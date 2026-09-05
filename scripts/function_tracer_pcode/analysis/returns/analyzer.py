@@ -17,6 +17,7 @@ from scripts.function_tracer_pcode.analysis.returns.local_values import LocalVal
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
+from scripts.function_tracer_pcode.analysis.returns.control_recovery import ReturnPathSelectionService
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import BranchGuardedWhileProofService
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import BlockGraphService
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService
@@ -100,7 +101,18 @@ class ReturnAnalyzer:
             pcode_sites=self._pcode_sites,
             cbranch_direct_target_keys=lambda *a, **kw: self._cbranch_direct_target_keys(*a, **kw),
         )
+        self._return_paths = ReturnPathSelectionService(
+            condition_logic=self._condition_logic,
+            block_graph=self._block_graph,
+            expression_cases=self._expression_cases,
+            debug_reporter=self._debug_reporter,
+            make_tracked_return_value=lambda *a, **kw: self._make_tracked_return_value(*a, **kw),
+            return_info_effective_region_conditions=lambda *a, **kw: self._return_info_effective_region_conditions(*a, **kw),
+            debug_flag=lambda: self.debug,
+            current_blocked_return_path_conditions_value=lambda: self._current_blocked_return_path_conditions,
+        )
         self._return_normalization = ReturnNormalizationService(
+            return_paths=self._return_paths,
             expression_cases=self._expression_cases,
             condition_logic=self._condition_logic,
             stack_protector=self._stack_protector,
@@ -114,7 +126,6 @@ class ReturnAnalyzer:
             exclusivize_return_regions=lambda *a, **kw: self._exclusivize_return_regions(*a, **kw),
             deduplicate_tracked_return_values=lambda *a, **kw: self._deduplicate_tracked_return_values(*a, **kw),
             propagate_passthrough_input_from_op=lambda *a, **kw: self._propagate_passthrough_input_from_op(*a, **kw),
-            propagate_multiequal_input_for_return_path=lambda *a, **kw: self._propagate_multiequal_input_for_return_path(*a, **kw),
             normalize_return_callother_userops=lambda *a, **kw: self._normalize_return_callother_userops(*a, **kw),
             current_parameters_value=lambda: self._current_parameters,
             current_effect_summary_value=lambda: self._current_effect_summary,
@@ -160,6 +171,7 @@ class ReturnAnalyzer:
             debug_flag=lambda: self.debug,
         )
         self._branch_guarded_while = BranchGuardedWhileProofService(
+            return_paths=self._return_paths,
             condition_logic=self._condition_logic,
             placeholder_algebra=self._placeholder_algebra,
             divergence_proofs=self._divergence_proofs,
@@ -177,7 +189,6 @@ class ReturnAnalyzer:
             return_info_return_phi_origin_keys=lambda *a, **kw: self._return_info_return_phi_origin_keys(*a, **kw),
             return_info_summary_identity_key=lambda *a, **kw: self._return_info_summary_identity_key(*a, **kw),
             return_site_key=lambda *a, **kw: self._return_site_key(*a, **kw),
-            high_function_has_forbidden_control_outcome_ops=lambda *a, **kw: self._high_function_has_forbidden_control_outcome_ops(*a, **kw),
             debug_flag=lambda: self.debug,
             enable_completed_recovery_proofs_value=lambda: self.enable_completed_recovery_proofs,
             program_value=lambda: self.program,
@@ -439,11 +450,13 @@ class ReturnAnalyzer:
         return self._branch_guarded_while.branch_guarded_expression_is_param_minus_one(expr, param, target_conditions)
     def _branch_guarded_structural_proof_from_return(self, ret):
         return self._branch_guarded_while.branch_guarded_structural_proof_from_return(ret)
-    _check_condition_coverage = _svc_control_recovery._impl__check_condition_coverage
+    def _check_condition_coverage(self, analysis):
+        return self._return_paths.check_condition_coverage(analysis)
     def _coerce_block_path_entries(self, path_entries):
         return self._block_graph.coerce_block_path_entries(path_entries)
     _collect_switch_impacted_return_sites = _svc_control_recovery._impl__collect_switch_impacted_return_sites
-    _control_region_returns_are_safe = _svc_control_recovery._impl__control_region_returns_are_safe
+    def _control_region_returns_are_safe(self, return_infos):
+        return self._return_paths.control_region_returns_are_safe(return_infos)
     def _direct_cbranch_successor_relation(self, cbranch, block, successor):
         return self._block_graph.direct_cbranch_successor_relation(cbranch, block, successor)
     def _find_branch_guarded_structural_proof_tuple(self, value):
@@ -455,18 +468,22 @@ class ReturnAnalyzer:
     _get_cached_return_path_entries = _svc_control_recovery._impl__get_cached_return_path_entries
     def _high_function_cbranch_count(self, high_function):
         return self._block_graph.high_function_cbranch_count(high_function)
-    _high_function_has_forbidden_control_outcome_ops = _svc_control_recovery._impl__high_function_has_forbidden_control_outcome_ops
+    def _high_function_has_forbidden_control_outcome_ops(self, high_function, *, allow_call):
+        return self._return_paths.high_function_has_forbidden_control_outcome_ops(high_function, allow_call=allow_call)
     def _infer_branch_guarded_while_role_parameters(self, analysis):
         return self._branch_guarded_while.infer_branch_guarded_while_role_parameters(analysis)
-    _is_control_outcome_forbidden_fp_mnemonic = _svc_control_recovery._impl__is_control_outcome_forbidden_fp_mnemonic
+    def _is_control_outcome_forbidden_fp_mnemonic(self, mnemonic):
+        return self._return_paths.is_control_outcome_forbidden_fp_mnemonic(mnemonic)
     def _iter_high_basic_blocks(self, high_function):
         return self._block_graph.iter_high_basic_blocks(high_function)
     def _iter_high_block_ops(self, block):
         return self._block_graph.iter_high_block_ops(block)
-    _mark_incomplete_control_flow = _svc_control_recovery._impl__mark_incomplete_control_flow
+    def _mark_incomplete_control_flow(self, analysis):
+        return self._return_paths.mark_incomplete_control_flow(analysis)
     _materialize_direct_path_specific_return_source = _svc_control_recovery._impl__materialize_direct_path_specific_return_source
     _phase1_direct_branch_escapes_function_body = _svc_control_recovery._impl__phase1_direct_branch_escapes_function_body
-    _propagate_multiequal_input_for_return_path = _svc_control_recovery._impl__propagate_multiequal_input_for_return_path
+    def _propagate_multiequal_input_for_return_path(self, pcode_op, *, tracer, condition_tracker, path_conditions=None):
+        return self._return_paths.propagate_multiequal_input_for_return_path(pcode_op, tracer=tracer, condition_tracker=condition_tracker, path_conditions=path_conditions)
     def _prove_branch_guarded_affine_unit_count_recurrence(self, high_function, *, analysis, c_param, target_conditions, recursive_returns, candidate_phi_origin_keys=(), return_phi_origin_keys=(), nonprogress_conditions=(), allow_latch_progress_guard=False):
         return self._branch_guarded_while.prove_branch_guarded_affine_unit_count_recurrence(high_function, analysis=analysis, c_param=c_param, target_conditions=target_conditions, recursive_returns=recursive_returns, candidate_phi_origin_keys=candidate_phi_origin_keys, return_phi_origin_keys=return_phi_origin_keys, nonprogress_conditions=nonprogress_conditions, allow_latch_progress_guard=allow_latch_progress_guard)
     def _prove_branch_guarded_structural_nonprogress_must_diverge(self, high_function, *, analysis=None, initial_c_ret, invariant_conditions):
@@ -479,7 +496,8 @@ class ReturnAnalyzer:
     _recover_explicit_return_from_path_source = _svc_control_recovery._impl__recover_explicit_return_from_path_source
     _recover_switch_like_returns_from_pcode = _svc_control_recovery._impl__recover_switch_like_returns_from_pcode
     _recover_switch_like_returns_from_placeholder_analysis = _svc_control_recovery._impl__recover_switch_like_returns_from_placeholder_analysis
-    _return_path_is_covered_by_existing_return = _svc_control_recovery._impl__return_path_is_covered_by_existing_return
+    def _return_path_is_covered_by_existing_return(self, analysis, path_conditions):
+        return self._return_paths.return_path_is_covered_by_existing_return(analysis, path_conditions)
     def _same_high_block(self, left, right):
         return self._block_graph.same_high_block(left, right)
     _should_attempt_switch_recovery = _svc_control_recovery._impl__should_attempt_switch_recovery
@@ -500,14 +518,21 @@ class ReturnAnalyzer:
     def _get_block_start_address(self, block):
         return self._block_graph.get_block_start_address(block)
     _is_noreturn_control_transfer_op = _svc_control_recovery._impl__is_noreturn_control_transfer_op
-    _matches_blocked_return_path_conditions = _svc_control_recovery._impl__matches_blocked_return_path_conditions
-    _min_branch_index = _svc_control_recovery._impl__min_branch_index
-    _path_condition_sets_union_condition = _svc_control_recovery._impl__path_condition_sets_union_condition
+    def _matches_blocked_return_path_conditions(self, conditions):
+        return self._return_paths.matches_blocked_return_path_conditions(conditions)
+    def _min_branch_index(self, left, right):
+        return self._return_paths.min_branch_index(left, right)
+    def _path_condition_sets_union_condition(self, path_condition_sets):
+        return self._return_paths.path_condition_sets_union_condition(path_condition_sets)
     _recover_implicit_return_from_block_paths = _svc_control_recovery._impl__recover_implicit_return_from_block_paths
-    _score_multiequal_incoming_for_return_path = _svc_control_recovery._impl__score_multiequal_incoming_for_return_path
-    _select_multiequal_input_for_return_path = _svc_control_recovery._impl__select_multiequal_input_for_return_path
-    _select_path_specific_return_source = _svc_control_recovery._impl__select_path_specific_return_source
-    _split_branch_index = _svc_control_recovery._impl__split_branch_index
+    def _score_multiequal_incoming_for_return_path(self, incoming_block, predecessor, condition_tracker, current_condition_keys):
+        return self._return_paths.score_multiequal_incoming_for_return_path(incoming_block, predecessor, condition_tracker, current_condition_keys)
+    def _select_multiequal_input_for_return_path(self, multiequal_op, predecessor, condition_tracker=None, path_conditions=None):
+        return self._return_paths.select_multiequal_input_for_return_path(multiequal_op, predecessor, condition_tracker, path_conditions)
+    def _select_path_specific_return_source(self, candidate, block_path, condition_tracker=None, path_conditions=None):
+        return self._return_paths.select_path_specific_return_source(candidate, block_path, condition_tracker, path_conditions)
+    def _split_branch_index(self, branch_index, original_index, split_index):
+        return self._return_paths.split_branch_index(branch_index, original_index, split_index)
     # analyzer_services.effect_integration
     def _accept_effect_rewrite_without_rank_gain(self, original, rewritten, conditions, effect_summary):
         return self._effect_integration.accept_effect_rewrite_without_rank_gain(original, rewritten, conditions, effect_summary)

@@ -29,6 +29,7 @@ from scripts.function_tracer_pcode.analysis.returns.expression_cases import Expr
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
+from scripts.function_tracer_pcode.analysis.returns.control_recovery import ReturnPathSelectionService
 from scripts.function_tracer_pcode.analysis.returns.phi_origins import expression_contains_phi
 
 
@@ -45,6 +46,7 @@ class ReturnNormalizationService:
     def __init__(
         self,
         *,
+        return_paths: ReturnPathSelectionService,
         expression_cases: ExpressionCaseService,
         condition_logic: ConditionLogicService,
         stack_protector: StackProtectorService,
@@ -58,12 +60,12 @@ class ReturnNormalizationService:
         exclusivize_return_regions: Callable[..., Any],
         deduplicate_tracked_return_values: Callable[..., Any],
         propagate_passthrough_input_from_op: Callable[..., Any],
-        propagate_multiequal_input_for_return_path: Callable[..., Any],
         normalize_return_callother_userops: Callable[..., Any],
         current_parameters_value: Callable[..., Any],
         current_effect_summary_value: Callable[..., Any],
         debug_flag: Callable[..., Any],
     ) -> None:
+        self.return_paths = return_paths
         self.expression_cases = expression_cases
         self.condition_logic = condition_logic
         self.stack_protector = stack_protector
@@ -77,7 +79,6 @@ class ReturnNormalizationService:
         self.exclusivize_return_regions = exclusivize_return_regions
         self.deduplicate_tracked_return_values = deduplicate_tracked_return_values
         self.propagate_passthrough_input_from_op = propagate_passthrough_input_from_op
-        self.propagate_multiequal_input_for_return_path = propagate_multiequal_input_for_return_path
         self.normalize_return_callother_userops = normalize_return_callother_userops
         self.current_parameters_value = current_parameters_value
         self.current_effect_summary_value = current_effect_summary_value
@@ -206,7 +207,7 @@ class ReturnNormalizationService:
             return propagated if propagated else None
 
         if opcode == _PCODE_OPCODE_BY_MNEMONIC["MULTIEQUAL"]:
-            propagated = self.propagate_multiequal_input_for_return_path(
+            propagated = self.return_paths.propagate_multiequal_input_for_return_path(
                 pcode_op,
                 tracer=tracer,
                 condition_tracker=condition_tracker,

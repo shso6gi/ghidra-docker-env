@@ -29,7 +29,6 @@ FACADE_CALLBACKS = (
     "exclusivize_return_regions",
     "deduplicate_tracked_return_values",
     "propagate_passthrough_input_from_op",
-    "propagate_multiequal_input_for_return_path",
     "normalize_return_callother_userops",
 )
 SUPPLIERS = ("current_parameters_value", "current_effect_summary_value", "debug_flag")
@@ -42,10 +41,11 @@ def _analyzer(debug=False):
 def test_collaborator_holds_only_its_dependencies():
     analyzer = _analyzer()
     service = analyzer._return_normalization
-    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"debug_reporter"}
+    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"debug_reporter", "return_paths"}
     for attr in DIRECT:
         assert getattr(service, attr) is getattr(analyzer, "_" + attr)
     assert service.debug_reporter is analyzer._debug_reporter
+    assert service.return_paths is analyzer._return_paths
 
 
 def test_every_delegator_forwards_to_the_collaborator():

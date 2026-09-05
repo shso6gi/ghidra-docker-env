@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     expression_contains_post_state_reads,
 )
 from scripts.function_tracer_pcode.analysis.returns._api import StructuralRecurrenceSummarizer
+from scripts.function_tracer_pcode.core import CallTargetRef
 
 if TYPE_CHECKING:  # 他 collaborator は本 module（BlockGraphService / 純関数）を import するため、型注釈の import は循環回避のため遅延
     from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
@@ -35,59 +36,6 @@ if TYPE_CHECKING:  # 他 collaborator は本 module（BlockGraphService / 純関
     from scripts.function_tracer_pcode.analysis.returns.phi_origins import PhiOriginService
     from scripts.function_tracer_pcode.analysis.returns.placeholder_algebra import PlaceholderAlgebraService
     from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
-from scripts.function_tracer_pcode.core import CallTargetRef
-
-
-def _impl__check_condition_coverage(self, analysis: FunctionReturnAnalysis):
-    """
-    条件カバレッジの簡易チェック
-
-    各パラメータについて、正・負・ゼロのケースが存在するかをヒューリスティックに確認
-    """
-    if not self.debug or not analysis.returns:
-        return
-
-    self._debug_print("Condition coverage check:")
-
-    # パラメータ名を収集
-    param_names = [p.get('name', f'param_{i}') for i, p in enumerate(analysis.parameters)]
-
-    if not param_names:
-        return
-
-    # 各パラメータについて、どのような条件が存在するか確認
-    for param_name in param_names:
-        has_zero_check = False
-        has_positive_check = False
-        has_negative_check = False
-        param_referenced = False
-
-        for ret_info in analysis.returns:
-            for cond in ret_info.conditions:
-                if not self._condition_mentions_param(cond, param_name):
-                    continue
-                param_referenced = True
-                is_zero, is_pos, is_neg = self._classify_param_condition(cond, param_name)
-                has_zero_check = has_zero_check or is_zero
-                has_positive_check = has_positive_check or is_pos
-                has_negative_check = has_negative_check or is_neg
-
-        if not param_referenced:
-            self._debug_print(f"  {param_name}: not referenced in conditions")
-            continue
-
-        coverage_info = []
-        if has_zero_check:
-            coverage_info.append("zero")
-        if has_positive_check:
-            coverage_info.append("positive")
-        if has_negative_check:
-            coverage_info.append("negative")
-
-        if coverage_info:
-            self._debug_print(f"  {param_name}: {', '.join(coverage_info)} checks found", 1)
-        else:
-            self._debug_print(f"  {param_name}: no explicit checks", 1)
 
 
 def _impl__phase1_direct_branch_escapes_function_body(self, instruction, body) -> bool:
@@ -110,6 +58,7 @@ class BranchGuardedWhileProofService:
     def __init__(
         self,
         *,
+        return_paths: "ReturnPathSelectionService",
         condition_logic: "ConditionLogicService",
         placeholder_algebra: "PlaceholderAlgebraService",
         divergence_proofs: "DivergenceProofService",
@@ -127,12 +76,12 @@ class BranchGuardedWhileProofService:
         return_info_return_phi_origin_keys: Callable[..., Any],
         return_info_summary_identity_key: Callable[..., Any],
         return_site_key: Callable[..., Any],
-        high_function_has_forbidden_control_outcome_ops: Callable[..., Any],
         debug_flag: Callable[..., Any],
         enable_completed_recovery_proofs_value: Callable[..., Any],
         program_value: Callable[..., Any],
         current_parameters_value: Callable[..., Any],
     ) -> None:
+        self.return_paths = return_paths
         self.condition_logic = condition_logic
         self.placeholder_algebra = placeholder_algebra
         self.divergence_proofs = divergence_proofs
@@ -150,7 +99,6 @@ class BranchGuardedWhileProofService:
         self.return_info_return_phi_origin_keys = return_info_return_phi_origin_keys
         self.return_info_summary_identity_key = return_info_summary_identity_key
         self.return_site_key = return_site_key
-        self.high_function_has_forbidden_control_outcome_ops = high_function_has_forbidden_control_outcome_ops
         self.debug_flag = debug_flag
         self.enable_completed_recovery_proofs_value = enable_completed_recovery_proofs_value
         self.program_value = program_value
@@ -167,7 +115,7 @@ class BranchGuardedWhileProofService:
         if getattr(analysis, "deferred_calls", None):
             self.debug_reporter.debug_print("Outcome branch-guarded while summary declined: deferred calls present")
             return False
-        if self.high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
+        if self.return_paths.high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
             self.debug_reporter.debug_print("Outcome branch-guarded while summary declined: forbidden control/effect op present")
             return False
         if self.block_graph.high_function_cbranch_count(high_function) < 2:
@@ -352,7 +300,7 @@ class BranchGuardedWhileProofService:
             return None
         if not self.divergence_proofs.high_function_has_cfg_cycle(high_function):
             return None
-        if self.high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
+        if self.return_paths.high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
             return None
         return {
             "proof_kind": "branch_guarded_structural_nonprogress_must_diverge",
@@ -1392,68 +1340,6 @@ class BranchGuardedWhileProofService:
         }
 
 
-
-def _impl__high_function_has_forbidden_control_outcome_ops(self, high_function, *, allow_call: bool) -> bool:
-    forbidden = {"CALLIND", "BRANCHIND", "LOAD", "STORE", "CALLOTHER"}
-    if not allow_call:
-        forbidden.add("CALL")
-    for block in self._iter_high_basic_blocks(high_function):
-        for op in self._iter_high_block_ops(block):
-            mnemonic = getattr(op, "getMnemonic", lambda: None)()
-            if mnemonic in forbidden or self._is_control_outcome_forbidden_fp_mnemonic(mnemonic):
-                return True
-    return False
-
-
-def _impl__is_control_outcome_forbidden_fp_mnemonic(self, mnemonic: Optional[str]) -> bool:
-    if not mnemonic:
-        return False
-    return (
-        mnemonic.startswith("FLOAT_")
-        or mnemonic in {"INT2FLOAT", "FLOAT2FLOAT", "TRUNC", "CEIL", "FLOOR", "ROUND", "NAN"}
-    )
-
-
-def _impl__mark_incomplete_control_flow(self, analysis: FunctionReturnAnalysis) -> None:
-    """後段で保守的に扱うべき不完全な制御フロー要約を記録する。"""
-    auto_notes = {
-        "unknown_return",
-        "overlapping_unconditional_returns",
-        "indirect_control_flow_unresolved",
-        "deferred_call_return_unresolved",
-    }
-    analysis.analysis_notes = [
-        note for note in analysis.analysis_notes
-        if note not in auto_notes
-    ]
-    reasons = []
-
-    if analysis.has_unknown_return():
-        reasons.append("unknown_return")
-    if analysis.has_overlapping_unconditional_returns():
-        reasons.append("overlapping_unconditional_returns")
-    if (
-        analysis.has_unresolved_return_value()
-        and any(
-            reason in {"call_out_of_scope", "callind_out_of_scope"}
-            for reason in analysis.unknown_event_reasons
-        )
-    ):
-        reasons.append("indirect_control_flow_unresolved")
-    if analysis.has_unresolved_return_value() and getattr(analysis, "deferred_calls", None):
-        reasons.append("deferred_call_return_unresolved")
-
-    if analysis.recovered_from_decompiler:
-        reasons = [reason for reason in reasons if reason == "unknown_return"]
-
-    seen = set(analysis.analysis_notes)
-    for reason in reasons:
-        if reason not in seen:
-            analysis.analysis_notes.append(reason)
-            seen.add(reason)
-    analysis.incomplete_control_flow = bool(reasons)
-
-
 def _impl__recover_control_region_returns_early(
     self,
     current_function,
@@ -1868,42 +1754,6 @@ def _impl__get_cached_return_path_entries(
     return path_entries
 
 
-def _impl__control_region_returns_are_safe(
-    self,
-    return_infos: List[ReturnInfo],
-) -> bool:
-    if not return_infos:
-        return False
-    for info in return_infos:
-        if self._expression_contains_unresolved_value(info.value):
-            return False
-        if expression_contains_post_state_reads(info.value):
-            return False
-        if _expression_contains_observed_loads(info.value):
-            return False
-    return True
-
-
-def _impl__return_path_is_covered_by_existing_return(
-    self,
-    analysis: FunctionReturnAnalysis,
-    path_conditions: Sequence[Condition],
-) -> bool:
-    path_conditions = ConditionSimplifier.simplify_conditions_object_centric(
-        list(path_conditions or [])
-    )
-    if ConditionSimplifier.object_centric_is_contradiction(path_conditions):
-        return True
-    path_constraint_set = ConditionSimplifier.build_constraint_set(path_conditions)
-    if path_constraint_set.is_contradictory:
-        return True
-    for ret in analysis.returns or []:
-        ret_conditions = self._return_info_effective_region_conditions(ret)
-        if path_constraint_set.implies_all(ret_conditions):
-            return True
-    return False
-
-
 def _impl__should_attempt_switch_recovery(
     self,
     analysis: Optional[FunctionReturnAnalysis],
@@ -2300,57 +2150,6 @@ def _impl__switch_recovery_conflicts_with_unaffected_returns(
     return False
 
 
-def _impl__propagate_multiequal_input_for_return_path(
-    self,
-    pcode_op,
-    *,
-    tracer: Optional[PcodeTracer],
-    condition_tracker: Optional[ConditionTracker],
-    path_conditions: Optional[List[Condition]] = None,
-) -> List[_TrackedReturnValue]:
-    if condition_tracker is None:
-        return []
-    parent = getattr(pcode_op, "getParent", lambda: None)()
-    predecessor = None
-    normalized_conditions = list(path_conditions or [])
-    if parent is not None:
-        get_in_size = getattr(parent, "getInSize", None)
-        get_in = getattr(parent, "getIn", None)
-        if callable(get_in_size) and callable(get_in):
-            current_keys = self._build_condition_signature_set(normalized_conditions)
-            best_score = None
-            try:
-                for index in range(int(get_in_size())):
-                    incoming = get_in(index)
-                    score = self._score_multiequal_incoming_for_return_path(
-                        incoming,
-                        None,
-                        condition_tracker,
-                        current_keys,
-                    )
-                    if best_score is None or score > best_score[0]:
-                        best_score = (score, incoming)
-            except Exception:
-                best_score = None
-            if best_score is not None:
-                predecessor = best_score[1]
-
-    selected = self._select_multiequal_input_for_return_path(
-        multiequal_op=pcode_op,
-        predecessor=predecessor,
-        condition_tracker=condition_tracker,
-        path_conditions=normalized_conditions,
-    )
-    if selected is None:
-        try:
-            selected = pcode_op.getInput(0)
-        except Exception:
-            selected = None
-    if selected is None:
-        return []
-    return [self._make_tracked_return_value(selected, tracer)]
-
-
 def _impl__filter_noreturn_return_path_entries(
     self,
     path_entries,
@@ -2523,140 +2322,6 @@ def _impl__recover_implicit_return_from_block_paths(
             f"path(s) {unresolved_paths}"
         )
     return None
-
-
-def _impl__select_path_specific_return_source(
-    self,
-    candidate,
-    block_path,
-    condition_tracker: Optional[ConditionTracker] = None,
-    path_conditions: Optional[List[Condition]] = None,
-):
-    """PHI 出力をそのまま返す代わりに、実際の predecessor に対応する入力へ絞る。"""
-    if candidate is None or not block_path or len(block_path) < 2:
-        return candidate
-
-    normalized_path = [getattr(entry, "block", entry) for entry in block_path]
-    selected = candidate
-    max_refinements = max(1, len(normalized_path))
-
-    for _ in range(max_refinements):
-        def_op = getattr(selected, "getDef", lambda: None)()
-        if def_op is None or getattr(def_op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
-            break
-
-        phi_parent = getattr(def_op, "getParent", lambda: None)()
-        phi_index = self._find_block_index_on_path(normalized_path, phi_parent)
-        if phi_index is None or phi_index <= 0:
-            break
-
-        predecessor = normalized_path[phi_index - 1]
-        refined = self._select_multiequal_input_for_return_path(
-            multiequal_op=def_op,
-            predecessor=predecessor,
-            condition_tracker=condition_tracker,
-            path_conditions=path_conditions,
-        )
-        if refined is None or refined is selected:
-            break
-
-        if self.debug:
-            self._debug_print(
-                "Refined implicit return PHI source to predecessor-specific input "
-                f"{refined}"
-            )
-        selected = refined
-
-    return selected
-
-
-def _impl__select_multiequal_input_for_return_path(
-    self,
-    multiequal_op,
-    predecessor,
-    condition_tracker: Optional[ConditionTracker] = None,
-    path_conditions: Optional[List[Condition]] = None,
-):
-    phi_parent = getattr(multiequal_op, "getParent", lambda: None)()
-    get_in_size = getattr(phi_parent, "getInSize", None)
-    get_in = getattr(phi_parent, "getIn", None)
-    if not callable(get_in_size) or not callable(get_in):
-        return None
-
-    current_condition_keys = self._build_condition_signature_set(path_conditions or [])
-    exact_matches = []
-    best_input = None
-    best_score: Optional[Tuple[int, int, int]] = None
-    exact_best_input = None
-    exact_best_score: Optional[Tuple[int, int, int]] = None
-
-    try:
-        for index in range(int(get_in_size())):
-            incoming = get_in(index)
-            candidate_input = multiequal_op.getInput(index)
-            if candidate_input is None:
-                continue
-            is_exact_match = self._blocks_match(incoming, predecessor)
-            if is_exact_match:
-                exact_matches.append(candidate_input)
-            score = self._score_multiequal_incoming_for_return_path(
-                incoming,
-                predecessor,
-                condition_tracker,
-                current_condition_keys,
-            )
-            if is_exact_match and (exact_best_score is None or score > exact_best_score):
-                exact_best_score = score
-                exact_best_input = candidate_input
-            if best_score is None or score > best_score:
-                best_score = score
-                best_input = candidate_input
-    except Exception:
-        return None
-
-    if exact_best_input is not None:
-        if (
-            best_input is not None
-            and best_input is not exact_best_input
-            and best_score is not None
-            and exact_best_score is not None
-            and bool(current_condition_keys)
-            and best_score[0] == len(current_condition_keys)
-            and best_score[0] > exact_best_score[0]
-        ):
-            return best_input
-        return exact_best_input
-    if len(exact_matches) == 1:
-        return exact_matches[0]
-    if exact_matches:
-        return exact_matches[0]
-
-    return best_input
-
-
-def _impl__score_multiequal_incoming_for_return_path(
-    self,
-    incoming_block,
-    predecessor,
-    condition_tracker: Optional[ConditionTracker],
-    current_condition_keys: Set[object],
-) -> Tuple[int, int, int]:
-    predecessor_match = 1 if self._blocks_match(incoming_block, predecessor) else 0
-    if condition_tracker is None or not current_condition_keys:
-        return (0, predecessor_match, 0)
-
-    block_info = condition_tracker.get_block_by_hash(incoming_block)
-    if block_info is None:
-        return (0, predecessor_match, 0)
-
-    incoming_conditions = condition_tracker.get_path_conditions_to_block(block_info)
-    incoming_keys = self._build_condition_signature_set(incoming_conditions)
-    if not incoming_keys:
-        return (0, predecessor_match, 0)
-
-    matched = len(incoming_keys & current_condition_keys)
-    specificity = len(incoming_keys)
-    return (matched, predecessor_match, specificity)
 
 
 class BlockGraphService:
@@ -2873,62 +2538,414 @@ class BlockGraphService:
         return str(start)
 
 
+class ReturnPathSelectionService:
+    """ReturnAnalyzer から切り出した return path 選択（MULTIEQUAL 入力選択・blocked path 条件・分岐 index・
+    制御 outcome 禁止 op 判定・条件被覆検査）の collaborator（control_recovery family 3 群目）。
 
-def _impl__path_condition_sets_union_condition(
-    self,
-    path_condition_sets: Sequence[Sequence[Condition]],
-) -> Optional[Condition]:
-    disjuncts: List[Expression] = []
-    for conditions in path_condition_sets or ():
-        conjunct = self._condition_set_conjunction_expression(conditions)
-        if conjunct is None:
-            return None
-        disjuncts.append(conjunct)
-    if len(disjuncts) <= 1:
-        return None
-    union_expr = disjuncts[0]
-    for disjunct in disjuncts[1:]:
-        union_expr = Expression.binary_op("BOOL_OR", union_expr, disjunct)
-        union_expr.size = 1
-    return Condition(union_expr)
+    facade 状態は debug フラグと現在の blocked return path 条件を supplier で読む。条件論理・block グラフ・
+    式ケース・デバッグ出力は各 collaborator を直接依存として受け取る。未抽出 family（return_extraction）が所有する
+    ``make_tracked_return_value`` と、生成順の都合で後に作られる EffectIntegrationService 所有の
+    ``return_info_effective_region_conditions`` は facade 経由で遅延 dispatch する callable として注入する。
+    """
 
+    def __init__(
+        self,
+        *,
+        condition_logic: "ConditionLogicService",
+        block_graph: "BlockGraphService",
+        expression_cases: "ExpressionCaseService",
+        debug_reporter: "DebugReporter",
+        make_tracked_return_value: Callable[..., Any],
+        return_info_effective_region_conditions: Callable[..., Any],
+        debug_flag: Callable[..., Any],
+        current_blocked_return_path_conditions_value: Callable[..., Any],
+    ) -> None:
+        self.condition_logic = condition_logic
+        self.block_graph = block_graph
+        self.expression_cases = expression_cases
+        self.debug_reporter = debug_reporter
+        self.make_tracked_return_value = make_tracked_return_value
+        self.return_info_effective_region_conditions = return_info_effective_region_conditions
+        self.debug_flag = debug_flag
+        self.current_blocked_return_path_conditions_value = current_blocked_return_path_conditions_value
 
-def _impl__matches_blocked_return_path_conditions(
-    self,
-    conditions: List[Condition],
-) -> bool:
-    blocked_sets = getattr(self, "_current_blocked_return_path_conditions", None) or []
-    if not blocked_sets:
+    def check_condition_coverage(self, analysis: FunctionReturnAnalysis):
+        """
+        条件カバレッジの簡易チェック
+
+        各パラメータについて、正・負・ゼロのケースが存在するかをヒューリスティックに確認
+        """
+        if not self.debug_flag() or not analysis.returns:
+            return
+
+        self.debug_reporter.debug_print("Condition coverage check:")
+
+        # パラメータ名を収集
+        param_names = [p.get('name', f'param_{i}') for i, p in enumerate(analysis.parameters)]
+
+        if not param_names:
+            return
+
+        # 各パラメータについて、どのような条件が存在するか確認
+        for param_name in param_names:
+            has_zero_check = False
+            has_positive_check = False
+            has_negative_check = False
+            param_referenced = False
+
+            for ret_info in analysis.returns:
+                for cond in ret_info.conditions:
+                    if not self.condition_logic.condition_mentions_param(cond, param_name):
+                        continue
+                    param_referenced = True
+                    is_zero, is_pos, is_neg = self.condition_logic.classify_param_condition(cond, param_name)
+                    has_zero_check = has_zero_check or is_zero
+                    has_positive_check = has_positive_check or is_pos
+                    has_negative_check = has_negative_check or is_neg
+
+            if not param_referenced:
+                self.debug_reporter.debug_print(f"  {param_name}: not referenced in conditions")
+                continue
+
+            coverage_info = []
+            if has_zero_check:
+                coverage_info.append("zero")
+            if has_positive_check:
+                coverage_info.append("positive")
+            if has_negative_check:
+                coverage_info.append("negative")
+
+            if coverage_info:
+                self.debug_reporter.debug_print(f"  {param_name}: {', '.join(coverage_info)} checks found", 1)
+            else:
+                self.debug_reporter.debug_print(f"  {param_name}: no explicit checks", 1)
+
+    def high_function_has_forbidden_control_outcome_ops(self, high_function, *, allow_call: bool) -> bool:
+        forbidden = {"CALLIND", "BRANCHIND", "LOAD", "STORE", "CALLOTHER"}
+        if not allow_call:
+            forbidden.add("CALL")
+        for block in self.block_graph.iter_high_basic_blocks(high_function):
+            for op in self.block_graph.iter_high_block_ops(block):
+                mnemonic = getattr(op, "getMnemonic", lambda: None)()
+                if mnemonic in forbidden or self.is_control_outcome_forbidden_fp_mnemonic(mnemonic):
+                    return True
         return False
 
-    condition_keys = self._build_condition_signature_set(conditions)
-    if not condition_keys:
-        return False
+    def is_control_outcome_forbidden_fp_mnemonic(self, mnemonic: Optional[str]) -> bool:
+        if not mnemonic:
+            return False
+        return (
+            mnemonic.startswith("FLOAT_")
+            or mnemonic in {"INT2FLOAT", "FLOAT2FLOAT", "TRUNC", "CEIL", "FLOOR", "ROUND", "NAN"}
+        )
 
-    for blocked_conditions in blocked_sets:
-        blocked_keys = self._build_condition_signature_set(blocked_conditions)
-        if blocked_keys and blocked_keys.issubset(condition_keys):
+    def mark_incomplete_control_flow(self, analysis: FunctionReturnAnalysis) -> None:
+        """後段で保守的に扱うべき不完全な制御フロー要約を記録する。"""
+        auto_notes = {
+            "unknown_return",
+            "overlapping_unconditional_returns",
+            "indirect_control_flow_unresolved",
+            "deferred_call_return_unresolved",
+        }
+        analysis.analysis_notes = [
+            note for note in analysis.analysis_notes
+            if note not in auto_notes
+        ]
+        reasons = []
+
+        if analysis.has_unknown_return():
+            reasons.append("unknown_return")
+        if analysis.has_overlapping_unconditional_returns():
+            reasons.append("overlapping_unconditional_returns")
+        if (
+            analysis.has_unresolved_return_value()
+            and any(
+                reason in {"call_out_of_scope", "callind_out_of_scope"}
+                for reason in analysis.unknown_event_reasons
+            )
+        ):
+            reasons.append("indirect_control_flow_unresolved")
+        if analysis.has_unresolved_return_value() and getattr(analysis, "deferred_calls", None):
+            reasons.append("deferred_call_return_unresolved")
+
+        if analysis.recovered_from_decompiler:
+            reasons = [reason for reason in reasons if reason == "unknown_return"]
+
+        seen = set(analysis.analysis_notes)
+        for reason in reasons:
+            if reason not in seen:
+                analysis.analysis_notes.append(reason)
+                seen.add(reason)
+        analysis.incomplete_control_flow = bool(reasons)
+
+    def control_region_returns_are_safe(
+        self,
+        return_infos: List[ReturnInfo],
+    ) -> bool:
+        if not return_infos:
+            return False
+        for info in return_infos:
+            if self.expression_cases.expression_contains_unresolved_value(info.value):
+                return False
+            if expression_contains_post_state_reads(info.value):
+                return False
+            if _expression_contains_observed_loads(info.value):
+                return False
+        return True
+
+    def return_path_is_covered_by_existing_return(
+        self,
+        analysis: FunctionReturnAnalysis,
+        path_conditions: Sequence[Condition],
+    ) -> bool:
+        path_conditions = ConditionSimplifier.simplify_conditions_object_centric(
+            list(path_conditions or [])
+        )
+        if ConditionSimplifier.object_centric_is_contradiction(path_conditions):
             return True
-    return False
+        path_constraint_set = ConditionSimplifier.build_constraint_set(path_conditions)
+        if path_constraint_set.is_contradictory:
+            return True
+        for ret in analysis.returns or []:
+            ret_conditions = self.return_info_effective_region_conditions(ret)
+            if path_constraint_set.implies_all(ret_conditions):
+                return True
+        return False
 
+    def propagate_multiequal_input_for_return_path(
+        self,
+        pcode_op,
+        *,
+        tracer: Optional[PcodeTracer],
+        condition_tracker: Optional[ConditionTracker],
+        path_conditions: Optional[List[Condition]] = None,
+    ) -> List[_TrackedReturnValue]:
+        if condition_tracker is None:
+            return []
+        parent = getattr(pcode_op, "getParent", lambda: None)()
+        predecessor = None
+        normalized_conditions = list(path_conditions or [])
+        if parent is not None:
+            get_in_size = getattr(parent, "getInSize", None)
+            get_in = getattr(parent, "getIn", None)
+            if callable(get_in_size) and callable(get_in):
+                current_keys = self.condition_logic.build_condition_signature_set(normalized_conditions)
+                best_score = None
+                try:
+                    for index in range(int(get_in_size())):
+                        incoming = get_in(index)
+                        score = self.score_multiequal_incoming_for_return_path(
+                            incoming,
+                            None,
+                            condition_tracker,
+                            current_keys,
+                        )
+                        if best_score is None or score > best_score[0]:
+                            best_score = (score, incoming)
+                except Exception:
+                    best_score = None
+                if best_score is not None:
+                    predecessor = best_score[1]
 
-def _impl__split_branch_index(
-    self,
-    branch_index: Optional[int],
-    original_index: int,
-    split_index: int,
-) -> Optional[int]:
-    seed = branch_index if branch_index is not None else (original_index + 1) * 1000
-    return seed * 10 + split_index
+        selected = self.select_multiequal_input_for_return_path(
+            multiequal_op=pcode_op,
+            predecessor=predecessor,
+            condition_tracker=condition_tracker,
+            path_conditions=normalized_conditions,
+        )
+        if selected is None:
+            try:
+                selected = pcode_op.getInput(0)
+            except Exception:
+                selected = None
+        if selected is None:
+            return []
+        return [self.make_tracked_return_value(selected, tracer)]
 
+    def select_path_specific_return_source(
+        self,
+        candidate,
+        block_path,
+        condition_tracker: Optional[ConditionTracker] = None,
+        path_conditions: Optional[List[Condition]] = None,
+    ):
+        """PHI 出力をそのまま返す代わりに、実際の predecessor に対応する入力へ絞る。"""
+        if candidate is None or not block_path or len(block_path) < 2:
+            return candidate
 
-def _impl__min_branch_index(
-    self,
-    left: Optional[int],
-    right: Optional[int],
-) -> Optional[int]:
-    if left is None:
-        return right
-    if right is None:
-        return left
-    return min(left, right)
+        normalized_path = [getattr(entry, "block", entry) for entry in block_path]
+        selected = candidate
+        max_refinements = max(1, len(normalized_path))
+
+        for _ in range(max_refinements):
+            def_op = getattr(selected, "getDef", lambda: None)()
+            if def_op is None or getattr(def_op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                break
+
+            phi_parent = getattr(def_op, "getParent", lambda: None)()
+            phi_index = self.block_graph.find_block_index_on_path(normalized_path, phi_parent)
+            if phi_index is None or phi_index <= 0:
+                break
+
+            predecessor = normalized_path[phi_index - 1]
+            refined = self.select_multiequal_input_for_return_path(
+                multiequal_op=def_op,
+                predecessor=predecessor,
+                condition_tracker=condition_tracker,
+                path_conditions=path_conditions,
+            )
+            if refined is None or refined is selected:
+                break
+
+            if self.debug_flag():
+                self.debug_reporter.debug_print(
+                    "Refined implicit return PHI source to predecessor-specific input "
+                    f"{refined}"
+                )
+            selected = refined
+
+        return selected
+
+    def select_multiequal_input_for_return_path(
+        self,
+        multiequal_op,
+        predecessor,
+        condition_tracker: Optional[ConditionTracker] = None,
+        path_conditions: Optional[List[Condition]] = None,
+    ):
+        phi_parent = getattr(multiequal_op, "getParent", lambda: None)()
+        get_in_size = getattr(phi_parent, "getInSize", None)
+        get_in = getattr(phi_parent, "getIn", None)
+        if not callable(get_in_size) or not callable(get_in):
+            return None
+
+        current_condition_keys = self.condition_logic.build_condition_signature_set(path_conditions or [])
+        exact_matches = []
+        best_input = None
+        best_score: Optional[Tuple[int, int, int]] = None
+        exact_best_input = None
+        exact_best_score: Optional[Tuple[int, int, int]] = None
+
+        try:
+            for index in range(int(get_in_size())):
+                incoming = get_in(index)
+                candidate_input = multiequal_op.getInput(index)
+                if candidate_input is None:
+                    continue
+                is_exact_match = self.block_graph.blocks_match(incoming, predecessor)
+                if is_exact_match:
+                    exact_matches.append(candidate_input)
+                score = self.score_multiequal_incoming_for_return_path(
+                    incoming,
+                    predecessor,
+                    condition_tracker,
+                    current_condition_keys,
+                )
+                if is_exact_match and (exact_best_score is None or score > exact_best_score):
+                    exact_best_score = score
+                    exact_best_input = candidate_input
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_input = candidate_input
+        except Exception:
+            return None
+
+        if exact_best_input is not None:
+            if (
+                best_input is not None
+                and best_input is not exact_best_input
+                and best_score is not None
+                and exact_best_score is not None
+                and bool(current_condition_keys)
+                and best_score[0] == len(current_condition_keys)
+                and best_score[0] > exact_best_score[0]
+            ):
+                return best_input
+            return exact_best_input
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+        if exact_matches:
+            return exact_matches[0]
+
+        return best_input
+
+    def score_multiequal_incoming_for_return_path(
+        self,
+        incoming_block,
+        predecessor,
+        condition_tracker: Optional[ConditionTracker],
+        current_condition_keys: Set[object],
+    ) -> Tuple[int, int, int]:
+        predecessor_match = 1 if self.block_graph.blocks_match(incoming_block, predecessor) else 0
+        if condition_tracker is None or not current_condition_keys:
+            return (0, predecessor_match, 0)
+
+        block_info = condition_tracker.get_block_by_hash(incoming_block)
+        if block_info is None:
+            return (0, predecessor_match, 0)
+
+        incoming_conditions = condition_tracker.get_path_conditions_to_block(block_info)
+        incoming_keys = self.condition_logic.build_condition_signature_set(incoming_conditions)
+        if not incoming_keys:
+            return (0, predecessor_match, 0)
+
+        matched = len(incoming_keys & current_condition_keys)
+        specificity = len(incoming_keys)
+        return (matched, predecessor_match, specificity)
+
+    def path_condition_sets_union_condition(
+        self,
+        path_condition_sets: Sequence[Sequence[Condition]],
+    ) -> Optional[Condition]:
+        disjuncts: List[Expression] = []
+        for conditions in path_condition_sets or ():
+            conjunct = self.condition_logic.condition_set_conjunction_expression(conditions)
+            if conjunct is None:
+                return None
+            disjuncts.append(conjunct)
+        if len(disjuncts) <= 1:
+            return None
+        union_expr = disjuncts[0]
+        for disjunct in disjuncts[1:]:
+            union_expr = Expression.binary_op("BOOL_OR", union_expr, disjunct)
+            union_expr.size = 1
+        return Condition(union_expr)
+
+    def matches_blocked_return_path_conditions(
+        self,
+        conditions: List[Condition],
+    ) -> bool:
+        blocked_sets = self.current_blocked_return_path_conditions_value() or []
+        if not blocked_sets:
+            return False
+
+        condition_keys = self.condition_logic.build_condition_signature_set(conditions)
+        if not condition_keys:
+            return False
+
+        for blocked_conditions in blocked_sets:
+            blocked_keys = self.condition_logic.build_condition_signature_set(blocked_conditions)
+            if blocked_keys and blocked_keys.issubset(condition_keys):
+                return True
+        return False
+
+    def split_branch_index(
+        self,
+        branch_index: Optional[int],
+        original_index: int,
+        split_index: int,
+    ) -> Optional[int]:
+        seed = branch_index if branch_index is not None else (original_index + 1) * 1000
+        return seed * 10 + split_index
+
+    def min_branch_index(
+        self,
+        left: Optional[int],
+        right: Optional[int],
+    ) -> Optional[int]:
+        if left is None:
+            return right
+        if right is None:
+            return left
+        return min(left, right)
+

@@ -9,11 +9,21 @@ from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyz
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import BranchGuardedWhileProofService
 
 DIRECT = ("condition_logic", "placeholder_algebra", "divergence_proofs", "block_graph", "stack_protector",
-          "debug_reporter", "expression_cases", "phi_origins", "program_access", "parameters", "pcode_sites")
+          "debug_reporter", "expression_cases", "phi_origins", "program_access", "parameters", "pcode_sites",
+          "return_paths")
+NAMES = {
+    "try_apply_branch_guarded_while_outcomes", "infer_branch_guarded_while_role_parameters",
+    "prove_branch_guarded_structural_nonprogress_must_diverge", "branch_guarded_structural_proof_from_return",
+    "find_branch_guarded_structural_proof_tuple", "validate_branch_guarded_structural_proof",
+    "find_branch_guarded_while_return_partition", "synthesize_branch_guarded_affine_initial_count_return",
+    "branch_guarded_artifact_is_imprecise_zero_seed", "branch_guarded_artifact_is_structural_accumulator_seed_projection",
+    "prove_branch_guarded_affine_unit_count_recurrence", "branch_guarded_affine_ignored_artifacts_are_shadowed",
+    "branch_guarded_affine_phi_step", "branch_guarded_affine_singleton_base_anchor_matches",
+    "branch_guarded_expression_is_param_minus_one", "prove_branch_guarded_while_nonprogress_must_diverge",
+}
 FACADE_CALLBACKS = ("acc_phi_flows_to_return_origin_phi", "return_conditions_cover_region",
                     "return_info_candidate_phi_origin_keys", "return_info_return_phi_origin_keys",
-                    "return_info_summary_identity_key", "return_site_key",
-                    "high_function_has_forbidden_control_outcome_ops")
+                    "return_info_summary_identity_key", "return_site_key")
 SUPPLIERS = ("debug_flag", "enable_completed_recovery_proofs_value", "program_value", "current_parameters_value")
 
 
@@ -32,7 +42,7 @@ def test_collaborator_holds_only_its_dependencies():
 def test_every_delegator_forwards_to_the_collaborator():
     analyzer = _analyzer()
     names = {n for n, _ in inspect.getmembers(BranchGuardedWhileProofService, predicate=inspect.isfunction)} - {"__init__"}
-    assert len(names) == 16
+    assert names == NAMES  # #79 レビュー: 件数だけでなく名簿で固定
     for name in sorted(names):
         sentinel = object()
         assert not isinstance(inspect.getattr_static(ReturnAnalyzer, "_" + name), (staticmethod, classmethod)), name
