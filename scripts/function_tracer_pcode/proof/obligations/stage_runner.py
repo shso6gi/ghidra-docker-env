@@ -258,6 +258,23 @@ def run_obligation_branch_plan(
                     pass
                 previous_branch = getattr(checker, "_active_call_proof_branch_id", None)
                 checker._active_call_proof_branch_id = branch_id
+                # 6c-1 (#93): 同じ情報から明示的な BranchCheckContext も組み、branch_context= で渡す
+                # （dual-write。legacy の _active_* set/restore は 6c-3 まで維持）。replan の
+                # precedence（plan の frame_generation / session / branch が active 値に勝つ）は
+                # checker と同じ builder に任せ、lease は _active_ に置いたのと同一 object を渡す。
+                from scripts.function_tracer_pcode.checker.branch_context import (
+                    build_branch_check_context,
+                )
+                explicit_context = build_branch_check_context(
+                    strategy=strategies[spec.strategy],
+                    replan_plan=getattr(checker, "_active_pair_replan_plan", None),
+                    call_proof_generation=generation,
+                    active_comparison_generation=generation,
+                    active_comparison_session_id=session_id,
+                    active_call_proof_branch_id=branch_id,
+                    decision_mode=getattr(checker, "call_proof_decision_mode", None),
+                    production_branch_authority_lease=branch_lease,
+                )
                 try:
                     return checker.check(
                         analysis1, analysis2, binary1_name, binary2_name, save_formula,
@@ -265,6 +282,7 @@ def run_obligation_branch_plan(
                         original_signature1=original_signature1,
                         original_signature2=original_signature2,
                         force_strategy=strategies[spec.strategy],
+                        branch_context=explicit_context,
                     )
                 finally:
                     if previous_branch is None:
