@@ -199,7 +199,12 @@ class RecurrenceStageMixin:
         retry_count: int,
         original_signature1: Optional[FunctionSignature],
         original_signature2: Optional[FunctionSignature],
+        *,
+        branch_context=None,
     ) -> Optional[EquivalenceResult]:
+        """``branch_context``: Internal execution context (Phase 6c #93)。stage runner は inner ``check()`` が
+        現在得ている effective context（session / generation / lease は runner 由来、branch_id は strategy class 名の
+        fallback）を渡す。direct 呼び出しでは省略し、``check()`` が direct semantics で組む。"""
         self._last_recursive_derived_view_identity = None
         abstraction = abstract_recursive_calls(
             analysis1,
@@ -243,6 +248,7 @@ class RecurrenceStageMixin:
             original_signature1=original_signature1,
             original_signature2=original_signature2,
             force_strategy=self.pairwise_strategy,
+            branch_context=branch_context,
         )
 
     def _should_try_loop_template_stage(

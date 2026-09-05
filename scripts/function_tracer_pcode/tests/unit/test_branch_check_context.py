@@ -59,12 +59,20 @@ def _checker():
     return EquivalenceChecker(strategy="pairwise", timeout=5, monolithic_timeout=5)
 
 
-def _run_check_until_first_collaborator(checker, analysis):
+def _run_check_until_first_collaborator(checker, analysis, **kwargs):
     """A 段の直後（try 内の最初の collaborator 呼び出し）で停止させ、error 経路で返す。"""
     def reject(*_a, **_k):
         raise UnknownSmtExtensionWidthError(operator="INT_ZEXT", operand_bits=32)
     with patch.object(checker, "_call_effect_shadow_manifest", reject):
-        return checker.check(analysis, analysis)
+        return checker.check(analysis, analysis, **kwargs)
+
+
+def _explicit(checker, **overrides):
+    """6c-2 以降、runner 由来の branch 文脈は明示引数で渡す（facade の _active_* は読まれない）。"""
+    fields = dict(strategy=checker.pairwise_strategy, replan_plan=None, generation=5, comparison_session_id="S-active",
+                  branch_id="S_PAIRWISE", decision_mode=checker.call_proof_decision_mode, production_branch_authority_lease=None)
+    fields.update(overrides)
+    return BranchCheckContext(**fields)
 
 
 def test_generation_increments_only_when_no_replan_plan_is_active():
@@ -73,39 +81,34 @@ def test_generation_increments_only_when_no_replan_plan_is_active():
     before = checker._call_proof_generation
     _run_check_until_first_collaborator(checker, analysis)
     assert checker._call_proof_generation == before + 1
-    checker._active_pair_replan_plan = SimpleNamespace(frame_generation=5, comparison_session_id="R", branch_id="S_PAIRWISE")
-    try:
-        _run_check_until_first_collaborator(checker, analysis)
-    finally:
-        del checker._active_pair_replan_plan
-    assert checker._call_proof_generation == before + 1  # replan 中は increment しない
+    replan = SimpleNamespace(frame_generation=5, comparison_session_id="R", branch_id="S_PAIRWISE")
+    _run_check_until_first_collaborator(checker, analysis, branch_context=_explicit(checker, replan_plan=replan))
+    assert checker._call_proof_generation == before + 1  # replan 中（明示 ctx の replan_plan）は increment しない
+    _run_check_until_first_collaborator(checker, analysis, branch_context=_explicit(checker))
+    assert checker._call_proof_generation == before + 2  # 明示 ctx でも replan でなければ increment
 
 
-def test_check_reads_the_lease_and_active_values_through_the_context_builder():
+def test_check_uses_the_supplied_context_lease_and_session_without_the_builder():
     analysis = create_mock_analysis("f", [])
     checker = _checker()
     lease = object()
-    checker._active_production_branch_authority_lease = lease
-    checker._active_comparison_session_id = "S-active"
+    supplied = _explicit(checker, production_branch_authority_lease=lease)
     captured = {}
-    real = checker_module.build_branch_check_context
+    real_prepare = checker_module.prepare_preflight_projection
 
-    def spy(**kw):
-        ctx = real(**kw)
+    def spy_prepare(ctx, *a, **k):
         captured["ctx"] = ctx
-        return ctx
+        return real_prepare(ctx, *a, **k)
 
-    try:
-        with patch.object(checker_module, "build_branch_check_context", spy):
-            _run_check_until_first_collaborator(checker, analysis)
-    finally:
-        del checker._active_production_branch_authority_lease
-        del checker._active_comparison_session_id
+    with patch.object(checker_module, "build_branch_check_context") as builder, \
+         patch.object(checker_module, "prepare_preflight_projection", side_effect=spy_prepare):
+        _run_check_until_first_collaborator(checker, analysis, branch_context=supplied)
+    builder.assert_not_called()
     ctx = captured["ctx"]
-    assert isinstance(ctx, BranchCheckContext)
+    assert ctx is supplied and isinstance(ctx, BranchCheckContext)
     assert ctx.production_branch_authority_lease is lease
     assert ctx.comparison_session_id == "S-active"
-    assert ctx.generation == checker._call_proof_generation
+    assert ctx.generation == 5  # supplied value のまま（counter の increment とは独立）
 
 
 def test_check_source_keeps_the_increment_inside_the_no_replan_branch_only():
@@ -117,5 +120,5 @@ def test_check_source_keeps_the_increment_inside_the_no_replan_branch_only():
     guards = [n for n in ast.walk(fn) if isinstance(n, ast.If) and "replan_plan is None" in ast.unparse(n.test)
               and any(isinstance(b, ast.AugAssign) for b in n.body)]
     assert len(guards) == 1 and not guards[0].orelse
-    assert "uuid4" not in src and "_active_comparison_generation" in src  # 読み取りは builder 呼び出しの引数としてのみ
-    assert src.count("_active_production_branch_authority_lease") == 1
+    assert "uuid4" not in src and "_active_comparison_generation" not in src  # 6c-2: facade の _active_* は読まない
+    assert src.count("_active_production_branch_authority_lease") == 0  # 6c-2: lease は明示 ctx からのみ
