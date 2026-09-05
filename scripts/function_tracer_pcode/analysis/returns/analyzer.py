@@ -12,7 +12,6 @@ from scripts.function_tracer_pcode.analysis.returns import (
     analyze_function as _svc_analyze_function,
     divergence_proofs as _svc_divergence_proofs,
     parameters as _svc_parameters,
-    pcode_sites as _svc_pcode_sites,
 )
 from typing import Any, Dict, List, Optional, Set, Tuple
 from scripts.function_tracer_pcode.config.settings import BOUNDED_CALL_MAX_CASES, BOUNDED_CALL_REFINEMENT_ENABLED, BOUNDED_CALL_UNROLL_LIMIT
@@ -21,6 +20,7 @@ from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
+from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
 from scripts.function_tracer_pcode.analysis.returns.phi_origins import PhiOriginService
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 from scripts.function_tracer_pcode.analysis.returns.placeholder_algebra import PlaceholderAlgebraService
@@ -76,6 +76,14 @@ class ReturnAnalyzer:
             decompose_comparison_condition=lambda condition: self._decompose_comparison_condition(condition),
             fold_constant_expression=lambda expr, **kw: self._fold_constant_expression(expr, **kw),
         )
+        self._pcode_sites = PcodeSiteService(
+            storages_overlap_for_return_recovery=lambda *a, **kw: self._storages_overlap_for_return_recovery(*a, **kw),
+            program_identity=lambda *a, **kw: self._program_identity(*a, **kw),
+            current_function_entry_address=lambda *a, **kw: self._current_function_entry_address(*a, **kw),
+            is_pcode_call_op=lambda *a, **kw: self._is_pcode_call_op(*a, **kw),
+            get_implicit_return_target_storages=lambda *a, **kw: self._get_implicit_return_target_storages(*a, **kw),
+            binary_id_value=lambda: self._binary_id,
+        )
         self._placeholder_algebra = PlaceholderAlgebraService(
             condition_logic=self._condition_logic,
             current_parameters=lambda: self._current_parameters,
@@ -86,7 +94,7 @@ class ReturnAnalyzer:
         self._phi_origins = PhiOriginService(
             condition_logic=self._condition_logic,
             stack_protector=self._stack_protector,
-            pcode_op_stable_key=lambda *a, **kw: self._pcode_op_stable_key(*a, **kw),
+            pcode_sites=self._pcode_sites,
             normalize_expanded_return_value=lambda *a, **kw: self._normalize_expanded_return_value(*a, **kw),
             debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
             debug_flag=lambda: self.debug,
@@ -468,14 +476,17 @@ class ReturnAnalyzer:
     _rewrite_tracked_return_values_for_op = _svc_return_normalization._impl__rewrite_tracked_return_values_for_op
     _should_replay_canonicalized_return = _svc_return_normalization._impl__should_replay_canonicalized_return
     # lifecycle / analyze_function / condition_logic / ... (session helpers)
-    _address_like_keys = _svc_pcode_sites._impl__address_like_keys
-    _address_space_name = _svc_pcode_sites._impl__address_space_name
+    def _address_like_keys(self, value, *, default_space=None):
+        return self._pcode_sites.address_like_keys(value, default_space=default_space)
+    def _address_space_name(self, address):
+        return self._pcode_sites.address_space_name(address)
     _apply_structural_recurrence_summary = _svc_analyze_function._impl__apply_structural_recurrence_summary
     def _candidate_phi_origin_keys_from_summary_source_key(self, value):
         return self._phi_origins.candidate_phi_origin_keys_from_summary_source_key(value)
     def _classify_param_condition(self, condition, param_name):
         return self._condition_logic.classify_param_condition(condition, param_name)
-    _coerce_optional_int = _svc_pcode_sites._impl__coerce_optional_int
+    def _coerce_optional_int(self, value):
+        return self._pcode_sites.coerce_optional_int(value)
     _collect_guard_dependency_varnodes = _svc_divergence_proofs._impl__collect_guard_dependency_varnodes
     _collect_java_or_python_iterable = staticmethod(_svc_lifecycle._impl__collect_java_or_python_iterable)
     _collect_parameter_descriptors_from_expression = _svc_parameters._impl__collect_parameter_descriptors_from_expression
@@ -499,7 +510,8 @@ class ReturnAnalyzer:
     _debug_expr_identity_summary = _svc_lifecycle._impl__debug_expr_identity_summary
     _debug_expr_summary = _svc_lifecycle._impl__debug_expr_summary
     _debug_print = _svc_lifecycle._impl__debug_print
-    _describe_pcode_site = _svc_pcode_sites._impl__describe_pcode_site
+    def _describe_pcode_site(self, pcode_op, fallback_address=None, *, identity_prefix=None):
+        return self._pcode_sites.describe_pcode_site(pcode_op, fallback_address, identity_prefix=identity_prefix)
     _edge_condition_for_successor = _svc_divergence_proofs._impl__edge_condition_for_successor
     def _expression_contains_equivalent_subexpr(self, expr, target):
         return self._expression_cases.expression_contains_equivalent_subexpr(expr, target)
@@ -543,10 +555,14 @@ class ReturnAnalyzer:
         return self._placeholder_algebra.negated_unit_condition_key_for_expression(expr, conditions)
     _parameter_descriptor_from_expression = _svc_parameters._impl__parameter_descriptor_from_expression
     _parameter_descriptor_key = _svc_parameters._impl__parameter_descriptor_key
-    _pcode_op_identity_key = _svc_pcode_sites._impl__pcode_op_identity_key
-    _pcode_op_input_def_reaches_phi = _svc_pcode_sites._impl__pcode_op_input_def_reaches_phi
-    _pcode_op_stable_key = _svc_pcode_sites._impl__pcode_op_stable_key
-    _pcode_ops_match = _svc_pcode_sites._impl__pcode_ops_match
+    def _pcode_op_identity_key(self, pcode_op):
+        return self._pcode_sites.pcode_op_identity_key(pcode_op)
+    def _pcode_op_input_def_reaches_phi(self, op, target_phi_key, *, max_depth):
+        return self._pcode_sites.pcode_op_input_def_reaches_phi(op, target_phi_key, max_depth=max_depth)
+    def _pcode_op_stable_key(self, op):
+        return self._pcode_sites.pcode_op_stable_key(op)
+    def _pcode_ops_match(self, lhs, rhs):
+        return self._pcode_sites.pcode_ops_match(lhs, rhs)
     _phase1_body_contains_address = staticmethod(_svc_analyze_function._impl__phase1_body_contains_address)
     def _phi_circular_origin_stable_keys(self, expr):
         return self._phi_origins.phi_circular_origin_stable_keys(expr)
@@ -586,7 +602,8 @@ class ReturnAnalyzer:
     def _unit_condition_key_for_expression(self, expr, conditions):
         return self._placeholder_algebra.unit_condition_key_for_expression(expr, conditions)
     _varnode_guard_dependency_key = _svc_divergence_proofs._impl__varnode_guard_dependency_key
-    _varnodes_same_storage = _svc_pcode_sites._impl__varnodes_same_storage
+    def _varnodes_same_storage(self, left, right):
+        return self._pcode_sites.varnodes_same_storage(left, right)
     analyze_function = _svc_analyze_function._impl_analyze_function
     dispose = _svc_lifecycle._impl_dispose
     # session helpers (continued)
@@ -698,7 +715,8 @@ class ReturnAnalyzer:
     _function_cache_key = _svc_lifecycle._impl__function_cache_key
     _get_function_manager = _svc_lifecycle._impl__get_function_manager
     _get_instruction_with_fallback = _svc_lifecycle._impl__get_instruction_with_fallback
-    _get_pcode_opcode = _svc_pcode_sites._impl__get_pcode_opcode
+    def _get_pcode_opcode(self, pcode_op):
+        return self._pcode_sites.get_pcode_opcode(pcode_op)
     _get_storage_info = _svc_parameters._impl__get_storage_info
     _has_non_parameter_symbol_for_storage = _svc_parameters._impl__has_non_parameter_symbol_for_storage
     _high_function_has_cfg_cycle = _svc_divergence_proofs._impl__high_function_has_cfg_cycle
@@ -708,7 +726,8 @@ class ReturnAnalyzer:
         return self._expression_cases.is_direct_location_carrier(expr)
     _is_signed_type = _svc_parameters._impl__is_signed_type
     _is_void_type = _svc_parameters._impl__is_void_type
-    _is_zero_constant_varnode = _svc_pcode_sites._impl__is_zero_constant_varnode
+    def _is_zero_constant_varnode(self, varnode):
+        return self._pcode_sites.is_zero_constant_varnode(varnode)
     def _iter_expression_nodes_for_unconditional_runtime_guards(self, expr):
         return self._expression_cases.iter_expression_nodes_for_unconditional_runtime_guards(expr)
     def _local_varnode_key(self, varnode):
@@ -728,8 +747,10 @@ class ReturnAnalyzer:
     _parameter_expression = _svc_parameters._impl__parameter_expression
     _parameter_storages_match_for_passthrough = _svc_parameters._impl__parameter_storages_match_for_passthrough
     _parameter_storages_overlap_for_passthrough = _svc_parameters._impl__parameter_storages_overlap_for_passthrough
-    _pcode_op_affects_tracked_storage = _svc_pcode_sites._impl__pcode_op_affects_tracked_storage
-    _pcode_op_debug_name = _svc_pcode_sites._impl__pcode_op_debug_name
+    def _pcode_op_affects_tracked_storage(self, pcode_op, target_storage, tracer, current_function=None):
+        return self._pcode_sites.pcode_op_affects_tracked_storage(pcode_op, target_storage, tracer, current_function)
+    def _pcode_op_debug_name(self, pcode_op):
+        return self._pcode_sites.pcode_op_debug_name(pcode_op)
     def _phi_circular_additive_signature(self, expr):
         return self._phi_origins.phi_circular_additive_signature(expr)
     def _phi_expression_key_set(self, expr):
@@ -763,8 +784,11 @@ class ReturnAnalyzer:
     def _substitute_parameter_constants_under_conditions(self, expr, conditions):
         return self._condition_logic.substitute_parameter_constants_under_conditions(expr, conditions)
     _synthesize_implicit_passthrough_parameter = _svc_parameters._impl__synthesize_implicit_passthrough_parameter
-    _varnode_location_key = staticmethod(_svc_pcode_sites._impl__varnode_location_key)
-    _varnodes_may_alias = classmethod(_svc_pcode_sites._impl__varnodes_may_alias)
+    @staticmethod
+    def _varnode_location_key(varnode):
+        return PcodeSiteService.varnode_location_key(varnode)
+    def _varnodes_may_alias(self, lhs, rhs):
+        return self._pcode_sites.varnodes_may_alias(lhs, rhs)
     def _wrapper_preserves_collapsed_operand(self, operator, shared_operand, *, kept_operand_index):
         return self._expression_cases.wrapper_preserves_collapsed_operand(operator, shared_operand, kept_operand_index=kept_operand_index)
     # session helpers (continued)

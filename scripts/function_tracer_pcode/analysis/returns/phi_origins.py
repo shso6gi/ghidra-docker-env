@@ -12,14 +12,15 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
 )
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
+from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
 
 
 class PhiOriginService:
     """ReturnAnalyzer から切り出した PHI 起源鍵・PHI 循環判定・有限パラメータ到達分割の collaborator。
 
     facade 状態は読まない（debug フラグは supplier 経由）。条件論理は ``ConditionLogicService``、
-    定数値抽出は ``StackProtectorService`` を直接依存として受け取る。未抽出 family が所有する
-    helper（``pcode_op_stable_key`` / ``normalize_expanded_return_value`` / ``debug_print``）は
+    定数値抽出は ``StackProtectorService``、p-code op 鍵は ``PcodeSiteService`` を直接依存として受け取る。
+    未抽出 family が所有する helper（``normalize_expanded_return_value`` / ``debug_print``）は
     facade 経由で遅延 dispatch する callable として注入する。
     """
 
@@ -28,14 +29,14 @@ class PhiOriginService:
         *,
         condition_logic: ConditionLogicService,
         stack_protector: StackProtectorService,
-        pcode_op_stable_key: Callable[..., Any],
+        pcode_sites: PcodeSiteService,
         normalize_expanded_return_value: Callable[..., Any],
         debug_print: Callable[..., Any],
         debug_flag: Callable[..., Any],
     ) -> None:
         self.condition_logic = condition_logic
         self.stack_protector = stack_protector
-        self.pcode_op_stable_key = pcode_op_stable_key
+        self.pcode_sites = pcode_sites
         self.normalize_expanded_return_value = normalize_expanded_return_value
         self.debug_print = debug_print
         self.debug_flag = debug_flag
@@ -154,7 +155,7 @@ class PhiOriginService:
             if op is None:
                 return
             if getattr(op, "getMnemonic", lambda: None)() == "MULTIEQUAL":
-                key = self.pcode_op_stable_key(op)
+                key = self.pcode_sites.pcode_op_stable_key(op)
                 if isinstance(key, tuple):
                     keys.add(key)
             try:

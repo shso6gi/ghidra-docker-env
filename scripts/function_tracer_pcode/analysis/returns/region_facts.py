@@ -12,9 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
-from scripts.function_tracer_pcode.analysis.returns.pcode_sites import (
-    _impl__varnode_location_key as varnode_location_key,
-)
+from scripts.function_tracer_pcode.analysis.returns.pcode_sites import varnode_location_key
 
 
 def input_is_nondata_operand(mnemonic: str, input_index: int) -> bool:
@@ -148,5 +146,4 @@ __all__ = (
     "RegionFacts",
     "input_is_nondata_operand",
     "parameter_index_for_location",
-    "varnode_location_key",
 )
