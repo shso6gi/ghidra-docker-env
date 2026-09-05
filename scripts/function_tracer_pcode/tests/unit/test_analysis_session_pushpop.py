@@ -2,7 +2,8 @@
 
 8 フィールドすべてについて、親 session の同一性復元 / 子の変更の非漏洩 / 親 container の同一性維持 /
 例外終了時の同一復元を固定する。blocked_return_path_conditions と return_path_entry_cache の分離は
-旧実装（6 フィールドのみ個別退避）に対する意図的な state-lifetime 修正。
+旧 live 実装（analyzer.py、5 フィールドのみ個別退避。lifecycle.py の dead 実装は 6 フィールド）に対する
+意図的な state-lifetime 修正。
 """
 
 import dataclasses
