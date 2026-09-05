@@ -8,7 +8,6 @@ from scripts.function_tracer_pcode.analysis.returns import (
     effect_integration as _svc_effect_integration,
     lifecycle as _svc_lifecycle,
     return_extraction as _svc_return_extraction,
-    return_normalization as _svc_return_normalization,
     analyze_function as _svc_analyze_function,
     divergence_proofs as _svc_divergence_proofs,
     parameters as _svc_parameters,
@@ -20,6 +19,7 @@ from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
+from scripts.function_tracer_pcode.analysis.returns.return_normalization import ReturnNormalizationService
 from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
 from scripts.function_tracer_pcode.analysis.returns.phi_origins import PhiOriginService
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
@@ -84,6 +84,27 @@ class ReturnAnalyzer:
             get_implicit_return_target_storages=lambda *a, **kw: self._get_implicit_return_target_storages(*a, **kw),
             binary_id_value=lambda: self._binary_id,
         )
+        self._return_normalization = ReturnNormalizationService(
+            expression_cases=self._expression_cases,
+            condition_logic=self._condition_logic,
+            stack_protector=self._stack_protector,
+            pcode_sites=self._pcode_sites,
+            debug_expr_summary=lambda *a, **kw: self._debug_expr_summary(*a, **kw),
+            debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
+            count_memory_reads=lambda *a, **kw: self._count_memory_reads(*a, **kw),
+            propagate_indirect_return_effect=lambda *a, **kw: self._propagate_indirect_return_effect(*a, **kw),
+            normalize_return_value_with_effect_summary=lambda *a, **kw: self._normalize_return_value_with_effect_summary(*a, **kw),
+            tracked_return_value_is_affected_by_op=lambda *a, **kw: self._tracked_return_value_is_affected_by_op(*a, **kw),
+            merge_equivalent_return_infos=lambda *a, **kw: self._merge_equivalent_return_infos(*a, **kw),
+            exclusivize_return_regions=lambda *a, **kw: self._exclusivize_return_regions(*a, **kw),
+            deduplicate_tracked_return_values=lambda *a, **kw: self._deduplicate_tracked_return_values(*a, **kw),
+            propagate_passthrough_input_from_op=lambda *a, **kw: self._propagate_passthrough_input_from_op(*a, **kw),
+            propagate_multiequal_input_for_return_path=lambda *a, **kw: self._propagate_multiequal_input_for_return_path(*a, **kw),
+            normalize_return_callother_userops=lambda *a, **kw: self._normalize_return_callother_userops(*a, **kw),
+            current_parameters_value=lambda: self._current_parameters,
+            current_effect_summary_value=lambda: self._current_effect_summary,
+            debug_flag=lambda: self.debug,
+        )
         self._placeholder_algebra = PlaceholderAlgebraService(
             condition_logic=self._condition_logic,
             current_parameters=lambda: self._current_parameters,
@@ -95,7 +116,7 @@ class ReturnAnalyzer:
             condition_logic=self._condition_logic,
             stack_protector=self._stack_protector,
             pcode_sites=self._pcode_sites,
-            normalize_expanded_return_value=lambda *a, **kw: self._normalize_expanded_return_value(*a, **kw),
+            return_normalization=self._return_normalization,
             debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
             debug_flag=lambda: self.debug,
         )
@@ -466,15 +487,24 @@ class ReturnAnalyzer:
     _merge_return_info_summary_candidate_source_keys = _svc_return_extraction._impl__merge_return_info_summary_candidate_source_keys
     _partition_return_conditions = _svc_return_extraction._impl__partition_return_conditions
     # analyzer_services.return_normalization
-    _normalize_bound_parameter_storage_values = _svc_return_normalization._impl__normalize_bound_parameter_storage_values
-    _normalize_bound_parameter_values = _svc_return_normalization._impl__normalize_bound_parameter_values
-    _normalize_expanded_return_value = _svc_return_normalization._impl__normalize_expanded_return_value
-    _normalize_return_partition = _svc_return_normalization._impl__normalize_return_partition
-    _rewrite_drops_composite_location_wrapper = _svc_return_normalization._impl__rewrite_drops_composite_location_wrapper
-    _rewrite_expression_signedness = _svc_return_normalization._impl__rewrite_expression_signedness
-    _rewrite_single_tracked_return_value_for_op = _svc_return_normalization._impl__rewrite_single_tracked_return_value_for_op
-    _rewrite_tracked_return_values_for_op = _svc_return_normalization._impl__rewrite_tracked_return_values_for_op
-    _should_replay_canonicalized_return = _svc_return_normalization._impl__should_replay_canonicalized_return
+    def _normalize_bound_parameter_storage_values(self, bound_parameter_storage_values):
+        return self._return_normalization.normalize_bound_parameter_storage_values(bound_parameter_storage_values)
+    def _normalize_bound_parameter_values(self, bound_parameter_values):
+        return self._return_normalization.normalize_bound_parameter_values(bound_parameter_values)
+    def _normalize_expanded_return_value(self, value, conditions):
+        return self._return_normalization.normalize_expanded_return_value(value, conditions)
+    def _normalize_return_partition(self, analysis):
+        return self._return_normalization.normalize_return_partition(analysis)
+    def _rewrite_drops_composite_location_wrapper(self, original, rewritten, conditions):
+        return self._return_normalization.rewrite_drops_composite_location_wrapper(original, rewritten, conditions)
+    def _rewrite_expression_signedness(self, expr, preferred):
+        return self._return_normalization.rewrite_expression_signedness(expr, preferred)
+    def _rewrite_single_tracked_return_value_for_op(self, tracked, pcode_op, *, tracer, condition_tracker, path_conditions=None, current_function=None):
+        return self._return_normalization.rewrite_single_tracked_return_value_for_op(tracked, pcode_op, tracer=tracer, condition_tracker=condition_tracker, path_conditions=path_conditions, current_function=current_function)
+    def _rewrite_tracked_return_values_for_op(self, tracked_values, pcode_op, *, tracer, condition_tracker, path_conditions=None, current_function=None):
+        return self._return_normalization.rewrite_tracked_return_values_for_op(tracked_values, pcode_op, tracer=tracer, condition_tracker=condition_tracker, path_conditions=path_conditions, current_function=current_function)
+    def _should_replay_canonicalized_return(self, canonicalized, original):
+        return self._return_normalization.should_replay_canonicalized_return(canonicalized, original)
     # lifecycle / analyze_function / condition_logic / ... (session helpers)
     def _address_like_keys(self, value, *, default_space=None):
         return self._pcode_sites.address_like_keys(value, default_space=default_space)
