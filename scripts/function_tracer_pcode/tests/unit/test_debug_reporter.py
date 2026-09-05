@@ -74,6 +74,9 @@ def test_every_collaborator_shares_the_single_reporter():
 def test_no_collaborator_local_shadows_an_imported_module_function():
     """`x = x(...)` 形の shadowing（UnboundLocalError）を returns package 全体で禁止する。
 
+    対象は Assign / AnnAssign / AugAssign の直接ターゲットのみ（for / with ... as / except ... as /
+    walrus は対象外）。今回の回帰の再発防止に必要十分な範囲に限定している。
+
     lifecycle の純関数 function_cache_key を import した effect_integration で、同名のローカル変数が
     import を隠して実行時に UnboundLocalError になる欠陥を検出したことに由来する回帰ガード。
     """
