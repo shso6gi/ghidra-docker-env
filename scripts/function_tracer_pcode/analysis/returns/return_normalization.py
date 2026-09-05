@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     locations_match,
     promote_effect_value_match_to_post_state_read,
 )
+from scripts.function_tracer_pcode.analysis.session import AnalysisSession
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
@@ -46,6 +47,7 @@ class ReturnNormalizationService:
     def __init__(
         self,
         *,
+        session: Callable[[], "AnalysisSession"],
         return_paths: ReturnPathSelectionService,
         expression_cases: ExpressionCaseService,
         condition_logic: ConditionLogicService,
@@ -61,10 +63,9 @@ class ReturnNormalizationService:
         deduplicate_tracked_return_values: Callable[..., Any],
         propagate_passthrough_input_from_op: Callable[..., Any],
         normalize_return_callother_userops: Callable[..., Any],
-        current_parameters_value: Callable[..., Any],
-        current_effect_summary_value: Callable[..., Any],
         debug_flag: Callable[..., Any],
     ) -> None:
+        self.session = session
         self.return_paths = return_paths
         self.expression_cases = expression_cases
         self.condition_logic = condition_logic
@@ -80,8 +81,6 @@ class ReturnNormalizationService:
         self.deduplicate_tracked_return_values = deduplicate_tracked_return_values
         self.propagate_passthrough_input_from_op = propagate_passthrough_input_from_op
         self.normalize_return_callother_userops = normalize_return_callother_userops
-        self.current_parameters_value = current_parameters_value
-        self.current_effect_summary_value = current_effect_summary_value
         self.debug_flag = debug_flag
 
     def normalize_return_partition(self, analysis: FunctionReturnAnalysis) -> None:
@@ -275,11 +274,11 @@ class ReturnNormalizationService:
 
         original_location = canonicalize_expr_read_location(
             original,
-            self.current_parameters_value(),
+            self.session().parameters,
         )
         rewritten_location = canonicalize_expr_read_location(
             rewritten,
-            self.current_parameters_value(),
+            self.session().parameters,
         )
         if (
             original_location is None
@@ -289,7 +288,7 @@ class ReturnNormalizationService:
             return False
         if not self.expression_cases.is_direct_location_carrier(rewritten):
             return False
-        current_effect_summary = self.current_effect_summary_value()
+        current_effect_summary = self.session().effect_summary
         if (
             current_effect_summary is not None
             and (
@@ -299,7 +298,7 @@ class ReturnNormalizationService:
                         original_location,
                         conditions,
                         current_effect_summary.effects,
-                        self.current_parameters_value(),
+                        self.session().parameters,
                         symbolic_post_state=True,
                     )
                     is not None
@@ -309,7 +308,7 @@ class ReturnNormalizationService:
                     rewritten,
                     conditions,
                     current_effect_summary.effects,
-                    self.current_parameters_value(),
+                    self.session().parameters,
                 )
             )
         ):
@@ -326,7 +325,7 @@ class ReturnNormalizationService:
     ) -> Expression:
         normalized_value = value
         started_with_phi = expression_contains_phi(value)
-        effect_summary = self.current_effect_summary_value()
+        effect_summary = self.session().effect_summary
         has_effects = effect_summary is not None and bool(effect_summary.effects)
 
         if started_with_phi:

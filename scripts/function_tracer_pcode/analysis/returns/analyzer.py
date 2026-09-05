@@ -82,7 +82,7 @@ class ReturnAnalyzer:
         self._diagnostics = AnalysisDiagnosticsState()
         self._current_parameters: List[Dict] = []
         self._expression_cases = ExpressionCaseService(
-            current_parameters=lambda: self._current_parameters,
+            session=self._ensure_analysis_session,
         )
         self._stack_protector = StackProtectorService(
             extract_stack_protector_memory_probe=lambda *a, **kw: self._extract_stack_protector_memory_probe(*a, **kw),
@@ -108,6 +108,7 @@ class ReturnAnalyzer:
             cbranch_direct_target_keys=lambda *a, **kw: self._cbranch_direct_target_keys(*a, **kw),
         )
         self._return_paths = ReturnPathSelectionService(
+            session=self._ensure_analysis_session,
             condition_logic=self._condition_logic,
             block_graph=self._block_graph,
             expression_cases=self._expression_cases,
@@ -115,9 +116,9 @@ class ReturnAnalyzer:
             make_tracked_return_value=lambda *a, **kw: self._make_tracked_return_value(*a, **kw),
             return_info_effective_region_conditions=lambda *a, **kw: self._return_info_effective_region_conditions(*a, **kw),
             debug_flag=lambda: self.debug,
-            current_blocked_return_path_conditions_value=lambda: self._current_blocked_return_path_conditions,
         )
         self._return_normalization = ReturnNormalizationService(
+            session=self._ensure_analysis_session,
             return_paths=self._return_paths,
             expression_cases=self._expression_cases,
             condition_logic=self._condition_logic,
@@ -133,8 +134,6 @@ class ReturnAnalyzer:
             deduplicate_tracked_return_values=lambda *a, **kw: self._deduplicate_tracked_return_values(*a, **kw),
             propagate_passthrough_input_from_op=lambda *a, **kw: self._propagate_passthrough_input_from_op(*a, **kw),
             normalize_return_callother_userops=lambda *a, **kw: self._normalize_return_callother_userops(*a, **kw),
-            current_parameters_value=lambda: self._current_parameters,
-            current_effect_summary_value=lambda: self._current_effect_summary,
             debug_flag=lambda: self.debug,
         )
         self._parameters = ParameterService(
@@ -152,12 +151,13 @@ class ReturnAnalyzer:
             set_current_parameters=lambda value: setattr(self, "_current_parameters", value),
         )
         self._placeholder_algebra = PlaceholderAlgebraService(
+            session=self._ensure_analysis_session,
             condition_logic=self._condition_logic,
-            current_parameters=lambda: self._current_parameters,
             stack_protector=self._stack_protector,
             branch_guarded_expression_is_param_minus_one=lambda *a, **kw: self._branch_guarded_expression_is_param_minus_one(*a, **kw),
         )
         self._divergence_proofs = DivergenceProofService(
+            runtime_state=self._runtime_state,
             block_graph=self._block_graph,
             program_access=self._program_access,
             condition_logic=self._condition_logic,
@@ -165,8 +165,6 @@ class ReturnAnalyzer:
             stack_protector=self._stack_protector,
             debug_reporter=self._debug_reporter,
             program_value=lambda: self.program,
-            direct_call_graph_value=lambda: self._direct_call_graph,
-            direct_call_graph_complete_nodes_value=lambda: self._direct_call_graph_complete_nodes,
         )
         self._phi_origins = PhiOriginService(
             condition_logic=self._condition_logic,
@@ -177,6 +175,7 @@ class ReturnAnalyzer:
             debug_flag=lambda: self.debug,
         )
         self._branch_guarded_while = BranchGuardedWhileProofService(
+            session=self._ensure_analysis_session,
             return_paths=self._return_paths,
             condition_logic=self._condition_logic,
             placeholder_algebra=self._placeholder_algebra,
@@ -198,9 +197,10 @@ class ReturnAnalyzer:
             debug_flag=lambda: self.debug,
             enable_completed_recovery_proofs_value=lambda: self.enable_completed_recovery_proofs,
             program_value=lambda: self.program,
-            current_parameters_value=lambda: self._current_parameters,
         )
         self._effect_integration = EffectIntegrationService(
+            runtime_state=self._runtime_state,
+            session=self._ensure_analysis_session,
             program_access=self._program_access,
             expression_cases=self._expression_cases,
             return_normalization=self._return_normalization,
@@ -230,12 +230,6 @@ class ReturnAnalyzer:
             high_function_has_phase1_pure_return_forbidden_ops=lambda *a, **kw: self._high_function_has_phase1_pure_return_forbidden_ops(*a, **kw),
             phase1_return_type_is_float=lambda *a, **kw: self._phase1_return_type_is_float(*a, **kw),
             decompile_with_broker=lambda *a, **kw: self._decompile_with_broker(*a, **kw),
-            current_parameters_value=lambda: self._current_parameters,
-            current_effect_summary_value=lambda: self._current_effect_summary,
-            effect_summary_cache_value=lambda: self._effect_summary_cache,
-            effect_summary_parameter_cache_value=lambda: self._effect_summary_parameter_cache,
-            direct_call_graph_value=lambda: self._direct_call_graph,
-            direct_call_graph_complete_nodes_value=lambda: self._direct_call_graph_complete_nodes,
             program_value=lambda: self.program,
             binary_id_value=lambda: self._binary_id,
             debug_flag=lambda: self.debug,

@@ -52,6 +52,8 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     rewrite_observed_loads_from_effects,
     summarize_store_effects,
 )
+from scripts.function_tracer_pcode.analysis.session import AnalysisSession
+from scripts.function_tracer_pcode.analysis.runtime_state import AnalysisRuntimeState
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import collect_java_or_python_iterable
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import function_cache_key as lifecycle_function_cache_key
@@ -122,6 +124,8 @@ class EffectIntegrationService:
     def __init__(
         self,
         *,
+        runtime_state: "AnalysisRuntimeState",
+        session: Callable[[], "AnalysisSession"],
         program_access: ProgramAccessService,
         expression_cases: ExpressionCaseService,
         return_normalization: ReturnNormalizationService,
@@ -151,16 +155,12 @@ class EffectIntegrationService:
         high_function_has_phase1_pure_return_forbidden_ops: Callable[..., Any],
         phase1_return_type_is_float: Callable[..., Any],
         decompile_with_broker: Callable[..., Any],
-        current_parameters_value: Callable[..., Any],
-        current_effect_summary_value: Callable[..., Any],
-        effect_summary_cache_value: Callable[..., Any],
-        effect_summary_parameter_cache_value: Callable[..., Any],
-        direct_call_graph_value: Callable[..., Any],
-        direct_call_graph_complete_nodes_value: Callable[..., Any],
         program_value: Callable[..., Any],
         binary_id_value: Callable[..., Any],
         debug_flag: Callable[..., Any],
     ) -> None:
+        self.runtime_state = runtime_state
+        self.session = session
         self.program_access = program_access
         self.expression_cases = expression_cases
         self.return_normalization = return_normalization
@@ -190,12 +190,6 @@ class EffectIntegrationService:
         self.high_function_has_phase1_pure_return_forbidden_ops = high_function_has_phase1_pure_return_forbidden_ops
         self.phase1_return_type_is_float = phase1_return_type_is_float
         self.decompile_with_broker = decompile_with_broker
-        self.current_parameters_value = current_parameters_value
-        self.current_effect_summary_value = current_effect_summary_value
-        self.effect_summary_cache_value = effect_summary_cache_value
-        self.effect_summary_parameter_cache_value = effect_summary_parameter_cache_value
-        self.direct_call_graph_value = direct_call_graph_value
-        self.direct_call_graph_complete_nodes_value = direct_call_graph_complete_nodes_value
         self.program_value = program_value
         self.binary_id_value = binary_id_value
         self.debug_flag = debug_flag
@@ -495,11 +489,11 @@ class EffectIntegrationService:
         )
 
         if function_identity_key is not None:
-            self.direct_call_graph_value()[function_identity_key] = set(direct_call_target_keys)
+            self.runtime_state.direct_call_graph[function_identity_key] = set(direct_call_target_keys)
             if call_graph_edges_complete and pcode_complete:
-                self.direct_call_graph_complete_nodes_value().add(function_identity_key)
+                self.runtime_state.direct_call_graph_complete_nodes.add(function_identity_key)
             else:
-                self.direct_call_graph_complete_nodes_value().discard(function_identity_key)
+                self.runtime_state.direct_call_graph_complete_nodes.discard(function_identity_key)
         recursive_scc_proven, recursive_scc_identity, recursive_scc_members = (
             self.divergence_proofs.recursive_scc_certificate(function_identity_key)
         )
@@ -670,13 +664,13 @@ class EffectIntegrationService:
         function_cache_key = lifecycle_function_cache_key(function)
         if function_cache_key is None:
             return None
-        self.effect_summary_parameter_cache_value()[function_cache_key] = list(parameters)
+        self.runtime_state.effect_summary_parameter_cache[function_cache_key] = list(parameters)
         summary_cache_key = self.analysis_scope_key(
             function,
             bound_parameter_values,
             bound_parameter_storage_values,
         )
-        cached = self.effect_summary_cache_value().get(summary_cache_key)
+        cached = self.runtime_state.effect_summary_cache.get(summary_cache_key)
         if cached is not None:
             return cached
 
@@ -706,7 +700,7 @@ class EffectIntegrationService:
             )
             if callee_scope_key is None:
                 return None
-            cached_callee = self.effect_summary_cache_value().get(callee_scope_key)
+            cached_callee = self.runtime_state.effect_summary_cache.get(callee_scope_key)
             if cached_callee is not None:
                 return cached_callee
 
@@ -751,7 +745,7 @@ class EffectIntegrationService:
             callee_tracker.build()
             callee_function_cache_key = lifecycle_function_cache_key(callee)
             if callee_function_cache_key is not None:
-                self.effect_summary_parameter_cache_value()[callee_function_cache_key] = list(callee_parameters)
+                self.runtime_state.effect_summary_parameter_cache[callee_function_cache_key] = list(callee_parameters)
             image_base = None
             try:
                 image_base = self.program_value().getImageBase().getOffset()
@@ -811,7 +805,7 @@ class EffectIntegrationService:
             function,
             parameters,
         )
-        self.effect_summary_cache_value()[summary_cache_key] = summary
+        self.runtime_state.effect_summary_cache[summary_cache_key] = summary
         return summary
 
     def local_memory_key(self, addr_expr: Expression, size: int) -> Tuple[StructuralKey, int]:
@@ -849,7 +843,7 @@ class EffectIntegrationService:
         value: Expression,
         conditions: List[Condition],
     ) -> List[Tuple[Expression, List[Condition]]]:
-        effect_summary = self.current_effect_summary_value()
+        effect_summary = self.session().effect_summary
         if effect_summary is None or not effect_summary.effects:
             return [(value, conditions)]
 
@@ -991,7 +985,7 @@ class EffectIntegrationService:
 
         location = canonicalize_expr_read_location(
             original,
-            self.current_parameters_value(),
+            self.session().parameters,
         )
         if location is None:
             return False
@@ -1001,14 +995,14 @@ class EffectIntegrationService:
             location,
             conditions,
             effect_summary.effects,
-            self.current_parameters_value(),
+            self.session().parameters,
         )
         rewritten_match = _find_matching_effect_value(
             rewritten,
             location,
             conditions,
             effect_summary.effects,
-            self.current_parameters_value(),
+            self.session().parameters,
         )
         return original_match is None and rewritten_match is not None
 
@@ -1023,7 +1017,7 @@ class EffectIntegrationService:
             return matched_locations
 
         for current in _iter_expression_nodes(expr, include_phi_conditions=False):
-            location = canonicalize_expr_read_location(current, self.current_parameters_value())
+            location = canonicalize_expr_read_location(current, self.session().parameters)
             if location is None:
                 continue
             if _find_matching_effect_value(
@@ -1031,7 +1025,7 @@ class EffectIntegrationService:
                 location,
                 conditions,
                 effect_summary.effects,
-                self.current_parameters_value(),
+                self.session().parameters,
             ) is None:
                 continue
             matched_locations.add(location.stable_key())
@@ -1045,7 +1039,7 @@ class EffectIntegrationService:
     ) -> Iterable[Tuple[str, Optional[Expression]]]:
         expr_location = canonicalize_expr_read_location(
             value,
-            self.current_parameters_value(),
+            self.session().parameters,
         )
         nontrivial_location_wrapper = False
         effect_value_matches_wrapper = False
@@ -1060,14 +1054,14 @@ class EffectIntegrationService:
                     expr_location,
                     conditions,
                     effect_summary.effects,
-                    self.current_parameters_value(),
+                    self.session().parameters,
                 ) is not None
         if expr_location is not None:
             post_state_read = resolve_definite_post_state_read_for_location(
                 expr_location,
                 conditions,
                 effect_summary.effects,
-                self.current_parameters_value(),
+                self.session().parameters,
                 symbolic_post_state=True,
             )
             if post_state_read is not None:
@@ -1075,7 +1069,7 @@ class EffectIntegrationService:
                     post_state_read,
                     conditions,
                     effect_summary.effects,
-                    self.current_parameters_value(),
+                    self.session().parameters,
                 ))
                 if not nontrivial_location_wrapper or effect_value_matches_wrapper:
                     yield ("final object-state symbolic", post_state_read)
@@ -1086,7 +1080,7 @@ class EffectIntegrationService:
                     value,
                     conditions,
                     effect_summary.effects,
-                    self.current_parameters_value(),
+                    self.session().parameters,
                 ),
             )
         yield (
@@ -1095,7 +1089,7 @@ class EffectIntegrationService:
                 value,
                 conditions,
                 effect_summary.effects,
-                self.current_parameters_value(),
+                self.session().parameters,
                 prefer_canonical_post_state=False,
                 preserve_composite_location_wrappers=True,
             ),
@@ -1106,7 +1100,7 @@ class EffectIntegrationService:
                 value,
                 conditions,
                 effect_summary.effects,
-                self.current_parameters_value(),
+                self.session().parameters,
             ),
         )
 
@@ -1141,7 +1135,7 @@ class EffectIntegrationService:
         for original_index, original_operand in enumerate(original_operands):
             location = canonicalize_expr_read_location(
                 original_operand,
-                self.current_parameters_value(),
+                self.session().parameters,
             )
             if location is None:
                 continue
@@ -1162,7 +1156,7 @@ class EffectIntegrationService:
                         location,
                         conditions,
                         effect_summary.effects,
-                        self.current_parameters_value(),
+                        self.session().parameters,
                     )
                     is None
                 ):
@@ -1171,7 +1165,7 @@ class EffectIntegrationService:
                     rewritten_operand,
                     conditions,
                     effect_summary.effects,
-                    self.current_parameters_value(),
+                    self.session().parameters,
                     symbolic_post_state=True,
                 )
                 if post_state_read is not None:
@@ -1179,13 +1173,13 @@ class EffectIntegrationService:
                         location,
                         conditions,
                         effect_summary.effects,
-                        self.current_parameters_value(),
+                        self.session().parameters,
                     )
                     if final_replayed is not None and _expressions_equivalent_under_conditions(
                         final_replayed,
                         rewritten_operand,
                         conditions,
-                        self.current_parameters_value(),
+                        self.session().parameters,
                     ):
                         post_state_read = None
                 if self.debug_flag():
@@ -1227,7 +1221,7 @@ class EffectIntegrationService:
         for original_index, original_operand in enumerate(original_operands):
             location = canonicalize_expr_read_location(
                 original_operand,
-                self.current_parameters_value(),
+                self.session().parameters,
             )
             if location is None:
                 continue
@@ -1236,7 +1230,7 @@ class EffectIntegrationService:
                 rewritten_without_carrier_ref,
                 location,
                 conditions,
-                self.current_parameters_value(),
+                self.session().parameters,
             ):
                 continue
             shared_original = original_operands[1 - original_index]
@@ -1252,7 +1246,7 @@ class EffectIntegrationService:
                     location,
                     conditions,
                     effect_summary.effects,
-                    self.current_parameters_value(),
+                    self.session().parameters,
                 )
                 is None
             ):
@@ -1372,7 +1366,7 @@ class EffectIntegrationService:
                 expr,
                 conditions,
                 effect_summary.effects,
-                self.current_parameters_value(),
+                self.session().parameters,
             )
             if lowered_candidate is not None:
                 lowered = lowered_candidate
@@ -1427,14 +1421,14 @@ class EffectIntegrationService:
             value,
             conditions,
             effect_summary.effects,
-            self.current_parameters_value(),
+            self.session().parameters,
             symbolic_post_state=True,
         )
         atomic_object_state_value = _materialize_existing_effect_value_carrier(
             value,
             conditions,
             effect_summary.effects,
-            self.current_parameters_value(),
+            self.session().parameters,
         )
         if (
             atomic_object_state_value is not None
@@ -1448,7 +1442,7 @@ class EffectIntegrationService:
             value,
             conditions,
             effect_summary.effects,
-            self.current_parameters_value(),
+            self.session().parameters,
             prefer_canonical_post_state=True,
             symbolic_post_state=True,
         )
@@ -1464,18 +1458,18 @@ class EffectIntegrationService:
             canonicalized,
             conditions,
             effect_summary.effects,
-            self.current_parameters_value(),
+            self.session().parameters,
         )
         original_location = canonicalize_expr_read_location(
             value,
-            self.current_parameters_value(),
+            self.session().parameters,
         )
         if original_location is None:
             original_location = _find_unique_effect_location_for_value(
                 value,
                 conditions,
                 effect_summary.effects,
-                self.current_parameters_value(),
+                self.session().parameters,
             )
         carrier_matches_wrapped_object = (
             carrier_post_state_read is not None
@@ -1506,7 +1500,7 @@ class EffectIntegrationService:
                 for location in (
                     canonicalize_expr_read_location(
                         node,
-                        self.current_parameters_value(),
+                        self.session().parameters,
                     ),
                 )
                 if location is not None
@@ -1516,13 +1510,13 @@ class EffectIntegrationService:
                     materialized_canonicalized,
                     conditions,
                     effect_summary.effects,
-                    self.current_parameters_value(),
+                    self.session().parameters,
                 )
                 if lowered_materialized is None or not _expressions_equivalent_under_conditions(
                     lowered_materialized,
                     value,
                     conditions,
-                    self.current_parameters_value(),
+                    self.session().parameters,
                 ):
                     drops_composite_wrapper = True
         if drops_composite_wrapper:
@@ -1530,7 +1524,7 @@ class EffectIntegrationService:
                 value,
                 conditions,
                 effect_summary.effects,
-                self.current_parameters_value(),
+                self.session().parameters,
                 prefer_canonical_post_state=False,
                 preserve_composite_location_wrappers=True,
             )
@@ -1551,7 +1545,7 @@ class EffectIntegrationService:
             canonicalized,
             conditions,
             effect_summary.effects,
-            self.current_parameters_value(),
+            self.session().parameters,
         ):
             return canonicalized
         if self.return_normalization.should_replay_canonicalized_return(canonicalized, value):
@@ -1559,7 +1553,7 @@ class EffectIntegrationService:
                 canonicalized,
                 conditions,
                 effect_summary.effects,
-                self.current_parameters_value(),
+                self.session().parameters,
                 prefer_canonical_post_state=False,
             )
             if replayed is not None:
@@ -1580,7 +1574,7 @@ class EffectIntegrationService:
                     value,
                     conditions,
                     effect_summary.effects,
-                    self.current_parameters_value(),
+                    self.session().parameters,
                     preserve_composite_location_wrappers=True,
                 )
             if fallback_replayed is None or _expressions_equivalent(fallback_replayed, value):
@@ -1588,7 +1582,7 @@ class EffectIntegrationService:
                     value,
                     conditions,
                     effect_summary.effects,
-                    self.current_parameters_value(),
+                    self.session().parameters,
                     prefer_canonical_post_state=False,
                     preserve_composite_location_wrappers=True,
                 )
@@ -1618,7 +1612,7 @@ class EffectIntegrationService:
             original,
             conditions,
             effect_summary.effects,
-            self.current_parameters_value(),
+            self.session().parameters,
             symbolic_post_state=True,
         )
         if (
@@ -1631,7 +1625,7 @@ class EffectIntegrationService:
             canonicalized,
             conditions,
             effect_summary.effects,
-            self.current_parameters_value(),
+            self.session().parameters,
         )
         if lowered_roundtrip is None:
             return canonicalized
@@ -1641,7 +1635,7 @@ class EffectIntegrationService:
             lowered_roundtrip,
             original,
             conditions,
-            self.current_parameters_value(),
+            self.session().parameters,
         ):
             return canonicalized
         return lowered_roundtrip
@@ -1661,7 +1655,7 @@ class EffectIntegrationService:
             canonicalized,
             conditions,
             effect_summary.effects,
-            self.current_parameters_value(),
+            self.session().parameters,
         )
         if lowered_roundtrip is None:
             return True
@@ -1672,7 +1666,7 @@ class EffectIntegrationService:
                 original,
                 conditions,
                 effect_summary.effects,
-                self.current_parameters_value(),
+                self.session().parameters,
                 preserve_composite_location_wrappers=True,
             )
             if expected_roundtrip is not None:
@@ -1682,7 +1676,7 @@ class EffectIntegrationService:
                 original,
                 conditions,
                 effect_summary.effects,
-                self.current_parameters_value(),
+                self.session().parameters,
                 symbolic_post_state=True,
             )
             if observed_post_state is not None:
@@ -1691,7 +1685,7 @@ class EffectIntegrationService:
                     observed_post_state,
                     conditions,
                     effect_summary.effects,
-                    self.current_parameters_value(),
+                    self.session().parameters,
                 )
                 if lowered_observed_post_state is not None:
                     comparison_targets.append(lowered_observed_post_state)
@@ -1699,7 +1693,7 @@ class EffectIntegrationService:
                 original,
                 conditions,
                 effect_summary.effects,
-                self.current_parameters_value(),
+                self.session().parameters,
             )
             if observed_rewritten is not None:
                 comparison_targets.append(observed_rewritten)
@@ -1707,7 +1701,7 @@ class EffectIntegrationService:
                 original,
                 conditions,
                 effect_summary.effects,
-                self.current_parameters_value(),
+                self.session().parameters,
                 prefer_canonical_post_state=False,
                 preserve_composite_location_wrappers=True,
             )
@@ -1719,7 +1713,7 @@ class EffectIntegrationService:
                 lowered_roundtrip,
                 comparison_target,
                 conditions,
-                self.current_parameters_value(),
+                self.session().parameters,
             ):
                 return False
         if self.expression_contains_stale_effect_value_for_post_state(
@@ -1750,14 +1744,14 @@ class EffectIntegrationService:
             )
 
         for current in candidates:
-            location = canonicalize_expr_read_location(current, self.current_parameters_value())
+            location = canonicalize_expr_read_location(current, self.session().parameters)
             if location is not None:
                 promoted = promote_effect_value_match_to_post_state_read(
                     current,
                     location,
                     conditions,
                     effect_summary.effects,
-                    self.current_parameters_value(),
+                    self.session().parameters,
                     symbolic_post_state=True,
                 )
                 if promoted is not None and _expressions_equivalent(promoted, target_post_state):
@@ -1767,7 +1761,7 @@ class EffectIntegrationService:
                 target_post_state,
                 conditions,
                 effect_summary.effects,
-                self.current_parameters_value(),
+                self.session().parameters,
             ):
                 return True
         return False

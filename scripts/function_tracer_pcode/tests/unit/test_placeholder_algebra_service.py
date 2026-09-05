@@ -19,7 +19,7 @@ def test_collaborator_holds_only_its_dependencies():
     assert set(vars(service)) == {
         "condition_logic",
         "stack_protector",
-        "current_parameters",
+        "session",
         "branch_guarded_expression_is_param_minus_one",
     }
     assert service.condition_logic is analyzer._condition_logic
@@ -74,7 +74,7 @@ def test_current_parameters_supplier_reads_analyzer_state_at_call_time():
     """旧コードの getattr(self, "_current_parameters", ()) 読み取りが supplier 経由で保たれること。"""
     analyzer = _analyzer()
     analyzer._current_parameters = [{"name": "param_1", "size": 4}]
-    assert analyzer._placeholder_algebra.current_parameters() is analyzer._current_parameters
+    assert analyzer._placeholder_algebra.session().parameters is analyzer._current_parameters
     p = Expression.variable("param_1", 4)
     expected = Expression.binary_op("INT_ADD", p, Expression.constant(1, 4))
     with patch.object(analyzer._condition_logic, "expressions_equal_under_conditions_smt", return_value=False) as smt:

@@ -89,12 +89,14 @@ def test_every_delegator_forwards_to_the_collaborator():
 def test_current_parameters_supplier_reads_analyzer_state_at_call_time():
     seen = []
 
+    from types import SimpleNamespace
+
     class _Probe(ExpressionCaseService):
         def snapshot(self):
-            seen.append(list(self._current_parameters()))
+            seen.append(list(self.session().parameters))
 
     holder = {"params": [{"name": "a"}]}
-    service = _Probe(current_parameters=lambda: holder["params"])
+    service = _Probe(session=lambda: SimpleNamespace(parameters=holder["params"]))
     service.snapshot()
     holder["params"] = [{"name": "b"}]
     service.snapshot()
@@ -104,7 +106,8 @@ def test_current_parameters_supplier_reads_analyzer_state_at_call_time():
 def test_analyzer_current_parameters_are_visible_through_the_collaborator():
     analyzer = _analyzer()
     analyzer._current_parameters = [{"name": "param_1", "size": 4}]
-    assert analyzer._expression_cases._current_parameters() is analyzer._current_parameters
+    assert analyzer._expression_cases.session().parameters is analyzer._current_parameters
+    assert analyzer._expression_cases.session() is analyzer._ensure_analysis_session()
 
 
 def test_clone_expression_delegator_matches_module_function():

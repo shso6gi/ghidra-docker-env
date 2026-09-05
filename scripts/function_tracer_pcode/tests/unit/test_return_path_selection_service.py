@@ -18,7 +18,7 @@ NAMES = {
 }
 DIRECT = ("condition_logic", "block_graph", "expression_cases", "debug_reporter")
 FACADE_CALLBACKS = ("make_tracked_return_value", "return_info_effective_region_conditions")
-SUPPLIERS = ("debug_flag", "current_blocked_return_path_conditions_value")
+SUPPLIERS = ("debug_flag", "session")
 
 
 def _analyzer():
@@ -66,7 +66,7 @@ def test_suppliers_read_analyzer_state_at_call_time():
     analyzer = _analyzer()
     service = analyzer._return_paths
     analyzer._current_blocked_return_path_conditions = [("k",)]
-    assert service.current_blocked_return_path_conditions_value() is analyzer._current_blocked_return_path_conditions
+    assert service.session().blocked_return_path_conditions is analyzer._current_blocked_return_path_conditions
     analyzer.debug = True
     assert service.debug_flag() is True
 

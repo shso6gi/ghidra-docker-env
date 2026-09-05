@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     build_switch_dispatch_summaries,
     expression_contains_post_state_reads,
 )
+from scripts.function_tracer_pcode.analysis.session import AnalysisSession
 from scripts.function_tracer_pcode.analysis.returns._api import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.core import CallTargetRef
 
@@ -58,6 +59,7 @@ class BranchGuardedWhileProofService:
     def __init__(
         self,
         *,
+        session: Callable[[], "AnalysisSession"],
         return_paths: "ReturnPathSelectionService",
         condition_logic: "ConditionLogicService",
         placeholder_algebra: "PlaceholderAlgebraService",
@@ -79,8 +81,8 @@ class BranchGuardedWhileProofService:
         debug_flag: Callable[..., Any],
         enable_completed_recovery_proofs_value: Callable[..., Any],
         program_value: Callable[..., Any],
-        current_parameters_value: Callable[..., Any],
     ) -> None:
+        self.session = session
         self.return_paths = return_paths
         self.condition_logic = condition_logic
         self.placeholder_algebra = placeholder_algebra
@@ -102,7 +104,6 @@ class BranchGuardedWhileProofService:
         self.debug_flag = debug_flag
         self.enable_completed_recovery_proofs_value = enable_completed_recovery_proofs_value
         self.program_value = program_value
-        self.current_parameters_value = current_parameters_value
 
     def try_apply_branch_guarded_while_outcomes(
         self,
@@ -1204,7 +1205,7 @@ class BranchGuardedWhileProofService:
                 Expression.constant(1, size=max(1, int(getattr(param, "size", 0) or 4))),
             ),
             tuple(target_conditions or ()),
-            self.current_parameters_value() or (),
+            self.session().parameters or (),
         ):
             return True
         if getattr(expr, "operator", None) == "INT_ADD":
@@ -2551,6 +2552,7 @@ class ReturnPathSelectionService:
     def __init__(
         self,
         *,
+        session: Callable[[], "AnalysisSession"],
         condition_logic: "ConditionLogicService",
         block_graph: "BlockGraphService",
         expression_cases: "ExpressionCaseService",
@@ -2558,8 +2560,8 @@ class ReturnPathSelectionService:
         make_tracked_return_value: Callable[..., Any],
         return_info_effective_region_conditions: Callable[..., Any],
         debug_flag: Callable[..., Any],
-        current_blocked_return_path_conditions_value: Callable[..., Any],
     ) -> None:
+        self.session = session
         self.condition_logic = condition_logic
         self.block_graph = block_graph
         self.expression_cases = expression_cases
@@ -2567,7 +2569,6 @@ class ReturnPathSelectionService:
         self.make_tracked_return_value = make_tracked_return_value
         self.return_info_effective_region_conditions = return_info_effective_region_conditions
         self.debug_flag = debug_flag
-        self.current_blocked_return_path_conditions_value = current_blocked_return_path_conditions_value
 
     def check_condition_coverage(self, analysis: FunctionReturnAnalysis):
         """
@@ -2915,7 +2916,7 @@ class ReturnPathSelectionService:
         self,
         conditions: List[Condition],
     ) -> bool:
-        blocked_sets = self.current_blocked_return_path_conditions_value() or []
+        blocked_sets = self.session().blocked_return_path_conditions or []
         if not blocked_sets:
             return False
 

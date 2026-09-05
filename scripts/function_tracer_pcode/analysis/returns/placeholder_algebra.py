@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.analysis.returns._shared import ConditionNormalizer
+from scripts.function_tracer_pcode.analysis.session import AnalysisSession
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import condition_identity_key
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
@@ -24,13 +25,13 @@ class PlaceholderAlgebraService:
     def __init__(
         self,
         *,
+        session: Callable[[], "AnalysisSession"],
         condition_logic: ConditionLogicService,
-        current_parameters: Callable[[], Sequence[Any]],
         stack_protector: StackProtectorService,
         branch_guarded_expression_is_param_minus_one: Callable[..., Any],
     ) -> None:
+        self.session = session
         self.condition_logic = condition_logic
-        self.current_parameters = current_parameters
         self.stack_protector = stack_protector
         self.branch_guarded_expression_is_param_minus_one = branch_guarded_expression_is_param_minus_one
 
@@ -68,7 +69,7 @@ class PlaceholderAlgebraService:
             expr,
             expected,
             tuple(conditions or ()),
-            self.current_parameters() or (),
+            self.session().parameters or (),
         )
 
     def expression_is_placeholder_minus_one_under_conditions(
@@ -91,7 +92,7 @@ class PlaceholderAlgebraService:
             expr,
             expected,
             tuple(conditions or ()),
-            self.current_parameters() or (),
+            self.session().parameters or (),
         )
 
     def expression_is_placeholder_plus_zero_under_conditions(
@@ -151,7 +152,7 @@ class PlaceholderAlgebraService:
             current,
             Expression.constant(0, size=max(1, int(getattr(current, "size", 0) or 4))),
             tuple(conditions or ()),
-            self.current_parameters() or (),
+            self.session().parameters or (),
         )
 
     def expression_is_placeholder_minus_one_unit_condition(

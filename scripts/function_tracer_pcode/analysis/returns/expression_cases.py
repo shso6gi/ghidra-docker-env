@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     promote_observed_loads_to_post_state_reads,
     rewrite_observed_loads_from_effects,
 )
+from scripts.function_tracer_pcode.analysis.session import AnalysisSession
 
 
 def clone_expression(expr: Expression) -> Expression:
@@ -39,8 +40,12 @@ class ExpressionCaseService:
     すべて facade ``ReturnAnalyzer._contains_multiequal`` を経由する（class-level patch seam）。
     """
 
-    def __init__(self, *, current_parameters: Callable[[], Sequence[Mapping[str, Any]]]) -> None:
-        self._current_parameters = current_parameters
+    def __init__(
+        self,
+        *,
+        session: Callable[[], "AnalysisSession"],
+    ) -> None:
+        self.session = session
 
     def expression_contains_equivalent_subexpr(
         self,
@@ -181,7 +186,7 @@ class ExpressionCaseService:
                 value,
                 conditions,
                 effect_summary.effects,
-                self._current_parameters(),
+                self.session().parameters,
             )
             if observed_rewritten is not None:
                 candidates.append(observed_rewritten)
@@ -190,7 +195,7 @@ class ExpressionCaseService:
                 value,
                 conditions,
                 effect_summary.effects,
-                self._current_parameters(),
+                self.session().parameters,
                 symbolic_post_state=True,
             )
             if observed_post_state is not None:
@@ -199,7 +204,7 @@ class ExpressionCaseService:
                     observed_post_state,
                     conditions,
                     effect_summary.effects,
-                    self._current_parameters(),
+                    self.session().parameters,
                 )
                 if lowered_observed_post_state is not None:
                     comparison_targets.append(lowered_observed_post_state)
@@ -209,7 +214,7 @@ class ExpressionCaseService:
                 candidate,
                 conditions,
                 effect_summary.effects,
-                self._current_parameters(),
+                self.session().parameters,
             )
             if materialized is None or materialized is candidate:
                 continue
@@ -220,7 +225,7 @@ class ExpressionCaseService:
                     materialized,
                     comparison_target,
                     conditions,
-                    self._current_parameters(),
+                    self.session().parameters,
                 )
                 for comparison_target in comparison_targets
             ):
@@ -249,7 +254,7 @@ class ExpressionCaseService:
             for index, operand in enumerate(expr.operands):
                 operand_location = canonicalize_expr_read_location(
                     operand,
-                    self._current_parameters(),
+                    self.session().parameters,
                 )
                 if operand_location is None or operand_location != location:
                     continue

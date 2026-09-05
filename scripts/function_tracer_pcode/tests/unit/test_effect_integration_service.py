@@ -39,11 +39,7 @@ FACADE_CALLBACKS = ( "extend_active_functions",
     "make_tracked_return_value", "function_body_has_phase1_pure_return_forbidden_ops",
     "high_function_has_phase1_pure_return_forbidden_ops", "phase1_return_type_is_float", "decompile_with_broker",
 )
-SUPPLIERS = (
-    "current_parameters_value", "current_effect_summary_value", "effect_summary_cache_value",
-    "effect_summary_parameter_cache_value", "direct_call_graph_value", "direct_call_graph_complete_nodes_value",
-    "program_value", "binary_id_value", "debug_flag",
-)
+SUPPLIERS = ("session", "program_value", "binary_id_value", "debug_flag")
 
 
 def _analyzer(debug=False):
@@ -53,7 +49,7 @@ def _analyzer(debug=False):
 def test_collaborator_holds_only_its_dependencies():
     analyzer = _analyzer()
     service = analyzer._effect_integration
-    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"debug_reporter", "program_access"}
+    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"debug_reporter", "program_access", "runtime_state"}
     for attr in DIRECT:
         assert getattr(service, attr) is getattr(analyzer, "_" + attr)
     assert service.debug_reporter is analyzer._debug_reporter
@@ -112,27 +108,36 @@ def test_collaborator_never_passes_itself_where_the_facade_is_expected():
         broker.assert_called_once_with(analyzer, "callee", 60, None, source_contract_id="c", semantic_owner="subordinate")
 
 
-def test_suppliers_read_analyzer_state_at_call_time_and_share_mutable_caches():
+def test_session_supplier_and_runtime_state_dependency_replace_the_per_field_suppliers():
+    """6a-5: session は現在の child を動的に見る supplier、runtime state は analyzer 寿命の同一 owner を直接持つ。"""
     analyzer = _analyzer()
     service = analyzer._effect_integration
+    state = analyzer._runtime_state
     analyzer._current_parameters = [{"name": "param_1"}]
     analyzer._current_effect_summary = object()
     analyzer._binary_id = "B-late"
-    assert service.current_parameters_value() is analyzer._current_parameters
-    assert service.current_effect_summary_value() is analyzer._current_effect_summary
+    assert service.session() is analyzer._ensure_analysis_session()
+    assert service.session().parameters is analyzer._current_parameters
+    assert service.session().effect_summary is analyzer._current_effect_summary
     assert service.binary_id_value() == "B-late"
     assert service.program_value() is analyzer.program
-    service.effect_summary_cache_value()[("k",)] = "summary"
+    assert service.runtime_state is state
+    service.runtime_state.effect_summary_cache[("k",)] = "summary"
     assert analyzer._effect_summary_cache == {("k",): "summary"}
-    service.effect_summary_parameter_cache_value()[("k",)] = []
+    service.runtime_state.effect_summary_parameter_cache[("k",)] = []
     assert ("k",) in analyzer._effect_summary_parameter_cache
-    service.direct_call_graph_value()[("f",)] = set()
-    service.direct_call_graph_complete_nodes_value().add(("f",))
+    service.runtime_state.direct_call_graph[("f",)] = set()
+    service.runtime_state.direct_call_graph_complete_nodes.add(("f",))
     assert ("f",) in analyzer._direct_call_graph and ("f",) in analyzer._direct_call_graph_complete_nodes
+    # nested context では session() が child を返し、runtime_state は同一
+    with analyzer._analysis_context([{"name": "child"}], None):
+        assert service.session() is analyzer._ensure_analysis_session()
+        assert service.session().parameters == [{"name": "child"}]
+        assert service.runtime_state is state
+    assert service.session().parameters == [{"name": "param_1"}]
     assert service.debug_flag() is False
     analyzer.debug = True
     assert service.debug_flag() is True
-
 
 def test_unextracted_helpers_dispatch_through_the_facade_at_call_time():
     analyzer = _analyzer()
