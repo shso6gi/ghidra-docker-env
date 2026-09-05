@@ -100,6 +100,7 @@ from scripts.function_tracer_pcode.core.recurrence_contracts import RecurrenceDi
 from scripts.function_tracer_pcode.smt import SolverResult
 from scripts.function_tracer_pcode.checker.abi_retry import AbiRetryMixin
 from scripts.function_tracer_pcode.checker.branch_context import BranchCheckContext, build_branch_check_context
+from scripts.function_tracer_pcode.checker.unknown_refinement import refine_unknown_reasons
 from scripts.function_tracer_pcode.checker.strategy_execution import (
     build_prepared_dispatch_frame,
     prepare_preflight_projection,
@@ -655,25 +656,18 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                 )
                 strategy_result = legacy_outcome.strategy_result
                 call_effect_shadow_manifest = legacy_outcome.call_effect_shadow_manifest
-            comparison_identity = self._call_effect_comparison_identity(
-                analysis1,
-                analysis2,
-                call_effect_shadow_manifest,
-            )
-            strategy_result.unknown_reasons = self._attach_recurrence_proposal_blockers(
+            # 6b-3: C 段（UNKNOWN reason refinement）。順序と各段の受け渡しは段関数内で固定。
+            # mixin メソッドは call 時に self から解決する（instance patch seam 維持）。
+            refine_unknown_reasons(
                 strategy_result,
                 analysis1,
                 analysis2,
-                branch_id=branch_id,
-            )
-            strategy_result.unknown_reasons = self._specialize_call_effect_unknown_reasons(
-                list(getattr(strategy_result, "unknown_reasons", ()) or ()),
                 call_effect_shadow_manifest,
-                comparison_identity=comparison_identity,
-            )
-            strategy_result.unknown_reasons = self._attach_root_blocker_identities(
-                strategy_result.unknown_reasons,
-                comparison_identity,
+                branch_id=branch_id,
+                call_effect_comparison_identity=self._call_effect_comparison_identity,
+                attach_recurrence_proposal_blockers=self._attach_recurrence_proposal_blockers,
+                specialize_call_effect_unknown_reasons=self._specialize_call_effect_unknown_reasons,
+                attach_root_blocker_identities=self._attach_root_blocker_identities,
             )
 
             # Recurrence is a recovery proof for this already-inconclusive
