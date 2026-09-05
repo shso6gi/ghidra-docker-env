@@ -14,8 +14,7 @@ DIRECT = {
     "pcode_sites": {"coerce_optional_int"},
     "return_normalization": {"rewrite_expression_signedness"},
 }
-FACADE_CALLBACKS = (
-    "debug_print", "target_active_key", "should_synthesize_implicit_passthrough_for_call",
+FACADE_CALLBACKS = ( "target_active_key", "should_synthesize_implicit_passthrough_for_call",
     "return_site_metadata_from_info", "make_tracked_return_value", "make_return_info",
     "get_freshest_callee_parameters",
 )
@@ -29,9 +28,10 @@ def _analyzer(debug=False):
 def test_collaborator_holds_only_its_dependencies():
     analyzer = _analyzer()
     service = analyzer._parameters
-    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"set_current_parameters"}
+    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"set_current_parameters", "debug_reporter"}
     for attr in DIRECT:
         assert getattr(service, attr) is getattr(analyzer, "_" + attr)
+    assert service.debug_reporter is analyzer._debug_reporter
 
 
 def test_every_delegator_forwards_to_the_collaborator():

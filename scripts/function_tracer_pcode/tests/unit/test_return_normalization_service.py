@@ -21,8 +21,6 @@ DIRECT = {
     "pcode_sites": {"get_pcode_opcode"},
 }
 FACADE_CALLBACKS = (
-    "debug_expr_summary",
-    "debug_print",
     "count_memory_reads",
     "propagate_indirect_return_effect",
     "normalize_return_value_with_effect_summary",
@@ -44,9 +42,10 @@ def _analyzer(debug=False):
 def test_collaborator_holds_only_its_dependencies():
     analyzer = _analyzer()
     service = analyzer._return_normalization
-    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS)
+    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"debug_reporter"}
     for attr in DIRECT:
         assert getattr(service, attr) is getattr(analyzer, "_" + attr)
+    assert service.debug_reporter is analyzer._debug_reporter
 
 
 def test_every_delegator_forwards_to_the_collaborator():

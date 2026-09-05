@@ -22,7 +22,7 @@ def test_collaborator_holds_only_its_dependencies():
         "stack_protector",
         "pcode_sites",
         "return_normalization",
-        "debug_print",
+        "debug_reporter",
         "debug_flag",
     }
     assert service.condition_logic is analyzer._condition_logic
@@ -74,15 +74,13 @@ def test_condition_logic_and_stack_protector_are_direct_dependencies():
         analyzer._phi_origins.parameter_equals_condition(p, 3)
 
 
-def test_unextracted_helpers_dispatch_through_the_facade_at_call_time():
+def test_no_facade_callbacks_remain_after_lifecycle_split():
+    """lifecycle 分割により debug_print も直接依存になり、facade 経由 callback は無い。"""
     analyzer = _analyzer()
-    for facade_name, attr in (
-        ("_debug_print", "debug_print"),
-    ):
-        sentinel = object()
-        with patch.object(ReturnAnalyzer, facade_name, return_value=sentinel) as mocked:
-            assert getattr(analyzer._phi_origins, attr)(Mock(), key=1) is sentinel
-            mocked.assert_called_once()
+    service = analyzer._phi_origins
+    assert service.debug_reporter is analyzer._debug_reporter
+    lambdas = {k for k, v in vars(service).items() if getattr(v, "__name__", "") == "<lambda>"}
+    assert lambdas == {"debug_flag"}  # 残る lambda は supplier のみ
 
 
 def test_pcode_op_stable_key_is_a_direct_pcode_sites_dependency():

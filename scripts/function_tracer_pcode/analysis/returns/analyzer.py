@@ -15,6 +15,7 @@ from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo, Functi
 from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
+from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
 from scripts.function_tracer_pcode.analysis.returns.effect_integration import EffectIntegrationService
 from scripts.function_tracer_pcode.analysis.returns.parameters import ParameterService
@@ -53,7 +54,8 @@ class ReturnAnalyzer:
     def __init__(self, program, debug: bool=False, binary_id: Optional[str]=None, *, enable_completed_recovery_proofs: bool=True):
         self.program = program
         self._region_facts = RegionFacts(program)
-        self._local_values = LocalValueResolver(debug_print=self._debug_print)
+        self._debug_reporter = DebugReporter(debug_flag=lambda: self.debug)
+        self._local_values = LocalValueResolver(debug_reporter=self._debug_reporter)
         self.debug = debug
         self._binary_id = binary_id
         self.enable_completed_recovery_proofs = bool(enable_completed_recovery_proofs)
@@ -67,13 +69,11 @@ class ReturnAnalyzer:
             extract_stack_protector_memory_probe=lambda *a, **kw: self._extract_stack_protector_memory_probe(*a, **kw),
             return_site_metadata_from_info=lambda *a, **kw: self._return_site_metadata_from_info(*a, **kw),
             make_return_info=lambda *a, **kw: self._make_return_info(*a, **kw),
-            decompose_comparison_condition=lambda *a, **kw: self._decompose_comparison_condition(*a, **kw),
-            debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
+            debug_reporter=self._debug_reporter,
             debug_flag=lambda: self.debug,
         )
         self._condition_logic = ConditionLogicService(
             stack_protector=self._stack_protector,
-            decompose_comparison_condition=lambda condition: self._decompose_comparison_condition(condition),
             fold_constant_expression=lambda expr, **kw: self._fold_constant_expression(expr, **kw),
         )
         self._pcode_sites = PcodeSiteService(
@@ -89,8 +89,7 @@ class ReturnAnalyzer:
             condition_logic=self._condition_logic,
             stack_protector=self._stack_protector,
             pcode_sites=self._pcode_sites,
-            debug_expr_summary=lambda *a, **kw: self._debug_expr_summary(*a, **kw),
-            debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
+            debug_reporter=self._debug_reporter,
             count_memory_reads=lambda *a, **kw: self._count_memory_reads(*a, **kw),
             propagate_indirect_return_effect=lambda *a, **kw: self._propagate_indirect_return_effect(*a, **kw),
             normalize_return_value_with_effect_summary=lambda *a, **kw: self._normalize_return_value_with_effect_summary(*a, **kw),
@@ -108,7 +107,7 @@ class ReturnAnalyzer:
         self._parameters = ParameterService(
             pcode_sites=self._pcode_sites,
             return_normalization=self._return_normalization,
-            debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
+            debug_reporter=self._debug_reporter,
             target_active_key=lambda *a, **kw: self._target_active_key(*a, **kw),
             should_synthesize_implicit_passthrough_for_call=lambda *a, **kw: self._should_synthesize_implicit_passthrough_for_call(*a, **kw),
             return_site_metadata_from_info=lambda *a, **kw: self._return_site_metadata_from_info(*a, **kw),
@@ -139,7 +138,7 @@ class ReturnAnalyzer:
             block_writes_outcome_guard_state=lambda *a, **kw: self._block_writes_outcome_guard_state(*a, **kw),
             block_predecessor_count=lambda *a, **kw: self._block_predecessor_count(*a, **kw),
             block_has_return_op=lambda *a, **kw: self._block_has_return_op(*a, **kw),
-            debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
+            debug_reporter=self._debug_reporter,
             make_tracer=lambda *a, **kw: self._make_tracer(*a, **kw),
             program_value=lambda: self.program,
             direct_call_graph_value=lambda: self._direct_call_graph,
@@ -150,7 +149,7 @@ class ReturnAnalyzer:
             stack_protector=self._stack_protector,
             pcode_sites=self._pcode_sites,
             return_normalization=self._return_normalization,
-            debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
+            debug_reporter=self._debug_reporter,
             debug_flag=lambda: self.debug,
         )
         self._effect_integration = EffectIntegrationService(
@@ -163,14 +162,10 @@ class ReturnAnalyzer:
             parameters=self._parameters,
             region_facts=self._region_facts,
             local_values=self._local_values,
-            debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
-            debug_expr_identity_summary=lambda *a, **kw: self._debug_expr_identity_summary(*a, **kw),
-            debug_expr_summary=lambda *a, **kw: self._debug_expr_summary(*a, **kw),
+            debug_reporter=self._debug_reporter,
             extend_active_functions=lambda *a, **kw: self._extend_active_functions(*a, **kw),
             current_function_entry_address=lambda *a, **kw: self._current_function_entry_address(*a, **kw),
             program_identity=lambda *a, **kw: self._program_identity(*a, **kw),
-            function_cache_key=lambda *a, **kw: self._function_cache_key(*a, **kw),
-            collect_java_or_python_iterable=lambda *a, **kw: self._collect_java_or_python_iterable(*a, **kw),
             analysis_scope_key=lambda *a, **kw: self._analysis_scope_key(*a, **kw),
             make_tracer=lambda *a, **kw: self._make_tracer(*a, **kw),
             get_freshest_callee_parameters=lambda *a, **kw: self._get_freshest_callee_parameters(*a, **kw),
@@ -660,9 +655,12 @@ class ReturnAnalyzer:
     def _constant_int_value(self, expr):
         return self._stack_protector.constant_int_value(expr)
     _current_function_entry_address = _svc_lifecycle._impl__current_function_entry_address
-    _debug_expr_identity_summary = _svc_lifecycle._impl__debug_expr_identity_summary
-    _debug_expr_summary = _svc_lifecycle._impl__debug_expr_summary
-    _debug_print = _svc_lifecycle._impl__debug_print
+    def _debug_expr_identity_summary(self, expr, max_depth=3):
+        return self._debug_reporter.debug_expr_identity_summary(expr, max_depth)
+    def _debug_expr_summary(self, expr, max_depth=4):
+        return self._debug_reporter.debug_expr_summary(expr, max_depth)
+    def _debug_print(self, msg, indent=0):
+        return self._debug_reporter.debug_print(msg, indent)
     def _describe_pcode_site(self, pcode_op, fallback_address=None, *, identity_prefix=None):
         return self._pcode_sites.describe_pcode_site(pcode_op, fallback_address, identity_prefix=identity_prefix)
     def _edge_condition_for_successor(self, block, successor, tracer):

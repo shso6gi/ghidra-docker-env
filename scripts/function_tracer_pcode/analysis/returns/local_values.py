@@ -5,8 +5,8 @@
 the caller passes the per-function ``local_values`` / ``local_storages`` /
 ``local_memory`` tables and the tracer.  Its two pure helpers
 (``clone_expression``, ``local_memory_key``) are imported from their owning
-modules; only ``debug_print`` is injected, because it reads facade state
-(``debug``).  Internal recursion dispatches on the collaborator, not on the
+modules; only the shared ``DebugReporter`` is injected (it reads the facade
+``debug`` flag through a supplier).  Internal recursion dispatches on the collaborator, not on the
 facade.
 """
 
@@ -18,14 +18,15 @@ from scripts.function_tracer_pcode.core.expression import Expression
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.structural import StructuralKey
 from scripts.function_tracer_pcode.analysis.returns.effect_integration import local_memory_key
+from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import clone_expression
 
 
 class LocalValueResolver:
     """Evaluate local varnodes / p-code ops against per-function value tables."""
 
-    def __init__(self, *, debug_print: Callable[..., None]) -> None:
-        self._debug_print = debug_print
+    def __init__(self, *, debug_reporter: DebugReporter) -> None:
+        self.debug_reporter = debug_reporter
 
     def varnode_key(self, varnode) -> Tuple[str, int, int]:
         try:
@@ -194,7 +195,7 @@ class LocalValueResolver:
                 continue
             aliased = clone_expression(candidate_expr)
             aliased.size = target_storage.size
-            self._debug_print(
+            self.debug_reporter.debug_print(
                 "Local alias resolution: "
                 f"{getattr(candidate_storage, 'register_name', None)} -> "
                 f"{getattr(target_storage, 'register_name', None)} as {aliased.to_string()}"

@@ -16,7 +16,6 @@ def _analyzer():
 def _service(**overrides):
     kwargs = dict(
         stack_protector=Mock(spec=StackProtectorService),
-        decompose_comparison_condition=lambda condition: None,
         fold_constant_expression=lambda expr, **kw: expr,
     )
     kwargs.update(overrides)
@@ -27,7 +26,6 @@ def test_collaborator_holds_no_facade_state():
     service = _service()
     assert set(vars(service)) == {
         "stack_protector",
-        "decompose_comparison_condition",
         "fold_constant_expression",
     }
 
@@ -67,9 +65,6 @@ def test_static_helpers_are_callable_on_the_class_without_an_instance():
 def test_injected_helpers_dispatch_through_the_facade_at_call_time():
     """facade の class-level patch が collaborator 内の helper 呼び出しにも効くこと。"""
     analyzer = _analyzer()
-    with patch.object(ReturnAnalyzer, "_decompose_comparison_condition", return_value=("x",)) as mocked:
-        assert analyzer._condition_logic.decompose_comparison_condition(Mock()) == ("x",)
-        mocked.assert_called_once()
     with patch.object(ReturnAnalyzer, "_fold_constant_expression", return_value="folded") as mocked:
         fallback = Expression.constant(9, 4)
         assert analyzer._condition_logic.fold_constant_expression(Mock(), fallback_expr=fallback) == "folded"
@@ -88,6 +83,14 @@ def test_constant_int_value_is_a_direct_stack_protector_dependency():
          patch.object(ReturnAnalyzer, "_constant_int_value", side_effect=AssertionError("facade must not be used")):
         analyzer._condition_logic.condition_is_signed_nonpositive_of_param(cond, p)
         direct.assert_called_once_with(zero)
+
+
+def test_decompose_comparison_condition_is_the_pure_lifecycle_function():
+    from scripts.function_tracer_pcode.analysis.returns import condition_logic, lifecycle
+    assert condition_logic.decompose_comparison_condition is lifecycle.decompose_comparison_condition
+    p = Expression.variable("param_1", 4)
+    cond = Condition(Expression.binary_op("INT_SLESS", Expression.constant(0, 4), p), True)
+    assert lifecycle.decompose_comparison_condition(cond) == ReturnAnalyzer._decompose_comparison_condition(_analyzer(), cond)
 
 
 def test_conditions_imply_matches_facade_result():

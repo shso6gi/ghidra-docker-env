@@ -62,10 +62,7 @@ def _impl__program_transaction(self, description: str):
         end_transaction(tx_id, False)
         raise
 
-def _impl__decompose_comparison_condition(
-    self,
-    condition: Condition,
-) -> Optional[Tuple[bool, str, Expression, Expression]]:
+def decompose_comparison_condition(condition: Condition) -> Optional[Tuple[bool, str, Expression, Expression]]:
     """条件を比較式 `(negated, op, left, right)` に展開。"""
     expr = condition.expression
     negated = bool(condition.negated)
@@ -83,6 +80,10 @@ def _impl__decompose_comparison_condition(
         expr.operands[0],
         expr.operands[1],
     )
+
+
+def _impl__decompose_comparison_condition(self, condition: Condition):
+    return decompose_comparison_condition(condition)
 
 def _impl__program_userop_name(self, userop_id: Optional[int]) -> Optional[str]:
     if userop_id is None:
@@ -191,10 +192,6 @@ def _impl__find_function_by_name(self, function_name: str):
 
 
 # ---- session helpers
-def _impl__debug_print(self, msg: str, indent: int = 0):
-    if self.debug:
-        prefix = "  " * indent
-        print(f"{prefix}[ReturnAnalyzer] {msg}")
 
 
 def _impl__current_function_entry_address(self):
@@ -218,7 +215,7 @@ def _impl__current_function_entry_address(self):
     return None
 
 
-def _impl__function_entry_address(function):
+def function_entry_address(function):
     entry_getter = getattr(function, "getEntryPoint", None)
     if not callable(entry_getter):
         return None
@@ -228,34 +225,8 @@ def _impl__function_entry_address(function):
         return None
 
 
-def _impl__debug_expr_summary(self, expr: Optional[Expression], max_depth: int = 4) -> str:
-    return summarize_expression(expr, max_depth=max_depth)
-
-
-def _impl__debug_expr_identity_summary(
-    self,
-    expr: Optional[Expression],
-    max_depth: int = 3,
-) -> str:
-    if expr is None:
-        return "None"
-
-    runtime_ref = getattr(expr, "runtime_ref", None)
-    read_order_key = getattr(expr, "read_order_key", None)
-    runtime_tag = type(runtime_ref).__name__ if runtime_ref is not None else "None"
-    try:
-        structural_key = expression_key_safe(
-            expr,
-            include_memory_read_order=True,
-        )
-    except Exception:
-        structural_key = None
-    return (
-        f"{summarize_expression(expr, max_depth=max_depth)} "
-        f"[type={expr.expr_type.name}, size={expr.size}, "
-        f"read_order={read_order_key}, runtime_ref={runtime_tag}:{runtime_ref}, "
-        f"structural={structural_key}]"
-    )
+def _impl__function_entry_address(function):
+    return function_entry_address(function)
 
 
 def _impl__analysis_context(
@@ -301,7 +272,7 @@ def _impl_dispose(self):
             self._decompiler = None
 
 
-def _impl__collect_java_or_python_iterable(value) -> Tuple[Tuple[Any, ...], bool]:
+def collect_java_or_python_iterable(value) -> Tuple[Tuple[Any, ...], bool]:
     if value is None:
         return (), False
     has_next = getattr(value, "hasNext", None)
@@ -331,13 +302,21 @@ def _impl__collect_java_or_python_iterable(value) -> Tuple[Tuple[Any, ...], bool
     return tuple(items), True
 
 
-def _impl__function_cache_key(self, function) -> Optional[Tuple[Any, ...]]:
+def _impl__collect_java_or_python_iterable(value):
+    return collect_java_or_python_iterable(value)
+
+
+def function_cache_key(function) -> Optional[Tuple[Any, ...]]:
     if function is None:
         return None
     try:
         return (str(function.getEntryPoint()),)
     except Exception:
         return None
+
+
+def _impl__function_cache_key(self, function):
+    return function_cache_key(function)
 
 
 def _impl__analysis_scope_key(

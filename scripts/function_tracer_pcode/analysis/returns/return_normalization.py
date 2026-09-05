@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     locations_match,
     promote_effect_value_match_to_post_state_read,
 )
+from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
@@ -48,8 +49,7 @@ class ReturnNormalizationService:
         condition_logic: ConditionLogicService,
         stack_protector: StackProtectorService,
         pcode_sites: PcodeSiteService,
-        debug_expr_summary: Callable[..., Any],
-        debug_print: Callable[..., Any],
+        debug_reporter: DebugReporter,
         count_memory_reads: Callable[..., Any],
         propagate_indirect_return_effect: Callable[..., Any],
         normalize_return_value_with_effect_summary: Callable[..., Any],
@@ -68,8 +68,7 @@ class ReturnNormalizationService:
         self.condition_logic = condition_logic
         self.stack_protector = stack_protector
         self.pcode_sites = pcode_sites
-        self.debug_expr_summary = debug_expr_summary
-        self.debug_print = debug_print
+        self.debug_reporter = debug_reporter
         self.count_memory_reads = count_memory_reads
         self.propagate_indirect_return_effect = propagate_indirect_return_effect
         self.normalize_return_value_with_effect_summary = normalize_return_value_with_effect_summary
@@ -338,9 +337,9 @@ class ReturnNormalizationService:
             if reduced_value is not None:
                 normalized_value = reduced_value
             if self.debug_flag() and normalized_value is not value:
-                self.debug_print(
+                self.debug_reporter.debug_print(
                     "Reduced PHI-bearing expanded return under active conditions: "
-                    f"{self.debug_expr_summary(value)} -> {self.debug_expr_summary(normalized_value)}"
+                    f"{self.debug_reporter.debug_expr_summary(value)} -> {self.debug_reporter.debug_expr_summary(normalized_value)}"
                 )
 
         substituted_value = self.condition_logic.substitute_parameter_constants_under_conditions(
@@ -350,9 +349,9 @@ class ReturnNormalizationService:
         if substituted_value is not None and substituted_value is not normalized_value:
             normalized_value = substituted_value
             if self.debug_flag():
-                self.debug_print(
+                self.debug_reporter.debug_print(
                     "Specialized expanded return under exact parameter conditions: "
-                    f"{self.debug_expr_summary(value)} -> {self.debug_expr_summary(normalized_value)}"
+                    f"{self.debug_reporter.debug_expr_summary(value)} -> {self.debug_reporter.debug_expr_summary(normalized_value)}"
                 )
         assignments = self.condition_logic.parameter_constant_assignments_from_conditions(conditions)
         evaluated_value = self.condition_logic.evaluate_expression_under_parameter_assignments(
@@ -362,9 +361,9 @@ class ReturnNormalizationService:
         if evaluated_value is not None and evaluated_value is not normalized_value:
             normalized_value = evaluated_value
             if self.debug_flag():
-                self.debug_print(
+                self.debug_reporter.debug_print(
                     "Evaluated expanded return PHI selectors under exact parameter conditions: "
-                    f"{self.debug_expr_summary(value)} -> {self.debug_expr_summary(normalized_value)}"
+                    f"{self.debug_reporter.debug_expr_summary(value)} -> {self.debug_reporter.debug_expr_summary(normalized_value)}"
                 )
 
         if has_effects:
@@ -376,10 +375,10 @@ class ReturnNormalizationService:
             )
             if canonicalized is not None:
                 if self.debug_flag() and canonicalized is not normalized_value:
-                    self.debug_print(
+                    self.debug_reporter.debug_print(
                         "Normalized expanded return with definite post-state replay: "
-                        f"{self.debug_expr_summary(normalized_value)} -> "
-                        f"{self.debug_expr_summary(canonicalized)}"
+                        f"{self.debug_reporter.debug_expr_summary(normalized_value)} -> "
+                        f"{self.debug_reporter.debug_expr_summary(canonicalized)}"
                     )
                 normalized_value = canonicalized
 

@@ -10,6 +10,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSimplifier,
     _iter_expression_nodes,
 )
+from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
@@ -35,8 +36,8 @@ class PhiOriginService:
 
     facade 状態は読まない（debug フラグは supplier 経由）。条件論理は ``ConditionLogicService``、
     定数値抽出は ``StackProtectorService``、p-code op 鍵は ``PcodeSiteService``、return 値正規化は
-    ``ReturnNormalizationService`` を直接依存として受け取る。未抽出 family が所有する ``debug_print`` は
-    facade 経由で遅延 dispatch する callable として注入する。``expression_contains_phi`` は module 関数が実装。
+    ``ReturnNormalizationService``、デバッグ出力は ``DebugReporter`` を直接依存として受け取る。facade 経由の
+    callback は残っていない。``expression_contains_phi`` は module 関数が実装。
     """
 
     def __init__(
@@ -46,14 +47,14 @@ class PhiOriginService:
         stack_protector: StackProtectorService,
         pcode_sites: PcodeSiteService,
         return_normalization: "ReturnNormalizationService",
-        debug_print: Callable[..., Any],
+        debug_reporter: DebugReporter,
         debug_flag: Callable[..., Any],
     ) -> None:
         self.condition_logic = condition_logic
         self.stack_protector = stack_protector
         self.pcode_sites = pcode_sites
         self.return_normalization = return_normalization
-        self.debug_print = debug_print
+        self.debug_reporter = debug_reporter
         self.debug_flag = debug_flag
 
     def phi_circular_origin_stable_keys(self, expr: Optional[Expression]) -> Set[Tuple[Any, ...]]:
@@ -205,7 +206,7 @@ class PhiOriginService:
                 continue
             candidates.append((finite_conditions, finite_value))
         if self.debug_flag() and (skipped_phi or skipped_none):
-            self.debug_print(
+            self.debug_reporter.debug_print(
                 "Finite PHI fallback split retained "
                 f"{len(candidates)}/{len(finite_condition_sets)} cases "
                 f"(skipped_phi={skipped_phi}, skipped_none={skipped_none})"
