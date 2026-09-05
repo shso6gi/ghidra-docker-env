@@ -20,7 +20,6 @@ def test_collaborator_holds_only_its_dependencies():
         "condition_logic",
         "stack_protector",
         "current_parameters",
-        "condition_identity_key",
         "branch_guarded_expression_is_param_minus_one",
     }
     assert service.condition_logic is analyzer._condition_logic
@@ -66,9 +65,6 @@ def test_condition_logic_is_a_direct_dependency_not_a_facade_callback():
 
 def test_unextracted_helpers_dispatch_through_the_facade_at_call_time():
     analyzer = _analyzer()
-    with patch.object(ReturnAnalyzer, "_condition_identity_key", return_value=("k",)) as mocked:
-        assert analyzer._placeholder_algebra.condition_identity_key(Mock()) == ("k",)
-        mocked.assert_called_once()
     with patch.object(ReturnAnalyzer, "_branch_guarded_expression_is_param_minus_one", return_value=True) as mocked:
         assert analyzer._placeholder_algebra.branch_guarded_expression_is_param_minus_one(Mock(), Mock(), Mock()) is True
         mocked.assert_called_once()
@@ -94,6 +90,18 @@ def test_constant_int_value_is_a_direct_stack_protector_dependency():
          patch.object(ReturnAnalyzer, "_constant_int_value", side_effect=AssertionError("facade must not be used")):
         assert analyzer._placeholder_algebra.expression_is_placeholder_minus_one(expr, p) is True
         direct.assert_called()
+
+
+def test_condition_identity_key_is_the_pure_module_function_from_divergence_proofs():
+    """#68 の facade callback condition_identity_key を純関数 import に置き換えたこと。"""
+    from scripts.function_tracer_pcode.analysis.returns import divergence_proofs, placeholder_algebra
+    analyzer = _analyzer()
+    assert not hasattr(analyzer._placeholder_algebra, "condition_identity_key")
+    assert placeholder_algebra.condition_identity_key is divergence_proofs.condition_identity_key
+    p = Expression.variable("param_1", 4)
+    cond = Condition(Expression.binary_op("INT_SLESS", Expression.constant(0, 4), p), True)
+    assert divergence_proofs.condition_identity_key(cond) == ReturnAnalyzer._condition_identity_key(cond)
+    assert divergence_proofs.condition_identity_key(cond)[0] == "condition"
 
 
 def test_static_helper_is_callable_on_the_class_without_an_instance():
