@@ -2628,7 +2628,7 @@ def test_analyzer_rejects_whileif_affine_summary_with_conflicting_same_site_arti
 def test_analyzer_synthesizes_whileif_partition_from_phi_free_fallback_provenance():
     analyzer = ReturnAnalyzer(object())
     fixture = _branch_guarded_structural_phi_fixture()
-    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analyzer._program_access.make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)  # facade delegator も collaborator も同じ属性を引く
     analysis = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi)
 
     analyzer._apply_outcome_partition_summaries(
@@ -2653,7 +2653,7 @@ def test_analyzer_synthesizes_whileif_partition_from_phi_free_fallback_provenanc
 def test_analyzer_rejects_phi_free_fallback_with_state_countdown_only_provenance():
     analyzer = ReturnAnalyzer(object())
     fixture = _branch_guarded_structural_phi_fixture()
-    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analyzer._program_access.make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)  # facade delegator も collaborator も同じ属性を引く
     analysis = _branch_guarded_phi_free_fallback_analysis(
         analyzer,
         fixture.state_phi,
@@ -2762,7 +2762,7 @@ def test_outcome_partition_equivalence_covers_phi_free_fallback_partitions():
     strategy = _strategy()
     analyzer = ReturnAnalyzer(object())
     fixture = _branch_guarded_structural_phi_fixture()
-    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analyzer._program_access.make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)  # facade delegator も collaborator も同じ属性を引く
     left = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi)
     right = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi)
     analyzer._apply_outcome_partition_summaries(None, fixture.high_function, left)
@@ -2799,7 +2799,7 @@ def test_analyzer_rejects_phi_free_fallback_with_stale_origin_key():
         time=77,
         order=0,
     )
-    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analyzer._program_access.make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)  # facade delegator も collaborator も同じ属性を引く
     analysis = _branch_guarded_phi_free_fallback_analysis(analyzer, stale_phi)
 
     analyzer._apply_outcome_partition_summaries(None, fixture.high_function, analysis)
@@ -2811,7 +2811,7 @@ def test_analyzer_rejects_phi_free_fallback_with_stale_origin_key():
 def test_analyzer_rejects_phi_free_fallback_when_base_anchor_value_wrong():
     analyzer = ReturnAnalyzer(object())
     fixture = _branch_guarded_structural_phi_fixture()
-    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analyzer._program_access.make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)  # facade delegator も collaborator も同じ属性を引く
     analysis = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi, base_value=2)
 
     analyzer._apply_outcome_partition_summaries(None, fixture.high_function, analysis)
@@ -2823,7 +2823,7 @@ def test_analyzer_rejects_phi_free_fallback_when_base_anchor_value_wrong():
 def test_analyzer_rejects_phi_free_fallback_when_base_anchor_guard_wrong():
     analyzer = ReturnAnalyzer(object())
     fixture = _branch_guarded_structural_phi_fixture()
-    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analyzer._program_access.make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)  # facade delegator も collaborator も同じ属性を引く
     analysis = _branch_guarded_phi_free_fallback_analysis(
         analyzer,
         fixture.acc_phi,
@@ -2840,7 +2840,7 @@ def test_analyzer_rejects_phi_free_fallback_when_base_anchor_guard_wrong():
 def test_analyzer_rejects_phi_free_fallback_when_state_decrement_missing():
     analyzer = ReturnAnalyzer(object())
     fixture = _branch_guarded_structural_phi_fixture(state_decrements=False)
-    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analyzer._program_access.make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)  # facade delegator も collaborator も同じ属性を引く
     analysis = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi)
 
     analyzer._apply_outcome_partition_summaries(None, fixture.high_function, analysis)
@@ -2852,7 +2852,7 @@ def test_analyzer_rejects_phi_free_fallback_when_state_decrement_missing():
 def test_analyzer_rejects_phi_free_fallback_when_nonprogress_edge_missing():
     analyzer = ReturnAnalyzer(object())
     fixture = _branch_guarded_structural_phi_fixture(include_nonprogress_edge=False)
-    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analyzer._program_access.make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)  # facade delegator も collaborator も同じ属性を引く
     analysis = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi)
 
     analyzer._apply_outcome_partition_summaries(None, fixture.high_function, analysis)
@@ -2863,7 +2863,7 @@ def test_analyzer_rejects_phi_free_fallback_when_nonprogress_edge_missing():
 def test_analyzer_rejects_phi_free_fallback_with_forbidden_effect_op():
     analyzer = ReturnAnalyzer(object())
     fixture = _branch_guarded_structural_phi_fixture(forbidden_op="STORE")
-    analyzer._make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)
+    analyzer._program_access.make_tracer = lambda _high_function: _FakeStructuralTracer(fixture.trace_map)  # facade delegator も collaborator も同じ属性を引く
     analysis = _branch_guarded_phi_free_fallback_analysis(analyzer, fixture.acc_phi)
 
     analyzer._apply_outcome_partition_summaries(None, fixture.high_function, analysis)

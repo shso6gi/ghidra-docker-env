@@ -24,8 +24,17 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
 )
 from scripts.function_tracer_pcode.analysis.returns._api import StructuralRecurrenceSummarizer
 
-if TYPE_CHECKING:  # pcode_sites → lifecycle → control_recovery の循環回避
+if TYPE_CHECKING:  # 他 collaborator は本 module（BlockGraphService / 純関数）を import するため、型注釈の import は循環回避のため遅延
+    from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
+    from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
+    from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import DivergenceProofService
+    from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
+    from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService
+    from scripts.function_tracer_pcode.analysis.returns.parameters import ParameterService
     from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
+    from scripts.function_tracer_pcode.analysis.returns.phi_origins import PhiOriginService
+    from scripts.function_tracer_pcode.analysis.returns.placeholder_algebra import PlaceholderAlgebraService
+    from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 from scripts.function_tracer_pcode.core import CallTargetRef
 
 
@@ -88,857 +97,911 @@ def _impl__phase1_direct_branch_escapes_function_body(self, instruction, body) -
     return not self._phase1_body_contains_address(body, target)
 
 
-def _current_cfg_applicability_surface(self, high_function) -> Tuple[Tuple[Any, ...], Tuple[Tuple[Any, Any], ...]]:
-    blocks = tuple(self._iter_high_basic_blocks(high_function))
-    block_keys = tuple(sorted((self._block_debug_key(block) for block in blocks), key=repr))
-    edge_keys = tuple(sorted((
-        (self._block_debug_key(block), self._block_debug_key(successor))
-        for block in blocks
-        for successor in self._block_successors(block)
-    ), key=repr))
-    return block_keys, edge_keys
+class BranchGuardedWhileProofService:
+    """ReturnAnalyzer から切り出した branch-guarded while / structural nonprogress 証明（control_recovery family 2 群目）の collaborator。
 
+    facade 状態は debug / enable_completed_recovery_proofs / program / 現在パラメータを supplier で読む。
+    条件論理・placeholder 代数・発散証明・block グラフ・PHI 起源・式ケース・定数抽出・パラメータ・p-code site・
+    program アクセス・デバッグ出力は各 collaborator を直接依存として受け取る。未抽出 family（return_extraction）
+    が所有する helper と、control_recovery に残る ``high_function_has_forbidden_control_outcome_ops`` は
+    facade 経由で遅延 dispatch する callable として注入する。
+    """
 
-def _impl__try_apply_branch_guarded_while_outcomes(
-    self,
-    high_function,
-    analysis: FunctionReturnAnalysis,
-) -> bool:
-    if len(getattr(analysis, "parameters", []) or []) != 2:
-        self._debug_print("Outcome branch-guarded while summary declined: expected two parameters")
-        return False
-    if getattr(analysis, "deferred_calls", None):
-        self._debug_print("Outcome branch-guarded while summary declined: deferred calls present")
-        return False
-    if self._high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
-        self._debug_print("Outcome branch-guarded while summary declined: forbidden control/effect op present")
-        return False
-    if self._high_function_cbranch_count(high_function) < 2:
-        self._debug_print("Outcome branch-guarded while summary declined: expected two control guards")
-        return False
-    if not any(
-        self._expression_contains_phi_circular(ret.value)
-        or self._return_info_candidate_phi_origin_keys(ret)
-        for ret in analysis.returns or ()
-    ):
-        self._debug_print("Outcome branch-guarded while summary declined: no phi_circular return or candidate provenance")
-        return False
+    def __init__(
+        self,
+        *,
+        condition_logic: "ConditionLogicService",
+        placeholder_algebra: "PlaceholderAlgebraService",
+        divergence_proofs: "DivergenceProofService",
+        block_graph: "BlockGraphService",
+        stack_protector: "StackProtectorService",
+        debug_reporter: "DebugReporter",
+        expression_cases: "ExpressionCaseService",
+        phi_origins: "PhiOriginService",
+        program_access: "ProgramAccessService",
+        parameters: "ParameterService",
+        pcode_sites: "PcodeSiteService",
+        acc_phi_flows_to_return_origin_phi: Callable[..., Any],
+        return_conditions_cover_region: Callable[..., Any],
+        return_info_candidate_phi_origin_keys: Callable[..., Any],
+        return_info_return_phi_origin_keys: Callable[..., Any],
+        return_info_summary_identity_key: Callable[..., Any],
+        return_site_key: Callable[..., Any],
+        high_function_has_forbidden_control_outcome_ops: Callable[..., Any],
+        debug_flag: Callable[..., Any],
+        enable_completed_recovery_proofs_value: Callable[..., Any],
+        program_value: Callable[..., Any],
+        current_parameters_value: Callable[..., Any],
+    ) -> None:
+        self.condition_logic = condition_logic
+        self.placeholder_algebra = placeholder_algebra
+        self.divergence_proofs = divergence_proofs
+        self.block_graph = block_graph
+        self.stack_protector = stack_protector
+        self.debug_reporter = debug_reporter
+        self.expression_cases = expression_cases
+        self.phi_origins = phi_origins
+        self.program_access = program_access
+        self.parameters = parameters
+        self.pcode_sites = pcode_sites
+        self.acc_phi_flows_to_return_origin_phi = acc_phi_flows_to_return_origin_phi
+        self.return_conditions_cover_region = return_conditions_cover_region
+        self.return_info_candidate_phi_origin_keys = return_info_candidate_phi_origin_keys
+        self.return_info_return_phi_origin_keys = return_info_return_phi_origin_keys
+        self.return_info_summary_identity_key = return_info_summary_identity_key
+        self.return_site_key = return_site_key
+        self.high_function_has_forbidden_control_outcome_ops = high_function_has_forbidden_control_outcome_ops
+        self.debug_flag = debug_flag
+        self.enable_completed_recovery_proofs_value = enable_completed_recovery_proofs_value
+        self.program_value = program_value
+        self.current_parameters_value = current_parameters_value
 
-    role_params = self._infer_branch_guarded_while_role_parameters(analysis)
-    if role_params is None:
-        self._debug_print("Outcome branch-guarded while summary declined: role parameters unavailable")
-        return False
-    t_param, c_param = role_params
-    if t_param is None or c_param is None:
-        self._debug_print("Outcome branch-guarded while summary declined: parameter expression unavailable")
-        return False
-    t_positive = self._signed_positive_condition(t_param)
-    c_positive = self._signed_positive_condition(c_param)
-    c_nonpositive = c_positive.negate()
-    t_nonpositive = t_positive.negate()
-
-    zero_ret, initial_c_ret = self._find_branch_guarded_while_return_partition(
-        analysis,
-        high_function=high_function,
-        c_param=c_param,
-        c_nonpositive=c_nonpositive,
-        c_positive=c_positive,
-        t_positive=t_positive,
-    )
-    if zero_ret is None or initial_c_ret is None:
-        self._debug_print("Outcome branch-guarded while summary declined: return partition/value proof unavailable")
-        return False
-    divergence_proof = self._prove_branch_guarded_while_nonprogress_must_diverge(
+    def try_apply_branch_guarded_while_outcomes(
+        self,
         high_function,
-        invariant_conditions=(c_positive, t_nonpositive),
-    )
-    if divergence_proof is None:
-        divergence_proof = self._prove_branch_guarded_structural_nonprogress_must_diverge(
-            high_function,
-            analysis=analysis,
-            initial_c_ret=initial_c_ret,
-            invariant_conditions=(c_positive, t_nonpositive),
-        )
-    analysis.returns = [zero_ret, initial_c_ret]
-    analysis.return_outcomes = (
-        ReturnOutcome(guard=tuple(zero_ret.conditions), value=zero_ret.value, provenance={"source": "branch_guarded_affine_recurrence"}, return_info=zero_ret),
-        ReturnOutcome(guard=tuple(initial_c_ret.conditions), value=initial_c_ret.value, provenance={"source": "branch_guarded_affine_recurrence"}, return_info=initial_c_ret),
-    )
-    if divergence_proof is not None:
-        analysis.divergence_outcomes = (
-            DivergenceOutcome(
-                guard=(c_positive, t_nonpositive),
-                proof=divergence_proof,
-            ),
-        )
-        analysis.unknown_outcomes = ()
-        if "outcome_partition_proved_branch_guarded_while_divergence" not in analysis.analysis_notes:
-            analysis.analysis_notes.append("outcome_partition_proved_branch_guarded_while_divergence")
-    else:
-        analysis.divergence_outcomes = ()
-        analysis.unknown_outcomes = (
-            UnknownOutcome(
-                guard=(c_positive, t_nonpositive),
-                reason="branch_guarded_recurrence_proof_missing",
-                evidence={
-                    "candidate_rule": "branch_guarded_loop_invariant_nonprogress",
-                    "state_reference": "inferred_state_count_parameter",
-                    "state_parameter": getattr(c_param, "name", None) or getattr(c_param, "value", None),
-                    "forbidden_ops_absent": True,
-                    "loop_has_cfg_cycle": self._high_function_has_cfg_cycle(high_function),
-                    "has_control_guards": True,
-                    "missing_proof": "scc_exit_impossibility_guard_preservation_and_affine_transition",
-                },
-            ),
-        )
-        if "outcome_partition_unknown_branch_guarded_while" not in analysis.analysis_notes:
-            analysis.analysis_notes.append("outcome_partition_unknown_branch_guarded_while")
-    return True
-
-
-def _impl__infer_branch_guarded_while_role_parameters(
-    self,
-    analysis: FunctionReturnAnalysis,
-) -> Optional[Tuple[Expression, Expression]]:
-    params = tuple(getattr(analysis, "parameters", ()) or ())
-    candidate_params = []
-    for index in range(len(params)):
-        param = self._parameter_expression(analysis, index)
-        if param is not None:
-            candidate_params.append(param)
-    if len(candidate_params) < 2:
-        return None
-
-    returns = tuple(getattr(analysis, "returns", ()) or ())
-    for c_param in candidate_params:
-        c_positive = self._signed_positive_condition(c_param)
-        c_nonpositive = c_positive.negate()
-        zero_seed = None
-        for ret in returns:
-            if self._constant_int_value(getattr(ret, "value", None)) != 0:
-                continue
-            conditions = tuple(getattr(ret, "conditions", ()) or ())
-            if self._conditions_equivalent(conditions, [c_nonpositive]) or (
-                len(conditions) == 1
-                and self._condition_is_signed_nonpositive_of_param(conditions[0], c_param)
-            ):
-                zero_seed = ret
-                break
-        if zero_seed is None:
-            continue
-        for t_param in candidate_params:
-            if self._expressions_same_key(t_param, c_param):
-                continue
-            t_positive = self._signed_positive_condition(t_param)
-            target_conditions = (c_positive, t_positive)
-            if any(
-                self._conditions_overlap(tuple(getattr(ret, "conditions", ()) or ()), target_conditions)
-                and (
-                    self._expression_is_same_parameter_ignoring_subpiece(getattr(ret, "value", None), c_param)
-                    or self._expressions_equal_under_conditions_smt(
-                        getattr(ret, "value", None),
-                        c_param,
-                        tuple(target_conditions) + tuple(getattr(ret, "conditions", ()) or ()),
-                        getattr(analysis, "parameters", ()) or (),
-                    )
-                    or self._branch_guarded_affine_singleton_base_anchor_matches(
-                        getattr(ret, "value", None),
-                        tuple(getattr(ret, "conditions", ()) or ()),
-                        c_param,
-                        target_conditions,
-                    )
-                    or self._branch_guarded_affine_phi_step(getattr(ret, "value", None)) is not None
-                    or self._return_info_candidate_phi_origin_keys(ret)
-                )
-                for ret in returns
-            ):
-                return t_param, c_param
-    return None
-
-
-def _impl__prove_branch_guarded_structural_nonprogress_must_diverge(
-    self,
-    high_function,
-    *,
-    analysis: Optional[FunctionReturnAnalysis] = None,
-    initial_c_ret: ReturnInfo,
-    invariant_conditions: Sequence[Condition],
-) -> Optional[Dict[str, Any]]:
-    if high_function is None:
-        return None
-    structural_proof = self._branch_guarded_structural_proof_from_return(initial_c_ret)
-    if structural_proof is None:
-        return None
-    if not self._validate_branch_guarded_structural_proof(
-        high_function,
-        structural_proof=structural_proof,
-        analysis=analysis,
-        initial_c_ret=initial_c_ret,
-        invariant_conditions=invariant_conditions,
-    ):
-        return None
-    nonprogress_backedges = self._tuple_field_from_structural_proof(
-        structural_proof,
-        "nonprogress_backedges",
-    )
-    conditional_progress_backedges = self._tuple_field_from_structural_proof(
-        structural_proof,
-        "conditional_progress_backedges",
-    )
-    conditional_progress_guard_keys = self._conditional_progress_guard_keys_from_structural_proof(
-        structural_proof,
-    )
-    conditional_progress_guards_blocked = self._conditional_progress_guards_contradict_invariant(
-        conditional_progress_guard_keys,
-        target_conditions=tuple(getattr(initial_c_ret, "conditions", ()) or ()),
-        invariant_conditions=tuple(invariant_conditions or ()),
-    )
-    if not nonprogress_backedges and not (conditional_progress_backedges and conditional_progress_guards_blocked):
-        return None
-    if not self._high_function_has_cfg_cycle(high_function):
-        return None
-    if self._high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
-        return None
-    return {
-        "proof_kind": "branch_guarded_structural_nonprogress_must_diverge",
-        "candidate_rule": "branch_guarded_loop_invariant_nonprogress",
-        "invariant": [condition.to_string() for condition in invariant_conditions or ()],
-        "structural_recurrence_proof": structural_proof,
-        "nonprogress_backedges": tuple(nonprogress_backedges),
-        "conditional_progress_backedges": tuple(conditional_progress_backedges),
-        "conditional_progress_guard_keys": tuple(sorted(conditional_progress_guard_keys.items(), key=repr)),
-        "conditional_progress_guard_negated_by_invariant": bool(conditional_progress_guards_blocked),
-        "state_preservation": "state_phi_nonprogress_backedge_identity",
-        "accumulator_preservation": "accumulator_phi_nonprogress_backedge_identity",
-        "loop_has_cfg_cycle": True,
-        "forbidden_control_effect_ops_absent": True,
-        "cfg_applicability_surface": _current_cfg_applicability_surface(self, high_function),
-    }
-
-
-def _impl__branch_guarded_structural_proof_from_return(
-    self,
-    ret: ReturnInfo,
-) -> Optional[Tuple[Any, ...]]:
-    source_key = getattr(ret, "summary_candidate_source_key", None)
-    return self._find_branch_guarded_structural_proof_tuple(source_key)
-
-
-def _impl__find_branch_guarded_structural_proof_tuple(
-    self,
-    value,
-) -> Optional[Tuple[Any, ...]]:
-    if not isinstance(value, tuple):
-        return None
-    if value and value[0] == "branch_guarded_affine_unit_count_structural_proof":
-        return value
-    for item in value:
-        found = self._find_branch_guarded_structural_proof_tuple(item)
-        if found is not None:
-            return found
-    return None
-
-
-def _impl__validate_branch_guarded_structural_proof(
-    self,
-    high_function,
-    *,
-    structural_proof: Tuple[Any, ...],
-    analysis: Optional[FunctionReturnAnalysis],
-    initial_c_ret: ReturnInfo,
-    invariant_conditions: Sequence[Condition],
-) -> bool:
-    if high_function is None:
-        return False
-    if self._field_value_from_structural_proof(structural_proof, "schema_version") != 1:
-        return False
-    if analysis is not None and self._field_value_from_structural_proof(
-        structural_proof,
-        "function",
-    ) != getattr(analysis, "function_name", None):
-        return False
-    proof_target_keys = self._tuple_field_from_structural_proof(
-        structural_proof,
-        "target_guard_keys",
-    )
-    current_target_keys = tuple(
-        sorted(
-            (self._condition_identity_key(condition) for condition in tuple(getattr(initial_c_ret, "conditions", ()) or ())),
-            key=repr,
-        )
-    )
-    if proof_target_keys != current_target_keys:
-        return False
-    acc_phi_key = self._field_value_from_structural_proof(structural_proof, "acc_phi")
-    state_phi_key = self._field_value_from_structural_proof(structural_proof, "state_phi")
-    if not isinstance(acc_phi_key, tuple) or not isinstance(state_phi_key, tuple):
-        return False
-    try:
-        tracer = self._make_tracer(high_function)
-    except Exception:
-        return False
-    summarizer = StructuralRecurrenceSummarizer(
-        tracer,
-        debug=False,
-        enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
-    )
-    acc_phi = None
-    state_phi = None
-    header_block = None
-    for block in summarizer._iter_basic_blocks(high_function):
-        for op in summarizer._iter_block_ops(block):
-            if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
-                continue
-            op_key = self._pcode_op_stable_key(op)
-            if op_key == acc_phi_key:
-                acc_phi = op
-                header_block = block
-            if op_key == state_phi_key:
-                state_phi = op
-                header_block = block if header_block is None else header_block
-    if acc_phi is None or state_phi is None or header_block is None:
-        return False
-    acc_parent = getattr(acc_phi, "getParent", lambda: None)()
-    state_parent = getattr(state_phi, "getParent", lambda: None)()
-    if acc_parent is None or state_parent is None:
-        return False
-    if self._block_debug_key(acc_parent) != self._block_debug_key(state_parent):
-        return False
-    header_block = acc_parent
-    acc_indices = summarizer._state_loop_phi_indices(header_block, acc_phi)
-    state_indices = summarizer._state_loop_phi_indices(header_block, state_phi)
-    if acc_indices is None or state_indices is None:
-        return False
-    _acc_init_index, acc_backedge_indices = acc_indices
-    _state_init_index, state_backedge_indices = state_indices
-    if tuple(int(index) for index in acc_backedge_indices) != tuple(int(index) for index in state_backedge_indices):
-        return False
-    progress_backedges = set(int(index) for index in self._tuple_field_from_structural_proof(structural_proof, "progress_backedges"))
-    nonprogress_backedges = set(int(index) for index in self._tuple_field_from_structural_proof(structural_proof, "nonprogress_backedges"))
-    conditional_progress_backedges = set(int(index) for index in self._tuple_field_from_structural_proof(structural_proof, "conditional_progress_backedges"))
-    expected_conditional_guard_keys = self._conditional_progress_guard_keys_from_structural_proof(
-        structural_proof,
-    )
-    proof_backedges = progress_backedges | nonprogress_backedges
-    if not progress_backedges:
-        return False
-    if conditional_progress_backedges:
-        proof_backedges |= conditional_progress_backedges
-    if proof_backedges != set(int(index) for index in acc_backedge_indices):
-        return False
-    target_conditions = tuple(getattr(initial_c_ret, "conditions", ()) or ())
-    if conditional_progress_backedges and not expected_conditional_guard_keys:
-        return False
-    if conditional_progress_backedges and set(expected_conditional_guard_keys) != conditional_progress_backedges:
-        return False
-    if conditional_progress_backedges and not self._conditional_progress_guards_contradict_invariant(
-        expected_conditional_guard_keys,
-        target_conditions=target_conditions,
-        invariant_conditions=tuple(invariant_conditions or ()),
-    ):
-        return False
-    acc_output = getattr(acc_phi, "getOutput", lambda: None)()
-    state_output = getattr(state_phi, "getOutput", lambda: None)()
-    if acc_output is None or state_output is None:
-        return False
-    acc_placeholder = Expression.variable("__branch_guarded_acc", size=max(1, int(getattr(acc_output, "getSize", lambda: 4)() or 4)))
-    state_placeholder = Expression.variable("__branch_guarded_state", size=max(1, int(getattr(state_output, "getSize", lambda: 4)() or 4)))
-    for backedge_index in acc_backedge_indices:
-        index = int(backedge_index)
-        acc_expr = summarizer._build_pcode_expression(
-            acc_phi.getInput(index),
-            placeholders={acc_output: acc_placeholder},
-        )
-        state_expr = summarizer._build_pcode_expression(
-            state_phi.getInput(index),
-            placeholders={state_output: state_placeholder},
-        )
-        if index in conditional_progress_backedges:
-            acc_guard_key = self._placeholder_plus_unit_condition_guard_key(
-                acc_expr,
-                acc_placeholder,
-                target_conditions,
-            )
-            state_guard_key = self._placeholder_minus_one_unit_condition_guard_key(
-                state_expr,
-                state_placeholder,
-                target_conditions,
-            )
-            if acc_guard_key is None or state_guard_key is None:
-                return False
-            if acc_guard_key != state_guard_key:
-                return False
-            if expected_conditional_guard_keys.get(index) != acc_guard_key:
-                return False
-            if index in nonprogress_backedges:
-                if not (
-                    self._expression_is_placeholder_plus_zero_under_conditions(
-                        acc_expr,
-                        acc_placeholder,
-                        invariant_conditions,
-                    )
-                    or self._expressions_equal_under_conditions_smt(
-                        acc_expr,
-                        acc_placeholder,
-                        tuple(invariant_conditions or ()),
-                        getattr(analysis, "parameters", ()) or (),
-                    )
-                ):
-                    return False
-                if not (
-                    self._expression_is_placeholder_plus_zero_under_conditions(
-                        state_expr,
-                        state_placeholder,
-                        invariant_conditions,
-                    )
-                    or self._expressions_equal_under_conditions_smt(
-                        state_expr,
-                        state_placeholder,
-                        tuple(invariant_conditions or ()),
-                        getattr(analysis, "parameters", ()) or (),
-                    )
-                ):
-                    return False
-            continue
-        if index in nonprogress_backedges:
-            if not (
-                self._expressions_same_key(acc_expr, acc_placeholder)
-                or self._expression_is_placeholder_plus_zero_under_conditions(
-                    acc_expr,
-                    acc_placeholder,
-                    invariant_conditions,
-                )
-                or self._expressions_equal_under_conditions_smt(
-                    acc_expr,
-                    acc_placeholder,
-                    tuple(invariant_conditions or ()),
-                    getattr(analysis, "parameters", ()) or (),
-                )
-            ):
-                return False
-            if not (
-                self._expressions_same_key(state_expr, state_placeholder)
-                or self._expression_is_placeholder_plus_zero_under_conditions(
-                    state_expr,
-                    state_placeholder,
-                    invariant_conditions,
-                )
-                or self._expressions_equal_under_conditions_smt(
-                    state_expr,
-                    state_placeholder,
-                    tuple(invariant_conditions or ()),
-                    getattr(analysis, "parameters", ()) or (),
-                )
-            ):
-                return False
-            continue
-        if index in progress_backedges:
-            if not self._expression_is_placeholder_plus_one_under_conditions(
-                acc_expr,
-                acc_placeholder,
-                target_conditions,
-            ):
-                return False
-            if not self._expression_is_placeholder_minus_one_under_conditions(
-                state_expr,
-                state_placeholder,
-                target_conditions,
-            ):
-                return False
-            continue
-        return False
-    return self._state_phi_feeds_positive_loop_guard(
-        high_function,
-        summarizer=summarizer,
-        header_block=header_block,
-        backedge_indices=tuple(int(index) for index in state_backedge_indices),
-        state_phi=state_phi,
-        state_placeholder=state_placeholder,
-        target_conditions=target_conditions,
-        allow_latch_progress_guard=bool(conditional_progress_backedges),
-    )
-
-
-def _impl__find_branch_guarded_while_return_partition(
-    self,
-    analysis: FunctionReturnAnalysis,
-    *,
-    high_function,
-    c_param: Expression,
-    c_nonpositive: Condition,
-    c_positive: Condition,
-    t_positive: Condition,
-) -> Tuple[Optional[ReturnInfo], Optional[ReturnInfo]]:
-    zero_ret = None
-    initial_c_ret = None
-    for ret in getattr(analysis, "returns", []) or ():
-        conditions = tuple(getattr(ret, "conditions", ()) or ())
-        if zero_ret is None and self._constant_int_value(getattr(ret, "value", None)) == 0:
-            if self._conditions_equivalent(conditions, [c_nonpositive]) or (
-                len(conditions) == 1
-                and self._condition_is_signed_nonpositive_of_param(conditions[0], c_param)
-            ):
-                zero_ret = ret
-                continue
-        if initial_c_ret is None and self._expression_is_same_parameter_ignoring_subpiece(
-            getattr(ret, "value", None),
-            c_param,
+        analysis: FunctionReturnAnalysis,
+    ) -> bool:
+        if len(getattr(analysis, "parameters", []) or []) != 2:
+            self.debug_reporter.debug_print("Outcome branch-guarded while summary declined: expected two parameters")
+            return False
+        if getattr(analysis, "deferred_calls", None):
+            self.debug_reporter.debug_print("Outcome branch-guarded while summary declined: deferred calls present")
+            return False
+        if self.high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
+            self.debug_reporter.debug_print("Outcome branch-guarded while summary declined: forbidden control/effect op present")
+            return False
+        if self.block_graph.high_function_cbranch_count(high_function) < 2:
+            self.debug_reporter.debug_print("Outcome branch-guarded while summary declined: expected two control guards")
+            return False
+        if not any(
+            self.phi_origins.expression_contains_phi_circular(ret.value)
+            or self.return_info_candidate_phi_origin_keys(ret)
+            for ret in analysis.returns or ()
         ):
-            if self._conditions_equivalent(conditions, [c_positive, t_positive]):
-                initial_c_ret = ret
-    if zero_ret is not None and initial_c_ret is None:
-        initial_c_ret = self._synthesize_branch_guarded_affine_initial_count_return(
-            high_function,
+            self.debug_reporter.debug_print("Outcome branch-guarded while summary declined: no phi_circular return or candidate provenance")
+            return False
+
+        role_params = self.infer_branch_guarded_while_role_parameters(analysis)
+        if role_params is None:
+            self.debug_reporter.debug_print("Outcome branch-guarded while summary declined: role parameters unavailable")
+            return False
+        t_param, c_param = role_params
+        if t_param is None or c_param is None:
+            self.debug_reporter.debug_print("Outcome branch-guarded while summary declined: parameter expression unavailable")
+            return False
+        t_positive = self.condition_logic.signed_positive_condition(t_param)
+        c_positive = self.condition_logic.signed_positive_condition(c_param)
+        c_nonpositive = c_positive.negate()
+        t_nonpositive = t_positive.negate()
+
+        zero_ret, initial_c_ret = self.find_branch_guarded_while_return_partition(
             analysis,
+            high_function=high_function,
             c_param=c_param,
+            c_nonpositive=c_nonpositive,
             c_positive=c_positive,
             t_positive=t_positive,
-            zero_ret=zero_ret,
         )
-    return zero_ret, initial_c_ret
-
-
-def _impl__synthesize_branch_guarded_affine_initial_count_return(
-    self,
-    high_function,
-    analysis: FunctionReturnAnalysis,
-    *,
-    c_param: Expression,
-    c_positive: Condition,
-    t_positive: Condition,
-    zero_ret: ReturnInfo,
-) -> Optional[ReturnInfo]:
-    target_conditions = (c_positive, t_positive)
-    candidate_returns = [
-        ret
-        for ret in tuple(getattr(analysis, "returns", ()) or ())
-        if self._conditions_overlap(tuple(getattr(ret, "conditions", ()) or ()), target_conditions)
-    ]
-    if not candidate_returns:
-        self._debug_print("Outcome branch-guarded affine proof declined: no target-overlapping returns")
-        return None
-    exact_base_returns: List[ReturnInfo] = []
-    recursive_returns: List[Tuple[ReturnInfo, int]] = []
-    ignored_artifacts: List[ReturnInfo] = []
-    for ret in candidate_returns:
-        conditions = tuple(getattr(ret, "conditions", ()) or ())
-        value = getattr(ret, "value", None)
-        if (
-            self._expressions_equal_under_conditions_smt(
-                value,
-                c_param,
-                tuple(target_conditions) + conditions,
-                getattr(analysis, "parameters", ()) or (),
-            )
-            or self._branch_guarded_affine_singleton_base_anchor_matches(
-                value,
-                conditions,
-                c_param,
-                target_conditions,
-            )
-        ):
-            exact_base_returns.append(ret)
-            continue
-        step = self._branch_guarded_affine_phi_step(value)
-        implies_target = self._conditions_imply(conditions, target_conditions)
-        if step is not None and implies_target:
-            recursive_returns.append((ret, int(step)))
-            continue
-        if self.debug and (step is not None or self._expression_contains_phi_circular(value)):
-            self._debug_print(
-                "Outcome branch-guarded affine candidate skipped: "
-                f"step={step}, implies_target={implies_target}, "
-                f"value={getattr(value, 'to_string', lambda: value)()}, "
-                f"conditions={[condition.to_string() for condition in conditions]}"
-            )
-        ignored_artifacts.append(ret)
-
-    candidate_phi_origin_keys = tuple(
-        sorted(
-            {
-                key
-                for ret in candidate_returns
-                for key in self._return_info_candidate_phi_origin_keys(ret)
-            },
-            key=repr,
-        )
-    )
-    return_phi_origin_keys = tuple(
-        sorted(
-            {
-                key
-                for ret in candidate_returns
-                for key in self._return_info_return_phi_origin_keys(ret)
-            },
-            key=repr,
-        )
-    )
-    if not recursive_returns and not candidate_phi_origin_keys:
-        self._debug_print("Outcome branch-guarded affine proof declined: recursive phi step missing")
-        return None
-    if recursive_returns:
-        steps = {step for _ret, step in recursive_returns}
-        if len(steps) != 1:
-            self._debug_print(f"Outcome branch-guarded affine proof declined: mixed recursive steps {sorted(steps)}")
-            return None
-        step = next(iter(steps))
-        if step <= 0 or step > 4:
-            self._debug_print(f"Outcome branch-guarded affine proof declined: unsupported recursive step {step}")
-            return None
-    else:
-        step = 1
-    structural_proof = None
-    exact_base_covers_target = bool(exact_base_returns) and self._return_conditions_cover_region(
-        target_conditions,
-        exact_base_returns,
-    )
-    if not exact_base_covers_target:
-        structural_proof = self._prove_branch_guarded_affine_unit_count_recurrence(
+        if zero_ret is None or initial_c_ret is None:
+            self.debug_reporter.debug_print("Outcome branch-guarded while summary declined: return partition/value proof unavailable")
+            return False
+        divergence_proof = self.prove_branch_guarded_while_nonprogress_must_diverge(
             high_function,
-            analysis=analysis,
-            c_param=c_param,
-            target_conditions=target_conditions,
-            recursive_returns=tuple(ret for ret, _step in recursive_returns),
-            candidate_phi_origin_keys=candidate_phi_origin_keys,
-            return_phi_origin_keys=return_phi_origin_keys,
-            nonprogress_conditions=(c_positive, t_positive.negate()),
-            allow_latch_progress_guard=bool(exact_base_returns),
+            invariant_conditions=(c_positive, t_nonpositive),
         )
-        if structural_proof is None:
-            if exact_base_returns:
-                self._debug_print("Outcome branch-guarded affine proof declined: exact base returns do not cover target")
-            else:
-                self._debug_print("Outcome branch-guarded affine proof declined: exact base return missing")
+        if divergence_proof is None:
+            divergence_proof = self.prove_branch_guarded_structural_nonprogress_must_diverge(
+                high_function,
+                analysis=analysis,
+                initial_c_ret=initial_c_ret,
+                invariant_conditions=(c_positive, t_nonpositive),
+            )
+        analysis.returns = [zero_ret, initial_c_ret]
+        analysis.return_outcomes = (
+            ReturnOutcome(guard=tuple(zero_ret.conditions), value=zero_ret.value, provenance={"source": "branch_guarded_affine_recurrence"}, return_info=zero_ret),
+            ReturnOutcome(guard=tuple(initial_c_ret.conditions), value=initial_c_ret.value, provenance={"source": "branch_guarded_affine_recurrence"}, return_info=initial_c_ret),
+        )
+        if divergence_proof is not None:
+            analysis.divergence_outcomes = (
+                DivergenceOutcome(
+                    guard=(c_positive, t_nonpositive),
+                    proof=divergence_proof,
+                ),
+            )
+            analysis.unknown_outcomes = ()
+            if "outcome_partition_proved_branch_guarded_while_divergence" not in analysis.analysis_notes:
+                analysis.analysis_notes.append("outcome_partition_proved_branch_guarded_while_divergence")
+        else:
+            analysis.divergence_outcomes = ()
+            analysis.unknown_outcomes = (
+                UnknownOutcome(
+                    guard=(c_positive, t_nonpositive),
+                    reason="branch_guarded_recurrence_proof_missing",
+                    evidence={
+                        "candidate_rule": "branch_guarded_loop_invariant_nonprogress",
+                        "state_reference": "inferred_state_count_parameter",
+                        "state_parameter": getattr(c_param, "name", None) or getattr(c_param, "value", None),
+                        "forbidden_ops_absent": True,
+                        "loop_has_cfg_cycle": self.divergence_proofs.high_function_has_cfg_cycle(high_function),
+                        "has_control_guards": True,
+                        "missing_proof": "scc_exit_impossibility_guard_preservation_and_affine_transition",
+                    },
+                ),
+            )
+            if "outcome_partition_unknown_branch_guarded_while" not in analysis.analysis_notes:
+                analysis.analysis_notes.append("outcome_partition_unknown_branch_guarded_while")
+        return True
+
+    def infer_branch_guarded_while_role_parameters(
+        self,
+        analysis: FunctionReturnAnalysis,
+    ) -> Optional[Tuple[Expression, Expression]]:
+        params = tuple(getattr(analysis, "parameters", ()) or ())
+        candidate_params = []
+        for index in range(len(params)):
+            param = self.parameters.parameter_expression(analysis, index)
+            if param is not None:
+                candidate_params.append(param)
+        if len(candidate_params) < 2:
             return None
-        ignored_artifacts = [
-            artifact for artifact in ignored_artifacts
-            if not self._branch_guarded_artifact_is_imprecise_zero_seed(
-                artifact,
-                zero_ret=zero_ret,
-                parameters=getattr(analysis, "parameters", ()) or (),
-            )
-            and not self._branch_guarded_artifact_is_structural_accumulator_seed_projection(
-                artifact,
-                recursive_returns=tuple(ret for ret, _step in recursive_returns),
-                parameters=getattr(analysis, "parameters", ()) or (),
-            )
-        ]
-        if ignored_artifacts and self.debug:
-            for artifact in ignored_artifacts:
-                self._debug_print(
-                    "Outcome branch-guarded affine artifact retained: "
-                    f"value={getattr(getattr(artifact, 'value', None), 'to_string', lambda: getattr(artifact, 'value', None))()}, "
-                    f"conditions={[condition.to_string() for condition in tuple(getattr(artifact, 'conditions', ()) or ())]}, "
-                    f"site={self._return_site_key(artifact)}"
-                )
-    proof_returns = list(exact_base_returns) + [ret for ret, _step in recursive_returns]
-    if not self._branch_guarded_affine_ignored_artifacts_are_shadowed(
-        ignored_artifacts,
-        recursive_returns,
-        getattr(analysis, "parameters", ()) or (),
-    ):
-        self._debug_print("Outcome branch-guarded affine proof declined: unshadowed target artifact return")
-        return None
 
-    anchor = recursive_returns[0][0] if recursive_returns else exact_base_returns[0]
-    source_keys = tuple(
-        self._return_info_summary_identity_key(ret)
-        for ret in proof_returns
-    )
-    return ReturnInfo(
-        address=str(getattr(anchor, "address", None) or getattr(analysis, "entry_point", None) or "outcome-summary"),
-        value=c_param,
-        conditions=list(target_conditions),
-        branch_index=31_200,
-        pcode_identity=getattr(anchor, "pcode_identity", None),
-        pcode_order=getattr(anchor, "pcode_order", None),
-        pcode_time=getattr(anchor, "pcode_time", None),
-        pcode_op_ref=getattr(anchor, "pcode_op_ref", None),
-        return_value_pcode_op_refs=tuple(getattr(anchor, "return_value_pcode_op_refs", ()) or ()),
-        return_kind="outcome_summary",
-        summary_candidate_id=("branch_guarded_affine_initial_count", getattr(analysis, "function_name", None)),
-        summary_candidate_source_key=(
-            "branch_guarded_affine_initial_count",
-            ("step", step),
-            ("candidate_phi_origin_keys", candidate_phi_origin_keys),
-            ("return_phi_origin_keys", return_phi_origin_keys),
-            ("structural_proof", structural_proof),
-            ("sources", source_keys),
-        ),
-    )
-
-
-def _impl__branch_guarded_artifact_is_imprecise_zero_seed(
-    self,
-    artifact: ReturnInfo,
-    *,
-    zero_ret: ReturnInfo,
-    parameters: Sequence[Dict],
-) -> bool:
-    artifact_conditions = tuple(getattr(artifact, "conditions", ()) or ())
-    zero_conditions = tuple(getattr(zero_ret, "conditions", ()) or ())
-    if not self._expressions_equal_under_conditions_smt(
-        getattr(artifact, "value", None),
-        getattr(zero_ret, "value", None),
-        artifact_conditions + zero_conditions,
-        parameters,
-    ):
-        return False
-    if not self._conditions_imply(zero_conditions, artifact_conditions):
-        return False
-    if self._conditions_imply(artifact_conditions, zero_conditions):
-        return False
-    return True
-
-
-def _impl__branch_guarded_artifact_is_structural_accumulator_seed_projection(
-    self,
-    artifact: ReturnInfo,
-    *,
-    recursive_returns: Sequence[ReturnInfo],
-    parameters: Sequence[Dict],
-) -> bool:
-    if self._constant_int_value(getattr(artifact, "value", None)) != 0:
-        return False
-    artifact_conditions = tuple(getattr(artifact, "conditions", ()) or ())
-    artifact_site = self._return_site_key(artifact)
-    for recursive in recursive_returns or ():
-        recursive_conditions = tuple(getattr(recursive, "conditions", ()) or ())
-        if artifact_site != self._return_site_key(recursive):
-            continue
-        if not (
-            self._condition_lists_equivalent(list(artifact_conditions), list(recursive_conditions))
-            or (
-                self._conditions_imply(artifact_conditions, recursive_conditions)
-                and self._conditions_imply(recursive_conditions, artifact_conditions)
-            )
-        ):
-            continue
-        if self._branch_guarded_affine_phi_step(getattr(recursive, "value", None)) == 1:
-            return True
-    return False
-
-
-def _impl__prove_branch_guarded_affine_unit_count_recurrence(
-    self,
-    high_function,
-    *,
-    analysis: FunctionReturnAnalysis,
-    c_param: Expression,
-    target_conditions: Sequence[Condition],
-    recursive_returns: Sequence[ReturnInfo],
-    candidate_phi_origin_keys: Sequence[Tuple[Any, ...]] = (),
-    return_phi_origin_keys: Sequence[Tuple[Any, ...]] = (),
-    nonprogress_conditions: Sequence[Condition] = (),
-    allow_latch_progress_guard: bool = False,
-) -> Optional[Tuple[Any, ...]]:
-    if high_function is None or self.program is None:
-        return None
-    recursive_origin_keys = set(candidate_phi_origin_keys or ())
-    return_origin_keys = set(return_phi_origin_keys or ())
-    for ret in recursive_returns or ():
-        recursive_origin_keys.update(self._phi_circular_origin_stable_keys(getattr(ret, "value", None)))
-        recursive_origin_keys.update(self._return_info_candidate_phi_origin_keys(ret))
-        return_origin_keys.update(self._phi_circular_origin_stable_keys(getattr(ret, "value", None)))
-        return_origin_keys.update(self._return_info_return_phi_origin_keys(ret))
-    if not recursive_origin_keys:
-        self._debug_print("Outcome branch-guarded structural proof declined: recursive phi origin unavailable")
-        return None
-    if not return_origin_keys:
-        self._debug_print("Outcome branch-guarded structural proof declined: return phi origin unavailable")
-        return None
-    try:
-        tracer = self._make_tracer(high_function)
-    except Exception:
-        self._debug_print("Outcome branch-guarded structural proof declined: tracer unavailable")
-        return None
-    summarizer = StructuralRecurrenceSummarizer(
-        tracer,
-        debug=False,
-        enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
-    )
-    saw_acc_candidate = False
-    saw_acc_transition = False
-    saw_state_transition = False
-    saw_state_guard = False
-    for header_block in summarizer._iter_basic_blocks(high_function):
-        phi_ops = [
-            op for op in summarizer._iter_block_ops(header_block)
-            if getattr(op, "getMnemonic", lambda: None)() == "MULTIEQUAL"
-            and getattr(op, "getOutput", lambda: None)() is not None
-        ]
-        if len(phi_ops) < 2:
-            continue
-        if any(self._pcode_op_stable_key(phi_op) in recursive_origin_keys for phi_op in phi_ops):
-            saw_acc_candidate = True
-        for acc_phi in phi_ops:
-            acc_phi_key = self._pcode_op_stable_key(acc_phi)
-            acc_flows_to_return = self._acc_phi_flows_to_return_origin_phi(
-                acc_phi,
-                return_origin_keys,
-                summarizer=summarizer,
-                high_function=high_function,
-            )
-            if acc_phi_key not in return_origin_keys and not acc_flows_to_return:
-                if self.debug:
-                    self._debug_print(
-                        "Outcome branch-guarded structural proof acc candidate skipped: "
-                        f"return provenance missing acc_phi={acc_phi_key}, "
-                        f"return_origins={sorted(return_origin_keys, key=repr)}"
+        returns = tuple(getattr(analysis, "returns", ()) or ())
+        for c_param in candidate_params:
+            c_positive = self.condition_logic.signed_positive_condition(c_param)
+            c_nonpositive = c_positive.negate()
+            zero_seed = None
+            for ret in returns:
+                if self.stack_protector.constant_int_value(getattr(ret, "value", None)) != 0:
+                    continue
+                conditions = tuple(getattr(ret, "conditions", ()) or ())
+                if self.condition_logic.conditions_equivalent(conditions, [c_nonpositive]) or (
+                    len(conditions) == 1
+                    and self.condition_logic.condition_is_signed_nonpositive_of_param(conditions[0], c_param)
+                ):
+                    zero_seed = ret
+                    break
+            if zero_seed is None:
+                continue
+            for t_param in candidate_params:
+                if self.condition_logic.expressions_same_key(t_param, c_param):
+                    continue
+                t_positive = self.condition_logic.signed_positive_condition(t_param)
+                target_conditions = (c_positive, t_positive)
+                if any(
+                    self.condition_logic.conditions_overlap(tuple(getattr(ret, "conditions", ()) or ()), target_conditions)
+                    and (
+                        self.condition_logic.expression_is_same_parameter_ignoring_subpiece(getattr(ret, "value", None), c_param)
+                        or self.condition_logic.expressions_equal_under_conditions_smt(
+                            getattr(ret, "value", None),
+                            c_param,
+                            tuple(target_conditions) + tuple(getattr(ret, "conditions", ()) or ()),
+                            getattr(analysis, "parameters", ()) or (),
+                        )
+                        or self.branch_guarded_affine_singleton_base_anchor_matches(
+                            getattr(ret, "value", None),
+                            tuple(getattr(ret, "conditions", ()) or ()),
+                            c_param,
+                            target_conditions,
+                        )
+                        or self.branch_guarded_affine_phi_step(getattr(ret, "value", None)) is not None
+                        or self.return_info_candidate_phi_origin_keys(ret)
                     )
-                continue
-            acc_indices = summarizer._state_loop_phi_indices(header_block, acc_phi)
-            if acc_indices is None:
-                if self.debug:
-                    self._debug_print("Outcome branch-guarded structural proof acc candidate skipped: loop phi indices unavailable")
-                continue
-            acc_init_index, acc_backedge_indices = acc_indices
-            acc_output = getattr(acc_phi, "getOutput", lambda: None)()
-            if acc_output is None:
-                continue
-            acc_placeholder = Expression.variable(
-                "__branch_guarded_acc",
-                size=max(1, int(getattr(acc_output, "getSize", lambda: 4)() or 4)),
+                    for ret in returns
+                ):
+                    return t_param, c_param
+        return None
+
+    def prove_branch_guarded_structural_nonprogress_must_diverge(
+        self,
+        high_function,
+        *,
+        analysis: Optional[FunctionReturnAnalysis] = None,
+        initial_c_ret: ReturnInfo,
+        invariant_conditions: Sequence[Condition],
+    ) -> Optional[Dict[str, Any]]:
+        if high_function is None:
+            return None
+        structural_proof = self.branch_guarded_structural_proof_from_return(initial_c_ret)
+        if structural_proof is None:
+            return None
+        if not self.validate_branch_guarded_structural_proof(
+            high_function,
+            structural_proof=structural_proof,
+            analysis=analysis,
+            initial_c_ret=initial_c_ret,
+            invariant_conditions=invariant_conditions,
+        ):
+            return None
+        nonprogress_backedges = self.divergence_proofs.tuple_field_from_structural_proof(
+            structural_proof,
+            "nonprogress_backedges",
+        )
+        conditional_progress_backedges = self.divergence_proofs.tuple_field_from_structural_proof(
+            structural_proof,
+            "conditional_progress_backedges",
+        )
+        conditional_progress_guard_keys = self.divergence_proofs.conditional_progress_guard_keys_from_structural_proof(
+            structural_proof,
+        )
+        conditional_progress_guards_blocked = self.divergence_proofs.conditional_progress_guards_contradict_invariant(
+            conditional_progress_guard_keys,
+            target_conditions=tuple(getattr(initial_c_ret, "conditions", ()) or ()),
+            invariant_conditions=tuple(invariant_conditions or ()),
+        )
+        if not nonprogress_backedges and not (conditional_progress_backedges and conditional_progress_guards_blocked):
+            return None
+        if not self.divergence_proofs.high_function_has_cfg_cycle(high_function):
+            return None
+        if self.high_function_has_forbidden_control_outcome_ops(high_function, allow_call=False):
+            return None
+        return {
+            "proof_kind": "branch_guarded_structural_nonprogress_must_diverge",
+            "candidate_rule": "branch_guarded_loop_invariant_nonprogress",
+            "invariant": [condition.to_string() for condition in invariant_conditions or ()],
+            "structural_recurrence_proof": structural_proof,
+            "nonprogress_backedges": tuple(nonprogress_backedges),
+            "conditional_progress_backedges": tuple(conditional_progress_backedges),
+            "conditional_progress_guard_keys": tuple(sorted(conditional_progress_guard_keys.items(), key=repr)),
+            "conditional_progress_guard_negated_by_invariant": bool(conditional_progress_guards_blocked),
+            "state_preservation": "state_phi_nonprogress_backedge_identity",
+            "accumulator_preservation": "accumulator_phi_nonprogress_backedge_identity",
+            "loop_has_cfg_cycle": True,
+            "forbidden_control_effect_ops_absent": True,
+            "cfg_applicability_surface": self.block_graph.cfg_applicability_surface(high_function),
+        }
+
+    def branch_guarded_structural_proof_from_return(
+        self,
+        ret: ReturnInfo,
+    ) -> Optional[Tuple[Any, ...]]:
+        source_key = getattr(ret, "summary_candidate_source_key", None)
+        return self.find_branch_guarded_structural_proof_tuple(source_key)
+
+    def find_branch_guarded_structural_proof_tuple(
+        self,
+        value,
+    ) -> Optional[Tuple[Any, ...]]:
+        if not isinstance(value, tuple):
+            return None
+        if value and value[0] == "branch_guarded_affine_unit_count_structural_proof":
+            return value
+        for item in value:
+            found = self.find_branch_guarded_structural_proof_tuple(item)
+            if found is not None:
+                return found
+        return None
+
+    def validate_branch_guarded_structural_proof(
+        self,
+        high_function,
+        *,
+        structural_proof: Tuple[Any, ...],
+        analysis: Optional[FunctionReturnAnalysis],
+        initial_c_ret: ReturnInfo,
+        invariant_conditions: Sequence[Condition],
+    ) -> bool:
+        if high_function is None:
+            return False
+        if self.divergence_proofs.field_value_from_structural_proof(structural_proof, "schema_version") != 1:
+            return False
+        if analysis is not None and self.divergence_proofs.field_value_from_structural_proof(
+            structural_proof,
+            "function",
+        ) != getattr(analysis, "function_name", None):
+            return False
+        proof_target_keys = self.divergence_proofs.tuple_field_from_structural_proof(
+            structural_proof,
+            "target_guard_keys",
+        )
+        current_target_keys = tuple(
+            sorted(
+                (self.divergence_proofs.condition_identity_key(condition) for condition in tuple(getattr(initial_c_ret, "conditions", ()) or ())),
+                key=repr,
             )
-            acc_init = summarizer._build_pcode_expression(
-                acc_phi.getInput(acc_init_index),
+        )
+        if proof_target_keys != current_target_keys:
+            return False
+        acc_phi_key = self.divergence_proofs.field_value_from_structural_proof(structural_proof, "acc_phi")
+        state_phi_key = self.divergence_proofs.field_value_from_structural_proof(structural_proof, "state_phi")
+        if not isinstance(acc_phi_key, tuple) or not isinstance(state_phi_key, tuple):
+            return False
+        try:
+            tracer = self.program_access.make_tracer(high_function)
+        except Exception:
+            return False
+        summarizer = StructuralRecurrenceSummarizer(
+            tracer,
+            debug=False,
+            enable_completed_recovery_proofs=self.enable_completed_recovery_proofs_value(),
+        )
+        acc_phi = None
+        state_phi = None
+        header_block = None
+        for block in summarizer._iter_basic_blocks(high_function):
+            for op in summarizer._iter_block_ops(block):
+                if getattr(op, "getMnemonic", lambda: None)() != "MULTIEQUAL":
+                    continue
+                op_key = self.pcode_sites.pcode_op_stable_key(op)
+                if op_key == acc_phi_key:
+                    acc_phi = op
+                    header_block = block
+                if op_key == state_phi_key:
+                    state_phi = op
+                    header_block = block if header_block is None else header_block
+        if acc_phi is None or state_phi is None or header_block is None:
+            return False
+        acc_parent = getattr(acc_phi, "getParent", lambda: None)()
+        state_parent = getattr(state_phi, "getParent", lambda: None)()
+        if acc_parent is None or state_parent is None:
+            return False
+        if self.block_graph.block_debug_key(acc_parent) != self.block_graph.block_debug_key(state_parent):
+            return False
+        header_block = acc_parent
+        acc_indices = summarizer._state_loop_phi_indices(header_block, acc_phi)
+        state_indices = summarizer._state_loop_phi_indices(header_block, state_phi)
+        if acc_indices is None or state_indices is None:
+            return False
+        _acc_init_index, acc_backedge_indices = acc_indices
+        _state_init_index, state_backedge_indices = state_indices
+        if tuple(int(index) for index in acc_backedge_indices) != tuple(int(index) for index in state_backedge_indices):
+            return False
+        progress_backedges = set(int(index) for index in self.divergence_proofs.tuple_field_from_structural_proof(structural_proof, "progress_backedges"))
+        nonprogress_backedges = set(int(index) for index in self.divergence_proofs.tuple_field_from_structural_proof(structural_proof, "nonprogress_backedges"))
+        conditional_progress_backedges = set(int(index) for index in self.divergence_proofs.tuple_field_from_structural_proof(structural_proof, "conditional_progress_backedges"))
+        expected_conditional_guard_keys = self.divergence_proofs.conditional_progress_guard_keys_from_structural_proof(
+            structural_proof,
+        )
+        proof_backedges = progress_backedges | nonprogress_backedges
+        if not progress_backedges:
+            return False
+        if conditional_progress_backedges:
+            proof_backedges |= conditional_progress_backedges
+        if proof_backedges != set(int(index) for index in acc_backedge_indices):
+            return False
+        target_conditions = tuple(getattr(initial_c_ret, "conditions", ()) or ())
+        if conditional_progress_backedges and not expected_conditional_guard_keys:
+            return False
+        if conditional_progress_backedges and set(expected_conditional_guard_keys) != conditional_progress_backedges:
+            return False
+        if conditional_progress_backedges and not self.divergence_proofs.conditional_progress_guards_contradict_invariant(
+            expected_conditional_guard_keys,
+            target_conditions=target_conditions,
+            invariant_conditions=tuple(invariant_conditions or ()),
+        ):
+            return False
+        acc_output = getattr(acc_phi, "getOutput", lambda: None)()
+        state_output = getattr(state_phi, "getOutput", lambda: None)()
+        if acc_output is None or state_output is None:
+            return False
+        acc_placeholder = Expression.variable("__branch_guarded_acc", size=max(1, int(getattr(acc_output, "getSize", lambda: 4)() or 4)))
+        state_placeholder = Expression.variable("__branch_guarded_state", size=max(1, int(getattr(state_output, "getSize", lambda: 4)() or 4)))
+        for backedge_index in acc_backedge_indices:
+            index = int(backedge_index)
+            acc_expr = summarizer._build_pcode_expression(
+                acc_phi.getInput(index),
                 placeholders={acc_output: acc_placeholder},
             )
-            if self._constant_int_value(acc_init) != 0:
-                if self.debug:
-                    self._debug_print(
-                        "Outcome branch-guarded structural proof acc candidate skipped: "
-                        f"init={self._debug_expr_summary(acc_init)}"
-                    )
-                continue
-            acc_progress_indices: Set[int] = set()
-            acc_nonprogress_indices: Set[int] = set()
-            acc_conditional_progress_keys: Dict[int, Tuple[Any, ...]] = {}
-            acc_unknown_transition = False
-            for backedge_index in acc_backedge_indices:
-                backedge_index_int = int(backedge_index)
-                acc_backedge_expr = summarizer._build_pcode_expression(
-                    acc_phi.getInput(backedge_index),
-                    placeholders={acc_output: acc_placeholder},
-                )
-                if self._expression_is_placeholder_plus_one(acc_backedge_expr, acc_placeholder):
-                    acc_progress_indices.add(backedge_index_int)
-                    continue
-                acc_guard_key = self._placeholder_plus_unit_condition_guard_key(
-                    acc_backedge_expr,
+            state_expr = summarizer._build_pcode_expression(
+                state_phi.getInput(index),
+                placeholders={state_output: state_placeholder},
+            )
+            if index in conditional_progress_backedges:
+                acc_guard_key = self.placeholder_algebra.placeholder_plus_unit_condition_guard_key(
+                    acc_expr,
                     acc_placeholder,
                     target_conditions,
                 )
-                if acc_guard_key is not None:
-                    acc_progress_indices.add(backedge_index_int)
-                    acc_conditional_progress_keys[backedge_index_int] = acc_guard_key
+                state_guard_key = self.placeholder_algebra.placeholder_minus_one_unit_condition_guard_key(
+                    state_expr,
+                    state_placeholder,
+                    target_conditions,
+                )
+                if acc_guard_key is None or state_guard_key is None:
+                    return False
+                if acc_guard_key != state_guard_key:
+                    return False
+                if expected_conditional_guard_keys.get(index) != acc_guard_key:
+                    return False
+                if index in nonprogress_backedges:
+                    if not (
+                        self.placeholder_algebra.expression_is_placeholder_plus_zero_under_conditions(
+                            acc_expr,
+                            acc_placeholder,
+                            invariant_conditions,
+                        )
+                        or self.condition_logic.expressions_equal_under_conditions_smt(
+                            acc_expr,
+                            acc_placeholder,
+                            tuple(invariant_conditions or ()),
+                            getattr(analysis, "parameters", ()) or (),
+                        )
+                    ):
+                        return False
+                    if not (
+                        self.placeholder_algebra.expression_is_placeholder_plus_zero_under_conditions(
+                            state_expr,
+                            state_placeholder,
+                            invariant_conditions,
+                        )
+                        or self.condition_logic.expressions_equal_under_conditions_smt(
+                            state_expr,
+                            state_placeholder,
+                            tuple(invariant_conditions or ()),
+                            getattr(analysis, "parameters", ()) or (),
+                        )
+                    ):
+                        return False
+                continue
+            if index in nonprogress_backedges:
+                if not (
+                    self.condition_logic.expressions_same_key(acc_expr, acc_placeholder)
+                    or self.placeholder_algebra.expression_is_placeholder_plus_zero_under_conditions(
+                        acc_expr,
+                        acc_placeholder,
+                        invariant_conditions,
+                    )
+                    or self.condition_logic.expressions_equal_under_conditions_smt(
+                        acc_expr,
+                        acc_placeholder,
+                        tuple(invariant_conditions or ()),
+                        getattr(analysis, "parameters", ()) or (),
+                    )
+                ):
+                    return False
+                if not (
+                    self.condition_logic.expressions_same_key(state_expr, state_placeholder)
+                    or self.placeholder_algebra.expression_is_placeholder_plus_zero_under_conditions(
+                        state_expr,
+                        state_placeholder,
+                        invariant_conditions,
+                    )
+                    or self.condition_logic.expressions_equal_under_conditions_smt(
+                        state_expr,
+                        state_placeholder,
+                        tuple(invariant_conditions or ()),
+                        getattr(analysis, "parameters", ()) or (),
+                    )
+                ):
+                    return False
+                continue
+            if index in progress_backedges:
+                if not self.placeholder_algebra.expression_is_placeholder_plus_one_under_conditions(
+                    acc_expr,
+                    acc_placeholder,
+                    target_conditions,
+                ):
+                    return False
+                if not self.placeholder_algebra.expression_is_placeholder_minus_one_under_conditions(
+                    state_expr,
+                    state_placeholder,
+                    target_conditions,
+                ):
+                    return False
+                continue
+            return False
+        return self.divergence_proofs.state_phi_feeds_positive_loop_guard(
+            high_function,
+            summarizer=summarizer,
+            header_block=header_block,
+            backedge_indices=tuple(int(index) for index in state_backedge_indices),
+            state_phi=state_phi,
+            state_placeholder=state_placeholder,
+            target_conditions=target_conditions,
+            allow_latch_progress_guard=bool(conditional_progress_backedges),
+        )
+
+    def find_branch_guarded_while_return_partition(
+        self,
+        analysis: FunctionReturnAnalysis,
+        *,
+        high_function,
+        c_param: Expression,
+        c_nonpositive: Condition,
+        c_positive: Condition,
+        t_positive: Condition,
+    ) -> Tuple[Optional[ReturnInfo], Optional[ReturnInfo]]:
+        zero_ret = None
+        initial_c_ret = None
+        for ret in getattr(analysis, "returns", []) or ():
+            conditions = tuple(getattr(ret, "conditions", ()) or ())
+            if zero_ret is None and self.stack_protector.constant_int_value(getattr(ret, "value", None)) == 0:
+                if self.condition_logic.conditions_equivalent(conditions, [c_nonpositive]) or (
+                    len(conditions) == 1
+                    and self.condition_logic.condition_is_signed_nonpositive_of_param(conditions[0], c_param)
+                ):
+                    zero_ret = ret
+                    continue
+            if initial_c_ret is None and self.condition_logic.expression_is_same_parameter_ignoring_subpiece(
+                getattr(ret, "value", None),
+                c_param,
+            ):
+                if self.condition_logic.conditions_equivalent(conditions, [c_positive, t_positive]):
+                    initial_c_ret = ret
+        if zero_ret is not None and initial_c_ret is None:
+            initial_c_ret = self.synthesize_branch_guarded_affine_initial_count_return(
+                high_function,
+                analysis,
+                c_param=c_param,
+                c_positive=c_positive,
+                t_positive=t_positive,
+                zero_ret=zero_ret,
+            )
+        return zero_ret, initial_c_ret
+
+    def synthesize_branch_guarded_affine_initial_count_return(
+        self,
+        high_function,
+        analysis: FunctionReturnAnalysis,
+        *,
+        c_param: Expression,
+        c_positive: Condition,
+        t_positive: Condition,
+        zero_ret: ReturnInfo,
+    ) -> Optional[ReturnInfo]:
+        target_conditions = (c_positive, t_positive)
+        candidate_returns = [
+            ret
+            for ret in tuple(getattr(analysis, "returns", ()) or ())
+            if self.condition_logic.conditions_overlap(tuple(getattr(ret, "conditions", ()) or ()), target_conditions)
+        ]
+        if not candidate_returns:
+            self.debug_reporter.debug_print("Outcome branch-guarded affine proof declined: no target-overlapping returns")
+            return None
+        exact_base_returns: List[ReturnInfo] = []
+        recursive_returns: List[Tuple[ReturnInfo, int]] = []
+        ignored_artifacts: List[ReturnInfo] = []
+        for ret in candidate_returns:
+            conditions = tuple(getattr(ret, "conditions", ()) or ())
+            value = getattr(ret, "value", None)
+            if (
+                self.condition_logic.expressions_equal_under_conditions_smt(
+                    value,
+                    c_param,
+                    tuple(target_conditions) + conditions,
+                    getattr(analysis, "parameters", ()) or (),
+                )
+                or self.branch_guarded_affine_singleton_base_anchor_matches(
+                    value,
+                    conditions,
+                    c_param,
+                    target_conditions,
+                )
+            ):
+                exact_base_returns.append(ret)
+                continue
+            step = self.branch_guarded_affine_phi_step(value)
+            implies_target = self.condition_logic.conditions_imply(conditions, target_conditions)
+            if step is not None and implies_target:
+                recursive_returns.append((ret, int(step)))
+                continue
+            if self.debug_flag() and (step is not None or self.phi_origins.expression_contains_phi_circular(value)):
+                self.debug_reporter.debug_print(
+                    "Outcome branch-guarded affine candidate skipped: "
+                    f"step={step}, implies_target={implies_target}, "
+                    f"value={getattr(value, 'to_string', lambda: value)()}, "
+                    f"conditions={[condition.to_string() for condition in conditions]}"
+                )
+            ignored_artifacts.append(ret)
+
+        candidate_phi_origin_keys = tuple(
+            sorted(
+                {
+                    key
+                    for ret in candidate_returns
+                    for key in self.return_info_candidate_phi_origin_keys(ret)
+                },
+                key=repr,
+            )
+        )
+        return_phi_origin_keys = tuple(
+            sorted(
+                {
+                    key
+                    for ret in candidate_returns
+                    for key in self.return_info_return_phi_origin_keys(ret)
+                },
+                key=repr,
+            )
+        )
+        if not recursive_returns and not candidate_phi_origin_keys:
+            self.debug_reporter.debug_print("Outcome branch-guarded affine proof declined: recursive phi step missing")
+            return None
+        if recursive_returns:
+            steps = {step for _ret, step in recursive_returns}
+            if len(steps) != 1:
+                self.debug_reporter.debug_print(f"Outcome branch-guarded affine proof declined: mixed recursive steps {sorted(steps)}")
+                return None
+            step = next(iter(steps))
+            if step <= 0 or step > 4:
+                self.debug_reporter.debug_print(f"Outcome branch-guarded affine proof declined: unsupported recursive step {step}")
+                return None
+        else:
+            step = 1
+        structural_proof = None
+        exact_base_covers_target = bool(exact_base_returns) and self.return_conditions_cover_region(
+            target_conditions,
+            exact_base_returns,
+        )
+        if not exact_base_covers_target:
+            structural_proof = self.prove_branch_guarded_affine_unit_count_recurrence(
+                high_function,
+                analysis=analysis,
+                c_param=c_param,
+                target_conditions=target_conditions,
+                recursive_returns=tuple(ret for ret, _step in recursive_returns),
+                candidate_phi_origin_keys=candidate_phi_origin_keys,
+                return_phi_origin_keys=return_phi_origin_keys,
+                nonprogress_conditions=(c_positive, t_positive.negate()),
+                allow_latch_progress_guard=bool(exact_base_returns),
+            )
+            if structural_proof is None:
+                if exact_base_returns:
+                    self.debug_reporter.debug_print("Outcome branch-guarded affine proof declined: exact base returns do not cover target")
+                else:
+                    self.debug_reporter.debug_print("Outcome branch-guarded affine proof declined: exact base return missing")
+                return None
+            ignored_artifacts = [
+                artifact for artifact in ignored_artifacts
+                if not self.branch_guarded_artifact_is_imprecise_zero_seed(
+                    artifact,
+                    zero_ret=zero_ret,
+                    parameters=getattr(analysis, "parameters", ()) or (),
+                )
+                and not self.branch_guarded_artifact_is_structural_accumulator_seed_projection(
+                    artifact,
+                    recursive_returns=tuple(ret for ret, _step in recursive_returns),
+                    parameters=getattr(analysis, "parameters", ()) or (),
+                )
+            ]
+            if ignored_artifacts and self.debug_flag():
+                for artifact in ignored_artifacts:
+                    self.debug_reporter.debug_print(
+                        "Outcome branch-guarded affine artifact retained: "
+                        f"value={getattr(getattr(artifact, 'value', None), 'to_string', lambda: getattr(artifact, 'value', None))()}, "
+                        f"conditions={[condition.to_string() for condition in tuple(getattr(artifact, 'conditions', ()) or ())]}, "
+                        f"site={self.return_site_key(artifact)}"
+                    )
+        proof_returns = list(exact_base_returns) + [ret for ret, _step in recursive_returns]
+        if not self.branch_guarded_affine_ignored_artifacts_are_shadowed(
+            ignored_artifacts,
+            recursive_returns,
+            getattr(analysis, "parameters", ()) or (),
+        ):
+            self.debug_reporter.debug_print("Outcome branch-guarded affine proof declined: unshadowed target artifact return")
+            return None
+
+        anchor = recursive_returns[0][0] if recursive_returns else exact_base_returns[0]
+        source_keys = tuple(
+            self.return_info_summary_identity_key(ret)
+            for ret in proof_returns
+        )
+        return ReturnInfo(
+            address=str(getattr(anchor, "address", None) or getattr(analysis, "entry_point", None) or "outcome-summary"),
+            value=c_param,
+            conditions=list(target_conditions),
+            branch_index=31_200,
+            pcode_identity=getattr(anchor, "pcode_identity", None),
+            pcode_order=getattr(anchor, "pcode_order", None),
+            pcode_time=getattr(anchor, "pcode_time", None),
+            pcode_op_ref=getattr(anchor, "pcode_op_ref", None),
+            return_value_pcode_op_refs=tuple(getattr(anchor, "return_value_pcode_op_refs", ()) or ()),
+            return_kind="outcome_summary",
+            summary_candidate_id=("branch_guarded_affine_initial_count", getattr(analysis, "function_name", None)),
+            summary_candidate_source_key=(
+                "branch_guarded_affine_initial_count",
+                ("step", step),
+                ("candidate_phi_origin_keys", candidate_phi_origin_keys),
+                ("return_phi_origin_keys", return_phi_origin_keys),
+                ("structural_proof", structural_proof),
+                ("sources", source_keys),
+            ),
+        )
+
+    def branch_guarded_artifact_is_imprecise_zero_seed(
+        self,
+        artifact: ReturnInfo,
+        *,
+        zero_ret: ReturnInfo,
+        parameters: Sequence[Dict],
+    ) -> bool:
+        artifact_conditions = tuple(getattr(artifact, "conditions", ()) or ())
+        zero_conditions = tuple(getattr(zero_ret, "conditions", ()) or ())
+        if not self.condition_logic.expressions_equal_under_conditions_smt(
+            getattr(artifact, "value", None),
+            getattr(zero_ret, "value", None),
+            artifact_conditions + zero_conditions,
+            parameters,
+        ):
+            return False
+        if not self.condition_logic.conditions_imply(zero_conditions, artifact_conditions):
+            return False
+        if self.condition_logic.conditions_imply(artifact_conditions, zero_conditions):
+            return False
+        return True
+
+    def branch_guarded_artifact_is_structural_accumulator_seed_projection(
+        self,
+        artifact: ReturnInfo,
+        *,
+        recursive_returns: Sequence[ReturnInfo],
+        parameters: Sequence[Dict],
+    ) -> bool:
+        if self.stack_protector.constant_int_value(getattr(artifact, "value", None)) != 0:
+            return False
+        artifact_conditions = tuple(getattr(artifact, "conditions", ()) or ())
+        artifact_site = self.return_site_key(artifact)
+        for recursive in recursive_returns or ():
+            recursive_conditions = tuple(getattr(recursive, "conditions", ()) or ())
+            if artifact_site != self.return_site_key(recursive):
+                continue
+            if not (
+                self.expression_cases.condition_lists_equivalent(list(artifact_conditions), list(recursive_conditions))
+                or (
+                    self.condition_logic.conditions_imply(artifact_conditions, recursive_conditions)
+                    and self.condition_logic.conditions_imply(recursive_conditions, artifact_conditions)
+                )
+            ):
+                continue
+            if self.branch_guarded_affine_phi_step(getattr(recursive, "value", None)) == 1:
+                return True
+        return False
+
+    def prove_branch_guarded_affine_unit_count_recurrence(
+        self,
+        high_function,
+        *,
+        analysis: FunctionReturnAnalysis,
+        c_param: Expression,
+        target_conditions: Sequence[Condition],
+        recursive_returns: Sequence[ReturnInfo],
+        candidate_phi_origin_keys: Sequence[Tuple[Any, ...]] = (),
+        return_phi_origin_keys: Sequence[Tuple[Any, ...]] = (),
+        nonprogress_conditions: Sequence[Condition] = (),
+        allow_latch_progress_guard: bool = False,
+    ) -> Optional[Tuple[Any, ...]]:
+        if high_function is None or self.program_value() is None:
+            return None
+        recursive_origin_keys = set(candidate_phi_origin_keys or ())
+        return_origin_keys = set(return_phi_origin_keys or ())
+        for ret in recursive_returns or ():
+            recursive_origin_keys.update(self.phi_origins.phi_circular_origin_stable_keys(getattr(ret, "value", None)))
+            recursive_origin_keys.update(self.return_info_candidate_phi_origin_keys(ret))
+            return_origin_keys.update(self.phi_origins.phi_circular_origin_stable_keys(getattr(ret, "value", None)))
+            return_origin_keys.update(self.return_info_return_phi_origin_keys(ret))
+        if not recursive_origin_keys:
+            self.debug_reporter.debug_print("Outcome branch-guarded structural proof declined: recursive phi origin unavailable")
+            return None
+        if not return_origin_keys:
+            self.debug_reporter.debug_print("Outcome branch-guarded structural proof declined: return phi origin unavailable")
+            return None
+        try:
+            tracer = self.program_access.make_tracer(high_function)
+        except Exception:
+            self.debug_reporter.debug_print("Outcome branch-guarded structural proof declined: tracer unavailable")
+            return None
+        summarizer = StructuralRecurrenceSummarizer(
+            tracer,
+            debug=False,
+            enable_completed_recovery_proofs=self.enable_completed_recovery_proofs_value(),
+        )
+        saw_acc_candidate = False
+        saw_acc_transition = False
+        saw_state_transition = False
+        saw_state_guard = False
+        for header_block in summarizer._iter_basic_blocks(high_function):
+            phi_ops = [
+                op for op in summarizer._iter_block_ops(header_block)
+                if getattr(op, "getMnemonic", lambda: None)() == "MULTIEQUAL"
+                and getattr(op, "getOutput", lambda: None)() is not None
+            ]
+            if len(phi_ops) < 2:
+                continue
+            if any(self.pcode_sites.pcode_op_stable_key(phi_op) in recursive_origin_keys for phi_op in phi_ops):
+                saw_acc_candidate = True
+            for acc_phi in phi_ops:
+                acc_phi_key = self.pcode_sites.pcode_op_stable_key(acc_phi)
+                acc_flows_to_return = self.acc_phi_flows_to_return_origin_phi(
+                    acc_phi,
+                    return_origin_keys,
+                    summarizer=summarizer,
+                    high_function=high_function,
+                )
+                if acc_phi_key not in return_origin_keys and not acc_flows_to_return:
+                    if self.debug_flag():
+                        self.debug_reporter.debug_print(
+                            "Outcome branch-guarded structural proof acc candidate skipped: "
+                            f"return provenance missing acc_phi={acc_phi_key}, "
+                            f"return_origins={sorted(return_origin_keys, key=repr)}"
+                        )
+                    continue
+                acc_indices = summarizer._state_loop_phi_indices(header_block, acc_phi)
+                if acc_indices is None:
+                    if self.debug_flag():
+                        self.debug_reporter.debug_print("Outcome branch-guarded structural proof acc candidate skipped: loop phi indices unavailable")
+                    continue
+                acc_init_index, acc_backedge_indices = acc_indices
+                acc_output = getattr(acc_phi, "getOutput", lambda: None)()
+                if acc_output is None:
+                    continue
+                acc_placeholder = Expression.variable(
+                    "__branch_guarded_acc",
+                    size=max(1, int(getattr(acc_output, "getSize", lambda: 4)() or 4)),
+                )
+                acc_init = summarizer._build_pcode_expression(
+                    acc_phi.getInput(acc_init_index),
+                    placeholders={acc_output: acc_placeholder},
+                )
+                if self.stack_protector.constant_int_value(acc_init) != 0:
+                    if self.debug_flag():
+                        self.debug_reporter.debug_print(
+                            "Outcome branch-guarded structural proof acc candidate skipped: "
+                            f"init={self.debug_reporter.debug_expr_summary(acc_init)}"
+                        )
+                    continue
+                acc_progress_indices: Set[int] = set()
+                acc_nonprogress_indices: Set[int] = set()
+                acc_conditional_progress_keys: Dict[int, Tuple[Any, ...]] = {}
+                acc_unknown_transition = False
+                for backedge_index in acc_backedge_indices:
+                    backedge_index_int = int(backedge_index)
+                    acc_backedge_expr = summarizer._build_pcode_expression(
+                        acc_phi.getInput(backedge_index),
+                        placeholders={acc_output: acc_placeholder},
+                    )
+                    if self.placeholder_algebra.expression_is_placeholder_plus_one(acc_backedge_expr, acc_placeholder):
+                        acc_progress_indices.add(backedge_index_int)
+                        continue
+                    acc_guard_key = self.placeholder_algebra.placeholder_plus_unit_condition_guard_key(
+                        acc_backedge_expr,
+                        acc_placeholder,
+                        target_conditions,
+                    )
+                    if acc_guard_key is not None:
+                        acc_progress_indices.add(backedge_index_int)
+                        acc_conditional_progress_keys[backedge_index_int] = acc_guard_key
+                        if (
+                            self.placeholder_algebra.expression_is_placeholder_plus_zero_under_conditions(
+                                acc_backedge_expr,
+                                acc_placeholder,
+                                nonprogress_conditions,
+                            )
+                            or self.condition_logic.expressions_equal_under_conditions_smt(
+                                acc_backedge_expr,
+                                acc_placeholder,
+                                tuple(nonprogress_conditions or ()),
+                                getattr(analysis, "parameters", ()) or (),
+                            )
+                        ):
+                            acc_nonprogress_indices.add(backedge_index_int)
+                        continue
                     if (
-                        self._expression_is_placeholder_plus_zero_under_conditions(
+                        self.condition_logic.expressions_same_key(acc_backedge_expr, acc_placeholder)
+                        or self.placeholder_algebra.expression_is_placeholder_plus_zero_under_conditions(
                             acc_backedge_expr,
                             acc_placeholder,
                             nonprogress_conditions,
                         )
-                        or self._expressions_equal_under_conditions_smt(
+                        or self.condition_logic.expressions_equal_under_conditions_smt(
                             acc_backedge_expr,
                             acc_placeholder,
                             tuple(nonprogress_conditions or ()),
@@ -946,93 +1009,93 @@ def _impl__prove_branch_guarded_affine_unit_count_recurrence(
                         )
                     ):
                         acc_nonprogress_indices.add(backedge_index_int)
-                    continue
-                if (
-                    self._expressions_same_key(acc_backedge_expr, acc_placeholder)
-                    or self._expression_is_placeholder_plus_zero_under_conditions(
+                        continue
+                    if self.placeholder_algebra.expression_is_placeholder_plus_one_under_conditions(
                         acc_backedge_expr,
                         acc_placeholder,
-                        nonprogress_conditions,
+                        target_conditions,
+                    ):
+                        acc_progress_indices.add(backedge_index_int)
+                        continue
+                    if self.debug_flag():
+                        self.debug_reporter.debug_print(
+                            "Outcome branch-guarded structural proof acc transition unrecognized: "
+                            f"index={backedge_index_int}, expr={self.debug_reporter.debug_expr_summary(acc_backedge_expr)}"
+                        )
+                    acc_unknown_transition = True
+                    break
+                if acc_unknown_transition or not acc_progress_indices:
+                    continue
+                saw_acc_transition = True
+                for state_phi in phi_ops:
+                    if state_phi is acc_phi:
+                        continue
+                    state_phi_key = self.pcode_sites.pcode_op_stable_key(state_phi)
+                    if acc_phi_key not in recursive_origin_keys and state_phi_key not in recursive_origin_keys:
+                        continue
+                    state_indices = summarizer._state_loop_phi_indices(header_block, state_phi)
+                    if state_indices is None:
+                        continue
+                    state_init_index, state_backedge_indices = state_indices
+                    if tuple(int(index) for index in state_backedge_indices) != tuple(int(index) for index in acc_backedge_indices):
+                        continue
+                    state_output = getattr(state_phi, "getOutput", lambda: None)()
+                    if state_output is None:
+                        continue
+                    state_placeholder = Expression.variable(
+                        "__branch_guarded_state",
+                        size=max(1, int(getattr(state_output, "getSize", lambda: 4)() or 4)),
                     )
-                    or self._expressions_equal_under_conditions_smt(
-                        acc_backedge_expr,
-                        acc_placeholder,
-                        tuple(nonprogress_conditions or ()),
-                        getattr(analysis, "parameters", ()) or (),
-                    )
-                ):
-                    acc_nonprogress_indices.add(backedge_index_int)
-                    continue
-                if self._expression_is_placeholder_plus_one_under_conditions(
-                    acc_backedge_expr,
-                    acc_placeholder,
-                    target_conditions,
-                ):
-                    acc_progress_indices.add(backedge_index_int)
-                    continue
-                if self.debug:
-                    self._debug_print(
-                        "Outcome branch-guarded structural proof acc transition unrecognized: "
-                        f"index={backedge_index_int}, expr={self._debug_expr_summary(acc_backedge_expr)}"
-                    )
-                acc_unknown_transition = True
-                break
-            if acc_unknown_transition or not acc_progress_indices:
-                continue
-            saw_acc_transition = True
-            for state_phi in phi_ops:
-                if state_phi is acc_phi:
-                    continue
-                state_phi_key = self._pcode_op_stable_key(state_phi)
-                if acc_phi_key not in recursive_origin_keys and state_phi_key not in recursive_origin_keys:
-                    continue
-                state_indices = summarizer._state_loop_phi_indices(header_block, state_phi)
-                if state_indices is None:
-                    continue
-                state_init_index, state_backedge_indices = state_indices
-                if tuple(int(index) for index in state_backedge_indices) != tuple(int(index) for index in acc_backedge_indices):
-                    continue
-                state_output = getattr(state_phi, "getOutput", lambda: None)()
-                if state_output is None:
-                    continue
-                state_placeholder = Expression.variable(
-                    "__branch_guarded_state",
-                    size=max(1, int(getattr(state_output, "getSize", lambda: 4)() or 4)),
-                )
-                state_init = summarizer._build_pcode_expression(
-                    state_phi.getInput(state_init_index),
-                    placeholders={state_output: state_placeholder},
-                )
-                if not self._expression_is_same_parameter_ignoring_subpiece(state_init, c_param):
-                    continue
-                state_progress_indices: Set[int] = set()
-                state_nonprogress_indices: Set[int] = set()
-                state_conditional_progress_keys: Dict[int, Tuple[Any, ...]] = {}
-                state_unknown_transition = False
-                for backedge_index in state_backedge_indices:
-                    backedge_index_int = int(backedge_index)
-                    state_backedge_expr = summarizer._build_pcode_expression(
-                        state_phi.getInput(backedge_index),
+                    state_init = summarizer._build_pcode_expression(
+                        state_phi.getInput(state_init_index),
                         placeholders={state_output: state_placeholder},
                     )
-                    if self._expression_is_placeholder_minus_one(state_backedge_expr, state_placeholder):
-                        state_progress_indices.add(backedge_index_int)
+                    if not self.condition_logic.expression_is_same_parameter_ignoring_subpiece(state_init, c_param):
                         continue
-                    state_guard_key = self._placeholder_minus_one_unit_condition_guard_key(
-                        state_backedge_expr,
-                        state_placeholder,
-                        target_conditions,
-                    )
-                    if state_guard_key is not None:
-                        state_progress_indices.add(backedge_index_int)
-                        state_conditional_progress_keys[backedge_index_int] = state_guard_key
+                    state_progress_indices: Set[int] = set()
+                    state_nonprogress_indices: Set[int] = set()
+                    state_conditional_progress_keys: Dict[int, Tuple[Any, ...]] = {}
+                    state_unknown_transition = False
+                    for backedge_index in state_backedge_indices:
+                        backedge_index_int = int(backedge_index)
+                        state_backedge_expr = summarizer._build_pcode_expression(
+                            state_phi.getInput(backedge_index),
+                            placeholders={state_output: state_placeholder},
+                        )
+                        if self.placeholder_algebra.expression_is_placeholder_minus_one(state_backedge_expr, state_placeholder):
+                            state_progress_indices.add(backedge_index_int)
+                            continue
+                        state_guard_key = self.placeholder_algebra.placeholder_minus_one_unit_condition_guard_key(
+                            state_backedge_expr,
+                            state_placeholder,
+                            target_conditions,
+                        )
+                        if state_guard_key is not None:
+                            state_progress_indices.add(backedge_index_int)
+                            state_conditional_progress_keys[backedge_index_int] = state_guard_key
+                            if (
+                                self.placeholder_algebra.expression_is_placeholder_plus_zero_under_conditions(
+                                    state_backedge_expr,
+                                    state_placeholder,
+                                    nonprogress_conditions,
+                                )
+                                or self.condition_logic.expressions_equal_under_conditions_smt(
+                                    state_backedge_expr,
+                                    state_placeholder,
+                                    tuple(nonprogress_conditions or ()),
+                                    getattr(analysis, "parameters", ()) or (),
+                                )
+                            ):
+                                state_nonprogress_indices.add(backedge_index_int)
+                            continue
                         if (
-                            self._expression_is_placeholder_plus_zero_under_conditions(
+                            self.condition_logic.expressions_same_key(state_backedge_expr, state_placeholder)
+                            or self.placeholder_algebra.expression_is_placeholder_plus_zero_under_conditions(
                                 state_backedge_expr,
                                 state_placeholder,
                                 nonprogress_conditions,
                             )
-                            or self._expressions_equal_under_conditions_smt(
+                            or self.condition_logic.expressions_equal_under_conditions_smt(
                                 state_backedge_expr,
                                 state_placeholder,
                                 tuple(nonprogress_conditions or ()),
@@ -1040,314 +1103,294 @@ def _impl__prove_branch_guarded_affine_unit_count_recurrence(
                             )
                         ):
                             state_nonprogress_indices.add(backedge_index_int)
-                        continue
+                            continue
+                        if self.placeholder_algebra.expression_is_placeholder_minus_one_under_conditions(
+                            state_backedge_expr,
+                            state_placeholder,
+                            target_conditions,
+                        ):
+                            state_progress_indices.add(backedge_index_int)
+                            continue
+                        if self.debug_flag():
+                            self.debug_reporter.debug_print(
+                                "Outcome branch-guarded structural proof state transition unrecognized: "
+                                f"index={backedge_index_int}, expr={self.debug_reporter.debug_expr_summary(state_backedge_expr)}"
+                            )
+                        state_unknown_transition = True
+                        break
                     if (
-                        self._expressions_same_key(state_backedge_expr, state_placeholder)
-                        or self._expression_is_placeholder_plus_zero_under_conditions(
-                            state_backedge_expr,
-                            state_placeholder,
-                            nonprogress_conditions,
-                        )
-                        or self._expressions_equal_under_conditions_smt(
-                            state_backedge_expr,
-                            state_placeholder,
-                            tuple(nonprogress_conditions or ()),
-                            getattr(analysis, "parameters", ()) or (),
-                        )
+                        state_unknown_transition
+                        or not state_progress_indices
+                        or state_progress_indices != acc_progress_indices
+                        or state_nonprogress_indices != acc_nonprogress_indices
+                        or state_conditional_progress_keys != acc_conditional_progress_keys
                     ):
-                        state_nonprogress_indices.add(backedge_index_int)
+                        if self.debug_flag():
+                            self.debug_reporter.debug_print(
+                                "Outcome branch-guarded structural proof state transition set mismatch: "
+                                f"state_unknown={state_unknown_transition}, "
+                                f"acc_progress={sorted(acc_progress_indices)}, "
+                                f"state_progress={sorted(state_progress_indices)}, "
+                                f"acc_nonprogress={sorted(acc_nonprogress_indices)}, "
+                                f"state_nonprogress={sorted(state_nonprogress_indices)}, "
+                                f"acc_conditional={sorted(acc_conditional_progress_keys)}, "
+                                f"state_conditional={sorted(state_conditional_progress_keys)}"
+                            )
                         continue
-                    if self._expression_is_placeholder_minus_one_under_conditions(
-                        state_backedge_expr,
-                        state_placeholder,
-                        target_conditions,
+                    saw_state_transition = True
+                    if not self.divergence_proofs.state_phi_feeds_positive_loop_guard(
+                        high_function,
+                        summarizer=summarizer,
+                        header_block=header_block,
+                        backedge_indices=tuple(int(index) for index in state_backedge_indices),
+                        state_phi=state_phi,
+                        state_placeholder=state_placeholder,
+                        target_conditions=target_conditions,
+                        allow_latch_progress_guard=allow_latch_progress_guard,
                     ):
-                        state_progress_indices.add(backedge_index_int)
                         continue
-                    if self.debug:
-                        self._debug_print(
-                            "Outcome branch-guarded structural proof state transition unrecognized: "
-                            f"index={backedge_index_int}, expr={self._debug_expr_summary(state_backedge_expr)}"
+                    saw_state_guard = True
+                    return (
+                        "branch_guarded_affine_unit_count_structural_proof",
+                        ("schema_version", 1),
+                        ("function", getattr(analysis, "function_name", None)),
+                        ("acc_phi", self.pcode_sites.pcode_op_stable_key(acc_phi)),
+                        ("state_phi", self.pcode_sites.pcode_op_stable_key(state_phi)),
+                        ("progress_backedges", tuple(sorted(acc_progress_indices))),
+                        ("nonprogress_backedges", tuple(sorted(acc_nonprogress_indices))),
+                        ("conditional_progress_backedges", tuple(sorted(acc_conditional_progress_keys))),
+                        ("conditional_progress_guard_keys", tuple(sorted(acc_conditional_progress_keys.items(), key=repr))),
+                        ("target", tuple(condition.to_string() for condition in target_conditions or ())),
+                        ("target_guard_keys", tuple(sorted((self.divergence_proofs.condition_identity_key(condition) for condition in target_conditions or ()), key=repr))),
+                    )
+        self.debug_reporter.debug_print(
+            "Outcome branch-guarded structural proof declined: "
+            f"saw_acc_candidate={saw_acc_candidate}, "
+            f"saw_acc_transition={saw_acc_transition}, "
+            f"saw_state_transition={saw_state_transition}, "
+            f"saw_state_guard={saw_state_guard}"
+        )
+        return None
+
+    def branch_guarded_affine_ignored_artifacts_are_shadowed(
+        self,
+        ignored_artifacts: Sequence[ReturnInfo],
+        recursive_returns: Sequence[Tuple[ReturnInfo, int]],
+        parameters: Sequence[Dict],
+    ) -> bool:
+        if not ignored_artifacts:
+            return True
+        for artifact in ignored_artifacts:
+            artifact_conditions = tuple(getattr(artifact, "conditions", ()) or ())
+            artifact_site = self.return_site_key(artifact)
+            if not any(
+                artifact_site == self.return_site_key(recursive)
+                and (
+                    self.expression_cases.condition_lists_equivalent(
+                        list(artifact_conditions),
+                        list(getattr(recursive, "conditions", ()) or ()),
+                    )
+                    or (
+                        self.condition_logic.conditions_imply(
+                            artifact_conditions,
+                            tuple(getattr(recursive, "conditions", ()) or ()),
                         )
-                    state_unknown_transition = True
-                    break
-                if (
-                    state_unknown_transition
-                    or not state_progress_indices
-                    or state_progress_indices != acc_progress_indices
-                    or state_nonprogress_indices != acc_nonprogress_indices
-                    or state_conditional_progress_keys != acc_conditional_progress_keys
-                ):
-                    if self.debug:
-                        self._debug_print(
-                            "Outcome branch-guarded structural proof state transition set mismatch: "
-                            f"state_unknown={state_unknown_transition}, "
-                            f"acc_progress={sorted(acc_progress_indices)}, "
-                            f"state_progress={sorted(state_progress_indices)}, "
-                            f"acc_nonprogress={sorted(acc_nonprogress_indices)}, "
-                            f"state_nonprogress={sorted(state_nonprogress_indices)}, "
-                            f"acc_conditional={sorted(acc_conditional_progress_keys)}, "
-                            f"state_conditional={sorted(state_conditional_progress_keys)}"
+                        and self.condition_logic.conditions_imply(
+                            tuple(getattr(recursive, "conditions", ()) or ()),
+                            artifact_conditions,
                         )
-                    continue
-                saw_state_transition = True
-                if not self._state_phi_feeds_positive_loop_guard(
-                    high_function,
-                    summarizer=summarizer,
-                    header_block=header_block,
-                    backedge_indices=tuple(int(index) for index in state_backedge_indices),
-                    state_phi=state_phi,
-                    state_placeholder=state_placeholder,
-                    target_conditions=target_conditions,
-                    allow_latch_progress_guard=allow_latch_progress_guard,
-                ):
-                    continue
-                saw_state_guard = True
-                return (
-                    "branch_guarded_affine_unit_count_structural_proof",
-                    ("schema_version", 1),
-                    ("function", getattr(analysis, "function_name", None)),
-                    ("acc_phi", self._pcode_op_stable_key(acc_phi)),
-                    ("state_phi", self._pcode_op_stable_key(state_phi)),
-                    ("progress_backedges", tuple(sorted(acc_progress_indices))),
-                    ("nonprogress_backedges", tuple(sorted(acc_nonprogress_indices))),
-                    ("conditional_progress_backedges", tuple(sorted(acc_conditional_progress_keys))),
-                    ("conditional_progress_guard_keys", tuple(sorted(acc_conditional_progress_keys.items(), key=repr))),
-                    ("target", tuple(condition.to_string() for condition in target_conditions or ())),
-                    ("target_guard_keys", tuple(sorted((self._condition_identity_key(condition) for condition in target_conditions or ()), key=repr))),
+                    )
                 )
-    self._debug_print(
-        "Outcome branch-guarded structural proof declined: "
-        f"saw_acc_candidate={saw_acc_candidate}, "
-        f"saw_acc_transition={saw_acc_transition}, "
-        f"saw_state_transition={saw_state_transition}, "
-        f"saw_state_guard={saw_state_guard}"
-    )
-    return None
-
-
-def _impl__branch_guarded_affine_ignored_artifacts_are_shadowed(
-    self,
-    ignored_artifacts: Sequence[ReturnInfo],
-    recursive_returns: Sequence[Tuple[ReturnInfo, int]],
-    parameters: Sequence[Dict],
-) -> bool:
-    if not ignored_artifacts:
+                and self.condition_logic.expressions_equal_under_conditions_smt(
+                    getattr(artifact, "value", None),
+                    getattr(recursive, "value", None),
+                    tuple(artifact_conditions) + tuple(getattr(recursive, "conditions", ()) or ()),
+                    parameters,
+                )
+                for recursive, _step in recursive_returns
+            ):
+                return False
         return True
-    for artifact in ignored_artifacts:
-        artifact_conditions = tuple(getattr(artifact, "conditions", ()) or ())
-        artifact_site = self._return_site_key(artifact)
-        if not any(
-            artifact_site == self._return_site_key(recursive)
-            and (
-                self._condition_lists_equivalent(
-                    list(artifact_conditions),
-                    list(getattr(recursive, "conditions", ()) or ()),
-                )
-                or (
-                    self._conditions_imply(
-                        artifact_conditions,
-                        tuple(getattr(recursive, "conditions", ()) or ()),
-                    )
-                    and self._conditions_imply(
-                        tuple(getattr(recursive, "conditions", ()) or ()),
-                        artifact_conditions,
-                    )
-                )
-            )
-            and self._expressions_equal_under_conditions_smt(
-                getattr(artifact, "value", None),
-                getattr(recursive, "value", None),
-                tuple(artifact_conditions) + tuple(getattr(recursive, "conditions", ()) or ()),
-                parameters,
-            )
-            for recursive, _step in recursive_returns
-        ):
+
+    def branch_guarded_affine_phi_step(self, value: Optional[Expression]) -> Optional[int]:
+        signature = self.phi_origins.phi_circular_additive_signature(value)
+        if signature is None:
+            return None
+        phi_coeff, constant = signature
+        if phi_coeff != 1:
+            return None
+        try:
+            return int(constant)
+        except (TypeError, ValueError):
+            return None
+
+    def branch_guarded_affine_singleton_base_anchor_matches(
+        self,
+        value: Optional[Expression],
+        conditions: Sequence[Condition],
+        c_param: Expression,
+        target_conditions: Sequence[Condition],
+    ) -> bool:
+        if self.stack_protector.constant_int_value(value) != 1:
             return False
-    return True
+        if not self.condition_logic.conditions_overlap(tuple(conditions or ()), target_conditions):
+            return False
+        return any(
+            self.placeholder_algebra.condition_is_param_minus_one_nonpositive(condition, c_param, target_conditions)
+            for condition in conditions or ()
+        )
 
-
-def _impl__branch_guarded_affine_phi_step(self, value: Optional[Expression]) -> Optional[int]:
-    signature = self._phi_circular_additive_signature(value)
-    if signature is None:
-        return None
-    phi_coeff, constant = signature
-    if phi_coeff != 1:
-        return None
-    try:
-        return int(constant)
-    except (TypeError, ValueError):
-        return None
-
-
-def _impl__branch_guarded_affine_singleton_base_anchor_matches(
-    self,
-    value: Optional[Expression],
-    conditions: Sequence[Condition],
-    c_param: Expression,
-    target_conditions: Sequence[Condition],
-) -> bool:
-    if self._constant_int_value(value) != 1:
-        return False
-    if not self._conditions_overlap(tuple(conditions or ()), target_conditions):
-        return False
-    return any(
-        self._condition_is_param_minus_one_nonpositive(condition, c_param, target_conditions)
-        for condition in conditions or ()
-    )
-
-
-def _impl__branch_guarded_expression_is_param_minus_one(
-    self,
-    expr: Optional[Expression],
-    param: Expression,
-    target_conditions: Sequence[Condition],
-) -> bool:
-    if expr is None or getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
-        return False
-    if self._expressions_equal_under_conditions_smt(
-        expr,
-        Expression.binary_op(
-            "INT_SUB",
-            param,
-            Expression.constant(1, size=max(1, int(getattr(param, "size", 0) or 4))),
-        ),
-        tuple(target_conditions or ()),
-        getattr(self, "_current_parameters", ()) or (),
-    ):
-        return True
-    if getattr(expr, "operator", None) == "INT_ADD":
+    def branch_guarded_expression_is_param_minus_one(
+        self,
+        expr: Optional[Expression],
+        param: Expression,
+        target_conditions: Sequence[Condition],
+    ) -> bool:
+        if expr is None or getattr(expr, "expr_type", None) != ExpressionType.BINARY_OP:
+            return False
+        if self.condition_logic.expressions_equal_under_conditions_smt(
+            expr,
+            Expression.binary_op(
+                "INT_SUB",
+                param,
+                Expression.constant(1, size=max(1, int(getattr(param, "size", 0) or 4))),
+            ),
+            tuple(target_conditions or ()),
+            self.current_parameters_value() or (),
+        ):
+            return True
+        if getattr(expr, "operator", None) == "INT_ADD":
+            operands = tuple(getattr(expr, "operands", ()) or ())
+            if len(operands) != 2:
+                return False
+            left, right = operands
+            if self.condition_logic.expression_is_same_parameter_ignoring_subpiece(left, param):
+                return self.placeholder_algebra.expression_is_placeholder_minus_one_under_conditions(expr, left, target_conditions)
+            if self.condition_logic.expression_is_same_parameter_ignoring_subpiece(right, param):
+                return self.placeholder_algebra.expression_is_placeholder_minus_one_under_conditions(expr, right, target_conditions)
+            return False
+        if getattr(expr, "operator", None) != "INT_SUB":
+            return False
         operands = tuple(getattr(expr, "operands", ()) or ())
         if len(operands) != 2:
             return False
-        left, right = operands
-        if self._expression_is_same_parameter_ignoring_subpiece(left, param):
-            return self._expression_is_placeholder_minus_one_under_conditions(expr, left, target_conditions)
-        if self._expression_is_same_parameter_ignoring_subpiece(right, param):
-            return self._expression_is_placeholder_minus_one_under_conditions(expr, right, target_conditions)
-        return False
-    if getattr(expr, "operator", None) != "INT_SUB":
-        return False
-    operands = tuple(getattr(expr, "operands", ()) or ())
-    if len(operands) != 2:
-        return False
-    return self._expression_is_same_parameter_ignoring_subpiece(
-        operands[0],
-        param,
-    ) and self._expression_is_one_under_conditions(operands[1], target_conditions)
+        return self.condition_logic.expression_is_same_parameter_ignoring_subpiece(
+            operands[0],
+            param,
+        ) and self.placeholder_algebra.expression_is_one_under_conditions(operands[1], target_conditions)
 
+    def prove_branch_guarded_while_nonprogress_must_diverge(
+        self,
+        high_function,
+        *,
+        invariant_conditions: Sequence[Condition],
+    ) -> Optional[Dict[str, Any]]:
+        if high_function is None:
+            return None
+        blocks = tuple(self.block_graph.iter_high_basic_blocks(high_function))
+        if not blocks:
+            return None
+        tracer = None
+        if self.program_value() is not None:
+            try:
+                tracer = self.program_access.make_tracer(high_function)
+            except Exception:
+                tracer = None
 
-def _impl__prove_branch_guarded_while_nonprogress_must_diverge(
-    self,
-    high_function,
-    *,
-    invariant_conditions: Sequence[Condition],
-) -> Optional[Dict[str, Any]]:
-    if high_function is None:
-        return None
-    blocks = tuple(self._iter_high_basic_blocks(high_function))
-    if not blocks:
-        return None
-    tracer = None
-    if self.program is not None:
-        try:
-            tracer = self._make_tracer(high_function)
-        except Exception:
-            tracer = None
+        adjacency: Dict[Any, List[Any]] = {}
+        excluded_edges: List[Dict[str, Any]] = []
+        for block in blocks:
+            block_key = self.block_graph.block_debug_key(block)
+            adjacency[block_key] = []
+            for successor in self.block_graph.block_successors(block):
+                successor_key = self.block_graph.block_debug_key(successor)
+                edge_condition = self.divergence_proofs.edge_condition_for_successor(block, successor, tracer)
+                if edge_condition is not None and self.condition_logic.condition_contradicts_any(
+                    edge_condition,
+                    tuple(invariant_conditions or ()),
+                ):
+                    excluded_edges.append(
+                        {
+                            "source": block_key,
+                            "target": successor_key,
+                            "edge_condition": edge_condition.to_string(),
+                            "relation": "invariant_contradicts_edge",
+                        }
+                    )
+                    continue
+                adjacency[block_key].append(successor_key)
 
-    adjacency: Dict[Any, List[Any]] = {}
-    excluded_edges: List[Dict[str, Any]] = []
-    for block in blocks:
-        block_key = self._block_debug_key(block)
-        adjacency[block_key] = []
-        for successor in self._block_successors(block):
-            successor_key = self._block_debug_key(successor)
-            edge_condition = self._edge_condition_for_successor(block, successor, tracer)
-            if edge_condition is not None and self._condition_contradicts_any(
-                edge_condition,
-                tuple(invariant_conditions or ()),
-            ):
-                excluded_edges.append(
-                    {
-                        "source": block_key,
-                        "target": successor_key,
-                        "edge_condition": edge_condition.to_string(),
-                        "relation": "invariant_contradicts_edge",
-                    }
-                )
+        key_to_block = {self.block_graph.block_debug_key(block): block for block in blocks}
+        entry_keys = [
+            self.block_graph.block_debug_key(block)
+            for block in blocks
+            if self.block_graph.block_predecessor_count(block) == 0
+        ]
+        if not entry_keys:
+            entry_keys = [self.block_graph.block_debug_key(blocks[0])]
+
+        reachable: Set[Any] = set()
+        stack = list(entry_keys)
+        while stack:
+            key = stack.pop()
+            if key in reachable or key not in key_to_block:
                 continue
-            adjacency[block_key].append(successor_key)
+            reachable.add(key)
+            stack.extend(adjacency.get(key, ()))
+        if not reachable:
+            return None
+        if not excluded_edges:
+            self.debug_reporter.debug_print("Outcome branch-guarded divergence proof declined: no invariant-excluding guard edges")
+            return None
+        for key in reachable:
+            block = key_to_block.get(key)
+            if block is None:
+                return None
+            if self.block_graph.block_has_return_op(block):
+                self.debug_reporter.debug_print("Outcome branch-guarded divergence proof declined: reachable RETURN under invariant")
+                return None
+            if self.block_graph.block_writes_outcome_guard_state(block):
+                self.debug_reporter.debug_print("Outcome branch-guarded divergence proof declined: reachable guard-state write under invariant")
+                return None
+            if not adjacency.get(key):
+                self.debug_reporter.debug_print("Outcome branch-guarded divergence proof declined: reachable terminal block under invariant")
+                return None
+        cycle_keys = self.divergence_proofs.reachable_cycle_keys(reachable, adjacency)
+        if not cycle_keys:
+            self.debug_reporter.debug_print("Outcome branch-guarded divergence proof declined: no feasible invariant cycle")
+            return None
+        reachable_blocks = {
+            key_to_block[key]
+            for key in reachable
+            if key in key_to_block
+        }
+        if not reachable_blocks or not self.divergence_proofs.scc_preserves_guard_dependencies(reachable_blocks):
+            self.debug_reporter.debug_print("Outcome branch-guarded divergence proof declined: reachable graph redefines guard dependency")
+            return None
+        cycle_blocks = {
+            key_to_block[key]
+            for key in cycle_keys
+            if key in key_to_block
+        }
+        if not cycle_blocks or not self.divergence_proofs.scc_preserves_guard_dependencies(cycle_blocks):
+            self.debug_reporter.debug_print("Outcome branch-guarded divergence proof declined: cycle redefines guard dependency")
+            return None
+        return {
+            "proof_kind": "branch_guarded_while_nonprogress_must_diverge",
+            "candidate_rule": "branch_guarded_loop_invariant_nonprogress",
+            "invariant": [condition.to_string() for condition in invariant_conditions or ()],
+            "reachable_blocks": sorted(str(key) for key in reachable),
+            "cycle_blocks": sorted(str(key) for key in cycle_keys),
+            "excluded_edges": excluded_edges,
+            "side_effect_control_safety": {
+                "forbidden_ops_absent": True,
+                "return_ops_absent_under_invariant": True,
+                "guard_state_writes_absent_under_invariant": True,
+                "guard_dependency_writes_absent_under_invariant": True,
+            },
+            "cfg_applicability_surface": self.block_graph.cfg_applicability_surface(high_function),
+        }
 
-    key_to_block = {self._block_debug_key(block): block for block in blocks}
-    entry_keys = [
-        self._block_debug_key(block)
-        for block in blocks
-        if self._block_predecessor_count(block) == 0
-    ]
-    if not entry_keys:
-        entry_keys = [self._block_debug_key(blocks[0])]
-
-    reachable: Set[Any] = set()
-    stack = list(entry_keys)
-    while stack:
-        key = stack.pop()
-        if key in reachable or key not in key_to_block:
-            continue
-        reachable.add(key)
-        stack.extend(adjacency.get(key, ()))
-    if not reachable:
-        return None
-    if not excluded_edges:
-        self._debug_print("Outcome branch-guarded divergence proof declined: no invariant-excluding guard edges")
-        return None
-    for key in reachable:
-        block = key_to_block.get(key)
-        if block is None:
-            return None
-        if self._block_has_return_op(block):
-            self._debug_print("Outcome branch-guarded divergence proof declined: reachable RETURN under invariant")
-            return None
-        if self._block_writes_outcome_guard_state(block):
-            self._debug_print("Outcome branch-guarded divergence proof declined: reachable guard-state write under invariant")
-            return None
-        if not adjacency.get(key):
-            self._debug_print("Outcome branch-guarded divergence proof declined: reachable terminal block under invariant")
-            return None
-    cycle_keys = self._reachable_cycle_keys(reachable, adjacency)
-    if not cycle_keys:
-        self._debug_print("Outcome branch-guarded divergence proof declined: no feasible invariant cycle")
-        return None
-    reachable_blocks = {
-        key_to_block[key]
-        for key in reachable
-        if key in key_to_block
-    }
-    if not reachable_blocks or not self._scc_preserves_guard_dependencies(reachable_blocks):
-        self._debug_print("Outcome branch-guarded divergence proof declined: reachable graph redefines guard dependency")
-        return None
-    cycle_blocks = {
-        key_to_block[key]
-        for key in cycle_keys
-        if key in key_to_block
-    }
-    if not cycle_blocks or not self._scc_preserves_guard_dependencies(cycle_blocks):
-        self._debug_print("Outcome branch-guarded divergence proof declined: cycle redefines guard dependency")
-        return None
-    return {
-        "proof_kind": "branch_guarded_while_nonprogress_must_diverge",
-        "candidate_rule": "branch_guarded_loop_invariant_nonprogress",
-        "invariant": [condition.to_string() for condition in invariant_conditions or ()],
-        "reachable_blocks": sorted(str(key) for key in reachable),
-        "cycle_blocks": sorted(str(key) for key in cycle_keys),
-        "excluded_edges": excluded_edges,
-        "side_effect_control_safety": {
-            "forbidden_ops_absent": True,
-            "return_ops_absent_under_invariant": True,
-            "guard_state_writes_absent_under_invariant": True,
-            "guard_dependency_writes_absent_under_invariant": True,
-        },
-        "cfg_applicability_surface": _current_cfg_applicability_surface(self, high_function),
-    }
 
 
 def _impl__high_function_has_forbidden_control_outcome_ops(self, high_function, *, allow_call: bool) -> bool:
@@ -2632,6 +2675,17 @@ class BlockGraphService:
     ) -> None:
         self.pcode_sites = pcode_sites
         self.cbranch_direct_target_keys = cbranch_direct_target_keys
+
+    def cfg_applicability_surface(self, high_function) -> Tuple[Tuple[Any, ...], Tuple[Tuple[Any, Any], ...]]:
+        """CFG の block 鍵と edge 鍵（旧 module 関数 _current_cfg_applicability_surface）。"""
+        blocks = tuple(self.iter_high_basic_blocks(high_function))
+        block_keys = tuple(sorted((self.block_debug_key(block) for block in blocks), key=repr))
+        edge_keys = tuple(sorted((
+            (self.block_debug_key(block), self.block_debug_key(successor))
+            for block in blocks
+            for successor in self.block_successors(block)
+        ), key=repr))
+        return block_keys, edge_keys
 
     def block_successors(self, block) -> Tuple[Any, ...]:
         successors = []

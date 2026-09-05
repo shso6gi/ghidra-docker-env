@@ -42,8 +42,8 @@ class DivergenceProofService:
 
     facade 状態のうち読むのは program / 直接呼び出しグラフ（とその完了ノード集合）で、いずれも引数なし
     supplier として注入し呼び出し時に読む（グラフは解析中に facade 側で更新される）。条件論理・placeholder
-    代数・定数値抽出は各 collaborator を直接依存として受け取る。未抽出 family（control_recovery / lifecycle）が
-    所有する helper は facade 経由で遅延 dispatch する callable として注入する。
+    代数・定数値抽出・block グラフ走査（``BlockGraphService``）・program アクセス（``ProgramAccessService``）・
+    デバッグ出力（``DebugReporter``）は各 collaborator を直接依存として受け取る。facade 経由の callback は残っていない。
     ``condition_identity_key`` は module 関数が実装で、PlaceholderAlgebraService も同じ関数を使う。
     """
 
