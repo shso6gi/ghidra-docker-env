@@ -18,7 +18,7 @@ DIRECT = {
     "stack_protector": {"constant_int_value"},
 }
 FACADE_CALLBACKS = ()
-SUPPLIERS = ("program_value", "direct_call_graph_value", "direct_call_graph_complete_nodes_value")
+SUPPLIERS = ("program_value",)
 STATIC = {"condition_identity_key", "field_value_from_structural_proof", "tuple_field_from_structural_proof"}
 
 
@@ -29,7 +29,7 @@ def _analyzer():
 def test_collaborator_holds_only_its_dependencies():
     analyzer = _analyzer()
     service = analyzer._divergence_proofs
-    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"debug_reporter", "program_access", "block_graph"}
+    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"debug_reporter", "program_access", "block_graph", "runtime_state"}
     for attr in DIRECT:
         assert getattr(service, attr) is getattr(analyzer, "_" + attr)
     assert service.debug_reporter is analyzer._debug_reporter
@@ -89,10 +89,11 @@ def test_suppliers_read_analyzer_state_at_call_time():
     analyzer = _analyzer()
     service = analyzer._divergence_proofs
     assert service.program_value() is analyzer.program
-    assert service.direct_call_graph_value() is analyzer._direct_call_graph
-    assert service.direct_call_graph_complete_nodes_value() is analyzer._direct_call_graph_complete_nodes
+    assert service.runtime_state is analyzer._runtime_state
+    assert service.runtime_state.direct_call_graph is analyzer._direct_call_graph
+    assert service.runtime_state.direct_call_graph_complete_nodes is analyzer._direct_call_graph_complete_nodes
     analyzer._direct_call_graph[("f",)] = {("g",)}
-    assert service.direct_call_graph_value() == {("f",): {("g",)}}
+    assert service.runtime_state.direct_call_graph == {("f",): {("g",)}}
 
 
 def test_unextracted_helpers_dispatch_through_the_facade_at_call_time():

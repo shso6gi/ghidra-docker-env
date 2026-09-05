@@ -14,6 +14,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     PcodeTracer,
     StructuralRecurrenceSummarizer,
 )
+from scripts.function_tracer_pcode.analysis.runtime_state import AnalysisRuntimeState
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns._api import (
@@ -40,8 +41,11 @@ def condition_identity_key(condition: Condition) -> Tuple[Any, ...]:
 class DivergenceProofService:
     """ReturnAnalyzer から切り出した発散証明（SCC 非進行ガード・条件進行ガード鍵・CFG 循環）の collaborator。
 
-    facade 状態のうち読むのは program / 直接呼び出しグラフ（とその完了ノード集合）で、いずれも引数なし
-    supplier として注入し呼び出し時に読む（グラフは解析中に facade 側で更新される）。条件論理・placeholder
+    analyzer-lifetime mutable state: ``AnalysisRuntimeState`` owner を ``runtime_state`` 直接依存として保持し、
+    直接呼び出しグラフとその完了ノード集合は ``self.runtime_state.direct_call_graph`` 等で owner 経由で都度読む
+    （owner の identity は固定するが field は都度参照するため、facade property による field object の差し替えに
+    追随する。グラフは解析中に facade 側で更新される）。configuration: ``program`` は従来どおり supplier 境界。
+    条件論理・placeholder
     代数・定数値抽出・block グラフ走査（``BlockGraphService``）・program アクセス（``ProgramAccessService``）・
     デバッグ出力（``DebugReporter``）は各 collaborator を直接依存として受け取る。facade 経由の callback は残っていない。
     ``condition_identity_key`` は module 関数が実装で、PlaceholderAlgebraService も同じ関数を使う。
@@ -50,6 +54,7 @@ class DivergenceProofService:
     def __init__(
         self,
         *,
+        runtime_state: "AnalysisRuntimeState",
         block_graph: BlockGraphService,
         program_access: ProgramAccessService,
         condition_logic: ConditionLogicService,
@@ -57,9 +62,8 @@ class DivergenceProofService:
         stack_protector: StackProtectorService,
         debug_reporter: DebugReporter,
         program_value: Callable[..., Any],
-        direct_call_graph_value: Callable[..., Any],
-        direct_call_graph_complete_nodes_value: Callable[..., Any],
     ) -> None:
+        self.runtime_state = runtime_state
         self.block_graph = block_graph
         self.program_access = program_access
         self.condition_logic = condition_logic
@@ -67,8 +71,6 @@ class DivergenceProofService:
         self.stack_protector = stack_protector
         self.debug_reporter = debug_reporter
         self.program_value = program_value
-        self.direct_call_graph_value = direct_call_graph_value
-        self.direct_call_graph_complete_nodes_value = direct_call_graph_complete_nodes_value
 
     def recursive_scc_certificate(
         self,
@@ -76,9 +78,9 @@ class DivergenceProofService:
     ) -> Tuple[bool, Optional[str], Tuple[Tuple[object, ...], ...]]:
         """Return a certificate only for a fully enumerated recursive SCC."""
 
-        if function_key is None or function_key not in self.direct_call_graph_value():
+        if function_key is None or function_key not in self.runtime_state.direct_call_graph:
             return False, None, ()
-        graph = self.direct_call_graph_value()
+        graph = self.runtime_state.direct_call_graph
         index = 0
         stack: List[Tuple[object, ...]] = []
         on_stack: Set[Tuple[object, ...]] = set()
@@ -121,7 +123,7 @@ class DivergenceProofService:
         )
         recursive = len(component) > 1 or function_key in graph.get(function_key, set())
         complete = bool(component) and all(
-            member in self.direct_call_graph_complete_nodes_value() for member in component
+            member in self.runtime_state.direct_call_graph_complete_nodes for member in component
         )
         if not recursive or not complete:
             return False, None, ()

@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     locations_match,
     promote_effect_value_match_to_post_state_read,
 )
+from scripts.function_tracer_pcode.analysis.session import AnalysisSession
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
@@ -36,9 +37,10 @@ from scripts.function_tracer_pcode.analysis.returns.phi_origins import expressio
 class ReturnNormalizationService:
     """ReturnAnalyzer から切り出した return 値正規化（分割正規化・符号書き換え・tracked value 書き換え）の collaborator。
 
-    facade 状態のうち読むのは現在パラメータ / 現在 effect summary / debug フラグで、いずれも引数なし
-    supplier として注入し呼び出し時に読む。式ケース・条件論理・stack-protector・p-code site の各 collaborator は
-    直接依存。PHI 含有判定は ``phi_origins.expression_contains_phi``（純関数）を import する。
+    per-analysis state: ``AnalysisSession`` を返す ``session`` supplier を 1 本保持し、呼び出し時に
+    ``self.session().parameters`` / ``self.session().effect_summary`` を読む（nested ``_analysis_context`` の
+    push/pop に追随する）。configuration: ``debug`` フラグは従来どおり supplier 境界。
+    式ケース・条件論理・stack-protector・p-code site の各 collaborator は直接依存。PHI 含有判定は ``phi_origins.expression_contains_phi``（純関数）を import する。
     未抽出 family（lifecycle / effect_integration / return_extraction / parameters / control_recovery /
     call_recovery）が所有する helper は facade 経由で遅延 dispatch する callable として注入する。
     """
@@ -46,6 +48,7 @@ class ReturnNormalizationService:
     def __init__(
         self,
         *,
+        session: Callable[[], "AnalysisSession"],
         return_paths: ReturnPathSelectionService,
         expression_cases: ExpressionCaseService,
         condition_logic: ConditionLogicService,
@@ -61,10 +64,9 @@ class ReturnNormalizationService:
         deduplicate_tracked_return_values: Callable[..., Any],
         propagate_passthrough_input_from_op: Callable[..., Any],
         normalize_return_callother_userops: Callable[..., Any],
-        current_parameters_value: Callable[..., Any],
-        current_effect_summary_value: Callable[..., Any],
         debug_flag: Callable[..., Any],
     ) -> None:
+        self.session = session
         self.return_paths = return_paths
         self.expression_cases = expression_cases
         self.condition_logic = condition_logic
@@ -80,8 +82,6 @@ class ReturnNormalizationService:
         self.deduplicate_tracked_return_values = deduplicate_tracked_return_values
         self.propagate_passthrough_input_from_op = propagate_passthrough_input_from_op
         self.normalize_return_callother_userops = normalize_return_callother_userops
-        self.current_parameters_value = current_parameters_value
-        self.current_effect_summary_value = current_effect_summary_value
         self.debug_flag = debug_flag
 
     def normalize_return_partition(self, analysis: FunctionReturnAnalysis) -> None:
@@ -275,11 +275,11 @@ class ReturnNormalizationService:
 
         original_location = canonicalize_expr_read_location(
             original,
-            self.current_parameters_value(),
+            self.session().parameters,
         )
         rewritten_location = canonicalize_expr_read_location(
             rewritten,
-            self.current_parameters_value(),
+            self.session().parameters,
         )
         if (
             original_location is None
@@ -289,7 +289,7 @@ class ReturnNormalizationService:
             return False
         if not self.expression_cases.is_direct_location_carrier(rewritten):
             return False
-        current_effect_summary = self.current_effect_summary_value()
+        current_effect_summary = self.session().effect_summary
         if (
             current_effect_summary is not None
             and (
@@ -299,7 +299,7 @@ class ReturnNormalizationService:
                         original_location,
                         conditions,
                         current_effect_summary.effects,
-                        self.current_parameters_value(),
+                        self.session().parameters,
                         symbolic_post_state=True,
                     )
                     is not None
@@ -309,7 +309,7 @@ class ReturnNormalizationService:
                     rewritten,
                     conditions,
                     current_effect_summary.effects,
-                    self.current_parameters_value(),
+                    self.session().parameters,
                 )
             )
         ):
@@ -326,7 +326,7 @@ class ReturnNormalizationService:
     ) -> Expression:
         normalized_value = value
         started_with_phi = expression_contains_phi(value)
-        effect_summary = self.current_effect_summary_value()
+        effect_summary = self.session().effect_summary
         has_effects = effect_summary is not None and bool(effect_summary.effects)
 
         if started_with_phi:

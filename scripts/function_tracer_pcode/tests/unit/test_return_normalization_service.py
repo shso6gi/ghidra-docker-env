@@ -31,7 +31,7 @@ FACADE_CALLBACKS = (
     "propagate_passthrough_input_from_op",
     "normalize_return_callother_userops",
 )
-SUPPLIERS = ("current_parameters_value", "current_effect_summary_value", "debug_flag")
+SUPPLIERS = ("session", "debug_flag")
 
 
 def _analyzer(debug=False):
@@ -91,8 +91,8 @@ def test_suppliers_read_analyzer_state_at_call_time():
     service = analyzer._return_normalization
     analyzer._current_parameters = [{"name": "param_1"}]
     analyzer._current_effect_summary = object()
-    assert service.current_parameters_value() is analyzer._current_parameters
-    assert service.current_effect_summary_value() is analyzer._current_effect_summary
+    assert service.session().parameters is analyzer._current_parameters
+    assert service.session().effect_summary is analyzer._current_effect_summary
     assert service.debug_flag() is False
     analyzer.debug = True
     assert service.debug_flag() is True

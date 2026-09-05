@@ -73,21 +73,15 @@ def test_augmented_assignment_on_the_counter_goes_through_the_setter():
     assert analyzer._runtime_state.deferred_call_counter == 2 == analyzer._deferred_call_counter
 
 
-def test_collaborator_suppliers_still_see_the_owner_containers():
+def test_collaborators_hold_the_runtime_state_owner_directly():
+    """6a-5 以降: collaborator は per-field supplier ではなく owner そのものを直接依存として持つ。"""
     analyzer = _analyzer()
     state = analyzer._runtime_state
-    ei = analyzer._effect_integration
-    assert ei.effect_summary_cache_value() is state.effect_summary_cache
-    assert ei.effect_summary_parameter_cache_value() is state.effect_summary_parameter_cache
-    assert ei.direct_call_graph_value() is state.direct_call_graph
-    assert ei.direct_call_graph_complete_nodes_value() is state.direct_call_graph_complete_nodes
-    dp = analyzer._divergence_proofs
-    assert dp.direct_call_graph_value() is state.direct_call_graph
-    assert dp.direct_call_graph_complete_nodes_value() is state.direct_call_graph_complete_nodes
-    # 差し替え後も supplier は新しい owner 側 object を返す
+    assert analyzer._effect_integration.runtime_state is state
+    assert analyzer._divergence_proofs.runtime_state is state
+    # 直接代入 seam で owner のフィールドを差し替えても、owner 経由で読む collaborator は新しい object を見る
     analyzer._direct_call_graph = {}
-    assert ei.direct_call_graph_value() is analyzer._runtime_state.direct_call_graph
-
+    assert analyzer._effect_integration.runtime_state.direct_call_graph is analyzer._runtime_state.direct_call_graph
 
 def test_runtime_state_survives_nested_analysis_contexts_unlike_the_session():
     """AnalysisSession は _analysis_context で push/pop されるが、runtime state は analyzer 寿命で不変。"""

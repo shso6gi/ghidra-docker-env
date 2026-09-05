@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     build_switch_dispatch_summaries,
     expression_contains_post_state_reads,
 )
+from scripts.function_tracer_pcode.analysis.session import AnalysisSession
 from scripts.function_tracer_pcode.analysis.returns._api import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.core import CallTargetRef
 
@@ -48,7 +49,9 @@ def _impl__phase1_direct_branch_escapes_function_body(self, instruction, body) -
 class BranchGuardedWhileProofService:
     """ReturnAnalyzer から切り出した branch-guarded while / structural nonprogress 証明（control_recovery family 2 群目）の collaborator。
 
-    facade 状態は debug / enable_completed_recovery_proofs / program / 現在パラメータを supplier で読む。
+    per-analysis state: ``AnalysisSession`` を返す ``session`` supplier を 1 本保持し、呼び出し時に
+    ``self.session().parameters`` を読む（nested ``_analysis_context`` の push/pop に追随する）。
+    configuration: ``debug`` / ``enable_completed_recovery_proofs`` / ``program`` は従来どおり supplier 境界。
     条件論理・placeholder 代数・発散証明・block グラフ・PHI 起源・式ケース・定数抽出・パラメータ・p-code site・
     program アクセス・デバッグ出力は各 collaborator を直接依存として受け取る。未抽出 family（return_extraction）
     が所有する helper と、control_recovery に残る ``high_function_has_forbidden_control_outcome_ops`` は
@@ -58,6 +61,7 @@ class BranchGuardedWhileProofService:
     def __init__(
         self,
         *,
+        session: Callable[[], "AnalysisSession"],
         return_paths: "ReturnPathSelectionService",
         condition_logic: "ConditionLogicService",
         placeholder_algebra: "PlaceholderAlgebraService",
@@ -79,8 +83,8 @@ class BranchGuardedWhileProofService:
         debug_flag: Callable[..., Any],
         enable_completed_recovery_proofs_value: Callable[..., Any],
         program_value: Callable[..., Any],
-        current_parameters_value: Callable[..., Any],
     ) -> None:
+        self.session = session
         self.return_paths = return_paths
         self.condition_logic = condition_logic
         self.placeholder_algebra = placeholder_algebra
@@ -102,7 +106,6 @@ class BranchGuardedWhileProofService:
         self.debug_flag = debug_flag
         self.enable_completed_recovery_proofs_value = enable_completed_recovery_proofs_value
         self.program_value = program_value
-        self.current_parameters_value = current_parameters_value
 
     def try_apply_branch_guarded_while_outcomes(
         self,
@@ -1204,7 +1207,7 @@ class BranchGuardedWhileProofService:
                 Expression.constant(1, size=max(1, int(getattr(param, "size", 0) or 4))),
             ),
             tuple(target_conditions or ()),
-            self.current_parameters_value() or (),
+            self.session().parameters or (),
         ):
             return True
         if getattr(expr, "operator", None) == "INT_ADD":
@@ -2542,7 +2545,9 @@ class ReturnPathSelectionService:
     """ReturnAnalyzer から切り出した return path 選択（MULTIEQUAL 入力選択・blocked path 条件・分岐 index・
     制御 outcome 禁止 op 判定・条件被覆検査）の collaborator（control_recovery family 3 群目）。
 
-    facade 状態は debug フラグと現在の blocked return path 条件を supplier で読む。条件論理・block グラフ・
+    per-analysis state: ``AnalysisSession`` を返す ``session`` supplier を 1 本保持し、呼び出し時に
+    ``self.session().blocked_return_path_conditions`` を読む（nested ``_analysis_context`` の push/pop に追随する）。
+    configuration: ``debug`` フラグは従来どおり supplier 境界。条件論理・block グラフ・
     式ケース・デバッグ出力は各 collaborator を直接依存として受け取る。未抽出 family（return_extraction）が所有する
     ``make_tracked_return_value`` と、生成順の都合で後に作られる EffectIntegrationService 所有の
     ``return_info_effective_region_conditions`` は facade 経由で遅延 dispatch する callable として注入する。
@@ -2551,6 +2556,7 @@ class ReturnPathSelectionService:
     def __init__(
         self,
         *,
+        session: Callable[[], "AnalysisSession"],
         condition_logic: "ConditionLogicService",
         block_graph: "BlockGraphService",
         expression_cases: "ExpressionCaseService",
@@ -2558,8 +2564,8 @@ class ReturnPathSelectionService:
         make_tracked_return_value: Callable[..., Any],
         return_info_effective_region_conditions: Callable[..., Any],
         debug_flag: Callable[..., Any],
-        current_blocked_return_path_conditions_value: Callable[..., Any],
     ) -> None:
+        self.session = session
         self.condition_logic = condition_logic
         self.block_graph = block_graph
         self.expression_cases = expression_cases
@@ -2567,7 +2573,6 @@ class ReturnPathSelectionService:
         self.make_tracked_return_value = make_tracked_return_value
         self.return_info_effective_region_conditions = return_info_effective_region_conditions
         self.debug_flag = debug_flag
-        self.current_blocked_return_path_conditions_value = current_blocked_return_path_conditions_value
 
     def check_condition_coverage(self, analysis: FunctionReturnAnalysis):
         """
@@ -2915,7 +2920,7 @@ class ReturnPathSelectionService:
         self,
         conditions: List[Condition],
     ) -> bool:
-        blocked_sets = self.current_blocked_return_path_conditions_value() or []
+        blocked_sets = self.session().blocked_return_path_conditions or []
         if not blocked_sets:
             return False
 

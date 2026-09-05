@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.analysis.returns._shared import ConditionNormalizer
+from scripts.function_tracer_pcode.analysis.session import AnalysisSession
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import condition_identity_key
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
@@ -13,8 +14,8 @@ from scripts.function_tracer_pcode.analysis.returns.condition_logic import Condi
 class PlaceholderAlgebraService:
     """ReturnAnalyzer から切り出した placeholder 代数（param-1 / +0 / +1 形の判定と単位進行ガード鍵）の collaborator。
 
-    facade 状態のうち読むのは ReturnAnalyzer が解析ごとに差し替える現在パラメータのみで、
-    ``current_parameters`` supplier（引数なし callable）として注入し呼び出し時に読む。
+    per-analysis state: ``AnalysisSession`` を返す ``session`` supplier を 1 本保持し、呼び出し時に
+    ``self.session().parameters`` を読む（nested ``_analysis_context`` の push/pop に追随する）。
     条件論理は ``ConditionLogicService``、定数値抽出は ``StackProtectorService`` を直接依存として受け取り、
     条件 identity 鍵は ``divergence_proofs.condition_identity_key``（純関数）を import する。
     未抽出 family が所有する ``branch_guarded_expression_is_param_minus_one`` は facade 経由で遅延 dispatch する
@@ -24,13 +25,13 @@ class PlaceholderAlgebraService:
     def __init__(
         self,
         *,
+        session: Callable[[], "AnalysisSession"],
         condition_logic: ConditionLogicService,
-        current_parameters: Callable[[], Sequence[Any]],
         stack_protector: StackProtectorService,
         branch_guarded_expression_is_param_minus_one: Callable[..., Any],
     ) -> None:
+        self.session = session
         self.condition_logic = condition_logic
-        self.current_parameters = current_parameters
         self.stack_protector = stack_protector
         self.branch_guarded_expression_is_param_minus_one = branch_guarded_expression_is_param_minus_one
 
@@ -68,7 +69,7 @@ class PlaceholderAlgebraService:
             expr,
             expected,
             tuple(conditions or ()),
-            self.current_parameters() or (),
+            self.session().parameters or (),
         )
 
     def expression_is_placeholder_minus_one_under_conditions(
@@ -91,7 +92,7 @@ class PlaceholderAlgebraService:
             expr,
             expected,
             tuple(conditions or ()),
-            self.current_parameters() or (),
+            self.session().parameters or (),
         )
 
     def expression_is_placeholder_plus_zero_under_conditions(
@@ -151,7 +152,7 @@ class PlaceholderAlgebraService:
             current,
             Expression.constant(0, size=max(1, int(getattr(current, "size", 0) or 4))),
             tuple(conditions or ()),
-            self.current_parameters() or (),
+            self.session().parameters or (),
         )
 
     def expression_is_placeholder_minus_one_unit_condition(

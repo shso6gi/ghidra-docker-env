@@ -24,7 +24,7 @@ NAMES = {
 FACADE_CALLBACKS = ("acc_phi_flows_to_return_origin_phi", "return_conditions_cover_region",
                     "return_info_candidate_phi_origin_keys", "return_info_return_phi_origin_keys",
                     "return_info_summary_identity_key", "return_site_key")
-SUPPLIERS = ("debug_flag", "enable_completed_recovery_proofs_value", "program_value", "current_parameters_value")
+SUPPLIERS = ("debug_flag", "enable_completed_recovery_proofs_value", "program_value", "session")
 
 
 def _analyzer():
@@ -76,7 +76,7 @@ def test_suppliers_read_analyzer_state_at_call_time():
     analyzer = _analyzer()
     service = analyzer._branch_guarded_while
     analyzer._current_parameters = [{"name": "param_1"}]
-    assert service.current_parameters_value() is analyzer._current_parameters
+    assert service.session().parameters is analyzer._current_parameters
     assert service.program_value() is analyzer.program
     assert service.enable_completed_recovery_proofs_value() == analyzer.enable_completed_recovery_proofs
     analyzer.debug = True
