@@ -20,7 +20,7 @@ DIRECT = {
 FACADE_CALLBACKS = (
     "block_debug_key", "block_successors", "same_high_block", "iter_high_basic_blocks", "first_high_block_cbranch",
     "iter_high_block_ops", "direct_cbranch_successor_relation", "block_writes_outcome_guard_state",
-    "block_predecessor_count", "block_has_return_op", "make_tracer",
+    "block_predecessor_count", "block_has_return_op",
 )
 SUPPLIERS = ("program_value", "direct_call_graph_value", "direct_call_graph_complete_nodes_value")
 STATIC = {"condition_identity_key", "field_value_from_structural_proof", "tuple_field_from_structural_proof"}
@@ -33,10 +33,11 @@ def _analyzer():
 def test_collaborator_holds_only_its_dependencies():
     analyzer = _analyzer()
     service = analyzer._divergence_proofs
-    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"debug_reporter"}
+    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"debug_reporter", "program_access"}
     for attr in DIRECT:
         assert getattr(service, attr) is getattr(analyzer, "_" + attr)
     assert service.debug_reporter is analyzer._debug_reporter
+    assert service.program_access is analyzer._program_access
 
 
 def test_every_delegator_forwards_to_the_collaborator():

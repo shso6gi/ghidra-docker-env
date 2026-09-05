@@ -23,8 +23,8 @@ def _varnode(space="register", offset=0x10, size=4):
 def test_collaborator_holds_only_injected_callables():
     service = _analyzer()._pcode_sites
     assert set(vars(service)) == {
+        "program_access",
         "storages_overlap_for_return_recovery",
-        "program_identity",
         "current_function_entry_address",
         "is_pcode_call_op",
         "get_implicit_return_target_storages",
@@ -86,7 +86,6 @@ def test_unextracted_helpers_dispatch_through_the_facade_at_call_time():
     analyzer = _analyzer()
     for facade_name, attr in (
         ("_storages_overlap_for_return_recovery", "storages_overlap_for_return_recovery"),
-        ("_program_identity", "program_identity"),
         ("_current_function_entry_address", "current_function_entry_address"),
         ("_is_pcode_call_op", "is_pcode_call_op"),
         ("_get_implicit_return_target_storages", "get_implicit_return_target_storages"),

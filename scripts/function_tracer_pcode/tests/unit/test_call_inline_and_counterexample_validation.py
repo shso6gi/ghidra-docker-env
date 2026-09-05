@@ -1839,7 +1839,7 @@ def test_return_analyzer_disassembles_local_target_and_follows_unconditional_bra
         listing.disassembled = True
         return True
 
-    analyzer._attempt_disassemble_at = _fake_disassemble
+    analyzer._program_access.attempt_disassemble_at = _fake_disassemble  # family 内呼び出し（get_instruction_with_fallback → attempt_disassemble_at）
 
     expanded = analyzer._expand_linear_code_target(start_addr, tracer)
 
