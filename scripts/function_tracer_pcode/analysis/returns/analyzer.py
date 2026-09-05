@@ -9,7 +9,6 @@ from scripts.function_tracer_pcode.analysis.returns import (
     lifecycle as _svc_lifecycle,
     return_extraction as _svc_return_extraction,
     analyze_function as _svc_analyze_function,
-    parameters as _svc_parameters,
 )
 from typing import Any, Dict, List, Optional, Set, Tuple
 from scripts.function_tracer_pcode.config.settings import BOUNDED_CALL_MAX_CASES, BOUNDED_CALL_REFINEMENT_ENABLED, BOUNDED_CALL_UNROLL_LIMIT
@@ -18,6 +17,7 @@ from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
+from scripts.function_tracer_pcode.analysis.returns.parameters import ParameterService
 from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import DivergenceProofService
 from scripts.function_tracer_pcode.analysis.returns.return_normalization import ReturnNormalizationService
 from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
@@ -104,6 +104,20 @@ class ReturnAnalyzer:
             current_parameters_value=lambda: self._current_parameters,
             current_effect_summary_value=lambda: self._current_effect_summary,
             debug_flag=lambda: self.debug,
+        )
+        self._parameters = ParameterService(
+            pcode_sites=self._pcode_sites,
+            return_normalization=self._return_normalization,
+            debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
+            target_active_key=lambda *a, **kw: self._target_active_key(*a, **kw),
+            should_synthesize_implicit_passthrough_for_call=lambda *a, **kw: self._should_synthesize_implicit_passthrough_for_call(*a, **kw),
+            return_site_metadata_from_info=lambda *a, **kw: self._return_site_metadata_from_info(*a, **kw),
+            make_tracked_return_value=lambda *a, **kw: self._make_tracked_return_value(*a, **kw),
+            make_return_info=lambda *a, **kw: self._make_return_info(*a, **kw),
+            get_freshest_callee_parameters=lambda *a, **kw: self._get_freshest_callee_parameters(*a, **kw),
+            program_value=lambda: self.program,
+            debug_flag=lambda: self.debug,
+            set_current_parameters=lambda value: setattr(self, "_current_parameters", value),
         )
         self._placeholder_algebra = PlaceholderAlgebraService(
             condition_logic=self._condition_logic,
@@ -539,9 +553,12 @@ class ReturnAnalyzer:
     def _collect_guard_dependency_varnodes(self, varnode, guard_dependency_keys, *, is_root, seen):
         return self._divergence_proofs.collect_guard_dependency_varnodes(varnode, guard_dependency_keys, is_root=is_root, seen=seen)
     _collect_java_or_python_iterable = staticmethod(_svc_lifecycle._impl__collect_java_or_python_iterable)
-    _collect_parameter_descriptors_from_expression = _svc_parameters._impl__collect_parameter_descriptors_from_expression
-    _collect_referenced_parameter_descriptors = _svc_parameters._impl__collect_referenced_parameter_descriptors
-    _collect_scalar_signedness_profiles = _svc_parameters._impl__collect_scalar_signedness_profiles
+    def _collect_parameter_descriptors_from_expression(self, expr, discovered):
+        return self._parameters.collect_parameter_descriptors_from_expression(expr, discovered)
+    def _collect_referenced_parameter_descriptors(self, return_infos):
+        return self._parameters.collect_referenced_parameter_descriptors(return_infos)
+    def _collect_scalar_signedness_profiles(self, return_infos):
+        return self._parameters.collect_scalar_signedness_profiles(return_infos)
     def _condition_for_identity_key(self, key, conditions):
         return self._divergence_proofs.condition_for_identity_key(key, conditions)
     @staticmethod
@@ -604,17 +621,21 @@ class ReturnAnalyzer:
     @staticmethod
     def _field_value_from_structural_proof(proof, field_name):
         return DivergenceProofService.field_value_from_structural_proof(proof, field_name)
-    _find_matching_parameter_descriptor_index = _svc_parameters._impl__find_matching_parameter_descriptor_index
+    def _find_matching_parameter_descriptor_index(self, parameters, candidate):
+        return self._parameters.find_matching_parameter_descriptor_index(parameters, candidate)
     _function_entry_address = staticmethod(_svc_lifecycle._impl__function_entry_address)
     def _high_function_cyclic_sccs(self, blocks):
         return self._divergence_proofs.high_function_cyclic_sccs(blocks)
     def _is_zero_constant(self, expr):
         return self._stack_protector.is_zero_constant(expr)
-    _merge_parameter_descriptors = _svc_parameters._impl__merge_parameter_descriptors
+    def _merge_parameter_descriptors(self, existing, candidate):
+        return self._parameters.merge_parameter_descriptors(existing, candidate)
     def _negated_unit_condition_key_for_expression(self, expr, conditions):
         return self._placeholder_algebra.negated_unit_condition_key_for_expression(expr, conditions)
-    _parameter_descriptor_from_expression = _svc_parameters._impl__parameter_descriptor_from_expression
-    _parameter_descriptor_key = _svc_parameters._impl__parameter_descriptor_key
+    def _parameter_descriptor_from_expression(self, expr):
+        return self._parameters.parameter_descriptor_from_expression(expr)
+    def _parameter_descriptor_key(self, descriptor):
+        return self._parameters.parameter_descriptor_key(descriptor)
     def _pcode_op_identity_key(self, pcode_op):
         return self._pcode_sites.pcode_op_identity_key(pcode_op)
     def _pcode_op_input_def_reaches_phi(self, op, target_phi_key, *, max_depth):
@@ -636,7 +657,8 @@ class ReturnAnalyzer:
         return self._divergence_proofs.prove_single_guard_nonprogress_region_must_diverge(high_function, analysis, divergence_guard=divergence_guard, param=param)
     def _reads_share_stack_protector_probe(self, left, right):
         return self._stack_protector.reads_share_stack_protector_probe(left, right)
-    _record_scalar_signedness_from_expression = _svc_parameters._impl__record_scalar_signedness_from_expression
+    def _record_scalar_signedness_from_expression(self, expr, profiles):
+        return self._parameters.record_scalar_signedness_from_expression(expr, profiles)
     def _recursive_scc_certificate(self, function_key):
         return self._divergence_proofs.recursive_scc_certificate(function_key)
     # RegionFacts collaborator (Phase 5): the facade keeps these names as thin
@@ -651,7 +673,8 @@ class ReturnAnalyzer:
 
     _region_input_is_nondata_operand = staticmethod(input_is_nondata_operand)
     _region_parameter_index_for_location = staticmethod(parameter_index_for_location)
-    _repair_mixed_scalar_signedness = _svc_parameters._impl__repair_mixed_scalar_signedness
+    def _repair_mixed_scalar_signedness(self, analysis):
+        return self._parameters.repair_mixed_scalar_signedness(analysis)
     def _scc_preserves_guard_dependencies(self, scc_set):
         return self._divergence_proofs.scc_preserves_guard_dependencies(scc_set)
     def _single_guard_condition_matches(self, condition, divergence_guard, param):
@@ -663,7 +686,8 @@ class ReturnAnalyzer:
     @staticmethod
     def _strip_transparent_unary(expr):
         return PlaceholderAlgebraService.strip_transparent_unary(expr)
-    _synchronize_parameters_with_referenced_parameter_expressions = _svc_parameters._impl__synchronize_parameters_with_referenced_parameter_expressions
+    def _synchronize_parameters_with_referenced_parameter_expressions(self, analysis):
+        return self._parameters.synchronize_parameters_with_referenced_parameter_expressions(analysis)
     @staticmethod
     def _tuple_field_from_structural_proof(proof, field_name):
         return DivergenceProofService.tuple_field_from_structural_proof(proof, field_name)
@@ -680,20 +704,24 @@ class ReturnAnalyzer:
     _analysis_needs_wrapper_recovery = _svc_analyze_function._impl__analysis_needs_wrapper_recovery
     _analysis_scope_key = _svc_lifecycle._impl__analysis_scope_key
     _attempt_disassemble_at = _svc_lifecycle._impl__attempt_disassemble_at
-    _augment_parameters_with_implicit_passthrough = _svc_parameters._impl__augment_parameters_with_implicit_passthrough
+    def _augment_parameters_with_implicit_passthrough(self, parameters, tracer, active_functions):
+        return self._parameters.augment_parameters_with_implicit_passthrough(parameters, tracer, active_functions)
     def _build_condition_signature_set(self, conditions):
         return self._condition_logic.build_condition_signature_set(conditions)
-    _choose_richer_parameter_descriptors = _svc_parameters._impl__choose_richer_parameter_descriptors
+    def _choose_richer_parameter_descriptors(self, cached_parameters, fresh_parameters):
+        return self._parameters.choose_richer_parameter_descriptors(cached_parameters, fresh_parameters)
     def _clone_expression(self, expr):
         return self._expression_cases.clone_expression(expr)
     def _coerce_expression_size(self, expr, size):
         return self._condition_logic.coerce_expression_size(expr, size)
     def _coerce_order_key(self, value):
         return self._condition_logic.coerce_order_key(value)
-    _coerce_wrapper_storage_info = _svc_parameters._impl__coerce_wrapper_storage_info
+    def _coerce_wrapper_storage_info(self, storage):
+        return self._parameters.coerce_wrapper_storage_info(storage)
     def _collect_expression_object_keys(self, expr, out):
         return self._expression_cases.collect_expression_object_keys(expr, out)
-    _collect_parameters = _svc_parameters._impl__collect_parameters
+    def _collect_parameters(self, high_function):
+        return self._parameters.collect_parameters(high_function)
     def _condition_contradicts_any(self, condition, others):
         return self._condition_logic.condition_contradicts_any(condition, others)
     def _condition_is_constant_equality_guard(self, condition):
@@ -736,8 +764,10 @@ class ReturnAnalyzer:
         return self._expression_cases.count_unresolved_value_nodes(expr)
     def _deduplicate_expression_cases(self, cases):
         return self._expression_cases.deduplicate_expression_cases(cases)
-    _deduplicate_storage_infos = _svc_parameters._impl__deduplicate_storage_infos
-    _detect_signedness = _svc_parameters._impl__detect_signedness
+    def _deduplicate_storage_infos(self, storages):
+        return self._parameters.deduplicate_storage_infos(storages)
+    def _detect_signedness(self, high_function):
+        return self._parameters.detect_signedness(high_function)
     def _direct_expression_runtime_guard_conditions(self, expr):
         return self._expression_cases.direct_expression_runtime_guard_conditions(expr)
     # LocalValueResolver collaborator (Phase 5): thin delegators for existing
@@ -787,16 +817,20 @@ class ReturnAnalyzer:
     _get_instruction_with_fallback = _svc_lifecycle._impl__get_instruction_with_fallback
     def _get_pcode_opcode(self, pcode_op):
         return self._pcode_sites.get_pcode_opcode(pcode_op)
-    _get_storage_info = _svc_parameters._impl__get_storage_info
-    _has_non_parameter_symbol_for_storage = _svc_parameters._impl__has_non_parameter_symbol_for_storage
+    def _get_storage_info(self, sym):
+        return self._parameters.get_storage_info(sym)
+    def _has_non_parameter_symbol_for_storage(self, tracer, target_storage):
+        return self._parameters.has_non_parameter_symbol_for_storage(tracer, target_storage)
     def _high_function_has_cfg_cycle(self, high_function):
         return self._divergence_proofs.high_function_has_cfg_cycle(high_function)
     def _is_boolean_expression(self, expr):
         return self._expression_cases.is_boolean_expression(expr)
     def _is_direct_location_carrier(self, expr):
         return self._expression_cases.is_direct_location_carrier(expr)
-    _is_signed_type = _svc_parameters._impl__is_signed_type
-    _is_void_type = _svc_parameters._impl__is_void_type
+    def _is_signed_type(self, data_type):
+        return self._parameters.is_signed_type(data_type)
+    def _is_void_type(self, data_type):
+        return self._parameters.is_void_type(data_type)
     def _is_zero_constant_varnode(self, varnode):
         return self._pcode_sites.is_zero_constant_varnode(varnode)
     def _iter_expression_nodes_for_unconditional_runtime_guards(self, expr):
@@ -812,12 +846,16 @@ class ReturnAnalyzer:
     _make_tracer = _svc_lifecycle._impl__make_tracer
     def _parameter_constant_assignments_from_conditions(self, conditions):
         return self._condition_logic.parameter_constant_assignments_from_conditions(conditions)
-    _parameter_descriptor_quality = _svc_parameters._impl__parameter_descriptor_quality
+    def _parameter_descriptor_quality(self, parameters):
+        return self._parameters.parameter_descriptor_quality(parameters)
     def _parameter_equals_condition(self, parameter, value):
         return self._phi_origins.parameter_equals_condition(parameter, value)
-    _parameter_expression = _svc_parameters._impl__parameter_expression
-    _parameter_storages_match_for_passthrough = _svc_parameters._impl__parameter_storages_match_for_passthrough
-    _parameter_storages_overlap_for_passthrough = _svc_parameters._impl__parameter_storages_overlap_for_passthrough
+    def _parameter_expression(self, analysis, index):
+        return self._parameters.parameter_expression(analysis, index)
+    def _parameter_storages_match_for_passthrough(self, caller_storage, callee_storage):
+        return self._parameters.parameter_storages_match_for_passthrough(caller_storage, callee_storage)
+    def _parameter_storages_overlap_for_passthrough(self, caller_storage, callee_storage):
+        return self._parameters.parameter_storages_overlap_for_passthrough(caller_storage, callee_storage)
     def _pcode_op_affects_tracked_storage(self, pcode_op, target_storage, tracer, current_function=None):
         return self._pcode_sites.pcode_op_affects_tracked_storage(pcode_op, target_storage, tracer, current_function)
     def _pcode_op_debug_name(self, pcode_op):
@@ -830,7 +868,8 @@ class ReturnAnalyzer:
         return self._phi_origins.phi_free_finite_fallback_candidates(fallback_value, conditions)
     def _phi_origin_keys_from_varnode_defs(self, varnode, *, max_depth=8):
         return self._phi_origins.phi_origin_keys_from_varnode_defs(varnode, max_depth=max_depth)
-    _propagate_passthrough_input_from_op = _svc_parameters._impl__propagate_passthrough_input_from_op
+    def _propagate_passthrough_input_from_op(self, pcode_op, tracer):
+        return self._parameters.propagate_passthrough_input_from_op(pcode_op, tracer)
     def _pruning_conditions_signature(self, conditions):
         return self._condition_logic.pruning_conditions_signature(conditions)
     def _reachable_cycle_keys(self, reachable, adjacency):
@@ -856,7 +895,8 @@ class ReturnAnalyzer:
         return self._divergence_proofs.state_phi_feeds_positive_loop_guard(high_function, summarizer=summarizer, header_block=header_block, backedge_indices=backedge_indices, state_phi=state_phi, state_placeholder=state_placeholder, target_conditions=target_conditions, allow_latch_progress_guard=allow_latch_progress_guard)
     def _substitute_parameter_constants_under_conditions(self, expr, conditions):
         return self._condition_logic.substitute_parameter_constants_under_conditions(expr, conditions)
-    _synthesize_implicit_passthrough_parameter = _svc_parameters._impl__synthesize_implicit_passthrough_parameter
+    def _synthesize_implicit_passthrough_parameter(self, current_parameters, callee_param, callee_storage):
+        return self._parameters.synthesize_implicit_passthrough_parameter(current_parameters, callee_param, callee_storage)
     @staticmethod
     def _varnode_location_key(varnode):
         return PcodeSiteService.varnode_location_key(varnode)

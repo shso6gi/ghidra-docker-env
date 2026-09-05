@@ -4930,7 +4930,7 @@ def test_return_analyzer_does_not_synthesize_hidden_param_when_register_has_loca
     ]
 
     with patch.object(analyzer, "_get_freshest_callee_parameters", return_value=callee_parameters):
-        with patch.object(analyzer, "_get_storage_info", side_effect=lambda sym: sym._storage):
+        with patch.object(analyzer._parameters, "get_storage_info", side_effect=lambda sym: sym._storage):
             augmented = analyzer._augment_parameters_with_implicit_passthrough(
                 current_parameters,
                 _FakeTracer(),
