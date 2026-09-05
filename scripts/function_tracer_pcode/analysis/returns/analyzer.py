@@ -9,7 +9,6 @@ from scripts.function_tracer_pcode.analysis.returns import (
     lifecycle as _svc_lifecycle,
     return_extraction as _svc_return_extraction,
     analyze_function as _svc_analyze_function,
-    divergence_proofs as _svc_divergence_proofs,
     parameters as _svc_parameters,
 )
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -19,6 +18,7 @@ from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
+from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import DivergenceProofService
 from scripts.function_tracer_pcode.analysis.returns.return_normalization import ReturnNormalizationService
 from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
 from scripts.function_tracer_pcode.analysis.returns.phi_origins import PhiOriginService
@@ -109,8 +109,27 @@ class ReturnAnalyzer:
             condition_logic=self._condition_logic,
             current_parameters=lambda: self._current_parameters,
             stack_protector=self._stack_protector,
-            condition_identity_key=lambda *a, **kw: self._condition_identity_key(*a, **kw),
             branch_guarded_expression_is_param_minus_one=lambda *a, **kw: self._branch_guarded_expression_is_param_minus_one(*a, **kw),
+        )
+        self._divergence_proofs = DivergenceProofService(
+            condition_logic=self._condition_logic,
+            placeholder_algebra=self._placeholder_algebra,
+            stack_protector=self._stack_protector,
+            block_debug_key=lambda *a, **kw: self._block_debug_key(*a, **kw),
+            block_successors=lambda *a, **kw: self._block_successors(*a, **kw),
+            same_high_block=lambda *a, **kw: self._same_high_block(*a, **kw),
+            iter_high_basic_blocks=lambda *a, **kw: self._iter_high_basic_blocks(*a, **kw),
+            first_high_block_cbranch=lambda *a, **kw: self._first_high_block_cbranch(*a, **kw),
+            iter_high_block_ops=lambda *a, **kw: self._iter_high_block_ops(*a, **kw),
+            direct_cbranch_successor_relation=lambda *a, **kw: self._direct_cbranch_successor_relation(*a, **kw),
+            block_writes_outcome_guard_state=lambda *a, **kw: self._block_writes_outcome_guard_state(*a, **kw),
+            block_predecessor_count=lambda *a, **kw: self._block_predecessor_count(*a, **kw),
+            block_has_return_op=lambda *a, **kw: self._block_has_return_op(*a, **kw),
+            debug_print=lambda *a, **kw: self._debug_print(*a, **kw),
+            make_tracer=lambda *a, **kw: self._make_tracer(*a, **kw),
+            program_value=lambda: self.program,
+            direct_call_graph_value=lambda: self._direct_call_graph,
+            direct_call_graph_complete_nodes_value=lambda: self._direct_call_graph_complete_nodes,
         )
         self._phi_origins = PhiOriginService(
             condition_logic=self._condition_logic,
@@ -517,20 +536,27 @@ class ReturnAnalyzer:
         return self._condition_logic.classify_param_condition(condition, param_name)
     def _coerce_optional_int(self, value):
         return self._pcode_sites.coerce_optional_int(value)
-    _collect_guard_dependency_varnodes = _svc_divergence_proofs._impl__collect_guard_dependency_varnodes
+    def _collect_guard_dependency_varnodes(self, varnode, guard_dependency_keys, *, is_root, seen):
+        return self._divergence_proofs.collect_guard_dependency_varnodes(varnode, guard_dependency_keys, is_root=is_root, seen=seen)
     _collect_java_or_python_iterable = staticmethod(_svc_lifecycle._impl__collect_java_or_python_iterable)
     _collect_parameter_descriptors_from_expression = _svc_parameters._impl__collect_parameter_descriptors_from_expression
     _collect_referenced_parameter_descriptors = _svc_parameters._impl__collect_referenced_parameter_descriptors
     _collect_scalar_signedness_profiles = _svc_parameters._impl__collect_scalar_signedness_profiles
-    _condition_for_identity_key = _svc_divergence_proofs._impl__condition_for_identity_key
-    _condition_identity_key = staticmethod(_svc_divergence_proofs._impl__condition_identity_key)
+    def _condition_for_identity_key(self, key, conditions):
+        return self._divergence_proofs.condition_for_identity_key(key, conditions)
+    @staticmethod
+    def _condition_identity_key(condition):
+        return DivergenceProofService.condition_identity_key(condition)
     def _condition_looks_like_stack_protector_guard(self, condition):
         return self._stack_protector.condition_looks_like_stack_protector_guard(condition)
     def _condition_mentions_param(self, condition, param_name):
         return self._condition_logic.condition_mentions_param(condition, param_name)
-    _conditional_progress_guard_keys_from_structural_proof = _svc_divergence_proofs._impl__conditional_progress_guard_keys_from_structural_proof
-    _conditional_progress_guards_contradict_invariant = _svc_divergence_proofs._impl__conditional_progress_guards_contradict_invariant
-    _conditions_have_contradictory_pair = _svc_divergence_proofs._impl__conditions_have_contradictory_pair
+    def _conditional_progress_guard_keys_from_structural_proof(self, proof):
+        return self._divergence_proofs.conditional_progress_guard_keys_from_structural_proof(proof)
+    def _conditional_progress_guards_contradict_invariant(self, guard_keys, *, target_conditions, invariant_conditions):
+        return self._divergence_proofs.conditional_progress_guards_contradict_invariant(guard_keys, target_conditions=target_conditions, invariant_conditions=invariant_conditions)
+    def _conditions_have_contradictory_pair(self, left, right):
+        return self._divergence_proofs.conditions_have_contradictory_pair(left, right)
     @staticmethod
     def _constant_expression_value(expr):
         return ConditionLogicService.constant_expression_value(expr)
@@ -542,7 +568,8 @@ class ReturnAnalyzer:
     _debug_print = _svc_lifecycle._impl__debug_print
     def _describe_pcode_site(self, pcode_op, fallback_address=None, *, identity_prefix=None):
         return self._pcode_sites.describe_pcode_site(pcode_op, fallback_address, identity_prefix=identity_prefix)
-    _edge_condition_for_successor = _svc_divergence_proofs._impl__edge_condition_for_successor
+    def _edge_condition_for_successor(self, block, successor, tracer):
+        return self._divergence_proofs.edge_condition_for_successor(block, successor, tracer)
     def _expression_contains_equivalent_subexpr(self, expr, target):
         return self._expression_cases.expression_contains_equivalent_subexpr(expr, target)
     @staticmethod
@@ -574,10 +601,13 @@ class ReturnAnalyzer:
         return self._stack_protector.extract_indirect_probe(expr)
     def _extract_stack_protector_compare_pair(self, condition):
         return self._stack_protector.extract_stack_protector_compare_pair(condition)
-    _field_value_from_structural_proof = staticmethod(_svc_divergence_proofs._impl__field_value_from_structural_proof)
+    @staticmethod
+    def _field_value_from_structural_proof(proof, field_name):
+        return DivergenceProofService.field_value_from_structural_proof(proof, field_name)
     _find_matching_parameter_descriptor_index = _svc_parameters._impl__find_matching_parameter_descriptor_index
     _function_entry_address = staticmethod(_svc_lifecycle._impl__function_entry_address)
-    _high_function_cyclic_sccs = _svc_divergence_proofs._impl__high_function_cyclic_sccs
+    def _high_function_cyclic_sccs(self, blocks):
+        return self._divergence_proofs.high_function_cyclic_sccs(blocks)
     def _is_zero_constant(self, expr):
         return self._stack_protector.is_zero_constant(expr)
     _merge_parameter_descriptors = _svc_parameters._impl__merge_parameter_descriptors
@@ -600,12 +630,15 @@ class ReturnAnalyzer:
         return self._placeholder_algebra.placeholder_minus_one_unit_condition_guard_key(expr, placeholder, conditions)
     def _placeholder_plus_unit_condition_guard_key(self, expr, placeholder, conditions):
         return self._placeholder_algebra.placeholder_plus_unit_condition_guard_key(expr, placeholder, conditions)
-    _prove_scc_must_diverge_under_guard = _svc_divergence_proofs._impl__prove_scc_must_diverge_under_guard
-    _prove_single_guard_nonprogress_region_must_diverge = _svc_divergence_proofs._impl__prove_single_guard_nonprogress_region_must_diverge
+    def _prove_scc_must_diverge_under_guard(self, scc, *, all_blocks, divergence_guard, param, tracer):
+        return self._divergence_proofs.prove_scc_must_diverge_under_guard(scc, all_blocks=all_blocks, divergence_guard=divergence_guard, param=param, tracer=tracer)
+    def _prove_single_guard_nonprogress_region_must_diverge(self, high_function, analysis, *, divergence_guard, param):
+        return self._divergence_proofs.prove_single_guard_nonprogress_region_must_diverge(high_function, analysis, divergence_guard=divergence_guard, param=param)
     def _reads_share_stack_protector_probe(self, left, right):
         return self._stack_protector.reads_share_stack_protector_probe(left, right)
     _record_scalar_signedness_from_expression = _svc_parameters._impl__record_scalar_signedness_from_expression
-    _recursive_scc_certificate = _svc_divergence_proofs._impl__recursive_scc_certificate
+    def _recursive_scc_certificate(self, function_key):
+        return self._divergence_proofs.recursive_scc_certificate(function_key)
     # RegionFacts collaborator (Phase 5): the facade keeps these names as thin
     # delegators for existing callers and tests.
     def _region_address_is_code(self, address) -> bool:
@@ -619,19 +652,25 @@ class ReturnAnalyzer:
     _region_input_is_nondata_operand = staticmethod(input_is_nondata_operand)
     _region_parameter_index_for_location = staticmethod(parameter_index_for_location)
     _repair_mixed_scalar_signedness = _svc_parameters._impl__repair_mixed_scalar_signedness
-    _scc_preserves_guard_dependencies = _svc_divergence_proofs._impl__scc_preserves_guard_dependencies
-    _single_guard_condition_matches = _svc_divergence_proofs._impl__single_guard_condition_matches
-    _single_guard_conditions_are_contradictory = _svc_divergence_proofs._impl__single_guard_conditions_are_contradictory
+    def _scc_preserves_guard_dependencies(self, scc_set):
+        return self._divergence_proofs.scc_preserves_guard_dependencies(scc_set)
+    def _single_guard_condition_matches(self, condition, divergence_guard, param):
+        return self._divergence_proofs.single_guard_condition_matches(condition, divergence_guard, param)
+    def _single_guard_conditions_are_contradictory(self, divergence_guard, edge_condition, param):
+        return self._divergence_proofs.single_guard_conditions_are_contradictory(divergence_guard, edge_condition, param)
     def _strip_stack_protector_only_conditions(self, return_infos):
         return self._stack_protector.strip_stack_protector_only_conditions(return_infos)
     @staticmethod
     def _strip_transparent_unary(expr):
         return PlaceholderAlgebraService.strip_transparent_unary(expr)
     _synchronize_parameters_with_referenced_parameter_expressions = _svc_parameters._impl__synchronize_parameters_with_referenced_parameter_expressions
-    _tuple_field_from_structural_proof = staticmethod(_svc_divergence_proofs._impl__tuple_field_from_structural_proof)
+    @staticmethod
+    def _tuple_field_from_structural_proof(proof, field_name):
+        return DivergenceProofService.tuple_field_from_structural_proof(proof, field_name)
     def _unit_condition_key_for_expression(self, expr, conditions):
         return self._placeholder_algebra.unit_condition_key_for_expression(expr, conditions)
-    _varnode_guard_dependency_key = _svc_divergence_proofs._impl__varnode_guard_dependency_key
+    def _varnode_guard_dependency_key(self, varnode):
+        return self._divergence_proofs.varnode_guard_dependency_key(varnode)
     def _varnodes_same_storage(self, left, right):
         return self._pcode_sites.varnodes_same_storage(left, right)
     analyze_function = _svc_analyze_function._impl_analyze_function
@@ -724,7 +763,8 @@ class ReturnAnalyzer:
         return self._placeholder_algebra.expression_is_one_under_conditions(expr, target_conditions)
     def _expression_is_param_minus_one(self, expr, param):
         return self._placeholder_algebra.expression_is_param_minus_one(expr, param)
-    _expression_is_positive_after_unit_progress_guard = _svc_divergence_proofs._impl__expression_is_positive_after_unit_progress_guard
+    def _expression_is_positive_after_unit_progress_guard(self, expr, state_placeholder, conditions):
+        return self._divergence_proofs.expression_is_positive_after_unit_progress_guard(expr, state_placeholder, conditions)
     def _expression_is_same_parameter(self, expr, param):
         return self._condition_logic.expression_is_same_parameter(expr, param)
     def _expression_is_same_parameter_ignoring_subpiece(self, expr, param):
@@ -749,7 +789,8 @@ class ReturnAnalyzer:
         return self._pcode_sites.get_pcode_opcode(pcode_op)
     _get_storage_info = _svc_parameters._impl__get_storage_info
     _has_non_parameter_symbol_for_storage = _svc_parameters._impl__has_non_parameter_symbol_for_storage
-    _high_function_has_cfg_cycle = _svc_divergence_proofs._impl__high_function_has_cfg_cycle
+    def _high_function_has_cfg_cycle(self, high_function):
+        return self._divergence_proofs.high_function_has_cfg_cycle(high_function)
     def _is_boolean_expression(self, expr):
         return self._expression_cases.is_boolean_expression(expr)
     def _is_direct_location_carrier(self, expr):
@@ -792,7 +833,8 @@ class ReturnAnalyzer:
     _propagate_passthrough_input_from_op = _svc_parameters._impl__propagate_passthrough_input_from_op
     def _pruning_conditions_signature(self, conditions):
         return self._condition_logic.pruning_conditions_signature(conditions)
-    _reachable_cycle_keys = _svc_divergence_proofs._impl__reachable_cycle_keys
+    def _reachable_cycle_keys(self, reachable, adjacency):
+        return self._divergence_proofs.reachable_cycle_keys(reachable, adjacency)
     def _readonly_reduction_contract_priority_score(self, info):
         return self._phi_origins.readonly_reduction_contract_priority_score(info)
     def _readonly_reduction_ref_contract_priority_score(self, runtime_ref):
@@ -810,7 +852,8 @@ class ReturnAnalyzer:
         return self._phi_origins.single_parameter_expression_in_conditions(conditions)
     def _split_small_finite_parameter_reachability_conditions(self, conditions, *, search_min=-8, search_max=64, max_cases=16):
         return self._phi_origins.split_small_finite_parameter_reachability_conditions(conditions, search_min=search_min, search_max=search_max, max_cases=max_cases)
-    _state_phi_feeds_positive_loop_guard = _svc_divergence_proofs._impl__state_phi_feeds_positive_loop_guard
+    def _state_phi_feeds_positive_loop_guard(self, high_function, *, summarizer, header_block, backedge_indices, state_phi, state_placeholder, target_conditions, allow_latch_progress_guard):
+        return self._divergence_proofs.state_phi_feeds_positive_loop_guard(high_function, summarizer=summarizer, header_block=header_block, backedge_indices=backedge_indices, state_phi=state_phi, state_placeholder=state_placeholder, target_conditions=target_conditions, allow_latch_progress_guard=allow_latch_progress_guard)
     def _substitute_parameter_constants_under_conditions(self, expr, conditions):
         return self._condition_logic.substitute_parameter_constants_under_conditions(expr, conditions)
     _synthesize_implicit_passthrough_parameter = _svc_parameters._impl__synthesize_implicit_passthrough_parameter
