@@ -20,13 +20,14 @@ def test_collaborator_holds_only_its_dependencies():
     assert set(vars(service)) == {
         "condition_logic",
         "stack_protector",
-        "pcode_op_stable_key",
+        "pcode_sites",
         "normalize_expanded_return_value",
         "debug_print",
         "debug_flag",
     }
     assert service.condition_logic is analyzer._condition_logic
     assert service.stack_protector is analyzer._stack_protector
+    assert service.pcode_sites is analyzer._pcode_sites
 
 
 def test_every_delegator_forwards_to_the_collaborator():
@@ -75,7 +76,6 @@ def test_condition_logic_and_stack_protector_are_direct_dependencies():
 def test_unextracted_helpers_dispatch_through_the_facade_at_call_time():
     analyzer = _analyzer()
     for facade_name, attr in (
-        ("_pcode_op_stable_key", "pcode_op_stable_key"),
         ("_normalize_expanded_return_value", "normalize_expanded_return_value"),
         ("_debug_print", "debug_print"),
     ):
@@ -83,6 +83,20 @@ def test_unextracted_helpers_dispatch_through_the_facade_at_call_time():
         with patch.object(ReturnAnalyzer, facade_name, return_value=sentinel) as mocked:
             assert getattr(analyzer._phi_origins, attr)(Mock(), key=1) is sentinel
             mocked.assert_called_once()
+
+
+def test_pcode_op_stable_key_is_a_direct_pcode_sites_dependency():
+    """#70 で facade callback だった pcode_op_stable_key を直接依存に置き換えたこと。"""
+    analyzer = _analyzer()
+    assert not hasattr(analyzer._phi_origins, "pcode_op_stable_key")
+    tree = ast.parse(inspect.getsource(po_module))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "PhiOriginService")
+    bases = set()
+    for node in ast.walk(cls):
+        if isinstance(node, ast.Attribute) and node.attr == "pcode_op_stable_key":
+            base = node.value
+            bases.add(base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", None))
+    assert bases == {"pcode_sites"}
 
 
 def test_debug_flag_supplier_reads_analyzer_state_at_call_time():
