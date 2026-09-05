@@ -1421,14 +1421,15 @@ def test_prepared_use_domain_mapping_rebuild_rejects_manifest_tampering(tamper_k
 
 def test_preflight_final_gate_rebuilds_use_mapping_from_prepared_analysis(monkeypatch):
     pytest.importorskip("z3")
-    import scripts.function_tracer_pcode.checker.checker as checker_module
+    # 6b-2: validate_call_resolution_projection の呼び出し元は checker.strategy_execution へ移った。
+    import scripts.function_tracer_pcode.checker.strategy_execution as strategy_execution_module
 
     left = _phase2_caller_analysis("B1", 1, 0x1000)
     right = _phase2_caller_analysis("B2", 2, 0x3000)
     _observe_phase2_call_result(left)
     _observe_phase2_call_result(right)
     checker = EquivalenceChecker(timeout=5)
-    trusted_validate = checker_module.validate_call_resolution_projection
+    trusted_validate = strategy_execution_module.validate_call_resolution_projection
     call_count = 0
 
     def tamper_before_final_gate(manifest, prepared, **kwargs):
@@ -1439,7 +1440,7 @@ def test_preflight_final_gate_rebuilds_use_mapping_from_prepared_analysis(monkey
         return trusted_validate(manifest, prepared, **kwargs)
 
     monkeypatch.setattr(
-        checker_module,
+        strategy_execution_module,
         "validate_call_resolution_projection",
         tamper_before_final_gate,
     )
