@@ -37,9 +37,10 @@ from scripts.function_tracer_pcode.analysis.returns.phi_origins import expressio
 class ReturnNormalizationService:
     """ReturnAnalyzer から切り出した return 値正規化（分割正規化・符号書き換え・tracked value 書き換え）の collaborator。
 
-    facade 状態のうち読むのは現在パラメータ / 現在 effect summary / debug フラグで、いずれも引数なし
-    supplier として注入し呼び出し時に読む。式ケース・条件論理・stack-protector・p-code site の各 collaborator は
-    直接依存。PHI 含有判定は ``phi_origins.expression_contains_phi``（純関数）を import する。
+    per-analysis state: ``AnalysisSession`` を返す ``session`` supplier を 1 本保持し、呼び出し時に
+    ``self.session().parameters`` / ``self.session().effect_summary`` を読む（nested ``_analysis_context`` の
+    push/pop に追随する）。configuration: ``debug`` フラグは従来どおり supplier 境界。
+    式ケース・条件論理・stack-protector・p-code site の各 collaborator は直接依存。PHI 含有判定は ``phi_origins.expression_contains_phi``（純関数）を import する。
     未抽出 family（lifecycle / effect_integration / return_extraction / parameters / control_recovery /
     call_recovery）が所有する helper は facade 経由で遅延 dispatch する callable として注入する。
     """

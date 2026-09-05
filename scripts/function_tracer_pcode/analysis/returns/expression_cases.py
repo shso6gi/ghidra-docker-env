@@ -34,8 +34,8 @@ def clone_expression(expr: Expression) -> Expression:
 class ExpressionCaseService:
     """ReturnAnalyzer から切り出した式ケース展開・runtime guard・未解決値計数の collaborator。
 
-    状態は ReturnAnalyzer が解析ごとに差し替える現在パラメータのみで、これは
-    ``current_parameters`` supplier（引数なし callable）として注入され、呼び出し時に読む。
+    per-analysis state: ``AnalysisSession`` を返す ``session`` supplier を 1 本保持し、呼び出し時に
+    ``self.session().parameters`` を読む（nested ``_analysis_context`` の push/pop に追随する）。
     ``contains_multiequal`` は自己再帰以外の内部呼び出しを持たない leaf であり、外部呼び出しは
     すべて facade ``ReturnAnalyzer._contains_multiequal`` を経由する（class-level patch seam）。
     """

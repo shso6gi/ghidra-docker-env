@@ -112,9 +112,14 @@ def observable_store_effects(effect_summary: Any) -> List[Any]:
 class EffectIntegrationService:
     """ReturnAnalyzer から切り出した effect summary 統合（構築・キャッシュ・effect-sensitive 書き換え・観測面適用）の collaborator。
 
-    facade 状態（現在パラメータ / 現在 effect summary / effect summary の 2 キャッシュ / 直接呼び出しグラフ /
-    program / binary id / debug フラグ）は引数なし supplier として注入し呼び出し時に読む。キャッシュとグラフは
-    facade が保持する dict / set をそのまま in-place 更新する（参照は固定しない）。
+    per-analysis state: ``AnalysisSession`` を返す ``session`` supplier を 1 本保持し、呼び出し時に
+    ``self.session().parameters`` / ``self.session().effect_summary`` を読む（nested ``_analysis_context`` の
+    push/pop に追随する）。
+    analyzer-lifetime mutable state: ``AnalysisRuntimeState`` owner を ``runtime_state`` 直接依存として保持し、
+    effect summary の 2 キャッシュ・直接呼び出しグラフ・完了ノード集合は ``self.runtime_state.<field>`` で owner 経由で
+    都度読み、その container を in-place 更新する。owner の identity は固定するが各 field は都度参照するため、
+    facade property による field object の差し替えには追随する。
+    configuration: ``program`` / ``binary_id`` / ``debug`` フラグは従来どおり supplier 境界。
     既存 collaborator（式ケース・条件正規化・stack-protector・p-code site・PHI 起源・発散証明・パラメータ・
     RegionFacts・LocalValueResolver）は直接依存。未抽出 family（lifecycle / call_recovery / return_extraction）が
     所有する helper は facade 経由で遅延 dispatch する callable として注入する。

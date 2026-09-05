@@ -49,7 +49,9 @@ def _impl__phase1_direct_branch_escapes_function_body(self, instruction, body) -
 class BranchGuardedWhileProofService:
     """ReturnAnalyzer から切り出した branch-guarded while / structural nonprogress 証明（control_recovery family 2 群目）の collaborator。
 
-    facade 状態は debug / enable_completed_recovery_proofs / program / 現在パラメータを supplier で読む。
+    per-analysis state: ``AnalysisSession`` を返す ``session`` supplier を 1 本保持し、呼び出し時に
+    ``self.session().parameters`` を読む（nested ``_analysis_context`` の push/pop に追随する）。
+    configuration: ``debug`` / ``enable_completed_recovery_proofs`` / ``program`` は従来どおり supplier 境界。
     条件論理・placeholder 代数・発散証明・block グラフ・PHI 起源・式ケース・定数抽出・パラメータ・p-code site・
     program アクセス・デバッグ出力は各 collaborator を直接依存として受け取る。未抽出 family（return_extraction）
     が所有する helper と、control_recovery に残る ``high_function_has_forbidden_control_outcome_ops`` は
@@ -2543,7 +2545,9 @@ class ReturnPathSelectionService:
     """ReturnAnalyzer から切り出した return path 選択（MULTIEQUAL 入力選択・blocked path 条件・分岐 index・
     制御 outcome 禁止 op 判定・条件被覆検査）の collaborator（control_recovery family 3 群目）。
 
-    facade 状態は debug フラグと現在の blocked return path 条件を supplier で読む。条件論理・block グラフ・
+    per-analysis state: ``AnalysisSession`` を返す ``session`` supplier を 1 本保持し、呼び出し時に
+    ``self.session().blocked_return_path_conditions`` を読む（nested ``_analysis_context`` の push/pop に追随する）。
+    configuration: ``debug`` フラグは従来どおり supplier 境界。条件論理・block グラフ・
     式ケース・デバッグ出力は各 collaborator を直接依存として受け取る。未抽出 family（return_extraction）が所有する
     ``make_tracked_return_value`` と、生成順の都合で後に作られる EffectIntegrationService 所有の
     ``return_info_effective_region_conditions`` は facade 経由で遅延 dispatch する callable として注入する。
