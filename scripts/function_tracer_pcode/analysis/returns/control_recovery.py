@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, TYPE_CHECKING, Tuple, cast
 from scripts.function_tracer_pcode.core.analysis import (
     DivergenceOutcome,
     FunctionReturnAnalysis,
@@ -23,11 +23,9 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     expression_contains_post_state_reads,
 )
 from scripts.function_tracer_pcode.analysis.returns._api import StructuralRecurrenceSummarizer
-from scripts.function_tracer_pcode.analysis.returns._shared import (
-    ConditionSimplifier,
-    ConditionTracker,
-    PcodeTracer,
-)
+
+if TYPE_CHECKING:  # pcode_sites → lifecycle → control_recovery の循環回避
+    from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
 from scripts.function_tracer_pcode.core import CallTargetRef
 
 
@@ -88,107 +86,6 @@ def _impl__phase1_direct_branch_escapes_function_body(self, instruction, body) -
     if target is None:
         return True
     return not self._phase1_body_contains_address(body, target)
-
-
-def _impl__block_successors(self, block) -> Tuple[Any, ...]:
-    successors = []
-    out_size = int(getattr(block, "getOutSize", lambda: 0)() or 0)
-    for index in range(out_size):
-        successor = getattr(block, "getOut", lambda _idx: None)(index)
-        if successor is not None:
-            successors.append(successor)
-    return tuple(successors)
-
-
-def _impl__block_predecessor_count(self, block) -> int:
-    return int(getattr(block, "getInSize", lambda: 0)() or 0)
-
-
-def _impl__block_has_return_op(self, block) -> bool:
-    return any(getattr(op, "getMnemonic", lambda: None)() == "RETURN" for op in self._iter_high_block_ops(block))
-
-
-def _impl__block_writes_outcome_guard_state(self, block) -> bool:
-    for op in self._iter_high_block_ops(block):
-        if bool(getattr(op, "writes_guard_state", False)):
-            return True
-    return False
-
-
-def _impl__direct_cbranch_successor_relation(self, cbranch, block, successor) -> Optional[str]:
-    target_keys = self._cbranch_direct_target_keys(cbranch, block)
-    if not target_keys:
-        return None
-    successor_keys = self._block_start_address_keys(successor)
-    if successor_keys & target_keys:
-        return "true"
-
-    successors = self._block_successors(block)
-    if len(successors) != 2:
-        return None
-    target_successors = [
-        candidate
-        for candidate in successors
-        if self._block_start_address_keys(candidate) & target_keys
-    ]
-    if len(target_successors) != 1:
-        return None
-    if self._same_high_block(target_successors[0], successor):
-        return "true"
-    return "false"
-
-
-def _impl__block_start_address_keys(self, block) -> Set[Tuple[str, int]]:
-    keys: Set[Tuple[str, int]] = set()
-    for getter_name in ("getStart", "getMinAddress"):
-        try:
-            value = getattr(block, getter_name, lambda: None)()
-        except Exception:
-            value = None
-        keys.update(self._address_like_keys(value))
-    return keys
-
-
-def _impl__block_start_address_spaces(self, block) -> Set[str]:
-    return {
-        space
-        for space, _offset in self._block_start_address_keys(block)
-        if space
-    }
-
-
-def _impl__first_high_block_cbranch(self, block):
-    for op in self._iter_high_block_ops(block):
-        if getattr(op, "getMnemonic", lambda: None)() == "CBRANCH":
-            return op
-    return None
-
-
-def _impl__same_high_block(self, left, right) -> bool:
-    if left is right:
-        return True
-    try:
-        if left == right:
-            return True
-    except Exception:
-        pass
-    return self._block_debug_key(left) == self._block_debug_key(right)
-
-
-def _impl__block_debug_key(self, block) -> Any:
-    try:
-        index = getattr(block, "getIndex", lambda: None)()
-        if index is not None:
-            return int(index)
-    except Exception:
-        pass
-    try:
-        start = getattr(block, "getStart", lambda: None)()
-        if start is not None:
-            return str(start)
-    except Exception:
-        pass
-    return f"block@{id(block):x}"
 
 
 def _current_cfg_applicability_surface(self, high_function) -> Tuple[Tuple[Any, ...], Tuple[Tuple[Any, Any], ...]]:
@@ -1474,51 +1371,6 @@ def _impl__is_control_outcome_forbidden_fp_mnemonic(self, mnemonic: Optional[str
     )
 
 
-def _impl__block_reaches(self, start, target, allowed: Set[Any]) -> bool:
-    stack = [start]
-    seen = set()
-    while stack:
-        current = stack.pop()
-        if current in seen:
-            continue
-        seen.add(current)
-        if current is target:
-            return True
-        out_size = int(getattr(current, "getOutSize", lambda: 0)() or 0)
-        for index in range(out_size):
-            succ = getattr(current, "getOut", lambda _idx: None)(index)
-            if succ in allowed and succ not in seen:
-                stack.append(succ)
-    return False
-
-
-def _impl__high_function_cbranch_count(self, high_function) -> int:
-    return sum(
-        1
-        for block in self._iter_high_basic_blocks(high_function)
-        for op in self._iter_high_block_ops(block)
-        if getattr(op, "getMnemonic", lambda: None)() == "CBRANCH"
-    )
-
-
-def _impl__iter_high_basic_blocks(self, high_function):
-    if high_function is None or not callable(getattr(high_function, "getBasicBlocks", None)):
-        return
-    try:
-        for block in high_function.getBasicBlocks():
-            yield block
-    except Exception:
-        return
-
-
-def _impl__iter_high_block_ops(self, block):
-    iterator = getattr(block, "getIterator", lambda: None)()
-    if iterator is None:
-        return
-    while iterator.hasNext():
-        yield iterator.next()
-
-
 def _impl__mark_incomplete_control_flow(self, analysis: FunctionReturnAnalysis) -> None:
     """後段で保守的に扱うべき不完全な制御フロー要約を記録する。"""
     auto_notes = {
@@ -2296,13 +2148,18 @@ def _impl__recover_switch_like_returns_from_pcode(
     return None
 
 
-def _impl__address_offset_for_block_endpoint(self, address) -> Optional[int]:
+def address_offset_for_block_endpoint(address) -> Optional[int]:
+    """block 端点アドレスの offset。純関数（facade 状態なし）。"""
     if address is None:
         return None
     try:
         return int(address.getOffset())
     except Exception:
         return None
+
+
+def _impl__address_offset_for_block_endpoint(self, address):
+    return address_offset_for_block_endpoint(address)
 
 
 def _impl__collect_switch_impacted_return_sites(
@@ -2449,23 +2306,6 @@ def _impl__propagate_multiequal_input_for_return_path(
     if selected is None:
         return []
     return [self._make_tracked_return_value(selected, tracer)]
-
-
-def _impl__coerce_block_path_entries(self, path_entries) -> Optional[List[Tuple[List[Any], List[Condition]]]]:
-    if not isinstance(path_entries, (list, tuple)):
-        return None
-
-    normalized: List[Tuple[List[Any], List[Condition]]] = []
-    for entry in path_entries:
-        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
-            return None
-        block_path, conditions = entry
-        if not isinstance(block_path, (list, tuple)):
-            return None
-        if not isinstance(conditions, (list, tuple)):
-            return None
-        normalized.append((list(block_path), list(conditions)))
-    return normalized
 
 
 def _impl__filter_noreturn_return_path_entries(
@@ -2687,16 +2527,6 @@ def _impl__select_path_specific_return_source(
     return selected
 
 
-def _impl__find_block_index_on_path(self, block_path, target_block) -> Optional[int]:
-    if target_block is None:
-        return None
-
-    for index in range(len(block_path) - 1, -1, -1):
-        if self._blocks_match(block_path[index], target_block):
-            return index
-    return None
-
-
 def _impl__select_multiequal_input_for_return_path(
     self,
     multiequal_op,
@@ -2786,34 +2616,208 @@ def _impl__score_multiequal_incoming_for_return_path(
     return (matched, predecessor_match, specificity)
 
 
-def _impl__blocks_match(self, lhs, rhs) -> bool:
-    if lhs is rhs:
-        return True
-    try:
-        if lhs == rhs:
+class BlockGraphService:
+    """ReturnAnalyzer から切り出した high-function block グラフ走査（control_recovery family の純 helper 群）の collaborator。
+
+    facade 状態は読まない。アドレス鍵は ``PcodeSiteService`` を直接依存として受け取る。未抽出 family
+    （call_recovery）が所有する ``cbranch_direct_target_keys`` は facade 経由で遅延 dispatch する callable として注入する。
+    ``address_offset_for_block_endpoint`` は module 関数が実装（``ProgramAccessService`` も同じ関数を使う）。
+    """
+
+    def __init__(
+        self,
+        *,
+        pcode_sites: "PcodeSiteService",
+        cbranch_direct_target_keys: Callable[..., Any],
+    ) -> None:
+        self.pcode_sites = pcode_sites
+        self.cbranch_direct_target_keys = cbranch_direct_target_keys
+
+    def block_successors(self, block) -> Tuple[Any, ...]:
+        successors = []
+        out_size = int(getattr(block, "getOutSize", lambda: 0)() or 0)
+        for index in range(out_size):
+            successor = getattr(block, "getOut", lambda _idx: None)(index)
+            if successor is not None:
+                successors.append(successor)
+        return tuple(successors)
+
+    def block_predecessor_count(self, block) -> int:
+        return int(getattr(block, "getInSize", lambda: 0)() or 0)
+
+    def block_has_return_op(self, block) -> bool:
+        return any(getattr(op, "getMnemonic", lambda: None)() == "RETURN" for op in self.iter_high_block_ops(block))
+
+    def block_writes_outcome_guard_state(self, block) -> bool:
+        for op in self.iter_high_block_ops(block):
+            if bool(getattr(op, "writes_guard_state", False)):
+                return True
+        return False
+
+    def direct_cbranch_successor_relation(self, cbranch, block, successor) -> Optional[str]:
+        target_keys = self.cbranch_direct_target_keys(cbranch, block)
+        if not target_keys:
+            return None
+        successor_keys = self.block_start_address_keys(successor)
+        if successor_keys & target_keys:
+            return "true"
+
+        successors = self.block_successors(block)
+        if len(successors) != 2:
+            return None
+        target_successors = [
+            candidate
+            for candidate in successors
+            if self.block_start_address_keys(candidate) & target_keys
+        ]
+        if len(target_successors) != 1:
+            return None
+        if self.same_high_block(target_successors[0], successor):
+            return "true"
+        return "false"
+
+    def block_start_address_keys(self, block) -> Set[Tuple[str, int]]:
+        keys: Set[Tuple[str, int]] = set()
+        for getter_name in ("getStart", "getMinAddress"):
+            try:
+                value = getattr(block, getter_name, lambda: None)()
+            except Exception:
+                value = None
+            keys.update(self.pcode_sites.address_like_keys(value))
+        return keys
+
+    def block_start_address_spaces(self, block) -> Set[str]:
+        return {
+            space
+            for space, _offset in self.block_start_address_keys(block)
+            if space
+        }
+
+    def first_high_block_cbranch(self, block):
+        for op in self.iter_high_block_ops(block):
+            if getattr(op, "getMnemonic", lambda: None)() == "CBRANCH":
+                return op
+        return None
+
+    def same_high_block(self, left, right) -> bool:
+        if left is right:
             return True
-    except Exception:
-        pass
+        try:
+            if left == right:
+                return True
+        except Exception:
+            pass
+        return self.block_debug_key(left) == self.block_debug_key(right)
 
-    lhs_start = self._get_block_start_address(lhs)
-    rhs_start = self._get_block_start_address(rhs)
-    if lhs_start is not None and rhs_start is not None:
-        return lhs_start == rhs_start
+    def block_debug_key(self, block) -> Any:
+        try:
+            index = getattr(block, "getIndex", lambda: None)()
+            if index is not None:
+                return int(index)
+        except Exception:
+            pass
+        try:
+            start = getattr(block, "getStart", lambda: None)()
+            if start is not None:
+                return str(start)
+        except Exception:
+            pass
+        return f"block@{id(block):x}"
 
-    return False
+    def block_reaches(self, start, target, allowed: Set[Any]) -> bool:
+        stack = [start]
+        seen = set()
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            if current is target:
+                return True
+            out_size = int(getattr(current, "getOutSize", lambda: 0)() or 0)
+            for index in range(out_size):
+                succ = getattr(current, "getOut", lambda _idx: None)(index)
+                if succ in allowed and succ not in seen:
+                    stack.append(succ)
+        return False
 
+    def high_function_cbranch_count(self, high_function) -> int:
+        return sum(
+            1
+            for block in self.iter_high_basic_blocks(high_function)
+            for op in self.iter_high_block_ops(block)
+            if getattr(op, "getMnemonic", lambda: None)() == "CBRANCH"
+        )
 
-def _impl__get_block_start_address(self, block) -> Optional[str]:
-    get_start = getattr(block, "getStart", None)
-    if not callable(get_start):
+    def iter_high_basic_blocks(self, high_function):
+        if high_function is None or not callable(getattr(high_function, "getBasicBlocks", None)):
+            return
+        try:
+            for block in high_function.getBasicBlocks():
+                yield block
+        except Exception:
+            return
+
+    def iter_high_block_ops(self, block):
+        iterator = getattr(block, "getIterator", lambda: None)()
+        if iterator is None:
+            return
+        while iterator.hasNext():
+            yield iterator.next()
+
+    def coerce_block_path_entries(self, path_entries) -> Optional[List[Tuple[List[Any], List[Condition]]]]:
+        if not isinstance(path_entries, (list, tuple)):
+            return None
+
+        normalized: List[Tuple[List[Any], List[Condition]]] = []
+        for entry in path_entries:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                return None
+            block_path, conditions = entry
+            if not isinstance(block_path, (list, tuple)):
+                return None
+            if not isinstance(conditions, (list, tuple)):
+                return None
+            normalized.append((list(block_path), list(conditions)))
+        return normalized
+
+    def find_block_index_on_path(self, block_path, target_block) -> Optional[int]:
+        if target_block is None:
+            return None
+
+        for index in range(len(block_path) - 1, -1, -1):
+            if self.blocks_match(block_path[index], target_block):
+                return index
         return None
-    try:
-        start = get_start()
-    except Exception:
-        return None
-    if start is None:
-        return None
-    return str(start)
+
+    def blocks_match(self, lhs, rhs) -> bool:
+        if lhs is rhs:
+            return True
+        try:
+            if lhs == rhs:
+                return True
+        except Exception:
+            pass
+
+        lhs_start = self.get_block_start_address(lhs)
+        rhs_start = self.get_block_start_address(rhs)
+        if lhs_start is not None and rhs_start is not None:
+            return lhs_start == rhs_start
+
+        return False
+
+    def get_block_start_address(self, block) -> Optional[str]:
+        get_start = getattr(block, "getStart", None)
+        if not callable(get_start):
+            return None
+        try:
+            start = get_start()
+        except Exception:
+            return None
+        if start is None:
+            return None
+        return str(start)
+
 
 
 def _impl__path_condition_sets_union_condition(

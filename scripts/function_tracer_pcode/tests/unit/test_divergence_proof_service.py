@@ -17,11 +17,7 @@ DIRECT = {
     "placeholder_algebra": {"expression_is_placeholder_minus_one_under_conditions", "expression_is_one_under_conditions"},
     "stack_protector": {"constant_int_value"},
 }
-FACADE_CALLBACKS = (
-    "block_debug_key", "block_successors", "same_high_block", "iter_high_basic_blocks", "first_high_block_cbranch",
-    "iter_high_block_ops", "direct_cbranch_successor_relation", "block_writes_outcome_guard_state",
-    "block_predecessor_count", "block_has_return_op",
-)
+FACADE_CALLBACKS = ()
 SUPPLIERS = ("program_value", "direct_call_graph_value", "direct_call_graph_complete_nodes_value")
 STATIC = {"condition_identity_key", "field_value_from_structural_proof", "tuple_field_from_structural_proof"}
 
@@ -33,11 +29,12 @@ def _analyzer():
 def test_collaborator_holds_only_its_dependencies():
     analyzer = _analyzer()
     service = analyzer._divergence_proofs
-    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"debug_reporter", "program_access"}
+    assert set(vars(service)) == set(DIRECT) | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"debug_reporter", "program_access", "block_graph"}
     for attr in DIRECT:
         assert getattr(service, attr) is getattr(analyzer, "_" + attr)
     assert service.debug_reporter is analyzer._debug_reporter
     assert service.program_access is analyzer._program_access
+    assert service.block_graph is analyzer._block_graph
 
 
 def test_every_delegator_forwards_to_the_collaborator():
@@ -99,7 +96,11 @@ def test_suppliers_read_analyzer_state_at_call_time():
 
 
 def test_unextracted_helpers_dispatch_through_the_facade_at_call_time():
+    """block 走査 helper が BlockGraphService 直接依存になり、facade 経由 callback は残っていない。"""
     analyzer = _analyzer()
+    assert FACADE_CALLBACKS == ()
+    lambdas = {k for k, v in vars(analyzer._divergence_proofs).items() if getattr(v, "__name__", "") == "<lambda>"}
+    assert lambdas == set(SUPPLIERS)
     for attr in FACADE_CALLBACKS:
         sentinel = object()
         with patch.object(ReturnAnalyzer, "_" + attr, return_value=sentinel) as mocked:
@@ -110,5 +111,5 @@ def test_unextracted_helpers_dispatch_through_the_facade_at_call_time():
 def test_high_function_has_cfg_cycle_matches_facade_result():
     analyzer = _analyzer()
     hf = Mock()
-    with patch.object(ReturnAnalyzer, "_iter_high_basic_blocks", return_value=[]):
+    with patch.object(analyzer._block_graph, "iter_high_basic_blocks", return_value=[]):
         assert analyzer._high_function_has_cfg_cycle(hf) == analyzer._divergence_proofs.high_function_has_cfg_cycle(hf)
