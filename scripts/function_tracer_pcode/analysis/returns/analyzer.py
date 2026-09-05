@@ -10,13 +10,13 @@ from scripts.function_tracer_pcode.analysis.returns import (
     analyze_function as _svc_analyze_function,
 )
 from typing import Any, Dict, List, Optional, Set, Tuple
-from scripts.function_tracer_pcode.config.settings import BOUNDED_CALL_MAX_CASES, BOUNDED_CALL_REFINEMENT_ENABLED, BOUNDED_CALL_UNROLL_LIMIT
 from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo, FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.runtime_state import AnalysisRuntimeState
+from scripts.function_tracer_pcode.analysis.limits import AnalysisLimits
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import ReturnPathSelectionService
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import BranchGuardedWhileProofService
@@ -75,6 +75,9 @@ class ReturnAnalyzer:
         self.enable_completed_recovery_proofs = bool(enable_completed_recovery_proofs)
         self._decompiler = None
         self._analysis_session = AnalysisSession()
+        # 長寿命の可変 runtime 状態と bounded-call 設定は collaborator 構築より前に所有者を作る（6a-2 / 6a-3）。
+        self._runtime_state = AnalysisRuntimeState()
+        self._limits = AnalysisLimits.from_settings()
         self._current_parameters: List[Dict] = []
         self._expression_cases = ExpressionCaseService(
             current_parameters=lambda: self._current_parameters,
@@ -236,15 +239,10 @@ class ReturnAnalyzer:
             debug_flag=lambda: self.debug,
         )
         self._current_effect_summary: Optional[EffectSummary] = None
-        # 長寿命の可変 runtime 状態は AnalysisRuntimeState が所有する（Phase 6a-2）。facade 属性名は property で維持。
-        self._runtime_state = AnalysisRuntimeState()
         self._current_deferred_calls: Dict[Tuple[Any, ...], DeferredCallInfo] = {}
         self._return_path_entry_cache: Dict[Tuple[Any, ...], Optional[List[Tuple[List[Any], List[Condition]]]]] = {}
         self._current_blocked_return_path_conditions: List[List[Condition]] = []
         self._current_noreturn_terminal_observations: List[Dict[str, Any]] = []
-        self._bounded_call_refinement_enabled = bool(BOUNDED_CALL_REFINEMENT_ENABLED)
-        self._bounded_call_unroll_limit = int(BOUNDED_CALL_UNROLL_LIMIT)
-        self._bounded_call_max_cases = int(BOUNDED_CALL_MAX_CASES)
         self._last_function_lookup_error: Optional[str] = None
         self._last_analysis_failure: Optional[AnalysisFailure] = None
         self._current_function_prototype = None
@@ -269,6 +267,38 @@ class ReturnAnalyzer:
             state = AnalysisRuntimeState()
             object.__setattr__(self, '_runtime_state', state)
             return state
+
+    def _ensure_limits(self) -> AnalysisLimits:
+        try:
+            return object.__getattribute__(self, '_limits')
+        except AttributeError:
+            limits = AnalysisLimits.from_settings()
+            object.__setattr__(self, '_limits', limits)
+            return limits
+
+    @property
+    def _bounded_call_refinement_enabled(self):
+        return self._ensure_limits().bounded_call_refinement_enabled
+
+    @_bounded_call_refinement_enabled.setter
+    def _bounded_call_refinement_enabled(self, value):
+        self._ensure_limits().bounded_call_refinement_enabled = value
+
+    @property
+    def _bounded_call_unroll_limit(self):
+        return self._ensure_limits().bounded_call_unroll_limit
+
+    @_bounded_call_unroll_limit.setter
+    def _bounded_call_unroll_limit(self, value):
+        self._ensure_limits().bounded_call_unroll_limit = value
+
+    @property
+    def _bounded_call_max_cases(self):
+        return self._ensure_limits().bounded_call_max_cases
+
+    @_bounded_call_max_cases.setter
+    def _bounded_call_max_cases(self, value):
+        self._ensure_limits().bounded_call_max_cases = value
 
     @property
     def _call_analysis_cache(self):
