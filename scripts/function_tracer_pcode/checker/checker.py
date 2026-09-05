@@ -6,7 +6,6 @@ from enum import Enum
 from dataclasses import dataclass, replace
 import time
 import warnings
-from uuid import uuid4
 
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis, FunctionSignature
 from scripts.function_tracer_pcode.core.render_smt import (
@@ -108,6 +107,7 @@ from scripts.function_tracer_pcode.core.recurrence_contracts import RecurrenceDi
 # Re-exports kept for callers that import these names from this module.
 from scripts.function_tracer_pcode.smt import SolverResult
 from scripts.function_tracer_pcode.checker.abi_retry import AbiRetryMixin
+from scripts.function_tracer_pcode.checker.branch_context import BranchCheckContext, build_branch_check_context
 from scripts.function_tracer_pcode.checker.preflight_gate import PreflightGateMixin
 from scripts.function_tracer_pcode.checker.root_causes import RootCauseMixin
 from scripts.function_tracer_pcode.checker.recovery_proofs import RecoveryProofMixin
@@ -557,26 +557,24 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
 
             replan_plan = getattr(self, "_active_pair_replan_plan", None)
             if replan_plan is None:
+                # 6b-1: generation の increment は facade write として check() に残す（replan でない場合のみ）。
                 self._call_proof_generation += 1
-                generation = int(
-                    getattr(self, "_active_comparison_generation", None)
-                    or self._call_proof_generation
-                )
-                comparison_session_id = str(
-                    getattr(self, "_active_comparison_session_id", None)
-                    or uuid4().hex
-                )
-                branch_id = str(
-                    getattr(self, "_active_call_proof_branch_id", None)
-                    or strategy.__class__.__name__
-                )
-            else:
-                generation = int(replan_plan.frame_generation)
-                comparison_session_id = str(
-                    replan_plan.comparison_session_id
-                )
-                branch_id = str(replan_plan.branch_id)
-            decision_mode = self.call_proof_decision_mode
+            ctx = build_branch_check_context(
+                strategy=strategy,
+                replan_plan=replan_plan,
+                call_proof_generation=self._call_proof_generation,
+                active_comparison_generation=getattr(self, "_active_comparison_generation", None),
+                active_comparison_session_id=getattr(self, "_active_comparison_session_id", None),
+                active_call_proof_branch_id=getattr(self, "_active_call_proof_branch_id", None),
+                decision_mode=self.call_proof_decision_mode,
+                production_branch_authority_lease=getattr(
+                    self, "_active_production_branch_authority_lease", None
+                ),
+            )
+            generation = ctx.generation
+            comparison_session_id = ctx.comparison_session_id
+            branch_id = ctx.branch_id
+            decision_mode = ctx.decision_mode
             dispatch_frame = None
             locally_issued_branch_authority = None
             cleanup_complete = True
@@ -611,9 +609,7 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                         root_blockers=("completed_recovery_proofs_disabled",),
                         covered_blockers=(),
                     )
-                branch_authority = getattr(
-                    self, "_active_production_branch_authority_lease", None
-                )
+                branch_authority = ctx.production_branch_authority_lease
                 if (
                     isinstance(strategy, MonolithicStrategy)
                     and branch_authority is None
