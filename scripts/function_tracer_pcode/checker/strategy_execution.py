@@ -1,6 +1,8 @@
 """Strategy execution stage of :meth:`EquivalenceChecker.check` (Phase 6b-2, #82).
 
-``check()`` は orchestration のみを持ち、本 module は B 段（strategy 実行）を 3 つの純粋な段に分ける:
+``check()`` は orchestration のみを持ち、本 module は B 段（strategy 実行）を、**checker facade を直接書き換えず、
+明示的な入力を受け取る module-level の段関数**に分ける（純粋関数ではない: manifest callback の副作用、frame 構築失敗時の
+lease revoke、strategy / dispatch frame / ledger / manifest の更新と lease revoke を含む。書かないのは checker facade の属性だけ）:
 
 1. :func:`prepare_preflight_projection` — solver surface / call-effect shadow manifest / projection を組み立てる。
    :func:`build_prepared_dispatch_frame` — dispatch frame を構築する（失敗時は check() が発行した lease を revoke）。

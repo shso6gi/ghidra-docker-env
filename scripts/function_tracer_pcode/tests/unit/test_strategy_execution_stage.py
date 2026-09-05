@@ -112,28 +112,132 @@ def _projection_prep(manifest=None, projection=None):
                                              projection=projection)
 
 
-def test_run_strategy_branch_order_bind_push_check_close_revoke_then_gate():
+def test_run_strategy_branch_order_pairwise_without_ledger_push_check_close_gate():
+    """ledger の無い direct Pairwise（compatibility lease も無い）: finalize / revoke は起きない。"""
     events = []
     strategy = _RecordingPairwise(events)
+    frame = _frame()
+    runtime = object()
+    with patch.object(se, "push_prepared_dispatch_frame", side_effect=lambda f: events.append(("push",)) or "tok"), \
+         patch.object(se, "close_prepared_dispatch_frame", side_effect=lambda f, tok: events.append(("close", tok)) or True), \
+         patch.object(se, "finalize_pairwise_comparison_receipt", side_effect=lambda f: events.append(("pairwise_finalize",))), \
+         patch.object(se, "diagnostic_projection", side_effect=lambda m, f: m), \
+         patch("scripts.function_tracer_pcode.proof.monolithic_authority.revoke_production_branch_authority",
+               side_effect=lambda l: events.append(("revoke", l))):
+        outcome = se.run_strategy_branch(_ctx(strategy), frame, runtime, "a1", "a2", False,
+                                         locally_issued_branch_authority=None, call_effect_shadow_manifest={},
+                                         debug_print=lambda m: events.append(("debug", m)),
+                                         apply_preflight_final_gate=lambda *a, **k: events.append(("gate", k["cleanup_complete"])))
+    names = [e[0] for e in events]
+    assert names == ["debug", "push", "strategy.check", "close", "gate"]
+    assert events[2][1] is runtime          # runtime は strategy.check より前に strategy へ束縛済み
+    assert frame.obligation_runtime is runtime
+    assert events[3][1] == "tok"
+    assert outcome.cleanup_complete is True and outcome.strategy_result is not None
+    assert outcome.preflight_gate_delta_diagnostic["comparison_branch"] == "DirectCall"
+
+
+def test_run_strategy_branch_order_direct_pairwise_with_ledger_finalizes_before_and_after_close():
+    """direct Pairwise + ledger あり（main の exact call sequence を基準）:
+    push → strategy.check → pairwise finalize（receipt 未発行のときのみ、frame.receipt を設定）→ close
+    → pairwise finalize（direct branch の finalization）→ final gate。revoke は無い（lease は Monolithic のみ）。"""
+    events = []
+    strategy = _RecordingPairwise(events)
+    frame = _frame()
+    frame.pair_disposition_ledger = object()
+    receipts = []
+
+    def finalize(f):
+        # 実物と同じく frame.receipt を副作用で設定する（1 回目のガード `receipt is None` を消費する）
+        receipt = SimpleNamespace(seq=len(receipts) + 1, receipt_before=f.receipt)
+        receipts.append(receipt)
+        f.receipt = receipt
+        events.append(("pairwise_finalize", receipt.seq))
+        return receipt
+
+    with patch.object(se, "push_prepared_dispatch_frame", side_effect=lambda f: events.append(("push",)) or "tok"), \
+         patch.object(se, "close_prepared_dispatch_frame", side_effect=lambda f, tok: events.append(("close", tok)) or True), \
+         patch.object(se, "finalize_pairwise_comparison_receipt", side_effect=finalize), \
+         patch.object(se, "diagnostic_projection", side_effect=lambda m, f: m), \
+         patch("scripts.function_tracer_pcode.proof.monolithic_authority.revoke_production_branch_authority",
+               side_effect=lambda l: events.append(("revoke", l))):
+        outcome = se.run_strategy_branch(_ctx(strategy), frame, object(), "a1", "a2", False,
+                                         locally_issued_branch_authority=None, call_effect_shadow_manifest={},
+                                         debug_print=lambda m: None,
+                                         apply_preflight_final_gate=lambda *a, **k: events.append(("gate", k["cleanup_complete"])))
+    assert events == [("push",), ("strategy.check", frame.obligation_runtime), ("pairwise_finalize", 1),
+                      ("close", "tok"), ("pairwise_finalize", 2), ("gate", True)]
+    assert receipts[0].receipt_before is None and receipts[1].receipt_before is receipts[0]
+    assert frame.receipt is receipts[1]
+    assert outcome.strategy_result.comparison_execution_receipt is receipts[1]
+
+
+def test_run_strategy_branch_order_direct_pairwise_with_preissued_receipt_finalizes_only_after_close():
+    """strategy.check の中で receipt が既に発行されていれば、close 前の finalize は行わない。"""
+    events = []
+    strategy = _RecordingPairwise(events)
+    frame = _frame()
+    frame.pair_disposition_ledger = object()
+    frame.receipt = "issued_by_strategy"
+    with patch.object(se, "push_prepared_dispatch_frame", return_value="tok"), \
+         patch.object(se, "close_prepared_dispatch_frame", side_effect=lambda f, tok: events.append(("close",)) or True), \
+         patch.object(se, "finalize_pairwise_comparison_receipt", side_effect=lambda f: events.append(("pairwise_finalize",)) or "R"), \
+         patch.object(se, "diagnostic_projection", side_effect=lambda m, f: m):
+        se.run_strategy_branch(_ctx(strategy), frame, object(), "a1", "a2", False,
+                               locally_issued_branch_authority=None, call_effect_shadow_manifest={},
+                               debug_print=lambda m: None, apply_preflight_final_gate=lambda *a, **k: events.append(("gate",)))
+    assert [e[0] for e in events] == ["strategy.check", "close", "pairwise_finalize", "gate"]
+
+
+class _RecordingMonolithic(MonolithicStrategy):
+    def __init__(self, events):
+        self._events = events
+        self._obligation_runtime_session = None
+
+    def check(self, analysis1, analysis2, save_formula=False):
+        self._events.append(("strategy.check", self._obligation_runtime_session))
+        return SimpleNamespace(is_equivalent=None, comparison_execution_receipt=None)
+
+
+def test_run_strategy_branch_order_direct_monolithic_with_locally_issued_lease():
+    """production-valid な direct Monolithic（check() が compatibility lease を発行）:
+    push → strategy.check → close → revoke（locally issued lease）→ monolithic finalize → final gate。"""
+    events = []
+    strategy = _RecordingMonolithic(events)
     frame = _frame()
     runtime = object()
     lease = object()
     with patch.object(se, "push_prepared_dispatch_frame", side_effect=lambda f: events.append(("push",)) or "tok"), \
          patch.object(se, "close_prepared_dispatch_frame", side_effect=lambda f, tok: events.append(("close", tok)) or True), \
+         patch.object(se, "finalize_pairwise_comparison_receipt", side_effect=lambda f: events.append(("pairwise_finalize",))), \
          patch.object(se, "diagnostic_projection", side_effect=lambda m, f: m), \
+         patch("scripts.function_tracer_pcode.proof.call_effect.preflight.finalize_monolithic_comparison_receipt",
+               side_effect=lambda f: events.append(("monolithic_finalize",)) or "MR"), \
          patch("scripts.function_tracer_pcode.proof.monolithic_authority.revoke_production_branch_authority",
                side_effect=lambda l: events.append(("revoke", l))):
-        outcome = se.run_strategy_branch(_ctx(strategy), frame, runtime, "a1", "a2", False,
+        outcome = se.run_strategy_branch(_ctx(strategy, branch_id="MonolithicStrategy", lease=lease), frame, runtime, "a1", "a2", False,
                                          locally_issued_branch_authority=lease, call_effect_shadow_manifest={},
-                                         debug_print=lambda m: events.append(("debug", m)),
+                                         debug_print=lambda m: None,
                                          apply_preflight_final_gate=lambda *a, **k: events.append(("gate", k["cleanup_complete"])))
-    names = [e[0] for e in events]
-    assert names == ["debug", "push", "strategy.check", "close", "revoke", "gate"]
-    assert events[2][1] is runtime          # runtime は strategy.check より前に strategy へ束縛済み
-    assert frame.obligation_runtime is runtime
-    assert events[3][1] == "tok" and events[4][1] is lease
-    assert outcome.cleanup_complete is True and outcome.strategy_result is not None
-    assert outcome.preflight_gate_delta_diagnostic["comparison_branch"] == "DirectCall"
+    assert events == [("push",), ("strategy.check", runtime), ("close", "tok"), ("revoke", lease),
+                      ("monolithic_finalize",), ("gate", True)]
+    assert outcome.strategy_result.comparison_execution_receipt == "MR"
+
+
+def test_run_strategy_branch_revokes_the_lease_even_when_the_strategy_raises():
+    events = []
+    strategy = _RecordingMonolithic(events)
+    strategy.check = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("strategy boom"))
+    lease = object()
+    with patch.object(se, "push_prepared_dispatch_frame", side_effect=lambda f: events.append(("push",)) or "tok"), \
+         patch.object(se, "close_prepared_dispatch_frame", side_effect=lambda f, tok: events.append(("close", tok)) or False), \
+         patch("scripts.function_tracer_pcode.proof.monolithic_authority.revoke_production_branch_authority",
+               side_effect=lambda l: events.append(("revoke", l))):
+        with pytest.raises(RuntimeError, match="strategy boom"):
+            se.run_strategy_branch(_ctx(strategy, branch_id="MonolithicStrategy", lease=lease), _frame(), object(), "a1", "a2", False,
+                                   locally_issued_branch_authority=lease, call_effect_shadow_manifest={},
+                                   debug_print=lambda m: None, apply_preflight_final_gate=lambda *a, **k: events.append(("gate",)))
+    assert events == [("push",), ("close", "tok"), ("revoke", lease)]
 
 
 def test_run_strategy_branch_skips_final_gate_when_stage_runner_owns_finalization():
