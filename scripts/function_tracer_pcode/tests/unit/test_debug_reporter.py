@@ -7,6 +7,7 @@ from scripts.function_tracer_pcode.analysis.returns import lifecycle
 from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.core.expression import Expression
+from scripts.function_tracer_pcode.core.structural import expression_key_safe
 
 
 def _analyzer(debug=False):
@@ -41,6 +42,22 @@ def test_debug_print_respects_the_flag_at_call_time(capsys):
     analyzer._debug_print("shown", indent=1)
     out = capsys.readouterr().out
     assert "hidden" not in out and "  [ReturnAnalyzer] shown" in out
+
+
+def test_debug_expr_identity_summary_reports_the_structural_key_for_a_real_expression():
+    """#76 レビュー指摘: 旧実装が表示していた structural identity が移動後も失われていないこと。
+
+    expression_key_safe の import 漏れは try/except に握りつぶされて常に structural=None になり、
+    compileall / import / unit / subset のいずれにも現れない。実行して非 None を固定する。
+    """
+    analyzer = _analyzer()
+    expr = Expression.binary_op("INT_ADD", Expression.variable("param_1", 4), Expression.constant(2, 4))
+    text = analyzer._debug_expr_identity_summary(expr)
+    expected = expression_key_safe(expr, include_memory_read_order=True)
+    assert expected is not None
+    assert f"structural={expected}" in text
+    assert "structural=None" not in text
+    assert analyzer._debug_expr_identity_summary(None) == "None"
 
 
 def test_every_collaborator_shares_the_single_reporter():

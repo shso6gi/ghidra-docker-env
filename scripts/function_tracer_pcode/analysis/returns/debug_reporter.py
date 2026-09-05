@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 from scripts.function_tracer_pcode.core.expression import Expression
+from scripts.function_tracer_pcode.core.structural import expression_key_safe
 from scripts.function_tracer_pcode.analysis.returns._shared import summarize_expression
 
 
