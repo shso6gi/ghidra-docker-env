@@ -51,7 +51,6 @@ from scripts.function_tracer_pcode.authority.lifecycle.production_boundary impor
 )
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     build_unknown_recovery_actions,
-    make_internal_v2_reason_diagnostic,
     make_unknown_reason,
 )
 from scripts.function_tracer_pcode.checker.cause_identity import (
@@ -102,6 +101,11 @@ from scripts.function_tracer_pcode.checker.unknown_refinement import refine_unkn
 from scripts.function_tracer_pcode.checker.recurrence_promotion import (
     complete_recurrence_promotion_signals,
     prepare_recurrence_promotion,
+)
+from scripts.function_tracer_pcode.checker.result_assembly import (
+    assemble_equivalence_result,
+    canonical_abi_error_result,
+    unsupported_smt_result,
 )
 from scripts.function_tracer_pcode.checker.strategy_execution import (
     build_prepared_dispatch_frame,
@@ -710,238 +714,47 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                             )
                         finally:
                             del self._active_recurrence_promotion_authority
-            function1_identity = self._deterministic_analysis_identity(strategy, analysis1)
-            function2_identity = self._deterministic_analysis_identity(strategy, analysis2)
-            
-            if self.debug and strategy_result.smt_formula:
-                print("\n" + "=" * 60)
-                print("Generated SMT formula:")
-                print("=" * 60)
-                print(strategy_result.smt_formula)
-                print("=" * 60 + "\n")
-            
-            total_time = time.time() - start_time
-            
-            # 反例をフォーマット
-            counterexample = None
-            if strategy_result.is_equivalent is False and strategy_result.counterexample_raw:
-                counterexample = self._format_counterexample(
-                    strategy_result.counterexample_raw,
-                    analysis1, analysis2,
-                    strategy_result.return_var1 or "return_1",
-                    strategy_result.return_var2 or "return_2"
-                )
-
-            completed_proofs = self._completed_recovery_proof_payload(
+            # 6b-5: E・F 段（結果組み立て + 私的付帯 3 つ）は段関数。mixin は call 時に self から解決する。
+            return assemble_equivalence_result(
+                strategy_result,
                 analysis1,
                 analysis2,
                 binary1_name,
                 binary2_name,
-                extra_records=getattr(
-                    strategy_result, "completed_recovery_proof_evidence", ()
-                ),
-            )
-            completion_contexts = self._reason_completion_applicability_contexts(
-                completed_proofs,
-                analysis1,
-                analysis2,
-            )
-            from scripts.function_tracer_pcode.authority.domains.comparison_closure import (
-                query_execution_record_projection,
-            )
-            
-            equivalence_result = EquivalenceResult(
-                is_equivalent=strategy_result.is_equivalent,
-                function1_name=analysis1.function_name,
-                function2_name=analysis2.function_name,
-                binary1_name=binary1_name,
-                binary2_name=binary2_name,
-                solver_results=strategy_result.solver_results,
-                counterexample=counterexample,
-                # ★ 修正: save_formula に関わらず smt_formula を保持（debug trace 用）
-                # ただし to_string() での出力は save_formula で制御
-                smt_formula=strategy_result.smt_formula,  # ← 条件を削除
-                total_time=total_time,
+                ctx=ctx,
+                dispatch_frame=dispatch_frame,
+                preflight_gate_delta_diagnostic=preflight_gate_delta_diagnostic,
+                call_effect_shadow_manifest=call_effect_shadow_manifest,
+                start_time=start_time,
                 type_fix_result=type_fix_result,
                 retry_count=retry_count,
-                function1_signature=original_signature1,
-                function2_signature=original_signature2,
-                effective_function1_signature=FunctionSignature.from_analysis(analysis1),
-                effective_function2_signature=FunctionSignature.from_analysis(analysis2),
-                function1_signature_hypotheses=list(analysis1.signature_hypotheses),
-                function2_signature_hypotheses=list(analysis2.signature_hypotheses),
-                constrained_fragments=strategy_result.constrained_fragments,
+                original_signature1=original_signature1,
+                original_signature2=original_signature2,
                 rewrite_info=rewrite_info,
-                pairwise_stats={
-                    'total_pairs': strategy_result.total_pairs,
-                    'unsat_pairs': strategy_result.unsat_pairs,
-                    'sat_pairs': strategy_result.sat_pairs,
-                    'unknown_pairs': strategy_result.unknown_pairs,
-                    'error_pairs': strategy_result.error_pairs,
-                } if strategy_result.total_pairs > 0 else None,
-                pairwise_debug_stats=strategy_result.pairwise_debug_stats,
-                unknown_reasons=strategy_result.unknown_reasons,
-                error_message=strategy_result.error_message,
-                failure_status=strategy_result.error_kind,
-                failure_message=strategy_result.error_message,
-                sat_pair_info=strategy_result.sat_pair_info,
-                normalization_rules=strategy_result.normalization_rules,
-                completed_recovery_proof_evidence=completed_proofs,
-                reason_completion_applicability_contexts=completion_contexts,
-                call_effect_shadow_manifest=call_effect_shadow_manifest,
-                recurrence_promotion_receipt=self._recurrence_promotion_result_receipt(
-                    strategy_result
-                ),
-                call_proof_terminal_provenance=(
-                    {
-                        "comparison_session_id": comparison_session_id,
-                        "terminal_branch_id": branch_id,
-                        "decision_owner_mode": decision_mode.value,
-                        "decision_owner_lease_id": (
-                            dispatch_frame.decision_lease.decision_owner_id
-                            if dispatch_frame is not None else None
-                        ),
-                        "terminal_outcome": (
-                            "EQ" if strategy_result.is_equivalent is True
-                            else "NOT_EQ" if strategy_result.is_equivalent is False
-                            else "UNKNOWN"
-                        ),
-                        "projection_generation": generation,
-                        "comparison_receipt_id": (
-                            dispatch_frame.receipt.receipt_id
-                            if dispatch_frame is not None and dispatch_frame.receipt is not None
-                            else None
-                        ),
-                        "monolithic_terminal_receipt": (
-                            {
-                                "receipt_digest": dispatch_frame.monolithic_terminal_receipt.receipt_digest,
-                                "comparison_receipt_id": dispatch_frame.monolithic_terminal_receipt.comparison_receipt_id,
-                                "outcome_kind": dispatch_frame.monolithic_terminal_receipt.outcome_kind,
-                                "parent_lease_digest": dispatch_frame.monolithic_terminal_receipt.parent_lease_digest,
-                                "execution_lease_digest": dispatch_frame.monolithic_terminal_receipt.execution_lease_digest,
-                                "frozen_surface_digest": dispatch_frame.monolithic_terminal_receipt.frozen_surface_digest,
-                                "census_digest": dispatch_frame.monolithic_terminal_receipt.census_digest,
-                                "region_receipt_digests": list(
-                                    dispatch_frame.monolithic_terminal_receipt.region_receipt_digests
-                                ),
-                                "sat_region_id": dispatch_frame.monolithic_terminal_receipt.sat_region_id,
-                                "model_digest": dispatch_frame.monolithic_terminal_receipt.model_digest,
-                                "fixed_model_assertion_digest": dispatch_frame.monolithic_terminal_receipt.fixed_model_assertion_digest,
-                                "legacy_replay_receipt_digest": dispatch_frame.monolithic_terminal_receipt.legacy_replay_receipt_digest,
-                                "counterexample_safety_receipt_digest": dispatch_frame.monolithic_terminal_receipt.counterexample_safety_receipt_digest,
-                                "proof_bundle_digest": dispatch_frame.monolithic_terminal_receipt.proof_bundle_digest,
-                                "typed_global_replay_receipt_count": len(tuple(
-                                    getattr(
-                                        dispatch_frame.monolithic_terminal_receipt.counterexample_safety_receipt,
-                                        "global_replay_receipts", (),
-                                    ) or ()
-                                )),
-                                "gate_reference_digests": list(dispatch_frame.monolithic_terminal_receipt.gate_reference_digests),
-                                "validated": dispatch_frame.monolithic_terminal_receipt.validates(),
-                            }
-                            if dispatch_frame is not None
-                            and dispatch_frame.monolithic_terminal_receipt is not None
-                            else None
-                        ),
-                        "query_execution_receipts": [
-                            query_execution_record_projection(record)
-                            for record in tuple(getattr(
-                                getattr(dispatch_frame, "receipt", None),
-                                "query_records",
-                                (),
-                            ) or ())
-                        ],
-                        "dispatch_cleanup_complete": (
-                            dispatch_frame.cleanup_complete if dispatch_frame is not None else True
-                        ),
-                        "preflight_gate_delta_diagnostic": (
-                            preflight_gate_delta_diagnostic
-                        ),
-                    }
-                ),
-                function1_identity=function1_identity,
-                function2_identity=function2_identity,
+                debug=self.debug,
+                deterministic_analysis_identity=self._deterministic_analysis_identity,
+                format_counterexample=self._format_counterexample,
+                completed_recovery_proof_payload=self._completed_recovery_proof_payload,
+                reason_completion_applicability_contexts=self._reason_completion_applicability_contexts,
+                recurrence_promotion_result_receipt=self._recurrence_promotion_result_receipt,
             )
-            # The obligation runner performs the final runtime-generation
-            # validation after proof gates and evidence application.  Keep the
-            # capability objects private; they are never serialized.
-            equivalence_result._prepared_dispatch_frame = dispatch_frame
-            equivalence_result._strategy_result = strategy_result
-            if (
-                dispatch_frame is not None
-                and dispatch_frame.receipt is not None
-                and dispatch_frame.monolithic_terminal_receipt is not None
-                and dispatch_frame.monolithic_terminal_receipt.outcome_kind
-                == "inconclusive_diagnostic"
-                and tuple(dispatch_frame.receipt.query_records)
-            ):
-                from scripts.function_tracer_pcode.authority.domains.comparison_closure import (
-                    InconclusiveComparisonAuthority,
-                )
-                equivalence_result._inconclusive_comparison_authority = (
-                    InconclusiveComparisonAuthority.issue(dispatch_frame)
-                )
-            else:
-                equivalence_result._inconclusive_comparison_authority = None
-            return equivalence_result
         
         except (UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError) as e:
-            diagnostic_kind = (
-                "unknown_smt_extension_width"
-                if isinstance(e, UnknownSmtExtensionWidthError)
-                else "unsupported_smt_operator"
-            )
             self._debug_print(
                 f"Check blocked by unsupported SMT expression semantics: {e}"
             )
-            blocked_analysis1 = locals().get("analysis1", analysis1)
-            blocked_analysis2 = locals().get("analysis2", analysis2)
-            return EquivalenceResult(
-                is_equivalent=None,
-                function1_name=blocked_analysis1.function_name,
-                function2_name=blocked_analysis2.function_name,
+            # 6b-5: handler 本体は段関数（catch scope・handler の種類と順序は check() に残す）。
+            return unsupported_smt_result(
+                e,
+                analysis1=analysis1,
+                analysis2=analysis2,
                 binary1_name=binary1_name,
                 binary2_name=binary2_name,
-                solver_results=ParallelResult(results=[]),
-                counterexample=None,
-                smt_formula=None,
-                total_time=time.time() - start_time,
+                start_time=start_time,
                 type_fix_result=type_fix_result,
                 retry_count=retry_count,
-                function1_signature=original_signature1,
-                function2_signature=original_signature2,
-                effective_function1_signature=FunctionSignature.from_analysis(
-                    blocked_analysis1
-                ),
-                effective_function2_signature=FunctionSignature.from_analysis(
-                    blocked_analysis2
-                ),
-                function1_signature_hypotheses=list(
-                    blocked_analysis1.signature_hypotheses
-                ),
-                function2_signature_hypotheses=list(
-                    blocked_analysis2.signature_hypotheses
-                ),
-                constrained_fragments=[],
-                pairwise_debug_stats={
-                    diagnostic_kind: 1,
-                },
-                unknown_reasons=[
-                    make_internal_v2_reason_diagnostic(
-                        "expression_semantics_unsupported",
-                        stage="S_PAIRWISE",
-                        evidence_refs=(diagnostic_kind,),
-                        object_target_key=(
-                            diagnostic_kind,
-                            e.operator,
-                            e.operand_bits,
-                            getattr(e, "result_bits", 0),
-                            tuple(blocked_analysis1.outcome_function_identity()),
-                            tuple(blocked_analysis2.outcome_function_identity()),
-                        ),
-                        detail=str(e),
-                    )
-                ],
+                original_signature1=original_signature1,
+                original_signature2=original_signature2,
             )
 
         except Exception as e:
@@ -954,19 +767,17 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                 ReturnAbiAuthorityInvalid,
             )
             if isinstance(e, ReturnAbiAuthorityInvalid):
-                return create_error_result(
+                return canonical_abi_error_result(
+                    e,
                     analysis1=analysis1,
                     analysis2=analysis2,
                     binary1_name=binary1_name,
                     binary2_name=binary2_name,
-                    error_message=e.canonical_error_kind,
                     start_time=start_time,
                     type_fix_result=type_fix_result,
                     retry_count=retry_count,
                     original_signature1=original_signature1,
                     original_signature2=original_signature2,
-                    failure_status=e.canonical_error_kind,
-                    failure_message=str(e),
                 )
             
             return self._create_error_result(
