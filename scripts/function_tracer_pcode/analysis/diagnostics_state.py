@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from scripts.function_tracer_pcode.analysis.returns._shared import AnalysisFailure
+from scripts.function_tracer_pcode.analysis.failure import AnalysisFailure
 
 
 @dataclass
