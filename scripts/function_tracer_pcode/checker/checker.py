@@ -543,9 +543,16 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         retry_count: int = 0,
         original_signature1: Optional[FunctionSignature] = None,
         original_signature2: Optional[FunctionSignature] = None,
-        force_strategy = None
+        force_strategy = None,
+        *,
+        branch_context: Optional[BranchCheckContext] = None,
     ) -> EquivalenceResult:
-        """2つの関数の等価性を判定"""
+        """2つの関数の等価性を判定
+
+        ``branch_context``: Internal execution context (stage runner → checker の明示的な
+        branch 文脈、Phase 6c #93); ordinary direct callers should normally omit it.
+        与えられればそのまま使い、無ければ従来どおり facade の ``_active_*`` から組み立てる。
+        """
         start_time = time.time()
         
         if original_signature1 is None:
@@ -561,11 +568,16 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             # strategy を選択
             strategy = force_strategy if force_strategy is not None else self.check_strategy
 
-            replan_plan = getattr(self, "_active_pair_replan_plan", None)
+            if branch_context is not None:
+                replan_plan = branch_context.replan_plan
+            else:
+                replan_plan = getattr(self, "_active_pair_replan_plan", None)
             if replan_plan is None:
                 # 6b-1: generation の increment は facade write として check() に残す（replan でない場合のみ）。
+                # 6c-1: 明示 ctx が渡されても increment の条件と副作用は同じ（ctx の generation は supplied value のまま）。
                 self._call_proof_generation += 1
-            ctx = build_branch_check_context(
+            # 6c-1: 明示 ctx があればそれを使う（dual-write 期間。legacy fallback は 6c-2 で閉じる）。
+            ctx = branch_context if branch_context is not None else build_branch_check_context(
                 strategy=strategy,
                 replan_plan=replan_plan,
                 call_proof_generation=self._call_proof_generation,
