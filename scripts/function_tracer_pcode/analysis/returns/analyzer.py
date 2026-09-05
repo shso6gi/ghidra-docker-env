@@ -16,6 +16,7 @@ from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
+from scripts.function_tracer_pcode.analysis.runtime_state import AnalysisRuntimeState
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import ReturnPathSelectionService
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import BranchGuardedWhileProofService
@@ -235,13 +236,9 @@ class ReturnAnalyzer:
             debug_flag=lambda: self.debug,
         )
         self._current_effect_summary: Optional[EffectSummary] = None
-        self._effect_summary_cache: Dict[Tuple[Any, ...], Any] = {}
-        self._effect_summary_parameter_cache: Dict[Tuple[Any, ...], List[Dict]] = {}
-        self._call_analysis_cache: Dict[Tuple[Any, ...], Optional[FunctionReturnAnalysis]] = {}
-        self._local_target_cache: Dict[Tuple[object, ...], Optional[List[Any]]] = {}
+        # 長寿命の可変 runtime 状態は AnalysisRuntimeState が所有する（Phase 6a-2）。facade 属性名は property で維持。
+        self._runtime_state = AnalysisRuntimeState()
         self._current_deferred_calls: Dict[Tuple[Any, ...], DeferredCallInfo] = {}
-        self._deferred_call_counter: int = 0
-        self._analysis_in_progress: Dict[Tuple[Any, ...], FunctionReturnAnalysis] = {}
         self._return_path_entry_cache: Dict[Tuple[Any, ...], Optional[List[Tuple[List[Any], List[Condition]]]]] = {}
         self._current_blocked_return_path_conditions: List[List[Condition]] = []
         self._current_noreturn_terminal_observations: List[Dict[str, Any]] = []
@@ -252,8 +249,6 @@ class ReturnAnalyzer:
         self._last_analysis_failure: Optional[AnalysisFailure] = None
         self._current_function_prototype = None
         self._current_function_entry_address_value = None
-        self._direct_call_graph: Dict[Tuple[Any, ...], Set[Tuple[Any, ...]]] = {}
-        self._direct_call_graph_complete_nodes: Set[Tuple[Any, ...]] = set()
 
     def _ensure_analysis_session(self) -> AnalysisSession:
         try:
@@ -266,6 +261,78 @@ class ReturnAnalyzer:
     def _install_analysis_session(self, session: AnalysisSession) -> None:
         """現在の :class:`AnalysisSession` object を差し替える（``_analysis_context`` の push/pop 用）。"""
         object.__setattr__(self, '_analysis_session', session)
+
+    def _ensure_runtime_state(self) -> AnalysisRuntimeState:
+        try:
+            return object.__getattribute__(self, '_runtime_state')
+        except AttributeError:
+            state = AnalysisRuntimeState()
+            object.__setattr__(self, '_runtime_state', state)
+            return state
+
+    @property
+    def _call_analysis_cache(self):
+        return self._ensure_runtime_state().call_analysis_cache
+
+    @_call_analysis_cache.setter
+    def _call_analysis_cache(self, value):
+        self._ensure_runtime_state().call_analysis_cache = value
+
+    @property
+    def _local_target_cache(self):
+        return self._ensure_runtime_state().local_target_cache
+
+    @_local_target_cache.setter
+    def _local_target_cache(self, value):
+        self._ensure_runtime_state().local_target_cache = value
+
+    @property
+    def _effect_summary_cache(self):
+        return self._ensure_runtime_state().effect_summary_cache
+
+    @_effect_summary_cache.setter
+    def _effect_summary_cache(self, value):
+        self._ensure_runtime_state().effect_summary_cache = value
+
+    @property
+    def _effect_summary_parameter_cache(self):
+        return self._ensure_runtime_state().effect_summary_parameter_cache
+
+    @_effect_summary_parameter_cache.setter
+    def _effect_summary_parameter_cache(self, value):
+        self._ensure_runtime_state().effect_summary_parameter_cache = value
+
+    @property
+    def _direct_call_graph(self):
+        return self._ensure_runtime_state().direct_call_graph
+
+    @_direct_call_graph.setter
+    def _direct_call_graph(self, value):
+        self._ensure_runtime_state().direct_call_graph = value
+
+    @property
+    def _direct_call_graph_complete_nodes(self):
+        return self._ensure_runtime_state().direct_call_graph_complete_nodes
+
+    @_direct_call_graph_complete_nodes.setter
+    def _direct_call_graph_complete_nodes(self, value):
+        self._ensure_runtime_state().direct_call_graph_complete_nodes = value
+
+    @property
+    def _analysis_in_progress(self):
+        return self._ensure_runtime_state().analysis_in_progress
+
+    @_analysis_in_progress.setter
+    def _analysis_in_progress(self, value):
+        self._ensure_runtime_state().analysis_in_progress = value
+
+    @property
+    def _deferred_call_counter(self):
+        return self._ensure_runtime_state().deferred_call_counter
+
+    @_deferred_call_counter.setter
+    def _deferred_call_counter(self, value):
+        self._ensure_runtime_state().deferred_call_counter = value
 
     @property
     def _current_parameters(self):
