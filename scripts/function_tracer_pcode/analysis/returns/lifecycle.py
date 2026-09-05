@@ -103,37 +103,6 @@ def _impl__function_entry_address(function):
     return function_entry_address(function)
 
 
-def _impl__analysis_context(
-    self,
-    parameters: List[Dict],
-    effect_summary: Optional[EffectSummary],
-    function_prototype=None,
-    function_entry_address=None,
-):
-    """Temporarily bind per-analysis state and restore the parent context on exit."""
-    previous_parameters = self._current_parameters
-    previous_effect_summary = self._current_effect_summary
-    previous_deferred_calls = self._current_deferred_calls
-    previous_function_prototype = self._current_function_prototype
-    previous_function_entry_address = self._current_function_entry_address_value
-    previous_noreturn_observations = self._current_noreturn_terminal_observations
-    self._current_parameters = parameters
-    self._current_effect_summary = effect_summary
-    self._current_deferred_calls = {}
-    self._current_function_prototype = function_prototype
-    self._current_function_entry_address_value = function_entry_address
-    self._current_noreturn_terminal_observations = []
-    try:
-        yield
-    finally:
-        self._current_parameters = previous_parameters
-        self._current_effect_summary = previous_effect_summary
-        self._current_deferred_calls = previous_deferred_calls
-        self._current_function_prototype = previous_function_prototype
-        self._current_function_entry_address_value = previous_function_entry_address
-        self._current_noreturn_terminal_observations = previous_noreturn_observations
-
-
 def collect_java_or_python_iterable(value) -> Tuple[Tuple[Any, ...], bool]:
     if value is None:
         return (), False

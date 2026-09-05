@@ -263,6 +263,10 @@ class ReturnAnalyzer:
             object.__setattr__(self, '_analysis_session', session)
             return session
 
+    def _install_analysis_session(self, session: AnalysisSession) -> None:
+        """現在の :class:`AnalysisSession` object を差し替える（``_analysis_context`` の push/pop 用）。"""
+        object.__setattr__(self, '_analysis_session', session)
+
     @property
     def _current_parameters(self):
         return self._ensure_analysis_session().parameters
@@ -329,25 +333,28 @@ class ReturnAnalyzer:
 
     @contextmanager
     def _analysis_context(self, parameters: List[Dict], effect_summary: Optional[EffectSummary], function_prototype=None, function_entry_address=None):
-        """Temporarily bind per-analysis state and restore the parent context on exit."""
-        previous_parameters = self._current_parameters
-        previous_effect_summary = self._current_effect_summary
-        previous_deferred_calls = self._current_deferred_calls
-        previous_function_prototype = self._current_function_prototype
-        previous_function_entry_address = self._current_function_entry_address_value
-        self._current_parameters = parameters
-        self._current_effect_summary = effect_summary
-        self._current_deferred_calls = {}
-        self._current_function_prototype = function_prototype
-        self._current_function_entry_address_value = function_entry_address
+        """Push a fresh per-analysis :class:`AnalysisSession` and restore the parent on exit.
+
+        子 session は context が明示的に束縛する値（parameters / effect_summary / function_prototype /
+        function_entry_address）で初期化し、``deferred_calls`` / ``blocked_return_path_conditions`` /
+        ``noreturn_terminal_observations`` / ``return_path_entry_cache`` は子が新規に所有する。finally では
+        親 session object をそのまま（同一性で）復元する。旧実装は 5 フィールドを個別に退避・復元し、
+        ``noreturn_terminal_observations`` / ``blocked_return_path_conditions`` / ``return_path_entry_cache``
+        は退避していなかった（子の変更が親へ漏れていた）。8 フィールドの寿命を context に揃えるのは
+        意図的な state-lifetime の修正（Phase 6a-1）。
+        """
+        parent = self._ensure_analysis_session()
+        child = AnalysisSession(
+            parameters=parameters,
+            effect_summary=effect_summary,
+            function_prototype=function_prototype,
+            function_entry_address=function_entry_address,
+        )
+        self._install_analysis_session(child)
         try:
             yield
         finally:
-            self._current_parameters = previous_parameters
-            self._current_effect_summary = previous_effect_summary
-            self._current_deferred_calls = previous_deferred_calls
-            self._current_function_prototype = previous_function_prototype
-            self._current_function_entry_address_value = previous_function_entry_address
+            self._install_analysis_session(parent)
 
     # ---- service implementations (bound explicitly; see <pkg>/*.py) ----
     # call_recovery

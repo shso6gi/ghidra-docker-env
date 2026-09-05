@@ -71,7 +71,7 @@ def _impl_analyze_function(
         active_functions,
         current_function_ref,
     )
-    self._return_path_entry_cache = {}
+    # return_path_entry_cache は _analysis_context が生成する子 AnalysisSession が新規に所有する（6a-1）
     current_active_key = analysis_scope_key
 
     self._debug_print("=" * 60)
