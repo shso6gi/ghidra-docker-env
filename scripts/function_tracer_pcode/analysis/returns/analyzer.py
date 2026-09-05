@@ -187,6 +187,7 @@ class ReturnAnalyzer:
             function_body_has_phase1_pure_return_forbidden_ops=lambda *a, **kw: self._function_body_has_phase1_pure_return_forbidden_ops(*a, **kw),
             high_function_has_phase1_pure_return_forbidden_ops=lambda *a, **kw: self._high_function_has_phase1_pure_return_forbidden_ops(*a, **kw),
             phase1_return_type_is_float=lambda *a, **kw: self._phase1_return_type_is_float(*a, **kw),
+            decompile_with_broker=lambda *a, **kw: self._decompile_with_broker(*a, **kw),
             current_parameters_value=lambda: self._current_parameters,
             current_effect_summary_value=lambda: self._current_effect_summary,
             effect_summary_cache_value=lambda: self._effect_summary_cache,
@@ -473,6 +474,12 @@ class ReturnAnalyzer:
         return self._effect_integration.effect_sensitive_rewrite_precision(expr, conditions, effect_summary)
     def _effect_sensitive_rewrite_rank(self, expr):
         return self._effect_integration.effect_sensitive_rewrite_rank(expr)
+    def _decompile_with_broker(self, function, timeout, monitor, **kwargs):
+        """decompilation_broker.decompile_function を facade（analyzer）を第 1 引数として呼ぶ。"""
+        from scripts.function_tracer_pcode.ghidra.decompilation_broker import decompile_function
+
+        return decompile_function(self, function, timeout, monitor, **kwargs)
+
     def _effect_summary_allows_pre_return_structural_summary(self, effect_summary, *, function=None, high_function=None, return_type=None, return_type_obj=None):
         return self._effect_integration.effect_summary_allows_pre_return_structural_summary(effect_summary, function=function, high_function=high_function, return_type=return_type, return_type_obj=return_type_obj)
     def _expression_contains_stale_effect_value_for_post_state(self, expr, target_post_state, conditions, effect_summary):

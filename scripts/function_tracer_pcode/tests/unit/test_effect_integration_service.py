@@ -38,7 +38,7 @@ FACADE_CALLBACKS = (
     "make_deferred_call_recorder", "is_semantically_lossless_effect_sensitive_rewrite",
     "direct_call_target_function_key", "coerce_runtime_target_ref",
     "make_tracked_return_value", "function_body_has_phase1_pure_return_forbidden_ops",
-    "high_function_has_phase1_pure_return_forbidden_ops", "phase1_return_type_is_float",
+    "high_function_has_phase1_pure_return_forbidden_ops", "phase1_return_type_is_float", "decompile_with_broker",
 )
 SUPPLIERS = (
     "current_parameters_value", "current_effect_summary_value", "effect_summary_cache_value",
@@ -94,6 +94,21 @@ def test_collaborator_owned_names_are_called_only_through_direct_dependencies():
     leftovers = {node.attr for node in ast.walk(cls)
                  if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "self" and node.attr.startswith("_")}
     assert leftovers == set()
+
+
+def test_collaborator_never_passes_itself_where_the_facade_is_expected():
+    """decompilation_broker.decompile_function(analyzer, ...) のように facade を第 1 引数に取る関数へ
+    collaborator 自身を渡していないこと（subset で AttributeError として検出された欠陥の回帰ガード）。"""
+    tree = ast.parse(inspect.getsource(ei_module))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "EffectIntegrationService")
+    offenders = [ast.unparse(n)[:60] for n in ast.walk(cls) if isinstance(n, ast.Call)
+                 and any(isinstance(a, ast.Name) and a.id == "self" for a in list(n.args) + [k.value for k in n.keywords])]
+    assert offenders == []
+    analyzer = _analyzer()
+    with patch("scripts.function_tracer_pcode.ghidra.decompilation_broker.decompile_function") as broker:
+        broker.return_value = "results"
+        assert analyzer._effect_integration.decompile_with_broker("callee", 60, None, source_contract_id="c", semantic_owner="subordinate") == "results"
+        broker.assert_called_once_with(analyzer, "callee", 60, None, source_contract_id="c", semantic_owner="subordinate")
 
 
 def test_suppliers_read_analyzer_state_at_call_time_and_share_mutable_caches():

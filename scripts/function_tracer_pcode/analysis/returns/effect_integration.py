@@ -147,7 +147,11 @@ class EffectIntegrationService:
         is_semantically_lossless_effect_sensitive_rewrite: Callable[..., Any],
         direct_call_target_function_key: Callable[..., Any],
         coerce_runtime_target_ref: Callable[..., Any],
-        make_tracked_return_value: Callable[..., Any], function_body_has_phase1_pure_return_forbidden_ops: Callable[..., Any], high_function_has_phase1_pure_return_forbidden_ops: Callable[..., Any], phase1_return_type_is_float: Callable[..., Any],
+        make_tracked_return_value: Callable[..., Any],
+        function_body_has_phase1_pure_return_forbidden_ops: Callable[..., Any],
+        high_function_has_phase1_pure_return_forbidden_ops: Callable[..., Any],
+        phase1_return_type_is_float: Callable[..., Any],
+        decompile_with_broker: Callable[..., Any],
         current_parameters_value: Callable[..., Any],
         current_effect_summary_value: Callable[..., Any],
         effect_summary_cache_value: Callable[..., Any],
@@ -191,6 +195,7 @@ class EffectIntegrationService:
         self.function_body_has_phase1_pure_return_forbidden_ops = function_body_has_phase1_pure_return_forbidden_ops
         self.high_function_has_phase1_pure_return_forbidden_ops = high_function_has_phase1_pure_return_forbidden_ops
         self.phase1_return_type_is_float = phase1_return_type_is_float
+        self.decompile_with_broker = decompile_with_broker
         self.current_parameters_value = current_parameters_value
         self.current_effect_summary_value = current_effect_summary_value
         self.effect_summary_cache_value = effect_summary_cache_value
@@ -711,12 +716,10 @@ class EffectIntegrationService:
             if cached_callee is not None:
                 return cached_callee
 
-            from scripts.function_tracer_pcode.ghidra.decompilation_broker import (
-                EFFECT_SUMMARY_SOURCE_CONTRACT,
-                decompile_function,
-            )
-            results = decompile_function(
-                self, callee, 60, None,
+            from scripts.function_tracer_pcode.ghidra.decompilation_broker import EFFECT_SUMMARY_SOURCE_CONTRACT
+            # broker は analyzer（facade）を第 1 引数に取るため、facade 経由の callable で呼ぶ
+            results = self.decompile_with_broker(
+                callee, 60, None,
                 source_contract_id=EFFECT_SUMMARY_SOURCE_CONTRACT,
                 semantic_owner="subordinate",
             )
