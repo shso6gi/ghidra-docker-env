@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "dc979a242dc79ca88ed8413ad311f8f6087276b9b884058067c60dc20fbc15af",
+  "manifest_digest": "77daeb5ad2b105d5591aad722c12b99ad179e1f66bfa62663a7fbbc2fbbacf14",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 30,
   "sites": [
@@ -146,15 +146,15 @@
         "equivalence_recurrence_validator"
       ],
       "branch_or_attempt_contract_id": "checker-recurrence-validation-completed:invocation",
-      "column": 32,
+      "column": 12,
       "domain": "loop_recurrence_summary",
       "emitter": "emit_loop_recurrence_signal",
-      "enclosing_function": "check",
+      "enclosing_function": "complete_recurrence_promotion_signals",
       "expected_cause_slots": [],
-      "line": 720,
-      "path": "scripts/function_tracer_pcode/checker/checker.py",
+      "line": 100,
+      "path": "scripts/function_tracer_pcode/checker/recurrence_promotion.py",
       "producer_site_manifest_id": "checker-recurrence-validation-completed",
-      "source_sha256": "bc9959650969d76515174c27ec06dc9029798104e288a7d3a7f1e68cc3152671"
+      "source_sha256": "279647839ebeb7b8465e5dd4787360d36a3ad7021fca50fa880c30280de9b3f3"
     },
     {
       "allowed_dispositions": [
