@@ -177,6 +177,9 @@ def _impl__unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):
     call_effect_reasons = {
         "unsupported_call_effect_summary": "unsupported_call_effect_semantics",
         "effect_summary_path_coverage_incomplete": "effect_observation_coverage_incomplete",
+        "effect_store_location_unmodeled": "effect_observation_coverage_incomplete",
+        "effect_global_read_identity_unavailable": "effect_observation_coverage_incomplete",
+        "effect_surface_composition_incomplete": "effect_observation_coverage_incomplete",
         "effect_call_argument_evidence": "call_argument_extraction_incomplete",
         "effect_call_argument_evidence_incomplete": "call_argument_extraction_incomplete",
         "effect_call_target_resolution_evidence": "call_target_resolution_unproven",

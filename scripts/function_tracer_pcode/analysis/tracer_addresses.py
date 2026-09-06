@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Optional, Any
-from scripts.function_tracer_pcode.core.signature import is_composite_data_type
+from scripts.function_tracer_pcode.core.signature import is_composite_data_type, is_pointer_data_type
 from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
     Expression,
@@ -58,6 +58,17 @@ class AddressRefMixin:
                         f"  -> Global scalar read {display_name or ''}@0x{runtime_ref.address_offset:x}: "
                         f"read-only image constant 0x{image_value:x}"
                     )
+                # A read-only pointer slot (GOT entry, relocated pointer table)
+                # yields the address of another object.  Keep that object's
+                # identity on the constant so a STORE/LOAD through the pointer
+                # canonicalises to the named global instead of a bare number.
+                if is_pointer_data_type(data_type_obj, data_type):
+                    target_ref = self._make_address_runtime_ref_for_offset(
+                        image_value,
+                        require_ghidra_evidence=True,
+                    )
+                    if target_ref is not None and target_ref.global_object_identity() is not None:
+                        return Expression.constant(image_value, size, runtime_ref=target_ref)
                 return Expression.constant(image_value, size)
         pointer_size = 8
         try:
@@ -147,10 +158,14 @@ class AddressRefMixin:
             except Exception:
                 pass
 
+            object_symbol_name, object_base_offset, object_size = self._global_object_facts(address)
             return AddressValueRef(
                 address_offset=offset,
                 source=source,
                 display_hint=display_name,
+                object_symbol_name=object_symbol_name,
+                object_base_offset=object_base_offset,
+                object_size=object_size,
                 program_id=(
                     int(self.program.getUniqueProgramID())
                     if self.program is not None and hasattr(self.program, "getUniqueProgramID")
@@ -305,10 +320,14 @@ class AddressRefMixin:
         if require_ghidra_evidence and not (has_symbol or has_data or has_reference or is_readonly_block):
             return None
 
+        object_symbol_name, object_base_offset, object_size = self._global_object_facts(address)
         return AddressValueRef(
             address_offset=offset,
             source="constant_offset",
             display_hint=display_name,
+            object_symbol_name=object_symbol_name,
+            object_base_offset=object_base_offset,
+            object_size=object_size,
             program_id=(
                 int(self.program.getUniqueProgramID())
                 if self.program is not None and hasattr(self.program, "getUniqueProgramID")
@@ -538,6 +557,127 @@ class AddressRefMixin:
             return bool(block.isWrite()) and not bool(block.isVolatile())
         except Exception:
             return False
+
+    def _global_object_facts(self, address):
+        """``(symbol_name, base_offset, size)`` of the named data object at ``address``.
+
+        The object is the Ghidra data item containing the address; its name is
+        the non-dynamic primary symbol at the item start (imported ELF object
+        symbols such as ``count``).  Ghidra's synthesised names (``DAT_``,
+        ``PTR_``, offcut ``h[4]``) are dynamic and never used as identity.
+        Returns ``(None, None, None)`` when there is no such object.
+        """
+
+        if address is None or self.program is None:
+            return None, None, None
+        try:
+            listing = self.program.getListing()
+            symbol_table = self.program.getSymbolTable()
+        except Exception:
+            return None, None, None
+        if listing is None or symbol_table is None:
+            return None, None, None
+        data = None
+        getter = getattr(listing, "getDataContaining", None)
+        if callable(getter):
+            try:
+                data = getter(address)
+            except Exception:
+                data = None
+        if data is None:
+            return None, None, None
+        try:
+            base_address = data.getAddress()
+            length = int(data.getLength())
+        except Exception:
+            return None, None, None
+        if base_address is None or length <= 0:
+            return None, None, None
+        try:
+            symbol = symbol_table.getPrimarySymbol(base_address)
+        except Exception:
+            symbol = None
+        if symbol is None:
+            return None, None, None
+        try:
+            if bool(symbol.isDynamic()):
+                return None, None, None
+            name = symbol.getName()
+        except Exception:
+            return None, None, None
+        if not name or not str(name).strip():
+            return None, None, None
+        try:
+            base_offset = int(base_address.getOffset())
+        except Exception:
+            return None, None, None
+        return str(name).strip(), base_offset, length
+
+    def ram_varnode_write_class(self, varnode) -> Optional[str]:
+        """Classify a ``ram``-space varnode as a write target.
+
+        ``"global"`` for a writable, non-volatile named data object,
+        ``"readonly"`` for read-only memory (GOT slots, ``.rodata``),
+        ``"unresolved"`` for writable memory without a stable object identity
+        (stripped symbol, volatile block, no data item) and ``None`` when the
+        varnode is not an addressable ``ram`` location at all.
+        """
+
+        if varnode is None:
+            return None
+        try:
+            if not varnode.isAddress():
+                return None
+            address = varnode.getAddress()
+            space = address.getAddressSpace()
+            space_name = space.getName() if space is not None else None
+        except Exception:
+            return None
+        if space_name in {None, "stack", "register", "unique", "const"}:
+            return None
+        runtime_ref = self._make_address_runtime_ref_for_offset(
+            int(address.getOffset()),
+            require_ghidra_evidence=False,
+        )
+        if runtime_ref is None:
+            return "unresolved"
+        if runtime_ref.is_readonly_memory():
+            return "readonly"
+        if runtime_ref.can_write is False and runtime_ref.is_volatile is False:
+            return "readonly"
+        if runtime_ref.global_object_identity() is not None:
+            return "global"
+        return "unresolved"
+
+    def global_object_location_for_varnode(self, varnode) -> Optional[CanonicalLocation]:
+        """Canonical global location of a writable ``ram`` varnode, or ``None``."""
+
+        if self.ram_varnode_write_class(varnode) != "global":
+            return None
+        try:
+            address = varnode.getAddress()
+            size = int(varnode.getSize())
+        except Exception:
+            return None
+        runtime_ref = self._make_address_runtime_ref_for_offset(
+            int(address.getOffset()),
+            require_ghidra_evidence=False,
+        )
+        identity = runtime_ref.global_object_identity() if runtime_ref is not None else None
+        if identity is None:
+            return None
+        symbol_name, object_size, offset = identity
+        if offset + max(1, size) > object_size:
+            return None
+        return CanonicalLocation(
+            base_ref=LocationBaseRef.global_object(
+                symbol_name,
+                object_size,
+                space_name=runtime_ref.space_name,
+            ),
+            offset=int(offset),
+            size=max(1, size),
+        )
 
     def _lookup_symbol_name_for_address(self, address) -> Optional[str]:
         if address is None:

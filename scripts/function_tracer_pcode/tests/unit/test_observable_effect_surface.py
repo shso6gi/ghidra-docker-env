@@ -209,8 +209,14 @@ def test_surface_is_not_built_for_incomplete_effect_summaries():
 
 
 def test_surface_is_not_built_when_return_cases_disagree_on_width():
+    """Issue #104 (Gap 5) regression.  Old behaviour: the surface was silently
+    skipped and the function compared on its return value alone, dropping the
+    stores (a soundness hole).  New behaviour: the surface is still not built,
+    but the effect summary is marked incomplete so the pair fails closed."""
     analyzer = _analyzer()
     analysis = _sret_constructor(Expression.constant(2, size=4))
     analysis.returns.append(ReturnInfo("0x1020", Expression.constant(0, size=1), []))
     assert analyzer._apply_observable_effect_surface(analysis, analysis.return_type_obj, analysis.return_type) is False
     assert analysis.comparison_surface is None
+    assert analysis.effect_summary.incomplete_reasons == ("effect_surface_composition_incomplete",)
+    assert "effect_surface_composition_incomplete" in analysis.get_equivalence_blocking_unsafety_reasons()

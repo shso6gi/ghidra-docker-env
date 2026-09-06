@@ -22,6 +22,8 @@ from scripts.function_tracer_pcode.analysis.effects._shared import (
     StoreEffectProvenance,
     UnsupportedCallEffectRef,
     _EFFECT_ORDER_UNAVAILABLE_REASON,
+    _EFFECT_STORE_LOCATION_UNMODELED_REASON,
+    _EFFECT_GLOBAL_READ_IDENTITY_REASON,
 )
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _block_has_path_incomplete_effects,
@@ -56,6 +58,12 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _resolve_direct_call_value_effects,
     _resolve_object_centric_store_value_effects,
     _resolve_store_value_effects,
+    _resolve_value_varnode_effects,
+    _collect_ram_output_write_effects,
+    _is_ram_exit_copy,
+    _ram_varnode_key,
+    classify_store_address,
+    expression_reads_global_object,
     _runtime_conditions_signature,
     _runtime_expression_signature,
     _strongly_connected_components,
@@ -83,9 +91,11 @@ def _impl_summarize_store_effects(
     debug: bool = False,
 ) -> EffectSummary:
     parameter_names = _collect_named_parameter_names(parameters)
+    block_infos = list(block_infos or ())
     effects: List[StoreEffect] = []
     has_unsupported_call = False
     incomplete_reasons: Set[str] = set()
+    store_path_global_locations: List[CanonicalLocation] = []
     call_argument_evidence: Dict[Tuple[object, ...], CallArgumentEvidence] = {}
     unsupported_call_sites: List[UnsupportedCallEffectRef] = []
     call_target_resolution_evidence: List[CallTargetResolutionEvidence] = []
@@ -288,9 +298,25 @@ def _impl_summarize_store_effects(
 
             if mnemonic == "STORE" and op.getNumInputs() >= 3:
                 addr_expr = tracer.trace_varnode(op.getInput(1), use_cache=False)
-                location = canonicalize_param_location(addr_expr, parameters, size=op.getInput(2).getSize())
-                if location is None:
+                store_kind, location = classify_store_address(
+                    addr_expr, parameters, size=op.getInput(2).getSize()
+                )
+                if store_kind == "stack_frame":
+                    # Frame-local memory dies with the function: proven unobservable.
                     continue
+                if store_kind == "unresolved" or location is None:
+                    # Issue #104 (Gap 1): the write may be observable (global,
+                    # escaped pointer, ...) but has no canonical identity; it must
+                    # not silently vanish from the comparison surface.
+                    incomplete_reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
+                    if debug:
+                        print(
+                            "[EffectSummary] unmodeled store location: "
+                            f"addr={addr_expr.to_string() if addr_expr is not None else None}"
+                        )
+                    continue
+                if store_kind == "global":
+                    store_path_global_locations.append(location)
                 value_effects = _resolve_store_value_effects(
                     op,
                     tracer,
@@ -711,6 +737,40 @@ def _impl_summarize_store_effects(
                         )
                     )
 
+    ram_effects, ram_reasons, ram_path_incomplete = _collect_ram_output_write_effects(
+        block_infos,
+        tracer,
+        condition_tracker,
+        parameters,
+        direct_call_expander=direct_call_expander,
+        resolve_callee_parameters=resolve_callee_parameters,
+        read_memory_value=read_memory_value,
+        image_base=image_base,
+        pcode_ref_for_op=_pcode_ref_for_op,
+        pcode_block_ref_for_block_info=_pcode_block_ref_for_block_info,
+        debug=debug,
+    )
+    incomplete_reasons.update(ram_reasons)
+    if ram_path_incomplete:
+        has_unsupported_call = True
+    if ram_effects:
+        # A location must be owned by exactly one representation; a global that
+        # is both STOREd through a pointer and tracked as an exit-state varnode
+        # cannot be ordered against itself, so fail closed.
+        ram_locations = {effect.location for effect in ram_effects}
+        if any(location in ram_locations for location in store_path_global_locations):
+            incomplete_reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
+        else:
+            effects.extend(ram_effects)
+    if any(effect.location.base_ref.is_global() for effect in effects) and any(
+        expression_reads_global_object(effect.value)
+        or any(expression_reads_global_object(getattr(cond, "expression", None)) for cond in effect.conditions)
+        for effect in effects
+    ):
+        # Reads of writable globals are still keyed by absolute address, which
+        # differs between binaries; a surface built on them would not unify.
+        incomplete_reasons.add(_EFFECT_GLOBAL_READ_IDENTITY_REASON)
+
     synthetic_expr = build_void_effect_summary_expr(effects)
     if debug:
         print(
@@ -739,6 +799,215 @@ def _impl__block_has_effect_sensitive_ops(block_info) -> bool:
         if mnemonic in {"STORE", "CALL", "CALLIND"}:
             return True
     return False
+
+def _impl__is_ram_exit_copy(op, return_targets: Set[object]) -> bool:
+    """True for the decompiler's return-site ``COPY ram_X <- ram_X'`` merge.
+
+    Ghidra materialises the final SSA value of every global the function
+    touches as a same-address COPY at each RETURN; the input is the reaching
+    definition, so it carries the post-state of that global on that path.
+    """
+
+    try:
+        if str(op.getMnemonic()).upper() != "COPY" or op.getNumInputs() < 1:
+            return False
+        out = op.getOutput()
+        src = op.getInput(0)
+        if out is None or src is None:
+            return False
+        if not (out.isAddress() and src.isAddress()):
+            return False
+        out_addr = out.getAddress()
+        src_addr = src.getAddress()
+        if out_addr.getAddressSpace().getName() != src_addr.getAddressSpace().getName():
+            return False
+        if int(out_addr.getOffset()) != int(src_addr.getOffset()) or int(out.getSize()) != int(src.getSize()):
+            return False
+        target = op.getSeqnum().getTarget()
+        return any(target.equals(ret) for ret in return_targets)
+    except Exception:
+        return False
+
+
+def _impl__ram_varnode_key(varnode) -> Optional[Tuple[str, int, int]]:
+    try:
+        address = varnode.getAddress()
+        return (
+            str(address.getAddressSpace().getName()),
+            int(address.getOffset()),
+            int(varnode.getSize()),
+        )
+    except Exception:
+        return None
+
+
+def _impl__collect_ram_output_write_effects(
+    block_infos: Sequence[object],
+    tracer,
+    condition_tracker,
+    parameters: Sequence[Dict],
+    *,
+    direct_call_expander=None,
+    resolve_callee_parameters=None,
+    read_memory_value=None,
+    image_base=None,
+    pcode_ref_for_op=None,
+    pcode_block_ref_for_block_info=None,
+    debug: bool = False,
+) -> Tuple[List[StoreEffect], Set[str], bool]:
+    """Global writes expressed as ``ram``-output ops (Issue #104, Gap 1).
+
+    Compilers that address globals directly (ARM64 ``adrp``/``str``) make the
+    decompiler track the global as an SSA varnode: the write is a ``COPY`` /
+    arithmetic / ``MULTIEQUAL`` whose output lives in ``ram`` and never a
+    ``STORE``.  The post-state of such a global on a return path is the input
+    of the return-site exit copy (``_is_ram_exit_copy``), which is turned into
+    a ``StoreEffect`` on the symbol-named global location.  Ops are classified
+    as: exit copy (post-state observation), ``INDIRECT`` (callee side-effect
+    marker, owned by the call-effect lane, skipped here), read-only memory
+    (ignored) and any other ``ram`` output (direct write / SSA merge; must be
+    covered by an exit copy at every return, otherwise the summary is
+    incomplete).  Returns ``(effects, incomplete_reasons, path_incomplete)``.
+    """
+
+    classify = getattr(tracer, "ram_varnode_write_class", None)
+    locate = getattr(tracer, "global_object_location_for_varnode", None)
+    if not callable(classify) or not callable(locate):
+        return [], set(), False
+
+    effects: List[StoreEffect] = []
+    reasons: Set[str] = set()
+    path_incomplete = False
+    written: Dict[Tuple[str, int, int], str] = {}
+    exit_copies: List[Tuple[object, List[object]]] = []
+
+    for block_info in block_infos:
+        ops = list(getattr(block_info, "pcode_ops", None) or ())
+        return_targets: Set[object] = set()
+        for op in ops:
+            try:
+                if str(op.getMnemonic()).upper() == "RETURN":
+                    return_targets.add(op.getSeqnum().getTarget())
+            except Exception:
+                continue
+        block_exit_copies: List[object] = []
+        for op in ops:
+            try:
+                mnemonic = str(op.getMnemonic()).upper()
+                out = op.getOutput()
+            except Exception:
+                continue
+            if out is None:
+                continue
+            write_class = classify(out)
+            if write_class is None or write_class == "readonly":
+                continue
+            if mnemonic == "INDIRECT":
+                # Possible modification by a call: the callee summary lane
+                # decides (Gap 3 / Gap 4); the reaching value still flows into
+                # the exit copy below.
+                continue
+            if return_targets and _is_ram_exit_copy(op, return_targets):
+                block_exit_copies.append(op)
+                continue
+            key = _ram_varnode_key(out)
+            if key is not None:
+                written[key] = write_class
+        if block_exit_copies:
+            exit_copies.append((block_info, block_exit_copies))
+
+    if not written and not exit_copies:
+        return effects, reasons, path_incomplete
+
+    covered_per_return: List[Set[Tuple[str, int, int]]] = []
+    for block_info, ops in exit_copies:
+        producer_block_ref = (
+            pcode_block_ref_for_block_info(block_info)
+            if callable(pcode_block_ref_for_block_info)
+            else None
+        )
+        coverage_status, path_sets = _path_coverage_for_effect_block(condition_tracker, block_info)
+        if coverage_status == "complete_unreachable":
+            continue
+        changed_ops = []
+        for op in ops:
+            try:
+                src = op.getInput(0)
+                if src.getDef() is None:
+                    # Reaching definition is the function-entry value: no write.
+                    continue
+            except Exception:
+                pass
+            changed_ops.append(op)
+        covered: Set[Tuple[str, int, int]] = set()
+        for op in ops:
+            key = _ram_varnode_key(op.getOutput())
+            if key is not None:
+                covered.add(key)
+        if coverage_status != "complete" or not path_sets:
+            if changed_ops:
+                path_incomplete = True
+                reasons.add("effect_summary_path_coverage_incomplete")
+                if debug:
+                    print("[EffectSummary] skip global exit state: path coverage unavailable")
+            covered_per_return.append(covered)
+            continue
+        covered_per_return.append(covered)
+        for op in changed_ops:
+            out = op.getOutput()
+            location = locate(out)
+            if location is None:
+                reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
+                if debug:
+                    print(f"[EffectSummary] unmodeled global exit state: {out}")
+                continue
+            order_key = _try_get_order_key(op)
+            if order_key is None:
+                reasons.add(_EFFECT_ORDER_UNAVAILABLE_REASON)
+                continue
+            value_effects = _resolve_value_varnode_effects(
+                op.getInput(0),
+                tracer,
+                condition_tracker,
+                parameters,
+                direct_call_expander=direct_call_expander,
+                resolve_callee_parameters=resolve_callee_parameters,
+                read_memory_value=read_memory_value,
+                image_base=image_base,
+            )
+            for path_conditions in path_sets:
+                for value_expr, value_conditions in value_effects:
+                    simplified = ConditionSimplifier.simplify_conditions(
+                        list(path_conditions) + list(value_conditions)
+                    )
+                    effects.append(
+                        StoreEffect(
+                            location=location,
+                            value=value_expr,
+                            conditions=simplified,
+                            order_key=order_key,
+                            provenance=StoreEffectProvenance(
+                                source_kind="local_store",
+                                producer_pcode_op_ref=(
+                                    pcode_ref_for_op(op) if callable(pcode_ref_for_op) else None
+                                ),
+                                producer_block_ref=producer_block_ref,
+                            ),
+                        )
+                    )
+            if debug:
+                print(f"[EffectSummary] global exit state effect: {location.base_ref.display_name()}")
+
+    # Every directly written global must be observed at every return path;
+    # otherwise its final value on some path is unknown.
+    for key, write_class in written.items():
+        if write_class != "global":
+            reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
+            continue
+        if not covered_per_return or any(key not in covered for covered in covered_per_return):
+            reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
+    return effects, reasons, path_incomplete
+
 
 def _impl__path_coverage_for_effect_block(condition_tracker, block_info) -> Tuple[str, List[List[Condition]]]:
     coverage_fn = getattr(condition_tracker, "get_path_coverage_to_block", None)
@@ -842,7 +1111,29 @@ def _impl__resolve_store_value_effects(
     read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
     image_base: Optional[int] = None,
 ) -> List[Tuple[Expression, List[Condition]]]:
-    value_varnode = store_op.getInput(2)
+    return _resolve_value_varnode_effects(
+        store_op.getInput(2),
+        tracer,
+        condition_tracker,
+        parameters,
+        direct_call_expander=direct_call_expander,
+        resolve_callee_parameters=resolve_callee_parameters,
+        read_memory_value=read_memory_value,
+        image_base=image_base,
+    )
+
+def _impl__resolve_value_varnode_effects(
+    value_varnode,
+    tracer,
+    condition_tracker,
+    parameters: Sequence[Dict],
+    *,
+    direct_call_expander: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional[Sequence[object]]]] = None,
+    resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]] = None,
+    read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
+    image_base: Optional[int] = None,
+) -> List[Tuple[Expression, List[Condition]]]:
+    """Value effects of a stored varnode (STORE input or global exit state)."""
     object_centric = _resolve_object_centric_store_value_effects(
         value_varnode,
         tracer,

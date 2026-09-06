@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core import (
+    AddressValueRef,
     CanonicalLocation,
     Condition,
     Expression,
@@ -39,6 +40,8 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _expression_truth_value,
     _extract_location_root_and_steps,
     _flatten_location_addition,
+    _global_object_root_for_constant,
+    _address_root_is_stack_frame,
     _is_stack_frame_base_expression,
     _iter_expression_nodes,
     _known_nonnull_address_comparison_truth,
@@ -724,12 +727,126 @@ def _impl__canonicalize_address_expression(
         )
     )
 
+def _impl__global_object_root_for_constant(
+    expr: Optional[Expression],
+) -> Optional[Tuple[LocationBaseRef, List[LocationStep]]]:
+    """Global-object base of a constant address carrying an ``AddressValueRef``.
+
+    The tracer attaches an ``AddressValueRef`` (symbol, containing data
+    object, block permissions) to constant addresses it derives from Ghidra;
+    a constant inside a writable, non-volatile named data object canonicalises
+    to ``LocationBaseRef.global_object`` plus the offset inside the object.
+    Bare constants without Ghidra evidence stay unresolved (``None``).
+    """
+
+    if expr is None or expr.expr_type != ExpressionType.CONSTANT:
+        return None
+    runtime_ref = getattr(expr, "runtime_ref", None)
+    if not isinstance(runtime_ref, AddressValueRef):
+        return None
+    identity = runtime_ref.global_object_identity()
+    if identity is None:
+        return None
+    symbol_name, object_size, offset = identity
+    base_ref = LocationBaseRef.global_object(
+        symbol_name,
+        object_size,
+        space_name=runtime_ref.space_name,
+    )
+    steps: List[LocationStep] = []
+    if int(offset) != 0:
+        steps.append(LocationStep("offset", int(offset)))
+    return base_ref, steps
+
+
+def _impl_expression_reads_global_object(expr: Optional[Expression]) -> bool:
+    """True when ``expr`` contains a memory read of a named writable global."""
+
+    if expr is None:
+        return False
+    for node in _iter_expression_nodes(expr):
+        if node.expr_type != ExpressionType.MEMORY or not node.operands:
+            continue
+        if _global_object_root_for_constant(node.operands[0]) is not None:
+            return True
+    return False
+
+
+def _impl__address_root_is_stack_frame(expr: Optional[Expression]) -> bool:
+    """True when the address expression is rooted at the stack/frame pointer.
+
+    Used to prove that a store whose exact location cannot be canonicalised
+    (symbolic index into a stack array, ...) still targets the current frame,
+    which dies with the function and is therefore not observable.
+    """
+
+    seen = 0
+    current = expr
+    while current is not None and seen < 64:
+        seen += 1
+        if _is_stack_frame_base_expression(current):
+            return True
+        storage = _coerce_storage_info(getattr(current, "storage_info", None))
+        if storage is not None and not storage.is_register and storage.space_name == "stack":
+            return True
+        expr_type = current.expr_type
+        operands = list(getattr(current, "operands", None) or [])
+        if expr_type == ExpressionType.UNARY_OP and current.operator in {"INT_ZEXT", "INT_SEXT", "CAST", "COPY"} and operands:
+            current = operands[0]
+            continue
+        if expr_type == ExpressionType.BINARY_OP and current.operator in {
+            "INT_ADD", "INT_SUB", "PTRADD", "PTRSUB", "SUBPIECE",
+        } and operands:
+            current = operands[0]
+            continue
+        if expr_type == ExpressionType.PHI and current.value:
+            return all(
+                _address_root_is_stack_frame(value) for _cond, value in current.value
+            )
+        return False
+    return False
+
+
+def _impl_classify_store_address(
+    addr_expr: Optional[Expression],
+    parameters: Sequence[Dict],
+    size: int,
+) -> Tuple[str, Optional[CanonicalLocation]]:
+    """Classify the target of a memory write for the effect summary.
+
+    Returns ``(kind, location)`` with ``kind`` one of ``"parameter"``
+    (parameter-based memory, modelled), ``"global"`` (named writable global
+    object, modelled), ``"stack_frame"`` (dies with the frame, excluded) or
+    ``"unresolved"`` (observable or possibly observable memory whose identity
+    could not be established: the caller must fail closed).
+    """
+
+    location = canonicalize_location(addr_expr, parameters, size=size)
+    if location is not None:
+        base_ref = location.base_ref
+        if base_ref.is_parameter():
+            if any(_parameter_base_ref_matches_descriptor(base_ref, param) for param in parameters):
+                return "parameter", location
+            return "unresolved", None
+        if base_ref.is_global():
+            return "global", location
+        if base_ref.is_stack_frame():
+            return "stack_frame", location
+        return "unresolved", None
+    if _address_root_is_stack_frame(addr_expr):
+        return "stack_frame", None
+    return "unresolved", None
+
+
 def _impl__extract_location_root_and_steps(
     expr: Expression,
     parameters: Sequence[Dict],
 ) -> Optional[Tuple[LocationBaseRef, List[LocationStep]]]:
     if expr is None:
         return None
+
+    if expr.expr_type == ExpressionType.CONSTANT:
+        return _global_object_root_for_constant(expr)
 
     if expr.expr_type in (ExpressionType.PARAMETER, ExpressionType.VARIABLE):
         resolved_base = _resolve_location_base_with_offset(expr, parameters)

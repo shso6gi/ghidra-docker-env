@@ -323,6 +323,11 @@ _EFFECT_INCOMPLETE_REASON_OWNERS = MappingProxyType({
     "callee_effect_summary_missing": "callee_effect_summary_incomplete",
     "effect_order_unavailable": "memory_effect_order_extraction_incomplete",
     "effect_summary_path_coverage_incomplete": "effect_observation_coverage_incomplete",
+    # Issue #104: observable memory writes / effect surface that could not be
+    # modelled; the function's effect census is not fully observed.
+    "effect_store_location_unmodeled": "effect_observation_coverage_incomplete",
+    "effect_global_read_identity_unavailable": "effect_observation_coverage_incomplete",
+    "effect_surface_composition_incomplete": "effect_observation_coverage_incomplete",
 })
 
 
