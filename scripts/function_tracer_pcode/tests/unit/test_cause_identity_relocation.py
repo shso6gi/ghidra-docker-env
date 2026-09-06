@@ -13,9 +13,29 @@ from scripts.function_tracer_pcode.checker import cause_identity as shim
 
 PUBLIC_NAMES = (
     "CAUSE_IDENTITY_SCHEMA_VERSION", "PROOF_REQUIREMENT_SCHEMA_VERSION", "CauseKey", "ExecutionCauseKey",
-    "IdentityScope", "ProofRequirementContract", "ProofRequirementId", "RelationalCauseKey", "UnaryCauseKey",
-    "canonical_cause_tuple", "cause_key_from_dict",
+    "IdentityScope", "LegacyProofObligationId", "ProofRequirementContract", "ProofRequirementId", "RelationalCauseKey",
+    "UnaryCauseKey", "canonical_cause_tuple", "cause_key_from_dict",
 )
+
+
+def _canonical_public_names():
+    """canonical module の top-level で定義・代入される非 private 名（型 alias を含む）を AST から集める。
+    手書きの PUBLIC_NAMES の漏れ（#98 レビューの LegacyProofObligationId）を防ぐ。"""
+    tree = ast.parse(inspect.getsource(canonical))
+    names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return {n for n in names if not n.startswith("_")}
+
+
+def test_public_name_list_matches_every_public_top_level_name_of_the_canonical_module():
+    assert set(PUBLIC_NAMES) == _canonical_public_names()
+    assert len(PUBLIC_NAMES) == 12
 
 
 @pytest.mark.parametrize("name", PUBLIC_NAMES)
