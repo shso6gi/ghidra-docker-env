@@ -114,6 +114,7 @@ _METHOD_MODULES = {
     'match_unaligned_store_half': 'unaligned_store',
     'pair_unaligned_store_halves': 'unaligned_store',
     'expression_reads_global_object': 'location',
+    'expression_reads_unidentified_writable_memory': 'location',
     '_resolve_value_varnode_effects': 'store_effect',
     '_collect_ram_output_write_effects': 'store_effect',
     '_is_ram_exit_copy': 'store_effect',

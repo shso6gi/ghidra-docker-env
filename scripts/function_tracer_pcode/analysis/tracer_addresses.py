@@ -635,6 +635,16 @@ class AddressRefMixin:
             return None
         if space_name in {None, "stack", "register", "unique", "const"}:
             return None
+        # Only a real memory space (Ghidra ``AddressSpace.isMemorySpace``) can
+        # hold an observable object; overlay / hash / external / OTHER spaces
+        # are not classified by name alone.
+        is_memory = getattr(space, "isMemorySpace", None)
+        if callable(is_memory):
+            try:
+                if not bool(is_memory()):
+                    return None
+            except Exception:
+                return None
         runtime_ref = self._make_address_runtime_ref_for_offset(
             int(address.getOffset()),
             require_ghidra_evidence=False,

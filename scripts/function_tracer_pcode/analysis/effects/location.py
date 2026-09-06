@@ -773,6 +773,40 @@ def _impl_expression_reads_global_object(expr: Optional[Expression]) -> bool:
     return False
 
 
+def _impl_expression_reads_unidentified_writable_memory(expr: Optional[Expression]) -> bool:
+    """True when ``expr`` reads writable memory at a constant address that has
+    no global-object identity (stripped symbol, no data item, ...).
+
+    Such a read is keyed by the absolute address only, which differs between
+    binaries, so a surface built on it cannot unify.  Reads of *named* globals
+    are rendered against a shared symbolic base address and are fine.
+    """
+
+    if expr is None:
+        return False
+    for node in _iter_expression_nodes(expr):
+        if node.expr_type != ExpressionType.MEMORY or not node.operands:
+            continue
+        address = node.operands[0]
+        while (
+            address is not None
+            and address.expr_type == ExpressionType.BINARY_OP
+            and address.operator == "INDIRECT"
+            and address.operands
+        ):
+            address = address.operands[0]
+        if address is None or address.expr_type != ExpressionType.CONSTANT:
+            continue
+        runtime_ref = getattr(address, "runtime_ref", None)
+        if not isinstance(runtime_ref, AddressValueRef):
+            continue
+        if runtime_ref.can_write is not True:
+            continue
+        if runtime_ref.global_object_identity() is None:
+            return True
+    return False
+
+
 def _impl__address_root_is_stack_frame(expr: Optional[Expression]) -> bool:
     """True when the address expression is rooted at the stack/frame pointer.
 

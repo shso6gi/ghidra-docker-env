@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any, List, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_refs import (
     AddressValueRef,
@@ -12,8 +13,70 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
 )
 
 
+GLOBAL_ADDRESS_BITS = 64
+
+
+def global_address_symbol_name(identity: Tuple[str, int, int]) -> str:
+    """SMT symbol for the base address of a named writable global object.
+
+    The symbol is keyed by the object's symbol name and size only (Issue #104):
+    two binaries built from the same source place the object at different
+    absolute addresses, so the address is a *shared* unconstrained constant
+    and every side's reads / writes of that object select the same cells of
+    the shared memory arrays.  Names are sanitised and disambiguated by a
+    digest so distinct C identifiers never collide.
+    """
+
+    name, size, _offset = identity
+    safe = re.sub(r"[^0-9A-Za-z_]", "_", str(name))
+    digest = hashlib.sha1(f"{name}\x00{int(size)}".encode("utf-8")).hexdigest()[:8]
+    return f"gaddr_{safe}_{int(size)}_{digest}"
+
+
+def global_address_identity(expr) -> Optional[Tuple[str, int, int]]:
+    """``(symbol, size, offset)`` when ``expr`` is a constant address inside a
+    named writable global object, else ``None``."""
+    address_ref = _coerce_address_value_ref(expr)
+    if address_ref is None:
+        return None
+    try:
+        return address_ref.global_object_identity()
+    except Exception:
+        return None
+
+
+def global_address_smt(expr, bits: int) -> Optional[str]:
+    """Render a global-object address constant as ``base (+ offset)`` at ``bits``."""
+    identity = global_address_identity(expr)
+    if identity is None:
+        return None
+    _name, _size, offset = identity
+    base = global_address_symbol_name(identity)
+    rendered = base if int(offset) == 0 else f"(bvadd {base} (_ bv{int(offset)} {GLOBAL_ADDRESS_BITS}))"
+    bits = max(1, int(bits or GLOBAL_ADDRESS_BITS))
+    if bits == GLOBAL_ADDRESS_BITS:
+        return rendered
+    if bits < GLOBAL_ADDRESS_BITS:
+        return f"((_ extract {bits - 1} 0) {rendered})"
+    return f"((_ zero_extend {bits - GLOBAL_ADDRESS_BITS}) {rendered})"
+
+
+def collect_global_address_identities(expr) -> List[Tuple[str, int]]:
+    """Distinct ``(symbol, size)`` global objects addressed anywhere in ``expr``."""
+    seen: List[Tuple[str, int]] = []
+    for node in _iter_expression_nodes(expr):
+        identity = global_address_identity(node)
+        if identity is None:
+            continue
+        key = (str(identity[0]), int(identity[1]))
+        if key not in seen:
+            seen.append(key)
+    return seen
+
+
 def collect_unknown_smt_declarations(expr) -> List[Tuple[str, int]]:
-    """Collect deterministic SMT declarations needed for UNKNOWN runtime objects."""
+    """Collect deterministic SMT declarations needed for UNKNOWN runtime objects
+    and for the shared base addresses of named global objects."""
     declarations: List[Tuple[str, int]] = []
     seen = set()
     for node in _iter_expression_nodes(expr):
@@ -22,7 +85,10 @@ def collect_unknown_smt_declarations(expr) -> List[Tuple[str, int]]:
         expr_kind = node.expr_type.__class__
         runtime_ref = getattr(node, "runtime_ref", None)
         decl = None
-        if node.expr_type == expr_kind.UNKNOWN:
+        identity = global_address_identity(node)
+        if identity is not None:
+            decl = (global_address_symbol_name(identity), GLOBAL_ADDRESS_BITS)
+        elif node.expr_type == expr_kind.UNKNOWN:
             decl = _unknown_smt_declaration(node)
         elif (
             node.expr_type == expr_kind.VARIABLE

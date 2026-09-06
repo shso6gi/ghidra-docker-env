@@ -238,6 +238,7 @@ from scripts.function_tracer_pcode.analysis.effects.unaligned_store import (
 )
 from scripts.function_tracer_pcode.analysis.effects.location import (
     _impl_expression_reads_global_object as expression_reads_global_object,
+    _impl_expression_reads_unidentified_writable_memory as expression_reads_unidentified_writable_memory,
     _impl__find_unique_effect_location_for_value as _find_unique_effect_location_for_value,
     _impl__flatten_location_addition as _flatten_location_addition,
     _impl__latest_definite_effect_value_for_location as _latest_definite_effect_value_for_location,
