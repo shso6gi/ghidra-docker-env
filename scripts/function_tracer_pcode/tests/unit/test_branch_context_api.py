@@ -1,5 +1,6 @@
-"""Phase 6c-1 (#93): stage runner → checker の branch 文脈を明示引数 ``branch_context`` でも渡す（dual-write）。
-explicit ctx と legacy（``_active_*``）由来の effective ctx の parity を context matrix で固定する。"""
+"""Phase 6c-1 / 6c-2 (#93): stage runner → checker の branch 文脈を明示引数 ``branch_context`` で渡す。
+6c-1 で固定した oracle（legacy ``_active_*`` 由来の effective ctx との parity）を保ちつつ、6c-2 で check() の implicit read を閉じ、
+再帰転送を provenance-sensitive にし、abstract recursive branch に inner effective context を明示的に渡す。"""
 
 import ast
 import inspect
@@ -227,12 +228,15 @@ def test_abstract_recursive_branch_keeps_the_inner_strategy_class_branch_id_fall
     runner_tests._run(checker, "_run_stage_plan")
     assert len(captured) == 1
     kwargs, inner_effective, has_branch_id, lease, session, generation = captured[0]
-    assert "branch_context" not in kwargs  # 6c-1: abstraction stage の signature は未変更
-    assert has_branch_id is False  # runner は abstract branch で _active_call_proof_branch_id を set しない
+    assert has_branch_id is False  # runner は abstract branch で _active_call_proof_branch_id を set しない（legacy、6c-3 まで）
     assert inner_effective.branch_id == "PairwiseStrategy"  # strategy class fallback（S_ABSTRACT_RECURSIVE_SUMMARY ではない）
     assert not inner_effective.branch_id.startswith("S_")
     assert inner_effective.production_branch_authority_lease is lease is not None
     assert inner_effective.comparison_session_id == session and inner_effective.generation == generation == 1
+    # 6c-2: runner は inner effective context を再構成して明示的に渡す（outer stage id ではない）
+    explicit = kwargs["branch_context"]
+    assert_same_context(explicit, inner_effective)
+    assert explicit.strategy is checker.pairwise_strategy and explicit.branch_id == "PairwiseStrategy"
     checker.check.assert_not_called()
 
 
@@ -270,33 +274,86 @@ def test_direct_checker_recurrence_recursion_rebuilds_a_fresh_direct_context():
     assert inner.production_branch_authority_lease is None
 
 
-def test_runner_supplied_facade_context_is_inherited_by_the_recurrence_recursion():
+def test_runner_supplied_context_is_forwarded_as_the_same_object_to_the_recurrence_recursion():
     analysis = create_mock_analysis("f", [])
     checker = EquivalenceChecker(strategy="pairwise", timeout=5, monolithic_timeout=5)
     lease = object()
-    checker._active_production_branch_authority_lease = lease
-    checker._active_comparison_session_id = "S-runner"
-    checker._active_comparison_generation = 9
-    checker._active_call_proof_branch_id = "S_PAIRWISE"
-    try:
+    supplied = BranchCheckContext(strategy=checker.pairwise_strategy, replan_plan=None, generation=9, comparison_session_id="S-runner",
+                                  branch_id="S_PAIRWISE", decision_mode=checker.call_proof_decision_mode, production_branch_authority_lease=lease)
+    nested = []
+    real_check = EquivalenceChecker.check
+
+    def observing_check(self, a1, a2, *args, **kwargs):
+        if getattr(self, "_active_recurrence_promotion_authority", None) is not None:
+            nested.append(kwargs.get("branch_context"))
+        return real_check(self, a1, a2, *args, **kwargs)
+
+    with patch.object(EquivalenceChecker, "check", observing_check):
+        result, seen = _run_with_forced_recurrence(checker, analysis, branch_context=supplied)
+    assert result.error_message is None
+    assert seen == []  # supplied ctx: outer も nested も builder を呼ばない
+    assert nested == [supplied] and nested[0] is supplied
+
+
+def test_direct_synthesized_context_is_not_forwarded_to_the_recurrence_recursion():
+    analysis = create_mock_analysis("f", [])
+    checker = EquivalenceChecker(strategy="pairwise", timeout=5, monolithic_timeout=5)
+    nested = []
+    real_check = EquivalenceChecker.check
+
+    def observing_check(self, a1, a2, *args, **kwargs):
+        if getattr(self, "_active_recurrence_promotion_authority", None) is not None:
+            nested.append(kwargs.get("branch_context"))
+        return real_check(self, a1, a2, *args, **kwargs)
+
+    with patch.object(EquivalenceChecker, "check", observing_check):
         result, seen = _run_with_forced_recurrence(checker, analysis)
+    assert result.error_message is None
+    assert nested == [None]          # direct で組んだ ctx は固定転送しない
+    assert len(seen) == 2 and seen[1].comparison_session_id != seen[0].comparison_session_id
+
+
+def test_legacy_facade_attributes_are_no_longer_read_by_check():
+    """6c-2: _active_* が facade に置かれていても、明示 ctx が無ければ direct semantics で組む。"""
+    analysis = create_mock_analysis("f", [])
+    checker = EquivalenceChecker(strategy="pairwise", timeout=5, monolithic_timeout=5)
+    checker._active_production_branch_authority_lease = object()
+    checker._active_comparison_session_id = "S-stale"
+    checker._active_comparison_generation = 99
+    checker._active_call_proof_branch_id = "S_STALE"
+    checker._active_pair_replan_plan = object()
+    before = checker._call_proof_generation
+    seen = []
+    real = checker_module.build_branch_check_context
+
+    def spy(**kw):
+        ctx = real(**kw); seen.append((kw, ctx)); return ctx
+
+    try:
+        with patch.object(checker_module, "build_branch_check_context", side_effect=spy):
+            _run_check_until_first_collaborator(checker, analysis)
     finally:
-        for name in ("_active_production_branch_authority_lease", "_active_comparison_session_id",
-                     "_active_comparison_generation", "_active_call_proof_branch_id"):
+        for name in ("_active_production_branch_authority_lease", "_active_comparison_session_id", "_active_comparison_generation",
+                     "_active_call_proof_branch_id", "_active_pair_replan_plan"):
             delattr(checker, name)
-    assert result.error_message is None and len(seen) == 2
-    outer, inner = seen
-    assert_same_context(outer, inner)
-    assert inner.comparison_session_id == "S-runner" and inner.generation == 9 and inner.branch_id == "S_PAIRWISE"
-    assert inner.production_branch_authority_lease is lease
+    kw, ctx = seen[0]
+    assert kw["replan_plan"] is None and kw["active_comparison_session_id"] is None and kw["active_comparison_generation"] is None
+    assert kw["active_call_proof_branch_id"] is None and kw["production_branch_authority_lease"] is None
+    assert ctx.comparison_session_id != "S-stale" and ctx.branch_id == "PairwiseStrategy" and ctx.production_branch_authority_lease is None
+    assert checker._call_proof_generation == before + 1  # stale replan 属性は増分判定に影響しない
+    src = inspect.getsource(EquivalenceChecker.check)
+    for name in ("_active_production_branch_authority_lease", "_active_comparison_session_id", "_active_comparison_generation",
+                 "_active_call_proof_branch_id", "_active_pair_replan_plan"):
+        assert name not in src, name
 
 
 # ---- 静的: runner 側の dual-write と check() の explicit 優先 ------------------------------------
 
 def test_runner_builds_the_explicit_context_with_the_shared_builder_and_keeps_legacy_writes():
     src = inspect.getsource(runner_module)
-    assert src.count("build_branch_check_context(") == 1
-    assert "branch_context=explicit_context" in src
+    assert src.count("build_branch_check_context(") == 2  # normal branch + abstract recursive branch（6c-2）
+    assert "branch_context=explicit_context" in src and "branch_context=inner_context" in src
+    assert "active_call_proof_branch_id=None" in src  # abstract path: inner branch_id は strategy class fallback
     for name in ("_active_production_branch_authority_lease", "_active_comparison_session_id",
                  "_active_comparison_generation", "_active_call_proof_branch_id", "_active_pair_replan_plan"):
         assert f"checker.{name} = " in src, name  # legacy set は 6c-3 まで残る
@@ -304,7 +361,19 @@ def test_runner_builds_the_explicit_context_with_the_shared_builder_and_keeps_le
     fn = ast.parse("class _C:\n" + "\n".join("    " + l for l in src.splitlines())).body[0].body[0]
     calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "build_branch_check_context"]
     assert len(calls) == 1
-    # ctx = branch_context if branch_context is not None else build_branch_check_context(...)
+    # ctx = branch_context if context_was_supplied else build_branch_check_context(<direct semantics>)
     assigns = [n for n in ast.walk(fn) if isinstance(n, ast.Assign) and any(getattr(t, "id", "") == "ctx" for t in n.targets)]
     assert len(assigns) == 1 and isinstance(assigns[0].value, ast.IfExp)
-    assert ast.unparse(assigns[0].value.test) == "branch_context is not None" and ast.unparse(assigns[0].value.body) == "branch_context"
+    assert ast.unparse(assigns[0].value.test) == "context_was_supplied" and ast.unparse(assigns[0].value.body) == "branch_context"
+    direct_kw = {k.arg: ast.unparse(k.value) for k in calls[0].keywords}
+    assert direct_kw["replan_plan"] == "None" and direct_kw["active_comparison_session_id"] == "None"
+    assert direct_kw["active_comparison_generation"] == "None" and direct_kw["active_call_proof_branch_id"] == "None"
+    assert direct_kw["production_branch_authority_lease"] == "None"
+    # 再帰 self.check(...) は provenance-sensitive に転送する
+    rec = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "check"
+           and ast.unparse(n.func.value) == "self"]
+    assert len(rec) == 1
+    assert {k.arg: ast.unparse(k.value) for k in rec[0].keywords}["branch_context"] == "ctx if context_was_supplied else None"
+    # abstraction stage は branch_context を check() へ転送する
+    abs_src = inspect.getsource(EquivalenceChecker._run_recursive_abstraction_stage)
+    assert "branch_context=branch_context" in abs_src

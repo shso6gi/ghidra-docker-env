@@ -241,9 +241,27 @@ def run_obligation_branch_plan(
             checker._active_comparison_generation = generation
             try:
                 if spec.strategy == "abstract_pairwise":
+                    # 6c-2 (#93): inner check() が現在暗黙に得ている effective context を再構成して渡す:
+                    # session / generation / lease は runner 発行値、active branch id は None（この branch では
+                    # _active_call_proof_branch_id を set しないため strategy class 名 fallback）、strategy は
+                    # pairwise。outer の S_ABSTRACT_RECURSIVE_SUMMARY を渡してはならない（"S_" 判定が変わる）。
+                    from scripts.function_tracer_pcode.checker.branch_context import (
+                        build_branch_check_context,
+                    )
+                    inner_context = build_branch_check_context(
+                        strategy=checker.pairwise_strategy,
+                        replan_plan=getattr(checker, "_active_pair_replan_plan", None),
+                        call_proof_generation=generation,
+                        active_comparison_generation=generation,
+                        active_comparison_session_id=session_id,
+                        active_call_proof_branch_id=None,
+                        decision_mode=getattr(checker, "call_proof_decision_mode", None),
+                        production_branch_authority_lease=branch_lease,
+                    )
                     return checker._run_recursive_abstraction_stage(
                         analysis1, analysis2, binary1_name, binary2_name, save_formula,
                         type_fix_result, retry_count, original_signature1, original_signature2,
+                        branch_context=inner_context,
                     )
                 strategies = {
                     "pairwise": checker.pairwise_strategy,
