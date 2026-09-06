@@ -20,7 +20,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable, Optional
 
-from scripts.function_tracer_pcode.checker.branch_context import BranchCheckContext
+from scripts.function_tracer_pcode.proof.obligations.branch_context import BranchCheckContext
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.checker.result_factory import create_error_result
 from scripts.function_tracer_pcode.checker.unknown_reason import make_internal_v2_reason_diagnostic

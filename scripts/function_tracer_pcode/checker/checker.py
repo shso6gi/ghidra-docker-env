@@ -96,7 +96,7 @@ from scripts.function_tracer_pcode.core.recurrence_contracts import RecurrenceDi
 # Re-exports kept for callers that import these names from this module.
 from scripts.function_tracer_pcode.smt import SolverResult
 from scripts.function_tracer_pcode.checker.abi_retry import AbiRetryMixin
-from scripts.function_tracer_pcode.checker.branch_context import BranchCheckContext, build_branch_check_context
+from scripts.function_tracer_pcode.proof.obligations.branch_context import BranchCheckContext, build_branch_check_context
 from scripts.function_tracer_pcode.checker.unknown_refinement import refine_unknown_reasons
 from scripts.function_tracer_pcode.checker.recurrence_promotion import (
     complete_recurrence_promotion_signals,

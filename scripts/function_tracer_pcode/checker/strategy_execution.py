@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict
 
-from scripts.function_tracer_pcode.checker.branch_context import BranchCheckContext
+from scripts.function_tracer_pcode.proof.obligations.branch_context import BranchCheckContext
 from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     PreparedDispatchFrame,
     StrategySourceAnalysisPair,
