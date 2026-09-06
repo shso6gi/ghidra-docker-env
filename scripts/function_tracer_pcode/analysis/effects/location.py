@@ -796,8 +796,14 @@ def _impl__address_root_is_stack_frame(expr: Optional[Expression]) -> bool:
             current = operands[0]
             continue
         if expr_type == ExpressionType.BINARY_OP and current.operator in {
-            "INT_ADD", "INT_SUB", "PTRADD", "PTRSUB", "SUBPIECE",
+            "INT_ADD", "INT_SUB", "SUBPIECE",
         } and operands:
+            current = operands[0]
+            continue
+        if expr_type == ExpressionType.INTRINSIC and (
+            getattr(current, "name", None) in {"PTRADD", "PTRSUB"}
+            or getattr(current, "opcode", None) in {PTRADD_OPCODE, PTRSUB_OPCODE}
+        ) and operands:
             current = operands[0]
             continue
         if expr_type == ExpressionType.PHI and current.value:

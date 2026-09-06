@@ -230,6 +230,13 @@ from scripts.function_tracer_pcode.analysis.effects.location import (  # noqa: F
     _impl__global_object_root_for_constant as _global_object_root_for_constant,
     _impl__address_root_is_stack_frame as _address_root_is_stack_frame,
     _impl_classify_store_address as classify_store_address,
+)
+from scripts.function_tracer_pcode.analysis.effects.unaligned_store import (
+    UnalignedStoreHalf,
+    _impl_match_unaligned_store_half as match_unaligned_store_half,
+    _impl_pair_unaligned_store_halves as pair_unaligned_store_halves,
+)
+from scripts.function_tracer_pcode.analysis.effects.location import (
     _impl_expression_reads_global_object as expression_reads_global_object,
     _impl__find_unique_effect_location_for_value as _find_unique_effect_location_for_value,
     _impl__flatten_location_addition as _flatten_location_addition,

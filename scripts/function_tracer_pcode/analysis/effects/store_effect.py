@@ -64,11 +64,14 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _ram_varnode_key,
     classify_store_address,
     expression_reads_global_object,
+    match_unaligned_store_half,
+    pair_unaligned_store_halves,
     _runtime_conditions_signature,
     _runtime_expression_signature,
     _strongly_connected_components,
     _try_get_order_key,
     build_void_effect_summary_expr,
+    canonicalize_location,
     canonicalize_param_location,
     is_call_effect_summary_allowed,
     locations_match,
@@ -96,6 +99,7 @@ def _impl_summarize_store_effects(
     has_unsupported_call = False
     incomplete_reasons: Set[str] = set()
     store_path_global_locations: List[CanonicalLocation] = []
+    unaligned_halves: List[Tuple[Tuple[object, List[List[Condition]], Optional[PcodeBlockRef]], object]] = []
     call_argument_evidence: Dict[Tuple[object, ...], CallArgumentEvidence] = {}
     unsupported_call_sites: List[UnsupportedCallEffectRef] = []
     call_target_resolution_evidence: List[CallTargetResolutionEvidence] = []
@@ -305,6 +309,17 @@ def _impl_summarize_store_effects(
                     # Frame-local memory dies with the function: proven unobservable.
                     continue
                 if store_kind == "unresolved" or location is None:
+                    # MIPS sdl/sdr (swl/swr): one half of an unaligned store.
+                    # The pair is composed into a single store after the scan;
+                    # an unmatched half fails closed below.
+                    half = match_unaligned_store_half(
+                        addr_expr,
+                        tracer.trace_varnode(op.getInput(2), use_cache=False),
+                        op.getInput(2).getSize(),
+                    )
+                    if half is not None:
+                        unaligned_halves.append(((op, path_sets, producer_block_ref), half))
+                        continue
                     # Issue #104 (Gap 1): the write may be observable (global,
                     # escaped pointer, ...) but has no canonical identity; it must
                     # not silently vanish from the comparison surface.
@@ -736,6 +751,50 @@ def _impl_summarize_store_effects(
                             reason="target_identity_unavailable",
                         )
                     )
+
+    if unaligned_halves:
+        def _canonical_base_key(base_expr, width):
+            location = canonicalize_location(base_expr, parameters, size=width)
+            return location.stable_key() if location is not None else None
+
+        pairs, unmatched = pair_unaligned_store_halves(unaligned_halves, _canonical_base_key)
+        if unmatched:
+            incomplete_reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
+            if debug:
+                for _tag, half in unmatched:
+                    print(f"[EffectSummary] unmatched unaligned store half: side={half.side} base={half.base_expr.to_string()}")
+        for _left_tag, right_tag, half in pairs:
+            right_op, right_path_sets, right_block_ref = right_tag
+            store_kind, location = classify_store_address(half.base_expr, parameters, size=half.width)
+            if store_kind == "stack_frame":
+                continue
+            if store_kind == "unresolved" or location is None:
+                incomplete_reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
+                if debug:
+                    print(f"[EffectSummary] unmodeled unaligned store base: {half.base_expr.to_string()}")
+                continue
+            if store_kind == "global":
+                store_path_global_locations.append(location)
+            order_key = _try_get_order_key(right_op)
+            if order_key is None:
+                incomplete_reasons.add(_EFFECT_ORDER_UNAVAILABLE_REASON)
+                continue
+            for path_conditions in right_path_sets:
+                effects.append(
+                    StoreEffect(
+                        location=location,
+                        value=half.value_expr,
+                        conditions=ConditionSimplifier.simplify_conditions(list(path_conditions)),
+                        order_key=order_key,
+                        provenance=StoreEffectProvenance(
+                            source_kind="local_store",
+                            producer_pcode_op_ref=_pcode_ref_for_op(right_op),
+                            producer_block_ref=right_block_ref,
+                        ),
+                    )
+                )
+            if debug:
+                print(f"[EffectSummary] composed unaligned store: {location.base_ref.display_name()}+{location.offset} width={half.width}")
 
     ram_effects, ram_reasons, ram_path_incomplete = _collect_ram_output_write_effects(
         block_infos,

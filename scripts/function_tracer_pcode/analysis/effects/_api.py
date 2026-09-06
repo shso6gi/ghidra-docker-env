@@ -111,6 +111,8 @@ _METHOD_MODULES = {
     '_global_object_root_for_constant': 'location',
     '_address_root_is_stack_frame': 'location',
     'classify_store_address': 'location',
+    'match_unaligned_store_half': 'unaligned_store',
+    'pair_unaligned_store_halves': 'unaligned_store',
     'expression_reads_global_object': 'location',
     '_resolve_value_varnode_effects': 'store_effect',
     '_collect_ram_output_write_effects': 'store_effect',

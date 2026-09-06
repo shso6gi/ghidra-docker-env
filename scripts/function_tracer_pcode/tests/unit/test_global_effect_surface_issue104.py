@@ -289,6 +289,14 @@ def test_global_base_requires_the_global_object_identity_key():
 # classify_store_address
 # --------------------------------------------------------------------------
 
+def _ptr_intrinsic(name, *operands):
+    """PTRADD / PTRSUB as the tracer emits them: INTRINSIC nodes named by mnemonic."""
+    from scripts.function_tracer_pcode.core import ExpressionType
+
+    expr = Expression(ExpressionType.INTRINSIC, name=name, operands=list(operands), size=8)
+    return expr
+
+
 def _stack_pointer():
     return Expression.variable(
         "sp",
@@ -302,10 +310,11 @@ def test_classify_store_address_distinguishes_parameter_global_stack_and_unresol
     pointer = Expression.parameter("param_1", 0, data_type="int *", size=8)
     assert classify_store_address(pointer, params, size=4)[0] == "parameter"
     assert classify_store_address(_const_addr(_global_ref(*G)), params, size=4)[0] == "global"
-    symbolic_index = Expression.binary_op(
+    symbolic_index = _ptr_intrinsic(
         "PTRADD",
-        Expression.binary_op("PTRSUB", _stack_pointer(), Expression.constant(-224, 8)),
+        _ptr_intrinsic("PTRSUB", _stack_pointer(), Expression.constant(-224, 8)),
         Expression.unknown("idx"),
+        Expression.constant(8, 8),
     )
     assert classify_store_address(symbolic_index, params, size=8) == ("stack_frame", None)
     assert classify_store_address(Expression.constant(0x1000d0, 8), params, size=4) == ("unresolved", None)
@@ -363,10 +372,11 @@ def test_store_through_an_escaped_pointer_fails_closed():
 # --------------------------------------------------------------------------
 
 def test_stack_local_store_with_symbolic_index_is_excluded_without_blocker():
-    addr = Expression.binary_op(
+    addr = _ptr_intrinsic(
         "PTRADD",
-        Expression.binary_op("PTRSUB", _stack_pointer(), Expression.constant(-224, 8)),
+        _ptr_intrinsic("PTRSUB", _stack_pointer(), Expression.constant(-224, 8)),
         Expression.unknown("idx"),
+        Expression.constant(8, 8),
     )
     tracer = _Tracer([G], values={"addr": addr, "val": _x()})
     summary = summarize_store_effects([_Block([_store_op("addr", "val", 8)])], tracer, _Tracker(), [_param("param_1", 0)])
