@@ -10,8 +10,10 @@ from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 from scripts.function_tracer_pcode.checker.unknown_reason import (
-    UnknownReasonId,
     make_unknown_reason,
+)
+from scripts.function_tracer_pcode.proof.unknown_reason import (
+    UnknownReasonId,
 )
 from scripts.function_tracer_pcode.analysis.failure import (
     ANALYSIS_STATUS_DECOMPILATION_FAILED,

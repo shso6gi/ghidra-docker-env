@@ -17,16 +17,18 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.checker.unknown_reason import (
-    UNKNOWN_TUPLE_MISSING,
-    UnknownCountKind,
-    UnknownDecisionEffect,
-    UnknownRecoveryActionStatus,
-    UnknownReasonClass,
-    UnknownReasonId,
     UnknownReasonRecord,
     build_unknown_recovery_actions,
     coerce_unknown_reason_records,
     make_unknown_reason,
+)
+from scripts.function_tracer_pcode.proof.unknown_reason import (
+    UNKNOWN_TUPLE_MISSING,
+    UnknownCountKind,
+    UnknownDecisionEffect,
+    UnknownReasonClass,
+    UnknownReasonId,
+    UnknownRecoveryActionStatus,
 )
 from scripts.function_tracer_pcode.reporting.root_blocker_summary import (
     compare_root_blocker_summaries,
