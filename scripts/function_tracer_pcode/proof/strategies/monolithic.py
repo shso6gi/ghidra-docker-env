@@ -1532,7 +1532,9 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor impo
 
 
 # Re-exports kept for callers that import these names from this module.
-from scripts.function_tracer_pcode.checker.unknown_reason import UnknownReasonId
+from scripts.function_tracer_pcode.proof.unknown_reason import (
+    UnknownReasonId,
+)
 
 register_canonical_guard_strategy_type(MonolithicStrategy)
 register_builtin_receipt_executor("monolithic", MonolithicStrategy.check)

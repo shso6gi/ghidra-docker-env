@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.smt import SolverStatus
-from scripts.function_tracer_pcode.checker.unknown_reason import UnknownRecoveryActionStatus
+from scripts.function_tracer_pcode.proof.unknown_reason import (
+    UnknownRecoveryActionStatus,
+)
 from scripts.function_tracer_pcode.proof.formula.returns import (
     RETURN_WIDTH_BRIDGE_MISSING_REASON,
     ReturnWidthMismatchError,

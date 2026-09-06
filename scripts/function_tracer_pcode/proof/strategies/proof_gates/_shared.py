@@ -7,16 +7,18 @@ from scripts.function_tracer_pcode.core import ReadonlyReductionRef
 from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.proof.formula.returns import coerce_value_to_bitvec_width
 from scripts.function_tracer_pcode.checker.unknown_reason import (
-    UnknownRecoveryActionStatus,
-    UnknownRecoveryProofKind,
-    UnknownRecoveryProofObligation,
-    UnknownReasonId,
     UnknownReasonRecord,
-    build_proof_obligation_id,
     build_unknown_recovery_actions,
     coerce_unknown_reason_records,
     make_internal_v2_reason_diagnostic,
     make_unknown_reason,
+)
+from scripts.function_tracer_pcode.proof.unknown_reason import (
+    UnknownReasonId,
+    UnknownRecoveryActionStatus,
+    UnknownRecoveryProofKind,
+    UnknownRecoveryProofObligation,
+    build_proof_obligation_id,
 )
 
 @dataclass

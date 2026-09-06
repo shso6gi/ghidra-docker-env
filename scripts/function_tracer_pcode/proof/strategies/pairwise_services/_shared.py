@@ -58,13 +58,15 @@ from scripts.function_tracer_pcode.semantics.semantic_width import (
 )
 from scripts.function_tracer_pcode.checker.debug_trace import NormalizationRuleApplication
 from scripts.function_tracer_pcode.checker.unknown_reason import (
-    UnknownRecoveryActionStatus,
-    UnknownRecoveryProofKind,
-    UnknownRecoveryProofObligation,
-    UnknownReasonId,
     build_unknown_recovery_actions,
     make_internal_v2_reason_diagnostic,
     make_unknown_reason,
+)
+from scripts.function_tracer_pcode.proof.unknown_reason import (
+    UnknownReasonId,
+    UnknownRecoveryActionStatus,
+    UnknownRecoveryProofKind,
+    UnknownRecoveryProofObligation,
 )
 
 @dataclass(frozen=True)
