@@ -92,7 +92,6 @@ UPWARD_BASELINE = frozenset({
     ("proof.obligations.decision", "checker"),
     ("proof.obligations.stage_runner", "checker"),
     ("proof.strategies.monolithic", "checker"),
-    ("proof.strategies.pairwise_query_executor", "checker"),
     ("proof.strategies.pairwise_services._shared", "checker"),
     ("proof.strategies.proof_gates._shared", "checker"),
     # proof -> reporting

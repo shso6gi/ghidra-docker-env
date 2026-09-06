@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "415b8645883c749db52f14a3e0e17fe2baf92db545c8a3331c5626ddedc4baf5",
+  "manifest_digest": "ff2de50fd4b22b70960f6c50e6faf199772d5388a31707c235905feb5b192387",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 30,
   "sites": [
@@ -1050,7 +1050,7 @@
       "line": 1307,
       "path": "scripts/function_tracer_pcode/proof/strategies/monolithic.py",
       "producer_site_manifest_id": "safe-counterexample-monolithic-production",
-      "source_sha256": "cd6be295bfa2336fee211086795fefa75b2f2c648a5047250ff88c208c62ae71"
+      "source_sha256": "d516777d788be6f8b93eb9eee9158179ff3eb07a58485657e10ef566622210eb"
     },
     {
       "allowed_dispositions": [
