@@ -154,7 +154,7 @@ def test_unsupported_smt_result_shape_and_diagnostic_kind():
 
 def test_assemble_result_attaches_private_capabilities_and_terminal_provenance_in_order():
     analysis = create_mock_analysis("f", [])
-    from scripts.function_tracer_pcode.checker.branch_context import BranchCheckContext
+    from scripts.function_tracer_pcode.proof.obligations.branch_context import BranchCheckContext
     from scripts.function_tracer_pcode.proof.call_effect.preflight import CallProofDecisionMode
     ctx = BranchCheckContext(strategy=object(), replan_plan=None, generation=3, comparison_session_id="S", branch_id="B",
                              decision_mode=CallProofDecisionMode.PREFLIGHT_PROJECTION, production_branch_authority_lease=None)

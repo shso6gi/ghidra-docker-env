@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from scripts.function_tracer_pcode.checker import strategy_execution as se
-from scripts.function_tracer_pcode.checker.branch_context import BranchCheckContext
+from scripts.function_tracer_pcode.proof.obligations.branch_context import BranchCheckContext
 from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
 from scripts.function_tracer_pcode.proof.call_effect.preflight import CallProofDecisionMode
 from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy

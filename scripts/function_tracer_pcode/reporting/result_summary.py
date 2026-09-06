@@ -22,8 +22,10 @@ from scripts.function_tracer_pcode.authority.decision.pair_status_authority impo
     validate_signed_pair_status,
 )
 from scripts.function_tracer_pcode.checker.unknown_reason import (
-    UNKNOWN_TUPLE_MISSING,
     coerce_unknown_reason_records,
+)
+from scripts.function_tracer_pcode.proof.unknown_reason import (
+    UNKNOWN_TUPLE_MISSING,
 )
 from scripts.function_tracer_pcode.reporting.unknown_reason_summary import (
     RESULT_JSON_BEGIN,

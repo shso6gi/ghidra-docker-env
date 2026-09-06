@@ -11,13 +11,15 @@ from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 from scripts.function_tracer_pcode.semantics.transform.rewrite.rules import RewriteResult
 from scripts.function_tracer_pcode.checker.debug_trace import DebugTrace
 from scripts.function_tracer_pcode.checker.unknown_reason import (
-    UnknownRecoveryAction,
-    UnknownRecoveryActionStatus,
     UnknownReasonRecord,
+    UnknownRecoveryAction,
     build_unknown_recovery_actions,
-    coerce_unknown_recovery_actions,
     coerce_unknown_reason_records,
+    coerce_unknown_recovery_actions,
     summarize_unknown_recovery_backlog,
+)
+from scripts.function_tracer_pcode.proof.unknown_reason import (
+    UnknownRecoveryActionStatus,
 )
 
 
