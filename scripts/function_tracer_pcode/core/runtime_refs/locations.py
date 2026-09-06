@@ -26,6 +26,12 @@ class AddressValueRef:
     can_write: Optional[bool] = None
     can_execute: Optional[bool] = None
     is_volatile: Optional[bool] = None
+    # Data object that contains the address (Ghidra ``Listing.getDataContaining``
+    # plus the non-dynamic primary symbol at its start).  ``None`` when the
+    # address is not covered by a named data object.
+    object_symbol_name: Optional[str] = None
+    object_base_offset: Optional[int] = None
+    object_size: Optional[int] = None
 
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         return (
@@ -37,6 +43,31 @@ class AddressValueRef:
 
     def has_concrete_address(self) -> bool:
         return int(self.address_offset) >= 0
+
+    def global_object_identity(self) -> Optional[Tuple[str, int, int]]:
+        """``(symbol_name, object_size, offset_in_object)`` of a writable global.
+
+        The identity is program-independent: it names the data object by its
+        imported symbol, so the same source-level global compiled by different
+        compilers / ISAs canonicalises to the same location.  ``None`` when the
+        address is not inside a named data object of a writable, non-volatile
+        memory block (read-only data keeps the readonly-image semantics and
+        volatile memory is never treated as a plain object).
+        """
+
+        if not self.has_concrete_address():
+            return None
+        if not self.object_symbol_name or self.object_base_offset is None:
+            return None
+        if self.can_write is not True or self.is_volatile is not False:
+            return None
+        size = int(self.object_size or 0)
+        if size <= 0:
+            return None
+        offset = int(self.address_offset) - int(self.object_base_offset)
+        if offset < 0 or offset >= size:
+            return None
+        return (str(self.object_symbol_name), size, offset)
 
     def is_readonly_memory(self) -> bool:
         return bool(
@@ -67,6 +98,9 @@ class AddressValueRef:
             "can_execute": self.can_execute,
             "is_volatile": self.is_volatile,
             "is_readonly_memory": self.is_readonly_memory(),
+            "object_symbol_name": self.object_symbol_name,
+            "object_base_offset": self.object_base_offset,
+            "object_size": self.object_size,
         }
 
 
@@ -87,8 +121,11 @@ class LocationBaseRef:
     display_hint: Optional[str] = None
 
     def __post_init__(self) -> None:
-        if self.kind not in {"parameter", "stack_frame", "storage"}:
+        if self.kind not in {"parameter", "stack_frame", "storage", "global"}:
             raise ValueError(f"Unsupported location base kind: {self.kind}")
+        if self.kind == "global":
+            if not self.storage_identity_key or self.storage_identity_key[0] != "global_object":
+                raise ValueError("global location base requires a global_object identity key")
         if self.kind == "parameter":
             normalized_index = None
             if self.parameter_index is not None:
@@ -144,6 +181,34 @@ class LocationBaseRef:
             display_hint=display_hint,
         )
 
+    @classmethod
+    def global_object(
+        cls,
+        symbol_name: str,
+        size: int,
+        *,
+        space_name: Optional[str] = None,
+    ) -> "LocationBaseRef":
+        """Base of a writable global / static data object named by its symbol.
+
+        The identity is the imported symbol name and the object size, never
+        the absolute address, so the same source global compiled into two
+        different binaries canonicalises to the same base (Issue #104).
+        """
+
+        name = str(symbol_name or "").strip()
+        if not name:
+            raise ValueError("global location base requires a symbol name")
+        object_size = max(1, int(size or 0))
+        return cls(
+            kind="global",
+            storage_space=space_name or None,
+            storage_offset=0,
+            storage_size=object_size,
+            storage_identity_key=("global_object", name, object_size),
+            display_hint=name,
+        )
+
     def is_parameter(self) -> bool:
         return self.kind == "parameter"
 
@@ -152,6 +217,15 @@ class LocationBaseRef:
 
     def is_storage(self) -> bool:
         return self.kind == "storage"
+
+    def is_global(self) -> bool:
+        return self.kind == "global"
+
+    @property
+    def global_symbol_name(self) -> Optional[str]:
+        if not self.is_global() or not self.storage_identity_key:
+            return None
+        return str(self.storage_identity_key[1])
 
     def __hash__(self) -> int:
         return hash(self.stable_key())

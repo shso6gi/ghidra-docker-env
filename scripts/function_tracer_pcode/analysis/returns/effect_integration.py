@@ -52,6 +52,11 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     rewrite_observed_loads_from_effects,
     summarize_store_effects,
 )
+from scripts.function_tracer_pcode.analysis.effects._shared import (
+    _EFFECT_GLOBAL_READ_IDENTITY_REASON,
+    _EFFECT_SURFACE_COMPOSITION_REASON,
+)
+from scripts.function_tracer_pcode.analysis.effects.summary import expression_reads_global_object
 from scripts.function_tracer_pcode.analysis.session import AnalysisSession
 from scripts.function_tracer_pcode.analysis.runtime_state import AnalysisRuntimeState
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService
@@ -91,6 +96,13 @@ def local_memory_key(addr_expr: Expression, size: int) -> Tuple[StructuralKey, i
 
 
 OBSERVABLE_EFFECT_SURFACE_SOURCE = "observable_effects_and_return_value"
+
+
+def _incomplete_reason_tuple(effect_summary: Any) -> Tuple[str, ...]:
+    reasons = getattr(effect_summary, "incomplete_reasons", ())
+    if not isinstance(reasons, (list, tuple, set, frozenset)):
+        return ()
+    return tuple(reasons)
 
 
 def observable_store_effects(effect_summary: Any) -> List[Any]:
@@ -1846,13 +1858,28 @@ class EffectIntegrationService:
         comparison surface becomes ``memory_effect`` with the combined width.
 
         When the effect summary is not trustworthy (``has_unsupported_call`` or
-        any ``incomplete_reasons``) or the return cases disagree on their width,
-        the surface is not built; the existing equivalence-blocking reasons
-        already keep such functions away from EQUIVALENT.
+        any ``incomplete_reasons``) the surface is not built and the existing
+        equivalence-blocking reasons keep such functions away from EQUIVALENT.
+        When the summary is trustworthy but the surface cannot be composed
+        (no return observation, return widths disagree, degenerate widths, or a
+        global effect next to an address-bound global read) the summary is
+        marked incomplete (Issue #104, Gap 5) so the return value alone is never
+        used as the comparison surface.
         """
-        if result is None or not result.returns:
+        if result is None:
             return False
         if return_type_obj is not None and self.parameters.is_void_type(return_type_obj):
+            return False
+        if not result.returns:
+            effect_summary = getattr(result, "effect_summary", None)
+            if (
+                isinstance(effect_summary, EffectSummary)
+                and not getattr(effect_summary, "has_unsupported_call", False)
+                and not _incomplete_reason_tuple(effect_summary)
+                and observable_store_effects(effect_summary)
+            ):
+                # Issue #104 (Gap 5): stores without any return observation.
+                effect_summary.incomplete_reasons = (_EFFECT_SURFACE_COMPOSITION_REASON,)
             return False
         if getattr(result, "comparison_surface", None) is not None:
             return False
@@ -1873,23 +1900,54 @@ class EffectIntegrationService:
             build_void_effect_summary_expr,
         )
 
+        def _fail_closed(reason: str, detail: str) -> bool:
+            # Issue #104 (Gap 5): observable stores exist but the combined
+            # return + effect surface cannot be composed.  Falling back to the
+            # return value alone would silently drop the stores, so record an
+            # effect-summary blocker instead; the existing equivalence gates
+            # then keep the pair away from EQUIVALENT.
+            reasons = _incomplete_reason_tuple(effect_summary)
+            if reason not in reasons:
+                effect_summary.incomplete_reasons = tuple(sorted(reasons + (reason,)))
+            self.debug_reporter.debug_print(
+                f"Observable effect surface not composed ({detail}); marked {reason}"
+            )
+            return False
+
+        if any(effect.location.base_ref.is_global() for effect in effects):
+            for ret in result.returns:
+                if expression_reads_global_object(ret.value) or any(
+                    expression_reads_global_object(getattr(cond, "expression", None))
+                    for cond in ret.conditions
+                ):
+                    return _fail_closed(
+                        _EFFECT_GLOBAL_READ_IDENTITY_REASON,
+                        "return observation reads a global whose identity is address-bound",
+                    )
+
         effects_expr = build_void_effect_summary_expr(effects)
         if effects_expr is None:
-            return False
+            return _fail_closed(_EFFECT_SURFACE_COMPOSITION_REASON, "no effect expression")
         effect_bits = int(effects_expr.get_bit_width() or 0)
         return_widths = set()
         for ret in result.returns:
             if ret.value is None:
-                return False
+                return _fail_closed(_EFFECT_SURFACE_COMPOSITION_REASON, "return without value")
             return_widths.add(int(ret.value.get_bit_width() or 0))
         if len(return_widths) != 1:
             # Every return case must contribute the same width, otherwise the
-            # combined surface would have no single width; keep the return-value
-            # surface (its own width gates still apply).
-            return False
+            # combined surface has no single width.  The return-value surface
+            # alone is not a complete observation once stores exist.
+            return _fail_closed(
+                _EFFECT_SURFACE_COMPOSITION_REASON,
+                f"return widths disagree: {sorted(return_widths)}",
+            )
         return_bits = return_widths.pop()
         if effect_bits <= 0 or return_bits <= 0:
-            return False
+            return _fail_closed(
+                _EFFECT_SURFACE_COMPOSITION_REASON,
+                f"degenerate widths effect={effect_bits} return={return_bits}",
+            )
         rewritten = []
         for ret in result.returns:
             combined = concat_expressions(effects_expr, ret.value)

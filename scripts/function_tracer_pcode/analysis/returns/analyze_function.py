@@ -39,6 +39,13 @@ from scripts.function_tracer_pcode.analysis.returns.parameters import (
 )
 
 
+def _effect_summary_incomplete_reasons(effect_summary) -> tuple:
+    reasons = getattr(effect_summary, "incomplete_reasons", ())
+    if not isinstance(reasons, (list, tuple, set, frozenset)):
+        return ()
+    return tuple(reasons)
+
+
 def _impl_analyze_function(
     self,
     function,
@@ -280,6 +287,7 @@ def _impl_analyze_function(
                 and self._is_void_type(return_type_obj)
                 and effect_summary.synthetic_expr is not None
                 and not effect_summary.has_unsupported_call
+                and not _effect_summary_incomplete_reasons(effect_summary)
             ):
                 result.returns = [
                     self._make_return_info(
