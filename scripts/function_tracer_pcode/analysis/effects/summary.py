@@ -230,6 +230,13 @@ from scripts.function_tracer_pcode.analysis.effects.location import (  # noqa: F
     _impl__global_object_root_for_constant as _global_object_root_for_constant,
     _impl__address_root_is_stack_frame as _address_root_is_stack_frame,
     _impl_classify_store_address as classify_store_address,
+)
+from scripts.function_tracer_pcode.analysis.effects.unaligned_store import (
+    UnalignedStoreHalf,
+    _impl_match_unaligned_store_half as match_unaligned_store_half,
+    _impl_pair_unaligned_store_halves as pair_unaligned_store_halves,
+)
+from scripts.function_tracer_pcode.analysis.effects.location import (
     _impl_expression_reads_global_object as expression_reads_global_object,
     _impl__find_unique_effect_location_for_value as _find_unique_effect_location_for_value,
     _impl__flatten_location_addition as _flatten_location_addition,
@@ -312,6 +319,7 @@ from scripts.function_tracer_pcode.analysis.effects.store_effect import (  # noq
     _impl__resolve_value_varnode_effects as _resolve_value_varnode_effects,
     _impl__collect_ram_output_write_effects as _collect_ram_output_write_effects,
     _impl__is_ram_exit_copy as _is_ram_exit_copy,
+    _impl__op_output_is_memory as _op_output_is_memory,
     _impl__ram_varnode_key as _ram_varnode_key,
     _impl_build_void_effect_summary_expr as build_void_effect_summary_expr,
     _impl_is_call_effect_summary_allowed as is_call_effect_summary_allowed,
