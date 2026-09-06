@@ -1,6 +1,6 @@
-"""Phase 6c-1 / 6c-2 (#93): stage runner → checker の branch 文脈を明示引数 ``branch_context`` で渡す。
-6c-1 で固定した oracle（legacy ``_active_*`` 由来の effective ctx との parity）を保ちつつ、6c-2 で check() の implicit read を閉じ、
-再帰転送を provenance-sensitive にし、abstract recursive branch に inner effective context を明示的に渡す。"""
+"""Phase 6c (#93): stage runner → checker の branch 文脈は明示引数 ``branch_context`` のみで渡す。
+6c-1 の oracle（runner が issue した lease の session / generation / branch と ctx の一致、replan precedence、abstract
+recursive branch の inner branch_id fallback、再帰転送の provenance）を、6c-3 で legacy facade 属性を撤去した後も固定する。"""
 
 import ast
 import inspect
@@ -30,18 +30,19 @@ def assert_same_context(explicit, implicit):
     assert explicit.decision_mode == implicit.decision_mode
 
 
-def _implicit_context_from_facade(checker, strategy):
-    """check() が legacy 経路で組む effective ctx（呼び出し時点の _active_* から）。"""
-    return build_branch_check_context(
-        strategy=strategy,
-        replan_plan=getattr(checker, "_active_pair_replan_plan", None),
-        call_proof_generation=getattr(checker, "_call_proof_generation", 0),
-        active_comparison_generation=getattr(checker, "_active_comparison_generation", None),
-        active_comparison_session_id=getattr(checker, "_active_comparison_session_id", None),
-        active_call_proof_branch_id=getattr(checker, "_active_call_proof_branch_id", None),
-        decision_mode=getattr(checker, "call_proof_decision_mode", None),
-        production_branch_authority_lease=getattr(checker, "_active_production_branch_authority_lease", None),
-    )
+LEGACY_FACADE_ATTRIBUTES = (
+    "_active_production_branch_authority_lease",
+    "_active_comparison_session_id",
+    "_active_comparison_generation",
+    "_active_call_proof_branch_id",
+    "_active_pair_replan_plan",
+)
+
+
+def _assert_no_legacy_handoff(checker):
+    """6c-3: runner は facade に branch 文脈を置かない（呼び出し時点でも属性が存在しない）。"""
+    for name in LEGACY_FACADE_ATTRIBUTES:
+        assert not hasattr(checker, name), name
 
 
 # ---- API 形 --------------------------------------------------------------------------------------
@@ -124,13 +125,14 @@ def _runner_checker(results_or_side_effect):
     # 実行されないため、ここでは branch_id を差し替えた同じ builder 経路として loop_template_strategy を検査する
     (StageID.S_PAIRWISE, "loop_template_pairwise", "loop_template_strategy"),
 ])
-def test_runner_passes_an_explicit_context_equal_to_the_legacy_effective_context(stage_id, key, attr):
+def test_runner_passes_an_explicit_context_bound_to_the_issued_lease(stage_id, key, attr):
     captured = []
 
     def execute(*args, **kwargs):
         checker_ref = captured_checker[0]
-        captured.append((kwargs["branch_context"], _implicit_context_from_facade(checker_ref, kwargs["force_strategy"]),
-                         kwargs["force_strategy"], getattr(checker_ref, "_active_production_branch_authority_lease", None)))
+        _assert_no_legacy_handoff(checker_ref)
+        ctx = kwargs["branch_context"]
+        captured.append((ctx, kwargs["force_strategy"], ctx.production_branch_authority_lease.validates(require_active=True)))
         return runner_tests._result(True)
 
     checker = _runner_checker(execute)
@@ -138,20 +140,22 @@ def test_runner_passes_an_explicit_context_equal_to_the_legacy_effective_context
     checker.stage_plan = [StageSpec(stage_id, key, key)]
     runner_tests._run(checker, "_run_stage_plan")
     assert len(captured) == 1
-    explicit, implicit, strategy, lease = captured[0]
+    explicit, strategy, lease_active_during_call = captured[0]
     assert isinstance(explicit, BranchCheckContext)
-    assert_same_context(explicit, implicit)
+    lease = explicit.production_branch_authority_lease
+    assert lease_active_during_call is True and not lease.validates(require_active=True)  # finally で revoke 済み
     assert explicit.strategy is getattr(checker, attr) is strategy
-    assert explicit.branch_id == stage_id.value and explicit.production_branch_authority_lease is lease is not None
-    assert explicit.replan_plan is None and explicit.generation == 1
+    # ctx の session / generation / branch は runner が issue した lease と同じ値
+    assert explicit.comparison_session_id == lease.comparison_session_id and explicit.generation == lease.generation == 1
+    assert explicit.branch_id == lease.branch_id == stage_id.value
+    assert explicit.replan_plan is None
     assert explicit.decision_mode == CallProofDecisionMode.PREFLIGHT_PROJECTION
-    # dual-write: 呼び出し後に legacy 属性は restore/delete されている（runner の finally は不変）
-    assert not hasattr(checker, "_active_call_proof_branch_id") and not hasattr(checker, "_active_production_branch_authority_lease")
+    _assert_no_legacy_handoff(checker)
 
 
 def test_runner_replan_context_takes_the_successor_plan_precedence_and_keeps_the_branch_local_lease():
     src = inspect.getsource(runner_tests.test_completed_proof_replans_pairwise_on_successor_view_and_ledger)
-    assert "checker._active_pair_replan_plan is successor_plan" in src  # 既存 seam（6c-3 で ctx 検査へ置換）
+    assert 'branch_context"].replan_plan is successor_plan' in src  # 6c-3: 既存 seam は ctx 検査へ置換済み
     from scripts.function_tracer_pcode.proof.obligations import PairLedgerBinding
     from scripts.function_tracer_pcode.checker.cause_identity import ProofRequirementContract, ProofRequirementId
     requirement = ProofRequirementId.create("return_coverage_completion", ("coverage", "f"), ProofRequirementContract("return coverage complete"))
@@ -171,8 +175,8 @@ def test_runner_replan_context_takes_the_successor_plan_precedence_and_keeps_the
     def execute(*_args, **kwargs):
         runtime = checker._obligation_runtime_session
         ctx = kwargs["branch_context"]
-        captured.append((ctx, _implicit_context_from_facade(checker, kwargs["force_strategy"]),
-                         getattr(checker, "_active_production_branch_authority_lease", None), checker._call_proof_generation))
+        _assert_no_legacy_handoff(checker)
+        captured.append((ctx, kwargs["force_strategy"], ctx.production_branch_authority_lease, checker._call_proof_generation))
         if len(captured) == 1:
             binding = PairLedgerBinding("session", "S_PAIRWISE", "surface", "projection", 1,
                                         runtime.current_view.view_id, runtime.premise_digest, 1)
@@ -192,10 +196,11 @@ def test_runner_replan_context_takes_the_successor_plan_precedence_and_keeps_the
     checker.pairwise_strategy = strategy
     final = runner_tests._run(checker, "_run_stage_plan")
     assert final.is_equivalent is True and len(captured) == 2
-    (ctx1, imp1, lease1, _), (ctx2, imp2, lease2, _) = captured
-    assert_same_context(ctx1, imp1)
-    assert_same_context(ctx2, imp2)
+    (ctx1, strat1, lease1, _), (ctx2, strat2, lease2, _) = captured
+    assert strat1 is strat2 is strategy and ctx1.strategy is strategy and ctx2.strategy is strategy
+    assert ctx1.replan_plan is None and ctx1.comparison_session_id == lease1.comparison_session_id
     plan = ctx2.replan_plan
+    assert plan is not None  # successor plan は明示 context 経由でのみ渡る
     # successor plan の precedence: session / generation / branch は plan の値（runner が今発行した session とは別）
     assert ctx2.comparison_session_id == plan.comparison_session_id and ctx2.generation == plan.frame_generation
     assert ctx2.branch_id == plan.branch_id
@@ -214,11 +219,9 @@ def test_abstract_recursive_branch_keeps_the_inner_strategy_class_branch_id_fall
     captured = []
 
     def abstraction(*_args, **kwargs):
-        captured.append((dict(kwargs), _implicit_context_from_facade(checker, checker.pairwise_strategy),
-                         hasattr(checker, "_active_call_proof_branch_id"),
-                         getattr(checker, "_active_production_branch_authority_lease", None),
-                         getattr(checker, "_active_comparison_session_id", None),
-                         getattr(checker, "_active_comparison_generation", None)))
+        _assert_no_legacy_handoff(checker)
+        ctx = kwargs["branch_context"]
+        captured.append((ctx, ctx.production_branch_authority_lease.validates(require_active=True)))
         return runner_tests._result(True)
 
     checker = _runner_checker([])
@@ -227,17 +230,17 @@ def test_abstract_recursive_branch_keeps_the_inner_strategy_class_branch_id_fall
     checker.stage_plan = [StageSpec(StageID.S_ABSTRACT_RECURSIVE_SUMMARY, "abstract", strategy="abstract_pairwise")]
     runner_tests._run(checker, "_run_stage_plan")
     assert len(captured) == 1
-    kwargs, inner_effective, has_branch_id, lease, session, generation = captured[0]
-    assert has_branch_id is False  # runner は abstract branch で _active_call_proof_branch_id を set しない（legacy、6c-3 まで）
-    assert inner_effective.branch_id == "PairwiseStrategy"  # strategy class fallback（S_ABSTRACT_RECURSIVE_SUMMARY ではない）
-    assert not inner_effective.branch_id.startswith("S_")
-    assert inner_effective.production_branch_authority_lease is lease is not None
-    assert inner_effective.comparison_session_id == session and inner_effective.generation == generation == 1
-    # 6c-2: runner は inner effective context を再構成して明示的に渡す（outer stage id ではない）
-    explicit = kwargs["branch_context"]
-    assert_same_context(explicit, inner_effective)
+    explicit, lease_active = captured[0]
+    lease = explicit.production_branch_authority_lease
+    assert lease_active is True and lease is not None
+    # session / generation / lease は runner 由来（lease は outer stage id で発行される）
+    assert explicit.comparison_session_id == lease.comparison_session_id and explicit.generation == lease.generation == 1
+    assert lease.branch_id == StageID.S_ABSTRACT_RECURSIVE_SUMMARY.value
+    # inner branch_id は strategy class fallback（outer の S_ABSTRACT_RECURSIVE_SUMMARY ではない）
     assert explicit.strategy is checker.pairwise_strategy and explicit.branch_id == "PairwiseStrategy"
+    assert not explicit.branch_id.startswith("S_") and explicit.replan_plan is None
     checker.check.assert_not_called()
+    _assert_no_legacy_handoff(checker)
 
 
 # ---- recurrence nested check（matrix 5、現行挙動の characterization） ---------------------------
@@ -313,50 +316,36 @@ def test_direct_synthesized_context_is_not_forwarded_to_the_recurrence_recursion
     assert len(seen) == 2 and seen[1].comparison_session_id != seen[0].comparison_session_id
 
 
-def test_legacy_facade_attributes_are_no_longer_read_by_check():
-    """6c-2: _active_* が facade に置かれていても、明示 ctx が無ければ direct semantics で組む。"""
-    analysis = create_mock_analysis("f", [])
-    checker = EquivalenceChecker(strategy="pairwise", timeout=5, monolithic_timeout=5)
-    checker._active_production_branch_authority_lease = object()
-    checker._active_comparison_session_id = "S-stale"
-    checker._active_comparison_generation = 99
-    checker._active_call_proof_branch_id = "S_STALE"
-    checker._active_pair_replan_plan = object()
-    before = checker._call_proof_generation
-    seen = []
-    real = checker_module.build_branch_check_context
-
-    def spy(**kw):
-        ctx = real(**kw); seen.append((kw, ctx)); return ctx
-
-    try:
-        with patch.object(checker_module, "build_branch_check_context", side_effect=spy):
-            _run_check_until_first_collaborator(checker, analysis)
-    finally:
-        for name in ("_active_production_branch_authority_lease", "_active_comparison_session_id", "_active_comparison_generation",
-                     "_active_call_proof_branch_id", "_active_pair_replan_plan"):
-            delattr(checker, name)
-    kw, ctx = seen[0]
-    assert kw["replan_plan"] is None and kw["active_comparison_session_id"] is None and kw["active_comparison_generation"] is None
-    assert kw["active_call_proof_branch_id"] is None and kw["production_branch_authority_lease"] is None
-    assert ctx.comparison_session_id != "S-stale" and ctx.branch_id == "PairwiseStrategy" and ctx.production_branch_authority_lease is None
-    assert checker._call_proof_generation == before + 1  # stale replan 属性は増分判定に影響しない
-    src = inspect.getsource(EquivalenceChecker.check)
-    for name in ("_active_production_branch_authority_lease", "_active_comparison_session_id", "_active_comparison_generation",
-                 "_active_call_proof_branch_id", "_active_pair_replan_plan"):
-        assert name not in src, name
+def test_legacy_facade_attributes_are_gone_from_production_sources():
+    """6c-3: 5 つの legacy 属性の set / restore / delete / read が production source に存在しない（repo-wide）。"""
+    import pathlib
+    from scripts import function_tracer_pcode as pkg
+    root = pathlib.Path(pkg.__file__).parent
+    offenders = []
+    for path in root.rglob("*.py"):
+        if "tests" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8")
+        for name in LEGACY_FACADE_ATTRIBUTES:
+            if name in text:
+                offenders.append((str(path.relative_to(root)), name))
+    assert offenders == []
+    # check() / runner の source にも無い（6c-2 / 6c-3）
+    for src in (inspect.getsource(EquivalenceChecker.check), inspect.getsource(runner_module)):
+        for name in LEGACY_FACADE_ATTRIBUTES:
+            assert name not in src, name
 
 
 # ---- 静的: runner 側の dual-write と check() の explicit 優先 ------------------------------------
 
-def test_runner_builds_the_explicit_context_with_the_shared_builder_and_keeps_legacy_writes():
+def test_runner_builds_the_explicit_context_with_the_shared_builder_only():
     src = inspect.getsource(runner_module)
     assert src.count("build_branch_check_context(") == 2  # normal branch + abstract recursive branch（6c-2）
     assert "branch_context=explicit_context" in src and "branch_context=inner_context" in src
     assert "active_call_proof_branch_id=None" in src  # abstract path: inner branch_id は strategy class fallback
-    for name in ("_active_production_branch_authority_lease", "_active_comparison_session_id",
-                 "_active_comparison_generation", "_active_call_proof_branch_id", "_active_pair_replan_plan"):
-        assert f"checker.{name} = " in src, name  # legacy set は 6c-3 まで残る
+    # 6c-3: replan の successor plan は execute_branch の引数 → builder の replan_plan= へ（facade を経由しない）
+    assert "def execute_branch(replan_plan=None):" in src and "execute_branch(replan_plan=successor_plan)" in src
+    assert src.count("replan_plan=replan_plan,") == 2
     src = inspect.getsource(EquivalenceChecker.check)
     fn = ast.parse("class _C:\n" + "\n".join("    " + l for l in src.splitlines())).body[0].body[0]
     calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "build_branch_check_context"]
@@ -377,3 +366,29 @@ def test_runner_builds_the_explicit_context_with_the_shared_builder_and_keeps_le
     # abstraction stage は branch_context を check() へ転送する
     abs_src = inspect.getsource(EquivalenceChecker._run_recursive_abstraction_stage)
     assert "branch_context=branch_context" in abs_src
+
+
+# ---- authority lease lifetime: 発行直後に try/finally（revoke）へ入る ---------------------------------
+
+def test_lease_issuance_is_immediately_followed_by_the_try_finally_that_revokes_it():
+    """#96 レビュー: issue_production_branch_authority() 成功後から try/finally に入るまでに、例外を投げ得る
+    処理（import を含む）を置かない。finally は同じ lease を revoke する。"""
+    module = ast.parse(inspect.getsource(runner_module))
+    fns = [n for n in ast.walk(module) if isinstance(n, ast.FunctionDef) and n.name == "execute_branch"]
+    assert len(fns) == 1
+    body = fns[0].body
+    issue_idx = [i for i, st in enumerate(body) if isinstance(st, ast.Assign)
+                 and isinstance(st.value, ast.Call) and ast.unparse(st.value.func) == "issue_production_branch_authority"]
+    assert len(issue_idx) == 1
+    i = issue_idx[0]
+    assert ast.unparse(body[i].targets[0]) == "branch_lease"
+    nxt = body[i + 1]
+    assert isinstance(nxt, ast.Try), ast.unparse(nxt)[:60]  # 発行の直後の文が try
+    assert [ast.unparse(st) for st in nxt.finalbody] == ["revoke_production_branch_authority(branch_lease)"]
+    assert not nxt.handlers and not nxt.orelse
+    # 発行より前の文だけが import / 局所計算（発行後に import は無い）
+    assert all(not isinstance(st, (ast.Import, ast.ImportFrom)) for st in body[i + 1:])
+    imports_before = [st for st in body[:i] if isinstance(st, ast.ImportFrom)]
+    assert {n.name for st in imports_before for n in st.names} >= {
+        "issue_production_branch_authority", "revoke_production_branch_authority", "build_branch_check_context"}
+

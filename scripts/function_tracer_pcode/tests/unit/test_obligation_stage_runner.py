@@ -400,7 +400,8 @@ def test_completed_proof_replans_pairwise_on_successor_view_and_ledger():
             return first
         successor_plan = runtime.pair_ledger_manager.pending_successor
         assert successor_plan is not None
-        assert checker._active_pair_replan_plan is successor_plan
+        # 6c-3 (#93): successor plan は facade 属性ではなく明示 context で渡される
+        assert _kwargs["branch_context"].replan_plan is successor_plan
         replacement_binding = PairLedgerBinding(
             successor_plan.comparison_session_id,
             successor_plan.branch_id,

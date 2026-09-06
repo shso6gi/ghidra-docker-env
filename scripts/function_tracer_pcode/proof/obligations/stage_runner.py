@@ -220,10 +220,16 @@ def run_obligation_branch_plan(
         checker._debug_print(f"Stage {branch_id}: {spec.description}")
         checker._debug_print("-" * 60)
 
-        def execute_branch():
+        def execute_branch(replan_plan=None):
             from scripts.function_tracer_pcode.proof.monolithic_authority import (
                 issue_production_branch_authority,
                 revoke_production_branch_authority,
+            )
+            # 6c-3 (#93): branch 文脈は BranchCheckContext の明示引数のみで checker へ渡す（facade の
+            # _active_* への set/restore/delete は撤去済み）。builder の import は lease 発行より前に置く:
+            # lease 発行成功後は例外を投げ得る処理を挟まず直ちに try/finally（revoke）に入る。
+            from scripts.function_tracer_pcode.checker.branch_context import (
+                build_branch_check_context,
             )
             session_id = uuid4().hex
             generation = int(getattr(checker, "_call_proof_generation", 0) or 0) + 1
@@ -233,24 +239,14 @@ def run_obligation_branch_plan(
             branch_lease = issue_production_branch_authority(
                 session_id, branch_id, generation, view_digest,
             )
-            previous_lease = getattr(checker, "_active_production_branch_authority_lease", None)
-            previous_session = getattr(checker, "_active_comparison_session_id", None)
-            previous_generation = getattr(checker, "_active_comparison_generation", None)
-            checker._active_production_branch_authority_lease = branch_lease
-            checker._active_comparison_session_id = session_id
-            checker._active_comparison_generation = generation
             try:
                 if spec.strategy == "abstract_pairwise":
-                    # 6c-2 (#93): inner check() が現在暗黙に得ている effective context を再構成して渡す:
-                    # session / generation / lease は runner 発行値、active branch id は None（この branch では
-                    # _active_call_proof_branch_id を set しないため strategy class 名 fallback）、strategy は
-                    # pairwise。outer の S_ABSTRACT_RECURSIVE_SUMMARY を渡してはならない（"S_" 判定が変わる）。
-                    from scripts.function_tracer_pcode.checker.branch_context import (
-                        build_branch_check_context,
-                    )
+                    # 6c-2 (#93): inner check() の effective context: session / generation / lease は runner
+                    # 発行値、active branch id は None（strategy class 名 fallback）、strategy は pairwise。
+                    # outer の S_ABSTRACT_RECURSIVE_SUMMARY を渡してはならない（"S_" 判定が変わる）。
                     inner_context = build_branch_check_context(
                         strategy=checker.pairwise_strategy,
-                        replan_plan=getattr(checker, "_active_pair_replan_plan", None),
+                        replan_plan=replan_plan,
                         call_proof_generation=generation,
                         active_comparison_generation=generation,
                         active_comparison_session_id=session_id,
@@ -274,18 +270,11 @@ def run_obligation_branch_plan(
                     strategies[spec.strategy]._obligation_runtime_session = runtime
                 except (AttributeError, TypeError):
                     pass
-                previous_branch = getattr(checker, "_active_call_proof_branch_id", None)
-                checker._active_call_proof_branch_id = branch_id
-                # 6c-1 (#93): 同じ情報から明示的な BranchCheckContext も組み、branch_context= で渡す
-                # （dual-write。legacy の _active_* set/restore は 6c-3 まで維持）。replan の
-                # precedence（plan の frame_generation / session / branch が active 値に勝つ）は
-                # checker と同じ builder に任せ、lease は _active_ に置いたのと同一 object を渡す。
-                from scripts.function_tracer_pcode.checker.branch_context import (
-                    build_branch_check_context,
-                )
+                # replan の precedence（plan の frame_generation / session / branch が runner 発行値に勝つ）は
+                # checker と同じ builder に任せる。lease は今発行した branch_lease object そのもの。
                 explicit_context = build_branch_check_context(
                     strategy=strategies[spec.strategy],
-                    replan_plan=getattr(checker, "_active_pair_replan_plan", None),
+                    replan_plan=replan_plan,
                     call_proof_generation=generation,
                     active_comparison_generation=generation,
                     active_comparison_session_id=session_id,
@@ -293,39 +282,16 @@ def run_obligation_branch_plan(
                     decision_mode=getattr(checker, "call_proof_decision_mode", None),
                     production_branch_authority_lease=branch_lease,
                 )
-                try:
-                    return checker.check(
-                        analysis1, analysis2, binary1_name, binary2_name, save_formula,
-                        type_fix_result=type_fix_result, retry_count=retry_count,
-                        original_signature1=original_signature1,
-                        original_signature2=original_signature2,
-                        force_strategy=strategies[spec.strategy],
-                        branch_context=explicit_context,
-                    )
-                finally:
-                    if previous_branch is None:
-                        try:
-                            del checker._active_call_proof_branch_id
-                        except AttributeError:
-                            pass
-                    else:
-                        checker._active_call_proof_branch_id = previous_branch
+                return checker.check(
+                    analysis1, analysis2, binary1_name, binary2_name, save_formula,
+                    type_fix_result=type_fix_result, retry_count=retry_count,
+                    original_signature1=original_signature1,
+                    original_signature2=original_signature2,
+                    force_strategy=strategies[spec.strategy],
+                    branch_context=explicit_context,
+                )
             finally:
                 revoke_production_branch_authority(branch_lease)
-                if previous_lease is None:
-                    for name in (
-                        "_active_production_branch_authority_lease",
-                        "_active_comparison_session_id",
-                        "_active_comparison_generation",
-                    ):
-                        try:
-                            delattr(checker, name)
-                        except AttributeError:
-                            pass
-                else:
-                    checker._active_production_branch_authority_lease = previous_lease
-                    checker._active_comparison_session_id = previous_session
-                    checker._active_comparison_generation = previous_generation
 
         active_strategy = (
             checker.pairwise_strategy
@@ -441,14 +407,8 @@ def run_obligation_branch_plan(
             successor_plan = runtime.pair_ledger_manager.pending_successor
             if successor_plan is None:
                 break
-            checker._active_pair_replan_plan = successor_plan
-            try:
-                replanned = execute_branch()
-            finally:
-                try:
-                    del checker._active_pair_replan_plan
-                except AttributeError:
-                    pass
+            # 6c-3: successor plan は明示 context 経由でのみ渡す（facade 属性は使わない）。
+            replanned = execute_branch(replan_plan=successor_plan)
             if replanned is None:
                 break
             result = replanned
