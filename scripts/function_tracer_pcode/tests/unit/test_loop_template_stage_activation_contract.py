@@ -82,7 +82,8 @@ def test_pairwise_timeout_activates_the_loop_template_branch_with_a_runner_issue
     last_result, decision = eligibility[0]
     assert decision is True and last_result.is_equivalent is None and last_result.error_message is None
     assert last_result.pairwise_debug_stats["timeout_fallback_attempts"] == 3
-    assert _record(checker, LOOP).activation_state in (ActivationState.ACTIVE, ActivationState.COMPLETED)
+    # runner は result 取得後に controller.record() で COMPLETED を格納する（final trace）
+    assert _record(checker, LOOP).activation_state == ActivationState.COMPLETED
 
     by_branch = {d.ctx.branch_id: d for d in checker.deliveries if d.ctx is not None}
     assert set(by_branch) >= {"S_PAIRWISE", LOOP}
