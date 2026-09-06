@@ -89,26 +89,16 @@ UPWARD_BASELINE = frozenset({
     ("proof.strategies.proof_gates.return_coverage", "authority"),
     ("proof.strategies.proof_gates.sat_safety", "authority"),
     # proof -> checker
-    ("proof.call_effect.preflight", "checker"),
     ("proof.obligations.decision", "checker"),
-    ("proof.obligations.model", "checker"),
-    ("proof.obligations.outcome_partition", "checker"),
-    ("proof.obligations.recurrence", "checker"),
-    ("proof.obligations.return_width", "checker"),
-    ("proof.obligations.runtime", "checker"),
     ("proof.obligations.stage_runner", "checker"),
     ("proof.strategies.monolithic", "checker"),
     ("proof.strategies.pairwise_query_executor", "checker"),
     ("proof.strategies.pairwise_services._shared", "checker"),
-    ("proof.strategies.pairwise_services.orchestration", "checker"),
     ("proof.strategies.proof_gates._shared", "checker"),
-    ("proof.strategies.proof_gates.call_effect", "checker"),
     # proof -> reporting
     ("proof.obligations.shadow", "reporting"),
     # authority -> checker
-    ("authority.codecs", "checker"),
     ("authority.decision.production_cutover", "checker"),
-    ("authority.domains.return_outcome", "checker"),
     ("authority.lifecycle.pilot", "checker"),
     ("authority.lifecycle.production_boundary", "checker"),
 })

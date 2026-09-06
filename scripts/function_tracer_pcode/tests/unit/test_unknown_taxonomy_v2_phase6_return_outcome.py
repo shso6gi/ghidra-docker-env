@@ -52,7 +52,7 @@ from scripts.function_tracer_pcode.proof.obligations.outcome_partition import (
     prove_unary_partition,
     requirement_for_stage,
 )
-from scripts.function_tracer_pcode.checker.cause_identity import ProofRequirementId
+from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementId
 
 
 _WITNESSES = (

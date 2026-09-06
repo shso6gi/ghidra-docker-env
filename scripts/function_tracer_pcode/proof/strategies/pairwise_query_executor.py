@@ -35,7 +35,7 @@ from scripts.function_tracer_pcode.proof.obligations.guard_overlap import (
     issue_guard_query_execution_artifact,
     register_guard_query_executor,
 )
-from scripts.function_tracer_pcode.checker.cause_identity import (
+from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
 )

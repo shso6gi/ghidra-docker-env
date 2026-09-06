@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Tuple
 
-from scripts.function_tracer_pcode.checker.cause_identity import ProofRequirementId
+from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementId
 
 
 # Re-exports kept for callers that import these names from this module.
