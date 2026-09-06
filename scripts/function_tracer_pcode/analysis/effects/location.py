@@ -767,7 +767,8 @@ def _impl_expression_reads_global_object(expr: Optional[Expression]) -> bool:
     for node in _iter_expression_nodes(expr):
         if node.expr_type != ExpressionType.MEMORY or not node.operands:
             continue
-        if _global_object_root_for_constant(node.operands[0]) is not None:
+        parsed = _extract_location_root_and_steps(node.operands[0], ())
+        if parsed is not None and parsed[0].is_global():
             return True
     return False
 
@@ -847,6 +848,32 @@ def _impl__extract_location_root_and_steps(
 
     if expr.expr_type == ExpressionType.CONSTANT:
         return _global_object_root_for_constant(expr)
+
+    if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INDIRECT":
+        # ``INDIRECT(c, op)`` is the decompiler's "value after op" of the
+        # varnode that held the constant address ``c``.  A constant that
+        # carries a Ghidra object identity was loaded from a read-only pointer
+        # slot (GOT); no op can change it, so the address is still ``c``.
+        # Any other INDIRECT base stays unresolved.
+        parsed = _extract_location_root_and_steps(expr.operands[0], parameters) if expr.operands else None
+        if parsed is not None and parsed[0].is_global():
+            return parsed
+        return None
+
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        # Branch-merged address: usable only when every branch names the same
+        # global object (otherwise the target is genuinely path dependent).
+        resolved = None
+        for _cond, value in expr.value:
+            parsed = _extract_location_root_and_steps(value, parameters)
+            if parsed is None or not parsed[0].is_global():
+                return None
+            key = (parsed[0].stable_key(), tuple(step.stable_key() for step in parsed[1]))
+            if resolved is None:
+                resolved = (key, parsed)
+            elif resolved[0] != key:
+                return None
+        return resolved[1] if resolved is not None else None
 
     if expr.expr_type in (ExpressionType.PARAMETER, ExpressionType.VARIABLE):
         resolved_base = _resolve_location_base_with_offset(expr, parameters)

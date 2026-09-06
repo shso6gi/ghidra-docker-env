@@ -691,3 +691,30 @@ def test_new_effect_tokens_are_owned_by_the_effect_observation_coverage_reason(t
     assert classified.reason_ids == ("effect_observation_coverage_incomplete",)
     strategy = PairwiseStrategy.__new__(PairwiseStrategy)
     assert strategy._unknown_reason_id_for_blocking_unsafety(token) == "effect_observation_coverage_incomplete"
+
+
+# --------------------------------------------------------------------------
+# MIPS64 shapes: constant address behind INDIRECT / PHI (GOT reload after a store)
+# --------------------------------------------------------------------------
+
+def test_indirect_of_a_global_address_constant_canonicalizes_to_the_global():
+    g = _global_ref(*G)
+    indirect = Expression.binary_op("INDIRECT", _const_addr(g), Expression.constant(271, 4))
+    location = canonicalize_location(indirect, [], size=4)
+    assert location is not None and location.base_ref.global_symbol_name == "g"
+    nested = Expression.binary_op("INDIRECT", indirect, Expression.constant(286, 4))
+    assert canonicalize_location(nested, [], size=4) == location
+    bare = Expression.binary_op("INDIRECT", Expression.constant(0x1000d0, 8), Expression.constant(271, 4))
+    assert canonicalize_location(bare, [], size=4) is None
+    assert expression_reads_global_object(Expression.memory(indirect, 4)) is True
+
+
+def test_phi_of_the_same_global_address_canonicalizes_but_mixed_targets_do_not():
+    g = _global_ref(*G)
+    h = _global_ref(*H)
+    same = Expression.phi([(None, _const_addr(g)), (None, Expression.binary_op("INDIRECT", _const_addr(g), Expression.constant(1, 4)))])
+    location = canonicalize_location(same, [], size=4)
+    assert location is not None and location.base_ref.global_symbol_name == "g"
+    mixed = Expression.phi([(None, _const_addr(g)), (None, _const_addr(h))])
+    assert canonicalize_location(mixed, [], size=4) is None
+    assert classify_store_address(mixed, [], size=4) == ("unresolved", None)
