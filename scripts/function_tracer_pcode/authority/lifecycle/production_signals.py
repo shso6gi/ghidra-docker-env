@@ -1157,6 +1157,17 @@ class CompositeProductionSignalEncoder:
             raise TypeError("ABI/width route lacks solver scheduler authority")
         registrar(session, blocker, seed)
 
+    def register_void_effect_only_return_abi_seed(self, session: Any, seed: Any) -> None:
+        from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
+            AbiWidthReadonlyBlockerSignal,
+        )
+
+        encoder = self._routes.get(AbiWidthReadonlyBlockerSignal)
+        registrar = getattr(encoder, "register_void_effect_only_return_abi_seed", None)
+        if not callable(registrar):
+            raise TypeError("ABI/width route lacks void effect-only ABI planning")
+        registrar(session, seed)
+
     def register_return_observation_proof_plan(
         self, session: Any, projection_seed: Any, assessment: Any
     ) -> None:
@@ -1618,6 +1629,22 @@ def register_abi_width_solver_candidate(blocker: Any, seed: Any) -> None:
     if not callable(registrar):
         return
     registrar(session, blocker, seed)
+
+
+def register_void_effect_only_return_abi_seed(seed: Any) -> None:
+    """Register one exact void effect-only ABI seed for structural closure (Issue #104)."""
+
+    session = active_production_pilot_session()
+    if session is None:
+        return
+    registrar = getattr(
+        session.domain_signal_encoder,
+        "register_void_effect_only_return_abi_seed",
+        None,
+    )
+    if not callable(registrar):
+        return
+    registrar(session, seed)
 
 
 def register_return_observation_proof_plan(

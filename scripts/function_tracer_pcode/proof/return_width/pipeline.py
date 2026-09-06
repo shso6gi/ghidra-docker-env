@@ -183,6 +183,7 @@ def prepare_pair_return_observation(
         )
         from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
             register_return_observation_proof_plan,
+            register_void_effect_only_return_abi_seed,
         )
 
         abi_assessment = assess_return_abi_pair(
@@ -197,6 +198,11 @@ def prepare_pair_return_observation(
                 signal,
                 producer_site_manifest_id="return-width-pair-assessment",
             )
+        for abi_seed in (abi_assessment.left_seed, abi_assessment.right_seed):
+            # Issue #104 (Gap 6): the missing return-storage blocker of a void
+            # effect-only surface is closed structurally at finalization.
+            if abi_seed.void_effect_only_surface:
+                register_void_effect_only_return_abi_seed(abi_seed)
         if not left_seed.complete or not right_seed.complete:
             projection_seed = None
         else:

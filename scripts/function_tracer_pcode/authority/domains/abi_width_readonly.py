@@ -428,6 +428,49 @@ def _sealed_return_abi_present_value(slot: str, value: Any) -> tuple[Any, ...]:
     raise ValueError("return ABI fact slot is not sealed")
 
 
+_VOID_EFFECT_SURFACE_FACT_SCHEMA = "void_effect_surface_fact_v1"
+
+
+def _sealed_void_effect_surface_fact(analysis: Any, slot_rows: tuple) -> tuple[Any, ...]:
+    """Seal the observable-surface facts that decide the void effect-only ABI case.
+
+    Read from the analysis exactly once at seed construction (Issue #104,
+    Gap 6) and carried inside the seed digest; the ABI assessment never
+    re-reads the analysis.  Every component is an immutable primitive.
+    """
+
+    surface = getattr(analysis, "comparison_surface", None)
+    surface_kind = getattr(surface, "kind", None)
+    surface_kind = str(surface_kind) if isinstance(surface_kind, str) and surface_kind else None
+    try:
+        surface_bits = int(getattr(surface, "explicit_bit_width", 0) or 0)
+    except Exception:
+        surface_bits = 0
+    effect_summary = getattr(analysis, "effect_summary", None)
+    effects = getattr(effect_summary, "effects", None) if effect_summary is not None else None
+    effect_count = len(effects) if isinstance(effects, (list, tuple)) else 0
+    reasons = getattr(effect_summary, "incomplete_reasons", ()) if effect_summary is not None else ()
+    if not isinstance(reasons, (list, tuple, set, frozenset)):
+        reasons = ("effect_incomplete_reasons_unreadable",)
+    reasons = tuple(sorted(str(item) for item in reasons))
+    unsupported = bool(getattr(effect_summary, "has_unsupported_call", True)) if effect_summary is not None else True
+    return_type_is_void = False
+    for slot, status, value, _source in slot_rows:
+        if slot == "declared_or_effective_return_type" and status is ReturnAbiFactStatus.PRESENT:
+            name = str(value[1]).rsplit("/", 1)[-1].strip().lower()
+            return_type_is_void = name == "void" and int(value[2]) == 0
+    return (
+        _VOID_EFFECT_SURFACE_FACT_SCHEMA,
+        surface_kind,
+        surface_bits,
+        effect_count,
+        reasons,
+        unsupported,
+        return_type_is_void,
+        effect_summary is not None,
+    )
+
+
 @dataclass(frozen=True, init=False)
 class FunctionReturnAbiSeed:
     return_site_target_key: Any
@@ -435,6 +478,7 @@ class FunctionReturnAbiSeed:
     width_seed_digest: str
     slot_facts: tuple[tuple[str, ReturnAbiFactStatus, Any, str], ...]
     prepared_snapshot_digest: str
+    surface_fact: tuple[Any, ...]
     seed_digest: str
 
     def __init__(self, **values: Any) -> None:
@@ -461,6 +505,43 @@ class FunctionReturnAbiSeed:
     @property
     def complete(self) -> bool:
         return all(status is ReturnAbiFactStatus.PRESENT for _name, status, _value, _source in self.slot_facts)
+
+    @property
+    def void_effect_only_surface(self) -> bool:
+        """True when the return storage slot is semantically absent.
+
+        A ``void`` function whose observable behaviour is a complete,
+        non-empty memory-effect surface (no incomplete effect reasons, no
+        unsupported call) has no return value to observe: its comparison
+        surface *is* the effect surface.  Exactly one ABI slot may then be
+        missing, ``return_storage_descriptor``; every other slot must be
+        PRESENT.  All inputs come from the sealed ``surface_fact``.
+        """
+
+        fact = self.surface_fact
+        if (
+            type(fact) is not tuple
+            or len(fact) != 8
+            or fact[0] != _VOID_EFFECT_SURFACE_FACT_SCHEMA
+        ):
+            return False
+        _schema, kind, bits, effect_count, reasons, unsupported, is_void, has_summary = fact
+        return bool(
+            has_summary
+            and kind == "memory_effect"
+            and int(bits) > 0
+            and int(effect_count) > 0
+            and reasons == ()
+            and unsupported is False
+            and is_void is True
+            and not self.malformed_slots
+            and self.missing_slots == ("return_storage_descriptor",)
+        )
+
+    @property
+    def observation_complete(self) -> bool:
+        """ABI facts suffice for the observation contract (complete, or void effect-only)."""
+        return self.complete or self.void_effect_only_surface
 
     def fact(self, slot: str) -> Any:
         for name, status, value, source in self.slot_facts:
@@ -537,10 +618,13 @@ class FunctionReturnAbiSeed:
             "return_site_slot_v2", width_seed.target_id.stable_key(),
             width_seed.normalization_policy_digest,
         )
+        surface_fact = _sealed_void_effect_surface_fact(analysis, rows)
+        authority_digest(surface_fact)
         prepared = authority_digest({
             "analysis_function": analysis.outcome_function_identity(),
             "width_seed": width_seed.stable_key(),
             "slot_facts": rows,
+            "surface_fact": surface_fact,
         })
         return cls(
             return_site_target_key=target,
@@ -548,6 +632,7 @@ class FunctionReturnAbiSeed:
             width_seed_digest=width_seed.digest,
             slot_facts=rows,
             prepared_snapshot_digest=prepared,
+            surface_fact=surface_fact,
             _factory_token=_RETURN_ABI_SEED_TOKEN,
         )
 
@@ -567,7 +652,10 @@ class ReturnAbiCompatibilityAssessment:
             left
         ) is not FunctionReturnAbiSeed or type(right) is not FunctionReturnAbiSeed:
             raise TypeError("ABI compatibility requires exact projection and ABI seeds")
-        if left.malformed_slots or right.malformed_slots or not left.complete or not right.complete:
+        if (
+            left.malformed_slots or right.malformed_slots
+            or not left.observation_complete or not right.observation_complete
+        ):
             status = ReturnAbiRelationStatus.INVALID
             body = ("abi_relation_invalid_v2", left.malformed_slots, right.malformed_slots,
                     left.missing_slots, right.missing_slots)
@@ -1965,6 +2053,47 @@ class ReturnAbiProvenanceArtifact(_AbiWidthReadonlyCompletionArtifact):
     REASON_ID = "return_abi_provenance_unavailable"
     ENCODING_VERSION = "return-abi-provenance-encoding-v2"
 
+    @classmethod
+    def from_void_effect_surface(cls, blocker, seed, *, source_snapshot_fingerprint):
+        """Structural proof that the return storage slot is not observable.
+
+        For a ``void`` function with a complete, non-empty memory-effect
+        comparison surface the return storage descriptor is semantically
+        absent: the observation contract is the effect surface, whose width
+        the unary width artifacts already establish.  The proof replays the
+        sealed surface fact of the exact seed and covers only the
+        ``return_storage_descriptor`` slot (Issue #104, Gap 6).
+        """
+
+        if type(seed) is not FunctionReturnAbiSeed:
+            raise TypeError("void effect-only ABI proof requires the exact ABI seed")
+        if not seed.void_effect_only_surface:
+            raise ValueError("ABI seed is not a void effect-only surface")
+        expected = AbiWidthReadonlyBlockerSignal.from_return_abi_seed(
+            seed, "return_storage_descriptor"
+        )
+        if blocker != expected:
+            raise ValueError("void effect-only ABI proof differs from its blocker")
+        return _artifact_values(
+            cls,
+            blocker,
+            source_seed_digest=seed.seed_digest,
+            source_snapshot_digest=source_snapshot_fingerprint,
+            prepared_snapshot_digest=seed.prepared_snapshot_digest,
+            proof_body=(
+                "void_effect_only_return_abi_v1",
+                "return_storage_semantically_absent",
+                seed.surface_fact,
+                seed.slot_facts,
+            ),
+            applicability_body=(
+                "void_effect_surface",
+                seed.function_snapshot,
+                ("missing_abi_slot", "return_storage_descriptor"),
+            ),
+            dependency_artifact_digests=(),
+        )
+
 class ReturnObservationContractArtifact(_AbiWidthReadonlyCompletionArtifact):
     REASON_ID = "return_observation_contract_unproven"
     ENCODING_VERSION = "return-observation-contract-encoding-v2"
@@ -2024,8 +2153,8 @@ class ReturnAbiRelationArtifact(_AbiWidthReadonlyCompletionArtifact):
             or assessment.projection_seed_digest != seed.seed_digest
             or assessment.left_abi_seed_digest != left_abi_seed.seed_digest
             or assessment.right_abi_seed_digest != right_abi_seed.seed_digest
-            or not left_abi_seed.complete
-            or not right_abi_seed.complete
+            or not left_abi_seed.observation_complete
+            or not right_abi_seed.observation_complete
         ):
             raise ValueError("ABI relation assessment authority is incomplete")
         expected = ReturnAbiCompatibilityAssessment.assess(
@@ -3408,6 +3537,39 @@ class AbiWidthReadonlyPilotEncoder:
             RequirementCompletedEventAuthority(receipt),
         )
 
+    def complete_return_abi_provenance(self, session, blocker, artifact):
+        return self._completion_intent(session, blocker, artifact, ReturnAbiProvenanceArtifact)
+
+    def register_void_effect_only_return_abi_seed(self, session: Any, seed: Any) -> None:
+        """Remember an exact void effect-only ABI seed for structural closure."""
+        if type(seed) is not FunctionReturnAbiSeed or not seed.void_effect_only_surface:
+            raise TypeError("void effect-only ABI plan requires an eligible exact seed")
+        pending = session.domain_signal_state.setdefault(
+            "void_effect_only_return_abi_seeds", {}
+        )
+        existing = pending.setdefault(seed.seed_digest, seed)
+        if existing != seed:
+            raise ValueError("void effect-only ABI plan drifted")
+
+    def _complete_registered_void_effect_only_return_abi(self, session: Any) -> None:
+        plans = session.domain_signal_state.get("void_effect_only_return_abi_seeds", {})
+        completed = session.domain_signal_state.setdefault(
+            "void_effect_only_return_abi_completed", set()
+        )
+        for seed_digest, seed in tuple(sorted(plans.items())):
+            if seed_digest in completed:
+                continue
+            blocker = AbiWidthReadonlyBlockerSignal.from_return_abi_seed(
+                seed, "return_storage_descriptor"
+            )
+            artifact = ReturnAbiProvenanceArtifact.from_void_effect_surface(
+                blocker,
+                seed,
+                source_snapshot_fingerprint=session.identity.source_snapshot_fingerprint,
+            )
+            session.emit(self.complete_return_abi_provenance(session, blocker, artifact))
+            completed.add(seed_digest)
+
     def complete_return_observation_contract(self, session, blocker, artifact):
         return self._completion_intent(session, blocker, artifact, ReturnObservationContractArtifact)
 
@@ -3727,6 +3889,7 @@ class AbiWidthReadonlyPilotEncoder:
         )
 
         self.finalize_derived_promotions(session)
+        self._complete_registered_void_effect_only_return_abi(session)
         self._complete_registered_return_abi_relations(session)
         self._execute_pending_solver_queries(session)
         self._complete_registered_observation_contracts(session)
@@ -3883,7 +4046,7 @@ def assess_return_abi_pair(
         for slot in seed.missing_slots
     ]
     relation = None
-    if left.complete and right.complete:
+    if left.observation_complete and right.observation_complete:
         if not left_width_seed.complete or not right_width_seed.complete:
             projection = None
         else:
