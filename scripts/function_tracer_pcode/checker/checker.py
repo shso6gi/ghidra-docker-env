@@ -53,7 +53,7 @@ from scripts.function_tracer_pcode.checker.unknown_reason import (
     build_unknown_recovery_actions,
     make_unknown_reason,
 )
-from scripts.function_tracer_pcode.checker.cause_identity import (
+from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
     UnaryCauseKey,

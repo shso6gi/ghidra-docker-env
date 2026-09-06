@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Optional, Tuple
 
-from scripts.function_tracer_pcode.checker.cause_identity import (
+from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
 )

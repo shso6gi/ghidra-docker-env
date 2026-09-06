@@ -27,7 +27,7 @@ from scripts.function_tracer_pcode.proof.call_effect.preflight import (
 from scripts.function_tracer_pcode.proof.query_receipt_authority import (
     canonical_region_query_receipt_digest,
 )
-from scripts.function_tracer_pcode.checker.cause_identity import (
+from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
 )

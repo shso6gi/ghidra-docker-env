@@ -9,7 +9,7 @@ from scripts.function_tracer_pcode.authority.lifecycle.production_boundary impor
     run_check_from_binaries_with_v2_pilot as run_check_from_binaries,
 )
 from scripts.function_tracer_pcode.checker.unknown_reason import build_unknown_recovery_actions
-from scripts.function_tracer_pcode.checker.cause_identity import (
+from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
     UnaryCauseKey,

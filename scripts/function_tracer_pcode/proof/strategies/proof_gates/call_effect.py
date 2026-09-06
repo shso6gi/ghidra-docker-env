@@ -655,7 +655,7 @@ def _impl__self_recursive_no_store_call_effect_proof_content(
     if len(proposals) != 1:
         return None
     try:
-        from scripts.function_tracer_pcode.checker.cause_identity import ProofRequirementId
+        from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementId
         from scripts.function_tracer_pcode.proof.obligations.recurrence import (
             validate_recurrence_requirement_target,
         )

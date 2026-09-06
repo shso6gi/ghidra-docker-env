@@ -14,7 +14,7 @@ from scripts.function_tracer_pcode.checker.debug_trace import (
     TransitionReason,
 )
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult, RewriteInfo
-from scripts.function_tracer_pcode.checker.cause_identity import ProofRequirementId
+from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementId
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 from scripts.function_tracer_pcode.checker.unknown_reason import coerce_unknown_reason_records
 from scripts.function_tracer_pcode.smt import ParallelResult

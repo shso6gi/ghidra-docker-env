@@ -157,7 +157,7 @@ def test_runner_replan_context_takes_the_successor_plan_precedence_and_keeps_the
     src = inspect.getsource(runner_tests.test_completed_proof_replans_pairwise_on_successor_view_and_ledger)
     assert 'branch_context"].replan_plan is successor_plan' in src  # 6c-3: 既存 seam は ctx 検査へ置換済み
     from scripts.function_tracer_pcode.proof.obligations import PairLedgerBinding
-    from scripts.function_tracer_pcode.checker.cause_identity import ProofRequirementContract, ProofRequirementId
+    from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementContract, ProofRequirementId
     requirement = ProofRequirementId.create("return_coverage_completion", ("coverage", "f"), ProofRequirementContract("return coverage complete"))
     reason = SimpleNamespace(reason_id="return_coverage_gap", recovery_proof_kind="return_coverage_completion",
                              proof_requirement_ids=(requirement.to_dict(),), object_target_key=("coverage", "f"),

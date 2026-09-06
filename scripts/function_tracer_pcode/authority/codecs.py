@@ -65,7 +65,7 @@ from scripts.function_tracer_pcode.authority.registry import (
     SealedReasonRegistry,
     SealedRecoveryRegistry,
 )
-from scripts.function_tracer_pcode.checker.cause_identity import ProofRequirementId
+from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementId
 
 
 def _json_value(value: Any) -> Any:

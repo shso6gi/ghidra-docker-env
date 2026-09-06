@@ -25,7 +25,7 @@ from scripts.function_tracer_pcode.proof.call_effect.obligations import (
     call_use_mapping_payload_from_manifest,
     call_use_obligation_edges_from_manifest,
 )
-from scripts.function_tracer_pcode.checker.cause_identity import (
+from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
 )

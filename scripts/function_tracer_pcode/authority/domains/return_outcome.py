@@ -14,7 +14,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Optional
 
 from scripts.function_tracer_pcode.authority.contracts import authority_digest, canonical_value
-from scripts.function_tracer_pcode.checker.cause_identity import (
+from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
 )

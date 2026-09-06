@@ -10,7 +10,7 @@ from scripts.function_tracer_pcode.core.recurrence_contracts import (
     semantic_recurrence_closure_digest,
 )
 from scripts.function_tracer_pcode.proof.obligations.model import ProofArtifact
-from scripts.function_tracer_pcode.checker.cause_identity import (
+from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
 )
