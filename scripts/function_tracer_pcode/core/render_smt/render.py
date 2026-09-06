@@ -408,6 +408,11 @@ def _to_smt_internal(
 
     if expr_type == expr_kind.CONSTANT:
         bits = expr.get_bit_width()
+        global_address = global_address_smt(expr, bits)
+        if global_address is not None:
+            # The absolute address of a named global differs between the two
+            # binaries; the shared symbolic base address is the identity.
+            return global_address
         value = expr.value
         if value < 0:
             value = value & ((1 << bits) - 1)
@@ -424,6 +429,9 @@ def _to_smt_internal(
             address_ref = _coerce_address_value_ref(expr)
             if address_ref is not None:
                 bits = max(1, expression_smt_bit_width(expr))
+                global_address = global_address_smt(expr, bits)
+                if global_address is not None:
+                    return global_address
                 return f"(_ bv{int(address_ref.address_offset)} {bits})"
         name = expr.name if expr.name else "var"
         if symbol_name_mapping is None:
@@ -953,6 +961,7 @@ from scripts.function_tracer_pcode.core.render_smt.loop_lowering import (
     _neon_ext_operands_are_smt_supported,
 )
 from scripts.function_tracer_pcode.core.render_smt.unknowns import (
+    global_address_smt,
     _coerce_address_value_ref,
     _unknown_smt_symbol_name,
 )

@@ -18,6 +18,9 @@ from scripts.function_tracer_pcode.core.render_smt import (
     collect_float_predicate_smt_declarations,
     collect_intrinsic_smt_declarations,
     collect_unknown_smt_declarations,
+    collect_global_address_identities,
+    global_address_symbol_name,
+    GLOBAL_ADDRESS_BITS,
     expression_uses_smt_uf,
     expression_uses_smt_float_theory,
     expression_smt_bit_width,
@@ -625,6 +628,10 @@ class FormulaBuilder:
         if runtime_unknown_decls:
             lines.extend(self._build_runtime_unknown_declarations(runtime_unknown_decls))
 
+        global_objects = self._collect_global_address_identities(*declaration_analyses)
+        if global_objects:
+            lines.extend(self._build_global_address_constraints(global_objects))
+
         intrinsic_decls = self._collect_intrinsic_smt_declarations(
             *declaration_analyses,
         )
@@ -998,6 +1005,66 @@ class FormulaBuilder:
                     comment += f": {v.analysis.reason}"
                 lines.append(f"; {v.smt_name}: {comment}")
             lines.append(f"(declare-const {v.smt_name} (_ BitVec {v.bit_width}))")
+        lines.append("")
+        return lines
+
+    def _collect_global_address_identities(
+        self,
+        *analyses: FunctionReturnAnalysis,
+    ) -> List[Tuple[str, int]]:
+        """Distinct named global objects addressed by either side (Issue #104)."""
+        identities: List[Tuple[str, int]] = []
+
+        def extend_from_expression(expr) -> None:
+            for identity in collect_global_address_identities(expr):
+                if identity not in identities:
+                    identities.append(identity)
+
+        for analysis in analyses:
+            if analysis is None:
+                continue
+            for ret in getattr(analysis, "returns", []) or []:
+                extend_from_expression(getattr(ret, "value", None))
+                for condition in getattr(ret, "conditions", None) or []:
+                    extend_from_expression(getattr(condition, "expression", None))
+            effect_summary = getattr(analysis, "effect_summary", None)
+            if effect_summary is not None:
+                extend_from_expression(getattr(effect_summary, "synthetic_expr", None))
+                for effect in getattr(effect_summary, "effects", []) or []:
+                    extend_from_expression(getattr(effect, "value", None))
+                    for condition in getattr(effect, "conditions", None) or []:
+                        extend_from_expression(getattr(condition, "expression", None))
+        return identities
+
+    def _build_global_address_constraints(
+        self,
+        identities: List[Tuple[str, int]],
+    ) -> List[str]:
+        """Constraints on the shared base addresses of named global objects.
+
+        The base symbols themselves are declared with the runtime unknown
+        objects (they are replay targets).  Distinct objects occupy disjoint,
+        non-wrapping, non-null byte ranges; nothing else is assumed, so
+        parameter pointers may still alias a global exactly as before.
+        """
+        bits = GLOBAL_ADDRESS_BITS
+        lines: List[str] = []
+        lines.append("; " + "-" * 40)
+        lines.append("; Named global objects (Issue #104)")
+        lines.append("; Shared symbolic base addresses: same source object on both sides")
+        lines.append("; " + "-" * 40)
+        symbols = [(global_address_symbol_name((name, size, 0)), int(size), name) for name, size in identities]
+        for symbol, size, name in symbols:
+            lines.append(f"; {symbol}: {name} ({size} bytes)")
+            lines.append(f"(assert (not (= {symbol} (_ bv0 {bits}))))")
+            lines.append(f"(assert (bvult {symbol} (bvsub (_ bv{(1 << bits) - 1} {bits}) (_ bv{size} {bits}))))")
+        for index, (left, left_size, _l) in enumerate(symbols):
+            for right, right_size, _r in symbols[index + 1:]:
+                lines.append(
+                    "(assert (or "
+                    f"(bvule (bvadd {left} (_ bv{left_size} {bits})) {right}) "
+                    f"(bvule (bvadd {right} (_ bv{right_size} {bits})) {left})))"
+                )
         lines.append("")
         return lines
 

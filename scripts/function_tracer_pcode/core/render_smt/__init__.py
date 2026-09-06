@@ -88,6 +88,11 @@ from scripts.function_tracer_pcode.core.render_smt.unknowns import (  # noqa: F4
     _unknown_smt_declaration,
     _unknown_smt_symbol_name,
     collect_unknown_smt_declarations,
+    collect_global_address_identities,
+    global_address_identity,
+    global_address_smt,
+    global_address_symbol_name,
+    GLOBAL_ADDRESS_BITS,
 )
 from scripts.function_tracer_pcode.core.render_smt.widths import (  # noqa: F401
     _coerce_expr_to_bitvec_width,

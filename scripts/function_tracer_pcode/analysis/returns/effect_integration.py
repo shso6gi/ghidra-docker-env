@@ -56,7 +56,7 @@ from scripts.function_tracer_pcode.analysis.effects._shared import (
     _EFFECT_GLOBAL_READ_IDENTITY_REASON,
     _EFFECT_SURFACE_COMPOSITION_REASON,
 )
-from scripts.function_tracer_pcode.analysis.effects.summary import expression_reads_global_object
+from scripts.function_tracer_pcode.analysis.effects.summary import expression_reads_unidentified_writable_memory
 from scripts.function_tracer_pcode.analysis.session import AnalysisSession
 from scripts.function_tracer_pcode.analysis.runtime_state import AnalysisRuntimeState
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService
@@ -1916,13 +1916,13 @@ class EffectIntegrationService:
 
         if any(effect.location.base_ref.is_global() for effect in effects):
             for ret in result.returns:
-                if expression_reads_global_object(ret.value) or any(
-                    expression_reads_global_object(getattr(cond, "expression", None))
+                if expression_reads_unidentified_writable_memory(ret.value) or any(
+                    expression_reads_unidentified_writable_memory(getattr(cond, "expression", None))
                     for cond in ret.conditions
                 ):
                     return _fail_closed(
                         _EFFECT_GLOBAL_READ_IDENTITY_REASON,
-                        "return observation reads a global whose identity is address-bound",
+                        "return observation reads writable memory without a global identity",
                     )
 
         effects_expr = build_void_effect_summary_expr(effects)

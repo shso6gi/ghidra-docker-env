@@ -65,6 +65,7 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _ram_varnode_key,
     classify_store_address,
     expression_reads_global_object,
+    expression_reads_unidentified_writable_memory,
     match_unaligned_store_half,
     pair_unaligned_store_halves,
     _runtime_conditions_signature,
@@ -840,12 +841,17 @@ def _impl_summarize_store_effects(
         else:
             effects.extend(ram_effects)
     if any(effect.location.base_ref.is_global() for effect in effects) and any(
-        expression_reads_global_object(effect.value)
-        or any(expression_reads_global_object(getattr(cond, "expression", None)) for cond in effect.conditions)
+        expression_reads_unidentified_writable_memory(effect.value)
+        or any(
+            expression_reads_unidentified_writable_memory(getattr(cond, "expression", None))
+            for cond in effect.conditions
+        )
         for effect in effects
     ):
-        # Reads of writable globals are still keyed by absolute address, which
-        # differs between binaries; a surface built on them would not unify.
+        # A read of writable memory without a global-object identity is keyed
+        # by its absolute address, which differs between binaries; a surface
+        # built on it would not unify.  Named globals render against a shared
+        # symbolic base address and need no gate.
         incomplete_reasons.add(_EFFECT_GLOBAL_READ_IDENTITY_REASON)
 
     synthetic_expr = build_void_effect_summary_expr(effects)

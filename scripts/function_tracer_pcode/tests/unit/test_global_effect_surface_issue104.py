@@ -531,11 +531,29 @@ def test_call_induced_indirect_on_ram_is_not_a_direct_write():
 # Global reads inside modelled effects
 # --------------------------------------------------------------------------
 
-def test_global_effect_value_reading_another_global_fails_closed():
+def test_global_effect_value_reading_a_named_global_is_modelled():
+    """Reads of named globals render against a shared symbolic base address,
+    so ``g = h + x`` is a complete effect."""
     g = _global_ref(*G)
     h = _global_ref(*H)
     value = Expression.binary_op("INT_ADD", _global_read(h, 4), _x())
     tracer = _Tracer([G, H], values={"addr": _const_addr(g), "val": value})
+    summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)])
+    assert len(summary.effects) == 1
+    assert summary.incomplete_reasons == ()
+
+
+def _unidentified_writable_ref(addr):
+    return AddressValueRef(address_offset=addr, program_id=1, space_id=3, space_name="ram", block_name=".bss",
+                           is_initialized=False, can_read=True, can_write=True, can_execute=False, is_volatile=False)
+
+
+def test_global_effect_value_reading_unidentified_writable_memory_fails_closed():
+    """A writable address without a symbol (stripped binary) is keyed by its
+    absolute address only and cannot unify across binaries."""
+    g = _global_ref(*G)
+    value = Expression.binary_op("INT_ADD", Expression.memory(_const_addr(_unidentified_writable_ref(0x2000)), 4), _x())
+    tracer = _Tracer([G], values={"addr": _const_addr(g), "val": value})
     summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)])
     assert len(summary.effects) == 1
     assert _EFFECT_GLOBAL_READ_IDENTITY_REASON in summary.incomplete_reasons
@@ -664,10 +682,18 @@ def test_existing_blockers_are_not_duplicated_by_the_composition_check():
     assert unsupported.effect_summary.incomplete_reasons == ()
 
 
-def test_global_effect_next_to_an_address_bound_global_read_in_the_return_fails_closed():
+def test_global_effect_next_to_a_named_global_read_in_the_return_is_composed():
     analyzer = _analyzer()
     analysis = _int_function([_global_effect("h", 0x1000d8, 16, _x())])
     analysis.returns = [ReturnInfo("0x1010", _global_read(_global_ref(*G), 4), [])]
+    assert analyzer._apply_observable_effect_surface(analysis, analysis.return_type_obj, "int") is True
+    assert analysis.effect_summary.incomplete_reasons == ()
+
+
+def test_global_effect_next_to_an_unidentified_writable_read_in_the_return_fails_closed():
+    analyzer = _analyzer()
+    analysis = _int_function([_global_effect("h", 0x1000d8, 16, _x())])
+    analysis.returns = [ReturnInfo("0x1010", Expression.memory(_const_addr(_unidentified_writable_ref(0x2000)), 4), [])]
     assert analyzer._apply_observable_effect_surface(analysis, analysis.return_type_obj, "int") is False
     assert analysis.effect_summary.incomplete_reasons == (_EFFECT_GLOBAL_READ_IDENTITY_REASON,)
 
