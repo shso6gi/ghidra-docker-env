@@ -228,7 +228,7 @@ def run_obligation_branch_plan(
             # 6c-3 (#93): branch 文脈は BranchCheckContext の明示引数のみで checker へ渡す（facade の
             # _active_* への set/restore/delete は撤去済み）。builder の import は lease 発行より前に置く:
             # lease 発行成功後は例外を投げ得る処理を挟まず直ちに try/finally（revoke）に入る。
-            from scripts.function_tracer_pcode.checker.branch_context import (
+            from scripts.function_tracer_pcode.proof.obligations.branch_context import (
                 build_branch_check_context,
             )
             session_id = uuid4().hex
