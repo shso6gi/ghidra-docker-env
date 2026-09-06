@@ -319,6 +319,7 @@ from scripts.function_tracer_pcode.analysis.effects.store_effect import (  # noq
     _impl__resolve_value_varnode_effects as _resolve_value_varnode_effects,
     _impl__collect_ram_output_write_effects as _collect_ram_output_write_effects,
     _impl__is_ram_exit_copy as _is_ram_exit_copy,
+    _impl__op_output_is_memory as _op_output_is_memory,
     _impl__ram_varnode_key as _ram_varnode_key,
     _impl_build_void_effect_summary_expr as build_void_effect_summary_expr,
     _impl_is_call_effect_summary_allowed as is_call_effect_summary_allowed,

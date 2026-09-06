@@ -61,6 +61,7 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _resolve_value_varnode_effects,
     _collect_ram_output_write_effects,
     _is_ram_exit_copy,
+    _op_output_is_memory,
     _ram_varnode_key,
     classify_store_address,
     expression_reads_global_object,
@@ -99,7 +100,8 @@ def _impl_summarize_store_effects(
     has_unsupported_call = False
     incomplete_reasons: Set[str] = set()
     store_path_global_locations: List[CanonicalLocation] = []
-    unaligned_halves: List[Tuple[Tuple[object, List[List[Condition]], Optional[PcodeBlockRef]], object]] = []
+    unaligned_halves: List[Tuple[Tuple[object, List[List[Condition]], Optional[PcodeBlockRef]], object, Tuple[int, int]]] = []
+    effect_barriers: List[Tuple[Tuple[int, int], Optional[CanonicalLocation]]] = []
     call_argument_evidence: Dict[Tuple[object, ...], CallArgumentEvidence] = {}
     unsupported_call_sites: List[UnsupportedCallEffectRef] = []
     call_target_resolution_evidence: List[CallTargetResolutionEvidence] = []
@@ -264,7 +266,7 @@ def _impl_summarize_store_effects(
             pcode_op_ref=pcode_op_ref,
         )
 
-    for block_info in block_infos:
+    for block_ordinal, block_info in enumerate(block_infos):
         producer_block_ref = _pcode_block_ref_for_block_info(block_info)
         coverage_status, path_sets = _path_coverage_for_effect_block(condition_tracker, block_info)
         if coverage_status == "complete_unreachable":
@@ -286,9 +288,16 @@ def _impl_summarize_store_effects(
                     )
             continue
 
-        for op in block_info.pcode_ops:
+        for op_ordinal, op in enumerate(block_info.pcode_ops):
             mnemonic = op.getMnemonic()
             op_order_key = _try_get_order_key(op)
+            if mnemonic in {"CALL", "CALLIND"} or (
+                mnemonic == "INDIRECT" and _op_output_is_memory(op)
+            ):
+                # A call / possible memory change separates unaligned store
+                # halves unconditionally.  STOREs are recorded with their
+                # canonical location below (disjoint stores do not separate).
+                effect_barriers.append(((block_ordinal, op_ordinal), None))
             if op_order_key is None and mnemonic in {"STORE", "CALL", "CALLIND"}:
                 incomplete_reasons.add(_EFFECT_ORDER_UNAVAILABLE_REASON)
                 if mnemonic in {"CALL", "CALLIND"}:
@@ -308,6 +317,8 @@ def _impl_summarize_store_effects(
                 if store_kind == "stack_frame":
                     # Frame-local memory dies with the function: proven unobservable.
                     continue
+                if store_kind in {"parameter", "global"} and location is not None:
+                    effect_barriers.append(((block_ordinal, op_ordinal), location))
                 if store_kind == "unresolved" or location is None:
                     # MIPS sdl/sdr (swl/swr): one half of an unaligned store.
                     # The pair is composed into a single store after the scan;
@@ -318,11 +329,14 @@ def _impl_summarize_store_effects(
                         op.getInput(2).getSize(),
                     )
                     if half is not None:
-                        unaligned_halves.append(((op, path_sets, producer_block_ref), half))
+                        unaligned_halves.append(
+                            ((op, path_sets, producer_block_ref), half, (block_ordinal, op_ordinal))
+                        )
                         continue
                     # Issue #104 (Gap 1): the write may be observable (global,
                     # escaped pointer, ...) but has no canonical identity; it must
                     # not silently vanish from the comparison surface.
+                    effect_barriers.append(((block_ordinal, op_ordinal), None))
                     incomplete_reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
                     if debug:
                         print(
@@ -753,11 +767,15 @@ def _impl_summarize_store_effects(
                     )
 
     if unaligned_halves:
-        def _canonical_base_key(base_expr, width):
-            location = canonicalize_location(base_expr, parameters, size=width)
-            return location.stable_key() if location is not None else None
+        def _locate_half(base_expr, width):
+            store_kind, location = classify_store_address(base_expr, parameters, size=width)
+            return location if store_kind in {"parameter", "global"} else None
 
-        pairs, unmatched = pair_unaligned_store_halves(unaligned_halves, _canonical_base_key)
+        pairs, unmatched = pair_unaligned_store_halves(
+            unaligned_halves,
+            _locate_half,
+            barriers=effect_barriers,
+        )
         if unmatched:
             incomplete_reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
             if debug:
@@ -858,6 +876,17 @@ def _impl__block_has_effect_sensitive_ops(block_info) -> bool:
         if mnemonic in {"STORE", "CALL", "CALLIND"}:
             return True
     return False
+
+def _impl__op_output_is_memory(op) -> bool:
+    """True when the op writes an addressable (non register/unique/const) varnode."""
+    try:
+        out = op.getOutput()
+        if out is None or not out.isAddress():
+            return False
+        return out.getAddress().getAddressSpace().getName() not in {"register", "unique", "const"}
+    except Exception:
+        return False
+
 
 def _impl__is_ram_exit_copy(op, return_targets: Set[object]) -> bool:
     """True for the decompiler's return-site ``COPY ram_X <- ram_X'`` merge.

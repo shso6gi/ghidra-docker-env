@@ -117,6 +117,7 @@ _METHOD_MODULES = {
     '_resolve_value_varnode_effects': 'store_effect',
     '_collect_ram_output_write_effects': 'store_effect',
     '_is_ram_exit_copy': 'store_effect',
+    '_op_output_is_memory': 'store_effect',
     '_ram_varnode_key': 'store_effect',
     '_extract_positive_param_equality_pair': 'condition_algebra',
     '_find_block_info_for_pcode_op': 'call_paths',

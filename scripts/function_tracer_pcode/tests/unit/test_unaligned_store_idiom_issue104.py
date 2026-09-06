@@ -97,6 +97,32 @@ def test_plain_stores_and_foreign_shapes_are_not_halves():
     assert match_unaligned_store_half(addr, wrong, 8) is None
 
 
+def test_interleaved_field_pairs_compose_in_clang_o0_order():
+    """clang -O0 emits sdl(f4) sdl(f3) sd(f0) sdr(f4) sdr(f3): every pair is
+    separated only by disjoint fields of the same object."""
+    from scripts.function_tracer_pcode.core import CanonicalLocation, LocationBaseRef
+
+    def locate(base_expr, width):
+        off = base_expr.operands[1].value if base_expr.operands[1].expr_type.name == "CONSTANT" else 0
+        return CanonicalLocation(base_ref=LocationBaseRef.parameter("param_1", index=0), offset=int(off), size=width)
+
+    l32a, l32v = _left_half(_b("INT_ADD", _p1(), _c(32)), _v())
+    l24a, l24v = _left_half(_b("INT_ADD", _p1(), _c(24)), _v("param_5", 4))
+    r32a, r32v = _right_half(_b("INT_ADD", _p1(), _c(39)), _v())
+    r24a, r24v = _right_half(_b("INT_ADD", _p1(), _c(31)), _v("param_5", 4))
+    halves = [
+        ("L32", match_unaligned_store_half(l32a, l32v, 8), (0, 0)),
+        ("L24", match_unaligned_store_half(l24a, l24v, 8), (0, 1)),
+        ("R32", match_unaligned_store_half(r32a, r32v, 8), (0, 3)),
+        ("R24", match_unaligned_store_half(r24a, r24v, 8), (0, 4)),
+    ]
+    pairs, unmatched = pair_unaligned_store_halves(
+        halves, locate, barriers=[((0, 2), CanonicalLocation(base_ref=LocationBaseRef.parameter("param_1", index=0), offset=0, size=8))]
+    )
+    assert sorted((l, r) for l, r, _h in pairs) == [("L24", "R24"), ("L32", "R32")]
+    assert unmatched == []
+
+
 def test_pairing_requires_same_value_and_base_and_reports_leftovers():
     x = _b("INT_ADD", _p1(), _c(32))
     la, lv = _left_half(x, _v())
@@ -105,9 +131,97 @@ def test_pairing_requires_same_value_and_base_and_reports_leftovers():
     left = match_unaligned_store_half(la, lv, 8)
     right = match_unaligned_store_half(ra, rv, 8)
     other = match_unaligned_store_half(other_ra, other_rv, 8)
-    pairs, unmatched = pair_unaligned_store_halves([("L", left), ("R2", other), ("R", right)])
+    pairs, unmatched = pair_unaligned_store_halves([("L", left, (0, 0)), ("R", right, (0, 1))])
     assert [(l, r) for l, r, _h in pairs] == [("L", "R")]
-    assert [tag for tag, _h in unmatched] == ["R2"]
+    assert unmatched == []
+    # a right half with a different value never pairs, and it also breaks the
+    # adjacency of the real pair: both leftovers are reported
+    pairs, unmatched = pair_unaligned_store_halves([("L", left, (0, 0)), ("R2", other, (0, 1)), ("R", right, (0, 2))])
+    assert pairs == []
+    assert [tag for tag, _h in unmatched] == ["L", "R2", "R"]
+
+
+def test_halves_in_different_blocks_never_pair():
+    """if (c) SDL(X, v) else SDR(X+7, v): no execution performs the full store."""
+    x = _b("INT_ADD", _p1(), _c(32))
+    la, lv = _left_half(x, _v())
+    ra, rv = _right_half(_b("INT_ADD", _p1(), _c(39)), _v())
+    left = match_unaligned_store_half(la, lv, 8)
+    right = match_unaligned_store_half(ra, rv, 8)
+    pairs, unmatched = pair_unaligned_store_halves([("L", left, (0, 3)), ("R", right, (1, 0))])
+    assert pairs == []
+    assert [tag for tag, _h in unmatched] == ["L", "R"]
+
+
+def test_halves_separated_by_a_memory_or_call_barrier_never_pair():
+    x = _b("INT_ADD", _p1(), _c(32))
+    la, lv = _left_half(x, _v())
+    ra, rv = _right_half(_b("INT_ADD", _p1(), _c(39)), _v())
+    left = match_unaligned_store_half(la, lv, 8)
+    right = match_unaligned_store_half(ra, rv, 8)
+    from scripts.function_tracer_pcode.core import CanonicalLocation, LocationBaseRef
+
+    def _loc(name, index, offset, size):
+        return CanonicalLocation(base_ref=LocationBaseRef.parameter(name, index=index), offset=offset, size=size)
+
+    def locate(base_expr, width):
+        return _loc("param_1", 0, 32, width)
+
+    # a call (location None) between the halves is a barrier
+    pairs, unmatched = pair_unaligned_store_halves(
+        [("L", left, (0, 0)), ("R", right, (0, 2))], locate, barriers=[((0, 1), None)]
+    )
+    assert pairs == []
+    assert [tag for tag, _h in unmatched] == ["L", "R"]
+    # an overlapping store between them is a barrier
+    pairs, unmatched = pair_unaligned_store_halves(
+        [("L", left, (0, 0)), ("R", right, (0, 2))], locate,
+        barriers=[((0, 1), _loc("param_1", 0, 36, 4))],
+    )
+    assert pairs == []
+    # a store to a different base object may alias: barrier
+    pairs, unmatched = pair_unaligned_store_halves(
+        [("L", left, (0, 0)), ("R", right, (0, 2))], locate,
+        barriers=[((0, 1), _loc("param_2", 1, 64, 8))],
+    )
+    assert pairs == []
+    # a provably disjoint store of the same object (another field) is not
+    pairs, unmatched = pair_unaligned_store_halves(
+        [("L", left, (0, 0)), ("R", right, (0, 2))], locate,
+        barriers=[((0, 1), _loc("param_1", 0, 0, 8))],
+    )
+    assert [(l, r) for l, r, _h in pairs] == [("L", "R")]
+    # barriers outside the span do not matter
+    pairs, unmatched = pair_unaligned_store_halves(
+        [("L", left, (0, 1)), ("R", right, (0, 2))], locate, barriers=[((0, 0), None), ((0, 3), None), ((1, 1), None)]
+    )
+    assert [(l, r) for l, r, _h in pairs] == [("L", "R")]
+    # without a canonical location the span can never be proven clear
+    pairs, unmatched = pair_unaligned_store_halves(
+        [("L", left, (0, 0)), ("R", right, (0, 2))], None,
+        barriers=[((0, 1), _loc("param_1", 0, 0, 8))],
+    )
+    assert pairs == []
+
+
+def test_zext_and_sext_of_the_same_source_are_different_stored_values():
+    """ZEXT32(0xffffffff) != SEXT32(0xffffffff): the halves store different
+    64-bit values and must not be composed."""
+    x = _b("INT_ADD", _p1(), _c(32))
+    source = Expression.parameter("param_6", 5, data_type="uint", size=4)
+    zext = Expression.unary_op("INT_ZEXT", source)
+    zext.size = 8
+    sext = Expression.unary_op("INT_SEXT", source)
+    sext.size = 8
+    la, lv = _left_half(x, zext)
+    ra, rv = _right_half(_b("INT_ADD", _p1(), _c(39)), sext)
+    left = match_unaligned_store_half(la, lv, 8)
+    right = match_unaligned_store_half(ra, rv, 8)
+    assert left is not None and right is not None
+    assert left.value_key != right.value_key
+    pairs, unmatched = pair_unaligned_store_halves([("L", left, (0, 0)), ("R", right, (0, 1))])
+    assert pairs == []
+    assert len(unmatched) == 2
 
 
 def _store(addr_key, val_key, target):
@@ -174,3 +288,55 @@ def test_four_byte_swl_swr_pair_is_supported():
     right = match_unaligned_store_half(ra, rv, 4)
     assert left is not None and right is not None and left.pair_key == right.pair_key
     assert left.width == 4
+
+
+def _call_op(target):
+    return _Op("CALL", _Varnode("register", 0x4000, 8), [_Varnode("ram", 0x101000, 8)], _Address("ram", target))
+
+
+def test_intervening_plain_store_or_call_keeps_the_halves_unmodelled():
+    x = _b("INT_ADD", _p1(), _c(32))
+    la, lv = _left_half(x, _v())
+    ra, rv = _right_half(_b("INT_ADD", _p1(), _c(39)), _v())
+    other = Expression.parameter("param_7", 6, data_type="ulong", size=8)
+    tracer = _Tracer([], values={"la": la, "lv": lv, "ra": ra, "rv": rv, "p": _p1(), "o": other})
+    params = [
+        _param("param_1", 0, size=8, data_type="undefined8 *"),
+        _param("param_6", 5, size=8, data_type="ulong"),
+        _param("param_7", 6, size=8, data_type="ulong"),
+    ]
+    # a plain store to a *disjoint* field of the same object (p + 0) between
+    # the halves is exactly the clang -O0 interleaving: still composed
+    with_store = summarize_store_effects(
+        [_Block([_store("la", "lv", 0x100), _store("p", "o", 0x104), _store("ra", "rv", 0x108)])], tracer, _Tracker(), params
+    )
+    assert with_store.incomplete_reasons == ()
+    assert sorted((e.location.offset, e.location.size) for e in with_store.effects) == [(0, 8), (32, 8)]
+
+    # an overlapping store (p + 36) between the halves is a barrier
+    overlap = _b("INT_ADD", _p1(), _c(36))
+    tracer_overlap = _Tracer([], values={"la": la, "lv": lv, "ra": ra, "rv": rv, "q": overlap, "o": other})
+    with_overlap = summarize_store_effects(
+        [_Block([_store("la", "lv", 0x100), _store("q", "o", 0x104), _store("ra", "rv", 0x108)])], tracer_overlap, _Tracker(), params
+    )
+    assert _EFFECT_STORE_LOCATION_UNMODELED_REASON in with_overlap.incomplete_reasons
+    assert all(e.location.offset != 32 for e in with_overlap.effects)
+
+    with_call = summarize_store_effects(
+        [_Block([_store("la", "lv", 0x100), _call_op(0x104), _store("ra", "rv", 0x108)])], tracer, _Tracker(), params
+    )
+    assert _EFFECT_STORE_LOCATION_UNMODELED_REASON in with_call.incomplete_reasons
+    assert all(e.location.offset != 32 for e in with_call.effects)
+
+
+def test_halves_split_across_blocks_are_unmodelled_at_summary_level():
+    x = _b("INT_ADD", _p1(), _c(32))
+    la, lv = _left_half(x, _v())
+    ra, rv = _right_half(_b("INT_ADD", _p1(), _c(39)), _v())
+    tracer = _Tracer([], values={"la": la, "lv": lv, "ra": ra, "rv": rv})
+    params = [_param("param_1", 0, size=8, data_type="undefined8 *"), _param("param_6", 5, size=8, data_type="ulong")]
+    summary = summarize_store_effects(
+        [_Block([_store("la", "lv", 0x100)], 0), _Block([_store("ra", "rv", 0x108)], 1)], tracer, _Tracker(), params
+    )
+    assert summary.effects == []
+    assert summary.incomplete_reasons == (_EFFECT_STORE_LOCATION_UNMODELED_REASON,)

@@ -56,12 +56,26 @@ class UnalignedStoreHalf:
 
 
 def _key(expr: Expression) -> StructuralKey:
+    """Address-shape key: width adapters / full masks are irrelevant for ``Y``."""
     return expression_key(
         expr,
         normalize_commutative=True,
         strip_width_adapters=True,
         collapse_full_masks=True,
         include_memory_read_order=False,
+    )
+
+
+def _value_key(expr: Expression) -> StructuralKey:
+    """Stored-value key: the two halves must store the *same full-width bit
+    vector*, so width adapters (``INT_ZEXT`` / ``INT_SEXT``), masks and memory
+    read order all stay significant."""
+    return expression_key(
+        expr,
+        normalize_commutative=True,
+        strip_width_adapters=False,
+        collapse_full_masks=False,
+        include_memory_read_order=True,
     )
 
 
@@ -259,7 +273,7 @@ def _impl_match_unaligned_store_half(
             base_expr=y_expr,
             value_expr=value,
             base_key=y_key,
-            value_key=_key(value),
+            value_key=_value_key(value),
         )
     value = _match_right_value(value_expr, addr_key, y_key, width)
     if value is not None:
@@ -270,53 +284,129 @@ def _impl_match_unaligned_store_half(
             base_expr=base_expr,
             value_expr=value,
             base_key=_key(base_expr),
-            value_key=_key(value),
+            value_key=_value_key(value),
         )
     return None
 
 
+def _ranges_provably_disjoint(left: Any, right: Any) -> bool:
+    """Two canonical locations are disjoint only when they share the exact same
+    base object and steps and their byte ranges do not overlap.  Different
+    bases (two pointer parameters, a parameter and a global, ...) may alias,
+    so they are never considered disjoint."""
+
+    if left is None or right is None:
+        return False
+    try:
+        if left.base_ref.stable_key() != right.base_ref.stable_key():
+            return False
+        if tuple(step.stable_key() for step in left.steps) != tuple(step.stable_key() for step in right.steps):
+            return False
+        a0, a1 = int(left.offset), int(left.offset) + max(1, int(left.size))
+        b0, b1 = int(right.offset), int(right.offset) + max(1, int(right.size))
+    except Exception:
+        return False
+    return a1 <= b0 or b1 <= a0
+
+
 def _impl_pair_unaligned_store_halves(
-    halves: Sequence[Tuple[Any, UnalignedStoreHalf]],
-    base_key_fn: Optional[Any] = None,
+    halves: Sequence[Tuple[Any, UnalignedStoreHalf, Tuple[Any, int]]],
+    locate_fn: Optional[Any] = None,
+    barriers: Optional[Sequence[Tuple[Tuple[Any, int], Any]]] = None,
 ) -> Tuple[List[Tuple[Any, Any, UnalignedStoreHalf]], List[Tuple[Any, UnalignedStoreHalf]]]:
     """Group halves into ``(left_tag, right_tag, half)`` pairs.
 
-    ``halves`` are ``(tag, half)`` in program order; a left half pairs with the
-    next right half that stores the same value to the same start address.
-    ``base_key_fn(base_expr, width)`` may supply a canonical address key (the
-    two halves are often spelled differently, ``PTRADD(p, 4, 8)`` vs
-    ``p + 39 - 7``); it falls back to the structural key when it returns
-    ``None``.  Returns ``(pairs, unmatched)``; every unmatched half must be
-    treated as an unmodelled store by the caller.
+    ``halves`` are ``(tag, half, position)`` in program order, ``position``
+    being ``(block_id, op_index)``.  ``locate_fn(base_expr, width)`` returns
+    the canonical location of a half's whole store (``None`` when unknown).
+    ``barriers`` lists the other effect-sensitive ops as
+    ``(position, location)``: plain STOREs carry their canonical location,
+    calls / CALLIND / memory-changing INDIRECT / unresolved stores carry
+    ``None``.
+
+    A right half pairs with the nearest preceding unpaired left half such that
+
+    * both are in the same basic block (one execution context, identical path
+      conditions; halves on different branches never compose);
+    * the two store the same full-width value (``value_key`` keeps width
+      adapters) to the same start address (canonical location);
+    * every op between them is a store whose location is **provably
+      disjoint** from ``[X, X + width)`` (same base object, non-overlapping
+      bytes) - compilers interleave the halves of several fields of one
+      struct; any call, unresolved store or overlapping store is a barrier.
+
+    Returns ``(pairs, unmatched)``; every unmatched half must be treated as an
+    unmodelled store by the caller.
     """
 
-    def _pair_key(half: UnalignedStoreHalf):
-        base_key = None
-        if base_key_fn is not None:
-            try:
-                base_key = base_key_fn(half.base_expr, half.width)
-            except Exception:
-                base_key = None
-        if base_key is None:
-            base_key = ("structural", half.base_key)
-        else:
-            base_key = ("canonical", base_key)
-        return (int(half.width), base_key, half.value_key)
+    def _locate(half: UnalignedStoreHalf):
+        if locate_fn is None:
+            return None
+        try:
+            return locate_fn(half.base_expr, half.width)
+        except Exception:
+            return None
 
-    pending: Dict[Any, List[Tuple[Any, UnalignedStoreHalf]]] = {}
+    items: List[Dict[str, Any]] = []
+    for tag, half, position in halves:
+        location = _locate(half)
+        items.append({
+            "tag": tag,
+            "half": half,
+            "position": position,
+            "location": location,
+            "key": (
+                int(half.width),
+                ("canonical", location.stable_key()) if location is not None else ("structural", half.base_key),
+                half.value_key,
+            ),
+            "paired": False,
+        })
+
+    barrier_list = [(tuple(position), location) for position, location in (barriers or ())]
+
+    def _span_is_clear(block_id, start: int, end: int, own_location) -> bool:
+        between = [
+            b_location for (b_block, b_index), b_location in barrier_list
+            if b_block == block_id and start < int(b_index) < end
+        ] + [
+            other["location"] for other in items
+            if other["position"][0] == block_id and start < int(other["position"][1]) < end
+        ]
+        if not between:
+            return True
+        if own_location is None:
+            return False
+        for (b_block, b_index), b_location in barrier_list:
+            if b_block == block_id and start < int(b_index) < end:
+                if not _ranges_provably_disjoint(own_location, b_location):
+                    return False
+        for other in items:
+            o_block, o_index = other["position"]
+            if o_block == block_id and start < int(o_index) < end:
+                if not _ranges_provably_disjoint(own_location, other["location"]):
+                    return False
+        return True
+
     pairs: List[Tuple[Any, Any, UnalignedStoreHalf]] = []
-    unmatched: List[Tuple[Any, UnalignedStoreHalf]] = []
-    for tag, half in halves:
-        key = _pair_key(half)
-        queue = pending.setdefault(key, [])
-        if half.side == "left":
-            queue.append((tag, half))
+    for index, item in enumerate(items):
+        if item["half"].side != "right":
             continue
-        if queue:
-            left_tag, left_half = queue.pop(0)
-            pairs.append((left_tag, tag, left_half))
-        else:
-            unmatched.append((tag, half))
-    for queue in pending.values():
-        unmatched.extend(queue)
+        block_id, op_index = item["position"]
+        for candidate in reversed(items[:index]):
+            if candidate["paired"] or candidate["half"].side != "left":
+                continue
+            c_block, c_index = candidate["position"]
+            if c_block != block_id:
+                break
+            if candidate["key"] != item["key"]:
+                continue
+            if not _span_is_clear(block_id, int(c_index), int(op_index), candidate["location"]):
+                break
+            candidate["paired"] = True
+            item["paired"] = True
+            pairs.append((candidate["tag"], item["tag"], candidate["half"]))
+            break
+
+    unmatched = [(item["tag"], item["half"]) for item in items if not item["paired"]]
     return pairs, unmatched
