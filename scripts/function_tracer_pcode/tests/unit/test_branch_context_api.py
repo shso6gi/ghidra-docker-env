@@ -366,3 +366,29 @@ def test_runner_builds_the_explicit_context_with_the_shared_builder_only():
     # abstraction stage は branch_context を check() へ転送する
     abs_src = inspect.getsource(EquivalenceChecker._run_recursive_abstraction_stage)
     assert "branch_context=branch_context" in abs_src
+
+
+# ---- authority lease lifetime: 発行直後に try/finally（revoke）へ入る ---------------------------------
+
+def test_lease_issuance_is_immediately_followed_by_the_try_finally_that_revokes_it():
+    """#96 レビュー: issue_production_branch_authority() 成功後から try/finally に入るまでに、例外を投げ得る
+    処理（import を含む）を置かない。finally は同じ lease を revoke する。"""
+    module = ast.parse(inspect.getsource(runner_module))
+    fns = [n for n in ast.walk(module) if isinstance(n, ast.FunctionDef) and n.name == "execute_branch"]
+    assert len(fns) == 1
+    body = fns[0].body
+    issue_idx = [i for i, st in enumerate(body) if isinstance(st, ast.Assign)
+                 and isinstance(st.value, ast.Call) and ast.unparse(st.value.func) == "issue_production_branch_authority"]
+    assert len(issue_idx) == 1
+    i = issue_idx[0]
+    assert ast.unparse(body[i].targets[0]) == "branch_lease"
+    nxt = body[i + 1]
+    assert isinstance(nxt, ast.Try), ast.unparse(nxt)[:60]  # 発行の直後の文が try
+    assert [ast.unparse(st) for st in nxt.finalbody] == ["revoke_production_branch_authority(branch_lease)"]
+    assert not nxt.handlers and not nxt.orelse
+    # 発行より前の文だけが import / 局所計算（発行後に import は無い）
+    assert all(not isinstance(st, (ast.Import, ast.ImportFrom)) for st in body[i + 1:])
+    imports_before = [st for st in body[:i] if isinstance(st, ast.ImportFrom)]
+    assert {n.name for st in imports_before for n in st.names} >= {
+        "issue_production_branch_authority", "revoke_production_branch_authority", "build_branch_check_context"}
+

@@ -225,6 +225,12 @@ def run_obligation_branch_plan(
                 issue_production_branch_authority,
                 revoke_production_branch_authority,
             )
+            # 6c-3 (#93): branch 文脈は BranchCheckContext の明示引数のみで checker へ渡す（facade の
+            # _active_* への set/restore/delete は撤去済み）。builder の import は lease 発行より前に置く:
+            # lease 発行成功後は例外を投げ得る処理を挟まず直ちに try/finally（revoke）に入る。
+            from scripts.function_tracer_pcode.checker.branch_context import (
+                build_branch_check_context,
+            )
             session_id = uuid4().hex
             generation = int(getattr(checker, "_call_proof_generation", 0) or 0) + 1
             view_digest = hashlib.sha256(repr((
@@ -232,11 +238,6 @@ def run_obligation_branch_plan(
             )).encode("utf-8")).hexdigest()
             branch_lease = issue_production_branch_authority(
                 session_id, branch_id, generation, view_digest,
-            )
-            # 6c-3 (#93): branch 文脈は BranchCheckContext の明示引数のみで checker へ渡す。
-            # facade の _active_* への set/restore/delete は撤去済み。lease の issue / revoke は従来どおりここ。
-            from scripts.function_tracer_pcode.checker.branch_context import (
-                build_branch_check_context,
             )
             try:
                 if spec.strategy == "abstract_pairwise":
