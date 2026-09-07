@@ -630,27 +630,38 @@ def _impl_summarize_store_effects(
                             continue
                         if not callee_summary.effects:
                             if callee_summary.has_unsupported_call:
-                                if _call_arguments_may_expose_parameter_memory(
-                                    variant_args,
-                                    parameters,
-                                    callee_parameters,
-                                ):
-                                    has_unsupported_call = True
-                                    unsupported_call_sites.append(
-                                        _unsupported_call_effect_ref(
-                                            op,
-                                            target_ref=target_ref,
-                                            target_expr=target_expr,
-                                            arguments=variant_args,
-                                            path_conditions=active_conditions,
-                                            reason="callee_unsupported_call_may_expose_parameter_memory",
-                                        )
+                                # Issue #104 (Gap 3): a callee whose own summary
+                                # still contains unsupported / unresolved call
+                                # effects has *unknown* observable behaviour.
+                                # Scalar-only arguments do not make that
+                                # behaviour unobservable (globals, statics and
+                                # nested calls do not need a pointer argument),
+                                # so the incompleteness always propagates.  The
+                                # reason only records whether parameter memory
+                                # may additionally be exposed.
+                                has_unsupported_call = True
+                                unsupported_call_sites.append(
+                                    _unsupported_call_effect_ref(
+                                        op,
+                                        target_ref=target_ref,
+                                        target_expr=target_expr,
+                                        arguments=variant_args,
+                                        path_conditions=active_conditions,
+                                        reason=(
+                                            "callee_unsupported_call_may_expose_parameter_memory"
+                                            if _call_arguments_may_expose_parameter_memory(
+                                                variant_args,
+                                                parameters,
+                                                callee_parameters,
+                                            )
+                                            else "callee_unsupported_call_effects_unresolved"
+                                        ),
                                     )
-                                elif debug:
+                                )
+                                if debug:
                                     print(
-                                        "[EffectSummary] effect-free callee summary has only "
-                                        "parameter-memory-insensitive unsupported calls: "
-                                        f"target={target_label}"
+                                        "[EffectSummary] effect-free callee summary still has "
+                                        f"unsupported nested calls: target={target_label}"
                                     )
                             elif debug:
                                 print(

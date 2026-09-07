@@ -1484,7 +1484,19 @@ def test_summarize_store_effects_keeps_zero_arg_missing_callee_summary_unsupport
     assert summary.has_unsupported_call is True
     assert summary.incomplete_reasons == ()
 
-def test_summarize_store_effects_does_not_propagate_scalar_only_unsupported_callee():
+def test_summarize_store_effects_propagates_scalar_only_unsupported_callee():
+    """Issue #104 (Gap 3) regression.
+
+    Old behaviour (soundness hole): a callee whose summary had no recovered
+    effects but still ``has_unsupported_call`` was treated as effect-free when
+    every argument was a scalar, on the theory that no parameter memory could
+    be exposed.  A scalar-only callee can still write globals / statics or
+    perform nested calls with observable effects, so the caller silently lost
+    them and could be proved EQUIVALENT.
+
+    New behaviour: the incompleteness always propagates (fail closed); the
+    reason records that parameter memory is *not* exposed by the arguments.
+    """
     class FakeVarnode:
         def __init__(self, key, size):
             self.key = key
@@ -1554,8 +1566,11 @@ def test_summarize_store_effects_does_not_propagate_scalar_only_unsupported_call
     )
 
     assert summary.effects == []
-    assert summary.has_unsupported_call is False
+    assert summary.has_unsupported_call is True
     assert summary.incomplete_reasons == ()
+    assert [site.reason for site in summary.unsupported_call_sites] == [
+        "callee_unsupported_call_effects_unresolved"
+    ]
 
 def test_recoverable_partial_call_summary_does_not_become_unsupported_blocker():
     class FakeVarnode:
