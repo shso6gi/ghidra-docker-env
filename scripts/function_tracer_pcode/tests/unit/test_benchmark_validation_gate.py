@@ -265,7 +265,8 @@ def test_bash_runner_helper_builds_manifest_runs_gate_and_sets_status(tmp_path):
     truth.write_text(f"{NEQ}\tchanged\tCONFIRMED_NOT_EQ\tx=1: old 1, new 2\n", encoding="utf-8")
 
     def run(env_extra: dict) -> tuple[int, str, dict]:
-        env = dict(os.environ, PYTHON_BIN=sys.executable, EQBENCH_GROUND_TRUTH_FILE=str(truth), **env_extra)
+        env = dict(os.environ, PYTHON_BIN=sys.executable, EQBENCH_GROUND_TRUTH_FILE=str(truth))
+        env.update(env_extra)
         result = subprocess.run(
             [
                 "bash", "-euo", "pipefail", "-c",
@@ -310,6 +311,10 @@ def test_bash_runner_helper_builds_manifest_runs_gate_and_sets_status(tmp_path):
     code, output, _ = run({})
     assert code == 0 and "STATUS=MANIFEST_FAILED FAILURES=1" in output
     assert "do not resolve" in (out / "function_diff_manifest.error").read_text()
+
+    code, output, _ = run({"EQBENCH_GROUND_TRUTH_FILE": str(tmp_path / "does-not-exist.tsv")})
+    assert code == 0 and "STATUS=MANIFEST_FAILED FAILURES=1" in output
+    assert "ground-truth file not found" in output
     truth.write_text("", encoding="utf-8")
 
     shutil.rmtree(bench)

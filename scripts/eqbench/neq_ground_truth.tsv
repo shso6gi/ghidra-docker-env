@@ -16,8 +16,11 @@
 #                     agreeing samples alone are not enough.
 # Entries apply to every runner pair (all ISAs, compilers, optimisation
 # levels) of the (sample, function): the evidence must not depend on the
-# architecture, type widths or floating-point environment.  Add a scope
-# column before registering anything architecture-specific.
+# architecture, type widths, floating-point environment or on how the
+# compiler resolves undefined behaviour (e.g. a source-level algebraic
+# argument that relies on signed-overflow wraparound does not justify
+# CONFIRMED_EQ: -O2/-O3 may compile the two definitions differently).  Add a
+# scope column before registering anything architecture-specific.
 # An entry that resolves to no function of the benchmark tree makes the
 # manifest build (and so the runner) fail closed.
 #
@@ -30,4 +33,3 @@ sample	function	verdict	evidence
 raytrace/sphere/Neq/newV-oldV	SphereConstructor	CONFIRMED_NOT_EQ	source: obj.radSqr = r*r (old) vs r*2 (new); native gcc 13 -O0 run, r=3.0f: old radSqr=9, new radSqr=6 (exact float arithmetic, ISA-independent); the pre-#13 checker judged these pairs EQUIVALENT (false EQ)
 raytrace/raytrace/Neq/newV-oldV	SphereConstructor	CONFIRMED_NOT_EQ	source: obj.radSqr = r*r (old) vs r*2 (new); native gcc 13 -O0 run, r=3.0f: old radSqr=9, new radSqr=6 (exact float arithmetic, ISA-independent); the pre-#13 checker judged these pairs EQUIVALENT (false EQ)
 raytrace/surface/Neq/newV-oldV	SurfaceConstructor	CONFIRMED_NOT_EQ	source: obj.ig = gval (old) vs 10 (new) and obj.kr = r*I255 (old) vs r/I255 (new); native gcc 13 -O0 run, gval=2.0f r=8.0f: old ig=2 kr=0.0313725, new ig=10 kr=2040 (ISA-independent); the pre-#13 checker judged these pairs EQUIVALENT (false EQ)
-CLEVER/UnchLoop/Neq/new-old	foo	CONFIRMED_EQ	algebra: old c=1; c+=b a times; return c = 1+a*b; new c=0; c+=b a times; return c+1 = a*b+1; identical for every (a,b) in two's-complement int arithmetic (a<=0: both return 1; wraparound is the same sequence of additions); native gcc 13 -O0 probes (0,900) (1,900) (5,900) (6,900) (-3,900) (2147483647,2) agree on both sides

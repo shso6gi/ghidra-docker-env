@@ -199,7 +199,7 @@ The label-only gate cannot tell a legitimate `EQUIVALENT` on an unchanged Neq
 helper from a false one, so both runners end with the function-level
 **benchmark validation gate** (`EQBENCH_BENCHMARK_GATE=0` disables it;
 `EQBENCH_GROUND_TRUTH_FILE` points it at another reviewed annotation file, e.g.
-an empty one for a synthetic benchmark root). It
+an empty one for a synthetic benchmark root; a missing file fails the gate). It
 builds `function_diff_manifest.json` from the actual `old.c`/`new.c` of the
 benchmark tree (`scripts/eqbench/function_diff_manifest.py`: per function
 `source_relation`, `source_impact`, `semantic_ground_truth`; `C-Desc.json` is
@@ -231,7 +231,8 @@ On `logs/EqBench/all_neq_same_isa_closure_current` (produced before the #13
 fix) the label-only gate fails on all 242 `EQUIVALENT` pairs in Neq samples;
 the benchmark validation gate fails on the 192 raytrace constructor pairs
 whose reviewed ground truth is `CONFIRMED_NOT_EQ` and counts the 50
-`CLEVER/UnchLoop foo` pairs as confirmed-equivalent. The manifest's `observed_baseline`
+`CLEVER/UnchLoop foo` pairs as suspicious (source changed, equivalence not
+confirmed at the binary level). The manifest's `observed_baseline`
 section records what the checker produced at the recorded commit; it is
 explicitly *not* ground truth — an EQUIVALENT/NOT_EQ there may be an accident
 of an implementation defect — and must only be used to explain transitions.
