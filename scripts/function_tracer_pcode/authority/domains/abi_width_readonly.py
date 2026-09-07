@@ -589,9 +589,9 @@ class FunctionReturnAbiSeed:
         """Kind of the surface this function is observed on.
 
         ``"memory_effect"`` when the analysis compares stores (void effect-only
-        or non-void stores ⊕ return), ``"return_value"`` when no comparison
-        surface was built (plain return value), any other sealed kind as-is,
-        and ``None`` when the sealed fact is malformed (never compatible).
+        or non-void stores ⊕ return), ``"return_value"`` for a plain return
+        value, and ``None`` for anything else (malformed evidence or a kind
+        outside the sealed set), which is never compatible.
         """
 
         fact = self.surface_fact
