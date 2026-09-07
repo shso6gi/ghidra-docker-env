@@ -348,3 +348,155 @@ def test_encoder_refuses_to_register_an_ineligible_seed():
     # idempotent for the same exact seed
     encoder.register_void_effect_only_return_abi_seed(session, eligible)
     assert list(session.domain_signal_state["void_effect_only_return_abi_seeds"]) == [eligible.seed_digest]
+
+
+# --------------------------------------------------------------------------
+# exact-type sealing: malformed evidence never becomes eligible
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("mutate", "label"),
+    [
+        (lambda a: setattr(a, "comparison_surface", SimpleNamespace(kind="memory_effect", explicit_bit_width="40")), "width as numeric string"),
+        (lambda a: setattr(a, "comparison_surface", SimpleNamespace(kind="memory_effect", explicit_bit_width=True)), "width as bool"),
+        (lambda a: setattr(a, "comparison_surface", SimpleNamespace(kind="memory_effect", explicit_bit_width=None)), "width None"),
+        (lambda a: setattr(a, "comparison_surface", SimpleNamespace(kind=None, explicit_bit_width=40)), "kind None"),
+        (lambda a: setattr(a, "comparison_surface", SimpleNamespace(kind=b"memory_effect", explicit_bit_width=40)), "kind bytes"),
+        (lambda a: setattr(a.effect_summary, "incomplete_reasons", None), "reasons None"),
+        (lambda a: setattr(a.effect_summary, "incomplete_reasons", ("",)), "empty reason string"),
+        (lambda a: setattr(a.effect_summary, "incomplete_reasons", (None,)), "None reason"),
+        (lambda a: setattr(a.effect_summary, "has_unsupported_call", 0), "unsupported as int 0"),
+        (lambda a: setattr(a.effect_summary, "has_unsupported_call", None), "unsupported None"),
+        (lambda a: setattr(a.effect_summary, "has_unsupported_call", "False"), "unsupported as string"),
+        (lambda a: setattr(a.effect_summary, "effects", None), "effects None"),
+        (lambda a: setattr(a, "effect_summary", None), "effect summary None"),
+    ],
+)
+def test_malformed_surface_evidence_is_sealed_malformed_and_never_eligible(mutate, label):
+    analysis = _void_analysis("left")
+    assert _seed_for(analysis, "left").void_effect_only_surface is True
+    mutate(analysis)
+    seed = _seed_for(analysis, "left")
+    assert seed.void_effect_only_surface is False, label
+    assert seed.observation_complete is False, label
+    if label not in {"effect summary None"}:
+        assert seed.surface_fact[1] == "malformed" or seed.surface_fact[1] != "memory_effect", label
+
+
+def test_surface_fact_components_keep_their_exact_types():
+    seed = _seed_for(_void_analysis("left"), "left")
+    _schema, kind, bits, count, reasons, unsupported, is_void, has_summary = seed.surface_fact
+    assert type(kind) is str and type(bits) is int and type(bits) is not bool
+    assert type(count) is int and type(reasons) is tuple
+    assert type(unsupported) is bool and type(is_void) is bool and has_summary is True
+
+
+# --------------------------------------------------------------------------
+# end to end: effect surface -> formula -> solver -> production decision
+# --------------------------------------------------------------------------
+
+def _z3_available():
+    import shutil
+
+    return shutil.which("z3") is not None
+
+
+class _Program:
+    def __init__(self, name):
+        self._name = name
+
+    def getName(self):
+        return self._name
+
+
+def _run_production_check(monkeypatch, case_id, left, right):
+    """Run the real phase workflow, pairwise strategy, z3 and the production
+    cutover connector; only the Ghidra analysis step is replaced."""
+    import scripts.function_tracer_pcode.analysis as analysis_package
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+        build_default_cutover_connector,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
+        activate_process_worker_execution_authority_deployment,
+    )
+    from scripts.function_tracer_pcode.checker import EquivalenceChecker
+
+    if not _z3_available():
+        pytest.skip("z3 is not available in PATH")
+    activate_process_worker_execution_authority_deployment(
+        key_id="gap6-e2e-" + case_id, key=(case_id.encode() * 32)[:32], key_source_id="/tmp/gap6-" + case_id,
+    )
+    table = {"left": left, "right": right}
+
+    class FakeReturnAnalyzer:
+        def __init__(self, program, **_kwargs):
+            self._program = program
+
+        def analyze_function_by_name(self, _name, _timeout):
+            return table[self._program.getName()]
+
+        def get_last_analysis_failure(self):
+            return None
+
+        def get_last_function_lookup_error(self):
+            return None
+
+        def dispose(self):
+            pass
+
+    monkeypatch.setattr(analysis_package, "ReturnAnalyzer", FakeReturnAnalyzer)
+    checker = EquivalenceChecker(debug=False)
+    checker.v2_dual_write_pilot_connector = build_default_cutover_connector()
+    result = checker.check_from_binaries(
+        _Program("left"), _Program("right"), "f", "f",
+        binary1_id="left-id", binary2_id="right-id",
+        binary1_content_identity=("sha256", "a" * 64), binary2_content_identity=("sha256", "b" * 64),
+    )
+    return result.to_dict()
+
+
+def _param_x():
+    return Expression.parameter("param_1", 0, data_type="int", size=4)
+
+
+def _e2e_void(side, value, **kwargs):
+    analysis = _void_analysis(side, effects=[_global_effect(value)], **kwargs)
+    analysis.parameters = [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}]
+    return analysis
+
+
+def test_e2e_same_void_global_effect_is_equivalent(monkeypatch):
+    result = _run_production_check(monkeypatch, "same", _e2e_void("left", _param_x()), _e2e_void("right", _param_x()))
+    assert result["final_outcome"] == "EQUIVALENT", result.get("unknown_reasons")
+    assert result["is_equivalent"] is True
+    assert result["stage_path"] == ["S_PAIRWISE"]
+
+
+def test_e2e_different_void_global_effect_is_not_equivalent(monkeypatch):
+    other = Expression.binary_op("INT_ADD", _param_x(), Expression.constant(1, size=4))
+    result = _run_production_check(monkeypatch, "diff", _e2e_void("left", _param_x()), _e2e_void("right", other))
+    assert result["final_outcome"] == "NOT_EQ"
+    assert result["is_equivalent"] is False
+
+
+def test_e2e_incomplete_void_effect_stays_unknown_with_the_abi_blocker(monkeypatch):
+    right = _e2e_void("right", _param_x(), incomplete=("effect_store_location_unmodeled",))
+    result = _run_production_check(monkeypatch, "incomplete", _e2e_void("left", _param_x()), right)
+    assert result["final_outcome"] == "UNKNOWN"
+    assert "return_abi_provenance_unavailable" in {r.get("reason_id") for r in result["unknown_reasons"]}
+
+
+def test_e2e_void_effect_only_versus_complete_non_void_is_never_equivalent(monkeypatch):
+    """Mixed pair: a void effect-only surface (40-bit effect) against an int
+    function with a real return storage (32-bit value).  The observation
+    widths cannot be joined, so the pair must not close as EQUIVALENT."""
+    left = _e2e_void("left", _param_x())
+    right = FunctionReturnAnalysis(
+        "fn-right", "0x2000", [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ReturnInfo("0x2010", _param_x(), [])], return_type="int", binary_id="bin-right",
+    )
+    right.return_abi_facts = _abi_facts(return_type="/int", type_length=4, storage="PRESENT")
+    result = _run_production_check(monkeypatch, "mixed", left, right)
+    assert result["final_outcome"] != "EQUIVALENT"
+    assert result["is_equivalent"] is not True
+    assert result["final_outcome"] in {"UNKNOWN", "NOT_EQ"}

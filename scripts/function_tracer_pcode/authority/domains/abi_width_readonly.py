@@ -431,29 +431,43 @@ def _sealed_return_abi_present_value(slot: str, value: Any) -> tuple[Any, ...]:
 _VOID_EFFECT_SURFACE_FACT_SCHEMA = "void_effect_surface_fact_v1"
 
 
+_VOID_EFFECT_SURFACE_FACT_MALFORMED = (_VOID_EFFECT_SURFACE_FACT_SCHEMA, "malformed")
+
+
+def _exact_int(value: Any) -> Optional[int]:
+    return value if type(value) is int else None
+
+
 def _sealed_void_effect_surface_fact(analysis: Any, slot_rows: tuple) -> tuple[Any, ...]:
     """Seal the observable-surface facts that decide the void effect-only ABI case.
 
     Read from the analysis exactly once at seed construction (Issue #104,
     Gap 6) and carried inside the seed digest; the ABI assessment never
-    re-reads the analysis.  Every component is an immutable primitive.
+    re-reads the analysis.  Every component must already have its exact type
+    (``str`` kind, ``int`` widths / counts, ``tuple`` of ``str`` reasons,
+    ``bool`` flags): authority evidence is never coerced, a malformed value
+    seals the fact as MALFORMED, which is never eligible.
     """
 
     surface = getattr(analysis, "comparison_surface", None)
-    surface_kind = getattr(surface, "kind", None)
-    surface_kind = str(surface_kind) if isinstance(surface_kind, str) and surface_kind else None
-    try:
-        surface_bits = int(getattr(surface, "explicit_bit_width", 0) or 0)
-    except Exception:
-        surface_bits = 0
     effect_summary = getattr(analysis, "effect_summary", None)
-    effects = getattr(effect_summary, "effects", None) if effect_summary is not None else None
-    effect_count = len(effects) if isinstance(effects, (list, tuple)) else 0
-    reasons = getattr(effect_summary, "incomplete_reasons", ()) if effect_summary is not None else ()
-    if not isinstance(reasons, (list, tuple, set, frozenset)):
-        reasons = ("effect_incomplete_reasons_unreadable",)
-    reasons = tuple(sorted(str(item) for item in reasons))
-    unsupported = bool(getattr(effect_summary, "has_unsupported_call", True)) if effect_summary is not None else True
+    if effect_summary is None:
+        return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("effect_summary_absent",)
+    surface_kind = getattr(surface, "kind", None) if surface is not None else None
+    surface_bits = getattr(surface, "explicit_bit_width", None) if surface is not None else None
+    effects = getattr(effect_summary, "effects", None)
+    reasons = getattr(effect_summary, "incomplete_reasons", None)
+    unsupported = getattr(effect_summary, "has_unsupported_call", None)
+    if surface is not None and (type(surface_kind) is not str or not surface_kind):
+        return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("surface_kind",)
+    if surface is not None and _exact_int(surface_bits) is None:
+        return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("surface_bits",)
+    if type(effects) not in (list, tuple):
+        return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("effects",)
+    if type(reasons) not in (list, tuple) or any(type(item) is not str or not item for item in reasons):
+        return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("incomplete_reasons",)
+    if type(unsupported) is not bool:
+        return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("has_unsupported_call",)
     return_type_is_void = False
     for slot, status, value, _source in slot_rows:
         if slot == "declared_or_effective_return_type" and status is ReturnAbiFactStatus.PRESENT:
@@ -462,12 +476,12 @@ def _sealed_void_effect_surface_fact(analysis: Any, slot_rows: tuple) -> tuple[A
     return (
         _VOID_EFFECT_SURFACE_FACT_SCHEMA,
         surface_kind,
-        surface_bits,
-        effect_count,
-        reasons,
+        surface_bits if surface is not None else 0,
+        len(effects),
+        tuple(sorted(reasons)),
         unsupported,
         return_type_is_void,
-        effect_summary is not None,
+        True,
     )
 
 
@@ -523,14 +537,15 @@ class FunctionReturnAbiSeed:
             type(fact) is not tuple
             or len(fact) != 8
             or fact[0] != _VOID_EFFECT_SURFACE_FACT_SCHEMA
+            or fact[1] == "malformed"
         ):
             return False
         _schema, kind, bits, effect_count, reasons, unsupported, is_void, has_summary = fact
-        return bool(
-            has_summary
+        return (
+            has_summary is True
             and kind == "memory_effect"
-            and int(bits) > 0
-            and int(effect_count) > 0
+            and type(bits) is int and bits > 0
+            and type(effect_count) is int and effect_count > 0
             and reasons == ()
             and unsupported is False
             and is_void is True
