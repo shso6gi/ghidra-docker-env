@@ -201,6 +201,15 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         self.assume_fp_non_nan = assume_fp_non_nan
         self.observes_errno = observes_errno
         self.observes_fenv = observes_fenv
+        from scripts.function_tracer_pcode.analysis.effects.external_call_models import (
+            ExternalCallEffectPolicy,
+        )
+
+        # Issue #104 (Gap 4): the effect lane's treatment of external callees
+        # follows the same observation flags as the deferred-call lane.
+        self.external_call_effect_policy = ExternalCallEffectPolicy(
+            observe_errno=bool(observes_errno), observe_fenv=bool(observes_fenv),
+        )
         self.observation_contract = observation_contract or EquivalenceObservationContract(
             observe_errno=observes_errno,
             observe_fenv=observes_fenv,

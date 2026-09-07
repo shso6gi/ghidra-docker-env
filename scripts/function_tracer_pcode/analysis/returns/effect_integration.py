@@ -57,6 +57,7 @@ from scripts.function_tracer_pcode.analysis.effects._shared import (
     _EFFECT_SURFACE_COMPOSITION_REASON,
 )
 from scripts.function_tracer_pcode.analysis.effects.summary import expression_reads_unidentified_writable_memory
+from scripts.function_tracer_pcode.analysis.effects.external_call_models import resolve_effect_callee
 from scripts.function_tracer_pcode.analysis.session import AnalysisSession
 from scripts.function_tracer_pcode.analysis.runtime_state import AnalysisRuntimeState
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService
@@ -175,6 +176,7 @@ class EffectIntegrationService:
         program_value: Callable[..., Any],
         binary_id_value: Callable[..., Any],
         debug_flag: Callable[..., Any],
+        external_call_effect_policy: Callable[..., Any],
     ) -> None:
         self.runtime_state = runtime_state
         self.session = session
@@ -210,6 +212,7 @@ class EffectIntegrationService:
         self.program_value = program_value
         self.binary_id_value = binary_id_value
         self.debug_flag = debug_flag
+        self.external_call_effect_policy = external_call_effect_policy
 
     def effect_summary_allows_pre_return_structural_summary(
         self,
@@ -701,6 +704,28 @@ class EffectIntegrationService:
             callee = self.resolve_target_function(target_ref)
             if callee is None:
                 return None
+            # Issue #104 (Gap 4): an external / thunk callee has no body in
+            # this binary.  Its empty HighFunction must not read as "no
+            # effect": follow a thunk to its internal body, use an explicit
+            # effect model, or fail closed (``callee_effect_summary_missing``).
+            callee_resolution = resolve_effect_callee(
+                callee,
+                self.external_call_effect_policy(),
+                parameter_names=(),
+            )
+            if callee_resolution.kind == "modeled":
+                self.debug_reporter.debug_print(
+                    f"[EffectSummary] external callee {callee_resolution.external_name}: "
+                    f"explicit effect model (no caller-visible memory write)"
+                )
+                return callee_resolution.summary
+            if callee_resolution.kind != "analyze":
+                self.debug_reporter.debug_print(
+                    f"[EffectSummary] external callee not summarised: "
+                    f"{callee_resolution.external_name} ({callee_resolution.reason})"
+                )
+                return None
+            callee = callee_resolution.function
             callee_parameters_for_binding = self.get_freshest_callee_parameters(target_ref)
             callee_bound_parameter_values = self.bound_parameter_values_from_call_args(
                 args,

@@ -45,6 +45,7 @@ def analyze_and_check_with_analysis(
         debug=checker.debug,
         binary_id=ctx.binary1_id,
         enable_completed_recovery_proofs=getattr(checker, "enable_completed_recovery_proofs", True),
+        external_call_effect_policy=getattr(checker, "external_call_effect_policy", None),
     )
     try:
         analysis1 = timer.timed(
@@ -86,6 +87,7 @@ def analyze_and_check_with_analysis(
         debug=checker.debug,
         binary_id=ctx.binary2_id,
         enable_completed_recovery_proofs=getattr(checker, "enable_completed_recovery_proofs", True),
+        external_call_effect_policy=getattr(checker, "external_call_effect_policy", None),
     )
     try:
         analysis2 = timer.timed(
@@ -262,6 +264,7 @@ def selective_reanalysis_and_check(
             debug=checker.debug,
             binary_id=binary_id,
             enable_completed_recovery_proofs=getattr(checker, "enable_completed_recovery_proofs", True),
+            external_call_effect_policy=getattr(checker, "external_call_effect_policy", None),
         )
         try:
             checker._debug_print(

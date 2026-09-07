@@ -39,7 +39,9 @@ FACADE_CALLBACKS = ( "extend_active_functions",
     "make_tracked_return_value", "function_body_has_phase1_pure_return_forbidden_ops",
     "high_function_has_phase1_pure_return_forbidden_ops", "phase1_return_type_is_float", "decompile_with_broker",
 )
-SUPPLIERS = ("session", "program_value", "binary_id_value", "debug_flag")
+# ``external_call_effect_policy`` (Issue #104 Gap 4): observation policy for
+# external / thunk callees in the effect lane, configuration supplied by the analyzer.
+SUPPLIERS = ("session", "program_value", "binary_id_value", "debug_flag", "external_call_effect_policy")
 
 
 def _analyzer(debug=False):
