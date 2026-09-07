@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "b53c06eb0bdb9639c865d918c0335b6d98b5d201e8644611a756e7f617800365",
+  "manifest_digest": "e0da33679284ba4345ca7ad38454c1f86685f104f2fa4761c69cceaeda1ec905",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 30,
   "sites": [
@@ -499,10 +499,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1755,
+      "line": 1782,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "pairwise-loop-sat-safety-observed",
-      "source_sha256": "09ff37a51bacb08f733979472b7a98191aff730415a8d9c8bfbbfc00627fb7cd"
+      "source_sha256": "65cdba5803731f85907423d1d49092bc79d2a7c220a7c862309dfa73f0230602"
     },
     {
       "allowed_dispositions": [
@@ -932,10 +932,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 196,
+      "line": 197,
       "path": "scripts/function_tracer_pcode/proof/return_width/pipeline.py",
       "producer_site_manifest_id": "return-width-pair-assessment",
-      "source_sha256": "ef23b90092bfaee3c427da9e27121e4808171903b5840238cc7e673724d83138"
+      "source_sha256": "377bd28c578c9ebc0810a641bf2bed28e0407edc19b27d2f2f91ecc04e02136d"
     },
     {
       "allowed_dispositions": [
@@ -961,10 +961,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 250,
+      "line": 256,
       "path": "scripts/function_tracer_pcode/proof/return_width/pipeline.py",
       "producer_site_manifest_id": "return-width-pair-unary-provenance-blocker",
-      "source_sha256": "ef23b90092bfaee3c427da9e27121e4808171903b5840238cc7e673724d83138"
+      "source_sha256": "377bd28c578c9ebc0810a641bf2bed28e0407edc19b27d2f2f91ecc04e02136d"
     },
     {
       "allowed_dispositions": [
@@ -1187,10 +1187,10 @@
       "emitter": "emit_sat_safety_completion_if_observed",
       "enclosing_function": "complete_observed_sat_safety_for_counterexample",
       "expected_cause_slots": [],
-      "line": 1394,
+      "line": 1405,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "sat-safety-counterexample-bound-completed",
-      "source_sha256": "09ff37a51bacb08f733979472b7a98191aff730415a8d9c8bfbbfc00627fb7cd"
+      "source_sha256": "65cdba5803731f85907423d1d49092bc79d2a7c220a7c862309dfa73f0230602"
     }
   ]
 }
