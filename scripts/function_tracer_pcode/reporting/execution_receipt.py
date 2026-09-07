@@ -25,6 +25,8 @@ EXECUTION_RECEIPT_SCHEMA = "phase10-validation-execution-receipt-v1"
 EXECUTION_RECEIPT_KIND = "Phase10ValidationExecutionReceipt"
 MATRIX_EXECUTION_RECEIPT_FILE = "validation-execution-receipt.json"
 MATRIX_PUBLICATION_MANIFEST_FILE = "matrix-publication-manifest.json"
+BENCHMARK_GATE_REPORT_FILE = "benchmark_validation_gate.json"
+FUNCTION_DIFF_MANIFEST_FILE = "function_diff_manifest.json"
 MATRIX_PUBLICATION_SCHEMA = "eqbench-matrix-publication-manifest-v3"
 SEAL_FIELDS = frozenset({"body_digest", "signature"})
 BODY_FIELDS = frozenset({
@@ -566,7 +568,13 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("matrix receipt requires --exit-status")
         publication = build_matrix_publication_manifest(root)
         _write(root / MATRIX_PUBLICATION_MANIFEST_FILE, publication)
-        names = (MATRIX_PUBLICATION_MANIFEST_FILE, "run_health_summary.json")
+        names = (
+            MATRIX_PUBLICATION_MANIFEST_FILE,
+            "run_health_summary.json",
+            # Issue #104 runner benchmark gate artifacts (present when the gate ran).
+            BENCHMARK_GATE_REPORT_FILE,
+            FUNCTION_DIFF_MANIFEST_FILE,
+        )
         artifacts = {
             name: sha256_file(root / name) for name in names
             if (root / name).is_file()

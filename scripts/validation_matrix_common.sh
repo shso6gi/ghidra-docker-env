@@ -122,6 +122,86 @@ validation_classify_log_display() {
     esac
 }
 
+# Issue #104 runner benchmark validation gate.
+#
+# Builds the function-level source diff manifest from the benchmark tree the
+# runner actually compiled and classifies every canonical pair outcome under
+# OUTPUT_BASE_DIR (Eq->NOT_EQ, Neq CONFIRMED_NOT_EQ->EQUIVALENT and
+# unclassifiable Neq EQUIVALENT are hard violations; source-changed-but-
+# unconfirmed EQUIVALENT is counted as suspicious).  The gate is an
+# evaluation oracle only: it never feeds the checker and never rewrites a
+# pair status.  Results are merged into run_health_summary.{json,txt} and
+# written to benchmark_validation_gate.json / function_diff_manifest.json,
+# which the execution receipt hashes.
+#
+#   validation_run_benchmark_gate <output_base_dir> <benchmark_root> <repo_root>
+#
+# Sets VALIDATION_BENCHMARK_GATE_STATUS (PASS|FAIL|EMPTY|SKIPPED|MANIFEST_FAILED)
+# and VALIDATION_BENCHMARK_GATE_FAILURES (0/1).  Disabled with
+# EQBENCH_BENCHMARK_GATE=0 (status SKIPPED, no failure).  Set
+# EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS=1 to also fail on suspicious rows.
+# The reviewed ground truth defaults to scripts/eqbench/neq_ground_truth.tsv;
+# EQBENCH_GROUND_TRUTH_FILE overrides it (e.g. an empty file for a synthetic
+# benchmark root).  A ground-truth path that does not exist, or an annotation
+# that resolves to no function of the benchmark root, fails the manifest
+# build (MANIFEST_FAILED): the runner never falls back to --no-ground-truth
+# and never passes --allow-unresolved-annotations.
+validation_run_benchmark_gate() {
+    local output_base_dir="$1" benchmark_root="$2" repo_root="$3"
+    local python_bin="${PYTHON_BIN:-python3}"
+    local manifest="$output_base_dir/function_diff_manifest.json"
+    local report="$output_base_dir/benchmark_validation_gate.json"
+    local ground_truth="${EQBENCH_GROUND_TRUTH_FILE:-$repo_root/scripts/eqbench/neq_ground_truth.tsv}"
+    local -a gate_args=()
+    VALIDATION_BENCHMARK_GATE_STATUS=SKIPPED
+    VALIDATION_BENCHMARK_GATE_FAILURES=0
+    if [[ "${EQBENCH_BENCHMARK_GATE:-1}" == "0" ]]; then
+        echo "Benchmark validation gate skipped (EQBENCH_BENCHMARK_GATE=0)."
+        return 0
+    fi
+    if [[ ! -f "$ground_truth" ]]; then
+        # The reviewed annotation file is part of the gate's authority: a
+        # missing (or mistyped) path must not silently degrade to "no truth".
+        VALIDATION_BENCHMARK_GATE_STATUS=MANIFEST_FAILED
+        VALIDATION_BENCHMARK_GATE_FAILURES=1
+        echo "Benchmark validation gate: ground-truth file not found: $ground_truth" >&2
+        return 0
+    fi
+    local -a manifest_args=(--benchmark-root "$benchmark_root" --output "$manifest" --ground-truth "$ground_truth")
+    if ! "$python_bin" -B "$repo_root/scripts/eqbench/function_diff_manifest.py" "${manifest_args[@]}" \
+        > "$output_base_dir/function_diff_manifest.summary.txt" 2> "$output_base_dir/function_diff_manifest.error"; then
+        VALIDATION_BENCHMARK_GATE_STATUS=MANIFEST_FAILED
+        VALIDATION_BENCHMARK_GATE_FAILURES=1
+        echo "Benchmark validation gate: function diff manifest failed; see $output_base_dir/function_diff_manifest.error" >&2
+        return 0
+    fi
+    cat "$output_base_dir/function_diff_manifest.summary.txt"
+    if [[ "${EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS:-0}" == "1" ]]; then
+        gate_args+=(--fail-on-suspicious)
+    fi
+    local gate_exit=0
+    (
+        cd "$repo_root" && "$python_bin" -B -m scripts.function_tracer_pcode.reporting.benchmark_validation_gate \
+            "$output_base_dir" \
+            --manifest "$manifest" \
+            --json "$report" \
+            --health-summary-json "$output_base_dir/run_health_summary.json" \
+            --health-summary-text "$output_base_dir/run_health_summary.txt" \
+            ${gate_args[@]+"${gate_args[@]}"}
+    ) > "$output_base_dir/benchmark_validation_gate.txt" 2>&1 || gate_exit=$?
+    cat "$output_base_dir/benchmark_validation_gate.txt"
+    case "$gate_exit" in
+        0) VALIDATION_BENCHMARK_GATE_STATUS=PASS ;;
+        1) VALIDATION_BENCHMARK_GATE_STATUS=FAIL; VALIDATION_BENCHMARK_GATE_FAILURES=1 ;;
+        *) VALIDATION_BENCHMARK_GATE_STATUS=EMPTY; VALIDATION_BENCHMARK_GATE_FAILURES=1 ;;
+    esac
+    if (( VALIDATION_BENCHMARK_GATE_FAILURES > 0 )); then
+        echo "Benchmark validation gate: $VALIDATION_BENCHMARK_GATE_STATUS (exit $gate_exit); see $report" >&2
+    fi
+    return 0
+}
+
+export -f validation_run_benchmark_gate
 export -f validation_result_log_is_complete
 export -f validation_result_log_has_final_authority
 export -f validation_classify_log_result

@@ -766,6 +766,8 @@ find "$OUTPUT_BASE_DIR" -type f -name '*.log' ! -name 'compile_*.log' ! -name 'r
     --health-summary-text "$OUTPUT_BASE_DIR/run_health_summary.txt" \
     --log-list0 "$OUTPUT_BASE_DIR/.overall-summary-log-paths.list0" \
     > "$OUTPUT_BASE_DIR/overall_summary.txt" || true
+# Issue #104: benchmark validation gate (after the health summary, before the receipt).
+validation_run_benchmark_gate "$OUTPUT_BASE_DIR" "$NEQ_ROOT" "$SCRIPT_DIR"
 cat >> "$RUN_MANIFEST" <<EOF
 completed_samples=$COMPLETED_SAMPLES
 skipped_samples=$SKIPPED_SAMPLES
@@ -782,13 +784,18 @@ missing_binary_count=$MISSING_BINARY_COUNT
 function_census_failure_count=$FUNCTION_CENSUS_FAILURES
 run_pair_failures=$RUN_PAIR_FAILURES
 run_failures=$RUN_PAIR_FAILURES
+benchmark_gate_status=$VALIDATION_BENCHMARK_GATE_STATUS
+benchmark_gate_failures=$VALIDATION_BENCHMARK_GATE_FAILURES
 analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
 EOF
 exit_status=0
-if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT > 0 || FUNCTION_CENSUS_FAILURES > 0 )); then
+if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT > 0 || FUNCTION_CENSUS_FAILURES > 0 || VALIDATION_BENCHMARK_GATE_FAILURES > 0 )); then
     exit_status=1
 fi
-"$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt --repo-root "$SCRIPT_DIR" --private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" --output "$OUTPUT_BASE_DIR/validation-execution-receipt.json" --matrix-root "$OUTPUT_BASE_DIR" --source-digest-start "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" --exit-status "$exit_status" -- "env" "NEQ_RUN_SCOPE=$NEQ_RUN_SCOPE" "NEQ_BUILD_POLICY=$NEQ_BUILD_POLICY" "ERROR_RERUN_MANIFEST_SHA256=$ERROR_RERUN_MANIFEST_SHA256" "ERROR_RERUN_RUN_ID=$ERROR_RERUN_RUN_ID" "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" "ERROR_ONLY_RERUN=$ERROR_ONLY_RERUN" "./neqbench_run_all_32jobs.sh"
+"$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt --repo-root "$SCRIPT_DIR" --private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" --output "$OUTPUT_BASE_DIR/validation-execution-receipt.json" --matrix-root "$OUTPUT_BASE_DIR" --source-digest-start "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" --exit-status "$exit_status" -- "env" "NEQ_RUN_SCOPE=$NEQ_RUN_SCOPE" "NEQ_BUILD_POLICY=$NEQ_BUILD_POLICY" "ERROR_RERUN_MANIFEST_SHA256=$ERROR_RERUN_MANIFEST_SHA256" "ERROR_RERUN_RUN_ID=$ERROR_RERUN_RUN_ID" "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" "ERROR_ONLY_RERUN=$ERROR_ONLY_RERUN" "EQBENCH_BENCHMARK_GATE=${EQBENCH_BENCHMARK_GATE:-1}" "EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS=${EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS:-0}" "EQBENCH_GROUND_TRUTH_FILE=${EQBENCH_GROUND_TRUTH_FILE:-}" "./neqbench_run_all_32jobs.sh"
 echo "NeqBench same-ISA caller-closure matrix finished: $OUTPUT_BASE_DIR"
+if (( VALIDATION_BENCHMARK_GATE_FAILURES > 0 )); then
+    echo "Error: benchmark validation gate $VALIDATION_BENCHMARK_GATE_STATUS; see $OUTPUT_BASE_DIR/benchmark_validation_gate.txt" >&2
+fi
 echo "Peak concurrent pair jobs: $PAIR_SCHEDULER_PEAK_ACTIVE_JOBS (PARALLEL_JOBS=$PARALLEL_JOBS)"
 exit "$exit_status"

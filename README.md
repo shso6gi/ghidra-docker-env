@@ -195,8 +195,44 @@ python3 -m scripts.function_tracer_pcode.reporting.soundness_gate \
     logs/EqBench/subset_after/eq logs/EqBench/subset_after/neq
 ```
 
-The gate currently fails on `logs/EqBench/all_neq_same_isa_closure_current`
-(242 `EQUIVALENT` pairs in Neq samples). The manifest's `observed_baseline`
+The label-only gate cannot tell a legitimate `EQUIVALENT` on an unchanged Neq
+helper from a false one, so both runners end with the function-level
+**benchmark validation gate** (`EQBENCH_BENCHMARK_GATE=0` disables it;
+`EQBENCH_GROUND_TRUTH_FILE` points it at another reviewed annotation file, e.g.
+an empty one for a synthetic benchmark root; a missing file fails the gate). It
+builds `function_diff_manifest.json` from the actual `old.c`/`new.c` of the
+benchmark tree (`scripts/eqbench/function_diff_manifest.py`: per function
+`source_relation`, `source_impact`, `semantic_ground_truth`; `C-Desc.json` is
+only audited, never trusted) and classifies every canonical pair outcome:
+
+- hard violations (runner exits 1): `Eq` → `NOT_EQ`; `Neq` function annotated
+  `CONFIRMED_NOT_EQ` in `scripts/eqbench/neq_ground_truth.tsv` → `EQUIVALENT`;
+  annotated `CONFIRMED_EQ` → `NOT_EQ`; `Neq` `EQUIVALENT` the manifest cannot
+  classify; an annotation that matches no function (the manifest build, and
+  so the runner, fails closed);
+- suspicious (counted only, `EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS=1` to
+  fail): `EQUIVALENT` on a source-impacted Neq function whose ground truth is
+  still `UNKNOWN`, `NOT_EQ` on a source-identical Neq function.
+
+A source change is never turned into a semantic verdict automatically; the
+checker never reads the manifest or the annotation file. The gate writes
+`benchmark_validation_gate.{json,txt}`, extends `run_health_summary.{json,txt}`
+(`soundness_violations: eq_not_eq=… neq_equivalent=… neq_not_eq_on_confirmed_eq=… neq_equivalent_unmapped=…`)
+and both artifacts are hashed into `validation-execution-receipt.json`. Offline:
+
+```bash
+python3 scripts/eqbench/function_diff_manifest.py \
+    --benchmark-root targets/EqBench/benchmarks --output /tmp/function_diff_manifest.json
+python3 -m scripts.function_tracer_pcode.reporting.benchmark_validation_gate \
+    logs/EqBench/all_neq_same_isa_closure_current --manifest /tmp/function_diff_manifest.json
+```
+
+On `logs/EqBench/all_neq_same_isa_closure_current` (produced before the #13
+fix) the label-only gate fails on all 242 `EQUIVALENT` pairs in Neq samples;
+the benchmark validation gate fails on the 192 raytrace constructor pairs
+whose reviewed ground truth is `CONFIRMED_NOT_EQ` and counts the 50
+`CLEVER/UnchLoop foo` pairs as suspicious (source changed, equivalence not
+confirmed at the binary level). The manifest's `observed_baseline`
 section records what the checker produced at the recorded commit; it is
 explicitly *not* ground truth — an EQUIVALENT/NOT_EQ there may be an accident
 of an implementation defect — and must only be used to explain transitions.
