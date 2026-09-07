@@ -118,7 +118,7 @@ python3 -B -m pytest scripts/function_tracer_pcode/tests/unit -q
 bash -n eqbench_run_all_32jobs.sh neqbench_run_all_32jobs.sh
 ```
 
-Default settings for benchmark runs on this host are `PARALLEL_JOBS=20` with
+Default settings for benchmark runs on this host are `PARALLEL_JOBS=32` with
 resource admission disabled (`EQBENCH_RESOURCE_ADMISSION=0`); the baseline trees
 under `logs/EqBench/*_current` were produced with them. Both runners record the
 effective values in `run_manifest.txt`.
@@ -130,7 +130,7 @@ pair finishes, and the run prints the peak concurrency at the end.
 Full Eq matrix (results under `logs/EqBench/all_eq_matrix_current`):
 
 ```bash
-PARALLEL_JOBS=20 EQBENCH_RESOURCE_ADMISSION=0 ./eqbench_run_all_32jobs.sh
+PARALLEL_JOBS=32 EQBENCH_RESOURCE_ADMISSION=0 ./eqbench_run_all_32jobs.sh
 # representative subset / single sample
 EQBENCH_SAMPLE_FILTER='REVE/barthe2big' ./eqbench_run_all_32jobs.sh
 # validate configuration without running pairs
@@ -140,7 +140,7 @@ DRY_RUN=1 ./eqbench_run_all_32jobs.sh
 Neq same-ISA closure (results under `logs/EqBench/all_neq_same_isa_closure_current`):
 
 ```bash
-PARALLEL_JOBS=20 EQBENCH_RESOURCE_ADMISSION=0 ./neqbench_run_all_32jobs.sh
+PARALLEL_JOBS=32 EQBENCH_RESOURCE_ADMISSION=0 ./neqbench_run_all_32jobs.sh
 ```
 
 Re-run only the pairs that ended in ERROR in both trees:
@@ -159,7 +159,7 @@ script for the full list and defaults.
 `scripts/function_tracer_pcode/reporting/eqbench_subset.json` fixes a small
 Eq + Neq subset (8 Eq sources and 10 Neq sources, one function and 8 pairs each) for comparing
 checker behaviour before and after a change. `eqbench_run_subset.sh` runs it
-with the settings stored in the manifest (`PARALLEL_JOBS=20`,
+with the settings stored in the manifest (`PARALLEL_JOBS=32`,
 `EQBENCH_RESOURCE_ADMISSION=0`, `EQBENCH_BUILD_POLICY=PREBUILT_ONLY`,
 `PAIR_PROCESS_TIMEOUT=240s`), running the Eq half and then the Neq half (each runner
 already fills `PARALLEL_JOBS` slots on its own):
