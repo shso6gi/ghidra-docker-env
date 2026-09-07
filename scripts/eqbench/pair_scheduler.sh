@@ -227,6 +227,12 @@ _pair_scheduler_reap_one() {
         pid=""
         if [[ "$PAIR_SCHEDULER_WAIT_PID_MODE_EFFECTIVE" == "wait-p" ]]; then
             if wait -n -p pid; then status=0; else status=$?; fi
+            # bash *unsets* the -p variable when it reaped nothing (no child
+            # left, or the wait was interrupted by a signal), so the reads
+            # below must not assume it still exists: the runners set -u, and
+            # an unguarded "$pid" would abort the whole matrix run right here
+            # instead of accounting the orphaned jobs as failures (#118).
+            pid="${pid:-}"
             if (( status == 127 )) && [[ -z "$pid" ]]; then
                 # No child left to wait for while jobs are still tracked: the
                 # bookkeeping can no longer be trusted, so count them as failed.
