@@ -649,3 +649,85 @@ def test_relation_assessment_refuses_malformed_surface_kind():
 def test_e2e_same_non_void_memory_effect_surfaces_are_equivalent(monkeypatch):
     result = _run_production_check(monkeypatch, "nonvoid-same", _non_void_with_global_store("left"), _non_void_with_global_store("right"))
     assert result["final_outcome"] == "EQUIVALENT", result.get("unknown_reasons")
+
+
+# --------------------------------------------------------------------------
+# the surface fact follows the canonical accessor, not the raw field
+# --------------------------------------------------------------------------
+
+def _derived_memory_effect_void(side="left"):
+    """Void analysis with a *derived* surface: the raw ``comparison_surface``
+    field is ``None`` and ``get_comparison_surface()`` derives ``memory_effect``
+    from the synthetic effect expression."""
+    from conftest import resolve_mock_data_type
+
+    analysis = _void_analysis(side, surface=False)
+    analysis.return_type = "void"
+    analysis.return_type_obj = resolve_mock_data_type("void")
+    analysis.returns = [ReturnInfo(f"0x{10 if side == 'left' else 20}10", analysis.effect_summary.synthetic_expr, [])]
+    analysis.parameters = [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}]
+    assert analysis.comparison_surface is None
+    assert analysis.get_comparison_surface().kind == "memory_effect"
+    return analysis
+
+
+def test_seed_reads_the_canonical_comparison_surface_not_the_raw_field():
+    analysis = _derived_memory_effect_void("left")
+    seed = _seed_for(analysis, "left")
+    assert seed.effective_surface_kind == "memory_effect"
+    assert seed.surface_fact[2] == analysis.get_comparison_surface().explicit_bit_width
+    assert seed.void_effect_only_surface is True
+
+
+def test_derived_memory_effect_against_matching_width_return_value_is_unproven():
+    left = _derived_memory_effect_void("left")
+    width_bits = left.get_comparison_surface().explicit_bit_width
+    assert width_bits % 8 == 0
+    right = _matching_width_non_void_value("right", width_bytes=width_bits // 8)
+    lw = _width_seed("left", function_identity=left.outcome_function_identity())
+    rw = _width_seed("right", function_identity=right.outcome_function_identity())
+    assessment = assess_return_abi_pair(left, right, lw, rw, build_pair_return_observation_seed(lw, rw))
+    assert assessment.relation_assessment.status.value == "UNPROVEN"
+    assert ("observation_surface_kinds_compatible", False) in assessment.relation_assessment.predicate_body
+
+
+def test_two_derived_memory_effect_surfaces_are_surface_kind_compatible():
+    left = _derived_memory_effect_void("left")
+    right = _derived_memory_effect_void("right")
+    lw = _width_seed("left", function_identity=left.outcome_function_identity())
+    rw = _width_seed("right", function_identity=right.outcome_function_identity())
+    assessment = assess_return_abi_pair(left, right, lw, rw, build_pair_return_observation_seed(lw, rw))
+    relation = assessment.relation_assessment
+    assert ("observation_surface_kinds_compatible", True) in relation.predicate_body
+    assert relation.status.value == "PROVED"
+    assert relation.predicate_body[0] == "return_abi_semantic_projection_predicates_v5"
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["future_unknown_surface_kind", "", "MEMORY_EFFECT", "memory effect"],
+)
+def test_unknown_surface_kinds_are_never_compatible(kind):
+    left = _void_analysis("left")
+    left.comparison_surface = SimpleNamespace(kind=kind, explicit_bit_width=40)
+    left.get_comparison_surface = lambda: left.comparison_surface
+    seed = _seed_for(left, "left")
+    assert seed.effective_surface_kind is None
+    assert seed.void_effect_only_surface is False
+    right = _void_analysis("right")
+    lw = _width_seed("left", function_identity=left.outcome_function_identity())
+    rw = _width_seed("right", function_identity=right.outcome_function_identity())
+    assessment = assess_return_abi_pair(left, right, lw, rw, build_pair_return_observation_seed(lw, rw))
+    relation = assessment.relation_assessment
+    assert relation is None or relation.status.value in {"UNPROVEN", "INVALID"}
+
+
+def test_effect_summary_facts_and_surface_kind_stay_separate():
+    """A plain return-value analysis without any effect summary keeps its
+    authoritative surface kind; only the eligibility facts are empty."""
+    right = _matching_width_non_void_value("right")
+    assert getattr(right, "effect_summary", None) is None
+    seed = _seed_for(right, "right")
+    assert seed.effective_surface_kind == "return_value"
+    assert seed.void_effect_only_surface is False
+    assert seed.surface_fact[3] == 0 and seed.surface_fact[4] == ()

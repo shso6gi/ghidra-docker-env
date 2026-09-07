@@ -432,6 +432,9 @@ _VOID_EFFECT_SURFACE_FACT_SCHEMA = "void_effect_surface_fact_v1"
 
 
 _VOID_EFFECT_SURFACE_FACT_MALFORMED = (_VOID_EFFECT_SURFACE_FACT_SCHEMA, "malformed")
+# Surface kinds this authority knows how to compare.  A kind outside this set
+# (new, unknown, or malformed evidence) is never compatible with anything.
+_SEALED_OBSERVATION_SURFACE_KINDS = frozenset({"memory_effect", "return_value"})
 
 
 def _exact_int(value: Any) -> Optional[int]:
@@ -439,36 +442,49 @@ def _exact_int(value: Any) -> Optional[int]:
 
 
 def _sealed_void_effect_surface_fact(analysis: Any, slot_rows: tuple) -> tuple[Any, ...]:
-    """Seal the observable-surface facts that decide the void effect-only ABI case.
+    """Seal the observation-surface facts that decide the ABI observation contract.
 
     Read from the analysis exactly once at seed construction (Issue #104,
     Gap 6) and carried inside the seed digest; the ABI assessment never
-    re-reads the analysis.  Every component must already have its exact type
-    (``str`` kind, ``int`` widths / counts, ``tuple`` of ``str`` reasons,
-    ``bool`` flags): authority evidence is never coerced, a malformed value
-    seals the fact as MALFORMED, which is never eligible.
+    re-reads the analysis.  The surface is taken from the canonical accessor
+    ``FunctionReturnAnalysis.get_comparison_surface()`` - the same authority
+    the width/solver path uses - so the ABI relation can never disagree with
+    the surface the query is actually built on.  Every component must already
+    have its exact type (``str`` kind out of the sealed kind set, ``int``
+    widths and counts, ``tuple`` of non-empty ``str`` reasons, ``bool``
+    flags): authority evidence is never coerced, a malformed value seals the
+    fact as MALFORMED, which is never eligible and never compatible.
     """
 
-    surface = getattr(analysis, "comparison_surface", None)
-    effect_summary = getattr(analysis, "effect_summary", None)
-    surface_kind = getattr(surface, "kind", None) if surface is not None else None
-    surface_bits = getattr(surface, "explicit_bit_width", None) if surface is not None else None
-    if surface is not None and (type(surface_kind) is not str or not surface_kind):
+    getter = getattr(analysis, "get_comparison_surface", None)
+    if not callable(getter):
+        return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("comparison_surface_api",)
+    try:
+        surface = getter()
+    except Exception:
+        return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("comparison_surface_error",)
+    if surface is None:
+        return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("comparison_surface_absent",)
+    surface_kind = getattr(surface, "kind", None)
+    surface_bits = getattr(surface, "explicit_bit_width", None)
+    if type(surface_kind) is not str or surface_kind not in _SEALED_OBSERVATION_SURFACE_KINDS:
         return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("surface_kind",)
-    if surface is not None and _exact_int(surface_bits) is None:
+    if _exact_int(surface_bits) is None or type(surface_bits) is bool:
         return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("surface_bits",)
     return_type_is_void = False
     for slot, status, value, _source in slot_rows:
         if slot == "declared_or_effective_return_type" and status is ReturnAbiFactStatus.PRESENT:
             name = str(value[1]).rsplit("/", 1)[-1].strip().lower()
             return_type_is_void = name == "void" and int(value[2]) == 0
+    effect_summary = getattr(analysis, "effect_summary", None)
     if effect_summary is None:
-        # No effect summary at all: a plain return-value observation with no
-        # effect evidence.  Not malformed, but never a void effect-only surface.
+        # No effect evidence at all.  The surface kind is still authoritative
+        # (a plain return-value observation); the eligibility facts below are
+        # simply empty, which can never satisfy the void effect-only shape.
         return (
             _VOID_EFFECT_SURFACE_FACT_SCHEMA,
             surface_kind,
-            surface_bits if surface is not None else 0,
+            surface_bits,
             0,
             (),
             True,
@@ -487,7 +503,7 @@ def _sealed_void_effect_surface_fact(analysis: Any, slot_rows: tuple) -> tuple[A
     return (
         _VOID_EFFECT_SURFACE_FACT_SCHEMA,
         surface_kind,
-        surface_bits if surface is not None else 0,
+        surface_bits,
         len(effects),
         tuple(sorted(reasons)),
         unsupported,
@@ -548,7 +564,6 @@ class FunctionReturnAbiSeed:
             type(fact) is not tuple
             or len(fact) != 8
             or fact[0] != _VOID_EFFECT_SURFACE_FACT_SCHEMA
-            or fact[1] == "malformed"
         ):
             return False
         _schema, kind, bits, effect_count, reasons, unsupported, is_void, has_summary = fact
@@ -584,13 +599,10 @@ class FunctionReturnAbiSeed:
             type(fact) is not tuple
             or len(fact) != 8
             or fact[0] != _VOID_EFFECT_SURFACE_FACT_SCHEMA
-            or fact[1] == "malformed"
         ):
             return None
         kind = fact[1]
-        if kind is None:
-            return "return_value"
-        if type(kind) is not str or not kind:
+        if type(kind) is not str or kind not in _SEALED_OBSERVATION_SURFACE_KINDS:
             return None
         return kind
 
@@ -747,7 +759,7 @@ class ReturnAbiCompatibilityAssessment:
                 left_kind is not None and right_kind is not None and left_kind == right_kind
             )
             body = (
-                "return_abi_semantic_projection_predicates_v4",
+                "return_abi_semantic_projection_predicates_v5",
                 (
                     "calling_conventions_individually_valid",
                     calling_conventions_individually_valid,
