@@ -706,8 +706,9 @@ class EffectIntegrationService:
                 return None
             # Issue #104 (Gap 4): an external / thunk callee has no body in
             # this binary.  Its empty HighFunction must not read as "no
-            # effect": follow a thunk to its internal body, use an explicit
-            # effect model, or fail closed (``callee_effect_summary_missing``).
+            # effect": follow a thunk to its internal body, or fail closed
+            # (``callee_effect_summary_missing``).  There is no name-based
+            # effect model for externals.
             callee_resolution = resolve_effect_callee(
                 callee,
                 self.external_call_effect_policy(),

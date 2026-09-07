@@ -4,10 +4,11 @@
  * Ghidra thunk to an EXTERNAL function; decompiling it yields a bare RETURN.
  * Before the fix the effect lane read that empty HighFunction as an
  * effect-free callee, so helper (and through it f) looked effect-free.
- * After the fix an unmodelled external is not summarised
- * (callee_effect_summary_missing -> unsupported_call_effect_semantics),
- * while sqrt is covered by the explicit pure-math model and s stays
- * effect-free.  printf is not modelled and stays unsupported.
+ * After the fix every external callee is unsupported for the effect lane
+ * (callee_effect_summary_missing -> unsupported_call_effect_semantics):
+ * there is no name-based library model, so sqrt (s) and printf (p) fail
+ * closed exactly like unknown_external.  A symbol name is not evidence of
+ * libm/libc semantics.
  */
 #include <math.h>
 #include <stdio.h>
