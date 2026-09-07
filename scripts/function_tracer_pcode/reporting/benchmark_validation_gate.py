@@ -18,6 +18,9 @@ hard violations (gate FAIL, runner exit 1)
     * ``eq_not_eq`` -- a pair of an ``Eq`` sample judged ``NOT_EQ``;
     * ``neq_confirmed_not_eq_equivalent`` -- a ``Neq`` function whose
       reviewed ground truth is ``CONFIRMED_NOT_EQ`` judged ``EQUIVALENT``;
+    * ``neq_confirmed_eq_not_eq`` -- a ``Neq`` function whose reviewed
+      ground truth is ``CONFIRMED_EQ`` judged ``NOT_EQ`` (a false NOT_EQ is
+      a correctness failure too);
     * ``neq_equivalent_unmapped`` -- a ``Neq`` pair judged ``EQUIVALENT``
       whose function the manifest cannot classify (missing sample/function or
       parse failure).  The gate cannot vouch for it, so it fails closed.
@@ -84,6 +87,7 @@ TRUTH_UNKNOWN = "UNKNOWN"
 # Classification kinds, in the order they are reported.
 KIND_EQ_NOT_EQ = "eq_not_eq"
 KIND_NEQ_CONFIRMED_NOT_EQ_EQUIVALENT = "neq_confirmed_not_eq_equivalent"
+KIND_NEQ_CONFIRMED_EQ_NOT_EQ = "neq_confirmed_eq_not_eq"
 KIND_NEQ_EQUIVALENT_UNMAPPED = "neq_equivalent_unmapped"
 KIND_SUSPICIOUS_EQ = "suspicious_eq_on_source_changed_function"
 KIND_SUSPICIOUS_NOT_EQ = "suspicious_not_eq_on_source_identical_function"
@@ -94,6 +98,7 @@ KIND_NOT_APPLICABLE = "not_applicable"
 HARD_VIOLATION_KINDS = (
     KIND_EQ_NOT_EQ,
     KIND_NEQ_CONFIRMED_NOT_EQ_EQUIVALENT,
+    KIND_NEQ_CONFIRMED_EQ_NOT_EQ,
     KIND_NEQ_EQUIVALENT_UNMAPPED,
 )
 SUSPICIOUS_KINDS = (KIND_SUSPICIOUS_EQ, KIND_SUSPICIOUS_NOT_EQ)
@@ -200,6 +205,11 @@ def classify(record: PairOutcome, manifest: Optional[FunctionDiffManifest]) -> C
             return Classified(record, KIND_BENIGN_EQ_NO_IMPACT, impact)
         return Classified(record, KIND_SUSPICIOUS_EQ, f"{impact} ground_truth=UNKNOWN")
     # NOT_EQ on a Neq pair
+    if fact.semantic_ground_truth == TRUTH_EQ:
+        return Classified(
+            record, KIND_NEQ_CONFIRMED_EQ_NOT_EQ,
+            f"{impact} ground_truth=CONFIRMED_EQ ({fact.ground_truth_evidence})",
+        )
     if fact.source_impact == IMPACT_NONE and fact.semantic_ground_truth != TRUTH_NOT_EQ:
         return Classified(record, KIND_SUSPICIOUS_NOT_EQ, f"{impact} ground_truth={fact.semantic_ground_truth}")
     return Classified(record, KIND_NOT_APPLICABLE, impact)

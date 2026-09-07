@@ -1122,6 +1122,7 @@ def format_benchmark_validation_lines(section: Mapping[str, Any]) -> List[str]:
         "  soundness_violations: "
         f"eq_not_eq={hard.get('eq_not_eq', 0)} "
         f"neq_equivalent={hard.get('neq_confirmed_not_eq_equivalent', 0)} "
+        f"neq_not_eq_on_confirmed_eq={hard.get('neq_confirmed_eq_not_eq', 0)} "
         f"neq_equivalent_unmapped={hard.get('neq_equivalent_unmapped', 0)}",
     ]
     for group in ("suspicious", "benign"):

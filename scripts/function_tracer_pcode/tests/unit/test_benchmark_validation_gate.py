@@ -102,6 +102,7 @@ def test_classification_matrix(tmp_path):
     write_pair_status(root, NEQ, "identical", "N_B1", "O_B1", "EQUIVALENT")
     write_pair_status(root, NEQ, "identical", "N_B2", "O_B2", "NOT_EQ")
     write_pair_status(root, NEQ, "reviewed_eq", "N_B1", "O_B1", "EQUIVALENT")
+    write_pair_status(root, NEQ, "reviewed_eq", "N_B2", "O_B2", "NOT_EQ")  # false NOT_EQ
     write_pair_status(root, NEQ, "unlisted", "N_B1", "O_B1", "EQUIVALENT")
     write_pair_status(root, NEQ, "unlisted", "N_B2", "O_B2", "NOT_EQ")
     write_pair_status(root, "fam/broken/Neq/newV-oldV", "f", "N_B1", "O_B1", "EQUIVALENT")
@@ -122,6 +123,7 @@ def test_classification_matrix(tmp_path):
     assert kinds[(NEQ, "identical", "N_B1_O_B1")] == gate.KIND_BENIGN_EQ_NO_IMPACT
     assert kinds[(NEQ, "identical", "N_B2_O_B2")] == gate.KIND_SUSPICIOUS_NOT_EQ
     assert kinds[(NEQ, "reviewed_eq", "N_B1_O_B1")] == gate.KIND_BENIGN_EQ_CONFIRMED
+    assert kinds[(NEQ, "reviewed_eq", "N_B2_O_B2")] == gate.KIND_NEQ_CONFIRMED_EQ_NOT_EQ
     assert kinds[(NEQ, "unlisted", "N_B1_O_B1")] == gate.KIND_NEQ_EQUIVALENT_UNMAPPED
     assert kinds[(NEQ, "unlisted", "N_B2_O_B2")] == gate.KIND_NOT_APPLICABLE
     assert kinds[("fam/broken/Neq/newV-oldV", "f", "N_B1_O_B1")] == gate.KIND_NEQ_EQUIVALENT_UNMAPPED
@@ -135,14 +137,15 @@ def test_classification_matrix(tmp_path):
     assert section["hard_violations"] == {
         gate.KIND_EQ_NOT_EQ: 1,
         gate.KIND_NEQ_CONFIRMED_NOT_EQ_EQUIVALENT: 1,
+        gate.KIND_NEQ_CONFIRMED_EQ_NOT_EQ: 1,
         gate.KIND_NEQ_EQUIVALENT_UNMAPPED: 3,
     }
     assert section["suspicious"] == {gate.KIND_SUSPICIOUS_EQ: 2, gate.KIND_SUSPICIOUS_NOT_EQ: 1}
     assert section["benign"] == {gate.KIND_BENIGN_EQ_NO_IMPACT: 1, gate.KIND_BENIGN_EQ_CONFIRMED: 1}
     assert section["outcomes_by_label"]["Eq"] == {"EQUIVALENT": 1, "NOT_EQ": 1, "UNKNOWN": 1}
     text = gate.format_gate_report(report)
-    assert "GATE: FAIL (5 hard violations, 3 suspicious)" in text
-    assert "soundness_violations: eq_not_eq=1 neq_equivalent=1 neq_equivalent_unmapped=3" in text
+    assert "GATE: FAIL (6 hard violations, 3 suspicious)" in text
+    assert "soundness_violations: eq_not_eq=1 neq_equivalent=1 neq_not_eq_on_confirmed_eq=1 neq_equivalent_unmapped=3" in text
     rows = report.as_dict()["rows"]
     assert {row["kind"] for row in rows} == set(gate.HARD_VIOLATION_KINDS + gate.SUSPICIOUS_KINDS)
 
@@ -158,6 +161,17 @@ def test_suspicious_only_passes_unless_requested(tmp_path):
     strict = gate.build_gate_report([root], manifest, fail_on_suspicious=True)
     assert strict.status == gate.GATE_STATUS_FAIL
     assert strict.exit_code == gate.EXIT_VIOLATION
+
+
+def test_confirmed_eq_judged_not_eq_is_a_hard_violation_on_its_own(tmp_path):
+    root = tmp_path / "results"
+    write_pair_status(root, NEQ, "reviewed_eq", "N_B1", "O_B1", "NOT_EQ")
+    manifest = gate.FunctionDiffManifest.load(_manifest(tmp_path))
+    report = gate.build_gate_report([root], manifest)
+    assert [c.kind for c in report.classified] == [gate.KIND_NEQ_CONFIRMED_EQ_NOT_EQ]
+    assert report.status == gate.GATE_STATUS_FAIL
+    assert report.exit_code == gate.EXIT_VIOLATION
+    assert report.health_section()["hard_violations"][gate.KIND_NEQ_CONFIRMED_EQ_NOT_EQ] == 1
 
 
 def test_without_manifest_every_neq_equivalent_is_unmapped(tmp_path):
@@ -204,7 +218,7 @@ def test_cli_merges_health_summary_and_exit_codes(tmp_path):
     assert merged[BENCHMARK_VALIDATION_KEY]["gate"] == "PASS"
     assert merged[BENCHMARK_VALIDATION_KEY]["suspicious"][gate.KIND_SUSPICIOUS_EQ] == 1
     text = health_text.read_text()
-    assert "soundness_violations: eq_not_eq=0 neq_equivalent=0 neq_equivalent_unmapped=0" in text
+    assert "soundness_violations: eq_not_eq=0 neq_equivalent=0 neq_not_eq_on_confirmed_eq=0 neq_equivalent_unmapped=0" in text
     assert f"{gate.KIND_SUSPICIOUS_EQ}: 1" in text
     assert "benchmark_gate: PASS (pairs=2)" in text
     assert text.strip() == format_run_health_summary(merged).strip()
@@ -247,9 +261,11 @@ def test_bash_runner_helper_builds_manifest_runs_gate_and_sets_status(tmp_path):
     write_pair_status(out, NEQ, "same", "N_B1", "O_B1", "EQUIVALENT")
     write_pair_status(out, NEQ, "changed", "N_B1", "O_B1", "NOT_EQ")
     (out / "run_health_summary.json").write_text(json.dumps({"total_results": 2}), encoding="utf-8")
+    truth = tmp_path / "truth.tsv"
+    truth.write_text(f"{NEQ}\tchanged\tCONFIRMED_NOT_EQ\tx=1: old 1, new 2\n", encoding="utf-8")
 
     def run(env_extra: dict) -> tuple[int, str, dict]:
-        env = dict(os.environ, PYTHON_BIN=sys.executable, **env_extra)
+        env = dict(os.environ, PYTHON_BIN=sys.executable, EQBENCH_GROUND_TRUTH_FILE=str(truth), **env_extra)
         result = subprocess.run(
             [
                 "bash", "-euo", "pipefail", "-c",
@@ -274,16 +290,27 @@ def test_bash_runner_helper_builds_manifest_runs_gate_and_sets_status(tmp_path):
     assert "benchmark_gate: PASS" in (out / "run_health_summary.txt").read_text()
 
     write_pair_status(out, NEQ, "changed", "N_B2", "O_B2", "EQUIVALENT")
-    code, output, health = run({"EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS": "1"})
+    code, output, health = run({})
     assert code == 0, output  # the helper never aborts the runner; it reports
-    assert "STATUS=FAIL FAILURES=1" in output
-    assert health[BENCHMARK_VALIDATION_KEY]["gate"] == "FAIL"
+    assert "STATUS=FAIL FAILURES=1" in output  # CONFIRMED_NOT_EQ judged EQUIVALENT
+    assert health[BENCHMARK_VALIDATION_KEY]["hard_violations"][gate.KIND_NEQ_CONFIRMED_NOT_EQ_EQUIVALENT] == 1
 
     code, output, _ = run({"EQBENCH_BENCHMARK_GATE": "0"})
     assert code == 0 and "STATUS=SKIPPED FAILURES=0" in output
 
-    code, output, _ = run({"EQBENCH_BENCHMARK_GATE": "1"})
-    assert "STATUS=PASS FAILURES=0" in output  # suspicious only counts by default
+    (out / NEQ / "changed" / "changed_N_B2_O_B2.pair-status.json").unlink()
+    write_pair_status(out, NEQ, "same", "N_B2", "O_B2", "NOT_EQ")  # source-identical -> suspicious only
+    code, output, health = run({})
+    assert "STATUS=PASS FAILURES=0" in output, output
+    assert health[BENCHMARK_VALIDATION_KEY]["suspicious"][gate.KIND_SUSPICIOUS_NOT_EQ] == 1
+    code, output, _ = run({"EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS": "1"})
+    assert "STATUS=FAIL FAILURES=1" in output
+
+    truth.write_text(f"{NEQ}\tchagned\tCONFIRMED_NOT_EQ\ttypo\n", encoding="utf-8")
+    code, output, _ = run({})
+    assert code == 0 and "STATUS=MANIFEST_FAILED FAILURES=1" in output
+    assert "do not resolve" in (out / "function_diff_manifest.error").read_text()
+    truth.write_text("", encoding="utf-8")
 
     shutil.rmtree(bench)
     bench.mkdir()

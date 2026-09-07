@@ -177,8 +177,7 @@ def test_ground_truth_annotations_apply_and_validate(tmp_path):
         tmp_path / "truth.tsv",
         "# comment\nsample\tfunction\tverdict\tevidence\n"
         "fam/prog/Neq/newV-oldV\tchanged\tCONFIRMED_NOT_EQ\tcounter-example x=1\n"
-        "fam/prog/Neq/newV-oldV\tuntouched\tCONFIRMED_EQ\tidentical body\n"
-        "fam/other/Neq/newV-oldV\tnope\tCONFIRMED_NOT_EQ\tstale entry\n",
+        "fam/prog/Neq/newV-oldV\tuntouched\tCONFIRMED_EQ\tidentical body\n",
     )
     manifest = fdm.build_manifest(tmp_path, ground_truth=truth)
     functions = manifest["samples"]["fam/prog/Neq/newV-oldV"]["functions"]
@@ -186,8 +185,8 @@ def test_ground_truth_annotations_apply_and_validate(tmp_path):
     assert functions["changed"]["ground_truth_evidence"] == "counter-example x=1"
     assert functions["untouched"]["semantic_ground_truth"] == fdm.TRUTH_EQ
     assert functions["caller"]["semantic_ground_truth"] == fdm.TRUTH_UNKNOWN
-    assert manifest["ground_truth"]["entries"] == 3
-    assert manifest["ground_truth"]["unresolved_annotations"] == ["fam/other/Neq/newV-oldV\tnope"]
+    assert manifest["ground_truth"]["entries"] == 2
+    assert manifest["ground_truth"]["unresolved_annotations"] == []
 
     bad = _write(tmp_path / "bad.tsv", "fam/prog/Neq/newV-oldV\tchanged\tSOURCE_CHANGED\tx\n")
     with pytest.raises(ValueError, match="verdict must be"):
@@ -200,11 +199,54 @@ def test_ground_truth_annotations_apply_and_validate(tmp_path):
         fdm.load_ground_truth(dup)
 
 
+def test_stale_annotation_fails_closed_unless_explicitly_allowed(tmp_path):
+    _neq_pair(tmp_path, "fam/prog", OLD, NEW)
+    truth = _write(
+        tmp_path / "truth.tsv",
+        "fam/prog/Neq/newV-oldV\tchanged\tCONFIRMED_NOT_EQ\tcex\n"
+        "fam/prog/Neq/newV-oldV\tchagned\tCONFIRMED_NOT_EQ\ttypo in function name\n"
+        "fam/other/Neq/newV-oldV\tnope\tCONFIRMED_NOT_EQ\tstale sample\n",
+    )
+    with pytest.raises(ValueError, match="do not resolve") as excinfo:
+        fdm.build_manifest(tmp_path, ground_truth=truth)
+    assert "chagned" in str(excinfo.value) and "nope" in str(excinfo.value)
+    manifest = fdm.build_manifest(tmp_path, ground_truth=truth, allow_unresolved=True)
+    assert manifest["ground_truth"]["unresolved_annotations"] == [
+        "fam/other/Neq/newV-oldV\tnope",
+        "fam/prog/Neq/newV-oldV\tchagned",
+    ]
+    assert manifest["samples"]["fam/prog/Neq/newV-oldV"]["functions"]["changed"]["semantic_ground_truth"] == fdm.TRUTH_NOT_EQ
+
+    output = tmp_path / "m.json"
+    base = [sys.executable, "-B", str(EQBENCH_SCRIPTS / "function_diff_manifest.py"),
+            "--benchmark-root", str(tmp_path), "--output", str(output), "--ground-truth", str(truth)]
+    failed = subprocess.run(base, check=False, text=True, capture_output=True)
+    assert failed.returncode == 2 and "do not resolve" in failed.stderr
+    assert not output.exists()
+    allowed = subprocess.run(base + ["--allow-unresolved-annotations"], check=False, text=True, capture_output=True)
+    assert allowed.returncode == 0, allowed.stderr
+    assert "unresolved=2" in allowed.stdout
+
+
+def test_changed_include_is_unattributable(tmp_path):
+    old = '#include "config_a.h"\nint f(int x) { return x; }\nint g(int x) { return 2; }\n'
+    new = '#include "config_b.h"\nint f(int x) { return x; }\nint g(int x) { return 2; }\n'
+    _neq_pair(tmp_path, "fam/inc", old, new)
+    sample = fdm.build_manifest(tmp_path)["samples"]["fam/inc/Neq/newV-oldV"]
+    assert sample["top_level_context_changed"] is True
+    assert sample["functions"]["f"]["source_impact"] == fdm.IMPACT_UNKNOWN
+    assert sample["functions"]["g"]["source_impact"] == fdm.IMPACT_UNKNOWN
+
+
 def test_tracked_default_ground_truth_file_is_loadable():
     path = fdm.DEFAULT_GROUND_TRUTH_FILE
     assert path.is_file()
-    for annotation in fdm.load_ground_truth(path):
+    annotations = fdm.load_ground_truth(path)
+    assert annotations, "the tracked file must carry the reviewed initial ground truth"
+    for annotation in annotations:
         assert annotation.verdict in (fdm.TRUTH_EQ, fdm.TRUTH_NOT_EQ)
+        assert "/Neq/" in annotation.sample
+        assert len(annotation.evidence) > 40  # input, outputs and argument, not a bare label
 
 
 def test_cli_writes_manifest_and_summary(tmp_path):

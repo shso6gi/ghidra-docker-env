@@ -254,9 +254,10 @@ class ContextDiff:
 def changed_top_level_context(new: ParsedSource, old: ParsedSource) -> ContextDiff:
     """Diff the file-scope units and collect the identifiers on changed units.
 
-    ``#include`` changes are ignored; ``#define`` / declarations contribute
-    their identifiers; any other changed directive (``#pragma``, ``#if``...)
-    or a changed unit without identifiers is *unattributable* and makes the
+    ``#define`` / declarations contribute their identifiers; a changed
+    ``#include`` (the included text is not inspected, so anything may have
+    changed), any other changed directive (``#pragma``, ``#if``...) or a
+    changed unit without identifiers is *unattributable* and makes the
     otherwise unaffected functions ``IMPACT_UNKNOWN``."""
     new_units = _context_units(_top_level_text(new))
     old_units = _context_units(_top_level_text(old))
@@ -270,8 +271,6 @@ def changed_top_level_context(new: ParsedSource, old: ParsedSource) -> ContextDi
         unit = line[1:].strip()
         if unit.startswith("#"):
             directive = unit[1:].split(None, 1)[0] if len(unit) > 1 else ""
-            if directive == "include":
-                continue
             if directive != "define":
                 unattributable = True
                 continue
@@ -559,8 +558,12 @@ def build_neq_sample(
 
 
 def build_manifest(
-    root: Path, *, ground_truth: Optional[Path] = None,
+    root: Path, *, ground_truth: Optional[Path] = None, allow_unresolved: bool = False,
 ) -> Dict[str, object]:
+    """Build the manifest.  An annotation that resolves to no (sample,
+    function) of the tree is a configuration error of the ground-truth
+    authority (typo, renamed sample) and raises ``ValueError`` unless
+    ``allow_unresolved`` is set; the runner never sets it."""
     annotations: Dict[Tuple[str, str], GroundTruthAnnotation] = {}
     ground_truth_info: Dict[str, object] = {"path": None, "sha256": None, "entries": 0}
     if ground_truth is not None:
@@ -584,6 +587,11 @@ def build_manifest(
     unresolved = sorted(
         f"{key[0]}\t{key[1]}" for key in annotations if key not in resolved
     )
+    if unresolved and not allow_unresolved:
+        raise ValueError(
+            "ground-truth annotations do not resolve to any function of the benchmark tree "
+            f"({len(unresolved)}): " + "; ".join(u.replace("\t", " ") for u in unresolved)
+        )
     counts = summarize(samples)
     return {
         "schema": MANIFEST_SCHEMA,
@@ -642,6 +650,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="reviewed Neq ground-truth TSV (sample, function, verdict, evidence); "
                              f"default: {DEFAULT_GROUND_TRUTH_FILE} when it exists")
     parser.add_argument("--no-ground-truth", action="store_true", help="ignore the default annotation file")
+    parser.add_argument("--allow-unresolved-annotations", action="store_true",
+                        help="exploration only: record annotations that match no function instead of "
+                             "failing (the runners never pass this)")
     return parser
 
 
@@ -655,7 +666,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if ground_truth is None and not args.no_ground_truth and DEFAULT_GROUND_TRUTH_FILE.is_file():
         ground_truth = DEFAULT_GROUND_TRUTH_FILE
     try:
-        manifest = build_manifest(root, ground_truth=ground_truth)
+        manifest = build_manifest(
+            root, ground_truth=ground_truth, allow_unresolved=args.allow_unresolved_annotations,
+        )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

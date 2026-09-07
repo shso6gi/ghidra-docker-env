@@ -140,12 +140,17 @@ validation_classify_log_display() {
 # and VALIDATION_BENCHMARK_GATE_FAILURES (0/1).  Disabled with
 # EQBENCH_BENCHMARK_GATE=0 (status SKIPPED, no failure).  Set
 # EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS=1 to also fail on suspicious rows.
+# The reviewed ground truth defaults to scripts/eqbench/neq_ground_truth.tsv;
+# EQBENCH_GROUND_TRUTH_FILE overrides it (e.g. an empty file for a synthetic
+# benchmark root).  An annotation that resolves to no function of the
+# benchmark root fails the manifest build (MANIFEST_FAILED): the runner
+# never passes --allow-unresolved-annotations.
 validation_run_benchmark_gate() {
     local output_base_dir="$1" benchmark_root="$2" repo_root="$3"
     local python_bin="${PYTHON_BIN:-python3}"
     local manifest="$output_base_dir/function_diff_manifest.json"
     local report="$output_base_dir/benchmark_validation_gate.json"
-    local ground_truth="$repo_root/scripts/eqbench/neq_ground_truth.tsv"
+    local ground_truth="${EQBENCH_GROUND_TRUTH_FILE:-$repo_root/scripts/eqbench/neq_ground_truth.tsv}"
     local -a gate_args=()
     VALIDATION_BENCHMARK_GATE_STATUS=SKIPPED
     VALIDATION_BENCHMARK_GATE_FAILURES=0
