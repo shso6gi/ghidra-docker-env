@@ -500,3 +500,52 @@ def test_e2e_void_effect_only_versus_complete_non_void_is_never_equivalent(monke
     assert result["final_outcome"] != "EQUIVALENT"
     assert result["is_equivalent"] is not True
     assert result["final_outcome"] in {"UNKNOWN", "NOT_EQ"}
+
+
+def _matching_width_non_void(side="right"):
+    """``undefined5 f(int x)`` returning the 40-bit value ``concat(0x01, x)``:
+    bit-for-bit the same solver term as the void side's effect surface
+    (presence flag 1 ⊕ stored ``x``), with a real return storage."""
+    x = _param_x()
+    value = Expression.binary_op("PIECE", Expression.constant(1, size=1), x)
+    value.size = 5
+    analysis = FunctionReturnAnalysis(
+        f"fn-{side}", "0x2000", [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ReturnInfo("0x2010", value, [])], return_type="undefined5", binary_id=f"bin-{side}",
+    )
+    analysis.return_abi_facts = {
+        "schema_version": 1,
+        "calling_convention": {"status": "PRESENT", "value": ("ghidra_calling_convention_v1", "default"), "source": "getModelName"},
+        "declared_or_effective_return_type": {"status": "PRESENT", "value": ("ghidra_return_type_v1", "/undefined5", 5), "source": "getReturnType"},
+        "return_storage_descriptor": {"status": "PRESENT", "value": ("ghidra_return_storage_v1", (("ghidra_return_storage_member_v1", "register", 0, 5),)), "source": "getReturnStorage"},
+    }
+    return analysis
+
+
+def test_e2e_matching_width_void_effect_versus_non_void_value_is_never_equivalent(monkeypatch):
+    """Adversarial mixed pair: the void side's memory-effect surface and the
+    non-void side's return value are the same 40-bit solver term.  Ignoring
+    the surface kind would make the pair EQUIVALENT although one function
+    writes a global and the other returns a value: the observation contract
+    must refuse to compare a memory-effect surface against a return value."""
+    left = _e2e_void("left", _param_x())
+    right = _matching_width_non_void()
+    assert left.comparison_surface.explicit_bit_width == 40
+    assert right.returns[0].value.get_bit_width() == 40
+    result = _run_production_check(monkeypatch, "mixed-width", left, right)
+    assert result["final_outcome"] != "EQUIVALENT", result.get("unknown_reasons")
+    assert result["is_equivalent"] is not True
+    reasons = {r.get("reason_id") for r in result["unknown_reasons"]}
+    assert "return_abi_relation_unproven" in reasons
+
+
+def test_relation_assessment_refuses_mixed_observation_surface_kinds():
+    left = _void_analysis("left")
+    right = _matching_width_non_void()
+    lw = _width_seed("left", function_identity=left.outcome_function_identity())
+    rw = _width_seed("right", function_identity=right.outcome_function_identity())
+    assessment = assess_return_abi_pair(left, right, lw, rw, build_pair_return_observation_seed(lw, rw))
+    relation = assessment.relation_assessment
+    assert relation is not None
+    assert relation.status.value == "UNPROVEN"
+    assert ("observation_surface_kinds_compatible", False) in relation.predicate_body

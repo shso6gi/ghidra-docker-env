@@ -699,14 +699,26 @@ class ReturnAbiCompatibilityAssessment:
                 and projection_seed.candidate_observation_width
                 <= projection_seed.right_storage_width
             )
+            # A memory-effect surface (void effect-only, Issue #104 Gap 6) and
+            # a return-value surface are different observations even when they
+            # render to the same bit vector: a function that writes a global is
+            # never compared as a value against one that returns that value.
+            # Both sides must therefore observe the same surface kind.
+            observation_surface_kinds_compatible = (
+                left.void_effect_only_surface == right.void_effect_only_surface
+            )
             body = (
-                "return_abi_semantic_projection_predicates_v3",
+                "return_abi_semantic_projection_predicates_v4",
                 (
                     "calling_conventions_individually_valid",
                     calling_conventions_individually_valid,
                 ),
                 ("storage_projection_related", storage_projection_related),
                 ("observation_contract_applicable", observation_applicable),
+                (
+                    "observation_surface_kinds_compatible",
+                    observation_surface_kinds_compatible,
+                ),
             )
             status = (
                 ReturnAbiRelationStatus.PROVED
@@ -714,6 +726,7 @@ class ReturnAbiCompatibilityAssessment:
                     calling_conventions_individually_valid,
                     storage_projection_related,
                     observation_applicable,
+                    observation_surface_kinds_compatible,
                 ))
                 else ReturnAbiRelationStatus.UNPROVEN
             )
