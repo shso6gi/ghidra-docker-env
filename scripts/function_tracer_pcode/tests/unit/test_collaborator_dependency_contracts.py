@@ -10,7 +10,12 @@ from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 
-CONFIG_SUPPLIERS = {"debug_flag", "program_value", "binary_id_value", "enable_completed_recovery_proofs_value", "decompiler_value"}
+# ``external_call_effect_policy`` (Issue #104 Gap 4): observation policy for
+# external / thunk callees in the effect lane, a configuration value of the analyzer.
+CONFIG_SUPPLIERS = {
+    "debug_flag", "program_value", "binary_id_value", "enable_completed_recovery_proofs_value",
+    "decompiler_value", "external_call_effect_policy",
+}
 
 
 def _analyzer():

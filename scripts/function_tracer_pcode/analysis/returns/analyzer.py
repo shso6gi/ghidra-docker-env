@@ -57,7 +57,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
 
 class ReturnAnalyzer:
 
-    def __init__(self, program, debug: bool=False, binary_id: Optional[str]=None, *, enable_completed_recovery_proofs: bool=True):
+    def __init__(self, program, debug: bool=False, binary_id: Optional[str]=None, *, enable_completed_recovery_proofs: bool=True, external_call_effect_policy=None):
         self.program = program
         self._region_facts = RegionFacts(program)
         self._debug_reporter = DebugReporter(debug_flag=lambda: self.debug)
@@ -78,6 +78,17 @@ class ReturnAnalyzer:
         self._analysis_session = AnalysisSession()
         # 長寿命の可変 runtime 状態と bounded-call 設定は collaborator 構築より前に所有者を作る（6a-2 / 6a-3）。
         self._runtime_state = AnalysisRuntimeState()
+        # Issue #104 (Gap 4): observation policy for external / thunk callees
+        # in the effect lane (configuration, supplied to the effect collaborator).
+        from scripts.function_tracer_pcode.analysis.effects.external_call_models import (
+            ExternalCallEffectPolicy,
+        )
+
+        if external_call_effect_policy is None:
+            external_call_effect_policy = ExternalCallEffectPolicy()
+        if type(external_call_effect_policy) is not ExternalCallEffectPolicy:
+            raise TypeError("external call effect policy must be an exact ExternalCallEffectPolicy")
+        self._external_call_effect_policy = external_call_effect_policy
         self._limits = AnalysisLimits.from_settings()
         self._diagnostics = AnalysisDiagnosticsState()
         self._current_parameters: List[Dict] = []
@@ -233,6 +244,7 @@ class ReturnAnalyzer:
             program_value=lambda: self.program,
             binary_id_value=lambda: self._binary_id,
             debug_flag=lambda: self.debug,
+            external_call_effect_policy=lambda: self._external_call_effect_policy,
         )
         self._current_effect_summary: Optional[EffectSummary] = None
         self._current_deferred_calls: Dict[Tuple[Any, ...], DeferredCallInfo] = {}

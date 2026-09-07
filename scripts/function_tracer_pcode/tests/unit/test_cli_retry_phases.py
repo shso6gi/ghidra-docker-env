@@ -133,6 +133,9 @@ def test_equiv_check_propagates_retry_flag():
     mock_args.save_formula = False
     mock_args.debug = False
     mock_args.quiet = True
+    # 観測フラグは exact bool でなければ checker が reject する（Issue #104 Gap 4）
+    mock_args.observe_errno = False
+    mock_args.observe_fenv = False
     mock_args.verbose = False
     mock_args.output = None
     mock_args.strategy = 'pairwise'
@@ -213,6 +216,9 @@ def test_equiv_check_propagates_no_retry_flag():
     mock_args.save_formula = False
     mock_args.debug = False
     mock_args.quiet = True
+    # 観測フラグは exact bool でなければ checker が reject する（Issue #104 Gap 4）
+    mock_args.observe_errno = False
+    mock_args.observe_fenv = False
     mock_args.verbose = False
     mock_args.output = None
     mock_args.strategy = 'pairwise'
@@ -455,6 +461,9 @@ def test_equiv_check_passes_phase_usage_flag_when_debug_enabled():
     mock_args.save_formula = False
     mock_args.debug = True
     mock_args.quiet = True
+    # 観測フラグは exact bool でなければ checker が reject する（Issue #104 Gap 4）
+    mock_args.observe_errno = False
+    mock_args.observe_fenv = False
     mock_args.verbose = False
     mock_args.output = None
     mock_args.strategy = 'pairwise'
