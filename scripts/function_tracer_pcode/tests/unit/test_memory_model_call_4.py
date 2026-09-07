@@ -1491,8 +1491,10 @@ def test_summarize_store_effects_propagates_scalar_only_unsupported_callee():
     effects but still ``has_unsupported_call`` was treated as effect-free when
     every argument was a scalar, on the theory that no parameter memory could
     be exposed.  A scalar-only callee can still write globals / statics or
-    perform nested calls with observable effects, so the caller silently lost
-    them and could be proved EQUIVALENT.
+    perform nested calls with observable effects.  The effect-summary layer
+    silently dropped this incompleteness, leaving no effect-summary blocker
+    for the caller; absent an independent blocker in another proof lane, this
+    could permit an unsound EQUIVALENT decision.
 
     New behaviour: the incompleteness always propagates (fail closed); the
     reason records that parameter memory is *not* exposed by the arguments.
