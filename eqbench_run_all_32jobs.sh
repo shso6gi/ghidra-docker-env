@@ -1370,6 +1370,10 @@ if (( ${#ALL_LOG_FILES[@]} > 0 )); then
             --log-list0 "$overall_log_list"
 fi
 
+# Issue #104: benchmark validation gate over the canonical pair outcomes
+# (after the health summary it extends, before the receipt that hashes it).
+validation_run_benchmark_gate "$OUTPUT_BASE_DIR" "$EQBENCH_ROOT" "$SCRIPT_DIR"
+
 cat >> "$OUTPUT_BASE_DIR/run_manifest.txt" <<EOF
 completed_samples=$COMPLETED_SAMPLES
 skipped_samples=$SKIPPED_SAMPLES
@@ -1385,11 +1389,13 @@ missing_binary_count=$MISSING_BINARY_COUNT
 function_census_failure_count=$FUNCTION_CENSUS_FAILURES
 process_authority_cleanup_failure_count=$PROCESS_AUTHORITY_CLEANUP_FAILURES
 run_pair_failures=$RUN_PAIR_FAILURES
+benchmark_gate_status=$VALIDATION_BENCHMARK_GATE_STATUS
+benchmark_gate_failures=$VALIDATION_BENCHMARK_GATE_FAILURES
 analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
 EOF
 
 FINAL_RUN_EXIT_STATUS=0
-if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT > 0 || FUNCTION_CENSUS_FAILURES > 0 )); then
+if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT > 0 || FUNCTION_CENSUS_FAILURES > 0 || VALIDATION_BENCHMARK_GATE_FAILURES > 0 )); then
     FINAL_RUN_EXIT_STATUS=1
 fi
 
@@ -1420,6 +1426,8 @@ fi
     "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" \
     "ERROR_ONLY_RERUN=$ERROR_ONLY_RERUN" \
     "VALIDATION_SUMMARY_LEVEL=$VALIDATION_SUMMARY_LEVEL" \
+    "EQBENCH_BENCHMARK_GATE=${EQBENCH_BENCHMARK_GATE:-1}" \
+    "EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS=${EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS:-0}" \
     "EQUIV_TIMEOUT=$EQUIV_TIMEOUT" \
     "DECOMPILE_TIMEOUT=$DECOMPILE_TIMEOUT" \
     "PAIRWISE_TIMEOUT=$PAIRWISE_TIMEOUT" \
@@ -1437,6 +1445,9 @@ echo "Peak concurrent pair jobs: $PAIR_SCHEDULER_PEAK_ACTIVE_JOBS (PARALLEL_JOBS
 
 if (( FINAL_RUN_EXIT_STATUS > 0 )); then
     echo "Error: $RUN_PAIR_FAILURES pair job(s) failed canonical classification or run-health checks." >&2
+    if (( VALIDATION_BENCHMARK_GATE_FAILURES > 0 )); then
+        echo "Error: benchmark validation gate $VALIDATION_BENCHMARK_GATE_STATUS; see $OUTPUT_BASE_DIR/benchmark_validation_gate.txt" >&2
+    fi
     if (( PROCESS_AUTHORITY_CLEANUP_FAILURES > 0 )); then
         echo "Error: $PROCESS_AUTHORITY_CLEANUP_FAILURES process-authority cleanup run-health failure(s)." >&2
     fi

@@ -1100,7 +1100,37 @@ def format_run_health_summary(health: Mapping[str, Any]) -> str:
             continue
         for name, count in sorted(values.items(), key=lambda item: (-int(item[1]), str(item[0])))[:20]:
             lines.append(f"    - {name}: {count}")
+    benchmark = health.get(BENCHMARK_VALIDATION_KEY)
+    if isinstance(benchmark, Mapping):
+        lines.extend(format_benchmark_validation_lines(benchmark))
     return "\n".join(lines)
+
+
+# Issue #104: the runner benchmark gate (``reporting.benchmark_validation_gate``)
+# merges its section into the health summary under this key; rendering lives
+# here so the runner path and the offline ``run_health_summary`` path agree.
+BENCHMARK_VALIDATION_KEY = "benchmark_validation"
+
+
+def format_benchmark_validation_lines(section: Mapping[str, Any]) -> List[str]:
+    def _counts(name: str) -> Mapping[str, Any]:
+        values = section.get(name)
+        return values if isinstance(values, Mapping) else {}
+
+    hard = _counts("hard_violations")
+    lines = [
+        "  soundness_violations: "
+        f"eq_not_eq={hard.get('eq_not_eq', 0)} "
+        f"neq_equivalent={hard.get('neq_confirmed_not_eq_equivalent', 0)} "
+        f"neq_equivalent_unmapped={hard.get('neq_equivalent_unmapped', 0)}",
+    ]
+    for group in ("suspicious", "benign"):
+        for kind, count in sorted(_counts(group).items()):
+            lines.append(f"  {kind}: {count}")
+    lines.append(
+        f"  benchmark_gate: {section.get('gate', 'EMPTY')} (pairs={section.get('pairs', 0)})"
+    )
+    return lines
 
 
 def _require_before_logs(before_logs: Sequence[Any], require_before_dir: bool) -> None:

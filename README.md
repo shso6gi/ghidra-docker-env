@@ -195,8 +195,37 @@ python3 -m scripts.function_tracer_pcode.reporting.soundness_gate \
     logs/EqBench/subset_after/eq logs/EqBench/subset_after/neq
 ```
 
-The gate currently fails on `logs/EqBench/all_neq_same_isa_closure_current`
-(242 `EQUIVALENT` pairs in Neq samples). The manifest's `observed_baseline`
+The label-only gate cannot tell a legitimate `EQUIVALENT` on an unchanged Neq
+helper from a false one, so both runners end with the function-level
+**benchmark validation gate** (`EQBENCH_BENCHMARK_GATE=0` disables it). It
+builds `function_diff_manifest.json` from the actual `old.c`/`new.c` of the
+benchmark tree (`scripts/eqbench/function_diff_manifest.py`: per function
+`source_relation`, `source_impact`, `semantic_ground_truth`; `C-Desc.json` is
+only audited, never trusted) and classifies every canonical pair outcome:
+
+- hard violations (runner exits 1): `Eq` → `NOT_EQ`; `Neq` function annotated
+  `CONFIRMED_NOT_EQ` in `scripts/eqbench/neq_ground_truth.tsv` → `EQUIVALENT`;
+  `Neq` `EQUIVALENT` the manifest cannot classify;
+- suspicious (counted only, `EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS=1` to
+  fail): `EQUIVALENT` on a source-impacted Neq function whose ground truth is
+  still `UNKNOWN`, `NOT_EQ` on a source-identical Neq function.
+
+A source change is never turned into a semantic verdict automatically; the
+checker never reads the manifest or the annotation file. The gate writes
+`benchmark_validation_gate.{json,txt}`, extends `run_health_summary.{json,txt}`
+(`soundness_violations: eq_not_eq=… neq_equivalent=… neq_equivalent_unmapped=…`)
+and both artifacts are hashed into `validation-execution-receipt.json`. Offline:
+
+```bash
+python3 scripts/eqbench/function_diff_manifest.py \
+    --benchmark-root targets/EqBench/benchmarks --output /tmp/function_diff_manifest.json
+python3 -m scripts.function_tracer_pcode.reporting.benchmark_validation_gate \
+    logs/EqBench/all_neq_same_isa_closure_current --manifest /tmp/function_diff_manifest.json
+```
+
+On `logs/EqBench/all_neq_same_isa_closure_current` the label-only gate fails
+(242 `EQUIVALENT` pairs in Neq samples) while the benchmark validation gate
+reports them all as suspicious (no reviewed ground truth yet). The manifest's `observed_baseline`
 section records what the checker produced at the recorded commit; it is
 explicitly *not* ground truth — an EQUIVALENT/NOT_EQ there may be an accident
 of an implementation defect — and must only be used to explain transitions.

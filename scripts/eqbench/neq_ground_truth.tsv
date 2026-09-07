@@ -1,0 +1,14 @@
+# Reviewed function-level semantic ground truth for EqBench Neq samples (Issue #104).
+#
+# Consumed by scripts/eqbench/function_diff_manifest.py; the runner benchmark
+# gate treats "CONFIRMED_NOT_EQ && checker EQUIVALENT" as a hard violation.
+# A source change is NOT evidence of non-equivalence: an entry belongs here
+# only after a human has confirmed the verdict for that function pair and
+# recorded how (the evidence column).  The checker never reads this file.
+#
+# Columns (tab-separated):
+#   sample     Neq sample identity as the runner names it, e.g. REVE/triangularMod/Neq/newV-oldV
+#   function   function name
+#   verdict    CONFIRMED_NOT_EQ | CONFIRMED_EQ
+#   evidence   free text: how the verdict was confirmed (counter-example, proof, review note)
+sample	function	verdict	evidence
