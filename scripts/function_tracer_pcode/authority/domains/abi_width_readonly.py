@@ -451,28 +451,39 @@ def _sealed_void_effect_surface_fact(analysis: Any, slot_rows: tuple) -> tuple[A
 
     surface = getattr(analysis, "comparison_surface", None)
     effect_summary = getattr(analysis, "effect_summary", None)
-    if effect_summary is None:
-        return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("effect_summary_absent",)
     surface_kind = getattr(surface, "kind", None) if surface is not None else None
     surface_bits = getattr(surface, "explicit_bit_width", None) if surface is not None else None
-    effects = getattr(effect_summary, "effects", None)
-    reasons = getattr(effect_summary, "incomplete_reasons", None)
-    unsupported = getattr(effect_summary, "has_unsupported_call", None)
     if surface is not None and (type(surface_kind) is not str or not surface_kind):
         return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("surface_kind",)
     if surface is not None and _exact_int(surface_bits) is None:
         return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("surface_bits",)
+    return_type_is_void = False
+    for slot, status, value, _source in slot_rows:
+        if slot == "declared_or_effective_return_type" and status is ReturnAbiFactStatus.PRESENT:
+            name = str(value[1]).rsplit("/", 1)[-1].strip().lower()
+            return_type_is_void = name == "void" and int(value[2]) == 0
+    if effect_summary is None:
+        # No effect summary at all: a plain return-value observation with no
+        # effect evidence.  Not malformed, but never a void effect-only surface.
+        return (
+            _VOID_EFFECT_SURFACE_FACT_SCHEMA,
+            surface_kind,
+            surface_bits if surface is not None else 0,
+            0,
+            (),
+            True,
+            return_type_is_void,
+            False,
+        )
+    effects = getattr(effect_summary, "effects", None)
+    reasons = getattr(effect_summary, "incomplete_reasons", None)
+    unsupported = getattr(effect_summary, "has_unsupported_call", None)
     if type(effects) not in (list, tuple):
         return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("effects",)
     if type(reasons) not in (list, tuple) or any(type(item) is not str or not item for item in reasons):
         return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("incomplete_reasons",)
     if type(unsupported) is not bool:
         return _VOID_EFFECT_SURFACE_FACT_MALFORMED + ("has_unsupported_call",)
-    return_type_is_void = False
-    for slot, status, value, _source in slot_rows:
-        if slot == "declared_or_effective_return_type" and status is ReturnAbiFactStatus.PRESENT:
-            name = str(value[1]).rsplit("/", 1)[-1].strip().lower()
-            return_type_is_void = name == "void" and int(value[2]) == 0
     return (
         _VOID_EFFECT_SURFACE_FACT_SCHEMA,
         surface_kind,
@@ -557,6 +568,31 @@ class FunctionReturnAbiSeed:
     def observation_complete(self) -> bool:
         """ABI facts suffice for the observation contract (complete, or void effect-only)."""
         return self.complete or self.void_effect_only_surface
+
+    @property
+    def effective_surface_kind(self) -> Optional[str]:
+        """Kind of the surface this function is observed on.
+
+        ``"memory_effect"`` when the analysis compares stores (void effect-only
+        or non-void stores ⊕ return), ``"return_value"`` when no comparison
+        surface was built (plain return value), any other sealed kind as-is,
+        and ``None`` when the sealed fact is malformed (never compatible).
+        """
+
+        fact = self.surface_fact
+        if (
+            type(fact) is not tuple
+            or len(fact) != 8
+            or fact[0] != _VOID_EFFECT_SURFACE_FACT_SCHEMA
+            or fact[1] == "malformed"
+        ):
+            return None
+        kind = fact[1]
+        if kind is None:
+            return "return_value"
+        if type(kind) is not str or not kind:
+            return None
+        return kind
 
     def fact(self, slot: str) -> Any:
         for name, status, value, source in self.slot_facts:
@@ -699,13 +735,16 @@ class ReturnAbiCompatibilityAssessment:
                 and projection_seed.candidate_observation_width
                 <= projection_seed.right_storage_width
             )
-            # A memory-effect surface (void effect-only, Issue #104 Gap 6) and
-            # a return-value surface are different observations even when they
+            # A memory-effect surface (stores, or stores ⊕ return) and a
+            # return-value surface are different observations even when they
             # render to the same bit vector: a function that writes a global is
             # never compared as a value against one that returns that value.
-            # Both sides must therefore observe the same surface kind.
+            # Both sides must observe the same effective surface kind; a
+            # malformed / unavailable kind is never compatible (Issue #104).
+            left_kind = left.effective_surface_kind
+            right_kind = right.effective_surface_kind
             observation_surface_kinds_compatible = (
-                left.void_effect_only_surface == right.void_effect_only_surface
+                left_kind is not None and right_kind is not None and left_kind == right_kind
             )
             body = (
                 "return_abi_semantic_projection_predicates_v4",

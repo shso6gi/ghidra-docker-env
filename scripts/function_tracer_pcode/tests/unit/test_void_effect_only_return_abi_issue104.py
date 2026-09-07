@@ -549,3 +549,103 @@ def test_relation_assessment_refuses_mixed_observation_surface_kinds():
     assert relation is not None
     assert relation.status.value == "UNPROVEN"
     assert ("observation_surface_kinds_compatible", False) in relation.predicate_body
+
+
+def _non_void_with_global_store(side="left"):
+    """``int f(int x) { g = x; return 0; }``: stores ⊕ return = 8 + 32 + 32 bits,
+    comparison surface kind ``memory_effect`` on a non-void function."""
+    from unittest.mock import Mock
+
+    from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
+    from conftest import resolve_mock_data_type
+
+    analysis = FunctionReturnAnalysis(
+        f"fn-{side}", "0x1000", [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ReturnInfo("0x1010", Expression.constant(0, size=4), [])], return_type="int",
+        return_type_obj=resolve_mock_data_type("int"), binary_id=f"bin-{side}",
+    )
+    effects = [_global_effect(_param_x())]
+    analysis.effect_summary = EffectSummary(parameter_names=["param_1"], effects=effects)
+    analysis.effect_summary.synthetic_expr = build_void_effect_summary_expr(effects)
+    analyzer = ReturnAnalyzer(Mock(), debug=False)
+    analyzer._parameters.is_void_type = lambda dtype: str(dtype) == "void"
+    assert analyzer._apply_observable_effect_surface(analysis, analysis.return_type_obj, "int") is True
+    assert analysis.comparison_surface.kind == "memory_effect"
+    assert analysis.comparison_surface.explicit_bit_width == 72
+    analysis.return_abi_facts = _abi_facts(return_type="/int", type_length=4, storage="PRESENT")
+    return analysis
+
+
+def _matching_width_non_void_value(side="right", *, width_bytes=9):
+    """``undefined9 f(int x)`` returning ``concat(0x01, x, 0x00000000)``: the same
+    72-bit solver term as the stores ⊕ return surface of the left side."""
+    x = _param_x()
+    inner = Expression.binary_op("PIECE", Expression.constant(1, size=1), x)
+    inner.size = 5
+    value = Expression.binary_op("PIECE", inner, Expression.constant(0, size=4))
+    value.size = width_bytes
+    analysis = FunctionReturnAnalysis(
+        f"fn-{side}", "0x2000", [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        [ReturnInfo("0x2010", value, [])], return_type=f"undefined{width_bytes}", binary_id=f"bin-{side}",
+    )
+    analysis.return_abi_facts = {
+        "schema_version": 1,
+        "calling_convention": {"status": "PRESENT", "value": ("ghidra_calling_convention_v1", "default"), "source": "getModelName"},
+        "declared_or_effective_return_type": {"status": "PRESENT", "value": ("ghidra_return_type_v1", f"/undefined{width_bytes}", width_bytes), "source": "getReturnType"},
+        "return_storage_descriptor": {"status": "PRESENT", "value": ("ghidra_return_storage_v1", (("ghidra_return_storage_member_v1", "register", 0, width_bytes),)), "source": "getReturnStorage"},
+    }
+    return analysis
+
+
+def test_e2e_matching_width_non_void_memory_effect_versus_return_value_is_never_equivalent(monkeypatch):
+    """Adversarial mixed pair on two *non-void* functions: ``int f(int x){ g = x;
+    return 0; }`` (stores ⊕ return, 72 bit) against ``undefined9 f(int x)``
+    returning the identical 72-bit term.  Both ABI seeds are complete, so the
+    void effect-only path is not involved; the surface kinds still differ."""
+    left = _non_void_with_global_store("left")
+    right = _matching_width_non_void_value("right")
+    assert right.returns[0].value.get_bit_width() == 72
+    result = _run_production_check(monkeypatch, "mixed-nonvoid", left, right)
+    assert result["final_outcome"] != "EQUIVALENT", result.get("unknown_reasons")
+    assert result["is_equivalent"] is not True
+
+
+def test_effective_surface_kind_follows_the_sealed_fact():
+    assert _seed_for(_void_analysis("left"), "left").effective_surface_kind == "memory_effect"
+    assert _seed_for(_non_void_with_global_store("left"), "left").effective_surface_kind == "memory_effect"
+    assert _seed_for(_matching_width_non_void_value("right"), "right").effective_surface_kind == "return_value"
+    malformed = _void_analysis("left")
+    malformed.comparison_surface = SimpleNamespace(kind=b"memory_effect", explicit_bit_width=40)
+    assert _seed_for(malformed, "left").effective_surface_kind is None
+
+
+def test_relation_assessment_refuses_non_void_memory_effect_against_return_value():
+    left = _non_void_with_global_store("left")
+    right = _matching_width_non_void_value("right")
+    lw = _width_seed("left", function_identity=left.outcome_function_identity())
+    rw = _width_seed("right", function_identity=right.outcome_function_identity())
+    assessment = assess_return_abi_pair(left, right, lw, rw, build_pair_return_observation_seed(lw, rw))
+    assert assessment.left_seed.complete and assessment.right_seed.complete
+    relation = assessment.relation_assessment
+    assert relation is not None and relation.status.value == "UNPROVEN"
+    assert ("observation_surface_kinds_compatible", False) in relation.predicate_body
+    # same kind on both sides (stores ⊕ return vs stores ⊕ return) stays PROVED
+    other = _non_void_with_global_store("right")
+    ow = _width_seed("right", function_identity=other.outcome_function_identity())
+    same = assess_return_abi_pair(left, other, lw, ow, build_pair_return_observation_seed(lw, ow))
+    assert same.relation_assessment.status.value == "PROVED"
+
+
+def test_relation_assessment_refuses_malformed_surface_kind():
+    left = _non_void_with_global_store("left")
+    right = _non_void_with_global_store("right")
+    right.comparison_surface = SimpleNamespace(kind=b"memory_effect", explicit_bit_width=72)
+    lw = _width_seed("left", function_identity=left.outcome_function_identity())
+    rw = _width_seed("right", function_identity=right.outcome_function_identity())
+    assessment = assess_return_abi_pair(left, right, lw, rw, build_pair_return_observation_seed(lw, rw))
+    assert assessment.relation_assessment.status.value == "UNPROVEN"
+
+
+def test_e2e_same_non_void_memory_effect_surfaces_are_equivalent(monkeypatch):
+    result = _run_production_check(monkeypatch, "nonvoid-same", _non_void_with_global_store("left"), _non_void_with_global_store("right"))
+    assert result["final_outcome"] == "EQUIVALENT", result.get("unknown_reasons")
