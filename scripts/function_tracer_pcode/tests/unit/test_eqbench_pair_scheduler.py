@@ -255,6 +255,55 @@ printf 'failures=%s completed=%s active=%s\n' "$FAILURES" "$PAIR_SCHEDULER_COMPL
     assert proc.stdout.strip().splitlines()[-1] == "failures=0 completed=1 active=0"
 
 
+@pytest.mark.parametrize("mode", WAIT_PID_MODES)
+def test_tracked_job_without_a_child_is_accounted_not_fatal(tmp_path, mode):
+    # Issue #118: a tracked PID with no corresponding child (the child was
+    # already reaped elsewhere, or the bookkeeping drifted).  `wait -n -p pid`
+    # then *unsets* pid, and the runners run with `set -u`, so an unguarded
+    # read of "$pid" aborted the whole matrix run before the orphan-accounting
+    # path could run.  The scheduler must instead count the orphan as a
+    # failure, complete its group and return normally.
+    script = COMMON + r"""
+pair_scheduler_init 2 on_group_complete FAILURES
+pair_scheduler_open_group g "ctx"
+# A PID that is not a child of this shell: no `wait` can ever reap it.
+pair_scheduler_start_job g 999999
+pair_scheduler_close_group g
+pair_scheduler_finalize
+printf 'failures=%s completed=%s active=%s\n' "$FAILURES" "$PAIR_SCHEDULER_COMPLETED_GROUPS" "$PAIR_SCHEDULER_ACTIVE_JOBS"
+"""
+    proc = _run_harness(tmp_path, script, mode)
+    assert proc.returncode == 0, proc.stderr
+    assert "unbound variable" not in proc.stderr
+    assert proc.stdout.strip().splitlines()[-1] == "failures=1 completed=1 active=0"
+
+
+@pytest.mark.parametrize("mode", WAIT_PID_MODES)
+def test_orphaned_tracked_job_does_not_strand_later_groups(tmp_path, mode):
+    # The same drift while a real job of another group is in flight: the
+    # scheduler must still reap the real job, complete both groups and leave
+    # nothing in flight.
+    script = COMMON + r"""
+pair_scheduler_init 2 on_group_complete FAILURES
+pair_scheduler_open_group g1 "ctx1"
+pair_scheduler_start_job g1 999999
+pair_scheduler_close_group g1
+pair_scheduler_open_group g2 "ctx2"
+pair_scheduler_wait_for_slot
+job g2 A 0.2 0 &
+pair_scheduler_start_job g2 "$!"
+pair_scheduler_close_group g2
+pair_scheduler_finalize
+printf 'failures=%s completed=%s active=%s\n' "$FAILURES" "$PAIR_SCHEDULER_COMPLETED_GROUPS" "$PAIR_SCHEDULER_ACTIVE_JOBS"
+"""
+    proc = _run_harness(tmp_path, script, mode)
+    assert proc.returncode == 0, proc.stderr
+    assert "unbound variable" not in proc.stderr
+    assert proc.stdout.strip().splitlines()[-1] == "failures=1 completed=2 active=0"
+    assert sorted(line.split()[1] for line in _events(tmp_path)) == ["key=g1", "key=g2"]
+    assert not list(tmp_path.glob("running.*"))
+
+
 def test_init_rejects_bad_arguments(tmp_path):
     script = COMMON + r"""
 set +e
