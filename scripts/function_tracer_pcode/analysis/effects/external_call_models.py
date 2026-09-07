@@ -9,20 +9,28 @@ evidence: the callee's body is simply not in the binary.
 
 This module decides, once per callee, how the effect lane may treat it:
 
-* an internal function (or a thunk that resolves to an internal function)
-  is analysed like any other callee;
-* an external whose effect semantics are covered by an explicit model
-  (``PURE_MATH_EXTERNALS``: libm / libc arithmetic functions that write no
-  caller-visible memory) is given the modelled, complete effect summary;
-* every other external / unresolvable thunk is *not* summarised, so the
-  caller records ``callee_effect_summary_missing`` and fails closed.
+* a function that is provably *not* a thunk and *not* external, or a thunk
+  chain that provably ends at such an internal function, is analysed like
+  any other callee (``"analyze"``);
+* everything else is ``"unsupported"``: an external function (no body in
+  the binary), a thunk whose target cannot be obtained, a thunk chain that
+  is cyclic or longer than the bound, and any callee whose classification
+  API raises or returns a non-boolean.  The caller then records
+  ``callee_effect_summary_missing`` and fails closed.
 
-The models here are about the *memory effect* lane only.  The pure-return
-contract of the deferred-call lane (``proof/deferred_call_abstraction.py``)
-and the printf-family argument recovery keep their own, unchanged rules.
-``errno`` / floating-point environment writes are a caller-visible effect
-only when the observation policy asks for them; the policy is carried from
-the CLI flags (``--observe-errno`` / ``--observe-fenv``).
+There is deliberately *no* name-based model of library functions here.  A
+symbol name is not evidence of standard-library semantics (an unresolved
+``sqrt`` may bind to any provider), so treating one as effect-free would
+reintroduce the very "effect-free without a body" path this module closes.
+Trusted external models, if ever wanted, must be an explicit analysis
+assumption bound to the observation contract and to the result receipt.
+
+The pure-return contract of the deferred-call lane
+(``proof/deferred_call_abstraction.py``) and the printf-family argument
+recovery keep their own, unchanged rules.  ``ExternalCallEffectPolicy`` is
+the effect lane's projection of the authoritative
+``EquivalenceObservationContract`` (``observe_errno`` / ``observe_fenv``);
+it must be built from the finalised contract, never from raw flags.
 """
 
 from __future__ import annotations
@@ -32,10 +40,18 @@ from typing import Any, Optional, Tuple
 
 from scripts.function_tracer_pcode.analysis.effects.models import EffectSummary
 
+#: Longest thunk chain the resolver follows before giving up (fail closed).
+MAX_THUNK_CHAIN_LENGTH = 8
+
 
 @dataclass(frozen=True)
 class ExternalCallEffectPolicy:
-    """What the comparison observes beyond memory reachable from the caller."""
+    """What the comparison observes beyond memory reachable from the caller.
+
+    Projection of ``EquivalenceObservationContract.observe_errno`` /
+    ``observe_fenv``.  Build it with :meth:`from_observation_contract` so the
+    effect lane can never disagree with the authoritative contract.
+    """
 
     observe_errno: bool = False
     observe_fenv: bool = False
@@ -44,107 +60,93 @@ class ExternalCallEffectPolicy:
         if type(self.observe_errno) is not bool or type(self.observe_fenv) is not bool:
             raise TypeError("external call effect policy flags must be exact bools")
 
-
-@dataclass(frozen=True)
-class ExternalEffectModel:
-    """Explicit effect contract of one external function in the memory lane."""
-
-    name: str
-    writes_caller_memory: bool = False
-    may_set_errno: bool = False
-    may_touch_fenv: bool = False
+    @classmethod
+    def from_observation_contract(cls, contract: Any) -> "ExternalCallEffectPolicy":
+        observe_errno = getattr(contract, "observe_errno", None)
+        observe_fenv = getattr(contract, "observe_fenv", None)
+        if type(observe_errno) is not bool or type(observe_fenv) is not bool:
+            raise TypeError("observation contract must expose exact-bool observe_errno / observe_fenv")
+        return cls(observe_errno=observe_errno, observe_fenv=observe_fenv)
 
 
-def _pure(name: str, *, errno: bool = True, fenv: bool = True) -> ExternalEffectModel:
-    return ExternalEffectModel(name, writes_caller_memory=False, may_set_errno=errno, may_touch_fenv=fenv)
+class _ClassificationUnavailable(Exception):
+    """A Ghidra classification API is missing, raised, or returned a non-bool."""
 
 
-# Arithmetic library functions that read only their arguments and write no
-# caller-visible memory.  Functions with out-parameters (``frexp``, ``modf``,
-# ``remquo``, ...) are deliberately absent: they write through a pointer and
-# stay unsupported until modelled as store effects.
-PURE_MATH_EXTERNALS: dict[str, ExternalEffectModel] = {
-    model.name: model
-    for model in (
-        _pure("sqrt"), _pure("sqrtf"), _pure("cbrt"), _pure("cbrtf"),
-        _pure("fabs", errno=False, fenv=False), _pure("fabsf", errno=False, fenv=False),
-        _pure("abs", errno=False, fenv=False), _pure("labs", errno=False, fenv=False),
-        _pure("llabs", errno=False, fenv=False),
-        _pure("sin"), _pure("sinf"), _pure("cos"), _pure("cosf"), _pure("tan"), _pure("tanf"),
-        _pure("asin"), _pure("acos"), _pure("atan"), _pure("atan2"), _pure("atan2f"),
-        _pure("sinh"), _pure("cosh"), _pure("tanh"),
-        _pure("exp"), _pure("expf"), _pure("exp2"), _pure("expm1"),
-        _pure("log"), _pure("logf"), _pure("log2"), _pure("log10"), _pure("log1p"),
-        _pure("pow"), _pure("powf"), _pure("hypot"), _pure("fmod"),
-        _pure("floor", errno=False), _pure("floorf", errno=False),
-        _pure("ceil", errno=False), _pure("ceilf", errno=False),
-        _pure("round", errno=False), _pure("roundf", errno=False),
-        _pure("trunc", errno=False), _pure("truncf", errno=False),
-        _pure("rint"), _pure("nearbyint", errno=False),
-        _pure("fmax", errno=False, fenv=False), _pure("fmin", errno=False, fenv=False),
-        _pure("copysign", errno=False, fenv=False),
-    )
-}
-
-
-def normalize_external_name(name: Optional[str]) -> str:
-    """``__sqrt_finite`` / ``sqrt@plt`` / ``_sqrt`` -> ``sqrt``-style key.
-
-    Mirrors the deferred-call lane's name normalisation so both lanes agree
-    on which library symbol a callee is.
-    """
-
-    raw = str(name or "").strip()
-    if not raw:
-        return ""
-    raw = raw.split("@", 1)[0]
-    raw = raw.rsplit(".", 1)[-1] if "." in raw else raw
-    while raw.startswith("_"):
-        raw = raw[1:]
-    if raw.endswith("_finite"):
-        raw = raw[: -len("_finite")]
-    return raw.lower()
-
-
-def _safe_call(obj: Any, method: str, *args: Any) -> Any:
+def _exact_bool_call(obj: Any, method: str) -> bool:
     getter = getattr(obj, method, None)
     if not callable(getter):
-        return None
+        raise _ClassificationUnavailable(f"{method} unavailable")
     try:
-        return getter(*args)
-    except Exception:
-        return None
+        value = getter()
+    except Exception as exc:  # noqa: BLE001 - any failure is "unknown", never "false"
+        raise _ClassificationUnavailable(f"{method} raised {type(exc).__name__}") from exc
+    if type(value) is not bool:
+        raise _ClassificationUnavailable(f"{method} returned non-bool {type(value).__name__}")
+    return value
 
 
 def _is_external_function(function: Any) -> bool:
-    return _safe_call(function, "isExternal") is True
+    return _exact_bool_call(function, "isExternal")
 
 
-def _thunked_function(function: Any) -> Any:
-    if _safe_call(function, "isThunk") is not True:
-        return None
-    for args in ((True,), ()):
-        thunked = _safe_call(function, "getThunkedFunction", *args)
-        if thunked is not None and thunked is not function:
-            return thunked
-    return None
+# Tri-state thunk probe: "not_thunk" / "resolved" (with target) / "unavailable".
+_NOT_THUNK = "not_thunk"
+_RESOLVED = "resolved"
+_UNAVAILABLE = "unavailable"
+
+
+def _probe_thunk(function: Any) -> Tuple[str, Any]:
+    """Classify ``function`` as not-a-thunk, a thunk with a target, or unknowable.
+
+    ``isThunk() is True`` with no obtainable target is *not* the same as
+    ``not a thunk``: the callee is known to be a forwarding stub whose body
+    must not be read as evidence.
+    """
+
+    try:
+        if not _exact_bool_call(function, "isThunk"):
+            return _NOT_THUNK, None
+    except _ClassificationUnavailable:
+        return _UNAVAILABLE, None
+    getter = getattr(function, "getThunkedFunction", None)
+    if not callable(getter):
+        return _UNAVAILABLE, None
+    try:
+        target = getter(False)
+    except Exception:  # noqa: BLE001
+        return _UNAVAILABLE, None
+    if target is None:
+        return _UNAVAILABLE, None
+    return _RESOLVED, target
 
 
 @dataclass(frozen=True)
 class EffectCalleeResolution:
     """How the effect lane must treat a resolved callee function object.
 
-    ``kind`` is ``"analyze"`` (decompile and summarise ``function``),
-    ``"modeled"`` (use ``summary``; ``model`` names the contract) or
-    ``"unsupported"`` (no summary; ``reason`` explains why).
+    ``kind`` is ``"analyze"`` (decompile and summarise ``function``) or
+    ``"unsupported"`` (no summary; ``reason`` explains why).  ``summary``
+    is always ``None`` today: no external is modelled.
     """
 
     kind: str
     function: Any = None
     summary: Optional[EffectSummary] = None
-    model: Optional[ExternalEffectModel] = None
     reason: Optional[str] = None
     external_name: Optional[str] = None
+
+
+def _unsupported(reason: str, function: Any = None) -> EffectCalleeResolution:
+    name = None
+    getter = getattr(function, "getName", None)
+    if callable(getter):
+        try:
+            raw = getter()
+            name = str(raw) if raw is not None else None
+        except Exception:  # noqa: BLE001
+            name = None
+    return EffectCalleeResolution("unsupported", reason=reason, external_name=name)
 
 
 def resolve_effect_callee(
@@ -153,53 +155,36 @@ def resolve_effect_callee(
     *,
     parameter_names: Tuple[str, ...] = (),
 ) -> EffectCalleeResolution:
-    """Classify a Ghidra function object for the effect lane (see module doc)."""
+    """Classify a Ghidra function object for the effect lane (see module doc).
 
+    ``policy`` is accepted so callers thread the observation boundary through
+    one place; with no modelled external it does not change the answer.
+    """
+
+    del parameter_names  # no modelled summary is produced
     if function is None:
-        return EffectCalleeResolution("unsupported", reason="callee_function_unavailable")
-    policy = policy or ExternalCallEffectPolicy()
+        return _unsupported("callee_function_unavailable")
+    if policy is not None and type(policy) is not ExternalCallEffectPolicy:
+        raise TypeError("policy must be an ExternalCallEffectPolicy or None")
 
     resolved = function
-    thunked = _thunked_function(function)
-    if thunked is not None:
-        # Follow thunk chains (bounded) to the real body when it is internal.
-        depth = 0
-        while thunked is not None and depth < 8:
-            resolved = thunked
-            thunked = _thunked_function(resolved)
-            depth += 1
-        if not _is_external_function(resolved):
-            return EffectCalleeResolution("analyze", function=resolved)
-    if not _is_external_function(resolved):
-        return EffectCalleeResolution("analyze", function=resolved)
+    seen: list = [function]
+    state, target = _probe_thunk(resolved)
+    while state == _RESOLVED:
+        if any(target is prior for prior in seen):
+            return _unsupported("thunk_chain_cyclic", function)
+        if len(seen) >= MAX_THUNK_CHAIN_LENGTH:
+            return _unsupported("thunk_chain_length_exceeded", function)
+        seen.append(target)
+        resolved = target
+        state, target = _probe_thunk(resolved)
+    if state == _UNAVAILABLE:
+        return _unsupported("thunk_target_unresolved", resolved)
 
-    external_name = normalize_external_name(_safe_call(resolved, "getName"))
-    model = PURE_MATH_EXTERNALS.get(external_name)
-    if model is None:
-        return EffectCalleeResolution(
-            "unsupported",
-            reason="external_callee_effect_unmodeled",
-            external_name=external_name or None,
-        )
-    if model.writes_caller_memory:
-        return EffectCalleeResolution(
-            "unsupported", reason="external_callee_writes_caller_memory", external_name=external_name,
-        )
-    if policy.observe_errno and model.may_set_errno:
-        return EffectCalleeResolution(
-            "unsupported", reason="external_callee_errno_observed", external_name=external_name,
-        )
-    if policy.observe_fenv and model.may_touch_fenv:
-        return EffectCalleeResolution(
-            "unsupported", reason="external_callee_fenv_observed", external_name=external_name,
-        )
-    summary = EffectSummary(
-        parameter_names=list(parameter_names),
-        effects=[],
-        synthetic_expr=None,
-        has_unsupported_call=False,
-        incomplete_reasons=(),
-    )
-    return EffectCalleeResolution(
-        "modeled", function=resolved, summary=summary, model=model, external_name=external_name,
-    )
+    try:
+        external = _is_external_function(resolved)
+    except _ClassificationUnavailable:
+        return _unsupported("callee_classification_unavailable", resolved)
+    if external:
+        return _unsupported("external_callee_effect_unmodeled", resolved)
+    return EffectCalleeResolution("analyze", function=resolved)

@@ -713,12 +713,6 @@ class EffectIntegrationService:
                 self.external_call_effect_policy(),
                 parameter_names=(),
             )
-            if callee_resolution.kind == "modeled":
-                self.debug_reporter.debug_print(
-                    f"[EffectSummary] external callee {callee_resolution.external_name}: "
-                    f"explicit effect model (no caller-visible memory write)"
-                )
-                return callee_resolution.summary
             if callee_resolution.kind != "analyze":
                 self.debug_reporter.debug_print(
                     f"[EffectSummary] external callee not summarised: "

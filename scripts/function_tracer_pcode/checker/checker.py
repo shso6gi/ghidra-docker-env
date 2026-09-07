@@ -140,6 +140,45 @@ class StageSpec:
     strategy: str  # "pairwise" or "monolithic"
 
 
+def _finalize_observation_contract(
+    contract: Optional[EquivalenceObservationContract],
+    *,
+    observes_errno: Optional[bool],
+    observes_fenv: Optional[bool],
+) -> EquivalenceObservationContract:
+    """observation contract を 1 回だけ確定する。
+
+    - contract 省略時: 省略形フラグ（None は False）から生成する。
+    - contract 明示時: 省略形フラグが None でなく contract と異なれば ValueError。
+      contract と一致する明示値は許容する。
+    """
+
+    for name, value in (("observes_errno", observes_errno), ("observes_fenv", observes_fenv)):
+        if value is not None and type(value) is not bool:
+            raise TypeError(f"{name} must be an exact bool or None")
+    if contract is None:
+        return EquivalenceObservationContract(
+            observe_errno=bool(observes_errno),
+            observe_fenv=bool(observes_fenv),
+        )
+    if not isinstance(contract, EquivalenceObservationContract):
+        raise TypeError("observation_contract must be an EquivalenceObservationContract")
+    mismatches = [
+        name
+        for name, value, contract_value in (
+            ("observes_errno", observes_errno, contract.observe_errno),
+            ("observes_fenv", observes_fenv, contract.observe_fenv),
+        )
+        if value is not None and value != contract_value
+    ]
+    if mismatches:
+        raise ValueError(
+            "observation flags contradict the explicit observation contract: "
+            + ", ".join(mismatches)
+        )
+    return contract
+
+
 class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, RecoveryProofMixin, RecurrenceStageMixin):
     """等価性判定を行うクラス"""
     
@@ -162,8 +201,8 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         enable_template_abstraction: bool = False,
         enable_completed_recovery_proofs: bool = True,
         assume_fp_non_nan: bool = False,
-        observes_errno: bool = False,
-        observes_fenv: bool = False,
+        observes_errno: Optional[bool] = None,
+        observes_fenv: Optional[bool] = None,
         observation_contract: Optional[EquivalenceObservationContract] = None,
         call_proof_decision_mode: str = "preflight_projection",
         canonical_decision_cutover: bool = True,
@@ -199,20 +238,22 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         self.enable_template_abstraction = enable_template_abstraction
         self.enable_completed_recovery_proofs = enable_completed_recovery_proofs
         self.assume_fp_non_nan = assume_fp_non_nan
-        self.observes_errno = observes_errno
-        self.observes_fenv = observes_fenv
+        # 観測境界の authority は observation_contract のみ。observes_errno /
+        # observes_fenv は contract を省略した呼び出しのための省略形で、明示
+        # contract と食い違う値を渡した場合は黙って片方を採用せず reject する。
+        self.observation_contract = _finalize_observation_contract(
+            observation_contract, observes_errno=observes_errno, observes_fenv=observes_fenv,
+        )
+        self.observes_errno = self.observation_contract.observe_errno
+        self.observes_fenv = self.observation_contract.observe_fenv
         from scripts.function_tracer_pcode.analysis.effects.external_call_models import (
             ExternalCallEffectPolicy,
         )
 
-        # Issue #104 (Gap 4): the effect lane's treatment of external callees
-        # follows the same observation flags as the deferred-call lane.
-        self.external_call_effect_policy = ExternalCallEffectPolicy(
-            observe_errno=bool(observes_errno), observe_fenv=bool(observes_fenv),
-        )
-        self.observation_contract = observation_contract or EquivalenceObservationContract(
-            observe_errno=observes_errno,
-            observe_fenv=observes_fenv,
+        # Issue #104 (Gap 4): effect lane の external callee 方針は確定済み
+        # contract からのみ導出する（raw 引数からは作らない）。
+        self.external_call_effect_policy = ExternalCallEffectPolicy.from_observation_contract(
+            self.observation_contract
         )
         self.call_proof_decision_mode = CallProofDecisionMode(call_proof_decision_mode)
         if type(canonical_decision_cutover) is not bool:
