@@ -1254,10 +1254,14 @@ def test_pre_return_summary_early_return_syncs_before_its_cache_write():
 
 
 def _callee_analysis_with_marker(scope_key=("callee_scope",), label="callee_fn"):
+    from scripts.function_tracer_pcode.core.analysis import ReturnInfo
+
     callee_record = _record(owner_scope_key=scope_key, label="callee side")
     callee = _analysis(
         function_name=label,
         analysis_scope_key=scope_key,
+        # 展開候補になる戻り値ケースを持つ callee（= 実際に利用され得る）
+        returns=[ReturnInfo(address="0x2000", value=Expression.constant(7, 4), conditions=[])],
         expansion_budget_truncations=(callee_record,),
     )
     return callee, callee_record
@@ -1321,6 +1325,32 @@ def test_call_resolver_records_into_the_collector_its_owner_bound(monkeypatch):
     assert records[0].owner_scope_key == ("caller_summary_scope",)
     assert records[0].callee_scope_key == ("callee_scope",)
     assert records[0].referenced_event_ids == (callee_record.event_id,)
+
+
+def test_call_resolver_does_not_record_a_callee_that_contributed_no_expansion():
+    """展開候補を 1 件も返さなかった callee は「利用した」とみなさない。"""
+    from unittest.mock import patch
+
+    analyzer = _analyzer()
+    analyzer._current_analysis_scope_key = ("caller_analysis_scope",)
+    callee, _ = _callee_analysis_with_marker()
+    callee.returns = []  # 戻り値ケースが無いので expander へ渡す候補が作れない
+    summary_collector = ExpansionBudgetCollector()
+
+    stack = _install_adopting_call_resolver(analyzer, callee)
+    for item in stack:
+        item.__enter__()
+    try:
+        expanded = analyzer._make_call_resolver(
+            set(), None, budget_collector=summary_collector
+        )(_ResolvableTarget(), [])
+    finally:
+        for item in reversed(stack):
+            item.__exit__(None, None, None)
+
+    assert not expanded
+    assert summary_collector.as_tuple() == ()
+    assert analyzer._current_expansion_budget_collector.as_tuple() == ()
 
 
 def test_call_resolver_without_a_bound_collector_uses_the_current_analysis_scope():

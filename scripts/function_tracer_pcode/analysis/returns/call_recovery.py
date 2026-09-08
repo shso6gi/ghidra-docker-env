@@ -1689,14 +1689,16 @@ def _impl__resolve_call_expansions(
         )
     except (AttributeError, TypeError, ValueError):
         expanded.return_signed = None
-    # Issue #131: callee 解析を意味入力として採用した箇所。callee の marker 本体は
-    # 複製せず、callee scope と参照 event ID だけを利用側 scope へ残す。効果要約の
-    # 構築中は要約自身の collector（= その要約の診断 cache）へ入る。
-    self._record_callee_analysis_expansion_budget(
-        specialized,
-        owner_scope_key=budget_owner_scope_key,
-        collector=budget_collector,
-    )
+    if expanded:
+        # Issue #131: callee 解析を意味入力として採用した箇所。展開候補を 1 件も返さ
+        # なかった callee は利用していないので記録しない。callee の marker 本体は複製
+        # せず、callee scope と参照 event ID だけを利用側 scope へ残す。効果要約の構築
+        # 中は要約自身の collector（= その要約の診断 cache）へ入る。
+        self._record_callee_analysis_expansion_budget(
+            specialized,
+            owner_scope_key=budget_owner_scope_key,
+            collector=budget_collector,
+        )
     return expanded
 
 
