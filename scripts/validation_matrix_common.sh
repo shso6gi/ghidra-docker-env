@@ -1,5 +1,38 @@
 #!/usr/bin/env bash
 
+# Issue #131: 正の整数設定の「要求値」から「実効値」を求める。
+#
+# 判定規則は解析器側 (`config/settings.py::_positive_int_setting`) と 1 本化する:
+# 検証そのものをその関数へ委譲し、runner 側で規則を二重実装しない。unset / 空白のみ /
+# 非整数 / 0 以下は既定値へ戻る。委譲に失敗した場合も既定値を返すので、runner が子へ
+# 渡す値は常に正の整数であり、子プロセスがその値を再検証しても同じ値になる。
+validation_positive_int_setting() {
+    local requested="${1-}"
+    local default_value_arg="$2"
+    local python_bin="${3:-${PYTHON_BIN:-python3}}"
+    local repo_root="${4:-${SCRIPT_DIR:-.}}"
+    local effective
+    effective="$(
+        cd "$repo_root" 2>/dev/null &&
+        "$python_bin" -B -c '
+import sys
+from scripts.function_tracer_pcode.config.settings import _positive_int_setting
+name = "SETTING"
+print(_positive_int_setting(name, int(sys.argv[2]), {name: sys.argv[1]}))
+' "$requested" "$default_value_arg" 2>/dev/null
+    )" || effective=""
+    if [[ "$effective" =~ ^[1-9][0-9]*$ ]]; then
+        printf '%s\n' "$effective"
+    else
+        printf '%s\n' "$default_value_arg"
+    fi
+}
+
+# 実行記録の 1 行に安全に埋め込める形へ整える（改行・復帰を潰す）。
+validation_manifest_value() {
+    printf '%s' "${1-}" | tr '\r\n' '  '
+}
+
 validation_prepare_before_after_logs() {
     VALIDATION_BEFORE_SOURCE="not configured"
     VALIDATION_MOVED_OUTPUT_DIR=""
@@ -201,6 +234,8 @@ validation_run_benchmark_gate() {
     return 0
 }
 
+export -f validation_positive_int_setting
+export -f validation_manifest_value
 export -f validation_run_benchmark_gate
 export -f validation_result_log_is_complete
 export -f validation_result_log_has_final_authority

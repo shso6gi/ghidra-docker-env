@@ -35,7 +35,10 @@ default_value DECOMPILE_TIMEOUT 60
 default_value PAIRWISE_TIMEOUT 5
 default_value PAIRWISE_TIMEOUT_HARD 30
 # Issue #131: 共通 dedup のケース数上限。既定は本番と同じ 16。
-default_value FT_EXPANDER_DEDUP_CASE_LIMIT 16
+# 要求値と実効値を分けて持つ（規則は解析器側と 1 本化。Eq runner と同じ扱い）。
+FT_EXPANDER_DEDUP_CASE_LIMIT_REQUESTED="${FT_EXPANDER_DEDUP_CASE_LIMIT-}"
+FT_EXPANDER_DEDUP_CASE_LIMIT="$(validation_positive_int_setting \
+    "$FT_EXPANDER_DEDUP_CASE_LIMIT_REQUESTED" 16)"
 export FT_EXPANDER_DEDUP_CASE_LIMIT
 default_value PAIR_PROCESS_TIMEOUT 600s
 default_value PAIR_PROCESS_KILL_AFTER 30s
@@ -538,7 +541,8 @@ equiv_timeout=$EQUIV_TIMEOUT
 decompile_timeout=$DECOMPILE_TIMEOUT
 pairwise_timeout=$PAIRWISE_TIMEOUT
 pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD
-expander_dedup_case_limit=$FT_EXPANDER_DEDUP_CASE_LIMIT
+expander_dedup_case_limit_requested=$(validation_manifest_value "$FT_EXPANDER_DEDUP_CASE_LIMIT_REQUESTED")
+expander_dedup_case_limit_effective=$FT_EXPANDER_DEDUP_CASE_LIMIT
 skip_completed_results=$SKIP_COMPLETED_RESULTS
 error_only_rerun=$ERROR_ONLY_RERUN
 debug=$EQBENCH_DEBUG
