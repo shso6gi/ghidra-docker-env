@@ -37,14 +37,35 @@ from conftest import MockProgram, create_mock_analysis
 _CORRECT_SOURCE = "long f(long a) { return a; }\n"
 _FALSE_SOURCE = "void f(long a) { (void)a; }\n"
 
-# 実行時間そのものを持つ field だけを除外する。判定に効く field は除外しない。
-_TIME_FIELDS = {
-    "total_time",
+# 同じ入力・同じレイアウトで 2 回走らせても必ず変わる leaf だけを列挙する
+# （乱数のセッション id と実時間）。`debug_trace` / `diagnostics` を丸ごと落とすと
+# `effective_function*_signature` のような判定に効く field まで比較対象から外れ、
+# AC4 の保証が弱くなるので、key 名で厳密に指定して再帰的に取り除く。
+_VOLATILE_KEYS = frozenset({
+    "analysis_seconds",
     "analysis_time",
-    "solver_time",
+    "comparison_session_id",
+    "elapsed_seconds",
     "elapsed_time",
+    "process_age_at_start_seconds",
+    "solver_time",
     "stage_timing",
-}
+    "timings",
+    "total_time",
+})
+
+
+def _drop_volatile(value):
+    """run ごとに必ず変わる時刻・セッション id だけを再帰的に取り除く。"""
+    if isinstance(value, dict):
+        return {
+            key: _drop_volatile(item)
+            for key, item in value.items()
+            if key not in _VOLATILE_KEYS
+        }
+    if isinstance(value, list):
+        return [_drop_volatile(item) for item in value]
+    return value
 
 
 def _mock_analysis():
@@ -174,6 +195,11 @@ def _run_cli(monkeypatch, directory, observations):
     binary1.write_bytes(b"\x7fELF-binary-1")
     binary2.write_bytes(b"\x7fELF-binary-2")
     output = directory / "result.txt"
+    # production の `write_to_file()` は append で開くので、直前の run の出力が
+    # 残っていると `_semantic_projection()` が 1 回目の JSON を読み続けてしまう。
+    # 1 CLI 実行 = 1 出力ファイル にしてから走らせる。
+    if output.exists():
+        output.unlink()
 
     args = build_parser().parse_args([
         "--equiv", str(binary1), str(binary2),
@@ -217,13 +243,13 @@ def _run_cli(monkeypatch, directory, observations):
 
 def _semantic_projection(observations, output_text):
     result = observations["result"]
-    payload = json.loads(
+    # この run の JSON だけが入っていること（append で混ざっていないこと）。
+    assert output_text.count("=== EQUIVALENCE_RESULT_JSON_BEGIN ===") == 1
+    payload = _drop_volatile(json.loads(
         output_text.split("=== EQUIVALENCE_RESULT_JSON_BEGIN ===")[1]
         .split("=== EQUIVALENCE_RESULT_JSON_END ===")[0]
         .strip()
-    )
-    for field in _TIME_FIELDS:
-        payload.pop(field, None)
+    ))
     return {
         "is_equivalent": result.is_equivalent,
         "function1_signature_hypotheses": list(result.function1_signature_hypotheses),
@@ -267,6 +293,10 @@ def test_semantic_result_is_identical_without_correct_and_false_adjacent_source(
     assert absent["is_equivalent"] is True
     assert absent["function1_signature_hypotheses"] == []
     assert absent["function2_signature_hypotheses"] == []
+    # 揮発 leaf の除去が、偽 `.c` の void override で実際に変化する field まで
+    # 落としていないことを確認する（落としていれば比較が骨抜きになる）。
+    assert absent["result_json"]["effective_function1_signature"]
+    assert absent["result_json"]["effective_function2_signature"]
 
 
 def test_no_source_declared_provenance_or_hypothesis_phase_remains(monkeypatch, tmp_path):
