@@ -17,6 +17,7 @@ from scripts.function_tracer_pcode.core.intrinsics import resolve_pcode_intrinsi
 from scripts.function_tracer_pcode.core.runtime_refs import (
     AddressValueRef,
     DeferredCallRef,
+    ExpansionBudgetCollector,
     PcodeOpRef,
     UnknownValueRef,
 )
@@ -292,9 +293,14 @@ def _impl__try_apply_triangular_mod_caller_outcomes(
     if "outcome_partition_unknown_callee_positive_region" not in analysis.analysis_notes:
         analysis.analysis_notes.append("outcome_partition_unknown_callee_positive_region")
     # Issue #131: callee の outcome 契約を実際に採用した箇所（候補を見ただけで
-    # 降りた経路では記録しない）。seed 構築より前にここで解析結果へ反映する。
-    self._record_callee_analysis_expansion_budget(matched_callee_analysis)
-    self._sync_expansion_budget_truncations(analysis)
+    # 降りた経路では記録しない）。周囲の session ではなく解析結果へ直接反映する。
+    outcome_collector = ExpansionBudgetCollector()
+    self._record_callee_analysis_expansion_budget(
+        matched_callee_analysis,
+        owner_scope_key=getattr(analysis, "analysis_scope_key", None),
+        collector=outcome_collector,
+    )
+    self._sync_expansion_budget_truncations(analysis, collector=outcome_collector)
     return True
 
 
@@ -501,27 +507,36 @@ def _impl__apply_bounded_call_refinement(
             args=args,
         )
 
-    # Issue #131: refiner へ渡した callee 解析のうち、実際に refinement が適用された
-    # 場合だけ marker を残す（候補を検索しただけの callee とは区別する）。
-    provided_callee_analyses: List[FunctionReturnAnalysis] = []
+    # Issue #131: refiner が callee の戻り値を caller の展開へ実際に積んだ地点だけを
+    # 記録する。provider が返しただけの候補（引数 alignment 失敗・width 安全性違反・
+    # 条件矛盾・展開不成立）では marker を作らない。記録先は refine 対象の analysis
+    # scope で、周囲の session へは混ぜない。
+    refinement_collector = ExpansionBudgetCollector()
+    refinement_owner_scope_key = getattr(analysis, "analysis_scope_key", None)
 
-    def provide_analysis_with_budget_record(target, args=None):
-        provided = provide_analysis(target, args)
-        if provided is not None:
-            provided_callee_analyses.append(provided)
-        return provided
+    def record_adopted_callee(callee_analysis) -> None:
+        self._record_callee_analysis_expansion_budget(
+            callee_analysis,
+            owner_scope_key=refinement_owner_scope_key,
+            collector=refinement_collector,
+        )
 
     refiner = BoundedCallRefiner(
-        provide_analysis_with_budget_record,
+        provide_analysis,
         max_unroll=self._bounded_call_unroll_limit,
         max_cases=self._bounded_call_max_cases,
         debug=self.debug,
+        on_callee_adopted=record_adopted_callee,
     )
+    returns_before_refinement = analysis.returns
     changed = refiner.refine_analysis(analysis)
+    if analysis.returns is not returns_before_refinement:
+        # 展開結果が実際に採用された（returns が置き換わった）ときだけ反映する。
+        self._sync_expansion_budget_truncations(
+            analysis,
+            collector=refinement_collector,
+        )
     if changed:
-        for provided in provided_callee_analyses:
-            self._record_callee_analysis_expansion_budget(provided)
-        self._sync_expansion_budget_truncations(analysis)
         self._debug_print(
             f"Applied bounded call refinement to '{analysis.function_name}' "
             f"(remaining deferred calls={len(analysis.deferred_calls)})"
@@ -1506,9 +1521,30 @@ def _impl__invoke_get_or_analyze_call_target(
             )
 
 
-def _impl__make_call_resolver(self, active_functions: Set[Tuple[Any, ...]], current_function=None):
+def _impl__make_call_resolver(
+    self,
+    active_functions: Set[Tuple[Any, ...]],
+    current_function=None,
+    *,
+    budget_collector=None,
+    budget_owner_scope_key=None,
+):
+    """CALL 展開用の resolver を作る。
+
+    Issue #131: 採用した callee の切り捨て marker をどこへ残すかは、resolver を作る側
+    （= その展開を所有する scope）が束縛する。効果要約の構築中は要約自身の局所
+    collector と summary cache key を渡すこと。省略時は現在の解析 session。
+    """
+
     def resolve_call(target, args):
-        return self._resolve_call_expansions(target, args, active_functions, current_function)
+        return self._resolve_call_expansions(
+            target,
+            args,
+            active_functions,
+            current_function,
+            budget_collector=budget_collector,
+            budget_owner_scope_key=budget_owner_scope_key,
+        )
 
     return resolve_call
 
@@ -1519,6 +1555,9 @@ def _impl__resolve_call_expansions(
     args: List[Expression],
     active_functions: Set[Tuple[Any, ...]],
     current_function=None,
+    *,
+    budget_collector=None,
+    budget_owner_scope_key=None,
 ):
     from scripts.function_tracer_pcode.semantics.transform.expander import ExpandedValue
 
@@ -1559,6 +1598,8 @@ def _impl__resolve_call_expansions(
 
     specialized = analysis if already_specialized else self._specialize_call_analysis(analysis, args)
     if specialized.deferred_calls:
+        # bounded refinement の marker は specialized 自身へ載る（呼び出し元 session
+        # には混ぜない）。下の callee_analysis marker がそれを参照 ID で拾う。
         self._apply_bounded_call_refinement(
             specialized,
             active_functions,
@@ -1649,8 +1690,13 @@ def _impl__resolve_call_expansions(
     except (AttributeError, TypeError, ValueError):
         expanded.return_signed = None
     # Issue #131: callee 解析を意味入力として採用した箇所。callee の marker 本体は
-    # 複製せず、callee scope と参照 event ID だけを caller の scope へ残す。
-    self._record_callee_analysis_expansion_budget(specialized)
+    # 複製せず、callee scope と参照 event ID だけを利用側 scope へ残す。効果要約の
+    # 構築中は要約自身の collector（= その要約の診断 cache）へ入る。
+    self._record_callee_analysis_expansion_budget(
+        specialized,
+        owner_scope_key=budget_owner_scope_key,
+        collector=budget_collector,
+    )
     return expanded
 
 

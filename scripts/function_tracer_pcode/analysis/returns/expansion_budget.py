@@ -53,13 +53,22 @@ def callee_reference_truncation(
     records: Optional[Iterable[ExpansionBudgetTruncation]],
     *,
     callee_scope_key,
+    owner_scope_key=None,
     label: Optional[str] = None,
     surface: str = "callee",
 ) -> Optional[ExpansionBudgetTruncation]:
     """採用した callee 側の記録から ``callee_analysis`` marker を 1 件作る。
 
+    3 つを明示する:
+
+    * 誰が利用したか … ``owner_scope_key``（利用した caller の解析/要約 scope）
+    * 何を利用したか … ``callee_scope_key``
+    * 何を参照したか … ``referenced_event_ids``
+
     callee の marker 本体は再帰コピーせず、callee scope と参照 event ID だけを持つ。
-    記録が無ければ marker を作らない（診断欠落から切り捨てを推定しない）。
+    ``owner_scope_key`` は発生事実キーに入るので、同じ callee を別 caller scope から
+    利用した場合は別 event になる。記録が無ければ marker を作らない（診断欠落から
+    切り捨てを推定しない）。
     """
 
     event_ids = expansion_budget_event_ids(records)
@@ -68,6 +77,7 @@ def callee_reference_truncation(
     return ExpansionBudgetTruncation(
         kind="callee_analysis",
         surface=surface,
+        owner_scope_key=owner_scope_key,
         callee_scope_key=callee_scope_key,
         label=label,
         referenced_event_ids=event_ids,
@@ -120,10 +130,12 @@ def _impl__record_callee_analysis_expansion_budget(
     analysis,
     *,
     surface: str = "callee",
+    owner_scope_key=None,
     collector: Optional[ExpansionBudgetCollector] = None,
 ) -> None:
     """callee 解析結果を意味入力として採用した箇所で ``callee_analysis`` を残す。
 
+    ``owner_scope_key`` は「誰が利用したか」。省略時は現在の解析 scope を使う。
     callee の marker 本体は再帰コピーせず、callee scope と参照 event ID だけを持つ。
     記録が無い callee からは marker を作らない（診断欠落から切り捨てを推定しない）。
     """
@@ -133,6 +145,11 @@ def _impl__record_callee_analysis_expansion_budget(
     marker = callee_reference_truncation(
         getattr(analysis, "expansion_budget_truncations", ()) or (),
         callee_scope_key=getattr(analysis, "analysis_scope_key", None),
+        owner_scope_key=(
+            owner_scope_key
+            if owner_scope_key is not None
+            else self._current_analysis_scope_key
+        ),
         label=(
             analysis.function_ref.display_name()
             if getattr(analysis, "function_ref", None) is not None

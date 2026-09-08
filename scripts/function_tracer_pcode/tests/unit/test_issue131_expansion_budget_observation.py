@@ -1246,3 +1246,503 @@ def test_pre_return_summary_early_return_syncs_before_its_cache_write():
     assert [item.label for item in result.expansion_budget_truncations] == ["pre_return_summary"]
     cached = analyzer._call_analysis_cache[result.analysis_scope_key]
     assert cached.expansion_budget_truncations == result.expansion_budget_truncations
+
+
+# ---------------------------------------------------------------------------
+# 効果要約構築中の callee 採用（呼び出し元 session ではなく要約の診断 cache へ）
+# ---------------------------------------------------------------------------
+
+
+def _callee_analysis_with_marker(scope_key=("callee_scope",), label="callee_fn"):
+    callee_record = _record(owner_scope_key=scope_key, label="callee side")
+    callee = _analysis(
+        function_name=label,
+        analysis_scope_key=scope_key,
+        expansion_budget_truncations=(callee_record,),
+    )
+    return callee, callee_record
+
+
+def _install_adopting_call_resolver(analyzer, callee):
+    """実際の ``_make_call_resolver`` / ``_resolve_call_expansions`` を通す最小 patch。
+
+    Ghidra 依存（target 解決・引数特殊化）だけを差し替え、marker の記録先の決定は
+    production の実装をそのまま動かす。
+    """
+    from unittest.mock import patch
+
+    return [
+        patch.object(analyzer, "_coerce_runtime_target_ref", side_effect=lambda target: target),
+        patch.object(analyzer, "_target_active_key", return_value=None),
+        patch.object(analyzer, "_invoke_get_or_analyze_call_target", return_value=callee),
+        patch.object(analyzer, "_analysis_is_fully_argument_specialized", return_value=True),
+        patch.object(analyzer, "_call_summary_is_safe", return_value=True),
+    ]
+
+
+class _ResolvableTarget:
+    """`CallTargetRef` の代わりに使う最小の target。"""
+
+    def is_code_address(self):
+        return False
+
+    def display_name(self):
+        return "callee_fn"
+
+
+def test_call_resolver_records_into_the_collector_its_owner_bound(monkeypatch):
+    """効果要約が渡した collector へ入り、周囲の AnalysisSession には入らない。"""
+    analyzer = _analyzer()
+    analyzer._current_analysis_scope_key = ("caller_analysis_scope",)
+    callee, callee_record = _callee_analysis_with_marker()
+    summary_collector = ExpansionBudgetCollector()
+
+    stack = _install_adopting_call_resolver(analyzer, callee)
+    for item in stack:
+        item.__enter__()
+    try:
+        resolver = analyzer._make_call_resolver(
+            set(),
+            None,
+            budget_collector=summary_collector,
+            budget_owner_scope_key=("caller_summary_scope",),
+        )
+        expanded = resolver(_ResolvableTarget(), [])
+    finally:
+        for item in reversed(stack):
+            item.__exit__(None, None, None)
+
+    assert expanded is not None
+    # 周囲の session には入らない
+    assert analyzer._current_expansion_budget_collector.as_tuple() == ()
+    records = summary_collector.as_tuple()
+    assert len(records) == 1
+    assert records[0].kind == "callee_analysis"
+    assert records[0].owner_scope_key == ("caller_summary_scope",)
+    assert records[0].callee_scope_key == ("callee_scope",)
+    assert records[0].referenced_event_ids == (callee_record.event_id,)
+
+
+def test_call_resolver_without_a_bound_collector_uses_the_current_analysis_scope():
+    analyzer = _analyzer()
+    analyzer._current_analysis_scope_key = ("caller_analysis_scope",)
+    callee, callee_record = _callee_analysis_with_marker()
+
+    stack = _install_adopting_call_resolver(analyzer, callee)
+    for item in stack:
+        item.__enter__()
+    try:
+        analyzer._make_call_resolver(set(), None)(_ResolvableTarget(), [])
+    finally:
+        for item in reversed(stack):
+            item.__exit__(None, None, None)
+
+    records = analyzer._current_expansion_budget_collector.as_tuple()
+    assert len(records) == 1
+    assert records[0].owner_scope_key == ("caller_analysis_scope",)
+    assert records[0].referenced_event_ids == (callee_record.event_id,)
+
+
+def _build_effect_summary_harness(analyzer, callee):
+    """``build_effect_summary`` を実際に走らせるための最小 harness。
+
+    STORE 走査（Ghidra 依存）だけを差し替え、渡された ``direct_call_expander`` を実際に
+    呼ぶ。resolver・marker の記録先・診断 cache への保存は production のまま。
+    """
+    from unittest.mock import Mock, patch
+
+    import scripts.function_tracer_pcode.analysis.returns.effect_integration as effect_integration
+
+    service = analyzer._effect_integration
+    function = Mock()
+    high_function = Mock()
+    calls = {"count": 0}
+
+    def _fake_summarize_store_effects(*_args, **kwargs):
+        calls["count"] += 1
+        expander = kwargs["direct_call_expander"]
+        expander(_ResolvableTarget(), [])
+        return Mock(
+            incomplete_reasons=(),
+            effects=[],
+            synthetic_expr=None,
+            has_unsupported_call=False,
+            function_control_effect_profile=None,
+        )
+
+    stack = [
+        patch.object(
+            effect_integration, "summarize_store_effects", _fake_summarize_store_effects
+        ),
+        patch.object(
+            effect_integration, "lifecycle_function_cache_key", return_value=("fn",)
+        ),
+        patch.object(service, "analysis_scope_key", return_value=("summary_scope",)),
+        patch.object(service, "build_function_control_effect_profile", return_value=None),
+        patch.object(service, "program_value", return_value=Mock()),
+        patch.object(service, "extend_active_functions", side_effect=lambda a, _t: a),
+        patch.object(service, "debug_flag", return_value=False),
+        *_install_adopting_call_resolver(analyzer, callee),
+    ]
+    condition_tracker = Mock(block_by_index={})
+    return service, function, high_function, condition_tracker, stack, calls
+
+
+def test_effect_summary_callee_truncation_lands_in_its_own_diagnostics_cache():
+    analyzer = _analyzer()
+    analyzer._current_analysis_scope_key = ("caller_analysis_scope",)
+    callee, callee_record = _callee_analysis_with_marker()
+    from unittest.mock import Mock
+
+    service, function, high_function, tracker, stack, calls = _build_effect_summary_harness(
+        analyzer, callee
+    )
+    for item in stack:
+        item.__enter__()
+    try:
+        summary = service.build_effect_summary(
+            function, high_function, Mock(), tracker, [], set()
+        )
+        assert calls["count"] == 1
+        # 2 度目は effect summary cache hit（再構築しない）
+        cached_summary = service.build_effect_summary(
+            function, high_function, Mock(), tracker, [], set()
+        )
+    finally:
+        for item in reversed(stack):
+            item.__exit__(None, None, None)
+
+    assert cached_summary is summary
+    assert calls["count"] == 1
+
+    diagnostics = analyzer._effect_summary_budget_diagnostics[("summary_scope",)]
+    assert len(diagnostics) == 1
+    assert diagnostics[0].kind == "callee_analysis"
+    assert diagnostics[0].owner_scope_key == ("summary_scope",)
+    assert diagnostics[0].callee_scope_key == ("callee_scope",)
+    assert diagnostics[0].referenced_event_ids == (callee_record.event_id,)
+
+    # 呼び出し元 session には過剰記録しない
+    assert analyzer._current_expansion_budget_collector.as_tuple() == ()
+
+    # cache hit 後でも診断 cache から復元できる
+    analyzer._absorb_effect_summary_budget_diagnostics(("summary_scope",))
+    restored = analyzer._current_expansion_budget_collector.as_tuple()
+    assert restored == diagnostics
+
+
+def test_same_callee_used_by_different_owner_scopes_yields_distinct_events():
+    callee, callee_record = _callee_analysis_with_marker()
+    left = callee_reference_truncation(
+        callee.expansion_budget_truncations,
+        callee_scope_key=("callee_scope",),
+        owner_scope_key=("caller_a",),
+        label="callee_fn",
+    )
+    right = callee_reference_truncation(
+        callee.expansion_budget_truncations,
+        callee_scope_key=("callee_scope",),
+        owner_scope_key=("caller_b",),
+        label="callee_fn",
+    )
+    assert left.event_id != right.event_id
+    # 参照先は同じでも、利用者ごとに別 event として保持される
+    assert left.referenced_event_ids == right.referenced_event_ids == (callee_record.event_id,)
+    assert len(merge_expansion_budget_truncations([left], [right])) == 2
+    # owner を持たない記録とも混同しない
+    unbound = callee_reference_truncation(
+        callee.expansion_budget_truncations, callee_scope_key=("callee_scope",)
+    )
+    assert unbound.event_id not in {left.event_id, right.event_id}
+
+
+def test_analyzer_callee_recording_binds_the_requested_owner_scope():
+    analyzer = _analyzer()
+    analyzer._current_analysis_scope_key = ("ambient",)
+    callee, _ = _callee_analysis_with_marker()
+    explicit = ExpansionBudgetCollector()
+    analyzer._record_callee_analysis_expansion_budget(
+        callee, owner_scope_key=("explicit_owner",), collector=explicit
+    )
+    analyzer._record_callee_analysis_expansion_budget(callee)
+    assert explicit.as_tuple()[0].owner_scope_key == ("explicit_owner",)
+    assert analyzer._current_expansion_budget_collector.as_tuple()[0].owner_scope_key == (
+        "ambient",
+    )
+
+
+# ---------------------------------------------------------------------------
+# operation case limit の切り捨ては op ごとに別 event になる
+# ---------------------------------------------------------------------------
+
+
+class _OpRefTracer(_FakeTracer):
+    """``_make_pcode_op_ref`` を持たず ``PcodeOpRef.from_pcode_op`` に委ねる tracer。"""
+
+
+class _SeqOp:
+    """`PcodeOpRef.from_pcode_op` が識別できる最小の P-code op。"""
+
+    def __init__(self, mnemonic, offset, order):
+        self._mnemonic = mnemonic
+        self._offset = offset
+        self._order = order
+
+    def getMnemonic(self):
+        return self._mnemonic
+
+    def getOpcode(self):
+        return 1
+
+    def getSeqnum(self):
+        class _Seq:
+            def __init__(self, offset, order):
+                self._offset = offset
+                self._order = order
+
+            def getTarget(self):
+                class _Addr:
+                    def __init__(self, offset):
+                        self._offset = offset
+
+                    def getOffset(self):
+                        return self._offset
+
+                    def getAddressSpace(self):
+                        class _Space:
+                            def getName(self_inner):
+                                return "ram"
+
+                        return _Space()
+
+                    def __str__(self):
+                        return f"0x{self._offset:x}"
+
+                return _Addr(self._offset)
+
+            def getTime(self):
+                return self._order
+
+            def getOrder(self):
+                return self._order
+
+        return _Seq(self._offset, self._order)
+
+    def getParent(self):
+        return None
+
+
+def test_same_mnemonic_and_counts_at_different_ops_stay_distinct_events():
+    from scripts.function_tracer_pcode.core.runtime_refs import PcodeOpRef
+
+    collector = ExpansionBudgetCollector()
+    expander = _bare_expander(collector)
+    expander.tracer = _OpRefTracer()
+
+    first_ref = PcodeOpRef.from_pcode_op(_SeqOp("INT_ADD", 0x401000, 1))
+    second_ref = PcodeOpRef.from_pcode_op(_SeqOp("INT_ADD", 0x401010, 2))
+    assert first_ref is not None and first_ref.stable_key() != second_ref.stable_key()
+
+    values = [
+        ExpandedValue(Expression.constant(index, 4), [Condition(_atom(1 + index % 9))])
+        for index in range(9)
+    ]
+    for ref in (first_ref, second_ref):
+        expander._deduplicate_expanded_values(
+            list(values), 0, limit=4, label="INT_ADD combinations", pcode_op_ref=ref
+        )
+
+    records = collector.as_tuple()
+    assert len(records) == 2
+    assert {record.dedup for record in records} == {(9, 4, 4)}
+    assert {record.label for record in records} == {"INT_ADD combinations"}
+    assert len({record.event_id for record in records}) == 2
+
+    # op 参照が無いと同じ event に潰れる（= 参照を付ける必要がある）ことも固定する
+    unref_collector = ExpansionBudgetCollector()
+    unref_expander = _bare_expander(unref_collector)
+    for _ in range(2):
+        unref_expander._deduplicate_expanded_values(
+            list(values), 0, limit=4, label="INT_ADD combinations"
+        )
+    assert len(unref_collector.as_tuple()) == 1
+
+
+def test_operation_case_limit_paths_forward_the_pcode_op_ref():
+    """`_finalize_combined_results` / 入力正規化 / CALL 展開の各経路で op を渡している。"""
+    import inspect
+
+    from scripts.function_tracer_pcode.semantics.transform import expander as expander_module
+    from scripts.function_tracer_pcode.semantics.transform import (
+        expander_calls as expander_calls_module,
+    )
+
+    combine = inspect.getsource(
+        expander_module.ExpressionExpander._combine_input_expansions_with_conditions
+    )
+    # 入力正規化と、すべての _finalize_combined_results 呼び出しが op を運ぶ
+    assert combine.count("pcode_op_ref=pcode_op_ref") == combine.count(
+        "_finalize_combined_results("
+    ) + 1
+
+    finalize = inspect.getsource(expander_module.ExpressionExpander._finalize_combined_results)
+    assert "pcode_op_ref=pcode_op_ref" in finalize
+
+    for name in ("_expand_input_operation", "_expand_operation"):
+        source = inspect.getsource(getattr(expander_module.ExpressionExpander, name))
+        assert "pcode_op_ref=_pcode_op_ref_from_tracer(self.tracer, pcode_op)" in source
+
+    call_source = inspect.getsource(
+        expander_calls_module.CallExpansionMixin._expand_call_operation
+    )
+    assert "pcode_op_ref=_pcode_op_ref_from_tracer(self.tracer, pcode_op)" in call_source
+
+
+# ---------------------------------------------------------------------------
+# bounded refinement: 実際に採用した callee だけを記録する
+# ---------------------------------------------------------------------------
+
+
+def _bounded_refinement_case():
+    from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo, ReturnInfo
+    from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+    from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
+
+    def _param_expr(name="n", index=0, size=4):
+        return Expression.parameter(name, index=index, data_type="int", size=size)
+
+    adopted_call = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:adopted#0",
+        target_ref=CallTargetRef.from_name("adopted"),
+        arguments=[_param_expr()],
+        sequence=0,
+    )
+    rejected_call = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:rejected#1",
+        target_ref=CallTargetRef.from_name("rejected"),
+        arguments=[_param_expr()],
+        sequence=1,
+    )
+    caller = create_mock_analysis(
+        "caller",
+        parameters=[{"name": "n", "index": 0, "data_type": "int", "size": 4}],
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown(
+                    adopted_call.placeholder_name, runtime_ref=adopted_call.unknown_ref
+                ),
+                conditions=[],
+            ),
+            ReturnInfo(
+                address="0x1004",
+                value=Expression.unknown(
+                    rejected_call.placeholder_name, runtime_ref=rejected_call.unknown_ref
+                ),
+                conditions=[],
+            ),
+        ],
+    )
+    caller.analysis_scope_key = ("caller_scope",)
+    caller.deferred_calls = {
+        adopted_call.deferred_call_ref.stable_key(): adopted_call,
+        rejected_call.deferred_call_ref.stable_key(): rejected_call,
+    }
+
+    adopted_record = _record(owner_scope_key=("adopted_scope",), label="adopted side")
+    adopted = create_mock_analysis(
+        "adopted",
+        parameters=[{"name": "x", "index": 0, "data_type": "int", "size": 4}],
+        returns=[ReturnInfo(address="0x2000", value=_param_expr("x", 0), conditions=[])],
+    )
+    adopted.analysis_scope_key = ("adopted_scope",)
+    adopted.expansion_budget_truncations = (adopted_record,)
+
+    rejected_record = _record(owner_scope_key=("rejected_scope",), label="rejected side")
+    # 引数 2 個を要求するので、deferred の 1 引数では alignment に失敗する
+    rejected = create_mock_analysis(
+        "rejected",
+        parameters=[
+            {"name": "a", "index": 0, "data_type": "int", "size": 4},
+            {"name": "b", "index": 1, "data_type": "int", "size": 4},
+        ],
+        returns=[ReturnInfo(address="0x3000", value=_param_expr("a", 0), conditions=[])],
+    )
+    rejected.analysis_scope_key = ("rejected_scope",)
+    rejected.expansion_budget_truncations = (rejected_record,)
+
+    def provider(target, args=None):
+        name = getattr(target, "function_name", None) or target.display_name()
+        return {"adopted": adopted, "rejected": rejected}.get(name)
+
+    return caller, adopted, adopted_record, rejected, rejected_record, provider
+
+
+def test_bounded_refinement_notifies_only_actually_adopted_callees():
+    from scripts.function_tracer_pcode.analysis.bounded_refinement import BoundedCallRefiner
+
+    caller, adopted, _adopted_record, rejected, _rejected_record, provider = (
+        _bounded_refinement_case()
+    )
+    provided = []
+    adopted_notifications = []
+
+    def counting_provider(target, args=None):
+        result = provider(target, args)
+        if result is not None:
+            provided.append(result.function_name)
+        return result
+
+    refiner = BoundedCallRefiner(
+        counting_provider,
+        max_unroll=1,
+        max_cases=8,
+        on_callee_adopted=lambda analysis: adopted_notifications.append(analysis.function_name),
+    )
+    refiner.refine_analysis(caller)
+
+    # provider は両方返しているが、採用されたのは片方だけ
+    assert set(provided) == {"adopted", "rejected"}
+    assert adopted_notifications == ["adopted"]
+
+
+def test_apply_bounded_call_refinement_records_only_adopted_callee_markers():
+    from unittest.mock import patch
+
+    analyzer = _analyzer()
+    caller, adopted, adopted_record, rejected, rejected_record, provider = (
+        _bounded_refinement_case()
+    )
+    analyzer._current_analysis_scope_key = ("ambient_scope",)
+
+    with patch.object(
+        analyzer, "_bound_parameter_maps_for_target_args", return_value=({}, {})
+    ), patch.object(
+        analyzer, "_coerce_runtime_target_ref", side_effect=lambda target: target
+    ), patch.object(
+        analyzer, "_analysis_scope_key", side_effect=lambda target, *_a, **_k: (
+            "scope",
+            getattr(target, "function_name", None) or target.display_name(),
+        )
+    ), patch.object(
+        analyzer, "_target_active_key", return_value=None
+    ), patch.object(
+        analyzer, "_invoke_get_or_analyze_call_target",
+        side_effect=lambda target, _active, args=None: provider(target, args),
+    ):
+        analyzer._apply_bounded_call_refinement(caller, set(), None)
+
+    labels = [
+        (item.kind, item.callee_scope_key, item.referenced_event_ids)
+        for item in caller.expansion_budget_truncations
+    ]
+    assert labels == [
+        ("callee_analysis", ("adopted_scope",), (adopted_record.event_id,))
+    ]
+    assert rejected_record.event_id not in {
+        ref for item in caller.expansion_budget_truncations
+        for ref in item.referenced_event_ids
+    }
+    # marker は refine 対象の解析へ載り、周囲の session には混ざらない
+    assert caller.expansion_budget_truncations[0].owner_scope_key == ("caller_scope",)
+    assert analyzer._current_expansion_budget_collector.as_tuple() == ()

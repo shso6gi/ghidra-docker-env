@@ -22,7 +22,10 @@ from scripts.function_tracer_pcode.analysis.effects.summary import (
     canonicalize_location,
     rewrite_location_read_from_effects,
 )
-from scripts.function_tracer_pcode.semantics.transform.expander_support import ExpandedValue
+from scripts.function_tracer_pcode.semantics.transform.expander_support import (
+    ExpandedValue,
+    _pcode_op_ref_from_tracer,
+)
 
 
 class CallExpansionMixin:
@@ -252,7 +255,12 @@ class CallExpansionMixin:
         resolve_with_args(0, [], list(base_conditions))
 
         if result:
-            return self._deduplicate_expanded_values(result, depth)
+            return self._deduplicate_expanded_values(
+                result,
+                depth,
+                label=f"{pcode_op.getMnemonic()} call expansions",
+                pcode_op_ref=_pcode_op_ref_from_tracer(self.tracer, pcode_op),
+            )
 
         fallback_target = self._select_deferred_call_target(resolved_targets, pcode_op)
         fallback_label = fallback_target.display_name()

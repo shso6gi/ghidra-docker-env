@@ -265,6 +265,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
         base_conditions: List[Condition],
         depth: int,
         over_budget: bool = False,
+        pcode_op_ref=None,
     ) -> List[ExpandedValue]:
         limit = self._max_operation_cases
         deduped = self._deduplicate_expanded_values(
@@ -272,6 +273,9 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
             depth,
             limit=limit,
             label=f"{mnemonic} combinations",
+            # Issue #131: 同一関数内で同じ mnemonic・同じ件数の切り捨てが複数箇所で
+            # 起きても別 event として識別できるよう、op が分かる経路では必ず渡す。
+            pcode_op_ref=pcode_op_ref,
         )
 
         if over_budget:
@@ -571,6 +575,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
             [fallback],
             depth,
             label=f"{pcode_op.getMnemonic()} traced budget fallback",
+            pcode_op_ref=_pcode_op_ref_from_tracer(self.tracer, pcode_op),
         )
 
     def _expand_expression_cases(
@@ -619,7 +624,13 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                         depth + 1,
                     )
                 )
-            return self._deduplicate_expanded_values(expanded, depth) if expanded else []
+            return (
+                self._deduplicate_expanded_values(
+                    expanded, depth, label="PHI expression cases"
+                )
+                if expanded
+                else []
+            )
 
         if expr.expr_type == ExpressionType.MEMORY and expr.operands:
             addr_cases = self._expand_expression_cases(expr.operands[0], base_conditions, depth + 1)
@@ -644,7 +655,13 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                     runtime_ref=getattr(expr, "runtime_ref", None),
                 )
                 expanded.append(ExpandedValue(rebuilt, simplified))
-            return self._deduplicate_expanded_values(expanded, depth) if expanded else []
+            return (
+                self._deduplicate_expanded_values(
+                    expanded, depth, label="MEMORY expression cases"
+                )
+                if expanded
+                else []
+            )
 
         if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
             operand_cases = self._expand_expression_cases(expr.operands[0], base_conditions, depth + 1)
@@ -667,7 +684,13 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                 rebuilt = Expression.unary_op(expr.operator, operand_case.value)
                 rebuilt.size = expr.size
                 expanded.append(ExpandedValue(rebuilt, simplified))
-            return self._deduplicate_expanded_values(expanded, depth) if expanded else []
+            return (
+                self._deduplicate_expanded_values(
+                    expanded, depth, label="UNARY_OP expression cases"
+                )
+                if expanded
+                else []
+            )
 
         if expr.expr_type == ExpressionType.BINARY_OP and len(expr.operands) == 2:
             left_cases = self._expand_expression_cases(expr.operands[0], base_conditions, depth + 1)
@@ -695,7 +718,13 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                 depth,
                 output_size=expr.size,
             )
-            return self._deduplicate_expanded_values(expanded, depth) if expanded else []
+            return (
+                self._deduplicate_expanded_values(
+                    expanded, depth, label=f"{expr.operator} expression cases"
+                )
+                if expanded
+                else []
+            )
 
         if expr.expr_type == ExpressionType.INTRINSIC and expr.operands:
             operand_cases = [
@@ -721,7 +750,13 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                 output_size=expr.size,
                 opcode=getattr(expr, "opcode", None),
             )
-            return self._deduplicate_expanded_values(expanded, depth) if expanded else []
+            return (
+                self._deduplicate_expanded_values(
+                    expanded, depth, label=f"{expr.name or 'INTRINSIC'} expression cases"
+                )
+                if expanded
+                else []
+            )
 
         return [
             ExpandedValue(
@@ -889,6 +924,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
             output_varnode=output,
             read_order_key=self.tracer._get_op_order_key(pcode_op) if mnemonic == "LOAD" else None,
             opcode=getattr(pcode_op, "getOpcode", lambda: None)(),
+            pcode_op_ref=_pcode_op_ref_from_tracer(self.tracer, pcode_op),
         )
         return self._maybe_replace_budget_results_with_traced_fallback(
             pcode_op,
@@ -1007,6 +1043,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
             output_varnode=output,
             read_order_key=self.tracer._get_op_order_key(pcode_op) if mnemonic == "LOAD" else None,
             opcode=getattr(pcode_op, "getOpcode", lambda: None)(),
+            pcode_op_ref=_pcode_op_ref_from_tracer(self.tracer, pcode_op),
         )
         return self._maybe_replace_budget_results_with_traced_fallback(
             pcode_op,
@@ -1130,6 +1167,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
             expanded_traced,
             depth,
             label=f"{pcode_op.getMnemonic()} whole-{context_label} cases",
+            pcode_op_ref=_pcode_op_ref_from_tracer(self.tracer, pcode_op),
         )
     
     def _combine_input_expansions_with_conditions(
@@ -1142,6 +1180,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
         output_varnode=None,
         read_order_key: Optional[int] = None,
         opcode: Optional[int] = None,
+        pcode_op_ref=None,
     ) -> List[ExpandedValue]:
         """入力の展開を組み合わせて結果を生成"""
         self._debug_print(f"Combining expansions for {mnemonic}", depth)
@@ -1154,6 +1193,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                     depth + 1,
                     limit=self._max_operation_cases,
                     label=f"{mnemonic} input[{index}]",
+                    pcode_op_ref=pcode_op_ref,
                 )
             else:
                 normalized = expansions
@@ -1197,6 +1237,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                 result,
                 base_conditions,
                 depth,
+                pcode_op_ref=pcode_op_ref,
             )
         
         if len(input_expansions) == 2:
@@ -1220,6 +1261,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                             base_conditions,
                             depth,
                             over_budget=True,
+                            pcode_op_ref=pcode_op_ref,
                         )
 
                     combined_conds = base_conditions + left_ev.conditions + right_ev.conditions
@@ -1292,6 +1334,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                             base_conditions,
                             depth,
                             over_budget=True,
+                            pcode_op_ref=pcode_op_ref,
                         )
 
             return self._finalize_combined_results(
@@ -1299,6 +1342,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                 list(result_map.values()),
                 base_conditions,
                 depth,
+                pcode_op_ref=pcode_op_ref,
             )
         
         # 3つ以上の入力は intrinsic として保持しつつ、条件は全組み合わせで構成する
@@ -1347,6 +1391,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                     base_conditions,
                     depth,
                     over_budget=True,
+                    pcode_op_ref=pcode_op_ref,
                 )
 
         return list(result_map.values()) or [ExpandedValue(Expression.unknown(f"{mnemonic}_fail"), base_conditions)]

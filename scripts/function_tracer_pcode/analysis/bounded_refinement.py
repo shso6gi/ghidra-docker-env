@@ -143,11 +143,16 @@ class BoundedCallRefiner:
         max_unroll: int = 2,
         max_cases: int = 128,
         debug: bool = False,
+        on_callee_adopted: Optional[Callable[[FunctionReturnAnalysis], None]] = None,
     ):
         self.analysis_provider = analysis_provider
         self.max_unroll = max(0, int(max_unroll))
         self.max_cases = max(1, int(max_cases))
         self.debug = debug
+        # Issue #131: callee の戻り値を実際に caller の展開へ採用した地点で呼ばれる。
+        # provider が返しただけの候補（引数 alignment 失敗、width 安全性違反、条件
+        # 矛盾、展開不成立）では呼ばない。
+        self.on_callee_adopted = on_callee_adopted
         self._analysis_provider_accepts_args = _callable_accepts_positional_args(
             analysis_provider,
             2,
@@ -162,6 +167,16 @@ class BoundedCallRefiner:
             return
         if note not in analysis.analysis_notes:
             analysis.analysis_notes.append(note)
+
+    def _notify_callee_adopted(self, callee_analysis: FunctionReturnAnalysis) -> None:
+        """callee の展開結果を caller の結果集合へ実際に積んだ時点で 1 度だけ通知する。"""
+
+        if self.on_callee_adopted is None or callee_analysis is None:
+            return
+        try:
+            self.on_callee_adopted(callee_analysis)
+        except Exception:  # 通知は診断専用。展開の成否には影響させない。
+            pass
 
     def _provide_analysis(
         self,
@@ -555,6 +570,11 @@ class BoundedCallRefiner:
                         had_return_expansion = True
                         candidate_result_count += 1
                         results.append((value_expr, merged_conditions))
+                        if candidate_result_count == 1:
+                            # この callee の戻り値が caller の展開へ入った最初の地点。
+                            # max_cases による早期 return でも取りこぼさないよう、
+                            # 候補ごとの後段ではなくここで通知する。
+                            self._notify_callee_adopted(callee_analysis)
                         if len(results) >= self.max_cases:
                             self._record_note(
                                 caller_analysis,

@@ -759,6 +759,7 @@ class EffectIntegrationService:
                         )
                         or (),
                         callee_scope_key=callee_scope_key,
+                        owner_scope_key=summary_cache_key,
                         label=target_ref.display_name(),
                     )
                 )
@@ -824,6 +825,8 @@ class EffectIntegrationService:
                 call_resolver=self.make_call_resolver(
                     self.extend_active_functions(active_functions, target_ref),
                     callee,
+                    budget_collector=callee_refinement_collector,
+                    budget_owner_scope_key=callee_summary_cache_key,
                 ),
                 parameters=callee_parameters,
                 resolve_callee_parameters=self.get_freshest_callee_parameters,
@@ -856,6 +859,7 @@ class EffectIntegrationService:
                     callee_reference_truncation(
                         diagnostics.get(callee_summary_cache_key) or (),
                         callee_scope_key=callee_summary_cache_key,
+                        owner_scope_key=summary_cache_key,
                         label=target_ref.display_name(),
                     )
                 )
@@ -879,9 +883,14 @@ class EffectIntegrationService:
             condition_tracker,
             parameters,
             direct_call_summary=summarize_call,
+            # Issue #131: STORE 値展開が CALL を解決して callee 解析を採用した場合の
+            # marker は、周囲の AnalysisSession ではなくこの要約の collector へ入れる
+            # （下で summary_cache_key の診断 cache に保存される）。
             direct_call_expander=self.make_call_resolver(
                 self.extend_active_functions(active_functions, current_target),
                 function,
+                budget_collector=budget_collector,
+                budget_owner_scope_key=summary_cache_key,
             ),
             resolve_callee_parameters=resolve_callee_parameters,
             read_memory_value=self.read_memory_value,
