@@ -250,6 +250,13 @@ EXPANSION_BUDGET_TRUNCATION_KINDS = frozenset({
     "callee_analysis",
 })
 
+# Issue #131 PR-B: 切り捨てが観測された関数を判定へ倒すための登録 reason。
+# 解析面（``FunctionReturnAnalysis`` の marker）と効果面（``EffectSummary`` の
+# ``incomplete_reasons``）で ID を分け、効果面は既存の効果不完全性処理へ写像する。
+EXPANSION_CASE_BUDGET_EXCEEDED_REASON = "expansion_case_budget_exceeded"
+EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON = "effect_expansion_case_budget_exceeded"
+
+
 EXPANSION_BUDGET_TRUNCATION_SURFACES = frozenset({
     "return_value",
     "branch_condition",

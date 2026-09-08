@@ -1,10 +1,10 @@
-"""Issue #131 PR-A: 展開ケース数・経路数の切り捨て marker の収集と同期。
+"""Issue #131: 展開ケース数・経路数の切り捨て marker の収集と同期。
 
 生成（``ExpressionExpander`` / ``ConditionTracker``）→ 保持（``AnalysisSession`` /
 効果要約診断 cache）→ 伝搬（利用面ごとの sink、callee 参照）→ 同期
 （``FunctionReturnAnalysis``）の各段を ``ReturnAnalyzer`` 側から扱うための service
-実装。PR-A では観測だけを行い、判定 gate・証明前提・semantic fingerprint には
-接続しない。
+実装。PR-B からは同期時に共通の依存表で派生 authority を無効化する（判定 gate は
+``proof`` 側が ``has_expansion_budget_truncation()`` を通して読む）。
 """
 
 from __future__ import annotations
@@ -13,7 +13,11 @@ import json
 import os
 from typing import Any, Callable, Iterable, Optional, Tuple
 
+from scripts.function_tracer_pcode.core.analysis import (
+    invalidate_semantic_successor_fields,
+)
 from scripts.function_tracer_pcode.core.runtime_refs import (
+    EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON,
     ExpansionBudgetCollector,
     ExpansionBudgetTruncation,
     expansion_budget_event_ids,
@@ -47,6 +51,24 @@ def make_expansion_budget_sink(
         )
 
     return sink
+
+
+def mark_effect_expansion_case_budget_exceeded(summary) -> bool:
+    """効果要約に ``effect_expansion_case_budget_exceeded`` を 1 度だけ足す。
+
+    Issue #131 PR-B: 効果面の切り捨ては要約自身が持つ不完全性にする。診断 dict と
+    違って要約は cache に載るので、cache hit でも不完全性が失われない。
+    ``incomplete_reasons`` は昇順・重複なしで保つ（v2 の効果 reason 分類がその形を
+    要求する）。
+    """
+
+    reasons = tuple(getattr(summary, "incomplete_reasons", ()) or ())
+    if EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON in reasons:
+        return False
+    summary.incomplete_reasons = tuple(sorted(
+        set(reasons) | {EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON}
+    ))
+    return True
 
 
 def callee_reference_truncation(
@@ -193,7 +215,12 @@ def _impl__sync_expansion_budget_truncations(
 
     session が空であることを理由に結果側の marker を消さない（返された view や callee
     由来の結果が既に保持する記録を保護する）。正規化済みの全記録が同じなら何も
-    変更しない。PR-A は診断値だけを更新し、無効化は行わない（PR-B で接続）。
+    変更しない（同じ記録の再同期は no-op）。
+
+    PR-B: 記録または参照情報が増えた場合は semantic 入力が変わったということなので、
+    共通の依存表（``returns`` と同じ範囲）で派生 authority を無効化する。marker の
+    反映と無効化はこの 1 か所で連続して行い、途中状態を証明・cache 利用者へ
+    公開しない。
     """
 
     if result is None:
@@ -207,6 +234,7 @@ def _impl__sync_expansion_budget_truncations(
     merged = merge_expansion_budget_truncations(existing, source.as_tuple())
     if merged != existing:
         result.expansion_budget_truncations = merged
+        invalidate_semantic_successor_fields(result, "expansion_budget_truncations")
     return result
 
 

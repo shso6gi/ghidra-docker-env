@@ -276,7 +276,11 @@ def _artifact(stage, reason_id):
 
 
 def test_stage_status_matrix_is_exact_and_rejects_unknown_pairs():
-    assert len(OUTCOME_STAGE_REASON_MATRIX) == 24
+    assert len(OUTCOME_STAGE_REASON_MATRIX) == 25
+    # Issue #131: 切り捨てで止まった網羅性 stage は専用 reason を持つ
+    assert reason_for_stage_status("path_region_completeness", "case_budget_exceeded") == (
+        "expansion_case_budget_exceeded"
+    )
     assert reason_for_stage_status("same_kind_consistency", "timeout") == (
         "outcome_same_kind_consistency_unproven"
     )

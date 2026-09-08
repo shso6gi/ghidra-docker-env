@@ -46,10 +46,10 @@ FUNCTION_ANALYSIS_FIELD_CLASSIFICATION = MappingProxyType({
     "termination_path_effect_evidence": "semantic",
     "quarantined_recurrence_proposals": "semantic",
     "return_abi_facts": "semantic",
-    # Issue #131 PR-A: 切り捨て marker は観測のみ。``to_dict`` へ出さず semantic
-    # projection にも入れないため、fingerprint は marker の有無で変わらない。
-    # PR-B で "semantic" へ変更し、この除外を解除する。
-    "expansion_budget_truncations": "diagnostic",
+    # Issue #131 PR-B: 切り捨て marker は解析前提の一部。``to_dict`` の正規化済み
+    # 全記録が snapshot fingerprint に入るので、marker を知らずに作った証明は
+    # 別の前提のものとして再利用されない。
+    "expansion_budget_truncations": "semantic",
 })
 
 

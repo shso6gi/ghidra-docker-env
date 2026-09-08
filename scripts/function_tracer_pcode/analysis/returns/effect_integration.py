@@ -68,6 +68,7 @@ from scripts.function_tracer_pcode.analysis.returns.lifecycle import function_ca
 from scripts.function_tracer_pcode.analysis.returns.expansion_budget import (
     callee_reference_truncation,
     make_expansion_budget_sink,
+    mark_effect_expansion_case_budget_exceeded,
 )
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns._api import ConditionTracker
@@ -855,6 +856,11 @@ class EffectIntegrationService:
                     diagnostics.get(callee_summary_cache_key) or (),
                     callee_refinement_collector.as_tuple(),
                 )
+                # Issue #131 PR-B: refinement は要約構築の外で走るので、その分の
+                # 切り捨ては要約自身の不完全性としてもここで残す（診断 dict が
+                # 失われても、cache 済み要約から不完全性を復元できるようにする）。
+                if callee_refinement_collector:
+                    mark_effect_expansion_case_budget_exceeded(summary)
                 budget_collector.record(
                     callee_reference_truncation(
                         diagnostics.get(callee_summary_cache_key) or (),
@@ -907,6 +913,11 @@ class EffectIntegrationService:
             function,
             parameters,
         )
+        # Issue #131 PR-B: 効果面の切り捨ては要約自身の不完全性として残す。
+        # 診断 dict は破棄・欠落し得るが、この reason は要約と一緒に cache へ入るので、
+        # cache hit でも不完全性が失われない（診断欠落から推定はしない）。
+        if budget_collector:
+            mark_effect_expansion_case_budget_exceeded(summary)
         self.runtime_state.effect_summary_cache[summary_cache_key] = summary
         # 再構築なので古い診断は残さず置き換える（切り捨てが無ければ空になる）。
         # 寿命と key は ``effect_summary_cache`` に揃える。

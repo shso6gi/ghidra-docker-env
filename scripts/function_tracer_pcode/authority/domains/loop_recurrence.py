@@ -328,6 +328,9 @@ _EFFECT_INCOMPLETE_REASON_OWNERS = MappingProxyType({
     "effect_store_location_unmodeled": "effect_observation_coverage_incomplete",
     "effect_global_read_identity_unavailable": "effect_observation_coverage_incomplete",
     "effect_surface_composition_incomplete": "effect_observation_coverage_incomplete",
+    # Issue #131: 効果面の展開が上限で切り捨てられた要約。観測できた効果集合が
+    # 全体である保証がないので、既存の効果不完全性へ写像する。
+    "effect_expansion_case_budget_exceeded": "effect_observation_coverage_incomplete",
 })
 
 
