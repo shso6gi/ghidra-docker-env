@@ -23,7 +23,12 @@ from scripts.function_tracer_pcode.analysis.returns.expansion_budget import (
     make_expansion_budget_sink,
 )
 from scripts.function_tracer_pcode.analysis.session import AnalysisSession
-from scripts.function_tracer_pcode.core import Condition, Expression, FunctionReturnAnalysis
+from scripts.function_tracer_pcode.core import (
+    Condition,
+    Expression,
+    ExpressionType,
+    FunctionReturnAnalysis,
+)
 from scripts.function_tracer_pcode.core.runtime_refs import (
     ExpansionBudgetCollector,
     ExpansionBudgetTruncation,
@@ -1776,3 +1781,185 @@ def test_apply_bounded_call_refinement_records_only_adopted_callee_markers():
     # marker は refine 対象の解析へ載り、周囲の session には混ざらない
     assert caller.expansion_budget_truncations[0].owner_scope_key == ("caller_scope",)
     assert analyzer._current_expansion_budget_collector.as_tuple() == ()
+
+
+# ---------------------------------------------------------------------------
+# bounded refinement: 最終 returns へ残った callee だけが採用済み
+# ---------------------------------------------------------------------------
+
+
+def _refiner_case(callee_returns, *, caller_extra_returns=(), max_cases=8, max_unroll=1):
+    """deferred call 1 件と、その callee の戻り値を差し替えられる最小構成。"""
+    from scripts.function_tracer_pcode.analysis.bounded_refinement import BoundedCallRefiner
+    from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo, ReturnInfo
+    from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+    from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
+
+    def _p(name="n", index=0, size=4):
+        return Expression.parameter(name, index=index, data_type="int", size=size)
+
+    deferred = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:callee#0",
+        target_ref=CallTargetRef.from_name("callee"),
+        arguments=[_p()],
+        sequence=0,
+    )
+    caller = create_mock_analysis(
+        "caller",
+        parameters=[{"name": "n", "index": 0, "data_type": "int", "size": 4}],
+        returns=[
+            *caller_extra_returns,
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.unknown(
+                    deferred.placeholder_name, runtime_ref=deferred.unknown_ref
+                ),
+                conditions=[],
+            ),
+        ],
+    )
+    caller.analysis_scope_key = ("caller_scope",)
+    caller.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
+
+    callee = create_mock_analysis(
+        "callee",
+        parameters=[{"name": "x", "index": 0, "data_type": "int", "size": 4}],
+        returns=list(callee_returns),
+    )
+    callee.analysis_scope_key = ("callee_scope",)
+    callee.expansion_budget_truncations = (_record(owner_scope_key=("callee_scope",)),)
+
+    adopted = []
+    refiner = BoundedCallRefiner(
+        lambda _target, _args=None: callee,
+        max_unroll=max_unroll,
+        max_cases=max_cases,
+        on_callee_adopted=lambda analysis: adopted.append(analysis.function_name),
+    )
+    return refiner, caller, callee, adopted
+
+
+def test_no_marker_when_the_callee_expansion_stays_unresolved():
+    """展開結果に UNKNOWN/deferred が残り、元の unresolved return が保持される場合。"""
+    from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo, ReturnInfo
+    from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+
+    # callee 自身がさらに未解決な呼び出しを返す（concrete fallback にならない）
+    nested = DeferredCallInfo(
+        placeholder_name="call_out_of_scope:nested#0",
+        target_ref=CallTargetRef.from_name("nested"),
+        arguments=[],
+        sequence=0,
+    )
+    refiner, caller, callee, adopted = _refiner_case(
+        [
+            ReturnInfo(
+                address="0x2000",
+                value=Expression.unknown(
+                    nested.placeholder_name, runtime_ref=nested.unknown_ref
+                ),
+                conditions=[],
+            )
+        ]
+    )
+    refiner.refine_analysis(caller)
+
+    # callee は実際に展開まで進んでいる（= 中間展開は作られた）
+    assert "bounded_call_refinement_deferred_expanded" in caller.analysis_notes
+    # だが concrete fallback にならないので最終 returns には元の unresolved が残る
+    assert "bounded_call_refinement_preserved_unresolved_deferred_call" in caller.analysis_notes
+    assert any(
+        ret.value.expr_type == ExpressionType.UNKNOWN for ret in caller.returns
+    )
+    assert adopted == []
+
+
+def test_no_marker_when_the_callee_expansion_is_dropped_by_caller_max_cases():
+    """concrete expansion は作られるが caller 側 ``max_cases`` で最終 return から落ちる。
+
+    ``max_cases=1`` だと ``concrete_limit`` が 0 になり、生成済みの concrete 展開は
+    すべて捨てられて元の unresolved return だけが残る。
+    """
+    from scripts.function_tracer_pcode.core.analysis import ReturnInfo
+
+    def _p(name="n", index=0, size=4):
+        return Expression.parameter(name, index=index, data_type="int", size=size)
+
+    refiner, caller, callee, adopted = _refiner_case(
+        [ReturnInfo(address="0x2000", value=_p("x", 0), conditions=[])],
+        max_cases=1,
+    )
+    original_return = caller.returns[0]
+    refiner.refine_analysis(caller)
+
+    # concrete 展開は実際に作られている（= 中間展開は存在した）
+    assert "bounded_call_refinement_deferred_expanded" in caller.analysis_notes
+    assert "bounded_call_refinement_preserved_unresolved_deferred_call" in caller.analysis_notes
+    # しかし最終 returns には残らず、元の unresolved return だけが残る
+    assert caller.returns == [original_return]
+    assert caller.returns[0].value.expr_type == ExpressionType.UNKNOWN
+    assert adopted == []
+
+
+def test_marker_only_for_the_callee_that_survives_into_the_final_returns():
+    from scripts.function_tracer_pcode.core.analysis import ReturnInfo
+
+    def _p(name="n", index=0, size=4):
+        return Expression.parameter(name, index=index, data_type="int", size=size)
+
+    refiner, caller, callee, adopted = _refiner_case(
+        [ReturnInfo(address="0x2000", value=_p("x", 0), conditions=[])]
+    )
+    changed = refiner.refine_analysis(caller)
+
+    assert changed is True
+    assert [ret.value.to_string() for ret in caller.returns] == ["n"]
+    assert adopted == ["callee"]
+
+
+def test_apply_bounded_call_refinement_marker_follows_final_adoption():
+    """service 層でも「最終 returns に残った callee」だけ marker になる。"""
+    from unittest.mock import patch
+
+    from scripts.function_tracer_pcode.core.analysis import ReturnInfo
+
+    def _p(name="n", index=0, size=4):
+        return Expression.parameter(name, index=index, data_type="int", size=size)
+
+    for callee_returns, expect_marker in (
+        ([ReturnInfo(address="0x2000", value=_p("x", 0), conditions=[])], True),
+        ([], False),
+    ):
+        refiner, caller, callee, _adopted = _refiner_case(callee_returns)
+        analyzer = _analyzer()
+        analyzer._current_analysis_scope_key = ("ambient",)
+        with patch.object(
+            analyzer, "_bound_parameter_maps_for_target_args", return_value=({}, {})
+        ), patch.object(
+            analyzer, "_coerce_runtime_target_ref", side_effect=lambda target: target
+        ), patch.object(
+            analyzer, "_analysis_scope_key", return_value=("callee_scope",)
+        ), patch.object(
+            analyzer, "_target_active_key", return_value=None
+        ), patch.object(
+            analyzer, "_invoke_get_or_analyze_call_target", return_value=callee
+        ):
+            analyzer._apply_bounded_call_refinement(caller, set(), None)
+        assert bool(caller.expansion_budget_truncations) is expect_marker
+        assert analyzer._current_expansion_budget_collector.as_tuple() == ()
+
+
+def test_provenance_is_not_reused_across_refine_runs():
+    from scripts.function_tracer_pcode.core.analysis import ReturnInfo
+
+    def _p(name="n", index=0, size=4):
+        return Expression.parameter(name, index=index, data_type="int", size=size)
+
+    refiner, caller, callee, adopted = _refiner_case(
+        [ReturnInfo(address="0x2000", value=_p("x", 0), conditions=[])]
+    )
+    refiner.refine_analysis(caller)
+    assert adopted == ["callee"]
+    # 2 度目は deferred_calls が消えているので何も展開せず、通知も増えない
+    refiner.refine_analysis(caller)
+    assert adopted == ["callee"]
