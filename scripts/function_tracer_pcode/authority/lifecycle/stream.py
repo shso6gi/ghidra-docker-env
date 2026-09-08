@@ -238,27 +238,39 @@ class OutcomeProducerAttemptEventAuthority:
         )
         if type(self.producer_attempt_ordinal) is not int or self.producer_attempt_ordinal <= 0:
             raise TypeError("outcome producer attempt ordinal is invalid")
-        allowed_statuses = {
-            "termination_classification": {"proved", "unclassified"},
-            "cfg_reachability": {"proved", "incomplete"},
-            "path_region_completeness": {"proved", "incomplete"},
-            "member_classification": {"proved", "unclassified"},
-            "same_kind_consistency": {
-                "proved", "comparison_surface_missing", "unknown", "timeout", "conflict",
-            },
-            "cross_kind_disjointness": {
-                "proved", "unknown", "timeout", "overlap",
-            },
-            "residual_totality": {
-                "proved", "incomplete", "unknown", "timeout", "residual_sat",
-            },
-            "partition_complete": {"proved", "unclassified"},
-        }
+        allowed_statuses = sealed_outcome_stage_statuses()
         if (
             self.stage not in allowed_statuses
             or self.producer_status not in allowed_statuses[self.stage]
         ):
             raise ValueError("outcome producer attempt stage/status pair is not sealed")
+
+
+_SEALED_OUTCOME_STAGE_STATUSES: Optional[Mapping[str, frozenset]] = None
+
+
+def sealed_outcome_stage_statuses() -> Mapping[str, frozenset]:
+    """封印済みの outcome stage/status を stage ごとの集合として返す。
+
+    唯一の出所は ``OUTCOME_STAGE_REASON_MATRIX``。ここで表を二重に持つと、行列へ
+    status を足したときに ingress 側だけ取り残される（Issue #131 の
+    ``case_budget_exceeded`` で実際に起きた）。``domains`` は本 module を import
+    するので、循環を避けて呼び出し時に 1 度だけ組み立てる。
+    """
+
+    global _SEALED_OUTCOME_STAGE_STATUSES
+    if _SEALED_OUTCOME_STAGE_STATUSES is None:
+        from scripts.function_tracer_pcode.authority.domains.return_outcome import (
+            OUTCOME_STAGE_REASON_MATRIX,
+        )
+
+        table: dict[str, set] = {}
+        for stage, status in OUTCOME_STAGE_REASON_MATRIX:
+            table.setdefault(stage, set()).add(status)
+        _SEALED_OUTCOME_STAGE_STATUSES = MappingProxyType({
+            stage: frozenset(statuses) for stage, statuses in sorted(table.items())
+        })
+    return _SEALED_OUTCOME_STAGE_STATUSES
 
 
 def validate_outcome_execution_receipt_authority(

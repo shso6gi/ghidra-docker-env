@@ -76,12 +76,21 @@ def _snapshot():
     return json.loads(SNAPSHOT.read_text(encoding="utf-8"))
 
 
+# 分割後に新しく登録された reason（snapshot は移動前の module から生成したもの
+# なので、追加分はここに明示して pre-split 分の parity と区別する）。
+_POST_SPLIT_REASON_ADDITIONS = {
+    "expansion_case_budget_exceeded",  # Issue #131
+}
+
+
 def test_reason_definition_registry_matches_the_pre_split_snapshot():
     snap = _snapshot()
     current = {k: dataclasses.asdict(v) for k, v in proof_ur._UNKNOWN_REASON_REGISTRY.items()}
-    assert set(current) == set(snap["definitions"])
-    assert json.loads(json.dumps(current, sort_keys=True, default=str)) == snap["definitions"]
-    assert len(current) == 37
+    assert set(snap["definitions"]) - set(current) == set()
+    assert set(current) - set(snap["definitions"]) == _POST_SPLIT_REASON_ADDITIONS
+    pre_split = {k: v for k, v in current.items() if k in snap["definitions"]}
+    assert json.loads(json.dumps(pre_split, sort_keys=True, default=str)) == snap["definitions"]
+    assert len(current) == 37 + len(_POST_SPLIT_REASON_ADDITIONS)
 
 
 def test_recovery_plan_registry_matches_the_pre_split_snapshot():

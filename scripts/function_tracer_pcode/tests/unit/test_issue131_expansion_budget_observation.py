@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Issue #131 PR-A: 展開ケース数・経路数の切り捨てが観測可能であることの回帰テスト。
+"""Issue #131: 展開ケース数・経路数の切り捨てが観測可能であることの回帰テスト。
 
-PR-A は観測のみ。判定 gate・証明前提・semantic fingerprint には接続しない。
 本 file は「生成 → 保持 → 伝搬 → 同期」の各段を、実際の展開・経路列挙・解析結果
-更新を通して固定する（Ghidra object だけ fake 化する）。
+更新を通して固定する（Ghidra object だけ fake 化する）。PR-B で追加した判定
+gate・無効化・reason は ``test_issue131_expansion_budget_fail_closed.py``。
 """
 
 import dataclasses
@@ -916,47 +916,80 @@ def test_outcome_summary_syncs_before_the_seed_is_built():
 
 
 # ---------------------------------------------------------------------------
-# PR-A の非接続（fingerprint / 判定 / to_dict / AST）
+# semantic 接続（fingerprint / 判定 / to_dict / 参照範囲）— PR-B
 # ---------------------------------------------------------------------------
 
 
-def test_markers_do_not_appear_in_to_dict_or_the_semantic_fingerprint():
+def test_markers_are_projected_into_to_dict_and_change_the_semantic_fingerprint():
     from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
 
     without = _analysis()
     with_marker = _analysis(expansion_budget_truncations=(_record(),))
     assert "expansion_budget_truncations" not in without.to_dict()
-    assert with_marker.to_dict() == without.to_dict()
+    projected = with_marker.to_dict()["expansion_budget_truncations"]
+    assert [item["kind"] for item in projected] == ["dedup_case_limit"]
+    assert projected[0]["event_id"] == _record().event_id
     assert (
         AnalysisSnapshot.from_function_analysis(with_marker).semantic_fingerprint
-        == AnalysisSnapshot.from_function_analysis(without).semantic_fingerprint
+        != AnalysisSnapshot.from_function_analysis(without).semantic_fingerprint
     )
     snapshot = AnalysisSnapshot.from_function_analysis(with_marker)
-    assert "expansion_budget_truncations" not in snapshot.semantic_fields
+    assert "expansion_budget_truncations" in snapshot.semantic_fields
 
 
-def test_marker_field_is_registered_as_a_diagnostic_field():
+def test_marker_order_alone_does_not_change_the_fingerprint_but_new_references_do():
+    """A11: 正規化済み全記録が同じなら同一、前提が増えれば別。"""
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
+
+    first = _record(label="a")
+    second = _record(label="b")
+    forward = _analysis(expansion_budget_truncations=(first, second))
+    reversed_order = _analysis(expansion_budget_truncations=(second, first))
+    assert forward.to_dict() == reversed_order.to_dict()
+    assert (
+        AnalysisSnapshot.from_function_analysis(forward).semantic_fingerprint
+        == AnalysisSnapshot.from_function_analysis(reversed_order).semantic_fingerprint
+    )
+
+    with_reference = _analysis(
+        expansion_budget_truncations=(
+            dataclasses.replace(first, referenced_event_ids=("ref-1",)),
+            second,
+        )
+    )
+    assert (
+        AnalysisSnapshot.from_function_analysis(with_reference).semantic_fingerprint
+        != AnalysisSnapshot.from_function_analysis(forward).semantic_fingerprint
+    )
+
+
+def test_marker_field_is_registered_as_a_semantic_field():
     from scripts.function_tracer_pcode.proof.obligations.snapshot import (
         FUNCTION_ANALYSIS_FIELD_CLASSIFICATION,
     )
 
-    assert FUNCTION_ANALYSIS_FIELD_CLASSIFICATION["expansion_budget_truncations"] == "diagnostic"
+    assert FUNCTION_ANALYSIS_FIELD_CLASSIFICATION["expansion_budget_truncations"] == "semantic"
     assert {item.name for item in dataclasses.fields(FunctionReturnAnalysis)} == set(
         FUNCTION_ANALYSIS_FIELD_CLASSIFICATION
     )
 
 
-def test_markers_do_not_change_the_analysis_level_unsafety_verdicts():
+def test_markers_block_both_analysis_level_unsafety_verdicts():
     without = _analysis()
     with_marker = _analysis(expansion_budget_truncations=(_record(),))
+    assert without.has_expansion_budget_truncation() is False
+    assert with_marker.has_expansion_budget_truncation() is True
+    assert "expansion_case_budget_exceeded" not in without.get_decisive_sat_unsafety_reasons()
+    assert "expansion_case_budget_exceeded" in with_marker.get_decisive_sat_unsafety_reasons()
     assert (
-        with_marker.get_decisive_sat_unsafety_reasons()
-        == without.get_decisive_sat_unsafety_reasons()
+        "expansion_case_budget_exceeded"
+        not in without.get_equivalence_blocking_unsafety_reasons()
     )
     assert (
-        with_marker.get_equivalence_blocking_unsafety_reasons()
-        == without.get_equivalence_blocking_unsafety_reasons()
+        "expansion_case_budget_exceeded"
+        in with_marker.get_equivalence_blocking_unsafety_reasons()
     )
+    # marker は戻り値の解決状態そのものは変えない
     assert with_marker.has_unresolved_return_value() == without.has_unresolved_return_value()
 
 
@@ -971,17 +1004,29 @@ def test_markers_survive_derived_views_without_being_cleared():
     assert successor.expansion_budget_truncations == (marker,)
 
 
-def test_pr_a_does_not_reference_the_marker_from_decision_or_proof_modules():
-    """PR-A の非接続検査（補助）。snapshot の分類登録・除外だけを例外として許可する。"""
+# PR-B で marker を読んでよい module（判定・reason 登録・写像のみ）。
+# ここに無い module から marker を読み始めたら、接続範囲が広がったということ。
+_MARKER_CONSUMER_MODULES = {
+    "proof/obligations/snapshot.py",          # field 分類
+    "proof/unknown_reason.py",                # reason 登録
+    "proof/strategies/proof_gates/return_coverage.py",  # 網羅性 producer / fallback
+    "proof/strategies/proof_gates/sat_safety.py",       # blocker 変換
+    "authority/domains/return_outcome.py",    # stage/status 行列
+    "authority/domains/loop_recurrence.py",   # 効果 reason 写像
+}
+
+
+def test_only_the_registered_modules_read_the_marker():
+    """PR-B の接続範囲検査。判定へ接続する module を明示的に固定する。"""
     import ast
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parents[2]
-    allowed = {root / "proof" / "obligations" / "snapshot.py"}
-    offenders = []
+    offenders = set()
     for layer in ("proof", "checker", "authority", "reporting"):
         for path in (root / layer).rglob("*.py"):
-            if path in allowed:
+            relative = path.relative_to(root).as_posix()
+            if relative in _MARKER_CONSUMER_MODULES:
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
@@ -994,19 +1039,20 @@ def test_pr_a_does_not_reference_the_marker_from_decision_or_proof_modules():
                     "expansion_budget_truncations",
                     "has_expansion_budget_truncation",
                     "expansion_case_budget_exceeded",
+                    "effect_expansion_case_budget_exceeded",
                 }:
-                    offenders.append(str(path.relative_to(root)))
-    assert offenders == []
+                    offenders.add(relative)
+    assert offenders == set()
 
 
-def test_snapshot_only_classifies_the_marker_and_never_projects_it():
+def test_snapshot_classifies_the_marker_as_a_semantic_field():
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parents[2]
     source = (root / "proof" / "obligations" / "snapshot.py").read_text(encoding="utf-8")
-    # 分類登録以外の場所からは参照しない
+    # 分類登録以外の場所からは参照しない（projection は ``to_dict`` 経由）
     assert source.count("expansion_budget_truncations") == 1
-    assert '"expansion_budget_truncations": "diagnostic"' in source
+    assert '"expansion_budget_truncations": "semantic"' in source
 
 
 # ---------------------------------------------------------------------------

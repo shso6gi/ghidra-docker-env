@@ -34,6 +34,9 @@ OUTCOME_STAGE_REASON_MATRIX = MappingProxyType({
     ("cfg_reachability", "incomplete"): "outcome_cfg_reachability_unproven",
     ("path_region_completeness", "proved"): None,
     ("path_region_completeness", "incomplete"): "outcome_path_region_completeness_unproven",
+    # Issue #131: 展開ケース数・経路数の上限で切り捨てが起きた関数。region 集合が
+    # 制御フロー全体を覆っているかを判定する前提そのものが失われている。
+    ("path_region_completeness", "case_budget_exceeded"): "expansion_case_budget_exceeded",
     ("member_classification", "proved"): None,
     ("member_classification", "unclassified"): "outcome_member_classification_unproven",
     ("same_kind_consistency", "proved"): None,

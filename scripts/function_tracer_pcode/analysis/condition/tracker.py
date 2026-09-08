@@ -220,11 +220,24 @@ class ConditionTracker:
         """CALL を含む分岐条件を、安全な要約が得られる場合のみ再構築する。
 
         ``budget_sink`` を渡すと、分岐条件の展開中に起きた切り捨てを所有 scope へ
-        即時転送する（Issue #131）。PR-A では記録のみで、refinement の採否は従来どおり。
+        即時転送する（Issue #131）。PR-B からは、切り捨てが起きたブロックの再構築
+        結果を採用しない（切り捨て後のケース集合から作った条件は、元の分岐条件より
+        狭い可能性がある）。記録は所有 scope へ 1 度だけ転送し、二重転送はしない。
         """
         from scripts.function_tracer_pcode.semantics.transform import ExpressionExpander
         from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
         from scripts.function_tracer_pcode.core.render_smt import expression_returns_bool
+
+        # Issue #131 PR-B: 所有 scope への転送はそのままに、ブロックごとに切り捨ての
+        # 有無を数えるための観測を挟む（sink は 1 度だけ呼ぶ）。
+        observed_truncations: List[ExpansionBudgetTruncation] = []
+
+        def observing_budget_sink(truncation: Optional[ExpansionBudgetTruncation]) -> None:
+            if truncation is None:
+                return
+            observed_truncations.append(truncation)
+            if budget_sink is not None:
+                budget_sink(truncation)
 
         expander = ExpressionExpander(
             self.tracer,
@@ -236,7 +249,7 @@ class ConditionTracker:
             resolve_callee_parameters=resolve_callee_parameters,
             read_memory_value=read_memory_value,
             image_base=image_base,
-            budget_sink=budget_sink,
+            budget_sink=observing_budget_sink,
         )
 
         changed = 0
@@ -248,7 +261,18 @@ class ConditionTracker:
             if not self._expression_requires_refinement(raw_condition):
                 continue
 
+            truncations_before = len(observed_truncations)
             expanded_values = expander.expand_from_varnode(cond_varnode, [])
+            if len(observed_truncations) > truncations_before:
+                # 切り捨てられたケース集合から作り直した条件は採用しない。
+                # 元の分岐条件（CALL を含む未解決のまま）を残し、後段の gate へ倒す。
+                if self.debug:
+                    self._debug_print(
+                        f"  Branch condition refinement declined for block "
+                        f"{block_info.index}: expansion budget truncated",
+                        1,
+                    )
+                continue
             refined = self._build_refined_branch_condition(
                 expanded_values,
                 output_size=cond_varnode.getSize() if hasattr(cond_varnode, "getSize") else 1,

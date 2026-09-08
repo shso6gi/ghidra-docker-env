@@ -271,6 +271,17 @@ def _impl__try_apply_triangular_mod_caller_outcomes(
     if zero_ret is None or one_ret is None:
         self._debug_print("Outcome caller summary declined: caller return partition/value proof unavailable")
         return False
+    # Issue #131: callee の outcome 契約を実際に採用した箇所（候補を見ただけで
+    # 降りた経路では記録しない）。周囲の session ではなく解析結果へ直接反映する。
+    # PR-B: 同期は派生 authority を無効化するので、下で書く outcome を消さないよう
+    # 採用が確定した直後・書き込みの前に行う（以降に early return はない）。
+    outcome_collector = ExpansionBudgetCollector()
+    self._record_callee_analysis_expansion_budget(
+        matched_callee_analysis,
+        owner_scope_key=getattr(analysis, "analysis_scope_key", None),
+        collector=outcome_collector,
+    )
+    self._sync_expansion_budget_truncations(analysis, collector=outcome_collector)
     analysis.returns = [zero_ret, one_ret]
     analysis.return_outcomes = (
         ReturnOutcome(guard=tuple(zero_ret.conditions), value=zero_ret.value, provenance={"source": "callee_positive_region_caller_summary"}, return_info=zero_ret),
@@ -292,15 +303,6 @@ def _impl__try_apply_triangular_mod_caller_outcomes(
     )
     if "outcome_partition_unknown_callee_positive_region" not in analysis.analysis_notes:
         analysis.analysis_notes.append("outcome_partition_unknown_callee_positive_region")
-    # Issue #131: callee の outcome 契約を実際に採用した箇所（候補を見ただけで
-    # 降りた経路では記録しない）。周囲の session ではなく解析結果へ直接反映する。
-    outcome_collector = ExpansionBudgetCollector()
-    self._record_callee_analysis_expansion_budget(
-        matched_callee_analysis,
-        owner_scope_key=getattr(analysis, "analysis_scope_key", None),
-        collector=outcome_collector,
-    )
-    self._sync_expansion_budget_truncations(analysis, collector=outcome_collector)
     return True
 
 

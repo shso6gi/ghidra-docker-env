@@ -85,6 +85,10 @@ def _unary_solver_status(self, ctx: Mapping[str, Any], assertions: Sequence[str]
 
 def _unary_blocker_reason_id(blocker: str):
     text = str(blocker or "")
+    # Issue #131: 切り捨てで止まった stage は、stage 名より原因の方が具体的なので
+    # 専用 reason を先に返す（``path_region`` の一般 blocker へ丸めない）。
+    if "case_budget_exceeded" in text:
+        return UnknownReasonId.EXPANSION_CASE_BUDGET_EXCEEDED
     if "cfg_reachability" in text:
         return UnknownReasonId.OUTCOME_CFG_REACHABILITY_INCOMPLETE
     if "path_region" in text:
@@ -496,6 +500,15 @@ def _prove_unary_outcome_for_analysis(
         )
 
     def path_region_completeness():
+        # Issue #131: 展開ケース数・経路数の上限で切り捨てが起きた関数では、
+        # region 集合そのものが「生き残ったケース」から作られている。生存 guard の
+        # 和が恒真でも元の展開が完全である証明にはならないので、CFG 事実との
+        # 照合へ進まずここで未完了にする。
+        if bool(getattr(analysis, "has_expansion_budget_truncation", lambda: False)()):
+            return UnaryProducerResult(
+                "case_budget_exceeded",
+                {"path_proof_kind": None, "return_member_path_artifacts": ()},
+            )
         base_complete = bool(
             terminals
             and not unknown_regions
@@ -723,6 +736,9 @@ def _prove_unary_outcome_for_analysis(
         return UnaryProducerResult("proved")
 
     def residual_totality():
+        # Issue #131: 生存 region の guard の和が恒真でも「展開が完全」ではない。
+        # 切り捨てのある関数は path_region_completeness で先に止まるので、ここへは
+        # 打ち切りなしのケース集合だけが到達する。
         union = self._outcome_guard_union_smt(
             [tuple(region.guard) for region in (return_regions + divergence_regions + termination_regions)], replace_fn
         )
@@ -834,7 +850,24 @@ def _impl__collect_return_coverage_unsafety_reasons(
         ("function1", cases1, param_replace_fn1, analysis1),
         ("function2", cases2, param_replace_fn2, analysis2),
     ):
-        if label in outcome_covered_labels:
+        if analysis is not None and bool(
+            getattr(analysis, "has_expansion_budget_truncation", lambda: False)()
+        ):
+            # Issue #131: 切り捨てが起きた側は、outcome partition・object-centric
+            # coverage・SMT 全域性のどの経路にも進ませない（生存ケースだけを見た
+            # 判定が covered になり得るため）。completion proof も発行しない。
+            coverage_result = ReturnCoverageCheckResult(
+                status="inconclusive",
+                reason_id=UnknownReasonId.EXPANSION_CASE_BUDGET_EXCEEDED,
+                detail=(
+                    f"Return case expansion truncated for {label}: "
+                    "surviving cases are not the whole case set"
+                ),
+                inconclusive_cause="expansion_case_budget_exceeded",
+                can_record_completion_proof=False,
+                solver_status="unknown",
+            )
+        elif label in outcome_covered_labels:
             coverage_result = ReturnCoverageCheckResult(
                 status="covered",
                 coverage_proof_method="outcome_partition_equivalence",
@@ -2555,6 +2588,13 @@ def _impl__outcome_guard_union_is_total(
     replace_fn,
     label: str,
 ) -> bool:
+    """渡された region guard の和が恒真かを判定する補助検査。
+
+    Issue #131: これが True でも、元の展開が上限で切り捨てられていれば区画全体の
+    complete／covered は成立しない。切り捨ては ``path_region_completeness``
+    producer が先に未完了へ倒す（この関数を弱めて補うことはしない）。
+    """
+
     union = self._outcome_guard_union_smt(guard_sets, replace_fn)
     if union is None:
         return False
@@ -2825,6 +2865,16 @@ def _impl__return_cases_have_object_centric_total_coverage(
     self,
     cases: Sequence[Any],
 ) -> Optional[bool]:
+    """観測済みケース集合が全体であることを前提にした網羅性判定。
+
+    Issue #131: **生存 guard の OR が恒真であることは、元の展開が完全である
+    ことの証明ではない。** 展開ケース数・経路数の上限で捨てられたケースがあると、
+    その guard が生存ケースの短い guard に包含されているだけで covered になり得る。
+    切り捨ての有無は ``FunctionReturnAnalysis.has_expansion_budget_truncation()``
+    が持ち、呼び出し側（``_impl__collect_return_coverage_unsafety_reasons`` と
+    ``path_region_completeness`` producer）がここへ来る前に inconclusive へ倒す。
+    ここでは「入力のケース集合が打ち切りなしで生成されている」ことを前提とする。
+    """
     if not cases:
         return False
     if any(not getattr(case, "conditions", None) for case in cases):
@@ -2851,6 +2901,11 @@ def _impl__return_cases_have_smt_total_coverage(
     For a case with conditions c1..cn, the case is missed by
     (not c1) or ... or (not cn).  If the conjunction of all case-miss
     formulas is UNSAT, the return partition is total.
+
+    Issue #131: この「全体」は渡されたケース集合に対する全体であって、元の展開が
+    完全であることの証明ではない。生存 guard の OR が恒真でも、上限で捨てられた
+    ケースがあれば覆えていない入力領域が残り得る。切り捨ての有無は呼び出し側が
+    先に判定する。
     """
 
     miss_conditions: List[Condition] = []

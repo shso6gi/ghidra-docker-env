@@ -174,12 +174,18 @@ def _impl__unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):
         return summary_return_reason_ids[reason_kind]
     if reason_kind in {"recoverable_partial", "argument_recovery_recoverable_partial"}:
         return UnknownReasonId.RECOVERABLE_PARTIAL
+    if reason_kind == UnknownReasonId.EXPANSION_CASE_BUDGET_EXCEEDED.value:
+        # Issue #131: 切り捨てが起きた関数の blocker は専用 reason のまま扱う
+        # （既定の効果不完全性へ丸めない）。
+        return UnknownReasonId.EXPANSION_CASE_BUDGET_EXCEEDED
     call_effect_reasons = {
         "unsupported_call_effect_summary": "unsupported_call_effect_semantics",
         "effect_summary_path_coverage_incomplete": "effect_observation_coverage_incomplete",
         "effect_store_location_unmodeled": "effect_observation_coverage_incomplete",
         "effect_global_read_identity_unavailable": "effect_observation_coverage_incomplete",
         "effect_surface_composition_incomplete": "effect_observation_coverage_incomplete",
+        # Issue #131: 効果面の切り捨ては既存の効果観測不完全性へ写像する。
+        "effect_expansion_case_budget_exceeded": "effect_observation_coverage_incomplete",
         "effect_call_argument_evidence": "call_argument_extraction_incomplete",
         "effect_call_argument_evidence_incomplete": "call_argument_extraction_incomplete",
         "effect_call_target_resolution_evidence": "call_target_resolution_unproven",

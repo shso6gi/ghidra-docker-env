@@ -23,6 +23,8 @@ from scripts.function_tracer_pcode.core.signature import (
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
 from scripts.function_tracer_pcode.core.runtime_refs import (
+    EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON,
+    EXPANSION_CASE_BUDGET_EXCEEDED_REASON,
     DeferredCallRef,
     ExpansionBudgetTruncation,
     PcodeBlockRef,
@@ -1172,6 +1174,16 @@ _SEMANTIC_SUCCESSOR_INVALIDATION_BY_CHANGE = {
         "comparison_surface", "completed_recovery_proof_ids",
         "completed_recovery_proof_evidence",
     }),
+    # Issue #131 PR-B: 切り捨て marker は「展開が完全だった」という前提を壊すので、
+    # ``returns`` が変わったときと同じ範囲の派生 authority を保守的に無効化する。
+    # 記録が増えた後で、marker を知らずに作った証明・seed・view を再利用しない。
+    "expansion_budget_truncations": frozenset({
+        "return_outcomes", "divergence_outcomes", "unknown_outcomes",
+        "outcome_seed", "analysis_view_identity", "partition_revision",
+        "comparison_surface", "completed_recovery_proof_ids",
+        "completed_recovery_proof_evidence", "summary_return_candidates",
+        "termination_path_effect_evidence", "quarantined_recurrence_proposals",
+    }),
 }
 
 _SEMANTIC_SUCCESSOR_DERIVED_DEFAULTS = {
@@ -1190,6 +1202,42 @@ _SEMANTIC_SUCCESSOR_DERIVED_DEFAULTS = {
     "termination_path_effect_evidence": (),
     "quarantined_recurrence_proposals": (),
 }
+
+
+def semantic_successor_invalidated_fields(*changed_fields: str) -> frozenset:
+    """変更された semantic 入力に対応する、無効化すべき派生 authority 名の集合。
+
+    ``semantic_successor`` と in-place 同期の双方がこの 1 か所を参照する
+    （集合の定義を二重実装しない）。
+    """
+
+    return frozenset().union(*(
+        _SEMANTIC_SUCCESSOR_INVALIDATION_BY_CHANGE.get(name, frozenset())
+        for name in changed_fields
+    ))
+
+
+def semantic_successor_derived_default(name: str) -> Any:
+    """派生 authority の既定値を新しい実体として返す。
+
+    mutable な既定値を複数の解析結果で共有しないよう、必ず複製して返す。
+    """
+
+    return _semantic_copy(_SEMANTIC_SUCCESSOR_DERIVED_DEFAULTS[name])
+
+
+def invalidate_semantic_successor_fields(analysis: Any, *changed_fields: str) -> frozenset:
+    """既存の解析結果を書き換える経路で、派生 authority を既定値へ戻す。
+
+    Issue #131 PR-B: 切り捨て marker のように、後から同じ解析結果へ追加される
+    semantic 入力のための in-place 版。呼び出し側は marker の反映とこの無効化を
+    途中状態が観測されない 1 か所で行う。
+    """
+
+    invalidated = semantic_successor_invalidated_fields(*changed_fields)
+    for name in sorted(invalidated):
+        setattr(analysis, name, semantic_successor_derived_default(name))
+    return invalidated
 
 
 def derive_memory_effect_bit_width(returns, effect_summary, expr_bit_width) -> int:
@@ -1255,9 +1303,9 @@ class FunctionReturnAnalysis:
     outcome_seed: Optional[FunctionOutcomeSeed] = None
     termination_path_effect_evidence: Tuple[TerminationPathEffectEvidence, ...] = ()
     quarantined_recurrence_proposals: Tuple[Any, ...] = ()
-    # Issue #131 PR-A: 展開ケース数・経路数の上限で実際に切り捨てが起きた事実。
-    # PR-A では診断のみ（``to_dict`` / semantic fingerprint / 証明前提には出さない）。
-    # 判定 gate への接続と semantic 化は PR-B で行う。
+    # Issue #131: 展開ケース数・経路数の上限で実際に切り捨てが起きた事実。
+    # PR-B から semantic 入力（``to_dict`` / snapshot fingerprint / seed / gate）。
+    # 記録がある限り「展開が完全だった」ことは前提にできない。
     expansion_budget_truncations: Tuple[ExpansionBudgetTruncation, ...] = ()
 
     def __post_init__(self) -> None:
@@ -1298,10 +1346,7 @@ class FunctionReturnAnalysis:
             unknown = ", ".join(sorted(unknown_changes))
             raise TypeError(f"unknown FunctionReturnAnalysis fields: {unknown}")
 
-        invalidated_fields = frozenset().union(*(
-            _SEMANTIC_SUCCESSOR_INVALIDATION_BY_CHANGE.get(name, frozenset())
-            for name in changes
-        ))
+        invalidated_fields = semantic_successor_invalidated_fields(*changes)
         conflicting_changes = invalidated_fields.intersection(changes)
         if conflicting_changes:
             conflicting = ", ".join(sorted(conflicting_changes))
@@ -1349,9 +1394,7 @@ class FunctionReturnAnalysis:
                 )
                 continue
             if name in invalidated_fields:
-                successor_values[name] = _semantic_copy(
-                    _SEMANTIC_SUCCESSOR_DERIVED_DEFAULTS[name]
-                )
+                successor_values[name] = semantic_successor_derived_default(name)
                 continue
             value = getattr(self, name)
             successor_values[name] = (
@@ -1601,6 +1644,16 @@ class FunctionReturnAnalysis:
             )
         if self.comparison_surface is not None:
             result["comparison_surface"] = self.comparison_surface.to_dict()
+        if self.expansion_budget_truncations:
+            # Issue #131 PR-B: 正規化済みの全記録（参照 event ID 込み）を出す。
+            # snapshot fingerprint は ``to_dict`` から作られるので、marker の有無・
+            # 参照情報の増加はそのまま解析前提の同一性に反映される。
+            result["expansion_budget_truncations"] = [
+                record.to_dict()
+                for record in merge_expansion_budget_truncations(
+                    self.expansion_budget_truncations
+                )
+            ]
         
         return result
     
@@ -1973,6 +2026,23 @@ class FunctionReturnAnalysis:
             provenance["counterpart_return_type"] = evidence.get("counterpart_return_type")
         return provenance
 
+    def has_expansion_budget_truncation(self) -> bool:
+        """展開ケース数・経路数の上限で実際に切り捨てが起きたか（Issue #131）。
+
+        解析面の marker が非空か、効果要約が
+        ``effect_expansion_case_budget_exceeded`` を持つ場合に True。
+        どちらか一方だけでも「観測したケース集合が全体である」ことは言えないので、
+        網羅性・決定的 SAT・無条件 EQ の各 gate はこれを共通判定として使う。
+        """
+
+        if tuple(self.expansion_budget_truncations or ()):
+            return True
+        effect_summary = getattr(self, "effect_summary", None)
+        effect_reasons = getattr(effect_summary, "incomplete_reasons", ())
+        if not isinstance(effect_reasons, (list, tuple, set, frozenset)):
+            return False
+        return EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON in effect_reasons
+
     def get_decisive_sat_unsafety_reasons(self) -> List[str]:
         """
         SAT を「非等価の決め手」として扱うには危険な要因を列挙する。
@@ -1991,6 +2061,10 @@ class FunctionReturnAnalysis:
             reasons.append("overlapping_unconditional_returns")
         if self.incomplete_control_flow and not self.recovered_from_decompiler:
             reasons.append("incomplete_control_flow")
+        # Issue #131 PR-B: 生き残ったケースが SAT でも、捨てられたケースを
+        # 見ていない以上「非等価の決め手」にはできない。
+        if self.has_expansion_budget_truncation():
+            reasons.append(EXPANSION_CASE_BUDGET_EXCEEDED_REASON)
         effect_summary = getattr(self, "effect_summary", None)
         if (
             effect_summary is not None
@@ -2042,6 +2116,10 @@ class FunctionReturnAnalysis:
         final EQUIVALENT にはしない。
         """
         reasons: List[str] = []
+        # Issue #131 PR-B: 生存ケースが全ペア UNSAT でも、捨てられたケースは
+        # 比較対象に入っていない。coverage 証明を経由しない経路でも塞ぐ。
+        if self.has_expansion_budget_truncation():
+            reasons.append(EXPANSION_CASE_BUDGET_EXCEEDED_REASON)
         effect_summary = getattr(self, "effect_summary", None)
         if effect_summary is not None:
             if getattr(effect_summary, "has_unsupported_call", False):

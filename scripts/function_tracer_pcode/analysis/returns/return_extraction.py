@@ -926,6 +926,11 @@ def _build_function_outcome_seed(analysis: FunctionReturnAnalysis) -> None:
             control_flow_evidence_key = candidate_profile_key
     if getattr(analysis, "incomplete_control_flow", False):
         unresolved.append(("incomplete_control_flow",))
+    # Issue #131 PR-B: 上限で捨てられたケースがある間は、生存ケースから作った
+    # region 集合が制御フロー全体を覆っている保証がない。切り捨て事実を seed の
+    # 未解決制御証拠に入れ、seed digest（= 単項証明の要求 ID）へ束縛する。
+    for record in tuple(getattr(analysis, "expansion_budget_truncations", ()) or ()):
+        unresolved.append(("expansion_budget_truncation", record.event_id))
     for reason in getattr(analysis, "unknown_event_reasons", ()) or ():
         if any(token in str(reason).lower() for token in ("branch", "control", "terminal", "callind")):
             unresolved.append(("analysis_unknown", str(reason)))

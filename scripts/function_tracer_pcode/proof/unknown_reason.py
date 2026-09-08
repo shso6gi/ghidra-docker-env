@@ -37,6 +37,7 @@ class UnknownReasonId(str, Enum):
     LOOP_SUMMARY_PROOF_MISSING = "loop_summary_proof_missing"
     RETURN_COVERAGE_GAP = "return_coverage_gap"
     RETURN_COVERAGE_INCONCLUSIVE = "return_coverage_inconclusive"
+    EXPANSION_CASE_BUDGET_EXCEEDED = "expansion_case_budget_exceeded"
     OUTCOME_PARTITION_UNKNOWN = "outcome_partition_unknown"
     OUTCOME_CFG_REACHABILITY_INCOMPLETE = "outcome_cfg_reachability_incomplete"
     OUTCOME_PATH_REGION_INCOMPLETE = "outcome_path_region_incomplete"
@@ -359,6 +360,18 @@ def _register_defaults() -> None:
             UnknownAggregationUnit.FUNCTION,
             recovery_proof_kind=UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION,
             target_regression="return_coverage_inconclusive",
+        ),
+        # Issue #131: 展開ケース数・経路数の上限で実際に切り捨てが起きた関数。
+        # 生存ケースだけで等価も非等価も決められないので BLOCKS_DECISION。
+        # marker を解除する回復手段は用意しない（recovery=NONE）。
+        UnknownReasonDefinition.create(
+            UnknownReasonId.EXPANSION_CASE_BUDGET_EXCEEDED,
+            UnknownReasonClass.COVERAGE_GAP,
+            UnknownDecisionEffect.BLOCKS_DECISION,
+            UnknownReasonScope.FUNCTION,
+            UnknownAggregationUnit.FUNCTION,
+            recovery_proof_kind=UnknownRecoveryProofKind.NONE,
+            target_regression="expansion_case_budget_exceeded",
         ),
         UnknownReasonDefinition.create(
             UnknownReasonId.OUTCOME_PARTITION_UNKNOWN,
