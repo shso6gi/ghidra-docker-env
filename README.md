@@ -66,6 +66,13 @@ the benchmark tree there). `eqbench_run_all_32jobs.sh` compiles every
 before running the matrix, so no manual build step is needed. Set
 `EQBENCH_BUILD_POLICY=PREBUILT_ONLY` to reuse existing binaries only.
 
+The checker's own input is exactly the two binaries passed to `--equiv`. It
+never reads files that happen to sit next to them: the `newV.c` / `new.c`
+sources copied into `Eq/source/` alongside the compiled binaries are inputs to
+the benchmark evaluation oracle (`scripts/eqbench/function_diff_manifest.py`,
+`reporting/benchmark_validation_gate.py`), never to the semantic judgement,
+its provenance, or the signed execution identity.
+
 ## Generated outputs
 
 These paths are intentionally not git-managed:

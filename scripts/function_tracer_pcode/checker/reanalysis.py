@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """解析と再解析のヘルパー"""
 
-from dataclasses import replace
 from typing import Optional, Tuple
 import time
 
@@ -10,7 +9,6 @@ from scripts.function_tracer_pcode.core import (
     FunctionSignature,
     SignatureHypothesis,
 )
-from scripts.function_tracer_pcode.core.signature import get_declared_type_size_bits
 from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext, PhaseResult
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.checker.diagnostics import AnalysisTimer
@@ -19,7 +17,6 @@ from scripts.function_tracer_pcode.checker.result_factory import (
     create_context_unknown_result,
     create_reanalysis_error,
 )
-from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixer
 from scripts.function_tracer_pcode.analysis.failure import (
     ANALYSIS_STATUS_DECOMPILATION_FAILED,
     ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS,
@@ -130,21 +127,6 @@ def analyze_and_check_with_analysis(
     if ctx.original_signature2 is None:
         ctx.original_signature2 = FunctionSignature.from_analysis(analysis2)
 
-    analysis1 = _apply_declared_return_type_hypothesis(
-        checker=checker,
-        analysis=analysis1,
-        program=ctx.program1,
-        binary_name=ctx.binary1_name,
-        declared_return_type=ctx.declared_return_type1,
-    )
-    analysis2 = _apply_declared_return_type_hypothesis(
-        checker=checker,
-        analysis=analysis2,
-        program=ctx.program2,
-        binary_name=ctx.binary2_name,
-        declared_return_type=ctx.declared_return_type2,
-    )
-
     checker._debug_print("Running stage plan...")
     result = checker._run_stage_plan(
         analysis1,
@@ -160,61 +142,6 @@ def analyze_and_check_with_analysis(
     _attach_analysis_diagnostics(checker, result)
 
     return analysis1, analysis2, result
-
-
-def _apply_declared_return_type_hypothesis(
-    *,
-    checker,
-    analysis: FunctionReturnAnalysis,
-    program,
-    binary_name: str,
-    declared_return_type: Optional[str],
-) -> FunctionReturnAnalysis:
-    declared = str(declared_return_type or "").strip()
-    if not declared:
-        return analysis
-    declared_width = get_declared_type_size_bits(None, declared, program=program)
-    if declared != "void":
-        provenance = dict(getattr(analysis, "return_type_provenance", {}) or {})
-        provenance.update(
-            {
-                "object_derived": True,
-                "source_declared_return_type_known": True,
-                "source_declared_return_type_width": declared_width,
-                "source_declared_return_type": declared,
-                "source_declared_return_type_source": "adjacent_c_declaration",
-            }
-        )
-        return replace(analysis, return_type_provenance=provenance)
-
-    type_fixer = TypeFixer(
-        program,
-        config=getattr(checker, "type_fixer_config", None),
-        debug=getattr(checker, "debug", False),
-    )
-    hypothesis, return_changed, _ = type_fixer.build_signature_hypothesis(
-        FunctionSignature.from_analysis(analysis),
-        fix_return_type=False,
-        fix_param_types=False,
-        override_return_type_name=declared,
-        phase_name="P0_SOURCE_DECLARATION",
-        reason="source-declared return type evidence",
-        evidence={
-            "source": "adjacent_c_declaration",
-            "binary_name": binary_name,
-            "function_name": analysis.function_name,
-            "declared_return_type": declared,
-            "declared_return_type_width": declared_width,
-        },
-    )
-    if not return_changed:
-        return analysis
-
-    checker._debug_print(
-        f"Applying source-declared return type for {binary_name}:{analysis.function_name}: "
-        f"{analysis.return_type} -> {declared}"
-    )
-    return analysis.with_signature_hypothesis(hypothesis)
 
 
 def selective_reanalysis_and_check(
@@ -256,7 +183,6 @@ def selective_reanalysis_and_check(
         function_name: str,
         binary_name: str,
         cached_analysis: FunctionReturnAnalysis,
-        declared_return_type: Optional[str],
     ) -> Tuple[Optional[FunctionReturnAnalysis], Optional[str], Optional[str]]:
         binary_id = ctx.binary1_id if program is ctx.program1 else ctx.binary2_id if program is ctx.program2 else None
         analyzer = ReturnAnalyzer(
@@ -293,18 +219,6 @@ def selective_reanalysis_and_check(
                     program=program,
                 )
                 replayed = replayed.with_signature_hypothesis(hypothesis)
-            # Non-void adjacent-source declarations are immutable provenance,
-            # not signature mutations, so they are intentionally absent from
-            # ``signature_hypotheses``.  Reapply the same evidence to the fresh
-            # analysis view; otherwise a parameter-only retry silently loses
-            # the return observation contract.
-            replayed = _apply_declared_return_type_hypothesis(
-                checker=checker,
-                analysis=replayed,
-                program=program,
-                binary_name=binary_name,
-                declared_return_type=declared_return_type,
-            )
             if getattr(replayed, "signature_hypotheses", None):
                 replayed = analyzer.refresh_structural_recurrence_summary(
                     replayed,
@@ -320,7 +234,6 @@ def selective_reanalysis_and_check(
             function_name=ctx.function_name1,
             binary_name=ctx.binary1_name,
             cached_analysis=analysis1,
-            declared_return_type=ctx.declared_return_type1,
         )
         if analysis1 is None:
             checker._debug_print(f"Fresh reanalysis failed for binary1: {error_message}")
@@ -350,7 +263,6 @@ def selective_reanalysis_and_check(
             function_name=ctx.function_name2,
             binary_name=ctx.binary2_name,
             cached_analysis=analysis2,
-            declared_return_type=ctx.declared_return_type2,
         )
         if analysis2 is None:
             checker._debug_print(f"Fresh reanalysis failed for binary2: {error_message}")

@@ -2609,3 +2609,30 @@ def test_high_bit_mask_relation_rejects_noncanonical_decimal_spellings():
             AbiWidthReadonlySolverQueryAuthority._extended_payload(
                 "payload", 32, 64, kind
             )
+
+
+def test_return_observation_contract_rejects_source_declared_derivation():
+    """Issue #122: source 由来の観測幅 derivation は sealed 集合から外れている。"""
+    snapshot = "source-snapshot"
+    projection = _projection_seed()
+    blocker = AbiWidthReadonlyBlockerSignal.from_projection_seed(
+        "return_observation_contract_unproven", projection
+    )
+
+    with pytest.raises(ValueError, match="observation width derivation is not sealed"):
+        ReturnObservationContractArtifact.from_projection_seed(
+            blocker,
+            projection,
+            derivation="source_declared_return_width",
+            projection_policy="identity",
+            source_snapshot_fingerprint=snapshot,
+        )
+
+    accepted = ReturnObservationContractArtifact.from_projection_seed(
+        blocker,
+        projection,
+        derivation="common_validated_semantic_payload_width",
+        projection_policy="identity",
+        source_snapshot_fingerprint=snapshot,
+    )
+    assert accepted.artifact_digest

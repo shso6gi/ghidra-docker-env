@@ -1522,8 +1522,6 @@ class FunctionReturnAnalysis:
             "signature_hypothesis_phase": None,
             "resolved_return_override_source": None,
             "counterpart_return_type": None,
-            "source_declared_return_type_known": False,
-            "source_declared_return_type_width": None,
             "declared_return_type_width": get_declared_type_size_bits(
                 self.return_type_obj,
                 return_type,
@@ -2009,19 +2007,6 @@ class FunctionReturnAnalysis:
             provenance["return_type_source"] = resolved_source
         elif phase:
             provenance["return_type_source"] = phase
-        if phase == "P0_SOURCE_DECLARATION":
-            declared_name = evidence.get("declared_return_type") or hypothesis_payload.get(
-                "return_type_override"
-            )
-            provenance["source_declared_return_type_known"] = True
-            provenance["source_declared_return_type_width"] = evidence.get(
-                "declared_return_type_width"
-            )
-            if provenance["source_declared_return_type_width"] is None:
-                provenance["source_declared_return_type_width"] = get_declared_type_size_bits(
-                    None,
-                    declared_name,
-                )
         if "counterpart_return_type" in evidence:
             provenance["counterpart_return_type"] = evidence.get("counterpart_return_type")
         return provenance

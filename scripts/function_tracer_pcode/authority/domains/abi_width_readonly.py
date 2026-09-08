@@ -2182,7 +2182,7 @@ class ReturnObservationContractArtifact(_AbiWidthReadonlyCompletionArtifact):
                              source_snapshot_fingerprint, high_bit_dependency=None):
         if type(seed) is not ReturnObservationProjectionSeed or blocker.evidence_refs[0] != seed.seed_digest:
             raise ValueError("observation artifact differs from projection seed authority")
-        if derivation not in {"source_declared_return_width", "common_validated_semantic_payload_width"}:
+        if derivation not in {"common_validated_semantic_payload_width"}:
             raise ValueError("observation width derivation is not sealed")
         if not projection_policy:
             raise ValueError("observation contract lacks a projection policy")

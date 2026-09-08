@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "765c12fdebb88f7201c1ab5b3646fb54d9f7e78a3e8f692bb1aa669e3324187b",
+  "manifest_digest": "bc73789a80db4a52e189892572b3acd5ec683d8edca5ef267013bfc8fe668b7a",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 30,
   "sites": [
@@ -904,7 +904,7 @@
       "line": 1130,
       "path": "scripts/function_tracer_pcode/proof/return_width/surface.py",
       "producer_site_manifest_id": "return-width-observation-contract-blocker",
-      "source_sha256": "4e503576fec39887dd09128ee8309f0229b3a9c84310de5a58609c4943e9d248"
+      "source_sha256": "cfb125dcdb61a7c93cb2ca4f6a6b3b2cc37944ed4d4b3569248cccc209e89bd9"
     },
     {
       "allowed_dispositions": [
@@ -1010,10 +1010,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1254,
+      "line": 1255,
       "path": "scripts/function_tracer_pcode/proof/return_width/surface.py",
       "producer_site_manifest_id": "return-width-projection-relation-blocker",
-      "source_sha256": "4e503576fec39887dd09128ee8309f0229b3a9c84310de5a58609c4943e9d248"
+      "source_sha256": "cfb125dcdb61a7c93cb2ca4f6a6b3b2cc37944ed4d4b3569248cccc209e89bd9"
     },
     {
       "allowed_dispositions": [
@@ -1042,7 +1042,7 @@
       "line": 1174,
       "path": "scripts/function_tracer_pcode/proof/return_width/surface.py",
       "producer_site_manifest_id": "return-width-unary-provenance-blocker",
-      "source_sha256": "4e503576fec39887dd09128ee8309f0229b3a9c84310de5a58609c4943e9d248"
+      "source_sha256": "cfb125dcdb61a7c93cb2ca4f6a6b3b2cc37944ed4d4b3569248cccc209e89bd9"
     },
     {
       "allowed_dispositions": [

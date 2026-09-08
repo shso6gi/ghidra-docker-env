@@ -224,8 +224,6 @@ def run_check_from_binaries_with_v2_pilot(
         )[1],
         "function_name1": function_name1,
         "function_name2": function_name2,
-        "declared_return_type1": kwargs.get("declared_return_type1"),
-        "declared_return_type2": kwargs.get("declared_return_type2"),
         "observation_contract_id": checker.observation_contract.contract_id,
     }
     boundary_seconds: Dict[str, float] = {}
