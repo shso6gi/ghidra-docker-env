@@ -1885,6 +1885,24 @@ def _refiner_case(callee_returns, *, caller_extra_returns=(), max_cases=8, max_u
     return refiner, caller, callee, adopted
 
 
+def _adopted_callee_refinement_case(on_callee_adopted):
+    """callee の戻り値が最終 returns へ実際に残る構成（通知先だけ差し替える）。
+
+    ``test_marker_only_for_the_callee_that_survives_into_the_final_returns`` と
+    同じ配置なので、「採用が起きること」自体は別テストで固定済み。
+    """
+    from scripts.function_tracer_pcode.core.analysis import ReturnInfo
+
+    def _p(name="n", index=0, size=4):
+        return Expression.parameter(name, index=index, data_type="int", size=size)
+
+    refiner, caller, _callee, _adopted = _refiner_case(
+        [ReturnInfo(address="0x2000", value=_p("x", 0), conditions=[])]
+    )
+    refiner.on_callee_adopted = on_callee_adopted
+    return refiner, caller
+
+
 def test_no_marker_when_the_callee_expansion_stays_unresolved():
     """展開結果に UNKNOWN/deferred が残り、元の unresolved return が保持される場合。"""
     from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo, ReturnInfo

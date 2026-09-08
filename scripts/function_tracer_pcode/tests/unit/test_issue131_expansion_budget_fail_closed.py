@@ -16,6 +16,8 @@ PR-A（``test_issue131_expansion_budget_observation.py``）が「生成 → 保�
 from dataclasses import replace
 from unittest.mock import Mock, patch
 
+import pytest
+
 from scripts.function_tracer_pcode.analysis.returns.return_extraction import (
     _build_function_outcome_seed,
 )
@@ -356,6 +358,92 @@ def test_a7_surviving_sat_does_not_become_decisive_for_either_side():
     )
 
 
+def _a1_analysis(input_values, *, with_markers=True):
+    """A1 の実展開（18 ケース → 生存 16 ケース）から解析結果を組み立てる。
+
+    切り捨てられる 2 ケースだけが左右で異なるので、生存ケースだけを比較すると
+    左右は完全に一致する。marker の有無だけを変えて対照できるようにする。
+    """
+
+    expanded, collector, _expander = _a1_expansion(input_values)
+    assert len(expanded) == 16
+    returns = [
+        ReturnInfo(
+            address=f"0x{index:x}",
+            value=item.value,
+            conditions=list(item.conditions),
+            branch_index=index,
+        )
+        for index, item in enumerate(expanded)
+    ]
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=[
+            {
+                "name": f"param_{index + 1}",
+                "index": index,
+                "size": 4,
+                "data_type": "int",
+                "is_signed": True,
+            }
+            for index in range(13)
+        ],
+        returns=returns,
+        return_type="int",
+        expansion_budget_truncations=collector.as_tuple() if with_markers else (),
+    )
+    assert collector.as_tuple(), "A1 fixture must truncate"
+    return analysis
+
+
+def test_a1_reaches_a_final_unknown_with_the_registered_reason():
+    """A1 を最終判定入口（``PairwiseStrategy.check``）まで通す。
+
+    生存 16 ケースは左右一致するので、切り捨てを見なければ EQUIVALENT になり得る
+    入力。marker があるときは UNKNOWN になり、登録 reason が出ることを固定する。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+    from scripts.function_tracer_pcode.smt.parallel import ParallelSolverRunner
+
+    left = _a1_analysis([100, 101, 102, 103])
+    right = _a1_analysis([100, 101, 202, 203])
+    strategy = PairwiseStrategy(FormulaBuilder(), ParallelSolverRunner(timeout=5), debug=False)
+    result = strategy.check(left, right)
+
+    # 生存ケースの比較はすべて UNSAT（= 切り捨てを見なければ等価に見える）
+    assert (result.total_pairs, result.unsat_pairs, result.sat_pairs) == (256, 256, 0)
+    assert result.is_equivalent is None, "final outcome must be UNKNOWN"
+    assert result.is_equivalent is not True and result.is_equivalent is not False
+    reason_ids = {str(getattr(record, "reason_id", "")) for record in result.unknown_reasons}
+    assert reason_ids == {EXPANSION_CASE_BUDGET_EXCEEDED_REASON}, sorted(reason_ids)
+    assert all(
+        get_unknown_reason_definition(reason).decision_effect
+        == UnknownDecisionEffect.BLOCKS_DECISION.value
+        for reason in reason_ids
+    )
+
+
+def test_a1_without_markers_does_not_report_the_case_budget_reason():
+    """対照: 同じ生存ケースでも marker が無ければ本 reason は出ない（退行検査）。"""
+
+    from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+    from scripts.function_tracer_pcode.smt.parallel import ParallelSolverRunner
+
+    left = _a1_analysis([100, 101, 102, 103], with_markers=False)
+    right = _a1_analysis([100, 101, 202, 203], with_markers=False)
+    strategy = PairwiseStrategy(FormulaBuilder(), ParallelSolverRunner(timeout=5), debug=False)
+    result = strategy.check(left, right)
+
+    assert (result.total_pairs, result.unsat_pairs, result.sat_pairs) == (256, 256, 0)
+    assert result.is_equivalent is not False, "surviving cases agree; NOT_EQ must not appear"
+    reason_ids = {str(getattr(record, "reason_id", "")) for record in result.unknown_reasons}
+    assert EXPANSION_CASE_BUDGET_EXCEEDED_REASON not in reason_ids
+    # marker が無ければ従来どおりの blocker（切り捨て以外の理由）だけが残る
+    assert reason_ids == {"return_coverage_gap"}, sorted(reason_ids)
+
+
 def test_a1_surviving_cases_that_agree_still_block_equivalence_on_both_sides():
     """A1: 捨てられたケースだけで値が違う対でも、生存ケースは一致する。
 
@@ -435,7 +523,7 @@ def test_a2_loop_phi_truncation_reaches_the_producer_through_the_seed():
     analysis = _total_return_analysis(truncations=collector.as_tuple())
     _build_function_outcome_seed(analysis)
     assert analysis.outcome_seed.unresolved_control_evidence == (
-        ("expansion_budget_truncation", collector.as_tuple()[0].event_id),
+        ("expansion_budget_truncation", collector.as_tuple()[0].event_id, ()),
     )
 
 
@@ -607,6 +695,73 @@ def test_a5_branch_refinement_still_applies_without_a_truncation():
 
 
 # ---------------------------------------------------------------------------
+# 採用 callee の marker 伝搬（fail-open を残さない）
+# ---------------------------------------------------------------------------
+
+
+def _refiner_with_adopted_callee(on_callee_adopted):
+    """callee の戻り値が実際に最終 returns へ残る bounded refinement を組む。"""
+    from scripts.function_tracer_pcode.tests.unit.test_issue131_expansion_budget_observation import (
+        _adopted_callee_refinement_case,
+    )
+
+    return _adopted_callee_refinement_case(on_callee_adopted)
+
+
+def test_marker_propagation_failure_is_not_swallowed_and_blocks_adoption():
+    """採用 callee の marker 伝搬が失敗したら refined returns を公開しない。"""
+
+    calls = []
+
+    def _failing(callee_analysis):
+        calls.append(callee_analysis)
+        raise RuntimeError("marker propagation failed")
+
+    refiner, analysis = _refiner_with_adopted_callee(_failing)
+    returns_before = analysis.returns
+
+    with pytest.raises(RuntimeError, match="marker propagation failed"):
+        refiner.refine_analysis(analysis)
+
+    assert calls, "the callee must actually have been adopted"
+    # 採用された callee 由来の値だけが残る状態にはしない
+    assert analysis.returns is returns_before
+    assert "bounded_call_refinement" not in analysis.analysis_notes
+
+
+def test_marker_propagation_success_still_adopts_and_propagates():
+    """正常時は従来どおり採用され、marker も伝搬する。"""
+
+    calls = []
+    refiner, analysis = _refiner_with_adopted_callee(calls.append)
+    returns_before = analysis.returns
+
+    changed = refiner.refine_analysis(analysis)
+
+    assert changed is True
+    assert analysis.returns is not returns_before
+    assert len(calls) == 1
+    assert calls[0].expansion_budget_truncations
+
+
+def test_adoption_notification_happens_before_the_returns_are_published():
+    """順序契約: 採用 callee 確定 → marker 伝搬 → refined returns 公開。"""
+    import inspect
+
+    from scripts.function_tracer_pcode.analysis import bounded_refinement
+
+    source = inspect.getsource(bounded_refinement.BoundedCallRefiner.refine_analysis)
+    notify_at = source.index("self._notify_adopted_callees(deduped)")
+    publish_at = source.index("analysis.returns = deduped")
+    assert notify_at < publish_at
+    # 通知経路に例外の握り潰しを残さない
+    notify_source = inspect.getsource(
+        bounded_refinement.BoundedCallRefiner._notify_callee_adopted
+    )
+    assert "except" not in notify_source
+
+
+# ---------------------------------------------------------------------------
 # A6 / A9: 効果要約
 # ---------------------------------------------------------------------------
 
@@ -694,6 +849,25 @@ def test_a9_callee_branch_refinement_truncation_marks_the_callee_summary_itself(
     record_at = tail.index("budget_collector.record(")
     assert mark_at < record_at
     assert "if callee_refinement_collector:" in tail[:mark_at]
+
+
+def test_a9_a_truncated_callee_summary_is_never_used_for_caller_effects():
+    """診断 dict が失われても、要約自身の reason で callee 効果は採用されない。
+
+    cache hit 経路で marker を作れなくても、caller 側は ``incomplete_reasons`` を
+    見て「未対応の呼び出し」として閉じる（fail-open が残っていないことの確認）。
+    """
+    from scripts.function_tracer_pcode.analysis.effects.summary import (
+        EffectSummary,
+        is_call_effect_summary_allowed,
+    )
+
+    summary = EffectSummary(
+        parameter_names=[],
+        effects=[],
+        incomplete_reasons=(EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON,),
+    )
+    assert is_call_effect_summary_allowed(summary) is False
 
 
 def test_a9_missing_diagnostics_alone_never_invent_a_truncation():
@@ -837,6 +1011,77 @@ def test_the_new_blocking_reason_cannot_be_discharged_by_a_completed_recovery_pr
 # ---------------------------------------------------------------------------
 
 
+def test_the_seed_binds_referenced_event_ids_not_only_the_event_id():
+    """同一 ``event_id`` でも参照 ID が増えれば seed digest が変わる。"""
+    from scripts.function_tracer_pcode.proof.obligations.outcome_partition import (
+        outcome_seed_digest,
+    )
+
+    marker = _record()
+    base = _total_return_analysis(truncations=(marker,))
+    _build_function_outcome_seed(base)
+    referenced = _total_return_analysis(
+        truncations=(replace(marker, referenced_event_ids=("ref-1",)),)
+    )
+    _build_function_outcome_seed(referenced)
+
+    assert base.outcome_seed.unresolved_control_evidence == (
+        ("expansion_budget_truncation", marker.event_id, ()),
+    )
+    assert referenced.outcome_seed.unresolved_control_evidence == (
+        ("expansion_budget_truncation", marker.event_id, ("ref-1",)),
+    )
+    assert outcome_seed_digest(base.outcome_seed) != outcome_seed_digest(
+        referenced.outcome_seed
+    )
+
+
+def test_the_seed_binds_an_effect_only_truncation():
+    """解析 marker が空でも、効果要約の切り捨て reason を seed へ束縛する。"""
+    from scripts.function_tracer_pcode.proof.obligations.outcome_partition import (
+        outcome_seed_digest,
+    )
+
+    clean = _total_return_analysis()
+    _build_function_outcome_seed(clean)
+    effect_only = _total_return_analysis()
+    effect_only.effect_summary = Mock(
+        incomplete_reasons=(EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON,),
+        has_unsupported_call=False,
+        function_control_effect_profile=_CompleteProfile(),
+    )
+    _build_function_outcome_seed(effect_only)
+
+    assert effect_only.expansion_budget_truncations == ()
+    assert (EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON,) in (
+        effect_only.outcome_seed.unresolved_control_evidence
+    )
+    assert outcome_seed_digest(clean.outcome_seed) != outcome_seed_digest(
+        effect_only.outcome_seed
+    )
+
+
+def test_the_seed_evidence_order_is_canonical():
+    """marker / 参照 ID の並び順だけでは seed digest が変わらない。"""
+    from scripts.function_tracer_pcode.proof.obligations.outcome_partition import (
+        outcome_seed_digest,
+    )
+
+    first = replace(_record(label="a"), referenced_event_ids=("ref-2", "ref-1"))
+    second = _record(label="b")
+    forward = _total_return_analysis(truncations=(first, second))
+    _build_function_outcome_seed(forward)
+    backward = _total_return_analysis(truncations=(second, first))
+    _build_function_outcome_seed(backward)
+
+    assert outcome_seed_digest(forward.outcome_seed) == outcome_seed_digest(
+        backward.outcome_seed
+    )
+    assert forward.outcome_seed.unresolved_control_evidence == (
+        backward.outcome_seed.unresolved_control_evidence
+    )
+
+
 def test_the_seed_digest_changes_when_a_marker_is_present():
     from scripts.function_tracer_pcode.proof.obligations.outcome_partition import (
         outcome_seed_digest,
@@ -849,7 +1094,7 @@ def test_the_seed_digest_changes_when_a_marker_is_present():
 
     assert clean.outcome_seed.unresolved_control_evidence == ()
     assert truncated.outcome_seed.unresolved_control_evidence == (
-        ("expansion_budget_truncation", _record().event_id),
+        ("expansion_budget_truncation", _record().event_id, ()),
     )
     assert outcome_seed_digest(clean.outcome_seed) != outcome_seed_digest(
         truncated.outcome_seed

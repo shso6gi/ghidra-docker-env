@@ -16,7 +16,10 @@ from scripts.function_tracer_pcode.core.analysis import (
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.render_smt import expression_contains_unsupported_smt_ops
-from scripts.function_tracer_pcode.core.runtime_refs import PcodeOpRef
+from scripts.function_tracer_pcode.core.runtime_refs import (
+    EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON,
+    PcodeOpRef,
+)
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.structural import StructuralKey, expression_key_safe
 from scripts.function_tracer_pcode.analysis.returns._shared import (
@@ -929,8 +932,29 @@ def _build_function_outcome_seed(analysis: FunctionReturnAnalysis) -> None:
     # Issue #131 PR-B: 上限で捨てられたケースがある間は、生存ケースから作った
     # region 集合が制御フロー全体を覆っている保証がない。切り捨て事実を seed の
     # 未解決制御証拠に入れ、seed digest（= 単項証明の要求 ID）へ束縛する。
-    for record in tuple(getattr(analysis, "expansion_budget_truncations", ()) or ()):
-        unresolved.append(("expansion_budget_truncation", record.event_id))
+    #
+    # ``event_id`` は発生事実キーだけの digest で参照先を含まないので、採用した
+    # callee が増えた（``referenced_event_ids`` が増えた）場合も前提が変わったこと
+    # にするため、参照 ID も一緒に束縛する。記録の並び順だけで digest が変わらない
+    # よう正規化してから足す。
+    unresolved.extend(sorted(
+        (
+            "expansion_budget_truncation",
+            record.event_id,
+            tuple(sorted(record.referenced_event_ids or ())),
+        )
+        for record in (getattr(analysis, "expansion_budget_truncations", ()) or ())
+    ))
+    # 解析面の marker が空でも、効果要約側だけが切り捨てを持つことがある
+    # （効果要約は cache に載り、診断 dict とは寿命が違う）。その不完全性も
+    # seed identity へ入れる。
+    effect_reasons = getattr(
+        getattr(analysis, "effect_summary", None), "incomplete_reasons", ()
+    )
+    if isinstance(effect_reasons, (list, tuple, set, frozenset)) and (
+        EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON in effect_reasons
+    ):
+        unresolved.append((EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON,))
     for reason in getattr(analysis, "unknown_event_reasons", ()) or ():
         if any(token in str(reason).lower() for token in ("branch", "control", "terminal", "callind")):
             unresolved.append(("analysis_unknown", str(reason)))

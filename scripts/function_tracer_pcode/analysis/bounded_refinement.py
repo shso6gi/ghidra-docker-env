@@ -248,6 +248,11 @@ class BoundedCallRefiner:
         Issue #131: ``results.append`` 時点ではまだ中間展開なので通知しない。
         ``_return_info_is_concrete_fallback`` による除外・caller 側 ``max_cases`` での
         打ち切り・dedup を通過して ``analysis.returns`` に残ったものだけを採用とみなす。
+
+        PR-B: この通知は診断ではなく、採用した callee の切り捨て marker を caller へ
+        伝搬して EQ/NOT_EQ を閉じる semantic 経路。失敗を握り潰すと「callee 由来の
+        値は採用したが不完全性だけ失われた」状態になるため、例外はそのまま伝播させる
+        （呼び出し側は refined returns を公開する前にこれを完了させる）。
         """
 
         if self.on_callee_adopted is None:
@@ -255,18 +260,15 @@ class BoundedCallRefiner:
         adopted_tokens: Set[int] = set()
         for return_info in adopted_returns or ():
             adopted_tokens |= self._callees_of_return_info(return_info)
-        for token in adopted_tokens:
+        for token in sorted(adopted_tokens):
             self._notify_callee_adopted(self._callee_by_token.get(token))
 
     def _notify_callee_adopted(self, callee_analysis: Optional[FunctionReturnAnalysis]) -> None:
-        """採用が確定した callee を 1 度だけ通知する。"""
+        """採用が確定した callee を 1 度だけ通知する（失敗は握り潰さない）。"""
 
         if self.on_callee_adopted is None or callee_analysis is None:
             return
-        try:
-            self.on_callee_adopted(callee_analysis)
-        except Exception:  # 通知は診断専用。展開の成否には影響させない。
-            pass
+        self.on_callee_adopted(callee_analysis)
 
     def _provide_analysis(
         self,
@@ -330,9 +332,12 @@ class BoundedCallRefiner:
         if not deduped:
             return False
 
-        analysis.returns = deduped
         # Issue #131: ここで初めて「最終的に採用された callee」が確定する。
+        # PR-B: marker 伝搬は採用した意味入力の一部なので、refined returns を公開する
+        # 前に完了させる。伝搬が失敗した場合は ``analysis.returns`` を置き換えないまま
+        # 例外が伝播し、callee 由来の値だけが採用された状態は残らない。
         self._notify_adopted_callees(deduped)
+        analysis.returns = deduped
         analysis.deferred_calls = self._filter_deferred_calls_in_use(analysis)
 
         changed = original_signature != self._analysis_signature(analysis.returns)
