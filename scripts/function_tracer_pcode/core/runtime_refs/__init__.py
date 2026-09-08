@@ -64,8 +64,17 @@ from scripts.function_tracer_pcode.core.runtime_refs.readonly import (  # noqa: 
     ReductionAccumulatorProof,
 )
 from scripts.function_tracer_pcode.core.runtime_refs.unknowns import (  # noqa: F401
+    EXPANSION_BUDGET_TRUNCATION_KINDS,
+    EXPANSION_BUDGET_TRUNCATION_SURFACES,
     DeferredCallRef,
+    ExpansionBudgetCollector,
+    ExpansionBudgetTruncation,
     UnknownValueRef,
+    _canonical_budget_json,
+    _canonical_budget_value,
     _runtime_ref_stable_key_or_repr,
+    expansion_budget_event_ids,
+    merge_expansion_budget_truncations,
+    normalize_expansion_budget_truncations,
 )
 

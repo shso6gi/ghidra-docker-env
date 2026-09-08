@@ -12,9 +12,11 @@ from scripts.function_tracer_pcode.core.analysis import (
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.runtime_refs import (
+    ExpansionBudgetCollector,
     PcodeBlockRef,
     PcodeOpRef,
     PostStateValueRef,
+    merge_expansion_budget_truncations,
 )
 from scripts.function_tracer_pcode.core.structural import StructuralKey
 from scripts.function_tracer_pcode.analysis.returns.region_facts import input_is_nondata_operand
@@ -63,6 +65,10 @@ from scripts.function_tracer_pcode.analysis.runtime_state import AnalysisRuntime
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import collect_java_or_python_iterable
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import function_cache_key as lifecycle_function_cache_key
+from scripts.function_tracer_pcode.analysis.returns.expansion_budget import (
+    callee_reference_truncation,
+    make_expansion_budget_sink,
+)
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns._api import ConditionTracker
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
@@ -694,6 +700,11 @@ class EffectIntegrationService:
         if cached is not None:
             return cached
 
+        # Issue #131: この効果要約 1 件分の局所 collector。``_analysis_context`` が押す
+        # 子 session に依存せず、要約の scope で切り捨てを集める。callee 由来は
+        # ``callee_analysis`` 参照だけを持ち、本体は callee 側の entry に残る。
+        budget_collector = ExpansionBudgetCollector()
+
         def summarize_call(target, args):
             target_ref = self.coerce_runtime_target_ref(target)
             if target_ref is None:
@@ -739,6 +750,19 @@ class EffectIntegrationService:
                 return None
             cached_callee = self.runtime_state.effect_summary_cache.get(callee_scope_key)
             if cached_callee is not None:
+                # cache hit でも採用した callee の切り捨て参照は失わない（保存済み
+                # 診断が空/欠落なら marker は作らない）。
+                budget_collector.record(
+                    callee_reference_truncation(
+                        self.runtime_state.effect_summary_budget_diagnostics.get(
+                            callee_scope_key
+                        )
+                        or (),
+                        callee_scope_key=callee_scope_key,
+                        owner_scope_key=summary_cache_key,
+                        label=target_ref.display_name(),
+                    )
+                )
                 return cached_callee
 
             from scripts.function_tracer_pcode.ghidra.decompilation_broker import EFFECT_SUMMARY_SOURCE_CONTRACT
@@ -788,15 +812,31 @@ class EffectIntegrationService:
                 image_base = self.program_value().getImageBase().getOffset()
             except Exception:
                 image_base = None
+            # Issue #131: この経路には通常の子 ``AnalysisSession`` が無い。callee の
+            # 分岐条件 refinement と STORE 展開の両方を、callee 要約と同じ key の
+            # 診断へ集約する（refinement は要約構築の外で走るため局所 collector 経由）。
+            callee_summary_cache_key = self.analysis_scope_key(
+                callee,
+                callee_bound_parameter_values,
+                callee_bound_parameter_storage_values,
+            )
+            callee_refinement_collector = ExpansionBudgetCollector()
             callee_tracker.refine_branch_conditions(
                 call_resolver=self.make_call_resolver(
                     self.extend_active_functions(active_functions, target_ref),
                     callee,
+                    budget_collector=callee_refinement_collector,
+                    budget_owner_scope_key=callee_summary_cache_key,
                 ),
                 parameters=callee_parameters,
                 resolve_callee_parameters=self.get_freshest_callee_parameters,
                 read_memory_value=self.read_memory_value,
                 image_base=image_base,
+                budget_sink=make_expansion_budget_sink(
+                    callee_refinement_collector,
+                    surface="branch_condition",
+                    owner_scope_key=callee_summary_cache_key,
+                ),
             )
             summary = self.invoke_build_effect_summary(
                 callee,
@@ -808,6 +848,21 @@ class EffectIntegrationService:
                 bound_parameter_values=callee_bound_parameter_values,
                 bound_parameter_storage_values=callee_bound_parameter_storage_values,
             )
+            if summary is not None and callee_summary_cache_key is not None:
+                # 要約構築側が同じ key の診断を置き換えた後に、refinement 分を足す。
+                diagnostics = self.runtime_state.effect_summary_budget_diagnostics
+                diagnostics[callee_summary_cache_key] = merge_expansion_budget_truncations(
+                    diagnostics.get(callee_summary_cache_key) or (),
+                    callee_refinement_collector.as_tuple(),
+                )
+                budget_collector.record(
+                    callee_reference_truncation(
+                        diagnostics.get(callee_summary_cache_key) or (),
+                        callee_scope_key=callee_summary_cache_key,
+                        owner_scope_key=summary_cache_key,
+                        label=target_ref.display_name(),
+                    )
+                )
             return summary
 
         def resolve_callee_parameters(target):
@@ -828,14 +883,24 @@ class EffectIntegrationService:
             condition_tracker,
             parameters,
             direct_call_summary=summarize_call,
+            # Issue #131: STORE 値展開が CALL を解決して callee 解析を採用した場合の
+            # marker は、周囲の AnalysisSession ではなくこの要約の collector へ入れる
+            # （下で summary_cache_key の診断 cache に保存される）。
             direct_call_expander=self.make_call_resolver(
                 self.extend_active_functions(active_functions, current_target),
                 function,
+                budget_collector=budget_collector,
+                budget_owner_scope_key=summary_cache_key,
             ),
             resolve_callee_parameters=resolve_callee_parameters,
             read_memory_value=self.read_memory_value,
             image_base=image_base,
             debug=self.debug_flag(),
+            budget_sink=make_expansion_budget_sink(
+                budget_collector,
+                surface="store_value",
+                owner_scope_key=summary_cache_key,
+            ),
         )
         summary.function_control_effect_profile = self.build_function_control_effect_profile(
             high_function,
@@ -843,6 +908,11 @@ class EffectIntegrationService:
             parameters,
         )
         self.runtime_state.effect_summary_cache[summary_cache_key] = summary
+        # 再構築なので古い診断は残さず置き換える（切り捨てが無ければ空になる）。
+        # 寿命と key は ``effect_summary_cache`` に揃える。
+        self.runtime_state.effect_summary_budget_diagnostics[summary_cache_key] = (
+            budget_collector.as_tuple()
+        )
         return summary
 
     def local_memory_key(self, addr_expr: Expression, size: int) -> Tuple[StructuralKey, int]:

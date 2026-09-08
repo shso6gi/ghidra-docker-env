@@ -2,8 +2,9 @@
 """条件分岐の追跡"""
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Any
+from typing import Callable, Dict, List, Optional, Set, Tuple, Any
 from scripts.function_tracer_pcode.core import Expression, Condition
+from scripts.function_tracer_pcode.core.runtime_refs import ExpansionBudgetTruncation
 from scripts.function_tracer_pcode.analysis.condition.normalizer import ConditionNormalizer
 
 
@@ -80,7 +81,15 @@ class ConditionTracker:
         self.block_by_index: Dict[int, BasicBlockInfo] = {}
         self.entry_block: Optional[BasicBlockInfo] = None
         self._single_path_cache: Dict[int, List[Condition]] = {}
-        self._valid_block_paths_cache: Dict[tuple[int, int], List[tuple[list[BasicBlockInfo], list[Condition]]]] = {}
+        # Issue #131: 経路列と、経路列挙で実際に起きた打ち切り原因を一緒に保持する。
+        # cache hit でも原因を失わないため（cache の独立した再設計は行わない）。
+        self._valid_block_paths_cache: Dict[
+            tuple[int, int],
+            tuple[
+                List[tuple[list[BasicBlockInfo], list[Condition]]],
+                Tuple[ExpansionBudgetTruncation, ...],
+            ],
+        ] = {}
         self.switch_dispatch_summaries: Dict[int, List[Any]] = {}
         
         self._built = False
@@ -206,8 +215,13 @@ class ConditionTracker:
         effect_summary=None,
         read_memory_value=None,
         image_base: Optional[int] = None,
+        budget_sink: Optional[Callable[[ExpansionBudgetTruncation], None]] = None,
     ) -> int:
-        """CALL を含む分岐条件を、安全な要約が得られる場合のみ再構築する。"""
+        """CALL を含む分岐条件を、安全な要約が得られる場合のみ再構築する。
+
+        ``budget_sink`` を渡すと、分岐条件の展開中に起きた切り捨てを所有 scope へ
+        即時転送する（Issue #131）。PR-A では記録のみで、refinement の採否は従来どおり。
+        """
         from scripts.function_tracer_pcode.semantics.transform import ExpressionExpander
         from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
         from scripts.function_tracer_pcode.core.render_smt import expression_returns_bool
@@ -222,6 +236,7 @@ class ConditionTracker:
             resolve_callee_parameters=resolve_callee_parameters,
             read_memory_value=read_memory_value,
             image_base=image_base,
+            budget_sink=budget_sink,
         )
 
         changed = 0
@@ -450,22 +465,47 @@ class ConditionTracker:
         target_block: BasicBlockInfo,
         limit_paths: Optional[int] = None,
     ) -> List[tuple[list[BasicBlockInfo], list[Condition]]]:
-        """エントリーから target_block までの block path と条件列を返す。"""
+        """エントリーから target_block までの block path と条件列を返す。
+
+        戻り値の内容と順序は従来どおり。打ち切り原因も必要な呼び出し側は
+        :meth:`get_all_valid_block_paths_to_block_with_truncations` を使う。
+        """
+        paths, _truncations = self.get_all_valid_block_paths_to_block_with_truncations(
+            target_block,
+            limit_paths=limit_paths,
+        )
+        return paths
+
+    def get_all_valid_block_paths_to_block_with_truncations(
+        self,
+        target_block: BasicBlockInfo,
+        limit_paths: Optional[int] = None,
+    ) -> Tuple[
+        List[tuple[list[BasicBlockInfo], list[Condition]]],
+        Tuple[ExpansionBudgetTruncation, ...],
+    ]:
+        """block path と、経路列挙で実際に起きた打ち切り原因を返す（Issue #131）。
+
+        原因は「経路数上限で削った」「条件数上限で経路を落とした」の 2 つだけを作る。
+        entry 情報が無い等の単なる情報不足では原因を作らない（``inconclusive`` と
+        予算超過は同義ではない）。利用面・所有 scope は利用側が束縛する。
+        """
         if limit_paths is None:
             limit_paths = self.MAX_VALID_PATHS
 
         if self.entry_block is None:
-            return []
+            return [], ()
 
         if target_block.index == self.entry_block.index:
-            return [([self.entry_block], [])]
+            return [([self.entry_block], [])], ()
 
         cache_key = (target_block.index, limit_paths)
         cached = self._valid_block_paths_cache.get(cache_key)
         if cached is not None:
             if self.debug:
                 self._debug_print(f"get_all_valid_block_paths_to_block cache hit for block {target_block.index}:")
-            return self._clone_block_paths(cached)
+            cached_paths, cached_truncations = cached
+            return self._clone_block_paths(cached_paths), cached_truncations
 
         all_paths: List[tuple[list[BasicBlockInfo], list[Condition]]] = []
         self._find_block_paths_with_conditions(
@@ -476,13 +516,28 @@ class ConditionTracker:
             all_paths=all_paths,
             visited=set(),
         )
-        filtered = self._filter_valid_block_paths(
+        filtered, truncations = self._filter_valid_block_paths(
             all_paths,
             target_index=target_block.index,
             limit_paths=limit_paths,
         )
-        self._valid_block_paths_cache[cache_key] = self._clone_block_paths(filtered)
-        return self._clone_block_paths(filtered)
+        self._valid_block_paths_cache[cache_key] = (
+            self._clone_block_paths(filtered),
+            truncations,
+        )
+        return self._clone_block_paths(filtered), truncations
+
+    def get_all_valid_paths_to_block_with_truncations(
+        self,
+        target_block: BasicBlockInfo,
+        limit_paths: Optional[int] = None,
+    ) -> Tuple[List[List[Condition]], Tuple[ExpansionBudgetTruncation, ...]]:
+        """条件列と、経路列挙で実際に起きた打ち切り原因を返す（Issue #131）。"""
+        path_entries, truncations = self.get_all_valid_block_paths_to_block_with_truncations(
+            target_block,
+            limit_paths=limit_paths,
+        )
+        return [conditions for _blocks, conditions in path_entries], truncations
 
     def get_path_coverage_to_block(
         self,
@@ -642,19 +697,26 @@ class ConditionTracker:
         all_paths: List[tuple[list[BasicBlockInfo], list[Condition]]],
         target_index: int,
         limit_paths: int,
-    ) -> List[tuple[list[BasicBlockInfo], list[Condition]]]:
+    ) -> Tuple[
+        List[tuple[list[BasicBlockInfo], list[Condition]]],
+        Tuple[ExpansionBudgetTruncation, ...],
+    ]:
         from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 
         self._debug_print(f"get_all_valid_block_paths_to_block for block {target_index}:")
         self._debug_print(f"  Found {len(all_paths)} total paths", 1)
 
+        truncations: List[ExpansionBudgetTruncation] = []
+        block_label = f"block_path:{target_index}"
         valid_paths = []
+        condition_limit_dropped = 0
         for i, (blocks, conditions) in enumerate(all_paths):
             if ConditionSimplifier.is_contradiction(conditions):
                 if self.debug:
                     self._debug_print(f"  Path {i} rejected (contradiction)", 2)
                 continue
             if len(conditions) > self.MAX_CONDITIONS_PER_PATH:
+                condition_limit_dropped += 1
                 if self.debug:
                     self._debug_print(
                         "  Path rejected (exceeds condition limit "
@@ -664,16 +726,33 @@ class ConditionTracker:
                 continue
             valid_paths.append((blocks, conditions))
 
+        # Issue #131: 条件数超過と経路数超過は単位も原因も別なので、両方あれば両方残す。
+        if condition_limit_dropped:
+            truncations.append(
+                ExpansionBudgetTruncation(
+                    kind="condition_limit",
+                    label=block_label,
+                    conditions=(condition_limit_dropped, self.MAX_CONDITIONS_PER_PATH),
+                )
+            )
+
         self._debug_print(f"  {len(valid_paths)} paths are valid (non-contradictory)", 1)
 
         if not valid_paths:
             self._debug_print("  WARNING: No valid paths found!", 1)
-            return []
+            return [], tuple(truncations)
 
         valid_paths = sorted(valid_paths, key=lambda entry: (len(entry[1]), len(entry[0])))
 
         if len(valid_paths) > limit_paths:
             self._debug_print(f"  Limiting to {limit_paths} paths (shortest first)", 1)
+            truncations.append(
+                ExpansionBudgetTruncation(
+                    kind="path_limit",
+                    label=block_label,
+                    paths=(len(valid_paths), limit_paths, limit_paths),
+                )
+            )
             valid_paths = valid_paths[:limit_paths]
 
         if self.debug:
@@ -685,7 +764,7 @@ class ConditionTracker:
                 ]
                 self._debug_print(f"    Path {i} ({len(conditions)} conditions): {conds}", 2)
 
-        return valid_paths
+        return valid_paths, tuple(truncations)
     
     def get_path_conditions_to_return(self, return_op) -> List[Condition]:
         """RETURNに至るパス条件を収集"""

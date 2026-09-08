@@ -5,7 +5,19 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import replace
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
@@ -40,7 +52,30 @@ from scripts.function_tracer_pcode.analysis.returns.summary_returns import (
 )
 
 
-ExpressionExpansion = Tuple[Expression, List[Condition]]
+class ExpressionExpansion(NamedTuple):
+    """1 つの展開結果と、その値を作るために採用した callee の provenance。
+
+    Issue #131: ``callees`` は展開に寄与した callee 解析の識別子（``id()``）の集合。
+    中間展開に持たせておき、最終的に caller の refined return 集合へ残ったものだけを
+    採用済み callee として確定する。
+    """
+
+    value: Optional[Expression]
+    conditions: List[Condition]
+    callees: FrozenSet[int] = frozenset()
+
+
+class ConditionExpansion(NamedTuple):
+    """条件列 1 通りと、その条件列を作るために採用した callee の provenance。"""
+
+    conditions: List[Condition]
+    callees: FrozenSet[int] = frozenset()
+
+
+def _unexpanded(expr: Optional[Expression]) -> ExpressionExpansion:
+    """展開できなかった（= callee を採用していない）式をそのまま返す。"""
+
+    return ExpressionExpansion(expr, [], frozenset())
 
 
 def _runtime_expression_signature(expr: Optional[Expression]):
@@ -143,11 +178,17 @@ class BoundedCallRefiner:
         max_unroll: int = 2,
         max_cases: int = 128,
         debug: bool = False,
+        on_callee_adopted: Optional[Callable[[FunctionReturnAnalysis], None]] = None,
     ):
         self.analysis_provider = analysis_provider
         self.max_unroll = max(0, int(max_unroll))
         self.max_cases = max(1, int(max_cases))
         self.debug = debug
+        # Issue #131: callee の戻り値を実際に caller の展開へ採用した地点で呼ばれる。
+        # provider が返しただけの候補（引数 alignment 失敗、width 安全性違反、条件
+        # 矛盾、展開不成立）では呼ばない。
+        self.on_callee_adopted = on_callee_adopted
+        self._reset_callee_provenance()
         self._analysis_provider_accepts_args = _callable_accepts_positional_args(
             analysis_provider,
             2,
@@ -163,6 +204,70 @@ class BoundedCallRefiner:
         if note not in analysis.analysis_notes:
             analysis.analysis_notes.append(note)
 
+    def _reset_callee_provenance(self) -> None:
+        """1 回の ``refine_analysis`` 分の callee provenance 台帳を初期化する。"""
+
+        # token -> callee 解析（token 発行元を強参照で保持し、id の再利用を防ぐ）
+        self._callee_by_token: Dict[int, FunctionReturnAnalysis] = {}
+        # id(ReturnInfo) -> (ReturnInfo, callee token 集合)
+        self._return_info_callees: Dict[
+            int, Tuple[ReturnInfo, FrozenSet[int]]
+        ] = {}
+
+    def _callee_provenance_token(
+        self,
+        callee_analysis: FunctionReturnAnalysis,
+    ) -> FrozenSet[int]:
+        """callee 解析 1 件に対応する provenance token を発行する。"""
+
+        if callee_analysis is None:
+            return frozenset()
+        token = id(callee_analysis)
+        self._callee_by_token[token] = callee_analysis
+        return frozenset({token})
+
+    def _register_return_info_callees(
+        self,
+        return_info: ReturnInfo,
+        callees: FrozenSet[int],
+    ) -> None:
+        if not callees:
+            return
+        key = id(return_info)
+        existing = self._return_info_callees.get(key)
+        merged = (existing[1] | callees) if existing is not None else callees
+        self._return_info_callees[key] = (return_info, merged)
+
+    def _callees_of_return_info(self, return_info: ReturnInfo) -> FrozenSet[int]:
+        entry = self._return_info_callees.get(id(return_info))
+        return entry[1] if entry is not None else frozenset()
+
+    def _notify_adopted_callees(self, adopted_returns: Sequence[ReturnInfo]) -> None:
+        """最終的に caller の refined return 集合へ残った callee だけを通知する。
+
+        Issue #131: ``results.append`` 時点ではまだ中間展開なので通知しない。
+        ``_return_info_is_concrete_fallback`` による除外・caller 側 ``max_cases`` での
+        打ち切り・dedup を通過して ``analysis.returns`` に残ったものだけを採用とみなす。
+        """
+
+        if self.on_callee_adopted is None:
+            return
+        adopted_tokens: Set[int] = set()
+        for return_info in adopted_returns or ():
+            adopted_tokens |= self._callees_of_return_info(return_info)
+        for token in adopted_tokens:
+            self._notify_callee_adopted(self._callee_by_token.get(token))
+
+    def _notify_callee_adopted(self, callee_analysis: Optional[FunctionReturnAnalysis]) -> None:
+        """採用が確定した callee を 1 度だけ通知する。"""
+
+        if self.on_callee_adopted is None or callee_analysis is None:
+            return
+        try:
+            self.on_callee_adopted(callee_analysis)
+        except Exception:  # 通知は診断専用。展開の成否には影響させない。
+            pass
+
     def _provide_analysis(
         self,
         target: object,
@@ -173,6 +278,7 @@ class BoundedCallRefiner:
         return self.analysis_provider(target)
 
     def refine_analysis(self, analysis: FunctionReturnAnalysis) -> bool:
+        self._reset_callee_provenance()
         if analysis is None or not analysis.returns or not analysis.deferred_calls or self.max_unroll <= 0:
             return False
         analysis.normalize_deferred_calls()
@@ -225,6 +331,8 @@ class BoundedCallRefiner:
             return False
 
         analysis.returns = deduped
+        # Issue #131: ここで初めて「最終的に採用された callee」が確定する。
+        self._notify_adopted_callees(deduped)
         analysis.deferred_calls = self._filter_deferred_calls_in_use(analysis)
 
         changed = original_signature != self._analysis_signature(analysis.returns)
@@ -254,8 +362,8 @@ class BoundedCallRefiner:
         value_states = self._expand_expression(ret.value, analysis, fuel, trail)
 
         results: List[ReturnInfo] = []
-        for conds in condition_states:
-            for value_expr, extra_conditions in value_states:
+        for conds, condition_callees in condition_states:
+            for value_expr, extra_conditions, value_callees in value_states:
                 merged_conditions = ConditionSimplifier.simplify_conditions(
                     list(conds) + list(extra_conditions)
                 )
@@ -278,22 +386,27 @@ class BoundedCallRefiner:
                             ),
                         ),
                     )
-                results.append(
-                    ReturnInfo(
-                        address=ret.address,
-                        value=value_expr,
-                        conditions=merged_conditions,
-                        branch_index=ret.branch_index,
-                        pcode_identity=ret.pcode_identity,
-                        pcode_order=ret.pcode_order,
-                        pcode_time=ret.pcode_time,
-                        pcode_op_ref=getattr(ret, "pcode_op_ref", None),
-                        return_value_pcode_op_refs=tuple(
-                            getattr(ret, "return_value_pcode_op_refs", ()) or ()
-                        ),
-                        return_path_evidence=return_path_evidence,
-                    )
+                expanded_info = ReturnInfo(
+                    address=ret.address,
+                    value=value_expr,
+                    conditions=merged_conditions,
+                    branch_index=ret.branch_index,
+                    pcode_identity=ret.pcode_identity,
+                    pcode_order=ret.pcode_order,
+                    pcode_time=ret.pcode_time,
+                    pcode_op_ref=getattr(ret, "pcode_op_ref", None),
+                    return_value_pcode_op_refs=tuple(
+                        getattr(ret, "return_value_pcode_op_refs", ()) or ()
+                    ),
+                    return_path_evidence=return_path_evidence,
                 )
+                # Issue #131: この ReturnInfo を作るのに採用した callee を覚えておく。
+                # 最終 ``analysis.returns`` に残ったものだけを後で採用済みとする。
+                self._register_return_info_callees(
+                    expanded_info,
+                    condition_callees | value_callees,
+                )
+                results.append(expanded_info)
                 if len(results) >= self.max_cases:
                     return results[: self.max_cases]
         return results
@@ -304,20 +417,22 @@ class BoundedCallRefiner:
         analysis: FunctionReturnAnalysis,
         fuel: int,
         trail: Set[Tuple[object, ...]],
-    ) -> List[List[Condition]]:
-        states: List[List[Condition]] = [[]]
+    ) -> List[ConditionExpansion]:
+        states: List[ConditionExpansion] = [ConditionExpansion([], frozenset())]
 
         for condition in conditions or []:
-            next_states: List[List[Condition]] = []
+            next_states: List[ConditionExpansion] = []
             expansions = self._expand_expression(condition.expression, analysis, fuel, trail)
-            for prefix in states:
-                for expr, extra_conditions in expansions:
+            for prefix, prefix_callees in states:
+                for expr, extra_conditions, expr_callees in expansions:
                     merged = ConditionSimplifier.simplify_conditions(
-                        prefix + extra_conditions + [Condition(expr, condition.negated)]
+                        list(prefix) + extra_conditions + [Condition(expr, condition.negated)]
                     )
                     if ConditionSimplifier.is_contradiction(merged):
                         continue
-                    next_states.append(merged)
+                    next_states.append(
+                        ConditionExpansion(merged, prefix_callees | expr_callees)
+                    )
                     if len(next_states) >= self.max_cases:
                         break
                 if len(next_states) >= self.max_cases:
@@ -338,17 +453,17 @@ class BoundedCallRefiner:
         if deferred is not None:
             deferred_key = deferred.identity_key()
             if fuel <= 0 or deferred_key in trail:
-                return [(expr, [])]
+                return [_unexpanded(expr)]
             unfolded = self._expand_deferred_call(
                 deferred,
                 analysis,
                 fuel - 1,
                 trail | {deferred_key},
             )
-            return unfolded or [(expr, [])]
+            return unfolded or [_unexpanded(expr)]
 
         if expr is None:
-            return [(expr, [])]
+            return [_unexpanded(expr)]
 
         if expr.expr_type in {
             ExpressionType.CONSTANT,
@@ -357,24 +472,27 @@ class BoundedCallRefiner:
             ExpressionType.UNKNOWN,
             ExpressionType.LITERAL,
         }:
-            return [(expr, [])]
+            return [_unexpanded(expr)]
 
         if expr.expr_type == ExpressionType.PHI and expr.value:
             return self._expand_phi_expression(expr, analysis, fuel, trail)
 
         if not expr.operands:
-            return [(expr, [])]
+            return [_unexpanded(expr)]
 
-        states: List[Tuple[List[Expression], List[Condition]]] = [([], [])]
+        states: List[Tuple[List[Expression], List[Condition], FrozenSet[int]]] = [
+            ([], [], frozenset())
+        ]
         for operand in expr.operands:
             operand_expansions = self._expand_expression(operand, analysis, fuel, trail)
-            next_states: List[Tuple[List[Expression], List[Condition]]] = []
-            for built_operands, built_conditions in states:
-                for new_operand, extra_conditions in operand_expansions:
+            next_states: List[Tuple[List[Expression], List[Condition], FrozenSet[int]]] = []
+            for built_operands, built_conditions, built_callees in states:
+                for new_operand, extra_conditions, operand_callees in operand_expansions:
                     next_states.append(
                         (
                             built_operands + [new_operand],
                             built_conditions + extra_conditions,
+                            built_callees | operand_callees,
                         )
                     )
                     if len(next_states) >= self.max_cases:
@@ -383,17 +501,19 @@ class BoundedCallRefiner:
                     break
             states = next_states
             if not states:
-                return [(expr, [])]
+                return [_unexpanded(expr)]
 
         results: List[ExpressionExpansion] = []
-        for operands, extra_conditions in states[: self.max_cases]:
+        for operands, extra_conditions, state_callees in states[: self.max_cases]:
             rebuilt = self._clone_expression_with_operands(expr, operands)
             merged_conditions = ConditionSimplifier.simplify_conditions(extra_conditions)
             if ConditionSimplifier.is_contradiction(merged_conditions):
                 continue
-            results.append((rebuilt, merged_conditions))
+            results.append(
+                ExpressionExpansion(rebuilt, merged_conditions, state_callees)
+            )
 
-        return results or [(expr, [])]
+        return results or [_unexpanded(expr)]
 
     def _expand_phi_expression(
         self,
@@ -402,15 +522,23 @@ class BoundedCallRefiner:
         fuel: int,
         trail: Set[Tuple[object, ...]],
     ) -> List[ExpressionExpansion]:
-        states: List[Tuple[List[Tuple[Optional[Condition], Expression]], List[Condition]]] = [([], [])]
+        states: List[
+            Tuple[List[Tuple[Optional[Condition], Expression]], List[Condition], FrozenSet[int]]
+        ] = [([], [], frozenset())]
         for branch_condition, branch_value in expr.value or []:
-            condition_expansions: List[Tuple[Optional[Condition], List[Condition]]]
+            condition_expansions: List[
+                Tuple[Optional[Condition], List[Condition], FrozenSet[int]]
+            ]
             if branch_condition is None:
-                condition_expansions = [(None, [])]
+                condition_expansions = [(None, [], frozenset())]
             else:
                 condition_expansions = [
-                    (Condition(condition_expr, branch_condition.negated), extra_conditions)
-                    for condition_expr, extra_conditions in self._expand_expression(
+                    (
+                        Condition(condition_expr, branch_condition.negated),
+                        extra_conditions,
+                        condition_callees,
+                    )
+                    for condition_expr, extra_conditions, condition_callees in self._expand_expression(
                         branch_condition.expression,
                         analysis,
                         fuel,
@@ -418,10 +546,12 @@ class BoundedCallRefiner:
                     )
                 ]
             value_expansions = self._expand_expression(branch_value, analysis, fuel, trail)
-            next_states: List[Tuple[List[Tuple[Optional[Condition], Expression]], List[Condition]]] = []
-            for built_branches, built_conditions in states:
-                for new_condition, condition_extra in condition_expansions:
-                    for new_value, value_extra in value_expansions:
+            next_states: List[
+                Tuple[List[Tuple[Optional[Condition], Expression]], List[Condition], FrozenSet[int]]
+            ] = []
+            for built_branches, built_conditions, built_callees in states:
+                for new_condition, condition_extra, condition_callees in condition_expansions:
+                    for new_value, value_extra, value_callees in value_expansions:
                         merged_extra = ConditionSimplifier.simplify_conditions(
                             list(built_conditions) + list(condition_extra) + list(value_extra)
                         )
@@ -431,6 +561,7 @@ class BoundedCallRefiner:
                             (
                                 built_branches + [(new_condition, new_value)],
                                 merged_extra,
+                                built_callees | condition_callees | value_callees,
                             )
                         )
                         if len(next_states) >= self.max_cases:
@@ -441,14 +572,16 @@ class BoundedCallRefiner:
                     break
             states = next_states
             if not states:
-                return [(expr, [])]
+                return [_unexpanded(expr)]
 
         results: List[ExpressionExpansion] = []
-        for branches, extra_conditions in states[: self.max_cases]:
+        for branches, extra_conditions, state_callees in states[: self.max_cases]:
             rebuilt = Expression.phi(branches)
             rebuilt.size = expr.size
-            results.append((rebuilt, list(extra_conditions)))
-        return self._deduplicate_expression_expansions(results) or [(expr, [])]
+            results.append(
+                ExpressionExpansion(rebuilt, list(extra_conditions), state_callees)
+            )
+        return self._deduplicate_expression_expansions(results) or [_unexpanded(expr)]
 
     def _expand_deferred_call(
         self,
@@ -545,16 +678,32 @@ class BoundedCallRefiner:
                     trail,
                 )
 
-                for conds in condition_sets or [[]]:
-                    for value_expr, extra_conditions in value_states:
+                for conds, nested_condition_callees in (
+                    condition_sets or [ConditionExpansion([], frozenset())]
+                ):
+                    for value_expr, extra_conditions, nested_value_callees in value_states:
                         merged_conditions = ConditionSimplifier.simplify_conditions(
                             list(target_conditions) + list(conds) + list(extra_conditions)
                         )
                         if ConditionSimplifier.is_contradiction(merged_conditions):
                             continue
+                        callee_provenance = (
+                            self._callee_provenance_token(callee_analysis)
+                            | nested_condition_callees
+                            | nested_value_callees
+                        )
                         had_return_expansion = True
                         candidate_result_count += 1
-                        results.append((value_expr, merged_conditions))
+                        # Issue #131: ここはまだ中間展開。provenance だけ積んでおき、
+                        # 最終 ``analysis.returns`` に残ったかどうかは refine_analysis
+                        # の最後で確定する。
+                        results.append(
+                            ExpressionExpansion(
+                                value_expr,
+                                merged_conditions,
+                                callee_provenance,
+                            )
+                        )
                         if len(results) >= self.max_cases:
                             self._record_note(
                                 caller_analysis,
@@ -814,16 +963,22 @@ class BoundedCallRefiner:
 
     def _deduplicate_condition_sets(
         self,
-        condition_sets: Sequence[Sequence[Condition]],
-    ) -> List[List[Condition]]:
-        seen = set()
-        result: List[List[Condition]] = []
-        for conditions in condition_sets:
+        condition_sets: Sequence[ConditionExpansion],
+    ) -> List[ConditionExpansion]:
+        seen: Dict[Any, int] = {}
+        result: List[ConditionExpansion] = []
+        for conditions, callees in condition_sets:
             key = _runtime_conditions_signature(conditions)
-            if key in seen:
+            index = seen.get(key)
+            if index is not None:
+                # 同じ条件列は同じ意味なので、provenance は和集合にして残す。
+                merged = result[index]
+                result[index] = ConditionExpansion(
+                    merged.conditions, merged.callees | callees
+                )
                 continue
-            seen.add(key)
-            result.append(list(conditions))
+            seen[key] = len(result)
+            result.append(ConditionExpansion(list(conditions), callees))
             if len(result) >= self.max_cases:
                 break
         return result
@@ -832,17 +987,22 @@ class BoundedCallRefiner:
         self,
         expansions: Sequence[ExpressionExpansion],
     ) -> List[ExpressionExpansion]:
-        seen = set()
+        seen: Dict[Any, int] = {}
         result: List[ExpressionExpansion] = []
-        for expr, conditions in expansions:
+        for expr, conditions, callees in expansions:
             key = (
                 _runtime_expression_signature(expr),
                 _runtime_conditions_signature(conditions),
             )
-            if key in seen:
+            index = seen.get(key)
+            if index is not None:
+                merged = result[index]
+                result[index] = ExpressionExpansion(
+                    merged.value, merged.conditions, merged.callees | callees
+                )
                 continue
-            seen.add(key)
-            result.append((expr, list(conditions)))
+            seen[key] = len(result)
+            result.append(ExpressionExpansion(expr, list(conditions), callees))
             if len(result) >= self.max_cases:
                 break
         return result
@@ -851,7 +1011,7 @@ class BoundedCallRefiner:
         self,
         return_infos: Sequence[ReturnInfo],
     ) -> List[ReturnInfo]:
-        seen = set()
+        seen: Dict[Any, ReturnInfo] = {}
         result: List[ReturnInfo] = []
         for ret in return_infos:
             key = (
@@ -860,9 +1020,15 @@ class BoundedCallRefiner:
                 _runtime_expression_signature(ret.value),
                 _runtime_conditions_signature(ret.conditions),
             )
-            if key in seen:
+            representative = seen.get(key)
+            if representative is not None:
+                # 意味的に同一の return case なので、落とした側の callee provenance は
+                # 代表へ引き継ぐ（同じ結果がその callee からも得られている）。
+                self._register_return_info_callees(
+                    representative, self._callees_of_return_info(ret)
+                )
                 continue
-            seen.add(key)
+            seen[key] = ret
             result.append(ret)
             if len(result) >= self.max_cases:
                 break

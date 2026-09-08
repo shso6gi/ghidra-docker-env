@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
+from scripts.function_tracer_pcode.core.runtime_refs import ExpansionBudgetTruncation
 
 
 @dataclass
@@ -32,3 +33,9 @@ class AnalysisRuntimeState:
     direct_call_graph_complete_nodes: Set[Tuple[Any, ...]] = field(default_factory=set)
     analysis_in_progress: Dict[Tuple[Any, ...], FunctionReturnAnalysis] = field(default_factory=dict)
     deferred_call_counter: int = 0
+    # Issue #131: 効果要約 1 件に対応する切り捨て記録。key と寿命は
+    # ``effect_summary_cache`` に揃える（再構築時は置き換え、cache hit 時は同じ key
+    # から参照情報を作る）。判定の根拠は保存済み要約側であり、この dict ではない。
+    effect_summary_budget_diagnostics: Dict[
+        Tuple[Any, ...], Tuple[ExpansionBudgetTruncation, ...]
+    ] = field(default_factory=dict)

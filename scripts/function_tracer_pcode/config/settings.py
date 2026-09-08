@@ -211,3 +211,30 @@ BOUNDED_CALL_MAX_CASES = 128
 # Expander safeguards for optimized loop/recur cases
 EXPANDER_MAX_OPERATION_CASES = 64
 EXPANDER_MAX_COMBINATION_ATTEMPTS = 512
+
+
+def _positive_int_setting(name: str, default: int, environ=None) -> int:
+    """正の整数設定を環境変数から読む（不正値は既定へ戻す）。
+
+    0 や負値をそのまま slice 上限に使うと「全件破棄」「制限解除」といった意図しない
+    挙動になるため、正の整数以外は採用しない。
+    """
+
+    source = environ if environ is not None else os.environ
+    raw = source.get(name)
+    if raw is None or str(raw).strip() == "":
+        return int(default)
+    try:
+        value = int(str(raw).strip(), 10)
+    except (TypeError, ValueError):
+        return int(default)
+    if value < 1:
+        return int(default)
+    return value
+
+
+# 共通 dedup のケース数上限（Issue #131）。既定値は従来の
+# ``ExpressionExpander.MAX_CASES_PER_MULTIEQUAL`` と同じ 16。調査用に下げられるが、
+# 通常実行の既定値は変えない。明示 limit を渡す呼び出し
+# （``EXPANDER_MAX_OPERATION_CASES``）はこの設定の対象外。
+EXPANDER_DEDUP_CASE_LIMIT = _positive_int_setting("FT_EXPANDER_DEDUP_CASE_LIMIT", 16)

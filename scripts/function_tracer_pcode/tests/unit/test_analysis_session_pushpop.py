@@ -13,6 +13,7 @@ import pytest
 
 from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.session import AnalysisSession
+from scripts.function_tracer_pcode.core.runtime_refs import ExpansionBudgetTruncation
 
 FIELDS = [f.name for f in dataclasses.fields(AnalysisSession)]
 FACADE = {
@@ -24,6 +25,9 @@ FACADE = {
     "blocked_return_path_conditions": "_current_blocked_return_path_conditions",
     "noreturn_terminal_observations": "_current_noreturn_terminal_observations",
     "return_path_entry_cache": "_return_path_entry_cache",
+    # Issue #131: 解析 scope key と切り捨て collector も session 寿命。
+    "analysis_scope_key": "_current_analysis_scope_key",
+    "expansion_budget_collector": "_current_expansion_budget_collector",
 }
 
 
@@ -41,10 +45,14 @@ def _populate_parent(analyzer):
     parent.blocked_return_path_conditions = [["blocked"]]
     parent.noreturn_terminal_observations = [{"obs": 1}]
     parent.return_path_entry_cache = {("k",): None}
+    parent.analysis_scope_key = ("parent_scope",)
+    parent.expansion_budget_collector.record(
+        ExpansionBudgetTruncation(kind="dedup_case_limit", label="parent", dedup=(3, 2, 2))
+    )
     return parent, {f: getattr(parent, f) for f in FIELDS}
 
 
-def test_session_dataclass_has_exactly_the_eight_fields_under_test():
+def test_session_dataclass_fields_all_have_a_facade_seam():
     assert set(FIELDS) == set(FACADE)
 
 
@@ -58,7 +66,13 @@ def test_child_is_a_fresh_session_initialised_from_the_bound_values_only():
         assert child.parameters is params and child.effect_summary is summary
         assert child.function_prototype is proto and child.function_entry_address == "0x200"
         # 子が新規に所有する 4 container は空で、親のものとは別 object
-        for f in ("deferred_calls", "blocked_return_path_conditions", "noreturn_terminal_observations", "return_path_entry_cache"):
+        for f in (
+            "deferred_calls",
+            "blocked_return_path_conditions",
+            "noreturn_terminal_observations",
+            "return_path_entry_cache",
+            "expansion_budget_collector",
+        ):
             assert not getattr(child, f) and getattr(child, f) is not getattr(parent, f), f
         # facade property は子を見る
         assert analyzer._current_parameters is params

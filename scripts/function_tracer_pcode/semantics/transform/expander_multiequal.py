@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional, Dict, Tuple
+from dataclasses import replace as dataclasses_replace
+from typing import Any, Callable, Iterable, List, Optional, Dict, Tuple
 from scripts.function_tracer_pcode.core import (
     Expression,
     Condition,
     ExpressionType,
+    ExpansionBudgetTruncation,
     UnknownValueRef,
     CanonicalLocation,
 )
@@ -28,6 +30,21 @@ from scripts.function_tracer_pcode.semantics.transform.expander_support import (
     ExpandedValue,
     MultiequalBranchObservation,
 )
+
+
+def replace_pcode_op_ref(
+    truncation: ExpansionBudgetTruncation,
+    pcode_op_ref,
+) -> ExpansionBudgetTruncation:
+    """tracker が返した原因へ、利用箇所の op 参照を付ける。
+
+    tracker は経路列挙の原因だけを返し、どの MULTIEQUAL の展開で使われたかは知らない。
+    利用側がここで結び付ける。
+    """
+
+    if pcode_op_ref is None or truncation.pcode_op_ref is not None:
+        return truncation
+    return dataclasses_replace(truncation, pcode_op_ref=pcode_op_ref)
 
 
 class MultiequalExpansionMixin:
@@ -86,6 +103,7 @@ class MultiequalExpansionMixin:
         self._debug_print("=" * 50, depth)
         
         all_expanded: List[ExpandedValue] = []
+        multiequal_pcode_op_ref = _pcode_op_ref_from_tracer(self.tracer, multiequal_op)
         canonical_multiequal_location = self._infer_multiequal_location_for_expansion(
             multiequal_op,
             base_conditions,
@@ -116,9 +134,13 @@ class MultiequalExpansionMixin:
             
             self._debug_multiequal_input_trace(input_varnode, depth + 1)
 
-            all_valid_paths = self.condition_tracker.get_all_valid_paths_to_block(
-                target_block=in_block_info
+            all_valid_paths, path_truncations = self._valid_paths_to_block_with_truncations(
+                in_block_info
             )
+            for truncation in path_truncations:
+                self._record_expansion_budget_truncation(
+                    replace_pcode_op_ref(truncation, multiequal_pcode_op_ref)
+                )
 
             self._debug_print(f"  valid_paths: {len(all_valid_paths)}", depth + 1)
 
@@ -205,7 +227,11 @@ class MultiequalExpansionMixin:
         
         if all_expanded:
             # ★★★ 改善点：値と条件の両方を考慮して重複排除 ★★★
-            merged = self._deduplicate_expanded_values(all_expanded, depth)
+            merged = self._deduplicate_expanded_values(
+                all_expanded,
+                depth,
+                pcode_op_ref=multiequal_pcode_op_ref,
+            )
             self._debug_print("=" * 50, depth)
             self._debug_print(f"MULTIEQUAL -> {len(merged)} branches (after dedup)", depth)
             self._debug_print("=" * 50, depth)
@@ -246,12 +272,65 @@ class MultiequalExpansionMixin:
             combined_conditions.append(edge_cond)
         return self._normalize_expansion_conditions(combined_conditions)
 
+    def _record_expansion_budget_truncation(
+        self,
+        truncation: Optional[ExpansionBudgetTruncation],
+    ) -> None:
+        """実際に上限で削った事実を局所記録に残し、sink へ即時転送する。
+
+        利用面と所有 scope は sink 側が束縛する（展開器は原因だけを持つ）。
+        """
+
+        if truncation is None:
+            return
+        self._budget_truncations.append(truncation)
+        sink = getattr(self, "_budget_sink", None)
+        if callable(sink):
+            sink(truncation)
+
+    def _resolve_dedup_case_limit(self) -> int:
+        """既定 dedup 上限。設定/クラス属性の 1 箇所だけを参照する。"""
+
+        try:
+            limit = int(self.MAX_CASES_PER_MULTIEQUAL)
+        except (TypeError, ValueError):
+            return 16
+        return limit if limit >= 1 else 16
+
+    def _valid_paths_to_block_with_truncations(
+        self,
+        target_block,
+    ) -> Tuple[List[List[Condition]], Tuple[ExpansionBudgetTruncation, ...]]:
+        """PHI 前任ブロックへの有効経路と、経路列挙で実際に起きた打ち切り原因。
+
+        情報付き API を持たない tracker（テスト用 fake など）では従来どおり経路だけを
+        返し、原因は空にする。entry 情報不足のような単なる inconclusive は原因を作らない。
+        """
+
+        # 型で判定する。``Mock`` のように任意の属性を生やす tracker では、属性の有無で
+        # 情報付き API の有無を判断できないため。
+        getter = getattr(
+            type(self.condition_tracker),
+            "get_all_valid_paths_to_block_with_truncations",
+            None,
+        )
+        if callable(getter):
+            paths, truncations = self.condition_tracker.get_all_valid_paths_to_block_with_truncations(
+                target_block=target_block
+            )
+            return list(paths), tuple(truncations or ())
+        return (
+            list(self.condition_tracker.get_all_valid_paths_to_block(target_block=target_block)),
+            (),
+        )
+
     def _deduplicate_expanded_values(
         self,
         values: List[ExpandedValue],
         depth: int,
         limit: Optional[int] = None,
         label: str = "expanded values",
+        pcode_op_ref: Optional[Any] = None,
     ) -> List[ExpandedValue]:
         """
         展開値の重複排除（値と条件の両方を考慮）
@@ -287,11 +366,21 @@ class MultiequalExpansionMixin:
         result = list(groups.values())
         
         # 上限チェック
-        applied_limit = self.MAX_CASES_PER_MULTIEQUAL if limit is None else limit
+        applied_limit = self._resolve_dedup_case_limit() if limit is None else limit
         if len(result) > applied_limit:
             self._debug_print(
                 f"  WARNING: Too many cases ({len(result)}), limiting to {applied_limit}",
                 depth
+            )
+            # Issue #131: ここが「件数上限で実際に削った」唯一の分岐。通常の重複排除・
+            # 矛盾除去（上の grouping）とは区別して記録する。
+            self._record_expansion_budget_truncation(
+                ExpansionBudgetTruncation(
+                    kind="dedup_case_limit",
+                    label=label,
+                    pcode_op_ref=pcode_op_ref,
+                    dedup=(len(result), applied_limit, applied_limit),
+                )
             )
             # 条件が短い順にソート
             result = sorted(result, key=lambda e: len(e.conditions))

@@ -17,6 +17,7 @@ from scripts.function_tracer_pcode.core.intrinsics import resolve_pcode_intrinsi
 from scripts.function_tracer_pcode.core.runtime_refs import (
     AddressValueRef,
     DeferredCallRef,
+    ExpansionBudgetCollector,
     PcodeOpRef,
     UnknownValueRef,
 )
@@ -235,6 +236,7 @@ def _impl__try_apply_triangular_mod_caller_outcomes(
         return False
     matched_call = None
     matched_source = None
+    matched_callee_analysis = None
     for target_ref, args_tuple, status, source in self._iter_outcome_call_candidates(analysis):
         args = list(args_tuple or ())
         if len(args) != 1 or not self._expression_is_param_minus_one(args[0], param):
@@ -249,6 +251,7 @@ def _impl__try_apply_triangular_mod_caller_outcomes(
             continue
         matched_call = (target_ref, args[0], status)
         matched_source = source
+        matched_callee_analysis = callee_analysis
         break
     if matched_call is None:
         self._debug_print("Outcome caller summary declined: no matching callee outcome contract for param_minus_one call")
@@ -289,6 +292,15 @@ def _impl__try_apply_triangular_mod_caller_outcomes(
     )
     if "outcome_partition_unknown_callee_positive_region" not in analysis.analysis_notes:
         analysis.analysis_notes.append("outcome_partition_unknown_callee_positive_region")
+    # Issue #131: callee の outcome 契約を実際に採用した箇所（候補を見ただけで
+    # 降りた経路では記録しない）。周囲の session ではなく解析結果へ直接反映する。
+    outcome_collector = ExpansionBudgetCollector()
+    self._record_callee_analysis_expansion_budget(
+        matched_callee_analysis,
+        owner_scope_key=getattr(analysis, "analysis_scope_key", None),
+        collector=outcome_collector,
+    )
+    self._sync_expansion_budget_truncations(analysis, collector=outcome_collector)
     return True
 
 
@@ -495,13 +507,35 @@ def _impl__apply_bounded_call_refinement(
             args=args,
         )
 
+    # Issue #131: refiner が callee の戻り値を caller の展開へ実際に積んだ地点だけを
+    # 記録する。provider が返しただけの候補（引数 alignment 失敗・width 安全性違反・
+    # 条件矛盾・展開不成立）では marker を作らない。記録先は refine 対象の analysis
+    # scope で、周囲の session へは混ぜない。
+    refinement_collector = ExpansionBudgetCollector()
+    refinement_owner_scope_key = getattr(analysis, "analysis_scope_key", None)
+
+    def record_adopted_callee(callee_analysis) -> None:
+        self._record_callee_analysis_expansion_budget(
+            callee_analysis,
+            owner_scope_key=refinement_owner_scope_key,
+            collector=refinement_collector,
+        )
+
     refiner = BoundedCallRefiner(
         provide_analysis,
         max_unroll=self._bounded_call_unroll_limit,
         max_cases=self._bounded_call_max_cases,
         debug=self.debug,
+        on_callee_adopted=record_adopted_callee,
     )
+    returns_before_refinement = analysis.returns
     changed = refiner.refine_analysis(analysis)
+    if analysis.returns is not returns_before_refinement:
+        # 展開結果が実際に採用された（returns が置き換わった）ときだけ反映する。
+        self._sync_expansion_budget_truncations(
+            analysis,
+            collector=refinement_collector,
+        )
     if changed:
         self._debug_print(
             f"Applied bounded call refinement to '{analysis.function_name}' "
@@ -1487,9 +1521,30 @@ def _impl__invoke_get_or_analyze_call_target(
             )
 
 
-def _impl__make_call_resolver(self, active_functions: Set[Tuple[Any, ...]], current_function=None):
+def _impl__make_call_resolver(
+    self,
+    active_functions: Set[Tuple[Any, ...]],
+    current_function=None,
+    *,
+    budget_collector=None,
+    budget_owner_scope_key=None,
+):
+    """CALL 展開用の resolver を作る。
+
+    Issue #131: 採用した callee の切り捨て marker をどこへ残すかは、resolver を作る側
+    （= その展開を所有する scope）が束縛する。効果要約の構築中は要約自身の局所
+    collector と summary cache key を渡すこと。省略時は現在の解析 session。
+    """
+
     def resolve_call(target, args):
-        return self._resolve_call_expansions(target, args, active_functions, current_function)
+        return self._resolve_call_expansions(
+            target,
+            args,
+            active_functions,
+            current_function,
+            budget_collector=budget_collector,
+            budget_owner_scope_key=budget_owner_scope_key,
+        )
 
     return resolve_call
 
@@ -1500,6 +1555,9 @@ def _impl__resolve_call_expansions(
     args: List[Expression],
     active_functions: Set[Tuple[Any, ...]],
     current_function=None,
+    *,
+    budget_collector=None,
+    budget_owner_scope_key=None,
 ):
     from scripts.function_tracer_pcode.semantics.transform.expander import ExpandedValue
 
@@ -1540,6 +1598,8 @@ def _impl__resolve_call_expansions(
 
     specialized = analysis if already_specialized else self._specialize_call_analysis(analysis, args)
     if specialized.deferred_calls:
+        # bounded refinement の marker は specialized 自身へ載る（呼び出し元 session
+        # には混ぜない）。下の callee_analysis marker がそれを参照 ID で拾う。
         self._apply_bounded_call_refinement(
             specialized,
             active_functions,
@@ -1629,6 +1689,16 @@ def _impl__resolve_call_expansions(
         )
     except (AttributeError, TypeError, ValueError):
         expanded.return_signed = None
+    if expanded:
+        # Issue #131: callee 解析を意味入力として採用した箇所。展開候補を 1 件も返さ
+        # なかった callee は利用していないので記録しない。callee の marker 本体は複製
+        # せず、callee scope と参照 event ID だけを利用側 scope へ残す。効果要約の構築
+        # 中は要約自身の collector（= その要約の診断 cache）へ入る。
+        self._record_callee_analysis_expansion_budget(
+            specialized,
+            owner_scope_key=budget_owner_scope_key,
+            collector=budget_collector,
+        )
     return expanded
 
 
@@ -2597,6 +2667,10 @@ def _impl__recover_implicit_return_from_terminal_call(
         read_memory_value=self._read_memory_value,
         image_base=self.program.getImageBase().getOffset(),
         record_deferred_call=self._make_deferred_call_recorder(current_function),
+        budget_sink=self._make_expansion_budget_sink(
+            surface="call_wrapper",
+            owner_scope_key=self._current_analysis_scope_key,
+        ),
     )
 
     path_condition_sets = all_path_conditions or []

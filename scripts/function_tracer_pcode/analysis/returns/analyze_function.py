@@ -37,6 +37,9 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
 from scripts.function_tracer_pcode.analysis.returns.parameters import (
     _sealed_return_abi_facts,
 )
+from scripts.function_tracer_pcode.analysis.returns.expansion_budget import (
+    emit_analysis_expansion_budget_diagnostics,
+)
 
 
 def _effect_summary_incomplete_reasons(effect_summary) -> tuple:
@@ -150,6 +153,7 @@ def _impl_analyze_function(
         None,
         function_prototype=function_prototype,
         function_entry_address=self._function_entry_address(function),
+        analysis_scope_key=analysis_scope_key,
     ):
         self._debug_print(f"Parameters: {[p['name'] for p in parameters]}")
         image_base = None
@@ -163,6 +167,10 @@ def _impl_analyze_function(
             resolve_callee_parameters=self._get_freshest_callee_parameters,
             read_memory_value=self._read_memory_value,
             image_base=image_base,
+            budget_sink=self._make_expansion_budget_sink(
+                surface="branch_condition",
+                owner_scope_key=analysis_scope_key,
+            ),
         )
 
         # 戻り値の型を取得
@@ -208,6 +216,9 @@ def _impl_analyze_function(
                 bound_parameter_storage_values=normalized_bound_parameter_storage_values,
             )
             self._current_effect_summary = effect_summary
+            # Issue #131: 自分自身の効果要約で観測した切り捨て（STORE 値展開と、その
+            # 中で採用した callee 要約への参照）を現在の解析 scope へ取り込む。
+            self._absorb_effect_summary_budget_diagnostics(analysis_scope_key)
 
             pre_return_structural_result = self._try_pre_return_counted_loop_summary(
                 function=function,
@@ -223,6 +234,9 @@ def _impl_analyze_function(
                 effect_summary=effect_summary,
             )
             if pre_return_structural_result is not None:
+                # 早期終了経路でも、cache へ入れる前に最新の marker を反映する。
+                self._sync_expansion_budget_truncations(pre_return_structural_result)
+                emit_analysis_expansion_budget_diagnostics(pre_return_structural_result)
                 self._call_analysis_cache[analysis_scope_key] = pre_return_structural_result
                 function_cache_key = self._function_cache_key(function)
                 if function_cache_key is not None and not normalized_bound_parameter_values:
@@ -259,6 +273,9 @@ def _impl_analyze_function(
             program_is_big_endian=self._program_is_big_endian(),
             binary_id=self._binary_id,
         )
+        # Issue #131: 構築時の値は途中の写し。以降の復元・要約・refinement で増えた
+        # marker も、証明利用と cache 保存の前に同期する。
+        self._sync_expansion_budget_truncations(result)
         result.unknown_event_count = len(tracer.unknown_tracker.events)
         result.unknown_event_reasons = sorted(
             {
@@ -334,6 +351,9 @@ def _impl_analyze_function(
                 if "switch_return_recovery" not in result.analysis_notes:
                     result.analysis_notes.append("switch_return_recovery")
 
+        # call wrapper / switch 復元は結果構築の後に走るので、要約適用（= 最初の
+        # 証明処理）より前にここで同期する。
+        self._sync_expansion_budget_truncations(result)
         result.deferred_calls = dict(self._current_deferred_calls)
         self._apply_effect_call_argument_evidence_to_deferred_calls(result)
 
@@ -349,6 +369,7 @@ def _impl_analyze_function(
         )
         if pre_refinement_summary is not None:
             result = pre_refinement_summary
+        self._sync_expansion_budget_truncations(result)
 
         if current_active_key is not None:
             self._analysis_in_progress[current_active_key] = result
@@ -365,6 +386,7 @@ def _impl_analyze_function(
         finally:
             if current_active_key is not None:
                 self._analysis_in_progress.pop(current_active_key, None)
+        self._sync_expansion_budget_truncations(result)
         self._clear_resolved_call_effect_blockers(result)
 
         self._synchronize_parameters_with_referenced_parameter_expressions(result)
@@ -377,6 +399,7 @@ def _impl_analyze_function(
         self._mark_incomplete_control_flow(result)
 
         if not recurrence_proposal_open:
+            self._sync_expansion_budget_truncations(result)
             summary_view = self._apply_structural_recurrence_summary(
                 function,
                 high_function,
@@ -387,6 +410,7 @@ def _impl_analyze_function(
                 result = summary_view
                 self._normalize_return_partition(result)
                 self._mark_incomplete_control_flow(result)
+            self._sync_expansion_budget_truncations(result)
             if result.deferred_calls:
                 if current_active_key is not None:
                     self._analysis_in_progress[current_active_key] = result
@@ -399,6 +423,7 @@ def _impl_analyze_function(
                 finally:
                     if current_active_key is not None:
                         self._analysis_in_progress.pop(current_active_key, None)
+                self._sync_expansion_budget_truncations(result)
                 self._clear_resolved_call_effect_blockers(result)
                 self._normalize_return_partition(result)
                 self._mark_incomplete_control_flow(result)
@@ -418,6 +443,7 @@ def _impl_analyze_function(
             high_function,
             result,
         )
+        self._sync_expansion_budget_truncations(result)
         self._normalize_return_partition(result)
         self._mark_incomplete_control_flow(result)
 
@@ -439,6 +465,10 @@ def _impl_analyze_function(
             print(f"\n[Info] {len(tracer.unknown_tracker.events)} unknown events occurred")
             print("  Use --debug flag for detailed report")
 
+        # 通常終了。cache へ保存する前に最終同期する（cache 保存はこの関数の中で
+        # return の直前に行われるため、外側からでは間に合わない）。
+        self._sync_expansion_budget_truncations(result)
+        emit_analysis_expansion_budget_diagnostics(result)
         self._call_analysis_cache[analysis_scope_key] = result
         function_cache_key = self._function_cache_key(function)
         if function_cache_key is not None and not normalized_bound_parameter_values:

@@ -632,6 +632,9 @@ def _impl__apply_outcome_partition_summaries(
     if not applied:
         self._try_apply_single_guard_nonprogress_loop_outcomes(high_function, analysis)
     _produce_standard_termination_path_effect_evidence(self, analysis)
+    # Issue #131: ``_try_apply_*`` の中で callee 契約を採用して marker が増えることが
+    # あるので、seed を構築する前に最新の状態を解析結果へ反映する。
+    self._sync_expansion_budget_truncations(analysis)
     _build_function_outcome_seed(analysis)
 
 
@@ -2179,6 +2182,10 @@ def _impl__analyze_return_value(
             read_memory_value=self._read_memory_value,
             image_base=self.program.getImageBase().getOffset(),
             record_deferred_call=self._make_deferred_call_recorder(current_function),
+            budget_sink=self._make_expansion_budget_sink(
+                surface="return_value",
+                owner_scope_key=self._current_analysis_scope_key,
+            ),
         )
         expanded_values = expander.expand_from_varnode(return_varnode, [])
     else:
@@ -2194,6 +2201,10 @@ def _impl__analyze_return_value(
             read_memory_value=self._read_memory_value,
             image_base=self.program.getImageBase().getOffset(),
             record_deferred_call=self._make_deferred_call_recorder(current_function),
+            budget_sink=self._make_expansion_budget_sink(
+                surface="return_value",
+                owner_scope_key=self._current_analysis_scope_key,
+            ),
         )
         path_condition_sets = all_path_conditions or []
         if not path_condition_sets:

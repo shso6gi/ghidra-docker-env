@@ -24,9 +24,11 @@ from scripts.function_tracer_pcode.core.signature import (
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
 from scripts.function_tracer_pcode.core.runtime_refs import (
     DeferredCallRef,
+    ExpansionBudgetTruncation,
     PcodeBlockRef,
     PcodeOpRef,
     UnknownValueRef,
+    merge_expansion_budget_truncations,
 )
 
 
@@ -1253,6 +1255,10 @@ class FunctionReturnAnalysis:
     outcome_seed: Optional[FunctionOutcomeSeed] = None
     termination_path_effect_evidence: Tuple[TerminationPathEffectEvidence, ...] = ()
     quarantined_recurrence_proposals: Tuple[Any, ...] = ()
+    # Issue #131 PR-A: 展開ケース数・経路数の上限で実際に切り捨てが起きた事実。
+    # PR-A では診断のみ（``to_dict`` / semantic fingerprint / 証明前提には出さない）。
+    # 判定 gate への接続と semantic 化は PR-B で行う。
+    expansion_budget_truncations: Tuple[ExpansionBudgetTruncation, ...] = ()
 
     def __post_init__(self) -> None:
         if self.function_ref is None:
