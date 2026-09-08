@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     UnknownValueRef,
     CanonicalLocation,
+    ExpansionBudgetTruncation,
     PcodeOpRef,
 )
 from scripts.function_tracer_pcode.core.intrinsics import resolve_pcode_intrinsic
@@ -21,6 +22,7 @@ from scripts.function_tracer_pcode.analysis.condition import (
 )
 from scripts.function_tracer_pcode.analysis.debug import summarize_expression, summarize_condition
 from scripts.function_tracer_pcode.config.settings import (
+    EXPANDER_DEDUP_CASE_LIMIT,
     EXPANDER_MAX_COMBINATION_ATTEMPTS,
     EXPANDER_MAX_OPERATION_CASES,
 )
@@ -84,7 +86,9 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
     """
     
     # 展開の上限設定
-    MAX_CASES_PER_MULTIEQUAL = 16  # 1つのMULTIEQUALから生成する最大ケース数
+    # 共通 dedup のケース数上限。設定 ``FT_EXPANDER_DEDUP_CASE_LIMIT`` の値をそのまま
+    # 参照する互換名で、上限の設定源はここ 1 つ（二重設定にしない）。
+    MAX_CASES_PER_MULTIEQUAL = EXPANDER_DEDUP_CASE_LIMIT
     COMMUTATIVE_ASSOCIATIVE_OPS = frozenset(
         [
             "INT_ADD", "ADD", "+",
@@ -109,6 +113,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
         record_deferred_call: Optional[
             Callable[[CallTargetRef, List[Expression], Optional[Expression], object], Any]
         ] = None,
+        budget_sink: Optional[Callable[[ExpansionBudgetTruncation], None]] = None,
     ):
         self.tracer = tracer
         self.condition_tracker = condition_tracker
@@ -130,6 +135,11 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
         self._debug_suppressed = False
         self._max_operation_cases = int(EXPANDER_MAX_OPERATION_CASES)
         self._max_combination_attempts = int(EXPANDER_MAX_COMBINATION_ATTEMPTS)
+        # Issue #131: 実際に上限で削った事実だけを sink へ即時転送する。局所 list は
+        # 「この展開中に切り捨てが起きたか」を上位 collector の長さに依存せず判定する
+        # ためのもの。
+        self._budget_sink = budget_sink
+        self._budget_truncations: List[ExpansionBudgetTruncation] = []
     
     def _debug_print(self, msg: str, indent: int = 0):
         if not self.debug:

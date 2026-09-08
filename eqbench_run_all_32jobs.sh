@@ -41,6 +41,10 @@ EQUIV_TIMEOUT="${EQUIV_TIMEOUT:-10}"
 DECOMPILE_TIMEOUT="${DECOMPILE_TIMEOUT:-60}"
 PAIRWISE_TIMEOUT="${PAIRWISE_TIMEOUT:-5}"
 PAIRWISE_TIMEOUT_HARD="${PAIRWISE_TIMEOUT_HARD:-30}"
+# Issue #131: 共通 dedup のケース数上限。既定は本番と同じ 16。調査で下げる場合も
+# 子プロセスへ明示的に渡し、実行記録に有効値を残す。
+FT_EXPANDER_DEDUP_CASE_LIMIT="${FT_EXPANDER_DEDUP_CASE_LIMIT:-16}"
+export FT_EXPANDER_DEDUP_CASE_LIMIT
 EQBENCH_RESOURCE_ADMISSION="${EQBENCH_RESOURCE_ADMISSION:-1}"
 EQBENCH_CPU_TOKENS="${EQBENCH_CPU_TOKENS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || printf '1')}"
 EQBENCH_PAIR_CPU_TOKENS="${EQBENCH_PAIR_CPU_TOKENS:-8}"
@@ -540,6 +544,7 @@ run_pair() {
     local -a equiv_cmd=(
         env "TMPDIR=$pair_tmpdir" "TEMP=$pair_tmpdir" "TMP=$pair_tmpdir"
         "UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE=$result_entry_occurrence_nonce"
+        "FT_EXPANDER_DEDUP_CASE_LIMIT=$FT_EXPANDER_DEDUP_CASE_LIMIT"
         "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main
         --equiv "$left_bin" "$right_bin" \
         --binary-ids "$left_id" "$right_id" \
@@ -927,6 +932,7 @@ equiv_timeout=$EQUIV_TIMEOUT
 decompile_timeout=$DECOMPILE_TIMEOUT
 pairwise_timeout=$PAIRWISE_TIMEOUT
 pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD
+expander_dedup_case_limit=$FT_EXPANDER_DEDUP_CASE_LIMIT
 skip_completed_results=$SKIP_COMPLETED_RESULTS
 error_only_rerun=$ERROR_ONLY_RERUN
 debug=$EQBENCH_DEBUG
@@ -1433,6 +1439,7 @@ fi
     "DECOMPILE_TIMEOUT=$DECOMPILE_TIMEOUT" \
     "PAIRWISE_TIMEOUT=$PAIRWISE_TIMEOUT" \
     "PAIRWISE_TIMEOUT_HARD=$PAIRWISE_TIMEOUT_HARD" \
+    "FT_EXPANDER_DEDUP_CASE_LIMIT=$FT_EXPANDER_DEDUP_CASE_LIMIT" \
     "PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT" \
     "PAIR_PROCESS_KILL_AFTER=$PAIR_PROCESS_KILL_AFTER" \
     "./eqbench_run_all_32jobs.sh"

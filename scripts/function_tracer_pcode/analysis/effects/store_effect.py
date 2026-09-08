@@ -94,6 +94,7 @@ def _impl_summarize_store_effects(
     read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
     image_base: Optional[int] = None,
     debug: bool = False,
+    budget_sink: Optional[Callable[[object], None]] = None,
 ) -> EffectSummary:
     parameter_names = _collect_named_parameter_names(parameters)
     block_infos = list(block_infos or ())
@@ -356,6 +357,7 @@ def _impl_summarize_store_effects(
                     resolve_callee_parameters=resolve_callee_parameters,
                     read_memory_value=read_memory_value,
                     image_base=image_base,
+                    budget_sink=budget_sink,
                 )
                 for path_conditions in path_sets:
                     for value_expr, value_conditions in value_effects:
@@ -838,6 +840,7 @@ def _impl_summarize_store_effects(
         pcode_ref_for_op=_pcode_ref_for_op,
         pcode_block_ref_for_block_info=_pcode_block_ref_for_block_info,
         debug=debug,
+        budget_sink=budget_sink,
     )
     incomplete_reasons.update(ram_reasons)
     if ram_path_incomplete:
@@ -959,6 +962,7 @@ def _impl__collect_ram_output_write_effects(
     pcode_ref_for_op=None,
     pcode_block_ref_for_block_info=None,
     debug: bool = False,
+    budget_sink: Optional[Callable[[object], None]] = None,
 ) -> Tuple[List[StoreEffect], Set[str], bool]:
     """Global writes expressed as ``ram``-output ops (Issue #104, Gap 1).
 
@@ -1079,6 +1083,7 @@ def _impl__collect_ram_output_write_effects(
                 resolve_callee_parameters=resolve_callee_parameters,
                 read_memory_value=read_memory_value,
                 image_base=image_base,
+                budget_sink=budget_sink,
             )
             for path_conditions in path_sets:
                 for value_expr, value_conditions in value_effects:
@@ -1215,6 +1220,7 @@ def _impl__resolve_store_value_effects(
     resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]] = None,
     read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
     image_base: Optional[int] = None,
+    budget_sink: Optional[Callable[[object], None]] = None,
 ) -> List[Tuple[Expression, List[Condition]]]:
     return _resolve_value_varnode_effects(
         store_op.getInput(2),
@@ -1225,6 +1231,7 @@ def _impl__resolve_store_value_effects(
         resolve_callee_parameters=resolve_callee_parameters,
         read_memory_value=read_memory_value,
         image_base=image_base,
+        budget_sink=budget_sink,
     )
 
 def _impl__resolve_value_varnode_effects(
@@ -1237,6 +1244,7 @@ def _impl__resolve_value_varnode_effects(
     resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]] = None,
     read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
     image_base: Optional[int] = None,
+    budget_sink: Optional[Callable[[object], None]] = None,
 ) -> List[Tuple[Expression, List[Condition]]]:
     """Value effects of a stored varnode (STORE input or global exit state)."""
     object_centric = _resolve_object_centric_store_value_effects(
@@ -1248,6 +1256,7 @@ def _impl__resolve_value_varnode_effects(
         resolve_callee_parameters=resolve_callee_parameters,
         read_memory_value=read_memory_value,
         image_base=image_base,
+        budget_sink=budget_sink,
     )
     if object_centric:
         return object_centric
@@ -1272,6 +1281,7 @@ def _impl__resolve_object_centric_store_value_effects(
     resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]] = None,
     read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
     image_base: Optional[int] = None,
+    budget_sink: Optional[Callable[[object], None]] = None,
 ) -> List[Tuple[Expression, List[Condition]]]:
     if value_varnode is None or condition_tracker is None:
         return []
@@ -1288,6 +1298,7 @@ def _impl__resolve_object_centric_store_value_effects(
         read_memory_value=read_memory_value,
         image_base=image_base,
         record_deferred_call=getattr(tracer, "record_deferred_call", None),
+        budget_sink=budget_sink,
     )
 
     try:

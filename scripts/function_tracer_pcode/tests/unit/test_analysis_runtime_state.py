@@ -10,6 +10,8 @@ FIELDS = [f.name for f in dataclasses.fields(AnalysisRuntimeState)]
 EXPECTED = {
     "call_analysis_cache", "local_target_cache", "effect_summary_cache", "effect_summary_parameter_cache",
     "direct_call_graph", "direct_call_graph_complete_nodes", "analysis_in_progress", "deferred_call_counter",
+    # Issue #131: 効果要約 1 件に対応する切り捨て診断（key/寿命は effect_summary_cache と同じ）
+    "effect_summary_budget_diagnostics",
 }
 
 
@@ -17,7 +19,7 @@ def _analyzer():
     return ReturnAnalyzer(program=Mock(), debug=False)
 
 
-def test_runtime_state_has_exactly_the_eight_fields():
+def test_runtime_state_has_exactly_the_expected_fields():
     assert set(FIELDS) == EXPECTED
 
 

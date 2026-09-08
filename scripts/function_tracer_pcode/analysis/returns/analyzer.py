@@ -8,6 +8,7 @@ from scripts.function_tracer_pcode.analysis.returns import (
     lifecycle as _svc_lifecycle,
     return_extraction as _svc_return_extraction,
     analyze_function as _svc_analyze_function,
+    expansion_budget as _svc_expansion_budget,
 )
 from typing import Any, Dict, List, Optional, Set, Tuple
 from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo, FunctionReturnAnalysis
@@ -355,6 +356,14 @@ class ReturnAnalyzer:
         self._ensure_runtime_state().effect_summary_cache = value
 
     @property
+    def _effect_summary_budget_diagnostics(self):
+        return self._ensure_runtime_state().effect_summary_budget_diagnostics
+
+    @_effect_summary_budget_diagnostics.setter
+    def _effect_summary_budget_diagnostics(self, value):
+        self._ensure_runtime_state().effect_summary_budget_diagnostics = value
+
+    @property
     def _effect_summary_parameter_cache(self):
         return self._ensure_runtime_state().effect_summary_parameter_cache
 
@@ -451,6 +460,27 @@ class ReturnAnalyzer:
         self._ensure_analysis_session().noreturn_terminal_observations = value
 
     @property
+    def _current_expansion_budget_collector(self):
+        """現在の解析 scope が所有する切り捨て collector（Issue #131）。
+
+        ``_analysis_context`` が push する子 session は自分の collector を新規に所有
+        するので、子解析の記録が親 session へ混入しない。
+        """
+        return self._ensure_analysis_session().expansion_budget_collector
+
+    @_current_expansion_budget_collector.setter
+    def _current_expansion_budget_collector(self, value):
+        self._ensure_analysis_session().expansion_budget_collector = value
+
+    @property
+    def _current_analysis_scope_key(self):
+        return self._ensure_analysis_session().analysis_scope_key
+
+    @_current_analysis_scope_key.setter
+    def _current_analysis_scope_key(self, value):
+        self._ensure_analysis_session().analysis_scope_key = value
+
+    @property
     def _return_path_entry_cache(self):
         return self._ensure_analysis_session().return_path_entry_cache
 
@@ -459,7 +489,7 @@ class ReturnAnalyzer:
         self._ensure_analysis_session().return_path_entry_cache = value
 
     @contextmanager
-    def _analysis_context(self, parameters: List[Dict], effect_summary: Optional[EffectSummary], function_prototype=None, function_entry_address=None):
+    def _analysis_context(self, parameters: List[Dict], effect_summary: Optional[EffectSummary], function_prototype=None, function_entry_address=None, analysis_scope_key=None):
         """Push a fresh per-analysis :class:`AnalysisSession` and restore the parent on exit.
 
         子 session は context が明示的に束縛する値（parameters / effect_summary / function_prototype /
@@ -476,6 +506,7 @@ class ReturnAnalyzer:
             effect_summary=effect_summary,
             function_prototype=function_prototype,
             function_entry_address=function_entry_address,
+            analysis_scope_key=analysis_scope_key,
         )
         self._install_analysis_session(child)
         try:
@@ -484,6 +515,12 @@ class ReturnAnalyzer:
             self._install_analysis_session(parent)
 
     # ---- service implementations (bound explicitly; see <pkg>/*.py) ----
+    # expansion_budget (Issue #131)
+    _absorb_effect_summary_budget_diagnostics = _svc_expansion_budget._impl__absorb_effect_summary_budget_diagnostics
+    _make_expansion_budget_sink = _svc_expansion_budget._impl__make_expansion_budget_sink
+    _record_callee_analysis_expansion_budget = _svc_expansion_budget._impl__record_callee_analysis_expansion_budget
+    _record_expansion_budget_truncations = _svc_expansion_budget._impl__record_expansion_budget_truncations
+    _sync_expansion_budget_truncations = _svc_expansion_budget._impl__sync_expansion_budget_truncations
     # call_recovery
     _align_deferred_call_arguments_for_recording = _svc_call_recovery._impl__align_deferred_call_arguments_for_recording
     _apply_bounded_call_refinement = _svc_call_recovery._impl__apply_bounded_call_refinement

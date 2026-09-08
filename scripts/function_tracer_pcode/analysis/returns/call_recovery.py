@@ -235,6 +235,7 @@ def _impl__try_apply_triangular_mod_caller_outcomes(
         return False
     matched_call = None
     matched_source = None
+    matched_callee_analysis = None
     for target_ref, args_tuple, status, source in self._iter_outcome_call_candidates(analysis):
         args = list(args_tuple or ())
         if len(args) != 1 or not self._expression_is_param_minus_one(args[0], param):
@@ -249,6 +250,7 @@ def _impl__try_apply_triangular_mod_caller_outcomes(
             continue
         matched_call = (target_ref, args[0], status)
         matched_source = source
+        matched_callee_analysis = callee_analysis
         break
     if matched_call is None:
         self._debug_print("Outcome caller summary declined: no matching callee outcome contract for param_minus_one call")
@@ -289,6 +291,10 @@ def _impl__try_apply_triangular_mod_caller_outcomes(
     )
     if "outcome_partition_unknown_callee_positive_region" not in analysis.analysis_notes:
         analysis.analysis_notes.append("outcome_partition_unknown_callee_positive_region")
+    # Issue #131: callee の outcome 契約を実際に採用した箇所（候補を見ただけで
+    # 降りた経路では記録しない）。seed 構築より前にここで解析結果へ反映する。
+    self._record_callee_analysis_expansion_budget(matched_callee_analysis)
+    self._sync_expansion_budget_truncations(analysis)
     return True
 
 
@@ -495,14 +501,27 @@ def _impl__apply_bounded_call_refinement(
             args=args,
         )
 
+    # Issue #131: refiner へ渡した callee 解析のうち、実際に refinement が適用された
+    # 場合だけ marker を残す（候補を検索しただけの callee とは区別する）。
+    provided_callee_analyses: List[FunctionReturnAnalysis] = []
+
+    def provide_analysis_with_budget_record(target, args=None):
+        provided = provide_analysis(target, args)
+        if provided is not None:
+            provided_callee_analyses.append(provided)
+        return provided
+
     refiner = BoundedCallRefiner(
-        provide_analysis,
+        provide_analysis_with_budget_record,
         max_unroll=self._bounded_call_unroll_limit,
         max_cases=self._bounded_call_max_cases,
         debug=self.debug,
     )
     changed = refiner.refine_analysis(analysis)
     if changed:
+        for provided in provided_callee_analyses:
+            self._record_callee_analysis_expansion_budget(provided)
+        self._sync_expansion_budget_truncations(analysis)
         self._debug_print(
             f"Applied bounded call refinement to '{analysis.function_name}' "
             f"(remaining deferred calls={len(analysis.deferred_calls)})"
@@ -1629,6 +1648,9 @@ def _impl__resolve_call_expansions(
         )
     except (AttributeError, TypeError, ValueError):
         expanded.return_signed = None
+    # Issue #131: callee 解析を意味入力として採用した箇所。callee の marker 本体は
+    # 複製せず、callee scope と参照 event ID だけを caller の scope へ残す。
+    self._record_callee_analysis_expansion_budget(specialized)
     return expanded
 
 
@@ -2597,6 +2619,10 @@ def _impl__recover_implicit_return_from_terminal_call(
         read_memory_value=self._read_memory_value,
         image_base=self.program.getImageBase().getOffset(),
         record_deferred_call=self._make_deferred_call_recorder(current_function),
+        budget_sink=self._make_expansion_budget_sink(
+            surface="call_wrapper",
+            owner_scope_key=self._current_analysis_scope_key,
+        ),
     )
 
     path_condition_sets = all_path_conditions or []

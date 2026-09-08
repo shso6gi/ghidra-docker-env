@@ -34,6 +34,9 @@ default_value EQUIV_TIMEOUT 10
 default_value DECOMPILE_TIMEOUT 60
 default_value PAIRWISE_TIMEOUT 5
 default_value PAIRWISE_TIMEOUT_HARD 30
+# Issue #131: 共通 dedup のケース数上限。既定は本番と同じ 16。
+default_value FT_EXPANDER_DEDUP_CASE_LIMIT 16
+export FT_EXPANDER_DEDUP_CASE_LIMIT
 default_value PAIR_PROCESS_TIMEOUT 600s
 default_value PAIR_PROCESS_KILL_AFTER 30s
 default_value VALIDATION_SUMMARY_LEVEL compact
@@ -478,7 +481,7 @@ run_pair() {
     identity="$(PYTHONWARNINGS=ignore::RuntimeWarning "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.production_cutover --print-production-execution-identity --binary1-path "$left" --binary2-path "$right" --binary1-id "$left_id" --binary2-id "$right_id" --function-name1 "$function" --function-name2 "$function" --result-entry-occurrence-nonce "$nonce")"
     IFS=$'\t' read -r result_id source_fp stream <<< "$identity"
     exec_nonce="$(printf '%s' "$result_id" | sed 's/^production-pilot-//')"; checkpoint="$RUN_TMP/process-authority"; authority="$checkpoint/$exec_nonce/supervisor-projection.json"; mkdir -p "$checkpoint"
-    local -a supervisor_cmd=("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.process.supervisor_command --checkpoint-root "$checkpoint" --authority-output "$authority" --working-directory "$SCRIPT_DIR" --execution-nonce "$exec_nonce" --result-occurrence-id "$result_id" --source-snapshot-fingerprint "$source_fp" --stream-id "$stream" --deadline-policy-digest "$(printf 'neq:%s:%s' "$PAIR_PROCESS_TIMEOUT_SECONDS" "$PAIR_PROCESS_KILL_AFTER_SECONDS" | sha256sum | awk '{print $1}')" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" --allow-child-exit-resolution -- env TMPDIR="$pair_tmp" TEMP="$pair_tmp" TMP="$pair_tmp" UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE="$nonce" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main --equiv "$left" "$right" --binary-ids "$left_id" "$right_id" -f "$function" --emit-result-json --equiv-timeout "$EQUIV_TIMEOUT" --timeout "$DECOMPILE_TIMEOUT" --pairwise-timeout "$PAIRWISE_TIMEOUT" --pairwise-timeout-hard "$PAIRWISE_TIMEOUT_HARD")
+    local -a supervisor_cmd=("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.process.supervisor_command --checkpoint-root "$checkpoint" --authority-output "$authority" --working-directory "$SCRIPT_DIR" --execution-nonce "$exec_nonce" --result-occurrence-id "$result_id" --source-snapshot-fingerprint "$source_fp" --stream-id "$stream" --deadline-policy-digest "$(printf 'neq:%s:%s' "$PAIR_PROCESS_TIMEOUT_SECONDS" "$PAIR_PROCESS_KILL_AFTER_SECONDS" | sha256sum | awk '{print $1}')" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" --allow-child-exit-resolution -- env TMPDIR="$pair_tmp" TEMP="$pair_tmp" TMP="$pair_tmp" UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE="$nonce" FT_EXPANDER_DEDUP_CASE_LIMIT="$FT_EXPANDER_DEDUP_CASE_LIMIT" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main --equiv "$left" "$right" --binary-ids "$left_id" "$right_id" -f "$function" --emit-result-json --equiv-timeout "$EQUIV_TIMEOUT" --timeout "$DECOMPILE_TIMEOUT" --pairwise-timeout "$PAIRWISE_TIMEOUT" --pairwise-timeout-hard "$PAIRWISE_TIMEOUT_HARD")
     if [[ "$EQBENCH_DEBUG" == "1" ]]; then supervisor_cmd+=( -d ); fi
     "${supervisor_cmd[@]}" > "$log" 2>&1 || ec=$?
     if ! supervisor_projection_is_terminal "$authority"; then
@@ -535,6 +538,7 @@ equiv_timeout=$EQUIV_TIMEOUT
 decompile_timeout=$DECOMPILE_TIMEOUT
 pairwise_timeout=$PAIRWISE_TIMEOUT
 pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD
+expander_dedup_case_limit=$FT_EXPANDER_DEDUP_CASE_LIMIT
 skip_completed_results=$SKIP_COMPLETED_RESULTS
 error_only_rerun=$ERROR_ONLY_RERUN
 debug=$EQBENCH_DEBUG
