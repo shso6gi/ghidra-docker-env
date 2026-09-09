@@ -12,6 +12,9 @@ EXPECTED = {
     "direct_call_graph", "direct_call_graph_complete_nodes", "analysis_in_progress", "deferred_call_counter",
     # Issue #131: 効果要約 1 件に対応する切り捨て診断（key/寿命は effect_summary_cache と同じ）
     "effect_summary_budget_diagnostics",
+    # Issue #47 (PR-A): decompile 成功時のみ作る complete な callee parameter snapshot と、
+    # その hit/miss 計数（診断専用）。
+    "callee_parameter_decompile_cache", "callee_parameter_decompile_stats",
 }
 
 

@@ -233,6 +233,7 @@ class ProgramAccessService:
         debug_flag: Callable[..., Any],
         decompiler_value: Callable[..., Any],
         set_decompiler: Callable[..., Any],
+        on_program_mutation: Optional[Callable[[], None]] = None,
     ) -> None:
         self.debug_reporter = debug_reporter
         self.decompile_with_broker = decompile_with_broker
@@ -241,6 +242,8 @@ class ProgramAccessService:
         self.debug_flag = debug_flag
         self.decompiler_value = decompiler_value
         self.set_decompiler = set_decompiler
+        # Issue #47 (PR-A): program を書き換えたら decompile 由来の snapshot を無効にする。
+        self.on_program_mutation = on_program_mutation
 
     def program_is_big_endian(self) -> Optional[bool]:
         language_getter = getattr(self.program_value(), "getLanguage", None)
@@ -277,19 +280,32 @@ class ProgramAccessService:
 
     @contextmanager
     def program_transaction(self, description: str):
-        start_transaction = getattr(self.program_value(), "startTransaction", None)
-        end_transaction = getattr(self.program_value(), "endTransaction", None)
-        if not callable(start_transaction) or not callable(end_transaction):
-            yield
-            return
-
-        tx_id = start_transaction(description)
+        # Issue #47 (PR-A): program を書き換え得る区間を抜けたら、decompile 由来の
+        # snapshot（再 decompile の代替根拠）は owner 側で無効化する。commit / rollback
+        # のどちらでも通知する（fail-closed: 迷ったら捨てて decompile し直す）。
         try:
-            yield
-            end_transaction(tx_id, True)
-        except Exception:
-            end_transaction(tx_id, False)
-            raise
+            start_transaction = getattr(self.program_value(), "startTransaction", None)
+            end_transaction = getattr(self.program_value(), "endTransaction", None)
+            if not callable(start_transaction) or not callable(end_transaction):
+                yield
+                return
+
+            tx_id = start_transaction(description)
+            try:
+                yield
+                end_transaction(tx_id, True)
+            except Exception:
+                end_transaction(tx_id, False)
+                raise
+        finally:
+            callback = self.on_program_mutation
+            if callback is not None:
+                try:
+                    callback()
+                except Exception as exc:
+                    self.debug_reporter.debug_print(
+                        f"Program mutation notification failed: {exc}"
+                    )
 
     def program_userop_name(self, userop_id: Optional[int]) -> Optional[str]:
         if userop_id is None:

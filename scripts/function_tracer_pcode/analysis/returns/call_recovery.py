@@ -55,6 +55,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     rewrite_observed_loads_from_effects,
 )
 from scripts.function_tracer_pcode.analysis.returns._api import resolve_call_targets
+from scripts.function_tracer_pcode.analysis.runtime_state import SuccessfulDecompileParameterSnapshot
 
 
 def _impl__direct_call_target_function_key(self, op) -> Optional[Tuple[object, ...]]:
@@ -1417,25 +1418,76 @@ def _impl__resolve_target_function(self, target) -> Optional[Any]:
     return None
 
 
+CALLEE_PARAMETER_DECOMPILE_TIMEOUT = 60
+
+
+def _callee_parameter_decompile_contract_id(timeout: int) -> str:
+    """snapshot を観測した decompile 条件の identity（contract + timeout）。
+
+    条件が変われば同じ callee でも別観測なので、snapshot は再利用せず decompile し直す。
+    """
+    from scripts.function_tracer_pcode.ghidra.decompilation_broker import (
+        LIFECYCLE_HELPER_SOURCE_CONTRACT,
+    )
+
+    return f"{LIFECYCLE_HELPER_SOURCE_CONTRACT}:timeout={int(timeout)}"
+
+
 def _impl__get_freshest_callee_parameters(self, target) -> List[Dict]:
+    """callee の parameter descriptor を返す（Issue #47 PR-A の 2-cache model）。
+
+    - ``_effect_summary_parameter_cache``: partial / richer descriptor cache。
+      effect lane など複数の producer が書き込むので **complete である保証はなく**、
+      fresh 観測と ``_choose_richer_parameter_descriptors`` で併合する入力にすぎない。
+    - ``_callee_parameter_decompile_cache``: decompile が完了し HighFunction が存在した
+      場合にだけ作る complete snapshot。同じ観測条件（contract / program identity）の
+      下でのみ、fresh decompile の代わりに使える唯一の freshness evidence。
+
+    decompile 失敗・HighFunction 欠落は snapshot 化しない（次回また decompile する）。
+    """
+    stats = self._callee_parameter_decompile_stats
     callee = self._resolve_target_function(target)
     if callee is None:
+        stats.record_uncacheable("callee_unresolved")
         return []
 
     callee_key = self._function_cache_key(callee)
     if callee_key is None:
+        stats.record_uncacheable("cache_key_unavailable")
         return []
     cached_parameters = self._effect_summary_parameter_cache.get(callee_key)
 
-    results = self._decompile_function(callee, timeout=60)
-    if results is None:
-        return list(cached_parameters or [])
+    timeout = CALLEE_PARAMETER_DECOMPILE_TIMEOUT
+    contract_id = _callee_parameter_decompile_contract_id(timeout)
+    program_identity = self._program_identity()
+    snapshot_cache = self._callee_parameter_decompile_cache
+    snapshot = snapshot_cache.get(callee_key)
+    if snapshot is not None and snapshot.matches_observation_contract(
+        decompile_contract_id=contract_id,
+        program_identity=program_identity,
+    ):
+        stats.record_hit()
+        fresh_parameters = snapshot.materialize_parameters()
+    else:
+        stats.record_miss("no_snapshot" if snapshot is None else "observation_contract_mismatch")
+        results = self._decompile_function(callee, timeout=timeout)
+        if results is None:
+            stats.record_uncacheable("decompile_incomplete")
+            return list(cached_parameters or [])
 
-    callee_high = results.getHighFunction()
-    if callee_high is None:
-        return list(cached_parameters or [])
+        callee_high = results.getHighFunction()
+        if callee_high is None:
+            stats.record_uncacheable("high_function_missing")
+            return list(cached_parameters or [])
 
-    fresh_parameters = self._collect_parameters(callee_high)
+        fresh_parameters = self._collect_parameters(callee_high)
+        snapshot_cache[callee_key] = SuccessfulDecompileParameterSnapshot.from_successful_decompile(
+            fresh_parameters,
+            decompile_contract_id=contract_id,
+            program_identity=program_identity,
+        )
+        stats.record_snapshot_stored()
+
     merged_parameters = self._choose_richer_parameter_descriptors(
         cached_parameters,
         fresh_parameters,

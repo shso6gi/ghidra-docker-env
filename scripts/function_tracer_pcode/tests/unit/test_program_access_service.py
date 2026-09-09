@@ -18,6 +18,9 @@ NAMES = {
     "get_decompiler", "dispose", "decompile_function", "make_tracer", "find_block_info_for_program_offset",
 }
 FACADE_CALLBACKS = ("decompile_with_broker",)
+# ``on_program_mutation`` (Issue #47 PR-A): program 書き換え区間を抜けたことを owner へ
+# 伝える通知先。supplier でも facade dispatch lambda でもなく、owner の bound method。
+OWNER_NOTIFICATIONS = ("on_program_mutation",)
 SUPPLIERS = ("program_value", "binary_id_value", "debug_flag", "decompiler_value")
 
 
@@ -28,8 +31,15 @@ def _analyzer(program=None):
 def test_collaborator_holds_only_its_dependencies():
     analyzer = _analyzer()
     service = analyzer._program_access
-    assert set(vars(service)) == {"debug_reporter"} | set(FACADE_CALLBACKS) | set(SUPPLIERS) | {"set_decompiler"}
+    assert set(vars(service)) == (
+        {"debug_reporter", "set_decompiler"}
+        | set(FACADE_CALLBACKS)
+        | set(SUPPLIERS)
+        | set(OWNER_NOTIFICATIONS)
+    )
     assert service.debug_reporter is analyzer._debug_reporter
+    # 通知先は owner（facade）の bound method で、collaborator は state を持たない。
+    assert service.on_program_mutation == analyzer._invalidate_decompile_derived_caches
 
 
 def test_every_delegator_forwards_to_the_collaborator():

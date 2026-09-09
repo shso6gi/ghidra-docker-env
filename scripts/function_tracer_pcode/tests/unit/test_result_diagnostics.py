@@ -48,6 +48,42 @@ def test_analysis_timer_records_seconds_and_expression_stats():
     assert snapshot["expressions"]["function1"]["node_count"] == 7
 
 
+def test_analysis_timer_accumulates_callee_parameter_cache_stats_per_side():
+    """Issue #47: 同じ side を再解析しても analyzer instance ごとの計数を足し合わせる。"""
+    timer = AnalysisTimer()
+    first = SimpleNamespace(
+        callee_parameter_cache_diagnostics=lambda: {
+            "schema": "callee-parameter-decompile-cache-v1",
+            "hits": 2, "misses": 3, "snapshots_stored": 3, "invalidations": 0,
+            "miss_reasons": {"no_snapshot": 3}, "uncacheable_reasons": {}, "entries": 3,
+        }
+    )
+    second = SimpleNamespace(
+        callee_parameter_cache_diagnostics=lambda: {
+            "schema": "callee-parameter-decompile-cache-v1",
+            "hits": 1, "misses": 1, "snapshots_stored": 0, "invalidations": 1,
+            "miss_reasons": {"no_snapshot": 1}, "uncacheable_reasons": {"decompile_incomplete": 1},
+            "entries": 1,
+        }
+    )
+    timer.record_callee_parameter_cache("function2", first)
+    timer.record_callee_parameter_cache("function2", second)
+    stats = timer.snapshot()["callee_parameter_cache"]["function2"]
+    assert stats["hits"] == 3 and stats["misses"] == 4 and stats["invalidations"] == 1
+    assert stats["miss_reasons"] == {"no_snapshot": 4}
+    assert stats["uncacheable_reasons"] == {"decompile_incomplete": 1}
+    assert stats["analyzer_instances"] == 2 and stats["snapshot_entries"] == 1
+
+
+def test_result_diagnostics_payload_carries_the_callee_parameter_cache_block():
+    result = SimpleNamespace(
+        diagnostics={"callee_parameter_cache": {"function1": {"hits": 4, "misses": 1}}},
+        debug_trace=None, total_time=1.0, pairwise_stats={}, stage_path=[], solver_results=None,
+    )
+    payload = result_diagnostics_payload(result)
+    assert payload["caches"]["callee_parameter_decompile"]["function1"] == {"hits": 4, "misses": 1}
+
+
 def test_result_diagnostics_payload_merges_recorded_and_live_statistics():
     attempt = SimpleNamespace(
         attempt_id="a1", phase="P0_BASE", strategy="pairwise", elapsed_time=1.5,

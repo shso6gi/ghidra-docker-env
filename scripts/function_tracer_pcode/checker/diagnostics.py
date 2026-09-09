@@ -144,12 +144,41 @@ def expression_stats(analysis: Any) -> Dict[str, int]:
     }
 
 
+_CACHE_STAT_COUNTERS = ("hits", "misses", "snapshots_stored", "invalidations")
+_CACHE_STAT_REASON_MAPS = ("miss_reasons", "uncacheable_reasons")
+
+
+def _merge_cache_stats(
+    accumulated: Optional[Mapping[str, Any]], observed: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """analyzer instance ごとの cache 計数を 1 つの side 単位の集計にまとめる。"""
+    if not accumulated:
+        merged = dict(observed)
+        merged["analyzer_instances"] = 1
+        merged["snapshot_entries"] = observed.get("entries", 0)
+        merged.pop("entries", None)
+        return merged
+    merged = dict(accumulated)
+    for key in _CACHE_STAT_COUNTERS:
+        merged[key] = int(merged.get(key, 0) or 0) + int(observed.get(key, 0) or 0)
+    for key in _CACHE_STAT_REASON_MAPS:
+        totals = dict(merged.get(key) or {})
+        for reason, count in (observed.get(key) or {}).items():
+            totals[reason] = totals.get(reason, 0) + int(count or 0)
+        merged[key] = dict(sorted(totals.items()))
+    merged["analyzer_instances"] = int(merged.get("analyzer_instances", 1) or 1) + 1
+    merged["snapshot_entries"] = observed.get("entries", 0)
+    merged.pop("entries", None)
+    return merged
+
+
 class AnalysisTimer:
     """関数解析の経過時間を side ごとに記録する。"""
 
     def __init__(self) -> None:
         self.seconds: Dict[str, float] = {}
         self.stats: Dict[str, Dict[str, int]] = {}
+        self.cache_stats: Dict[str, Dict[str, Any]] = {}
 
     def timed(self, side: str, run: Any) -> Any:
         started = time.perf_counter()
@@ -170,11 +199,31 @@ class AnalysisTimer:
         except Exception as exc:
             self.stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
 
+    def record_callee_parameter_cache(self, side: str, analyzer: Any) -> None:
+        """Issue #47: callee parameter snapshot cache の hit/miss を side ごとに残す。
+
+        同じ side が複数回解析される（再解析）場合は analyzer が作り直されるので、
+        instance ごとの計数を側単位で足し合わせる。``snapshot_entries`` だけは累積では
+        なく最後の analyzer の保持数。Fail-open: 診断の失敗を呼び出し側へ出さない。
+        """
+        reader = getattr(analyzer, "callee_parameter_cache_diagnostics", None)
+        if not callable(reader):
+            return
+        try:
+            self.cache_stats[side] = _merge_cache_stats(
+                self.cache_stats.get(side), dict(reader() or {})
+            )
+        except Exception as exc:
+            self.cache_stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
     def snapshot(self) -> Dict[str, Any]:
         try:
             return {
                 "analysis_seconds": {side: round(value, 6) for side, value in self.seconds.items()},
                 "expressions": {side: dict(stats) for side, stats in self.stats.items()},
+                "callee_parameter_cache": {
+                    side: dict(stats) for side, stats in self.cache_stats.items()
+                },
             }
         except Exception as exc:
             return {"error": f"{type(exc).__name__}: {exc}"[:200]}
@@ -243,6 +292,9 @@ def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
             "boundary_seconds": dict(base.get("boundary_seconds") or {}),
         },
         "expressions": dict(base.get("expressions") or {}),
+        "caches": {
+            "callee_parameter_decompile": dict(base.get("callee_parameter_cache") or {}),
+        },
         "validated_once_entries": base.get("validated_once_entries"),
         "pairs": pairwise,
         "solver_invocations": solver_invocations,
