@@ -567,8 +567,11 @@ class PhaseTimeline:
         """phase の記録を開始する（閉じ忘れた記録があれば先に閉じる）。
 
         ``attempt_id`` は、この phase の結果が記録される attempt の id。phase 行と
-        ``timings.attempts[]`` / ``debug_trace.attempts[]`` の対応をこの id で固定し、
-        位置合わせのような不安定な対応付けを作らない。
+        ``debug_trace.attempts[]`` の対応をこの id で固定し、位置合わせのような
+        不安定な対応付けを作らない。attempt を必ず生成する phase だけがここで id を
+        渡せる。生成するか未確定な phase は渡さず、確定した時点で
+        ``record_attempt_id()`` で結び付ける（存在しない attempt の id を予約すると、
+        後続 phase が使う id と衝突して別 attempt を指してしまう）。
         """
         try:
             if self._current is not None:
@@ -626,6 +629,16 @@ class PhaseTimeline:
             getattr(phase_result, "changed_binary2", False),
             retry_name=getattr(phase_result, "retry_name", None),
         )
+
+    def record_attempt_id(self, attempt_id: Optional[int]) -> None:
+        """この phase の結果を記録する attempt が確定した時点で id を結び付ける。"""
+        current = self._current
+        if current is None:
+            return
+        try:
+            current["attempt_id"] = attempt_id
+        except Exception:
+            return
 
     def record_reanalyzed_side(self, side: str) -> None:
         """この phase で fresh 解析し直した側を記録する。"""

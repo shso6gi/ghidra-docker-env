@@ -439,8 +439,15 @@ class TestPhaseTimingThroughTheWorkflow:
             # （作ると proof completion / reason completion の対象が増えてしまう）。
             assert attempt["unknown_reasons"] == []
             assert attempt["reason_occurrences"] == []
-        # phase 行と attempt は attempt_id で 1 対 1 に対応する。
-        assert [row["attempt_id"] for row in phases[:3]] == [0, 1, 2]
+        # `attempt_id` を持つ phase 行は対応する attempt と 1 対 1。attempt を作らない
+        # auxiliary phase（applied=False の P4-A tail）は join key を持たない。
+        assert [(row["phase"], row["attempt_id"]) for row in phases] == [
+            ("P0_BASE", 0),
+            ("P1_SIGNEDNESS", 1),
+            ("P2_PATTERN_INT", 2),
+            ("P4A_MIPS64_ABI", None),
+        ]
+        assert [attempt["attempt_id"] for attempt in attempts] == [0, 1, 2]
 
     def test_phase_records_do_not_change_the_outcome_or_the_reason_set(
         self, checker, program, program2
@@ -466,8 +473,8 @@ class TestPhaseTimingThroughTheWorkflow:
             UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value
         ]
 
-    def test_sat_tail_records_the_p4c_and_p4a_phases(self, checker, program, program2):
-        """SAT が残る経路で P4-C / P4-A の phase 行と attempt が閉じられる。"""
+    def _run_sat_tail(self, checker, program, program2, *, return_type_fix, p4a_result):
+        """SAT が残る経路（P0 → P4-C → P4-A）を実際の workflow で流す。"""
         analysis1 = create_mock_analysis("func1", return_type="ulong")
         analysis2 = create_mock_analysis("func2", return_type="int")
         analyze_calls = {"func1": 0, "func2": 0}
@@ -481,20 +488,13 @@ class TestPhaseTimingThroughTheWorkflow:
         def _stage_plan(*args, **kwargs):
             stage_calls.append(kwargs.get("retry_count"))
             result = create_mock_result(is_equivalent=False, solver_status=SolverStatus.SAT)
-            result.unknown_reasons = []
+            result.unknown_reasons = [_reason(UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS)]
             return result
 
         phase_handler = Mock(spec=PhaseHandler)
-        # P4-C（戻り値型リトライ）は binary2、P4-A（MIPS64 ABI）は binary1 を変更する。
         phase_handler.should_fix_return_type.return_value = True
-        phase_handler.run_phase2_return_type_fix.return_value = (True, False, True)
-        phase_handler.execute_phase.return_value = PhaseResult(
-            PhaseID.P4A_MIPS64_ABI,
-            applied=True,
-            retry_name="mips64_abi_fix",
-            changed_binary1=True,
-            changed_binary2=False,
-        )
+        phase_handler.run_phase2_return_type_fix.return_value = return_type_fix
+        phase_handler.execute_phase.return_value = p4a_result
         phase_handler.run_phase4_mips64_retry.return_value = None
         checker.phase_handler = phase_handler
 
@@ -516,8 +516,34 @@ class TestPhaseTimingThroughTheWorkflow:
                         retry_with_type_fix=True,
                     )
 
-        phases = result.to_dict()["diagnostics"]["timings"]["phases"]
-        attempts = result.to_dict()["debug_trace"]["attempts"]
+        payload = result.to_dict()
+        return (
+            payload["diagnostics"]["timings"]["phases"],
+            payload["debug_trace"]["attempts"],
+            analyze_calls,
+            stage_calls,
+        )
+
+    @staticmethod
+    def _applied_p4a():
+        return PhaseResult(
+            PhaseID.P4A_MIPS64_ABI,
+            applied=True,
+            retry_name="mips64_abi_fix",
+            changed_binary1=True,
+            changed_binary2=False,
+        )
+
+    def test_sat_tail_records_the_p4c_and_p4a_phases(self, checker, program, program2):
+        """SAT が残る経路で P4-C / P4-A の phase 行と attempt が閉じられる。"""
+        # P4-C（戻り値型リトライ）は binary2、P4-A（MIPS64 ABI）は binary1 を変更する。
+        phases, attempts, analyze_calls, stage_calls = self._run_sat_tail(
+            checker,
+            program,
+            program2,
+            return_type_fix=(True, False, True),
+            p4a_result=self._applied_p4a(),
+        )
         assert [row["phase"] for row in phases] == [
             "P0_BASE",
             "P4C_RETURN_TYPE_FIX",
@@ -544,11 +570,82 @@ class TestPhaseTimingThroughTheWorkflow:
         assert attempts[1]["reanalyzed_sides"] == ["function2"]
         assert attempts[2]["applied"] is True
         assert attempts[2]["reanalyzed_sides"] == ["function1"]
-        for attempt in attempts:
-            assert attempt["reason_before"] == attempt["reason_after"] == []
         # P0 が両側、P4-C が binary2、P4-A が binary1 を fresh 解析している。
         assert analyze_calls == {"func1": 2, "func2": 2}
         assert len(stage_calls) == 3
+
+    def test_an_unapplied_p4c_does_not_reserve_the_next_attempt_id(
+        self, checker, program, program2
+    ):
+        """attempt を作らない P4-C は join key を持たず、次の P4-A の id を奪わない。"""
+        phases, attempts, analyze_calls, stage_calls = self._run_sat_tail(
+            checker,
+            program,
+            program2,
+            return_type_fix=(False, False, False),
+            p4a_result=self._applied_p4a(),
+        )
+        assert [(row["phase"], row["attempt_id"]) for row in phases] == [
+            ("P0_BASE", 0),
+            ("P4C_RETURN_TYPE_FIX", None),
+            ("P4A_MIPS64_ABI", 1),
+        ]
+        assert [(attempt["phase"], attempt["attempt_id"]) for attempt in attempts] == [
+            ("P0_BASE", 0),
+            ("P4A_MIPS64_ABI", 1),
+        ]
+
+        p4c_row = phases[1]
+        assert p4c_row["applied"] is False
+        assert p4c_row["skipped_reason"] == PHASE_SKIPPED_NO_CHANGES
+        assert p4c_row["reanalyzed_sides"] == []
+        assert p4c_row["reason_before"] == p4c_row["reason_after"] == [
+            UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value
+        ]
+        # P4-C の attempt は存在しない。
+        assert not [
+            attempt for attempt in attempts if attempt["phase"] == "P4C_RETURN_TYPE_FIX"
+        ]
+
+        p4a_row = phases[2]
+        assert p4a_row["applied"] is True
+        assert p4a_row["attempt_id"] == attempts[1]["attempt_id"]
+        assert p4a_row["reanalyzed_sides"] == ["function1"]
+        assert analyze_calls == {"func1": 2, "func2": 1}
+        assert len(stage_calls) == 2
+
+    def test_unapplied_p4c_and_p4a_rows_carry_no_join_key(
+        self, checker, program, program2
+    ):
+        """attempt を作らない auxiliary phase は 2 つ続いても id を予約しない。"""
+        phases, attempts, analyze_calls, stage_calls = self._run_sat_tail(
+            checker,
+            program,
+            program2,
+            return_type_fix=(False, False, False),
+            p4a_result=PhaseResult(
+                PhaseID.P4A_MIPS64_ABI,
+                applied=False,
+                retry_name="mips64_abi_fix",
+                changed_binary1=False,
+                changed_binary2=False,
+            ),
+        )
+        assert [(row["phase"], row["attempt_id"]) for row in phases] == [
+            ("P0_BASE", 0),
+            ("P4C_RETURN_TYPE_FIX", None),
+            ("P4A_MIPS64_ABI", None),
+        ]
+        assert [(attempt["phase"], attempt["attempt_id"]) for attempt in attempts] == [
+            ("P0_BASE", 0)
+        ]
+        for row in phases[1:]:
+            assert row["applied"] is False
+            assert row["skipped_reason"] == PHASE_SKIPPED_NO_CHANGES
+            assert row["reanalyzed_sides"] == []
+            assert row["reason_before"] == row["reason_after"]
+        assert analyze_calls == {"func1": 1, "func2": 1}
+        assert len(stage_calls) == 1
 
 
 class TestPhaseTimelineLifecycle:

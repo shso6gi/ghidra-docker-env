@@ -398,10 +398,9 @@ def _run_phase4a_tail(
     checker._debug_print(f"Phase {PhaseID.P4A_MIPS64_ABI.value}: {phase4a_spec.description}")
     checker._debug_print("=" * 60)
 
+    # applied=False なら attempt を作らない phase なので、ここでは id を予約しない。
     phase_timeline.begin(
-        PhaseID.P4A_MIPS64_ABI.value,
-        attempt_id=attempt_id,
-        reason_before=unknown_reason_ids(result),
+        PhaseID.P4A_MIPS64_ABI.value, reason_before=unknown_reason_ids(result)
     )
     with phase_timeline.measure("phase_fix"):
         phase_result = checker.phase_handler.execute_phase(
@@ -413,6 +412,8 @@ def _run_phase4a_tail(
         phase_timeline.end(reason_after=unknown_reason_ids(result))
         return result, attempt_id
 
+    # ここから先は必ずこの attempt_id で attempt を記録する。
+    phase_timeline.record_attempt_id(attempt_id)
     retry_count += 1
     ctx.type_fix_result.retry_phase = phase_result.retry_name
 
@@ -544,10 +545,10 @@ def _maybe_retry_sat_return_type_fix(
     )
 
     phase_timeline = phase_timeline_of(checker)
+    # applied=False なら attempt を作らない phase なので、ここでは id を予約しない。
     phase_timeline.begin(
         "P4C_RETURN_TYPE_FIX",
         retry_name="sat_return_type_fix",
-        attempt_id=attempt_id,
         reason_before=unknown_reason_ids(result),
     )
     with phase_timeline.measure("phase_fix"):
@@ -561,6 +562,9 @@ def _maybe_retry_sat_return_type_fix(
         phase_timeline.end(reason_after=unknown_reason_ids(result))
         checker._debug_print("Phase 4-C: Return type fix was not applied")
         return result, attempt_id, True
+
+    # ここから先は必ずこの attempt_id で attempt を記録する。
+    phase_timeline.record_attempt_id(attempt_id)
 
     ctx.type_fix_result.retry_phase = "sat_return_type_fix"
     phase_result = PhaseResult(
