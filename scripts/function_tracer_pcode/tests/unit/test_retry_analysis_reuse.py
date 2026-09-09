@@ -6,6 +6,7 @@
 **再利用しないと決めたときに必ず fresh へ倒れること**である。
 """
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -34,6 +35,9 @@ from scripts.function_tracer_pcode.checker.phases.handler import (
 from scripts.function_tracer_pcode.checker.reanalysis import (
     build_retry_analysis_base,
     program_modification_number,
+    reuse_equivalence_key,
+    reuse_equivalence_mismatch_kind,
+    runtime_type_projection,
     selective_reanalysis_and_check,
     semantic_fingerprint_of,
 )
@@ -41,7 +45,12 @@ from scripts.function_tracer_pcode.core import SignatureHypothesis
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 from scripts.function_tracer_pcode.smt import SolverStatus
 
-from conftest import MockProgram, create_mock_analysis, create_mock_result
+from conftest import (
+    MockDataType,
+    MockProgram,
+    create_mock_analysis,
+    create_mock_result,
+)
 
 _ANALYZER = "scripts.function_tracer_pcode.analysis.returns.analyzer.ReturnAnalyzer"
 
@@ -252,7 +261,7 @@ class TestProgramModificationNumber:
 class TestBaseSnapshotConstruction:
     """base state の 3 要素は一体でしか作られない"""
 
-    def test_base_holds_a_copy_and_its_generation_and_fingerprint(self):
+    def test_base_holds_a_copy_and_its_generation_and_equivalence_key(self):
         program = VersionedMockProgram(name="b.exe")
         program.modification_number = 5
         analysis = create_mock_analysis("func1", return_type="ulong")
@@ -263,17 +272,17 @@ class TestBaseSnapshotConstruction:
         assert base.analysis is not analysis  # 複製であって参照ではない
         assert base.program is program
         assert base.modification_number == 5
-        assert base.semantic_fingerprint == semantic_fingerprint_of(analysis)
+        assert base.equivalence_key == reuse_equivalence_key(analysis)
 
     def test_no_base_when_the_generation_cannot_be_read(self):
         analysis = create_mock_analysis("func1")
         assert build_retry_analysis_base(MockProgram(name="b.exe"), analysis) is None
 
-    def test_no_base_when_the_fingerprint_cannot_be_built(self):
+    def test_no_base_when_the_equivalence_key_cannot_be_built(self):
         program = VersionedMockProgram(name="b.exe")
         analysis = create_mock_analysis("func1")
         with patch(
-            "scripts.function_tracer_pcode.checker.reanalysis.semantic_fingerprint_of",
+            "scripts.function_tracer_pcode.checker.reanalysis.reuse_equivalence_key",
             lambda _analysis: None,
         ):
             assert build_retry_analysis_base(program, analysis) is None
@@ -289,6 +298,118 @@ class TestBaseSnapshotConstruction:
             side_effect=TypeError("opaque object"),
         ):
             assert semantic_fingerprint_of(analysis) is None
+
+
+class TestReuseEquivalenceContract:
+    """再利用等価キー: runtime 型意味と完了済み proof まで含める
+
+    `dart/test/Eq/newV` の `snippet` B4_B16 / B6_B14 / B13_B15 は、
+    `AnalysisSnapshot` の semantic fingerprint が一致していたのに P4-A の適用可否が変わり、
+    最終 UNKNOWN reason から `outcome_same_kind_consistency_unproven` が消えた。原因は
+    `to_dict()` が `parameters_without_runtime_objects()` を通って `data_type_obj` を落とす
+    一方、P4-A（`checker/arch/mips64.py`）はその object から型名とサイズを読むこと。
+    ここではその条件を単体で再現し、強化後の等価キーが mismatch として捕まえることを固定する。
+    """
+
+    @staticmethod
+    def _with_param_type(analysis, data_type_obj, data_type_name, declared_size=8):
+        """parameter 1 件だけ持つ解析ビューにする（runtime object だけ差し替える）。
+
+        ``to_dict()`` に載る記述（型名・サイズ）は固定し、runtime の ``data_type_obj``
+        だけを変える。これが実測で起きていた条件そのもの。
+        """
+        return replace(
+            analysis,
+            parameters=[
+                {
+                    "name": "param_1",
+                    "index": 0,
+                    "data_type": data_type_name,
+                    "data_type_obj": data_type_obj,
+                    "size": declared_size,
+                    "is_signed": True,
+                }
+            ],
+        )
+
+    def test_same_declared_name_but_different_runtime_width_is_a_mismatch(self):
+        # `to_dict()` に載る文字列は同じで、runtime DataType のサイズだけ違う状況。
+        base = create_mock_analysis("func1")
+        four_byte = MockDataType("long", 4, True)
+        eight_byte = MockDataType("long", 8, True)
+        left = self._with_param_type(base, four_byte, "long")
+        right = self._with_param_type(base, eight_byte, "long")
+
+        assert semantic_fingerprint_of(left) == semantic_fingerprint_of(right)
+        assert reuse_equivalence_key(left) != reuse_equivalence_key(right)
+        assert (
+            reuse_equivalence_mismatch_kind(
+                reuse_equivalence_key(left), reuse_equivalence_key(right)
+            )
+            == "runtime_type_semantics"
+        )
+
+    def test_same_declared_name_but_different_runtime_signedness_is_a_mismatch(self):
+        base = create_mock_analysis("func1")
+        signed = MockDataType("int", 4, True)
+        unsigned = MockDataType("int", 4, False)
+        left = self._with_param_type(base, signed, "int")
+        right = self._with_param_type(base, unsigned, "int")
+
+        assert reuse_equivalence_key(left) != reuse_equivalence_key(right)
+
+    def test_distinct_runtime_objects_with_the_same_semantics_still_match(self):
+        # object identity は比較条件にしない（複製が別 object になっても mismatch にしない）。
+        base = create_mock_analysis("func1")
+        left = self._with_param_type(base, MockDataType("int", 4, True), "int")
+        right = self._with_param_type(base, MockDataType("int", 4, True), "int")
+
+        assert left.parameters[0]["data_type_obj"] is not right.parameters[0]["data_type_obj"]
+        assert reuse_equivalence_key(left) == reuse_equivalence_key(right)
+        assert (
+            reuse_equivalence_mismatch_kind(
+                reuse_equivalence_key(left), reuse_equivalence_key(right)
+            )
+            is None
+        )
+
+    def test_return_type_runtime_semantics_are_covered(self):
+        base = create_mock_analysis("func1")
+        left = replace(base, return_type="long", return_type_obj=MockDataType("long", 8, True))
+        right = replace(base, return_type="long", return_type_obj=MockDataType("long", 4, True))
+
+        assert reuse_equivalence_key(left) != reuse_equivalence_key(right)
+
+    def test_completed_recovery_proof_carry_over_is_a_mismatch(self):
+        # `AnalysisSnapshot` は proof state を除外するので、指紋は一致してしまう。
+        base = create_mock_analysis("func1")
+        carried = replace(
+            base,
+            completed_recovery_proof_ids=(("recovery_proof_v1", "func1", 1),),
+        )
+
+        assert semantic_fingerprint_of(base) == semantic_fingerprint_of(carried)
+        assert reuse_equivalence_key(base) != reuse_equivalence_key(carried)
+        assert (
+            reuse_equivalence_mismatch_kind(
+                reuse_equivalence_key(base), reuse_equivalence_key(carried)
+            )
+            == "completed_recovery_proofs"
+        )
+
+    def test_unbuildable_projection_yields_no_key(self):
+        analysis = create_mock_analysis("func1")
+        with patch(
+            "scripts.function_tracer_pcode.checker.reanalysis._analysis_runtime_type_projection",
+            side_effect=TypeError("opaque runtime type"),
+        ):
+            assert reuse_equivalence_key(analysis) is None
+
+    def test_projection_reads_the_runtime_object_before_the_declared_name(self):
+        # P4-A と同じ読み方（object を先に見る）になっていること。
+        projected = runtime_type_projection(MockDataType("int", 4, True), "long", 8)
+        assert projected[0] == "int"
+        assert projected[2] == 4
 
 
 class TestReuseModeAcceptsAValidBase:
@@ -387,7 +508,7 @@ class TestReuseIsRefusedAndFallsBackToFresh:
             analysis=base.analysis,
             program=plain,
             modification_number=base.modification_number,
-            semantic_fingerprint=base.semantic_fingerprint,
+            equivalence_key=base.equivalence_key,
         )
         run = fixture.run(changed1=True)
         self._assert_fell_back(run, REUSE_FALLBACK_MODIFICATION_NUMBER_UNAVAILABLE)
@@ -487,7 +608,7 @@ class TestFallbackReSeed:
         assert base.modification_number == 9
         # 仮説を重ねる前の raw だけを base にする（派生ビューを次の base にしない）。
         assert list(base.analysis.signature_hypotheses or ()) == []
-        assert base.semantic_fingerprint == semantic_fingerprint_of(fixture.raw1)
+        assert base.equivalence_key == reuse_equivalence_key(fixture.raw1)
         assert base.analysis is not fixture.raw1
 
     def test_re_seeded_base_is_reusable_on_the_next_retry(self, reuse_mode):
@@ -712,6 +833,129 @@ class TestAuxiliaryPhasesUseTheSameReusePath:
             "function1": REUSE_FALLBACK_NO_SNAPSHOT
         }
         assert analyze_calls == ["func1", "func2", "func2", "func1"]
+
+
+class TestReuseDisabledCostsNothing:
+    """kill switch: 無効なら base snapshot も再利用処理も作らない"""
+
+    @pytest.fixture
+    def disabled(self, monkeypatch):
+        from scripts.function_tracer_pcode.config import settings
+
+        monkeypatch.setattr(
+            settings, "RETRY_ANALYSIS_REUSE_ENABLED", False, raising=False
+        )
+
+    def test_p0_does_not_build_a_base_snapshot(self, disabled):
+        from scripts.function_tracer_pcode.checker.reanalysis import (
+            _seed_retry_analysis_base,
+        )
+
+        program = VersionedMockProgram(name="binary1.exe")
+        ctx = _make_ctx(program, VersionedMockProgram(name="binary2.exe"), None, None)
+        with patch(
+            "scripts.function_tracer_pcode.checker.reanalysis.build_retry_analysis_base"
+        ) as build:
+            _seed_retry_analysis_base(
+                ctx, "function1", program, create_mock_analysis("func1")
+            )
+        assert build.call_count == 0
+        assert ctx.retry_analysis_base1 is None
+
+    def test_retry_runs_the_plain_fresh_path(self, disabled):
+        fixture = _Fixture(seed1=False, seed2=False)
+        run = fixture.run(changed1=True)
+
+        assert run.analyze_calls == ["func1"]
+        # 再利用専用の観測も残さない（無効時は従来処理と実質同じ）。
+        assert run.row["reuse_eligible_by_side"] == {}
+        assert run.row["analysis_source_by_side"] == {"function1": ANALYSIS_SOURCE_FRESH}
+        assert run.row["shadow_fingerprints_by_side"] == {}
+
+    def test_missing_setting_does_not_enable_reuse(self, monkeypatch):
+        from scripts.function_tracer_pcode.checker import reanalysis
+        from scripts.function_tracer_pcode.config import settings
+
+        monkeypatch.delattr(settings, "RETRY_ANALYSIS_REUSE_ENABLED", raising=False)
+        monkeypatch.delattr(settings, "RETRY_ANALYSIS_REUSE_SHADOW", raising=False)
+
+        # 設定が欠けたら未検証の再利用を暗黙に有効化せず、fresh 側へ倒す。
+        assert reanalysis._retry_reuse_enabled() is False
+        assert reanalysis._retry_reuse_shadow_enabled() is True
+
+
+class TestShadowCatchesRuntimeTypeDivergence:
+    """強化した等価キーが shadow 比較で効くこと"""
+
+    def test_runtime_type_divergence_is_reported_and_fresh_wins(self, shadow_mode):
+        fixture = _Fixture()
+        # fresh 側だけ runtime DataType のサイズが違う（記述文字列は同じ）状況。
+        divergent = replace(
+            fixture.raw1,
+            parameters=[
+                {
+                    "name": "param_1",
+                    "index": 0,
+                    "data_type": "long",
+                    "data_type_obj": MockDataType("long", 4, True),
+                    "size": 8,
+                    "is_signed": True,
+                }
+            ],
+        )
+        fixture.ctx.retry_analysis_base1 = build_retry_analysis_base(
+            fixture.program1,
+            replace(
+                fixture.raw1,
+                parameters=[
+                    {
+                        "name": "param_1",
+                        "index": 0,
+                        "data_type": "long",
+                        "data_type_obj": MockDataType("long", 8, True),
+                        "size": 8,
+                        "is_signed": True,
+                    }
+                ],
+            ),
+        )
+        run = fixture.run(changed1=True, fresh_by_name={"func1": divergent})
+
+        shadow = run.row["shadow_fingerprints_by_side"]["function1"]
+        assert shadow["matched"] is False
+        assert shadow["mismatch_kind"] == "runtime_type_semantics"
+        assert (
+            run.row["analysis_source_by_side"]["function1"]
+            == REUSE_FALLBACK_SHADOW_MISMATCH
+        )
+        # stage plan には fresh 側が渡る。
+        assert run.stage_inputs["analysis1"].parameters[0]["data_type_obj"].getLength() == 4
+        assert run.result.error_message is None
+
+    def test_completed_recovery_proof_divergence_is_reported(self, shadow_mode):
+        fixture = _Fixture()
+        # fresh 側が retry 時に proof を作り直し、base は P0 時点のものを持つ状況。
+        divergent = replace(
+            fixture.raw1,
+            completed_recovery_proof_ids=(("recovery_proof_v1", "func1", 7),),
+        )
+        run = fixture.run(changed1=True, fresh_by_name={"func1": divergent})
+
+        shadow = run.row["shadow_fingerprints_by_side"]["function1"]
+        assert shadow["matched"] is False
+        assert shadow["mismatch_kind"] == "completed_recovery_proofs"
+        assert (
+            run.row["analysis_source_by_side"]["function1"]
+            == REUSE_FALLBACK_SHADOW_MISMATCH
+        )
+
+    def test_matching_views_still_report_no_mismatch_kind(self, shadow_mode):
+        fixture = _Fixture()
+        run = fixture.run(changed1=True)
+
+        shadow = run.row["shadow_fingerprints_by_side"]["function1"]
+        assert shadow["matched"] is True
+        assert shadow["mismatch_kind"] is None
 
 
 class TestBaseSeedingThroughTheWorkflow:

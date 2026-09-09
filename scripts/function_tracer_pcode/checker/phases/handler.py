@@ -71,8 +71,9 @@ class RetryAnalysisBase:
     """P0 の raw 解析ビューと、その再利用可否を判定するための state（Issue #107 PR-B）。
 
     ``analysis`` は仮説をまだ重ねていない解析の複製、``program`` / ``modification_number``
-    は「その複製が前提にしている Program の世代」、``semantic_fingerprint`` は
-    「複製自身が書き換えられていないこと」を確認するための seed 時の指紋。
+    は「その複製が前提にしている Program の世代」、``equivalence_key`` は
+    「複製自身が書き換えられていないこと」を確認するための seed 時の等価キー
+    （``checker/reanalysis.py`` の ``reuse_equivalence_key()``）。
     3 つは常に同時に作られなければ意味を持たない（片方だけ新しい state を作ると
     「古い解析を新しい Program の世代で再利用してよい」と誤判定する）ので frozen にし、
     更新は必ず新しいインスタンスの差し替えで行う。
@@ -81,7 +82,7 @@ class RetryAnalysisBase:
     analysis: FunctionReturnAnalysis
     program: Any
     modification_number: int
-    semantic_fingerprint: str
+    equivalence_key: Any
 
 
 @dataclass

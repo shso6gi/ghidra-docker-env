@@ -531,17 +531,6 @@ REUSE_FALLBACK_FINGERPRINT_UNAVAILABLE = (
 REUSE_FALLBACK_CONSTRUCTION_FAILED = REUSE_FALLBACK_PREFIX + "reuse_construction_failed"
 REUSE_FALLBACK_SHADOW_MISMATCH = REUSE_FALLBACK_PREFIX + "shadow_mismatch"
 
-REUSE_FALLBACK_REASONS = (
-    REUSE_FALLBACK_NO_SNAPSHOT,
-    REUSE_FALLBACK_PROGRAM_IDENTITY_CHANGED,
-    REUSE_FALLBACK_MODIFICATION_NUMBER_UNAVAILABLE,
-    REUSE_FALLBACK_MODIFICATION_NUMBER_CHANGED,
-    REUSE_FALLBACK_BASE_SNAPSHOT_MUTATED,
-    REUSE_FALLBACK_FINGERPRINT_UNAVAILABLE,
-    REUSE_FALLBACK_CONSTRUCTION_FAILED,
-    REUSE_FALLBACK_SHADOW_MISMATCH,
-)
-
 
 PHASE_TIMING_SEGMENTS = (
     "phase_fix",
@@ -725,8 +714,12 @@ class PhaseTimeline:
         fresh: Optional[str] = None,
         reuse: Optional[str] = None,
         matched: Optional[bool] = None,
+        mismatch_kind: Optional[str] = None,
     ) -> None:
-        """fresh / reuse の完成ビューの semantic fingerprint 比較を記録する。"""
+        """fresh / reuse の完成ビューの再利用等価キー比較を記録する。
+
+        ``mismatch_kind`` は「意味・runtime 型・完了済み proof のどれが食い違ったか」。
+        """
         current = self._current
         if current is None:
             return
@@ -735,6 +728,7 @@ class PhaseTimeline:
                 "fresh": None if fresh is None else str(fresh),
                 "reuse": None if reuse is None else str(reuse),
                 "matched": None if matched is None else bool(matched),
+                "mismatch_kind": None if mismatch_kind is None else str(mismatch_kind),
             }
         except Exception:
             return

@@ -10,6 +10,20 @@ from scripts.function_tracer_pcode.core import (
     FunctionSignature,
     SignatureHypothesis,
 )
+from scripts.function_tracer_pcode.core.signature import (
+    get_data_type_display_name,
+    get_data_type_path,
+    get_declared_type_signedness,
+    get_declared_type_size_bits,
+    get_declared_type_size_bytes,
+    is_composite_data_type,
+    is_floating_data_type,
+    is_integral_data_type,
+    is_pointer_data_type,
+    is_undefined_data_type,
+    is_unsigned_data_type,
+    is_void_data_type,
+)
 from scripts.function_tracer_pcode.checker.phases.handler import (
     PhaseContext,
     PhaseResult,
@@ -42,6 +56,12 @@ from scripts.function_tracer_pcode.analysis.failure import (
 )
 
 
+# Issue #107 (PR-B): 再利用ビューと fresh 再解析ビューが「後続 retry phase にとって同じ」と
+# 言えるかを判定するための射影の版。``AnalysisSnapshot`` の一般的な意味は変えず、
+# PR-107-B 専用の狭い射影としてここに置く。
+REUSE_EQUIVALENCE_PROJECTION_VERSION = "retry-reuse-equivalence-v1"
+
+
 def semantic_fingerprint_of(analysis) -> Optional[str]:
     """解析ビューの semantic fingerprint を返す（生成できなければ ``None``）。
 
@@ -51,6 +71,11 @@ def semantic_fingerprint_of(analysis) -> Optional[str]:
     入力に対して ``SnapshotFingerprintCodec`` は例外を送出するので、その場合は ``None``
     を返し、呼び出し側は「再利用できない」として fresh へ倒す。**診断のための指紋生成が
     失敗しても判定を壊さない。**
+
+    ただしこの指紋だけでは再利用の等価性判定に**足りない**。``to_dict()`` は
+    ``parameters_without_runtime_objects()`` を通るため runtime の ``data_type_obj`` を
+    落とすが、retry phase はその object から型名・サイズ・型分類・signedness を読む。
+    等価性の判定には :func:`reuse_equivalence_key` を使うこと。
     """
     if analysis is None:
         return None
@@ -60,6 +85,136 @@ def semantic_fingerprint_of(analysis) -> Optional[str]:
         return str(AnalysisSnapshot.from_function_analysis(analysis).semantic_fingerprint)
     except Exception:
         return None
+
+
+def runtime_type_projection(
+    data_type_obj,
+    fallback_name=None,
+    fallback_size=None,
+):
+    """retry phase が runtime DataType から読む意味だけを安定値へ射影する。
+
+    Java/PyGhidra object の identity は比較条件にしない。射影に含めるのは、
+    ``checker/arch/mips64.py`` の P4-A 適用判定（``_get_param_type_string`` /
+    ``_get_param_size``）と、``checker/phases/handler.py`` / ``semantics/typing/`` の
+    型修正判定（``is_void_data_type`` / ``is_unsigned_data_type`` /
+    ``is_suspicious_undefined_data_type`` / ``resolve_signed_counterpart_spec`` など）が
+    実際に読む項目に対応する。``is_suspicious_undefined_data_type`` は
+    「undefined か」＋サイズから決まり、``resolve_*_spec`` は型名・サイズ・signedness と
+    program から決まるので、下の組で必要十分になる。
+    """
+    return (
+        get_data_type_display_name(data_type_obj, fallback_name),
+        get_data_type_path(data_type_obj),
+        get_declared_type_size_bytes(data_type_obj, fallback_name, fallback_size=fallback_size),
+        get_declared_type_size_bits(data_type_obj, fallback_name, fallback_size=fallback_size),
+        get_declared_type_signedness(data_type_obj, fallback_name),
+        is_void_data_type(data_type_obj, fallback_name),
+        is_undefined_data_type(data_type_obj, fallback_name),
+        is_composite_data_type(data_type_obj, fallback_name),
+        is_pointer_data_type(data_type_obj, fallback_name),
+        is_floating_data_type(data_type_obj, fallback_name),
+        is_integral_data_type(data_type_obj, fallback_name),
+        is_unsigned_data_type(data_type_obj, fallback_name),
+    )
+
+
+def _analysis_runtime_type_projection(analysis):
+    """解析ビューの戻り値型と全 parameter について runtime 型意味を射影する。"""
+    parameters = []
+    for index, param in enumerate(getattr(analysis, "parameters", None) or ()):
+        parameters.append(
+            (
+                int(param.get("index", index) or 0),
+                runtime_type_projection(
+                    param.get("data_type_obj"),
+                    param.get("data_type"),
+                    param.get("size"),
+                ),
+            )
+        )
+    return (
+        runtime_type_projection(
+            getattr(analysis, "return_type_obj", None),
+            getattr(analysis, "return_type", None),
+        ),
+        tuple(parameters),
+    )
+
+
+def _completed_recovery_proof_projection(analysis):
+    """完了済み recovery proof の同一性を安定値へ射影する。
+
+    ``AnalysisSnapshot`` は proof state を意図的に除外する（derived proof 扱い）。
+    ここでは一般の snapshot の意味は変えず、**再利用ビューが P0 時点の完了済み proof を
+    そのまま持ち越していないか**を PR-107-B 側で検証するために射影する。
+    """
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import (
+        SnapshotFingerprintCodec,
+    )
+
+    return (
+        SnapshotFingerprintCodec.digest(
+            tuple(getattr(analysis, "completed_recovery_proof_ids", ()) or ())
+        ),
+        SnapshotFingerprintCodec.digest(
+            tuple(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
+        ),
+    )
+
+
+def reuse_equivalence_key(analysis) -> Optional[tuple]:
+    """再利用ビューと fresh ビューが後続 phase にとって同じかを判定するキー。
+
+    ``semantic_fingerprint``（意味的な解析内容）に加えて、
+    **runtime 型の意味**（``semantic_fingerprint`` が落とす ``data_type_obj`` 由来の情報）と
+    **完了済み recovery proof の同一性**（``AnalysisSnapshot`` が derived proof として
+    除外する情報）を含める。どれか 1 つでも作れなければ ``None`` を返し、
+    呼び出し側は再利用せず fresh へ倒す（fail-closed）。
+    """
+    if analysis is None:
+        return None
+    try:
+        fingerprint = semantic_fingerprint_of(analysis)
+        if fingerprint is None:
+            return None
+        return (
+            REUSE_EQUIVALENCE_PROJECTION_VERSION,
+            fingerprint,
+            _analysis_runtime_type_projection(analysis),
+            _completed_recovery_proof_projection(analysis),
+        )
+    except Exception:
+        return None
+
+
+def reuse_equivalence_digest(key) -> Optional[str]:
+    """等価キーを診断へ載せるための短い文字列にする（比較そのものはキーで行う）。"""
+    if key is None:
+        return None
+    try:
+        from scripts.function_tracer_pcode.proof.obligations.snapshot import (
+            SnapshotFingerprintCodec,
+        )
+
+        return str(SnapshotFingerprintCodec.digest(key))
+    except Exception:
+        return None
+
+
+def reuse_equivalence_mismatch_kind(fresh_key, reuse_key) -> Optional[str]:
+    """等価キーのどの成分が食い違ったかを診断用に返す。"""
+    if fresh_key is None or reuse_key is None:
+        return "key_unavailable"
+    if fresh_key == reuse_key:
+        return None
+    if fresh_key[1] != reuse_key[1]:
+        return "semantic_fingerprint"
+    if fresh_key[2] != reuse_key[2]:
+        return "runtime_type_semantics"
+    if fresh_key[3] != reuse_key[3]:
+        return "completed_recovery_proofs"
+    return "unclassified"
 
 
 def program_modification_number(program) -> Optional[int]:
@@ -91,7 +246,7 @@ def program_modification_number(program) -> Optional[int]:
 def build_retry_analysis_base(program, analysis) -> Optional[RetryAnalysisBase]:
     """raw 解析から再利用用の base state を作る。
 
-    解析の複製・Program の世代・複製の指紋の 3 つが揃わなければ ``None`` を返す
+    解析の複製・Program の世代・複製の等価キーの 3 つが揃わなければ ``None`` を返す
     （途中まで作った state を残さない）。複製は既存の ``semantic_successor()`` に任せ、
     新しい copy 規約を作らない。
     """
@@ -104,14 +259,14 @@ def build_retry_analysis_base(program, analysis) -> Optional[RetryAnalysisBase]:
         copied = analysis.semantic_successor()
     except Exception:
         return None
-    fingerprint = semantic_fingerprint_of(copied)
-    if fingerprint is None:
+    equivalence_key = reuse_equivalence_key(copied)
+    if equivalence_key is None:
         return None
     return RetryAnalysisBase(
         analysis=copied,
         program=program,
         modification_number=modification_number,
-        semantic_fingerprint=fingerprint,
+        equivalence_key=equivalence_key,
     )
 
 
@@ -130,19 +285,38 @@ def _retry_analysis_base(ctx: PhaseContext, side: str) -> Optional[RetryAnalysis
 
 
 def _seed_retry_analysis_base(ctx: PhaseContext, side: str, program, analysis) -> None:
-    """P0 の raw 解析から base state を作る（作れなければ何も入れず、後で fresh に倒れる）。"""
+    """P0 の raw 解析から base state を作る（作れなければ何も入れず、後で fresh に倒れる）。
+
+    再利用が無効なら **何もしない**。複製・世代取得・等価キー生成のコストを、
+    使わない run に払わせない（無効時は従来の処理と実質同じになる）。
+    """
+    if not _retry_reuse_enabled():
+        return
     _store_retry_analysis_base(ctx, side, build_retry_analysis_base(program, analysis))
 
 
 def _retry_reuse_enabled() -> bool:
-    from scripts.function_tracer_pcode.config import settings
+    """再利用機構を動かすか。設定が読めなければ **無効**（fail-closed）。
 
-    return bool(getattr(settings, "RETRY_ANALYSIS_REUSE_ENABLED", True))
+    設定の欠落で未検証の再利用が暗黙に有効化されないよう、既定値は無効側に倒す。
+    """
+    try:
+        from scripts.function_tracer_pcode.config import settings
+    except Exception:
+        return False
+    return bool(getattr(settings, "RETRY_ANALYSIS_REUSE_ENABLED", False))
 
 
 def _retry_reuse_shadow_enabled() -> bool:
-    from scripts.function_tracer_pcode.config import settings
+    """fresh も構成して比較する validation mode か。設定が読めなければ **有効**。
 
+    こちらは fresh を authoritative にする側なので、判断できないときは
+    shadow（＝従来どおり fresh を採用する）へ倒すのが fail-closed になる。
+    """
+    try:
+        from scripts.function_tracer_pcode.config import settings
+    except Exception:
+        return True
     return bool(getattr(settings, "RETRY_ANALYSIS_REUSE_SHADOW", True))
 
 
@@ -352,10 +526,10 @@ def selective_reanalysis_and_check(
             return None, REUSE_FALLBACK_MODIFICATION_NUMBER_UNAVAILABLE
         if current_modification != base.modification_number:
             return None, REUSE_FALLBACK_MODIFICATION_NUMBER_CHANGED
-        fingerprint = semantic_fingerprint_of(base.analysis)
-        if fingerprint is None:
+        equivalence_key = reuse_equivalence_key(base.analysis)
+        if equivalence_key is None:
             return None, REUSE_FALLBACK_FINGERPRINT_UNAVAILABLE
-        if fingerprint != base.semantic_fingerprint:
+        if equivalence_key != base.equivalence_key:
             return None, REUSE_FALLBACK_BASE_SNAPSHOT_MUTATED
         return base, None
 
@@ -390,10 +564,10 @@ def selective_reanalysis_and_check(
         except Exception as exc:  # 構築できないなら fresh へ倒す
             checker._debug_print(f"Retry analysis reuse construction failed for {side}: {exc}")
             return None, REUSE_FALLBACK_CONSTRUCTION_FAILED
-        post_fingerprint = semantic_fingerprint_of(base.analysis)
-        if post_fingerprint is None:
+        post_key = reuse_equivalence_key(base.analysis)
+        if post_key is None:
             return None, REUSE_FALLBACK_FINGERPRINT_UNAVAILABLE
-        if post_fingerprint != base.semantic_fingerprint:
+        if post_key != base.equivalence_key:
             return None, REUSE_FALLBACK_BASE_SNAPSHOT_MUTATED
         return candidate, None
 
@@ -502,26 +676,29 @@ def selective_reanalysis_and_check(
                 if candidate is None:
                     phases.record_analysis_source(side, construction_reason)
                     return replayed, None, None
-                fresh_fingerprint = semantic_fingerprint_of(replayed)
-                reuse_fingerprint = semantic_fingerprint_of(candidate)
+                fresh_key = reuse_equivalence_key(replayed)
+                reuse_key = reuse_equivalence_key(candidate)
                 matched = (
-                    fresh_fingerprint is not None
-                    and reuse_fingerprint is not None
-                    and fresh_fingerprint == reuse_fingerprint
+                    fresh_key is not None
+                    and reuse_key is not None
+                    and fresh_key == reuse_key
                 )
+                mismatch_kind = reuse_equivalence_mismatch_kind(fresh_key, reuse_key)
                 phases.record_shadow_comparison(
                     side,
-                    fresh=fresh_fingerprint,
-                    reuse=reuse_fingerprint,
+                    fresh=reuse_equivalence_digest(fresh_key),
+                    reuse=reuse_equivalence_digest(reuse_key),
                     matched=matched,
+                    mismatch_kind=mismatch_kind,
                 )
-                if fresh_fingerprint is None or reuse_fingerprint is None:
+                if fresh_key is None or reuse_key is None:
                     phases.record_analysis_source(side, REUSE_FALLBACK_FINGERPRINT_UNAVAILABLE)
                 elif matched:
                     phases.record_analysis_source(side, ANALYSIS_SOURCE_FRESH)
                 else:
                     checker._debug_print(
-                        f"Retry analysis reuse shadow mismatch for {binary_name} ({side})"
+                        f"Retry analysis reuse equivalence mismatch for {binary_name} "
+                        f"({side}, {mismatch_kind})"
                     )
                     phases.record_analysis_source(side, REUSE_FALLBACK_SHADOW_MISMATCH)
                 return replayed, None, None

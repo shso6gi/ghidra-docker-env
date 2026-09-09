@@ -262,8 +262,9 @@ CALLEE_UNBOUND_REUSE_SHADOW = _bool_setting("FT_CALLEE_UNBOUND_REUSE_SHADOW", Fa
 
 
 # Issue #107 (PR-B): 型仮説を適用した retry phase の「変更側 fresh 再解析」を、P0 の raw
-# 解析 snapshot の複製 + 累積仮説の replay で置き換えるか。無効にすると従来どおり毎回
-# ``analyze_function_by_name()`` をやり直す。
+# 解析 snapshot の複製 + 累積仮説の replay で置き換えるか。無効にすると base snapshot の
+# 作成も含めて再利用機構を一切動かさず、従来どおり毎回 ``analyze_function_by_name()`` を
+# やり直す（kill switch）。設定が読めない場合も無効側に倒す。
 RETRY_ANALYSIS_REUSE_ENABLED = _bool_setting("FT_RETRY_ANALYSIS_REUSE", True)
 
 # 再利用ビューと従来の fresh 再解析を両方構成して semantic fingerprint を比較する
