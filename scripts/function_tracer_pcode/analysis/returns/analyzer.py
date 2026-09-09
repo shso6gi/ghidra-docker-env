@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.analysis.returns import (
     return_extraction as _svc_return_extraction,
     analyze_function as _svc_analyze_function,
     expansion_budget as _svc_expansion_budget,
+    callee_unbound_reuse as _svc_callee_unbound_reuse,
 )
 from typing import Any, Dict, List, Optional, Set, Tuple
 from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo, FunctionReturnAnalysis
@@ -396,6 +397,45 @@ class ReturnAnalyzer:
     def _callee_analysis_cache_stats(self, value):
         self._ensure_runtime_state().callee_analysis_cache_stats = value
 
+    @property
+    def _callee_unbound_reuse_verdicts(self):
+        return self._ensure_runtime_state().callee_unbound_reuse_verdicts
+
+    @_callee_unbound_reuse_verdicts.setter
+    def _callee_unbound_reuse_verdicts(self, value):
+        self._ensure_runtime_state().callee_unbound_reuse_verdicts = value
+
+    @property
+    def _callee_unbound_reuse_cache_ownership(self):
+        return self._ensure_runtime_state().callee_unbound_reuse_cache_ownership
+
+    @_callee_unbound_reuse_cache_ownership.setter
+    def _callee_unbound_reuse_cache_ownership(self, value):
+        self._ensure_runtime_state().callee_unbound_reuse_cache_ownership = value
+
+    @property
+    def _callee_unbound_reuse_stats(self):
+        return self._ensure_runtime_state().callee_unbound_reuse_stats
+
+    @_callee_unbound_reuse_stats.setter
+    def _callee_unbound_reuse_stats(self, value):
+        self._ensure_runtime_state().callee_unbound_reuse_stats = value
+
+    def callee_unbound_reuse_diagnostics(self) -> Dict[str, Any]:
+        """external placeholder callee の束縛ゼロ解析再利用の診断（Issue #47 PR-B）。
+
+        判定には使わない観測値なので、失敗しても呼び出し側に例外を出さない。
+        """
+        try:
+            payload = self._callee_unbound_reuse_stats.snapshot()
+            payload["entries"] = len(self._callee_unbound_reuse_verdicts)
+            payload["owned_cache_entries"] = len(
+                self._callee_unbound_reuse_cache_ownership.owned_keys()
+            )
+            return payload
+        except Exception as exc:  # diagnostics never fail the verdict
+            return {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
     def callee_analysis_cache_diagnostics(self) -> Dict[str, Any]:
         """callee 解析 cache（``call_analysis_cache``）の hit/miss 診断（Issue #47）。
 
@@ -432,6 +472,18 @@ class ReturnAnalyzer:
         entries = len(cache)
         cache.clear()
         self._callee_parameter_decompile_stats.record_invalidation(entries)
+        # Issue #47 (PR-B): 再利用の適格判定と、その判定に基づいて再利用の根拠として
+        # 使った解析 cache entry（束縛ゼロ entry / そこから作った束縛 view / 同じ解析を
+        # 指す generic 別名）も decompile 由来の証拠なので捨てる。判定だけ捨てても、
+        # ``analyze_function()`` 冒頭の cache 参照が判定より先に書き換え前の解析を
+        # 返してしまう。所有していない entry は落とさない。
+        verdicts = self._callee_unbound_reuse_verdicts
+        verdict_entries = len(verdicts)
+        verdicts.clear()
+        evicted = self._callee_unbound_reuse_cache_ownership.evict_from(
+            self._call_analysis_cache
+        )
+        self._callee_unbound_reuse_stats.record_invalidation(verdict_entries, evicted)
 
     @property
     def _direct_call_graph(self):
@@ -1107,6 +1159,10 @@ class ReturnAnalyzer:
     def _varnodes_same_storage(self, left, right):
         return self._pcode_sites.varnodes_same_storage(left, right)
     analyze_function = _svc_analyze_function._impl_analyze_function
+    # Issue #47 (PR-B): external placeholder callee の束縛ゼロ解析の再利用。
+    _callee_unbound_reuse_verdict = _svc_callee_unbound_reuse._impl__callee_unbound_reuse_verdict
+    _reuse_unbound_placeholder_analysis = _svc_callee_unbound_reuse._impl__reuse_unbound_placeholder_analysis
+    _suspended_callee_unbound_reuse = _svc_callee_unbound_reuse._impl__suspended_callee_unbound_reuse
     def dispose(self):
         return self._program_access.dispose()
     # session helpers (continued)

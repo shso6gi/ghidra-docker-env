@@ -250,6 +250,83 @@ def _merge_analysis_cache_stats(
     return merged
 
 
+_REUSE_STAT_COUNTERS = (
+    "reuses",
+    "unbound_analyses",
+    "shadow_comparisons",
+    "shadow_mismatches",
+    "invalidations",
+    "evicted_cache_entries",
+)
+_REUSE_STAT_REASON_MAPS = ("verdicts", "declines")
+
+
+def _merge_reuse_target_rows(
+    accumulated: Iterable[Mapping[str, Any]], observed: Iterable[Mapping[str, Any]]
+) -> list:
+    """再利用の target 行を identity で足し合わせる（判定内容は先勝ちで保持）。"""
+    rows: Dict[str, Dict[str, Any]] = {}
+    for row in list(accumulated) + list(observed):
+        identity = str(row.get("target"))
+        current = rows.get(identity)
+        if current is None:
+            rows[identity] = dict(row)
+            rows[identity]["declines"] = dict(row.get("declines") or {})
+            continue
+        for key in ("unbound_analyses", "reuses", "shadow_comparisons", "shadow_mismatches"):
+            current[key] = int(current.get(key, 0) or 0) + int(row.get(key, 0) or 0)
+        declines = dict(current.get("declines") or {})
+        for reason, count in (row.get("declines") or {}).items():
+            declines[reason] = declines.get(reason, 0) + int(count or 0)
+        current["declines"] = dict(sorted(declines.items()))
+        for key in ("eligible", "verdict_reason", "resolution_reason"):
+            if current.get(key) is None and row.get(key) is not None:
+                current[key] = row.get(key)
+    return sorted(
+        rows.values(),
+        key=lambda row: (-int(row.get("reuses", 0) or 0), -int(row.get("unbound_analyses", 0) or 0), str(row.get("target"))),
+    )
+
+
+def _merge_reuse_stats(
+    accumulated: Optional[Mapping[str, Any]], observed: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """再利用の計数を side 単位で集約する（cache 診断と同じ集約規則）。"""
+    if not accumulated:
+        merged = dict(observed)
+        merged["analyzer_instances"] = 1
+        merged["verdict_entries"] = observed.get("entries", 0)
+        merged.pop("entries", None)
+        return merged
+    merged = dict(accumulated)
+    for key in _REUSE_STAT_COUNTERS:
+        merged[key] = int(merged.get(key, 0) or 0) + int(observed.get(key, 0) or 0)
+    for key in _REUSE_STAT_REASON_MAPS:
+        totals = dict(merged.get(key) or {})
+        for reason, count in (observed.get(key) or {}).items():
+            totals[reason] = totals.get(reason, 0) + int(count or 0)
+        merged[key] = dict(sorted(totals.items()))
+    merged["targets"] = _merge_reuse_target_rows(
+        merged.get("targets") or (), observed.get("targets") or ()
+    )
+    merged["targets_truncated"] = int(merged.get("targets_truncated", 0) or 0) + int(
+        observed.get("targets_truncated", 0) or 0
+    )
+    merged["shadow_mismatch_targets"] = sorted(
+        {
+            str(row.get("target"))
+            for row in merged["targets"]
+            if int(row.get("shadow_mismatches", 0) or 0) > 0
+        }
+    )
+    merged["analyzer_instances"] = int(merged.get("analyzer_instances", 1) or 1) + 1
+    # 保持数は累積ではなく最後の analyzer の値。
+    merged["verdict_entries"] = observed.get("entries", 0)
+    merged["owned_cache_entries"] = observed.get("owned_cache_entries", 0)
+    merged.pop("entries", None)
+    return merged
+
+
 class AnalysisTimer:
     """関数解析の経過時間を side ごとに記録する。"""
 
@@ -258,6 +335,7 @@ class AnalysisTimer:
         self.stats: Dict[str, Dict[str, int]] = {}
         self.cache_stats: Dict[str, Dict[str, Any]] = {}
         self.analysis_cache_stats: Dict[str, Dict[str, Any]] = {}
+        self.reuse_stats: Dict[str, Dict[str, Any]] = {}
 
     def timed(self, side: str, run: Any) -> Any:
         started = time.perf_counter()
@@ -312,6 +390,22 @@ class AnalysisTimer:
         except Exception as exc:
             self.analysis_cache_stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
 
+    def record_callee_unbound_reuse(self, side: str, analyzer: Any) -> None:
+        """Issue #47 (PR-B): external placeholder callee の再利用計数を side ごとに残す。
+
+        cache の hit/miss とは別の観測（「解析を何回省いたか」「shadow が一致したか」）
+        なので別 bucket に置く。Fail-open: 診断の失敗を呼び出し側へ出さない。
+        """
+        reader = getattr(analyzer, "callee_unbound_reuse_diagnostics", None)
+        if not callable(reader):
+            return
+        try:
+            self.reuse_stats[side] = _merge_reuse_stats(
+                self.reuse_stats.get(side), dict(reader() or {})
+            )
+        except Exception as exc:
+            self.reuse_stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
     def snapshot(self) -> Dict[str, Any]:
         try:
             return {
@@ -322,6 +416,9 @@ class AnalysisTimer:
                 },
                 "callee_analysis_cache": {
                     side: dict(stats) for side, stats in self.analysis_cache_stats.items()
+                },
+                "callee_unbound_reuse": {
+                    side: dict(stats) for side, stats in self.reuse_stats.items()
                 },
             }
         except Exception as exc:
@@ -394,6 +491,7 @@ def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
         "caches": {
             "callee_parameter_decompile": dict(base.get("callee_parameter_cache") or {}),
             "callee_analysis": dict(base.get("callee_analysis_cache") or {}),
+            "callee_unbound_reuse": dict(base.get("callee_unbound_reuse") or {}),
         },
         "validated_once_entries": base.get("validated_once_entries"),
         "pairs": pairwise,

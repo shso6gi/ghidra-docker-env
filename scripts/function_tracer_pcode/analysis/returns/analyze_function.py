@@ -128,6 +128,20 @@ def _impl_analyze_function(
     )
     if cached_analysis is not None:
         return cached_analysis
+    # Issue #47 (PR-B): 束縛が解析を変え得ない external placeholder callee は、束縛ゼロ
+    # scope の解析を要求 scope の view として使い回す。対象外なら None が返り、以降は
+    # 従来どおり decompile して解析する。
+    reused_analysis = self._reuse_unbound_placeholder_analysis(
+        function,
+        current_function_ref,
+        analysis_scope_key,
+        normalized_bound_parameter_values,
+        normalized_bound_parameter_storage_values,
+        timeout,
+        active_functions,
+    )
+    if reused_analysis is not None:
+        return reused_analysis
     active_functions = self._extend_active_functions(
         active_functions,
         current_function_ref,

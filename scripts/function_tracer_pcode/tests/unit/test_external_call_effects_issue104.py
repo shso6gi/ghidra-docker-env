@@ -15,6 +15,7 @@ from scripts.function_tracer_pcode.analysis.effects.external_call_models import 
     MAX_THUNK_CHAIN_LENGTH,
     EffectCalleeResolution,
     ExternalCallEffectPolicy,
+    resolution_is_confirmed_external,
     resolve_effect_callee,
 )
 from scripts.function_tracer_pcode.proof.call_effect.obligations import EquivalenceObservationContract
@@ -199,6 +200,25 @@ def test_thunk_chain_ending_at_external_is_unsupported():
     )
     assert resolution.kind == "unsupported"
     assert resolution.reason == "external_callee_effect_unmodeled"
+
+
+def test_only_a_resolved_external_counts_as_confirmed_external():
+    """Issue #47 (PR-B): "unsupported" のうち external と確定した 1 件だけを区別する。
+
+    分類できなかった callee（thunk target 不明・循環・API 不通）は "external" では
+    ないので、それを external の証拠として扱う読み手が現れないよう固定する。
+    """
+    policy = ExternalCallEffectPolicy()
+    confirmed = resolve_effect_callee(_Fn("plt", thunk_to=_Fn("log", external=True)), policy)
+    assert resolution_is_confirmed_external(confirmed) is True
+    assert resolution_is_confirmed_external(resolve_effect_callee(_Fn("body"), policy)) is False
+    for ambiguous in (
+        _Fn("plt", is_thunk=True, thunk_to=None),
+        _Fn("self", is_thunk=True),
+        _Fn("broken", is_thunk="yes"),
+    ):
+        assert resolution_is_confirmed_external(resolve_effect_callee(ambiguous, policy)) is False
+    assert resolution_is_confirmed_external(None) is False
 
 
 def test_policy_and_resolution_are_exact():

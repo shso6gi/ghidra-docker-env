@@ -233,6 +233,34 @@ def _positive_int_setting(name: str, default: int, environ=None) -> int:
     return value
 
 
+def _bool_setting(name: str, default: bool, environ=None) -> bool:
+    """真偽設定を環境変数から読む（``1``/``0`` のみ受け付け、他は既定へ戻す）。
+
+    解析の意味を変えない run 単位の切り替え用。曖昧な綴りを推測で解釈すると
+    「有効にしたつもりで無効」が起きるので、認識できない値は既定値を使う。
+    """
+
+    source = environ if environ is not None else os.environ
+    raw = source.get(name)
+    if raw is None:
+        return bool(default)
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
+
+
+# Issue #47 (PR-B): bound が semantic analysis を変えないと静的に確認できる external
+# placeholder callee について、束縛ゼロ scope の解析を再利用するか。
+CALLEE_UNBOUND_REUSE_ENABLED = _bool_setting("FT_CALLEE_UNBOUND_REUSE", True)
+
+# 再利用した解析と従来の bound-sensitive 解析を両方走らせて比較する regression
+# validation（shadow）。既定は無効。有効にすると再利用による削減は起きない。
+CALLEE_UNBOUND_REUSE_SHADOW = _bool_setting("FT_CALLEE_UNBOUND_REUSE_SHADOW", False)
+
+
 # 共通 dedup のケース数上限（Issue #131）。既定値は従来の
 # ``ExpressionExpander.MAX_CASES_PER_MULTIEQUAL`` と同じ 16。調査用に下げられるが、
 # 通常実行の既定値は変えない。明示 limit を渡す呼び出し

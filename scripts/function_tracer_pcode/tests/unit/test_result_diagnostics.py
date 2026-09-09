@@ -120,6 +120,63 @@ def test_analysis_timer_accumulates_callee_analysis_cache_stats_per_side():
     }
 
 
+def test_analysis_timer_accumulates_callee_unbound_reuse_stats_per_side():
+    """Issue #47 (PR-B): 再利用の計数も side ごとに instance をまたいで足し合わせる。"""
+    timer = AnalysisTimer()
+
+    def _analyzer(payload):
+        return SimpleNamespace(callee_unbound_reuse_diagnostics=lambda: payload)
+
+    first = _analyzer({
+        "schema": "callee-unbound-reuse-v1", "reuses": 20, "unbound_analyses": 1,
+        "shadow_comparisons": 0, "shadow_mismatches": 0,
+        "verdicts": {"eligible_external_placeholder": 1},
+        "declines": {},
+        "targets": [{"target": "function:log@0x1000", "reuses": 20, "unbound_analyses": 1,
+                     "shadow_comparisons": 0, "shadow_mismatches": 0, "declines": {},
+                     "eligible": True, "verdict_reason": "eligible_external_placeholder"}],
+        "targets_truncated": 0, "shadow_mismatch_targets": [], "entries": 1,
+    })
+    second = _analyzer({
+        "schema": "callee-unbound-reuse-v1", "reuses": 5, "unbound_analyses": 1,
+        "shadow_comparisons": 2, "shadow_mismatches": 1,
+        "verdicts": {"callee_is_internal": 1},
+        "declines": {"unbound_analysis_unavailable": 1},
+        "targets": [{"target": "function:log@0x1000", "reuses": 5, "unbound_analyses": 1,
+                     "shadow_comparisons": 2, "shadow_mismatches": 1,
+                     "declines": {"unbound_analysis_unavailable": 1}}],
+        "targets_truncated": 0, "shadow_mismatch_targets": ["function:log@0x1000"], "entries": 2,
+    })
+    timer.record_callee_unbound_reuse("function2", first)
+    timer.record_callee_unbound_reuse("function2", second)
+    stats = timer.snapshot()["callee_unbound_reuse"]["function2"]
+    assert stats["reuses"] == 25 and stats["unbound_analyses"] == 2
+    assert stats["shadow_comparisons"] == 2 and stats["shadow_mismatches"] == 1
+    assert stats["verdicts"] == {"callee_is_internal": 1, "eligible_external_placeholder": 1}
+    assert stats["declines"] == {"unbound_analysis_unavailable": 1}
+    assert stats["analyzer_instances"] == 2 and stats["verdict_entries"] == 2
+    assert stats["shadow_mismatch_targets"] == ["function:log@0x1000"]
+    row = stats["targets"][0]
+    assert row["reuses"] == 25 and row["shadow_mismatches"] == 1
+    # 先に観測した判定内容は後続の instance でも失わない。
+    assert row["eligible"] is True
+    assert row["verdict_reason"] == "eligible_external_placeholder"
+
+
+def test_result_diagnostics_payload_carries_the_callee_unbound_reuse_block():
+    result = SimpleNamespace(
+        diagnostics={"callee_unbound_reuse": {"function2": {"reuses": 43, "unbound_analyses": 1}}},
+        debug_trace=None, total_time=1.0, pairwise_stats={}, stage_path=[], solver_results=None,
+    )
+    payload = result_diagnostics_payload(result)
+    assert payload["caches"]["callee_unbound_reuse"]["function2"] == {
+        "reuses": 43, "unbound_analyses": 1
+    }
+    # 3 つの cache 診断は別概念として並ぶ。
+    assert payload["caches"]["callee_analysis"] == {}
+    assert payload["caches"]["callee_parameter_decompile"] == {}
+
+
 def test_result_diagnostics_payload_carries_the_callee_analysis_cache_block():
     result = SimpleNamespace(
         diagnostics={"callee_analysis_cache": {"function2": {"hits": 9, "misses": 2}}},

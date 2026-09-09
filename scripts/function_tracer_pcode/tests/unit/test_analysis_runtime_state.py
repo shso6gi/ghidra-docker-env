@@ -17,6 +17,10 @@ EXPECTED = {
     "callee_parameter_decompile_cache", "callee_parameter_decompile_stats",
     # Issue #47: callee 解析 cache（call_analysis_cache）側の hit/miss 診断。
     "callee_analysis_cache_stats",
+    # Issue #47 (PR-B): external placeholder callee の束縛ゼロ解析再利用の静的判定と計数、
+    # および再利用の根拠として使った analysis cache entry の所有権。
+    "callee_unbound_reuse_verdicts", "callee_unbound_reuse_stats",
+    "callee_unbound_reuse_cache_ownership",
 }
 
 

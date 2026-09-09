@@ -318,6 +318,234 @@ def repeated_miss_targets(target_snapshots) -> Dict[str, List[str]]:
     return {reason: sorted(targets) for reason, targets in sorted(grouped.items())}
 
 
+CALLEE_UNBOUND_REUSE_DIAGNOSTICS_SCHEMA = "callee-unbound-reuse-v1"
+
+# 束縛ゼロ解析を再利用してよいか（Issue #47 PR-B）の判定ラベル。判定そのものは
+# ``analysis.returns.callee_unbound_reuse`` が行い、ここは所有する状態の語彙だけを持つ。
+UNBOUND_REUSE_ELIGIBLE = "eligible_external_placeholder"
+UNBOUND_REUSE_CALLEE_IS_INTERNAL = "callee_is_internal"
+UNBOUND_REUSE_EXTERNAL_RESOLUTION_AMBIGUOUS = "external_resolution_ambiguous"
+UNBOUND_REUSE_DECOMPILE_INCOMPLETE = "decompile_incomplete"
+UNBOUND_REUSE_HIGH_FUNCTION_MISSING = "high_function_missing"
+UNBOUND_REUSE_PCODE_BODY_PRESENT = "pcode_body_present"
+UNBOUND_REUSE_PCODE_BODY_UNREADABLE = "pcode_body_unreadable"
+UNBOUND_REUSE_CACHE_KEY_UNAVAILABLE = "cache_key_unavailable"
+UNBOUND_REUSE_UNBOUND_ANALYSIS_UNAVAILABLE = "unbound_analysis_unavailable"
+
+
+@dataclass(frozen=True)
+class CalleeUnboundReuseVerdict:
+    """1 つの callee について「束縛ゼロ解析を再利用してよいか」の静的判定。
+
+    ``eligible`` が真になるのは、external と確定していて解決が曖昧でなく、decompile が
+    完了し HighFunction があり、その本体に「戻る」以外の P-code が無い場合だけ
+    （= この binary に本体が無い placeholder）。それ以外は ``reason`` に不適格の理由を
+    持ち、呼び出し側は従来の bound-sensitive 経路を使う。
+
+    ``program_identity`` は判定を観測した program。program が変われば判定し直す。
+    """
+
+    eligible: bool
+    reason: str
+    program_identity: Optional[int] = None
+    resolution_reason: Optional[str] = None
+
+
+@dataclass
+class CalleeUnboundReuseTargetStats:
+    """1 つの callee についての再利用計数（診断専用）。"""
+
+    identity: str
+    eligible: Optional[bool] = None
+    verdict_reason: Optional[str] = None
+    resolution_reason: Optional[str] = None
+    unbound_analyses: int = 0
+    reuses: int = 0
+    declines: Dict[str, int] = field(default_factory=dict)
+    shadow_comparisons: int = 0
+    shadow_mismatches: int = 0
+
+    def snapshot(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "target": self.identity,
+            "unbound_analyses": self.unbound_analyses,
+            "reuses": self.reuses,
+            "shadow_comparisons": self.shadow_comparisons,
+            "shadow_mismatches": self.shadow_mismatches,
+            "declines": dict(sorted(self.declines.items())),
+        }
+        if self.eligible is not None:
+            payload["eligible"] = bool(self.eligible)
+        if self.verdict_reason is not None:
+            payload["verdict_reason"] = self.verdict_reason
+        if self.resolution_reason is not None:
+            payload["resolution_reason"] = self.resolution_reason
+        return payload
+
+
+@dataclass
+class CalleeUnboundReuseCacheOwnership:
+    """PR-47-B が再利用の根拠として使った ``call_analysis_cache`` entry の追跡。
+
+    Program を書き換えると、その前に得た decompile 由来の解析は根拠として使えない。
+    適格判定（``callee_unbound_reuse_verdicts``）を捨てるだけでは足りず、判定に基づいて
+
+    - 束縛ゼロ scope に作った解析（再利用の authority 本体）
+    - そこから materialize した束縛 scope の view
+    - 同じ束縛ゼロ解析を指す generic ``_function_cache_key`` の別名
+
+    が cache に残っていると、``analyze_function()`` 冒頭の cache 参照が適格判定より先に
+    書き換え前の解析を返してしまう。ここで所有権を追跡し、Program 変更時に **この範囲
+    だけ** を落とす（無関係な解析結果は残す）。
+
+    entry は identity で照合してから落とす。同じ key を別の経路が書き換えていた場合、
+    それは PR-47-B の authority ではないので巻き添えにしない。
+    """
+
+    unbound_authorities: Dict[Tuple[Any, ...], Any] = field(default_factory=dict)
+    view_authorities: Dict[Tuple[Any, ...], Any] = field(default_factory=dict)
+    # generic ``_function_cache_key`` → その別名が指す束縛ゼロ scope key
+    generic_alias_keys: Dict[Tuple[Any, ...], Tuple[Any, ...]] = field(default_factory=dict)
+
+    def record_unbound_authority(self, unbound_key: Tuple[Any, ...], analysis: Any) -> None:
+        """束縛ゼロ解析を再利用の根拠として使ったことを記録する。"""
+        if unbound_key is None or analysis is None:
+            return
+        self.unbound_authorities[unbound_key] = analysis
+
+    def record_view(self, view_key: Tuple[Any, ...], view: Any) -> None:
+        """束縛 scope へ materialize した view を cache に置いたことを記録する。"""
+        if view_key is None or view is None:
+            return
+        self.view_authorities[view_key] = view
+
+    def record_generic_alias(
+        self, generic_key: Tuple[Any, ...], unbound_key: Tuple[Any, ...]
+    ) -> None:
+        """generic key が同じ束縛ゼロ解析を指していることを記録する。"""
+        if generic_key is None or unbound_key is None:
+            return
+        self.generic_alias_keys[generic_key] = unbound_key
+
+    def owned_keys(self) -> Tuple[Tuple[Any, ...], ...]:
+        return tuple(self.view_authorities) + tuple(self.generic_alias_keys) + tuple(
+            self.unbound_authorities
+        )
+
+    def evict_from(self, cache: Dict[Tuple[Any, ...], Any]) -> int:
+        """所有している entry だけを cache から落とし、追跡を空にする。"""
+        removed = 0
+        for key, view in self.view_authorities.items():
+            if cache.get(key) is view:
+                del cache[key]
+                removed += 1
+        for generic_key, unbound_key in self.generic_alias_keys.items():
+            owned = self.unbound_authorities.get(unbound_key)
+            if owned is not None and cache.get(generic_key) is owned:
+                del cache[generic_key]
+                removed += 1
+        for key, analysis in self.unbound_authorities.items():
+            if cache.get(key) is analysis:
+                del cache[key]
+                removed += 1
+        self.clear()
+        return removed
+
+    def clear(self) -> None:
+        self.unbound_authorities.clear()
+        self.view_authorities.clear()
+        self.generic_alias_keys.clear()
+
+
+@dataclass
+class CalleeUnboundReuseStats:
+    """eligible external placeholder の束縛ゼロ解析再利用の計数（診断専用）。
+
+    ``reuses`` は「束縛付き要求を、callee を解析し直さずに満たした回数」= 削減できた
+    callee 解析回数。``unbound_analyses`` は実際に走らせた束縛ゼロ解析の回数。
+    ``shadow_mismatches`` は shadow validation で従来経路と一致しなかった回数で、
+    0 でないなら再利用は採用されていない（従来結果を採る）。
+    """
+
+    reuses: int = 0
+    unbound_analyses: int = 0
+    shadow_comparisons: int = 0
+    shadow_mismatches: int = 0
+    # Program 変更で再利用の根拠（判定と cache entry）を捨てた回数と、落とした entry 数。
+    invalidations: int = 0
+    evicted_cache_entries: int = 0
+    verdicts: Dict[str, int] = field(default_factory=dict)
+    declines: Dict[str, int] = field(default_factory=dict)
+    targets: Dict[str, CalleeUnboundReuseTargetStats] = field(default_factory=dict)
+
+    def _target(self, identity: str) -> CalleeUnboundReuseTargetStats:
+        entry = self.targets.get(identity)
+        if entry is None:
+            entry = CalleeUnboundReuseTargetStats(identity=identity)
+            self.targets[identity] = entry
+        return entry
+
+    def record_verdict(self, identity: str, verdict: CalleeUnboundReuseVerdict) -> None:
+        """callee ごとに 1 回だけ確定する静的判定を記録する。"""
+        self.verdicts[verdict.reason] = self.verdicts.get(verdict.reason, 0) + 1
+        entry = self._target(identity)
+        entry.eligible = bool(verdict.eligible)
+        entry.verdict_reason = verdict.reason
+        entry.resolution_reason = verdict.resolution_reason
+
+    def record_unbound_analysis(self, identity: str) -> None:
+        self.unbound_analyses += 1
+        self._target(identity).unbound_analyses += 1
+
+    def record_reuse(self, identity: str) -> None:
+        self.reuses += 1
+        self._target(identity).reuses += 1
+
+    def record_decline(self, identity: str, reason: str) -> None:
+        """eligible だったが、この要求では再利用しなかった理由。"""
+        self.declines[reason] = self.declines.get(reason, 0) + 1
+        entry = self._target(identity)
+        entry.declines[reason] = entry.declines.get(reason, 0) + 1
+
+    def record_invalidation(self, verdicts: int, evicted_cache_entries: int) -> None:
+        """実際に何かを捨てた無効化だけを数える（空状態の通知は数えない）。"""
+        if verdicts <= 0 and evicted_cache_entries <= 0:
+            return
+        self.invalidations += 1
+        self.evicted_cache_entries += int(evicted_cache_entries)
+
+    def record_shadow(self, identity: str, matched: bool) -> None:
+        self.shadow_comparisons += 1
+        entry = self._target(identity)
+        entry.shadow_comparisons += 1
+        if not matched:
+            self.shadow_mismatches += 1
+            entry.shadow_mismatches += 1
+
+    def snapshot(self) -> Dict[str, Any]:
+        ordered = sorted(
+            self.targets.values(),
+            key=lambda entry: (-entry.reuses, -entry.unbound_analyses, entry.identity),
+        )
+        reported = ordered[:CALLEE_ANALYSIS_CACHE_TARGET_REPORT_LIMIT]
+        return {
+            "schema": CALLEE_UNBOUND_REUSE_DIAGNOSTICS_SCHEMA,
+            "reuses": self.reuses,
+            "unbound_analyses": self.unbound_analyses,
+            "shadow_comparisons": self.shadow_comparisons,
+            "shadow_mismatches": self.shadow_mismatches,
+            "invalidations": self.invalidations,
+            "evicted_cache_entries": self.evicted_cache_entries,
+            "verdicts": dict(sorted(self.verdicts.items())),
+            "declines": dict(sorted(self.declines.items())),
+            "targets": [entry.snapshot() for entry in reported],
+            "targets_truncated": max(0, len(ordered) - len(reported)),
+            "shadow_mismatch_targets": sorted(
+                entry.identity for entry in ordered if entry.shadow_mismatches > 0
+            ),
+        }
+
+
 @dataclass
 class AnalysisRuntimeState:
     """State whose lifetime is the analyzer's, not one nested analysis context.
@@ -351,6 +579,19 @@ class AnalysisRuntimeState:
     # miss 原因。cache 方針は変えず、観測だけを足す。
     callee_analysis_cache_stats: CalleeAnalysisCacheStats = field(
         default_factory=CalleeAnalysisCacheStats
+    )
+    # Issue #47 (PR-B): callee ごとに 1 回だけ確定する「束縛ゼロ解析を再利用してよいか」
+    # の静的判定。decompile 由来の証拠を含むので program を書き換えたら捨てる。
+    callee_unbound_reuse_verdicts: Dict[
+        Tuple[Any, ...], CalleeUnboundReuseVerdict
+    ] = field(default_factory=dict)
+    callee_unbound_reuse_stats: CalleeUnboundReuseStats = field(
+        default_factory=CalleeUnboundReuseStats
+    )
+    # Issue #47 (PR-B): 再利用の根拠として使った analysis cache entry の所有権。
+    # Program 変更時にこの範囲だけを evict する。
+    callee_unbound_reuse_cache_ownership: CalleeUnboundReuseCacheOwnership = field(
+        default_factory=CalleeUnboundReuseCacheOwnership
     )
     direct_call_graph: Dict[Tuple[Any, ...], Set[Tuple[Any, ...]]] = field(default_factory=dict)
     direct_call_graph_complete_nodes: Set[Tuple[Any, ...]] = field(default_factory=set)
