@@ -511,27 +511,6 @@ PHASE_SKIPPED_NO_CHANGES = TransitionReason.NO_CHANGES.value
 
 # 1 phase の内訳として計測する区間。`total` は phase 全体の実測値なので、
 # 内訳の合計とは一致しない（計測していない区間の分だけ total の方が大きい）。
-# Issue #107 (PR-B): retry phase の変更側の解析ビューを何から構成したか（side 単位）。
-# 診断語彙であって schema ではない。`#124` の正式な `analysis_source` schema を先取りしない。
-ANALYSIS_SOURCE_FRESH = "fresh"
-ANALYSIS_SOURCE_REUSE = "reuse"
-REUSE_FALLBACK_PREFIX = "reuse_fallback:"
-REUSE_FALLBACK_NO_SNAPSHOT = REUSE_FALLBACK_PREFIX + "no_snapshot"
-REUSE_FALLBACK_PROGRAM_IDENTITY_CHANGED = REUSE_FALLBACK_PREFIX + "program_identity_changed"
-REUSE_FALLBACK_MODIFICATION_NUMBER_UNAVAILABLE = (
-    REUSE_FALLBACK_PREFIX + "modification_number_unavailable"
-)
-REUSE_FALLBACK_MODIFICATION_NUMBER_CHANGED = (
-    REUSE_FALLBACK_PREFIX + "modification_number_changed"
-)
-REUSE_FALLBACK_BASE_SNAPSHOT_MUTATED = REUSE_FALLBACK_PREFIX + "base_snapshot_mutated"
-REUSE_FALLBACK_FINGERPRINT_UNAVAILABLE = (
-    REUSE_FALLBACK_PREFIX + "semantic_fingerprint_unavailable"
-)
-REUSE_FALLBACK_CONSTRUCTION_FAILED = REUSE_FALLBACK_PREFIX + "reuse_construction_failed"
-REUSE_FALLBACK_SHADOW_MISMATCH = REUSE_FALLBACK_PREFIX + "shadow_mismatch"
-
-
 PHASE_TIMING_SEGMENTS = (
     "phase_fix",
     "analysis",
@@ -608,11 +587,6 @@ class PhaseTimeline:
                 "reanalyzed_sides": [],
                 "seconds": {segment: 0.0 for segment in PHASE_TIMING_SEGMENTS},
                 "analysis_seconds_by_side": {},
-                # Issue #107 (PR-B): 変更側ごとの再利用可否・採用元・shadow 比較結果。
-                # 再解析が起きない phase では空のままになる。
-                "reuse_eligible_by_side": {},
-                "analysis_source_by_side": {},
-                "shadow_fingerprints_by_side": {},
                 "reason_before": [str(reason) for reason in reason_before],
                 "reason_after": [],
             }
@@ -667,12 +641,7 @@ class PhaseTimeline:
             return
 
     def record_reanalyzed_side(self, side: str) -> None:
-        """この phase で解析ビューを作り直した側を記録する。
-
-        Issue #107 (PR-B) 以降は fresh 再解析と base snapshot の再利用の両方でここに
-        入る（「どちらから作ったか」は ``analysis_source_by_side`` が持つ）ので、
-        phase の意味は再利用の有無で変わらない。
-        """
+        """この phase で fresh 解析し直した側を記録する。"""
         current = self._current
         if current is None:
             return
@@ -680,56 +649,6 @@ class PhaseTimeline:
             sides = current["reanalyzed_sides"]
             if side not in sides:
                 sides.append(str(side))
-        except Exception:
-            return
-
-    def record_reuse_eligibility(self, side: str, eligible: bool) -> None:
-        """その side が再利用の validity 条件をすべて満たしたか（Issue #107 PR-B）。
-
-        ``analysis_source_by_side`` から推測させず独立に持つ。shadow 比較の結果では
-        変えない（変えると「eligible な side での mismatch 件数」という観測が空振りする）。
-        """
-        current = self._current
-        if current is None:
-            return
-        try:
-            current["reuse_eligible_by_side"][str(side)] = bool(eligible)
-        except Exception:
-            return
-
-    def record_analysis_source(self, side: str, source: str) -> None:
-        """その side の解析ビューを実際に何から作ったかを記録する（Issue #107 PR-B）。"""
-        current = self._current
-        if current is None:
-            return
-        try:
-            current["analysis_source_by_side"][str(side)] = str(source)
-        except Exception:
-            return
-
-    def record_shadow_comparison(
-        self,
-        side: str,
-        *,
-        fresh: Optional[str] = None,
-        reuse: Optional[str] = None,
-        matched: Optional[bool] = None,
-        mismatch_kind: Optional[str] = None,
-    ) -> None:
-        """fresh / reuse の完成ビューの再利用等価キー比較を記録する。
-
-        ``mismatch_kind`` は「意味・runtime 型・完了済み proof のどれが食い違ったか」。
-        """
-        current = self._current
-        if current is None:
-            return
-        try:
-            current["shadow_fingerprints_by_side"][str(side)] = {
-                "fresh": None if fresh is None else str(fresh),
-                "reuse": None if reuse is None else str(reuse),
-                "matched": None if matched is None else bool(matched),
-                "mismatch_kind": None if mismatch_kind is None else str(mismatch_kind),
-            }
         except Exception:
             return
 
@@ -805,12 +724,6 @@ class PhaseTimeline:
             "analysis_seconds_by_side": {
                 side: round(value, 6)
                 for side, value in (phase.get("analysis_seconds_by_side") or {}).items()
-            },
-            "reuse_eligible_by_side": dict(phase.get("reuse_eligible_by_side") or {}),
-            "analysis_source_by_side": dict(phase.get("analysis_source_by_side") or {}),
-            "shadow_fingerprints_by_side": {
-                side: dict(value or {})
-                for side, value in (phase.get("shadow_fingerprints_by_side") or {}).items()
             },
             "reason_before": list(phase.get("reason_before") or ()),
             "reason_after": list(phase.get("reason_after") or ()),

@@ -66,25 +66,6 @@ DEFAULT_PHASE_PLAN: List[PhaseSpec] = [
 ]
 
 
-@dataclass(frozen=True)
-class RetryAnalysisBase:
-    """P0 の raw 解析ビューと、その再利用可否を判定するための state（Issue #107 PR-B）。
-
-    ``analysis`` は仮説をまだ重ねていない解析の複製、``program`` / ``modification_number``
-    は「その複製が前提にしている Program の世代」、``equivalence_key`` は
-    「複製自身が書き換えられていないこと」を確認するための seed 時の等価キー
-    （``checker/reanalysis.py`` の ``reuse_equivalence_key()``）。
-    3 つは常に同時に作られなければ意味を持たない（片方だけ新しい state を作ると
-    「古い解析を新しい Program の世代で再利用してよい」と誤判定する）ので frozen にし、
-    更新は必ず新しいインスタンスの差し替えで行う。
-    """
-
-    analysis: FunctionReturnAnalysis
-    program: Any
-    modification_number: int
-    equivalence_key: Any
-
-
 @dataclass
 class PhaseContext:
     """Phase実行のコンテキスト"""
@@ -103,10 +84,6 @@ class PhaseContext:
     binary2_id: Optional[str] = None
     analysis1: Optional[FunctionReturnAnalysis] = None
     analysis2: Optional[FunctionReturnAnalysis] = None
-    # Issue #107 (PR-B): retry phase をまたぐ base state の所有者は PhaseContext。
-    # 構築と再利用判定は checker/reanalysis.py が行う。
-    retry_analysis_base1: Optional[RetryAnalysisBase] = None
-    retry_analysis_base2: Optional[RetryAnalysisBase] = None
 
 
 class PhaseHandler:
