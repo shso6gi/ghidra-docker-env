@@ -113,8 +113,6 @@ def _analysis(binary_id, entry, storage_bits, *, extension=None):
         ),
         return_type_provenance={
             "object_derived": True,
-            "source_declared_return_type_known": True,
-            "source_declared_return_type_width": 32,
             "declared_return_type_width": 32,
         },
         binary_id=binary_id,
@@ -172,7 +170,32 @@ def test_extension_certificate_input_defines_semantic_payload_width_and_identity
     }
 
 
-def test_source_declared_observation_width_precedes_decompiler_storage_type_width():
+def _observation_seed(binary_id, entry, provenance, *, storage_bits=64):
+    """Build one unary width seed whose return_type_provenance is fully controlled."""
+    analysis = _analysis(binary_id, entry, storage_bits, extension="INT_SEXT")
+    analysis.return_type_provenance = dict(provenance)
+    return extract_function_return_width_seed(
+        analysis, extract_return_cases(analysis)[0]
+    )
+
+
+_DECOMPILER_DECLARED_PROVENANCE = {
+    "object_derived": True,
+    "return_type": "int",
+    "return_type_source": "decompiler_return_type",
+    "declared_return_type_width": 32,
+}
+
+_UNDECLARED_PROVENANCE = {
+    "object_derived": True,
+    "return_type": "undefined8",
+    "return_type_source": "undefined_decompiler_type",
+    "declared_return_type_width": None,
+}
+
+
+def test_declared_observation_width_ignores_source_declared_entries():
+    """Issue #122: 観測幅は Ghidra prototype 由来の宣言幅のみを見る。"""
     fact = (
         "return_type_provenance",
         (
@@ -182,7 +205,98 @@ def test_source_declared_observation_width_precedes_decompiler_storage_type_widt
         ),
     )
 
-    assert _declared_observation_width(fact) == 32
+    assert _declared_observation_width(fact) == 64
+
+
+def test_top_level_observation_contract_names_the_decompiler_declared_derivation():
+    """Issue #122: 宣言幅由来の contract は source ではなく decompiler 由来を名乗る。"""
+    left = _observation_seed("B-decl-left", 0x3000, _DECOMPILER_DECLARED_PROVENANCE)
+    right = _observation_seed("B-decl-right", 0x4000, _DECOMPILER_DECLARED_PROVENANCE)
+
+    contract = build_top_level_observation_contract(left, right)
+
+    assert not isinstance(contract, BlockedObservation)
+    assert contract.observation_semantics == (
+        "return_value",
+        "decompiler_declared_return_width",
+    )
+    assert contract.projection_policy == "abi_declared_return_width_v1"
+    assert contract.left_observation_width == 32
+    assert contract.right_observation_width == 32
+    assert "source_declared" not in repr(contract.provenance)
+    assert "source_declared" not in repr(contract.observation_semantics)
+
+
+def test_observation_contract_keeps_binary_only_common_payload_width_fallback():
+    """Issue #122: 宣言幅が無くても binary-only の共通 payload 幅で contract は成立する。"""
+    left = _observation_seed("B-fallback-left", 0x5000, _UNDECLARED_PROVENANCE)
+    right = _observation_seed("B-fallback-right", 0x6000, _UNDECLARED_PROVENANCE)
+
+    assert left.extension_evidence_source.supported
+    assert right.extension_evidence_source.supported
+
+    contract = build_top_level_observation_contract(left, right)
+
+    assert not isinstance(contract, BlockedObservation)
+    assert contract.observation_semantics == (
+        "return_value",
+        "common_validated_semantic_payload_width",
+    )
+    assert contract.projection_policy == "validated_semantic_payload_width_v1"
+    assert contract.left_observation_width == 32
+
+
+def test_observation_contract_fails_closed_on_incompatible_payload_widths():
+    """Issue #122 / AC3: 幅が食い違えば pair 契約の不足として Blocked。"""
+    left = _observation_seed("B-mismatch-left", 0x7000, _UNDECLARED_PROVENANCE)
+    right = replace(
+        _observation_seed("B-mismatch-right", 0x8000, _UNDECLARED_PROVENANCE),
+        payload_width=64,
+    )
+
+    blocked = build_top_level_observation_contract(left, right)
+
+    assert isinstance(blocked, BlockedObservation)
+    assert [
+        (blocker.blocker_kind, blocker.missing_slot) for blocker in blocked.blockers
+    ] == [("observation_contract", "top_level_comparison_contract")]
+
+
+def test_observation_contract_fails_closed_on_unknown_payload_width():
+    """Issue #122 / AC3: payload 幅そのものが未解決なら unary 側の不足として Blocked。"""
+    left = _observation_seed("B-nopayload-left", 0x9000, _UNDECLARED_PROVENANCE)
+    right = replace(
+        _observation_seed("B-nopayload-right", 0xA000, _UNDECLARED_PROVENANCE),
+        payload_width=None,
+        unresolved_fact_slots=("payload_width_fact",),
+    )
+
+    blocked = build_top_level_observation_contract(left, right)
+
+    assert isinstance(blocked, BlockedObservation)
+    assert [
+        (blocker.blocker_kind, blocker.missing_slot) for blocker in blocked.blockers
+    ] == [("unary_width", "payload_width_fact")]
+
+
+def test_observation_contract_fails_closed_without_extension_evidence():
+    """Issue #122 / AC3: 拡張証拠が無ければ unary 側の不足として Blocked。"""
+    left = _observation_seed("B-noext-left", 0xB000, _UNDECLARED_PROVENANCE)
+    right_seed = _observation_seed("B-noext-right", 0xC000, _UNDECLARED_PROVENANCE)
+    right = replace(
+        right_seed,
+        extension_evidence_source=replace(
+            right_seed.extension_evidence_source, kind="unsupported"
+        ),
+        unresolved_fact_slots=("extension_evidence_fact",),
+    )
+
+    blocked = build_top_level_observation_contract(left, right)
+
+    assert isinstance(blocked, BlockedObservation)
+    assert [
+        (blocker.blocker_kind, blocker.missing_slot) for blocker in blocked.blockers
+    ] == [("unary_width", "extension_evidence_fact")]
 
 
 def test_unary_width_artifact_is_domain_cached_and_pair_independent():

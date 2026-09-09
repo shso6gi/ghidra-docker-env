@@ -418,12 +418,14 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         retry_with_type_fix: bool = False,
         binary1_id: Optional[str] = None,
         binary2_id: Optional[str] = None,
-        declared_return_type1: Optional[str] = None,
-        declared_return_type2: Optional[str] = None,
         binary1_content_identity: Optional[Tuple[Any, ...]] = None,
         binary2_content_identity: Optional[Tuple[Any, ...]] = None,
     ) -> EquivalenceResult:
-        """2つのバイナリから関数を解析して等価性を判定"""
+        """2つのバイナリから関数を解析して等価性を判定
+
+        意味判定の入力は ``program1`` / ``program2`` の 2 バイナリだけで、
+        バイナリ隣接のソース宣言を受け取る引数は持たない（Issue #122）。
+        """
         previous_context = getattr(self, "_active_binary_content_identities", None)
         self._active_binary_content_identities = (
             binary1_content_identity,
@@ -441,8 +443,6 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                 retry_with_type_fix=retry_with_type_fix,
                 binary1_id=binary1_id,
                 binary2_id=binary2_id,
-                declared_return_type1=declared_return_type1,
-                declared_return_type2=declared_return_type2,
             )
             result.binary1_content_identity = binary1_content_identity
             result.binary2_content_identity = binary2_content_identity

@@ -97,7 +97,6 @@ UPWARD_BASELINE = frozenset({
     # proof -> reporting
     ("proof.obligations.shadow", "reporting"),
     # authority -> checker
-    ("authority.decision.production_cutover", "checker"),
     ("authority.lifecycle.pilot", "checker"),
     ("authority.lifecycle.production_boundary", "checker"),
 })

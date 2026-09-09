@@ -1187,7 +1187,7 @@ def build_top_level_observation_contract(
     left_declared = _declared_observation_width(left.calling_convention_fact)
     right_declared = _declared_observation_width(right.calling_convention_fact)
     observation_width = None
-    provenance_kind = "source_declared_return_width"
+    provenance_kind = "decompiler_declared_return_width"
     if left_declared is not None and left_declared == right_declared:
         observation_width = left_declared
     elif (
@@ -1198,7 +1198,8 @@ def build_top_level_observation_contract(
     ):
         # The eventual observation view validates both unary artifacts.  This
         # contract may therefore use their common semantic payload width when
-        # source declaration provenance is unavailable in a stripped binary.
+        # the decompiler recovered no declared return width (a stripped or
+        # ``undefined``-typed prototype).
         observation_width = int(left.payload_width)
         provenance_kind = "common_validated_semantic_payload_width"
     if observation_width is None:
@@ -1279,7 +1280,7 @@ def build_top_level_observation_contract(
         right_observation_width=observation_width,
         projection_policy=(
             "abi_declared_return_width_v1"
-            if provenance_kind == "source_declared_return_width"
+            if provenance_kind == "decompiler_declared_return_width"
             else "validated_semantic_payload_width_v1"
         ),
         observation_semantics=("return_value", provenance_kind),
@@ -1333,12 +1334,9 @@ def _declared_observation_width(calling_convention_fact: Tuple[Any, ...]) -> Opt
                 stack.extend(reversed(value))
         return None
 
-    # Source-adjacent declaration evidence describes the language-level
-    # observation contract.  A decompiler-inferred storage type may be wider
-    # and is only a fallback when source declaration evidence is unavailable.
-    source_width = find_width("source_declared_return_type_width")
-    if source_width is not None:
-        return source_width
+    # The observation width is derived only from the Ghidra prototype's declared
+    # return type.  Source text adjacent to a binary is not an input of the
+    # judgement, so no source-declared provenance is consulted here (Issue #122).
     return find_width("declared_return_type_width")
 
 

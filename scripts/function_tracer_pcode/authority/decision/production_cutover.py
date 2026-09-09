@@ -391,9 +391,6 @@ def main(argv: list[str] | None = None) -> int:
         from scripts.function_tracer_pcode.proof.call_effect.obligations import (
             EquivalenceObservationContract,
         )
-        from scripts.function_tracer_pcode.checker.source_declarations import (
-            infer_adjacent_c_return_type,
-        )
         from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
             ProductionPilotExecutionIdentity,
         )
@@ -409,12 +406,6 @@ def main(argv: list[str] | None = None) -> int:
             "binary2_content_identity": content_identity(args.binary2_path),
             "function_name1": args.function_name1,
             "function_name2": args.function_name2,
-            "declared_return_type1": infer_adjacent_c_return_type(
-                args.binary1_path, args.function_name1
-            ),
-            "declared_return_type2": infer_adjacent_c_return_type(
-                args.binary2_path, args.function_name2
-            ),
             "observation_contract_id": EquivalenceObservationContract().contract_id,
             "result_entry_occurrence_nonce": (
                 args.result_entry_occurrence_nonce

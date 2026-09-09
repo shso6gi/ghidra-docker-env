@@ -1,5 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Equivalence-mode CLI helpers."""
+"""Equivalence-mode CLI helpers.
+
+The semantic input of an equivalence check is exactly the two binaries given to
+``--equiv``.  Files adjacent to those binaries (in particular the EqBench
+``newV.c`` / ``new.c`` sources) are never read here: they are inputs of the
+benchmark evaluation oracle, not of the judgement, its provenance, or the signed
+execution identity (Issue #122).
+"""
 
 import json
 import hashlib
@@ -285,7 +292,11 @@ def _emit_import_error_result(
 
 
 def run_equivalence_check(args):
-    """等価性判定を実行する。"""
+    """等価性判定を実行する。
+
+    入力は ``args.equiv`` の 2 バイナリのみ。バイナリ隣接ファイルは読まない
+    （Issue #122）。
+    """
     start_time = time.time()
     from scripts.function_tracer_pcode.checker.diagnostics import StageClock, attach_stage_timing
 
@@ -321,9 +332,6 @@ def run_equivalence_check(args):
         )
 
     from scripts.function_tracer_pcode.checker import EquivalenceChecker, TypeFixerConfig
-    from scripts.function_tracer_pcode.checker.source_declarations import (
-        infer_adjacent_c_return_type,
-    )
 
     function_names = get_target_functions(args)
 
@@ -345,8 +353,6 @@ def run_equivalence_check(args):
     else:
         func_name1 = function_names[0]
         func_name2 = function_names[1]
-    declared_return_type1 = infer_adjacent_c_return_type(binary1_path, func_name1)
-    declared_return_type2 = infer_adjacent_c_return_type(binary2_path, func_name2)
 
     retry_with_type_fix = not getattr(args, "no_retry_phases", False)
     strategy = getattr(args, "strategy", "pairwise")
@@ -499,8 +505,6 @@ def run_equivalence_check(args):
                             retry_with_type_fix=retry_with_type_fix,
                             binary1_id=binary1_id,
                             binary2_id=binary2_id,
-                            declared_return_type1=declared_return_type1,
-                            declared_return_type2=declared_return_type2,
                             binary1_content_identity=binary1_content_identity,
                             binary2_content_identity=binary2_content_identity,
                         )
