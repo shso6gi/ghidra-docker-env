@@ -71,6 +71,7 @@ class ReturnAnalyzer:
             debug_flag=lambda: self.debug,
             decompiler_value=lambda: self._decompiler,
             set_decompiler=lambda value: setattr(self, "_decompiler", value),
+            on_program_mutation=self._invalidate_decompile_derived_caches,
         )
         self.debug = debug
         self._binary_id = binary_id
@@ -370,6 +371,67 @@ class ReturnAnalyzer:
     @_effect_summary_parameter_cache.setter
     def _effect_summary_parameter_cache(self, value):
         self._ensure_runtime_state().effect_summary_parameter_cache = value
+
+    @property
+    def _callee_parameter_decompile_cache(self):
+        return self._ensure_runtime_state().callee_parameter_decompile_cache
+
+    @_callee_parameter_decompile_cache.setter
+    def _callee_parameter_decompile_cache(self, value):
+        self._ensure_runtime_state().callee_parameter_decompile_cache = value
+
+    @property
+    def _callee_parameter_decompile_stats(self):
+        return self._ensure_runtime_state().callee_parameter_decompile_stats
+
+    @_callee_parameter_decompile_stats.setter
+    def _callee_parameter_decompile_stats(self, value):
+        self._ensure_runtime_state().callee_parameter_decompile_stats = value
+
+    @property
+    def _callee_analysis_cache_stats(self):
+        return self._ensure_runtime_state().callee_analysis_cache_stats
+
+    @_callee_analysis_cache_stats.setter
+    def _callee_analysis_cache_stats(self, value):
+        self._ensure_runtime_state().callee_analysis_cache_stats = value
+
+    def callee_analysis_cache_diagnostics(self) -> Dict[str, Any]:
+        """callee 解析 cache（``call_analysis_cache``）の hit/miss 診断（Issue #47）。
+
+        parameter snapshot cache（``callee_parameter_cache_diagnostics``）とは対象が別。
+        判定には使わない観測値なので、失敗しても呼び出し側に例外を出さない。
+        """
+        try:
+            payload = self._callee_analysis_cache_stats.snapshot()
+            payload["entries"] = len(self._call_analysis_cache)
+            return payload
+        except Exception as exc:  # diagnostics never fail the verdict
+            return {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
+    def callee_parameter_cache_diagnostics(self) -> Dict[str, Any]:
+        """callee parameter snapshot cache の hit/miss 診断（Issue #47 PR-A）。
+
+        判定には使わない観測値なので、失敗しても呼び出し側に例外を出さない。
+        """
+        try:
+            payload = self._callee_parameter_decompile_stats.snapshot()
+            payload["entries"] = len(self._callee_parameter_decompile_cache)
+            return payload
+        except Exception as exc:  # diagnostics never fail the verdict
+            return {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
+    def _invalidate_decompile_derived_caches(self) -> None:
+        """program を書き換えたら、decompile 由来の snapshot は証拠として無効にする。
+
+        ``_effect_summary_parameter_cache``（partial cache）は従来どおり残す。破棄するのは
+        「再 decompile の代わりに使える」と主張していた snapshot だけで、次回は必ず
+        decompile し直す（fail-closed）。
+        """
+        cache = self._callee_parameter_decompile_cache
+        entries = len(cache)
+        cache.clear()
+        self._callee_parameter_decompile_stats.record_invalidation(entries)
 
     @property
     def _direct_call_graph(self):

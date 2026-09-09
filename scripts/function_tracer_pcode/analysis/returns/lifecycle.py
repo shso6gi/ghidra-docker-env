@@ -200,6 +200,98 @@ def _impl__analysis_scope_key(
     return ("analysis_scope", target_key, bound_signature, storage_bound_signature)
 
 
+ANALYSIS_SCOPE_KEY_TAG = "analysis_scope"
+
+# miss 原因のラベルは診断状態の所有者（runtime_state）が定義する。分類そのものは
+# scope key を作るこの module の純関数が行う。
+from scripts.function_tracer_pcode.analysis.runtime_state import (  # noqa: E402
+    CALLEE_ANALYSIS_MISS_BOTH_SIGNATURES,
+    CALLEE_ANALYSIS_MISS_BOUND_SIGNATURE,
+    CALLEE_ANALYSIS_MISS_STORAGE_BOUND_SIGNATURE,
+    CALLEE_ANALYSIS_MISS_TARGET_FIRST,
+    CALLEE_ANALYSIS_MISS_UNCLASSIFIED,
+)
+
+
+def analysis_scope_key_components(key) -> Optional[Tuple[Any, Any, Any]]:
+    """scope key を ``(target_key, bound_signature, storage_bound_signature)`` に分解する。
+
+    ``_analysis_scope_key()`` 以外の形（generic function key 等）なら ``None``。
+    """
+    if not isinstance(key, tuple) or len(key) != 4 or key[0] != ANALYSIS_SCOPE_KEY_TAG:
+        return None
+    return key[1], key[2], key[3]
+
+
+def classify_analysis_scope_cache_miss(
+    requested_key,
+    cached_keys,
+) -> Tuple[str, bool, int]:
+    """analysis cache の miss を ``_analysis_scope_key()`` の差分で分類する（診断専用）。
+
+    返り値は ``(reason, unbound_entry_absent, same_target_scope_keys)``。
+
+    - 同じ target の scope key が 1 つも cache に無ければ ``target_first_analysis``。
+    - 束縛差の分類は Issue #47 の問い（bound 由来の反復解析があるか）に合わせ、
+      ``bound_signature`` の差を先に見る。``storage_bound_signature`` が一致する
+      entry があれば ``bound_signature_differs``、逆なら
+      ``storage_bound_signature_differs``、どの entry とも両方違えば
+      ``bound_and_storage_bound_signature_differ``。
+    - ``unbound_entry_absent`` は「束縛付きの要求なのに、再利用できる無束縛 entry
+      （両署名が空の scope key）が cache に無かった」ことを表す。
+
+    cache の内容も key の意味も変えない。判定は呼び出し側の cache 参照結果のみに従う。
+    """
+    requested = analysis_scope_key_components(requested_key)
+    if requested is None:
+        return CALLEE_ANALYSIS_MISS_UNCLASSIFIED, False, 0
+    target_key, bound_signature, storage_bound_signature = requested
+    is_bound_request = bool(bound_signature) or bool(storage_bound_signature)
+
+    same_target: List[Tuple[Any, Any]] = []
+    for key in cached_keys:
+        components = analysis_scope_key_components(key)
+        if components is None or components[0] != target_key:
+            continue
+        same_target.append((components[1], components[2]))
+
+    unbound_entry_present = any(
+        not cached_bound and not cached_storage for cached_bound, cached_storage in same_target
+    )
+    unbound_entry_absent = bool(is_bound_request and not unbound_entry_present)
+
+    if not same_target:
+        return CALLEE_ANALYSIS_MISS_TARGET_FIRST, unbound_entry_absent, 0
+    for cached_bound, cached_storage in same_target:
+        if cached_storage == storage_bound_signature and cached_bound != bound_signature:
+            return CALLEE_ANALYSIS_MISS_BOUND_SIGNATURE, unbound_entry_absent, len(same_target)
+    for cached_bound, cached_storage in same_target:
+        if cached_bound == bound_signature and cached_storage != storage_bound_signature:
+            return (
+                CALLEE_ANALYSIS_MISS_STORAGE_BOUND_SIGNATURE,
+                unbound_entry_absent,
+                len(same_target),
+            )
+    return CALLEE_ANALYSIS_MISS_BOTH_SIGNATURES, unbound_entry_absent, len(same_target)
+
+
+def analysis_cache_target_identity(target_ref: Optional[CallTargetRef]) -> str:
+    """診断出力用の安定した target 表現（Ghidra / Python の object identity は出さない）。"""
+    if target_ref is None:
+        return "unknown:UNKNOWN_FUNC"
+    try:
+        kind = str(getattr(target_ref, "kind", "unknown"))
+        name = str(target_ref.display_name())
+        entry_offset = getattr(target_ref, "entry_offset", None)
+        address_offset = getattr(target_ref, "address_offset", None)
+        offset = entry_offset if entry_offset is not None else address_offset
+        if offset is None:
+            return f"{kind}:{name}"
+        return f"{kind}:{name}@{int(offset):#x}"
+    except Exception:
+        return "unknown:UNKNOWN_FUNC"
+
+
 def _impl__extend_active_functions(
     self,
     active_functions: Optional[Set[Tuple[Any, ...]]],
@@ -233,6 +325,7 @@ class ProgramAccessService:
         debug_flag: Callable[..., Any],
         decompiler_value: Callable[..., Any],
         set_decompiler: Callable[..., Any],
+        on_program_mutation: Optional[Callable[[], None]] = None,
     ) -> None:
         self.debug_reporter = debug_reporter
         self.decompile_with_broker = decompile_with_broker
@@ -241,6 +334,8 @@ class ProgramAccessService:
         self.debug_flag = debug_flag
         self.decompiler_value = decompiler_value
         self.set_decompiler = set_decompiler
+        # Issue #47 (PR-A): program を書き換えたら decompile 由来の snapshot を無効にする。
+        self.on_program_mutation = on_program_mutation
 
     def program_is_big_endian(self) -> Optional[bool]:
         language_getter = getattr(self.program_value(), "getLanguage", None)
@@ -277,19 +372,32 @@ class ProgramAccessService:
 
     @contextmanager
     def program_transaction(self, description: str):
-        start_transaction = getattr(self.program_value(), "startTransaction", None)
-        end_transaction = getattr(self.program_value(), "endTransaction", None)
-        if not callable(start_transaction) or not callable(end_transaction):
-            yield
-            return
-
-        tx_id = start_transaction(description)
+        # Issue #47 (PR-A): program を書き換え得る区間を抜けたら、decompile 由来の
+        # snapshot（再 decompile の代替根拠）は owner 側で無効化する。commit / rollback
+        # のどちらでも通知する（fail-closed: 迷ったら捨てて decompile し直す）。
         try:
-            yield
-            end_transaction(tx_id, True)
-        except Exception:
-            end_transaction(tx_id, False)
-            raise
+            start_transaction = getattr(self.program_value(), "startTransaction", None)
+            end_transaction = getattr(self.program_value(), "endTransaction", None)
+            if not callable(start_transaction) or not callable(end_transaction):
+                yield
+                return
+
+            tx_id = start_transaction(description)
+            try:
+                yield
+                end_transaction(tx_id, True)
+            except Exception:
+                end_transaction(tx_id, False)
+                raise
+        finally:
+            callback = self.on_program_mutation
+            if callback is not None:
+                try:
+                    callback()
+                except Exception as exc:
+                    self.debug_reporter.debug_print(
+                        f"Program mutation notification failed: {exc}"
+                    )
 
     def program_userop_name(self, userop_id: Optional[int]) -> Optional[str]:
         if userop_id is None:

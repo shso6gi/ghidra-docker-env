@@ -3,10 +3,319 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.runtime_refs import ExpansionBudgetTruncation
+
+
+CALLEE_PARAMETER_CACHE_DIAGNOSTICS_SCHEMA = "callee-parameter-decompile-cache-v1"
+
+
+def _copy_parameter_descriptor(parameter: Any) -> Any:
+    """parameter descriptor 1 件を、共有可変状態を残さない形で複製する。
+
+    ``storage`` だけが入れ子の dict なのでそこまでを複製し、``data_type_obj`` の
+    ような Ghidra 側 object は所有権が無いので参照のまま持つ（複製しない）。
+    """
+    if not isinstance(parameter, Mapping):
+        return parameter
+    copied = dict(parameter)
+    storage = copied.get("storage")
+    if isinstance(storage, Mapping):
+        copied["storage"] = dict(storage)
+    return copied
+
+
+@dataclass(frozen=True)
+class SuccessfulDecompileParameterSnapshot:
+    """成功した callee decompile 1 回分の完全な parameter descriptor 群（Issue #47 PR-A）。
+
+    ``effect_summary_parameter_cache`` が「今までに見えた中で最も豊富な descriptor」の
+    partial cache であるのに対し、この snapshot は **decompile が完了し HighFunction が
+    存在した** 場合にだけ作る complete な観測結果である。したがってこれだけが
+    「同じ callee をもう一度 decompile し直す代わりに使える」freshness evidence になる。
+
+    失敗した decompile・HighFunction 欠落からは決して作らない（``high_function_present``
+    が偽なら構築時に拒否する）。``decompile_contract_id`` / ``program_identity`` は
+    「どの条件で観測したか」を保持し、条件が違う要求には再利用しない。
+    """
+
+    parameters: Tuple[Any, ...]
+    decompile_contract_id: str
+    program_identity: Optional[int]
+    high_function_present: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.high_function_present:
+            raise ValueError(
+                "SuccessfulDecompileParameterSnapshot requires a present HighFunction"
+            )
+
+    @classmethod
+    def from_successful_decompile(
+        cls,
+        parameters: Optional[List[Dict]],
+        *,
+        decompile_contract_id: str,
+        program_identity: Optional[int],
+    ) -> "SuccessfulDecompileParameterSnapshot":
+        return cls(
+            parameters=tuple(_copy_parameter_descriptor(param) for param in (parameters or [])),
+            decompile_contract_id=str(decompile_contract_id),
+            program_identity=program_identity,
+            high_function_present=True,
+        )
+
+    def matches_observation_contract(
+        self,
+        *,
+        decompile_contract_id: str,
+        program_identity: Optional[int],
+    ) -> bool:
+        return (
+            self.decompile_contract_id == str(decompile_contract_id)
+            and self.program_identity == program_identity
+        )
+
+    def materialize_parameters(self) -> List[Dict]:
+        """呼び出し側が自由に書き換えてよい複製を返す（snapshot 本体は共有しない）。"""
+        return [_copy_parameter_descriptor(param) for param in self.parameters]
+
+
+@dataclass
+class CalleeParameterDecompileCacheStats:
+    """callee parameter snapshot cache の hit/miss 計数（診断専用・判定には使わない）。
+
+    ``hits`` は decompile を 1 回省けたこと、``misses`` は snapshot を再利用できず
+    decompile を実行したことを表す。``miss_reasons`` は「なぜ再利用できなかったか」、
+    ``uncacheable_reasons`` は「decompile したのに snapshot を作れなかった / そもそも
+    decompile に到達しなかった」理由の内訳。
+    """
+
+    hits: int = 0
+    misses: int = 0
+    snapshots_stored: int = 0
+    invalidations: int = 0
+    miss_reasons: Dict[str, int] = field(default_factory=dict)
+    uncacheable_reasons: Dict[str, int] = field(default_factory=dict)
+
+    def record_hit(self) -> None:
+        self.hits += 1
+
+    def record_miss(self, reason: str) -> None:
+        self.misses += 1
+        self.miss_reasons[reason] = self.miss_reasons.get(reason, 0) + 1
+
+    def record_uncacheable(self, reason: str) -> None:
+        self.uncacheable_reasons[reason] = self.uncacheable_reasons.get(reason, 0) + 1
+
+    def record_snapshot_stored(self) -> None:
+        self.snapshots_stored += 1
+
+    def record_invalidation(self, entries: int) -> None:
+        """実際に snapshot を捨てた無効化だけを数える（空 cache の通知は数えない）。"""
+        if entries > 0:
+            self.invalidations += 1
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "schema": CALLEE_PARAMETER_CACHE_DIAGNOSTICS_SCHEMA,
+            "hits": self.hits,
+            "misses": self.misses,
+            "snapshots_stored": self.snapshots_stored,
+            "invalidations": self.invalidations,
+            "miss_reasons": dict(sorted(self.miss_reasons.items())),
+            "uncacheable_reasons": dict(sorted(self.uncacheable_reasons.items())),
+        }
+
+
+CALLEE_ANALYSIS_CACHE_DIAGNOSTICS_SCHEMA = "callee-analysis-cache-v1"
+
+# ``_analysis_scope_key()`` の構成要素で分類した miss 原因（診断専用のラベル）。
+# 分類そのものは ``analysis.returns.lifecycle`` の純関数が行う。
+CALLEE_ANALYSIS_MISS_TARGET_FIRST = "target_first_analysis"
+CALLEE_ANALYSIS_MISS_BOUND_SIGNATURE = "bound_signature_differs"
+CALLEE_ANALYSIS_MISS_STORAGE_BOUND_SIGNATURE = "storage_bound_signature_differs"
+CALLEE_ANALYSIS_MISS_BOTH_SIGNATURES = "bound_and_storage_bound_signature_differ"
+CALLEE_ANALYSIS_MISS_UNCLASSIFIED = "unclassified"
+
+# 1 pair の診断 JSON が無制限に伸びないための上限。超えた分は件数だけ残す。
+CALLEE_ANALYSIS_CACHE_TARGET_REPORT_LIMIT = 50
+
+
+@dataclass
+class CalleeAnalysisTargetStats:
+    """1 つの解析対象（callee / top-level）についての analysis cache 計数。"""
+
+    identity: str
+    is_external: Optional[bool] = None
+    is_thunk: Optional[bool] = None
+    # thunk の場合、その先が external か。「本体を持つ internal callee」と
+    # 「external への thunk」を診断だけで区別するために持つ（#47-B / #47-C の切り分け）。
+    thunked_is_external: Optional[bool] = None
+    hits: int = 0
+    misses: int = 0
+    miss_reasons: Dict[str, int] = field(default_factory=dict)
+    # 束縛付き要求が miss し、かつ再利用できる unbound entry も無かった回数
+    # （「unbound entry 不在」。PR-47-B / PR-47-C が対象にする形の miss）。
+    bound_misses_without_unbound_entry: int = 0
+    # 同一 target を何通りの scope key で解析したか（診断用の観測値）。
+    distinct_scope_keys: int = 0
+
+    def snapshot(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "target": self.identity,
+            "hits": self.hits,
+            "misses": self.misses,
+            "miss_reasons": dict(sorted(self.miss_reasons.items())),
+            "bound_misses_without_unbound_entry": self.bound_misses_without_unbound_entry,
+            "distinct_scope_keys": self.distinct_scope_keys,
+        }
+        payload.update(binding_induced_miss_counts(self.miss_reasons))
+        if self.is_external is not None:
+            payload["is_external"] = bool(self.is_external)
+        if self.is_thunk is not None:
+            payload["is_thunk"] = bool(self.is_thunk)
+        if self.thunked_is_external is not None:
+            payload["thunked_is_external"] = bool(self.thunked_is_external)
+        return payload
+
+
+@dataclass
+class CalleeAnalysisCacheStats:
+    """``call_analysis_cache`` の hit/miss と miss 原因の計数（診断専用・判定に使わない）。
+
+    ``callee_parameter_decompile_stats`` が parameter descriptor の snapshot cache を見るのに
+    対し、こちらは **callee 解析そのもの** の cache（``_analysis_scope_key()`` で引く
+    ``call_analysis_cache``）を見る。両者は対象が違うので混ぜない。
+
+    miss 原因は ``_analysis_scope_key()`` の構成要素で分類する。key の意味自体は変えない。
+    ``analyze_function()`` は top-level 関数の解析にも使われるので、pair ごとに top-level 1 件が
+    ``target_first_analysis`` の miss として現れる。
+    """
+
+    hits: int = 0
+    misses: int = 0
+    miss_reasons: Dict[str, int] = field(default_factory=dict)
+    bound_misses_without_unbound_entry: int = 0
+    targets: Dict[str, CalleeAnalysisTargetStats] = field(default_factory=dict)
+
+    def _target(
+        self,
+        identity: str,
+        *,
+        is_external: Optional[bool] = None,
+        is_thunk: Optional[bool] = None,
+        thunked_is_external: Optional[bool] = None,
+    ) -> CalleeAnalysisTargetStats:
+        entry = self.targets.get(identity)
+        if entry is None:
+            entry = CalleeAnalysisTargetStats(
+                identity=identity,
+                is_external=is_external,
+                is_thunk=is_thunk,
+                thunked_is_external=thunked_is_external,
+            )
+            self.targets[identity] = entry
+        return entry
+
+    def record_hit(
+        self,
+        identity: str,
+        *,
+        is_external: Optional[bool] = None,
+        is_thunk: Optional[bool] = None,
+        thunked_is_external: Optional[bool] = None,
+    ) -> None:
+        self.hits += 1
+        self._target(
+            identity,
+            is_external=is_external,
+            is_thunk=is_thunk,
+            thunked_is_external=thunked_is_external,
+        ).hits += 1
+
+    def record_miss(
+        self,
+        identity: str,
+        reason: str,
+        *,
+        is_external: Optional[bool] = None,
+        is_thunk: Optional[bool] = None,
+        thunked_is_external: Optional[bool] = None,
+        unbound_entry_absent: bool = False,
+        same_target_scope_keys: int = 0,
+    ) -> None:
+        self.misses += 1
+        self.miss_reasons[reason] = self.miss_reasons.get(reason, 0) + 1
+        entry = self._target(
+            identity,
+            is_external=is_external,
+            is_thunk=is_thunk,
+            thunked_is_external=thunked_is_external,
+        )
+        entry.misses += 1
+        entry.miss_reasons[reason] = entry.miss_reasons.get(reason, 0) + 1
+        # この miss 自身が新しい scope key なので、観測済み key 数 + 1 を保持する。
+        entry.distinct_scope_keys = max(entry.distinct_scope_keys, int(same_target_scope_keys) + 1)
+        if unbound_entry_absent:
+            self.bound_misses_without_unbound_entry += 1
+            entry.bound_misses_without_unbound_entry += 1
+
+    def snapshot(self) -> Dict[str, Any]:
+        ordered = sorted(
+            self.targets.values(), key=lambda entry: (-entry.misses, -entry.hits, entry.identity)
+        )
+        reported = ordered[:CALLEE_ANALYSIS_CACHE_TARGET_REPORT_LIMIT]
+        payload: Dict[str, Any] = {
+            "schema": CALLEE_ANALYSIS_CACHE_DIAGNOSTICS_SCHEMA,
+            "hits": self.hits,
+            "misses": self.misses,
+            "miss_reasons": dict(sorted(self.miss_reasons.items())),
+            "bound_misses_without_unbound_entry": self.bound_misses_without_unbound_entry,
+            "targets": [entry.snapshot() for entry in reported],
+            **binding_induced_miss_counts(self.miss_reasons),
+            "targets_truncated": max(0, len(ordered) - len(reported)),
+            "repeated_miss_targets": repeated_miss_targets(
+                entry.snapshot() for entry in ordered
+            ),
+        }
+        return payload
+
+
+def binding_induced_miss_counts(miss_reasons: Optional[Mapping[str, int]]) -> Dict[str, int]:
+    """miss 原因の内訳から、束縛差が原因の miss 回数を成分ごとに数える。
+
+    「両方違う」は bound / storage-bound の双方に数える（どちらの成分でも再解析を
+    引き起こしているため）。内訳は ``miss_reasons`` にそのまま残るので情報は失わない。
+    """
+    reasons = dict(miss_reasons or {})
+    both = int(reasons.get(CALLEE_ANALYSIS_MISS_BOTH_SIGNATURES, 0) or 0)
+    return {
+        "bound_signature_induced_misses": int(
+            reasons.get(CALLEE_ANALYSIS_MISS_BOUND_SIGNATURE, 0) or 0
+        )
+        + both,
+        "storage_bound_signature_induced_misses": int(
+            reasons.get(CALLEE_ANALYSIS_MISS_STORAGE_BOUND_SIGNATURE, 0) or 0
+        )
+        + both,
+    }
+
+
+def repeated_miss_targets(target_snapshots) -> Dict[str, List[str]]:
+    """同じ理由で 2 回以上 miss した target を理由ごとに列挙する。
+
+    「同一 target で ``bound_signature`` 起因の miss が複数回起きたか」を、
+    こちらで解釈を加えずに機械判定できるようにするための集計。
+    """
+    grouped: Dict[str, List[str]] = {}
+    for entry in target_snapshots:
+        for reason, count in (entry.get("miss_reasons") or {}).items():
+            if int(count or 0) >= 2:
+                grouped.setdefault(reason, []).append(str(entry.get("target")))
+    return {reason: sorted(targets) for reason, targets in sorted(grouped.items())}
 
 
 @dataclass
@@ -29,6 +338,20 @@ class AnalysisRuntimeState:
     local_target_cache: Dict[Tuple[object, ...], Optional[List[Any]]] = field(default_factory=dict)
     effect_summary_cache: Dict[Tuple[Any, ...], Any] = field(default_factory=dict)
     effect_summary_parameter_cache: Dict[Tuple[Any, ...], List[Dict]] = field(default_factory=dict)
+    # Issue #47 (PR-A): 成功した decompile から得た complete な parameter snapshot。
+    # ``effect_summary_parameter_cache`` は partial/richer descriptor cache のままで、
+    # 「decompile をもう一度やらずに済む」根拠になるのはこちらだけ。
+    callee_parameter_decompile_cache: Dict[
+        Tuple[Any, ...], SuccessfulDecompileParameterSnapshot
+    ] = field(default_factory=dict)
+    callee_parameter_decompile_stats: CalleeParameterDecompileCacheStats = field(
+        default_factory=CalleeParameterDecompileCacheStats
+    )
+    # Issue #47: callee 解析そのものの cache（``call_analysis_cache``）の hit/miss と
+    # miss 原因。cache 方針は変えず、観測だけを足す。
+    callee_analysis_cache_stats: CalleeAnalysisCacheStats = field(
+        default_factory=CalleeAnalysisCacheStats
+    )
     direct_call_graph: Dict[Tuple[Any, ...], Set[Tuple[Any, ...]]] = field(default_factory=dict)
     direct_call_graph_complete_nodes: Set[Tuple[Any, ...]] = field(default_factory=set)
     analysis_in_progress: Dict[Tuple[Any, ...], FunctionReturnAnalysis] = field(default_factory=dict)
