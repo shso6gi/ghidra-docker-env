@@ -11,7 +11,9 @@ from unittest.mock import Mock, patch
 import pytest
 
 from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.checker.debug_trace import Attempt
 from scripts.function_tracer_pcode.checker.diagnostics import (
+    PHASE_SKIPPED_NO_CHANGES,
     PHASE_TIMING_SCHEMA,
     PHASE_TIMING_SEGMENTS,
     PhaseTimeline,
@@ -231,9 +233,15 @@ class TestPhaseTimingThroughTheWorkflow:
 
     @pytest.fixture
     def program(self):
-        return MockProgram(name="test_binary.exe", architecture="x86:LE:64:default")
+        return MockProgram(name="binary1.exe", architecture="x86:LE:64:default")
 
-    def _run(self, checker, program, *, phase_result, stage_results):
+    @pytest.fixture
+    def program2(self):
+        # 左右で別 object にしないと、再解析した側の識別（`program is ctx.program1`）を
+        # テストできない。
+        return MockProgram(name="binary2.exe", architecture="x86:LE:64:default")
+
+    def _run(self, checker, program, program2, *, phase_result, stage_results):
         """P0 → P1 を 1 回だけ回し、phase 記録つきの結果を返す。"""
         analysis1 = create_mock_analysis("func1", return_type="ulong")
         analysis2 = create_mock_analysis("func2", return_type="int")
@@ -287,7 +295,7 @@ class TestPhaseTimingThroughTheWorkflow:
                         fixer.side_effect = lambda *args, **kwargs: Mock()
                         result = checker.check_from_binaries(
                             program1=program,
-                            program2=program,
+                            program2=program2,
                             function_name1="func1",
                             function_name2="func2",
                             decompile_timeout=60,
@@ -308,11 +316,12 @@ class TestPhaseTimingThroughTheWorkflow:
         return _make
 
     def test_applied_phase_records_its_cost_breakdown_and_reason_transition(
-        self, checker, program
+        self, checker, program, program2
     ):
         result, analyze_calls = self._run(
             checker,
             program,
+            program2,
             phase_result=PhaseResult(
                 PhaseID.P1_SIGNEDNESS,
                 applied=True,
@@ -331,7 +340,9 @@ class TestPhaseTimingThroughTheWorkflow:
 
         base = phases[0]
         assert base["retry_name"] == "initial"
-        assert base["applied"] is False
+        # P0 には「型修正の適用」という概念が無いので False ではなく None。
+        assert base["applied"] is None
+        assert base["skipped_reason"] is None
         assert base["changed_sides"] == []
         # P0 は両側を解析するので、両側が analysis 側の内訳に出る。
         assert base["reanalyzed_sides"] == ["function1", "function2"]
@@ -356,10 +367,33 @@ class TestPhaseTimingThroughTheWorkflow:
         assert retry["seconds"]["recurrence_refresh"] >= 0.0
         assert analyze_calls == {"func1": 2, "func2": 1}
 
-    def test_unapplied_phase_records_that_it_did_not_reanalyze(self, checker, program):
+        # 同じ観測が attempt 側にも残り、対応は attempt_id で固定される。
+        attempts = result.to_dict()["debug_trace"]["attempts"]
+        assert [row["attempt_id"] for row in phases] == [0, 1]
+        assert [attempt["attempt_id"] for attempt in attempts] == [0, 1]
+        base_attempt, retry_attempt = attempts
+        assert base_attempt["phase"] == "P0_BASE"
+        assert base_attempt["applied"] is None
+        assert base_attempt["reanalyzed_sides"] == ["function1", "function2"]
+        assert base_attempt["reason_before"] == []
+        assert base_attempt["reason_after"] == [UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT.value]
+        assert retry_attempt["phase"] == "P1_SIGNEDNESS"
+        assert retry_attempt["applied"] is True
+        assert retry_attempt["skipped_reason"] is None
+        # 実際に fresh 解析した側が changed side と一致する。
+        assert retry_attempt["reanalyzed_sides"] == retry["changed_sides"] == ["function1"]
+        assert retry_attempt["reason_before"] == [UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT.value]
+        assert retry_attempt["reason_after"] == [
+            UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value
+        ]
+
+    def test_unapplied_phase_records_that_it_did_not_reanalyze(
+        self, checker, program, program2
+    ):
         result, analyze_calls = self._run(
             checker,
             program,
+            program2,
             phase_result=PhaseResult(
                 PhaseID.P1_SIGNEDNESS,
                 applied=False,
@@ -387,15 +421,34 @@ class TestPhaseTimingThroughTheWorkflow:
         assert skipped["analysis_seconds_by_side"] == {}
         assert skipped["seconds"]["stage_plan"] == 0.0
         assert skipped["reason_before"] == skipped["reason_after"]
+        assert skipped["skipped_reason"] == PHASE_SKIPPED_NO_CHANGES
         assert all(row["reanalyzed_sides"] == [] for row in phases[1:])
         assert analyze_calls == {"func1": 1, "func2": 1}
 
+        # applied=False の phase も attempt として残り、その時点の reason を失わない。
+        attempts = result.to_dict()["debug_trace"]["attempts"]
+        assert [attempt["phase"] for attempt in attempts] == ["P0_BASE", "P1_SIGNEDNESS", "P2_PATTERN_INT"]
+        for attempt in attempts[1:]:
+            assert attempt["applied"] is False
+            assert attempt["skipped_reason"] == PHASE_SKIPPED_NO_CHANGES
+            assert attempt["reanalyzed_sides"] == []
+            assert attempt["reason_before"] == attempt["reason_after"] == [
+                UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT.value
+            ]
+            # この attempt は判定を実行していないので、reason occurrence は作らない
+            # （作ると proof completion / reason completion の対象が増えてしまう）。
+            assert attempt["unknown_reasons"] == []
+            assert attempt["reason_occurrences"] == []
+        # phase 行と attempt は attempt_id で 1 対 1 に対応する。
+        assert [row["attempt_id"] for row in phases[:3]] == [0, 1, 2]
+
     def test_phase_records_do_not_change_the_outcome_or_the_reason_set(
-        self, checker, program
+        self, checker, program, program2
     ):
         result, _ = self._run(
             checker,
             program,
+            program2,
             phase_result=PhaseResult(
                 PhaseID.P1_SIGNEDNESS,
                 applied=True,
@@ -412,3 +465,241 @@ class TestPhaseTimingThroughTheWorkflow:
         assert unknown_reason_ids(result) == [
             UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value
         ]
+
+    def test_sat_tail_records_the_p4c_and_p4a_phases(self, checker, program, program2):
+        """SAT が残る経路で P4-C / P4-A の phase 行と attempt が閉じられる。"""
+        analysis1 = create_mock_analysis("func1", return_type="ulong")
+        analysis2 = create_mock_analysis("func2", return_type="int")
+        analyze_calls = {"func1": 0, "func2": 0}
+
+        def _analyze(self, function_name, timeout):
+            analyze_calls[function_name] += 1
+            return analysis1 if function_name == "func1" else analysis2
+
+        stage_calls = []
+
+        def _stage_plan(*args, **kwargs):
+            stage_calls.append(kwargs.get("retry_count"))
+            result = create_mock_result(is_equivalent=False, solver_status=SolverStatus.SAT)
+            result.unknown_reasons = []
+            return result
+
+        phase_handler = Mock(spec=PhaseHandler)
+        # P4-C（戻り値型リトライ）は binary2、P4-A（MIPS64 ABI）は binary1 を変更する。
+        phase_handler.should_fix_return_type.return_value = True
+        phase_handler.run_phase2_return_type_fix.return_value = (True, False, True)
+        phase_handler.execute_phase.return_value = PhaseResult(
+            PhaseID.P4A_MIPS64_ABI,
+            applied=True,
+            retry_name="mips64_abi_fix",
+            changed_binary1=True,
+            changed_binary2=False,
+        )
+        phase_handler.run_phase4_mips64_retry.return_value = None
+        checker.phase_handler = phase_handler
+
+        with patch(
+            "scripts.function_tracer_pcode.analysis.returns.analyzer."
+            "ReturnAnalyzer.analyze_function_by_name",
+            _analyze,
+        ):
+            with patch.object(checker, "_run_stage_plan", side_effect=_stage_plan):
+                with patch("scripts.function_tracer_pcode.checker.checker.TypeFixer") as fixer:
+                    fixer.side_effect = lambda *args, **kwargs: Mock()
+                    result = checker.check_from_binaries(
+                        program1=program,
+                        program2=program2,
+                        function_name1="func1",
+                        function_name2="func2",
+                        decompile_timeout=60,
+                        save_formula=False,
+                        retry_with_type_fix=True,
+                    )
+
+        phases = result.to_dict()["diagnostics"]["timings"]["phases"]
+        attempts = result.to_dict()["debug_trace"]["attempts"]
+        assert [row["phase"] for row in phases] == [
+            "P0_BASE",
+            "P4C_RETURN_TYPE_FIX",
+            "P4A_MIPS64_ABI",
+        ]
+        assert [attempt["phase"] for attempt in attempts] == [
+            "P0_BASE",
+            "P4C_RETURN_TYPE_FIX",
+            "P4A_MIPS64_ABI",
+        ]
+        # phase 行 → attempt の対応は attempt_id で固定。
+        assert [row["attempt_id"] for row in phases] == [
+            attempt["attempt_id"] for attempt in attempts
+        ]
+
+        p4c_row, p4a_row = phases[1], phases[2]
+        assert p4c_row["applied"] is True and p4c_row["retry_name"] == "sat_return_type_fix"
+        assert p4c_row["changed_sides"] == p4c_row["reanalyzed_sides"] == ["function2"]
+        assert p4c_row["seconds"]["total"] >= p4c_row["seconds"]["stage_plan"] >= 0.0
+        assert p4a_row["applied"] is True and p4a_row["retry_name"] == "mips64_abi_fix"
+        assert p4a_row["changed_sides"] == p4a_row["reanalyzed_sides"] == ["function1"]
+
+        assert attempts[1]["applied"] is True
+        assert attempts[1]["reanalyzed_sides"] == ["function2"]
+        assert attempts[2]["applied"] is True
+        assert attempts[2]["reanalyzed_sides"] == ["function1"]
+        for attempt in attempts:
+            assert attempt["reason_before"] == attempt["reason_after"] == []
+        # P0 が両側、P4-C が binary2、P4-A が binary1 を fresh 解析している。
+        assert analyze_calls == {"func1": 2, "func2": 2}
+        assert len(stage_calls) == 3
+
+
+class TestPhaseTimelineLifecycle:
+    """`checker._phase_timeline` は 1 run の間だけ存在する"""
+
+    @pytest.fixture
+    def checker(self):
+        return EquivalenceChecker(
+            timeout=5,
+            debug=False,
+            strategy="pairwise",
+            canonical_decision_cutover=False,
+        )
+
+    @pytest.fixture
+    def program(self):
+        return MockProgram(name="test_binary.exe", architecture="x86:LE:64:default")
+
+    @staticmethod
+    def _run(checker, program):
+        def _analyze(self, function_name, timeout):
+            return create_mock_analysis(function_name)
+
+        with patch(
+            "scripts.function_tracer_pcode.analysis.returns.analyzer."
+            "ReturnAnalyzer.analyze_function_by_name",
+            _analyze,
+        ):
+            with patch.object(
+                checker,
+                "_run_stage_plan",
+                side_effect=lambda *a, **k: create_mock_result(
+                    is_equivalent=None, solver_status=SolverStatus.UNKNOWN
+                ),
+            ):
+                return checker.check_from_binaries(
+                    program1=program,
+                    program2=program,
+                    function_name1="func1",
+                    function_name2="func2",
+                    decompile_timeout=60,
+                    save_formula=False,
+                    retry_with_type_fix=False,
+                )
+
+    def test_run_does_not_leave_its_timeline_on_the_checker(self, checker, program):
+        result = self._run(checker, program)
+        assert result.to_dict()["diagnostics"]["timings"]["phases"]
+
+        assert not hasattr(checker, "_phase_timeline")
+        # workflow 外の呼び出しは前 run の記録先を掴まない。
+        detached = phase_timeline_of(checker)
+        detached.begin("P0_BASE")
+        detached.end()
+        assert len(detached.snapshot()) == 1
+        assert len(result.to_dict()["diagnostics"]["timings"]["phases"]) == 1
+
+    def test_an_existing_attribute_is_restored_after_the_run(self, checker, program):
+        outer = PhaseTimeline()
+        checker._phase_timeline = outer
+
+        self._run(checker, program)
+
+        assert checker._phase_timeline is outer
+        assert outer.snapshot() == []
+
+    def test_the_attribute_is_restored_when_the_run_raises(self, checker, program):
+        with patch.object(
+            checker, "_analyze_and_check_with_analysis", side_effect=RuntimeError("boom")
+        ):
+            with pytest.raises(RuntimeError):
+                self._run(checker, program)
+        assert not hasattr(checker, "_phase_timeline")
+
+        outer = PhaseTimeline()
+        checker._phase_timeline = outer
+        with patch.object(
+            checker, "_analyze_and_check_with_analysis", side_effect=RuntimeError("boom")
+        ):
+            with pytest.raises(RuntimeError):
+                self._run(checker, program)
+        assert checker._phase_timeline is outer
+
+
+class TestAttemptSerializationCompatibility:
+    """新 field は既定値を持ち、既存形式の payload を壊さない"""
+
+    def test_attempt_without_the_new_fields_serializes_with_neutral_defaults(self):
+        attempt = Attempt(
+            attempt_id=0,
+            retry_count=0,
+            phase="P0_BASE",
+            stage_path=[],
+            strategy="pairwise",
+            result=None,
+            transition_reason="UNKNOWN",
+        )
+        payload = attempt.to_dict()
+        assert payload["applied"] is None
+        assert payload["reanalyzed_sides"] == []
+        assert payload["skipped_reason"] is None
+        assert payload["reason_before"] == []
+        assert payload["reason_after"] == []
+
+    def test_legacy_attempt_payload_without_the_new_keys_still_aggregates(self):
+        from scripts.function_tracer_pcode.reporting.root_blocker_summary import (
+            summarize_root_blockers,
+        )
+
+        legacy_attempt = {
+            "attempt_id": 0,
+            "retry_count": 0,
+            "phase": "P0_BASE",
+            "strategy": "pairwise",
+            "result": None,
+            "transition_reason": "UNKNOWN",
+            "unknown_reasons": [_reason(UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT).to_dict()],
+        }
+        payload = {
+            "is_equivalent": None,
+            "case_id": "f",
+            "function1_name": "f",
+            "function2_name": "f",
+            "function1_identity": ("function", "left", "f", 0x1000, "sig-left"),
+            "function2_identity": ("function", "right", "f", 0x2000, "sig-right"),
+            "run_identity": "run-1",
+            "artifact_identity": ("run-1", "f"),
+            "binary1_content_identity": ("sha256", "left"),
+            "binary2_content_identity": ("sha256", "right"),
+            "debug_trace": {"final_result": None, "attempts": [legacy_attempt]},
+        }
+        summary = summarize_root_blockers([payload])
+        assert summary is not None
+
+    def test_legacy_diagnostics_without_the_phase_block_still_summarizes(self):
+        from scripts.function_tracer_pcode.reporting.unknown_reason_summary import (
+            summarize_validation_unknowns,
+        )
+
+        summary = summarize_validation_unknowns([
+            {
+                "final_outcome": "UNKNOWN",
+                "is_equivalent": None,
+                "unknown_reasons": [_reason(UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT).to_dict()],
+                "diagnostics": {
+                    "timings": {
+                        "total_seconds": 2.0,
+                        "analysis_seconds": {"function1": 0.5},
+                        "solver_seconds": 0.3,
+                    }
+                },
+            }
+        ])
+        assert summary.diagnostics_stats["results_with_diagnostics"] == 1

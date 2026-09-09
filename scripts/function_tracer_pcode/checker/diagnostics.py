@@ -12,6 +12,8 @@ import time
 from contextlib import contextmanager
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional
 
+from scripts.function_tracer_pcode.checker.debug_trace import TransitionReason
+
 DIAGNOSTICS_SCHEMA = "result-diagnostics-v1"
 
 
@@ -503,6 +505,10 @@ def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
 
 PHASE_TIMING_SCHEMA = "phase-timing-v1"
 
+# 「phase は実行したが型修正を何も適用しなかった」ことを表す機械可読な理由。
+# 既存の attempt 遷移理由と同じ語彙を使う（新しい語彙を作らない）。
+PHASE_SKIPPED_NO_CHANGES = TransitionReason.NO_CHANGES.value
+
 # 1 phase の内訳として計測する区間。`total` は phase 全体の実測値なので、
 # 内訳の合計とは一致しない（計測していない区間の分だけ total の方が大きい）。
 PHASE_TIMING_SEGMENTS = (
@@ -555,16 +561,25 @@ class PhaseTimeline:
         phase: str,
         *,
         retry_name: str = "",
+        attempt_id: Optional[int] = None,
         reason_before: Iterable[str] = (),
     ) -> None:
-        """phase の記録を開始する（閉じ忘れた記録があれば先に閉じる）。"""
+        """phase の記録を開始する（閉じ忘れた記録があれば先に閉じる）。
+
+        ``attempt_id`` は、この phase の結果が記録される attempt の id。phase 行と
+        ``timings.attempts[]`` / ``debug_trace.attempts[]`` の対応をこの id で固定し、
+        位置合わせのような不安定な対応付けを作らない。
+        """
         try:
             if self._current is not None:
                 self.end()
             self._current = {
                 "phase": str(phase),
                 "retry_name": str(retry_name),
-                "applied": False,
+                "attempt_id": attempt_id,
+                # 型修正の適用という概念が無い attempt（P0）は None のまま。
+                # False は「phase を実行したが何も適用されなかった」を意味する。
+                "applied": None,
                 "changed_sides": [],
                 "reanalyzed_sides": [],
                 "seconds": {segment: 0.0 for segment in PHASE_TIMING_SEGMENTS},
@@ -651,17 +666,24 @@ class PhaseTimeline:
         finally:
             self.add(segment, time.perf_counter() - started, side=side)
 
-    def end(self, *, reason_after: Iterable[str] = ()) -> None:
-        """phase の記録を閉じ、phase 全体の経過時間と後 reason を確定する。"""
+    def end(self, *, reason_after: Iterable[str] = ()) -> Optional[Dict[str, Any]]:
+        """phase の記録を閉じ、phase 全体の経過時間と後 reason を確定する。
+
+        閉じた行の snapshot を返す。呼び出し側はそれをそのまま attempt 記録へ渡せる
+        （phase 行と attempt が同じ観測から作られることを構成で保証する）。
+        """
         current = self._current
         if current is None:
-            return
+            return None
         try:
             current["seconds"]["total"] = max(0.0, time.perf_counter() - self._started)
             current["reason_after"] = [str(reason) for reason in reason_after]
+            if current.get("applied") is False:
+                current["skipped_reason"] = PHASE_SKIPPED_NO_CHANGES
             self.phases.append(current)
+            return self._snapshot_phase(current)
         except Exception:
-            pass
+            return None
         finally:
             self._current = None
 
@@ -678,7 +700,9 @@ class PhaseTimeline:
             "schema": PHASE_TIMING_SCHEMA,
             "phase": phase.get("phase"),
             "retry_name": phase.get("retry_name"),
+            "attempt_id": phase.get("attempt_id"),
             "applied": phase.get("applied"),
+            "skipped_reason": phase.get("skipped_reason"),
             "changed_sides": list(phase.get("changed_sides") or ()),
             "reanalyzed_sides": list(phase.get("reanalyzed_sides") or ()),
             "seconds": {

@@ -69,8 +69,14 @@ def record_attempt(
     mips64_abi_constraints: Optional[Dict[str, Any]],
     elapsed_time: float,
     unknown_reasons: Optional[List[Any]] = None,
+    phase_diagnostics: Optional[Mapping[str, Any]] = None,
 ) -> None:
-    """Attempt を追加する"""
+    """Attempt を追加する
+
+    ``phase_diagnostics`` は `PhaseTimeline.end()` が返した phase 行（Issue #107）。
+    その attempt に対応する phase の観測をそのまま載せるだけで、判定には関与しない。
+    """
+    phase_observation = _phase_observation(phase_diagnostics)
     attempt = Attempt(
         attempt_id=attempt_id,
         retry_count=retry_count,
@@ -97,8 +103,35 @@ def record_attempt(
         unknown_reasons=list(coerce_unknown_reason_records(unknown_reasons)),
         mips64_abi_constraints=mips64_abi_constraints,
         elapsed_time=elapsed_time,
+        **phase_observation,
     )
     debug_trace.add_attempt(attempt)
+
+
+def _phase_observation(phase_diagnostics: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """phase 行から attempt に載せる観測を取り出す（診断専用・fail-open）。
+
+    phase 行が無い attempt（ABI 制約リトライなど）は `applied=None` と空集合になる。
+    """
+    empty: Dict[str, Any] = {
+        "applied": None,
+        "reanalyzed_sides": [],
+        "skipped_reason": None,
+        "reason_before": [],
+        "reason_after": [],
+    }
+    if not isinstance(phase_diagnostics, Mapping):
+        return empty
+    try:
+        return {
+            "applied": phase_diagnostics.get("applied"),
+            "reanalyzed_sides": [str(side) for side in phase_diagnostics.get("reanalyzed_sides") or ()],
+            "skipped_reason": phase_diagnostics.get("skipped_reason"),
+            "reason_before": [str(reason) for reason in phase_diagnostics.get("reason_before") or ()],
+            "reason_after": [str(reason) for reason in phase_diagnostics.get("reason_after") or ()],
+        }
+    except Exception:  # diagnostics never fail the verdict
+        return empty
 
 
 def record_attempt_from_result(
@@ -109,7 +142,8 @@ def record_attempt_from_result(
     result: EquivalenceResult,
     transition_reason: str,
     type_fix_result: TypeFixResult,
-    strategy_name: str
+    strategy_name: str,
+    phase_diagnostics: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """EquivalenceResult から Attempt を構築して追加する"""
     pairwise_decisive = _build_pairwise_decisive_info(result)
@@ -143,6 +177,7 @@ def record_attempt_from_result(
         mips64_abi_constraints=mips64_abi_dict,
         elapsed_time=result.total_time,
         unknown_reasons=list(result.unknown_reasons),
+        phase_diagnostics=phase_diagnostics,
     )
     _record_explicit_proof_completions(debug_trace, result)
 

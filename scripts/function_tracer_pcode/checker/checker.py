@@ -488,7 +488,8 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         pairwise_decisive: Optional[PairwiseDecisiveInfo],
         normalization_rules: Optional[List],
         mips64_abi_constraints: Optional[Dict],
-        elapsed_time: float
+        elapsed_time: float,
+        phase_diagnostics: Optional[Mapping[str, Any]] = None,
     ):
         """Attempt を記録する互換ラッパー"""
         record_attempt(
@@ -516,6 +517,7 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             normalization_rules=normalization_rules,
             mips64_abi_constraints=mips64_abi_constraints,
             elapsed_time=elapsed_time,
+            phase_diagnostics=phase_diagnostics,
         )
     
     # ★ 新規: EquivalenceResult から Attempt を記録
@@ -527,7 +529,8 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         phase: str,
         result: EquivalenceResult,
         transition_reason: str,
-        type_fix_result: TypeFixResult
+        type_fix_result: TypeFixResult,
+        phase_diagnostics: Optional[Mapping[str, Any]] = None,
     ):
         """EquivalenceResult から Attempt を記録する互換ラッパー"""
         record_attempt_from_result(
@@ -539,6 +542,7 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             transition_reason=transition_reason,
             type_fix_result=type_fix_result,
             strategy_name=self.strategy_name,
+            phase_diagnostics=phase_diagnostics,
         )
     
     def _selective_reanalysis_and_check(
