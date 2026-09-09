@@ -486,6 +486,7 @@ def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
             "attempts": attempts_out,
             "stages": dict(base.get("stages") or {}),
             "boundary_seconds": dict(base.get("boundary_seconds") or {}),
+            "phases": list(base.get("phases") or []),
         },
         "expressions": dict(base.get("expressions") or {}),
         "caches": {
@@ -498,3 +499,222 @@ def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
         "solver_invocations": solver_invocations,
         "stage_path": list(getattr(result, "stage_path", ()) or ()),
     }
+
+
+PHASE_TIMING_SCHEMA = "phase-timing-v1"
+
+# 1 phase の内訳として計測する区間。`total` は phase 全体の実測値なので、
+# 内訳の合計とは一致しない（計測していない区間の分だけ total の方が大きい）。
+PHASE_TIMING_SEGMENTS = (
+    "phase_fix",
+    "analysis",
+    "hypothesis_replay",
+    "recurrence_refresh",
+    "stage_plan",
+)
+
+
+def unknown_reason_ids(result: Any) -> list:
+    """結果が保持する UNKNOWN reason id を安定順で返す（診断専用）。
+
+    phase 前後の reason 集合を比べるための観測で、判定にも reason 集合にも
+    影響しない。壊れた入力でも例外を出さず空リストを返す。
+    """
+    if result is None:
+        return []
+    try:
+        ids = set()
+        for reason in getattr(result, "unknown_reasons", None) or ():
+            reason_id = getattr(reason, "reason_id", None)
+            if reason_id is None and isinstance(reason, Mapping):
+                reason_id = reason.get("reason_id")
+            reason_id = getattr(reason_id, "value", reason_id)
+            if reason_id:
+                ids.add(str(reason_id))
+        return sorted(ids)
+    except Exception:
+        return []
+
+
+class PhaseTimeline:
+    """retry phase 1 件ごとの内訳時間と reason 遷移を記録する（Issue #107）。
+
+    `#107-B` 以降の削減余地を測るための観測専用ブロックであり、判定結果にも
+    最終 UNKNOWN reason 集合にも関与しない。``begin()`` から ``end()`` までを
+    1 phase とし、``measure()`` で囲んだ区間の秒数を種別ごとに加算する。
+    診断なので、記録に失敗しても例外を呼び出し側へ出さない。
+    """
+
+    def __init__(self) -> None:
+        self.phases: list = []
+        self._current: Optional[Dict[str, Any]] = None
+        self._started: float = 0.0
+
+    def begin(
+        self,
+        phase: str,
+        *,
+        retry_name: str = "",
+        reason_before: Iterable[str] = (),
+    ) -> None:
+        """phase の記録を開始する（閉じ忘れた記録があれば先に閉じる）。"""
+        try:
+            if self._current is not None:
+                self.end()
+            self._current = {
+                "phase": str(phase),
+                "retry_name": str(retry_name),
+                "applied": False,
+                "changed_sides": [],
+                "reanalyzed_sides": [],
+                "seconds": {segment: 0.0 for segment in PHASE_TIMING_SEGMENTS},
+                "analysis_seconds_by_side": {},
+                "reason_before": [str(reason) for reason in reason_before],
+                "reason_after": [],
+            }
+            self._started = time.perf_counter()
+        except Exception:
+            self._current = None
+
+    def record_applied(
+        self,
+        applied: bool,
+        changed_binary1: bool = False,
+        changed_binary2: bool = False,
+        *,
+        retry_name: Optional[str] = None,
+    ) -> None:
+        """型修正が適用されたか、どちら側の解析ビューが変わったかを記録する。"""
+        current = self._current
+        if current is None:
+            return
+        try:
+            current["applied"] = bool(applied)
+            if retry_name:
+                current["retry_name"] = str(retry_name)
+            changed = []
+            if changed_binary1:
+                changed.append("function1")
+            if changed_binary2:
+                changed.append("function2")
+            current["changed_sides"] = changed
+        except Exception:
+            return
+
+    def record_phase_result(self, phase_result: Any) -> None:
+        """``PhaseResult`` から適用状況を記録する。"""
+        if phase_result is None:
+            return
+        self.record_applied(
+            getattr(phase_result, "applied", False),
+            getattr(phase_result, "changed_binary1", False),
+            getattr(phase_result, "changed_binary2", False),
+            retry_name=getattr(phase_result, "retry_name", None),
+        )
+
+    def record_reanalyzed_side(self, side: str) -> None:
+        """この phase で fresh 解析し直した側を記録する。"""
+        current = self._current
+        if current is None:
+            return
+        try:
+            sides = current["reanalyzed_sides"]
+            if side not in sides:
+                sides.append(str(side))
+        except Exception:
+            return
+
+    def add(self, segment: str, seconds: float, *, side: Optional[str] = None) -> None:
+        """内訳区間へ秒数を加算する（同じ区間を複数回囲めば合算）。"""
+        current = self._current
+        if current is None:
+            return
+        try:
+            value = max(0.0, float(seconds))
+        except (TypeError, ValueError):
+            return
+        try:
+            totals = current["seconds"]
+            totals[segment] = totals.get(segment, 0.0) + value
+            if side is not None:
+                by_side = current["analysis_seconds_by_side"]
+                by_side[side] = by_side.get(side, 0.0) + value
+        except Exception:
+            return
+
+    @contextmanager
+    def measure(self, segment: str, *, side: Optional[str] = None) -> Iterator[None]:
+        """区間の経過時間を計測して加算する。``begin()`` 前なら何も記録しない。"""
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.add(segment, time.perf_counter() - started, side=side)
+
+    def end(self, *, reason_after: Iterable[str] = ()) -> None:
+        """phase の記録を閉じ、phase 全体の経過時間と後 reason を確定する。"""
+        current = self._current
+        if current is None:
+            return
+        try:
+            current["seconds"]["total"] = max(0.0, time.perf_counter() - self._started)
+            current["reason_after"] = [str(reason) for reason in reason_after]
+            self.phases.append(current)
+        except Exception:
+            pass
+        finally:
+            self._current = None
+
+    def snapshot(self) -> list:
+        """結果 JSON の診断ブロックへそのまま入る phase 行のリスト。"""
+        try:
+            return [self._snapshot_phase(phase) for phase in self.phases]
+        except Exception as exc:
+            return [{"error": f"{type(exc).__name__}: {exc}"[:200]}]
+
+    @staticmethod
+    def _snapshot_phase(phase: Mapping[str, Any]) -> Dict[str, Any]:
+        return {
+            "schema": PHASE_TIMING_SCHEMA,
+            "phase": phase.get("phase"),
+            "retry_name": phase.get("retry_name"),
+            "applied": phase.get("applied"),
+            "changed_sides": list(phase.get("changed_sides") or ()),
+            "reanalyzed_sides": list(phase.get("reanalyzed_sides") or ()),
+            "seconds": {
+                key: round(value, 6) for key, value in (phase.get("seconds") or {}).items()
+            },
+            "analysis_seconds_by_side": {
+                side: round(value, 6)
+                for side, value in (phase.get("analysis_seconds_by_side") or {}).items()
+            },
+            "reason_before": list(phase.get("reason_before") or ()),
+            "reason_after": list(phase.get("reason_after") or ()),
+        }
+
+
+def phase_timeline_of(checker: Any) -> PhaseTimeline:
+    """checker に紐づく phase timeline を返す。
+
+    workflow を経由しない呼び出し（単体テストや `check()` 直呼び）では記録先が
+    無いので、``begin()`` されていない timeline を返して no-op にする。
+    """
+    timeline = getattr(checker, "_phase_timeline", None)
+    if isinstance(timeline, PhaseTimeline):
+        return timeline
+    return PhaseTimeline()
+
+
+def attach_phase_timings(result: Any, timeline: Optional[PhaseTimeline]) -> None:
+    """結果の診断ブロックへ phase 別の内訳時間を添付する（署名対象外）。"""
+    if result is None or timeline is None:
+        return
+    try:
+        phases = timeline.snapshot()
+        if not phases:
+            return
+        diagnostics = dict(getattr(result, "diagnostics", None) or {})
+        diagnostics["phases"] = phases
+        result.diagnostics = diagnostics
+    except Exception:
+        return

@@ -11,7 +11,7 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext, PhaseResult
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
-from scripts.function_tracer_pcode.checker.diagnostics import AnalysisTimer
+from scripts.function_tracer_pcode.checker.diagnostics import AnalysisTimer, phase_timeline_of
 from scripts.function_tracer_pcode.checker.result_factory import (
     create_context_error_result,
     create_context_unknown_result,
@@ -35,6 +35,7 @@ def analyze_and_check_with_analysis(
     start_time = time.time()
     timer = AnalysisTimer()
     checker._analysis_timer = timer
+    phases = phase_timeline_of(checker)
 
     checker._debug_print(f"Analyzing function '{ctx.function_name1}' in {ctx.binary1_name}...")
     analyzer1 = ReturnAnalyzer(
@@ -45,10 +46,12 @@ def analyze_and_check_with_analysis(
         external_call_effect_policy=getattr(checker, "external_call_effect_policy", None),
     )
     try:
-        analysis1 = timer.timed(
-            "function1",
-            lambda: analyzer1.analyze_function_by_name(ctx.function_name1, ctx.decompile_timeout),
-        )
+        phases.record_reanalyzed_side("function1")
+        with phases.measure("analysis", side="function1"):
+            analysis1 = timer.timed(
+                "function1",
+                lambda: analyzer1.analyze_function_by_name(ctx.function_name1, ctx.decompile_timeout),
+            )
         timer.record_analysis("function1", analysis1)
         timer.record_callee_parameter_cache("function1", analyzer1)
         timer.record_callee_analysis_cache("function1", analyzer1)
@@ -90,10 +93,12 @@ def analyze_and_check_with_analysis(
         external_call_effect_policy=getattr(checker, "external_call_effect_policy", None),
     )
     try:
-        analysis2 = timer.timed(
-            "function2",
-            lambda: analyzer2.analyze_function_by_name(ctx.function_name2, ctx.decompile_timeout),
-        )
+        phases.record_reanalyzed_side("function2")
+        with phases.measure("analysis", side="function2"):
+            analysis2 = timer.timed(
+                "function2",
+                lambda: analyzer2.analyze_function_by_name(ctx.function_name2, ctx.decompile_timeout),
+            )
         timer.record_analysis("function2", analysis2)
         timer.record_callee_parameter_cache("function2", analyzer2)
         timer.record_callee_analysis_cache("function2", analyzer2)
@@ -134,17 +139,18 @@ def analyze_and_check_with_analysis(
         ctx.original_signature2 = FunctionSignature.from_analysis(analysis2)
 
     checker._debug_print("Running stage plan...")
-    result = checker._run_stage_plan(
-        analysis1,
-        analysis2,
-        ctx.binary1_name,
-        ctx.binary2_name,
-        ctx.save_formula,
-        type_fix_result=ctx.type_fix_result,
-        retry_count=retry_count,
-        original_signature1=ctx.original_signature1,
-        original_signature2=ctx.original_signature2,
-    )
+    with phases.measure("stage_plan"):
+        result = checker._run_stage_plan(
+            analysis1,
+            analysis2,
+            ctx.binary1_name,
+            ctx.binary2_name,
+            ctx.save_formula,
+            type_fix_result=ctx.type_fix_result,
+            retry_count=retry_count,
+            original_signature1=ctx.original_signature1,
+            original_signature2=ctx.original_signature2,
+        )
     _attach_analysis_diagnostics(checker, result)
 
     return analysis1, analysis2, result
@@ -205,10 +211,13 @@ def selective_reanalysis_and_check(
             side = "function1" if program is ctx.program1 else "function2"
             timer = getattr(checker, "_analysis_timer", None) or AnalysisTimer()
             checker._analysis_timer = timer
-            fresh_analysis = timer.timed(
-                side,
-                lambda: analyzer.analyze_function_by_name(function_name, ctx.decompile_timeout),
-            )
+            phases = phase_timeline_of(checker)
+            phases.record_reanalyzed_side(side)
+            with phases.measure("analysis", side=side):
+                fresh_analysis = timer.timed(
+                    side,
+                    lambda: analyzer.analyze_function_by_name(function_name, ctx.decompile_timeout),
+                )
             timer.record_analysis(side, fresh_analysis)
             timer.record_callee_parameter_cache(side, analyzer)
             timer.record_callee_analysis_cache(side, analyzer)
@@ -221,18 +230,20 @@ def selective_reanalysis_and_check(
                 )
                 return None, error_message, failure_status
 
-            replayed = fresh_analysis
-            for hypothesis_payload in list(getattr(cached_analysis, "signature_hypotheses", []) or []):
-                hypothesis = SignatureHypothesis.from_dict(
-                    hypothesis_payload,
-                    program=program,
-                )
-                replayed = replayed.with_signature_hypothesis(hypothesis)
+            with phases.measure("hypothesis_replay"):
+                replayed = fresh_analysis
+                for hypothesis_payload in list(getattr(cached_analysis, "signature_hypotheses", []) or []):
+                    hypothesis = SignatureHypothesis.from_dict(
+                        hypothesis_payload,
+                        program=program,
+                    )
+                    replayed = replayed.with_signature_hypothesis(hypothesis)
             if getattr(replayed, "signature_hypotheses", None):
-                replayed = analyzer.refresh_structural_recurrence_summary(
-                    replayed,
-                    timeout=ctx.decompile_timeout,
-                )
+                with phases.measure("recurrence_refresh"):
+                    replayed = analyzer.refresh_structural_recurrence_summary(
+                        replayed,
+                        timeout=ctx.decompile_timeout,
+                    )
             return replayed, None, None
         finally:
             analyzer.dispose()
@@ -298,17 +309,18 @@ def selective_reanalysis_and_check(
     ctx.analysis1 = analysis1
     ctx.analysis2 = analysis2
 
-    result = checker._run_stage_plan(
-        analysis1,
-        analysis2,
-        ctx.binary1_name,
-        ctx.binary2_name,
-        ctx.save_formula,
-        type_fix_result=ctx.type_fix_result,
-        retry_count=retry_count,
-        original_signature1=ctx.original_signature1,
-        original_signature2=ctx.original_signature2,
-    )
+    with phase_timeline_of(checker).measure("stage_plan"):
+        result = checker._run_stage_plan(
+            analysis1,
+            analysis2,
+            ctx.binary1_name,
+            ctx.binary2_name,
+            ctx.save_formula,
+            type_fix_result=ctx.type_fix_result,
+            retry_count=retry_count,
+            original_signature1=ctx.original_signature1,
+            original_signature2=ctx.original_signature2,
+        )
     _attach_analysis_diagnostics(checker, result)
 
     return analysis1, analysis2, result
