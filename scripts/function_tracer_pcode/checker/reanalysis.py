@@ -52,6 +52,7 @@ def analyze_and_check_with_analysis(
         timer.record_analysis("function1", analysis1)
         timer.record_callee_parameter_cache("function1", analyzer1)
         timer.record_callee_analysis_cache("function1", analyzer1)
+        timer.record_callee_unbound_reuse("function1", analyzer1)
         if analysis1 is None:
             failure = analyzer1.get_last_analysis_failure()
             failure_status = getattr(failure, "status", None)
@@ -96,6 +97,7 @@ def analyze_and_check_with_analysis(
         timer.record_analysis("function2", analysis2)
         timer.record_callee_parameter_cache("function2", analyzer2)
         timer.record_callee_analysis_cache("function2", analyzer2)
+        timer.record_callee_unbound_reuse("function2", analyzer2)
         if analysis2 is None:
             failure = analyzer2.get_last_analysis_failure()
             failure_status = getattr(failure, "status", None)
@@ -210,6 +212,7 @@ def selective_reanalysis_and_check(
             timer.record_analysis(side, fresh_analysis)
             timer.record_callee_parameter_cache(side, analyzer)
             timer.record_callee_analysis_cache(side, analyzer)
+            timer.record_callee_unbound_reuse(side, analyzer)
             if fresh_analysis is None:
                 failure = analyzer.get_last_analysis_failure()
                 failure_status = getattr(failure, "status", None)

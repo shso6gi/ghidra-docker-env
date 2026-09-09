@@ -49,6 +49,12 @@ FT_EXPANDER_DEDUP_CASE_LIMIT_REQUESTED="${FT_EXPANDER_DEDUP_CASE_LIMIT-}"
 FT_EXPANDER_DEDUP_CASE_LIMIT="$(validation_positive_int_setting \
     "$FT_EXPANDER_DEDUP_CASE_LIMIT_REQUESTED" 16)"
 export FT_EXPANDER_DEDUP_CASE_LIMIT
+# Issue #47 (PR-B): eligible external placeholder callee の束縛ゼロ解析再利用と、その
+# shadow validation。既定は解析器と同じ（再利用 ON / shadow OFF）。shadow は回帰検査用で、
+# 有効にすると従来解析も併走するため削減効果は測れない。
+FT_CALLEE_UNBOUND_REUSE="${FT_CALLEE_UNBOUND_REUSE:-1}"
+FT_CALLEE_UNBOUND_REUSE_SHADOW="${FT_CALLEE_UNBOUND_REUSE_SHADOW:-0}"
+export FT_CALLEE_UNBOUND_REUSE FT_CALLEE_UNBOUND_REUSE_SHADOW
 EQBENCH_RESOURCE_ADMISSION="${EQBENCH_RESOURCE_ADMISSION:-1}"
 EQBENCH_CPU_TOKENS="${EQBENCH_CPU_TOKENS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || printf '1')}"
 EQBENCH_PAIR_CPU_TOKENS="${EQBENCH_PAIR_CPU_TOKENS:-8}"
@@ -549,6 +555,8 @@ run_pair() {
         env "TMPDIR=$pair_tmpdir" "TEMP=$pair_tmpdir" "TMP=$pair_tmpdir"
         "UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE=$result_entry_occurrence_nonce"
         "FT_EXPANDER_DEDUP_CASE_LIMIT=$FT_EXPANDER_DEDUP_CASE_LIMIT"
+        "FT_CALLEE_UNBOUND_REUSE=$FT_CALLEE_UNBOUND_REUSE"
+        "FT_CALLEE_UNBOUND_REUSE_SHADOW=$FT_CALLEE_UNBOUND_REUSE_SHADOW"
         "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main
         --equiv "$left_bin" "$right_bin" \
         --binary-ids "$left_id" "$right_id" \
@@ -938,6 +946,8 @@ pairwise_timeout=$PAIRWISE_TIMEOUT
 pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD
 expander_dedup_case_limit_requested=$(validation_manifest_value "$FT_EXPANDER_DEDUP_CASE_LIMIT_REQUESTED")
 expander_dedup_case_limit_effective=$FT_EXPANDER_DEDUP_CASE_LIMIT
+callee_unbound_reuse=$FT_CALLEE_UNBOUND_REUSE
+callee_unbound_reuse_shadow=$FT_CALLEE_UNBOUND_REUSE_SHADOW
 skip_completed_results=$SKIP_COMPLETED_RESULTS
 error_only_rerun=$ERROR_ONLY_RERUN
 debug=$EQBENCH_DEBUG
@@ -1445,6 +1455,8 @@ fi
     "PAIRWISE_TIMEOUT=$PAIRWISE_TIMEOUT" \
     "PAIRWISE_TIMEOUT_HARD=$PAIRWISE_TIMEOUT_HARD" \
     "FT_EXPANDER_DEDUP_CASE_LIMIT=$FT_EXPANDER_DEDUP_CASE_LIMIT_REQUESTED" \
+    "FT_CALLEE_UNBOUND_REUSE=$FT_CALLEE_UNBOUND_REUSE" \
+    "FT_CALLEE_UNBOUND_REUSE_SHADOW=$FT_CALLEE_UNBOUND_REUSE_SHADOW" \
     "PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT" \
     "PAIR_PROCESS_KILL_AFTER=$PAIR_PROCESS_KILL_AFTER" \
     "./eqbench_run_all_32jobs.sh"

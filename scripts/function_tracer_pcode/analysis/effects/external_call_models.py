@@ -43,6 +43,10 @@ from scripts.function_tracer_pcode.analysis.effects.models import EffectSummary
 #: Longest thunk chain the resolver follows before giving up (fail closed).
 MAX_THUNK_CHAIN_LENGTH = 8
 
+#: The one ``unsupported`` reason that means "resolved cleanly, and the callee it
+#: resolves to is external".  Every other reason is *unknowable*, not external.
+EXTERNAL_CALLEE_EFFECT_UNMODELED = "external_callee_effect_unmodeled"
+
 
 @dataclass(frozen=True)
 class ExternalCallEffectPolicy:
@@ -186,5 +190,24 @@ def resolve_effect_callee(
     except _ClassificationUnavailable:
         return _unsupported("callee_classification_unavailable", resolved)
     if external:
-        return _unsupported("external_callee_effect_unmodeled", resolved)
+        return _unsupported(EXTERNAL_CALLEE_EFFECT_UNMODELED, resolved)
     return EffectCalleeResolution("analyze", function=resolved)
+
+
+def resolution_is_confirmed_external(resolution: Optional[EffectCalleeResolution]) -> bool:
+    """Is ``resolution`` the *unambiguous* "this callee is external" answer?
+
+    Read-only classification helper (Issue #47 PR-B): it adds no policy of its
+    own and changes no effect-lane decision.  ``resolve_effect_callee`` reports
+    "unsupported" both for a callee it *knows* is external and for one whose
+    classification it could not obtain (a cyclic or over-long thunk chain, an
+    unresolvable thunk target, a classification API that raised).  Only the
+    first is evidence of anything; the rest must keep their fail-closed
+    treatment wherever a caller asks this question.
+    """
+
+    return (
+        resolution is not None
+        and resolution.kind == "unsupported"
+        and resolution.reason == EXTERNAL_CALLEE_EFFECT_UNMODELED
+    )
