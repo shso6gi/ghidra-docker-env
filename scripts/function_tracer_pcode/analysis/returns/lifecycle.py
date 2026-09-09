@@ -202,12 +202,15 @@ def _impl__analysis_scope_key(
 
 ANALYSIS_SCOPE_KEY_TAG = "analysis_scope"
 
-# ``_analysis_scope_key()`` の構成要素で分類した miss 原因（診断専用のラベル）。
-CALLEE_ANALYSIS_MISS_TARGET_FIRST = "target_first_analysis"
-CALLEE_ANALYSIS_MISS_BOUND_SIGNATURE = "bound_signature_differs"
-CALLEE_ANALYSIS_MISS_STORAGE_BOUND_SIGNATURE = "storage_bound_signature_differs"
-CALLEE_ANALYSIS_MISS_BOTH_SIGNATURES = "bound_and_storage_bound_signature_differ"
-CALLEE_ANALYSIS_MISS_UNCLASSIFIED = "unclassified"
+# miss 原因のラベルは診断状態の所有者（runtime_state）が定義する。分類そのものは
+# scope key を作るこの module の純関数が行う。
+from scripts.function_tracer_pcode.analysis.runtime_state import (  # noqa: E402
+    CALLEE_ANALYSIS_MISS_BOTH_SIGNATURES,
+    CALLEE_ANALYSIS_MISS_BOUND_SIGNATURE,
+    CALLEE_ANALYSIS_MISS_STORAGE_BOUND_SIGNATURE,
+    CALLEE_ANALYSIS_MISS_TARGET_FIRST,
+    CALLEE_ANALYSIS_MISS_UNCLASSIFIED,
+)
 
 
 def analysis_scope_key_components(key) -> Optional[Tuple[Any, Any, Any]]:

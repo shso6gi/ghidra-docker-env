@@ -132,6 +132,14 @@ class CalleeParameterDecompileCacheStats:
 
 CALLEE_ANALYSIS_CACHE_DIAGNOSTICS_SCHEMA = "callee-analysis-cache-v1"
 
+# ``_analysis_scope_key()`` の構成要素で分類した miss 原因（診断専用のラベル）。
+# 分類そのものは ``analysis.returns.lifecycle`` の純関数が行う。
+CALLEE_ANALYSIS_MISS_TARGET_FIRST = "target_first_analysis"
+CALLEE_ANALYSIS_MISS_BOUND_SIGNATURE = "bound_signature_differs"
+CALLEE_ANALYSIS_MISS_STORAGE_BOUND_SIGNATURE = "storage_bound_signature_differs"
+CALLEE_ANALYSIS_MISS_BOTH_SIGNATURES = "bound_and_storage_bound_signature_differ"
+CALLEE_ANALYSIS_MISS_UNCLASSIFIED = "unclassified"
+
 # 1 pair の診断 JSON が無制限に伸びないための上限。超えた分は件数だけ残す。
 CALLEE_ANALYSIS_CACHE_TARGET_REPORT_LIMIT = 50
 
@@ -143,6 +151,9 @@ class CalleeAnalysisTargetStats:
     identity: str
     is_external: Optional[bool] = None
     is_thunk: Optional[bool] = None
+    # thunk の場合、その先が external か。「本体を持つ internal callee」と
+    # 「external への thunk」を診断だけで区別するために持つ（#47-B / #47-C の切り分け）。
+    thunked_is_external: Optional[bool] = None
     hits: int = 0
     misses: int = 0
     miss_reasons: Dict[str, int] = field(default_factory=dict)
@@ -161,10 +172,13 @@ class CalleeAnalysisTargetStats:
             "bound_misses_without_unbound_entry": self.bound_misses_without_unbound_entry,
             "distinct_scope_keys": self.distinct_scope_keys,
         }
+        payload.update(binding_induced_miss_counts(self.miss_reasons))
         if self.is_external is not None:
             payload["is_external"] = bool(self.is_external)
         if self.is_thunk is not None:
             payload["is_thunk"] = bool(self.is_thunk)
+        if self.thunked_is_external is not None:
+            payload["thunked_is_external"] = bool(self.thunked_is_external)
         return payload
 
 
@@ -193,11 +207,15 @@ class CalleeAnalysisCacheStats:
         *,
         is_external: Optional[bool] = None,
         is_thunk: Optional[bool] = None,
+        thunked_is_external: Optional[bool] = None,
     ) -> CalleeAnalysisTargetStats:
         entry = self.targets.get(identity)
         if entry is None:
             entry = CalleeAnalysisTargetStats(
-                identity=identity, is_external=is_external, is_thunk=is_thunk
+                identity=identity,
+                is_external=is_external,
+                is_thunk=is_thunk,
+                thunked_is_external=thunked_is_external,
             )
             self.targets[identity] = entry
         return entry
@@ -208,9 +226,15 @@ class CalleeAnalysisCacheStats:
         *,
         is_external: Optional[bool] = None,
         is_thunk: Optional[bool] = None,
+        thunked_is_external: Optional[bool] = None,
     ) -> None:
         self.hits += 1
-        self._target(identity, is_external=is_external, is_thunk=is_thunk).hits += 1
+        self._target(
+            identity,
+            is_external=is_external,
+            is_thunk=is_thunk,
+            thunked_is_external=thunked_is_external,
+        ).hits += 1
 
     def record_miss(
         self,
@@ -219,12 +243,18 @@ class CalleeAnalysisCacheStats:
         *,
         is_external: Optional[bool] = None,
         is_thunk: Optional[bool] = None,
+        thunked_is_external: Optional[bool] = None,
         unbound_entry_absent: bool = False,
         same_target_scope_keys: int = 0,
     ) -> None:
         self.misses += 1
         self.miss_reasons[reason] = self.miss_reasons.get(reason, 0) + 1
-        entry = self._target(identity, is_external=is_external, is_thunk=is_thunk)
+        entry = self._target(
+            identity,
+            is_external=is_external,
+            is_thunk=is_thunk,
+            thunked_is_external=thunked_is_external,
+        )
         entry.misses += 1
         entry.miss_reasons[reason] = entry.miss_reasons.get(reason, 0) + 1
         # この miss 自身が新しい scope key なので、観測済み key 数 + 1 を保持する。
@@ -245,12 +275,33 @@ class CalleeAnalysisCacheStats:
             "miss_reasons": dict(sorted(self.miss_reasons.items())),
             "bound_misses_without_unbound_entry": self.bound_misses_without_unbound_entry,
             "targets": [entry.snapshot() for entry in reported],
+            **binding_induced_miss_counts(self.miss_reasons),
             "targets_truncated": max(0, len(ordered) - len(reported)),
             "repeated_miss_targets": repeated_miss_targets(
                 entry.snapshot() for entry in ordered
             ),
         }
         return payload
+
+
+def binding_induced_miss_counts(miss_reasons: Optional[Mapping[str, int]]) -> Dict[str, int]:
+    """miss 原因の内訳から、束縛差が原因の miss 回数を成分ごとに数える。
+
+    「両方違う」は bound / storage-bound の双方に数える（どちらの成分でも再解析を
+    引き起こしているため）。内訳は ``miss_reasons`` にそのまま残るので情報は失わない。
+    """
+    reasons = dict(miss_reasons or {})
+    both = int(reasons.get(CALLEE_ANALYSIS_MISS_BOTH_SIGNATURES, 0) or 0)
+    return {
+        "bound_signature_induced_misses": int(
+            reasons.get(CALLEE_ANALYSIS_MISS_BOUND_SIGNATURE, 0) or 0
+        )
+        + both,
+        "storage_bound_signature_induced_misses": int(
+            reasons.get(CALLEE_ANALYSIS_MISS_STORAGE_BOUND_SIGNATURE, 0) or 0
+        )
+        + both,
+    }
 
 
 def repeated_miss_targets(target_snapshots) -> Dict[str, List[str]]:

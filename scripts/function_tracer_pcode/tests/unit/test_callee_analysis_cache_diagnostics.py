@@ -126,10 +126,10 @@ def _analyzer():
     return ReturnAnalyzer(program=Mock(), debug=False)
 
 
-def _ref(name="callee", entry=0x401000, external=False):
+def _ref(name="callee", entry=0x401000, external=False, thunk=False, thunked_external=None):
     return CallTargetRef(
         kind="function", function_name=name, program_id=11, entry_offset=entry,
-        is_external=external, is_thunk=False,
+        is_external=external, is_thunk=thunk, thunked_is_external=thunked_external,
     )
 
 
@@ -160,6 +160,9 @@ def test_lookup_records_hits_and_bound_misses_per_target():
     assert row["hits"] == 1 and row["misses"] == 2
     assert row["miss_reasons"] == {"bound_signature_differs": 2}
     assert row["is_external"] is False
+    assert row["bound_signature_induced_misses"] == 2
+    assert row["storage_bound_signature_induced_misses"] == 0
+    assert payload["bound_signature_induced_misses"] == 2
     assert payload["entries"] == 2
 
 
@@ -206,6 +209,40 @@ def test_analyze_function_records_the_cache_hit_it_returns():
     payload = analyzer.callee_analysis_cache_diagnostics()
     assert payload["hits"] == 1 and payload["misses"] == 0
     assert payload["targets"][0]["target"] == "function:callee@0x401000"
+
+
+def test_a_thunk_to_an_external_is_distinguishable_from_an_internal_callee():
+    """#47-B（external / thunk）と #47-C（本体を持つ internal）を診断だけで切り分ける。"""
+    analyzer = _analyzer()
+    thunk_ref = _ref(name="log", entry=0x401100, thunk=True, thunked_external=True)
+    internal_ref = _ref(name="helper", entry=0x401200)
+    _record_callee_analysis_cache_lookup(analyzer, thunk_ref, _key(target=("function", 11, 0x401100)), None)
+    _record_callee_analysis_cache_lookup(analyzer, internal_ref, _key(target=("function", 11, 0x401200)), None)
+
+    rows = {row["target"]: row for row in analyzer.callee_analysis_cache_diagnostics()["targets"]}
+    assert rows["function:log@0x401100"]["is_thunk"] is True
+    assert rows["function:log@0x401100"]["thunked_is_external"] is True
+    assert rows["function:helper@0x401200"]["is_thunk"] is False
+    assert "thunked_is_external" not in rows["function:helper@0x401200"]
+
+
+def test_binding_induced_counts_include_the_both_signatures_reason():
+    from scripts.function_tracer_pcode.analysis.runtime_state import binding_induced_miss_counts
+
+    counts = binding_induced_miss_counts({
+        "bound_signature_differs": 1,
+        "storage_bound_signature_differs": 2,
+        "bound_and_storage_bound_signature_differ": 4,
+        "target_first_analysis": 7,
+    })
+    assert counts == {
+        "bound_signature_induced_misses": 5,
+        "storage_bound_signature_induced_misses": 6,
+    }
+    assert binding_induced_miss_counts(None) == {
+        "bound_signature_induced_misses": 0,
+        "storage_bound_signature_induced_misses": 0,
+    }
 
 
 def test_repeated_miss_targets_lists_only_reasons_seen_at_least_twice():

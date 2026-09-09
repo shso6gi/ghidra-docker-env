@@ -111,6 +111,9 @@ def test_analysis_timer_accumulates_callee_analysis_cache_stats_per_side():
     assert stats["analyzer_instances"] == 2 and stats["cache_entries"] == 5
     row = stats["targets"][0]
     assert row["hits"] == 5 and row["misses"] == 5 and row["distinct_scope_keys"] == 4
+    assert row["bound_signature_induced_misses"] == 3
+    assert stats["bound_signature_induced_misses"] == 3
+    assert stats["storage_bound_signature_induced_misses"] == 0
     assert stats["repeated_miss_targets"] == {
         "bound_signature_differs": ["function:log@0x1000"],
         "target_first_analysis": ["function:log@0x1000"],

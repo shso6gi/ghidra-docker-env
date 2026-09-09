@@ -61,8 +61,14 @@ def _record_callee_analysis_cache_lookup(
         identity = analysis_cache_target_identity(target_ref)
         is_external = getattr(target_ref, "is_external", None)
         is_thunk = getattr(target_ref, "is_thunk", None)
+        thunked_is_external = getattr(target_ref, "thunked_is_external", None)
         if cached_analysis is not None:
-            stats.record_hit(identity, is_external=is_external, is_thunk=is_thunk)
+            stats.record_hit(
+                identity,
+                is_external=is_external,
+                is_thunk=is_thunk,
+                thunked_is_external=thunked_is_external,
+            )
             return
         reason, unbound_entry_absent, same_target_scope_keys = classify_analysis_scope_cache_miss(
             analysis_scope_key,
@@ -73,6 +79,7 @@ def _record_callee_analysis_cache_lookup(
             reason,
             is_external=is_external,
             is_thunk=is_thunk,
+            thunked_is_external=thunked_is_external,
             unbound_entry_absent=unbound_entry_absent,
             same_target_scope_keys=same_target_scope_keys,
         )

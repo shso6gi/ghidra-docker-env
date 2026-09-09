@@ -175,6 +175,12 @@ def _merge_cache_stats(
     return merged
 
 
+def _binding_induced_miss_counts(miss_reasons) -> Dict[str, int]:
+    from scripts.function_tracer_pcode.analysis.runtime_state import binding_induced_miss_counts
+
+    return binding_induced_miss_counts(miss_reasons)
+
+
 def _merge_target_rows(
     accumulated: Iterable[Mapping[str, Any]], observed: Iterable[Mapping[str, Any]]
 ) -> list:
@@ -197,9 +203,10 @@ def _merge_target_rows(
             int(current.get("distinct_scope_keys", 0) or 0),
             int(row.get("distinct_scope_keys", 0) or 0),
         )
-        for key in ("is_external", "is_thunk"):
+        for key in ("is_external", "is_thunk", "thunked_is_external"):
             if current.get(key) is None and row.get(key) is not None:
                 current[key] = row.get(key)
+        current.update(_binding_induced_miss_counts(current.get("miss_reasons")))
     return sorted(
         rows.values(),
         key=lambda row: (-int(row.get("misses", 0) or 0), -int(row.get("hits", 0) or 0), str(row.get("target"))),
@@ -229,6 +236,7 @@ def _merge_analysis_cache_stats(
     for reason, count in (observed.get("miss_reasons") or {}).items():
         totals[reason] = totals.get(reason, 0) + int(count or 0)
     merged["miss_reasons"] = dict(sorted(totals.items()))
+    merged.update(_binding_induced_miss_counts(merged["miss_reasons"]))
     merged["targets"] = _merge_target_rows(
         merged.get("targets") or (), observed.get("targets") or ()
     )
