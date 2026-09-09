@@ -269,6 +269,16 @@ RETRY_ANALYSIS_REUSE_ENABLED = _bool_setting("FT_RETRY_ANALYSIS_REUSE", True)
 # 再利用ビューと従来の fresh 再解析を両方構成して semantic fingerprint を比較する
 # shadow validation。**既定は有効**で、fresh 側を authoritative にするため再利用による
 # 削減は起きない。無効にすると再利用のみを構成する（reuse mode）。
+#
+# **reuse mode はまだ検証を通っていない。既定を無効側へ倒さないこと。**
+# 固定 subset を reuse mode で流すと、outcome は不変だが `dart/test` の 3 pair で
+# 最終 UNKNOWN reason 集合から `outcome_same_kind_consistency_unproven` が消える。
+# 原因は、比較に使う `AnalysisSnapshot.from_function_analysis()` が
+# `to_dict()` → `parameters_without_runtime_objects()` を通るため
+# `data_type_obj` を落とすのに対し、P4-A の適用判定
+# (`checker/arch/mips64.py` の `_get_param_type_string` / `_get_param_size`) は
+# その `data_type_obj` を先に読むこと。semantic fingerprint が一致していても
+# phase の適用可否が変わり得るので、この指紋だけでは reuse の等価性を保証できない。
 RETRY_ANALYSIS_REUSE_SHADOW = _bool_setting("FT_RETRY_ANALYSIS_REUSE_SHADOW", True)
 
 
