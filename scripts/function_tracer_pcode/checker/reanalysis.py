@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """解析と再解析のヘルパー"""
 
+from contextlib import nullcontext
 from typing import Optional, Tuple
 import time
 
@@ -9,9 +10,26 @@ from scripts.function_tracer_pcode.core import (
     FunctionSignature,
     SignatureHypothesis,
 )
-from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext, PhaseResult
+from scripts.function_tracer_pcode.checker.phases.handler import (
+    PhaseContext,
+    PhaseResult,
+    RetryAnalysisBase,
+)
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
-from scripts.function_tracer_pcode.checker.diagnostics import AnalysisTimer, phase_timeline_of
+from scripts.function_tracer_pcode.checker.diagnostics import (
+    ANALYSIS_SOURCE_FRESH,
+    ANALYSIS_SOURCE_REUSE,
+    REUSE_FALLBACK_BASE_SNAPSHOT_MUTATED,
+    REUSE_FALLBACK_CONSTRUCTION_FAILED,
+    REUSE_FALLBACK_FINGERPRINT_UNAVAILABLE,
+    REUSE_FALLBACK_MODIFICATION_NUMBER_CHANGED,
+    REUSE_FALLBACK_MODIFICATION_NUMBER_UNAVAILABLE,
+    REUSE_FALLBACK_NO_SNAPSHOT,
+    REUSE_FALLBACK_PROGRAM_IDENTITY_CHANGED,
+    REUSE_FALLBACK_SHADOW_MISMATCH,
+    AnalysisTimer,
+    phase_timeline_of,
+)
 from scripts.function_tracer_pcode.checker.result_factory import (
     create_context_error_result,
     create_context_unknown_result,
@@ -22,6 +40,126 @@ from scripts.function_tracer_pcode.analysis.failure import (
     ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS,
     ANALYSIS_STATUS_HIGH_FUNCTION_MISSING,
 )
+
+
+def semantic_fingerprint_of(analysis) -> Optional[str]:
+    """解析ビューの semantic fingerprint を返す（生成できなければ ``None``）。
+
+    Issue #107 (PR-B): 既存の ``AnalysisSnapshot`` を使い、独自の指紋機構は作らない。
+    ``snapshot_id`` は ``semantic_fingerprint`` の入力に含まれているので、この 1 つの
+    文字列を比べれば取り違えも検出できる。opaque object を含むなどで正規化できない
+    入力に対して ``SnapshotFingerprintCodec`` は例外を送出するので、その場合は ``None``
+    を返し、呼び出し側は「再利用できない」として fresh へ倒す。**診断のための指紋生成が
+    失敗しても判定を壊さない。**
+    """
+    if analysis is None:
+        return None
+    try:
+        from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
+
+        return str(AnalysisSnapshot.from_function_analysis(analysis).semantic_fingerprint)
+    except Exception:
+        return None
+
+
+def program_modification_number(program) -> Optional[int]:
+    """Program の変更世代を返す（読めなければ ``None`` = 判定不能）。
+
+    Ghidra の ``DomainObject.getModificationNumber()`` をそのまま読む。型修正自体は
+    Program を書き換えないが、解析は ``DisassembleCommand`` で Program を書き換え得る
+    （``analysis/returns/lifecycle.py``）ので、「型修正が Program を触らない」ことだけでは
+    base snapshot の有効性を保証できない。意味的に無害な増加で fresh に倒れることは
+    あっても、書き換えを見落とさない側を採る。
+    """
+    if program is None:
+        return None
+    getter = getattr(program, "getModificationNumber", None)
+    if not callable(getter):
+        return None
+    try:
+        value = getter()
+    except Exception:
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_retry_analysis_base(program, analysis) -> Optional[RetryAnalysisBase]:
+    """raw 解析から再利用用の base state を作る。
+
+    解析の複製・Program の世代・複製の指紋の 3 つが揃わなければ ``None`` を返す
+    （途中まで作った state を残さない）。複製は既存の ``semantic_successor()`` に任せ、
+    新しい copy 規約を作らない。
+    """
+    if analysis is None:
+        return None
+    modification_number = program_modification_number(program)
+    if modification_number is None:
+        return None
+    try:
+        copied = analysis.semantic_successor()
+    except Exception:
+        return None
+    fingerprint = semantic_fingerprint_of(copied)
+    if fingerprint is None:
+        return None
+    return RetryAnalysisBase(
+        analysis=copied,
+        program=program,
+        modification_number=modification_number,
+        semantic_fingerprint=fingerprint,
+    )
+
+
+def _store_retry_analysis_base(ctx: PhaseContext, side: str, base) -> None:
+    """base state を PhaseContext へ入れる（3 要素は一体でしか入らない）。"""
+    if base is None:
+        return
+    if side == "function1":
+        ctx.retry_analysis_base1 = base
+    else:
+        ctx.retry_analysis_base2 = base
+
+
+def _retry_analysis_base(ctx: PhaseContext, side: str) -> Optional[RetryAnalysisBase]:
+    return ctx.retry_analysis_base1 if side == "function1" else ctx.retry_analysis_base2
+
+
+def _seed_retry_analysis_base(ctx: PhaseContext, side: str, program, analysis) -> None:
+    """P0 の raw 解析から base state を作る（作れなければ何も入れず、後で fresh に倒れる）。"""
+    _store_retry_analysis_base(ctx, side, build_retry_analysis_base(program, analysis))
+
+
+def _retry_reuse_enabled() -> bool:
+    from scripts.function_tracer_pcode.config import settings
+
+    return bool(getattr(settings, "RETRY_ANALYSIS_REUSE_ENABLED", True))
+
+
+def _retry_reuse_shadow_enabled() -> bool:
+    from scripts.function_tracer_pcode.config import settings
+
+    return bool(getattr(settings, "RETRY_ANALYSIS_REUSE_SHADOW", True))
+
+
+def _replay_signature_hypotheses(analysis, cached_analysis, program):
+    """累積した型仮説を、記録された順序のまま重ねる。
+
+    fresh 経路と再利用経路が同じ関数を使うことで、replay の順序が経路によって
+    変わらないことを構成で保証する。
+    """
+    replayed = analysis
+    for hypothesis_payload in list(getattr(cached_analysis, "signature_hypotheses", []) or []):
+        hypothesis = SignatureHypothesis.from_dict(
+            hypothesis_payload,
+            program=program,
+        )
+        replayed = replayed.with_signature_hypothesis(hypothesis)
+    return replayed
 
 
 def analyze_and_check_with_analysis(
@@ -84,6 +222,11 @@ def analyze_and_check_with_analysis(
     finally:
         analyzer1.dispose()
 
+    # Issue #107 (PR-B): retry phase が再利用する base は「仮説を重ねる前の raw 解析」。
+    # ここが raw が存在する唯一の地点で、stage plan へ渡した後では派生・in-place 更新が
+    # 入り得る。Program の世代は analyzer を dispose した後に読む。
+    _seed_retry_analysis_base(ctx, "function1", ctx.program1, analysis1)
+
     checker._debug_print(f"Analyzing function '{ctx.function_name2}' in {ctx.binary2_name}...")
     analyzer2 = ReturnAnalyzer(
         ctx.program2,
@@ -132,6 +275,8 @@ def analyze_and_check_with_analysis(
             )
     finally:
         analyzer2.dispose()
+
+    _seed_retry_analysis_base(ctx, "function2", ctx.program2, analysis2)
 
     if ctx.original_signature1 is None:
         ctx.original_signature1 = FunctionSignature.from_analysis(analysis1)
@@ -189,6 +334,69 @@ def selective_reanalysis_and_check(
             retry_count,
         )
 
+    def _check_reuse_validity(
+        side: str, program
+    ) -> Tuple[Optional[RetryAnalysisBase], Optional[str]]:
+        """再利用の事前条件を判定する（``(base, fallback_reason)`` を返す）。
+
+        **fresh 解析より前に評価しなければならない。** fresh 解析自身が Program を
+        書き換え得るので、後で評価すると常に「世代が変わった」になってしまう。
+        """
+        base = _retry_analysis_base(ctx, side)
+        if base is None:
+            return None, REUSE_FALLBACK_NO_SNAPSHOT
+        if base.program is not program:
+            return None, REUSE_FALLBACK_PROGRAM_IDENTITY_CHANGED
+        current_modification = program_modification_number(program)
+        if current_modification is None:
+            return None, REUSE_FALLBACK_MODIFICATION_NUMBER_UNAVAILABLE
+        if current_modification != base.modification_number:
+            return None, REUSE_FALLBACK_MODIFICATION_NUMBER_CHANGED
+        fingerprint = semantic_fingerprint_of(base.analysis)
+        if fingerprint is None:
+            return None, REUSE_FALLBACK_FINGERPRINT_UNAVAILABLE
+        if fingerprint != base.semantic_fingerprint:
+            return None, REUSE_FALLBACK_BASE_SNAPSHOT_MUTATED
+        return base, None
+
+    def _build_reuse_candidate(
+        *,
+        base: RetryAnalysisBase,
+        side: str,
+        program,
+        cached_analysis: FunctionReturnAnalysis,
+        analyzer,
+        phases,
+        measure: bool,
+    ) -> Tuple[Optional[FunctionReturnAnalysis], Optional[str]]:
+        """base の複製へ累積仮説を重ね、recurrence summary を張り直した候補を作る。
+
+        構築の**後にも** base の指紋を確認する。``semantic_successor()`` が意図的に
+        共有する field があり、recurrence refresh には入力の ``analysis_notes`` へ
+        in-place 追記する経路もあるため、構築前の確認だけでは base 非汚染を保証できない。
+        ``measure`` が偽のとき（shadow validation の比較用構築）は、fresh 側の内訳時間を
+        汚さないよう phase の秒数へ加算しない。
+        """
+        try:
+            candidate = base.analysis.semantic_successor()
+            with phases.measure("hypothesis_replay") if measure else nullcontext():
+                candidate = _replay_signature_hypotheses(candidate, cached_analysis, program)
+            if getattr(candidate, "signature_hypotheses", None):
+                with phases.measure("recurrence_refresh") if measure else nullcontext():
+                    candidate = analyzer.refresh_structural_recurrence_summary(
+                        candidate,
+                        timeout=ctx.decompile_timeout,
+                    )
+        except Exception as exc:  # 構築できないなら fresh へ倒す
+            checker._debug_print(f"Retry analysis reuse construction failed for {side}: {exc}")
+            return None, REUSE_FALLBACK_CONSTRUCTION_FAILED
+        post_fingerprint = semantic_fingerprint_of(base.analysis)
+        if post_fingerprint is None:
+            return None, REUSE_FALLBACK_FINGERPRINT_UNAVAILABLE
+        if post_fingerprint != base.semantic_fingerprint:
+            return None, REUSE_FALLBACK_BASE_SNAPSHOT_MUTATED
+        return candidate, None
+
     def _reanalyze_with_hypotheses(
         *,
         program,
@@ -205,14 +413,47 @@ def selective_reanalysis_and_check(
             external_call_effect_policy=getattr(checker, "external_call_effect_policy", None),
         )
         try:
-            checker._debug_print(
-                f"Fresh reanalysis requested for {binary_name} after signature-changing retry phase"
-            )
             side = "function1" if program is ctx.program1 else "function2"
             timer = getattr(checker, "_analysis_timer", None) or AnalysisTimer()
             checker._analysis_timer = timer
             phases = phase_timeline_of(checker)
             phases.record_reanalyzed_side(side)
+
+            # Issue #107 (PR-B): 事前条件は fresh 解析の前に見る（下の docstring 参照）。
+            reuse_enabled = _retry_reuse_enabled()
+            shadow_mode = _retry_reuse_shadow_enabled()
+            base: Optional[RetryAnalysisBase] = None
+            fallback_reason: Optional[str] = None
+            if reuse_enabled:
+                base, fallback_reason = _check_reuse_validity(side, program)
+
+            if base is not None and not shadow_mode:
+                # reuse mode: 事前条件を満たしていれば fresh 再解析を行わない。
+                candidate, fallback_reason = _build_reuse_candidate(
+                    base=base,
+                    side=side,
+                    program=program,
+                    cached_analysis=cached_analysis,
+                    analyzer=analyzer,
+                    phases=phases,
+                    measure=True,
+                )
+                phases.record_reuse_eligibility(side, candidate is not None)
+                if candidate is not None:
+                    checker._debug_print(
+                        f"Retry analysis reuse accepted for {binary_name} ({side})"
+                    )
+                    phases.record_analysis_source(side, ANALYSIS_SOURCE_REUSE)
+                    timer.record_analysis(side, candidate)
+                    timer.record_callee_parameter_cache(side, analyzer)
+                    timer.record_callee_analysis_cache(side, analyzer)
+                    timer.record_callee_unbound_reuse(side, analyzer)
+                    return candidate, None, None
+                base = None  # 構築に失敗したので fresh へ倒す
+
+            checker._debug_print(
+                f"Fresh reanalysis requested for {binary_name} after signature-changing retry phase"
+            )
             with phases.measure("analysis", side=side):
                 fresh_analysis = timer.timed(
                     side,
@@ -223,6 +464,9 @@ def selective_reanalysis_and_check(
             timer.record_callee_analysis_cache(side, analyzer)
             timer.record_callee_unbound_reuse(side, analyzer)
             if fresh_analysis is None:
+                if reuse_enabled and base is None:
+                    phases.record_reuse_eligibility(side, False)
+                    phases.record_analysis_source(side, fallback_reason or ANALYSIS_SOURCE_FRESH)
                 failure = analyzer.get_last_analysis_failure()
                 failure_status = getattr(failure, "status", None)
                 error_message = getattr(failure, "message", None) or analyzer.get_last_function_lookup_error() or (
@@ -231,19 +475,65 @@ def selective_reanalysis_and_check(
                 return None, error_message, failure_status
 
             with phases.measure("hypothesis_replay"):
-                replayed = fresh_analysis
-                for hypothesis_payload in list(getattr(cached_analysis, "signature_hypotheses", []) or []):
-                    hypothesis = SignatureHypothesis.from_dict(
-                        hypothesis_payload,
-                        program=program,
-                    )
-                    replayed = replayed.with_signature_hypothesis(hypothesis)
+                replayed = _replay_signature_hypotheses(fresh_analysis, cached_analysis, program)
             if getattr(replayed, "signature_hypotheses", None):
                 with phases.measure("recurrence_refresh"):
                     replayed = analyzer.refresh_structural_recurrence_summary(
                         replayed,
                         timeout=ctx.decompile_timeout,
                     )
+
+            if not reuse_enabled:
+                phases.record_analysis_source(side, ANALYSIS_SOURCE_FRESH)
+                return replayed, None, None
+
+            if base is not None:
+                # shadow validation: 再利用側も構成して指紋を比べる。fresh が authoritative。
+                candidate, construction_reason = _build_reuse_candidate(
+                    base=base,
+                    side=side,
+                    program=program,
+                    cached_analysis=cached_analysis,
+                    analyzer=analyzer,
+                    phases=phases,
+                    measure=False,
+                )
+                phases.record_reuse_eligibility(side, candidate is not None)
+                if candidate is None:
+                    phases.record_analysis_source(side, construction_reason)
+                    return replayed, None, None
+                fresh_fingerprint = semantic_fingerprint_of(replayed)
+                reuse_fingerprint = semantic_fingerprint_of(candidate)
+                matched = (
+                    fresh_fingerprint is not None
+                    and reuse_fingerprint is not None
+                    and fresh_fingerprint == reuse_fingerprint
+                )
+                phases.record_shadow_comparison(
+                    side,
+                    fresh=fresh_fingerprint,
+                    reuse=reuse_fingerprint,
+                    matched=matched,
+                )
+                if fresh_fingerprint is None or reuse_fingerprint is None:
+                    phases.record_analysis_source(side, REUSE_FALLBACK_FINGERPRINT_UNAVAILABLE)
+                elif matched:
+                    phases.record_analysis_source(side, ANALYSIS_SOURCE_FRESH)
+                else:
+                    checker._debug_print(
+                        f"Retry analysis reuse shadow mismatch for {binary_name} ({side})"
+                    )
+                    phases.record_analysis_source(side, REUSE_FALLBACK_SHADOW_MISMATCH)
+                return replayed, None, None
+
+            # 事前条件を満たさなかった。fresh が authoritative で、raw な fresh 解析から
+            # base を張り直す（派生ビューは決して base にしない）。3 要素を作れないときは
+            # 既存 base を据え置き、その side は以降も fresh のままにする。
+            phases.record_reuse_eligibility(side, False)
+            phases.record_analysis_source(side, fallback_reason or ANALYSIS_SOURCE_FRESH)
+            _store_retry_analysis_base(
+                ctx, side, build_retry_analysis_base(program, fresh_analysis)
+            )
             return replayed, None, None
         finally:
             analyzer.dispose()

@@ -261,6 +261,17 @@ CALLEE_UNBOUND_REUSE_ENABLED = _bool_setting("FT_CALLEE_UNBOUND_REUSE", True)
 CALLEE_UNBOUND_REUSE_SHADOW = _bool_setting("FT_CALLEE_UNBOUND_REUSE_SHADOW", False)
 
 
+# Issue #107 (PR-B): 型仮説を適用した retry phase の「変更側 fresh 再解析」を、P0 の raw
+# 解析 snapshot の複製 + 累積仮説の replay で置き換えるか。無効にすると従来どおり毎回
+# ``analyze_function_by_name()`` をやり直す。
+RETRY_ANALYSIS_REUSE_ENABLED = _bool_setting("FT_RETRY_ANALYSIS_REUSE", True)
+
+# 再利用ビューと従来の fresh 再解析を両方構成して semantic fingerprint を比較する
+# shadow validation。**既定は有効**で、fresh 側を authoritative にするため再利用による
+# 削減は起きない。無効にすると再利用のみを構成する（reuse mode）。
+RETRY_ANALYSIS_REUSE_SHADOW = _bool_setting("FT_RETRY_ANALYSIS_REUSE_SHADOW", True)
+
+
 # 共通 dedup のケース数上限（Issue #131）。既定値は従来の
 # ``ExpressionExpander.MAX_CASES_PER_MULTIEQUAL`` と同じ 16。調査用に下げられるが、
 # 通常実行の既定値は変えない。明示 limit を渡す呼び出し
