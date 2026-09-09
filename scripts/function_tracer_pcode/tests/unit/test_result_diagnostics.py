@@ -75,6 +75,58 @@ def test_analysis_timer_accumulates_callee_parameter_cache_stats_per_side():
     assert stats["analyzer_instances"] == 2 and stats["snapshot_entries"] == 1
 
 
+def test_analysis_timer_accumulates_callee_analysis_cache_stats_per_side():
+    """Issue #47: 解析 cache 側も side ごとに instance をまたいで足し合わせる。"""
+    timer = AnalysisTimer()
+
+    def _analyzer(payload):
+        return SimpleNamespace(callee_analysis_cache_diagnostics=lambda: payload)
+
+    first = _analyzer({
+        "schema": "callee-analysis-cache-v1", "hits": 4, "misses": 2,
+        "miss_reasons": {"target_first_analysis": 2},
+        "bound_misses_without_unbound_entry": 1,
+        "targets": [{"target": "function:log@0x1000", "hits": 4, "misses": 2,
+                     "miss_reasons": {"target_first_analysis": 2},
+                     "bound_misses_without_unbound_entry": 1, "distinct_scope_keys": 2}],
+        "targets_truncated": 0, "repeated_miss_targets": {"target_first_analysis": ["function:log@0x1000"]},
+        "entries": 3,
+    })
+    second = _analyzer({
+        "schema": "callee-analysis-cache-v1", "hits": 1, "misses": 3,
+        "miss_reasons": {"bound_signature_differs": 3},
+        "bound_misses_without_unbound_entry": 3,
+        "targets": [{"target": "function:log@0x1000", "hits": 1, "misses": 3,
+                     "miss_reasons": {"bound_signature_differs": 3},
+                     "bound_misses_without_unbound_entry": 3, "distinct_scope_keys": 4}],
+        "targets_truncated": 0, "repeated_miss_targets": {"bound_signature_differs": ["function:log@0x1000"]},
+        "entries": 5,
+    })
+    timer.record_callee_analysis_cache("function2", first)
+    timer.record_callee_analysis_cache("function2", second)
+    stats = timer.snapshot()["callee_analysis_cache"]["function2"]
+    assert stats["hits"] == 5 and stats["misses"] == 5
+    assert stats["miss_reasons"] == {"bound_signature_differs": 3, "target_first_analysis": 2}
+    assert stats["bound_misses_without_unbound_entry"] == 4
+    assert stats["analyzer_instances"] == 2 and stats["cache_entries"] == 5
+    row = stats["targets"][0]
+    assert row["hits"] == 5 and row["misses"] == 5 and row["distinct_scope_keys"] == 4
+    assert stats["repeated_miss_targets"] == {
+        "bound_signature_differs": ["function:log@0x1000"],
+        "target_first_analysis": ["function:log@0x1000"],
+    }
+
+
+def test_result_diagnostics_payload_carries_the_callee_analysis_cache_block():
+    result = SimpleNamespace(
+        diagnostics={"callee_analysis_cache": {"function2": {"hits": 9, "misses": 2}}},
+        debug_trace=None, total_time=1.0, pairwise_stats={}, stage_path=[], solver_results=None,
+    )
+    payload = result_diagnostics_payload(result)
+    assert payload["caches"]["callee_analysis"]["function2"] == {"hits": 9, "misses": 2}
+    assert payload["caches"]["callee_parameter_decompile"] == {}
+
+
 def test_result_diagnostics_payload_carries_the_callee_parameter_cache_block():
     result = SimpleNamespace(
         diagnostics={"callee_parameter_cache": {"function1": {"hits": 4, "misses": 1}}},
@@ -82,6 +134,7 @@ def test_result_diagnostics_payload_carries_the_callee_parameter_cache_block():
     )
     payload = result_diagnostics_payload(result)
     assert payload["caches"]["callee_parameter_decompile"]["function1"] == {"hits": 4, "misses": 1}
+    assert payload["caches"]["callee_analysis"] == {}
 
 
 def test_result_diagnostics_payload_merges_recorded_and_live_statistics():

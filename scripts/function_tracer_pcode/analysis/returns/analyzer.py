@@ -388,6 +388,27 @@ class ReturnAnalyzer:
     def _callee_parameter_decompile_stats(self, value):
         self._ensure_runtime_state().callee_parameter_decompile_stats = value
 
+    @property
+    def _callee_analysis_cache_stats(self):
+        return self._ensure_runtime_state().callee_analysis_cache_stats
+
+    @_callee_analysis_cache_stats.setter
+    def _callee_analysis_cache_stats(self, value):
+        self._ensure_runtime_state().callee_analysis_cache_stats = value
+
+    def callee_analysis_cache_diagnostics(self) -> Dict[str, Any]:
+        """callee 解析 cache（``call_analysis_cache``）の hit/miss 診断（Issue #47）。
+
+        parameter snapshot cache（``callee_parameter_cache_diagnostics``）とは対象が別。
+        判定には使わない観測値なので、失敗しても呼び出し側に例外を出さない。
+        """
+        try:
+            payload = self._callee_analysis_cache_stats.snapshot()
+            payload["entries"] = len(self._call_analysis_cache)
+            return payload
+        except Exception as exc:  # diagnostics never fail the verdict
+            return {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
     def callee_parameter_cache_diagnostics(self) -> Dict[str, Any]:
         """callee parameter snapshot cache の hit/miss 診断（Issue #47 PR-A）。
 

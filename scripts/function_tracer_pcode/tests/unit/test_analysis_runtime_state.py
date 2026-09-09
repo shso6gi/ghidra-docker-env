@@ -15,6 +15,8 @@ EXPECTED = {
     # Issue #47 (PR-A): decompile 成功時のみ作る complete な callee parameter snapshot と、
     # その hit/miss 計数（診断専用）。
     "callee_parameter_decompile_cache", "callee_parameter_decompile_stats",
+    # Issue #47: callee 解析 cache（call_analysis_cache）側の hit/miss 診断。
+    "callee_analysis_cache_stats",
 }
 
 

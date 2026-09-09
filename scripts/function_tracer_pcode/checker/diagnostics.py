@@ -148,6 +148,9 @@ _CACHE_STAT_COUNTERS = ("hits", "misses", "snapshots_stored", "invalidations")
 _CACHE_STAT_REASON_MAPS = ("miss_reasons", "uncacheable_reasons")
 
 
+_ANALYSIS_CACHE_STAT_COUNTERS = ("hits", "misses", "bound_misses_without_unbound_entry")
+
+
 def _merge_cache_stats(
     accumulated: Optional[Mapping[str, Any]], observed: Mapping[str, Any]
 ) -> Dict[str, Any]:
@@ -172,6 +175,73 @@ def _merge_cache_stats(
     return merged
 
 
+def _merge_target_rows(
+    accumulated: Iterable[Mapping[str, Any]], observed: Iterable[Mapping[str, Any]]
+) -> list:
+    """target 単位の analysis cache 計数を identity で足し合わせる。"""
+    rows: Dict[str, Dict[str, Any]] = {}
+    for row in list(accumulated) + list(observed):
+        identity = str(row.get("target"))
+        current = rows.get(identity)
+        if current is None:
+            rows[identity] = dict(row)
+            rows[identity]["miss_reasons"] = dict(row.get("miss_reasons") or {})
+            continue
+        for key in ("hits", "misses", "bound_misses_without_unbound_entry"):
+            current[key] = int(current.get(key, 0) or 0) + int(row.get(key, 0) or 0)
+        reasons = dict(current.get("miss_reasons") or {})
+        for reason, count in (row.get("miss_reasons") or {}).items():
+            reasons[reason] = reasons.get(reason, 0) + int(count or 0)
+        current["miss_reasons"] = dict(sorted(reasons.items()))
+        current["distinct_scope_keys"] = max(
+            int(current.get("distinct_scope_keys", 0) or 0),
+            int(row.get("distinct_scope_keys", 0) or 0),
+        )
+        for key in ("is_external", "is_thunk"):
+            if current.get(key) is None and row.get(key) is not None:
+                current[key] = row.get(key)
+    return sorted(
+        rows.values(),
+        key=lambda row: (-int(row.get("misses", 0) or 0), -int(row.get("hits", 0) or 0), str(row.get("target"))),
+    )
+
+
+def _merge_analysis_cache_stats(
+    accumulated: Optional[Mapping[str, Any]], observed: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """callee 解析 cache の計数を side 単位で集約する（parameter cache と同じ集約規則）。
+
+    counter と reason map は加算、``entries`` は最後の analyzer の値、target 行は
+    identity ごとに加算し、``repeated_miss_targets`` は集約後の値から作り直す。
+    """
+    from scripts.function_tracer_pcode.analysis.runtime_state import repeated_miss_targets
+
+    if not accumulated:
+        merged = dict(observed)
+        merged["analyzer_instances"] = 1
+        merged["cache_entries"] = observed.get("entries", 0)
+        merged.pop("entries", None)
+        return merged
+    merged = dict(accumulated)
+    for key in _ANALYSIS_CACHE_STAT_COUNTERS:
+        merged[key] = int(merged.get(key, 0) or 0) + int(observed.get(key, 0) or 0)
+    totals = dict(merged.get("miss_reasons") or {})
+    for reason, count in (observed.get("miss_reasons") or {}).items():
+        totals[reason] = totals.get(reason, 0) + int(count or 0)
+    merged["miss_reasons"] = dict(sorted(totals.items()))
+    merged["targets"] = _merge_target_rows(
+        merged.get("targets") or (), observed.get("targets") or ()
+    )
+    merged["targets_truncated"] = int(merged.get("targets_truncated", 0) or 0) + int(
+        observed.get("targets_truncated", 0) or 0
+    )
+    merged["repeated_miss_targets"] = repeated_miss_targets(merged["targets"])
+    merged["analyzer_instances"] = int(merged.get("analyzer_instances", 1) or 1) + 1
+    merged["cache_entries"] = observed.get("entries", 0)
+    merged.pop("entries", None)
+    return merged
+
+
 class AnalysisTimer:
     """関数解析の経過時間を side ごとに記録する。"""
 
@@ -179,6 +249,7 @@ class AnalysisTimer:
         self.seconds: Dict[str, float] = {}
         self.stats: Dict[str, Dict[str, int]] = {}
         self.cache_stats: Dict[str, Dict[str, Any]] = {}
+        self.analysis_cache_stats: Dict[str, Dict[str, Any]] = {}
 
     def timed(self, side: str, run: Any) -> Any:
         started = time.perf_counter()
@@ -216,6 +287,23 @@ class AnalysisTimer:
         except Exception as exc:
             self.cache_stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
 
+    def record_callee_analysis_cache(self, side: str, analyzer: Any) -> None:
+        """Issue #47: callee 解析 cache の hit/miss と miss 原因を side ごとに残す。
+
+        parameter snapshot cache とは別の観測なので別 bucket に置く。集約規則は
+        ``record_callee_parameter_cache`` と同じ（instance ごとの計数を side で加算）。
+        Fail-open: 診断の失敗を呼び出し側へ出さない。
+        """
+        reader = getattr(analyzer, "callee_analysis_cache_diagnostics", None)
+        if not callable(reader):
+            return
+        try:
+            self.analysis_cache_stats[side] = _merge_analysis_cache_stats(
+                self.analysis_cache_stats.get(side), dict(reader() or {})
+            )
+        except Exception as exc:
+            self.analysis_cache_stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
     def snapshot(self) -> Dict[str, Any]:
         try:
             return {
@@ -223,6 +311,9 @@ class AnalysisTimer:
                 "expressions": {side: dict(stats) for side, stats in self.stats.items()},
                 "callee_parameter_cache": {
                     side: dict(stats) for side, stats in self.cache_stats.items()
+                },
+                "callee_analysis_cache": {
+                    side: dict(stats) for side, stats in self.analysis_cache_stats.items()
                 },
             }
         except Exception as exc:
@@ -294,6 +385,7 @@ def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
         "expressions": dict(base.get("expressions") or {}),
         "caches": {
             "callee_parameter_decompile": dict(base.get("callee_parameter_cache") or {}),
+            "callee_analysis": dict(base.get("callee_analysis_cache") or {}),
         },
         "validated_once_entries": base.get("validated_once_entries"),
         "pairs": pairwise,

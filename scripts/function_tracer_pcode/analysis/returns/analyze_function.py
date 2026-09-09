@@ -40,6 +40,44 @@ from scripts.function_tracer_pcode.analysis.returns.parameters import (
 from scripts.function_tracer_pcode.analysis.returns.expansion_budget import (
     emit_analysis_expansion_budget_diagnostics,
 )
+from scripts.function_tracer_pcode.analysis.returns.lifecycle import (
+    analysis_cache_target_identity,
+    classify_analysis_scope_cache_miss,
+)
+
+
+def _record_callee_analysis_cache_lookup(
+    self,
+    target_ref,
+    analysis_scope_key,
+    cached_analysis,
+) -> None:
+    """analysis cache の参照結果を診断へ記録する（Issue #47）。
+
+    観測だけで cache も key も判定も変えない。診断の失敗は解析へ伝播させない。
+    """
+    try:
+        stats = self._callee_analysis_cache_stats
+        identity = analysis_cache_target_identity(target_ref)
+        is_external = getattr(target_ref, "is_external", None)
+        is_thunk = getattr(target_ref, "is_thunk", None)
+        if cached_analysis is not None:
+            stats.record_hit(identity, is_external=is_external, is_thunk=is_thunk)
+            return
+        reason, unbound_entry_absent, same_target_scope_keys = classify_analysis_scope_cache_miss(
+            analysis_scope_key,
+            tuple(self._call_analysis_cache.keys()),
+        )
+        stats.record_miss(
+            identity,
+            reason,
+            is_external=is_external,
+            is_thunk=is_thunk,
+            unbound_entry_absent=unbound_entry_absent,
+            same_target_scope_keys=same_target_scope_keys,
+        )
+    except Exception:  # diagnostics never fail the analysis
+        return
 
 
 def _effect_summary_incomplete_reasons(effect_summary) -> tuple:
@@ -75,6 +113,12 @@ def _impl_analyze_function(
         normalized_bound_parameter_storage_values,
     )
     cached_analysis = self._call_analysis_cache.get(analysis_scope_key)
+    _record_callee_analysis_cache_lookup(
+        self,
+        current_function_ref,
+        analysis_scope_key,
+        cached_analysis,
+    )
     if cached_analysis is not None:
         return cached_analysis
     active_functions = self._extend_active_functions(
