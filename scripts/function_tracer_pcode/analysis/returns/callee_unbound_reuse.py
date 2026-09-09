@@ -258,6 +258,23 @@ def _classify_callee_for_unbound_reuse(self, callee, program_identity) -> Callee
     )
 
 
+def _record_unbound_authority(self, function, unbound_key, unbound_analysis) -> None:
+    """束縛ゼロ解析を再利用の根拠にしたことを記録する（Program 変更時の evict 用）。
+
+    ``analyze_function()`` は束縛ゼロ解析を generic ``_function_cache_key`` にも保存する
+    ので、その別名が **同じ解析 object を指しているときだけ** 併せて所有権に含める。
+    別の経路が書いた entry は巻き添えにしない。
+    """
+
+    ownership = self._callee_unbound_reuse_cache_ownership
+    ownership.record_unbound_authority(unbound_key, unbound_analysis)
+    generic_key = self._function_cache_key(function)
+    if generic_key is None:
+        return
+    if self._call_analysis_cache.get(generic_key) is unbound_analysis:
+        ownership.record_generic_alias(generic_key, unbound_key)
+
+
 @contextmanager
 def _impl__suspended_callee_unbound_reuse(self):
     """再利用を一時的に止める（shadow validation の再入用）。"""
@@ -312,6 +329,7 @@ def _impl__reuse_unbound_placeholder_analysis(
         if unbound_analysis is None:
             stats.record_decline(identity, UNBOUND_REUSE_UNBOUND_ANALYSIS_UNAVAILABLE)
             return None
+        _record_unbound_authority(self, function, unbound_key, unbound_analysis)
 
         reused = rebound_scope_view(unbound_analysis, analysis_scope_key)
         if unbound_reuse_shadow_enabled():
@@ -327,6 +345,7 @@ def _impl__reuse_unbound_placeholder_analysis(
             )
         # 従来経路と同じ key へ同じように残す（cache の構造も方針も変えない）。
         self._call_analysis_cache[analysis_scope_key] = reused
+        self._callee_unbound_reuse_cache_ownership.record_view(analysis_scope_key, reused)
         stats.record_reuse(identity)
         return reused
     except Exception as exc:  # 再利用の失敗で解析を止めない

@@ -255,6 +255,8 @@ _REUSE_STAT_COUNTERS = (
     "unbound_analyses",
     "shadow_comparisons",
     "shadow_mismatches",
+    "invalidations",
+    "evicted_cache_entries",
 )
 _REUSE_STAT_REASON_MAPS = ("verdicts", "declines")
 
@@ -318,7 +320,9 @@ def _merge_reuse_stats(
         }
     )
     merged["analyzer_instances"] = int(merged.get("analyzer_instances", 1) or 1) + 1
+    # 保持数は累積ではなく最後の analyzer の値。
     merged["verdict_entries"] = observed.get("entries", 0)
+    merged["owned_cache_entries"] = observed.get("owned_cache_entries", 0)
     merged.pop("entries", None)
     return merged
 

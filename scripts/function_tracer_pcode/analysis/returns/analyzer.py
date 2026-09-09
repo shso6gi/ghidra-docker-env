@@ -406,6 +406,14 @@ class ReturnAnalyzer:
         self._ensure_runtime_state().callee_unbound_reuse_verdicts = value
 
     @property
+    def _callee_unbound_reuse_cache_ownership(self):
+        return self._ensure_runtime_state().callee_unbound_reuse_cache_ownership
+
+    @_callee_unbound_reuse_cache_ownership.setter
+    def _callee_unbound_reuse_cache_ownership(self, value):
+        self._ensure_runtime_state().callee_unbound_reuse_cache_ownership = value
+
+    @property
     def _callee_unbound_reuse_stats(self):
         return self._ensure_runtime_state().callee_unbound_reuse_stats
 
@@ -421,6 +429,9 @@ class ReturnAnalyzer:
         try:
             payload = self._callee_unbound_reuse_stats.snapshot()
             payload["entries"] = len(self._callee_unbound_reuse_verdicts)
+            payload["owned_cache_entries"] = len(
+                self._callee_unbound_reuse_cache_ownership.owned_keys()
+            )
             return payload
         except Exception as exc:  # diagnostics never fail the verdict
             return {"error": f"{type(exc).__name__}: {exc}"[:200]}
@@ -461,8 +472,18 @@ class ReturnAnalyzer:
         entries = len(cache)
         cache.clear()
         self._callee_parameter_decompile_stats.record_invalidation(entries)
-        # Issue #47 (PR-B): 再利用の適格判定も decompile 由来の証拠なので捨てる。
-        self._callee_unbound_reuse_verdicts.clear()
+        # Issue #47 (PR-B): 再利用の適格判定と、その判定に基づいて再利用の根拠として
+        # 使った解析 cache entry（束縛ゼロ entry / そこから作った束縛 view / 同じ解析を
+        # 指す generic 別名）も decompile 由来の証拠なので捨てる。判定だけ捨てても、
+        # ``analyze_function()`` 冒頭の cache 参照が判定より先に書き換え前の解析を
+        # 返してしまう。所有していない entry は落とさない。
+        verdicts = self._callee_unbound_reuse_verdicts
+        verdict_entries = len(verdicts)
+        verdicts.clear()
+        evicted = self._callee_unbound_reuse_cache_ownership.evict_from(
+            self._call_analysis_cache
+        )
+        self._callee_unbound_reuse_stats.record_invalidation(verdict_entries, evicted)
 
     @property
     def _direct_call_graph(self):

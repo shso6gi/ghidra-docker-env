@@ -197,7 +197,9 @@ def _install_analysis_loop(analyzer, function, *, analysis_factory=None):
     """``_impl_analyze_function`` の「cache → 再利用 → 解析 → cache 保存」だけを再現する。
 
     Ghidra を要らなくしたうえで、再利用の判断と cache 書き込みは production と同じ
-    関数を通す。返り値は「実際に解析した scope key」の記録。
+    関数を通す。束縛値が無い解析を generic ``_function_cache_key`` にも保存するのも
+    production と同じ（PR-B が作る束縛ゼロ解析はこの別名を持つ）。
+    返り値は「実際に解析した scope key」の記録。
     """
 
     performed = []
@@ -233,6 +235,9 @@ def _install_analysis_loop(analyzer, function, *, analysis_factory=None):
         performed.append(scope_key)
         analysis = factory(scope_key)
         analyzer._call_analysis_cache[scope_key] = analysis
+        generic_key = analyzer._function_cache_key(target)
+        if generic_key is not None and not bound_values:
+            analyzer._call_analysis_cache[generic_key] = analysis
         return analysis
 
     analyzer.analyze_function = analyze_function
@@ -432,13 +437,15 @@ def test_a_bound_analysis_never_lands_in_the_unbound_entry():
     assert unbound.analysis_scope_key == unbound_key
     assert unbound.analysis_scope_key[2] == () and unbound.analysis_scope_key[3] == ()
 
-    # 束縛付きの結果は要求された scope key にだけ入る。再利用経路は generic
-    # ``_function_cache_key``（storage 束縛が混入し得る key）を読み書きしない。
-    keys = set(analyzer._call_analysis_cache)
-    assert analyzer._function_cache_key(function) not in keys
-    for key in keys:
+    # 束縛付きの結果は要求された scope key にだけ入る。generic ``_function_cache_key``
+    # には既存規則どおり束縛ゼロ解析だけが入り、storage 束縛付きの結果は混入しない。
+    generic_key = analyzer._function_cache_key(function)
+    assert analyzer._call_analysis_cache[generic_key] is unbound
+    for key, entry in analyzer._call_analysis_cache.items():
+        if key == generic_key:
+            continue
         assert key[0] == "analysis_scope"
-        assert analyzer._call_analysis_cache[key].analysis_scope_key == key
+        assert entry.analysis_scope_key == key
 
 
 def test_an_internal_callee_keeps_the_bound_sensitive_path():
@@ -510,6 +517,157 @@ def test_reuse_can_be_switched_off_by_configuration():
                     bound_parameter_storage_values=storage,
                 )
     assert len(performed) == 2
+
+
+def _generation_factory(function, generation):
+    """世代を note に刻む analysis factory（mutation 前後の object を区別する）。"""
+
+    def factory(scope_key):
+        return _analysis(function, scope_key, note=f"gen{generation[0]}")
+
+    return factory
+
+
+def test_a_bound_view_is_not_served_from_the_cache_after_a_program_mutation():
+    """Program 変更後は、変更前に materialize した束縛 view を返さない。"""
+    function = _external_placeholder()
+    analyzer = _analyzer(function)
+    generation = [1]
+    performed = _install_analysis_loop(
+        analyzer, function, analysis_factory=_generation_factory(function, generation)
+    )
+    values, storage = _bound(7)
+    with patch.object(
+        analyzer, "_decompile_function", return_value=_completed_results()
+    ) as decompile:
+        before = analyzer.analyze_function(
+            function,
+            bound_parameter_values=values,
+            bound_parameter_storage_values=storage,
+        )
+        view_key = analyzer._analysis_scope_key(function, values, storage)
+        assert analyzer._call_analysis_cache[view_key] is before
+        assert decompile.call_count == 1 and len(performed) == 1
+
+        with analyzer._program_transaction("retype"):
+            pass
+
+        # 変更前の view は cache から消えている（先に cache が返してしまわない）。
+        assert view_key not in analyzer._call_analysis_cache
+
+        generation[0] = 2
+        after = analyzer.analyze_function(
+            function,
+            bound_parameter_values=values,
+            bound_parameter_storage_values=storage,
+        )
+
+    assert after is not before
+    assert after.analysis_notes == ["gen2"]
+    # 適格判定も束縛ゼロ解析も fresh にやり直している。
+    assert decompile.call_count == 2
+    assert len(performed) == 2
+
+    diagnostics = analyzer.callee_unbound_reuse_diagnostics()
+    assert diagnostics["invalidations"] == 1
+    # 束縛ゼロ entry・その generic 別名・束縛 view の 3 件。
+    assert diagnostics["evicted_cache_entries"] == 3
+
+
+def test_the_unbound_entry_is_not_used_as_reuse_authority_after_a_mutation():
+    """変更前の束縛ゼロ解析を、変更後の再利用の根拠にしない。"""
+    function = _external_placeholder()
+    analyzer = _analyzer(function)
+    generation = [1]
+    _install_analysis_loop(
+        analyzer, function, analysis_factory=_generation_factory(function, generation)
+    )
+    unbound_key = analyzer._analysis_scope_key(function)
+    with patch.object(analyzer, "_decompile_function", return_value=_completed_results()):
+        first_values, first_storage = _bound(7)
+        analyzer.analyze_function(
+            function,
+            bound_parameter_values=first_values,
+            bound_parameter_storage_values=first_storage,
+        )
+        stale_unbound = analyzer._call_analysis_cache[unbound_key]
+
+        with analyzer._program_transaction("retype"):
+            pass
+        assert unbound_key not in analyzer._call_analysis_cache
+
+        generation[0] = 2
+        # 別の束縛 scope から要求しても、根拠は取り直した束縛ゼロ解析になる。
+        second_values, second_storage = _bound(9)
+        reused = analyzer.analyze_function(
+            function,
+            bound_parameter_values=second_values,
+            bound_parameter_storage_values=second_storage,
+        )
+
+    fresh_unbound = analyzer._call_analysis_cache[unbound_key]
+    assert fresh_unbound is not stale_unbound
+    assert fresh_unbound.analysis_notes == ["gen2"]
+    assert reused.analysis_notes == ["gen2"]
+
+
+def test_the_generic_alias_of_the_unbound_analysis_is_dropped_by_a_mutation():
+    """束縛ゼロ解析を指す generic ``_function_cache_key`` の別名も残さない。"""
+    function = _external_placeholder()
+    analyzer = _analyzer(function)
+    _install_analysis_loop(analyzer, function)
+    generic_key = analyzer._function_cache_key(function)
+    with patch.object(analyzer, "_decompile_function", return_value=_completed_results()):
+        values, storage = _bound(7)
+        analyzer.analyze_function(
+            function,
+            bound_parameter_values=values,
+            bound_parameter_storage_values=storage,
+        )
+        unbound = analyzer._call_analysis_cache[analyzer._analysis_scope_key(function)]
+        # 既存規則どおり、束縛ゼロ解析は generic 別名にも入っている。
+        assert analyzer._call_analysis_cache[generic_key] is unbound
+
+        with analyzer._program_transaction("retype"):
+            pass
+
+    assert generic_key not in analyzer._call_analysis_cache
+
+
+def test_a_mutation_only_drops_what_the_reuse_path_owns():
+    """再利用が所有していない cache entry は巻き添えにしない。"""
+    function = _external_placeholder()
+    other = _internal_callee()
+    analyzer = ReturnAnalyzer(
+        program=_FakeProgram([function, other]), debug=False, binary_id="B1"
+    )
+    _install_analysis_loop(analyzer, function)
+    with patch.object(analyzer, "_decompile_function", return_value=_completed_results()):
+        values, storage = _bound(7)
+        analyzer.analyze_function(
+            function,
+            bound_parameter_values=values,
+            bound_parameter_storage_values=storage,
+        )
+        view_key = analyzer._analysis_scope_key(function, values, storage)
+
+        # 無関係な entry: 別 callee の scope key / 別 callee の generic key。
+        other_scope_key = analyzer._analysis_scope_key(other)
+        other_generic_key = analyzer._function_cache_key(other)
+        other_analysis = _analysis(other, other_scope_key, note="unrelated")
+        analyzer._call_analysis_cache[other_scope_key] = other_analysis
+        analyzer._call_analysis_cache[other_generic_key] = other_analysis
+        # 再利用が置いた key を別経路が上書きした場合も、それは再利用の authority では
+        # ないので落とさない（その entry の寿命は従来どおり）。
+        replaced = _analysis(function, view_key, note="written-by-another-path")
+        analyzer._call_analysis_cache[view_key] = replaced
+
+        with analyzer._program_transaction("retype"):
+            pass
+
+    assert analyzer._call_analysis_cache[other_scope_key] is other_analysis
+    assert analyzer._call_analysis_cache[other_generic_key] is other_analysis
+    assert analyzer._call_analysis_cache[view_key] is replaced
 
 
 # -------------------------------------------------------------------- shadow
