@@ -4,6 +4,12 @@
 import time
 
 from scripts.function_tracer_pcode.checker.debug_trace import DebugTrace, TransitionReason
+from scripts.function_tracer_pcode.checker.diagnostics import (
+    PhaseTimeline,
+    attach_phase_timings,
+    phase_timeline_of,
+    unknown_reason_ids,
+)
 from scripts.function_tracer_pcode.checker.phases.handler import (
     DEFAULT_PHASE_PLAN,
     PhaseContext,
@@ -12,6 +18,10 @@ from scripts.function_tracer_pcode.checker.phases.handler import (
     PhaseSpec,
 )
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
+
+
+# `checker` が `_phase_timeline` を持っていなかったことを表す番兵。
+_NO_PHASE_TIMELINE = object()
 
 
 def run_check_from_binaries(
@@ -26,8 +36,59 @@ def run_check_from_binaries(
     binary1_id: str | None = None,
     binary2_id: str | None = None,
 ):
-    """`check_from_binaries()` の phase workflow を実行する"""
+    """`check_from_binaries()` の phase workflow を実行する
+
+    phase ごとの内訳時間（Issue #107）は判定に関与しない診断なので、どの経路で
+    抜けても最後に 1 箇所だけで結果へ添付する。
+    """
+    phase_timeline = PhaseTimeline()
+    previous_timeline = getattr(checker, "_phase_timeline", _NO_PHASE_TIMELINE)
+    checker._phase_timeline = phase_timeline
+    result = None
+    try:
+        result = _run_phase_plan(
+            checker,
+            program1,
+            program2,
+            function_name1,
+            function_name2,
+            decompile_timeout=decompile_timeout,
+            save_formula=save_formula,
+            retry_with_type_fix=retry_with_type_fix,
+            binary1_id=binary1_id,
+            binary2_id=binary2_id,
+        )
+        return result
+    finally:
+        try:
+            attach_phase_timings(result, phase_timeline)
+        finally:
+            # この run の timeline を checker に残さない。残すと、workflow を経由しない
+            # 後続処理の `phase_timeline_of(checker)` が前 run の記録先を掴んでしまう。
+            if previous_timeline is _NO_PHASE_TIMELINE:
+                try:
+                    del checker._phase_timeline
+                except AttributeError:
+                    pass
+            else:
+                checker._phase_timeline = previous_timeline
+
+
+def _run_phase_plan(
+    checker,
+    program1,
+    program2,
+    function_name1: str,
+    function_name2: str,
+    decompile_timeout: int = 60,
+    save_formula: bool = False,
+    retry_with_type_fix: bool = False,
+    binary1_id: str | None = None,
+    binary2_id: str | None = None,
+):
+    """phase plan 本体（診断の添付は呼び出し側が行う）"""
     start_time = time.time()
+    phase_timeline = phase_timeline_of(checker)
     binary1_name = program1.getName() if hasattr(program1, "getName") else "binary1"
     binary2_name = program2.getName() if hasattr(program2, "getName") else "binary2"
 
@@ -79,9 +140,16 @@ def run_check_from_binaries(
             first_phase = False
             type_fix_result.retry_phase = "initial"
 
+            phase_timeline.begin(
+                phase_id.value,
+                retry_name="initial",
+                attempt_id=attempt_id,
+                reason_before=unknown_reason_ids(result),
+            )
             analysis1, analysis2, result = checker._analyze_and_check_with_analysis(
                 ctx, retry_count=retry_count
             )
+            phase_record = phase_timeline.end(reason_after=unknown_reason_ids(result))
             ctx.analysis1 = analysis1
             ctx.analysis2 = analysis2
             ctx.original_signature1 = result.function1_signature
@@ -95,15 +163,23 @@ def run_check_from_binaries(
                 checker._debug_print("Stopping: type_fixer not available")
                 break
 
-            phase_result = checker.phase_handler.execute_phase(
-                phase_spec,
-                ctx,
-                type_fixer1,
-                type_fixer2,
-                checker._get_params_via_decompile,
+            phase_timeline.begin(
+                phase_id.value,
+                attempt_id=attempt_id,
+                reason_before=unknown_reason_ids(result),
             )
+            with phase_timeline.measure("phase_fix"):
+                phase_result = checker.phase_handler.execute_phase(
+                    phase_spec,
+                    ctx,
+                    type_fixer1,
+                    type_fixer2,
+                    checker._get_params_via_decompile,
+                )
+            phase_timeline.record_phase_result(phase_result)
 
             if not phase_result.applied:
+                phase_record = phase_timeline.end(reason_after=unknown_reason_ids(result))
                 checker._debug_print(
                     f"Phase {phase_id.value}: No changes applied, skipping recheck"
                 )
@@ -131,6 +207,7 @@ def run_check_from_binaries(
                     None,
                     None,
                     0.0,
+                    phase_diagnostics=phase_record,
                 )
                 attempt_id += 1
                 continue
@@ -141,6 +218,7 @@ def run_check_from_binaries(
             analysis1, analysis2, result = checker._selective_reanalysis_and_check(
                 ctx, phase_result, retry_count=retry_count
             )
+            phase_record = phase_timeline.end(reason_after=unknown_reason_ids(result))
             ctx.analysis1 = analysis1
             ctx.analysis2 = analysis2
 
@@ -153,7 +231,14 @@ def run_check_from_binaries(
             result, retry_with_type_fix, phase_id.value, will_try_phase4b
         )
         checker._record_attempt_from_result(
-            debug_trace, attempt_id, retry_count, phase_id.value, result, transition_reason, type_fix_result
+            debug_trace,
+            attempt_id,
+            retry_count,
+            phase_id.value,
+            result,
+            transition_reason,
+            type_fix_result,
+            phase_diagnostics=phase_record,
         )
         attempt_id += 1
 
@@ -307,24 +392,35 @@ def _run_phase4a_tail(
     retry_with_type_fix: bool,
 ):
     phase4a_spec = PhaseSpec(PhaseID.P4A_MIPS64_ABI, "MIPS64 ABI param fix (conservative)")
+    phase_timeline = phase_timeline_of(checker)
 
     checker._debug_print("=" * 60)
     checker._debug_print(f"Phase {PhaseID.P4A_MIPS64_ABI.value}: {phase4a_spec.description}")
     checker._debug_print("=" * 60)
 
-    phase_result = checker.phase_handler.execute_phase(
-        phase4a_spec, ctx, type_fixer1, type_fixer2, checker._get_params_via_decompile
+    # applied=False なら attempt を作らない phase なので、ここでは id を予約しない。
+    phase_timeline.begin(
+        PhaseID.P4A_MIPS64_ABI.value, reason_before=unknown_reason_ids(result)
     )
+    with phase_timeline.measure("phase_fix"):
+        phase_result = checker.phase_handler.execute_phase(
+            phase4a_spec, ctx, type_fixer1, type_fixer2, checker._get_params_via_decompile
+        )
+    phase_timeline.record_phase_result(phase_result)
 
     if not phase_result.applied:
+        phase_timeline.end(reason_after=unknown_reason_ids(result))
         return result, attempt_id
 
+    # ここから先は必ずこの attempt_id で attempt を記録する。
+    phase_timeline.record_attempt_id(attempt_id)
     retry_count += 1
     ctx.type_fix_result.retry_phase = phase_result.retry_name
 
     analysis1, analysis2, result = checker._selective_reanalysis_and_check(
         ctx, phase_result, retry_count=retry_count
     )
+    phase_record = phase_timeline.end(reason_after=unknown_reason_ids(result))
     ctx.analysis1 = analysis1
     ctx.analysis2 = analysis2
 
@@ -344,6 +440,7 @@ def _run_phase4a_tail(
         result,
         transition_reason,
         ctx.type_fix_result,
+        phase_diagnostics=phase_record,
     )
     attempt_id += 1
 
@@ -447,14 +544,27 @@ def _maybe_retry_sat_return_type_fix(
         "Phase 4-C: SAT persists, attempting suspicious return type fix"
     )
 
-    applied, changed1, changed2 = checker.phase_handler.run_phase2_return_type_fix(
-        ctx,
-        type_fixer1,
-        type_fixer2,
+    phase_timeline = phase_timeline_of(checker)
+    # applied=False なら attempt を作らない phase なので、ここでは id を予約しない。
+    phase_timeline.begin(
+        "P4C_RETURN_TYPE_FIX",
+        retry_name="sat_return_type_fix",
+        reason_before=unknown_reason_ids(result),
     )
+    with phase_timeline.measure("phase_fix"):
+        applied, changed1, changed2 = checker.phase_handler.run_phase2_return_type_fix(
+            ctx,
+            type_fixer1,
+            type_fixer2,
+        )
+    phase_timeline.record_applied(applied, changed1, changed2)
     if not applied:
+        phase_timeline.end(reason_after=unknown_reason_ids(result))
         checker._debug_print("Phase 4-C: Return type fix was not applied")
         return result, attempt_id, True
+
+    # ここから先は必ずこの attempt_id で attempt を記録する。
+    phase_timeline.record_attempt_id(attempt_id)
 
     ctx.type_fix_result.retry_phase = "sat_return_type_fix"
     phase_result = PhaseResult(
@@ -467,6 +577,7 @@ def _maybe_retry_sat_return_type_fix(
     analysis1, analysis2, result = checker._selective_reanalysis_and_check(
         ctx, phase_result, retry_count=retry_count
     )
+    phase_record = phase_timeline.end(reason_after=unknown_reason_ids(result))
     ctx.analysis1 = analysis1
     ctx.analysis2 = analysis2
 
@@ -481,6 +592,7 @@ def _maybe_retry_sat_return_type_fix(
         result,
         transition_reason,
         ctx.type_fix_result,
+        phase_diagnostics=phase_record,
     )
     return result, attempt_id + 1, True
 

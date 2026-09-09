@@ -246,6 +246,14 @@ class Attempt:
     reason_occurrences: List[ReasonOccurrence] = field(default_factory=list)
     mips64_abi_constraints: Optional[Dict[str, Any]] = None
     elapsed_time: float = 0.0
+    # Issue #107: phase 観測（診断のみ）。既存の payload に無ければ既定値のままで、
+    # 判定にも reason にも関与しない。`applied` は三値: True/False は型修正 phase の
+    # 適用有無、None は「その概念が無い attempt」（P0 や ABI 制約リトライ）。
+    applied: Optional[bool] = None
+    reanalyzed_sides: List[str] = field(default_factory=list)
+    skipped_reason: Optional[str] = None
+    reason_before: List[str] = field(default_factory=list)
+    reason_after: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
@@ -287,6 +295,11 @@ class Attempt:
             "reason_occurrences": [item.to_dict() for item in self.reason_occurrences],
             "mips64_abi_constraints": self.mips64_abi_constraints,
             "elapsed_time": self.elapsed_time,
+            "applied": self.applied,
+            "reanalyzed_sides": list(self.reanalyzed_sides),
+            "skipped_reason": self.skipped_reason,
+            "reason_before": list(self.reason_before),
+            "reason_after": list(self.reason_after),
         }
         return result
 
