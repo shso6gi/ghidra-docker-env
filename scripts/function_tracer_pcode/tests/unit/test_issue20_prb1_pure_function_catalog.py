@@ -534,8 +534,13 @@ def test_thunk_chain_within_the_bound_still_resolves_to_the_external_signature()
     assert resolution.provenance_kind == PROVENANCE_THUNK_TO_EXTERNAL
 
 
-def test_candidate_provenance_uses_the_same_classifier_as_the_effect_lane():
-    """candidate が external と認める入力集合は effect lane の proven-external と同じ。"""
+def test_candidate_external_classification_is_a_subset_of_the_effect_lane_verdict():
+    """external 判定は effect lane と同じ ``classify_callee_chain()`` を使う。
+
+    その上で B1 は library / symbol / catalog / signature / observation の条件を
+    **追加**するので、最終的な candidate 集合は effect lane の confirmed-external
+    集合の **部分集合** になる。両者が一致するとは主張しない。
+    """
     cases = [
         _external_function("log"),
         _thunk_to_external("log"),
@@ -546,6 +551,9 @@ def test_candidate_provenance_uses_the_same_classifier_as_the_effect_lane():
     non_bool = _Function("log", external_location=_ExternalLocation())
     non_bool._is_external = "true"
     cases.append(non_bool)
+    # external location を持たない external: effect lane は external と確定するが、
+    # library evidence が無いので candidate にはならない（部分集合である例）。
+    cases.append(_Function("log", is_external=True, external_location=None))
     for function_obj in cases:
         resolution = external_call_models.resolve_effect_callee(
             function_obj, ExternalCallEffectPolicy()
@@ -554,7 +562,25 @@ def test_candidate_provenance_uses_the_same_classifier_as_the_effect_lane():
             resolution
         )
         provenance, _reason = catalog_module.external_symbol_provenance(_target(function_obj))
-        assert (provenance is not None) is effect_lane_external, function_obj.getName()
+        if provenance is not None:
+            assert effect_lane_external, function_obj.getName()
+        candidate = resolve_call_model_candidate(
+            _target(function_obj), policy=NO_OBSERVATION
+        ).candidate
+        if candidate is not None:
+            assert effect_lane_external, function_obj.getName()
+
+
+def test_candidate_set_is_strictly_smaller_than_the_confirmed_external_set():
+    """confirmed external でも B1 固有条件を満たさなければ candidate にならない。"""
+    library_less = _Function("log", is_external=True, external_location=None)
+    non_catalog = _external_function("client_specific_helper")
+    for function_obj in (library_less, non_catalog):
+        resolution = external_call_models.resolve_effect_callee(
+            function_obj, ExternalCallEffectPolicy()
+        )
+        assert external_call_models.resolution_is_confirmed_external(resolution)
+        assert not _resolve(function_obj).accepted
 
 
 def test_unknown_call_target_is_not_a_candidate():

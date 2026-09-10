@@ -542,6 +542,11 @@ def external_symbol_provenance(
 
     thunk の signature / 名前は、chain が **proven external に解決できた場合だけ**
     その終端から読む。循環 / 解決不能 / 上限超過 / non-bool は candidate なし。
+
+    ここは external 判定を共有するだけで、両者が同じ集合を返すという意味ではない。
+    B1 はこの上に library / symbol / catalog / signature / observation の条件を
+    **追加**するので、最終的な candidate 集合は effect lane の confirmed-external
+    集合の **部分集合** になる。
     """
 
     if not isinstance(target_ref, CallTargetRef) or not target_ref.is_function():
