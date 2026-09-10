@@ -1,0 +1,2056 @@
+{
+  "schema_version": 1,
+  "provider": "c99_math_catalog_v1",
+  "symbol_resolution": {
+    "required_provenance": "external_import",
+    "strip_elf_version_suffix": true
+  },
+  "functions": [
+    {
+      "canonical_symbol": "acos",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__acos_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "acosf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__acosf_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "acosh",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__acosh_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "acoshf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__acoshf_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "asin",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__asin_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "asinf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__asinf_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "asinh",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "asinhf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "atan",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "atan2",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__atan2_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "atan2f",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__atan2f_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "atanf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "atanh",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__atanh_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "atanhf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__atanhf_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "cbrt",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "cbrtf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "ceil",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "ceilf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "copysign",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": false
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "copysignf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": false
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "cos",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "cosf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "cosh",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__cosh_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "coshf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__coshf_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "erf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "erfc",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "erfcf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "erff",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "exp",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__exp_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "exp2",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__exp2_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "exp2f",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__exp2f_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "expf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__expf_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "expm1",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "expm1f",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "fabs",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": false
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "fabsf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": false
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "fdim",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "fdimf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "floor",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "floorf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "fma",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "fmaf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "fmax",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "fmaxf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "fmin",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "fminf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "fmod",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__fmod_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "fmodf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__fmodf_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "hypot",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__hypot_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "hypotf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__hypotf_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "ilogb",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "int",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "ilogbf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "int",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "ldexp",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "int",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "ldexpf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "int",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "lgamma",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "lgammaf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "llrint",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "int",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "llrintf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "int",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "llround",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "int",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "llroundf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "int",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "log",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__log_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "log10",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__log10_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "log10f",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__log10f_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "log1p",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "log1pf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "log2",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__log2_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "log2f",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__log2f_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "logb",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "logbf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "logf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__logf_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "nearbyint",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "nearbyintf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "nextafter",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "nextafterf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "pow",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__pow_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "powf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__powf_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "remainder",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__remainder_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "remainderf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__remainderf_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "rint",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "rintf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "round",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "roundf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "scalbn",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        },
+        {
+          "type_class": "int",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "scalbnf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        },
+        {
+          "type_class": "int",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "sin",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "sinf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "sinh",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__sinh_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "sinhf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__sinhf_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "sqrt",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__sqrt_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "sqrtf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": [
+        {
+          "alias_symbol": "__sqrtf_finite",
+          "provenance_requirement": "external_import"
+        }
+      ]
+    },
+    {
+      "canonical_symbol": "tan",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "tanf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "tanh",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "tanhf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "tgamma",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "tgammaf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": true,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "trunc",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 64
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 64
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    },
+    {
+      "canonical_symbol": "truncf",
+      "parameters": [
+        {
+          "type_class": "float",
+          "width_bits": 32
+        }
+      ],
+      "return": {
+        "type_class": "float",
+        "width_bits": 32
+      },
+      "observation_sensitivity": {
+        "errno": false,
+        "fenv": true
+      },
+      "aliases": []
+    }
+  ]
+}

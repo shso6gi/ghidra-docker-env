@@ -24,6 +24,9 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
 from scripts.function_tracer_pcode.core.signature import get_declared_type_signedness
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.structural import StructuralKey
+from scripts.function_tracer_pcode.analysis.effects.pure_function_catalog import (
+    resolve_call_model_candidate_ref,
+)
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     BoundedCallRefiner,
     CallArgumentEvidence,
@@ -389,6 +392,27 @@ def _impl__make_deferred_call_recorder(self, current_function=None):
         else CallTargetRef.unknown()
     )
     caller_parameters = [dict(param) for param in (self._current_parameters or [])]
+    # decision-neutral な call-model candidate（Issue #20 PR-B1）。同じ callee を
+    # 何度呼んでも Ghidra signature の読み出しは 1 度で足りるのでキャッシュする。
+    candidate_cache: Dict[Any, Any] = {}
+
+    def call_model_candidate_for(target_ref: CallTargetRef):
+        """catalog candidate metadata を返す。判定は一切変えない。
+
+        candidate は「仮定を置けば model 化し得る」という分類にすぎず、
+        ``effect_class`` にも引数復元にも影響しない。
+        """
+        # policy が無い host では observation 境界を確認できないので fail closed。
+        policy = getattr(self, "_external_call_effect_policy", None)
+        try:
+            cache_key = (target_ref.stable_key(), policy)
+        except Exception:  # noqa: BLE001 - 識別できないなら候補にしない
+            return None
+        if cache_key in candidate_cache:
+            return candidate_cache[cache_key]
+        candidate = resolve_call_model_candidate_ref(target_ref, policy=policy)
+        candidate_cache[cache_key] = candidate
+        return candidate
 
     def record_call(
         target,
@@ -423,6 +447,7 @@ def _impl__make_deferred_call_recorder(self, current_function=None):
             call_target_expr=cloned_target_expr,
             deferred_call_ref=deferred_call_ref,
             placeholder_name=deferred_call_ref.display_name(),
+            call_model_candidate=call_model_candidate_for(target_ref),
         )
         self._current_deferred_calls[deferred_call_ref.stable_key()] = info
         if self.debug:
@@ -2245,6 +2270,7 @@ def _impl__specialize_call_analysis(
             abi_return_width_bits=getattr(info, "abi_return_width_bits", None),
             abi_return_type_policy=getattr(info, "abi_return_type_policy", None),
             call_site_multiplicity=getattr(info, "call_site_multiplicity", None),
+            call_model_candidate=getattr(info, "call_model_candidate", None),
         )
         specialized_deferred_calls[info.deferred_call_ref.stable_key()] = specialized_info
         original_to_specialized[info.deferred_call_ref.stable_key()] = specialized_info
@@ -2376,6 +2402,7 @@ def _impl__merge_deferred_calls_into_current_analysis(
                 abi_return_width_bits=getattr(info, "abi_return_width_bits", None),
                 abi_return_type_policy=getattr(info, "abi_return_type_policy", None),
                 call_site_multiplicity=getattr(info, "call_site_multiplicity", None),
+                call_model_candidate=getattr(info, "call_model_candidate", None),
             )
 
 
