@@ -2211,6 +2211,50 @@ _PHASE2_STRUCTURAL_PRECONDITION_STAGES = (
 )
 
 
+#: readiness 層の binding 検証で拒否する理由。
+INTERNAL_AUTHORITY_MISSING = "internal_callee_correspondence_authority_missing"
+INTERNAL_AUTHORITY_MALFORMED = "internal_callee_correspondence_authority_malformed"
+INTERNAL_AUTHORITY_UNBOUND = "internal_callee_correspondence_authority_unbound"
+
+#: `RelationalCalleeCorrespondenceId.stable_key()` の形。
+_RELATIONAL_CALLEE_ID_KIND = "relational_callee_correspondence"
+_RELATIONAL_CALLEE_ID_LENGTH = 6
+
+
+def _internal_authority_binding_blockers(
+    obligation: RelationalCallEffectObligation,
+) -> Tuple[str, ...]:
+    """Check that the carried correspondence receipts bind to each other.
+
+    facts は見ない。見るのは obligation が運んできた三つ組
+    （candidate id / proof id / relational callee id）の構造的な整合だけ。
+    substituted / malformed / stale combination をここで止める。
+    """
+
+    candidate_id = obligation.internal_candidate_id
+    proof_id = obligation.callee_correspondence_proof_id
+    relational_id = obligation.relational_callee_correspondence_id
+    if not candidate_id:
+        # internal lane ではない obligation には何も要求しない。
+        return ()
+    if not proof_id or not relational_id:
+        return (INTERNAL_AUTHORITY_MISSING,)
+
+    key = tuple(relational_id)
+    if (
+        len(key) != _RELATIONAL_CALLEE_ID_LENGTH
+        or key[0] != _RELATIONAL_CALLEE_ID_KIND
+        or not isinstance(key[1], str)
+    ):
+        return (INTERNAL_AUTHORITY_MALFORMED,)
+    # embedded proof_id / candidate_key が、別々に運ばれた値と一致すること。
+    if key[1] != str(proof_id):
+        return (INTERNAL_AUTHORITY_UNBOUND,)
+    if tuple(key[2] or ()) != tuple(candidate_id):
+        return (INTERNAL_AUTHORITY_UNBOUND,)
+    return ()
+
+
 def evaluate_obligation_proof_readiness(
     obligation: RelationalCallEffectObligation,
     eligibility: Phase2DirectCallEligibility,
@@ -2223,12 +2267,11 @@ def evaluate_obligation_proof_readiness(
         blockers.append("eligibility_obligation_id_mismatch")
     if eligibility.status != "candidate":
         blockers.append("obligation_not_solver_candidate")
-    # Issue #20 PR-D: correspondence authority の境界チェック。事実に基づく再検証は
-    # Phase 2 eligibility が済ませており、ここはその判定と運ばれた authority が
-    # 食い違っていないかだけを見る（内部 candidate なのに correspondence id が
-    # 無い、という状態を solver proof 段へ通さない）。
-    if obligation.internal_candidate_id and not obligation.relational_callee_correspondence_id:
-        blockers.append("internal_callee_correspondence_authority_missing")
+    # Issue #20 PR-D: correspondence authority の **binding 検証**。
+    # 責務分離: 事実に基づく semantic / authority の再検証は Phase 2 eligibility が
+    # 行う（facts を持っているのはそちらだけ）。readiness 層は facts を再解析せず、
+    # 運ばれてきた receipt 同士が構造的に噛み合っているかだけを検証する。
+    blockers.extend(_internal_authority_binding_blockers(obligation))
     records_by_stage: Dict[str, List[SolverProofRecord]] = {}
     verified_records: List[SolverProofRecord] = []
     artifact_failures: List[str] = []
@@ -2359,29 +2402,55 @@ def evaluate_obligation_proof_readiness(
     )
 
 
+def _width_from_storage_key(key: Any, depth: int = 0) -> Optional[int]:
+    """Semantic bit width carried by one storage identity key.
+
+    production で現れる形をすべて受ける。``parameter_storage`` は storage key を
+    包む wrapper なので中へ降りる（``("parameter_storage", <storage_key>)`` と
+    ``("parameter_storage", <storage_key>, size_bits)`` の両方がある）。
+    判別できなければ ``None``。推測しない。
+    """
+
+    if depth > 4 or not isinstance(key, (tuple, list)) or not key:
+        return None
+    kind = str(key[0])
+    if kind == "register_storage" and len(key) >= 6:
+        try:
+            width = int(key[5])
+        except (TypeError, ValueError):
+            return None
+        return width if width > 0 else None
+    if kind == "memory_storage" and len(key) >= 4:
+        try:
+            width = int(key[3]) * 8
+        except (TypeError, ValueError):
+            return None
+        return width if width > 0 else None
+    if kind == "parameter_storage":
+        if len(key) >= 3 and isinstance(key[2], int) and not isinstance(key[2], bool) and key[2] > 0:
+            return int(key[2])
+        if len(key) >= 2:
+            return _width_from_storage_key(key[1], depth + 1)
+    return None
+
+
 def _storage_identity_width_bits(identity: Any) -> Optional[int]:
     """Semantic width of one declared callee parameter, in bits.
 
-    ``callee_param_identities`` の 1 要素は identity key の tuple。その中の
-    storage key から幅を取り出す。``register_storage`` は末尾が bit 幅、
-    ``memory_storage`` は末尾が byte 幅。判別できなければ ``None``（推測しない）。
+    ``callee_param_identities`` の 1 要素は、その parameter を指す identity key の
+    tuple。その中の storage key から幅を回収する。回収できなければ ``None`` で、
+    呼び出し側は correspondence proof を不成立にする（未観測を一致扱いしない）。
     """
 
-    for key in tuple(identity or ()):
-        if not isinstance(key, (tuple, list)) or not key:
-            continue
-        if key[0] == "register_storage" and len(key) >= 6:
-            try:
-                width = int(key[5])
-            except (TypeError, ValueError):
-                return None
-            return width if width > 0 else None
-        if key[0] == "memory_storage" and len(key) >= 4:
-            try:
-                width = int(key[3]) * 8
-            except (TypeError, ValueError):
-                return None
-            return width if width > 0 else None
+    if not isinstance(identity, (tuple, list)):
+        return None
+    direct = _width_from_storage_key(identity)
+    if direct is not None:
+        return direct
+    for key in identity:
+        width = _width_from_storage_key(key)
+        if width is not None:
+            return width
     return None
 
 

@@ -1699,11 +1699,16 @@ def test_callee_return_width_mismatch_fails_closed():
     assert CALLEE_RETURN_WIDTH_RELATION_MISSING in {r for _k, r in proof.rejected}
 
 
-def test_unobservable_width_on_both_sides_is_recorded_not_asserted():
-    """どちらでも観測できない leg は ``unobserved`` として ID に明記する。
+def test_unavailable_width_fails_closed_on_both_sides():
+    """どちらでも幅が回収できないなら correspondence は成立しない。
 
-    「一致した」とは書かない。後段 stage に委ねたことが receipt から読める。
+    「両側とも不明だから一致扱い」は fail-open であって証明ではない。
     """
+
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CALLEE_PARAMETER_WIDTH_RELATION_MISSING,
+        CALLEE_RETURN_WIDTH_RELATION_MISSING,
+    )
 
     left = _internal_fact_with_callee_proof(
         "L1", "binaryL", 0x1000, callee_parameter_width_bits=(), callee_return_width_bits=(),
@@ -1713,16 +1718,75 @@ def test_unobservable_width_on_both_sides_is_recorded_not_asserted():
     )
     candidates, proof = _proof_for([left], [right])
 
-    assert len(proof.pairs) == 1
-    relation = proof.pairs[0].interface_relation_key
-    assert ("parameter_width", "unobserved") in relation
-    assert ("return_width", "unobserved") in relation
+    assert proof.pairs == ()
+    rejected = {r for _k, r in proof.rejected}
+    assert CALLEE_PARAMETER_WIDTH_RELATION_MISSING in rejected
+    assert CALLEE_RETURN_WIDTH_RELATION_MISSING in rejected
 
     correspondence, blockers = confirm_internal_callsite_correspondence(
         candidates[0], proof, left, right
     )
+    assert correspondence is None
+    assert CALLSITE_CALLEE_CORRESPONDENCE_MISSING in blockers
+
+
+def test_partially_recovered_parameter_widths_fail_closed():
+    """一部の ordinal しか回収できていない状態を関係の根拠にしない。"""
+
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CALLEE_PARAMETER_WIDTH_RELATION_MISSING,
+    )
+
+    two_params = ((("parameter_storage", "a"),), (("parameter_storage", "b"),))
+    left = _internal_fact_with_callee_proof(
+        "L1", "binaryL", 0x1000,
+        callee_parameter_keys=two_params, callee_parameter_width_bits=(32, None),
+    )
+    right = _internal_fact_with_callee_proof(
+        "R1", "binaryR", 0x2000,
+        callee_parameter_keys=two_params, callee_parameter_width_bits=(32, 32),
+    )
+    _candidates, proof = _proof_for([left], [right])
+
+    assert proof.pairs == ()
+    assert CALLEE_PARAMETER_WIDTH_RELATION_MISSING in {r for _k, r in proof.rejected}
+
+
+def test_callee_return_semantic_shape_must_correspond():
+    """戻り値 semantic shape が左右で対応しなければ ID を出さない。"""
+
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CALLEE_RETURN_SHAPE_RELATION_MISSING,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof(
+        "R1", "binaryR", 0x2000, callee_return_shape_keys=((("return", "other"),),),
+    )
+    candidates, proof = _proof_for([left], [right])
+
+    assert proof.pairs == ()
+    assert CALLEE_RETURN_SHAPE_RELATION_MISSING in {r for _k, r in proof.rejected}
+
+    correspondence, blockers = confirm_internal_callsite_correspondence(
+        candidates[0], proof, left, right
+    )
+    assert correspondence is None
+    assert CALLEE_RETURN_SHAPE_RELATION_MISSING in blockers
+
+
+def test_matching_callee_return_semantic_shape_is_bound_into_the_id():
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, proof = _proof_for([left], [right])
+
+    correspondence, blockers = confirm_internal_callsite_correspondence(
+        candidates[0], proof, left, right
+    )
+
     assert blockers == ()
-    assert correspondence.callee_correspondence.interface_relation_key == relation
+    relation = correspondence.callee_correspondence.interface_relation_key
+    assert ("return_semantic_shape", ((("return", "int32"),),)) in relation
 
 
 def test_interface_relation_is_bound_into_the_correspondence_id():
@@ -1739,6 +1803,7 @@ def test_interface_relation_is_bound_into_the_correspondence_id():
     assert ("parameter_arity", 1) in relation
     assert ("parameter_width", (32,)) in relation
     assert ("return_width", 32) in relation
+    assert ("return_semantic_shape", ((("return", "int32"),),)) in relation
     # ID は proof digest と interface relation の両方に bind される。
     assert correspondence.callee_correspondence.proof_id == proof.proof_id
     assert relation in correspondence.callee_correspondence.stable_key()
@@ -1835,3 +1900,121 @@ def test_readiness_refuses_an_internal_candidate_without_correspondence_authorit
 
     assert "internal_callee_correspondence_authority_missing" in readiness.blockers
     assert readiness.to_dict().get("decision_eligible") is not True
+
+
+# --------------------------------------------------------------------------
+# 16. readiness layer: receipt-to-receipt binding
+# --------------------------------------------------------------------------
+
+
+def _readiness_obligation(**overrides):
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import (
+        RelationalCallEffectObligation,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, proof = _proof_for([left], [right])
+    correspondence, _b = confirm_internal_callsite_correspondence(
+        candidates[0], proof, left, right
+    )
+    fields = dict(
+        obligation_id="ob1",
+        relation_kind="call_to_call",
+        observation_contract_id="contract",
+        left_fact_id="L1",
+        right_fact_id="R1",
+        internal_candidate_id=candidates[0].stable_key(),
+        callee_correspondence_proof_id=proof.proof_id,
+        relational_callee_correspondence_id=correspondence.callee_correspondence.stable_key(),
+    )
+    fields.update(overrides)
+    return RelationalCallEffectObligation(**fields), proof, candidates[0]
+
+
+def _readiness_blockers(obligation):
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import (
+        Phase2DirectCallEligibility,
+        evaluate_obligation_proof_readiness,
+    )
+
+    eligibility = Phase2DirectCallEligibility(
+        obligation_id=obligation.obligation_id,
+        status="candidate",
+        blockers=(),
+        required_solver_stages=(),
+    )
+    return evaluate_obligation_proof_readiness(obligation, eligibility, ()).blockers
+
+
+def test_readiness_accepts_a_fully_bound_authority_triple():
+    from scripts.function_tracer_pcode.proof.call_effect import obligations as O
+
+    obligation, _proof, _candidate = _readiness_obligation()
+
+    blockers = _readiness_blockers(obligation)
+
+    assert O.INTERNAL_AUTHORITY_MISSING not in blockers
+    assert O.INTERNAL_AUTHORITY_MALFORMED not in blockers
+    assert O.INTERNAL_AUTHORITY_UNBOUND not in blockers
+
+
+def test_readiness_rejects_a_missing_relational_id():
+    from scripts.function_tracer_pcode.proof.call_effect import obligations as O
+
+    obligation, _p, _c = _readiness_obligation(relational_callee_correspondence_id=None)
+
+    assert O.INTERNAL_AUTHORITY_MISSING in _readiness_blockers(obligation)
+
+
+def test_readiness_rejects_a_malformed_relational_id():
+    from scripts.function_tracer_pcode.proof.call_effect import obligations as O
+
+    for bad in (
+        ("wrong_kind", "p", (), (), (), ()),
+        ("relational_callee_correspondence", "p", ()),
+        ("relational_callee_correspondence", 1, (), (), (), ()),
+    ):
+        obligation, _p, _c = _readiness_obligation(relational_callee_correspondence_id=bad)
+        assert O.INTERNAL_AUTHORITY_MALFORMED in _readiness_blockers(obligation)
+
+
+def test_readiness_rejects_an_id_bound_to_another_proof():
+    """embedded proof_id が運ばれた proof id と食い違えば通さない。"""
+
+    from scripts.function_tracer_pcode.proof.call_effect import obligations as O
+
+    obligation, _p, _c = _readiness_obligation(callee_correspondence_proof_id="deadbeef")
+
+    assert O.INTERNAL_AUTHORITY_UNBOUND in _readiness_blockers(obligation)
+
+
+def test_readiness_rejects_an_id_bound_to_another_candidate():
+    """embedded candidate_key が運ばれた candidate id と食い違えば通さない。"""
+
+    from scripts.function_tracer_pcode.proof.call_effect import obligations as O
+
+    obligation, _p, candidate = _readiness_obligation()
+    substituted = ("internal_call_correspondence_candidate", "L9", "R9", ("shape",), ())
+    obligation, _p, _c = _readiness_obligation(internal_candidate_id=substituted)
+
+    assert O.INTERNAL_AUTHORITY_UNBOUND in _readiness_blockers(obligation)
+
+
+def test_readiness_ignores_non_internal_obligations():
+    from scripts.function_tracer_pcode.proof.call_effect import obligations as O
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import (
+        RelationalCallEffectObligation,
+    )
+
+    obligation = RelationalCallEffectObligation(
+        obligation_id="ob1",
+        relation_kind="call_to_region",
+        observation_contract_id="contract",
+        left_fact_id="L1",
+        right_fact_id="R1",
+    )
+
+    blockers = _readiness_blockers(obligation)
+    for code in (O.INTERNAL_AUTHORITY_MISSING, O.INTERNAL_AUTHORITY_MALFORMED, O.INTERNAL_AUTHORITY_UNBOUND):
+        assert code not in blockers

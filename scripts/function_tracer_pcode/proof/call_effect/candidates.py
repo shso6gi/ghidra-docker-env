@@ -279,6 +279,7 @@ CALLEE_CORRESPONDENCE_AMBIGUOUS = "internal_callee_correspondence_ambiguous"
 CALLEE_CORRESPONDENCE_PROOF_INVALID = "internal_callee_correspondence_proof_invalid"
 CALLEE_CORRESPONDENCE_PROOF_STALE = "internal_callee_correspondence_proof_stale"
 CALLEE_RETURN_SUMMARY_UNPROVEN = "internal_callee_return_summary_unproven"
+#: 戻り値 semantic shape が片側でも取れない、または左右で対応しない。
 CALLEE_RETURN_SHAPE_RELATION_MISSING = "internal_callee_return_shape_relation_missing"
 CALLEE_EFFECT_SUMMARY_UNPROVEN = "internal_callee_effect_summary_unproven"
 CALLEE_MEMORY_EFFECT_RELATION_MISSING = "internal_callee_memory_effect_relation_missing"
@@ -323,15 +324,15 @@ def _resolved_callee_key(fact: Any) -> Optional[Tuple[Any, ...]]:
     return tuple(target) if isinstance(target, (tuple, list)) else (target,)
 
 
-def _observable_parameter_widths(fact: Any) -> Optional[Tuple[int, ...]]:
-    """Declared callee parameter widths when *every* ordinal is observable.
+def _declared_parameter_widths(fact: Any) -> Optional[Tuple[int, ...]]:
+    """Declared callee parameter widths when *every* ordinal is recovered.
 
-    一部だけ観測できている状態は関係を書く根拠にならないので ``None`` にする。
+    一部でも回収できなければ ``None``。部分的な観測は関係を書く根拠にならない。
     """
 
     widths = tuple(getattr(fact, "callee_parameter_width_bits", ()) or ())
     arity = len(tuple(getattr(fact, "callee_parameter_keys", ()) or ()))
-    if not widths or len(widths) != arity or any(w is None for w in widths):
+    if len(widths) != arity or any(w is None for w in widths):
         return None
     return tuple(int(w) for w in widths)
 
@@ -339,8 +340,9 @@ def _observable_parameter_widths(fact: Any) -> Optional[Tuple[int, ...]]:
 def _callee_side_inputs(fact: Any) -> Tuple[Optional[Tuple[Any, ...]], Tuple[str, ...]]:
     """Per-side callee facts the relation is written over, or why they are missing.
 
-    存在確認そのものは証明ではない。ここで集めるのは関係を書くための量であり、
-    correspondence の成立は後段の interface relation と bijection 検査が担う。
+    ここで集めるのは関係を書くための量であり、これ自体は証明ではない。関係の
+    成立は `_callee_interface_relation` と bijection 検査が判定する。
+    幅が回収できない side は、その時点で関係を書けないので理由付きで落とす。
     """
 
     reasons: List[str] = []
@@ -357,6 +359,14 @@ def _callee_side_inputs(fact: Any) -> Tuple[Optional[Tuple[Any, ...]], Tuple[str
     profile = _single(getattr(fact, "callee_control_profile_keys", ()))
     if profile is None:
         reasons.append(CALLEE_CONTROL_PROFILE_RELATION_MISSING)
+
+    parameter_widths = _declared_parameter_widths(fact)
+    if parameter_widths is None:
+        reasons.append(CALLEE_PARAMETER_WIDTH_RELATION_MISSING)
+    return_width = _single(getattr(fact, "callee_return_width_bits", ()))
+    if return_width is None:
+        reasons.append(CALLEE_RETURN_WIDTH_RELATION_MISSING)
+
     if reasons:
         return None, tuple(dict.fromkeys(reasons))
 
@@ -364,8 +374,8 @@ def _callee_side_inputs(fact: Any) -> Tuple[Optional[Tuple[Any, ...]], Tuple[str
         (
             "callee_interface",
             len(tuple(getattr(fact, "callee_parameter_keys", ()) or ())),
-            _observable_parameter_widths(fact),
-            _single(getattr(fact, "callee_return_width_bits", ())),
+            parameter_widths,
+            int(return_width),
             shapes,
             memory,
             tuple(profile),
@@ -374,69 +384,52 @@ def _callee_side_inputs(fact: Any) -> Tuple[Optional[Tuple[Any, ...]], Tuple[str
     )
 
 
-def _relate_observable(
-    left: Any,
-    right: Any,
-    label: str,
-    mismatch_reason: str,
-) -> Tuple[Optional[Tuple[Any, ...]], Optional[str]]:
-    """Relate one interface leg, distinguishing three states.
-
-    * 両側で観測できる → 一致を要求する（食い違えば fail closed）
-    * 片側だけ観測できる → **fail closed**。片方に情報があるのに突き合わせない
-      のは、不一致を黙って見逃すのと同じになる。
-    * どちらでも観測できない → 関係を書く材料が無い。``unobserved`` として
-      ID に明記し、この leg は後段 stage（``argument_relation`` /
-      ``return_relation``）に委ねる。ここで「一致した」とは書かない。
-    """
-
-    if left is None and right is None:
-        return (label, "unobserved"), None
-    if left is None or right is None:
-        return None, mismatch_reason
-    if left != right:
-        return None, mismatch_reason
-    return (label, left), None
-
-
 def _callee_interface_relation(
     left_inputs: Tuple[Any, ...],
     right_inputs: Tuple[Any, ...],
 ) -> Tuple[Optional[Tuple[Any, ...]], Tuple[str, ...]]:
-    """The ABI/type-level relation two callees must satisfy to be counterparts.
+    """The relation two callees must satisfy to be relational counterparts.
 
-    **意味的等価ではない。** 同じソース関数から出た左右の callee は、引数の個数と、
-    観測できる範囲での引数・戻り値の意味幅が一致する。逆にこれが食い違えば
-    そもそも相手同士ではない。本体の等価性は後段 ``return_relation`` /
+    **意味的等価ではない。** 同じソース関数から出た左右の callee は、引数の個数、
+    各引数の意味幅、戻り値の意味幅、そして cross-binary 正規化済みの戻り値
+    semantic shape が一致する。逆にこれが食い違えば相手同士ではない。本体の
+    等価性（ガード分割・メモリ最終状態など）は後段 ``return_relation`` /
     ``memory_relation`` が証明する。
 
-    raw memory-effect count / store count / return 式 shape の一致は要求しない
-    （同じ番地を 2 回書く実装と 1 回書く実装は最終状態が同じなら等価であり、
-    それを先回りして潰さない）。
+    要求しないもの: raw memory-effect count / store count の一致。同じ番地を
+    2 回書く実装と 1 回書く実装は最終状態が同じなら等価であり、後段 stage の
+    責務を先取りしない。
+
+    未観測を「一致」として通す経路は無い。幅も shape も、回収できなければ
+    `_callee_side_inputs` の時点で落ちている。
     """
 
     reasons: List[str] = []
-    _tag, left_arity, left_widths, left_return, _ls, _lm, _lp = left_inputs
-    _tag2, right_arity, right_widths, right_return, _rs, _rm, _rp = right_inputs
+    _tag, left_arity, left_widths, left_return, left_shapes, _lm, _lp = left_inputs
+    _tag2, right_arity, right_widths, right_return, right_shapes, _rm, _rp = right_inputs
 
     if left_arity != right_arity:
         return None, (CALLEE_PARAMETER_ARITY_RELATION_MISSING,)
-
-    parameter_leg, parameter_reason = _relate_observable(
-        left_widths, right_widths, "parameter_width", CALLEE_PARAMETER_WIDTH_RELATION_MISSING
-    )
-    if parameter_reason:
-        reasons.append(parameter_reason)
-    return_leg, return_reason = _relate_observable(
-        left_return, right_return, "return_width", CALLEE_RETURN_WIDTH_RELATION_MISSING
-    )
-    if return_reason:
-        reasons.append(return_reason)
+    if left_widths != right_widths:
+        reasons.append(CALLEE_PARAMETER_WIDTH_RELATION_MISSING)
+    if left_return != right_return:
+        reasons.append(CALLEE_RETURN_WIDTH_RELATION_MISSING)
+    # 戻り値 semantic shape は `_cross_binary_expression_shape` で artifact-local
+    # identity を落とした後の形。既存の cross-binary 正規化 authority をそのまま
+    # 再利用し、左右で一致することを関係として要求する。
+    if left_shapes != right_shapes:
+        reasons.append(CALLEE_RETURN_SHAPE_RELATION_MISSING)
 
     if reasons:
         return None, tuple(dict.fromkeys(reasons))
     return (
-        ("callee_interface_relation", ("parameter_arity", left_arity), parameter_leg, return_leg),
+        (
+            "callee_interface_relation",
+            ("parameter_arity", left_arity),
+            ("parameter_width", left_widths),
+            ("return_width", left_return),
+            ("return_semantic_shape", left_shapes),
+        ),
         (),
     )
 
