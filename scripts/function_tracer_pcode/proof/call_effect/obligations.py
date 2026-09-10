@@ -25,9 +25,12 @@ from scripts.function_tracer_pcode.core import (
     expression_provenance_key,
 )
 from scripts.function_tracer_pcode.proof.call_effect.candidates import (
-    InternalCallCorrespondenceCandidateId,
+    build_callee_correspondence_proof,
     build_internal_call_correspondence_candidates,
+    issue_relational_callee_correspondence,
     confirm_internal_callsite_correspondence,
+    verify_internal_candidate_binding,
+    CALLEE_CORRESPONDENCE_PROOF_STALE,
 )
 from scripts.function_tracer_pcode.proof.call_effect.fresh_arguments import (
     FRESH_ARGUMENT_STATUS_NOT_EVALUATED,
@@ -859,6 +862,12 @@ class RelationalCallEffectObligation:
     #: **候補**の identity であって callee equivalence の証明ダイジェストではない。
     #: 成立条件に callee return / effect の事実を含めない（循環防止）。
     internal_candidate_id: Optional[Tuple[Any, ...]] = None
+    #: Issue #20 PR-D: 候補集合が誘導する callee correspondence proof の digest。
+    #: eligibility 側で現在の fact から再導出したものと突き合わせ、食い違えば
+    #: stale / foreign として拒否する。
+    callee_correspondence_proof_id: Optional[str] = None
+    #: Issue #20 PR-D: proof に bind された callee correspondence id。
+    relational_callee_correspondence_id: Optional[Tuple[Any, ...]] = None
     #: Issue #20 PR-D: 左右 fresh 引数の扱い。call-to-call の対応でだけ評価する。
     #: 評価していない obligation は ``not_evaluated`` のままにし、成り立っていない
     #: ``independent`` を receipt に書かない。relational equality proof が無い限り
@@ -2338,24 +2347,54 @@ def _pair_is_in_internal_call_lane(left: Any, right: Any) -> bool:
     return True
 
 
-def _candidate_from_obligation(
+def _internal_correspondence_blockers(
     obligation: RelationalCallEffectObligation,
-) -> Optional[InternalCallCorrespondenceCandidateId]:
-    """The internal candidate identity this obligation was built from.
+    left: Any,
+    right: Any,
+    left_by_id: Mapping[str, RiskBearingFact],
+    right_by_id: Mapping[str, RiskBearingFact],
+) -> Tuple[str, ...]:
+    """Verify the candidate binding and the callee correspondence proof.
 
-    ``None`` when the pair is not an internal callsite candidate; the
-    correspondence then fails closed rather than being assumed.
+    永続化された identity を信用せず、現在の fact から候補と proof を再導出して
+    突き合わせる。schema / obligation 所属 / 候補 shape / proof digest のいずれか
+    が食い違えば fail closed する。
     """
 
-    key = getattr(obligation, "internal_candidate_id", None)
-    if not key:
-        return None
-    return InternalCallCorrespondenceCandidateId(
-        left_fact_id=str(obligation.left_fact_id or ""),
-        right_fact_id=str(obligation.right_fact_id or ""),
-        correspondence_shape_key=tuple(key[3]) if len(key) > 3 else (),
-        abi_argument_slot_keys=tuple(key[4]) if len(key) > 4 else (),
+    candidate, binding_blockers = verify_internal_candidate_binding(
+        getattr(obligation, "internal_candidate_id", None),
+        obligation.left_fact_id,
+        obligation.right_fact_id,
+        left,
+        right,
     )
+    if candidate is None:
+        return binding_blockers
+
+    # 候補集合全体から callee correspondence proof を再導出する。obligation が
+    # 運んできた proof id は「現在の事実から出るはずの proof」と一致しなければ
+    # stale / foreign として拒否する。
+    all_candidates = build_internal_call_correspondence_candidates(
+        [fact for fact in left_by_id.values() if isinstance(fact, CallSiteFact)],
+        [fact for fact in right_by_id.values() if isinstance(fact, CallSiteFact)],
+    ).candidates
+    proof = build_callee_correspondence_proof(all_candidates, left_by_id, right_by_id)
+    carried_proof_id = getattr(obligation, "callee_correspondence_proof_id", None)
+    if carried_proof_id and str(carried_proof_id) != proof.proof_id:
+        return (CALLEE_CORRESPONDENCE_PROOF_STALE,)
+
+    correspondence, blockers = confirm_internal_callsite_correspondence(
+        candidate, proof, left, right
+    )
+    if correspondence is None:
+        return tuple(blockers)
+
+    # obligation が運んできた correspondence id も、再導出したものと一致しなければ
+    # 受け付けない（差し替えられた id で correspondence を成立させない）。
+    carried_id = getattr(obligation, "relational_callee_correspondence_id", None)
+    if carried_id is not None and tuple(carried_id) != correspondence.callee_correspondence.stable_key():
+        return (CALLEE_CORRESPONDENCE_PROOF_STALE,)
+    return ()
 
 
 def _phase2_direct_call_eligibility(
@@ -2527,12 +2566,11 @@ def _phase2_direct_call_eligibility(
         # correspondence blocker を重ねると、internal でない pair に
         # `callsite_correspondence_unproven` という別の reason が付いてしまう。
         if _pair_is_in_internal_call_lane(left, right):
-            _correspondence, correspondence_blockers = confirm_internal_callsite_correspondence(
-                _candidate_from_obligation(obligation),
-                left,
-                right,
+            blockers.extend(
+                _internal_correspondence_blockers(
+                    obligation, left, right, left_by_id, right_by_id
+                )
             )
-            blockers.extend(correspondence_blockers)
 
     memory_relation_required = bool(
         isinstance(left, CallSiteFact)
@@ -2775,6 +2813,20 @@ def build_call_effect_shadow_manifest(
         (candidate.left_fact_id, candidate.right_fact_id): candidate
         for candidate in internal_candidates.candidates
     }
+    # 候補集合が誘導する callee correspondence を一度だけ証明し、その receipt を
+    # obligation に bind する。候補形成はこの proof を見ていない（循環しない）。
+    internal_callee_proof = build_callee_correspondence_proof(
+        internal_candidates.candidates,
+        {fact.fact_id: fact for fact in left_facts},
+        {fact.fact_id: fact for fact in right_facts},
+    )
+    internal_callee_id_by_pair = {}
+    for candidate in internal_candidates.candidates:
+        issued, _blockers = issue_relational_callee_correspondence(
+            internal_callee_proof, candidate
+        )
+        if issued is not None:
+            internal_callee_id_by_pair[(candidate.left_fact_id, candidate.right_fact_id)] = issued
     paired_left = {left for left, _ in pairs}
     paired_right = {right for _, right in pairs}
     left_unmatched_calls = tuple(
@@ -2826,6 +2878,16 @@ def build_call_effect_shadow_manifest(
                 internal_candidate_id=(
                     internal_candidate_by_pair[(left_id, right_id)].stable_key()
                     if (left_id, right_id) in internal_candidate_by_pair
+                    else None
+                ),
+                callee_correspondence_proof_id=(
+                    internal_callee_proof.proof_id
+                    if (left_id, right_id) in internal_candidate_by_pair
+                    else None
+                ),
+                relational_callee_correspondence_id=(
+                    internal_callee_id_by_pair[(left_id, right_id)].stable_key()
+                    if (left_id, right_id) in internal_callee_id_by_pair
                     else None
                 ),
                 fresh_argument_status=fresh_argument_correspondence_status(

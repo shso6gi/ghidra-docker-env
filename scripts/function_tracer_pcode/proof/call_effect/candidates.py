@@ -21,8 +21,10 @@ shape が同じ複数候補を「位置が近いから」で結び付けるこ�
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
 #: 内部 callee の callsite だけが候補になる。
@@ -231,34 +233,65 @@ def candidate_identity_is_callee_proof_free(
     ) and bool(candidate.stable_key())
 
 
-# ---------------------------------------------------------------------------
-# candidate → callee correspondence proof → callsite correspondence
-# ---------------------------------------------------------------------------
-#
-# 権限境界を型で分ける（正本 v4 §4.3.4）。
-#
-#   1. candidate 形成            InternalCallCorrespondenceCandidateId
-#        semantic shape の相互一意のみ。callee return / effect を読まない。
-#   2. callee correspondence     RelationalCalleeCorrespondenceId
-#        **左右 callee が対応する**ことを、後段の callee return / effect 事実から
-#        関係的に確立する。ここで初めて callee の事実を読んでよい。
-#   3. callsite correspondence   InternalCallsiteCorrespondence
-#        candidate + callee correspondence + relational argument key の三点が
-#        揃って初めて成立する。
-#
-# 1 で 2/3 の入力を先取りしない（循環防止）。2 が無ければ 3 は成立しない。
 
-#: callee correspondence が確立できない理由（fail closed）。
+# ---------------------------------------------------------------------------
+# candidate → callee correspondence proof → RelationalCalleeCorrespondenceId
+#             → relational argument key → internal callsite correspondence
+# ---------------------------------------------------------------------------
+#
+# 権限境界（正本 v4 §4.3.4）。所有者を分ける。
+#
+#   candidate 形成          InternalCallCorrespondenceCandidateId
+#       semantic shape の相互一意のみ。callee return / effect を読まない。
+#   callee correspondence   CalleeCorrespondenceProof（factory 発行の receipt）
+#       **左右 callee が対応する**ことを関係的に証明する。
+#   correspondence id       RelationalCalleeCorrespondenceId
+#       proof digest に bind される。proof 無しでは発行できない。
+#   callsite correspondence InternalCallsiteCorrespondence
+#       candidate + correspondence id + relational argument key。
+#
+# **何を関係的な証明とするか**
+#
+# callee identity (`CallTargetRef.stable_key()`) は `program_id` を含むので左右で
+# 一致しない（正本 G3）。したがって「左右の callee が同じ」ことは直接は言えない。
+# 代わりに、この関数対の **候補集合全体が誘導する callee の対応**が
+# 双方向に一意（bijection）であることを証明する。
+#
+#   左 callsite A ↔ 右 callsite A'、左 callsite B ↔ 右 callsite B' が候補で、
+#   A と B が同じ左 callee を呼ぶなら、A' と B' も同じ右 callee を呼ばねばならない。
+#   一つでも破れていれば callee の対応は曖昧であり、ID を発行しない。
+#
+# これは各 side の情報が「存在する」ことの確認ではなく、候補集合という関係の上で
+# しか書けない制約であり、かつ callee の **意味的等価**は何も主張しない。等価性は
+# 後段の `return_relation` / `memory_relation` が証明する（責務を先取りしない）。
+
+CALLEE_CORRESPONDENCE_PROOF_KIND = "internal_callee_correspondence_bijection_v1"
+CALLEE_CORRESPONDENCE_SCHEMA_VERSION = 1
+
+#: candidate の binding 検証で拒否する理由。
+CANDIDATE_SCHEMA_INVALID = "internal_callsite_candidate_schema_invalid"
+CANDIDATE_OBLIGATION_MISMATCH = "internal_callsite_candidate_obligation_mismatch"
+CANDIDATE_STALE = "internal_callsite_candidate_stale"
+
+#: callee correspondence proof が成立しない理由（fail closed）。
+CALLEE_TARGET_UNRESOLVED = "internal_callee_target_unresolved"
+CALLEE_CORRESPONDENCE_AMBIGUOUS = "internal_callee_correspondence_ambiguous"
+CALLEE_CORRESPONDENCE_PROOF_INVALID = "internal_callee_correspondence_proof_invalid"
+CALLEE_CORRESPONDENCE_PROOF_STALE = "internal_callee_correspondence_proof_stale"
 CALLEE_RETURN_SUMMARY_UNPROVEN = "internal_callee_return_summary_unproven"
 CALLEE_RETURN_SHAPE_RELATION_MISSING = "internal_callee_return_shape_relation_missing"
 CALLEE_EFFECT_SUMMARY_UNPROVEN = "internal_callee_effect_summary_unproven"
 CALLEE_MEMORY_EFFECT_RELATION_MISSING = "internal_callee_memory_effect_relation_missing"
 CALLEE_CONTROL_PROFILE_RELATION_MISSING = "internal_callee_control_profile_relation_missing"
 
-#: callsite correspondence が確立できない理由（fail closed）。
+#: callsite correspondence が成立しない理由（fail closed）。
 CALLSITE_CANDIDATE_MISSING = "internal_callsite_candidate_missing"
 CALLSITE_CALLEE_CORRESPONDENCE_MISSING = "internal_callsite_callee_correspondence_missing"
 CALLSITE_ARGUMENT_RELATION_MISSING = "internal_callsite_argument_relation_missing"
+
+#: 候補 identity の永続化キーの形（schema 検証に使う）。
+_CANDIDATE_KEY_KIND = "internal_call_correspondence_candidate"
+_CANDIDATE_KEY_LENGTH = 5
 
 
 def _single(values: Any) -> Optional[Any]:
@@ -268,123 +301,351 @@ def _single(values: Any) -> Optional[Any]:
     return items[0] if len(items) == 1 else None
 
 
-@dataclass(frozen=True)
-class RelationalCalleeCorrespondenceId:
-    """Identity of the left-callee ↔ right-callee correspondence obligation.
+def _resolved_callee_key(fact: Any) -> Optional[Tuple[Any, ...]]:
+    """The single resolved callee identity of a call site, else ``None``."""
 
-    **何を主張するか**: 「この 2 つの callsite の callee を突き合わせる関係が、
-    後段 proof の入力として関係的に成立している」ことだけ。両 callee が
-    *等価である*ことは主張しない。等価性は後段の ``return_relation`` /
-    ``memory_relation`` 等が証明する。
+    if getattr(fact, "target_resolution_status", None) != "resolved":
+        return None
+    target = _single(getattr(fact, "target_candidates", ()))
+    if target is None:
+        return None
+    return tuple(target) if isinstance(target, (tuple, list)) else (target,)
 
-    **何を主張しないか**: 左右の return shape / memory 効果数 / control profile が
-    構造的に一致すること。一致は等価の必要条件ではない（同じ番地を 2 回上書き
-    する callee と 1 回だけ書く callee は最終状態が同じなら等価であり、効果数は
-    違う）。ここで構造一致を要求すると、後段 proof が証明できるはずの等価を
-    先回りして潰してしまう。
 
-    したがって成立条件は **入力の関係的な健全性**に限る。
+def _callee_wellformedness(fact: Any) -> Tuple[Optional[Tuple[Any, ...]], Tuple[str, ...]]:
+    """Per-side inputs the later callee proof needs, or the reasons they are missing.
+
+    存在確認そのものは *証明ではない*。ここで集めるのは、関係の証明を書くための
+    入力が各 side で一意に定まっていることの確認であり、correspondence の成立は
+    後段の bijection 検査が担う。
     """
 
+    reasons: List[str] = []
+    if tuple(getattr(fact, "callee_return_summary_statuses", ()) or ()) != ("complete",):
+        reasons.append(CALLEE_RETURN_SUMMARY_UNPROVEN)
+    if tuple(getattr(fact, "callee_effect_summary_statuses", ()) or ()) != ("complete",):
+        reasons.append(CALLEE_EFFECT_SUMMARY_UNPROVEN)
+    shapes = tuple(tuple(k) for k in (getattr(fact, "callee_return_shape_keys", ()) or ()))
+    if not shapes:
+        reasons.append(CALLEE_RETURN_SHAPE_RELATION_MISSING)
+    memory = _single(getattr(fact, "callee_memory_effect_counts", ()))
+    if memory is None:
+        reasons.append(CALLEE_MEMORY_EFFECT_RELATION_MISSING)
+    profile = _single(getattr(fact, "callee_control_profile_keys", ()))
+    if profile is None:
+        reasons.append(CALLEE_CONTROL_PROFILE_RELATION_MISSING)
+    if reasons:
+        return None, tuple(dict.fromkeys(reasons))
+    return ("callee_inputs", shapes, memory, tuple(profile)), ()
+
+
+@dataclass(frozen=True)
+class CalleeCorrespondencePair:
+    """One proven callee correspondence inside a ``CalleeCorrespondenceProof``."""
+
     candidate_key: Tuple[Any, ...]
-    left_callee_return_shape_keys: Tuple[Tuple[Any, ...], ...]
-    right_callee_return_shape_keys: Tuple[Tuple[Any, ...], ...]
-    left_callee_effect_key: Tuple[Any, ...]
-    right_callee_effect_key: Tuple[Any, ...]
+    left_fact_id: str
+    right_fact_id: str
+    left_callee_key: Tuple[Any, ...]
+    right_callee_key: Tuple[Any, ...]
+    left_inputs_key: Tuple[Any, ...]
+    right_inputs_key: Tuple[Any, ...]
+
+    def payload(self) -> Tuple[Any, ...]:
+        return (
+            self.candidate_key,
+            self.left_fact_id,
+            self.right_fact_id,
+            self.left_callee_key,
+            self.right_callee_key,
+            self.left_inputs_key,
+            self.right_inputs_key,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "candidate_key": list(self.candidate_key),
+            "left_fact_id": self.left_fact_id,
+            "right_fact_id": self.right_fact_id,
+            "left_callee_key": list(self.left_callee_key),
+            "right_callee_key": list(self.right_callee_key),
+            "left_inputs_key": list(self.left_inputs_key),
+            "right_inputs_key": list(self.right_inputs_key),
+        }
+
+
+@dataclass(frozen=True)
+class CalleeCorrespondenceProof:
+    """Factory-issued receipt for one function pair's induced callee bijection.
+
+    ``proof_id`` は payload 全体の digest で、``verification_failure()`` が再計算して
+    突き合わせる。差し替え・改竄された receipt は拒否される。
+    """
+
+    proof_id: str
+    pairs: Tuple[CalleeCorrespondencePair, ...] = ()
+    rejected: Tuple[Tuple[Tuple[Any, ...], str], ...] = ()
+    proof_kind: str = CALLEE_CORRESPONDENCE_PROOF_KIND
+    schema_version: int = CALLEE_CORRESPONDENCE_SCHEMA_VERSION
+
+    def payload(self) -> Tuple[Any, ...]:
+        return (
+            self.proof_kind,
+            int(self.schema_version),
+            tuple(pair.payload() for pair in self.pairs),
+            tuple((tuple(key), reason) for key, reason in self.rejected),
+        )
+
+    def verification_failure(self) -> Optional[str]:
+        if self.proof_kind != CALLEE_CORRESPONDENCE_PROOF_KIND:
+            return "proof_kind_mismatch"
+        if int(self.schema_version) != CALLEE_CORRESPONDENCE_SCHEMA_VERSION:
+            return "proof_schema_version_mismatch"
+        if _proof_digest(self.payload()) != self.proof_id:
+            return "proof_digest_mismatch"
+        return None
+
+    def pair_for(self, candidate_key: Tuple[Any, ...]) -> Optional[CalleeCorrespondencePair]:
+        key = tuple(candidate_key or ())
+        for pair in self.pairs:
+            if pair.candidate_key == key:
+                return pair
+        return None
+
+    def rejection_for(self, candidate_key: Tuple[Any, ...]) -> Tuple[str, ...]:
+        key = tuple(candidate_key or ())
+        return tuple(reason for rejected_key, reason in self.rejected if tuple(rejected_key) == key)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": self.proof_kind,
+            "schema_version": int(self.schema_version),
+            "proof_id": self.proof_id,
+            "pairs": [pair.to_dict() for pair in self.pairs],
+            "rejected": [[list(key), reason] for key, reason in self.rejected],
+            "verification_status": (
+                "verified" if self.verification_failure() is None else "invalid"
+            ),
+        }
+
+
+def _proof_digest(value: Any) -> str:
+    def jsonable(item: Any) -> Any:
+        if item is None or isinstance(item, (bool, int, float, str)):
+            return item
+        if isinstance(item, (tuple, list)):
+            return [jsonable(entry) for entry in item]
+        if isinstance(item, dict):
+            return {str(k): jsonable(v) for k, v in sorted(item.items(), key=lambda kv: str(kv[0]))}
+        return str(item)
+
+    payload = json.dumps(
+        jsonable(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def build_callee_correspondence_proof(
+    candidates: Sequence[InternalCallCorrespondenceCandidateId],
+    left_by_id: Mapping[str, Any],
+    right_by_id: Mapping[str, Any],
+) -> CalleeCorrespondenceProof:
+    """Prove the callee correspondence induced by a function pair's candidate set.
+
+    候補集合が誘導する callee の対応が双方向に一意であることを検査する。曖昧な
+    ものは ``rejected`` に落ち、``RelationalCalleeCorrespondenceId`` を得られない。
+    """
+
+    resolved: List[Tuple[InternalCallCorrespondenceCandidateId, Tuple[Any, ...], Tuple[Any, ...], Tuple[Any, ...], Tuple[Any, ...]]] = []
+    rejected: List[Tuple[Tuple[Any, ...], str]] = []
+
+    for candidate in candidates or ():
+        key = candidate.stable_key()
+        left_fact = left_by_id.get(candidate.left_fact_id)
+        right_fact = right_by_id.get(candidate.right_fact_id)
+        if left_fact is None or right_fact is None:
+            rejected.append((key, CALLSITE_CANDIDATE_MISSING))
+            continue
+        left_callee = _resolved_callee_key(left_fact)
+        right_callee = _resolved_callee_key(right_fact)
+        if left_callee is None or right_callee is None:
+            rejected.append((key, CALLEE_TARGET_UNRESOLVED))
+            continue
+        left_inputs, left_reasons = _callee_wellformedness(left_fact)
+        right_inputs, right_reasons = _callee_wellformedness(right_fact)
+        if left_inputs is None or right_inputs is None:
+            for reason in dict.fromkeys(tuple(left_reasons) + tuple(right_reasons)):
+                rejected.append((key, reason))
+            continue
+        resolved.append((candidate, left_callee, right_callee, left_inputs, right_inputs))
+
+    # 誘導される callee 対応が双方向に一意か。破れていればその callee に関わる
+    # 候補をすべて落とす（どれが正しいか決める根拠が無いので推測しない）。
+    left_to_right: Dict[Tuple[Any, ...], set] = {}
+    right_to_left: Dict[Tuple[Any, ...], set] = {}
+    for _candidate, left_callee, right_callee, _li, _ri in resolved:
+        left_to_right.setdefault(left_callee, set()).add(right_callee)
+        right_to_left.setdefault(right_callee, set()).add(left_callee)
+
+    pairs: List[CalleeCorrespondencePair] = []
+    for candidate, left_callee, right_callee, left_inputs, right_inputs in resolved:
+        if len(left_to_right.get(left_callee, ())) != 1 or len(right_to_left.get(right_callee, ())) != 1:
+            rejected.append((candidate.stable_key(), CALLEE_CORRESPONDENCE_AMBIGUOUS))
+            continue
+        pairs.append(
+            CalleeCorrespondencePair(
+                candidate_key=candidate.stable_key(),
+                left_fact_id=candidate.left_fact_id,
+                right_fact_id=candidate.right_fact_id,
+                left_callee_key=left_callee,
+                right_callee_key=right_callee,
+                left_inputs_key=left_inputs,
+                right_inputs_key=right_inputs,
+            )
+        )
+
+    pairs_tuple = tuple(sorted(pairs, key=lambda item: (item.left_fact_id, item.right_fact_id)))
+    rejected_tuple = tuple(sorted(set(rejected), key=lambda item: (str(item[0]), item[1])))
+    proof = CalleeCorrespondenceProof(
+        proof_id="",
+        pairs=pairs_tuple,
+        rejected=rejected_tuple,
+    )
+    return CalleeCorrespondenceProof(
+        proof_id=_proof_digest(proof.payload()),
+        pairs=pairs_tuple,
+        rejected=rejected_tuple,
+    )
+
+
+@dataclass(frozen=True)
+class RelationalCalleeCorrespondenceId:
+    """Identity of a *proven* left-callee ↔ right-callee correspondence.
+
+    ``proof_id`` に bind されており、``CalleeCorrespondenceProof`` を通さずには
+    生成できない（``issue_relational_callee_correspondence`` が唯一の入口）。
+    """
+
+    proof_id: str
+    candidate_key: Tuple[Any, ...]
+    left_callee_key: Tuple[Any, ...]
+    right_callee_key: Tuple[Any, ...]
 
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "relational_callee_correspondence",
+            self.proof_id,
             self.candidate_key,
-            self.left_callee_return_shape_keys,
-            self.right_callee_return_shape_keys,
-            self.left_callee_effect_key,
-            self.right_callee_effect_key,
+            self.left_callee_key,
+            self.right_callee_key,
         )
-
-    def return_shapes_agree(self) -> bool:
-        """Diagnostic only. Never a condition for the identity to exist."""
-
-        return self.left_callee_return_shape_keys == self.right_callee_return_shape_keys
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "kind": "relational_callee_correspondence",
+            "proof_id": self.proof_id,
             "candidate_key": list(self.candidate_key),
-            "left_callee_return_shape_keys": [list(k) for k in self.left_callee_return_shape_keys],
-            "right_callee_return_shape_keys": [list(k) for k in self.right_callee_return_shape_keys],
-            "left_callee_effect_key": list(self.left_callee_effect_key),
-            "right_callee_effect_key": list(self.right_callee_effect_key),
-            "return_shapes_agree": self.return_shapes_agree(),
+            "left_callee_key": list(self.left_callee_key),
+            "right_callee_key": list(self.right_callee_key),
         }
 
 
-def build_relational_callee_correspondence(
+def issue_relational_callee_correspondence(
+    proof: Optional[CalleeCorrespondenceProof],
     candidate: Optional[InternalCallCorrespondenceCandidateId],
-    left_fact: Any,
-    right_fact: Any,
 ) -> Tuple[Optional[RelationalCalleeCorrespondenceId], Tuple[str, ...]]:
-    """Bind the candidate to a callee-correspondence obligation, or fail closed.
+    """Issue the correspondence id **only** from a verified proof."""
 
-    Consumes callee return / effect facts — that is the *later* stage and is
-    allowed here; the candidate itself never saw them.  Every leg must be
-    present and unambiguous **on each side**; cross-side agreement is what the
-    downstream solver stages prove, so it is not required here.
-    """
-
-    if candidate is None or left_fact is None or right_fact is None:
+    if candidate is None:
         return None, (CALLSITE_CANDIDATE_MISSING,)
-
-    blockers: List[str] = []
-    sides = (left_fact, right_fact)
-
-    if any(
-        tuple(getattr(fact, "callee_return_summary_statuses", ()) or ()) != ("complete",)
-        for fact in sides
-    ):
-        blockers.append(CALLEE_RETURN_SUMMARY_UNPROVEN)
-    if any(
-        tuple(getattr(fact, "callee_effect_summary_statuses", ()) or ()) != ("complete",)
-        for fact in sides
-    ):
-        blockers.append(CALLEE_EFFECT_SUMMARY_UNPROVEN)
-
-    return_shapes = []
-    for fact in sides:
-        shapes = tuple(
-            tuple(key) for key in (getattr(fact, "callee_return_shape_keys", ()) or ())
-        )
-        if not shapes:
-            blockers.append(CALLEE_RETURN_SHAPE_RELATION_MISSING)
-        return_shapes.append(shapes)
-
-    memory_counts = []
-    for fact in sides:
-        count = _single(getattr(fact, "callee_memory_effect_counts", ()))
-        if count is None:
-            blockers.append(CALLEE_MEMORY_EFFECT_RELATION_MISSING)
-        memory_counts.append(count)
-
-    profiles = []
-    for fact in sides:
-        profile = _single(getattr(fact, "callee_control_profile_keys", ()))
-        if profile is None:
-            blockers.append(CALLEE_CONTROL_PROFILE_RELATION_MISSING)
-        profiles.append(tuple(profile) if profile is not None else ())
-
-    if blockers:
-        return None, tuple(dict.fromkeys(blockers))
-
+    if proof is None:
+        return None, (CALLSITE_CALLEE_CORRESPONDENCE_MISSING,)
+    if proof.verification_failure() is not None:
+        return None, (CALLEE_CORRESPONDENCE_PROOF_INVALID,)
+    key = candidate.stable_key()
+    pair = proof.pair_for(key)
+    if pair is None:
+        reasons = proof.rejection_for(key) or (CALLSITE_CALLEE_CORRESPONDENCE_MISSING,)
+        return None, tuple(dict.fromkeys(reasons + (CALLSITE_CALLEE_CORRESPONDENCE_MISSING,)))
+    if pair.left_fact_id != candidate.left_fact_id or pair.right_fact_id != candidate.right_fact_id:
+        return None, (CALLEE_CORRESPONDENCE_PROOF_STALE,)
     return (
         RelationalCalleeCorrespondenceId(
-            candidate_key=candidate.stable_key(),
-            left_callee_return_shape_keys=return_shapes[0],
-            right_callee_return_shape_keys=return_shapes[1],
-            left_callee_effect_key=("callee_effect", memory_counts[0], profiles[0]),
-            right_callee_effect_key=("callee_effect", memory_counts[1], profiles[1]),
+            proof_id=proof.proof_id,
+            candidate_key=key,
+            left_callee_key=pair.left_callee_key,
+            right_callee_key=pair.right_callee_key,
         ),
         (),
     )
+
+
+def verify_internal_candidate_binding(
+    persisted_key: Any,
+    obligation_left_fact_id: Optional[str],
+    obligation_right_fact_id: Optional[str],
+    left_fact: Any,
+    right_fact: Any,
+) -> Tuple[Optional[InternalCallCorrespondenceCandidateId], Tuple[str, ...]]:
+    """Validate a persisted candidate key against the obligation and current facts.
+
+    永続化されたキーを *信用しない*。schema、obligation との所属関係、そして
+    現在の fact から再導出した候補との一致をすべて確認する。obligation の値で
+    キーを作り直して辻褄を合わせることはしない（foreign / stale / tampered を
+    そこで見逃すため）。
+    """
+
+    if not persisted_key:
+        return None, (CALLSITE_CANDIDATE_MISSING,)
+    key = tuple(persisted_key)
+    if (
+        len(key) != _CANDIDATE_KEY_LENGTH
+        or key[0] != _CANDIDATE_KEY_KIND
+        or not isinstance(key[1], str)
+        or not isinstance(key[2], str)
+    ):
+        return None, (CANDIDATE_SCHEMA_INVALID,)
+    if key[1] != str(obligation_left_fact_id or "") or key[2] != str(obligation_right_fact_id or ""):
+        return None, (CANDIDATE_OBLIGATION_MISMATCH,)
+    if left_fact is None or right_fact is None:
+        return None, (CALLSITE_CANDIDATE_MISSING,)
+    if str(getattr(left_fact, "fact_id", "")) != key[1] or str(getattr(right_fact, "fact_id", "")) != key[2]:
+        return None, (CANDIDATE_OBLIGATION_MISMATCH,)
+
+    rebuilt = build_internal_call_correspondence_candidates([left_fact], [right_fact])
+    candidate = rebuilt.candidate_for(key[1])
+    if candidate is None or candidate.stable_key() != key:
+        return None, (CANDIDATE_STALE,)
+    return candidate, ()
+
+
+@dataclass(frozen=True)
+class InternalCallsiteCorrespondence:
+    """A confirmed internal callsite correspondence.
+
+    成立には candidate / callee correspondence id / relational argument key の
+    三点すべてが要る。どれか一つでも欠ければ correspondence は成立しない。
+    """
+
+    candidate: InternalCallCorrespondenceCandidateId
+    callee_correspondence: RelationalCalleeCorrespondenceId
+    argument_relation_key: Tuple[Any, ...]
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return (
+            "internal_callsite_correspondence",
+            self.candidate.stable_key(),
+            self.callee_correspondence.stable_key(),
+            self.argument_relation_key,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "kind": "internal_callsite_correspondence",
+            "candidate": self.candidate.to_dict(),
+            "callee_correspondence": self.callee_correspondence.to_dict(),
+            "argument_relation_key": list(self.argument_relation_key),
+        }
 
 
 def relational_argument_key(
@@ -422,54 +683,25 @@ def relational_argument_key(
     )
 
 
-@dataclass(frozen=True)
-class InternalCallsiteCorrespondence:
-    """A confirmed internal callsite correspondence.
-
-    成立には三点すべてが要る。どれか一つでも欠ければ correspondence は成立しない。
-    """
-
-    candidate: InternalCallCorrespondenceCandidateId
-    callee_correspondence: RelationalCalleeCorrespondenceId
-    argument_relation_key: Tuple[Any, ...]
-
-    def stable_key(self) -> Tuple[Any, ...]:
-        return (
-            "internal_callsite_correspondence",
-            self.candidate.stable_key(),
-            self.callee_correspondence.stable_key(),
-            self.argument_relation_key,
-        )
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "internal_callsite_correspondence",
-            "candidate": self.candidate.to_dict(),
-            "callee_correspondence": self.callee_correspondence.to_dict(),
-            "argument_relation_key": list(self.argument_relation_key),
-        }
-
-
 def confirm_internal_callsite_correspondence(
     candidate: Optional[InternalCallCorrespondenceCandidateId],
+    proof: Optional[CalleeCorrespondenceProof],
     left_fact: Any,
     right_fact: Any,
 ) -> Tuple[Optional[InternalCallsiteCorrespondence], Tuple[str, ...]]:
-    """candidate + callee correspondence + relational argument key を突き合わせる。
+    """candidate + proof 由来の correspondence id + relational argument key。
 
     ``RelationalCalleeCorrespondenceId`` が得られなければ correspondence は
-    成立しない（``None`` と blocker を返す）。
+    成立しない。
     """
 
     if candidate is None:
         return None, (CALLSITE_CANDIDATE_MISSING,)
 
-    callee_correspondence, callee_blockers = build_relational_callee_correspondence(
-        candidate, left_fact, right_fact
+    callee_correspondence, callee_blockers = issue_relational_callee_correspondence(
+        proof, candidate
     )
     blockers: List[str] = list(callee_blockers)
-    if callee_correspondence is None:
-        blockers.append(CALLSITE_CALLEE_CORRESPONDENCE_MISSING)
 
     argument_key = relational_argument_key(left_fact, right_fact)
     if argument_key is None:

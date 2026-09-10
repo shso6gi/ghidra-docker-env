@@ -614,6 +614,10 @@ _CALL_ELIGIBILITY_BLOCKER_BASE_CODES = frozenset({
     # の authority 境界。RelationalCalleeCorrespondenceId が確立できない場合の
     # fail-closed コード。
     "internal_callee_control_profile_relation_missing",
+    "internal_callee_correspondence_ambiguous",
+    "internal_callee_correspondence_proof_invalid",
+    "internal_callee_correspondence_proof_stale",
+    "internal_callee_target_unresolved",
     "internal_callee_effect_summary_unproven",
     "internal_callee_memory_effect_relation_missing",
     "internal_callee_return_shape_relation_missing",
@@ -621,6 +625,9 @@ _CALL_ELIGIBILITY_BLOCKER_BASE_CODES = frozenset({
     "internal_callsite_argument_relation_missing",
     "internal_callsite_callee_correspondence_missing",
     "internal_callsite_candidate_missing",
+    "internal_callsite_candidate_obligation_mismatch",
+    "internal_callsite_candidate_schema_invalid",
+    "internal_callsite_candidate_stale",
 })
 _CALL_ELIGIBILITY_EXTRACTION_CODES = frozenset({
     "argument_coverage_incomplete",
@@ -666,7 +673,14 @@ def classify_call_eligibility_blocker(
         # 候補も callee correspondence も「この 2 つの callsite が対応する」ことの
         # 未確立なので、callsite correspondence の未証明として扱う。
         "internal_callsite_candidate_missing",
+        "internal_callsite_candidate_obligation_mismatch",
+        "internal_callsite_candidate_schema_invalid",
+        "internal_callsite_candidate_stale",
         "internal_callsite_callee_correspondence_missing",
+        "internal_callee_correspondence_ambiguous",
+        "internal_callee_correspondence_proof_invalid",
+        "internal_callee_correspondence_proof_stale",
+        "internal_callee_target_unresolved",
     }:
         return _semantic("callsite_correspondence_unproven")
     if "argument" in normalized or "parameter_alignment" in normalized:

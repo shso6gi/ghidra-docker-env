@@ -28,7 +28,6 @@ from scripts.function_tracer_pcode.core.runtime_refs.pcode import PcodeOpRef
 from scripts.function_tracer_pcode.analysis.effects import call_argument_abi as abi
 from scripts.function_tracer_pcode.analysis.effects.models import CallArgumentEvidence
 from scripts.function_tracer_pcode.proof.call_effect.candidates import (
-    CALLEE_CONTROL_PROFILE_RELATION_MISSING,
     CALLEE_PROOF_FIELDS_EXCLUDED_FROM_CANDIDATE_IDENTITY,
     CALLEE_RETURN_SUMMARY_UNPROVEN,
     CALLSITE_ARGUMENT_RELATION_MISSING,
@@ -896,227 +895,368 @@ def _internal_fact_with_callee_proof(fact_id, binary_id, offset, **overrides):
     return _internal_call_fact(fact_id, binary_id, ("shape", "a"), offset, **fields)
 
 
-def test_callee_correspondence_completes_the_callsite_correspondence():
+def _proof_for(left_facts, right_facts):
     from scripts.function_tracer_pcode.proof.call_effect.candidates import (
-        build_relational_callee_correspondence,
+        build_callee_correspondence_proof,
+    )
+
+    candidates = build_internal_call_correspondence_candidates(left_facts, right_facts).candidates
+    proof = build_callee_correspondence_proof(
+        candidates,
+        {f.fact_id: f for f in left_facts},
+        {f.fact_id: f for f in right_facts},
+    )
+    return candidates, proof
+
+
+def test_callee_correspondence_proof_issues_the_id_and_completes_the_correspondence():
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, proof = _proof_for([left], [right])
+
+    assert proof.verification_failure() is None
+    assert len(proof.pairs) == 1
+
+    correspondence, blockers = confirm_internal_callsite_correspondence(
+        candidates[0], proof, left, right
+    )
+
+    assert blockers == ()
+    assert correspondence is not None
+    # ID は proof digest に bind されている。
+    assert correspondence.callee_correspondence.proof_id == proof.proof_id
+    assert correspondence.argument_relation_key[0] == "relational_argument"
+
+
+def test_correspondence_id_cannot_be_issued_without_a_proof():
+    """proof 無しでは ``RelationalCalleeCorrespondenceId`` を発行できない。"""
+
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        issue_relational_callee_correspondence,
     )
 
     left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
     right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
-    candidate = build_internal_call_correspondence_candidates([left], [right]).candidates[0]
+    candidates, _proof = _proof_for([left], [right])
 
-    callee_id, callee_blockers = build_relational_callee_correspondence(candidate, left, right)
-    assert callee_blockers == ()
-    assert callee_id is not None
-    assert callee_id.candidate_key == candidate.stable_key()
+    issued, blockers = issue_relational_callee_correspondence(None, candidates[0])
 
-    correspondence, blockers = confirm_internal_callsite_correspondence(candidate, left, right)
-    assert blockers == ()
-    assert correspondence is not None
-    assert correspondence.callee_correspondence.stable_key() == callee_id.stable_key()
-    assert correspondence.argument_relation_key[0] == "relational_argument"
+    assert issued is None
+    assert CALLSITE_CALLEE_CORRESPONDENCE_MISSING in blockers
+
+    correspondence, blockers = confirm_internal_callsite_correspondence(
+        candidates[0], None, left, right
+    )
+    assert correspondence is None
+    assert CALLSITE_CALLEE_CORRESPONDENCE_MISSING in blockers
 
 
-def test_without_a_callee_correspondence_the_callsite_correspondence_fails_closed():
-    """``RelationalCalleeCorrespondenceId`` が無ければ correspondence は成立しない。"""
+def test_tampered_proof_receipt_is_rejected():
+    """digest と payload が食い違う receipt は拒否する。"""
 
+    import dataclasses
+
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CALLEE_CORRESPONDENCE_PROOF_INVALID,
+        issue_relational_callee_correspondence,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, proof = _proof_for([left], [right])
+
+    tampered = dataclasses.replace(proof, proof_id="0" * 64)
+    assert tampered.verification_failure() == "proof_digest_mismatch"
+
+    issued, blockers = issue_relational_callee_correspondence(tampered, candidates[0])
+    assert issued is None
+    assert CALLEE_CORRESPONDENCE_PROOF_INVALID in blockers
+
+
+def test_foreign_proof_does_not_cover_another_pairs_candidate():
+    """他の関数対の proof は候補を覆わない。"""
+
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        issue_relational_callee_correspondence,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, _proof = _proof_for([left], [right])
+
+    other_left = _internal_fact_with_callee_proof(
+        "L9", "binaryL", 0x9000, argument_shape_keys=(("shape", "z"),)
+    )
+    other_right = _internal_fact_with_callee_proof(
+        "R9", "binaryR", 0x9100, argument_shape_keys=(("shape", "z"),)
+    )
+    _other_candidates, foreign_proof = _proof_for([other_left], [other_right])
+
+    issued, blockers = issue_relational_callee_correspondence(foreign_proof, candidates[0])
+
+    assert issued is None
+    assert CALLSITE_CALLEE_CORRESPONDENCE_MISSING in blockers
+
+
+def test_ambiguous_callee_mapping_blocks_the_correspondence():
+    """同じ左 callee が 2 つの異なる右 callee に対応するなら曖昧。
+
+    候補集合が誘導する callee 対応が双方向に一意でなければ ID を発行しない。
+    """
+
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CALLEE_CORRESPONDENCE_AMBIGUOUS,
+    )
+
+    same_left_callee = (("function", 111, 0x2000),)
+    left_a = _internal_fact_with_callee_proof(
+        "L1", "binaryL", 0x1000, argument_shape_keys=(("shape", "a"),),
+        target_candidates=same_left_callee,
+    )
+    left_b = _internal_fact_with_callee_proof(
+        "L2", "binaryL", 0x1010, argument_shape_keys=(("shape", "b"),),
+        target_candidates=same_left_callee,
+    )
+    right_a = _internal_fact_with_callee_proof(
+        "R1", "binaryR", 0x2000, argument_shape_keys=(("shape", "a"),),
+        target_candidates=(("function", 222, 0x4000),),
+    )
+    right_b = _internal_fact_with_callee_proof(
+        "R2", "binaryR", 0x2010, argument_shape_keys=(("shape", "b"),),
+        target_candidates=(("function", 222, 0x5000),),
+    )
+
+    _candidates, proof = _proof_for([left_a, left_b], [right_a, right_b])
+
+    assert proof.pairs == ()
+    assert CALLEE_CORRESPONDENCE_AMBIGUOUS in {reason for _key, reason in proof.rejected}
+
+
+def test_consistent_callee_mapping_is_proven():
+    same_left_callee = (("function", 111, 0x2000),)
+    same_right_callee = (("function", 222, 0x4000),)
+    left_a = _internal_fact_with_callee_proof(
+        "L1", "binaryL", 0x1000, argument_shape_keys=(("shape", "a"),),
+        target_candidates=same_left_callee,
+    )
+    left_b = _internal_fact_with_callee_proof(
+        "L2", "binaryL", 0x1010, argument_shape_keys=(("shape", "b"),),
+        target_candidates=same_left_callee,
+    )
+    right_a = _internal_fact_with_callee_proof(
+        "R1", "binaryR", 0x2000, argument_shape_keys=(("shape", "a"),),
+        target_candidates=same_right_callee,
+    )
+    right_b = _internal_fact_with_callee_proof(
+        "R2", "binaryR", 0x2010, argument_shape_keys=(("shape", "b"),),
+        target_candidates=same_right_callee,
+    )
+
+    _candidates, proof = _proof_for([left_a, left_b], [right_a, right_b])
+
+    assert proof.verification_failure() is None
+    assert len(proof.pairs) == 2
+
+
+def test_unresolved_callee_target_blocks_the_correspondence():
+    """候補成立後に callee target が解決不能になった場合も ID を出さない。
+
+    target が最初から未解決なら `correspondence_operation_class()` が
+    internal candidate にならないので候補すら立たない。ここで守るのは、
+    候補と proof が別々の事実を見てしまう drift のケース。
+    """
+
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CALLEE_TARGET_UNRESOLVED,
+        build_callee_correspondence_proof,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, _proof = _proof_for([left], [right])
+
+    drifted_right = _internal_fact_with_callee_proof(
+        "R1", "binaryR", 0x2000, target_resolution_status="ambiguous",
+    )
+    proof = build_callee_correspondence_proof(
+        candidates, {"L1": left}, {"R1": drifted_right}
+    )
+
+    assert proof.pairs == ()
+    assert CALLEE_TARGET_UNRESOLVED in {reason for _key, reason in proof.rejected}
+
+    correspondence, blockers = confirm_internal_callsite_correspondence(
+        candidates[0], proof, left, drifted_right
+    )
+    assert correspondence is None
+    assert CALLEE_TARGET_UNRESOLVED in blockers
+
+
+def test_incomplete_callee_summary_blocks_the_correspondence():
     left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
     right = _internal_fact_with_callee_proof(
         "R1", "binaryR", 0x2000, callee_return_summary_statuses=("inconclusive",),
     )
-    candidate = build_internal_call_correspondence_candidates([left], [right]).candidates[0]
+    candidates, proof = _proof_for([left], [right])
 
-    correspondence, blockers = confirm_internal_callsite_correspondence(candidate, left, right)
-
+    assert proof.pairs == ()
+    correspondence, blockers = confirm_internal_callsite_correspondence(
+        candidates[0], proof, left, right
+    )
     assert correspondence is None
     assert CALLEE_RETURN_SUMMARY_UNPROVEN in blockers
     assert CALLSITE_CALLEE_CORRESPONDENCE_MISSING in blockers
 
 
-def test_without_a_candidate_the_callsite_correspondence_fails_closed():
-    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
-    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
-
-    correspondence, blockers = confirm_internal_callsite_correspondence(None, left, right)
-
-    assert correspondence is None
-    assert blockers == (CALLSITE_CANDIDATE_MISSING,)
-
-
 def test_callee_correspondence_does_not_require_structural_agreement():
-    """左右で効果数が違っても correspondence の identity は成立する。
+    """左右で効果数が違っても correspondence は成立する。
 
     同じ番地を 2 回上書きする callee と 1 回だけ書く callee は最終状態が同じなら
     等価であり、等価性は後段 ``memory_relation`` が証明する。ここで構造一致を
     要求すると、証明できるはずの等価を先回りして潰してしまう。
     """
 
-    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
-        build_relational_callee_correspondence,
-    )
-
     left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000, callee_memory_effect_counts=(2,))
     right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000, callee_memory_effect_counts=(1,))
-    candidate = build_internal_call_correspondence_candidates([left], [right]).candidates[0]
+    candidates, proof = _proof_for([left], [right])
 
-    callee_id, blockers = build_relational_callee_correspondence(candidate, left, right)
+    correspondence, blockers = confirm_internal_callsite_correspondence(
+        candidates[0], proof, left, right
+    )
 
     assert blockers == ()
-    assert callee_id is not None
-    assert callee_id.left_callee_effect_key != callee_id.right_callee_effect_key
+    assert correspondence is not None
+    pair = proof.pairs[0]
+    assert pair.left_inputs_key != pair.right_inputs_key
 
 
-def test_ambiguous_callee_summary_blocks_the_callee_correspondence():
-    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
-        build_relational_callee_correspondence,
-    )
-
-    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000, callee_control_profile_keys=())
+def test_without_a_candidate_the_callsite_correspondence_fails_closed():
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
     right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
-    candidate = build_internal_call_correspondence_candidates([left], [right]).candidates[0]
+    _candidates, proof = _proof_for([left], [right])
 
-    callee_id, blockers = build_relational_callee_correspondence(candidate, left, right)
-
-    assert callee_id is None
-    assert CALLEE_CONTROL_PROFILE_RELATION_MISSING in blockers
-
-
-# --------------------------------------------------------------------------
-# 12. integration: corresponding ABI slots, side-specific fresh values
-# --------------------------------------------------------------------------
-
-
-def _abi_evidence_with_fresh_slot(binary_id, offset):
-    """Both sides resolve the same ABI slot but cannot observe the value."""
-
-    tracer = _Tracer(binary_id=binary_id)
-    tracer.trace_varnode = lambda *_a, **_k: None
-    call_op = _CallOp([_Varnode(8, storage=_register_storage("d1", 0x5020))], offset=offset)
-    callee_parameters = [_callee_parameter(0, "__x", _register_storage("d0", 0x5000))]
-    evidence, reason = abi._impl__recover_abi_call_argument_evidence(
-        call_op, tracer, [], callee_parameters, _target_ref(), binary_id=binary_id
+    correspondence, blockers = confirm_internal_callsite_correspondence(
+        None, proof, left, right
     )
-    assert reason is None, reason
-    return evidence
+
+    assert correspondence is None
+    assert blockers == (CALLSITE_CANDIDATE_MISSING,)
 
 
-def test_corresponding_abi_slots_keep_side_specific_fresh_values():
-    """左右で対応する ABI slot / 値は side-specific fresh / SMT symbol は別物。
+# --------------------------------------------------------------------------
+# candidate binding: schema / obligation / staleness / tampering
+# --------------------------------------------------------------------------
 
-    そのうえで、relational equality proof が無い限り無条件 `NOT_EQ` に到達
-    できないことを authority 層まで通して確認する。
-    """
 
-    from scripts.function_tracer_pcode.core.render_smt.unknowns import (
-        collect_unknown_smt_declarations,
+def test_candidate_binding_accepts_a_matching_persisted_key():
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        verify_internal_candidate_binding,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, _proof = _proof_for([left], [right])
+
+    bound, blockers = verify_internal_candidate_binding(
+        candidates[0].stable_key(), "L1", "R1", left, right
+    )
+
+    assert blockers == ()
+    assert bound is not None
+    assert bound.stable_key() == candidates[0].stable_key()
+
+
+def test_candidate_binding_rejects_a_malformed_key():
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CANDIDATE_SCHEMA_INVALID,
+        verify_internal_candidate_binding,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+
+    for bad in (
+        ("wrong_kind", "L1", "R1", ("shape",), ()),
+        ("internal_call_correspondence_candidate", "L1", "R1"),
+        ("internal_call_correspondence_candidate", 1, "R1", ("shape",), ()),
+    ):
+        bound, blockers = verify_internal_candidate_binding(bad, "L1", "R1", left, right)
+        assert bound is None
+        assert blockers == (CANDIDATE_SCHEMA_INVALID,)
+
+
+def test_candidate_binding_rejects_a_key_from_another_obligation():
+    """obligation の値でキーを作り直して辻褄を合わせない。"""
+
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CANDIDATE_OBLIGATION_MISMATCH,
+        verify_internal_candidate_binding,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, _proof = _proof_for([left], [right])
+    foreign_key = ("internal_call_correspondence_candidate", "L9", "R9") + tuple(
+        candidates[0].stable_key()[3:]
+    )
+
+    bound, blockers = verify_internal_candidate_binding(
+        foreign_key, "L1", "R1", left, right
+    )
+
+    assert bound is None
+    assert blockers == (CANDIDATE_OBLIGATION_MISMATCH,)
+
+
+def test_candidate_binding_rejects_a_stale_shape():
+    """fact が変わったのに古い shape を運んでいるキーは拒否する。"""
+
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CANDIDATE_STALE,
+        verify_internal_candidate_binding,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, _proof = _proof_for([left], [right])
+    stale_key = tuple(candidates[0].stable_key()[:3]) + (("shape", "stale"), ())
+
+    bound, blockers = verify_internal_candidate_binding(
+        stale_key, "L1", "R1", left, right
+    )
+
+    assert bound is None
+    assert blockers == (CANDIDATE_STALE,)
+
+
+def test_phase2_rejects_a_stale_callee_correspondence_proof_id():
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CALLEE_CORRESPONDENCE_PROOF_STALE,
     )
     from scripts.function_tracer_pcode.proof.call_effect.obligations import (
         RelationalCallEffectObligation,
         _phase2_direct_call_eligibility,
     )
-    from scripts.function_tracer_pcode.authority.domains.call_effect import (
-        classify_call_eligibility_blocker,
-    )
 
-    left_evidence = _abi_evidence_with_fresh_slot("binaryL", 0x1000)
-    right_evidence = _abi_evidence_with_fresh_slot("binaryR", 0x2000)
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, _proof = _proof_for([left], [right])
 
-    # (a) ABI スロットの identity correspondence は成立している。
-    left_slot = left_evidence.abi_argument_slots[0]
-    right_slot = right_evidence.abi_argument_slots[0]
-    assert left_slot.stable_key() == right_slot.stable_key()
-
-    # (b) 値は side-specific fresh のまま。
-    left_fresh = left_evidence.fresh_argument_refs[0]
-    right_fresh = right_evidence.fresh_argument_refs[0]
-    assert fresh_call_argument_refs_are_side_distinct(left_fresh, right_fresh)
-    assert left_fresh.identity_correspondence_key() == right_fresh.identity_correspondence_key()
-    assert left_fresh.stable_key() != right_fresh.stable_key()
-
-    # (c) SMT シンボルが別物。
-    left_symbols = collect_unknown_smt_declarations(left_evidence.arguments[0])
-    right_symbols = collect_unknown_smt_declarations(right_evidence.arguments[0])
-    assert left_symbols and right_symbols
-    assert left_symbols[0][0] != right_symbols[0][0]
-    assert left_symbols[0][1] == right_symbols[0][1] == 64
-
-    # (d) 証明が無ければ coupling しない。irrelevance も coupling ではない。
-    assert couple_fresh_arguments(left_fresh, right_fresh) is None
-    assert fresh_arguments_are_independent(left_fresh, right_fresh) is True
-    assert (
-        fresh_argument_correspondence_status(
-            [left_fresh.stable_key()], [right_fresh.stable_key()]
-        )
-        == FRESH_ARGUMENT_STATUS_INDEPENDENT
-    )
-
-    # (e) 値が観測できていないので証拠は complete を名乗らない。
-    for evidence in (left_evidence, right_evidence):
-        assert evidence.coverage_complete is False
-        assert evidence.recovery_status == CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL
-
-    # (f) SAT が得られても無条件 NOT_EQ には到達できない: 引数証拠が
-    #     complete でない以上、pair は relational stage の候補にならない。
-    left_fact = _internal_fact_with_callee_proof(
-        "L1", "binaryL", 0x1000,
-        extraction_status="inconclusive",
-        extraction_failure_causes=("argument_coverage_incomplete",),
-        fresh_argument_keys=(tuple(left_fresh.stable_key()),),
-        abi_argument_slot_keys=(tuple(left_slot.stable_key()),),
-    )
-    right_fact = _internal_fact_with_callee_proof(
-        "R1", "binaryR", 0x2000,
-        extraction_status="inconclusive",
-        extraction_failure_causes=("argument_coverage_incomplete",),
-        fresh_argument_keys=(tuple(right_fresh.stable_key()),),
-        abi_argument_slot_keys=(tuple(right_slot.stable_key()),),
-    )
     obligation = RelationalCallEffectObligation(
         obligation_id="ob1",
         relation_kind="call_to_call",
         observation_contract_id="contract",
         left_fact_id="L1",
         right_fact_id="R1",
+        internal_candidate_id=candidates[0].stable_key(),
+        callee_correspondence_proof_id="deadbeef",
     )
+
     eligibility = _phase2_direct_call_eligibility(
-        obligation, {"L1": left_fact}, {"R1": right_fact}
+        obligation, {"L1": left}, {"R1": right}
     )
 
-    assert eligibility.status == "ineligible"
-    assert eligibility.required_solver_stages == ()
-    assert "left_extraction_argument_coverage_incomplete" in eligibility.blockers
-    assert "right_extraction_argument_coverage_incomplete" in eligibility.blockers
-    # 左右 fresh は別シンボルのままなので、その値の食い違いを根拠に
-    # 無条件の非等価を主張することはできない。
-    assert set(left_fact.fresh_argument_keys) & set(right_fact.fresh_argument_keys) == set()
-    classified = {
-        classify_call_eligibility_blocker(b).reason_id for b in eligibility.blockers
-    }
-    assert "abi_argument_relation_unproven" in classified
-
-
-def test_relational_equality_proof_is_the_only_way_to_couple_fresh_arguments():
-    left_evidence = _abi_evidence_with_fresh_slot("binaryL", 0x1000)
-    right_evidence = _abi_evidence_with_fresh_slot("binaryR", 0x2000)
-    left_fresh = left_evidence.fresh_argument_refs[0]
-    right_fresh = right_evidence.fresh_argument_refs[0]
-
-    assert couple_fresh_arguments(left_fresh, right_fresh) is None
-
-    proof = RelationalEqualityProof(
-        proof_id="rel-1",
-        left_key=left_fresh.stable_key(),
-        right_key=right_fresh.stable_key(),
-        premise_digest="digest",
-        obligation_id="ob1",
-        discharged=True,
-    )
-    coupling = couple_fresh_arguments(left_fresh, right_fresh, proof)
-
-    assert coupling is not None
-    assert coupling.coupled_symbol_key() is not None
-    # coupling されても DTO の identity は side-specific のまま（記録が残る）。
-    assert left_fresh.stable_key() != right_fresh.stable_key()
+    assert CALLEE_CORRESPONDENCE_PROOF_STALE in eligibility.blockers
 
 
 def test_external_call_pairs_do_not_get_the_internal_correspondence_blocker():
@@ -1186,3 +1326,269 @@ def test_internal_pairs_still_require_the_callee_correspondence():
 
     assert eligibility.status == "ineligible"
     assert CALLSITE_CALLEE_CORRESPONDENCE_MISSING in eligibility.blockers
+
+
+# --------------------------------------------------------------------------
+# 13. end-to-end: a SAT over side-specific fresh arguments is not decisive
+# --------------------------------------------------------------------------
+
+
+def _fresh_return_analysis(function_name, entry_point, binary_id, constant):
+    """A return value that carries a side-specific fresh call argument."""
+
+    from scripts.function_tracer_pcode.core import FunctionReturnAnalysis, ReturnInfo
+
+    fresh = FreshCallArgumentRef(
+        binary_id=binary_id,
+        slot=AbiArgumentSlotRef(
+            ordinal=0,
+            storage_class="register",
+            width_bits=32,
+            storage_identity_key=("register", "w0", 4),
+        ),
+        call_site_key=("pcode_op", binary_id, 0x1000),
+    )
+    fresh_expr = abi._impl__fresh_call_argument_expression(fresh)
+    fresh_expr.size = 4
+    value = Expression.binary_op("INT_ADD", fresh_expr, Expression.constant(constant, size=4))
+    return (
+        FunctionReturnAnalysis(
+            function_name=function_name,
+            entry_point=entry_point,
+            parameters=[{"name": "x", "index": 0, "size": 4, "data_type": "int", "storage": None}],
+            returns=[ReturnInfo(address=entry_point, value=value, conditions=[])],
+            return_type="int",
+        ),
+        fresh,
+        fresh_expr,
+    )
+
+
+def test_sat_over_side_specific_fresh_arguments_is_not_decisive(monkeypatch):
+    """左右で対応する ABI slot / 値は side-specific fresh / SMT symbol は別。
+
+    その状態で SAT（counterexample 候補）を実際に構成し、production の
+    decisive-SAT authority を通しても無条件 `NOT_EQ` にならないことを固定する。
+    反例は左右で独立な自由シンボルに異なる値を割り当てただけで成立するため、
+    非等価の証拠にならない。
+    """
+
+    from unittest.mock import Mock
+
+    from scripts.function_tracer_pcode.core.render_smt.unknowns import (
+        collect_unknown_smt_declarations,
+    )
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+    from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import (
+        ReturnCase,
+        _base_context_for_single_int_param,
+        _solver_bound_query_result,
+    )
+
+    analysis1, left_fresh, left_expr = _fresh_return_analysis("same_func", "0x1000", "binaryL", 1)
+    analysis2, right_fresh, right_expr = _fresh_return_analysis("same_func", "0x2000", "binaryR", 2)
+
+    # (a) 対応する ABI slot。
+    assert left_fresh.identity_correspondence_key() == right_fresh.identity_correspondence_key()
+    # (b) 値は side-specific fresh。
+    assert fresh_call_argument_refs_are_side_distinct(left_fresh, right_fresh)
+    # (c) SMT symbol は別。
+    left_symbols = collect_unknown_smt_declarations(left_expr)
+    right_symbols = collect_unknown_smt_declarations(right_expr)
+    assert left_symbols[0][0] != right_symbols[0][0]
+    # (d) relational equality proof も irrelevance proof も無い。
+    assert couple_fresh_arguments(left_fresh, right_fresh) is None
+    assert fresh_arguments_are_independent(left_fresh, right_fresh) is True
+    discharged, undischarged = discharge_fresh_argument_blockers(
+        [left_fresh], ("decisive", "return_relation"), []
+    )
+    assert discharged is False and undischarged
+
+    # (e) authority 層の decisive-SAT gate が両 side で発火している。
+    for analysis in (analysis1, analysis2):
+        assert "unresolved_return_value" in analysis.get_decisive_sat_unsafety_reasons()
+
+    # (f) SAT を実際に構成して production path を通す。
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    cases = {
+        id(analysis1): ReturnCase(
+            index=0, conditions=[], value_expr=analysis1.returns[0].value,
+            return_info=analysis1.returns[0], return_type="int",
+            parameters=analysis1.parameters,
+        ),
+        id(analysis2): ReturnCase(
+            index=0, conditions=[], value_expr=analysis2.returns[0].value,
+            return_info=analysis2.returns[0], return_type="int",
+            parameters=analysis2.parameters,
+        ),
+    }
+    monkeypatch.setattr(
+        strategy, "_extract_return_cases", lambda analysis: [cases[id(analysis)]]
+    )
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda c, *_a, **_k: c)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_a, **_k: False)
+    # counterexample の検証は通ったことにする。それでも fresh 由来の SAT は
+    # 決め手にならない、というのがここで固定したい不変条件。
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
+        lambda *_a, **_k: True,
+    )
+    strategy._solve_query_after_guard = Mock(
+        return_value=_solver_bound_query_result(
+            False,
+            model={left_symbols[0][0]: 0, right_symbols[0][0]: 7},
+            query="(assert (distinct a b))\n(check-sat)",
+        )
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    # (g) 無条件 NOT_EQ にならず、UNKNOWN / blocker へ倒れる。
+    assert result.is_equivalent is not False
+    assert result.is_equivalent is None
+    assert result.unknown_reasons
+
+
+def test_positive_control_same_harness_reaches_unconditional_not_eq(monkeypatch):
+    """対照実験。同じ harness で fresh を使わなければ SAT は決め手になる。
+
+    これが `NOT_EQ` に到達することで、直前の test が「fresh のせいで止まった」
+    ことを示せる（harness の別要因で止まったのではない）。
+    """
+
+    from unittest.mock import Mock
+
+    from scripts.function_tracer_pcode.core import FunctionReturnAnalysis, ReturnInfo
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+    from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import (
+        ReturnCase,
+        _base_context_for_single_int_param,
+        _solver_bound_query_result,
+    )
+
+    def _plain(entry_point, constant):
+        return FunctionReturnAnalysis(
+            function_name="same_func",
+            entry_point=entry_point,
+            parameters=[{"name": "x", "index": 0, "size": 4, "data_type": "int", "storage": None}],
+            returns=[ReturnInfo(address=entry_point, value=Expression.constant(constant, size=4), conditions=[])],
+            return_type="int",
+        )
+
+    analysis1, analysis2 = _plain("0x1000", 1), _plain("0x2000", 2)
+    for analysis in (analysis1, analysis2):
+        assert "unresolved_return_value" not in analysis.get_decisive_sat_unsafety_reasons()
+
+    formula_builder = Mock()
+    formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
+    solver_runner = Mock()
+    solver_runner.timeout = 5
+    strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    cases = {
+        id(analysis1): ReturnCase(
+            index=0, conditions=[], value_expr=analysis1.returns[0].value,
+            return_info=analysis1.returns[0], return_type="int",
+            parameters=analysis1.parameters,
+        ),
+        id(analysis2): ReturnCase(
+            index=0, conditions=[], value_expr=analysis2.returns[0].value,
+            return_info=analysis2.returns[0], return_type="int",
+            parameters=analysis2.parameters,
+        ),
+    }
+    monkeypatch.setattr(strategy, "_extract_return_cases", lambda a: [cases[id(a)]])
+    monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda c, *_a, **_k: c)
+    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
+        lambda *_a, **_k: True,
+    )
+    strategy._solve_query_after_guard = Mock(
+        return_value=_solver_bound_query_result(
+            False,
+            model={"x_1": 0, "x_2": 0},
+            query="(assert (distinct (_ bv1 32) (_ bv2 32)))\n(check-sat)",
+        )
+    )
+
+    result = strategy.check(analysis1, analysis2)
+
+    assert result.is_equivalent is False
+    assert result.sat_pairs == 1
+
+
+def test_phase2_rejects_a_substituted_relational_callee_correspondence_id():
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CALLEE_CORRESPONDENCE_PROOF_STALE,
+    )
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import (
+        RelationalCallEffectObligation,
+        _phase2_direct_call_eligibility,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, proof = _proof_for([left], [right])
+
+    obligation = RelationalCallEffectObligation(
+        obligation_id="ob1",
+        relation_kind="call_to_call",
+        observation_contract_id="contract",
+        left_fact_id="L1",
+        right_fact_id="R1",
+        internal_candidate_id=candidates[0].stable_key(),
+        callee_correspondence_proof_id=proof.proof_id,
+        relational_callee_correspondence_id=("relational_callee_correspondence", "forged"),
+    )
+
+    eligibility = _phase2_direct_call_eligibility(
+        obligation, {"L1": left}, {"R1": right}
+    )
+
+    assert CALLEE_CORRESPONDENCE_PROOF_STALE in eligibility.blockers
+
+
+def test_phase2_accepts_a_correctly_bound_internal_correspondence():
+    """正しく bind されていれば correspondence 由来の blocker は付かない。"""
+
+    from scripts.function_tracer_pcode.proof.call_effect import candidates as k
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import (
+        RelationalCallEffectObligation,
+        _phase2_direct_call_eligibility,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, proof = _proof_for([left], [right])
+    issued, _b = k.issue_relational_callee_correspondence(proof, candidates[0])
+
+    obligation = RelationalCallEffectObligation(
+        obligation_id="ob1",
+        relation_kind="call_to_call",
+        observation_contract_id="contract",
+        left_fact_id="L1",
+        right_fact_id="R1",
+        internal_candidate_id=candidates[0].stable_key(),
+        callee_correspondence_proof_id=proof.proof_id,
+        relational_callee_correspondence_id=issued.stable_key(),
+    )
+
+    eligibility = _phase2_direct_call_eligibility(
+        obligation, {"L1": left}, {"R1": right}
+    )
+
+    correspondence_codes = {
+        k.CALLSITE_CANDIDATE_MISSING,
+        k.CALLSITE_CALLEE_CORRESPONDENCE_MISSING,
+        k.CALLSITE_ARGUMENT_RELATION_MISSING,
+        k.CANDIDATE_SCHEMA_INVALID,
+        k.CANDIDATE_OBLIGATION_MISMATCH,
+        k.CANDIDATE_STALE,
+        k.CALLEE_CORRESPONDENCE_PROOF_STALE,
+        k.CALLEE_CORRESPONDENCE_PROOF_INVALID,
+    }
+    assert set(eligibility.blockers) & correspondence_codes == set()
