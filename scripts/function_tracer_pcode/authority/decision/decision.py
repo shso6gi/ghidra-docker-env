@@ -156,6 +156,21 @@ class FinalizationAuthority:
     def __post_init__(self) -> None:
         if type(self.lifecycle_projection) is not VerifiedLifecycleProjection:
             raise TypeError("decision finalization requires FINAL lifecycle authority")
+        # The unconditional lane accepts exactly these receipt types.  A
+        # conditional (assumption-dependent) proof carries a different type and
+        # is rejected here rather than falling through as a receipt whose kind
+        # the outcome derivation happens not to recognise.
+        for receipts, expected in (
+            (self.decisive_proof_receipts, DecisiveProofReceipt),
+            (self.terminal_timeout_receipts, TerminalTimeoutReceipt),
+            (self.error_receipts, ErrorReceipt),
+        ):
+            for receipt in receipts:
+                if type(receipt) is not expected:
+                    raise TypeError(
+                        "the unconditional decision accepts "
+                        f"{expected.__name__} only: {type(receipt).__name__}"
+                    )
         object.__setattr__(self, "decisive_proof_receipts", tuple(self.decisive_proof_receipts))
         object.__setattr__(self, "terminal_timeout_receipts", tuple(self.terminal_timeout_receipts))
         object.__setattr__(self, "error_receipts", tuple(self.error_receipts))

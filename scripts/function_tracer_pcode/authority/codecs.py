@@ -33,6 +33,12 @@ from scripts.function_tracer_pcode.authority.contracts import (
     canonical_value,
     _CAUSE_ID_CODEC_TOKEN,
 )
+from scripts.function_tracer_pcode.authority.decision.conditional import (
+    ConditionalDecisionReceipt,
+    ConditionalDecisiveProofKind,
+    ConditionalDecisiveProofReceipt,
+    _CONDITIONAL_DECISION_CODEC_TOKEN,
+)
 from scripts.function_tracer_pcode.authority.decision.decision import (
     DecisiveProofKind,
     DecisiveProofReceipt,
@@ -64,6 +70,10 @@ from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
     SealedReasonRegistry,
     SealedRecoveryRegistry,
+)
+from scripts.function_tracer_pcode.proof.assumptions import (
+    AssumptionKind,
+    AssumptionPremise,
 )
 from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementId
 
@@ -304,6 +314,70 @@ def _decode_error(payload: Mapping[str, Any]) -> ErrorReceipt:
     return receipt
 
 
+def _decode_assumption_premise(payload: Mapping[str, Any]) -> AssumptionPremise:
+    _require_keys(payload, {field.name for field in fields(AssumptionPremise)})
+    _require_exact_string_fields(payload, {"kind", "subject"})
+    if type(payload["schema_version"]) is not int:
+        raise TypeError("strict v2 field schema_version must be an exact int")
+    if not isinstance(payload["payload"], list):
+        raise TypeError("strict v2 assumption payload must be a JSON array of pairs")
+    # AssumptionPremise re-normalizes the decoded lists back into its canonical
+    # tuple form and rejects any leaf the proof layer does not allow, so a
+    # tampered payload cannot round-trip into a premise.
+    return AssumptionPremise(
+        kind=AssumptionKind(payload["kind"]),
+        subject=payload["subject"],
+        payload=payload["payload"],
+        schema_version=payload["schema_version"],
+    )
+
+
+def _decode_conditional_decisive(
+    payload: Mapping[str, Any],
+) -> ConditionalDecisiveProofReceipt:
+    _require_keys(payload, {field.name for field in fields(ConditionalDecisiveProofReceipt)})
+    _require_exact_string_fields(payload, {
+        "result_occurrence_id", "lifecycle_projection_digest",
+        "proof_artifact_digest", "assumption_set_digest", "receipt_digest",
+    })
+    if not isinstance(payload["assumption_dependencies"], list):
+        raise TypeError("strict v2 assumption dependencies must be a JSON array")
+    receipt = ConditionalDecisiveProofReceipt.create(
+        result_occurrence_id=payload["result_occurrence_id"],
+        lifecycle_projection_digest=payload["lifecycle_projection_digest"],
+        proof_kind=ConditionalDecisiveProofKind(payload["proof_kind"]),
+        proof_artifact_digest=payload["proof_artifact_digest"],
+        assumption_dependencies=tuple(
+            _decode_assumption_premise(item)
+            for item in payload["assumption_dependencies"]
+        ),
+    )
+    if (
+        receipt.assumption_set_digest != payload["assumption_set_digest"]
+        or receipt.receipt_digest != payload["receipt_digest"]
+    ):
+        raise ValueError("persisted conditional proof receipt digest mismatch")
+    receipt.validate()
+    return receipt
+
+
+def _decode_conditional_decision(payload: Mapping[str, Any]) -> ConditionalDecisionReceipt:
+    _require_keys(payload, {field.name for field in fields(ConditionalDecisionReceipt)})
+    _require_exact_string_fields(payload, {
+        "result_occurrence_id", "unconditional_receipt_digest",
+        "lifecycle_projection_digest", "assumption_set_digest",
+        "authority_input_digest", "receipt_digest",
+    })
+    return ConditionalDecisionReceipt.from_persisted(
+        **{
+            **payload,
+            "conditional_outcome": Outcome(payload["conditional_outcome"]),
+            "unconditional_outcome": Outcome(payload["unconditional_outcome"]),
+        },
+        _codec_token=_CONDITIONAL_DECISION_CODEC_TOKEN,
+    )
+
+
 def _decode_decision(payload: Mapping[str, Any]) -> DecisionReceipt:
     _require_keys(payload, {field.name for field in fields(DecisionReceipt)})
     _require_exact_string_fields(payload, {
@@ -483,6 +557,9 @@ _DECODERS = MappingProxyType({
     "TerminalTimeoutReceipt": _decode_timeout,
     "ErrorReceipt": _decode_error,
     "DecisionReceipt": _decode_decision,
+    "AssumptionPremise": _decode_assumption_premise,
+    "ConditionalDecisiveProofReceipt": _decode_conditional_decisive,
+    "ConditionalDecisionReceipt": _decode_conditional_decision,
     "CauseOccurrenceAuthority": lambda payload: payload,
     "RequirementCompletionReceipt": _decode_completion,
     "CauseTransformationEvent": _decode_transformation,
@@ -587,6 +664,17 @@ class StrictV2JsonCodec:
             value.validate()
         elif isinstance(value, (DecisiveProofReceipt, TerminalTimeoutReceipt, ErrorReceipt, DecisionReceipt)):
             value.validate()
+        elif isinstance(value, (ConditionalDecisiveProofReceipt, ConditionalDecisionReceipt)):
+            value.validate()
+        elif isinstance(value, AssumptionPremise):
+            # Re-running the proof-layer normalization proves the premise is
+            # already canonical; a non-canonical one would not compare equal.
+            rebuilt = AssumptionPremise(
+                kind=value.kind, subject=value.subject,
+                payload=value.payload, schema_version=value.schema_version,
+            )
+            if rebuilt != value:
+                raise ValueError("assumption premise is not in canonical form")
         elif isinstance(value, CensusManifest):
             rebuilt = CensusManifest(
                 value.manifest_id, value.census_mode, value.repository_commit,

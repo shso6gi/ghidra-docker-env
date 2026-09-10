@@ -171,6 +171,35 @@ class Classified:
         }
 
 
+def classify_conditional(
+    record: PairOutcome, manifest: Optional[FunctionDiffManifest],
+) -> Classified:
+    """Classify the assumption-dependent column with the same ground truth.
+
+    Issue #20 gates the conditional lane in both directions -- an ``Eq`` sample
+    judged conditionally ``NOT_EQ`` and a ``Neq`` sample judged conditionally
+    ``EQUIVALENT`` are both violations -- but the counts stay in their own
+    section so the unconditional gate cannot be moved by a conditional proof.
+    """
+    conditional = record.conditional_outcome
+    if not conditional:
+        return Classified(record, KIND_NOT_APPLICABLE, "")
+    return classify(_as_conditional_record(record), manifest)
+
+
+def _as_conditional_record(record: PairOutcome) -> PairOutcome:
+    """View one pair through its conditional outcome, keeping its identity."""
+    return PairOutcome(
+        record.sample_identity,
+        record.function_name,
+        record.left_binary_id,
+        record.right_binary_id,
+        str(record.conditional_outcome),
+        record.status_path,
+        conditional_outcome=record.conditional_outcome,
+    )
+
+
 def classify(record: PairOutcome, manifest: Optional[FunctionDiffManifest]) -> Classified:
     label = record.label
     outcome = record.outcome
@@ -220,6 +249,9 @@ class GateReport:
     classified: Tuple[Classified, ...]
     manifest_path: Optional[str]
     fail_on_suspicious: bool = False
+    # Issue #20: rows whose assumption-dependent outcome is classified against
+    # the same ground truth.  Empty until the conditional lane is activated.
+    conditional_classified: Tuple[Classified, ...] = ()
 
     @property
     def pairs(self) -> int:
@@ -238,10 +270,33 @@ class GateReport:
         return tuple(item for item in self.classified if item.kind in SUSPICIOUS_KINDS)
 
     @property
+    def conditional_pairs(self) -> int:
+        return len(self.conditional_classified)
+
+    @property
+    def conditional_counts(self) -> Counter:
+        return Counter(item.kind for item in self.conditional_classified)
+
+    @property
+    def conditional_hard_violations(self) -> Tuple[Classified, ...]:
+        return tuple(
+            item for item in self.conditional_classified
+            if item.kind in HARD_VIOLATION_KINDS
+        )
+
+    @property
+    def conditional_suspicious(self) -> Tuple[Classified, ...]:
+        return tuple(
+            item for item in self.conditional_classified if item.kind in SUSPICIOUS_KINDS
+        )
+
+    @property
     def status(self) -> str:
         if not self.classified:
             return GATE_STATUS_EMPTY
-        if self.hard_violations or (self.fail_on_suspicious and self.suspicious):
+        if self.hard_violations or self.conditional_hard_violations:
+            return GATE_STATUS_FAIL
+        if self.fail_on_suspicious and (self.suspicious or self.conditional_suspicious):
             return GATE_STATUS_FAIL
         return GATE_STATUS_PASS
 
@@ -270,7 +325,29 @@ class GateReport:
             "suspicious": {kind: counts.get(kind, 0) for kind in SUSPICIOUS_KINDS},
             "benign": {kind: counts.get(kind, 0) for kind in BENIGN_KINDS},
             "outcomes_by_label": self.label_outcome_counts(),
+            "conditional": self.conditional_section(),
         }
+
+    def conditional_section(self) -> Dict[str, Any]:
+        """The assumption-dependent counts, kept out of the columns above."""
+        counts = self.conditional_counts
+        return {
+            "pairs": self.conditional_pairs,
+            "hard_violations": {
+                kind: counts.get(kind, 0) for kind in HARD_VIOLATION_KINDS
+            },
+            "suspicious": {kind: counts.get(kind, 0) for kind in SUSPICIOUS_KINDS},
+            "benign": {kind: counts.get(kind, 0) for kind in BENIGN_KINDS},
+            "outcomes_by_label": self.conditional_label_outcome_counts(),
+        }
+
+    def conditional_label_outcome_counts(self) -> Dict[str, Dict[str, int]]:
+        table: Dict[str, Dict[str, int]] = {}
+        for item in self.conditional_classified:
+            row = table.setdefault(item.record.label, {})
+            outcome = str(item.record.conditional_outcome)
+            row[outcome] = row.get(outcome, 0) + 1
+        return {label: dict(sorted(row.items())) for label, row in sorted(table.items())}
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -278,6 +355,11 @@ class GateReport:
             "rows": [
                 item.as_dict()
                 for item in self.classified
+                if item.kind in HARD_VIOLATION_KINDS + SUSPICIOUS_KINDS
+            ],
+            "conditional_rows": [
+                item.as_dict()
+                for item in self.conditional_classified
                 if item.kind in HARD_VIOLATION_KINDS + SUSPICIOUS_KINDS
             ],
         }
@@ -291,11 +373,15 @@ def build_gate_report(
     fail_on_suspicious: bool = False,
 ) -> GateReport:
     classified: List[Classified] = []
+    conditional: List[Classified] = []
     for root in roots:
         for record in iter_pair_outcomes(root):
             classified.append(classify(record, manifest))
+            if record.conditional_outcome:
+                conditional.append(classify_conditional(record, manifest))
     return GateReport(
         classified=tuple(classified), manifest_path=manifest_path, fail_on_suspicious=fail_on_suspicious,
+        conditional_classified=tuple(conditional),
     )
 
 
@@ -307,7 +393,12 @@ def format_gate_report(report: GateReport) -> str:
     lines.append("Benchmark validation:")
     lines.extend(format_benchmark_validation_lines(report.health_section()))
     lines.append("")
-    for title, rows in (("Hard violations", report.hard_violations), ("Suspicious", report.suspicious)):
+    for title, rows in (
+        ("Hard violations", report.hard_violations),
+        ("Suspicious", report.suspicious),
+        ("Conditional hard violations", report.conditional_hard_violations),
+        ("Conditional suspicious", report.conditional_suspicious),
+    ):
         if rows:
             lines.append(f"{title} ({len(rows)}):")
             for item in rows:
@@ -320,7 +411,17 @@ def format_gate_report(report: GateReport) -> str:
     if status == GATE_STATUS_EMPTY:
         lines.append("GATE: EMPTY (no pair status found)")
     elif status == GATE_STATUS_FAIL:
-        lines.append(f"GATE: FAIL ({len(report.hard_violations)} hard violations, {len(report.suspicious)} suspicious)")
+        # The conditional clause is appended only when the run produced one, so
+        # a run without a conditional lane prints exactly what it printed before.
+        conditional = (
+            f", {len(report.conditional_hard_violations)} conditional hard violations"
+            if report.conditional_classified
+            else ""
+        )
+        lines.append(
+            f"GATE: FAIL ({len(report.hard_violations)} hard violations, "
+            f"{len(report.suspicious)} suspicious{conditional})"
+        )
     else:
         lines.append(f"GATE: PASS ({len(report.suspicious)} suspicious)")
     return "\n".join(lines) + "\n"
