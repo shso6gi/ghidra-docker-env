@@ -17,7 +17,8 @@ M-20 では ET_REL のバイナリで外部 callee の convention が ``unknown`
 * 決定は次の二段で行い、どちらも成立しなければ fail closed
 
   tier A ``callee_declared_parameter_storage``
-      宣言ストレージが callsite の入力ストレージと ordinal ごとに **一意**照合できる。
+      宣言ストレージが **同じ ordinal** の入力ストレージと一致する（corroboration）。
+      storage を使って別 ordinal の input へ並べ替えることはしない。
 
   tier B ``callsite_prototype_parameter_slots``
       高位 P-code では decompiler が ABI 受け渡しの COPY を畳み込むため、CALL 入力の
@@ -69,8 +70,11 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
 
 #: ABI 決定の出所。証拠の種類を receipt / diagnostics に残すために型で持つ。
 #:
-#: tier A: callee の宣言済み引数ストレージが callsite の P-code 入力ストレージと
-#:   ordinal ごとに一意照合できた場合。最も強い証拠。
+#: semantic argument order は常に CALL input の ordinal 順で、どちらの tier でも
+#: assignment は恒等。tier は「順序の決め方」ではなく「どれだけ裏付けがあるか」を表す。
+#:
+#: tier A: 宣言ストレージが **同じ ordinal** の入力ストレージと一致した場合
+#:   （corroboration）。最も強い証拠。
 #: tier B: 高位 P-code では decompiler が ABI の受け渡し COPY を畳み込むため、
 #:   CALL 入力の register は「値を定義したレジスタ」であって ABI スロットとは
 #:   限らない（M-20 の gammln arm64-O1: ABI は d0 だが入力は d1）。この場合は
@@ -275,29 +279,34 @@ def _impl__abi_slot_input_assignment(
     if len(input_widths) != len(callee_parameters):
         return None, None, ABI_CALLSITE_ARITY_MISMATCH
 
-    # tier A: exact, unique storage identity match per ordinal.
-    assignment: List[int] = []
-    used: set = set()
-    storage_match_complete = True
-    for callee_param in callee_parameters:
+    # **semantic argument order は常に CALL input の ordinal 順**。どちらの tier でも
+    # assignment は恒等 [0, 1, ..., n-1] であり、storage を根拠に別 ordinal の input へ
+    # 並べ替えることはしない。
+    #
+    # 高位 P-code では decompiler が ABI 受け渡しの COPY を畳むため、CALL input の
+    # register は「値を定義したレジスタ」であって ABI スロットとは限らない
+    # (gammln arm64-O1: `fmov d0,d1` が畳まれ ABI は d0 なのに input は d1)。
+    # したがって storage 一致は **順序の根拠にならない**。callee arg0→d0 / arg1→d1 に
+    # 対して input ordinal0 が d1、ordinal1 が d0 を定義元に持つとき、storage で
+    # 探索すると引数が入れ替わってしまう。
+    identity_assignment = list(range(len(callee_parameters)))
+
+    # tier A: 同 ordinal での storage の裏付け（corroboration）。宣言ストレージと
+    # 同じ位置の input storage が一意に一致するときだけ、より強い authority を
+    # 名乗る。順序はここでも恒等のまま。
+    storage_corroborated = True
+    for ordinal, callee_param in enumerate(callee_parameters):
         param_storage = _coerce_storage_info((callee_param or {}).get("storage"))
-        if param_storage is None:
-            storage_match_complete = False
+        input_storage = input_storages[ordinal]
+        if (
+            param_storage is None
+            or input_storage is None
+            or not _storage_matches_parameter(input_storage, param_storage)
+        ):
+            storage_corroborated = False
             break
-        matches = [
-            index
-            for index, input_storage in enumerate(input_storages)
-            if index not in used
-            and input_storage is not None
-            and _storage_matches_parameter(input_storage, param_storage)
-        ]
-        if len(matches) != 1:
-            storage_match_complete = False
-            break
-        used.add(matches[0])
-        assignment.append(matches[0])
-    if storage_match_complete and len(assignment) == len(callee_parameters):
-        return ABI_AUTHORITY_CALLEE_DECLARED_STORAGE, assignment, None
+    if storage_corroborated:
+        return ABI_AUTHORITY_CALLEE_DECLARED_STORAGE, identity_assignment, None
 
     # tier B: Ghidra's CALL inputs are the applied prototype's parameters in
     # order.  Arity already matched above; every ordinal's width must agree too.
@@ -307,7 +316,7 @@ def _impl__abi_slot_input_assignment(
             return None, None, ABI_PARAMETER_STORAGE_MISSING
         if int(slot_ref.width_bits or 0) != int(input_widths[ordinal]):
             return None, None, ABI_CALLSITE_WIDTH_MISMATCH
-    return ABI_AUTHORITY_CALLSITE_PROTOTYPE_SLOTS, list(range(len(callee_parameters))), None
+    return ABI_AUTHORITY_CALLSITE_PROTOTYPE_SLOTS, identity_assignment, None
 
 
 def _impl__resolve_abi_call_arguments(

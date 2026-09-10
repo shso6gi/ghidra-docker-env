@@ -1194,3 +1194,89 @@ def test_positive_control_same_harness_reaches_unconditional_not_eq(monkeypatch)
     assert result.sat_pairs == 1
 
 
+
+
+# --------------------------------------------------------------------------
+# tier A must not permute arguments by storage
+# --------------------------------------------------------------------------
+
+
+def test_tier_a_does_not_permute_arguments_across_ordinals():
+    """cross-storage: callee arg0=d0/arg1=d1 に対し input ordinal0=d1, ordinal1=d0。
+
+    高位 P-code の CALL input register は COPY folding により「値の定義元」で
+    あり得るので、storage 一致を semantic argument order の根拠にしてはいけない。
+    storage で探索すると引数が入れ替わる。ordinal 順を順序の authority とし、
+    tier A は同 ordinal の裏付けにだけ使う。
+    """
+
+    tracer = _Tracer()
+    d0 = _register_storage("d0", 0x5000)
+    d1 = _register_storage("d1", 0x5020)
+    x = Expression.variable("x", size=8)
+    y = Expression.variable("y", size=8)
+    # ordinal0 は d1 を定義元に持ち値は y、ordinal1 は d0 を定義元に持ち値は x。
+    call_op = _CallOp(
+        [
+            _Varnode(8, storage=d1, expression=y),
+            _Varnode(8, storage=d0, expression=x),
+        ]
+    )
+    callee_parameters = [
+        _callee_parameter(0, "a", d0),
+        _callee_parameter(1, "b", d1),
+    ]
+
+    authority, assignment, reason = abi._impl__abi_slot_input_assignment(
+        call_op, tracer, callee_parameters
+    )
+
+    assert reason is None
+    # tier A は成立しない（同 ordinal の storage が一致しない）。
+    assert authority == abi.ABI_AUTHORITY_CALLSITE_PROTOTYPE_SLOTS
+    # 並べ替えは起きない。
+    assert assignment == [0, 1]
+
+    resolution, resolve_reason = abi._impl__resolve_abi_call_arguments(
+        call_op, tracer, [], callee_parameters,
+        binary_id="binaryL", call_site_key=("op", 1),
+    )
+
+    assert resolve_reason is None
+    recovered = [str(arg) for arg in resolution.arguments]
+    assert recovered == [str(y), str(x)]
+    assert recovered != [str(x), str(y)]
+
+
+def test_tier_a_corroborates_only_on_matching_ordinals():
+    """同 ordinal で storage が一致するときだけ tier A を名乗る。"""
+
+    tracer = _Tracer()
+    d0 = _register_storage("d0", 0x5000)
+    d1 = _register_storage("d1", 0x5020)
+    x = Expression.variable("x", size=8)
+    y = Expression.variable("y", size=8)
+    call_op = _CallOp(
+        [
+            _Varnode(8, storage=d0, expression=x),
+            _Varnode(8, storage=d1, expression=y),
+        ]
+    )
+    callee_parameters = [
+        _callee_parameter(0, "a", d0),
+        _callee_parameter(1, "b", d1),
+    ]
+
+    authority, assignment, reason = abi._impl__abi_slot_input_assignment(
+        call_op, tracer, callee_parameters
+    )
+
+    assert reason is None
+    assert authority == abi.ABI_AUTHORITY_CALLEE_DECLARED_STORAGE
+    assert assignment == [0, 1]
+
+    resolution, _r = abi._impl__resolve_abi_call_arguments(
+        call_op, tracer, [], callee_parameters,
+        binary_id="binaryL", call_site_key=("op", 1),
+    )
+    assert [str(a) for a in resolution.arguments] == [str(x), str(y)]
