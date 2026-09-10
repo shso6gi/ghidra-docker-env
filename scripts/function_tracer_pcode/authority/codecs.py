@@ -37,7 +37,7 @@ from scripts.function_tracer_pcode.authority.decision.conditional import (
     ConditionalDecisionReceipt,
     ConditionalDecisiveProofKind,
     ConditionalDecisiveProofReceipt,
-    _CONDITIONAL_DECISION_CODEC_TOKEN,
+    conditional_decision_receipt_from_payload,
 )
 from scripts.function_tracer_pcode.authority.decision.decision import (
     DecisiveProofKind,
@@ -362,20 +362,9 @@ def _decode_conditional_decisive(
 
 
 def _decode_conditional_decision(payload: Mapping[str, Any]) -> ConditionalDecisionReceipt:
-    _require_keys(payload, {field.name for field in fields(ConditionalDecisionReceipt)})
-    _require_exact_string_fields(payload, {
-        "result_occurrence_id", "unconditional_receipt_digest",
-        "lifecycle_projection_digest", "assumption_set_digest",
-        "authority_input_digest", "receipt_digest",
-    })
-    return ConditionalDecisionReceipt.from_persisted(
-        **{
-            **payload,
-            "conditional_outcome": Outcome(payload["conditional_outcome"]),
-            "unconditional_outcome": Outcome(payload["unconditional_outcome"]),
-        },
-        _codec_token=_CONDITIONAL_DECISION_CODEC_TOKEN,
-    )
+    # The strict shape, field and digest checks live next to the receipt so the
+    # codec and the pair-status projection cannot drift apart.
+    return conditional_decision_receipt_from_payload(payload)
 
 
 def _decode_decision(payload: Mapping[str, Any]) -> DecisionReceipt:

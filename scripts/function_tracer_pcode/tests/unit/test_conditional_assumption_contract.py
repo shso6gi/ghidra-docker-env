@@ -91,7 +91,10 @@ def _reason_registry() -> SealedReasonRegistry:
     ))
 
 
-def _projection(result_id: str = "result-1", *, decision_effect: str = "blocks_decision"):
+def _projection(
+    result_id: str = "result-1", *, decision_effect: str = "blocks_decision",
+    snapshot_digest: str = "snapshot",
+):
     active = (
         CActiveBaseRow(
             result_id, "occ-1", "cause-1", REASON_ID,
@@ -100,7 +103,7 @@ def _projection(result_id: str = "result-1", *, decision_effect: str = "blocks_d
     )
     return VerifiedLifecycleProjection.seal(
         result_occurrence_id=result_id,
-        snapshot_digest="snapshot",
+        snapshot_digest=snapshot_digest,
         c_active_base=active,
         q_open_base=(QOpenBaseRow(result_id, "occ-1", "cause-1", "req-A", "call", "target"),),
         blocker_eligibility_base=(
@@ -110,10 +113,13 @@ def _projection(result_id: str = "result-1", *, decision_effect: str = "blocks_d
     )
 
 
-def _unconditional(result_id: str = "result-1", *, outcome: Outcome = Outcome.UNKNOWN):
+def _unconditional(
+    result_id: str = "result-1", *, outcome: Outcome = Outcome.UNKNOWN,
+    snapshot_digest: str = "snapshot",
+):
     """Build a real unconditional DecisionReceipt with the requested outcome."""
     if outcome is Outcome.UNKNOWN:
-        projection = _projection(result_id)
+        projection = _projection(result_id, snapshot_digest=snapshot_digest)
         return projection, finalize_decision(
             FinalizationAuthority(result_id, projection)
         )
@@ -467,7 +473,7 @@ def test_conditional_column_refuses_a_pair_that_is_already_decided():
     assert result.conditional_outcome is None
 
 
-def test_conditional_column_refuses_a_receipt_from_another_decision():
+def test_conditional_column_refuses_a_receipt_from_another_pair():
     class _Result:
         decision_receipt = None
         final_outcome = None
@@ -483,8 +489,38 @@ def test_conditional_column_refuses_a_receipt_from_another_decision():
     other = finalize_conditional_decision(ConditionalFinalizationAuthority(
         "result-2", other_decision, other_projection, (_premise(),),
     ))
+    with pytest.raises(ValueError, match="different pair"):
+        attach_conditional_decision(result, other)
+    assert result.conditional_outcome is None
+
+
+def test_conditional_column_refuses_a_receipt_from_another_decision_of_the_same_pair():
+    """Same pair, a different DecisionReceipt: the digest join must still fail."""
+    class _Result:
+        decision_receipt = None
+        final_outcome = None
+        is_equivalent = None
+        conditional_decision_receipt = None
+        conditional_outcome = None
+
+    result = _Result()
+    _projection_a, decision = _unconditional("result-1")
+    attach_canonical_decision(result, decision)
+    _projection_b, other_decision = _unconditional(
+        "result-1", snapshot_digest="another-snapshot",
+    )
+    assert other_decision.receipt_digest != decision.receipt_digest
+    assert other_decision.result_occurrence_id == decision.result_occurrence_id
+    other_conditional_projection = _projection(
+        "result-1", decision_effect="blocks_disequivalence",
+        snapshot_digest="another-snapshot",
+    )
+    other = finalize_conditional_decision(ConditionalFinalizationAuthority(
+        "result-1", other_decision, other_conditional_projection, (_premise(),),
+    ))
     with pytest.raises(ValueError, match="different DecisionReceipt"):
         attach_conditional_decision(result, other)
+    assert result.conditional_outcome is None
 
 
 # --- serialization ----------------------------------------------------------
@@ -593,7 +629,27 @@ def test_serialized_conditional_column_is_validated_against_its_receipt():
     receipt_payload["conditional_outcome"] = "NOT_EQ"
     payload["conditional_decision_receipt"] = receipt_payload
     payload["conditional_outcome"] = "NOT_EQ"
-    with pytest.raises(ValueError, match="digest is invalid"):
+    with pytest.raises(ValueError, match="digest mismatch"):
+        conditional_outcome_from_payload(payload)
+
+    # A receipt whose own digest is intact but that was issued against another
+    # pair's decision must not be readable in this payload's column.
+    _foreign_projection, foreign_decision = _unconditional("result-2")
+    foreign = finalize_conditional_decision(ConditionalFinalizationAuthority(
+        "result-2", foreign_decision,
+        _projection("result-2", decision_effect="blocks_disequivalence"),
+        (_premise(),),
+    ))
+    payload = dict(result.to_dict())
+    payload["conditional_decision_receipt"] = conditional_decision_receipt_payload(foreign)
+    payload["conditional_outcome"] = foreign.conditional_outcome.value
+    with pytest.raises(ValueError, match="different pair"):
+        conditional_outcome_from_payload(payload)
+
+    # Dropping the unconditional receipt leaves the column unreadable.
+    payload = dict(result.to_dict())
+    payload["decision_receipt"] = None
+    with pytest.raises(ValueError, match="without its unconditional decision receipt"):
         conditional_outcome_from_payload(payload)
 
 

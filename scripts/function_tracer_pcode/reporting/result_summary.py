@@ -344,6 +344,15 @@ def read_validation_log_record(
         # receipt.  It is aggregated separately and never feeds ``status``.
         conditional = conditional_outcome_from_payload(payload)
         conditional_status = None if conditional is None else conditional.value
+    if pair_status is not None:
+        # In canonical mode the signed body is the authority for this column
+        # too; the log payload may only agree with it.
+        signed_conditional = pair_status.get("conditional_outcome")
+        if payloads and conditional_status != signed_conditional:
+            raise ValueError(
+                "pair-status conditional column differs from the result payload"
+            )
+        conditional_status = signed_conditional
     return ValidationLogRecord(
         path=str(log_path),
         function_name=function_name,

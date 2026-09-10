@@ -64,6 +64,17 @@ PAIR_STATUS_SEAL_FIELDS = frozenset({
     "pair_status_body_digest",
     "pair_status_signature",
 })
+# Issue #20: the assumption-dependent column.  This is an *optional* field
+# group, not a schema break: it is written only for a pair that actually has a
+# conditional decision, so a pair-status file produced before the conditional
+# lane existed carries exactly the v1 field set and keeps validating unchanged,
+# and both fields must appear together or not at all.  The pair-status schema
+# id therefore stays ``signed-canonical-pair-status-v1``; a future change that
+# alters an existing field's meaning has to version the schema instead.
+PAIR_STATUS_CONDITIONAL_FIELDS = frozenset({
+    "conditional_outcome",
+    "conditional_decision_receipt",
+})
 PAIR_STATUS_OPERATIONAL_DIAGNOSTIC_FIELDS = frozenset({
     "classification_valid",
     "error_kind",
@@ -265,6 +276,32 @@ def _validate_durable_child_exit(body: Mapping[str, Any]) -> None:
         raise ValueError("pair-status child return code differs from disposition")
 
 
+def _validate_pair_status_conditional_column(body: Mapping[str, Any]) -> None:
+    """Bind the conditional column to this pair's own unconditional decision."""
+    from scripts.function_tracer_pcode.authority.decision.conditional import (
+        conditional_decision_receipt_from_payload,
+        validate_conditional_decision_join,
+    )
+
+    if body.get("supervisor_status") != "RESOLVED":
+        raise ValueError("pair-status conditional column requires a resolved pair")
+    if body.get("canonical_outcome") != Outcome.UNKNOWN.value:
+        # The conditional lane runs only after an unconditional UNKNOWN, so a
+        # conditional column on a decided pair is not a column at all.
+        raise ValueError("pair-status conditional column requires an unconditional UNKNOWN")
+    receipt = conditional_decision_receipt_from_payload(
+        body["conditional_decision_receipt"]
+    )
+    validate_conditional_decision_join(
+        receipt,
+        result_occurrence_id=body["result_occurrence_id"],
+        unconditional_outcome=Outcome(body["canonical_outcome"]),
+        unconditional_receipt_digest=body["decision_receipt_digest"],
+    )
+    if body["conditional_outcome"] != receipt.conditional_outcome.value:
+        raise ValueError("pair-status conditional outcome contradicts its receipt")
+
+
 def _validate_pair_status_body(body: Mapping[str, Any]) -> None:
     status = body.get("supervisor_status")
     expected = set(PAIR_STATUS_COMMON_FIELDS)
@@ -272,6 +309,11 @@ def _validate_pair_status_body(body: Mapping[str, Any]) -> None:
         expected.update(PAIR_STATUS_DURABLE_FIELDS)
     elif status != "RESOLVED":
         raise ValueError("pair-status supervisor disposition is invalid")
+    conditional_fields = PAIR_STATUS_CONDITIONAL_FIELDS & set(body)
+    if conditional_fields:
+        # Naming either field requires both: a half-written column would let a
+        # conditional outcome stand without the receipt that justifies it.
+        expected.update(PAIR_STATUS_CONDITIONAL_FIELDS)
     if set(body) != expected:
         raise ValueError("pair-status authority fields differ")
     if body.get("classification_valid") is not True:
@@ -335,6 +377,8 @@ def _validate_pair_status_body(body: Mapping[str, Any]) -> None:
         if authority_kind != expected_kind or supervisor_kind != expected_kind:
             raise ValueError("pair-status durable authority kind is invalid")
         _validate_durable_child_exit(body)
+    if conditional_fields:
+        _validate_pair_status_conditional_column(body)
 
 
 def seal_pair_status(
@@ -380,6 +424,9 @@ def validate_signed_pair_status(
         set(PAIR_STATUS_COMMON_FIELDS)
         | (set(PAIR_STATUS_DURABLE_FIELDS)
            if payload.get("supervisor_status") in {"TIMEOUT", "ERROR"} else set())
+        # The optional conditional group is accepted only as a whole; a payload
+        # naming one of its fields fails the body check below.
+        | (set(PAIR_STATUS_CONDITIONAL_FIELDS) & set(payload))
     ):
         raise ValueError("signed pair-status schema differs")
     body = {key: payload[key] for key in payload if key not in PAIR_STATUS_SEAL_FIELDS}

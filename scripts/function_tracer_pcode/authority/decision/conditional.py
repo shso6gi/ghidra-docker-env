@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable, Tuple
+from typing import Any, Iterable, Mapping, Tuple
 
 from scripts.function_tracer_pcode.authority.contracts import (
     Outcome,
@@ -259,6 +259,88 @@ class ConditionalDecisionReceipt:
         )
         receipt.validate()
         return receipt
+
+
+CONDITIONAL_DECISION_RECEIPT_FIELDS = frozenset({
+    "result_occurrence_id", "conditional_outcome", "unconditional_outcome",
+    "unconditional_receipt_digest", "lifecycle_projection_digest",
+    "assumption_set_digest", "authority_input_digest", "receipt_digest",
+})
+
+
+def conditional_decision_receipt_payload(receipt: Any) -> dict:
+    """Return the strict public representation of one conditional receipt.
+
+    The payload repeats the unconditional outcome and the receipt digest the
+    conditional decision was issued against, so every consumer can re-check the
+    join instead of trusting the column it is printed next to.
+    """
+    if type(receipt) is not ConditionalDecisionReceipt:
+        raise TypeError("the conditional column requires an exact ConditionalDecisionReceipt")
+    receipt.validate()
+    return {
+        "result_occurrence_id": receipt.result_occurrence_id,
+        "conditional_outcome": receipt.conditional_outcome.value,
+        "unconditional_outcome": receipt.unconditional_outcome.value,
+        "unconditional_receipt_digest": receipt.unconditional_receipt_digest,
+        "lifecycle_projection_digest": receipt.lifecycle_projection_digest,
+        "assumption_set_digest": receipt.assumption_set_digest,
+        "authority_input_digest": receipt.authority_input_digest,
+        "receipt_digest": receipt.receipt_digest,
+    }
+
+
+def conditional_decision_receipt_from_payload(payload: Any) -> ConditionalDecisionReceipt:
+    """Rebuild one persisted conditional receipt through its own validation.
+
+    Every consumer of a serialized conditional column goes through here, so the
+    digest check is the receipt's own ``validate()`` and no second, weaker
+    verification exists anywhere.
+    """
+    if not isinstance(payload, Mapping) or set(payload) != set(
+        CONDITIONAL_DECISION_RECEIPT_FIELDS
+    ):
+        raise ValueError("serialized conditional decision receipt shape is invalid")
+    for name in CONDITIONAL_DECISION_RECEIPT_FIELDS - {
+        "conditional_outcome", "unconditional_outcome",
+    }:
+        if type(payload[name]) is not str or not payload[name]:
+            raise TypeError(
+                f"conditional decision receipt field {name} must be a non-empty exact string"
+            )
+    return ConditionalDecisionReceipt.from_persisted(
+        **{
+            **payload,
+            "conditional_outcome": Outcome(payload["conditional_outcome"]),
+            "unconditional_outcome": Outcome(payload["unconditional_outcome"]),
+        },
+        _codec_token=_CONDITIONAL_DECISION_CODEC_TOKEN,
+    )
+
+
+def validate_conditional_decision_join(
+    receipt: ConditionalDecisionReceipt,
+    *,
+    result_occurrence_id: str,
+    unconditional_outcome: Outcome,
+    unconditional_receipt_digest: str,
+) -> None:
+    """Bind one conditional receipt to the exact unconditional decision it followed.
+
+    A conditional receipt is only ever meaningful next to its own pair's
+    unconditional decision: a receipt from another pair, or one issued against
+    a different ``DecisionReceipt`` of the same pair, is rejected rather than
+    reported in the conditional column of whatever it was pasted into.
+    """
+    if type(receipt) is not ConditionalDecisionReceipt:
+        raise TypeError("the conditional join requires an exact ConditionalDecisionReceipt")
+    receipt.validate()
+    if receipt.result_occurrence_id != result_occurrence_id:
+        raise ValueError("conditional receipt belongs to a different pair")
+    if receipt.unconditional_receipt_digest != unconditional_receipt_digest:
+        raise ValueError("conditional receipt joins a different DecisionReceipt")
+    if receipt.unconditional_outcome is not Outcome(unconditional_outcome):
+        raise ValueError("conditional receipt contradicts the unconditional outcome")
 
 
 def finalize_conditional_decision(
