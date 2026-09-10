@@ -22,6 +22,42 @@ _FLOAT_PREDICATE_FP_OPS = {
 }
 
 
+# Ghidra P-code の浮動小数点 opcode 集合。mnemonic の部分一致ではなく明示列挙で
+# 保持し、taxonomy / 診断側が「名前らしさ」ではなく opcode 由来の証拠として
+# 参照できるようにする。素の ``TRUNC`` / ``CEIL`` / ``FLOOR`` / ``ROUND`` /
+# ``NAN`` は本リポジトリ内で整数側の縮小・受け渡しにも使われており opcode を
+# 一意に定めないため、ここには含めない。
+FLOAT_SEMANTICS_PCODE_OPERATORS = frozenset({
+    # 比較述語
+    "FLOAT_EQUAL",
+    "FLOAT_NOTEQUAL",
+    "FLOAT_LESS",
+    "FLOAT_LESSEQUAL",
+    # 算術
+    "FLOAT_ADD",
+    "FLOAT_SUB",
+    "FLOAT_MULT",
+    "FLOAT_DIV",
+    "FLOAT_SDIV",
+    "FLOAT_REM",
+    "FLOAT_SREM",
+    # 単項値 / 単項述語
+    "FLOAT_NEG",
+    "FLOAT_ABS",
+    "FLOAT_SQRT",
+    "FLOAT_NAN",
+    # 変換・丸め
+    "INT2FLOAT",
+    "FLOAT_INT2FLOAT",
+    "FLOAT2FLOAT",
+    "FLOAT_FLOAT2FLOAT",
+    "FLOAT_TRUNC",
+    "FLOAT_CEIL",
+    "FLOAT_FLOOR",
+    "FLOAT_ROUND",
+})
+
+
 def collect_float_predicate_smt_declarations(expr, *, float_mode: str = "uf") -> List[str]:
     """Collect declarations for P-code FLOAT_* predicates lowered as UFBV predicates."""
     declarations: List[str] = []
@@ -99,6 +135,22 @@ def collect_float_predicate_smt_declarations(expr, *, float_mode: str = "uf") ->
         seen.add(decl)
         declarations.append(decl)
     return declarations
+
+
+def expression_node_uses_float_pcode_operator(node) -> bool:
+    """node の operator が P-code の浮動小数点 opcode かどうかを返す。"""
+    operator = getattr(node, "operator", None)
+    if not operator:
+        return False
+    return str(operator) in FLOAT_SEMANTICS_PCODE_OPERATORS
+
+
+def expression_uses_float_pcode_operators(expr) -> bool:
+    """式のいずれかの node が P-code 浮動小数点 opcode を持つかどうかを返す。"""
+    return any(
+        expression_node_uses_float_pcode_operator(node)
+        for node in _iter_expression_nodes(expr)
+    )
 
 
 def expression_uses_smt_float_theory(expr) -> bool:

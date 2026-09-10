@@ -1,6 +1,7 @@
 """SMT-LIB rendering of expressions: core renderer, width coercion, float theory, loop lowerings, intrinsics and unknown-symbol declarations."""
 
 from scripts.function_tracer_pcode.core.render_smt.float_theory import (  # noqa: F401
+    FLOAT_SEMANTICS_PCODE_OPERATORS,
     _FLOAT_PREDICATE_FP_OPS,
     _FLOAT_UNARY_PREDICATE_SMT_NAMES,
     _FLOAT_UNARY_VALUE_SMT_NAMES,
@@ -18,8 +19,10 @@ from scripts.function_tracer_pcode.core.render_smt.float_theory import (  # noqa
     _looks_like_fp_expr,
     _normalize_to_fp_expr,
     collect_float_predicate_smt_declarations,
+    expression_node_uses_float_pcode_operator,
     expression_renders_as_fp_sort,
     expression_smt_sort_kind,
+    expression_uses_float_pcode_operators,
     expression_uses_smt_float_theory,
 )
 from scripts.function_tracer_pcode.core.render_smt.intrinsics import (  # noqa: F401

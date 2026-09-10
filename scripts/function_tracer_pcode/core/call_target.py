@@ -323,3 +323,40 @@ def coerce_call_target_ref(target: Union["CallTargetRef", str, None]) -> Optiona
     if target is None:
         return None
     return None
+
+
+def call_target_declared_return_data_type(target_ref: Any) -> Any:
+    """解決済み call target の宣言戻り型 DataType を返す（得られなければ None）。"""
+    function_obj = _safe_getattr(target_ref, "function_obj")
+    if function_obj is None:
+        return None
+    for candidate in (function_obj, _safe_thunked_function(function_obj)):
+        if candidate is None:
+            continue
+        getter = _safe_getattr(candidate, "getReturnType")
+        if not callable(getter):
+            continue
+        try:
+            return_type = getter()
+        except Exception:
+            continue
+        if return_type is not None:
+            return return_type
+    return None
+
+
+def call_target_returns_floating_value(target_ref: Any) -> bool:
+    """call target の宣言戻り型が浮動小数点型かどうかを typed provenance から返す。
+
+    シンボル名（``log`` / ``sqrt`` 等）は根拠にしない。宣言型が取得できない場合は
+    False を返す（fail-closed）。
+    """
+    return_type = call_target_declared_return_data_type(target_ref)
+    if return_type is None:
+        return False
+    from scripts.function_tracer_pcode.core.signature import is_floating_data_type
+
+    try:
+        return bool(is_floating_data_type(return_type))
+    except Exception:
+        return False
