@@ -4,20 +4,25 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core import (
+    CallTargetRef,
     Condition,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
 )
+from scripts.function_tracer_pcode.core.call_target import call_target_returns_floating_value
 from scripts.function_tracer_pcode.core.render_smt import (
+    _iter_expression_nodes,
     collect_float_predicate_smt_declarations,
     collect_intrinsic_smt_declarations,
     collect_unknown_smt_declarations,
     expression_node_has_unsupported_smt_ops,
+    expression_node_uses_float_pcode_operator,
     expression_uses_smt_float_theory,
     expression_uses_smt_uf,
     smt_logic_name,
 )
+from scripts.function_tracer_pcode.core.signature import is_floating_data_type
 from scripts.function_tracer_pcode.smt import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
@@ -293,7 +298,73 @@ def _impl__solver_rewrite_side_object_key(
         return self._artifact_stable_key_for_analysis(target, analysis)
     return target
 
+def _float_taxonomy_call_target_refs(node: Any) -> Tuple[Any, ...]:
+    """node の runtime provenance から解決済み call target 参照を取り出す。"""
+    runtime_ref = getattr(node, "runtime_ref", None)
+    if runtime_ref is None:
+        return ()
+    deferred_call_ref = getattr(runtime_ref, "deferred_call_ref", None)
+    candidates = (
+        runtime_ref,
+        getattr(runtime_ref, "target_ref", None),
+        getattr(deferred_call_ref, "target_ref", None),
+    )
+    refs: List[Any] = []
+    for candidate in candidates:
+        if isinstance(candidate, CallTargetRef) and candidate not in refs:
+            refs.append(candidate)
+    return tuple(refs)
+
+
+def _float_taxonomy_node_has_declared_float_type(node: Any, resolved: Dict[int, bool]) -> bool:
+    """node の宣言型が浮動小数点型かどうかを型オブジェクトから判定する。
+
+    ``resolved`` は 1 回の走査内で同じ DataType を何度も問い合わせないための
+    キャッシュ。走査中は node が DataType を保持しているので id を鍵にできる。
+    """
+    data_type_obj = getattr(node, "data_type_obj", None)
+    if data_type_obj is None:
+        return False
+    key = id(data_type_obj)
+    if key not in resolved:
+        try:
+            resolved[key] = bool(is_floating_data_type(data_type_obj))
+        except Exception:
+            resolved[key] = False
+    return resolved[key]
+
+
+def _float_taxonomy_node_calls_float_returning_target(
+    node: Any,
+    resolved: Dict[Any, bool],
+) -> bool:
+    """node が指す call target の宣言戻り型が浮動小数点型かどうかを判定する。"""
+    for target_ref in _float_taxonomy_call_target_refs(node):
+        if target_ref not in resolved:
+            try:
+                resolved[target_ref] = bool(call_target_returns_floating_value(target_ref))
+            except Exception:
+                resolved[target_ref] = False
+        if resolved[target_ref]:
+            return True
+    return False
+
+
 def _impl__expression_uses_float_or_float_op(expr: Any) -> bool:
+    """UNKNOWN cause taxonomy 用の浮動小数点証拠を object-derived に判定する。
+
+    シンボル名（``log`` / ``exp`` / ``sqrt`` 等）や型名の部分一致は根拠にしない。
+    採用する証拠は次の 3 系統のみで、いずれも解析対象オブジェクトから得られる。
+
+    - SMT float theory で描画できる node があること
+    - node の operator が P-code の浮動小数点 opcode であること
+    - node の宣言型、または node が指す call target の宣言戻り型が浮動小数点型
+      であること（typed provenance）
+
+    証拠が得られない場合は False を返す。ここは equivalence の判定ではなく
+    既に UNKNOWN となった pair の cause 分類なので、証拠不足は fail-closed に
+    扱い、名前からの推測で float と断定しない。
+    """
     if expr is None:
         return False
     try:
@@ -301,25 +372,21 @@ def _impl__expression_uses_float_or_float_op(expr: Any) -> bool:
             return True
     except (AttributeError, TypeError, RecursionError):
         pass
-    expr_type = getattr(expr, "expr_type", None)
-    type_name = str(getattr(expr_type, "name", "") or "")
-    operator = str(getattr(expr, "operator", "") or "")
-    name = str(getattr(expr, "name", "") or "")
-    if any(token in type_name.upper() for token in ("FLOAT", "F")):
+    try:
+        nodes = [node for node in _iter_expression_nodes(expr) if node is not None]
+    except (AttributeError, TypeError, RecursionError):
+        return False
+    # opcode 証拠は解析対象オブジェクトへの問い合わせが要らないので先に走査し、
+    # 型・provenance 証拠の問い合わせは必要な場合だけ行う。
+    if any(expression_node_uses_float_pcode_operator(node) for node in nodes):
         return True
-    if any(token in operator.upper() for token in ("FLOAT", "FADD", "FSUB", "FMUL", "FDIV")):
-        return True
-    if name.lower() in {"log", "exp", "sqrt", "sin", "cos", "pow"}:
-        return True
-    for operand in getattr(expr, "operands", []) or ():
-        if _impl__expression_uses_float_or_float_op(operand):
+    declared_float_types: Dict[int, bool] = {}
+    float_returning_targets: Dict[Any, bool] = {}
+    for node in nodes:
+        if _float_taxonomy_node_has_declared_float_type(node, declared_float_types):
             return True
-    if getattr(expr, "expr_type", None) == ExpressionType.PHI and getattr(expr, "value", None):
-        for condition, value in expr.value:
-            if condition is not None and _impl__expression_uses_float_or_float_op(condition.expression):
-                return True
-            if _impl__expression_uses_float_or_float_op(value):
-                return True
+        if _float_taxonomy_node_calls_float_returning_target(node, float_returning_targets):
+            return True
     return False
 
 def _impl__unsupported_smt_op_keys(self, expr: Any) -> Tuple[Any, ...]:
