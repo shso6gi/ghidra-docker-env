@@ -325,38 +325,79 @@ def coerce_call_target_ref(target: Union["CallTargetRef", str, None]) -> Optiona
     return None
 
 
-def call_target_declared_return_data_type(target_ref: Any) -> Any:
-    """解決済み call target の宣言戻り型 DataType を返す（得られなければ None）。"""
-    function_obj = _safe_getattr(target_ref, "function_obj")
+def _declared_return_data_type(function_obj: Any) -> Any:
+    """関数オブジェクトの宣言戻り型を返す。宣言が無いに等しい型は None にする。
+
+    void / undefined は「型が取れていない」のと区別できないので、authority には
+    しない。
+    """
     if function_obj is None:
         return None
-    for candidate in (function_obj, _safe_thunked_function(function_obj)):
-        if candidate is None:
-            continue
-        getter = _safe_getattr(candidate, "getReturnType")
-        if not callable(getter):
-            continue
-        try:
-            return_type = getter()
-        except Exception:
-            continue
-        if return_type is not None:
-            return return_type
-    return None
+    getter = _safe_getattr(function_obj, "getReturnType")
+    if not callable(getter):
+        return None
+    try:
+        return_type = getter()
+    except Exception:
+        return None
+    if return_type is None:
+        return None
+    from scripts.function_tracer_pcode.core.signature import (
+        is_undefined_data_type,
+        is_void_data_type,
+    )
+
+    try:
+        if is_void_data_type(return_type) or is_undefined_data_type(return_type):
+            return None
+    except Exception:
+        return None
+    return return_type
+
+
+def call_target_declared_return_data_types(target_ref: Any) -> Tuple[Any, ...]:
+    """call target の宣言戻り型候補を返す。
+
+    thunk の場合、Ghidra 上は wrapper 側と thunk target 側の双方が宣言を持ち得る。
+    ``CallTargetRef`` が external 分類で両方を記録している（``is_external`` と
+    ``thunked_is_external``）のと同じ方針で、ここでも双方を候補として返し、
+    どちらを authority とするかは呼び出し側が決める。thunk target を先に置く。
+
+    void / undefined の宣言と、取得できなかった宣言は候補に含めない。
+    """
+    function_obj = _safe_getattr(target_ref, "function_obj")
+    if function_obj is None:
+        return ()
+    declarations: list = []
+    for candidate in (_safe_thunked_function(function_obj), function_obj):
+        declared = _declared_return_data_type(candidate)
+        if declared is not None:
+            declarations.append(declared)
+    return tuple(declarations)
 
 
 def call_target_returns_floating_value(target_ref: Any) -> bool:
     """call target の宣言戻り型が浮動小数点型かどうかを typed provenance から返す。
 
-    シンボル名（``log`` / ``sqrt`` 等）は根拠にしない。宣言型が取得できない場合は
-    False を返す（fail-closed）。
+    シンボル名（``log`` / ``sqrt`` 等）は根拠にしない。
+
+    thunk では thunk target の宣言を authority とし、thunk target 側の宣言が
+    取れない場合だけ wrapper 側の宣言を使う。両方に宣言があって浮動小数点かどうかで
+    食い違う場合は、どちらを信じるべきかが決まらないので証拠にしない（False）。
+    宣言が 1 つも取れない場合も False（fail-closed）。
     """
-    return_type = call_target_declared_return_data_type(target_ref)
-    if return_type is None:
+    declarations = call_target_declared_return_data_types(target_ref)
+    if not declarations:
         return False
     from scripts.function_tracer_pcode.core.signature import is_floating_data_type
 
-    try:
-        return bool(is_floating_data_type(return_type))
-    except Exception:
+    verdicts = set()
+    for declared in declarations:
+        try:
+            verdicts.add(bool(is_floating_data_type(declared)))
+        except Exception:
+            return False
+    if len(verdicts) != 1:
+        # wrapper と thunk target の宣言が食い違う。曖昧なまま float 側に倒さない。
         return False
+    return verdicts.pop()
