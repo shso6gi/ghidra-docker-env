@@ -37,6 +37,7 @@ from scripts.function_tracer_pcode.authority.decision.conditional import (
     ConditionalDecisionReceipt,
     ConditionalDecisiveProofKind,
     ConditionalDecisiveProofReceipt,
+    assumption_premise_from_payload,
     conditional_decision_receipt_from_payload,
 )
 from scripts.function_tracer_pcode.authority.decision.decision import (
@@ -71,10 +72,7 @@ from scripts.function_tracer_pcode.authority.registry import (
     SealedReasonRegistry,
     SealedRecoveryRegistry,
 )
-from scripts.function_tracer_pcode.proof.assumptions import (
-    AssumptionKind,
-    AssumptionPremise,
-)
+from scripts.function_tracer_pcode.proof.assumptions import AssumptionPremise
 from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementId
 
 
@@ -315,21 +313,9 @@ def _decode_error(payload: Mapping[str, Any]) -> ErrorReceipt:
 
 
 def _decode_assumption_premise(payload: Mapping[str, Any]) -> AssumptionPremise:
-    _require_keys(payload, {field.name for field in fields(AssumptionPremise)})
-    _require_exact_string_fields(payload, {"kind", "subject"})
-    if type(payload["schema_version"]) is not int:
-        raise TypeError("strict v2 field schema_version must be an exact int")
-    if not isinstance(payload["payload"], list):
-        raise TypeError("strict v2 assumption payload must be a JSON array of pairs")
-    # AssumptionPremise re-normalizes the decoded lists back into its canonical
-    # tuple form and rejects any leaf the proof layer does not allow, so a
-    # tampered payload cannot round-trip into a premise.
-    return AssumptionPremise(
-        kind=AssumptionKind(payload["kind"]),
-        subject=payload["subject"],
-        payload=payload["payload"],
-        schema_version=payload["schema_version"],
-    )
+    # The shape check and the proof-layer re-normalization live next to the
+    # receipts, so the codec and the pair-status projection cannot drift apart.
+    return assumption_premise_from_payload(payload)
 
 
 def _decode_conditional_decisive(

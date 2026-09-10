@@ -12,6 +12,14 @@ sample must never be judged ``EQUIVALENT``. Any such pair is a soundness
 violation and the command exits 1. UNKNOWN/TIMEOUT/ERROR are not violations.
 Exit 2 means the trees contained no pair status at all (an empty tree is not
 a pass).
+
+Issue #20: the same rule is applied to the assumption-dependent column -- an
+``Eq`` pair judged conditionally ``NOT_EQ`` and a ``Neq`` pair judged
+conditionally ``EQUIVALENT`` are conditional soundness violations and also fail
+the gate -- but they are counted and reported apart from the unconditional
+ones, and the unconditional verdict stays separately visible. A run in which no
+pair carries a conditional decision prints and serializes exactly what it did
+before.
 """
 
 from __future__ import annotations
@@ -44,6 +52,12 @@ def is_violation(record: PairOutcome) -> bool:
     return FORBIDDEN_OUTCOME.get(record.label) == record.outcome
 
 
+def is_conditional_violation(record: PairOutcome) -> bool:
+    """The same ground-truth rule read against the conditional column."""
+    conditional = record.conditional_outcome
+    return bool(conditional) and FORBIDDEN_OUTCOME.get(record.label) == conditional
+
+
 @dataclass(frozen=True)
 class GateReport:
     records: Tuple[PairOutcome, ...]
@@ -57,11 +71,33 @@ class GateReport:
         return Counter((record.label, record.outcome) for record in self.records)
 
     @property
-    def passed(self) -> bool:
+    def conditional_records(self) -> Tuple[PairOutcome, ...]:
+        return tuple(record for record in self.records if record.conditional_outcome)
+
+    @property
+    def conditional_violations(self) -> Tuple[PairOutcome, ...]:
+        return tuple(
+            record for record in self.records if is_conditional_violation(record)
+        )
+
+    @property
+    def conditional_counts(self) -> Counter:
+        return Counter(
+            (record.label, record.conditional_outcome)
+            for record in self.conditional_records
+        )
+
+    @property
+    def unconditional_passed(self) -> bool:
+        """The verdict of the unconditional lane alone, unchanged by #20."""
         return bool(self.records) and not self.violations
 
+    @property
+    def passed(self) -> bool:
+        return self.unconditional_passed and not self.conditional_violations
+
     def as_dict(self) -> Dict[str, object]:
-        return {
+        payload: Dict[str, object] = {
             "pairs": len(self.records),
             "violations": len(self.violations),
             "passed": self.passed,
@@ -69,18 +105,38 @@ class GateReport:
                 {"label": label, "outcome": outcome, "count": count}
                 for (label, outcome), count in sorted(self.counts.items())
             ],
-            "violation_rows": [
-                {
-                    "sample_identity": record.sample_identity,
-                    "function_name": record.function_name,
-                    "pair_id": record.pair_id,
-                    "label": record.label,
-                    "outcome": record.outcome,
-                    "status_path": record.status_path,
-                }
-                for record in self.violations
-            ],
+            "violation_rows": [_violation_row(record, record.outcome)
+                               for record in self.violations],
         }
+        # The conditional section appears only when a run produced one, so a
+        # gate report without the lane is byte-identical to before.
+        if self.conditional_records:
+            payload["conditional"] = {
+                "pairs": len(self.conditional_records),
+                "violations": len(self.conditional_violations),
+                "passed": not self.conditional_violations,
+                "counts": [
+                    {"label": label, "outcome": outcome, "count": count}
+                    for (label, outcome), count in sorted(self.conditional_counts.items())
+                ],
+                "violation_rows": [
+                    _violation_row(record, record.conditional_outcome)
+                    for record in self.conditional_violations
+                ],
+            }
+            payload["unconditional_passed"] = self.unconditional_passed
+        return payload
+
+
+def _violation_row(record: PairOutcome, outcome: object) -> Dict[str, object]:
+    return {
+        "sample_identity": record.sample_identity,
+        "function_name": record.function_name,
+        "pair_id": record.pair_id,
+        "label": record.label,
+        "outcome": outcome,
+        "status_path": record.status_path,
+    }
 
 
 def build_gate_report(roots: Sequence[Path]) -> GateReport:
@@ -105,9 +161,8 @@ def format_gate_report(report: GateReport) -> str:
         )
     lines.append("")
     violations = report.violations
-    if not report.records:
-        lines.append("GATE: EMPTY (no pair status found)")
-    elif violations:
+    conditional_violations = report.conditional_violations
+    if violations:
         lines.append(f"Soundness violations ({len(violations)}):")
         for record in violations:
             lines.append(
@@ -115,10 +170,50 @@ def format_gate_report(report: GateReport) -> str:
                 f"{record.sample_identity} {record.function_name} {record.pair_id}"
             )
         lines.append("")
-        lines.append(f"GATE: FAIL ({len(violations)} violations)")
+    lines.extend(_format_conditional_section(report))
+    if not report.records:
+        lines.append("GATE: EMPTY (no pair status found)")
+    elif not report.conditional_records:
+        # No conditional lane in this run: exactly the pre-#20 verdict line.
+        lines.append(
+            f"GATE: FAIL ({len(violations)} violations)" if violations else "GATE: PASS"
+        )
+    elif violations or conditional_violations:
+        lines.append(
+            f"GATE: FAIL ({len(violations)} violations, "
+            f"{len(conditional_violations)} conditional violations)"
+        )
     else:
         lines.append("GATE: PASS")
     return "\n".join(lines) + "\n"
+
+
+def _format_conditional_section(report: GateReport) -> List[str]:
+    """Render the assumption-dependent counts, never mixed into the table above."""
+    conditional_records = report.conditional_records
+    if not conditional_records:
+        return []
+    counts = report.conditional_counts
+    lines = [
+        "Conditional (assumption-dependent) outcomes by benchmark label:",
+    ]
+    for (label, outcome), count in sorted(counts.items()):
+        lines.append(f"  {label}: {outcome}={count}")
+    lines.append(
+        f"  unconditional verdict: {'PASS' if report.unconditional_passed else 'FAIL'}"
+    )
+    if report.conditional_violations:
+        lines.append(
+            f"Conditional soundness violations ({len(report.conditional_violations)}):"
+        )
+        for record in report.conditional_violations:
+            lines.append(
+                f"  {record.label} sample judged conditionally "
+                f"{record.conditional_outcome}: {record.sample_identity} "
+                f"{record.function_name} {record.pair_id}"
+            )
+    lines.append("")
+    return lines
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -140,7 +235,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sys.stdout.write(format_gate_report(report))
     if not report.records:
         return EXIT_EMPTY
-    if report.violations:
+    if report.violations or report.conditional_violations:
         return EXIT_VIOLATION
     return EXIT_PASS
 

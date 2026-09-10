@@ -27,7 +27,10 @@ from scripts.function_tracer_pcode.authority.contracts import (
     freeze_authority_value,
 )
 from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
-from scripts.function_tracer_pcode.proof.assumptions import AssumptionPremise
+from scripts.function_tracer_pcode.proof.assumptions import (
+    AssumptionKind,
+    AssumptionPremise,
+)
 
 
 class ConditionalDecisiveProofKind(str, Enum):
@@ -179,6 +182,7 @@ class ConditionalDecisionReceipt:
     unconditional_receipt_digest: str
     lifecycle_projection_digest: str
     assumption_set_digest: str
+    assumption_set: Tuple[AssumptionPremise, ...]
     authority_input_digest: str
     receipt_digest: str
 
@@ -190,6 +194,7 @@ class ConditionalDecisionReceipt:
         unconditional_receipt_digest: str,
         lifecycle_projection_digest: str,
         assumption_set_digest: str,
+        assumption_set: Iterable[AssumptionPremise],
         authority_input_digest: str,
         receipt_digest: str,
         *,
@@ -205,6 +210,9 @@ class ConditionalDecisionReceipt:
         object.__setattr__(self, "unconditional_receipt_digest", unconditional_receipt_digest)
         object.__setattr__(self, "lifecycle_projection_digest", lifecycle_projection_digest)
         object.__setattr__(self, "assumption_set_digest", assumption_set_digest)
+        # Stored exactly as given: canonicality is checked, never imposed, so a
+        # persisted set that repeats or reorders a premise cannot validate.
+        object.__setattr__(self, "assumption_set", tuple(assumption_set))
         object.__setattr__(self, "authority_input_digest", authority_input_digest)
         object.__setattr__(self, "receipt_digest", receipt_digest)
 
@@ -227,8 +235,14 @@ class ConditionalDecisionReceipt:
             raise ValueError("conditional decision receipt digest mismatch")
         if self.unconditional_outcome is not Outcome.UNKNOWN and self.is_decisive():
             raise ValueError("a conditional decision cannot follow an unconditional decision")
-        if self.is_decisive() and not self.assumption_set_digest:
-            raise ValueError("a decisive conditional receipt requires its assumption set")
+        if not self.assumption_set:
+            raise ValueError("a conditional decision receipt requires its assumption set")
+        # The premises carried here are the ones the digest names: a repeated,
+        # reordered or edited set does not reproduce it and is refused.
+        if self.assumption_set != canonical_assumption_dependencies(self.assumption_set):
+            raise ValueError("conditional decision assumption set is not canonical")
+        if authority_digest(self.assumption_set) != self.assumption_set_digest:
+            raise ValueError("conditional decision assumption set digest mismatch")
 
     @classmethod
     def from_persisted(
@@ -240,6 +254,7 @@ class ConditionalDecisionReceipt:
         unconditional_receipt_digest: str,
         lifecycle_projection_digest: str,
         assumption_set_digest: str,
+        assumption_set: Iterable[AssumptionPremise],
         authority_input_digest: str,
         receipt_digest: str,
         _codec_token: object = None,
@@ -253,6 +268,7 @@ class ConditionalDecisionReceipt:
             unconditional_receipt_digest,
             lifecycle_projection_digest,
             assumption_set_digest,
+            assumption_set,
             authority_input_digest,
             receipt_digest,
             _factory_token=_CONDITIONAL_DECISION_FACTORY_TOKEN,
@@ -264,8 +280,72 @@ class ConditionalDecisionReceipt:
 CONDITIONAL_DECISION_RECEIPT_FIELDS = frozenset({
     "result_occurrence_id", "conditional_outcome", "unconditional_outcome",
     "unconditional_receipt_digest", "lifecycle_projection_digest",
-    "assumption_set_digest", "authority_input_digest", "receipt_digest",
+    "assumption_set_digest", "assumption_set", "authority_input_digest",
+    "receipt_digest",
 })
+
+
+def _json_payload_value(value: Any) -> Any:
+    """Render one premise payload level with JSON containers only.
+
+    ``canonical_value`` maps a tuple and a list to the same canonical form, so
+    this changes no digest; it only makes the in-memory payload identical to
+    what comes back out of a JSON file.
+    """
+    if isinstance(value, tuple):
+        return [_json_payload_value(item) for item in value]
+    return value
+
+
+def assumption_premise_payload(premise: AssumptionPremise) -> dict:
+    """Return the strict public representation of one proof premise."""
+    if type(premise) is not AssumptionPremise:
+        raise TypeError(
+            f"assumption payloads carry AssumptionPremise only: {type(premise).__name__}"
+        )
+    return {
+        "kind": premise.kind.value,
+        "subject": premise.subject,
+        "payload": _json_payload_value(premise.payload),
+        "schema_version": premise.schema_version,
+    }
+
+
+def assumption_premise_from_payload(payload: Any) -> AssumptionPremise:
+    """Rebuild one persisted premise; the proof layer re-checks its shape."""
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "kind", "subject", "payload", "schema_version",
+    }:
+        raise ValueError("serialized assumption premise shape is invalid")
+    for name in ("kind", "subject"):
+        if type(payload[name]) is not str or not payload[name]:
+            raise TypeError(f"assumption premise field {name} must be a non-empty exact str")
+    if type(payload["schema_version"]) is not int:
+        raise TypeError("assumption premise schema version must be an exact int")
+    if not isinstance(payload["payload"], (list, tuple)):
+        raise TypeError("assumption premise payload must be a sequence of pairs")
+    return AssumptionPremise(
+        kind=AssumptionKind(payload["kind"]),
+        subject=payload["subject"],
+        payload=payload["payload"],
+        schema_version=payload["schema_version"],
+    )
+
+
+def assumption_set_payload(premises: Iterable[AssumptionPremise]) -> list:
+    return [assumption_premise_payload(premise) for premise in premises]
+
+
+def assumption_set_from_payload(payload: Any) -> Tuple[AssumptionPremise, ...]:
+    """Rebuild a persisted assumption set exactly as it was written.
+
+    The premises are *not* re-canonicalized here: a persisted set that repeats
+    or reorders a premise must fail the receipt's canonicality check rather
+    than be silently normalized into a valid one.
+    """
+    if not isinstance(payload, (list, tuple)):
+        raise ValueError("serialized assumption set must be a JSON array")
+    return tuple(assumption_premise_from_payload(item) for item in payload)
 
 
 def conditional_decision_receipt_payload(receipt: Any) -> dict:
@@ -285,6 +365,9 @@ def conditional_decision_receipt_payload(receipt: Any) -> dict:
         "unconditional_receipt_digest": receipt.unconditional_receipt_digest,
         "lifecycle_projection_digest": receipt.lifecycle_projection_digest,
         "assumption_set_digest": receipt.assumption_set_digest,
+        # The premises themselves travel with the decision, so a reader of the
+        # final artifact alone can say what the conditional result assumed.
+        "assumption_set": assumption_set_payload(receipt.assumption_set),
         "authority_input_digest": receipt.authority_input_digest,
         "receipt_digest": receipt.receipt_digest,
     }
@@ -302,7 +385,7 @@ def conditional_decision_receipt_from_payload(payload: Any) -> ConditionalDecisi
     ):
         raise ValueError("serialized conditional decision receipt shape is invalid")
     for name in CONDITIONAL_DECISION_RECEIPT_FIELDS - {
-        "conditional_outcome", "unconditional_outcome",
+        "conditional_outcome", "unconditional_outcome", "assumption_set",
     }:
         if type(payload[name]) is not str or not payload[name]:
             raise TypeError(
@@ -313,6 +396,7 @@ def conditional_decision_receipt_from_payload(payload: Any) -> ConditionalDecisi
             **payload,
             "conditional_outcome": Outcome(payload["conditional_outcome"]),
             "unconditional_outcome": Outcome(payload["unconditional_outcome"]),
+            "assumption_set": assumption_set_from_payload(payload["assumption_set"]),
         },
         _codec_token=_CONDITIONAL_DECISION_CODEC_TOKEN,
     )
@@ -438,6 +522,7 @@ def finalize_conditional_decision(
         unconditional.receipt_digest,
         projection.lifecycle_projection_digest,
         set_digest,
+        authority.assumption_set,
         input_digest,
         receipt_digest,
         _factory_token=_CONDITIONAL_DECISION_FACTORY_TOKEN,

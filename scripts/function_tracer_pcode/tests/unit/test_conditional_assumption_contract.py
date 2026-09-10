@@ -30,12 +30,18 @@ from scripts.function_tracer_pcode.authority.contracts import (
     authority_digest,
 )
 from scripts.function_tracer_pcode.authority.decision.conditional import (
+    CONDITIONAL_DECISION_RECEIPT_FIELDS,
     ConditionalDecisionReceipt,
     ConditionalDecisiveProofKind,
     ConditionalDecisiveProofReceipt,
     ConditionalFinalizationAuthority,
     assumption_dependencies_digest,
+    assumption_premise_from_payload,
+    assumption_premise_payload,
+    assumption_set_from_payload,
+    assumption_set_payload,
     canonical_assumption_dependencies,
+    conditional_decision_receipt_from_payload,
     finalize_conditional_decision,
 )
 from scripts.function_tracer_pcode.authority.decision.decision import (
@@ -158,11 +164,14 @@ def _conditional_lane(*, decision_effect: str = "blocks_decision", premises=None
     conditional_projection = _projection("result-1", decision_effect=decision_effect)
     assumption_set = premises if premises is not None else (_premise(),)
     proof = _conditional_proof(conditional_projection, assumption_set, kind=kind)
-    receipt = finalize_conditional_decision(ConditionalFinalizationAuthority(
+    authority = ConditionalFinalizationAuthority(
         "result-1", decision, conditional_projection, assumption_set,
         conditional_decisive_proof_receipts=(proof,),
-    ))
-    return decision, conditional_projection, assumption_set, proof, receipt
+    )
+    receipt = finalize_conditional_decision(authority)
+    # The authority holds the canonical (digest-ordered) set; that is what the
+    # receipts carry, so hand it back rather than the order it was written in.
+    return decision, conditional_projection, authority.assumption_set, proof, receipt
 
 
 def _codec() -> StrictV2JsonCodec:
@@ -395,7 +404,8 @@ def test_conditional_decision_receipts_are_issued_only_by_the_finalizer():
         ConditionalDecisionReceipt(*[getattr(receipt, name) for name in (
             "result_occurrence_id", "conditional_outcome", "unconditional_outcome",
             "unconditional_receipt_digest", "lifecycle_projection_digest",
-            "assumption_set_digest", "authority_input_digest", "receipt_digest",
+            "assumption_set_digest", "assumption_set", "authority_input_digest",
+            "receipt_digest",
         )])
 
 
@@ -674,3 +684,158 @@ def test_conditional_and_unconditional_receipts_stay_distinct_documents():
     assert decision.receipt_digest != conditional.receipt_digest
     assert conditional.unconditional_receipt_digest == decision.receipt_digest
     assert codec.dumps(decision) != codec.dumps(conditional)
+
+
+# --- the assumption set is auditable from the final artifact ----------------
+
+
+def test_the_conditional_decision_carries_the_premises_its_digest_names():
+    premises = (_premise("log"), _premise("exp"))
+    _d, _p, assumption_set, _proof, receipt = _conditional_lane(
+        decision_effect="blocks_disequivalence", premises=premises,
+    )
+    assert receipt.conditional_outcome is Outcome.EQUIVALENT
+    # The set travels with the decision, in canonical order, and its digest
+    # is the one the receipt states.
+    assert receipt.assumption_set == assumption_set
+    assert receipt.assumption_set == canonical_assumption_dependencies(premises)
+    assert authority_digest(receipt.assumption_set) == receipt.assumption_set_digest
+    assert {premise.subject for premise in receipt.assumption_set} == {"log", "exp"}
+    receipt.validate()
+    assert_deep_immutable(receipt)
+
+
+def test_assumption_set_round_trips_through_the_receipt_payload():
+    _d, _p, assumption_set, _proof, receipt = _conditional_lane(
+        decision_effect="blocks_disequivalence", premises=(_premise("log"), _premise("exp")),
+    )
+    payload = conditional_decision_receipt_payload(receipt)
+    assert set(payload) == set(CONDITIONAL_DECISION_RECEIPT_FIELDS)
+    # JSON containers only, so the in-memory payload and the file agree.
+    assert json.loads(json.dumps(payload)) == payload
+    restored = conditional_decision_receipt_from_payload(payload)
+    assert restored == receipt
+    assert restored.assumption_set == assumption_set
+    assert conditional_decision_receipt_payload(restored) == payload
+
+
+def test_one_premise_round_trips_through_its_own_payload():
+    premise = _premise("log")
+    payload = assumption_premise_payload(premise)
+    assert payload["kind"] == "EXTERNAL_CALLEE_SPEC"
+    assert payload["payload"] == [
+        ["canonical_symbol", "log"],
+        ["no_observable_memory_write", True],
+        ["returns_normally", True],
+        ["signature", ["double", "double"]],
+    ]
+    assert json.loads(json.dumps(payload)) == payload
+    assert assumption_premise_from_payload(payload) == premise
+    assert assumption_set_from_payload(assumption_set_payload((premise,))) == (premise,)
+    with pytest.raises((ValueError, TypeError)):
+        assumption_premise_from_payload({"kind": "EXTERNAL_CALLEE_SPEC"})
+    with pytest.raises(ValueError):
+        assumption_set_from_payload({"not": "an array"})
+
+
+def test_a_persisted_assumption_set_must_be_canonical_and_match_its_digest():
+    _d, _p, _a, _proof, receipt = _conditional_lane(
+        decision_effect="blocks_disequivalence", premises=(_premise("log"), _premise("exp")),
+    )
+    payload = conditional_decision_receipt_payload(receipt)
+
+    # Reordered: normalizing it into a valid receipt would hide the edit.
+    reordered = {**payload, "assumption_set": list(reversed(payload["assumption_set"]))}
+    with pytest.raises(ValueError, match="not canonical"):
+        conditional_decision_receipt_from_payload(reordered)
+
+    # Duplicated.
+    duplicated = {
+        **payload,
+        "assumption_set": list(payload["assumption_set"]) + [payload["assumption_set"][0]],
+    }
+    with pytest.raises(ValueError, match="not canonical"):
+        conditional_decision_receipt_from_payload(duplicated)
+
+    # Dropped: the remaining set no longer digests to what the receipt says.
+    dropped = {**payload, "assumption_set": list(payload["assumption_set"])[:1]}
+    with pytest.raises(ValueError, match="assumption set digest mismatch"):
+        conditional_decision_receipt_from_payload(dropped)
+
+    # Emptied.
+    with pytest.raises(ValueError, match="requires its assumption set"):
+        conditional_decision_receipt_from_payload({**payload, "assumption_set": []})
+
+    # Edited in place: same premise count, different content.
+    edited = json.loads(json.dumps(payload))
+    edited["assumption_set"][0]["subject"] = "sqrt"
+    with pytest.raises(ValueError, match="assumption set digest mismatch"):
+        conditional_decision_receipt_from_payload(edited)
+
+    # A premise swapped in from another set.
+    _d2, _p2, _a2, _proof2, other = _conditional_lane(
+        decision_effect="blocks_disequivalence", premises=(_premise("sqrt"),),
+    )
+    swapped = json.loads(json.dumps(payload))
+    swapped["assumption_set"] = assumption_set_payload(other.assumption_set)
+    with pytest.raises(ValueError, match="assumption set digest mismatch"):
+        conditional_decision_receipt_from_payload(swapped)
+
+
+def test_the_strict_codec_round_trips_the_assumption_set_and_rejects_a_tampered_one():
+    codec = _codec()
+    _d, _p, _a, _proof, receipt = _conditional_lane(
+        decision_effect="blocks_disequivalence", premises=(_premise("log"), _premise("exp")),
+    )
+    encoded = codec.dumps(receipt)
+    decoded = codec.loads(encoded)
+    assert decoded == receipt
+    assert decoded.assumption_set == receipt.assumption_set
+    assert codec.dumps(decoded) == encoded
+
+    envelope = json.loads(encoded)
+    envelope["payload"]["assumption_set"] = list(
+        reversed(envelope["payload"]["assumption_set"])
+    )
+    envelope["payload_digest"] = authority_digest(envelope["payload"])
+    with pytest.raises(ValueError, match="not canonical"):
+        codec.loads(json.dumps(envelope))
+
+
+def test_the_unconditional_decision_never_carries_an_assumption_set():
+    _projection_a, decision = _unconditional()
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+        decision_receipt_payload,
+    )
+
+    payload = decision_receipt_payload(decision)
+    assert "assumption_set" not in payload
+    assert "assumption_set_digest" not in payload
+    assert not hasattr(decision, "assumption_set")
+
+
+def test_the_result_payload_exposes_the_assumption_set_next_to_the_outcome():
+    from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+
+    result = EquivalenceResult(
+        is_equivalent=None, function1_name="f", function2_name="f",
+        binary1_name="a", binary2_name="b", solver_results=None,
+    )
+    _unconditional_projection, decision = _unconditional()
+    attach_canonical_decision(result, decision)
+    _d, _p, _a, _proof, conditional = _conditional_lane(
+        decision_effect="blocks_disequivalence", premises=(_premise("log"),),
+    )
+    attach_conditional_decision(result, conditional)
+    payload = result.to_dict()
+
+    # From the result JSON alone: what the conditional outcome assumed.
+    column = payload["conditional_decision_receipt"]
+    assert payload["conditional_outcome"] == "EQUIVALENT"
+    assert [premise["subject"] for premise in column["assumption_set"]] == ["log"]
+    restored = conditional_decision_receipt_from_payload(column)
+    assert restored.assumption_set[0].payload_value("canonical_symbol") == "log"
+    assert conditional_outcome_from_payload(payload) is Outcome.EQUIVALENT
+    # And the unconditional column still knows nothing about it.
+    assert "assumption_set" not in payload["decision_receipt"]
+    assert outcome_from_payload(payload) is Outcome.UNKNOWN

@@ -32,6 +32,7 @@ from scripts.function_tracer_pcode.authority.decision.canonical_result import (
 )
 from scripts.function_tracer_pcode.authority.decision.conditional import (
     ConditionalDecisiveProofKind,
+    conditional_decision_receipt_from_payload,
     ConditionalDecisiveProofReceipt,
     ConditionalFinalizationAuthority,
     conditional_decision_receipt_payload,
@@ -556,3 +557,61 @@ def test_a_conditional_column_is_refused_on_a_decided_pair(tmp_path, monkeypatch
             decided, private_key_path=root / ".pair-status-test.key",
             public_key_path=root / PAIR_STATUS_PUBLIC_KEY_FILE,
         )
+
+
+def test_assumption_dependencies_are_recoverable_from_the_signed_pair_status(
+    tmp_path, monkeypatch,
+):
+    """The signed artifact alone answers: what did this conditional EQ assume?"""
+    run = _classified_pair_status(
+        tmp_path, monkeypatch, case="audit", conditional_outcome=Outcome.EQUIVALENT,
+    )
+    root = tmp_path / "results"
+    path, _sealed, public_key = _seal(root, EQ, "f", "B1", "B2", run.status)
+
+    # Read the file back the way a reviewer would: nothing but the bytes on disk.
+    body = validate_signed_pair_status(
+        json.loads(path.read_text(encoding="utf-8")), public_key_path=public_key,
+    )
+    receipt = conditional_decision_receipt_from_payload(body["conditional_decision_receipt"])
+    assert body["conditional_outcome"] == "EQUIVALENT"
+    assert receipt.conditional_outcome is Outcome.EQUIVALENT
+    assert [premise.subject for premise in receipt.assumption_set] == ["log"]
+    premise = receipt.assumption_set[0]
+    assert premise.kind is AssumptionKind.EXTERNAL_CALLEE_SPEC
+    assert premise.payload_value("canonical_symbol") == "log"
+    assert premise.payload_value("no_observable_memory_write") is True
+    assert authority_digest(receipt.assumption_set) == receipt.assumption_set_digest
+    assert receipt == run.conditional
+
+
+def test_sealing_rejects_a_conditional_receipt_whose_assumption_set_was_edited(
+    tmp_path, monkeypatch,
+):
+    run = _classified_pair_status(
+        tmp_path, monkeypatch, case="assumption-tamper",
+        conditional_outcome=Outcome.EQUIVALENT,
+    )
+    root = tmp_path / "results"
+    generate_pair_status_keypair(
+        root / ".pair-status-test.key", root / PAIR_STATUS_PUBLIC_KEY_FILE,
+    )
+    target = _execution_target(EQ, "f", "B1", "B2")
+
+    for mutate, message in (
+        (lambda column: column["assumption_set"][0].__setitem__("subject", "sqrt"),
+         "assumption set digest mismatch"),
+        (lambda column: column["assumption_set"].append(column["assumption_set"][0]),
+         "not canonical"),
+        (lambda column: column["assumption_set"].clear(),
+         "requires its assumption set"),
+    ):
+        column = json.loads(json.dumps(run.status["conditional_decision_receipt"]))
+        mutate(column)
+        with pytest.raises(ValueError, match=message):
+            seal_pair_status(
+                {**run.status, "conditional_decision_receipt": column,
+                 "pair_execution_target": target},
+                private_key_path=root / ".pair-status-test.key",
+                public_key_path=root / PAIR_STATUS_PUBLIC_KEY_FILE,
+            )
