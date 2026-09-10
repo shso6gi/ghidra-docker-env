@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, Tuple
+from typing import Dict, Iterator, Optional, Tuple
 
 PAIR_STATUS_SUFFIX = ".pair-status.json"
 OUTCOME_MISSING = "MISSING"
@@ -37,6 +37,10 @@ class PairOutcome:
     right_binary_id: str
     outcome: str
     status_path: str
+    # Issue #20: the assumption-dependent column, reported separately from
+    # ``outcome``.  ``None`` whenever the pair carries no conditional decision,
+    # which is every pair until the conditional lane is activated.
+    conditional_outcome: Optional[str] = None
 
     @property
     def key(self) -> PairKey:
@@ -112,7 +116,15 @@ def iter_pair_outcomes(root: Path) -> Iterator[PairOutcome]:
             identity = identity_from_status_path(root, status_path)
         if not (isinstance(outcome, str) and outcome):
             outcome = OUTCOME_INVALID
-        yield PairOutcome(*identity, outcome, status_path=str(status_path))
+        conditional = payload.get("conditional_outcome")
+        if not (isinstance(conditional, str) and conditional):
+            conditional = None
+        yield PairOutcome(
+            *identity,
+            outcome,
+            status_path=str(status_path),
+            conditional_outcome=conditional,
+        )
 
 
 def load_pair_outcomes(root: Path) -> Dict[PairKey, PairOutcome]:

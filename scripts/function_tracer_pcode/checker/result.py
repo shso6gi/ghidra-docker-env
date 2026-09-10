@@ -139,6 +139,12 @@ class EquivalenceResult:
     function2_identity: Optional[Tuple[Any, ...]] = None
     decision_receipt: Optional[Any] = field(default=None, repr=False, compare=False)
     final_outcome: Optional[str] = None
+    # 条件付き（仮定依存）判定の列。無条件 authority とは別に保持し、
+    # is_equivalent / final_outcome / exit code には決して影響させない（#20 PR-A）。
+    conditional_decision_receipt: Optional[Any] = field(
+        default=None, repr=False, compare=False
+    )
+    conditional_outcome: Optional[str] = None
     canonical_decision_required: bool = False
     canonical_c_active_base: Tuple[Mapping[str, Any], ...] = ()
     canonical_q_open_base: Tuple[Mapping[str, Any], ...] = ()
@@ -231,6 +237,17 @@ class EquivalenceResult:
             decision_receipt = decision_receipt_payload(self.decision_receipt)
         elif self.canonical_decision_required:
             raise ValueError("canonical serialization lacks DecisionReceipt")
+        conditional_decision_receipt = None
+        if self.conditional_decision_receipt is not None:
+            from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+                conditional_decision_receipt_payload,
+            )
+
+            conditional_decision_receipt = conditional_decision_receipt_payload(
+                self.conditional_decision_receipt
+            )
+        elif self.conditional_outcome is not None:
+            raise ValueError("conditional outcome without its ConditionalDecisionReceipt")
         result = {
             "is_equivalent": self.is_equivalent,
             "function1_name": self.function1_name,
@@ -258,6 +275,8 @@ class EquivalenceResult:
             "is_timeout": self.is_timeout(),
             "final_outcome": self.final_outcome,
             "decision_receipt": decision_receipt,
+            "conditional_outcome": self.conditional_outcome,
+            "conditional_decision_receipt": conditional_decision_receipt,
             "c_active_base": [dict(row) for row in self.canonical_c_active_base],
             "q_open_base": [dict(row) for row in self.canonical_q_open_base],
             "constrained_fragments": self.constrained_fragments,

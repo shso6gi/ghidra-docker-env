@@ -21,6 +21,9 @@ from scripts.function_tracer_pcode.authority.decision.pair_status_authority impo
     pair_status_operational_diagnostic,
     validate_signed_pair_status,
 )
+from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+    conditional_outcome_from_payload,
+)
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     coerce_unknown_reason_records,
 )
@@ -67,6 +70,10 @@ class ValidationLogRecord:
     status: str
     payloads: Tuple[Mapping[str, Any], ...] = ()
     pair_status_metadata: Optional[Mapping[str, Any]] = None
+    # Issue #20: the assumption-dependent column.  ``status`` stays the
+    # unconditional classification; this one is aggregated separately and is
+    # ``None`` for every pair that carries no conditional decision.
+    conditional_status: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +81,11 @@ class ValidationResultAggregate:
     records: Tuple[ValidationLogRecord, ...] = ()
     counts: Dict[str, int] = field(default_factory=dict)
     pairs_by_status: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    # Issue #20: conditional (assumption-dependent) results are counted in
+    # their own column.  ``counts`` never sees them, so the unconditional
+    # totals of a run cannot move because a conditional proof succeeded.
+    conditional_counts: Dict[str, int] = field(default_factory=dict)
+    conditional_pairs_by_status: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def total_pairs(self) -> int:
@@ -82,6 +94,13 @@ class ValidationResultAggregate:
     def count(self, status: str) -> int:
         return int(self.counts.get(status, 0) or 0)
 
+    def conditional_count(self, status: str) -> int:
+        return int(self.conditional_counts.get(status, 0) or 0)
+
+    @property
+    def total_conditional_pairs(self) -> int:
+        return sum(int(value or 0) for value in self.conditional_counts.values())
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "total_pairs": self.total_pairs,
@@ -89,6 +108,11 @@ class ValidationResultAggregate:
             "pairs_by_status": {
                 status: list(pairs)
                 for status, pairs in self.pairs_by_status.items()
+            },
+            "conditional_counts": dict(self.conditional_counts),
+            "conditional_pairs_by_status": {
+                status: list(pairs)
+                for status, pairs in self.conditional_pairs_by_status.items()
             },
         }
 
@@ -308,6 +332,7 @@ def read_validation_log_record(
         if pair_status is None:
             payloads = ()
     function_name, pair_label = parse_log_identity(log_path)
+    conditional_status = None
     if payloads:
         payload = payloads[-1]
         function_name = str(
@@ -315,6 +340,19 @@ def read_validation_log_record(
             or payload.get("function_name")
             or function_name
         )
+        # Issue #20: the conditional column is validated against its own
+        # receipt.  It is aggregated separately and never feeds ``status``.
+        conditional = conditional_outcome_from_payload(payload)
+        conditional_status = None if conditional is None else conditional.value
+    if pair_status is not None:
+        # In canonical mode the signed body is the authority for this column
+        # too; the log payload may only agree with it.
+        signed_conditional = pair_status.get("conditional_outcome")
+        if payloads and conditional_status != signed_conditional:
+            raise ValueError(
+                "pair-status conditional column differs from the result payload"
+            )
+        conditional_status = signed_conditional
     return ValidationLogRecord(
         path=str(log_path),
         function_name=function_name,
@@ -333,6 +371,7 @@ def read_validation_log_record(
             else classify_log_text(text, matrix_context=True)
         ),
         payloads=payloads,
+        conditional_status=conditional_status,
         pair_status_metadata=(
             {
                 "error_kind": pair_status["error_kind"],
@@ -413,16 +452,30 @@ def aggregate_validation_records(records: Iterable[ValidationLogRecord]) -> Vali
     record_tuple = tuple(records)
     counts = {status: 0 for status in STATUS_ORDER}
     pairs_by_status = {status: [] for status in STATUS_ORDER}
+    conditional_counts: Dict[str, int] = {}
+    conditional_pairs: Dict[str, list] = {}
     for record in record_tuple:
         status = record.status if record.status in counts else STATUS_UNKNOWN
         counts[status] += 1
         pairs_by_status[status].append(record.pair_label)
+        conditional = record.conditional_status
+        if conditional is None:
+            continue
+        conditional_counts[conditional] = conditional_counts.get(conditional, 0) + 1
+        conditional_pairs.setdefault(conditional, []).append(record.pair_label)
     return ValidationResultAggregate(
         records=record_tuple,
         counts=counts,
         pairs_by_status={
             status: tuple(sorted(pairs))
             for status, pairs in pairs_by_status.items()
+        },
+        conditional_counts={
+            status: conditional_counts[status] for status in sorted(conditional_counts)
+        },
+        conditional_pairs_by_status={
+            status: tuple(sorted(conditional_pairs[status]))
+            for status in sorted(conditional_pairs)
         },
     )
 
@@ -1131,6 +1184,20 @@ def format_benchmark_validation_lines(section: Mapping[str, Any]) -> List[str]:
     lines.append(
         f"  benchmark_gate: {section.get('gate', 'EMPTY')} (pairs={section.get('pairs', 0)})"
     )
+    # Issue #20: the assumption-dependent column, printed only when the run
+    # produced one so existing summaries are byte-identical without it.
+    conditional = section.get("conditional")
+    if isinstance(conditional, Mapping) and int(conditional.get("pairs", 0) or 0):
+        conditional_hard = conditional.get("hard_violations")
+        conditional_hard = conditional_hard if isinstance(conditional_hard, Mapping) else {}
+        lines.append(
+            "  conditional_soundness_violations: "
+            f"eq_not_eq={conditional_hard.get('eq_not_eq', 0)} "
+            f"neq_equivalent={conditional_hard.get('neq_confirmed_not_eq_equivalent', 0)} "
+            f"neq_not_eq_on_confirmed_eq={conditional_hard.get('neq_confirmed_eq_not_eq', 0)} "
+            f"neq_equivalent_unmapped={conditional_hard.get('neq_equivalent_unmapped', 0)}"
+        )
+        lines.append(f"  conditional_pairs: {conditional.get('pairs', 0)}")
     return lines
 
 
@@ -1200,13 +1267,33 @@ def _apply_baseline_match_scope(
 
 
 def _format_count_lines(indent: str, aggregate: ValidationResultAggregate) -> Tuple[str, ...]:
-    return (
+    lines = (
         f"{indent}Equivalent     : {aggregate.count(STATUS_EQ)}",
         f"{indent}Not equivalent : {aggregate.count(STATUS_NOT_EQ)}",
         f"{indent}Error          : {aggregate.count(STATUS_ERROR)}",
         f"{indent}Unknown        : {aggregate.count(STATUS_UNKNOWN)}",
         f"{indent}Timeout        : {aggregate.count(STATUS_TIMEOUT)}",
         f"{indent}Incomplete     : {aggregate.count(STATUS_INCOMPLETE)}",
+    )
+    return lines + _format_conditional_count_lines(indent, aggregate)
+
+
+def _format_conditional_count_lines(
+    indent: str, aggregate: ValidationResultAggregate,
+) -> Tuple[str, ...]:
+    """Render the assumption-dependent column, and only when it has rows.
+
+    A run without a conditional lane prints exactly what it printed before, so
+    the unconditional summary of an existing run cannot move.
+    """
+    if not aggregate.conditional_counts:
+        return ()
+    body = " ".join(
+        f"{status}={aggregate.conditional_count(status)}"
+        for status in sorted(aggregate.conditional_counts)
+    )
+    return (
+        f"{indent}Conditional (assumption-dependent), reported separately: {body}",
     )
 
 

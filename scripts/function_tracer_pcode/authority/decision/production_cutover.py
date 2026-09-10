@@ -17,6 +17,11 @@ from scripts.function_tracer_pcode.authority.contracts import (
     CLI_EXIT_CODE_BY_OUTCOME,
     Outcome,
 )
+from scripts.function_tracer_pcode.authority.decision.conditional import (
+    conditional_decision_receipt_from_payload,
+    conditional_decision_receipt_payload,
+    validate_conditional_decision_join,
+)
 from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
 
 
@@ -47,6 +52,59 @@ def decision_receipt_payload(receipt: DecisionReceipt) -> dict[str, str]:
         "authority_input_digest": receipt.authority_input_digest,
         "receipt_digest": receipt.receipt_digest,
     }
+
+
+def attach_conditional_decision(result: Any, receipt: Any) -> Any:
+    """Install the conditional column without touching the unconditional one.
+
+    ``is_equivalent``, ``final_outcome`` and ``decision_receipt`` keep the
+    values the unconditional lane gave them; a conditional proof can only ever
+    add a separate column.
+    """
+    payload = conditional_decision_receipt_payload(receipt)
+    unconditional = outcome_from_result(result)
+    if unconditional is not Outcome.UNKNOWN:
+        raise ValueError("the conditional lane runs only after an unconditional UNKNOWN")
+    validate_conditional_decision_join(
+        receipt,
+        result_occurrence_id=result.decision_receipt.result_occurrence_id,
+        unconditional_outcome=unconditional,
+        unconditional_receipt_digest=result.decision_receipt.receipt_digest,
+    )
+    result.conditional_decision_receipt = receipt
+    result.conditional_outcome = payload["conditional_outcome"]
+    return result
+
+
+def conditional_outcome_from_payload(payload: Mapping[str, Any]) -> Outcome | None:
+    """Validate a serialized conditional column; ``None`` when there is none.
+
+    The column is only accepted when it joins the unconditional decision of the
+    same payload: same pair, same ``DecisionReceipt`` digest, same unconditional
+    outcome.  ``outcome_from_payload`` validates that outer receipt first, so a
+    conditional result can never be read next to a decision it did not follow.
+    """
+
+    receipt_payload = payload.get("conditional_decision_receipt")
+    declared = payload.get("conditional_outcome")
+    if receipt_payload is None:
+        if declared is not None:
+            raise ValueError("conditional outcome without its conditional receipt")
+        return None
+    receipt = conditional_decision_receipt_from_payload(receipt_payload)
+    if declared != receipt.conditional_outcome.value:
+        raise ValueError("payload conditional_outcome contradicts its receipt")
+    outer = payload.get("decision_receipt")
+    if not isinstance(outer, Mapping):
+        raise ValueError("conditional column without its unconditional decision receipt")
+    unconditional = outcome_from_payload(payload)
+    validate_conditional_decision_join(
+        receipt,
+        result_occurrence_id=outer["result_occurrence_id"],
+        unconditional_outcome=unconditional,
+        unconditional_receipt_digest=outer["receipt_digest"],
+    )
+    return receipt.conditional_outcome
 
 
 def _relation_payload(row: Any) -> dict[str, Any]:

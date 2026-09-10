@@ -1001,6 +1001,44 @@ class SupervisorCanonicalResultResolvedReceipt:
             raise ValueError("supervisor canonical result receipt drifted")
 
 
+def conditional_pair_status_projection(
+    result_payload: Mapping[str, Any], *, result_occurrence_id: str,
+    unconditional_outcome: Outcome, decision_receipt_digest: str,
+) -> Mapping[str, Any]:
+    """Project the conditional column of one canonical result into pair-status.
+
+    Returns an empty mapping when the pair has no conditional decision, which is
+    every pair until the conditional lane is activated, so the sealed body keeps
+    exactly its v1 field set.  When there is one, the receipt is re-validated
+    against the unconditional authority the supervisor just verified -- not
+    against the digests the payload states about itself -- so a conditional
+    result cannot travel into another pair's signed status.
+    """
+    from scripts.function_tracer_pcode.authority.decision.conditional import (
+        conditional_decision_receipt_from_payload,
+        validate_conditional_decision_join,
+    )
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+        conditional_outcome_from_payload,
+    )
+
+    conditional = conditional_outcome_from_payload(result_payload)
+    if conditional is None:
+        return {}
+    receipt_payload = result_payload["conditional_decision_receipt"]
+    receipt = conditional_decision_receipt_from_payload(receipt_payload)
+    validate_conditional_decision_join(
+        receipt,
+        result_occurrence_id=result_occurrence_id,
+        unconditional_outcome=unconditional_outcome,
+        unconditional_receipt_digest=decision_receipt_digest,
+    )
+    return {
+        "conditional_outcome": conditional.value,
+        "conditional_decision_receipt": dict(receipt_payload),
+    }
+
+
 def classify_pair_status(
     log_path: Path, projection_path: Path, *, checkpoint_root: Path,
     execution_nonce: str, supervisor_signing_key_id: str,
@@ -1296,6 +1334,16 @@ def classify_pair_status(
         raise ValueError("canonical ERROR/error_kind join is invalid")
     return {
         **joins,
+        # Issue #20: the assumption-dependent column travels with the pair only
+        # when it exists, and only bound to the authority validated above.  The
+        # payload it comes from is covered by
+        # ``canonical_result_payload_preimage_digest`` in the signed bundle.
+        **conditional_pair_status_projection(
+            result_payload,
+            result_occurrence_id=identity["result_occurrence_id"],
+            unconditional_outcome=outcome,
+            decision_receipt_digest=validated["decision_receipt_digest"],
+        ),
         "error_kind": error_kind,
         "child_returncode": supervisor["child_returncode"],
         "supervisor_status": supervisor["status"],
