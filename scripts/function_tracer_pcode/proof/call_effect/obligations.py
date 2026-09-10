@@ -25,12 +25,7 @@ from scripts.function_tracer_pcode.core import (
     expression_provenance_key,
 )
 from scripts.function_tracer_pcode.proof.call_effect.candidates import (
-    build_callee_correspondence_proof,
     build_internal_call_correspondence_candidates,
-    issue_relational_callee_correspondence,
-    confirm_internal_callsite_correspondence,
-    verify_internal_candidate_binding,
-    CALLEE_CORRESPONDENCE_PROOF_STALE,
 )
 from scripts.function_tracer_pcode.proof.call_effect.fresh_arguments import (
     FRESH_ARGUMENT_STATUS_NOT_EVALUATED,
@@ -521,11 +516,6 @@ class CallSiteFact:
     #: 復元できなかった引数の side-specific fresh シンボル identity。
     #: binary_id を含むので左右で必ず異なる。
     fresh_argument_keys: Tuple[Tuple[Any, ...], ...] = ()
-    #: Issue #20 PR-D: callee の **interface** 事実。ABI / 型レベルの量であって
-    #: 意味ではない。cross-binary で比較できるので relational counterpart の
-    #: 最小条件に使う（意味的等価は後段 stage の責務）。
-    callee_parameter_width_bits: Tuple[Optional[int], ...] = ()
-    callee_return_width_bits: Tuple[int, ...] = ()
 
     @property
     def fact_kind(self) -> str:
@@ -593,8 +583,6 @@ class CallSiteFact:
             "extraction_status": self.extraction_status,
             "abi_argument_slot_keys": _jsonable(self.abi_argument_slot_keys),
             "fresh_argument_keys": _jsonable(self.fresh_argument_keys),
-            "callee_parameter_width_bits": list(self.callee_parameter_width_bits),
-            "callee_return_width_bits": list(self.callee_return_width_bits),
         }
 
 
@@ -869,12 +857,6 @@ class RelationalCallEffectObligation:
     #: **候補**の identity であって callee equivalence の証明ダイジェストではない。
     #: 成立条件に callee return / effect の事実を含めない（循環防止）。
     internal_candidate_id: Optional[Tuple[Any, ...]] = None
-    #: Issue #20 PR-D: 候補集合が誘導する callee correspondence proof の digest。
-    #: eligibility 側で現在の fact から再導出したものと突き合わせ、食い違えば
-    #: stale / foreign として拒否する。
-    callee_correspondence_proof_id: Optional[str] = None
-    #: Issue #20 PR-D: proof に bind された callee correspondence id。
-    relational_callee_correspondence_id: Optional[Tuple[Any, ...]] = None
     #: Issue #20 PR-D: 左右 fresh 引数の扱い。call-to-call の対応でだけ評価する。
     #: 評価していない obligation は ``not_evaluated`` のままにし、成り立っていない
     #: ``independent`` を receipt に書かない。relational equality proof が無い限り
@@ -1136,8 +1118,6 @@ def _extract_side_facts(
                 "argument_evidence_complete": [],
                 "abi_argument_slot_keys": [],
                 "fresh_argument_keys": [],
-                "callee_parameter_width_bits": [],
-                "callee_return_width_bits": [],
                 "userop_key": None,
             },
         )
@@ -1735,12 +1715,6 @@ def _extract_side_facts(
                 fresh_key = getattr(fresh, "stable_key", None)
                 if callable(fresh_key):
                     bucket["fresh_argument_keys"].append(tuple(fresh_key()))
-            parameter_widths = tuple(
-                _storage_identity_width_bits(identity)
-                for identity in getattr(evidence, "callee_param_identities", ()) or ()
-            )
-            if parameter_widths:
-                bucket["callee_parameter_width_bits"].append(parameter_widths)
 
         for evidence in getattr(summary, "call_target_resolution_evidence", ()) or ():
             if evidence is None:
@@ -1822,9 +1796,6 @@ def _extract_side_facts(
             bucket["callee_return_summary_statuses"].append(
                 str(getattr(evidence, "return_summary_status", "unavailable") or "unavailable")
             )
-            return_width = getattr(evidence, "return_semantic_bit_width", None)
-            if isinstance(return_width, int) and not isinstance(return_width, bool) and return_width > 0:
-                bucket["callee_return_width_bits"].append(int(return_width))
             bucket["callee_return_shape_keys"].extend(
                 _cross_binary_expression_shape(tuple(key))
                 for key in getattr(evidence, "return_value_keys", ()) or ()
@@ -2046,12 +2017,6 @@ def _extract_side_facts(
                 extraction_status="complete" if extraction_complete else "inconclusive",
                 abi_argument_slot_keys=tuple(dict.fromkeys(bucket["abi_argument_slot_keys"])),
                 fresh_argument_keys=tuple(dict.fromkeys(bucket["fresh_argument_keys"])),
-                callee_parameter_width_bits=(
-                    _dedupe(bucket["callee_parameter_width_bits"])[0]
-                    if len(_dedupe(bucket["callee_parameter_width_bits"])) == 1
-                    else ()
-                ),
-                callee_return_width_bits=tuple(sorted(set(bucket["callee_return_width_bits"]))),
             )
         )
     return tuple(facts)
@@ -2211,50 +2176,6 @@ _PHASE2_STRUCTURAL_PRECONDITION_STAGES = (
 )
 
 
-#: readiness 層の binding 検証で拒否する理由。
-INTERNAL_AUTHORITY_MISSING = "internal_callee_correspondence_authority_missing"
-INTERNAL_AUTHORITY_MALFORMED = "internal_callee_correspondence_authority_malformed"
-INTERNAL_AUTHORITY_UNBOUND = "internal_callee_correspondence_authority_unbound"
-
-#: `RelationalCalleeCorrespondenceId.stable_key()` の形。
-_RELATIONAL_CALLEE_ID_KIND = "relational_callee_correspondence"
-_RELATIONAL_CALLEE_ID_LENGTH = 6
-
-
-def _internal_authority_binding_blockers(
-    obligation: RelationalCallEffectObligation,
-) -> Tuple[str, ...]:
-    """Check that the carried correspondence receipts bind to each other.
-
-    facts は見ない。見るのは obligation が運んできた三つ組
-    （candidate id / proof id / relational callee id）の構造的な整合だけ。
-    substituted / malformed / stale combination をここで止める。
-    """
-
-    candidate_id = obligation.internal_candidate_id
-    proof_id = obligation.callee_correspondence_proof_id
-    relational_id = obligation.relational_callee_correspondence_id
-    if not candidate_id:
-        # internal lane ではない obligation には何も要求しない。
-        return ()
-    if not proof_id or not relational_id:
-        return (INTERNAL_AUTHORITY_MISSING,)
-
-    key = tuple(relational_id)
-    if (
-        len(key) != _RELATIONAL_CALLEE_ID_LENGTH
-        or key[0] != _RELATIONAL_CALLEE_ID_KIND
-        or not isinstance(key[1], str)
-    ):
-        return (INTERNAL_AUTHORITY_MALFORMED,)
-    # embedded proof_id / candidate_key が、別々に運ばれた値と一致すること。
-    if key[1] != str(proof_id):
-        return (INTERNAL_AUTHORITY_UNBOUND,)
-    if tuple(key[2] or ()) != tuple(candidate_id):
-        return (INTERNAL_AUTHORITY_UNBOUND,)
-    return ()
-
-
 def evaluate_obligation_proof_readiness(
     obligation: RelationalCallEffectObligation,
     eligibility: Phase2DirectCallEligibility,
@@ -2267,11 +2188,6 @@ def evaluate_obligation_proof_readiness(
         blockers.append("eligibility_obligation_id_mismatch")
     if eligibility.status != "candidate":
         blockers.append("obligation_not_solver_candidate")
-    # Issue #20 PR-D: correspondence authority の **binding 検証**。
-    # 責務分離: 事実に基づく semantic / authority の再検証は Phase 2 eligibility が
-    # 行う（facts を持っているのはそちらだけ）。readiness 層は facts を再解析せず、
-    # 運ばれてきた receipt 同士が構造的に噛み合っているかだけを検証する。
-    blockers.extend(_internal_authority_binding_blockers(obligation))
     records_by_stage: Dict[str, List[SolverProofRecord]] = {}
     verified_records: List[SolverProofRecord] = []
     artifact_failures: List[str] = []
@@ -2400,126 +2316,6 @@ def evaluate_obligation_proof_readiness(
         invalid_stages=tuple(invalid),
         blockers=tuple(blockers),
     )
-
-
-def _width_from_storage_key(key: Any, depth: int = 0) -> Optional[int]:
-    """Semantic bit width carried by one storage identity key.
-
-    production で現れる形をすべて受ける。``parameter_storage`` は storage key を
-    包む wrapper なので中へ降りる（``("parameter_storage", <storage_key>)`` と
-    ``("parameter_storage", <storage_key>, size_bits)`` の両方がある）。
-    判別できなければ ``None``。推測しない。
-    """
-
-    if depth > 4 or not isinstance(key, (tuple, list)) or not key:
-        return None
-    kind = str(key[0])
-    if kind == "register_storage" and len(key) >= 6:
-        try:
-            width = int(key[5])
-        except (TypeError, ValueError):
-            return None
-        return width if width > 0 else None
-    if kind == "memory_storage" and len(key) >= 4:
-        try:
-            width = int(key[3]) * 8
-        except (TypeError, ValueError):
-            return None
-        return width if width > 0 else None
-    if kind == "parameter_storage":
-        if len(key) >= 3 and isinstance(key[2], int) and not isinstance(key[2], bool) and key[2] > 0:
-            return int(key[2])
-        if len(key) >= 2:
-            return _width_from_storage_key(key[1], depth + 1)
-    return None
-
-
-def _storage_identity_width_bits(identity: Any) -> Optional[int]:
-    """Semantic width of one declared callee parameter, in bits.
-
-    ``callee_param_identities`` の 1 要素は、その parameter を指す identity key の
-    tuple。その中の storage key から幅を回収する。回収できなければ ``None`` で、
-    呼び出し側は correspondence proof を不成立にする（未観測を一致扱いしない）。
-    """
-
-    if not isinstance(identity, (tuple, list)):
-        return None
-    direct = _width_from_storage_key(identity)
-    if direct is not None:
-        return direct
-    for key in identity:
-        width = _width_from_storage_key(key)
-        if width is not None:
-            return width
-    return None
-
-
-def _pair_is_in_internal_call_lane(left: Any, right: Any) -> bool:
-    """True when both sides are resolved internal call candidates.
-
-    外部 callee の pair には internal 用の correspondence 要件を課さない。
-    そちらは `not_resolved_internal_call_candidate` / `noninternal_call_target`
-    が既に塞いでいる。
-    """
-
-    for fact in (left, right):
-        if not isinstance(fact, CallSiteFact):
-            return False
-        if fact.correspondence_operation_class() != "resolved_internal_call_candidate":
-            return False
-        if fact.target_categories != ("internal_function",):
-            return False
-    return True
-
-
-def _internal_correspondence_blockers(
-    obligation: RelationalCallEffectObligation,
-    left: Any,
-    right: Any,
-    left_by_id: Mapping[str, RiskBearingFact],
-    right_by_id: Mapping[str, RiskBearingFact],
-) -> Tuple[str, ...]:
-    """Verify the candidate binding and the callee correspondence proof.
-
-    永続化された identity を信用せず、現在の fact から候補と proof を再導出して
-    突き合わせる。schema / obligation 所属 / 候補 shape / proof digest のいずれか
-    が食い違えば fail closed する。
-    """
-
-    candidate, binding_blockers = verify_internal_candidate_binding(
-        getattr(obligation, "internal_candidate_id", None),
-        obligation.left_fact_id,
-        obligation.right_fact_id,
-        left,
-        right,
-    )
-    if candidate is None:
-        return binding_blockers
-
-    # 候補集合全体から callee correspondence proof を再導出する。obligation が
-    # 運んできた proof id は「現在の事実から出るはずの proof」と一致しなければ
-    # stale / foreign として拒否する。
-    all_candidates = build_internal_call_correspondence_candidates(
-        [fact for fact in left_by_id.values() if isinstance(fact, CallSiteFact)],
-        [fact for fact in right_by_id.values() if isinstance(fact, CallSiteFact)],
-    ).candidates
-    proof = build_callee_correspondence_proof(all_candidates, left_by_id, right_by_id)
-    carried_proof_id = getattr(obligation, "callee_correspondence_proof_id", None)
-    if carried_proof_id and str(carried_proof_id) != proof.proof_id:
-        return (CALLEE_CORRESPONDENCE_PROOF_STALE,)
-
-    correspondence, blockers = confirm_internal_callsite_correspondence(
-        candidate, proof, left, right
-    )
-    if correspondence is None:
-        return tuple(blockers)
-
-    # obligation が運んできた correspondence id も、再導出したものと一致しなければ
-    # 受け付けない（差し替えられた id で correspondence を成立させない）。
-    carried_id = getattr(obligation, "relational_callee_correspondence_id", None)
-    if carried_id is not None and tuple(carried_id) != correspondence.callee_correspondence.stable_key():
-        return (CALLEE_CORRESPONDENCE_PROOF_STALE,)
-    return ()
 
 
 def _phase2_direct_call_eligibility(
@@ -2678,24 +2474,6 @@ def _phase2_direct_call_eligibility(
             blockers.append("argument_arity_relation_missing")
         if not left.argument_keys and (left.callee_parameter_keys or right.callee_parameter_keys):
             blockers.append("argument_relation_missing")
-        # Issue #20 PR-D: 候補が決まっただけでは internal callsite correspondence を
-        # 成立させない。`semantic_shape_key` は cross-binary で比較できない callee
-        # identity を含まないので、引数 shape が同じなら別の callee を呼ぶ 2 つの
-        # callsite も候補になる。候補 → callee correspondence proof →
-        # RelationalCalleeCorrespondenceId → relational argument key の順に通し、
-        # RelationalCalleeCorrespondenceId が無ければ correspondence 不成立とする。
-        #
-        # 適用するのは **internal lane に入っている pair だけ**。external callee の
-        # pair は上の `not_resolved_internal_call_candidate` /
-        # `noninternal_call_target` が既に塞いでおり、そこへ internal 用の
-        # correspondence blocker を重ねると、internal でない pair に
-        # `callsite_correspondence_unproven` という別の reason が付いてしまう。
-        if _pair_is_in_internal_call_lane(left, right):
-            blockers.extend(
-                _internal_correspondence_blockers(
-                    obligation, left, right, left_by_id, right_by_id
-                )
-            )
 
     memory_relation_required = bool(
         isinstance(left, CallSiteFact)
@@ -2938,20 +2716,6 @@ def build_call_effect_shadow_manifest(
         (candidate.left_fact_id, candidate.right_fact_id): candidate
         for candidate in internal_candidates.candidates
     }
-    # 候補集合が誘導する callee correspondence を一度だけ証明し、その receipt を
-    # obligation に bind する。候補形成はこの proof を見ていない（循環しない）。
-    internal_callee_proof = build_callee_correspondence_proof(
-        internal_candidates.candidates,
-        {fact.fact_id: fact for fact in left_facts},
-        {fact.fact_id: fact for fact in right_facts},
-    )
-    internal_callee_id_by_pair = {}
-    for candidate in internal_candidates.candidates:
-        issued, _blockers = issue_relational_callee_correspondence(
-            internal_callee_proof, candidate
-        )
-        if issued is not None:
-            internal_callee_id_by_pair[(candidate.left_fact_id, candidate.right_fact_id)] = issued
     paired_left = {left for left, _ in pairs}
     paired_right = {right for _, right in pairs}
     left_unmatched_calls = tuple(
@@ -3003,16 +2767,6 @@ def build_call_effect_shadow_manifest(
                 internal_candidate_id=(
                     internal_candidate_by_pair[(left_id, right_id)].stable_key()
                     if (left_id, right_id) in internal_candidate_by_pair
-                    else None
-                ),
-                callee_correspondence_proof_id=(
-                    internal_callee_proof.proof_id
-                    if (left_id, right_id) in internal_candidate_by_pair
-                    else None
-                ),
-                relational_callee_correspondence_id=(
-                    internal_callee_id_by_pair[(left_id, right_id)].stable_key()
-                    if (left_id, right_id) in internal_callee_id_by_pair
                     else None
                 ),
                 fresh_argument_status=fresh_argument_correspondence_status(
@@ -3353,18 +3107,9 @@ def apply_solver_proof_artifacts_to_manifest(
             failure_cause=item.get("failure_cause"),
             correspondence_basis=str(item.get("correspondence_basis") or "none"),
             dependency_proof_ids=tuple(item.get("dependency_proof_ids", ()) or ()),
-            # Issue #20 PR-D: correspondence authority を solver proof 段まで
-            # 落とさずに運ぶ。manifest 生成時に検証しただけで捨てると、receipt に
-            # 「何を根拠に対応付けたか」が残らない。
+            # Issue #20 PR-D: candidate matching identity と fresh 引数の扱いは
+            # receipt に残す。manifest 生成時に付けたものを組み直しで落とさない。
             internal_candidate_id=_coerce_key(item.get("internal_candidate_id")),
-            callee_correspondence_proof_id=(
-                str(item["callee_correspondence_proof_id"])
-                if item.get("callee_correspondence_proof_id")
-                else None
-            ),
-            relational_callee_correspondence_id=_coerce_key(
-                item.get("relational_callee_correspondence_id")
-            ),
             fresh_argument_status=str(
                 item.get("fresh_argument_status") or FRESH_ARGUMENT_STATUS_NOT_EVALUATED
             ),

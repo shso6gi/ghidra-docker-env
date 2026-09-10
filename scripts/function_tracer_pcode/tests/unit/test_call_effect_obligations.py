@@ -205,15 +205,7 @@ def _analysis_with_call(
     evidence = CallArgumentEvidence(
         pcode_op_ref=pcode_ref,
         target_ref=target,
-        # production の identity 形（`_call_evidence_callee_param_identities`）:
-        # parameter ごとに identity key の tuple を持ち、storage key は
-        # `StorageInfo.storage_identity_key()` の tuple を包む。
-        callee_param_identities=(
-            (
-                ("parameter", 0),
-                ("parameter_storage", ("register_storage", 0, 1, 32, 0, 32)),
-            ),
-        ),
+        callee_param_identities=(("parameter_storage", "register", 0, 4),),
         arguments=(argument,),
         sources=("pcode_input",),
         coverage_complete=True,
