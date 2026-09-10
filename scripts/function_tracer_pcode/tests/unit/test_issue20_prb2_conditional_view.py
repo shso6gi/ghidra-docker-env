@@ -273,6 +273,19 @@ def test_different_symbols_produce_different_uf_identities():
     assert log_view.call_models[0].uf_identity() != exp_view.call_models[0].uf_identity()
 
 
+def test_unobserved_reference_width_takes_the_declared_return_width():
+    """参照側が幅を持たない (size 0) のは食い違いではない。
+
+    その場合の戻り幅は callee の宣言 signature が authority なので catalog の幅を
+    使う。実バイナリでは deferred-call の UNKNOWN 参照が幅を持たないことが多い。
+    """
+    analysis, _ = _single_call_analysis(unknown_size=0)
+    result = create_conditional_view(analysis, observation_policy=NO_OBSERVATION)
+    assert result.constructed, result.refusal_reason
+    assert result.view.call_models[0].return_width_bits == 64
+    assert result.view.analysis.returns[0].value.size == 8
+
+
 def test_return_width_mismatch_refuses_the_call():
     analysis, _ = _single_call_analysis(unknown_size=4)
     result = create_conditional_view(analysis, observation_policy=NO_OBSERVATION)

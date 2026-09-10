@@ -285,7 +285,13 @@ def _call_model_for(
     sizes = observed_sizes.get(deferred_key)
     if not sizes:
         return None, CALL_SKIPPED_NOT_REFERENCED
-    if any(int(size or 0) * 8 != int(return_width_bits) for size in sizes):
+    # 参照側が幅を持っていない (size 0) のは「観測できていない」であって
+    # 「食い違っている」ではない。その場合の戻り幅は callee の宣言 signature が
+    # authority なので catalog の幅を使う（既存の pure-return 経路が
+    # ``expr.size or summary_size`` としているのと同じ扱い）。実際に別の幅で
+    # 観測されているなら、それは食い違いなので fail closed。
+    observed_widths = {int(size or 0) * 8 for size in sizes if int(size or 0) > 0}
+    if any(width != int(return_width_bits) for width in observed_widths):
         return None, CALL_SKIPPED_RETURN_WIDTH_MISMATCH
 
     premise = external_callee_spec_premise(
