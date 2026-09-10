@@ -114,23 +114,39 @@ class AbiArgumentSlotRef:
         }
 
 
+class MissingSideDiscriminator(ValueError):
+    """Raised when a fresh argument cannot be made side-specific.
+
+    左右独立は「``binary_id`` が入っていれば保たれる」という約束ではなく、
+    **discriminator が必ず存在する**ことで担保する。取得できないなら fresh を
+    発行してはならない（``unknown_binary`` 等に丸めると左右が同じシンボルに
+    潰れ、証明していない値の一致を主張することになる）。
+    """
+
+
 @dataclass(frozen=True)
 class FreshCallArgumentRef:
     """A side-specific free symbol standing for one unrecovered call argument.
 
-    ``binary_id`` participates in ``stable_key()``.  Unknown-expression SMT
-    symbols are derived from that key, so a left fresh argument and a right
-    fresh argument are distinct symbols by construction; nothing downstream has
-    to remember to keep them apart.
+    ``binary_id`` participates in ``stable_key()`` and is **required to be a
+    non-empty discriminator**.  Unknown-expression SMT symbols are derived from
+    that key, so a left fresh argument and a right fresh argument are distinct
+    symbols by construction; nothing downstream has to remember to keep them
+    apart, and nothing may fall back to a shared placeholder.
     """
 
-    binary_id: Optional[str]
+    binary_id: str
     slot: AbiArgumentSlotRef
     call_site_key: Optional[Tuple[Any, ...]] = None
     reason: str = "call_argument_unrecovered"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "binary_id", _optional_text(self.binary_id))
+        discriminator = _optional_text(self.binary_id)
+        if discriminator is None:
+            raise MissingSideDiscriminator(
+                "fresh call argument requires a non-empty side discriminator"
+            )
+        object.__setattr__(self, "binary_id", discriminator)
         object.__setattr__(self, "reason", _optional_text(self.reason) or "call_argument_unrecovered")
         key = self.call_site_key
         object.__setattr__(
@@ -161,8 +177,8 @@ class FreshCallArgumentRef:
         return self.slot.stable_key()
 
     def display_name(self) -> str:
-        binary = self.binary_id or "unknown_binary"
-        return f"fresh_{binary}_arg{self.slot.ordinal}"
+        # discriminator は __post_init__ で保証済み。ここで既定値へ丸めない。
+        return f"fresh_{self.binary_id}_arg{self.slot.ordinal}"
 
     def to_dict(self) -> Dict[str, Any]:
         return {

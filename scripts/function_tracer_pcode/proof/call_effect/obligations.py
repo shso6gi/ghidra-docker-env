@@ -25,7 +25,9 @@ from scripts.function_tracer_pcode.core import (
     expression_provenance_key,
 )
 from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+    InternalCallCorrespondenceCandidateId,
     build_internal_call_correspondence_candidates,
+    confirm_internal_callsite_correspondence,
 )
 from scripts.function_tracer_pcode.proof.call_effect.fresh_arguments import (
     FRESH_ARGUMENT_STATUS_NOT_EVALUATED,
@@ -2318,6 +2320,26 @@ def evaluate_obligation_proof_readiness(
     )
 
 
+def _candidate_from_obligation(
+    obligation: RelationalCallEffectObligation,
+) -> Optional[InternalCallCorrespondenceCandidateId]:
+    """The internal candidate identity this obligation was built from.
+
+    ``None`` when the pair is not an internal callsite candidate; the
+    correspondence then fails closed rather than being assumed.
+    """
+
+    key = getattr(obligation, "internal_candidate_id", None)
+    if not key:
+        return None
+    return InternalCallCorrespondenceCandidateId(
+        left_fact_id=str(obligation.left_fact_id or ""),
+        right_fact_id=str(obligation.right_fact_id or ""),
+        correspondence_shape_key=tuple(key[3]) if len(key) > 3 else (),
+        abi_argument_slot_keys=tuple(key[4]) if len(key) > 4 else (),
+    )
+
+
 def _phase2_direct_call_eligibility(
     obligation: RelationalCallEffectObligation,
     left_by_id: Mapping[str, RiskBearingFact],
@@ -2474,6 +2496,18 @@ def _phase2_direct_call_eligibility(
             blockers.append("argument_arity_relation_missing")
         if not left.argument_keys and (left.callee_parameter_keys or right.callee_parameter_keys):
             blockers.append("argument_relation_missing")
+        # Issue #20 PR-D: 候補が決まっただけでは internal callsite correspondence を
+        # 成立させない。`semantic_shape_key` は cross-binary で比較できない callee
+        # identity を含まないので、引数 shape が同じなら別の callee を呼ぶ 2 つの
+        # callsite も候補になる。候補 → callee correspondence proof →
+        # RelationalCalleeCorrespondenceId → relational argument key の順に通し、
+        # RelationalCalleeCorrespondenceId が無ければ correspondence 不成立とする。
+        _correspondence, correspondence_blockers = confirm_internal_callsite_correspondence(
+            _candidate_from_obligation(obligation),
+            left,
+            right,
+        )
+        blockers.extend(correspondence_blockers)
 
     memory_relation_required = bool(
         isinstance(left, CallSiteFact)

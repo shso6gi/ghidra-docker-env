@@ -40,6 +40,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
+from scripts.function_tracer_pcode.core.runtime_refs.call_arguments import (
+    MissingSideDiscriminator,
+)
 from scripts.function_tracer_pcode.core import (
     AbiArgumentSlotRef,
     CallTargetRef,
@@ -89,6 +92,11 @@ ABI_CALLSITE_WIDTH_MISMATCH = "abi_callsite_argument_width_mismatch"
 
 #: 引数式が作れなかったスロットに付ける理由。
 FRESH_ARGUMENT_UNTRACEABLE_INPUT = "abi_slot_input_not_traceable"
+
+#: side discriminator が取れないので fresh を発行できない（fail closed）。
+#: 既定値へ丸めると左右の fresh が同じシンボルに潰れ、証明していない値の一致を
+#: 主張することになるため、証拠行そのものを作らない。
+ABI_SIDE_DISCRIMINATOR_UNAVAILABLE = "abi_side_discriminator_unavailable"
 
 
 @dataclass(frozen=True)
@@ -261,6 +269,12 @@ def _impl__abi_slot_input_assignment(
     if input_storages is None or input_widths is None:
         return None, None, ABI_CALLSITE_INPUTS_UNAVAILABLE
 
+    # arity は **両 tier の前提**。callee の宣言 parameter がすべて storage 一致
+    # しても、callsite に余分な実引数が残っていれば「その prototype が適用された」
+    # とは言えない（余分な引数を黙って無視して complete を名乗ることになる）。
+    if len(input_widths) != len(callee_parameters):
+        return None, None, ABI_CALLSITE_ARITY_MISMATCH
+
     # tier A: exact, unique storage identity match per ordinal.
     assignment: List[int] = []
     used: set = set()
@@ -286,10 +300,7 @@ def _impl__abi_slot_input_assignment(
         return ABI_AUTHORITY_CALLEE_DECLARED_STORAGE, assignment, None
 
     # tier B: Ghidra's CALL inputs are the applied prototype's parameters in
-    # order.  Accept that ordering only when the callsite agrees with the
-    # declared signature on arity *and* on every ordinal's width.
-    if len(input_widths) != len(callee_parameters):
-        return None, None, ABI_CALLSITE_ARITY_MISMATCH
+    # order.  Arity already matched above; every ordinal's width must agree too.
     for ordinal, callee_param in enumerate(callee_parameters):
         slot_ref = _impl__abi_argument_slot_ref(ordinal, callee_param)
         if slot_ref is None:
@@ -355,12 +366,16 @@ def _impl__resolve_abi_call_arguments(
             except Exception:
                 pass
         if expression is None:
-            fresh_ref = FreshCallArgumentRef(
-                binary_id=binary_id,
-                slot=slot_ref,
-                call_site_key=call_site_key,
-                reason=FRESH_ARGUMENT_UNTRACEABLE_INPUT,
-            )
+            try:
+                fresh_ref = FreshCallArgumentRef(
+                    binary_id=binary_id,
+                    slot=slot_ref,
+                    call_site_key=call_site_key,
+                    reason=FRESH_ARGUMENT_UNTRACEABLE_INPUT,
+                )
+            except MissingSideDiscriminator:
+                # 左右を区別できない fresh は作らない。証拠行ごと諦める。
+                return None, ABI_SIDE_DISCRIMINATOR_UNAVAILABLE
             slots.append(
                 AbiCallArgumentSlot(
                     slot=slot_ref,

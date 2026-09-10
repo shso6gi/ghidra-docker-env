@@ -610,6 +610,17 @@ _CALL_ELIGIBILITY_BLOCKER_BASE_CODES = frozenset({
     "inline_region_single_entry_unproven",
     "inline_region_state_transformer_missing",
     "phase2_requires_paired_call_sites",
+    # Issue #20 PR-D: candidate → callee correspondence → callsite correspondence
+    # の authority 境界。RelationalCalleeCorrespondenceId が確立できない場合の
+    # fail-closed コード。
+    "internal_callee_control_profile_relation_missing",
+    "internal_callee_effect_summary_unproven",
+    "internal_callee_memory_effect_relation_missing",
+    "internal_callee_return_shape_relation_missing",
+    "internal_callee_return_summary_unproven",
+    "internal_callsite_argument_relation_missing",
+    "internal_callsite_callee_correspondence_missing",
+    "internal_callsite_candidate_missing",
 })
 _CALL_ELIGIBILITY_EXTRACTION_CODES = frozenset({
     "argument_coverage_incomplete",
@@ -650,7 +661,13 @@ def classify_call_eligibility_blocker(
         return FailureClassification(
             FailureDisposition.INFRASTRUCTURE_INVALID, None, None
         )
-    if normalized == "phase2_requires_paired_call_sites":
+    if normalized in {
+        "phase2_requires_paired_call_sites",
+        # 候補も callee correspondence も「この 2 つの callsite が対応する」ことの
+        # 未確立なので、callsite correspondence の未証明として扱う。
+        "internal_callsite_candidate_missing",
+        "internal_callsite_callee_correspondence_missing",
+    }:
         return _semantic("callsite_correspondence_unproven")
     if "argument" in normalized or "parameter_alignment" in normalized:
         return _semantic("abi_argument_relation_unproven")
