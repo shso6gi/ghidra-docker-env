@@ -757,3 +757,25 @@ def test_same_abi_slot_with_different_argument_values_does_not_correspond():
     result = build_internal_call_correspondence_candidates([left], [right])
     assert result.candidates == ()
     assert left.semantic_shape_key() != right.semantic_shape_key()
+
+
+def test_obligations_do_not_claim_independence_they_did_not_evaluate():
+    """評価していない obligation に ``independent`` を書かない。"""
+
+    from scripts.function_tracer_pcode.proof.call_effect.fresh_arguments import (
+        FRESH_ARGUMENT_STATUS_NOT_EVALUATED,
+    )
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import (
+        RelationalCallEffectObligation,
+    )
+
+    obligation = RelationalCallEffectObligation(
+        obligation_id="ob1",
+        relation_kind="call_to_region",
+        observation_contract_id="contract",
+        left_fact_id="L1",
+        right_fact_id="R1",
+    )
+
+    assert obligation.fresh_argument_status == FRESH_ARGUMENT_STATUS_NOT_EVALUATED
+    assert obligation.internal_candidate_id is None

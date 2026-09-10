@@ -28,6 +28,7 @@ from scripts.function_tracer_pcode.proof.call_effect.candidates import (
     build_internal_call_correspondence_candidates,
 )
 from scripts.function_tracer_pcode.proof.call_effect.fresh_arguments import (
+    FRESH_ARGUMENT_STATUS_NOT_EVALUATED,
     fresh_argument_correspondence_status,
 )
 
@@ -856,9 +857,11 @@ class RelationalCallEffectObligation:
     #: **候補**の identity であって callee equivalence の証明ダイジェストではない。
     #: 成立条件に callee return / effect の事実を含めない（循環防止）。
     internal_candidate_id: Optional[Tuple[Any, ...]] = None
-    #: Issue #20 PR-D: 左右 fresh 引数の扱い。既定は ``independent``。
-    #: relational equality proof が無い限り同一シンボルにはしない。
-    fresh_argument_status: str = "independent"
+    #: Issue #20 PR-D: 左右 fresh 引数の扱い。call-to-call の対応でだけ評価する。
+    #: 評価していない obligation は ``not_evaluated`` のままにし、成り立っていない
+    #: ``independent`` を receipt に書かない。relational equality proof が無い限り
+    #: 左右の fresh を同一シンボルにはしない。
+    fresh_argument_status: str = FRESH_ARGUMENT_STATUS_NOT_EVALUATED
 
     def to_dict(self) -> Dict[str, Any]:
         return _jsonable(self.__dict__)

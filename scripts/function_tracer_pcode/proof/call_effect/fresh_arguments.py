@@ -240,7 +240,11 @@ def fresh_argument_registry(
     }
 
 
-#: 左右 fresh 引数の状態。既定は independent（結合していない）。
+#: 左右 fresh 引数の状態。
+#: ``not_evaluated`` は「この obligation では fresh 引数を評価していない」。
+#: 評価していない obligation に ``independent`` を書くと、成り立っていない主張を
+#: receipt に残すことになるので、既定値はこちらにする。
+FRESH_ARGUMENT_STATUS_NOT_EVALUATED = "not_evaluated"
 FRESH_ARGUMENT_STATUS_NONE = "none"
 FRESH_ARGUMENT_STATUS_INDEPENDENT = "independent"
 FRESH_ARGUMENT_STATUS_SIDE_IDENTITY_VIOLATED = "side_identity_violated"
