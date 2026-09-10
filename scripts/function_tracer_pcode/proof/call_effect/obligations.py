@@ -2320,6 +2320,24 @@ def evaluate_obligation_proof_readiness(
     )
 
 
+def _pair_is_in_internal_call_lane(left: Any, right: Any) -> bool:
+    """True when both sides are resolved internal call candidates.
+
+    外部 callee の pair には internal 用の correspondence 要件を課さない。
+    そちらは `not_resolved_internal_call_candidate` / `noninternal_call_target`
+    が既に塞いでいる。
+    """
+
+    for fact in (left, right):
+        if not isinstance(fact, CallSiteFact):
+            return False
+        if fact.correspondence_operation_class() != "resolved_internal_call_candidate":
+            return False
+        if fact.target_categories != ("internal_function",):
+            return False
+    return True
+
+
 def _candidate_from_obligation(
     obligation: RelationalCallEffectObligation,
 ) -> Optional[InternalCallCorrespondenceCandidateId]:
@@ -2502,12 +2520,19 @@ def _phase2_direct_call_eligibility(
         # callsite も候補になる。候補 → callee correspondence proof →
         # RelationalCalleeCorrespondenceId → relational argument key の順に通し、
         # RelationalCalleeCorrespondenceId が無ければ correspondence 不成立とする。
-        _correspondence, correspondence_blockers = confirm_internal_callsite_correspondence(
-            _candidate_from_obligation(obligation),
-            left,
-            right,
-        )
-        blockers.extend(correspondence_blockers)
+        #
+        # 適用するのは **internal lane に入っている pair だけ**。external callee の
+        # pair は上の `not_resolved_internal_call_candidate` /
+        # `noninternal_call_target` が既に塞いでおり、そこへ internal 用の
+        # correspondence blocker を重ねると、internal でない pair に
+        # `callsite_correspondence_unproven` という別の reason が付いてしまう。
+        if _pair_is_in_internal_call_lane(left, right):
+            _correspondence, correspondence_blockers = confirm_internal_callsite_correspondence(
+                _candidate_from_obligation(obligation),
+                left,
+                right,
+            )
+            blockers.extend(correspondence_blockers)
 
     memory_relation_required = bool(
         isinstance(left, CallSiteFact)

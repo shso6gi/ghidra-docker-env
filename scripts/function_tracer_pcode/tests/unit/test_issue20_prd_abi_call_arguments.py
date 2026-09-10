@@ -1117,3 +1117,72 @@ def test_relational_equality_proof_is_the_only_way_to_couple_fresh_arguments():
     assert coupling.coupled_symbol_key() is not None
     # coupling されても DTO の identity は side-specific のまま（記録が残る）。
     assert left_fresh.stable_key() != right_fresh.stable_key()
+
+
+def test_external_call_pairs_do_not_get_the_internal_correspondence_blocker():
+    """internal 用の correspondence 要件を external callee の pair に課さない。
+
+    external の pair は `not_resolved_internal_call_candidate` /
+    `noninternal_call_target` が既に塞いでいる。そこへ internal 用の blocker を
+    重ねると、internal でない pair に `callsite_correspondence_unproven` という
+    別の reason が付いてしまう。
+    """
+
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import (
+        RelationalCallEffectObligation,
+        _phase2_direct_call_eligibility,
+    )
+
+    left = _internal_call_fact(
+        "L1", "binaryL", ("shape", "a"), 0x1000, target_categories=("external_function",)
+    )
+    right = _internal_call_fact(
+        "R1", "binaryR", ("shape", "a"), 0x2000, target_categories=("external_function",)
+    )
+    obligation = RelationalCallEffectObligation(
+        obligation_id="ob1",
+        relation_kind="call_to_call",
+        observation_contract_id="contract",
+        left_fact_id="L1",
+        right_fact_id="R1",
+    )
+
+    eligibility = _phase2_direct_call_eligibility(
+        obligation, {"L1": left}, {"R1": right}
+    )
+
+    assert eligibility.status == "ineligible"
+    assert CALLSITE_CANDIDATE_MISSING not in eligibility.blockers
+    assert CALLSITE_CALLEE_CORRESPONDENCE_MISSING not in eligibility.blockers
+    assert CALLSITE_ARGUMENT_RELATION_MISSING not in eligibility.blockers
+    # external であることは従来どおり別の blocker で塞がれている。
+    assert "left_noninternal_call_target" in eligibility.blockers
+
+
+def test_internal_pairs_still_require_the_callee_correspondence():
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import (
+        RelationalCallEffectObligation,
+        _phase2_direct_call_eligibility,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof(
+        "R1", "binaryR", 0x2000, callee_return_summary_statuses=("inconclusive",),
+    )
+    obligation = RelationalCallEffectObligation(
+        obligation_id="ob1",
+        relation_kind="call_to_call",
+        observation_contract_id="contract",
+        left_fact_id="L1",
+        right_fact_id="R1",
+        internal_candidate_id=build_internal_call_correspondence_candidates(
+            [left], [right]
+        ).candidates[0].stable_key(),
+    )
+
+    eligibility = _phase2_direct_call_eligibility(
+        obligation, {"L1": left}, {"R1": right}
+    )
+
+    assert eligibility.status == "ineligible"
+    assert CALLSITE_CALLEE_CORRESPONDENCE_MISSING in eligibility.blockers
