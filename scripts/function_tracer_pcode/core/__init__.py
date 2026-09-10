@@ -8,6 +8,7 @@
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
 from scripts.function_tracer_pcode.core.runtime_refs import (
+    AbiArgumentSlotRef,
     AddressValueRef,
     CanonicalLocation,
     ComposedLoopSummaryRef,
@@ -16,6 +17,7 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
     DeferredCallRef,
     ExpansionBudgetCollector,
     ExpansionBudgetTruncation,
+    FreshCallArgumentRef,
     LoopBodyEffectRef,
     LoopCaseRef,
     LoopSummaryComparisonResult,
@@ -102,6 +104,7 @@ __all__ = [
     "StorageInfo",
     "CallTargetRef",
     "coerce_call_target_ref",
+    "AbiArgumentSlotRef",
     "AddressValueRef",
     "CanonicalLocation",
     "ComposedLoopSummaryRef",
@@ -110,6 +113,7 @@ __all__ = [
     "DeferredCallRef",
     "ExpansionBudgetCollector",
     "ExpansionBudgetTruncation",
+    "FreshCallArgumentRef",
     "LoopBodyEffectRef",
     "LoopCaseRef",
     "LoopSummaryComparisonResult",

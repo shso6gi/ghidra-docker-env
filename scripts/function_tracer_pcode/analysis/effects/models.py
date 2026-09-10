@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import ClassVar, Dict, List, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
@@ -626,6 +626,11 @@ class CallArgumentEvidence:
     coverage_complete: bool = False
     recovery_status: str = RECOVERY_COMPLETE
     reason: Optional[str] = None
+    #: Issue #20 PR-D: ABI で決定した引数スロットの identity correspondence。
+    #: ``binary_id`` を含まないので左右で比較できるが、値の一致は意味しない。
+    abi_argument_slots: Tuple[Any, ...] = ()
+    #: 復元できなかったスロットの side-specific fresh 参照。
+    fresh_argument_refs: Tuple[Any, ...] = ()
 
     def __post_init__(self) -> None:
         status = _normalize_call_argument_recovery_status(self.recovery_status)

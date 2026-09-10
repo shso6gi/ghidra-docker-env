@@ -362,6 +362,8 @@ def _impl__merge_call_argument_evidence(
             coverage_complete=True,
             recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
             reason=None,
+            abi_argument_slots=previous.abi_argument_slots or current.abi_argument_slots,
+            fresh_argument_refs=previous.fresh_argument_refs or current.fresh_argument_refs,
         )
     if target_and_params_match:
         preserved = _preserve_complete_call_argument_evidence(previous, current, path_conditions)
@@ -385,6 +387,8 @@ def _impl__merge_call_argument_evidence(
         coverage_complete=False,
         recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
         reason=current.reason or previous.reason or "argument_evidence_path_conflict",
+        abi_argument_slots=previous.abi_argument_slots or current.abi_argument_slots,
+        fresh_argument_refs=previous.fresh_argument_refs or current.fresh_argument_refs,
     )
 
 
@@ -413,6 +417,8 @@ def _impl__preserve_complete_call_argument_evidence(
         coverage_complete=True,
         recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
         reason=None,
+        abi_argument_slots=complete.abi_argument_slots or partial.abi_argument_slots,
+        fresh_argument_refs=complete.fresh_argument_refs or partial.fresh_argument_refs,
     )
 
 
@@ -437,6 +443,8 @@ def _impl__merge_recoverable_partial_call_argument_evidence(
         coverage_complete=False,
         recovery_status=CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL,
         reason=kept.reason or "argument_recovery_recoverable_partial",
+        abi_argument_slots=kept.abi_argument_slots,
+        fresh_argument_refs=kept.fresh_argument_refs,
     )
 
 

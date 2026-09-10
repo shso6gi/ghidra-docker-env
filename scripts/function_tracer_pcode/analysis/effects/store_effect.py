@@ -25,13 +25,16 @@ from scripts.function_tracer_pcode.analysis.effects._shared import (
     _EFFECT_STORE_LOCATION_UNMODELED_REASON,
     _EFFECT_GLOBAL_READ_IDENTITY_REASON,
 )
+from scripts.function_tracer_pcode.analysis.effects import call_argument_abi as _abi
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _block_has_path_incomplete_effects,
     _build_parameter_replacements,
+    _call_argument_evidence_storage_key,
     _call_argument_recovery_status,
     _call_arguments_may_expose_parameter_memory,
     _call_arguments_width_safe_for_effect_summary,
     _call_op_requires_path_covered_effect_summary,
+    _call_target_ref_is_resolved,
     _choose_effect_substitution_args,
     _collect_named_parameter_names,
     _concat,
@@ -42,6 +45,7 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _expression_matches_value_under_conditions,
     _expression_reads_location,
     _find_matching_effect_value,
+    _has_target_specific_call_argument_evidence,
     _infer_call_argument_sources,
     _location_sort_key,
     _normalize_call_argument_expression,
@@ -868,6 +872,18 @@ def _impl_summarize_store_effects(
         # symbolic base address and need no gate.
         incomplete_reasons.add(_EFFECT_GLOBAL_READ_IDENTITY_REASON)
 
+    # Issue #20 PR-D: 効果レーンの経路列挙が届かなかった呼び出しサイトを、
+    # object 由来の ABI 証拠だけで拾い直す。ここで作る行は「引数が観測できた
+    # ことの証拠」であって、未検証の deferred 引数の昇格ではない。
+    _recover_uncovered_call_argument_evidence(
+        block_infos,
+        tracer,
+        parameters,
+        resolve_callee_parameters,
+        call_argument_evidence,
+        debug=debug,
+    )
+
     synthetic_expr = build_void_effect_summary_expr(effects)
     if debug:
         print(
@@ -1563,3 +1579,93 @@ def _impl__collect_definite_active_effects(
             )
         )
     return active_effects
+
+
+def _impl__recover_uncovered_call_argument_evidence(
+    block_infos: Sequence[Any],
+    tracer,
+    parameters: Sequence[Dict],
+    resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]],
+    call_argument_evidence: Dict[Tuple[object, ...], CallArgumentEvidence],
+    *,
+    debug: bool = False,
+) -> List[Tuple[Tuple[object, ...], str]]:
+    """ABI 証拠だけで、証拠行の無い呼び出しサイトを拾い直す（Issue #20 PR-D）。
+
+    効果レーンの経路列挙が ``complete_unreachable`` などで届かなかったブロックの
+    呼び出しは、`_record_call_argument_evidence` が一度も呼ばれず
+    ``callee_parameter_keys=()`` になる（M-20 の `ran/gammln` の blocker）。
+    根拠にするのは **callee の宣言済み引数ストレージ**と **callsite の P-code
+    引数リスト**だけで、判定は `call_argument_abi` の二段 authority
+    （storage 一意照合 / arity + 幅一致）に委ねる。どちらも成立しなければ
+    何も書かない。
+
+    既に証拠行がある呼び出しサイトには一切触れない。戻り値は診断用の
+    ``(pcode_key, outcome)`` 一覧。
+    """
+
+    outcomes: List[Tuple[Tuple[object, ...], str]] = []
+    if resolve_callee_parameters is None:
+        return outcomes
+    make_ref = getattr(tracer, "_make_pcode_op_ref", None)
+    if not callable(make_ref):
+        return outcomes
+    binary_id = getattr(tracer, "_function_binary_id", None)
+
+    for block_info in block_infos or ():
+        for op in getattr(block_info, "pcode_ops", []) or ():
+            try:
+                mnemonic = str(op.getMnemonic()).upper()
+            except Exception:
+                continue
+            if mnemonic not in {"CALL", "CALLIND"}:
+                continue
+            pcode_op_ref = make_ref(op)
+            if pcode_op_ref is None:
+                continue
+            try:
+                pcode_key = pcode_op_ref.stable_key()
+            except Exception:
+                continue
+            if pcode_key in call_argument_evidence:
+                continue
+            if _has_target_specific_call_argument_evidence(call_argument_evidence, pcode_key):
+                continue
+
+            target_ref = _resolve_call_target_ref(tracer, op)
+            if not _call_target_ref_is_resolved(target_ref):
+                outcomes.append((pcode_key, _abi.ABI_UNRESOLVED_TARGET))
+                continue
+            try:
+                callee_parameters = list(resolve_callee_parameters(target_ref) or [])
+            except Exception:
+                callee_parameters = []
+            evidence, reason = _abi._impl__recover_abi_call_argument_evidence(
+                op,
+                tracer,
+                parameters,
+                callee_parameters,
+                target_ref,
+                binary_id=binary_id,
+            )
+            if evidence is None:
+                outcomes.append((pcode_key, reason or "abi_recovery_failed"))
+                if debug:
+                    print(
+                        "[EffectSummary] ABI call-argument recovery failed: "
+                        f"target={target_ref.display_name()} reason={reason}"
+                    )
+                continue
+            storage_key = _call_argument_evidence_storage_key(pcode_key, target_ref)
+            call_argument_evidence[storage_key or pcode_key] = evidence
+            outcomes.append((pcode_key, "abi_evidence_recovered"))
+            if debug:
+                print(
+                    "[EffectSummary] ABI call-argument recovery: "
+                    f"target={target_ref.display_name()} "
+                    f"args={len(evidence.arguments)} status={evidence.recovery_status}"
+                )
+    return outcomes
+
+
+_recover_uncovered_call_argument_evidence = _impl__recover_uncovered_call_argument_evidence

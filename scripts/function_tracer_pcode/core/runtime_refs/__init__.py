@@ -1,5 +1,10 @@
 """Runtime object references carried through expression analysis (locations, P-code refs, loop summaries, read-only reductions, unknown values)."""
 
+from scripts.function_tracer_pcode.core.runtime_refs.call_arguments import (  # noqa: F401
+    AbiArgumentSlotRef,
+    FreshCallArgumentRef,
+    fresh_call_argument_refs_are_side_distinct,
+)
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (  # noqa: F401
     AddressValueRef,
     CanonicalLocation,

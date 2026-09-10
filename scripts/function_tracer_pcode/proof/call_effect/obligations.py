@@ -24,6 +24,12 @@ from scripts.function_tracer_pcode.core import (
     StorageInfo,
     expression_provenance_key,
 )
+from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+    build_internal_call_correspondence_candidates,
+)
+from scripts.function_tracer_pcode.proof.call_effect.fresh_arguments import (
+    fresh_argument_correspondence_status,
+)
 
 
 SCHEMA_VERSION = 1
@@ -503,6 +509,12 @@ class CallSiteFact:
     extraction_failure_causes: Tuple[str, ...] = ()
     evidence_sources: Tuple[str, ...] = ()
     extraction_status: str = "inconclusive"
+    #: Issue #20 PR-D: ABI で決めた引数スロットの identity correspondence。
+    #: 左右で同じ値になり得る（binary_id を含まない）が、値の一致は主張しない。
+    abi_argument_slot_keys: Tuple[Tuple[Any, ...], ...] = ()
+    #: 復元できなかった引数の side-specific fresh シンボル identity。
+    #: binary_id を含むので左右で必ず異なる。
+    fresh_argument_keys: Tuple[Tuple[Any, ...], ...] = ()
 
     @property
     def fact_kind(self) -> str:
@@ -568,6 +580,8 @@ class CallSiteFact:
             "extraction_failure_causes": list(self.extraction_failure_causes),
             "evidence_sources": list(self.evidence_sources),
             "extraction_status": self.extraction_status,
+            "abi_argument_slot_keys": _jsonable(self.abi_argument_slot_keys),
+            "fresh_argument_keys": _jsonable(self.fresh_argument_keys),
         }
 
 
@@ -838,6 +852,13 @@ class RelationalCallEffectObligation:
     failure_cause: Optional[str] = None
     correspondence_basis: str = "none"
     dependency_proof_ids: Tuple[str, ...] = ()
+    #: Issue #20 PR-D: 内部 callee の callsite 候補 identity。
+    #: **候補**の identity であって callee equivalence の証明ダイジェストではない。
+    #: 成立条件に callee return / effect の事実を含めない（循環防止）。
+    internal_candidate_id: Optional[Tuple[Any, ...]] = None
+    #: Issue #20 PR-D: 左右 fresh 引数の扱い。既定は ``independent``。
+    #: relational equality proof が無い限り同一シンボルにはしない。
+    fresh_argument_status: str = "independent"
 
     def to_dict(self) -> Dict[str, Any]:
         return _jsonable(self.__dict__)
@@ -1092,6 +1113,8 @@ def _extract_side_facts(
                 "callee_return_shape_keys": [],
                 "multiplicities": [],
                 "argument_evidence_complete": [],
+                "abi_argument_slot_keys": [],
+                "fresh_argument_keys": [],
                 "userop_key": None,
             },
         )
@@ -1679,6 +1702,16 @@ def _extract_side_facts(
                 bool(getattr(evidence, "coverage_complete", False))
                 and str(getattr(evidence, "recovery_status", "")) == "complete"
             )
+            # Issue #20 PR-D: identity correspondence（左右で一致し得る）と
+            # side-specific fresh identity（左右で必ず異なる）を別々に載せる。
+            for slot in getattr(evidence, "abi_argument_slots", ()) or ():
+                slot_key = getattr(slot, "stable_key", None)
+                if callable(slot_key):
+                    bucket["abi_argument_slot_keys"].append(tuple(slot_key()))
+            for fresh in getattr(evidence, "fresh_argument_refs", ()) or ():
+                fresh_key = getattr(fresh, "stable_key", None)
+                if callable(fresh_key):
+                    bucket["fresh_argument_keys"].append(tuple(fresh_key()))
 
         for evidence in getattr(summary, "call_target_resolution_evidence", ()) or ():
             if evidence is None:
@@ -1979,6 +2012,8 @@ def _extract_side_facts(
                 extraction_failure_causes=tuple(dict.fromkeys(extraction_failure_causes)),
                 evidence_sources=tuple(sorted(set(bucket["sources"]))),
                 extraction_status="complete" if extraction_complete else "inconclusive",
+                abi_argument_slot_keys=tuple(dict.fromkeys(bucket["abi_argument_slot_keys"])),
+                fresh_argument_keys=tuple(dict.fromkeys(bucket["fresh_argument_keys"])),
             )
         )
     return tuple(facts)
@@ -2671,6 +2706,13 @@ def build_call_effect_shadow_manifest(
         == sorted(right_fact_pcode_keys, key=_digest)
     )
     pairs = _mutually_unique_pairs(left_facts, right_facts)
+    # Issue #20 PR-D: 内部 callsite の候補対応に型付き identity を与える。
+    # pairing の条件そのものは変えない（候補を増やすために緩めない）。
+    internal_candidates = build_internal_call_correspondence_candidates(left_facts, right_facts)
+    internal_candidate_by_pair = {
+        (candidate.left_fact_id, candidate.right_fact_id): candidate
+        for candidate in internal_candidates.candidates
+    }
     paired_left = {left for left, _ in pairs}
     paired_right = {right for _, right in pairs}
     left_unmatched_calls = tuple(
@@ -2719,6 +2761,15 @@ def build_call_effect_shadow_manifest(
                 right_fact_id=right_id,
                 status="pending",
                 correspondence_basis="mutually_unique_object_shape_candidate",
+                internal_candidate_id=(
+                    internal_candidate_by_pair[(left_id, right_id)].stable_key()
+                    if (left_id, right_id) in internal_candidate_by_pair
+                    else None
+                ),
+                fresh_argument_status=fresh_argument_correspondence_status(
+                    getattr(left, "fresh_argument_keys", ()),
+                    getattr(right, "fresh_argument_keys", ()),
+                ),
             )
         )
 
