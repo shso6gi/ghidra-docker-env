@@ -7,6 +7,12 @@ target lives in the EXTERNAL space.  Decompiling the thunk yields an empty
 otherwise read as "this callee has no observable effect".  That is not
 evidence: the callee's body is simply not in the binary.
 
+``classify_callee_chain`` は、この分類（exact-bool な ``isExternal`` /
+``isThunk`` 判定と thunk chain の fail-closed 解決）を単体で提供する共有 helper で
+ある。effect lane の ``resolve_effect_callee`` も、Issue #20 PR-B1 の call-model
+candidate 分類も同じ helper を通す。callee を external と認める判定器を各所に
+複製しないこと。
+
 This module decides, once per callee, how the effect lane may treat it:
 
 * a function that is provably *not* a thunk and *not* external, or a thunk
@@ -125,6 +131,80 @@ def _probe_thunk(function: Any) -> Tuple[str, Any]:
     return _RESOLVED, target
 
 
+#: ``classify_callee_chain`` の判定値。
+CALLEE_CHAIN_INTERNAL = "internal"
+CALLEE_CHAIN_EXTERNAL = "external"
+CALLEE_CHAIN_UNCLASSIFIABLE = "unclassifiable"
+
+
+@dataclass(frozen=True)
+class CalleeChainClassification:
+    """thunk chain を辿った先の callee を exact-bool で分類した結果。
+
+    ``kind`` は ``CALLEE_CHAIN_INTERNAL``（binary 内に body を持つ）/
+    ``CALLEE_CHAIN_EXTERNAL``（proven external）/ ``CALLEE_CHAIN_UNCLASSIFIABLE``
+    （missing API / 例外 / non-bool / thunk target 不明 / 循環 / 上限超過）の 3 値。
+    ``function`` は判定対象になった chain の終端で、``reason`` を名乗る対象でもある。
+
+    **この package で callee を external と認めるのはここだけ**である。
+    ``isExternal()`` が ``"true"`` のような非 bool を返しても external と見なさない
+    こと、循環・上限超過・解決不能な thunk chain を external と見なさないことを、
+    この 1 か所で保証する。effect lane も candidate 分類（Issue #20 PR-B1）も
+    同じ判定を通し、弱い分類器を各所に持たない。
+    """
+
+    kind: str
+    function: Any = None
+    reason: Optional[str] = None
+
+
+def classify_callee_chain(function: Any) -> CalleeChainClassification:
+    """``function`` の thunk chain を辿り、終端を fail closed に分類する。
+
+    ``resolve_effect_callee`` の分類部分そのもの。effect lane の判定を変えないよう、
+    reason 文字列と「どの関数オブジェクトが reason を名乗るか」も従来どおりにする。
+    """
+
+    if function is None:
+        return CalleeChainClassification(
+            CALLEE_CHAIN_UNCLASSIFIABLE, reason="callee_function_unavailable"
+        )
+
+    resolved = function
+    seen: list = [function]
+    state, target = _probe_thunk(resolved)
+    while state == _RESOLVED:
+        if any(target is prior for prior in seen):
+            return CalleeChainClassification(
+                CALLEE_CHAIN_UNCLASSIFIABLE, function=function, reason="thunk_chain_cyclic"
+            )
+        if len(seen) >= MAX_THUNK_CHAIN_LENGTH:
+            return CalleeChainClassification(
+                CALLEE_CHAIN_UNCLASSIFIABLE,
+                function=function,
+                reason="thunk_chain_length_exceeded",
+            )
+        seen.append(target)
+        resolved = target
+        state, target = _probe_thunk(resolved)
+    if state == _UNAVAILABLE:
+        return CalleeChainClassification(
+            CALLEE_CHAIN_UNCLASSIFIABLE, function=resolved, reason="thunk_target_unresolved"
+        )
+
+    try:
+        external = _is_external_function(resolved)
+    except _ClassificationUnavailable:
+        return CalleeChainClassification(
+            CALLEE_CHAIN_UNCLASSIFIABLE,
+            function=resolved,
+            reason="callee_classification_unavailable",
+        )
+    if external:
+        return CalleeChainClassification(CALLEE_CHAIN_EXTERNAL, function=resolved)
+    return CalleeChainClassification(CALLEE_CHAIN_INTERNAL, function=resolved)
+
+
 @dataclass(frozen=True)
 class EffectCalleeResolution:
     """How the effect lane must treat a resolved callee function object.
@@ -171,27 +251,12 @@ def resolve_effect_callee(
     if policy is not None and type(policy) is not ExternalCallEffectPolicy:
         raise TypeError("policy must be an ExternalCallEffectPolicy or None")
 
-    resolved = function
-    seen: list = [function]
-    state, target = _probe_thunk(resolved)
-    while state == _RESOLVED:
-        if any(target is prior for prior in seen):
-            return _unsupported("thunk_chain_cyclic", function)
-        if len(seen) >= MAX_THUNK_CHAIN_LENGTH:
-            return _unsupported("thunk_chain_length_exceeded", function)
-        seen.append(target)
-        resolved = target
-        state, target = _probe_thunk(resolved)
-    if state == _UNAVAILABLE:
-        return _unsupported("thunk_target_unresolved", resolved)
-
-    try:
-        external = _is_external_function(resolved)
-    except _ClassificationUnavailable:
-        return _unsupported("callee_classification_unavailable", resolved)
-    if external:
-        return _unsupported(EXTERNAL_CALLEE_EFFECT_UNMODELED, resolved)
-    return EffectCalleeResolution("analyze", function=resolved)
+    classification = classify_callee_chain(function)
+    if classification.kind == CALLEE_CHAIN_UNCLASSIFIABLE:
+        return _unsupported(classification.reason, classification.function)
+    if classification.kind == CALLEE_CHAIN_EXTERNAL:
+        return _unsupported(EXTERNAL_CALLEE_EFFECT_UNMODELED, classification.function)
+    return EffectCalleeResolution("analyze", function=classification.function)
 
 
 def resolution_is_confirmed_external(resolution: Optional[EffectCalleeResolution]) -> bool:

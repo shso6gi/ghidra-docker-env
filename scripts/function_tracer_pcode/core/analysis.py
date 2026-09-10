@@ -25,6 +25,7 @@ from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce
 from scripts.function_tracer_pcode.core.runtime_refs import (
     EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON,
     EXPANSION_CASE_BUDGET_EXCEEDED_REASON,
+    CallModelCandidateRef,
     DeferredCallRef,
     ExpansionBudgetTruncation,
     PcodeBlockRef,
@@ -589,6 +590,7 @@ class DeferredCallInfo:
     abi_return_width_bits: Optional[int] = None
     abi_return_type_policy: Optional[str] = None
     call_site_multiplicity: Optional[int] = None
+    call_model_candidate: Optional["CallModelCandidateRef"] = None
 
     _VALID_CALL_ARGUMENT_RECOVERY_STATUSES = {
         "complete",
@@ -612,6 +614,7 @@ class DeferredCallInfo:
         abi_return_width_bits: Optional[int] = None,
         abi_return_type_policy: Optional[str] = None,
         call_site_multiplicity: Optional[int] = None,
+        call_model_candidate: Optional["CallModelCandidateRef"] = None,
     ) -> None:
         if call_argument_recovery_status is None:
             call_argument_recovery_status = "inconclusive"
@@ -641,6 +644,9 @@ class DeferredCallInfo:
             if call_site_multiplicity is not None
             else None
         )
+        self.call_model_candidate = self._normalize_call_model_candidate(
+            call_model_candidate
+        )
         self.match_evidence = self._build_match_evidence(match_evidence)
 
     def clone(self) -> "DeferredCallInfo":
@@ -669,11 +675,27 @@ class DeferredCallInfo:
             abi_return_width_bits=self.abi_return_width_bits,
             abi_return_type_policy=self.abi_return_type_policy,
             call_site_multiplicity=self.call_site_multiplicity,
+            call_model_candidate=self.call_model_candidate,
         )
 
     @property
     def placeholder_name(self) -> str:
         return self.display_hint or self.deferred_call_ref.display_name()
+
+    @staticmethod
+    def _normalize_call_model_candidate(candidate: object):
+        """decision-neutral な call-model candidate metadata を受け取る。
+
+        型だけを検査する。``core`` は catalog を lookup せず、candidate の
+        有無で ``effect_class`` を変えることもしない（Issue #20 PR-B1)。
+        """
+        if candidate is None:
+            return None
+        if not isinstance(candidate, CallModelCandidateRef):
+            raise TypeError(
+                "call_model_candidate must be a CallModelCandidateRef or None"
+            )
+        return candidate
 
     @staticmethod
     def _normalize_call_argument_recovery_status(status: object) -> str:
@@ -775,6 +797,8 @@ class DeferredCallInfo:
         }
         if self.call_target_expr is not None:
             result["call_target_expr"] = self.call_target_expr.to_dict()
+        if self.call_model_candidate is not None:
+            result["call_model_candidate"] = self.call_model_candidate.to_dict()
         return result
 
 

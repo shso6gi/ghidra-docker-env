@@ -5,6 +5,10 @@ from scripts.function_tracer_pcode.core.runtime_refs.call_arguments import (  # 
     FreshCallArgumentRef,
     fresh_call_argument_refs_are_side_distinct,
 )
+from scripts.function_tracer_pcode.core.runtime_refs.call_models import (  # noqa: F401
+    CALL_MODEL_CANDIDATE_KIND,
+    CallModelCandidateRef,
+)
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (  # noqa: F401
     AddressValueRef,
     CanonicalLocation,
