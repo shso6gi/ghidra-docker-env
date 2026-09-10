@@ -614,6 +614,10 @@ _CALL_ELIGIBILITY_BLOCKER_BASE_CODES = frozenset({
     # の authority 境界。RelationalCalleeCorrespondenceId が確立できない場合の
     # fail-closed コード。
     "internal_callee_control_profile_relation_missing",
+    "internal_callee_correspondence_authority_missing",
+    "internal_callee_parameter_arity_relation_missing",
+    "internal_callee_parameter_width_relation_missing",
+    "internal_callee_return_width_relation_missing",
     "internal_callee_correspondence_ambiguous",
     "internal_callee_correspondence_proof_invalid",
     "internal_callee_correspondence_proof_stale",
@@ -681,6 +685,7 @@ def classify_call_eligibility_blocker(
         "internal_callee_correspondence_proof_invalid",
         "internal_callee_correspondence_proof_stale",
         "internal_callee_target_unresolved",
+        "internal_callee_correspondence_authority_missing",
     }:
         return _semantic("callsite_correspondence_unproven")
     if "argument" in normalized or "parameter_alignment" in normalized:

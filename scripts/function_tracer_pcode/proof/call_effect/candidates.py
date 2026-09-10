@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 
@@ -283,6 +283,9 @@ CALLEE_RETURN_SHAPE_RELATION_MISSING = "internal_callee_return_shape_relation_mi
 CALLEE_EFFECT_SUMMARY_UNPROVEN = "internal_callee_effect_summary_unproven"
 CALLEE_MEMORY_EFFECT_RELATION_MISSING = "internal_callee_memory_effect_relation_missing"
 CALLEE_CONTROL_PROFILE_RELATION_MISSING = "internal_callee_control_profile_relation_missing"
+CALLEE_PARAMETER_ARITY_RELATION_MISSING = "internal_callee_parameter_arity_relation_missing"
+CALLEE_PARAMETER_WIDTH_RELATION_MISSING = "internal_callee_parameter_width_relation_missing"
+CALLEE_RETURN_WIDTH_RELATION_MISSING = "internal_callee_return_width_relation_missing"
 
 #: callsite correspondence が成立しない理由（fail closed）。
 CALLSITE_CANDIDATE_MISSING = "internal_callsite_candidate_missing"
@@ -292,6 +295,14 @@ CALLSITE_ARGUMENT_RELATION_MISSING = "internal_callsite_argument_relation_missin
 #: 候補 identity の永続化キーの形（schema 検証に使う）。
 _CANDIDATE_KEY_KIND = "internal_call_correspondence_candidate"
 _CANDIDATE_KEY_LENGTH = 5
+
+#: Module-private issuance token.  ``CalleeCorrespondenceProof`` は digest が
+#: 合っているだけでは authorized にならない。この token を渡せるのは同一モジュール内の
+#: factory (`build_callee_correspondence_proof`) だけで、外部が payload を組み立てて
+#: digest を合わせても `verification_failure()` が拒否する。
+#: digest 整合性は「改竄されていない」ことしか言わず、「正しい手続きで発行された」
+#: ことは言わないので、両者を分けて検証する。
+_CALLEE_CORRESPONDENCE_ISSUER_TOKEN = object()
 
 
 def _single(values: Any) -> Optional[Any]:
@@ -312,12 +323,24 @@ def _resolved_callee_key(fact: Any) -> Optional[Tuple[Any, ...]]:
     return tuple(target) if isinstance(target, (tuple, list)) else (target,)
 
 
-def _callee_wellformedness(fact: Any) -> Tuple[Optional[Tuple[Any, ...]], Tuple[str, ...]]:
-    """Per-side inputs the later callee proof needs, or the reasons they are missing.
+def _observable_parameter_widths(fact: Any) -> Optional[Tuple[int, ...]]:
+    """Declared callee parameter widths when *every* ordinal is observable.
 
-    存在確認そのものは *証明ではない*。ここで集めるのは、関係の証明を書くための
-    入力が各 side で一意に定まっていることの確認であり、correspondence の成立は
-    後段の bijection 検査が担う。
+    一部だけ観測できている状態は関係を書く根拠にならないので ``None`` にする。
+    """
+
+    widths = tuple(getattr(fact, "callee_parameter_width_bits", ()) or ())
+    arity = len(tuple(getattr(fact, "callee_parameter_keys", ()) or ()))
+    if not widths or len(widths) != arity or any(w is None for w in widths):
+        return None
+    return tuple(int(w) for w in widths)
+
+
+def _callee_side_inputs(fact: Any) -> Tuple[Optional[Tuple[Any, ...]], Tuple[str, ...]]:
+    """Per-side callee facts the relation is written over, or why they are missing.
+
+    存在確認そのものは証明ではない。ここで集めるのは関係を書くための量であり、
+    correspondence の成立は後段の interface relation と bijection 検査が担う。
     """
 
     reasons: List[str] = []
@@ -336,7 +359,86 @@ def _callee_wellformedness(fact: Any) -> Tuple[Optional[Tuple[Any, ...]], Tuple[
         reasons.append(CALLEE_CONTROL_PROFILE_RELATION_MISSING)
     if reasons:
         return None, tuple(dict.fromkeys(reasons))
-    return ("callee_inputs", shapes, memory, tuple(profile)), ()
+
+    return (
+        (
+            "callee_interface",
+            len(tuple(getattr(fact, "callee_parameter_keys", ()) or ())),
+            _observable_parameter_widths(fact),
+            _single(getattr(fact, "callee_return_width_bits", ())),
+            shapes,
+            memory,
+            tuple(profile),
+        ),
+        (),
+    )
+
+
+def _relate_observable(
+    left: Any,
+    right: Any,
+    label: str,
+    mismatch_reason: str,
+) -> Tuple[Optional[Tuple[Any, ...]], Optional[str]]:
+    """Relate one interface leg, distinguishing three states.
+
+    * 両側で観測できる → 一致を要求する（食い違えば fail closed）
+    * 片側だけ観測できる → **fail closed**。片方に情報があるのに突き合わせない
+      のは、不一致を黙って見逃すのと同じになる。
+    * どちらでも観測できない → 関係を書く材料が無い。``unobserved`` として
+      ID に明記し、この leg は後段 stage（``argument_relation`` /
+      ``return_relation``）に委ねる。ここで「一致した」とは書かない。
+    """
+
+    if left is None and right is None:
+        return (label, "unobserved"), None
+    if left is None or right is None:
+        return None, mismatch_reason
+    if left != right:
+        return None, mismatch_reason
+    return (label, left), None
+
+
+def _callee_interface_relation(
+    left_inputs: Tuple[Any, ...],
+    right_inputs: Tuple[Any, ...],
+) -> Tuple[Optional[Tuple[Any, ...]], Tuple[str, ...]]:
+    """The ABI/type-level relation two callees must satisfy to be counterparts.
+
+    **意味的等価ではない。** 同じソース関数から出た左右の callee は、引数の個数と、
+    観測できる範囲での引数・戻り値の意味幅が一致する。逆にこれが食い違えば
+    そもそも相手同士ではない。本体の等価性は後段 ``return_relation`` /
+    ``memory_relation`` が証明する。
+
+    raw memory-effect count / store count / return 式 shape の一致は要求しない
+    （同じ番地を 2 回書く実装と 1 回書く実装は最終状態が同じなら等価であり、
+    それを先回りして潰さない）。
+    """
+
+    reasons: List[str] = []
+    _tag, left_arity, left_widths, left_return, _ls, _lm, _lp = left_inputs
+    _tag2, right_arity, right_widths, right_return, _rs, _rm, _rp = right_inputs
+
+    if left_arity != right_arity:
+        return None, (CALLEE_PARAMETER_ARITY_RELATION_MISSING,)
+
+    parameter_leg, parameter_reason = _relate_observable(
+        left_widths, right_widths, "parameter_width", CALLEE_PARAMETER_WIDTH_RELATION_MISSING
+    )
+    if parameter_reason:
+        reasons.append(parameter_reason)
+    return_leg, return_reason = _relate_observable(
+        left_return, right_return, "return_width", CALLEE_RETURN_WIDTH_RELATION_MISSING
+    )
+    if return_reason:
+        reasons.append(return_reason)
+
+    if reasons:
+        return None, tuple(dict.fromkeys(reasons))
+    return (
+        ("callee_interface_relation", ("parameter_arity", left_arity), parameter_leg, return_leg),
+        (),
+    )
 
 
 @dataclass(frozen=True)
@@ -350,6 +452,7 @@ class CalleeCorrespondencePair:
     right_callee_key: Tuple[Any, ...]
     left_inputs_key: Tuple[Any, ...]
     right_inputs_key: Tuple[Any, ...]
+    interface_relation_key: Tuple[Any, ...] = ()
 
     def payload(self) -> Tuple[Any, ...]:
         return (
@@ -360,6 +463,7 @@ class CalleeCorrespondencePair:
             self.right_callee_key,
             self.left_inputs_key,
             self.right_inputs_key,
+            self.interface_relation_key,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -371,6 +475,7 @@ class CalleeCorrespondencePair:
             "right_callee_key": list(self.right_callee_key),
             "left_inputs_key": list(self.left_inputs_key),
             "right_inputs_key": list(self.right_inputs_key),
+            "interface_relation_key": list(self.interface_relation_key),
         }
 
 
@@ -387,6 +492,8 @@ class CalleeCorrespondenceProof:
     rejected: Tuple[Tuple[Tuple[Any, ...], str], ...] = ()
     proof_kind: str = CALLEE_CORRESPONDENCE_PROOF_KIND
     schema_version: int = CALLEE_CORRESPONDENCE_SCHEMA_VERSION
+    #: 発行元の証明。digest とは独立で、比較にも serialize にも入れない。
+    issuer_token: Any = field(default=None, repr=False, compare=False)
 
     def payload(self) -> Tuple[Any, ...]:
         return (
@@ -397,6 +504,10 @@ class CalleeCorrespondenceProof:
         )
 
     def verification_failure(self) -> Optional[str]:
+        # digest 整合性と semantic authority を分けて見る。digest が合っていても、
+        # factory 以外が組み立てた receipt は authorized ではない。
+        if self.issuer_token is not _CALLEE_CORRESPONDENCE_ISSUER_TOKEN:
+            return "untrusted_issuer_token"
         if self.proof_kind != CALLEE_CORRESPONDENCE_PROOF_KIND:
             return "proof_kind_mismatch"
         if int(self.schema_version) != CALLEE_CORRESPONDENCE_SCHEMA_VERSION:
@@ -471,24 +582,33 @@ def build_callee_correspondence_proof(
         if left_callee is None or right_callee is None:
             rejected.append((key, CALLEE_TARGET_UNRESOLVED))
             continue
-        left_inputs, left_reasons = _callee_wellformedness(left_fact)
-        right_inputs, right_reasons = _callee_wellformedness(right_fact)
+        left_inputs, left_reasons = _callee_side_inputs(left_fact)
+        right_inputs, right_reasons = _callee_side_inputs(right_fact)
         if left_inputs is None or right_inputs is None:
             for reason in dict.fromkeys(tuple(left_reasons) + tuple(right_reasons)):
                 rejected.append((key, reason))
             continue
-        resolved.append((candidate, left_callee, right_callee, left_inputs, right_inputs))
+        interface_relation, interface_reasons = _callee_interface_relation(
+            left_inputs, right_inputs
+        )
+        if interface_relation is None:
+            for reason in interface_reasons:
+                rejected.append((key, reason))
+            continue
+        resolved.append(
+            (candidate, left_callee, right_callee, left_inputs, right_inputs, interface_relation)
+        )
 
     # 誘導される callee 対応が双方向に一意か。破れていればその callee に関わる
     # 候補をすべて落とす（どれが正しいか決める根拠が無いので推測しない）。
     left_to_right: Dict[Tuple[Any, ...], set] = {}
     right_to_left: Dict[Tuple[Any, ...], set] = {}
-    for _candidate, left_callee, right_callee, _li, _ri in resolved:
+    for _candidate, left_callee, right_callee, _li, _ri, _rel in resolved:
         left_to_right.setdefault(left_callee, set()).add(right_callee)
         right_to_left.setdefault(right_callee, set()).add(left_callee)
 
     pairs: List[CalleeCorrespondencePair] = []
-    for candidate, left_callee, right_callee, left_inputs, right_inputs in resolved:
+    for candidate, left_callee, right_callee, left_inputs, right_inputs, interface_relation in resolved:
         if len(left_to_right.get(left_callee, ())) != 1 or len(right_to_left.get(right_callee, ())) != 1:
             rejected.append((candidate.stable_key(), CALLEE_CORRESPONDENCE_AMBIGUOUS))
             continue
@@ -501,20 +621,22 @@ def build_callee_correspondence_proof(
                 right_callee_key=right_callee,
                 left_inputs_key=left_inputs,
                 right_inputs_key=right_inputs,
+                interface_relation_key=interface_relation,
             )
         )
 
     pairs_tuple = tuple(sorted(pairs, key=lambda item: (item.left_fact_id, item.right_fact_id)))
     rejected_tuple = tuple(sorted(set(rejected), key=lambda item: (str(item[0]), item[1])))
-    proof = CalleeCorrespondenceProof(
+    unsigned = CalleeCorrespondenceProof(
         proof_id="",
         pairs=pairs_tuple,
         rejected=rejected_tuple,
     )
     return CalleeCorrespondenceProof(
-        proof_id=_proof_digest(proof.payload()),
+        proof_id=_proof_digest(unsigned.payload()),
         pairs=pairs_tuple,
         rejected=rejected_tuple,
+        issuer_token=_CALLEE_CORRESPONDENCE_ISSUER_TOKEN,
     )
 
 
@@ -530,6 +652,7 @@ class RelationalCalleeCorrespondenceId:
     candidate_key: Tuple[Any, ...]
     left_callee_key: Tuple[Any, ...]
     right_callee_key: Tuple[Any, ...]
+    interface_relation_key: Tuple[Any, ...] = ()
 
     def stable_key(self) -> Tuple[Any, ...]:
         return (
@@ -538,6 +661,7 @@ class RelationalCalleeCorrespondenceId:
             self.candidate_key,
             self.left_callee_key,
             self.right_callee_key,
+            self.interface_relation_key,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -547,6 +671,7 @@ class RelationalCalleeCorrespondenceId:
             "candidate_key": list(self.candidate_key),
             "left_callee_key": list(self.left_callee_key),
             "right_callee_key": list(self.right_callee_key),
+            "interface_relation_key": list(self.interface_relation_key),
         }
 
 
@@ -575,6 +700,7 @@ def issue_relational_callee_correspondence(
             candidate_key=key,
             left_callee_key=pair.left_callee_key,
             right_callee_key=pair.right_callee_key,
+            interface_relation_key=pair.interface_relation_key,
         ),
         (),
     )

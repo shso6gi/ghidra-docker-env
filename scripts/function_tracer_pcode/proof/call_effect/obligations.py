@@ -521,6 +521,11 @@ class CallSiteFact:
     #: 復元できなかった引数の side-specific fresh シンボル identity。
     #: binary_id を含むので左右で必ず異なる。
     fresh_argument_keys: Tuple[Tuple[Any, ...], ...] = ()
+    #: Issue #20 PR-D: callee の **interface** 事実。ABI / 型レベルの量であって
+    #: 意味ではない。cross-binary で比較できるので relational counterpart の
+    #: 最小条件に使う（意味的等価は後段 stage の責務）。
+    callee_parameter_width_bits: Tuple[Optional[int], ...] = ()
+    callee_return_width_bits: Tuple[int, ...] = ()
 
     @property
     def fact_kind(self) -> str:
@@ -588,6 +593,8 @@ class CallSiteFact:
             "extraction_status": self.extraction_status,
             "abi_argument_slot_keys": _jsonable(self.abi_argument_slot_keys),
             "fresh_argument_keys": _jsonable(self.fresh_argument_keys),
+            "callee_parameter_width_bits": list(self.callee_parameter_width_bits),
+            "callee_return_width_bits": list(self.callee_return_width_bits),
         }
 
 
@@ -1129,6 +1136,8 @@ def _extract_side_facts(
                 "argument_evidence_complete": [],
                 "abi_argument_slot_keys": [],
                 "fresh_argument_keys": [],
+                "callee_parameter_width_bits": [],
+                "callee_return_width_bits": [],
                 "userop_key": None,
             },
         )
@@ -1726,6 +1735,12 @@ def _extract_side_facts(
                 fresh_key = getattr(fresh, "stable_key", None)
                 if callable(fresh_key):
                     bucket["fresh_argument_keys"].append(tuple(fresh_key()))
+            parameter_widths = tuple(
+                _storage_identity_width_bits(identity)
+                for identity in getattr(evidence, "callee_param_identities", ()) or ()
+            )
+            if parameter_widths:
+                bucket["callee_parameter_width_bits"].append(parameter_widths)
 
         for evidence in getattr(summary, "call_target_resolution_evidence", ()) or ():
             if evidence is None:
@@ -1807,6 +1822,9 @@ def _extract_side_facts(
             bucket["callee_return_summary_statuses"].append(
                 str(getattr(evidence, "return_summary_status", "unavailable") or "unavailable")
             )
+            return_width = getattr(evidence, "return_semantic_bit_width", None)
+            if isinstance(return_width, int) and not isinstance(return_width, bool) and return_width > 0:
+                bucket["callee_return_width_bits"].append(int(return_width))
             bucket["callee_return_shape_keys"].extend(
                 _cross_binary_expression_shape(tuple(key))
                 for key in getattr(evidence, "return_value_keys", ()) or ()
@@ -2028,6 +2046,12 @@ def _extract_side_facts(
                 extraction_status="complete" if extraction_complete else "inconclusive",
                 abi_argument_slot_keys=tuple(dict.fromkeys(bucket["abi_argument_slot_keys"])),
                 fresh_argument_keys=tuple(dict.fromkeys(bucket["fresh_argument_keys"])),
+                callee_parameter_width_bits=(
+                    _dedupe(bucket["callee_parameter_width_bits"])[0]
+                    if len(_dedupe(bucket["callee_parameter_width_bits"])) == 1
+                    else ()
+                ),
+                callee_return_width_bits=tuple(sorted(set(bucket["callee_return_width_bits"]))),
             )
         )
     return tuple(facts)
@@ -2199,6 +2223,12 @@ def evaluate_obligation_proof_readiness(
         blockers.append("eligibility_obligation_id_mismatch")
     if eligibility.status != "candidate":
         blockers.append("obligation_not_solver_candidate")
+    # Issue #20 PR-D: correspondence authority の境界チェック。事実に基づく再検証は
+    # Phase 2 eligibility が済ませており、ここはその判定と運ばれた authority が
+    # 食い違っていないかだけを見る（内部 candidate なのに correspondence id が
+    # 無い、という状態を solver proof 段へ通さない）。
+    if obligation.internal_candidate_id and not obligation.relational_callee_correspondence_id:
+        blockers.append("internal_callee_correspondence_authority_missing")
     records_by_stage: Dict[str, List[SolverProofRecord]] = {}
     verified_records: List[SolverProofRecord] = []
     artifact_failures: List[str] = []
@@ -2327,6 +2357,32 @@ def evaluate_obligation_proof_readiness(
         invalid_stages=tuple(invalid),
         blockers=tuple(blockers),
     )
+
+
+def _storage_identity_width_bits(identity: Any) -> Optional[int]:
+    """Semantic width of one declared callee parameter, in bits.
+
+    ``callee_param_identities`` の 1 要素は identity key の tuple。その中の
+    storage key から幅を取り出す。``register_storage`` は末尾が bit 幅、
+    ``memory_storage`` は末尾が byte 幅。判別できなければ ``None``（推測しない）。
+    """
+
+    for key in tuple(identity or ()):
+        if not isinstance(key, (tuple, list)) or not key:
+            continue
+        if key[0] == "register_storage" and len(key) >= 6:
+            try:
+                width = int(key[5])
+            except (TypeError, ValueError):
+                return None
+            return width if width > 0 else None
+        if key[0] == "memory_storage" and len(key) >= 4:
+            try:
+                width = int(key[3]) * 8
+            except (TypeError, ValueError):
+                return None
+            return width if width > 0 else None
+    return None
 
 
 def _pair_is_in_internal_call_lane(left: Any, right: Any) -> bool:
@@ -3200,6 +3256,16 @@ def build_call_effect_shadow_manifest(
     }
 
 
+def _coerce_key(value: Any) -> Optional[Tuple[Any, ...]]:
+    """Round-trip a serialized identity key back to a tuple, or ``None``."""
+
+    if not value:
+        return None
+    if isinstance(value, (tuple, list)):
+        return tuple(_coerce_key(item) if isinstance(item, (tuple, list)) else item for item in value)
+    return None
+
+
 def apply_solver_proof_artifacts_to_manifest(
     manifest: Dict[str, Any],
     proof_artifacts: Sequence[InternalSolverProofArtifact],
@@ -3218,6 +3284,21 @@ def apply_solver_proof_artifacts_to_manifest(
             failure_cause=item.get("failure_cause"),
             correspondence_basis=str(item.get("correspondence_basis") or "none"),
             dependency_proof_ids=tuple(item.get("dependency_proof_ids", ()) or ()),
+            # Issue #20 PR-D: correspondence authority を solver proof 段まで
+            # 落とさずに運ぶ。manifest 生成時に検証しただけで捨てると、receipt に
+            # 「何を根拠に対応付けたか」が残らない。
+            internal_candidate_id=_coerce_key(item.get("internal_candidate_id")),
+            callee_correspondence_proof_id=(
+                str(item["callee_correspondence_proof_id"])
+                if item.get("callee_correspondence_proof_id")
+                else None
+            ),
+            relational_callee_correspondence_id=_coerce_key(
+                item.get("relational_callee_correspondence_id")
+            ),
+            fresh_argument_status=str(
+                item.get("fresh_argument_status") or FRESH_ARGUMENT_STATUS_NOT_EVALUATED
+            ),
         )
         for item in manifest.get("relational_obligations", ()) or ()
         if isinstance(item, Mapping)

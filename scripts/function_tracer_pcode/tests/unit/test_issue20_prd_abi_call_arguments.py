@@ -890,6 +890,8 @@ def _internal_fact_with_callee_proof(fact_id, binary_id, offset, **overrides):
         callee_effect_summary_statuses=("complete",),
         callee_memory_effect_counts=(1,),
         callee_control_profile_keys=((("profile", "total_scalar"),),),
+        callee_parameter_width_bits=(32,),
+        callee_return_width_bits=(32,),
     )
     fields.update(overrides)
     return _internal_call_fact(fact_id, binary_id, ("shape", "a"), offset, **fields)
@@ -1592,3 +1594,244 @@ def test_phase2_accepts_a_correctly_bound_internal_correspondence():
         k.CALLEE_CORRESPONDENCE_PROOF_INVALID,
     }
     assert set(eligibility.blockers) & correspondence_codes == set()
+
+
+# --------------------------------------------------------------------------
+# 14. proof issuance authority (token) and the callee interface relation
+# --------------------------------------------------------------------------
+
+
+def test_hand_built_proof_with_a_matching_digest_is_not_authorized():
+    """digest 整合性は「改竄されていない」ことしか言わない。
+
+    factory を通さず payload を組み立てて digest を合わせても authorized に
+    ならないことを固定する。
+    """
+
+    import dataclasses
+
+    from scripts.function_tracer_pcode.proof.call_effect import candidates as k
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, genuine = _proof_for([left], [right])
+    assert genuine.verification_failure() is None
+
+    forged = dataclasses.replace(genuine, issuer_token=None)
+    # payload も digest も本物と同一。違うのは発行元だけ。
+    assert forged.payload() == genuine.payload()
+    assert forged.proof_id == genuine.proof_id
+    assert forged.verification_failure() == "untrusted_issuer_token"
+
+    issued, blockers = k.issue_relational_callee_correspondence(forged, candidates[0])
+    assert issued is None
+    assert k.CALLEE_CORRESPONDENCE_PROOF_INVALID in blockers
+
+
+def test_callee_parameter_arity_relation_is_rechecked_against_drift():
+    """arity は `semantic_shape_key` に含まれるので候補段で既に効いている。
+
+    proof 側の arity 検査は、候補形成後に fact が変わった場合の drift guard。
+    候補と proof が別々の事実を見て通ってしまわないことを固定する。
+    """
+
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CALLEE_PARAMETER_ARITY_RELATION_MISSING,
+        build_callee_correspondence_proof,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, _proof = _proof_for([left], [right])
+    # arity が違えば候補自体が立たない（上流で既に塞がれている）。
+    mismatched = _internal_fact_with_callee_proof(
+        "R1", "binaryR", 0x2000,
+        callee_parameter_keys=((("parameter_storage", "d0"),), (("parameter_storage", "d1"),)),
+        callee_parameter_width_bits=(32, 32),
+    )
+    assert build_internal_call_correspondence_candidates([left], [mismatched]).candidates == ()
+
+    # 候補成立後に arity が変わった場合は proof 側で捕まえる。
+    proof = build_callee_correspondence_proof(candidates, {"L1": left}, {"R1": mismatched})
+
+    assert proof.pairs == ()
+    assert CALLEE_PARAMETER_ARITY_RELATION_MISSING in {r for _k, r in proof.rejected}
+
+
+def test_callee_parameter_width_mismatch_fails_closed():
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CALLEE_PARAMETER_WIDTH_RELATION_MISSING,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000, callee_parameter_width_bits=(64,))
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000, callee_parameter_width_bits=(32,))
+    _candidates, proof = _proof_for([left], [right])
+
+    assert proof.pairs == ()
+    assert CALLEE_PARAMETER_WIDTH_RELATION_MISSING in {r for _k, r in proof.rejected}
+
+
+def test_asymmetric_width_evidence_fails_closed():
+    """片側だけ観測できる状態を「一致した」とも「無関係」とも扱わない。"""
+
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CALLEE_PARAMETER_WIDTH_RELATION_MISSING,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000, callee_parameter_width_bits=(64,))
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000, callee_parameter_width_bits=())
+    _candidates, proof = _proof_for([left], [right])
+
+    assert proof.pairs == ()
+    assert CALLEE_PARAMETER_WIDTH_RELATION_MISSING in {r for _k, r in proof.rejected}
+
+
+def test_callee_return_width_mismatch_fails_closed():
+    from scripts.function_tracer_pcode.proof.call_effect.candidates import (
+        CALLEE_RETURN_WIDTH_RELATION_MISSING,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000, callee_return_width_bits=(64,))
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000, callee_return_width_bits=(32,))
+    _candidates, proof = _proof_for([left], [right])
+
+    assert proof.pairs == ()
+    assert CALLEE_RETURN_WIDTH_RELATION_MISSING in {r for _k, r in proof.rejected}
+
+
+def test_unobservable_width_on_both_sides_is_recorded_not_asserted():
+    """どちらでも観測できない leg は ``unobserved`` として ID に明記する。
+
+    「一致した」とは書かない。後段 stage に委ねたことが receipt から読める。
+    """
+
+    left = _internal_fact_with_callee_proof(
+        "L1", "binaryL", 0x1000, callee_parameter_width_bits=(), callee_return_width_bits=(),
+    )
+    right = _internal_fact_with_callee_proof(
+        "R1", "binaryR", 0x2000, callee_parameter_width_bits=(), callee_return_width_bits=(),
+    )
+    candidates, proof = _proof_for([left], [right])
+
+    assert len(proof.pairs) == 1
+    relation = proof.pairs[0].interface_relation_key
+    assert ("parameter_width", "unobserved") in relation
+    assert ("return_width", "unobserved") in relation
+
+    correspondence, blockers = confirm_internal_callsite_correspondence(
+        candidates[0], proof, left, right
+    )
+    assert blockers == ()
+    assert correspondence.callee_correspondence.interface_relation_key == relation
+
+
+def test_interface_relation_is_bound_into_the_correspondence_id():
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, proof = _proof_for([left], [right])
+
+    correspondence, blockers = confirm_internal_callsite_correspondence(
+        candidates[0], proof, left, right
+    )
+
+    assert blockers == ()
+    relation = correspondence.callee_correspondence.interface_relation_key
+    assert ("parameter_arity", 1) in relation
+    assert ("parameter_width", (32,)) in relation
+    assert ("return_width", 32) in relation
+    # ID は proof digest と interface relation の両方に bind される。
+    assert correspondence.callee_correspondence.proof_id == proof.proof_id
+    assert relation in correspondence.callee_correspondence.stable_key()
+
+
+# --------------------------------------------------------------------------
+# 15. correspondence authority survives to the solver-proof stage
+# --------------------------------------------------------------------------
+
+
+def test_solver_proof_rebuild_preserves_the_correspondence_authority():
+    """manifest 生成時に検証しただけで authority を捨てない。
+
+    `apply_solver_proof_artifacts_to_manifest()` は manifest の dict から
+    obligation を組み直すので、PR-D の binding field が落ちないことを固定する。
+    """
+
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import (
+        RelationalCallEffectObligation,
+        apply_solver_proof_artifacts_to_manifest,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, proof = _proof_for([left], [right])
+    correspondence, _b = confirm_internal_callsite_correspondence(
+        candidates[0], proof, left, right
+    )
+
+    obligation = RelationalCallEffectObligation(
+        obligation_id="ob1",
+        relation_kind="call_to_call",
+        observation_contract_id="contract",
+        left_fact_id="L1",
+        right_fact_id="R1",
+        internal_candidate_id=candidates[0].stable_key(),
+        callee_correspondence_proof_id=proof.proof_id,
+        relational_callee_correspondence_id=correspondence.callee_correspondence.stable_key(),
+        fresh_argument_status="independent",
+    )
+    manifest = {
+        "relational_obligations": [obligation.to_dict()],
+        "phase2_direct_call_eligibility": [
+            {
+                "obligation_id": "ob1",
+                "status": "ineligible",
+                "blockers": ["left_callee_dependency_closure_missing"],
+                "required_solver_stages": [],
+            }
+        ],
+        "coupling": {},
+        "legacy_blocker_mapping": [],
+    }
+
+    apply_solver_proof_artifacts_to_manifest(manifest, ())
+
+    readiness = manifest["proof_readiness"][0]
+    assert readiness["obligation_id"] == "ob1"
+    # 再構築された obligation に authority が残っている。
+    rebuilt = manifest["relational_obligations"][0]
+    assert rebuilt["internal_candidate_id"]
+    assert rebuilt["callee_correspondence_proof_id"] == proof.proof_id
+    assert rebuilt["relational_callee_correspondence_id"]
+    assert rebuilt["fresh_argument_status"] == "independent"
+
+
+def test_readiness_refuses_an_internal_candidate_without_correspondence_authority():
+    """internal candidate なのに correspondence id が無い obligation を通さない。"""
+
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import (
+        Phase2DirectCallEligibility,
+        RelationalCallEffectObligation,
+        evaluate_obligation_proof_readiness,
+    )
+
+    left = _internal_fact_with_callee_proof("L1", "binaryL", 0x1000)
+    right = _internal_fact_with_callee_proof("R1", "binaryR", 0x2000)
+    candidates, _proof = _proof_for([left], [right])
+
+    obligation = RelationalCallEffectObligation(
+        obligation_id="ob1",
+        relation_kind="call_to_call",
+        observation_contract_id="contract",
+        left_fact_id="L1",
+        right_fact_id="R1",
+        internal_candidate_id=candidates[0].stable_key(),
+        relational_callee_correspondence_id=None,
+    )
+    eligibility = Phase2DirectCallEligibility(
+        obligation_id="ob1", status="candidate", blockers=(), required_solver_stages=(),
+    )
+
+    readiness = evaluate_obligation_proof_readiness(obligation, eligibility, ())
+
+    assert "internal_callee_correspondence_authority_missing" in readiness.blockers
+    assert readiness.to_dict().get("decision_eligible") is not True
