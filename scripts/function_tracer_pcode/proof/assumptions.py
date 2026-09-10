@@ -64,6 +64,10 @@ def _normalized_leaf(value: Any, path: str) -> Any:
 
 
 def _normalized_payload_value(value: Any, path: str) -> Any:
+    # A mapping is a record: its names are unique and its order carries no
+    # meaning, so it becomes a key-sorted tuple of pairs at every depth.  A
+    # sequence is a value whose order is part of it (an argument list, a
+    # signature) and keeps the order it was given.
     if isinstance(value, Mapping):
         return _normalized_payload(value, path)
     if isinstance(value, (list, tuple)):
@@ -75,7 +79,12 @@ def _normalized_payload_value(value: Any, path: str) -> Any:
 
 
 def _normalized_payload(value: Any, path: str = "$") -> Tuple[Tuple[str, Any], ...]:
-    """Return one payload level as a key-sorted tuple of ``(name, value)``."""
+    """Return one record level as a key-sorted tuple of ``(name, value)``.
+
+    A mapping and an equivalent sequence of pairs normalize to the same
+    tuple, so how a producer happened to spell the record does not change the
+    premise, its identity, or the receipt digest built from it.
+    """
     if isinstance(value, Mapping):
         items: Sequence[Tuple[Any, Any]] = tuple(value.items())
     elif isinstance(value, (list, tuple)):
