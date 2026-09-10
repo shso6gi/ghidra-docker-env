@@ -29,6 +29,7 @@ from scripts.function_tracer_pcode.analysis.effects.pure_function_catalog import
     parse_pure_function_catalog,
     resolve_call_model_candidate,
 )
+from scripts.function_tracer_pcode.analysis.effects import external_call_models
 from scripts.function_tracer_pcode.analysis.effects.external_call_models import (
     ExternalCallEffectPolicy,
 )
@@ -205,6 +206,13 @@ def _external_function(name, **kwargs):
 def _thunk_to_external(wrapper_name, external_name=None, **kwargs):
     external = _external_function(external_name or wrapper_name, **kwargs)
     return _Function(wrapper_name, is_thunk=True, thunked=external)
+
+
+class _OpaqueCallee:
+    """classification API を一切持たない callee（分類不能）。"""
+
+    def getName(self):
+        return "log"
 
 
 def _target(function_obj):
@@ -433,11 +441,7 @@ def test_thunk_to_internal_function_is_not_a_candidate():
 
 
 def test_unresolvable_classification_is_not_a_candidate():
-    class _OpaqueFunction:
-        def getName(self):
-            return "log"
-
-    resolution = _resolve(_OpaqueFunction())
+    resolution = _resolve(_OpaqueCallee())
     assert not resolution.accepted
     assert resolution.reject_reason == catalog_module.REJECT_PROVENANCE_UNAVAILABLE
 
@@ -458,6 +462,99 @@ def test_thunk_whose_target_cannot_be_obtained_is_not_a_candidate():
     resolution = _resolve(wrapper)
     assert not resolution.accepted
     assert resolution.reject_reason == catalog_module.REJECT_PROVENANCE_UNAVAILABLE
+
+
+def test_non_bool_is_external_is_not_proven_external():
+    """``isExternal()`` が ``"true"`` 等の非 bool でも external 扱いしない。
+
+    ``CallTargetRef`` は API 戻り値を ``bool(...)`` 化するので、この truthy 値を
+    そのまま authority にすると proven external になってしまう。candidate 分類は
+    effect lane と同じ exact-bool classifier を通す。
+    """
+    external = _Function("log", external_location=_ExternalLocation())
+    external._is_external = "true"
+    target_ref = _target(external)
+    # 弱い projection では external に見えてしまうことを明示しておく。
+    assert target_ref.is_external is True
+
+    resolution = resolve_call_model_candidate(target_ref, policy=NO_OBSERVATION)
+    assert not resolution.accepted
+    assert resolution.reject_reason == catalog_module.REJECT_PROVENANCE_UNAVAILABLE
+
+
+def test_non_bool_is_thunk_is_not_followed():
+    wrapper = _thunk_to_external("log")
+    wrapper._is_thunk = 1
+    target_ref = _target(wrapper)
+    assert target_ref.is_thunk is True
+
+    resolution = resolve_call_model_candidate(target_ref, policy=NO_OBSERVATION)
+    assert not resolution.accepted
+    assert resolution.reject_reason == catalog_module.REJECT_PROVENANCE_UNAVAILABLE
+
+
+def test_non_bool_is_external_on_the_thunk_target_is_not_proven_external():
+    wrapper = _thunk_to_external("log")
+    wrapper._thunked._is_external = "true"
+    target_ref = _target(wrapper)
+    assert target_ref.thunked_is_external is True
+
+    resolution = resolve_call_model_candidate(target_ref, policy=NO_OBSERVATION)
+    assert not resolution.accepted
+    assert resolution.reject_reason == catalog_module.REJECT_PROVENANCE_UNAVAILABLE
+
+
+def test_cyclic_thunk_chain_is_not_a_candidate():
+    first = _Function("log", is_thunk=True)
+    second = _Function("log", is_thunk=True, thunked=first)
+    first._thunked = second
+    resolution = _resolve(first)
+    assert not resolution.accepted
+    assert resolution.reject_reason == catalog_module.REJECT_PROVENANCE_UNAVAILABLE
+
+
+def test_thunk_chain_longer_than_the_bound_is_not_a_candidate():
+    external = _external_function("log")
+    current = external
+    for _ in range(external_call_models.MAX_THUNK_CHAIN_LENGTH + 2):
+        current = _Function("log", is_thunk=True, thunked=current)
+    resolution = _resolve(current)
+    assert not resolution.accepted
+    assert resolution.reject_reason == catalog_module.REJECT_PROVENANCE_UNAVAILABLE
+
+
+def test_thunk_chain_within_the_bound_still_resolves_to_the_external_signature():
+    external = _external_function("log")
+    current = external
+    for _ in range(3):
+        current = _Function("FUN_00100000", is_thunk=True, thunked=current)
+    resolution = _resolve(current)
+    assert resolution.accepted
+    assert resolution.canonical_symbol == "log"
+    assert resolution.provenance_kind == PROVENANCE_THUNK_TO_EXTERNAL
+
+
+def test_candidate_provenance_uses_the_same_classifier_as_the_effect_lane():
+    """candidate が external と認める入力集合は effect lane の proven-external と同じ。"""
+    cases = [
+        _external_function("log"),
+        _thunk_to_external("log"),
+        _Function("log", is_external=False, is_thunk=False),
+        _Function("log", is_thunk=True),
+        _OpaqueCallee(),
+    ]
+    non_bool = _Function("log", external_location=_ExternalLocation())
+    non_bool._is_external = "true"
+    cases.append(non_bool)
+    for function_obj in cases:
+        resolution = external_call_models.resolve_effect_callee(
+            function_obj, ExternalCallEffectPolicy()
+        )
+        effect_lane_external = external_call_models.resolution_is_confirmed_external(
+            resolution
+        )
+        provenance, _reason = catalog_module.external_symbol_provenance(_target(function_obj))
+        assert (provenance is not None) is effect_lane_external, function_obj.getName()
 
 
 def test_unknown_call_target_is_not_a_candidate():
@@ -593,15 +690,44 @@ def test_fenv_observation_rejects_an_fenv_sensitive_candidate():
     assert resolution.reject_reason == catalog_module.REJECT_FENV_OBSERVED
 
 
-def test_observation_insensitive_entry_survives_both_observation_modes():
-    """``fabs`` は errno も fenv も動かさないので観測中でも候補のままでよい。"""
-    for policy in (
-        ExternalCallEffectPolicy(observe_errno=True),
-        ExternalCallEffectPolicy(observe_fenv=True),
-        ExternalCallEffectPolicy(observe_errno=True, observe_fenv=True),
-    ):
-        resolution = _resolve(_thunk_to_external("fabs"), policy=policy)
-        assert resolution.accepted, policy
+@pytest.mark.parametrize("symbol", ["log", "fabs"])
+@pytest.mark.parametrize(
+    "policy,expected",
+    [
+        (ExternalCallEffectPolicy(observe_errno=True), catalog_module.REJECT_ERRNO_OBSERVED),
+        (ExternalCallEffectPolicy(observe_fenv=True), catalog_module.REJECT_FENV_OBSERVED),
+        (
+            ExternalCallEffectPolicy(observe_errno=True, observe_fenv=True),
+            catalog_module.REJECT_ERRNO_OBSERVED,
+        ),
+    ],
+)
+def test_any_observation_mode_rejects_every_candidate(symbol, policy, expected):
+    """B1 の条件は「errno / fenv を observation 対象にしていないこと」。
+
+    catalog の ``observation_sensitivity`` は metadata として残すが、gate を緩める
+    根拠にはしない。``fabs`` のように感度が無いとされる関数でも観測中は不成立。
+    """
+    resolution = _resolve(_thunk_to_external(symbol), policy=policy)
+    assert not resolution.accepted
+    assert resolution.reject_reason == expected
+
+
+@pytest.mark.parametrize("symbol", ["log", "fabs"])
+def test_candidate_is_available_only_when_neither_channel_is_observed(symbol):
+    resolution = _resolve(
+        _thunk_to_external(symbol),
+        policy=ExternalCallEffectPolicy(observe_errno=False, observe_fenv=False),
+    )
+    assert resolution.accepted
+    assert resolution.canonical_symbol == symbol
+
+
+def test_observation_sensitivity_remains_catalog_metadata():
+    """gate では使わないが、schema からは落とさない（B2 以降で使う情報）。"""
+    catalog = load_pure_function_catalog(reload=True)
+    assert catalog.entries["log"].observation_sensitivity == ("errno", "fenv")
+    assert catalog.entries["fabs"].observation_sensitivity == ()
 
 
 def test_missing_observation_policy_fails_closed():

@@ -9,9 +9,15 @@ Issue #20 PR-B1。external call が explicit-assumption model の **候補にな
 * catalog schema（canonical symbol / 引数型・幅 / 戻り型・幅 / alias 解決規則 /
   errno・fenv 感度）の読み込みと検証
 * alias から canonical symbol への解決（catalog 規則 + provenance evidence）
-* external / thunk-to-external の provenance 検証
 * Ghidra 側 signature と catalog signature の一致検証
 * 上記がすべて成立したときだけ ``CallModelCandidateRef`` を作ること
+
+callee が external かどうかの判定は **この module では行わない**。
+``external_call_models.classify_callee_chain``（effect lane と同一の exact-bool +
+thunk chain fail-closed classifier）に委ね、candidate 分類が独自の弱い判定器を
+持たないようにする。``CallTargetRef.is_external`` / ``is_thunk`` は API 戻り値を
+``bool(...)`` 化した projection なので、``"true"`` のような非 bool を proven
+external として通し得る。authority にしない。
 
 この module が決め **ない** こと:
 
@@ -24,9 +30,13 @@ pure / no-write の証拠として使ってはならない。仮定の下で意�
 層の conditional view（PR-20-B2 以降）であり、そこでは ``AssumptionPremise`` が
 明示的に付随する。``analysis`` 層は assumption を所有しない。
 
-fail closed の原則: 名前が一致するだけ、provenance が不明、alias が曖昧、
-signature が取れない・食い違う、errno / fenv を観測中 — いずれも candidate
-**不成立**（``None`` と reject reason）を返す。
+fail closed の原則: 名前が一致するだけ、provenance が不明（missing API / 例外 /
+non-bool / thunk 解決不能 / 循環 / chain 上限超過）、alias が曖昧、signature が
+取れない・食い違う、errno / fenv を観測中 — いずれも candidate **不成立**
+（``None`` と reject reason）を返す。
+
+errno / fenv は **関数ごとの感度で緩めない**。``observe_errno or observe_fenv``
+なら catalog を引くまでもなく不成立にする（正本 v4 §4.3.4 の B1 条件）。
 
 catalog scope（B1 で意図的に載せていないもの）:
 
@@ -48,6 +58,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from scripts.function_tracer_pcode.analysis.effects.external_call_models import (
+    CALLEE_CHAIN_EXTERNAL,
+    CALLEE_CHAIN_INTERNAL,
+    classify_callee_chain,
+)
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef
 from scripts.function_tracer_pcode.core.runtime_refs.call_models import (
     CallModelCandidateRef,
@@ -480,14 +495,6 @@ def _optional_symbol_text(value: Any) -> Optional[str]:
     return text or None
 
 
-def _thunked_function(function_obj: Any) -> Any:
-    for args in ((True,), (False,), ()):
-        thunked = _safe_call(function_obj, "getThunkedFunction", *args)
-        if thunked is not None and thunked is not function_obj:
-            return thunked
-    return None
-
-
 def _external_symbol_names(function_obj: Any) -> Tuple[str, ...]:
     """external 側の object-derived な symbol 名を順に返す。
 
@@ -513,13 +520,28 @@ def _external_symbol_names(function_obj: Any) -> Tuple[str, ...]:
     return tuple(deduplicated)
 
 
+def _external_library_name(function_obj: Any) -> Optional[str]:
+    """proven external function から library 名を読む（無ければ ``None``）。"""
+
+    external_location = _safe_call(function_obj, "getExternalLocation")
+    if external_location is None:
+        return None
+    return _optional_symbol_text(_safe_call(external_location, "getLibraryName"))
+
+
 def external_symbol_provenance(
     target_ref: Any,
 ) -> Tuple[Optional[ExternalSymbolProvenance], Optional[str]]:
     """call target から external import provenance を取り出す。
 
-    分類は ``CallTargetRef`` が Ghidra から取った ``is_external`` /
-    ``is_thunk`` / ``thunked_is_external`` を根拠にする。名前は根拠にしない。
+    分類は effect lane と **同一の** ``classify_callee_chain``（exact-bool + thunk
+    chain の fail-closed 解決）に委ねる。``CallTargetRef`` が持つ ``is_external`` /
+    ``is_thunk`` は API 戻り値を ``bool(...)`` 化したものなので、``"true"`` のような
+    非 bool を proven external として通し得る。candidate 分類が独自の弱い判定器を
+    持たないよう、ここでは使わない。
+
+    thunk の signature / 名前は、chain が **proven external に解決できた場合だけ**
+    その終端から読む。循環 / 解決不能 / 上限超過 / non-bool は candidate なし。
     """
 
     if not isinstance(target_ref, CallTargetRef) or not target_ref.is_function():
@@ -528,31 +550,26 @@ def external_symbol_provenance(
     if function_obj is None:
         return None, REJECT_PROVENANCE_UNAVAILABLE
 
-    is_external = target_ref.is_external
-    is_thunk = target_ref.is_thunk
-    if is_external is True:
-        library = _optional_symbol_text(target_ref.library_name)
-        if library is None:
-            return None, REJECT_PROVENANCE_UNAVAILABLE
-        signature_function = function_obj
-        kind = PROVENANCE_DIRECT_EXTERNAL
-    elif is_thunk is True and target_ref.thunked_is_external is True:
-        library = _optional_symbol_text(target_ref.thunked_library_name)
-        if library is None:
-            return None, REJECT_PROVENANCE_UNAVAILABLE
-        signature_function = _thunked_function(function_obj)
-        if signature_function is None:
-            return None, REJECT_PROVENANCE_UNAVAILABLE
-        kind = PROVENANCE_THUNK_TO_EXTERNAL
-    elif is_external is False and (
-        is_thunk is False or target_ref.thunked_is_external is False
-    ):
+    classification = classify_callee_chain(function_obj)
+    if classification.kind == CALLEE_CHAIN_INTERNAL:
         # binary 内に body を持つ関数。同名の user-defined `log` はここで落ちる。
         return None, REJECT_PROVENANCE_NOT_EXTERNAL
-    else:
+    if classification.kind != CALLEE_CHAIN_EXTERNAL:
         return None, REJECT_PROVENANCE_UNAVAILABLE
 
-    symbol_names = _external_symbol_names(signature_function)
+    external_function = classification.function
+    if external_function is None:
+        return None, REJECT_PROVENANCE_UNAVAILABLE
+    library = _external_library_name(external_function)
+    if library is None:
+        return None, REJECT_PROVENANCE_UNAVAILABLE
+    kind = (
+        PROVENANCE_DIRECT_EXTERNAL
+        if external_function is function_obj
+        else PROVENANCE_THUNK_TO_EXTERNAL
+    )
+
+    symbol_names = _external_symbol_names(external_function)
     if not symbol_names:
         return None, REJECT_SYMBOL_UNAVAILABLE
     return (
@@ -560,7 +577,7 @@ def external_symbol_provenance(
             kind=kind,
             library_name=library,
             symbol_names=symbol_names,
-            signature_function=signature_function,
+            signature_function=external_function,
         ),
         None,
     )
@@ -659,16 +676,23 @@ def validate_catalog_signature(function_obj: Any, entry: CatalogEntry) -> Option
 # --- observation boundary -------------------------------------------------
 
 
-def observation_conflict(entry: CatalogEntry, policy: Any) -> Optional[str]:
-    """errno / fenv を観測しているなら、感度のある関数は candidate にしない。"""
+def observation_conflict(policy: Any) -> Optional[str]:
+    """errno / fenv を観測しているなら candidate を作らない。
+
+    正本 v4 §4.3.4 の B1 成立条件は「errno / fenv を observation 対象にしていない
+    こと」であり、関数ごとの感度で緩めてよいとは書かれていない。catalog の
+    ``observation_sensitivity`` は metadata として保持するが、**B1 の gate を
+    緩める根拠には使わない**（`fabs` のように感度が無いとされる関数でも、観測中は
+    candidate 不成立）。観測境界の判断は観測を止めたときにだけ有効にする。
+    """
 
     observe_errno = getattr(policy, "observe_errno", None)
     observe_fenv = getattr(policy, "observe_fenv", None)
     if type(observe_errno) is not bool or type(observe_fenv) is not bool:
         return REJECT_OBSERVATION_POLICY_UNAVAILABLE
-    if observe_errno and "errno" in entry.observation_sensitivity:
+    if observe_errno:
         return REJECT_ERRNO_OBSERVED
-    if observe_fenv and "fenv" in entry.observation_sensitivity:
+    if observe_fenv:
         return REJECT_FENV_OBSERVED
     return None
 
@@ -749,7 +773,7 @@ def resolve_call_model_candidate(
     1. proven external、または proven external へ解決される thunk
     2. alias を catalog 規則 + provenance evidence で canonical symbol へ解決できる
     3. Ghidra signature の引数個数 / 型クラス / 幅、戻り型クラス / 幅が catalog と一致
-    4. errno / fenv が現在の observation 対象ではない
+    4. errno / fenv を **どちらも** observation 対象にしていない
 
     どれか 1 つでも欠ける・曖昧・食い違うなら candidate を作らない。
     """
@@ -757,6 +781,11 @@ def resolve_call_model_candidate(
     provenance, reason = external_symbol_provenance(target_ref)
     if provenance is None:
         return _rejected(reason or REJECT_PROVENANCE_UNAVAILABLE)
+
+    # observation 境界は関数によらない大域の前提なので、catalog を引く前に判定する。
+    conflict = observation_conflict(policy)
+    if conflict is not None:
+        return _rejected(conflict, provenance_kind=provenance.kind)
 
     if catalog is None:
         try:
@@ -772,14 +801,6 @@ def resolve_call_model_candidate(
             reason or REJECT_SYMBOL_NOT_IN_CATALOG, provenance_kind=provenance.kind
         )
     entry = catalog.entries[canonical_symbol]
-
-    conflict = observation_conflict(entry, policy)
-    if conflict is not None:
-        return _rejected(
-            conflict,
-            canonical_symbol=canonical_symbol,
-            provenance_kind=provenance.kind,
-        )
 
     signature_mismatch = validate_catalog_signature(provenance.signature_function, entry)
     if signature_mismatch is not None:
