@@ -316,25 +316,37 @@ def _float_taxonomy_call_target_refs(node: Any) -> Tuple[Any, ...]:
     return tuple(refs)
 
 
-def _float_taxonomy_node_has_declared_float_type(node: Any) -> bool:
-    """node の宣言型が浮動小数点型かどうかを型オブジェクトから判定する。"""
+def _float_taxonomy_node_has_declared_float_type(node: Any, resolved: Dict[int, bool]) -> bool:
+    """node の宣言型が浮動小数点型かどうかを型オブジェクトから判定する。
+
+    ``resolved`` は 1 回の走査内で同じ DataType を何度も問い合わせないための
+    キャッシュ。走査中は node が DataType を保持しているので id を鍵にできる。
+    """
     data_type_obj = getattr(node, "data_type_obj", None)
     if data_type_obj is None:
         return False
-    try:
-        return bool(is_floating_data_type(data_type_obj))
-    except Exception:
-        return False
+    key = id(data_type_obj)
+    if key not in resolved:
+        try:
+            resolved[key] = bool(is_floating_data_type(data_type_obj))
+        except Exception:
+            resolved[key] = False
+    return resolved[key]
 
 
-def _float_taxonomy_node_calls_float_returning_target(node: Any) -> bool:
+def _float_taxonomy_node_calls_float_returning_target(
+    node: Any,
+    resolved: Dict[Any, bool],
+) -> bool:
     """node が指す call target の宣言戻り型が浮動小数点型かどうかを判定する。"""
     for target_ref in _float_taxonomy_call_target_refs(node):
-        try:
-            if call_target_returns_floating_value(target_ref):
-                return True
-        except Exception:
-            continue
+        if target_ref not in resolved:
+            try:
+                resolved[target_ref] = bool(call_target_returns_floating_value(target_ref))
+            except Exception:
+                resolved[target_ref] = False
+        if resolved[target_ref]:
+            return True
     return False
 
 
@@ -361,17 +373,19 @@ def _impl__expression_uses_float_or_float_op(expr: Any) -> bool:
     except (AttributeError, TypeError, RecursionError):
         pass
     try:
-        nodes = _iter_expression_nodes(expr)
+        nodes = [node for node in _iter_expression_nodes(expr) if node is not None]
     except (AttributeError, TypeError, RecursionError):
         return False
+    # opcode 証拠は解析対象オブジェクトへの問い合わせが要らないので先に走査し、
+    # 型・provenance 証拠の問い合わせは必要な場合だけ行う。
+    if any(expression_node_uses_float_pcode_operator(node) for node in nodes):
+        return True
+    declared_float_types: Dict[int, bool] = {}
+    float_returning_targets: Dict[Any, bool] = {}
     for node in nodes:
-        if node is None:
-            continue
-        if expression_node_uses_float_pcode_operator(node):
+        if _float_taxonomy_node_has_declared_float_type(node, declared_float_types):
             return True
-        if _float_taxonomy_node_has_declared_float_type(node):
-            return True
-        if _float_taxonomy_node_calls_float_returning_target(node):
+        if _float_taxonomy_node_calls_float_returning_target(node, float_returning_targets):
             return True
     return False
 
