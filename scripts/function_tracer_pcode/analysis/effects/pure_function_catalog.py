@@ -177,6 +177,39 @@ class CatalogEntry:
         )
 
 
+def catalog_signature_widths(
+    signature_key: Any,
+) -> Optional[Tuple[Tuple[int, ...], int]]:
+    """``CallModelCandidateRef.signature_key`` から ``(引数幅, 戻り幅)`` を取り出す。
+
+    key の内部構造を知っているのは、それを作った本 module だけである。消費側
+    （proof の conditional view など）が位置で読み解かずに済むよう、decoder を
+    ここに置く。形が違えば ``None``（fail closed）。
+    """
+
+    if not isinstance(signature_key, tuple) or len(signature_key) != 4:
+        return None
+    kind, canonical, parameters, return_spec = signature_key
+    if kind != SIGNATURE_KEY_KIND or not isinstance(canonical, str) or not canonical:
+        return None
+    if not isinstance(parameters, tuple) or not isinstance(return_spec, tuple):
+        return None
+    widths: List[int] = []
+    for parameter in parameters:
+        if not isinstance(parameter, tuple) or len(parameter) != 2:
+            return None
+        _type_class, width_bits = parameter
+        if type(width_bits) is not int or isinstance(width_bits, bool) or width_bits <= 0:
+            return None
+        widths.append(width_bits)
+    if len(return_spec) != 2:
+        return None
+    _return_class, return_width = return_spec
+    if type(return_width) is not int or isinstance(return_width, bool) or return_width <= 0:
+        return None
+    return tuple(widths), return_width
+
+
 @dataclass(frozen=True)
 class PureFunctionCatalog:
     """検証済み catalog。lookup は canonical と alias の両方を引く。"""

@@ -1,5 +1,13 @@
 """SMT-LIB rendering of expressions: core renderer, width coercion, float theory, loop lowerings, intrinsics and unknown-symbol declarations."""
 
+from scripts.function_tracer_pcode.core.render_smt.calls import (  # noqa: F401
+    CallDeclarationConflict,
+    CallSmtDeclarations,
+    add_call_smt_declaration,
+    call_smt_declaration,
+    call_smt_declaration_lines,
+    collect_call_smt_declarations,
+)
 from scripts.function_tracer_pcode.core.render_smt.float_theory import (  # noqa: F401
     FLOAT_SEMANTICS_PCODE_OPERATORS,
     _FLOAT_PREDICATE_FP_OPS,
