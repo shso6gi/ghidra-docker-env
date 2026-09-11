@@ -152,6 +152,27 @@ def _fact_pcode_keys(manifest: Any, side: str) -> Mapping[str, Any]:
     return resolved
 
 
+def validated_conditional_proof_artifact(artifact: Any) -> Any:
+    """exact な proof artifact であり、digest が保存 field と一致することを確かめる。
+
+    duck typing では受け付けない。artifact の authority-relevant field
+    （proof kind / assumption set / modelled callsite / 各完全性フラグ）は
+    ``artifact_digest`` に bind されているので、差し替えはここで落ちる。
+    """
+
+    from scripts.function_tracer_pcode.proof.conditional_lane import (
+        ConditionalProofArtifact,
+    )
+
+    if type(artifact) is not ConditionalProofArtifact:
+        raise TypeError(
+            "the conditional lane accepts an exact ConditionalProofArtifact only: "
+            f"{type(artifact).__name__}"
+        )
+    artifact.validate()
+    return artifact
+
+
 def conditional_discharged_causes(
     projection: VerifiedLifecycleProjection,
     *,
@@ -161,9 +182,11 @@ def conditional_discharged_causes(
     """仮定が実際に引き受けた ``(occurrence_id, cause_id)`` だけを返す。
 
     対応を既存 authority / evidence から証明できない cause は返さない
-    （= conditional projection に残る）。
+    （= conditional projection に残る）。artifact は exact 型 + digest 検証を
+    通ったものだけを受け付ける。
     """
 
+    artifact = validated_conditional_proof_artifact(artifact)
     if not bool(getattr(artifact, "modelled_call_sites_complete", False)):
         return frozenset()
     modelled: dict = {"function1": set(), "function2": set()}
@@ -366,6 +389,7 @@ def issue_conditional_decision(
 
     if not conditional_lane_is_eligible(unconditional_decision):
         raise ValueError("the conditional lane runs only after an unconditional UNKNOWN")
+    artifact = validated_conditional_proof_artifact(artifact)
     assumption_set = tuple(getattr(artifact, "assumption_set", ()) or ())
     if not assumption_set:
         raise ValueError("a conditional lane requires a non-empty assumption set")

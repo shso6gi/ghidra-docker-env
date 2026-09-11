@@ -602,21 +602,28 @@ def test_identical_premises_are_deduplicated_but_nothing_else_is_dropped():
 
 def test_dependencies_survive_when_the_uf_does_not_appear_in_the_final_formula():
     """simplification で UF が消えても premise は落とさない。"""
-    projection = _projection()
-    decision = _decision(Outcome.UNKNOWN, projection=projection)
+    projection, result = _pair()
+    decision = result.decision_receipt
     artifact = run_conditional_proof(
         *_both_analyses(), observation_policy=NO_OBSERVATION, solver_runner=_Solver(True)
     )
-    stripped = ConditionalProofArtifact(
+    # UF が formula から消えた別 artifact（formula digest が違う）でも、
+    # assumption_set は view が運んだものをそのまま持つ。
+    stripped = ConditionalProofArtifact._create(
         proof_kind=artifact.proof_kind,
         assumption_set=artifact.assumption_set,
-        artifact_digest=artifact.artifact_digest,
+        formula_digest="formula-without-any-uf",
+        solver_disposition=artifact.solver_disposition,
         modelled_call_count=artifact.modelled_call_count,
+        modelled_call_sites=artifact.modelled_call_sites,
+        modelled_call_sites_complete=artifact.modelled_call_sites_complete,
         all_calls_modelled=True,
         unsupported_calls_all_modelled=artifact.unsupported_calls_all_modelled,
     )
+    assert stripped.validates()
     receipt = issue_conditional_decision(
-        unconditional_decision=decision, projection=projection, artifact=stripped
+        unconditional_decision=decision, projection=projection, artifact=stripped,
+        result=result,
     )
     assert len(receipt.assumption_set) == len(artifact.assumption_set)
 
@@ -642,13 +649,204 @@ def test_a_receipt_that_depends_on_less_than_the_lane_assumption_set_is_malforme
 def test_a_lane_without_an_assumption_set_is_refused():
     projection = _projection()
     decision = _decision(Outcome.UNKNOWN, projection=projection)
-    empty = ConditionalProofArtifact(
-        proof_kind=None, assumption_set=(), artifact_digest="x"
-    )
+    empty = ConditionalProofArtifact._create(proof_kind=None, assumption_set=())
     with pytest.raises(ValueError):
         issue_conditional_decision(
             unconditional_decision=decision, projection=projection, artifact=empty
         )
+
+
+# --- artifact sealing -------------------------------------------------------
+
+
+def _tampered(artifact, **changes):
+    """digest はそのままに field だけ差し替える（改竄を模す）。"""
+    import copy
+
+    forged = copy.copy(artifact)
+    for name, value in changes.items():
+        object.__setattr__(forged, name, value)
+    return forged
+
+
+def test_a_freshly_issued_artifact_validates():
+    artifact = _artifact_for()
+    artifact.validate()
+    assert artifact.validates() is True
+    assert artifact.artifact_digest
+    assert artifact.assumption_set_digest
+    assert artifact.formula_digest and artifact.solver_disposition == "unsat"
+
+
+def test_an_artifact_cannot_be_constructed_outside_its_factory():
+    artifact = _artifact_for()
+    with pytest.raises(ValueError):
+        ConditionalProofArtifact(
+            proof_kind=artifact.proof_kind,
+            assumption_set=artifact.assumption_set,
+            assumption_set_digest=artifact.assumption_set_digest,
+            formula_digest=artifact.formula_digest,
+            solver_disposition=artifact.solver_disposition,
+            modelled_call_count=artifact.modelled_call_count,
+            modelled_call_sites=artifact.modelled_call_sites,
+            modelled_call_sites_complete=artifact.modelled_call_sites_complete,
+            all_calls_modelled=artifact.all_calls_modelled,
+            unsupported_calls_all_modelled=artifact.unsupported_calls_all_modelled,
+            non_decisive_reasons=artifact.non_decisive_reasons,
+            artifact_digest=artifact.artifact_digest,
+        )
+    # dataclasses.replace も init=False なので通らない。
+    import dataclasses
+
+    with pytest.raises(Exception):
+        dataclasses.replace(artifact, proof_kind=None)
+
+
+@pytest.mark.parametrize(
+    "field_name, replacement",
+    [
+        pytest.param("modelled_call_sites", lambda value: (), id="modelled_call_sites"),
+        pytest.param(
+            "modelled_call_sites",
+            lambda value: (("function1", UNRELATED_LEFT_SITE),),
+            id="modelled_call_sites_swapped",
+        ),
+        pytest.param(
+            "modelled_call_sites_complete", lambda value: not value,
+            id="modelled_call_sites_complete",
+        ),
+        pytest.param(
+            "proof_kind", lambda value: CONDITIONAL_SAFE_COUNTEREXAMPLE, id="proof_kind"
+        ),
+        pytest.param("all_calls_modelled", lambda value: not value, id="all_calls_modelled"),
+        pytest.param(
+            "unsupported_calls_all_modelled", lambda value: not value,
+            id="unsupported_calls_all_modelled",
+        ),
+        pytest.param("solver_disposition", lambda value: "sat", id="solver_disposition"),
+        pytest.param("formula_digest", lambda value: "other-formula", id="formula_digest"),
+        pytest.param("modelled_call_count", lambda value: value + 1, id="modelled_call_count"),
+        pytest.param("non_decisive_reasons", lambda value: ("x",), id="non_decisive_reasons"),
+    ],
+)
+def test_a_tampered_field_with_the_old_digest_is_rejected(field_name, replacement):
+    artifact = _artifact_for()
+    current = getattr(artifact, field_name)
+    new_value = replacement(current)
+    # 差し替えが本当に値を変えていること（no-op で通る test にしない）。
+    assert new_value != current, field_name
+
+    forged = _tampered(artifact, **{field_name: new_value})
+    assert forged.artifact_digest == artifact.artifact_digest
+    assert forged.validates() is False
+    with pytest.raises(ValueError):
+        forged.validate()
+
+
+def test_a_tampered_assumption_set_with_the_old_digest_is_rejected():
+    artifact = _artifact_for()
+    forged = _tampered(artifact, assumption_set=(_premise("exp"),))
+    assert forged.validates() is False
+    with pytest.raises(ValueError):
+        forged.validate()
+    # digest だけ辻褄を合わせても artifact digest 側で落ちる。
+    forged = _tampered(
+        artifact,
+        assumption_set=(_premise("exp"),),
+        assumption_set_digest=ConditionalProofArtifact.assumption_digest(
+            (_premise("exp"),)
+        ),
+    )
+    with pytest.raises(ValueError):
+        forged.validate()
+
+
+def test_the_authority_entry_points_reject_a_tampered_artifact():
+    projection, result = _pair()
+    artifact = _artifact_for()
+    forged = _tampered(artifact, modelled_call_sites_complete=False)
+
+    with pytest.raises(ValueError):
+        conditional_discharged_causes(projection, result=result, artifact=forged)
+    with pytest.raises(ValueError):
+        issue_conditional_decision(
+            unconditional_decision=result.decision_receipt,
+            projection=projection,
+            artifact=forged,
+            result=result,
+        )
+
+
+def test_the_authority_entry_points_reject_a_duck_typed_artifact():
+    projection, result = _pair()
+    artifact = _artifact_for()
+
+    class _LookAlike:
+        pass
+
+    forged = _LookAlike()
+    for name in (
+        "proof_kind", "assumption_set", "assumption_set_digest", "formula_digest",
+        "solver_disposition", "modelled_call_count", "modelled_call_sites",
+        "modelled_call_sites_complete", "all_calls_modelled",
+        "unsupported_calls_all_modelled", "non_decisive_reasons", "artifact_digest",
+    ):
+        setattr(forged, name, getattr(artifact, name))
+    forged.validate = lambda: None
+
+    with pytest.raises(TypeError):
+        conditional_discharged_causes(projection, result=result, artifact=forged)
+    with pytest.raises(TypeError):
+        issue_conditional_decision(
+            unconditional_decision=result.decision_receipt,
+            projection=projection,
+            artifact=forged,
+            result=result,
+        )
+
+
+def test_a_tampered_artifact_leaves_the_unconditional_result_untouched():
+    projection, result = _pair(decision_effect="blocks_equivalence")
+    before = (result.is_equivalent, result.final_outcome, result.decision_receipt)
+
+    class _ForgingSolver:
+        def run_parallel(self, formula, timeout=None):
+            return type("_R", (), {"is_equivalent": True})()
+
+    # production 経路は lane 内で artifact を発行するので、改竄は
+    # authority 入口で落ちる = conditional 列が付かないだけ。
+    forged = _tampered(_artifact_for(), modelled_call_sites=())
+    with pytest.raises(ValueError):
+        issue_conditional_decision(
+            unconditional_decision=result.decision_receipt,
+            projection=projection,
+            artifact=forged,
+            result=result,
+        )
+    assert (result.is_equivalent, result.final_outcome, result.decision_receipt) == before
+    assert result.conditional_decision_receipt is None
+    assert result.conditional_outcome is None
+
+
+def test_a_valid_artifact_still_discharges_the_bound_occurrence():
+    """sealing を入れても occurrence-scoped discharge はそのまま成功する。"""
+    causes = [
+        _cause(CORRESPONDENCE_REASON_ID, index=0,
+               left=("fact-left-modelled", LEFT_SITE),
+               right=("fact-right-modelled", RIGHT_SITE)),
+        _cause(CORRESPONDENCE_REASON_ID, index=1,
+               left=("fact-left-internal", UNRELATED_LEFT_SITE),
+               right=("fact-right-internal", UNRELATED_RIGHT_SITE)),
+    ]
+    projection, result = _pair(causes=causes, decision_effect="blocks_equivalence")
+    artifact = _artifact_for()
+    artifact.validate()
+    assert conditional_discharged_causes(
+        projection, result=result, artifact=artifact
+    ) == frozenset({("occ-0", "cause-0")})
+    diagnostics = _run_lane(result, projection, _both_analyses())
+    assert diagnostics["discharged_cause_count"] == 1
+    assert result.conditional_outcome == Outcome.UNKNOWN.value
 
 
 # --- discharge rule ---------------------------------------------------------
@@ -795,14 +993,16 @@ def test_incomplete_modelled_call_site_identity_discharges_nothing():
     """写像した callsite の identity が 1 つでも取れなければ何も落とさない。"""
     projection, result = _pair()
     artifact = _artifact_for()
-    blinded = ConditionalProofArtifact(
+    blinded = ConditionalProofArtifact._create(
         proof_kind=artifact.proof_kind,
         assumption_set=artifact.assumption_set,
-        artifact_digest=artifact.artifact_digest,
+        formula_digest=artifact.formula_digest,
+        solver_disposition=artifact.solver_disposition,
         modelled_call_count=artifact.modelled_call_count,
         modelled_call_sites=artifact.modelled_call_sites,
         modelled_call_sites_complete=False,
         all_calls_modelled=True,
+        unsupported_calls_all_modelled=artifact.unsupported_calls_all_modelled,
     )
     assert conditional_discharged_causes(
         projection, result=result, artifact=blinded
@@ -1133,9 +1333,10 @@ def test_the_proof_layer_does_not_import_the_authority_layer():
 
 def test_a_decisive_artifact_requires_every_call_to_be_modelled():
     with pytest.raises(ValueError):
-        ConditionalProofArtifact(
+        ConditionalProofArtifact._create(
             proof_kind=CONDITIONAL_EQ_CLOSURE,
             assumption_set=(_premise(),),
-            artifact_digest="x",
+            formula_digest="formula",
+            solver_disposition="unsat",
             all_calls_modelled=False,
         )

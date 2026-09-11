@@ -87,9 +87,19 @@ def _digest(payload: Any) -> str:
     ).hexdigest()
 
 
-@dataclass(frozen=True)
+#: この token を持つ ``_create`` 以外から artifact を作らせない。
+_CONDITIONAL_PROOF_ARTIFACT_FACTORY_TOKEN = object()
+
+
+@dataclass(frozen=True, init=False)
 class ConditionalProofArtifact:
     """conditional lane 1 回分の proof 成果物（authority ではない）。
+
+    authority 側の discharge / receipt 発行が読む field は **すべて
+    ``artifact_digest`` に bind される**。artifact は :meth:`_create` からしか
+    作れず、:meth:`validate` が保存された field から digest を組み直して
+    改竄を検出する。``diagnostics`` だけは判定に使わない観測なので digest に
+    入れない（``compare=False``）。
 
     ``proof_kind`` が ``None`` なら decisive ではない。``assumption_set`` は
     左右 view の和で、**最小化しない**。receipt はこれをそのまま
@@ -98,36 +108,190 @@ class ConditionalProofArtifact:
 
     proof_kind: Optional[str]
     assumption_set: Tuple[AssumptionPremise, ...]
-    artifact_digest: str
-    modelled_call_count: int = 0
+    assumption_set_digest: str
+    formula_digest: Optional[str]
+    solver_disposition: Optional[str]
+    modelled_call_count: int
     #: 写像した callsite の object identity。``(side, pcode_op_stable_key)``。
     #: authority 側が「どの cause occurrence を仮定が引き受けたか」を exact に
     #: 突き合わせるための唯一の根拠で、1 つでも identity が取れなければ
     #: ``modelled_call_sites_complete`` が False になり discharge は行われない。
-    modelled_call_sites: Tuple[Tuple[str, Tuple[Any, ...]], ...] = ()
-    modelled_call_sites_complete: bool = False
-    all_calls_modelled: bool = False
-    unsupported_calls_all_modelled: bool = False
-    non_decisive_reasons: Tuple[str, ...] = ()
-    diagnostics: Mapping[str, Any] = field(default_factory=dict)
+    modelled_call_sites: Tuple[Tuple[str, Tuple[Any, ...]], ...]
+    modelled_call_sites_complete: bool
+    all_calls_modelled: bool
+    unsupported_calls_all_modelled: bool
+    non_decisive_reasons: Tuple[str, ...]
+    artifact_digest: str
+    diagnostics: Mapping[str, Any] = field(
+        default_factory=dict, compare=False, repr=False
+    )
+
+    def __init__(
+        self,
+        *,
+        proof_kind: Optional[str],
+        assumption_set: Sequence[AssumptionPremise],
+        assumption_set_digest: str,
+        formula_digest: Optional[str],
+        solver_disposition: Optional[str],
+        modelled_call_count: int,
+        modelled_call_sites: Sequence[Tuple[str, Tuple[Any, ...]]],
+        modelled_call_sites_complete: bool,
+        all_calls_modelled: bool,
+        unsupported_calls_all_modelled: bool,
+        non_decisive_reasons: Sequence[str],
+        artifact_digest: str,
+        diagnostics: Optional[Mapping[str, Any]] = None,
+        _factory_token: object = None,
+    ) -> None:
+        if _factory_token is not _CONDITIONAL_PROOF_ARTIFACT_FACTORY_TOKEN:
+            raise ValueError(
+                "conditional proof artifacts are issued only by run_conditional_proof"
+            )
+        object.__setattr__(self, "proof_kind", proof_kind)
+        object.__setattr__(self, "assumption_set", tuple(assumption_set))
+        object.__setattr__(self, "assumption_set_digest", assumption_set_digest)
+        object.__setattr__(self, "formula_digest", formula_digest)
+        object.__setattr__(self, "solver_disposition", solver_disposition)
+        object.__setattr__(self, "modelled_call_count", int(modelled_call_count))
+        object.__setattr__(
+            self,
+            "modelled_call_sites",
+            tuple((str(side), tuple(key)) for side, key in modelled_call_sites),
+        )
+        object.__setattr__(
+            self, "modelled_call_sites_complete", bool(modelled_call_sites_complete)
+        )
+        object.__setattr__(self, "all_calls_modelled", bool(all_calls_modelled))
+        object.__setattr__(
+            self, "unsupported_calls_all_modelled", bool(unsupported_calls_all_modelled)
+        )
+        object.__setattr__(self, "non_decisive_reasons", tuple(non_decisive_reasons))
+        object.__setattr__(self, "artifact_digest", artifact_digest)
+        object.__setattr__(self, "diagnostics", dict(diagnostics or {}))
 
     @property
     def decisive(self) -> bool:
         return self.proof_kind is not None
 
-    def __post_init__(self) -> None:
-        if self.proof_kind is not None:
-            if self.proof_kind not in (
-                CONDITIONAL_EQ_CLOSURE,
-                CONDITIONAL_SAFE_COUNTEREXAMPLE,
-            ):
-                raise ValueError(f"unknown conditional proof kind: {self.proof_kind}")
+    @staticmethod
+    def assumption_digest(
+        assumption_set: Sequence[AssumptionPremise],
+    ) -> str:
+        """assumption set の内容そのものを表す digest。
+
+        ``premise_key()`` は schema version / kind / subject / payload を含む
+        canonical identity なので、premise を 1 つ差し替えても digest が動く。
+        """
+
+        return _digest(tuple(premise.premise_key() for premise in assumption_set))
+
+    def artifact_payload(self) -> Mapping[str, Any]:
+        """``artifact_digest`` の preimage（authority が読む field 全部）。"""
+
+        return {
+            "adapter": CONDITIONAL_PROOF_ADAPTER_VERSION,
+            "proof_kind": self.proof_kind,
+            "assumption_set_digest": self.assumption_set_digest,
+            "formula_digest": self.formula_digest,
+            "solver_disposition": self.solver_disposition,
+            "modelled_call_count": self.modelled_call_count,
+            "modelled_call_sites": [
+                [side, list(key)] for side, key in self.modelled_call_sites
+            ],
+            "modelled_call_sites_complete": self.modelled_call_sites_complete,
+            "all_calls_modelled": self.all_calls_modelled,
+            "unsupported_calls_all_modelled": self.unsupported_calls_all_modelled,
+            "non_decisive_reasons": list(self.non_decisive_reasons),
+        }
+
+    def validate(self) -> None:
+        """保存された field から digest を組み直して一致を確かめる。"""
+
+        if self.proof_kind is not None and self.proof_kind not in (
+            CONDITIONAL_EQ_CLOSURE,
+            CONDITIONAL_SAFE_COUNTEREXAMPLE,
+        ):
+            raise ValueError(f"unknown conditional proof kind: {self.proof_kind}")
+        for premise in self.assumption_set:
+            if type(premise) is not AssumptionPremise:
+                raise TypeError(
+                    "conditional proof artifacts carry AssumptionPremise only: "
+                    f"{type(premise).__name__}"
+                )
+        if self.assumption_digest(self.assumption_set) != self.assumption_set_digest:
+            raise ValueError("conditional proof artifact assumption digest mismatch")
+        if _digest(self.artifact_payload()) != self.artifact_digest:
+            raise ValueError("conditional proof artifact digest mismatch")
+        if self.decisive:
             if not self.assumption_set:
                 raise ValueError("a decisive conditional proof carries its assumption set")
             if not self.all_calls_modelled:
                 raise ValueError(
                     "a decisive conditional proof models every deferred call of both sides"
                 )
+            if not self.formula_digest or not self.solver_disposition:
+                raise ValueError(
+                    "a decisive conditional proof binds its formula and solver disposition"
+                )
+            if self.non_decisive_reasons:
+                raise ValueError("a decisive conditional proof carries no refusal reason")
+
+    def validates(self) -> bool:
+        try:
+            self.validate()
+        except (TypeError, ValueError):
+            return False
+        return True
+
+    @classmethod
+    def _create(
+        cls,
+        *,
+        proof_kind: Optional[str],
+        assumption_set: Sequence[AssumptionPremise] = (),
+        formula_digest: Optional[str] = None,
+        solver_disposition: Optional[str] = None,
+        modelled_call_count: int = 0,
+        modelled_call_sites: Sequence[Tuple[str, Tuple[Any, ...]]] = (),
+        modelled_call_sites_complete: bool = False,
+        all_calls_modelled: bool = False,
+        unsupported_calls_all_modelled: bool = False,
+        non_decisive_reasons: Sequence[str] = (),
+        diagnostics: Optional[Mapping[str, Any]] = None,
+    ) -> "ConditionalProofArtifact":
+        """artifact を発行する唯一の入口。digest はここでだけ計算する。"""
+
+        assumption_set = tuple(assumption_set)
+        fields = {
+            "proof_kind": proof_kind,
+            "assumption_set": assumption_set,
+            "assumption_set_digest": cls.assumption_digest(assumption_set),
+            "formula_digest": formula_digest,
+            "solver_disposition": solver_disposition,
+            "modelled_call_count": int(modelled_call_count),
+            "modelled_call_sites": tuple(
+                (str(side), tuple(key)) for side, key in modelled_call_sites
+            ),
+            "modelled_call_sites_complete": bool(modelled_call_sites_complete),
+            "all_calls_modelled": bool(all_calls_modelled),
+            "unsupported_calls_all_modelled": bool(unsupported_calls_all_modelled),
+            "non_decisive_reasons": tuple(non_decisive_reasons),
+        }
+        artifact = cls(
+            **fields,
+            artifact_digest="",
+            diagnostics=diagnostics,
+            _factory_token=_CONDITIONAL_PROOF_ARTIFACT_FACTORY_TOKEN,
+        )
+        artifact = cls(
+            **fields,
+            artifact_digest=_digest(artifact.artifact_payload()),
+            diagnostics=diagnostics,
+            _factory_token=_CONDITIONAL_PROOF_ARTIFACT_FACTORY_TOKEN,
+        )
+        artifact.validate()
+        return artifact
 
 
 def _non_decisive(
@@ -140,24 +304,21 @@ def _non_decisive(
     unsupported_calls_all_modelled: bool = False,
     modelled_call_sites: Sequence[Tuple[str, Tuple[Any, ...]]] = (),
     modelled_call_sites_complete: bool = False,
+    formula_digest: Optional[str] = None,
+    solver_disposition: Optional[str] = None,
 ) -> ConditionalProofArtifact:
-    return ConditionalProofArtifact(
+    return ConditionalProofArtifact._create(
         proof_kind=None,
-        assumption_set=tuple(assumption_set),
-        artifact_digest=_digest(
-            {
-                "adapter": CONDITIONAL_PROOF_ADAPTER_VERSION,
-                "decisive": False,
-                "reasons": list(reasons),
-            }
-        ),
+        assumption_set=assumption_set,
+        formula_digest=formula_digest,
+        solver_disposition=solver_disposition,
         modelled_call_count=modelled_call_count,
-        modelled_call_sites=tuple(modelled_call_sites),
+        modelled_call_sites=modelled_call_sites,
         modelled_call_sites_complete=modelled_call_sites_complete,
         all_calls_modelled=all_calls_modelled,
         unsupported_calls_all_modelled=unsupported_calls_all_modelled,
-        non_decisive_reasons=tuple(reasons),
-        diagnostics=dict(diagnostics),
+        non_decisive_reasons=reasons,
+        diagnostics=diagnostics,
     )
 
 
@@ -423,13 +584,13 @@ def run_conditional_proof(
     diagnostics["solver_disposition"] = (
         "unsat" if disposition is True else "sat" if disposition is False else "unknown"
     )
-    artifact_digest = _digest(
+    # formula digest は view identity も一緒に束ねる（同じ SMT 文字列でも、
+    # 別の view から来たものは別 artifact）。
+    formula_digest = _digest(
         {
-            "adapter": CONDITIONAL_PROOF_ADAPTER_VERSION,
             "left_view_key": left_view.view_key(),
             "right_view_key": right_view.view_key(),
-            "formula_digest": _digest(built.formula),
-            "solver_disposition": diagnostics["solver_disposition"],
+            "formula": built.formula,
         }
     )
     common = {
@@ -438,6 +599,8 @@ def run_conditional_proof(
         "unsupported_calls_all_modelled": unsupported_modelled,
         "modelled_call_sites": modelled_call_sites,
         "modelled_call_sites_complete": sites_complete,
+        "formula_digest": formula_digest,
+        "solver_disposition": diagnostics["solver_disposition"],
     }
 
     if disposition is True:
@@ -454,10 +617,9 @@ def run_conditional_proof(
             return _non_decisive(
                 assumption_set, (LANE_EQ_CLOSURE_BLOCKED, *blocking), diagnostics, **common
             )
-        return ConditionalProofArtifact(
+        return ConditionalProofArtifact._create(
             proof_kind=CONDITIONAL_EQ_CLOSURE,
             assumption_set=assumption_set,
-            artifact_digest=artifact_digest,
             non_decisive_reasons=(),
             diagnostics=diagnostics,
             **common,
@@ -477,10 +639,9 @@ def run_conditional_proof(
             return _non_decisive(
                 assumption_set, (LANE_COUNTEREXAMPLE_UNSAFE, *safety), diagnostics, **common
             )
-        return ConditionalProofArtifact(
+        return ConditionalProofArtifact._create(
             proof_kind=CONDITIONAL_SAFE_COUNTEREXAMPLE,
             assumption_set=assumption_set,
-            artifact_digest=artifact_digest,
             non_decisive_reasons=(),
             diagnostics=diagnostics,
             **common,
