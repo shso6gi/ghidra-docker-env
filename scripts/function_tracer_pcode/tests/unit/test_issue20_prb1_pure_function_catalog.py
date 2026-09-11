@@ -838,8 +838,12 @@ def test_effect_class_is_unchanged_when_a_candidate_is_attached():
     assert with_candidate.call_model_candidate is candidate
 
 
-def test_old_sqrt_pure_return_path_is_untouched_by_the_catalog():
-    """sqrt の既存 ``pure_return`` 分類は B1 では変更しない（cutover は B3）。"""
+def test_sqrt_is_a_catalog_candidate_and_no_longer_a_pure_return_special_case():
+    """PR-20-B3 の cutover 後、sqrt の値意味は catalog 候補としてだけ現れる。
+
+    B1 の candidate は立つが、``effect_class`` を名前で ``pure_return`` へ
+    上げる旧特例は無い（仮定は conditional lane が明示的に負う）。
+    """
     external = _thunk_to_external("sqrt")
     target_ref = _target(external)
     candidate = _resolve(external).candidate
@@ -847,7 +851,7 @@ def test_old_sqrt_pure_return_path_is_untouched_by_the_catalog():
     info = DeferredCallInfo(
         target_ref=target_ref, sequence=0, call_model_candidate=candidate
     )
-    assert info.effect_class == "pure_return"
+    assert info.effect_class == "unknown_effect"
 
 
 def test_candidate_survives_clone_and_stays_out_of_the_correspondence_identity():

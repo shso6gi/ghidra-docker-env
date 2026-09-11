@@ -214,6 +214,26 @@ def test_recursive_abstraction_rewrites_matching_self_recursive_placeholders_to_
     assert left_expr == right_expr
     assert any(param.get("synthetic_recursive_summary") for param in result.analysis1.parameters)
     assert any(param.get("synthetic_recursive_summary") for param in result.analysis2.parameters)
+    # 要約後の clone が return-ABI seed を壊していないこと。この確認は以前
+    # sqrt pure-return の test が持っていたが、PR-20-B3 の cutover でその経路が
+    # 無くなったので、いま要約が成立する自己再帰側へ移した。
+    analysis1.return_abi_facts = _production_return_abi_facts()
+    analysis2.return_abi_facts = _production_return_abi_facts()
+    result = abstract_recursive_calls(analysis1, analysis2, debug=False)
+    assert result.analysis1.return_abi_facts == analysis1.return_abi_facts
+    assert result.analysis1.return_abi_facts is not analysis1.return_abi_facts
+    abi_assessment = assess_return_abi_pair(
+        result.analysis1,
+        result.analysis2,
+        _production_width_seed(result.analysis1, "left"),
+        _production_width_seed(result.analysis2, "right"),
+        build_pair_return_observation_seed(
+            _production_width_seed(result.analysis1, "left"),
+            _production_width_seed(result.analysis2, "right"),
+        ),
+    )
+    assert not abi_assessment.left_seed.malformed_slots
+    assert not abi_assessment.right_seed.malformed_slots
 
 
 def test_recursive_abstraction_rejects_name_only_self_target_even_when_display_name_matches():
@@ -478,7 +498,13 @@ def test_recursive_abstraction_debug_reports_argument_mismatch_for_shared_target
     assert "shared_targets=0" in output
 
 
-def test_deferred_call_abstraction_rewrites_matching_sqrt_returns_to_summary_call_params():
+def test_deferred_call_abstraction_no_longer_folds_matching_sqrt_returns():
+    """PR-20-B3 cutover: 旧 sqrt pure-return 要約は成立しない。
+
+    以前はここで左右の ``sqrt`` 呼び出しが共有 summary parameter に畳まれ、
+    無条件 lane が等価を主張できた。cutover 後は要約されず、旧 fallback にも
+    戻らない。sqrt の値意味を使う経路は conditional lane の明示仮定だけ。
+    """
     x1 = _param("x", 0, size=8)
     x2 = _param("y", 0, size=8)
     info1 = DeferredCallInfo(
@@ -507,36 +533,17 @@ def test_deferred_call_abstraction_rewrites_matching_sqrt_returns_to_summary_cal
         debug=False,
     )
 
-    assert result.applied is True
-    assert len(result.matches) == 1
-    assert result.matches[0].summary_name.startswith("summary_call_")
-    left_value = result.analysis1.returns[0].value
-    right_value = result.analysis2.returns[0].value
-    assert left_value.expr_type == ExpressionType.PARAMETER
-    assert right_value.expr_type == ExpressionType.PARAMETER
-    assert left_value.name == right_value.name
-    assert any(param.get("synthetic_pure_call_summary") for param in result.analysis1.parameters)
-    assert result.analysis1.return_abi_facts == analysis1.return_abi_facts
-    assert result.analysis2.return_abi_facts == analysis2.return_abi_facts
-    assert result.analysis1.return_abi_facts is not analysis1.return_abi_facts
-    assert result.analysis2.return_abi_facts is not analysis2.return_abi_facts
-    left_width = _production_width_seed(result.analysis1, "left")
-    right_width = _production_width_seed(result.analysis2, "right")
-    abi_assessment = assess_return_abi_pair(
-        result.analysis1,
-        result.analysis2,
-        left_width,
-        right_width,
-        build_pair_return_observation_seed(left_width, right_width),
+    assert result.applied is False
+    assert result.matches == []
+    # 返り値は deferred call の UNKNOWN のまま。共有 summary parameter も作らない。
+    assert result.analysis1.returns[0].value.expr_type != ExpressionType.PARAMETER
+    assert not any(
+        param.get("synthetic_pure_call_summary")
+        for param in result.analysis1.parameters
     )
-    assert not abi_assessment.left_seed.malformed_slots
-    assert not abi_assessment.right_seed.malformed_slots
-    evidence = result.matches[0].match_evidence["left"]
-    assert evidence["effect_class"] == "pure_return"
-    assert evidence["domain_policy"]["fp_non_nan"] is True
-    assert evidence["abi_return_width_bits"] == 64
-    assert evidence["abi_return_type_policy"] == "fp64"
-    assert evidence["callee_identity_policy"]["status"] == "external_library_function"
+    # 名前による pure_return 分類も無い。
+    assert info1.effect_class == "unknown_effect"
+    assert info2.effect_class == "unknown_effect"
 
 
 def test_deferred_call_abstraction_requires_fp_non_nan_domain_for_sqrt():
@@ -645,7 +652,7 @@ def test_deferred_call_abstraction_rejects_local_sqrt_replacement_target():
     assert info1.effect_class == "unknown_effect"
 
 
-def test_deferred_call_abstraction_allows_external_sqrt_thunk_target():
+def test_deferred_call_abstraction_does_not_fold_external_sqrt_thunk_target():
     target = CallTargetRef.from_name(
         "sqrt",
         entry_offset=0x5000,
@@ -663,8 +670,9 @@ def test_deferred_call_abstraction_allows_external_sqrt_thunk_target():
 
     result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=True)
 
-    assert result.applied is True
-    assert result.matches[0].match_evidence["left"]["callee_identity_policy"]["status"] == "external_library_thunk"
+    # PR-20-B3 cutover: external thunk であっても無条件要約はしない。
+    assert result.applied is False
+    assert info1.effect_class == "unknown_effect"
 
 
 def test_deferred_call_abstraction_rejects_sqrt_different_same_typed_parameter_ordinal():
@@ -684,7 +692,7 @@ def test_deferred_call_abstraction_rejects_sqrt_different_same_typed_parameter_o
     assert result.applied is False
 
 
-def test_deferred_call_abstraction_uses_policy_width_for_unknown_sqrt_usage_width():
+def test_deferred_call_abstraction_no_longer_supplies_a_policy_width_for_sqrt():
     info1 = DeferredCallInfo("sqrt@0x1000", _external_sqrt_target(), [_param("x", 0, size=8)], sequence=0)
     info2 = DeferredCallInfo("sqrt@0x2000", _external_sqrt_target(), [_param("y", 0, size=8)], sequence=0)
     analysis1 = _analysis_with_deferred_value("left", info1, value_size=0)
@@ -694,9 +702,8 @@ def test_deferred_call_abstraction_uses_policy_width_for_unknown_sqrt_usage_widt
 
     result = abstract_recursive_calls(analysis1, analysis2, assume_fp_non_nan=True)
 
-    assert result.applied is True
-    assert result.matches[0].summary_size == 8
-    assert result.analysis1.returns[0].value.size == 8
+    # 幅が観測されていないとき callee 名から宣言幅を補う経路も撤去済み。
+    assert result.applied is False
 
 
 def test_deferred_call_abstraction_rejects_side_effecting_printf():
