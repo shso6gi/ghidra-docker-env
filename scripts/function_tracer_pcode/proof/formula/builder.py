@@ -15,6 +15,10 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.core.signature import is_floating_data_type
 from scripts.function_tracer_pcode.core.render_smt import (
+    CallDeclarationConflict,
+    call_smt_declaration_lines,
+    collect_call_smt_declarations,
+    expression_contains_call,
     collect_float_predicate_smt_declarations,
     collect_intrinsic_smt_declarations,
     collect_unknown_smt_declarations,
@@ -306,6 +310,15 @@ def _rewrite_parameter_leaf_for_smt(
     )
 
 
+class CallFormulaUnsupported(ValueError):
+    """conditional lane で CALL を UF として宣言できない（fail closed）。
+
+    幅が取れない CALL、同じ symbol に別 signature を要求する CALL のいずれも
+    ここで止める。silent rename や片側優先は、証明していない値の一致を主張する
+    ことになるので行わない。
+    """
+
+
 class FormulaBuilder:
     """2つの関数解析結果からSMT式を構築"""
     
@@ -314,16 +327,24 @@ class FormulaBuilder:
         debug: bool = False,
         exclude_ub: bool = True,
         assume_fp_non_nan: bool = False,
+        allow_call: bool = False,
     ):
         """
         Args:
             debug: デバッグ出力を有効にする
             exclude_ub: UB（未定義動作）除外制約を追加する
             assume_fp_non_nan: FP引数がNaNでないことを明示前提として追加する
+            allow_call: ``ExpressionType.CALL`` を uninterpreted function として
+                受け入れる。**conditional view 由来の formula 専用**
+                (Issue #20 PR-20-B2)。既定の無条件 lane は ``False`` のままで、
+                CALL を含む通常 analysis は従来どおり unsupported として扱われる。
         """
         self.debug = debug
         self.exclude_ub = exclude_ub
         self.assume_fp_non_nan = assume_fp_non_nan
+        if type(allow_call) is not bool:
+            raise TypeError("allow_call must be an exact bool")
+        self.allow_call = allow_call
         self.variable_analyzer = VariableAnalyzer(debug=debug)
         self.ub_constraint_builder = UbConstraintBuilder(debug=debug)
     
@@ -637,6 +658,10 @@ class FormulaBuilder:
         )
         if intrinsic_decls:
             lines.extend(self._build_intrinsic_smt_declarations(intrinsic_decls))
+
+        call_decls = self._collect_call_smt_declarations(*declaration_analyses)
+        if call_decls:
+            lines.extend(self._build_call_smt_declarations(call_decls))
 
         float_predicate_decls = self._collect_float_predicate_smt_declarations(
             *declaration_analyses,
@@ -1599,6 +1624,72 @@ class FormulaBuilder:
                     extend_from_expression(arg)
 
         return declarations
+
+    def _iter_smt_lowered_expressions(self, *analyses: FunctionReturnAnalysis):
+        """実際に SMT へ流す式（return value / guard / effect surface）を列挙する。"""
+
+        for analysis in analyses:
+            if analysis is None:
+                continue
+            for expr, guards in self._iter_analysis_expressions_with_guards(analysis):
+                if expr is not None:
+                    yield expr
+                for guard in guards or ():
+                    guard_expr = getattr(guard, "expression", guard)
+                    if guard_expr is not None:
+                        yield guard_expr
+
+    def _collect_call_smt_declarations(
+        self,
+        *analyses: FunctionReturnAnalysis,
+    ) -> List[str]:
+        """lane 境界を検査し、conditional lane でだけ CALL の UF 宣言を集める。
+
+        無条件 lane (``allow_call=False``) で CALL を含む analysis を渡されたら
+        :class:`CallFormulaUnsupported` で **明示的に fail closed** にする。宣言を
+        出さないだけだと、``(call_log …)`` を含むのに ``declare-fun`` が無い不正な
+        SMT を組み立ててしまう。CALL を含まない analysis では従来どおり空を返すので、
+        既存 formula の出力は 1 バイトも変わらない。
+
+        宣言規則は condition SMT oracle と共有の ``core/render_smt`` helper が唯一の
+        実装で、同名の CALL に別 signature が要求されたら silent rename せず
+        :class:`CallFormulaUnsupported` を送出する。CALL 以外の unsupported 判定は
+        既存 gate の責務なので、ここでは触らない。
+        """
+
+        if not self.allow_call:
+            for candidate_expr in self._iter_smt_lowered_expressions(*analyses):
+                if expression_contains_call(candidate_expr):
+                    raise CallFormulaUnsupported(
+                        "the unconditional formula lane does not accept CALL applications; "
+                        "build them through a conditional view instead"
+                    )
+            return []
+
+        declarations: Dict[str, Tuple[Tuple[int, ...], int]] = {}
+        for candidate_expr in self._iter_smt_lowered_expressions(*analyses):
+            try:
+                collected = collect_call_smt_declarations(candidate_expr, declarations)
+            except CallDeclarationConflict as conflict:
+                raise CallFormulaUnsupported(str(conflict)) from conflict
+            if collected is None:
+                raise CallFormulaUnsupported(
+                    "a CALL application has no usable SMT signature"
+                )
+        return call_smt_declaration_lines(declarations)
+
+    def _build_call_smt_declarations(
+        self,
+        declarations: List[str],
+    ) -> List[str]:
+        lines: List[str] = []
+        lines.append("; " + "-" * 40)
+        lines.append("; Conditional external call declarations")
+        lines.append("; Catalog-modelled calls lowered as uninterpreted SMT functions")
+        lines.append("; " + "-" * 40)
+        lines.extend(declarations)
+        lines.append("")
+        return lines
 
     def _collect_intrinsic_smt_declarations(
         self,

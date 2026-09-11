@@ -9,6 +9,10 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core import Condition
 from scripts.function_tracer_pcode.core.structural import condition_key, key_contains_placeholder
 from scripts.function_tracer_pcode.core.render_smt import (
+    CallDeclarationConflict,
+    add_call_smt_declaration,
+    call_smt_declaration,
+    call_smt_declaration_lines,
     collect_float_predicate_smt_declarations,
     collect_unknown_smt_declarations,
     expression_uses_smt_float_theory,
@@ -170,14 +174,14 @@ class ConditionSMTOracle:
                         return False, None
                     memory_widths.add(mem_bits)
                 elif expr_type == expr_kind.CALL:
-                    call_decl = cls._collect_call_declaration(node)
-                    if call_decl is None:
+                    # 宣言規則は core/render_smt の共有 helper が唯一の実装。
+                    # 幅が取れない CALL も、同名で signature が食い違う CALL も
+                    # fail closed（従来どおり oracle は答えない）。
+                    try:
+                        if not add_call_smt_declaration(call_declarations, node):
+                            return False, None
+                    except CallDeclarationConflict:
                         return False, None
-                    call_name, arg_sorts, ret_bits = call_decl
-                    prior = call_declarations.get(call_name)
-                    if prior is not None and prior != (arg_sorts, ret_bits):
-                        return False, None
-                    call_declarations[call_name] = (arg_sorts, ret_bits)
 
             for decl in collect_unknown_smt_declarations(expr):
                 unknown_decls.add(decl)
@@ -197,11 +201,7 @@ class ConditionSMTOracle:
         for symbol_name, bit_width in sorted(unknown_decls):
             lines.append(f"(declare-const {symbol_name} (_ BitVec {bit_width}))")
         lines.extend(sorted(float_predicate_decls))
-        for call_name, (arg_sorts, ret_bits) in sorted(call_declarations.items()):
-            args = " ".join(f"(_ BitVec {bits})" for bits in arg_sorts)
-            lines.append(
-                f"(declare-fun {call_name} ({args}) (_ BitVec {ret_bits}))"
-            )
+        lines.extend(call_smt_declaration_lines(call_declarations))
         for condition in conditions:
             condition_expr = getattr(condition, "expression", None)
             if condition_expr is None:
@@ -500,27 +500,8 @@ class ConditionSMTOracle:
         cls,
         node: Any,
         ) -> Optional[Tuple[str, Tuple[int, ...], int]]:
-        expr_type = getattr(node, "expr_type", None)
-        expr_kind = getattr(expr_type, "__class__", None)
-        if expr_type is None or expr_kind is None or expr_type != expr_kind.CALL:
-            return None
-
-        call_name = cls._symbol_name(node)
-        if not call_name:
-            return None
-
-        arg_sorts = []
-        for arg in getattr(node, "operands", None) or []:
-            bits = max(1, int(expression_smt_bit_width(arg) or 0))
-            if bits <= 0:
-                return None
-            arg_sorts.append(bits)
-
-        return_bits = max(1, int(expression_smt_bit_width(node) or 0))
-        if return_bits <= 0:
-            return None
-
-        return call_name, tuple(arg_sorts), return_bits
+        """共有 helper への薄い委譲（既存呼び出し元・test のための入口）。"""
+        return call_smt_declaration(node)
 
     @classmethod
     def _iter_expression_nodes(cls, expr) -> Iterable[Any]:
