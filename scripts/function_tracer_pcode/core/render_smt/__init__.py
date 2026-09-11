@@ -7,6 +7,7 @@ from scripts.function_tracer_pcode.core.render_smt.calls import (  # noqa: F401
     call_smt_declaration,
     call_smt_declaration_lines,
     collect_call_smt_declarations,
+    expression_contains_call,
 )
 from scripts.function_tracer_pcode.core.render_smt.float_theory import (  # noqa: F401
     FLOAT_SEMANTICS_PCODE_OPERATORS,

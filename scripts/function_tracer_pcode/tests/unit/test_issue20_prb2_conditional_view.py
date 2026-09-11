@@ -31,12 +31,14 @@ from scripts.function_tracer_pcode.core.analysis import (
     ReturnInfo,
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.render_smt import (
     CallDeclarationConflict,
     call_smt_declaration,
     call_smt_declaration_lines,
     collect_call_smt_declarations,
+    expression_contains_call,
     expression_contains_unsupported_smt_ops,
 )
 from scripts.function_tracer_pcode.core.runtime_refs import (
@@ -50,6 +52,7 @@ from scripts.function_tracer_pcode.proof.assumptions import (
 )
 from scripts.function_tracer_pcode.proof.conditional_view import (
     ConditionalSemanticView,
+    build_conditional_equivalence_formula,
     create_conditional_view,
     external_callee_spec_premise,
 )
@@ -609,12 +612,47 @@ def test_unconditional_expression_gate_still_rejects_call():
     assert expression_contains_unsupported_smt_ops(call_expr, allow_call=True) is False
 
 
-def test_unconditional_builder_declares_no_call_uf():
-    builder = FormulaBuilder()
-    assert builder.allow_call is False
+def test_call_presence_predicate_matches_the_allow_call_difference():
+    call_expr = _call("log", [_param()])
+    plain = Expression.binary_op("FLOAT_ADD", _param(), Expression.constant(1, size=8))
+    assert expression_contains_call(call_expr) is True
+    assert expression_contains_call(plain) is False
+    # allow_call が作る差分と同じものを見ている。
+    assert (
+        expression_contains_unsupported_smt_ops(call_expr, allow_call=False)
+        and not expression_contains_unsupported_smt_ops(call_expr, allow_call=True)
+    )
+
+
+def test_unconditional_builder_rejects_a_call_analysis_end_to_end():
+    """宣言を出さないだけでなく、formula 構築そのものを fail closed にする。"""
     analysis, _ = _single_call_analysis()
     view = create_conditional_view(analysis, observation_policy=NO_OBSERVATION).view
-    assert builder._collect_call_smt_declarations(view.analysis) == []
+    builder = FormulaBuilder()
+    assert builder.allow_call is False
+    with pytest.raises(CallFormulaUnsupported):
+        builder.build_equivalence_formula_extended(view.analysis, view.analysis)
+    with pytest.raises(CallFormulaUnsupported):
+        builder.build_base_context(view.analysis, view.analysis)
+    with pytest.raises(CallFormulaUnsupported):
+        builder._collect_call_smt_declarations(view.analysis)
+
+
+def test_unconditional_builder_rejects_a_call_in_a_guard():
+    analysis, info = _single_call_analysis()
+    view = create_conditional_view(analysis, observation_policy=NO_OBSERVATION).view
+    call_expr = view.analysis.returns[0].value
+    guarded = view.analysis.semantic_successor(
+        returns=[
+            ReturnInfo(
+                address="0x1000",
+                value=Expression.constant(0, size=8),
+                conditions=[Condition(call_expr, False)],
+            )
+        ]
+    )
+    with pytest.raises(CallFormulaUnsupported):
+        FormulaBuilder().build_equivalence_formula_extended(guarded, guarded)
 
 
 def test_conditional_builder_declares_the_call_uf():
@@ -624,6 +662,49 @@ def test_conditional_builder_declares_the_call_uf():
     assert builder._collect_call_smt_declarations(view.analysis) == [
         "(declare-fun call_log ((_ BitVec 64)) (_ BitVec 64))"
     ]
+
+
+def test_conditional_entry_point_builds_a_declared_and_applied_formula():
+    """conditional view からは formula が組め、宣言と応用の両方が現れる。"""
+    left, _ = _single_call_analysis(binary_id="binary1")
+    right, _ = _single_call_analysis(binary_id="binary2")
+    left_view = create_conditional_view(left, observation_policy=NO_OBSERVATION).view
+    right_view = create_conditional_view(right, observation_policy=NO_OBSERVATION).view
+
+    built = build_conditional_equivalence_formula(left_view, right_view)
+    assert "(declare-fun call_log ((_ BitVec 64)) (_ BitVec 64))" in built.formula
+    # return 定義側にも UF の応用が現れる（宣言だけの formula ではない）。
+    application_lines = [
+        line
+        for line in built.formula.splitlines()
+        if "call_log" in line and not line.lstrip().startswith("(declare-fun")
+    ]
+    assert application_lines
+    # assumption は両 view の和で、最小化しない。
+    assert built.assumption_set == left_view.assumption_set
+    assert all(
+        premise.kind is AssumptionKind.EXTERNAL_CALLEE_SPEC
+        for premise in built.assumption_set
+    )
+
+
+def test_conditional_entry_point_unions_assumption_sets_without_minimizing():
+    left, _ = _single_call_analysis(candidate=_candidate("log"), binary_id="binary1")
+    right, _ = _single_call_analysis(candidate=_candidate("exp"), binary_id="binary2")
+    left_view = create_conditional_view(left, observation_policy=NO_OBSERVATION).view
+    right_view = create_conditional_view(right, observation_policy=NO_OBSERVATION).view
+    built = build_conditional_equivalence_formula(left_view, right_view)
+    assert [premise.subject for premise in built.assumption_set] == ["exp", "log"]
+    assert len(built.assumption_set) == 2
+
+
+def test_conditional_entry_point_only_accepts_conditional_views():
+    analysis, _ = _single_call_analysis()
+    view = create_conditional_view(analysis, observation_policy=NO_OBSERVATION).view
+    with pytest.raises(TypeError):
+        build_conditional_equivalence_formula(view, view.analysis)
+    with pytest.raises(TypeError):
+        build_conditional_equivalence_formula(analysis, analysis)
 
 
 def test_conditional_builder_fails_closed_on_a_signature_conflict():

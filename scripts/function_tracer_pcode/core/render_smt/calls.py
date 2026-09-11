@@ -146,6 +146,22 @@ def collect_call_smt_declarations(
     return collected
 
 
+def expression_contains_call(expr: Any) -> bool:
+    """式木に CALL 応用が含まれるか。
+
+    ``expression_contains_unsupported_smt_ops`` の ``allow_call`` が作る差分と
+    同じ対象を、他の unsupported 判定に触れずに直接見るための述語。lane 境界
+    （無条件 formula は CALL を受け付けない）の検査に使う。
+    """
+
+    for node in _iter_expression_nodes(expr):
+        expr_type = getattr(node, "expr_type", None)
+        expr_kind = getattr(expr_type, "__class__", None)
+        if expr_type is not None and expr_kind is not None and expr_type == expr_kind.CALL:
+            return True
+    return False
+
+
 def call_smt_declaration_lines(declarations: Mapping[str, Tuple[Tuple[int, ...], int]]) -> List[str]:
     """``(declare-fun ...)`` 行を決定的な順序で返す。"""
 

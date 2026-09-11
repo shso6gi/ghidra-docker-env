@@ -509,3 +509,62 @@ def create_conditional_view(
         analysis=view_analysis,
     )
     return ConditionalViewResult(view=view, call_diagnostics=tuple(diagnostics))
+
+
+# --- conditional formula entry point --------------------------------------
+
+
+@dataclass(frozen=True)
+class ConditionalEquivalenceFormula:
+    """conditional view 2 つから組んだ formula と、それが依存する仮定。
+
+    formula と assumption set を必ず一緒に運ぶための最小 adapter。receipt でも
+    verdict でもない（それらは PR-20-B3）。``assumption_set`` は両 view の和で、
+    **最小化しない**ので B3 がそのまま ``assumption_dependencies`` に使える。
+    """
+
+    formula: str
+    assumption_set: Tuple[AssumptionPremise, ...]
+    builder_result: Any = field(default=None, compare=False, hash=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if not self.assumption_set:
+            raise ValueError("a conditional formula carries a non-empty assumption set")
+
+
+def build_conditional_equivalence_formula(
+    left_view: ConditionalSemanticView,
+    right_view: ConditionalSemanticView,
+    **builder_kwargs: Any,
+) -> ConditionalEquivalenceFormula:
+    """conditional view 由来の formula を組む **唯一の入口**。
+
+    ``FormulaBuilder(allow_call=True)`` を production 側で直接使わせないための薄い
+    adapter。``view.analysis`` 以外を conditional builder へ渡す経路を作らない。
+    lane の起動・receipt 発行・verdict は PR-20-B3 の責務で、ここにはない。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+
+    for view in (left_view, right_view):
+        if type(view) is not ConditionalSemanticView:
+            raise TypeError(
+                "conditional formulas are built from ConditionalSemanticView only"
+            )
+    builder = FormulaBuilder(allow_call=True, **builder_kwargs)
+    result = builder.build_equivalence_formula_extended(
+        left_view.analysis,
+        right_view.analysis,
+    )
+    # dependency minimization はしない。両 view の assumption をそのまま合わせる。
+    assumption_set = normalize_assumption_premises(
+        sorted(
+            (*left_view.assumption_set, *right_view.assumption_set),
+            key=lambda premise: premise.premise_key(),
+        )
+    )
+    return ConditionalEquivalenceFormula(
+        formula=result.formula,
+        assumption_set=assumption_set,
+        builder_result=result,
+    )

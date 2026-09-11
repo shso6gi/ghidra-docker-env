@@ -18,6 +18,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
     CallDeclarationConflict,
     call_smt_declaration_lines,
     collect_call_smt_declarations,
+    expression_contains_call,
     collect_float_predicate_smt_declarations,
     collect_intrinsic_smt_declarations,
     collect_unknown_smt_declarations,
@@ -1624,36 +1625,57 @@ class FormulaBuilder:
 
         return declarations
 
-    def _collect_call_smt_declarations(
-        self,
-        *analyses: FunctionReturnAnalysis,
-    ) -> List[str]:
-        """conditional lane でだけ CALL の UF 宣言を集める。
+    def _iter_smt_lowered_expressions(self, *analyses: FunctionReturnAnalysis):
+        """実際に SMT へ流す式（return value / guard / effect surface）を列挙する。"""
 
-        無条件 lane (``allow_call=False``) では常に空を返すので、既存 formula の
-        出力は 1 バイトも変わらない。宣言規則は condition SMT oracle と共有の
-        ``core/render_smt`` helper が唯一の実装で、同名の CALL に別 signature が
-        要求されたら silent rename せず :class:`CallFormulaUnsupported` を送出する。
-        """
-
-        if not self.allow_call:
-            return []
-        declarations: Dict[str, Tuple[Tuple[int, ...], int]] = {}
         for analysis in analyses:
             if analysis is None:
                 continue
             for expr, guards in self._iter_analysis_expressions_with_guards(analysis):
-                for candidate_expr in (expr, *(
-                    getattr(guard, "expression", guard) for guard in guards or ()
-                )):
-                    try:
-                        collected = collect_call_smt_declarations(candidate_expr, declarations)
-                    except CallDeclarationConflict as conflict:
-                        raise CallFormulaUnsupported(str(conflict)) from conflict
-                    if collected is None:
-                        raise CallFormulaUnsupported(
-                            "a CALL application has no usable SMT signature"
-                        )
+                if expr is not None:
+                    yield expr
+                for guard in guards or ():
+                    guard_expr = getattr(guard, "expression", guard)
+                    if guard_expr is not None:
+                        yield guard_expr
+
+    def _collect_call_smt_declarations(
+        self,
+        *analyses: FunctionReturnAnalysis,
+    ) -> List[str]:
+        """lane 境界を検査し、conditional lane でだけ CALL の UF 宣言を集める。
+
+        無条件 lane (``allow_call=False``) で CALL を含む analysis を渡されたら
+        :class:`CallFormulaUnsupported` で **明示的に fail closed** にする。宣言を
+        出さないだけだと、``(call_log …)`` を含むのに ``declare-fun`` が無い不正な
+        SMT を組み立ててしまう。CALL を含まない analysis では従来どおり空を返すので、
+        既存 formula の出力は 1 バイトも変わらない。
+
+        宣言規則は condition SMT oracle と共有の ``core/render_smt`` helper が唯一の
+        実装で、同名の CALL に別 signature が要求されたら silent rename せず
+        :class:`CallFormulaUnsupported` を送出する。CALL 以外の unsupported 判定は
+        既存 gate の責務なので、ここでは触らない。
+        """
+
+        if not self.allow_call:
+            for candidate_expr in self._iter_smt_lowered_expressions(*analyses):
+                if expression_contains_call(candidate_expr):
+                    raise CallFormulaUnsupported(
+                        "the unconditional formula lane does not accept CALL applications; "
+                        "build them through a conditional view instead"
+                    )
+            return []
+
+        declarations: Dict[str, Tuple[Tuple[int, ...], int]] = {}
+        for candidate_expr in self._iter_smt_lowered_expressions(*analyses):
+            try:
+                collected = collect_call_smt_declarations(candidate_expr, declarations)
+            except CallDeclarationConflict as conflict:
+                raise CallFormulaUnsupported(str(conflict)) from conflict
+            if collected is None:
+                raise CallFormulaUnsupported(
+                    "a CALL application has no usable SMT signature"
+                )
         return call_smt_declaration_lines(declarations)
 
     def _build_call_smt_declarations(
