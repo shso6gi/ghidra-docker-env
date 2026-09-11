@@ -714,6 +714,22 @@ def test_the_lane_never_raises_out_of_production():
     assert result.final_outcome == Outcome.UNKNOWN.value
 
 
+def test_lane_diagnostics_reach_the_serialized_result():
+    """lane が回ったことを結果 JSON から観測できる（判定には効かない）。"""
+    from scripts.function_tracer_pcode.checker.diagnostics import (
+        result_diagnostics_payload,
+    )
+
+    result = type("_R", (), {})()
+    result.diagnostics = {"conditional_lane": {"conditional_lane": "issued"}}
+    payload = result_diagnostics_payload(result)
+    assert payload["conditional_lane"] == {"conditional_lane": "issued"}
+    # lane が回っていない結果では None のまま。
+    empty = type("_R", (), {})()
+    empty.diagnostics = {}
+    assert result_diagnostics_payload(empty)["conditional_lane"] is None
+
+
 def test_the_proof_layer_does_not_import_the_authority_layer():
     import ast
 
