@@ -18,10 +18,32 @@ UNKNOWN でも view が立たない・仮定が成立しない・formula が組�
 **discharge 規則**: conditional lane が持ち込む事実は「modelled した外部 callee が
 catalog 仕様どおりに振る舞い、observable memory write が無く、normal return する」
 という仮定と、その callsite を同名 UF として左右そろって扱う formula だけである。
-したがって conditional projection から落としてよい active cause は、その 2 つが
-置き換える理由だけに限る。ここに無い理由（outcome partition、ABI 幅、recurrence、
-argument extraction など）は残り、``finalize_conditional_decision`` の
-``blocks_equivalence`` / ``blocks_decision`` 判定でそのまま効く（= fail closed）。
+したがって conditional projection から落とせる active cause は
+
+1. reason id が :data:`ASSUMPTION_DISCHARGED_REASON_IDS` にあり、**かつ**
+2. その cause occurrence が **仮定で写像した callsite そのもの**に bind されている
+
+ものだけに限る。**reason id 単位では落とさない。** 同じ
+``callsite_correspondence_unproven`` でも、写像していない internal call 由来の
+occurrence は残す ―― external callee の仮定はそれを discharge する根拠にならない。
+
+対応付けは既存の typed identity をそのまま使う（新しい identity を作らない）:
+
+    c_active_base row (occurrence_id, cause_id)
+      → 同じ pair の UnknownReasonRecord.typed_cause_key で join
+      → record.object_target_key
+         = (target_kind, "call_effect_prerequisite", obligation_id,
+            observation_contract_id, left_fact_id, right_fact_id,
+            structural_certificate_id)                   ← call_effect 域の cause 鍵
+      → call-effect shadow manifest の left_facts / right_facts で
+         fact_id → CallSiteFact.identity.pcode_op_key    ← 既存の object identity
+      → proof artifact が運んだ modelled callsite の PcodeOpRef.stable_key() と一致
+
+いずれかが解決できなければ **その cause は落とさない**（fail closed）。occurrence 数・
+並び順・reason 名の一致は対応根拠にしない。ここで落とせなかった理由（outcome
+partition、ABI 幅、recurrence、argument extraction など）は残り、
+``finalize_conditional_decision`` の ``blocks_equivalence`` / ``blocks_decision``
+判定でそのまま効く。
 """
 
 from __future__ import annotations
@@ -69,41 +91,247 @@ ASSUMPTION_DISCHARGED_REASON_IDS = frozenset({
 })
 
 
+#: call-effect 域の prerequisite cause 鍵のタグ（``_prerequisite_authority`` が作る）。
+CALL_EFFECT_PREREQUISITE_TARGET_TAG = "call_effect_prerequisite"
+_PREREQUISITE_TARGET_KEY_LENGTH = 7
+_PREREQUISITE_LEFT_FACT_SLOT = 4
+_PREREQUISITE_RIGHT_FACT_SLOT = 5
+
+
+def _canonical_key(value: Any) -> Any:
+    """list / tuple を再帰的に tuple へ揃える（JSON 往復で形だけ変わるため）。"""
+
+    if isinstance(value, (list, tuple)):
+        return tuple(_canonical_key(item) for item in value)
+    return value
+
+
+def _cause_target_keys(result: Any) -> Mapping[Tuple[str, str], Any]:
+    """``(occurrence_id, cause_id) -> object_target_key``。
+
+    同じ cause に食い違う target key が付いていたら ``None`` を値にして、
+    その cause は対応付け不能（= discharge しない）ことを表す。
+    """
+
+    keys: dict = {}
+    for record in getattr(result, "unknown_reasons", None) or ():
+        typed_cause_key = getattr(record, "typed_cause_key", None)
+        if not isinstance(typed_cause_key, Mapping):
+            continue
+        occurrence_id = typed_cause_key.get("occurrence_id")
+        cause_id = typed_cause_key.get("cause_id")
+        target_key = _canonical_key(getattr(record, "object_target_key", None))
+        if not occurrence_id or not cause_id or not target_key:
+            continue
+        identity = (str(occurrence_id), str(cause_id))
+        if identity in keys and keys[identity] != target_key:
+            keys[identity] = None
+            continue
+        keys[identity] = target_key
+    return keys
+
+
+def _fact_pcode_keys(manifest: Any, side: str) -> Mapping[str, Any]:
+    """``fact_id -> CallSiteFact.identity.pcode_op_key`` を manifest から読む。"""
+
+    if not isinstance(manifest, Mapping):
+        return {}
+    rows = manifest.get(side) or ()
+    resolved: dict = {}
+    for fact in rows:
+        if not isinstance(fact, Mapping):
+            continue
+        fact_id = fact.get("fact_id")
+        identity = fact.get("identity")
+        if not fact_id or not isinstance(identity, Mapping):
+            continue
+        pcode_op_key = _canonical_key(identity.get("pcode_op_key"))
+        if not pcode_op_key:
+            continue
+        resolved[str(fact_id)] = pcode_op_key
+    return resolved
+
+
+def conditional_discharged_causes(
+    projection: VerifiedLifecycleProjection,
+    *,
+    result: Any,
+    artifact: Any,
+) -> frozenset:
+    """仮定が実際に引き受けた ``(occurrence_id, cause_id)`` だけを返す。
+
+    対応を既存 authority / evidence から証明できない cause は返さない
+    （= conditional projection に残る）。
+    """
+
+    if not bool(getattr(artifact, "modelled_call_sites_complete", False)):
+        return frozenset()
+    modelled: dict = {"function1": set(), "function2": set()}
+    for side, identity in getattr(artifact, "modelled_call_sites", ()) or ():
+        if side not in modelled:
+            return frozenset()
+        modelled[side].add(_canonical_key(identity))
+    if not (modelled["function1"] or modelled["function2"]):
+        return frozenset()
+
+    manifest = getattr(result, "call_effect_shadow_manifest", None)
+    left_facts = _fact_pcode_keys(manifest, "left_facts")
+    right_facts = _fact_pcode_keys(manifest, "right_facts")
+    if not left_facts and not right_facts:
+        return frozenset()
+    target_keys = _cause_target_keys(result)
+
+    discharged = set()
+    for row in projection.c_active_base:
+        if row.reason_id not in ASSUMPTION_DISCHARGED_REASON_IDS:
+            continue
+        target_key = target_keys.get((row.occurrence_id, row.cause_id))
+        if not target_key or len(target_key) != _PREREQUISITE_TARGET_KEY_LENGTH:
+            continue
+        if target_key[1] != CALL_EFFECT_PREREQUISITE_TARGET_TAG:
+            continue
+        endpoints = (
+            ("function1", left_facts, target_key[_PREREQUISITE_LEFT_FACT_SLOT]),
+            ("function2", right_facts, target_key[_PREREQUISITE_RIGHT_FACT_SLOT]),
+        )
+        if all(fact_id is None for _side, _facts, fact_id in endpoints):
+            continue
+        bound = True
+        for side, facts, fact_id in endpoints:
+            if fact_id is None:
+                continue
+            pcode_op_key = facts.get(str(fact_id))
+            if pcode_op_key is None or pcode_op_key not in modelled[side]:
+                bound = False
+                break
+        if bound:
+            discharged.add((row.occurrence_id, row.cause_id))
+    return frozenset(discharged)
+
+
+def _as_mapping(value: Any) -> Optional[dict]:
+    """Mapping か、``canonical_value`` が作る ``((key, value), ...)`` を dict にする。
+
+    ``VerifiedLifecycleProjection.seal`` は satisfaction projection を
+    ``canonical_value`` へ通すので、封じる前（Mapping）と封じた後（pair tuple）で
+    形が変わる。どちらでも同じ規則で扱えるようにする。
+    """
+
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, tuple) and value and all(
+        isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str)
+        for item in value
+    ):
+        return dict(value)
+    return None
+
+
+def _satisfaction_row_identity(row: Any) -> Optional[Tuple[str, str]]:
+    fields = _as_mapping(row)
+    if fields is None:
+        return None
+    occurrence_id = fields.get("occurrence_id")
+    cause_id = fields.get("cause_id")
+    if occurrence_id is None or cause_id is None:
+        return None
+    return (str(occurrence_id), str(cause_id))
+
+
+def _satisfaction_without(projection: Any, removed: frozenset) -> Any:
+    """discharge した occurrence の satisfaction 行を落とす。
+
+    ``seal()`` は satisfaction projection の中身を検査しないので、ここで
+    整合させないと「c_active から消えたのに satisfaction では active のまま」
+    という派生情報の食い違いが残る。行の形が読めなければ落とさない（fail closed
+    ではなく、そのまま持ち越して整合検査で弾く）。
+    """
+
+    satisfaction = projection.satisfaction_projection
+    fields = _as_mapping(satisfaction)
+    if fields is None:
+        return satisfaction
+    rows = fields.get("occurrences")
+    if not isinstance(rows, (list, tuple)):
+        return satisfaction
+    kept = tuple(
+        row for row in rows
+        if _satisfaction_row_identity(row) not in removed
+    )
+    fields["occurrences"] = kept
+    return fields
+
+
+def _assert_conditional_projection_consistent(
+    lane_projection: VerifiedLifecycleProjection,
+    *,
+    removed: frozenset,
+) -> None:
+    """封じ直した projection の派生情報が整合していることを確かめる。
+
+    ``seal()`` が通ることだけを根拠にしない。落とした occurrence がどこにも
+    残っていないこと、open requirement と active cause が対応すること、
+    satisfaction の active 行と c_active_base が一致することを直接検査する。
+    """
+
+    active = {
+        (row.occurrence_id, row.cause_id) for row in lane_projection.c_active_base
+    }
+    if active & removed:
+        raise ValueError("discharged cause is still active in the conditional projection")
+    for row in lane_projection.q_open_base:
+        if (row.occurrence_id, row.cause_id) in removed:
+            raise ValueError("discharged cause still has an open proof requirement")
+        if (row.occurrence_id, row.cause_id) not in active:
+            raise ValueError("conditional projection open requirement lacks its cause")
+    fields = _as_mapping(lane_projection.satisfaction_projection) or {}
+    rows = fields.get("occurrences") or ()
+    satisfied_active = set()
+    for row in rows:
+        identity = _satisfaction_row_identity(row)
+        if identity is None:
+            raise ValueError("conditional projection satisfaction row is unreadable")
+        if identity in removed:
+            raise ValueError("discharged cause still has a satisfaction row")
+        if (_as_mapping(row) or {}).get("active"):
+            satisfied_active.add(identity)
+    if satisfied_active != active:
+        raise ValueError("conditional projection satisfaction rows disagree with c_active_base")
+
+
 def conditional_lane_projection(
     projection: VerifiedLifecycleProjection,
     *,
-    discharged_reason_ids: Sequence[str],
+    discharged_causes: Sequence[Tuple[str, str]],
 ) -> VerifiedLifecycleProjection:
-    """discharge した cause だけを落とした conditional projection を封する。
+    """引き受けた cause occurrence だけを落とした conditional projection を封する。
 
-    落とした cause にぶら下がる open requirement も一緒に落とす（``seal`` は
-    「open requirement には対応する active cause が要る」を検査する）。
+    落とした cause にぶら下がる open requirement と satisfaction 行も一緒に落とす。
     blocker eligibility 行はそのまま残す ―― 観測事実は仮定では消えない。
     """
 
     projection.validate()
-    discharged = frozenset(discharged_reason_ids)
-    if not discharged:
+    removed = frozenset((str(occ), str(cause)) for occ, cause in discharged_causes)
+    if not removed:
         return projection
     kept_causes = tuple(
-        row for row in projection.c_active_base if row.reason_id not in discharged
+        row for row in projection.c_active_base
+        if (row.occurrence_id, row.cause_id) not in removed
     )
-    kept_cause_keys = {
-        (row.result_occurrence_id, row.occurrence_id, row.cause_id)
-        for row in kept_causes
-    }
     kept_requirements = tuple(
         row for row in projection.q_open_base
-        if (row.result_occurrence_id, row.occurrence_id, row.cause_id) in kept_cause_keys
+        if (row.occurrence_id, row.cause_id) not in removed
     )
-    return VerifiedLifecycleProjection.seal(
+    lane_projection = VerifiedLifecycleProjection.seal(
         result_occurrence_id=projection.result_occurrence_id,
         snapshot_digest=projection.snapshot_digest,
         c_active_base=kept_causes,
         q_open_base=kept_requirements,
         blocker_eligibility_base=projection.blocker_eligibility_base,
-        satisfaction_projection=projection.satisfaction_projection,
+        satisfaction_projection=_satisfaction_without(projection, removed),
     )
+    _assert_conditional_projection_consistent(lane_projection, removed=removed)
+    return lane_projection
 
 
 _PROOF_KIND_BY_NAME = {
@@ -128,6 +356,7 @@ def issue_conditional_decision(
     unconditional_decision: DecisionReceipt,
     projection: VerifiedLifecycleProjection,
     artifact: Any,
+    result: Any = None,
 ) -> Any:
     """proof artifact を conditional 列の ``ConditionalDecisionReceipt`` にする。
 
@@ -148,8 +377,13 @@ def issue_conditional_decision(
         proof_kind = _PROOF_KIND_BY_NAME.get(str(proof_kind_name))
         if proof_kind is None:
             raise ValueError(f"unknown conditional proof kind: {proof_kind_name}")
+        # 仮定が実際に引き受けた cause occurrence だけを落とす。対応を証明
+        # できなければ 1 つも落とさず、残った blocker がそのまま効く。
+        discharged = conditional_discharged_causes(
+            projection, result=result, artifact=artifact
+        )
         lane_projection = conditional_lane_projection(
-            projection, discharged_reason_ids=ASSUMPTION_DISCHARGED_REASON_IDS
+            projection, discharged_causes=discharged
         )
         receipts = (
             ConditionalDecisiveProofReceipt.create(
@@ -230,6 +464,7 @@ def run_production_conditional_lane(
             unconditional_decision=decision,
             projection=projection,
             artifact=artifact,
+            result=result,
         )
         attach_conditional_decision(result, receipt)
     except Exception as exc:  # noqa: BLE001
@@ -243,6 +478,9 @@ def run_production_conditional_lane(
         "conditional_outcome": receipt.conditional_outcome.value,
         "proof_kind": artifact.proof_kind,
         "assumption_count": len(artifact.assumption_set),
+        "discharged_cause_count": len(
+            conditional_discharged_causes(projection, result=result, artifact=artifact)
+        ),
         "non_decisive_reasons": list(artifact.non_decisive_reasons),
         "diagnostics": dict(artifact.diagnostics),
     }

@@ -40,7 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Sequence, Tuple
+from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core.render_smt import expression_contains_call
 from scripts.function_tracer_pcode.proof.assumptions import (
@@ -100,6 +100,12 @@ class ConditionalProofArtifact:
     assumption_set: Tuple[AssumptionPremise, ...]
     artifact_digest: str
     modelled_call_count: int = 0
+    #: 写像した callsite の object identity。``(side, pcode_op_stable_key)``。
+    #: authority 側が「どの cause occurrence を仮定が引き受けたか」を exact に
+    #: 突き合わせるための唯一の根拠で、1 つでも identity が取れなければ
+    #: ``modelled_call_sites_complete`` が False になり discharge は行われない。
+    modelled_call_sites: Tuple[Tuple[str, Tuple[Any, ...]], ...] = ()
+    modelled_call_sites_complete: bool = False
     all_calls_modelled: bool = False
     unsupported_calls_all_modelled: bool = False
     non_decisive_reasons: Tuple[str, ...] = ()
@@ -132,6 +138,8 @@ def _non_decisive(
     modelled_call_count: int = 0,
     all_calls_modelled: bool = False,
     unsupported_calls_all_modelled: bool = False,
+    modelled_call_sites: Sequence[Tuple[str, Tuple[Any, ...]]] = (),
+    modelled_call_sites_complete: bool = False,
 ) -> ConditionalProofArtifact:
     return ConditionalProofArtifact(
         proof_kind=None,
@@ -144,6 +152,8 @@ def _non_decisive(
             }
         ),
         modelled_call_count=modelled_call_count,
+        modelled_call_sites=tuple(modelled_call_sites),
+        modelled_call_sites_complete=modelled_call_sites_complete,
         all_calls_modelled=all_calls_modelled,
         unsupported_calls_all_modelled=unsupported_calls_all_modelled,
         non_decisive_reasons=tuple(reasons),
@@ -188,6 +198,39 @@ def view_lowers_uninterpreted_call(view: ConditionalSemanticView) -> bool:
             if expression_contains_call(getattr(condition, "expression", None)):
                 return True
     return False
+
+
+def modelled_call_site_identities(
+    analysis: Any,
+    view: ConditionalSemanticView,
+) -> Optional[Tuple[Tuple[Any, ...], ...]]:
+    """view が写像した callsite の ``PcodeOpRef.stable_key()`` 集合。
+
+    1 つでも identity が取れない、あるいは写像した数と一致しないなら ``None``
+    （fail closed）。この key は call-effect 側の ``CallSiteFact.identity``
+    (``ArtifactObjectIdentity.pcode_op_key``) と同じ object identity なので、
+    別実装の対応付けを作らずに cause occurrence へ突き合わせられる。
+    """
+
+    modelled = {model.deferred_call_key for model in view.call_models}
+    keys = []
+    for info in (getattr(analysis, "deferred_calls", None) or {}).values():
+        deferred_call_ref = getattr(info, "deferred_call_ref", None)
+        stable_key = getattr(deferred_call_ref, "stable_key", None)
+        deferred_key = stable_key() if callable(stable_key) else None
+        if deferred_key not in modelled:
+            continue
+        pcode_op_ref = getattr(deferred_call_ref, "pcode_op_ref", None)
+        op_key = getattr(pcode_op_ref, "stable_key", None)
+        if not callable(op_key):
+            return None
+        key = op_key()
+        if not key:
+            return None
+        keys.append(tuple(key))
+    if len(keys) != len(modelled):
+        return None
+    return tuple(keys)
 
 
 def unsupported_calls_are_modelled(analysis: Any, view: ConditionalSemanticView) -> bool:
@@ -323,6 +366,20 @@ def run_conditional_proof(
     )
     diagnostics["unsupported_calls_all_modelled"] = unsupported_modelled
 
+    call_sites: List[Tuple[str, Tuple[Any, ...]]] = []
+    sites_complete = True
+    for label, analysis, view in (
+        ("function1", analysis1, left_view),
+        ("function2", analysis2, right_view),
+    ):
+        identities = modelled_call_site_identities(analysis, view)
+        if identities is None:
+            sites_complete = False
+            continue
+        call_sites.extend((label, identity) for identity in identities)
+    modelled_call_sites = tuple(call_sites)
+    diagnostics["modelled_call_sites_complete"] = sites_complete
+
     try:
         built = build_conditional_equivalence_formula(left_view, right_view, debug=debug)
     except (ValueError, TypeError) as exc:
@@ -379,6 +436,8 @@ def run_conditional_proof(
         "modelled_call_count": modelled_call_count,
         "all_calls_modelled": True,
         "unsupported_calls_all_modelled": unsupported_modelled,
+        "modelled_call_sites": modelled_call_sites,
+        "modelled_call_sites_complete": sites_complete,
     }
 
     if disposition is True:

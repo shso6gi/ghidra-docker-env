@@ -37,6 +37,8 @@ from scripts.function_tracer_pcode.authority.decision.conditional import (
 )
 from scripts.function_tracer_pcode.authority.decision.conditional_lane import (
     ASSUMPTION_DISCHARGED_REASON_IDS,
+    CALL_EFFECT_PREREQUISITE_TARGET_TAG,
+    conditional_discharged_causes,
     conditional_lane_is_eligible,
     conditional_lane_projection,
     issue_conditional_decision,
@@ -58,6 +60,7 @@ from scripts.function_tracer_pcode.core.expression import Expression
 from scripts.function_tracer_pcode.core.runtime_refs import (
     CallModelCandidateRef,
     DeferredCallRef,
+    PcodeOpRef,
 )
 from scripts.function_tracer_pcode.proof import conditional_lane as lane_module
 from scripts.function_tracer_pcode.proof.conditional_lane import (
@@ -73,6 +76,7 @@ from scripts.function_tracer_pcode.proof.conditional_lane import (
 
 NO_OBSERVATION = ExternalCallEffectPolicy()
 CALL_REASON_ID = "pure_call_semantics_unproven"
+CORRESPONDENCE_REASON_ID = "callsite_correspondence_unproven"
 OTHER_REASON_ID = "outcome_path_region_completeness_unproven"
 RESULT_ID = "result-b3"
 
@@ -103,7 +107,27 @@ def _param(name="x", index=0, size=8):
     return Expression.parameter(name, index=index, data_type="double", size=size)
 
 
-def _analysis(*, symbol="log", binary_id="binary1", entry=0x1000, recovery_status="complete"):
+def _op_ref(binary_id, offset, entry=0x1000):
+    return PcodeOpRef(
+        address_offset=offset,
+        seq_time=offset,
+        seq_order=1,
+        block_index=0,
+        mnemonic="CALL",
+        binary_id=binary_id,
+        function_entry_space="ram",
+        function_entry_offset=entry,
+        target_space="ram",
+        target_offset=offset,
+        local_op_ordinal=1,
+        program_uid=entry,
+    )
+
+
+def _analysis(
+    *, symbol="log", binary_id="binary1", entry=0x1000, recovery_status="complete",
+    op_offset=0x1100,
+):
     candidate = _candidate(symbol)
     target_ref = CallTargetRef.from_name(symbol, program_id=entry, entry_offset=entry + 1)
     info = DeferredCallInfo(
@@ -113,6 +137,7 @@ def _analysis(*, symbol="log", binary_id="binary1", entry=0x1000, recovery_statu
         deferred_call_ref=DeferredCallRef(
             caller_program_id=entry,
             caller_entry_offset=entry,
+            pcode_op_ref=_op_ref(binary_id, op_offset, entry=entry),
             target_ref=target_ref,
             sequence=1,
         ),
@@ -147,28 +172,135 @@ class _Solver:
 # --- authority fixtures -----------------------------------------------------
 
 
-def _projection(*, reason_ids=(CALL_REASON_ID,), result_id=RESULT_ID, decision_effect="blocks_decision"):
-    causes = tuple(
+#: 1 本の cause occurrence を表すテスト用の記述。``left`` / ``right`` は
+#: ``(fact_id, pcode_op_key)`` で、None 側は「その側に callsite が無い」。
+def _cause(reason_id, *, index, left=None, right=None,
+           target_kind="call_semantic_obligation", prerequisite=True):
+    return {
+        "reason_id": reason_id,
+        "occurrence_id": f"occ-{index}",
+        "cause_id": f"cause-{index}",
+        "left": left,
+        "right": right,
+        "target_kind": target_kind,
+        "prerequisite": prerequisite,
+    }
+
+
+def _projection(*, causes=None, reason_ids=(CALL_REASON_ID,), result_id=RESULT_ID,
+                decision_effect="blocks_decision"):
+    causes = causes if causes is not None else _default_causes(reason_ids)
+    rows = tuple(
         CActiveBaseRow(
-            result_id, f"occ-{index}", f"cause-{index}", reason_id,
-            "expression_call_effect_memory", decision_effect, "call_semantic_obligation",
+            result_id, spec["occurrence_id"], spec["cause_id"], spec["reason_id"],
+            "expression_call_effect_memory", decision_effect, spec["target_kind"],
         )
-        for index, reason_id in enumerate(reason_ids)
+        for spec in causes
     )
     return VerifiedLifecycleProjection.seal(
         result_occurrence_id=result_id,
         snapshot_digest="snapshot",
-        c_active_base=causes,
+        c_active_base=rows,
         q_open_base=tuple(
             QOpenBaseRow(result_id, row.occurrence_id, row.cause_id, f"req-{index}", "call", "target")
-            for index, row in enumerate(causes)
+            for index, row in enumerate(rows)
         ),
         blocker_eligibility_base=tuple(
             BlockerEligibilityBaseRow(result_id, row.occurrence_id, row.cause_id)
-            for row in causes
+            for row in rows
         ),
-        satisfaction_projection={"live": tuple(f"req-{index}" for index in range(len(causes)))},
+        satisfaction_projection={
+            "occurrences": tuple(
+                {
+                    "occurrence_id": row.occurrence_id,
+                    "cause_id": row.cause_id,
+                    "live_requirement_ids": (f"req-{index}",),
+                    "active": True,
+                }
+                for index, row in enumerate(rows)
+            ),
+            "execution_event_digests": (),
+        },
     )
+
+
+def _prerequisite_target_key(spec):
+    """`_prerequisite_authority` が作るのと同じ形の canonical target key。"""
+    left = spec["left"][0] if spec["left"] else None
+    right = spec["right"][0] if spec["right"] else None
+    return (
+        spec["target_kind"],
+        CALL_EFFECT_PREREQUISITE_TARGET_TAG,
+        "obligation-" + spec["cause_id"],
+        "observation-contract",
+        left,
+        right,
+        "structural-certificate",
+    )
+
+
+class _ReasonRecord:
+    """production の `UnknownReasonRecord` のうち binding が読む面だけ。"""
+
+    def __init__(self, spec):
+        self.reason_id = spec["reason_id"]
+        self.object_target_key = (
+            _prerequisite_target_key(spec) if spec["prerequisite"] else
+            ("function_outcome_seed_stage", "unary-target", spec["cause_id"])
+        )
+        self.typed_cause_key = {
+            "occurrence_id": spec["occurrence_id"],
+            "cause_id": spec["cause_id"],
+            "reason_id": spec["reason_id"],
+        }
+
+
+def _manifest_for(causes):
+    """cause 記述から call-effect shadow manifest の fact 面を作る。"""
+    left_rows, right_rows = [], []
+    for spec in causes:
+        for endpoint, rows in ((spec["left"], left_rows), (spec["right"], right_rows)):
+            if not endpoint:
+                continue
+            fact_id, pcode_op_key = endpoint
+            if pcode_op_key is None:
+                continue
+            rows.append(
+                {"fact_id": fact_id, "identity": {"pcode_op_key": list(pcode_op_key)}}
+            )
+    return {"left_facts": left_rows, "right_facts": right_rows}
+
+
+def _satisfaction_occurrences(projection):
+    """封じた projection の satisfaction 行（canonical な pair tuple）を読む。"""
+    fields = dict(projection.satisfaction_projection)
+    return {dict(row)["occurrence_id"] for row in fields["occurrences"]}
+
+
+def _call_site_key(analysis):
+    info = next(iter(analysis.deferred_calls.values()))
+    return info.deferred_call_ref.pcode_op_ref.stable_key()
+
+
+#: 既定 fixture が写像する callsite の object identity。
+LEFT_SITE = _op_ref("binary1", 0x1100).stable_key()
+RIGHT_SITE = _op_ref("binary2", 0x2100, entry=0x2000).stable_key()
+#: 写像していない別 callsite の object identity（internal call を模す）。
+UNRELATED_LEFT_SITE = _op_ref("binary1", 0x1900).stable_key()
+UNRELATED_RIGHT_SITE = _op_ref("binary2", 0x2900, entry=0x2000).stable_key()
+
+
+def _default_causes(reason_ids=(CALL_REASON_ID,)):
+    """写像した callsite に bind された既定の cause 記述。"""
+    return [
+        _cause(
+            reason_id,
+            index=index,
+            left=(f"fact-left-{index}", LEFT_SITE),
+            right=(f"fact-right-{index}", RIGHT_SITE),
+        )
+        for index, reason_id in enumerate(reason_ids)
+    ]
 
 
 def _decision(outcome=Outcome.UNKNOWN, *, projection=None):
@@ -216,9 +348,10 @@ def _decision(outcome=Outcome.UNKNOWN, *, projection=None):
 
 
 class _Result:
-    """production_cutover が読む最小の result 面。"""
+    """production_cutover / discharge binding が読む最小の result 面。"""
 
-    def __init__(self, decision):
+    def __init__(self, decision, *, causes=None):
+        causes = causes if causes is not None else _default_causes()
         self.decision_receipt = decision
         self.final_outcome = decision.outcome.value
         self.is_equivalent = {
@@ -226,6 +359,8 @@ class _Result:
         }.get(decision.outcome, None)
         self.conditional_decision_receipt = None
         self.conditional_outcome = None
+        self.unknown_reasons = [_ReasonRecord(spec) for spec in causes]
+        self.call_effect_shadow_manifest = _manifest_for(causes)
 
 
 def _run_lane(result, projection, analyses, *, disposition=True, policy=NO_OBSERVATION):
@@ -239,15 +374,29 @@ def _run_lane(result, projection, analyses, *, disposition=True, policy=NO_OBSER
 
 
 def _both_analyses():
-    return _analysis(binary_id="binary1"), _analysis(binary_id="binary2", entry=0x2000)
+    return (
+        _analysis(binary_id="binary1", op_offset=0x1100),
+        _analysis(binary_id="binary2", entry=0x2000, op_offset=0x2100),
+    )
+
+
+def _pair(reason_ids=(CALL_REASON_ID,), *, causes=None,
+          decision_effect="blocks_decision", outcome=Outcome.UNKNOWN):
+    """同じ cause 記述から projection と result を作る。"""
+    causes = causes if causes is not None else _default_causes(reason_ids)
+    projection = _projection(causes=causes, decision_effect=decision_effect)
+    decision = (
+        _decision(outcome, projection=projection) if outcome is Outcome.UNKNOWN
+        else _decision(outcome)
+    )
+    return projection, _Result(decision, causes=causes)
 
 
 # --- lane activation --------------------------------------------------------
 
 
 def test_lane_runs_after_an_unconditional_unknown_with_eligible_views():
-    projection = _projection()
-    result = _Result(_decision(Outcome.UNKNOWN, projection=projection))
+    projection, result = _pair()
     diagnostics = _run_lane(result, projection, _both_analyses())
 
     assert diagnostics is not None and diagnostics["conditional_lane"] == "issued"
@@ -275,16 +424,14 @@ def test_lane_never_runs_after_a_timeout():
     """
     fake = type("_D", (), {"outcome": Outcome.TIMEOUT})()
     assert conditional_lane_is_eligible(fake) is False
-    projection = _projection()
-    result = _Result(_decision(Outcome.UNKNOWN, projection=projection))
+    projection, result = _pair()
     result.decision_receipt = fake
     assert _run_lane(result, projection, _both_analyses()) is None
     assert result.conditional_decision_receipt is None
 
 
 def test_unknown_without_a_constructible_view_issues_no_conditional_receipt():
-    projection = _projection()
-    result = _Result(_decision(Outcome.UNKNOWN, projection=projection))
+    projection, result = _pair()
     # 引数証拠が未証明なら view は立たない。
     analyses = (
         _analysis(binary_id="binary1", recovery_status="partial"),
@@ -298,8 +445,7 @@ def test_unknown_without_a_constructible_view_issues_no_conditional_receipt():
 
 
 def test_lane_does_not_run_without_bound_analyses():
-    projection = _projection()
-    result = _Result(_decision(Outcome.UNKNOWN, projection=projection))
+    projection, result = _pair()
     assert _run_lane(result, projection, None) is None
     assert result.conditional_decision_receipt is None
 
@@ -308,8 +454,8 @@ def test_lane_does_not_run_without_bound_analyses():
 
 
 def test_proof_artifact_becomes_a_conditional_decisive_receipt_and_decision():
-    projection = _projection()
-    decision = _decision(Outcome.UNKNOWN, projection=projection)
+    projection, result = _pair()
+    decision = result.decision_receipt
     artifact = run_conditional_proof(
         *_both_analyses(),
         observation_policy=NO_OBSERVATION,
@@ -318,7 +464,8 @@ def test_proof_artifact_becomes_a_conditional_decisive_receipt_and_decision():
     assert artifact.proof_kind == CONDITIONAL_EQ_CLOSURE
 
     receipt = issue_conditional_decision(
-        unconditional_decision=decision, projection=projection, artifact=artifact
+        unconditional_decision=decision, projection=projection, artifact=artifact,
+        result=result,
     )
     assert type(receipt) is ConditionalDecisionReceipt
     receipt.validate()
@@ -333,13 +480,14 @@ def test_conditional_decision_binds_to_its_own_pair_and_receipt():
         validate_conditional_decision_join,
     )
 
-    projection = _projection()
-    decision = _decision(Outcome.UNKNOWN, projection=projection)
+    projection, result = _pair()
+    decision = result.decision_receipt
     artifact = run_conditional_proof(
         *_both_analyses(), observation_policy=NO_OBSERVATION, solver_runner=_Solver(True)
     )
     receipt = issue_conditional_decision(
-        unconditional_decision=decision, projection=projection, artifact=artifact
+        unconditional_decision=decision, projection=projection, artifact=artifact,
+        result=result,
     )
     validate_conditional_decision_join(
         receipt,
@@ -384,8 +532,7 @@ def test_conditional_result_never_moves_the_unconditional_outcome_or_exit_code()
         outcome_from_result,
     )
 
-    projection = _projection()
-    result = _Result(_decision(Outcome.UNKNOWN, projection=projection))
+    projection, result = _pair()
     before = (result.is_equivalent, result.final_outcome, result.decision_receipt)
     _run_lane(result, projection, _both_analyses())
 
@@ -410,17 +557,20 @@ def _premise(symbol="log"):
 
 
 def test_receipt_dependencies_are_the_whole_assumption_set():
-    projection = _projection()
-    decision = _decision(Outcome.UNKNOWN, projection=projection)
-    left = _analysis(symbol="log", binary_id="binary1")
-    right = _analysis(symbol="exp", binary_id="binary2", entry=0x2000)
+    projection, result = _pair()
+    decision = result.decision_receipt
+    left = _analysis(symbol="log", binary_id="binary1", op_offset=0x1100)
+    right = _analysis(symbol="exp", binary_id="binary2", entry=0x2000, op_offset=0x2100)
     artifact = run_conditional_proof(
         left, right, observation_policy=NO_OBSERVATION, solver_runner=_Solver(True)
     )
     assert len(artifact.assumption_set) == 2
 
     lane_projection = conditional_lane_projection(
-        projection, discharged_reason_ids=ASSUMPTION_DISCHARGED_REASON_IDS
+        projection,
+        discharged_causes=conditional_discharged_causes(
+            projection, result=result, artifact=artifact
+        ),
     )
     proof_receipt = ConditionalDecisiveProofReceipt.create(
         result_occurrence_id=RESULT_ID,
@@ -431,7 +581,8 @@ def test_receipt_dependencies_are_the_whole_assumption_set():
     )
     assert len(proof_receipt.assumption_dependencies) == 2
     receipt = issue_conditional_decision(
-        unconditional_decision=decision, projection=projection, artifact=artifact
+        unconditional_decision=decision, projection=projection, artifact=artifact,
+        result=result,
     )
     assert len(receipt.assumption_set) == 2
     assert {premise.subject for premise in receipt.assumption_set} == {
@@ -503,38 +654,270 @@ def test_a_lane_without_an_assumption_set_is_refused():
 # --- discharge rule ---------------------------------------------------------
 
 
-def test_only_assumption_owned_reasons_leave_the_conditional_projection():
-    projection = _projection(reason_ids=(CALL_REASON_ID, OTHER_REASON_ID))
+def _artifact_for(analyses=None, *, disposition=True):
+    return run_conditional_proof(
+        *(analyses or _both_analyses()),
+        observation_policy=NO_OBSERVATION,
+        solver_runner=_Solver(disposition),
+    )
+
+
+def test_the_fixture_call_site_identities_are_the_ones_the_lane_derives():
+    """LEFT_SITE / RIGHT_SITE が作り話でないこと（binding の前提）。"""
+    left, right = _both_analyses()
+    assert _call_site_key(left) == LEFT_SITE
+    assert _call_site_key(right) == RIGHT_SITE
+    artifact = _artifact_for((left, right))
+    assert artifact.modelled_call_sites_complete is True
+    assert set(artifact.modelled_call_sites) == {
+        ("function1", LEFT_SITE), ("function2", RIGHT_SITE)
+    }
+
+
+def test_only_causes_bound_to_a_modelled_call_leave_the_conditional_projection():
+    causes = [
+        # A: 写像した external log の callsite に bind された occurrence。
+        _cause(CALL_REASON_ID, index=0,
+               left=("fact-left-0", LEFT_SITE), right=("fact-right-0", RIGHT_SITE)),
+        # B: 仮定と無関係な別 blocker。
+        _cause(OTHER_REASON_ID, index=1,
+               left=("fact-left-1", LEFT_SITE), right=("fact-right-1", RIGHT_SITE)),
+    ]
+    projection, result = _pair(causes=causes)
     lane = conditional_lane_projection(
-        projection, discharged_reason_ids=ASSUMPTION_DISCHARGED_REASON_IDS
+        projection,
+        discharged_causes=conditional_discharged_causes(
+            projection, result=result, artifact=_artifact_for()
+        ),
     )
     assert {row.reason_id for row in lane.c_active_base} == {OTHER_REASON_ID}
-    # 落とした cause にぶら下がる open requirement も一緒に落ちる。
+    # 落とした cause にぶら下がる open requirement も satisfaction 行も落ちる。
     assert len(lane.q_open_base) == 1
+    assert _satisfaction_occurrences(lane) == {"occ-1"}
     lane.validate()
-    assert OTHER_REASON_ID not in ASSUMPTION_DISCHARGED_REASON_IDS
+
+
+def test_the_same_reason_id_is_discharged_only_where_it_binds_to_a_modelled_call():
+    """同じ reason でも、写像した call 由来の occurrence だけを落とす。
+
+    A: modelled external ``log`` に対応する ``callsite_correspondence_unproven``
+    B: 写像していない internal call に対応する同じ reason
+    → A だけ discharge、B は残り、conditional outcome は UNKNOWN。
+    """
+    causes = [
+        _cause(CORRESPONDENCE_REASON_ID, index=0,
+               left=("fact-left-modelled", LEFT_SITE),
+               right=("fact-right-modelled", RIGHT_SITE)),
+        _cause(CORRESPONDENCE_REASON_ID, index=1,
+               left=("fact-left-internal", UNRELATED_LEFT_SITE),
+               right=("fact-right-internal", UNRELATED_RIGHT_SITE)),
+    ]
+    projection, result = _pair(causes=causes, decision_effect="blocks_equivalence")
+    artifact = _artifact_for()
+    discharged = conditional_discharged_causes(
+        projection, result=result, artifact=artifact
+    )
+    assert discharged == frozenset({("occ-0", "cause-0")})
+
+    diagnostics = _run_lane(result, projection, _both_analyses())
+    assert diagnostics["proof_kind"] == CONDITIONAL_EQ_CLOSURE
+    assert diagnostics["discharged_cause_count"] == 1
+    # B が残るので conditional 列は EQUIVALENT にならない。
+    assert result.conditional_outcome == Outcome.UNKNOWN.value
+
+
+def test_one_endpoint_outside_the_modelled_set_keeps_the_whole_cause():
+    """左右どちらかでも写像外の callsite なら、その cause は落とさない。"""
+    causes = [
+        _cause(CORRESPONDENCE_REASON_ID, index=0,
+               left=("fact-left-modelled", LEFT_SITE),
+               right=("fact-right-internal", UNRELATED_RIGHT_SITE)),
+    ]
+    projection, result = _pair(causes=causes)
+    assert conditional_discharged_causes(
+        projection, result=result, artifact=_artifact_for()
+    ) == frozenset()
+
+
+def test_a_single_sided_cause_binds_to_that_side_only():
+    """片側だけの obligation は、その側が写像済みなら discharge できる。"""
+    causes = [
+        _cause(CORRESPONDENCE_REASON_ID, index=0,
+               left=("fact-left-modelled", LEFT_SITE), right=None),
+        _cause(CORRESPONDENCE_REASON_ID, index=1,
+               left=("fact-left-internal", UNRELATED_LEFT_SITE), right=None),
+    ]
+    projection, result = _pair(causes=causes)
+    assert conditional_discharged_causes(
+        projection, result=result, artifact=_artifact_for()
+    ) == frozenset({("occ-0", "cause-0")})
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda result: setattr(result, "call_effect_shadow_manifest", None),
+                     id="manifest_missing"),
+        pytest.param(lambda result: setattr(result, "unknown_reasons", []),
+                     id="cause_target_key_missing"),
+        pytest.param(
+            lambda result: setattr(
+                result, "call_effect_shadow_manifest",
+                {"left_facts": [{"fact_id": "fact-left-0", "identity": {}}],
+                 "right_facts": []},
+            ),
+            id="fact_identity_missing",
+        ),
+    ],
+)
+def test_discharge_fails_closed_when_the_binding_cannot_be_resolved(mutate):
+    projection, result = _pair()
+    mutate(result)
+    assert conditional_discharged_causes(
+        projection, result=result, artifact=_artifact_for()
+    ) == frozenset()
+
+
+def test_a_non_prerequisite_target_key_is_never_discharged():
+    """call-effect prerequisite 以外の鍵形の cause は対応付けない。"""
+    causes = [
+        _cause(CALL_REASON_ID, index=0,
+               left=("fact-left-0", LEFT_SITE), right=("fact-right-0", RIGHT_SITE),
+               prerequisite=False),
+    ]
+    projection, result = _pair(causes=causes)
+    assert conditional_discharged_causes(
+        projection, result=result, artifact=_artifact_for()
+    ) == frozenset()
+
+
+def test_incomplete_modelled_call_site_identity_discharges_nothing():
+    """写像した callsite の identity が 1 つでも取れなければ何も落とさない。"""
+    projection, result = _pair()
+    artifact = _artifact_for()
+    blinded = ConditionalProofArtifact(
+        proof_kind=artifact.proof_kind,
+        assumption_set=artifact.assumption_set,
+        artifact_digest=artifact.artifact_digest,
+        modelled_call_count=artifact.modelled_call_count,
+        modelled_call_sites=artifact.modelled_call_sites,
+        modelled_call_sites_complete=False,
+        all_calls_modelled=True,
+    )
+    assert conditional_discharged_causes(
+        projection, result=result, artifact=blinded
+    ) == frozenset()
+
+
+def test_a_deferred_call_without_a_pcode_identity_is_not_bindable():
+    left = _analysis(binary_id="binary1", op_offset=0x1100)
+    right = _analysis(binary_id="binary2", entry=0x2000, op_offset=0x2100)
+    info = next(iter(left.deferred_calls.values()))
+    info.deferred_call_ref = DeferredCallRef(
+        caller_program_id=0x1000,
+        caller_entry_offset=0x1000,
+        target_ref=info.target_ref,
+        sequence=1,
+    )
+    left.deferred_calls = {info.deferred_call_ref.stable_key(): info}
+    artifact = _artifact_for((left, right))
+    assert artifact.modelled_call_sites_complete is False
+    projection, result = _pair()
+    assert conditional_discharged_causes(
+        projection, result=result, artifact=artifact
+    ) == frozenset()
+
+
+def test_the_conditional_projection_rebuilds_its_derived_digests():
+    """seal が通ることではなく、派生 digest が作り直されていることを見る。"""
+    causes = [
+        _cause(CALL_REASON_ID, index=0,
+               left=("fact-left-0", LEFT_SITE), right=("fact-right-0", RIGHT_SITE)),
+        _cause(OTHER_REASON_ID, index=1,
+               left=("fact-left-1", LEFT_SITE), right=("fact-right-1", RIGHT_SITE)),
+    ]
+    projection, result = _pair(causes=causes)
+    lane = conditional_lane_projection(
+        projection,
+        discharged_causes=conditional_discharged_causes(
+            projection, result=result, artifact=_artifact_for()
+        ),
+    )
+    lane.validate()
+    for name in (
+        "c_active_base_digest",
+        "q_open_base_digest",
+        "semantic_cause_projection_digest",
+        "satisfaction_projection_digest",
+        "lifecycle_projection_digest",
+    ):
+        assert getattr(lane, name) != getattr(projection, name), name
+    # 観測事実（blocker eligibility）は仮定では消えない。
+    assert lane.blocker_eligibility_base == projection.blocker_eligibility_base
+
+
+def test_an_unreadable_satisfaction_projection_fails_the_lane_closed():
+    causes = [
+        _cause(CALL_REASON_ID, index=0,
+               left=("fact-left-0", LEFT_SITE), right=("fact-right-0", RIGHT_SITE)),
+        _cause(OTHER_REASON_ID, index=1,
+               left=("fact-left-1", LEFT_SITE), right=("fact-right-1", RIGHT_SITE)),
+    ]
+    rows = tuple(
+        CActiveBaseRow(
+            RESULT_ID, spec["occurrence_id"], spec["cause_id"], spec["reason_id"],
+            "expression_call_effect_memory", "blocks_equivalence", spec["target_kind"],
+        )
+        for spec in causes
+    )
+    projection = VerifiedLifecycleProjection.seal(
+        result_occurrence_id=RESULT_ID,
+        snapshot_digest="snapshot",
+        c_active_base=rows,
+        q_open_base=(),
+        blocker_eligibility_base=tuple(
+            BlockerEligibilityBaseRow(RESULT_ID, row.occurrence_id, row.cause_id)
+            for row in rows
+        ),
+        # 行の形が読めない satisfaction。整合検査で弾かれる。
+        satisfaction_projection={"occurrences": ("unreadable-row",)},
+    )
+    result = _Result(_decision(Outcome.UNKNOWN, projection=projection), causes=causes)
+    with pytest.raises(ValueError):
+        conditional_lane_projection(
+            projection,
+            discharged_causes=conditional_discharged_causes(
+                projection, result=result, artifact=_artifact_for()
+            ),
+        )
+    # production 経路では conditional 列を作らずに落ちる。
+    diagnostics = _run_lane(result, projection, _both_analyses())
+    assert diagnostics["conditional_lane"] == "failed"
+    assert result.conditional_decision_receipt is None
+    assert result.final_outcome == Outcome.UNKNOWN.value
 
 
 def test_a_call_only_blocker_set_lets_the_conditional_column_reach_equivalent():
-    """discharge 対象だけが残っていれば conditional 列は EQUIVALENT になる。
+    """写像した call 由来の blocker だけなら conditional 列は EQUIVALENT になる。
 
     次の test の対照。これが無いと「常に UNKNOWN」でも通ってしまう。
     """
-    projection = _projection(
-        reason_ids=(CALL_REASON_ID,), decision_effect="blocks_equivalence"
-    )
-    result = _Result(_decision(Outcome.UNKNOWN, projection=projection))
+    projection, result = _pair(decision_effect="blocks_equivalence")
     diagnostics = _run_lane(result, projection, _both_analyses())
 
     assert diagnostics["proof_kind"] == CONDITIONAL_EQ_CLOSURE
+    assert diagnostics["discharged_cause_count"] == 1
     assert result.conditional_outcome == Outcome.EQUIVALENT.value
 
 
 def test_a_residual_non_call_blocker_keeps_the_conditional_column_unknown():
-    projection = _projection(
-        reason_ids=(CALL_REASON_ID, OTHER_REASON_ID), decision_effect="blocks_equivalence"
-    )
-    result = _Result(_decision(Outcome.UNKNOWN, projection=projection))
+    causes = [
+        _cause(CALL_REASON_ID, index=0,
+               left=("fact-left-0", LEFT_SITE), right=("fact-right-0", RIGHT_SITE)),
+        _cause(OTHER_REASON_ID, index=1,
+               left=("fact-left-1", LEFT_SITE), right=("fact-right-1", RIGHT_SITE)),
+    ]
+    projection, result = _pair(causes=causes, decision_effect="blocks_equivalence")
     diagnostics = _run_lane(result, projection, _both_analyses())
 
     # EQ closure 自体は立つが、仮定が引き受けない blocker が残るので列は UNKNOWN。
@@ -564,8 +947,7 @@ def test_a_uf_sat_is_never_a_decisive_conditional_counterexample():
 
 
 def test_a_uf_sat_does_not_move_the_unconditional_outcome():
-    projection = _projection()
-    result = _Result(_decision(Outcome.UNKNOWN, projection=projection))
+    projection, result = _pair()
     diagnostics = _run_lane(result, projection, _both_analyses(), disposition=False)
 
     assert result.final_outcome == Outcome.UNKNOWN.value
@@ -635,8 +1017,7 @@ def test_the_solver_being_inconclusive_is_not_decisive():
         *_both_analyses(), observation_policy=NO_OBSERVATION, solver_runner=_Solver(None)
     )
     assert artifact.proof_kind is None
-    projection = _projection()
-    result = _Result(_decision(Outcome.UNKNOWN, projection=projection))
+    projection, result = _pair()
     diagnostics = _run_lane(result, projection, _both_analyses(), disposition=None)
     assert diagnostics["conditional_lane"] == "non_decisive"
     assert result.conditional_decision_receipt is None
@@ -703,8 +1084,7 @@ def test_an_unproven_sqrt_argument_recovery_fails_closed():
 
 
 def test_the_lane_never_raises_out_of_production():
-    projection = _projection()
-    result = _Result(_decision(Outcome.UNKNOWN, projection=projection))
+    projection, result = _pair()
 
     class _Exploding:
         def run_parallel(self, formula, timeout=None):
