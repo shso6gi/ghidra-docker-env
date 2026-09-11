@@ -808,19 +808,11 @@ def _classify_deferred_call_effect(target_ref: CallTargetRef) -> str:
     name = _normalized_deferred_call_name(target_ref.display_name())
     if name in {"printf", "fprintf", "sprintf", "snprintf", "puts", "putchar", "fputs"}:
         return "side_effecting"
-    if name in {"sqrt", "sqrtf"} and _target_ref_has_external_library_provenance(target_ref):
-        return "pure_return"
+    # Issue #20 PR-20-B3: ``sqrt`` / ``sqrtf`` を名前で ``pure_return`` に
+    # 分類していた特例は撤去した。外部 callee の値意味は analysis が黙って
+    # 与える事実ではなく、conditional lane が明示的な ``AssumptionPremise``
+    # として引き受ける（B1 catalog → B2 conditional view → B3 lane）。
     return "unknown_effect"
-
-
-def _target_ref_has_external_library_provenance(target_ref: CallTargetRef) -> bool:
-    if target_ref is None or not target_ref.is_function():
-        return False
-    if getattr(target_ref, "is_external", None) is True:
-        return bool(getattr(target_ref, "library_name", None))
-    if getattr(target_ref, "is_thunk", None) is True and getattr(target_ref, "thunked_is_external", None) is True:
-        return bool(getattr(target_ref, "thunked_library_name", None))
-    return False
 
 
 def _normalized_deferred_call_name(name: Optional[str]) -> str:

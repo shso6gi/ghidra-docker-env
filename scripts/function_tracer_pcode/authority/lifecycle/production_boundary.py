@@ -195,6 +195,36 @@ def _attach_boundary_seconds(result: Any, seconds: Dict[str, float]) -> None:
         return
 
 
+def _run_conditional_lane(checker: Any, result: Any, *, projection: Any) -> None:
+    """conditional lane を起動し、診断だけ結果へ残す（判定は変えない）。
+
+    lane 自身が fail closed（例外を投げず、条件を満たさなければ列を作らない）
+    なので、ここでは呼び出し口を用意して診断を書くだけにする。
+    """
+
+    from scripts.function_tracer_pcode.authority.decision.conditional_lane import (
+        run_production_conditional_lane,
+    )
+
+    diagnostics = run_production_conditional_lane(
+        result,
+        projection=projection,
+        analyses=getattr(result, "_conditional_lane_analyses", None),
+        observation_policy=getattr(checker, "external_call_effect_policy", None),
+        solver_runner=getattr(checker, "solver_runner", None),
+        timeout=getattr(checker, "timeout", None),
+        debug=bool(getattr(checker, "debug", False)),
+    )
+    if diagnostics is None:
+        return
+    try:
+        current = dict(getattr(result, "diagnostics", None) or {})
+        current["conditional_lane"] = diagnostics
+        result.diagnostics = current
+    except Exception:
+        return
+
+
 def run_check_from_binaries_with_v2_pilot(
     checker: Any,
     program1: Any,
@@ -436,6 +466,14 @@ def run_check_from_binaries_with_v2_pilot(
             else:
                 attach_canonical_relations(
                     result, evidence.pilot_result.reduction.projection
+                )
+                # Issue #20 PR-20-B3: 無条件 DecisionReceipt が確定したあと、
+                # UNKNOWN のときだけ conditional lane を回す。conditional 列は
+                # 別列で、is_equivalent / final_outcome / exit code は動かない。
+                _run_conditional_lane(
+                    checker,
+                    result,
+                    projection=evidence.pilot_result.reduction.projection,
                 )
                 # The CLI owns the final serialized payload (including binary
                 # content identities and timing).  Preserve exact issuer-owned

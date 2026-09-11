@@ -152,6 +152,7 @@ def analyze_and_check_with_analysis(
             original_signature2=ctx.original_signature2,
         )
     _attach_analysis_diagnostics(checker, result)
+    bind_conditional_lane_analyses(result, analysis1, analysis2)
 
     return analysis1, analysis2, result
 
@@ -322,8 +323,25 @@ def selective_reanalysis_and_check(
             original_signature2=ctx.original_signature2,
         )
     _attach_analysis_diagnostics(checker, result)
+    bind_conditional_lane_analyses(result, analysis1, analysis2)
 
     return analysis1, analysis2, result
+
+
+def bind_conditional_lane_analyses(result, analysis1, analysis2) -> None:
+    """この結果を生んだ base analysis を結果へ結び付ける（Issue #20 PR-20-B3）。
+
+    conditional lane は無条件判定が UNKNOWN のときだけ、この 2 つから
+    conditional view を作る。署名対象でも serialization 対象でもない補助参照で、
+    付いていなければ lane は起動しない（fail closed）。
+    """
+
+    if result is None or analysis1 is None or analysis2 is None:
+        return
+    try:
+        result._conditional_lane_analyses = (analysis1, analysis2)
+    except Exception:
+        return
 
 
 def _attach_analysis_diagnostics(checker, result) -> None:

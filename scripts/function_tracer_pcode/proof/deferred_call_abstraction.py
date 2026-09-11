@@ -47,22 +47,11 @@ class DeferredCallAbstractionResult:
 RecursiveAbstractionResult = DeferredCallAbstractionResult
 
 
-_PURE_RETURN_CALLS: Mapping[str, Dict[str, Any]] = {
-    "sqrt": {
-        "return_width_bits": 64,
-        "return_type_policy": "fp64",
-        "requires_fp_non_nan": True,
-        "observes_errno": False,
-        "observes_fenv": False,
-    },
-    "sqrtf": {
-        "return_width_bits": 32,
-        "return_type_policy": "fp32",
-        "requires_fp_non_nan": True,
-        "observes_errno": False,
-        "observes_fenv": False,
-    },
-}
+# Issue #20 PR-20-B3: ``sqrt`` / ``sqrtf`` を無条件の ``pure_return`` として
+# 共有 summary parameter に畳む特例は撤去した。外部 callee の値意味を使う経路は
+# B1 catalog → B2 conditional view → B3 conditional lane の 1 本だけで、そこでは
+# 仮定が ``AssumptionPremise`` として receipt に残る。ここに残るのは自己再帰の
+# 要約だけ。
 
 _SIDE_EFFECTING_CALLS = {
     "printf",
@@ -214,55 +203,8 @@ def _deferred_call_match_key(
         arg_key = tuple(_argument_key(arg) for arg in (info.arguments or []))
         return ("self_recursive", recursive_key, arg_key)
 
-    return _pure_call_match_key(analysis, info, usage, domain_policy)
-
-
-def _pure_call_match_key(
-    analysis: FunctionReturnAnalysis,
-    info: DeferredCallInfo,
-    usage: Mapping[str, Any],
-    domain_policy: Mapping[str, bool],
-) -> Optional[Tuple[Any, ...]]:
-    target_name = _normalized_call_name(getattr(info, "target_name", ""))
-    if target_name in _SIDE_EFFECTING_CALLS:
-        return None
-    if getattr(info, "effect_class", None) != "pure_return":
-        return None
-    policy = _PURE_RETURN_CALLS.get(target_name)
-    if policy is None:
-        return None
-    target_identity_key = _pure_target_identity_key(info)
-    if target_identity_key is None:
-        return None
-    if policy.get("requires_fp_non_nan") and not domain_policy.get("fp_non_nan", False):
-        return None
-    if domain_policy.get("observes_errno", False) or domain_policy.get("observes_fenv", False):
-        return None
-    if len(getattr(info, "arguments", []) or []) != 1:
-        return None
-    if _usage_has_condition_only_reference(usage):
-        return None
-
-    usage_width_bits = _usage_return_width_bits(usage)
-    expected_width_bits = int(policy["return_width_bits"])
-    if usage_width_bits is not None and usage_width_bits != expected_width_bits:
-        return None
-
-    guard_key = usage.get("return_case_guard_key")
-    if guard_key is None:
-        return None
-
-    arg_key = tuple(_pure_analysis_expression_key(analysis, arg) for arg in (info.arguments or []))
-    return (
-        "pure_call",
-        target_name,
-        target_identity_key,
-        arg_key,
-        guard_key,
-        expected_width_bits,
-        policy["return_type_policy"],
-        tuple(sorted(domain_policy.items())),
-    )
+    # 自己再帰以外の deferred call は、この無条件経路では要約しない。
+    return None
 
 
 def _match_evidence(
@@ -273,11 +215,6 @@ def _match_evidence(
 ) -> Dict[str, Any]:
     evidence = dict(getattr(info, "match_evidence", {}) or {})
     width_bits = _usage_return_width_bits(usage)
-    if width_bits is None:
-        target_name = _normalized_call_name(getattr(info, "target_name", ""))
-        policy = _PURE_RETURN_CALLS.get(target_name)
-        if policy is not None:
-            width_bits = int(policy["return_width_bits"])
     evidence.update(
         {
             "callee_identity": info.target_ref.stable_key(),
@@ -297,13 +234,8 @@ def _match_evidence(
 
 
 def _usage_return_type_policy(info: DeferredCallInfo, usage: Mapping[str, Any]) -> Optional[str]:
+    # 観測された幅だけが根拠。callee 名から宣言幅を補う経路は PR-20-B3 で撤去した。
     width = _usage_return_width_bits(usage)
-    name = _normalized_call_name(getattr(info, "target_name", ""))
-    policy = _PURE_RETURN_CALLS.get(name)
-    if width is None and policy is not None:
-        return str(policy["return_type_policy"])
-    if policy is not None and width == int(policy["return_width_bits"]):
-        return str(policy["return_type_policy"])
     return None if width is None else f"bv{width}"
 
 
@@ -324,29 +256,11 @@ def _summary_size_for_match(
     right_usage: Mapping[str, Any],
     summary_kind: str,
 ) -> Optional[int]:
-    if summary_kind == "pure_call":
-        left_policy_size = _pure_return_policy_size(left_info)
-        right_policy_size = _pure_return_policy_size(right_info)
-        if left_policy_size is None or left_policy_size != right_policy_size:
-            return None
-        return left_policy_size
-
     left_sizes = sorted({int(size) for size in left_usage.get("value_sizes", ()) if size})
     right_sizes = sorted({int(size) for size in right_usage.get("value_sizes", ()) if size})
     if len(left_sizes) == 1 and left_sizes == right_sizes:
         return left_sizes[0]
     return 4
-
-
-def _pure_return_policy_size(info: DeferredCallInfo) -> Optional[int]:
-    target_name = _normalized_call_name(getattr(info, "target_name", ""))
-    policy = _PURE_RETURN_CALLS.get(target_name)
-    if policy is None:
-        return None
-    width_bits = int(policy.get("return_width_bits") or 0)
-    if width_bits <= 0 or width_bits % 8 != 0:
-        return None
-    return width_bits // 8
 
 
 def _usage_has_condition_only_reference(usage: Mapping[str, Any]) -> bool:
@@ -836,11 +750,8 @@ def _rewrite_analysis_with_abstract_calls(
 
     for match in placeholder_mapping.values():
         if match.summary_index not in existing_indices:
-            synthetic_key = (
-                "synthetic_recursive_summary"
-                if match.summary_kind == "self_recursive"
-                else "synthetic_pure_call_summary"
-            )
+            # PR-20-B3 以降、この無条件経路が作る要約は自己再帰だけ。
+            synthetic_key = "synthetic_recursive_summary"
             cloned.parameters.append(
                 {
                     "name": match.summary_name,
@@ -984,9 +895,6 @@ def _target_inventory(
         if key[0] == "self_recursive":
             target_key = tuple(key[1])
             arg_key = tuple(key[2])
-        elif key[0] == "pure_call":
-            target_key = (key[1], key[2])
-            arg_key = tuple(key[3])
         else:
             continue
         inventory.setdefault(target_key, []).append(arg_key)

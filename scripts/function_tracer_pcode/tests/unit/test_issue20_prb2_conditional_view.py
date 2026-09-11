@@ -846,17 +846,17 @@ def test_unconditional_formula_output_is_unchanged_by_the_flag():
 # --- legacy sqrt path ------------------------------------------------------
 
 
-def test_legacy_pure_return_call_table_is_untouched_by_b2():
-    """旧 sqrt/sqrtf の production 経路は B2 では変えない（cutover は B3）。"""
+def test_legacy_pure_return_call_table_is_gone_after_the_b3_cutover():
+    """旧 sqrt/sqrtf の無条件 pure-return 経路は PR-20-B3 で撤去済み。"""
     from scripts.function_tracer_pcode.proof import deferred_call_abstraction
 
-    assert set(deferred_call_abstraction._PURE_RETURN_CALLS) == {"sqrt", "sqrtf"}
-    assert deferred_call_abstraction._PURE_RETURN_CALLS["sqrt"]["return_width_bits"] == 64
-    assert deferred_call_abstraction._PURE_RETURN_CALLS["sqrtf"]["return_width_bits"] == 32
+    assert not hasattr(deferred_call_abstraction, "_PURE_RETURN_CALLS")
+    assert not hasattr(deferred_call_abstraction, "_pure_call_match_key")
+    assert not hasattr(deferred_call_abstraction, "_pure_return_policy_size")
 
 
-def test_conditional_view_is_not_wired_into_production_orchestration():
-    """B2 の view は production から呼ばれない（lane 起動は B3）。"""
+def test_conditional_view_has_exactly_one_production_entry_point():
+    """view を production から使うのは PR-20-B3 の conditional lane だけ。"""
     import ast
     from pathlib import Path
 
@@ -874,4 +874,6 @@ def test_conditional_view_is_not_wired_into_production_orchestration():
                 module = ",".join(alias.name for alias in node.names)
             if module and "conditional_view" in module:
                 importers.append(str(path.relative_to(package_root)))
-    assert not importers, importers
+    # lane adapter (proof) だけが view を production 経路へ持ち込む。receipt 化は
+    # authority 側で行うので、checker / reporting / cli からの直接 import は無い。
+    assert importers == ["proof/conditional_lane.py"], importers

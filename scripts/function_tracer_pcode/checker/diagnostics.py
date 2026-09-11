@@ -497,6 +497,9 @@ def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
             "callee_unbound_reuse": dict(base.get("callee_unbound_reuse") or {}),
         },
         "validated_once_entries": base.get("validated_once_entries"),
+        # Issue #20 PR-20-B3: conditional lane が回ったか、回ったなら何で
+        # decisive にならなかったか。判定には効かない観測。
+        "conditional_lane": base.get("conditional_lane"),
         "pairs": pairwise,
         "solver_invocations": solver_invocations,
         "stage_path": list(getattr(result, "stage_path", ()) or ()),
