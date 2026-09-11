@@ -217,6 +217,15 @@ def run_production_conditional_lane(
                 "non_decisive_reasons": list(artifact.non_decisive_reasons),
                 "diagnostics": dict(artifact.diagnostics),
             }
+        if not artifact.decisive:
+            # 何も証明できていない。conditional 列は「出たときだけ出す」ので、
+            # 起動した事実と非決定理由は診断にだけ残す。
+            return {
+                "conditional_lane": "non_decisive",
+                "non_decisive_reasons": list(artifact.non_decisive_reasons),
+                "assumption_count": len(artifact.assumption_set),
+                "diagnostics": dict(artifact.diagnostics),
+            }
         receipt = issue_conditional_decision(
             unconditional_decision=decision,
             projection=projection,

@@ -566,11 +566,14 @@ def test_a_uf_sat_is_never_a_decisive_conditional_counterexample():
 def test_a_uf_sat_does_not_move_the_unconditional_outcome():
     projection = _projection()
     result = _Result(_decision(Outcome.UNKNOWN, projection=projection))
-    _run_lane(result, projection, _both_analyses(), disposition=False)
+    diagnostics = _run_lane(result, projection, _both_analyses(), disposition=False)
 
     assert result.final_outcome == Outcome.UNKNOWN.value
     assert result.is_equivalent is None
-    assert result.conditional_outcome == Outcome.UNKNOWN.value
+    # 何も証明できていないので conditional 列そのものを出さない。
+    assert diagnostics["conditional_lane"] == "non_decisive"
+    assert result.conditional_outcome is None
+    assert result.conditional_decision_receipt is None
 
 
 def test_counterexample_safety_keeps_the_existing_analysis_side_contract():
@@ -632,6 +635,11 @@ def test_the_solver_being_inconclusive_is_not_decisive():
         *_both_analyses(), observation_policy=NO_OBSERVATION, solver_runner=_Solver(None)
     )
     assert artifact.proof_kind is None
+    projection = _projection()
+    result = _Result(_decision(Outcome.UNKNOWN, projection=projection))
+    diagnostics = _run_lane(result, projection, _both_analyses(), disposition=None)
+    assert diagnostics["conditional_lane"] == "non_decisive"
+    assert result.conditional_decision_receipt is None
 
 
 # --- sqrt/sqrtf cutover -----------------------------------------------------
@@ -709,8 +717,8 @@ def test_the_lane_never_raises_out_of_production():
         observation_policy=NO_OBSERVATION,
         solver_runner=_Exploding(),
     )
-    assert diagnostics["conditional_lane"] == "issued"
-    assert result.conditional_outcome == Outcome.UNKNOWN.value
+    assert diagnostics["conditional_lane"] == "non_decisive"
+    assert result.conditional_outcome is None
     assert result.final_outcome == Outcome.UNKNOWN.value
 
 
