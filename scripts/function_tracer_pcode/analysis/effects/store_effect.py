@@ -78,7 +78,6 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _try_get_order_key,
     build_void_effect_summary_expr,
     canonicalize_location,
-    canonicalize_param_location,
     is_call_effect_summary_allowed,
     locations_match,
     substitute_condition,
