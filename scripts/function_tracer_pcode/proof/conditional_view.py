@@ -535,13 +535,22 @@ class ConditionalEquivalenceFormula:
 def build_conditional_equivalence_formula(
     left_view: ConditionalSemanticView,
     right_view: ConditionalSemanticView,
-    **builder_kwargs: Any,
+    *,
+    debug: bool = False,
 ) -> ConditionalEquivalenceFormula:
     """conditional view 由来の formula を組む **唯一の入口**。
 
     ``FormulaBuilder(allow_call=True)`` を production 側で直接使わせないための薄い
     adapter。``view.analysis`` 以外を conditional builder へ渡す経路を作らない。
     lane の起動・receipt 発行・verdict は PR-20-B3 の責務で、ここにはない。
+
+    **builder option を外から注入させない。** ``assume_fp_non_nan`` のように
+    formula へ追加の前提を入れる option を通すと、formula が依存する仮定と
+    :attr:`ConditionalEquivalenceFormula.assumption_set` が食い違い、B3 が receipt へ
+    繋いだときに assumption dependency が欠落する。したがって semantics を変え得る
+    option は受け取らず、``debug``（出力に影響しない診断印字）だけを許す。
+    FP non-NaN を仮定として正式に扱うなら、対応する premise を先に定義する必要が
+    あり、それは本 PR の scope ではない。
     """
 
     from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
@@ -551,7 +560,14 @@ def build_conditional_equivalence_formula(
             raise TypeError(
                 "conditional formulas are built from ConditionalSemanticView only"
             )
-    builder = FormulaBuilder(allow_call=True, **builder_kwargs)
+    if type(debug) is not bool:
+        raise TypeError("debug must be an exact bool")
+    builder = FormulaBuilder(allow_call=True, debug=debug)
+    # builder 既定が将来変わって追跡外の前提が入らないよう、ここで固定を確認する。
+    if builder.assume_fp_non_nan:
+        raise ValueError(
+            "a conditional formula must not carry untracked input-domain assumptions"
+        )
     result = builder.build_equivalence_formula_extended(
         left_view.analysis,
         right_view.analysis,

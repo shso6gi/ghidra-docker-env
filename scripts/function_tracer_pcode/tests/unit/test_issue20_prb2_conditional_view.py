@@ -15,6 +15,7 @@ B2 は **dormant な基盤**である。ここで固定するのは主に
 
 from __future__ import annotations
 
+import inspect
 import json
 
 import pytest
@@ -696,6 +697,61 @@ def test_conditional_entry_point_unions_assumption_sets_without_minimizing():
     built = build_conditional_equivalence_formula(left_view, right_view)
     assert [premise.subject for premise in built.assumption_set] == ["exp", "log"]
     assert len(built.assumption_set) == 2
+
+
+def test_conditional_entry_point_rejects_semantics_changing_builder_options():
+    """builder option を外から注入させない（追跡外の仮定が formula に入る）。"""
+    left, _ = _single_call_analysis(binary_id="binary1")
+    right, _ = _single_call_analysis(binary_id="binary2")
+    left_view = create_conditional_view(left, observation_policy=NO_OBSERVATION).view
+    right_view = create_conditional_view(right, observation_policy=NO_OBSERVATION).view
+
+    for option in ("assume_fp_non_nan", "exclude_ub", "allow_call"):
+        with pytest.raises(TypeError):
+            build_conditional_equivalence_formula(
+                left_view, right_view, **{option: True}
+            )
+    signature = inspect.signature(build_conditional_equivalence_formula)
+    assert not [
+        name
+        for name, parameter in signature.parameters.items()
+        if parameter.kind is inspect.Parameter.VAR_KEYWORD
+    ]
+    assert set(signature.parameters) == {"left_view", "right_view", "debug"}
+
+
+def test_conditional_formula_carries_no_untracked_fp_assumption():
+    """追跡されない FP non-NaN assertion が conditional formula に混入しない。"""
+    left, _ = _single_call_analysis(binary_id="binary1")
+    right, _ = _single_call_analysis(binary_id="binary2")
+    left_view = create_conditional_view(left, observation_policy=NO_OBSERVATION).view
+    right_view = create_conditional_view(right, observation_policy=NO_OBSERVATION).view
+
+    built = build_conditional_equivalence_formula(left_view, right_view)
+    assert "fp.isNaN" not in built.formula
+    assert "Explicit FP input-domain assumptions" not in built.formula
+    # 対照: 同じ analysis でも option を入れれば実際に assertion が増える
+    # （= この test が空振りしていないこと）。
+    injected = FormulaBuilder(allow_call=True, assume_fp_non_nan=True)
+    injected_formula = injected.build_equivalence_formula_extended(
+        left_view.analysis, right_view.analysis
+    ).formula
+    assert "fp.isNaN" in injected_formula
+    # entry point 経由の formula は、その追跡外 assertion を含まない。
+    assert built.formula != injected_formula
+
+
+def test_conditional_entry_point_debug_option_does_not_change_the_formula():
+    left, _ = _single_call_analysis(binary_id="binary1")
+    right, _ = _single_call_analysis(binary_id="binary2")
+    left_view = create_conditional_view(left, observation_policy=NO_OBSERVATION).view
+    right_view = create_conditional_view(right, observation_policy=NO_OBSERVATION).view
+    plain = build_conditional_equivalence_formula(left_view, right_view)
+    verbose = build_conditional_equivalence_formula(left_view, right_view, debug=True)
+    assert plain.formula == verbose.formula
+    assert plain.assumption_set == verbose.assumption_set
+    with pytest.raises(TypeError):
+        build_conditional_equivalence_formula(left_view, right_view, debug=1)
 
 
 def test_conditional_entry_point_only_accepts_conditional_views():
