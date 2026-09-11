@@ -1,3 +1,12 @@
+import inspect
+
+import pytest
+
+import scripts.function_tracer_pcode.analysis.effects.store_effect as store_effect_module
+from scripts.function_tracer_pcode.analysis.effects.summary import (
+    _block_has_path_incomplete_effects,
+    _call_op_requires_path_covered_effect_summary,
+)
 from scripts.function_tracer_pcode.tests.unit._memory_model_fixtures import *
 
 def test_summarize_store_effects_recovers_direct_call_store_values_from_call_expander():
@@ -125,6 +134,7 @@ def test_summarize_store_effects_recovers_direct_call_store_values_from_call_exp
             _param("b", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
         ],
         debug=False,
+        direct_call_summary=forbid_callee_summary,
     )
 
     assert summary.has_unsupported_call is False
@@ -320,6 +330,7 @@ def test_summarize_store_effects_expands_nested_copy_and_arithmetic_store_values
             _param("b", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
         ],
         debug=False,
+        direct_call_summary=lambda _target_ref, _arguments: EffectSummary(parameter_names=["a", "b"], effects=[]),
     )
 
     assert summary.has_unsupported_call is False
@@ -1792,3 +1803,93 @@ def test_summarize_store_effects_keeps_pathless_side_effect_call_incomplete():
     assert summary.effects == []
     assert summary.has_unsupported_call is True
     assert summary.incomplete_reasons == ("effect_summary_path_coverage_incomplete",)
+
+
+# --------------------------------------------------------------------------
+# Issue #121: direct_call_summary は callable 必須
+#
+# 旧実装は既定値 `None` を持ち、`None` のとき CALL / CALLIND を blocker を
+# 記録せずに読み飛ばしていた。本番の唯一の呼び出し元
+# (EffectIntegrationService.build_effect_summary) は常に callable を渡すため
+# この経路は test からしか到達しなかったが、新しい呼び出し元が引数を省略すると
+# call の効果が blocker 無しに消える。契約違反は TypeError で落とす。
+# --------------------------------------------------------------------------
+
+def _issue121_minimal_block_without_calls():
+    """CALL / CALLIND を含まない最小の block と、その周辺 fake 群を返す。"""
+
+    class FakeCoverage:
+        status = "complete"
+        condition_paths = [[]]
+
+    class FakeConditionTracker:
+        def get_path_coverage_to_block(self, _block):
+            return FakeCoverage()
+
+    class FakeTracer:
+        pass
+
+    class FakeStoreOp:
+        __module__ = "ghidra.program.model.pcode"
+
+        def getMnemonic(self):
+            return "STORE"
+
+        def getSeqnum(self):
+            raise RuntimeError("seqnum unavailable")
+
+    class FakeBlockInfo:
+        pcode_ops = [FakeStoreOp()]
+
+    return (
+        [FakeBlockInfo()],
+        FakeTracer(),
+        FakeConditionTracker(),
+        [_param("dst", index=0, size=8)],
+    )
+
+
+def test_summarize_store_effects_requires_a_direct_call_summary_argument():
+    blocks, tracer, tracker, parameters = _issue121_minimal_block_without_calls()
+    with pytest.raises(TypeError):
+        summarize_store_effects(blocks, tracer, tracker, parameters)
+
+
+def test_summarize_store_effects_rejects_an_explicit_none_direct_call_summary():
+    blocks, tracer, tracker, parameters = _issue121_minimal_block_without_calls()
+    with pytest.raises(TypeError):
+        summarize_store_effects(
+            blocks,
+            tracer,
+            tracker,
+            parameters,
+            direct_call_summary=None,
+        )
+
+
+def test_direct_call_summary_has_no_default_on_the_effect_summary_surface():
+    """facade 経由でも `_impl_*` 直接でも既定値を持たない。"""
+    surfaces = (
+        summarize_store_effects,
+        store_effect_module._impl_summarize_store_effects,
+        _call_op_requires_path_covered_effect_summary,
+        store_effect_module._impl__call_op_requires_path_covered_effect_summary,
+        _block_has_path_incomplete_effects,
+        store_effect_module._impl__block_has_path_incomplete_effects,
+    )
+    for surface in surfaces:
+        parameter = inspect.signature(surface).parameters["direct_call_summary"]
+        assert parameter.default is inspect.Parameter.empty, surface
+
+
+def test_forbid_callee_summary_stub_stays_silent_on_a_call_free_block():
+    """CALL を含まない fixture では stub が呼ばれない(stub 自体の健全性)。"""
+    blocks, tracer, tracker, parameters = _issue121_minimal_block_without_calls()
+    summary = summarize_store_effects(
+        blocks,
+        tracer,
+        tracker,
+        parameters,
+        direct_call_summary=forbid_callee_summary,
+    )
+    assert summary.effects == []

@@ -91,7 +91,7 @@ def _impl_summarize_store_effects(
     tracer,
     condition_tracker,
     parameters: Sequence[Dict],
-    direct_call_summary: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional["EffectSummary"]]] = None,
+    direct_call_summary: Callable[[CallTargetRef, Sequence[Expression]], Optional["EffectSummary"]],
     direct_call_expander: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional[Sequence[object]]]] = None,
     resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]] = None,
     read_memory_value: Optional[Callable[[int, int], Optional[int]]] = None,
@@ -99,6 +99,13 @@ def _impl_summarize_store_effects(
     debug: bool = False,
     budget_sink: Optional[Callable[[object], None]] = None,
 ) -> EffectSummary:
+    if not callable(direct_call_summary):
+        # Issue #121: callee summary を得る手段が無い状態で CALL / CALLIND を
+        # blocker 無しに読み飛ばす経路を残さない。引数契約違反であり、
+        # 解析結果 (UNKNOWN 等) ではないので TypeError で落とす。
+        raise TypeError(
+            "summarize_store_effects requires a callable direct_call_summary"
+        )
     parameter_names = _collect_named_parameter_names(parameters)
     block_infos = list(block_infos or ())
     effects: List[StoreEffect] = []
@@ -382,7 +389,7 @@ def _impl_summarize_store_effects(
                         )
                 continue
 
-            if mnemonic not in {"CALL", "CALLIND"} or direct_call_summary is None or op.getNumInputs() < 1:
+            if mnemonic not in {"CALL", "CALLIND"} or op.getNumInputs() < 1:
                 continue
 
             explicit_args = [
@@ -1159,7 +1166,7 @@ def _impl__block_has_path_incomplete_effects(
     block_info,
     tracer,
     parameters: Sequence[Dict],
-    direct_call_summary: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional["EffectSummary"]]],
+    direct_call_summary: Callable[[CallTargetRef, Sequence[Expression]], Optional["EffectSummary"]],
     resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]],
 ) -> bool:
     for op in getattr(block_info, "pcode_ops", []) or ():
@@ -1183,11 +1190,9 @@ def _impl__call_op_requires_path_covered_effect_summary(
     op,
     tracer,
     parameters: Sequence[Dict],
-    direct_call_summary: Optional[Callable[[CallTargetRef, Sequence[Expression]], Optional["EffectSummary"]]],
+    direct_call_summary: Callable[[CallTargetRef, Sequence[Expression]], Optional["EffectSummary"]],
     resolve_callee_parameters: Optional[Callable[[CallTargetRef], Sequence[Dict]]],
 ) -> bool:
-    if direct_call_summary is None:
-        return True
     try:
         if op.getNumInputs() < 1:
             return True

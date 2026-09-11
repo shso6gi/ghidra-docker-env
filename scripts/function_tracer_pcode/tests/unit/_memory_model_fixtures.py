@@ -109,6 +109,17 @@ from scripts.function_tracer_pcode.semantics.transform.expander import (
     ExpandedValue,
 )
 
+def forbid_callee_summary(_target_ref, _arguments):
+    """Issue #121: CALL / CALLIND を含まない fixture であることを固定する stub。
+
+    ``summarize_store_effects`` は callable な ``direct_call_summary`` を必須に
+    するが、block に call が無ければこの stub は呼ばれない。将来 fixture に
+    call が混入したら、黙って summary が変わる代わりに test が失敗する。
+    """
+    raise AssertionError(
+        "fixture contains no CALL/CALLIND; direct_call_summary must not be invoked"
+    )
+
 def _param(
     name: str,
     size: int = 4,

@@ -19,6 +19,7 @@ from scripts.function_tracer_pcode.analysis.effects._shared import (
     _EFFECT_STORE_LOCATION_UNMODELED_REASON,
 )
 from scripts.function_tracer_pcode.core import Expression
+from scripts.function_tracer_pcode.tests.unit._memory_model_fixtures import forbid_callee_summary
 from scripts.function_tracer_pcode.tests.unit.test_global_effect_surface_issue104 import (
     _Address,
     _Block,
@@ -242,7 +243,8 @@ def test_matched_pair_becomes_one_eight_byte_parameter_store():
     tracer = _Tracer([], values={"la": la, "lv": lv, "ra": ra, "rv": rv})
     params = [_param("param_1", 0, size=8, data_type="undefined8 *"), _param("param_6", 5, size=8, data_type="ulong")]
     summary = summarize_store_effects(
-        [_Block([_store("la", "lv", 0x100), _store("ra", "rv", 0x104)])], tracer, _Tracker(), params
+        [_Block([_store("la", "lv", 0x100), _store("ra", "rv", 0x104)])], tracer, _Tracker(), params,
+        direct_call_summary=forbid_callee_summary
     )
     assert summary.incomplete_reasons == ()
     assert len(summary.effects) == 1
@@ -263,7 +265,8 @@ def test_ptradd_left_half_pairs_with_int_add_right_half():
     tracer = _Tracer([], values={"la": la, "lv": lv, "ra": ra, "rv": rv})
     params = [_param("param_1", 0, size=8, data_type="undefined8 *"), _param("param_6", 5, size=8, data_type="ulong")]
     summary = summarize_store_effects(
-        [_Block([_store("la", "lv", 0x100), _store("ra", "rv", 0x104)])], tracer, _Tracker(), params
+        [_Block([_store("la", "lv", 0x100), _store("ra", "rv", 0x104)])], tracer, _Tracker(), params,
+        direct_call_summary=forbid_callee_summary
     )
     assert summary.incomplete_reasons == ()
     assert [(e.location.offset, e.location.size) for e in summary.effects] == [(32, 8)]
@@ -274,7 +277,7 @@ def test_unmatched_half_fails_closed():
     la, lv = _left_half(x, _v())
     tracer = _Tracer([], values={"la": la, "lv": lv})
     params = [_param("param_1", 0, size=8, data_type="undefined8 *"), _param("param_6", 5, size=8, data_type="ulong")]
-    summary = summarize_store_effects([_Block([_store("la", "lv", 0x100)])], tracer, _Tracker(), params)
+    summary = summarize_store_effects([_Block([_store("la", "lv", 0x100)])], tracer, _Tracker(), params, direct_call_summary=forbid_callee_summary)
     assert summary.effects == []
     assert summary.incomplete_reasons == (_EFFECT_STORE_LOCATION_UNMODELED_REASON,)
 
@@ -308,7 +311,8 @@ def test_intervening_plain_store_or_call_keeps_the_halves_unmodelled():
     # a plain store to a *disjoint* field of the same object (p + 0) between
     # the halves is exactly the clang -O0 interleaving: still composed
     with_store = summarize_store_effects(
-        [_Block([_store("la", "lv", 0x100), _store("p", "o", 0x104), _store("ra", "rv", 0x108)])], tracer, _Tracker(), params
+        [_Block([_store("la", "lv", 0x100), _store("p", "o", 0x104), _store("ra", "rv", 0x108)])], tracer, _Tracker(), params,
+        direct_call_summary=forbid_callee_summary
     )
     assert with_store.incomplete_reasons == ()
     assert sorted((e.location.offset, e.location.size) for e in with_store.effects) == [(0, 8), (32, 8)]
@@ -317,16 +321,22 @@ def test_intervening_plain_store_or_call_keeps_the_halves_unmodelled():
     overlap = _b("INT_ADD", _p1(), _c(36))
     tracer_overlap = _Tracer([], values={"la": la, "lv": lv, "ra": ra, "rv": rv, "q": overlap, "o": other})
     with_overlap = summarize_store_effects(
-        [_Block([_store("la", "lv", 0x100), _store("q", "o", 0x104), _store("ra", "rv", 0x108)])], tracer_overlap, _Tracker(), params
+        [_Block([_store("la", "lv", 0x100), _store("q", "o", 0x104), _store("ra", "rv", 0x108)])], tracer_overlap, _Tracker(), params,
+        direct_call_summary=forbid_callee_summary
     )
     assert _EFFECT_STORE_LOCATION_UNMODELED_REASON in with_overlap.incomplete_reasons
     assert all(e.location.offset != 32 for e in with_overlap.effects)
 
     with_call = summarize_store_effects(
-        [_Block([_store("la", "lv", 0x100), _call_op(0x104), _store("ra", "rv", 0x108)])], tracer, _Tracker(), params
+        [_Block([_store("la", "lv", 0x100), _call_op(0x104), _store("ra", "rv", 0x108)])], tracer, _Tracker(), params,
+        direct_call_summary=lambda _target_ref, _arguments: None
     )
     assert _EFFECT_STORE_LOCATION_UNMODELED_REASON in with_call.incomplete_reasons
     assert all(e.location.offset != 32 for e in with_call.effects)
+    # Issue #121: 介在する call は barrier であると同時に call-effect lane の
+    # blocker としても記録される。この test の前提を明示する。
+    assert with_call.has_unsupported_call is True
+    assert {ref.reason for ref in with_call.unsupported_call_sites} == {"target_identity_unavailable"}
 
 
 def test_halves_split_across_blocks_are_unmodelled_at_summary_level():
@@ -336,7 +346,8 @@ def test_halves_split_across_blocks_are_unmodelled_at_summary_level():
     tracer = _Tracer([], values={"la": la, "lv": lv, "ra": ra, "rv": rv})
     params = [_param("param_1", 0, size=8, data_type="undefined8 *"), _param("param_6", 5, size=8, data_type="ulong")]
     summary = summarize_store_effects(
-        [_Block([_store("la", "lv", 0x100)], 0), _Block([_store("ra", "rv", 0x108)], 1)], tracer, _Tracker(), params
+        [_Block([_store("la", "lv", 0x100)], 0), _Block([_store("ra", "rv", 0x108)], 1)], tracer, _Tracker(), params,
+        direct_call_summary=forbid_callee_summary
     )
     assert summary.effects == []
     assert summary.incomplete_reasons == (_EFFECT_STORE_LOCATION_UNMODELED_REASON,)
