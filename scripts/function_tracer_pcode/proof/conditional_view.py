@@ -562,8 +562,16 @@ def build_conditional_equivalence_formula(
             )
     if type(debug) is not bool:
         raise TypeError("debug must be an exact bool")
-    builder = FormulaBuilder(allow_call=True, debug=debug)
-    # builder 既定が将来変わって追跡外の前提が入らないよう、ここで固定を確認する。
+    # semantics を決める option は既定任せにせず**すべて明示**する。FormulaBuilder
+    # の既定が将来変わっても conditional formula の意味が黙って動かないようにする
+    # ため（`assume_fp_non_nan` が既定で真になれば、記録されない前提が formula に
+    # 入る）。新しい option を公開しないので、値はここが唯一の決定点。
+    builder = FormulaBuilder(
+        debug=debug,
+        exclude_ub=True,
+        assume_fp_non_nan=False,
+        allow_call=True,
+    )
     if builder.assume_fp_non_nan:
         raise ValueError(
             "a conditional formula must not carry untracked input-domain assumptions"

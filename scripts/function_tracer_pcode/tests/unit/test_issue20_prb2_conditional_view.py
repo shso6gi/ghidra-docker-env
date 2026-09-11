@@ -741,6 +741,40 @@ def test_conditional_formula_carries_no_untracked_fp_assumption():
     assert built.formula != injected_formula
 
 
+def test_conditional_entry_point_pins_every_semantic_builder_option():
+    """semantic option を既定任せにしない（既定が変われば意味が黙って動く）。"""
+    from scripts.function_tracer_pcode.proof.formula import builder as builder_module
+
+    recorded = []
+
+    class _RecordingFormulaBuilder(builder_module.FormulaBuilder):
+        def __init__(self, *args, **kwargs):
+            recorded.append((args, dict(kwargs)))
+            super().__init__(*args, **kwargs)
+
+    left, _ = _single_call_analysis(binary_id="binary1")
+    right, _ = _single_call_analysis(binary_id="binary2")
+    left_view = create_conditional_view(left, observation_policy=NO_OBSERVATION).view
+    right_view = create_conditional_view(right, observation_policy=NO_OBSERVATION).view
+
+    original = builder_module.FormulaBuilder
+    builder_module.FormulaBuilder = _RecordingFormulaBuilder
+    try:
+        build_conditional_equivalence_formula(left_view, right_view)
+    finally:
+        builder_module.FormulaBuilder = original
+
+    assert len(recorded) == 1
+    positional, keywords = recorded[0]
+    assert positional == ()
+    assert keywords == {
+        "debug": False,
+        "exclude_ub": True,
+        "assume_fp_non_nan": False,
+        "allow_call": True,
+    }
+
+
 def test_conditional_entry_point_debug_option_does_not_change_the_formula():
     left, _ = _single_call_analysis(binary_id="binary1")
     right, _ = _single_call_analysis(binary_id="binary2")
