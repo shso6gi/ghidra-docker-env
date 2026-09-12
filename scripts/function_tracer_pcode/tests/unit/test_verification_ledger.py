@@ -1416,7 +1416,7 @@ def test_the_scope_evidence_payload_records_what_was_actually_checked(full_run):
     )
 
     tree = row["scope_evidence"]["trees"]["."]
-    assert tree == {
+    assert {key: tree[key] for key in tree if key != "scope_health"} == {
         "whole_benchmark_scope": "FULL_EQBENCH",
         "failure_reason": None,
         "formal_publication": "valid",
@@ -1430,6 +1430,20 @@ def test_the_scope_evidence_payload_records_what_was_actually_checked(full_run):
         "pairs_in_census": 1,
     }
     assert row["scope_evidence"]["whole_benchmark_scope"] == "FULL_EQBENCH"
+    # scope health: 4 failure counters at 0 and the accounting that must close.
+    health = tree["scope_health"]
+    assert health["status"] == verification_ledger.SCOPE_HEALTH_OK
+    assert health["failure_reason"] is None
+    assert health["failures"] == {
+        "function_census_failure_count": 0,
+        "compile_failure_count": 0,
+        "missing_binary_count": 0,
+        "run_pair_failures": 0,
+    }
+    assert health["accounting"]["target_sources"] == health["accounting"]["completed_samples"]
+    assert health["accounting"]["expected_binary_count"] == (
+        health["accounting"]["compiled_binary_count"])
+    assert health["accounting"]["dry_run"] == 0
 
 
 def test_a_rejected_tree_records_its_reason_in_the_payload(full_run):
@@ -1488,3 +1502,286 @@ def test_limit_never_drops_the_rows_the_verdict_rests_on(tmp_path, full_run, sub
         line for line in listing.splitlines()
         if line.strip().endswith("  " + good["run_dir"])
     ], "--limit dropped the evidence row behind the verdict"
+
+
+# ---------------------------------------------------------------------------
+# scope health: benchmark 対象が途中で欠落した run を full と認めない
+#
+# formal validator を通り、残存 census が complete で、
+# `total_pair_jobs == total_functions × expected_pairs_per_function` まで
+# 自己整合していても、失敗 counter / accounting が「対象が途中で消えた」ことを
+# 示すなら full verification ではない。digest は必ず reseal してから試験する。
+# ---------------------------------------------------------------------------
+
+
+def _healthy_full(full_run, name, scope="full_eq", **kwargs):
+    """artifact として正式かつ scope health も ok な full run。"""
+    return full_run(name, scope=scope, **kwargs)
+
+
+def test_A_a_function_census_failure_is_never_full_evidence(tmp_path, full_run):
+    """本 blocker の直接固定。
+
+    Eq runner は census 不一致を記録して**処理を続行**する（:1096-1099）ので、
+    `total_functions` / `total_pair_jobs` / census はすべて縮小後の関数集合から
+    作られ、内部的に自己整合する。それでも 1 関数は評価されていない。
+    """
+    def census_failure(payload):
+        payload["function_census_failure_count"] = 1
+        payload["function_census_failures"] = ["CLEVER/LoopSub/Eq/new"]
+        return _reseal(payload)
+
+    run_dir = full_run("census_failure", scope="full_eq", mutate=census_failure)
+
+    # formal validator は受理する（contract 違反ではない）。
+    assert _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    # 残存範囲は complete で、extent 不変量も満たす。
+    assert row["completed_scope"] == outcome_transition.COMPLETENESS_COMPLETE
+    tree = row["scope_evidence"]["trees"]["."]
+    assert tree["pairs_declared"] == tree["pairs_in_census"]
+    # それでも full evidence にならず、理由が census failure を明示する。
+    assert evidence is None
+    assert "function_census_failure_count=1" in reason
+    assert "CLEVER/LoopSub/Eq/new" in reason
+    assert tree["scope_health"]["status"] == verification_ledger.SCOPE_HEALTH_FAILED
+
+    listing = verification_ledger.format_listing(
+        (row,), _head_state(), ledger_path=tmp_path / "l.jsonl",
+    )
+    assert "full_eq: YES" not in listing
+    assert "full_eq: NO" in listing
+    assert "function_census_failure_count=1" in listing
+
+
+def test_B_a_compile_failure_is_never_full_evidence(tmp_path, full_run):
+    def compile_failure(payload):
+        payload["compile_failure_count"] = 1
+        payload["compile_failure_samples"] = ["airy/Sign/Eq/newV"]
+        return _reseal(payload)
+
+    run_dir = full_run("compile_failure", scope="full_eq", mutate=compile_failure)
+
+    assert _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None
+    assert "compile_failure_count=1" in reason and "airy/Sign/Eq/newV" in reason
+
+
+def test_C_a_missing_binary_is_never_full_evidence(tmp_path, full_run):
+    def missing_binary(payload):
+        payload["missing_binary_count"] = 1
+        payload["missing_binary_axes"] = ["airy/Sign/Eq/newV/B7"]
+        return _reseal(payload)
+
+    run_dir = full_run("missing_binary", scope="full_eq", mutate=missing_binary)
+
+    assert _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None
+    assert "missing_binary_count=1" in reason
+
+
+def test_D_a_healthy_full_artifact_is_still_evidence(tmp_path, full_run):
+    """逆向きの固定: 健全な full artifact は引き続き YES。"""
+    run_dir = _healthy_full(full_run, "healthy", scope="full_eq")
+
+    assert _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+
+    assert row["scope_evidence"]["trees"]["."]["scope_health"]["status"] == (
+        verification_ledger.SCOPE_HEALTH_OK
+    )
+    assert verification_ledger.full_scope_evidence(row) == ("full_eq", "")
+    listing = verification_ledger.format_listing(
+        (row,), _head_state(), ledger_path=tmp_path / "l.jsonl",
+    )
+    assert "full_eq: YES" in listing
+    assert "scope_health=ok" in listing
+
+
+def test_E_a_benchmark_gate_failure_does_not_remove_the_coverage_fact(tmp_path, full_run):
+    """gate 軸（C）の失敗を coverage の喪失に混ぜない。
+
+    benchmark gate の結果は publication manifest の field ではない
+    （`benchmark_gate_failures` は run_manifest / gate JSON 側）。全 pair を実行した
+    run が gate violation を出しても、「全件を実行した」という事実は残る。
+    """
+    run_dir = _healthy_full(full_run, "gate_fail", scope="full_eq")
+    # gate が violation を報告している状態を作る（coverage とは別 artifact）。
+    (run_dir / "benchmark_validation_gate.json").write_text(
+        json.dumps({
+            "gate": "FAIL", "pairs": 1,
+            "hard_violations": {"eq_not_eq": 1},
+            "suspicious": {"suspicious_eq_on_source_changed_function": 2},
+        }),
+        encoding="utf-8",
+    )
+    manifest = run_dir / "run_manifest.txt"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        + "benchmark_gate_status=FAIL\nbenchmark_gate_failures=1\n",
+        encoding="utf-8",
+    )
+
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+
+    # C 軸は FAIL を報告する。
+    assert row["gate"]["benchmark"]["."]["gate"] == "FAIL"
+    assert row["gate"]["benchmark"]["."]["hard_violations"] == 1
+    assert row["gate"]["benchmark"]["."]["suspicious"] == 2
+    # coverage の事実は失われない。
+    assert row["scope_evidence"]["trees"]["."]["scope_health"]["status"] == (
+        verification_ledger.SCOPE_HEALTH_OK
+    )
+    assert verification_ledger.full_scope_evidence(row) == ("full_eq", "")
+    # gate の状態は scope 判定に混ざっていない（gate 由来の field 名が現れない）。
+    serialized = json.dumps(row["scope_evidence"])
+    for gate_field in (
+        "benchmark_gate", "hard_violations", "suspicious", "gate",
+        "benchmark_gate_failures", "benchmark_gate_status",
+    ):
+        assert gate_field not in serialized, gate_field
+
+
+def test_run_pair_failures_block_full_evidence_but_are_not_gate_failures(full_run):
+    """`run_pair_failures` は「評価できなかった pair」であり gate 失敗ではない。
+
+    fixed subset は TIMEOUT / ERROR pair を 5 件持ちながら `run_pair_failures=0`
+    なので、この counter は outcome の悪さではなく分類不能を表す。
+    """
+    run_dir = full_run(
+        "pair_failures", scope="full_eq",
+        mutate=lambda payload: _reseal({**payload, "run_pair_failures": 3}),
+    )
+
+    assert _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None and "run_pair_failures=3" in reason
+
+
+def test_a_dry_run_is_never_full_evidence(full_run):
+    run_dir = full_run(
+        "dry", scope="full_eq",
+        mutate=lambda payload: _reseal({**payload, "dry_run": 1}),
+    )
+
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None and "dry run" in reason
+
+
+@pytest.mark.parametrize(
+    "name,mutation,expected",
+    [
+        ("samples_unaccounted", {"completed_samples": 2}, "do not account for"),
+        ("binaries_short", {"compiled_binary_count": 8}, "expected binaries were built"),
+        ("no_binaries_expected", {"expected_binary_count": 0, "compiled_binary_count": 0},
+         "expected binaries were built"),
+        ("pairs_unaccounted", {"total_scheduled_pair_jobs": 0}, "do not account for"),
+    ],
+)
+def test_accounting_that_does_not_close_is_not_full_evidence(
+    full_run, name, mutation, expected,
+):
+    """対象が途中で消えたことを accounting の閉じ方から検出する。"""
+    run_dir = full_run(
+        name, scope="full_eq",
+        mutate=lambda payload: _reseal({**payload, **mutation}),
+    )
+
+    assert _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None, f"{name} was accepted as whole-benchmark evidence"
+    assert expected in reason
+
+
+@pytest.mark.parametrize("scope", ["full_eq", "full_neq"])
+def test_scope_health_applies_to_both_runners(full_run, scope):
+    """Eq / Neq どちらの run_scope でも同じ health 条件が働く。
+
+    両 runner の counter 意味と accounting の閉じ方は同型（Eq :1096/:1241/:1239、
+    Neq :672/:685/:695 と `record_missing_variant_axes`）なので、判定式も共通。
+    """
+    healthy = verification_ledger.build_row(
+        full_run(f"healthy_{scope}", scope=scope), requested_scope=scope)
+    broken = verification_ledger.build_row(
+        full_run(f"broken_{scope}", scope=scope,
+                 mutate=lambda p: _reseal({**p, "function_census_failure_count": 1,
+                                           "function_census_failures": ["s"]})),
+        requested_scope=scope)
+
+    assert verification_ledger.full_scope_evidence(healthy) == (scope, "")
+    assert verification_ledger.full_scope_evidence(broken)[0] is None
+
+
+def test_unreadable_scope_health_fields_are_unknown_not_ok(full_run):
+    """health を判定できないなら ok ではなく unknown（fail-closed）。"""
+    run_dir = full_run("unknown_health", scope="full_eq")
+    published = run_dir / outcome_transition.PUBLICATION_MANIFEST_FILE
+    payload = json.loads(published.read_text(encoding="utf-8"))
+    del payload["run_pair_failures"]
+    published.write_text(json.dumps(payload), encoding="utf-8")
+
+    health = verification_ledger.scope_health(payload)
+
+    assert health["status"] == verification_ledger.SCOPE_HEALTH_UNKNOWN
+    assert "run_pair_failures" in health["failure_reason"]
+
+
+def test_the_real_full_matrix_scope_health_is_reported_faithfully():
+    """実在の full run に新しい条件を当てた結果を固定する（現実との齟齬防止）。"""
+    path = Path(REPO_ROOT) / "logs/EqBench/all_eq_matrix_current/matrix-publication-manifest.json"
+    if not path.is_file():
+        pytest.skip("the historical full matrix artifact is not in this checkout")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    execution_receipt.validate_matrix_publication_manifest(payload)
+
+    health = verification_ledger.scope_health(payload)
+
+    # 対象の欠落は無い（census/compile/missing binary は 0、accounting は閉じる）が、
+    # 197 pair が canonical 分類に失敗しているので health は failed。
+    assert health["failures"]["function_census_failure_count"] == 0
+    assert health["failures"]["compile_failure_count"] == 0
+    assert health["failures"]["missing_binary_count"] == 0
+    assert health["accounting"]["completed_samples"] == health["accounting"]["target_sources"]
+    assert health["accounting"]["compiled_binary_count"] == (
+        health["accounting"]["expected_binary_count"])
+    if health["failures"]["run_pair_failures"]:
+        assert health["status"] == verification_ledger.SCOPE_HEALTH_FAILED
+        assert "run_pair_failures" in health["failure_reason"]
+
+
+def test_matrix_root_run_exit_status_comes_from_the_execution_receipt(full_run):
+    """matrix-root でも exit status を診断として残す（scope 条件には使わない）。"""
+    run_dir = full_run("with_receipt", scope="full_eq")
+    (run_dir / verification_ledger.EXECUTION_RECEIPT_FILE).write_text(
+        json.dumps({"schema": "phase10-validation-execution-receipt-v1",
+                    "execution_kind": "EQBENCH_MATRIX", "exit_status": 1}),
+        encoding="utf-8",
+    )
+
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+
+    assert row["run_exit_status"]["status"] == "1"
+    assert row["run_exit_status"]["source"] == verification_ledger.EXECUTION_RECEIPT_FILE
+    # exit_status は gate 失敗も含むので、単独で full を落とす条件にはしない。
+    assert verification_ledger.full_scope_evidence(row) == ("full_eq", "")
+
+
+def test_subset_run_exit_status_still_comes_from_its_own_manifest(subset_run):
+    row = verification_ledger.build_row(subset_run("run"), requested_scope="subset")
+
+    assert row["run_exit_status"]["status"] == "0"
+    assert row["run_exit_status"]["source"] == "subset_manifest.txt"

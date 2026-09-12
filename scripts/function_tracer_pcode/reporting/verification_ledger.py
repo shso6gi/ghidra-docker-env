@@ -117,6 +117,50 @@ PUBLICATION_MANIFEST_FILE = "matrix-publication-manifest.json"
 # its declared scope says.
 NARROWING_FILTER_KEYS = ("sample_filter", "pair_filter")
 NARROWING_LIMIT_KEY = "max_samples"
+
+# Publication fields that say whether the benchmark *target* survived the run.
+# Each was read out of the runners (Eq `eqbench_run_all_32jobs.sh`, Neq
+# `neqbench_run_all_32jobs.sh`) rather than assumed:
+#
+#   function_census_failure_count -- the actual function set diverged from the
+#       frozen expectation.  Eq records it and *keeps going* (:1096-1099), so
+#       `total_functions`, `total_pair_jobs` and the census are all rebuilt from
+#       the reduced set and stay self-consistent; Neq drops the sample outright
+#       (:671-676).  Either way part of the benchmark was not evaluated.
+#   compile_failure_count -- a sample (Eq :1241) or a variant (Neq :685/:695)
+#       did not build, and its pairs were never run.
+#   missing_binary_count -- an axis binary is absent (Eq :1232-1239, Neq via
+#       `record_missing_variant_axes`), so pairs over it cannot be formed.
+#   run_pair_failures -- a pair job exited non-zero, i.e. failed canonical
+#       classification or a run-health check (`pair_scheduler.sh:200-202`, and
+#       the runner's own message at Eq :1484).  A TIMEOUT or ERROR *outcome*
+#       does not bump it: the fixed subset carries 5 such pairs with
+#       run_pair_failures=0.  So a non-zero value means a pair nobody could
+#       evaluate, not a pair that was evaluated and came out badly.
+#
+# The benchmark gate is deliberately absent from this list: it lives in
+# `VALIDATION_BENCHMARK_GATE_FAILURES` / `benchmark_gate_failures`, which is not
+# a publication manifest field at all.  Coverage ("did we run everything?") and
+# the gate ("is what we got sound?") stay separate axes.
+SCOPE_HEALTH_COUNTERS = (
+    ("function_census_failure_count", "function_census_failures"),
+    ("compile_failure_count", "compile_failure_samples"),
+    ("missing_binary_count", "missing_binary_axes"),
+    ("run_pair_failures", None),
+)
+# Accounting that must close for a run that covered the whole benchmark.  Each
+# identity was checked against the one real full run and against healthy runs of
+# both runners before being adopted.
+SCOPE_HEALTH_ACCOUNTING_KEYS = (
+    "target_sources", "completed_samples", "skipped_samples",
+    "expected_binary_count", "compiled_binary_count",
+    "total_functions", "expected_pairs_per_function", "total_pair_jobs",
+    "total_scheduled_pair_jobs", "total_skipped_pair_jobs", "dry_run",
+)
+SCOPE_HEALTH_OK = "ok"
+SCOPE_HEALTH_FAILED = "failed"
+SCOPE_HEALTH_UNKNOWN = "unknown"
+EXECUTION_RECEIPT_FILE = "validation-execution-receipt.json"
 # Recorded per tree as well as folded, because these legitimately differ
 # between the halves of one subset run.
 PER_TREE_PROVENANCE_KEYS = (
@@ -534,6 +578,7 @@ def _tree_scope_evidence(tree: Path) -> Dict[str, Any]:
         run_manifest, config)
     row["pairs_declared"], row["pairs_in_census"] = _declared_and_published_extent(
         publication)
+    row["scope_health"] = scope_health(publication)
     # The three sources are compared directly rather than through
     # _agreed_field(), which ignores a source whose value is empty.  Here an
     # absent value must be a reason to say no, not one fewer source to agree.
@@ -579,6 +624,14 @@ def _tree_scope_evidence(tree: Path) -> Dict[str, Any]:
             f"the manifest itself declares (total_functions x "
             f"expected_pairs_per_function)"
         )
+        return row
+    health = row["scope_health"]
+    if health["status"] != SCOPE_HEALTH_OK:
+        # The artifact is well-formed and internally consistent, but its own
+        # failure counters or accounting say the benchmark target shrank while
+        # the run was going.  A run that lost part of its target did not verify
+        # the whole benchmark, however complete the remainder looks.
+        row["failure_reason"] = f"scope health {health['status']}: {health['failure_reason']}"
         return row
     row["failure_reason"] = None
     row["whole_benchmark_scope"] = declared
@@ -644,6 +697,92 @@ def _run_manifest_filters_agree(
     except ValueError:
         return None
     return True
+
+
+def scope_health(publication: Mapping[str, Any]) -> Dict[str, Any]:
+    """Whether the benchmark target survived the run, from the manifest itself.
+
+    "Well-formed artifact" and "evaluated the whole benchmark without losing
+    part of the target" are different claims.  The formal validator settles the
+    first; this settles the second, using the failure counters and the
+    accounting the same validated manifest already carries.
+
+    The failure that motivates it: an Eq function-census failure records the
+    divergence and lets the run continue, so ``total_functions``, the pair count
+    and the census are all rebuilt from the *reduced* function set.  Every
+    self-consistency check then passes -- 99 functions x 120 pairs, all statuses
+    present, ``complete`` -- while a hundredth function was never evaluated.
+
+    ``unknown`` (not ``ok``) whenever a field needed to answer is missing or not
+    an integer: an unanswerable question is never an affirmative answer.
+    """
+    numbers: Dict[str, Any] = {}
+    for key in SCOPE_HEALTH_ACCOUNTING_KEYS:
+        value = publication.get(key)
+        if type(value) is not int:
+            return {
+                "status": SCOPE_HEALTH_UNKNOWN,
+                "failure_reason": f"the published manifest has no usable {key}",
+                "failures": {}, "accounting": numbers,
+            }
+        numbers[key] = value
+    failures: Dict[str, int] = {}
+    for counter, _listing in SCOPE_HEALTH_COUNTERS:
+        value = publication.get(counter)
+        if type(value) is not int:
+            return {
+                "status": SCOPE_HEALTH_UNKNOWN,
+                "failure_reason": f"the published manifest has no usable {counter}",
+                "failures": failures, "accounting": numbers,
+            }
+        failures[counter] = value
+
+    def failed(reason: str) -> Dict[str, Any]:
+        return {
+            "status": SCOPE_HEALTH_FAILED, "failure_reason": reason,
+            "failures": failures, "accounting": numbers,
+        }
+
+    if numbers["dry_run"]:
+        return failed("the run was a dry run, so no pair was evaluated")
+    for counter, listing in SCOPE_HEALTH_COUNTERS:
+        if not failures[counter]:
+            continue
+        detail = ""
+        rows = publication.get(listing) if listing else None
+        if isinstance(rows, list) and rows:
+            shown = ", ".join(str(row) for row in rows[:3])
+            detail = f" ({shown}{', ...' if len(rows) > 3 else ''})"
+        return failed(
+            f"{counter}={failures[counter]}{detail}: part of the benchmark target "
+            "was not evaluated"
+        )
+    if numbers["completed_samples"] + numbers["skipped_samples"] != numbers["target_sources"]:
+        return failed(
+            f"{numbers['completed_samples']} completed + "
+            f"{numbers['skipped_samples']} skipped samples do not account for the "
+            f"{numbers['target_sources']} the run targeted"
+        )
+    if not numbers["expected_binary_count"] or (
+        numbers["compiled_binary_count"] != numbers["expected_binary_count"]
+    ):
+        return failed(
+            f"{numbers['compiled_binary_count']} of "
+            f"{numbers['expected_binary_count']} expected binaries were built"
+        )
+    if (
+        numbers["total_scheduled_pair_jobs"] + numbers["total_skipped_pair_jobs"]
+        != numbers["total_pair_jobs"]
+    ):
+        return failed(
+            f"{numbers['total_scheduled_pair_jobs']} scheduled + "
+            f"{numbers['total_skipped_pair_jobs']} reused pair jobs do not account "
+            f"for the {numbers['total_pair_jobs']} the run expected"
+        )
+    return {
+        "status": SCOPE_HEALTH_OK, "failure_reason": None,
+        "failures": failures, "accounting": numbers,
+    }
 
 
 def _declared_and_published_extent(
@@ -782,6 +921,38 @@ def collect_gate_reports(layout: RunLayout) -> Dict[str, Any]:
     }
 
 
+def _run_exit_status(layout: RunLayout) -> Dict[str, Any]:
+    """The run's own exit status, as a diagnostic only.
+
+    A subset run records it directly; a matrix run does not, so it is read back
+    from the signed execution receipt it already writes.  **It is deliberately
+    not a scope condition**: the runners exit non-zero when
+    ``VALIDATION_BENCHMARK_GATE_FAILURES`` is non-zero too (Eq :1431, Neq :818),
+    so a run that executed every pair and then failed the benchmark gate would
+    lose its coverage fact along with its gate verdict.  Coverage is decided by
+    ``scope_health``; the gate is the separate C axis.  Reading the receipt here
+    does not make it an authority for anything -- nothing is verified or
+    re-signed, only reported.
+    """
+    recorded = layout.subset_manifest.get("exit_status")
+    if recorded not in (None, ""):
+        return {"status": recorded, "source": SUBSET_MANIFEST_FILE}
+    statuses = {}
+    for name, tree in zip(layout.tree_names, layout.trees):
+        receipt = _read_json(tree / EXECUTION_RECEIPT_FILE) or {}
+        value = receipt.get("exit_status")
+        statuses[name] = str(value) if type(value) is int else UNSET
+    if not statuses:
+        return {"status": UNSET, "source": "absent"}
+    distinct = set(statuses.values())
+    return {
+        "status": distinct.pop() if len(distinct) == 1 else MISMATCH,
+        "source": EXECUTION_RECEIPT_FILE,
+        "trees": statuses,
+        "note": "diagnostic only; a non-zero status also covers benchmark gate failures",
+    }
+
+
 def _reference(given: Optional[str], recorded: Optional[str]) -> Optional[str]:
     """An issue / PR reference, with the runner's literal ``none`` normalised.
 
@@ -860,7 +1031,7 @@ def build_row(
         "correctness": correctness,
         "transition": transition,
         "gate": {**collect_gate_reports(layout), "axis": gate_axis_counts},
-        "run_exit_status": layout.subset_manifest.get("exit_status", UNSET),
+        "run_exit_status": _run_exit_status(layout),
         # Issue #123 / v3 §9.3: filled in by hand when an indicator moved and
         # a rerun did not settle whether it was the code or run-to-run noise.
         "unresolved_variance": [],
@@ -949,6 +1120,28 @@ def _coverage_cell(row: Mapping[str, Any]) -> str:
     return " ".join(parts)
 
 
+def _scope_health_cell(row: Mapping[str, Any]) -> str:
+    """``ok`` / ``failed(counter=n)`` / ``unknown`` per tree, for the listing.
+
+    The counter that decided a ``failed`` is named inline so a ``full_eq: NO``
+    can be traced to the number behind it without reopening the run directory.
+    """
+    trees = ((row.get("scope_evidence") or {}).get("trees") or {})
+    cells = []
+    for name, tree in sorted(trees.items()):
+        health = (tree or {}).get("scope_health") or {}
+        status = health.get("status", UNSET)
+        if status == SCOPE_HEALTH_FAILED:
+            offending = [
+                f"{counter}={value}"
+                for counter, value in sorted((health.get("failures") or {}).items())
+                if value
+            ]
+            status = f"failed({', '.join(offending)})" if offending else "failed"
+        cells.append(status if len(trees) == 1 else f"{name}:{status}")
+    return " ".join(cells) if cells else UNSET
+
+
 def _digest_cell(row: Mapping[str, Any], key: str) -> str:
     """One provenance digest, keeping the per-tree values when they differ.
 
@@ -993,6 +1186,7 @@ def format_row_lines(row: Mapping[str, Any], head: Mapping[str, Any]) -> List[st
         f"      coverage={_coverage_cell(row)}",
         f"      layout={row.get('run_layout')} "
         f"declared_run_scope={(row.get('scope_evidence') or {}).get('declared_run_scope', UNSET)} "
+        f"scope_health={_scope_health_cell(row)} "
         + (
             f"whole_benchmark_evidence={scope_evidence}"
             if scope_evidence is not None

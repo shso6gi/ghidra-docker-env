@@ -327,8 +327,36 @@ Three distinctions the schema exists to keep apart:
   4. the **validated** analysis config shows no `sample_filter`, `pair_filter`
      or `max_samples` narrowing;
   5. the recorded scope matches the requested full scope;
-  6. `completed_scope` is `complete`;
-  7. `code_matches_head` is `yes`.
+  6. the manifest's own **scope health** is `ok` (below);
+  7. `completed_scope` is `complete`;
+  8. `code_matches_head` is `yes`.
+
+  **A well-formed artifact whose remaining census is complete is still not a
+  full verification if the benchmark target shrank while the run was going.**
+  An Eq function-census failure, for instance, records the divergence and lets
+  the run continue, so `total_functions`, the pair count and the census are all
+  rebuilt from the *reduced* function set and every self-consistency check
+  passes — 99 functions × 120 pairs, all statuses present, `complete` — while a
+  hundredth function was never evaluated. Scope health therefore reads the
+  failure counters and the accounting the same validated manifest already
+  carries, and requires all of: `function_census_failure_count`,
+  `compile_failure_count`, `missing_binary_count` and `run_pair_failures` all
+  zero; `dry_run` zero; `completed_samples + skipped_samples == target_sources`;
+  `compiled_binary_count == expected_binary_count` (and non-zero);
+  `total_scheduled_pair_jobs + total_skipped_pair_jobs == total_pair_jobs`. A
+  field that cannot be read makes health `unknown`, never `ok`. The counter that
+  decided a failure is named in `list`, so a `NO` can be traced to its number.
+
+  `run_pair_failures` counts pair jobs that exited non-zero — a pair that
+  failed canonical classification or a run-health check, i.e. one nobody could
+  evaluate. A TIMEOUT or ERROR *outcome* does not bump it (the fixed subset
+  carries five such pairs with `run_pair_failures=0`), so it is a coverage fact,
+  not a verdict about results. The benchmark gate is deliberately **not** part
+  of scope health: it lives in `benchmark_gate_failures`, which is not a
+  publication-manifest field at all. A run that executed every pair and then
+  failed the gate keeps its coverage fact and reports the gate failure on the C
+  axis — the run's exit status is recorded as a diagnostic only, never as a
+  scope condition, precisely because the runners fold gate failures into it.
 
   Nothing is inferred from a source that is absent: a missing manifest, a
   missing `run_scope`, a disagreement, or filters that cannot be read are each
