@@ -263,16 +263,22 @@ validation_run_git_state_lines() {
 
 # Issue #123: before run の half が「比較対象」として使えるかどうか。
 #
-# `reporting.outcome_transition` が before tree から読むのは half 配下の
-# `*.pair-status.json` だけ（`reporting/pair_outcomes.py::iter_pair_outcomes`）なので、
-# 可否の基準もそれに揃える。run_manifest.txt や provenance の行は transition には
-# 不要なので要求しない: それらを持たない過去の run（PR #150 以前）も before に使える。
-# pair 数まで一致しているかは実行前には決められない（after 側の pair 集合が未確定）。
-# 欠けは transition 表の MISSING 行として出る。
+# 判定規則を shell 側に書き写さない: transition / gate が実際に通す reader
+# （`reporting.pair_outcomes.load_pair_outcomes()`）へ `--validate-comparison-tree`
+# で委譲し、そこを唯一の正とする。payload からも path からも identity を復元できない
+# pair-status や、同じ pair の status が 2 つある tree は reader が拒否するので、
+# ここでも通さない。run_manifest.txt や provenance は transition に不要なので要求
+# しない: それらを持たない過去の run（PR #150 以前）も before として使える。
+# after との pair 集合の一致は実行前には決められないので要求しない（欠けは従来どおり
+# transition 表の MISSING 行として出る）。
+# 成功時は pair 件数を stdout に出す。拒否の理由は reader の stderr をそのまま通す。
 validation_before_run_half_is_comparable() {
     local half_dir="$1"
-    [[ -d "$half_dir" ]] || return 1
-    [[ -n "$(find "$half_dir" -name '*.pair-status.json' -type f -print -quit 2>/dev/null)" ]]
+    local python_bin="${2:-${PYTHON_BIN:-python3}}"
+    local repo_root="${3:-${SCRIPT_DIR:-.}}"
+    (cd "$repo_root" && "$python_bin" -m \
+        scripts.function_tracer_pcode.reporting.pair_outcomes \
+        --validate-comparison-tree "$half_dir")
 }
 
 export -f validation_positive_int_setting

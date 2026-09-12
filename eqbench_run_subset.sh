@@ -48,21 +48,23 @@ halves=()
 
 if [[ -n "$SUBSET_BEFORE" ]]; then
     # Resolve and check before the (long) halves run: a mistyped before run must
-    # not be discovered only after the results are already produced.  The check
-    # is what outcome_transition actually needs from a before tree (a result
-    # tree carrying pair statuses), not the provenance this change adds -- runs
-    # made before it stay usable as a before.
+    # not be discovered only after the results are already produced.  What is
+    # checked is that the reader behind outcome_transition can actually load the
+    # half, not the provenance this change adds -- runs made before it stay
+    # usable as a before.
     SUBSET_BEFORE="$(realpath -m "$SUBSET_BEFORE")"
     if [[ ! -d "$SUBSET_BEFORE" ]]; then
         echo "Error: SUBSET_BEFORE is not a directory: $SUBSET_BEFORE" >&2
         exit 1
     fi
     for half in "${halves[@]}"; do
-        if ! validation_before_run_half_is_comparable "$SUBSET_BEFORE/$half"; then
+        if ! before_half_pairs="$(validation_before_run_half_is_comparable \
+            "$SUBSET_BEFORE/$half" "$PYTHON_BIN" "$SCRIPT_DIR")"; then
             echo "Error: SUBSET_BEFORE has no comparable $half half (SUBSET_SCOPE=$SUBSET_SCOPE):" \
-                "$SUBSET_BEFORE/$half holds no *.pair-status.json" >&2
+                "$SUBSET_BEFORE/$half (see the reader error above)" >&2
             exit 1
         fi
+        echo "Before run $half: $before_half_pairs comparable pairs"
     done
 fi
 
