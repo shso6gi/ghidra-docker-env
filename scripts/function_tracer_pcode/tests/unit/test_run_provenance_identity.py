@@ -13,6 +13,7 @@
 """
 
 import os
+import shutil
 import subprocess
 
 import pytest
@@ -74,10 +75,7 @@ def _seed_repository(root):
 
 @pytest.fixture()
 def seeded_repository(tmp_path):
-    if not any(
-        os.access(os.path.join(directory, "git"), os.X_OK)
-        for directory in os.environ.get("PATH", "").split(os.pathsep) if directory
-    ):
+    if shutil.which("git") is None:
         pytest.skip("git is not available")
     root = tmp_path / "repo"
     root.mkdir()
