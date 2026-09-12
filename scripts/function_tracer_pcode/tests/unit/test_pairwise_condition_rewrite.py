@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Pairwise 向け条件 rewrite の回帰テスト"""
+"""Pairwise 条件評価の回帰テスト（正規化済み条件・未解決ケース・phi 還元・符号混在ガード）"""
 
 import sys
 from pathlib import Path
@@ -24,15 +24,6 @@ from scripts.function_tracer_pcode.core import (
     ReturnInfo,
 )
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
-from scripts.function_tracer_pcode.analysis.effects.summary import (
-    CanonicalLocation,
-    EffectSummary,
-    StoreEffect,
-)
-from scripts.function_tracer_pcode.semantics.transform.rewrite import (
-    ExpressionRewriter,
-    rewrite_analysis_returns,
-)
 from scripts.function_tracer_pcode.smt import (
     ParallelResult,
     ParallelSolverRunner,
@@ -88,18 +79,6 @@ def _indexed_masked_param(name: str, index: int) -> Expression:
     return _binary("INT_AND", _indexed_param(name, index), _const(0xFFFFFFFF))
 
 
-def _signed_modulo_expansion(lhs: Expression, rhs: Expression) -> Expression:
-    return _binary(
-        "INT_SUB",
-        lhs,
-        _binary(
-            "INT_MULT",
-            _binary("INT_SDIV", lhs, rhs),
-            rhs,
-        ),
-    )
-
-
 def _signed_negative_condition(expr: Expression, negated: bool = False) -> Condition:
     return Condition(_binary("INT_SLESS", expr, _const(0)), negated=negated)
 
@@ -143,22 +122,6 @@ def _analysis(conditions) -> FunctionReturnAnalysis:
     )
 
 
-def test_rewrite_analysis_returns_normalizes_condition_expressions():
-    rewriter = ExpressionRewriter(direction=ExpressionRewriter.NORMALIZE_TO_MODULO)
-    analysis = _analysis(
-        [_signed_negative_condition(_signed_modulo_expansion(_param("param_1"), _param("param_2")))]
-    )
-
-    rewritten, results = rewrite_analysis_returns(analysis, rewriter)
-
-    condition_expr = rewritten.returns[0].conditions[0].expression
-
-    assert results[0].was_rewritten is True
-    assert any(rule.startswith("condition[0]:") for rule, _, _ in results[0].history)
-    assert condition_expr.operator == "INT_SLESS"
-    assert condition_expr.operands[0].operator == "INT_SREM"
-
-
 def test_summary_condition_equivalence_keeps_expression_width_semantic():
     cond32 = Condition(_binary("INT_SLESS", _sized_param("param_1", 4), _sized_const(0, 4)))
     cond64 = Condition(_binary("INT_SLESS", _sized_param("param_1", 8), _sized_const(0, 8)))
@@ -183,102 +146,30 @@ def test_summary_condition_equivalence_keeps_expression_width_semantic():
     assert strategy._cases_have_equivalent_summary_conditions(case32, case64) is False
 
 
-def test_rewrite_analysis_returns_preserves_effect_summary_metadata():
-    rewriter = ExpressionRewriter(direction=ExpressionRewriter.NORMALIZE_TO_MODULO)
-    effect_summary = EffectSummary(
-        parameter_names=["param_1"],
-        effects=[
-            StoreEffect(
-                location=CanonicalLocation("param_1", 0, 4),
-                value=_const(1),
-                conditions=[],
-                order_key=1,
-            )
-        ],
-    )
-    analysis = FunctionReturnAnalysis(
-        function_name="f",
-        entry_point="0x1000",
-        parameters=[],
-        returns=[
-            ReturnInfo(
-                address="0x1001",
-                value=_signed_modulo_expansion(_param("param_1"), _param("param_2")),
-                conditions=[],
-            )
-        ],
-        return_type="long",
-        unknown_event_count=3,
-        unknown_event_reasons=["r1"],
-        analysis_notes=["n1"],
-        recovered_from_decompiler=True,
-        incomplete_control_flow=True,
-        deferred_calls={"placeholder": Mock()},
-        effect_summary=effect_summary,
-        return_abi_facts={
-            "schema_version": 1,
-            "calling_convention": {
-                "status": "PRESENT",
-                "value": ("ghidra_calling_convention_v1", "default"),
-                "source": "getModelName",
-            },
-            "declared_or_effective_return_type": {
-                "status": "PRESENT",
-                "value": ("ghidra_return_type_v1", "/int", 8),
-                "source": "getReturnType",
-            },
-            "return_storage_descriptor": {
-                "status": "PRESENT",
-                "value": (
-                    "ghidra_return_storage_v1",
-                    (("ghidra_return_storage_member_v1", "register", 0, 8),),
-                ),
-                "source": "getReturnStorage",
-            },
-        },
-    )
+def test_pairwise_strategy_marks_contradictory_signed_modulo_pair_unsat_without_deciding():
+    """Issue #54-B: 条件が互いに矛盾する signed-modulo pair の Pairwise 挙動。
 
-    rewritten, _ = rewrite_analysis_returns(analysis, rewriter)
+    旧 `rewrite_analysis_returns` を通していたが、rewrite package は production-dead で
+    削除したため、**旧 rewriter の出力と同じ正規化済みの形**（両側 `INT_SREM`、
+    片側 negated）を fixture として直接構築する。削除前に旧 rewriter の出力を dump して
+    照合済み: condition は両側 `((param_1 % param_2) < 0)`、negated は side1 True /
+    side2 False、`value` / `return_type` / `analysis_notes` / `unknown_event_*` /
+    `deferred_calls` / `effect_summary` / `return_abi_facts` はいずれも同じ
+    （side2 はそもそも `was_rewritten=False` で rewriter が触っていない）。
+    assert は rewrite 前後で変えていない。
+    """
+    def _signed_modulo_condition(negated: bool) -> Condition:
+        return _signed_negative_condition(
+            _binary(
+                "INT_SREM",
+                _indexed_param("param_1", 0),
+                _indexed_param("param_2", 1),
+            ),
+            negated=negated,
+        )
 
-    assert rewritten.effect_summary is effect_summary
-    assert rewritten.unknown_event_count == 3
-    assert rewritten.unknown_event_reasons == ["r1"]
-    assert rewritten.analysis_notes == ["n1"]
-    assert rewritten.recovered_from_decompiler is True
-    assert rewritten.incomplete_control_flow is True
-    assert "placeholder" in rewritten.deferred_calls
-    assert rewritten.return_abi_facts == analysis.return_abi_facts
-    assert rewritten.return_abi_facts is not analysis.return_abi_facts
-    assert rewritten.return_abi_facts["return_storage_descriptor"] is not analysis.return_abi_facts["return_storage_descriptor"]
-
-
-def test_pairwise_strategy_skips_solver_for_rewritten_contradictory_conditions():
-    rewriter = ExpressionRewriter(direction=ExpressionRewriter.NORMALIZE_TO_MODULO)
-    analysis1 = _analysis(
-        [
-            _signed_negative_condition(
-                _signed_modulo_expansion(
-                    _indexed_param("param_1", 0),
-                    _indexed_param("param_2", 1),
-                ),
-                negated=True,
-            )
-        ]
-    )
-    analysis2 = _analysis(
-        [
-            _signed_negative_condition(
-                _binary(
-                    "INT_SREM",
-                    _indexed_param("param_1", 0),
-                    _indexed_param("param_2", 1),
-                )
-            )
-        ]
-    )
-
-    rewritten1, _ = rewrite_analysis_returns(analysis1, rewriter)
-    rewritten2, _ = rewrite_analysis_returns(analysis2, rewriter)
+    normalized1 = _analysis([_signed_modulo_condition(negated=True)])
+    normalized2 = _analysis([_signed_modulo_condition(negated=False)])
 
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = {
@@ -305,18 +196,18 @@ def test_pairwise_strategy_skips_solver_for_rewritten_contradictory_conditions()
     solver_runner.timeout = 5
 
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
-    result = strategy.check(rewritten1, rewritten2)
+    result = strategy.check(normalized1, normalized2)
 
     assert result.is_equivalent is None
     assert result.total_pairs == 1
     assert result.unsat_pairs == 1
     assert result.unknown_pairs == 0
     assert any(
-        note in rewritten1.analysis_notes
+        note in normalized1.analysis_notes
         for note in ("return_case_coverage_gap", "return_case_coverage_inconclusive")
     )
     assert any(
-        note in rewritten2.analysis_notes
+        note in normalized2.analysis_notes
         for note in ("return_case_coverage_gap", "return_case_coverage_inconclusive")
     )
     solver_runner.run_sequential.assert_called()
