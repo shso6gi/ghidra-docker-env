@@ -440,6 +440,18 @@ def collect_gate_reports(layout: RunLayout) -> Dict[str, Any]:
     }
 
 
+def _reference(given: Optional[str], recorded: Optional[str]) -> Optional[str]:
+    """An issue / PR reference, with the runner's literal ``none`` normalised.
+
+    ``eqbench_run_subset.sh`` writes ``issue=none`` when nothing was named, and
+    a row carrying the string ``"none"`` would read like a reference.
+    """
+    for value in (given, recorded):
+        if value and value != "none":
+            return value
+    return None
+
+
 def build_row(
     run_dir: Path,
     *,
@@ -484,8 +496,8 @@ def build_row(
         "run_dir": str(run_dir),
         "run_layout": layout.kind,
         "trees": list(layout.tree_names),
-        "issue": issue or layout.subset_manifest.get("issue") or None,
-        "pr": pr or layout.subset_manifest.get("pr") or None,
+        "issue": _reference(issue, layout.subset_manifest.get("issue")),
+        "pr": _reference(pr, layout.subset_manifest.get("pr")),
         "note": note or None,
         "requested_scope": requested_scope,
         "completed_scope": completed_scope,

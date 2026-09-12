@@ -238,7 +238,7 @@ different claims, so they are reported as three independent groups of counters:
 | axis | values | source |
 |---|---|---|
 | **A. correctness** | `confirmed_consistent` / `confirmed_contradicted` / `unconfirmed` / `not_applicable` | The `Eq` label (one source on both sides) is its own ground truth. A `Neq` decision needs `semantic_ground_truth` from the tree's own `function_diff_manifest.json`; `source_relation` / `source_impact` are **not** a substitute for it. Anything else is `unconfirmed`; a non-decisive outcome is `not_applicable`. |
-| **B. transition** | `capability_improvement` / `classification_change` / `regression` / `other` | A new decision is an improvement **only when axis A confirms it**. A new decision nothing can confirm is `other` with the note `decided_but_unconfirmed`, counted on its own. A decision a ground truth contradicts, and any loss of a decision, is a `regression`. |
+| **B. transition** | `capability_improvement` / `classification_change` / `regression` / `other` | A new decision is an improvement **only when axis A confirms it**. A new decision nothing can confirm is `other` with the note `decided_but_unconfirmed`, counted on its own. A decision a ground truth contradicts, and a decision that was lost, is a `regression` -- except that *losing* a contradicted decision is `other` with the note `lost_a_contradicted_decision`, since dropping a wrong answer is not a loss (nor, by itself, a gain). |
 | **C. gate** | `violation` / `suspicious` / `ok` / `not_applicable` | `benchmark_validation_gate`'s own classification, grouped. A gate `ok` means "the gate found nothing to complain about", never "this decision is correct". |
 
 Most `Neq` `NOT_EQ` results sit in axis A's `unconfirmed` bucket, because their

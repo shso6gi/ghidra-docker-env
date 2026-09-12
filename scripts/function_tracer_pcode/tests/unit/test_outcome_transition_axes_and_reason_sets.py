@@ -574,3 +574,60 @@ def test_fail_on_change_keeps_its_meaning_with_the_new_sections(tmp_path):
         "--before", str(before), "--after", str(after),
         "--reason-sets", "--axes", "--fail-on-change",
     ]) == 2
+
+
+def test_losing_a_contradicted_decision_is_not_reported_as_a_regression(tmp_path):
+    """正解に反する決定が消えたのを「退行」と数えない（改善にも数えない）。"""
+    before, after = tmp_path / "before", tmp_path / "after"
+    write_pair(before, EQ_SAMPLE, "f", "B1", "B2", "NOT_EQ")
+    write_pair(after, EQ_SAMPLE, "f", "B1", "B2", "UNKNOWN")
+
+    report = ot.build_axes(load_pair_outcomes(before), load_pair_outcomes(after))
+
+    assert report.transition_counts()[ot.TRANSITION_REGRESSION] == 0
+    assert report.transition_counts()[ot.TRANSITION_IMPROVEMENT] == 0
+    assert report.transition_notes()[ot.TRANSITION_NOTE_LOST_CONTRADICTED] == 1
+    # 消えた側が違反だった事実は正解軸に残る。
+    assert report.correctness_counts("before")[ot.CORRECTNESS_CONTRADICTED] == 1
+
+
+def test_the_unconfirmed_note_is_not_used_for_a_contradicted_decision():
+    """`decided_but_unconfirmed` は「確認できなかった」だけに付く名前。"""
+    both_wrong = ot.classify_transition(
+        "EQUIVALENT", "NOT_EQ", ot.CORRECTNESS_CONTRADICTED, ot.CORRECTNESS_CONTRADICTED,
+    )
+    unconfirmed = ot.classify_transition(
+        "EQUIVALENT", "NOT_EQ", ot.CORRECTNESS_UNCONFIRMED, ot.CORRECTNESS_UNCONFIRMED,
+    )
+
+    assert both_wrong == (ot.TRANSITION_OTHER, ())
+    assert unconfirmed == (
+        ot.TRANSITION_OTHER, (ot.TRANSITION_NOTE_DECIDED_BUT_UNCONFIRMED,),
+    )
+
+
+def test_ground_truth_manifest_override_is_used_for_both_sides(tmp_path):
+    """tree 直下に manifest が無くても、明示した ground truth で正解軸を出せる。"""
+    before, after = tmp_path / "before", tmp_path / "after"
+    for tree in (before, after):
+        write_pair(tree, NEQ_SAMPLE, "g", "N_B1", "O_B1", "NOT_EQ")
+    manifest_path = tmp_path / "function_diff_manifest.json"
+    manifest_path.write_text(json.dumps({
+        "schema": "eqbench-function-diff-manifest-v1",
+        "samples": {NEQ_SAMPLE: {"parse_status": "ok", "functions": {"g": {
+            "source_relation": "changed", "source_impact": "MAY_AFFECT",
+            "semantic_ground_truth": "CONFIRMED_NOT_EQ",
+            "ground_truth_evidence": "reviewed",
+        }}}},
+    }), encoding="utf-8")
+
+    without = ot.build_report_sections(before, after, axes=True)[1]["axes"]
+    with_override = ot.build_report_sections(
+        before, after, axes=True, ground_truth_manifest=manifest_path,
+    )[1]["axes"]
+
+    assert without.after_ground_truth == ot.GROUND_TRUTH_ABSENT
+    assert without.correctness_counts("after")[ot.CORRECTNESS_UNCONFIRMED] == 1
+    assert with_override.after_ground_truth == str(manifest_path)
+    assert with_override.correctness_counts("after")[ot.CORRECTNESS_CONSISTENT] == 1
+    assert with_override.correctness_counts("before")[ot.CORRECTNESS_CONSISTENT] == 1

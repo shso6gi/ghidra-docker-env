@@ -340,11 +340,13 @@ TRANSITION_NOTE_UNCHANGED = "unchanged"
 TRANSITION_NOTE_DECIDED_BUT_UNCONFIRMED = "decided_but_unconfirmed"
 TRANSITION_NOTE_REASON_SET_CHANGED = "reason_set_changed"
 TRANSITION_NOTE_MISSING = "missing_on_one_side"
+TRANSITION_NOTE_LOST_CONTRADICTED = "lost_a_contradicted_decision"
 TRANSITION_NOTE_ORDER = (
     TRANSITION_NOTE_UNCHANGED,
     TRANSITION_NOTE_DECIDED_BUT_UNCONFIRMED,
     TRANSITION_NOTE_REASON_SET_CHANGED,
     TRANSITION_NOTE_MISSING,
+    TRANSITION_NOTE_LOST_CONTRADICTED,
 )
 
 OUTCOME_EQ = "EQUIVALENT"
@@ -435,6 +437,18 @@ def gate_axis(record: Optional[PairOutcome], manifest: Optional[Any]) -> str:
     return GATE_NOT_APPLICABLE
 
 
+def _unconfirmed_note(after_correctness: str) -> Tuple[str, ...]:
+    """``decided_but_unconfirmed`` only when that is what actually happened.
+
+    The note names a decision no ground truth could confirm.  A decision that a
+    ground truth *contradicts* is a different fact and must not borrow this
+    name, so it gets no note and is visible through the correctness axis.
+    """
+    if after_correctness == CORRECTNESS_UNCONFIRMED:
+        return (TRANSITION_NOTE_DECIDED_BUT_UNCONFIRMED,)
+    return ()
+
+
 def classify_transition(
     before_outcome: str,
     after_outcome: str,
@@ -461,11 +475,17 @@ def classify_transition(
     if after_correctness == CORRECTNESS_CONTRADICTED and before_correctness != CORRECTNESS_CONTRADICTED:
         return TRANSITION_REGRESSION, ()
     if before_decisive and not after_decisive:
+        if before_correctness == CORRECTNESS_CONTRADICTED:
+            # The pair stopped producing a verdict a ground truth contradicts.
+            # Nothing was gained, so this is not an improvement -- but calling
+            # it a regression would report the removal of a wrong answer as a
+            # loss, so it gets its own name instead.
+            return TRANSITION_OTHER, (TRANSITION_NOTE_LOST_CONTRADICTED,)
         return TRANSITION_REGRESSION, ()
     if after_decisive and not before_decisive:
         if after_correctness == CORRECTNESS_CONSISTENT:
             return TRANSITION_IMPROVEMENT, ()
-        return TRANSITION_OTHER, (TRANSITION_NOTE_DECIDED_BUT_UNCONFIRMED,)
+        return TRANSITION_OTHER, _unconfirmed_note(after_correctness)
     if before_decisive and after_decisive:
         if before_outcome == after_outcome:
             return TRANSITION_OTHER, (TRANSITION_NOTE_UNCHANGED,)
@@ -474,7 +494,7 @@ def classify_transition(
             return TRANSITION_IMPROVEMENT, ()
         if before_correctness == CORRECTNESS_CONSISTENT:
             return TRANSITION_REGRESSION, ()
-        return TRANSITION_OTHER, (TRANSITION_NOTE_DECIDED_BUT_UNCONFIRMED,)
+        return TRANSITION_OTHER, _unconfirmed_note(after_correctness)
     # Neither side decided anything.
     if before_outcome != after_outcome:
         return TRANSITION_CLASSIFICATION_CHANGE, ()
@@ -1223,7 +1243,7 @@ def format_reason_sets(report: ReasonSetReport) -> List[str]:
                 f"  {row.key[0]} {row.key[1]} {row.key[2]}_{row.key[3]}: "
                 f"{row.before_outcome} -> {row.after_outcome}{detail}"
             )
-            if row in report.reason_set_mismatches:
+            if row.reason_set_mismatch:
                 lines.append(f"      before={list(row.before_reasons or ())}")
                 lines.append(f"      after ={list(row.after_reasons or ())}")
     return lines

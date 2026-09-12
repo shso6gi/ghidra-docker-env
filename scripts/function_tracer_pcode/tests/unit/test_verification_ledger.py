@@ -467,3 +467,18 @@ def test_ledger_record_runs_after_the_existing_artifacts(tmp_path):
 
 def read_key_value_manifest_text(path: Path):
     return verification_ledger.read_key_value_manifest(path)
+
+
+def test_the_runners_literal_none_is_not_recorded_as_a_reference(tmp_path, subset_run):
+    """runner が書く `issue=none` を issue 番号として持ち回らない。"""
+    run_dir = subset_run("run")
+    manifest = run_dir / "subset_manifest.txt"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8") + "issue=none\npr=none\n", encoding="utf-8",
+    )
+
+    row = verification_ledger.build_row(run_dir, requested_scope="subset")
+    named = verification_ledger.build_row(run_dir, requested_scope="subset", issue="123")
+
+    assert row["issue"] is None and row["pr"] is None
+    assert named["issue"] == "123"

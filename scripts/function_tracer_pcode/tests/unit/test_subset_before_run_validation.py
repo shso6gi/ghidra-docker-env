@@ -106,6 +106,10 @@ def _run_subset_script(tmp_path, *, before, scope, output_name="out"):
         "OUTPUT_BASE_DIR": str(output_dir),
         "SUBSET_SCOPE": scope,
         "SUBSET_BEFORE": str(before),
+        # Issue #123: the script records into the verification ledger at the
+        # end.  Point it at the temporary directory: a test run must never
+        # append rows to the repository's real logs/EqBench ledger.
+        "VERIFICATION_LEDGER": str(tmp_path / "verification_ledger.jsonl"),
         "EQBENCH_ROOT": str(tmp_path / "empty-eqbench-root"),
         "NEQ_ROOT": str(tmp_path / "empty-eqbench-root"),
         "EQBENCH_TMPDIR": str(tmp_path / "runner-tmp"),
