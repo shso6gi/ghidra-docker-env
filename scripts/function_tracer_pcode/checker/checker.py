@@ -14,7 +14,6 @@ from scripts.function_tracer_pcode.core.render_smt import (
 )
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner, ParallelResult
 from scripts.function_tracer_pcode.proof.formula import FormulaBuilder
-from scripts.function_tracer_pcode.proof.formula.returns import ReturnWidthMismatchError
 from scripts.function_tracer_pcode.checker.counterexample import CounterexampleFormatter
 from scripts.function_tracer_pcode.semantics.typing.fixer import (
     TypeFixer,
@@ -44,53 +43,11 @@ from scripts.function_tracer_pcode.checker.attempts import (
     record_attempt,
     record_attempt_from_result,
 )
-from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec
-from scripts.function_tracer_pcode.proof.recursive_abstraction import abstract_recursive_calls
 from scripts.function_tracer_pcode.authority.lifecycle.production_boundary import (
     run_check_from_binaries_with_v2_pilot as run_check_from_binaries,
 )
-from scripts.function_tracer_pcode.checker.unknown_reason import (
-    build_unknown_recovery_actions,
-    make_unknown_reason,
-)
-from scripts.function_tracer_pcode.proof.cause_identity import (
-    ProofRequirementContract,
-    ProofRequirementId,
-    UnaryCauseKey,
-    RelationalCauseKey,
-    canonical_cause_tuple,
-)
-from scripts.function_tracer_pcode.proof.call_effect.obligations import (
-    EquivalenceObservationContract,
-    apply_solver_proof_artifacts_to_manifest,
-    build_call_effect_shadow_manifest,
-    build_structural_coverage_certificate,
-)
-from scripts.function_tracer_pcode.proof.call_effect.producer import (
-    produce_pure_direct_call_proofs,
-    produce_v2_pure_direct_call_proofs,
-)
-from scripts.function_tracer_pcode.authority.domains.call_effect import (
-    CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
-)
-from scripts.function_tracer_pcode.authority.domains.call_effect_sites import (
-    CALL_EFFECT_PROOF_BATCH_SITE,
-)
-from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
-    CallEffectProofBatchProductionSignal,
-    build_active_call_effect_execution_context,
-    emit_call_effect_signal,
-    record_production_pilot_shadow_error,
-)
-from scripts.function_tracer_pcode.proof.call_effect.preflight import (
-    CallProofDecisionMode,
-    verify_monolithic_terminal_receipt,
-    verify_monolithic_proof_receipt,
-)
-from scripts.function_tracer_pcode.proof.recurrence_promotion import (
-    PairRecurrencePromotionAuthority,
-)
-from scripts.function_tracer_pcode.core.recurrence_contracts import RecurrenceDigestCodec
+from scripts.function_tracer_pcode.proof.call_effect.obligations import EquivalenceObservationContract
+from scripts.function_tracer_pcode.proof.call_effect.preflight import CallProofDecisionMode
 
 
 # Re-exports kept for callers that import these names from this module.
