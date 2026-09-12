@@ -1,1 +1,1 @@
-"""Expression semantics: normalisation, semantic width, parameter semantics, type fixing and rewrites."""
+"""Expression semantics: normalisation, semantic width, parameter semantics, type fixing and expansion."""
