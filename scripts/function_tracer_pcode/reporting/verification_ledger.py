@@ -471,46 +471,35 @@ def _collect_transition(layout: RunLayout, before_layout: RunLayout) -> Dict[str
 
 
 def collect_scope_evidence(layout: RunLayout) -> Dict[str, Any]:
-    """What the run's own artifacts say about the scope it actually executed.
+    """Whether each result tree is a formally published whole-benchmark run.
 
-    ``requested_scope`` is what somebody asked for; it is not evidence.  This
-    reads what the runner wrote into the artifacts instead:
+    ``requested_scope`` is what somebody asked for; it is not evidence.  What
+    counts is whether the tree carries a ``matrix-publication-manifest.json``
+    that satisfies the repository's own publication artifact contract --
+    checked by calling the owning validator,
+    ``execution_receipt.validate_matrix_publication_manifest``, rather than by
+    re-implementing a few of its field checks here.  That validator already
+    binds the whole artifact together: the exact field set, the schema tag, the
+    ``run_scope`` and its agreement with ``analysis_config.run_scope``, the
+    ``analysis_config_digest`` over that config, the ``artifact_digest`` over
+    the body, and the typed analysis config itself.
 
-    * ``run_scope`` from the sealed ``matrix-publication-manifest.json`` (and
-      from its ``analysis_config``, whose digest is ``analysis_config_digest``),
-      cross-checked against ``run_manifest.txt``;
-    * the filters the run was given -- a run with a ``sample_filter`` or a
-      ``pair_filter``, or a ``max_samples`` limit, covered part of the benchmark
-      whatever its declared scope says.
-
-    Anything missing or disagreeing leaves ``unknown`` / ``differs``, which can
-    never support a full verdict.
+    Nothing is inferred from a source that is absent.  A missing manifest, a
+    missing ``run_scope`` in ``run_manifest.txt``, a disagreement between the
+    two, or filters that cannot be read from the validated config are each a
+    recorded *failure reason* -- never a field quietly dropped from the
+    comparison.
     """
     trees: Dict[str, Any] = {}
     for name, tree in zip(layout.tree_names, layout.trees):
-        run_manifest = read_key_value_manifest(tree / RUN_MANIFEST_FILE)
-        publication = _read_json(tree / PUBLICATION_MANIFEST_FILE) or {}
-        config = publication.get("analysis_config")
-        config = config if isinstance(config, Mapping) else {}
-        declared = _agreed_field(
-            [
-                source for source in (
-                    run_manifest,
-                    {"run_scope": publication.get("run_scope")}
-                    if isinstance(publication.get("run_scope"), str) else {},
-                    {"run_scope": config.get("run_scope")}
-                    if isinstance(config.get("run_scope"), str) else {},
-                ) if source
-            ],
-            "run_scope",
-        )
-        trees[name] = {
-            "declared_run_scope": declared,
-            "narrowed": _run_was_narrowed(run_manifest, config),
-            "has_publication_manifest": bool(publication),
-        }
+        trees[name] = _tree_scope_evidence(tree)
+    scopes = {row["whole_benchmark_scope"] for row in trees.values()}
     return {
         "trees": trees,
+        # One agreed scope only when every tree established the same one.
+        "whole_benchmark_scope": (
+            scopes.pop() if len(scopes) == 1 and None not in scopes else None
+        ),
         "declared_run_scope": _agreed_field(
             [{"run_scope": row["declared_run_scope"]} for row in trees.values()],
             "run_scope",
@@ -518,49 +507,210 @@ def collect_scope_evidence(layout: RunLayout) -> Dict[str, Any]:
     }
 
 
-def _run_was_narrowed(
+def _tree_scope_evidence(tree: Path) -> Dict[str, Any]:
+    """One tree's scope evidence: the validated scope, or why there is none."""
+    run_manifest = read_key_value_manifest(tree / RUN_MANIFEST_FILE)
+    run_manifest_scope = run_manifest.get("run_scope") or UNSET
+    publication, failure = _formally_published_manifest(tree)
+    row: Dict[str, Any] = {
+        "whole_benchmark_scope": None,
+        "failure_reason": failure,
+        "formal_publication": "valid" if publication is not None else failure,
+        "run_manifest_run_scope": run_manifest_scope,
+        "publication_run_scope": UNSET,
+        "analysis_config_run_scope": UNSET,
+        "declared_run_scope": run_manifest_scope,
+        "narrowed": None,
+    }
+    if publication is None:
+        return row
+    config = publication["analysis_config"]
+    # The validator guarantees these exist, are strings, and agree with each
+    # other; they are read back so the row records what was actually checked.
+    row["publication_run_scope"] = publication["run_scope"]
+    row["analysis_config_run_scope"] = config["run_scope"]
+    row["narrowed"] = _config_narrowed(config)
+    row["narrowing_agrees_with_run_manifest"] = _run_manifest_filters_agree(
+        run_manifest, config)
+    row["pairs_declared"], row["pairs_in_census"] = _declared_and_published_extent(
+        publication)
+    # The three sources are compared directly rather than through
+    # _agreed_field(), which ignores a source whose value is empty.  Here an
+    # absent value must be a reason to say no, not one fewer source to agree.
+    sources = (run_manifest_scope, publication["run_scope"], config["run_scope"])
+    declared = sources[0] if len(set(sources)) == 1 else MISMATCH
+    row["declared_run_scope"] = declared
+    if run_manifest_scope == UNSET:
+        row["failure_reason"] = f"{RUN_MANIFEST_FILE} records no run_scope"
+        return row
+    if declared == MISMATCH:
+        row["failure_reason"] = (
+            f"run_scope differs across sources: {RUN_MANIFEST_FILE}="
+            f"{run_manifest_scope} {PUBLICATION_MANIFEST_FILE}="
+            f"{publication['run_scope']} analysis_config={config['run_scope']}"
+        )
+        return row
+    if row["narrowed"] is not False:
+        row["failure_reason"] = (
+            "the published analysis config narrowed the run "
+            "(sample_filter / pair_filter / max_samples)"
+        )
+        return row
+    if row["narrowing_agrees_with_run_manifest"] is not True:
+        row["failure_reason"] = (
+            f"the filters in {RUN_MANIFEST_FILE} are absent or disagree with the "
+            f"published analysis config"
+        )
+        return row
+    pairs_declared, census = row["pairs_declared"], row["pairs_in_census"]
+    if pairs_declared is None or census is None:
+        row["failure_reason"] = (
+            "the published manifest does not state how many pairs a whole "
+            "benchmark run covers"
+        )
+        return row
+    if census != pairs_declared:
+        # The scope and the filters can both look whole-benchmark while the
+        # published pair census covers only a slice -- a rerun manifest, say,
+        # which no typed config field models.  The manifest contradicts itself
+        # in that case, and a contradiction is never evidence.
+        row["failure_reason"] = (
+            f"the published pair census covers {census} of the {pairs_declared} pairs "
+            f"the manifest itself declares (total_functions x "
+            f"expected_pairs_per_function)"
+        )
+        return row
+    row["failure_reason"] = None
+    row["whole_benchmark_scope"] = declared
+    return row
+
+
+def _formally_published_manifest(
+    tree: Path,
+) -> Tuple[Optional[Mapping[str, Any]], Optional[str]]:
+    """``(manifest, None)`` when the tree's publication artifact is valid.
+
+    Validity is decided by the artifact's owner
+    (``execution_receipt.validate_matrix_publication_manifest``), so the ledger
+    reads only artifacts that authority already considers well-formed instead
+    of minting a second, weaker contract of its own.  The ledger stays a
+    measurement aid: it never signs, repairs, or relaxes anything.
+    """
+    from scripts.function_tracer_pcode.reporting.execution_receipt import (
+        validate_matrix_publication_manifest,
+    )
+
+    path = tree / PUBLICATION_MANIFEST_FILE
+    if not path.is_file():
+        return None, f"no {PUBLICATION_MANIFEST_FILE}"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return None, f"unreadable {PUBLICATION_MANIFEST_FILE}: {exc}"
+    try:
+        validate_matrix_publication_manifest(payload)
+    except ValueError as exc:
+        return None, f"{PUBLICATION_MANIFEST_FILE} fails the publication contract: {exc}"
+    except TypeError as exc:
+        # A malformed artifact can make the validator's own set/hash work
+        # raise (an unhashable census entry, say).  That is bad data, not a
+        # bug in this module, so it is reported like any other rejection --
+        # and nothing broader is caught, so real defects still surface.
+        return None, f"{PUBLICATION_MANIFEST_FILE} is malformed: {exc}"
+    return payload, None
+
+
+def _run_manifest_filters_agree(
     run_manifest: Mapping[str, str], config: Mapping[str, Any],
 ) -> Optional[bool]:
-    """``True`` when a filter or a sample limit narrowed the run, else ``False``.
+    """Whether ``run_manifest.txt``'s own filters match the published config.
 
-    ``None`` when neither source recorded the filters at all: not knowing
-    whether a run was narrowed must not read as "it was not".
+    The publication manifest is built *from* the run manifest, so the two
+    should say the same thing; if they do not, one of them is not describing
+    this run and neither can be trusted.  A filter the run manifest does not
+    record keeps the answer ``None`` -- the source is not dropped from the
+    comparison just because it is silent.
     """
-    seen = False
-    for source in (run_manifest, config):
-        if not source:
-            continue
-        for key in NARROWING_FILTER_KEYS:
-            if key in source:
-                seen = True
-                if str(source[key] or ""):
-                    return True
-        if NARROWING_LIMIT_KEY in source:
-            seen = True
-            try:
-                if int(source[NARROWING_LIMIT_KEY]) > 0:
-                    return True
-            except (TypeError, ValueError):
-                return None
-    return False if seen else None
+    for key in NARROWING_FILTER_KEYS:
+        if key not in run_manifest or not isinstance(config.get(key), str):
+            return None
+        if run_manifest[key] != config[key]:
+            return False
+    if NARROWING_LIMIT_KEY not in run_manifest or type(config.get(NARROWING_LIMIT_KEY)) is not int:
+        return None
+    try:
+        if int(run_manifest[NARROWING_LIMIT_KEY]) != config[NARROWING_LIMIT_KEY]:
+            return False
+    except ValueError:
+        return None
+    return True
+
+
+def _declared_and_published_extent(
+    publication: Mapping[str, Any],
+) -> Tuple[Optional[int], Optional[int]]:
+    """``(pairs a whole run covers, pairs the census actually lists)``.
+
+    Both numbers come from the already-validated manifest: the extent it
+    declares (``total_functions`` x ``expected_pairs_per_function``) and the
+    census it published.  Either being unreadable yields ``None``, which is
+    never read as agreement.
+    """
+    functions = publication.get("total_functions")
+    per_function = publication.get("expected_pairs_per_function")
+    jobs = publication.get("total_pair_jobs")
+    census = publication.get("expected_pair_status_paths")
+    if any(type(value) is not int for value in (functions, per_function, jobs)):
+        return None, None
+    if not isinstance(census, list) or len(census) != jobs:
+        return None, None
+    return functions * per_function, len(census)
+
+
+def _config_narrowed(config: Mapping[str, Any]) -> Optional[bool]:
+    """Whether the *validated* analysis config shows a narrowed run.
+
+    Only the formal config is consulted: it has passed
+    ``validate_analysis_config``, so the filter fields are known to be present
+    and correctly typed.  ``None`` means the question could not be answered,
+    which is never read as "not narrowed".
+    """
+    for key in NARROWING_FILTER_KEYS:
+        value = config.get(key)
+        if not isinstance(value, str):
+            return None
+        if value:
+            return True
+    limit = config.get(NARROWING_LIMIT_KEY)
+    if type(limit) is not int:
+        return None
+    return limit > 0
 
 
 def full_scope_evidence(row: Mapping[str, Any]) -> Tuple[Optional[str], str]:
     """``(full scope this row really covers, reason)`` -- artifacts only.
 
     A row supports a full verdict only when every one of these holds, so that
-    no self-declared field can manufacture one:
+    no request and no self-declared field can manufacture one:
 
-    * the run is a single matrix tree (a subset run's ``eq``/``neq`` halves are
-      by construction not a whole-benchmark run, whatever scope was requested);
-    * the scope the runner recorded in its artifacts is the full scope, and it
-      agrees across the publication manifest and the run manifest;
-    * that recorded scope matches what was requested;
-    * no sample or pair filter narrowed the run;
-    * the run is complete, by the publication manifest's own pair census.
+    * the run is a single whole-benchmark matrix tree -- a subset run's
+      ``eq``/``neq`` halves are by construction not one, whatever was
+      requested;
+    * that tree's ``matrix-publication-manifest.json`` satisfies the
+      repository's publication artifact contract in full, as judged by the
+      validator that owns it (which also binds ``run_scope``,
+      ``analysis_config``, ``analysis_config_digest`` and ``artifact_digest``
+      together);
+    * ``run_manifest.txt`` records a ``run_scope`` and it agrees with the
+      published one;
+    * the validated analysis config shows no ``sample_filter`` /
+      ``pair_filter`` / ``max_samples`` narrowing;
+    * the recorded scope matches the requested full scope;
+    * the run is complete by the publication manifest's own pair census.
 
-    Whether it is evidence about the code at *HEAD* is a separate question,
-    answered by ``head_match``.
+    Anything absent, malformed, disagreeing or simply uncheckable is a reason
+    to say no.  Whether the row is evidence about the code at *HEAD* is a
+    separate question, answered by ``head_match``.
     """
     requested = row.get("requested_scope")
     if requested not in FULL_SCOPES:
@@ -571,15 +721,17 @@ def full_scope_evidence(row: Mapping[str, Any]) -> Tuple[Optional[str], str]:
             "matrix tree"
         )
     evidence = row.get("scope_evidence") or {}
-    declared = evidence.get("declared_run_scope", UNSET)
+    trees = evidence.get("trees") or {}
+    if not trees:
+        return None, "the run has no result tree to read a published scope from"
+    for name, tree in sorted(trees.items()):
+        reason = tree.get("failure_reason")
+        if reason or not tree.get("whole_benchmark_scope"):
+            return None, reason or "no formally published whole-benchmark scope"
+    scope = evidence.get("whole_benchmark_scope")
     expected = RUN_SCOPE_BY_FULL_SCOPE[requested]
-    if declared != expected:
-        return None, f"the run recorded run_scope={declared}, not {expected}"
-    narrowed = {
-        name: tree.get("narrowed") for name, tree in (evidence.get("trees") or {}).items()
-    }
-    if any(value is not False for value in narrowed.values()) or not narrowed:
-        return None, "the run was narrowed by a filter, or its filters are unknown"
+    if scope != expected:
+        return None, f"the published run_scope is {scope or UNSET}, not {expected}"
     if row.get("completed_scope") != outcome_transition.COMPLETENESS_COMPLETE:
         return None, f"completed_scope is {row.get('completed_scope')}"
     return requested, ""
@@ -899,6 +1051,31 @@ def format_row_lines(row: Mapping[str, Any], head: Mapping[str, Any]) -> List[st
     return lines
 
 
+def _supporting_indexes(
+    rows: Sequence[Mapping[str, Any]], head: Mapping[str, Any],
+) -> Dict[str, int]:
+    """``scope -> index`` of the latest row that actually supports a full verdict.
+
+    Computed once and used by both the verdict and the detail listing, so the
+    row a ``YES`` rests on can never be a different row from the one printed.
+    """
+    supporting: Dict[str, int] = {}
+    for index, row in enumerate(rows):
+        scope, _reason = full_scope_evidence(row)
+        if scope is not None and head_match(row, head)[0] == HEAD_MATCH_YES:
+            supporting[scope] = index
+    return supporting
+
+
+def _requesting_indexes(rows: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+    """``scope -> index`` of the latest row that merely *requested* each scope."""
+    requesting: Dict[str, int] = {}
+    for index, row in enumerate(rows):
+        if row.get("requested_scope") in FULL_SCOPES:
+            requesting[row["requested_scope"]] = index
+    return requesting
+
+
 def format_listing(
     rows: Sequence[Mapping[str, Any]],
     head: Mapping[str, Any],
@@ -927,15 +1104,19 @@ def format_listing(
         "",
     ]
 
-    last_full_index: Optional[int] = None
+    requesting = _requesting_indexes(real_rows)
+    supporting = _supporting_indexes(real_rows, head)
+    # Both the latest request for a scope and the latest row that actually
+    # supports it are kept: they are often the same row, and when they are not,
+    # a reader needs to see both -- the one that was asked for, and the one the
+    # verdict is built on.
+    latest_full: Dict[str, int] = dict(requesting)
     lines.append("Last run recorded *requesting* each full scope (a request is not evidence):")
     for scope in FULL_SCOPES:
-        indexes = [i for i, row in enumerate(real_rows) if row.get("requested_scope") == scope]
-        if not indexes:
+        if scope not in requesting:
             lines.append(f"  {scope}: (none recorded)")
             continue
-        index = indexes[-1]
-        last_full_index = index if last_full_index is None else max(last_full_index, index)
+        index = requesting[scope]
         row = real_rows[index]
         match, _reason = head_match(row, head)
         evidence, evidence_reason = full_scope_evidence(row)
@@ -952,21 +1133,35 @@ def format_listing(
         )
     lines.append("")
 
-    if last_full_index is None:
+    for scope, index in supporting.items():
+        latest_full[f"{scope}:evidence"] = index
+    if not latest_full:
         lines.append("Runs recorded (no full-scope run to count from):")
-        shown = real_rows
+        indexes = list(range(len(real_rows)))
     else:
-        # The full-scope row itself is included, not just what came after it:
-        # its digests and timing are exactly what a reader needs to retrace the
-        # run the verdict above rests on.
-        lines.append("The last full-scope run and every run recorded after it:")
-        shown = real_rows[last_full_index:]
+        # Every scope's latest candidate is shown in full, not just the most
+        # recent one: `full_eq` and `full_neq` are answered separately, so the
+        # digests and timing behind *each* answer have to be readable.  The
+        # runs recorded after the newest of them follow, and an index appears
+        # once however many of those sets it belongs to.
+        lines.append(
+            "The latest run requesting each full scope, and every run recorded "
+            "after the newest of them:"
+        )
+        indexes = sorted(
+            set(latest_full.values()) | set(range(max(latest_full.values()), len(real_rows)))
+        )
     if limit is not None:
-        shown = shown[-limit:]
-    if not shown:
+        # The latest candidate for each full scope is always kept: --limit
+        # trims the trailing verification runs, never the evidence the verdict
+        # above is built from.
+        keep = set(latest_full.values())
+        trailing = [index for index in indexes if index not in keep]
+        indexes = sorted(keep | set(trailing[-limit:]))
+    if not indexes:
         lines.append("  (none)")
-    for row in shown:
-        lines.extend(format_row_lines(row, head))
+    for index in indexes:
+        lines.extend(format_row_lines(real_rows[index], head))
     lines.append("")
     lines.extend(_format_verdict(real_rows, head))
     return "\n".join(lines) + "\n"
@@ -982,11 +1177,8 @@ def _format_verdict(
     evidence about the code at HEAD (``head_match``).  A request for
     ``--requested-scope full_eq`` on a subset run satisfies neither.
     """
-    covered = {}
-    for row in rows:
-        scope, _reason = full_scope_evidence(row)
-        if scope is not None and head_match(row, head)[0] == HEAD_MATCH_YES:
-            covered[scope] = row
+    supporting = _supporting_indexes(rows, head)
+    covered = {scope: rows[index] for scope, index in supporting.items()}
     lines = ["Has everything been evaluated at the current HEAD?"]
     for scope in FULL_SCOPES:
         if scope in covered:

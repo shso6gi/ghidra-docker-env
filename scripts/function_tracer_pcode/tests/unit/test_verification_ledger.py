@@ -22,6 +22,8 @@ from pathlib import Path
 import pytest
 
 from scripts.function_tracer_pcode.reporting import outcome_transition, verification_ledger
+from scripts.function_tracer_pcode.authority.contracts import authority_digest
+from scripts.function_tracer_pcode.reporting import execution_receipt
 from scripts.function_tracer_pcode.reporting.execution_receipt import (
     MATRIX_PUBLICATION_SCHEMA,
 )
@@ -137,16 +139,103 @@ def write_subset_manifest(run_dir: Path, **fields) -> None:
     )
 
 
+def build_formal_publication_manifest(run_dir: Path, expected_paths, *, run_scope,
+                                      sample_filter="", pair_filter="",
+                                      max_samples="0", commit=HEAD,
+                                      dirty=GIT_DIRTY_NO) -> dict:
+    """本番の builder で publication artifact を作る（schema を test に複製しない）。
+
+    `execution_receipt.build_matrix_publication_manifest()` は run_manifest.txt と
+    census file 群から canonical body を組み立て、`analysis_config_digest` /
+    `artifact_digest` まで計算する。fixture がこれを使うことで、正式 schema が
+    変わっても test 側が古い形のまま drift しない。
+    """
+    run_dir.mkdir(parents=True, exist_ok=True)
+    prefilter = [f"targets/EqBench/benchmarks/sample{index}.c"
+                 for index in range(1, 4)]
+    run_manifest = {
+        "run_kind": "eqbench_all_eq_matrix_current",
+        "run_scope": run_scope,
+        "build_policy": "PREBUILT_ONLY",
+        "max_samples": max_samples,
+        "sample_filter": sample_filter,
+        "pair_filter": pair_filter,
+        "debug": "0",
+        "dry_run": "0",
+        "parallel_jobs": "20",
+        "validation_summary_level": "compact",
+        "equiv_timeout": "10",
+        "decompile_timeout": "60",
+        "pairwise_timeout": "5",
+        "pairwise_timeout_hard": "30",
+        "pair_process_timeout_seconds": "240",
+        "pair_process_kill_after_seconds": "30",
+        "prefilter_source_census_digest": execution_receipt._source_census_digest(prefilter),
+        "prefilter_source_count": str(len(prefilter)),
+        "target_sources": str(len(prefilter)),
+        "completed_samples": str(len(prefilter)),
+        "skipped_samples": "0",
+        "total_functions": "1",
+        "total_pair_jobs": str(len(expected_paths)),
+        "total_scheduled_pair_jobs": str(len(expected_paths)),
+        "total_skipped_pair_jobs": "0",
+        "expected_pairs_per_function": str(len(expected_paths)),
+        "expected_binary_count": "16",
+        "compiled_binary_count": "16",
+        "compile_failure_count": "0",
+        "missing_binary_count": "0",
+        "function_census_failure_count": "0",
+        "run_pair_failures": "0",
+        "analysis_source_digest_start": "s" * 8,
+        "analysis_source_digest_end": "s" * 8,
+        "git_commit": commit,
+        "git_dirty": dirty,
+        "git_dirty_files_digest": "d" * 8,
+        "manifest_sha256": "m" * 8,
+        "start_time_utc": "2026-01-01T00:00:00Z",
+        "end_time_utc": "2026-01-02T00:00:00Z",
+        "hostname": "host",
+    }
+    config = execution_receipt.analysis_config_from_run(run_manifest)
+    run_manifest["analysis_config_digest"] = authority_digest(config)
+    (run_dir / "run_manifest.txt").write_text(
+        "".join(f"{key}={value}\n" for key, value in run_manifest.items()),
+        encoding="utf-8",
+    )
+    for name, rows in (
+        ("prefilter_source_paths.txt", prefilter),
+        ("compile_failure_samples.txt", []),
+        ("missing_binary_axes.txt", []),
+        ("function_census_failures.txt", []),
+        ("expected_pair_status_paths.txt", list(expected_paths)),
+        ("verified_skipped_pair_status_paths.txt", []),
+    ):
+        (run_dir / name).write_text(
+            "".join(f"{row}\n" for row in rows), encoding="utf-8",
+        )
+    (run_dir / "used_build_receipts.jsonl").write_text("", encoding="utf-8")
+    payload = execution_receipt.build_matrix_publication_manifest(run_dir)
+    # fixture が本当に正式 artifact であることを、ここでも実際に確かめる。
+    execution_receipt.validate_matrix_publication_manifest(payload)
+    (run_dir / outcome_transition.PUBLICATION_MANIFEST_FILE).write_text(
+        json.dumps(payload, sort_keys=True), encoding="utf-8",
+    )
+    return dict(payload)
+
+
 @pytest.fixture()
 def full_run(tmp_path):
-    """本物の full run の形（matrix root + run_scope=FULL_* + filter 無し）。
+    """正式 publication contract を満たす whole-benchmark run。
 
     subset run とは layout も declared run_scope も filter も違う。full verdict は
-    この形の artifact からしか作れないことを、fixture の側でも固定する。
+    この形の artifact からしか作れないことを、fixture 自身が
+    `validate_matrix_publication_manifest()` を通して保証する。
+    `mutate` で出来上がった artifact を壊し、fail-closed を behavior で確かめる。
     """
     def build(name, *, scope="full_eq", commit=HEAD, dirty=GIT_DIRTY_NO,
               sample_filter="", pair_filter="", max_samples="0",
-              run_scope=None, outcomes=None, with_publication=True):
+              run_scope=None, run_manifest_scope=None, outcomes=None,
+              with_publication=True, mutate=None):
         run_dir = tmp_path / name
         declared = run_scope or verification_ledger.RUN_SCOPE_BY_FULL_SCOPE.get(scope, scope)
         sample = EQ_SAMPLE if declared == "FULL_EQBENCH" else NEQ_SAMPLE
@@ -156,18 +245,30 @@ def full_run(tmp_path):
                 outcomes or [("f", "B1", "B2", "EQUIVALENT")]
             )
         ]
-        if with_publication:
-            write_publication_manifest(run_dir, paths, run_scope=declared)
-        write_run_manifest(
-            run_dir, run_kind="eqbench_all_eq_matrix_current", run_scope=declared,
-            sample_filter=sample_filter, pair_filter=pair_filter,
-            max_samples=max_samples, git_commit=commit, git_dirty=dirty,
-            git_dirty_files_digest="d", manifest_sha256="m",
-            analysis_config_digest="c", analysis_source_digest_start="s",
-            analysis_source_digest_end="s",
-            start_time_utc="2026-01-01T00:00:00Z",
-            end_time_utc="2026-01-02T00:00:00Z", hostname="host",
+        payload = build_formal_publication_manifest(
+            run_dir, paths, run_scope=declared, sample_filter=sample_filter,
+            pair_filter=pair_filter, max_samples=max_samples, commit=commit,
+            dirty=dirty,
         )
+        if run_manifest_scope is not None:
+            # run_manifest だけ別の（あるいは欠けた）run_scope にする。
+            manifest = run_dir / "run_manifest.txt"
+            rows = [
+                line for line in manifest.read_text(encoding="utf-8").splitlines()
+                if not line.startswith("run_scope=")
+            ]
+            if run_manifest_scope != "":
+                rows.insert(1, f"run_scope={run_manifest_scope}")
+            manifest.write_text("".join(f"{row}\n" for row in rows), encoding="utf-8")
+        published = run_dir / outcome_transition.PUBLICATION_MANIFEST_FILE
+        if not with_publication:
+            published.unlink()
+        elif mutate is not None:
+            broken = mutate(dict(payload))
+            if broken is None:
+                published.unlink()
+            else:
+                published.write_text(json.dumps(broken, sort_keys=True), encoding="utf-8")
         write_ground_truth(run_dir, [(NEQ_SAMPLE, "g", "changed", "MAY_AFFECT", "UNKNOWN")])
         return run_dir
     return build
@@ -860,3 +961,530 @@ def test_only_the_most_recent_request_per_scope_is_explained(tmp_path, subset_ru
     ]
     assert len(explained) == 1 and explained[0].strip().startswith(str(tmp_path / "c"))
     assert "full_eq: NO" in listing
+
+
+# ---------------------------------------------------------------------------
+# full evidence は「正式 publication artifact contract を満たした artifact」からのみ
+#
+# 一部 field を自前で再検証するのではなく、artifact の持ち主である
+# `execution_receipt.validate_matrix_publication_manifest()` に判定させる。
+# したがってここでの固定は「formal validator が reject する artifact を
+# `full_scope_evidence()` が accept しない」という等価性そのもの。
+# ---------------------------------------------------------------------------
+
+
+def _published(run_dir: Path):
+    path = run_dir / outcome_transition.PUBLICATION_MANIFEST_FILE
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _formal_validator_accepts(run_dir: Path) -> bool:
+    payload = _published(run_dir)
+    if payload is None:
+        return False
+    try:
+        execution_receipt.validate_matrix_publication_manifest(payload)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def test_the_full_run_fixture_is_a_formally_valid_publication_artifact(full_run):
+    """fixture 自体が current の正式 contract を満たしていること。"""
+    run_dir = full_run("valid", scope="full_eq")
+
+    payload = _published(run_dir)
+    # 例外が出れば test は失敗する（= fixture が current schema から drift した合図）。
+    # validator が既に digest と schema tag を強制しているので、ここで固定するのは
+    # 「この fixture が何を表しているか」＝ whole-benchmark scope だけ。
+    execution_receipt.validate_matrix_publication_manifest(payload)
+
+    assert payload["run_scope"] == "FULL_EQBENCH"
+
+
+@pytest.mark.parametrize("scope", ["full_eq", "full_neq"])
+def test_only_a_formally_published_unnarrowed_complete_full_run_is_evidence(
+    tmp_path, full_run, scope,
+):
+    """valid な full run だけが YES になる（両 scope）。"""
+    run_dir = full_run(f"valid_{scope}", scope=scope)
+    assert _formal_validator_accepts(run_dir)
+
+    row = verification_ledger.build_row(run_dir, requested_scope=scope)
+
+    assert row["completed_scope"] == outcome_transition.COMPLETENESS_COMPLETE
+    assert verification_ledger.full_scope_evidence(row) == (scope, "")
+    listing = verification_ledger.format_listing(
+        (row,), _head_state(), ledger_path=tmp_path / "l.jsonl",
+    )
+    assert f"{scope}: YES" in listing
+
+
+def _reseal(payload):
+    """壊した body の digest を計算し直す。
+
+    `artifact_digest` は body 全体の SHA-256 なので、resealing しないと
+    **どの改変も digest 不一致で弾かれてしまい**、名前のついた条件
+    （run_scope 不一致・typed config 不正 等）に一度も到達しない。
+    それでは test が「stale hash を見ている」だけになるので、意図した条件で
+    reject されることを確かめるために封をし直す。
+    """
+    payload["analysis_config_digest"] = authority_digest(payload["analysis_config"])
+    body = {
+        key: payload[key]
+        for key in execution_receipt.MATRIX_PUBLICATION_FIELDS - {"artifact_digest"}
+        if key in payload
+    }
+    payload["artifact_digest"] = authority_digest(body)
+    return payload
+
+
+def _drop(key, *, reseal=False):
+    def mutate(payload):
+        payload.pop(key, None)
+        return _reseal(payload) if reseal else payload
+    return mutate
+
+
+def _set(key, value, *, reseal=False):
+    def mutate(payload):
+        payload[key] = value
+        return _reseal(payload) if reseal else payload
+    return mutate
+
+
+def _set_config(key, value, *, reseal=True):
+    def mutate(payload):
+        payload["analysis_config"] = {**payload["analysis_config"], key: value}
+        return _reseal(payload) if reseal else payload
+    return mutate
+
+
+# 各 case は「その名前の条件で reject される」ことを狙う。`reseal=True` は
+# digest を直してから改変を残し、validator の当該述語まで到達させるため。
+# digest 自体を試す 2 件だけは、当然 reseal しない。
+PUBLICATION_REJECTIONS = {
+    # 欠落 / 余剰は field 集合の検査で落ちる（digest 以前の段階）。
+    "missing_top_level_run_scope": _drop("run_scope"),
+    "missing_analysis_config": _drop("analysis_config"),
+    "extra_field": _set("unexpected_field", "x"),
+    # 値の改変は reseal して、名前の条件そのものに到達させる。
+    "run_scope_disagrees_with_analysis_config": _set("run_scope", "FULL_NEQ", reseal=True),
+    "run_scope_not_a_known_scope": _set("run_scope", "WHATEVER", reseal=True),
+    "unknown_schema": _set("schema", "eqbench-matrix-publication-manifest-v2", reseal=True),
+    "census_not_a_list": _set("expected_pair_status_paths", "not-a-list", reseal=True),
+    # typed analysis config の検査（validate_analysis_config）に到達させる。
+    "malformed_analysis_config": _set(
+        "analysis_config", {"schema": "eqbench-analysis-config-v2"}, reseal=True),
+    "incomplete_analysis_config": _set_config("sample_filter", None),
+    "unreadable_filter_type": _set_config("pair_filter", 7),
+    "unknown_config_scope": _set_config("run_scope", "WHATEVER"),
+    # digest そのものを壊す 2 件（ここだけ reseal しない）。
+    "bad_analysis_config_digest": _set("analysis_config_digest", "0" * 64),
+    "bad_artifact_digest": _set("artifact_digest", "0" * 64),
+}
+# reseal しても reject されること（= stale hash 由来の空振りでないこと）を確かめる case。
+RESEALED_REJECTIONS = {
+    name for name in PUBLICATION_REJECTIONS
+    if name not in {"bad_analysis_config_digest", "bad_artifact_digest"}
+}
+
+
+@pytest.mark.parametrize("name", sorted(PUBLICATION_REJECTIONS))
+def test_an_artifact_the_formal_validator_rejects_is_never_full_evidence(
+    tmp_path, full_run, name,
+):
+    """formal validator が拒否する artifact を ledger が accept しない。"""
+    run_dir = full_run(name, scope="full_eq", mutate=PUBLICATION_REJECTIONS[name])
+
+    assert not _formal_validator_accepts(run_dir), (
+        f"{name}: the formal validator accepted this; the case no longer tests anything"
+    )
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None, f"{name} was accepted as whole-benchmark evidence"
+    assert reason
+    listing = verification_ledger.format_listing(
+        (row,), _head_state(), ledger_path=tmp_path / "l.jsonl",
+    )
+    assert "full_eq: YES" not in listing
+
+
+@pytest.mark.parametrize("name", sorted(RESEALED_REJECTIONS))
+def test_each_rejection_is_caused_by_its_own_condition_not_a_stale_digest(
+    full_run, name,
+):
+    """digest を封じ直しても reject されること（test の空振り防止）。
+
+    `artifact_digest` は body 全体の hash なので、封じ直さない改変はすべて
+    digest 不一致で落ち、名前のついた条件に到達しない。ここでは digest を
+    正しくしたうえで、それでもなお reject されることを確かめる。
+    """
+    run_dir = full_run(f"resealed_{name}", scope="full_eq",
+                       mutate=PUBLICATION_REJECTIONS[name])
+    payload = _published(run_dir)
+    if payload is not None and "artifact_digest" in payload:
+        body = {
+            key: payload[key]
+            for key in execution_receipt.MATRIX_PUBLICATION_FIELDS - {"artifact_digest"}
+            if key in payload
+        }
+        # 欠落 case では body が揃わないので digest 検査より前に落ちる（それが正）。
+        if set(payload) == execution_receipt.MATRIX_PUBLICATION_FIELDS:
+            assert payload["artifact_digest"] == authority_digest(body), (
+                f"{name}: the mutant was not resealed, so the test would pass on a stale hash"
+            )
+
+    assert not _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    assert verification_ledger.full_scope_evidence(row)[0] is None
+
+
+def test_a_resealed_typed_config_violation_reaches_the_typed_validator(full_run):
+    """typed analysis config の検査が実際に働いていること。"""
+    run_dir = full_run(
+        "typed_config", scope="full_eq", mutate=_set_config("sample_filter", None))
+    payload = _published(run_dir)
+
+    with pytest.raises(ValueError, match="analysis config"):
+        execution_receipt.validate_matrix_publication_manifest(payload)
+
+
+def test_a_missing_publication_manifest_is_never_full_evidence(tmp_path, full_run):
+    run_dir = full_run("no_publication", scope="full_eq", with_publication=False)
+
+    assert not _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None
+    assert outcome_transition.PUBLICATION_MANIFEST_FILE in reason
+
+
+def test_an_unparsable_publication_manifest_is_a_diagnostic_not_a_crash(
+    tmp_path, full_run,
+):
+    """壊れた JSON でも CLI を落とさず、理由付きで full evidence 不成立にする。"""
+    run_dir = full_run("broken_json", scope="full_eq")
+    (run_dir / outcome_transition.PUBLICATION_MANIFEST_FILE).write_text(
+        '{"schema": ', encoding="utf-8",
+    )
+    ledger = tmp_path / "ledger.jsonl"
+
+    # record も list も成功し、他の row も読める。
+    assert verification_ledger.main([
+        "--ledger", str(ledger), "record", "--run-dir", str(run_dir),
+        "--requested-scope", "full_eq",
+    ]) == 0
+    assert verification_ledger.main(["--ledger", str(ledger), "list"]) == 0
+
+    row = verification_ledger.read_rows(ledger)[0]
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+    assert evidence is None and "unreadable" in reason
+
+
+def test_a_malformed_census_entry_is_reported_not_raised(tmp_path, full_run):
+    """validator 自身が TypeError を出す形の壊れ方でも診断として扱う。"""
+    run_dir = full_run(
+        "unhashable_census", scope="full_eq",
+        mutate=_set("expected_pair_status_paths", [{"unhashable": True}]),
+    )
+
+    assert not _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+
+    assert verification_ledger.full_scope_evidence(row)[0] is None
+
+
+@pytest.mark.parametrize(
+    "name,kwargs",
+    [
+        ("sample_filtered", dict(sample_filter="CLEVER/")),
+        ("pair_filtered", dict(pair_filter="B1_B2")),
+        ("sample_limited", dict(max_samples="8")),
+    ],
+)
+def test_a_narrowed_run_is_not_full_evidence_even_when_formally_published(
+    tmp_path, full_run, name, kwargs,
+):
+    """filter 付きの run は、artifact として正しくても全件ではない。"""
+    run_dir = full_run(name, scope="full_eq", **kwargs)
+
+    # 正式 artifact としては妥当（narrowing は contract 違反ではない）。
+    assert _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None and "narrowed" in reason
+
+
+@pytest.mark.parametrize(
+    "name,run_manifest_scope,expected",
+    [
+        ("run_manifest_scope_missing", "", "records no run_scope"),
+        ("run_manifest_scope_differs", "FULL_NEQ", "differs across sources"),
+        ("run_manifest_scope_representative", "REPRESENTATIVE", "differs across sources"),
+    ],
+)
+def test_the_run_manifest_scope_must_be_present_and_agree(
+    full_run, name, run_manifest_scope, expected,
+):
+    """run_manifest の run_scope が無い / 食い違うなら full evidence にしない。
+
+    「field が無い source は照合対象から外す」挙動ではなく、欠落そのものを理由にする。
+    """
+    run_dir = full_run(name, scope="full_eq", run_manifest_scope=run_manifest_scope)
+
+    # publication 側は正式なまま: 落ちる理由は run_manifest 側にある。
+    assert _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None and expected in reason
+
+
+def test_a_published_full_neq_run_does_not_satisfy_a_full_eq_request(full_run):
+    run_dir = full_run("neq_run", scope="full_neq")
+
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None and "FULL_EQBENCH" in reason
+
+
+def test_both_latest_full_scope_rows_keep_their_detail_blocks(tmp_path, subset_run, full_run):
+    """latest full_eq と latest full_neq の両方の詳細を list から追える。
+
+    row1 subset / row2 full_eq / row3 subset / row4 full_neq / row5 subset。
+    row2 は row4 より古いが、`full_eq` の答えの根拠なので詳細が要る。
+    """
+    ledger = tmp_path / "ledger.jsonl"
+    rows = [
+        verification_ledger.build_row(subset_run("s1"), requested_scope="subset"),
+        verification_ledger.build_row(
+            full_run("f_eq", scope="full_eq"), requested_scope="full_eq"),
+        verification_ledger.build_row(subset_run("s2"), requested_scope="subset"),
+        verification_ledger.build_row(
+            full_run("f_neq", scope="full_neq"), requested_scope="full_neq"),
+        verification_ledger.build_row(subset_run("s3"), requested_scope="subset"),
+    ]
+    for row in rows:
+        verification_ledger.append_row(ledger, row)
+
+    listing = verification_ledger.format_listing(
+        verification_ledger.read_rows(ledger), _head_state(), ledger_path=ledger,
+    )
+
+    def detail_blocks(run_dir):
+        """詳細 block の先頭行は "  <recorded_at>  <run_dir>" だけ。"""
+        return [
+            line for line in listing.splitlines()
+            if line.strip().endswith(f"  {run_dir}")
+        ]
+
+    # latest full_eq（古い方）と latest full_neq、そのあとの subset が詳細を持つ。
+    for name in ("f_eq", "f_neq", "s3"):
+        assert len(detail_blocks(tmp_path / name)) == 1, f"{name}: {detail_blocks(tmp_path / name)}"
+    # 最新 full row より前の、根拠候補でない run は詳細を繰り返さない。
+    for name in ("s1", "s2"):
+        assert detail_blocks(tmp_path / name) == []
+    # 両 full row の検証条件を追える。
+    for row in (rows[1], rows[3]):
+        digest = row["provenance"]["analysis_config_digest"]
+        assert digest != verification_ledger.UNSET
+        assert verification_ledger._short(digest) in listing
+        assert row["timing"]["start_time_utc"] in listing
+        assert verification_ledger._short(row["provenance"]["manifest_sha256"]) in listing
+
+
+# ---------------------------------------------------------------------------
+# 型付き config が表現しない narrowing（rerun manifest 等）への fail-closed
+#
+# `eqbench_run_all_32jobs.sh` の `EQBENCH_RERUN_MANIFEST`（neq は
+# `NEQ_RERUN_MANIFEST`）は、`expected_pair_status_paths` を rerun 対象だけに
+# 絞る一方で `total_functions` / `expected_pairs_per_function` は絞らない。
+# analysis config にも run_manifest にも現れないので filter 検査では見えない。
+# publication manifest 自身が矛盾する（census が宣言した規模に満たない）ので、
+# その矛盾を根拠に full evidence を認めない。
+# ---------------------------------------------------------------------------
+
+
+def test_a_census_smaller_than_the_declared_extent_is_not_full_evidence(full_run):
+    """rerun 等で census だけが縮んだ run を全件と認めない。"""
+    def shrink_census(payload):
+        payload["total_functions"] = 40
+        payload["expected_pairs_per_function"] = 120
+        return _reseal(payload)
+
+    run_dir = full_run("rerun_narrowed", scope="full_eq", mutate=shrink_census)
+
+    # artifact としては正式（rerun は contract 違反ではない）。
+    assert _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert row["completed_scope"] == outcome_transition.COMPLETENESS_COMPLETE
+    assert evidence is None, "a census-narrowed run was accepted as whole-benchmark"
+    assert "census covers" in reason and "4800" in reason
+    assert row["scope_evidence"]["trees"]["."]["pairs_declared"] == 4800
+    assert row["scope_evidence"]["trees"]["."]["pairs_in_census"] == 1
+
+
+def test_an_unreadable_declared_extent_is_not_full_evidence(full_run):
+    """規模を宣言する field が読めなければ「全件」と言えない。"""
+    def break_extent(payload):
+        payload["total_functions"] = 0
+        payload["expected_pairs_per_function"] = 0
+        return _reseal(payload)
+
+    run_dir = full_run("no_extent", scope="full_eq", mutate=break_extent)
+
+    assert _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+
+    assert verification_ledger.full_scope_evidence(row)[0] is None
+
+
+def test_the_real_full_matrix_artifact_satisfies_the_extent_invariant():
+    """実在の full run が不変量を満たすこと（規則が現実と食い違わない確認）。"""
+    path = Path(REPO_ROOT) / "logs/EqBench/all_eq_matrix_current/matrix-publication-manifest.json"
+    if not path.is_file():
+        pytest.skip("the historical full matrix artifact is not in this checkout")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    execution_receipt.validate_matrix_publication_manifest(payload)
+
+    declared, census = verification_ledger._declared_and_published_extent(payload)
+
+    assert declared == census == len(payload["expected_pair_status_paths"])
+
+
+# ---------------------------------------------------------------------------
+# run_manifest 側の filter も照合対象から外さない
+# ---------------------------------------------------------------------------
+
+
+def test_run_manifest_filters_must_agree_with_the_published_config(full_run):
+    """run_manifest が別の filter を言っているなら full evidence にしない。"""
+    run_dir = full_run("filter_disagreement", scope="full_eq")
+    manifest = run_dir / "run_manifest.txt"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "sample_filter=\n", "sample_filter=CLEVER/\n"),
+        encoding="utf-8",
+    )
+
+    # publication 側は正式なまま: 落ちる理由は 2 つの source の食い違い。
+    assert _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None and "disagree" in reason
+
+
+def test_absent_run_manifest_filters_are_a_reason_not_a_dropped_source(full_run):
+    """run_manifest に filter 行が無い場合、「無い source は無視」にしない。"""
+    run_dir = full_run("filters_absent", scope="full_eq")
+    manifest = run_dir / "run_manifest.txt"
+    manifest.write_text(
+        "".join(
+            f"{line}\n" for line in manifest.read_text(encoding="utf-8").splitlines()
+            if not line.startswith(("sample_filter=", "pair_filter=", "max_samples="))
+        ),
+        encoding="utf-8",
+    )
+
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None
+    assert "absent or disagree" in reason
+    assert row["scope_evidence"]["trees"]["."]["narrowing_agrees_with_run_manifest"] is None
+
+
+# ---------------------------------------------------------------------------
+# 診断 payload / verdict と listing の整合
+# ---------------------------------------------------------------------------
+
+
+def test_the_scope_evidence_payload_records_what_was_actually_checked(full_run):
+    """人が読む診断 field を固定する。"""
+    row = verification_ledger.build_row(
+        full_run("valid_payload", scope="full_eq"), requested_scope="full_eq",
+    )
+
+    tree = row["scope_evidence"]["trees"]["."]
+    assert tree == {
+        "whole_benchmark_scope": "FULL_EQBENCH",
+        "failure_reason": None,
+        "formal_publication": "valid",
+        "run_manifest_run_scope": "FULL_EQBENCH",
+        "publication_run_scope": "FULL_EQBENCH",
+        "analysis_config_run_scope": "FULL_EQBENCH",
+        "declared_run_scope": "FULL_EQBENCH",
+        "narrowed": False,
+        "narrowing_agrees_with_run_manifest": True,
+        "pairs_declared": 1,
+        "pairs_in_census": 1,
+    }
+    assert row["scope_evidence"]["whole_benchmark_scope"] == "FULL_EQBENCH"
+
+
+def test_a_rejected_tree_records_its_reason_in_the_payload(full_run):
+    row = verification_ledger.build_row(
+        full_run("no_pub", scope="full_eq", with_publication=False),
+        requested_scope="full_eq",
+    )
+
+    tree = row["scope_evidence"]["trees"]["."]
+    assert tree["whole_benchmark_scope"] is None
+    assert outcome_transition.PUBLICATION_MANIFEST_FILE in tree["failure_reason"]
+    assert tree["formal_publication"] == tree["failure_reason"]
+
+
+def test_the_row_a_yes_rests_on_is_always_printed(tmp_path, full_run, subset_run):
+    """verdict の根拠 row と、詳細表示される row が食い違わない。
+
+    あとから full_eq を「依頼」しただけの subset row が記録されても、YES の
+    根拠である本物の full row の詳細が list から消えないこと。
+    """
+    ledger = tmp_path / "ledger.jsonl"
+    good = verification_ledger.build_row(
+        full_run("real_full", scope="full_eq"), requested_scope="full_eq")
+    verification_ledger.append_row(ledger, good)
+    for name in ("later1", "later2"):
+        verification_ledger.append_row(ledger, verification_ledger.build_row(
+            subset_run(name, commit=HEAD), requested_scope="full_eq"))
+
+    listing = verification_ledger.format_listing(
+        verification_ledger.read_rows(ledger), _head_state(), ledger_path=ledger,
+    )
+
+    assert "full_eq: YES" in listing and good["run_dir"] in listing
+    # 根拠 row の詳細 block（先頭行が "  <time>  <run_dir>"）が出ている。
+    assert [
+        line for line in listing.splitlines()
+        if line.strip().endswith("  " + good["run_dir"])
+    ], "the row the YES rests on has no detail block"
+
+
+def test_limit_never_drops_the_rows_the_verdict_rests_on(tmp_path, full_run, subset_run):
+    ledger = tmp_path / "ledger.jsonl"
+    good = verification_ledger.build_row(
+        full_run("kept_full", scope="full_eq"), requested_scope="full_eq")
+    verification_ledger.append_row(ledger, good)
+    for name in ("a", "b", "c", "d"):
+        verification_ledger.append_row(ledger, verification_ledger.build_row(
+            subset_run(name, commit=HEAD), requested_scope="subset"))
+
+    listing = verification_ledger.format_listing(
+        verification_ledger.read_rows(ledger), _head_state(), ledger_path=ledger, limit=1,
+    )
+
+    assert "full_eq: YES" in listing
+    assert [
+        line for line in listing.splitlines()
+        if line.strip().endswith("  " + good["run_dir"])
+    ], "--limit dropped the evidence row behind the verdict"

@@ -307,23 +307,62 @@ Three distinctions the schema exists to keep apart:
   was invalid". A past run remains a perfectly good record of the commit it was
   made on.
 
-- **A full verdict is built from artifacts, never from the request.** `list`
-  answers "has everything been evaluated at the current HEAD?" with `YES` for a
-  scope only when a row satisfies *all* of: the run is a single whole-benchmark
-  matrix tree (a subset run's `eq`/`neq` halves are by construction not one, no
-  matter what scope was requested); the `run_scope` the runner wrote into its
-  own `matrix-publication-manifest.json` and `run_manifest.txt` is
-  `FULL_EQBENCH` / `FULL_NEQ` and the two agree; that recorded scope matches
-  the requested one; no `sample_filter`, `pair_filter` or `max_samples` limit
-  narrowed the run; `completed_scope` is `complete`; and `code_matches_head` is
-  `yes`. Passing `--requested-scope full_eq` to a subset run therefore changes
-  nothing, and `list` prints the reason each requesting row fell short.
+- **A full verdict is built from a formally published artifact, never from the
+  request.** `requested_scope` is a request, so it is not evidence of anything.
+  `list` answers "has everything been evaluated at the current HEAD?" with
+  `YES` for a scope only when a row satisfies *all* of:
+
+  1. the run is a single whole-benchmark matrix tree — a subset run's `eq` /
+     `neq` halves are by construction not one, whatever scope was requested;
+  2. that tree carries a `matrix-publication-manifest.json` which satisfies the
+     repository's publication artifact contract **in full**, as judged by the
+     validator that owns it
+     (`execution_receipt.validate_matrix_publication_manifest`) rather than by
+     any second, weaker check — so the exact field set, the schema tag, the
+     `run_scope`, its agreement with `analysis_config.run_scope`, the
+     `analysis_config_digest` over that config, the `artifact_digest` over the
+     body and the typed analysis config are all bound together;
+  3. `run_manifest.txt` records a `run_scope` and it agrees with the published
+     one;
+  4. the **validated** analysis config shows no `sample_filter`, `pair_filter`
+     or `max_samples` narrowing;
+  5. the recorded scope matches the requested full scope;
+  6. `completed_scope` is `complete`;
+  7. `code_matches_head` is `yes`.
+
+  Nothing is inferred from a source that is absent: a missing manifest, a
+  missing `run_scope`, a disagreement, or filters that cannot be read are each
+  a recorded *reason for no* — never a field quietly dropped from the
+  comparison. A subset run, a focused run, a narrowed run, a malformed artifact
+  and a legacy artifact that predates the current schema therefore all answer
+  `NO`, and `list` prints why. A stale full run stays a valid record of its own
+  commit while answering `NO` for HEAD. Passing `--requested-scope full_eq` to
+  a subset run changes nothing at all.
+
+  A malformed publication manifest is a diagnostic, not a crash: `record` and
+  `list` still work, that row simply establishes no full evidence and says why,
+  and the other rows still print.
 
 `list` names the last run *requesting* each full scope (labelling it as a
-request, with its whole-benchmark evidence stated separately), then every run
-recorded after it, then the verdict. A ledger holding only subset rows can
-never print "full verified": **subset verification is not full verification**,
-and a subset row says nothing about the pairs outside the subset.
+request, with its whole-benchmark evidence stated separately), then prints a
+detail block for the latest run requesting each full scope, for the latest run
+that actually *supports* each verdict when that is a different row, and for
+every run recorded after the newest of them — each row once. `--limit` trims
+the trailing verification runs and never the rows a verdict rests on. Then
+comes the verdict. A ledger holding only subset rows can never print
+"full verified": **subset verification is not full verification**, and a subset
+row says nothing about the pairs outside the subset.
+
+One narrowing knob is deliberately caught by a different rule: a rerun manifest
+(`EQBENCH_RERUN_MANIFEST` / `NEQ_RERUN_MANIFEST`) shrinks
+`expected_pair_status_paths` without appearing in the typed analysis config at
+all, so a rerun of a handful of pairs can declare `FULL_EQBENCH` with empty
+filters and still be `complete` against its own census. The ledger therefore
+also requires the published census to cover the extent the same manifest
+declares (`total_functions` × `expected_pairs_per_function`); a manifest that
+contradicts itself is never evidence. The run manifest's own filter fields must
+agree with the published config too — a source that is silent is a reason to
+say no, not one fewer source to agree.
 
 Each row prints `requested_scope`, `completed_scope`, `coverage`, the run
 layout and declared run scope, `commit`, `dirty`, `manifest_sha256`,
