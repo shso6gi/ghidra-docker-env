@@ -8,7 +8,6 @@ from scripts.function_tracer_pcode.core import FunctionSignature
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverStatus
 from scripts.function_tracer_pcode.checker.counterexample import FormattedCounterexample
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
-from scripts.function_tracer_pcode.semantics.transform.rewrite.rules import RewriteResult
 from scripts.function_tracer_pcode.checker.debug_trace import DebugTrace
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownReasonRecord,
@@ -21,50 +20,6 @@ from scripts.function_tracer_pcode.checker.unknown_reason import (
 from scripts.function_tracer_pcode.proof.unknown_reason import (
     UnknownRecoveryActionStatus,
 )
-
-
-@dataclass
-class RewriteInfo:
-    """リライト情報"""
-    applied: bool = False
-    function1_rewrites: List[RewriteResult] = field(default_factory=list)
-    function2_rewrites: List[RewriteResult] = field(default_factory=list)
-    
-    def get_summary(self) -> str:
-        """リライトの概要を取得"""
-        if not self.applied:
-            return "No rewrite applied"
-        
-        lines = ["Rewrite applied:"]
-        
-        if any(r.was_rewritten for r in self.function1_rewrites):
-            lines.append("  Function 1:")
-            for i, r in enumerate(self.function1_rewrites):
-                if r.was_rewritten:
-                    for rule, before, after in r.history:
-                        lines.append(f"    Return {i}: [{rule}] {before} -> {after}")
-        
-        if any(r.was_rewritten for r in self.function2_rewrites):
-            lines.append("  Function 2:")
-            for i, r in enumerate(self.function2_rewrites):
-                if r.was_rewritten:
-                    for rule, before, after in r.history:
-                        lines.append(f"    Return {i}: [{rule}] {before} -> {after}")
-        
-        return "\n".join(lines)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "applied": self.applied,
-            "function1_rewrites": [
-                {"was_rewritten": r.was_rewritten, "history": r.history}
-                for r in self.function1_rewrites
-            ],
-            "function2_rewrites": [
-                {"was_rewritten": r.was_rewritten, "history": r.history}
-                for r in self.function2_rewrites
-            ],
-        }
 
 
 def _format_stage_seconds(diagnostics: Any) -> str:
@@ -113,7 +68,6 @@ class EquivalenceResult:
     function1_signature_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
     function2_signature_hypotheses: List[Dict[str, Any]] = field(default_factory=list)
     constrained_fragments: List[str] = field(default_factory=list)
-    rewrite_info: Optional[RewriteInfo] = None
     mips64_abi_constraints: Optional[Dict[str, Tuple[str, int]]] = None
     pairwise_stats: Optional[Dict[str, int]] = None
     pairwise_debug_stats: Optional[Dict[str, int]] = None
@@ -280,7 +234,6 @@ class EquivalenceResult:
             "c_active_base": [dict(row) for row in self.canonical_c_active_base],
             "q_open_base": [dict(row) for row in self.canonical_q_open_base],
             "constrained_fragments": self.constrained_fragments,
-            "rewrite_info": self.rewrite_info.to_dict() if self.rewrite_info else None,
             "pairwise_stats": self.pairwise_stats,
             "pairwise_debug_stats": self.pairwise_debug_stats,
             "unknown_reasons": [reason.to_dict() for reason in self.unknown_reasons],
@@ -502,11 +455,6 @@ class EquivalenceResult:
             lines.append(f"Type fix applied: {self.type_fix_result}")
         if self.retry_count > 0:
             lines.append(f"Retry count: {self.retry_count}")
-        
-        # リライト情報
-        if self.rewrite_info and self.rewrite_info.applied:
-            lines.append("")
-            lines.append(self.rewrite_info.get_summary())
         
         lines.append("-" * 70)
         

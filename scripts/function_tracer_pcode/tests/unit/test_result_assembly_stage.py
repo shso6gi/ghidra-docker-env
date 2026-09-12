@@ -77,7 +77,7 @@ def test_all_stage_calls_stay_inside_the_top_level_try_body():
     assert isinstance(last, ast.Return) and getattr(last.value.func, "id", "") == "assemble_equivalence_result"
     kw = {k.arg for k in last.value.keywords}
     assert {"ctx", "dispatch_frame", "preflight_gate_delta_diagnostic", "call_effect_shadow_manifest", "start_time",
-            "type_fix_result", "retry_count", "original_signature1", "original_signature2", "rewrite_info", "debug",
+            "type_fix_result", "retry_count", "original_signature1", "original_signature2", "debug",
             "deterministic_analysis_identity", "format_counterexample", "completed_recovery_proof_payload",
             "reason_completion_applicability_contexts", "recurrence_promotion_result_receipt"} == kw
 
@@ -166,7 +166,7 @@ def test_assemble_result_attaches_private_capabilities_and_terminal_provenance_i
     result = ra.assemble_equivalence_result(
         sr, analysis, analysis, "L", "R", ctx=ctx, dispatch_frame=None, preflight_gate_delta_diagnostic={"d": 1},
         call_effect_shadow_manifest={"m": 1}, start_time=0.0, type_fix_result=None, retry_count=0,
-        original_signature1=None, original_signature2=None, rewrite_info=None, debug=False,
+        original_signature1=None, original_signature2=None, debug=False,
         deterministic_analysis_identity=lambda strategy, a: events.append(("identity", strategy)) or "ID",
         format_counterexample=lambda raw, a1, a2, v1, v2: events.append(("cex", raw, v1, v2)) or "CEX",
         completed_recovery_proof_payload=lambda a1, a2, b1, b2, *, extra_records: events.append(("proofs", b1, b2, extra_records)) or ["P"],

@@ -20,7 +20,7 @@ from scripts.function_tracer_pcode.semantics.typing.fixer import (
     TypeFixerConfig,
     TypeFixResult,
 )
-from scripts.function_tracer_pcode.checker.result import EquivalenceResult, RewriteInfo
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.checker.result_factory import create_error_result
 from scripts.function_tracer_pcode.checker.phases.handler import (
     PhaseHandler,
@@ -432,7 +432,6 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         result: Optional[bool],
         transition_reason: str,
         type_fix_result: Optional[TypeFixResult],
-        rewrite_info: Optional[RewriteInfo],
         original_function1_signature: Optional[Dict],
         original_function2_signature: Optional[Dict],
         effective_function1_signature: Optional[Dict],
@@ -459,7 +458,6 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             result=result,
             transition_reason=transition_reason,
             type_fix_result=type_fix_result,
-            rewrite_info=rewrite_info,
             original_function1_signature=original_function1_signature,
             original_function2_signature=original_function2_signature,
             effective_function1_signature=effective_function1_signature,
@@ -573,10 +571,6 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             original_signature2 = FunctionSignature.from_analysis(analysis2)
         
         try:
-            # リライト段階は廃止済み（解析結果を変更したことはない）。結果 JSON の
-            # `rewrite_info` は互換のため従来どおりの定数を出す。
-            rewrite_info = RewriteInfo()
-
             # strategy を選択
             strategy = force_strategy if force_strategy is not None else self.check_strategy
 
@@ -755,7 +749,6 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                 retry_count=retry_count,
                 original_signature1=original_signature1,
                 original_signature2=original_signature2,
-                rewrite_info=rewrite_info,
                 debug=self.debug,
                 deterministic_analysis_identity=self._deterministic_analysis_identity,
                 format_counterexample=self._format_counterexample,

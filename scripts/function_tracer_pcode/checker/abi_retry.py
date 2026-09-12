@@ -11,7 +11,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
 )
 from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.proof.formula.returns import ReturnWidthMismatchError
-from scripts.function_tracer_pcode.checker.result import EquivalenceResult, RewriteInfo
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext
 from scripts.function_tracer_pcode.authority.lifecycle.production_boundary import (
     run_check_from_binaries_with_v2_pilot as run_check_from_binaries,
@@ -48,10 +48,8 @@ class AbiRetryMixin:
                 ctx.original_signature2
             )
         
-        rewrite_info = None
         try:
             analysis1, analysis2 = ctx.analysis1, ctx.analysis2
-            rewrite_info = RewriteInfo()  # リライト段階は廃止済み（互換の定数）
 
             # ABI制約セクションを FormulaBuilder に完全委譲
             abi_assertion_section = self.formula_builder.build_abi_assertion_section(
@@ -119,7 +117,6 @@ class AbiRetryMixin:
                 function1_signature_hypotheses=list(analysis1.signature_hypotheses),
                 function2_signature_hypotheses=list(analysis2.signature_hypotheses),
                 constrained_fragments=[],
-                rewrite_info=rewrite_info,
                 mips64_abi_constraints=abi_constraints,
                 # Solver TIMEOUT/UNKNOWN is execution authority, not a
                 # semantic UNKNOWN reason.  The v2 finalizer joins its receipt
@@ -167,7 +164,6 @@ class AbiRetryMixin:
                     blocked_analysis2.signature_hypotheses
                 ),
                 constrained_fragments=[],
-                rewrite_info=rewrite_info,
                 mips64_abi_constraints=abi_constraints,
                 pairwise_debug_stats={
                     diagnostic_kind: 1,
@@ -214,7 +210,6 @@ class AbiRetryMixin:
                 function1_signature_hypotheses=list(blocked_analysis1.signature_hypotheses),
                 function2_signature_hypotheses=list(blocked_analysis2.signature_hypotheses),
                 constrained_fragments=[],
-                rewrite_info=rewrite_info,
                 mips64_abi_constraints=abi_constraints,
                 pairwise_debug_stats={reason_id: 1},
                 unknown_reasons=[

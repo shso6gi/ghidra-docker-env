@@ -228,7 +228,6 @@ class Attempt:
     
     # 詳細情報
     type_fix_result: Optional[Dict[str, Any]] = None
-    rewrite_info: Optional[Dict[str, Any]] = None
     original_function1_signature: Optional[Dict[str, Any]] = None
     original_function2_signature: Optional[Dict[str, Any]] = None
     effective_function1_signature: Optional[Dict[str, Any]] = None
@@ -277,7 +276,6 @@ class Attempt:
             "result": self.result,
             "transition_reason": self.transition_reason,
             "type_fix_result": self.type_fix_result,
-            "rewrite_info": self.rewrite_info,
             "original_function1_signature": self.original_function1_signature,
             "original_function2_signature": self.original_function2_signature,
             "effective_function1_signature": self.effective_function1_signature,
