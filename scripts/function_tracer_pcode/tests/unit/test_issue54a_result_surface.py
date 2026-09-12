@@ -288,9 +288,14 @@ def test_attempt_and_result_assembly_signatures_have_no_rewrite_info():
         assert "rewrite_info" not in inspect.signature(surface).parameters, surface
 
 
-def test_result_module_no_longer_imports_the_rewrite_package():
-    """`RewriteInfo` が消えたので `RewriteResult` の import も不要（#54-B の前提）。"""
+def test_result_module_no_longer_depends_on_the_rewrite_package():
+    """`RewriteInfo` が消えたので `RewriteResult` の import も不要（#54-B の前提）。
+
+    固定するのは「旧 rewrite package への依存が無い」ことだけで、`rewrite` という
+    単語一般を将来禁止はしない（pairwise / proof 層には無関係な同名識別子がある）。
+    """
     from scripts.function_tracer_pcode.checker import result as result_module
 
     source = inspect.getsource(result_module)
-    assert "rewrite" not in source.lower()
+    assert "RewriteResult" not in source
+    assert "semantics.transform.rewrite" not in source
