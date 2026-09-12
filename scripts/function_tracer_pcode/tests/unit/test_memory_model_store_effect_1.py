@@ -29,6 +29,7 @@ def test_summarize_store_effects_marks_real_op_unknown_order_incomplete():
         FakeTracer(),
         FakeConditionTracker(),
         [_param("dst", index=0, size=8)],
+        direct_call_summary=forbid_callee_summary,
     )
 
     assert summary.effects == []
@@ -713,6 +714,7 @@ def test_summarize_store_effects_captures_double_indirect_parameter_store():
             _param("value", size=4, index=1),
         ],
         debug=False,
+        direct_call_summary=forbid_callee_summary,
     )
 
     assert len(summary.effects) == 1
@@ -768,6 +770,7 @@ def test_summarize_store_effects_marks_store_block_incomplete_when_paths_unavail
         FakeConditionTracker(),
         [_param("slot", size=8, is_signed=False, index=0)],
         debug=False,
+        direct_call_summary=forbid_callee_summary,
     )
 
     assert summary.effects == []
@@ -822,6 +825,7 @@ def test_summarize_store_effects_ignores_proven_unreachable_effect_block():
         FakeConditionTracker(),
         [_param("slot", size=8, is_signed=False, index=0)],
         debug=False,
+        direct_call_summary=forbid_callee_summary,
     )
 
     assert summary.effects == []

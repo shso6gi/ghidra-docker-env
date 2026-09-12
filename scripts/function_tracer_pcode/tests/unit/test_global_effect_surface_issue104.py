@@ -48,6 +48,7 @@ from scripts.function_tracer_pcode.core import (
     StorageInfo,
 )
 from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.tests.unit._memory_model_fixtures import forbid_callee_summary
 from conftest import resolve_mock_data_type
 
 
@@ -336,7 +337,7 @@ def _store_op(addr_key, value_key, size, target=0x100):
 
 def test_global_direct_store_becomes_a_global_store_effect():
     tracer = _Tracer([G], values={"addr": _const_addr(_global_ref(*G)), "val": _x()})
-    summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)])
+    summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
 
     assert summary.incomplete_reasons == ()
     assert summary.has_unsupported_call is False
@@ -354,7 +355,7 @@ def test_store_to_an_unresolved_address_fails_closed_instead_of_vanishing():
     """Old behaviour (soundness hole): the store was silently skipped and the
     function compared as if it had no effects.  New behaviour: fail closed."""
     tracer = _Tracer([G], values={"addr": Expression.constant(0x1000d0, 8), "val": _x()})
-    summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)])
+    summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
 
     assert summary.effects == []
     assert summary.incomplete_reasons == (_EFFECT_STORE_LOCATION_UNMODELED_REASON,)
@@ -362,7 +363,7 @@ def test_store_to_an_unresolved_address_fails_closed_instead_of_vanishing():
 
 def test_store_through_an_escaped_pointer_fails_closed():
     tracer = _Tracer([G], values={"addr": Expression.unknown("escaped_ptr"), "val": _x()})
-    summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)])
+    summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
     assert summary.effects == []
     assert summary.incomplete_reasons == (_EFFECT_STORE_LOCATION_UNMODELED_REASON,)
 
@@ -379,7 +380,7 @@ def test_stack_local_store_with_symbolic_index_is_excluded_without_blocker():
         Expression.constant(8, 8),
     )
     tracer = _Tracer([G], values={"addr": addr, "val": _x()})
-    summary = summarize_store_effects([_Block([_store_op("addr", "val", 8)])], tracer, _Tracker(), [_param("param_1", 0)])
+    summary = summarize_store_effects([_Block([_store_op("addr", "val", 8)])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
     assert summary.effects == []
     assert summary.incomplete_reasons == ()
     assert summary.has_unsupported_call is False
@@ -391,7 +392,7 @@ def test_pointer_argument_store_is_unchanged_next_to_a_global_store():
     value = Expression.parameter("param_2", 1, data_type="int", size=4)
     tracer = _Tracer([G], values={"p": pointer, "gaddr": _const_addr(_global_ref(*G)), "val": value})
     ops = [_store_op("p", "val", 4, target=0x100), _store_op("gaddr", "val", 4, target=0x104)]
-    summary = summarize_store_effects([_Block(ops)], tracer, _Tracker(), params)
+    summary = summarize_store_effects([_Block(ops)], tracer, _Tracker(), params, direct_call_summary=forbid_callee_summary)
 
     assert summary.incomplete_reasons == ()
     kinds = sorted(effect.location.base_ref.kind for effect in summary.effects)
@@ -406,7 +407,7 @@ def test_global_read_only_function_has_no_effects_and_no_blocker():
     load = _Op("LOAD", _Varnode("unique", 0x30, 4, key="loaded"), [_Varnode("const", 0x1b1, 4), _Varnode("unique", 0x10, 8, key="addr")], _Address("ram", 0x100))
     ret = _Op("RETURN", None, [_Varnode("const", 0, 8), _Varnode("register", 0x4000, 4)], _Address("ram", 0x108))
     tracer = _Tracer([G], values={"addr": _const_addr(g), "loaded": _global_read(g, 4)})
-    summary = summarize_store_effects([_Block([load, ret])], tracer, _Tracker(), [_param("param_1", 0)])
+    summary = summarize_store_effects([_Block([load, ret])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
     assert summary.effects == []
     assert summary.incomplete_reasons == ()
     assert summary.has_unsupported_call is False
@@ -420,7 +421,7 @@ def test_readonly_ram_outputs_are_ignored():
     ret = _Op("RETURN", None, [_Varnode("const", 0, 8)], _Address("ram", 0x108))
     exit_copy = _Op("COPY", got, [_Varnode("ram", 0x101000, 8, defined_by=object())], _Address("ram", 0x108))
     tracer = _Tracer([G], readonly={0x101000})
-    summary = summarize_store_effects([_Block([exit_copy, ret])], tracer, _Tracker(), [])
+    summary = summarize_store_effects([_Block([exit_copy, ret])], tracer, _Tracker(), [], direct_call_summary=forbid_callee_summary)
     assert summary.effects == []
     assert summary.incomplete_reasons == ()
 
@@ -442,7 +443,7 @@ def test_ram_output_copy_is_observed_through_the_return_site_exit_copy():
     ret = _Op("RETURN", None, [_Varnode("const", 0, 8), _Varnode("register", 0x4000, 8)], _Address("ram", 0x20))
     exit_copy = _exit_copy(0x1000d0, 4, True, 0x20)
     tracer = _Tracer([G], values={"x": _x(), "exit:0x1000d0": _x()})
-    summary = summarize_store_effects([_Block([write, ret, exit_copy])], tracer, _Tracker(), [_param("param_1", 0)])
+    summary = summarize_store_effects([_Block([write, ret, exit_copy])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
 
     assert summary.incomplete_reasons == ()
     assert len(summary.effects) == 1
@@ -457,7 +458,7 @@ def test_unchanged_global_exit_copy_produces_no_effect():
     """A global that is only read keeps its entry value at the return site."""
     ret = _Op("RETURN", None, [_Varnode("const", 0, 8)], _Address("ram", 0x20))
     exit_copy = _exit_copy(0x1000d0, 4, False, 0x20)
-    summary = summarize_store_effects([_Block([ret, exit_copy])], _Tracer([G]), _Tracker(), [])
+    summary = summarize_store_effects([_Block([ret, exit_copy])], _Tracer([G]), _Tracker(), [], direct_call_summary=forbid_callee_summary)
     assert summary.effects == []
     assert summary.incomplete_reasons == ()
 
@@ -466,7 +467,7 @@ def test_ram_output_write_without_exit_copy_fails_closed():
     write = _Op("COPY", _Varnode("ram", 0x1000d0, 4), [_Varnode("register", 0x4000, 4, key="x")], _Address("ram", 0x14))
     ret = _Op("RETURN", None, [_Varnode("const", 0, 8)], _Address("ram", 0x20))
     tracer = _Tracer([G], values={"x": _x()})
-    summary = summarize_store_effects([_Block([write, ret])], tracer, _Tracker(), [_param("param_1", 0)])
+    summary = summarize_store_effects([_Block([write, ret])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
     assert summary.effects == []
     assert _EFFECT_STORE_LOCATION_UNMODELED_REASON in summary.incomplete_reasons
 
@@ -476,7 +477,7 @@ def test_ram_output_write_to_an_unnamed_object_fails_closed():
     ret = _Op("RETURN", None, [_Varnode("const", 0, 8)], _Address("ram", 0x20))
     exit_copy = _exit_copy(0x2000, 4, True, 0x20)
     tracer = _Tracer([G], values={"x": _x(), "exit:0x2000": _x()})
-    summary = summarize_store_effects([_Block([write, ret, exit_copy])], tracer, _Tracker(), [_param("param_1", 0)])
+    summary = summarize_store_effects([_Block([write, ret, exit_copy])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
     assert summary.effects == []
     assert _EFFECT_STORE_LOCATION_UNMODELED_REASON in summary.incomplete_reasons
 
@@ -489,7 +490,8 @@ def test_exit_copies_at_every_return_site_each_contribute_the_path_value():
     write = _Op("COPY", _Varnode("ram", 0x1000d0, 4), [_Varnode("register", 0x4000, 4, key="x")], _Address("ram", 0x14))
     tracer = _Tracer([G], values={"x": _x(), "exit:0x1000d0": _x()})
     summary = summarize_store_effects(
-        [_Block([write, ret1, exit1], 0), _Block([ret2, exit2], 1)], tracer, _Tracker(), [_param("param_1", 0)]
+        [_Block([write, ret1, exit1], 0), _Block([ret2, exit2], 1)], tracer, _Tracker(), [_param("param_1", 0)],
+        direct_call_summary=forbid_callee_summary
     )
     assert summary.incomplete_reasons == ()
     assert len(summary.effects) == 1
@@ -505,7 +507,7 @@ def test_multiequal_merged_global_is_observed_as_a_branch_dependent_value():
     ret = _Op("RETURN", None, [_Varnode("const", 0, 8)], _Address("ram", 0x68))
     exit_copy = _exit_copy(0x1000d0, 4, True, 0x68)
     tracer = _Tracer([G], values={"exit:0x1000d0": phi})
-    summary = summarize_store_effects([_Block([merge, ret, exit_copy])], tracer, _Tracker(), [_param("param_1", 0)])
+    summary = summarize_store_effects([_Block([merge, ret, exit_copy])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
     assert summary.incomplete_reasons == ()
     assert len(summary.effects) == 1
     assert summary.effects[0].value is phi
@@ -522,9 +524,13 @@ def test_call_induced_indirect_on_ram_is_not_a_direct_write():
     indirect = _Op("INDIRECT", _Varnode("ram", 0x1000d0, 4), [_Varnode("ram", 0x1000d0, 4), _Varnode("const", 0x30, 4)], _Address("ram", 0x30))
     ret = _Op("RETURN", None, [_Varnode("const", 0, 8)], _Address("ram", 0x40))
     exit_copy = _exit_copy(0x1000d0, 4, False, 0x40)
-    summary = summarize_store_effects([_Block([call, indirect, ret, exit_copy])], _Tracer([G]), _Tracker(), [])
+    summary = summarize_store_effects([_Block([call, indirect, ret, exit_copy])], _Tracer([G]), _Tracker(), [], direct_call_summary=lambda _target_ref, _arguments: None)
     assert summary.effects == []
     assert _EFFECT_STORE_LOCATION_UNMODELED_REASON not in summary.incomplete_reasons
+    # Issue #121: callee summary が無い call は call-effect lane の blocker として
+    # 記録される（読み飛ばされない）。この test の前提を明示する。
+    assert summary.has_unsupported_call is True
+    assert {ref.reason for ref in summary.unsupported_call_sites} == {"target_identity_unavailable"}
 
 
 # --------------------------------------------------------------------------
@@ -538,7 +544,7 @@ def test_global_effect_value_reading_a_named_global_is_modelled():
     h = _global_ref(*H)
     value = Expression.binary_op("INT_ADD", _global_read(h, 4), _x())
     tracer = _Tracer([G, H], values={"addr": _const_addr(g), "val": value})
-    summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)])
+    summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
     assert len(summary.effects) == 1
     assert summary.incomplete_reasons == ()
 
@@ -554,7 +560,7 @@ def test_global_effect_value_reading_unidentified_writable_memory_fails_closed()
     g = _global_ref(*G)
     value = Expression.binary_op("INT_ADD", Expression.memory(_const_addr(_unidentified_writable_ref(0x2000)), 4), _x())
     tracer = _Tracer([G], values={"addr": _const_addr(g), "val": value})
-    summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)])
+    summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
     assert len(summary.effects) == 1
     assert _EFFECT_GLOBAL_READ_IDENTITY_REASON in summary.incomplete_reasons
 
