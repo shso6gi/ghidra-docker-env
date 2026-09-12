@@ -11,8 +11,6 @@ from scripts.function_tracer_pcode.core.structural import expression_key_safe
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionNormalizer,
     ConditionSMTOracle,
-    PcodeTracer,
-    StructuralRecurrenceSummarizer,
 )
 from scripts.function_tracer_pcode.analysis.runtime_state import AnalysisRuntimeState
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService

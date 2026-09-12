@@ -10,7 +10,6 @@ from scripts.function_tracer_pcode.core.analysis import (
     ReturnOutcome,
     UnknownOutcome,
 )
-from scripts.function_tracer_pcode.core.call_target import CallTargetRef
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSimplifier,

@@ -29,9 +29,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     _RuntimeShortcutDecision,
     parameter_identity_key_from_expression,
 )
-from typing import Any, Dict, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
-    ReturnCase,
     _PendingLoopSummaryPair,
 )
 

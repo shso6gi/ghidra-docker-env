@@ -15,25 +15,18 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSMTOracle,
     ConditionSimplifier,
     EffectSummary,
-    PcodeTracer,
     _expressions_equivalent,
     _iter_expression_nodes,
     attach_quarantined_recurrence_proposal,
 )
 from scripts.function_tracer_pcode.analysis.returns._api import (
     ConditionTracker,
-    StructuralRecurrenceSummarizer,
 )
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     StructuralRecurrenceSummarizer,
     eval_constant_raw,
 )
 from scripts.function_tracer_pcode.analysis.returns._api import PcodeTracer
-from typing import Any, Optional, Set, Tuple
-from scripts.function_tracer_pcode.analysis.returns._shared import (
-    AnalysisFailure,
-)
 from scripts.function_tracer_pcode.analysis.returns.parameters import (
     _sealed_return_abi_facts,
 )

@@ -49,12 +49,8 @@ from scripts.function_tracer_pcode.core.structural import (
     expression_key_safe as _outcome_expression_key_safe,
 )
 from scripts.function_tracer_pcode.core.structural import expression_provenance_key
-from typing import Any, List, Optional, Set, Tuple
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    ConditionSimplifier,
-    _expressions_equivalent,
     _expressions_equivalent_under_conditions,
-    expression_contains_post_state_reads,
     lower_post_state_expression_for_smt,
 )
 
