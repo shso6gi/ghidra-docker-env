@@ -143,21 +143,10 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     canonicalize_location,
     canonicalize_param_location,
 )
-from typing import Dict, Optional, Sequence, Set, Tuple
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _collect_parameter_replacements_from_conditions,
     _expression_contains_parameter_identity,
-    _expressions_equivalent,
-    _normalize_parameter_index,
-    _parameter_base_ref,
-    _parameter_expression_from_descriptor,
-    _parameter_identity_key_from_base_ref,
-    _parameter_identity_keys_from_expression,
-    _recover_parameter_expression_from_varnode,
-    _resolve_parameter_descriptor,
-    _resolve_parameter_descriptor_from_identity,
     _stack_location_key,
-    _try_get_order_key,
     substitute_expression,
 )
 

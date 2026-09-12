@@ -17,7 +17,6 @@ from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.structural import StructuralKey
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSimplifier,
-    PcodeTracer,
     SignednessDetector,
     _SIGNED_COMPARE_TO_UNSIGNED,
     _TrackedReturnValue,

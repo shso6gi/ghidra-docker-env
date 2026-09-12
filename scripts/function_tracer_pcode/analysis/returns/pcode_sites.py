@@ -6,7 +6,6 @@ from typing import Any, Callable, Dict, Optional, Set, Tuple, cast
 from scripts.function_tracer_pcode.core.runtime_refs import PcodeOpRef
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    PcodeTracer,
     _PCODE_OPCODE_BY_MNEMONIC,
 )
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import ProgramAccessService

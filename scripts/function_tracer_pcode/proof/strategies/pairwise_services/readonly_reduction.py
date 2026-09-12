@@ -24,9 +24,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     build_unknown_recovery_actions,
     parameter_identity_key_from_expression,
 )
-from typing import Any, Dict, List, Optional, Sequence
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
-    ReturnCase,
     canonicalize_location,
 )
 

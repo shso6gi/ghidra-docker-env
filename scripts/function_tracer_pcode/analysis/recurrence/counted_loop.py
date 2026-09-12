@@ -35,10 +35,6 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     _runtime_conditions_signature,
     _runtime_expression_signature,
 )
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
-    ConditionSimplifier,
-    CountedLoopAccumulator,
-)
 
 
 def _impl_try_summarize_pre_return_counted_scalar_loop(

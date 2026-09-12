@@ -30,10 +30,6 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     _runtime_conditions_signature,
     _runtime_expression_signature,
 )
-from typing import Any, Dict, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
-    StateTransitionLoopModel,
-)
 
 
 def _impl__counted_loop_transition_evidence_key_from_parts(
