@@ -280,11 +280,17 @@ Three distinctions the schema exists to keep apart:
 - **`requested_scope` vs `completed_scope`.** "A run exists" and "the range
   that was asked for was actually verified" are different facts.
   `requested_scope` (`subset` / `focused` / `full_eq` / `full_neq`) is supplied
-  by the caller and never guessed from the results; `completed_scope`
-  (`complete` / `partial` / `unknown`) comes from the `--manifest` rules above,
-  applied to every tree of the run and folded fail-closed (any `unknown` wins,
-  then any `partial`). A run that expected no pairs is `unknown`, not
-  `complete`. There is deliberately **no single `full_evaluation` boolean**.
+  by the caller and never guessed from the results — and, being a request, it
+  is **never treated as evidence** (see the full-scope rule below);
+  `completed_scope` (`complete` / `partial` / `unknown`) comes from the
+  `--manifest` rules above, applied to every result tree the run said it would
+  produce and folded fail-closed (any `unknown` wins, then any `partial`). A
+  run that expected no pairs is `unknown`, not `complete`. A run whose
+  `subset_manifest.txt` says `scope=all` but whose `neq/` directory is absent
+  is `unknown` too: the missing tree took its publication manifest with it, so
+  the size of the gap is unknowable, and the tree is named in
+  `coverage.trees_missing` so it cannot disappear from the counts. There is
+  deliberately **no single `full_evaluation` boolean**.
 - **`coverage`.** The counted evidence behind `completed_scope`:
   `pairs_expected`, `pairs_with_status`, `pairs_missing`, `pairs_unexpected`,
   `pairs_verified_skipped` (reused from an earlier run, not executed here) and
@@ -301,11 +307,36 @@ Three distinctions the schema exists to keep apart:
   was invalid". A past run remains a perfectly good record of the commit it was
   made on.
 
-`list` names the last run recorded for each full scope, then every run recorded
-after it, and ends with an explicit answer to "has everything been evaluated at
-the current HEAD?". A ledger holding only subset rows can never print
-"full verified": **subset verification is not full verification**, and a subset
-row says nothing about the pairs outside the subset.
+- **A full verdict is built from artifacts, never from the request.** `list`
+  answers "has everything been evaluated at the current HEAD?" with `YES` for a
+  scope only when a row satisfies *all* of: the run is a single whole-benchmark
+  matrix tree (a subset run's `eq`/`neq` halves are by construction not one, no
+  matter what scope was requested); the `run_scope` the runner wrote into its
+  own `matrix-publication-manifest.json` and `run_manifest.txt` is
+  `FULL_EQBENCH` / `FULL_NEQ` and the two agree; that recorded scope matches
+  the requested one; no `sample_filter`, `pair_filter` or `max_samples` limit
+  narrowed the run; `completed_scope` is `complete`; and `code_matches_head` is
+  `yes`. Passing `--requested-scope full_eq` to a subset run therefore changes
+  nothing, and `list` prints the reason each requesting row fell short.
+
+`list` names the last run *requesting* each full scope (labelling it as a
+request, with its whole-benchmark evidence stated separately), then every run
+recorded after it, then the verdict. A ledger holding only subset rows can
+never print "full verified": **subset verification is not full verification**,
+and a subset row says nothing about the pairs outside the subset.
+
+Each row prints `requested_scope`, `completed_scope`, `coverage`, the run
+layout and declared run scope, `commit`, `dirty`, `manifest_sha256`,
+`analysis_config_digest`, the whole-run timing with its source,
+`code_matches_head` and any `stale_code` mark, so the conditions a run was
+verified under can be retraced from the ledger alone. Where a value legitimately
+differs between the halves of one run — an Eq half and a Neq half really do run
+under different analysis configs — the row shows `differs` **followed by each
+tree's own value**, which is a different thing from `unknown` (nobody recorded
+one). The whole-run `start_time_utc` / `end_time_utc` / `hostname` come from
+`subset_manifest.txt` for a subset run, because a subset legitimately starts
+before its first half and ends after its last; each half's own clock is kept
+under `timing.trees`.
 
 The three axes are stored as three separate groups of counters, exactly as
 `outcome_transition --axes` computes them, and are never folded into one

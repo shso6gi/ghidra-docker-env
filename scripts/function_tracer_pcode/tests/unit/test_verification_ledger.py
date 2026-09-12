@@ -16,6 +16,7 @@ source 文字列の grep ではなく、実際に row を作って表示させ�
 """
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -75,16 +76,27 @@ def write_pair(tree: Path, sample: str, function: str, left: str, right: str,
     return f"{sample}/{function}/{name}.pair-status.json"
 
 
-def write_publication_manifest(tree: Path, expected, skipped=(), *, schema=None) -> None:
-    """完成度判定が読む 3 key（schema と 2 つの census）を持つ manifest。"""
+def write_publication_manifest(
+    tree: Path, expected, skipped=(), *, schema=None, run_scope=None,
+) -> None:
+    """完成度判定が読む 3 key（schema と 2 つの census）を持つ manifest。
+
+    `run_scope` を渡すと、full scope の裏付けに使う側の field も一緒に書く。
+    """
     tree.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": MATRIX_PUBLICATION_SCHEMA if schema is None else schema,
+        "expected_pair_status_paths": list(expected),
+        "verified_skipped_pair_status_paths": list(skipped),
+    }
+    if run_scope is not None:
+        payload["run_scope"] = run_scope
+        payload["analysis_config"] = {
+            "run_scope": run_scope, "sample_filter": "", "pair_filter": "",
+            "max_samples": 0,
+        }
     (tree / outcome_transition.PUBLICATION_MANIFEST_FILE).write_text(
-        json.dumps({
-            "schema": MATRIX_PUBLICATION_SCHEMA if schema is None else schema,
-            "expected_pair_status_paths": list(expected),
-            "verified_skipped_pair_status_paths": list(skipped),
-        }),
-        encoding="utf-8",
+        json.dumps(payload), encoding="utf-8",
     )
 
 
@@ -123,6 +135,42 @@ def write_subset_manifest(run_dir: Path, **fields) -> None:
     (run_dir / "subset_manifest.txt").write_text(
         "".join(f"{key}={value}\n" for key, value in fields.items()), encoding="utf-8",
     )
+
+
+@pytest.fixture()
+def full_run(tmp_path):
+    """本物の full run の形（matrix root + run_scope=FULL_* + filter 無し）。
+
+    subset run とは layout も declared run_scope も filter も違う。full verdict は
+    この形の artifact からしか作れないことを、fixture の側でも固定する。
+    """
+    def build(name, *, scope="full_eq", commit=HEAD, dirty=GIT_DIRTY_NO,
+              sample_filter="", pair_filter="", max_samples="0",
+              run_scope=None, outcomes=None, with_publication=True):
+        run_dir = tmp_path / name
+        declared = run_scope or verification_ledger.RUN_SCOPE_BY_FULL_SCOPE.get(scope, scope)
+        sample = EQ_SAMPLE if declared == "FULL_EQBENCH" else NEQ_SAMPLE
+        paths = [
+            write_pair(run_dir, sample, function, left, right, outcome)
+            for function, left, right, outcome in (
+                outcomes or [("f", "B1", "B2", "EQUIVALENT")]
+            )
+        ]
+        if with_publication:
+            write_publication_manifest(run_dir, paths, run_scope=declared)
+        write_run_manifest(
+            run_dir, run_kind="eqbench_all_eq_matrix_current", run_scope=declared,
+            sample_filter=sample_filter, pair_filter=pair_filter,
+            max_samples=max_samples, git_commit=commit, git_dirty=dirty,
+            git_dirty_files_digest="d", manifest_sha256="m",
+            analysis_config_digest="c", analysis_source_digest_start="s",
+            analysis_source_digest_end="s",
+            start_time_utc="2026-01-01T00:00:00Z",
+            end_time_utc="2026-01-02T00:00:00Z", hostname="host",
+        )
+        write_ground_truth(run_dir, [(NEQ_SAMPLE, "g", "changed", "MAY_AFFECT", "UNKNOWN")])
+        return run_dir
+    return build
 
 
 @pytest.fixture()
@@ -290,12 +338,14 @@ def test_ledger_list_marks_stale_code_and_never_claims_head_coverage(tmp_path, s
     assert "Subset verification is not full verification" in listing
 
 
-def test_ledger_list_reports_a_full_run_at_head_as_evaluated(tmp_path, subset_run):
-    """逆向きの固定: 現 HEAD の complete な full row は YES と出る。"""
+def test_a_valid_full_run_backed_by_its_artifacts_is_reported_as_evaluated(
+    tmp_path, full_run,
+):
+    """逆向きの固定: artifact が full scope を裏付ける run だけ YES になる。"""
     ledger = tmp_path / "ledger.jsonl"
     for scope in ("full_eq", "full_neq"):
         verification_ledger.append_row(ledger, verification_ledger.build_row(
-            subset_run(f"run_{scope}", commit=HEAD), requested_scope=scope,
+            full_run(f"run_{scope}", scope=scope), requested_scope=scope,
         ))
 
     listing = verification_ledger.format_listing(
@@ -304,6 +354,127 @@ def test_ledger_list_reports_a_full_run_at_head_as_evaluated(tmp_path, subset_ru
 
     assert "full_eq: YES" in listing and "full_neq: YES" in listing
     assert "Subset verification is not full verification" not in listing
+
+
+@pytest.mark.parametrize("scope", ["full_eq", "full_neq"])
+def test_a_subset_layout_is_never_full_verification_however_it_is_requested(
+    tmp_path, subset_run, scope,
+):
+    """blocker: subset run に full_eq/full_neq を指定しても full と認めない。"""
+    ledger = tmp_path / "ledger.jsonl"
+    row = verification_ledger.build_row(
+        subset_run("run", commit=HEAD), requested_scope=scope,
+    )
+    verification_ledger.append_row(ledger, row)
+
+    # requested_scope は保持するが、それ自体は証拠にならない。
+    assert row["requested_scope"] == scope
+    assert row["completed_scope"] == outcome_transition.COMPLETENESS_COMPLETE
+    assert verification_ledger.head_match(row, _head_state())[0] == (
+        verification_ledger.HEAD_MATCH_YES
+    )
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+    assert evidence is None and "matrix tree" in reason
+
+    listing = verification_ledger.format_listing(
+        verification_ledger.read_rows(ledger), _head_state(), ledger_path=ledger,
+    )
+    assert f"{scope}: YES" not in listing
+    assert "full_eq: NO" in listing and "full_neq: NO" in listing
+    assert "Subset verification is not full verification" in listing
+
+
+def test_requested_scope_alone_never_produces_a_full_verdict(tmp_path, full_run):
+    """裏付けの各条件を 1 つずつ壊すと full と認めなくなる。"""
+    cases = {
+        # filter が掛かっていれば、宣言が FULL でも全件ではない
+        "narrowed": dict(sample_filter="CLEVER/"),
+        "pair_filtered": dict(pair_filter="B1_B2"),
+        "sample_limited": dict(max_samples="8"),
+        # runner が記録した scope が違う
+        "representative": dict(run_scope="REPRESENTATIVE"),
+    }
+    for name, override in cases.items():
+        row = verification_ledger.build_row(
+            full_run(name, scope="full_eq", **override), requested_scope="full_eq",
+        )
+        evidence, reason = verification_ledger.full_scope_evidence(row)
+        assert evidence is None, f"{name} was accepted as whole-benchmark evidence"
+        assert reason
+
+
+def test_a_focused_run_is_not_mistaken_for_a_full_run(tmp_path, full_run):
+    """focused 依頼は full verdict の候補にすらならない。"""
+    row = verification_ledger.build_row(
+        full_run("focused", scope="full_eq"), requested_scope="focused",
+    )
+
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None and reason == "not a full scope request"
+    listing = verification_ledger.format_listing(
+        (row,), _head_state(), ledger_path=tmp_path / "l.jsonl",
+    )
+    assert "full_eq: NO" in listing and "full_neq: NO" in listing
+
+
+def test_a_full_run_with_partial_coverage_is_not_evaluated(tmp_path, full_run):
+    """full を依頼しても coverage が partial なら YES にしない。"""
+    run_dir = full_run(
+        "partial", scope="full_eq",
+        outcomes=[("f", "B1", "B2", "EQUIVALENT"), ("f", "B3", "B4", "UNKNOWN")],
+    )
+    (run_dir / EQ_SAMPLE / "f" / "f_B3_B4.pair-status.json").unlink()
+
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert row["completed_scope"] == outcome_transition.COMPLETENESS_PARTIAL
+    assert evidence is None and "completed_scope" in reason
+    listing = verification_ledger.format_listing(
+        (row,), _head_state(), ledger_path=tmp_path / "l.jsonl",
+    )
+    assert "full_eq: NO" in listing
+
+
+def test_a_full_run_without_a_publication_manifest_is_not_evaluated(tmp_path, full_run):
+    """census が無ければ全件走ったことを裏付けられない。"""
+    row = verification_ledger.build_row(
+        full_run("no_manifest", scope="full_eq", with_publication=False),
+        requested_scope="full_eq",
+    )
+
+    assert row["completed_scope"] == outcome_transition.COMPLETENESS_UNKNOWN
+    assert verification_ledger.full_scope_evidence(row)[0] is None
+
+
+@pytest.mark.parametrize(
+    "commit,dirty,head",
+    [
+        (OTHER_COMMIT, GIT_DIRTY_NO, _head_state()),
+        (HEAD, GIT_DIRTY_YES, _head_state()),
+        (verification_ledger.UNSET, GIT_DIRTY_NO, _head_state()),
+        (HEAD, GIT_DIRTY_NO, _head_state(dirty=GIT_DIRTY_YES)),
+    ],
+)
+def test_a_valid_full_run_is_not_head_verification_when_the_code_differs(
+    tmp_path, full_run, commit, dirty, head,
+):
+    """artifact 上は完全な full run でも、HEAD の証拠でなければ YES にしない。"""
+    row = verification_ledger.build_row(
+        full_run("full", scope="full_eq", commit=commit, dirty=dirty),
+        requested_scope="full_eq",
+    )
+    # run 自体は full scope を裏付けている（過去 run としては有効）。
+    assert verification_ledger.full_scope_evidence(row)[0] == "full_eq"
+
+    listing = verification_ledger.format_listing(
+        (row,), head, ledger_path=tmp_path / "l.jsonl",
+    )
+
+    assert "full_eq: YES" not in listing
+    assert "full_eq: NO" in listing
+    assert "stale_code" in listing
 
 
 def test_a_subset_only_ledger_never_prints_full_verified(tmp_path, subset_run):
@@ -482,3 +653,173 @@ def test_the_runners_literal_none_is_not_recorded_as_a_reference(tmp_path, subse
 
     assert row["issue"] is None and row["pr"] is None
     assert named["issue"] == "123"
+
+
+# ---------------------------------------------------------------------------
+# 欠落した half（修正 2）
+#
+# `scope=all` が要求する half が directory ごと無いとき、存在する half だけを
+# 数えて complete にしない。欠落そのものが集計から消えないことも固定する。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("absent,present", [("neq", "eq"), ("eq", "neq")])
+def test_scope_all_with_a_missing_half_is_never_complete(tmp_path, subset_run, absent, present):
+    run_dir = subset_run("run")
+    shutil.rmtree(run_dir / absent)
+
+    row = verification_ledger.build_row(run_dir, requested_scope="subset")
+
+    assert row["completed_scope"] == outcome_transition.COMPLETENESS_UNKNOWN
+    assert absent in row["completed_scope_detail"]
+    # 欠落が集計から消えない: 期待した half と欠落した half の両方が残る。
+    assert row["coverage"]["trees_expected"] == ["eq", "neq"]
+    assert row["coverage"]["trees_missing"] == [absent]
+    assert present in row["coverage"]["trees"]
+    listing = verification_ledger.format_listing(
+        (row,), _head_state(), ledger_path=tmp_path / "l.jsonl",
+    )
+    assert f"MISSING TREE(S): {absent}" in listing
+
+
+@pytest.mark.parametrize("scope,absent", [("eq", "neq"), ("neq", "eq")])
+def test_a_single_half_scope_is_complete_without_the_other_half(
+    tmp_path, subset_run, scope, absent,
+):
+    """`scope=eq` は neq を要求していないので、無くても complete。"""
+    run_dir = subset_run("run")
+    shutil.rmtree(run_dir / absent)
+    manifest = run_dir / "subset_manifest.txt"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace("scope=all", f"scope={scope}"),
+        encoding="utf-8",
+    )
+
+    row = verification_ledger.build_row(run_dir, requested_scope="subset")
+
+    assert row["completed_scope"] == outcome_transition.COMPLETENESS_COMPLETE
+    assert row["coverage"]["trees_expected"] == [scope]
+    assert row["coverage"]["trees_missing"] == []
+
+
+def test_scope_all_with_both_halves_present_is_complete(subset_run):
+    row = verification_ledger.build_row(subset_run("run"), requested_scope="subset")
+
+    assert row["completed_scope"] == outcome_transition.COMPLETENESS_COMPLETE
+    assert row["coverage"]["trees_expected"] == ["eq", "neq"]
+    assert row["coverage"]["trees_missing"] == []
+
+
+# ---------------------------------------------------------------------------
+# list の表示契約（修正 3）と timing の出所（修正 4）
+# ---------------------------------------------------------------------------
+
+
+def test_list_shows_every_field_needed_to_retrace_a_run(tmp_path, subset_run):
+    """v4 §7.B: row から検証条件を追えること。"""
+    row = verification_ledger.build_row(
+        subset_run("run"), requested_scope="subset", issue="123",
+    )
+
+    listing = verification_ledger.format_listing(
+        (row,), _head_state(), ledger_path=tmp_path / "l.jsonl",
+    )
+
+    for expected in (
+        "requested_scope=subset",
+        "completed_scope=complete",
+        "coverage=",
+        "commit=",
+        "dirty=",
+        "manifest_sha256=",
+        "analysis_config_digest=",
+        "code_matches_head=",
+        "layout=subset_halves",
+    ):
+        assert expected in listing, f"{expected} missing from the listing"
+
+
+def test_per_tree_analysis_config_digests_are_kept_when_they_differ(tmp_path, subset_run):
+    """eq / neq で正当に異なる digest を単語 1 つに潰さない。"""
+    run_dir = subset_run("run")
+    for half, digest in (("eq", "digest-eq"), ("neq", "digest-neq")):
+        manifest = run_dir / half / "run_manifest.txt"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                "analysis_config_digest=c", f"analysis_config_digest={digest}"),
+            encoding="utf-8",
+        )
+
+    row = verification_ledger.build_row(run_dir, requested_scope="subset")
+    listing = verification_ledger.format_listing(
+        (row,), _head_state(), ledger_path=tmp_path / "l.jsonl",
+    )
+
+    # 「異なる」ことと、それぞれの値の両方が読める。
+    assert row["provenance"]["analysis_config_digest"] == verification_ledger.MISMATCH
+    assert row["provenance"]["trees"]["eq"]["analysis_config_digest"] == "digest-eq"
+    assert row["provenance"]["trees"]["neq"]["analysis_config_digest"] == "digest-neq"
+    assert "eq=digest-eq" in listing and "neq=digest-neq" in listing
+
+
+def test_a_value_no_tree_recorded_is_unknown_not_differs(tmp_path, subset_run):
+    """「異なる」と「誰も記録していない」を区別する。"""
+    run_dir = subset_run("run")
+    for half in ("eq", "neq"):
+        manifest = run_dir / half / "run_manifest.txt"
+        manifest.write_text(
+            "".join(
+                line + "\n"
+                for line in manifest.read_text(encoding="utf-8").splitlines()
+                if not line.startswith("analysis_config_digest=")
+            ),
+            encoding="utf-8",
+        )
+
+    row = verification_ledger.build_row(run_dir, requested_scope="subset")
+
+    assert row["provenance"]["analysis_config_digest"] == verification_ledger.UNSET
+    assert row["provenance"]["analysis_config_digest"] != verification_ledger.MISMATCH
+
+
+def test_whole_run_timing_comes_from_the_subset_manifest(tmp_path, subset_run):
+    """subset 全体の start/end は half と一致しないのが正常 -> mismatch にしない。"""
+    run_dir = subset_run("run")
+    # half は run 全体とは別の時刻を持つ（実際の run と同じ形）。
+    for half, start, end in (
+        ("eq", "2026-01-01T00:00:10Z", "2026-01-01T00:04:05Z"),
+        ("neq", "2026-01-01T00:04:06Z", "2026-01-01T00:09:55Z"),
+    ):
+        manifest = run_dir / half / "run_manifest.txt"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + f"start_time_utc={start}\nend_time_utc={end}\nhostname=host\n",
+            encoding="utf-8",
+        )
+
+    row = verification_ledger.build_row(run_dir, requested_scope="subset")
+    timing = row["timing"]
+
+    assert timing["source"] == "subset_manifest"
+    assert timing["start_time_utc"] == "2026-01-01T00:00:00Z"
+    assert timing["end_time_utc"] == "2026-01-01T00:10:00Z"
+    assert verification_ledger.MISMATCH not in (
+        timing["start_time_utc"], timing["end_time_utc"], timing["hostname"],
+    )
+    # half の時刻は失われず per-tree に残る。
+    assert timing["trees"]["eq"]["start_time_utc"] == "2026-01-01T00:00:10Z"
+    assert timing["trees"]["neq"]["end_time_utc"] == "2026-01-01T00:09:55Z"
+    listing = verification_ledger.format_listing(
+        (row,), _head_state(), ledger_path=tmp_path / "l.jsonl",
+    )
+    assert "timing=2026-01-01T00:00:00Z -> 2026-01-01T00:10:00Z" in listing
+
+
+def test_matrix_run_timing_still_comes_from_its_run_manifest(full_run, tmp_path):
+    row = verification_ledger.build_row(
+        full_run("full", scope="full_eq"), requested_scope="full_eq",
+    )
+
+    assert row["timing"]["source"] == "run_manifest"
+    assert row["timing"]["start_time_utc"] == "2026-01-01T00:00:00Z"
+    assert row["timing"]["end_time_utc"] == "2026-01-02T00:00:00Z"
