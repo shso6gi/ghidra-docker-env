@@ -261,6 +261,20 @@ validation_run_git_state_lines() {
     printf '%s\n' "$lines"
 }
 
+# Issue #123: before run の half が「比較対象」として使えるかどうか。
+#
+# `reporting.outcome_transition` が before tree から読むのは half 配下の
+# `*.pair-status.json` だけ（`reporting/pair_outcomes.py::iter_pair_outcomes`）なので、
+# 可否の基準もそれに揃える。run_manifest.txt や provenance の行は transition には
+# 不要なので要求しない: それらを持たない過去の run（PR #150 以前）も before に使える。
+# pair 数まで一致しているかは実行前には決められない（after 側の pair 集合が未確定）。
+# 欠けは transition 表の MISSING 行として出る。
+validation_before_run_half_is_comparable() {
+    local half_dir="$1"
+    [[ -d "$half_dir" ]] || return 1
+    [[ -n "$(find "$half_dir" -name '*.pair-status.json' -type f -print -quit 2>/dev/null)" ]]
+}
+
 export -f validation_positive_int_setting
 export -f validation_manifest_value
 export -f validation_run_benchmark_gate

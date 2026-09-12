@@ -9,10 +9,12 @@
 # EQBENCH_BUILD_POLICY). SUBSET_SCOPE=eq|neq|all selects the halves to run.
 #
 # Issue #123: the run records its own provenance.  SUBSET_BEFORE=<run dir> names
-# the run this one is compared against; the transition report of every half and
-# the soundness gate of this run are then written next to the results, so the
-# comparison survives without a hand-written note.  SUBSET_ISSUE / SUBSET_PR
-# record what the run was made for.  None of this changes how a pair is judged:
+# the run this one is compared against; it is checked against the halves this
+# run will actually produce before the first pair starts, and the transition
+# report of every half and the soundness gate of this run are then written next
+# to the results, so the comparison survives without a hand-written note.
+# SUBSET_ISSUE / SUBSET_PR record what the run was made for.  None of this
+# changes how a pair is judged:
 # the reports are read from the results after the halves have finished, and
 # their exit status is recorded in the manifest instead of becoming the exit
 # status of this script.
@@ -37,14 +39,31 @@ if [[ "$SUBSET_SCOPE" != "eq" && "$SUBSET_SCOPE" != "neq" && "$SUBSET_SCOPE" != 
     echo "Error: SUBSET_SCOPE must be eq, neq or all" >&2
     exit 1
 fi
+# The halves to run are fixed by SUBSET_SCOPE alone, so they are known before
+# anything expensive happens -- and the before run is checked against exactly
+# those halves, never against a half this run will not produce.
+halves=()
+[[ "$SUBSET_SCOPE" == "eq" || "$SUBSET_SCOPE" == "all" ]] && halves+=(eq)
+[[ "$SUBSET_SCOPE" == "neq" || "$SUBSET_SCOPE" == "all" ]] && halves+=(neq)
+
 if [[ -n "$SUBSET_BEFORE" ]]; then
     # Resolve and check before the (long) halves run: a mistyped before run must
-    # not be discovered only after the results are already produced.
+    # not be discovered only after the results are already produced.  The check
+    # is what outcome_transition actually needs from a before tree (a result
+    # tree carrying pair statuses), not the provenance this change adds -- runs
+    # made before it stay usable as a before.
     SUBSET_BEFORE="$(realpath -m "$SUBSET_BEFORE")"
     if [[ ! -d "$SUBSET_BEFORE" ]]; then
         echo "Error: SUBSET_BEFORE is not a directory: $SUBSET_BEFORE" >&2
         exit 1
     fi
+    for half in "${halves[@]}"; do
+        if ! validation_before_run_half_is_comparable "$SUBSET_BEFORE/$half"; then
+            echo "Error: SUBSET_BEFORE has no comparable $half half (SUBSET_SCOPE=$SUBSET_SCOPE):" \
+                "$SUBSET_BEFORE/$half holds no *.pair-status.json" >&2
+            exit 1
+        fi
+    done
 fi
 
 # One value of a `key=value` manifest, keeping values that contain "=".
@@ -119,9 +138,6 @@ run_half() {
 # 2 x PARALLEL_JOBS pair processes on the host.  Console output of each half
 # goes to $OUTPUT_BASE_DIR/<half>.log.
 status=0
-halves=()
-[[ "$SUBSET_SCOPE" == "eq" || "$SUBSET_SCOPE" == "all" ]] && halves+=(eq)
-[[ "$SUBSET_SCOPE" == "neq" || "$SUBSET_SCOPE" == "all" ]] && halves+=(neq)
 for half in "${halves[@]}"; do
     half_status=0
     run_half "$half" > "$OUTPUT_BASE_DIR/$half.log" 2>&1 || half_status=$?
