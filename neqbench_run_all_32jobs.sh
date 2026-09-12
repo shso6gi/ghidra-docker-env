@@ -525,6 +525,12 @@ write_function_results_summary() {
 pair_scheduler_init "$PARALLEL_JOBS" write_function_results_summary RUN_PAIR_FAILURES
 
 ANALYSIS_SOURCE_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)"
+# Issue #123: この run を出した作業ツリー・時刻・ホストを manifest に残す。
+# analysis_config_digest は固定 key 集合からしか作られないので、これらの行を
+# 足しても判定系 digest は変わらない。
+RUN_START_TIME_UTC="$(validation_utc_timestamp)"
+RUN_HOSTNAME="$(validation_run_hostname)"
+RUN_GIT_STATE_LINES="$(validation_run_git_state_lines "$PYTHON_BIN" "$SCRIPT_DIR")"
 RUN_MANIFEST="$OUTPUT_BASE_DIR/run_manifest.txt"
 PREVIOUS_RUN_MANIFEST="$RUN_TMP/previous-run-manifest.txt"
 if [[ -s "$RUN_MANIFEST" ]]; then cp "$RUN_MANIFEST" "$PREVIOUS_RUN_MANIFEST"; fi
@@ -577,6 +583,9 @@ planned_pair_jobs=$TOTAL_PLANNED_PAIR_JOBS
 source_pair_count=$SOURCE_PAIR_COUNT
 source_pair_census_digest=$CENSUS_DIGEST
 runner_script_sha256=$(sha256sum "$SCRIPT_DIR/neqbench_run_all_32jobs.sh" | awk '{print $1}')
+start_time_utc=$RUN_START_TIME_UTC
+hostname=$RUN_HOSTNAME
+$RUN_GIT_STATE_LINES
 analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST
 EOF
 CONFIG_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt --run-manifest "$RUN_MANIFEST" --print-analysis-config-digest)"
@@ -803,6 +812,7 @@ run_failures=$RUN_PAIR_FAILURES
 benchmark_gate_status=$VALIDATION_BENCHMARK_GATE_STATUS
 benchmark_gate_failures=$VALIDATION_BENCHMARK_GATE_FAILURES
 analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
+end_time_utc=$(validation_utc_timestamp)
 EOF
 exit_status=0
 if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT > 0 || FUNCTION_CENSUS_FAILURES > 0 || VALIDATION_BENCHMARK_GATE_FAILURES > 0 )); then

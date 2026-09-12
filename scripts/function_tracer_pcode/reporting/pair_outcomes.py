@@ -8,10 +8,12 @@ table and the soundness gate are measurement aids, not authorities.
 
 from __future__ import annotations
 
+import argparse
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, Optional, Tuple
+from typing import Dict, Iterator, Optional, Sequence, Tuple
 
 PAIR_STATUS_SUFFIX = ".pair-status.json"
 OUTCOME_MISSING = "MISSING"
@@ -137,3 +139,46 @@ def load_pair_outcomes(root: Path) -> Dict[PairKey, PairOutcome]:
             )
         outcomes[record.key] = record
     return outcomes
+
+
+def comparison_tree_pair_count(root: Path) -> int:
+    """Number of pairs a transition/gate report would read from ``root``.
+
+    Raises ``ValueError`` for the trees the reader itself refuses (an identity
+    that is recoverable from neither the payload nor the path, two statuses for
+    the same pair).  Callers that want to know *before* producing results
+    whether a tree can serve as the ``--before`` side ask here, so the rule
+    stays this module's and is never restated by a caller.
+    """
+    return len(load_pair_outcomes(root))
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--validate-comparison-tree", type=Path, required=True, metavar="ROOT",
+        help=(
+            "exit 0 and print the pair count when ROOT can be loaded as the "
+            "before/after side of a transition report and holds at least one "
+            "pair; exit 1 with the reason otherwise"
+        ),
+    )
+    args = parser.parse_args(argv)
+    root = args.validate_comparison_tree
+    if not root.is_dir():
+        print(f"error: not a directory: {root}", file=sys.stderr)
+        return 1
+    try:
+        pairs = comparison_tree_pair_count(root)
+    except ValueError as exc:
+        print(f"error: not loadable as a result tree: {root}: {exc}", file=sys.stderr)
+        return 1
+    if pairs == 0:
+        print(f"error: no pair status under: {root}", file=sys.stderr)
+        return 1
+    print(pairs)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
