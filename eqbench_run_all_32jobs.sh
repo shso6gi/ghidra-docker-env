@@ -908,6 +908,13 @@ USED_BUILD_RECEIPTS_FILE="$OUTPUT_BASE_DIR/used_build_receipts.jsonl"
 ANALYSIS_SOURCE_DIGEST_START="$("$PYTHON_BIN" -m \
     scripts.function_tracer_pcode.reporting.execution_identity \
     --repo-root "$SCRIPT_DIR" --print-source-digest)"
+# Issue #123: この run を出した作業ツリー・時刻・ホストを manifest に残す。
+# analysis_config_digest は固定 key 集合からしか作られないので、これらの行を
+# 足しても判定系 digest は変わらない。
+RUN_START_TIME_UTC="$(validation_utc_timestamp)"
+RUN_HOSTNAME="$(validation_run_hostname)"
+RUN_GIT_STATE_LINES="$(validation_run_git_state_lines "$PYTHON_BIN" "$SCRIPT_DIR")"
+RUNNER_SCRIPT_SHA256="$(sha256sum "$SCRIPT_DIR/eqbench_run_all_32jobs.sh" | awk '{print $1}')"
 PAIR_PROCESS_DEADLINE_POLICY_DIGEST="$(printf '%s' \
     "phase8:${PAIR_PROCESS_TIMEOUT_SECONDS}:${PAIR_PROCESS_KILL_AFTER_SECONDS}" \
     | sha256sum | awk '{print $1}')"
@@ -962,6 +969,10 @@ function_policy=all top-level source-defined functions except main
 binary_policy=verified build receipt first; isolated fresh build fallback
 sample_filter=$EQBENCH_SAMPLE_FILTER
 pair_filter=$EQBENCH_PAIR_FILTER
+runner_script_sha256=$RUNNER_SCRIPT_SHA256
+start_time_utc=$RUN_START_TIME_UTC
+hostname=$RUN_HOSTNAME
+$RUN_GIT_STATE_LINES
 analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST_START
 dry_run=$DRY_RUN
 EOF
@@ -1413,6 +1424,7 @@ run_pair_failures=$RUN_PAIR_FAILURES
 benchmark_gate_status=$VALIDATION_BENCHMARK_GATE_STATUS
 benchmark_gate_failures=$VALIDATION_BENCHMARK_GATE_FAILURES
 analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
+end_time_utc=$(validation_utc_timestamp)
 EOF
 
 FINAL_RUN_EXIT_STATUS=0

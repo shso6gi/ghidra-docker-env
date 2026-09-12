@@ -14,6 +14,8 @@ from scripts.function_tracer_pcode.authority.contracts import authority_digest
 
 SOURCE_ROOTS = (
     "eqbench_run_all_32jobs.sh",
+    "eqbench_run_subset.sh",
+    "neqbench_run_all_32jobs.sh",
     "requirements-test.txt",
     "scripts/validation_matrix_common.sh",
     "scripts/eqbench",
@@ -21,6 +23,10 @@ SOURCE_ROOTS = (
 )
 PAIR_EXECUTION_TARGET_SCHEMA = "eqbench-pair-execution-target-v1"
 PAIR_EXECUTION_TARGET_KIND = "PairExecutionTargetReceipt"
+GIT_STATE_UNAVAILABLE = "unavailable"
+GIT_DIRTY_UNKNOWN = "unknown"
+GIT_DIRTY_YES = "1"
+GIT_DIRTY_NO = "0"
 
 
 def sha256_file(path: Path) -> str:
@@ -53,6 +59,80 @@ def source_files(repo_root: Path) -> tuple[Mapping[str, str], ...]:
 
 def source_tree_digest(repo_root: Path) -> str:
     return authority_digest({"source_files": source_files(repo_root)})
+
+
+def _porcelain_entries(repo_root: Path, status: bytes) -> tuple[Mapping[str, str], ...]:
+    """``git status --porcelain=v1 -z`` のレコードを内容 sha256 付きで並べる。
+
+    NUL 区切りを使うのは、空白を含む path が引用されて曖昧になるのを避けるため。
+    rename / copy は「新 path のレコード」の直後に旧 path が 1 レコードとして続く。
+    """
+    fields = status.split(b"\0")
+    entries: list[Mapping[str, str]] = []
+    index = 0
+    while index < len(fields):
+        record = fields[index]
+        index += 1
+        if not record:
+            continue
+        code = record[:2].decode()
+        path = record[3:].decode()
+        renamed_from = ""
+        if code[:1] in {"R", "C"} and index < len(fields):
+            renamed_from = fields[index].decode()
+            index += 1
+        absolute = repo_root / path
+        entries.append({
+            "status": code,
+            "path": path,
+            "renamed_from": renamed_from,
+            # 削除された path は "absent"。作業ツリーの内容そのものを digest に
+            # 含めるので、同じ file 集合でも中身が違えば digest が変わる。
+            "sha256": sha256_file(absolute) if absolute.is_file() else "absent",
+        })
+    return tuple(sorted(
+        entries, key=lambda entry: (entry["path"], entry["status"], entry["renamed_from"])
+    ))
+
+
+def git_state(repo_root: Path) -> Mapping[str, Any]:
+    """run を出した作業ツリーの git 素性（commit と SOURCE_ROOTS の汚れ）。
+
+    ``dirty`` は ``SOURCE_ROOTS`` に限定した ``git status`` の結果で、解析結果に
+    影響しうる未コミット変更だけを見る（`docs/issues/` のような範囲外の untracked
+    は clean のまま）。git が使えない場合は欄を空にせず ``unavailable`` /
+    ``unknown`` を返す: 「汚れていない」と読み違えられないようにするため。
+    """
+    repo_root = repo_root.resolve()
+    try:
+        commit = _git(repo_root, "rev-parse", "HEAD").decode().strip()
+        status = _git(
+            repo_root, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+            "--", *SOURCE_ROOTS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {
+            "commit": GIT_STATE_UNAVAILABLE,
+            "dirty": GIT_DIRTY_UNKNOWN,
+            "dirty_files": (),
+            "dirty_files_digest": GIT_STATE_UNAVAILABLE,
+        }
+    dirty_files = _porcelain_entries(repo_root, status)
+    return {
+        "commit": commit,
+        "dirty": GIT_DIRTY_YES if dirty_files else GIT_DIRTY_NO,
+        "dirty_files": dirty_files,
+        "dirty_files_digest": authority_digest({"dirty_files": dirty_files}),
+    }
+
+
+def format_git_state(state: Mapping[str, Any]) -> str:
+    """runner の manifest 行そのままの形（`key=value` 3 行）で返す。"""
+    return "\n".join((
+        f"git_commit={state['commit']}",
+        f"git_dirty={state['dirty']}",
+        f"git_dirty_files_digest={state['dirty_files_digest']}",
+    ))
 
 
 def _relative_file(repo_root: Path, path: Path) -> tuple[str, str]:
@@ -99,6 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--print-source-digest", action="store_true")
+    parser.add_argument("--print-git-state", action="store_true")
     parser.add_argument("--build-pair-target", action="store_true")
     parser.add_argument("--sample-identity")
     parser.add_argument("--output-sample-relative-path")
@@ -114,6 +195,9 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path(args.repo_root)
     if args.print_source_digest:
         print(source_tree_digest(repo_root))
+        return 0
+    if args.print_git_state:
+        print(format_git_state(git_state(repo_root)))
         return 0
     if args.build_pair_target:
         names = (

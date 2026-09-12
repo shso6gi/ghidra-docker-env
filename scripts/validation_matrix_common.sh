@@ -234,6 +234,33 @@ validation_run_benchmark_gate() {
     return 0
 }
 
+# Issue #123: run provenance（いつ・どこで・どの作業ツリーで走ったか）を
+# 3 本の runner で同じ規則にするための小さな共有関数。判定には一切使わず、
+# manifest に残す診断情報だけを作る。
+validation_utc_timestamp() {
+    date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+validation_run_hostname() {
+    uname -n 2>/dev/null || echo unknown
+}
+
+# 作業ツリーの git 素性を run_manifest / subset_manifest の行として返す。
+# provenance の取得失敗で run を落とさない。取得できない場合も欄を空にせず
+# unavailable / unknown を書く: 空欄を「汚れていなかった」と誤読させないため。
+validation_run_git_state_lines() {
+    local python_bin="${1:-${PYTHON_BIN:-python3}}"
+    local repo_root="${2:-${SCRIPT_DIR:-.}}"
+    local lines=""
+    lines="$(cd "$repo_root" && "$python_bin" -m \
+        scripts.function_tracer_pcode.reporting.execution_identity \
+        --repo-root "$repo_root" --print-git-state 2>/dev/null)" || lines=""
+    if [[ -z "$lines" ]]; then
+        lines=$'git_commit=unavailable\ngit_dirty=unknown\ngit_dirty_files_digest=unavailable'
+    fi
+    printf '%s\n' "$lines"
+}
+
 export -f validation_positive_int_setting
 export -f validation_manifest_value
 export -f validation_run_benchmark_gate
