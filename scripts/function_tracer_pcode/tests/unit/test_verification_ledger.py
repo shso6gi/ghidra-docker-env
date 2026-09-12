@@ -823,3 +823,40 @@ def test_matrix_run_timing_still_comes_from_its_run_manifest(full_run, tmp_path)
     assert row["timing"]["source"] == "run_manifest"
     assert row["timing"]["start_time_utc"] == "2026-01-01T00:00:00Z"
     assert row["timing"]["end_time_utc"] == "2026-01-02T00:00:00Z"
+
+
+def test_the_last_full_scope_row_keeps_its_own_detail_block(tmp_path, full_run):
+    """full row が最後の 1 行でも、digest / timing を追える詳細が出る。"""
+    ledger = tmp_path / "ledger.jsonl"
+    verification_ledger.append_row(ledger, verification_ledger.build_row(
+        full_run("full", scope="full_eq"), requested_scope="full_eq",
+    ))
+
+    listing = verification_ledger.format_listing(
+        verification_ledger.read_rows(ledger), _head_state(), ledger_path=ledger,
+    )
+
+    assert "manifest_sha256=" in listing
+    assert "analysis_config_digest=" in listing
+    assert "timing=" in listing
+    assert "(none)" not in listing
+
+
+def test_only_the_most_recent_request_per_scope_is_explained(tmp_path, subset_run):
+    """同じ scope の古い依頼まで並べて verdict を埋もれさせない。"""
+    ledger = tmp_path / "ledger.jsonl"
+    for name in ("a", "b", "c"):
+        verification_ledger.append_row(ledger, verification_ledger.build_row(
+            subset_run(name, commit=HEAD), requested_scope="full_eq",
+        ))
+
+    listing = verification_ledger.format_listing(
+        verification_ledger.read_rows(ledger), _head_state(), ledger_path=ledger,
+    )
+
+    explained = [
+        line for line in listing.splitlines()
+        if "requested full_eq but is not whole-benchmark evidence" in line
+    ]
+    assert len(explained) == 1 and explained[0].strip().startswith(str(tmp_path / "c"))
+    assert "full_eq: NO" in listing

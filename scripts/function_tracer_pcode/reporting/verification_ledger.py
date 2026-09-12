@@ -956,8 +956,11 @@ def format_listing(
         lines.append("Runs recorded (no full-scope run to count from):")
         shown = real_rows
     else:
-        lines.append("Runs recorded after the last full-scope run:")
-        shown = real_rows[last_full_index + 1:]
+        # The full-scope row itself is included, not just what came after it:
+        # its digests and timing are exactly what a reader needs to retrace the
+        # run the verdict above rests on.
+        lines.append("The last full-scope run and every run recorded after it:")
+        shown = real_rows[last_full_index:]
     if limit is not None:
         shown = shown[-limit:]
     if not shown:
@@ -1001,20 +1004,23 @@ def _format_verdict(
             "nothing about the pairs outside the subset."
         )
         for scope in missing:
-            for row in rows:
-                if row.get("requested_scope") != scope:
-                    continue
-                evidence, reason = full_scope_evidence(row)
-                if evidence is None:
-                    lines.append(
-                        f"    {row.get('run_dir')} requested {scope} but is not "
-                        f"whole-benchmark evidence: {reason}"
-                    )
-                elif head_match(row, head)[0] != HEAD_MATCH_YES:
-                    lines.append(
-                        f"    {row.get('run_dir')} is a complete {scope} run, but "
-                        f"{head_match(row, head)[1]}"
-                    )
+            # Only the most recent request for each scope is explained: older
+            # ones say nothing new and would bury the verdict.
+            requesting = [row for row in rows if row.get("requested_scope") == scope]
+            if not requesting:
+                continue
+            row = requesting[-1]
+            evidence, reason = full_scope_evidence(row)
+            if evidence is None:
+                lines.append(
+                    f"    {row.get('run_dir')} requested {scope} but is not "
+                    f"whole-benchmark evidence: {reason}"
+                )
+            elif head_match(row, head)[0] != HEAD_MATCH_YES:
+                lines.append(
+                    f"    {row.get('run_dir')} is a complete {scope} run, but "
+                    f"{head_match(row, head)[1]}"
+                )
     return lines
 
 
