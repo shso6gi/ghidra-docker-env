@@ -193,7 +193,6 @@ def _run_phase_plan(
                     result=None,
                     transition_reason=TransitionReason.NO_CHANGES.value,
                     type_fix_result=type_fix_result,
-                    rewrite_info=None,
                     original_function1_signature=None,
                     original_function2_signature=None,
                     effective_function1_signature=None,

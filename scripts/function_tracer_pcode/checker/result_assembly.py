@@ -45,7 +45,6 @@ def assemble_equivalence_result(
     retry_count: int,
     original_signature1: Optional[FunctionSignature],
     original_signature2: Optional[FunctionSignature],
-    rewrite_info,
     debug: bool,
     deterministic_analysis_identity: Callable[..., Any],
     format_counterexample: Callable[..., Any],
@@ -114,7 +113,6 @@ def assemble_equivalence_result(
         function1_signature_hypotheses=list(analysis1.signature_hypotheses),
         function2_signature_hypotheses=list(analysis2.signature_hypotheses),
         constrained_fragments=strategy_result.constrained_fragments,
-        rewrite_info=rewrite_info,
         pairwise_stats={
             'total_pairs': strategy_result.total_pairs,
             'unsat_pairs': strategy_result.unsat_pairs,

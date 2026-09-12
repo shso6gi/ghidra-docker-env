@@ -13,7 +13,7 @@ from scripts.function_tracer_pcode.checker.debug_trace import (
     ReasonCompletionEvent,
     TransitionReason,
 )
-from scripts.function_tracer_pcode.checker.result import EquivalenceResult, RewriteInfo
+from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementId
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 from scripts.function_tracer_pcode.checker.unknown_reason import coerce_unknown_reason_records
@@ -53,7 +53,6 @@ def record_attempt(
     result: Optional[bool],
     transition_reason: str,
     type_fix_result: Optional[TypeFixResult],
-    rewrite_info: Optional[RewriteInfo],
     original_function1_signature: Optional[Dict[str, Any]],
     original_function2_signature: Optional[Dict[str, Any]],
     effective_function1_signature: Optional[Dict[str, Any]],
@@ -86,7 +85,6 @@ def record_attempt(
         result=result,
         transition_reason=transition_reason,
         type_fix_result=type_fix_result.to_dict() if type_fix_result else None,
-        rewrite_info=rewrite_info.to_dict() if rewrite_info else None,
         original_function1_signature=original_function1_signature,
         original_function2_signature=original_function2_signature,
         effective_function1_signature=effective_function1_signature,
@@ -161,7 +159,6 @@ def record_attempt_from_result(
         result=result.is_equivalent,
         transition_reason=transition_reason,
         type_fix_result=type_fix_result,
-        rewrite_info=result.rewrite_info,
         original_function1_signature=result.function1_signature.to_dict() if result.function1_signature else None,
         original_function2_signature=result.function2_signature.to_dict() if result.function2_signature else None,
         effective_function1_signature=result.get_effective_function1_signature().to_dict() if result.get_effective_function1_signature() else None,

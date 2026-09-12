@@ -22,7 +22,6 @@ _LAZY = {
     "ParameterFragmentInfo": ("scripts.function_tracer_pcode.proof.formula", "ParameterFragmentInfo"),
     "PhaseContext": ("scripts.function_tracer_pcode.checker.phases.handler", "PhaseContext"),
     "PhaseHandler": ("scripts.function_tracer_pcode.checker.phases.handler", "PhaseHandler"),
-    "RewriteInfo": ("scripts.function_tracer_pcode.checker.result", "RewriteInfo"),
     "TypeFixResult": ("scripts.function_tracer_pcode.semantics.typing.fixer", "TypeFixResult"),
     "TypeFixer": ("scripts.function_tracer_pcode.semantics.typing.fixer", "TypeFixer"),
     "TypeFixerConfig": ("scripts.function_tracer_pcode.semantics.typing.fixer", "TypeFixerConfig"),
