@@ -13,8 +13,12 @@
 # run will actually produce before the first pair starts, and the transition
 # report of every half and the soundness gate of this run are then written next
 # to the results, so the comparison survives without a hand-written note.
-# SUBSET_ISSUE / SUBSET_PR record what the run was made for.  None of this
-# changes how a pair is judged:
+# SUBSET_ISSUE / SUBSET_PR record what the run was made for.
+#
+# Issue #123 / PR-123-B: the finished run is then appended to the verification
+# ledger (VERIFICATION_LEDGER, default logs/EqBench/verification_ledger.jsonl)
+# with SUBSET_REQUESTED_SCOPE (default "subset") as the scope that was asked
+# for.  None of this changes how a pair is judged:
 # the reports are read from the results after the halves have finished, and
 # their exit status is recorded in the manifest instead of becoming the exit
 # status of this script.
@@ -28,6 +32,7 @@ SUBSET_SCOPE="${SUBSET_SCOPE:-all}"
 SUBSET_BEFORE="${SUBSET_BEFORE:-}"
 SUBSET_ISSUE="${SUBSET_ISSUE:-}"
 SUBSET_PR="${SUBSET_PR:-}"
+SUBSET_REQUESTED_SCOPE="${SUBSET_REQUESTED_SCOPE:-subset}"
 DEFAULT_PYTHON_BIN="python3"
 if [[ -x "$SCRIPT_DIR/.venv-pyghidra/bin/python" ]]; then
     DEFAULT_PYTHON_BIN="$SCRIPT_DIR/.venv-pyghidra/bin/python"
@@ -239,4 +244,36 @@ ELAPSED=$(( $(date +%s) - START_EPOCH ))
     echo "exit_status=$status"
 } > "$OUTPUT_BASE_DIR/subset_manifest.txt"
 echo "Subset total elapsed: ${ELAPSED}s"
+
+# Issue #123 / PR-123-B: record this run in the verification ledger.
+#
+# This runs last, after every pair has been judged and after the soundness and
+# transition artifacts exist, and it only reads what those steps already wrote.
+# A failure to record is a diagnostic, never a verdict: it does not touch any
+# pair's outcome and it does not become the exit status of this script, because
+# "we failed to write a note about the run" is not "the run failed".  The
+# failure is left in the manifest (`ledger_record_status`) so that a row missing
+# from the ledger can be explained instead of being silently absent.
+LEDGER_PATH="${VERIFICATION_LEDGER:-$SCRIPT_DIR/logs/EqBench/verification_ledger.jsonl}"
+LEDGER_STATUS=0
+ledger_args=(--ledger "$LEDGER_PATH" record --run-dir "$OUTPUT_BASE_DIR"
+             --requested-scope "${SUBSET_REQUESTED_SCOPE:-subset}")
+[[ -n "$SUBSET_BEFORE" ]] && ledger_args+=(--before "$SUBSET_BEFORE")
+[[ -n "$SUBSET_ISSUE" ]] && ledger_args+=(--issue "$SUBSET_ISSUE")
+[[ -n "$SUBSET_PR" ]] && ledger_args+=(--pr "$SUBSET_PR")
+(
+    cd "$SCRIPT_DIR" && "$PYTHON_BIN" -m \
+        scripts.function_tracer_pcode.reporting.verification_ledger "${ledger_args[@]}"
+) > "$OUTPUT_BASE_DIR/verification_ledger_record.txt" 2>&1 || LEDGER_STATUS=$?
+echo "Verification ledger: exit $LEDGER_STATUS (0=recorded) -> $LEDGER_PATH" \
+     "(output: $OUTPUT_BASE_DIR/verification_ledger_record.txt)"
+if (( LEDGER_STATUS != 0 )); then
+    echo "Warning: the ledger record failed; the run result below is unaffected." >&2
+    sed 's/^/  ledger: /' "$OUTPUT_BASE_DIR/verification_ledger_record.txt" >&2 || true
+fi
+{
+    echo "ledger_path=$LEDGER_PATH"
+    echo "ledger_record_status=$LEDGER_STATUS"
+} >> "$OUTPUT_BASE_DIR/subset_manifest.txt"
+
 exit "$status"

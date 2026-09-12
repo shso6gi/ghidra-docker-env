@@ -173,14 +173,19 @@ already fills `PARALLEL_JOBS` slots on its own):
 
 ```bash
 OUTPUT_BASE_DIR=logs/EqBench/subset_before ./eqbench_run_subset.sh   # e.g. on main
-OUTPUT_BASE_DIR=logs/EqBench/subset_after  ./eqbench_run_subset.sh   # on the topic branch
+SUBSET_BEFORE=logs/EqBench/subset_before SUBSET_ISSUE=123 SUBSET_PR=151 \
+    OUTPUT_BASE_DIR=logs/EqBench/subset_after ./eqbench_run_subset.sh   # on the topic branch
 # SUBSET_SCOPE=eq|neq runs one half only; env overrides (PARALLEL_JOBS, ...) win over the manifest
 ```
 
 Each run writes `eq/` and `neq/` result trees plus `subset_manifest.txt`
-(manifest digest, settings, elapsed seconds). Note that the subset uses a
-240 s pair timeout instead of the 600 s of full runs, so TIMEOUT counts are not
-comparable with the full trees.
+(manifest digest, settings, elapsed seconds, and the run's own provenance:
+`git_commit`, `git_dirty`, `git_dirty_files_digest`, `start_time_utc`,
+`end_time_utc`, `hostname`). `SUBSET_BEFORE` names the run this one is compared
+against; it is checked before the first pair starts, and the transition report
+of each half plus this run's soundness gate are then saved next to the results.
+Note that the subset uses a 240 s pair timeout instead of the 600 s of full
+runs, so TIMEOUT counts are not comparable with the full trees.
 
 Compare two runs with the outcome transition table (rows: before, columns:
 after; `--fail-on-change` exits 2 on any difference, which is how determinism
@@ -192,6 +197,123 @@ python3 -m scripts.function_tracer_pcode.reporting.outcome_transition \
 python3 -m scripts.function_tracer_pcode.reporting.outcome_transition \
     --before logs/EqBench/subset_before/neq --after logs/EqBench/subset_after/neq --changed-only --json neq_transition.json
 ```
+
+Four opt-in sections add the rest of the comparison. They are opt-in so the
+command above keeps printing and serializing exactly what it did before, and
+none of them can move `--fail-on-change` (which still means, and only means,
+"an unconditional outcome changed or a pair is missing on one side"):
+
+```bash
+python3 -m scripts.function_tracer_pcode.reporting.outcome_transition \
+    --before logs/EqBench/subset_before/eq --after logs/EqBench/subset_after/eq \
+    --axes --reason-sets --manifest --runtime-metrics --changed-only
+```
+
+- `--reason-sets` compares the **final UNKNOWN reason-id set** of every pair
+  (pair identity, canonical outcome and reason ids only — never a per-run
+  digest). A pair whose result payload cannot be read on either side, or that
+  exists on one side only, is `incomparable` and is counted separately: it is
+  never counted as a match. This replaces the `compare_reason_sets.py` that
+  used to be copied into each run directory by hand.
+- `--manifest` checks each tree against its own
+  `matrix-publication-manifest.json` (`expected_pair_status_paths` versus the
+  pair statuses actually on disk). It is fail-closed: a missing or
+  unexpectedly-schema'd manifest gives `unknown`, and a missing pair, an
+  unexpected pair, or a pair the run only reused from an earlier run
+  (`verified_skipped_pair_status_paths`) gives `partial`. Only a tree that
+  expected some pairs and executed all of them is `complete`.
+- `--runtime-metrics` reads `.runtime-metrics/<pair>.runtime.json` for the
+  wall-clock delta. It is informational only — it never changes an exit code,
+  it always states how much of each tree it could see, and a pair without a
+  receipt is never read as zero seconds. (The Neq runner does not write these
+  receipts, so its coverage is reported as incomplete rather than as "no
+  change".)
+- `--axes` adds the three axes below.
+
+#### The three axes (EPIC #130) — do not fold them into one verdict
+
+"the outcome changed", "the outcome is right" and "the gate passed" are three
+different claims, so they are reported as three independent groups of counters:
+
+| axis | values | source |
+|---|---|---|
+| **A. correctness** | `confirmed_consistent` / `confirmed_contradicted` / `unconfirmed` / `not_applicable` | The `Eq` label (one source on both sides) is its own ground truth. A `Neq` decision needs `semantic_ground_truth` from the tree's own `function_diff_manifest.json`; `source_relation` / `source_impact` are **not** a substitute for it. Anything else is `unconfirmed`; a non-decisive outcome is `not_applicable`. |
+| **B. transition** | `capability_improvement` / `classification_change` / `regression` / `other` | A new decision is an improvement **only when axis A confirms it**. A new decision nothing can confirm is `other` with the note `decided_but_unconfirmed`, counted on its own. A decision a ground truth contradicts, and any loss of a decision, is a `regression`. |
+| **C. gate** | `violation` / `suspicious` / `ok` / `not_applicable` | `benchmark_validation_gate`'s own classification, grouped. A gate `ok` means "the gate found nothing to complain about", never "this decision is correct". |
+
+Most `Neq` `NOT_EQ` results sit in axis A's `unconfirmed` bucket, because their
+reviewed ground truth is `UNKNOWN`. They must never be counted as correct
+decisions or as improvements. EPIC #130's fourth category,
+*performance improvement*, is not an outcome transition: it needs per-pair wall
+clock and is therefore reported by `--runtime-metrics` only, so that a run
+without runtime receipts cannot silently report "no performance change".
+
+Axis B can only see a reason-set change when `--reason-sets` is also on; the
+report says so explicitly rather than letting a zero be read as "no reason
+changed".
+
+### Verification ledger
+
+`reporting/verification_ledger.py` keeps one JSON line per verification run in
+`logs/EqBench/verification_ledger.jsonl` (git-ignored), replacing the
+hand-written `NOTES.md` that used to record which commit a run was made on,
+what it was compared against and how far it got. `eqbench_run_subset.sh` calls
+`record` itself at the end of a run.
+
+```bash
+python3 -m scripts.function_tracer_pcode.reporting.verification_ledger \
+    record --run-dir logs/EqBench/subset_after --requested-scope subset \
+    --before logs/EqBench/subset_before --issue 123 --pr 151
+python3 -m scripts.function_tracer_pcode.reporting.verification_ledger list
+```
+
+**The ledger is a measurement aid, never an authority.** It only reads
+artifacts other tools already wrote (pair statuses, the runner manifests, the
+publication manifests, the gates); it cannot change a pair's outcome or a
+receipt. The `record` call happens after every pair has been judged and after
+the soundness and transition artifacts exist, and a failure to record is a
+diagnostic — it leaves `ledger_record_status` in `subset_manifest.txt` and
+never becomes the runner's exit status.
+
+Three distinctions the schema exists to keep apart:
+
+- **`requested_scope` vs `completed_scope`.** "A run exists" and "the range
+  that was asked for was actually verified" are different facts.
+  `requested_scope` (`subset` / `focused` / `full_eq` / `full_neq`) is supplied
+  by the caller and never guessed from the results; `completed_scope`
+  (`complete` / `partial` / `unknown`) comes from the `--manifest` rules above,
+  applied to every tree of the run and folded fail-closed (any `unknown` wins,
+  then any `partial`). A run that expected no pairs is `unknown`, not
+  `complete`. There is deliberately **no single `full_evaluation` boolean**.
+- **`coverage`.** The counted evidence behind `completed_scope`:
+  `pairs_expected`, `pairs_with_status`, `pairs_missing`, `pairs_unexpected`,
+  `pairs_verified_skipped` (reused from an earlier run, not executed here) and
+  `pairs_incomparable` (a status exists but no readable result payload, so the
+  reason set cannot be checked). A pair nobody looked at is never counted as
+  one that was checked.
+- **`code_matches_head` / `stale_code`.** Computed by `list` against the
+  *current* HEAD and never stored, because a stored answer would rot as HEAD
+  moves. `yes` requires a recorded commit equal to the current HEAD, a run that
+  was not dirty, and a working tree whose git state can be read right now;
+  a different commit or a dirty run is `no`, and missing or unreadable
+  provenance is `unknown`. Anything that is not `yes` is marked `stale_code`,
+  which means **"this is not evidence about the code at HEAD"** — not "this run
+  was invalid". A past run remains a perfectly good record of the commit it was
+  made on.
+
+`list` names the last run recorded for each full scope, then every run recorded
+after it, and ends with an explicit answer to "has everything been evaluated at
+the current HEAD?". A ledger holding only subset rows can never print
+"full verified": **subset verification is not full verification**, and a subset
+row says nothing about the pairs outside the subset.
+
+The three axes are stored as three separate groups of counters, exactly as
+`outcome_transition --axes` computes them, and are never folded into one
+`PASS`. Rows also carry the run's provenance, timings, settings, outcome
+counts, the persisted gate verdicts (a gate whose artifact is absent is
+`unknown`, never `PASS`) and an `unresolved_variance` list to fill in by hand
+when an indicator moved and a rerun did not settle whether it was the code or
+run-to-run noise.
 
 Check soundness against the benchmark labels only (an `Eq` sample must never be
 `NOT_EQ`, a `Neq` sample must never be `EQUIVALENT`; exit 1 on any violation,

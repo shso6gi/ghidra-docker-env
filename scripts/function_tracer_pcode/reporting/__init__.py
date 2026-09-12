@@ -30,10 +30,46 @@ __all__ = [
     "RootBlockerSummary",
     "format_root_blocker_summary",
     "summarize_root_blockers",
+    "build_axes",
+    "build_reason_sets",
+    "classify_transition",
+    "correctness_axis",
+    "gate_axis",
+    "summarize_run_axes",
+    "tree_completeness",
+    "build_ledger_row",
+    "format_ledger_listing",
+    "ledger_head_match",
+    "read_ledger_rows",
 ]
 
 
+# Issue #123: the ledger re-exports keep the caller-facing names unambiguous at
+# package level (`build_row` alone says nothing about which report it builds),
+# so the alias is resolved here rather than renaming the module's own API.
+_LEDGER_ALIASES = {
+    "build_ledger_row": "build_row",
+    "format_ledger_listing": "format_listing",
+    "ledger_head_match": "head_match",
+    "read_ledger_rows": "read_rows",
+}
+
+
 def __getattr__(name):
+    if name in _LEDGER_ALIASES:
+        module = import_module(".verification_ledger", __name__)
+        return getattr(module, _LEDGER_ALIASES[name])
+    if name in {
+        "build_axes",
+        "build_reason_sets",
+        "classify_transition",
+        "correctness_axis",
+        "gate_axis",
+        "summarize_run_axes",
+        "tree_completeness",
+    }:
+        module = import_module(".outcome_transition", __name__)
+        return getattr(module, name)
     if name in {
         "AggregationSnapshot",
         "RootBlockerSummary",
