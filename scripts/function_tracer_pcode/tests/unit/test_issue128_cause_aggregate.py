@@ -544,6 +544,38 @@ def test_canonical_source_change_is_measured_separately():
     )
 
 
+def test_legacy_trace_with_empty_final_attempt_keeps_the_synthesized_record():
+    """最終 attempt はあるが record が 0 件 -- 従来どおり合成 1 件にする。
+
+    aggregate も payload の `unknown_reasons` も先回りして埋めない。「最終
+    attempt が無い」(次の源を見る) と「あったが空だった」(結果単位の合成) は別。
+    """
+    trace = DebugTrace(attempts=[_attempt(0, "pairwise", [])])
+    canonical = _reason(
+        "return_coverage_gap", cause=_v2_projection_cause("empty"), target="empty",
+        action_status="pending_proof",
+    )
+    payload = _payload(
+        case="empty_final_attempt", outcome="UNKNOWN", trace=trace,
+        unknown_reasons=[canonical],
+    )
+    payload.pop("decision_receipt")
+    payload.pop("final_outcome")
+
+    summary = summarize_validation_unknowns([payload])
+    assert summary.reason_source_kinds == ("synthesized",)
+    assert summary.unknown_units == 1
+    assert list(summary.unknown_by_reason) == ["unknown"]
+    # canonical payload として読めば、同じ結果から本物の reason が出る（A の差）。
+    canonical_payload = _payload(
+        case="empty_final_attempt", outcome="UNKNOWN", trace=trace,
+        unknown_reasons=[canonical],
+    )
+    canonical_summary = summarize_validation_unknowns([canonical_payload])
+    assert canonical_summary.reason_source_kinds == ("canonical",)
+    assert list(canonical_summary.unknown_by_reason) == ["return_coverage_gap"]
+
+
 def test_legacy_payload_without_aggregate_uses_full_trace():
     """aggregate の無い古い log は従来どおり trace から集計する（unknown に丸めない）。"""
     payloads = _fixture_payloads()

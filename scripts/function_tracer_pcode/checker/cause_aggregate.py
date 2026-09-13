@@ -22,6 +22,22 @@ backlog / completion / causal transition）の唯一の入力でもある。将�
 この module は reporting（`root_blocker_summary` / `unknown_reason_summary`）と
 **同じ関数**を共有する。checker から reporting を import しないための配置で、
 集計の定義が 2 箇所に分かれてドリフトするのを防ぐ。
+
+schema `unknown-cause-aggregate-v1` の block:
+
+* `final_reasons` / `legacy_view`: 1 つの record 集合の集計（`build_reason_view`）。
+  前者は canonical 確定時のみ、後者は legacy 最終 attempt があるときのみ。
+* `effective_source` / `backlog` / `operational`: 上の 2 つのうち authority が
+  選ぶ側（canonical > legacy）の backlog 4 次元と operational 2 次元。
+* `completions` / `transitions`: 完了・因果遷移イベントの集計。backlog とは
+  独立に数える（完了件数から未完了を引かない）。
+* `root_causes[]`: root blocker identity ごとの `all` / `active` union。
+  `active` は「最終 attempt かつ実効 causal status が active」な occurrence だけ。
+  `reason_id` / `decision_effect` は読みやすさのための代表値で、集合そのものは
+  `all.reason_ids` / `all.decision_effects` にある。
+* `identity_pool`: 繰り返す identity の実体。`*_refs` はこの index。
+* `root_cause_stats`: reporting の coverage / diagnostics を再構成する counter。
+* `attempts` / `evidence_present`: attempt の要約と、各 block の観測可否。
 """
 
 from __future__ import annotations
@@ -1116,7 +1132,7 @@ def _build_root_causes(
                 "status_counts": {},
             }
             groups[group_key] = entry
-        payload = dict(
+        contribution = dict(
             occurrence_id_payload=occurrence.get("occurrence_id"),
             frozen_occurrence_id=occurrence_id,
             record=record,
@@ -1126,10 +1142,13 @@ def _build_root_causes(
             certainty=certainty,
             pool=pool,
         )
-        entry["all"].add(**payload)
+        entry["all"].add(**contribution)
         _inc(entry["status_counts"], str(effective or "unclassified"))
+        # active は「最終 attempt の occurrence」かつ「実効 status が blocker」の
+        # ときだけ。`all` と別に union するので、active に数えなかった occurrence の
+        # proof requirement や case pair が active 側へ混ざらない。
         if effective in _ACTIVE_CAUSAL_STATUSES and is_final:
-            entry["active"].add(**payload)
+            entry["active"].add(**contribution)
             entry["active_count"] += 1
 
     root_causes = [_freeze_cause(entry) for entry in groups.values()]
@@ -1178,6 +1197,8 @@ def _freeze_cause(entry: Mapping[str, Any]) -> Dict[str, Any]:
         causal_status = "completed"
     else:
         causal_status = "unknown"
+    # 1 つの cause identity に複数の reason が乗ることがある。代表値はここに、
+    # 集合は `all` に置く（代表値だけを見て集合を推測しないこと）。
     reason_ids = sorted(all_group.reason_ids)
     effects = sorted(all_group.decision_effects)
     case_pairs = sorted(all_group.case_pairs, key=repr)

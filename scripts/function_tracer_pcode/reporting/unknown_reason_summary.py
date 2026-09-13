@@ -958,6 +958,29 @@ def _payload_matches_targets(payload: Mapping[str, Any], targets: Sequence[str])
     return any(target in haystack for target in targets)
 
 
+def _legacy_trace_records(
+    payload: Mapping[str, Any],
+) -> Optional[Tuple[UnknownReasonRecord, ...]]:
+    """最終 UNKNOWN/TIMEOUT attempt の legacy record。
+
+    `None` は「最終 attempt が無い」、空 tuple は「最終 attempt はあるが record を
+    持たない」。後者は結果単位の合成 record へ進む従来の挙動なので、両者を
+    同じ falsy 値へ潰さない。
+    """
+    debug_trace = payload.get("debug_trace")
+    if not isinstance(debug_trace, Mapping) or debug_trace.get("final_result") is not None:
+        return None
+    for attempt in reversed(tuple(debug_trace.get("attempts") or ())):
+        if not isinstance(attempt, Mapping):
+            continue
+        if (
+            attempt.get("result") is None
+            and str(attempt.get("transition_reason")) in FINAL_UNKNOWN_TRANSITIONS
+        ):
+            return coerce_unknown_reason_records(attempt.get("unknown_reasons") or ())
+    return None
+
+
 def _extract_final_unknown_reasons(payload: Mapping[str, Any]) -> Tuple[UnknownReasonRecord, ...]:
     """最終 UNKNOWN reason の record 集合（正本 = canonical payload）。
 
@@ -968,17 +991,9 @@ def _extract_final_unknown_reasons(payload: Mapping[str, Any]) -> Tuple[UnknownR
     """
     if payload.get("decision_receipt") is not None:
         return coerce_unknown_reason_records(payload.get("unknown_reasons") or ())
-    debug_trace = payload.get("debug_trace")
-    if isinstance(debug_trace, Mapping) and debug_trace.get("final_result") is None:
-        attempts = debug_trace.get("attempts") or ()
-        for attempt in reversed(tuple(attempts)):
-            if not isinstance(attempt, Mapping):
-                continue
-            if (
-                attempt.get("result") is None
-                and str(attempt.get("transition_reason")) in FINAL_UNKNOWN_TRANSITIONS
-            ):
-                return coerce_unknown_reason_records(attempt.get("unknown_reasons") or ())
+    legacy = _legacy_trace_records(payload)
+    if legacy is not None:
+        return legacy
     return coerce_unknown_reason_records(payload.get("unknown_reasons") or ())
 
 
@@ -993,34 +1008,30 @@ def _payload_reason_view(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], st
     4. payload の `unknown_reasons`
     5. どれも無い -> record を持たない結果として 1 件合成する（従来どおり）
 
-    `debug_trace` と aggregate が両方あっても片方しか使わないので二重計上しない。
+    3 が 4 より前にあるのが要点: trace を省いた log でも payload の
+    `unknown_reasons` は残るので、先に payload を読むと legacy 件数が静かに
+    canonical 件数へすり替わる。`debug_trace` と aggregate が両方あっても
+    片方しか使わないので二重計上しない。
     """
     if payload.get("decision_receipt") is not None:
         records = coerce_unknown_reason_records(payload.get("unknown_reasons") or ())
         if records:
             return build_reason_view(records), SOURCE_CANONICAL
     else:
-        debug_trace = payload.get("debug_trace")
-        if isinstance(debug_trace, Mapping) and debug_trace.get("final_result") is None:
-            for attempt in reversed(tuple(debug_trace.get("attempts") or ())):
-                if not isinstance(attempt, Mapping):
-                    continue
-                if (
-                    attempt.get("result") is None
-                    and str(attempt.get("transition_reason")) in FINAL_UNKNOWN_TRANSITIONS
-                ):
-                    records = coerce_unknown_reason_records(attempt.get("unknown_reasons") or ())
-                    if records:
-                        return build_reason_view(records), SOURCE_LEGACY_TRACE
-                    break
-        aggregate = payload.get("unknown_cause_aggregate")
-        if aggregate_is_usable(aggregate):
-            legacy_view = aggregate.get("legacy_view")
-            if isinstance(legacy_view, Mapping) and int(legacy_view.get("record_count") or 0):
-                return dict(legacy_view), SOURCE_AGGREGATE_LEGACY
-        records = coerce_unknown_reason_records(payload.get("unknown_reasons") or ())
-        if records:
-            return build_reason_view(records), SOURCE_PAYLOAD
+        legacy = _legacy_trace_records(payload)
+        if legacy:
+            return build_reason_view(legacy), SOURCE_LEGACY_TRACE
+        if legacy is None:
+            # 最終 attempt そのものが無いときだけ次の源を見る。あったが record が
+            # 0 件だった場合は、従来どおり合成 record 1 件にする。
+            aggregate = payload.get("unknown_cause_aggregate")
+            if aggregate_is_usable(aggregate):
+                legacy_view = aggregate.get("legacy_view")
+                if isinstance(legacy_view, Mapping) and int(legacy_view.get("record_count") or 0):
+                    return dict(legacy_view), SOURCE_AGGREGATE_LEGACY
+            records = coerce_unknown_reason_records(payload.get("unknown_reasons") or ())
+            if records:
+                return build_reason_view(records), SOURCE_PAYLOAD
     synthesized = make_unknown_reason(
         UnknownReasonId.UNKNOWN,
         stage=_payload_stage(payload),
