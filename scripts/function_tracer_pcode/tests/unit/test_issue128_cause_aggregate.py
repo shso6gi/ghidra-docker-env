@@ -646,36 +646,176 @@ def test_canonical_source_change_is_measured_separately():
     )
 
 
+def _legacy_payload(case, *, trace, unknown_reasons):
+    """`decision_receipt` を持たない legacy payload（最終 reason は legacy 経路で決まる）。"""
+    payload = _payload(
+        case=case, outcome="UNKNOWN", trace=trace, unknown_reasons=unknown_reasons,
+    )
+    payload.pop("decision_receipt", None)
+    payload.pop("final_outcome", None)
+    return payload
+
+
+def _empty_final_attempt_payload(case="empty_final_attempt"):
+    """最終 UNKNOWN attempt はあるが record 0 件。top-level には別 reason を置く。
+
+    誤って payload へ fall through すると `return_coverage_gap` が出るので、
+    合成 `unknown` との差で必ず検出できる（fixture が vacuous にならない）。
+    """
+    top_level = _reason(
+        "return_coverage_gap",
+        cause=_v2_projection_cause("empty"),
+        target="empty",
+        action_status="pending_proof",
+    )
+    return _legacy_payload(
+        case,
+        trace=DebugTrace(attempts=[_attempt(0, "pairwise", [])]),
+        unknown_reasons=[top_level],
+    )
+
+
+def _trace_only(payload):
+    """O 側: aggregate を外し full `debug_trace` だけを残す。"""
+    out = copy.deepcopy(payload)
+    out.pop("unknown_cause_aggregate", None)
+    return out
+
+
+def _aggregate_only(payload):
+    """R 側: `debug_trace` を外し aggregate だけを残す（JSON 往復込み）。"""
+    out = copy.deepcopy(payload)
+    out.pop("debug_trace", None)
+    return json.loads(json.dumps(out, default=str))
+
+
 def test_legacy_trace_with_empty_final_attempt_keeps_the_synthesized_record():
     """最終 attempt はあるが record が 0 件 -- 従来どおり合成 1 件にする。
 
     aggregate も payload の `unknown_reasons` も先回りして埋めない。「最終
     attempt が無い」(次の源を見る) と「あったが空だった」(結果単位の合成) は別。
     """
-    trace = DebugTrace(attempts=[_attempt(0, "pairwise", [])])
-    canonical = _reason(
-        "return_coverage_gap", cause=_v2_projection_cause("empty"), target="empty",
-        action_status="pending_proof",
-    )
-    payload = _payload(
-        case="empty_final_attempt", outcome="UNKNOWN", trace=trace,
-        unknown_reasons=[canonical],
-    )
-    payload.pop("decision_receipt")
-    payload.pop("final_outcome")
-
-    summary = summarize_validation_unknowns([payload])
+    payload = _empty_final_attempt_payload()
+    summary = summarize_validation_unknowns([_trace_only(payload)])
     assert summary.final_reason_sources == ("synthesized",)
     assert summary.unknown_units == 1
     assert list(summary.unknown_by_reason) == ["unknown"]
+
     # canonical payload として読めば、同じ結果から本物の reason が出る（A の差）。
     canonical_payload = _payload(
-        case="empty_final_attempt", outcome="UNKNOWN", trace=trace,
-        unknown_reasons=[canonical],
+        case="empty_final_attempt",
+        outcome="UNKNOWN",
+        trace=DebugTrace(attempts=[_attempt(0, "pairwise", [])]),
+        unknown_reasons=[
+            _reason(
+                "return_coverage_gap",
+                cause=_v2_projection_cause("empty"),
+                target="empty",
+                action_status="pending_proof",
+            )
+        ],
     )
     canonical_summary = summarize_validation_unknowns([canonical_payload])
     assert canonical_summary.final_reason_sources == ("canonical",)
     assert list(canonical_summary.unknown_by_reason) == ["return_coverage_gap"]
+
+
+def test_empty_final_attempt_final_reason_is_identical_from_trace_and_aggregate():
+    """観測して 0 件の最終 attempt は、trace でも aggregate でも同じ答えになる。"""
+    payload = _empty_final_attempt_payload()
+    aggregate = payload["unknown_cause_aggregate"]
+    # producer は 3 状態を区別できる形で残している。
+    assert aggregate["evidence_present"]["legacy_records"] is True
+    assert aggregate["legacy_view"]["source"] == "final_attempt"
+    assert aggregate["legacy_view"]["record_count"] == 0
+    # fixture が vacuous でないこと: top-level には別の reason がある。
+    assert [item["reason_id"] for item in payload["unknown_reasons"]] == [
+        "return_coverage_gap"
+    ]
+
+    oracle_input, replay_input = _trace_only(payload), _aggregate_only(payload)
+    oracle = summarize_validation_unknowns([oracle_input])
+    replay = summarize_validation_unknowns([replay_input])
+
+    # 経路は別（O は trace、R は aggregate）。
+    assert oracle.diagnostic_sources == ("debug_trace",)
+    assert replay.diagnostic_sources == ("unknown_cause_aggregate",)
+
+    # final reason authority の答えが一致し、どちらも合成 `unknown`。
+    assert oracle.final_reason_sources == replay.final_reason_sources == ("synthesized",)
+    assert oracle.unknown_units == replay.unknown_units == 1
+    assert oracle.unknown_by_reason == replay.unknown_by_reason == {"unknown": 1}
+    # top-level の reason へ fall through していないこと。
+    assert "return_coverage_gap" not in oracle.unknown_by_reason
+    assert "return_coverage_gap" not in replay.unknown_by_reason
+
+    # reporting surface 全体でも一致する。
+    assert _reporting_surface([oracle_input]) == _reporting_surface([replay_input])
+
+
+def test_final_reason_source_selection_matrix():
+    """最終 attempt の 3 状態 x (trace のみ / aggregate のみ) を固定する。"""
+    records_reason = _reason(
+        "summary_effect_unmodeled", cause=_unary_cause("matrix"), target="matrix",
+        action_status="pending_proof", requirement_kinds=("effect_summary_completion",),
+    )
+    top_level = _reason(
+        "return_coverage_gap", cause=_v2_projection_cause("matrix"), target="matrix",
+        action_status="pending_proof",
+    )
+
+    cases = {
+        # 1. 最終 attempt 無し（SAT で終わった trace）-> 次の源（payload）へ進める
+        "absent": (
+            _legacy_payload(
+                "absent",
+                trace=DebugTrace(
+                    attempts=[_attempt(0, "pairwise", [], result=False, transition="SAT")]
+                ),
+                unknown_reasons=[top_level],
+            ),
+            ("payload",),
+            {"return_coverage_gap": 1},
+        ),
+        # 2. 最終 attempt あり・record > 0 -> その legacy record
+        "records": (
+            _legacy_payload(
+                "records",
+                trace=DebugTrace(attempts=[_attempt(0, "pairwise", [records_reason])]),
+                unknown_reasons=[top_level],
+            ),
+            ("legacy_trace", "aggregate_legacy"),
+            {"summary_effect_unmodeled": 1},
+        ),
+        # 3. 最終 attempt あり・record == 0 -> 合成 unknown、payload へ進まない
+        "empty": (
+            _empty_final_attempt_payload("empty"),
+            ("synthesized",),
+            {"unknown": 1},
+        ),
+    }
+    for name, (payload, allowed_sources, expected_reasons) in cases.items():
+        for label, view in (("trace", _trace_only(payload)), ("aggregate", _aggregate_only(payload))):
+            summary = summarize_validation_unknowns([view])
+            assert summary.unknown_by_reason == expected_reasons, (name, label)
+            assert summary.final_reason_sources[0] in allowed_sources, (name, label)
+        # 経路が違っても答えは同じ。
+        assert (
+            summarize_validation_unknowns([_trace_only(payload)]).unknown_by_reason
+            == summarize_validation_unknowns([_aggregate_only(payload)]).unknown_by_reason
+        ), name
+
+    # 4. trace 無し + aggregate にも legacy evidence 無し -> payload fallback
+    absent_evidence = _trace_absent_typed_cause_payload("matrix_absent")
+    absent_summary = summarize_validation_unknowns([absent_evidence])
+    assert absent_summary.diagnostic_sources == ("payload_fallback",)
+    assert absent_summary.final_reason_sources == ("payload",)
+    assert list(absent_summary.unknown_by_reason) == ["summary_effect_unmodeled"]
+
+    # 5. 生成時に trace があり serialize 後に除去 -> aggregate だけで 1〜3 を再現
+    for name, (payload, _sources, expected_reasons) in cases.items():
+        replay = summarize_validation_unknowns([_aggregate_only(payload)])
+        assert replay.unknown_by_reason == expected_reasons, name
 
 
 def test_legacy_payload_without_aggregate_uses_full_trace():

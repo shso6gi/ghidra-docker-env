@@ -64,6 +64,12 @@ DIAGNOSTIC_SOURCE_TRACE = "debug_trace"
 # 「trace があったときの legacy 集計」と同じである保証は無いので、観測できた
 # 結果としては数えない（run 全体が partial になる）。
 DIAGNOSTIC_SOURCE_PAYLOAD_FALLBACK = "payload_fallback"
+# 最終 UNKNOWN/TIMEOUT attempt の 3 状態。`EMPTY`（観測して 0 件）を `ABSENT`
+# （最終 attempt が無い）と同じに扱うと、trace を省いた途端に最終 reason が
+# payload の record へすり替わる。
+LEGACY_FINAL_ATTEMPT_RECORDS = "observed_records"
+LEGACY_FINAL_ATTEMPT_EMPTY = "observed_empty"
+LEGACY_FINAL_ATTEMPT_ABSENT = "absent"
 # completion / causal transition の集計単位。block ごとに観測可否が別。
 CAUSAL_BLOCKS = ("proof_completions", "reason_completions", "causal_transitions")
 
@@ -1095,18 +1101,59 @@ def _synthesized_reason_view(payload: Mapping[str, Any]) -> Dict[str, Any]:
     ))
 
 
+def _legacy_final_attempt_state(
+    payload: Mapping[str, Any],
+) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
+    """最終 UNKNOWN/TIMEOUT attempt の 3 状態を、経路に依らず同じに決める。
+
+    * `LEGACY_FINAL_ATTEMPT_RECORDS` — 観測し、record があった（view を返す）
+    * `LEGACY_FINAL_ATTEMPT_EMPTY`   — 観測したが record が 0 件だった
+    * `LEGACY_FINAL_ATTEMPT_ABSENT`  — そもそも最終 attempt が無かった
+
+    **`EMPTY` と `ABSENT` は別**。前者は「見た上で 0 件」なので次の源へ進まず
+    結果単位の合成 record 1 件になり、後者だけが次の源（payload）へ進む。
+    full `debug_trace` からも `unknown_cause_aggregate.legacy_view` からも同じ
+    3 状態が出ることが、trace を省いても最終 reason が変わらない条件。
+    """
+    legacy = _legacy_trace_records(payload)
+    if legacy is not None:
+        if legacy:
+            return LEGACY_FINAL_ATTEMPT_RECORDS, build_reason_view(legacy), SOURCE_LEGACY_TRACE
+        return LEGACY_FINAL_ATTEMPT_EMPTY, None, SOURCE_LEGACY_TRACE
+    aggregate = payload.get("unknown_cause_aggregate")
+    if aggregate_is_usable(aggregate):
+        legacy_view = aggregate.get("legacy_view")
+        # 最終 attempt の record 集合として作られた view だけが legacy authority の
+        # 代用になる。`payload_records` 形は「最終 attempt が無かった」ことの記録
+        # なので ABSENT として扱い、payload を読む分岐へ落とす。
+        if (
+            (aggregate.get("evidence_present") or {}).get("legacy_records")
+            and isinstance(legacy_view, Mapping)
+            and legacy_view.get("source") == "final_attempt"
+        ):
+            if int(legacy_view.get("record_count") or 0):
+                return (
+                    LEGACY_FINAL_ATTEMPT_RECORDS,
+                    dict(legacy_view),
+                    SOURCE_AGGREGATE_LEGACY,
+                )
+            return LEGACY_FINAL_ATTEMPT_EMPTY, None, SOURCE_AGGREGATE_LEGACY
+    return LEGACY_FINAL_ATTEMPT_ABSENT, None, None
+
+
 def _final_reason_view(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], str]:
     """(1) final reason authority: この結果の最終 UNKNOWN reason そのもの。
 
     優先順:
 
     1. canonical payload（`decision_receipt` あり）の `unknown_reasons`
-    2. full `debug_trace` の最終 UNKNOWN/TIMEOUT attempt（従来経路）
-    3. `unknown_cause_aggregate.legacy_view`（trace を省いた log の legacy 相当）
-    4. payload の `unknown_reasons`
-    5. どれも無い -> record を持たない結果として 1 件合成する（従来どおり）
+    2. 最終 UNKNOWN/TIMEOUT attempt — full `debug_trace` から、無ければ
+       `unknown_cause_aggregate.legacy_view` から（`_legacy_final_attempt_state`）。
+       **観測したが 0 件**なら合成 1 件で確定し、次の源へは進まない。
+    3. 最終 attempt が無かったときだけ payload の `unknown_reasons`
+    4. どれも無い -> record を持たない結果として 1 件合成する（従来どおり）
 
-    3 が 4 より前にあるのが要点: trace を省いた log でも payload の
+    2 が 3 より前にあるのが要点: trace を省いた log でも payload の
     `unknown_reasons` は残るので、先に payload を読むと legacy 件数が静かに
     canonical 件数へすり替わる。ここが返すのは最終 reason だけで、診断集計は
     `_diagnostic_reason_view` が別に決める。
@@ -1116,27 +1163,14 @@ def _final_reason_view(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], str]
         if records:
             return build_reason_view(records), SOURCE_CANONICAL
     else:
-        legacy = _legacy_trace_records(payload)
-        if legacy:
-            return build_reason_view(legacy), SOURCE_LEGACY_TRACE
-        if legacy is None:
-            # 最終 attempt そのものが無いときだけ次の源を見る。あったが record が
-            # 0 件だった場合は、従来どおり合成 record 1 件にする。
-            aggregate = payload.get("unknown_cause_aggregate")
-            if aggregate_is_usable(aggregate):
-                legacy_view = aggregate.get("legacy_view")
-                # 最終 attempt の record 集合として作られた view だけを
-                # legacy authority の代用にする（payload の写しは次の分岐で読む）。
-                if (
-                    (aggregate.get("evidence_present") or {}).get("legacy_records")
-                    and isinstance(legacy_view, Mapping)
-                    and legacy_view.get("source") == "final_attempt"
-                    and int(legacy_view.get("record_count") or 0)
-                ):
-                    return dict(legacy_view), SOURCE_AGGREGATE_LEGACY
+        state, view, source = _legacy_final_attempt_state(payload)
+        if state == LEGACY_FINAL_ATTEMPT_RECORDS:
+            return view, source
+        if state == LEGACY_FINAL_ATTEMPT_ABSENT:
             records = coerce_unknown_reason_records(payload.get("unknown_reasons") or ())
             if records:
                 return build_reason_view(records), SOURCE_PAYLOAD
+        # EMPTY は次の源を見ずにここへ落ちる（trace 経路と同じ答え）。
     return _synthesized_reason_view(payload), SOURCE_SYNTHESIZED
 
 
