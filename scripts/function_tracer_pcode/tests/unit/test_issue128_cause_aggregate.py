@@ -504,11 +504,17 @@ def test_aggregate_is_lossless_for_required_reporting():
     assert oracle["causal_evidence"]["reason_completions"]["total"] > 0
     assert oracle["causal_evidence"]["causal_transitions"]["total"] > 0
 
-    # aggregate も trace も無ければ root blocker は失われる。
-    starved = _reporting_surface(_without_aggregate(_without_trace(payloads)))
+    # aggregate も trace も無ければ root blocker は失われ、証拠も観測されない。
+    starved_inputs = _without_aggregate(_without_trace(payloads))
+    starved = _reporting_surface(starved_inputs)
     assert starved["root_active_count"] == 0
     assert starved["root_candidate_count"] == 0
-    assert starved["root_diagnostics"].get("unknown_typed_cause_schema", 0) > 0
+    # 観測できなかった結果は counter にも diagnostics にも入れない。
+    assert starved["root_diagnostics"] == {}
+    assert starved["root_coverage"] is None
+    assert summarize_validation_unknowns(starved_inputs).to_dict()[
+        "root_blocker_summary"
+    ]["coverage"] is None
 
 
 @pytest.mark.parametrize(
@@ -918,6 +924,115 @@ def _no_source_payload(case="no_source"):
 def _trace_removed_payloads():
     """ケース B: 生成時に trace があり、serialize 後に trace だけ取り除いた結果。"""
     return _without_trace(_fixture_payloads())
+
+
+def _trace_absent_typed_cause_payload(case="trace_absent_typed"):
+    """trace は無いが、top-level `unknown_reasons` に v1 typed cause を持つ結果。
+
+    producer はこの record から root cause を作れてしまう。観測できていない値を
+    observed 集計へ混ぜないことを確かめるための、空でない missing fixture。
+    """
+    reason = _reason(
+        "summary_effect_unmodeled",
+        cause=_unary_cause("callsite-absent"),
+        target="absent",
+        action_status="pending_proof",
+        requirement_kinds=("effect_summary_completion",),
+    )
+    result = EquivalenceResult(
+        is_equivalent=None,
+        function1_name=case,
+        function2_name=case,
+        binary1_name="left",
+        binary2_name="right",
+        solver_results=None,
+        unknown_reasons=[reason],
+        binary1_content_identity=BIN1,
+        binary2_content_identity=BIN2,
+        function1_identity=("function", "left", case),
+        function2_identity=("function", "right", case),
+    )
+    payload = result.to_dict()
+    payload["case_id"] = case
+    return payload
+
+
+def test_trace_absent_typed_cause_is_missing_root_blocker_evidence():
+    """trace 無しでも root cause は作れてしまうが、それは観測された証拠ではない。"""
+    payload = _trace_absent_typed_cause_payload()
+    aggregate = payload["unknown_cause_aggregate"]
+    # producer: cause は作れている（= 空 payload では検出できない経路）。
+    assert aggregate["root_causes"], "fixture must produce root causes"
+    assert aggregate["root_cause_stats"]["typed_reasons"] > 0
+    assert aggregate["evidence_present"]["debug_trace"] is False
+
+    summary = summarize_root_blockers([payload])
+    # consumer: observed 集計にも blocker にも入れない。
+    assert summary.active_root_blocker_count == 0
+    assert summary.candidate_root_blocker_count == 0
+    assert summary.diagnostics == {}
+    assert summary.coverage is None
+
+
+def test_missing_typed_cause_payload_does_not_move_observed_root_blockers():
+    """mixed run: missing 側を足しても observed の blocker 集計は 1 つも動かない。"""
+    observed_inputs = _trace_removed_payloads()
+    observed = summarize_root_blockers(observed_inputs).to_dict()
+    mixed = summarize_root_blockers(
+        observed_inputs + [_trace_absent_typed_cause_payload()]
+    ).to_dict()
+
+    for name in (
+        "active_root_blocker_count",
+        "candidate_root_blocker_count",
+        "required_unique_proof_count",
+        "diagnostics",
+    ):
+        assert observed[name] == mixed[name], name
+    assert [item["blocker_id"] for item in observed["active_root_blockers"]] == [
+        item["blocker_id"] for item in mixed["active_root_blockers"]
+    ]
+    # coverage の分母分子も観測できた結果だけから作る。
+    ratios = (
+        "typed_cause_coverage",
+        "explicit_causal_status_coverage",
+        "case_pair_identity_coverage",
+        "transition_emission_coverage",
+        "proof_completion_linkage_coverage",
+    )
+    for name in ratios:
+        assert observed["coverage"][name] == mixed["coverage"][name], name
+    # 変わるのは観測状況の表示だけ。
+    assert observed["coverage"]["evidence_state"] == "complete"
+    assert mixed["coverage"]["evidence_state"] == "partial"
+    assert mixed["coverage"]["evidence_complete"] is False
+    assert mixed["coverage"]["results_without_evidence"] == 1
+    assert (
+        mixed["coverage"]["results_with_evidence"]
+        == observed["coverage"]["results_with_evidence"]
+    )
+
+
+def test_attempts_evidence_separates_absent_from_observed_zero():
+    """`attempts` も「観測できなかった」と「観測して 0 件」を分ける。"""
+    absent = _trace_absent_payload()["unknown_cause_aggregate"]
+    assert absent["attempts"] is None
+    assert absent["evidence_present"]["attempts"] is False
+
+    empty_trace = _payload(
+        case="empty_trace", outcome="UNKNOWN", trace=DebugTrace(attempts=[]),
+    )["unknown_cause_aggregate"]
+    assert empty_trace["attempts"]["count"] == 0
+    assert empty_trace["evidence_present"]["attempts"] is True
+
+    with_attempts = _trace_removed_payloads()[0]["unknown_cause_aggregate"]
+    assert with_attempts["attempts"]["count"] > 0
+    assert with_attempts["evidence_present"]["attempts"] is True
+
+    # completion / transition / legacy_records / debug_trace も同じ意味体系。
+    for name in ("debug_trace", "completion_events", "causal_transitions", "legacy_records"):
+        assert absent["evidence_present"][name] is False, name
+        assert empty_trace["evidence_present"][name] is True, name
 
 
 def test_case_a_trace_originally_absent_is_unknown_not_observed_zero():

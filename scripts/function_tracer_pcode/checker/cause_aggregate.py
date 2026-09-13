@@ -40,8 +40,9 @@ schema `unknown-cause-aggregate-v1` の block:
 * `identity_pool`: 繰り返す identity の実体。`*_refs` はこの index。
 * `root_cause_stats`: reporting の coverage / diagnostics を再構成する counter。
 * `attempts` / `evidence_present`: attempt の要約と、各 block の観測可否。
-  `evidence_present.debug_trace` は「この結果に trace があったか」の証言で、
-  consumer が「trace が省かれた」と「もともと無かった」を区別するのに使う。
+  `evidence_present` は各 block を **観測できたか**（件数ではない）。
+  `debug_trace` は「この結果に trace があったか」の証言で、consumer が
+  「trace が省かれた」と「もともと無かった」を区別するのに使う。
 """
 
 from __future__ import annotations
@@ -881,13 +882,18 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
         "identity_pool": identity_pool,
         "root_cause_stats": root_cause_stats,
         "attempts": _attempt_summary(attempts, legacy_attempt) if trace is not None else None,
+        # `evidence_present` は「件数が非 0 か」ではなく **「その情報を観測できたか」**。
+        # trace を見られなかったのか、見た上で 0 件だったのかを consumer が区別する
+        # ための証言で、block の `null` と対になる。
+        # 例: trace 有り・attempt 0 件 -> `attempts={"count": 0,…}` + `True`、
+        #     trace 無し             -> `attempts=None`            + `False`。
         "evidence_present": {
             "debug_trace": trace is not None,
-            "attempts": bool(attempts),
+            "attempts": trace is not None,
             "completion_events": trace is not None,
             "causal_transitions": trace is not None,
-            "legacy_records": legacy_attempt is not None,
-            "canonical_reasons": bool(canonical_available),
+            "legacy_records": trace is not None,
+            "canonical_reasons": canonical_available,
         },
     }
 

@@ -349,8 +349,18 @@ def summarize_root_blockers(
         # Issue #128: 診断の入力は (1) unknown_cause_aggregate -> (2) full
         # debug_trace -> (3) evidence 無し の順。aggregate があるときは trace を
         # 集計に使わない（同じ occurrence を二重計上しないため）。
+        #
+        # **aggregate が在ることと、原因の証拠が在ることは別**。producer が trace を
+        # 観測できていない結果でも `root_causes` / `root_cause_stats` は payload の
+        # `unknown_reasons` から作られてしまうので、そのまま足すと観測できなかった
+        # 値が observed の counter・coverage の分母分子・candidate / active blocker
+        # へ混ざる。証拠が無い結果はここで完全に除外し、件数だけ数える。
         aggregate = payload.get("unknown_cause_aggregate")
         if aggregate_is_usable(aggregate) and isinstance(aggregate.get("root_causes"), list):
+            if not (aggregate.get("evidence_present") or {}).get("debug_trace"):
+                results_without_evidence += 1
+                continue
+            results_with_evidence += 1
             stats = aggregate.get("root_cause_stats") or {}
             total_reasons += int(stats.get("total_reasons") or 0)
             typed_reasons += int(stats.get("typed_reasons") or 0)
@@ -361,13 +371,6 @@ def summarize_root_blockers(
             linked_completion_count += int(stats.get("linked_completion_count") or 0)
             for name, value in (stats.get("diagnostics") or {}).items():
                 _inc(diagnostics, str(name), int(value or 0))
-            # Issue #128: aggregate が在ることと、原因の証拠が在ることは別。
-            # producer が trace を観測できていない結果は、root cause も causal
-            # coverage も再構成できないので「観測できなかった」側に数える。
-            if (aggregate.get("evidence_present") or {}).get("debug_trace"):
-                results_with_evidence += 1
-            else:
-                results_without_evidence += 1
             identity_pool = aggregate.get("identity_pool") or ()
             for cause in aggregate.get("root_causes") or ():
                 if not isinstance(cause, Mapping) or cause.get("canonical_cause_key") is None:
@@ -386,13 +389,13 @@ def summarize_root_blockers(
                         active, blocker_id, active_group, stable, provenance, identity_pool
                     )
             continue
-        # Issue #128: aggregate も trace も無い結果は、原因の証拠が観測できていない。
-        # occurrence の組み立ては従来どおり payload の record に落ちるが、その結果は
-        # coverage 上 "観測できなかった" 側に数える（完全観測の 0 に混ぜない）。
-        if isinstance(payload.get("debug_trace"), Mapping):
-            results_with_evidence += 1
-        else:
+        # aggregate も trace も無い結果も同じ扱い: 観測できなかったので counter にも
+        # blocker にも入れない。payload の record から occurrence は作れるが、それは
+        # trace が持っていた legacy record とは別物で、混ぜると identity 集計が壊れる。
+        if not isinstance(payload.get("debug_trace"), Mapping):
             results_without_evidence += 1
+            continue
+        results_with_evidence += 1
         occurrences, transitions, completions, reason_completions = extract_reason_occurrences(payload)
         transition_target_count += len(
             {

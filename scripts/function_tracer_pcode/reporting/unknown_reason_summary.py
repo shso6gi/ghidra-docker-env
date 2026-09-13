@@ -1128,7 +1128,8 @@ def _final_reason_view(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], str]
                 # 最終 attempt の record 集合として作られた view だけを
                 # legacy authority の代用にする（payload の写しは次の分岐で読む）。
                 if (
-                    isinstance(legacy_view, Mapping)
+                    (aggregate.get("evidence_present") or {}).get("legacy_records")
+                    and isinstance(legacy_view, Mapping)
                     and legacy_view.get("source") == "final_attempt"
                     and int(legacy_view.get("record_count") or 0)
                 ):
@@ -1156,8 +1157,10 @@ def _diagnostic_reason_view(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any],
     """
     aggregate = payload.get("unknown_cause_aggregate")
     if aggregate_is_usable(aggregate):
+        # block の中身より先に「観測できたか」の証言を見る（他の block と同じ順）。
+        observed = (aggregate.get("evidence_present") or {}).get("legacy_records")
         legacy_view = aggregate.get("legacy_view")
-        if isinstance(legacy_view, Mapping):
+        if observed and isinstance(legacy_view, Mapping):
             if int(legacy_view.get("record_count") or 0):
                 return dict(legacy_view), DIAGNOSTIC_SOURCE_AGGREGATE
             # record を 1 件も持たない集合。従来経路と同じく合成 1 件にする。
