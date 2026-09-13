@@ -11,50 +11,25 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
-from scripts.function_tracer_pcode.proof.cause_identity import (
-    CauseKey,
-    IdentityScope,
-    ProofRequirementId,
-    canonical_cause_tuple,
-    cause_key_from_dict,
-)
 from scripts.function_tracer_pcode.checker.unknown_reason import build_unknown_recovery_actions
+# Issue #128 PR-128-A: cause identity / causal status の決め方は checker 側の
+# `cause_aggregate` が正本。`unknown_cause_aggregate` を作る producer と、
+# ここ（consumer）が同じ関数を使うことで、`debug_trace` 経路と aggregate 経路の
+# identity が一致する（= 経路が違っても before/after 比較が成立する）。
+from scripts.function_tracer_pcode.checker.cause_aggregate import (
+    BLOCKING_DECISION_EFFECTS as _BLOCKING_EFFECTS,
+    FINAL_UNKNOWN_TRANSITIONS as _FINAL_TRANSITIONS,
+    aggregate_is_usable,
+    freeze_identity as _freeze,
+    identity_tuple as _tuple,
+    resolve_cause_identity,
+    resolve_occurrence_transitions as _resolve_transitions,
+    resolve_pool_refs,
+    resolve_required_proofs,
+)
 
 
 ROOT_BLOCKER_SCHEMA_VERSION = 1
-_FINAL_TRANSITIONS = {"UNKNOWN", "TIMEOUT"}
-_BLOCKING_EFFECTS = {
-    "blocks_equivalence",
-    "blocks_disequivalence",
-    "blocks_decision",
-    "retryable",
-}
-_LEGACY_CAUSE_SCOPES = {
-    "return_coverage": (IdentityScope.UNARY.value, "return_coverage_v3"),
-    "call_argument_evidence": (IdentityScope.UNARY.value, "call_evidence_v1"),
-    "call_target_resolution_evidence": (IdentityScope.UNARY.value, "call_evidence_v1"),
-    "deferred_call_site": (IdentityScope.UNARY.value, "deferred_call_v1"),
-    "return_width_bridge": (IdentityScope.RELATIONAL.value, "return_width_v1"),
-    "solver_timeout": (IdentityScope.EXECUTION.value, "solver_timeout_v1"),
-}
-
-
-def _freeze(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return tuple(
-            (str(key), _freeze(item))
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
-        )
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze(item) for item in value)
-    return value
-
-
-def _tuple(value: Any) -> Tuple[Any, ...]:
-    frozen = _freeze(value)
-    if frozen is None:
-        return ()
-    return frozen if isinstance(frozen, tuple) else (frozen,)
 
 
 @dataclass(frozen=True)
@@ -179,7 +154,8 @@ class RootBlockerSummary:
     active_root_blockers: Tuple[RootBlocker, ...] = ()
     observed_candidate_blockers: Tuple[RootBlocker, ...] = ()
     diagnostics: Dict[str, int] = field(default_factory=dict)
-    coverage: Dict[str, float] = field(default_factory=dict)
+    # ``None`` = causal evidence was not observable (distinct from "all zero").
+    coverage: Optional[Dict[str, float]] = field(default_factory=dict)
     aggregate_pair_count_hints: Tuple[str, ...] = ()
 
     @property
@@ -216,7 +192,7 @@ class RootBlockerSummary:
             "candidate_root_blocker_count": self.candidate_root_blocker_count,
             "required_unique_proof_count": self.required_unique_proof_count,
             "diagnostics": dict(self.diagnostics),
-            "coverage": dict(self.coverage),
+            "coverage": dict(self.coverage) if self.coverage is not None else None,
             "aggregate_pair_count_hints": self.aggregate_pair_count_hints,
         }
 
@@ -360,9 +336,53 @@ def summarize_root_blockers(
     active: Dict[Tuple[Any, ...], _BlockerBuilder] = {}
     total_reasons = typed_reasons = explicit_status = pair_identified = 0
     transition_target_count = proof_completion_count = linked_completion_count = 0
+    causal_evidence_present = False
 
     for payload, stable, provenance in entries:
         final_unknown = _is_final_unknown(payload)
+        active_result_occurrence = (
+            final_unknown
+            and provenance.to_key() in active_occurrence_keys
+            and stable.identity_certainty == "verified"
+        )
+        # Issue #128: 診断の入力は (1) unknown_cause_aggregate -> (2) full
+        # debug_trace -> (3) evidence 無し の順。aggregate があるときは trace を
+        # 集計に使わない（同じ occurrence を二重計上しないため）。
+        aggregate = payload.get("unknown_cause_aggregate")
+        if aggregate_is_usable(aggregate) and isinstance(aggregate.get("root_causes"), list):
+            stats = aggregate.get("root_cause_stats") or {}
+            total_reasons += int(stats.get("total_reasons") or 0)
+            typed_reasons += int(stats.get("typed_reasons") or 0)
+            explicit_status += int(stats.get("explicit_causal_status") or 0)
+            pair_identified += int(stats.get("pair_identified") or 0)
+            transition_target_count += int(stats.get("transition_target_count") or 0)
+            proof_completion_count += int(stats.get("proof_completion_count") or 0)
+            linked_completion_count += int(stats.get("linked_completion_count") or 0)
+            for name, value in (stats.get("diagnostics") or {}).items():
+                _inc(diagnostics, str(name), int(value or 0))
+            evidence = aggregate.get("evidence_present") or {}
+            if evidence.get("causal_transitions") or evidence.get("completion_events"):
+                causal_evidence_present = True
+            identity_pool = aggregate.get("identity_pool") or ()
+            for cause in aggregate.get("root_causes") or ():
+                if not isinstance(cause, Mapping) or cause.get("canonical_cause_key") is None:
+                    continue
+                blocker_id = RootBlockerId(
+                    str(cause.get("identity_scope") or ""),
+                    str(cause.get("cause_kind") or ""),
+                    _freeze(cause.get("canonical_cause_key")),
+                )
+                _add_cause_group(
+                    candidate, blocker_id, cause.get("all") or {}, stable, provenance, identity_pool
+                )
+                active_group = cause.get("active")
+                if active_result_occurrence and active_group:
+                    _add_cause_group(
+                        active, blocker_id, active_group, stable, provenance, identity_pool
+                    )
+            continue
+        if isinstance(payload.get("debug_trace"), Mapping):
+            causal_evidence_present = True
         occurrences, transitions, completions, reason_completions = _extract_occurrences(payload)
         transition_target_count += len(
             {
@@ -435,12 +455,7 @@ def summarize_root_blockers(
                 effective == "contributing_blocker"
                 and is_final_occurrence
             )
-            if (
-                final_unknown
-                and provenance.to_key() in active_occurrence_keys
-                and stable.identity_certainty == "verified"
-                and active_status_allowed
-            ):
+            if active_result_occurrence and active_status_allowed:
                 _add_occurrence(
                     active,
                     blocker_id,
@@ -453,15 +468,19 @@ def summarize_root_blockers(
                     None,
                 )
 
-    coverage = {
-        "typed_cause_coverage": _ratio(typed_reasons, total_reasons),
-        "explicit_causal_status_coverage": _ratio(explicit_status, total_reasons),
-        "case_pair_identity_coverage": _ratio(pair_identified, total_reasons),
-        "transition_emission_coverage": _ratio(transition_target_count, total_reasons),
-        "proof_completion_linkage_coverage": _ratio(
-            linked_completion_count, proof_completion_count
-        ) if proof_completion_count else 0.0,
-    }
+    # Issue #128: aggregate も trace も無ければ coverage は `unknown`（= None）。
+    # 「全部 0 件だった」と「観測できなかった」を同じ 0.0 で潰さない。
+    coverage = None
+    if causal_evidence_present:
+        coverage = {
+            "typed_cause_coverage": _ratio(typed_reasons, total_reasons),
+            "explicit_causal_status_coverage": _ratio(explicit_status, total_reasons),
+            "case_pair_identity_coverage": _ratio(pair_identified, total_reasons),
+            "transition_emission_coverage": _ratio(transition_target_count, total_reasons),
+            "proof_completion_linkage_coverage": _ratio(
+                linked_completion_count, proof_completion_count
+            ) if proof_completion_count else 0.0,
+        }
     blocker_sort = lambda item: (
         -len(item.results),
         repr(item.blocker_id.to_key()),
@@ -647,296 +666,26 @@ def _final_attempt_occurrence_ids(payload, occurrences):
     }
 
 
-def _resolve_transitions(
-    occurrences,
-    transitions,
-    completions,
-    diagnostics,
-    *,
-    reason_completions=(),
-):
-    occurrence_by_id = {
-        _freeze(item.get("occurrence_id")): item for item in occurrences
-    }
-    occurrence_ids = set(occurrence_by_id)
-    result = {}
-    for completion in reason_completions:
-        if not isinstance(completion, Mapping):
-            continue
-        target = _freeze(completion.get("completed_occurrence_id"))
-        if str(completion.get("applicability_status")) != "APPLICABLE":
-            _inc(diagnostics, "inapplicable_reason_completion")
-            continue
-        if target not in occurrence_ids:
-            _inc(diagnostics, "dangling_reason_completion_target")
-            continue
-        record = occurrence_by_id[target].get("reason_record") or {}
-        expected_target = _freeze(record.get("object_target_key"))
-        observed_target = _freeze(completion.get("exact_target_id"))
-        expected_slots = {
-            str(item.get("proof_kind") or "")
-            for item in (record.get("proof_requirement_ids") or ())
-            if isinstance(item, Mapping)
-        }
-        observed_slot = str(
-            completion.get("exact_missing_fact_or_proof_slot") or ""
-        )
-        if (
-            (expected_target and expected_target != observed_target)
-            or (expected_slots and observed_slot not in expected_slots)
-            or not completion.get("source_snapshot_fingerprint")
-            or not completion.get("semantic_seed_or_premise_digest")
-            or not completion.get("evidence_or_artifact_digest")
-            or not completion.get("recognizing_stage")
-        ):
-            _inc(diagnostics, "invalid_reason_completion_applicability")
-            continue
-        completed_ordinal = _attempt_ordinal(completion.get("completed_at_attempt"))
-        target_ordinal = _attempt_ordinal(occurrence_by_id[target].get("attempt_identity"))
-        if (
-            completed_ordinal is None
-            or target_ordinal is None
-            or completed_ordinal <= target_ordinal
-        ):
-            _inc(diagnostics, "non_forward_reason_completion")
-            continue
-        result[target] = "discharged"
-    seen = set()
-    by_target = {}
-    for transition in sorted(transitions, key=lambda item: repr(_freeze(item))):
-        if not isinstance(transition, Mapping):
-            continue
-        transition_id = _freeze(transition.get("transition_id"))
-        if transition_id in seen:
-            continue
-        seen.add(transition_id)
-        target = _freeze(transition.get("target_occurrence_id"))
-        if target not in occurrence_ids:
-            _inc(diagnostics, "dangling_transition_target")
-            continue
-        kind = str(transition.get("transition_kind") or "")
-        cause_kind = str(transition.get("cause_kind") or "")
-        cause_ref = _freeze(transition.get("cause_ref"))
-        valid = False
-        emitted_ordinal = _attempt_ordinal(transition.get("emitted_at_attempt"))
-        target_ordinal = _attempt_ordinal(
-            occurrence_by_id[target].get("attempt_identity")
-        )
-        if emitted_ordinal is None or target_ordinal is None or emitted_ordinal <= target_ordinal:
-            _inc(diagnostics, "non_forward_causal_transition")
-            continue
-        if kind == "superseded" and cause_kind == "reason_occurrence":
-            valid = cause_ref in occurrence_ids
-        if not valid:
-            _inc(diagnostics, "dangling_transition_cause")
-            continue
-        by_target.setdefault(target, set()).add((kind, cause_kind, cause_ref))
-    for target, values in by_target.items():
-        if len(values) != 1:
-            _inc(diagnostics, "conflicting_causal_transitions")
-            continue
-        kind = next(iter(values))[0]
-        prior = result.get(target)
-        if prior is not None and prior != kind:
-            _inc(diagnostics, "conflicting_causal_transitions")
-            result.pop(target, None)
-            continue
-        result[target] = kind
-    supersession_edges = {
-        target: next(iter(values))[2]
-        for target, values in by_target.items()
-        if len(values) == 1 and next(iter(values))[0] == "superseded"
-    }
-    cyclic = _cyclic_nodes(supersession_edges)
-    for target in cyclic:
-        result.pop(target, None)
-    if cyclic:
-        diagnostics["causal_transition_cycle"] = len(cyclic)
-    return result
-
-
-def _attempt_ordinal(value: Any) -> Optional[int]:
-    if not isinstance(value, Mapping):
-        return None
-    raw = value.get("attempt_ordinal")
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return None
-
-
-def _cyclic_nodes(edges: Mapping[Any, Any]) -> set:
-    cyclic = set()
-    for start in edges:
-        path = []
-        positions = {}
-        current = start
-        while current in edges:
-            if current in positions:
-                cyclic.update(path[positions[current]:])
-                break
-            positions[current] = len(path)
-            path.append(current)
-            current = edges[current]
-    return cyclic
-
-
 def _blocker_id(record, stable, diagnostics):
-    typed = record.get("typed_cause_key")
-    if isinstance(typed, Mapping):
-        try:
-            cause: CauseKey = cause_key_from_dict(typed)
-        except ValueError as exc:
-            message = str(exc)
-            if "unsupported typed cause schema" in message:
-                _inc(diagnostics, "unknown_typed_cause_schema")
-            elif "unsupported identity scope" in message:
-                _inc(diagnostics, "unsupported_identity_scope")
-            else:
-                _inc(diagnostics, "incomplete_typed_cause_key")
-            return None, False
-        return RootBlockerId(cause.identity_scope, cause.cause_kind, canonical_cause_tuple(cause)), True
-    legacy = record.get("object_target_key")
-    if not legacy:
-        return None, False
-    discriminator = str(_tuple(legacy)[0])
-    spec = _LEGACY_CAUSE_SCOPES.get(discriminator)
-    if spec is None:
-        _inc(diagnostics, "legacy_adapter_missing")
-        return None, False
-    scope, schema = spec
-    validation = _validate_legacy_cause_key(schema, _tuple(legacy))
-    if validation == "schema_invalid":
-        _inc(diagnostics, "legacy_cause_schema_invalid")
-        return None, False
-    if validation == "identity_incomplete":
-        _inc(diagnostics, "legacy_cause_identity_incomplete")
-        return None, False
-    # A registered adapter asserts that the complete tuple schema already
-    # carries the semantic object/comparison/query identity for its scope.
-    # No display name or enclosing result domain is added to the blocker key.
-    canonical = (
-        "legacy_known_canonical",
-        _canonicalize_legacy_cause_key(schema, _tuple(legacy), stable),
+    """reason record -> RootBlockerId。identity の判定は共有 resolver に委ねる。"""
+    resolution = resolve_cause_identity(
+        typed_cause_key=record.get("typed_cause_key"),
+        object_target_key=record.get("object_target_key"),
+        left_binary_identity=stable.comparison_domain.left_binary_identity,
+        right_binary_identity=stable.comparison_domain.right_binary_identity,
     )
-    return RootBlockerId(scope, discriminator, canonical), False
-
-
-def _canonicalize_legacy_cause_key(
-    schema: str,
-    key: Tuple[Any, ...],
-    stable: StableResultRef,
-) -> Tuple[Any, ...]:
-    if schema == "return_coverage_v3":
-        # key[2] is only the presentation side within the current comparison.
-        return _freeze(
-            (
-                key[0],
-                ("local_binary_content", _local_binary_identity(stable, key[2])),
-                key[1],
-                *key[3:],
-            )
-        )
-    if schema == "call_evidence_v1":
-        # key[1] is function1/function2; function_ref and pcode identity remain.
-        return _freeze(
-            (
-                key[0],
-                ("local_binary_content", _local_binary_identity(stable, key[1])),
-                *key[2:],
-            )
-        )
-    return _freeze(key)
-
-
-def _local_binary_identity(stable: StableResultRef, side: str) -> Tuple[Any, ...]:
-    if side == "function1":
-        return stable.comparison_domain.left_binary_identity
-    if side == "function2":
-        return stable.comparison_domain.right_binary_identity
-    raise ValueError(f"unsupported unary cause side: {side}")
-
-
-def _validate_legacy_cause_key(schema: str, key: Tuple[Any, ...]) -> str:
-    if schema == "return_coverage_v3":
-        if len(key) < 8 or key[0] != "return_coverage":
-            return "schema_invalid"
-        if key[1] != ("target_schema_version", 3):
-            return "schema_invalid"
-        if key[2] not in {"function1", "function2"}:
-            return "identity_incomplete"
-        required_tags = ("function_identity", "return_partition_identity", "guard_disjunction_identity")
-        if not all(
-            isinstance(value, tuple) and value and value[0] == tag
-            for value, tag in ((key[3], required_tags[0]), (key[6], required_tags[1]), (key[7], required_tags[2]))
-        ):
-            return "identity_incomplete"
-        if not _contains_tagged_identity(key[3], "binary_identity"):
-            return "identity_incomplete"
-        return "valid"
-    if schema == "return_width_v1":
-        if len(key) != 5 or key[0] != "return_width_bridge":
-            return "schema_invalid"
-        if not (isinstance(key[1], tuple) and key[1][:1] == ("pair",) and key[1][1]):
-            return "identity_incomplete"
-        widths = key[2]
-        if not (
-            isinstance(widths, tuple)
-            and len(widths) == 3
-            and widths[0] == "return_widths"
-            and all(isinstance(value, int) and value > 0 for value in widths[1:])
-        ):
-            return "identity_incomplete"
-        if not all(isinstance(value, tuple) and len(value) >= 3 for value in key[3:]):
-            return "identity_incomplete"
-        return "valid"
-    if schema == "solver_timeout_v1":
-        if len(key) != 8 or key[0] != "solver_timeout":
-            return "schema_invalid"
-        required = {
-            "pair": key[1],
-            "stage": key[2],
-            "query_hash": key[3],
-            "timeout_budget_seconds": key[4],
-            "solver_options": key[5],
-        }
-        if any(not isinstance(value, tuple) or not value for value in required.values()):
-            return "schema_invalid"
-        if any(value[0] != tag for tag, value in required.items()):
-            return "schema_invalid"
-        if not key[3][1] or not key[4][1] or not key[5][1:]:
-            return "identity_incomplete"
-        if not all(isinstance(value, tuple) and len(value) >= 2 for value in key[6:]):
-            return "identity_incomplete"
-        return "valid"
-    if schema == "call_evidence_v1":
-        if len(key) < 5 or key[0] not in {
-            "call_argument_evidence",
-            "call_target_resolution_evidence",
-        }:
-            return "schema_invalid"
-        if key[1] not in {"function1", "function2"}:
-            return "identity_incomplete"
-        if not all(isinstance(value, tuple) and value for value in key[2:5]):
-            return "identity_incomplete"
-        if key[2][0] != "function_ref" or key[3][0] != "pcode_op":
-            return "identity_incomplete"
-        return "valid"
-    if schema == "deferred_call_v1":
-        if len(key) < 4 or key[0] != "deferred_call_site":
-            return "schema_invalid"
-        if not all(isinstance(value, tuple) and value for value in key[1:4]):
-            return "identity_incomplete"
-        return "valid"
-    return "schema_invalid"
-
-
-def _contains_tagged_identity(value: Any, tag: str) -> bool:
-    if isinstance(value, tuple):
-        if value and value[0] == tag:
-            return True
-        return any(_contains_tagged_identity(item, tag) for item in value)
-    return False
+    if resolution.diagnostic:
+        _inc(diagnostics, resolution.diagnostic)
+    if not resolution.resolved:
+        return None, False
+    return (
+        RootBlockerId(
+            resolution.identity_scope,
+            resolution.cause_kind,
+            resolution.canonical_cause_key,
+        ),
+        resolution.typed,
+    )
 
 
 def _case_pair_ref(payload, stable, occurrence, record):
@@ -948,51 +697,26 @@ def _case_pair_ref(payload, stable, occurrence, record):
 
 
 def _add_occurrence(builders, blocker_id, record, occurrence_id, stable, provenance, pair_ref, certainty, diagnostics):
-    key = blocker_id.to_key()
-    builder = builders.setdefault(key, _BlockerBuilder(blocker_id))
+    builder = builders.setdefault(blocker_id.to_key(), _BlockerBuilder(blocker_id))
     legacy = record.get("proof_obligation_id")
     if legacy:
         builder.legacy.add(_freeze(legacy))
-    explicit_requirements = record.get("proof_requirement_ids") or ()
-    for requirement in explicit_requirements:
-        try:
-            builder.required.add(ProofRequirementId.from_dict(requirement).to_key())
-        except (TypeError, ValueError) as exc:
-            builder.proof_requirements_complete = False
-            message = str(exc)
-            if diagnostics is not None:
-                if "unsupported proof requirement schema" in message:
-                    _inc(diagnostics, "unknown_proof_requirement_schema")
-                elif "requires kind, target, and contract" in message:
-                    _inc(diagnostics, "proof_requirement_identity_incomplete")
-                else:
-                    _inc(diagnostics, "invalid_proof_requirement")
-    if not explicit_requirements and record.get("object_target_key"):
-        # Conservative migration for old artifacts.  The full legacy target and
-        # comparison domain remain in the target key; reason_id and observed
-        # stage are intentionally absent so the same proposition can collapse
-        # across reason buckets.
-        for action in build_unknown_recovery_actions((record,)):
-            if str(getattr(action, "proof_kind", "none")) == "none":
-                continue
-            contract = (
-                "legacy_recovery_contract",
-                str(getattr(action, "proof_kind", "")),
-                _freeze(getattr(action, "required_evidence", ()) or ()),
-            )
-            try:
-                requirement = ProofRequirementId.create(
-                    getattr(action, "proof_kind", ""),
-                    (
-                        "legacy_scope_aware_target",
-                        blocker_id.identity_scope,
-                        blocker_id.canonical_cause_key,
-                    ),
-                    contract,
-                )
-            except ValueError:
-                continue
-            builder.required.add(requirement.to_key())
+    # Requirement derivation (including the conservative legacy migration for
+    # artifacts that only carry an ``object_target_key``) is shared with the
+    # ``unknown_cause_aggregate`` producer so both paths yield the same keys.
+    proofs = resolve_required_proofs(
+        proof_requirement_ids=record.get("proof_requirement_ids") or (),
+        object_target_key=record.get("object_target_key"),
+        identity_scope=blocker_id.identity_scope,
+        canonical_cause_key=blocker_id.canonical_cause_key,
+        recovery_actions=build_unknown_recovery_actions((record,)),
+    )
+    builder.required.update(proofs.keys)
+    if not proofs.complete:
+        builder.proof_requirements_complete = False
+    if diagnostics is not None:
+        for name in proofs.diagnostics:
+            _inc(diagnostics, name)
     if pair_ref is not None:
         builder.pairs.add(pair_ref)
     builder.results.add(stable.to_key())
@@ -1003,12 +727,48 @@ def _add_occurrence(builders, blocker_id, record, occurrence_id, stable, provena
     builder.certainties.add(certainty)
 
 
+def _add_cause_group(builders, blocker_id, group, stable, provenance, pool=()):
+    """``unknown_cause_aggregate`` の 1 原因分をそのまま builder へ足す。
+
+    aggregate は occurrence ごとの record を持たないので、producer 側で
+    union 済みの集合（proof requirement / case pair / evidence …）を受け取る。
+    ``all`` と ``active`` は producer が別々に union しているため、active 判定に
+    使われなかった occurrence の情報が active 側へ混ざらない。繰り返す identity
+    は ``identity_pool`` へ畳まれているので index から戻す。
+    """
+    builder = builders.setdefault(blocker_id.to_key(), _BlockerBuilder(blocker_id))
+    builder.legacy.update(
+        _freeze(item)
+        for item in resolve_pool_refs(pool, group.get("legacy_proof_obligation_id_refs"))
+    )
+    builder.required.update(
+        _freeze(item) for item in resolve_pool_refs(pool, group.get("required_proof_id_refs"))
+    )
+    if not group.get("proof_requirements_complete", True):
+        builder.proof_requirements_complete = False
+    for case_pair in group.get("case_pairs") or ():
+        frozen = _freeze(case_pair)
+        if not isinstance(frozen, tuple) or len(frozen) != 3:
+            continue
+        strategy, left_case, right_case = frozen
+        builder.pairs.add(
+            StableCasePairRef(stable, str(strategy), _tuple(left_case), _tuple(right_case)).to_key()
+        )
+    builder.results.add(stable.to_key())
+    builder.result_occurrences.add(provenance.to_key())
+    builder.reasons.update(str(item) for item in (group.get("reason_ids") or ()))
+    for occurrence_id in group.get("occurrence_ids") or ():
+        builder.occurrences.add((stable.to_key(), _freeze(occurrence_id)))
+    builder.evidence.update(str(item) for item in (group.get("evidence_refs") or ()))
+    builder.certainties.update(str(item) for item in (group.get("certainties") or ()))
+
+
 def _ratio(numerator, denominator):
     return float(numerator) / float(denominator) if denominator else 1.0
 
 
-def _inc(counts, key):
-    counts[key] = counts.get(key, 0) + 1
+def _inc(counts, key, amount: int = 1):
+    counts[key] = counts.get(key, 0) + amount
 
 
 def format_root_blocker_summary(summary: RootBlockerSummary, *, max_items: int = 20) -> str:

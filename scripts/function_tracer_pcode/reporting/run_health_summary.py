@@ -59,6 +59,9 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
         "operational_unknown_by_reason": {},
     }
     active_section: Optional[str] = None
+    # Issue #128: `(unknown)` = 証拠が無い、`(none)` = 実際に 0 件。どちらも
+    # 空の section になるので、marker を見た section だけ別に記録する。
+    evidence_missing_sections: list = []
     section_titles = {
         "UNKNOWN by reason:": "unknown_by_reason",
         "Proof backlog by reason:": "proof_backlog_by_reason",
@@ -78,6 +81,10 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
             continue
         if stripped in section_titles:
             active_section = section_titles[stripped]
+            continue
+        if active_section and stripped in ("(unknown)", "(none)"):
+            if stripped == "(unknown)" and active_section not in evidence_missing_sections:
+                evidence_missing_sections.append(active_section)
             continue
         if stripped.endswith(":") and not stripped.startswith("- "):
             active_section = None
@@ -118,6 +125,7 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
         "unknown_results": unknown_results,
         "unknown_units": unknown_units,
         "functions": functions,
+        "evidence_missing_sections": evidence_missing_sections,
         **sections,
     }
 
