@@ -327,9 +327,36 @@ Three distinctions the schema exists to keep apart:
   4. the **validated** analysis config shows no `sample_filter`, `pair_filter`
      or `max_samples` narrowing;
   5. the recorded scope matches the requested full scope;
-  6. the manifest's own **scope health** is `ok` (below);
-  7. `completed_scope` is `complete`;
-  8. `code_matches_head` is `yes`.
+  6. the tree's three artifacts are bound to **one execution** (below);
+  7. the manifest's own **scope health** is `ok` (below);
+  8. `completed_scope` is `complete`;
+  9. `code_matches_head` is `yes`.
+
+  **Execution binding.** A result directory gets reused, and its artifacts are
+  written at different moments — `run_manifest.txt` early, the publication and
+  the signed receipt at the end. A run interrupted after rewriting the manifest
+  but before republishing therefore leaves one execution's publication beside
+  another execution's manifest, and every individual check still passes: the
+  ledger would read current provenance off the new manifest while the coverage
+  came from the old run. So the tree's `validation-execution-receipt.json` must
+  validate against its own `pair-status-verification-key.json`
+  (`execution_receipt.validate_execution_receipt`), bind to the publication
+  (same `execution_kind`, the receipt's `artifact_sha256` matching the
+  publication file's actual SHA-256, and the same `analysis_config_digest` and
+  source-tree digests — the shared
+  `execution_receipt.matrix_execution_binding_mismatch` predicate, which the
+  resume path uses too), and `run_manifest.txt` must repeat the same
+  `analysis_config_digest` and `analysis_source_digest_start`/`_end`. Missing,
+  malformed, unsigned or disagreeing all fail closed, and `list` prints which
+  field disagreed. The historical `all_eq_matrix_current` is a real example: its
+  publication and its `run_manifest.txt` carry different digests and the
+  manifest has no `analysis_source_digest_end`, because the directory was reused
+  and the last run never finished.
+
+  The receipt is used only to prove *which execution* the artifacts came from.
+  Its `exit_status` is recorded as a diagnostic and is never a coverage
+  condition, for the same reason as above: the runners fold benchmark gate
+  failures into their exit code.
 
   **A well-formed artifact whose remaining census is complete is still not a
   full verification if the benchmark target shrank while the run was going.**

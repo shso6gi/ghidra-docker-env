@@ -161,6 +161,17 @@ SCOPE_HEALTH_OK = "ok"
 SCOPE_HEALTH_FAILED = "failed"
 SCOPE_HEALTH_UNKNOWN = "unknown"
 EXECUTION_RECEIPT_FILE = "validation-execution-receipt.json"
+PAIR_STATUS_PUBLIC_KEY_FILE = "pair-status-verification-key.json"
+BINDING_OK = "ok"
+BINDING_FAILED = "failed"
+# `run_manifest.txt` keys that must repeat what the signed artifacts say.  These
+# are the three the publication itself is built from, so a manifest left over
+# from a different execution cannot agree with them by accident.
+RUN_MANIFEST_BINDING_KEYS = (
+    ("analysis_config_digest", "analysis_config_digest"),
+    ("analysis_source_digest_start", "analysis_source_digest_start"),
+    ("analysis_source_digest_end", "analysis_source_digest_end"),
+)
 # Recorded per tree as well as folded, because these legitimately differ
 # between the halves of one subset run.
 PER_TREE_PROVENANCE_KEYS = (
@@ -579,6 +590,7 @@ def _tree_scope_evidence(tree: Path) -> Dict[str, Any]:
     row["pairs_declared"], row["pairs_in_census"] = _declared_and_published_extent(
         publication)
     row["scope_health"] = scope_health(publication)
+    row["execution_binding"] = execution_binding(tree, publication)
     # The three sources are compared directly rather than through
     # _agreed_field(), which ignores a source whose value is empty.  Here an
     # absent value must be a reason to say no, not one fewer source to agree.
@@ -623,6 +635,15 @@ def _tree_scope_evidence(tree: Path) -> Dict[str, Any]:
             f"the published pair census covers {census} of the {pairs_declared} pairs "
             f"the manifest itself declares (total_functions x "
             f"expected_pairs_per_function)"
+        )
+        return row
+    binding = row["execution_binding"]
+    if binding["status"] != BINDING_OK:
+        # Each artifact can be individually valid while belonging to a
+        # different run than the one next to it.  Current provenance plus a
+        # previous run's coverage is not evidence about either.
+        row["failure_reason"] = (
+            f"execution binding {binding['status']}: {binding['failure_reason']}"
         )
         return row
     health = row["scope_health"]
@@ -697,6 +718,82 @@ def _run_manifest_filters_agree(
     except ValueError:
         return None
     return True
+
+
+def execution_binding(
+    tree: Path, publication: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Whether this tree's three artifacts describe one and the same execution.
+
+    A result directory can be reused across runs, and the artifacts in it are
+    written at different moments: the run manifest early, the publication and
+    the signed receipt at the end.  A run that is interrupted after rewriting
+    `run_manifest.txt` but before republishing therefore leaves one execution's
+    publication and receipt beside another execution's manifest -- and every
+    other check here would pass, because each artifact is individually valid.
+    Current provenance would then be read off the new manifest while the
+    coverage came from the old run.
+
+    So the receipt is validated by its owner
+    (``execution_receipt.validate_execution_receipt``, against the tree's own
+    ``pair-status-verification-key.json``), bound to the publication by the
+    shared predicate ``matrix_execution_binding_mismatch``, and the run manifest
+    is required to repeat the same analysis-config and source-tree digests.
+    Anything missing, unreadable or disagreeing fails closed with a reason.
+
+    ``exit_status`` is deliberately not consulted: the runners fold benchmark
+    gate failures into their exit code, and coverage must not be lost because
+    the gate found something.  The receipt is used here only to prove which
+    execution these artifacts came from.
+    """
+    from scripts.function_tracer_pcode.reporting.execution_receipt import (
+        matrix_execution_binding_mismatch,
+        validate_execution_receipt,
+    )
+
+    row: Dict[str, Any] = {
+        "status": BINDING_FAILED, "failure_reason": None,
+        "receipt": UNSET, "run_manifest": UNSET,
+    }
+    receipt_path = tree / EXECUTION_RECEIPT_FILE
+    key_path = tree / PAIR_STATUS_PUBLIC_KEY_FILE
+    if not receipt_path.is_file():
+        row["failure_reason"] = f"no {EXECUTION_RECEIPT_FILE}"
+        return row
+    if not key_path.is_file():
+        row["failure_reason"] = f"no {PAIR_STATUS_PUBLIC_KEY_FILE} to verify the receipt"
+        return row
+    try:
+        receipt = validate_execution_receipt(
+            json.loads(receipt_path.read_text(encoding="utf-8")),
+            public_key_path=key_path,
+        )
+    except (OSError, ValueError) as exc:
+        row["failure_reason"] = f"{EXECUTION_RECEIPT_FILE} is not a valid receipt: {exc}"
+        return row
+    row["receipt"] = "valid"
+    mismatch = matrix_execution_binding_mismatch(
+        tree / PUBLICATION_MANIFEST_FILE, publication, receipt,
+    )
+    if mismatch is not None:
+        row["failure_reason"] = mismatch
+        return row
+    run_manifest = read_key_value_manifest(tree / RUN_MANIFEST_FILE)
+    for manifest_key, publication_key in RUN_MANIFEST_BINDING_KEYS:
+        recorded = run_manifest.get(manifest_key)
+        if not recorded:
+            row["failure_reason"] = f"{RUN_MANIFEST_FILE} records no {manifest_key}"
+            return row
+        if recorded != publication[publication_key]:
+            row["failure_reason"] = (
+                f"{RUN_MANIFEST_FILE} {manifest_key} ({recorded}) differs from the "
+                f"published {publication_key} ({publication[publication_key]}): the "
+                "manifest and the signed artifacts are from different executions"
+            )
+            return row
+    row["run_manifest"] = "bound"
+    row["status"] = BINDING_OK
+    return row
 
 
 def scope_health(publication: Mapping[str, Any]) -> Dict[str, Any]:
@@ -1142,6 +1239,29 @@ def _scope_health_cell(row: Mapping[str, Any]) -> str:
     return " ".join(cells) if cells else UNSET
 
 
+def _binding_cell(row: Mapping[str, Any]) -> str:
+    """``ok`` / ``failed`` per tree; the reason follows on its own line."""
+    trees = ((row.get("scope_evidence") or {}).get("trees") or {})
+    cells = []
+    for name, tree in sorted(trees.items()):
+        status = ((tree or {}).get("execution_binding") or {}).get("status", UNSET)
+        cells.append(status if len(trees) == 1 else f"{name}:{status}")
+    return " ".join(cells) if cells else UNSET
+
+
+def _binding_reasons(row: Mapping[str, Any]) -> List[str]:
+    """One line per tree whose artifacts do not agree on their execution."""
+    trees = ((row.get("scope_evidence") or {}).get("trees") or {})
+    lines = []
+    for name, tree in sorted(trees.items()):
+        binding = (tree or {}).get("execution_binding") or {}
+        if binding.get("status") in (None, BINDING_OK):
+            continue
+        if binding.get("failure_reason"):
+            lines.append(f"        execution binding ({name}): {binding['failure_reason']}")
+    return lines
+
+
 def _digest_cell(row: Mapping[str, Any], key: str) -> str:
     """One provenance digest, keeping the per-tree values when they differ.
 
@@ -1187,6 +1307,7 @@ def format_row_lines(row: Mapping[str, Any], head: Mapping[str, Any]) -> List[st
         f"      layout={row.get('run_layout')} "
         f"declared_run_scope={(row.get('scope_evidence') or {}).get('declared_run_scope', UNSET)} "
         f"scope_health={_scope_health_cell(row)} "
+        f"execution_binding={_binding_cell(row)} "
         + (
             f"whole_benchmark_evidence={scope_evidence}"
             if scope_evidence is not None
@@ -1240,6 +1361,7 @@ def format_row_lines(row: Mapping[str, Any], head: Mapping[str, Any]) -> List[st
             for name in outcome_transition.GATE_ORDER
         )
     )
+    lines.extend(_binding_reasons(row))
     if row.get("note"):
         lines.append(f"      note: {row['note']}")
     return lines

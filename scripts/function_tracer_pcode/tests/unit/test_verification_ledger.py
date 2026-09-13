@@ -23,6 +23,9 @@ import pytest
 
 from scripts.function_tracer_pcode.reporting import outcome_transition, verification_ledger
 from scripts.function_tracer_pcode.authority.contracts import authority_digest
+from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
+    generate_pair_status_keypair,
+)
 from scripts.function_tracer_pcode.reporting import execution_receipt
 from scripts.function_tracer_pcode.reporting.execution_receipt import (
     MATRIX_PUBLICATION_SCHEMA,
@@ -220,7 +223,40 @@ def build_formal_publication_manifest(run_dir: Path, expected_paths, *, run_scop
     (run_dir / outcome_transition.PUBLICATION_MANIFEST_FILE).write_text(
         json.dumps(payload, sort_keys=True), encoding="utf-8",
     )
+    seal_execution_receipt_for(run_dir, payload)
     return dict(payload)
+
+
+def seal_execution_receipt_for(run_dir: Path, publication, *, exit_status=0) -> dict:
+    """本番の封印関数で、この publication を指す署名済み receipt を作る。
+
+    鍵も `generate_pair_status_keypair()` で実際に生成するので、署名検証は本物。
+    publication を改変した test は、**改変後の内容で封じ直してから**評価する:
+    そうしないと receipt の sha256 不一致（＝binding 失敗）で落ちてしまい、
+    その test が意図した条件に到達しない。
+    """
+    private_key = run_dir / "pair-status-signing-key.bin"
+    public_key = run_dir / verification_ledger.PAIR_STATUS_PUBLIC_KEY_FILE
+    if not public_key.is_file():
+        generate_pair_status_keypair(private_key, public_key)
+    publication_path = run_dir / outcome_transition.PUBLICATION_MANIFEST_FILE
+    receipt = execution_receipt.seal_execution_receipt(
+        execution_kind="EQBENCH_MATRIX",
+        command=["bash", "eqbench_run_all_32jobs.sh"],
+        source_digest_start=publication["analysis_source_digest_start"],
+        source_digest_end=publication["analysis_source_digest_end"],
+        analysis_config_digest=publication["analysis_config_digest"],
+        exit_status=exit_status,
+        artifacts={
+            execution_receipt.MATRIX_PUBLICATION_MANIFEST_FILE:
+                execution_receipt.sha256_file(publication_path),
+        },
+        private_key_path=private_key, public_key_path=public_key,
+    )
+    (run_dir / verification_ledger.EXECUTION_RECEIPT_FILE).write_text(
+        json.dumps(receipt, sort_keys=True), encoding="utf-8",
+    )
+    return dict(receipt)
 
 
 @pytest.fixture()
@@ -235,7 +271,8 @@ def full_run(tmp_path):
     def build(name, *, scope="full_eq", commit=HEAD, dirty=GIT_DIRTY_NO,
               sample_filter="", pair_filter="", max_samples="0",
               run_scope=None, run_manifest_scope=None, outcomes=None,
-              with_publication=True, mutate=None):
+              with_publication=True, mutate=None, rebind_receipt=True,
+              receipt_mutate=None, with_public_key=True):
         run_dir = tmp_path / name
         declared = run_scope or verification_ledger.RUN_SCOPE_BY_FULL_SCOPE.get(scope, scope)
         sample = EQ_SAMPLE if declared == "FULL_EQBENCH" else NEQ_SAMPLE
@@ -269,6 +306,24 @@ def full_run(tmp_path):
                 published.unlink()
             else:
                 published.write_text(json.dumps(broken, sort_keys=True), encoding="utf-8")
+                if rebind_receipt:
+                    # 改変後の publication を指すように封じ直す。これをしないと
+                    # どの test も binding 不一致で落ち、名前の条件に到達しない。
+                    seal_execution_receipt_for(
+                        run_dir,
+                        broken if isinstance(broken.get("analysis_source_digest_start"), str)
+                        else payload,
+                    )
+        if receipt_mutate is not None:
+            receipt_path = run_dir / verification_ledger.EXECUTION_RECEIPT_FILE
+            current = json.loads(receipt_path.read_text(encoding="utf-8"))
+            tampered = receipt_mutate(current, run_dir)
+            if tampered is None:
+                receipt_path.unlink()
+            else:
+                receipt_path.write_text(json.dumps(tampered, sort_keys=True), encoding="utf-8")
+        if not with_public_key:
+            (run_dir / verification_ledger.PAIR_STATUS_PUBLIC_KEY_FILE).unlink()
         write_ground_truth(run_dir, [(NEQ_SAMPLE, "g", "changed", "MAY_AFFECT", "UNKNOWN")])
         return run_dir
     return build
@@ -1416,7 +1471,8 @@ def test_the_scope_evidence_payload_records_what_was_actually_checked(full_run):
     )
 
     tree = row["scope_evidence"]["trees"]["."]
-    assert {key: tree[key] for key in tree if key != "scope_health"} == {
+    assert {key: tree[key] for key in tree
+            if key not in ("scope_health", "execution_binding")} == {
         "whole_benchmark_scope": "FULL_EQBENCH",
         "failure_reason": None,
         "formal_publication": "valid",
@@ -1766,17 +1822,19 @@ def test_the_real_full_matrix_scope_health_is_reported_faithfully():
 def test_matrix_root_run_exit_status_comes_from_the_execution_receipt(full_run):
     """matrix-root でも exit status を診断として残す（scope 条件には使わない）。"""
     run_dir = full_run("with_receipt", scope="full_eq")
-    (run_dir / verification_ledger.EXECUTION_RECEIPT_FILE).write_text(
-        json.dumps({"schema": "phase10-validation-execution-receipt-v1",
-                    "execution_kind": "EQBENCH_MATRIX", "exit_status": 1}),
-        encoding="utf-8",
-    )
+    published = json.loads(
+        (run_dir / outcome_transition.PUBLICATION_MANIFEST_FILE).read_text(encoding="utf-8"))
+    # 正しく署名された receipt のまま exit_status だけ 1 にする。
+    seal_execution_receipt_for(run_dir, published, exit_status=1)
 
     row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
 
     assert row["run_exit_status"]["status"] == "1"
     assert row["run_exit_status"]["source"] == verification_ledger.EXECUTION_RECEIPT_FILE
     # exit_status は gate 失敗も含むので、単独で full を落とす条件にはしない。
+    assert row["scope_evidence"]["trees"]["."]["execution_binding"]["status"] == (
+        verification_ledger.BINDING_OK
+    )
     assert verification_ledger.full_scope_evidence(row) == ("full_eq", "")
 
 
@@ -1785,3 +1843,276 @@ def test_subset_run_exit_status_still_comes_from_its_own_manifest(subset_run):
 
     assert row["run_exit_status"]["status"] == "0"
     assert row["run_exit_status"]["source"] == "subset_manifest.txt"
+
+
+# ---------------------------------------------------------------------------
+# execution binding: 異なる世代の artifact を混ぜて full YES にしない
+#
+# 結果ディレクトリは再利用され得るし、artifact が書かれる時刻も違う
+# （run_manifest は最初、publication と署名 receipt は最後）。run_manifest だけ
+# 新しい execution のものに入れ替わった状態では、個々の artifact はすべて valid
+# なのに「現在の provenance ＋ 過去の run の coverage」という合成ができてしまう。
+# ---------------------------------------------------------------------------
+
+
+def _rewrite_run_manifest(run_dir: Path, **changes) -> None:
+    """run_manifest.txt の key を差し替える（他の行はそのまま）。"""
+    manifest = run_dir / "run_manifest.txt"
+    rows = []
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        key = line.split("=", 1)[0]
+        rows.append(f"{key}={changes[key]}" if key in changes else line)
+    manifest.write_text("".join(f"{row}\n" for row in rows), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "changed_key",
+    ["analysis_config_digest", "analysis_source_digest_start", "analysis_source_digest_end"],
+)
+def test_an_old_publication_with_a_new_run_manifest_is_never_full_evidence(
+    tmp_path, full_run, changed_key,
+):
+    """本 blocker の直接固定: 世代の違う artifact を混ぜて full にしない。
+
+    healthy full run A の publication / receipt / pair-status はそのまま残し、
+    `run_manifest.txt` だけ別 execution B 相当（現 HEAD の provenance）に書き換える。
+    個別の検査はすべて通るが、3 者が同じ execution を指していない。
+    """
+    run_dir = full_run("generation_mix", scope="full_eq")
+    _rewrite_run_manifest(run_dir, **{changed_key: "b" * 64, "git_commit": HEAD,
+                                      "git_dirty": GIT_DIRTY_NO})
+
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    tree = row["scope_evidence"]["trees"]["."]
+
+    # 個々の検査は通る。
+    assert _formal_validator_accepts(run_dir)
+    assert tree["scope_health"]["status"] == verification_ledger.SCOPE_HEALTH_OK
+    assert row["completed_scope"] == outcome_transition.COMPLETENESS_COMPLETE
+    assert verification_ledger.head_match(row, _head_state())[0] == (
+        verification_ledger.HEAD_MATCH_YES
+    )
+    # binding だけが落ちる。
+    assert tree["execution_binding"]["status"] == verification_ledger.BINDING_FAILED
+    assert tree["execution_binding"]["receipt"] == "valid"
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+    assert evidence is None
+    assert "different executions" in reason and changed_key in reason
+
+    listing = verification_ledger.format_listing(
+        (row,), _head_state(), ledger_path=tmp_path / "l.jsonl",
+    )
+    assert "full_eq: YES" not in listing
+    assert "full_eq: NO" in listing
+    assert "execution_binding=failed" in listing
+    assert "execution binding (.):" in listing and changed_key in listing
+
+
+def test_a_run_manifest_missing_a_binding_digest_is_not_full_evidence(full_run):
+    """binding key が欠けている run_manifest も fail-closed。"""
+    run_dir = full_run("no_binding_key", scope="full_eq")
+    manifest = run_dir / "run_manifest.txt"
+    manifest.write_text(
+        "".join(
+            f"{line}\n" for line in manifest.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("analysis_config_digest=")
+        ),
+        encoding="utf-8",
+    )
+
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None
+    assert "records no analysis_config_digest" in reason
+
+
+def test_a_missing_execution_receipt_is_not_full_evidence(full_run):
+    run_dir = full_run(
+        "no_receipt", scope="full_eq", receipt_mutate=lambda receipt, run_dir: None)
+
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None
+    assert verification_ledger.EXECUTION_RECEIPT_FILE in reason
+
+
+def test_a_missing_verification_key_is_not_full_evidence(full_run):
+    run_dir = full_run("no_key", scope="full_eq", with_public_key=False)
+
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+
+    assert evidence is None
+    assert verification_ledger.PAIR_STATUS_PUBLIC_KEY_FILE in reason
+
+
+def _tamper_signature(receipt, run_dir):
+    """署名だけを別の鍵で作り直す（body は正しいまま）。"""
+    other_private = run_dir / "other-signing-key.bin"
+    other_public = run_dir / "other-verification-key.json"
+    generate_pair_status_keypair(other_private, other_public)
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    key = Ed25519PrivateKey.from_private_bytes(other_private.read_bytes())
+    import base64 as _base64
+    receipt["signature"] = _base64.b64encode(
+        key.sign(bytes.fromhex(receipt["body_digest"]))
+    ).decode("ascii")
+    return receipt
+
+
+def _reseal_receipt_body(receipt, **changes):
+    """body を書き換えて body_digest だけ整える（署名は古いまま）。"""
+    receipt = {**receipt, **changes}
+    body = {key: receipt[key] for key in execution_receipt.BODY_FIELDS}
+    receipt["body_digest"] = authority_digest(body)
+    return receipt
+
+
+RECEIPT_REJECTIONS = {
+    "malformed": lambda receipt, run_dir: {"schema": "nope"},
+    "invalid_signature": _tamper_signature,
+    "wrong_execution_kind": lambda receipt, run_dir: _reseal_receipt_body(
+        receipt, execution_kind="EQBENCH_UNIT"),
+    "points_at_another_publication": lambda receipt, run_dir: _reseal_receipt_body(
+        receipt, artifact_sha256={"matrix-publication-manifest.json": "0" * 64}),
+    "analysis_config_digest_mismatch": lambda receipt, run_dir: _reseal_receipt_body(
+        receipt, analysis_config_digest="0" * 64),
+    "source_digest_mismatch": lambda receipt, run_dir: _reseal_receipt_body(
+        receipt, source_tree_digest_start="0" * 64, source_tree_digest_end="0" * 64),
+}
+
+
+@pytest.mark.parametrize("name", sorted(RECEIPT_REJECTIONS))
+def test_a_receipt_that_does_not_bind_is_never_full_evidence(tmp_path, full_run, name):
+    """receipt 側の各不整合が、それぞれの理由で reject されること。"""
+    run_dir = full_run(
+        f"receipt_{name}", scope="full_eq", receipt_mutate=RECEIPT_REJECTIONS[name])
+
+    # publication と scope health は健全なまま: 落ちる理由は receipt 側にある。
+    assert _formal_validator_accepts(run_dir)
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    tree = row["scope_evidence"]["trees"]["."]
+    assert tree["scope_health"]["status"] == verification_ledger.SCOPE_HEALTH_OK
+
+    evidence, reason = verification_ledger.full_scope_evidence(row)
+    assert evidence is None, f"{name} was accepted as whole-benchmark evidence"
+    assert "execution binding" in reason
+    # 署名を検証する 3 ケースは receipt 自体が invalid、残りは binding 不一致。
+    if name in ("malformed", "invalid_signature", "wrong_execution_kind",
+                "analysis_config_digest_mismatch", "source_digest_mismatch",
+                "points_at_another_publication"):
+        assert tree["execution_binding"]["failure_reason"]
+    listing = verification_ledger.format_listing(
+        (row,), _head_state(), ledger_path=tmp_path / "l.jsonl",
+    )
+    assert "full_eq: YES" not in listing
+
+
+def test_each_receipt_rejection_reaches_its_own_condition(full_run):
+    """署名まで整えた改変でも reject されること（digest 偶然一致の空振り防止）。
+
+    `wrong_execution_kind` などは body_digest を整え直しても **署名が古いまま**
+    なので、まず署名検証で落ちる。それが意図どおりであることを明示する。
+    """
+    resealed_only = ("wrong_execution_kind", "points_at_another_publication",
+                     "analysis_config_digest_mismatch", "source_digest_mismatch")
+    for name in resealed_only:
+        run_dir = full_run(
+            f"reach_{name}", scope="full_eq", receipt_mutate=RECEIPT_REJECTIONS[name])
+        row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+        reason = row["scope_evidence"]["trees"]["."]["execution_binding"]["failure_reason"]
+        assert "signature is invalid" in reason or "receipt" in reason, (name, reason)
+
+
+def test_a_correctly_signed_receipt_for_another_publication_is_rejected_on_binding(
+    full_run,
+):
+    """署名は正しいが別 publication を指す receipt は binding で落ちる。
+
+    body ごと正しく封印し直すので署名検証は通り、**binding 検査だけ**が働く。
+    """
+    run_dir = full_run("rebound_elsewhere", scope="full_eq")
+    published = json.loads(
+        (run_dir / outcome_transition.PUBLICATION_MANIFEST_FILE).read_text(encoding="utf-8"))
+    receipt = execution_receipt.seal_execution_receipt(
+        execution_kind="EQBENCH_MATRIX",
+        command=["bash", "eqbench_run_all_32jobs.sh"],
+        source_digest_start=published["analysis_source_digest_start"],
+        source_digest_end=published["analysis_source_digest_end"],
+        analysis_config_digest=published["analysis_config_digest"],
+        exit_status=0,
+        artifacts={"matrix-publication-manifest.json": "0" * 64},
+        private_key_path=run_dir / "pair-status-signing-key.bin",
+        public_key_path=run_dir / verification_ledger.PAIR_STATUS_PUBLIC_KEY_FILE,
+    )
+    (run_dir / verification_ledger.EXECUTION_RECEIPT_FILE).write_text(
+        json.dumps(receipt, sort_keys=True), encoding="utf-8")
+
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    tree = row["scope_evidence"]["trees"]["."]
+
+    # 署名は valid（receipt 自体は正式）。
+    assert tree["execution_binding"]["receipt"] == "valid"
+    assert "signs a different" in tree["execution_binding"]["failure_reason"]
+    assert verification_ledger.full_scope_evidence(row)[0] is None
+
+
+def test_a_healthy_bound_full_artifact_is_still_evidence(tmp_path, full_run):
+    """逆向きの固定: 3 者が同じ execution なら引き続き YES。"""
+    run_dir = full_run("bound_healthy", scope="full_eq")
+
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+    tree = row["scope_evidence"]["trees"]["."]
+
+    assert tree["execution_binding"] == {
+        "status": verification_ledger.BINDING_OK,
+        "failure_reason": None,
+        "receipt": "valid",
+        "run_manifest": "bound",
+    }
+    assert verification_ledger.full_scope_evidence(row) == ("full_eq", "")
+    listing = verification_ledger.format_listing(
+        (row,), _head_state(), ledger_path=tmp_path / "l.jsonl",
+    )
+    assert "full_eq: YES" in listing and "execution_binding=ok" in listing
+
+
+def test_a_gate_failure_with_sound_binding_keeps_the_coverage_fact(full_run):
+    """gate FAIL でも binding / scope health が正常なら coverage は残る。"""
+    run_dir = full_run("gate_fail_bound", scope="full_eq")
+    published = json.loads(
+        (run_dir / outcome_transition.PUBLICATION_MANIFEST_FILE).read_text(encoding="utf-8"))
+    # runner は gate 失敗時に非 0 で終わる。receipt はその exit_status を載せる。
+    seal_execution_receipt_for(run_dir, published, exit_status=1)
+    (run_dir / "benchmark_validation_gate.json").write_text(
+        json.dumps({"gate": "FAIL", "pairs": 1,
+                    "hard_violations": {"eq_not_eq": 1}, "suspicious": {}}),
+        encoding="utf-8")
+
+    row = verification_ledger.build_row(run_dir, requested_scope="full_eq")
+
+    assert row["gate"]["benchmark"]["."]["gate"] == "FAIL"
+    assert row["run_exit_status"]["status"] == "1"
+    assert row["scope_evidence"]["trees"]["."]["execution_binding"]["status"] == (
+        verification_ledger.BINDING_OK
+    )
+    # exit_status も gate も coverage を奪わない。
+    assert verification_ledger.full_scope_evidence(row) == ("full_eq", "")
+
+
+def test_the_real_full_matrix_execution_binding_is_reported_faithfully():
+    """実在 full run の binding 状態を実測で固定する。"""
+    root = Path(REPO_ROOT) / "logs/EqBench/all_eq_matrix_current"
+    if not (root / "matrix-publication-manifest.json").is_file():
+        pytest.skip("the historical full matrix artifact is not in this checkout")
+    publication = json.loads(
+        (root / "matrix-publication-manifest.json").read_text(encoding="utf-8"))
+
+    binding = verification_ledger.execution_binding(root, publication)
+
+    assert binding["status"] in (
+        verification_ledger.BINDING_OK, verification_ledger.BINDING_FAILED)
+    if binding["status"] == verification_ledger.BINDING_FAILED:
+        assert binding["failure_reason"]

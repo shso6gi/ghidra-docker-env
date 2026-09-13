@@ -424,6 +424,56 @@ def validate_execution_receipt(
     return body
 
 
+MATRIX_EXECUTION_BINDING_CHECKS = (
+    "execution_kind", "publication_sha256", "analysis_config_digest",
+    "source_tree_digest_start", "source_tree_digest_end",
+)
+
+
+def matrix_execution_binding_mismatch(
+    publication_path: Path,
+    publication: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+) -> str | None:
+    """Why a validated receipt does not bind to its publication, or ``None``.
+
+    The two artifacts must describe the *same* execution: the receipt names the
+    matrix execution kind, hashes the exact publication file on disk, and
+    repeats that publication's analysis config and source-tree digests.  Left
+    unchecked, a directory reused across runs can end up holding one run's
+    publication next to another run's manifests.
+
+    Extracted from ``compatible_published_analysis_identity`` so the resume
+    path and any other caller share one implementation of the binding rather
+    than each carrying a copy.  Deliberately says nothing about
+    ``exit_status``: whether a run's exit code matters is the caller's policy,
+    not part of "are these artifacts from the same execution".
+    """
+    if receipt["execution_kind"] != "EQBENCH_MATRIX":
+        return (
+            f"the receipt records execution_kind={receipt['execution_kind']}, "
+            "not EQBENCH_MATRIX"
+        )
+    published_sha256 = receipt["artifact_sha256"].get(MATRIX_PUBLICATION_MANIFEST_FILE)
+    actual_sha256 = sha256_file(publication_path)
+    if published_sha256 != actual_sha256:
+        return (
+            f"the receipt signs a different {MATRIX_PUBLICATION_MANIFEST_FILE} "
+            f"({published_sha256} vs {actual_sha256} on disk)"
+        )
+    for receipt_key, publication_key in (
+        ("analysis_config_digest", "analysis_config_digest"),
+        ("source_tree_digest_start", "analysis_source_digest_start"),
+        ("source_tree_digest_end", "analysis_source_digest_end"),
+    ):
+        if receipt[receipt_key] != publication[publication_key]:
+            return (
+                f"the receipt's {receipt_key} ({receipt[receipt_key]}) differs from "
+                f"the publication's {publication_key} ({publication[publication_key]})"
+            )
+    return None
+
+
 def compatible_published_analysis_identity(
     matrix_root: Path, *, current_config: Mapping[str, Any],
     current_source_digest: str,
@@ -461,16 +511,10 @@ def compatible_published_analysis_identity(
                 "eqbench-analysis-config-v1", "eqbench-analysis-config-v2",
             }
             or normalize_semantic_analysis_config(legacy_config) != current_config
-            or receipt["execution_kind"] != "EQBENCH_MATRIX"
             or receipt["exit_status"] not in {0, 1}
-            or receipt["analysis_config_digest"]
-            != publication["analysis_config_digest"]
-            or receipt["artifact_sha256"].get(MATRIX_PUBLICATION_MANIFEST_FILE)
-            != sha256_file(publication_path)
-            or receipt["source_tree_digest_start"]
-            != publication["analysis_source_digest_start"]
-            or receipt["source_tree_digest_end"]
-            != publication["analysis_source_digest_end"]
+            or matrix_execution_binding_mismatch(
+                publication_path, publication, receipt
+            ) is not None
         ):
             return None
         return (
