@@ -739,7 +739,11 @@ def execution_binding(
     ``pair-status-verification-key.json``), bound to the publication by the
     shared predicate ``matrix_execution_binding_mismatch``, and the run manifest
     is required to repeat the same analysis-config and source-tree digests.
-    Anything missing, unreadable or disagreeing fails closed with a reason.
+    Those digests are not execution-unique, though -- the same source and config
+    give the same values on every run -- so finally the publication is rebuilt
+    from the tree's current artifacts with the canonical builder and required to
+    equal the one that was stored.  Anything missing, unreadable or disagreeing
+    fails closed with a reason.
 
     ``exit_status`` is deliberately not consulted: the runners fold benchmark
     gate failures into their exit code, and coverage must not be lost because
@@ -753,7 +757,7 @@ def execution_binding(
 
     row: Dict[str, Any] = {
         "status": BINDING_FAILED, "failure_reason": None,
-        "receipt": UNSET, "run_manifest": UNSET,
+        "receipt": UNSET, "run_manifest": UNSET, "current_publication": UNSET,
     }
     receipt_path = tree / EXECUTION_RECEIPT_FILE
     key_path = tree / PAIR_STATUS_PUBLIC_KEY_FILE
@@ -792,8 +796,80 @@ def execution_binding(
             )
             return row
     row["run_manifest"] = "bound"
+    # The three digests above are not execution-unique: the same source and
+    # config produce the same values on every run.  So a directory reused for a
+    # second run of the *same* code can still hold run A's publication beside
+    # run B's manifests and censuses and agree on all of them.  The canonical
+    # builder settles it: rebuild the publication from what is on the tree right
+    # now and require it to be the one that was published.  Any difference in
+    # completed/skipped samples, scheduled/reused pairs, failure counters, the
+    # expected or verified-skipped census, build receipts, binary accounting or
+    # the function census shows up as a different canonical body.
+    rebuilt, reason = _rebuilt_publication(tree)
+    if rebuilt is None:
+        row["failure_reason"] = reason
+        return row
+    if dict(rebuilt) != dict(publication):
+        row["failure_reason"] = (
+            "the current artifacts reconstruct a different publication than the "
+            f"one stored ({_publication_difference(publication, rebuilt)}): the "
+            "stored publication is from an earlier execution"
+        )
+        return row
+    row["current_publication"] = "matches"
     row["status"] = BINDING_OK
     return row
+
+
+def _rebuilt_publication(tree: Path) -> Tuple[Optional[Mapping[str, Any]], Optional[str]]:
+    """The publication the tree's current artifacts would produce, or why not.
+
+    Uses the builder that owns the canonical body
+    (``execution_receipt.build_matrix_publication_manifest``) rather than
+    comparing a hand-picked subset of fields, so nothing a future field records
+    can slip between the two executions unnoticed.  A tree whose current
+    artifacts cannot be rebuilt at all -- an interrupted run that has not
+    written its end-of-run fields yet, say -- fails closed.
+    """
+    from scripts.function_tracer_pcode.reporting.execution_receipt import (
+        build_matrix_publication_manifest,
+    )
+
+    try:
+        return build_matrix_publication_manifest(tree), None
+    except (OSError, ValueError, KeyError) as exc:
+        # The artifact and input errors the builder raises by contract:
+        # missing census files (OSError), malformed rows / digests / censuses
+        # (ValueError, which json.JSONDecodeError and UnicodeError subclass) and
+        # absent manifest keys (KeyError).  Nothing broader, so a defect in this
+        # module still surfaces.
+        return None, (
+            "the current artifacts cannot be rebuilt into a publication: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
+
+def _publication_difference(
+    stored: Mapping[str, Any], rebuilt: Mapping[str, Any],
+) -> str:
+    """A short, readable account of which canonical fields differ."""
+    names = sorted(
+        key for key in set(stored) | set(rebuilt)
+        if stored.get(key) != rebuilt.get(key)
+    )
+    parts = []
+    for key in names[:4]:
+        stored_value, rebuilt_value = stored.get(key), rebuilt.get(key)
+        if isinstance(stored_value, list) or isinstance(rebuilt_value, list):
+            parts.append(
+                f"{key}: {len(stored_value or [])} stored vs "
+                f"{len(rebuilt_value or [])} now"
+            )
+        else:
+            parts.append(f"{key}: {_short(stored_value)} stored vs {_short(rebuilt_value)} now")
+    if len(names) > 4:
+        parts.append(f"and {len(names) - 4} more")
+    return "; ".join(parts)
 
 
 def scope_health(publication: Mapping[str, Any]) -> Dict[str, Any]:

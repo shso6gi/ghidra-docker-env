@@ -348,7 +348,20 @@ Three distinctions the schema exists to keep apart:
   resume path uses too), and `run_manifest.txt` must repeat the same
   `analysis_config_digest` and `analysis_source_digest_start`/`_end`. Missing,
   malformed, unsigned or disagreeing all fail closed, and `list` prints which
-  field disagreed. The historical `all_eq_matrix_current` is a real example: its
+  field disagreed.
+
+  Those three digests are not execution-unique, though — the same source and
+  config give the same values on every run — so a directory reused for a second
+  run of the *same code* can still hold run A's publication beside run B's
+  manifests and censuses and agree on all of them. The last step therefore
+  rebuilds the publication from what is on the tree right now, with the builder
+  that owns the canonical body
+  (`execution_receipt.build_matrix_publication_manifest`), and requires it to
+  equal the one that was stored. Any difference in completed/skipped samples,
+  scheduled/reused pairs, failure counters, the expected or verified-skipped
+  census, build receipts, binary accounting or the function census shows up as
+  a different canonical body, and a tree that cannot be rebuilt at all fails
+  closed too. The historical `all_eq_matrix_current` is a real example: its
   publication and its `run_manifest.txt` carry different digests and the
   manifest has no `analysis_source_digest_end`, because the directory was reused
   and the last run never finished.
