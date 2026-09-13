@@ -26,8 +26,8 @@
 
 伝搬は `contextvars`。`ThreadPoolExecutor` の worker は空 context で始まるため、
 worker 内で `stage_region()` を呼んでも親 region には混入しない（no-op になる）。
-worker 側の計測は region ではなく counter で行う（`smt/parallel.py` の solver
-counter、`ghidra/decompilation_broker.py` の decompile counter）。
+worker から加算される計測は region では測れないので counter で行う
+（`smt/parallel.py` の solver counter）。
 
 診断専用。計測に失敗しても例外を呼び出し側へ出さない。
 """
@@ -49,7 +49,10 @@ STAGE_TIMING_SCHEMA = "pair-stage-timing-v1"
 REGION_IDENTITY_ABSOLUTE_TOLERANCE = 0.05
 REGION_IDENTITY_RELATIVE_TOLERANCE = 0.01
 
-#: 「check の内側で開かれたか」を分ける既定の親 region 名。
+#: 派生ビューが名指しする region 名。計測点（`stage_region("check")` など）は
+#: 各 entry point が文字列で開き、ここは「どの名前がどの派生値の基準か」を決める。
+#: `CHECK_REGION` は内外分離の親、`OBLIGATION_BUILD_REGION` はその分離対象、
+#: `ORCHESTRATION_REGION` は恒等式 A / B の対象。
 CHECK_REGION = "check"
 OBLIGATION_BUILD_REGION = "obligation_build"
 ORCHESTRATION_REGION = "branch_plan_orchestration"
@@ -371,7 +374,12 @@ def split_region_by_ancestor(
     （stage runner の branch schedule）でも起きるので、単一の値に潰さずに
     分けて出す。``total_*`` は report 用の合計であって恒等式の項ではない
     （恒等式は各親の直接子だけで閉じる）。
+
+    key は `ancestor_name` から作る（`check` なら `inside_check` /
+    `outside_check`）。基準にした region 名と出力の名前をずらさないため。
     """
+    inside_key = f"inside_{ancestor_name}"
+    outside_key = f"outside_{ancestor_name}"
     inside_seconds = outside_seconds = 0.0
     inside_calls = outside_calls = 0
     found = False
@@ -395,8 +403,8 @@ def split_region_by_ancestor(
     if not found:
         return None
     return {
-        "inside_check": {"seconds": round(inside_seconds, 6), "calls": inside_calls},
-        "outside_check": {"seconds": round(outside_seconds, 6), "calls": outside_calls},
+        inside_key: {"seconds": round(inside_seconds, 6), "calls": inside_calls},
+        outside_key: {"seconds": round(outside_seconds, 6), "calls": outside_calls},
         "total_seconds": round(inside_seconds + outside_seconds, 6),
         "total_calls": inside_calls + outside_calls,
         "total_is_report_metric_not_identity_term": True,
