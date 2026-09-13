@@ -43,6 +43,10 @@ _DIAGNOSTIC_SOURCES_RE = re.compile(
     r"^\s+Diagnostic sources\s*:\s*(?P<value>.*?)"
     r"\s*\(observed (?P<observed>\d+) / missing (?P<missing>\d+)\)\s*$"
 )
+_CAUSAL_EVIDENCE_RE = re.compile(r"^\s+Causal evidence\s*:\s*(?P<value>.*?)\s*$")
+_CAUSAL_BLOCK_RE = re.compile(
+    r"(?P<name>[a-z_]+) observed (?P<observed>\d+) / missing (?P<missing>\d+)"
+)
 
 
 def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
@@ -73,6 +77,7 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
     final_reason_sources: list = []
     diagnostic_sources: list = []
     diagnostic_evidence: Dict[str, int] = {}
+    causal_evidence_counts: Dict[str, Dict[str, int]] = {}
     section_titles = {
         "UNKNOWN by reason:": "unknown_by_reason",
         "Proof backlog by reason:": "proof_backlog_by_reason",
@@ -104,6 +109,17 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
             diagnostic_evidence = {
                 "observed": int(diagnostic_match.group("observed")),
                 "missing": int(diagnostic_match.group("missing")),
+            }
+            active_section = None
+            continue
+        causal_match = _CAUSAL_EVIDENCE_RE.match(line)
+        if causal_match:
+            causal_evidence_counts = {
+                block.group("name"): {
+                    "observed": int(block.group("observed")),
+                    "missing": int(block.group("missing")),
+                }
+                for block in _CAUSAL_BLOCK_RE.finditer(causal_match.group("value"))
             }
             active_section = None
             continue
@@ -154,6 +170,7 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
         "final_reason_sources": final_reason_sources,
         "diagnostic_sources": diagnostic_sources,
         "diagnostic_evidence": diagnostic_evidence,
+        "causal_evidence_counts": causal_evidence_counts,
         **sections,
     }
 

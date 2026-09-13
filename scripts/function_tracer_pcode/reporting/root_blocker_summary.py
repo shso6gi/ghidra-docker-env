@@ -361,7 +361,13 @@ def summarize_root_blockers(
             linked_completion_count += int(stats.get("linked_completion_count") or 0)
             for name, value in (stats.get("diagnostics") or {}).items():
                 _inc(diagnostics, str(name), int(value or 0))
-            results_with_evidence += 1
+            # Issue #128: aggregate が在ることと、原因の証拠が在ることは別。
+            # producer が trace を観測できていない結果は、root cause も causal
+            # coverage も再構成できないので「観測できなかった」側に数える。
+            if (aggregate.get("evidence_present") or {}).get("debug_trace"):
+                results_with_evidence += 1
+            else:
+                results_without_evidence += 1
             identity_pool = aggregate.get("identity_pool") or ()
             for cause in aggregate.get("root_causes") or ():
                 if not isinstance(cause, Mapping) or cause.get("canonical_cause_key") is None:
@@ -485,6 +491,10 @@ def summarize_root_blockers(
             "proof_completion_linkage_coverage": _ratio(
                 linked_completion_count, proof_completion_count
             ) if proof_completion_count else 0.0,
+            # 3 状態: coverage が `None` = missing、`evidence_complete=True` =
+            # fully observed、`False` = partially observed。ratio は観測できた
+            # 結果からしか作っていないので、完全観測値と読まれないよう必ず対で持つ。
+            "evidence_state": "complete" if results_without_evidence == 0 else "partial",
             "evidence_complete": results_without_evidence == 0,
             "results_with_evidence": results_with_evidence,
             "results_without_evidence": results_without_evidence,

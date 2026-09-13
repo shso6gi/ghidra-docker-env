@@ -26,7 +26,9 @@ backlog / completion / causal transition）の唯一の入力でもある。将�
 schema `unknown-cause-aggregate-v1` の block:
 
 * `final_reasons` / `legacy_view`: 1 つの record 集合の集計（`build_reason_view`）。
-  前者は canonical 確定時のみ、後者は legacy 最終 attempt があるときのみ。
+  前者は canonical 確定時のみ。後者は **trace を観測できたときだけ**で、
+  `source` が `final_attempt` / `payload_records` のどちらを選んだかを言う。
+  trace がもともと無い結果では `null`（= 診断の証拠が無い）。
 * `effective_source` / `backlog` / `operational`: 上の 2 つのうち authority が
   選ぶ側（canonical > legacy）の backlog 4 次元と operational 2 次元。
 * `completions` / `transitions`: 完了・因果遷移イベントの集計。backlog とは
@@ -831,7 +833,20 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
     legacy_attempt, legacy_records = _final_legacy_attempt(trace, attempts)
 
     final_reasons = build_reason_view(canonical_records) if canonical_available else None
-    legacy_view = build_reason_view(legacy_records) if legacy_attempt is not None else None
+    # `legacy_view` は「trace を見た consumer が診断に使う record 集合」の集計で、
+    # **trace を観測できたときだけ**作る。trace がもともと無い結果では `null` に
+    # して、「観測できなかった」と「観測して 0 件」を取り違えさせない。
+    # `source` はどちらの record 集合を選んだかで、consumer の選択規則と一致する:
+    #   final_attempt   -- 最終 UNKNOWN/TIMEOUT attempt の record（0 件もあり得る）
+    #   payload_records -- 最終 attempt が無いので結果の `unknown_reasons`
+    legacy_view = None
+    if trace is not None:
+        if legacy_attempt is not None:
+            legacy_view = build_reason_view(legacy_records)
+            legacy_view["source"] = "final_attempt"
+        else:
+            legacy_view = build_reason_view(canonical_records)
+            legacy_view["source"] = "payload_records"
     effective_view = final_reasons if final_reasons is not None else legacy_view
     effective_source = (
         "canonical" if final_reasons is not None
