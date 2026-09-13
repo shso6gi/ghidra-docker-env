@@ -2317,17 +2317,54 @@ def test_the_rebuild_matches_for_a_healthy_untouched_run(full_run):
     assert verification_ledger.full_scope_evidence(row) == ("full_eq", "")
 
 
+def _recorded_verification_halves():
+    """`logs/EqBench/subset_issue123b_rev<N>/{eq,neq}` を revision 順に返す。
+
+    並び順は glob の偶然ではなく `<N>` の数値で決める。どれか N 件だけを拾うと、
+    この PR の**最終実 run** が検証から漏れ得るので、呼び出し側は全件を回す。
+    """
+    base = Path(REPO_ROOT) / "logs/EqBench"
+    runs = []
+    for run_dir in base.glob("subset_issue123b_rev*"):
+        suffix = run_dir.name.rsplit("rev", 1)[-1]
+        if not suffix.isdigit():
+            continue
+        halves = [
+            run_dir / half for half in ("eq", "neq")
+            if (run_dir / half / outcome_transition.PUBLICATION_MANIFEST_FILE).is_file()
+        ]
+        if halves:
+            runs.append((int(suffix), run_dir, halves))
+    return sorted(runs)
+
+
 def test_real_healthy_runs_rebuild_to_their_stored_publication():
-    """実在の健全な run で再構築が一致すること（誤検出しない確認）。"""
-    roots = sorted(
-        (Path(REPO_ROOT) / "logs/EqBench").glob("subset_issue123b_rev*/[en]*q"))
-    roots = [root for root in roots
-             if (root / outcome_transition.PUBLICATION_MANIFEST_FILE).is_file()]
-    if not roots:
+    """実在の健全な run すべてで再構築が一致すること（誤検出しない確認）。
+
+    「sort 後の先頭 N 件」のような偶然の選択にしない: 記録されている
+    `subset_issue123b_rev<N>` の**全 half** を回し、そのうえで最新 revision の
+    eq / neq 両方が実際に検証対象へ入ったことを明示的に確かめる。
+    """
+    runs = _recorded_verification_halves()
+    if not runs:
         pytest.skip("no recorded subset halves in this checkout")
-    for root in roots[:4]:
-        stored = json.loads(
-            (root / outcome_transition.PUBLICATION_MANIFEST_FILE).read_text(encoding="utf-8"))
-        rebuilt, reason = verification_ledger._rebuilt_publication(root)
-        assert rebuilt is not None, f"{root}: {reason}"
-        assert dict(rebuilt) == stored, f"{root} rebuilt differently"
+
+    verified = []
+    for _revision, _run_dir, halves in runs:
+        for root in halves:
+            stored = json.loads(
+                (root / outcome_transition.PUBLICATION_MANIFEST_FILE).read_text(
+                    encoding="utf-8"))
+            rebuilt, reason = verification_ledger._rebuilt_publication(root)
+            assert rebuilt is not None, f"{root}: {reason}"
+            assert dict(rebuilt) == stored, f"{root} rebuilt differently"
+            verified.append(root)
+
+    # この PR の最終実 run（最大 revision）の両 half が必ず含まれていること。
+    _revision, latest_run, latest_halves = runs[-1]
+    assert [half.name for half in latest_halves] == ["eq", "neq"], (
+        f"{latest_run} does not carry both halves; the latest verification run "
+        "must be checked in full"
+    )
+    for half in latest_halves:
+        assert half in verified, f"{half} was not verified"
