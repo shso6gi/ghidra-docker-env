@@ -357,17 +357,23 @@ def _fixture_payloads():
 # 比較面（O と R で同じ関数を使うが、経路は別）
 # ---------------------------------------------------------------------------
 
-REQUIRED_REPORTING_SURFACES = (
+# final reason authority が決める surface（A の対象）。O と R では同じ
+# canonical payload から読むので、ここが一致しても diagnostic の一致は言えない。
+FINAL_REASON_SURFACE_NAMES = (
     "unknown_results",
     "unknown_units",
     "final_result_counts",
-    "validation_unknown_unit_multiset",
-    "reason_record_multiset",
-    "proof_action_multiset",
     "unknown_by_reason",
     "unknown_by_decision_effect",
     "unknown_by_reason_scope",
     "unknown_by_reason_detail",
+)
+# diagnostic source が決める surface（B の対象）。O は full `debug_trace`、
+# R は `unknown_cause_aggregate` という**別経路**から作る。
+DIAGNOSTIC_SURFACE_NAMES = (
+    "validation_unknown_unit_multiset",
+    "reason_record_multiset",
+    "proof_action_multiset",
     "proof_backlog_by_reason",
     "proof_backlog_by_proof_kind",
     "proof_backlog_by_recovery_action",
@@ -377,16 +383,25 @@ REQUIRED_REPORTING_SURFACES = (
 )
 
 
-def _reporting_surface(payloads):
-    summary = summarize_validation_unknowns(payloads).to_dict()
-    root = summary["root_blocker_summary"]
-    surface = {name: summary[name] for name in REQUIRED_REPORTING_SURFACES}
+def _final_reason_surface(summary_dict):
+    return {name: summary_dict[name] for name in FINAL_REASON_SURFACE_NAMES}
+
+
+def _diagnostic_surface(summary_dict):
+    """診断系 surface 一式。root blocker / completion / causal status を含む。"""
+    root = summary_dict["root_blocker_summary"]
+    surface = {name: summary_dict[name] for name in DIAGNOSTIC_SURFACE_NAMES}
     surface["root_active_count"] = root["active_root_blocker_count"]
     surface["root_candidate_count"] = root["candidate_root_blocker_count"]
     surface["root_required_unique_proofs"] = root["required_unique_proof_count"]
     surface["root_active_blocker_ids"] = sorted(
         repr(item["blocker_id"]) for item in root["active_root_blockers"]
     )
+    surface["root_candidate_blocker_ids"] = sorted(
+        repr(item["blocker_id"]) for item in root["observed_candidate_blockers"]
+    )
+    # per-blocker の内訳（affected results / case pairs / required proofs /
+    # observed reason ids / causal certainty）まで比べる。
     surface["root_active_blocker_shape"] = sorted(
         (
             repr(item["blocker_id"]),
@@ -395,11 +410,23 @@ def _reporting_surface(payloads):
             len(item["required_proof_ids"]),
             tuple(item["observed_reason_ids"]),
             tuple(item["causal_certainties"]),
+            item["proof_requirements_complete"],
         )
         for item in root["active_root_blockers"]
     )
+    # coverage は completion linkage / transition emission を含むので、
+    # completion と causal transition の集計はここで比較される。
     surface["root_coverage"] = root["coverage"]
     surface["root_diagnostics"] = root["diagnostics"]
+    # completion / causal transition の集計そのもの。
+    surface["causal_evidence"] = summary_dict["causal_evidence"]
+    return surface
+
+
+def _reporting_surface(payloads):
+    summary = summarize_validation_unknowns(payloads).to_dict()
+    surface = _final_reason_surface(summary)
+    surface.update(_diagnostic_surface(summary))
     return surface
 
 
@@ -425,39 +452,108 @@ def _without_trace(payloads):
 # ---------------------------------------------------------------------------
 
 def test_aggregate_is_lossless_for_required_reporting():
+    """B の oracle: 診断 surface を **別経路**で作って一致を要求する。
+
+    * O -- final reason は canonical authority、診断は full `debug_trace` の
+      従来経路。`unknown_cause_aggregate` は入力から外す。
+    * R -- final reason は同じ canonical authority、診断は
+      `unknown_cause_aggregate`。`debug_trace` は入力から外す。
+
+    O と R が同じ aggregate 由来の view を共有しないので、aggregate の
+    どこかが壊れれば必ず食い違う（`test_broken_aggregate_dimension_*` で固定）。
+    """
     payloads = _fixture_payloads()
 
-    # O: full trace のみ（aggregate を外すので従来の trace 経路を通る）
     oracle_inputs = _without_aggregate(payloads)
-    oracle = _reporting_surface(oracle_inputs)
-
-    # R: aggregate + canonical payload のみ（debug_trace を外す）
     replay_inputs = _without_trace(payloads)
+    assert all("unknown_cause_aggregate" not in payload for payload in oracle_inputs)
     assert all("debug_trace" not in payload for payload in replay_inputs)
     assert all(
         payload["unknown_cause_aggregate"]["schema"] == UNKNOWN_CAUSE_AGGREGATE_SCHEMA
         for payload in replay_inputs
     )
-    replay = _reporting_surface(replay_inputs)
 
+    oracle_summary = summarize_validation_unknowns(oracle_inputs).to_dict()
+    replay_summary = summarize_validation_unknowns(replay_inputs).to_dict()
+
+    # 経路が本当に別であること（見かけの一致でない）。
+    assert oracle_summary["diagnostic_sources"] == ["debug_trace"]
+    assert replay_summary["diagnostic_sources"] == ["unknown_cause_aggregate"]
+    # final reason は両方とも canonical authority から読む（A は同条件）。
+    assert oracle_summary["final_reason_sources"] == ["canonical"]
+    assert replay_summary["final_reason_sources"] == ["canonical"]
+
+    oracle = _reporting_surface(oracle_inputs)
+    replay = _reporting_surface(replay_inputs)
     mismatched = [name for name in oracle if oracle[name] != replay[name]]
     assert mismatched == [], {
         name: (oracle[name], replay[name]) for name in mismatched
     }
 
-    # 一致が vacuous でないこと: oracle 自体が中身を持っている。
-    assert oracle["unknown_units"] > 0
-    assert oracle["root_active_count"] > 0
-    assert oracle["root_required_unique_proofs"] > 0
+    # 一致が vacuous でないこと: 診断側が実際に中身を持っている。
     assert oracle["proof_action_multiset"]
     assert oracle["proof_backlog_by_proof_kind"]
+    assert oracle["proof_backlog_by_recovery_action"]
+    assert oracle["operational_unknown_by_reason"]
+    assert oracle["root_active_count"] > 0
+    assert oracle["root_required_unique_proofs"] > 0
+    assert oracle["root_coverage"]["typed_cause_coverage"] > 0
+    assert oracle["root_coverage"]["transition_emission_coverage"] > 0
+    assert oracle["root_coverage"]["evidence_complete"] is True
+    assert oracle["causal_evidence"]["proof_completions"]["total"] > 0
+    assert oracle["causal_evidence"]["reason_completions"]["total"] > 0
+    assert oracle["causal_evidence"]["causal_transitions"]["total"] > 0
 
-    # O と R が同じ経路を共有していないこと: aggregate を外して trace も外すと
-    # root blocker は失われる（= R は aggregate を本当に読んでいる）。
+    # aggregate も trace も無ければ root blocker は失われる。
     starved = _reporting_surface(_without_aggregate(_without_trace(payloads)))
     assert starved["root_active_count"] == 0
     assert starved["root_candidate_count"] == 0
     assert starved["root_diagnostics"].get("unknown_typed_cause_schema", 0) > 0
+
+
+@pytest.mark.parametrize(
+    "mutate, label",
+    [
+        (
+            lambda agg: agg["legacy_view"]["proof_action_multiset"].pop(),
+            "legacy_view.proof_action_multiset",
+        ),
+        (
+            lambda agg: agg["legacy_view"]["backlog"]["by_proof_kind"].clear(),
+            "legacy_view.backlog",
+        ),
+        (
+            lambda agg: agg["completions"]["proof_completions"].__setitem__("total", 99),
+            "completions",
+        ),
+        (
+            lambda agg: agg["root_causes"].pop(),
+            "root_causes",
+        ),
+        (
+            lambda agg: agg["root_cause_stats"].__setitem__("typed_reasons", 0),
+            "root_cause_stats",
+        ),
+    ],
+)
+def test_broken_aggregate_dimension_is_detected_by_the_oracle(mutate, label):
+    """aggregate の 1 次元を壊したら oracle が必ず気づく（tautological でない）。"""
+    payloads = _fixture_payloads()
+    oracle = _reporting_surface(_without_aggregate(payloads))
+
+    broken = _without_trace(payloads)
+    mutated = False
+    for payload in broken:
+        aggregate = payload["unknown_cause_aggregate"]
+        try:
+            mutate(aggregate)
+        except (KeyError, TypeError, IndexError):
+            continue
+        mutated = True
+    assert mutated, f"fixture does not exercise {label}"
+
+    replay = _reporting_surface(broken)
+    assert oracle != replay, label
 
 
 def test_aggregate_preserves_legacy_view_separately_from_canonical_counts():
@@ -563,7 +659,7 @@ def test_legacy_trace_with_empty_final_attempt_keeps_the_synthesized_record():
     payload.pop("final_outcome")
 
     summary = summarize_validation_unknowns([payload])
-    assert summary.reason_source_kinds == ("synthesized",)
+    assert summary.final_reason_sources == ("synthesized",)
     assert summary.unknown_units == 1
     assert list(summary.unknown_by_reason) == ["unknown"]
     # canonical payload として読めば、同じ結果から本物の reason が出る（A の差）。
@@ -572,7 +668,7 @@ def test_legacy_trace_with_empty_final_attempt_keeps_the_synthesized_record():
         unknown_reasons=[canonical],
     )
     canonical_summary = summarize_validation_unknowns([canonical_payload])
-    assert canonical_summary.reason_source_kinds == ("canonical",)
+    assert canonical_summary.final_reason_sources == ("canonical",)
     assert list(canonical_summary.unknown_by_reason) == ["return_coverage_gap"]
 
 
@@ -590,7 +686,7 @@ def test_legacy_payload_without_aggregate_uses_full_trace():
     assert summary.proof_backlog_by_proof_kind
     assert summary.root_blocker_summary["active_root_blocker_count"] > 0
     assert summary.evidence_missing == ()
-    assert "legacy_trace" in summary.reason_source_kinds
+    assert "legacy_trace" in summary.final_reason_sources
 
 
 # ---------------------------------------------------------------------------
@@ -746,57 +842,111 @@ def test_run_health_summary_parses_unknown_and_none_markers(tmp_path):
     assert "  proof_backlog_by_reason:\n    (unknown)" in rendered
     assert "  operational_unknown_by_reason:\n    (none)" in rendered
 
-    # (2) overall_summary.txt -> health: `(unknown)` と `(none)` を取り違えない。
-    evidence_missing_summary = summarize_validation_unknowns([
-        EquivalenceResult(
-            is_equivalent=None,
-            function1_name="f",
-            function2_name="f",
-            binary1_name="left",
-            binary2_name="right",
-            solver_results=None,
-        ).to_dict()
-    ])
-    path = tmp_path / "overall_summary.txt"
-    text = format_validation_unknown_summary(evidence_missing_summary)
-    assert "Proof backlog by reason:\n    (unknown)" in text
-    path.write_text(text + "\n")
-    parsed = parse_overall_summary_health(path)
-    assert "proof_backlog_by_reason" in parsed["evidence_missing_sections"]
-    assert "proof_backlog_by_proof_kind" in parsed["evidence_missing_sections"]
-    assert parsed["proof_backlog_by_reason"] == {}
-    # 証拠のある run では同じ section が `(none)` として読まれる（区別が保たれる）。
-    evidenced = summarize_validation_unknowns(_without_trace(_fixture_payloads()))
-    evidenced_path = tmp_path / "overall_summary_evidenced.txt"
-    evidenced_path.write_text(format_validation_unknown_summary(evidenced) + "\n")
-    evidenced_parsed = parse_overall_summary_health(evidenced_path)
-    assert evidenced_parsed["evidence_missing_sections"] == []
-    assert evidenced_parsed["unknown_by_reason"]
+    # (2) overall_summary.txt -> health: 源・観測件数・`(unknown)`/`(none)` が往復する。
+    def _round_trip(summary, name):
+        path = tmp_path / name
+        path.write_text(format_validation_unknown_summary(summary) + "\n")
+        return parse_overall_summary_health(path)
+
+    missing = _round_trip(
+        summarize_validation_unknowns([_bare_unknown_payload(keep_aggregate=False)]),
+        "missing.txt",
+    )
+    assert missing["diagnostic_sources"] == ["payload_fallback"]
+    assert missing["diagnostic_evidence"] == {"observed": 0, "missing": 1}
+    assert "proof_backlog_by_reason" in missing["evidence_missing_sections"]
+    assert "proof_backlog_by_proof_kind" in missing["evidence_missing_sections"]
+    assert missing["proof_backlog_by_reason"] == {}
+
+    observed = _round_trip(
+        summarize_validation_unknowns(_without_trace(_fixture_payloads())), "observed.txt"
+    )
+    assert observed["final_reason_sources"] == ["canonical"]
+    assert observed["diagnostic_sources"] == ["unknown_cause_aggregate"]
+    assert observed["diagnostic_evidence"] == {"observed": 3, "missing": 0}
+    assert observed["evidence_missing_sections"] == []
+    assert observed["unknown_by_reason"]
+
+    mixed = _round_trip(
+        summarize_validation_unknowns(
+            _without_trace(_fixture_payloads())
+            + [_bare_unknown_payload(case="missing", keep_aggregate=False)]
+        ),
+        "mixed.txt",
+    )
+    assert sorted(mixed["diagnostic_sources"]) == ["payload_fallback", "unknown_cause_aggregate"]
+    assert mixed["diagnostic_evidence"] == {"observed": 3, "missing": 1}
 
 
-def test_summary_marks_unknown_when_no_reason_evidence_exists():
-    """record の証拠が 1 件も無いときだけ `(unknown)`。0 件の `(none)` と区別する。"""
-    result = EquivalenceResult(
+def _bare_unknown_payload(case="bare", *, keep_aggregate):
+    """UNKNOWN の結果 1 件。`keep_aggregate=False` で診断源をどちらも持たない。"""
+    payload = EquivalenceResult(
         is_equivalent=None,
-        function1_name="f",
-        function2_name="f",
+        function1_name=case,
+        function2_name=case,
         binary1_name="left",
         binary2_name="right",
         solver_results=None,
-    )
-    payload = result.to_dict()
-    summary = summarize_validation_unknowns([payload])
-    assert summary.unknown_results == 1
-    assert summary.reason_source_kinds == ("synthesized",)
+        binary1_content_identity=BIN1,
+        binary2_content_identity=BIN2,
+        function1_identity=("function", "left", case),
+        function2_identity=("function", "right", case),
+    ).to_dict()
+    payload["case_id"] = case
+    if not keep_aggregate:
+        payload.pop("unknown_cause_aggregate")
+    return payload
+
+
+def test_partial_evidence_all_observed_reports_a_real_zero():
+    """全件に診断源がある run では、空の集計は本当に 0 件（`(none)`）。"""
+    summary = summarize_validation_unknowns(_without_trace(_fixture_payloads()))
+    assert summary.diagnostic_evidence == {"observed": 3, "missing": 0}
+    assert summary.evidence_missing == ()
+    assert summary.diagnostic_sources == ("unknown_cause_aggregate",)
+    rendered = format_validation_unknown_summary(summary)
+    assert "(observed 3 / missing 0)" in rendered
+
+    # 診断源はあるが中身が 0 件、というケースも `(none)` のまま。
+    zero = summarize_validation_unknowns([_bare_unknown_payload(keep_aggregate=True)])
+    assert zero.diagnostic_evidence == {"observed": 1, "missing": 0}
+    assert zero.evidence_missing == ()
+    assert zero.proof_backlog_by_proof_kind == {}
+    assert "Proof backlog by proof_kind:\n    (none)" in format_validation_unknown_summary(zero)
+
+
+def test_partial_evidence_all_missing_is_unknown_not_zero():
+    """診断源がどこにも無い run は、空の集計を `(unknown)` として出す。"""
+    summary = summarize_validation_unknowns([_bare_unknown_payload(keep_aggregate=False)])
+    assert summary.diagnostic_evidence == {"observed": 0, "missing": 1}
+    assert summary.diagnostic_sources == ("payload_fallback",)
     assert "proof_backlog_by_proof_kind" in summary.evidence_missing
     rendered = format_validation_unknown_summary(summary)
     assert "Proof backlog by proof_kind:\n    (unknown)" in rendered
+    assert "(observed 0 / missing 1)" in rendered
 
-    evidenced = summarize_validation_unknowns(_without_trace(_fixture_payloads()))
-    assert evidenced.evidence_missing == ()
-    assert "Proof backlog by proof_kind:\n    (none)" not in format_validation_unknown_summary(
-        evidenced
-    )
+
+def test_partial_evidence_mixed_does_not_collapse_to_a_known_zero():
+    """1 件でも診断源が欠けたら、run 全体を完全観測済みとして扱わない。"""
+    observed = _without_trace(_fixture_payloads())
+    missing = _bare_unknown_payload(case="missing", keep_aggregate=False)
+    summary = summarize_validation_unknowns(observed + [missing])
+
+    assert summary.diagnostic_evidence == {"observed": 3, "missing": 1}
+    assert set(summary.diagnostic_sources) == {"unknown_cause_aggregate", "payload_fallback"}
+    # 観測できた分の件数は残る（欠測で全部 0 にはしない）。
+    assert summary.proof_action_multiset
+    # しかし run 全体は partial なので、空の集計は `(unknown)` 側に倒す。
+    assert summary.evidence_missing
+    rendered = format_validation_unknown_summary(summary)
+    assert "(observed 3 / missing 1)" in rendered
+
+    # root blocker の coverage も「完全観測」と言わない。
+    # root blocker は UNKNOWN 以外の結果も見るので、件数は fixture 全体で数える。
+    root = summary.root_blocker_summary["coverage"]
+    assert root["evidence_complete"] is False
+    assert root["results_with_evidence"] == len(_fixture_payloads())
+    assert root["results_without_evidence"] == 1
 
 
 def test_root_blocker_coverage_is_unknown_without_causal_evidence():

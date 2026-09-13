@@ -35,6 +35,14 @@ _TOTALS_RE = re.compile(
 )
 _FUNCTION_LINE_RE = re.compile(r"^\s{2}(?P<function>[A-Za-z0-9_:$.-]+)\s+: (?P<totals>.*)$")
 _COUNT_LINE_RE = re.compile(r"^\s+- (?P<key>.+): (?P<count>-?\d+)$")
+# Issue #128: the two aggregation families and how much of the diagnostic source
+# was observable.  A run whose diagnostic evidence is incomplete must not read
+# back as a fully observed zero.
+_FINAL_REASON_SOURCES_RE = re.compile(r"^\s+Final reason sources:\s*(?P<value>.*?)\s*$")
+_DIAGNOSTIC_SOURCES_RE = re.compile(
+    r"^\s+Diagnostic sources\s*:\s*(?P<value>.*?)"
+    r"\s*\(observed (?P<observed>\d+) / missing (?P<missing>\d+)\)\s*$"
+)
 
 
 def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
@@ -62,6 +70,9 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
     # Issue #128: `(unknown)` = 証拠が無い、`(none)` = 実際に 0 件。どちらも
     # 空の section になるので、marker を見た section だけ別に記録する。
     evidence_missing_sections: list = []
+    final_reason_sources: list = []
+    diagnostic_sources: list = []
+    diagnostic_evidence: Dict[str, int] = {}
     section_titles = {
         "UNKNOWN by reason:": "unknown_by_reason",
         "Proof backlog by reason:": "proof_backlog_by_reason",
@@ -81,6 +92,20 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
             continue
         if stripped in section_titles:
             active_section = section_titles[stripped]
+            continue
+        source_match = _FINAL_REASON_SOURCES_RE.match(line)
+        if source_match:
+            final_reason_sources = _split_sources(source_match.group("value"))
+            active_section = None
+            continue
+        diagnostic_match = _DIAGNOSTIC_SOURCES_RE.match(line)
+        if diagnostic_match:
+            diagnostic_sources = _split_sources(diagnostic_match.group("value"))
+            diagnostic_evidence = {
+                "observed": int(diagnostic_match.group("observed")),
+                "missing": int(diagnostic_match.group("missing")),
+            }
+            active_section = None
             continue
         if active_section and stripped in ("(unknown)", "(none)"):
             if stripped == "(unknown)" and active_section not in evidence_missing_sections:
@@ -126,8 +151,15 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
         "unknown_units": unknown_units,
         "functions": functions,
         "evidence_missing_sections": evidence_missing_sections,
+        "final_reason_sources": final_reason_sources,
+        "diagnostic_sources": diagnostic_sources,
+        "diagnostic_evidence": diagnostic_evidence,
         **sections,
     }
+
+
+def _split_sources(text: str) -> list:
+    return [item for item in (part.strip() for part in text.split(",")) if item and item != "(none)"]
 
 
 def _parse_totals(text: str) -> Optional[Dict[str, int]]:

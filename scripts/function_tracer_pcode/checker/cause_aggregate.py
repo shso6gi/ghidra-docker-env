@@ -38,6 +38,8 @@ schema `unknown-cause-aggregate-v1` の block:
 * `identity_pool`: 繰り返す identity の実体。`*_refs` はこの index。
 * `root_cause_stats`: reporting の coverage / diagnostics を再構成する counter。
 * `attempts` / `evidence_present`: attempt の要約と、各 block の観測可否。
+  `evidence_present.debug_trace` は「この結果に trace があったか」の証言で、
+  consumer が「trace が省かれた」と「もともと無かった」を区別するのに使う。
 """
 
 from __future__ import annotations
@@ -855,16 +857,17 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
         "backlog": dict(effective_view["backlog"]) if effective_view is not None else None,
         "operational": dict(effective_view["operational"]) if effective_view is not None else None,
         "completions": (
-            _completion_counts(completions, reason_completions, occurrences)
+            completion_counts(completions, reason_completions, occurrences)
             if trace is not None
             else None
         ),
-        "transitions": _transition_counts(transitions, occurrences) if trace is not None else None,
+        "transitions": transition_counts(transitions, occurrences) if trace is not None else None,
         "root_causes": root_causes,
         "identity_pool": identity_pool,
         "root_cause_stats": root_cause_stats,
         "attempts": _attempt_summary(attempts, legacy_attempt) if trace is not None else None,
         "evidence_present": {
+            "debug_trace": trace is not None,
             "attempts": bool(attempts),
             "completion_events": trace is not None,
             "causal_transitions": trace is not None,
@@ -1225,7 +1228,7 @@ def _freeze_cause(entry: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _completion_counts(
+def completion_counts(
     completions: Sequence[Mapping[str, Any]],
     reason_completions: Sequence[Mapping[str, Any]],
     occurrences: Sequence[Mapping[str, Any]],
@@ -1289,7 +1292,7 @@ def _completion_counts(
     }
 
 
-def _transition_counts(
+def transition_counts(
     transitions: Sequence[Mapping[str, Any]],
     occurrences: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any]:

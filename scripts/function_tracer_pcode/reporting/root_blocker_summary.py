@@ -336,7 +336,8 @@ def summarize_root_blockers(
     active: Dict[Tuple[Any, ...], _BlockerBuilder] = {}
     total_reasons = typed_reasons = explicit_status = pair_identified = 0
     transition_target_count = proof_completion_count = linked_completion_count = 0
-    causal_evidence_present = False
+    results_with_evidence = 0
+    results_without_evidence = 0
 
     for payload, stable, provenance in entries:
         final_unknown = _is_final_unknown(payload)
@@ -360,9 +361,7 @@ def summarize_root_blockers(
             linked_completion_count += int(stats.get("linked_completion_count") or 0)
             for name, value in (stats.get("diagnostics") or {}).items():
                 _inc(diagnostics, str(name), int(value or 0))
-            evidence = aggregate.get("evidence_present") or {}
-            if evidence.get("causal_transitions") or evidence.get("completion_events"):
-                causal_evidence_present = True
+            results_with_evidence += 1
             identity_pool = aggregate.get("identity_pool") or ()
             for cause in aggregate.get("root_causes") or ():
                 if not isinstance(cause, Mapping) or cause.get("canonical_cause_key") is None:
@@ -381,9 +380,14 @@ def summarize_root_blockers(
                         active, blocker_id, active_group, stable, provenance, identity_pool
                     )
             continue
+        # Issue #128: aggregate も trace も無い結果は、原因の証拠が観測できていない。
+        # occurrence の組み立ては従来どおり payload の record に落ちるが、その結果は
+        # coverage 上 "観測できなかった" 側に数える（完全観測の 0 に混ぜない）。
         if isinstance(payload.get("debug_trace"), Mapping):
-            causal_evidence_present = True
-        occurrences, transitions, completions, reason_completions = _extract_occurrences(payload)
+            results_with_evidence += 1
+        else:
+            results_without_evidence += 1
+        occurrences, transitions, completions, reason_completions = extract_reason_occurrences(payload)
         transition_target_count += len(
             {
                 _freeze(item.get("target_occurrence_id"))
@@ -468,10 +472,11 @@ def summarize_root_blockers(
                     None,
                 )
 
-    # Issue #128: aggregate も trace も無ければ coverage は `unknown`（= None）。
-    # 「全部 0 件だった」と「観測できなかった」を同じ 0.0 で潰さない。
+    # Issue #128: 1 件も観測できていなければ coverage は `unknown`（= None）。
+    # 一部だけ観測できた run は ratio を出すが `evidence_complete=False` を付けて、
+    # 「全部見た上での 0」と取り違えられないようにする。
     coverage = None
-    if causal_evidence_present:
+    if results_with_evidence:
         coverage = {
             "typed_cause_coverage": _ratio(typed_reasons, total_reasons),
             "explicit_causal_status_coverage": _ratio(explicit_status, total_reasons),
@@ -480,6 +485,9 @@ def summarize_root_blockers(
             "proof_completion_linkage_coverage": _ratio(
                 linked_completion_count, proof_completion_count
             ) if proof_completion_count else 0.0,
+            "evidence_complete": results_without_evidence == 0,
+            "results_with_evidence": results_with_evidence,
+            "results_without_evidence": results_without_evidence,
         }
     blocker_sort = lambda item: (
         -len(item.results),
@@ -603,7 +611,7 @@ def _is_final_unknown(payload: Mapping[str, Any]) -> bool:
     return True
 
 
-def _extract_occurrences(payload: Mapping[str, Any]):
+def extract_reason_occurrences(payload: Mapping[str, Any]):
     trace = payload.get("debug_trace") if isinstance(payload.get("debug_trace"), Mapping) else {}
     occurrences = []
     for attempt_index, attempt in enumerate(trace.get("attempts") or ()):
