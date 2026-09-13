@@ -26,6 +26,7 @@ from scripts.function_tracer_pcode.checker.unknown_reason import (
 # 関数を使うので、aggregate 経路と debug_trace 経路の数が構造的に一致する。
 from scripts.function_tracer_pcode.checker.cause_aggregate import (
     FINAL_UNKNOWN_TRANSITIONS,
+    GLOBAL_REASON_TUPLE_WIDTH as _GLOBAL_REASON_TUPLE_WIDTH,
     aggregate_is_usable,
     build_reason_view,
     multiset_from_rows,
@@ -69,7 +70,6 @@ RECORD_DERIVED_SURFACES = (
 )
 RESULT_JSON_BEGIN = "=== EQUIVALENCE_RESULT_JSON_BEGIN ==="
 RESULT_JSON_END = "=== EQUIVALENCE_RESULT_JSON_END ==="
-_GLOBAL_REASON_TUPLE_WIDTH = 7
 _GLOBAL_REASON_COUNT_KINDS = {
     UnknownCountKind.FINAL_RESULT.value,
     UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value,

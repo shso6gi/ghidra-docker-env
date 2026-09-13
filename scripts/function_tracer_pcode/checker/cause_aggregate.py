@@ -73,6 +73,8 @@ from scripts.function_tracer_pcode.proof.unknown_reason import (
 UNKNOWN_CAUSE_AGGREGATE_SCHEMA = "unknown-cause-aggregate-v1"
 
 FINAL_UNKNOWN_TRANSITIONS = frozenset({"UNKNOWN", "TIMEOUT"})
+# `global_reason_tuple_from_record` / `_from_action` が作る tuple の次元数。
+# 古い artifact の tuple を読むとき、consumer はこの幅へ正規化する。
 GLOBAL_REASON_TUPLE_WIDTH = 7
 PROOF_BACKLOG_CLASSES = frozenset({
     UnknownReasonClass.PROOF_OBLIGATION.value,
