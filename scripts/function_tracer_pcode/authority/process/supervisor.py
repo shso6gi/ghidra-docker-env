@@ -46,6 +46,10 @@ from scripts.function_tracer_pcode.authority.process.operational_extraction impo
     OPERATIONAL_RECOVERY_REGISTRY,
     OPERATIONAL_PRODUCER_STAGE_REGISTRY_DIGEST,
 )
+from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+    ANALYSIS_LIMITATION_REASON_REGISTRY,
+    ANALYSIS_LIMITATION_RECOVERY_REGISTRY,
+)
 from scripts.function_tracer_pcode.authority.domains.call_effect import (
     CALL_EFFECT_REASON_REGISTRY,
     CALL_EFFECT_RECOVERY_REGISTRY,
@@ -154,6 +158,7 @@ PROCESS_DURABLE_REASON_REGISTRY = SealedReasonRegistry.build((
     *SAT_SAFETY_REASON_REGISTRY.snapshot(),
     *ABI_WIDTH_READONLY_REASON_REGISTRY.snapshot(),
     *COMPARISON_CLOSURE_REASON_REGISTRY.snapshot(),
+    *ANALYSIS_LIMITATION_REASON_REGISTRY.snapshot(),
     *PROCESS_COMPLETION_REASON_REGISTRY.snapshot(),
 ))
 PROCESS_DURABLE_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((
@@ -164,6 +169,7 @@ PROCESS_DURABLE_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((
     *SAT_SAFETY_RECOVERY_REGISTRY.snapshot(),
     *ABI_WIDTH_READONLY_RECOVERY_REGISTRY.snapshot(),
     *COMPARISON_CLOSURE_RECOVERY_REGISTRY.snapshot(),
+    *ANALYSIS_LIMITATION_RECOVERY_REGISTRY.snapshot(),
     *PROCESS_COMPLETION_RECOVERY_REGISTRY.snapshot(),
 ))
 
