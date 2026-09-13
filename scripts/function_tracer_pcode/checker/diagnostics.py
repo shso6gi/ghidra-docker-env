@@ -1,8 +1,19 @@
 # -*- coding: utf-8 -*-
-"""結果 JSON に添付する非署名の診断ブロック（Issue #17）。
+"""結果 JSON に添付する診断ブロック（Issue #17）。
 
-段階別の経過時間・式サイズ・ソルバ呼び出し数を機械可読に残す。receipt / digest
-の対象ではない診断領域なので、ここに項目を足しても既存の署名契約は変わらない。
+段階別の経過時間・式サイズ・ソルバ呼び出し数を機械可読に残す。
+
+digest との関係（ここに項目を足すときの契約）:
+
+* 診断は**判定にも semantic projection にも影響しない**。`_semantic_projection`
+  はこのブロックを読まない。
+* ただし診断は `EquivalenceResult.to_dict()` に含まれるので、**canonical result
+  payload preimage は変わり得る**。したがって
+  `canonical_result_payload_preimage_digest` も変わり得る（署名対象外ではない）。
+* 「preimage は変わるが semantic projection は変わらない」ことは、同じ入力から
+  session / evidence / bundle を共有しない **finalization を 2 本独立に起こして**
+  確認する（`tests/unit/_finalization_support.py`、計画 v4 §9.2）。実 run 間の
+  digest 一致・不一致は根拠にしない。
 """
 
 from __future__ import annotations
@@ -27,7 +38,7 @@ DIAGNOSTICS_SCHEMA = "result-diagnostics-v1"
 
 
 def attach_stage_timing(result: Any, clock: StageClock) -> None:
-    """結果オブジェクトの診断ブロックに段階別時間を添付する（署名対象外）。
+    """結果オブジェクトの診断ブロックに段階別時間を添付する（判定には効かない）。
 
     既存の診断（`analysis_seconds` / `phases` / `boundary_seconds` …）は保持し、
     `stages` だけを差し替える（merge）。`stages` には clock の stage / region に
@@ -743,7 +754,7 @@ def phase_timeline_of(checker: Any) -> PhaseTimeline:
 
 
 def attach_phase_timings(result: Any, timeline: Optional[PhaseTimeline]) -> None:
-    """結果の診断ブロックへ phase 別の内訳時間を添付する（署名対象外）。"""
+    """結果の診断ブロックへ phase 別の内訳時間を添付する（判定には効かない）。"""
     if result is None or timeline is None:
         return
     try:

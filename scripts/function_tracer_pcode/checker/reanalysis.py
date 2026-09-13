@@ -345,7 +345,7 @@ def bind_conditional_lane_analyses(result, analysis1, analysis2) -> None:
 
 
 def _attach_analysis_diagnostics(checker, result) -> None:
-    """解析時間と式サイズを結果に添付する（非署名の診断領域）。
+    """解析時間と式サイズを結果に添付する（判定には効かない診断領域）。
 
     Issue #124: 丸ごと上書きせず merge する。同じ結果には `phases`
     （`phase-timing-v1`）/ `boundary_seconds` / `stages` / `conditional_lane`
