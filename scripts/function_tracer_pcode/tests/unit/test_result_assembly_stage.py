@@ -51,23 +51,43 @@ def test_check_no_longer_constructs_equivalence_result_directly():
 
 
 def test_top_level_try_except_handlers_keep_their_types_order_and_bodies():
+    """Issue #125: typed handler 2 つ（限界 / 内部エラー）を generic の前に足した。
+
+    generic 例外の handler は `self._create_error_result` ではなく
+    `internal_error_result(InternalError(...))` を返す（`legacy_compatibility_error`
+    ではなく `internal_exception` に分類するための意図的な契約変更）。
+    """
     fn, _ = _check_fn()
     tr = _top_try(fn)
-    assert len(tr.handlers) == 2 and not tr.orelse and not tr.finalbody
-    assert ast.unparse(tr.handlers[0].type) == "(UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError)"
-    assert ast.unparse(tr.handlers[1].type) == "Exception"
+    assert len(tr.handlers) == 4 and not tr.orelse and not tr.finalbody
+    assert [ast.unparse(handler.type) for handler in tr.handlers] == [
+        "(UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError)",
+        "AnalysisLimitation",
+        "InternalError",
+        "Exception",
+    ]
     # handler 1: debug print → unsupported_smt_result を返す
     h1 = tr.handlers[0]
     assert len(_calls(h1, "unsupported_smt_result")) == 1
     assert isinstance(h1.body[-1], ast.Return) and getattr(h1.body[-1].value.func, "id", "") == "unsupported_smt_result"
-    # handler 2: debug print / traceback → ReturnAbiAuthorityInvalid なら canonical helper、それ以外は self._create_error_result
+    # handler 2: 限界 → analysis_limitation_result（帰属は authority が決める）
     h2 = tr.handlers[1]
-    ifs = [n for n in h2.body if isinstance(n, ast.If)]
+    assert isinstance(h2.body[-1], ast.Return) and getattr(h2.body[-1].value.func, "id", "") == "analysis_limitation_result"
+    assert "session" in {k.arg for k in h2.body[-1].value.keywords}
+    # handler 3: 内部エラー → internal_error_result（例外はそのまま渡す）
+    h3 = tr.handlers[2]
+    assert isinstance(h3.body[-1], ast.Return) and getattr(h3.body[-1].value.func, "id", "") == "internal_error_result"
+    # handler 4: debug print / traceback → ReturnAbiAuthorityInvalid なら canonical helper、
+    # それ以外は InternalError で包んで internal_error_result
+    h4 = tr.handlers[3]
+    ifs = [n for n in h4.body if isinstance(n, ast.If)]
     # if self.debug: traceback（従来どおり）と isinstance 分岐の 2 つ、この順
     assert [ast.unparse(n.test) for n in ifs] == ["self.debug", "isinstance(e, ReturnAbiAuthorityInvalid)"] and not ifs[1].orelse
     ifs = ifs[1:]
     assert isinstance(ifs[0].body[-1], ast.Return) and getattr(ifs[0].body[-1].value.func, "id", "") == "canonical_abi_error_result"
-    assert isinstance(h2.body[-1], ast.Return) and ast.unparse(h2.body[-1].value.func) == "self._create_error_result"
+    assert isinstance(h4.body[-1], ast.Return) and getattr(h4.body[-1].value.func, "id", "") == "internal_error_result"
+    wrapped = _calls(h4.body[-1], "InternalError")
+    assert len(wrapped) == 1 and {k.arg for k in wrapped[0].keywords} == {"site"}
 
 
 def test_all_stage_calls_stay_inside_the_top_level_try_body():
@@ -138,19 +158,27 @@ def test_return_abi_authority_invalid_maps_to_the_canonical_error_kind():
     assert result.failure_message == str(exc)
 
 
-def test_other_exceptions_still_go_through_the_instance_create_error_result_seam():
+def test_other_exceptions_become_internal_exception_errors():
+    """Issue #125: 型の付いていない例外は `internal_exception` の ERROR になる。
+
+    以前は `self._create_error_result` seam 経由の `failure_status=None`
+    （境界で `legacy_compatibility_error`）だった。seam は `abi_retry` が今も
+    使うので残すが、generic handler はここを通らない。
+    """
     analysis = create_mock_analysis("f", [])
     checker = _checker()
-    seen = {}
-
-    def fake_error_result(a1, a2, b1, b2, message, start_time, type_fix_result, retry_count, sig1, sig2):
-        seen.update(message=message, b1=b1)
-        return "ERROR_RESULT"
-
-    checker._create_error_result = fake_error_result
+    checker._create_error_result = lambda *a, **k: "SEAM_WAS_USED"
     with patch.object(checker_module, "assemble_equivalence_result", side_effect=RuntimeError("assembly boom")):
-        assert checker.check(analysis, analysis, "L", "R") == "ERROR_RESULT"
-    assert seen == {"message": "assembly boom", "b1": "L"}
+        result = checker.check(analysis, analysis, "L", "R")
+    assert isinstance(result, EquivalenceResult) and result.is_equivalent is None
+    assert result.failure_status == "internal_exception"
+    assert result.error_message == "RuntimeError: assembly boom"
+    assert result.binary1_name == "L"
+    failure = result.diagnostics["failures"]["internal_exception"]
+    assert failure["exception_type"] == "RuntimeError"
+    assert failure["site"] == "checker.checker.EquivalenceChecker.check"
+    assert failure["stack"] and len(failure["stack"]) <= 64
+    assert len(failure["stack_digest"]) == 64
 
 
 # ---- 段関数の単体 ----------------------------------------------------------------------------------
