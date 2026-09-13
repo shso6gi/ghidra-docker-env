@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
     UnknownSmtExtensionWidthError,
     UnsupportedSmtOperatorError,
 )
+from scripts.function_tracer_pcode.core.stage_clock import open_stage_region, stage_region
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner, ParallelResult
 from scripts.function_tracer_pcode.proof.formula import FormulaBuilder
 from scripts.function_tracer_pcode.checker.counterexample import CounterexampleFormatter
@@ -528,18 +529,24 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             run_obligation_branch_plan,
         )
 
-        return run_obligation_branch_plan(
-            self,
-            analysis1,
-            analysis2,
-            binary1_name,
-            binary2_name,
-            save_formula,
-            type_fix_result,
-            retry_count,
-            original_signature1,
-            original_signature2,
-        )
+        # Issue #124: stage plan 全体を 1 つの親 region にする。`phases[].seconds.
+        # stage_plan` が測るのと同じ区間なので、恒等式 A の左右が同じ境界になる。
+        # 内側の `check` / `obligation_build` は同じ clock の子 region として積まれ、
+        # 差し引き（exclusive）が branch activation / replan / receipt finalize の
+        # 残余になる。
+        with stage_region("branch_plan_orchestration"):
+            return run_obligation_branch_plan(
+                self,
+                analysis1,
+                analysis2,
+                binary1_name,
+                binary2_name,
+                save_formula,
+                type_fix_result,
+                retry_count,
+                original_signature1,
+                original_signature2,
+            )
 
     def check(
         self,
@@ -569,7 +576,12 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             original_signature1 = FunctionSignature.from_analysis(analysis1)
         if original_signature2 is None:
             original_signature2 = FunctionSignature.from_analysis(analysis2)
-        
+
+        # Issue #124: check() 1 回分の region。stage plan 直下に積まれるので、
+        # 「記録されなかった check 呼び出し」が帰属不能時間として残らない。
+        # recurrence promotion の再帰は同名 region への再入なので、回数だけを
+        # 数えて時間は最外の区間に含める（二重計上しない）。
+        check_region = open_stage_region("check")
         try:
             # strategy を選択
             strategy = force_strategy if force_strategy is not None else self.check_strategy
@@ -601,17 +613,18 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             preflight_gate_delta_diagnostic = None
 
             if decision_mode == CallProofDecisionMode.PREFLIGHT_PROJECTION:
-                projection_preparation = prepare_preflight_projection(
-                    ctx,
-                    analysis1,
-                    analysis2,
-                    binary1_name,
-                    binary2_name,
-                    observation_contract_id=self.observation_contract.contract_id,
-                    trusted_proof_artifacts=lambda: self._last_internal_call_effect_artifacts,
-                    enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
-                    call_effect_shadow_manifest=self._call_effect_shadow_manifest,
-                )
+                with stage_region("preflight_projection"):
+                    projection_preparation = prepare_preflight_projection(
+                        ctx,
+                        analysis1,
+                        analysis2,
+                        binary1_name,
+                        binary2_name,
+                        observation_contract_id=self.observation_contract.contract_id,
+                        trusted_proof_artifacts=lambda: self._last_internal_call_effect_artifacts,
+                        enable_completed_recovery_proofs=self.enable_completed_recovery_proofs,
+                        call_effect_shadow_manifest=self._call_effect_shadow_manifest,
+                    )
                 branch_authority = ctx.production_branch_authority_lease
                 locally_issued_branch_authority = None
                 if (
@@ -633,13 +646,16 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                         "direct_checker_compatibility_view",
                     )
                     branch_authority = locally_issued_branch_authority
-                dispatch_frame = build_prepared_dispatch_frame(
-                    ctx,
-                    projection_preparation,
-                    trusted_proof_artifacts=lambda: self._last_internal_call_effect_artifacts,
-                    branch_authority=branch_authority,
-                    locally_issued_branch_authority=locally_issued_branch_authority,
-                )
+                # projection から作る dispatch frame も同じ region へ合算する
+                # （同名 region なので合算され、区間として二重計上されない）。
+                with stage_region("preflight_projection"):
+                    dispatch_frame = build_prepared_dispatch_frame(
+                        ctx,
+                        projection_preparation,
+                        trusted_proof_artifacts=lambda: self._last_internal_call_effect_artifacts,
+                        branch_authority=branch_authority,
+                        locally_issued_branch_authority=locally_issued_branch_authority,
+                    )
                 runtime_preparation = prepare_strategy_runtime(
                     getattr(self, "_obligation_runtime_session", None),
                     replan_plan,
@@ -649,48 +665,51 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                 if runtime_preparation.store_on_facade:
                     # 6b-2: facade write は check() に残す。strategy 実行より前、必要な場合のみ。
                     self._obligation_runtime_session = runtime_preparation.runtime
-                outcome = run_strategy_branch(
-                    ctx,
-                    dispatch_frame,
-                    runtime_preparation.runtime,
-                    analysis1,
-                    analysis2,
-                    save_formula,
-                    locally_issued_branch_authority=locally_issued_branch_authority,
-                    call_effect_shadow_manifest=projection_preparation.call_effect_shadow_manifest,
-                    debug_print=self._debug_print,
-                    apply_preflight_final_gate=self._apply_preflight_final_gate,
-                )
+                with stage_region("strategy_branch"):
+                    outcome = run_strategy_branch(
+                        ctx,
+                        dispatch_frame,
+                        runtime_preparation.runtime,
+                        analysis1,
+                        analysis2,
+                        save_formula,
+                        locally_issued_branch_authority=locally_issued_branch_authority,
+                        call_effect_shadow_manifest=projection_preparation.call_effect_shadow_manifest,
+                        debug_print=self._debug_print,
+                        apply_preflight_final_gate=self._apply_preflight_final_gate,
+                    )
                 strategy_result = outcome.strategy_result
                 call_effect_shadow_manifest = outcome.call_effect_shadow_manifest
                 preflight_gate_delta_diagnostic = outcome.preflight_gate_delta_diagnostic
             else:
-                legacy_outcome = run_legacy_strategy(
-                    strategy,
-                    analysis1,
-                    analysis2,
-                    binary1_name,
-                    binary2_name,
-                    save_formula,
-                    debug_print=self._debug_print,
-                    call_effect_shadow_manifest=self._call_effect_shadow_manifest,
-                    apply_phase2_relational_call_discharge=self._apply_phase2_relational_call_discharge,
-                )
+                with stage_region("strategy_branch"):
+                    legacy_outcome = run_legacy_strategy(
+                        strategy,
+                        analysis1,
+                        analysis2,
+                        binary1_name,
+                        binary2_name,
+                        save_formula,
+                        debug_print=self._debug_print,
+                        call_effect_shadow_manifest=self._call_effect_shadow_manifest,
+                        apply_phase2_relational_call_discharge=self._apply_phase2_relational_call_discharge,
+                    )
                 strategy_result = legacy_outcome.strategy_result
                 call_effect_shadow_manifest = legacy_outcome.call_effect_shadow_manifest
             # 6b-3: C 段（UNKNOWN reason refinement）。順序と各段の受け渡しは段関数内で固定。
             # mixin メソッドは call 時に self から解決する（instance patch seam 維持）。
-            refine_unknown_reasons(
-                strategy_result,
-                analysis1,
-                analysis2,
-                call_effect_shadow_manifest,
-                branch_id=branch_id,
-                call_effect_comparison_identity=self._call_effect_comparison_identity,
-                attach_recurrence_proposal_blockers=self._attach_recurrence_proposal_blockers,
-                specialize_call_effect_unknown_reasons=self._specialize_call_effect_unknown_reasons,
-                attach_root_blocker_identities=self._attach_root_blocker_identities,
-            )
+            with stage_region("unknown_refinement"):
+                refine_unknown_reasons(
+                    strategy_result,
+                    analysis1,
+                    analysis2,
+                    call_effect_shadow_manifest,
+                    branch_id=branch_id,
+                    call_effect_comparison_identity=self._call_effect_comparison_identity,
+                    attach_recurrence_proposal_blockers=self._attach_recurrence_proposal_blockers,
+                    specialize_call_effect_unknown_reasons=self._specialize_call_effect_unknown_reasons,
+                    attach_root_blocker_identities=self._attach_root_blocker_identities,
+                )
 
             # Recurrence is a recovery proof for this already-inconclusive
             # branch, never an alternative surface evaluated before the
@@ -699,14 +718,15 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             # function-local unary artifact.
             if getattr(self, "_active_recurrence_promotion_authority", None) is None:
                 # 6b-4: (1)(2) は段関数、(3) の facade write はその直後・(4) より前に check() が書く。
-                promotion = prepare_recurrence_promotion(
-                    strategy_result,
-                    analysis1,
-                    analysis2,
-                    comparison_session_id=comparison_session_id,
-                    branch_id=branch_id,
-                    recurrence_promotion_authority=self._recurrence_promotion_authority,
-                )
+                with stage_region("recurrence_promotion"):
+                    promotion = prepare_recurrence_promotion(
+                        strategy_result,
+                        analysis1,
+                        analysis2,
+                        comparison_session_id=comparison_session_id,
+                        branch_id=branch_id,
+                        recurrence_promotion_authority=self._recurrence_promotion_authority,
+                    )
                 if promotion is not None:
                     self._last_recurrence_promotion_attempt = promotion.attempt
                     if complete_recurrence_promotion_signals(
@@ -734,28 +754,29 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                         finally:
                             del self._active_recurrence_promotion_authority
             # 6b-5: E・F 段（結果組み立て + 私的付帯 3 つ）は段関数。mixin は call 時に self から解決する。
-            return assemble_equivalence_result(
-                strategy_result,
-                analysis1,
-                analysis2,
-                binary1_name,
-                binary2_name,
-                ctx=ctx,
-                dispatch_frame=dispatch_frame,
-                preflight_gate_delta_diagnostic=preflight_gate_delta_diagnostic,
-                call_effect_shadow_manifest=call_effect_shadow_manifest,
-                start_time=start_time,
-                type_fix_result=type_fix_result,
-                retry_count=retry_count,
-                original_signature1=original_signature1,
-                original_signature2=original_signature2,
-                debug=self.debug,
-                deterministic_analysis_identity=self._deterministic_analysis_identity,
-                format_counterexample=self._format_counterexample,
-                completed_recovery_proof_payload=self._completed_recovery_proof_payload,
-                reason_completion_applicability_contexts=self._reason_completion_applicability_contexts,
-                recurrence_promotion_result_receipt=self._recurrence_promotion_result_receipt,
-            )
+            with stage_region("result_assembly"):
+                return assemble_equivalence_result(
+                    strategy_result,
+                    analysis1,
+                    analysis2,
+                    binary1_name,
+                    binary2_name,
+                    ctx=ctx,
+                    dispatch_frame=dispatch_frame,
+                    preflight_gate_delta_diagnostic=preflight_gate_delta_diagnostic,
+                    call_effect_shadow_manifest=call_effect_shadow_manifest,
+                    start_time=start_time,
+                    type_fix_result=type_fix_result,
+                    retry_count=retry_count,
+                    original_signature1=original_signature1,
+                    original_signature2=original_signature2,
+                    debug=self.debug,
+                    deterministic_analysis_identity=self._deterministic_analysis_identity,
+                    format_counterexample=self._format_counterexample,
+                    completed_recovery_proof_payload=self._completed_recovery_proof_payload,
+                    reason_completion_applicability_contexts=self._reason_completion_applicability_contexts,
+                    recurrence_promotion_result_receipt=self._recurrence_promotion_result_receipt,
+                )
         
         except (UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError) as e:
             self._debug_print(
@@ -804,6 +825,9 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                 type_fix_result, retry_count,
                 original_signature1, original_signature2
             )
+
+        finally:
+            check_region.close()
 
     def _format_counterexample(
         self,

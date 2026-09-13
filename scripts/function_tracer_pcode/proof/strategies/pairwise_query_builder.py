@@ -6,6 +6,7 @@ import os
 from functools import cmp_to_key
 from typing import Any, Dict, List, Tuple
 
+from scripts.function_tracer_pcode.core.stage_clock import stage_region
 from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
@@ -717,40 +718,42 @@ def build_pair_query(
     pair_id: str
 ) -> str:
     """値不等式つきの pair query を構築する"""
-    lines = _build_query_header(
-        f"; Pairwise Query: Pair {pair_id}",
-        f"; Case1[{case1.index}]: {case1.get_condition_summary()}",
-        f"; Case2[{case2.index}]: {case2.get_condition_summary()}",
-        logic=base_ctx.get("smt_logic", "QF_BV"),
-    )
-    lines.extend(base_ctx["header_lines"])
-    lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
-    lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
-    lines.extend(_build_loop_summary_case_comments(case1.value_expr, "Case1"))
-    lines.extend(_build_loop_summary_case_comments(case2.value_expr, "Case2"))
-    lines.extend(_build_pairwise_extra_assertions(base_ctx, pair_id))
-    lines.extend(
-        _build_value_inequality_section(
-            case1.get_value_smt(
-                param_replace_fn1,
-                target_bits=base_ctx.get("return_size1", 32),
-                use_sign_extension=case1.should_sign_extend_value(),
-            ),
-            case2.get_value_smt(
-                param_replace_fn2,
-                target_bits=base_ctx.get("return_size2", 32),
-                use_sign_extension=case2.should_sign_extend_value(),
-            ),
-            base_ctx.get("return_size1", 32),
-            base_ctx.get("return_size2", 32),
-            title="; Value inequality",
-            note_lines=[],
+    # Issue #124: pair query のレンダリングを計測する（全 renderer がここを通る）。
+    with stage_region("query_build"):
+        lines = _build_query_header(
+            f"; Pairwise Query: Pair {pair_id}",
+            f"; Case1[{case1.index}]: {case1.get_condition_summary()}",
+            f"; Case2[{case2.index}]: {case2.get_condition_summary()}",
+            logic=base_ctx.get("smt_logic", "QF_BV"),
         )
-    )
-    lines.append("")
-    lines.append("(check-sat)")
-    lines.append("(get-model)")
-    return "\n".join(lines)
+        lines.extend(base_ctx["header_lines"])
+        lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
+        lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
+        lines.extend(_build_loop_summary_case_comments(case1.value_expr, "Case1"))
+        lines.extend(_build_loop_summary_case_comments(case2.value_expr, "Case2"))
+        lines.extend(_build_pairwise_extra_assertions(base_ctx, pair_id))
+        lines.extend(
+            _build_value_inequality_section(
+                case1.get_value_smt(
+                    param_replace_fn1,
+                    target_bits=base_ctx.get("return_size1", 32),
+                    use_sign_extension=case1.should_sign_extend_value(),
+                ),
+                case2.get_value_smt(
+                    param_replace_fn2,
+                    target_bits=base_ctx.get("return_size2", 32),
+                    use_sign_extension=case2.should_sign_extend_value(),
+                ),
+                base_ctx.get("return_size1", 32),
+                base_ctx.get("return_size2", 32),
+                title="; Value inequality",
+                note_lines=[],
+            )
+        )
+        lines.append("")
+        lines.append("(check-sat)")
+        lines.append("(get-model)")
+        return "\n".join(lines)
 
 
 def _build_pairwise_extra_assertions(

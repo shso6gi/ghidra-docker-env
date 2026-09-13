@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
+from scripts.function_tracer_pcode.core.stage_clock import stage_region
 from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
@@ -111,28 +112,30 @@ class ObligationRuntimeSession:
 
     @classmethod
     def create(cls, analysis1: Any, analysis2: Any) -> "ObligationRuntimeSession":
-        left = cls._snapshot(analysis1, "left")
-        right = cls._snapshot(analysis2, "right")
-        pair_snapshot_id = ("analysis_pair", left.snapshot_id, right.snapshot_id)
-        premise = SnapshotFingerprintCodec.digest(
-            (left.semantic_fingerprint, right.semantic_fingerprint)
-        )
-        view = DerivedAnalysisView.create(
-            snapshot_id=pair_snapshot_id,
-            parent_view_id=None,
-            validated_proof_closure_id=("proof_closure", ()),
-            normalization_policy_digest="legacy-normalization-surface-v1",
-            view_builder_version="obligation-runtime-v1",
-            semantic_surface={
-                "left_snapshot": left.semantic_fingerprint,
-                "right_snapshot": right.semantic_fingerprint,
-                "premise_digest": premise,
-                "applied_artifact_ids": (),
-            },
-        )
-        session = cls(view, view)
-        session.view_records[view.view_id] = ViewPremiseRecord(view.view_id, premise)
-        return session
+        # Issue #124: pair obligation runtime の構築を計測する。
+        with stage_region("obligation_build"):
+            left = cls._snapshot(analysis1, "left")
+            right = cls._snapshot(analysis2, "right")
+            pair_snapshot_id = ("analysis_pair", left.snapshot_id, right.snapshot_id)
+            premise = SnapshotFingerprintCodec.digest(
+                (left.semantic_fingerprint, right.semantic_fingerprint)
+            )
+            view = DerivedAnalysisView.create(
+                snapshot_id=pair_snapshot_id,
+                parent_view_id=None,
+                validated_proof_closure_id=("proof_closure", ()),
+                normalization_policy_digest="legacy-normalization-surface-v1",
+                view_builder_version="obligation-runtime-v1",
+                semantic_surface={
+                    "left_snapshot": left.semantic_fingerprint,
+                    "right_snapshot": right.semantic_fingerprint,
+                    "premise_digest": premise,
+                    "applied_artifact_ids": (),
+                },
+            )
+            session = cls(view, view)
+            session.view_records[view.view_id] = ViewPremiseRecord(view.view_id, premise)
+            return session
 
     @classmethod
     def create_unary(
@@ -144,40 +147,42 @@ class ObligationRuntimeSession:
         domain_contract: Any,
         normalization_policy_digest: str,
     ) -> "ObligationRuntimeSession":
-        normalized_domain = UnaryArtifactDomain.normalize(domain)
-        snapshot = cls._snapshot(analysis, "unary")
-        seed = semantic_seed
-        if seed is None and normalized_domain == UnaryArtifactDomain.RETURN_OUTCOME_V1.value:
-            seed = getattr(analysis, "outcome_seed", None)
-        unary_premise = build_function_unary_premise(
-            normalized_domain,
-            snapshot.semantic_fingerprint,
-            seed,
-            domain_contract,
-            normalization_policy_digest,
-        )
-        seed_digest = unary_premise.semantic_seed_digest
-        premise = unary_premise.function_premise_digest
-        view = DerivedAnalysisView.create(
-            snapshot_id=("function_analysis", snapshot.snapshot_id),
-            parent_view_id=None,
-            validated_proof_closure_id=("proof_closure", ()),
-            normalization_policy_digest=str(normalization_policy_digest),
-            view_builder_version="unary-obligation-runtime-v1",
-            semantic_surface={
-                "function_snapshot": snapshot.semantic_fingerprint,
-                "unary_artifact_domain": normalized_domain,
-                "domain_contract": SnapshotFingerprintCodec.freeze(domain_contract),
-                "semantic_seed_digest": seed_digest,
-                "premise_digest": premise,
-                "premise_schema_id": unary_premise.premise_schema_id,
-                "premise_codec_id": unary_premise.premise_codec_id,
-                "applied_artifact_ids": (),
-            },
-        )
-        session = cls(view, view)
-        session.view_records[view.view_id] = ViewPremiseRecord(view.view_id, premise)
-        return session
+        # Issue #124: unary obligation runtime の構築を計測する。
+        with stage_region("obligation_build"):
+            normalized_domain = UnaryArtifactDomain.normalize(domain)
+            snapshot = cls._snapshot(analysis, "unary")
+            seed = semantic_seed
+            if seed is None and normalized_domain == UnaryArtifactDomain.RETURN_OUTCOME_V1.value:
+                seed = getattr(analysis, "outcome_seed", None)
+            unary_premise = build_function_unary_premise(
+                normalized_domain,
+                snapshot.semantic_fingerprint,
+                seed,
+                domain_contract,
+                normalization_policy_digest,
+            )
+            seed_digest = unary_premise.semantic_seed_digest
+            premise = unary_premise.function_premise_digest
+            view = DerivedAnalysisView.create(
+                snapshot_id=("function_analysis", snapshot.snapshot_id),
+                parent_view_id=None,
+                validated_proof_closure_id=("proof_closure", ()),
+                normalization_policy_digest=str(normalization_policy_digest),
+                view_builder_version="unary-obligation-runtime-v1",
+                semantic_surface={
+                    "function_snapshot": snapshot.semantic_fingerprint,
+                    "unary_artifact_domain": normalized_domain,
+                    "domain_contract": SnapshotFingerprintCodec.freeze(domain_contract),
+                    "semantic_seed_digest": seed_digest,
+                    "premise_digest": premise,
+                    "premise_schema_id": unary_premise.premise_schema_id,
+                    "premise_codec_id": unary_premise.premise_codec_id,
+                    "applied_artifact_ids": (),
+                },
+            )
+            session = cls(view, view)
+            session.view_records[view.view_id] = ViewPremiseRecord(view.view_id, premise)
+            return session
 
     def publish_unary_artifact(
         self,
@@ -472,21 +477,23 @@ class ObligationRuntimeSession:
         depends_on: Iterable[ProofRequirementId] = (),
         payload: Any = None,
     ) -> WorkItem:
-        instance = ObligationInstanceId(
-            requirement,
-            self.current_view.view_id,
-            self.premise_digest,
-        )
-        item = WorkItem(instance, kind, payload)
-        self.worklist.add(item)
-        key = instance.to_key()
-        if callback is not None:
-            self.callbacks[key] = callback
-            self.producers[requirement.to_key()] = callback
-        for dependency in depends_on:
-            self.dependencies.setdefault(dependency.to_key(), set()).add(requirement.to_key())
-        self.events.append(ObligationExecutionEvent("scheduled", key, self.current_view.view_id, kind))
-        return item
+        # Issue #124: obligation の構築（scheduling）を計測する。producer の実行は run_next 側なので含まない。
+        with stage_region("obligation_build"):
+            instance = ObligationInstanceId(
+                requirement,
+                self.current_view.view_id,
+                self.premise_digest,
+            )
+            item = WorkItem(instance, kind, payload)
+            self.worklist.add(item)
+            key = instance.to_key()
+            if callback is not None:
+                self.callbacks[key] = callback
+                self.producers[requirement.to_key()] = callback
+            for dependency in depends_on:
+                self.dependencies.setdefault(dependency.to_key(), set()).add(requirement.to_key())
+            self.events.append(ObligationExecutionEvent("scheduled", key, self.current_view.view_id, kind))
+            return item
 
     def execute(
         self,

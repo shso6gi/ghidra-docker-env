@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple, cas
 from scripts.function_tracer_pcode.core.analysis import ComparisonSurface, FunctionReturnAnalysis, ReturnInfo
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.stage_clock import stage_region
 from scripts.function_tracer_pcode.core.structural import StructuralKey, expression_key_safe
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ANALYSIS_STATUS_DECOMPILATION_FAILED,
@@ -150,11 +151,12 @@ def _impl_analyze_function(
         TOP_LEVEL_SOURCE_CONTRACT,
         decompile_function,
     )
-    results = decompile_function(
-        self, function, timeout, None,
-        source_contract_id=TOP_LEVEL_SOURCE_CONTRACT,
-        semantic_owner="slice6",
-    )
+    with stage_region("decompile"):
+        results = decompile_function(
+            self, function, timeout, None,
+            source_contract_id=TOP_LEVEL_SOURCE_CONTRACT,
+            semantic_owner="slice6",
+        )
 
     if not results.decompileCompleted():
         message = "Decompilation failed!"
@@ -263,16 +265,18 @@ def _impl_analyze_function(
             self._current_effect_summary = empty_effect_summary
             return_infos = list(recovered_control_returns)
         else:
-            effect_summary = self._invoke_build_effect_summary(
-                function,
-                high_function,
-                tracer,
-                condition_tracker,
-                parameters,
-                active_functions=active_functions,
-                bound_parameter_values=normalized_bound_parameter_values,
-                bound_parameter_storage_values=normalized_bound_parameter_storage_values,
-            )
+            # Issue #124: 効果要約の構築（side ごとの analysis_regions の内訳）。
+            with stage_region("effect_summary"):
+                effect_summary = self._invoke_build_effect_summary(
+                    function,
+                    high_function,
+                    tracer,
+                    condition_tracker,
+                    parameters,
+                    active_functions=active_functions,
+                    bound_parameter_values=normalized_bound_parameter_values,
+                    bound_parameter_storage_values=normalized_bound_parameter_storage_values,
+                )
             self._current_effect_summary = effect_summary
             # Issue #131: 自分自身の効果要約で観測した切り捨て（STORE 値展開と、その
             # 中で採用した callee 要約への参照）を現在の解析 scope へ取り込む。
@@ -302,18 +306,20 @@ def _impl_analyze_function(
                 return pre_return_structural_result
 
             return_infos = []
-            for i, return_op in enumerate(return_ops):
-                self._debug_print(f"--- Analyzing RETURN #{i + 1} ---")
-                infos = self._analyze_return_op(
-                    return_op,
-                    tracer,
-                    condition_tracker,
-                    i,
-                    current_function=function,
-                    active_functions=active_functions,
-                    return_type_obj=return_type_obj,
-                )
-                return_infos.extend(infos)
+            # Issue #124: RETURN ごとの戻り値意味の抽出（p-code 走査本体）。
+            with stage_region("trace_returns"):
+                for i, return_op in enumerate(return_ops):
+                    self._debug_print(f"--- Analyzing RETURN #{i + 1} ---")
+                    infos = self._analyze_return_op(
+                        return_op,
+                        tracer,
+                        condition_tracker,
+                        i,
+                        current_function=function,
+                        active_functions=active_functions,
+                        return_type_obj=return_type_obj,
+                    )
+                    return_infos.extend(infos)
 
         result = FunctionReturnAnalysis(
             function_name=function.getName(),
@@ -419,12 +425,13 @@ def _impl_analyze_function(
         # them into several overlapping finite-unroll members.  Rejected
         # proposals remain diagnostics-only and continue through the legacy
         # refinement path unchanged.
-        pre_refinement_summary = self._apply_structural_recurrence_summary(
-            function,
-            high_function,
-            result,
-            tracer,
-        )
+        with stage_region("recurrence_summary"):
+            pre_refinement_summary = self._apply_structural_recurrence_summary(
+                function,
+                high_function,
+                result,
+                tracer,
+            )
         if pre_refinement_summary is not None:
             result = pre_refinement_summary
         self._sync_expansion_budget_truncations(result)
@@ -436,11 +443,12 @@ def _impl_analyze_function(
                 result.deferred_calls
                 and not result.quarantined_recurrence_proposals
             ):
-                self._apply_bounded_call_refinement(
-                    result,
-                    active_functions,
-                    CallTargetRef.from_function(function),
-                )
+                with stage_region("bounded_refinement"):
+                    self._apply_bounded_call_refinement(
+                        result,
+                        active_functions,
+                        CallTargetRef.from_function(function),
+                    )
         finally:
             if current_active_key is not None:
                 self._analysis_in_progress.pop(current_active_key, None)
@@ -458,12 +466,13 @@ def _impl_analyze_function(
 
         if not recurrence_proposal_open:
             self._sync_expansion_budget_truncations(result)
-            summary_view = self._apply_structural_recurrence_summary(
-                function,
-                high_function,
-                result,
-                tracer,
-            )
+            with stage_region("recurrence_summary"):
+                summary_view = self._apply_structural_recurrence_summary(
+                    function,
+                    high_function,
+                    result,
+                    tracer,
+                )
             if summary_view is not None:
                 result = summary_view
                 self._normalize_return_partition(result)
@@ -473,11 +482,12 @@ def _impl_analyze_function(
                 if current_active_key is not None:
                     self._analysis_in_progress[current_active_key] = result
                 try:
-                    self._apply_bounded_call_refinement(
-                        result,
-                        active_functions,
-                        CallTargetRef.from_function(function),
-                    )
+                    with stage_region("bounded_refinement"):
+                        self._apply_bounded_call_refinement(
+                            result,
+                            active_functions,
+                            CallTargetRef.from_function(function),
+                        )
                 finally:
                     if current_active_key is not None:
                         self._analysis_in_progress.pop(current_active_key, None)
@@ -722,12 +732,13 @@ def _impl_refresh_structural_recurrence_summary(
                 requirement.requirement_id,
                 authority_digest(requirement.semantic_target_key),
             )
-    results = decompile_function(
-        self, function, timeout, None,
-        source_contract_id=RECURRENCE_REFRESH_SOURCE_CONTRACT,
-        semantic_owner="subordinate",
-        parent_binding=parent_binding,
-    )
+    with stage_region("decompile"):
+        results = decompile_function(
+            self, function, timeout, None,
+            source_contract_id=RECURRENCE_REFRESH_SOURCE_CONTRACT,
+            semantic_owner="subordinate",
+            parent_binding=parent_binding,
+        )
     if not results.decompileCompleted():
         self._debug_print(
             f"Structural summary refresh decompilation failed for '{analysis.function_name}'"

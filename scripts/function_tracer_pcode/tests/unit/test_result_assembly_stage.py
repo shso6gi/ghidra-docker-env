@@ -45,7 +45,9 @@ def test_check_no_longer_constructs_equivalence_result_directly():
 def test_top_level_try_except_handlers_keep_their_types_order_and_bodies():
     fn, _ = _check_fn()
     tr = _top_try(fn)
-    assert len(tr.handlers) == 2 and not tr.orelse and not tr.finalbody
+    assert len(tr.handlers) == 2 and not tr.orelse
+    # Issue #124: finally は診断 region を閉じるだけ（判定に効く文を置かない）。
+    assert [ast.unparse(n) for n in tr.finalbody] == ["check_region.close()"]
     assert ast.unparse(tr.handlers[0].type) == "(UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError)"
     assert ast.unparse(tr.handlers[1].type) == "Exception"
     # handler 1: debug print → unsupported_smt_result を返す
@@ -72,8 +74,15 @@ def test_all_stage_calls_stay_inside_the_top_level_try_body():
         calls = _calls(fn, name)
         assert len(calls) == 1, name
         assert calls[0].lineno in body_lines, name
-    # 通常経路の return は assemble_equivalence_result の戻り値そのもの（try 本体の最後）
+    # 通常経路の return は assemble_equivalence_result の戻り値そのもの（try 本体の最後）。
+    # Issue #124: その return は `result_assembly` region の中に入っているが、
+    # region は計測だけで分岐も値も変えない。
     last = tr.body[-1]
+    assert isinstance(last, ast.With) and [ast.unparse(item.context_expr) for item in last.items] == [
+        "stage_region('result_assembly')"
+    ]
+    assert len(last.body) == 1
+    last = last.body[0]
     assert isinstance(last, ast.Return) and getattr(last.value.func, "id", "") == "assemble_equivalence_result"
     kw = {k.arg for k in last.value.keywords}
     assert {"ctx", "dispatch_frame", "preflight_gate_delta_diagnostic", "call_effect_shadow_manifest", "start_time",

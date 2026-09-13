@@ -10,6 +10,7 @@ from scripts.function_tracer_pcode.core import (
     condition_key,
     key_contains_placeholder,
 )
+from scripts.function_tracer_pcode.core.stage_clock import stage_region
 from scripts.function_tracer_pcode.core.structural import expression_provenance_key
 from scripts.function_tracer_pcode.analysis.debug import summarize_expression, summarize_condition
 from scripts.function_tracer_pcode.analysis.condition.bitvector import (
@@ -1134,7 +1135,9 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         cls,
         conditions: Iterable[Condition],
     ) -> List[Condition]:
-        return cls.build_object_centric_condition_basis(conditions)
+        # Issue #124: 条件簡約の公開 entry（同名 region に合算される）。
+        with stage_region("condition_simplify"):
+            return cls.build_object_centric_condition_basis(conditions)
 
     @classmethod
     def subtract_implied_conditions(
@@ -1164,7 +1167,9 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
     @classmethod
     def simplify_conditions(cls, conditions: List[Condition]) -> List[Condition]:
         """条件リストを object-centric に簡略化する。"""
-        return cls.build_constraint_set(conditions).simplified_conditions()
+        # Issue #124: 条件簡約の公開 entry（同名 region に合算される）。
+        with stage_region("condition_simplify"):
+            return cls.build_constraint_set(conditions).simplified_conditions()
 
     @classmethod
     def reduce_expression_under_conditions(

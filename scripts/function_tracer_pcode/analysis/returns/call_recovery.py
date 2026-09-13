@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, cast
 from dataclasses import replace
+from scripts.function_tracer_pcode.core.stage_clock import stage_region
 from scripts.function_tracer_pcode.core.analysis import (
     DeferredCallInfo,
     FunctionReturnAnalysis,
@@ -1843,11 +1844,12 @@ def _impl__resolve_local_code_target_expansions(
         INLINE_REGION_SOURCE_CONTRACT,
         decompile_function,
     )
-    results = decompile_function(
-        self, containing, 60, None,
-        source_contract_id=INLINE_REGION_SOURCE_CONTRACT,
-        semantic_owner="subordinate",
-    )
+    with stage_region("decompile"):
+        results = decompile_function(
+            self, containing, 60, None,
+            source_contract_id=INLINE_REGION_SOURCE_CONTRACT,
+            semantic_owner="subordinate",
+        )
     if not results.decompileCompleted():
         self._debug_print(
             f"Local target resolution failed: decompilation incomplete for 0x{address_value:x}"
