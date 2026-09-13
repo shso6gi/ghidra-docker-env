@@ -1141,6 +1141,10 @@ def format_run_health_summary(health: Mapping[str, Any]) -> str:
                 f"    added pairs: {baseline.get('added_pair_identity_count', 0)}",
             ]
         )
+    # Issue #128: 証拠が無い section は `(unknown)`。実際に 0 件の `(none)` と
+    # 潰さない（`run_health_summary.parse_overall_summary_health` が往復させる）。
+    evidence_missing = health.get("evidence_missing_sections")
+    evidence_missing = set(evidence_missing) if isinstance(evidence_missing, (list, tuple, set)) else set()
     for title in (
         "unknown_by_reason",
         "proof_backlog_by_reason",
@@ -1149,7 +1153,7 @@ def format_run_health_summary(health: Mapping[str, Any]) -> str:
         values = health.get(title)
         lines.append(f"  {title}:")
         if not isinstance(values, Mapping) or not values:
-            lines.append("    (none)")
+            lines.append("    (unknown)" if title in evidence_missing else "    (none)")
             continue
         for name, count in sorted(values.items(), key=lambda item: (-int(item[1]), str(item[0])))[:20]:
             lines.append(f"    - {name}: {count}")

@@ -299,6 +299,7 @@ def run_equivalence_check(args):
     """
     start_time = time.time()
     from scripts.function_tracer_pcode.checker.diagnostics import StageClock, attach_stage_timing
+    from scripts.function_tracer_pcode.checker.cause_aggregate import attach_cause_aggregate
 
     stage_clock = StageClock()
 
@@ -541,6 +542,9 @@ def run_equivalence_check(args):
         )
 
     attach_stage_timing(result, stage_clock)
+    # Issue #128: 添付順は attach_stage_timing -> attach_cause_aggregate ->
+    # to_string -> to_dict -> bundle。aggregate は preimage を組む前に確定させる。
+    attach_cause_aggregate(result)
     emission_started = time.monotonic()
     output_content = result.to_string(
         verbose=args.verbose,

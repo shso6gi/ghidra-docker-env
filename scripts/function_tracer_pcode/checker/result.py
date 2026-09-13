@@ -107,6 +107,13 @@ class EquivalenceResult:
     )
     # 非署名の診断（Issue #17）: 解析時間・式サイズ。to_dict で結果統計と合成する。
     diagnostics: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
+    # Issue #128 PR-128-A: `debug_trace` を省いても原因分析を失わないための
+    # lossless な compact 集計。canonical bundle を組む前に確定させる
+    # （`checker.cause_aggregate.attach_cause_aggregate`）。未設定なら to_dict が
+    # その場で組むので、この field が None でも JSON には必ず出る。
+    unknown_cause_aggregate: Optional[Dict[str, Any]] = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
@@ -248,6 +255,15 @@ class EquivalenceResult:
         from scripts.function_tracer_pcode.checker.diagnostics import result_diagnostics_payload
 
         result["diagnostics"] = result_diagnostics_payload(self)
+        # Issue #128: 原因分析の compact 集計は常時出す。既に確定していれば
+        # それを使い、ここで作り直さない（preimage 確定前に固定するため）。
+        if self.unknown_cause_aggregate is None:
+            from scripts.function_tracer_pcode.checker.cause_aggregate import (
+                build_unknown_cause_aggregate,
+            )
+
+            self.unknown_cause_aggregate = build_unknown_cause_aggregate(self)
+        result["unknown_cause_aggregate"] = self.unknown_cause_aggregate
         if self.canonical_result_finalization_bundle is not None:
             result["canonical_result_finalization_bundle"] = dict(
                 self.canonical_result_finalization_bundle

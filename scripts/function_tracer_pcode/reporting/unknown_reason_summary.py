@@ -18,39 +18,84 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownReasonRecord,
-    build_unknown_recovery_actions,
     coerce_unknown_reason_records,
     make_unknown_reason,
+)
+# Issue #128 PR-128-A: 集計の次元・単位選択・backlog 判定は checker 側の
+# `cause_aggregate` が正本。`unknown_cause_aggregate` を作る producer と同じ
+# 関数を使うので、aggregate 経路と debug_trace 経路の数が構造的に一致する。
+from scripts.function_tracer_pcode.checker.cause_aggregate import (
+    FINAL_UNKNOWN_TRANSITIONS,
+    GLOBAL_REASON_TUPLE_WIDTH as _GLOBAL_REASON_TUPLE_WIDTH,
+    aggregate_is_usable,
+    build_reason_view,
+    completion_counts,
+    multiset_from_rows,
+    transition_counts,
 )
 from scripts.function_tracer_pcode.proof.unknown_reason import (
     UNKNOWN_TUPLE_MISSING,
     UnknownCountKind,
-    UnknownDecisionEffect,
-    UnknownReasonClass,
     UnknownReasonId,
-    UnknownRecoveryActionStatus,
 )
 from scripts.function_tracer_pcode.reporting.root_blocker_summary import (
     compare_root_blocker_summaries,
+    extract_reason_occurrences,
     summarize_root_blockers,
 )
 
 
-_FINAL_UNKNOWN_TRANSITIONS = {"UNKNOWN", "TIMEOUT"}
-_PROOF_BACKLOG_CLASSES = {
-    UnknownReasonClass.PROOF_OBLIGATION.value,
-    UnknownReasonClass.COVERAGE_GAP.value,
-}
-_PRIMARY_DECISION_EFFECT_PRIORITY = {
-    UnknownDecisionEffect.BLOCKS_EQUIVALENCE.value: 0,
-    UnknownDecisionEffect.BLOCKS_DISEQUIVALENCE.value: 1,
-    UnknownDecisionEffect.BLOCKS_DECISION.value: 2,
-    UnknownDecisionEffect.RETRYABLE.value: 3,
-    UnknownDecisionEffect.DIAGNOSTIC_ONLY.value: 4,
-}
+# 集計は 2 系統あり、源も契約も別。混ぜて加算しない。
+#
+# (1) final reason authority -- 「この結果の最終 UNKNOWN reason は何だったか」。
+#     `decision_receipt` があれば canonical `unknown_reasons` が正本。
+#     Issue #128 の A（意図的な語彙・件数変更）はこの系統にだけ現れる。
+SOURCE_CANONICAL = "canonical"
+SOURCE_LEGACY_TRACE = "legacy_trace"
+SOURCE_AGGREGATE_LEGACY = "aggregate_legacy"
+SOURCE_PAYLOAD = "payload"
+SOURCE_SYNTHESIZED = "synthesized"
+# (2) diagnostic reporting source -- 「原因分析の材料」。`debug_trace` が持っていた
+#     legacy record 由来の集計で、aggregate はそれを保つためにある（B）。
+#     canonical 化でこちらの件数を 0 にしてはいけない。
+DIAGNOSTIC_SOURCE_AGGREGATE = "unknown_cause_aggregate"
+DIAGNOSTIC_SOURCE_TRACE = "debug_trace"
+# 診断源がどちらも無い結果。payload の record から作れる値は出すが、それが
+# 「trace があったときの legacy 集計」と同じである保証は無いので、観測できた
+# 結果としては数えない（run 全体が partial になる）。
+DIAGNOSTIC_SOURCE_PAYLOAD_FALLBACK = "payload_fallback"
+# 最終 UNKNOWN/TIMEOUT attempt の 3 状態。`EMPTY`（観測して 0 件）を `ABSENT`
+# （最終 attempt が無い）と同じに扱うと、trace を省いた途端に最終 reason が
+# payload の record へすり替わる。
+LEGACY_FINAL_ATTEMPT_RECORDS = "observed_records"
+LEGACY_FINAL_ATTEMPT_EMPTY = "observed_empty"
+LEGACY_FINAL_ATTEMPT_ABSENT = "absent"
+# completion / causal transition の集計単位。block ごとに観測可否が別。
+CAUSAL_BLOCKS = ("proof_completions", "reason_completions", "causal_transitions")
+
+# final reason authority が決める集計。証拠が無いことは起こらない
+# （最後は「record を持たない結果」として 1 件合成する）。
+FINAL_REASON_SURFACES = (
+    "unknown_by_reason",
+    "unknown_by_reason_detail",
+    "unknown_by_decision_effect",
+    "unknown_by_reason_scope",
+)
+# diagnostic source が決める集計。1 結果でも源が無ければ
+# 「0 件（none）」ではなく「観測できなかった（unknown）」になる。
+DIAGNOSTIC_SURFACES = (
+    "validation_unknown_unit_multiset",
+    "reason_record_multiset",
+    "proof_action_multiset",
+    "proof_backlog_by_reason",
+    "proof_backlog_by_proof_kind",
+    "proof_backlog_by_recovery_action",
+    "proof_backlog_by_action_status",
+    "operational_unknown_by_reason",
+    "operational_unknown_by_class",
+)
 RESULT_JSON_BEGIN = "=== EQUIVALENCE_RESULT_JSON_BEGIN ==="
 RESULT_JSON_END = "=== EQUIVALENCE_RESULT_JSON_END ==="
-_GLOBAL_REASON_TUPLE_WIDTH = 7
 _GLOBAL_REASON_COUNT_KINDS = {
     UnknownCountKind.FINAL_RESULT.value,
     UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value,
@@ -107,6 +152,19 @@ class UnknownValidationSummary:
     root_blocker_summary: Dict[str, Any] = field(default_factory=dict)
     unknown_by_reason_detail: Dict[str, int] = field(default_factory=dict)
     diagnostics_stats: Dict[str, Any] = field(default_factory=dict)
+    # Issue #128: 集計の 2 系統それぞれの出所と、診断源の観測状況。
+    # `evidence_missing` に載った集計は、空でも「0 件」ではなく「観測できなかった」。
+    # `diagnostic_evidence` は一部だけ欠測した run（partial）を見分けるために持つ。
+    final_reason_sources: Tuple[str, ...] = ()
+    diagnostic_sources: Tuple[str, ...] = ()
+    diagnostic_evidence: Dict[str, int] = field(default_factory=dict)
+    # completion / causal transition の集計。診断源から作るので、`debug_trace` を
+    # 省いても aggregate 側から同じ値が出る（oracle の比較対象）。
+    causal_evidence: Dict[str, Any] = field(default_factory=dict)
+    # block ごとの観測件数。`causal_evidence[name] is None` は「観測できなかった」で、
+    # `{"total": 0, ...}` は「観測して 0 件」。両者を潰さないための対。
+    causal_evidence_counts: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    evidence_missing: Tuple[str, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -131,6 +189,12 @@ class UnknownValidationSummary:
             "operational_unknown_by_reason": dict(self.operational_unknown_by_reason),
             "operational_unknown_by_class": dict(self.operational_unknown_by_class),
             "root_blocker_summary": dict(self.root_blocker_summary),
+            "final_reason_sources": list(self.final_reason_sources),
+            "diagnostic_sources": list(self.diagnostic_sources),
+            "diagnostic_evidence": dict(self.diagnostic_evidence),
+            "causal_evidence": dict(self.causal_evidence),
+            "causal_evidence_counts": dict(self.causal_evidence_counts),
+            "evidence_missing": list(self.evidence_missing),
             "reason_record_correspondence": [
                 diagnostic.to_dict()
                 for diagnostic in diagnose_unknown_reason_correspondence(self)
@@ -204,19 +268,13 @@ def summarize_validation_unknowns(
     unknown_results = 0
     unknown_units = 0
     final_result_counts: Dict[str, int] = {}
-    validation_unknown_unit_multiset: Dict[Tuple[str, ...], int] = {}
-    reason_record_multiset: Dict[Tuple[str, ...], int] = {}
-    proof_action_multiset: Dict[Tuple[str, ...], int] = {}
-    unknown_by_reason: Dict[str, int] = {}
-    unknown_by_decision_effect: Dict[str, int] = {}
-    unknown_by_reason_scope: Dict[str, int] = {}
-    proof_backlog_by_reason: Dict[str, int] = {}
-    proof_backlog_by_proof_kind: Dict[str, int] = {}
-    proof_backlog_by_recovery_action: Dict[str, int] = {}
-    proof_backlog_by_action_status: Dict[str, int] = {}
-    operational_unknown_by_reason: Dict[str, int] = {}
-    operational_unknown_by_class: Dict[str, int] = {}
-    unknown_by_reason_detail: Dict[str, int] = {}
+    merged = _empty_merge_target()
+    final_sources: set = set()
+    diagnostic_sources: set = set()
+    diagnostic_observed = 0
+    diagnostic_missing = 0
+    causal_evidence: Dict[str, Any] = {}
+    causal_evidence_counts: Dict[str, Dict[str, int]] = {}
     diagnostics_collector = _DiagnosticsCollector()
 
     for payload in selected_payloads:
@@ -226,75 +284,62 @@ def summarize_validation_unknowns(
         if not _payload_is_unknown(payload):
             continue
         unknown_results += 1
+        # (1) 最終 reason は authority から、(2) 診断は診断源から。別々に取る。
+        final_view, final_source = _final_reason_view(payload)
+        final_sources.add(final_source)
+        unknown_units += int(final_view.get("unit_count") or 0)
+        _merge_final_reason_view(merged, final_view)
 
-        extracted_records = _extract_final_unknown_reasons(payload)
-        records = _select_primary_records_by_aggregation_unit(extracted_records)
-        if not records:
-            records = (
-                make_unknown_reason(
-                    UnknownReasonId.UNKNOWN,
-                    stage=_payload_stage(payload),
-                    pair_or_case=_payload_pair_or_case(payload),
-                    detail="result payload carries no unknown_reasons record",
-                ),
-            )
-        unknown_units += len(records)
-        for record in records:
-            _inc(unknown_by_reason_detail, _reason_detail_key(record))
+        diagnostic_view, diagnostic_source = _diagnostic_reason_view(payload)
+        diagnostic_sources.add(diagnostic_source)
+        if diagnostic_source == DIAGNOSTIC_SOURCE_PAYLOAD_FALLBACK:
+            diagnostic_missing += 1
+        else:
+            diagnostic_observed += 1
+        _merge_diagnostic_view(merged, diagnostic_view)
+        _merge_causal_evidence(
+            causal_evidence, causal_evidence_counts, _diagnostic_causal_evidence(payload)
+        )
 
-        for record in extracted_records or records:
-            _inc(
-                reason_record_multiset,
-                _global_reason_tuple_from_record(
-                    record,
-                    UnknownCountKind.REASON_RECORD.value,
-                ),
-            )
-            for action in build_unknown_recovery_actions((record,)):
-                _inc(proof_action_multiset, _global_reason_tuple_from_action(action))
-
-        for record in records:
-            _inc(
-                validation_unknown_unit_multiset,
-                _global_reason_tuple_from_record(
-                    record,
-                    UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value,
-                ),
-            )
-            _inc(unknown_by_reason, record.reason_id)
-            _inc(unknown_by_decision_effect, record.decision_effect)
-            _inc(unknown_by_reason_scope, record.reason_scope)
-            actions = build_unknown_recovery_actions((record,))
-            if _is_proof_backlog(record, actions):
-                _inc(proof_backlog_by_reason, record.reason_id)
-                for action in actions:
-                    _inc(proof_backlog_by_proof_kind, action.proof_kind)
-                    _inc(proof_backlog_by_recovery_action, _recovery_action_key(action))
-                    _inc(proof_backlog_by_action_status, action.status)
-            else:
-                _inc(operational_unknown_by_reason, record.reason_id)
-                _inc(operational_unknown_by_class, record.reason_class)
+    # 1 結果でも診断源が無ければ、診断集計は「完全に観測できた値」ではない。
+    # 全欠測でも一部欠測でも `unknown` 扱いにし、静かに確定値へ潰さない。
+    evidence_missing: Tuple[str, ...] = DIAGNOSTIC_SURFACES if diagnostic_missing else ()
 
     return UnknownValidationSummary(
         total_results=total_results,
         unknown_results=unknown_results,
         unknown_units=unknown_units,
         final_result_counts=final_result_counts,
-        validation_unknown_unit_multiset=validation_unknown_unit_multiset,
-        reason_record_multiset=reason_record_multiset,
-        proof_action_multiset=proof_action_multiset,
-        unknown_by_reason=unknown_by_reason,
-        unknown_by_decision_effect=unknown_by_decision_effect,
-        unknown_by_reason_scope=unknown_by_reason_scope,
-        proof_backlog_by_reason=proof_backlog_by_reason,
-        proof_backlog_by_proof_kind=proof_backlog_by_proof_kind,
-        proof_backlog_by_recovery_action=proof_backlog_by_recovery_action,
-        proof_backlog_by_action_status=proof_backlog_by_action_status,
-        operational_unknown_by_reason=operational_unknown_by_reason,
-        operational_unknown_by_class=operational_unknown_by_class,
+        validation_unknown_unit_multiset=merged["validation_unknown_unit_multiset"],
+        reason_record_multiset=merged["reason_record_multiset"],
+        proof_action_multiset=merged["proof_action_multiset"],
+        unknown_by_reason=merged["by_reason"],
+        unknown_by_decision_effect=merged["by_decision_effect"],
+        unknown_by_reason_scope=merged["by_reason_scope"],
+        proof_backlog_by_reason=merged["backlog"]["by_reason"],
+        proof_backlog_by_proof_kind=merged["backlog"]["by_proof_kind"],
+        proof_backlog_by_recovery_action=merged["backlog"]["by_recovery_action"],
+        proof_backlog_by_action_status=merged["backlog"]["by_action_status"],
+        operational_unknown_by_reason=merged["operational"]["by_reason"],
+        operational_unknown_by_class=merged["operational"]["by_class"],
         root_blocker_summary=summarize_root_blockers(selected_payloads).to_dict(),
-        unknown_by_reason_detail=unknown_by_reason_detail,
+        unknown_by_reason_detail=merged["by_reason_detail"],
         diagnostics_stats=diagnostics_collector.snapshot(),
+        final_reason_sources=tuple(sorted(final_sources)),
+        diagnostic_sources=tuple(sorted(diagnostic_sources)),
+        diagnostic_evidence={
+            "observed": diagnostic_observed,
+            "missing": diagnostic_missing,
+        },
+        causal_evidence={
+            # 1 件も観測できなかった block は `None`（= unknown）。空 dict にしない。
+            name: causal_evidence.get(name)
+            if causal_evidence_counts.get(name, {}).get("observed")
+            else None
+            for name in CAUSAL_BLOCKS
+        },
+        causal_evidence_counts=causal_evidence_counts,
+        evidence_missing=evidence_missing,
     )
 
 
@@ -484,6 +529,38 @@ def format_validation_unknown_summary(
         f"{indent}  Unknown results: {summary.unknown_results}",
         f"{indent}  Unknown units  : {summary.unknown_units}",
     ]
+    # Issue #128: 最終 reason の authority と、診断集計の源は別。どちらから
+    # 読んだかと、診断源が何件観測できたかを出力に残す（partial を隠さない）。
+    evidence = summary.diagnostic_evidence or {}
+    lines.append(
+        f"{indent}  Final reason sources: "
+        + (", ".join(summary.final_reason_sources) or "(none)")
+    )
+    lines.append(
+        f"{indent}  Diagnostic sources  : "
+        + (", ".join(summary.diagnostic_sources) or "(none)")
+        + f" (observed {int(evidence.get('observed', 0))}"
+        + f" / missing {int(evidence.get('missing', 0))})"
+    )
+    # completion / causal transition は block ごとに観測可否が違う。
+    # 「観測して 0 件」と「観測できなかった」を text でも取り違えないよう並べる。
+    lines.append(
+        f"{indent}  Causal evidence     : "
+        + "; ".join(
+            "{name} observed {observed} / missing {missing}".format(
+                name=name,
+                observed=int((summary.causal_evidence_counts.get(name) or {}).get("observed", 0)),
+                missing=int((summary.causal_evidence_counts.get(name) or {}).get("missing", 0)),
+            )
+            for name in CAUSAL_BLOCKS
+        )
+    )
+    missing = frozenset(summary.evidence_missing)
+
+    def _empty(surface: str) -> str:
+        # 空の集計が「0 件（none）」なのか「観測できなかった（unknown）」なのか。
+        return "(unknown)" if surface in missing else "(none)"
+
     max_items = _summary_max_items(compact=compact, max_items=max_items)
     _append_count_block(lines, "Final results", summary.final_result_counts, indent, max_items=max_items)
     _append_count_block(
@@ -491,6 +568,7 @@ def format_validation_unknown_summary(
         "Validation UNKNOWN unit tuples",
         summary.validation_unknown_unit_multiset,
         indent,
+        empty_label=_empty("validation_unknown_unit_multiset"),
         max_items=max_items,
     )
     if not compact:
@@ -499,6 +577,7 @@ def format_validation_unknown_summary(
             "Reason record tuples",
             summary.reason_record_multiset,
             indent,
+            empty_label=_empty("reason_record_multiset"),
             max_items=max_items,
         )
         _append_count_block(
@@ -506,14 +585,16 @@ def format_validation_unknown_summary(
             "Proof action tuples",
             summary.proof_action_multiset,
             indent,
+            empty_label=_empty("proof_action_multiset"),
             max_items=max_items,
         )
-    _append_count_block(lines, "UNKNOWN by reason", summary.unknown_by_reason, indent, max_items=max_items)
+    _append_count_block(lines, "UNKNOWN by reason", summary.unknown_by_reason, indent, empty_label=_empty("unknown_by_reason"), max_items=max_items)
     _append_count_block(
         lines,
         "UNKNOWN by reason detail",
         summary.unknown_by_reason_detail,
         indent,
+        empty_label=_empty("unknown_by_reason_detail"),
         max_items=max_items,
     )
     _append_diagnostics_block(lines, summary.diagnostics_stats, indent)
@@ -522,6 +603,7 @@ def format_validation_unknown_summary(
         "UNKNOWN by decision_effect",
         summary.unknown_by_decision_effect,
         indent,
+        empty_label=_empty("unknown_by_decision_effect"),
         max_items=max_items,
     )
     _append_count_block(
@@ -529,14 +611,16 @@ def format_validation_unknown_summary(
         "UNKNOWN by reason_scope",
         summary.unknown_by_reason_scope,
         indent,
+        empty_label=_empty("unknown_by_reason_scope"),
         max_items=max_items,
     )
-    _append_count_block(lines, "Proof backlog by reason", summary.proof_backlog_by_reason, indent, max_items=max_items)
+    _append_count_block(lines, "Proof backlog by reason", summary.proof_backlog_by_reason, indent, empty_label=_empty("proof_backlog_by_reason"), max_items=max_items)
     _append_count_block(
         lines,
         "Proof backlog by proof_kind",
         summary.proof_backlog_by_proof_kind,
         indent,
+        empty_label=_empty("proof_backlog_by_proof_kind"),
         max_items=max_items,
     )
     _append_count_block(
@@ -544,6 +628,7 @@ def format_validation_unknown_summary(
         "Proof backlog by recovery_action",
         summary.proof_backlog_by_recovery_action,
         indent,
+        empty_label=_empty("proof_backlog_by_recovery_action"),
         max_items=max_items,
     )
     _append_count_block(
@@ -551,6 +636,7 @@ def format_validation_unknown_summary(
         "Proof backlog by action_status",
         summary.proof_backlog_by_action_status,
         indent,
+        empty_label=_empty("proof_backlog_by_action_status"),
         max_items=max_items,
     )
     _append_count_block(
@@ -558,6 +644,7 @@ def format_validation_unknown_summary(
         "Operational UNKNOWN by reason",
         summary.operational_unknown_by_reason,
         indent,
+        empty_label=_empty("operational_unknown_by_reason"),
         max_items=max_items,
     )
     if not compact:
@@ -963,99 +1050,272 @@ def _payload_matches_targets(payload: Mapping[str, Any], targets: Sequence[str])
     return any(target in haystack for target in targets)
 
 
-def _extract_final_unknown_reasons(payload: Mapping[str, Any]) -> Tuple[UnknownReasonRecord, ...]:
+def _legacy_trace_records(
+    payload: Mapping[str, Any],
+) -> Optional[Tuple[UnknownReasonRecord, ...]]:
+    """最終 UNKNOWN/TIMEOUT attempt の legacy record。
+
+    `None` は「最終 attempt が無い」、空 tuple は「最終 attempt はあるが record を
+    持たない」。後者は結果単位の合成 record へ進む従来の挙動なので、両者を
+    同じ falsy 値へ潰さない。
+    """
     debug_trace = payload.get("debug_trace")
-    if isinstance(debug_trace, Mapping) and debug_trace.get("final_result") is None:
-        attempts = debug_trace.get("attempts") or ()
-        for attempt in reversed(tuple(attempts)):
-            if not isinstance(attempt, Mapping):
-                continue
-            if (
-                attempt.get("result") is None
-                and str(attempt.get("transition_reason")) in _FINAL_UNKNOWN_TRANSITIONS
-            ):
-                return coerce_unknown_reason_records(attempt.get("unknown_reasons") or ())
+    if not isinstance(debug_trace, Mapping) or debug_trace.get("final_result") is not None:
+        return None
+    for attempt in reversed(tuple(debug_trace.get("attempts") or ())):
+        if not isinstance(attempt, Mapping):
+            continue
+        if (
+            attempt.get("result") is None
+            and str(attempt.get("transition_reason")) in FINAL_UNKNOWN_TRANSITIONS
+        ):
+            return coerce_unknown_reason_records(attempt.get("unknown_reasons") or ())
+    return None
+
+
+def _extract_final_unknown_reasons(payload: Mapping[str, Any]) -> Tuple[UnknownReasonRecord, ...]:
+    """最終 UNKNOWN reason の record 集合（正本 = canonical payload）。
+
+    Issue #128: `decision_receipt` を持つ canonical payload では top-level
+    `unknown_reasons` が最終 reason の authority で、legacy trace を優先しない。
+    receipt を持たない古い log だけが従来どおり最終 attempt の legacy record を
+    使う。どちらか一方だけを使い、両方を足し合わせることはしない。
+    """
+    if payload.get("decision_receipt") is not None:
+        return coerce_unknown_reason_records(payload.get("unknown_reasons") or ())
+    legacy = _legacy_trace_records(payload)
+    if legacy is not None:
+        return legacy
     return coerce_unknown_reason_records(payload.get("unknown_reasons") or ())
 
 
-def _select_primary_records_by_aggregation_unit(
-    records: Iterable[UnknownReasonRecord],
-) -> Tuple[UnknownReasonRecord, ...]:
-    grouped_records: Dict[Tuple[str, str], list[UnknownReasonRecord]] = {}
-    fallback_index = 0
-    for record in records:
-        aggregation_key = str(record.aggregation_unit or "result")
-        unit_key = record.pair_or_case or record.stage
-        if unit_key is None:
-            unit_key = f"record:{fallback_index}"
-            fallback_index += 1
-        grouped_records.setdefault((aggregation_key, unit_key), []).append(record)
-    return tuple(
-        min(group, key=_primary_unknown_record_sort_key)
-        for group in grouped_records.values()
-    )
+def _synthesized_reason_view(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """record を 1 件も持たない結果の扱い（従来どおり合成 record 1 件）。"""
+    return build_reason_view((
+        make_unknown_reason(
+            UnknownReasonId.UNKNOWN,
+            stage=_payload_stage(payload),
+            pair_or_case=_payload_pair_or_case(payload),
+            detail="result payload carries no unknown_reasons record",
+        ),
+    ))
 
 
-def _primary_unknown_record_sort_key(record: UnknownReasonRecord) -> Tuple[Any, ...]:
-    return (
-        _PRIMARY_DECISION_EFFECT_PRIORITY.get(str(record.decision_effect), 99),
-        str(record.reason_id),
-        str(record.reason_scope),
-        str(record.recovery_proof_kind),
-        str(record.proof_stage or ""),
-        str(record.action_status or ""),
-        tuple(str(ref) for ref in (record.evidence_refs or ())),
-        str(record.detail or ""),
-    )
+def _legacy_final_attempt_state(
+    payload: Mapping[str, Any],
+) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
+    """最終 UNKNOWN/TIMEOUT attempt の 3 状態を、経路に依らず同じに決める。
+
+    * `LEGACY_FINAL_ATTEMPT_RECORDS` — 観測し、record があった（view を返す）
+    * `LEGACY_FINAL_ATTEMPT_EMPTY`   — 観測したが record が 0 件だった
+    * `LEGACY_FINAL_ATTEMPT_ABSENT`  — そもそも最終 attempt が無かった
+
+    **`EMPTY` と `ABSENT` は別**。前者は「見た上で 0 件」なので次の源へ進まず
+    結果単位の合成 record 1 件になり、後者だけが次の源（payload）へ進む。
+    full `debug_trace` からも `unknown_cause_aggregate.legacy_view` からも同じ
+    3 状態が出ることが、trace を省いても最終 reason が変わらない条件。
+    """
+    legacy = _legacy_trace_records(payload)
+    if legacy is not None:
+        if legacy:
+            return LEGACY_FINAL_ATTEMPT_RECORDS, build_reason_view(legacy), SOURCE_LEGACY_TRACE
+        return LEGACY_FINAL_ATTEMPT_EMPTY, None, SOURCE_LEGACY_TRACE
+    aggregate = payload.get("unknown_cause_aggregate")
+    if aggregate_is_usable(aggregate):
+        legacy_view = aggregate.get("legacy_view")
+        # 最終 attempt の record 集合として作られた view だけが legacy authority の
+        # 代用になる。`payload_records` 形は「最終 attempt が無かった」ことの記録
+        # なので ABSENT として扱い、payload を読む分岐へ落とす。
+        if (
+            (aggregate.get("evidence_present") or {}).get("legacy_records")
+            and isinstance(legacy_view, Mapping)
+            and legacy_view.get("source") == "final_attempt"
+        ):
+            if int(legacy_view.get("record_count") or 0):
+                return (
+                    LEGACY_FINAL_ATTEMPT_RECORDS,
+                    dict(legacy_view),
+                    SOURCE_AGGREGATE_LEGACY,
+                )
+            return LEGACY_FINAL_ATTEMPT_EMPTY, None, SOURCE_AGGREGATE_LEGACY
+    return LEGACY_FINAL_ATTEMPT_ABSENT, None, None
 
 
-def _is_proof_backlog(record: UnknownReasonRecord, actions: Sequence[Any] = ()) -> bool:
-    action_statuses = {str(getattr(action, "status", "")) for action in actions}
-    return (
-        record.reason_class in _PROOF_BACKLOG_CLASSES
-        or record.action_status
-        in {
-            UnknownRecoveryActionStatus.PENDING_PROOF.value,
-            UnknownRecoveryActionStatus.PLANNED.value,
-        }
-        or (
-            record.object_target_key is not None
-            and bool(
-                action_statuses
-                & {
-                    UnknownRecoveryActionStatus.PENDING_PROOF.value,
-                    UnknownRecoveryActionStatus.PLANNED.value,
-                }
-            )
+def _final_reason_view(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """(1) final reason authority: この結果の最終 UNKNOWN reason そのもの。
+
+    優先順:
+
+    1. canonical payload（`decision_receipt` あり）の `unknown_reasons`
+    2. 最終 UNKNOWN/TIMEOUT attempt — full `debug_trace` から、無ければ
+       `unknown_cause_aggregate.legacy_view` から（`_legacy_final_attempt_state`）。
+       **観測したが 0 件**なら合成 1 件で確定し、次の源へは進まない。
+    3. 最終 attempt が無かったときだけ payload の `unknown_reasons`
+    4. どれも無い -> record を持たない結果として 1 件合成する（従来どおり）
+
+    2 が 3 より前にあるのが要点: trace を省いた log でも payload の
+    `unknown_reasons` は残るので、先に payload を読むと legacy 件数が静かに
+    canonical 件数へすり替わる。ここが返すのは最終 reason だけで、診断集計は
+    `_diagnostic_reason_view` が別に決める。
+    """
+    if payload.get("decision_receipt") is not None:
+        records = coerce_unknown_reason_records(payload.get("unknown_reasons") or ())
+        if records:
+            return build_reason_view(records), SOURCE_CANONICAL
+    else:
+        state, view, source = _legacy_final_attempt_state(payload)
+        if state == LEGACY_FINAL_ATTEMPT_RECORDS:
+            return view, source
+        if state == LEGACY_FINAL_ATTEMPT_ABSENT:
+            records = coerce_unknown_reason_records(payload.get("unknown_reasons") or ())
+            if records:
+                return build_reason_view(records), SOURCE_PAYLOAD
+        # EMPTY は次の源を見ずにここへ落ちる（trace 経路と同じ答え）。
+    return _synthesized_reason_view(payload), SOURCE_SYNTHESIZED
+
+
+def _diagnostic_reason_view(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """(2) diagnostic reporting source: 原因分析の材料（multiset / backlog / operational）。
+
+    **aggregate が在ることと、診断の証拠が在ることは別**。usable な aggregate でも
+    `legacy_view` が `null`（= producer が trace を観測できていない）なら、その結果の
+    診断は観測できていない。値は payload の record から作るが、それは補助値であって
+    「観測済み」ではないので `payload_fallback` として返し、run 全体を partial にする。
+
+    順序:
+
+    * usable aggregate で `legacy_view` が在る -> 観測済み（aggregate）
+    * usable aggregate だが `legacy_view` が `null` -> 欠測（payload fallback）
+    * full `debug_trace` が在る -> 観測済み（従来経路）
+    * どちらも無い -> 欠測（payload fallback）
+    """
+    aggregate = payload.get("unknown_cause_aggregate")
+    if aggregate_is_usable(aggregate):
+        # block の中身より先に「観測できたか」の証言を見る（他の block と同じ順）。
+        observed = (aggregate.get("evidence_present") or {}).get("legacy_records")
+        legacy_view = aggregate.get("legacy_view")
+        if observed and isinstance(legacy_view, Mapping):
+            if int(legacy_view.get("record_count") or 0):
+                return dict(legacy_view), DIAGNOSTIC_SOURCE_AGGREGATE
+            # record を 1 件も持たない集合。従来経路と同じく合成 1 件にする。
+            return _synthesized_reason_view(payload), DIAGNOSTIC_SOURCE_AGGREGATE
+        return _payload_fallback_reason_view(payload)
+    if isinstance(payload.get("debug_trace"), Mapping):
+        legacy = _legacy_trace_records(payload)
+        if legacy is None:
+            legacy = coerce_unknown_reason_records(payload.get("unknown_reasons") or ())
+        view = build_reason_view(legacy) if legacy else _synthesized_reason_view(payload)
+        return view, DIAGNOSTIC_SOURCE_TRACE
+    return _payload_fallback_reason_view(payload)
+
+
+def _payload_fallback_reason_view(payload: Mapping[str, Any]) -> Tuple[Dict[str, Any], str]:
+    """診断源が無いときの補助値。古い artifact を壊さないが観測済みとは数えない。"""
+    records = coerce_unknown_reason_records(payload.get("unknown_reasons") or ())
+    view = build_reason_view(records) if records else _synthesized_reason_view(payload)
+    return view, DIAGNOSTIC_SOURCE_PAYLOAD_FALLBACK
+
+
+def _diagnostic_causal_evidence(
+    payload: Mapping[str, Any],
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """completion / causal transition の集計。block ごとに観測可否を返す。
+
+    `None` は「観測できなかった」で、`{"total": 0, ...}` は「観測して 0 件」。
+    aggregate は `evidence_present.completion_events` / `causal_transitions` で
+    どちらだったかを証言するので、それを `{}` に潰さない。
+    """
+    empty: Dict[str, Optional[Dict[str, Any]]] = {name: None for name in CAUSAL_BLOCKS}
+    aggregate = payload.get("unknown_cause_aggregate")
+    if aggregate_is_usable(aggregate):
+        evidence = aggregate.get("evidence_present") or {}
+        blocks = dict(empty)
+        completions = aggregate.get("completions")
+        if evidence.get("completion_events") and isinstance(completions, Mapping):
+            for name in ("proof_completions", "reason_completions"):
+                value = completions.get(name)
+                if isinstance(value, Mapping):
+                    blocks[name] = dict(value)
+        transitions = aggregate.get("transitions")
+        if evidence.get("causal_transitions") and isinstance(transitions, Mapping):
+            value = transitions.get("causal_transitions")
+            if isinstance(value, Mapping):
+                blocks["causal_transitions"] = dict(value)
+        return blocks
+    if isinstance(payload.get("debug_trace"), Mapping):
+        occurrences, trace_transitions, completions, reason_completions = (
+            extract_reason_occurrences(payload)
         )
-    )
+        counted = dict(completion_counts(completions, reason_completions, occurrences))
+        counted.update(transition_counts(trace_transitions, occurrences))
+        return {name: dict(counted[name]) for name in CAUSAL_BLOCKS}
+    return empty
 
 
-def _global_reason_tuple_from_record(
-    record: UnknownReasonRecord,
-    count_kind: str,
-) -> Tuple[str, ...]:
-    return (
-        str(count_kind),
-        str(record.reason_id),
-        str(record.decision_effect),
-        str(record.reason_scope),
-        str(record.recovery_proof_kind or UNKNOWN_TUPLE_MISSING),
-        str(record.proof_stage or UNKNOWN_TUPLE_MISSING),
-        str(record.action_status or UNKNOWN_TUPLE_MISSING),
-    )
+def _merge_causal_evidence(
+    target: Dict[str, Any],
+    counts: Dict[str, Dict[str, int]],
+    blocks: Mapping[str, Optional[Mapping[str, Any]]],
+) -> None:
+    """block ごとに観測できたものだけ足し、観測できなかった件数を別に数える。"""
+    for name in CAUSAL_BLOCKS:
+        block = blocks.get(name)
+        tally = counts.setdefault(name, {"observed": 0, "missing": 0})
+        if block is None:
+            tally["missing"] += 1
+            continue
+        tally["observed"] += 1
+        bucket = target.setdefault(name, {})
+        for key, value in block.items():
+            if isinstance(value, Mapping):
+                inner = bucket.setdefault(key, {})
+                for inner_key, inner_value in value.items():
+                    _inc(inner, inner_key, int(inner_value or 0))
+            else:
+                _inc(bucket, key, int(value or 0))
 
 
-def _global_reason_tuple_from_action(action: Any) -> Tuple[str, ...]:
-    return (
-        str(getattr(action, "count_kind", UnknownCountKind.PROOF_ACTION.value)),
-        str(getattr(action, "reason_id", UnknownReasonId.UNKNOWN.value)),
-        str(getattr(action, "decision_effect", UNKNOWN_TUPLE_MISSING)),
-        str(getattr(action, "reason_scope", UNKNOWN_TUPLE_MISSING)),
-        str(getattr(action, "proof_kind", UNKNOWN_TUPLE_MISSING)),
-        str(getattr(action, "proof_stage", UNKNOWN_TUPLE_MISSING)),
-        str(getattr(action, "status", UNKNOWN_TUPLE_MISSING)),
-    )
+def _merge_final_reason_view(target: Dict[str, Any], view: Mapping[str, Any]) -> None:
+    """final reason authority の次元だけ足し込む。"""
+    for name in ("by_reason", "by_decision_effect", "by_reason_scope", "by_reason_detail"):
+        for key, value in (view.get(name) or {}).items():
+            _inc(target[name], key, int(value or 0))
+
+
+def _merge_diagnostic_view(target: Dict[str, Any], view: Mapping[str, Any]) -> None:
+    """diagnostic source の次元だけ足し込む（final reason の次元には触れない）。"""
+    for name in (
+        "validation_unknown_unit_multiset",
+        "reason_record_multiset",
+        "proof_action_multiset",
+    ):
+        for key, value in multiset_from_rows(view.get(name)).items():
+            _inc(target[name], key, int(value or 0))
+    for name in ("by_reason", "by_proof_kind", "by_recovery_action", "by_action_status"):
+        for key, value in ((view.get("backlog") or {}).get(name) or {}).items():
+            _inc(target["backlog"][name], key, int(value or 0))
+    for name in ("by_reason", "by_class"):
+        for key, value in ((view.get("operational") or {}).get(name) or {}).items():
+            _inc(target["operational"][name], key, int(value or 0))
+
+
+def _empty_merge_target() -> Dict[str, Any]:
+    return {
+        "by_reason": {},
+        "by_decision_effect": {},
+        "by_reason_scope": {},
+        "by_reason_detail": {},
+        "validation_unknown_unit_multiset": {},
+        "reason_record_multiset": {},
+        "proof_action_multiset": {},
+        "backlog": {
+            "by_reason": {},
+            "by_proof_kind": {},
+            "by_recovery_action": {},
+            "by_action_status": {},
+        },
+        "operational": {"by_reason": {}, "by_class": {}},
+    }
 
 
 def _payload_stage(payload: Mapping[str, Any]) -> Optional[str]:
@@ -1116,18 +1376,6 @@ def _reason_tuple_from_signature(
 def _inc(counts: Dict[str, int], key: Any, amount: int = 1) -> None:
     count_key = key if isinstance(key, tuple) else str(key)
     counts[count_key] = int(counts.get(count_key, 0) or 0) + int(amount)
-
-
-def _recovery_action_key(action: Any) -> str:
-    return " | ".join(
-        str(value)
-        for value in (
-            getattr(action, "reason_id", "unknown"),
-            getattr(action, "proof_kind", "none"),
-            getattr(action, "proof_stage", "unspecified"),
-            getattr(action, "status", "unspecified"),
-        )
-    )
 
 
 def _diff_counts(before: Mapping[str, int], after: Mapping[str, int]) -> Dict[str, int]:
@@ -1204,12 +1452,6 @@ def _format_delta(value: int) -> str:
     if value > 0:
         return f"+{value}"
     return str(value)
-
-
-def _reason_detail_key(record: Any) -> str:
-    """`reason_id | detail` aggregation key (detail-less records are marked)."""
-    detail = getattr(record, "detail", None)
-    return f"{record.reason_id} | {detail if detail else '(no detail)'}"
 
 
 class _DiagnosticsCollector:
