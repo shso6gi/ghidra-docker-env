@@ -20,8 +20,16 @@ def _check_fn():
     return tree.body[0].body[0], src
 
 
-def _top_try(fn):
+def _timing_try(fn):
+    """Issue #124: 計時専用の外側 try（handler を持たない）。"""
     tries = [n for n in fn.body if isinstance(n, ast.Try)]
+    assert len(tries) == 1
+    return tries[0]
+
+
+def _top_try(fn):
+    """判定用の try（catch scope はこの test が固定する対象）。"""
+    tries = [n for n in _timing_try(fn).body if isinstance(n, ast.Try)]
     assert len(tries) == 1
     return tries[0]
 
@@ -45,9 +53,7 @@ def test_check_no_longer_constructs_equivalence_result_directly():
 def test_top_level_try_except_handlers_keep_their_types_order_and_bodies():
     fn, _ = _check_fn()
     tr = _top_try(fn)
-    assert len(tr.handlers) == 2 and not tr.orelse
-    # Issue #124: finally は診断 region を閉じるだけ（判定に効く文を置かない）。
-    assert [ast.unparse(n) for n in tr.finalbody] == ["check_region.close()"]
+    assert len(tr.handlers) == 2 and not tr.orelse and not tr.finalbody
     assert ast.unparse(tr.handlers[0].type) == "(UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError)"
     assert ast.unparse(tr.handlers[1].type) == "Exception"
     # handler 1: debug print → unsupported_smt_result を返す

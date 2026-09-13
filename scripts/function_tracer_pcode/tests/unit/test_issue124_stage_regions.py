@@ -827,3 +827,149 @@ def test_stages_change_preimage_but_no_semantic_field(tmp_path, monkeypatch):
     projection = bundle_with["canonical_semantic_result_projection"]["payload"]
     assert projection["canonical_outcome"] == "EQUIVALENT"
     assert "diagnostics" not in projection and "stages" not in projection
+
+
+# --------------------------------------------------------------------------
+# 8. region の境界（どこから測り始めるか）
+#
+# 恒等式 B / C は `exclusive = inclusive - 直接子` から作った値を同じ式で確かめる
+# ので、region を開くのが遅くても閉じてしまう。境界そのものはここで固定する。
+# --------------------------------------------------------------------------
+
+def _checker_function_ast(name):
+    import ast
+    import inspect
+
+    from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+
+    source = inspect.getsource(getattr(EquivalenceChecker, name))
+    tree = __import__("ast").parse(
+        "class _C:\n" + "\n".join("    " + line for line in source.splitlines())
+    )
+    function = tree.body[0].body[0]
+    body = function.body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(getattr(body[0], "value", None), ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    return ast, function, body
+
+
+def test_stage_plan_region_covers_the_whole_method_body_including_the_import():
+    """`branch_plan_orchestration` は `_run_stage_plan()` の本体全部を測る。
+
+    `phases[].seconds.stage_plan` は method 呼び出し全体を測るので、region が
+    後ろで開くと恒等式 A の左右が別の区間になる（差は「意図的に除外した前処理」
+    として残り、誰にも帰属されない）。
+    """
+    ast, _function, body = _checker_function_ast("_run_stage_plan")
+
+    # docstring の次は region そのもの。前に実行される文を 1 つも許さない。
+    assert len(body) == 1 and isinstance(body[0], ast.With), [
+        ast.unparse(node) for node in body
+    ]
+    assert [ast.unparse(item.context_expr) for item in body[0].items] == [
+        "stage_region('branch_plan_orchestration')"
+    ]
+    # 遅延 import も region の内側にある。
+    imports = [
+        node for node in ast.walk(body[0])
+        if isinstance(node, ast.ImportFrom)
+        and any(alias.name == "run_obligation_branch_plan" for alias in node.names)
+    ]
+    assert len(imports) == 1
+
+
+def test_check_region_opens_at_method_entry_without_widening_the_catch_scope():
+    """`check` は method entry 直後から測り、判定用 try の catch 範囲は広げない。"""
+    ast, _function, body = _checker_function_ast("check")
+
+    # 1 文目が region の open、2 文目が計時専用の try。
+    assert ast.unparse(body[0]) == "check_region = open_stage_region('check')"
+    assert len(body) == 2 and isinstance(body[1], ast.Try), [
+        ast.unparse(node) for node in body
+    ]
+    timing = body[1]
+    # 計時用の try は handler を持たない = 例外の扱いを変えない。
+    assert timing.handlers == [] and timing.orelse == []
+    assert [ast.unparse(node) for node in timing.finalbody] == ["check_region.close()"]
+
+    # 冒頭の実処理（start_time と signature 生成）は region の内側、判定用 try の外側。
+    judgement = [node for node in timing.body if isinstance(node, ast.Try)]
+    assert len(judgement) == 1
+    before = timing.body[:timing.body.index(judgement[0])]
+    rendered = [ast.unparse(node).splitlines()[0] for node in before]
+    assert rendered == [
+        "start_time = time.time()",
+        "if original_signature1 is None:",
+        "if original_signature2 is None:",
+    ]
+    # 判定用 try の handler は従来どおり 2 つ、順序も型も変わらない。
+    assert [ast.unparse(handler.type) for handler in judgement[0].handlers] == [
+        "(UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError)",
+        "Exception",
+    ]
+    assert judgement[0].finalbody == []
+
+
+def test_check_inclusive_covers_the_signature_work_at_the_entry(monkeypatch):
+    """`check()` 冒頭の非ゼロ処理が `check` の inclusive に入る（実行で確認）。"""
+    from scripts.function_tracer_pcode.core.signature import FunctionSignature
+    from scripts.function_tracer_pcode.tests.unit.test_monolithic_region_split import _analysis
+
+    original = FunctionSignature.from_analysis
+    delay = 0.05
+
+    def slow_from_analysis(analysis):
+        time.sleep(delay)
+        return original(analysis)
+
+    monkeypatch.setattr(FunctionSignature, "from_analysis", staticmethod(slow_from_analysis))
+
+    clock = StageClock()
+    with clock.scope():
+        with stage_region("branch_plan_orchestration"):
+            # original_signature1/2 を渡さないので、冒頭で 2 回 signature を作る。
+            _real_checker().check(_analysis("left", 7), _analysis("right", 7))
+
+    stages = clock.snapshot()
+    orchestration = _node(stages["regions"], "branch_plan_orchestration")
+    check = _node(stages["regions"], "branch_plan_orchestration", "check")
+    # 2 回分の signature 生成が check の内側にある。
+    assert check["seconds_inclusive"] >= 2 * delay
+    # したがって orchestration exclusive へは漏れていない。
+    assert orchestration["seconds_exclusive"] < delay
+    assert all(row["within_tolerance"] for row in region_identity_rows(stages))
+
+
+def test_check_entry_exception_is_not_caught_by_the_judgement_handlers(monkeypatch):
+    """冒頭の signature 生成が投げた例外は、従来どおり呼び出し元へ出る。
+
+    計時用の try を足したことで catch-all が広がっていないことを実行で固定する。
+    region は閉じるが、`_create_error_result` へは落ちない。
+    """
+    from scripts.function_tracer_pcode.core.signature import FunctionSignature
+    from scripts.function_tracer_pcode.tests.unit.test_monolithic_region_split import _analysis
+
+    class _EntryFailure(RuntimeError):
+        pass
+
+    def failing_from_analysis(_analysis_argument):
+        raise _EntryFailure("signature construction failed")
+
+    monkeypatch.setattr(
+        FunctionSignature, "from_analysis", staticmethod(failing_from_analysis)
+    )
+
+    clock = StageClock()
+    with clock.scope():
+        with stage_region("branch_plan_orchestration"):
+            with pytest.raises(_EntryFailure):
+                _real_checker().check(_analysis("left", 7), _analysis("right", 7))
+
+    # 例外で抜けても region は閉じている（回数と時間が残る）。
+    check = _node(clock.snapshot()["regions"], "branch_plan_orchestration", "check")
+    assert check["calls"] == 1
