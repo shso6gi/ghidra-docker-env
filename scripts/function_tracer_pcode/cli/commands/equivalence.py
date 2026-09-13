@@ -495,19 +495,24 @@ def run_equivalence_check(args):
                             pyghidra.analyze(program2)
 
                         check_started = time.monotonic()
-                        result = checker.check_from_binaries(
-                            program1,
-                            program2,
-                            func_name1,
-                            func_name2,
-                            decompile_timeout=args.timeout,
-                            save_formula=args.save_formula,
-                            retry_with_type_fix=retry_with_type_fix,
-                            binary1_id=binary1_id,
-                            binary2_id=binary2_id,
-                            binary1_content_identity=binary1_content_identity,
-                            binary2_content_identity=binary2_content_identity,
-                        )
+                        # Issue #124: region scope はペア 1 件につき 1 回だけ、
+                        # stage plan より外側で開く。この内側で開かれた region
+                        # （check / obligation_build / query_build / 解析 sub-stage
+                        # …）は 1 つの木に積まれ、二重計上されない。
+                        with stage_clock.scope():
+                            result = checker.check_from_binaries(
+                                program1,
+                                program2,
+                                func_name1,
+                                func_name2,
+                                decompile_timeout=args.timeout,
+                                save_formula=args.save_formula,
+                                retry_with_type_fix=retry_with_type_fix,
+                                binary1_id=binary1_id,
+                                binary2_id=binary2_id,
+                                binary1_content_identity=binary1_content_identity,
+                                binary2_content_identity=binary2_content_identity,
+                            )
                         stage_clock.mark("check", time.monotonic() - check_started)
                     finally:
                         with stage_clock.timed("close_programs"):

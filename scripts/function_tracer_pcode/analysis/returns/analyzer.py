@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.analysis.returns import (
     callee_unbound_reuse as _svc_callee_unbound_reuse,
 )
 from typing import Any, Dict, List, Optional, Set, Tuple
+from scripts.function_tracer_pcode.core.stage_clock import stage_region
 from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo, FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.expression import Condition
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
@@ -847,7 +848,10 @@ class ReturnAnalyzer:
         """decompilation_broker.decompile_function を facade（analyzer）を第 1 引数として呼ぶ。"""
         from scripts.function_tracer_pcode.ghidra.decompilation_broker import decompile_function
 
-        return decompile_function(self, function, timeout, monitor, **kwargs)
+        # Issue #124: decompile は解析のどの段からでも呼ばれるので、region として
+        # 「どの段が decompile を払ったか」を残す（入れ子の再入は最外だけ計測）。
+        with stage_region("decompile"):
+            return decompile_function(self, function, timeout, monitor, **kwargs)
 
     def _effect_summary_allows_pre_return_structural_summary(self, effect_summary, *, function=None, high_function=None, return_type=None, return_type_obj=None):
         return self._effect_integration.effect_summary_allows_pre_return_structural_summary(effect_summary, function=function, high_function=high_function, return_type=return_type, return_type_obj=return_type_obj)

@@ -345,11 +345,20 @@ def bind_conditional_lane_analyses(result, analysis1, analysis2) -> None:
 
 
 def _attach_analysis_diagnostics(checker, result) -> None:
-    """解析時間と式サイズを結果に添付する（非署名の診断領域）。"""
+    """解析時間と式サイズを結果に添付する（判定には効かない診断領域）。
+
+    Issue #124: 丸ごと上書きせず merge する。同じ結果には `phases`
+    （`phase-timing-v1`）/ `boundary_seconds` / `stages` / `conditional_lane`
+    など別の生産者が書く診断も載るので、上書きすると先に書かれたものが消える。
+    この関数が持つのは `AnalysisTimer` の snapshot が返す key だけで、その key
+    は最新の観測で置き換える（同じ側を再解析したら新しい値が正）。
+    """
     timer = getattr(checker, "_analysis_timer", None)
     if timer is None or result is None:
         return
     try:
-        result.diagnostics = timer.snapshot()
+        diagnostics = dict(getattr(result, "diagnostics", None) or {})
+        diagnostics.update(timer.snapshot())
+        result.diagnostics = diagnostics
     except Exception:  # diagnostics never fail the verdict
         return

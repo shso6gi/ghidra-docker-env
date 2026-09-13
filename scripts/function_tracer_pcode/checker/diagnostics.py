@@ -1,97 +1,98 @@
 # -*- coding: utf-8 -*-
-"""結果 JSON に添付する非署名の診断ブロック（Issue #17）。
+"""結果 JSON に添付する診断ブロック（Issue #17）。
 
-段階別の経過時間・式サイズ・ソルバ呼び出し数を機械可読に残す。receipt / digest
-の対象ではない診断領域なので、ここに項目を足しても既存の署名契約は変わらない。
+段階別の経過時間・式サイズ・ソルバ呼び出し数を機械可読に残す。
+
+digest との関係（ここに項目を足すときの契約）:
+
+* 診断は**判定にも semantic projection にも影響しない**。`_semantic_projection`
+  はこのブロックを読まない。
+* ただし診断は `EquivalenceResult.to_dict()` に含まれるので、**canonical result
+  payload preimage は変わり得る**。したがって
+  `canonical_result_payload_preimage_digest` も変わり得る（署名対象外ではない）。
+* 「preimage は変わるが semantic projection は変わらない」ことは、同じ入力から
+  session / evidence / bundle を共有しない **finalization を 2 本独立に起こして**
+  確認する（`tests/unit/_finalization_support.py`、計画 v4 §9.2）。実 run 間の
+  digest 一致・不一致は根拠にしない。
 """
 
 from __future__ import annotations
 
-import os
 import time
 from contextlib import contextmanager
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional
 
 from scripts.function_tracer_pcode.checker.debug_trace import TransitionReason
+# Issue #124: StageClock は core へ移した（analysis / proof / smt からも同じ型で
+# 計測し、checker が pull するため）。ここは既存 import を壊さないための再公開。
+from scripts.function_tracer_pcode.core.stage_clock import (  # noqa: F401
+    STAGE_TIMING_SCHEMA,
+    StageClock,
+    open_stage_region,
+    process_age_seconds,
+    region_identity_rows,
+    stage_region,
+)
 
 DIAGNOSTICS_SCHEMA = "result-diagnostics-v1"
 
 
-class StageClock:
-    """ペア 1 件の実行を段階（JVM 起動 / import / auto-analysis / 判定 …）に
-    分けて計測する（Issue #14）。
-
-    ``timed(stage)`` で囲んだ区間の秒数を ``seconds[stage]`` に加算し、同じ
-    stage を複数回囲めば合算する。``mark(stage, seconds)`` は外部で測った値の
-    登録用。``snapshot()`` は結果 JSON の診断ブロックへそのまま入る dict。
-    診断なので計測に失敗しても例外を外へ出さない。
-    """
-
-    def __init__(self) -> None:
-        self.seconds: Dict[str, float] = {}
-        self.order: list = []
-        self.notes: Dict[str, Any] = {}
-        self._process_age_at_start = process_age_seconds()
-        self._started = time.monotonic()
-
-    @contextmanager
-    def timed(self, stage: str) -> Iterator[None]:
-        started = time.monotonic()
-        try:
-            yield
-        finally:
-            self.mark(stage, time.monotonic() - started)
-
-    def mark(self, stage: str, seconds: float) -> None:
-        try:
-            value = max(0.0, float(seconds))
-        except (TypeError, ValueError):
-            return
-        if stage not in self.seconds:
-            self.order.append(stage)
-            self.seconds[stage] = 0.0
-        self.seconds[stage] += value
-
-    def note(self, key: str, value: Any) -> None:
-        self.notes[key] = value
-
-    def snapshot(self) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "schema": "pair-stage-timing-v1",
-            "seconds": {stage: round(self.seconds[stage], 6) for stage in self.order},
-            "elapsed_seconds": round(time.monotonic() - self._started, 6),
-        }
-        if self._process_age_at_start is not None:
-            # Python 起動から計測開始までの時間（インタプリタ起動・import 込み）。
-            payload["process_age_at_start_seconds"] = round(self._process_age_at_start, 6)
-        if self.notes:
-            payload["notes"] = dict(self.notes)
-        return payload
-
-
-def process_age_seconds() -> Optional[float]:
-    """このプロセスの起動からの経過秒（Linux の /proc、fail-open で None）。"""
-    try:
-        with open("/proc/self/stat", "r", encoding="ascii", errors="replace") as handle:
-            stat = handle.read()
-        fields = stat[stat.rindex(")") + 2:].split()
-        start_ticks = int(fields[19])
-        with open("/proc/uptime", "r", encoding="ascii") as handle:
-            uptime = float(handle.read().split()[0])
-        ticks_per_second = os.sysconf("SC_CLK_TCK")
-        return max(0.0, uptime - start_ticks / float(ticks_per_second))
-    except Exception:
-        return None
-
-
 def attach_stage_timing(result: Any, clock: StageClock) -> None:
-    """結果オブジェクトの診断ブロックに段階別時間を添付する（署名対象外）。"""
+    """結果オブジェクトの診断ブロックに段階別時間を添付する（判定には効かない）。
+
+    既存の診断（`analysis_seconds` / `phases` / `boundary_seconds` …）は保持し、
+    `stages` だけを差し替える（merge）。`stages` には clock の stage / region に
+    加えて、region では測れない process 全体の counter（solver）も載せる。
+    counter はペアの最後に 1 回だけ pull するので、conditional lane のように
+    判定確定後に動く solver 呼び出しも取りこぼさない。
+    """
+    try:
+        payload = clock.snapshot()
+    except Exception as exc:  # diagnostics never fail the verdict
+        payload = {"schema": STAGE_TIMING_SCHEMA, "error": f"{type(exc).__name__}: {exc}"[:200]}
+    payload.update(process_counter_payload())
     try:
         diagnostics = dict(getattr(result, "diagnostics", None) or {})
-        diagnostics["stages"] = clock.snapshot()
+    except Exception:
+        return
+    # Issue #124: 恒等式 A / B / C をその場で評価して残す。phase 行はこの時点で
+    # すでに添付されている（`attach_phase_timings` は workflow の finally、
+    # `attach_stage_timing` は CLI の最後）ので、結果 JSON 単体で閉包を確認できる。
+    try:
+        rows = region_identity_rows(payload, diagnostics.get("phases") or ())
+        if rows:
+            payload["identities"] = rows
+    except Exception:
+        pass
+    try:
+        diagnostics["stages"] = payload
         result.diagnostics = diagnostics
     except Exception:
         return
+
+
+def process_counter_payload() -> Dict[str, Any]:
+    """region では測れない process 単位の counter を集める（fail-open）。
+
+    ``solver``: `smt/parallel.py` の 4 counter。worker thread から加算されるので
+    region（contextvars）では測れない。decompile は解析の主 thread から呼ばれる
+    ので region（`regions.*.decompile` / `region_totals.decompile`）で測り、
+    ここには載せない。
+
+    同じ block の `timings.solver_seconds` とは意味が違う: あちらは attempt の
+    `solver_results` 行の合計で、pairwise strategy はそこへ
+    `pairwise_aggregate` という合成行を 1 本だけ置く（`elapsed_time` は pairwise
+    段全体で、backend 実行 1 回分ではない）。固定 subset ではその合計が、同じ
+    プロセスの backend 実行時間の合計より大きい。両者を足したり比べたりしない。
+    """
+    payload: Dict[str, Any] = {}
+    try:
+        from scripts.function_tracer_pcode.smt.parallel import solver_counter_snapshot
+
+        payload["solver"] = solver_counter_snapshot()
+    except Exception:
+        pass
+    return payload
 
 
 def expression_stats(analysis: Any) -> Dict[str, int]:
@@ -340,9 +341,16 @@ class AnalysisTimer:
         self.reuse_stats: Dict[str, Dict[str, Any]] = {}
 
     def timed(self, side: str, run: Any) -> Any:
+        """side（function1 / function2）の解析を計測する。
+
+        Issue #124: 同じ区間を `analysis_regions.<side>` region としても開き、
+        解析内部の sub-stage（trace_returns / effect_summary …）が side ごとに
+        木の下へ積まれるようにする。region は clock が無ければ no-op。
+        """
         started = time.perf_counter()
         try:
-            return run()
+            with stage_region("analysis_regions"), stage_region(side):
+                return run()
         finally:
             try:
                 self.seconds[side] = self.seconds.get(side, 0.0) + (time.perf_counter() - started)
@@ -746,7 +754,7 @@ def phase_timeline_of(checker: Any) -> PhaseTimeline:
 
 
 def attach_phase_timings(result: Any, timeline: Optional[PhaseTimeline]) -> None:
-    """結果の診断ブロックへ phase 別の内訳時間を添付する（署名対象外）。"""
+    """結果の診断ブロックへ phase 別の内訳時間を添付する（判定には効かない）。"""
     if result is None or timeline is None:
         return
     try:

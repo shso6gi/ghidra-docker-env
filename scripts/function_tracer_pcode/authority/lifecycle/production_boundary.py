@@ -379,10 +379,19 @@ def run_check_from_binaries_with_v2_pilot(
                 "non_authoritative_shadow": False,
             }
             return result
+        # Issue #124: `finish` は authority finalize だけではない。内訳を分けて
+        # 残し、`finish` 全体を authority 固有コストと読めないようにする。
+        # 既存 key `finish` は後方互換のためそのまま全区間を保持する。
         finish_started = time.monotonic()
+        boundary_seconds["authority_finalize"] = 0.0
+        boundary_seconds["conditional_lane"] = 0.0
+        authority_finalize_started = time.monotonic()
         try:
             evidence = _profiled_finish(connector, session, result)
         except Exception as exc:
+            boundary_seconds["authority_finalize"] = (
+                time.monotonic() - authority_finalize_started
+            )
             # 判定は ERROR へ落ちるが、原因はログ（stderr）に残す。
             import sys
             import traceback
@@ -431,6 +440,9 @@ def run_check_from_binaries_with_v2_pilot(
                 "error_kind": type(exc).__name__,
             }
         else:
+            boundary_seconds["authority_finalize"] = (
+                time.monotonic() - authority_finalize_started
+            )
             result._v2_dual_write_evidence = evidence
             result.v2_dual_write_pilot = dict(evidence.to_dict())
             candidate_receipt, reconciliation_error = (
@@ -470,10 +482,14 @@ def run_check_from_binaries_with_v2_pilot(
                 # Issue #20 PR-20-B3: 無条件 DecisionReceipt が確定したあと、
                 # UNKNOWN のときだけ conditional lane を回す。conditional 列は
                 # 別列で、is_equivalent / final_outcome / exit code は動かない。
+                conditional_lane_started = time.monotonic()
                 _run_conditional_lane(
                     checker,
                     result,
                     projection=evidence.pilot_result.reduction.projection,
+                )
+                boundary_seconds["conditional_lane"] = (
+                    time.monotonic() - conditional_lane_started
                 )
                 # The CLI owns the final serialized payload (including binary
                 # content identities and timing).  Preserve exact issuer-owned
@@ -482,6 +498,14 @@ def run_check_from_binaries_with_v2_pilot(
                 # identities that no later digest rebound could repair.
                 result._canonical_finalization_context = (evidence, session)
         boundary_seconds["finish"] = time.monotonic() - finish_started
+        # 残差 = finalization context の設置・例外処理・reconciliation など、
+        # authority finalize でも conditional lane でもない区間。
+        boundary_seconds["finish_other"] = max(
+            0.0,
+            boundary_seconds["finish"]
+            - boundary_seconds["authority_finalize"]
+            - boundary_seconds["conditional_lane"],
+        )
         _attach_boundary_seconds(result, boundary_seconds)
         return result
     finally:

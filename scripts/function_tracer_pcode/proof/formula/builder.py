@@ -14,6 +14,7 @@ from scripts.function_tracer_pcode.core import (
     loop_summary_method_b_key,
 )
 from scripts.function_tracer_pcode.core.signature import is_floating_data_type
+from scripts.function_tracer_pcode.core.stage_clock import stage_region
 from scripts.function_tracer_pcode.core.render_smt import (
     CallDeclarationConflict,
     call_smt_declaration_lines,
@@ -368,85 +369,87 @@ class FormulaBuilder:
         Returns:
             FormulaBuilderResult: 構築結果（詳細情報付き）
         """
-        analysis1, analysis2, _, _ = self._normalize_analyses(analysis1, analysis2)
+        # Issue #124: monolithic 等価式の構築を計測する。
+        with stage_region("query_build"):
+            analysis1, analysis2, _, _ = self._normalize_analyses(analysis1, analysis2)
 
-        lines = []
-        context = self._prepare_formula_context(
-            analysis1, analysis2, func1_suffix, func2_suffix, emit_debug_info=True
-        )
-        render_analysis1 = normalize_analysis_semantic_width(
-            analysis1,
-            infer_parameter_semantics(analysis1),
-            context.extra_vars1,
-        )
-        render_analysis2 = normalize_analysis_semantic_width(
-            analysis2,
-            infer_parameter_semantics(analysis2),
-            context.extra_vars2,
-        )
-        
-        # ヘッダー
-        lines.append("; " + "=" * 60)
-        lines.append("; Equivalence Check")
-        lines.append(f"; Function 1: {analysis1.function_name}")
-        lines.append(f"; Function 2: {analysis2.function_name}")
-        lines.append("; " + "=" * 60)
-        lines.append("")
-        lines.append(f"(set-logic {context.smt_logic})")
-        lines.append("")
-        lines.extend(context.header_lines)
-        
-        # 全変数の情報を統合（パラメータ + 追加変数）
-        all_vars1 = self._merge_param_and_extra_vars(context.params1, context.extra_vars1)
-        all_vars2 = self._merge_param_and_extra_vars(context.params2, context.extra_vars2)
-        
-        # 関数1のreturn値を定義
-        lines.append("; " + "-" * 40)
-        lines.append(f"; Return value for {analysis1.function_name}")
-        lines.append("; " + "-" * 40)
-        return_var1 = f"return{func1_suffix}"
-        return_def1 = self._build_return_definition(render_analysis1, return_var1, all_vars1)
-        lines.extend(return_def1)
-        lines.append("")
-        
-        # 関数2のreturn値を定義
-        lines.append("; " + "-" * 40)
-        lines.append(f"; Return value for {analysis2.function_name}")
-        lines.append("; " + "-" * 40)
-        return_var2 = f"return{func2_suffix}"
-        return_def2 = self._build_return_definition(render_analysis2, return_var2, all_vars2)
-        lines.extend(return_def2)
-        lines.append("")
-        
-        # 等価性の否定をアサート
-        lines.extend(
-            self._build_equivalence_assertion(
-                return_var1,
-                return_var2,
-                context.return_size1,
-                context.return_size2,
-                canonical_return_observation_width=canonical_return_observation_width,
+            lines = []
+            context = self._prepare_formula_context(
+                analysis1, analysis2, func1_suffix, func2_suffix, emit_debug_info=True
             )
-        )
+            render_analysis1 = normalize_analysis_semantic_width(
+                analysis1,
+                infer_parameter_semantics(analysis1),
+                context.extra_vars1,
+            )
+            render_analysis2 = normalize_analysis_semantic_width(
+                analysis2,
+                infer_parameter_semantics(analysis2),
+                context.extra_vars2,
+            )
         
-        # ★ NEW: 追加アサート（(check-sat)の直前に挿入）
-        if extra_assertions:
+            # ヘッダー
+            lines.append("; " + "=" * 60)
+            lines.append("; Equivalence Check")
+            lines.append(f"; Function 1: {analysis1.function_name}")
+            lines.append(f"; Function 2: {analysis2.function_name}")
+            lines.append("; " + "=" * 60)
             lines.append("")
-            lines.extend(extra_assertions)
+            lines.append(f"(set-logic {context.smt_logic})")
+            lines.append("")
+            lines.extend(context.header_lines)
         
-        lines.append("")
-        lines.append("(check-sat)")
-        lines.append("(get-model)")
+            # 全変数の情報を統合（パラメータ + 追加変数）
+            all_vars1 = self._merge_param_and_extra_vars(context.params1, context.extra_vars1)
+            all_vars2 = self._merge_param_and_extra_vars(context.params2, context.extra_vars2)
         
-        return FormulaBuilderResult(
-            formula="\n".join(lines),
-            return_var1=return_var1,
-            return_var2=return_var2,
-            extra_vars1=context.extra_vars1,
-            extra_vars2=context.extra_vars2,
-            constrained_fragments=context.constrained_fragments,
-            param_fragment_constrained=context.param_fragment_constrained
-        )
+            # 関数1のreturn値を定義
+            lines.append("; " + "-" * 40)
+            lines.append(f"; Return value for {analysis1.function_name}")
+            lines.append("; " + "-" * 40)
+            return_var1 = f"return{func1_suffix}"
+            return_def1 = self._build_return_definition(render_analysis1, return_var1, all_vars1)
+            lines.extend(return_def1)
+            lines.append("")
+        
+            # 関数2のreturn値を定義
+            lines.append("; " + "-" * 40)
+            lines.append(f"; Return value for {analysis2.function_name}")
+            lines.append("; " + "-" * 40)
+            return_var2 = f"return{func2_suffix}"
+            return_def2 = self._build_return_definition(render_analysis2, return_var2, all_vars2)
+            lines.extend(return_def2)
+            lines.append("")
+        
+            # 等価性の否定をアサート
+            lines.extend(
+                self._build_equivalence_assertion(
+                    return_var1,
+                    return_var2,
+                    context.return_size1,
+                    context.return_size2,
+                    canonical_return_observation_width=canonical_return_observation_width,
+                )
+            )
+        
+            # ★ NEW: 追加アサート（(check-sat)の直前に挿入）
+            if extra_assertions:
+                lines.append("")
+                lines.extend(extra_assertions)
+        
+            lines.append("")
+            lines.append("(check-sat)")
+            lines.append("(get-model)")
+        
+            return FormulaBuilderResult(
+                formula="\n".join(lines),
+                return_var1=return_var1,
+                return_var2=return_var2,
+                extra_vars1=context.extra_vars1,
+                extra_vars2=context.extra_vars2,
+                constrained_fragments=context.constrained_fragments,
+                param_fragment_constrained=context.param_fragment_constrained
+            )
 
     def _prepare_formula_context(
         self,
