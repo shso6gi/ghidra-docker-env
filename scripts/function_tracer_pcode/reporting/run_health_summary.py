@@ -280,6 +280,11 @@ def write_health_outputs(
         print(rendered)
 
 
+#: `timeout_hotspot_summary` の report JSON にだけある key。health の節には
+#: 入れない（runner 経路が書く `health_section()` と形をそろえるため）。
+_REPORT_ONLY_KEYS = frozenset({"schema", "roots", "pairs_detail"})
+
+
 def merge_timeout_diagnostics(
     health: Dict[str, Any], report_path: Optional[Path],
 ) -> Dict[str, Any]:
@@ -301,9 +306,16 @@ def merge_timeout_diagnostics(
     section = timeout_diagnostics_from_health(payload)
     if section is None:
         # report JSON そのものは節を平らに持っている（`pairs` / `timeout_kind`）。
-        section = payload if "timeout_kind" in payload and "pairs" in payload else None
-    if section is None:
-        return health
+        # その場合は compact な節だけを取り、report 固有の key
+        # （`schema` / `roots` / `pairs_detail`）を health に持ち込まない。
+        # runner 経路（`timeout_hotspot_summary --health-summary-json`）が
+        # 書くのは `health_section()` なので、両経路で同じ形にそろえる。
+        if "timeout_kind" not in payload or "pairs" not in payload:
+            return health
+        section = {
+            key: value for key, value in payload.items()
+            if key not in _REPORT_ONLY_KEYS
+        }
     health[TIMEOUT_DIAGNOSTICS_KEY] = dict(section)
     return health
 

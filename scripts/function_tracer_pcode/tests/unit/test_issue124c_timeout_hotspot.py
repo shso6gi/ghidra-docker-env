@@ -414,6 +414,13 @@ def test_run_health_summary_cli_merges_the_report(tmp_path):
         hotspot.KIND_PROCESS_WALL_CLOCK: 1
     }
     assert "timeout_hotspots" in output_text.read_text(encoding="utf-8")
+    # 両経路が同じ形の節を書く。report 固有の key は health へ持ち込まない。
+    merged_section = merged[TIMEOUT_DIAGNOSTICS_KEY]
+    assert set(merged_section) == set(
+        hotspot.build_timeout_hotspot_report([root]).health_section()
+    )
+    for key in ("schema", "roots", "pairs_detail"):
+        assert key not in merged_section
 
 
 def test_run_health_summary_without_the_option_adds_no_section(tmp_path):
