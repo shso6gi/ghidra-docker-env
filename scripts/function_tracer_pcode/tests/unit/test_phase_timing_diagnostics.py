@@ -368,7 +368,9 @@ class TestPhaseTimingThroughTheWorkflow:
         assert analyze_calls == {"func1": 2, "func2": 1}
 
         # 同じ観測が attempt 側にも残り、対応は attempt_id で固定される。
-        attempts = result.to_dict()["debug_trace"]["attempts"]
+        # Issue #128 PR-128-B: attempt 行は trace object 上の同じ serialize を読む
+        # （通常 run では result JSON へ添付されないが、生成は止まっていない）。
+        attempts = result.debug_trace.to_dict()["attempts"]
         assert [row["attempt_id"] for row in phases] == [0, 1]
         assert [attempt["attempt_id"] for attempt in attempts] == [0, 1]
         base_attempt, retry_attempt = attempts
@@ -426,7 +428,8 @@ class TestPhaseTimingThroughTheWorkflow:
         assert analyze_calls == {"func1": 1, "func2": 1}
 
         # applied=False の phase も attempt として残り、その時点の reason を失わない。
-        attempts = result.to_dict()["debug_trace"]["attempts"]
+        # Issue #128 PR-128-B: 添付の有無に依らず object 上の trace から読む。
+        attempts = result.debug_trace.to_dict()["attempts"]
         assert [attempt["phase"] for attempt in attempts] == ["P0_BASE", "P1_SIGNEDNESS", "P2_PATTERN_INT"]
         for attempt in attempts[1:]:
             assert attempt["applied"] is False
@@ -519,7 +522,8 @@ class TestPhaseTimingThroughTheWorkflow:
         payload = result.to_dict()
         return (
             payload["diagnostics"]["timings"]["phases"],
-            payload["debug_trace"]["attempts"],
+            # Issue #128 PR-128-B: object 上の trace から読む（添付の有無に依らない）。
+            result.debug_trace.to_dict()["attempts"],
             analyze_calls,
             stage_calls,
         )

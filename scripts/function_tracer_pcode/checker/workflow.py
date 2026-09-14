@@ -61,6 +61,12 @@ def run_check_from_binaries(
         return result
     finally:
         try:
+            # Issue #128 PR-128-B: trace の生成・保持は止めず、result JSON へ
+            # 添付するかだけを既存の debug 指定（`--debug` / `-d` /
+            # `EQBENCH_DEBUG=1` はすべて `checker.debug` に集約済み）で決める。
+            # 新しい flag / env / config は作らない。
+            if result is not None:
+                result.emit_debug_trace = bool(getattr(checker, "debug", False))
             attach_phase_timings(result, phase_timeline)
         finally:
             # この run の timeline を checker に残さない。残すと、workflow を経由しない

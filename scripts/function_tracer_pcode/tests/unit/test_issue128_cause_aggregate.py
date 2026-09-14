@@ -194,8 +194,13 @@ def _payload(
     is_equivalent=None,
     error_message=None,
     canonical=True,
+    emit_debug_trace=True,
 ):
-    """1 結果分の payload。canonical なら serialized receipt を持たせる。"""
+    """1 結果分の payload。canonical なら serialized receipt を持たせる。
+
+    `emit_debug_trace=False` は PR-128-B の通常 run（trace は object 上に在るが
+    JSON へ添付しない）。既定 True は従来どおり。
+    """
     result = EquivalenceResult(
         is_equivalent=is_equivalent,
         function1_name=case,
@@ -210,6 +215,7 @@ def _payload(
         binary2_content_identity=BIN2,
         function1_identity=("function", "left", case),
         function2_identity=("function", "right", case),
+        emit_debug_trace=emit_debug_trace,
     )
     if canonical:
         # producer は「確定したか」だけを見る。serialization は下で行う。
@@ -226,8 +232,12 @@ def _payload(
     return payload
 
 
-def _fixture_payloads():
-    """UNKNOWN / TIMEOUT / ERROR / EQ / NOT_EQ と completion あり/なしを含む集合。"""
+def _fixture_payloads(emit_debug_trace=True):
+    """UNKNOWN / TIMEOUT / ERROR / EQ / NOT_EQ と completion あり/なしを含む集合。
+
+    `emit_debug_trace=False` で同じ入力の「trace を添付しない通常 run」形が得られる
+    （PR-128-B）。呼び出し側の既定は従来どおり添付あり。
+    """
     payloads = []
 
     # --- 1. UNKNOWN: 同一 reason の 2 cause、片方だけ completed、transition あり ---
@@ -289,6 +299,7 @@ def _fixture_payloads():
         pair_or_case=("case-l", "case-r"),
     )
     payloads.append(_payload(
+        emit_debug_trace=emit_debug_trace,
         case="with_completions", outcome="UNKNOWN", trace=trace,
         unknown_reasons=[canonical_x],
     ))
@@ -307,6 +318,7 @@ def _fixture_payloads():
         action_status="pending_proof",
     )
     payloads.append(_payload(
+        emit_debug_trace=emit_debug_trace,
         case="no_completions", outcome="UNKNOWN", trace=trace2, unknown_reasons=[canonical_w],
     ))
 
@@ -321,6 +333,7 @@ def _fixture_payloads():
         action_status="no_registered_plan",
     )
     payloads.append(_payload(
+        emit_debug_trace=emit_debug_trace,
         case="timeout_case", outcome="TIMEOUT", trace=trace3, unknown_reasons=[canonical_t],
     ))
 
@@ -330,6 +343,7 @@ def _fixture_payloads():
         error_message="strategy_exception",
     )
     payloads.append(_payload(
+        emit_debug_trace=emit_debug_trace,
         case="error_case", outcome="ERROR", trace=trace4, error_message="strategy_exception",
     ))
 
@@ -339,6 +353,7 @@ def _fixture_payloads():
         final_result=True,
     )
     payloads.append(_payload(
+        emit_debug_trace=emit_debug_trace,
         case="eq_case", outcome="EQUIVALENT", trace=trace5, is_equivalent=True,
     ))
 
@@ -348,6 +363,7 @@ def _fixture_payloads():
         final_result=False,
     )
     payloads.append(_payload(
+        emit_debug_trace=emit_debug_trace,
         case="not_eq_case", outcome="NOT_EQ", trace=trace6, is_equivalent=False,
     ))
     return payloads
