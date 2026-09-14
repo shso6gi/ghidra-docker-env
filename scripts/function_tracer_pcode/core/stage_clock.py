@@ -41,7 +41,21 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
+# Issue #124 PR-124-B: 同じ stage / region を kill 耐性のある JSONL としても出す。
+# journal は**この計測の観測 surface**であって、別の計測定義ではない
+# （`stage_end` の秒数は clock が集計するのと同じ実測値）。
+from scripts.function_tracer_pcode.core.stage_journal import (
+    journal_region_end,
+    journal_region_reentry,
+    journal_region_start,
+    journal_stage_end,
+    journal_stage_start,
+)
+
 STAGE_TIMING_SCHEMA = "pair-stage-timing-v1"
+
+#: 平坦な stage（`timed()`）の journal payload。region と区別するための印。
+_FLAT_STAGE_PAYLOAD = {"kind": "stage"}
 
 #: 恒等式の許容誤差 = ``max(ABSOLUTE, RELATIVE * 比較する値の大きい方)``。
 #: 浮動小数点の丸め（snapshot は 6 桁丸め）と scheduler jitter を吸収するための
@@ -137,12 +151,17 @@ class _OpenRegion:
                 # ここでは呼び出し回数だけを最外ノードへ足す。
                 self._clock._record_reentry(path, self._name)
                 self._closed = True
+                journal_region_reentry(self._name, path)
                 return self
             self._path = path + (self._name,)
             self._token = _ACTIVE_REGION_PATH.set(self._path)
             self._started = time.perf_counter()
         except Exception:
             self._closed = True
+        else:
+            # journal は計測が成立した後で書く（journal 側の失敗が region の
+            # 計測を落とさないよう、既存の except の外に置く）。
+            journal_region_start(self._name, self._path)
         return self
 
     def close(self) -> None:
@@ -163,6 +182,7 @@ class _OpenRegion:
                     _ACTIVE_REGION_PATH.set(self._path[:-1])
             if self._started is not None:
                 self._clock._record_region(self._path, elapsed)
+                journal_region_end(self._name, self._path, elapsed)
         except Exception:
             return
 
@@ -200,10 +220,15 @@ class StageClock:
     @contextmanager
     def timed(self, stage: str) -> Iterator[None]:
         started = time.monotonic()
+        # Issue #124 PR-124-B: JVM 起動や auto-analyze の途中で kill された pair
+        # にも「どの stage にいたか」が残るよう、同じ区間を journal にも出す。
+        journal_stage_start(stage, _FLAT_STAGE_PAYLOAD)
         try:
             yield
         finally:
-            self.mark(stage, time.monotonic() - started)
+            elapsed = time.monotonic() - started
+            self.mark(stage, elapsed)
+            journal_stage_end(stage, elapsed, _FLAT_STAGE_PAYLOAD)
 
     def mark(self, stage: str, seconds: float) -> None:
         try:

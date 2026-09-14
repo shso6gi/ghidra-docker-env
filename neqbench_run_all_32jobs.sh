@@ -485,12 +485,28 @@ run_pair() {
     local sample_position="${11}" function_position="${12}" function_total="${13}"
     local sample="$1" function="$2" left_id="$3" right_id="$4" left="$5" right="$6" out="$7" count="$8" total="$9" target="${10}"
     local log="$out/$function"_"$left_id"_"$right_id.log" pair_tmp="$(mktemp -d "$RUN_TMP/pair.XXXXXX")"
+    # Issue #124 PR-124-B: skip 判定は呼び出し側で済んでいる。新しい child を起こす
+    # 前に前回 execution の journal を捨て、`.log` の `>` と同じ境界にする
+    # （残すと seq が巻き戻り、古い readiness 行が current のものに見える）。
+    local journal_file="${log%.log}.stage.jsonl"
+    rm -f -- "$journal_file"
+    # 同じ境界で、journal が正本として宣言する dump 退避先の残骸も捨てる
+    # （退避そのものは PR-124-C。残すと前回の dump が current の dump に見える）。
+    local metrics_dir dump_artifact
+    metrics_dir="$out/.runtime-metrics"; mkdir -p "$metrics_dir"
+    dump_artifact="$metrics_dir/$function"_"$left_id"_"$right_id.stack-dump.txt"
+    rm -f -- "$dump_artifact"
     local nonce identity result_id source_fp stream exec_nonce checkpoint authority status_file detail ec=0
     nonce="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_hex(24))')"
     identity="$(PYTHONWARNINGS=ignore::RuntimeWarning "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.production_cutover --print-production-execution-identity --binary1-path "$left" --binary2-path "$right" --binary1-id "$left_id" --binary2-id "$right_id" --function-name1 "$function" --function-name2 "$function" --result-entry-occurrence-nonce "$nonce")"
     IFS=$'\t' read -r result_id source_fp stream <<< "$identity"
     exec_nonce="$(printf '%s' "$result_id" | sed 's/^production-pilot-//')"; checkpoint="$RUN_TMP/process-authority"; authority="$checkpoint/$exec_nonce/supervisor-projection.json"; mkdir -p "$checkpoint"
-    local -a supervisor_cmd=("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.process.supervisor_command --checkpoint-root "$checkpoint" --authority-output "$authority" --working-directory "$SCRIPT_DIR" --execution-nonce "$exec_nonce" --result-occurrence-id "$result_id" --source-snapshot-fingerprint "$source_fp" --stream-id "$stream" --deadline-policy-digest "$(printf 'neq:%s:%s' "$PAIR_PROCESS_TIMEOUT_SECONDS" "$PAIR_PROCESS_KILL_AFTER_SECONDS" | sha256sum | awk '{print $1}')" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" --allow-child-exit-resolution -- env TMPDIR="$pair_tmp" TEMP="$pair_tmp" TMP="$pair_tmp" UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE="$nonce" FT_EXPANDER_DEDUP_CASE_LIMIT="$FT_EXPANDER_DEDUP_CASE_LIMIT" FT_CALLEE_UNBOUND_REUSE="$FT_CALLEE_UNBOUND_REUSE" FT_CALLEE_UNBOUND_REUSE_SHADOW="$FT_CALLEE_UNBOUND_REUSE_SHADOW" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main --equiv "$left" "$right" --binary-ids "$left_id" "$right_id" -f "$function" --emit-result-json --equiv-timeout "$EQUIV_TIMEOUT" --timeout "$DECOMPILE_TIMEOUT" --pairwise-timeout "$PAIRWISE_TIMEOUT" --pairwise-timeout-hard "$PAIRWISE_TIMEOUT_HARD")
+    # Issue #124 PR-124-B: journal は log の隣、stack dump の一時先は checkpoint
+    # 配下（cleanup で消える）、journal に正本として渡す退避先は run dir 配下。
+    # 退避そのものは supervisor 側の責務（PR-124-C）。
+    local dump_tmp
+    dump_tmp="$checkpoint/$exec_nonce/stack-dump.txt"
+    local -a supervisor_cmd=("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.process.supervisor_command --checkpoint-root "$checkpoint" --authority-output "$authority" --working-directory "$SCRIPT_DIR" --execution-nonce "$exec_nonce" --result-occurrence-id "$result_id" --source-snapshot-fingerprint "$source_fp" --stream-id "$stream" --deadline-policy-digest "$(printf 'neq:%s:%s' "$PAIR_PROCESS_TIMEOUT_SECONDS" "$PAIR_PROCESS_KILL_AFTER_SECONDS" | sha256sum | awk '{print $1}')" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" --allow-child-exit-resolution -- env TMPDIR="$pair_tmp" TEMP="$pair_tmp" TMP="$pair_tmp" UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE="$nonce" FT_EXPANDER_DEDUP_CASE_LIMIT="$FT_EXPANDER_DEDUP_CASE_LIMIT" FT_CALLEE_UNBOUND_REUSE="$FT_CALLEE_UNBOUND_REUSE" FT_CALLEE_UNBOUND_REUSE_SHADOW="$FT_CALLEE_UNBOUND_REUSE_SHADOW" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main --equiv "$left" "$right" --binary-ids "$left_id" "$right_id" -f "$function" --emit-result-json --equiv-timeout "$EQUIV_TIMEOUT" --timeout "$DECOMPILE_TIMEOUT" --pairwise-timeout "$PAIRWISE_TIMEOUT" --pairwise-timeout-hard "$PAIRWISE_TIMEOUT_HARD" --stage-journal "$journal_file" --stack-dump-file "$dump_tmp" --stack-dump-artifact "$dump_artifact")
     if [[ "$EQBENCH_DEBUG" == "1" ]]; then supervisor_cmd+=( -d ); fi
     "${supervisor_cmd[@]}" > "$log" 2>&1 || ec=$?
     if ! supervisor_projection_is_terminal "$authority"; then

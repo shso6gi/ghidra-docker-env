@@ -33,6 +33,21 @@ from scripts.function_tracer_pcode.core.stage_clock import (  # noqa: F401
     region_identity_rows,
     stage_region,
 )
+# Issue #124 PR-124-B: 同じ計測を kill 耐性のある JSONL にも出す journal。
+# 実体は `core` にある（solver worker thread と authority の finalize 区間から
+# 同じ関数を呼ぶため）。ここは checker から読む既存の窓口を揃えるための再公開で、
+# **結果 JSON には入らない**（journal は結果 JSON の外に置く）。
+from scripts.function_tracer_pcode.core.stage_journal import (  # noqa: F401
+    STAGE_JOURNAL_SCHEMA,
+    StageJournal,
+    active_stage_journal,
+    close_active_stage_journal,
+    journal_counter,
+    journal_note,
+    journal_stage_end,
+    journal_stage_start,
+    set_active_stage_journal,
+)
 
 DIAGNOSTICS_SCHEMA = "result-diagnostics-v1"
 

@@ -240,6 +240,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="--pairwise-save-unknown で保存する UNKNOWN クエリの出力ディレクトリ",
     )
+    # Issue #124 PR-124-B: 診断の出力先。いずれも判定には関与しない。
+    parser.add_argument(
+        "--stage-journal",
+        default=None,
+        help=(
+            "stage / region の開始・終了を 1 行ずつ追記する JSONL のパス"
+            "（kill されても書き終えた行は残る。既定: 出力しない）"
+        ),
+    )
+    parser.add_argument(
+        "--stack-dump-file",
+        default=None,
+        help=(
+            "SIGUSR1 受信時に Python 全スレッドの stack を書く一時ファイル。"
+            "checkpoint 配下を想定し、cleanup で消える"
+        ),
+    )
+    parser.add_argument(
+        "--stack-dump-artifact",
+        default=None,
+        help=(
+            "stack dump の永続的な退避先（run dir 配下）。journal はこちらを"
+            "正本の dump path として記録する（退避自体は supervisor 側の責務）"
+        ),
+    )
     parser.add_argument(
         "--normalize-mode",
         choices=["off", "safe", "full"],

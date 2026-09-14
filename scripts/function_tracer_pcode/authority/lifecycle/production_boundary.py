@@ -19,6 +19,12 @@ from scripts.function_tracer_pcode.authority.decision.production_cutover import 
     attach_canonical_relations,
     issue_infrastructure_error_decision,
 )
+# Issue #124 PR-124-B: finalize / conditional lane の区間を journal にも残す。
+# 秒数は `boundary_seconds` と同じ 1 回の計測から書く（別定義にしない）。
+from scripts.function_tracer_pcode.core.stage_journal import (
+    journal_stage_end,
+    journal_stage_start,
+)
 
 
 class LegacyBoundaryErrorKind(str, Enum):
@@ -395,11 +401,17 @@ def run_check_from_binaries_with_v2_pilot(
         boundary_seconds["authority_finalize"] = 0.0
         boundary_seconds["conditional_lane"] = 0.0
         authority_finalize_started = time.monotonic()
+        journal_stage_start("authority_finalize", {"kind": "boundary"})
         try:
             evidence = _profiled_finish(connector, session, result)
         except Exception as exc:
             boundary_seconds["authority_finalize"] = (
                 time.monotonic() - authority_finalize_started
+            )
+            journal_stage_end(
+                "authority_finalize",
+                boundary_seconds["authority_finalize"],
+                {"kind": "boundary", "raised": True},
             )
             # 判定は ERROR へ落ちるが、原因はログ（stderr）に残す。
             import sys
@@ -452,6 +464,11 @@ def run_check_from_binaries_with_v2_pilot(
             boundary_seconds["authority_finalize"] = (
                 time.monotonic() - authority_finalize_started
             )
+            journal_stage_end(
+                "authority_finalize",
+                boundary_seconds["authority_finalize"],
+                {"kind": "boundary", "raised": False},
+            )
             result._v2_dual_write_evidence = evidence
             result.v2_dual_write_pilot = dict(evidence.to_dict())
             candidate_receipt, reconciliation_error = (
@@ -492,6 +509,7 @@ def run_check_from_binaries_with_v2_pilot(
                 # UNKNOWN のときだけ conditional lane を回す。conditional 列は
                 # 別列で、is_equivalent / final_outcome / exit code は動かない。
                 conditional_lane_started = time.monotonic()
+                journal_stage_start("conditional_lane", {"kind": "boundary"})
                 _run_conditional_lane(
                     checker,
                     result,
@@ -499,6 +517,11 @@ def run_check_from_binaries_with_v2_pilot(
                 )
                 boundary_seconds["conditional_lane"] = (
                     time.monotonic() - conditional_lane_started
+                )
+                journal_stage_end(
+                    "conditional_lane",
+                    boundary_seconds["conditional_lane"],
+                    {"kind": "boundary"},
                 )
                 # The CLI owns the final serialized payload (including binary
                 # content identities and timing).  Preserve exact issuer-owned
