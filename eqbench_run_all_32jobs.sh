@@ -37,6 +37,11 @@ PAIR_PROCESS_TIMEOUT="${PAIR_PROCESS_TIMEOUT:-600s}"
 PAIR_PROCESS_KILL_AFTER="${PAIR_PROCESS_KILL_AFTER:-30s}"
 PAIR_PROCESS_TIMEOUT_SECONDS="${PAIR_PROCESS_TIMEOUT%s}"
 PAIR_PROCESS_KILL_AFTER_SECONDS="${PAIR_PROCESS_KILL_AFTER%s}"
+# Issue #124 PR-124-C: deadline の何秒前に stack dump を要求するか（診断のみ）。
+# deadline の総予算・起点・kill 手順はこの値で変わらない。0 や予算以上を指定
+# すると診断は disabled になり、待ち方の構造だけが従来どおり残る。
+PAIR_STACK_DUMP_LEAD="${PAIR_STACK_DUMP_LEAD:-2s}"
+PAIR_STACK_DUMP_LEAD_SECONDS="${PAIR_STACK_DUMP_LEAD%s}"
 EQUIV_TIMEOUT="${EQUIV_TIMEOUT:-10}"
 DECOMPILE_TIMEOUT="${DECOMPILE_TIMEOUT:-60}"
 PAIRWISE_TIMEOUT="${PAIRWISE_TIMEOUT:-5}"
@@ -538,6 +543,11 @@ run_pair() {
     # 残っていると、それが current execution の dump として読まれてしまう。
     local stack_dump_artifact="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.stack-dump.txt"
     rm -f -- "$stack_dump_artifact"
+    # Issue #124 PR-124-C: 同じ execution 境界で、supervisor が書く診断 sidecar の
+    # 残骸も捨てる。残すと前回 execution の registration / 送信結果が current の
+    # ものとして読まれてしまう。
+    local stack_dump_status="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.stack-dump.status.json"
+    rm -f -- "$stack_dump_status"
     progress_receipt="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.progress.json"
     runtime_metrics_file="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.runtime.json"
     local started_at finished_at elapsed_seconds max_rss_kb
@@ -610,6 +620,11 @@ run_pair() {
         --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS"
         --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS"
         --allow-child-exit-resolution
+        --stage-journal "$stage_journal_file"
+        --stack-dump-file "$stack_dump_tmp"
+        --stack-dump-artifact "$stack_dump_artifact"
+        --diagnostic-status-output "$stack_dump_status"
+        --stack-dump-lead-seconds "$PAIR_STACK_DUMP_LEAD_SECONDS"
         -- "${equiv_cmd[@]}"
     )
 
@@ -715,6 +730,12 @@ run_pair() {
     if (( pair_status_validation_ec != 0 && classification_ec == 0 )); then
         classification_ec="$pair_status_validation_ec"
     fi
+    # Issue #124 PR-124-C: cleanup より前に dump 退避状態を確認して記録する
+    # （checkpoint が消えると tmp dump も消える）。cleanup 自体は必ず実行する。
+    validation_record_stack_dump_state \
+        "$STACK_DUMP_ARTIFACT_STATE_FILE" "$sample_label" \
+        "${function_name}_${left_id}_${right_id}" "$stack_dump_status" \
+        "$stack_dump_artifact" "$log_file"
     if cleanup_pair_process_authority_with_run_health \
         "$checkpoint_root" "$execution_nonce" "$log_file" "$pair_status_file" \
         "$sample_label" "${function_name}_${left_id}_${right_id}"; then
@@ -925,6 +946,10 @@ FUNCTION_CENSUS_FAILURES_FILE="$OUTPUT_BASE_DIR/function_census_failures.txt"
 : > "$FUNCTION_CENSUS_FAILURES_FILE"
 PROCESS_AUTHORITY_CLEANUP_FAILURES_FILE="$OUTPUT_BASE_DIR/process_authority_cleanup_failures.txt"
 : > "$PROCESS_AUTHORITY_CLEANUP_FAILURES_FILE"
+# Issue #124 PR-124-C: cleanup 前に確認した dump 退避状態（診断のみ。
+# cleanup 失敗の file とは別にする: あちらは run を止める STOP 判定に使われる）。
+STACK_DUMP_ARTIFACT_STATE_FILE="$OUTPUT_BASE_DIR/stack_dump_artifact_state.tsv"
+: > "$STACK_DUMP_ARTIFACT_STATE_FILE"
 USED_BUILD_RECEIPTS_FILE="$OUTPUT_BASE_DIR/used_build_receipts.jsonl"
 : > "$USED_BUILD_RECEIPTS_FILE"
 ANALYSIS_SOURCE_DIGEST_START="$("$PYTHON_BIN" -m \
@@ -967,6 +992,7 @@ progress_interval_seconds=$EQBENCH_PROGRESS_INTERVAL_SECONDS
 validation_summary_level=$VALIDATION_SUMMARY_LEVEL
 pair_process_timeout=$PAIR_PROCESS_TIMEOUT
 pair_process_kill_after=$PAIR_PROCESS_KILL_AFTER
+pair_stack_dump_lead=$PAIR_STACK_DUMP_LEAD
 pair_process_timeout_seconds=$PAIR_PROCESS_TIMEOUT_SECONDS
 pair_process_kill_after_seconds=$PAIR_PROCESS_KILL_AFTER_SECONDS
 equiv_timeout=$EQUIV_TIMEOUT
@@ -1427,6 +1453,10 @@ fi
 # Issue #104: benchmark validation gate over the canonical pair outcomes
 # (after the health summary it extends, before the receipt that hashes it).
 validation_run_benchmark_gate "$OUTPUT_BASE_DIR" "$EQBENCH_ROOT" "$SCRIPT_DIR"
+
+# Issue #124 PR-124-C: TIMEOUT 診断（timeout_kind / timeout_hotspots）を
+# run_health_summary へ merge する（gate の直後、receipt が hash する前）。
+validation_run_timeout_hotspot_summary "$OUTPUT_BASE_DIR" "$SCRIPT_DIR"
 
 cat >> "$OUTPUT_BASE_DIR/run_manifest.txt" <<EOF
 completed_samples=$COMPLETED_SAMPLES

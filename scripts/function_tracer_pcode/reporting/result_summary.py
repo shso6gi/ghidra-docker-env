@@ -1559,6 +1559,12 @@ def format_run_health_summary(health: Mapping[str, Any]) -> str:
     benchmark = health.get(BENCHMARK_VALIDATION_KEY)
     if isinstance(benchmark, Mapping):
         lines.extend(format_benchmark_validation_lines(benchmark))
+    # Issue #124 PR-124-C: TIMEOUT の診断（`timeout_hotspot_summary` が merge する）。
+    # key が無い run（このツールを流していない / PR-124-C 以前）では 1 行も出さない。
+    # 「0 件」と書くと、観測していないことを観測して 0 だったことにしてしまう。
+    timeout_diagnostics = health.get(TIMEOUT_DIAGNOSTICS_KEY)
+    if isinstance(timeout_diagnostics, Mapping):
+        lines.extend(format_timeout_health_lines(timeout_diagnostics))
     return "\n".join(lines)
 
 
@@ -1653,6 +1659,81 @@ def format_failure_health_lines(health: Mapping[str, Any]) -> List[str]:
             continue
         for name, count in sorted(values.items(), key=lambda item: (-int(item[1]), str(item[0])))[:20]:
             lines.append(f"    - {name}: {count}")
+    return lines
+
+
+# Issue #124 PR-124-C: TIMEOUT 診断（``reporting.timeout_hotspot_summary``）が
+# merge する節。gate と同じく、runner 経路と offline 再集計で同じ描画を使う。
+TIMEOUT_DIAGNOSTICS_KEY = "timeout_diagnostics"
+
+#: text に出す counting 次元と、その見出し。`timeout_kind` と `timeout_hotspots`
+#: は Issue #124 の AC が名指ししている 2 節。
+TIMEOUT_HEALTH_SECTIONS = (
+    "timeout_kind",
+    "handler_registered",
+    "signal_sent",
+    "dump_observed",
+    "sent_but_unobserved",
+    "unavailable_reason",
+    "artifact_status",
+    "last_completed_stage",
+    "in_progress_stage",
+    "longest_completed_stage",
+    "timeout_hotspots",
+)
+
+
+def timeout_diagnostics_from_health(
+    health: Mapping[str, Any],
+) -> Optional[Mapping[str, Any]]:
+    """health から TIMEOUT 診断の節を取り出す。無ければ `None`。
+
+    `None` は「この run では集計していない」であって「TIMEOUT が 0 件」ではない。
+    0 件の run は `pairs: 0` を持つ mapping を返す。
+    """
+
+    section = health.get(TIMEOUT_DIAGNOSTICS_KEY)
+    if not isinstance(section, Mapping):
+        return None
+    return section
+
+
+def format_timeout_health_lines(section: Mapping[str, Any]) -> List[str]:
+    """TIMEOUT 診断の節。件数はすべて TIMEOUT pair 数と総和が一致する。
+
+    値が観測できなかった pair は ``(unknown)`` bucket に入っているので、
+    ここで 0 件へ潰さない。section 自体が無い health では呼ばれない。
+    """
+
+    pairs = section.get("pairs")
+    total = section.get("total_pairs")
+    header = f"  timeout_diagnostics: pairs={pairs if _is_count(pairs) else EVIDENCE_UNKNOWN}"
+    if _is_count(total):
+        header += f" / {total}"
+    lines: List[str] = [header]
+    evidence = section.get("evidence")
+    if isinstance(evidence, Mapping):
+        lines.append(
+            "  timeout_diagnostic_evidence: "
+            + " ".join(
+                f"{name}={evidence.get(name, 0)}"
+                for name in sorted(evidence)
+            )
+        )
+    for title in TIMEOUT_HEALTH_SECTIONS:
+        values = section.get(title)
+        lines.append(f"  {title}:")
+        if not isinstance(values, Mapping) or not values:
+            # 集計自体はあるが次元が空 = TIMEOUT pair が 0 件。
+            lines.append("    (none)")
+            continue
+        for name, count in sorted(
+            values.items(), key=lambda item: (-int(item[1]), str(item[0]))
+        )[:20]:
+            lines.append(f"    - {name}: {count}")
+    note = section.get("candidate_frames_note")
+    if isinstance(note, str) and note:
+        lines.append(f"  timeout_candidate_frames_note: {note}")
     return lines
 
 

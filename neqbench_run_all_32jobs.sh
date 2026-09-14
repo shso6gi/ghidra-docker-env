@@ -48,6 +48,9 @@ FT_CALLEE_UNBOUND_REUSE_SHADOW="${FT_CALLEE_UNBOUND_REUSE_SHADOW:-0}"
 export FT_CALLEE_UNBOUND_REUSE FT_CALLEE_UNBOUND_REUSE_SHADOW
 default_value PAIR_PROCESS_TIMEOUT 600s
 default_value PAIR_PROCESS_KILL_AFTER 30s
+# Issue #124 PR-124-C: deadline の何秒前に stack dump を要求するか（診断のみ）。
+# deadline の総予算・起点・kill 手順はこの値で変わらない。
+default_value PAIR_STACK_DUMP_LEAD 2s
 default_value VALIDATION_SUMMARY_LEVEL compact
 if [[ ! -v EQBENCH_TMPDIR ]]; then
     if [[ -d /workspace && -w /workspace ]]; then EQBENCH_TMPDIR=/workspace/tmp; else EQBENCH_TMPDIR="$SCRIPT_DIR/tmp"; fi
@@ -70,6 +73,7 @@ if [[ "$NEQ_RUN_SCOPE" == FULL_NEQ && "$NEQ_MAX_SAMPLES" != 0 ]]; then exit 1; f
 if [[ "$NEQ_RUN_SCOPE" == FULL_NEQ && ( -n "$NEQ_SAMPLE_FILTER" || -n "$NEQ_PAIR_FILTER" ) ]]; then exit 1; fi
 PAIR_PROCESS_TIMEOUT_SECONDS="$(printf '%s' "$PAIR_PROCESS_TIMEOUT" | sed 's/s$//')"
 PAIR_PROCESS_KILL_AFTER_SECONDS="$(printf '%s' "$PAIR_PROCESS_KILL_AFTER" | sed 's/s$//')"
+PAIR_STACK_DUMP_LEAD_SECONDS="$(printf '%s' "$PAIR_STACK_DUMP_LEAD" | sed 's/s$//')"
 
 RESOURCE_ADMISSION_JOBS="$EQBENCH_CPU_TOKENS"
 if (( EQBENCH_RESOURCE_ADMISSION == 1 )); then
@@ -284,6 +288,9 @@ fi
 "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.pair_status_authority --validate-private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" >/dev/null
 
 PROCESS_CLEANUP_FAILURES="$OUTPUT_BASE_DIR/process_authority_cleanup_failures.txt"; : > "$PROCESS_CLEANUP_FAILURES"
+# Issue #124 PR-124-C: cleanup 前に確認した dump 退避状態（診断のみ。cleanup 失敗
+# の file とは別。あちらは run を止める判定と receipt の hash に使われる）。
+STACK_DUMP_ARTIFACT_STATE_FILE="$OUTPUT_BASE_DIR/stack_dump_artifact_state.tsv"; : > "$STACK_DUMP_ARTIFACT_STATE_FILE"
 EXPECTED_STATUS="$OUTPUT_BASE_DIR/expected_pair_status_paths.txt"; : > "$EXPECTED_STATUS"
 VERIFIED_SKIPPED_STATUS="$OUTPUT_BASE_DIR/verified_skipped_pair_status_paths.txt"; : > "$VERIFIED_SKIPPED_STATUS"
 COMPILE_FAILURE_SAMPLES_FILE="$OUTPUT_BASE_DIR/compile_failure_samples.txt"; : > "$COMPILE_FAILURE_SAMPLES_FILE"
@@ -496,6 +503,10 @@ run_pair() {
     metrics_dir="$out/.runtime-metrics"; mkdir -p "$metrics_dir"
     dump_artifact="$metrics_dir/$function"_"$left_id"_"$right_id.stack-dump.txt"
     rm -f -- "$dump_artifact"
+    # Issue #124 PR-124-C: supervisor が書く診断 sidecar の残骸も同じ境界で捨てる。
+    local dump_status
+    dump_status="$metrics_dir/$function"_"$left_id"_"$right_id.stack-dump.status.json"
+    rm -f -- "$dump_status"
     local nonce identity result_id source_fp stream exec_nonce checkpoint authority status_file detail ec=0
     nonce="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_hex(24))')"
     identity="$(PYTHONWARNINGS=ignore::RuntimeWarning "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.production_cutover --print-production-execution-identity --binary1-path "$left" --binary2-path "$right" --binary1-id "$left_id" --binary2-id "$right_id" --function-name1 "$function" --function-name2 "$function" --result-entry-occurrence-nonce "$nonce")"
@@ -506,7 +517,7 @@ run_pair() {
     # 退避そのものは supervisor 側の責務（PR-124-C）。
     local dump_tmp
     dump_tmp="$checkpoint/$exec_nonce/stack-dump.txt"
-    local -a supervisor_cmd=("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.process.supervisor_command --checkpoint-root "$checkpoint" --authority-output "$authority" --working-directory "$SCRIPT_DIR" --execution-nonce "$exec_nonce" --result-occurrence-id "$result_id" --source-snapshot-fingerprint "$source_fp" --stream-id "$stream" --deadline-policy-digest "$(printf 'neq:%s:%s' "$PAIR_PROCESS_TIMEOUT_SECONDS" "$PAIR_PROCESS_KILL_AFTER_SECONDS" | sha256sum | awk '{print $1}')" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" --allow-child-exit-resolution -- env TMPDIR="$pair_tmp" TEMP="$pair_tmp" TMP="$pair_tmp" UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE="$nonce" FT_EXPANDER_DEDUP_CASE_LIMIT="$FT_EXPANDER_DEDUP_CASE_LIMIT" FT_CALLEE_UNBOUND_REUSE="$FT_CALLEE_UNBOUND_REUSE" FT_CALLEE_UNBOUND_REUSE_SHADOW="$FT_CALLEE_UNBOUND_REUSE_SHADOW" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main --equiv "$left" "$right" --binary-ids "$left_id" "$right_id" -f "$function" --emit-result-json --equiv-timeout "$EQUIV_TIMEOUT" --timeout "$DECOMPILE_TIMEOUT" --pairwise-timeout "$PAIRWISE_TIMEOUT" --pairwise-timeout-hard "$PAIRWISE_TIMEOUT_HARD" --stage-journal "$journal_file" --stack-dump-file "$dump_tmp" --stack-dump-artifact "$dump_artifact")
+    local -a supervisor_cmd=("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.process.supervisor_command --checkpoint-root "$checkpoint" --authority-output "$authority" --working-directory "$SCRIPT_DIR" --execution-nonce "$exec_nonce" --result-occurrence-id "$result_id" --source-snapshot-fingerprint "$source_fp" --stream-id "$stream" --deadline-policy-digest "$(printf 'neq:%s:%s' "$PAIR_PROCESS_TIMEOUT_SECONDS" "$PAIR_PROCESS_KILL_AFTER_SECONDS" | sha256sum | awk '{print $1}')" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" --allow-child-exit-resolution --stage-journal "$journal_file" --stack-dump-file "$dump_tmp" --stack-dump-artifact "$dump_artifact" --diagnostic-status-output "$dump_status" --stack-dump-lead-seconds "$PAIR_STACK_DUMP_LEAD_SECONDS" -- env TMPDIR="$pair_tmp" TEMP="$pair_tmp" TMP="$pair_tmp" UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE="$nonce" FT_EXPANDER_DEDUP_CASE_LIMIT="$FT_EXPANDER_DEDUP_CASE_LIMIT" FT_CALLEE_UNBOUND_REUSE="$FT_CALLEE_UNBOUND_REUSE" FT_CALLEE_UNBOUND_REUSE_SHADOW="$FT_CALLEE_UNBOUND_REUSE_SHADOW" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main --equiv "$left" "$right" --binary-ids "$left_id" "$right_id" -f "$function" --emit-result-json --equiv-timeout "$EQUIV_TIMEOUT" --timeout "$DECOMPILE_TIMEOUT" --pairwise-timeout "$PAIRWISE_TIMEOUT" --pairwise-timeout-hard "$PAIRWISE_TIMEOUT_HARD" --stage-journal "$journal_file" --stack-dump-file "$dump_tmp" --stack-dump-artifact "$dump_artifact")
     if [[ "$EQBENCH_DEBUG" == "1" ]]; then supervisor_cmd+=( -d ); fi
     "${supervisor_cmd[@]}" > "$log" 2>&1 || ec=$?
     if ! supervisor_projection_is_terminal "$authority"; then
@@ -522,6 +533,9 @@ run_pair() {
         status=ERROR
         ec=1
     fi
+    # Issue #124 PR-124-C: cleanup より前に dump 退避状態を確認して記録する。
+    # cleanup 自体は従来どおり必ず実行し、失敗の扱いも変えない。
+    validation_record_stack_dump_state "$STACK_DUMP_ARTIFACT_STATE_FILE" "$sample" "$function"_"$left_id"_"$right_id" "$dump_status" "$dump_artifact" "$log"
     "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.process_authority_cleanup --tmp-root "$EQBENCH_TMPDIR" --run-tmpdir "$RUN_TMP" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" || { printf '%s\t%s\t%s\n' "$sample" "$function" "$exec_nonce" >> "$PROCESS_CLEANUP_FAILURES"; ec=1; }
     rm -rf "$pair_tmp"
     progress_update "$sample" "$function" "$left_id" "$right_id" "$status"
@@ -563,6 +577,7 @@ resource_admission_jobs=$RESOURCE_ADMISSION_JOBS
 validation_summary_level=$VALIDATION_SUMMARY_LEVEL
 pair_process_timeout=$PAIR_PROCESS_TIMEOUT
 pair_process_kill_after=$PAIR_PROCESS_KILL_AFTER
+pair_stack_dump_lead=$PAIR_STACK_DUMP_LEAD
 pair_process_timeout_seconds=$PAIR_PROCESS_TIMEOUT_SECONDS
 pair_process_kill_after_seconds=$PAIR_PROCESS_KILL_AFTER_SECONDS
 equiv_timeout=$EQUIV_TIMEOUT
@@ -809,6 +824,8 @@ find "$OUTPUT_BASE_DIR" -type f -name '*.log' ! -name 'compile_*.log' ! -name 'r
     > "$OUTPUT_BASE_DIR/overall_summary.txt" || true
 # Issue #104: benchmark validation gate (after the health summary, before the receipt).
 validation_run_benchmark_gate "$OUTPUT_BASE_DIR" "$NEQ_ROOT" "$SCRIPT_DIR"
+# Issue #124 PR-124-C: TIMEOUT 診断を run_health_summary へ merge（gate の直後）。
+validation_run_timeout_hotspot_summary "$OUTPUT_BASE_DIR" "$SCRIPT_DIR"
 cat >> "$RUN_MANIFEST" <<EOF
 completed_samples=$COMPLETED_SAMPLES
 skipped_samples=$SKIPPED_SAMPLES
