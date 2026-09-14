@@ -346,6 +346,124 @@ def test_5_malformed_swallowed_ledger_is_not_an_observed_zero(tmp_path):
         assert health[FAILURE_EVIDENCE_KEY][FAILURE_INTERNAL_SURFACE]["state"] == EVIDENCE_COMPLETE
 
 
+def test_5a_missing_declared_total_is_malformed_not_an_exact_zero(tmp_path):
+    """`total` key 欠落は producer 契約外。`by_site` だけで exact 0 を名乗らない。"""
+
+    failures = {"swallowed_exceptions": {"by_site": []}}
+    log = _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures))
+    summary = summarize_failure_diagnostics(_records(log))
+
+    assert summary.swallowed_evidence == FailureEvidence(malformed=1)
+    assert summary.swallowed_evidence.state == EVIDENCE_UNKNOWN
+    assert summary.swallowed_exact_total is None
+    assert summary.swallowed_observed_total == 0
+
+    text, parsed, built = _round_trip(tmp_path, log)
+    block = _failure_block(text)
+    assert "Swallowed exception evidence: unknown (observed 0 / missing 0 / malformed 1)" in block
+    assert "Swallowed exceptions total  : unknown (observed 0)" in block
+    assert f"{FAILURE_SWALLOWED_BY_TYPE_TITLE}:\n      (unknown)" in block
+    assert "(none)" not in block.split(FAILURE_INTERNAL_BY_SITE_TITLE)[0]
+    for health in (parsed, built):
+        assert health[FAILURE_SWALLOWED_TOTAL_KEY] is None
+        assert health[FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY] == 0
+        assert health[FAILURE_EVIDENCE_KEY][FAILURE_SWALLOWED_SURFACE]["state"] == EVIDENCE_UNKNOWN
+    rendered = format_run_health_summary(built)
+    assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: unknown (observed 0)" in rendered
+    assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: 0" not in rendered
+
+
+def test_5c_swallowed_ledger_schema_boundaries(tmp_path):
+    """producer 契約の各境界。readable なのは契約を全部満たすときだけ。"""
+
+    rows = [{"site": "analysis.a", "exception_type": "ValueError", "count": 2}]
+    malformed_ledgers = {
+        "total key missing": {"by_site": []},
+        "total is None": {"total": None, "by_site": []},
+        "total is True": {"total": True, "by_site": [
+            {"site": "s", "exception_type": "E", "count": 1}
+        ]},
+        "total is negative": {"total": -1, "by_site": []},
+        "total is a string": {"total": "0", "by_site": []},
+        "total is a float": {"total": 0.0, "by_site": []},
+        "by_site key missing": {"total": 0},
+        "by_site is not a sequence": {"total": 0, "by_site": {}},
+        "by_site is a string": {"total": 0, "by_site": ""},
+        "row is not a mapping": {"total": 0, "by_site": ["row"]},
+        "count key missing": {"total": 0, "by_site": [{"site": "s"}]},
+        "count is negative": {"total": -1, "by_site": [{"site": "s", "count": -1}]},
+        "count is a bool": {"total": 1, "by_site": [{"site": "s", "count": True}]},
+        "declared total mismatch": {"total": 5, "by_site": rows},
+    }
+    for label, ledger in malformed_ledgers.items():
+        log = _write_log(
+            tmp_path / label.replace(" ", "_"),
+            "f/f_B1_B2.log",
+            _payload(failures={"swallowed_exceptions": ledger}),
+        )
+        summary = summarize_failure_diagnostics(_records(log))
+        assert summary.swallowed_evidence.malformed == 1, label
+        assert summary.swallowed_evidence.observed == 0, label
+        assert summary.swallowed_exact_total is None, label
+
+    valid_ledgers = {
+        "observed zero": ({"total": 0, "by_site": []}, 0, {}),
+        "observed nonzero": ({"total": 2, "by_site": rows}, 2, {"ValueError": 2}),
+    }
+    for label, (ledger, expected_total, expected_by_type) in valid_ledgers.items():
+        log = _write_log(
+            tmp_path / label.replace(" ", "_"),
+            "f/f_B1_B2.log",
+            _payload(failures={"swallowed_exceptions": ledger}),
+        )
+        summary = summarize_failure_diagnostics(_records(log))
+        assert summary.swallowed_evidence == FailureEvidence(observed=1), label
+        assert summary.swallowed_evidence.state == EVIDENCE_COMPLETE, label
+        assert summary.swallowed_exact_total == expected_total, label
+        assert summary.swallowed_exceptions_by_type == expected_by_type, label
+
+
+def test_5d_an_empty_failures_block_is_malformed_for_both_surfaces(tmp_path):
+    """block はあるが中身が無い payload を「観測して 0 件」にしない。
+
+    `failures` key ごと無い log（PR-125-A 以前）は `missing`、空 block は
+    `malformed`。どちらも complete にはならないが、意味が違うので分ける。
+    """
+
+    empty = _write_log(tmp_path / "empty", "f/f_B1_B2.log", _payload(failures={}))
+    summary = summarize_failure_diagnostics(_records(empty))
+    assert summary.swallowed_evidence == FailureEvidence(malformed=1)
+    assert summary.internal_evidence == FailureEvidence(malformed=1)
+    assert summary.swallowed_exact_total is None
+
+    # `diagnostics` はあるが `failures` key が無い payload は未観測。
+    no_key = _write_log(
+        tmp_path / "no_key", "f/f_B1_B2.log",
+        _payload(diagnostics={"schema": "result-diagnostics-v1", "stages": {}}),
+    )
+    summary = summarize_failure_diagnostics(_records(no_key))
+    assert summary.swallowed_evidence == FailureEvidence(missing=1)
+    assert summary.internal_evidence == FailureEvidence(missing=1)
+
+
+def test_5e_an_explicit_null_internal_exception_is_malformed(tmp_path):
+    """key 欠落（観測済み 0 件）と明示的な `None`（契約外）を混同しない。"""
+
+    absent = _producer_swallowed_block(())
+    assert "internal_exception" not in absent
+    explicit_null = dict(absent, internal_exception=None)
+
+    absent_log = _write_log(tmp_path / "absent", "f/f_B1_B2.log", _payload(failures=absent))
+    null_log = _write_log(tmp_path / "null", "f/f_B1_B2.log", _payload(failures=explicit_null))
+
+    assert summarize_failure_diagnostics(
+        _records(absent_log)
+    ).internal_evidence == FailureEvidence(observed=1)
+    assert summarize_failure_diagnostics(
+        _records(null_log)
+    ).internal_evidence == FailureEvidence(malformed=1)
+
+
 def test_5b_partially_read_rows_are_kept_but_not_called_complete(tmp_path):
     """行が 1 つ壊れていても、読めた行は捨てずに下限として残す。"""
 
@@ -436,6 +554,32 @@ def test_7_a_pre_pr125b_summary_is_unknown_not_zero(tmp_path):
     assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    (unknown)" in legacy_text
     assert f"    - {FAILURE_SWALLOWED_SURFACE}: unknown" in legacy_text
     assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: unknown" in legacy_text
+
+
+def test_7b_an_incomplete_evidence_row_is_not_restored_as_complete(tmp_path):
+    """health mapping 側でも欠けた次元を 0 で埋めない（fail-closed）。"""
+
+    for broken in (
+        {"observed": 2},                                            # missing/malformed 欠落
+        {"observed": 2, "missing": 0},                              # malformed 欠落
+        {"observed": 2, "missing": 0, "malformed": None},           # 非 int
+        {"observed": 2, "missing": 0, "malformed": True},           # bool
+        {"observed": -1, "missing": 0, "malformed": 0},             # 負数
+        # 件数と矛盾する state を書いた health は信用しない。
+        {"state": EVIDENCE_COMPLETE, "observed": 1, "missing": 1, "malformed": 0},
+    ):
+        health = {
+            FAILURE_EVIDENCE_KEY: {
+                FAILURE_SWALLOWED_SURFACE: broken,
+                FAILURE_INTERNAL_SURFACE: broken,
+            },
+            FAILURE_SWALLOWED_TOTAL_KEY: 0,
+            FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY: 0,
+        }
+        rendered = format_run_health_summary(health)
+        assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    (unknown)" in rendered, broken
+        assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: unknown (observed 0)" in rendered, broken
+        assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: 0" not in rendered, broken
 
 
 def test_8_mixed_old_and_new_logs_are_partial(tmp_path):

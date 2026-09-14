@@ -24,6 +24,10 @@ from scripts.function_tracer_pcode.authority.decision.pair_status_authority impo
 from scripts.function_tracer_pcode.authority.decision.production_cutover import (
     conditional_outcome_from_payload,
 )
+from scripts.function_tracer_pcode.checker.diagnostics import (
+    FAILURE_INTERNAL_EXCEPTION as INTERNAL_EXCEPTION_KEY,
+    FAILURE_SWALLOWED_EXCEPTIONS as SWALLOWED_LEDGER_KEY,
+)
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     coerce_unknown_reason_records,
 )
@@ -712,16 +716,30 @@ class FailureDiagnosticsSummary:
         }
 
 
+#: `dict.get()` では「key が無い」と「値が None」を区別できないので、その 2 つを
+#: 分けたい読み取りではこの番兵を既定値にする。
+_ABSENT = object()
+
+
+def _is_count(value: Any) -> bool:
+    """件数として受理できる値か（bool は int だが件数ではない）。"""
+
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def _failure_diagnostics_block(payload: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
-    """1 つの結果 payload から ``diagnostics["failures"]`` を取り出す。"""
+    """1 つの結果 payload から ``diagnostics["failures"]`` を取り出す。
+
+    ``None`` は「block ごと無い」= 未観測（PR-125-A 以前の log、結果 payload の
+    無い pair）。空の block は **present だが契約を満たしていない**ので、ここでは
+    返し、surface ごとの読み取りが malformed として扱う。
+    """
 
     diagnostics = payload.get("diagnostics")
     if not isinstance(diagnostics, Mapping):
         return None
     failures = diagnostics.get("failures")
-    # `failures` block そのものの有無が「PR-125-A 以降の log か」の観測 marker。
-    # 空の block は誰も書かないので、未観測として扱う。
-    if not isinstance(failures, Mapping) or not failures:
+    if not isinstance(failures, Mapping):
         return None
     return failures
 
@@ -737,39 +755,48 @@ def _read_swallowed_surface(
 ) -> Tuple[bool, int]:
     """握り潰し台帳を 1 pair 分読む。``(読み切れたか, 観測した件数)``。
 
-    読み切れなかった場合も、**そこまでに読めた行は捨てない**（観測できた非 0
-    count を失わないため）。読み切れなかった pair は呼び出し側が
-    ``malformed`` に数えるので、surface 全体が complete を主張することはない。
+    PR-125-A の producer 契約は ``{"total": <非負 int>, "by_site": [...]}``。
+    readable と言えるのは **その契約を全部満たしたときだけ**:
+
+    * ``by_site`` key があり、str/bytes でない sequence
+    * ``total`` key が **存在**し、bool でない非負 int
+    * 各行が mapping で、``count`` が bool でない非負 int
+    * 宣言された ``total`` が読めた行の合計と一致
+
+    1 つでも欠けたら readable にしない（``total`` が無い payload から
+    「全行を観測できた」= exact total は導けない）。ただし **そこまでに読めた
+    行は捨てない**。読み切れなかった pair は呼び出し側が ``malformed`` に
+    数えるので、surface が complete を主張することはなく、読めた分は
+    observed lower bound として残る。
     """
 
-    swallowed = failures.get("swallowed_exceptions")
+    swallowed = failures.get(SWALLOWED_LEDGER_KEY, _ABSENT)
     if not isinstance(swallowed, Mapping):
-        # `attach_failure_diagnostics` は全 pair でこの key を書く。無い block は
-        # producer 契約から外れているので、この surface は読めていない。
+        # `attach_failure_diagnostics` は全 pair でこの key を書く。無い block も
+        # 値が mapping でない block も、この surface は読めていない。
         return False, 0
-    rows = swallowed.get("by_site")
-    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
-        return False, 0
+    rows = swallowed.get("by_site", _ABSENT)
+    declared = swallowed.get("total", _ABSENT)
     readable = True
     row_total = 0
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        # key 欠落（`_ABSENT`）も非 sequence もここに落ちる。
+        readable = False
+        rows = ()
     for row in rows:
         if not isinstance(row, Mapping):
             readable = False
             continue
-        count = row.get("count")
-        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+        count = row.get("count", _ABSENT)
+        if not _is_count(count):
             readable = False
             continue
         row_total += count
         _bump_count(by_type, str(row.get("exception_type") or UNKNOWN_TUPLE_MISSING), count)
         _bump_count(by_site, str(row.get("site") or UNKNOWN_TUPLE_MISSING), count)
-    declared = swallowed.get("total")
-    if isinstance(declared, int) and not isinstance(declared, bool):
-        # 宣言された合計と行の合計が食い違う payload は読み切れていない。
-        # 表示は必ず節の合計と一致させたいので、値は行の合計を採る。
-        if declared != row_total:
-            readable = False
-    elif declared is not None:
+    # `total` は producer の必須 key。欠落・None・bool・非 int・負数・行の合計との
+    # 不一致は、どれも「全行を観測できた」ことを保証しない。
+    if not _is_count(declared) or declared != row_total:
         readable = False
     return readable, row_total
 
@@ -779,15 +806,19 @@ def _read_internal_surface(
 ) -> bool:
     """内部エラーを 1 pair 分読む。読み切れたら ``True``。
 
-    key が無いことは、正常な failure block の中では「その pair では内部エラーが
-    起きなかった」= 観測済み 0 件。握り潰し台帳が壊れていても、こちらの観測は
-    有効なまま残す。
+    ``internal_exception`` key が無いことを「その pair では内部エラーが起きな
+    かった」= 観測済み 0 件と読めるのは、その block が attach 経路で作られたと
+    分かるときだけ。marker は ``swallowed_exceptions`` **key の存在**で、
+    `attach_failure_diagnostics` が全 pair で必ず書く。marker は key の有無だけ
+    を見るので、握り潰し台帳の **値** が壊れていても、こちらの観測は有効なまま
+    残る（surface 間で壊れを伝播させない）。
     """
 
-    internal = failures.get("internal_exception")
-    if internal is None:
-        return True
+    internal = failures.get(INTERNAL_EXCEPTION_KEY, _ABSENT)
+    if internal is _ABSENT:
+        return SWALLOWED_LEDGER_KEY in failures
     if not isinstance(internal, Mapping):
+        # 明示的な `None` もここ。key 欠落と混同しない。
         return False
     # 1 pair は 1 回しか内部エラーで終われないので 1 件で数える。
     _bump_count(by_site, str(internal.get("site") or UNKNOWN_TUPLE_MISSING), 1)
@@ -1522,14 +1553,17 @@ def failure_evidence_from_health(
     row = evidence.get(surface)
     if not isinstance(row, Mapping):
         return None
-    try:
-        return FailureEvidence(
-            observed=int(row.get("observed", 0) or 0),
-            missing=int(row.get("missing", 0) or 0),
-            malformed=int(row.get("malformed", 0) or 0),
-        )
-    except (TypeError, ValueError):
+    counts = [row.get(name, _ABSENT) for name in ("observed", "missing", "malformed")]
+    # 3 つとも揃っていなければ復元しない。欠けた次元を 0 で埋めると、
+    # 未観測の run が complete に見えてしまう。
+    if not all(_is_count(value) for value in counts):
         return None
+    restored = FailureEvidence(*counts)
+    declared_state = row.get("state", _ABSENT)
+    if declared_state is not _ABSENT and declared_state != restored.state:
+        # 書かれている state と件数が矛盾する health は信用しない（fail-closed）。
+        return None
+    return restored
 
 
 def format_failure_health_lines(health: Mapping[str, Any]) -> List[str]:
@@ -1563,9 +1597,9 @@ def format_failure_health_lines(health: Mapping[str, Any]) -> List[str]:
         evidences[FAILURE_SWALLOWED_SURFACE] is not None
         and evidences[FAILURE_SWALLOWED_SURFACE].is_complete
     )
-    if swallowed_complete and isinstance(exact, int) and not isinstance(exact, bool):
+    if swallowed_complete and _is_count(exact):
         lines.append(f"  {FAILURE_SWALLOWED_TOTAL_KEY}: {exact}")
-    elif isinstance(observed_total, int) and not isinstance(observed_total, bool):
+    elif _is_count(observed_total):
         lines.append(
             f"  {FAILURE_SWALLOWED_TOTAL_KEY}: "
             f"{EVIDENCE_UNKNOWN} (observed {observed_total})"
