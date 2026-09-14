@@ -478,9 +478,31 @@ def test_error_rerun_manifest_includes_three_new_statuses(tmp_path, status):
 
 # --- producer-sites manifest ----------------------------------------------------
 
-def test_producer_sites_manifest_delta_is_exactly_one_site():
-    import subprocess
+#: PR-125-A の base（`main` `6d64b83`）が持っていた producer site 数。
+#: PR-125-A が足してよいのは `analysis-limitation-observed` の 1 件だけ。
+PRODUCER_SITE_COUNT_BEFORE_ISSUE125 = 30
+NEW_PRODUCER_SITE_ID = "analysis-limitation-observed"
 
+
+def _site_contract(payload):
+    return {
+        row["producer_site_manifest_id"]: {
+            "allowed_dispositions": row["allowed_dispositions"],
+            "allowed_producer_ids": row["allowed_producer_ids"],
+            "domain": row["domain"],
+            "expected_cause_slots": row["expected_cause_slots"],
+            "emitter": row["emitter"],
+        }
+        for row in payload["sites"]
+    }
+
+
+def test_producer_sites_manifest_delta_is_exactly_one_site():
+    """base からの delta が **ちょうど +1 site** であることを固定する。
+
+    `origin/main` が無い環境（CI の shallow checkout）でも skip せず、件数と
+    新 site の一意性で同じ契約を検査する。
+    """
     from scripts.function_tracer_pcode.reporting.phase7_producer_manifest import (
         build_phase7_producer_manifest,
         validate_phase7_producer_manifest,
@@ -493,6 +515,29 @@ def test_producer_sites_manifest_delta_is_exactly_one_site():
     # 追跡中の manifest は現 HEAD の source と一致している。
     validate_phase7_producer_manifest(REPO_ROOT, tracked)
 
+    built = build_phase7_producer_manifest(REPO_ROOT)
+    ids = [row["producer_site_manifest_id"] for row in built["sites"]]
+    assert len(ids) == len(set(ids))
+    assert built["site_count"] == PRODUCER_SITE_COUNT_BEFORE_ISSUE125 + 1
+    assert ids.count(NEW_PRODUCER_SITE_ID) == 1
+    # 新 domain の site はこの 1 件だけ（2 件目を足したらここで落ちる）。
+    assert [
+        row["producer_site_manifest_id"] for row in built["sites"]
+        if row["domain"] == "analysis_limitation"
+    ] == [NEW_PRODUCER_SITE_ID]
+
+
+def test_producer_sites_manifest_keeps_every_existing_site_contract():
+    """既存 site の disposition / producer / cause slot / emitter を変えていない。
+
+    `origin/main` を読めるときだけ実行する上乗せ検査（件数の固定は上の test）。
+    """
+    import subprocess
+
+    from scripts.function_tracer_pcode.reporting.phase7_producer_manifest import (
+        build_phase7_producer_manifest,
+    )
+
     base = subprocess.run(
         ["git", "show", "origin/main:artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"],
         cwd=REPO_ROOT, capture_output=True, text=True,
@@ -500,33 +545,18 @@ def test_producer_sites_manifest_delta_is_exactly_one_site():
     if base.returncode != 0:
         pytest.skip("origin/main producer manifest is unavailable")
     before = json.loads(base.stdout)
+    after = json.loads(json.dumps(
+        build_phase7_producer_manifest(REPO_ROOT), sort_keys=True
+    ))
 
     before_ids = {row["producer_site_manifest_id"] for row in before["sites"]}
-    after_ids = {
-        row["producer_site_manifest_id"]
-        for row in build_phase7_producer_manifest(REPO_ROOT)["sites"]
-    }
-    assert after_ids - before_ids == {"analysis-limitation-observed"}
+    after_ids = {row["producer_site_manifest_id"] for row in after["sites"]}
+    assert after_ids - before_ids == {NEW_PRODUCER_SITE_ID}
     assert before_ids - after_ids == set()
-    assert len(after_ids) == len(before_ids) + 1
+    assert len(before_ids) == PRODUCER_SITE_COUNT_BEFORE_ISSUE125
 
-    # 既存 site の契約（disposition / producer / cause slot）は変わっていない。
-    def _contract(payload):
-        return {
-            row["producer_site_manifest_id"]: {
-                "allowed_dispositions": row["allowed_dispositions"],
-                "allowed_producer_ids": row["allowed_producer_ids"],
-                "domain": row["domain"],
-                "expected_cause_slots": row["expected_cause_slots"],
-                "emitter": row["emitter"],
-            }
-            for row in payload["sites"]
-        }
-
-    after_contract = _contract(json.loads(json.dumps(
-        build_phase7_producer_manifest(REPO_ROOT), sort_keys=True
-    )))
-    before_contract = _contract(before)
+    before_contract = _site_contract(before)
+    after_contract = _site_contract(after)
     for site_id, contract in before_contract.items():
         assert after_contract[site_id] == contract, site_id
 
