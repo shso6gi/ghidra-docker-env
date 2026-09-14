@@ -170,7 +170,10 @@ class StackDumpDiagnostic:
         self.dump_observed = False
         self.dump_observed_bytes: Optional[int] = None
         self.dump_baseline_bytes: Optional[int] = None
-        self.handler_registered = False
+        # **3 値**。`None` = 「診断 worker が journal を見ていない」（deadline
+        # 前に終わった pair など）。`False` = 「見たが readiness を確認できなかった」。
+        # 未観測を False に潰すと、集計側で「handler が無かった」と読めてしまう。
+        self.handler_registered: Optional[bool] = None
         self.unavailable_reason: Optional[str] = config.disabled_reason(
             timeout_seconds=timeout_seconds
         )
@@ -246,11 +249,14 @@ class StackDumpDiagnostic:
             read, pid=self.child_pid, start_token=self.start_token
         )
         if segment is None:
+            # journal は見た（= 観測はした）が current segment を選べなかった。
+            self.handler_registered = False
             self._record_unavailable(reason or "journal_unavailable")
             return
         self.journal_segment_selected = True
         handler = segment.handler_row
         if handler is None:
+            self.handler_registered = False
             self._record_unavailable("handler_not_registered")
             return
         self.handler_registered = True

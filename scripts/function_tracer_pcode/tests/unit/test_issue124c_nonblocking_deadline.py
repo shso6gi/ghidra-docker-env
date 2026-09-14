@@ -390,6 +390,23 @@ def test_artifact_is_persisted_regardless_of_outcome(pair, sender):
     assert Path(pair["artifact"]).exists()
 
 
+def test_handler_registration_is_unknown_until_the_worker_looks(pair, sender):
+    """要求していない pair の `handler_registered` は `False` ではなく `None`。
+
+    観測していないことを「handler が無かった」と読ませない（集計側は
+    `(unknown)` bucket に入れる）。
+    """
+    diagnostic = _diagnostic(pair)
+    assert diagnostic.handler_registered is None
+    assert diagnostic.status_payload()["handler_registered"] is None
+    # worker が journal を見て readiness を確認できなければ False になる。
+    write_journal(pair["journal"], None)
+    looked = _diagnostic(pair)
+    looked.request_async()
+    _join_worker(looked)
+    assert looked.handler_registered is False
+
+
 def test_artifact_status_is_unset_without_a_destination(pair):
     diagnostic = _diagnostic(pair, artifact=False)
     Path(pair["dump_tmp"]).write_text("Current thread 0x1:\n")
