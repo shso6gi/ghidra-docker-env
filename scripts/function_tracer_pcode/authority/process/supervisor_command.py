@@ -466,9 +466,15 @@ class ProcessSupervisorCommand:
             child_pid=process.pid,
             start_token=start_token,
             timeout_seconds=float(self.config.timeout_seconds),
-            # 送信直前の同一性確認は supervisor の既存規則をそのまま使う。
+            # 送信直前の同一性確認。**`Popen` に触らない**のが要点で、
+            # `process.poll()` / `_same_process` は `Popen._waitpid_lock` を取り
+            # `waitpid` を呼ぶため、worker thread から呼ぶと監視ループの終了検出と
+            # 競合する。identity は `/proc/<pid>/stat` の start token だけで足りる
+            # （取れなければ `read_process_start_token` が ValueError を投げ、
+            # worker 側が False として扱う）。「すでに終了した」ことは監視ループが
+            # `cancel_future_requests()` で伝える。
             identity_verifier=lambda: (
-                process.poll() is None and self._same_process(process, start_token)
+                read_process_start_token(process.pid) == start_token
             ),
         )
 

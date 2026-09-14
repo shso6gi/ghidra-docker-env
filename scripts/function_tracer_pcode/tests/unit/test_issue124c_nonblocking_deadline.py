@@ -765,3 +765,33 @@ def test_the_monitoring_loop_does_not_join_the_diagnostic_worker():
     for forbidden in ("join", "stat", "read", "read_text", "open", "glob", "is_file"):
         assert forbidden not in called, forbidden
     assert {"poll", "wait", "monotonic"} <= called
+
+
+def test_the_diagnostic_worker_never_touches_the_popen_object():
+    """worker の identity 確認が `Popen` に触らない。
+
+    `Popen.poll()` / `Popen.wait()` は `_waitpid_lock` を取って `waitpid` を
+    呼ぶので、worker thread から呼ぶと監視ループの終了検出と競合する。
+    identity は `/proc/<pid>/stat` の start token だけで確かめる。
+    """
+    import ast
+    import inspect
+    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+        ProcessSupervisorCommand,
+    )
+
+    tree = ast.parse(
+        inspect.getsource(ProcessSupervisorCommand._build_stack_dump_diagnostic).lstrip()
+    )
+    lambdas = [node for node in ast.walk(tree) if isinstance(node, ast.Lambda)]
+    assert lambdas, "identity verifier の lambda が見つからない"
+    called = {
+        node.func.attr for node in ast.walk(lambdas[0])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert not (called & {"poll", "wait", "_same_process"}), sorted(called)
+    names = {
+        node.func.id for node in ast.walk(lambdas[0])
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "read_process_start_token" in names
