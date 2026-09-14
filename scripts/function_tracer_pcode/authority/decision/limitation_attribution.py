@@ -132,11 +132,13 @@ def _recomputed_cause_identity(key: CauseAttributionKey) -> Optional[Any]:
         return None
 
 
-def _observed_occurrences(session: Any) -> Dict[str, Any]:
+def _observed_occurrences(prefix: Any) -> Dict[str, Any]:
     """event prefix に記録された occurrence を `occurrence_id` で引けるようにする。
 
     reducer は同じ `occurrence_id` の再観測を拒否するので、この写像は reducer の
     内部状態と一致する。active かどうかはここでは決めない（`c_active_base` が正）。
+    projection を作ったのと **同じ prefix** を受け取る（別々に prefix を取ると、
+    間に event が積まれたときに projection と occurrence 写像が食い違う）。
     """
     from scripts.function_tracer_pcode.authority.lifecycle.stream import (
         CauseObservedEventAuthority,
@@ -144,7 +146,7 @@ def _observed_occurrences(session: Any) -> Dict[str, Any]:
     )
 
     occurrences: Dict[str, Any] = {}
-    for recorded in session.recorder.prefix_view().events:
+    for recorded in prefix.events:
         if recorded.header.event_type is not EventType.CAUSE_OBSERVED:
             continue
         payload = recorded.authority_payload
@@ -164,7 +166,7 @@ def _matching_active_rows(
         return ()
     prefix = session.recorder.prefix_view()
     projection = session.reducer.replay_prefix(prefix)
-    occurrences = _observed_occurrences(session)
+    occurrences = _observed_occurrences(prefix)
     requirement_ids = frozenset(key.proof_requirement_ids)
     matches = []
     for row in projection.c_active_base:

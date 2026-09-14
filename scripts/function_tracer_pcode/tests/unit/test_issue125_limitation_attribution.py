@@ -476,6 +476,14 @@ def test_retired_umbrella_reason_is_a_typed_error():
 
 # --- 静的: reason_id 一致だけの帰属になっていない -------------------------------
 
+def test_attribution_reads_one_prefix_for_projection_and_occurrences():
+    """projection と occurrence 写像は同じ prefix から作る（別々に取らない）。"""
+    source = inspect.getsource(la._matching_active_rows)
+    assert source.count("prefix_view()") == 1
+    assert "replay_prefix(prefix)" in source
+    assert "_observed_occurrences(prefix)" in source
+
+
 def test_attribution_never_matches_on_reason_id_alone():
     source = inspect.getsource(la._matching_active_rows)
     tree = ast.parse(source)
