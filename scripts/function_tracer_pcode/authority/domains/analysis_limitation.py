@@ -20,7 +20,7 @@ EQ / NOT_EQ のどちらにも進まない（fail-closed）。予算内で再解
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrence,
@@ -58,8 +58,12 @@ ANALYSIS_LIMITATION_PRODUCER_ID = "analysis-limitation-producer-v1"
 ANALYSIS_LIMITATION_TARGET_NAMESPACE = "analysis_limitation_v1"
 #: この domain が発行できる identity scope（manifest の slot と一致させる）。
 ANALYSIS_LIMITATION_IDENTITY_SCOPE = IdentityScope.RELATIONAL
-#: session ごとに「どの限界を既に観測したか」を持つ ledger の key。
-ANALYSIS_LIMITATION_LEDGER_KEY = "analysis_limitation_observed"
+#: session ごとに「どの限界を **これまでに一度でも** 観測したか」を持つ ledger の key。
+#: これは reducer の重複 occurrence 拒否を避けるためだけの履歴で、
+#: **その cause が今も active かどうかは一切表さない**（discharge 済みの cause も
+#: 載ったまま）。active かどうかは常に現在の lifecycle projection の
+#: `c_active_base` が正本（`authority/decision/limitation_attribution.py`）。
+ANALYSIS_LIMITATION_LEDGER_KEY = "analysis_limitation_ever_observed"
 
 ANALYSIS_LIMITATION_REASON_REGISTRY = SealedReasonRegistry.build((
     ReasonDefinition(
@@ -138,9 +142,13 @@ class AnalysisLimitationPilotEncoder:
     """Encode one limitation observation into a single CAUSE_OBSERVED intent.
 
     Observing the *same* limitation twice in one session (a retry phase hits the
-    same budget at the same site) is one cause, not two. The reducer rejects a
-    repeated occurrence id outright, so the repeat is dropped here and the
-    producer site reports the cause as already materialized.
+    same budget at the same site) is one cause, not two: the reducer rejects a
+    repeated occurrence id outright, so the repeat is dropped here.
+
+    Dropping the repeat says nothing about whether that cause is still active.
+    The producer site reports the occurrence id and the decision layer confirms
+    it against `c_active_base`; a limitation whose cause was discharged is not
+    re-materialized by this ledger.
     """
 
     def __init__(self) -> None:
@@ -161,7 +169,14 @@ class AnalysisLimitationPilotEncoder:
         return ledger
 
     def has_observed(self, session: Any, signal: Any) -> bool:
-        """Report whether this exact limitation already has a committed cause."""
+        """Report whether this exact limitation was **ever** observed in this session.
+
+        This is the reducer's duplicate-occurrence guard, not an activeness
+        answer: an occurrence whose requirement has been discharged stays in the
+        ledger while its cause is no longer in `c_active_base`. Callers that need
+        "is there an unresolved cause for this limitation" must read the current
+        lifecycle projection instead.
+        """
         if type(signal) is not AnalysisLimitationBlockerSignal:
             return False
         occurrence_id = self.authority_for_signal(
@@ -286,14 +301,14 @@ def observe_analysis_limitation(
     target_key: Any = (),
     missing_semantic_fact: Any = (),
     evidence_refs: tuple[str, ...] = (),
-) -> int:
+) -> Optional[str]:
     """この domain が所有する限界を 1 件観測する（唯一の emit 呼び出し）。
 
-    戻り値は **その限界の cause が session に materialize されている数**（0 か 1）で、
-    追加された event 数ではない。同じ限界を同じ session で 2 度観測した場合、
-    新しい event は作られないが cause は既に active なので 1 を返す。pilot session
-    が無ければ 0（strict no-op）。呼び出し側は 1 でないときに **帰属できなかった**
-    とみなし、fail-closed で ERROR に落とす。
+    戻り値は **この限界に対応する occurrence id**（pilot session や encoder が無ければ
+    `None`）。「その cause が今も active か」はここでは答えない: 同じ限界を再観測した
+    場合、新しい event は作られず同じ occurrence id が返るだけで、その cause が
+    discharge 済みであることもある。active かどうかは呼び出し側が現在の
+    `c_active_base` で確認する（`authority/decision/limitation_attribution.py`）。
     """
     # Deferred import: `production_signals` はこの module の signal 型を
     # import するので、module top で読むと循環する。
@@ -311,14 +326,14 @@ def observe_analysis_limitation(
         missing_semantic_fact=missing_semantic_fact,
         evidence_refs=tuple(evidence_refs),
     )
-    emitted = int(emit_analysis_limitation_signal(
+    emit_analysis_limitation_signal(
         signal,
         producer_site_manifest_id=ANALYSIS_LIMITATION_OBSERVED_SITE.site_id,
-    ))
-    if emitted:
-        return emitted
+    )
     session = active_production_pilot_session()
     if session is None:
-        return 0
-    observed = getattr(session.domain_signal_encoder, "has_observed", None)
-    return 1 if callable(observed) and observed(session, signal) else 0
+        return None
+    resolver = getattr(session.domain_signal_encoder, "authority_for_signal", None)
+    if not callable(resolver):
+        return None
+    return resolver(session, signal).occurrence.occurrence_id

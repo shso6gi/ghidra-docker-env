@@ -38,6 +38,7 @@ from scripts.function_tracer_pcode.core.errors import (
     DeadlineExceeded,
 )
 from scripts.function_tracer_pcode.tests.unit._issue125_support import (
+    LOOP_EXACT_CONTRACT,
     OUTCOME_CONTRACT,
     OUTCOME_PROOF_KIND,
     SAT_SAFETY_CONTRACT,
@@ -45,6 +46,7 @@ from scripts.function_tracer_pcode.tests.unit._issue125_support import (
     SAT_SAFETY_REASON_ID,
     LifecycleHarness,
     attribution_key,
+    loop_exact_cause_inputs,
     outcome_cause_inputs,
     sat_safety_cause_inputs,
 )
@@ -355,36 +357,45 @@ def _clone_with_occurrence_id(authority, occurrence_id):
 
 # --- A7: 新規 cause 経路と既存帰属経路は別契約 --------------------------------
 
-def test_owned_producer_path_creates_a_new_blocking_cause(monkeypatch):
-    from scripts.function_tracer_pcode.authority.decision import limitation_attribution
+def test_owned_producer_path_without_a_session_is_unattributed():
+    """pilot session が無ければ active を確認できないので観測もしない（fail-closed）。
 
-    emitted = {}
-
-    def fake_observe(**kwargs):
-        emitted.update(kwargs)
-        return 1
-
-    monkeypatch.setattr(
-        limitation_attribution, "observe_analysis_limitation", fake_observe,
-    )
-    attribution = la.attribute_analysis_limitation(
-        None, DeadlineExceeded("budget", site="checker.checker.EquivalenceChecker.check"),
-    )
-
-    assert attribution.disposition == la.ATTRIBUTED_NEW_CAUSE
-    assert attribution.decision_effect == "blocks_decision"
-    assert attribution.cause_id is None and attribution.occurrence_id is None
-    assert emitted["reason_id"] == "analysis_budget_exceeded"
-    assert emitted["limitation_site"] == "checker.checker.EquivalenceChecker.check"
-
-
-def test_owned_producer_path_without_activation_is_unattributed():
-    # pilot session が無いので emit は strict no-op（0）。fail-open しない。
+    新規 cause 経路の成立は実 session が要るので
+    `test_issue125_limitation_finalization.py` 側で最終化まで通して検証する。
+    """
     attribution = la.attribute_analysis_limitation(
         None, DeadlineExceeded("budget", site="checker.checker.EquivalenceChecker.check"),
     )
     assert attribution.disposition == la.UNATTRIBUTED
     assert attribution.failure_status == "limitation_unattributed"
+    assert "session" in attribution.detail
+
+
+def test_owned_producer_path_never_trusts_an_observation_it_cannot_confirm(monkeypatch):
+    """producer が occurrence id を返しても、active でなければ帰属させない。"""
+    from scripts.function_tracer_pcode.authority.decision import limitation_attribution
+
+    harness = LifecycleHarness()
+    # 別 cause は active。それでも、この限界の occurrence は active ではない。
+    _observed(harness, sat_safety_cause_inputs())
+    monkeypatch.setattr(
+        limitation_attribution, "observe_analysis_limitation",
+        lambda **kwargs: "analysis-limitation-occ-never-active",
+    )
+    attribution = la.attribute_analysis_limitation(
+        harness,
+        DeadlineExceeded("budget", site="checker.checker.EquivalenceChecker.check"),
+    )
+    assert attribution.disposition == la.UNATTRIBUTED
+    assert "not active" in attribution.detail
+
+    # event が 1 件も無い session でも、同じく fail-closed（例外にしない）。
+    empty = la.attribute_analysis_limitation(
+        LifecycleHarness(),
+        DeadlineExceeded("budget", site="checker.checker.EquivalenceChecker.check"),
+    )
+    assert empty.disposition == la.UNATTRIBUTED
+    assert "not active" in empty.detail
 
 
 def test_existing_cause_path_creates_no_new_cause():
@@ -432,10 +443,33 @@ def test_attribution_requirement_superset_is_not_a_match():
 
 
 def test_attribution_requirement_order_does_not_matter():
-    """順序違いは一致（集合として比較する）。"""
-    source = inspect.getsource(la._matching_active_rows)
-    assert "frozenset(occurrence.proof_requirement_ids) != requirement_ids" in source
-    assert "len(occurrence.proof_requirement_ids) != len(requirement_ids)" in source
+    """requirement が 2 つある cause で、順序違いは一致・真部分集合は不一致。"""
+    harness = LifecycleHarness()
+    inputs = loop_exact_cause_inputs()
+    authority, requirements = harness.build_multi_requirement_occurrence(
+        inputs, contract=LOOP_EXACT_CONTRACT,
+    )
+    harness.observe(authority)
+    ordered = tuple(r.requirement_id for r in requirements)
+    assert len(ordered) == 2
+
+    forward = la.attribute_analysis_limitation(
+        harness, _limitation(inputs["reason_id"],
+                             attribution=attribution_key(inputs, ordered)),
+    )
+    reversed_ = la.attribute_analysis_limitation(
+        harness, _limitation(inputs["reason_id"],
+                             attribution=attribution_key(inputs, tuple(reversed(ordered)))),
+    )
+    assert forward.disposition == la.ATTRIBUTED_EXISTING_CAUSE
+    assert reversed_.disposition == la.ATTRIBUTED_EXISTING_CAUSE
+    assert forward.occurrence_id == reversed_.occurrence_id
+
+    subset = la.attribute_analysis_limitation(
+        harness, _limitation(inputs["reason_id"],
+                             attribution=attribution_key(inputs, ordered[:1])),
+    )
+    assert subset.disposition == la.UNATTRIBUTED
 
 
 # --- A9: 例外の reason と帰属キーの reason の一致 ------------------------------
@@ -478,10 +512,22 @@ def test_retired_umbrella_reason_is_a_typed_error():
 
 def test_attribution_reads_one_prefix_for_projection_and_occurrences():
     """projection と occurrence 写像は同じ prefix から作る（別々に取らない）。"""
-    source = inspect.getsource(la._matching_active_rows)
-    assert source.count("prefix_view()") == 1
-    assert "replay_prefix(prefix)" in source
-    assert "_observed_occurrences(prefix)" in source
+    reader = inspect.getsource(la._current_projection)
+    assert reader.count("prefix_view()") == 1
+    assert "replay_prefix(prefix)" in reader
+    for name in ("_matching_active_rows", "_active_row_for_occurrence"):
+        source = inspect.getsource(getattr(la, name))
+        assert "prefix_view()" not in source, name
+        assert "_current_projection(session)" in source, name
+    assert "_observed_occurrences(prefix)" in inspect.getsource(la._matching_active_rows)
+
+
+def test_activeness_is_decided_by_the_projection_not_the_history():
+    """active 判定の唯一の入力は `c_active_base`（履歴 ledger ではない）。"""
+    source = inspect.getsource(la)
+    assert "c_active_base" in inspect.getsource(la._active_row_for_occurrence)
+    assert "has_observed" not in source
+    assert "ANALYSIS_LIMITATION_LEDGER_KEY" not in source
 
 
 def test_attribution_never_matches_on_reason_id_alone():
@@ -504,11 +550,15 @@ def test_attribution_never_matches_on_reason_id_alone():
 
 
 def test_attribution_result_never_carries_a_foreign_decision_effect():
-    """帰属した場合の effect は、その cause の `decision_effect` そのもの。"""
+    """帰属した場合の effect は、active 行の `decision_effect` そのもの。
+
+    どちらの経路も `c_active_base` の行から読むので、reason ごとの effect を
+    文字列で書き換える余地が無い。
+    """
     source = inspect.getsource(la.attribute_analysis_limitation)
-    assert "decision_effect=row.decision_effect" in source
-    assert "decision_effect=definition.decision_effect" in source
-    assert '"blocks_decision"' not in source
+    assert source.count("decision_effect=row.decision_effect") == 2
+    for literal in ("blocks_decision", "blocks_equivalence", "blocks_disequivalence"):
+        assert literal not in source, literal
 
 
 def test_attribution_requires_an_exact_limitation_type():

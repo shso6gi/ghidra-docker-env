@@ -43,6 +43,13 @@ SAT_SAFETY_TARGET_KIND = "counterexample_safety_gate"
 SAT_SAFETY_CONTRACT = ("counterexample-safety-recovery", 1, "safety")
 SAT_SAFETY_PROOF_KIND = "counterexample_safety"
 
+LOOP_EXACT_REASON_ID = "loop_exact_summary_relation_unproven"
+LOOP_EXACT_TARGET_KIND = "exact_summary_pair"
+LOOP_EXACT_CONTRACT = (
+    "loop-exact-summary-recovery", 1,
+    ("loop_exact_term_relation", "loop_exact_guard_partition"),
+)
+
 OUTCOME_REASON_ID = "outcome_partition_completion_unproven"
 OUTCOME_TARGET_KIND = "function_outcome_stage"
 OUTCOME_CONTRACT = ("return-outcome-stage-recovery", 1, "stage_proof")
@@ -134,6 +141,57 @@ class LifecycleHarness:
         )
         return CauseOccurrenceAuthority(occurrence, bound), requirement
 
+    def build_multi_requirement_occurrence(self, cause_inputs, *, contract, suffix="a"):
+        """slot を複数持つ sealed contract で 1 件の occurrence を組み立てる。
+
+        requirement 集合の照合（順序非依存・部分集合不一致）を実挙動で確かめるため。
+        """
+        contract_id, contract_version, slots = contract
+        definition = self._recovery_registry.get(contract_id, contract_version)
+        proof_kinds = {
+            slot.name: sorted(slot.allowed_proof_kinds)[0]
+            for slot in definition.requirement_slots
+        }
+        cause = SemanticCauseIdentityFactory(self._reason_registry).create(
+            **cause_inputs
+        )
+        requirements = {}
+        for slot in slots:
+            requirements[slot] = ProofRequirement(
+                "issue125-q-" + authority_digest(
+                    {"cause": cause.value, "slot": slot, "suffix": suffix}
+                )[:32],
+                proof_kinds[slot],
+                ("cause", cause.value, slot),
+            )
+        bound = SatisfactionBindingFactory(self._recovery_registry).bind(
+            contract_definition_id=contract_id,
+            contract_version=contract_version,
+            bindings=requirements,
+        )
+        ordered = tuple(requirements[slot] for slot in slots)
+        occurrence = CauseOccurrence(
+            "issue125-occ-" + authority_digest(
+                {"cause": cause.value, "suffix": suffix}
+            )[:32],
+            cause,
+            cause_inputs["reason_id"],
+            authority_digest(cause_inputs["canonical_target_key"]),
+            cause_inputs["target_kind"],
+            cause_inputs["identity_scope"],
+            bound.contract_definition_id,
+            bound.contract_version,
+            bound.normalized_expression_digest,
+            bound.bound_expression_digest,
+            tuple(item.requirement_id for item in ordered),
+            (f"issue125-evidence-{suffix}",),
+            "issue125_test_producer_signal",
+            self.identity.source_snapshot_fingerprint,
+            "issue125-test-producer-v1",
+            self.identity.execution_identity_digest,
+        )
+        return CauseOccurrenceAuthority(occurrence, bound), ordered
+
     # -- event の記録 -------------------------------------------------------
 
     def observe(self, authority) -> None:
@@ -181,6 +239,23 @@ def sat_safety_cause_inputs(**overrides):
         semantic_proposition=("counterexample_is_safe_and_decisive", "gate"),
         observation_surface=("analysis_safety",),
         active_semantic_precondition=("sat_candidate_observed", True),
+        correspondence_contract=("ordered_function_pair",),
+    )
+    base.update(overrides)
+    return base
+
+
+def loop_exact_cause_inputs(**overrides):
+    """requirement を 2 つ持つ cause identity 入力（`blocks_decision`）。"""
+    base = dict(
+        reason_id=LOOP_EXACT_REASON_ID,
+        identity_scope=IdentityScope.RELATIONAL,
+        target_kind=LOOP_EXACT_TARGET_KIND,
+        canonical_target_key=("loop", "left", "right"),
+        missing_semantic_fact=("loop_exact_summary_relation_unproven", "pair"),
+        semantic_proposition=("loop_summary_relation_is_exact", "pair"),
+        observation_surface=("loop_summary",),
+        active_semantic_precondition=("loop_pair_observed", True),
         correspondence_contract=("ordered_function_pair",),
     )
     base.update(overrides)

@@ -11,10 +11,20 @@ requirement 集合の一致を全部要求する。
 
 ===================== ==========================================================
 UNREGISTERED          `reason_id` が sealed registry に無い / retired umbrella
-OWNED_PRODUCER        analysis_limitation domain の reason → 新しい cause を発行
+OWNED_PRODUCER        analysis_limitation domain の reason → cause を観測し、
+                      **その occurrence が現在 active か** を projection で確認
 EXISTING_CAUSE        帰属キーに **ちょうど 1 つ** 対応する active occurrence
 UNATTRIBUTED          上記以外（fail-closed。呼び出し側が ERROR に落とす）
 ===================== ==========================================================
+
+**「観測したことがある」と「今 active」は別**。producer の重複排除 ledger は
+reducer の重複 occurrence 拒否を避けるための履歴で、requirement を discharge した
+cause もそこに残る。履歴だけを根拠に帰属を成功させると、active な blocker が 1 つも
+無いのに limitation が「帰属できた」ことになり、EQ / NOT_EQ の decisive proof が
+そのまま通ってしまう。よって **両方の経路とも** active 判定は現在の
+`c_active_base` を唯一の authority とし、discharge 済みの限界を再観測した場合は
+（PR-125-A の範囲で健全な再 activation authority を定義できないので）
+`limitation_unattributed` で fail-closed にする。
 
 帰属は cause を**追加も強化もしない**（既存 active cause の存在を確認するだけ）。
 したがって EQ / NOT_EQ の証明条件は変わらず、`blocks_equivalence` の cause に
@@ -84,6 +94,14 @@ class LimitationAttribution:
             "decision_effect": self.decision_effect,
             "detail": self.detail,
         }
+
+
+def _active_pilot_session() -> Optional[Any]:
+    from scripts.function_tracer_pcode.authority.lifecycle.production_context import (
+        active_production_pilot_session,
+    )
+
+    return active_production_pilot_session()
 
 
 def _reason_definition(reason_id: str) -> Optional[Any]:
@@ -157,6 +175,33 @@ def _observed_occurrences(prefix: Any) -> Dict[str, Any]:
     return occurrences
 
 
+def _current_projection(session: Any) -> Tuple[Any, Any]:
+    """現在の event prefix と、それを reduce した lifecycle projection。
+
+    `worker_runtime.prepare` と同じ読み方。prefix は 1 度だけ取り、projection と
+    occurrence 写像の両方に同じものを使う。event が 1 件も無い prefix は封印
+    できないので `(None, None)` を返す（event が無い = active な cause も無い）。
+    """
+    if not getattr(session.recorder, "event_count", 0):
+        return None, None
+    prefix = session.recorder.prefix_view()
+    return prefix, session.reducer.replay_prefix(prefix)
+
+
+def _active_row_for_occurrence(session: Any, occurrence_id: str) -> Optional[Any]:
+    """`occurrence_id` が現在 active なら、その `c_active_base` 行を返す。
+
+    履歴（観測したことがあるか）ではなく **現在の projection** を見る。
+    """
+    _prefix, projection = _current_projection(session)
+    if projection is None:
+        return None
+    for row in projection.c_active_base:
+        if row.occurrence_id == occurrence_id:
+            return row
+    return None
+
+
 def _matching_active_rows(
     session: Any, key: CauseAttributionKey,
 ) -> Tuple[Tuple[Any, Any], ...]:
@@ -164,8 +209,9 @@ def _matching_active_rows(
     expected = _recomputed_cause_identity(key)
     if expected is None:
         return ()
-    prefix = session.recorder.prefix_view()
-    projection = session.reducer.replay_prefix(prefix)
+    prefix, projection = _current_projection(session)
+    if projection is None:
+        return ()
     occurrences = _observed_occurrences(prefix)
     requirement_ids = frozenset(key.proof_requirement_ids)
     matches = []
@@ -220,23 +266,53 @@ def attribute_analysis_limitation(
             "attribution key reason differs from the limitation reason",
         )
 
+    # emit が届く session（contextvar）と checker が持つ view は production では
+    # 同じ object。明示引数を優先し、無ければ emit と同じ session を読む。
+    pilot = session if session is not None else _active_pilot_session()
+
     if definition.domain == ANALYSIS_LIMITATION_DOMAIN:
-        emitted = observe_analysis_limitation(
-            reason_id=reason_id,
-            limitation_site=limitation.site,
-            target_key=limitation.target_key,
-            missing_semantic_fact=limitation.missing_semantic_fact,
-            evidence_refs=limitation.evidence_refs,
-        )
-        if emitted != 1:
+        if pilot is None:
             return LimitationAttribution(
                 UNATTRIBUTED, reason_id,
-                "analysis limitation producer did not materialize a cause",
+                "no production pilot session is available to confirm an active cause",
+            )
+        try:
+            occurrence_id = observe_analysis_limitation(
+                reason_id=reason_id,
+                limitation_site=limitation.site,
+                target_key=limitation.target_key,
+                missing_semantic_fact=limitation.missing_semantic_fact,
+                evidence_refs=limitation.evidence_refs,
+            )
+            row = (
+                None if occurrence_id is None
+                else _active_row_for_occurrence(pilot, occurrence_id)
+            )
+        except Exception as exc:  # 観測も確認もできないなら帰属できない
+            return LimitationAttribution(
+                UNATTRIBUTED, reason_id,
+                f"analysis limitation producer failed: {type(exc).__name__}",
+            )
+        if occurrence_id is None:
+            return LimitationAttribution(
+                UNATTRIBUTED, reason_id,
+                "analysis limitation producer did not observe a cause",
+            )
+        if row is None:
+            # 過去に観測済みでも、その cause が discharge 済みなら未解消の
+            # blocker は存在しない。履歴だけを根拠に成功扱いしない。
+            return LimitationAttribution(
+                UNATTRIBUTED, reason_id,
+                "the limitation cause is not active in the current lifecycle "
+                "projection (a discharged observation is not re-activated here)",
             )
         return LimitationAttribution(
             ATTRIBUTED_NEW_CAUSE, reason_id,
-            "analysis limitation producer materialized one new cause",
-            decision_effect=definition.decision_effect,
+            "analysis limitation producer materialized one active cause",
+            cause_id=row.cause_id,
+            occurrence_id=row.occurrence_id,
+            # active 行の effect をそのまま使う（registry と同値。強化しない）。
+            decision_effect=row.decision_effect,
         )
 
     if key is None:
@@ -244,13 +320,13 @@ def attribute_analysis_limitation(
             UNATTRIBUTED, reason_id,
             "limitation carries no cause attribution key",
         )
-    if session is None:
+    if pilot is None:
         return LimitationAttribution(
             UNATTRIBUTED, reason_id,
             "no production pilot session is available to read active causes",
         )
     try:
-        matches = _matching_active_rows(session, key)
+        matches = _matching_active_rows(pilot, key)
     except Exception as exc:  # 読めないなら帰属できない（fail-closed）
         return LimitationAttribution(
             UNATTRIBUTED, reason_id,

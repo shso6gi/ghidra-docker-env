@@ -29,6 +29,7 @@ from scripts.function_tracer_pcode.authority.lifecycle.reducer import (
 )
 from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
     ANALYSIS_BUDGET_REASON_ID,
+    ANALYSIS_LIMITATION_LEDGER_KEY,
     AnalysisLimitationBlockerSignal,
     AnalysisLimitationPilotEncoder,
 )
@@ -174,6 +175,7 @@ def test_limitation_without_producer_activation_fails_closed():
     failure = result.diagnostics["failures"]["analysis_limitation"]
     assert failure["disposition"] == "UNATTRIBUTED"
     assert failure["decision_effect"] is None
+    assert failure["cause_id"] is None and failure["occurrence_id"] is None
 
 
 def test_unregistered_limitation_reason_fails_closed():
@@ -199,10 +201,14 @@ def test_unregistered_limitation_reason_fails_closed():
     assert result.diagnostics["failures"]["analysis_limitation"]["disposition"] == (
         "UNREGISTERED"
     )
+    # failure 経路では legacy 診断も UNKNOWN reason を主張しない
+    # （canonical が ERROR なのに legacy が UNKNOWN 原因を持つ矛盾を作らない）。
+    assert result.unknown_reasons == []
+    assert session.recorder.event_count == 0
 
 
 def test_the_same_limitation_twice_is_one_cause_not_an_error():
-    """retry phase が同じ限界を再観測しても cause は 1 件、UNKNOWN のまま。
+    """retry phase が同じ限界を再観測しても cause は 1 件、最終化まで UNKNOWN。
 
     reducer は同じ occurrence id の再観測を拒否するので、重複を落とさないと
     pair が不透明な ERROR になる。
@@ -243,25 +249,209 @@ def test_a_different_limitation_site_is_a_different_cause():
     connector = _connector()
     session = connector.begin({"case": "issue125-two-sites"})
     with production_signal_scope(session):
-        assert observe_analysis_limitation(
+        first = observe_analysis_limitation(
             reason_id=ANALYSIS_BUDGET_REASON_ID,
             limitation_site="analysis.tracer.trace",
             target_key=("left",),
-        ) == 1
-        assert observe_analysis_limitation(
+        )
+        second = observe_analysis_limitation(
             reason_id=ANALYSIS_BUDGET_REASON_ID,
             limitation_site="analysis.recurrence.summarizer.summarize",
             target_key=("left",),
-        ) == 1
-        # 同じ site・同じ target の再観測は新しい cause を作らない。
-        assert observe_analysis_limitation(
+        )
+        # 同じ site・同じ target の再観測は新しい cause も event も作らない。
+        repeat = observe_analysis_limitation(
             reason_id=ANALYSIS_BUDGET_REASON_ID,
             limitation_site="analysis.tracer.trace",
             target_key=("left",),
-        ) == 1
+        )
+    assert first and second and first != second
+    assert repeat == first
     assert session.recorder.event_count == 2
     projection = session.preview_lifecycle_projection()
     assert len({row.cause_id for row in projection.c_active_base}) == 2
+    assert {row.occurrence_id for row in projection.c_active_base} == {first, second}
+
+
+def _limitation_occurrence_authority(session, *, site=LIMITATION_SITE, target_key=("left", "right")):
+    """`_check_with_limitation` が観測するのと同じ occurrence authority を作る。"""
+    signal = AnalysisLimitationBlockerSignal(
+        declared_reason_id=ANALYSIS_BUDGET_REASON_ID,
+        limitation_site=site,
+        canonical_target_key=target_key,
+        missing_semantic_fact=(
+            "analysis_limitation_unresolved", ANALYSIS_BUDGET_REASON_ID,
+        ),
+        evidence_refs=("issue125-budget",),
+    )
+    return session.domain_signal_encoder.authority_for_signal(session, signal)
+
+
+def _discharge_limitation_requirement(session):
+    """限界 cause の唯一の requirement を完了させ、cause を active から外す。"""
+    from scripts.function_tracer_pcode.authority.contracts import (
+        RequirementCompletionReceipt,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+        EventIntent,
+        EventType,
+        RequirementCompletedEventAuthority,
+    )
+
+    authority = _limitation_occurrence_authority(session)
+    occurrence = authority.occurrence
+    bound = authority.bound_contract
+    requirement_id = occurrence.proof_requirement_ids[0]
+    receipt = RequirementCompletionReceipt(
+        occurrence.cause_id.value,
+        occurrence.occurrence_id,
+        requirement_id,
+        bound.contract_definition_id,
+        bound.contract_version,
+        bound.bound_expression_digest,
+        "issue125-budget-proof-artifact",
+        "issue125-budget-applicability",
+    )
+    session.emit(EventIntent(
+        EventType.REQUIREMENT_COMPLETED,
+        RequirementCompletedEventAuthority(receipt),
+    ))
+    return occurrence.occurrence_id
+
+
+def test_a_discharged_limitation_reobserved_never_rides_the_old_cause():
+    """discharge 済みの限界を再観測しても、履歴だけで成功扱いしない（blocker 回帰）。
+
+    観測 → requirement 完了 → cause が `c_active_base` から消える → その状態で
+    decisive proof が通り得る → **同じ限界を再観測**。ここで「一度観測した」を
+    根拠に UNKNOWN 成功にすると、未解消の限界が EQUIVALENT へ黙って抜ける。
+    """
+    from scripts.function_tracer_pcode.authority.decision.decision import (
+        DecisiveProofKind,
+        DecisiveProofReceipt,
+        FinalizationAuthority,
+        finalize_decision,
+    )
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+        issue_infrastructure_error_decision,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_boundary import (
+        LegacyBoundaryErrorKind,
+        _issue_legacy_boundary_error,
+    )
+
+    connector = _connector()
+    session = connector.begin({"case": "issue125-discharged-rearm"})
+    checker = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5,
+        canonical_decision_cutover=False,
+    )
+    with production_signal_scope(session):
+        first = _check_with_limitation(session, checker=checker)
+        assert first.failure_status is None
+        assert first.diagnostics["failures"]["analysis_limitation"][
+            "disposition"
+        ] == "ATTRIBUTED_NEW_CAUSE"
+        observed_id = _discharge_limitation_requirement(session)
+
+        # cause は active から消えた（= 未解消の blocker はもう無い）。
+        after_discharge = session.preview_lifecycle_projection()
+        assert observed_id not in {
+            row.occurrence_id for row in after_discharge.c_active_base
+        }
+        assert after_discharge.c_active_base == ()
+
+        second = _check_with_limitation(session, checker=checker)
+
+    # 履歴 ledger には残っている（= かつて観測した）。それでも active ではない。
+    ever_observed = session.domain_signal_state[ANALYSIS_LIMITATION_LEDGER_KEY]
+    assert observed_id in ever_observed
+    assert second.failure_status == "limitation_unattributed"
+    failure = second.diagnostics["failures"]["analysis_limitation"]
+    assert failure["disposition"] == "UNATTRIBUTED"
+    assert "not active" in failure["detail"]
+    assert failure["decision_effect"] is None
+    assert second.unknown_reasons == []
+    # 重複 event も作っていない（観測 1 + 完了 1）。producer-site discovery も
+    # 再観測では開かれないので、activation と実 event が食い違わない。
+    assert session.recorder.event_count == 2
+    assert len(session.phase7_runtime._materialized) == 1
+    assert session.phase7_runtime._pending == {}
+
+    # production boundary はこれを canonical ERROR にするので EQUIVALENT へ抜けない。
+    artifact = _issue_legacy_boundary_error(session, second)
+    assert artifact.error_kind is LegacyBoundaryErrorKind.LIMITATION_UNATTRIBUTED
+    decision = issue_infrastructure_error_decision(
+        result_occurrence_id=session.identity.result_occurrence_id,
+        error_kind=artifact.error_kind.value,
+        error_artifact_digest=artifact.artifact_digest,
+    )
+    assert decision.outcome is Outcome.ERROR
+
+    # 対比: active な blocker が無いので、限界を「帰属できた」と誤報告していたら
+    # EQ closure がそのまま decisive になっていた。
+    projection = session.reducer.replay(session.recorder.seal()).projection
+    assert projection.c_active_base == ()
+    would_have_been = finalize_decision(FinalizationAuthority(
+        session.identity.result_occurrence_id,
+        projection,
+        (DecisiveProofReceipt.create(
+            result_occurrence_id=session.identity.result_occurrence_id,
+            lifecycle_projection_digest=projection.lifecycle_projection_digest,
+            proof_kind=DecisiveProofKind.EQ_CLOSURE,
+            proof_artifact_digest="issue125-eq-closure",
+        ),),
+    ))
+    assert would_have_been.outcome is Outcome.EQUIVALENT
+
+
+def test_an_active_limitation_reobserved_keeps_blocking():
+    """active なままの限界を再観測しても cause は 1 件で、EQ は通らない。"""
+    from scripts.function_tracer_pcode.authority.decision.decision import (
+        DecisiveProofKind,
+        DecisiveProofReceipt,
+        FinalizationAuthority,
+        finalize_decision,
+    )
+
+    connector = _connector()
+    session = connector.begin({"case": "issue125-active-rearm"})
+    checker = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5,
+        canonical_decision_cutover=False,
+    )
+    with production_signal_scope(session):
+        first = _check_with_limitation(session, checker=checker)
+        second = _check_with_limitation(session, checker=checker)
+
+    for result in (first, second):
+        assert result.failure_status is None
+        failure = result.diagnostics["failures"]["analysis_limitation"]
+        assert failure["disposition"] == "ATTRIBUTED_NEW_CAUSE"
+        assert failure["decision_effect"] == "blocks_decision"
+        assert failure["occurrence_id"] and failure["cause_id"]
+    assert (
+        first.diagnostics["failures"]["analysis_limitation"]["occurrence_id"]
+        == second.diagnostics["failures"]["analysis_limitation"]["occurrence_id"]
+    )
+    assert session.recorder.event_count == 1
+    assert len(session.phase7_runtime._materialized) == 1
+
+    projection = session.reducer.replay(session.recorder.seal()).projection
+    assert [row.reason_id for row in projection.c_active_base] == [
+        ANALYSIS_BUDGET_REASON_ID
+    ]
+    blocked = finalize_decision(FinalizationAuthority(
+        session.identity.result_occurrence_id,
+        projection,
+        (DecisiveProofReceipt.create(
+            result_occurrence_id=session.identity.result_occurrence_id,
+            lifecycle_projection_digest=projection.lifecycle_projection_digest,
+            proof_kind=DecisiveProofKind.EQ_CLOSURE,
+            proof_artifact_digest="issue125-eq-closure",
+        ),),
+    ))
+    assert blocked.outcome is Outcome.UNKNOWN
 
 
 # --- E2E-2 ------------------------------------------------------------------
