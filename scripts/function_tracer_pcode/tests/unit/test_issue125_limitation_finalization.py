@@ -201,6 +201,69 @@ def test_unregistered_limitation_reason_fails_closed():
     )
 
 
+def test_the_same_limitation_twice_is_one_cause_not_an_error():
+    """retry phase が同じ限界を再観測しても cause は 1 件、UNKNOWN のまま。
+
+    reducer は同じ occurrence id の再観測を拒否するので、重複を落とさないと
+    pair が不透明な ERROR になる。
+    """
+    connector = _connector()
+    session = connector.begin({"case": "issue125-e2e-1-repeat"})
+    checker = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5,
+        canonical_decision_cutover=False,
+    )
+    with production_signal_scope(session):
+        first = _check_with_limitation(session, checker=checker)
+        second = _check_with_limitation(session, checker=checker)
+
+    for result in (first, second):
+        assert result.failure_status is None
+        assert result.diagnostics["failures"]["analysis_limitation"][
+            "disposition"
+        ] == "ATTRIBUTED_NEW_CAUSE"
+    assert session.recorder.event_count == 1
+
+    evidence = connector.finish(
+        session, _legacy_view(second), case_id="issue125-e2e-1-repeat",
+    )
+    pilot = evidence.pilot_result
+    assert pilot.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+    assert [
+        row.reason_id for row in pilot.reduction.projection.c_active_base
+    ] == [ANALYSIS_BUDGET_REASON_ID]
+
+
+def test_a_different_limitation_site_is_a_different_cause():
+    """限界ごとに別 cause（1 つのバケットに丸めない）。"""
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        observe_analysis_limitation,
+    )
+
+    connector = _connector()
+    session = connector.begin({"case": "issue125-two-sites"})
+    with production_signal_scope(session):
+        assert observe_analysis_limitation(
+            reason_id=ANALYSIS_BUDGET_REASON_ID,
+            limitation_site="analysis.tracer.trace",
+            target_key=("left",),
+        ) == 1
+        assert observe_analysis_limitation(
+            reason_id=ANALYSIS_BUDGET_REASON_ID,
+            limitation_site="analysis.recurrence.summarizer.summarize",
+            target_key=("left",),
+        ) == 1
+        # 同じ site・同じ target の再観測は新しい cause を作らない。
+        assert observe_analysis_limitation(
+            reason_id=ANALYSIS_BUDGET_REASON_ID,
+            limitation_site="analysis.tracer.trace",
+            target_key=("left",),
+        ) == 1
+    assert session.recorder.event_count == 2
+    projection = session.preview_lifecycle_projection()
+    assert len({row.cause_id for row in projection.c_active_base}) == 2
+
+
 # --- E2E-2 ------------------------------------------------------------------
 
 def test_limitation_after_other_producer_activation_keeps_both_causes():

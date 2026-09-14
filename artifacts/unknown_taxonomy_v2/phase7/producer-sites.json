@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "9272c1ffd7411a6fc8f003d46bfc15284474f9d03b5f76de5b39e978cd6e71ca",
+  "manifest_digest": "b1866dace012cf00e7ccf716b8f345a6ab6a8619bae51a24959496be70b9dfd7",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 31,
   "sites": [
@@ -11,7 +11,7 @@
         "analysis-limitation-producer-v1"
       ],
       "branch_or_attempt_contract_id": "analysis-limitation-observed:invocation",
-      "column": 15,
+      "column": 18,
       "domain": "analysis_limitation",
       "emitter": "emit_analysis_limitation_signal",
       "enclosing_function": "observe_analysis_limitation",
@@ -27,10 +27,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 257,
+      "line": 314,
       "path": "scripts/function_tracer_pcode/authority/domains/analysis_limitation.py",
       "producer_site_manifest_id": "analysis-limitation-observed",
-      "source_sha256": "a93c16d9b541c13782950a65526ac72d01b59f711f61a3c22278030d2b0fed66"
+      "source_sha256": "5a7c1b3871b7b8b472f82ab72dbe370052ebe0b473f39fccf1f1759fa1f69c22"
     },
     {
       "allowed_dispositions": [
@@ -538,10 +538,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1804,
+      "line": 1810,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "pairwise-loop-sat-safety-observed",
-      "source_sha256": "e8afabb4fd5a28a741e49c040c22c74124e6b12fc11be69d6faba738d38e7805"
+      "source_sha256": "5ac38ca6684a43f5e2386b539fc04d1f21a63a971816018d59b793e7049386c8"
     },
     {
       "allowed_dispositions": [
@@ -1226,10 +1226,10 @@
       "emitter": "emit_sat_safety_completion_if_observed",
       "enclosing_function": "complete_observed_sat_safety_for_counterexample",
       "expected_cause_slots": [],
-      "line": 1427,
+      "line": 1433,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "sat-safety-counterexample-bound-completed",
-      "source_sha256": "e8afabb4fd5a28a741e49c040c22c74124e6b12fc11be69d6faba738d38e7805"
+      "source_sha256": "5ac38ca6684a43f5e2386b539fc04d1f21a63a971816018d59b793e7049386c8"
     }
   ]
 }

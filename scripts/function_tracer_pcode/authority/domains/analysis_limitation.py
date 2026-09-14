@@ -58,6 +58,8 @@ ANALYSIS_LIMITATION_PRODUCER_ID = "analysis-limitation-producer-v1"
 ANALYSIS_LIMITATION_TARGET_NAMESPACE = "analysis_limitation_v1"
 #: この domain が発行できる identity scope（manifest の slot と一致させる）。
 ANALYSIS_LIMITATION_IDENTITY_SCOPE = IdentityScope.RELATIONAL
+#: session ごとに「どの限界を既に観測したか」を持つ ledger の key。
+ANALYSIS_LIMITATION_LEDGER_KEY = "analysis_limitation_observed"
 
 ANALYSIS_LIMITATION_REASON_REGISTRY = SealedReasonRegistry.build((
     ReasonDefinition(
@@ -133,7 +135,13 @@ class AnalysisLimitationBlockerSignal:
 
 
 class AnalysisLimitationPilotEncoder:
-    """Encode one limitation observation into a single CAUSE_OBSERVED intent."""
+    """Encode one limitation observation into a single CAUSE_OBSERVED intent.
+
+    Observing the *same* limitation twice in one session (a retry phase hits the
+    same budget at the same site) is one cause, not two. The reducer rejects a
+    repeated occurrence id outright, so the repeat is dropped here and the
+    producer site reports the cause as already materialized.
+    """
 
     def __init__(self) -> None:
         self._cause_factory = SemanticCauseIdentityFactory(
@@ -143,11 +151,57 @@ class AnalysisLimitationPilotEncoder:
             ANALYSIS_LIMITATION_RECOVERY_REGISTRY
         )
 
+    @staticmethod
+    def _observed_ledger(session: Any) -> set:
+        ledger = session.domain_signal_state.get(ANALYSIS_LIMITATION_LEDGER_KEY)
+        if ledger is None:
+            return set()
+        if type(ledger) is not set:
+            raise TypeError("analysis limitation observed ledger is not an exact set")
+        return ledger
+
+    def has_observed(self, session: Any, signal: Any) -> bool:
+        """Report whether this exact limitation already has a committed cause."""
+        if type(signal) is not AnalysisLimitationBlockerSignal:
+            return False
+        occurrence_id = self.authority_for_signal(
+            session, signal,
+        ).occurrence.occurrence_id
+        return occurrence_id in self._observed_ledger(session)
+
+    def commit_emitted_signal(
+        self, session: Any, signal: Any, intents: tuple[EventIntent, ...],
+    ) -> None:
+        if type(signal) is not AnalysisLimitationBlockerSignal or not intents:
+            return
+        occurrence_id = self.authority_for_signal(
+            session, signal,
+        ).occurrence.occurrence_id
+        session.domain_signal_state.setdefault(
+            ANALYSIS_LIMITATION_LEDGER_KEY, set()
+        ).add(occurrence_id)
+
+    def authority_for_signal(
+        self, session: Any, signal: AnalysisLimitationBlockerSignal,
+    ) -> CauseOccurrenceAuthority:
+        """Resolve the occurrence authority without emitting an event."""
+        return self._authority(session, signal)
+
     def __call__(
         self, session: Any, signal: AnalysisLimitationBlockerSignal,
     ) -> tuple[EventIntent, ...]:
         if type(signal) is not AnalysisLimitationBlockerSignal:
             raise TypeError("analysis limitation encoder requires an exact signal")
+        authority = self._authority(session, signal)
+        if authority.occurrence.occurrence_id in self._observed_ledger(session):
+            return ()
+        return (EventIntent(
+            EventType.CAUSE_OBSERVED, CauseObservedEventAuthority(authority),
+        ),)
+
+    def _authority(
+        self, session: Any, signal: AnalysisLimitationBlockerSignal,
+    ) -> CauseOccurrenceAuthority:
         target = signal.cause_target()
         cause = self._cause_factory.create(
             reason_id=signal.declared_reason_id,
@@ -189,10 +243,7 @@ class AnalysisLimitationPilotEncoder:
             session.identity.source_snapshot_fingerprint, signal.producer_id,
             session.identity.execution_identity_digest,
         )
-        return (EventIntent(
-            EventType.CAUSE_OBSERVED,
-            CauseObservedEventAuthority(CauseOccurrenceAuthority(occurrence, bound)),
-        ),)
+        return CauseOccurrenceAuthority(occurrence, bound)
 
 
 @dataclass(frozen=True)
@@ -238,11 +289,17 @@ def observe_analysis_limitation(
 ) -> int:
     """この domain が所有する限界を 1 件観測する（唯一の emit 呼び出し）。
 
-    pilot session が無ければ 0 を返す（strict no-op）。呼び出し側はこの戻り値が
-    1 でないときに **帰属できなかった** とみなし、fail-closed で ERROR に落とす。
+    戻り値は **その限界の cause が session に materialize されている数**（0 か 1）で、
+    追加された event 数ではない。同じ限界を同じ session で 2 度観測した場合、
+    新しい event は作られないが cause は既に active なので 1 を返す。pilot session
+    が無ければ 0（strict no-op）。呼び出し側は 1 でないときに **帰属できなかった**
+    とみなし、fail-closed で ERROR に落とす。
     """
     # Deferred import: `production_signals` はこの module の signal 型を
     # import するので、module top で読むと循環する。
+    from scripts.function_tracer_pcode.authority.lifecycle.production_context import (
+        active_production_pilot_session,
+    )
     from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         emit_analysis_limitation_signal,
     )
@@ -254,7 +311,14 @@ def observe_analysis_limitation(
         missing_semantic_fact=missing_semantic_fact,
         evidence_refs=tuple(evidence_refs),
     )
-    return int(emit_analysis_limitation_signal(
+    emitted = int(emit_analysis_limitation_signal(
         signal,
         producer_site_manifest_id=ANALYSIS_LIMITATION_OBSERVED_SITE.site_id,
     ))
+    if emitted:
+        return emitted
+    session = active_production_pilot_session()
+    if session is None:
+        return 0
+    observed = getattr(session.domain_signal_encoder, "has_observed", None)
+    return 1 if callable(observed) and observed(session, signal) else 0

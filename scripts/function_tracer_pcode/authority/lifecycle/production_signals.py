@@ -1289,6 +1289,12 @@ def emit_analysis_limitation_signal(
     session = active_production_pilot_session()
     if session is None:
         return 0
+    already_observed = getattr(session.domain_signal_encoder, "has_observed", None)
+    if callable(already_observed) and already_observed(session, signal):
+        # Re-observing the same limitation is not a new producer activation.  In
+        # particular, do not open a Phase-7 discovery record which would
+        # otherwise materialize the encoder's empty deduplication result.
+        return 0
     if getattr(session, "phase7_runtime", None) is not None:
         session.record_phase7_pre_emission_activation(
             producer_site_manifest_id, signal
