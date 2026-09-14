@@ -24,6 +24,7 @@ PR-128-A の lossless oracle（`test_issue128_cause_aggregate.py`）が「trace 
 import copy
 import inspect
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -282,16 +283,24 @@ def test_debug_propagation_uses_the_existing_entry_points():
     assert '"--debug",' in args_source and '"-d",' in args_source
     # (2) CLI はそれを checker の `debug=` に渡す。
     assert "debug=args.debug," in inspect.getsource(equivalence.run_equivalence_check)
-    # (3) runner は `EQBENCH_DEBUG=1` を `-d` に落とす（runner は変更していない）。
+    # (3) runner は `EQBENCH_DEBUG=1` を CLI の `-d` に落とす（runner は変更していない）。
+    debug_branch = re.compile(
+        r'if \[\[ "\$EQBENCH_DEBUG" == "1" \]\]; then\s*\n?\s*\w+\+=\( -d \)'
+    )
     for runner in ("eqbench_run_all_32jobs.sh", "neqbench_run_all_32jobs.sh"):
         source = (REPO_ROOT / runner).read_text(encoding="utf-8")
-        assert 'EQBENCH_DEBUG" == "1"' in source and "-d" in source
+        assert debug_branch.search(source), runner
     # (4) workflow が読むのは `checker.debug` だけ。env / config は読まない。
     workflow_source = inspect.getsource(workflow.run_check_from_binaries)
     assert 'getattr(checker, "debug", False)' in workflow_source
-    assert "environ" not in workflow_source and "EQBENCH_DEBUG" not in inspect.getsource(
-        workflow
-    ).replace("# `EQBENCH_DEBUG=1` はすべて `checker.debug` に集約済み）で決める。", "")
+    code_only = "\n".join(
+        line for line in inspect.getsource(workflow).splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    for forbidden in ("environ", "getenv", "EQBENCH_DEBUG"):
+        assert forbidden not in code_only, forbidden
+    # config 層（tunable の読み出し）も引き込んでいない。
+    assert "function_tracer_pcode.config" not in code_only
 
 
 # ---------------------------------------------------------------------------
