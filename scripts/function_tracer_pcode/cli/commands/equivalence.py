@@ -24,6 +24,11 @@ from scripts.function_tracer_pcode.ghidra.pyghidra_support import (
 )
 from scripts.function_tracer_pcode.config import apply_runtime_environment
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+# Issue #124 PR-124-B: `result_emit` は結果 JSON の外（journal）にだけ残す区間。
+from scripts.function_tracer_pcode.core.stage_journal import (
+    journal_stage_end,
+    journal_stage_start,
+)
 from scripts.function_tracer_pcode.reporting import output_result
 from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.cli.commands.analyze import get_target_functions
@@ -61,6 +66,28 @@ def _get_binary_ids_arg(args):
     if isinstance(value, (list, tuple)) and len(value) == 2:
         return value[0], value[1]
     return None, None
+
+
+def _journal_run_context(args):
+    """journal の 1 行目に残す pair の識別情報（Issue #124 PR-124-B）。
+
+    結果 JSON が出ない pair でも「どのペアの journal か」が分かるようにする。
+    診断なので判定には使わない。値は型を確かめてから入れる（診断の組み立てで
+    例外を出して判定経路を壊さないため）。
+    """
+    def _strings(value):
+        if not isinstance(value, (list, tuple)):
+            return []
+        return [item for item in value if isinstance(item, str)]
+
+    context = {"binaries": _strings(getattr(args, "equiv", None))}
+    binary_ids = _strings(getattr(args, "binary_ids", None))
+    if len(binary_ids) == 2:
+        context["binary_ids"] = binary_ids
+    functions = _strings(getattr(args, "functions", None))
+    if functions:
+        context["functions"] = functions
+    return context
 
 
 def _exception_chain_text(exc: BaseException) -> str:
@@ -257,6 +284,10 @@ def _emit_import_error_result(
         error_kind=error_kind,
         error_artifact_digest=error_artifact_digest,
     )
+    # Issue #124 PR-124-B: ERROR 経路の emission も同じ区間名で journal に残す
+    # （journal を持つ pair が結果 JSON の有無で欠けないようにする）。
+    emission_started = time.monotonic()
+    journal_stage_start("result_emit", {"kind": "emission", "path": "import_error"})
     result_payload = result.to_dict()
     evidence, session = result._canonical_finalization_context
     bundle = build_canonical_result_finalization_bundle(
@@ -285,6 +316,9 @@ def _emit_import_error_result(
         args.output,
         args.quiet,
     )
+    journal_stage_end("result_emit", time.monotonic() - emission_started, {
+        "kind": "emission", "path": "import_error",
+    })
     from scripts.function_tracer_pcode.authority.contracts import Outcome
     from scripts.function_tracer_pcode.authority.decision.production_cutover import CLI_EXIT_MATRIX
 
@@ -309,6 +343,17 @@ def run_equivalence_check(args):
     # Issue #125: 握り潰した例外の集計はペア 1 件の実行ごとに取り直す。
     reset_swallowed_exceptions()
     stage_clock = StageClock()
+
+    # Issue #124 PR-124-B: journal と stack dump handler は **in-process の JVM を
+    # 起動する前**に設置する（`start_headless_pyghidra` はこの下）。handler の
+    # readiness は `faulthandler.register()` が成功したことだけを根拠にし、
+    # 失敗しても判定にも終了状態にも影響しない。診断 signal の送信は行わない
+    # （supervisor 側の責務、PR-124-C）。
+    from scripts.function_tracer_pcode.cli.pair_diagnostics import (
+        install_pair_diagnostics,
+    )
+
+    install_pair_diagnostics(args, context=_journal_run_context(args))
 
     def _get_bool_arg(name: str, default: bool = False) -> bool:
         value = getattr(args, name, default)
@@ -555,6 +600,17 @@ def run_equivalence_check(args):
     attach_failure_diagnostics(result)
     attach_cause_aggregate(result)
     emission_started = time.monotonic()
+    # Issue #124 PR-124-B: `result_emit` は `to_dict()` を呼ぶ**前**から JSON の
+    # 書き出し完了までを囲む（結果の描画・正準化・envelope 永続化が入る区間で、
+    # 結果 JSON 自身の中には入れられない）。journal にしか出さないので添付順
+    # （stage timing -> failures -> cause aggregate -> to_string -> to_dict ->
+    # bundle -> JSON write）も serialization 契約も変えない。ここで例外が出た
+    # 場合は `stage_end` が書かれないままになり、それが「emission の途中で
+    # 落ちた」という観測になる。
+    journal_stage_start("result_emit", {
+        "kind": "emission",
+        "emit_result_json": _get_bool_arg("emit_result_json", False),
+    })
     output_content = result.to_string(
         verbose=args.verbose,
         show_phase_usage=args.debug,
@@ -592,6 +648,11 @@ def run_equivalence_check(args):
             )
         )
         output_result(json_content, args.output, args.quiet)
+
+    journal_stage_end("result_emit", time.monotonic() - emission_started, {
+        "kind": "emission",
+        "render_seconds": round(render_seconds, 6),
+    })
 
     if not args.quiet:
         # 結果の描画・JSON 化・envelope 永続化に掛かった時間。結果 JSON の中には
