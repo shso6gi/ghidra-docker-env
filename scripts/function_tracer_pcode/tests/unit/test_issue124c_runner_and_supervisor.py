@@ -65,16 +65,17 @@ def test_runners_pass_the_diagnostic_arguments_to_the_supervisor(runner):
 
 @pytest.mark.parametrize("runner", RUNNERS)
 def test_runners_record_the_artifact_state_before_cleanup(runner):
-    """source 上で、退避確認が cleanup 呼び出しより前にある。"""
+    """`run_pair` の中で、退避確認が cleanup 呼び出しより前にある。"""
     source = (REPO_ROOT / runner).read_text(encoding="utf-8")
-    check = source.index("validation_record_stack_dump_state")
-    cleanup = source.index("process_authority_cleanup", check - 4000)
-    assert check < source.index(
-        "cleanup_pair_process_authority_with_run_health \\"
-        if runner.startswith("eq") else
-        "reporting.process_authority_cleanup"
+    function = _extract_shell_function(source, "run_pair")
+    cleanup_call = (
+        "cleanup_pair_process_authority_with_run_health"
+        if runner.startswith("eq")
+        else "reporting.process_authority_cleanup"
     )
-    assert cleanup > 0
+    assert function.index("validation_record_stack_dump_state") < function.index(
+        cleanup_call
+    )
 
 
 @pytest.mark.parametrize("runner", RUNNERS)
@@ -440,6 +441,25 @@ def test_real_supervisor_persists_a_dump_from_a_child_that_exits_normally(tmp_pa
     assert status["signal_sent"] is False
     assert status["artifact_status"] == "copied"   # それでも保存する
     assert Path(config.stack_dump_artifact).is_file()
+
+
+def test_a_failing_diagnostic_does_not_change_the_supervisor_exit(tmp_path, monkeypatch):
+    """診断の失敗が exit code / projection を変えない（`finally` の中の guard）。"""
+    from scripts.function_tracer_pcode.authority.process import supervisor_command
+
+    config = _supervisor_config(
+        tmp_path, "import time; time.sleep(30)", timeout=1.0, lead=0.5,
+    )
+    monkeypatch.setattr(
+        supervisor_command.ProcessSupervisorCommand,
+        "_child_terminal_timeout_evidence",
+        lambda self: (_ for _ in ()).throw(AttributeError("diagnostic exploded")),
+    )
+    command = supervisor_command.ProcessSupervisorCommand(config)
+    assert command.run() == 124
+    projection = json.loads(config.authority_output.read_text(encoding="utf-8"))
+    assert projection["status"] == "TIMEOUT"
+    assert projection["authority_kind"] == "DurableTimeoutFinalizationBundle"
 
 
 def test_real_supervisor_reports_missing_when_no_dump_was_written(tmp_path):

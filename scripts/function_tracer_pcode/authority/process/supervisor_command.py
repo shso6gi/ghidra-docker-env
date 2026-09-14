@@ -44,6 +44,14 @@ CHILD_ENV_SUPERVISOR_KEY_FILE = "UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_FILE"
 CHILD_ENV_WORKER_KEY_ID = "UNKNOWN_TAXONOMY_V2_WORKER_KEY_ID"
 CHILD_ENV_WORKER_KEY_FILE = "UNKNOWN_TAXONOMY_V2_WORKER_KEY_FILE"
 
+#: Issue #124 PR-124-C: 診断（journal 読取 / bundle 検証 / dump 退避 / sidecar）の
+#: 失敗が supervisor の終了状態・exit code・projection を変えないための型付き guard。
+#: `except Exception` は使わない（Issue #125 PR-125-B の baseline は delete-only）。
+_DIAGNOSTIC_GUARD_ERRORS = (
+    ArithmeticError, AttributeError, ImportError, LookupError, OSError,
+    RecursionError, TypeError, ValueError,
+)
+
 
 def _exact_string(name: str, value: Any) -> str:
     if type(value) is not str or not value:
@@ -514,7 +522,7 @@ class ProcessSupervisorCommand:
             envelope = json.loads(path.read_text(encoding="utf-8"))
             payload = envelope["canonical_result_payload"]
             bundle = payload["canonical_result_finalization_bundle"]
-        except (KeyError, OSError, TypeError, ValueError) as exc:
+        except _DIAGNOSTIC_GUARD_ERRORS as exc:
             return {
                 "observed": True,
                 "validated": False,
@@ -539,7 +547,7 @@ class ProcessSupervisorCommand:
                     self.config.supervisor_signing_key_file
                 ),
             )
-        except (KeyError, OSError, TypeError, ValueError) as exc:
+        except _DIAGNOSTIC_GUARD_ERRORS as exc:
             record["validation_error"] = type(exc).__name__
             return record
         identity = validated["execution_identity"]
@@ -580,11 +588,16 @@ class ProcessSupervisorCommand:
         if diagnostic is None:
             return
         diagnostic.cancel_future_requests()
-        diagnostic.record_child_timeout_evidence(
-            self._child_terminal_timeout_evidence()
-        )
-        diagnostic.persist_artifact()
-        diagnostic.write_status()
+        try:
+            diagnostic.record_child_timeout_evidence(
+                self._child_terminal_timeout_evidence()
+            )
+            diagnostic.persist_artifact()
+            diagnostic.write_status()
+        except _DIAGNOSTIC_GUARD_ERRORS:
+            # ここは `run()` の finally の中。診断の失敗で exit code や
+            # projection を変えてはいけないので、握り潰して抜ける。
+            return
 
     @staticmethod
     def _resolved_projection(launch: Any, state: Any, returncode: Any) -> dict[str, Any]:
