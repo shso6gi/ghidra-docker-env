@@ -14,6 +14,12 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from scripts.function_tracer_pcode.reporting.result_summary import (
+    FAILURE_EVIDENCE_KEY,
+    FAILURE_INTERNAL_BY_SITE_KEY,
+    FAILURE_INTERNAL_BY_SITE_TITLE,
+    FAILURE_SWALLOWED_BY_TYPE_KEY,
+    FAILURE_SWALLOWED_BY_TYPE_TITLE,
+    FAILURE_SWALLOWED_TOTAL_KEY,
     STATUS_EQ,
     STATUS_ERROR,
     STATUS_INCOMPLETE,
@@ -47,6 +53,16 @@ _CAUSAL_EVIDENCE_RE = re.compile(r"^\s+Causal evidence\s*:\s*(?P<value>.*?)\s*$"
 _CAUSAL_BLOCK_RE = re.compile(
     r"(?P<name>[a-z_]+) observed (?P<observed>\d+) / missing (?P<missing>\d+)"
 )
+# Issue #125 PR-125-B: typed failure 診断の観測件数と握り潰し合計。
+# `failures` ブロックを読めた pair 数（observed）と読めなかった pair 数
+# (missing) を分けて往復させ、「key が無い」を「0 件」と読ませない。
+_FAILURE_EVIDENCE_RE = re.compile(
+    r"^\s+Results with failure diagnostics\s*:\s*(?P<observed>\d+)"
+    r"\s*\(missing (?P<missing>\d+), malformed (?P<malformed>\d+)\)\s*$"
+)
+_SWALLOWED_TOTAL_RE = re.compile(
+    r"^\s+Swallowed exceptions total\s*:\s*(?P<total>\d+)\s*$"
+)
 
 
 def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
@@ -69,7 +85,11 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
         "proof_backlog_by_reason": {},
         "proof_backlog_by_proof_kind": {},
         "operational_unknown_by_reason": {},
+        FAILURE_SWALLOWED_BY_TYPE_KEY: {},
+        FAILURE_INTERNAL_BY_SITE_KEY: {},
     }
+    failure_evidence: Dict[str, int] = {}
+    swallowed_total: Optional[int] = None
     active_section: Optional[str] = None
     # Issue #128: `(unknown)` = 証拠が無い、`(none)` = 実際に 0 件。どちらも
     # 空の section になるので、marker を見た section だけ別に記録する。
@@ -83,6 +103,10 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
         "Proof backlog by reason:": "proof_backlog_by_reason",
         "Proof backlog by proof_kind:": "proof_backlog_by_proof_kind",
         "Operational UNKNOWN by reason:": "operational_unknown_by_reason",
+        # Issue #125 PR-125-B。登録しないと直後の `- key: count` 行が
+        # 前の section の続きとして読まれてしまう。
+        f"{FAILURE_SWALLOWED_BY_TYPE_TITLE}:": FAILURE_SWALLOWED_BY_TYPE_KEY,
+        f"{FAILURE_INTERNAL_BY_SITE_TITLE}:": FAILURE_INTERNAL_BY_SITE_KEY,
     }
 
     for line in lines:
@@ -110,6 +134,20 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
                 "observed": int(diagnostic_match.group("observed")),
                 "missing": int(diagnostic_match.group("missing")),
             }
+            active_section = None
+            continue
+        failure_evidence_match = _FAILURE_EVIDENCE_RE.match(line)
+        if failure_evidence_match:
+            failure_evidence = {
+                "observed": int(failure_evidence_match.group("observed")),
+                "missing": int(failure_evidence_match.group("missing")),
+                "malformed": int(failure_evidence_match.group("malformed")),
+            }
+            active_section = None
+            continue
+        swallowed_total_match = _SWALLOWED_TOTAL_RE.match(line)
+        if swallowed_total_match:
+            swallowed_total = int(swallowed_total_match.group("total"))
             active_section = None
             continue
         causal_match = _CAUSAL_EVIDENCE_RE.match(line)
@@ -171,6 +209,10 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
         "diagnostic_sources": diagnostic_sources,
         "diagnostic_evidence": diagnostic_evidence,
         "causal_evidence_counts": causal_evidence_counts,
+        FAILURE_EVIDENCE_KEY: failure_evidence,
+        # 行が無い（PR-125-B 以前の summary）ときは 0。観測できたかどうかは
+        # `FAILURE_EVIDENCE_KEY` が空 dict かどうかで区別する。
+        FAILURE_SWALLOWED_TOTAL_KEY: 0 if swallowed_total is None else swallowed_total,
         **sections,
     }
 

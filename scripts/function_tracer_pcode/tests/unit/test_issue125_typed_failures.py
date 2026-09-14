@@ -531,6 +531,11 @@ def test_producer_sites_manifest_keeps_every_existing_site_contract():
     """既存 site の disposition / producer / cause slot / emitter を変えていない。
 
     `origin/main` を読めるときだけ実行する上乗せ検査（件数の固定は上の test）。
+
+    PR-125-A が merge されると `origin/main` 側にも新 site が入るので、
+    「ちょうど +1」は merge 前しか成り立たない。merge 後も意味が残るように、
+    **site を消していないこと**・**追加は新 site 以外に無いこと**・
+    **総数が base + 1 のままであること**で固定する。
     """
     import subprocess
 
@@ -551,9 +556,11 @@ def test_producer_sites_manifest_keeps_every_existing_site_contract():
 
     before_ids = {row["producer_site_manifest_id"] for row in before["sites"]}
     after_ids = {row["producer_site_manifest_id"] for row in after["sites"]}
-    assert after_ids - before_ids == {NEW_PRODUCER_SITE_ID}
+    # merge 前は {NEW_PRODUCER_SITE_ID}、merge 後は空集合。どちらでも
+    # 「新 site 以外は増えていない」ことは変わらない。
+    assert after_ids - before_ids <= {NEW_PRODUCER_SITE_ID}
     assert before_ids - after_ids == set()
-    assert len(before_ids) == PRODUCER_SITE_COUNT_BEFORE_ISSUE125
+    assert len(after_ids) == PRODUCER_SITE_COUNT_BEFORE_ISSUE125 + 1
 
     before_contract = _site_contract(before)
     after_contract = _site_contract(after)
