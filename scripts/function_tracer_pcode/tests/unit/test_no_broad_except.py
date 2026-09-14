@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Mapping, Tuple
@@ -41,7 +42,9 @@ BROAD_EXCEPTION_NAMES = frozenset({"Exception", "BaseException"})
 #: 握り潰しを台帳に残す関数名（`core.errors.log_swallowed`）。
 SWALLOWED_LEDGER_FUNCTION = "log_swallowed"
 
-#: 走査しないディレクトリ名（テスト自身は対象外）。
+#: package 直下の走査しないディレクトリ（テスト自身は対象外）。
+#: ここに無い場所へ test を置くと新しい key として FAIL するので、見落としでは
+#: なく「置き場所が違う」ことが分かる。
 EXCLUDED_TOP_LEVEL_DIRS = frozenset({"tests"})
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -311,13 +314,24 @@ def test_baseline_is_a_frozen_snapshot_with_stable_totals():
     }
 
 
+#: `module.path` / `Host.method.<locals>.inner` / `<module>` だけを許す形。
+_MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_QUALNAME_SEGMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*|<locals>)$")
+
+
 def test_baseline_keys_carry_no_line_numbers():
+    """key に位置情報（`path:line` の類）が一切入っていないこと。"""
+
     for module, qualnames in load_baseline().items():
-        assert not any(character.isdigit() for character in module.split(".")[-1][:1])
+        assert _MODULE_RE.fullmatch(module), module
         for qualname, counts in qualnames.items():
-            assert ":" not in qualname
+            if qualname != MODULE_QUALNAME:
+                for segment in qualname.split("."):
+                    assert _QUALNAME_SEGMENT_RE.fullmatch(segment), qualname
             assert set(counts) == {"logged", "unlogged"}
             assert counts["logged"] >= 0 and counts["unlogged"] >= 0
+    # 位置が変わっても key は動かない、を fixture で直接確かめる。
+    assert MODULE_QUALNAME == "<module>"
 
 
 # ---------------------------------------------------------------------------
