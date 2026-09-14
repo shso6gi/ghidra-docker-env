@@ -1,0 +1,901 @@
+{
+  "schema": "broad-except-baseline-v1",
+  "entries": {
+    "analysis.condition.smt_oracle": {
+      "ConditionSMTOracle._expression_identity_key": {"logged": 0, "unlogged": 1},
+      "ConditionSMTOracle._runtime_ref_identity": {"logged": 0, "unlogged": 2},
+      "ConditionSMTOracle._runtime_ref_is_parameter_ref": {"logged": 0, "unlogged": 2},
+      "ConditionSMTOracle.conjunction_is_unsat": {"logged": 0, "unlogged": 1},
+      "ConditionSMTOracle.has_object_identity_support": {"logged": 0, "unlogged": 1},
+      "ConditionSMTOracle.is_available": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.condition.tracker": {
+      "ConditionTracker._detect_branch_condition": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.debug.render": {
+      "summarize_expression.<locals>._render": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.debug.unknown_trace": {
+      "PcodeOpInfo.from_pcodeop": {"logged": 0, "unlogged": 1},
+      "VarnodeInfo.from_varnode": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.effects.call_argument": {
+      "_impl__call_argument_evidence_storage_key": {"logged": 0, "unlogged": 1},
+      "_impl__call_argument_semantic_rank": {"logged": 0, "unlogged": 1},
+      "_impl__call_input_storages_for_explicit_args": {"logged": 0, "unlogged": 3},
+      "_impl__coerce_argument_to_callee_parameter": {"logged": 0, "unlogged": 3},
+      "_impl__coerce_storage_info": {"logged": 0, "unlogged": 1},
+      "_impl__expression_maps_to_parameter": {"logged": 0, "unlogged": 1},
+      "_impl__normalize_parameter_index": {"logged": 0, "unlogged": 1},
+      "_impl__parameter_base_ref": {"logged": 0, "unlogged": 2},
+      "_impl__parameter_declared_semantic_size_bytes": {"logged": 0, "unlogged": 2},
+      "_impl__parameter_descriptor_storage_size_bytes": {"logged": 0, "unlogged": 3},
+      "_impl__parameter_expression_from_descriptor": {"logged": 0, "unlogged": 2},
+      "_impl__parameter_expression_from_varnode": {"logged": 0, "unlogged": 5},
+      "_impl__parameter_semantic_size_bytes": {"logged": 0, "unlogged": 1},
+      "_impl__path_writes_storage": {"logged": 0, "unlogged": 1},
+      "_impl__recover_call_argument_candidate_from_op": {"logged": 0, "unlogged": 2},
+      "_impl__resolve_call_argument_expression": {"logged": 0, "unlogged": 1},
+      "_impl__select_explicit_call_arguments_by_dependency_tail": {"logged": 0, "unlogged": 1},
+      "_impl__select_explicit_call_arguments_by_input_storage": {"logged": 0, "unlogged": 3},
+      "_impl__select_explicit_call_arguments_by_storage_window": {"logged": 0, "unlogged": 3},
+      "_impl__should_prefer_explicit_call_argument": {"logged": 0, "unlogged": 1},
+      "_impl__stack_varnode_matches_storage": {"logged": 0, "unlogged": 1},
+      "_impl__storage_info_from_identity_key": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.effects.call_argument_abi": {
+      "_impl__callsite_input_storages": {"logged": 0, "unlogged": 3},
+      "_impl__callsite_input_widths": {"logged": 0, "unlogged": 2},
+      "_impl__recover_abi_call_argument_evidence": {"logged": 0, "unlogged": 1},
+      "_impl__resolve_abi_call_arguments": {"logged": 0, "unlogged": 3}
+    },
+    "analysis.effects.call_argument_evidence": {
+      "_impl__explicit_argument_is_safe_immediate_for_callee_param": {"logged": 0, "unlogged": 2},
+      "_impl__expression_has_format_pointer_evidence": {"logged": 0, "unlogged": 2}
+    },
+    "analysis.effects.call_paths": {
+      "_impl__compatible_call_block_paths": {"logged": 0, "unlogged": 1},
+      "_impl__find_block_info_for_pcode_op": {"logged": 0, "unlogged": 1},
+      "_impl__pcode_op_ref_key_from_tracker": {"logged": 0, "unlogged": 2},
+      "_impl__recover_unmodified_live_in_argument": {"logged": 0, "unlogged": 2},
+      "_impl__resolve_multiequal_input_for_path": {"logged": 0, "unlogged": 4}
+    },
+    "analysis.effects.call_target": {
+      "_impl__call_target_ref_analysis_key": {"logged": 0, "unlogged": 3},
+      "_impl__resolve_call_target_expression": {"logged": 0, "unlogged": 2},
+      "_impl__resolve_call_target_ref": {"logged": 0, "unlogged": 3},
+      "_impl__resolve_call_targets_for_effect_summary": {"logged": 0, "unlogged": 2},
+      "_impl__resolve_function_ref_by_value": {"logged": 0, "unlogged": 1},
+      "_impl__resolve_function_ref_from_address": {"logged": 0, "unlogged": 1},
+      "_impl_resolve_call_targets": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.effects.constant_folding": {
+      "_impl__read_program_memory_value": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.effects.expression_forms": {
+      "_impl__condition_evidence_key": {"logged": 0, "unlogged": 1},
+      "_impl__encode_signed_token": {"logged": 0, "unlogged": 1},
+      "_impl__expression_bit_width": {"logged": 0, "unlogged": 2},
+      "_impl__expression_is_non_address_sized_scalar_value": {"logged": 0, "unlogged": 1},
+      "_impl__expression_is_wide_unknown_or_undefined": {"logged": 0, "unlogged": 1},
+      "_impl__get_order_key": {"logged": 0, "unlogged": 2}
+    },
+    "analysis.effects.external_call_models": {
+      "_exact_bool_call": {"logged": 0, "unlogged": 1},
+      "_probe_thunk": {"logged": 0, "unlogged": 1},
+      "_unsupported": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.effects.location": {
+      "_impl__stack_location_key": {"logged": 0, "unlogged": 1},
+      "_impl_memory_expression_for_location": {"logged": 0, "unlogged": 2}
+    },
+    "analysis.effects.post_state": {
+      "_impl__materialize_function_pointer_argument": {"logged": 0, "unlogged": 2}
+    },
+    "analysis.effects.pure_function_catalog": {
+      "_declared_type_class": {"logged": 0, "unlogged": 1},
+      "_declared_width_bits": {"logged": 0, "unlogged": 1},
+      "_optional_symbol_text": {"logged": 0, "unlogged": 1},
+      "_safe_call": {"logged": 0, "unlogged": 1},
+      "validate_catalog_signature": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.effects.store_effect": {
+      "_impl__block_has_effect_sensitive_ops": {"logged": 0, "unlogged": 1},
+      "_impl__block_has_path_incomplete_effects": {"logged": 0, "unlogged": 1},
+      "_impl__call_op_requires_path_covered_effect_summary": {"logged": 0, "unlogged": 1},
+      "_impl__collect_ram_output_write_effects": {"logged": 0, "unlogged": 3},
+      "_impl__is_ram_exit_copy": {"logged": 0, "unlogged": 1},
+      "_impl__op_output_is_memory": {"logged": 0, "unlogged": 1},
+      "_impl__path_coverage_for_effect_block": {"logged": 0, "unlogged": 2},
+      "_impl__ram_varnode_key": {"logged": 0, "unlogged": 1},
+      "_impl__recover_uncovered_call_argument_evidence": {"logged": 0, "unlogged": 3},
+      "_impl__resolve_direct_call_value_effects": {"logged": 0, "unlogged": 1},
+      "_impl__resolve_object_centric_store_value_effects": {"logged": 0, "unlogged": 1},
+      "_impl_summarize_store_effects": {"logged": 0, "unlogged": 1},
+      "_impl_summarize_store_effects.<locals>._pcode_block_ref_for_block_info": {"logged": 0, "unlogged": 2},
+      "_impl_summarize_store_effects.<locals>._pcode_ref_for_op": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.effects.unaligned_store": {
+      "_impl_pair_unaligned_store_halves.<locals>._locate": {"logged": 0, "unlogged": 1},
+      "_is_const": {"logged": 0, "unlogged": 1},
+      "_ranges_provably_disjoint": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.phi_resolver": {
+      "PhiHandler._build_combined_expression": {"logged": 0, "unlogged": 1},
+      "PhiHandler._check_self_reference": {"logged": 0, "unlogged": 1},
+      "_pcode_op_ref_from_tracer": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.recurrence.cfg_blocks": {
+      "_impl__cfg_block_reachable_without_reentering_header": {"logged": 0, "unlogged": 1},
+      "_impl__coerce_pcode_site_int": {"logged": 0, "unlogged": 3},
+      "_impl__high_varnode_instances": {"logged": 0, "unlogged": 2},
+      "_impl__iter_basic_blocks": {"logged": 0, "unlogged": 1},
+      "_impl__make_pcode_block_ref": {"logged": 0, "unlogged": 2},
+      "_impl__phi_incoming_block": {"logged": 0, "unlogged": 2},
+      "_impl__phi_input_is_cfg_entry_seed": {"logged": 0, "unlogged": 2},
+      "_impl__phi_input_predecessor_block": {"logged": 0, "unlogged": 1},
+      "_impl__phi_input_value_varnode": {"logged": 0, "unlogged": 1},
+      "_impl__program_is_big_endian": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.recurrence.coordinator": {
+      "_impl__counter_parameter_candidate_matches_descriptor": {"logged": 0, "unlogged": 2}
+    },
+    "analysis.recurrence.counted_loop": {
+      "_impl__counted_loop_identity_match_key": {"logged": 0, "unlogged": 1},
+      "_impl__counted_loop_summary_source_key_fallback": {"logged": 0, "unlogged": 2},
+      "_impl__counted_loop_summary_source_key_from_parts": {"logged": 0, "unlogged": 2},
+      "_impl__multiequal_accumulator_update_rejection_reason": {"logged": 0, "unlogged": 1},
+      "_impl__unique_multiequal_accumulator_update_input": {"logged": 0, "unlogged": 1},
+      "_impl__varnode_aliases_accumulator_object": {"logged": 0, "unlogged": 3},
+      "_impl__varnode_is_accumulator_update_for_phi": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.recurrence.guard_proof": {
+      "_impl__condition_conjunction_unsat_with_solver": {"logged": 0, "unlogged": 3},
+      "_impl__condition_sets_equivalent": {"logged": 0, "unlogged": 1},
+      "_impl__conditions_are_disjoint_from_conditions": {"logged": 0, "unlogged": 2},
+      "_impl__conditions_overlap_conditions": {"logged": 0, "unlogged": 1},
+      "_impl__conditions_overlap_for_analysis_parameters": {"logged": 0, "unlogged": 1},
+      "_impl__guard_handoff_key": {"logged": 0, "unlogged": 1},
+      "_impl__nonzero_returns_are_disjoint_from_base_guard": {"logged": 0, "unlogged": 1},
+      "_impl__positive_counter_conditions_for_return": {"logged": 0, "unlogged": 1},
+      "_impl__prove_return_conditions_cover_region": {"logged": 0, "unlogged": 1},
+      "_impl__prove_summary_conditions_plus_exact_returns_cover_active_precondition": {"logged": 0, "unlogged": 1},
+      "_impl__summary_guard_constraints_key": {"logged": 0, "unlogged": 2},
+      "_impl__summary_return_conditions_key": {"logged": 0, "unlogged": 1},
+      "_impl__two_way_condition_partition_is_total": {"logged": 0, "unlogged": 2},
+      "_impl__zero_base_guard_cover_for_positive_counter_guard": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.recurrence.loop_effects": {
+      "_impl__safe_pcode_input_count": {"logged": 0, "unlogged": 1},
+      "_impl__safe_pcode_input_varnode": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.recurrence.multiplicative_recurrence": {
+      "_impl__multiplicative_accumulator_delta_multiplier": {"logged": 0, "unlogged": 2},
+      "_impl__multiplicative_phi_return_summary_conditions": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.recurrence.object_identity": {
+      "_impl__block_identity_key": {"logged": 0, "unlogged": 1},
+      "_impl__parameter_expression_semantic_identity": {"logged": 0, "unlogged": 2},
+      "_impl__pcode_block_group_key": {"logged": 0, "unlogged": 2},
+      "_impl__phi_incoming_same_storage_definition": {"logged": 0, "unlogged": 1},
+      "_impl__return_info_summary_identity_key": {"logged": 0, "unlogged": 1},
+      "_impl__runtime_ref_stable_key": {"logged": 0, "unlogged": 1},
+      "_impl__same_counter_expression": {"logged": 0, "unlogged": 1},
+      "_impl__same_high_variable": {"logged": 0, "unlogged": 3},
+      "_impl__same_pcode_block": {"logged": 0, "unlogged": 2},
+      "_impl__same_placeholder_varnode": {"logged": 0, "unlogged": 1},
+      "_impl__same_storage_varnode": {"logged": 0, "unlogged": 1},
+      "_impl__same_varnode_value": {"logged": 0, "unlogged": 2},
+      "_impl__stable_key_or_none": {"logged": 0, "unlogged": 1},
+      "_impl__storage_infos_refer_to_same_parameter_slot": {"logged": 0, "unlogged": 3},
+      "_impl__summary_expression_evidence_key": {"logged": 0, "unlogged": 1},
+      "_impl__summary_return_expression_key": {"logged": 0, "unlogged": 1},
+      "_impl__summary_storage_identity_key": {"logged": 0, "unlogged": 1},
+      "_impl__summary_value_source_key": {"logged": 0, "unlogged": 1},
+      "_impl__varnode_cache_key": {"logged": 0, "unlogged": 4}
+    },
+    "analysis.recurrence.pointer_progression": {
+      "_impl__constant_resolves_to_executable_address": {"logged": 0, "unlogged": 4},
+      "_impl__function_body_address_ranges": {"logged": 0, "unlogged": 4},
+      "_impl__match_pointer_progression_phi_by_storage": {"logged": 0, "unlogged": 1},
+      "_impl__parameter_index_from_symbol": {"logged": 0, "unlogged": 1},
+      "_impl__parse_pcode_address_offset": {"logged": 0, "unlogged": 2},
+      "_impl__pointer_phi_seed_offsets": {"logged": 0, "unlogged": 1},
+      "_impl__store_address_space_ref_for_op": {"logged": 0, "unlogged": 3}
+    },
+    "analysis.recurrence.proof_utils": {
+      "_build_pcode_expression_with_context": {"logged": 0, "unlogged": 1},
+      "_impl__expression_equivalence_target_bits": {"logged": 0, "unlogged": 1},
+      "_impl__implied_counter_constant_expression": {"logged": 0, "unlogged": 3},
+      "_impl__trace_varnode_expression": {"logged": 0, "unlogged": 2}
+    },
+    "analysis.recurrence.readonly_reduction": {
+      "_impl__address_points_to_readonly_data": {"logged": 0, "unlogged": 3},
+      "_impl__base_witnesses_exactly_cover_region": {"logged": 0, "unlogged": 1},
+      "_impl__read_readonly_int32_lanes": {"logged": 0, "unlogged": 5}
+    },
+    "analysis.recurrence.return_region": {
+      "_impl__exit_region_return_refs_using_value.<locals>.prove_block": {"logged": 0, "unlogged": 1},
+      "_impl__prove_return_value_equals_summary_closed_form": {"logged": 0, "unlogged": 3},
+      "_impl__strict_zero_iteration_exit_region_block_ops": {"logged": 0, "unlogged": 3},
+      "_impl__summary_storage_info_from_parameter": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.recurrence.state_transition": {
+      "_impl__build_multiplicative_state_transition_loop_value": {"logged": 0, "unlogged": 1},
+      "_impl__counted_loop_transition_evidence_key_from_parts": {"logged": 0, "unlogged": 1},
+      "_impl__prior_counted_state_transition_base_value": {"logged": 0, "unlogged": 1},
+      "_impl__state_transition_cases_evidence_key": {"logged": 0, "unlogged": 1},
+      "_impl__state_transition_exact_return_exclusion_conditions": {"logged": 0, "unlogged": 1},
+      "_impl__state_transition_guard_false_at_stop_value": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.recurrence.unrolled_tail": {
+      "_impl__varnode_matches_tail_index_source_or": {"logged": 0, "unlogged": 2}
+    },
+    "analysis.recurrence.varnode_algebra": {
+      "_impl__counter_low_bits_clear_for_or_delta": {"logged": 0, "unlogged": 1},
+      "_impl__iter_varnode_descendant_ops": {"logged": 0, "unlogged": 1},
+      "_impl__signed_varnode_constant_value": {"logged": 0, "unlogged": 1},
+      "_impl__storage_info_from_varnode": {"logged": 0, "unlogged": 1},
+      "_impl__value_preserving_edge_kind": {"logged": 0, "unlogged": 1},
+      "_impl__varnode_bit_width": {"logged": 0, "unlogged": 1},
+      "_impl__varnode_constant_value": {"logged": 0, "unlogged": 1},
+      "_impl__varnode_depends_on_varnode": {"logged": 0, "unlogged": 1},
+      "_impl__varnode_input_multiplicity": {"logged": 0, "unlogged": 1},
+      "_impl__varnode_matches_parameter": {"logged": 0, "unlogged": 1},
+      "_impl__varnode_size_bits": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.analyze_function": {
+      "_impl__phase1_body_contains_address": {"logged": 0, "unlogged": 2},
+      "_impl_analyze_function": {"logged": 0, "unlogged": 2},
+      "_record_callee_analysis_cache_lookup": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.analyzer": {
+      "ReturnAnalyzer.callee_analysis_cache_diagnostics": {"logged": 0, "unlogged": 1},
+      "ReturnAnalyzer.callee_parameter_cache_diagnostics": {"logged": 0, "unlogged": 1},
+      "ReturnAnalyzer.callee_unbound_reuse_diagnostics": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.call_recovery": {
+      "_impl__bound_parameter_storage_values_from_call_args": {"logged": 0, "unlogged": 1},
+      "_impl__bound_parameter_values_from_call_args": {"logged": 0, "unlogged": 1},
+      "_impl__build_return_tracking_targets": {"logged": 0, "unlogged": 1},
+      "_impl__cached_callee_analysis_for_outcome_summary": {"logged": 0, "unlogged": 2},
+      "_impl__cbranch_direct_target_keys": {"logged": 0, "unlogged": 1},
+      "_impl__direct_call_target_function_key": {"logged": 0, "unlogged": 2},
+      "_impl__enumerate_switch_branch_targets": {"logged": 0, "unlogged": 1},
+      "_impl__expand_linear_code_target": {"logged": 0, "unlogged": 3},
+      "_impl__find_indirect_dispatch_op_on_block": {"logged": 0, "unlogged": 1},
+      "_impl__is_passthrough_storage_live_in_for_call": {"logged": 0, "unlogged": 1},
+      "_impl__make_deferred_call_recorder.<locals>.call_model_candidate_for": {"logged": 0, "unlogged": 1},
+      "_impl__normalize_call_target_expression": {"logged": 0, "unlogged": 2},
+      "_impl__recover_dispatch_call_arguments": {"logged": 0, "unlogged": 3},
+      "_impl__resolve_local_branch_target": {"logged": 0, "unlogged": 3},
+      "_impl__resolve_local_code_target_expansions": {"logged": 0, "unlogged": 4},
+      "_impl__resolve_object_centric_transfer_targets": {"logged": 0, "unlogged": 5},
+      "_impl__specialize_local_target_expansions": {"logged": 0, "unlogged": 1},
+      "_impl__tracked_values_match_call_output": {"logged": 0, "unlogged": 3}
+    },
+    "analysis.returns.callee_unbound_reuse": {
+      "_classify_callee_for_unbound_reuse": {"logged": 0, "unlogged": 2},
+      "_impl__reuse_unbound_placeholder_analysis": {"logged": 0, "unlogged": 1},
+      "_placeholder_op_ineligibility_reason": {"logged": 0, "unlogged": 2},
+      "_shadow_validated_reuse": {"logged": 0, "unlogged": 1},
+      "placeholder_body_ineligibility_reason": {"logged": 0, "unlogged": 2}
+    },
+    "analysis.returns.condition_logic": {
+      "ConditionLogicService.active_conditions_imply_all": {"logged": 0, "unlogged": 1},
+      "ConditionLogicService.build_condition_signature_set": {"logged": 0, "unlogged": 2},
+      "ConditionLogicService.coerce_order_key": {"logged": 0, "unlogged": 1},
+      "ConditionLogicService.condition_contradicts_any": {"logged": 0, "unlogged": 2},
+      "ConditionLogicService.condition_mentions_param": {"logged": 0, "unlogged": 1},
+      "ConditionLogicService.conditions_are_unsat": {"logged": 0, "unlogged": 1},
+      "ConditionLogicService.conditions_imply": {"logged": 0, "unlogged": 1},
+      "ConditionLogicService.conditions_overlap": {"logged": 0, "unlogged": 1},
+      "ConditionLogicService.evaluate_expression_under_parameter_assignments": {"logged": 0, "unlogged": 1},
+      "ConditionLogicService.expression_has_param": {"logged": 0, "unlogged": 1},
+      "ConditionLogicService.expression_is_zero_constant": {"logged": 0, "unlogged": 2},
+      "ConditionLogicService.expressions_equal_under_conditions_smt": {"logged": 0, "unlogged": 1},
+      "ConditionLogicService.expressions_same_key": {"logged": 0, "unlogged": 1},
+      "ConditionLogicService.parameter_constant_assignments_from_conditions": {"logged": 0, "unlogged": 1},
+      "ConditionLogicService.substitute_parameter_constants": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.control_recovery": {
+      "BlockGraphService.block_debug_key": {"logged": 0, "unlogged": 2},
+      "BlockGraphService.block_start_address_keys": {"logged": 0, "unlogged": 1},
+      "BlockGraphService.blocks_match": {"logged": 0, "unlogged": 1},
+      "BlockGraphService.get_block_start_address": {"logged": 0, "unlogged": 1},
+      "BlockGraphService.iter_high_basic_blocks": {"logged": 0, "unlogged": 1},
+      "BlockGraphService.same_high_block": {"logged": 0, "unlogged": 1},
+      "BranchGuardedWhileProofService.prove_branch_guarded_affine_unit_count_recurrence": {"logged": 0, "unlogged": 1},
+      "BranchGuardedWhileProofService.prove_branch_guarded_while_nonprogress_must_diverge": {"logged": 0, "unlogged": 1},
+      "BranchGuardedWhileProofService.validate_branch_guarded_structural_proof": {"logged": 0, "unlogged": 1},
+      "ReturnPathSelectionService.propagate_multiequal_input_for_return_path": {"logged": 0, "unlogged": 2},
+      "ReturnPathSelectionService.select_multiequal_input_for_return_path": {"logged": 0, "unlogged": 1},
+      "_impl__filter_noreturn_return_path_entries": {"logged": 0, "unlogged": 1},
+      "_impl__is_noreturn_control_transfer_op": {"logged": 0, "unlogged": 1},
+      "_impl__materialize_direct_path_specific_return_source": {"logged": 0, "unlogged": 1},
+      "_impl__recover_explicit_return_from_block_paths": {"logged": 0, "unlogged": 1},
+      "address_offset_for_block_endpoint": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.debug_reporter": {
+      "DebugReporter.debug_expr_identity_summary": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.divergence_proofs": {
+      "DivergenceProofService.collect_guard_dependency_varnodes": {"logged": 0, "unlogged": 4},
+      "DivergenceProofService.conditional_progress_guard_keys_from_structural_proof": {"logged": 0, "unlogged": 1},
+      "DivergenceProofService.conditional_progress_guards_contradict_invariant": {"logged": 0, "unlogged": 1},
+      "DivergenceProofService.conditions_have_contradictory_pair": {"logged": 0, "unlogged": 1},
+      "DivergenceProofService.edge_condition_for_successor": {"logged": 0, "unlogged": 1},
+      "DivergenceProofService.prove_single_guard_nonprogress_region_must_diverge": {"logged": 0, "unlogged": 1},
+      "DivergenceProofService.scc_preserves_guard_dependencies": {"logged": 0, "unlogged": 1},
+      "DivergenceProofService.state_phi_feeds_positive_loop_guard": {"logged": 0, "unlogged": 2},
+      "DivergenceProofService.varnode_guard_dependency_key": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.effect_integration": {
+      "EffectIntegrationService.build_effect_summary": {"logged": 0, "unlogged": 1},
+      "EffectIntegrationService.build_effect_summary.<locals>.summarize_call": {"logged": 0, "unlogged": 1},
+      "EffectIntegrationService.build_function_control_effect_profile": {"logged": 0, "unlogged": 11},
+      "EffectIntegrationService.concretize_readonly_loads": {"logged": 0, "unlogged": 1},
+      "EffectIntegrationService.propagate_indirect_return_effect": {"logged": 0, "unlogged": 1},
+      "EffectIntegrationService.read_memory_value": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.expression_cases": {
+      "ExpressionCaseService.count_object_centric_unknowns": {"logged": 0, "unlogged": 1},
+      "ExpressionCaseService.expression_runtime_guard_conditions": {"logged": 0, "unlogged": 1},
+      "ExpressionCaseService.wrapper_preserves_collapsed_operand": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.lifecycle": {
+      "ProgramAccessService.attempt_disassemble_at": {"logged": 0, "unlogged": 4},
+      "ProgramAccessService.decompile_function": {"logged": 0, "unlogged": 1},
+      "ProgramAccessService.dispose": {"logged": 0, "unlogged": 1},
+      "ProgramAccessService.find_function_by_name": {"logged": 0, "unlogged": 1},
+      "ProgramAccessService.get_function_manager": {"logged": 0, "unlogged": 1},
+      "ProgramAccessService.program_identity": {"logged": 0, "unlogged": 1},
+      "ProgramAccessService.program_is_big_endian": {"logged": 0, "unlogged": 1},
+      "ProgramAccessService.program_transaction": {"logged": 0, "unlogged": 2},
+      "ProgramAccessService.program_userop_name": {"logged": 0, "unlogged": 1},
+      "ProgramAccessService.resolve_function_from_address": {"logged": 0, "unlogged": 1},
+      "ProgramAccessService.resolve_function_from_program_offset": {"logged": 0, "unlogged": 1},
+      "_impl__analysis_scope_key": {"logged": 0, "unlogged": 1},
+      "_impl__current_function_entry_address": {"logged": 0, "unlogged": 2},
+      "_impl_analyze_function_by_name": {"logged": 0, "unlogged": 1},
+      "analysis_cache_target_identity": {"logged": 0, "unlogged": 1},
+      "collect_java_or_python_iterable": {"logged": 0, "unlogged": 2},
+      "function_cache_key": {"logged": 0, "unlogged": 1},
+      "function_entry_address": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.local_values": {
+      "LocalValueResolver.lookup_alias": {"logged": 0, "unlogged": 2},
+      "LocalValueResolver.lookup_for_storage": {"logged": 0, "unlogged": 1},
+      "LocalValueResolver.varnode_key": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.parameters": {
+      "ParameterService.augment_parameters_with_implicit_passthrough": {"logged": 0, "unlogged": 2},
+      "ParameterService.coerce_wrapper_storage_info": {"logged": 0, "unlogged": 1},
+      "ParameterService.collect_parameters": {"logged": 0, "unlogged": 3},
+      "ParameterService.detect_signedness": {"logged": 0, "unlogged": 1},
+      "ParameterService.get_storage_info": {"logged": 0, "unlogged": 1},
+      "ParameterService.has_non_parameter_symbol_for_storage": {"logged": 0, "unlogged": 3},
+      "ParameterService.parameter_storages_overlap_for_passthrough": {"logged": 0, "unlogged": 1},
+      "_sealed_return_abi_facts": {"logged": 0, "unlogged": 3}
+    },
+    "analysis.returns.pcode_sites": {
+      "PcodeSiteService.address_like_keys": {"logged": 0, "unlogged": 4},
+      "PcodeSiteService.address_space_name": {"logged": 0, "unlogged": 1},
+      "PcodeSiteService.coerce_optional_int": {"logged": 0, "unlogged": 1},
+      "PcodeSiteService.describe_pcode_site": {"logged": 0, "unlogged": 1},
+      "PcodeSiteService.get_pcode_opcode": {"logged": 0, "unlogged": 2},
+      "PcodeSiteService.is_zero_constant_varnode": {"logged": 0, "unlogged": 2},
+      "PcodeSiteService.pcode_op_affects_tracked_storage": {"logged": 0, "unlogged": 1},
+      "PcodeSiteService.pcode_op_debug_name": {"logged": 0, "unlogged": 1},
+      "PcodeSiteService.pcode_op_identity_key": {"logged": 0, "unlogged": 1},
+      "PcodeSiteService.pcode_op_input_def_reaches_phi": {"logged": 0, "unlogged": 2},
+      "PcodeSiteService.pcode_op_input_def_reaches_phi.<locals>.visit_varnode": {"logged": 0, "unlogged": 3},
+      "PcodeSiteService.pcode_op_stable_key": {"logged": 0, "unlogged": 1},
+      "PcodeSiteService.varnodes_same_storage": {"logged": 0, "unlogged": 1},
+      "varnode_location_key": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.phi_origins": {
+      "PhiOriginService.phi_circular_origin_stable_keys": {"logged": 0, "unlogged": 1},
+      "PhiOriginService.phi_expression_key_set.<locals>.visit": {"logged": 0, "unlogged": 1},
+      "PhiOriginService.phi_origin_keys_from_varnode_defs.<locals>.visit": {"logged": 0, "unlogged": 3},
+      "PhiOriginService.single_parameter_expression_in_conditions": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.region_facts": {
+      "RegionFacts.address_is_code": {"logged": 0, "unlogged": 3},
+      "RegionFacts.live_in_key": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.return_extraction": {
+      "_build_return_value_flow_certificate": {"logged": 0, "unlogged": 3},
+      "_impl__append_smt_lowerable_phi_return_fallback_infos": {"logged": 0, "unlogged": 1},
+      "_impl__dump_return_infos": {"logged": 0, "unlogged": 3},
+      "_impl__function_body_has_phase1_pure_return_forbidden_ops": {"logged": 0, "unlogged": 4},
+      "_impl__function_has_no_return": {"logged": 0, "unlogged": 1},
+      "_impl__get_current_prototype_return_varnodes": {"logged": 0, "unlogged": 1},
+      "_impl__get_function_return_varnodes": {"logged": 0, "unlogged": 1},
+      "_impl__get_return_type": {"logged": 0, "unlogged": 1},
+      "_impl__get_return_type_info": {"logged": 0, "unlogged": 1},
+      "_impl__infer_abi_return_storages": {"logged": 0, "unlogged": 1},
+      "_impl__make_tracked_return_value": {"logged": 0, "unlogged": 1},
+      "_impl__phi_origin_keys_from_return_varnode_trace": {"logged": 0, "unlogged": 1},
+      "_impl__return_origin_phi_has_acc_output_input": {"logged": 0, "unlogged": 3},
+      "_impl__return_value_producer_chain": {"logged": 0, "unlogged": 3},
+      "_impl__storages_overlap_for_return_recovery": {"logged": 0, "unlogged": 1},
+      "_impl__tracked_return_value_is_affected_by_op": {"logged": 0, "unlogged": 2},
+      "_termination_signature_key": {"logged": 0, "unlogged": 4}
+    },
+    "analysis.returns.return_normalization": {
+      "ReturnNormalizationService.normalize_bound_parameter_storage_values": {"logged": 0, "unlogged": 1},
+      "ReturnNormalizationService.normalize_bound_parameter_values": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.returns.summary_returns": {
+      "_conditions_are_complementary_comparisons": {"logged": 0, "unlogged": 1},
+      "_conditions_have_direct_negated_pair": {"logged": 0, "unlogged": 2},
+      "_conditions_key": {"logged": 0, "unlogged": 1},
+      "_conditions_unsat": {"logged": 0, "unlogged": 2},
+      "_expr_width_bits": {"logged": 0, "unlogged": 1},
+      "_expression_key": {"logged": 0, "unlogged": 1},
+      "_stable_key_or_none": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.signedness.detector": {
+      "SignednessDetector._find_return_ops": {"logged": 0, "unlogged": 1},
+      "SignednessDetector._get_op_address": {"logged": 0, "unlogged": 1},
+      "SignednessDetector.detect": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.signedness.fastpath": {
+      "FastPathDetector._scan_block_for_cbranch": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.signedness.varnode_analyzer": {
+      "VarnodeAnalyzer.get_identity_key": {"logged": 0, "unlogged": 1}
+    },
+    "analysis.switch": {
+      "_address_identity": {"logged": 0, "unlogged": 2},
+      "_address_offset": {"logged": 0, "unlogged": 1},
+      "_address_to_string": {"logged": 0, "unlogged": 1},
+      "_build_synthetic_dispatch_summary": {"logged": 0, "unlogged": 2},
+      "_canonicalize_program_address_offset": {"logged": 0, "unlogged": 1},
+      "_extract_address_offsets": {"logged": 0, "unlogged": 1},
+      "_extract_int_values": {"logged": 0, "unlogged": 2},
+      "_extract_load_specs": {"logged": 0, "unlogged": 1},
+      "_iter_indirect_dispatch_ops": {"logged": 0, "unlogged": 1},
+      "_match_jump_table_dispatch": {"logged": 0, "unlogged": 1},
+      "_resolve_concrete_address_offset": {"logged": 0, "unlogged": 2},
+      "build_switch_dispatch_summaries": {"logged": 0, "unlogged": 4}
+    },
+    "analysis.tracer": {
+      "PcodeTracer._get_op_key": {"logged": 0, "unlogged": 1},
+      "PcodeTracer._resolve_callother_userop_name": {"logged": 0, "unlogged": 2},
+      "PcodeTracer._trace_pcode_op_internal": {"logged": 0, "unlogged": 2},
+      "PcodeTracer._trace_varnode_internal": {"logged": 0, "unlogged": 2}
+    },
+    "analysis.tracer_addresses": {
+      "AddressRefMixin._canonical_location_for_varnode": {"logged": 0, "unlogged": 2},
+      "AddressRefMixin._global_object_facts": {"logged": 0, "unlogged": 6},
+      "AddressRefMixin._global_object_value_expression": {"logged": 0, "unlogged": 1},
+      "AddressRefMixin._lookup_symbol_name_for_address": {"logged": 0, "unlogged": 7},
+      "AddressRefMixin._make_address_runtime_ref": {"logged": 0, "unlogged": 2},
+      "AddressRefMixin._make_address_runtime_ref.<locals>._build_runtime_ref": {"logged": 0, "unlogged": 4},
+      "AddressRefMixin._make_address_runtime_ref_for_offset": {"logged": 0, "unlogged": 10},
+      "AddressRefMixin._read_program_memory_value": {"logged": 0, "unlogged": 1},
+      "AddressRefMixin._varnode_supports_symbolic_post_state_promotion": {"logged": 0, "unlogged": 4},
+      "AddressRefMixin.global_object_location_for_varnode": {"logged": 0, "unlogged": 1},
+      "AddressRefMixin.ram_varnode_write_class": {"logged": 0, "unlogged": 2}
+    },
+    "analysis.tracer_calls": {
+      "CallRecoveryMixin._call_parameter_descriptor": {"logged": 0, "unlogged": 4},
+      "CallRecoveryMixin._call_parameter_storage_info": {"logged": 0, "unlogged": 1},
+      "CallRecoveryMixin._call_target_parameters": {"logged": 0, "unlogged": 1},
+      "CallRecoveryMixin._recover_call_argument_expressions": {"logged": 0, "unlogged": 1},
+      "CallRecoveryMixin._recover_call_target_expression": {"logged": 0, "unlogged": 1},
+      "CallRecoveryMixin._recover_implicit_call_arguments_with_effect_model": {"logged": 0, "unlogged": 1},
+      "CallRecoveryMixin._resolve_call_target_function": {"logged": 0, "unlogged": 1},
+      "CallRecoveryMixin._resolve_call_target_ref_from_expression": {"logged": 0, "unlogged": 4},
+      "CallRecoveryMixin._resolve_call_target_ref_from_op": {"logged": 0, "unlogged": 1},
+      "CallRecoveryMixin.resolve_call_target_ref": {"logged": 0, "unlogged": 3}
+    },
+    "analysis.tracer_storage": {
+      "ParameterStorageMixin._coerce_descriptor_signedness": {"logged": 0, "unlogged": 1},
+      "ParameterStorageMixin._collect_parameter_descriptors": {"logged": 0, "unlogged": 6},
+      "ParameterStorageMixin._get_storage_info_from_variable_storage": {"logged": 0, "unlogged": 4},
+      "ParameterStorageMixin._get_storage_info_from_varnode": {"logged": 0, "unlogged": 4},
+      "ParameterStorageMixin._make_parameter_or_storage_location_ref": {"logged": 0, "unlogged": 1},
+      "ParameterStorageMixin._resolve_current_function_scope": {"logged": 0, "unlogged": 3},
+      "ParameterStorageMixin._storage_identity_key": {"logged": 0, "unlogged": 1}
+    },
+    "authority.decision.canonical_result": {
+      "main": {"logged": 0, "unlogged": 1}
+    },
+    "authority.decision.conditional_lane": {
+      "run_production_conditional_lane": {"logged": 0, "unlogged": 1}
+    },
+    "authority.decision.limitation_attribution": {
+      "attribute_analysis_limitation": {"logged": 0, "unlogged": 2}
+    },
+    "authority.decision.pair_status_authority": {
+      "_atomic_write": {"logged": 0, "unlogged": 1},
+      "load_pair_status_public_key": {"logged": 0, "unlogged": 2},
+      "seal_pair_status": {"logged": 0, "unlogged": 1},
+      "validate_pair_status_keypair": {"logged": 0, "unlogged": 1},
+      "validate_signed_pair_status": {"logged": 0, "unlogged": 1},
+      "write_pair_status_public_key": {"logged": 0, "unlogged": 1}
+    },
+    "authority.domains.abi_width_readonly": {
+      "AbiWidthReadonlyPilotEncoder._execute_pending_solver_queries": {"logged": 0, "unlogged": 2},
+      "AbiWidthReadonlyPilotEncoder.commit_emitted_signal": {"logged": 0, "unlogged": 1},
+      "_sealed_void_effect_surface_fact": {"logged": 0, "unlogged": 1}
+    },
+    "authority.domains.loop_recurrence": {
+      "LoopRecurrencePilotEncoder._commit_recurrence_emission_plan": {"logged": 0, "unlogged": 1},
+      "LoopRecurrencePilotEncoder.commit_emitted_signal": {"logged": 0, "unlogged": 1}
+    },
+    "authority.domains.return_outcome": {
+      "capture_active_outcome_solver_result": {"logged": 0, "unlogged": 1}
+    },
+    "authority.lifecycle.execution_authority": {
+      "PinnedSolverExecutionIssuer.execute": {"logged": 0, "unlogged": 1}
+    },
+    "authority.lifecycle.pilot": {
+      "ProductionDualWritePilotSession._emit_domain_signal_with_commit": {"logged": 0, "unlogged": 4},
+      "ProductionDualWritePilotSession._emit_many_locked": {"logged": 0, "unlogged": 1},
+      "ProductionDualWritePilotSession.record_phase7_pre_emission_activation": {"logged": 0, "unlogged": 1},
+      "_safe_projection_diagnostic": {"logged": 0, "unlogged": 1}
+    },
+    "authority.lifecycle.production_boundary": {
+      "_attach_boundary_seconds": {"logged": 0, "unlogged": 1},
+      "_profiled_finish": {"logged": 0, "unlogged": 1},
+      "_run_conditional_lane": {"logged": 0, "unlogged": 1},
+      "run_check_from_binaries_with_v2_pilot": {"logged": 0, "unlogged": 2}
+    },
+    "authority.lifecycle.production_signals": {
+      "execute_loop_solver_rendered_query": {"logged": 0, "unlogged": 1}
+    },
+    "authority.process.supervisor": {
+      "DurableCheckpointStore._archive_resolved_checkpoint_locked": {"logged": 0, "unlogged": 1},
+      "DurableCheckpointStore._commit_pending_active_locked": {"logged": 0, "unlogged": 1},
+      "DurableCheckpointStore._decode_active_transaction_locked": {"logged": 0, "unlogged": 2},
+      "DurableCheckpointStore._rematerialize_operational_error_bundle_locked": {"logged": 0, "unlogged": 1},
+      "DurableCheckpointStore.persist_active": {"logged": 0, "unlogged": 1},
+      "DurableCheckpointStore.read_state": {"logged": 0, "unlogged": 1},
+      "DurableCheckpointStore.recover_completion_ready": {"logged": 0, "unlogged": 1},
+      "DurableCheckpointStore.rematerialize_active_prefix": {"logged": 0, "unlogged": 1},
+      "DurableCheckpointStore.rematerialize_resolved_state.<locals>.read_receipt": {"logged": 0, "unlogged": 1},
+      "DurableCheckpointStore.rematerialize_terminal_segment": {"logged": 0, "unlogged": 1},
+      "DurableCheckpointStore.rematerialize_timeout_bundle.<locals>.read_receipt": {"logged": 0, "unlogged": 1},
+      "DurableCheckpointStore.rematerialize_worker_continuation": {"logged": 0, "unlogged": 1},
+      "DurableCheckpointStore.rollback_active": {"logged": 0, "unlogged": 1},
+      "DurableCheckpointStore.supervisor_finalize_operational_error": {"logged": 0, "unlogged": 1}
+    },
+    "authority.process.supervisor_command": {
+      "ProcessSupervisorCommand._resume": {"logged": 0, "unlogged": 1},
+      "ProcessSupervisorCommand.run": {"logged": 0, "unlogged": 3},
+      "_read_key": {"logged": 0, "unlogged": 1},
+      "read_process_start_token": {"logged": 0, "unlogged": 1}
+    },
+    "authority.process.worker_runtime": {
+      "PreparedWorkerCheckpoint.persist": {"logged": 0, "unlogged": 1}
+    },
+    "checker.abi_retry": {
+      "AbiRetryMixin._retry_with_abi_constraints": {"logged": 0, "unlogged": 1}
+    },
+    "checker.arch.detector": {
+      "ArchitectureDetector.is_mips64": {"logged": 0, "unlogged": 1}
+    },
+    "checker.attempts": {
+      "_phase_observation": {"logged": 0, "unlogged": 1}
+    },
+    "checker.cause_aggregate": {
+      "attach_cause_aggregate": {"logged": 0, "unlogged": 1},
+      "build_unknown_cause_aggregate": {"logged": 0, "unlogged": 1}
+    },
+    "checker.checker": {
+      "EquivalenceChecker.check": {"logged": 0, "unlogged": 1}
+    },
+    "checker.diagnostics": {
+      "AnalysisTimer.record_analysis": {"logged": 0, "unlogged": 1},
+      "AnalysisTimer.record_callee_analysis_cache": {"logged": 0, "unlogged": 1},
+      "AnalysisTimer.record_callee_parameter_cache": {"logged": 0, "unlogged": 1},
+      "AnalysisTimer.record_callee_unbound_reuse": {"logged": 0, "unlogged": 1},
+      "AnalysisTimer.snapshot": {"logged": 0, "unlogged": 1},
+      "AnalysisTimer.timed": {"logged": 0, "unlogged": 1},
+      "PhaseTimeline.add": {"logged": 0, "unlogged": 1},
+      "PhaseTimeline.begin": {"logged": 0, "unlogged": 1},
+      "PhaseTimeline.end": {"logged": 0, "unlogged": 1},
+      "PhaseTimeline.record_applied": {"logged": 0, "unlogged": 1},
+      "PhaseTimeline.record_attempt_id": {"logged": 0, "unlogged": 1},
+      "PhaseTimeline.record_reanalyzed_side": {"logged": 0, "unlogged": 1},
+      "PhaseTimeline.snapshot": {"logged": 0, "unlogged": 1},
+      "attach_failure_diagnostics": {"logged": 0, "unlogged": 1},
+      "attach_phase_timings": {"logged": 0, "unlogged": 1},
+      "attach_stage_timing": {"logged": 0, "unlogged": 4},
+      "expression_stats": {"logged": 0, "unlogged": 1},
+      "process_counter_payload": {"logged": 0, "unlogged": 1},
+      "record_failure_diagnostic": {"logged": 0, "unlogged": 1},
+      "result_diagnostics_payload": {"logged": 0, "unlogged": 1},
+      "unknown_reason_ids": {"logged": 0, "unlogged": 1}
+    },
+    "checker.preflight_gate": {
+      "PreflightGateMixin._call_effect_shadow_manifest": {"logged": 0, "unlogged": 2}
+    },
+    "checker.reanalysis": {
+      "_attach_analysis_diagnostics": {"logged": 0, "unlogged": 1},
+      "bind_conditional_lane_analyses": {"logged": 0, "unlogged": 1}
+    },
+    "checker.recurrence_promotion": {
+      "complete_recurrence_promotion_signals": {"logged": 0, "unlogged": 1}
+    },
+    "checker.recurrence_stage": {
+      "RecurrenceStageMixin._attach_recurrence_proposal_blockers": {"logged": 0, "unlogged": 1}
+    },
+    "checker.result": {
+      "_format_stage_seconds": {"logged": 0, "unlogged": 1}
+    },
+    "checker.strategy_execution": {
+      "build_prepared_dispatch_frame": {"logged": 0, "unlogged": 1}
+    },
+    "cli.commands.equivalence": {
+      "_load_program_context": {"logged": 0, "unlogged": 2},
+      "_safe_close_context": {"logged": 0, "unlogged": 1},
+      "_to_java_byte_array": {"logged": 0, "unlogged": 1},
+      "run_equivalence_check": {"logged": 0, "unlogged": 1}
+    },
+    "cli.main": {
+      "_line_buffer_stdio": {"logged": 0, "unlogged": 1}
+    },
+    "config.settings": {
+      "_discover_optional_python_paths": {"logged": 0, "unlogged": 1},
+      "apply_runtime_environment": {"logged": 0, "unlogged": 1}
+    },
+    "core.analysis": {
+      "FunctionReturnAnalysis.__post_init__": {"logged": 0, "unlogged": 1},
+      "FunctionReturnAnalysis._expr_bit_width": {"logged": 0, "unlogged": 2},
+      "FunctionReturnAnalysis._expression_has_effect_sensitive_raw_memory_read": {"logged": 0, "unlogged": 3},
+      "FunctionReturnAnalysis._retains_post_state_reads_after_lowering": {"logged": 0, "unlogged": 1},
+      "VarnodeFlowRef.from_varnode": {"logged": 0, "unlogged": 1}
+    },
+    "core.call_target": {
+      "CallTargetRef.from_function": {"logged": 0, "unlogged": 2},
+      "_declared_return_data_type": {"logged": 0, "unlogged": 2},
+      "_safe_bool_method": {"logged": 0, "unlogged": 1},
+      "_safe_external_library_name": {"logged": 0, "unlogged": 2},
+      "_safe_getattr": {"logged": 0, "unlogged": 1},
+      "_safe_offset": {"logged": 0, "unlogged": 2},
+      "_safe_program_id": {"logged": 0, "unlogged": 2},
+      "_safe_thunked_function": {"logged": 0, "unlogged": 1},
+      "call_target_returns_floating_value": {"logged": 0, "unlogged": 1}
+    },
+    "core.errors": {
+      "InternalError.stack_lines": {"logged": 0, "unlogged": 1},
+      "log_swallowed": {"logged": 0, "unlogged": 1}
+    },
+    "core.expression": {
+      "Expression._serialize_runtime_ref": {"logged": 0, "unlogged": 1}
+    },
+    "core.render_smt.loop_lowering": {
+      "_counted_loop_sum_exact_smt.<locals>._render_bias_term": {"logged": 0, "unlogged": 1},
+      "_counted_state_transition_case_signature_matches_expr": {"logged": 0, "unlogged": 1},
+      "_counted_state_transition_exact_multiplier": {"logged": 0, "unlogged": 2},
+      "_neon_ext_operands_are_smt_supported": {"logged": 0, "unlogged": 1}
+    },
+    "core.render_smt.render": {
+      "_coerce_expr_to_bool": {"logged": 0, "unlogged": 1}
+    },
+    "core.render_smt.unknowns": {
+      "_unknown_runtime_identity_key": {"logged": 0, "unlogged": 2},
+      "_unknown_runtime_stable_origin_key": {"logged": 0, "unlogged": 1},
+      "global_address_identity": {"logged": 0, "unlogged": 1}
+    },
+    "core.render_smt.widths": {
+      "_expr_constant_int": {"logged": 0, "unlogged": 1}
+    },
+    "core.runtime_refs.locations": {
+      "LocationBaseRef.__post_init__": {"logged": 0, "unlogged": 1},
+      "LocationBaseRef.matches_parameter": {"logged": 0, "unlogged": 1}
+    },
+    "core.runtime_refs.pcode": {
+      "PcodeOpRef.from_pcode_op": {"logged": 0, "unlogged": 11},
+      "_address_components": {"logged": 0, "unlogged": 3},
+      "_local_op_ordinal_from_parent": {"logged": 0, "unlogged": 3},
+      "_pcode_op_ordinal_signature": {"logged": 0, "unlogged": 6}
+    },
+    "core.signature": {
+      "_call_one_arg": {"logged": 0, "unlogged": 1},
+      "_call_zero_arg": {"logged": 0, "unlogged": 1},
+      "_iter_float_data_types": {"logged": 0, "unlogged": 2},
+      "_parse_data_type_with_ghidra": {"logged": 0, "unlogged": 2},
+      "get_data_type_display_name": {"logged": 0, "unlogged": 1},
+      "get_data_type_path": {"logged": 0, "unlogged": 1},
+      "get_declared_type_size_bytes": {"logged": 0, "unlogged": 1},
+      "is_composite_data_type": {"logged": 0, "unlogged": 1},
+      "is_floating_data_type": {"logged": 0, "unlogged": 1},
+      "is_integral_data_type": {"logged": 0, "unlogged": 2},
+      "is_pointer_data_type": {"logged": 0, "unlogged": 1},
+      "is_undefined_data_type": {"logged": 0, "unlogged": 1},
+      "is_void_data_type": {"logged": 0, "unlogged": 2},
+      "resolve_integer_type_spec": {"logged": 0, "unlogged": 1},
+      "resolve_signed_counterpart_spec": {"logged": 0, "unlogged": 1}
+    },
+    "core.stage_clock": {
+      "StageClock.region_snapshot": {"logged": 0, "unlogged": 1},
+      "_OpenRegion.close": {"logged": 0, "unlogged": 1},
+      "_OpenRegion.start": {"logged": 0, "unlogged": 1},
+      "process_age_seconds": {"logged": 0, "unlogged": 1}
+    },
+    "core.structural": {
+      "_atom_key": {"logged": 0, "unlogged": 2},
+      "_expression_storage_key": {"logged": 0, "unlogged": 1},
+      "_raw_stable_key_or_none": {"logged": 0, "unlogged": 1},
+      "_semantic_runtime_ref_key": {"logged": 0, "unlogged": 1},
+      "_stable_value_key": {"logged": 0, "unlogged": 1}
+    },
+    "ghidra.decompilation_broker": {
+      "_BrokeredDecompileResults.getHighFunction": {"logged": 0, "unlogged": 4},
+      "_subordinate_decompile": {"logged": 0, "unlogged": 4},
+      "decompile_function": {"logged": 0, "unlogged": 4}
+    },
+    "proof.call_effect.obligations": {
+      "_condition_key": {"logged": 0, "unlogged": 1},
+      "_expression_key": {"logged": 0, "unlogged": 1},
+      "_jsonable": {"logged": 0, "unlogged": 1},
+      "_stable_key": {"logged": 0, "unlogged": 1},
+      "_target_ref_category": {"logged": 0, "unlogged": 2}
+    },
+    "proof.call_effect.preflight": {
+      "PreparedDispatchFrame.__post_init__": {"logged": 0, "unlogged": 1},
+      "close_prepared_dispatch_frame": {"logged": 0, "unlogged": 1}
+    },
+    "proof.call_effect.producer": {
+      "_evidence_pcode_key": {"logged": 0, "unlogged": 1},
+      "_solver_version": {"logged": 0, "unlogged": 1}
+    },
+    "proof.conditional_lane": {
+      "run_conditional_proof": {"logged": 0, "unlogged": 1}
+    },
+    "proof.deferred_call_abstraction": {
+      "_call_target_runtime_display_name": {"logged": 0, "unlogged": 1},
+      "_object_centric_expression_key": {"logged": 0, "unlogged": 1},
+      "_parameter_role_map": {"logged": 0, "unlogged": 1},
+      "_parameter_size_role_map": {"logged": 0, "unlogged": 1}
+    },
+    "proof.formula.variable": {
+      "VariableAnalyzer._infer_fragment_from_expression": {"logged": 0, "unlogged": 1}
+    },
+    "proof.obligations.outcome_partition": {
+      "_run_outcome_producer_with_pilot_signal": {"logged": 0, "unlogged": 1},
+      "prove_unary_partition": {"logged": 0, "unlogged": 1}
+    },
+    "proof.recurrence_promotion": {
+      "_prepare_side_for_proposal": {"logged": 0, "unlogged": 1}
+    },
+    "proof.return_width.pipeline": {
+      "prepare_pair_return_observation": {"logged": 0, "unlogged": 2}
+    },
+    "proof.return_width.surface": {
+      "build_top_level_observation_contract": {"logged": 0, "unlogged": 3}
+    },
+    "proof.strategies.loop_template": {
+      "_expr_key": {"logged": 0, "unlogged": 2}
+    },
+    "proof.strategies.monolithic": {
+      "MonolithicStrategy.check": {"logged": 0, "unlogged": 2}
+    },
+    "proof.strategies.pairwise_query_builder": {
+      "_coerce_storage_info": {"logged": 0, "unlogged": 1},
+      "save_unknown_query": {"logged": 0, "unlogged": 1}
+    },
+    "proof.strategies.pairwise_services.auxiliary_smt": {
+      "_float_taxonomy_node_calls_float_returning_target": {"logged": 0, "unlogged": 1},
+      "_float_taxonomy_node_has_declared_float_type": {"logged": 0, "unlogged": 1}
+    },
+    "proof.strategies.pairwise_services.case_conditions": {
+      "_impl__expression_is_provably_nonnegative_under_conditions": {"logged": 0, "unlogged": 1}
+    },
+    "proof.strategies.pairwise_services.loop_summary": {
+      "_impl__canonical_counted_state_transition_outer_start_key": {"logged": 0, "unlogged": 1},
+      "_impl__composed_counted_state_transition_summary_key": {"logged": 0, "unlogged": 1},
+      "_impl__counted_loop_outer_side_effect_key": {"logged": 0, "unlogged": 1},
+      "_impl__counted_loop_refs_match_ignoring_signedness": {"logged": 0, "unlogged": 1},
+      "_impl__counted_state_transition_cases_allow_bounded_unroll": {"logged": 0, "unlogged": 1},
+      "_impl__counted_state_transition_semantic_core_key": {"logged": 0, "unlogged": 1},
+      "_impl__counted_state_transition_side_effects_allow_bounded_unroll": {"logged": 0, "unlogged": 1},
+      "_impl__counted_state_transition_value_operands_match_ref": {"logged": 0, "unlogged": 1},
+      "_impl__loop_term_descriptor_semantic_key": {"logged": 0, "unlogged": 1},
+      "_impl__semantic_recurrence_jsonable": {"logged": 0, "unlogged": 2}
+    },
+    "proof.strategies.pairwise_services.method_b_closure": {
+      "_impl__record_completed_method_b_covering_case_proof_if_safe": {"logged": 0, "unlogged": 2}
+    },
+    "proof.strategies.pairwise_services.orchestration": {
+      "_impl_check": {"logged": 0, "unlogged": 4}
+    },
+    "proof.strategies.pairwise_services.parameter_identity": {
+      "_impl__storage_info_from_parameter_descriptor": {"logged": 0, "unlogged": 1}
+    },
+    "proof.strategies.pairwise_services.readonly_reduction": {
+      "_impl__readonly_parameter_declared_signedness": {"logged": 0, "unlogged": 1}
+    },
+    "proof.strategies.pairwise_solver_proven_rewrite": {
+      "_exact_expr_key": {"logged": 0, "unlogged": 1},
+      "_expr_signature": {"logged": 0, "unlogged": 1}
+    },
+    "proof.strategies.proof_gates.object_keys": {
+      "_impl__return_value_extension_ops_object_key": {"logged": 0, "unlogged": 1}
+    },
+    "proof.strategies.proof_gates.return_coverage": {
+      "_impl__outcome_condition_smt": {"logged": 0, "unlogged": 2},
+      "_impl__outcome_expression_smt": {"logged": 0, "unlogged": 2},
+      "_impl__return_coverage_case_debug_suffix": {"logged": 0, "unlogged": 1}
+    },
+    "proof.strategies.proof_gates.return_metadata": {
+      "_impl__expression_bit_width_from_object_key": {"logged": 0, "unlogged": 2}
+    },
+    "reporting.execution_receipt": {
+      "validate_execution_receipt": {"logged": 0, "unlogged": 1}
+    },
+    "reporting.formatter": {
+      "write_to_file": {"logged": 0, "unlogged": 1}
+    },
+    "semantics.param_semantics": {
+      "_coerce_storage_info": {"logged": 0, "unlogged": 1},
+      "_get_declared_bits": {"logged": 0, "unlogged": 1},
+      "_get_storage_bits": {"logged": 0, "unlogged": 1},
+      "_record_readonly_reduction_counter_evidence": {"logged": 0, "unlogged": 1},
+      "_signed_boundary_bonus": {"logged": 0, "unlogged": 1}
+    },
+    "semantics.semantic_width": {
+      "_coerce_storage_info": {"logged": 0, "unlogged": 1},
+      "_expression_bit_width": {"logged": 0, "unlogged": 2},
+      "_rewritten_expr_bit_width": {"logged": 0, "unlogged": 2}
+    },
+    "semantics.transform.expander": {
+      "ExpressionExpander._operation_may_benefit_from_whole_object_shortcut": {"logged": 0, "unlogged": 3},
+      "ExpressionExpander._trace_operation_expression": {"logged": 0, "unlogged": 1},
+      "ExpressionExpander._varnode_subgraph_contains_mnemonics": {"logged": 0, "unlogged": 4}
+    },
+    "semantics.transform.expander_calls": {
+      "CallExpansionMixin._expand_call_operation": {"logged": 0, "unlogged": 1},
+      "CallExpansionMixin._fallback_storage_info_from_varnode": {"logged": 0, "unlogged": 2},
+      "CallExpansionMixin._infer_indirect_output_location": {"logged": 0, "unlogged": 2},
+      "CallExpansionMixin._recover_deferred_call_target_expression": {"logged": 0, "unlogged": 2}
+    },
+    "semantics.transform.expander_canonical": {
+      "CanonicalizationMixin._resolve_canonical_location_under_branch_expression": {"logged": 0, "unlogged": 1},
+      "CanonicalizationMixin._trace_and_canonicalize_input_value": {"logged": 0, "unlogged": 1}
+    },
+    "semantics.transform.expander_multiequal": {
+      "MultiequalExpansionMixin._collapse_nested_multiequal_to_memory": {"logged": 0, "unlogged": 1},
+      "MultiequalExpansionMixin._collect_multiequal_branch_observations": {"logged": 0, "unlogged": 1},
+      "MultiequalExpansionMixin._debug_multiequal_input_trace": {"logged": 0, "unlogged": 2}
+    },
+    "semantics.transform.expander_support": {
+      "_pcode_op_ref_from_tracer": {"logged": 0, "unlogged": 1}
+    },
+    "smt.parallel": {
+      "ParallelSolverRunner._initialize_solvers": {"logged": 0, "unlogged": 1},
+      "ParallelSolverRunner.run_parallel": {"logged": 0, "unlogged": 1},
+      "ParallelSolverRunner.run_single": {"logged": 0, "unlogged": 1}
+    },
+    "smt.solvers.boolector": {
+      "BoolectorSolver._parse_file": {"logged": 0, "unlogged": 1},
+      "BoolectorSolver._set_options": {"logged": 0, "unlogged": 2},
+      "BoolectorSolver.check_equivalence_direct": {"logged": 0, "unlogged": 1}
+    },
+    "smt.solvers.cvc5": {
+      "CVC5Solver._bv_to_int": {"logged": 0, "unlogged": 3},
+      "CVC5Solver._collect_bv_vars": {"logged": 0, "unlogged": 1},
+      "CVC5Solver._extract_model_from_assertions": {"logged": 0, "unlogged": 2},
+      "CVC5Solver._extract_model_via_declared_terms": {"logged": 0, "unlogged": 2},
+      "CVC5Solver._get_term_name": {"logged": 0, "unlogged": 1},
+      "CVC5Solver.check_availability": {"logged": 0, "unlogged": 2},
+      "CVC5Solver.check_equivalence_direct": {"logged": 0, "unlogged": 1}
+    },
+    "smt.solvers.yices2": {
+      "Yices2Solver.__del__": {"logged": 0, "unlogged": 1},
+      "Yices2Solver._check_command_line": {"logged": 0, "unlogged": 1},
+      "Yices2Solver._check_python_binding": {"logged": 0, "unlogged": 1},
+      "Yices2Solver._check_via_subprocess": {"logged": 0, "unlogged": 1}
+    },
+    "smt.solvers.z3": {
+      "Z3Solver.check_availability": {"logged": 0, "unlogged": 1},
+      "Z3Solver.check_equivalence_direct": {"logged": 0, "unlogged": 2}
+    }
+  }
+}

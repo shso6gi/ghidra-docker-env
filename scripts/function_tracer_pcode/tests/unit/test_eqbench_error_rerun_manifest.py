@@ -1,3 +1,4 @@
+import json
 import re
 from pathlib import Path
 
@@ -313,3 +314,119 @@ def test_pair_target_joins_manifest_identity_and_run_digests():
     validate_rerun_pair_target(
         row, body, source_digest="source", config_digest="config",
     )
+
+
+# --- Issue #125 PR-125-B: typed failure の ERROR が再実行対象に入ること ---------
+#
+# PR-125-A が足した 3 つの `failure_status` は、いずれも ERROR 結果として
+# 出力される。`error_rerun_manifest` は実装を変えずにこれらを拾うはずなので、
+# その振る舞いを consumer 側で固定する（実装が ERROR 判定を狭めたら落ちる）。
+
+ISSUE125_FAILURE_STATUSES = (
+    "internal_exception",
+    "unregistered_reason",
+    "limitation_unattributed",
+)
+
+#: PR-125-A 以前から ERROR になっていた `failure_status`（回帰防止）。
+LEGACY_FAILURE_STATUSES = ("strategy_exception", "legacy_compatibility_error")
+
+
+def _error_result_log(path: Path, failure_status: str) -> None:
+    payload = {
+        "function1_name": path.parent.name,
+        "function2_name": path.parent.name,
+        "binary1_name": "B1",
+        "binary2_name": "B2",
+        "is_equivalent": None,
+        "error_message": f"{failure_status}: analysis failed",
+        "failure_status": failure_status,
+        "diagnostics": {
+            "schema": "result-diagnostics-v1",
+            "failures": {
+                "swallowed_exceptions": {"total": 0, "by_site": []},
+                "internal_exception": {
+                    "exception_type": "RuntimeError",
+                    "site": "checker.checker.EquivalenceChecker.check",
+                    "stack": ["Traceback (most recent call last):"],
+                    "stack_digest": "0" * 64,
+                },
+            },
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            (
+                "=== EQUIVALENCE_RESULT_JSON_BEGIN ===",
+                json.dumps(payload),
+                "=== EQUIVALENCE_RESULT_JSON_END ===",
+                "Result: ERROR",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_issue125_failure_statuses_become_eq_rerun_targets(tmp_path: Path):
+    root = tmp_path / "eq"
+    directory = root / "CLEVER/Add/Eq/newV/foo"
+    expected = set()
+    for index, status in enumerate(ISSUE125_FAILURE_STATUSES):
+        pair = f"B1_B{index + 2}"
+        _error_result_log(directory / f"foo_{pair}.log", status)
+        expected.add(("EQ", "CLEVER/Add/Eq/newV", "foo", pair))
+    # 判定が出た pair は再実行対象にしない。
+    (directory / "foo_B1_B9.log").write_text("Result: UNKNOWN\n", encoding="utf-8")
+
+    assert collect(root, "EQ") == expected
+
+
+def test_issue125_failure_statuses_become_neq_rerun_targets(tmp_path: Path):
+    root = tmp_path / "neq"
+    directory = root / "REVE/addhorn/Neq/newV-oldV/f"
+    expected = set()
+    for index, status in enumerate(ISSUE125_FAILURE_STATUSES):
+        pair = f"N_B{index + 1}_O_B{index + 1}"
+        _error_result_log(directory / f"f_{pair}.log", status)
+        expected.add(("NEQ", "REVE/addhorn/Neq/newV-oldV", "f", pair))
+
+    assert collect(root, "NEQ") == expected
+
+
+def test_existing_error_statuses_still_rerun_alongside_the_new_ones(tmp_path: Path):
+    """既存 ERROR の振る舞いを新 status が壊していないこと。"""
+
+    root = tmp_path / "eq"
+    directory = root / "CLEVER/Add/Eq/newV/foo"
+    expected = set()
+    for index, status in enumerate(LEGACY_FAILURE_STATUSES + ISSUE125_FAILURE_STATUSES):
+        pair = f"B1_B{index + 2}"
+        _error_result_log(directory / f"foo_{pair}.log", status)
+        expected.add(("EQ", "CLEVER/Add/Eq/newV", "foo", pair))
+    # 素の `Result: ERROR` 行（payload 無し）と fatal marker も従来どおり拾う。
+    (directory / "foo_B7_B8.log").write_text("Result: ERROR\n", encoding="utf-8")
+    expected.add(("EQ", "CLEVER/Add/Eq/newV", "foo", "B7_B8"))
+    (directory / "foo_B7_B9.log").write_text(
+        "Result: UNKNOWN\n"
+        "TypeError: Object of type SolverQueryExecutionReceipt is not JSON serializable\n",
+        encoding="utf-8",
+    )
+    expected.add(("EQ", "CLEVER/Add/Eq/newV", "foo", "B7_B9"))
+    (directory / "foo_B7_B10.log").write_text("Result: EQUIVALENT\n", encoding="utf-8")
+
+    assert collect(root, "EQ") == expected
+
+
+def test_issue125_failure_statuses_classify_as_error(tmp_path: Path):
+    """`collect` が使う分類器そのものの契約。"""
+
+    from scripts.function_tracer_pcode.reporting.result_summary import classify_log_text
+
+    directory = tmp_path / "eq/CLEVER/Add/Eq/newV/foo"
+    for status in ISSUE125_FAILURE_STATUSES:
+        log = directory / f"foo_B1_B2_{status}.log"
+        _error_result_log(log, status)
+        text = log.read_text(encoding="utf-8")
+        assert classify_log_text(text, matrix_context=True) == "ERROR"

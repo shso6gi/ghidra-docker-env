@@ -14,7 +14,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
     find_pair_status_public_key,
@@ -23,6 +23,10 @@ from scripts.function_tracer_pcode.authority.decision.pair_status_authority impo
 )
 from scripts.function_tracer_pcode.authority.decision.production_cutover import (
     conditional_outcome_from_payload,
+)
+from scripts.function_tracer_pcode.checker.diagnostics import (
+    FAILURE_INTERNAL_EXCEPTION as INTERNAL_EXCEPTION_KEY,
+    FAILURE_SWALLOWED_EXCEPTIONS as SWALLOWED_LEDGER_KEY,
 )
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     coerce_unknown_reason_records,
@@ -56,6 +60,30 @@ STATUS_ORDER = (
     STATUS_TIMEOUT,
     STATUS_INCOMPLETE,
 )
+# Issue #125 PR-125-B: typed failure 診断（`diagnostics["failures"]`）の集計。
+# 見出しは `run_health_summary.parse_overall_summary_health` の `section_titles`
+# に登録してあるので、名前を変えるときは両方を変える。
+FAILURE_SWALLOWED_BY_TYPE_TITLE = "Swallowed exceptions by type"
+FAILURE_INTERNAL_BY_SITE_TITLE = "Internal exceptions by site"
+FAILURE_SWALLOWED_BY_TYPE_KEY = "swallowed_exceptions_by_type"
+FAILURE_SWALLOWED_BY_SITE_KEY = "swallowed_exceptions_by_site"
+FAILURE_INTERNAL_BY_SITE_KEY = "internal_exception_by_site"
+FAILURE_EVIDENCE_KEY = "failure_diagnostic_evidence"
+FAILURE_SWALLOWED_TOTAL_KEY = "swallowed_exception_total"
+FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY = "swallowed_exception_observed_total"
+#: `diagnostics["failures"]` block の 3 値（key 欠落 / 壊れた値 / 正常）。
+#: `is` で比較するので intern 済みの literal をそのまま使う。
+FAILURE_BLOCK_MISSING = "block_missing"
+FAILURE_BLOCK_BROKEN = "block_broken"
+FAILURE_BLOCK_PRESENT = "block_present"
+#: evidence は surface ごと。片方が壊れても、もう片方の観測は有効なまま残す。
+FAILURE_SWALLOWED_SURFACE = "swallowed_exceptions"
+FAILURE_INTERNAL_SURFACE = "internal_exception"
+#: surface ごとの evidence の状態。`(none)` / exact total を名乗れるのは complete だけ。
+EVIDENCE_COMPLETE = "complete"
+EVIDENCE_PARTIAL = "partial"
+EVIDENCE_UNKNOWN = "unknown"
+
 BASELINE_MATCH_SCOPE_ALL = "all"
 BASELINE_MATCH_SCOPE_AFTER_PAIRS = "after-pairs"
 BASELINE_MATCH_LEVEL_EXACT = "exact"
@@ -604,6 +632,360 @@ def scope_baseline_records_for_after_pairs(
     )
 
 
+@dataclass(frozen=True)
+class FailureEvidence:
+    """1 つの診断 surface を、何 pair 分読めたか（Issue #125）。
+
+    ``observed`` / ``missing`` / ``malformed`` は排他で、合計が run の pair 数。
+
+    * ``observed``  … その surface を読めた pair
+    * ``missing``   … ``diagnostics["failures"]`` ごと無い pair（PR-125-A 以前の
+      log、結果 payload の無い pair）。surface が読めたわけではない。
+    * ``malformed`` … block はあるがその surface が契約から外れていた pair。
+    """
+
+    observed: int = 0
+    missing: int = 0
+    malformed: int = 0
+
+    @property
+    def state(self) -> str:
+        # 未観測が 1 pair でもあれば「run 全体で 0 件」とは言えない。
+        if not self.missing and not self.malformed:
+            return EVIDENCE_COMPLETE
+        if not self.observed:
+            return EVIDENCE_UNKNOWN
+        return EVIDENCE_PARTIAL
+
+    @property
+    def is_complete(self) -> bool:
+        return self.state == EVIDENCE_COMPLETE
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "state": self.state,
+            "observed": self.observed,
+            "missing": self.missing,
+            "malformed": self.malformed,
+        }
+
+
+@dataclass(frozen=True)
+class FailureDiagnosticsSummary:
+    """1 run 分の typed failure 診断（Issue #125）。
+
+    源は結果 payload の ``diagnostics["failures"]`` だけで、**判定には一切
+    触れない**。`unknown_cause_aggregate` / canonical unknown reason の集計とは
+    別経路で、reason 語彙も共有しない（診断を decision authority へ接続しない）。
+
+    evidence は **surface ごと**に持つ。``internal_exception`` が書かれていない
+    ことは、正常な failure block の中では「観測して 0 件」だが、block 自体が
+    無ければ「未観測」で意味が違う。同じ理由で、握り潰し台帳が壊れている pair
+    があっても内部エラーの観測結果までは捨てない。
+
+    件数の読み方:
+
+    * ``swallowed_observed_total`` は **観測できた分の合計（下限）**。常に整数。
+    * ``swallowed_exact_total`` は run 全体の正確な合計。evidence が complete
+      でなければ ``None``（0 と主張しない）。
+    * ``*_by_type`` / ``*_by_site`` は観測できた行だけ。evidence が complete で
+      なければ下限であって「run 全体の内訳」ではない。
+    """
+
+    swallowed_evidence: FailureEvidence = field(default_factory=FailureEvidence)
+    internal_evidence: FailureEvidence = field(default_factory=FailureEvidence)
+    swallowed_observed_total: int = 0
+    swallowed_exceptions_by_type: Dict[str, int] = field(default_factory=dict)
+    swallowed_exceptions_by_site: Dict[str, int] = field(default_factory=dict)
+    internal_exception_by_site: Dict[str, int] = field(default_factory=dict)
+
+    @property
+    def swallowed_exact_total(self) -> Optional[int]:
+        """evidence が complete のときだけ run 全体の正確な合計。"""
+
+        if self.swallowed_evidence.is_complete:
+            return self.swallowed_observed_total
+        return None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            FAILURE_EVIDENCE_KEY: {
+                FAILURE_SWALLOWED_SURFACE: self.swallowed_evidence.to_dict(),
+                FAILURE_INTERNAL_SURFACE: self.internal_evidence.to_dict(),
+            },
+            FAILURE_SWALLOWED_TOTAL_KEY: self.swallowed_exact_total,
+            FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY: self.swallowed_observed_total,
+            FAILURE_SWALLOWED_BY_TYPE_KEY: dict(self.swallowed_exceptions_by_type),
+            FAILURE_SWALLOWED_BY_SITE_KEY: dict(self.swallowed_exceptions_by_site),
+            FAILURE_INTERNAL_BY_SITE_KEY: dict(self.internal_exception_by_site),
+        }
+
+
+#: `dict.get()` では「key が無い」と「値が None」を区別できないので、その 2 つを
+#: 分けたい読み取りではこの番兵を既定値にする。
+_ABSENT = object()
+
+
+def _is_count(value: Any) -> bool:
+    """件数として受理できる値か（bool は int だが件数ではない）。"""
+
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _failure_diagnostics_block(
+    payload: Mapping[str, Any],
+) -> Tuple[str, Mapping[str, Any]]:
+    """1 つの結果 payload から ``diagnostics["failures"]`` を 3 値で取り出す。
+
+    * ``FAILURE_BLOCK_MISSING`` — ``diagnostics`` / ``failures`` の **key 自体が
+      無い**。PR-125-A 以前の log。**未観測**であって 0 件ではない。
+    * ``FAILURE_BLOCK_BROKEN`` — key はあるが値が mapping でない（``None`` /
+      文字列 / list …）。log は PR-125-A 以降だが、観測 surface が **壊れて
+      いる**。未観測と混同しない。
+    * ``FAILURE_BLOCK_PRESENT`` — mapping。surface ごとの検証へ進む。空の
+      mapping もここに入り、どちらの surface も読めないので malformed になる。
+    """
+
+    if not isinstance(payload, Mapping) or "diagnostics" not in payload:
+        return FAILURE_BLOCK_MISSING, {}
+    diagnostics = payload["diagnostics"]
+    if not isinstance(diagnostics, Mapping):
+        return FAILURE_BLOCK_BROKEN, {}
+    if "failures" not in diagnostics:
+        return FAILURE_BLOCK_MISSING, {}
+    failures = diagnostics["failures"]
+    if not isinstance(failures, Mapping):
+        return FAILURE_BLOCK_BROKEN, {}
+    return FAILURE_BLOCK_PRESENT, failures
+
+
+def _bump_count(counts: Dict[str, int], key: str, amount: int) -> None:
+    counts[key] = counts.get(key, 0) + amount
+
+
+def _read_swallowed_surface(
+    failures: Mapping[str, Any],
+    by_type: Dict[str, int],
+    by_site: Dict[str, int],
+) -> Tuple[bool, int]:
+    """握り潰し台帳を 1 pair 分読む。``(読み切れたか, 観測した件数)``。
+
+    PR-125-A の producer 契約は ``{"total": <非負 int>, "by_site": [...]}``。
+    readable と言えるのは **その契約を全部満たしたときだけ**:
+
+    * ``by_site`` key があり、str/bytes でない sequence
+    * ``total`` key が **存在**し、bool でない非負 int
+    * 各行が mapping で、``count`` が bool でない非負 int
+    * 宣言された ``total`` が読めた行の合計と一致
+
+    1 つでも欠けたら readable にしない（``total`` が無い payload から
+    「全行を観測できた」= exact total は導けない）。ただし **そこまでに読めた
+    行は捨てない**。読み切れなかった pair は呼び出し側が ``malformed`` に
+    数えるので、surface が complete を主張することはなく、読めた分は
+    observed lower bound として残る。
+    """
+
+    swallowed = failures.get(SWALLOWED_LEDGER_KEY, _ABSENT)
+    if not isinstance(swallowed, Mapping):
+        # `attach_failure_diagnostics` は全 pair でこの key を書く。無い block も
+        # 値が mapping でない block も、この surface は読めていない。
+        return False, 0
+    rows = swallowed.get("by_site", _ABSENT)
+    declared = swallowed.get("total", _ABSENT)
+    readable = True
+    row_total = 0
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        # key 欠落（`_ABSENT`）も非 sequence もここに落ちる。
+        readable = False
+        rows = ()
+    for row in rows:
+        if not isinstance(row, Mapping):
+            readable = False
+            continue
+        count = row.get("count", _ABSENT)
+        if not _is_count(count):
+            readable = False
+            continue
+        row_total += count
+        _bump_count(by_type, str(row.get("exception_type") or UNKNOWN_TUPLE_MISSING), count)
+        _bump_count(by_site, str(row.get("site") or UNKNOWN_TUPLE_MISSING), count)
+    # `total` は producer の必須 key。欠落・None・bool・非 int・負数・行の合計との
+    # 不一致は、どれも「全行を観測できた」ことを保証しない。
+    if not _is_count(declared) or declared != row_total:
+        readable = False
+    return readable, row_total
+
+
+def _read_internal_surface(
+    failures: Mapping[str, Any], by_site: Dict[str, int],
+) -> bool:
+    """内部エラーを 1 pair 分読む。読み切れたら ``True``。
+
+    ``internal_exception`` key が無いことを「その pair では内部エラーが起きな
+    かった」= 観測済み 0 件と読めるのは、その block が attach 経路で作られたと
+    分かるときだけ。marker は ``swallowed_exceptions`` **key の存在**で、
+    `attach_failure_diagnostics` が全 pair で必ず書く。marker は key の有無だけ
+    を見るので、握り潰し台帳の **値** が壊れていても、こちらの観測は有効なまま
+    残る（surface 間で壊れを伝播させない）。
+    """
+
+    internal = failures.get(INTERNAL_EXCEPTION_KEY, _ABSENT)
+    if internal is _ABSENT:
+        return SWALLOWED_LEDGER_KEY in failures
+    if not isinstance(internal, Mapping):
+        # 明示的な `None` もここ。key 欠落と混同しない。
+        return False
+    # 1 pair は 1 回しか内部エラーで終われないので 1 件で数える。
+    _bump_count(by_site, str(internal.get("site") or UNKNOWN_TUPLE_MISSING), 1)
+    return True
+
+
+def summarize_failure_diagnostics(
+    records: Iterable[ValidationLogRecord],
+) -> FailureDiagnosticsSummary:
+    """pair ごとの最終結果 payload から typed failure 診断を集計する。
+
+    1 pair = 1 log = 1 record。log に結果 payload が複数あっても **最後の 1 つ**
+    （その pair の最終結果）だけを読むので、同じ pair を複数経路から二重に
+    数えない。読めなかった pair は surface ごとに数えるだけで、集計全体を
+    落とさない（fail-open）。読めなかった分を 0 件として数えることはしない。
+    """
+
+    swallowed = {"observed": 0, "missing": 0, "malformed": 0}
+    internal = {"observed": 0, "missing": 0, "malformed": 0}
+    observed_total = 0
+    by_type: Dict[str, int] = {}
+    by_site: Dict[str, int] = {}
+    internal_by_site: Dict[str, int] = {}
+    for record in records:
+        payloads = tuple(record.payloads)
+        block_state, failures = (
+            _failure_diagnostics_block(payloads[-1]) if payloads
+            # 結果 payload が 1 つも無い pair（TIMEOUT / 無 payload）は未観測。
+            else (FAILURE_BLOCK_MISSING, {})
+        )
+        if block_state is FAILURE_BLOCK_MISSING:
+            swallowed["missing"] += 1
+            internal["missing"] += 1
+            continue
+        if block_state is FAILURE_BLOCK_BROKEN:
+            # key はあるので未観測ではない。両 surface とも読めていない。
+            swallowed["malformed"] += 1
+            internal["malformed"] += 1
+            continue
+        readable, row_total = _read_swallowed_surface(failures, by_type, by_site)
+        swallowed["observed" if readable else "malformed"] += 1
+        observed_total += row_total
+        internal_readable = _read_internal_surface(failures, internal_by_site)
+        internal["observed" if internal_readable else "malformed"] += 1
+    return FailureDiagnosticsSummary(
+        swallowed_evidence=FailureEvidence(**swallowed),
+        internal_evidence=FailureEvidence(**internal),
+        swallowed_observed_total=observed_total,
+        swallowed_exceptions_by_type=dict(sorted(by_type.items())),
+        swallowed_exceptions_by_site=dict(sorted(by_site.items())),
+        internal_exception_by_site=dict(sorted(internal_by_site.items())),
+    )
+
+
+def format_failure_evidence_value(evidence: FailureEvidence) -> str:
+    return (
+        f"{evidence.state} (observed {evidence.observed}"
+        f" / missing {evidence.missing} / malformed {evidence.malformed})"
+    )
+
+
+def format_swallowed_total_value(summary: FailureDiagnosticsSummary) -> str:
+    """正確な合計と「観測できた下限」を表示で分ける。"""
+
+    exact = summary.swallowed_exact_total
+    if exact is None:
+        return f"unknown (observed {summary.swallowed_observed_total})"
+    return str(exact)
+
+
+def format_failure_diagnostics_summary(
+    summary: FailureDiagnosticsSummary,
+    *,
+    indent: str = "",
+    compact: bool = False,
+    max_items: Optional[int] = None,
+) -> str:
+    """Issue #125 の 2 節を既存の count block と同じ形で描画する。
+
+    空の節は #128 と同じ語彙で書き分ける: その surface の evidence が complete
+    なら ``(none)``（観測して 0 件）、そうでなければ ``(unknown)``。未観測の
+    pair がある run を「run 全体で 0 件」と読ませないための区別。
+    """
+
+    if max_items is None and compact:
+        # compact の既定（`unknown_reason_summary` の count block と同じ 20 件）。
+        max_items = 20
+    lines = [
+        f"{indent}Failure diagnostics:",
+        f"{indent}  Swallowed exception evidence: "
+        + format_failure_evidence_value(summary.swallowed_evidence),
+        f"{indent}  Internal exception evidence : "
+        + format_failure_evidence_value(summary.internal_evidence),
+        f"{indent}  Swallowed exceptions total  : "
+        + format_swallowed_total_value(summary),
+    ]
+    _append_failure_count_block(
+        lines,
+        FAILURE_SWALLOWED_BY_TYPE_TITLE,
+        summary.swallowed_exceptions_by_type,
+        indent,
+        empty_label=_evidence_empty_label(summary.swallowed_evidence),
+        max_items=max_items,
+    )
+    _append_failure_count_block(
+        lines,
+        FAILURE_INTERNAL_BY_SITE_TITLE,
+        summary.internal_exception_by_site,
+        indent,
+        empty_label=_evidence_empty_label(summary.internal_evidence),
+        max_items=max_items,
+    )
+    return "\n".join(lines)
+
+
+def _evidence_empty_label(evidence: Optional[FailureEvidence]) -> str:
+    """空の集計を `(none)`（観測して 0 件）と `(unknown)`（未観測）に分ける。"""
+
+    return "(none)" if evidence is not None and evidence.is_complete else "(unknown)"
+
+
+def _append_failure_count_block(
+    lines: list,
+    title: str,
+    counts: Mapping[str, int],
+    indent: str,
+    *,
+    empty_label: str,
+    max_items: Optional[int] = None,
+) -> None:
+    """`unknown_reason_summary` の count block と **同じ行の形**で出す。
+
+    `run_health_summary.parse_overall_summary_health` は見出しと `- key: count`
+    の 2 つの形だけで section を読むので、ここを別形にすると parser が割れる。
+    """
+
+    lines.append(f"{indent}  {title}:")
+    if not counts:
+        lines.append(f"{indent}    {empty_label}")
+        return
+    ordered = sorted(counts, key=lambda key: (-int(counts[key]), str(key)))
+    shown = ordered[:max_items] if max_items is not None and max_items >= 0 else ordered
+    for key in shown:
+        lines.append(f"{indent}    - {key}: {counts[key]}")
+    if len(shown) < len(ordered):
+        hidden = ordered[len(shown):]
+        lines.append(
+            f"{indent}    - ... {len(hidden)} more entries "
+            f"(sum={sum(int(counts[key]) for key in hidden)})"
+        )
+
+
 def format_function_results_summary(
     function_name: str,
     aggregate: ValidationResultAggregate,
@@ -722,6 +1104,17 @@ def format_overall_results_summary(
     lines.append(
         format_validation_unknown_summary(
             unknown_summary,
+            indent="  ",
+            compact=compact,
+            max_items=max_items,
+        )
+    )
+    # Issue #125 PR-125-B: typed failure 診断。UNKNOWN の集計（authority 由来の
+    # reason）とは別源なので、その block の後ろに独立した節として置く。
+    lines.append("")
+    lines.append(
+        format_failure_diagnostics_summary(
+            summarize_failure_diagnostics(summary.overall.records),
             indent="  ",
             compact=compact,
             max_items=max_items,
@@ -1079,6 +1472,9 @@ def build_run_health_summary(
         "proof_backlog_by_reason": dict(unknown_summary.proof_backlog_by_reason),
         "proof_backlog_by_proof_kind": dict(unknown_summary.proof_backlog_by_proof_kind),
         "operational_unknown_by_reason": dict(unknown_summary.operational_unknown_by_reason),
+        # Issue #125 PR-125-B: 診断専用の次元。canonical unknown reason の集計
+        # 契約とは独立で、decision authority へは接続しない。
+        **summarize_failure_diagnostics(summary.overall.records).to_dict(),
         **metadata_counts,
         "functions": {
             function_name: {
@@ -1157,10 +1553,107 @@ def format_run_health_summary(health: Mapping[str, Any]) -> str:
             continue
         for name, count in sorted(values.items(), key=lambda item: (-int(item[1]), str(item[0])))[:20]:
             lines.append(f"    - {name}: {count}")
+    # Issue #125 PR-125-B: typed failure 診断の 2 節。証拠が 1 件も無い run は
+    # `(unknown)`、読めた上で 0 件なら `(none)`（#128 と同じ語彙）。
+    lines.extend(format_failure_health_lines(health))
     benchmark = health.get(BENCHMARK_VALIDATION_KEY)
     if isinstance(benchmark, Mapping):
         lines.extend(format_benchmark_validation_lines(benchmark))
     return "\n".join(lines)
+
+
+def failure_evidence_from_health(
+    health: Mapping[str, Any], surface: str,
+) -> Optional[FailureEvidence]:
+    """health mapping から 1 surface の evidence を復元する。
+
+    key が無い（PR-125-B 以前に作った JSON / summary）場合は ``None``。
+    これを「観測して 0 件」に読み替えてはいけない。
+    """
+
+    evidence = health.get(FAILURE_EVIDENCE_KEY)
+    if not isinstance(evidence, Mapping):
+        return None
+    row = evidence.get(surface)
+    if not isinstance(row, Mapping):
+        return None
+    counts = [row.get(name, _ABSENT) for name in ("observed", "missing", "malformed")]
+    # 3 つとも揃っていなければ復元しない。欠けた次元を 0 で埋めると、
+    # 未観測の run が complete に見えてしまう。
+    if not all(_is_count(value) for value in counts):
+        return None
+    restored = FailureEvidence(*counts)
+    declared_state = row.get("state", _ABSENT)
+    if declared_state is not _ABSENT and declared_state != restored.state:
+        # 書かれている state と件数が矛盾する health は信用しない（fail-closed）。
+        return None
+    # 3 次元は run の pair 全部を排他に分類したもの。`total_results` が分かる
+    # health では合計が一致していなければならない。一致しない evidence からは
+    # complete も exact total も導けないので信用しない。`total_results` を
+    # 持たない legacy health では推測しない（勝手に 0 を仮定しない）。
+    total_results = health.get("total_results", _ABSENT)
+    if total_results is not _ABSENT:
+        if not _is_count(total_results):
+            return None
+        if restored.observed + restored.missing + restored.malformed != total_results:
+            return None
+    return restored
+
+
+def format_failure_health_lines(health: Mapping[str, Any]) -> List[str]:
+    """Issue #125 の evidence と 2 節を health summary にも出す。
+
+    空の節の書き分けは #128 と同じ語彙。**観測記録そのものが無い** health
+    （PR-125-B 以前に作った JSON / summary）は「0 件」ではなく `(unknown)`。
+    合計も、evidence が complete でなければ exact 0 を名乗らない。
+    """
+
+    # どの集計がどの surface の evidence に従うか。
+    surfaces = {
+        FAILURE_SWALLOWED_BY_TYPE_KEY: FAILURE_SWALLOWED_SURFACE,
+        FAILURE_INTERNAL_BY_SITE_KEY: FAILURE_INTERNAL_SURFACE,
+    }
+    evidences = {
+        surface: failure_evidence_from_health(health, surface)
+        for surface in (FAILURE_SWALLOWED_SURFACE, FAILURE_INTERNAL_SURFACE)
+    }
+    lines: List[str] = [f"  {FAILURE_EVIDENCE_KEY}:"]
+    for surface in (FAILURE_SWALLOWED_SURFACE, FAILURE_INTERNAL_SURFACE):
+        evidence = evidences[surface]
+        lines.append(
+            f"    - {surface}: "
+            + (EVIDENCE_UNKNOWN if evidence is None
+               else format_failure_evidence_value(evidence))
+        )
+    exact = health.get(FAILURE_SWALLOWED_TOTAL_KEY)
+    observed_total = health.get(FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY)
+    swallowed_complete = (
+        evidences[FAILURE_SWALLOWED_SURFACE] is not None
+        and evidences[FAILURE_SWALLOWED_SURFACE].is_complete
+    )
+    if swallowed_complete and _is_count(exact):
+        lines.append(f"  {FAILURE_SWALLOWED_TOTAL_KEY}: {exact}")
+    elif _is_count(observed_total):
+        lines.append(
+            f"  {FAILURE_SWALLOWED_TOTAL_KEY}: "
+            f"{EVIDENCE_UNKNOWN} (observed {observed_total})"
+        )
+    else:
+        lines.append(f"  {FAILURE_SWALLOWED_TOTAL_KEY}: {EVIDENCE_UNKNOWN}")
+    # `overall_summary.txt` から読み戻した health は `(unknown)` marker を
+    # `evidence_missing_sections` に持つので、そちらも尊重して往復させる。
+    marked = health.get("evidence_missing_sections")
+    marked = set(marked) if isinstance(marked, (list, tuple, set)) else set()
+    for key in (FAILURE_SWALLOWED_BY_TYPE_KEY, FAILURE_INTERNAL_BY_SITE_KEY):
+        values = health.get(key)
+        lines.append(f"  {key}:")
+        if not isinstance(values, Mapping) or not values:
+            empty_label = _evidence_empty_label(evidences[surfaces[key]])
+            lines.append(f"    {'(unknown)' if key in marked else empty_label}")
+            continue
+        for name, count in sorted(values.items(), key=lambda item: (-int(item[1]), str(item[0])))[:20]:
+            lines.append(f"    - {name}: {count}")
+    return lines
 
 
 # Issue #104: the runner benchmark gate (``reporting.benchmark_validation_gate``)
