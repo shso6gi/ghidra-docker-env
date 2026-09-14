@@ -971,28 +971,252 @@ def test_cancel_before_the_worker_reads_the_journal_stops_the_signal(pair, sende
     assert diagnostic.unavailable_reason == "cancelled"
 
 
-def test_the_send_gate_checks_cancel_last(pair):
-    """`_send_signal` の最後の判断が cancel であることを AST で固定する。"""
+def test_the_cancel_read_and_the_send_share_one_exclusive_region(pair):
+    """cancel の読みと `pidfd_send_signal` が同じ `with self._send_gate` の中にある。
+
+    「送信の直前に見る」だけでは check-then-act のままで、確認後・送信前に
+    cancel が完了する interleaving が残る。両者を 1 つの排他区間に閉じ込め、
+    `cancel_future_requests()` が同じ gate を取ることで順序を確定する。
+    """
     import ast
     import inspect
 
     tree = ast.parse(inspect.getsource(StackDumpDiagnostic._send_signal).lstrip())
+    gates = [
+        node for node in ast.walk(tree) if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Attribute)
+            and item.context_expr.attr == "_send_gate"
+            for item in node.items
+        )
+    ]
+    assert len(gates) == 1, "send gate の区間が 1 つでない"
+    inside = list(ast.walk(gates[0]))
     sends = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        and node.func.id == "pidfd_send"
+        n for n in inside if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name) and n.func.id == "pidfd_send"
     ]
-    assert len(sends) == 1
-    send_line = sends[0].lineno
-    cancel_checks = [
-        node.lineno for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "is_set"
+    cancels = [
+        n for n in inside if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute) and n.func.attr == "is_set"
     ]
-    assert cancel_checks, "cancel の確認が無い"
-    # 送信の直前にも cancel を見ている。
-    assert max(cancel_checks) < send_line
-    assert send_line - max(cancel_checks) < 12, (cancel_checks, send_line)
+    assert len(sends) == 1, "送信が gate の中に 1 回だけ無い"
+    assert cancels, "cancel の読みが gate の中に無い"
+    assert cancels[0].lineno < sends[0].lineno
+    # 遅い処理は gate の外（監視ループを待たせない）。
+    slow = {
+        n.func.id for n in inside if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Name)
+    } | {
+        n.func.attr for n in inside if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+    }
+    assert not (slow & {
+        "pidfd_open", "_identity_is_current", "read_stage_journal",
+        "select_current_segment", "_observe_dump", "sleep",
+    }), sorted(slow)
+
+
+def test_cancel_takes_the_same_gate_so_it_cannot_return_mid_send():
+    """`cancel_future_requests()` が同じ gate を取ることを AST で固定する。"""
+    import ast
+    import inspect
+
+    tree = ast.parse(
+        inspect.getsource(StackDumpDiagnostic.cancel_future_requests).lstrip()
+    )
+    gates = [
+        node for node in ast.walk(tree) if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Attribute)
+            and item.context_expr.attr == "_send_gate"
+            for item in node.items
+        )
+    ]
+    assert gates, "cancel が send gate を取っていない"
+    sets = [
+        n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute) and n.func.attr == "set"
+    ]
+    # flag は gate を取る前に立てる（待っている間も新しい送信を止めるため）。
+    assert sets and sets[0] < gates[0].lineno
+
+
+class _ParkedGate:
+    """`_send_gate` の差し替え。最初の取得の直前で worker を止める。
+
+    park は**実 lock を取る前**に行うので、その間 `cancel_future_requests()` は
+    gate を取れる（= cancel を先に linearize させられる）。
+    """
+
+    def __init__(self, real, arrived, release):
+        self._real = real
+        self._arrived = arrived
+        self._release = release
+        self._parked = False
+
+    def __enter__(self):
+        if not self._parked:
+            self._parked = True
+            self._arrived.set()
+            assert self._release.wait(5.0), "worker を再開できなかった"
+        return self._real.__enter__()
+
+    def __exit__(self, *exc):
+        return self._real.__exit__(*exc)
+
+
+def test_cancel_completed_before_the_send_gate_stops_the_signal(pair, monkeypatch):
+    """cancel が先に linearize したら、絶対に送らない。
+
+    1. worker を**最終 send gate の直前**で止める
+    2. monitor 側で `cancel_future_requests()` を**完了**させる
+    3. worker を再開する
+    4. `pidfd_send_signal` が 0 回 / `signal_sent=False` / reason は cancelled
+    """
+    arrived = threading.Event()
+    release = threading.Event()
+    sent = []
+    monkeypatch.setattr(os, "pidfd_open", lambda pid, flags: os.open(os.devnull, os.O_RDONLY), raising=False)
+    monkeypatch.setattr(
+        signal, "pidfd_send_signal", lambda fd, number: sent.append(number),
+        raising=False,
+    )
+
+    diagnostic = _diagnostic(pair)
+    diagnostic._send_gate = _ParkedGate(diagnostic._send_gate, arrived, release)
+    diagnostic.request_async()
+    assert arrived.wait(5.0), "worker が send gate まで到達しなかった"
+
+    # ここで cancel を「完了」させる（戻り値が返るまで待つ）。
+    diagnostic.cancel_future_requests()
+    release.set()
+    _join_worker(diagnostic)
+
+    assert sent == [], "cancel 完了後に SIGUSR1 を送っている"
+    assert diagnostic.signal_sent is False
+    assert diagnostic.unavailable_reason == "cancelled"
+    assert diagnostic.signal_sent_monotonic is None
+    assert diagnostic.signal_sent_epoch is None
+    assert diagnostic.dump_observed is False
+
+
+def test_a_completed_send_is_not_undone_by_a_later_cancel(pair, sender):
+    """送信が先に linearize したら、あとから来た cancel で取り消さない。"""
+    diagnostic = _diagnostic(pair, observe=0.02)
+    # offset は deadline からの相対なので、監視ループと同じく先に渡しておく。
+    diagnostic.note_deadline(time.monotonic())
+    diagnostic.request_async()
+    _join_worker(diagnostic)
+    assert diagnostic.signal_sent is True
+    assert sender.sent == [int(signal.SIGUSR1)]
+
+    diagnostic.cancel_future_requests()
+
+    assert diagnostic.signal_sent is True
+    assert diagnostic.signal_sent_monotonic is not None
+    assert diagnostic.signal_sent_epoch is not None
+    assert diagnostic.unavailable_reason != "cancelled"
+    payload = diagnostic.status_payload()
+    assert payload["signal_sent"] is True
+    # cancel は送信のあとに linearize している。
+    assert payload["cancel_linearized_offset_seconds"] is not None
+    assert (
+        payload["cancel_linearized_offset_seconds"]
+        >= payload["signal_sent_offset_seconds"]
+    )
+
+
+def test_cancel_waits_for_an_in_flight_send_then_reports_it_as_sent(pair, monkeypatch):
+    """送信中に cancel が来たら、cancel は待ち、送信は「済み」のまま。"""
+    in_send = threading.Event()
+    finish_send = threading.Event()
+    sent = []
+    monkeypatch.setattr(os, "pidfd_open", lambda pid, flags: os.open(os.devnull, os.O_RDONLY), raising=False)
+
+    def _slow_send(fd, number):
+        sent.append(number)
+        in_send.set()
+        assert finish_send.wait(5.0)
+
+    monkeypatch.setattr(signal, "pidfd_send_signal", _slow_send, raising=False)
+
+    diagnostic = _diagnostic(pair, observe=0.02)
+    diagnostic.request_async()
+    assert in_send.wait(5.0), "worker が送信に入らなかった"
+
+    cancel_returned = threading.Event()
+
+    def _cancel():
+        diagnostic.cancel_future_requests()
+        cancel_returned.set()
+
+    canceller = threading.Thread(target=_cancel, daemon=True)
+    canceller.start()
+    # 送信中は cancel が gate で待つ（= 戻っていない）。
+    assert not cancel_returned.wait(0.2)
+
+    finish_send.set()
+    canceller.join(5.0)
+    _join_worker(diagnostic)
+
+    assert cancel_returned.is_set()
+    assert sent == [int(signal.SIGUSR1)]
+    assert diagnostic.signal_sent is True
+    assert diagnostic.unavailable_reason != "cancelled"
+
+
+def test_cancel_does_not_wait_for_slow_diagnostic_work(pair, monkeypatch):
+    """gate の外の遅い処理（`pidfd_open` 等）で監視ループを待たせない。"""
+    parked = threading.Event()
+    release = threading.Event()
+
+    def _slow_open(pid, flags):
+        parked.set()
+        assert release.wait(5.0)
+        return os.open(os.devnull, os.O_RDONLY)
+
+    monkeypatch.setattr(os, "pidfd_open", _slow_open, raising=False)
+    monkeypatch.setattr(
+        signal, "pidfd_send_signal", lambda fd, number: None, raising=False)
+
+    diagnostic = _diagnostic(pair)
+    diagnostic.request_async()
+    assert parked.wait(5.0), "worker が pidfd_open に入らなかった"
+
+    done = threading.Event()
+    threading.Thread(
+        target=lambda: (diagnostic.cancel_future_requests(), done.set()), daemon=True,
+    ).start()
+    # gate の外で止まっているので、cancel は待たされずに戻る。
+    assert done.wait(2.0), "cancel が gate の外の処理を待っている"
+
+    release.set()
+    _join_worker(diagnostic)
+    assert diagnostic.signal_sent is False
+
+
+def test_send_and_cancel_never_produce_a_contradictory_state(pair, sender):
+    """どちらが先でも、状態が linearization 順と矛盾しない。
+
+    競わせたうえで不変量だけを見る（どちらが勝つかは固定しない）。
+    """
+    for _ in range(25):
+        diagnostic = _diagnostic(pair, observe=0.0)
+        canceller = threading.Thread(
+            target=diagnostic.cancel_future_requests, daemon=True)
+        diagnostic.request_async()
+        canceller.start()
+        canceller.join(5.0)
+        _join_worker(diagnostic)
+        if diagnostic.signal_sent:
+            assert diagnostic.unavailable_reason != "cancelled"
+            assert diagnostic.signal_sent_monotonic is not None
+            assert diagnostic.signal_sent_epoch is not None
+        else:
+            assert diagnostic.signal_sent_monotonic is None
+            assert diagnostic.signal_sent_epoch is None
+            assert diagnostic.dump_observed is False
 
 
 # ---------------------------------------------------------------------------

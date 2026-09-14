@@ -86,9 +86,18 @@ _DIAGNOSTIC_START_ERRORS = (
     AttributeError, MemoryError, OSError, RuntimeError, TypeError, ValueError,
 )
 
-#: worker 本体で起こり得る失敗。thread が例外で落ちると Python が stderr へ
+#: worker 本体と送信で起こり得る失敗。thread が例外で落ちると Python が stderr へ
 #: traceback を出し、それが pair log に混ざるので、ここで受けて理由に変える。
-_WORKER_ERRORS = _DIAGNOSTIC_ERRORS + (RuntimeError,)
+#: 起動側（`_DIAGNOSTIC_START_ERRORS`）と同じ境界にそろえてあり、違いは
+#: 起動側だけが `threading` 由来の失敗を名前で区別する点だけ:
+#:
+#: - `OSError`: pidfd / stat / open（`PermissionError` / `ProcessLookupError` を含む）
+#: - `RuntimeError`: interpreter 資源の枯渇、signal API の状態エラー
+#: - `MemoryError`: 20 並列で 1 GB 級のプロセスを扱うので現実に起こり得る
+#: - `AttributeError` / `TypeError` / `ValueError` / `LookupError`: payload の形が
+#:   想定外だったとき（journal は他プロセスが書く file なので信用しない）
+#: - `RecursionError`: 自己参照する payload
+_WORKER_ERRORS = _DIAGNOSTIC_ERRORS + (MemoryError, RuntimeError)
 
 # unavailable の理由（journal 側の語彙は `core/stage_journal_reader.py`）。
 UNAVAILABLE_DISABLED = "disabled"
@@ -175,6 +184,13 @@ class StackDumpDiagnostic:
         self._identity_verifier = identity_verifier
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
+        # **cancel と実送信の linearization point。**この lock が守るのは
+        # 「cancel flag を読む -> `pidfd_send_signal` -> 送信した事実を書く」
+        # だけで、journal 読取・`pidfd_open`・identity 確認・dump polling は
+        # 一切入れない。監視ループが `cancel_future_requests()` でここを待つのは
+        # 最悪でも syscall 1 回ぶんになる。
+        self._send_gate = threading.Lock()
+        self._cancel_linearized_monotonic: Optional[float] = None
         self._thread: Optional[threading.Thread] = None
 
         self.requested = False
@@ -258,10 +274,28 @@ class StackDumpDiagnostic:
     def cancel_future_requests(self) -> None:
         """以後の送信を禁止する（正常終了 / deadline 到達の双方で呼ぶ）。
 
-        Event の確認だけでは「確認後・送信前」の競合を排除できないので、worker は
-        送信直前に cancel と pid / start_token を lock の中で再確認する。
+        **この関数から戻った時点で、診断 SIGUSR1 はもう送られない。** flag を
+        立てるだけでは足りない（worker が「確認 -> 送信」の途中なら、確認後・
+        送信前に立った flag は無視されてしまう）ので、2 段で順序を確定する:
+
+        1. `_cancelled` を立てる。worker が **send gate の中で**読む値なので、
+           これ以降に gate を取る送信は必ず cancel を見る。
+        2. send gate を 1 回取って放す。すでに送信中の worker がいれば、その
+           送信が終わるまで待つ。戻った時点で「送信中の worker はいない」かつ
+           「これから gate を取る worker は cancel を見る」が両方成り立つ。
+
+        送信が先に linearize した場合、その送信は**取り消さない**（`signal_sent`
+        は True のまま、`unavailable_reason` に `cancelled` は入らない）。
+        どちらが先だったかは `_cancel_linearized_monotonic` と
+        `signal_sent_monotonic` の順序で読める。
+
+        gate が守るのは flag の読みと syscall 1 回だけなので、監視ループがここで
+        待つ時間は有界。journal 読取や `pidfd_open` は gate の外にある。
         """
         self._cancelled.set()
+        with self._send_gate:
+            if self._cancel_linearized_monotonic is None:
+                self._cancel_linearized_monotonic = time.monotonic()
 
     def note_deadline(self, deadline_monotonic: float) -> None:
         self.deadline_monotonic = float(deadline_monotonic)
@@ -378,29 +412,34 @@ class StackDumpDiagnostic:
                 descriptor = pidfd_open(self.child_pid, 0)
                 # pidfd を開いたあとにもう一度 identity を確かめる。ここから送信
                 # までの間に PID が再利用されても、pidfd は元のプロセスを指す。
+                # ここまでは **gate の外**（遅い処理で監視ループを待たせない）。
                 if not self._identity_is_current():
                     self.unavailable_reason = (
                         self.unavailable_reason or UNAVAILABLE_PROCESS_EXITED
                     )
                     return False
-                # **cancel の確認は送信の直前が最後**。`cancel_future_requests()`
-                # は lock を取らない（監視ループを worker の lock 保持で待たせない）
-                # ので、入口の 1 回だけでは「確認 -> pidfd_open -> 送信」の間に
-                # 入った cancel を取りこぼす。正常終了・deadline 到達のあとに
-                # 診断 signal を送らない、が守るべき契約なので、実際の syscall の
-                # 直前でもう一度見る。
-                if self._cancelled.is_set():
-                    self.unavailable_reason = (
-                        self.unavailable_reason or UNAVAILABLE_CANCELLED
-                    )
-                    return False
-                pidfd_send(descriptor, STACK_DUMP_SIGNAL)
+                # ここから下が linearization point。cancel flag の読みと syscall と
+                # 「送信した」の記録を 1 つの排他区間に閉じ込める。gate を取れた
+                # 時点で cancel が立っていれば送らない。取れたあとに cancel が来た
+                # 場合、その cancel は gate の外で待つので送信は完了扱いになる。
+                with self._send_gate:
+                    if self._cancelled.is_set():
+                        self.unavailable_reason = (
+                            self.unavailable_reason or UNAVAILABLE_CANCELLED
+                        )
+                        return False
+                    pidfd_send(descriptor, STACK_DUMP_SIGNAL)
+                    # 観測者が `signal_sent` を見たときに時刻も見えているよう、
+                    # 時刻を先に書いてから flag を立てる。
+                    self.signal_sent_monotonic = time.monotonic()
+                    self.signal_sent_epoch = time.time()
+                    self.signal_sent = True
             except ProcessLookupError:
                 self.unavailable_reason = (
                     self.unavailable_reason or UNAVAILABLE_PROCESS_EXITED
                 )
                 return False
-            except _DIAGNOSTIC_ERRORS as exc:
+            except _WORKER_ERRORS as exc:
                 self.unavailable_reason = (
                     self.unavailable_reason
                     or f"{UNAVAILABLE_SIGNAL_FAILED}:{type(exc).__name__}"
@@ -412,9 +451,6 @@ class StackDumpDiagnostic:
                         os.close(descriptor)
                     except OSError:
                         pass
-            self.signal_sent = True
-            self.signal_sent_monotonic = time.monotonic()
-            self.signal_sent_epoch = time.time()
             return True
 
     def _observe_dump(self) -> None:
@@ -478,7 +514,10 @@ class StackDumpDiagnostic:
         except OSError as exc:
             self.artifact_status = f"{ARTIFACT_COPY_FAILED}:{exc.errno}"
             return self.artifact_status
-        except _DIAGNOSTIC_ERRORS as exc:
+        except _WORKER_ERRORS as exc:
+            # dump 全体を読むので `MemoryError` も現実に起こり得る。ここで
+            # typed に受けて状態へ変える（上位の guard 任せにすると
+            # `copy_failed` が残らない）。
             self.artifact_status = f"{ARTIFACT_COPY_FAILED}:{type(exc).__name__}"
             return self.artifact_status
         self.artifact_bytes = len(payload)
@@ -543,6 +582,11 @@ class StackDumpDiagnostic:
             "kill_start_offset_seconds": _offset(kill_signal_start),
             "signal_sent_epoch": self.signal_sent_epoch,
             "signal_sent_offset_seconds": _offset(self.signal_sent_monotonic),
+            # cancel が send gate を通った時刻。`signal_sent_offset_seconds` との
+            # 前後で「cancel と送信のどちらが先に linearize したか」が読める。
+            "cancel_linearized_offset_seconds": _offset(
+                self._cancel_linearized_monotonic
+            ),
             "child_timeout_evidence": self.child_timeout_evidence,
         }
 
@@ -567,7 +611,7 @@ class StackDumpDiagnostic:
             finally:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
-        except _DIAGNOSTIC_ERRORS:
+        except _WORKER_ERRORS:
             return None
         return path
 

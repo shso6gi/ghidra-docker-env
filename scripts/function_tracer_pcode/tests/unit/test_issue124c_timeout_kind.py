@@ -655,3 +655,63 @@ def test_an_unsealed_bundle_is_labelled_as_such(real_timeout_payload):
     )
     assert evidence.status == EVIDENCE_CONFIRMED
     assert evidence.detail["verification"] == "unsealed_bundle"
+
+
+# ---------------------------------------------------------------------------
+# 診断 artifact は reporting 専用（semantic authority へ接続しない）
+# ---------------------------------------------------------------------------
+
+
+def test_no_decision_path_reads_the_diagnostic_sidecar_or_the_hotspot_summary():
+    """sidecar と hotspot 集計が authority / proof / decision から読まれない。
+
+    sidecar 自体は署名されていない reporting-only artifact なので、判定側から
+    読まれていないこと自体が契約になる（PR-124-B の journal と同じ扱い）。
+    import 名で固定する。
+    """
+    import ast
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parents[2]
+    forbidden = {"timeout_hotspot_summary", "read_stack_dump_status"}
+    # 判定に関わる層。`authority/process` は sidecar の**書き手**なので除く。
+    decision_dirs = ("authority/decision", "authority/domains", "authority/lifecycle",
+                     "authority/sites", "proof", "checker", "semantics", "analysis")
+    offenders = []
+    for directory in decision_dirs:
+        for path in (root / directory).rglob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            names = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module:
+                    names.update(node.module.split("."))
+                    names.update(alias.name for alias in node.names)
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        names.update(alias.name.split("."))
+            hit = names & forbidden
+            if hit:
+                offenders.append((str(path.relative_to(root)), sorted(hit)))
+    assert not offenders, offenders
+
+
+def test_the_hotspot_summary_does_not_import_decision_authority_writers():
+    """集計側が judgement を書く面へ触っていない（読むだけ）。"""
+    import ast
+    from pathlib import Path as _Path
+
+    source = (
+        _Path(__file__).resolve().parents[2] / "reporting/timeout_hotspot_summary.py"
+    ).read_text(encoding="utf-8")
+    imported = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            imported.update(alias.name for alias in node.names)
+    # 使ってよいのは検証器と読み取りだけ。発行 / finalize 系は使わない。
+    assert "validate_canonical_result_finalization_bundle" in imported
+    assert not (imported & {
+        "build_canonical_result_finalization_bundle",
+        "persist_canonical_result_envelope",
+        "finalize_decision",
+        "attach_canonical_decision",
+    }), sorted(imported)

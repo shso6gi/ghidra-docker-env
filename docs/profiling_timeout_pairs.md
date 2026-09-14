@@ -108,10 +108,24 @@ daemon worker thread の中だけで行い、監視ループは join しない�
 失敗してもハングしても、**worker thread を作れなくても**、kill 開始は deadline
 から 0.5 秒以内。
 
-**cancel は送信の直前が最後の関門。** `cancel_future_requests()` は lock を
-取らない（監視ループを worker の lock 保持で待たせないため）ので、worker は
-readiness 確認だけでなく `pidfd_send_signal` の直前でも cancel を見る。正常終了
-または deadline 到達のあとに診断 signal を送らない、が守るべき契約。
+**cancel と送信には linearization point がある。** 「送信の直前に cancel を
+見る」だけでは check-then-act のままで、確認後・送信前に cancel が完了する
+interleaving が残る。専用の短い send gate（`_send_gate`）が
+
+* cancel flag の読み
+* `pidfd_send_signal`
+* 「送信した」の記録
+
+**だけ**を囲み、`cancel_future_requests()` は flag を立ててから同じ gate を 1 回
+取って放す。戻った時点で「送信中の worker はいない」かつ「これから gate を取る
+worker は cancel を見る」が両方成り立つので、**cancel が完了したあとに診断
+SIGUSR1 が出ることはない**。逆に送信が先に linearize した場合、あとから来た
+cancel でそれを取り消さない（`signal_sent` は true のまま、
+`unavailable_reason` に `cancelled` は入らない）。どちらが先だったかは
+`signal_sent_offset_seconds` と `cancel_linearized_offset_seconds` の順序で読める。
+
+journal 読取・`pidfd_open`・identity 確認・dump polling は gate の**外**なので、
+監視ループが cancel で待つのは最悪でも syscall 1 回ぶん。
 
 deadline の起点は barrier 解放の直後で 1 回だけ固定し、診断 object の生成は
 そのあと。診断を足したぶん child の実効予算が伸びることはない。
@@ -131,6 +145,7 @@ schema `pair-stack-dump-status-v1`。4 つの状態を**別々に**持つ。
 | `deadline_finalization_offset_seconds` | deadline 到達 → termination path へ入るまで（**まだ signal は送っていない**） |
 | `kill_signal` / `kill_start_offset_seconds` | **実際に**最初の termination signal（SIGTERM）を送れた時刻と、deadline からの実測秒。送る前に child が終了した pair は `null`（kill を開始したと記録しない） |
 | `signal_sent_epoch` | dump を撮った瞬間（journal を切って `active` を出すのに使う） |
+| `cancel_linearized_offset_seconds` | cancel が send gate を通った時刻。`signal_sent_offset_seconds` との前後で cancel / 送信のどちらが先に linearize したかが読める |
 | `child_timeout_evidence` | cleanup 前に検証した子の terminal timeout 証拠 |
 
 「送った」と「取れた」を同一視しない。`sent_but_unobserved` の pair でも、
