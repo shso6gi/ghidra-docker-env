@@ -48,6 +48,9 @@ from scripts.function_tracer_pcode.authority.domains.loop_recurrence import LOOP
 from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
     ABI_WIDTH_READONLY_REASON_SPECS,
 )
+from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+    ANALYSIS_LIMITATION_REASON_REGISTRY,
+)
 
 
 PILOT_TYPED_CAUSE_KINDS = frozenset({
@@ -68,7 +71,11 @@ PILOT_TYPED_CAUSE_KINDS = frozenset({
     "function_decompilation_artifact_unavailable",
     "high_function_ir_unavailable",
     "subordinate_parent_authority_unproven",
-})
+}) | frozenset(
+    # Issue #125: analysis_limitation domain の sealed reason（現状 1 個）。
+    # registry から導くので、domain へ reason を足したら自動で追従する。
+    item.reason_id for item in ANALYSIS_LIMITATION_REASON_REGISTRY.snapshot()
+)
 
 PILOT_EVENT_TYPES = frozenset({
     EventType.CAUSE_OBSERVED,

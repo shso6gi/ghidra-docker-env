@@ -907,9 +907,12 @@ def test_check_region_opens_at_method_entry_without_widening_the_catch_scope():
         "if original_signature1 is None:",
         "if original_signature2 is None:",
     ]
-    # 判定用 try の handler は従来どおり 2 つ、順序も型も変わらない。
+    # 判定用 try の handler の種類と順序（Issue #125 で typed 分岐を 2 つ足した）。
+    # region は計時だけで catch scope を広げていないことがここで固定される。
     assert [ast.unparse(handler.type) for handler in judgement[0].handlers] == [
         "(UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError)",
+        "AnalysisLimitation",
+        "InternalError",
         "Exception",
     ]
     assert judgement[0].finalbody == []

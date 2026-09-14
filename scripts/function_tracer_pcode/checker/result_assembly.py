@@ -9,7 +9,10 @@ module-level の関数に移す。トップレベルの ``try/except`` 自体、
   （``_prepared_dispatch_frame`` / ``_strategy_result`` / ``_inconclusive_comparison_authority``）を旧順序で行う。
 - :func:`unsupported_smt_result` — ``UnknownSmtExtensionWidthError`` / ``UnsupportedSmtOperatorError`` handler の本体。
 - :func:`canonical_abi_error_result` — ``ReturnAbiAuthorityInvalid`` 用の canonical error result。
-  その他の例外は従来どおり ``check()`` が ``self._create_error_result`` を呼ぶ。
+- :func:`analysis_limitation_result` — ``AnalysisLimitation`` handler の本体（Issue #125）。
+  帰属できた限界は UNKNOWN、帰属できなければ ``limitation_unattributed`` /
+  ``unregistered_reason`` の ERROR（fail-closed）。
+- :func:`internal_error_result` — ``InternalError`` handler の本体。``internal_exception`` の ERROR。
 
 checker の mixin メソッド（identity / 反例整形 / completed proof payload / completion contexts / recurrence receipt）は
 callable として受け取る（instance patch seam 維持）。
@@ -20,6 +23,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable, Optional
 
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation, InternalError
 from scripts.function_tracer_pcode.proof.obligations.branch_context import BranchCheckContext
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.checker.result_factory import create_error_result
@@ -319,3 +323,142 @@ def canonical_abi_error_result(
         failure_status=exc.canonical_error_kind,
         failure_message=str(exc),
     )
+
+
+def analysis_limitation_result(
+    exc: AnalysisLimitation,
+    *,
+    session,
+    analysis1,
+    analysis2,
+    binary1_name: str,
+    binary2_name: str,
+    start_time: float,
+    type_fix_result,
+    retry_count: int,
+    original_signature1: Optional[FunctionSignature],
+    original_signature2: Optional[FunctionSignature],
+) -> EquivalenceResult:
+    """解析の限界で check が止まったときの結果（handler 本体、Issue #125）。
+
+    判定は **帰属先の cause** が決める。この関数は cause を作らず（producer 経路が
+    作る）、強化もしない。帰属できなかった限界は UNKNOWN にせず ERROR に落とす
+    （限界を表現する authority が無いまま EQ / NOT_EQ へ抜けないため）。
+    """
+    from scripts.function_tracer_pcode.authority.decision.limitation_attribution import (
+        attribute_analysis_limitation,
+    )
+    from scripts.function_tracer_pcode.checker.diagnostics import (
+        FAILURE_ANALYSIS_LIMITATION,
+        record_failure_diagnostic,
+    )
+
+    attribution = attribute_analysis_limitation(session, exc)
+    diagnostic = {
+        **attribution.to_diagnostic(),
+        "site": exc.site,
+        "exception_type": type(exc).__name__,
+        "evidence_refs": list(exc.evidence_refs),
+        "message": str(exc)[:500],
+    }
+    if not attribution.is_attributed:
+        result = create_error_result(
+            analysis1=analysis1,
+            analysis2=analysis2,
+            binary1_name=binary1_name,
+            binary2_name=binary2_name,
+            error_message=attribution.failure_status,
+            start_time=start_time,
+            type_fix_result=type_fix_result,
+            retry_count=retry_count,
+            original_signature1=original_signature1,
+            original_signature2=original_signature2,
+            failure_status=attribution.failure_status,
+            failure_message=f"{attribution.detail}: {exc}",
+        )
+        record_failure_diagnostic(result, FAILURE_ANALYSIS_LIMITATION, diagnostic)
+        return result
+
+    result = EquivalenceResult(
+        is_equivalent=None,
+        function1_name=analysis1.function_name,
+        function2_name=analysis2.function_name,
+        binary1_name=binary1_name,
+        binary2_name=binary2_name,
+        solver_results=ParallelResult(results=[]),
+        counterexample=None,
+        smt_formula=None,
+        total_time=time.time() - start_time,
+        type_fix_result=type_fix_result,
+        retry_count=retry_count,
+        function1_signature=original_signature1,
+        function2_signature=original_signature2,
+        effective_function1_signature=FunctionSignature.from_analysis(analysis1),
+        effective_function2_signature=FunctionSignature.from_analysis(analysis2),
+        function1_signature_hypotheses=list(analysis1.signature_hypotheses),
+        function2_signature_hypotheses=list(analysis2.signature_hypotheses),
+        constrained_fragments=[],
+        pairwise_debug_stats={"analysis_limitation": 1},
+        unknown_reasons=[
+            make_internal_v2_reason_diagnostic(
+                exc.reason_id,
+                stage="S_ANALYSIS_LIMITATION",
+                evidence_refs=(exc.site, *exc.evidence_refs),
+                object_target_key=(
+                    "analysis_limitation_v1",
+                    exc.reason_id,
+                    exc.site,
+                    exc.target_key,
+                ),
+                detail=exc.detail,
+            )
+        ],
+    )
+    record_failure_diagnostic(result, FAILURE_ANALYSIS_LIMITATION, diagnostic)
+    return result
+
+
+def internal_error_result(
+    exc: InternalError,
+    *,
+    analysis1,
+    analysis2,
+    binary1_name: str,
+    binary2_name: str,
+    start_time: float,
+    type_fix_result,
+    retry_count: int,
+    original_signature1: Optional[FunctionSignature],
+    original_signature2: Optional[FunctionSignature],
+) -> EquivalenceResult:
+    """内部エラーの ERROR 結果（handler 本体、Issue #125）。
+
+    `legacy_compatibility_error` に混ぜず `internal_exception` として分類し、
+    stack を診断に残す（rerun manifest は ERROR をそのまま再実行対象にする）。
+    """
+    from scripts.function_tracer_pcode.checker.diagnostics import (
+        FAILURE_INTERNAL_EXCEPTION,
+        record_failure_diagnostic,
+    )
+
+    result = create_error_result(
+        analysis1=analysis1,
+        analysis2=analysis2,
+        binary1_name=binary1_name,
+        binary2_name=binary2_name,
+        error_message=str(exc),
+        start_time=start_time,
+        type_fix_result=type_fix_result,
+        retry_count=retry_count,
+        original_signature1=original_signature1,
+        original_signature2=original_signature2,
+        failure_status="internal_exception",
+        failure_message=str(exc),
+    )
+    record_failure_diagnostic(result, FAILURE_INTERNAL_EXCEPTION, {
+        "exception_type": exc.exception_type,
+        "site": exc.site,
+        "stack": list(exc.stack_lines()),
+        "stack_digest": exc.stack_digest(),
+    })
+    return result

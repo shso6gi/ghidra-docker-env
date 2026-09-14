@@ -36,6 +36,54 @@ from scripts.function_tracer_pcode.core.stage_clock import (  # noqa: F401
 
 DIAGNOSTICS_SCHEMA = "result-diagnostics-v1"
 
+#: `diagnostics["failures"]` に載る typed failure の種類（Issue #125）。
+FAILURE_ANALYSIS_LIMITATION = "analysis_limitation"
+FAILURE_INTERNAL_EXCEPTION = "internal_exception"
+FAILURE_SWALLOWED_EXCEPTIONS = "swallowed_exceptions"
+
+
+def record_failure_diagnostic(result: Any, kind: str, payload: Any) -> None:
+    """`diagnostics["failures"][kind]` を 1 件書く（merge・fail-open）。
+
+    既存の診断（`stages` / `phases` / `boundary_seconds` …）も、同じ `failures`
+    block の他の key も消さない。診断なので、書けなくても判定は変えない。
+    """
+    try:
+        diagnostics = dict(getattr(result, "diagnostics", None) or {})
+        failures = dict(diagnostics.get("failures") or {})
+        failures[kind] = payload
+        diagnostics["failures"] = failures
+        result.diagnostics = diagnostics
+    except Exception:  # 診断は判定を壊さない
+        return
+
+
+def attach_failure_diagnostics(result: Any) -> None:
+    """握り潰した例外の集計を `diagnostics["failures"]` へ載せる（merge・fail-open）。
+
+    catch-all が書いた `analysis_limitation` / `internal_exception` は残したまま、
+    `swallowed_exceptions` だけを足す。集計はペア 1 件の実行の冒頭で
+    `reset_swallowed_exceptions()` により空にしてある。
+
+    **この block は判定にも semantic projection にも効かない**。`to_dict()` には
+    入るので canonical result payload preimage は変わり得る（この module 冒頭の
+    digest 契約と同じ）。
+    """
+    try:
+        from scripts.function_tracer_pcode.core.errors import (
+            swallowed_exception_snapshot,
+            swallowed_exception_total,
+        )
+
+        rows = swallowed_exception_snapshot()
+        payload = {
+            "total": swallowed_exception_total(),
+            "by_site": rows,
+        }
+    except Exception as exc:  # 診断は判定を壊さない
+        payload = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+    record_failure_diagnostic(result, FAILURE_SWALLOWED_EXCEPTIONS, payload)
+
 
 def attach_stage_timing(result: Any, clock: StageClock) -> None:
     """結果オブジェクトの診断ブロックに段階別時間を添付する（判定には効かない）。
@@ -504,6 +552,9 @@ def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
             "callee_analysis": dict(base.get("callee_analysis_cache") or {}),
             "callee_unbound_reuse": dict(base.get("callee_unbound_reuse") or {}),
         },
+        # Issue #125: typed failure（限界 / 内部エラー / 握り潰し）の記録。
+        # 判定にも semantic projection にも効かない診断。
+        "failures": dict(base.get("failures") or {}),
         "validated_once_entries": base.get("validated_once_entries"),
         # Issue #20 PR-20-B3: conditional lane が回ったか、回ったなら何で
         # decisive にならなかったか。判定には効かない観測。

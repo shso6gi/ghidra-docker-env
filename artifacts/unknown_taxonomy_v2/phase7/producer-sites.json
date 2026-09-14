@@ -1,8 +1,37 @@
 {
-  "manifest_digest": "bc73789a80db4a52e189892572b3acd5ec683d8edca5ef267013bfc8fe668b7a",
+  "manifest_digest": "cd874e594529b82e2c17f1250615ce34723033e1ab081d75df0a7833c351bf44",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
-  "site_count": 30,
+  "site_count": 31,
   "sites": [
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
+        "analysis-limitation-producer-v1"
+      ],
+      "branch_or_attempt_contract_id": "analysis-limitation-observed:invocation",
+      "column": 4,
+      "domain": "analysis_limitation",
+      "emitter": "emit_analysis_limitation_signal",
+      "enclosing_function": "observe_analysis_limitation",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "analysis_budget_exceeded"
+          ],
+          "expected_domain": "analysis_limitation",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "analysis_limitation",
+          "slot_id": "analysis-limitation-observed:analysis_budget_exceeded",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 329,
+      "path": "scripts/function_tracer_pcode/authority/domains/analysis_limitation.py",
+      "producer_site_manifest_id": "analysis-limitation-observed",
+      "source_sha256": "912a3bb9f143bf9dee1e7a76aef33135254a16fbe2bd3832e6cd7023528e9ec1"
+    },
     {
       "allowed_dispositions": [
         "ELIGIBLE"
@@ -180,10 +209,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1144,
+      "line": 1151,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/pilot.py",
       "producer_site_manifest_id": "comparison-inconclusive-terminal",
-      "source_sha256": "3da01e7be6674c086f2fb0c4a974921732ed799ad0ab47f86972fadcb9cf36f9"
+      "source_sha256": "558ccf4687be88cdf87b7a9ce3d3bbea4edfdfebc9224f483ae8c0adfff19fe4"
     },
     {
       "allowed_dispositions": [
@@ -509,10 +538,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1782,
+      "line": 1810,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "pairwise-loop-sat-safety-observed",
-      "source_sha256": "65cdba5803731f85907423d1d49092bc79d2a7c220a7c862309dfa73f0230602"
+      "source_sha256": "5ac38ca6684a43f5e2386b539fc04d1f21a63a971816018d59b793e7049386c8"
     },
     {
       "allowed_dispositions": [
@@ -1197,10 +1226,10 @@
       "emitter": "emit_sat_safety_completion_if_observed",
       "enclosing_function": "complete_observed_sat_safety_for_counterexample",
       "expected_cause_slots": [],
-      "line": 1405,
+      "line": 1433,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "sat-safety-counterexample-bound-completed",
-      "source_sha256": "65cdba5803731f85907423d1d49092bc79d2a7c220a7c862309dfa73f0230602"
+      "source_sha256": "5ac38ca6684a43f5e2386b539fc04d1f21a63a971816018d59b793e7049386c8"
     }
   ]
 }

@@ -13,6 +13,12 @@ from scripts.function_tracer_pcode.authority.contracts import authority_digest
 from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
     ABI_WIDTH_READONLY_REASON_SPECS,
 )
+from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+    ANALYSIS_BUDGET_REASON_ID,
+    ANALYSIS_LIMITATION_IDENTITY_SCOPE,
+    ANALYSIS_LIMITATION_OBSERVED_SITE,
+    ANALYSIS_LIMITATION_PRODUCER_SITE_SPECS,
+)
 from scripts.function_tracer_pcode.authority.domains.call_effect import CALL_EFFECT_REASON_SPECS
 from scripts.function_tracer_pcode.authority.domains.call_effect_sites import (
     CALL_EFFECT_PROOF_BATCH_SITE,
@@ -34,6 +40,7 @@ from scripts.function_tracer_pcode.authority.domains.sat_safety_sites import (
 
 
 EMITTERS = frozenset({
+    "emit_analysis_limitation_signal",
     "emit_outcome_partition_signal",
     "emit_sat_safety_signal",
     "emit_sat_safety_completion_if_observed",
@@ -46,6 +53,7 @@ EMITTERS = frozenset({
 })
 
 _DOMAIN_BY_EMITTER = {
+    "emit_analysis_limitation_signal": "analysis_limitation",
     "emit_outcome_partition_signal": "return_outcome",
     "emit_sat_safety_signal": "sat_safety",
     "emit_sat_safety_completion_if_observed": "sat_safety",
@@ -64,10 +72,15 @@ _DOMAIN_BY_SITE_OVERRIDE = {
 }
 
 _SEALED_SITE_SPEC_IDS = {
+    "ANALYSIS_LIMITATION_OBSERVED_SITE": ANALYSIS_LIMITATION_OBSERVED_SITE.site_id,
     "CALL_EFFECT_PROOF_BATCH_SITE": CALL_EFFECT_PROOF_BATCH_SITE.site_id,
 }
 
 _PRODUCER_IDS_BY_SITE = {
+    **{
+        spec.site_id: (spec.producer_id,)
+        for spec in ANALYSIS_LIMITATION_PRODUCER_SITE_SPECS
+    },
     "call-effect-producer-blocker": (
         "internal_typed_pure_direct_call_stage_producer",
     ),
@@ -147,6 +160,10 @@ _PRODUCER_IDS_BY_SITE = {
 }
 
 _DISPOSITIONS_BY_SITE = {
+    **{
+        spec.site_id: (spec.disposition,)
+        for spec in ANALYSIS_LIMITATION_PRODUCER_SITE_SPECS
+    },
     "call-effect-producer-blocker": ("ELIGIBLE",),
     "call-effect-producer-prerequisite": ("ELIGIBLE",),
     **{
@@ -189,6 +206,10 @@ _DISPOSITIONS_BY_SITE = {
 # site must update this table explicitly; domain-wide registry expansion is
 # forbidden.
 _CAUSE_REASON_IDS_BY_SITE = {
+    **{
+        spec.site_id: spec.reason_ids
+        for spec in ANALYSIS_LIMITATION_PRODUCER_SITE_SPECS
+    },
     "comparison-inconclusive-terminal": (
         "comparison_equivalence_closure_unproven",
     ),
@@ -294,6 +315,7 @@ _REASON_IDENTITY_SCOPES = {
     "counterexample_partition_replay_ambiguous": "RELATIONAL",
     "counterexample_replay_unproven": "RELATIONAL",
     "comparison_equivalence_closure_unproven": "RELATIONAL",
+    ANALYSIS_BUDGET_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,
 }
 
 

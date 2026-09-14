@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
     UnknownSmtExtensionWidthError,
     UnsupportedSmtOperatorError,
 )
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation, InternalError
 from scripts.function_tracer_pcode.core.stage_clock import open_stage_region, stage_region
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner, ParallelResult
 from scripts.function_tracer_pcode.proof.formula import FormulaBuilder
@@ -61,8 +62,10 @@ from scripts.function_tracer_pcode.checker.recurrence_promotion import (
     prepare_recurrence_promotion,
 )
 from scripts.function_tracer_pcode.checker.result_assembly import (
+    analysis_limitation_result,
     assemble_equivalence_result,
     canonical_abi_error_result,
+    internal_error_result,
     unsupported_smt_result,
 )
 from scripts.function_tracer_pcode.checker.strategy_execution import (
@@ -802,6 +805,42 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                     original_signature2=original_signature2,
                 )
 
+            except AnalysisLimitation as e:
+                # 6b-5 / Issue #125: 解析の限界。判定は帰属先 cause が決める。
+                self._debug_print(f"Check stopped by an analysis limitation: {e}")
+                return analysis_limitation_result(
+                    e,
+                    session=getattr(self, "_active_v2_dual_write_pilot_session", None),
+                    analysis1=analysis1,
+                    analysis2=analysis2,
+                    binary1_name=binary1_name,
+                    binary2_name=binary2_name,
+                    start_time=start_time,
+                    type_fix_result=type_fix_result,
+                    retry_count=retry_count,
+                    original_signature1=original_signature1,
+                    original_signature2=original_signature2,
+                )
+
+            except InternalError as e:
+                # Issue #125: 内部エラーは `internal_exception` として分類する。
+                self._debug_print(f"Internal error in check: {e}")
+                if self.debug:
+                    import traceback
+                    print(traceback.format_exc())
+                return internal_error_result(
+                    e,
+                    analysis1=analysis1,
+                    analysis2=analysis2,
+                    binary1_name=binary1_name,
+                    binary2_name=binary2_name,
+                    start_time=start_time,
+                    type_fix_result=type_fix_result,
+                    retry_count=retry_count,
+                    original_signature1=original_signature1,
+                    original_signature2=original_signature2,
+                )
+
             except Exception as e:
                 self._debug_print(f"Exception in check: {e}")
                 if self.debug:
@@ -825,11 +864,21 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                         original_signature2=original_signature2,
                     )
             
-                return self._create_error_result(
-                    analysis1, analysis2, binary1_name, binary2_name,
-                    str(e), start_time,
-                    type_fix_result, retry_count,
-                    original_signature1, original_signature2
+                # Issue #125: 型の付いていない例外は内部エラーとして分類する
+                # （`legacy_compatibility_error` には落とさない）。
+                return internal_error_result(
+                    InternalError(
+                        e, site="checker.checker.EquivalenceChecker.check",
+                    ),
+                    analysis1=analysis1,
+                    analysis2=analysis2,
+                    binary1_name=binary1_name,
+                    binary2_name=binary2_name,
+                    start_time=start_time,
+                    type_fix_result=type_fix_result,
+                    retry_count=retry_count,
+                    original_signature1=original_signature1,
+                    original_signature2=original_signature2,
                 )
 
         finally:

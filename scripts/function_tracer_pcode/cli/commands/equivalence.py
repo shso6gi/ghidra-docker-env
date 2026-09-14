@@ -298,9 +298,16 @@ def run_equivalence_check(args):
     （Issue #122）。
     """
     start_time = time.time()
-    from scripts.function_tracer_pcode.checker.diagnostics import StageClock, attach_stage_timing
+    from scripts.function_tracer_pcode.checker.diagnostics import (
+        StageClock,
+        attach_failure_diagnostics,
+        attach_stage_timing,
+    )
     from scripts.function_tracer_pcode.checker.cause_aggregate import attach_cause_aggregate
+    from scripts.function_tracer_pcode.core.errors import reset_swallowed_exceptions
 
+    # Issue #125: 握り潰した例外の集計はペア 1 件の実行ごとに取り直す。
+    reset_swallowed_exceptions()
     stage_clock = StageClock()
 
     def _get_bool_arg(name: str, default: bool = False) -> bool:
@@ -542,8 +549,10 @@ def run_equivalence_check(args):
         )
 
     attach_stage_timing(result, stage_clock)
-    # Issue #128: 添付順は attach_stage_timing -> attach_cause_aggregate ->
-    # to_string -> to_dict -> bundle。aggregate は preimage を組む前に確定させる。
+    # Issue #125 / #128: 添付順は attach_stage_timing -> attach_failure_diagnostics
+    # -> attach_cause_aggregate -> to_string -> to_dict -> bundle。診断は
+    # preimage を組む前に確定させる（確定後に payload を書き換えない）。
+    attach_failure_diagnostics(result)
     attach_cause_aggregate(result)
     emission_started = time.monotonic()
     output_content = result.to_string(

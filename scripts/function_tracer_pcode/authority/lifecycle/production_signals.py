@@ -24,6 +24,9 @@ from scripts.function_tracer_pcode.authority.lifecycle.production_context import
     comparison_receipt_authority,
     production_pilot_session_scope,
 )
+from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+    AnalysisLimitationBlockerSignal,
+)
 from scripts.function_tracer_pcode.authority.domains.comparison_closure import (
     ComparisonClosureProductionSignal,
 )
@@ -1266,6 +1269,31 @@ def emit_comparison_closure_signal(
 ) -> int:
     session = active_production_pilot_session()
     if session is None:
+        return 0
+    if getattr(session, "phase7_runtime", None) is not None:
+        session.record_phase7_pre_emission_activation(
+            producer_site_manifest_id, signal
+        )
+    emit = getattr(session, "emit_domain_signal", None)
+    if not callable(emit):
+        raise TypeError("active production pilot session lacks signal authority")
+    return int(emit(signal))
+
+
+def emit_analysis_limitation_signal(
+    signal: AnalysisLimitationBlockerSignal,
+    *, producer_site_manifest_id: Optional[str] = None,
+) -> int:
+    """Return emitted event count; remain a strict no-op when pilot is disabled."""
+
+    session = active_production_pilot_session()
+    if session is None:
+        return 0
+    already_observed = getattr(session.domain_signal_encoder, "has_observed", None)
+    if callable(already_observed) and already_observed(session, signal):
+        # Re-observing the same limitation is not a new producer activation.  In
+        # particular, do not open a Phase-7 discovery record which would
+        # otherwise materialize the encoder's empty deduplication result.
         return 0
     if getattr(session, "phase7_runtime", None) is not None:
         session.record_phase7_pre_emission_activation(

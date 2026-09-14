@@ -27,6 +27,10 @@ class LegacyBoundaryErrorKind(str, Enum):
     UNEXPECTED_PAIRWISE_STATE = "unexpected_pairwise_state"
     COMPATIBILITY_ERROR = "legacy_compatibility_error"
     RETURN_ABI_AUTHORITY_INVALID = "return_abi_authority_invalid"
+    # Issue #125: typed analysis failures。既存 5 member の値は変えない（追加のみ）。
+    INTERNAL_EXCEPTION = "internal_exception"
+    UNREGISTERED_REASON = "unregistered_reason"
+    LIMITATION_UNATTRIBUTED = "limitation_unattributed"
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,11 @@ def _issue_legacy_boundary_error(
         ),
         "return_abi_authority_invalid": (
             LegacyBoundaryErrorKind.RETURN_ABI_AUTHORITY_INVALID
+        ),
+        "internal_exception": LegacyBoundaryErrorKind.INTERNAL_EXCEPTION,
+        "unregistered_reason": LegacyBoundaryErrorKind.UNREGISTERED_REASON,
+        "limitation_unattributed": (
+            LegacyBoundaryErrorKind.LIMITATION_UNATTRIBUTED
         ),
     }.get(raw_status, LegacyBoundaryErrorKind.COMPATIBILITY_ERROR)
     diagnostic_digest = authority_digest({
