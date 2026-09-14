@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import os
 import signal
 import subprocess
@@ -1190,3 +1191,294 @@ def test_child_registers_handler_before_jvm_and_survives_signal(tmp_path):
     assert jvm_rows[0]["payload"]["jvm_started"] is True
     assert jvm_rows[0]["payload"]["python_threads"] >= 2
     assert registered[0]["seq"] < jvm_rows[0]["seq"]
+
+
+# --------------------------------------------------------------------------
+# 11. runner: 1 journal = 1 execution（再実行で前回の行を残さない）
+# --------------------------------------------------------------------------
+#
+# journal path は pair 固定（`${log%.log}.stage.jsonl`）で、`StageJournal` は
+# 追記で開く。同じ pair をもう一度実行したときに前回の journal が残っていると、
+# 1 file の中で `seq` が 1..N -> 1..M と巻き戻り、古い `handler_registered` /
+# pid / start_token が current execution の evidence に見えてしまう。
+#
+# 契約: runner は「この pair を新しく実行する」と確定したあと（skip 判定は済み）、
+# child を起こす前に既存 journal を捨てる。`.log` を `>` で開き直すのと同じ境界。
+#
+# ここでは runner の **実際の `run_pair`** を取り出して bash で走らせる。
+# 呼び先はすべて stub にするので途中で失敗してよい（`|| true`）。判定するのは
+# 「journal が消えたか」と「消えたのは最初の child 起動より前か」だけなので、
+# `rm` を child 起動より後ろへ動かすとこの test が落ちる。
+
+RUNNERS = ("eqbench_run_all_32jobs.sh", "neqbench_run_all_32jobs.sh")
+
+
+def _extract_shell_function(source: str, name: str) -> str:
+    """`name() {` から、桁 0 の `}` までを取り出す（runner の関数定義の形）。"""
+    lines = source.splitlines()
+    start = next(
+        index for index, line in enumerate(lines) if line.startswith(f"{name}() {{")
+    )
+    for index in range(start + 1, len(lines)):
+        if lines[index] == "}":
+            return "\n".join(lines[start:index + 1])
+    raise AssertionError(f"unterminated shell function {name}")
+
+
+_RUN_PAIR_HARNESS = """
+set -u
+export PATH="__STUBS__:$PATH"
+
+# runner が run_pair の外で用意する変数（この test で意味を持つものだけ）。
+EQBENCH_RUN_TMPDIR="__TMP__/runtmp"
+RUN_TMP="__TMP__/runtmp"
+SCRIPT_DIR="__TMP__"
+OUTPUT_BASE_DIR="__TMP__/out"
+PYTHON_BIN="__STUBS__/python-probe"
+EQUIV_TIMEOUT=10; DECOMPILE_TIMEOUT=60; PAIRWISE_TIMEOUT=5; PAIRWISE_TIMEOUT_HARD=30
+PAIR_PROCESS_TIMEOUT_SECONDS=240; PAIR_PROCESS_KILL_AFTER_SECONDS=30
+PAIR_PROCESS_TIMEOUT=240s; PAIR_PROCESS_KILL_AFTER=30s
+PAIR_PROCESS_DEADLINE_POLICY_DIGEST=deadbeef
+PROCESS_SUPERVISOR_KEY_ID=k; PROCESS_SUPERVISOR_KEY_FILE=/dev/null
+PROCESS_WORKER_KEY_ID=k; PROCESS_WORKER_KEY_FILE=/dev/null
+SUPERVISOR_KEY_ID=k; SUPERVISOR_KEY=/dev/null
+WORKER_KEY_ID=k; WORKER_KEY=/dev/null
+PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE=/dev/null
+PAIR_STATUS_VERIFICATION_KEY_FILE=/dev/null
+PAIR_PRIVATE_KEY=/dev/null; PAIR_PUBLIC_KEY=/dev/null
+EQBENCH_DEBUG=0; EQBENCH_PROGRESS_INTERVAL_SECONDS=1
+FT_EXPANDER_DEDUP_CASE_LIMIT=0; FT_CALLEE_UNBOUND_REUSE=0
+FT_CALLEE_UNBOUND_REUSE_SHADOW=0
+EQBENCH_TMPDIR="__TMP__/runtmp"; PROCESS_CLEANUP_FAILURES="__TMP__/cleanup-failures"
+SOURCE_PAIR_COUNT=1
+
+# runner の他の関数はこの test の対象ではないので握り潰す。
+write_pair_progress_receipt() { :; }
+supervisor_projection_is_terminal() { return 0; }
+validate_current_pair_status() { printf 'UNKNOWN'; }
+cleanup_pair_process_authority_with_run_health() { return 0; }
+progress_update() { :; }
+
+__FUNCTION__
+
+run_pair __ARGS__ || true
+"""
+
+_PYTHON_PROBE = """#!/bin/sh
+# 最初に child 側の python が呼ばれた時点で、前回 execution の成果物が
+# 残っていたら記録する（journal と、journal が正本として宣言する dump 退避先）。
+if [ ! -f "$PROBE_MARKER" ]; then
+  state=""
+  if [ -f "$PROBE_JOURNAL" ]; then state="journal_present"; else state="journal_absent"; fi
+  if [ -f "$PROBE_ARTIFACT" ]; then
+    state="$state artifact_present"
+  else
+    state="$state artifact_absent"
+  fi
+  echo "$state" > "$PROBE_MARKER"
+fi
+echo "stub"
+exit 0
+"""
+
+
+def _run_pair_harness(tmp_path, runner, journal, extra_env=None):
+    """runner の実 `run_pair` を stub 環境で 1 回走らせる。"""
+    stubs = tmp_path / "stubs"
+    stubs.mkdir(exist_ok=True)
+    probe = stubs / "python-probe"
+    probe.write_text(_PYTHON_PROBE, encoding="utf-8")
+    probe.chmod(0o755)
+    # /usr/bin/time は eq runner が直接叩くので、同名 stub を PATH ではなく
+    # 関数で潰せない。存在しなくても run_pair は先へ進めないだけで、判定には
+    # 影響しない（journal の削除はそれより前）。
+    (tmp_path / "runtmp").mkdir(exist_ok=True)
+    (tmp_path / "out").mkdir(exist_ok=True)
+
+    source = (REPO_ROOT / runner).read_text(encoding="utf-8")
+    function = _extract_shell_function(source, "run_pair")
+    out_dir = journal.parent
+    if runner.startswith("eq"):
+        args = ('"sample" "f" "B1" "B2" "/left" "/right" "%s" 1 1 "/target"' % out_dir)
+    else:
+        args = ('"sample" "f" "N_B1" "O_B2" "/left" "/right" "%s" 1 1 "/target" 1 1 1'
+                % out_dir)
+    script = (
+        _RUN_PAIR_HARNESS
+        .replace("__STUBS__", str(stubs))
+        .replace("__TMP__", str(tmp_path))
+        .replace("__FUNCTION__", function)
+        .replace("__ARGS__", args)
+    )
+    marker = tmp_path / "probe-marker"
+    if marker.exists():
+        marker.unlink()
+    env = dict(os.environ)
+    env.update({
+        "PROBE_MARKER": str(marker),
+        "PROBE_JOURNAL": str(journal),
+        "PROBE_ARTIFACT": str(_pair_artifact_path(journal)),
+    })
+    env.update(extra_env or {})
+    subprocess.run(["bash", "-c", script], env=env, capture_output=True, timeout=120)
+    return marker
+
+
+def _pair_artifact_path(journal):
+    """journal が正本として宣言する dump 退避先（run dir の `.runtime-metrics`）。"""
+    name = journal.name[: -len(".stage.jsonl")]
+    return journal.parent / ".runtime-metrics" / f"{name}.stack-dump.txt"
+
+
+def _pair_journal_path(tmp_path, runner):
+    out = tmp_path / "out" / "sample" / "f"
+    out.mkdir(parents=True, exist_ok=True)
+    name = "f_B1_B2" if runner.startswith("eq") else "f_N_B1_O_B2"
+    return out / f"{name}.stage.jsonl"
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_runner_drops_the_previous_journal_before_relaunching_a_pair(tmp_path, runner):
+    """再実行する pair の journal は、child を起こす前に捨てられる。"""
+    journal = _pair_journal_path(tmp_path, runner)
+    log = journal.with_name(journal.name[: -len(".stage.jsonl")] + ".log")
+    # 前回 execution の journal（seq 1..3、古い pid / handler_registered つき）。
+    previous = StageJournal(journal)
+    previous.append(EVENT_HANDLER_REGISTERED, stage="stack_dump_handler",
+                    payload={"pid": 424242, "start_token": "linux-proc-starttime-1"})
+    previous.append(EVENT_STAGE_START, stage="check")
+    previous.append(EVENT_STAGE_END, stage="check", seconds=1.0)
+    previous.close()
+    log.write_text("previous execution log\n", encoding="utf-8")
+    # 前回 execution の dump 退避先も置いておく（PR-124-C が読む正本 path）。
+    artifact = _pair_artifact_path(journal)
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("stack dump from the previous execution\n", encoding="utf-8")
+    assert journal.exists()
+    old_rows, _ = read_journal(journal)
+    assert len(old_rows) == 3
+
+    marker = _run_pair_harness(tmp_path, runner, journal)
+
+    # 1. 前回の journal も、正本として宣言する dump 退避先の残骸も残っていない。
+    assert not journal.exists(), (
+        f"{runner}: run_pair left the previous execution's journal in place"
+    )
+    assert not artifact.exists(), (
+        f"{runner}: run_pair left the previous execution's dump artifact in place"
+    )
+    # 2. 消えたのは最初の child 起動より前（= 古い行 / 古い dump が current の
+    #    evidence になる窓が無い）。
+    assert marker.exists(), f"{runner}: run_pair never reached a child launch"
+    assert marker.read_text().split() == ["journal_absent", "artifact_absent"]
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_only_run_pair_removes_a_stage_journal(runner):
+    """journal を消すのは `run_pair`（= 新規実行が確定した経路）だけ。
+
+    skip した pair の journal を消す経路を作らないことの静的な裏付け。
+    skip 側の実挙動そのものは固定 subset の再実行（PR 本文の E1）で確認する。
+    """
+    source = (REPO_ROOT / runner).read_text(encoding="utf-8")
+    # journal path を持つ変数名を assignment から拾う（名前を test に埋めない）。
+    holders = set(re.findall(r'(\w+)="\$\{log[^"]*%\.log\}\.stage\.jsonl"', source))
+    assert holders, "no shell variable holds the pair journal path"
+    removals = [
+        line.strip() for line in source.splitlines()
+        if line.strip().startswith("rm ")
+        and any(f'"${holder}"' in line for holder in holders)
+    ]
+    assert len(removals) == 1, removals
+    run_pair = _extract_shell_function(source, "run_pair")
+    assert removals[0] in run_pair
+    # dump 退避先の残骸も同じ関数の中で 1 回だけ捨てる。
+    artifact_holders = set(
+        re.findall(r'^\s*(?:local\s+)?(\w+)=.*\.stack-dump\.txt', source, re.M)
+    ) & set(re.findall(r'rm -f -- "\$(\w+)"', source))
+    assert len(artifact_holders) == 1, artifact_holders
+    # 削除は supervisor / equiv コマンドの組み立てより前にある。
+    assert run_pair.index(removals[0]) < run_pair.index("supervisor_cmd")
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_a_fresh_journal_restarts_the_sequence_at_one(tmp_path, runner):
+    """削除後に同じ path へ書き直すと seq は 1 から始まる（巻き戻りが無い）。"""
+    journal = _pair_journal_path(tmp_path, runner)
+    stale = StageJournal(journal)
+    for _ in range(4):
+        stale.append(EVENT_STAGE_START, stage="check")
+    stale.close()
+    assert [row["seq"] for row in read_journal(journal)[0]] == [1, 2, 3, 4]
+
+    _run_pair_harness(tmp_path, runner, journal)
+    assert not journal.exists()
+
+    # 新しい child が同じ path を開き直した後の journal。
+    fresh = StageJournal(journal)
+    fresh.append(EVENT_NOTE, payload={"note": "pair_journal_opened"})
+    fresh.append(EVENT_HANDLER_REGISTERED, stage="stack_dump_handler")
+    fresh.close()
+    rows, broken = read_journal(journal)
+    assert broken == 0
+    assert [row["seq"] for row in rows] == [1, 2]
+    # 1 journal = 1 execution: 開始行はちょうど 1 本。
+    opened = [
+        row for row in rows
+        if row["event"] == EVENT_NOTE and row["payload"].get("note") == "pair_journal_opened"
+    ]
+    assert len(opened) == 1 and opened[0]["seq"] == 1
+
+
+def test_a_journal_holding_two_executions_is_detectable(tmp_path):
+    """混在した journal は「検出できる」形にしておく（回帰時に黙って通さない）。"""
+    journal = tmp_path / "mixed.stage.jsonl"
+    first = StageJournal(journal)
+    first.append(EVENT_NOTE, payload={"note": "pair_journal_opened"})
+    first.append(EVENT_STAGE_END, stage="check", seconds=1.0)
+    first.close()
+    second = StageJournal(journal)  # 削除せずに開き直す = 回帰したときの姿
+    second.append(EVENT_NOTE, payload={"note": "pair_journal_opened"})
+    second.close()
+
+    rows, _ = read_journal(journal)
+    seqs = [row["seq"] for row in rows]
+    opened = [
+        row for row in rows
+        if row["event"] == EVENT_NOTE and row["payload"].get("note") == "pair_journal_opened"
+    ]
+    # 検出条件はこの 2 つ（実 run の evidence でも同じ 2 つを数える）。
+    assert seqs != sorted(seqs) or len(set(seqs)) != len(seqs)
+    assert len(opened) == 2
+
+
+def test_registered_before_jvm_is_a_probe_observation_not_a_proof(monkeypatch):
+    """`jvm_already_started()` は判断できないとき False を返す（= 観測しなかった）。
+
+    したがって `registered_before_jvm: true` は「probe で JVM started を観測
+    しなかった」であって、それ単独で「JVM より前だった」ことの証明ではない。
+    production path の根拠は呼び出し順（`test_the_handler_is_installed_before_
+    the_jvm_starts_in_the_cli`）と実 JVM 子プロセス test の行順序。
+    """
+    # jpype が無い -> 観測できない -> False
+    monkeypatch.delitem(sys.modules, "jpype", raising=False)
+    assert jvm_already_started() is False
+    # jpype はあるが probe が壊れている -> 観測できない -> False（true とは言わない）
+    class _Broken:
+        @staticmethod
+        def isJVMStarted():
+            raise RuntimeError("jvm probe unavailable")
+
+    monkeypatch.setitem(sys.modules, "jpype", _Broken)
+    assert jvm_already_started() is False
+    # probe が「起動済み」と答えたときだけ True
+    monkeypatch.setitem(sys.modules, "jpype", SimpleNamespace(isJVMStarted=lambda: True))
+    assert jvm_already_started() is True
+
+
+def test_chain_false_is_documented_as_no_chaining_not_as_override_protection():
+    """`chain=False` の説明が「後からの上書きを防ぐ」になっていないこと。"""
+    source = (PACKAGE_ROOT / "cli" / "pair_diagnostics.py").read_text(encoding="utf-8")
+    assert "previous handler へ連鎖しない" in source
+    assert "あとから別の handler が" in source
+    assert "防ぐ設定ではない" in source
