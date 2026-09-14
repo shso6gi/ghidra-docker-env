@@ -17,8 +17,11 @@ from scripts.function_tracer_pcode.reporting.result_summary import (
     FAILURE_EVIDENCE_KEY,
     FAILURE_INTERNAL_BY_SITE_KEY,
     FAILURE_INTERNAL_BY_SITE_TITLE,
+    FAILURE_INTERNAL_SURFACE,
     FAILURE_SWALLOWED_BY_TYPE_KEY,
     FAILURE_SWALLOWED_BY_TYPE_TITLE,
+    FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY,
+    FAILURE_SWALLOWED_SURFACE,
     FAILURE_SWALLOWED_TOTAL_KEY,
     STATUS_EQ,
     STATUS_ERROR,
@@ -53,16 +56,24 @@ _CAUSAL_EVIDENCE_RE = re.compile(r"^\s+Causal evidence\s*:\s*(?P<value>.*?)\s*$"
 _CAUSAL_BLOCK_RE = re.compile(
     r"(?P<name>[a-z_]+) observed (?P<observed>\d+) / missing (?P<missing>\d+)"
 )
-# Issue #125 PR-125-B: typed failure 診断の観測件数と握り潰し合計。
-# `failures` ブロックを読めた pair 数（observed）と読めなかった pair 数
-# (missing) を分けて往復させ、「key が無い」を「0 件」と読ませない。
+# Issue #125 PR-125-B: typed failure 診断の evidence と握り潰し合計。
+# evidence は surface ごと（握り潰し台帳 / 内部エラー）。observed / missing /
+# malformed を分けて往復させ、「読めなかった」を「0 件」と読ませない。
 _FAILURE_EVIDENCE_RE = re.compile(
-    r"^\s+Results with failure diagnostics\s*:\s*(?P<observed>\d+)"
-    r"\s*\(missing (?P<missing>\d+), malformed (?P<malformed>\d+)\)\s*$"
+    r"^\s+(?P<label>Swallowed|Internal) exception evidence\s*:\s*"
+    r"(?P<state>complete|partial|unknown)\s*"
+    r"\(observed (?P<observed>\d+) / missing (?P<missing>\d+)"
+    r" / malformed (?P<malformed>\d+)\)\s*$"
 )
+# 正確な合計（evidence complete）と、観測できた下限（incomplete）を別の形で書く。
 _SWALLOWED_TOTAL_RE = re.compile(
-    r"^\s+Swallowed exceptions total\s*:\s*(?P<total>\d+)\s*$"
+    r"^\s+Swallowed exceptions total\s*:\s*"
+    r"(?:(?P<exact>\d+)|unknown \(observed (?P<observed>\d+)\))\s*$"
 )
+_FAILURE_EVIDENCE_SURFACES = {
+    "Swallowed": FAILURE_SWALLOWED_SURFACE,
+    "Internal": FAILURE_INTERNAL_SURFACE,
+}
 
 
 def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
@@ -88,8 +99,9 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
         FAILURE_SWALLOWED_BY_TYPE_KEY: {},
         FAILURE_INTERNAL_BY_SITE_KEY: {},
     }
-    failure_evidence: Dict[str, int] = {}
-    swallowed_total: Optional[int] = None
+    failure_evidence: Dict[str, Dict[str, Any]] = {}
+    swallowed_exact_total: Optional[int] = None
+    swallowed_observed_total: Optional[int] = None
     active_section: Optional[str] = None
     # Issue #128: `(unknown)` = 証拠が無い、`(none)` = 実際に 0 件。どちらも
     # 空の section になるので、marker を見た section だけ別に記録する。
@@ -138,7 +150,9 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
             continue
         failure_evidence_match = _FAILURE_EVIDENCE_RE.match(line)
         if failure_evidence_match:
-            failure_evidence = {
+            surface = _FAILURE_EVIDENCE_SURFACES[failure_evidence_match.group("label")]
+            failure_evidence[surface] = {
+                "state": failure_evidence_match.group("state"),
                 "observed": int(failure_evidence_match.group("observed")),
                 "missing": int(failure_evidence_match.group("missing")),
                 "malformed": int(failure_evidence_match.group("malformed")),
@@ -147,7 +161,11 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
             continue
         swallowed_total_match = _SWALLOWED_TOTAL_RE.match(line)
         if swallowed_total_match:
-            swallowed_total = int(swallowed_total_match.group("total"))
+            exact = swallowed_total_match.group("exact")
+            observed = swallowed_total_match.group("observed")
+            # `unknown (observed N)` は下限であって合計ではない。exact は None。
+            swallowed_exact_total = None if exact is None else int(exact)
+            swallowed_observed_total = int(exact if exact is not None else observed)
             active_section = None
             continue
         causal_match = _CAUSAL_EVIDENCE_RE.match(line)
@@ -210,9 +228,10 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
         "diagnostic_evidence": diagnostic_evidence,
         "causal_evidence_counts": causal_evidence_counts,
         FAILURE_EVIDENCE_KEY: failure_evidence,
-        # 行が無い（PR-125-B 以前の summary）ときは 0。観測できたかどうかは
-        # `FAILURE_EVIDENCE_KEY` が空 dict かどうかで区別する。
-        FAILURE_SWALLOWED_TOTAL_KEY: 0 if swallowed_total is None else swallowed_total,
+        # 行が無い（PR-125-B 以前の summary）ときも、evidence が incomplete な
+        # ときも exact total は `None`。**0 に変換しない**。下限は別 key に持つ。
+        FAILURE_SWALLOWED_TOTAL_KEY: swallowed_exact_total,
+        FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY: swallowed_observed_total,
         **sections,
     }
 

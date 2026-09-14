@@ -5,14 +5,21 @@ PR-125-A が結果 JSON に書く `diagnostics["failures"]` を run 単位で集
 `result_summary --overall-summary` に 2 節（`Swallowed exceptions by type:` /
 `Internal exceptions by site:`）として出す部分の契約を固定する。
 
-固定する性質:
+中心にあるのは **evidence 契約**（未観測を 0 件と読ませない）:
 
-* 握り潰し例外を **型別 / site 別**に、内部エラーを **site 別**に数える。
+* evidence は **surface ごと**に持つ（握り潰し台帳 / 内部エラー）。
+  片方が壊れても、もう片方の観測は有効なまま残す。
+* `complete`（missing 0 / malformed 0）のときだけ、空集計を `(none)` と、
+  合計を exact な整数と名乗れる。
+* `partial` / `unknown` では空集計は `(unknown)`、合計は
+  `unknown (observed N)` = **観測できた下限**として出す。
+* partial でも、観測できた非 0 count は捨てない。
+
+その他:
+
 * 複数 pair は加算される。1 pair の log に結果 payload が複数あっても
   最終結果だけを読む（同じ pair を二重に数えない）。
-* `failures` block が無い log（PR-125-A 以前）でも落ちず、**「key が無い」を
-  「0 件」と読ませない**（`(unknown)` と `(none)` を書き分ける）。
-* 壊れた診断は件数に数えるだけで、summary 全体を落とさない（fail-open）。
+* 壊れた診断は surface ごとに数えるだけで、summary 全体を落とさない。
 * 新 2 節は parser を往復し、後続 section を飲み込まない。
 * PR-128-A で確定した既存 section は 1 文字も変わらない。
 
@@ -37,13 +44,20 @@ from scripts.function_tracer_pcode.core.errors import (
     reset_swallowed_exceptions,
 )
 from scripts.function_tracer_pcode.reporting.result_summary import (
+    EVIDENCE_COMPLETE,
+    EVIDENCE_PARTIAL,
+    EVIDENCE_UNKNOWN,
     FAILURE_EVIDENCE_KEY,
     FAILURE_INTERNAL_BY_SITE_KEY,
     FAILURE_INTERNAL_BY_SITE_TITLE,
+    FAILURE_INTERNAL_SURFACE,
     FAILURE_SWALLOWED_BY_SITE_KEY,
     FAILURE_SWALLOWED_BY_TYPE_KEY,
     FAILURE_SWALLOWED_BY_TYPE_TITLE,
+    FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY,
+    FAILURE_SWALLOWED_SURFACE,
     FAILURE_SWALLOWED_TOTAL_KEY,
+    FailureEvidence,
     aggregate_validation_logs_by_function,
     build_run_health_summary,
     format_failure_diagnostics_summary,
@@ -92,7 +106,7 @@ def _write_log(tmp_path, name, *payloads, human_result="Result: UNKNOWN"):
     return path
 
 
-def _records(tmp_path, *logs):
+def _records(*logs):
     return aggregate_validation_logs_by_function(logs).overall.records
 
 
@@ -132,8 +146,321 @@ def _producer_internal_block(site, exc):
     return dict(result.diagnostics["failures"])
 
 
+def _round_trip(tmp_path, *logs, name="overall_summary.txt"):
+    """text → parser → structured health を 1 本で返す。"""
+
+    summary = aggregate_validation_logs_by_function(logs)
+    text = format_overall_results_summary(summary)
+    path = tmp_path / name
+    path.write_text(text + "\n", encoding="utf-8")
+    return text, parse_overall_summary_health(path), build_run_health_summary(summary)
+
+
+def _failure_block(text):
+    """`Failure diagnostics:` block だけを取り出す（他 section を混ぜない）。"""
+
+    lines = text.splitlines()
+    start = lines.index("  Failure diagnostics:")
+    end = start
+    while end < len(lines) and lines[end].strip():
+        end += 1
+    return "\n".join(lines[start:end])
+
+
 # ---------------------------------------------------------------------------
-# 集計
+# evidence contract: 必須 regression 1〜8
+# ---------------------------------------------------------------------------
+
+
+def test_1_complete_observed_zero(tmp_path):
+    """observed=2 / missing=0 / 0 件 → `(none)` と exact `0`。"""
+
+    logs = tuple(
+        _write_log(
+            tmp_path,
+            f"f/f_B1_B{index + 2}.log",
+            _payload(failures=_producer_swallowed_block(())),
+        )
+        for index in range(2)
+    )
+    summary = summarize_failure_diagnostics(_records(*logs))
+
+    assert summary.swallowed_evidence == FailureEvidence(observed=2)
+    assert summary.internal_evidence == FailureEvidence(observed=2)
+    assert summary.swallowed_evidence.state == EVIDENCE_COMPLETE
+    assert summary.swallowed_exact_total == 0
+    assert summary.swallowed_observed_total == 0
+
+    text, parsed, built = _round_trip(tmp_path, *logs)
+    block = _failure_block(text)
+    assert "Swallowed exception evidence: complete (observed 2 / missing 0 / malformed 0)" in block
+    assert "Swallowed exceptions total  : 0" in block
+    assert f"{FAILURE_SWALLOWED_BY_TYPE_TITLE}:\n      (none)" in block
+    assert f"{FAILURE_INTERNAL_BY_SITE_TITLE}:\n      (none)" in block
+    assert "(unknown)" not in block
+    for health in (parsed, built):
+        assert health[FAILURE_SWALLOWED_TOTAL_KEY] == 0
+        assert health[FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY] == 0
+        assert health[FAILURE_EVIDENCE_KEY][FAILURE_SWALLOWED_SURFACE]["state"] == EVIDENCE_COMPLETE
+        assert health[FAILURE_EVIDENCE_KEY][FAILURE_INTERNAL_SURFACE]["state"] == EVIDENCE_COMPLETE
+    rendered = format_run_health_summary(built)
+    assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: 0" in rendered
+    assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    (none)" in rendered
+    assert f"  {FAILURE_INTERNAL_BY_SITE_KEY}:\n    (none)" in rendered
+
+
+def test_2_all_missing_is_unknown_not_zero(tmp_path):
+    """observed=0 / missing>0 → 両 surface `(unknown)`、exact total を主張しない。"""
+
+    logs = (
+        _write_log(tmp_path, "f/f_B1_B2.log", _payload()),
+        _write_log(tmp_path, "f/f_B1_B3.log", human_result="Result: UNKNOWN"),
+    )
+    summary = summarize_failure_diagnostics(_records(*logs))
+
+    assert summary.swallowed_evidence == FailureEvidence(missing=2)
+    assert summary.swallowed_evidence.state == EVIDENCE_UNKNOWN
+    assert summary.internal_evidence.state == EVIDENCE_UNKNOWN
+    assert summary.swallowed_exact_total is None
+
+    text, parsed, built = _round_trip(tmp_path, *logs)
+    block = _failure_block(text)
+    assert "Swallowed exception evidence: unknown (observed 0 / missing 2 / malformed 0)" in block
+    assert "Internal exception evidence : unknown (observed 0 / missing 2 / malformed 0)" in block
+    assert "Swallowed exceptions total  : unknown (observed 0)" in block
+    assert f"{FAILURE_SWALLOWED_BY_TYPE_TITLE}:\n      (unknown)" in block
+    assert f"{FAILURE_INTERNAL_BY_SITE_TITLE}:\n      (unknown)" in block
+    assert "(none)" not in block
+    for health in (parsed, built):
+        assert health[FAILURE_SWALLOWED_TOTAL_KEY] is None
+        assert health[FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY] == 0
+    rendered = format_run_health_summary(built)
+    assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: unknown (observed 0)" in rendered
+    assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    (unknown)" in rendered
+    assert f"  {FAILURE_INTERNAL_BY_SITE_KEY}:\n    (unknown)" in rendered
+
+
+def test_3_partial_observed_zero_plus_missing(tmp_path):
+    """observed=1（0 件）/ missing=1 → run 全体を `(none)` / exact 0 にしない。"""
+
+    logs = (
+        _write_log(
+            tmp_path, "f/f_B1_B2.log",
+            _payload(failures=_producer_swallowed_block(())),
+        ),
+        _write_log(tmp_path, "f/f_B1_B3.log", _payload()),
+    )
+    summary = summarize_failure_diagnostics(_records(*logs))
+
+    assert summary.swallowed_evidence == FailureEvidence(observed=1, missing=1)
+    assert summary.swallowed_evidence.state == EVIDENCE_PARTIAL
+    assert summary.internal_evidence.state == EVIDENCE_PARTIAL
+    assert summary.swallowed_exact_total is None
+    assert summary.swallowed_observed_total == 0
+
+    text, parsed, built = _round_trip(tmp_path, *logs)
+    block = _failure_block(text)
+    assert "Swallowed exception evidence: partial (observed 1 / missing 1 / malformed 0)" in block
+    assert "Internal exception evidence : partial (observed 1 / missing 1 / malformed 0)" in block
+    assert "Swallowed exceptions total  : unknown (observed 0)" in block
+    # 観測できた側が 0 件でも、run 全体では `(none)` と言えない。
+    assert f"{FAILURE_SWALLOWED_BY_TYPE_TITLE}:\n      (unknown)" in block
+    assert f"{FAILURE_INTERNAL_BY_SITE_TITLE}:\n      (unknown)" in block
+    assert "(none)" not in block
+    for health in (parsed, built):
+        assert health[FAILURE_SWALLOWED_TOTAL_KEY] is None
+        assert health[FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY] == 0
+        assert health[FAILURE_EVIDENCE_KEY][FAILURE_INTERNAL_SURFACE] == {
+            "state": EVIDENCE_PARTIAL, "observed": 1, "missing": 1, "malformed": 0,
+        }
+
+
+def test_4_partial_observed_nonzero_keeps_the_observed_counts(tmp_path):
+    """observed 側の `ValueError: 3` は保持しつつ、exact total とは分ける。"""
+
+    logs = (
+        _write_log(
+            tmp_path, "f/f_B1_B2.log",
+            _payload(failures=_producer_swallowed_block(
+                ((None, ValueError("v"), "analysis.a", 3),)
+            )),
+        ),
+        _write_log(tmp_path, "f/f_B1_B3.log", _payload()),
+    )
+    summary = summarize_failure_diagnostics(_records(*logs))
+
+    assert summary.swallowed_evidence.state == EVIDENCE_PARTIAL
+    assert summary.swallowed_exact_total is None
+    assert summary.swallowed_observed_total == 3
+    assert summary.swallowed_exceptions_by_type == {"ValueError": 3}
+
+    text, parsed, built = _round_trip(tmp_path, *logs)
+    block = _failure_block(text)
+    assert "Swallowed exceptions total  : unknown (observed 3)" in block
+    assert f"{FAILURE_SWALLOWED_BY_TYPE_TITLE}:\n      - ValueError: 3" in block
+    for health in (parsed, built):
+        assert health[FAILURE_SWALLOWED_TOTAL_KEY] is None
+        assert health[FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY] == 3
+        assert health[FAILURE_SWALLOWED_BY_TYPE_KEY] == {"ValueError": 3}
+        assert health[FAILURE_EVIDENCE_KEY][FAILURE_SWALLOWED_SURFACE]["state"] == EVIDENCE_PARTIAL
+    rendered = format_run_health_summary(built)
+    assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: unknown (observed 3)" in rendered
+    assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    - ValueError: 3" in rendered
+    assert built[FAILURE_SWALLOWED_BY_SITE_KEY] == {"analysis.a": 3}
+
+
+def test_5_malformed_swallowed_ledger_is_not_an_observed_zero(tmp_path):
+    """握り潰し surface が読めない pair を observed-zero にしない。"""
+
+    broken = (
+        # by_site が list でない
+        {"swallowed_exceptions": {"total": 3, "by_site": "not-a-list"}},
+        # 宣言 total と行の合計が食い違う
+        {"swallowed_exceptions": {"total": 9, "by_site": []}},
+        # `swallowed_exceptions` key そのものが欠落
+        {"internal_exception": {"exception_type": "RuntimeError", "site": "checker.checker"}},
+    )
+    logs = tuple(
+        _write_log(tmp_path, f"f/f_B1_B{index + 2}.log", _payload(failures=failures))
+        for index, failures in enumerate(broken)
+    )
+    summary = summarize_failure_diagnostics(_records(*logs))
+
+    assert summary.swallowed_evidence == FailureEvidence(malformed=3)
+    assert summary.swallowed_evidence.state == EVIDENCE_UNKNOWN
+    assert summary.swallowed_exact_total is None
+    assert summary.swallowed_exceptions_by_type == {}
+    # 内部エラー surface は 3 pair とも読めているので complete のまま。
+    assert summary.internal_evidence == FailureEvidence(observed=3)
+    assert summary.internal_exception_by_site == {"checker.checker": 1}
+
+    text, parsed, built = _round_trip(tmp_path, *logs)
+    block = _failure_block(text)
+    assert "Swallowed exception evidence: unknown (observed 0 / missing 0 / malformed 3)" in block
+    assert "Internal exception evidence : complete (observed 3 / missing 0 / malformed 0)" in block
+    assert "Swallowed exceptions total  : unknown (observed 0)" in block
+    assert f"{FAILURE_SWALLOWED_BY_TYPE_TITLE}:\n      (unknown)" in block
+    assert f"{FAILURE_INTERNAL_BY_SITE_TITLE}:\n      - checker.checker: 1" in block
+    for health in (parsed, built):
+        assert health[FAILURE_SWALLOWED_TOTAL_KEY] is None
+        assert health[FAILURE_EVIDENCE_KEY][FAILURE_INTERNAL_SURFACE]["state"] == EVIDENCE_COMPLETE
+
+
+def test_5b_partially_read_rows_are_kept_but_not_called_complete(tmp_path):
+    """行が 1 つ壊れていても、読めた行は捨てずに下限として残す。"""
+
+    failures = {
+        "swallowed_exceptions": {
+            "total": 5,
+            "by_site": [
+                {"site": "analysis.a", "exception_type": "ValueError", "count": 3},
+                {"site": "analysis.b", "exception_type": "KeyError", "count": "two"},
+            ],
+        }
+    }
+    log = _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures))
+    summary = summarize_failure_diagnostics(_records(log))
+
+    assert summary.swallowed_evidence == FailureEvidence(malformed=1)
+    assert summary.swallowed_exact_total is None
+    assert summary.swallowed_observed_total == 3
+    assert summary.swallowed_exceptions_by_type == {"ValueError": 3}
+
+
+def test_6_malformed_internal_exception_keeps_the_swallowed_surface(tmp_path):
+    """内部エラー surface が壊れても握り潰しの観測は残す（逆も同じ）。"""
+
+    failures = _producer_swallowed_block(((None, ValueError("v"), "analysis.a", 2),))
+    failures["internal_exception"] = "not-a-mapping"
+    log = _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures))
+    summary = summarize_failure_diagnostics(_records(log))
+
+    assert summary.internal_evidence == FailureEvidence(malformed=1)
+    assert summary.internal_evidence.state == EVIDENCE_UNKNOWN
+    assert summary.swallowed_evidence == FailureEvidence(observed=1)
+    assert summary.swallowed_exact_total == 2
+    assert summary.swallowed_exceptions_by_type == {"ValueError": 2}
+
+    text, parsed, built = _round_trip(tmp_path, log)
+    block = _failure_block(text)
+    assert "Swallowed exception evidence: complete (observed 1 / missing 0 / malformed 0)" in block
+    assert "Internal exception evidence : unknown (observed 0 / missing 0 / malformed 1)" in block
+    assert "Swallowed exceptions total  : 2" in block
+    assert f"{FAILURE_SWALLOWED_BY_TYPE_TITLE}:\n      - ValueError: 2" in block
+    # 内部エラーは読めていないので `(none)` にしない。
+    assert f"{FAILURE_INTERNAL_BY_SITE_TITLE}:\n      (unknown)" in block
+    for health in (parsed, built):
+        assert health[FAILURE_SWALLOWED_TOTAL_KEY] == 2
+        assert health[FAILURE_EVIDENCE_KEY][FAILURE_INTERNAL_SURFACE]["state"] == EVIDENCE_UNKNOWN
+
+
+def test_7_a_pre_pr125b_summary_is_unknown_not_zero(tmp_path):
+    """PR-125-B 以前の `overall_summary.txt` / health JSON との後方互換。"""
+
+    path = tmp_path / "overall_summary.txt"
+    path.write_text(
+        "\n".join(
+            [
+                "  Overall totals              : TOTAL=  2, EQ=  1, NOT_EQ=  0,"
+                " ERROR=  0, UNKNOWN=  1, TIMEOUT=  0, INCOMPLETE=  0",
+                "    UNKNOWN by reason:",
+                "      - outcome_path_region_completeness_unproven: 1",
+                "    Operational UNKNOWN by reason:",
+                "      (none)",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    health = parse_overall_summary_health(path)
+
+    assert health[FAILURE_EVIDENCE_KEY] == {}
+    assert health[FAILURE_SWALLOWED_TOTAL_KEY] is None
+    assert health[FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY] is None
+    assert health[FAILURE_SWALLOWED_BY_TYPE_KEY] == {}
+    rendered = format_run_health_summary(health)
+    assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    (unknown)" in rendered
+    assert f"  {FAILURE_INTERNAL_BY_SITE_KEY}:\n    (unknown)" in rendered
+    assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: unknown" in rendered
+    assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: 0" not in rendered
+    # 既存 summary parser 契約は不変（`(none)` は観測済み 0 件のまま）。
+    assert health["unknown_by_reason"] == {
+        "outcome_path_region_completeness_unproven": 1
+    }
+    assert health["operational_unknown_by_reason"] == {}
+    assert health["evidence_missing_sections"] == []
+    # key を 1 つも持たない health（PR-125-B 以前の JSON）も同じ扱い。
+    legacy = {"total_results": 2, "final_result_counts": {}, "unknown_units": 1}
+    legacy_text = format_run_health_summary(legacy)
+    assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    (unknown)" in legacy_text
+    assert f"    - {FAILURE_SWALLOWED_SURFACE}: unknown" in legacy_text
+    assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: unknown" in legacy_text
+
+
+def test_8_mixed_old_and_new_logs_are_partial(tmp_path):
+    """新旧 log が混ざった run は partial。内部エラーも `(none)` にしない。"""
+
+    failures = _producer_swallowed_block(((None, OSError("io"), "ghidra.broker", 2),))
+    logs = (
+        _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures)),
+        _write_log(tmp_path, "f/f_B1_B3.log", _payload()),
+    )
+    summary = summarize_failure_diagnostics(_records(*logs))
+
+    assert summary.swallowed_evidence == FailureEvidence(observed=1, missing=1)
+    assert summary.internal_evidence == FailureEvidence(observed=1, missing=1)
+    assert summary.swallowed_exact_total is None
+    assert summary.swallowed_observed_total == 2
+    assert summary.swallowed_exceptions_by_type == {"OSError": 2}
+
+    block = _failure_block(_round_trip(tmp_path, *logs)[0])
+    assert f"{FAILURE_INTERNAL_BY_SITE_TITLE}:\n      (unknown)" in block
+    assert "(none)" not in block
+
+
+# ---------------------------------------------------------------------------
+# 集計そのもの
 # ---------------------------------------------------------------------------
 
 
@@ -146,18 +473,16 @@ def test_swallowed_exceptions_are_counted_by_type_and_by_site(tmp_path):
     assert failures[FAILURE_SWALLOWED_EXCEPTIONS]["total"] == 6
 
     log = _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures))
-    summary = summarize_failure_diagnostics(_records(tmp_path, log))
+    summary = summarize_failure_diagnostics(_records(log))
 
-    assert summary.swallowed_exception_total == 6
+    assert summary.swallowed_exact_total == 6
     assert summary.swallowed_exceptions_by_type == {"KeyError": 1, "ValueError": 5}
     assert summary.swallowed_exceptions_by_site == {
         "analysis.returns.widths": 3,
         "semantics.normalize.fold": 3,
     }
     assert summary.internal_exception_by_site == {}
-    assert summary.results_observed == 1
-    assert summary.results_missing == 0
-    assert summary.malformed_results == 0
+    assert summary.swallowed_evidence == FailureEvidence(observed=1)
 
 
 def test_internal_exceptions_are_counted_by_site(tmp_path):
@@ -176,14 +501,14 @@ def test_internal_exceptions_are_counted_by_site(tmp_path):
         _write_log(tmp_path, "f/f_B1_B3.log", _payload(failures=right)),
         _write_log(tmp_path, "f/f_B1_B4.log", _payload(failures=left)),
     )
-    summary = summarize_failure_diagnostics(_records(tmp_path, *logs))
+    summary = summarize_failure_diagnostics(_records(*logs))
 
     assert summary.internal_exception_by_site == {
         "analysis.returns.analyze_function": 1,
         "checker.checker.EquivalenceChecker.check": 2,
     }
     assert summary.swallowed_exceptions_by_type == {"ValueError": 1}
-    assert summary.results_observed == 3
+    assert summary.internal_evidence == FailureEvidence(observed=3)
 
 
 def test_multiple_pairs_add_up(tmp_path):
@@ -195,63 +520,14 @@ def test_multiple_pairs_add_up(tmp_path):
         logs.append(
             _write_log(tmp_path, f"f/f_B1_B{index + 2}.log", _payload(failures=failures))
         )
-    summary = summarize_failure_diagnostics(_records(tmp_path, *logs))
+    summary = summarize_failure_diagnostics(_records(*logs))
 
-    assert summary.swallowed_exception_total == 1 + 2 + 3 + 4
+    assert summary.swallowed_exact_total == 1 + 2 + 3 + 4
     assert summary.swallowed_exceptions_by_type == {"TypeError": 10}
     assert summary.swallowed_exceptions_by_site == {
         "analysis.site0": 1 + 3,
         "analysis.site1": 2 + 4,
     }
-
-
-def test_zero_swallowed_exceptions_is_an_observed_zero(tmp_path):
-    failures = _producer_swallowed_block(())
-    assert failures[FAILURE_SWALLOWED_EXCEPTIONS] == {"by_site": [], "total": 0}
-
-    log = _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures))
-    summary = summarize_failure_diagnostics(_records(tmp_path, log))
-
-    assert summary.results_observed == 1
-    assert summary.results_missing == 0
-    assert summary.swallowed_exception_total == 0
-    assert summary.evidence_observed is True
-    assert "(none)" in format_failure_diagnostics_summary(summary)
-    assert "(unknown)" not in format_failure_diagnostics_summary(summary)
-
-
-def test_logs_without_a_failures_block_are_missing_not_zero(tmp_path):
-    """PR-125-A 以前の log。0 件と読ませず `(unknown)` にする。"""
-
-    logs = (
-        _write_log(tmp_path, "f/f_B1_B2.log", _payload()),
-        _write_log(tmp_path, "f/f_B1_B3.log", _payload(diagnostics={"stages": {}})),
-        _write_log(tmp_path, "f/f_B1_B4.log", human_result="Result: UNKNOWN"),
-    )
-    summary = summarize_failure_diagnostics(_records(tmp_path, *logs))
-
-    assert summary.results_observed == 0
-    assert summary.results_missing == 3
-    assert summary.evidence_observed is False
-    rendered = format_failure_diagnostics_summary(summary)
-    assert f"{FAILURE_SWALLOWED_BY_TYPE_TITLE}:\n    (unknown)" in rendered
-    assert f"{FAILURE_INTERNAL_BY_SITE_TITLE}:\n    (unknown)" in rendered
-
-
-def test_mixed_old_and_new_logs_keep_both_counts(tmp_path):
-    failures = _producer_swallowed_block(((None, OSError("io"), "ghidra.broker", 2),))
-    logs = (
-        _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures)),
-        _write_log(tmp_path, "f/f_B1_B3.log", _payload()),
-    )
-    summary = summarize_failure_diagnostics(_records(tmp_path, *logs))
-
-    assert (summary.results_observed, summary.results_missing) == (1, 1)
-    assert summary.swallowed_exceptions_by_type == {"OSError": 2}
-    # 1 件でも観測できていれば空の節は `(none)`（内部エラーは実際に 0 件）。
-    assert f"{FAILURE_INTERNAL_BY_SITE_TITLE}:\n    (none)" in (
-        format_failure_diagnostics_summary(summary)
-    )
 
 
 def test_only_the_final_payload_of_a_pair_is_counted(tmp_path):
@@ -260,56 +536,10 @@ def test_only_the_final_payload_of_a_pair_is_counted(tmp_path):
     log = _write_log(
         tmp_path, "f/f_B1_B2.log", _payload(failures=early), _payload(failures=final)
     )
-    summary = summarize_failure_diagnostics(_records(tmp_path, log))
+    summary = summarize_failure_diagnostics(_records(log))
 
-    assert summary.results_observed == 1
-    assert summary.swallowed_exception_total == 1
-
-
-def test_malformed_failure_diagnostics_fail_open(tmp_path):
-    good = _producer_swallowed_block(((None, ValueError("v"), "analysis.a", 2),))
-    broken = (
-        {"swallowed_exceptions": {"error": "RuntimeError: ledger unavailable"}},
-        {"swallowed_exceptions": {"total": 3, "by_site": "not-a-list"}},
-        {"swallowed_exceptions": {"total": 1, "by_site": [{"site": "s"}]}},
-        {"swallowed_exceptions": {"total": 9, "by_site": []}},
-        {
-            "swallowed_exceptions": {"total": 0, "by_site": []},
-            "internal_exception": "not-a-mapping",
-        },
-    )
-    logs = [_write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=good))]
-    for index, failures in enumerate(broken):
-        logs.append(
-            _write_log(
-                tmp_path, f"f/f_B1_B{index + 3}.log", _payload(failures=failures)
-            )
-        )
-    summary = summarize_failure_diagnostics(_records(tmp_path, *logs))
-
-    assert summary.results_observed == 6
-    assert summary.malformed_results == len(broken)
-    # 読めた分だけは残る。壊れた行で全体を捨てない。
-    assert summary.swallowed_exceptions_by_type == {"ValueError": 2}
-    assert summary.swallowed_exception_total == 2
-
-
-def test_a_failures_block_without_the_swallowed_ledger_is_malformed(tmp_path):
-    """producer 契約では全 pair に `swallowed_exceptions` が載る。
-
-    無い block は「観測できたが壊れている」として数え、内部エラーの site は
-    読めた分だけ残す（欠けた key で pair ごと捨てない）。
-    """
-
-    failures = _producer_internal_block("checker.checker", RuntimeError("boom"))
-    assert "swallowed_exceptions" not in failures
-    log = _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures))
-    summary = summarize_failure_diagnostics(_records(tmp_path, log))
-
-    assert summary.results_observed == 1
-    assert summary.results_missing == 0
-    assert summary.malformed_results == 1
-    assert summary.internal_exception_by_site == {"checker.checker": 1}
+    assert summary.swallowed_evidence == FailureEvidence(observed=1)
+    assert summary.swallowed_exact_total == 1
 
 
 def test_missing_site_or_type_uses_the_existing_missing_marker(tmp_path):
@@ -321,22 +551,29 @@ def test_missing_site_or_type_uses_the_existing_missing_marker(tmp_path):
         "internal_exception": {"exception_type": "RuntimeError", "stack": []},
     }
     log = _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures))
-    summary = summarize_failure_diagnostics(_records(tmp_path, log))
+    summary = summarize_failure_diagnostics(_records(log))
 
     assert summary.swallowed_exceptions_by_type == {"<missing>": 2}
     assert summary.swallowed_exceptions_by_site == {"<missing>": 2}
     assert summary.internal_exception_by_site == {"<missing>": 1}
-    assert summary.malformed_results == 0
+    assert summary.swallowed_evidence == FailureEvidence(observed=1)
+    assert summary.internal_evidence == FailureEvidence(observed=1)
+
+
+def test_empty_run_is_complete_with_zero_pairs(tmp_path):
+    summary = summarize_failure_diagnostics(())
+
+    assert summary.swallowed_evidence == FailureEvidence()
+    assert summary.swallowed_evidence.state == EVIDENCE_COMPLETE
+    assert summary.swallowed_exact_total == 0
+    text = format_failure_diagnostics_summary(summary)
+    assert "Swallowed exceptions total  : 0" in text
+    assert f"{FAILURE_SWALLOWED_BY_TYPE_TITLE}:\n    (none)" in text
 
 
 # ---------------------------------------------------------------------------
 # summary surface と parser
 # ---------------------------------------------------------------------------
-
-
-def _overall(tmp_path, *logs):
-    summary = aggregate_validation_logs_by_function(logs)
-    return summary, format_overall_results_summary(summary)
 
 
 def test_overall_summary_carries_both_new_sections(tmp_path):
@@ -348,7 +585,7 @@ def test_overall_summary_carries_both_new_sections(tmp_path):
         _producer_internal_block("checker.checker.EquivalenceChecker.check", OSError("x"))
     )
     log = _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures))
-    _summary, text = _overall(tmp_path, log)
+    text, _parsed, _built = _round_trip(tmp_path, log)
 
     assert "  Failure diagnostics:" in text
     assert f"    {FAILURE_SWALLOWED_BY_TYPE_TITLE}:" in text
@@ -368,20 +605,19 @@ def test_new_sections_round_trip_through_the_health_parser(tmp_path):
         (None, KeyError("k"), "analysis.b", 1),
     ))
     failures.update(_producer_internal_block("proof.strategies.pairwise", OSError("x")))
-    logs = (
-        _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures)),
-        _write_log(tmp_path, "f/f_B1_B3.log", _payload()),
-    )
-    summary, text = _overall(tmp_path, *logs)
-    path = tmp_path / "overall_summary.txt"
-    path.write_text(text + "\n", encoding="utf-8")
-
-    parsed = parse_overall_summary_health(path)
-    built = build_run_health_summary(summary)
+    log = _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures))
+    _text, parsed, built = _round_trip(tmp_path, log)
 
     assert parsed[FAILURE_SWALLOWED_BY_TYPE_KEY] == {"ValueError": 2, "KeyError": 1}
     assert parsed[FAILURE_INTERNAL_BY_SITE_KEY] == {"proof.strategies.pairwise": 1}
-    assert parsed[FAILURE_EVIDENCE_KEY] == {"observed": 1, "missing": 1, "malformed": 0}
+    assert parsed[FAILURE_EVIDENCE_KEY] == {
+        FAILURE_SWALLOWED_SURFACE: {
+            "state": EVIDENCE_COMPLETE, "observed": 1, "missing": 0, "malformed": 0,
+        },
+        FAILURE_INTERNAL_SURFACE: {
+            "state": EVIDENCE_COMPLETE, "observed": 1, "missing": 0, "malformed": 0,
+        },
+    }
     assert parsed[FAILURE_SWALLOWED_TOTAL_KEY] == 3
     # structured summary は site 別の握り潰しも保持する（text には出さない次元）。
     assert built[FAILURE_SWALLOWED_BY_SITE_KEY] == {"analysis.a": 2, "analysis.b": 1}
@@ -390,6 +626,7 @@ def test_new_sections_round_trip_through_the_health_parser(tmp_path):
         FAILURE_INTERNAL_BY_SITE_KEY,
         FAILURE_EVIDENCE_KEY,
         FAILURE_SWALLOWED_TOTAL_KEY,
+        FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY,
     ):
         assert built[key] == parsed[key]
 
@@ -404,8 +641,9 @@ def test_new_sections_do_not_swallow_the_following_section(tmp_path):
                 "  Overall totals              : TOTAL=  2, EQ=  1, NOT_EQ=  0,"
                 " ERROR=  0, UNKNOWN=  1, TIMEOUT=  0, INCOMPLETE=  0",
                 "  Failure diagnostics:",
-                "    Results with failure diagnostics: 2 (missing 0, malformed 0)",
-                "    Swallowed exceptions total: 3",
+                "    Swallowed exception evidence: partial (observed 2 / missing 1 / malformed 0)",
+                "    Internal exception evidence : complete (observed 3 / missing 0 / malformed 0)",
+                "    Swallowed exceptions total  : unknown (observed 3)",
                 f"    {FAILURE_SWALLOWED_BY_TYPE_TITLE}:",
                 "      - ValueError: 3",
                 f"    {FAILURE_INTERNAL_BY_SITE_TITLE}:",
@@ -424,6 +662,10 @@ def test_new_sections_do_not_swallow_the_following_section(tmp_path):
 
     assert health[FAILURE_SWALLOWED_BY_TYPE_KEY] == {"ValueError": 3}
     assert health[FAILURE_INTERNAL_BY_SITE_KEY] == {}
+    assert health[FAILURE_SWALLOWED_TOTAL_KEY] is None
+    assert health[FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY] == 3
+    assert health[FAILURE_EVIDENCE_KEY][FAILURE_SWALLOWED_SURFACE]["state"] == EVIDENCE_PARTIAL
+    assert health[FAILURE_EVIDENCE_KEY][FAILURE_INTERNAL_SURFACE]["state"] == EVIDENCE_COMPLETE
     assert health["operational_unknown_by_reason"] == {
         "expression_semantics_unsupported": 7
     }
@@ -431,75 +673,19 @@ def test_new_sections_do_not_swallow_the_following_section(tmp_path):
         "outcome_path_region_completeness_unproven": 9
     }
     assert health["total_results"] == 2
+    # `(none)` marker は既存契約どおり `evidence_missing_sections` に入らない。
+    assert FAILURE_INTERNAL_BY_SITE_KEY not in health["evidence_missing_sections"]
 
 
 def test_unknown_marker_round_trips_for_the_new_sections(tmp_path):
-    logs = (_write_log(tmp_path, "f/f_B1_B2.log", _payload()),)
-    summary, text = _overall(tmp_path, *logs)
-    path = tmp_path / "overall_summary.txt"
-    path.write_text(text + "\n", encoding="utf-8")
-
-    health = parse_overall_summary_health(path)
+    log = _write_log(tmp_path, "f/f_B1_B2.log", _payload())
+    _text, health, _built = _round_trip(tmp_path, log)
 
     assert FAILURE_SWALLOWED_BY_TYPE_KEY in health["evidence_missing_sections"]
     assert FAILURE_INTERNAL_BY_SITE_KEY in health["evidence_missing_sections"]
-    assert health[FAILURE_EVIDENCE_KEY] == {"observed": 0, "missing": 1, "malformed": 0}
     rendered = format_run_health_summary(health)
     assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    (unknown)" in rendered
     assert f"  {FAILURE_INTERNAL_BY_SITE_KEY}:\n    (unknown)" in rendered
-    # 観測できた run では同じ節が `(none)` で出る。
-    observed = build_run_health_summary(
-        aggregate_validation_logs_by_function(
-            (
-                _write_log(
-                    tmp_path,
-                    "g/g_B1_B2.log",
-                    _payload(function="g", failures=_producer_swallowed_block(())),
-                ),
-            )
-        )
-    )
-    observed_text = format_run_health_summary(observed)
-    assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    (none)" in observed_text
-
-
-def test_a_pre_pr125b_summary_reads_as_unknown_not_zero(tmp_path):
-    """PR-125-B 以前の `overall_summary.txt` / health JSON との後方互換。
-
-    新 2 節が無い成果物を読んだときに「観測して 0 件」と言ってはいけない。
-    """
-
-    path = tmp_path / "overall_summary.txt"
-    path.write_text(
-        "\n".join(
-            [
-                "  Overall totals              : TOTAL=  2, EQ=  1, NOT_EQ=  0,"
-                " ERROR=  0, UNKNOWN=  1, TIMEOUT=  0, INCOMPLETE=  0",
-                "    UNKNOWN by reason:",
-                "      - outcome_path_region_completeness_unproven: 1",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    health = parse_overall_summary_health(path)
-
-    assert health[FAILURE_EVIDENCE_KEY] == {}
-    assert health[FAILURE_SWALLOWED_BY_TYPE_KEY] == {}
-    assert health[FAILURE_SWALLOWED_TOTAL_KEY] == 0
-    rendered = format_run_health_summary(health)
-    assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    (unknown)" in rendered
-    assert f"  {FAILURE_INTERNAL_BY_SITE_KEY}:\n    (unknown)" in rendered
-    # 既存 section の読み取りは壊れていない。
-    assert health["unknown_by_reason"] == {
-        "outcome_path_region_completeness_unproven": 1
-    }
-    # key を 1 つも持たない health（PR-125-B 以前の JSON）も同じ扱い。
-    legacy = {"total_results": 2, "final_result_counts": {}, "unknown_units": 1}
-    assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    (unknown)" in (
-        format_run_health_summary(legacy)
-    )
 
 
 def test_existing_summary_sections_are_unchanged_by_the_new_block(tmp_path):
@@ -507,7 +693,8 @@ def test_existing_summary_sections_are_unchanged_by_the_new_block(tmp_path):
 
     failures = _producer_swallowed_block(((None, ValueError("v"), "analysis.a", 1),))
     log = _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures))
-    summary, text = _overall(tmp_path, log)
+    summary = aggregate_validation_logs_by_function((log,))
+    text = format_overall_results_summary(summary)
     lines = text.splitlines()
     start = lines.index("  Failure diagnostics:")
     end = start
@@ -540,7 +727,7 @@ def test_existing_summary_sections_are_unchanged_by_the_new_block(tmp_path):
     assert "Failure diagnostics:" not in without_new_block
 
 
-def test_health_summary_json_keeps_the_three_planned_dimensions(tmp_path):
+def test_health_summary_json_keeps_the_planned_dimensions(tmp_path):
     failures = _producer_swallowed_block(((None, ValueError("v"), "analysis.a", 4),))
     failures.update(_producer_internal_block("smt.parallel.run_single", OSError("x")))
     log = _write_log(tmp_path, "f/f_B1_B2.log", _payload(failures=failures))
@@ -550,6 +737,9 @@ def test_health_summary_json_keeps_the_three_planned_dimensions(tmp_path):
     assert health[FAILURE_SWALLOWED_BY_SITE_KEY] == {"analysis.a": 4}
     assert health[FAILURE_INTERNAL_BY_SITE_KEY] == {"smt.parallel.run_single": 1}
     assert health[FAILURE_SWALLOWED_TOTAL_KEY] == 4
+    assert health[FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY] == 4
+    # JSON 化しても壊れない（exact total は None になり得るので null 許容）。
+    assert json.loads(json.dumps(health))[FAILURE_SWALLOWED_TOTAL_KEY] == 4
     # 既存 key を落としていない。
     for key in (
         "unknown_by_reason",
@@ -561,11 +751,18 @@ def test_health_summary_json_keeps_the_three_planned_dimensions(tmp_path):
         assert key in health
 
 
-def test_empty_run_renders_without_evidence_claims(tmp_path):
-    summary = aggregate_validation_logs_by_function(())
-    failure_summary = summarize_failure_diagnostics(summary.overall.records)
+def test_exact_total_is_null_in_json_when_evidence_is_incomplete(tmp_path):
+    logs = (
+        _write_log(
+            tmp_path, "f/f_B1_B2.log",
+            _payload(failures=_producer_swallowed_block(
+                ((None, ValueError("v"), "analysis.a", 3),)
+            )),
+        ),
+        _write_log(tmp_path, "f/f_B1_B3.log", _payload()),
+    )
+    health = build_run_health_summary(aggregate_validation_logs_by_function(logs))
+    round_tripped = json.loads(json.dumps(health))
 
-    assert failure_summary.results_observed == 0
-    assert failure_summary.results_missing == 0
-    text = format_overall_results_summary(summary)
-    assert "Results with failure diagnostics: 0 (missing 0, malformed 0)" in text
+    assert round_tripped[FAILURE_SWALLOWED_TOTAL_KEY] is None
+    assert round_tripped[FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY] == 3
