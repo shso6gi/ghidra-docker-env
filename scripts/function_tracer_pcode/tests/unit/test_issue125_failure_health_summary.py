@@ -58,6 +58,7 @@ from scripts.function_tracer_pcode.reporting.result_summary import (
     FAILURE_SWALLOWED_SURFACE,
     FAILURE_SWALLOWED_TOTAL_KEY,
     FailureEvidence,
+    failure_evidence_from_health,
     aggregate_validation_logs_by_function,
     build_run_health_summary,
     format_failure_diagnostics_summary,
@@ -446,6 +447,85 @@ def test_5d_an_empty_failures_block_is_malformed_for_both_surfaces(tmp_path):
     assert summary.internal_evidence == FailureEvidence(missing=1)
 
 
+def test_5f_a_broken_failures_value_is_malformed_not_missing(tmp_path):
+    """`failures` key が **ある**のに値が壊れている log は未観測ではない。
+
+    * `diagnostics` / `failures` の key が無い旧 log → `missing`
+    * `failures=None` / 非 mapping → 両 surface `malformed`
+
+    どちらも exact 0 は名乗らないが、「PR-125-A 以前の log」と
+    「PR-125-A 以降だが観測 surface が壊れている」は別の事実なので分ける。
+    """
+
+    def _summary(directory, payload):
+        return summarize_failure_diagnostics(
+            _records(_write_log(tmp_path / directory, "f/f_B1_B2.log", payload))
+        )
+
+    # (a) failures key ごと無い → missing
+    missing = _summary(
+        "no_failures_key",
+        _payload(diagnostics={"schema": "result-diagnostics-v1", "stages": {}}),
+    )
+    assert missing.swallowed_evidence == FailureEvidence(missing=1)
+    assert missing.internal_evidence == FailureEvidence(missing=1)
+
+    # (b) failures=None / 非 mapping → malformed
+    for label, broken in (
+        ("null", None),
+        ("string", "broken"),
+        ("list", []),
+        ("int", 0),
+    ):
+        summary = _summary(
+            f"broken_{label}",
+            _payload(diagnostics={"schema": "result-diagnostics-v1", "failures": broken}),
+        )
+        assert summary.swallowed_evidence == FailureEvidence(malformed=1), label
+        assert summary.internal_evidence == FailureEvidence(malformed=1), label
+        assert summary.swallowed_exact_total is None, label
+
+    # (c) diagnostics 自体が壊れている場合も未観測ではなく malformed
+    broken_diagnostics = _summary("broken_diagnostics", _payload(diagnostics="broken"))
+    assert broken_diagnostics.swallowed_evidence == FailureEvidence(malformed=1)
+    assert broken_diagnostics.internal_evidence == FailureEvidence(malformed=1)
+
+    # (d) diagnostics key ごと無い（最も古い log）→ missing
+    oldest = _summary("no_diagnostics", _payload())
+    assert oldest.swallowed_evidence == FailureEvidence(missing=1)
+
+
+def test_5g_broken_failures_value_round_trips_as_malformed(tmp_path):
+    """text → parser → structured health まで malformed として往復する。"""
+
+    log = _write_log(
+        tmp_path, "f/f_B1_B2.log",
+        _payload(diagnostics={"schema": "result-diagnostics-v1", "failures": None}),
+    )
+    text, parsed, built = _round_trip(tmp_path, log)
+    block = _failure_block(text)
+
+    assert "Swallowed exception evidence: unknown (observed 0 / missing 0 / malformed 1)" in block
+    assert "Internal exception evidence : unknown (observed 0 / missing 0 / malformed 1)" in block
+    assert "Swallowed exceptions total  : unknown (observed 0)" in block
+    assert "(none)" not in block
+    for health in (parsed, built):
+        assert health[FAILURE_SWALLOWED_TOTAL_KEY] is None
+        assert health[FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY] == 0
+        for surface in (FAILURE_SWALLOWED_SURFACE, FAILURE_INTERNAL_SURFACE):
+            assert health[FAILURE_EVIDENCE_KEY][surface] == {
+                "state": EVIDENCE_UNKNOWN, "observed": 0, "missing": 0, "malformed": 1,
+            }
+    rendered = format_run_health_summary(built)
+    assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    (unknown)" in rendered
+    assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: 0" not in rendered
+    # 旧 log（missing）とは違う事実として読める。
+    old_log = _write_log(tmp_path / "old", "f/f_B1_B2.log", _payload())
+    _old_text, _old_parsed, old_built = _round_trip(tmp_path / "old", old_log)
+    assert old_built[FAILURE_EVIDENCE_KEY][FAILURE_SWALLOWED_SURFACE]["missing"] == 1
+    assert old_built[FAILURE_EVIDENCE_KEY][FAILURE_SWALLOWED_SURFACE]["malformed"] == 0
+
+
 def test_5e_an_explicit_null_internal_exception_is_malformed(tmp_path):
     """key 欠落（観測済み 0 件）と明示的な `None`（契約外）を混同しない。"""
 
@@ -580,6 +660,101 @@ def test_7b_an_incomplete_evidence_row_is_not_restored_as_complete(tmp_path):
         assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    (unknown)" in rendered, broken
         assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: unknown (observed 0)" in rendered, broken
         assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: 0" not in rendered, broken
+
+
+def test_7c_evidence_counts_must_account_for_every_pair(tmp_path):
+    """`total_results` が分かる health では 3 次元の合計が一致していること。
+
+    合計が pair 総数に届かない evidence からは complete も exact total も
+    導けないので、その surface の evidence を信用しない（fail-closed）。
+    """
+
+    def _health(total_results, observed, missing, malformed, **extra):
+        row = {"observed": observed, "missing": missing, "malformed": malformed}
+        health = {
+            FAILURE_EVIDENCE_KEY: {
+                FAILURE_SWALLOWED_SURFACE: dict(row),
+                FAILURE_INTERNAL_SURFACE: dict(row),
+            },
+            FAILURE_SWALLOWED_TOTAL_KEY: 0,
+            FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY: 0,
+        }
+        if total_results is not None:
+            health["total_results"] = total_results
+        health.update(extra)
+        return health
+
+    # 合計が総数に足りない → reject
+    rejected = _health(2, 1, 0, 0)
+    assert failure_evidence_from_health(rejected, FAILURE_SWALLOWED_SURFACE) is None
+    assert failure_evidence_from_health(rejected, FAILURE_INTERNAL_SURFACE) is None
+    rendered = format_run_health_summary(rejected)
+    assert f"  {FAILURE_SWALLOWED_BY_TYPE_KEY}:\n    (unknown)" in rendered
+    assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: 0" not in rendered
+    assert f"    - {FAILURE_SWALLOWED_SURFACE}: unknown" in rendered
+
+    # 合計が一致 → accept
+    accepted = _health(2, 1, 1, 0)
+    assert failure_evidence_from_health(
+        accepted, FAILURE_SWALLOWED_SURFACE
+    ) == FailureEvidence(observed=1, missing=1)
+    assert EVIDENCE_PARTIAL in format_run_health_summary(accepted)
+
+    # 合計が総数を超える → reject
+    assert failure_evidence_from_health(_health(2, 2, 1, 0), FAILURE_SWALLOWED_SURFACE) is None
+
+    # complete を名乗る evidence も合計が合わなければ reject
+    over = _health(3, 2, 0, 0)
+    assert failure_evidence_from_health(over, FAILURE_SWALLOWED_SURFACE) is None
+    assert f"  {FAILURE_SWALLOWED_TOTAL_KEY}: 0" not in format_run_health_summary(over)
+
+    # `total_results` が不正なら complete を導かない
+    for bad_total in (True, -1, "2", 2.0, None):
+        health = _health(2, 2, 0, 0)
+        health["total_results"] = bad_total
+        assert failure_evidence_from_health(health, FAILURE_SWALLOWED_SURFACE) is None, bad_total
+
+    # `total_results` を持たない legacy health は既存どおり（勝手に 0 を推測しない）
+    legacy = _health(None, 2, 0, 0)
+    assert "total_results" not in legacy
+    assert failure_evidence_from_health(
+        legacy, FAILURE_SWALLOWED_SURFACE
+    ) == FailureEvidence(observed=2)
+
+    # surface ごとに独立して判定する。
+    mixed = _health(2, 1, 1, 0)
+    mixed[FAILURE_EVIDENCE_KEY][FAILURE_INTERNAL_SURFACE] = {
+        "observed": 1, "missing": 0, "malformed": 0,
+    }
+    assert failure_evidence_from_health(
+        mixed, FAILURE_SWALLOWED_SURFACE
+    ) == FailureEvidence(observed=1, missing=1)
+    assert failure_evidence_from_health(mixed, FAILURE_INTERNAL_SURFACE) is None
+
+
+def test_7d_real_summaries_keep_evidence_consistent_with_total_results(tmp_path):
+    """自分が書いた summary / health は常にこの不変量を満たす。"""
+
+    logs = (
+        _write_log(
+            tmp_path, "f/f_B1_B2.log",
+            _payload(failures=_producer_swallowed_block(())),
+        ),
+        _write_log(tmp_path, "f/f_B1_B3.log", _payload()),
+        _write_log(
+            tmp_path, "f/f_B1_B4.log",
+            _payload(diagnostics={"schema": "result-diagnostics-v1", "failures": None}),
+        ),
+    )
+    _text, parsed, built = _round_trip(tmp_path, *logs)
+
+    for health in (parsed, built):
+        assert health["total_results"] == 3
+        for surface in (FAILURE_SWALLOWED_SURFACE, FAILURE_INTERNAL_SURFACE):
+            evidence = failure_evidence_from_health(health, surface)
+            assert evidence is not None, surface
+            assert evidence.observed + evidence.missing + evidence.malformed == 3
+            assert evidence == FailureEvidence(observed=1, missing=1, malformed=1)
 
 
 def test_8_mixed_old_and_new_logs_are_partial(tmp_path):
@@ -782,8 +957,8 @@ def test_new_sections_do_not_swallow_the_following_section(tmp_path):
     path.write_text(
         "\n".join(
             [
-                "  Overall totals              : TOTAL=  2, EQ=  1, NOT_EQ=  0,"
-                " ERROR=  0, UNKNOWN=  1, TIMEOUT=  0, INCOMPLETE=  0",
+                "  Overall totals              : TOTAL=  3, EQ=  1, NOT_EQ=  0,"
+                " ERROR=  0, UNKNOWN=  2, TIMEOUT=  0, INCOMPLETE=  0",
                 "  Failure diagnostics:",
                 "    Swallowed exception evidence: partial (observed 2 / missing 1 / malformed 0)",
                 "    Internal exception evidence : complete (observed 3 / missing 0 / malformed 0)",
@@ -816,7 +991,10 @@ def test_new_sections_do_not_swallow_the_following_section(tmp_path):
     assert health["unknown_by_reason"] == {
         "outcome_path_region_completeness_unproven": 9
     }
-    assert health["total_results"] == 2
+    assert health["total_results"] == 3
+    # 3 次元の合計は pair 総数と一致する（fixture も不変量を満たす）。
+    for surface in (FAILURE_SWALLOWED_SURFACE, FAILURE_INTERNAL_SURFACE):
+        assert failure_evidence_from_health(health, surface) is not None
     # `(none)` marker は既存契約どおり `evidence_missing_sections` に入らない。
     assert FAILURE_INTERNAL_BY_SITE_KEY not in health["evidence_missing_sections"]
 

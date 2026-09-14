@@ -71,6 +71,11 @@ FAILURE_INTERNAL_BY_SITE_KEY = "internal_exception_by_site"
 FAILURE_EVIDENCE_KEY = "failure_diagnostic_evidence"
 FAILURE_SWALLOWED_TOTAL_KEY = "swallowed_exception_total"
 FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY = "swallowed_exception_observed_total"
+#: `diagnostics["failures"]` block の 3 値（key 欠落 / 壊れた値 / 正常）。
+#: `is` で比較するので intern 済みの literal をそのまま使う。
+FAILURE_BLOCK_MISSING = "block_missing"
+FAILURE_BLOCK_BROKEN = "block_broken"
+FAILURE_BLOCK_PRESENT = "block_present"
 #: evidence は surface ごと。片方が壊れても、もう片方の観測は有効なまま残す。
 FAILURE_SWALLOWED_SURFACE = "swallowed_exceptions"
 FAILURE_INTERNAL_SURFACE = "internal_exception"
@@ -727,21 +732,31 @@ def _is_count(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def _failure_diagnostics_block(payload: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
-    """1 つの結果 payload から ``diagnostics["failures"]`` を取り出す。
+def _failure_diagnostics_block(
+    payload: Mapping[str, Any],
+) -> Tuple[str, Mapping[str, Any]]:
+    """1 つの結果 payload から ``diagnostics["failures"]`` を 3 値で取り出す。
 
-    ``None`` は「block ごと無い」= 未観測（PR-125-A 以前の log、結果 payload の
-    無い pair）。空の block は **present だが契約を満たしていない**ので、ここでは
-    返し、surface ごとの読み取りが malformed として扱う。
+    * ``FAILURE_BLOCK_MISSING`` — ``diagnostics`` / ``failures`` の **key 自体が
+      無い**。PR-125-A 以前の log。**未観測**であって 0 件ではない。
+    * ``FAILURE_BLOCK_BROKEN`` — key はあるが値が mapping でない（``None`` /
+      文字列 / list …）。log は PR-125-A 以降だが、観測 surface が **壊れて
+      いる**。未観測と混同しない。
+    * ``FAILURE_BLOCK_PRESENT`` — mapping。surface ごとの検証へ進む。空の
+      mapping もここに入り、どちらの surface も読めないので malformed になる。
     """
 
-    diagnostics = payload.get("diagnostics")
+    if not isinstance(payload, Mapping) or "diagnostics" not in payload:
+        return FAILURE_BLOCK_MISSING, {}
+    diagnostics = payload["diagnostics"]
     if not isinstance(diagnostics, Mapping):
-        return None
-    failures = diagnostics.get("failures")
+        return FAILURE_BLOCK_BROKEN, {}
+    if "failures" not in diagnostics:
+        return FAILURE_BLOCK_MISSING, {}
+    failures = diagnostics["failures"]
     if not isinstance(failures, Mapping):
-        return None
-    return failures
+        return FAILURE_BLOCK_BROKEN, {}
+    return FAILURE_BLOCK_PRESENT, failures
 
 
 def _bump_count(counts: Dict[str, int], key: str, amount: int) -> None:
@@ -844,10 +859,19 @@ def summarize_failure_diagnostics(
     internal_by_site: Dict[str, int] = {}
     for record in records:
         payloads = tuple(record.payloads)
-        failures = _failure_diagnostics_block(payloads[-1]) if payloads else None
-        if failures is None:
+        block_state, failures = (
+            _failure_diagnostics_block(payloads[-1]) if payloads
+            # 結果 payload が 1 つも無い pair（TIMEOUT / 無 payload）は未観測。
+            else (FAILURE_BLOCK_MISSING, {})
+        )
+        if block_state is FAILURE_BLOCK_MISSING:
             swallowed["missing"] += 1
             internal["missing"] += 1
+            continue
+        if block_state is FAILURE_BLOCK_BROKEN:
+            # key はあるので未観測ではない。両 surface とも読めていない。
+            swallowed["malformed"] += 1
+            internal["malformed"] += 1
             continue
         readable, row_total = _read_swallowed_surface(failures, by_type, by_site)
         swallowed["observed" if readable else "malformed"] += 1
@@ -1563,6 +1587,16 @@ def failure_evidence_from_health(
     if declared_state is not _ABSENT and declared_state != restored.state:
         # 書かれている state と件数が矛盾する health は信用しない（fail-closed）。
         return None
+    # 3 次元は run の pair 全部を排他に分類したもの。`total_results` が分かる
+    # health では合計が一致していなければならない。一致しない evidence からは
+    # complete も exact total も導けないので信用しない。`total_results` を
+    # 持たない legacy health では推測しない（勝手に 0 を仮定しない）。
+    total_results = health.get("total_results", _ABSENT)
+    if total_results is not _ABSENT:
+        if not _is_count(total_results):
+            return None
+        if restored.observed + restored.missing + restored.malformed != total_results:
+            return None
     return restored
 
 
