@@ -520,11 +520,24 @@ run_pair() {
     local total="$9"
     local pair_target_file="${10}"
     local log_file="${output_dir}/${function_name}_${left_id}_${right_id}.log"
+    # Issue #124 PR-124-B: ここに来るのは「この pair を新しく実行する」と確定した
+    # あと（skip 判定は呼び出し側で済んでいる）。前回 execution の journal を捨てて
+    # おき、`.log` を `>` で開き直すのと同じ execution 境界にする。捨てないと 1 file
+    # の中で seq が 1..N -> 1..M と巻き戻り、古い handler_registered / pid /
+    # start_token が current execution の evidence に見えてしまう。
+    # supervisor recovery の再呼び出しは `.log` と同じく追記側なので触らない。
+    local stage_journal_file="${log_file%.log}.stage.jsonl"
+    rm -f -- "$stage_journal_file"
     local pair_tmpdir
     pair_tmpdir="$(mktemp -d "$EQBENCH_RUN_TMPDIR/pair.XXXXXX")"
     local runtime_metrics_dir progress_receipt runtime_metrics_file
     runtime_metrics_dir="${output_dir}/.runtime-metrics"
     mkdir -p "$runtime_metrics_dir"
+    # journal と同じ execution 境界。まだ dump を退避しない（PR-124-C の責務）が、
+    # journal が「正本の dump 先」として宣言する path に前回 execution の dump が
+    # 残っていると、それが current execution の dump として読まれてしまう。
+    local stack_dump_artifact="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.stack-dump.txt"
+    rm -f -- "$stack_dump_artifact"
     progress_receipt="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.progress.json"
     runtime_metrics_file="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.runtime.json"
     local started_at finished_at elapsed_seconds max_rss_kb
@@ -554,10 +567,8 @@ run_pair() {
     # stack dump は checkpoint 配下（cleanup で消える）に書かせて、cleanup 後も
     # 残る run dir 側の artifact path を journal の正本として渡す。
     # dump の退避そのものは supervisor 側の責務（PR-124-C）。
-    local stage_journal_file stack_dump_tmp stack_dump_artifact
-    stage_journal_file="${log_file%.log}.stage.jsonl"
+    local stack_dump_tmp
     stack_dump_tmp="${checkpoint_root}/${execution_nonce}/stack-dump.txt"
-    stack_dump_artifact="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.stack-dump.txt"
 
     local -a equiv_cmd=(
         env "TMPDIR=$pair_tmpdir" "TEMP=$pair_tmpdir" "TMP=$pair_tmpdir"
