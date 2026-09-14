@@ -477,3 +477,100 @@ def test_real_supervisor_reports_missing_when_no_dump_was_written(tmp_path):
     assert status["artifact_status"] == "missing"
     assert status["sent_but_unobserved"] is False
     assert not Path(config.stack_dump_artifact).exists()
+
+
+def test_kill_signal_jitter_is_measured_at_the_signal_not_at_the_path_entry(
+    tmp_path, monkeypatch,
+):
+    """報告する jitter が「termination path へ入った時刻」ではないことを示す。
+
+    `_terminate_exact_process_group` は SIGTERM の前に終了確認と PID /
+    start-token の検証を行う。その検証をわざと遅らせると、
+
+    * `deadline_finalization_offset_seconds`（path へ入った時刻）はほぼ 0 のまま
+    * `kill_start_offset_seconds`（実際に SIGTERM を送れた時刻）は遅延ぶん増える
+
+    となる。前者だけを見ていると、実際の kill 開始がどれだけ遅れても
+    「0.0001s」と報告できてしまう。
+    """
+    from scripts.function_tracer_pcode.authority.process import supervisor_command
+
+    delay = 0.35
+    original = supervisor_command.ProcessSupervisorCommand._same_process
+
+    def _slow_same_process(self, process, start_token):
+        time.sleep(delay)
+        return original(self, process, start_token)
+
+    monkeypatch.setattr(
+        supervisor_command.ProcessSupervisorCommand, "_same_process", _slow_same_process
+    )
+    config = _supervisor_config(
+        tmp_path, "import time; time.sleep(30)", timeout=2.0, lead=1.0,
+    )
+    assert supervisor_command.ProcessSupervisorCommand(config).run() == 124
+    status = read_stack_dump_status(config.diagnostic_status_output)
+    assert status is not None
+    entry = status["deadline_finalization_offset_seconds"]
+    signal_start = status["kill_start_offset_seconds"]
+    assert entry is not None and signal_start is not None
+    assert status["kill_signal"] == "SIGTERM"
+    # path へ入った時刻は遅延の影響を受けない（= これを jitter と呼ぶと誤る）。
+    assert 0.0 <= entry < delay
+    # 実 signal の時刻は遅延ぶん後ろにある。
+    assert signal_start >= delay
+    assert signal_start > entry
+
+
+def test_an_exploding_first_signal_hook_does_not_change_the_disposition(
+    tmp_path, monkeypatch,
+):
+    """診断 hook が例外を投げても kill 手順と disposition は変わらない。"""
+    from scripts.function_tracer_pcode.authority.process import supervisor_command
+    from scripts.function_tracer_pcode.authority.process.stack_dump_diagnostic import (
+        StackDumpDiagnostic,
+    )
+
+    def _explode(self, name, monotonic_time):
+        raise RuntimeError("diagnostic hook exploded")
+
+    monkeypatch.setattr(StackDumpDiagnostic, "note_kill_signal", _explode)
+    config = _supervisor_config(
+        tmp_path, "import time; time.sleep(30)", timeout=2.0, lead=1.0,
+    )
+    assert supervisor_command.ProcessSupervisorCommand(config).run() == 124
+    projection = json.loads(config.authority_output.read_text(encoding="utf-8"))
+    assert projection["status"] == "TIMEOUT"
+    assert projection["authority_kind"] == "DurableTimeoutFinalizationBundle"
+    assert projection["child_exit_disposition"] in {
+        "SIGTERM_AFTER_DEADLINE", "SIGKILL_AFTER_DEADLINE",
+    }
+
+
+def test_a_diagnostic_that_cannot_be_built_does_not_change_the_outcome(
+    tmp_path, monkeypatch,
+):
+    """診断 object を組めなくても `run()` は通常の deadline 経路を通る。
+
+    組み立ての失敗が `run()` の `except Exception` に落ちると `_resume()` へ
+    移り、診断の都合で exit code と projection が変わってしまう。
+    """
+    from scripts.function_tracer_pcode.authority.process import supervisor_command
+
+    def _explode(self, process, start_token):
+        raise RuntimeError("cannot build the diagnostic")
+
+    monkeypatch.setattr(
+        supervisor_command.ProcessSupervisorCommand, "_stack_dump_diagnostic", _explode
+    )
+    config = _supervisor_config(
+        tmp_path, "import time; time.sleep(30)", timeout=1.5, lead=0.5,
+    )
+    assert supervisor_command.ProcessSupervisorCommand(config).run() == 124
+    projection = json.loads(config.authority_output.read_text(encoding="utf-8"))
+    assert projection["status"] == "TIMEOUT"
+    # 無効化された診断でも sidecar は書かれ、送っていないことが読み取れる。
+    status = read_stack_dump_status(config.diagnostic_status_output)
+    assert status is None or (
+        status["signal_sent"] is False and status["enabled"] is False
+    )

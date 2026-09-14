@@ -79,6 +79,17 @@ _DIAGNOSTIC_ERRORS = (
     AttributeError, LookupError, OSError, RecursionError, TypeError, ValueError,
 )
 
+#: worker thread の起動そのものが失敗し得る型。`threading.Thread.start()` は
+#: スレッドを作れないと `RuntimeError` を投げる。**この失敗で deadline 監視を
+#: 止めないため**、`request_async()` は自分で握り潰して理由だけ残す。
+_DIAGNOSTIC_START_ERRORS = (
+    AttributeError, MemoryError, OSError, RuntimeError, TypeError, ValueError,
+)
+
+#: worker 本体で起こり得る失敗。thread が例外で落ちると Python が stderr へ
+#: traceback を出し、それが pair log に混ざるので、ここで受けて理由に変える。
+_WORKER_ERRORS = _DIAGNOSTIC_ERRORS + (RuntimeError,)
+
 # unavailable の理由（journal 側の語彙は `core/stage_journal_reader.py`）。
 UNAVAILABLE_DISABLED = "disabled"
 UNAVAILABLE_CANCELLED = "cancelled"
@@ -87,6 +98,7 @@ UNAVAILABLE_IDENTITY_BINDING = "identity_binding_unavailable"
 UNAVAILABLE_DUMP_PATH_MISMATCH = "dump_path_mismatch"
 UNAVAILABLE_SIGNAL_CONTRACT = "signal_contract_mismatch"
 UNAVAILABLE_SIGNAL_FAILED = "signal_failed"
+UNAVAILABLE_START_FAILED = "diagnostic_start_failed"
 
 # artifact の退避状態。
 ARTIFACT_UNSET = "unset"
@@ -184,7 +196,15 @@ class StackDumpDiagnostic:
         self.artifact_path: Optional[str] = _absolute(config.dump_artifact_path)
         self.child_timeout_evidence: Optional[Dict[str, Any]] = None
         self.deadline_monotonic: Optional[float] = None
-        self.kill_start_monotonic: Optional[float] = None
+        # deadline に到達して termination path へ入った時刻。**まだ signal は
+        # 送っていない**（`_terminate_exact_process_group` が終了確認と identity
+        # 検証を先に行う）。
+        self.deadline_finalization_monotonic: Optional[float] = None
+        # 実際に最初の termination signal（SIGTERM）を発した時刻。send が成功した
+        # ときだけ入る。deadline 後・signal 前に child が終了した pair では
+        # `None` のままで、「kill を開始した」とは記録しない。
+        self.kill_signal: Optional[str] = None
+        self.kill_signal_monotonic: Optional[float] = None
         self.requested_monotonic: Optional[float] = None
         self.signal_sent_monotonic: Optional[float] = None
         # journal の行は `t_epoch` を持つので、送信した瞬間を epoch でも残す。
@@ -198,23 +218,42 @@ class StackDumpDiagnostic:
         return self.config.disabled_reason(timeout_seconds=self.timeout_seconds) is None
 
     def request_async(self) -> None:
-        """診断 worker を起動する。**1 回だけ**、join しない daemon thread。"""
+        """診断 worker を起動する。**1 回だけ**、join しない daemon thread。
+
+        **この関数は例外を出さない。** 監視ループはこれを deadline の手前で呼ぶ
+        ので、thread を作れない（`RuntimeError: can't start new thread` など）
+        場合でもループを抜けさせてはならない。失敗は `unavailable_reason` に
+        fail-closed で残し、送信は行わない。
+        """
         # lock を取る前に弾く。監視ループを worker の lock 保持で待たせない。
         if self.requested or self._cancelled.is_set() or not self.enabled:
             return
         with self._lock:
             if self.requested or self._cancelled.is_set() or not self.enabled:
                 return
+            # 起動の成否によらず `requested` を立てる。失敗を毎 poll slice で
+            # 再試行すると、そのぶん監視ループが仕事を増やすことになる。
             self.requested = True
             self.requested_monotonic = time.monotonic()
-            thread = threading.Thread(
-                target=self._run_worker,
-                name="stack-dump-diagnostic",
-                daemon=True,
-            )
+            try:
+                thread = threading.Thread(
+                    target=self._run_worker,
+                    name="stack-dump-diagnostic",
+                    daemon=True,
+                )
+            except _DIAGNOSTIC_START_ERRORS as exc:
+                self.unavailable_reason = self.unavailable_reason or (
+                    f"{UNAVAILABLE_START_FAILED}:{type(exc).__name__}"
+                )
+                return
             self._thread = thread
         # start() は lock の外。worker が即座に lock を取っても詰まらせない。
-        thread.start()
+        try:
+            thread.start()
+        except _DIAGNOSTIC_START_ERRORS as exc:
+            self._record_unavailable(
+                f"{UNAVAILABLE_START_FAILED}:{type(exc).__name__}"
+            )
 
     def cancel_future_requests(self) -> None:
         """以後の送信を禁止する（正常終了 / deadline 到達の双方で呼ぶ）。
@@ -227,8 +266,18 @@ class StackDumpDiagnostic:
     def note_deadline(self, deadline_monotonic: float) -> None:
         self.deadline_monotonic = float(deadline_monotonic)
 
-    def note_kill_start(self, kill_start_monotonic: float) -> None:
-        self.kill_start_monotonic = float(kill_start_monotonic)
+    def note_deadline_finalization_start(self, monotonic_time: float) -> None:
+        """deadline 到達で termination path へ入った時刻（signal はまだ）。"""
+        self.deadline_finalization_monotonic = float(monotonic_time)
+
+    def note_kill_signal(self, name: str, monotonic_time: float) -> None:
+        """最初の termination signal を**実際に送れた**時刻。
+
+        `_terminate_exact_process_group` が `os.killpg` の成功後に呼ぶ。属性の
+        代入だけで I/O も lock も持たないので、kill 経路を遅らせない。
+        """
+        self.kill_signal = str(name)
+        self.kill_signal_monotonic = float(monotonic_time)
 
     # -- worker（ここから下はすべて worker thread の中） ----------------------
 
@@ -240,7 +289,7 @@ class StackDumpDiagnostic:
     def _run_worker(self) -> None:
         try:
             self._diagnose()
-        except _DIAGNOSTIC_ERRORS as exc:
+        except _WORKER_ERRORS as exc:
             self._record_unavailable(f"diagnostic_error:{type(exc).__name__}")
 
     def _diagnose(self) -> None:
@@ -332,6 +381,17 @@ class StackDumpDiagnostic:
                 if not self._identity_is_current():
                     self.unavailable_reason = (
                         self.unavailable_reason or UNAVAILABLE_PROCESS_EXITED
+                    )
+                    return False
+                # **cancel の確認は送信の直前が最後**。`cancel_future_requests()`
+                # は lock を取らない（監視ループを worker の lock 保持で待たせない）
+                # ので、入口の 1 回だけでは「確認 -> pidfd_open -> 送信」の間に
+                # 入った cancel を取りこぼす。正常終了・deadline 到達のあとに
+                # 診断 signal を送らない、が守るべき契約なので、実際の syscall の
+                # 直前でもう一度見る。
+                if self._cancelled.is_set():
+                    self.unavailable_reason = (
+                        self.unavailable_reason or UNAVAILABLE_CANCELLED
                     )
                     return False
                 pidfd_send(descriptor, STACK_DUMP_SIGNAL)
@@ -439,7 +499,14 @@ class StackDumpDiagnostic:
 
     def status_payload(self) -> Dict[str, Any]:
         deadline = self.deadline_monotonic
-        kill_start = self.kill_start_monotonic
+        kill_signal_start = self.kill_signal_monotonic
+        finalization_start = self.deadline_finalization_monotonic
+
+        def _offset(value: Optional[float]) -> Optional[float]:
+            if deadline is None or value is None:
+                return None
+            return round(value - deadline, 6)
+
         return {
             "schema": STACK_DUMP_STATUS_SCHEMA,
             "child_pid": self.child_pid,
@@ -464,16 +531,18 @@ class StackDumpDiagnostic:
             "timeout_seconds": self.timeout_seconds,
             "lead_seconds": float(self.config.lead_seconds),
             "deadline_monotonic": deadline,
-            "kill_start_monotonic": kill_start,
-            "kill_start_offset_seconds": (
-                None if deadline is None or kill_start is None
-                else round(kill_start - deadline, 6)
-            ),
+            # deadline 到達 -> termination path へ入った時刻（signal の前）。
+            "deadline_finalization_monotonic": finalization_start,
+            "deadline_finalization_offset_seconds": _offset(finalization_start),
+            # 実際に最初の termination signal を送れた時刻。送っていなければ null
+            # （deadline 後・signal 前に child が終了した pair はここが null）。
+            "kill_signal": self.kill_signal,
+            "kill_signal_monotonic": kill_signal_start,
+            # **actual signal start に対応する offset**。以前は termination path
+            # へ入った時刻を指していたので、意味を signal 側へそろえた。
+            "kill_start_offset_seconds": _offset(kill_signal_start),
             "signal_sent_epoch": self.signal_sent_epoch,
-            "signal_sent_offset_seconds": (
-                None if deadline is None or self.signal_sent_monotonic is None
-                else round(self.signal_sent_monotonic - deadline, 6)
-            ),
+            "signal_sent_offset_seconds": _offset(self.signal_sent_monotonic),
             "child_timeout_evidence": self.child_timeout_evidence,
         }
 

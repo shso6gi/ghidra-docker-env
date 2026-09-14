@@ -105,7 +105,16 @@ supervisor は deadline の `PAIR_STACK_DUMP_LEAD`（既定 2s）前に **1 回�
 
 **process group へは送らない**（`killpg` は使わない）。送信も dump の観測も
 daemon worker thread の中だけで行い、監視ループは join しない。診断が遅くても
-失敗してもハングしても、kill 開始は deadline から 0.5 秒以内。
+失敗してもハングしても、**worker thread を作れなくても**、kill 開始は deadline
+から 0.5 秒以内。
+
+**cancel は送信の直前が最後の関門。** `cancel_future_requests()` は lock を
+取らない（監視ループを worker の lock 保持で待たせないため）ので、worker は
+readiness 確認だけでなく `pidfd_send_signal` の直前でも cancel を見る。正常終了
+または deadline 到達のあとに診断 signal を送らない、が守るべき契約。
+
+deadline の起点は barrier 解放の直後で 1 回だけ固定し、診断 object の生成は
+そのあと。診断を足したぶん child の実効予算が伸びることはない。
 
 ## 4. 診断状態（`<pair>.stack-dump.status.json`）
 
@@ -119,7 +128,8 @@ schema `pair-stack-dump-status-v1`。4 つの状態を**別々に**持つ。
 | `sent_but_unobserved` | 送ったが観測できなかった（**dump が無い、ではない**） |
 | `unavailable_reason` | 送らなかった / 送れなかった理由 |
 | `artifact_status` | `copied` / `partial` / `missing` / `copy_failed:<errno>` / `unset` |
-| `kill_start_offset_seconds` | deadline 到達から kill 開始までの実測秒（jitter） |
+| `deadline_finalization_offset_seconds` | deadline 到達 → termination path へ入るまで（**まだ signal は送っていない**） |
+| `kill_signal` / `kill_start_offset_seconds` | **実際に**最初の termination signal（SIGTERM）を送れた時刻と、deadline からの実測秒。送る前に child が終了した pair は `null`（kill を開始したと記録しない） |
 | `signal_sent_epoch` | dump を撮った瞬間（journal を切って `active` を出すのに使う） |
 | `child_timeout_evidence` | cleanup 前に検証した子の terminal timeout 証拠 |
 
@@ -146,6 +156,21 @@ payload の有無・log の文字列・returncode 単独からは推定しない
   この pair・この execution に束縛され、outcome が TIMEOUT で、terminal timeout が
   solver（`terminal_timeout_candidate_selection_receipt.solver_invocation_id`）で
   識別できること。`RESOLVED + returncode=3` だけでは S にしない。
+
+  **どこまで検証したかを混ぜない。** S の経路は 2 つあって強さが違う:
+
+  | 経路 | `verification` | 確定 S になるか |
+  |---|---|---|
+  | supervisor が cleanup 前に signing key で検証し sidecar に残した証拠 | `supervisor_key_verified` | なる（**優先**） |
+  | pair log の bundle を key 無しで読んだもの（封あり） | `replay_only_unsigned` | **ならない**（`supervisor_key_verification` が欠落） |
+  | pair log の bundle に key を渡して読んだもの | `supervisor_key_verified` | なる |
+  | 封の無い bundle（`bundle_seal_key_id` が null。開発・test 用） | `unsealed_bundle` | なる |
+
+  key 無しの `validate_canonical_result_finalization_bundle` は digest と event
+  stream の replay しか見ず、`bundle_signature` を検査しない。body を書き換えて
+  digest を計算し直した bundle は digest 検査を通ってしまうので、封のある bundle
+  を key 無しで「検証済み」と呼ばない。集計 CLI は key を渡さない（run 中と
+  offline 再集計で同じ結果にするため）ので、実運用の S は sidecar 経由になる。
 
 | `timeout_kind` | 条件 |
 |---|---|

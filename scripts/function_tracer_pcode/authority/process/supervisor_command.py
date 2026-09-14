@@ -48,8 +48,8 @@ CHILD_ENV_WORKER_KEY_FILE = "UNKNOWN_TAXONOMY_V2_WORKER_KEY_FILE"
 #: 失敗が supervisor の終了状態・exit code・projection を変えないための型付き guard。
 #: `except Exception` は使わない（Issue #125 PR-125-B の baseline は delete-only）。
 _DIAGNOSTIC_GUARD_ERRORS = (
-    ArithmeticError, AttributeError, ImportError, LookupError, OSError,
-    RecursionError, TypeError, ValueError,
+    ArithmeticError, AttributeError, ImportError, LookupError, MemoryError,
+    OSError, RecursionError, RuntimeError, TypeError, ValueError,
 )
 
 
@@ -442,6 +442,25 @@ class ProcessSupervisorCommand:
     def _build_stack_dump_diagnostic(
         self, process: subprocess.Popen[Any], start_token: str,
     ) -> StackDumpDiagnostic:
+        """診断 object を組む。**組めなくても例外を出さない。**
+
+        ここで失敗すると `run()` の `except Exception` に落ちて `_resume()` へ
+        移ってしまう。診断の都合で outcome / exit code を変えないため、失敗時は
+        無効化した診断（`enabled` が False で、送信も退避も行わない）を返す。
+        """
+        try:
+            return self._stack_dump_diagnostic(process, start_token)
+        except _DIAGNOSTIC_GUARD_ERRORS:
+            return StackDumpDiagnostic(
+                StackDumpDiagnosticConfig(),
+                child_pid=process.pid,
+                start_token=None,
+                timeout_seconds=float(self.config.timeout_seconds),
+            )
+
+    def _stack_dump_diagnostic(
+        self, process: subprocess.Popen[Any], start_token: str,
+    ) -> StackDumpDiagnostic:
         config = StackDumpDiagnosticConfig(
             journal_path=(
                 None if self.config.stage_journal_path is None
@@ -479,30 +498,42 @@ class ProcessSupervisorCommand:
         )
 
     def _wait_for_child_until_deadline(
-        self, process: subprocess.Popen[Any], diagnostic: StackDumpDiagnostic,
-    ) -> tuple[Optional[int], float]:
-        """絶対 deadline まで child を待つ。戻り値は ``(returncode, deadline)``。
+        self, process: subprocess.Popen[Any], diagnostic: Any, deadline: float,
+    ) -> Optional[int]:
+        """``deadline``（絶対時刻）まで child を待つ。
 
-        ``returncode`` が ``None`` なら deadline 到達（既存の kill 経路へ）。
-        ループの中には同期的な journal 読み取り・`stat`・dump の polling を**置かない**。
-        診断の完了 / 失敗 / dump 観測を待って deadline を延ばすこともしない。
+        ``None`` を返したら deadline 到達（既存の kill 経路へ）。
+        **`deadline` は呼び出し側が 1 回だけ決めてここへ渡す。**この関数は
+        deadline を作り直さないし、延ばさない。
+
+        ループの中には同期的な journal 読み取り・`stat`・dump の polling を
+        **置かない**。診断の完了 / 失敗 / dump 観測を待つこともしない。診断の
+        要求そのものが失敗しても、ループは deadline 監視を続ける。
         """
-        deadline = time.monotonic() + float(self.config.timeout_seconds)
         diagnostic.note_deadline(deadline)
         lead = float(self.config.stack_dump_lead_seconds)
+        # 診断を要求したかはループ側で持つ。診断 object の状態に依存させない
+        # （要求が失敗した場合に毎 poll slice で作り直そうとしないため）。
+        requested = False
         while True:
             # 最優先は child の終了確認。
             return_code = process.poll()
             if return_code is not None:
                 diagnostic.cancel_future_requests()
-                return return_code, deadline
+                return return_code
             now = time.monotonic()
             if now >= deadline:
                 diagnostic.cancel_future_requests()
-                return None, deadline
-            if not diagnostic.requested and now >= deadline - lead:
+                return None
+            if not requested and now >= deadline - lead:
+                requested = True
                 # daemon worker を起こすだけ。join もしないし戻り値も見ない。
-                diagnostic.request_async()
+                # 起動が失敗しても理由は診断側に残り、ここは監視を続ける
+                # （診断は diagnostic-only で、deadline を動かさない）。
+                try:
+                    diagnostic.request_async()
+                except _DIAGNOSTIC_GUARD_ERRORS:
+                    pass
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 continue
@@ -511,7 +542,7 @@ class ProcessSupervisorCommand:
             except subprocess.TimeoutExpired:
                 continue
             diagnostic.cancel_future_requests()
-            return return_code, deadline
+            return return_code
 
     def _child_terminal_timeout_evidence(self) -> Optional[dict[str, Any]]:
         """子が残した canonical 結果から terminal timeout の証拠を**検証して**拾う。
@@ -627,13 +658,23 @@ class ProcessSupervisorCommand:
 
     def _terminate_exact_process_group(
         self, process: subprocess.Popen[Any], start_token: str,
+        *, on_first_signal: Any = None,
     ) -> str:
+        """SIGTERM -> grace -> SIGKILL。**手順と disposition 文字列は不変。**
+
+        ``on_first_signal`` は診断の観測点で、最初の SIGTERM を**実際に送れた**
+        ときだけ `(name, monotonic)` で呼ばれる。属性代入だけの軽い callback を
+        渡すこと（kill 経路に I/O も lock も足さない）。終了確認や identity 検証
+        で signal を送らずに戻る枝では呼ばれないので、送っていない kill を
+        「開始した」と記録することはない。
+        """
         if process.poll() is not None:
             return f"EXITED_{process.returncode}"
         if not self._same_process(process, start_token):
             raise ValueError("child PID/start-token identity changed before kill")
         if process.poll() is not None:
             return f"EXITED_{process.returncode}"
+        first_signal_monotonic = time.monotonic()
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -641,6 +682,14 @@ class ProcessSupervisorCommand:
             if return_code is not None:
                 return f"EXITED_{return_code}_BEFORE_SIGTERM"
             raise
+        if on_first_signal is not None:
+            # 診断の観測点が kill 経路を壊さないようにする。ここは supervisor で
+            # 最も安全側に倒すべき経路なので、callback の失敗で disposition や
+            # 終了手順が変わることを許さない。
+            try:
+                on_first_signal("SIGTERM", first_signal_monotonic)
+            except _DIAGNOSTIC_GUARD_ERRORS:
+                pass
         try:
             process.wait(timeout=self.config.kill_grace_seconds)
             return (
@@ -764,8 +813,11 @@ class ProcessSupervisorCommand:
 
     def _finalize_deadline(
         self, *, launch: Any, process: subprocess.Popen[Any], start_token: str,
+        on_first_signal: Any = None,
     ) -> tuple[int, dict[str, Any]]:
-        kill_disposition = self._terminate_exact_process_group(process, start_token)
+        kill_disposition = self._terminate_exact_process_group(
+            process, start_token, on_first_signal=on_first_signal,
+        )
         recovered_pending = self.store.recover_pending_active_commit()
         state_path = self.store.directory / "state.json"
         state = (
@@ -888,16 +940,24 @@ class ProcessSupervisorCommand:
             os.write(write_fd, b"1")
             os.close(write_fd)
             write_fd = -1
+            # Issue #124 PR-124-C: deadline の起点は、この PR の前に
+            # `process.wait(timeout=self.config.timeout_seconds)` を呼んでいた
+            # のと**同じ位置**（barrier 解放の直後）で 1 回だけ固定する。診断
+            # object の生成はそのあとなので、生成時間が予算の外へ逃げない。
+            deadline = time.monotonic() + float(self.config.timeout_seconds)
             diagnostic = self._build_stack_dump_diagnostic(process, start_token)
-            return_code, _deadline = self._wait_for_child_until_deadline(
-                process, diagnostic
+            return_code = self._wait_for_child_until_deadline(
+                process, diagnostic, deadline
             )
             if return_code is None:
                 # deadline 到達。既存の termination / finalization 経路へそのまま入る
                 # （終了との競合の再確認も kill 手順も `_finalize_deadline` の中）。
-                diagnostic.note_kill_start(time.monotonic())
+                # ここはまだ signal を送っていないので「termination path へ入った
+                # 時刻」として記録し、実際の SIGTERM は `on_first_signal` で測る。
+                diagnostic.note_deadline_finalization_start(time.monotonic())
                 exit_code, projection = self._finalize_deadline(
-                    launch=launch, process=process, start_token=start_token
+                    launch=launch, process=process, start_token=start_token,
+                    on_first_signal=diagnostic.note_kill_signal,
                 )
             else:
                 state_path = self.store.directory / "state.json"

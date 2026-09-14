@@ -83,6 +83,16 @@ EVIDENCE_CONFIRMED = "confirmed"
 EVIDENCE_ABSENT = "absent"
 EVIDENCE_INVALID = "invalid"
 
+# S 証拠をどこから取り、どこまで検証したか。強さの違う 2 経路を混ぜない。
+SOURCE_SIDECAR = "diagnostic_status_sidecar"
+SOURCE_PAIR_LOG = "pair_log_result_payload"
+#: supervisor signing key で署名まで検証した（sidecar、または key を渡された呼び出し）。
+VERIFICATION_SUPERVISOR_KEY = "supervisor_key_verified"
+#: 封のある bundle を digest + replay だけで見た。真正性は未確認。
+VERIFICATION_REPLAY_ONLY = "replay_only_unsigned"
+#: そもそも封が無い bundle（`bundle_seal_key_id` が null）。digest + replay が全て。
+VERIFICATION_UNSEALED = "unsealed_bundle"
+
 #: supervisor の deadline 経路が作り得る `child_exit_disposition` の全体
 #: （`_terminate_exact_process_group` の戻り値）。wildcard の部分一致では
 #: 判定しない。
@@ -297,70 +307,122 @@ def _solver_identified_terminal_timeout(bundle: Mapping[str, Any]) -> Optional[s
     return invocation
 
 
+def _sidecar_child_evidence(
+    pair_status: Mapping[str, Any], recorded: Mapping[str, Any],
+    detail: Dict[str, Any],
+) -> Evidence:
+    """cleanup 前に supervisor が **signing key つきで**検証した子の証拠。"""
+    detail.update({
+        "source": SOURCE_SIDECAR,
+        "verification": VERIFICATION_SUPERVISOR_KEY,
+        "canonical_outcome": recorded.get("canonical_outcome"),
+        "bundle_digest": recorded.get("bundle_digest"),
+        "validation_error": recorded.get("validation_error"),
+    })
+    if recorded.get("validated") is not True:
+        return _evidence([], ["validated"], detail)
+    if not _identity_binds(recorded, pair_status):
+        return _evidence([], ["execution_identity"], detail)
+    if recorded.get("canonical_outcome") != TIMEOUT_OUTCOME:
+        return _evidence([], ["canonical_outcome"], detail)
+    invocation = recorded.get("terminal_timeout_solver_invocation_id")
+    if not isinstance(invocation, str) or not invocation:
+        return _evidence(["terminal_timeout_solver_invocation_id"], [], detail)
+    detail["terminal_timeout_solver_invocation_id"] = invocation
+    return _evidence([], [], detail)
+
+
+def _pair_log_child_evidence(
+    pair_status: Mapping[str, Any], bundle: Mapping[str, Any],
+    result_payload: Mapping[str, Any], detail: Dict[str, Any],
+    *, key_id: Optional[str], key: Optional[bytes],
+) -> Evidence:
+    """pair log に残った子の bundle。**署名の検証には key が要る。**
+
+    key を渡されなければ `validate_canonical_result_finalization_bundle` は
+    digest と event stream の replay しか見ない（`bundle_signature` は無視される）。
+    封をした bundle（`bundle_seal_key_id` あり）をその状態で「検証済み」とは
+    呼べないので、`supervisor_key_verification` を欠落として fail-closed にする。
+    """
+    detail["source"] = SOURCE_PAIR_LOG
+    sealed = bundle.get("bundle_seal_key_id") is not None
+    verified_with_key = sealed and key is not None and key_id is not None
+    detail["verification"] = (
+        VERIFICATION_SUPERVISOR_KEY if verified_with_key
+        else VERIFICATION_UNSEALED if not sealed
+        else VERIFICATION_REPLAY_ONLY
+    )
+    preimage = {
+        key_name: value for key_name, value in result_payload.items()
+        if key_name != "canonical_result_finalization_bundle"
+    }
+    try:
+        validated = validate_canonical_result_finalization_bundle(
+            dict(bundle),
+            result_payload_preimage=preimage,
+            bundle_verification_key_id=key_id if verified_with_key else None,
+            bundle_verification_key=key if verified_with_key else None,
+        )
+    except _READ_ERRORS as exc:
+        detail["validation_error"] = type(exc).__name__
+        return _evidence([], ["canonical_result_finalization_bundle"], detail)
+    identity = validated["execution_identity"]
+    detail["bundle_digest"] = validated["bundle_digest"]
+    detail["canonical_outcome"] = validated["outcome"]
+    if not _identity_binds(identity, pair_status):
+        return _evidence([], ["execution_identity"], detail)
+    if validated["outcome"] != TIMEOUT_OUTCOME:
+        return _evidence([], ["canonical_outcome"], detail)
+    invocation = _solver_identified_terminal_timeout(bundle)
+    if invocation is None:
+        return _evidence(["terminal_timeout_solver_invocation_id"], [], detail)
+    detail["terminal_timeout_solver_invocation_id"] = invocation
+    if not verified_with_key and sealed:
+        # digest も replay も通ったが、封の真正性は確かめていない。
+        # 「検証済み S evidence」としては採用しない。
+        return _evidence(["supervisor_key_verification"], [], detail)
+    return _evidence([], [], detail)
+
+
 def child_solver_timeout_evidence(
     pair_status: Mapping[str, Any],
     *,
     result_payload: Optional[Mapping[str, Any]] = None,
     status_sidecar: Optional[Mapping[str, Any]] = None,
+    bundle_verification_key_id: Optional[str] = None,
+    bundle_verification_key: Optional[bytes] = None,
 ) -> Evidence:
     """S: 子自身が solver の terminal timeout で TIMEOUT を確定したか。
 
     根拠は **検証済みの** canonical bundle だけ。`RESOLVED + returncode=3` や
     「result payload がある」ことだけでは solver 由来と断定しない。
     根拠が残っていない（cleanup 済みで log にも payload が無い）run では `absent`。
+
+    **どこまで検証したかを混ぜない。** 2 つの経路は強さが違う:
+
+    1. supervisor が cleanup 前に signing key で検証し sidecar に残した証拠
+       （`verification: supervisor_key_verified`）。**こちらを優先する。**
+    2. pair log に残った bundle。ここでは signing key を持たないのが既定なので、
+       封のある bundle は digest と replay しか確かめられない
+       （`verification: replay_only_unsigned`）。その場合は
+       `supervisor_key_verification` を欠落として **confirmed にしない**。
+       key を渡された呼び出し（調査用）だけが 1 と同じ強さになる。
+
+    どちらの経路も reporting / diagnostic 専用で、semantic authority や
+    outcome 判定へは接続しない。
     """
-    detail: Dict[str, Any] = {"source": None}
-    if isinstance(result_payload, Mapping):
-        bundle = result_payload.get("canonical_result_finalization_bundle")
-        if isinstance(bundle, Mapping):
-            detail["source"] = "pair_log_result_payload"
-            preimage = {
-                key: value for key, value in result_payload.items()
-                if key != "canonical_result_finalization_bundle"
-            }
-            try:
-                validated = validate_canonical_result_finalization_bundle(
-                    dict(bundle), result_payload_preimage=preimage,
-                )
-            except _READ_ERRORS as exc:
-                detail["validation_error"] = type(exc).__name__
-                return _evidence([], ["canonical_result_finalization_bundle"], detail)
-            identity = validated["execution_identity"]
-            detail["bundle_digest"] = validated["bundle_digest"]
-            detail["canonical_outcome"] = validated["outcome"]
-            if not _identity_binds(identity, pair_status):
-                return _evidence([], ["execution_identity"], detail)
-            if validated["outcome"] != TIMEOUT_OUTCOME:
-                return _evidence([], ["canonical_outcome"], detail)
-            invocation = _solver_identified_terminal_timeout(bundle)
-            if invocation is None:
-                return _evidence(
-                    ["terminal_timeout_solver_invocation_id"], [], detail
-                )
-            detail["terminal_timeout_solver_invocation_id"] = invocation
-            return _evidence([], [], detail)
+    detail: Dict[str, Any] = {"source": None, "verification": None}
     if isinstance(status_sidecar, Mapping):
         recorded = status_sidecar.get("child_timeout_evidence")
         if isinstance(recorded, Mapping):
-            detail["source"] = "diagnostic_status_sidecar"
-            detail.update({
-                "canonical_outcome": recorded.get("canonical_outcome"),
-                "bundle_digest": recorded.get("bundle_digest"),
-                "validation_error": recorded.get("validation_error"),
-            })
-            if recorded.get("validated") is not True:
-                return _evidence([], ["validated"], detail)
-            if not _identity_binds(recorded, pair_status):
-                return _evidence([], ["execution_identity"], detail)
-            if recorded.get("canonical_outcome") != TIMEOUT_OUTCOME:
-                return _evidence([], ["canonical_outcome"], detail)
-            invocation = recorded.get("terminal_timeout_solver_invocation_id")
-            if not isinstance(invocation, str) or not invocation:
-                return _evidence(
-                    ["terminal_timeout_solver_invocation_id"], [], detail
-                )
-            detail["terminal_timeout_solver_invocation_id"] = invocation
-            return _evidence([], [], detail)
+            return _sidecar_child_evidence(pair_status, recorded, detail)
+    if isinstance(result_payload, Mapping):
+        bundle = result_payload.get("canonical_result_finalization_bundle")
+        if isinstance(bundle, Mapping):
+            return _pair_log_child_evidence(
+                pair_status, bundle, result_payload, detail,
+                key_id=bundle_verification_key_id, key=bundle_verification_key,
+            )
     return _evidence(["child_canonical_timeout_evidence"], [], detail)
 
 
@@ -383,11 +445,15 @@ def classify_timeout_kind(
     *,
     result_payload: Optional[Mapping[str, Any]] = None,
     status_sidecar: Optional[Mapping[str, Any]] = None,
+    bundle_verification_key_id: Optional[str] = None,
+    bundle_verification_key: Optional[bytes] = None,
 ) -> TimeoutKindReport:
     """P と S を**独立に**評価して 5 値のどれかへ落とす。"""
     process = supervisor_deadline_evidence(pair_status)
     child = child_solver_timeout_evidence(
         pair_status, result_payload=result_payload, status_sidecar=status_sidecar,
+        bundle_verification_key_id=bundle_verification_key_id,
+        bundle_verification_key=bundle_verification_key,
     )
     outcome = (
         pair_status.get("canonical_outcome")

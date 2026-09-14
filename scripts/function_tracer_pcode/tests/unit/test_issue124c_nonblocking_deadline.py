@@ -497,7 +497,8 @@ class _DiagnosticProbe:
         self.requested = False
         self.cancelled = 0
         self.deadline = None
-        self.kill_start = None
+        self.finalization_start = None
+        self.kill_signal = None
         self._work = work
         self.thread = None
         self.request_monotonic = None
@@ -505,8 +506,11 @@ class _DiagnosticProbe:
     def note_deadline(self, deadline):
         self.deadline = deadline
 
-    def note_kill_start(self, value):
-        self.kill_start = value
+    def note_deadline_finalization_start(self, value):
+        self.finalization_start = value
+
+    def note_kill_signal(self, name, value):
+        self.kill_signal = (name, value)
 
     def cancel_future_requests(self):
         self.cancelled += 1
@@ -521,9 +525,15 @@ class _DiagnosticProbe:
 
 
 def _run_loop(timeout, lead, process, probe):
+    """`run()` と同じ順序で deadline を決めてからループへ入る。
+
+    deadline は **呼び出し側が 1 回だけ**決めてループへ渡す（production では
+    barrier 解放の直後）。ループは deadline を作り直さない。
+    """
     command = _Command(timeout, lead)
     started = time.monotonic()
-    return_code, deadline = command._wait_for_child_until_deadline(process, probe)
+    deadline = started + timeout
+    return_code = command._wait_for_child_until_deadline(process, probe, deadline)
     finished = time.monotonic()
     return {
         "return_code": return_code,
@@ -565,20 +575,76 @@ def test_d3_hanging_diagnostic_does_not_block_the_loop():
         stop.set()
 
 
-def test_d4_raising_diagnostic_request_does_not_stop_the_deadline():
-    """D4: 診断要求そのものが例外でも deadline どおり kill へ進む。"""
+@pytest.mark.parametrize("failure", [
+    RuntimeError("can't start new thread"),
+    MemoryError(),
+    OSError(11, "Resource temporarily unavailable"),
+])
+def test_d4_raising_diagnostic_request_does_not_stop_the_deadline(failure):
+    """D4: 診断要求そのものが例外でも、deadline 到達まで監視を続ける。
+
+    `threading.Thread.start()` は thread を作れないと `RuntimeError` を投げる。
+    それがループを抜けると `run()` の `except Exception` -> `_resume()` へ移り、
+    **診断の都合で outcome / exit code が変わってしまう**。診断は
+    diagnostic-only なので、ここは握り潰して deadline 監視を続ける。
+    """
     class _Raising(_DiagnosticProbe):
         def request_async(self):
             self.requested = True
-            raise RuntimeError("diagnostic exploded")
+            raise failure
 
     probe = _Raising()
-    with pytest.raises(RuntimeError):
-        _run_loop(0.6, 0.3, _FakeProcess(), probe)
-    # 監視ループは診断の例外を握り潰さない（supervisor の `run()` が resume する）。
-    # 実装側の `StackDumpDiagnostic.request_async` は例外を出さないので、
-    # production 経路でここに来ることはない。
+    result = _run_loop(0.6, 0.3, _FakeProcess(), probe)
+    # deadline に到達し、既存の kill 経路へ渡している。
+    assert result["return_code"] is None
     assert probe.requested is True
+    assert probe.cancelled >= 1
+    assert 0.0 <= result["offset"] <= DEADLINE_JITTER_ALLOWANCE_SECONDS
+
+
+def test_a_failing_diagnostic_request_is_not_retried_every_slice():
+    """失敗した要求をループが毎 slice 作り直さない（監視の仕事を増やさない）。"""
+    calls = []
+
+    class _Raising(_DiagnosticProbe):
+        def request_async(self):
+            calls.append(time.monotonic())
+            raise RuntimeError("can't start new thread")
+
+    _run_loop(0.6, 0.5, _FakeProcess(), _Raising())
+    assert len(calls) == 1, calls
+
+
+def test_the_production_diagnostic_never_raises_from_request_async(pair, monkeypatch):
+    """実装側の `request_async` は、thread を作れなくても例外を出さない。"""
+    def _explode(*args, **kwargs):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading, "Thread", _explode)
+    diagnostic = _diagnostic(pair)
+    diagnostic.request_async()          # 例外にならない
+    assert diagnostic.requested is True
+    assert diagnostic.signal_sent is False
+    assert diagnostic.unavailable_reason == "diagnostic_start_failed:RuntimeError"
+
+
+def test_a_failed_thread_start_is_recorded_without_sending(pair, monkeypatch, sender):
+    """`Thread.start()` の失敗も理由として残り、送信は起きない。"""
+    class _DeadThread:
+        def __init__(self, *args, **kwargs):
+            self.daemon = True
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setattr(threading, "Thread", _DeadThread)
+    diagnostic = _diagnostic(pair)
+    diagnostic.request_async()
+    assert diagnostic.unavailable_reason == "diagnostic_start_failed:RuntimeError"
+    assert sender.sent == []
 
 
 def test_d5_child_exit_during_diagnostic_is_a_normal_resolution():
@@ -588,7 +654,8 @@ def test_d5_child_exit_during_diagnostic_is_a_normal_resolution():
     result = _run_loop(2.0, 1.8, process, probe)
     assert result["return_code"] == 0
     assert probe.cancelled >= 1
-    assert probe.kill_start is None
+    assert probe.finalization_start is None
+    assert probe.kill_signal is None
 
 
 def test_exit_before_the_lead_never_requests_a_diagnostic():
@@ -618,8 +685,59 @@ def test_the_loop_never_waits_longer_than_one_poll_slice():
     assert process.max_wait_timeout <= POLL_SLICE_SECONDS + 1e-9
 
 
-def test_deadline_is_fixed_once_at_the_start():
-    """deadline は 1 回だけ決まり、ループの途中で作り直さない。"""
+def test_the_loop_never_derives_a_deadline_of_its_own():
+    """ループは deadline を受け取るだけで、作りも延ばしもしない。
+
+    `deadline` への代入や `timeout_seconds` の読み出しがループ本体に無いことを
+    AST で固定する（あると、診断を足した分だけ起点がずれる余地が残る）。
+    """
+    import ast
+    import inspect
+    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+        ProcessSupervisorCommand,
+    )
+
+    tree = ast.parse(inspect.getsource(
+        ProcessSupervisorCommand._wait_for_child_until_deadline
+    ).lstrip())
+    assigned = {
+        target.id for node in ast.walk(tree) if isinstance(node, ast.Assign)
+        for target in node.targets if isinstance(target, ast.Name)
+    }
+    assert "deadline" not in assigned, assigned
+    attributes = {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    }
+    assert "timeout_seconds" not in attributes, sorted(attributes)
+
+
+def test_the_deadline_origin_is_fixed_before_the_diagnostic_is_built():
+    """`run()` は barrier 解放の直後に deadline を固定してから診断を組む。
+
+    診断 object の生成時間が timeout budget の外へ逃げると、診断を入れた分だけ
+    child の実効予算が伸びる。順序を source で固定する。
+    """
+    import re
+    from pathlib import Path as _Path
+
+    source = (
+        _Path(__file__).resolve().parents[4]
+        / "scripts/function_tracer_pcode/authority/process/supervisor_command.py"
+    ).read_text(encoding="utf-8")
+    body = source[source.index("    def run(self) -> int:"):]
+    barrier = body.index('os.write(write_fd, b"1")')
+    origin = body.index("deadline = time.monotonic() + float(self.config.timeout_seconds)")
+    build = body.index("diagnostic = self._build_stack_dump_diagnostic(")
+    wait = body.index("self._wait_for_child_until_deadline(")
+    assert barrier < origin < build < wait
+    # 起点は 1 回だけ。
+    assert len(re.findall(
+        r"deadline = time\.monotonic\(\) \+ float\(self\.config\.timeout_seconds\)",
+        source,
+    )) == 1
+
+
+def test_the_loop_uses_the_deadline_it_was_given():
     probe = _DiagnosticProbe()
     result = _run_loop(0.5, 0.2, _FakeProcess(), probe)
     assert probe.deadline == pytest.approx(result["deadline"])
@@ -781,7 +899,7 @@ def test_the_diagnostic_worker_never_touches_the_popen_object():
     )
 
     tree = ast.parse(
-        inspect.getsource(ProcessSupervisorCommand._build_stack_dump_diagnostic).lstrip()
+        inspect.getsource(ProcessSupervisorCommand._stack_dump_diagnostic).lstrip()
     )
     lambdas = [node for node in ast.walk(tree) if isinstance(node, ast.Lambda)]
     assert lambdas, "identity verifier の lambda が見つからない"
@@ -795,3 +913,147 @@ def test_the_diagnostic_worker_never_touches_the_popen_object():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert "read_process_start_token" in names
+
+
+# ---------------------------------------------------------------------------
+# cancel と送信の競合（sleep に頼らず決定的に再現する）
+# ---------------------------------------------------------------------------
+
+
+def test_cancel_between_the_readiness_check_and_the_send_stops_the_signal(
+    pair, monkeypatch,
+):
+    """worker が pidfd を開いた**あと**に cancel されたら、もう送らない。
+
+    `cancel_future_requests()` は lock を取らない（監視ループを worker の lock
+    保持で待たせないため）ので、入口で 1 回見るだけでは
+    「確認 -> pidfd_open -> 送信」の間に入った cancel を取りこぼす。
+    ここでは `os.pidfd_open` の中で worker を止め、監視側に相当する main thread
+    から cancel してから再開させる。sleep には頼らない。
+    """
+    opened = threading.Event()
+    release = threading.Event()
+    sent = []
+
+    def _open(pid, flags):
+        opened.set()
+        assert release.wait(5.0), "テストが worker を再開させられなかった"
+        return os.open(os.devnull, os.O_RDONLY)
+
+    monkeypatch.setattr(os, "pidfd_open", _open, raising=False)
+    monkeypatch.setattr(
+        signal, "pidfd_send_signal", lambda fd, number: sent.append(number),
+        raising=False,
+    )
+
+    diagnostic = _diagnostic(pair)
+    diagnostic.request_async()
+    assert opened.wait(5.0), "worker が pidfd_open まで到達しなかった"
+    # ここが「監視ループが child の終了 / deadline 到達を見た」瞬間に相当する。
+    diagnostic.cancel_future_requests()
+    release.set()
+    _join_worker(diagnostic)
+
+    assert sent == [], "cancel 後に SIGUSR1 を送っている"
+    assert diagnostic.signal_sent is False
+    assert diagnostic.unavailable_reason == "cancelled"
+    assert diagnostic.dump_observed is False
+
+
+def test_cancel_before_the_worker_reads_the_journal_stops_the_signal(pair, sender):
+    """cancel が先に立っていれば worker は送らない（入口の関門）。"""
+    diagnostic = _diagnostic(pair)
+    diagnostic.cancel_future_requests()
+    # cancel 済みでも worker を直接動かして、送信側の関門だけを見る。
+    diagnostic._diagnose()
+    assert diagnostic.signal_sent is False
+    assert sender.sent == []
+    assert diagnostic.unavailable_reason == "cancelled"
+
+
+def test_the_send_gate_checks_cancel_last(pair):
+    """`_send_signal` の最後の判断が cancel であることを AST で固定する。"""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(StackDumpDiagnostic._send_signal).lstrip())
+    sends = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "pidfd_send"
+    ]
+    assert len(sends) == 1
+    send_line = sends[0].lineno
+    cancel_checks = [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "is_set"
+    ]
+    assert cancel_checks, "cancel の確認が無い"
+    # 送信の直前にも cancel を見ている。
+    assert max(cancel_checks) < send_line
+    assert send_line - max(cancel_checks) < 12, (cancel_checks, send_line)
+
+
+# ---------------------------------------------------------------------------
+# kill 開始時刻は「termination path へ入った時刻」ではなく実 signal
+# ---------------------------------------------------------------------------
+
+
+def test_kill_start_offset_tracks_the_actual_signal_not_the_path_entry(pair):
+    """`kill_start_offset_seconds` は実際に SIGTERM を送れた時刻に対応する。"""
+    diagnostic = _diagnostic(pair)
+    deadline = 1000.0
+    diagnostic.note_deadline(deadline)
+    diagnostic.note_deadline_finalization_start(deadline + 0.01)
+    diagnostic.note_kill_signal("SIGTERM", deadline + 0.30)
+    payload = diagnostic.status_payload()
+    assert payload["deadline_finalization_offset_seconds"] == pytest.approx(0.01)
+    assert payload["kill_start_offset_seconds"] == pytest.approx(0.30)
+    assert payload["kill_signal"] == "SIGTERM"
+
+
+def test_no_kill_start_is_claimed_when_no_signal_was_sent(pair):
+    """deadline 後・signal 前に child が終了した pair は kill を名乗らない。"""
+    diagnostic = _diagnostic(pair)
+    diagnostic.note_deadline(1000.0)
+    diagnostic.note_deadline_finalization_start(1000.02)
+    payload = diagnostic.status_payload()
+    assert payload["deadline_finalization_offset_seconds"] == pytest.approx(0.02)
+    assert payload["kill_start_offset_seconds"] is None
+    assert payload["kill_signal"] is None
+    assert payload["kill_signal_monotonic"] is None
+
+
+def test_the_first_signal_hook_fires_only_after_a_delivered_sigterm():
+    """`_terminate_exact_process_group` の hook は送れたときだけ呼ばれる。
+
+    終了確認・identity 検証で signal を送らずに戻る枝では呼ばれないことを、
+    source の位置関係で固定する（hook が早すぎると、送っていない kill を
+    「開始した」と記録してしまう）。
+    """
+    import ast
+    import inspect
+    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+        ProcessSupervisorCommand,
+    )
+
+    source = inspect.getsource(
+        ProcessSupervisorCommand._terminate_exact_process_group
+    ).lstrip()
+    tree = ast.parse(source)
+    killpg_lines = [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "killpg"
+    ]
+    hook_lines = [
+        node.lineno for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "on_first_signal"
+    ]
+    assert len(killpg_lines) == 2, killpg_lines      # SIGTERM と SIGKILL
+    assert len(hook_lines) == 1, hook_lines
+    # hook は最初の killpg より後（= 送れたあと）、grace 待ちより前。
+    assert hook_lines[0] > min(killpg_lines)
+    assert hook_lines[0] < max(killpg_lines)

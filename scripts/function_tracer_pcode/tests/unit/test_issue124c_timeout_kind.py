@@ -517,3 +517,141 @@ def test_real_bundle_plus_supervisor_deadline_is_both_signals(real_timeout_paylo
     assert classify_timeout_kind(
         status, result_payload=payload
     ).kind == KIND_BOTH_SIGNALS
+
+
+# ---------------------------------------------------------------------------
+# 「どこまで検証したか」を混ぜない（sidecar 優先 / pair-log は署名未検証）
+# ---------------------------------------------------------------------------
+
+
+def _sealed_timeout_payload(tmp_path, monkeypatch, key=b"s" * 32):
+    """supervisor signing key で封をした本物の TIMEOUT payload を作る。"""
+    key_file = tmp_path / "supervisor.key"
+    key_file.write_bytes(key)
+    monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_ID", "supervisor-key-v1")
+    monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_FILE", str(key_file))
+    try:
+        return _build_real_timeout_payload()
+    finally:
+        monkeypatch.delenv("UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_ID", raising=False)
+        monkeypatch.delenv("UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_FILE", raising=False)
+
+
+def test_a_sealed_bundle_without_the_key_is_not_verified_s_evidence(
+    tmp_path, monkeypatch,
+):
+    """key を渡さない pair-log fallback は「supervisor-key verified」にしない。
+
+    key 無しの `validate_canonical_result_finalization_bundle` は digest と
+    event stream の replay しか見ず、`bundle_signature` を検査しない。
+    封のある bundle をその状態で確定 S 証拠として採用してはいけない。
+    """
+    payload, identity = _sealed_timeout_payload(tmp_path, monkeypatch)
+    evidence = child_solver_timeout_evidence(
+        _status_for(identity), result_payload=payload
+    )
+    assert evidence.confirmed is False
+    assert evidence.status == EVIDENCE_ABSENT
+    assert "supervisor_key_verification" in evidence.missing
+    assert evidence.detail["verification"] == "replay_only_unsigned"
+    # 分類も S 未確認として扱う（P も無いので unknown）。
+    assert classify_timeout_kind(
+        _status_for(identity), result_payload=payload
+    ).kind == KIND_UNKNOWN
+
+
+def test_the_same_sealed_bundle_with_the_key_is_verified(tmp_path, monkeypatch):
+    payload, identity = _sealed_timeout_payload(tmp_path, monkeypatch)
+    evidence = child_solver_timeout_evidence(
+        _status_for(identity), result_payload=payload,
+        bundle_verification_key_id="supervisor-key-v1",
+        bundle_verification_key=b"s" * 32,
+    )
+    assert evidence.status == EVIDENCE_CONFIRMED
+    assert evidence.detail["verification"] == "supervisor_key_verified"
+    assert classify_timeout_kind(
+        _status_for(identity), result_payload=payload,
+        bundle_verification_key_id="supervisor-key-v1",
+        bundle_verification_key=b"s" * 32,
+    ).kind == KIND_CHILD_SOLVER_TIMEOUT
+
+
+def test_a_rebuilt_body_and_digest_with_a_stale_signature_is_rejected(
+    tmp_path, monkeypatch,
+):
+    """body / digest を整合させて作り直しても、署名が合わなければ採用しない。
+
+    digest だけを検査する経路は、body を書き換えて digest を再計算すれば通って
+    しまう。key を渡す呼び出しでは署名で弾き、key を渡さない呼び出しでは
+    そもそも「検証済み」と名乗らない。どちらの枝でも fail-closed。
+    """
+    from scripts.function_tracer_pcode.authority.contracts import authority_digest
+
+    payload, identity = _sealed_timeout_payload(tmp_path, monkeypatch)
+    tampered = copy.deepcopy(payload)
+    bundle = tampered["canonical_result_finalization_bundle"]
+    # 無関係に見える field を書き換え、digest だけ辻褄を合わせる。
+    bundle["execution_payload"] = {"case": "tampered-by-the-test"}
+    body = {
+        key: value for key, value in bundle.items()
+        if key not in {"bundle_digest", "bundle_signature"}
+    }
+    bundle["bundle_digest"] = authority_digest(body)
+    # `bundle_signature` は元のまま = 新しい digest に対しては不正。
+
+    with_key = child_solver_timeout_evidence(
+        _status_for(identity), result_payload=tampered,
+        bundle_verification_key_id="supervisor-key-v1",
+        bundle_verification_key=b"s" * 32,
+    )
+    assert with_key.confirmed is False
+    assert with_key.status == EVIDENCE_INVALID
+    assert with_key.detail["validation_error"] == "ValueError"
+
+    without_key = child_solver_timeout_evidence(
+        _status_for(identity), result_payload=tampered
+    )
+    assert without_key.confirmed is False
+
+
+def test_the_verified_sidecar_wins_over_the_pair_log(tmp_path, monkeypatch):
+    """両方あるときは、署名まで検証済みの sidecar を採用する。"""
+    payload, identity = _sealed_timeout_payload(tmp_path, monkeypatch)
+    sidecar = _sidecar_evidence(
+        result_occurrence_id=identity["result_occurrence_id"],
+        stream_id=identity["stream_id"],
+        source_snapshot_fingerprint=identity["source_snapshot_fingerprint"],
+    )
+    evidence = child_solver_timeout_evidence(
+        _status_for(identity), result_payload=payload, status_sidecar=sidecar,
+    )
+    assert evidence.status == EVIDENCE_CONFIRMED
+    assert evidence.detail["source"] == "diagnostic_status_sidecar"
+    assert evidence.detail["verification"] == "supervisor_key_verified"
+
+
+def test_an_unverified_sidecar_is_not_rescued_by_the_pair_log(tmp_path, monkeypatch):
+    """sidecar が「検証できなかった」と言っているなら、log で上書きしない。"""
+    payload, identity = _sealed_timeout_payload(tmp_path, monkeypatch)
+    sidecar = _sidecar_evidence(
+        validated=False, validation_error="ValueError",
+        result_occurrence_id=identity["result_occurrence_id"],
+        stream_id=identity["stream_id"],
+        source_snapshot_fingerprint=identity["source_snapshot_fingerprint"],
+    )
+    evidence = child_solver_timeout_evidence(
+        _status_for(identity), result_payload=payload, status_sidecar=sidecar,
+    )
+    assert evidence.confirmed is False
+    assert evidence.status == EVIDENCE_INVALID
+    assert evidence.detail["source"] == "diagnostic_status_sidecar"
+
+
+def test_an_unsealed_bundle_is_labelled_as_such(real_timeout_payload):
+    """封が無い bundle（env 未設定で作ったもの）は digest + replay が全て。"""
+    payload, identity = real_timeout_payload
+    evidence = child_solver_timeout_evidence(
+        _status_for(identity), result_payload=payload
+    )
+    assert evidence.status == EVIDENCE_CONFIRMED
+    assert evidence.detail["verification"] == "unsealed_bundle"
