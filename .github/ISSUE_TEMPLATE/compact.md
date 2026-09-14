@@ -23,8 +23,7 @@ assignees: ''
   - 未決定の対策をタイトルにしない
 
 【label】
-  既存 label からのみ選ぶ: bug / documentation / duplicate / enhancement / epic /
-  good first issue / help wanted / invalid / question / wontfix
+  起票時点で repository に存在する label のみ使用する。
   新しい label を勝手に作らない。該当が無ければ label 無しでよい。
 
 【節の扱い】
@@ -61,11 +60,18 @@ assignees: ''
 
 ## 受け入れ基準
 
-<!-- 外部から確認できる条件で書く。主観的な条件（「読みやすくなる」等）は書かない。 -->
+<!-- 外部から確認できる条件で書く。主観的な条件（「読みやすくなる」等）は書かない。
+     3 の test は変更の性質で決まる。bug を人工的に作ってまで regression test を足さない。
+       - bug 修正: non-vacuous な regression test（現行実装に対して落ちることを確認した
+         記録を残す）
+       - 局所 cleanup: 対象の contract / invariant を固定する unit / static test
+         （振る舞いを変えないなら、その不変性を固定する test でよい）
+       - 純粋な文書変更や、test を足す余地の無い機械的変更: 既存の検証で十分かを
+         この Issue で判断し、その理由を書く -->
 
 1. 期待挙動が満たされることを確認する条件
 2. 逆条件でも壊れないこと（緩めていないことの確認）
-3. non-vacuous な regression test を持つ（現行実装に対して落ちることを確認した記録を残す）
+3. 変更の性質に応じた test（上のコメント参照）
 4. 既存の検証が通る（unit / 静的チェック / 該当すれば意味論不変の確認）
 
 ## 関連

@@ -31,8 +31,7 @@ assignees: ''
     「YYYY-MM-DD タイトル改訂（旧タイトル: …、理由: …）」を残す
 
 【label】
-  既存 label からのみ選ぶ: bug / documentation / duplicate / enhancement / epic /
-  good first issue / help wanted / invalid / question / wontfix
+  起票時点で repository に存在する label のみ使用する。
   新しい label を勝手に作らない。該当が無ければ label 無しでよい。
 
 【節の扱い】
@@ -100,8 +99,8 @@ assignees: ''
 
 <!-- やらないこと。
      - 他 Issue が所有する責務は Issue 番号つきで除外する
-     - 問題を隠す対策（測定条件の都合のよい変更、成功した試行だけの採用、
-       再試行による回避など）を明示的に禁止する -->
+     - 該当する場合は、問題を隠す対策（測定条件の都合のよい変更、成功した試行だけの
+       採用、再試行による回避など）を明示的に禁止する。該当しない Issue では書かない -->
 
 -
 
