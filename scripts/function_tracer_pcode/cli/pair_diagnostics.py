@@ -32,9 +32,13 @@
 * ``SIGUSR1`` は既定動作が terminate なので、**登録が確認できない限り送っては
   ならない**（送信側の責務は PR-124-C）。この PR では送信を一切行わない。
 
-`chain=False` にするのは、JVM が後から同じ signal に handler を載せた場合でも
-既定動作（= プロセス終了）へ落ちないようにするため。`all_threads=True` は
-`smt/parallel.py` の solver worker thread を dump に含めるため。
+`chain=False` は「faulthandler が stack を書いたあと、**登録時点で入っていた
+previous handler へ連鎖しない**」という設定である。あとから別の handler が
+SIGUSR1 を上書きすることを防ぐ設定ではない（それは登録順の問題で、この flag は
+関与しない）。JVM 起動後も Python の faulthandler が生きているかどうかは別問題で、
+実 JVM を上げた子プロセス test（`RUN_PYGHIDRA_REGRESSIONS=1`）で実証する。
+
+`all_threads=True` は `smt/parallel.py` の solver worker thread を dump に含めるため。
 
 ## dump path の 2 本立て
 
@@ -148,10 +152,16 @@ def _sigcgt_probe(signal_number: int) -> Dict[str, Any]:
 
 
 def jvm_already_started() -> bool:
-    """in-process JVM がすでに起動しているか（起動順序の実測）。
+    """in-process JVM の起動を **この probe で観測できたか**。
 
     JPype が import すらされていなければ JVM は起動していない。import 済み
-    なら JPype 自身に聞く。判断できないときは「起動している」とは言わない。
+    なら JPype 自身に聞く。**判断できないときは False を返す**ので、この関数の
+    False は「JVM は起動していない」の証明ではなく「起動を観測しなかった」で
+    しかない。`registered_before_jvm` もその意味で読むこと
+    （production path で登録が JVM 起動より前であることの根拠は、
+    `run_equivalence_check` の呼び出し順と実 JVM 子プロセス test の
+    `handler_registered` < `jvm_state_after_launch` の順序であって、この probe
+    単独ではない）。
     """
     jpype = sys.modules.get("jpype")
     if jpype is None:
@@ -239,6 +249,9 @@ def register_stack_dump_handler(
             "declared" if state.dump_artifact_path else "unset"
         ),
         "dump_path_tmp": state.dump_path_tmp,
+        # 「登録時の probe で JVM started を観測しなかった」という意味。
+        # probe 不能時も False（= この値は true）になるので、単独で
+        # 「JVM より前だった」ことの証明にはしない（`jvm_already_started`）。
         "registered_before_jvm": not jvm_already_started(),
         "signal": signal_name,
         "signal_number": int(signal_number),
