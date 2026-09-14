@@ -10,6 +10,11 @@ from contextvars import ContextVar
 from typing import List, Optional, Dict, Any, Type
 from dataclasses import dataclass
 
+from scripts.function_tracer_pcode.core.stage_journal import (
+    journal_counter,
+    journal_stage_end,
+    journal_stage_start,
+)
 from scripts.function_tracer_pcode.smt.interface import SMTSolver, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 
@@ -48,13 +53,17 @@ class _SolverCounters:
         self.backend_seconds = 0.0
         self.wall_seconds = 0.0
 
-    def record_logical_query(self) -> None:
+    def record_logical_query(self) -> int:
+        """1 件数えて、その通し番号を返す（journal の対応 ID に使う）。"""
         with self._lock:
             self.logical_queries += 1
+            return self.logical_queries
 
-    def record_backend_run(self) -> None:
+    def record_backend_run(self) -> int:
+        """1 件数えて、その通し番号を返す（journal の対応 ID に使う）。"""
         with self._lock:
             self.backend_runs += 1
+            return self.backend_runs
 
     def add_backend_seconds(self, seconds: float) -> None:
         with self._lock:
@@ -95,24 +104,31 @@ def reset_solver_counters() -> None:
 
 
 @contextmanager
-def _solver_orchestration():
+def _solver_orchestration(mode: str):
     """1 回の論理的な問い合わせ（並列 / 順次実行）を囲む計測 scope。
 
     入口で `logical_queries` を 1 回、出口で orchestration と待ちを含む
     `wall_seconds` を加算する。内側の `run_single` は backend counter だけを
     動かす（`logical_queries` / `wall_seconds` を二重計上しない）。
+
+    Issue #124 PR-124-B: 同じ区間を journal にも出す。counter の値と意味は
+    変えず、`logical_queries` の通し番号をそのまま `query_id` として使う
+    （backend 側の `counter` 行がこの ID で対応づく）。
     """
-    _SOLVER_COUNTERS.record_logical_query()
+    query_id = _SOLVER_COUNTERS.record_logical_query()
     started = time.perf_counter()
     token = _IN_SOLVER_ORCHESTRATION.set(True)
+    journal_stage_start("solver", {"kind": mode, "query_id": query_id})
     try:
-        yield
+        yield query_id
     finally:
         try:
             _IN_SOLVER_ORCHESTRATION.reset(token)
         except ValueError:
             _IN_SOLVER_ORCHESTRATION.set(False)
-        _SOLVER_COUNTERS.add_wall_seconds(time.perf_counter() - started)
+        elapsed = time.perf_counter() - started
+        _SOLVER_COUNTERS.add_wall_seconds(elapsed)
+        journal_stage_end("solver", elapsed, {"kind": mode, "query_id": query_id})
 
 
 @dataclass
@@ -236,21 +252,36 @@ class ParallelSolverRunner:
         timeout: Optional[int] = None,
         *,
         _orchestrated: Optional[bool] = None,
+        _journal_query_id: Optional[int] = None,
     ) -> SolverResult:
         """単一ソルバーで実行
 
-        ``_orchestrated`` は計測専用の内部引数。run_parallel が worker thread へ
-        submit するとき（ContextVar が伝わらない）にだけ明示で渡す。判定には
-        一切関与しない。
+        ``_orchestrated`` / ``_journal_query_id`` は計測専用の内部引数。
+        run_parallel が worker thread へ submit するとき（ContextVar も
+        journal の対応 ID も伝わらない）にだけ明示で渡す。判定には一切
+        関与しない。
         """
         import sys
 
         orchestrated = (
             _IN_SOLVER_ORCHESTRATION.get() if _orchestrated is None else bool(_orchestrated)
         )
+        query_id = _journal_query_id
         if not orchestrated:
-            _SOLVER_COUNTERS.record_logical_query()
-        _SOLVER_COUNTERS.record_backend_run()
+            query_id = _SOLVER_COUNTERS.record_logical_query()
+        backend_run_id = _SOLVER_COUNTERS.record_backend_run()
+        # Issue #124 PR-124-B: orchestration の内側は backend counter と対応 ID
+        # だけを残す（論理問い合わせの start / end は orchestration 側が持って
+        # いるので、ここで start / end を書くと journal 上で二重になる）。
+        journal_payload = {
+            "kind": "run_single",
+            "orchestrated": orchestrated,
+            "query_id": query_id,
+            "backend_run_id": backend_run_id,
+            "solver": getattr(solver, "name", None),
+        }
+        if not orchestrated:
+            journal_stage_start("solver", journal_payload)
         backend_started = time.perf_counter()
         try:
             # タイムアウトを動的に設定（重要：ここで反映される）
@@ -284,6 +315,9 @@ class ParallelSolverRunner:
             _SOLVER_COUNTERS.add_backend_seconds(elapsed)
             if not orchestrated:
                 _SOLVER_COUNTERS.add_wall_seconds(elapsed)
+                journal_stage_end("solver", elapsed, journal_payload)
+            else:
+                journal_counter("solver", journal_payload, seconds=elapsed)
     
     def run_parallel(
         self,
@@ -299,7 +333,7 @@ class ParallelSolverRunner:
         Returns:
             ParallelResult: 並列実行の結果
         """
-        with _solver_orchestration():
+        with _solver_orchestration("run_parallel") as query_id:
             if not self._solvers:
                 return ParallelResult(
                     results=[],
@@ -326,6 +360,7 @@ class ParallelSolverRunner:
                         cancellation_token,
                         runtime_timeout,
                         _orchestrated=True,
+                        _journal_query_id=query_id,
                     ): solver
                     for solver in self._solvers
                 }
@@ -423,7 +458,7 @@ class ParallelSolverRunner:
         複数ソルバーを順次実行（デバッグ用）
         最初に確定結果が出たら終了
         """
-        with _solver_orchestration():
+        with _solver_orchestration("run_sequential") as query_id:
             runtime_timeout = self._resolve_timeout(timeout)
             if self.debug:
                 print(f"[ParallelRunner] Starting sequential execution with {len(self._solvers)} solvers")
@@ -442,6 +477,7 @@ class ParallelSolverRunner:
                     solver,
                     smt_script,
                     timeout=runtime_timeout,
+                    _journal_query_id=query_id,
                 )
                 results.append(result)
             
