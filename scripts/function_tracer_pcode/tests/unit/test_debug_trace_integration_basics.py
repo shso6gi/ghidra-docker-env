@@ -273,11 +273,16 @@ def test_debug_trace_multiple_attempts_on_unknown(mock_program_x86):
                 assert result.is_equivalent is True
 
 def test_debug_trace_to_dict_machine_readable(mock_program_x86):
-    """to_dict()が機械可読であることを確認"""
+    """to_dict()が機械可読であることを確認
+
+    Issue #128 PR-128-B: `debug_trace` は debug 指定のときだけ JSON へ添付される
+    ので、serialize された trace を見るこの test は `debug=True` で回す（生成は
+    どちらでも行われ、object 上には常に在る）。
+    """
     import json
     
     checker = EquivalenceChecker(
-        debug=False,
+        debug=True,
         strategy="pairwise",
         canonical_decision_cutover=False,
     )
@@ -373,3 +378,10 @@ def test_debug_trace_to_dict_machine_readable(mock_program_x86):
                 assert "attempts" in parsed["debug_trace"]
                 assert "final_result" in parsed["debug_trace"]
                 assert "total_time" in parsed["debug_trace"]
+
+            # debug 指定が無いときは key だけが消え、object 上の trace は残る。
+            result.emit_debug_trace = False
+            withheld = result.to_dict()
+            assert "debug_trace" not in withheld
+            assert result.debug_trace is not None
+            assert withheld["unknown_cause_aggregate"] == result_dict["unknown_cause_aggregate"]

@@ -114,6 +114,14 @@ class EquivalenceResult:
     unknown_cause_aggregate: Optional[Dict[str, Any]] = field(
         default=None, repr=False, compare=False
     )
+    # Issue #128 PR-128-B: `debug_trace` **object の生成は止めない**。この flag は
+    # `to_dict()` が JSON へ添付するかだけを決める（object 読者 — diagnostics /
+    # attempts / LegacyExecutionSnapshot / to_string(show_phase_usage) /
+    # aggregate 生成 — は従来どおり full trace を読める）。既定 True なので
+    # `EquivalenceResult` を直接組む呼び出し元の挙動は変わらず、production では
+    # `checker/workflow.py` が既存の debug 伝播（`--debug` / `-d` /
+    # `EQBENCH_DEBUG=1`）をそのまま入れる。
+    emit_debug_trace: bool = True
 
     def __post_init__(self) -> None:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
@@ -294,7 +302,11 @@ class EquivalenceResult:
             }
         
         # ★ 新規追加: デバッグトレース
-        if self.debug_trace:
+        # Issue #128 PR-128-B: trace は常に object 上に在る。debug 指定のときだけ
+        # serialize する（通常 run の原因分析は常時添付の
+        # `unknown_cause_aggregate` が持つ）。to_dict 後の pop は preimage 規則
+        # 違反なので、ここで添付しないことで条件化する。
+        if self.debug_trace and self.emit_debug_trace:
             result["debug_trace"] = self.debug_trace.to_dict()
         
         return result
