@@ -550,6 +550,14 @@ run_pair() {
     checkpoint_root="${EQBENCH_RUN_TMPDIR}/process-authority"
     authority_output="${checkpoint_root}/${execution_nonce}/supervisor-projection.json"
     mkdir -p "$checkpoint_root"
+    # Issue #124 PR-124-B: pair ごとの診断出力先。journal は log の隣に置き、
+    # stack dump は checkpoint 配下（cleanup で消える）に書かせて、cleanup 後も
+    # 残る run dir 側の artifact path を journal の正本として渡す。
+    # dump の退避そのものは supervisor 側の責務（PR-124-C）。
+    local stage_journal_file stack_dump_tmp stack_dump_artifact
+    stage_journal_file="${log_file%.log}.stage.jsonl"
+    stack_dump_tmp="${checkpoint_root}/${execution_nonce}/stack-dump.txt"
+    stack_dump_artifact="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.stack-dump.txt"
 
     local -a equiv_cmd=(
         env "TMPDIR=$pair_tmpdir" "TEMP=$pair_tmpdir" "TMP=$pair_tmpdir"
@@ -565,6 +573,9 @@ run_pair() {
         --timeout "$DECOMPILE_TIMEOUT"
         --pairwise-timeout "$PAIRWISE_TIMEOUT"
         --pairwise-timeout-hard "$PAIRWISE_TIMEOUT_HARD"
+        --stage-journal "$stage_journal_file"
+        --stack-dump-file "$stack_dump_tmp"
+        --stack-dump-artifact "$stack_dump_artifact"
     )
     if [[ "$EQBENCH_DEBUG" == "1" ]]; then
         equiv_cmd+=( -d )
