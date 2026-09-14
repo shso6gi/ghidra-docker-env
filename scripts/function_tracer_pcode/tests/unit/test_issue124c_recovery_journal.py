@@ -422,3 +422,60 @@ def test_worker_does_not_reuse_a_previous_execution_handler_row(
     assert diagnostic.signal_sent is False
     assert recording_sender == []
     assert diagnostic.unavailable_reason == UNAVAILABLE_IDENTITY_CHANGED
+
+
+# ---------------------------------------------------------------------------
+# stack dump を撮った瞬間で切る（teardown で region が閉じる前）
+# ---------------------------------------------------------------------------
+
+
+def _teardown_journal(tmp_path):
+    """SIGTERM を受けたあと後始末まで走った pair と同じ形の journal。"""
+    journal = tmp_path / "pair.stage.jsonl"
+    rows = [
+        _row(1, "note", pid=FIRST_PID, payload={"note": "pair_journal_opened"},
+             monotonic=0.0),
+        _row(2, "handler_registered", stage="stack_dump_handler", pid=FIRST_PID,
+             payload=_handler(FIRST_PID, FIRST_TOKEN), monotonic=0.1),
+        _row(3, "stage_start", stage="analysis_regions", pid=FIRST_PID,
+             payload={"kind": "region", "path": ["analysis_regions"]}, monotonic=1.0),
+        _row(4, "stage_start", stage="function1", pid=FIRST_PID,
+             payload={"kind": "region", "path": ["analysis_regions", "function1"]},
+             monotonic=1.1),
+        _row(5, "stage_end", stage="decompile", pid=FIRST_PID, seconds=0.4,
+             payload={"kind": "region",
+                      "path": ["analysis_regions", "function1", "decompile"]},
+             monotonic=2.0),
+        # ここまでが dump を撮った瞬間（t_epoch 1005）。以降は kill 後の後始末。
+        _row(6, "stage_end", stage="function1", pid=FIRST_PID, seconds=200.0,
+             payload={"kind": "region", "path": ["analysis_regions", "function1"]},
+             monotonic=9.0),
+        _row(7, "stage_end", stage="analysis_regions", pid=FIRST_PID, seconds=200.1,
+             payload={"kind": "region", "path": ["analysis_regions"]}, monotonic=9.1),
+        _row(8, "stage_start", stage="close_programs", pid=FIRST_PID, monotonic=9.2),
+        _row(9, "stage_end", stage="close_programs", pid=FIRST_PID, seconds=0.00002,
+             monotonic=9.3),
+    ]
+    Path(journal).write_text("\n".join(rows) + "\n", encoding="utf-8")
+    return journal
+
+
+def test_as_of_epoch_keeps_the_region_that_was_open_at_the_dump(tmp_path):
+    """journal の末尾では閉じている region が、dump の瞬間では開いている。"""
+    segment, _ = select_current_segment(read_stage_journal(_teardown_journal(tmp_path)))
+    at_end = segment_stages(segment)
+    assert at_end.in_progress_stage is None
+    assert at_end.last_completed_stage == "close_programs"
+    # seq 5 の t_epoch = 1005。そこで切ると function1 が開いたまま。
+    at_dump = segment_stages(segment, as_of_epoch=1005.0)
+    assert at_dump.in_progress_stage == "function1"
+    assert at_dump.in_progress_path == ("analysis_regions", "function1")
+    assert at_dump.last_completed_stage == "decompile"
+
+
+def test_as_of_epoch_before_anything_started_reports_no_stage(tmp_path):
+    segment, _ = select_current_segment(read_stage_journal(_teardown_journal(tmp_path)))
+    early = segment_stages(segment, as_of_epoch=1000.5)
+    assert early.in_progress_stage is None
+    assert early.last_completed_stage is None
+    assert early.started == 0

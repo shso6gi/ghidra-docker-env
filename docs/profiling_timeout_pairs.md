@@ -49,8 +49,13 @@ for line in sys.stdin:
   child は `close_programs` などの後始末を走らせてから終わるので、`stage_end` の
   最後の行がそこになることがある。時間の所在は
   `longest_completed_stage`（完了区間のうち最長）と各行の `seconds` で見る。
-- **進行中の stage は推定。** `stage_start` があって対応する `stage_end` が無い
-  区間のうち、一番内側のもの。teardown まで走った pair では空になる。
+- **進行中の stage は推定で、どの瞬間の推定かで変わる。** `stage_start` があって
+  対応する `stage_end` が無い区間のうち一番内側のもの。journal の末尾まで読むと、
+  teardown まで走った pair では全部閉じていて空になる。そこで集計側は
+  sidecar の `signal_sent_epoch`（stack dump を撮った瞬間）で journal を切り、
+  **候補 frame と同じ瞬間**に開いていた region を `in_progress_stage` にする。
+  どちらから取ったかは `in_progress_stage_basis`（`at_stack_dump` /
+  `journal_end` / `none_open` / `(unknown)`）に残る。
 - 末尾 1 行が途中で切れていることがある（SIGKILL）。`partial_final_line` として
   数え、壊れた行（`malformed_lines`）とは分けて扱う。
 
@@ -115,6 +120,7 @@ schema `pair-stack-dump-status-v1`。4 つの状態を**別々に**持つ。
 | `unavailable_reason` | 送らなかった / 送れなかった理由 |
 | `artifact_status` | `copied` / `partial` / `missing` / `copy_failed:<errno>` / `unset` |
 | `kill_start_offset_seconds` | deadline 到達から kill 開始までの実測秒（jitter） |
+| `signal_sent_epoch` | dump を撮った瞬間（journal を切って `active` を出すのに使う） |
 | `child_timeout_evidence` | cleanup 前に検証した子の terminal timeout 証拠 |
 
 「送った」と「取れた」を同一視しない。`sent_but_unobserved` の pair でも、
@@ -162,6 +168,9 @@ stack dump は **全 thread**（`Thread 0x…` と `Current thread 0x…` の両
 観測点でしかなく、待機中の frame は「待たせている側」ではない。
 
 表の軸は `last_completed_stage × in_progress_stage × candidate_frame`。
+`last_completed_stage` は journal 末尾のもの（kill 後の `close_programs` に
+なり得る）、`in_progress_stage` は dump を撮った瞬間のもの、`candidate_frames` も
+同じ瞬間のもの。時間の所在は `longest_completed_stage` で見る。
 どの次元も、値が観測できなかった pair は `(unknown)` bucket に入る。
 **`(unknown)` と 0 件（`(none)`）を潰さない。**
 

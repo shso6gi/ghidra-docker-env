@@ -108,6 +108,12 @@ WAITING_FRAME_MARKERS = ("wait", "acquire", "select", "poll")
 UNKNOWN_LABEL = "(unknown)"
 NONE_LABEL = "(none)"
 
+# 「進行中の stage」をどの瞬間から取ったか。dump と同じ瞬間で切れたのか、
+# journal の末尾なのか、そもそも開いた region が無かったのかを区別する。
+IN_PROGRESS_AT_STACK_DUMP = "at_stack_dump"
+IN_PROGRESS_AT_JOURNAL_END = "journal_end"
+IN_PROGRESS_NONE_OPEN = "none_open"
+
 _FRAME_RE = re.compile(
     r'\A\s*File "(?P<file>.*)", line (?P<line>\d+) in (?P<function>.+?)\s*\Z'
 )
@@ -604,6 +610,7 @@ class TimeoutPairRow:
     artifact_bytes: Optional[int]
     last_completed_stage: Optional[str]
     in_progress_stage: Optional[str]
+    in_progress_stage_basis: str
     longest_completed_stage: Optional[str]
     longest_completed_seconds: Optional[float]
     diagnostic_status_present: bool
@@ -634,6 +641,7 @@ class TimeoutPairRow:
             "artifact_bytes": self.artifact_bytes,
             "last_completed_stage": self.last_completed_stage,
             "in_progress_stage": self.in_progress_stage,
+            "in_progress_stage_basis": self.in_progress_stage_basis,
             "longest_completed_stage": self.longest_completed_stage,
             "longest_completed_seconds": self.longest_completed_seconds,
             "diagnostic_status_present": self.diagnostic_status_present,
@@ -685,6 +693,25 @@ def build_timeout_pair_row(
         start_token=(sidecar or {}).get("child_start_token"),
     )
     stages = segment_stages(segment) if segment is not None else None
+    # SIGTERM を受けた child は後始末まで走るので、journal の末尾では region が
+    # 全部閉じている。stack dump を撮った瞬間（sidecar の `signal_sent_epoch`）で
+    # 切ると、その時点で開いていた region が残る。候補 frame と同じ瞬間なので、
+    # 表の `active` と `frame` が同じ観測時刻を指す。
+    signal_epoch = (sidecar or {}).get("signal_sent_epoch")
+    stages_at_signal = None
+    if segment is not None and isinstance(signal_epoch, (int, float)):
+        stages_at_signal = segment_stages(segment, as_of_epoch=float(signal_epoch))
+    if stages_at_signal is not None and stages_at_signal.in_progress_stage is not None:
+        in_progress = stages_at_signal.in_progress_stage
+        in_progress_basis = IN_PROGRESS_AT_STACK_DUMP
+    elif stages is not None and stages.in_progress_stage is not None:
+        in_progress = stages.in_progress_stage
+        in_progress_basis = IN_PROGRESS_AT_JOURNAL_END
+    else:
+        in_progress = None
+        in_progress_basis = (
+            IN_PROGRESS_NONE_OPEN if stages is not None else UNKNOWN_LABEL
+        )
     stack = read_stack_dump(paths.stack_dump)
     artifact_status = None
     artifact_bytes = None
@@ -711,7 +738,8 @@ def build_timeout_pair_row(
         artifact_status=artifact_status,
         artifact_bytes=artifact_bytes,
         last_completed_stage=None if stages is None else stages.last_completed_stage,
-        in_progress_stage=None if stages is None else stages.in_progress_stage,
+        in_progress_stage=in_progress,
+        in_progress_stage_basis=in_progress_basis,
         longest_completed_stage=(
             None if stages is None else stages.longest_completed_stage
         ),
@@ -770,6 +798,7 @@ class TimeoutHotspotReport:
         artifact: Dict[str, int] = {}
         last_stage: Dict[str, int] = {}
         active_stage: Dict[str, int] = {}
+        active_basis: Dict[str, int] = {}
         longest_stage: Dict[str, int] = {}
         frames: Dict[str, int] = {}
         hotspots: Dict[str, int] = {}
@@ -795,6 +824,7 @@ class TimeoutHotspotReport:
             _count(artifact, row.artifact_status or UNKNOWN_LABEL)
             _count(last_stage, row.last_completed_stage or UNKNOWN_LABEL)
             _count(active_stage, row.in_progress_stage or UNKNOWN_LABEL)
+            _count(active_basis, row.in_progress_stage_basis)
             _count(longest_stage, row.longest_completed_stage or UNKNOWN_LABEL)
             if row.journal_unavailable_reason is None:
                 evidence["journal_current_segment"] += 1
@@ -835,6 +865,7 @@ class TimeoutHotspotReport:
             "artifact_status": artifact,
             "last_completed_stage": last_stage,
             "in_progress_stage": active_stage,
+            "in_progress_stage_basis": active_basis,
             "longest_completed_stage": longest_stage,
             "candidate_frames": frames,
             "timeout_hotspots": hotspots,
@@ -886,7 +917,8 @@ def format_timeout_hotspot_report(report: TimeoutHotspotReport) -> str:
     for title in (
         "handler_registered", "signal_sent", "dump_observed",
         "sent_but_unobserved", "unavailable_reason", "artifact_status",
-        "last_completed_stage", "in_progress_stage", "longest_completed_stage",
+        "last_completed_stage", "in_progress_stage", "in_progress_stage_basis",
+        "longest_completed_stage",
     ):
         lines.append(f"  {title}:")
         values = section[title]

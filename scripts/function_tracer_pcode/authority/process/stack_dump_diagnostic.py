@@ -187,6 +187,9 @@ class StackDumpDiagnostic:
         self.kill_start_monotonic: Optional[float] = None
         self.requested_monotonic: Optional[float] = None
         self.signal_sent_monotonic: Optional[float] = None
+        # journal の行は `t_epoch` を持つので、送信した瞬間を epoch でも残す。
+        # 集計側はこれで「dump を撮った時点で開いていた region」を切り出す。
+        self.signal_sent_epoch: Optional[float] = None
 
     # -- 監視ループから呼ぶ面 ------------------------------------------------
 
@@ -351,6 +354,7 @@ class StackDumpDiagnostic:
                         pass
             self.signal_sent = True
             self.signal_sent_monotonic = time.monotonic()
+            self.signal_sent_epoch = time.time()
             return True
 
     def _observe_dump(self) -> None:
@@ -465,6 +469,7 @@ class StackDumpDiagnostic:
                 None if deadline is None or kill_start is None
                 else round(kill_start - deadline, 6)
             ),
+            "signal_sent_epoch": self.signal_sent_epoch,
             "signal_sent_offset_seconds": (
                 None if deadline is None or self.signal_sent_monotonic is None
                 else round(self.signal_sent_monotonic - deadline, 6)

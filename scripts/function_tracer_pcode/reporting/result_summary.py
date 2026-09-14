@@ -1678,6 +1678,7 @@ TIMEOUT_HEALTH_SECTIONS = (
     "artifact_status",
     "last_completed_stage",
     "in_progress_stage",
+    "in_progress_stage_basis",
     "longest_completed_stage",
     "timeout_hotspots",
 )

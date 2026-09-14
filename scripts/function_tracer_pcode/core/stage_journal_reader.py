@@ -390,12 +390,19 @@ class SegmentStages:
         }
 
 
-def segment_stages(segment: JournalSegment) -> SegmentStages:
-    """最後に完了した stage と、kill 時点で進行中と推定できる stage。
+def segment_stages(
+    segment: JournalSegment, *, as_of_epoch: Optional[float] = None,
+) -> SegmentStages:
+    """最後に完了した stage と、その時点で進行中の stage。
 
     進行中の stage は「`stage_start` があって対応する `stage_end` が無い区間のうち
     一番内側（最後に開いたもの）」。同名 region の再入は書き手が最外だけを
     start / end にしているので、ここでも path 込みで突き合わせる。
+
+    ``as_of_epoch`` を渡すと、その ``t_epoch`` **以前**の行だけを見る。SIGTERM を
+    受けた child は後始末を走らせてから終わるので、journal の末尾まで読むと開いて
+    いた region が全部閉じてしまい「進行中の stage」が空になる。stack dump を
+    撮った瞬間（deadline の少し前）で切ると、その時点で開いていた region が残る。
     """
     open_stack: List[JournalRow] = []
     last_completed: Optional[JournalRow] = None
@@ -403,6 +410,12 @@ def segment_stages(segment: JournalSegment) -> SegmentStages:
     started = 0
     completed = 0
     for row in segment.rows:
+        if (
+            as_of_epoch is not None
+            and row.t_epoch is not None
+            and row.t_epoch > as_of_epoch
+        ):
+            break
         if row.event == EVENT_STAGE_START:
             open_stack.append(row)
             started += 1

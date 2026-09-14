@@ -486,3 +486,83 @@ def test_pair_paths_are_derived_from_the_pair_status_path(tmp_path):
     assert paths.stack_dump.parent.name == ".runtime-metrics"
     assert paths.stack_dump.name == "f_B1_B2.stack-dump.txt"
     assert paths.diagnostic_status.name == "f_B1_B2.stack-dump.status.json"
+
+
+# ---------------------------------------------------------------------------
+# 「進行中の stage」をどの瞬間から取ったか
+# ---------------------------------------------------------------------------
+
+
+def _teardown_run(tmp_path, *, signal_epoch):
+    """kill 後の後始末まで走った pair（末尾では region が全部閉じている）。"""
+    root, _ = _build_run(tmp_path)
+    pair_dir = root / "REVE" / "sample" / "Eq" / "new" / "f"
+    rows = [
+        _row(1, "note", payload={"note": "pair_journal_opened"}),
+        _row(2, "handler_registered", stage="stack_dump_handler", payload={
+            "pid": CHILD_PID, "start_token": START_TOKEN,
+            "signal_number": int(signal.SIGUSR1), "all_threads": True,
+            "readiness_basis": "faulthandler_register_returned",
+        }),
+        _row(3, "stage_start", stage="branch_plan_orchestration", payload={
+            "kind": "region", "path": ["branch_plan_orchestration"]}),
+        _row(4, "stage_start", stage="check", payload={
+            "kind": "region", "path": ["branch_plan_orchestration", "check"]}),
+        # t_epoch 1004 までが dump の瞬間。以降は kill 後の後始末。
+        _row(5, "stage_end", stage="check", seconds=55.0, payload={
+            "kind": "region", "path": ["branch_plan_orchestration", "check"]}),
+        _row(6, "stage_end", stage="branch_plan_orchestration", seconds=55.1, payload={
+            "kind": "region", "path": ["branch_plan_orchestration"]}),
+        _row(7, "stage_start", stage="close_programs"),
+        _row(8, "stage_end", stage="close_programs", seconds=0.00002),
+    ]
+    (pair_dir / "f_B1_B2.stage.jsonl").write_text(
+        "\n".join(rows) + "\n", encoding="utf-8"
+    )
+    sidecar = _status_sidecar()
+    if signal_epoch is not None:
+        sidecar["signal_sent_epoch"] = signal_epoch
+    (pair_dir / ".runtime-metrics" / "f_B1_B2.stack-dump.status.json").write_text(
+        json.dumps(sidecar), encoding="utf-8"
+    )
+    return root
+
+
+def test_in_progress_stage_is_taken_at_the_stack_dump_moment(tmp_path):
+    """候補 frame と同じ瞬間の region を `active` に出す。"""
+    root = _teardown_run(tmp_path, signal_epoch=1004.0)
+    row = hotspot.build_timeout_hotspot_report([root]).rows[0]
+    assert row.in_progress_stage == "check"
+    assert row.in_progress_stage_basis == hotspot.IN_PROGRESS_AT_STACK_DUMP
+    # 「最後に完了した stage」は journal 末尾のまま（後始末が入り得ると docs に明記）。
+    assert row.last_completed_stage == "close_programs"
+    section = hotspot.build_timeout_hotspot_report([root]).health_section()
+    assert section["in_progress_stage"] == {"check": 1}
+    assert section["in_progress_stage_basis"] == {
+        hotspot.IN_PROGRESS_AT_STACK_DUMP: 1
+    }
+
+
+def test_without_a_signal_epoch_the_basis_says_so(tmp_path):
+    """sidecar に瞬間が無い run（PR-124-C 以前）は journal 末尾に落ちる。"""
+    root = _teardown_run(tmp_path, signal_epoch=None)
+    row = hotspot.build_timeout_hotspot_report([root]).rows[0]
+    assert row.in_progress_stage is None
+    assert row.in_progress_stage_basis == hotspot.IN_PROGRESS_NONE_OPEN
+
+
+def test_journal_end_basis_is_used_when_nothing_closed_before_the_kill(tmp_path):
+    """SIGKILL 側（後始末が走らない）は journal 末尾で region が開いたまま。"""
+    root, _ = _build_run(tmp_path)   # 既定の journal は solver が開いたまま
+    row = hotspot.build_timeout_hotspot_report([root]).rows[0]
+    assert row.in_progress_stage == "solver"
+    assert row.in_progress_stage_basis == hotspot.IN_PROGRESS_AT_JOURNAL_END
+
+
+def test_an_unreadable_journal_reports_an_unknown_basis(tmp_path):
+    root, _ = _build_run(tmp_path, with_sidecar=False)
+    journal = root / "REVE/sample/Eq/new/f/f_B1_B2.stage.jsonl"
+    journal.write_text("{not json\n", encoding="utf-8")
+    row = hotspot.build_timeout_hotspot_report([root]).rows[0]
+    assert row.in_progress_stage is None
+    assert row.in_progress_stage_basis == "(unknown)"
