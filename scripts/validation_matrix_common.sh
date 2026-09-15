@@ -234,6 +234,89 @@ validation_run_benchmark_gate() {
     return 0
 }
 
+# Issue #124 PR-124-C: cleanup 前の stack dump 退避確認と、TIMEOUT 診断の集計。
+#
+# pair の cleanup 順序は必ず
+#   1) diagnostic / dump artifact の保存・存在確認
+#   2) 必要な status の記録
+#   3) process_authority_cleanup
+#   4) checkpoint 削除（3 の中）
+# の順。dump の退避そのものは supervisor が自プロセス終了前に済ませているので、
+# ここでやるのは「退避できたか」の確認と記録だけ。**確認できなくても cleanup は
+# 必ず実行する**（既存の run-health 契約を変えない）。退避の失敗を
+# `process_authority_cleanup_failures.txt` へは書かない: あの file は run を止める
+# STOP 判定と execution receipt の hash 対象で、診断の失敗を混ぜると
+# cleanup 失敗の意味が変わってしまう。診断は専用の TSV と pair log に残す。
+#
+#   validation_record_stack_dump_state <state_tsv> <sample> <pair> <status_json> <artifact> <log>
+validation_record_stack_dump_state() {
+    local state_file="$1" sample_label="$2" pair_label="$3"
+    local status_json="$4" artifact_file="$5" log_file="$6"
+    local python_bin="${PYTHON_BIN:-python3}"
+    local artifact_state="unknown" artifact_present="no" status_present="no"
+    local artifact_bytes="-"
+    if [[ -f "$artifact_file" ]]; then
+        artifact_present="yes"
+        artifact_bytes="$(wc -c < "$artifact_file" 2>/dev/null || echo -)"
+    fi
+    if [[ -s "$status_json" ]]; then
+        status_present="yes"
+        artifact_state="$("$python_bin" -c '
+import json, sys
+try:
+    payload = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    print("unreadable")
+else:
+    value = payload.get("artifact_status") if isinstance(payload, dict) else None
+    print(value if isinstance(value, str) and value else "unknown")
+' "$status_json" 2>/dev/null || echo unknown)"
+    fi
+    [[ -n "$state_file" ]] && printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$sample_label" "$pair_label" "$artifact_state" "$artifact_present" \
+        "$status_present" "$artifact_bytes" >> "$state_file"
+    if [[ "$artifact_state" != "copied" && "$artifact_state" != "unset" ]]; then
+        {
+            echo ""
+            echo "Stack dump artifact state before cleanup: $artifact_state" \
+                 "(artifact_present=$artifact_present status_present=$status_present)"
+        } >> "$log_file"
+    fi
+    return 0
+}
+
+# TIMEOUT 診断（`timeout_kind` / `timeout_hotspots`）を run_health_summary へ merge。
+# gate の直後に呼ぶ。読むのは run dir に残る file だけなので、run 終了後に同じ
+# コマンドを流せば同じ表が再現できる。集計の失敗で run を落とさない。
+#
+#   validation_run_timeout_hotspot_summary <output_base_dir> <repo_root>
+validation_run_timeout_hotspot_summary() {
+    local output_base_dir="$1" repo_root="$2"
+    local python_bin="${PYTHON_BIN:-python3}"
+    VALIDATION_TIMEOUT_HOTSPOT_STATUS=SKIPPED
+    if [[ "${EQBENCH_TIMEOUT_HOTSPOT_SUMMARY:-1}" == "0" ]]; then
+        echo "Timeout hotspot summary skipped (EQBENCH_TIMEOUT_HOTSPOT_SUMMARY=0)."
+        return 0
+    fi
+    local exit_code=0
+    (
+        cd "$repo_root" && "$python_bin" -B -m \
+            scripts.function_tracer_pcode.reporting.timeout_hotspot_summary \
+            "$output_base_dir" \
+            --json "$output_base_dir/timeout_hotspot_summary.json" \
+            --health-summary-json "$output_base_dir/run_health_summary.json" \
+            --health-summary-text "$output_base_dir/run_health_summary.txt"
+    ) > "$output_base_dir/timeout_hotspot_summary.txt" 2>&1 || exit_code=$?
+    cat "$output_base_dir/timeout_hotspot_summary.txt"
+    if (( exit_code == 0 )); then
+        VALIDATION_TIMEOUT_HOTSPOT_STATUS=OK
+    else
+        VALIDATION_TIMEOUT_HOTSPOT_STATUS=FAILED
+        echo "Timeout hotspot summary: exit $exit_code (diagnostic only)" >&2
+    fi
+    return 0
+}
+
 # Issue #123: run provenance（いつ・どこで・どの作業ツリーで走ったか）を
 # 3 本の runner で同じ規則にするための小さな共有関数。判定には一切使わず、
 # manifest に残す診断情報だけを作る。

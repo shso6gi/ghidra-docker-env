@@ -29,7 +29,9 @@ from scripts.function_tracer_pcode.reporting.result_summary import (
     STATUS_NOT_EQ,
     STATUS_TIMEOUT,
     STATUS_UNKNOWN,
+    TIMEOUT_DIAGNOSTICS_KEY,
     format_run_health_summary,
+    timeout_diagnostics_from_health,
 )
 
 
@@ -278,15 +280,63 @@ def write_health_outputs(
         print(rendered)
 
 
+#: `timeout_hotspot_summary` の report JSON にだけある key。health の節には
+#: 入れない（runner 経路が書く `health_section()` と形をそろえるため）。
+_REPORT_ONLY_KEYS = frozenset({"schema", "roots", "pairs_detail"})
+
+
+def merge_timeout_diagnostics(
+    health: Dict[str, Any], report_path: Optional[Path],
+) -> Dict[str, Any]:
+    """Issue #124 PR-124-C: TIMEOUT 診断の節を health に足す。
+
+    `timeout_hotspot_summary` が書いた report JSON（または既に merge 済みの
+    health JSON）から節だけを取る。path を渡さない / 読めない場合は **key を
+    足さない**: 節が無いことを「TIMEOUT 0 件」と読ませないため。
+    """
+
+    if report_path is None:
+        return health
+    try:
+        payload = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return health
+    if not isinstance(payload, dict):
+        return health
+    section = timeout_diagnostics_from_health(payload)
+    if section is None:
+        # report JSON そのものは節を平らに持っている（`pairs` / `timeout_kind`）。
+        # その場合は compact な節だけを取り、report 固有の key
+        # （`schema` / `roots` / `pairs_detail`）を health に持ち込まない。
+        # runner 経路（`timeout_hotspot_summary --health-summary-json`）が
+        # 書くのは `health_section()` なので、両経路で同じ形にそろえる。
+        if "timeout_kind" not in payload or "pairs" not in payload:
+            return health
+        section = {
+            key: value for key, value in payload.items()
+            if key not in _REPORT_ONLY_KEYS
+        }
+    health[TIMEOUT_DIAGNOSTICS_KEY] = dict(section)
+    return health
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Generate compact run-health summaries.")
     parser.add_argument("--overall-summary", required=True)
     parser.add_argument("--output-json")
     parser.add_argument("--output-text")
     parser.add_argument("--print-text", action="store_true")
+    parser.add_argument(
+        "--timeout-hotspots-json",
+        help="timeout_hotspot_summary の report JSON を timeout_diagnostics 節として取り込む",
+    )
     args = parser.parse_args(argv)
 
     health = parse_overall_summary_health(Path(args.overall_summary))
+    health = merge_timeout_diagnostics(
+        health,
+        Path(args.timeout_hotspots_json) if args.timeout_hotspots_json else None,
+    )
     write_health_outputs(
         health,
         output_json=Path(args.output_json) if args.output_json else None,

@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Mapping, Optional, Sequence
 
 from scripts.function_tracer_pcode.authority.contracts import authority_digest, canonical_value
@@ -26,6 +27,12 @@ from scripts.function_tracer_pcode.authority.decision.canonical_result import (
     validate_durable_child_returncode_observation,
     validate_canonical_result_finalization_bundle,
 )
+from scripts.function_tracer_pcode.authority.process.stack_dump_diagnostic import (
+    DEFAULT_STACK_DUMP_LEAD_SECONDS,
+    POLL_SLICE_SECONDS,
+    StackDumpDiagnostic,
+    StackDumpDiagnosticConfig,
+)
 
 
 COMMAND_SCHEMA = "unknown-taxonomy-v2-process-supervisor-command-v1"
@@ -36,6 +43,14 @@ CHILD_ENV_SUPERVISOR_KEY_ID = "UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_ID"
 CHILD_ENV_SUPERVISOR_KEY_FILE = "UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_FILE"
 CHILD_ENV_WORKER_KEY_ID = "UNKNOWN_TAXONOMY_V2_WORKER_KEY_ID"
 CHILD_ENV_WORKER_KEY_FILE = "UNKNOWN_TAXONOMY_V2_WORKER_KEY_FILE"
+
+#: Issue #124 PR-124-C: 診断（journal 読取 / bundle 検証 / dump 退避 / sidecar）の
+#: 失敗が supervisor の終了状態・exit code・projection を変えないための型付き guard。
+#: `except Exception` は使わない（Issue #125 PR-125-B の baseline は delete-only）。
+_DIAGNOSTIC_GUARD_ERRORS = (
+    ArithmeticError, AttributeError, ImportError, LookupError, MemoryError,
+    OSError, RecursionError, RuntimeError, TypeError, ValueError,
+)
 
 
 def _exact_string(name: str, value: Any) -> str:
@@ -87,6 +102,15 @@ class SupervisorCommandConfig:
     kill_grace_seconds: float
     child_command: tuple[str, ...]
     allow_child_exit_resolution: bool = False
+    # Issue #124 PR-124-C: deadline 手前の stack dump 診断（判定に一切関与しない）。
+    # 未指定なら診断は `disabled` で、待ち方の構造だけが従来と同じまま残る。
+    # `manifest_entry_preimage_digest` はこれらを含まない（下の property を参照）:
+    # 診断の有無で pair の実行 identity を変えてはならない。
+    stage_journal_path: Optional[Path] = None
+    stack_dump_file: Optional[Path] = None
+    stack_dump_artifact: Optional[Path] = None
+    diagnostic_status_output: Optional[Path] = None
+    stack_dump_lead_seconds: float = DEFAULT_STACK_DUMP_LEAD_SECONDS
 
     def __post_init__(self) -> None:
         for name in (
@@ -113,6 +137,18 @@ class SupervisorCommandConfig:
             raise TypeError("child command must be a non-empty exact tuple")
         if self.supervisor_signing_key_id == self.worker_signing_key_id:
             raise ValueError("worker and supervisor signing key IDs must differ")
+        for name in (
+            "stage_journal_path", "stack_dump_file", "stack_dump_artifact",
+            "diagnostic_status_output",
+        ):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, (str, os.PathLike)):
+                raise TypeError(f"{name} must be a path or None")
+        if (
+            type(self.stack_dump_lead_seconds) not in {int, float}
+            or self.stack_dump_lead_seconds < 0
+        ):
+            raise TypeError("stack dump lead is invalid")
 
     @property
     def manifest_entry_preimage_digest(self) -> str:
@@ -396,6 +432,210 @@ class ProcessSupervisorCommand:
         except ValueError:
             return process.poll() is not None
 
+    # -- Issue #124 PR-124-C: 非ブロッキングな deadline 監視と診断 --------------
+    #
+    # deadline の総予算・起点・kill 手順・disposition 文字列・`child_returncode`
+    # 検証・`deadline_policy_digest` は**変えない**。変えるのは「待ち方の構造」
+    # （1 回待ち -> poll ループ）と、そのループから **join しない** daemon worker
+    # に stack dump を要求することだけ。
+
+    def _build_stack_dump_diagnostic(
+        self, process: subprocess.Popen[Any], start_token: str,
+    ) -> StackDumpDiagnostic:
+        """診断 object を組む。**組めなくても例外を出さない。**
+
+        ここで失敗すると `run()` の `except Exception` に落ちて `_resume()` へ
+        移ってしまう。診断の都合で outcome / exit code を変えないため、失敗時は
+        無効化した診断（`enabled` が False で、送信も退避も行わない）を返す。
+        """
+        try:
+            return self._stack_dump_diagnostic(process, start_token)
+        except _DIAGNOSTIC_GUARD_ERRORS:
+            return StackDumpDiagnostic(
+                StackDumpDiagnosticConfig(),
+                child_pid=process.pid,
+                start_token=None,
+                timeout_seconds=float(self.config.timeout_seconds),
+            )
+
+    def _stack_dump_diagnostic(
+        self, process: subprocess.Popen[Any], start_token: str,
+    ) -> StackDumpDiagnostic:
+        config = StackDumpDiagnosticConfig(
+            journal_path=(
+                None if self.config.stage_journal_path is None
+                else str(self.config.stage_journal_path)
+            ),
+            dump_path_tmp=(
+                None if self.config.stack_dump_file is None
+                else str(self.config.stack_dump_file)
+            ),
+            dump_artifact_path=(
+                None if self.config.stack_dump_artifact is None
+                else str(self.config.stack_dump_artifact)
+            ),
+            status_output_path=(
+                None if self.config.diagnostic_status_output is None
+                else str(self.config.diagnostic_status_output)
+            ),
+            lead_seconds=float(self.config.stack_dump_lead_seconds),
+        )
+        return StackDumpDiagnostic(
+            config,
+            child_pid=process.pid,
+            start_token=start_token,
+            timeout_seconds=float(self.config.timeout_seconds),
+            # 送信直前の同一性確認。**`Popen` に触らない**のが要点で、
+            # `process.poll()` / `_same_process` は `Popen._waitpid_lock` を取り
+            # `waitpid` を呼ぶため、worker thread から呼ぶと監視ループの終了検出と
+            # 競合する。identity は `/proc/<pid>/stat` の start token だけで足りる
+            # （取れなければ `read_process_start_token` が ValueError を投げ、
+            # worker 側が False として扱う）。「すでに終了した」ことは監視ループが
+            # `cancel_future_requests()` で伝える。
+            identity_verifier=lambda: (
+                read_process_start_token(process.pid) == start_token
+            ),
+        )
+
+    def _wait_for_child_until_deadline(
+        self, process: subprocess.Popen[Any], diagnostic: Any, deadline: float,
+    ) -> Optional[int]:
+        """``deadline``（絶対時刻）まで child を待つ。
+
+        ``None`` を返したら deadline 到達（既存の kill 経路へ）。
+        **`deadline` は呼び出し側が 1 回だけ決めてここへ渡す。**この関数は
+        deadline を作り直さないし、延ばさない。
+
+        ループの中には同期的な journal 読み取り・`stat`・dump の polling を
+        **置かない**。診断の完了 / 失敗 / dump 観測を待つこともしない。診断の
+        要求そのものが失敗しても、ループは deadline 監視を続ける。
+        """
+        diagnostic.note_deadline(deadline)
+        lead = float(self.config.stack_dump_lead_seconds)
+        # 診断を要求したかはループ側で持つ。診断 object の状態に依存させない
+        # （要求が失敗した場合に毎 poll slice で作り直そうとしないため）。
+        requested = False
+        while True:
+            # 最優先は child の終了確認。
+            return_code = process.poll()
+            if return_code is not None:
+                diagnostic.cancel_future_requests()
+                return return_code
+            now = time.monotonic()
+            if now >= deadline:
+                diagnostic.cancel_future_requests()
+                return None
+            if not requested and now >= deadline - lead:
+                requested = True
+                # daemon worker を起こすだけ。join もしないし戻り値も見ない。
+                # 起動が失敗しても理由は診断側に残り、ここは監視を続ける
+                # （診断は diagnostic-only で、deadline を動かさない）。
+                try:
+                    diagnostic.request_async()
+                except _DIAGNOSTIC_GUARD_ERRORS:
+                    pass
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                continue
+            try:
+                return_code = process.wait(timeout=min(POLL_SLICE_SECONDS, remaining))
+            except subprocess.TimeoutExpired:
+                continue
+            diagnostic.cancel_future_requests()
+            return return_code
+
+    def _child_terminal_timeout_evidence(self) -> Optional[dict[str, Any]]:
+        """子が残した canonical 結果から terminal timeout の証拠を**検証して**拾う。
+
+        cleanup で消える checkpoint の中を、消える前に 1 回だけ読む。
+        これは `timeout_kind` の S 側の根拠**参照**であって、判定には使わない
+        （分類そのものは `reporting/timeout_hotspot_summary` が run 終了後に行う）。
+        検証に失敗した場合も `validated: false` として残し、証拠の欠落と区別する。
+        """
+        path = self.store.directory / RESULT_ENVELOPE_FILE
+        try:
+            if not path.is_file():
+                return None
+            envelope = json.loads(path.read_text(encoding="utf-8"))
+            payload = envelope["canonical_result_payload"]
+            bundle = payload["canonical_result_finalization_bundle"]
+        except _DIAGNOSTIC_GUARD_ERRORS as exc:
+            return {
+                "observed": True,
+                "validated": False,
+                "validation_error": type(exc).__name__,
+            }
+        record: dict[str, Any] = {
+            "observed": True,
+            "validated": False,
+            "validation_error": None,
+            "source": "checkpoint_result_envelope",
+        }
+        try:
+            preimage = {
+                key: value for key, value in payload.items()
+                if key != "canonical_result_finalization_bundle"
+            }
+            validated = validate_canonical_result_finalization_bundle(
+                bundle,
+                result_payload_preimage=preimage,
+                bundle_verification_key_id=self.config.supervisor_signing_key_id,
+                bundle_verification_key=_read_key(
+                    self.config.supervisor_signing_key_file
+                ),
+            )
+        except _DIAGNOSTIC_GUARD_ERRORS as exc:
+            record["validation_error"] = type(exc).__name__
+            return record
+        identity = validated["execution_identity"]
+        selection = bundle.get("terminal_timeout_candidate_selection_receipt")
+        selection = selection if isinstance(selection, dict) else {}
+        record.update({
+            "validated": True,
+            "canonical_outcome": validated["outcome"],
+            "bundle_digest": validated["bundle_digest"],
+            "result_occurrence_id": identity["result_occurrence_id"],
+            "stream_id": identity["stream_id"],
+            "source_snapshot_fingerprint": identity["source_snapshot_fingerprint"],
+            # 受領書は codec で {"object_type", "payload"} に包まれている。
+            "terminal_timeout_requirement_ids": sorted({
+                str((item.get("payload") if isinstance(item.get("payload"), dict)
+                     else item).get("proof_requirement_id"))
+                for item in bundle.get("terminal_timeout_receipts") or ()
+                if isinstance(item, dict)
+                and (item.get("payload") if isinstance(item.get("payload"), dict)
+                     else item).get("proof_requirement_id")
+            }),
+            "terminal_timeout_solver_invocation_id": selection.get(
+                "solver_invocation_id"
+            ),
+            "terminal_timeout_query_digest": selection.get("query_digest"),
+        })
+        return record
+
+    def _finalize_stack_dump_diagnostic(
+        self, diagnostic: Optional[StackDumpDiagnostic],
+    ) -> None:
+        """終了処理のあと・supervisor 終了の前に、dump を退避して状態を書く。
+
+        **最終 outcome によらず**呼ぶ（deadline 前に正常終了した pair も対象）。
+        退避と sidecar 書き出しはここでだけ行い、deadline 監視ループには入れない
+        ので、この所要時間は kill 開始時刻の jitter には混ざらない。
+        """
+        if diagnostic is None:
+            return
+        diagnostic.cancel_future_requests()
+        try:
+            diagnostic.record_child_timeout_evidence(
+                self._child_terminal_timeout_evidence()
+            )
+            diagnostic.persist_artifact()
+            diagnostic.write_status()
+        except _DIAGNOSTIC_GUARD_ERRORS:
+            # ここは `run()` の finally の中。診断の失敗で exit code や
+            # projection を変えてはいけないので、握り潰して抜ける。
+            return
+
     @staticmethod
     def _resolved_projection(launch: Any, state: Any, returncode: Any) -> dict[str, Any]:
         return {
@@ -418,13 +658,23 @@ class ProcessSupervisorCommand:
 
     def _terminate_exact_process_group(
         self, process: subprocess.Popen[Any], start_token: str,
+        *, on_first_signal: Any = None,
     ) -> str:
+        """SIGTERM -> grace -> SIGKILL。**手順と disposition 文字列は不変。**
+
+        ``on_first_signal`` は診断の観測点で、最初の SIGTERM を**実際に送れた**
+        ときだけ `(name, monotonic)` で呼ばれる。属性代入だけの軽い callback を
+        渡すこと（kill 経路に I/O も lock も足さない）。終了確認や identity 検証
+        で signal を送らずに戻る枝では呼ばれないので、送っていない kill を
+        「開始した」と記録することはない。
+        """
         if process.poll() is not None:
             return f"EXITED_{process.returncode}"
         if not self._same_process(process, start_token):
             raise ValueError("child PID/start-token identity changed before kill")
         if process.poll() is not None:
             return f"EXITED_{process.returncode}"
+        first_signal_monotonic = time.monotonic()
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -432,6 +682,14 @@ class ProcessSupervisorCommand:
             if return_code is not None:
                 return f"EXITED_{return_code}_BEFORE_SIGTERM"
             raise
+        if on_first_signal is not None:
+            # 診断の観測点が kill 経路を壊さないようにする。ここは supervisor で
+            # 最も安全側に倒すべき経路なので、callback の失敗で disposition や
+            # 終了手順が変わることを許さない。
+            try:
+                on_first_signal("SIGTERM", first_signal_monotonic)
+            except _DIAGNOSTIC_GUARD_ERRORS:
+                pass
         try:
             process.wait(timeout=self.config.kill_grace_seconds)
             return (
@@ -555,8 +813,11 @@ class ProcessSupervisorCommand:
 
     def _finalize_deadline(
         self, *, launch: Any, process: subprocess.Popen[Any], start_token: str,
+        on_first_signal: Any = None,
     ) -> tuple[int, dict[str, Any]]:
-        kill_disposition = self._terminate_exact_process_group(process, start_token)
+        kill_disposition = self._terminate_exact_process_group(
+            process, start_token, on_first_signal=on_first_signal,
+        )
         recovered_pending = self.store.recover_pending_active_commit()
         state_path = self.store.directory / "state.json"
         state = (
@@ -649,6 +910,7 @@ class ProcessSupervisorCommand:
         process: Optional[subprocess.Popen[Any]] = None
         launch: Any = None
         start_token: Optional[str] = None
+        diagnostic: Optional[StackDumpDiagnostic] = None
         try:
             process = subprocess.Popen(
                 self._barrier_command(read_fd, self.config.child_command),
@@ -678,11 +940,24 @@ class ProcessSupervisorCommand:
             os.write(write_fd, b"1")
             os.close(write_fd)
             write_fd = -1
-            try:
-                return_code = process.wait(timeout=self.config.timeout_seconds)
-            except subprocess.TimeoutExpired:
+            # Issue #124 PR-124-C: deadline の起点は、この PR の前に
+            # `process.wait(timeout=self.config.timeout_seconds)` を呼んでいた
+            # のと**同じ位置**（barrier 解放の直後）で 1 回だけ固定する。診断
+            # object の生成はそのあとなので、生成時間が予算の外へ逃げない。
+            deadline = time.monotonic() + float(self.config.timeout_seconds)
+            diagnostic = self._build_stack_dump_diagnostic(process, start_token)
+            return_code = self._wait_for_child_until_deadline(
+                process, diagnostic, deadline
+            )
+            if return_code is None:
+                # deadline 到達。既存の termination / finalization 経路へそのまま入る
+                # （終了との競合の再確認も kill 手順も `_finalize_deadline` の中）。
+                # ここはまだ signal を送っていないので「termination path へ入った
+                # 時刻」として記録し、実際の SIGTERM は `on_first_signal` で測る。
+                diagnostic.note_deadline_finalization_start(time.monotonic())
                 exit_code, projection = self._finalize_deadline(
-                    launch=launch, process=process, start_token=start_token
+                    launch=launch, process=process, start_token=start_token,
+                    on_first_signal=diagnostic.note_kill_signal,
                 )
             else:
                 state_path = self.store.directory / "state.json"
@@ -750,6 +1025,10 @@ class ProcessSupervisorCommand:
                     os.close(descriptor)
             if process is not None and process.poll() is None:
                 self._cleanup_exact_process_group(process, start_token)
+            # 取得できた dump は最終 outcome によらず run dir へ退避する。
+            # runner の `process_authority_cleanup` はこのプロセスが終わってから
+            # 走るので、ここが「cleanup 前」の最後の機会になる。
+            self._finalize_stack_dump_diagnostic(diagnostic)
 
 
 def _barrier_main(arguments: Sequence[str]) -> int:
@@ -781,6 +1060,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout-seconds", required=True, type=float)
     parser.add_argument("--kill-grace-seconds", type=float, default=30.0)
     parser.add_argument("--allow-child-exit-resolution", action="store_true")
+    # Issue #124 PR-124-C: 診断だけの引数。省略すると診断は disabled になり、
+    # 待ち方の構造・kill 手順・判定はすべて従来どおり。
+    parser.add_argument("--stage-journal", default=None,
+                        help="child が書く pair-stage-journal-v1 (readiness の根拠)")
+    parser.add_argument("--stack-dump-file", default=None,
+                        help="child の faulthandler が書く checkpoint 配下の dump")
+    parser.add_argument("--stack-dump-artifact", default=None,
+                        help="cleanup 後も残る dump の退避先 (.runtime-metrics)")
+    parser.add_argument("--diagnostic-status-output", default=None,
+                        help="診断状態 (pair-stack-dump-status-v1) の書き出し先")
+    parser.add_argument("--stack-dump-lead-seconds", type=float,
+                        default=DEFAULT_STACK_DUMP_LEAD_SECONDS,
+                        help="deadline の何秒前に dump を要求するか")
     parser.add_argument("child_command", nargs=argparse.REMAINDER)
     return parser
 
@@ -810,6 +1102,21 @@ def main(arguments: Optional[Sequence[str]] = None) -> int:
         kill_grace_seconds=args.kill_grace_seconds,
         allow_child_exit_resolution=args.allow_child_exit_resolution,
         child_command=child_command,
+        stage_journal_path=(
+            None if args.stage_journal is None else Path(args.stage_journal)
+        ),
+        stack_dump_file=(
+            None if args.stack_dump_file is None else Path(args.stack_dump_file)
+        ),
+        stack_dump_artifact=(
+            None if args.stack_dump_artifact is None
+            else Path(args.stack_dump_artifact)
+        ),
+        diagnostic_status_output=(
+            None if args.diagnostic_status_output is None
+            else Path(args.diagnostic_status_output)
+        ),
+        stack_dump_lead_seconds=args.stack_dump_lead_seconds,
     )
     return ProcessSupervisorCommand(config).run()
 
