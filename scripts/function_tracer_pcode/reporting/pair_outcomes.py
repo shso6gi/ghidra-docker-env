@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, Mapping, Optional, Sequence, Tuple
 
 PAIR_STATUS_SUFFIX = ".pair-status.json"
 OUTCOME_MISSING = "MISSING"
@@ -28,7 +29,28 @@ LABEL_EQ = "Eq"
 LABEL_NEQ = "Neq"
 LABEL_UNLABELLED = "unlabelled"
 
+#: A run tree may hold one half per benchmark set; a subset run has both.
+HALF_EQ = "eq"
+HALF_NEQ = "neq"
+HALVES = (HALF_EQ, HALF_NEQ)
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
 PairKey = Tuple[str, str, str, str]
+
+
+def normalized_sha256(value: Any) -> Optional[str]:
+    """The lower-case 64 hex digits of ``value``, or ``None`` if it is not one.
+
+    Empty, short, non-string and non-hex values are all "not a digest": a
+    reader must never conclude "the two sides are the same binary" from two
+    values that merely compare equal (``""`` == ``""``).
+    """
+
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip().lower()
+    return candidate if _SHA256_RE.match(candidate) else None
 
 
 @dataclass(frozen=True)
@@ -43,6 +65,36 @@ class PairOutcome:
     # ``outcome``.  ``None`` whenever the pair carries no conditional decision,
     # which is every pair until the conditional lane is activated.
     conditional_outcome: Optional[str] = None
+    # Issue #15 PR-15-B.  The signed execution target names the two binaries
+    # this pair actually ran on; the gate needs them to tell an identical-input
+    # pair from any other, and it must not re-derive them from a path.
+    left_binary_sha256: Optional[str] = None
+    right_binary_sha256: Optional[str] = None
+    # The pair log next to the status file, where the result JSON lives.
+    log_path: Optional[str] = None
+    # ``eq`` / ``neq`` when the status sits under one of a run's halves, else
+    # ``None``.  A per-half manifest and ground truth is chosen with this, so a
+    # pair is never read against the other half's settings.
+    half: Optional[str] = None
+    # The pair's own conditional receipt, exactly as the signed status carries
+    # it.  Kept unparsed here; the gate validates it through the authority
+    # codec rather than trusting these fields.
+    conditional_decision_receipt: Optional[Mapping[str, Any]] = None
+    # What binds a result JSON (and a conditional receipt) to *this* pair.
+    result_occurrence_id: Optional[str] = None
+    decision_receipt_digest: Optional[str] = None
+
+    @property
+    def identical_input(self) -> bool:
+        """Did this pair run on two byte-identical binaries?
+
+        True only when both sides carry a well-formed sha256 and the two are
+        the same digest.  A missing or malformed digest is never "identical".
+        """
+
+        left = normalized_sha256(self.left_binary_sha256)
+        right = normalized_sha256(self.right_binary_sha256)
+        return left is not None and left == right
 
     @property
     def key(self) -> PairKey:
@@ -121,12 +173,55 @@ def iter_pair_outcomes(root: Path) -> Iterator[PairOutcome]:
         conditional = payload.get("conditional_outcome")
         if not (isinstance(conditional, str) and conditional):
             conditional = None
+        receipt = payload.get("conditional_decision_receipt")
+        if not isinstance(receipt, dict):
+            receipt = None
         yield PairOutcome(
             *identity,
             outcome,
             status_path=str(status_path),
             conditional_outcome=conditional,
+            left_binary_sha256=_target_text(target, "left_binary_sha256"),
+            right_binary_sha256=_target_text(target, "right_binary_sha256"),
+            log_path=str(_log_path_for(status_path)),
+            half=_half_of(root, status_path),
+            conditional_decision_receipt=receipt,
+            result_occurrence_id=_payload_text(payload, "result_occurrence_id"),
+            decision_receipt_digest=_payload_text(payload, "decision_receipt_digest"),
         )
+
+
+def _payload_text(payload: Any, field: str) -> Optional[str]:
+    value = payload.get(field) if isinstance(payload, Mapping) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _target_text(target: Any, field: str) -> Optional[str]:
+    value = target.get(field) if isinstance(target, Mapping) else None
+    return value if isinstance(value, str) and value else None
+
+
+def _log_path_for(status_path: Path) -> Path:
+    """The pair log the runner wrote next to this status file."""
+
+    return status_path.with_name(
+        status_path.name[: -len(PAIR_STATUS_SUFFIX)] + ".log"
+    )
+
+
+def _half_of(root: Path, status_path: Path) -> Optional[str]:
+    """``eq``/``neq`` when the status lives under one of a run's halves.
+
+    The half decides which ``run_manifest.txt`` and which ground truth apply,
+    so it is read from the path relative to the root that was scanned and is
+    never guessed from the sample identity.
+    """
+
+    try:
+        parts = status_path.relative_to(root).parts
+    except ValueError:
+        return None
+    return parts[0] if parts and parts[0] in HALVES else None
 
 
 def load_pair_outcomes(root: Path) -> Dict[PairKey, PairOutcome]:

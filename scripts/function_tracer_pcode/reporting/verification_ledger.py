@@ -185,6 +185,9 @@ SETTING_KEYS = (
     "parallel_jobs", "pair_process_timeout", "equiv_timeout", "decompile_timeout",
     "pairwise_timeout", "pairwise_timeout_hard", "pair_process_kill_after",
     "build_policy", "resource_admission",
+    # Issue #15 PR-15-B: an oracle run (fast path off) and a feature run differ
+    # in nothing else, so the row has to say which one it was.
+    "identical_fast_path", "analysis_config_schema",
 )
 
 
@@ -1057,6 +1060,37 @@ def _read_json(path: Path) -> Optional[Mapping[str, Any]]:
     return payload if isinstance(payload, Mapping) else None
 
 
+#: Where the soundness gate (schema ``soundness-gate-v2``) keeps each kind of
+#: violation.  Recorded per kind: "3 violations" does not say whether a run
+#: contradicted a reviewed relation or merely failed to accept a fast path.
+SOUNDNESS_VIOLATION_PATHS = {
+    "verified_ground_truth_unconditional": (
+        "verified_ground_truth", "unconditional_violations",
+    ),
+    "verified_ground_truth_conditional": (
+        "verified_ground_truth", "conditional_violations",
+    ),
+    "identical_input_soundness": ("identical_input", "soundness_violations"),
+    "identical_input_fast_path": ("identical_input", "fast_path_violations"),
+    "config_integrity": ("config_integrity", "violations"),
+}
+
+
+def _soundness_violation_counts(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    """Per-kind counts, or ``unknown`` for a section this reader cannot see.
+
+    A section that is absent or not a list is never counted as zero: a gate
+    artifact written by a different schema must read as unknown, not as clean.
+    """
+
+    counts: Dict[str, Any] = {}
+    for name, (section, field) in SOUNDNESS_VIOLATION_PATHS.items():
+        rows = (payload.get(section) or {}).get(field) \
+            if isinstance(payload.get(section), Mapping) else None
+        counts[name] = len(rows) if isinstance(rows, list) else UNSET
+    return counts
+
+
 def collect_gate_reports(layout: RunLayout) -> Dict[str, Any]:
     """The gates' own persisted verdicts, read back rather than recomputed.
 
@@ -1082,7 +1116,7 @@ def collect_gate_reports(layout: RunLayout) -> Dict[str, Any]:
         soundness_status, soundness_violations = UNSET, None
     else:
         soundness_status = "PASS" if soundness["passed"] else "VIOLATION"
-        soundness_violations = soundness.get("violations")
+        soundness_violations = _soundness_violation_counts(soundness)
     return {
         "soundness": {
             "status": soundness_status,

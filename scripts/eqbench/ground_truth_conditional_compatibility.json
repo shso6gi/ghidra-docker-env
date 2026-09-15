@@ -1,0 +1,107 @@
+{
+ "schema": "ground-truth-conditional-compatibility-v1",
+ "note": [
+  "Issue #15 PR-15-B.  Evaluation-side metadata: whether a reviewed function-level",
+  "ground truth (scripts/eqbench/neq_ground_truth.tsv -> function_diff_manifest.json)",
+  "still holds under the premises a conditional proof depends on.  The checker never",
+  "reads this file and no outcome depends on it; only reporting/soundness_gate.py does.",
+  "",
+  "A conditional result can contradict a reviewed relation only when EVERY premise of",
+  "its receipt is 'verified' here.  'unverified', 'not_applicable' and a missing entry",
+  "all mean the same thing to the gate: the contradiction is an investigation row, not",
+  "a soundness violation.  Raising an entry to 'verified' requires showing that the",
+  "witness difference recorded in the tsv survives the premise (for EXTERNAL_CALLEE_SPEC:",
+  "that the callee really behaves like the catalog specification on the witness input),",
+  "and writing that argument into 'evidence'.  No entry is verified today."
+ ],
+ "entries": [
+  {
+   "sample": "raytrace/surface/Neq/newV-oldV",
+   "function": "SurfaceConstructor",
+   "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+   "subject": "*",
+   "status": "unverified",
+   "evidence": "none",
+   "note": "The compiled Neq binaries call sqrt / sqrtf.  Whether the recorded witness (gval=2.0f r=8.0f -> old ig=2 kr=0.0313725 / new ig=10 kr=2040) still separates the two definitions once a callee is only assumed to meet its catalog specification has not been checked.",
+   "verified_by": null,
+   "verified_at": null
+  },
+  {
+   "sample": "raytrace/sphere/Neq/newV-oldV",
+   "function": "SphereConstructor",
+   "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+   "subject": "*",
+   "status": "unverified",
+   "evidence": "none",
+   "note": "Same binaries as raytrace/surface (sqrt / sqrtf are present as callees).  The witness r=3.0f -> old radSqr=9 / new radSqr=6 was confirmed by native execution, not under an assumed callee specification.",
+   "verified_by": null,
+   "verified_at": null
+  },
+  {
+   "sample": "optimization/wood/Neq/newV-oldV",
+   "function": "wood",
+   "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+   "subject": "*",
+   "status": "unverified",
+   "evidence": "none",
+   "note": "The observable difference is an stdout write, and the compiled binaries reach it through puts / printf.  A premise about those callees is exactly a premise about the observable, so it cannot be waved through.  wood is not registered in neq_ground_truth.tsv yet (Issue #109 PR-109-B owns that); the entry is here so that registering the relation does not silently make a conditional result a verified violation.",
+   "verified_by": null,
+   "verified_at": null
+  },
+  {
+   "sample": "ran/gammln/Eq/newV",
+   "function": "snippet",
+   "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+   "subject": "*",
+   "status": "unverified",
+   "evidence": "none",
+   "note": "Eq sample (CONFIRMED_EQ by single source).  The compiled binaries call log.",
+   "verified_by": null,
+   "verified_at": null
+  },
+  {
+   "sample": "bess/bessj0/Eq/newV",
+   "function": "snippet",
+   "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+   "subject": "*",
+   "status": "unverified",
+   "evidence": "none",
+   "note": "Eq sample (CONFIRMED_EQ by single source).  The compiled binaries call sin.",
+   "verified_by": null,
+   "verified_at": null
+  },
+  {
+   "sample": "airy/MAX/Neq/newV-oldV",
+   "function": "snippet",
+   "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+   "subject": "*",
+   "status": "not_applicable",
+   "evidence": "The source of both versions calls nothing, and the compiled binaries hold snippet alone.",
+   "note": "A declaration that this kind of premise is not expected here.  If one appears anyway the gate treats it as unknown, never as verified.",
+   "verified_by": null,
+   "verified_at": null
+  },
+  {
+   "sample": "bess/SIGN/Neq/newV-oldV",
+   "function": "snippet",
+   "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+   "subject": "*",
+   "status": "not_applicable",
+   "evidence": "The source of both versions calls nothing, and the compiled binaries hold snippet alone.",
+   "note": "See airy/MAX.",
+   "verified_by": null,
+   "verified_at": null
+  },
+  {
+   "sample": "REVE/barthe2big/Eq/new",
+   "function": "f",
+   "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+   "subject": "*",
+   "status": "not_applicable",
+   "evidence": "The source calls nothing and the compiled binaries hold f alone.",
+   "note": "See airy/MAX.",
+   "verified_by": null,
+   "verified_at": null
+  }
+ ]
+}

@@ -60,7 +60,9 @@ def test_invalid_pair_status_recovers_identity_from_path(tmp_path: Path):
 
     assert records[("a/b/Neq/newV-oldV", "h", "N_B2", "O_B4")].outcome == OUTCOME_INVALID
     assert records[("a/b/Eq/newV", "f", "B1", "B9")].outcome == OUTCOME_INVALID
-    assert soundness_gate.build_gate_report([tmp_path]).violations == ()
+    report = soundness_gate.build_gate_report([tmp_path])
+    assert report.accumulator.unconditional_verified_violations == []
+    assert report.accumulator.config_integrity_violations == []
     with pytest.raises(ValueError, match="unrecognised pair id"):
         identity_from_status_path(tmp_path, tmp_path / "a/b/Eq/newV/f/f_B1_B2_B3.pair-status.json")
 
@@ -111,45 +113,25 @@ def test_transition_cli_writes_json_and_fails_on_change_only_when_asked(tmp_path
     assert "not a directory" in capsys.readouterr().err
 
 
-def test_soundness_gate_flags_neq_equivalent_and_eq_not_eq_only(tmp_path: Path):
+def test_the_dataset_label_alone_no_longer_decides_the_gate(tmp_path: Path):
+    """Issue #15 PR-15-B: a verdict needs a function-level reviewed relation.
+
+    Before, the directory a sample lives in was the whole rule: any ``NOT_EQ``
+    under ``Eq/`` and any ``EQUIVALENT`` under ``Neq/`` failed the gate.  That
+    reported an unregistered function as *proven wrong*.  Those rows are now
+    investigations, and ``test_soundness_gate_v2.py`` covers what does decide.
+    """
+
     eq, neq = tmp_path / "eq", tmp_path / "neq"
-    write_pair_status(eq, "a/b/Eq/newV", "f", "B1", "B2", "EQUIVALENT")
-    write_pair_status(eq, "a/b/Eq/newV", "f", "B1", "B9", "UNKNOWN")
     write_pair_status(eq, "a/b/Eq/newV", "f", "B3", "B11", "NOT_EQ")
-    write_pair_status(neq, "c/d/Neq/newV-oldV", "h", "N_B1", "O_B1", "NOT_EQ")
     write_pair_status(neq, "c/d/Neq/newV-oldV", "h", "N_B2", "O_B4", "EQUIVALENT")
-    write_pair_status(neq, "c/d/Neq/newV-oldV", "h", "N_B5", "O_B7", "TIMEOUT")
-    write_pair_status(neq, "c/d/Neq/newV-oldV", "h", "N_B9", "O_B9", "ERROR")
 
     report = soundness_gate.build_gate_report([eq, neq])
 
-    assert [(r.label, r.function_name, r.pair_id, r.outcome) for r in report.violations] == [
-        ("Eq", "f", "B3_B11", "NOT_EQ"),
-        ("Neq", "h", "N_B2_O_B4", "EQUIVALENT"),
-    ]
-    assert not report.passed
-    text = soundness_gate.format_gate_report(report)
-    assert "GATE: FAIL (2 violations)" in text
-    assert "Neq sample judged EQUIVALENT: c/d/Neq/newV-oldV h N_B2_O_B4" in text
-
-
-def test_soundness_gate_cli_exit_codes(tmp_path: Path):
-    eq = tmp_path / "eq"
-    write_pair_status(eq, "a/b/Eq/newV", "f", "B1", "B2", "EQUIVALENT")
-    write_pair_status(eq, "a/b/Eq/newV", "f", "B1", "B9", "UNKNOWN")
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    out = tmp_path / "gate.json"
-
-    assert soundness_gate.main([str(eq), "--json", str(out)]) == soundness_gate.EXIT_PASS
-    assert json.loads(out.read_text(encoding="utf-8"))["passed"] is True
-    assert soundness_gate.main([str(empty)]) == soundness_gate.EXIT_EMPTY
-    assert soundness_gate.main([str(tmp_path / "missing")]) == soundness_gate.EXIT_EMPTY
-
-    write_pair_status(eq, "a/b/Eq/newV", "f", "B3", "B11", "NOT_EQ")
-    assert soundness_gate.main([str(eq), "--json", str(out)]) == soundness_gate.EXIT_VIOLATION
-    payload = json.loads(out.read_text(encoding="utf-8"))
-    assert payload["violations"] == 1 and payload["violation_rows"][0]["pair_id"] == "B3_B11"
+    assert report.accumulator.unconditional_verified_violations == []
+    assert len(report.accumulator.dataset_label_mismatch_rows) == 2
+    assert report.passed is True
+    assert soundness_gate.format_gate_report(report).rstrip().endswith("GATE: PASS")
 
 
 def test_subset_manifest_is_consistent_with_full_scope():
