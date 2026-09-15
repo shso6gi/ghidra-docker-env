@@ -101,6 +101,14 @@ class EquivalenceResult:
     identical_fast_path_disposition: Optional[Mapping[str, Any]] = field(
         default=None, repr=False, compare=False
     )
+    # Issue #15 PR-15-B: 左右の Program から観測した同一性そのもの。
+    # `function*_identity`（= 解析由来の stable result key）とは別の key に置く。
+    # 前者は「この pair のこの側を他と区別する識別子」、こちらは「左右が同じ
+    # 関数だと言える観測」で、役割が違う。混ぜると同じ binary を共有する複数の
+    # pair が 1 つの結果に潰れる（`reporting/root_blocker_summary`）。
+    identical_function_identity_evidence: Optional[Mapping[str, Any]] = field(
+        default=None, repr=False, compare=False
+    )
     decision_receipt: Optional[Any] = field(default=None, repr=False, compare=False)
     final_outcome: Optional[str] = None
     # 条件付き（仮定依存）判定の列。無条件 authority とは別に保持し、
@@ -307,6 +315,10 @@ class EquivalenceResult:
         if self.identical_fast_path_disposition is not None:
             result["identical_fast_path_disposition"] = dict(
                 self.identical_fast_path_disposition
+            )
+        if self.identical_function_identity_evidence is not None:
+            result["identical_function_identity_evidence"] = dict(
+                self.identical_function_identity_evidence
             )
         
         # ★ 新規追加: mips64_abi_constraints
