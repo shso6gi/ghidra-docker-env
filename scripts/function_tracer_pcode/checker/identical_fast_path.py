@@ -34,6 +34,8 @@ from scripts.function_tracer_pcode.ghidra.function_identity import (
 )
 
 
+_SHA256_HEX_DIGITS = frozenset("0123456789abcdef")
+
 #: fast path で確定した結果の stage 名。
 IDENTICAL_FUNCTION_IDENTITY_STAGE = "IDENTICAL_FUNCTION_IDENTITY"
 
@@ -57,11 +59,18 @@ def _disposition(reason: str, **extra: Any) -> Mapping[str, Any]:
     return {"applicable": False, "applied": False, "reason": reason, **extra}
 
 
-def _session_content_identity(value: Any) -> Optional[str]:
-    """session 入力を operational な `sha256:<hex>` へ正規化する（不正なら None）。
+#: operational な content identity の接頭辞。
+_SHA256_PREFIX = "sha256:"
+
+
+def _session_content_identity(value: Any) -> Optional[Tuple[str, str]]:
+    """session 入力を `(operational identity, sha256 hex)` へ正規化する。
 
     正規化は `production_boundary` の 1 つだけを使う（Program ↔ sha の binding も
-    encoder 側の照合も同じ関数で作られるので、ここで別実装を持たない）。
+    encoder 側の照合も同じ関数で作られるので、ここで別実装を持たない）。ただし
+    その関数は「非空の文字列はそのまま通す」ので、`sha256:<hex>` の形であること
+    は**ここで確かめる**。接頭辞を確かめずに切り出すと、別形式の identity から
+    偽の sha を取り出してしまう。形が違えば `None`（= 不適用）。
     """
 
     from scripts.function_tracer_pcode.authority.lifecycle.production_boundary import (
@@ -69,9 +78,15 @@ def _session_content_identity(value: Any) -> Optional[str]:
     )
 
     try:
-        return _operational_binary_content_identity(value)
+        identity = _operational_binary_content_identity(value)
     except ValueError:
         return None
+    if not identity.startswith(_SHA256_PREFIX):
+        return None
+    digest = identity[len(_SHA256_PREFIX):]
+    if len(digest) != 64 or not set(digest) <= _SHA256_HEX_DIGITS:
+        return None
+    return identity, digest
 
 
 def _program_binding_is_bound(
@@ -85,34 +100,27 @@ def _program_binding_is_bound(
     return bindings.get(id(program)) == content_identity
 
 
-def _identity_fields(identity: BinaryFunctionIdentity) -> Tuple[Any, ...]:
-    return (
-        identity.executable_sha256,
-        identity.function_name,
-        identity.language_id,
-        identity.compiler_spec_id,
-        identity.image_base,
-        identity.entry,
-        identity.body_range,
-    )
-
-
-def _exact_binary_ids(
+def _missing_binding_input(
     binary1_id: Any, binary2_id: Any, payload: Mapping[str, Any],
-) -> bool:
-    """checker 側の binary ID が session payload と同じ非空文字列か。"""
+) -> Optional[str]:
+    """artifact を束縛できない入力があればその理由を返す（無ければ `None`）。
 
-    if any(
-        type(value) is not str or not value
-        for value in (
-            binary1_id, binary2_id, payload.get("observation_contract_id"),
-        )
+    binary ID は checker 側の引数と session payload の両方で同じ非空文字列で
+    なければならない（片側で閉じた確認にしないため）。
+    """
+
+    for value in (binary1_id, binary2_id):
+        if type(value) is not str or not value:
+            return "binary_id_unavailable"
+    if (
+        binary1_id != payload.get("binary1_id")
+        or binary2_id != payload.get("binary2_id")
     ):
-        return False
-    return (
-        binary1_id == payload.get("binary1_id")
-        and binary2_id == payload.get("binary2_id")
-    )
+        return "binary_id_unavailable"
+    contract_id = payload.get("observation_contract_id")
+    if type(contract_id) is not str or not contract_id:
+        return "observation_contract_unavailable"
+    return None
 
 
 def _resolve_side(program: Any, function_name: str):
@@ -154,18 +162,13 @@ def assess_identical_function_identity(
     if session is None:
         return None
     payload = dict(getattr(session, "execution_payload", None) or ())
-    left_identity = _session_content_identity(payload.get("binary1_content_identity"))
-    right_identity = _session_content_identity(payload.get("binary2_content_identity"))
-    if (
-        left_identity is None
-        or right_identity is None
-        or left_identity != right_identity
-    ):
+    left_input = _session_content_identity(payload.get("binary1_content_identity"))
+    right_input = _session_content_identity(payload.get("binary2_content_identity"))
+    if left_input is None or right_input is None or left_input != right_input:
         return None
     if function_name1 != function_name2:
         return None
-    left_sha = left_identity[len("sha256:"):]
-    right_sha = right_identity[len("sha256:"):]
+    (left_identity, left_sha), (right_identity, right_sha) = left_input, right_input
 
     if not _program_binding_is_bound(
         session, program1, left_identity
@@ -180,7 +183,15 @@ def assess_identical_function_identity(
     if left_reason is not None or right_reason is not None:
         return IdenticalIdentityAssessment(
             identities=(None, None),
-            disposition=_disposition(left_reason or right_reason),
+            disposition=_disposition(
+                left_reason or right_reason,
+                # どちらの Program を見ればよいかを落とさない（`sha_mismatch_side`
+                # と同じ規約）。左右で理由が違うときは `reason` が左側のもの。
+                resolution_side=(
+                    "both" if left_reason is not None and right_reason is not None
+                    else ("left" if left_reason is not None else "right")
+                ),
+            ),
         )
 
     # 左右それぞれの Program SHA を、その側の session 入力 SHA と直接照合する。
@@ -201,7 +212,9 @@ def assess_identical_function_identity(
                 ),
             ),
         )
-    if _identity_fields(left) != _identity_fields(right):
+    # 比較する field を 2 箇所で数え上げない（`as_tuple()` が正本。ここに来る
+    # 時点で両側とも `match_count == 1` なので、schema と件数も一致する）。
+    if left.as_tuple() != right.as_tuple():
         return IdenticalIdentityAssessment(
             identities=(None, None),
             disposition=_disposition("identity_mismatch"),
@@ -210,12 +223,13 @@ def assess_identical_function_identity(
     # artifact の binding は checker 側が持つ値で作り、encoder は session 側の
     # payload から作り直して照合する。片方が欠けていれば束縛が作れないので
     # 適用しない（fail closed）。
-    if not _exact_binary_ids(binary1_id, binary2_id, payload):
+    binding_gap = _missing_binding_input(binary1_id, binary2_id, payload)
+    if binding_gap is not None:
         # identity 自体は照合済みなので evidence は残す。束縛できないのは
         # artifact の方（fast path を適用しないだけ）。
         return IdenticalIdentityAssessment(
             identities=(left, right),
-            disposition=_disposition("binary_id_unavailable"),
+            disposition=_disposition(binding_gap),
             identity_evidence_ok=True,
         )
 

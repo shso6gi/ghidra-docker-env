@@ -535,6 +535,16 @@ def test_signal_cannot_be_constructed_without_its_artifact():
         )
 
 
+def test_the_artifact_is_hashable_even_though_its_body_is_a_mapping():
+    artifact = IdenticalFunctionIdentityProofArtifact.create(
+        _identity(), _identity(), session_binding=_binding()
+    )
+    assert hash(artifact) == hash(IdenticalFunctionIdentityProofArtifact.create(
+        _identity(), _identity(), session_binding=_binding()
+    ))
+    assert {artifact, artifact} == {artifact}
+
+
 def test_phase7_signal_authority_projects_the_artifact_body():
     signal = _signal()
     assert signal._phase7_signal_authority() == dict(signal.artifact.body)
@@ -904,6 +914,29 @@ def test_identity_differences_fall_back_to_the_normal_path(
     assert "decisive_proof_provenance" not in payload
 
 
+def test_the_disposition_names_the_side_that_failed_to_resolve(monkeypatch):
+    result, probe, _ = _run_production_check(
+        monkeypatch, "sides",
+        _FakeProgram("left", functions=[_FakeFunction("snippet"), _FakeFunction("snippet")]),
+        _FakeProgram("right", functions=[_FakeFunction("other")]),
+    )
+    disposition = result.to_dict()["identical_fast_path_disposition"]
+    assert probe.analyzer_programs == ["left"]
+    # reason は左側のもの、side はどちらを見ればよいかを落とさない。
+    assert disposition["reason"] == "name_not_unique"
+    assert disposition["resolution_side"] == "both"
+
+
+def test_the_disposition_names_a_one_sided_resolution_failure(monkeypatch):
+    result, _, _ = _run_production_check(
+        monkeypatch, "side-right", _FakeProgram("left"),
+        _FakeProgram("right", functions=[_FakeFunction("other")]),
+    )
+    disposition = result.to_dict()["identical_fast_path_disposition"]
+    assert disposition["reason"] == "function_missing"
+    assert disposition["resolution_side"] == "right"
+
+
 def test_a_missing_function_keeps_the_existing_error_path(monkeypatch):
     result, probe, _ = _run_production_check(
         monkeypatch, "missing",
@@ -971,6 +1004,75 @@ def test_assessment_is_absent_without_a_session_content_identity(monkeypatch):
     assert _assess_with_session(
         monkeypatch, session, _FakeProgram("left"), _FakeProgram("right")
     ) is None
+
+
+def _bound_session(program1, program2, **payload_overrides):
+    """Program ↔ sha の束縛まで張った assess 用の session。"""
+
+    payload = {
+        "binary1_id": "B1", "binary2_id": "B2",
+        "binary1_content_identity": ("sha256", SHA_A),
+        "binary2_content_identity": ("sha256", SHA_A),
+        "function_name1": "snippet", "function_name2": "snippet",
+        "observation_contract_id": "contract-1",
+    }
+    payload.update(payload_overrides)
+    identity = payload["binary1_content_identity"]
+    bound = identity if type(identity) is str else f"sha256:{identity[1]}"
+    return _AssessSession(payload, {
+        "operational_program_binary_identities": {
+            id(program1): bound, id(program2): bound,
+        },
+    })
+
+
+@pytest.mark.parametrize(
+    "content_identity",
+    [
+        pytest.param("SHA256:" + SHA_A, id="uppercase-prefix"),
+        pytest.param("md5:" + SHA_A, id="other-algorithm"),
+        pytest.param("x", id="too-short-to-slice"),
+        pytest.param("sha256:" + SHA_A[:-1], id="short-digest"),
+        pytest.param("sha256:" + SHA_A.upper(), id="uppercase-digest"),
+    ],
+)
+def test_a_non_canonical_content_identity_is_not_sliced_into_a_sha(
+    monkeypatch, content_identity,
+):
+    """接頭辞を確かめずに切り出すと偽の sha が取れてしまう。
+
+    `production_boundary._operational_binary_content_identity` は非空の文字列を
+    そのまま通すので、`sha256:<hex>` でない identity も session に入り得る。
+    そこから 7 文字を落として sha として使わないことを固定する（不適用 = None）。
+    """
+
+    program1, program2 = _FakeProgram("left"), _FakeProgram("right")
+    session = _bound_session(
+        program1, program2,
+        binary1_content_identity=content_identity,
+        binary2_content_identity=content_identity,
+    )
+    assert _assess_with_session(monkeypatch, session, program1, program2) is None
+
+
+def test_a_missing_observation_contract_is_named_as_such(monkeypatch):
+    program1, program2 = _FakeProgram("left"), _FakeProgram("right")
+    session = _bound_session(program1, program2, observation_contract_id="")
+    assessment = _assess_with_session(monkeypatch, session, program1, program2)
+    assert assessment.disposition == {
+        "applicable": False, "applied": False,
+        "reason": "observation_contract_unavailable",
+    }
+    assert assessment.identity_evidence_ok is True
+    assert assessment.fast_path_result is None
+
+
+def test_a_binary_id_that_differs_from_the_session_does_not_apply(monkeypatch):
+    program1, program2 = _FakeProgram("left"), _FakeProgram("right")
+    session = _bound_session(program1, program2, binary1_id="B9")
+    assessment = _assess_with_session(monkeypatch, session, program1, program2)
+    assert assessment.disposition["reason"] == "binary_id_unavailable"
+    assert assessment.fast_path_result is None
 
 
 def test_assessment_is_absent_without_an_active_session(monkeypatch):

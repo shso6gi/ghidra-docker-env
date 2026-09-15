@@ -154,7 +154,10 @@ class IdenticalFunctionIdentityProofArtifact:
     """左右一致した identity 観測と、その実行への束縛を封じた proof。"""
 
     schema: str
-    body: Mapping[str, Any]
+    # `body` は dict なので比較・hash からは外す（frozen dataclass が
+    # unhashable にならないように）。`artifact_digest` が body を決めていて、
+    # 食い違いは `validate()` が検出する。
+    body: Mapping[str, Any] = field(compare=False)
     artifact_digest: str
 
     @classmethod

@@ -177,11 +177,10 @@ def _run_phase_stages(
     retry_with_type_fix: bool = False,
     binary1_id: str | None = None,
     binary2_id: str | None = None,
-    start_time: float | None = None,
+    *,
+    start_time: float,
 ):
     """phase plan 本体（診断の添付は呼び出し側が行う）"""
-    if start_time is None:
-        start_time = time.time()
     phase_timeline = phase_timeline_of(checker)
     binary1_name = program1.getName() if hasattr(program1, "getName") else "binary1"
     binary2_name = program2.getName() if hasattr(program2, "getName") else "binary2"
