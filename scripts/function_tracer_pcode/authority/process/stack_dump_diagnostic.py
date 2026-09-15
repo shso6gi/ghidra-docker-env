@@ -109,6 +109,13 @@ UNAVAILABLE_SIGNAL_CONTRACT = "signal_contract_mismatch"
 UNAVAILABLE_SIGNAL_FAILED = "signal_failed"
 UNAVAILABLE_START_FAILED = "diagnostic_start_failed"
 
+# 送信開始がどこまで進んだか（`signal_sent` の bool では潰れてしまう区別）。
+SIGNAL_START_SENT = "sent"
+SIGNAL_START_CLAIMED_NOT_SENT = "claimed_not_sent"
+SIGNAL_START_REFUSED_CANCELLED = "refused_cancelled"
+SIGNAL_START_NOT_REQUESTED = "not_requested"
+SIGNAL_START_NOT_CLAIMED = "not_claimed"
+
 # artifact の退避状態。
 ARTIFACT_UNSET = "unset"
 ARTIFACT_MISSING = "missing"
@@ -184,13 +191,25 @@ class StackDumpDiagnostic:
         self._identity_verifier = identity_verifier
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
-        # **cancel と実送信の linearization point。**この lock が守るのは
-        # 「cancel flag を読む -> `pidfd_send_signal` -> 送信した事実を書く」
-        # だけで、journal 読取・`pidfd_open`・identity 確認・dump polling は
-        # 一切入れない。監視ループが `cancel_future_requests()` でここを待つのは
-        # 最悪でも syscall 1 回ぶんになる。
-        self._send_gate = threading.Lock()
+        # **送信開始権（一度きり）。cancel と送信開始の linearization point。**
+        #
+        # worker も cancel も `acquire(blocking=False)` でしか触らないので、
+        # **どちらも待たない**。先に取れた側が勝ち、負けた側は即座に戻る:
+        #
+        # * cancel が取れた -> worker は以後 `acquire` に失敗し、送信を開始できない
+        # * worker が取れた -> 送信は「開始済み」。cancel は取得に失敗して即 return し、
+        #   syscall の完了は**待たない**（待つと監視ループが worker に引きずられる）
+        #
+        # 「送信開始の順序づけ」と「syscall の完了」を分けているのが要点。
+        # 監視ループが待ってよいものは何一つ無い。
+        self._send_permit = threading.Lock()
+        #: cancel が送信権を取った（= これ以降 worker は送信を開始できない）。
+        #: 書き手は監視スレッドの `cancel_future_requests()` だけ。
+        self._send_blocked_by_cancel = False
         self._cancel_linearized_monotonic: Optional[float] = None
+        #: 送信権を取った（送信開始が linearize した）。syscall の成否とは別。
+        self.send_claimed = False
+        self.send_claimed_monotonic: Optional[float] = None
         self._thread: Optional[threading.Thread] = None
 
         self.requested = False
@@ -272,30 +291,29 @@ class StackDumpDiagnostic:
             )
 
     def cancel_future_requests(self) -> None:
-        """以後の送信を禁止する（正常終了 / deadline 到達の双方で呼ぶ）。
+        """以後の**送信開始**を禁止する（正常終了 / deadline 到達の双方で呼ぶ）。
 
-        **この関数から戻った時点で、診断 SIGUSR1 はもう送られない。** flag を
-        立てるだけでは足りない（worker が「確認 -> 送信」の途中なら、確認後・
-        送信前に立った flag は無視されてしまう）ので、2 段で順序を確定する:
+        **監視ループから呼ばれるので、何も待たない。** 送信権を
+        `acquire(blocking=False)` で取りに行くだけで、取れなければ即座に戻る。
 
-        1. `_cancelled` を立てる。worker が **send gate の中で**読む値なので、
-           これ以降に gate を取る送信は必ず cancel を見る。
-        2. send gate を 1 回取って放す。すでに送信中の worker がいれば、その
-           送信が終わるまで待つ。戻った時点で「送信中の worker はいない」かつ
-           「これから gate を取る worker は cancel を見る」が両方成り立つ。
+        * 取れた場合: cancel が先に linearize した。worker は以後この権利を
+          取れないので、**新しい SIGUSR1 の送信を開始できない**。
+        * 取れなかった場合: worker がすでに送信を開始している。その事実は
+          取り消さない（`signal_sent` / `send_claimed` はそのまま）。
+          **進行中の syscall の完了は待たない** —— 待つと、診断 worker が
+          syscall で止まっているあいだ監視ループの kill 開始が遅れてしまう。
 
-        送信が先に linearize した場合、その送信は**取り消さない**（`signal_sent`
-        は True のまま、`unavailable_reason` に `cancelled` は入らない）。
-        どちらが先だったかは `_cancel_linearized_monotonic` と
-        `signal_sent_monotonic` の順序で読める。
-
-        gate が守るのは flag の読みと syscall 1 回だけなので、監視ループがここで
-        待つ時間は有界。journal 読取や `pidfd_open` は gate の外にある。
+        つまり「送信開始の順序づけ」だけをここで確定し、「syscall の完了」とは
+        分離している。どちらが先だったかは `send_claimed_offset_seconds` と
+        `cancel_linearized_offset_seconds` の順序で読める。
         """
         self._cancelled.set()
-        with self._send_gate:
-            if self._cancel_linearized_monotonic is None:
-                self._cancel_linearized_monotonic = time.monotonic()
+        if self._send_blocked_by_cancel:
+            return
+        # blocking=False。**ここが監視ループから見た唯一の同期操作**で、待ちは無い。
+        if self._send_permit.acquire(blocking=False):
+            self._send_blocked_by_cancel = True
+            self._cancel_linearized_monotonic = time.monotonic()
 
     def note_deadline(self, deadline_monotonic: float) -> None:
         self.deadline_monotonic = float(deadline_monotonic)
@@ -418,22 +436,23 @@ class StackDumpDiagnostic:
                         self.unavailable_reason or UNAVAILABLE_PROCESS_EXITED
                     )
                     return False
-                # ここから下が linearization point。cancel flag の読みと syscall と
-                # 「送信した」の記録を 1 つの排他区間に閉じ込める。gate を取れた
-                # 時点で cancel が立っていれば送らない。取れたあとに cancel が来た
-                # 場合、その cancel は gate の外で待つので送信は完了扱いになる。
-                with self._send_gate:
-                    if self._cancelled.is_set():
-                        self.unavailable_reason = (
-                            self.unavailable_reason or UNAVAILABLE_CANCELLED
-                        )
-                        return False
-                    pidfd_send(descriptor, STACK_DUMP_SIGNAL)
-                    # 観測者が `signal_sent` を見たときに時刻も見えているよう、
-                    # 時刻を先に書いてから flag を立てる。
-                    self.signal_sent_monotonic = time.monotonic()
-                    self.signal_sent_epoch = time.time()
-                    self.signal_sent = True
+                # ここが送信開始の linearization point。**権利を取るだけ**で、
+                # syscall はこのあと（権利の外側の話として）行う。取れなければ
+                # cancel が先に linearize しているので、送信を開始しない。
+                if not self._send_permit.acquire(blocking=False):
+                    self.unavailable_reason = (
+                        self.unavailable_reason or UNAVAILABLE_CANCELLED
+                    )
+                    return False
+                # 以後 cancel は「送信は開始済み」と見なし、**待たずに**戻る。
+                self.send_claimed_monotonic = time.monotonic()
+                self.send_claimed = True
+                pidfd_send(descriptor, STACK_DUMP_SIGNAL)
+                # 観測者が `signal_sent` を見たときに時刻も見えているよう、
+                # 時刻を先に書いてから flag を立てる。
+                self.signal_sent_monotonic = time.monotonic()
+                self.signal_sent_epoch = time.time()
+                self.signal_sent = True
             except ProcessLookupError:
                 self.unavailable_reason = (
                     self.unavailable_reason or UNAVAILABLE_PROCESS_EXITED
@@ -469,6 +488,24 @@ class StackDumpDiagnostic:
             time.sleep(DUMP_OBSERVE_SLICE_SECONDS)
 
     # -- 終了処理のあと（監視ループの外）で呼ぶ面 ----------------------------
+
+    @property
+    def signal_start_state(self) -> str:
+        """送信開始がどこまで進んだか（`signal_sent` の bool だけでは足りない）。
+
+        `claimed_not_sent` は「送信権は取ったが syscall が失敗した」で、
+        `refused_cancelled` は「cancel が先に権利を取ったので開始しなかった」。
+        この 2 つを同じ `signal_sent=False` に潰さない。
+        """
+        if self.signal_sent:
+            return SIGNAL_START_SENT
+        if self.send_claimed:
+            return SIGNAL_START_CLAIMED_NOT_SENT
+        if not self.requested:
+            return SIGNAL_START_NOT_REQUESTED
+        if self._send_blocked_by_cancel:
+            return SIGNAL_START_REFUSED_CANCELLED
+        return SIGNAL_START_NOT_CLAIMED
 
     @property
     def sent_but_unobserved(self) -> bool:
@@ -556,6 +593,10 @@ class StackDumpDiagnostic:
             "signal": "SIGUSR1",
             "signal_number": STACK_DUMP_SIGNAL,
             "signal_sent": self.signal_sent,
+            # 送信開始の linearization（syscall の成否とは別）。
+            "send_claimed": self.send_claimed,
+            "send_claimed_offset_seconds": _offset(self.send_claimed_monotonic),
+            "signal_start_state": self.signal_start_state,
             "dump_observed": self.dump_observed,
             "dump_observed_bytes": self.dump_observed_bytes,
             "dump_baseline_bytes": self.dump_baseline_bytes,

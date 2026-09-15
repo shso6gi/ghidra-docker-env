@@ -669,6 +669,7 @@ class TimeoutPairRow:
     kind_report: TimeoutKindReport
     handler_registered: Optional[bool]
     signal_sent: Optional[bool]
+    signal_start_state: Optional[str]
     dump_observed: Optional[bool]
     sent_but_unobserved: Optional[bool]
     unavailable_reason: Optional[str]
@@ -700,6 +701,7 @@ class TimeoutPairRow:
             **self.kind_report.to_dict(),
             "handler_registered": self.handler_registered,
             "signal_sent": self.signal_sent,
+            "signal_start_state": self.signal_start_state,
             "dump_observed": self.dump_observed,
             "sent_but_unobserved": self.sent_but_unobserved,
             "unavailable_reason": self.unavailable_reason,
@@ -796,6 +798,9 @@ def build_timeout_pair_row(
         kind_report=report,
         handler_registered=_optional_bool(sidecar, "handler_registered"),
         signal_sent=_optional_bool(sidecar, "signal_sent"),
+        signal_start_state=(
+            sidecar.get("signal_start_state") if isinstance(sidecar, Mapping) else None
+        ),
         dump_observed=_optional_bool(sidecar, "dump_observed"),
         sent_but_unobserved=_optional_bool(sidecar, "sent_but_unobserved"),
         unavailable_reason=(
@@ -858,6 +863,7 @@ class TimeoutHotspotReport:
         kinds: Dict[str, int] = {}
         handler: Dict[str, int] = {}
         signal_sent: Dict[str, int] = {}
+        signal_start: Dict[str, int] = {}
         dump_observed: Dict[str, int] = {}
         sent_but_unobserved: Dict[str, int] = {}
         unavailable: Dict[str, int] = {}
@@ -880,6 +886,9 @@ class TimeoutHotspotReport:
             _count(kinds, row.timeout_kind)
             _count(handler, _bucket(row.handler_registered))
             _count(signal_sent, _bucket(row.signal_sent))
+            # 「送信権を取ったが syscall が失敗した」と「cancel に先を越された」を
+            # 同じ `signal_sent=false` に潰さない。
+            _count(signal_start, row.signal_start_state or UNKNOWN_LABEL)
             _count(dump_observed, _bucket(row.dump_observed))
             _count(sent_but_unobserved, _bucket(row.sent_but_unobserved))
             if not row.diagnostic_status_present:
@@ -925,6 +934,7 @@ class TimeoutHotspotReport:
             "timeout_kind": kinds,
             "handler_registered": handler,
             "signal_sent": signal_sent,
+            "signal_start_state": signal_start,
             "dump_observed": dump_observed,
             "sent_but_unobserved": sent_but_unobserved,
             "unavailable_reason": unavailable,
@@ -981,7 +991,7 @@ def format_timeout_hotspot_report(report: TimeoutHotspotReport) -> str:
     else:
         lines.append(f"    {NONE_LABEL}")
     for title in (
-        "handler_registered", "signal_sent", "dump_observed",
+        "handler_registered", "signal_sent", "signal_start_state", "dump_observed",
         "sent_but_unobserved", "unavailable_reason", "artifact_status",
         "last_completed_stage", "in_progress_stage", "in_progress_stage_basis",
         "longest_completed_stage",

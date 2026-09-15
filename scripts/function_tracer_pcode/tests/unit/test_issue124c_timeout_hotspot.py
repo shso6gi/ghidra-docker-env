@@ -573,3 +573,35 @@ def test_an_unreadable_journal_reports_an_unknown_basis(tmp_path):
     row = hotspot.build_timeout_hotspot_report([root]).rows[0]
     assert row.in_progress_stage is None
     assert row.in_progress_stage_basis == "(unknown)"
+
+
+def test_signal_start_state_is_counted_separately_from_signal_sent(tmp_path):
+    """`signal_sent=false` の中身（cancel 負け / syscall 失敗）を潰さない。"""
+    root, _ = _build_run(tmp_path)
+    pair_dir = root / "REVE" / "sample" / "Eq" / "new" / "f"
+    sidecar = _status_sidecar(
+        signal_sent=False, dump_observed=False, send_claimed=True,
+        signal_start_state="claimed_not_sent",
+        unavailable_reason="signal_failed:PermissionError",
+        artifact_status="missing",
+    )
+    (pair_dir / ".runtime-metrics" / "f_B1_B2.stack-dump.status.json").write_text(
+        json.dumps(sidecar), encoding="utf-8"
+    )
+    section = hotspot.build_timeout_hotspot_report([root]).health_section()
+    assert section["signal_sent"] == {"false": 1}
+    assert section["signal_start_state"] == {"claimed_not_sent": 1}
+    assert sum(section["signal_start_state"].values()) == section["pairs"]
+
+
+def test_a_run_without_the_state_reads_as_unknown(tmp_path):
+    """sidecar が古くて state を持たない run は `(unknown)`（false ではない）。"""
+    root, _ = _build_run(tmp_path)
+    pair_dir = root / "REVE" / "sample" / "Eq" / "new" / "f"
+    sidecar = _status_sidecar()
+    sidecar.pop("signal_start_state", None)
+    (pair_dir / ".runtime-metrics" / "f_B1_B2.stack-dump.status.json").write_text(
+        json.dumps(sidecar), encoding="utf-8"
+    )
+    section = hotspot.build_timeout_hotspot_report([root]).health_section()
+    assert section["signal_start_state"] == {"(unknown)": 1}

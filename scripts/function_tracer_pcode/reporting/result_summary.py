@@ -1672,6 +1672,7 @@ TIMEOUT_HEALTH_SECTIONS = (
     "timeout_kind",
     "handler_registered",
     "signal_sent",
+    "signal_start_state",
     "dump_observed",
     "sent_but_unobserved",
     "unavailable_reason",
