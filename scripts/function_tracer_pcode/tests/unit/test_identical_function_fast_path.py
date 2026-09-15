@@ -776,8 +776,18 @@ def test_identical_binaries_and_function_are_equivalent_without_any_analysis(mon
     assert provenance["proof_artifact_digest"] == authority_digest(
         provenance["artifact"]
     )
-    assert payload["function1_identity"] == payload["function2_identity"]
-    assert payload["function1_identity"][0] == "binary_function_identity_v1"
+    # 同一性の観測は専用 key に載る。`function*_identity` は結果を他と区別する
+    # stable key なので、左右で違う（同じ binary を共有する別 pair と衝突させない）。
+    evidence = payload["identical_function_identity_evidence"]
+    assert evidence["schema"] == "identical_function_identity_evidence_v1"
+    assert evidence["left"] == evidence["right"]
+    assert evidence["left"]["executable_sha256"] == SHA_A
+    assert evidence["left"]["match_count"] == 1
+    assert payload["function1_identity"] != payload["function2_identity"]
+    assert payload["function1_identity"][:2] == (
+        "identical_fast_path_function_identity_v1", ("binary_id", "B1"),
+    )
+    assert payload["function2_identity"][1] == ("binary_id", "B2")
     _, bundle = _payload_with_bundle(result)
     assert bundle["canonical_semantic_result_projection"]["payload"][
         "decisive_proof_kinds"
@@ -1015,9 +1025,14 @@ def test_fast_path_is_not_applied_when_the_flag_is_off(monkeypatch):
     assert payload["identical_fast_path_disposition"] == {
         "applicable": True, "applied": False, "reason": "disabled",
     }
-    # OFF でも identity evidence は残る（oracle run で gate が読む）。
-    assert payload["function1_identity"] == payload["function2_identity"]
-    assert payload["function1_identity"][0] == "binary_function_identity_v1"
+    # OFF でも identity evidence は残る（oracle run で gate が読む）。解析由来の
+    # `function*_identity` には触らないので、oracle run の stable result key は
+    # fast path の有無で変わらない。
+    evidence = payload["identical_function_identity_evidence"]
+    assert evidence["left"] == evidence["right"]
+    assert evidence["left"]["executable_sha256"] == SHA_A
+    assert payload["function1_identity"] is None
+    assert payload["function2_identity"] is None
     assert "decisive_proof_provenance" not in payload
 
 
@@ -1291,7 +1306,8 @@ def test_missing_binary_ids_do_not_apply_the_fast_path(monkeypatch):
     payload = result.to_dict()
     assert probe.analyzer_programs == ["left"]
     assert payload["identical_fast_path_disposition"]["reason"] == "binary_id_unavailable"
-    assert payload["function1_identity"] == payload["function2_identity"]
+    evidence = payload["identical_function_identity_evidence"]
+    assert evidence["left"] == evidence["right"]
 
 
 def test_a_missing_program_binding_does_not_apply_the_fast_path(monkeypatch):

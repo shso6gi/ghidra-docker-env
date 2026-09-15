@@ -193,11 +193,28 @@ The result JSON carries:
   two inputs share one content identity and one function name;
 * `decisive_proof_provenance` — `{kind, proof_artifact_digest, artifact}`, present
   only when the fast path decided the pair;
-* `function1_identity` / `function2_identity` — the observed binary-level identity
-  (`binary_function_identity_v1`), filled only after both sides' sha were checked
-  against the session inputs.
+* `identical_function_identity_evidence` — `{schema, left, right}`, the identity
+  observed on each side, written only after both sides' sha were checked against
+  the session inputs. This is what the soundness gate reads to confirm that one
+  and the same function was compared; it is deliberately **not** stored in
+  `function1_identity` / `function2_identity`, which stay the per-side key that
+  distinguishes one result from another (two pairs that share a byte-identical
+  binary must not collapse into one result in `root_blocker_summary`). On a pair
+  the fast path decided there is no analysis to derive that key from, so it is
+  the observed identity scoped by the side's binary ID
+  (`identical_fast_path_function_identity_v1`).
 
 Pairs that are not identical keep their previous result JSON unchanged.
+
+Both matrix runners take `EQBENCH_IDENTICAL_FAST_PATH` (`1` by default; `0`
+passes `--no-identical-fast-path` to every pair) and record the mode in
+`run_manifest.txt` as `identical_fast_path=` next to
+`analysis_config_schema=eqbench-analysis-config-v3`. The flag is part of the
+typed analysis config, so an ON run and an OFF run have different
+`analysis_config_digest` values and neither reuses the other's pair statuses.
+A run recorded before this field existed names no schema and is read as the
+previous (v2) config unchanged; the soundness gate reports its mode as
+`legacy_unknown` and does not guess.
 
 ### Measurement subset
 
@@ -491,17 +508,60 @@ counts, the persisted gate verdicts (a gate whose artifact is absent is
 when an indicator moved and a rerun did not settle whether it was the code or
 run-to-run noise.
 
-Check soundness against the benchmark labels only (an `Eq` sample must never be
-`NOT_EQ`, a `Neq` sample must never be `EQUIVALENT`; exit 1 on any violation,
-exit 2 when no pair status was found):
+Check soundness against what is actually *verified* about each pair (exit 1 on
+any violation, exit 2 when no pair status was found):
 
 ```bash
 python3 -m scripts.function_tracer_pcode.reporting.soundness_gate \
     logs/EqBench/subset_after/eq logs/EqBench/subset_after/neq
 ```
 
-The label-only gate cannot tell a legitimate `EQUIVALENT` on an unchanged Neq
-helper from a false one, so both runners end with the function-level
+The shared gate (`soundness-gate-v2`) fails on, and only on:
+
+- a **verified** contradiction of a function-level reviewed relation: the
+  pair's own `(sample, function)` is `CONFIRMED_EQ` in
+  `function_diff_manifest.json` and was judged `NOT_EQ`, or `CONFIRMED_NOT_EQ`
+  and judged `EQUIVALENT`. The lookup is done for `Eq` samples too — the
+  dataset directory a sample sits in is not itself a reviewed relation;
+- the same contradiction in the assumption-dependent column, but only when
+  **every** premise of that pair's conditional receipt is recorded `verified`
+  in `scripts/eqbench/ground_truth_conditional_compatibility.json` (the file is
+  evaluation metadata; the checker never reads it, and no entry is `verified`
+  today). An unverified, not-applicable or absent premise leaves the row an
+  investigation;
+- an identical-input pair whose identity evidence confirms the same function on
+  both sides and that was judged `NOT_EQ` (any mode);
+- with the fast path `on`, an applicable identical pair that was not accepted,
+  or one whose disposition cannot be read (`unverifiable`);
+- a configuration or integrity failure: a `eqbench-analysis-config-v3` manifest
+  without a usable `identical_fast_path`, an `off` run whose results say the
+  fast path was applied, a conditional column that does not hold together, a
+  ground truth that is unreadable or that claims `CONFIRMED_*` without the
+  evidence column, broken compatibility metadata.
+
+Both things the gate calls *verified* have to carry their authority with them.
+A reviewed relation comes from `scripts/eqbench/neq_ground_truth.tsv`, whose
+evidence column is required (an `Eq` sample's relation carries
+`eq_sample_single_source`); a `CONFIRMED_*` entry that reaches the gate without
+evidence fails it rather than quietly becoming an investigation. A `verified`
+compatibility entry must carry a real `evidence` (not `none`), a `verified_by`
+and a `verified_at` UTC instant (`YYYY-MM-DDTHH:MM:SSZ`); the other statuses
+must carry neither verifier field. A file the loader cannot fully understand —
+an unknown field, a missing one, a duplicate key — is refused whole, so a
+broken entry can never authorize a conditional violation.
+
+A pair the runner killed at its deadline leaves no result JSON, so there is
+nothing to observe: its identity is never reconstructed from the input sha
+alone, it is reported as `same_function_unverified`, gate A stays silent about
+it, and with the fast path `on` gate B fails closed on it (`unverifiable`).
+
+A dataset-label mismatch, an unregistered function, an `UNKNOWN` verdict and an
+unverified premise are counted and reported as investigations; they never fail
+the gate. `UNKNOWN` / `TIMEOUT` / `ERROR` decide nothing and never violate
+anything.
+
+The shared gate says nothing about benchmark coverage, so both runners
+separately end with the function-level
 **benchmark validation gate** (`EQBENCH_BENCHMARK_GATE=0` disables it;
 `EQBENCH_GROUND_TRUTH_FILE` points it at another reviewed annotation file, e.g.
 an empty one for a synthetic benchmark root; a missing file fails the gate). It
@@ -533,14 +593,77 @@ python3 -m scripts.function_tracer_pcode.reporting.benchmark_validation_gate \
 ```
 
 On `logs/EqBench/all_neq_same_isa_closure_current` (produced before the #13
-fix) the label-only gate fails on all 242 `EQUIVALENT` pairs in Neq samples;
-the benchmark validation gate fails on the 192 raytrace constructor pairs
+fix) the benchmark validation gate fails on the 192 raytrace constructor pairs
 whose reviewed ground truth is `CONFIRMED_NOT_EQ` and counts the 50
 `CLEVER/UnchLoop foo` pairs as suspicious (source changed, equivalence not
 confirmed at the binary level). The manifest's `observed_baseline`
 section records what the checker produced at the recorded commit; it is
 explicitly *not* ground truth — an EQUIVALENT/NOT_EQ there may be an accident
 of an implementation defect — and must only be used to explain transitions.
+
+### Comparing two runs on the same binaries
+
+A before/after comparison only means something when both runs analysed the same
+bytes. `scripts/eqbench/binary_manifest.py` answers that from the runs
+themselves — it reads the sha256 each pair's signed execution target names, so
+it describes the binaries that were compared rather than whatever is on disk
+now:
+
+```bash
+python3 -m scripts.eqbench.binary_manifest build \
+    --run-dir logs/EqBench/<run> --binary-root . --output logs/EqBench/<run>/binary_manifest.txt
+python3 -m scripts.eqbench.binary_manifest compare \
+    --before logs/EqBench/<before>/binary_manifest.txt \
+    --after  logs/EqBench/<after>/binary_manifest.txt
+```
+
+`compare` succeeds only when the two manifests name the **same set of keys**
+(`sample_identity`, `binary_id`, path) **and** the same digest for every key: a
+binary that appeared, disappeared, moved or changed all fail the same way,
+because any of them makes an outcome difference ambiguous. Only a full
+lower-case sha256 counts as a digest, so two runs can never look equal because
+neither carried a usable one. `--binary-root` asserts that the compared tree is
+still there: every binary is re-hashed under it and a **missing** file fails
+just like a changed one — omit the option when the working root is gone and you
+only want the manifest. Run `compare` before using two runs as before/after of
+each other.
+
+`outcome_transition --reason-sets` says which pairs it could actually compare.
+A pair without a readable result payload is `incomparable`, never a match, and
+the report splits that bucket by **how the pair ended, as the pair-status
+authority confirms it** — not by the canonical outcome and not by the
+`supervisor_status` field on its own. `pair_status_finalization()` validates
+the whole signed status (seal, field set, durable authority fields, authority
+kinds, child-exit join) and answers with one of:
+
+- `resolved` — the supervisor read the child's canonical result, so the run
+  holds that pair's result. A missing payload here is a `payload_loss`: a real
+  difference. This includes `canonical_outcome = ERROR`, which a resolved pair
+  reports just as a durable failure does.
+- `durable` — a validated `TIMEOUT` or `ERROR` finalization: the pair never
+  reached a canonical result and owes no payload. Whether a killed child
+  flushed one first is a matter of milliseconds and differs between runs of the
+  same commit.
+- `unverified` — anything the authority could not confirm: an unsigned or
+  edited file, a missing verification key, an ending that contradicts the
+  outcome, missing durable authority fields, a broken child-exit join. This
+  counts as a loss. A file that merely *says* `TIMEOUT` is not a pair that
+  timed out, and "we do not know how it ended" must not become "it owed
+  nothing".
+
+An oracle comparison therefore requires `changed`, `reason-set mismatch` and
+`payload_loss` to all be 0; `incomparable` alone is not a defect.
+
+Runs are made against a fresh writable copy of the benchmark tree, never against
+the canonical `targets/EqBench` checkout (the runners write compiled binaries
+into their input root):
+
+```bash
+W=tmp/eqbench-work/<eqbench commit>
+[[ ! -e "$W" ]] || { echo "working root exists: $W" >&2; exit 1; }
+mkdir -p "$W/benchmarks" && cp -a targets/EqBench/benchmarks/. "$W/benchmarks/"
+export EQBENCH_ROOT="$PWD/$W/benchmarks" NEQ_ROOT="$PWD/$W/benchmarks"
+```
 
 ## Branching
 

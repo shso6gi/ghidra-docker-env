@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "52f8eb3aba19ec3f9f8bf4d87a3585401c4b446baacaa13fa66dc8ae5a29ad00",
+  "manifest_digest": "daeee4700d5b8d5d51f9c664305fca766ad0635c9f28e10de655ca7d88d1852c",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 32,
   "sites": [
@@ -151,10 +151,10 @@
       "emitter": "emit_identical_function_identity_signal",
       "enclosing_function": "_apply_fast_path",
       "expected_cause_slots": [],
-      "line": 355,
+      "line": 400,
       "path": "scripts/function_tracer_pcode/checker/identical_fast_path.py",
       "producer_site_manifest_id": "checker-identical-function-identity",
-      "source_sha256": "1334c4e84f290220dbcaebb0cd4dd6ceb4be111d4c273557647ce63153b6bc7b"
+      "source_sha256": "6ce34fbc448b00baaec709fbfe549a7d3906589b14be55629cc00eb88faa31cf"
     },
     {
       "allowed_dispositions": [

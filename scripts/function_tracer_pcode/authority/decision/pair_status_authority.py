@@ -56,6 +56,24 @@ PAIR_STATUS_DURABLE_FIELDS = frozenset({
     "child_exit_disposition",
     "child_returncode_observation_kind",
 })
+# How a pair ended, as the supervisor projection resolved it.  ``RESOLVED``
+# means the supervisor read the child's canonical result envelope, so the run
+# holds that pair's result; the durable states mean it never got one -- the
+# child was killed at the deadline (``TIMEOUT``) or failed to produce a usable
+# canonical result (``ERROR``) -- and the durable fields above then carry what
+# is known about the exit instead.  Consumers that ask "should this pair have
+# left a result?" read these rather than guessing from the canonical outcome,
+# which says ``ERROR`` in both the resolved and the durable case.
+PAIR_STATUS_SUPERVISOR_RESOLVED = "RESOLVED"
+PAIR_STATUS_DURABLE_SUPERVISOR_STATES = frozenset({"TIMEOUT", "ERROR"})
+
+# How a *verified* pair status finalized, for consumers that have to know
+# whether the run should hold that pair's result.  ``UNVERIFIED`` is not a
+# fourth ending: it means this authority could not confirm any of them, and a
+# consumer must not read it as permission for anything.
+FINALIZATION_RESOLVED = "resolved"
+FINALIZATION_DURABLE = "durable"
+FINALIZATION_UNVERIFIED = "unverified"
 PAIR_STATUS_SEAL_FIELDS = frozenset({
     "pair_status_schema",
     "pair_status_authority_kind",
@@ -283,7 +301,7 @@ def _validate_pair_status_conditional_column(body: Mapping[str, Any]) -> None:
         validate_conditional_decision_join,
     )
 
-    if body.get("supervisor_status") != "RESOLVED":
+    if body.get("supervisor_status") != PAIR_STATUS_SUPERVISOR_RESOLVED:
         raise ValueError("pair-status conditional column requires a resolved pair")
     if body.get("canonical_outcome") != Outcome.UNKNOWN.value:
         # The conditional lane runs only after an unconditional UNKNOWN, so a
@@ -305,9 +323,9 @@ def _validate_pair_status_conditional_column(body: Mapping[str, Any]) -> None:
 def _validate_pair_status_body(body: Mapping[str, Any]) -> None:
     status = body.get("supervisor_status")
     expected = set(PAIR_STATUS_COMMON_FIELDS)
-    if status in {"TIMEOUT", "ERROR"}:
+    if status in PAIR_STATUS_DURABLE_SUPERVISOR_STATES:
         expected.update(PAIR_STATUS_DURABLE_FIELDS)
-    elif status != "RESOLVED":
+    elif status != PAIR_STATUS_SUPERVISOR_RESOLVED:
         raise ValueError("pair-status supervisor disposition is invalid")
     conditional_fields = PAIR_STATUS_CONDITIONAL_FIELDS & set(body)
     if conditional_fields:
@@ -352,7 +370,7 @@ def _validate_pair_status_body(body: Mapping[str, Any]) -> None:
         or target["target_digest"] != authority_digest(target_body)
     ):
         raise ValueError("pair execution target authority is invalid")
-    if status in {"TIMEOUT", "ERROR"} and any(
+    if status in PAIR_STATUS_DURABLE_SUPERVISOR_STATES and any(
         type(body.get(field)) is not str or not body[field]
         for field in PAIR_STATUS_DURABLE_FIELDS
     ):
@@ -361,7 +379,7 @@ def _validate_pair_status_body(body: Mapping[str, Any]) -> None:
         raise ValueError("pair-status canonical bundle kind is invalid")
     authority_kind = body.get("authority_kind")
     supervisor_kind = body.get("supervisor_authority_kind")
-    if status == "RESOLVED":
+    if status == PAIR_STATUS_SUPERVISOR_RESOLVED:
         if (
             authority_kind != "SupervisorCanonicalResultResolvedReceipt"
             or supervisor_kind != "SupervisorCanonicalResultResolvedReceipt"
@@ -423,7 +441,8 @@ def validate_signed_pair_status(
     if set(payload) != set(PAIR_STATUS_SEAL_FIELDS) | (
         set(PAIR_STATUS_COMMON_FIELDS)
         | (set(PAIR_STATUS_DURABLE_FIELDS)
-           if payload.get("supervisor_status") in {"TIMEOUT", "ERROR"} else set())
+           if payload.get("supervisor_status") in PAIR_STATUS_DURABLE_SUPERVISOR_STATES
+           else set())
         # The optional conditional group is accepted only as a whole; a payload
         # naming one of its fields fails the body check below.
         | (set(PAIR_STATUS_CONDITIONAL_FIELDS) & set(payload))
@@ -447,6 +466,40 @@ def validate_signed_pair_status(
         raise ValueError("pair-status signature is invalid") from exc
     _validate_pair_status_body(body)
     return body
+
+
+def pair_status_finalization(
+    payload: Any, *, public_key_path: Path | None = None,
+    pair_status_path: Path | None = None,
+) -> str:
+    """How this pair ended, but only once the whole signed status validates.
+
+    The supervisor state is a *claim* until the seal, the field set, the
+    durable authority fields and the child-exit join have all been checked:
+    a file that merely says ``supervisor_status: TIMEOUT`` is not a pair the
+    supervisor killed, it is a file saying so.  Consumers that would excuse
+    something on the strength of the ending (a missing result payload, say)
+    must ask here rather than read the field, and anything this function
+    cannot confirm comes back ``FINALIZATION_UNVERIFIED``.
+
+    ``public_key_path`` defaults to the verification key the run wrote next to
+    its results, found from ``pair_status_path``.
+    """
+
+    if public_key_path is None:
+        if pair_status_path is None:
+            return FINALIZATION_UNVERIFIED
+        try:
+            public_key_path = find_pair_status_public_key(Path(pair_status_path))
+        except (OSError, ValueError):
+            return FINALIZATION_UNVERIFIED
+    try:
+        body = validate_signed_pair_status(payload, public_key_path=public_key_path)
+    except (OSError, TypeError, ValueError):
+        return FINALIZATION_UNVERIFIED
+    if body["supervisor_status"] == PAIR_STATUS_SUPERVISOR_RESOLVED:
+        return FINALIZATION_RESOLVED
+    return FINALIZATION_DURABLE
 
 
 def pair_status_resume_disposition(body: Mapping[str, Any]) -> str:

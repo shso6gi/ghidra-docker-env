@@ -19,6 +19,16 @@ from pathlib import Path
 
 import pytest
 
+from scripts.function_tracer_pcode.authority.contracts import (
+    CLI_EXIT_CODE_BY_OUTCOME,
+    Outcome,
+    authority_digest,
+)
+from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
+    PAIR_STATUS_PUBLIC_KEY_FILE,
+    generate_pair_status_keypair,
+    seal_pair_status,
+)
 from scripts.function_tracer_pcode.reporting import outcome_transition as ot
 from scripts.function_tracer_pcode.reporting.benchmark_validation_gate import (
     FunctionDiffManifest,
@@ -30,22 +40,33 @@ from scripts.function_tracer_pcode.reporting.pair_outcomes import load_pair_outc
 
 EQ_SAMPLE = "CLEVER/LoopSub/Eq/new"
 NEQ_SAMPLE = "CLEVER/LoopSub/Neq/new-old"
+DIGEST = "a" * 64
 
 
 def write_pair(tree: Path, sample, function, left, right, outcome, *,
-               reasons=None, payload=True) -> str:
+               reasons=None, payload=True, supervisor_status="RESOLVED") -> str:
+    """One pair status.  ``supervisor_status`` is how the pair *ended*.
+
+    It is written explicitly rather than derived from ``outcome``, because the
+    two say different things: a canonical ``ERROR`` can come from a pair the
+    supervisor resolved (the run holds its result) or from one that ended in
+    the durable ERROR state (it never produced one).
+    """
+
     directory = tree / sample / function
     directory.mkdir(parents=True, exist_ok=True)
     name = f"{function}_{left}_{right}"
+    body = {
+        "canonical_outcome": outcome,
+        "pair_execution_target": {
+            "sample_identity": sample, "function_name": function,
+            "left_binary_id": left, "right_binary_id": right,
+        },
+    }
+    if supervisor_status is not None:
+        body["supervisor_status"] = supervisor_status
     (directory / f"{name}.pair-status.json").write_text(
-        json.dumps({
-            "canonical_outcome": outcome,
-            "pair_execution_target": {
-                "sample_identity": sample, "function_name": function,
-                "left_binary_id": left, "right_binary_id": right,
-            },
-        }),
-        encoding="utf-8",
+        json.dumps(body), encoding="utf-8",
     )
     log = directory / f"{name}.log"
     if payload:
@@ -61,6 +82,112 @@ def write_pair(tree: Path, sample, function, left, right, outcome, *,
     else:
         log.write_text("no result payload\n", encoding="utf-8")
     return f"{sample}/{function}/{name}.pair-status.json"
+
+
+# ---------------------------------------------------------------------------
+# Issue #15 PR-15-B: pair statuses that are *sealed* by the real authority.
+#
+# A missing result payload can be excused only by an ending the pair-status
+# authority confirms, so a fixture that merely writes ``supervisor_status`` as
+# a string would test nothing: it would be exactly the unverified file the
+# contract is there to refuse.  These helpers seal a real signed status with
+# ``seal_pair_status`` and drop the verification key in the tree, so an
+# "authority-valid" fixture is one the authority actually validated.
+# ---------------------------------------------------------------------------
+
+RESOLVED_KIND = "SupervisorCanonicalResultResolvedReceipt"
+
+
+def _pair_target(sample, function, left, right):
+    target = {
+        "schema": "eqbench-pair-execution-target-v1",
+        "authority_kind": "PairExecutionTargetReceipt",
+        "sample_identity": sample, "output_sample_relative_path": sample,
+        "function_name": function, "left_binary_id": left,
+        "right_binary_id": right, "source_path": "source.c",
+        "source_sha256": DIGEST, "left_binary_path": "left.bin",
+        "left_binary_sha256": DIGEST, "right_binary_path": "right.bin",
+        "right_binary_sha256": DIGEST, "analysis_source_digest": DIGEST,
+        "analysis_config_digest": DIGEST,
+    }
+    return {**target, "target_digest": authority_digest(target)}
+
+
+def _status_body(sample, function, left, right, outcome, supervisor_status):
+    body = {
+        "authority_kind": RESOLVED_KIND,
+        "supervisor_authority_kind": RESOLVED_KIND,
+        "supervisor_final_authority_digest": DIGEST,
+        "launch_receipt_digest": DIGEST,
+        "canonical_outcome": outcome,
+        "decision_receipt_digest": DIGEST,
+        "result_occurrence_id": "production-pilot-fixture",
+        "result_entry_occurrence_receipt_digest": DIGEST,
+        "execution_identity_digest": DIGEST,
+        "execution_nonce": "fixture-nonce",
+        "stream_id": "stream-production-pilot-fixture",
+        "source_snapshot_fingerprint": DIGEST,
+        "canonical_result_bundle_digest": DIGEST,
+        "canonical_result_bundle_kind": "CanonicalResultFinalizationBundle",
+        "canonical_result_payload_preimage_digest": DIGEST,
+        "semantic_projection_digest": DIGEST,
+        "error_kind": "checker_error" if outcome == "ERROR" else None,
+        "child_returncode": CLI_EXIT_CODE_BY_OUTCOME[Outcome(outcome)],
+        "supervisor_status": supervisor_status,
+        "supervisor_projection_digest": DIGEST,
+        "classification_valid": True,
+        "pair_execution_target": _pair_target(sample, function, left, right),
+    }
+    if supervisor_status != "RESOLVED":
+        kind = f"Durable{supervisor_status.title()}FinalizationBundle"
+        body.update({
+            "authority_kind": kind,
+            "supervisor_authority_kind": kind,
+            "finalization_bundle_digest": DIGEST,
+            "event_stream_authority_digest": DIGEST,
+            "child_exit_disposition": "EXITED_143_AFTER_SIGTERM",
+            "child_returncode_observation_kind": "LIVE_PROCESS_WAIT",
+            "child_returncode": 143,
+        })
+    return body
+
+
+def write_sealed_pair(
+    tree: Path, sample, function, left, right, outcome, *,
+    supervisor_status="RESOLVED", reasons=None, payload=True, corrupt=None,
+) -> Path:
+    """One pair status sealed by the authority, optionally corrupted after sealing."""
+
+    private_key = tree / "pair-status-signing.key"
+    public_key = tree / PAIR_STATUS_PUBLIC_KEY_FILE
+    tree.mkdir(parents=True, exist_ok=True)
+    if not public_key.is_file():
+        generate_pair_status_keypair(private_key, public_key)
+    body = _status_body(sample, function, left, right, outcome, supervisor_status)
+    sealed = seal_pair_status(
+        body, private_key_path=private_key, public_key_path=public_key,
+    )
+    if corrupt is not None:
+        sealed = corrupt(dict(sealed))
+    directory = tree / sample / function
+    directory.mkdir(parents=True, exist_ok=True)
+    name = f"{function}_{left}_{right}"
+    path = directory / f"{name}.pair-status.json"
+    path.write_text(json.dumps(sealed), encoding="utf-8")
+    log = directory / f"{name}.log"
+    if payload:
+        log.write_text(
+            "=== EQUIVALENCE_RESULT_JSON_BEGIN ===\n"
+            + json.dumps({
+                "unknown_reasons": [{"reason_id": v} for v in (reasons or ())],
+                "diagnostics": {},
+            })
+            + "\n=== EQUIVALENCE_RESULT_JSON_END ===\n",
+            encoding="utf-8",
+        )
+    else:
+        log.write_text("no result payload\n", encoding="utf-8")
+    return path
 
 
 def ground_truth(entries) -> FunctionDiffManifest:
@@ -338,8 +465,10 @@ def test_reason_set_comparison_separates_comparable_mismatch_and_incomparable(tm
     write_pair(after, EQ_SAMPLE, "f", "B1", "B2", "UNKNOWN", reasons=("b", "a"))
     write_pair(before, EQ_SAMPLE, "f", "B1", "B9", "UNKNOWN", reasons=("a",))
     write_pair(after, EQ_SAMPLE, "f", "B1", "B9", "UNKNOWN", reasons=("c",))
-    write_pair(before, EQ_SAMPLE, "f", "B3", "B4", "TIMEOUT", payload=False)
-    write_pair(after, EQ_SAMPLE, "f", "B3", "B4", "TIMEOUT", payload=False)
+    write_pair(before, EQ_SAMPLE, "f", "B3", "B4", "TIMEOUT", payload=False,
+               supervisor_status="TIMEOUT")
+    write_pair(after, EQ_SAMPLE, "f", "B3", "B4", "TIMEOUT", payload=False,
+               supervisor_status="TIMEOUT")
     write_pair(before, EQ_SAMPLE, "f", "B5", "B6", "UNKNOWN", reasons=("a",))
     write_pair(after, EQ_SAMPLE, "f", "B5", "B6", "EQUIVALENT", reasons=())
 
@@ -357,14 +486,15 @@ def test_reason_set_comparison_separates_comparable_mismatch_and_incomparable(tm
 def test_a_pair_without_a_payload_is_never_counted_as_a_match(tmp_path):
     """payload 無しを「reason 集合が一致」に数えない。"""
     before, after = tmp_path / "before", tmp_path / "after"
-    write_pair(before, EQ_SAMPLE, "f", "B1", "B2", "TIMEOUT", payload=False)
-    write_pair(after, EQ_SAMPLE, "f", "B1", "B2", "TIMEOUT", payload=False)
+    for tree in (before, after):
+        write_sealed_pair(tree, EQ_SAMPLE, "f", "B1", "B2", outcome="TIMEOUT",
+                          supervisor_status="TIMEOUT", payload=False)
 
     report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
 
     assert report.counts() == {
         "pairs": 1, "comparable": 0, "incomparable": 1,
-        "outcome_mismatch": 0, "reason_set_mismatch": 0,
+        "outcome_mismatch": 0, "reason_set_mismatch": 0, "payload_loss": 0,
     }
     assert report.rows[0].detail == ot.REASON_DETAIL_NO_PAYLOAD_BOTH
 
@@ -389,6 +519,286 @@ def test_losing_a_payload_on_one_side_only_is_visible(tmp_path):
     assert report.counts()["incomparable"] == 1
     assert report.rows[0].detail == ot.REASON_DETAIL_NO_PAYLOAD_AFTER
     assert report.incomparable_sides_agree is False
+    assert report.counts()["payload_loss"] == 1
+
+
+def test_a_decided_pair_that_lost_its_payload_is_a_payload_loss(tmp_path):
+    """Issue #15 PR-15-B: separate "we could not look" from "there was nothing".
+
+    A pair the checker decided emitted a result payload, so its absence on one
+    side means the run lost something it produced.  That must stay visible as
+    its own count instead of being absorbed into the generic incomparable
+    bucket, because a before/after comparison is only as good as what it could
+    actually compare.
+    """
+
+    before, after = tmp_path / "before", tmp_path / "after"
+    write_pair(before, EQ_SAMPLE, "f", "B1", "B2", "UNKNOWN", reasons=("a",))
+    write_pair(after, EQ_SAMPLE, "f", "B1", "B2", "UNKNOWN", payload=False)
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+
+    assert report.counts()["payload_loss"] == 1
+    assert report.payload_losses == report.incomparable
+    assert report.rows[0].as_dict()["payload_loss"] is True
+
+
+# ---------------------------------------------------------------------------
+# What excuses a missing result payload: an ending the authority confirms.
+# ---------------------------------------------------------------------------
+
+
+def _sealed_reason_sets(tmp_path, *, before_spec, after_spec):
+    before, after = tmp_path / "before", tmp_path / "after"
+    for tree, spec in ((before, before_spec), (after, after_spec)):
+        write_sealed_pair(tree, EQ_SAMPLE, "f", "B1", "B2", **spec)
+    return ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+
+
+@pytest.mark.parametrize("outcome,supervisor_status", [
+    pytest.param("TIMEOUT", "TIMEOUT", id="killed-at-the-deadline"),
+    pytest.param("ERROR", "ERROR", id="durable-failure"),
+])
+def test_an_authority_valid_durable_ending_owes_no_payload(
+    tmp_path, outcome, supervisor_status,
+):
+    """Neither ending reached a canonical result, so neither owes a payload.
+
+    A pair killed at the deadline may or may not have flushed the JSON first --
+    a matter of milliseconds, on which two runs of the same commit legitimately
+    disagree -- and a durable failure never produced one at all.
+    """
+
+    report = _sealed_reason_sets(
+        tmp_path,
+        before_spec=dict(outcome=outcome, supervisor_status=supervisor_status,
+                         reasons=("a",)),
+        after_spec=dict(outcome=outcome, supervisor_status=supervisor_status,
+                        payload=False),
+    )
+
+    assert report.counts()["incomparable"] == 1
+    assert report.counts()["payload_loss"] == 0
+    # ... and it is still not counted as a match.
+    assert report.counts()["comparable"] == 0
+    assert report.counts()["reason_set_mismatch"] == 0
+
+
+def test_an_error_the_supervisor_resolved_owes_its_payload(tmp_path):
+    """The canonical outcome cannot tell the two ERROR endings apart.
+
+    A pair the supervisor RESOLVED holds the child's canonical result, so its
+    payload going missing is a real loss -- and reading ``ERROR`` alone would
+    have excused exactly that.
+    """
+
+    report = _sealed_reason_sets(
+        tmp_path,
+        before_spec=dict(outcome="ERROR", supervisor_status="RESOLVED", reasons=("a",)),
+        after_spec=dict(outcome="ERROR", supervisor_status="RESOLVED", payload=False),
+    )
+
+    assert report.counts()["payload_loss"] == 1
+    assert report.rows[0].detail == ot.REASON_DETAIL_NO_PAYLOAD_AFTER
+    assert report.rows[0].as_dict()["after_finalization"] == "resolved"
+
+
+def test_a_resolved_error_with_payloads_on_both_sides_is_comparable(tmp_path):
+    report = _sealed_reason_sets(
+        tmp_path,
+        before_spec=dict(outcome="ERROR", supervisor_status="RESOLVED", reasons=("a",)),
+        after_spec=dict(outcome="ERROR", supervisor_status="RESOLVED", reasons=("a",)),
+    )
+
+    assert report.counts()["comparable"] == 1
+    assert report.counts()["payload_loss"] == 0
+    assert report.counts()["reason_set_mismatch"] == 0
+
+
+def _drop(field):
+    return lambda sealed: {k: v for k, v in sealed.items() if k != field}
+
+
+def _set(**fields):
+    return lambda sealed: {**sealed, **fields}
+
+
+@pytest.mark.parametrize("spec,why", [
+    # A status whose ending contradicts its own outcome is not a durable
+    # ending, it is a broken file claiming one.  It cannot be sealed (see
+    # below), so it can only reach a run tree as an edited file.
+    pytest.param(dict(outcome="TIMEOUT", supervisor_status="TIMEOUT",
+                      corrupt=_set(canonical_outcome="UNKNOWN")),
+                 "status/outcome join", id="timeout-state-unknown-outcome"),
+    pytest.param(dict(outcome="ERROR", supervisor_status="ERROR",
+                      corrupt=_set(canonical_outcome="TIMEOUT")),
+                 "status/outcome join", id="error-state-timeout-outcome"),
+    # The durable authority fields are what a durable ending is made of.
+    pytest.param(dict(outcome="TIMEOUT", supervisor_status="TIMEOUT",
+                      corrupt=_drop("finalization_bundle_digest")),
+                 "missing durable field", id="missing-durable-field"),
+    pytest.param(dict(outcome="TIMEOUT", supervisor_status="TIMEOUT",
+                      corrupt=_set(event_stream_authority_digest="")),
+                 "empty durable field", id="empty-durable-field"),
+    pytest.param(dict(outcome="TIMEOUT", supervisor_status="TIMEOUT",
+                      corrupt=_set(authority_kind="SupervisorCanonicalResultResolvedReceipt")),
+                 "authority kind", id="wrong-authority-kind"),
+    pytest.param(dict(outcome="TIMEOUT", supervisor_status="TIMEOUT",
+                      corrupt=_set(supervisor_authority_kind="DurableErrorFinalizationBundle")),
+                 "supervisor kind", id="wrong-supervisor-kind"),
+    pytest.param(dict(outcome="TIMEOUT", supervisor_status="TIMEOUT",
+                      corrupt=_set(child_returncode=7)),
+                 "child exit join", id="child-exit-join"),
+    pytest.param(dict(outcome="TIMEOUT", supervisor_status="TIMEOUT",
+                      corrupt=_set(child_exit_disposition="SOMETHING_ELSE")),
+                 "child disposition", id="child-disposition"),
+    pytest.param(dict(outcome="TIMEOUT", supervisor_status="TIMEOUT",
+                      corrupt=_drop("supervisor_status")),
+                 "no ending at all", id="missing-supervisor-status"),
+    pytest.param(dict(outcome="TIMEOUT", supervisor_status="TIMEOUT",
+                      corrupt=_set(supervisor_status="KILLED")),
+                 "unknown ending", id="unknown-supervisor-status"),
+    pytest.param(dict(outcome="TIMEOUT", supervisor_status="TIMEOUT",
+                      corrupt=_set(pair_status_signature="A" * 88)),
+                 "broken seal", id="broken-signature"),
+])
+def test_a_claimed_durable_ending_the_authority_refuses_excuses_nothing(
+    tmp_path, spec, why,
+):
+    """Only an ending the authority *confirms* can excuse a missing payload.
+
+    Each of these is a file that says ``TIMEOUT``/``ERROR`` somewhere while
+    failing the contract that makes such a status mean anything -- the seal,
+    the durable authority fields, the authority kinds, the child-exit join.
+    Taking the claim at face value would let a broken artifact hide a lost
+    result, so the payload stays counted as lost.
+    """
+
+    before, after = tmp_path / "before", tmp_path / "after"
+    write_sealed_pair(before, EQ_SAMPLE, "f", "B1", "B2", outcome=spec["outcome"],
+                      supervisor_status=spec["supervisor_status"], reasons=("a",))
+    write_sealed_pair(after, EQ_SAMPLE, "f", "B1", "B2", payload=False, **spec)
+    # The before side is a genuine durable ending, so only the after side is
+    # in question: the count below is about the corrupted file alone.
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+
+    assert report.counts()["payload_loss"] == 1, why
+    assert report.rows[0].as_dict()["after_finalization"] == "unverified"
+
+
+@pytest.mark.parametrize("outcome,supervisor_status", [
+    pytest.param("UNKNOWN", "ERROR", id="error-state-unknown-outcome"),
+    pytest.param("ERROR", "TIMEOUT", id="timeout-state-error-outcome"),
+])
+def test_the_authority_refuses_to_seal_a_contradictory_ending(
+    tmp_path, outcome, supervisor_status,
+):
+    """A durable ending must agree with the outcome, so these cannot be sealed.
+
+    This is why the reporting side can treat "sealed and validated" as the
+    whole question: a contradictory combination has no legitimate form, and a
+    file carrying one is an edited file, covered by the case above.
+    """
+
+    with pytest.raises(ValueError, match="status/outcome join"):
+        write_sealed_pair(tmp_path / "tree", EQ_SAMPLE, "f", "B1", "B2",
+                          outcome=outcome, supervisor_status=supervisor_status)
+
+
+def test_the_text_report_does_not_claim_a_loss_was_resolved(tmp_path):
+    """``payload_loss`` covers two cases, so the wording may assert neither.
+
+    A row is counted when the pair was resolved *or* when no authority-valid
+    durable finalization could be confirmed.  Printing it as "a pair the
+    supervisor resolved" would state the first as fact for rows that are there
+    for the second, so the heading says what the count means and each row
+    carries the finalization it actually had.
+    """
+
+    before, after = tmp_path / "before", tmp_path / "after"
+    # One of each kind: a resolved pair that lost its payload, and a durable
+    # claim the authority refuses.
+    write_sealed_pair(before, EQ_SAMPLE, "f", "B1", "B2", outcome="UNKNOWN",
+                      reasons=("a",))
+    write_sealed_pair(after, EQ_SAMPLE, "f", "B1", "B2", outcome="UNKNOWN",
+                      payload=False)
+    write_sealed_pair(before, EQ_SAMPLE, "f", "B3", "B4", outcome="TIMEOUT",
+                      supervisor_status="TIMEOUT", reasons=("a",))
+    write_sealed_pair(after, EQ_SAMPLE, "f", "B3", "B4", outcome="TIMEOUT",
+                      supervisor_status="TIMEOUT", payload=False,
+                      corrupt=_set(supervisor_status="KILLED"))
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+    text = "\n".join(ot.format_reason_sets(report))
+
+    assert report.counts()["payload_loss"] == 2
+    assert (
+        "of those, a missing payload nothing excuses: 2 (the pair was resolved,"
+        " or no authority-valid durable finalization could be confirmed)"
+    ) in text
+    assert "Missing payloads nothing excuses (2):" in text
+    # Neither ending is asserted for the other's row: each says its own.
+    assert "finalization: before=resolved after=resolved" in text
+    assert "finalization: before=durable after=unverified" in text
+    assert "supervisor resolved that lost its payload" not in text
+    assert "Resolved pairs that lost their payload" not in text
+
+
+def test_the_text_report_says_nothing_of_the_kind_when_there_is_no_loss(tmp_path):
+    before, after = tmp_path / "before", tmp_path / "after"
+    for tree in (before, after):
+        write_sealed_pair(tree, EQ_SAMPLE, "f", "B3", "B4", outcome="TIMEOUT",
+                          supervisor_status="TIMEOUT", payload=False)
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+    text = "\n".join(ot.format_reason_sets(report))
+
+    assert "of those, a missing payload nothing excuses: 0" in text
+    assert "Missing payloads nothing excuses (0):" in text
+    assert "finalization:" not in text
+
+
+def test_a_status_without_a_verification_key_is_not_verified(tmp_path):
+    """The seal is only evidence when it can be checked."""
+
+    before, after = tmp_path / "before", tmp_path / "after"
+    write_sealed_pair(before, EQ_SAMPLE, "f", "B1", "B2", outcome="TIMEOUT",
+                      supervisor_status="TIMEOUT", reasons=("a",))
+    write_sealed_pair(after, EQ_SAMPLE, "f", "B1", "B2", outcome="TIMEOUT",
+                      supervisor_status="TIMEOUT", payload=False)
+    (after / PAIR_STATUS_PUBLIC_KEY_FILE).unlink()
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+
+    assert report.counts()["payload_loss"] == 1
+
+
+def test_a_pair_missing_on_one_side_is_not_a_lost_payload(tmp_path):
+    """No status on that side at all is a missing pair, not a missing result."""
+
+    before, after = tmp_path / "before", tmp_path / "after"
+    write_pair(before, EQ_SAMPLE, "f", "B1", "B2", "UNKNOWN", reasons=("a",))
+    after.mkdir(parents=True, exist_ok=True)
+    write_pair(after, EQ_SAMPLE, "f", "B9", "B9", "UNKNOWN", reasons=("a",))
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+
+    assert report.counts()["payload_loss"] == 0
+    assert {row.detail for row in report.incomparable} == {ot.REASON_DETAIL_MISSING}
+
+
+def test_a_comparable_pair_is_never_a_payload_loss(tmp_path):
+    before, after = tmp_path / "before", tmp_path / "after"
+    for tree in (before, after):
+        write_pair(tree, EQ_SAMPLE, "f", "B1", "B2", "UNKNOWN", reasons=("a",))
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+
+    assert report.counts() == {
+        "pairs": 1, "comparable": 1, "incomparable": 0,
+        "outcome_mismatch": 0, "reason_set_mismatch": 0, "payload_loss": 0,
+    }
 
 
 def test_only_the_last_result_payload_of_a_log_is_used(tmp_path):

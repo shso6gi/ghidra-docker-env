@@ -59,6 +59,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
+    FINALIZATION_DURABLE,
+    FINALIZATION_UNVERIFIED,
+)
 from scripts.function_tracer_pcode.reporting.pair_outcomes import (
     LABEL_EQ,
     LABEL_NEQ,
@@ -721,6 +725,36 @@ REASON_DETAIL_NO_PAYLOAD_BEFORE = "no_result_payload_before"
 REASON_DETAIL_NO_PAYLOAD_AFTER = "no_result_payload_after"
 REASON_DETAIL_NO_PAYLOAD_BOTH = "no_result_payload_both"
 
+# Issue #15 PR-15-B: whether a pair is *expected* to leave a result payload is
+# a question about how the supervisor ended it, not about the canonical
+# outcome.  ``ERROR`` in particular means two different things: a pair the
+# supervisor RESOLVED (it read the child's canonical result envelope, which the
+# run therefore holds) and a pair that ended in the durable ERROR state (the
+# child never produced a usable canonical result).  Reading the outcome alone
+# would excuse the first case, which is exactly a lost result.
+#
+# A pair killed at its deadline may or may not have flushed the result JSON
+# first, so its absence says nothing about the code: two runs of the same
+# commit legitimately disagree.  A pair whose ending is unreadable is not
+# excused -- "we do not know how it ended" must not become "it owed nothing".
+
+
+def _owes_a_result_payload(outcome: str, finalization: str) -> bool:
+    """Should this side of the comparison hold a result payload?
+
+    Only an ending the pair-status authority could *confirm* excuses a missing
+    payload.  A status that merely claims ``TIMEOUT`` -- unsigned, malformed,
+    contradicting its own canonical outcome, missing the durable authority
+    fields -- confirms nothing, and treating its claim as an excuse would let a
+    broken artifact hide a lost result.
+    """
+
+    if outcome == OUTCOME_MISSING:
+        # No pair status on this side at all: reported as a missing pair, which
+        # is a different fact from a result that went missing.
+        return False
+    return finalization != FINALIZATION_DURABLE
+
 
 def _log_path_for(record: PairOutcome) -> Path:
     """The pair log next to a ``*.pair-status.json`` (same stem, ``.log``)."""
@@ -775,6 +809,10 @@ class ReasonSetRow:
     after_outcome: str
     before_reasons: Optional[Tuple[str, ...]]
     after_reasons: Optional[Tuple[str, ...]]
+    before_supervisor_status: Optional[str] = None
+    after_supervisor_status: Optional[str] = None
+    before_finalization: str = FINALIZATION_UNVERIFIED
+    after_finalization: str = FINALIZATION_UNVERIFIED
 
     @property
     def outcome_mismatch(self) -> bool:
@@ -789,6 +827,33 @@ class ReasonSetRow:
         """Only a comparable pair can mismatch; an unreadable one cannot."""
         return self.verdict == REASON_SET_COMPARABLE and self.before_reasons != self.after_reasons
 
+    @property
+    def payload_loss(self) -> bool:
+        """A missing result payload that nothing excuses.
+
+        Only one thing excuses it: an ending the pair-status authority
+        confirmed to be a durable finalization, where the pair never reached a
+        canonical result and whether the child flushed a payload first is not a
+        fact about the code.  So this covers two cases, and the report does not
+        claim to know which without saying so:
+
+        * the pair was ``resolved`` -- it holds a canonical result, so the
+          payload went missing.  This includes canonical ``ERROR``, which a
+          resolved pair reports just as a durable failure does;
+        * the ending was ``unverified`` -- an unsigned or edited status, a
+          missing verification key, a broken join.  An unconfirmed claim is
+          not an excuse.
+        """
+        if self.verdict != REASON_SET_INCOMPARABLE:
+            return False
+        return any(
+            reasons is None and _owes_a_result_payload(outcome, finalization)
+            for outcome, reasons, finalization in (
+                (self.before_outcome, self.before_reasons, self.before_finalization),
+                (self.after_outcome, self.after_reasons, self.after_finalization),
+            )
+        )
+
     def as_dict(self) -> Dict[str, Any]:
         return {
             "sample_identity": self.key[0],
@@ -802,6 +867,11 @@ class ReasonSetRow:
             "after_reasons": None if self.after_reasons is None else list(self.after_reasons),
             "outcome_mismatch": self.outcome_mismatch,
             "reason_set_mismatch": self.reason_set_mismatch,
+            "payload_loss": self.payload_loss,
+            "before_supervisor_status": self.before_supervisor_status,
+            "after_supervisor_status": self.after_supervisor_status,
+            "before_finalization": self.before_finalization,
+            "after_finalization": self.after_finalization,
         }
 
 
@@ -826,6 +896,11 @@ class ReasonSetReport:
         return tuple(row for row in self.rows if row.reason_set_mismatch)
 
     @property
+    def payload_losses(self) -> Tuple[ReasonSetRow, ...]:
+        """Incomparable pairs whose missing payload nothing excuses."""
+        return tuple(row for row in self.rows if row.payload_loss)
+
+    @property
     def incomparable_sides_agree(self) -> bool:
         """Whether exactly the same pairs were unreadable on both sides.
 
@@ -843,6 +918,7 @@ class ReasonSetReport:
             "incomparable": len(self.incomparable),
             "outcome_mismatch": len(self.outcome_mismatches),
             "reason_set_mismatch": len(self.reason_set_mismatches),
+            "payload_loss": len(self.payload_losses),
         }
 
     def as_dict(self) -> Dict[str, Any]:
@@ -885,6 +961,20 @@ def build_reason_sets(
             after_outcome=after_record.outcome if after_record else OUTCOME_MISSING,
             before_reasons=before_reasons,
             after_reasons=after_reasons,
+            before_supervisor_status=(
+                before_record.supervisor_status if before_record else None
+            ),
+            after_supervisor_status=(
+                after_record.supervisor_status if after_record else None
+            ),
+            before_finalization=(
+                before_record.finalization if before_record
+                else FINALIZATION_UNVERIFIED
+            ),
+            after_finalization=(
+                after_record.finalization if after_record
+                else FINALIZATION_UNVERIFIED
+            ),
         ))
     return ReasonSetReport(rows=tuple(rows))
 
@@ -1227,11 +1317,15 @@ def format_reason_sets(report: ReasonSetReport) -> List[str]:
         f"(of {counts['comparable']} comparable)",
         f"  incomparable: {counts['incomparable']} "
         "(no readable result payload, or present on one side only)",
+        f"  of those, a missing payload nothing excuses: {counts['payload_loss']} "
+        "(the pair was resolved, or no authority-valid durable finalization "
+        "could be confirmed)",
         f"  the same pairs are unreadable on both sides: {report.incomparable_sides_agree}",
     ]
     for title, rows in (
         ("Outcome mismatches", report.outcome_mismatches),
         ("Reason-set mismatches", report.reason_set_mismatches),
+        ("Missing payloads nothing excuses", report.payload_losses),
         ("Incomparable pairs", report.incomparable),
     ):
         lines.append(f"{title} ({len(rows)}):")
@@ -1246,6 +1340,14 @@ def format_reason_sets(report: ReasonSetReport) -> List[str]:
             if row.reason_set_mismatch:
                 lines.append(f"      before={list(row.before_reasons or ())}")
                 lines.append(f"      after ={list(row.after_reasons or ())}")
+            if row.payload_loss:
+                # Which of the two reasons this row is here for: a resolved
+                # pair whose result went missing, or an ending the pair-status
+                # authority could not confirm.
+                lines.append(
+                    f"      finalization: before={row.before_finalization} "
+                    f"after={row.after_finalization}"
+                )
     return lines
 
 

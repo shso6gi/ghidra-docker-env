@@ -29,6 +29,10 @@ default_value EQBENCH_PAIR_CPU_TOKENS 8
 default_value EQBENCH_DEBUG 0
 default_value SKIP_COMPLETED_RESULTS 1
 default_value ERROR_ONLY_RERUN 0
+# Issue #15: 0 passes --no-identical-fast-path, so byte-identical inputs go
+# through the ordinary pipeline (the oracle).  Part of the analysis config
+# identity, so an ON pair status is never reused for an OFF run.
+default_value EQBENCH_IDENTICAL_FAST_PATH 1
 default_value DRY_RUN 0
 default_value EQUIV_TIMEOUT 10
 default_value DECOMPILE_TIMEOUT 60
@@ -65,6 +69,7 @@ EXPECTED_FULL_SOURCE_PAIRS=125
 [[ "$NEQ_BUILD_POLICY" == REUSE_OR_COMPILE || "$NEQ_BUILD_POLICY" == FRESH_ONLY ]] || exit 1
 [[ "$NEQ_MAX_SAMPLES" =~ ^[0-9]+$ && "$PARALLEL_JOBS" =~ ^[1-9][0-9]*$ ]] || exit 1
 [[ "$SKIP_COMPLETED_RESULTS" =~ ^[01]$ && "$ERROR_ONLY_RERUN" =~ ^[01]$ ]] || exit 1
+[[ "$EQBENCH_IDENTICAL_FAST_PATH" =~ ^[01]$ ]] || { echo "EQBENCH_IDENTICAL_FAST_PATH must be 0 or 1" >&2; exit 1; }
 [[ -f "$COMPILE_TEMPLATE" && -f "$FUNCTION_LISTER" && -f "$FUNCTION_SELECTOR" ]] || exit 1
 NEQ_ROOT="$(realpath -m "$NEQ_ROOT")"
 case "$NEQ_ROOT" in "$SCRIPT_DIR"/*) ;; *) echo "NEQ_ROOT must be inside repository" >&2; exit 1 ;; esac
@@ -518,6 +523,7 @@ run_pair() {
     local dump_tmp
     dump_tmp="$checkpoint/$exec_nonce/stack-dump.txt"
     local -a supervisor_cmd=("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.process.supervisor_command --checkpoint-root "$checkpoint" --authority-output "$authority" --working-directory "$SCRIPT_DIR" --execution-nonce "$exec_nonce" --result-occurrence-id "$result_id" --source-snapshot-fingerprint "$source_fp" --stream-id "$stream" --deadline-policy-digest "$(printf 'neq:%s:%s' "$PAIR_PROCESS_TIMEOUT_SECONDS" "$PAIR_PROCESS_KILL_AFTER_SECONDS" | sha256sum | awk '{print $1}')" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" --allow-child-exit-resolution --stage-journal "$journal_file" --stack-dump-file "$dump_tmp" --stack-dump-artifact "$dump_artifact" --diagnostic-status-output "$dump_status" --stack-dump-lead-seconds "$PAIR_STACK_DUMP_LEAD_SECONDS" -- env TMPDIR="$pair_tmp" TEMP="$pair_tmp" TMP="$pair_tmp" UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE="$nonce" FT_EXPANDER_DEDUP_CASE_LIMIT="$FT_EXPANDER_DEDUP_CASE_LIMIT" FT_CALLEE_UNBOUND_REUSE="$FT_CALLEE_UNBOUND_REUSE" FT_CALLEE_UNBOUND_REUSE_SHADOW="$FT_CALLEE_UNBOUND_REUSE_SHADOW" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main --equiv "$left" "$right" --binary-ids "$left_id" "$right_id" -f "$function" --emit-result-json --equiv-timeout "$EQUIV_TIMEOUT" --timeout "$DECOMPILE_TIMEOUT" --pairwise-timeout "$PAIRWISE_TIMEOUT" --pairwise-timeout-hard "$PAIRWISE_TIMEOUT_HARD" --stage-journal "$journal_file" --stack-dump-file "$dump_tmp" --stack-dump-artifact "$dump_artifact")
+    if [[ "$EQBENCH_IDENTICAL_FAST_PATH" == "0" ]]; then supervisor_cmd+=( --no-identical-fast-path ); fi
     if [[ "$EQBENCH_DEBUG" == "1" ]]; then supervisor_cmd+=( -d ); fi
     "${supervisor_cmd[@]}" > "$log" 2>&1 || ec=$?
     if ! supervisor_projection_is_terminal "$authority"; then
@@ -591,6 +597,8 @@ callee_unbound_reuse_shadow=$FT_CALLEE_UNBOUND_REUSE_SHADOW
 skip_completed_results=$SKIP_COMPLETED_RESULTS
 error_only_rerun=$ERROR_ONLY_RERUN
 debug=$EQBENCH_DEBUG
+analysis_config_schema=eqbench-analysis-config-v3
+identical_fast_path=$EQBENCH_IDENTICAL_FAST_PATH
 max_samples=$NEQ_MAX_SAMPLES
 sample_filter=$NEQ_SAMPLE_FILTER
 pair_filter=$NEQ_PAIR_FILTER

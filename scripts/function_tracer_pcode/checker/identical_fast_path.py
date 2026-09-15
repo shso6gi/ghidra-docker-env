@@ -24,7 +24,7 @@ SHA と一致した」こと。左右の Program SHA が互いに一致してい
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Optional, Tuple
 
 from scripts.function_tracer_pcode.ghidra.function_identity import (
@@ -43,6 +43,51 @@ IDENTICAL_FUNCTION_IDENTITY_STAGE = "IDENTICAL_FUNCTION_IDENTITY"
 IDENTICAL_FUNCTION_IDENTITY_AUTHORITY_INVALID = (
     "identical_function_identity_authority_invalid"
 )
+
+#: 結果 JSON の `identical_function_identity_evidence` の schema。
+IDENTICAL_FUNCTION_IDENTITY_EVIDENCE_SCHEMA = (
+    "identical_function_identity_evidence_v1"
+)
+
+#: fast path で確定した結果の `function*_identity` の schema。
+IDENTICAL_FAST_PATH_FUNCTION_IDENTITY_SCHEMA = (
+    "identical_fast_path_function_identity_v1"
+)
+
+
+def identity_evidence_payload(
+    left: BinaryFunctionIdentity, right: BinaryFunctionIdentity,
+) -> Mapping[str, Any]:
+    """左右の identity 観測そのもの（gate が同一関数を確認するための evidence）。
+
+    field を列挙し直さない（`BinaryFunctionIdentity` が正本）。ここは
+    `function*_identity` とは**別の key** に載る: あちらは結果を他と区別する
+    stable な識別子で、同じ binary を共有する別 pair と衝突してはいけない。
+    """
+
+    return {
+        "schema": IDENTICAL_FUNCTION_IDENTITY_EVIDENCE_SCHEMA,
+        "left": asdict(left),
+        "right": asdict(right),
+    }
+
+
+def fast_path_function_identity(
+    identity: BinaryFunctionIdentity, binary_id: str,
+) -> Tuple[Any, ...]:
+    """fast path で確定した結果の、その側だけを指す識別子。
+
+    fast path は解析をしないので解析由来の identity が無い。binary 由来の観測は
+    左右で同じ値になるため、それだけでは「B2 対 B3」と「B2 対 B4」を区別できず、
+    `root_blocker_summary` の stable result key が衝突する。side を決めるのは
+    binary ID なので、それを含めて識別子にする。
+    """
+
+    return (
+        IDENTICAL_FAST_PATH_FUNCTION_IDENTITY_SCHEMA,
+        ("binary_id", binary_id),
+        identity.as_tuple(),
+    )
 
 
 @dataclass(frozen=True)
@@ -370,8 +415,8 @@ def _apply_fast_path(
         solver_results=ParallelResult(results=[]),
         total_time=time.time() - start_time,
         stage_path=[IDENTICAL_FUNCTION_IDENTITY_STAGE],
-        function1_identity=left.as_tuple(),
-        function2_identity=right.as_tuple(),
+        function1_identity=fast_path_function_identity(left, binary1_id),
+        function2_identity=fast_path_function_identity(right, binary2_id),
         decisive_proof_provenance={
             "kind": "identical_function_identity",
             "proof_artifact_digest": artifact.artifact_digest,
@@ -383,7 +428,12 @@ def _apply_fast_path(
 def attach_identity_assessment(
     result: Any, assessment: Optional[IdenticalIdentityAssessment],
 ) -> Any:
-    """通常経路の結果へ identity evidence と disposition を 1 箇所で載せる。"""
+    """結果へ identity evidence と disposition を 1 箇所で載せる。
+
+    `function*_identity` には触らない。あれは解析が作る stable result key で、
+    左右・pair を区別する責務がある。同一性の観測は
+    `identical_function_identity_evidence` に載せ、gate はそちらを読む。
+    """
 
     if assessment is None or result is None:
         return result
@@ -391,6 +441,7 @@ def attach_identity_assessment(
     if assessment.identity_evidence_ok:
         left, right = assessment.identities
         if left is not None and right is not None:
-            result.function1_identity = left.as_tuple()
-            result.function2_identity = right.as_tuple()
+            result.identical_function_identity_evidence = identity_evidence_payload(
+                left, right
+            )
     return result

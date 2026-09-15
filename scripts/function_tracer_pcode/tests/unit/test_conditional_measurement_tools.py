@@ -130,79 +130,38 @@ def test_fail_on_change_keeps_its_unconditional_meaning(tmp_path, capsys):
 
 
 # --- soundness_gate ---------------------------------------------------------
+#
+# Issue #15 PR-15-B replaced the gate's label-only rule with verified
+# function-level relations, so the conditional *verdict* is covered by
+# ``test_soundness_gate_v2.py`` against real conditional receipts.  What stays
+# here is the part this file owns: a run without a conditional lane reads
+# exactly as before, and a conditional column that arrives without its receipt
+# is refused instead of being counted.
 
 
-def test_gate_without_a_conditional_lane_is_unchanged(tmp_path):
+def test_a_run_without_a_conditional_lane_reports_no_conditional_row(tmp_path):
     root = tmp_path / "results"
     _status(root, EQ, "f", "B1", "B2", "EQUIVALENT")
     _status(root, NEQ, "g", "N_B1", "O_B1", "NOT_EQ")
+
     report = soundness_gate.build_gate_report([root])
-    assert report.conditional_records == ()
+
+    assert report.accumulator.compatibility_unknown_rows == []
+    assert report.accumulator.config_integrity_violations == []
     assert report.passed is True
-    assert report.unconditional_passed is True
-    payload = report.as_dict()
-    assert "conditional" not in payload
-    assert "unconditional_passed" not in payload
-    text = soundness_gate.format_gate_report(report)
-    assert text.rstrip().endswith("GATE: PASS")
-    assert "Conditional" not in text
-
-    _status(root, EQ, "f", "B1", "B4", "NOT_EQ")
-    failing = soundness_gate.build_gate_report([root])
-    assert soundness_gate.format_gate_report(failing).rstrip().endswith(
-        "GATE: FAIL (1 violations)"
-    )
+    assert soundness_gate.format_gate_report(report).rstrip().endswith("GATE: PASS")
 
 
-@pytest.mark.parametrize("sample,function,unconditional,conditional", [
-    (EQ, "f", "UNKNOWN", "NOT_EQ"),
-    (NEQ, "g", "UNKNOWN", "EQUIVALENT"),
-])
-def test_gate_fails_on_a_conditional_violation_in_both_directions(
-    tmp_path, sample, function, unconditional, conditional,
-):
+def test_a_conditional_column_without_its_receipt_is_refused(tmp_path):
+    """The signed status cannot carry one without the other; a tree that does is broken."""
+
     root = tmp_path / "results"
-    _status(root, sample, function, "B1", "B2", unconditional, conditional=conditional)
+    _status(root, NEQ, "g", "N_B1", "O_B1", "UNKNOWN", conditional="EQUIVALENT")
+
     report = soundness_gate.build_gate_report([root])
 
-    # The unconditional lane saw only UNKNOWN and passes on its own.
-    assert report.violations == ()
-    assert report.unconditional_passed is True
-    assert len(report.conditional_violations) == 1
-    assert report.passed is False
-
-    payload = report.as_dict()
-    assert payload["violations"] == 0
-    assert payload["violation_rows"] == []
-    assert payload["unconditional_passed"] is True
-    assert payload["conditional"]["violations"] == 1
-    assert payload["conditional"]["passed"] is False
-    assert payload["conditional"]["violation_rows"][0]["outcome"] == conditional
-    assert payload["conditional"]["counts"] == [
-        {"label": report.records[0].label, "outcome": conditional, "count": 1},
+    assert [row["detail"] for row in report.accumulator.config_integrity_violations] == [
+        "conditional_column_half_written",
     ]
-    # The unconditional count table never sees the conditional outcome.
-    assert all(row["outcome"] == unconditional for row in payload["counts"])
-
-    text = soundness_gate.format_gate_report(report)
-    assert "Conditional (assumption-dependent) outcomes by benchmark label:" in text
-    assert "unconditional verdict: PASS" in text
-    assert text.rstrip().endswith("GATE: FAIL (0 violations, 1 conditional violations)")
+    assert report.passed is False
     assert soundness_gate.main([str(root)]) == soundness_gate.EXIT_VIOLATION
-
-
-def test_a_sound_conditional_result_passes_but_is_still_counted(tmp_path):
-    root = tmp_path / "results"
-    _status(root, EQ, "f", "B1", "B2", "UNKNOWN", conditional="EQUIVALENT")
-    _status(root, NEQ, "g", "N_B1", "O_B1", "UNKNOWN", conditional="NOT_EQ")
-    report = soundness_gate.build_gate_report([root])
-    assert report.conditional_violations == ()
-    assert report.passed is True
-    payload = report.as_dict()
-    assert payload["conditional"]["pairs"] == 2
-    assert payload["conditional"]["passed"] is True
-    text = soundness_gate.format_gate_report(report)
-    assert "Eq: EQUIVALENT=1" in text
-    assert "Neq: NOT_EQ=1" in text
-    assert text.rstrip().endswith("GATE: PASS")
-    assert soundness_gate.main([str(root)]) == soundness_gate.EXIT_PASS
