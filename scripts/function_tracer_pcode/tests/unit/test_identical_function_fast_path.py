@@ -1063,7 +1063,9 @@ def test_identity_differences_fall_back_to_the_normal_path(
     assert "decisive_proof_provenance" not in payload
 
 
-def test_the_disposition_names_the_side_that_failed_to_resolve(monkeypatch):
+def test_the_left_side_reason_is_reported_when_both_sides_fail(monkeypatch):
+    """`reason` は 1 つ。左右が違う理由で失敗したら左側のものを載せる。"""
+
     result, probe, _ = _run_production_check(
         monkeypatch, "sides",
         _FakeProgram("left", functions=[_FakeFunction("snippet"), _FakeFunction("snippet")]),
@@ -1071,19 +1073,19 @@ def test_the_disposition_names_the_side_that_failed_to_resolve(monkeypatch):
     )
     disposition = result.to_dict()["identical_fast_path_disposition"]
     assert probe.analyzer_programs == ["left"]
-    # reason は左側のもの、side はどちらを見ればよいかを落とさない。
-    assert disposition["reason"] == "name_not_unique"
-    assert disposition["resolution_side"] == "both"
+    assert disposition == {
+        "applicable": False, "applied": False, "reason": "name_not_unique",
+    }
 
 
-def test_the_disposition_names_a_one_sided_resolution_failure(monkeypatch):
+def test_a_right_side_only_resolution_failure_is_reported(monkeypatch):
     result, _, _ = _run_production_check(
         monkeypatch, "side-right", _FakeProgram("left"),
         _FakeProgram("right", functions=[_FakeFunction("other")]),
     )
-    disposition = result.to_dict()["identical_fast_path_disposition"]
-    assert disposition["reason"] == "function_missing"
-    assert disposition["resolution_side"] == "right"
+    assert result.to_dict()["identical_fast_path_disposition"] == {
+        "applicable": False, "applied": False, "reason": "function_missing",
+    }
 
 
 def test_a_missing_function_keeps_the_existing_error_path(monkeypatch):

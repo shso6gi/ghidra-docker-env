@@ -181,17 +181,10 @@ def assess_identical_function_identity(
     left, left_reason = _resolve_side(program1, function_name1)
     right, right_reason = _resolve_side(program2, function_name2)
     if left_reason is not None or right_reason is not None:
+        # 左右で理由が違うときは左側のものを載せる（`reason` は 1 つ）。
         return IdenticalIdentityAssessment(
             identities=(None, None),
-            disposition=_disposition(
-                left_reason or right_reason,
-                # どちらの Program を見ればよいかを落とさない（`sha_mismatch_side`
-                # と同じ規約）。左右で理由が違うときは `reason` が左側のもの。
-                resolution_side=(
-                    "both" if left_reason is not None and right_reason is not None
-                    else ("left" if left_reason is not None else "right")
-                ),
-            ),
+            disposition=_disposition(left_reason or right_reason),
         )
 
     # 左右それぞれの Program SHA を、その側の session 入力 SHA と直接照合する。
