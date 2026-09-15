@@ -28,6 +28,7 @@ from scripts.function_tracer_pcode.authority.domains import identical_function_i
 from scripts.function_tracer_pcode.authority.domains.identical_function_identity import (
     IDENTICAL_FUNCTION_IDENTITY_COMMITTED_KEY,
     IDENTICAL_FUNCTION_IDENTITY_PRODUCER_ID,
+    IDENTICAL_FUNCTION_IDENTITY_PROOF_SCHEMA,
     IdenticalFunctionIdentityPilotEncoder,
     IdenticalFunctionIdentityProofArtifact,
     IdenticalFunctionIdentitySessionBinding,
@@ -219,14 +220,22 @@ def test_resolver_counts_zero_and_multiple_matches():
         _FakeProgram("left", functions=[_FakeFunction("other")]), "snippet"
     )
     assert (missing.match_count, missing.entry, missing.body_range) == (0, None, None)
-    duplicated = resolve_binary_function_identity(
-        _FakeProgram(
-            "left", functions=[_FakeFunction("snippet"), _FakeFunction("snippet")]
-        ),
-        "snippet",
-    )
-    assert duplicated.match_count == 2
-    assert duplicated.entry is None and duplicated.body_range is None
+    for count in (2, 3, 5):
+        duplicated = resolve_binary_function_identity(
+            _FakeProgram("left", functions=[_FakeFunction("snippet")] * count),
+            "snippet",
+        )
+        # 「2 件以上」ではなく実際の件数を記録する（走査は打ち切らない）。
+        assert duplicated.match_count == count
+        assert duplicated.entry is None and duplicated.body_range is None
+
+
+def test_resolver_counts_matches_among_other_functions():
+    program = _FakeProgram("left", functions=[
+        _FakeFunction("a"), _FakeFunction("snippet"), _FakeFunction("b"),
+        _FakeFunction("snippet"), _FakeFunction("c"), _FakeFunction("snippet"),
+    ])
+    assert resolve_binary_function_identity(program, "snippet").match_count == 3
 
 
 @pytest.mark.parametrize("sha256", ["", "not-hex" + "0" * 57, "a" * 63])
@@ -379,10 +388,8 @@ def test_artifact_refuses_a_sha_that_differs_from_the_session_input():
 
 def _signal(*, identity_overrides=None, **binding_overrides):
     identity = _identity(**(identity_overrides or {}))
-    return IdenticalFunctionIdentitySignal.from_artifact(
-        IdenticalFunctionIdentityProofArtifact.create(
-            identity, identity, session_binding=_binding(**binding_overrides)
-        )
+    return IdenticalFunctionIdentitySignal.issue(
+        identity, identity, session_binding=_binding(**binding_overrides)
     )
 
 
@@ -475,35 +482,103 @@ def test_encoder_refuses_a_session_whose_two_inputs_differ():
         )
 
 
-def _forged_signal(*, artifact=None, proof_artifact_digest=None):
-    """封印された factory を意図的に迂回して作る signal（改竄の模擬）。
+def _forged_artifact(**body_overrides):
+    """封印を迂回して body を作り替え、digest も**正しく作り直した** artifact。
 
-    production では `from_artifact` が `validates()` で弾くが、encoder が
-    signal を信用せず自分で検証し直すことをここで固定する。
+    「古い digest のまま改竄する」だけでは、digest の再計算で気付ける改竄しか
+    固定できない。ここでは改竄側が digest まで辻褄を合わせられる前提で、
+    それでも decisive proof として受理されないことを見る。
     """
+
+    body = {**_signal().artifact.body, **body_overrides}
+    forged = object.__new__(IdenticalFunctionIdentityProofArtifact)
+    object.__setattr__(forged, "schema", IDENTICAL_FUNCTION_IDENTITY_PROOF_SCHEMA)
+    object.__setattr__(forged, "body", body)
+    object.__setattr__(forged, "artifact_digest", authority_digest(body))
+    return forged
+
+
+def _forged_signal(*, artifact=None, proof_artifact_digest=None):
+    """封印された factory を意図的に迂回して作る signal（改竄の模擬）。"""
 
     signal = _signal()
     forged = object.__new__(IdenticalFunctionIdentitySignal)
     object.__setattr__(
         forged, "proof_artifact_digest",
-        proof_artifact_digest or signal.proof_artifact_digest,
+        proof_artifact_digest or (
+            artifact.artifact_digest if artifact is not None
+            else signal.proof_artifact_digest
+        ),
     )
     object.__setattr__(forged, "producer_id", signal.producer_id)
     object.__setattr__(forged, "artifact", artifact or signal.artifact)
     return forged
 
 
-def test_encoder_refuses_a_tampered_body():
-    import dataclasses
+def test_the_artifact_cannot_be_constructed_outside_its_factory():
+    """意味検証（左右一致 / `match_count == 1` / SHA 整合）を迂回させない。"""
 
-    signal = _signal()
-    artifact = dataclasses.replace(
-        signal.artifact, body={**signal.artifact.body, "entry": ["ram", 4919]}
-    )
-    assert not artifact.validate()
+    body = dict(_signal().artifact.body)
+    with pytest.raises(TypeError):
+        IdenticalFunctionIdentityProofArtifact(
+            schema=IDENTICAL_FUNCTION_IDENTITY_PROOF_SCHEMA,
+            body=body,
+            artifact_digest=authority_digest(body),
+        )
+    with pytest.raises(TypeError):
+        import dataclasses
+
+        dataclasses.replace(_signal().artifact, artifact_digest="0" * 64)
+
+
+@pytest.mark.parametrize(
+    "body_overrides",
+    [
+        pytest.param({"entry": ["ram", 4919]}, id="entry"),
+        pytest.param({"body_range": [["ram", 0], ["ram", 4919]]}, id="body-range"),
+        pytest.param({"image_base": 4919}, id="image-base"),
+        pytest.param({"language_id": "MIPS:BE:64:64-32addr"}, id="language"),
+        pytest.param({"compiler_spec_id": "gcc"}, id="compiler-spec"),
+        pytest.param({"match_count": 2}, id="match-count"),
+        pytest.param(
+            {"executable_sha256": SHA_B, "binary_content_identity": f"sha256:{SHA_B}"},
+            id="both-sha-fields",
+        ),
+    ],
+)
+def test_a_forged_artifact_with_a_recomputed_digest_is_not_authority(body_overrides):
+    """body を作り替え digest も作り直した artifact は decisive proof にならない。
+
+    `artifact_digest` の再計算で辻褄が合っていても、`create()` を通っていない
+    以上「左右の観測が一致し、名前一致が 1 件で、観測 SHA が session 入力と
+    同じ」ことは何も証明されていない。
+    """
+
+    forged = _forged_artifact(**body_overrides)
+    # digest は正しく作り直されている（古い digest のままではない）。
+    assert forged.artifact_digest == authority_digest(dict(forged.body))
+    assert forged.validate() is False
+    signal = _forged_signal(artifact=forged)
+    assert signal.validates() is False
+    with pytest.raises(ValueError):
+        IdenticalFunctionIdentityPilotEncoder()(_FakeSession(), signal)
+    with pytest.raises(ValueError):
+        signal._phase7_signal_authority()
+
+
+def test_a_forged_artifact_is_refused_even_when_every_field_stays_canonical():
+    """body を触らずに object だけ作り直した artifact も受理しない。
+
+    binding も identity も本物と同じで digest も一致するが、`create()` の
+    意味検証を通っていないので authority にはならない。
+    """
+
+    forged = _forged_artifact()
+    assert forged.body_is_canonical() is True
+    assert forged.validate() is False
     with pytest.raises(ValueError):
         IdenticalFunctionIdentityPilotEncoder()(
-            _FakeSession(), _forged_signal(artifact=artifact)
+            _FakeSession(), _forged_signal(artifact=forged)
         )
 
 
@@ -514,14 +589,15 @@ def test_encoder_refuses_a_tampered_digest():
         )
 
 
-def test_a_tampered_artifact_cannot_be_sealed_into_a_signal():
-    import dataclasses
+def test_the_signal_cannot_be_constructed_around_a_prebuilt_artifact():
+    """signal は観測から issue する。出来合いの artifact を載せる経路を残さない。"""
 
-    signal = _signal()
-    with pytest.raises(ValueError):
-        IdenticalFunctionIdentitySignal.from_artifact(dataclasses.replace(
-            signal.artifact, body={**signal.artifact.body, "entry": ["ram", 4919]}
-        ))
+    with pytest.raises(TypeError):
+        IdenticalFunctionIdentitySignal(
+            proof_artifact_digest=_forged_artifact().artifact_digest,
+            producer_id=IDENTICAL_FUNCTION_IDENTITY_PRODUCER_ID,
+            artifact=_forged_artifact(),
+        )
 
 
 def test_encoder_ignores_a_foreign_signal_type():
@@ -773,6 +849,59 @@ def test_bundle_validation_rejects_a_drifting_provenance(monkeypatch, mutate, ex
         )
 
 
+@pytest.mark.parametrize(
+    "body_overrides",
+    [
+        pytest.param({"match_count": 2}, id="non-unique-match"),
+        pytest.param({"executable_sha256": SHA_B}, id="sha-disagrees-with-content"),
+        pytest.param({"image_base": "0x1000"}, id="image-base-is-not-an-int"),
+        pytest.param({"entry": "ram:0"}, id="entry-is-not-an-address-pair"),
+        pytest.param({"binary_content_identity": "md5:" + SHA_A}, id="other-algorithm"),
+    ],
+)
+def test_saved_provenance_must_satisfy_the_same_body_invariants(
+    monkeypatch, body_overrides,
+):
+    """保存物にも producer 側と同じ body 不変条件が掛かる。
+
+    bundle 経由では receipt の digest が先に食い違うので、ここでは
+    「receipt とも digest が一致する forged body」を直接渡して、body 不変条件
+    そのものが判断根拠になる状態を作る。
+    """
+
+    from types import SimpleNamespace
+
+    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
+        _validate_decisive_proof_provenance,
+    )
+    from scripts.function_tracer_pcode.authority.decision.decision import (
+        DecisiveProofKind,
+    )
+
+    result, _, _ = _run_production_check(
+        monkeypatch, "saved-body", _FakeProgram("left"), _FakeProgram("right"),
+        forbid_analysis=True,
+    )
+    payload, bundle = _payload_with_bundle(result)
+    artifact = {**payload["decisive_proof_provenance"]["artifact"], **body_overrides}
+    digest = authority_digest(artifact)
+    provenance = {
+        "kind": "identical_function_identity",
+        "proof_artifact_digest": digest,
+        "artifact": artifact,
+    }
+    receipt = SimpleNamespace(
+        proof_kind=DecisiveProofKind.EQ_CLOSURE, proof_artifact_digest=digest,
+    )
+    with pytest.raises(ValueError):
+        _validate_decisive_proof_provenance(
+            provenance,
+            decisive_receipts=(receipt,),
+            execution_identity=bundle["execution_identity"],
+            execution_payload=bundle["execution_payload"],
+        )
+
+
 def test_bundle_validation_requires_a_decisive_receipt_for_the_provenance(monkeypatch):
     from scripts.function_tracer_pcode.authority.decision.canonical_result import (
         _validate_decisive_proof_provenance,
@@ -827,32 +956,52 @@ def test_an_unbound_artifact_fails_closed_to_a_saved_canonical_error(
     assert payload["identical_fast_path_disposition"]["applied"] is False
 
 
-def test_a_tampered_artifact_digest_fails_closed_to_a_saved_canonical_error(monkeypatch):
-    import dataclasses
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param("digest", id="stale-digest"),
+        pytest.param("body", id="recomputed-digest"),
+    ],
+)
+def test_a_forged_artifact_fails_closed_to_a_saved_canonical_error(monkeypatch, tamper):
+    """producer が forged artifact を出しても EQUIVALENT にはならない（e2e）。
 
-    class _TamperedArtifactFactory:
+    `recomputed-digest` の側は body を作り替えたうえで digest も作り直す。
+    digest の再計算で気付ける改竄だけを見ている test にしない。
+    """
+
+    real_create = IdenticalFunctionIdentityProofArtifact.create
+
+    class _ForgingFactory:
         @staticmethod
         def create(left, right, *, session_binding):
-            return dataclasses.replace(
-                IdenticalFunctionIdentityProofArtifact.create(
-                    left, right, session_binding=session_binding
-                ),
-                artifact_digest="0" * 64,
+            genuine = real_create(left, right, session_binding=session_binding)
+            body = dict(genuine.body)
+            if tamper == "body":
+                body["entry"] = ["ram", 4919]
+            forged = object.__new__(IdenticalFunctionIdentityProofArtifact)
+            object.__setattr__(forged, "schema", genuine.schema)
+            object.__setattr__(forged, "body", body)
+            object.__setattr__(
+                forged, "artifact_digest",
+                "0" * 64 if tamper == "digest" else authority_digest(body),
             )
+            return forged
 
     monkeypatch.setattr(
         identical_function_identity,
         "IdenticalFunctionIdentityProofArtifact",
-        _TamperedArtifactFactory,
+        _ForgingFactory,
     )
     result, _, _ = _run_production_check(
-        monkeypatch, "tampered", _FakeProgram("left"), _FakeProgram("right"),
+        monkeypatch, "forged-" + tamper, _FakeProgram("left"), _FakeProgram("right"),
         forbid_analysis=True,
     )
     payload = result.to_dict()
     assert payload["is_equivalent"] is None
     assert payload["final_outcome"] == "ERROR"
     assert _outcome(payload) is Outcome.ERROR
+    assert "decisive_proof_provenance" not in payload
 
 
 def test_fast_path_is_not_applied_when_the_flag_is_off(monkeypatch):

@@ -177,16 +177,18 @@ def resolve_binary_function_identity(
     iterate = getattr(function_manager, "getFunctions", None)
     if not callable(iterate):
         raise FunctionIdentityUnavailable("getFunctions() is unavailable")
+    # 件数は打ち切らずに数える（`match_count` は「その名前に一致した関数の
+    # 件数」であって「2 件以上見つかった」ではない）。entry / body を読むのは
+    # ちょうど 1 件のときだけ、という fail-closed 条件は変えない。
     match_count = 0
-    matched = None
+    first_match = None
     for function in iterate(True):
         if _exact_text(_call_noarg(function, "getName"), "function name") != function_name:
             continue
         match_count += 1
-        if match_count > 1:
-            matched = None
-            break
-        matched = function
+        if match_count == 1:
+            first_match = function
+    matched = first_match if match_count == 1 else None
     entry = None
     body_range = None
     if matched is not None:

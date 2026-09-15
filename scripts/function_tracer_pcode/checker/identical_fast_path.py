@@ -321,7 +321,6 @@ def _apply_fast_path(
     """
 
     from scripts.function_tracer_pcode.authority.domains.identical_function_identity import (
-        IdenticalFunctionIdentityProofArtifact,
         IdenticalFunctionIdentitySignal,
     )
     from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
@@ -356,10 +355,10 @@ def _apply_fast_path(
             binary2_id=binary2_id,
             observation_contract_id=observation_contract_id,
         )
-        artifact = IdenticalFunctionIdentityProofArtifact.create(
+        signal = IdenticalFunctionIdentitySignal.issue(
             left, right, session_binding=binding
         )
-        signal = IdenticalFunctionIdentitySignal.from_artifact(artifact)
+        artifact = signal.artifact
         emitted = emit_identical_function_identity_signal(
             signal, producer_site_manifest_id="checker-identical-function-identity",
         )

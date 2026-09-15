@@ -523,6 +523,14 @@ def _validate_decisive_proof_provenance(
     artifact_digest = authority_digest(dict(artifact))
     if provenance.get("proof_artifact_digest") != artifact_digest:
         raise ValueError("decisive proof provenance digest differs from its artifact")
+    from scripts.function_tracer_pcode.authority.domains.identical_function_identity import (
+        identical_function_identity_body_is_canonical,
+    )
+
+    # 保存物にも producer 側と**同じ**body 不変条件を掛ける（digest の一致だけを
+    # 見ると、body ごと作り替えた artifact が保存物として通ってしまう）。
+    if not identical_function_identity_body_is_canonical(artifact, artifact_digest):
+        raise ValueError("identity proof provenance artifact body is not canonical")
     if len(decisive_receipts) != 1:
         raise ValueError(
             "identity proof provenance requires exactly one decisive receipt"

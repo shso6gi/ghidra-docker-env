@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Tuple
+from weakref import WeakValueDictionary
 
 from scripts.function_tracer_pcode.authority.contracts import authority_digest
 from scripts.function_tracer_pcode.authority.lifecycle.stream import (
@@ -37,7 +38,24 @@ IDENTICAL_FUNCTION_IDENTITY_PRODUCER_ID = "identical-function-identity-producer-
 IDENTICAL_FUNCTION_IDENTITY_COMMITTED_KEY = "identical_function_identity_committed"
 
 _SIGNAL_TOKEN = object()
+_ARTIFACT_TOKEN = object()
 _SHA256_HEX_DIGITS = frozenset("0123456789abcdef")
+
+#: `create()` が実際に発行した artifact だけを覚えておく台帳。object 同一性で
+#: 引くので、body を作り替えて `artifact_digest` まで辻褄を合わせた forgery は
+#: ここに載らない（`production_context.register_comparison_receipt_authority`
+#: と同じ考え方。digest や安定 key に同一性を使うのではなく、「この proof は
+#: 意味検証を通って発行されたか」という capability の確認にだけ使う）。
+_ISSUED_ARTIFACTS: WeakValueDictionary = WeakValueDictionary()
+
+
+def _seal_issuance(artifact: Any) -> Any:
+    _ISSUED_ARTIFACTS[id(artifact)] = artifact
+    return artifact
+
+
+def _was_issued(artifact: Any) -> bool:
+    return _ISSUED_ARTIFACTS.get(id(artifact)) is artifact
 
 #: artifact body のうち、左右の Program から観測した identity 側の field。
 _IDENTITY_FIELDS = (
@@ -149,9 +167,60 @@ def _identity_projection(identity: Any, side: str) -> Mapping[str, Any]:
     }
 
 
-@dataclass(frozen=True)
+def identical_function_identity_body_is_canonical(
+    body: Any, artifact_digest: Any,
+) -> bool:
+    """proof body だけから再導出できる不変条件を全部見直す。
+
+    digest の一致だけでは「body が意味的に成立している」ことは言えない
+    （改竄側は digest も作り直せる）。ここでは schema・field 集合・各値の型・
+    `match_count == 1`・content identity と観測 SHA の一致を、body から独立に
+    確かめる。in-process の artifact（`IdenticalFunctionIdentityProofArtifact`）
+    と、保存済み結果の `decisive_proof_provenance.artifact` の**両方**が同じ
+    定義を使う（片方だけ緩い検査にしない）。
+
+    これは「`create()` の意味検証を通ったか」の代わりにはならない。左右の観測が
+    一致していたことは body からは再導出できないので、その保証は発行台帳
+    （`validate()`）が持つ。
+    """
+
+    if (
+        not isinstance(body, Mapping)
+        or body.get("schema") != IDENTICAL_FUNCTION_IDENTITY_PROOF_SCHEMA
+        or set(body) != {"schema", *_BINDING_FIELDS, *_IDENTITY_FIELDS}
+        or authority_digest(dict(body)) != artifact_digest
+    ):
+        return False
+    try:
+        for name in _BINDING_FIELDS:
+            _exact_text(body[name], name)
+        _exact_text(body["executable_sha256"], "executable SHA-256")
+        _exact_text(body["language_id"], "language ID")
+        _exact_text(body["compiler_spec_id"], "compiler spec ID")
+        _exact_int(body["image_base"], "image base")
+        _exact_address(body["entry"], "entry")
+        start, end = tuple(body["body_range"])
+        _exact_address(start, "body start")
+        _exact_address(end, "body end")
+        content_sha256 = _content_identity_sha256(body["binary_content_identity"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(
+        type(body["match_count"]) is int
+        and body["match_count"] == 1
+        and body["executable_sha256"] == content_sha256
+    )
+
+
+@dataclass(frozen=True, init=False)
 class IdenticalFunctionIdentityProofArtifact:
-    """左右一致した identity 観測と、その実行への束縛を封じた proof。"""
+    """左右一致した identity 観測と、その実行への束縛を封じた proof。
+
+    生成経路は `create()` だけ。直接 construct すると `create()` の意味検証
+    （左右 identity の一致・`match_count == 1`・観測 SHA と session 入力 SHA の
+    一致）を迂回できてしまうので、constructor を factory token で封じ、発行
+    済みであることを `validate()` が台帳で確認する。
+    """
 
     schema: str
     # `body` は dict なので比較・hash からは外す（frozen dataclass が
@@ -159,6 +228,16 @@ class IdenticalFunctionIdentityProofArtifact:
     # 食い違いは `validate()` が検出する。
     body: Mapping[str, Any] = field(compare=False)
     artifact_digest: str
+
+    def __init__(self, **values: Any) -> None:
+        if values.pop("_factory_token", None) is not _ARTIFACT_TOKEN:
+            raise TypeError(
+                "identical function identity artifact must be issued from create()"
+            )
+        for name in ("schema", "body", "artifact_digest"):
+            object.__setattr__(self, name, values.pop(name))
+        if values:
+            raise TypeError("identical function identity artifact fields are not sealed")
 
     @classmethod
     def create(
@@ -189,21 +268,30 @@ class IdenticalFunctionIdentityProofArtifact:
             **session_binding.as_body_fields(),
             **{name: left_projection[name] for name in _IDENTITY_FIELDS},
         }
-        return cls(
+        artifact = cls(
             schema=IDENTICAL_FUNCTION_IDENTITY_PROOF_SCHEMA,
             body=body,
             artifact_digest=authority_digest(body),
+            _factory_token=_ARTIFACT_TOKEN,
+        )
+        if not artifact.body_is_canonical():
+            raise ValueError("identical function identity artifact body is not canonical")
+        return _seal_issuance(artifact)
+
+    def body_is_canonical(self) -> bool:
+        """body だけから再導出できる不変条件（`validate()` の前半）。"""
+
+        return (
+            self.schema == IDENTICAL_FUNCTION_IDENTITY_PROOF_SCHEMA
+            and identical_function_identity_body_is_canonical(
+                self.body, self.artifact_digest
+            )
         )
 
     def validate(self) -> bool:
-        if (
-            self.schema != IDENTICAL_FUNCTION_IDENTITY_PROOF_SCHEMA
-            or not isinstance(self.body, Mapping)
-            or self.body.get("schema") != IDENTICAL_FUNCTION_IDENTITY_PROOF_SCHEMA
-            or set(self.body) != {"schema", *_BINDING_FIELDS, *_IDENTITY_FIELDS}
-        ):
-            return False
-        return authority_digest(dict(self.body)) == self.artifact_digest
+        """`create()` を通って発行され、body の不変条件も成立しているか。"""
+
+        return bool(_was_issued(self) and self.body_is_canonical())
 
 
 @dataclass(frozen=True, init=False)
@@ -227,11 +315,23 @@ class IdenticalFunctionIdentitySignal:
             raise ValueError("identical function identity signal authority is invalid")
 
     @classmethod
-    def from_artifact(
-        cls, artifact: IdenticalFunctionIdentityProofArtifact,
+    def issue(
+        cls,
+        left: Any,
+        right: Any,
+        *,
+        session_binding: IdenticalFunctionIdentitySessionBinding,
     ) -> "IdenticalFunctionIdentitySignal":
-        if type(artifact) is not IdenticalFunctionIdentityProofArtifact:
-            raise ValueError("identical function identity artifact is not exact")
+        """観測と束縛から signal を出す（出来合いの artifact は受け取らない）。
+
+        artifact を引数で受け取る factory を置くと、意味検証を通っていない
+        artifact を signal に載せる経路ができてしまう。ここで `create()` を
+        呼ぶことで、signal に載る artifact は必ず検証済みになる。
+        """
+
+        artifact = IdenticalFunctionIdentityProofArtifact.create(
+            left, right, session_binding=session_binding
+        )
         return cls(
             proof_artifact_digest=artifact.artifact_digest,
             producer_id=IDENTICAL_FUNCTION_IDENTITY_PRODUCER_ID,
