@@ -59,6 +59,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
+    FINALIZATION_DURABLE,
+    FINALIZATION_UNVERIFIED,
+)
 from scripts.function_tracer_pcode.reporting.pair_outcomes import (
     LABEL_EQ,
     LABEL_NEQ,
@@ -735,23 +739,21 @@ REASON_DETAIL_NO_PAYLOAD_BOTH = "no_result_payload_both"
 # excused -- "we do not know how it ended" must not become "it owed nothing".
 
 
-def _owes_a_result_payload(outcome: str, supervisor_status: Optional[str]) -> bool:
-    """Should this side of the comparison hold a result payload?"""
-    from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
-        PAIR_STATUS_DURABLE_SUPERVISOR_STATES,
-        PAIR_STATUS_SUPERVISOR_RESOLVED,
-    )
+def _owes_a_result_payload(outcome: str, finalization: str) -> bool:
+    """Should this side of the comparison hold a result payload?
+
+    Only an ending the pair-status authority could *confirm* excuses a missing
+    payload.  A status that merely claims ``TIMEOUT`` -- unsigned, malformed,
+    contradicting its own canonical outcome, missing the durable authority
+    fields -- confirms nothing, and treating its claim as an excuse would let a
+    broken artifact hide a lost result.
+    """
 
     if outcome == OUTCOME_MISSING:
         # No pair status on this side at all: reported as a missing pair, which
         # is a different fact from a result that went missing.
         return False
-    if supervisor_status == PAIR_STATUS_SUPERVISOR_RESOLVED:
-        return True
-    if supervisor_status in PAIR_STATUS_DURABLE_SUPERVISOR_STATES:
-        return False
-    # Absent, malformed or unknown: fail closed and keep the absence visible.
-    return True
+    return finalization != FINALIZATION_DURABLE
 
 
 def _log_path_for(record: PairOutcome) -> Path:
@@ -809,6 +811,8 @@ class ReasonSetRow:
     after_reasons: Optional[Tuple[str, ...]]
     before_supervisor_status: Optional[str] = None
     after_supervisor_status: Optional[str] = None
+    before_finalization: str = FINALIZATION_UNVERIFIED
+    after_finalization: str = FINALIZATION_UNVERIFIED
 
     @property
     def outcome_mismatch(self) -> bool:
@@ -838,10 +842,10 @@ class ReasonSetRow:
         if self.verdict != REASON_SET_INCOMPARABLE:
             return False
         return any(
-            reasons is None and _owes_a_result_payload(outcome, status)
-            for outcome, reasons, status in (
-                (self.before_outcome, self.before_reasons, self.before_supervisor_status),
-                (self.after_outcome, self.after_reasons, self.after_supervisor_status),
+            reasons is None and _owes_a_result_payload(outcome, finalization)
+            for outcome, reasons, finalization in (
+                (self.before_outcome, self.before_reasons, self.before_finalization),
+                (self.after_outcome, self.after_reasons, self.after_finalization),
             )
         )
 
@@ -861,6 +865,8 @@ class ReasonSetRow:
             "payload_loss": self.payload_loss,
             "before_supervisor_status": self.before_supervisor_status,
             "after_supervisor_status": self.after_supervisor_status,
+            "before_finalization": self.before_finalization,
+            "after_finalization": self.after_finalization,
         }
 
 
@@ -955,6 +961,14 @@ def build_reason_sets(
             ),
             after_supervisor_status=(
                 after_record.supervisor_status if after_record else None
+            ),
+            before_finalization=(
+                before_record.finalization if before_record
+                else FINALIZATION_UNVERIFIED
+            ),
+            after_finalization=(
+                after_record.finalization if after_record
+                else FINALIZATION_UNVERIFIED
             ),
         ))
     return ReasonSetReport(rows=tuple(rows))

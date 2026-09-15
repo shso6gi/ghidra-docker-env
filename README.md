@@ -630,19 +630,26 @@ each other.
 
 `outcome_transition --reason-sets` says which pairs it could actually compare.
 A pair without a readable result payload is `incomparable`, never a match, and
-the report splits that bucket by **how the supervisor ended the pair**, not by
-its canonical outcome:
+the report splits that bucket by **how the pair ended, as the pair-status
+authority confirms it** — not by the canonical outcome and not by the
+`supervisor_status` field on its own. `pair_status_finalization()` validates
+the whole signed status (seal, field set, durable authority fields, authority
+kinds, child-exit join) and answers with one of:
 
-- `supervisor_status = RESOLVED` — the supervisor read the child's canonical
-  result, so the run holds that pair's result. A missing payload here is a
-  `payload_loss`: a real difference. This includes `canonical_outcome = ERROR`,
-  which a resolved pair reports just as a durable failure does.
-- `supervisor_status = TIMEOUT` or `ERROR` (the durable states) — the pair
-  never reached a canonical result. It owes no payload: whether a killed child
+- `resolved` — the supervisor read the child's canonical result, so the run
+  holds that pair's result. A missing payload here is a `payload_loss`: a real
+  difference. This includes `canonical_outcome = ERROR`, which a resolved pair
+  reports just as a durable failure does.
+- `durable` — a validated `TIMEOUT` or `ERROR` finalization: the pair never
+  reached a canonical result and owes no payload. Whether a killed child
   flushed one first is a matter of milliseconds and differs between runs of the
   same commit.
-- anything else (absent, empty, unknown) — fail closed and count it as a loss.
-  "We do not know how it ended" must not become "it owed nothing".
+- `unverified` — anything the authority could not confirm: an unsigned or
+  edited file, a missing verification key, an ending that contradicts the
+  outcome, missing durable authority fields, a broken child-exit join. This
+  counts as a loss. A file that merely *says* `TIMEOUT` is not a pair that
+  timed out, and "we do not know how it ended" must not become "it owed
+  nothing".
 
 An oracle comparison therefore requires `changed`, `reason-set mismatch` and
 `payload_loss` to all be 0; `incomparable` alone is not a defect.

@@ -1,9 +1,16 @@
 # -*- coding: utf-8 -*-
 """Load canonical pair outcomes from an EqBench/NeqBench result tree.
 
-Only ``*.pair-status.json`` files are read; the signature material they carry
-is not verified here (``result_summary`` does that), because the transition
-table and the soundness gate are measurement aids, not authorities.
+Only ``*.pair-status.json`` files are read.  The outcome and identity fields
+are taken as read -- the transition table and the soundness gate are
+measurement aids, not authorities, and ``result_summary`` is what audits a run
+as a whole.
+
+One field is different: ``finalization`` says how the pair *ended*, and a
+consumer uses it to excuse something (a result payload that is not there).
+An excuse has to be earned, so that one goes through the pair-status
+authority's own validation and comes back ``unverified`` whenever it cannot be
+confirmed.
 """
 
 from __future__ import annotations
@@ -15,6 +22,13 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, Mapping, Optional, Sequence, Tuple
+
+# The ending of a pair is an authority question, so it is asked of the
+# authority that seals the status rather than re-derived from its fields.
+from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
+    FINALIZATION_UNVERIFIED,
+    pair_status_finalization,
+)
 
 PAIR_STATUS_SUFFIX = ".pair-status.json"
 OUTCOME_MISSING = "MISSING"
@@ -84,11 +98,15 @@ class PairOutcome:
     result_occurrence_id: Optional[str] = None
     decision_receipt_digest: Optional[str] = None
     # How the supervisor projection ended this pair (``RESOLVED`` / ``TIMEOUT``
-    # / ``ERROR``), exactly as the signed status carries it.  ``None`` when the
-    # status does not carry one, which is itself a fact a reader must not
-    # confuse with a known ending.  The meaning of each state belongs to the
-    # pair-status authority, not here.
+    # / ``ERROR``), exactly as the status *claims*.  Reported as observed; it
+    # is not evidence on its own, because an unsigned or malformed file can
+    # claim anything.
     supervisor_status: Optional[str] = None
+    # What the pair-status authority could confirm about that claim:
+    # ``resolved`` / ``durable`` / ``unverified``.  A consumer that would
+    # excuse something on the strength of how a pair ended reads this, never
+    # the field above.
+    finalization: str = FINALIZATION_UNVERIFIED
 
     @property
     def identical_input(self) -> bool:
@@ -195,6 +213,9 @@ def iter_pair_outcomes(root: Path) -> Iterator[PairOutcome]:
             result_occurrence_id=_text(payload, "result_occurrence_id"),
             decision_receipt_digest=_text(payload, "decision_receipt_digest"),
             supervisor_status=_text(payload, "supervisor_status"),
+            finalization=pair_status_finalization(
+                payload, pair_status_path=status_path,
+            ),
         )
 
 
