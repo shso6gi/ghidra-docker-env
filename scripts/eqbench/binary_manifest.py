@@ -27,19 +27,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
 import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+# The soundness gate and this tool must agree on what counts as a digest, so
+# there is one definition: a value that is not a full sha256 is not "a digest
+# that happens to differ", it is one neither tool can compare.
+from scripts.function_tracer_pcode.reporting.pair_outcomes import normalized_sha256
+
 MANIFEST_HEADER = "# eqbench-binary-manifest-v1"
 COLUMNS = ("sample_identity", "binary_id", "binary_relative_path", "sha256")
-
-#: Only a full sha256 counts as a digest.  A short, upper-case, empty or
-#: otherwise malformed value is not "a digest that happens to differ": it is a
-#: value this tool cannot compare, and comparing it would let two runs look
-#: equal because neither carried a usable one.
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 PAIR_STATUS_SUFFIX = ".pair-status.json"
 
@@ -64,8 +62,8 @@ def _sha256_of(path: Path) -> str:
 def exact_sha256(value: object) -> str:
     """``value`` as a lower-case sha256, or ``ManifestError``."""
 
-    digest = value.strip().lower() if isinstance(value, str) else None
-    if digest is None or not _SHA256.match(digest):
+    digest = normalized_sha256(value)
+    if digest is None:
         raise ManifestError(f"binary digest is not a sha256: {value!r}")
     return digest
 

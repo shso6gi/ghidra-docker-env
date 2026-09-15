@@ -306,11 +306,22 @@ class RunMode:
 
 
 def _read_key_values(path: Path) -> Mapping[str, str]:
+    """A runner ``key=value`` manifest, refusing a key that appears twice.
+
+    ``execution_receipt`` refuses one when it seals the run, so a duplicate
+    here means the file was edited afterwards.  Taking the last value would let
+    an edited manifest decide which mode the gate believes.
+    """
+
     fields: Dict[str, str] = {}
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            fields[key.strip()] = value.strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key in fields:
+            raise ValueError(f"matrix run manifest names {key} twice")
+        fields[key] = value.strip()
     return fields
 
 
@@ -327,7 +338,7 @@ def resolve_run_mode(manifest_path: Path) -> RunMode:
         return RunMode(MODE_LEGACY_UNKNOWN, "run_manifest_absent")
     try:
         fields = _read_key_values(manifest_path)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return RunMode(MODE_INVALID, f"run_manifest_unreadable: {exc}",
                        str(manifest_path))
     schema = fields.get(ANALYSIS_CONFIG_SCHEMA_KEY)
@@ -680,6 +691,21 @@ class _Accumulator:
     identity_unverified_rows: List[Dict[str, Any]] = field(default_factory=list)
     oracle_rows: List[Dict[str, Any]] = field(default_factory=list)
     config_integrity_violations: List[Dict[str, Any]] = field(default_factory=list)
+    # A broken ground-truth entry is one broken artifact however many pairs
+    # read it; reporting it per pair would inflate the violation count into a
+    # number about the run size rather than about the damage.
+    _reported_ground_truth: set = field(default_factory=set)
+
+    def report_ground_truth_defect(
+        self, record: PairOutcome, scope: Scope, kind: str, detail: str,
+    ) -> None:
+        key = (scope.name, record.sample_identity, record.function_name, kind)
+        if key in self._reported_ground_truth:
+            return
+        self._reported_ground_truth.add(key)
+        self.config_integrity_violations.append(
+            _row(record, scope, kind=kind, detail=detail)
+        )
 
 
 def _ground_truth_is_readable(
@@ -697,13 +723,13 @@ def _ground_truth_is_readable(
 
     truth = fact.semantic_ground_truth
     if truth not in KNOWN_GROUND_TRUTH_VERDICTS:
-        acc.config_integrity_violations.append(
-            _row(record, scope, kind="ground_truth_verdict_unknown", detail=truth)
+        acc.report_ground_truth_defect(
+            record, scope, "ground_truth_verdict_unknown", truth,
         )
         return False
     if truth in FORBIDDEN_BY_TRUTH and not (fact.ground_truth_evidence or "").strip():
-        acc.config_integrity_violations.append(
-            _row(record, scope, kind="ground_truth_without_evidence", detail=truth)
+        acc.report_ground_truth_defect(
+            record, scope, "ground_truth_without_evidence", truth,
         )
         return False
     return True

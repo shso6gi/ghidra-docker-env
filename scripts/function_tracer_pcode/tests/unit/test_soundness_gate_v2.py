@@ -657,6 +657,40 @@ def test_a_reviewed_relation_without_its_evidence_fails_the_gate(
     assert report.passed is False
 
 
+def test_one_broken_ground_truth_entry_is_reported_once(tmp_path, empty_compatibility):
+    """The defect is in the manifest entry, not in each pair that read it."""
+
+    for pair in ("B1", "B3", "B5"):
+        write_pair_status(tmp_path, EQ, "snippet", pair, "B2", "NOT_EQ")
+    write_ground_truth(tmp_path, {EQ: {"snippet": "CONFIRMED_EQ"}}, evidence=None)
+
+    report = build([tmp_path], empty_compatibility)
+
+    assert len(report.records) == 3
+    assert len(report.accumulator.config_integrity_violations) == 1
+
+
+def test_a_run_manifest_that_names_the_mode_twice_is_not_read(
+    tmp_path, empty_compatibility,
+):
+    """A sealed manifest cannot repeat a key, so a repeat means it was edited."""
+
+    write_pair_status(tmp_path, EQ, "snippet", "B1", "B2", "EQUIVALENT")
+    (tmp_path / soundness_gate.RUN_MANIFEST_FILE).write_text(
+        "analysis_config_schema=eqbench-analysis-config-v3\n"
+        "identical_fast_path=1\nidentical_fast_path=0\n",
+        encoding="utf-8",
+    )
+
+    report = build([tmp_path], empty_compatibility)
+
+    assert [info["mode"] for info in report.mode_by_scope.values()] == ["invalid"]
+    assert [row["kind"] for row in report.accumulator.config_integrity_violations] == [
+        "analysis_config_invalid",
+    ]
+    assert report.passed is False
+
+
 def test_a_verdict_this_gate_cannot_read_fails_the_gate(tmp_path, empty_compatibility):
     write_pair_status(tmp_path, EQ, "snippet", "B1", "B2", "NOT_EQ")
     write_ground_truth(tmp_path, {EQ: {"snippet": "CONFIRMED-EQ"}})
