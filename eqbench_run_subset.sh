@@ -107,6 +107,9 @@ export PARALLEL_JOBS="${PARALLEL_JOBS:-$(manifest_value setting PARALLEL_JOBS)}"
 export PAIR_PROCESS_TIMEOUT="${PAIR_PROCESS_TIMEOUT:-$(manifest_value setting PAIR_PROCESS_TIMEOUT)}"
 export EQBENCH_RESOURCE_ADMISSION="${EQBENCH_RESOURCE_ADMISSION:-$(manifest_value setting EQBENCH_RESOURCE_ADMISSION)}"
 export EQBENCH_BUILD_POLICY="${EQBENCH_BUILD_POLICY:-$(manifest_value setting EQBENCH_BUILD_POLICY)}"
+# Issue #15: passed through to both halves so the two run in the same mode
+# and the manifest below can say which one it was.
+export EQBENCH_IDENTICAL_FAST_PATH="${EQBENCH_IDENTICAL_FAST_PATH:-1}"
 
 mkdir -p "$OUTPUT_BASE_DIR"
 OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
@@ -227,6 +230,8 @@ ELAPSED=$(( $(date +%s) - START_EPOCH ))
     echo "pairwise_timeout=$(half_setting pairwise_timeout)"
     echo "pairwise_timeout_hard=$(half_setting pairwise_timeout_hard)"
     echo "pair_process_kill_after=$(half_setting pair_process_kill_after)"
+    echo "identical_fast_path=$(half_setting identical_fast_path)"
+    echo "analysis_config_schema=$(half_setting analysis_config_schema)"
     echo "$RUN_GIT_STATE_LINES"
     echo "start_time_utc=$START_TIME_UTC"
     echo "end_time_utc=$(validation_utc_timestamp)"

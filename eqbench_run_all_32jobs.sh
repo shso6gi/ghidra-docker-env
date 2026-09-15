@@ -67,6 +67,13 @@ EQBENCH_PROGRESS_INTERVAL_SECONDS="${EQBENCH_PROGRESS_INTERVAL_SECONDS:-5}"
 SKIP_COMPLETED_RESULTS="${SKIP_COMPLETED_RESULTS:-1}"
 ERROR_ONLY_RERUN="${ERROR_ONLY_RERUN:-0}"
 EQBENCH_DEBUG="${EQBENCH_DEBUG:-0}"
+# Issue #15: byte-identical inputs are decided from an identity proof before any
+# analysis.  Setting this to 0 passes --no-identical-fast-path so the same pairs
+# go through the ordinary pipeline, which is the oracle the improvement is
+# measured against.  The value is part of the analysis config identity
+# (analysis_config_schema below), so an ON pair status is never reused for an
+# OFF run.
+EQBENCH_IDENTICAL_FAST_PATH="${EQBENCH_IDENTICAL_FAST_PATH:-1}"
 DEFAULT_TMPDIR="$SCRIPT_DIR/tmp"
 if [[ -d /workspace && -w /workspace ]]; then
     DEFAULT_TMPDIR="/workspace/tmp"
@@ -103,6 +110,10 @@ fi
 if [[ ! "$EQBENCH_DEBUG" =~ ^[01]$ || ! "$SKIP_COMPLETED_RESULTS" =~ ^[01]$ \
     || ! "$ERROR_ONLY_RERUN" =~ ^[01]$ ]]; then
     echo "Error: EQBENCH_DEBUG, SKIP_COMPLETED_RESULTS, and ERROR_ONLY_RERUN must be 0 or 1" >&2
+    exit 1
+fi
+if [[ ! "$EQBENCH_IDENTICAL_FAST_PATH" =~ ^[01]$ ]]; then
+    echo "Error: EQBENCH_IDENTICAL_FAST_PATH must be 0 or 1" >&2
     exit 1
 fi
 if [[ ! "$EQBENCH_MAX_SAMPLES" =~ ^[0-9]+$ ]]; then
@@ -598,6 +609,9 @@ run_pair() {
         --stack-dump-file "$stack_dump_tmp"
         --stack-dump-artifact "$stack_dump_artifact"
     )
+    if [[ "$EQBENCH_IDENTICAL_FAST_PATH" == "0" ]]; then
+        equiv_cmd+=( --no-identical-fast-path )
+    fi
     if [[ "$EQBENCH_DEBUG" == "1" ]]; then
         equiv_cmd+=( -d )
     fi
@@ -1006,6 +1020,8 @@ callee_unbound_reuse_shadow=$FT_CALLEE_UNBOUND_REUSE_SHADOW
 skip_completed_results=$SKIP_COMPLETED_RESULTS
 error_only_rerun=$ERROR_ONLY_RERUN
 debug=$EQBENCH_DEBUG
+analysis_config_schema=eqbench-analysis-config-v3
+identical_fast_path=$EQBENCH_IDENTICAL_FAST_PATH
 eqbench_tmpdir=$EQBENCH_TMPDIR
 authority_keyset_id=$AUTHORITY_KEYSET_ID
 compile_axes=arm64,mips64 x clang,gcc x O0,O1,O2,O3

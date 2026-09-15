@@ -61,10 +61,28 @@ ANALYSIS_CONFIG_V1_FIELDS = frozenset({
     "pair_process_kill_after_seconds", "prefilter_source_census_digest",
 })
 ANALYSIS_CONFIG_V2_FIELDS = ANALYSIS_CONFIG_V1_FIELDS - {"skip_completed_results"}
+# Issue #15 PR-15-B.  The identical-input fast path changes what a pair's
+# result means, so it belongs to the analysis identity: an ON run and an OFF
+# run get different ``analysis_config_digest`` values and a pair status from
+# one is never reused for the other.  A run manifest opts in by naming the
+# schema; one that does not name it is read as v2 exactly as before.
+ANALYSIS_CONFIG_V3_FIELDS = ANALYSIS_CONFIG_V2_FIELDS | {"identical_fast_path"}
+ANALYSIS_CONFIG_V3_SCHEMA = "eqbench-analysis-config-v3"
+ANALYSIS_CONFIG_SCHEMA_KEY = "analysis_config_schema"
 MATRIX_RUN_SCOPES = frozenset({"REPRESENTATIVE", "FULL_EQBENCH", "FULL_NEQ"})
 
 
 def analysis_config_from_run(run: Mapping[str, str]) -> Mapping[str, Any]:
+    """The typed analysis config a run manifest describes.
+
+    A manifest that names ``analysis_config_schema`` must name one this reader
+    knows and must carry every field that schema requires; anything else is a
+    ``ValueError`` rather than a silent fall back to the older identity, which
+    would let an ON run and an OFF run share a digest.
+    """
+    schema = run.get(ANALYSIS_CONFIG_SCHEMA_KEY)
+    if schema is not None and schema != ANALYSIS_CONFIG_V3_SCHEMA:
+        raise ValueError("matrix run manifest names an unknown analysis config schema")
     try:
         config = {
             "schema": "eqbench-analysis-config-v2",
@@ -86,10 +104,20 @@ def analysis_config_from_run(run: Mapping[str, str]) -> Mapping[str, Any]:
             "pair_process_kill_after_seconds": run["pair_process_kill_after_seconds"],
             "prefilter_source_census_digest": run["prefilter_source_census_digest"],
         }
+        if schema == ANALYSIS_CONFIG_V3_SCHEMA:
+            config["schema"] = ANALYSIS_CONFIG_V3_SCHEMA
+            config["identical_fast_path"] = _exact_flag(run["identical_fast_path"])
     except (KeyError, ValueError) as exc:
         raise ValueError("matrix run manifest lacks typed analysis config") from exc
     validate_analysis_config(config)
     return config
+
+
+def _exact_flag(value: str) -> bool:
+    """``0``/``1`` only: a runner flag is never inferred from another spelling."""
+    if value not in ("0", "1"):
+        raise ValueError("matrix run manifest flag is not 0 or 1")
+    return value == "1"
 
 
 def validate_analysis_config(config: Mapping[str, Any]) -> None:
@@ -103,10 +131,13 @@ def validate_analysis_config(config: Mapping[str, Any]) -> None:
     expected_fields = {
         "eqbench-analysis-config-v1": ANALYSIS_CONFIG_V1_FIELDS,
         "eqbench-analysis-config-v2": ANALYSIS_CONFIG_V2_FIELDS,
+        ANALYSIS_CONFIG_V3_SCHEMA: ANALYSIS_CONFIG_V3_FIELDS,
     }.get(config.get("schema"))
     bool_fields = {"debug", "dry_run"}
     if config.get("schema") == "eqbench-analysis-config-v1":
         bool_fields.add("skip_completed_results")
+    if config.get("schema") == ANALYSIS_CONFIG_V3_SCHEMA:
+        bool_fields.add("identical_fast_path")
     if (
         expected_fields is None or set(config) != expected_fields
         or config["authority_kind"] != "EqBenchAnalysisConfig"
@@ -130,7 +161,10 @@ def normalize_semantic_analysis_config(config: Mapping[str, Any]) -> Mapping[str
     """Project historical v1 config onto the scheduling-free v2 authority."""
 
     validate_analysis_config(config)
-    if config["schema"] == "eqbench-analysis-config-v2":
+    if config["schema"] in ("eqbench-analysis-config-v2", ANALYSIS_CONFIG_V3_SCHEMA):
+        # A v3 config is *not* projected onto v2: dropping the fast-path field
+        # would make an ON run and an OFF run compare equal, which is exactly
+        # the confusion the field exists to prevent.
         return dict(config)
     normalized = {
         key: value for key, value in config.items()
@@ -151,6 +185,10 @@ def _legacy_analysis_config_from_run(run: Mapping[str, str]) -> Mapping[str, Any
     """
 
     config = dict(analysis_config_from_run(run))
+    if config["schema"] != "eqbench-analysis-config-v2":
+        # v1 predates both later schemas; a manifest that declares one of them
+        # has no v1 reading at all.
+        raise ValueError("this matrix run manifest has no legacy v1 analysis config")
     try:
         config["schema"] = "eqbench-analysis-config-v1"
         config["skip_completed_results"] = bool(int(run["skip_completed_results"]))
@@ -270,7 +308,11 @@ def build_matrix_publication_manifest(matrix_root: Path) -> Mapping[str, Any]:
     if run["analysis_config_digest"] != authority_digest(analysis_config):
         # A v1 publication is still a valid authority artifact.  Accept it
         # only when the stored digest exactly matches the reconstructed v1
-        # object; never silently replace a mismatched digest.
+        # object; never silently replace a mismatched digest.  A manifest that
+        # declares a later schema has no v1 reading, so its digest must match
+        # the config it declared.
+        if analysis_config["schema"] != "eqbench-analysis-config-v2":
+            raise ValueError("matrix analysis config digest differs")
         analysis_config = _legacy_analysis_config_from_run(run)
         if run["analysis_config_digest"] != authority_digest(analysis_config):
             raise ValueError("matrix analysis config digest differs")
