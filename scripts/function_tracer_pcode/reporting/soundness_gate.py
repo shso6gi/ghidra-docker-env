@@ -57,6 +57,7 @@ import json
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -85,6 +86,10 @@ TRUTH_NOT_EQ = "CONFIRMED_NOT_EQ"
 
 #: The outcome a reviewed relation forbids.
 FORBIDDEN_BY_TRUTH = {TRUTH_EQ: OUTCOME_NOT_EQ, TRUTH_NOT_EQ: OUTCOME_EQ}
+#: Every verdict this gate knows how to read.  A manifest that carries another
+#: one is not "a relation this gate happens not to check": it is a manifest
+#: this gate cannot read, and it fails closed instead of quietly checking less.
+KNOWN_GROUND_TRUTH_VERDICTS = frozenset({TRUTH_EQ, TRUTH_NOT_EQ, "UNKNOWN"})
 #: The outcome the dataset directory *suggests* is wrong.  Never a violation on
 #: its own -- only the input to an investigation row.
 MISMATCHED_BY_LABEL = {LABEL_EQ: OUTCOME_NOT_EQ, LABEL_NEQ: OUTCOME_EQ}
@@ -120,6 +125,19 @@ COMPATIBILITY_STATUSES = frozenset({
     COMPATIBILITY_VERIFIED, COMPATIBILITY_UNVERIFIED, COMPATIBILITY_NOT_APPLICABLE,
 })
 COMPATIBILITY_ANY_SUBJECT = "*"
+#: The key of one compatibility entry, and the fields each status requires.
+COMPATIBILITY_KEY_FIELDS = ("sample", "function", "assumption_kind", "subject")
+COMPATIBILITY_REQUIRED_FIELDS = frozenset(
+    {*COMPATIBILITY_KEY_FIELDS, "status", "evidence", "verified_by", "verified_at"}
+)
+COMPATIBILITY_OPTIONAL_FIELDS = frozenset({"note"})
+COMPATIBILITY_FILE_REQUIRED_FIELDS = frozenset({"schema", "entries"})
+COMPATIBILITY_FILE_OPTIONAL_FIELDS = frozenset({"note"})
+#: What ``evidence`` says when there is none.  A ``verified`` entry may not use
+#: it: "verified with no evidence" is the exact claim this file must not carry.
+COMPATIBILITY_NO_EVIDENCE = "none"
+#: ``verified_at`` is a UTC instant in the repository's usual spelling.
+_COMPATIBILITY_TIMESTAMP = "%Y-%m-%dT%H:%M:%SZ"
 DEFAULT_COMPATIBILITY_PATH = (
     Path(__file__).resolve().parents[2]
     / "eqbench"
@@ -144,6 +162,14 @@ class ConditionalCompatibility:
     sha256: Optional[str]
     entries: Mapping[Tuple[str, str, str, str], str]
 
+    @property
+    def verified_entry_count(self) -> int:
+        """How many entries could authorize a conditional violation at all."""
+
+        return sum(
+            1 for status in self.entries.values() if status == COMPATIBILITY_VERIFIED
+        )
+
     def status(self, sample: str, function: str, kind: str, subject: str) -> str:
         """``verified`` / ``unverified`` / ``not_applicable`` / ``unknown``.
 
@@ -164,12 +190,67 @@ class ConditionalCompatibility:
 EMPTY_COMPATIBILITY = ConditionalCompatibility(path=None, sha256=None, entries={})
 
 
+def _compatibility_text(row: Mapping[str, Any], name: str, path: Path) -> str:
+    value = row.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"conditional compatibility entry needs a non-empty {name}: {path}"
+        )
+    return value
+
+
+def _validate_compatibility_verification(row: Mapping[str, Any], path: Path) -> None:
+    """A ``verified`` entry must say what was checked, by whom and when.
+
+    This file is the *only* thing that can turn a conditional contradiction of
+    a reviewed relation into a soundness violation, so an entry that merely
+    spells the word "verified" is not enough: without the evidence and the
+    verifier, nothing distinguishes a real verification from a typo, and the
+    gate would be reporting an unproven violation as proven.
+
+    The other statuses assert nothing, so they must not carry a verifier: a
+    ``verified_by`` next to ``unverified`` is a contradiction, not extra
+    information.
+    """
+
+    status = row["status"]
+    if status == COMPATIBILITY_VERIFIED:
+        evidence = _compatibility_text(row, "evidence", path)
+        if evidence.strip().lower() == COMPATIBILITY_NO_EVIDENCE:
+            raise ValueError(
+                f"a verified conditional compatibility entry needs real evidence: {path}"
+            )
+        _compatibility_text(row, "verified_by", path)
+        stamp = _compatibility_text(row, "verified_at", path)
+        try:
+            datetime.strptime(stamp, _COMPATIBILITY_TIMESTAMP)
+        except ValueError as exc:
+            raise ValueError(
+                f"conditional compatibility verified_at is not a UTC instant "
+                f"({_COMPATIBILITY_TIMESTAMP}): {path}"
+            ) from exc
+        return
+    # unverified / not_applicable: evidence is free text (it may say "none"),
+    # and there is no verifier to name.
+    if not isinstance(row.get("evidence"), str):
+        raise ValueError(
+            f"conditional compatibility entry needs an evidence string: {path}"
+        )
+    for name in ("verified_by", "verified_at"):
+        if row.get(name) is not None:
+            raise ValueError(
+                f"only a verified conditional compatibility entry carries {name}: {path}"
+            )
+
+
 def load_conditional_compatibility(path: Path) -> ConditionalCompatibility:
     """Read the evaluation-side compatibility metadata, or raise ``ValueError``.
 
-    Every field is checked: a file the gate cannot fully understand must fail
-    the gate (C5) rather than silently contribute zero verified entries, which
-    would look exactly like "nothing is verified" and hide the breakage.
+    Every field is checked -- the file's own key set, each entry's key set, the
+    status, and (for ``verified``) the evidence and the verifier -- because a
+    file the gate cannot fully understand must fail the gate (C5) rather than
+    silently contribute zero verified entries, which would look exactly like
+    "nothing is verified" and hide the breakage.
     """
 
     raw = Path(path).read_bytes()
@@ -179,6 +260,9 @@ def load_conditional_compatibility(path: Path) -> ConditionalCompatibility:
         raise ValueError(f"conditional compatibility metadata is not JSON: {path}") from exc
     if not isinstance(payload, Mapping) or payload.get("schema") != COMPATIBILITY_SCHEMA:
         raise ValueError(f"unexpected conditional compatibility schema in {path}")
+    unknown = set(payload) - COMPATIBILITY_FILE_REQUIRED_FIELDS - COMPATIBILITY_FILE_OPTIONAL_FIELDS
+    if unknown or not COMPATIBILITY_FILE_REQUIRED_FIELDS <= set(payload):
+        raise ValueError(f"unexpected conditional compatibility file fields: {path}")
     rows = payload.get("entries")
     if not isinstance(rows, list):
         raise ValueError(f"conditional compatibility metadata has no entries: {path}")
@@ -186,17 +270,19 @@ def load_conditional_compatibility(path: Path) -> ConditionalCompatibility:
     for row in rows:
         if not isinstance(row, Mapping):
             raise ValueError(f"conditional compatibility entry is not an object: {path}")
-        key_fields = ("sample", "function", "assumption_kind", "subject")
-        for name in (*key_fields, "status"):
-            if not isinstance(row.get(name), str) or not row[name]:
-                raise ValueError(
-                    f"conditional compatibility entry lacks {name}: {path}"
-                )
+        unknown = set(row) - COMPATIBILITY_REQUIRED_FIELDS - COMPATIBILITY_OPTIONAL_FIELDS
+        if unknown or not COMPATIBILITY_REQUIRED_FIELDS <= set(row):
+            raise ValueError(
+                f"unexpected conditional compatibility entry fields {sorted(unknown)}: {path}"
+            )
+        for name in (*COMPATIBILITY_KEY_FIELDS, "status"):
+            _compatibility_text(row, name, path)
         if row["status"] not in COMPATIBILITY_STATUSES:
             raise ValueError(
                 f"conditional compatibility entry has an unknown status: {path}"
             )
-        key = tuple(row[name] for name in key_fields)
+        _validate_compatibility_verification(row, path)
+        key = tuple(row[name] for name in COMPATIBILITY_KEY_FIELDS)
         if key in entries:
             raise ValueError(f"duplicate conditional compatibility entry: {key}")
         entries[key] = row["status"]
@@ -596,6 +682,33 @@ class _Accumulator:
     config_integrity_violations: List[Dict[str, Any]] = field(default_factory=list)
 
 
+def _ground_truth_is_readable(
+    record: PairOutcome, scope: Scope, fact: Any, acc: _Accumulator,
+) -> bool:
+    """Can this gate call the manifest's verdict for this pair *verified*?
+
+    A reviewed relation is an authority claim, so it has to come with what the
+    reviewer checked (``scripts/eqbench/neq_ground_truth.tsv`` requires the
+    evidence column, and an ``Eq`` sample's relation carries its own).  A
+    ``CONFIRMED_*`` without evidence, or a verdict this reader does not know,
+    means the artifact is broken -- and a broken ground truth fails the gate
+    rather than silently downgrading a violation to an investigation.
+    """
+
+    truth = fact.semantic_ground_truth
+    if truth not in KNOWN_GROUND_TRUTH_VERDICTS:
+        acc.config_integrity_violations.append(
+            _row(record, scope, kind="ground_truth_verdict_unknown", detail=truth)
+        )
+        return False
+    if truth in FORBIDDEN_BY_TRUTH and not (fact.ground_truth_evidence or "").strip():
+        acc.config_integrity_violations.append(
+            _row(record, scope, kind="ground_truth_without_evidence", detail=truth)
+        )
+        return False
+    return True
+
+
 def _classify_ground_truth(
     record: PairOutcome, scope: Scope, conditional: ConditionalView, acc: _Accumulator,
 ) -> None:
@@ -607,6 +720,8 @@ def _classify_ground_truth(
         fact, reason = scope.manifest.lookup(
             record.sample_identity, record.function_name
         )
+    if fact is not None and not _ground_truth_is_readable(record, scope, fact, acc):
+        fact, reason = None, "unreadable_ground_truth_entry"
     truth = fact.semantic_ground_truth if fact is not None else None
     verified = truth in FORBIDDEN_BY_TRUTH
 
@@ -774,6 +889,11 @@ class GateReport:
             "metadata": {
                 "compatibility_file": self.compatibility.path,
                 "compatibility_sha256": self.compatibility.sha256,
+                # 0 means no conditional contradiction can be a violation in
+                # this run, whatever the conditional column says.
+                "compatibility_verified_entries": (
+                    self.compatibility.verified_entry_count
+                ),
             },
             "counts": [
                 {"label": label, "outcome": outcome, "count": count}
@@ -915,7 +1035,8 @@ def format_gate_report(report: GateReport) -> str:
     if report.compatibility.path is not None:
         lines.append(
             f"Conditional compatibility: {report.compatibility.path} "
-            f"sha256={report.compatibility.sha256}"
+            f"sha256={report.compatibility.sha256} "
+            f"verified entries={report.compatibility.verified_entry_count}"
         )
         lines.append("")
     lines.extend(_format_rows(

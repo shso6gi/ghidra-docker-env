@@ -172,7 +172,7 @@ def write_run_manifest(directory: Path, **fields) -> Path:
     return path
 
 
-def write_ground_truth(directory: Path, facts) -> Path:
+def write_ground_truth(directory: Path, facts, *, evidence="witness input 1 -> 2 / 0") -> Path:
     """``{sample: {function: verdict}}`` as the runner's manifest writes it."""
 
     directory.mkdir(parents=True, exist_ok=True)
@@ -188,7 +188,7 @@ def write_ground_truth(directory: Path, facts) -> Path:
                             "source_relation": "SOURCE_CHANGED",
                             "source_impact": "DIRECTLY_CHANGED",
                             "semantic_ground_truth": verdict,
-                            "ground_truth_evidence": "test",
+                            "ground_truth_evidence": evidence,
                         }
                         for function, verdict in functions.items()
                     },
@@ -201,21 +201,44 @@ def write_ground_truth(directory: Path, facts) -> Path:
     return path
 
 
-def write_compatibility(path: Path, entries) -> Path:
+VERIFIED_FIELDS = {
+    "evidence": "native run of the witness input with the callee's catalog value",
+    "verified_by": "reviewer",
+    "verified_at": "2026-09-15T00:00:00Z",
+}
+UNVERIFIED_FIELDS = {"evidence": "none", "verified_by": None, "verified_at": None}
+
+
+def compatibility_entry(sample, function, kind, subject, status, **overrides):
+    """One entry with exactly the fields its status requires."""
+
+    row = {
+        "sample": sample, "function": function,
+        "assumption_kind": kind, "subject": subject, "status": status,
+        **(VERIFIED_FIELDS if status == "verified" else UNVERIFIED_FIELDS),
+    }
+    row.update(overrides)
+    return {name: value for name, value in row.items() if value is not _DROP}
+
+
+class _Drop:
+    pass
+
+
+_DROP = _Drop()
+
+
+def write_compatibility(path: Path, entries, **file_overrides) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({
-            "schema": soundness_gate.COMPATIBILITY_SCHEMA,
-            "entries": [
-                {
-                    "sample": sample, "function": function,
-                    "assumption_kind": kind, "subject": subject, "status": status,
-                }
-                for sample, function, kind, subject, status in entries
-            ],
-        }),
-        encoding="utf-8",
-    )
+    payload = {
+        "schema": soundness_gate.COMPATIBILITY_SCHEMA,
+        "entries": [
+            compatibility_entry(*entry) if isinstance(entry, tuple) else entry
+            for entry in entries
+        ],
+    }
+    payload.update(file_overrides)
+    path.write_text(json.dumps(payload), encoding="utf-8")
     return path
 
 
@@ -610,6 +633,55 @@ def test_a_conditional_column_on_a_decided_pair_is_an_integrity_failure(
     assert report.passed is False
 
 
+@pytest.mark.parametrize("evidence", [None, "", "   "])
+def test_a_reviewed_relation_without_its_evidence_fails_the_gate(
+    tmp_path, empty_compatibility, evidence,
+):
+    """A relation is an authority claim, and a claim needs what was checked.
+
+    Without the evidence column the entry cannot be called verified -- but
+    silently demoting it to an investigation would hide a violation, so the
+    broken artifact fails the gate instead.
+    """
+
+    write_pair_status(tmp_path, EQ, "snippet", "B1", "B2", "NOT_EQ")
+    write_ground_truth(tmp_path, {EQ: {"snippet": "CONFIRMED_EQ"}}, evidence=evidence)
+
+    report = build([tmp_path], empty_compatibility)
+    acc = report.accumulator
+
+    assert [row["kind"] for row in acc.config_integrity_violations] == [
+        "ground_truth_without_evidence",
+    ]
+    assert acc.unconditional_verified_violations == []
+    assert report.passed is False
+
+
+def test_a_verdict_this_gate_cannot_read_fails_the_gate(tmp_path, empty_compatibility):
+    write_pair_status(tmp_path, EQ, "snippet", "B1", "B2", "NOT_EQ")
+    write_ground_truth(tmp_path, {EQ: {"snippet": "CONFIRMED-EQ"}})
+
+    report = build([tmp_path], empty_compatibility)
+
+    assert [row["kind"] for row in report.accumulator.config_integrity_violations] == [
+        "ground_truth_verdict_unknown",
+    ]
+    assert report.passed is False
+
+
+def test_an_unverified_verdict_needs_no_evidence(tmp_path, empty_compatibility):
+    """``UNKNOWN`` asserts nothing, so it carries no evidence and breaks nothing."""
+
+    write_pair_status(tmp_path, EQ, "snippet", "B1", "B2", "NOT_EQ")
+    write_ground_truth(tmp_path, {EQ: {"snippet": "UNKNOWN"}}, evidence=None)
+
+    report = build([tmp_path], empty_compatibility)
+
+    assert report.accumulator.config_integrity_violations == []
+    assert len(report.accumulator.dataset_label_mismatch_rows) == 1
+    assert report.passed is True
+
+
 def test_an_unreadable_ground_truth_fails_the_gate(tmp_path, empty_compatibility):
     write_pair_status(tmp_path, EQ, "snippet", "B1", "B2", "EQUIVALENT")
     (tmp_path / soundness_gate.GROUND_TRUTH_FILE).write_text("{", encoding="utf-8")
@@ -620,6 +692,138 @@ def test_an_unreadable_ground_truth_fails_the_gate(tmp_path, empty_compatibility
         "ground_truth_unreadable",
     ]
     assert report.passed is False
+
+
+# ---------------------------------------------------------------------------
+# the compatibility metadata is the only thing that can authorize A0c
+# ---------------------------------------------------------------------------
+
+
+def test_the_shipped_metadata_loads_and_verifies_nothing_yet():
+    """The file in the repository must satisfy the contract it is read under."""
+
+    loaded = soundness_gate.load_conditional_compatibility(
+        soundness_gate.DEFAULT_COMPATIBILITY_PATH
+    )
+    assert loaded.entries
+    assert loaded.verified_entry_count == 0
+
+
+@pytest.mark.parametrize("overrides,match", [
+    pytest.param({"evidence": _DROP}, "entry fields", id="no-evidence-field"),
+    pytest.param({"evidence": ""}, "non-empty evidence", id="empty-evidence"),
+    pytest.param({"evidence": "none"}, "needs real evidence", id="evidence-says-none"),
+    pytest.param({"evidence": "NONE"}, "needs real evidence", id="evidence-says-none-caps"),
+    pytest.param({"verified_by": None}, "non-empty verified_by", id="no-verifier"),
+    pytest.param({"verified_by": ""}, "non-empty verified_by", id="empty-verifier"),
+    pytest.param({"verified_at": None}, "non-empty verified_at", id="no-timestamp"),
+    pytest.param({"verified_at": "yesterday"}, "not a UTC instant", id="prose-timestamp"),
+    pytest.param({"verified_at": "2026-13-01T00:00:00Z"}, "not a UTC instant",
+                 id="impossible-timestamp"),
+    pytest.param({"verified_at": "2026-09-15"}, "not a UTC instant", id="date-only"),
+])
+def test_a_verified_entry_without_its_evidence_and_verifier_is_refused(
+    tmp_path, overrides, match,
+):
+    """"verified" is an authority claim; without evidence it is only a word.
+
+    This file is the only thing that can turn a conditional contradiction into
+    a soundness violation, so an entry that cannot say what was checked, by
+    whom and when must not be readable at all.
+    """
+
+    path = write_compatibility(tmp_path / "c.json", [
+        compatibility_entry(NEQ, "SphereConstructor", COMPAT_KIND, "log", "verified",
+                            **overrides),
+    ])
+    with pytest.raises(ValueError, match=match):
+        soundness_gate.load_conditional_compatibility(path)
+
+
+@pytest.mark.parametrize("status", ["unverified", "not_applicable"])
+@pytest.mark.parametrize("overrides", [
+    pytest.param({"verified_by": "reviewer"}, id="verifier"),
+    pytest.param({"verified_at": "2026-09-15T00:00:00Z"}, id="timestamp"),
+])
+def test_only_a_verified_entry_may_name_a_verifier(tmp_path, status, overrides):
+    path = write_compatibility(tmp_path / "c.json", [
+        compatibility_entry(NEQ, "SphereConstructor", COMPAT_KIND, "log", status,
+                            **overrides),
+    ])
+    with pytest.raises(ValueError, match="only a verified"):
+        soundness_gate.load_conditional_compatibility(path)
+
+
+@pytest.mark.parametrize("entries,file_overrides,match", [
+    pytest.param([{"sample": NEQ, "function": "f", "assumption_kind": COMPAT_KIND,
+                   "subject": "*", "status": "unverified", "evidence": "none",
+                   "verified_by": None, "verified_at": None, "extra": 1}],
+                 {}, "entry fields", id="unknown-entry-field"),
+    pytest.param([{"sample": NEQ, "function": "f", "assumption_kind": COMPAT_KIND,
+                   "subject": "*", "status": "unverified"}],
+                 {}, "entry fields", id="missing-required-fields"),
+    pytest.param([], {"extra": 1}, "file fields", id="unknown-file-field"),
+    pytest.param([(NEQ, "f", COMPAT_KIND, "*", "maybe")], {}, "unknown status",
+                 id="unknown-status"),
+    pytest.param([(NEQ, "f", COMPAT_KIND, "*", "unverified"),
+                  (NEQ, "f", COMPAT_KIND, "*", "verified")], {}, "duplicate",
+                 id="duplicate-key"),
+])
+def test_metadata_the_gate_cannot_fully_understand_is_refused(
+    tmp_path, entries, file_overrides, match,
+):
+    path = write_compatibility(tmp_path / "c.json", entries, **file_overrides)
+    with pytest.raises(ValueError, match=match):
+        soundness_gate.load_conditional_compatibility(path)
+
+
+def test_an_unreadable_metadata_file_cannot_authorize_a_conditional_violation(
+    tmp_path,
+):
+    """Fail-closed twice: gate C fails, and nothing counts as verified.
+
+    The entry below would make the contradiction a violation if the file were
+    accepted; because one of its siblings is malformed the whole file is
+    refused, so the row stays an investigation and the run fails on C instead.
+    """
+
+    write_conditional_pair(
+        tmp_path, NEQ, "SphereConstructor", "cond-broken-metadata", Outcome.EQUIVALENT,
+    )
+    write_ground_truth(tmp_path, {NEQ: {"SphereConstructor": "CONFIRMED_NOT_EQ"}})
+    compat = write_compatibility(tmp_path / "c.json", [
+        compatibility_entry(NEQ, "SphereConstructor", COMPAT_KIND, "log", "verified"),
+        compatibility_entry(NEQ, "other", COMPAT_KIND, "*", "verified", evidence="none"),
+    ])
+
+    report = build([tmp_path], compat)
+    acc = report.accumulator
+
+    assert [row["kind"] for row in acc.config_integrity_violations] == [
+        "conditional_compatibility_unreadable",
+    ]
+    assert acc.conditional_verified_violations == []
+    assert len(acc.compatibility_unknown_rows) == 1
+    # The metadata block says the file was not used at all, so the 0 below
+    # cannot be read as "the file was read and verifies nothing".
+    assert report.as_dict()["metadata"] == {
+        "compatibility_file": None,
+        "compatibility_sha256": None,
+        "compatibility_verified_entries": 0,
+    }
+    assert report.passed is False
+
+
+def test_the_report_says_how_many_entries_could_authorize_a_violation(tmp_path):
+    write_pair_status(tmp_path, EQ, "snippet", "B1", "B2", "EQUIVALENT")
+    compat = write_compatibility(tmp_path / "c.json", [
+        compatibility_entry(NEQ, "SphereConstructor", COMPAT_KIND, "log", "verified"),
+        compatibility_entry(NEQ, "SphereConstructor", COMPAT_KIND, "sin", "unverified"),
+    ])
+
+    payload = build([tmp_path], compat).as_dict()
+
+    assert payload["metadata"]["compatibility_verified_entries"] == 1
 
 
 def test_broken_compatibility_metadata_fails_the_gate(tmp_path):
@@ -848,6 +1052,64 @@ def test_an_unreadable_disposition_fails_the_gate_when_the_fast_path_is_on(
 
     assert [row["violation_kind"] for row in acc.fast_path_violations] == ["unverifiable"]
     assert acc.identical_rows[0]["result_json"] == detail
+    assert report.passed is False
+
+
+@pytest.mark.parametrize("fields,mode", [
+    pytest.param({}, "legacy_unknown", id="legacy"),
+    pytest.param({"identical_fast_path": "0",
+                  "analysis_config_schema": "eqbench-analysis-config-v3"},
+                 "off", id="off"),
+])
+def test_a_timeout_pair_is_never_reported_as_a_confirmed_same_function(
+    tmp_path, empty_compatibility, fields, mode,
+):
+    """A pair the runner killed left no result JSON, so there is nothing to confirm.
+
+    The identity is not reconstructed from the sha alone and not guessed from
+    the pair's siblings: byte-identical inputs say the two *files* are the
+    same, not that the checker resolved one and the same function in both.  An
+    oracle run must therefore report such a pair as unverified, and gate A must
+    stay silent about it.
+    """
+
+    _identical_pair(tmp_path, "TIMEOUT", with_log=False)
+    write_run_manifest(tmp_path, run_kind="test", **fields)
+
+    report = build([tmp_path], empty_compatibility)
+    acc = report.accumulator
+
+    assert len(acc.identical_rows) == 1
+    row = acc.identical_rows[0]
+    assert row["identity"] == "same_function_unverified"
+    assert (row["identity_detail"], row["result_json"]) == (
+        "result_json_unusable", "log_absent",
+    )
+    assert acc.identity_unverified_rows == [row]
+    assert acc.identical_soundness_violations == []
+    assert acc.fast_path_violations == []
+    assert acc.oracle_rows == ([row] if mode == "off" else [])
+    assert report.counts_by_mode == {mode: 1}
+    assert report.passed is True
+
+
+def test_the_same_timeout_pair_fails_gate_b_when_the_fast_path_is_on(
+    tmp_path, empty_compatibility,
+):
+    """With the fast path on, "we cannot check" is a failure, not a pass."""
+
+    _identical_pair(tmp_path, "TIMEOUT", with_log=False)
+    write_run_manifest(
+        tmp_path, analysis_config_schema="eqbench-analysis-config-v3",
+        identical_fast_path="1",
+    )
+
+    report = build([tmp_path], empty_compatibility)
+
+    assert [row["violation_kind"] for row in report.accumulator.fast_path_violations] == [
+        "unverifiable",
+    ]
+    assert report.accumulator.identical_soundness_violations == []
     assert report.passed is False
 
 
