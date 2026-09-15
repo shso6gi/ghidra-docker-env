@@ -44,10 +44,9 @@ def write_pair_status(
 
 
 def run_tree(root: Path, **overrides) -> Path:
-    write_pair_status(
-        root, "a/b/Eq/newV", "f", "B1", "B2",
-        left_path="work/a-O0", right_path="work/a-O1", **overrides,
-    )
+    fields = {"left_path": "work/a-O0", "right_path": "work/a-O1"}
+    fields.update(overrides)
+    write_pair_status(root, "a/b/Eq/newV", "f", "B1", "B2", **fields)
     return root
 
 
@@ -86,7 +85,7 @@ def test_two_pairs_disagreeing_about_one_binary_is_an_error(tmp_path):
 
 @pytest.mark.parametrize("overrides,match", [
     pytest.param({"target": False}, "no execution target", id="no-target"),
-    pytest.param({"left_sha": ""}, "usable left binary", id="empty-digest"),
+    pytest.param({"left_path": ""}, "usable left binary", id="no-path"),
 ])
 def test_a_status_that_names_no_binary_fails_the_build(tmp_path, overrides, match):
     with pytest.raises(binary_manifest.ManifestError, match=match):
@@ -109,11 +108,61 @@ def test_a_rebuilt_binary_on_disk_fails_the_build(tmp_path):
         manifest_of(root, binary_root=binaries)
 
 
-def test_a_binary_that_is_gone_does_not_fail_the_build(tmp_path):
-    """The manifest records what the run compared; a working root may be deleted."""
+def test_a_binary_that_is_gone_fails_the_build_under_a_binary_root(tmp_path):
+    """``--binary-root`` claims the compared tree is still there.
+
+    A missing file refutes that claim exactly as much as a changed one, and
+    skipping it would turn "I could not look" into "they agree" -- which is
+    what this tool exists to prevent.  A caller whose working root is gone
+    omits the option and gets the manifest without the claim.
+    """
 
     root = run_tree(tmp_path / "run")
-    assert len(manifest_of(root, binary_root=tmp_path / "absent")) == 2
+
+    with pytest.raises(binary_manifest.ManifestError, match="not under the binary root"):
+        manifest_of(root, binary_root=tmp_path / "absent")
+    # Without the claim, the manifest is still produced.
+    assert len(manifest_of(root)) == 2
+
+
+def test_a_partially_present_binary_root_fails_the_build(tmp_path):
+    import hashlib
+
+    content = b"the exact binary"
+    digest = hashlib.sha256(content).hexdigest()
+    root = tmp_path / "run"
+    write_pair_status(root, "a/b/Eq/newV", "f", "B1", "B2",
+                      left_path="work/a-O0", right_path="work/a-O1",
+                      left_sha=digest, right_sha=digest)
+    binaries = tmp_path / "root"
+    (binaries / "work").mkdir(parents=True)
+    (binaries / "work" / "a-O0").write_bytes(content)
+
+    with pytest.raises(binary_manifest.ManifestError, match="not under the binary root"):
+        manifest_of(root, binary_root=binaries)
+
+
+@pytest.mark.parametrize("digest", [
+    pytest.param("", id="empty"),
+    pytest.param("abc", id="short"),
+    pytest.param("z" * 64, id="non-hex"),
+    pytest.param("a" * 63, id="one-short"),
+    pytest.param("a" * 65, id="one-long"),
+    pytest.param("sha256:" + "a" * 64, id="prefixed"),
+    pytest.param(None, id="null"),
+])
+def test_a_digest_that_is_not_a_sha256_is_never_compared(tmp_path, digest):
+    """Two runs must not look equal because neither carried a usable digest."""
+
+    with pytest.raises(binary_manifest.ManifestError, match="not a sha256"):
+        manifest_of(run_tree(tmp_path / "run", left_sha=digest))
+
+
+def test_a_digest_is_compared_in_one_spelling(tmp_path):
+    """Case is normalized, so the same digest never reads as two."""
+
+    rows = manifest_of(run_tree(tmp_path / "run", left_sha=SHA_A.upper()))
+    assert rows[("a/b/Eq/newV", "B1", "work/a-O0")] == SHA_A
 
 
 def test_a_binary_still_on_disk_is_rehashed_and_accepted(tmp_path):
@@ -204,6 +253,16 @@ def test_a_manifest_round_trips_through_its_file(tmp_path):
     pytest.param(
         binary_manifest.MANIFEST_HEADER + "\n" + "\t".join(binary_manifest.COLUMNS) + "\n",
         "holds no binary", id="empty",
+    ),
+    pytest.param(
+        binary_manifest.format_manifest(sorted(BASE.items()))
+        + "a/b/Eq/newV\tB3\twork/a-O2\tnot-a-digest\n",
+        "not a sha256", id="malformed-digest",
+    ),
+    pytest.param(
+        binary_manifest.format_manifest(sorted(BASE.items()))
+        + "\tB3\twork/a-O2\t" + "c" * 64 + "\n",
+        "empty field", id="empty-key-field",
     ),
 ])
 def test_a_manifest_file_that_cannot_be_trusted_is_refused(tmp_path, text, match):

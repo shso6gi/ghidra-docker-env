@@ -9,8 +9,9 @@ runs analysed the same bytes.  This tool answers that from the runs themselves:
     each side of each pair, the ``pair_execution_target``'s binary path, binary
     id and sha256.  The digests are the ones the runner sealed into the target
     *before* the pair ran, so they describe the binary that was compared, not
-    whatever happens to be on disk now.  When the file is still present under
-    ``--binary-root`` its sha256 is recomputed and a difference is an error.
+    whatever happens to be on disk now.  With ``--binary-root`` every one of
+    them is re-hashed there and a missing or differing file is an error --
+    "I could not look" must not read as "they agree".
 
 ``compare``
     two manifests agree only when they name **the same set of keys** and every
@@ -26,12 +27,19 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 MANIFEST_HEADER = "# eqbench-binary-manifest-v1"
 COLUMNS = ("sample_identity", "binary_id", "binary_relative_path", "sha256")
+
+#: Only a full sha256 counts as a digest.  A short, upper-case, empty or
+#: otherwise malformed value is not "a digest that happens to differ": it is a
+#: value this tool cannot compare, and comparing it would let two runs look
+#: equal because neither carried a usable one.
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 PAIR_STATUS_SUFFIX = ".pair-status.json"
 
@@ -53,16 +61,24 @@ def _sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+def exact_sha256(value: object) -> str:
+    """``value`` as a lower-case sha256, or ``ManifestError``."""
+
+    digest = value.strip().lower() if isinstance(value, str) else None
+    if digest is None or not _SHA256.match(digest):
+        raise ManifestError(f"binary digest is not a sha256: {value!r}")
+    return digest
+
+
 def _sides(target: Mapping[str, object]) -> Iterable[Tuple[str, str, str]]:
     for side in ("left", "right"):
         binary_id = target.get(f"{side}_binary_id")
         path = target.get(f"{side}_binary_path")
-        sha256 = target.get(f"{side}_binary_sha256")
-        if not all(isinstance(value, str) and value for value in (binary_id, path, sha256)):
+        if not all(isinstance(value, str) and value for value in (binary_id, path)):
             raise ManifestError(
                 f"pair execution target lacks a usable {side} binary: {target!r}"
             )
-        yield str(binary_id), str(path), str(sha256).lower()
+        yield str(binary_id), str(path), exact_sha256(target.get(f"{side}_binary_sha256"))
 
 
 def build_manifest(
@@ -108,19 +124,22 @@ def build_manifest(
 
 
 def _verify_against_disk(rows: Mapping[Key, str], binary_root: Path) -> None:
-    """Re-hash the files that are still there; a difference is an error.
+    """Re-hash every binary the run named; missing or different is an error.
 
-    A binary that is gone is not an error here: the manifest records what the
-    run compared, and a working root may legitimately have been removed after
-    the run.  A binary that is present but different means the tree was
-    rebuilt, which would invalidate exactly the comparison this tool exists to
-    protect.
+    ``--binary-root`` is a claim: "the tree the run compared is still here".
+    A file that is absent refutes that claim just as much as one that changed,
+    and skipping it would turn an unverifiable manifest into a verified one --
+    the exact failure this tool exists to prevent.  A caller that only wants
+    the manifest (because the working root is gone) simply omits the option.
     """
 
     for (sample, binary_id, relative), sha256 in rows.items():
         candidate = binary_root / relative
         if not candidate.is_file():
-            continue
+            raise ManifestError(
+                f"binary the run compared is not under the binary root: "
+                f"{sample} {binary_id} {relative} (looked at {candidate})"
+            )
         observed = _sha256_of(candidate)
         if observed != sha256:
             raise ManifestError(
@@ -151,10 +170,12 @@ def parse_manifest(path: Path) -> Dict[Key, str]:
         if len(fields) != len(COLUMNS):
             raise ManifestError(f"binary manifest row is malformed: {path}: {line!r}")
         sample, binary_id, relative, sha256 = fields
+        if not all((sample, binary_id, relative)):
+            raise ManifestError(f"binary manifest row has an empty field: {path}: {line!r}")
         key: Key = (sample, binary_id, relative)
         if key in rows:
             raise ManifestError(f"duplicate binary manifest row: {path}: {key}")
-        rows[key] = sha256
+        rows[key] = exact_sha256(sha256)
     if not rows:
         raise ManifestError(f"binary manifest holds no binary: {path}")
     return rows
@@ -190,9 +211,9 @@ def build_parser() -> argparse.ArgumentParser:
     build_command.add_argument(
         "--binary-root", type=Path, default=None,
         help=(
-            "re-hash each binary under this root (the target paths are repo "
-            "relative, so this is normally the repo root) and fail when a file "
-            "that is still there differs from what the run compared"
+            "re-hash every binary under this root (the target paths are repo "
+            "relative, so this is normally the repo root) and fail when one is "
+            "missing or differs from what the run compared"
         ),
     )
 
