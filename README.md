@@ -535,8 +535,25 @@ The shared gate (`soundness-gate-v2`) fails on, and only on:
   or one whose disposition cannot be read (`unverifiable`);
 - a configuration or integrity failure: a `eqbench-analysis-config-v3` manifest
   without a usable `identical_fast_path`, an `off` run whose results say the
-  fast path was applied, a conditional column that does not hold together, an
-  unreadable ground truth, broken compatibility metadata.
+  fast path was applied, a conditional column that does not hold together, a
+  ground truth that is unreadable or that claims `CONFIRMED_*` without the
+  evidence column, broken compatibility metadata.
+
+Both things the gate calls *verified* have to carry their authority with them.
+A reviewed relation comes from `scripts/eqbench/neq_ground_truth.tsv`, whose
+evidence column is required (an `Eq` sample's relation carries
+`eq_sample_single_source`); a `CONFIRMED_*` entry that reaches the gate without
+evidence fails it rather than quietly becoming an investigation. A `verified`
+compatibility entry must carry a real `evidence` (not `none`), a `verified_by`
+and a `verified_at` UTC instant (`YYYY-MM-DDTHH:MM:SSZ`); the other statuses
+must carry neither verifier field. A file the loader cannot fully understand —
+an unknown field, a missing one, a duplicate key — is refused whole, so a
+broken entry can never authorize a conditional violation.
+
+A pair the runner killed at its deadline leaves no result JSON, so there is
+nothing to observe: its identity is never reconstructed from the input sha
+alone, it is reported as `same_function_unverified`, gate A stays silent about
+it, and with the fast path `on` gate B fails closed on it (`unverifiable`).
 
 A dataset-label mismatch, an unregistered function, an `UNKNOWN` verdict and an
 unverified premise are counted and reported as investigations; they never fail
@@ -603,11 +620,22 @@ python3 -m scripts.eqbench.binary_manifest compare \
 `compare` succeeds only when the two manifests name the **same set of keys**
 (`sample_identity`, `binary_id`, path) **and** the same digest for every key: a
 binary that appeared, disappeared, moved or changed all fail the same way,
-because any of them makes an outcome difference ambiguous. `--binary-root`
-re-hashes each file that is still present and fails when it differs from what
-the run compared; a file that is gone is not an error, because a working root
-may legitimately have been removed after the run. Run `compare` before using
-two runs as before/after of each other.
+because any of them makes an outcome difference ambiguous. Only a full
+lower-case sha256 counts as a digest, so two runs can never look equal because
+neither carried a usable one. `--binary-root` asserts that the compared tree is
+still there: every binary is re-hashed under it and a **missing** file fails
+just like a changed one — omit the option when the working root is gone and you
+only want the manifest. Run `compare` before using two runs as before/after of
+each other.
+
+`outcome_transition --reason-sets` says which pairs it could actually compare.
+A pair without a readable result payload is `incomparable`, never a match, and
+the report splits that bucket: `payload_loss` counts the pairs whose *decided*
+outcome means the run produced a payload and then lost it (a real difference),
+while a `TIMEOUT`/`ERROR` pair owes no payload at all — whether it flushed one
+before the kill is a matter of milliseconds and differs between runs of the
+same commit. An oracle comparison therefore requires `changed`, `reason-set
+mismatch` and `payload_loss` to be 0; `incomparable` alone is not a defect.
 
 Runs are made against a fresh writable copy of the benchmark tree, never against
 the canonical `targets/EqBench` checkout (the runners write compiled binaries
