@@ -3,12 +3,21 @@
 
 import time
 
-from scripts.function_tracer_pcode.checker.debug_trace import DebugTrace, TransitionReason
+from scripts.function_tracer_pcode.checker.debug_trace import (
+    Attempt,
+    DebugTrace,
+    TransitionReason,
+)
 from scripts.function_tracer_pcode.checker.diagnostics import (
     PhaseTimeline,
     attach_phase_timings,
     phase_timeline_of,
     unknown_reason_ids,
+)
+from scripts.function_tracer_pcode.checker.identical_fast_path import (
+    IDENTICAL_FUNCTION_IDENTITY_STAGE,
+    assess_identical_function_identity,
+    attach_identity_assessment,
 )
 from scripts.function_tracer_pcode.checker.phases.handler import (
     DEFAULT_PHASE_PLAN,
@@ -92,8 +101,87 @@ def _run_phase_plan(
     binary1_id: str | None = None,
     binary2_id: str | None = None,
 ):
-    """phase plan 本体（診断の添付は呼び出し側が行う）"""
+    """identity 評価（Issue #15）を先に済ませてから phase plan を走らせる。
+
+    identity の評価は authority session の内側（`session.execution_payload` と
+    `operational_program_binary_identities` が有効な区間）でしか意味を持たないので
+    ここで行う。適用できた pair はその場で確定し、それ以外は従来どおり解析へ進む。
+    評価結果は `_run_phase_plan` の local だけに置き、どの return 点を通っても
+    最後に 1 箇所（`attach_identity_assessment`）で結果へ載せる。
+    """
     start_time = time.time()
+    assessment = assess_identical_function_identity(
+        checker,
+        program1,
+        program2,
+        function_name1,
+        function_name2,
+        binary1_id=binary1_id,
+        binary2_id=binary2_id,
+        start_time=start_time,
+    )
+    if assessment is not None and assessment.fast_path_result is not None:
+        return attach_identity_assessment(
+            _identical_fast_path_trace(assessment.fast_path_result, start_time),
+            assessment,
+        )
+    return attach_identity_assessment(
+        _run_phase_stages(
+            checker,
+            program1,
+            program2,
+            function_name1,
+            function_name2,
+            decompile_timeout=decompile_timeout,
+            save_formula=save_formula,
+            retry_with_type_fix=retry_with_type_fix,
+            binary1_id=binary1_id,
+            binary2_id=binary2_id,
+            start_time=start_time,
+        ),
+        assessment,
+    )
+
+
+def _identical_fast_path_trace(result, start_time: float):
+    """fast path で確定した結果に、stage 1 行だけの trace を付ける。"""
+    debug_trace = DebugTrace(
+        planned_phases=[IDENTICAL_FUNCTION_IDENTITY_STAGE],
+        known_phases=[IDENTICAL_FUNCTION_IDENTITY_STAGE],
+    )
+    debug_trace.add_attempt(Attempt(
+        attempt_id=0,
+        retry_count=0,
+        phase=IDENTICAL_FUNCTION_IDENTITY_STAGE,
+        stage_path=[IDENTICAL_FUNCTION_IDENTITY_STAGE],
+        strategy=IDENTICAL_FUNCTION_IDENTITY_STAGE,
+        result=result.is_equivalent,
+        transition_reason=(
+            TransitionReason.UNSAT.value if result.is_equivalent is True
+            else TransitionReason.CRITICAL_ERROR.value
+        ),
+    ))
+    return _attach_trace_and_return(
+        result, debug_trace, start_time, result.is_equivalent
+    )
+
+
+def _run_phase_stages(
+    checker,
+    program1,
+    program2,
+    function_name1: str,
+    function_name2: str,
+    decompile_timeout: int = 60,
+    save_formula: bool = False,
+    retry_with_type_fix: bool = False,
+    binary1_id: str | None = None,
+    binary2_id: str | None = None,
+    start_time: float | None = None,
+):
+    """phase plan 本体（診断の添付は呼び出し側が行う）"""
+    if start_time is None:
+        start_time = time.time()
     phase_timeline = phase_timeline_of(checker)
     binary1_name = program1.getName() if hasattr(program1, "getName") else "binary1"
     binary2_name = program2.getName() if hasattr(program2, "getName") else "binary2"

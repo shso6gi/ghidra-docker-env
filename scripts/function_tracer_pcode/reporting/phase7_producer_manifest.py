@@ -50,6 +50,7 @@ EMITTERS = frozenset({
     "_emit_return_width_signal_once",
     "emit_operational_extraction_signal",
     "emit_comparison_closure_signal",
+    "emit_identical_function_identity_signal",
 })
 
 _DOMAIN_BY_EMITTER = {
@@ -63,6 +64,7 @@ _DOMAIN_BY_EMITTER = {
     "_emit_return_width_signal_once": "return_width",
     "emit_operational_extraction_signal": "operational_extraction",
     "emit_comparison_closure_signal": "comparison_closure",
+    "emit_identical_function_identity_signal": "identical_function_identity",
 }
 
 _DOMAIN_BY_SITE_OVERRIDE = {
@@ -157,6 +159,9 @@ _PRODUCER_IDS_BY_SITE = {
         "subordinate-parent-authority-producer-v2",
     ),
     "comparison-inconclusive-terminal": ("comparison-closure-producer-v1",),
+    "checker-identical-function-identity": (
+        "identical-function-identity-producer-v1",
+    ),
 }
 
 _DISPOSITIONS_BY_SITE = {
@@ -198,6 +203,7 @@ _DISPOSITIONS_BY_SITE = {
         for spec in SAT_SAFETY_PRODUCER_SITE_SPECS
     },
     "comparison-inconclusive-terminal": ("ELIGIBLE",),
+    "checker-identical-function-identity": ("DECISIVE",),
 }
 
 

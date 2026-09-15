@@ -167,6 +167,7 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         observation_contract: Optional[EquivalenceObservationContract] = None,
         call_proof_decision_mode: str = "preflight_projection",
         canonical_decision_cutover: bool = True,
+        identical_fast_path: bool = True,
     ):
         """
         Args:
@@ -178,6 +179,9 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                 変更しておらず、設定は判定に影響しない。
             rewrite_direction: 非推奨・無効（同上）。
             strategy: 判定戦略 ("pairwise" or "monolithic")
+            identical_fast_path: 同一バイナリ・同一関数を identity proof で
+                早期に EQUIVALENT 確定する（Issue #15）。False でも identity の
+                観測と結果 JSON への記録は続ける。
         """
         self.timeout = timeout
         self.debug = debug
@@ -220,6 +224,11 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         if type(canonical_decision_cutover) is not bool:
             raise TypeError("canonical decision cutover flag must be exact bool")
         self.canonical_decision_cutover = canonical_decision_cutover
+        # Issue #15: 同一バイナリ・同一関数の identity proof による早期確定。
+        # 既定 ON。OFF にしても identity の観測（結果 JSON の evidence）は続ける。
+        if type(identical_fast_path) is not bool:
+            raise TypeError("identical fast path flag must be exact bool")
+        self.identical_fast_path = identical_fast_path
         if canonical_decision_cutover:
             from scripts.function_tracer_pcode.authority.decision.production_cutover import (
                 build_default_cutover_connector,

@@ -1,7 +1,7 @@
 {
-  "manifest_digest": "cd874e594529b82e2c17f1250615ce34723033e1ab081d75df0a7833c351bf44",
+  "manifest_digest": "ab6b3b7004cdeb4ee30c1a800dd56a8fbf7c23083d583c95003e9583177cc592",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
-  "site_count": 31,
+  "site_count": 32,
   "sites": [
     {
       "allowed_dispositions": [
@@ -137,6 +137,24 @@
       "path": "scripts/function_tracer_pcode/checker/preflight_gate.py",
       "producer_site_manifest_id": "checker-call-effect-proof-batch",
       "source_sha256": "8d9d1dd4fb59d67d40405ffb7d5e16d2f891d8d3d02ea2f4bf8b28360c8eed31"
+    },
+    {
+      "allowed_dispositions": [
+        "DECISIVE"
+      ],
+      "allowed_producer_ids": [
+        "identical-function-identity-producer-v1"
+      ],
+      "branch_or_attempt_contract_id": "checker-identical-function-identity:invocation",
+      "column": 18,
+      "domain": "identical_function_identity",
+      "emitter": "emit_identical_function_identity_signal",
+      "enclosing_function": "_apply_fast_path",
+      "expected_cause_slots": [],
+      "line": 349,
+      "path": "scripts/function_tracer_pcode/checker/identical_fast_path.py",
+      "producer_site_manifest_id": "checker-identical-function-identity",
+      "source_sha256": "455a387fdf9aa64365242d751ece7fe010132604ec2e3e925155bced792e4abf"
     },
     {
       "allowed_dispositions": [
@@ -538,10 +556,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1810,
+      "line": 1836,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "pairwise-loop-sat-safety-observed",
-      "source_sha256": "5ac38ca6684a43f5e2386b539fc04d1f21a63a971816018d59b793e7049386c8"
+      "source_sha256": "e8945b889d9bd54ae52800a542223054124f089797b2cd34f1788c968992c14c"
     },
     {
       "allowed_dispositions": [
@@ -1226,10 +1244,10 @@
       "emitter": "emit_sat_safety_completion_if_observed",
       "enclosing_function": "complete_observed_sat_safety_for_counterexample",
       "expected_cause_slots": [],
-      "line": 1433,
+      "line": 1459,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "sat-safety-counterexample-bound-completed",
-      "source_sha256": "5ac38ca6684a43f5e2386b539fc04d1f21a63a971816018d59b793e7049386c8"
+      "source_sha256": "e8945b889d9bd54ae52800a542223054124f089797b2cd34f1788c968992c14c"
     }
   ]
 }

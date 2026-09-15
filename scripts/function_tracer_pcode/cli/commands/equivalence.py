@@ -494,6 +494,7 @@ def run_equivalence_check(args):
         assume_fp_non_nan=getattr(args, "assume_fp_non_nan", False),
         observes_errno=getattr(args, "observe_errno", False),
         observes_fenv=getattr(args, "observe_fenv", False),
+        identical_fast_path=not getattr(args, "no_identical_fast_path", False),
     )
 
     available_solvers = checker.solver_runner.get_available_solvers()

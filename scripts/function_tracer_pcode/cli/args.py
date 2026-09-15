@@ -167,6 +167,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Recovery phases（型修正リトライなど）を無効にする（デフォルト: 有効）",
     )
     parser.add_argument(
+        "--no-identical-fast-path",
+        action="store_true",
+        help=(
+            "同一バイナリ・同一関数の identity proof による早期 EQUIVALENT 確定を"
+            "無効にする（デフォルト: 有効）。無効にしても identity の観測は結果 JSON に"
+            "残る（Issue #15 の oracle 用）"
+        ),
+    )
+    parser.add_argument(
         "--no-completed-recovery-proofs",
         action="store_true",
         help="completed recovery proof を結果へ反映しない（Phase 2 producer 検証用）",

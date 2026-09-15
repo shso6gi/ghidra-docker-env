@@ -161,6 +161,44 @@ All runners are configured through environment variables (`PARALLEL_JOBS`,
 `SKIP_COMPLETED_RESULTS`, `ERROR_ONLY_RERUN`, timeouts); see the header of each
 script for the full list and defaults.
 
+### Identical binary / identical function fast path
+
+A pair whose two inputs are the same bytes and whose two function names are the
+same is decided from an identity proof instead of an analysis (Issue #15). The
+fast path fires only when every one of these is observed:
+
+* the two `--binary-ids` inputs have the same `sha256` content identity, and the
+  two function names are equal;
+* `Program.getExecutableSHA256()` of **each** side equals **that side's** input
+  sha256 (two programs agreeing with each other but not with the inputs is not
+  enough);
+* exactly one function of that name exists in each program;
+* entry point, body range, image base, language ID and compiler spec ID are equal
+  on both sides.
+
+The proof is an artifact bound to this execution (result occurrence, execution
+identity digest, both binary IDs, content identity, function name, observation
+contract ID). It is emitted as the existing `EQ_CLOSURE` decisive proof, so the
+outcome still comes from the one canonical decision gate; if the artifact does
+not match the session, nothing is emitted and the pair is saved as a canonical
+`ERROR`, never as `EQUIVALENT`. No decompiler, analyzer or solver runs when the
+fast path fires.
+
+`--no-identical-fast-path` turns the early decision off (the default is on) while
+keeping the identity observation, so an unmodified run can be used as an oracle.
+The result JSON carries:
+
+* `identical_fast_path_disposition` — `{applicable, applied, reason}` (plus
+  `sha_mismatch_side` when a side's sha differs), present only for pairs whose
+  two inputs share one content identity and one function name;
+* `decisive_proof_provenance` — `{kind, proof_artifact_digest, artifact}`, present
+  only when the fast path decided the pair;
+* `function1_identity` / `function2_identity` — the observed binary-level identity
+  (`binary_function_identity_v1`), filled only after both sides' sha were checked
+  against the session inputs.
+
+Pairs that are not identical keep their previous result JSON unchanged.
+
 ### Measurement subset
 
 `scripts/function_tracer_pcode/reporting/eqbench_subset.json` fixes a small

@@ -91,6 +91,16 @@ class EquivalenceResult:
     binary2_content_identity: Optional[Tuple[Any, ...]] = None
     function1_identity: Optional[Tuple[Any, ...]] = None
     function2_identity: Optional[Tuple[Any, ...]] = None
+    # Issue #15: 同一バイナリ・同一関数の identity proof で確定したときの provenance
+    # と、その評価の顛末（適用可否と理由）。どちらも判定の authority ではなく、
+    # authority は `decision_receipt` / `final_outcome` のまま。値が無い pair では
+    # `to_dict()` に key ごと出さないので、非 identical pair の JSON は変わらない。
+    decisive_proof_provenance: Optional[Mapping[str, Any]] = field(
+        default=None, repr=False, compare=False
+    )
+    identical_fast_path_disposition: Optional[Mapping[str, Any]] = field(
+        default=None, repr=False, compare=False
+    )
     decision_receipt: Optional[Any] = field(default=None, repr=False, compare=False)
     final_outcome: Optional[str] = None
     # 条件付き（仮定依存）判定の列。無条件 authority とは別に保持し、
@@ -292,6 +302,12 @@ class EquivalenceResult:
             result["recurrence_promotion_receipt"] = dict(
                 self.recurrence_promotion_receipt
             )
+        if self.decisive_proof_provenance is not None:
+            result["decisive_proof_provenance"] = dict(self.decisive_proof_provenance)
+        if self.identical_fast_path_disposition is not None:
+            result["identical_fast_path_disposition"] = dict(
+                self.identical_fast_path_disposition
+            )
         
         # ★ 新規追加: mips64_abi_constraints
         if self.mips64_abi_constraints:
@@ -470,6 +486,17 @@ class EquivalenceResult:
         if self.decision_gated_by_pending_proof:
             lines.append("")
             lines.append("Decision gated: pending proof obligation blocks EQUIVALENT recovery")
+        if self.identical_fast_path_disposition is not None:
+            disposition = self.identical_fast_path_disposition
+            lines.append("")
+            lines.append(
+                "Identical function identity: applicable={applicable}, "
+                "applied={applied}, reason={reason}".format(
+                    applicable=disposition.get("applicable"),
+                    applied=disposition.get("applied"),
+                    reason=disposition.get("reason"),
+                )
+            )
                 
         lines.append("")
         

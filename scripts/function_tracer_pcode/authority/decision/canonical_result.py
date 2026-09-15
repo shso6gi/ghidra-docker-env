@@ -18,6 +18,7 @@ from scripts.function_tracer_pcode.authority.contracts import (
     authority_digest,
     canonical_value,
 )
+from scripts.function_tracer_pcode.authority.decision.decision import DecisiveProofKind
 from scripts.function_tracer_pcode.authority.decision.pair_status_authority import seal_pair_status
 from scripts.function_tracer_pcode.authority.process.supervisor import (
     PROCESS_DURABLE_REASON_REGISTRY,
@@ -486,6 +487,85 @@ def build_supervisor_canonical_result_finalization_bundle(
     return bundle
 
 
+#: Issue #15: identity proof で確定した結果の provenance と、その proof が
+#: 束縛する execution の field。provenance は判定の authority ではないが、
+#: receipt と食い違ったまま保存されることは内部不変条件の違反なので拒否する。
+_IDENTICAL_FUNCTION_IDENTITY_PROVENANCE_KIND = "identical_function_identity"
+_IDENTICAL_FUNCTION_IDENTITY_PAYLOAD_BINDING = (
+    ("left_binary_id", "binary1_id"),
+    ("right_binary_id", "binary2_id"),
+    ("function_name", "function_name1"),
+    ("function_name", "function_name2"),
+    ("observation_contract_id", "observation_contract_id"),
+)
+
+
+def _validate_decisive_proof_provenance(
+    provenance: Any, *, decisive_receipts: tuple[Any, ...],
+    execution_identity: Mapping[str, Any], execution_payload: Any,
+) -> None:
+    """`decisive_proof_provenance` が bundle の receipt と execution に join するか。
+
+    主たる fail-closed は producer 側の encoder（artifact を session と照合してから
+    でないと event を出さない）で、ここはその結果が保存物として矛盾していない
+    ことの再検証。到達したら内部不変条件違反なので `ValueError`。
+    """
+
+    if provenance is None:
+        return
+    if not isinstance(provenance, Mapping):
+        raise ValueError("decisive proof provenance is not a mapping")
+    if provenance.get("kind") != _IDENTICAL_FUNCTION_IDENTITY_PROVENANCE_KIND:
+        raise ValueError("decisive proof provenance kind is not recognized")
+    artifact = provenance.get("artifact")
+    if not isinstance(artifact, Mapping):
+        raise ValueError("decisive proof provenance lacks its artifact body")
+    artifact_digest = authority_digest(dict(artifact))
+    if provenance.get("proof_artifact_digest") != artifact_digest:
+        raise ValueError("decisive proof provenance digest differs from its artifact")
+    if len(decisive_receipts) != 1:
+        raise ValueError(
+            "identity proof provenance requires exactly one decisive receipt"
+        )
+    receipt = decisive_receipts[0]
+    if (
+        receipt.proof_kind is not DecisiveProofKind.EQ_CLOSURE
+        or receipt.proof_artifact_digest != artifact_digest
+    ):
+        raise ValueError("identity proof provenance is not the decisive EQ_CLOSURE")
+    if (
+        artifact.get("result_occurrence_id")
+        != execution_identity["result_occurrence_id"]
+        or artifact.get("execution_identity_digest")
+        != execution_identity["execution_identity_digest"]
+    ):
+        raise ValueError("identity proof provenance does not join the execution identity")
+    if execution_payload is None:
+        raise ValueError("identity proof provenance lacks its execution payload")
+    payload = dict(execution_payload)
+    for artifact_key, payload_key in _IDENTICAL_FUNCTION_IDENTITY_PAYLOAD_BINDING:
+        if artifact.get(artifact_key) != payload.get(payload_key):
+            raise ValueError(
+                "identity proof provenance does not join the execution payload"
+            )
+    content = canonical_value(artifact.get("binary_content_identity"))
+    for payload_key in ("binary1_content_identity", "binary2_content_identity"):
+        if content != _operational_content_identity(payload.get(payload_key)):
+            raise ValueError(
+                "identity proof provenance content identity differs from the input"
+            )
+
+
+def _operational_content_identity(value: Any) -> str:
+    from scripts.function_tracer_pcode.authority.lifecycle.production_boundary import (
+        _operational_binary_content_identity,
+    )
+
+    return _operational_binary_content_identity(
+        tuple(value) if type(value) in (tuple, list) else value
+    )
+
+
 def validate_canonical_result_finalization_bundle(
     bundle: Mapping[str, Any], *,
     result_payload_preimage: Mapping[str, Any] | None = None,
@@ -837,6 +917,13 @@ def validate_canonical_result_finalization_bundle(
             != authority_digest(raw_execution_payload)
         ):
             raise ValueError("result-entry occurrence does not join execution payload")
+    if result_payload_preimage is not None:
+        _validate_decisive_proof_provenance(
+            result_payload_preimage.get("decisive_proof_provenance"),
+            decisive_receipts=decisive,
+            execution_identity=identity,
+            execution_payload=execution_payload,
+        )
     semantic = bundle["canonical_semantic_result_projection"]
     if result_payload_preimage is not None:
         rebuilt_semantic = _semantic_projection(
