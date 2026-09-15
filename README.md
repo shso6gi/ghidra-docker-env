@@ -630,12 +630,22 @@ each other.
 
 `outcome_transition --reason-sets` says which pairs it could actually compare.
 A pair without a readable result payload is `incomparable`, never a match, and
-the report splits that bucket: `payload_loss` counts the pairs whose *decided*
-outcome means the run produced a payload and then lost it (a real difference),
-while a `TIMEOUT`/`ERROR` pair owes no payload at all — whether it flushed one
-before the kill is a matter of milliseconds and differs between runs of the
-same commit. An oracle comparison therefore requires `changed`, `reason-set
-mismatch` and `payload_loss` to be 0; `incomparable` alone is not a defect.
+the report splits that bucket by **how the supervisor ended the pair**, not by
+its canonical outcome:
+
+- `supervisor_status = RESOLVED` — the supervisor read the child's canonical
+  result, so the run holds that pair's result. A missing payload here is a
+  `payload_loss`: a real difference. This includes `canonical_outcome = ERROR`,
+  which a resolved pair reports just as a durable failure does.
+- `supervisor_status = TIMEOUT` or `ERROR` (the durable states) — the pair
+  never reached a canonical result. It owes no payload: whether a killed child
+  flushed one first is a matter of milliseconds and differs between runs of the
+  same commit.
+- anything else (absent, empty, unknown) — fail closed and count it as a loss.
+  "We do not know how it ended" must not become "it owed nothing".
+
+An oracle comparison therefore requires `changed`, `reason-set mismatch` and
+`payload_loss` to all be 0; `incomparable` alone is not a defect.
 
 Runs are made against a fresh writable copy of the benchmark tree, never against
 the canonical `targets/EqBench` checkout (the runners write compiled binaries

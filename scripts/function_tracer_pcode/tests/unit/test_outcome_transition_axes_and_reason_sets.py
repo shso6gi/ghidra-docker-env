@@ -33,19 +33,29 @@ NEQ_SAMPLE = "CLEVER/LoopSub/Neq/new-old"
 
 
 def write_pair(tree: Path, sample, function, left, right, outcome, *,
-               reasons=None, payload=True) -> str:
+               reasons=None, payload=True, supervisor_status="RESOLVED") -> str:
+    """One pair status.  ``supervisor_status`` is how the pair *ended*.
+
+    It is written explicitly rather than derived from ``outcome``, because the
+    two say different things: a canonical ``ERROR`` can come from a pair the
+    supervisor resolved (the run holds its result) or from one that ended in
+    the durable ERROR state (it never produced one).
+    """
+
     directory = tree / sample / function
     directory.mkdir(parents=True, exist_ok=True)
     name = f"{function}_{left}_{right}"
+    body = {
+        "canonical_outcome": outcome,
+        "pair_execution_target": {
+            "sample_identity": sample, "function_name": function,
+            "left_binary_id": left, "right_binary_id": right,
+        },
+    }
+    if supervisor_status is not None:
+        body["supervisor_status"] = supervisor_status
     (directory / f"{name}.pair-status.json").write_text(
-        json.dumps({
-            "canonical_outcome": outcome,
-            "pair_execution_target": {
-                "sample_identity": sample, "function_name": function,
-                "left_binary_id": left, "right_binary_id": right,
-            },
-        }),
-        encoding="utf-8",
+        json.dumps(body), encoding="utf-8",
     )
     log = directory / f"{name}.log"
     if payload:
@@ -338,8 +348,10 @@ def test_reason_set_comparison_separates_comparable_mismatch_and_incomparable(tm
     write_pair(after, EQ_SAMPLE, "f", "B1", "B2", "UNKNOWN", reasons=("b", "a"))
     write_pair(before, EQ_SAMPLE, "f", "B1", "B9", "UNKNOWN", reasons=("a",))
     write_pair(after, EQ_SAMPLE, "f", "B1", "B9", "UNKNOWN", reasons=("c",))
-    write_pair(before, EQ_SAMPLE, "f", "B3", "B4", "TIMEOUT", payload=False)
-    write_pair(after, EQ_SAMPLE, "f", "B3", "B4", "TIMEOUT", payload=False)
+    write_pair(before, EQ_SAMPLE, "f", "B3", "B4", "TIMEOUT", payload=False,
+               supervisor_status="TIMEOUT")
+    write_pair(after, EQ_SAMPLE, "f", "B3", "B4", "TIMEOUT", payload=False,
+               supervisor_status="TIMEOUT")
     write_pair(before, EQ_SAMPLE, "f", "B5", "B6", "UNKNOWN", reasons=("a",))
     write_pair(after, EQ_SAMPLE, "f", "B5", "B6", "EQUIVALENT", reasons=())
 
@@ -357,8 +369,10 @@ def test_reason_set_comparison_separates_comparable_mismatch_and_incomparable(tm
 def test_a_pair_without_a_payload_is_never_counted_as_a_match(tmp_path):
     """payload 無しを「reason 集合が一致」に数えない。"""
     before, after = tmp_path / "before", tmp_path / "after"
-    write_pair(before, EQ_SAMPLE, "f", "B1", "B2", "TIMEOUT", payload=False)
-    write_pair(after, EQ_SAMPLE, "f", "B1", "B2", "TIMEOUT", payload=False)
+    write_pair(before, EQ_SAMPLE, "f", "B1", "B2", "TIMEOUT", payload=False,
+               supervisor_status="TIMEOUT")
+    write_pair(after, EQ_SAMPLE, "f", "B1", "B2", "TIMEOUT", payload=False,
+               supervisor_status="TIMEOUT")
 
     report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
 
@@ -413,18 +427,27 @@ def test_a_decided_pair_that_lost_its_payload_is_a_payload_loss(tmp_path):
     assert report.rows[0].as_dict()["payload_loss"] is True
 
 
-@pytest.mark.parametrize("outcome", ["TIMEOUT", "ERROR"])
-def test_a_pair_that_was_killed_owes_no_payload(tmp_path, outcome):
-    """A run that never finished the pair may or may not have flushed the JSON.
+@pytest.mark.parametrize("outcome,supervisor_status", [
+    pytest.param("TIMEOUT", "TIMEOUT", id="killed-at-the-deadline"),
+    pytest.param("ERROR", "ERROR", id="durable-failure"),
+])
+def test_a_pair_the_supervisor_never_resolved_owes_no_payload(
+    tmp_path, outcome, supervisor_status,
+):
+    """Neither ending produced a canonical result, so neither owes a payload.
 
-    Whether it did is a matter of milliseconds at the deadline, so two runs of
-    the same commit can legitimately disagree about it.  Counting that as a
-    lost payload would report scheduling noise as a difference in the code.
+    A pair killed at the deadline may or may not have flushed the JSON first --
+    a matter of milliseconds, on which two runs of the same commit legitimately
+    disagree -- and a durable failure never reached one at all.  Counting
+    either as a lost payload would report an ending as a difference in the
+    code.
     """
 
     before, after = tmp_path / "before", tmp_path / "after"
-    write_pair(before, EQ_SAMPLE, "f", "B1", "B2", outcome, reasons=("a",))
-    write_pair(after, EQ_SAMPLE, "f", "B1", "B2", outcome, payload=False)
+    write_pair(before, EQ_SAMPLE, "f", "B1", "B2", outcome, reasons=("a",),
+               supervisor_status=supervisor_status)
+    write_pair(after, EQ_SAMPLE, "f", "B1", "B2", outcome, payload=False,
+               supervisor_status=supervisor_status)
 
     report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
 
@@ -433,6 +456,74 @@ def test_a_pair_that_was_killed_owes_no_payload(tmp_path, outcome):
     # ... and it is still not counted as a match.
     assert report.counts()["comparable"] == 0
     assert report.counts()["reason_set_mismatch"] == 0
+
+
+def test_an_error_the_supervisor_resolved_owes_its_payload(tmp_path):
+    """The canonical outcome cannot tell the two ERROR endings apart.
+
+    A pair the supervisor RESOLVED holds the child's canonical result, so its
+    payload going missing is a real loss -- and reading ``ERROR`` alone would
+    have excused exactly that.
+    """
+
+    before, after = tmp_path / "before", tmp_path / "after"
+    write_pair(before, EQ_SAMPLE, "f", "B1", "B2", "ERROR", reasons=("a",),
+               supervisor_status="RESOLVED")
+    write_pair(after, EQ_SAMPLE, "f", "B1", "B2", "ERROR", payload=False,
+               supervisor_status="RESOLVED")
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+
+    assert report.counts()["payload_loss"] == 1
+    assert report.rows[0].detail == ot.REASON_DETAIL_NO_PAYLOAD_AFTER
+
+
+def test_a_resolved_error_with_payloads_on_both_sides_is_comparable(tmp_path):
+    before, after = tmp_path / "before", tmp_path / "after"
+    for tree in (before, after):
+        write_pair(tree, EQ_SAMPLE, "f", "B1", "B2", "ERROR", reasons=("a",),
+                   supervisor_status="RESOLVED")
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+
+    assert report.counts()["comparable"] == 1
+    assert report.counts()["payload_loss"] == 0
+    assert report.counts()["reason_set_mismatch"] == 0
+
+
+@pytest.mark.parametrize("supervisor_status", [
+    pytest.param(None, id="absent"),
+    pytest.param("", id="empty"),
+    pytest.param("KILLED", id="unknown-state"),
+])
+def test_an_unreadable_ending_does_not_excuse_a_missing_payload(
+    tmp_path, supervisor_status,
+):
+    """"We do not know how it ended" must not become "it owed nothing"."""
+
+    before, after = tmp_path / "before", tmp_path / "after"
+    write_pair(before, EQ_SAMPLE, "f", "B1", "B2", "TIMEOUT", reasons=("a",),
+               supervisor_status="TIMEOUT")
+    write_pair(after, EQ_SAMPLE, "f", "B1", "B2", "TIMEOUT", payload=False,
+               supervisor_status=supervisor_status)
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+
+    assert report.counts()["payload_loss"] == 1
+
+
+def test_a_pair_missing_on_one_side_is_not_a_lost_payload(tmp_path):
+    """No status on that side at all is a missing pair, not a missing result."""
+
+    before, after = tmp_path / "before", tmp_path / "after"
+    write_pair(before, EQ_SAMPLE, "f", "B1", "B2", "UNKNOWN", reasons=("a",))
+    after.mkdir(parents=True, exist_ok=True)
+    write_pair(after, EQ_SAMPLE, "f", "B9", "B9", "UNKNOWN", reasons=("a",))
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+
+    assert report.counts()["payload_loss"] == 0
+    assert {row.detail for row in report.incomparable} == {ot.REASON_DETAIL_MISSING}
 
 
 def test_a_comparable_pair_is_never_a_payload_loss(tmp_path):

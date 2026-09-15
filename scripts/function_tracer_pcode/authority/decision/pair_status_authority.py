@@ -56,6 +56,16 @@ PAIR_STATUS_DURABLE_FIELDS = frozenset({
     "child_exit_disposition",
     "child_returncode_observation_kind",
 })
+# How a pair ended, as the supervisor projection resolved it.  ``RESOLVED``
+# means the supervisor read the child's canonical result envelope, so the run
+# holds that pair's result; the durable states mean it never got one -- the
+# child was killed at the deadline (``TIMEOUT``) or failed to produce a usable
+# canonical result (``ERROR``) -- and the durable fields above then carry what
+# is known about the exit instead.  Consumers that ask "should this pair have
+# left a result?" read these rather than guessing from the canonical outcome,
+# which says ``ERROR`` in both the resolved and the durable case.
+PAIR_STATUS_SUPERVISOR_RESOLVED = "RESOLVED"
+PAIR_STATUS_DURABLE_SUPERVISOR_STATES = frozenset({"TIMEOUT", "ERROR"})
 PAIR_STATUS_SEAL_FIELDS = frozenset({
     "pair_status_schema",
     "pair_status_authority_kind",
@@ -305,9 +315,9 @@ def _validate_pair_status_conditional_column(body: Mapping[str, Any]) -> None:
 def _validate_pair_status_body(body: Mapping[str, Any]) -> None:
     status = body.get("supervisor_status")
     expected = set(PAIR_STATUS_COMMON_FIELDS)
-    if status in {"TIMEOUT", "ERROR"}:
+    if status in PAIR_STATUS_DURABLE_SUPERVISOR_STATES:
         expected.update(PAIR_STATUS_DURABLE_FIELDS)
-    elif status != "RESOLVED":
+    elif status != PAIR_STATUS_SUPERVISOR_RESOLVED:
         raise ValueError("pair-status supervisor disposition is invalid")
     conditional_fields = PAIR_STATUS_CONDITIONAL_FIELDS & set(body)
     if conditional_fields:

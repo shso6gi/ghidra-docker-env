@@ -62,7 +62,6 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.reporting.pair_outcomes import (
     LABEL_EQ,
     LABEL_NEQ,
-    OUTCOME_INVALID,
     OUTCOME_MISSING,
     OUTCOME_ORDER,
     PAIR_STATUS_SUFFIX,
@@ -722,15 +721,37 @@ REASON_DETAIL_NO_PAYLOAD_BEFORE = "no_result_payload_before"
 REASON_DETAIL_NO_PAYLOAD_AFTER = "no_result_payload_after"
 REASON_DETAIL_NO_PAYLOAD_BOTH = "no_result_payload_both"
 
-# Issue #15 PR-15-B: whether a pair is *expected* to leave a result payload
-# depends on how it ended.  A pair the runner killed at its deadline may or may
-# not have flushed the result JSON first, so the payload's absence there says
-# nothing about the code -- two runs of the same commit can disagree about it.
-# A pair the checker *decided* did emit one, so a decided pair without a
-# payload is a real loss and has to stay visible as one.
-OUTCOMES_WITHOUT_A_DURABLE_PAYLOAD = frozenset({
-    "TIMEOUT", "ERROR", OUTCOME_INVALID, OUTCOME_MISSING,
-})
+# Issue #15 PR-15-B: whether a pair is *expected* to leave a result payload is
+# a question about how the supervisor ended it, not about the canonical
+# outcome.  ``ERROR`` in particular means two different things: a pair the
+# supervisor RESOLVED (it read the child's canonical result envelope, which the
+# run therefore holds) and a pair that ended in the durable ERROR state (the
+# child never produced a usable canonical result).  Reading the outcome alone
+# would excuse the first case, which is exactly a lost result.
+#
+# A pair killed at its deadline may or may not have flushed the result JSON
+# first, so its absence says nothing about the code: two runs of the same
+# commit legitimately disagree.  A pair whose ending is unreadable is not
+# excused -- "we do not know how it ended" must not become "it owed nothing".
+
+
+def _owes_a_result_payload(outcome: str, supervisor_status: Optional[str]) -> bool:
+    """Should this side of the comparison hold a result payload?"""
+    from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
+        PAIR_STATUS_DURABLE_SUPERVISOR_STATES,
+        PAIR_STATUS_SUPERVISOR_RESOLVED,
+    )
+
+    if outcome == OUTCOME_MISSING:
+        # No pair status on this side at all: reported as a missing pair, which
+        # is a different fact from a result that went missing.
+        return False
+    if supervisor_status == PAIR_STATUS_SUPERVISOR_RESOLVED:
+        return True
+    if supervisor_status in PAIR_STATUS_DURABLE_SUPERVISOR_STATES:
+        return False
+    # Absent, malformed or unknown: fail closed and keep the absence visible.
+    return True
 
 
 def _log_path_for(record: PairOutcome) -> Path:
@@ -786,6 +807,8 @@ class ReasonSetRow:
     after_outcome: str
     before_reasons: Optional[Tuple[str, ...]]
     after_reasons: Optional[Tuple[str, ...]]
+    before_supervisor_status: Optional[str] = None
+    after_supervisor_status: Optional[str] = None
 
     @property
     def outcome_mismatch(self) -> bool:
@@ -802,22 +825,23 @@ class ReasonSetRow:
 
     @property
     def payload_loss(self) -> bool:
-        """A side that decided this pair and still left nothing to compare.
+        """A side whose ending implies a result payload, that has none.
 
-        This separates the two reasons a pair can be incomparable.  A
-        ``TIMEOUT``/``ERROR`` pair without a payload is expected noise: the
-        child was killed, and whether it had flushed the result first is a
-        matter of milliseconds.  A pair with a decided outcome and no payload
-        means the run lost something it produced, which is a difference a
-        before/after comparison must not absorb.
+        This separates the two reasons a pair can be incomparable.  A pair the
+        supervisor never resolved owes nothing: the child was killed at the
+        deadline or failed durably, and whether it flushed a result first is
+        not a fact about the code.  A pair the supervisor *did* resolve holds a
+        canonical result, so a missing payload there means the run lost
+        something it produced -- including when its canonical outcome is
+        ``ERROR``, which both endings report.
         """
         if self.verdict != REASON_SET_INCOMPARABLE:
             return False
         return any(
-            reasons is None and outcome not in OUTCOMES_WITHOUT_A_DURABLE_PAYLOAD
-            for outcome, reasons in (
-                (self.before_outcome, self.before_reasons),
-                (self.after_outcome, self.after_reasons),
+            reasons is None and _owes_a_result_payload(outcome, status)
+            for outcome, reasons, status in (
+                (self.before_outcome, self.before_reasons, self.before_supervisor_status),
+                (self.after_outcome, self.after_reasons, self.after_supervisor_status),
             )
         )
 
@@ -835,6 +859,8 @@ class ReasonSetRow:
             "outcome_mismatch": self.outcome_mismatch,
             "reason_set_mismatch": self.reason_set_mismatch,
             "payload_loss": self.payload_loss,
+            "before_supervisor_status": self.before_supervisor_status,
+            "after_supervisor_status": self.after_supervisor_status,
         }
 
 
@@ -860,7 +886,7 @@ class ReasonSetReport:
 
     @property
     def payload_losses(self) -> Tuple[ReasonSetRow, ...]:
-        """Incomparable pairs that a decided outcome should have made comparable."""
+        """Incomparable pairs whose ending should have left a payload."""
         return tuple(row for row in self.rows if row.payload_loss)
 
     @property
@@ -924,6 +950,12 @@ def build_reason_sets(
             after_outcome=after_record.outcome if after_record else OUTCOME_MISSING,
             before_reasons=before_reasons,
             after_reasons=after_reasons,
+            before_supervisor_status=(
+                before_record.supervisor_status if before_record else None
+            ),
+            after_supervisor_status=(
+                after_record.supervisor_status if after_record else None
+            ),
         ))
     return ReasonSetReport(rows=tuple(rows))
 
@@ -1266,14 +1298,14 @@ def format_reason_sets(report: ReasonSetReport) -> List[str]:
         f"(of {counts['comparable']} comparable)",
         f"  incomparable: {counts['incomparable']} "
         "(no readable result payload, or present on one side only)",
-        f"  of those, a decided pair that lost its payload: {counts['payload_loss']} "
-        "(the rest ended in a way that guarantees no payload)",
+        f"  of those, a pair the supervisor resolved that lost its payload: "
+        f"{counts['payload_loss']} (the rest never reached a canonical result)",
         f"  the same pairs are unreadable on both sides: {report.incomparable_sides_agree}",
     ]
     for title, rows in (
         ("Outcome mismatches", report.outcome_mismatches),
         ("Reason-set mismatches", report.reason_set_mismatches),
-        ("Decided pairs that lost their payload", report.payload_losses),
+        ("Resolved pairs that lost their payload", report.payload_losses),
         ("Incomparable pairs", report.incomparable),
     ):
         lines.append(f"{title} ({len(rows)}):")

@@ -83,6 +83,12 @@ class PairOutcome:
     # What binds a result JSON (and a conditional receipt) to *this* pair.
     result_occurrence_id: Optional[str] = None
     decision_receipt_digest: Optional[str] = None
+    # How the supervisor projection ended this pair (``RESOLVED`` / ``TIMEOUT``
+    # / ``ERROR``), exactly as the signed status carries it.  ``None`` when the
+    # status does not carry one, which is itself a fact a reader must not
+    # confuse with a known ending.  The meaning of each state belongs to the
+    # pair-status authority, not here.
+    supervisor_status: Optional[str] = None
 
     @property
     def identical_input(self) -> bool:
@@ -188,6 +194,7 @@ def iter_pair_outcomes(root: Path) -> Iterator[PairOutcome]:
             conditional_decision_receipt=receipt,
             result_occurrence_id=_text(payload, "result_occurrence_id"),
             decision_receipt_digest=_text(payload, "decision_receipt_digest"),
+            supervisor_status=_text(payload, "supervisor_status"),
         )
 
 
