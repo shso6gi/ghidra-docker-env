@@ -706,6 +706,59 @@ def test_the_authority_refuses_to_seal_a_contradictory_ending(
                           outcome=outcome, supervisor_status=supervisor_status)
 
 
+def test_the_text_report_does_not_claim_a_loss_was_resolved(tmp_path):
+    """``payload_loss`` covers two cases, so the wording may assert neither.
+
+    A row is counted when the pair was resolved *or* when no authority-valid
+    durable finalization could be confirmed.  Printing it as "a pair the
+    supervisor resolved" would state the first as fact for rows that are there
+    for the second, so the heading says what the count means and each row
+    carries the finalization it actually had.
+    """
+
+    before, after = tmp_path / "before", tmp_path / "after"
+    # One of each kind: a resolved pair that lost its payload, and a durable
+    # claim the authority refuses.
+    write_sealed_pair(before, EQ_SAMPLE, "f", "B1", "B2", outcome="UNKNOWN",
+                      reasons=("a",))
+    write_sealed_pair(after, EQ_SAMPLE, "f", "B1", "B2", outcome="UNKNOWN",
+                      payload=False)
+    write_sealed_pair(before, EQ_SAMPLE, "f", "B3", "B4", outcome="TIMEOUT",
+                      supervisor_status="TIMEOUT", reasons=("a",))
+    write_sealed_pair(after, EQ_SAMPLE, "f", "B3", "B4", outcome="TIMEOUT",
+                      supervisor_status="TIMEOUT", payload=False,
+                      corrupt=_set(supervisor_status="KILLED"))
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+    text = "\n".join(ot.format_reason_sets(report))
+
+    assert report.counts()["payload_loss"] == 2
+    assert (
+        "of those, a missing payload nothing excuses: 2 (the pair was resolved,"
+        " or no authority-valid durable finalization could be confirmed)"
+    ) in text
+    assert "Missing payloads nothing excuses (2):" in text
+    # Neither ending is asserted for the other's row: each says its own.
+    assert "finalization: before=resolved after=resolved" in text
+    assert "finalization: before=durable after=unverified" in text
+    assert "supervisor resolved that lost its payload" not in text
+    assert "Resolved pairs that lost their payload" not in text
+
+
+def test_the_text_report_says_nothing_of_the_kind_when_there_is_no_loss(tmp_path):
+    before, after = tmp_path / "before", tmp_path / "after"
+    for tree in (before, after):
+        write_sealed_pair(tree, EQ_SAMPLE, "f", "B3", "B4", outcome="TIMEOUT",
+                          supervisor_status="TIMEOUT", payload=False)
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+    text = "\n".join(ot.format_reason_sets(report))
+
+    assert "of those, a missing payload nothing excuses: 0" in text
+    assert "Missing payloads nothing excuses (0):" in text
+    assert "finalization:" not in text
+
+
 def test_a_status_without_a_verification_key_is_not_verified(tmp_path):
     """The seal is only evidence when it can be checked."""
 

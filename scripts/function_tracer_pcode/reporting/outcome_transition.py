@@ -829,15 +829,20 @@ class ReasonSetRow:
 
     @property
     def payload_loss(self) -> bool:
-        """A side whose ending implies a result payload, that has none.
+        """A missing result payload that nothing excuses.
 
-        This separates the two reasons a pair can be incomparable.  A pair the
-        supervisor never resolved owes nothing: the child was killed at the
-        deadline or failed durably, and whether it flushed a result first is
-        not a fact about the code.  A pair the supervisor *did* resolve holds a
-        canonical result, so a missing payload there means the run lost
-        something it produced -- including when its canonical outcome is
-        ``ERROR``, which both endings report.
+        Only one thing excuses it: an ending the pair-status authority
+        confirmed to be a durable finalization, where the pair never reached a
+        canonical result and whether the child flushed a payload first is not a
+        fact about the code.  So this covers two cases, and the report does not
+        claim to know which without saying so:
+
+        * the pair was ``resolved`` -- it holds a canonical result, so the
+          payload went missing.  This includes canonical ``ERROR``, which a
+          resolved pair reports just as a durable failure does;
+        * the ending was ``unverified`` -- an unsigned or edited status, a
+          missing verification key, a broken join.  An unconfirmed claim is
+          not an excuse.
         """
         if self.verdict != REASON_SET_INCOMPARABLE:
             return False
@@ -892,7 +897,7 @@ class ReasonSetReport:
 
     @property
     def payload_losses(self) -> Tuple[ReasonSetRow, ...]:
-        """Incomparable pairs whose ending should have left a payload."""
+        """Incomparable pairs whose missing payload nothing excuses."""
         return tuple(row for row in self.rows if row.payload_loss)
 
     @property
@@ -1312,14 +1317,15 @@ def format_reason_sets(report: ReasonSetReport) -> List[str]:
         f"(of {counts['comparable']} comparable)",
         f"  incomparable: {counts['incomparable']} "
         "(no readable result payload, or present on one side only)",
-        f"  of those, a pair the supervisor resolved that lost its payload: "
-        f"{counts['payload_loss']} (the rest never reached a canonical result)",
+        f"  of those, a missing payload nothing excuses: {counts['payload_loss']} "
+        "(the pair was resolved, or no authority-valid durable finalization "
+        "could be confirmed)",
         f"  the same pairs are unreadable on both sides: {report.incomparable_sides_agree}",
     ]
     for title, rows in (
         ("Outcome mismatches", report.outcome_mismatches),
         ("Reason-set mismatches", report.reason_set_mismatches),
-        ("Resolved pairs that lost their payload", report.payload_losses),
+        ("Missing payloads nothing excuses", report.payload_losses),
         ("Incomparable pairs", report.incomparable),
     ):
         lines.append(f"{title} ({len(rows)}):")
@@ -1334,6 +1340,14 @@ def format_reason_sets(report: ReasonSetReport) -> List[str]:
             if row.reason_set_mismatch:
                 lines.append(f"      before={list(row.before_reasons or ())}")
                 lines.append(f"      after ={list(row.after_reasons or ())}")
+            if row.payload_loss:
+                # Which of the two reasons this row is here for: a resolved
+                # pair whose result went missing, or an ending the pair-status
+                # authority could not confirm.
+                lines.append(
+                    f"      finalization: before={row.before_finalization} "
+                    f"after={row.after_finalization}"
+                )
     return lines
 
 
