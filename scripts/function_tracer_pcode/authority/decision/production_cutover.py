@@ -352,6 +352,10 @@ def build_default_cutover_connector() -> Any:
         AnalysisLimitationBlockerSignal,
         AnalysisLimitationPilotEncoder,
     )
+    from scripts.function_tracer_pcode.authority.domains.identical_function_identity import (
+        IdenticalFunctionIdentityPilotEncoder,
+        IdenticalFunctionIdentitySignal,
+    )
 
     worker_key_id = os.environ.get("UNKNOWN_TAXONOMY_V2_WORKER_KEY_ID")
     worker_key_file = os.environ.get("UNKNOWN_TAXONOMY_V2_WORKER_KEY_FILE")
@@ -379,6 +383,7 @@ def build_default_cutover_connector() -> Any:
     operational = OperationalExtractionPilotEncoder()
     comparison = ComparisonClosurePilotEncoder()
     analysis_limitation = AnalysisLimitationPilotEncoder()
+    identical_function_identity = IdenticalFunctionIdentityPilotEncoder()
     routes = {
         OutcomePartitionProductionSignal: outcome,
         SatSafetyBlockerProductionSignal: sat,
@@ -398,6 +403,7 @@ def build_default_cutover_connector() -> Any:
         OperationalCompletionSignal: operational,
         ComparisonClosureProductionSignal: comparison,
         AnalysisLimitationBlockerSignal: analysis_limitation,
+        IdenticalFunctionIdentitySignal: identical_function_identity,
     }
     return ProductionDualWritePilotConnector(
         ShadowLifecycleReducer(

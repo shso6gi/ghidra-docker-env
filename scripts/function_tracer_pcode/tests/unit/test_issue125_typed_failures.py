@@ -483,6 +483,19 @@ def test_error_rerun_manifest_includes_three_new_statuses(tmp_path, status):
 PRODUCER_SITE_COUNT_BEFORE_ISSUE125 = 30
 NEW_PRODUCER_SITE_ID = "analysis-limitation-observed"
 
+#: PR-125-A の後に別 Issue が足した producer site。site を足す PR は
+#: **ここへ 1 行足す**（それ以外の増減はこの test が落とす）。
+PRODUCER_SITES_ADDED_AFTER_ISSUE125 = (
+    # Issue #15 PR-15-A: 同一バイナリ・同一関数の identity proof。
+    "checker-identical-function-identity",
+)
+
+#: 現在期待される producer site 総数。
+EXPECTED_PRODUCER_SITE_COUNT = (
+    PRODUCER_SITE_COUNT_BEFORE_ISSUE125 + 1
+    + len(PRODUCER_SITES_ADDED_AFTER_ISSUE125)
+)
+
 
 def _site_contract(payload):
     return {
@@ -518,8 +531,10 @@ def test_producer_sites_manifest_delta_is_exactly_one_site():
     built = build_phase7_producer_manifest(REPO_ROOT)
     ids = [row["producer_site_manifest_id"] for row in built["sites"]]
     assert len(ids) == len(set(ids))
-    assert built["site_count"] == PRODUCER_SITE_COUNT_BEFORE_ISSUE125 + 1
+    assert built["site_count"] == EXPECTED_PRODUCER_SITE_COUNT
     assert ids.count(NEW_PRODUCER_SITE_ID) == 1
+    for site_id in PRODUCER_SITES_ADDED_AFTER_ISSUE125:
+        assert ids.count(site_id) == 1
     # 新 domain の site はこの 1 件だけ（2 件目を足したらここで落ちる）。
     assert [
         row["producer_site_manifest_id"] for row in built["sites"]
@@ -557,10 +572,12 @@ def test_producer_sites_manifest_keeps_every_existing_site_contract():
     before_ids = {row["producer_site_manifest_id"] for row in before["sites"]}
     after_ids = {row["producer_site_manifest_id"] for row in after["sites"]}
     # merge 前は {NEW_PRODUCER_SITE_ID}、merge 後は空集合。どちらでも
-    # 「新 site 以外は増えていない」ことは変わらない。
-    assert after_ids - before_ids <= {NEW_PRODUCER_SITE_ID}
+    # 「宣言した site 以外は増えていない」ことは変わらない。
+    assert after_ids - before_ids <= {
+        NEW_PRODUCER_SITE_ID, *PRODUCER_SITES_ADDED_AFTER_ISSUE125
+    }
     assert before_ids - after_ids == set()
-    assert len(after_ids) == PRODUCER_SITE_COUNT_BEFORE_ISSUE125 + 1
+    assert len(after_ids) == EXPECTED_PRODUCER_SITE_COUNT
 
     before_contract = _site_contract(before)
     after_contract = _site_contract(after)

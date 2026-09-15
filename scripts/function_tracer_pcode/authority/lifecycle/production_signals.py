@@ -30,6 +30,9 @@ from scripts.function_tracer_pcode.authority.domains.analysis_limitation import 
 from scripts.function_tracer_pcode.authority.domains.comparison_closure import (
     ComparisonClosureProductionSignal,
 )
+from scripts.function_tracer_pcode.authority.domains.identical_function_identity import (
+    IdenticalFunctionIdentitySignal,
+)
 from scripts.function_tracer_pcode.authority.domains.call_effect_sites import (
     CALL_EFFECT_PROOF_BATCH_SITE,
 )
@@ -1267,6 +1270,29 @@ def emit_comparison_closure_signal(
     signal: ComparisonClosureProductionSignal,
     *, producer_site_manifest_id: Optional[str] = None,
 ) -> int:
+    session = active_production_pilot_session()
+    if session is None:
+        return 0
+    if getattr(session, "phase7_runtime", None) is not None:
+        session.record_phase7_pre_emission_activation(
+            producer_site_manifest_id, signal
+        )
+    emit = getattr(session, "emit_domain_signal", None)
+    if not callable(emit):
+        raise TypeError("active production pilot session lacks signal authority")
+    return int(emit(signal))
+
+
+def emit_identical_function_identity_signal(
+    signal: IdenticalFunctionIdentitySignal,
+    *, producer_site_manifest_id: Optional[str] = None,
+) -> int:
+    """Issue #15: 同一バイナリ・同一関数の decisive proof を 1 回だけ出す。
+
+    pilot が無効なら厳密に no-op（0）。`emit_comparison_closure_signal` と同型で、
+    ここには判定も正規化も置かない（artifact の検証は encoder が行う）。
+    """
+
     session = active_production_pilot_session()
     if session is None:
         return 0
