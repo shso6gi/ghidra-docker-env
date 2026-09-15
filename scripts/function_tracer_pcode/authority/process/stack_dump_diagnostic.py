@@ -207,8 +207,7 @@ class StackDumpDiagnostic:
         #: 書き手は監視スレッドの `cancel_future_requests()` だけ。
         self._send_blocked_by_cancel = False
         self._cancel_linearized_monotonic: Optional[float] = None
-        #: 送信権を取った（送信開始が linearize した）。syscall の成否とは別。
-        self.send_claimed = False
+        #: 送信権を取った時刻（`send_claimed` が True になった瞬間）。
         self.send_claimed_monotonic: Optional[float] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -444,9 +443,10 @@ class StackDumpDiagnostic:
                         self.unavailable_reason or UNAVAILABLE_CANCELLED
                     )
                     return False
+                # 権利を取れた時点で `send_claimed` は True（下の property が
+                # 所有から導くので、別 flag への代入を待つ必要が無い）。
                 # 以後 cancel は「送信は開始済み」と見なし、**待たずに**戻る。
                 self.send_claimed_monotonic = time.monotonic()
-                self.send_claimed = True
                 pidfd_send(descriptor, STACK_DUMP_SIGNAL)
                 # 観測者が `signal_sent` を見たときに時刻も見えているよう、
                 # 時刻を先に書いてから flag を立てる。
@@ -490,12 +490,36 @@ class StackDumpDiagnostic:
     # -- 終了処理のあと（監視ループの外）で呼ぶ面 ----------------------------
 
     @property
+    def send_claimed(self) -> bool:
+        """worker が送信権を取った（= 送信開始が linearize した）。
+
+        **permit の所有そのものから導く。** 別 flag を acquire の直後に代入する
+        形だと、「acquire 成功 -> 代入」の間に status を snapshot されたときに、
+        権利を持っているのに `False` に見える window が残る。
+
+        permit が locked でも cancel が取った場合は worker のものではないので、
+        `_send_blocked_by_cancel` で除く。cancel 側にも「acquire 成功 -> flag 代入」
+        の window はあるが、`cancel_future_requests()` も `status_payload()` も
+        **監視スレッドが呼ぶ**ので、その thread が自分の中間状態を観測することは
+        ない（worker はこの property を読まない）。
+        """
+        return self._send_permit.locked() and not self._send_blocked_by_cancel
+
+    @property
     def signal_start_state(self) -> str:
         """送信開始がどこまで進んだか（`signal_sent` の bool だけでは足りない）。
 
-        `claimed_not_sent` は「送信権は取ったが syscall が失敗した」で、
-        `refused_cancelled` は「cancel が先に権利を取ったので開始しなかった」。
-        この 2 つを同じ `signal_sent=False` に潰さない。
+        * ``sent`` —— 送信の syscall が戻り、送信成功を確認した
+        * ``claimed_not_sent`` —— **送信権は取ったが、送信成功をまだ確認できて
+          いない**。syscall が失敗した場合だけでなく、まだ実行中（in-flight）・
+          ハングしている・worker がその途中で失敗した場合も含む。明示的な失敗は
+          `unavailable_reason` が `signal_failed:<例外型>` /
+          `process_exited` として持つので、区別はそちらで行う
+        * ``refused_cancelled`` —— cancel が先に権利を取ったので開始しなかった
+        * ``not_requested`` —— 診断そのものを要求していない（deadline 前に終了）
+        * ``not_claimed`` —— 要求はしたが readiness などで権利取得まで進まなかった
+
+        `signal_sent=False` の中身をこの 5 つに分ける（潰さない）のが目的。
         """
         if self.signal_sent:
             return SIGNAL_START_SENT

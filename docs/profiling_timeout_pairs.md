@@ -133,6 +133,26 @@ kill 開始が遅れてしまう（deadline を診断に引きずられる）。
 journal 読取・`pidfd_open`・identity 確認・dump polling は権利取得より**前**
 （= 権利を持たない状態）で行うので、そこで時間がかかっても cancel は待たされない。
 
+`signal_start_state` は `signal_sent` の bool では潰れる区別を持つ:
+
+| 値 | 意味 |
+|---|---|
+| `sent` | 送信の syscall が戻り、**送信成功を確認した** |
+| `claimed_not_sent` | **送信権は取ったが、送信成功をまだ確認できていない。** syscall が失敗した場合だけでなく、まだ実行中（in-flight）・ハングしている・worker がその途中で失敗した場合も含む |
+| `refused_cancelled` | cancel が先に権利を取ったので、送信を開始しなかった |
+| `not_requested` | 診断そのものを要求していない（deadline 前に終了した pair） |
+| `not_claimed` | 要求はしたが readiness などで権利取得まで進まなかった |
+
+`claimed_not_sent` を「失敗」と読まないこと。**明示的な失敗は
+`unavailable_reason`** が `signal_failed:<例外型>` / `process_exited` として持つので、
+区別はそちらで行う。
+
+`send_claimed` は送信権の所有そのものから導く（acquire の直後に別 flag を立てる
+形だと、その 2 命令のあいだに status を snapshot されたときに「権利は持っているのに
+`false`」と見える window が残る）。cancel 側にも同様の window はあるが、
+`cancel_future_requests()` も `status_payload()` も監視スレッドが呼ぶので、
+その thread が自分の中間状態を観測することはない。
+
 deadline の起点は barrier 解放の直後で 1 回だけ固定し、診断 object の生成は
 そのあと。診断を足したぶん child の実効予算が伸びることはない。
 
@@ -152,7 +172,7 @@ schema `pair-stack-dump-status-v1`。4 つの状態を**別々に**持つ。
 | `kill_signal` / `kill_start_offset_seconds` | **実際に**最初の termination signal（SIGTERM）を送れた時刻と、deadline からの実測秒。送る前に child が終了した pair は `null`（kill を開始したと記録しない） |
 | `signal_sent_epoch` | dump を撮った瞬間（journal を切って `active` を出すのに使う） |
 | `send_claimed` / `send_claimed_offset_seconds` | 送信権を取った（送信開始が linearize した）時刻。syscall の成否とは別 |
-| `signal_start_state` | `sent` / `claimed_not_sent`（権利は取ったが syscall 失敗）/ `refused_cancelled`（cancel が先）/ `not_requested` / `not_claimed` |
+| `signal_start_state` | 下表の 5 値。`signal_sent=false` の中身を潰さない |
 | `cancel_linearized_offset_seconds` | cancel が送信権を取った時刻。取れなかった（worker が先だった）場合は `null` |
 | `child_timeout_evidence` | cleanup 前に検証した子の terminal timeout 証拠 |
 

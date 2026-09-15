@@ -1056,6 +1056,9 @@ class _ParkedPermit:
     def release(self):
         return self._real.release()
 
+    def locked(self):
+        return self._real.locked()
+
 
 def test_cancel_first_stops_the_send_from_starting(pair, monkeypatch):
     """1. cancel が先に linearize したら、送信を**開始**しない。
@@ -1311,3 +1314,86 @@ def test_the_first_signal_hook_fires_only_after_a_delivered_sigterm():
     # hook は最初の killpg より後（= 送れたあと）、grace 待ちより前。
     assert hook_lines[0] > min(killpg_lines)
     assert hook_lines[0] < max(killpg_lines)
+
+
+def test_send_claimed_follows_permit_ownership_with_no_assignment_window(pair):
+    """`send_claimed` は送信権の所有そのもの（代入待ちの window を作らない）。
+
+    acquire の直後に別 flag を立てる形だと、その 2 命令のあいだに status を
+    snapshot されたときに「権利は持っているのに `send_claimed=False`」という
+    観測が出る。property で所有から導けばその window は存在しない。
+    """
+    diagnostic = _diagnostic(pair)
+    assert diagnostic.send_claimed is False
+    assert diagnostic.status_payload()["send_claimed"] is False
+
+    # worker が権利を取った状態（代入は何もしていない）。
+    assert diagnostic._send_permit.acquire(blocking=False) is True
+    assert diagnostic.send_claimed is True
+    assert diagnostic.status_payload()["send_claimed"] is True
+    assert diagnostic.signal_start_state == "claimed_not_sent"
+
+
+def test_a_permit_taken_by_cancel_is_not_reported_as_a_send_claim(pair):
+    """cancel が取った権利を「worker が送信を開始した」と誤読しない。"""
+    diagnostic = _diagnostic(pair)
+    diagnostic.cancel_future_requests()
+    assert diagnostic._send_permit.locked() is True
+    assert diagnostic.send_claimed is False
+    payload = diagnostic.status_payload()
+    assert payload["send_claimed"] is False
+    # 要求前の cancel なので「要求していない」。要求済みなら refused_cancelled。
+    assert payload["signal_start_state"] == "not_requested"
+
+
+def test_claimed_not_sent_covers_an_unfinished_send_not_only_a_failure(pair, monkeypatch):
+    """`claimed_not_sent` は「送信成功を未確認」であって「失敗」ではない。
+
+    syscall がまだ戻っていない（in-flight / hang）状態でも同じ値になる。
+    明示的な失敗は `unavailable_reason` が `signal_failed:<型>` で区別する。
+    """
+    in_send = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(
+        os, "pidfd_open", lambda pid, flags: os.open(os.devnull, os.O_RDONLY),
+        raising=False,
+    )
+
+    def _hanging_send(fd, number):
+        in_send.set()
+        assert release.wait(5.0)
+
+    monkeypatch.setattr(signal, "pidfd_send_signal", _hanging_send, raising=False)
+    diagnostic = _diagnostic(pair, observe=0.01)
+    diagnostic.request_async()
+    try:
+        assert in_send.wait(5.0)
+        # syscall はまだ戻っていない。失敗してはいないが成功も未確認。
+        assert diagnostic.send_claimed is True
+        assert diagnostic.signal_sent is False
+        assert diagnostic.signal_start_state == "claimed_not_sent"
+        assert diagnostic.unavailable_reason is None
+    finally:
+        release.set()
+    _join_worker(diagnostic)
+    assert diagnostic.signal_start_state == "sent"
+
+
+def test_a_failed_send_syscall_is_distinguished_by_the_reason(pair, monkeypatch):
+    """失敗は `claimed_not_sent` + `signal_failed:<型>` で読み分けられる。"""
+    monkeypatch.setattr(
+        os, "pidfd_open", lambda pid, flags: os.open(os.devnull, os.O_RDONLY),
+        raising=False,
+    )
+
+    def _failing_send(fd, number):
+        raise PermissionError(1, "denied")
+
+    monkeypatch.setattr(signal, "pidfd_send_signal", _failing_send, raising=False)
+    diagnostic = _diagnostic(pair)
+    diagnostic.request_async()
+    _join_worker(diagnostic)
+    assert diagnostic.send_claimed is True
+    assert diagnostic.signal_sent is False
+    assert diagnostic.signal_start_state == "claimed_not_sent"
+    assert diagnostic.unavailable_reason == "signal_failed:PermissionError"
