@@ -181,23 +181,20 @@ def iter_pair_outcomes(root: Path) -> Iterator[PairOutcome]:
             outcome,
             status_path=str(status_path),
             conditional_outcome=conditional,
-            left_binary_sha256=_target_text(target, "left_binary_sha256"),
-            right_binary_sha256=_target_text(target, "right_binary_sha256"),
+            left_binary_sha256=_text(target, "left_binary_sha256"),
+            right_binary_sha256=_text(target, "right_binary_sha256"),
             log_path=str(_log_path_for(status_path)),
             half=_half_of(root, status_path),
             conditional_decision_receipt=receipt,
-            result_occurrence_id=_payload_text(payload, "result_occurrence_id"),
-            decision_receipt_digest=_payload_text(payload, "decision_receipt_digest"),
+            result_occurrence_id=_text(payload, "result_occurrence_id"),
+            decision_receipt_digest=_text(payload, "decision_receipt_digest"),
         )
 
 
-def _payload_text(payload: Any, field: str) -> Optional[str]:
-    value = payload.get(field) if isinstance(payload, Mapping) else None
-    return value if isinstance(value, str) and value else None
+def _text(source: Any, field: str) -> Optional[str]:
+    """One non-empty string field, or ``None``; an empty value is not a value."""
 
-
-def _target_text(target: Any, field: str) -> Optional[str]:
-    value = target.get(field) if isinstance(target, Mapping) else None
+    value = source.get(field) if isinstance(source, Mapping) else None
     return value if isinstance(value, str) and value else None
 
 

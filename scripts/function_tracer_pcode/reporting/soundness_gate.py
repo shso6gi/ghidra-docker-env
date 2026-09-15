@@ -472,7 +472,13 @@ class ConditionalView:
 
     @property
     def decisive(self) -> bool:
-        return self.outcome in DECISIVE_OUTCOMES
+        """A decisive column, and one this reader was able to verify.
+
+        A receipt that did not hold together is already a gate C violation; it
+        must not also be read as a decision about the pair.
+        """
+
+        return self.integrity_error is None and self.outcome in DECISIVE_OUTCOMES
 
     @property
     def all_premises_verified(self) -> bool:
@@ -874,17 +880,27 @@ def _format_counts(report: GateReport) -> List[str]:
     return lines + [""]
 
 
+#: The row fields worth printing, most specific first.  A row carries only
+#: some of them, and a scope-level row carries none of the pair fields.
+_ROW_DETAIL_FIELDS = (
+    "detail", "violation_kind", "kind", "lookup", "identity_detail", "ground_truth",
+)
+
+
 def _format_rows(title: str, rows: Sequence[Mapping[str, Any]]) -> List[str]:
     if not rows:
         return []
     lines = [f"{title} ({len(rows)}):"]
     for row in rows:
         identity = " ".join(
-            str(row.get(name, "")) for name in ("sample_identity", "function_name", "pair_id")
-        ).strip()
-        detail = row.get("detail") or row.get("violation_kind") or row.get("lookup") \
-            or row.get("identity_detail") or row.get("ground_truth") or row.get("kind") or ""
-        lines.append(f"  {identity or row.get('scope', '')}: {row.get('column_outcome') or row.get('outcome') or ''} {detail}".rstrip())
+            str(row[name]) for name in ("sample_identity", "function_name", "pair_id")
+            if row.get(name)
+        ) or str(row.get("scope", ""))
+        outcome = row.get("column_outcome") or row.get("outcome") or ""
+        detail = next(
+            (str(row[name]) for name in _ROW_DETAIL_FIELDS if row.get(name)), "",
+        )
+        lines.append(f"  {identity}: {outcome} {detail}".rstrip())
     return lines + [""]
 
 

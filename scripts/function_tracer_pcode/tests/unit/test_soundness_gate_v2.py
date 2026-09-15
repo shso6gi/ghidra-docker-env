@@ -549,6 +549,34 @@ def test_a_malformed_conditional_receipt_fails_the_gate_closed(
     assert report.passed is False
 
 
+def test_a_malformed_conditional_column_is_not_also_read_as_a_decision(tmp_path):
+    """A receipt that did not hold together says nothing about the pair.
+
+    It is a gate C violation; it must not additionally become a conditional
+    ground-truth violation, however permissive the compatibility table is.
+    """
+
+    payload, result_id, digest = conditional_column("cond-not-a-column", Outcome.EQUIVALENT)
+    write_pair_status(
+        tmp_path, NEQ, "SphereConstructor", "B1", "B2", "UNKNOWN",
+        occurrence=result_id, receipt_digest=digest,
+        conditional={**payload, "receipt_digest": "0" * 64},
+    )
+    write_ground_truth(tmp_path, {NEQ: {"SphereConstructor": "CONFIRMED_NOT_EQ"}})
+    compat = write_compatibility(
+        tmp_path / "compat.json",
+        [(NEQ, "SphereConstructor", COMPAT_KIND, "*", "verified")],
+    )
+
+    report = build([tmp_path], compat)
+    acc = report.accumulator
+
+    assert len(acc.config_integrity_violations) == 1
+    assert acc.conditional_verified_violations == []
+    assert acc.compatibility_unknown_rows == []
+    assert report.passed is False
+
+
 def test_a_conditional_receipt_from_another_pair_is_refused(
     tmp_path, empty_compatibility,
 ):
