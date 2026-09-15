@@ -364,7 +364,7 @@ def test_a_pair_without_a_payload_is_never_counted_as_a_match(tmp_path):
 
     assert report.counts() == {
         "pairs": 1, "comparable": 0, "incomparable": 1,
-        "outcome_mismatch": 0, "reason_set_mismatch": 0,
+        "outcome_mismatch": 0, "reason_set_mismatch": 0, "payload_loss": 0,
     }
     assert report.rows[0].detail == ot.REASON_DETAIL_NO_PAYLOAD_BOTH
 
@@ -389,6 +389,63 @@ def test_losing_a_payload_on_one_side_only_is_visible(tmp_path):
     assert report.counts()["incomparable"] == 1
     assert report.rows[0].detail == ot.REASON_DETAIL_NO_PAYLOAD_AFTER
     assert report.incomparable_sides_agree is False
+    assert report.counts()["payload_loss"] == 1
+
+
+def test_a_decided_pair_that_lost_its_payload_is_a_payload_loss(tmp_path):
+    """Issue #15 PR-15-B: separate "we could not look" from "there was nothing".
+
+    A pair the checker decided emitted a result payload, so its absence on one
+    side means the run lost something it produced.  That must stay visible as
+    its own count instead of being absorbed into the generic incomparable
+    bucket, because a before/after comparison is only as good as what it could
+    actually compare.
+    """
+
+    before, after = tmp_path / "before", tmp_path / "after"
+    write_pair(before, EQ_SAMPLE, "f", "B1", "B2", "UNKNOWN", reasons=("a",))
+    write_pair(after, EQ_SAMPLE, "f", "B1", "B2", "UNKNOWN", payload=False)
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+
+    assert report.counts()["payload_loss"] == 1
+    assert report.payload_losses == report.incomparable
+    assert report.rows[0].as_dict()["payload_loss"] is True
+
+
+@pytest.mark.parametrize("outcome", ["TIMEOUT", "ERROR"])
+def test_a_pair_that_was_killed_owes_no_payload(tmp_path, outcome):
+    """A run that never finished the pair may or may not have flushed the JSON.
+
+    Whether it did is a matter of milliseconds at the deadline, so two runs of
+    the same commit can legitimately disagree about it.  Counting that as a
+    lost payload would report scheduling noise as a difference in the code.
+    """
+
+    before, after = tmp_path / "before", tmp_path / "after"
+    write_pair(before, EQ_SAMPLE, "f", "B1", "B2", outcome, reasons=("a",))
+    write_pair(after, EQ_SAMPLE, "f", "B1", "B2", outcome, payload=False)
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+
+    assert report.counts()["incomparable"] == 1
+    assert report.counts()["payload_loss"] == 0
+    # ... and it is still not counted as a match.
+    assert report.counts()["comparable"] == 0
+    assert report.counts()["reason_set_mismatch"] == 0
+
+
+def test_a_comparable_pair_is_never_a_payload_loss(tmp_path):
+    before, after = tmp_path / "before", tmp_path / "after"
+    for tree in (before, after):
+        write_pair(tree, EQ_SAMPLE, "f", "B1", "B2", "UNKNOWN", reasons=("a",))
+
+    report = ot.build_reason_sets(load_pair_outcomes(before), load_pair_outcomes(after))
+
+    assert report.counts() == {
+        "pairs": 1, "comparable": 1, "incomparable": 0,
+        "outcome_mismatch": 0, "reason_set_mismatch": 0, "payload_loss": 0,
+    }
 
 
 def test_only_the_last_result_payload_of_a_log_is_used(tmp_path):

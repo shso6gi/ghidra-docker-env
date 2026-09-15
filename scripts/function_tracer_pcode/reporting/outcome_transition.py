@@ -62,6 +62,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.reporting.pair_outcomes import (
     LABEL_EQ,
     LABEL_NEQ,
+    OUTCOME_INVALID,
     OUTCOME_MISSING,
     OUTCOME_ORDER,
     PAIR_STATUS_SUFFIX,
@@ -721,6 +722,16 @@ REASON_DETAIL_NO_PAYLOAD_BEFORE = "no_result_payload_before"
 REASON_DETAIL_NO_PAYLOAD_AFTER = "no_result_payload_after"
 REASON_DETAIL_NO_PAYLOAD_BOTH = "no_result_payload_both"
 
+# Issue #15 PR-15-B: whether a pair is *expected* to leave a result payload
+# depends on how it ended.  A pair the runner killed at its deadline may or may
+# not have flushed the result JSON first, so the payload's absence there says
+# nothing about the code -- two runs of the same commit can disagree about it.
+# A pair the checker *decided* did emit one, so a decided pair without a
+# payload is a real loss and has to stay visible as one.
+OUTCOMES_WITHOUT_A_DURABLE_PAYLOAD = frozenset({
+    "TIMEOUT", "ERROR", OUTCOME_INVALID, OUTCOME_MISSING,
+})
+
 
 def _log_path_for(record: PairOutcome) -> Path:
     """The pair log next to a ``*.pair-status.json`` (same stem, ``.log``)."""
@@ -789,6 +800,27 @@ class ReasonSetRow:
         """Only a comparable pair can mismatch; an unreadable one cannot."""
         return self.verdict == REASON_SET_COMPARABLE and self.before_reasons != self.after_reasons
 
+    @property
+    def payload_loss(self) -> bool:
+        """A side that decided this pair and still left nothing to compare.
+
+        This separates the two reasons a pair can be incomparable.  A
+        ``TIMEOUT``/``ERROR`` pair without a payload is expected noise: the
+        child was killed, and whether it had flushed the result first is a
+        matter of milliseconds.  A pair with a decided outcome and no payload
+        means the run lost something it produced, which is a difference a
+        before/after comparison must not absorb.
+        """
+        if self.verdict != REASON_SET_INCOMPARABLE:
+            return False
+        return any(
+            reasons is None and outcome not in OUTCOMES_WITHOUT_A_DURABLE_PAYLOAD
+            for outcome, reasons in (
+                (self.before_outcome, self.before_reasons),
+                (self.after_outcome, self.after_reasons),
+            )
+        )
+
     def as_dict(self) -> Dict[str, Any]:
         return {
             "sample_identity": self.key[0],
@@ -802,6 +834,7 @@ class ReasonSetRow:
             "after_reasons": None if self.after_reasons is None else list(self.after_reasons),
             "outcome_mismatch": self.outcome_mismatch,
             "reason_set_mismatch": self.reason_set_mismatch,
+            "payload_loss": self.payload_loss,
         }
 
 
@@ -826,6 +859,11 @@ class ReasonSetReport:
         return tuple(row for row in self.rows if row.reason_set_mismatch)
 
     @property
+    def payload_losses(self) -> Tuple[ReasonSetRow, ...]:
+        """Incomparable pairs that a decided outcome should have made comparable."""
+        return tuple(row for row in self.rows if row.payload_loss)
+
+    @property
     def incomparable_sides_agree(self) -> bool:
         """Whether exactly the same pairs were unreadable on both sides.
 
@@ -843,6 +881,7 @@ class ReasonSetReport:
             "incomparable": len(self.incomparable),
             "outcome_mismatch": len(self.outcome_mismatches),
             "reason_set_mismatch": len(self.reason_set_mismatches),
+            "payload_loss": len(self.payload_losses),
         }
 
     def as_dict(self) -> Dict[str, Any]:
@@ -1227,11 +1266,14 @@ def format_reason_sets(report: ReasonSetReport) -> List[str]:
         f"(of {counts['comparable']} comparable)",
         f"  incomparable: {counts['incomparable']} "
         "(no readable result payload, or present on one side only)",
+        f"  of those, a decided pair that lost its payload: {counts['payload_loss']} "
+        "(the rest ended in a way that guarantees no payload)",
         f"  the same pairs are unreadable on both sides: {report.incomparable_sides_agree}",
     ]
     for title, rows in (
         ("Outcome mismatches", report.outcome_mismatches),
         ("Reason-set mismatches", report.reason_set_mismatches),
+        ("Decided pairs that lost their payload", report.payload_losses),
         ("Incomparable pairs", report.incomparable),
     ):
         lines.append(f"{title} ({len(rows)}):")

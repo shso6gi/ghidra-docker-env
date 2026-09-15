@@ -20,6 +20,7 @@ from scripts.function_tracer_pcode.reporting.execution_receipt import (
     ANALYSIS_CONFIG_V3_SCHEMA,
     _read_key_values,
     analysis_config_from_run,
+    compatible_previous_run_manifest_analysis_identity,
     normalize_semantic_analysis_config,
     validate_analysis_config,
 )
@@ -121,6 +122,49 @@ def test_a_v3_config_object_is_validated_field_by_field(mutate):
     config = dict(analysis_config_from_run(v3_run("1")))
     with pytest.raises(ValueError):
         validate_analysis_config(mutate(config))
+
+
+SOURCE_DIGEST = "b" * 64
+
+
+def write_run_manifest(path, run):
+    """A prior run's manifest, sealed with the digest that run would have taken."""
+
+    fields = dict(
+        run,
+        analysis_config_digest=authority_digest(analysis_config_from_run(run)),
+        analysis_source_digest_start=SOURCE_DIGEST,
+        analysis_source_digest_end=SOURCE_DIGEST,
+    )
+    path.write_text(
+        "".join(f"{key}={value}\n" for key, value in fields.items()), encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.parametrize("previous,current,reusable", [
+    pytest.param(v3_run("1"), v3_run("1"), True, id="on-resumes-on"),
+    pytest.param(v3_run("0"), v3_run("0"), True, id="off-resumes-off"),
+    pytest.param(v3_run("1"), v3_run("0"), False, id="off-never-resumes-on"),
+    pytest.param(v3_run("0"), v3_run("1"), False, id="on-never-resumes-off"),
+    pytest.param(BASE_RUN, v3_run("1"), False, id="v3-never-resumes-a-legacy-run"),
+    pytest.param(v3_run("1"), BASE_RUN, False, id="legacy-never-resumes-v3"),
+    pytest.param(BASE_RUN, BASE_RUN, True, id="legacy-resumes-legacy"),
+])
+def test_a_run_never_reuses_the_other_mode_s_pair_statuses(
+    tmp_path, previous, current, reusable,
+):
+    """The resume check is where an ON pair status could land in an OFF run.
+
+    That would destroy the oracle silently -- the OFF run would report results
+    the fast path produced -- so the two modes must not be compatible here.
+    """
+
+    manifest = write_run_manifest(tmp_path / "run_manifest.txt", previous)
+    identity = compatible_previous_run_manifest_analysis_identity(
+        manifest, current_config=analysis_config_from_run(current),
+    )
+    assert (identity is not None) is reusable
 
 
 # One real ``run_manifest.txt`` written before this change (the Issue #124-C
