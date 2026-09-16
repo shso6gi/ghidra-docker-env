@@ -1109,7 +1109,7 @@ def test_saturation_does_not_recall_an_already_observed_count_api():
     assert proxy.getNumInputs() == 2
     assert calls == ["called"]
     # 飽和はその観測を読むだけで、実 API を呼び直さない。
-    assert recorder._counted(proxy, "getNumInputs") == 2
+    assert recorder._counted(proxy._rec_index, proxy, "getNumInputs") == 2
     assert calls == ["called"]
     observations = recorder._entries[proxy._rec_index]["observations"]
     assert len(observations[record_pcode_fixture.call_key("getNumInputs", ())]) == 1
@@ -1374,6 +1374,198 @@ def test_saturation_settled_predicate_is_shared_by_both_passes():
     for method in ("_saturate_equality_classes", "_saturate_ir_kinds"):
         body = inspect.getsource(getattr(record_pcode_fixture.Recorder, method))
         assert "saturation_is_settled" in body, method
+
+
+# --- index accessor の件数 API も同じ terminal 判定を通る --------------------
+
+
+class _IndexedSource:
+    """``getInput(i)`` を census に載せる source（件数 API も持つ）。"""
+
+    def getNumInputs(self) -> int:
+        return 1
+
+    def getInput(self, ordinal: int) -> int:
+        return 100 + ordinal
+
+
+def _indexed_peer_recorder(monkeypatch, peer, accessor="getInput", counter="getNumInputs"):
+    """census を作る source と、件数 API に問題のある peer を並べる。"""
+
+    _ir_kind(monkeypatch)
+    recorder = _synthetic_recorder_instance()
+    source = recorder.proxy_for(_IndexedSource())
+    assert source.getNumInputs() == 1
+    assert source.getInput(0) == 100      # indexed census に accessor が載る
+    other = recorder.proxy_for(peer)
+    return recorder, other
+
+
+class _PeerWithoutCounter:
+    """`getInput` は持つが件数 API を持たない peer（``attr`` が absent）。"""
+
+    def getInput(self, ordinal: int) -> int:
+        return ordinal
+
+
+class _PeerWithNonCallableCounter:
+    def __init__(self) -> None:
+        self.getNumInputs = 3
+
+    def getInput(self, ordinal: int) -> int:
+        return ordinal
+
+
+class _PeerWhoseCounterGetattrRaises:
+    def getInput(self, ordinal: int) -> int:
+        return ordinal
+
+    def __getattr__(self, name):
+        if name == "getNumInputs":
+            raise RuntimeError("ghidra refuses the attribute")
+        raise AttributeError(name)
+
+
+def test_indexed_counter_terminates_when_the_peer_lacks_it(monkeypatch):
+    """件数 API が無い peer でも飽和は固定点で終わる（RecordingError にしない）。"""
+
+    recorder, other = _indexed_peer_recorder(monkeypatch, _PeerWithoutCounter())
+    recorder.saturate()
+    observations = recorder._entries[other._rec_index]["observations"]
+    assert observations["attr:getNumInputs"][0]["v"]["kind"] == "absent"
+    # 観測は 1 件だけ（毎周回積み直していない）。
+    assert len(observations["attr:getNumInputs"]) == 1
+    assert "call:getNumInputs()" not in observations
+
+
+def test_indexed_counter_terminates_when_the_peer_counter_is_not_callable(monkeypatch):
+    recorder, other = _indexed_peer_recorder(
+        monkeypatch, _PeerWithNonCallableCounter(),
+    )
+    recorder.saturate()
+    observations = recorder._entries[other._rec_index]["observations"]
+    assert observations["attr:getNumInputs"][0]["v"]["kind"] == "value"
+    assert len(observations["attr:getNumInputs"]) == 1
+
+
+def test_indexed_counter_terminates_when_its_getattr_raises(monkeypatch):
+    recorder, other = _indexed_peer_recorder(
+        monkeypatch, _PeerWhoseCounterGetattrRaises(),
+    )
+    recorder.saturate()
+    observations = recorder._entries[other._rec_index]["observations"]
+    assert "raises" in observations["attr:getNumInputs"][0]
+    assert len(observations["attr:getNumInputs"]) == 1
+
+
+def test_indexed_counter_that_raises_is_observed_once(monkeypatch):
+    """callable な件数 API の通常例外は 1 回だけ観測し、再試行しない。"""
+
+    calls = []
+
+    class _PeerWhoseCounterRaises:
+        def getInput(self, ordinal):
+            return ordinal
+
+        def getNumInputs(self):
+            calls.append("counted")
+            raise RuntimeError("ghidra says no")
+
+    recorder, other = _indexed_peer_recorder(
+        monkeypatch, _PeerWhoseCounterRaises(),
+    )
+    recorder.saturate()
+    assert calls == ["counted"]
+    observations = recorder._entries[other._rec_index]["observations"]
+    assert "raises" in observations["call:getNumInputs()"][0]
+    assert len(observations["call:getNumInputs()"]) == 1
+
+
+def test_indexed_counter_propagates_a_recording_error(monkeypatch):
+    """件数 API 経路でも `RecordingError` は握り潰さず即時伝播する。"""
+
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+
+    class _PeerWhoseCounterFailsTheRecording:
+        def getInput(self, ordinal):
+            return ordinal
+
+        def getNumInputs(self):
+            raise record_pcode_fixture.RecordingError("counter broke the recording")
+
+    recorder, _other = _indexed_peer_recorder(
+        monkeypatch, _PeerWhoseCounterFailsTheRecording(),
+    )
+    with pytest.raises(record_pcode_fixture.RecordingError):
+        recorder.saturate()
+
+
+def test_indexed_counter_is_not_recalled_once_observed(monkeypatch):
+    """production が観測済みの件数 API を飽和が呼び直さない。"""
+
+    calls = []
+
+    class _PeerWithCounter:
+        def getInput(self, ordinal):
+            return ordinal
+
+        def getNumInputs(self):
+            calls.append("counted")
+            return 1
+
+    recorder, other = _indexed_peer_recorder(monkeypatch, _PeerWithCounter())
+    assert other.getNumInputs() == 1          # production が 1 回観測
+    assert calls == ["counted"]
+    recorder.saturate()
+    assert calls == ["counted"]               # 飽和は呼び直さない
+    observations = recorder._entries[other._rec_index]["observations"]
+    assert len(observations["call:getNumInputs()"]) == 1
+    # 件数が読めたので accessor は展開される。
+    assert "call:getInput(int:0)" in observations
+
+
+@pytest.mark.parametrize("accessor,counter", [
+    ("getInput", "getNumInputs"), ("getIn", "getInSize"), ("getOut", "getOutSize"),
+])
+def test_every_indexed_accessor_uses_the_same_counter_contract(
+    monkeypatch, accessor, counter,
+):
+    """宣言済みの index accessor すべてが同じ terminal 判定を通る。"""
+
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+
+    assert (accessor, counter) in record_pcode_fixture.INDEXED_ACCESSORS
+    _ir_kind(monkeypatch)
+    recorder = _synthetic_recorder_instance()
+
+    class _Source:
+        pass
+
+    setattr(_Source, counter, lambda self: 1)
+    setattr(_Source, accessor, lambda self, ordinal: 100 + ordinal)
+    source = recorder.proxy_for(_Source())
+    assert getattr(source, counter)() == 1
+    assert getattr(source, accessor)(0) == 100
+
+    class _PeerWithoutTheCounter:
+        pass
+
+    setattr(_PeerWithoutTheCounter, accessor, lambda self, ordinal: ordinal)
+    peer = recorder.proxy_for(_PeerWithoutTheCounter())
+    recorder.saturate()
+    observations = recorder._entries[peer._rec_index]["observations"]
+    assert observations[fixture_schema.attr_key(counter)][0]["v"]["kind"] == "absent"
+    assert len(observations[fixture_schema.attr_key(counter)]) == 1
+
+
+def test_counter_lookup_uses_the_shared_settled_predicate():
+    """`_counted` が専用の terminal 判定を再実装していないこと。"""
+
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+    import inspect
+
+    body = inspect.getsource(record_pcode_fixture.Recorder._counted)
+    assert "saturation_is_settled" in body
 
 
 # --- validator: eq_group と hashCode identity の整合 -------------------------

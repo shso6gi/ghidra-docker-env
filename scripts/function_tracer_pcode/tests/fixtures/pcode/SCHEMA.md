@@ -209,8 +209,8 @@ digest の対象（`SOURCE_ROOTS`）には `tests/` も入るので、書き出�
   全員へ出す。飽和が **production の観測列を乱さない**こと: 既に記録のある key は
   呼び直さない（件数 API も記録済みの値を読む）。dunder は飽和しない。
 - **終了性**: 飽和は次のどれかを満たした member を terminal として扱い、二度と
-  試さない（両方の飽和経路が `Recorder.saturation_is_settled` という 1 つの判定を
-  共有する）。
+  試さない。**3 つの経路（equality-class / IR-kind / index accessor の件数 API）
+  すべて**が `Recorder.saturation_is_settled` という 1 つの判定を共有する。
   - 呼び出し観測が取れている
   - `attr` が `absent`（その object に member が無い）
   - `attr` が callable でない `value`
@@ -220,6 +220,10 @@ digest の対象（`SOURCE_ROOTS`）には `tests/` も入るので、書き出�
   member を永久に試し続ける。周回の進捗は「試した」ではなく**記録した観測が
   増えた**ことで判定し、増えなければ終了する。固定点に達しないまま
   `MAX_SATURATION_PASSES` 周回したら記録を失敗させる。
+
+  進捗を観測数で測れるのは、どの経路も settled な member を二度と試さないから。
+  1 つでも迂回すると、到達できない member の失敗観測を毎周回積むことで
+  **偽の進捗**を作り、正常に固定点へ達するはずの記録が失敗する。
 - **Program / Memory / Listing / SymbolTable / FunctionManager /
   DataTypeManager など**は要求駆動のまま。
 

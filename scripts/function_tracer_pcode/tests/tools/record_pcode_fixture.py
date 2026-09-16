@@ -276,7 +276,14 @@ class Recorder:
         return observations[0]
 
     def observation_count(self) -> int:
-        """記録済み観測の総数（飽和の進捗判定に使う単調増加量）。"""
+        """記録済み観測の総数（飽和の進捗判定に使う単調増加量）。
+
+        これが進捗の指標として成立するのは、飽和の**すべての**経路
+        （equality-class / IR-kind / index accessor の件数 API）が
+        :meth:`saturation_is_settled` を通り、settled な member を二度と
+        試さないから。1 つでも迂回すると、失敗の観測を毎周回積むことで
+        「偽の進捗」を作り、固定点に到達しなくなる。
+        """
 
         return sum(len(values) for entry in self._entries
                    for values in entry["observations"].values())
@@ -445,7 +452,7 @@ class Recorder:
             for accessor, counter in INDEXED_ACCESSORS:
                 if accessor not in indexed_census.get(simple, ()):
                     continue
-                count = self._counted(proxy, counter)
+                count = self._counted(index, proxy, counter)
                 if count is None:
                     continue
                 if count > MAX_SATURATION_INDEX:
@@ -462,22 +469,33 @@ class Recorder:
                     self._safe_call(proxy, accessor, (ordinal,))
             index += 1
 
-    def _counted(self, proxy: "RecordingProxy", counter: str) -> Optional[int]:
+    def _counted(
+        self, index: int, proxy: "RecordingProxy", counter: str,
+    ) -> Optional[int]:
         """index accessor を回すための件数。
 
-        すでに記録済みなら**呼び直さない**。飽和のために production が観測した
-        key を再度呼ぶと、状態を持つ API だった場合に production の観測列を
-        乱す（記録済み key へ観測を足してしまう）。
+        件数 API も通常 member と**同じ terminal 判定**
+        （:meth:`saturation_is_settled`）を使う。専用の判定を書くと、
+        「counter に到達し得ないと記録で確定しているのに毎周回呼び直す」経路が
+        できて、観測（``attr`` の再記録）だけが増え続け、飽和が偽の進捗で
+        回り続けてしまう。
+
+        * 観測済み → 記録値を使い、**呼び直さない**（状態を持つ API だった
+          場合に production の観測列を乱さない）
+        * 到達し得ないと確定（``attr`` が absent / 非 callable / raises）
+          → ``None``
+        * callable で未観測 → 1 回だけ呼ぶ
         """
 
-        recorded = proxy._rec_recorder.recorded_observation(
-            proxy._rec_index, call_key(counter, ())
-        )
+        member_key = call_key(counter, ())
+        recorded = self.recorded_observation(index, member_key)
         if recorded is not None:
             tagged = recorded.get("v")
             if not isinstance(tagged, Mapping) or tagged.get("kind") != VALUE_INT:
                 return None
             value: Any = tagged["value"]
+        elif self.saturation_is_settled(index, member_key, counter):
+            return None
         else:
             value = self._safe_call(proxy, counter, ())
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
