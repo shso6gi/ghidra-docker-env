@@ -63,8 +63,9 @@
    "right_observation": "old snippet returns 1"
   }
  },
- "verification_basis": "source review of both versions plus an independent native execution of the two definitions on the recorded input; the verdict and the same evidence are registered in the tsv, which is the source of truth",
+ "verification_basis": "source review of both versions plus an independent native execution of the two definitions on the recorded input (native_execution_witness); the verdict and the same evidence are registered in scripts/eqbench/neq_ground_truth.tsv, which is the source of truth.",
+ "verification_method": "source_review_and_native_execution",
  "verification_status": "verified",
  "verified_at": "2026-09-16T00:00:00Z",
- "verified_by": "Issue #109 PR-109-B (source review + independent native execution)"
+ "verified_by": "Issue #109 PR-109-B"
 }

@@ -27,7 +27,9 @@ soundness assert は (1) と (2) が揃った case にだけ掛ける。conditio
 
 逃げ道は置かない: z3 が無い・fixture が無い・schema が壊れている・API surface が
 足りない・budget を超えた、はすべて **fail** であって skip でも UNKNOWN でも
-ない。budget は test harness の失敗条件であって production の timeout ではない。
+ない。per-case budget は実際の deadline として worker の process group に効き、
+超えたら待たずに落として :class:`RecordedReplayBudgetExceeded` になる。これは
+harness の失敗条件で、production の UNKNOWN / TIMEOUT へは変換しない。
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ from __future__ import annotations
 import importlib
 import json
 import shutil
+import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -72,6 +76,29 @@ VARIANT_FAST_PATH = {
 VERIFICATION_VERIFIED = "verified"
 VERIFICATION_SOURCE_WITNESS_ONLY = "source_witness_only"
 COMPATIBILITY_VERIFIED = "verified"
+
+#: `verification_method` → その method が主張する事実。metadata が「やっていない
+#: 確認」を名乗らないよう、散文ではなくこの表で照合する（`verified_by` は誰が
+#: 登録したかだけを言い、どう確かめたかは method が構造化して持つ）。
+VERIFICATION_METHODS = {
+    # tsv に登録された関数単位 relation。source 読解 + 独立した native 実行。
+    "source_review_and_native_execution": {
+        "requires_native_witness": True,
+        "requires_source_witness": True,
+        "registry_key": "file",
+    },
+    # Eq sample の単一 source 規則。比較する第 2 定義が無いので実行 probe は無い。
+    "eq_sample_single_source": {
+        "requires_native_witness": False,
+        "requires_source_witness": False,
+        "registry_key": "kind",
+    },
+}
+
+#: native 実行 witness が名乗るべき field（どれが欠けても「実行した」と言えない）。
+NATIVE_WITNESS_FIELDS = (
+    "toolchain", "command", "input", "left_output", "right_output",
+)
 
 RELATION_NOT_EQ = "NOT_EQ"
 RELATION_EQ = "EQ"
@@ -353,6 +380,78 @@ WORKER_FAST_PATH = {
 }
 
 
+class RecordedReplayBudgetExceeded(AssertionError):
+    """worker が per-case budget 内に終わらず、deadline で止められた。
+
+    **production の UNKNOWN / TIMEOUT ではない。** production の timeout は
+    supervisor が受領証付きで出す判定で、これは「この test harness がこの機械で
+    待つと決めた上限」でしかない。両者を同じ語彙にすると、harness の都合が
+    判定結果の分布に混ざる。だから harness の失敗（``AssertionError``）として
+    投げ、report にも payload にも変換しない。
+    """
+
+    def __init__(self, case_id: str, variant: str, budget_seconds: int) -> None:
+        super().__init__(
+            "{}: the replay worker did not finish inside its {}s per-case "
+            "harness budget and its process group was killed "
+            "(case_id={!r}, variant={!r}). This is a test-harness failure "
+            "condition; it is not converted into a production UNKNOWN or "
+            "TIMEOUT outcome.".format(
+                _variant_id(case_id, variant), budget_seconds, case_id, variant,
+            )
+        )
+        self.case_id = case_id
+        self.variant = variant
+        self.budget_seconds = budget_seconds
+
+
+def _kill_process_group(process: "subprocess.Popen") -> None:
+    """worker と、それが起動した solver ごと落とす。
+
+    ``start_new_session=True`` で作った process group を SIGKILL する。worker
+    だけを kill すると、解いている最中の z3 が孤児として残り、次の case と
+    CPU を取り合う。
+    """
+
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        # group を落とせない環境でも、せめて直接の子は止める。
+        try:
+            process.kill()
+        except OSError:
+            pass
+
+
+def _run_replay_worker(
+    command: Sequence[str], *, case_id: str, variant: str, budget_seconds: int,
+) -> Tuple[int, str, str]:
+    """worker を起動し、per-case budget を **実際の deadline** として適用する。
+
+    budget を過ぎたら待ち続けずに process group を落とし、
+    :class:`RecordedReplayBudgetExceeded` を送出する。worker が hang しても
+    job 全体の timeout まで待たない。
+    """
+
+    process = subprocess.Popen(
+        list(command), cwd=str(REPO_ROOT),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=budget_seconds)
+    except subprocess.TimeoutExpired as expired:
+        _kill_process_group(process)
+        try:
+            process.communicate(timeout=30)
+        except subprocess.TimeoutExpired:  # pragma: no cover - kill 後は来ない
+            pass
+        raise RecordedReplayBudgetExceeded(
+            case_id, variant, budget_seconds,
+        ) from expired
+    return process.returncode, stdout, stderr
+
+
 def _replay_case(case: Mapping[str, Any], variant: str) -> Mapping[str, Any]:
     """1 件の再生を **子 process で 1 回だけ**走らせ、観測を読み戻す。
 
@@ -368,6 +467,7 @@ def _replay_case(case: Mapping[str, Any], variant: str) -> Mapping[str, Any]:
     """
 
     case_id = case["case_id"]
+    budget_seconds = int(case["budget_seconds"])
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="recorded-pair-") as work:
         output = Path(work) / "report.json"
@@ -381,15 +481,16 @@ def _replay_case(case: Mapping[str, Any], variant: str) -> Mapping[str, Any]:
         ]
         if variant == VARIANT_FAST_PATH_ON:
             command.append("--forbid-solver")
-        completed = subprocess.run(
-            command, cwd=str(REPO_ROOT), capture_output=True, text=True,
+        returncode, stdout, stderr = _run_replay_worker(
+            command, case_id=case_id, variant=variant,
+            budget_seconds=budget_seconds,
         )
-        if completed.returncode != 0 or not output.is_file():
+        if returncode != 0 or not output.is_file():
             raise AssertionError(
                 "the replay worker failed for {} (exit {}).\nstdout:\n{}\n"
                 "stderr:\n{}".format(
-                    _variant_id(case_id, variant), completed.returncode,
-                    completed.stdout[-4000:], completed.stderr[-4000:],
+                    _variant_id(case_id, variant), returncode,
+                    stdout[-4000:], stderr[-4000:],
                 )
             )
         report = _read_json(output)
@@ -589,16 +690,11 @@ def test_recorded_pair(case_id, variant, record_property):
     # (5) regression（遷移検出）
     _compare_regression(payload, expected, where)
 
-    # (6) wall clock。production の UNKNOWN / TIMEOUT へは変換しない。
-    budget = case["budget_seconds"]
-    if elapsed > budget:
-        pytest.fail(
-            "{}: the replay took {:.1f}s, over its {}s harness budget. This is "
-            "a test-harness failure condition, not a production timeout."
-            .format(where, elapsed, budget)
-        )
-    record_property("replay_seconds", "{} wall={:.2f} replay={:.2f}".format(
-        where, elapsed, float(report["seconds"]),
+    # (6) wall clock。per-case budget は `_run_replay_worker` が **deadline として**
+    #     適用済みで、ここへ来た時点で budget 内に終わっている（超過した replay は
+    #     worker を落として RecordedReplayBudgetExceeded になる）。所要は報告する。
+    record_property("replay_seconds", "{} wall={:.2f} replay={:.2f} budget={}".format(
+        where, elapsed, float(report["seconds"]), case["budget_seconds"],
     ))
 
 
@@ -610,8 +706,9 @@ def test_recorded_pair(case_id, variant, record_property):
 def test_recorded_corpus_stays_within_its_wall_clock_budget():
     """corpus 全体の所要。**file 全体を走らせたときだけ**意味がある。
 
-    超過を case 削除や surface 削減で埋め合わせないこと。超過は Issue #109 の
-    AC 未達として報告する事実であって、corpus を縮める理由ではない。
+    Issue #109 の時間 AC（2026-09-17 改訂）は「GitHub-hosted runner で 1200 秒
+    以内」。超過したときに case を削ったり記録面を削ったりして帳尻を合わせない
+    こと。合わせるべきは corpus ではなく、遅くなった原因のほう。
     """
 
     missing = [
@@ -626,9 +723,10 @@ def test_recorded_corpus_stays_within_its_wall_clock_budget():
     total = sum(MEASURED.values())
     if total > CORPUS_BUDGET_SECONDS:
         pytest.fail(
-            "the recorded corpus took {:.1f}s, over the {}s budget: {}. Report "
-            "this as an Issue #109 acceptance-criteria miss; do not drop cases "
-            "or trim the recorded surface to fit.".format(
+            "the recorded corpus took {:.1f}s, over the {}s budget (Issue #109 "
+            "time acceptance criterion, revised 2026-09-17): {}. Do not drop "
+            "cases, trim the recorded surface, or turn a harness timeout into "
+            "an UNKNOWN to fit it.".format(
                 total, CORPUS_BUDGET_SECONDS,
                 ", ".join(
                     "{}={:.1f}s".format(_variant_id(*key), value)
@@ -636,6 +734,154 @@ def test_recorded_corpus_stays_within_its_wall_clock_budget():
                 ),
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# per-case budget は実際の deadline（worker が hang しても待たない）
+# ---------------------------------------------------------------------------
+
+
+def _python_command(source: str) -> List[str]:
+    return [sys.executable, "-c", source]
+
+
+def _process_is_alive(pid: int) -> bool:
+    """pid がまだ走っているか。zombie は「走っていない」と数える。
+
+    ``os.kill(pid, 0)`` だけでは足りない: 成功は **zombie にも返る**。container の
+    PID 1 は孤児を reap しないので、deadline で殺した孫 process は zombie のまま
+    残り、素朴な liveness 判定では「生き残った」と読めてしまう。
+    """
+
+    stat_path = Path("/proc/{}/stat".format(pid))
+    try:
+        stat = stat_path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return False
+    except OSError:  # pragma: no cover - /proc の無い環境
+        pass
+    else:
+        # comm には空白も ')' も入りうるので、最後の ')' の後ろから読む。
+        state = stat.rpartition(")")[2].split()[0]
+        return state not in ("Z", "X", "x")
+    try:  # pragma: no cover - /proc の無い環境の fallback
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def test_a_worker_over_its_budget_is_a_harness_failure():
+    """budget を過ぎた worker は待たずに落とし、harness の失敗にする。"""
+
+    started = time.monotonic()
+    with pytest.raises(RecordedReplayBudgetExceeded) as raised:
+        _run_replay_worker(
+            _python_command("import time; time.sleep(300)"),
+            case_id="synthetic_case", variant="default", budget_seconds=2,
+        )
+    elapsed = time.monotonic() - started
+    # 「300 秒待ってから諦める」ではなく deadline で止まっていること。
+    assert elapsed < 60, elapsed
+    assert raised.value.case_id == "synthetic_case"
+    assert raised.value.variant == "default"
+    assert raised.value.budget_seconds == 2
+    message = str(raised.value)
+    assert "synthetic_case" in message
+    assert "default" in message
+    assert "2s" in message
+
+
+def test_a_worker_that_ignores_termination_is_still_stopped_at_the_deadline():
+    """SIGTERM を無視する worker と、その子 process も deadline で消える。
+
+    worker は再生中に z3 を起動する。worker だけを止めると solver が孤児として
+    残り、次の case と CPU を取り合う。process group ごと落とすことを、
+    SIGTERM を無視して孫を持つ synthetic worker で固定する。
+    """
+
+    source = (
+        "import os, signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "child = subprocess.Popen([sys.executable, '-c',"
+        " 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN);"
+        " time.sleep(300)'])\n"
+        "sys.stderr.write(str(child.pid) + chr(10))\n"
+        "sys.stderr.flush()\n"
+        "time.sleep(300)\n"
+    )
+    process = subprocess.Popen(
+        _python_command(source), cwd=str(REPO_ROOT),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )
+    grandchild_pid = int(process.stderr.readline().strip())
+    assert _process_is_alive(process.pid)
+    assert _process_is_alive(grandchild_pid)
+
+    _kill_process_group(process)
+    process.communicate(timeout=30)
+
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and _process_is_alive(grandchild_pid):
+        time.sleep(0.1)
+    assert not _process_is_alive(grandchild_pid), (
+        "the worker's own child survived the deadline kill"
+    )
+
+
+def test_a_budget_timeout_is_not_converted_into_an_outcome():
+    """deadline の失敗を production の UNKNOWN / TIMEOUT にしない。
+
+    harness の都合（この機械でどれだけ待つか）が判定結果の分布に混ざらない
+    ことを、型と副作用の両面で固定する。
+    """
+
+    from scripts.function_tracer_pcode.authority.contracts import Outcome
+
+    # harness の失敗であって、production の結果ではない。
+    assert issubclass(RecordedReplayBudgetExceeded, AssertionError)
+    measured_before = dict(MEASURED)
+    with pytest.raises(RecordedReplayBudgetExceeded) as raised:
+        _run_replay_worker(
+            _python_command("import time; time.sleep(300)"),
+            case_id="synthetic_case", variant="default", budget_seconds=2,
+        )
+    # report も payload も作られない（= outcome へ丸められる余地がない）。
+    assert not hasattr(raised.value, "payload")
+    assert not hasattr(raised.value, "report")
+    assert not hasattr(raised.value, "final_outcome")
+    # 計測済み扱いにもしない。budget 超過を「測れた replay」として
+    # corpus の合計へ足すと、落ちた case ほど合計が小さく見える。
+    assert dict(MEASURED) == measured_before
+    # production 側の TIMEOUT / UNKNOWN は authority の Outcome であって、
+    # この例外はその値を一切持たない。
+    assert not any(
+        getattr(raised.value, name, None) in tuple(Outcome)
+        for name in ("outcome", "final_outcome", "canonical_outcome")
+    )
+
+
+def test_a_worker_inside_its_budget_is_unaffected_by_the_deadline():
+    """通常 case の経路は deadline の配線で変わらない。"""
+
+    returncode, stdout, stderr = _run_replay_worker(
+        _python_command("import sys; sys.stdout.write('ok'); sys.exit(0)"),
+        case_id="synthetic_case", variant="default", budget_seconds=60,
+    )
+    assert returncode == 0
+    assert stdout == "ok"
+    assert stderr == ""
+
+    returncode, _stdout, stderr = _run_replay_worker(
+        _python_command("import sys; sys.stderr.write('boom'); sys.exit(3)"),
+        case_id="synthetic_case", variant="default", budget_seconds=60,
+    )
+    # 異常終了は deadline とは別の失敗として、そのまま呼び出し側へ返る。
+    assert returncode == 3
+    assert stderr == "boom"
 
 
 # ---------------------------------------------------------------------------
@@ -782,6 +1028,70 @@ def test_every_case_has_a_complete_and_consistent_description():
         assert linkage["produced_from"]["compile_script"] == (
             "scripts/eqbench/compile_all_arm_mips.sh"
         ), case_id
+
+
+def test_verification_metadata_claims_only_what_was_actually_checked():
+    """GT metadata が「やっていない確認」を名乗らないこと。
+
+    ここが緩むと、実行 probe を持たない entry が「independent native execution
+    で確かめた」と読める状態になり、soundness assert の根拠を実際より強く
+    見せてしまう。`verification_method` と witness field を突き合わせる。
+    """
+
+    for case_id in sorted(CASES):
+        ground_truth = _ground_truth(CASES[case_id])
+        assert ground_truth is not None, case_id
+        method = ground_truth.get("verification_method")
+        assert method in VERIFICATION_METHODS, (
+            "{}: unknown verification_method {!r}".format(case_id, method)
+        )
+        rules = VERIFICATION_METHODS[method]
+        native = ground_truth["native_execution_witness"]
+        source_witness = ground_truth["semantic_truth"]["source_witness"]
+
+        if rules["requires_native_witness"]:
+            assert isinstance(native, Mapping), (
+                "{}: {} claims an independent native execution but carries no "
+                "native_execution_witness".format(case_id, method)
+            )
+            for field in NATIVE_WITNESS_FIELDS:
+                assert str(native.get(field) or "").strip(), (
+                    "{}: native_execution_witness.{} is empty, so the run it "
+                    "claims cannot be reproduced".format(case_id, field)
+                )
+        else:
+            assert native is None, (
+                "{}: {} claims no execution probe, so "
+                "native_execution_witness must stay null".format(case_id, method)
+            )
+
+        if rules["requires_source_witness"]:
+            assert isinstance(source_witness, Mapping) and source_witness, case_id
+            for field in ("input", "left_observation", "right_observation",
+                          "differing_observable"):
+                assert str(source_witness.get(field) or "").strip(), (
+                    case_id, field,
+                )
+        else:
+            assert source_witness is None, (
+                "{}: {} has no differing observable to witness".format(
+                    case_id, method
+                )
+            )
+
+        assert rules["registry_key"] in ground_truth["registry"], (
+            "{}: registry shape does not match {}".format(case_id, method)
+        )
+        # `verified_by` は登録者だけを言う。確認方法を散文で重ねると、method と
+        # 食い違ったときにどちらが事実か決められなくなる。
+        verified_by = ground_truth["verified_by"]
+        assert verified_by and "execution" not in verified_by.lower(), (
+            "{}: verified_by must name who registered the entry, not restate "
+            "how it was checked ({!r}); verification_method owns that".format(
+                case_id, verified_by,
+            )
+        )
+        assert ground_truth["verification_basis"].strip(), case_id
 
 
 def test_the_identical_case_is_recorded_with_the_fast_path_off():

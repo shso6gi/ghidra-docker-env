@@ -87,7 +87,14 @@ real Ghidra returned for a pair of EqBench binaries, so the production
 `cases.json` describes the eight-case corpus `tests/unit/test_recorded_pairs.py`
 replays; `expected/` holds one regression expectation per case (and per variant
 for the byte-identical pair, which is replayed with the identity fast path both
-on and off from a single fast-path-**off** recording). `ground_truth/` holds
+on and off from a single fast-path-**off** recording). Each replay runs in its
+own process, the way production runs one pair per process, and `budget_seconds`
+is applied as a real deadline: the worker's process group is killed when it
+expires, so a hung replay fails fast instead of running into the job timeout.
+Both that budget and the whole-corpus `corpus_budget_seconds` (1200 s on a
+GitHub-hosted runner, the Issue #109 time criterion revised on 2026-09-17) are
+test-harness failure conditions and never become a production UNKNOWN or
+TIMEOUT. `ground_truth/` holds
 *references* to the semantic relation, never the relation itself: the source of
 truth is `scripts/eqbench/neq_ground_truth.tsv` (reviewed, with an independent
 native execution witness) plus `function_diff_manifest`'s single-source rule for

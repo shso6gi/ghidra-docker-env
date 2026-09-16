@@ -50,8 +50,9 @@
   ],
   "source_witness": null
  },
- "verification_basis": "EqBench Eq sample: both binaries of the pair are compiled from the one source file listed below, so every function of the sample is CONFIRMED_EQ by construction.  This is the same rule function_diff_manifest.build_eq_sample applies to every Eq sample, and the runner's benchmark gate already enforces it on every Eq pair; no separate execution probe exists or is needed because there is no second definition to compare against",
+ "verification_basis": "EqBench Eq sample: both binaries of the pair are compiled from the one source file listed in semantic_truth.source_paths, so every function of the sample is CONFIRMED_EQ by construction.  This is the same rule function_diff_manifest.build_eq_sample applies to every Eq sample, and the runner's benchmark gate already enforces it on every Eq pair.  What was checked here is the linkage: the sample resolves to that single source, binary_linkage names the two binaries built from it with their SHA-256, and the function was confirmed present exactly once in both by --list-functions.  There is no second definition to execute against, so this entry claims no native execution probe and native_execution_witness is null.",
+ "verification_method": "eq_sample_single_source",
  "verification_status": "verified",
  "verified_at": "2026-09-16T00:00:00Z",
- "verified_by": "Issue #109 PR-109-B (source review + independent native execution)"
+ "verified_by": "Issue #109 PR-109-B"
 }
