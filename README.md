@@ -110,7 +110,10 @@ Recording the same input twice is byte-identical (compare with
 varies per import — an object's identity hash and the program's unique ID —
 are recorded as surrogates that **preserve the equality and collision relation
 of the observed raw values** while replacing the values themselves; the raw
-numbers never enter the fixture.
+numbers never enter the fixture. A legal `hashCode()` collision between two
+unequal objects survives as a collision, and a recording stops outright if
+Java-equal receivers report different hashes — a contract the fixture loader
+re-checks with the same implementation.
 
 **A fixture replay is not a substitute for real-binary verification.** The
 recording proxy is not a Java object, so Ghidra's `isinstance` / Java static-API

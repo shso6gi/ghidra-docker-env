@@ -117,6 +117,9 @@ surrogate を **production にもそのまま返す**ので、記録時と再生
 - `hashCode` で Java-equal（同じ同値類）の receiver が違う raw 値を返したら
   `IdentityContractViolation` → 記録を止める（どちらかへ勝手に寄せない）
 - 宣言外の member、引数付きの呼び出し、整数以外の戻り値も記録を止める
+- 飽和中に起きた `RecordingError`（identity 契約 / schema / 健全性の違反）は
+  best-effort の例外処理で握り潰さず、記録全体を失敗させる。握り潰すと観測が
+  保存されないまま `progressed` だけが立ち、飽和 loop が終わらなくなる
 
 validator は fixture 側で次を検査する:
 
@@ -126,6 +129,11 @@ validator は fixture 側で次を検査する:
   （任意の in-band 値を受理しない）
 - fixture 全体で `(member, group)` と `value` が **1 対 1**
   （同じ group が 2 つの値を持たない / 同じ値が 2 つの group に使い回されない）
+- **`hashCode` の Java 契約を load 時にも守る**: 同じ `eq_group` の object は
+  同じ identity group / value を持たなければならない（`seq` の中も含む）。
+  違う `eq_group` が同じ group / value を共有するのは合法な collision なので
+  許す。記録側が raw 値で確かめる契約と**同じ実装**（`HashEqualityContract`）を
+  group / value に当てるので、弱い別実装にならない
 
 **削除で production surface を欠落させることはしない**（production はどちらの
 値も実際に読む）。
@@ -149,7 +157,8 @@ validator は fixture 側で次を検査する:
   `recording_commit` / `eqbench.commit` は 40 桁
 - `side` は `left` / `right`、`recording_mode.connector` は `production`
 - identity surrogate は `value == canonical_identity_surrogate(side, member, group)`
-  で、fixture 全体で `(member, group)` と `value` が 1 対 1
+  で、fixture 全体で `(member, group)` と `value` が 1 対 1、かつ同じ `eq_group` の
+  object は同じ `hashCode` identity を持つ
 - `eqbench_relative_path` は working root からの canonical relative path
   （絶対 path や `..` を含まない）
 - `ref` の参照先 object id が実在する

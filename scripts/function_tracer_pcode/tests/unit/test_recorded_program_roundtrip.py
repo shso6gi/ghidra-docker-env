@@ -1115,6 +1115,168 @@ def test_saturation_does_not_recall_an_already_observed_count_api():
     assert len(observations[record_pcode_fixture.call_key("getNumInputs", ())]) == 1
 
 
+# --- saturation は soundness 例外を握り潰さない ------------------------------
+
+
+class _ContractBreakingBlock:
+    """飽和で初めて呼ばれたときに Java の hash 契約を破る object。
+
+    production 本流では ``getIndex()`` しか呼ばれず、``hashCode()`` は飽和が
+    kind census から広げたときに初めて呼ばれる。
+    """
+
+    def __init__(self, index: int, raw_hash: int) -> None:
+        self._index = index
+        self._raw_hash = raw_hash
+
+    def getIndex(self) -> int:
+        return self._index
+
+    def hashCode(self) -> int:
+        return self._raw_hash
+
+
+def test_saturation_propagates_a_recording_error_instead_of_swallowing_it(monkeypatch):
+    """飽和中の identity 契約違反は記録全体を失敗させる（握り潰さない）。"""
+
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+
+    recorder = _synthetic_recorder_instance()
+    # 飽和対象の kind を名乗らせる（IR kind census が広がる対象になる）。
+    monkeypatch.setattr(
+        record_pcode_fixture, "_java_class_name",
+        lambda value: "ghidra.program.model.pcode.PcodeBlockBasic",
+    )
+    first = recorder.proxy_for(_ContractBreakingBlock(0, 111))
+    second = recorder.proxy_for(_ContractBreakingBlock(1, 222))
+    # 2 つは Java-equal（同じ同値類）だが raw hash が違う、という観測にする。
+    recorder._entries[second._rec_index]["eq_group"] = (
+        recorder._entries[first._rec_index]["eq_group"]
+    )
+    # production 本流では hashCode を呼ばない。census に載せるのは片側だけ。
+    assert first.getIndex() == 0
+    assert second.getIndex() == 1
+    assert first.hashCode() == fixture_schema.canonical_identity_surrogate(
+        "left", "hashCode", 0,
+    )
+
+    with pytest.raises(record_pcode_fixture.RecordingError):
+        recorder.saturate()
+
+
+def test_saturation_terminates_when_a_member_keeps_failing(monkeypatch):
+    """普通の Ghidra API failure は best-effort のまま、loop は必ず終わる。"""
+
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+
+    calls = []
+
+    class _FlakyBlock:
+        def getIndex(self):
+            return 0
+
+        def getStart(self):
+            calls.append("start")
+            raise RuntimeError("ghidra says no")
+
+    recorder = _synthetic_recorder_instance()
+    monkeypatch.setattr(
+        record_pcode_fixture, "_java_class_name",
+        lambda value: "ghidra.program.model.pcode.PcodeBlockBasic",
+    )
+    proxy = recorder.proxy_for(_FlakyBlock())
+    with pytest.raises(RuntimeError):
+        proxy.getStart()
+    assert proxy.getIndex() == 0
+    # 例外は観測として記録されるので、飽和は同じ key を再発行せず終わる。
+    recorder.saturate()
+    assert calls == ["start"]
+    recorder.collapse()
+    members = recorder._entries[proxy._rec_index]["members"]
+    assert "raises" in members[record_pcode_fixture.call_key("getStart", ())]
+
+
+# --- validator: eq_group と hashCode identity の整合 -------------------------
+
+
+def _hash_receiver_payload(pairs) -> Dict[str, Any]:
+    """``(object id, eq_group, hash group)`` から最小 fixture を作る。"""
+
+    payload = _minimal_payload({})
+    for object_id, eq_group, group in pairs:
+        payload["objects"][object_id] = {
+            "kind": "ghidra.program.model.pcode.PcodeBlockBasic",
+            "eq_group": eq_group,
+            "members": {
+                "attr:hashCode": {"v": {"kind": "method"}},
+                "call:hashCode()": {"v": _identity_value("left", "hashCode", group)},
+            },
+        }
+    return payload
+
+
+def test_validator_accepts_java_equal_receivers_sharing_one_hash_identity():
+    fixture_schema.validate_fixture(
+        _hash_receiver_payload([("o2", 5, 0), ("o3", 5, 0)])
+    )
+
+
+def test_validator_rejects_java_equal_receivers_with_different_hash_identities():
+    """replay で A == B なのに A.hashCode() != B.hashCode() になる fixture。"""
+
+    _rejects(_hash_receiver_payload([("o2", 5, 0), ("o3", 5, 1)]))
+
+
+def test_validator_accepts_a_hash_collision_between_unequal_receivers():
+    """違う同値類が同じ hash を共有するのは Java 的に合法。"""
+
+    fixture_schema.validate_fixture(
+        _hash_receiver_payload([("o2", 5, 0), ("o3", 6, 0)])
+    )
+
+
+def test_validator_rejects_a_hash_identity_that_changes_inside_one_sequence():
+    payload = _hash_receiver_payload([("o2", 5, 0)])
+    payload["objects"]["o2"]["members"]["call:hashCode()"] = {
+        "seq": [
+            {"v": _identity_value("left", "hashCode", 0)},
+            {"v": _identity_value("left", "hashCode", 1)},
+        ],
+    }
+    _rejects(payload)
+
+
+def test_validator_accepts_a_stable_hash_identity_inside_a_sequence():
+    payload = _hash_receiver_payload([("o2", 5, 0)])
+    payload["objects"]["o2"]["members"]["call:hashCode()"] = {
+        "seq": [
+            {"v": _identity_value("left", "hashCode", 0)},
+            {"raises": {"type": "java.lang.RuntimeException", "message": "x"}},
+        ],
+    }
+    fixture_schema.validate_fixture(payload)
+
+
+def test_malformed_identity_fixture_is_rejected_before_replay():
+    """壊れた fixture は再生器を作る前に落ちる（意味のある値へ寄せない）。"""
+
+    payload = _hash_receiver_payload([("o2", 5, 0), ("o3", 5, 1)])
+    with pytest.raises(fixture_schema.RecordedFixtureInvalid):
+        recorded_program_from_payload(payload)
+
+
+def test_record_and_validate_share_one_hash_contract_implementation():
+    """記録側と検証側が同じ contract 実装を使っていること。"""
+
+    contract = fixture_schema.HashEqualityContract()
+    assert contract.observe(5, "a") == (True, None)
+    assert contract.observe(5, "a") == (True, None)
+    assert contract.observe(5, "b") == (False, "a")
+    assert contract.observe(6, "a") == (True, None)   # collision は合法
+    # 同値類が無い（None）ときは何も言わない。
+    assert contract.observe(None, "z") == (True, None)
+
+
 def test_identity_surrogates_in_the_case_fixture_match_their_canonical_form():
     """実 fixture の surrogate が (side, member, group) と整合していること。"""
 

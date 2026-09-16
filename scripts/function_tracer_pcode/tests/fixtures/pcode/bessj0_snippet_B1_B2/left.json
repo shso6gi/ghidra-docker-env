@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "2ac815278246c479df8ad361ee4a5edc5bced3e4017e4f8a70bd2060e32f5bab",
+  "analysis_source_digest": "ae65fab47b7030c4280fffa22e2455a6c0c4ea8c631cfc54e326c1a90c28bb25",
   "binary": {
    "binary_id": "B1",
    "eqbench_relative_path": "bess/bessj0/Eq/source/newV-arm64-clang-O0",
@@ -15,10 +15,10 @@
   "fixture_id": "bessj0_snippet_B1_B2",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-09-16T03:56:23+00:00",
+  "recorded_at_utc": "2026-09-16T04:22:00+00:00",
   "recorder_version": "2",
-  "recording_commit": "46261e81ec5cfd1aa3bf4f29dc7dcfe1ea6533d1",
-  "recording_dirty": false,
+  "recording_commit": "583099754a8f9431ea6c0b913d9fcc0f232cf2a0",
+  "recording_dirty": true,
   "recording_mode": {
    "connector": "production",
    "identical_fast_path": false

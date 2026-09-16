@@ -35,20 +35,32 @@ PyGhidra にも依存しない（再生は Ghidra 無しで走る）。記録器
 identity surrogate:
 
 ``Object.hashCode()`` と ``Program.getUniqueProgramID()`` は、Ghidra / JVM が
-**import ごとに違う値**を返す。具体値そのものに意味は無く（Java の契約は
-「equal な object は equal な hash」だけ、program ID は不透明な handle）、
-production はどちらも「等しいか」だけに使う（``condition/tracker.py`` の
-block 索引、runtime ref の owner）。raw 値を記録すると同じ入力の再記録が
-byte 一致しないので、**値の一致 / 不一致関係を保ったまま** fixture-local な
-決定的 surrogate へ正規化する:
+**import ごとに違う値**を返す。具体値そのものに意味は無い — Java の契約は
+``a.equals(b) => a.hashCode() == b.hashCode()`` **だけ**で、異なる object の
+hash collision は合法。program ID は不透明な handle — production はどちらも
+「等しいか」だけに使う（``condition/tracker.py`` の block 索引、runtime ref の
+owner）。
 
-    surrogate = (side_ordinal + 1) * IDENTITY_SURROGATE_SIDE_STRIDE + eq_group
+そこで記録器は、**観測した raw 値そのものは保存せず、raw 値どうしの equality /
+collision relation を保存する**:
 
-``eq_group`` は受け手 object の Java 同値類なので、``equals`` な object は同じ
-surrogate を持ち（Java の hashCode 契約と一致）、別の同値類は別の surrogate に
-なる。side ordinal を掛けるので左右の fixture で surrogate は決して衝突しない。
-記録器は surrogate を **production にもそのまま返す**ので、記録時と再生時で
-production が見る値は同一になる。
+    (member, 観測した raw 値) -> 初観測順の group -> canonical surrogate
+
+    canonical_identity_surrogate(side, member, group) =
+          (side_ordinal   + 1) * IDENTITY_SURROGATE_SIDE_STRIDE
+        + (member_ordinal + 1) * IDENTITY_SURROGATE_MEMBER_STRIDE
+        + group
+
+* 同じ ``(member, raw 値)`` は同じ surrogate、違う raw 値は違う surrogate。
+* **unequal な receiver 間の合法な ``hashCode()`` collision はそのまま維持される**
+  （受け手の同値類で採番すると、この collision を壊してしまう）。
+* Java-equal な receiver が違う raw hash を返したら
+  :class:`IdentityContractViolation` で**記録を失敗させる**（どちらかへ寄せない）。
+  同じ契約を fixture 検証側も :class:`HashEqualityContract` で確かめる。
+* group は初観測順なので、raw 値の大小にも Python の randomized hash にも
+  依存しない。side と member で帯が分かれるので左右・member 間で衝突しない。
+* 記録器は surrogate を **production にもそのまま返す**ので、記録時と再生時で
+  production が見る値は同一になる。
 """
 
 from __future__ import annotations
@@ -165,6 +177,33 @@ def canonical_identity_surrogate(side: str, member: str, group: int) -> int:
     )
 
 
+class HashEqualityContract:
+    """``a.equals(b) => a.hashCode() == b.hashCode()`` を 1 箇所で持つ。
+
+    記録側は**観測した raw 値**で、fixture 検証側は**記録された identity
+    group / value** で、同じ契約を同じ実装で確かめる（弱い別実装を作らない）。
+    逆向き（違う同値類が同じ hash）は合法な collision なので何も言わない。
+    """
+
+    def __init__(self) -> None:
+        self._seen: dict = {}
+
+    def observe(
+        self, equality_class: Any, hash_identity: Any,
+    ) -> Tuple[bool, Any]:
+        """``(契約を満たすか, 衝突した場合の既存値)`` を返す。"""
+
+        if equality_class is None:
+            return True, None
+        if equality_class not in self._seen:
+            self._seen[equality_class] = hash_identity
+            return True, None
+        previous = self._seen[equality_class]
+        if previous != hash_identity:
+            return False, previous
+        return True, None
+
+
 class IdentitySurrogateLedger:
     """観測した identity 由来の raw 値を、関係を保ったまま surrogate へ写す。
 
@@ -192,8 +231,8 @@ class IdentitySurrogateLedger:
         self._groups: dict = {}
         # member -> 次に振る group
         self._next_group: dict = {}
-        # (member, receiver の同値類) -> raw 値。``hashCode`` の契約検査用。
-        self._equal_receiver_values: dict = {}
+        # ``hashCode`` の Java 契約（equal な receiver は同じ raw 値）。
+        self._hash_contract = HashEqualityContract()
 
     def assign(
         self, member: str, raw_value: Any, receiver_equality_class: Any,
@@ -233,14 +272,10 @@ class IdentitySurrogateLedger:
         破れていたら記録を止める（勝手にどちらかへ寄せない）。
         """
 
-        if receiver_equality_class is None:
-            return
-        key = (member, receiver_equality_class)
-        previous = self._equal_receiver_values.get(key)
-        if previous is None:
-            self._equal_receiver_values[key] = raw
-            return
-        if previous != raw:
+        satisfied, previous = self._hash_contract.observe(
+            receiver_equality_class, raw,
+        )
+        if not satisfied:
             raise IdentityContractViolation(
                 "Java-equal receivers returned different {} values "
                 "(equality class {}): {} != {}".format(
@@ -519,8 +554,22 @@ def _validate_header(header: Any) -> Mapping[str, Any]:
     return header
 
 
+class _IdentityValidationState:
+    """fixture 全体を跨ぐ identity surrogate の検証状態。"""
+
+    def __init__(self) -> None:
+        # member -> ({group: value}, {value: group})
+        self.census: dict = {}
+        # 記録側と同じ契約実装で、fixture 側の group/value を検査する。
+        self.hash_contract = HashEqualityContract()
+        # いま検証している object。
+        self.object_id: Any = None
+        self.eq_group: Any = None
+
+
 def _validate_value(
-    member_key: str, tagged: Any, *, object_ids: Any, side: str, identity_census: dict,
+    member_key: str, tagged: Any, *, object_ids: Any, side: str,
+    identity_state: "_IdentityValidationState",
 ) -> None:
     if not isinstance(tagged, Mapping) or tagged.get("kind") not in VALUE_KINDS:
         raise RecordedFixtureInvalid(
@@ -564,7 +613,7 @@ def _validate_value(
         for item in items:
             _validate_value(
                 member_key, item, object_ids=object_ids, side=side,
-                identity_census=identity_census,
+                identity_state=identity_state,
             )
         return
     if kind == VALUE_REF:
@@ -596,8 +645,7 @@ def _validate_value(
                 repr(member_key), value, side, member, group
             )
         )
-    census = identity_census.setdefault(member, ({}, {}))
-    by_group, by_value = census
+    by_group, by_value = identity_state.census.setdefault(member, ({}, {}))
     if by_group.setdefault(group, value) != value:
         raise RecordedFixtureInvalid(
             "identity surrogate group {} of {} maps to two values".format(group, member)
@@ -608,11 +656,27 @@ def _validate_value(
                 value, member
             )
         )
+    if member == HASH_CODE_MEMBER:
+        # ``hashCode`` を受けた object の Java 同値類ごとに、記録された identity
+        # が 1 つであること（record 時に ledger が raw 値で確かめた契約を、
+        # load 時にも同じ実装で確かめる）。違う同値類が同じ group を共有するのは
+        # 合法な collision なので許す。
+        satisfied, previous = identity_state.hash_contract.observe(
+            identity_state.eq_group, (group, value),
+        )
+        if not satisfied:
+            raise RecordedFixtureInvalid(
+                "objects in equality class {} record different {} identities: "
+                "{} != {} (at {} on {})".format(
+                    identity_state.eq_group, member, previous, (group, value),
+                    member_key, identity_state.object_id,
+                )
+            )
 
 
 def _validate_observation(
     member_key: str, observation: Any, *, object_ids: Any, side: str,
-    identity_census: dict,
+    identity_state: "_IdentityValidationState",
 ) -> None:
     if not isinstance(observation, Mapping):
         raise RecordedFixtureInvalid(
@@ -648,18 +712,18 @@ def _validate_observation(
         if value["kind"] == MEMBER_VALUE:
             _validate_value(
                 member_key, value["value"], object_ids=object_ids, side=side,
-                identity_census=identity_census,
+                identity_state=identity_state,
             )
         return
     _validate_value(
         member_key, value, object_ids=object_ids, side=side,
-        identity_census=identity_census,
+        identity_state=identity_state,
     )
 
 
 def _validate_envelope(
     member_key: str, envelope: Any, *, object_ids: Any, side: str,
-    identity_census: dict,
+    identity_state: "_IdentityValidationState",
 ) -> None:
     if not isinstance(envelope, Mapping):
         raise RecordedFixtureInvalid(
@@ -674,7 +738,7 @@ def _validate_envelope(
     if keys != {"seq"}:
         _validate_observation(
             member_key, envelope, object_ids=object_ids, side=side,
-            identity_census=identity_census,
+            identity_state=identity_state,
         )
         return
     observations = envelope["seq"]
@@ -686,7 +750,7 @@ def _validate_envelope(
     for observation in observations:
         _validate_observation(
             member_key, observation, object_ids=object_ids, side=side,
-            identity_census=identity_census,
+            identity_state=identity_state,
         )
 
 
@@ -720,13 +784,16 @@ def validate_fixture(payload: Any) -> Mapping[str, Any]:
     if not isinstance(objects, Mapping):
         raise RecordedFixtureInvalid("recorded fixture objects is not a mapping")
     object_ids = frozenset(objects)
-    # fixture 全体で (member, group) と value が 1 対 1 であることを確かめる。
-    identity_census: dict = {}
+    # fixture 全体の identity surrogate 検証（1 対 1 と hashCode 契約）。
+    identity_state = _IdentityValidationState()
     for object_id, entry in objects.items():
         _exact_str("recorded object id", object_id)
         _exact_keys("recorded object " + str(object_id), entry, OBJECT_KEYS)
         _exact_str("recorded object kind of " + str(object_id), entry["kind"])
-        _exact_int("recorded object equality class of " + str(object_id), entry["eq_group"])
+        identity_state.object_id = object_id
+        identity_state.eq_group = _exact_int(
+            "recorded object equality class of " + str(object_id), entry["eq_group"],
+        )
         members = entry["members"]
         if not isinstance(members, Mapping):
             raise RecordedFixtureInvalid(
@@ -736,7 +803,7 @@ def validate_fixture(payload: Any) -> Mapping[str, Any]:
             _validate_member_key(member_key)
             _validate_envelope(
                 member_key, envelope, object_ids=object_ids, side=side,
-                identity_census=identity_census,
+                identity_state=identity_state,
             )
 
     roots = _exact_keys("recorded fixture roots", payload["roots"], ROOT_KEYS)

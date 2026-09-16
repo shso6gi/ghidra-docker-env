@@ -442,16 +442,28 @@ class Recorder:
         return value
 
     def _safe_call(self, proxy: "RecordingProxy", name: str, args: Tuple) -> Any:
+        """飽和のための best-effort な 1 呼び出し。
+
+        Ghidra API がその object で使えないこと（``AttributeError``、実装側の
+        例外）は飽和では普通に起こるので無視してよい。ただし
+        :class:`RecordingError` は**握り潰さない**: fixture の健全性 / schema /
+        identity 契約の違反はここで止めないと、観測が保存されないまま
+        ``progressed`` だけが立って飽和 loop が終わらなくなり、契約違反も
+        silent に無視されてしまう。
+        """
+
         try:
             member = getattr(proxy, name)
-        except AttributeError:
-            return None
+        except RecordingError:
+            raise
         except Exception:
             return None
         if not callable(member):
             return None
         try:
             return member(*args)
+        except RecordingError:
+            raise
         except Exception:
             return None
 
