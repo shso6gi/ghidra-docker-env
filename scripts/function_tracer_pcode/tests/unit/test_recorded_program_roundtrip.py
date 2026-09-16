@@ -1875,6 +1875,61 @@ def test_equivalence_checker_injection_replaces_only_the_analyzer_factory():
     assert made == ["program1"]
 
 
+def test_a_callable_but_falsey_analyzer_factory_is_still_used():
+    """``__bool__`` が False の callable でも黙って差し替えられないこと。
+
+    fallback するのは ``analyzer_factory is None`` のときだけ。``or`` で書くと
+    「呼べるのに falsey」な collaborator が静かに ``ReturnAnalyzer`` へ
+    置き換わり、記録器 / 再生器の注入が効かなくなる。
+    """
+
+    from scripts.function_tracer_pcode.checker import EquivalenceChecker
+    from scripts.function_tracer_pcode.checker import reanalysis
+    from scripts.function_tracer_pcode.checker.phases.handler import (
+        PhaseID, PhaseResult,
+    )
+
+    made = []
+
+    class _Stop(Exception):
+        pass
+
+    class _FalseyFactory:
+        """呼べるが真偽値は False（空の collection を模した collaborator）。"""
+
+        def __bool__(self):
+            return False
+
+        def __call__(self, program, **kwargs):
+            made.append(program)
+            raise _Stop()
+
+    factory = _FalseyFactory()
+    assert callable(factory) and not factory
+    checker = EquivalenceChecker(debug=False, analyzer_factory=factory)
+    assert checker.analyzer_factory is factory
+
+    # 初回解析。
+    with pytest.raises(_Stop):
+        reanalysis.analyze_and_check_with_analysis(checker, _StubContext())
+    assert made == ["program1"]
+
+    # selective reanalysis も同じ契約。
+    context = _StubContext()
+    context.analysis1 = object()
+    context.analysis2 = object()
+    with pytest.raises(_Stop):
+        reanalysis.selective_reanalysis_and_check(
+            checker, context,
+            PhaseResult(
+                phase_id=PhaseID.P1_SIGNEDNESS, applied=True, retry_name="signedness",
+                changed_binary1=True, changed_binary2=False,
+            ),
+            retry_count=1,
+        )
+    assert made == ["program1", "program1"]
+
+
 def test_equivalence_checker_rejects_a_non_callable_analyzer_factory():
     from scripts.function_tracer_pcode.checker import EquivalenceChecker
 

@@ -508,9 +508,10 @@ class Recorder:
         Ghidra API がその object で使えないこと（``AttributeError``、実装側の
         例外）は飽和では普通に起こるので無視してよい。ただし
         :class:`RecordingError` は**握り潰さない**: fixture の健全性 / schema /
-        identity 契約の違反はここで止めないと、観測が保存されないまま
-        ``progressed`` だけが立って飽和 loop が終わらなくなり、契約違反も
-        silent に無視されてしまう。
+        identity 契約の違反をここで飲み込むと、記録がそのまま続いて不正な
+        fixture を書き出してしまう。:meth:`saturate` の固定点判定
+        （観測数が増えなくなったら終了）とは別に、soundness に関わる失敗は
+        記録全体を止める。
         """
 
         try:

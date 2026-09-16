@@ -33,8 +33,12 @@ def analyze_and_check_with_analysis(
     from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
 
     # Issue #109: 解析器の生成点は checker の 1 つの collaborator に委ねる。
-    # 既定（None）では従来どおり ``ReturnAnalyzer`` をそのまま使う。
-    make_analyzer = getattr(checker, "analyzer_factory", None) or ReturnAnalyzer
+    # fallback するのは **None のときだけ**。``or`` で書くと、``__bool__`` が
+    # False を返す callable（呼べるのに falsey な object）が黙って
+    # ``ReturnAnalyzer`` に差し替わる。
+    make_analyzer = getattr(checker, "analyzer_factory", None)
+    if make_analyzer is None:
+        make_analyzer = ReturnAnalyzer
 
     start_time = time.time()
     timer = AnalysisTimer()
@@ -171,7 +175,10 @@ def selective_reanalysis_and_check(
 
     from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
 
-    make_analyzer = getattr(checker, "analyzer_factory", None) or ReturnAnalyzer
+    # 初回解析と同じ契約: fallback は None のときだけ（上のコメント参照）。
+    make_analyzer = getattr(checker, "analyzer_factory", None)
+    if make_analyzer is None:
+        make_analyzer = ReturnAnalyzer
 
     need_reanalyze1 = phase_result.changed_binary1
     need_reanalyze2 = phase_result.changed_binary2
