@@ -1137,7 +1137,11 @@ class _ContractBreakingBlock:
 
 
 def test_saturation_propagates_a_recording_error_instead_of_swallowing_it(monkeypatch):
-    """飽和中の identity 契約違反は記録全体を失敗させる（握り潰さない）。"""
+    """飽和中の identity 契約違反は記録全体を失敗させる（握り潰さない）。
+
+    終了条件（:meth:`Recorder.saturation_is_settled`）を足しても、soundness に
+    関わる `RecordingError` は best-effort の例外処理を素通りする。
+    """
 
     from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
 
@@ -1194,6 +1198,182 @@ def test_saturation_terminates_when_a_member_keeps_failing(monkeypatch):
     recorder.collapse()
     members = recorder._entries[proxy._rec_index]["members"]
     assert "raises" in members[record_pcode_fixture.call_key("getStart", ())]
+
+
+# --- saturation の終了性（call key が作られない member でも止まる）-----------
+
+
+def _ir_kind(monkeypatch):
+    """object を IR kind（飽和対象）に見せる。"""
+
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+
+    monkeypatch.setattr(
+        record_pcode_fixture, "_java_class_name",
+        lambda value: "ghidra.program.model.pcode.PcodeBlockBasic",
+    )
+
+
+class _Peer:
+    """``getIndex()`` だけを持つ飽和対象。census の出所になる。"""
+
+    def __init__(self, index: int) -> None:
+        self._index = index
+
+    def getIndex(self) -> int:
+        return self._index
+
+
+class _PeerWithoutTheMember:
+    """census にある ``getStart`` を**持たない** peer（``attr`` は absent）。"""
+
+    def getIndex(self) -> int:
+        return 1
+
+
+class _PeerWithNonCallableMember:
+    """``getStart`` が callable でない値である peer。"""
+
+    def __init__(self) -> None:
+        self.getStart = 7
+
+    def getIndex(self) -> int:
+        return 1
+
+
+class _PeerWhoseGetattrRaises:
+    """``getStart`` の ``getattr`` 自体が通常例外になる peer。"""
+
+    def getIndex(self) -> int:
+        return 1
+
+    def __getattr__(self, name):
+        if name == "getStart":
+            raise RuntimeError("ghidra refuses the attribute")
+        raise AttributeError(name)
+
+
+def _saturation_reaches_a_fixpoint(monkeypatch, peer) -> Any:
+    """census を作った peer と、問題のある peer を並べて飽和させる。"""
+
+    _ir_kind(monkeypatch)
+    recorder = _synthetic_recorder_instance()
+
+    class _Source:
+        def getIndex(self):
+            return 0
+
+        def getStart(self):
+            return 4096
+
+    source = recorder.proxy_for(_Source())
+    assert source.getIndex() == 0
+    assert source.getStart() == 4096       # census に getStart が載る
+    other = recorder.proxy_for(peer)
+    assert other.getIndex() == 1
+    recorder.saturate()                    # 旧実装ではここが終わらない
+    return recorder, other
+
+
+def test_saturation_terminates_when_a_peer_lacks_the_member(monkeypatch):
+    recorder, other = _saturation_reaches_a_fixpoint(
+        monkeypatch, _PeerWithoutTheMember(),
+    )
+    observations = recorder._entries[other._rec_index]["observations"]
+    # 「その member は無い」という観測だけが残り、call key は作られない。
+    assert observations["attr:getStart"][0]["v"]["kind"] == "absent"
+    assert "call:getStart()" not in observations
+
+
+def test_saturation_terminates_when_a_peer_member_is_not_callable(monkeypatch):
+    recorder, other = _saturation_reaches_a_fixpoint(
+        monkeypatch, _PeerWithNonCallableMember(),
+    )
+    observations = recorder._entries[other._rec_index]["observations"]
+    assert observations["attr:getStart"][0]["v"]["kind"] == "value"
+    assert "call:getStart()" not in observations
+
+
+def test_saturation_terminates_when_getattr_itself_raises(monkeypatch):
+    recorder, other = _saturation_reaches_a_fixpoint(
+        monkeypatch, _PeerWhoseGetattrRaises(),
+    )
+    observations = recorder._entries[other._rec_index]["observations"]
+    assert "raises" in observations["attr:getStart"][0]
+    assert "call:getStart()" not in observations
+
+
+def test_saturation_terminates_for_equality_class_peers_too(monkeypatch):
+    """同値類の飽和も同じ terminal 判定を使う（IR kind でなくても）。"""
+
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+
+    monkeypatch.setattr(
+        record_pcode_fixture, "_java_class_name",
+        lambda value: "ghidra.program.model.address.GenericAddress",
+    )
+    recorder = _synthetic_recorder_instance()
+
+    class _Source:
+        def getOffset(self):
+            return 16
+
+    source = recorder.proxy_for(_Source())
+    assert source.getOffset() == 16
+    sibling = recorder.proxy_for(_PeerWithoutTheMember())
+    # 同じ Java 同値類に見せる（equality-class 飽和の対象になる）。
+    recorder._entries[sibling._rec_index]["eq_group"] = (
+        recorder._entries[source._rec_index]["eq_group"]
+    )
+    recorder.saturate()
+    observations = recorder._entries[sibling._rec_index]["observations"]
+    assert observations["attr:getOffset"][0]["v"]["kind"] == "absent"
+    assert "call:getOffset()" not in observations
+
+
+def test_saturation_records_a_failing_call_once_and_stops_retrying(monkeypatch):
+    """callable な member の通常例外は観測として残り、再試行され続けない。"""
+
+    calls = []
+    _ir_kind(monkeypatch)
+    recorder = _synthetic_recorder_instance()
+
+    class _Source:
+        def getIndex(self):
+            return 0
+
+        def getStart(self):
+            return 4096
+
+    class _FailingPeer:
+        def getIndex(self):
+            return 1
+
+        def getStart(self):
+            calls.append("start")
+            raise RuntimeError("ghidra says no")
+
+    source = recorder.proxy_for(_Source())
+    assert source.getIndex() == 0 and source.getStart() == 4096
+    peer = recorder.proxy_for(_FailingPeer())
+    assert peer.getIndex() == 1
+    recorder.saturate()
+    assert calls == ["start"]
+    observations = recorder._entries[peer._rec_index]["observations"]
+    assert "raises" in observations["call:getStart()"][0]
+
+
+def test_saturation_settled_predicate_is_shared_by_both_passes():
+    """両方の飽和経路が同じ判定を使っている（弱い重複実装を作らない）。"""
+
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+    import inspect
+
+    source = inspect.getsource(record_pcode_fixture.Recorder)
+    assert source.count("def saturation_is_settled") == 1
+    for method in ("_saturate_equality_classes", "_saturate_ir_kinds"):
+        body = inspect.getsource(getattr(record_pcode_fixture.Recorder, method))
+        assert "saturation_is_settled" in body, method
 
 
 # --- validator: eq_group と hashCode identity の整合 -------------------------

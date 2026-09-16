@@ -208,6 +208,18 @@ digest の対象（`SOURCE_ROOTS`）には `tests/` も入るので、書き出�
 - **同値類の飽和**: Java の `equals` で等しい object のどれか 1 つに出た要求は
   全員へ出す。飽和が **production の観測列を乱さない**こと: 既に記録のある key は
   呼び直さない（件数 API も記録済みの値を読む）。dunder は飽和しない。
+- **終了性**: 飽和は次のどれかを満たした member を terminal として扱い、二度と
+  試さない（両方の飽和経路が `Recorder.saturation_is_settled` という 1 つの判定を
+  共有する）。
+  - 呼び出し観測が取れている
+  - `attr` が `absent`（その object に member が無い）
+  - `attr` が callable でない `value`
+  - `attr` 取得自体が通常例外として記録済み（`raises`）
+
+  後ろの 3 つでは `call:` key が作られないので、call 観測だけを見ていると同じ
+  member を永久に試し続ける。周回の進捗は「試した」ではなく**記録した観測が
+  増えた**ことで判定し、増えなければ終了する。固定点に達しないまま
+  `MAX_SATURATION_PASSES` 周回したら記録を失敗させる。
 - **Program / Memory / Listing / SymbolTable / FunctionManager /
   DataTypeManager など**は要求駆動のまま。
 

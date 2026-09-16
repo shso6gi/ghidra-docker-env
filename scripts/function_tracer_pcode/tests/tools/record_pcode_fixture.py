@@ -111,6 +111,11 @@ INDEXED_ACCESSORS = (
 #: 飽和の安全弁（index accessor の暴走を検出する。超えたら記録を失敗させる）。
 MAX_SATURATION_INDEX = 4096
 
+#: 飽和が固定点に達するまでに許す周回数。新しい観測が増えなくなれば終わるので
+#: 通常は数周で止まる。超えたら（= 何かが毎周回 observation を作り続けている）
+#: 黙って回り続けず記録を失敗させる。
+MAX_SATURATION_PASSES = 64
+
 
 class RecordingError(RuntimeError):
     pass
@@ -270,6 +275,39 @@ class Recorder:
             return None
         return observations[0]
 
+    def observation_count(self) -> int:
+        """記録済み観測の総数（飽和の進捗判定に使う単調増加量）。"""
+
+        return sum(len(values) for entry in self._entries
+                   for values in entry["observations"].values())
+
+    def saturation_is_settled(self, index: int, member_key: str, name: str) -> bool:
+        """飽和がこの member をこれ以上試さなくてよいか。
+
+        呼び出し観測が取れていれば当然 settled。加えて「**呼び出しに到達し得ない
+        ことが記録として確定した**」場合も settled にする:
+
+        * member がそもそも無い（``attr`` が ``absent``）
+        * member が callable でない値だった（``attr`` が ``value``）
+        * ``getattr`` 自体が通常例外だった（``attr`` が ``raises``）
+
+        これらでは ``call:`` key が永遠に作られないので、call 観測だけを見て
+        いると飽和 loop が同じ member を試し続ける。equality-class 飽和と
+        IR-kind 飽和の両方がこの 1 つの判定を使う。
+        """
+
+        observations = self._entries[index]["observations"]
+        if member_key in observations:
+            return True
+        attribute = observations.get(attr_key(name))
+        if not attribute:
+            return False
+        first = attribute[0]
+        if "raises" in first:
+            return True
+        member = first.get("v") or {}
+        return member.get("kind") in (MEMBER_ABSENT, MEMBER_VALUE)
+
     def note_call(self, index: int, member_key: str, name: str, args: Tuple) -> None:
         self._calls[index].setdefault(member_key, (name, args))
 
@@ -333,15 +371,24 @@ class Recorder:
           単位で要求を飽和させる（index accessor は件数 API で回す）。
         """
 
-        while True:
-            if not (self._saturate_equality_classes() | self._saturate_ir_kinds()):
+        for _pass in range(MAX_SATURATION_PASSES):
+            before = self.observation_count()
+            self._saturate_equality_classes()
+            self._saturate_ir_kinds()
+            # 「試した」ではなく「新しい観測が増えた」を進捗とする。到達でき
+            # ない member を試しただけの周回は進捗にならないので必ず止まる。
+            if self.observation_count() == before:
                 return
+        raise RecordingError(
+            "saturation did not reach a fixpoint in {} passes".format(
+                MAX_SATURATION_PASSES
+            )
+        )
 
-    def _saturate_equality_classes(self) -> bool:
+    def _saturate_equality_classes(self) -> None:
         classes: Dict[int, List[int]] = {}
         for index, entry in enumerate(self._entries):
             classes.setdefault(entry["eq_group"], []).append(index)
-        progressed = False
         for members in classes.values():
             if len(members) < 2:
                 continue
@@ -353,13 +400,11 @@ class Recorder:
                     census.setdefault(member_key, call)
             for index in members:
                 for member_key, (name, args) in census.items():
-                    if member_key in self._entries[index]["observations"]:
+                    if self.saturation_is_settled(index, member_key, name):
                         continue
-                    progressed = True
                     self._safe_call(self._proxies[index], name, args)
-        return progressed
 
-    def _saturate_ir_kinds(self) -> bool:
+    def _saturate_ir_kinds(self) -> None:
         census: Dict[str, set] = {}
         indexed_census: Dict[str, set] = {}
         for entry in self._entries:
@@ -383,7 +428,6 @@ class Recorder:
                         )
                     ):
                         indexed.add(accessor)
-        progressed = False
         index = 0
         while index < len(self._entries):
             entry = self._entries[index]
@@ -395,9 +439,8 @@ class Recorder:
             for name in sorted(census.get(simple, ())):
                 if name.startswith("__"):
                     continue
-                if call_key(name, ()) in entry["observations"]:
+                if self.saturation_is_settled(index, call_key(name, ()), name):
                     continue
-                progressed = True
                 self._safe_call(proxy, name, ())
             for accessor, counter in INDEXED_ACCESSORS:
                 if accessor not in indexed_census.get(simple, ()):
@@ -412,12 +455,12 @@ class Recorder:
                         )
                     )
                 for ordinal in range(count):
-                    if call_key(accessor, [ordinal]) in entry["observations"]:
+                    if self.saturation_is_settled(
+                        index, call_key(accessor, [ordinal]), accessor,
+                    ):
                         continue
-                    progressed = True
                     self._safe_call(proxy, accessor, (ordinal,))
             index += 1
-        return progressed
 
     def _counted(self, proxy: "RecordingProxy", counter: str) -> Optional[int]:
         """index accessor を回すための件数。
