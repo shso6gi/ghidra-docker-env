@@ -226,6 +226,10 @@ class RecordedObject:
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, RecordedObject):
             return NotImplemented
+        # 同値類 id は fixture（= 片側 1 binary）ごとに振られる。左右で同じ
+        # 番号が別の object を指すので、context をまたいで等しくしない。
+        if other._rec_context is not self._rec_context:
+            return False
         return self._rec_eq_group == other._rec_eq_group
 
     def __ne__(self, other: Any) -> bool:
@@ -235,6 +239,9 @@ class RecordedObject:
         return not result
 
     def __hash__(self) -> int:
+        # ``__eq__`` は context も見るが、hash は同値類だけで決める。等しい
+        # object の hash が一致すればよく、``id()`` のような run ごとに変わる
+        # 値を混ぜると set / dict の反復順が run 間で変わる。
         return hash(("recorded-eq-group", self._rec_eq_group))
 
     # Ghidra object は解析にとって不透明な runtime leaf で、``_semantic_copy``

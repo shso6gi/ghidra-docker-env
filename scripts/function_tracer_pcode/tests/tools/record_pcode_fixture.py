@@ -511,6 +511,10 @@ class RecordingProxy:
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, RecordingProxy):
             return NotImplemented
+        # 同値類 id は側ごとの ``Recorder`` が振るので、左右をまたいで
+        # 同じ番号を等しくしない（再生側の ``RecordedObject`` と同じ規則）。
+        if other._rec_recorder is not self._rec_recorder:
+            return False
         return (
             self._rec_recorder.entry(self._rec_index)["eq_group"]
             == other._rec_recorder.entry(other._rec_index)["eq_group"]
@@ -523,6 +527,8 @@ class RecordingProxy:
         return not result
 
     def __hash__(self) -> int:
+        # 再生側と同じ規則。``id()`` のような run ごとに変わる値は混ぜない
+        # （set / dict の反復順が変わり、記録が非決定になる）。
         return hash((
             "recorded-eq-group",
             self._rec_recorder.entry(self._rec_index)["eq_group"],

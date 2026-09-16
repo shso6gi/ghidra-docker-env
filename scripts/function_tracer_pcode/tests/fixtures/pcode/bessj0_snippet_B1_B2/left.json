@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "5e26d2a6eaca360d0f9d4e5d0e47b71090799734f831fb6c035d7e41db21d884",
+  "analysis_source_digest": "8b4a0222041124f31224ed13114fcc46d9bd2ee9ddc9e65ca83c0baccfe5030c",
   "binary": {
    "binary_id": "B1",
    "eqbench_relative_path": "benchmarks/bess/bessj0/Eq/source/newV-arm64-clang-O0",
@@ -15,9 +15,9 @@
   "fixture_id": "bessj0_snippet_B1_B2",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-09-16T00:15:51+00:00",
+  "recorded_at_utc": "2026-09-16T00:30:12+00:00",
   "recorder_version": "1",
-  "recording_commit": "e32080f5609e818f71a9117bceefab62b558b82e",
+  "recording_commit": "bb7e9e05def07e16e90c97fabd75efe742cc99c2",
   "recording_dirty": true,
   "recording_mode": {
    "connector": "production",
@@ -315,7 +315,7 @@
     "call:getUniqueProgramID()": {
      "v": {
       "kind": "int",
-      "value": 3752890638067196306
+      "value": 3752892429630207026
      }
     }
    }
@@ -192712,7 +192712,7 @@
     "call:hashCode()": {
      "v": {
       "kind": "int",
-      "value": 192500434
+      "value": 1012373446
      }
     }
    }
@@ -194637,7 +194637,7 @@
     "call:hashCode()": {
      "v": {
       "kind": "int",
-      "value": 1561896839
+      "value": 692203105
      }
     }
    }
@@ -270133,7 +270133,7 @@
     "call:hashCode()": {
      "v": {
       "kind": "int",
-      "value": 1372745709
+      "value": 1291085172
      }
     }
    }
@@ -279721,7 +279721,7 @@
     "call:hashCode()": {
      "v": {
       "kind": "int",
-      "value": 1736021405
+      "value": 2006768185
      }
     }
    }
@@ -283290,7 +283290,7 @@
     "call:hashCode()": {
      "v": {
       "kind": "int",
-      "value": 861554088
+      "value": 1107677641
      }
     }
    }
@@ -290762,7 +290762,7 @@
     "call:hashCode()": {
      "v": {
       "kind": "int",
-      "value": 692860601
+      "value": 1158870513
      }
     }
    }
@@ -362066,7 +362066,7 @@
     "call:hashCode()": {
      "v": {
       "kind": "int",
-      "value": 1451735609
+      "value": 664683782
      }
     }
    }

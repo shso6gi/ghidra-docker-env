@@ -483,6 +483,15 @@ def test_recorded_objects_share_identity_and_java_equality_classes():
     # 同じ Java 同値類（``equals``）は再生でも等しく、hash も一致する。
     assert first == second
     assert hash(first) == hash(second)
+    # 同値類 id は fixture ごとの採番なので、別 fixture の同じ番号とは
+    # 等しくならない（左右の object を取り違えない）。
+    other_program = recorded_program_from_payload(copy.deepcopy(payload))
+    assert other_program.getMemory() != first
+    assert other_program != program
+    assert other_program.getMemory() == other_program.getListing()
+    # hash は同値類だけで決める（``id()`` を混ぜると set の反復順が run 間で
+    # 変わり、記録が非決定になる）。等しくない object が同じ hash でもよい。
+    assert hash(other_program.getMemory()) == hash(first)
 
 
 # --- fixture の直列化 / schema -----------------------------------------------
