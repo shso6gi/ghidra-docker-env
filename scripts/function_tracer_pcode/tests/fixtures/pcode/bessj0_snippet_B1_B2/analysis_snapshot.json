@@ -1,0 +1,324 @@
+{
+ "analyzer_programs": [
+  "B1",
+  "B2"
+ ],
+ "schema": "recorded-pcode-analysis-snapshot-v1",
+ "sides": {
+  "B1": [
+   {
+    "analysis_notes": [
+     "effect_call_argument_evidence",
+     "bounded_call_refinement_deferred_expanded",
+     "bounded_call_refinement_preserved_unresolved_deferred_call",
+     "deferred_call_return_unresolved"
+    ],
+    "effect_summary": {
+     "effects": [],
+     "has_unsupported_call": true,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1"
+     ],
+     "synthetic_expr": null,
+     "unsupported_call_sites": [
+      {
+       "arguments": [
+        "(FLOAT_ABS(param_1) - 4605249457302732159)"
+       ],
+       "order_key": 268567592,
+       "path_conditions": [
+        "(FLOAT_NEG(FLOAT_ABS(param_1)) FLOAT_LESSEQUAL (-4602678819172646912))"
+       ],
+       "reason": "callee_effect_summary_missing",
+       "target_expr": "1052672"
+      }
+     ]
+    },
+    "entry_point": "00100000",
+    "expansion_budget_truncations": [],
+    "function_name": "snippet",
+    "incomplete_control_flow": true,
+    "parameters": [
+     {
+      "data_type": "double",
+      "index": 0,
+      "is_signed": true,
+      "name": "param_1",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "z0",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20480,
+       "register_name": "d0",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": false,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__cdecl"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/undefined1[16]",
+       16
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_storage_v1",
+       [
+        [
+         "ghidra_return_storage_member_v1",
+         "register",
+         20480,
+         16
+        ]
+       ]
+      ]
+     },
+     "schema_version": 1
+    },
+    "return_type": "undefined1[16]",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 128,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "undefined1[16]",
+     "return_type_source": "undefined_decompiler_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "00100234",
+      "branch_index": 0,
+      "conditions": [
+       "(not (FLOAT_NEG(FLOAT_ABS(param_1)) FLOAT_LESSEQUAL (-4602678819172646912)))"
+      ],
+      "order_index": 0,
+      "pcode_identity": "00100234:t268",
+      "pcode_order": 46,
+      "pcode_time": 268,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "((4767850423327129600 + ((13981675489502167040 + ((4738749390097324442 + ((13935654345594015580 + ((4680054773643236994 + (13864081828381383458 * (param_1 * param_1))) * (param_1 * param_1))) * (param_1 * param_1))) * (param_1 * param_1))) * (param_1 * param_1))) / (4767850423305764864 + ((4741919557000626176 + ((4711359028498389795 + ((4678379184366681231 + ((4643419740771166694 + ((param_1 * param_1) * 4607182418800017408)) * (param_1 * param_1))) * (param_1 * param_1))) * (param_1 * param_1))) * (param_1 * param_1))))"
+     },
+     {
+      "acceptance_status": null,
+      "address": "00100234",
+      "branch_index": 1000,
+      "conditions": [
+       "(FLOAT_NEG(FLOAT_ABS(param_1)) FLOAT_LESSEQUAL (-4602678819172646912))"
+      ],
+      "order_index": 1,
+      "pcode_identity": "00100234:t268",
+      "pcode_order": 46,
+      "pcode_time": 268,
+      "return_kind": "phi_expansion",
+      "validation_blockers": [],
+      "value": "((((13786081390032297738 + ((4538692075317890871 + ((13745378071113473105 + (4507006509970434145 * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1)))) + 4607182418800017408) - ((13803532857861747202 + ((4549409596046484833 + ((13753145305741065212 + ((4515301147868079785 - (4501656673954357033 * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * sin@0x100204)))"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 0,
+      "signed_medium": 0,
+      "signed_strong": 0,
+      "unsigned": 0
+     },
+     "opcode_counts": {},
+     "signedness": "unknown"
+    },
+    "unknown_event_reasons": []
+   }
+  ],
+  "B2": [
+   {
+    "analysis_notes": [
+     "effect_call_argument_evidence",
+     "bounded_call_refinement_deferred_expanded",
+     "bounded_call_refinement_preserved_unresolved_deferred_call",
+     "deferred_call_return_unresolved"
+    ],
+    "effect_summary": {
+     "effects": [],
+     "has_unsupported_call": true,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1"
+     ],
+     "synthetic_expr": null,
+     "unsupported_call_sites": [
+      {
+       "arguments": [
+        "(FLOAT_ABS(param_1) + 13828621494157507967)"
+       ],
+       "order_key": 268512296,
+       "path_conditions": [
+        "(4620693217682128896 FLOAT_LESSEQUAL FLOAT_ABS(param_1))"
+       ],
+       "reason": "callee_effect_summary_missing",
+       "target_expr": "1052672"
+      }
+     ]
+    },
+    "entry_point": "00100000",
+    "expansion_budget_truncations": [],
+    "function_name": "snippet",
+    "incomplete_control_flow": true,
+    "parameters": [
+     {
+      "data_type": "double",
+      "index": 0,
+      "is_signed": true,
+      "name": "param_1",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "z0",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20480,
+       "register_name": "d0",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": false,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__cdecl"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/undefined1[16]",
+       16
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_storage_v1",
+       [
+        [
+         "ghidra_return_storage_member_v1",
+         "register",
+         20480,
+         16
+        ]
+       ]
+      ]
+     },
+     "schema_version": 1
+    },
+    "return_type": "undefined1[16]",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 128,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "undefined1[16]",
+     "return_type_source": "undefined_decompiler_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "00100148",
+      "branch_index": 0,
+      "conditions": [
+       "(not (4620693217682128896 FLOAT_LESSEQUAL FLOAT_ABS(param_1)))"
+      ],
+      "order_index": 0,
+      "pcode_identity": "00100148:t161",
+      "pcode_order": 46,
+      "pcode_time": 161,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "((4767850423327129600 + ((13981675489502167040 + ((4738749390097324442 + ((13935654345594015580 + ((4680054773643236994 + (13864081828381383458 * (param_1 * param_1))) * (param_1 * param_1))) * (param_1 * param_1))) * (param_1 * param_1))) * (param_1 * param_1))) / (4767850423305764864 + ((4741919557000626176 + ((4711359028498389795 + ((4678379184366681231 + (((param_1 * param_1) + 4643419740771166694) * (param_1 * param_1))) * (param_1 * param_1))) * (param_1 * param_1))) * (param_1 * param_1))))"
+     },
+     {
+      "acceptance_status": null,
+      "address": "00100148",
+      "branch_index": 1000,
+      "conditions": [
+       "(4620693217682128896 FLOAT_LESSEQUAL FLOAT_ABS(param_1))"
+      ],
+      "order_index": 1,
+      "pcode_identity": "00100148:t161",
+      "pcode_order": 46,
+      "pcode_time": 161,
+      "return_kind": "phi_expansion",
+      "validation_blockers": [],
+      "value": "((((13786081390032297738 + ((4538692075317890871 + ((13745378071113473105 + (4507006509970434145 * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1)))) + 4607182418800017408) + ((13803532857861747202 + ((4549409596046484833 + ((13753145305741065212 + ((4515301147868079785 + (13725028710809132841 * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * (sin@0x10012c * FLOAT_NEG((4620693217682128896 / FLOAT_ABS(param_1))))))"
+     },
+     {
+      "acceptance_status": null,
+      "address": "00100148",
+      "branch_index": 91000,
+      "conditions": [
+       "(4620693217682128896 FLOAT_LESSEQUAL FLOAT_ABS(param_1))"
+      ],
+      "order_index": 2,
+      "pcode_identity": "00100148:t161",
+      "pcode_order": 46,
+      "pcode_time": 161,
+      "return_kind": "phi_reachability_fallback",
+      "validation_blockers": [],
+      "value": "((((13786081390032297738 + ((4538692075317890871 + ((13745378071113473105 + (4507006509970434145 * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1)))) + 4607182418800017408) + ((13803532857861747202 + ((4549409596046484833 + ((13753145305741065212 + ((4515301147868079785 + (13725028710809132841 * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * ((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))))) * (sin@0x10012c * FLOAT_NEG((4620693217682128896 / FLOAT_ABS(param_1))))))"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 0,
+      "signed_medium": 0,
+      "signed_strong": 0,
+      "unsigned": 0
+     },
+     "opcode_counts": {},
+     "signedness": "unknown"
+    },
+    "unknown_event_reasons": []
+   }
+  ]
+ }
+}

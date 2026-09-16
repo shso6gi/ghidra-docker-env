@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """等価性判定メインロジック（Stage/Phase ループ骨格版）"""
 
-from typing import Optional, Dict, Any, List, Mapping, Tuple
+from typing import Callable, Optional, Dict, Any, List, Mapping, Tuple
 from enum import Enum
 from dataclasses import dataclass
 import time
@@ -168,6 +168,7 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         call_proof_decision_mode: str = "preflight_projection",
         canonical_decision_cutover: bool = True,
         identical_fast_path: bool = True,
+        analyzer_factory: Optional[Callable[..., Any]] = None,
     ):
         """
         Args:
@@ -182,6 +183,10 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             identical_fast_path: 同一バイナリ・同一関数を identity proof で
                 早期に EQUIVALENT 確定する（Issue #15）。False でも identity の
                 観測と結果 JSON への記録は続ける。
+            analyzer_factory: ``ReturnAnalyzer`` を作る collaborator（Issue #109）。
+                既定 None のときは ``ReturnAnalyzer`` をそのまま使い、production
+                の挙動は変わらない。記録器と再生器はこの 1 点だけで解析器の
+                decompiler を差し替える。
         """
         self.timeout = timeout
         self.debug = debug
@@ -229,6 +234,10 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         if type(identical_fast_path) is not bool:
             raise TypeError("identical fast path flag must be exact bool")
         self.identical_fast_path = identical_fast_path
+        # Issue #109: 解析器生成の唯一の注入点。判定側に test 分岐は入れない。
+        if analyzer_factory is not None and not callable(analyzer_factory):
+            raise TypeError("analyzer factory must be callable")
+        self.analyzer_factory = analyzer_factory
         if canonical_decision_cutover:
             from scripts.function_tracer_pcode.authority.decision.production_cutover import (
                 build_default_cutover_connector,

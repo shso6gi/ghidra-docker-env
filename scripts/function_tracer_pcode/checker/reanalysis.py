@@ -32,13 +32,21 @@ def analyze_and_check_with_analysis(
     """初回解析を実行し、その結果で stage plan を走らせる"""
     from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
 
+    # Issue #109: 解析器の生成点は checker の 1 つの collaborator に委ねる。
+    # fallback するのは **None のときだけ**。``or`` で書くと、``__bool__`` が
+    # False を返す callable（呼べるのに falsey な object）が黙って
+    # ``ReturnAnalyzer`` に差し替わる。
+    make_analyzer = getattr(checker, "analyzer_factory", None)
+    if make_analyzer is None:
+        make_analyzer = ReturnAnalyzer
+
     start_time = time.time()
     timer = AnalysisTimer()
     checker._analysis_timer = timer
     phases = phase_timeline_of(checker)
 
     checker._debug_print(f"Analyzing function '{ctx.function_name1}' in {ctx.binary1_name}...")
-    analyzer1 = ReturnAnalyzer(
+    analyzer1 = make_analyzer(
         ctx.program1,
         debug=checker.debug,
         binary_id=ctx.binary1_id,
@@ -85,7 +93,7 @@ def analyze_and_check_with_analysis(
         analyzer1.dispose()
 
     checker._debug_print(f"Analyzing function '{ctx.function_name2}' in {ctx.binary2_name}...")
-    analyzer2 = ReturnAnalyzer(
+    analyzer2 = make_analyzer(
         ctx.program2,
         debug=checker.debug,
         binary_id=ctx.binary2_id,
@@ -167,6 +175,11 @@ def selective_reanalysis_and_check(
 
     from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
 
+    # 初回解析と同じ契約: fallback は None のときだけ（上のコメント参照）。
+    make_analyzer = getattr(checker, "analyzer_factory", None)
+    if make_analyzer is None:
+        make_analyzer = ReturnAnalyzer
+
     need_reanalyze1 = phase_result.changed_binary1
     need_reanalyze2 = phase_result.changed_binary2
 
@@ -198,7 +211,7 @@ def selective_reanalysis_and_check(
         cached_analysis: FunctionReturnAnalysis,
     ) -> Tuple[Optional[FunctionReturnAnalysis], Optional[str], Optional[str]]:
         binary_id = ctx.binary1_id if program is ctx.program1 else ctx.binary2_id if program is ctx.program2 else None
-        analyzer = ReturnAnalyzer(
+        analyzer = make_analyzer(
             program,
             debug=checker.debug,
             binary_id=binary_id,
