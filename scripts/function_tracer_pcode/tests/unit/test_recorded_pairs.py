@@ -1030,6 +1030,48 @@ def test_every_case_has_a_complete_and_consistent_description():
         ), case_id
 
 
+def test_the_corpus_was_recorded_from_one_clean_source_tree():
+    """8 case が同じ clean な source tree から記録されていること。
+
+    `recording_dirty=true` の fixture は「どの source から取ったか」が
+    commit だけでは決まらない。corpus を 1 case ずつ記録すると、先に書いた
+    fixture 自身が tree を汚して 2 件目以降が dirty になるので、記録出力は
+    repo の外へ出し、全 case を 1 つの凍結した tree から取る。
+    """
+
+    recordings = set()
+    for case_id in sorted(CASES):
+        case = CASES[case_id]
+        recording = case["recording"]
+        assert recording["dirty"] is False, (
+            "{}: recorded from a dirty tree; re-record from a clean, frozen "
+            "checkout with the output written outside the repository".format(
+                case_id
+            )
+        )
+        assert len(recording["commit"]) == 40, case_id
+        assert len(recording["analysis_source_digest"]) == 64, case_id
+        recordings.add(
+            (recording["commit"], recording["analysis_source_digest"])
+        )
+        for side in ("left", "right"):
+            header = _read_json(
+                FIXTURE_ROOT / case_id / case[side]["fixture"]
+            )["header"]
+            assert header["recording_dirty"] is False, (case_id, side)
+            assert header["recording_commit"] == recording["commit"], (
+                case_id, side,
+            )
+            assert header["analysis_source_digest"] == (
+                recording["analysis_source_digest"]
+            ), (case_id, side)
+    assert len(recordings) == 1, (
+        "the corpus was recorded from more than one source tree, so its "
+        "fixtures cannot be reproduced from a single checkout: "
+        + repr(sorted(recordings))
+    )
+
+
 def test_verification_metadata_claims_only_what_was_actually_checked():
     """GT metadata が「やっていない確認」を名乗らないこと。
 

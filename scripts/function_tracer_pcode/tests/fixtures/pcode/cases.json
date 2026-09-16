@@ -22,8 +22,9 @@
     "github_hosted_runner": 9.7
    },
    "recording": {
-    "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
-    "dirty": true,
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
     "identical_fast_path": false
    },
    "right": {
@@ -59,8 +60,9 @@
     "github_hosted_runner": 346.1
    },
    "recording": {
-    "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
-    "dirty": true,
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
     "identical_fast_path": false
    },
    "right": {
@@ -96,8 +98,9 @@
     "github_hosted_runner": 390.7
    },
    "recording": {
-    "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
-    "dirty": true,
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
     "identical_fast_path": false
    },
    "right": {
@@ -133,7 +136,8 @@
     "github_hosted_runner": 3.3
    },
    "recording": {
-    "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -170,8 +174,9 @@
     "github_hosted_runner": 8.4
    },
    "recording": {
-    "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
-    "dirty": true,
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
     "identical_fast_path": false
    },
    "right": {
@@ -207,8 +212,9 @@
     "github_hosted_runner": 6.8
    },
    "recording": {
-    "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
-    "dirty": true,
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
     "identical_fast_path": false
    },
    "right": {
@@ -245,8 +251,9 @@
     "github_hosted_runner": 18.5
    },
    "recording": {
-    "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
-    "dirty": true,
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
     "identical_fast_path": false
    },
    "right": {
@@ -282,8 +289,9 @@
     "github_hosted_runner": 15.9
    },
    "recording": {
-    "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
-    "dirty": true,
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
     "identical_fast_path": false
    },
    "right": {
