@@ -790,17 +790,18 @@ def test_fixture_schema_rejects_malformed_members_and_values():
     _rejects(unclosed)
 
 
+def _identity_value(side: str, member: str, group: int) -> Dict[str, Any]:
+    return {
+        "kind": "identity_surrogate", "member": member, "group": group,
+        "value": fixture_schema.canonical_identity_surrogate(side, member, group),
+    }
+
+
 def test_fixture_schema_rejects_identity_surrogates_outside_their_contract():
-    base = _minimal_payload({
-        "attr:hashCode": {"v": {"kind": "method"}},
-    })
+    base = _minimal_payload({"attr:hashCode": {"v": {"kind": "method"}}})
     good = copy.deepcopy(base)
     good["objects"]["o0"]["members"]["call:hashCode()"] = {
-        "v": {
-            "kind": "identity_surrogate",
-            "value": fixture_schema.identity_surrogate("left", 0),
-            "member": "hashCode",
-        },
+        "v": _identity_value("left", "hashCode", 0),
     }
     fixture_schema.validate_fixture(good)
 
@@ -808,9 +809,10 @@ def test_fixture_schema_rejects_identity_surrogates_outside_their_contract():
     undeclared = copy.deepcopy(good)
     undeclared["objects"]["o0"]["members"]["call:getName()"] = {
         "v": {
-            "kind": "identity_surrogate",
-            "value": fixture_schema.identity_surrogate("left", 0),
-            "member": "getName",
+            "kind": "identity_surrogate", "member": "getName", "group": 0,
+            "value": fixture_schema.canonical_identity_surrogate(
+                "left", "hashCode", 0
+            ),
         },
     }
     _rejects(undeclared)
@@ -825,55 +827,338 @@ def test_fixture_schema_rejects_identity_surrogates_outside_their_contract():
     # 反対側の帯域の surrogate は拒否する（左右の取り違え）。
     wrong_side = copy.deepcopy(good)
     wrong_side["objects"]["o0"]["members"]["call:hashCode()"]["v"]["value"] = (
-        fixture_schema.identity_surrogate("right", 0)
+        fixture_schema.canonical_identity_surrogate("right", "hashCode", 0)
     )
     _rejects(wrong_side)
 
-    not_int = copy.deepcopy(good)
-    not_int["objects"]["o0"]["members"]["call:hashCode()"]["v"]["value"] = "1"
-    _rejects(not_int)
+    # 別 member の帯域の値も拒否する。
+    wrong_member_band = copy.deepcopy(good)
+    wrong_member_band["objects"]["o0"]["members"]["call:hashCode()"]["v"]["value"] = (
+        fixture_schema.canonical_identity_surrogate("left", "getUniqueProgramID", 0)
+    )
+    _rejects(wrong_member_band)
+
+    # group と value の不一致（どちらを改竄しても落ちる）。
+    tampered_value = copy.deepcopy(good)
+    tampered_value["objects"]["o0"]["members"]["call:hashCode()"]["v"]["value"] += 1
+    _rejects(tampered_value)
+    tampered_group = copy.deepcopy(good)
+    tampered_group["objects"]["o0"]["members"]["call:hashCode()"]["v"]["group"] = 7
+    _rejects(tampered_group)
+
+    for broken in ("value", "group"):
+        not_int = copy.deepcopy(good)
+        not_int["objects"]["o0"]["members"]["call:hashCode()"]["v"][broken] = "1"
+        _rejects(not_int)
+        missing = copy.deepcopy(good)
+        del missing["objects"]["o0"]["members"]["call:hashCode()"]["v"][broken]
+        _rejects(missing)
+
+    negative_group = copy.deepcopy(good)
+    negative_group["objects"]["o0"]["members"]["call:hashCode()"]["v"]["group"] = -1
+    negative_group["objects"]["o0"]["members"]["call:hashCode()"]["v"]["value"] = (
+        fixture_schema.canonical_identity_surrogate("left", "hashCode", 0) - 1
+    )
+    _rejects(negative_group)
 
 
-def test_identity_surrogates_preserve_equality_and_stay_side_disjoint():
-    """identity 由来の値は、意味（一致 / 不一致）を保ったまま決定的になる。"""
+def test_fixture_schema_rejects_inconsistent_identity_groups_across_objects():
+    """fixture 全体で (member, group) と value が 1 対 1 であること。"""
 
-    left = fixture_schema.loads((CASE_DIR / "left.json").read_text(encoding="utf-8"))
-    right = fixture_schema.loads((CASE_DIR / "right.json").read_text(encoding="utf-8"))
+    base = _minimal_payload({"attr:hashCode": {"v": {"kind": "method"}}})
+    base["objects"]["o0"]["members"]["call:hashCode()"] = {
+        "v": _identity_value("left", "hashCode", 0),
+    }
+    base["objects"]["o1"]["members"] = {
+        "attr:hashCode": {"v": {"kind": "method"}},
+        "call:hashCode()": {"v": _identity_value("left", "hashCode", 1)},
+    }
+    fixture_schema.validate_fixture(base)
 
-    def surrogates(payload):
-        found = {}
-        for object_id, entry in payload["objects"].items():
+    # 同じ group が 2 つの値を持つ。
+    two_values = copy.deepcopy(base)
+    two_values["objects"]["o1"]["members"]["call:hashCode()"]["v"]["group"] = 0
+    _rejects(two_values)
+
+    # 同じ値が 2 つの group に使い回される。
+    two_groups = copy.deepcopy(base)
+    two_groups["objects"]["o1"]["members"]["call:hashCode()"]["v"]["value"] = (
+        fixture_schema.canonical_identity_surrogate("left", "hashCode", 0)
+    )
+    _rejects(two_groups)
+
+
+# --- identity surrogate: raw 値の同値関係が保存されること --------------------
+
+
+def test_identity_ledger_preserves_a_hash_collision_between_unequal_receivers():
+    """``hashCode`` の collision は合法。実観測の collision を壊さない。"""
+
+    ledger = fixture_schema.IdentitySurrogateLedger("left")
+    first = ledger.assign("hashCode", 0x5EED, receiver_equality_class=1)
+    second = ledger.assign("hashCode", 0x5EED, receiver_equality_class=2)
+    assert first == second, "unequal receivers sharing a raw hash must share a surrogate"
+
+
+def test_identity_ledger_separates_unequal_receivers_with_different_raw_hashes():
+    ledger = fixture_schema.IdentitySurrogateLedger("left")
+    first = ledger.assign("hashCode", 11, receiver_equality_class=1)
+    second = ledger.assign("hashCode", 22, receiver_equality_class=2)
+    assert first != second
+    assert first[1] != second[1]
+
+
+def test_identity_ledger_keeps_java_equal_receivers_on_one_surrogate():
+    ledger = fixture_schema.IdentitySurrogateLedger("left")
+    first = ledger.assign("hashCode", 77, receiver_equality_class=5)
+    second = ledger.assign("hashCode", 77, receiver_equality_class=5)
+    assert first == second
+
+
+def test_identity_ledger_fails_closed_when_java_equal_receivers_disagree():
+    """``a.equals(b) => a.hashCode() == b.hashCode()`` が破れたら記録を止める。"""
+
+    ledger = fixture_schema.IdentitySurrogateLedger("left")
+    ledger.assign("hashCode", 77, receiver_equality_class=5)
+    with pytest.raises(fixture_schema.IdentityContractViolation):
+        ledger.assign("hashCode", 78, receiver_equality_class=5)
+
+
+def test_identity_ledger_maps_one_program_id_to_one_surrogate():
+    ledger = fixture_schema.IdentitySurrogateLedger("left")
+    first = ledger.assign("getUniqueProgramID", 4242, receiver_equality_class=0)
+    # 受け手が違っても raw 値が同じなら同じ surrogate。
+    second = ledger.assign("getUniqueProgramID", 4242, receiver_equality_class=9)
+    assert first == second
+    other = ledger.assign("getUniqueProgramID", 4243, receiver_equality_class=0)
+    assert other != first
+
+
+def test_identity_ledger_bands_are_disjoint_across_sides_and_members():
+    left = fixture_schema.IdentitySurrogateLedger("left")
+    right = fixture_schema.IdentitySurrogateLedger("right")
+    values = set()
+    for ledger in (left, right):
+        for member in sorted(fixture_schema.IDENTITY_DERIVED_METHODS):
+            for raw in (1, 2, 3):
+                _group, value = ledger.assign(
+                    member, raw, receiver_equality_class=raw,
+                )
+                assert value not in values
+                values.add(value)
+    assert len(values) == 2 * len(fixture_schema.IDENTITY_DERIVED_METHODS) * 3
+
+
+def test_identity_surrogates_depend_only_on_the_equality_relation_of_raw_values():
+    """raw 値が run ごとに変わっても、同値関係が同じなら結果が同じ。"""
+
+    relation = [(0, 1), (0, 2), (1, 3), (0, 4), (2, 5)]  # (class index, receiver)
+    runs = (
+        [7, 7, 900001, 7, 123],            # 昇順でない / 桁もばらばら
+        [999999999, 999999999, 1, 999999999, 500],   # 大小関係を逆にした
+        [-5, -5, -900, -5, 0],             # 負値
+    )
+    outputs = []
+    for raw_values in runs:
+        ledger = fixture_schema.IdentitySurrogateLedger("left")
+        outputs.append([
+            ledger.assign("hashCode", raw, receiver_equality_class=receiver)
+            for (_class_index, receiver), raw in zip(relation, raw_values)
+        ])
+    assert outputs[0] == outputs[1] == outputs[2]
+    # 同値関係そのものは保たれている（1 番目と 2 番目と 4 番目が同じ class）。
+    groups = [group for group, _value in outputs[0]]
+    assert groups[0] == groups[1] == groups[3]
+    assert len(set(groups)) == 3
+
+
+def test_identity_ledger_rejects_undeclared_members_and_non_integers():
+    ledger = fixture_schema.IdentitySurrogateLedger("left")
+    with pytest.raises(fixture_schema.IdentityContractViolation):
+        ledger.assign("getName", 1, receiver_equality_class=0)
+    for raw in (True, "1", 1.0, None):
+        with pytest.raises(fixture_schema.IdentityContractViolation):
+            ledger.assign("hashCode", raw, receiver_equality_class=0)
+
+
+def test_synthetic_recording_canonicalizes_identity_values(monkeypatch):
+    """記録 proxy 経由でも、raw 値が変わって同値関係が同じなら記録が同じ。"""
+
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+
+    def record_run(raw_hashes):
+        recorder = _SyntheticRecorder("left")
+        proxies = [
+            record_pcode_fixture.RecordingProxy(
+                recorder, index, _SyntheticBlock(raw),
+            )
+            for index, raw in enumerate(raw_hashes)
+        ]
+        for proxy in proxies:
+            proxy.hashCode()
+        return recorder.stored
+
+    first = record_run([3, 3, 71])
+    second = record_run([88888888, 88888888, 2])
+    assert first == second
+    # collision（先頭 2 つ）は同じ surrogate のまま、3 つ目は別。
+    values = [
+        entry["v"]["value"] for entry in first
+        if entry["v"].get("kind") == "identity_surrogate"
+    ]
+    assert len(values) == 3
+    assert values[0] == values[1] != values[2]
+
+
+def test_synthetic_recording_fails_closed_on_a_broken_hash_contract():
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+
+    recorder = _SyntheticRecorder("left", equality_classes={0: 4, 1: 4})
+    first = record_pcode_fixture.RecordingProxy(recorder, 0, _SyntheticBlock(10))
+    second = record_pcode_fixture.RecordingProxy(recorder, 1, _SyntheticBlock(11))
+    first.hashCode()
+    with pytest.raises(record_pcode_fixture.RecordingError):
+        second.hashCode()
+
+
+class _SyntheticBlock:
+    """``hashCode()`` だけを持つ、記録対象の代役。"""
+
+    def __init__(self, raw: int) -> None:
+        self._raw = raw
+
+    def hashCode(self) -> int:
+        return self._raw
+
+
+class _SyntheticRecorder:
+    """``RecordingProxy`` が使う面だけを持つ最小の recorder。"""
+
+    def __init__(self, side: str, equality_classes: Optional[Dict[int, int]] = None) -> None:
+        self.identity_ledger = fixture_schema.IdentitySurrogateLedger(side)
+        self._equality_classes = equality_classes or {}
+        self.stored: list = []
+
+    def object_id(self, index: int) -> str:
+        return "o{}".format(index)
+
+    def entry(self, index: int) -> Dict[str, Any]:
+        return {"eq_group": self._equality_classes.get(index, index)}
+
+    def key_arg(self, value: Any) -> Any:
+        return value
+
+    def note_call(self, index: int, member_key: str, name: str, args: Tuple) -> None:
+        return None
+
+    def store(self, index: int, member_key: str, envelope: Mapping[str, Any]) -> None:
+        self.stored.append(dict(envelope))
+
+    def capture(self, value: Any) -> Tuple[Any, Dict[str, Any]]:  # pragma: no cover
+        raise AssertionError("identity members must not reach the generic capture")
+
+
+class _FakeJavaMap:
+    """``IdentityHashMap`` / ``HashMap`` の、記録器が使う面だけの代役。"""
+
+    def __init__(self) -> None:
+        self._entries: Dict[Any, Any] = {}
+
+    def get(self, key: Any) -> Any:
+        return self._entries.get(id(key))
+
+    def put(self, key: Any, value: Any) -> None:
+        self._entries[id(key)] = value
+
+
+class _FakeJPype:
+    """``Recorder`` が起動時に引く JPype の面だけの代役（production 経路は不変）。"""
+
+    @staticmethod
+    def JClass(name: str) -> Any:
+        if name == "java.lang.Integer":
+            return int
+        return _FakeJavaMap
+
+
+def _synthetic_recorder_instance(side: str = "left"):
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+
+    return record_pcode_fixture.Recorder(_FakeJPype, side)
+
+
+def test_saturation_does_not_recall_an_already_observed_count_api():
+    """飽和は production が観測済みの key を呼び直さない。
+
+    件数 API が状態を持っていた場合、呼び直すと production の観測列に
+    観測を足してしまう（`seq` の位置がずれる）。
+    """
+
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+
+    recorder = _synthetic_recorder_instance()
+    calls = []
+
+    class _CountingOp:
+        def getNumInputs(self):
+            calls.append("called")
+            return 2
+
+    proxy = recorder.proxy_for(_CountingOp())
+    # production が 1 回観測する。
+    assert proxy.getNumInputs() == 2
+    assert calls == ["called"]
+    # 飽和はその観測を読むだけで、実 API を呼び直さない。
+    assert recorder._counted(proxy, "getNumInputs") == 2
+    assert calls == ["called"]
+    observations = recorder._entries[proxy._rec_index]["observations"]
+    assert len(observations[record_pcode_fixture.call_key("getNumInputs", ())]) == 1
+
+
+def test_identity_surrogates_in_the_case_fixture_match_their_canonical_form():
+    """実 fixture の surrogate が (side, member, group) と整合していること。"""
+
+    for name, side in (("left.json", "left"), ("right.json", "right")):
+        payload = fixture_schema.loads(
+            (CASE_DIR / name).read_text(encoding="utf-8")
+        )
+        found = []
+        for entry in payload["objects"].values():
             for member_key, envelope in entry["members"].items():
                 tagged = envelope.get("v")
-                if isinstance(tagged, Mapping) and tagged.get("kind") == "identity_surrogate":
-                    found[(object_id, member_key)] = (
-                        entry["eq_group"], tagged["value"], tagged["member"],
-                    )
-        return found
+                if isinstance(tagged, Mapping) and tagged.get("kind") == (
+                    "identity_surrogate"
+                ):
+                    found.append((member_key, tagged))
+        assert found
+        for member_key, tagged in found:
+            assert tagged["member"] in fixture_schema.IDENTITY_DERIVED_METHODS
+            assert tagged["member"] == fixture_schema.member_name_of(member_key)
+            assert tagged["value"] == fixture_schema.canonical_identity_surrogate(
+                side, tagged["member"], tagged["group"],
+            )
+        # (member, group) と value は 1 対 1。
+        pairs = {(t["member"], t["group"]): t["value"] for _k, t in found}
+        assert len(set(pairs.values())) == len(pairs)
 
-    left_found = surrogates(left)
-    right_found = surrogates(right)
-    assert left_found and right_found
-    # 記録された identity 面は hashCode と getUniqueProgramID だけ。
-    assert {item[2] for item in left_found.values()} <= fixture_schema.IDENTITY_DERIVED_METHODS
 
-    for payload, found, side in ((left, left_found, "left"), (right, right_found, "right")):
-        low, high = fixture_schema.identity_surrogate_band(side)
-        by_eq_group = {}
-        for (_object_id, _member_key), (eq_group, value, _member) in found.items():
-            assert low <= value < high
-            assert value == fixture_schema.identity_surrogate(side, eq_group)
-            # 同じ Java 同値類なら同じ surrogate（hashCode の契約と一致）。
-            by_eq_group.setdefault(eq_group, set()).add(value)
-        assert all(len(values) == 1 for values in by_eq_group.values())
-        # 別の同値類なら別の surrogate。
-        assert len({next(iter(v)) for v in by_eq_group.values()}) == len(by_eq_group)
-
-    # 左右で surrogate は決して衝突しない。
-    assert not (
-        {value for _eq, value, _m in left_found.values()}
-        & {value for _eq, value, _m in right_found.values()}
-    )
+def test_identity_surrogates_never_collide_across_the_two_sides():
+    values = {}
+    for name, side in (("left.json", "left"), ("right.json", "right")):
+        payload = fixture_schema.loads(
+            (CASE_DIR / name).read_text(encoding="utf-8")
+        )
+        values[side] = {
+            tagged["value"]
+            for entry in payload["objects"].values()
+            for tagged in (
+                envelope.get("v") for envelope in entry["members"].values()
+            )
+            if isinstance(tagged, Mapping)
+            and tagged.get("kind") == "identity_surrogate"
+        }
+    assert values["left"] and values["right"]
+    assert not (values["left"] & values["right"])
 
 
 def test_identity_surrogate_is_what_replay_returns():

@@ -51,6 +51,8 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.function_tracer_pcode.tests.fixtures.pcode import schema as fixture_schema
 from scripts.function_tracer_pcode.tests.fixtures.pcode.schema import (
     IDENTITY_DERIVED_METHODS,
+    IdentityContractViolation,
+    IdentitySurrogateLedger,
     MEMBER_ABSENT,
     MEMBER_METHOD,
     MEMBER_VALUE,
@@ -68,7 +70,6 @@ from scripts.function_tracer_pcode.tests.fixtures.pcode.schema import (
     ObjectRef,
     attr_key,
     call_key,
-    identity_surrogate,
     is_recordable_member,
 )
 from scripts.function_tracer_pcode.tests.fixtures.pcode.recorded_program import (
@@ -135,6 +136,8 @@ class Recorder:
     def __init__(self, jpype: Any, side: str) -> None:
         self._jpype = jpype
         self.side = side
+        # identity 由来の raw 値を、関係を保ったまま surrogate へ写す台帳。
+        self.identity_ledger = IdentitySurrogateLedger(side)
         self._Integer = jpype.JClass("java.lang.Integer")
         self._identity = jpype.JClass("java.util.IdentityHashMap")()
         self._equality = jpype.JClass("java.util.HashMap")()
@@ -254,23 +257,6 @@ class Recorder:
         raise RecordingError(
             "recorded call argument type is outside the fixture schema: "
             + _java_class_name(value)
-        )
-
-    def identity_surrogate_for(self, receiver_index: int, member_name: str) -> int:
-        """identity 由来の戻り値を、決定的な fixture-local surrogate にする。
-
-        raw の ``hashCode`` / ``getUniqueProgramID`` は Ghidra / JVM が import
-        ごとに変える値で、具体値に意味は無い（production は「等しいか」だけを
-        使う）。受け手の Java 同値類から作るので、``equals`` な object は同じ
-        surrogate になり（hashCode の契約と一致）、side ごとに帯域が分かれる。
-        """
-
-        if member_name not in IDENTITY_DERIVED_METHODS:
-            raise RecordingError(
-                "member is not declared as identity-derived: " + member_name
-            )
-        return identity_surrogate(
-            self.side, self._entries[receiver_index]["eq_group"]
         )
 
     def recorded_observation(self, index: int, member_key: str) -> Any:
@@ -533,24 +519,26 @@ class RecordingProxy:
     ) -> Tuple[Any, Mapping[str, Any]]:
         """identity 由来の戻り値を surrogate へ差し替える。
 
-        **production にも surrogate を返す**ので、記録時と再生時に production が
-        見る値は同一になる。宣言した面（無引数で整数を返す）から外れていたら、
-        raw の非決定値をそのまま記録せずに記録を失敗させる。
+        写すのは **観測した raw 値どうしの一致 / 不一致関係**で、受け手の同値類
+        ではない（``hashCode`` は unequal な object の collision が合法なので、
+        受け手で採番すると実観測の collision を壊す）。**production にも
+        surrogate を返す**ので、記録時と再生時に production が見る値は同一。
+        宣言した面（無引数で整数を返す）から外れていたら記録を失敗させる。
         """
 
         if args:
             raise RecordingError(
                 "identity-derived member {} was called with arguments".format(name)
             )
-        if isinstance(raw, bool) or not isinstance(raw, int):
-            raise RecordingError(
-                "identity-derived member {} did not return an integer: {}".format(
-                    name, type(raw).__name__
-                )
+        try:
+            group, surrogate = self._rec_recorder.identity_ledger.assign(
+                name, raw, self._rec_recorder.entry(self._rec_index)["eq_group"],
             )
-        surrogate = self._rec_recorder.identity_surrogate_for(self._rec_index, name)
+        except IdentityContractViolation as exc:
+            raise RecordingError(str(exc)) from exc
         return surrogate, {
-            "kind": VALUE_IDENTITY, "value": surrogate, "member": name,
+            "kind": VALUE_IDENTITY, "value": surrogate,
+            "member": name, "group": group,
         }
 
     # -- 記録対象の dunder --------------------------------------------------

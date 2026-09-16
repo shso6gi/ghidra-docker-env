@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "ff543c0dc6100026650a4f12190077878d9bd618b4e0b7f22f26eb3bd82374fa",
+  "analysis_source_digest": "31200fede4674d168f6816ff5e58cfaaa4e63e6737d6af135bfe567b30c66674",
   "binary": {
    "binary_id": "B1",
    "eqbench_relative_path": "bess/bessj0/Eq/source/newV-arm64-clang-O0",
@@ -15,9 +15,9 @@
   "fixture_id": "bessj0_snippet_B1_B2",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-09-16T03:14:43+00:00",
+  "recorded_at_utc": "2026-09-16T03:46:26+00:00",
   "recorder_version": "2",
-  "recording_commit": "f5a32cfd97494c193b28cec6776b3875d0ae848d",
+  "recording_commit": "dfd078122e9a17b2e1432ef03bf263bf5a1d5f0c",
   "recording_dirty": true,
   "recording_mode": {
    "connector": "production",
@@ -314,9 +314,10 @@
     },
     "call:getUniqueProgramID()": {
      "v": {
+      "group": 0,
       "kind": "identity_surrogate",
       "member": "getUniqueProgramID",
-      "value": 1000000000000
+      "value": 1001000000000
      }
     }
    }
@@ -192712,9 +192713,10 @@
     },
     "call:hashCode()": {
      "v": {
+      "group": 6,
       "kind": "identity_surrogate",
       "member": "hashCode",
-      "value": 1000000001907
+      "value": 1002000000006
      }
     }
    }
@@ -194638,9 +194640,10 @@
     },
     "call:hashCode()": {
      "v": {
+      "group": 4,
       "kind": "identity_surrogate",
       "member": "hashCode",
-      "value": 1000000001924
+      "value": 1002000000004
      }
     }
    }
@@ -270135,9 +270138,10 @@
     },
     "call:hashCode()": {
      "v": {
+      "group": 0,
       "kind": "identity_surrogate",
       "member": "hashCode",
-      "value": 1000000000035
+      "value": 1002000000000
      }
     }
    }
@@ -279724,9 +279728,10 @@
     },
     "call:hashCode()": {
      "v": {
+      "group": 1,
       "kind": "identity_surrogate",
       "member": "hashCode",
-      "value": 1000000000036
+      "value": 1002000000001
      }
     }
    }
@@ -283294,9 +283299,10 @@
     },
     "call:hashCode()": {
      "v": {
+      "group": 2,
       "kind": "identity_surrogate",
       "member": "hashCode",
-      "value": 1000000000037
+      "value": 1002000000002
      }
     }
    }
@@ -290767,9 +290773,10 @@
     },
     "call:hashCode()": {
      "v": {
+      "group": 3,
       "kind": "identity_surrogate",
       "member": "hashCode",
-      "value": 1000000000038
+      "value": 1002000000003
      }
     }
    }
@@ -362072,9 +362079,10 @@
     },
     "call:hashCode()": {
      "v": {
+      "group": 5,
       "kind": "identity_surrogate",
       "member": "hashCode",
-      "value": 1000000000645
+      "value": 1002000000005
      }
     }
    }

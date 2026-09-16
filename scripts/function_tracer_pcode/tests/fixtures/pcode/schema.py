@@ -90,47 +90,163 @@ VALUE_KEYS = {
     VALUE_BYTES: frozenset({"kind", "value"}),
     VALUE_LIST: frozenset({"kind", "items"}),
     VALUE_REF: frozenset({"kind", "id"}),
-    VALUE_IDENTITY: frozenset({"kind", "value", "member"}),
+    VALUE_IDENTITY: frozenset({"kind", "value", "member", "group"}),
 }
 VALUE_KINDS = frozenset(VALUE_KEYS)
 
 # --- identity surrogate -----------------------------------------------------
 
-#: raw 値に意味が無く、値の一致 / 不一致関係だけが意味を持つ member。
-#: 記録器はこれらの戻り値を fixture-local な surrogate に正規化する。
+#: raw 値そのものに意味が無く、**観測された値どうしの一致 / 不一致関係**だけが
+#: 意味を持つ member。記録器はこれらの戻り値を fixture-local な surrogate に
+#: 正規化する（raw 値は fixture に残さない）。
 IDENTITY_DERIVED_METHODS = frozenset({
-    # Java の identity hash。契約は「equal なら equal」だけで、具体値は
-    # JVM の run ごとに変わる。production は block 索引 / op 鍵に使う。
+    # Java の identity hash。契約は ``a.equals(b) => a.hashCode() == b.hashCode()``
+    # だけで、**異なる object の hash collision は合法**。具体値は JVM の run
+    # ごとに変わる。production は block / op の索引 key に使う。
     "hashCode",
     # Ghidra が import ごとに振る不透明な program handle。production は
     # runtime ref / parameter の owner 識別にだけ使う。
     "getUniqueProgramID",
 })
 
-#: side ごとの surrogate 帯域。左右の fixture で surrogate が衝突しない。
+#: ``hashCode`` は Java の hash 契約を持つ唯一の member（equal な receiver は
+#: 同じ raw 値を返さなければならない）。
+HASH_CODE_MEMBER = "hashCode"
+
+#: surrogate の桁割り。side / member / group が重ならない帯に入る。
 IDENTITY_SURROGATE_SIDE_STRIDE = 1_000_000_000_000
+IDENTITY_SURROGATE_MEMBER_STRIDE = 1_000_000_000
+#: 1 つの (side, member) が持てる group の上限。
+IDENTITY_SURROGATE_MAX_GROUPS = IDENTITY_SURROGATE_MEMBER_STRIDE
 
 #: fixture の ``side`` と、surrogate の帯域を決める序数。
 SIDE_ORDINALS = {"left": 0, "right": 1}
 
+#: identity member の序数（宣言集合から決まるので、宣言が変わらない限り安定）。
+IDENTITY_MEMBER_ORDINALS = {
+    name: ordinal for ordinal, name in enumerate(sorted(IDENTITY_DERIVED_METHODS))
+}
 
-def identity_surrogate(side: str, eq_group: int) -> int:
-    """identity 由来の値の、決定的で side ごとに重ならない surrogate。"""
+
+class IdentityContractViolation(ValueError):
+    """実 Ghidra の観測が identity member の契約を満たしていない。
+
+    ``hashCode`` で、Java-equal（同じ同値類）の receiver が違う raw 値を返した
+    場合など。記録を続けると意味論を勝手に決めてしまうので fail-closed にする。
+    """
+
+
+def canonical_identity_surrogate(side: str, member: str, group: int) -> int:
+    """``(side, member, group)`` から surrogate を一意に決める。
+
+    group は「同じ raw 値を観測した集合」に振られた通し番号で、raw 値そのもの
+    とは無関係。したがって surrogate は raw 値の大小にも Python の hash にも
+    依存しない。
+    """
 
     if side not in SIDE_ORDINALS:
-        raise ValueError("recorded fixture side is not part of the schema: " + repr(side))
-    if type(eq_group) is not int or type(eq_group) is bool:
-        raise TypeError("equality class is not an exact int")
-    return (SIDE_ORDINALS[side] + 1) * IDENTITY_SURROGATE_SIDE_STRIDE + eq_group
+        raise RecordedFixtureInvalid(
+            "recorded fixture side is not part of the schema: " + repr(side)
+        )
+    if member not in IDENTITY_MEMBER_ORDINALS:
+        raise RecordedFixtureInvalid(
+            "identity surrogate member is not declared: " + repr(member)
+        )
+    if type(group) is not int or type(group) is bool:
+        raise RecordedFixtureInvalid("identity surrogate group is not an exact int")
+    if not 0 <= group < IDENTITY_SURROGATE_MAX_GROUPS:
+        raise RecordedFixtureInvalid(
+            "identity surrogate group is outside its band: " + repr(group)
+        )
+    return (
+        (SIDE_ORDINALS[side] + 1) * IDENTITY_SURROGATE_SIDE_STRIDE
+        + (IDENTITY_MEMBER_ORDINALS[member] + 1) * IDENTITY_SURROGATE_MEMBER_STRIDE
+        + group
+    )
 
 
-def identity_surrogate_band(side: str) -> Tuple[int, int]:
-    """``side`` の surrogate が入るべき半開区間。"""
+class IdentitySurrogateLedger:
+    """観測した identity 由来の raw 値を、関係を保ったまま surrogate へ写す。
 
-    base = (SIDE_ORDINALS[side] + 1) * IDENTITY_SURROGATE_SIDE_STRIDE
-    # eq_group は identity 同値類の fallback で負になり得るので下側にも幅を取る。
-    return (base - IDENTITY_SURROGATE_SIDE_STRIDE // 2,
-            base + IDENTITY_SURROGATE_SIDE_STRIDE // 2)
+    保つ関係（これが正本）:
+
+    * 同じ ``(member, raw 値)`` → 同じ surrogate。**unequal な receiver 間の
+      hash collision もそのまま保存される**（production は ``hashCode()`` を
+      索引 key に使うので、collision の有無は意味論）。
+    * 違う raw 値 → 違う surrogate。
+    * group は「初めてその raw 値を観測した順」で振るので、raw 値の大小にも
+      Python の randomized hash にも依存しない（記録の観測順が決定的である限り
+      決定的）。
+    * side / member ごとに帯が分かれるので、左右でも member 間でも衝突しない。
+
+    raw 値そのものは ledger の中にしか存在せず、fixture には出さない。
+    """
+
+    def __init__(self, side: str) -> None:
+        if side not in SIDE_ORDINALS:
+            raise ValueError(
+                "recorded fixture side is not part of the schema: " + repr(side)
+            )
+        self.side = side
+        # (member, raw 値) -> group。挿入順 = 初観測順。
+        self._groups: dict = {}
+        # member -> 次に振る group
+        self._next_group: dict = {}
+        # (member, receiver の同値類) -> raw 値。``hashCode`` の契約検査用。
+        self._equal_receiver_values: dict = {}
+
+    def assign(
+        self, member: str, raw_value: Any, receiver_equality_class: Any,
+    ) -> Tuple[int, int]:
+        """``(group, surrogate)`` を返す。"""
+
+        if member not in IDENTITY_DERIVED_METHODS:
+            raise IdentityContractViolation(
+                "member is not declared as identity-derived: " + repr(member)
+            )
+        if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+            raise IdentityContractViolation(
+                "identity-derived member {} did not return an integer: {}".format(
+                    member, type(raw_value).__name__
+                )
+            )
+        raw = int(raw_value)
+        if member == HASH_CODE_MEMBER:
+            self._check_hash_contract(member, raw, receiver_equality_class)
+        key = (member, raw)
+        group = self._groups.get(key)
+        if group is None:
+            group = self._next_group.get(member, 0)
+            if group >= IDENTITY_SURROGATE_MAX_GROUPS:
+                raise IdentityContractViolation(
+                    "identity surrogate groups for {} are exhausted".format(member)
+                )
+            self._next_group[member] = group + 1
+            self._groups[key] = group
+        return group, canonical_identity_surrogate(self.side, member, group)
+
+    def _check_hash_contract(
+        self, member: str, raw: int, receiver_equality_class: Any,
+    ) -> None:
+        """``a.equals(b) => a.hashCode() == b.hashCode()`` を実観測で確かめる。
+
+        破れていたら記録を止める（勝手にどちらかへ寄せない）。
+        """
+
+        if receiver_equality_class is None:
+            return
+        key = (member, receiver_equality_class)
+        previous = self._equal_receiver_values.get(key)
+        if previous is None:
+            self._equal_receiver_values[key] = raw
+            return
+        if previous != raw:
+            raise IdentityContractViolation(
+                "Java-equal receivers returned different {} values "
+                "(equality class {}): {} != {}".format(
+                    member, receiver_equality_class, previous, raw
+                )
+            )
 
 
 # --- member kinds -----------------------------------------------------------
@@ -404,7 +520,7 @@ def _validate_header(header: Any) -> Mapping[str, Any]:
 
 
 def _validate_value(
-    member_key: str, tagged: Any, *, object_ids: Any, side: str,
+    member_key: str, tagged: Any, *, object_ids: Any, side: str, identity_census: dict,
 ) -> None:
     if not isinstance(tagged, Mapping) or tagged.get("kind") not in VALUE_KINDS:
         raise RecordedFixtureInvalid(
@@ -446,7 +562,10 @@ def _validate_value(
                 "recorded list of {} is not a list".format(repr(member_key))
             )
         for item in items:
-            _validate_value(member_key, item, object_ids=object_ids, side=side)
+            _validate_value(
+                member_key, item, object_ids=object_ids, side=side,
+                identity_census=identity_census,
+            )
         return
     if kind == VALUE_REF:
         target = _exact_str("recorded reference of " + repr(member_key), tagged["id"])
@@ -467,18 +586,33 @@ def _validate_value(
         raise RecordedFixtureInvalid(
             "identity surrogate member does not match its key: " + repr(member_key)
         )
+    group = _exact_int("identity surrogate group of " + repr(member_key), tagged["group"])
     value = _exact_int("identity surrogate of " + repr(member_key), tagged["value"])
-    low, high = identity_surrogate_band(side)
-    if not low <= value < high:
+    # 値は (side, member, group) から一意に決まる。任意の in-band 値は通さない。
+    if value != canonical_identity_surrogate(side, member, group):
         raise RecordedFixtureInvalid(
-            "identity surrogate of {} is outside the {} band".format(
-                repr(member_key), side
+            "identity surrogate of {} does not match its (side, member, group): "
+            "{} != canonical({}, {}, {})".format(
+                repr(member_key), value, side, member, group
+            )
+        )
+    census = identity_census.setdefault(member, ({}, {}))
+    by_group, by_value = census
+    if by_group.setdefault(group, value) != value:
+        raise RecordedFixtureInvalid(
+            "identity surrogate group {} of {} maps to two values".format(group, member)
+        )
+    if by_value.setdefault(value, group) != group:
+        raise RecordedFixtureInvalid(
+            "identity surrogate value {} of {} is reused by two groups".format(
+                value, member
             )
         )
 
 
 def _validate_observation(
     member_key: str, observation: Any, *, object_ids: Any, side: str,
+    identity_census: dict,
 ) -> None:
     if not isinstance(observation, Mapping):
         raise RecordedFixtureInvalid(
@@ -512,13 +646,20 @@ def _validate_observation(
             MEMBER_KEYS[value["kind"]],
         )
         if value["kind"] == MEMBER_VALUE:
-            _validate_value(member_key, value["value"], object_ids=object_ids, side=side)
+            _validate_value(
+                member_key, value["value"], object_ids=object_ids, side=side,
+                identity_census=identity_census,
+            )
         return
-    _validate_value(member_key, value, object_ids=object_ids, side=side)
+    _validate_value(
+        member_key, value, object_ids=object_ids, side=side,
+        identity_census=identity_census,
+    )
 
 
 def _validate_envelope(
     member_key: str, envelope: Any, *, object_ids: Any, side: str,
+    identity_census: dict,
 ) -> None:
     if not isinstance(envelope, Mapping):
         raise RecordedFixtureInvalid(
@@ -531,7 +672,10 @@ def _validate_envelope(
             + repr(member_key)
         )
     if keys != {"seq"}:
-        _validate_observation(member_key, envelope, object_ids=object_ids, side=side)
+        _validate_observation(
+            member_key, envelope, object_ids=object_ids, side=side,
+            identity_census=identity_census,
+        )
         return
     observations = envelope["seq"]
     if not isinstance(observations, list) or len(observations) < 2:
@@ -540,7 +684,10 @@ def _validate_envelope(
             + repr(member_key)
         )
     for observation in observations:
-        _validate_observation(member_key, observation, object_ids=object_ids, side=side)
+        _validate_observation(
+            member_key, observation, object_ids=object_ids, side=side,
+            identity_census=identity_census,
+        )
 
 
 def _validate_member_key(member_key: Any) -> str:
@@ -573,6 +720,8 @@ def validate_fixture(payload: Any) -> Mapping[str, Any]:
     if not isinstance(objects, Mapping):
         raise RecordedFixtureInvalid("recorded fixture objects is not a mapping")
     object_ids = frozenset(objects)
+    # fixture 全体で (member, group) と value が 1 対 1 であることを確かめる。
+    identity_census: dict = {}
     for object_id, entry in objects.items():
         _exact_str("recorded object id", object_id)
         _exact_keys("recorded object " + str(object_id), entry, OBJECT_KEYS)
@@ -585,7 +734,10 @@ def validate_fixture(payload: Any) -> Mapping[str, Any]:
             )
         for member_key, envelope in members.items():
             _validate_member_key(member_key)
-            _validate_envelope(member_key, envelope, object_ids=object_ids, side=side)
+            _validate_envelope(
+                member_key, envelope, object_ids=object_ids, side=side,
+                identity_census=identity_census,
+            )
 
     roots = _exact_keys("recorded fixture roots", payload["roots"], ROOT_KEYS)
     for key in sorted(ROOT_KEYS):

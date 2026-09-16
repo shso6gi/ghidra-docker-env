@@ -15,7 +15,8 @@ connector 付きの `check_from_binaries` を同じ経路で再生する**ため
    こう呼んだらこれが返った」という観測しか持たない。Ghidra の object graph を
    別表現へ組み直さないので、再生器は値を引くだけで、推論・既定値・
    Ghidra API の再実装を持たない。唯一の例外は identity 由来の 2 面で、
-   意味（一致 / 不一致）を保ったまま決定的な surrogate に正規化する（下記）。
+   **観測した raw 値の equality / collision relation を保存したまま**、具体値
+   だけを決定的な surrogate に置換する（下記）。
 2. **未記録は None でも空でも既定値でもない。** 記録された値は envelope
    `{"v": ...}` に入り、`{"v": {"kind": "none"}}` は「None が返った」、
    `{"v": {"kind": "list", "items": []}}` は「空列が返った」。key 自体が無ければ
@@ -80,32 +81,54 @@ object 引数が**同一性ではなく Java 同値類**なのは、`Memory.getB
 
 `Object.hashCode()` と `Program.getUniqueProgramID()` は Ghidra / JVM が
 **import ごとに違う値**を返す。具体値そのものに意味は無い — Java の契約は
-「equal な object は equal な hash」だけで、program ID は不透明な handle —
-production はどちらも「等しいか」だけに使う（`condition/tracker.py` の block
-索引、runtime ref / parameter の owner 識別）。raw 値を記録すると同じ入力の
-再記録が byte 一致しないので、**値の一致 / 不一致関係を保ったまま**
-fixture-local な決定的 surrogate へ正規化する:
+`a.equals(b) => a.hashCode() == b.hashCode()` **だけ**（異なる object の hash
+collision は合法）で、program ID は不透明な handle — production はどちらも
+「等しいか」だけに使う（`condition/tracker.py` の block 索引、runtime ref /
+parameter の owner 識別）。
+
+そこで記録器は、**実際に観測した raw 値どうしの equality / collision relation を
+保存し、具体値だけを決定的な surrogate に置換する**。
+
+- 同じ `(member, raw 値)` → 同じ surrogate
+- 違う raw 値 → 違う surrogate
+- **unequal な receiver 間の hash collision も、観測されたとおり保存される**
+  （production は `hashCode()` を索引 key に使うので、collision の有無自体が
+  意味論。受け手の同値類で採番すると、実観測の collision を壊してしまう）
+- raw 値そのものは fixture に残さない
+
+採番は「その `(member, raw 値)` を初めて観測した順」の通し番号 `group` で、
+raw 値の大小にも Python の randomized hash にも依存しない。surrogate は
+`(side, member, group)` から一意に決まる:
 
 ```
-surrogate = (side_ordinal + 1) * IDENTITY_SURROGATE_SIDE_STRIDE + eq_group
+canonical_identity_surrogate(side, member, group) =
+      (side_ordinal  + 1) * IDENTITY_SURROGATE_SIDE_STRIDE
+    + (member_ordinal + 1) * IDENTITY_SURROGATE_MEMBER_STRIDE
+    + group
 ```
 
-`eq_group` は受け手 object の Java 同値類なので、
+side と member で帯が分かれるので、左右でも member 間でも衝突しない。記録器は
+surrogate を **production にもそのまま返す**ので、記録時と再生時に production が
+見る値は同一になる。
 
-- `equals` な object は同じ surrogate（hashCode の契約と一致）
-- 別の同値類は別の surrogate（lookup が壊れない）
-- side ordinal を掛けるので**左右の fixture で surrogate は衝突しない**
+正規化するのは `schema.IDENTITY_DERIVED_METHODS` に宣言した member だけ。
+**fail-closed**:
 
-記録器は surrogate を **production にもそのまま返す**ので、記録時と再生時に
-production が見る値は同一になる。正規化するのは
-`schema.IDENTITY_DERIVED_METHODS` に宣言した member だけで、validator は
+- `hashCode` で Java-equal（同じ同値類）の receiver が違う raw 値を返したら
+  `IdentityContractViolation` → 記録を止める（どちらかへ勝手に寄せない）
+- 宣言外の member、引数付きの呼び出し、整数以外の戻り値も記録を止める
 
-- 宣言外の member を `identity_surrogate` にできない
-- `member` と key の member 名が一致する
-- 値が `side` の帯域に入っている
+validator は fixture 側で次を検査する:
 
-ことを検査する。**削除で production surface を欠落させることはしない**
-（production はどちらの値も実際に読む）。
+- `member` が宣言済みで、key の member 名と一致する
+- `group` が exact int で帯域内
+- `value == canonical_identity_surrogate(side, member, group)`
+  （任意の in-band 値を受理しない）
+- fixture 全体で `(member, group)` と `value` が **1 対 1**
+  （同じ group が 2 つの値を持たない / 同じ値が 2 つの group に使い回されない）
+
+**削除で production surface を欠落させることはしない**（production はどちらの
+値も実際に読む）。
 
 ### 例外
 
@@ -125,6 +148,8 @@ production が見る値は同一になる。正規化するのは
 - SHA-256 と `analysis_source_digest` は 64 桁の小文字 hex、
   `recording_commit` / `eqbench.commit` は 40 桁
 - `side` は `left` / `right`、`recording_mode.connector` は `production`
+- identity surrogate は `value == canonical_identity_surrogate(side, member, group)`
+  で、fixture 全体で `(member, group)` と `value` が 1 対 1
 - `eqbench_relative_path` は working root からの canonical relative path
   （絶対 path や `..` を含まない）
 - `ref` の参照先 object id が実在する
@@ -225,10 +250,11 @@ python3 -B -m scripts.function_tracer_pcode.tests.tools.record_pcode_fixture --c
 `analysis_source_digest` は同じ source からの再記録なら一致すべき出自なので
 隠さない。
 
-`bessj0_snippet_B1_B2` の実測（Ghidra 12.0.1 / PyGhidra 3.0.2）: `left.json` /
-`right.json` / `analysis_snapshot.json` / `check_snapshot.json` の 4 file とも
-**byte 一致**（差分 0）。identity 由来の 2 面（`getUniqueProgramID` /
-`hashCode`）は上記の surrogate で正規化されている。
+`bessj0_snippet_B1_B2` の実測（Ghidra 12.0.1 / PyGhidra 3.0.2、source tree を
+凍結して 4 回記録し 6 通りすべて比較）: `left.json` / `right.json` /
+`analysis_snapshot.json` / `check_snapshot.json` の 4 file とも **byte 一致**
+（差分 0）。identity 由来の 2 面（`getUniqueProgramID` / `hashCode`）は上記の
+surrogate で正規化されている。
 
 ## 既知の制約
 

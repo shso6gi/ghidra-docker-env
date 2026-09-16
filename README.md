@@ -106,7 +106,11 @@ separately.
 
 Recording the same input twice is byte-identical (compare with
 `--compare <dir-a> <dir-b>`, which only excludes the volatile
-`recorded_at_utc` / `recording_dirty` header fields).
+`recorded_at_utc` / `recording_dirty` header fields). The two values Ghidra
+varies per import — an object's identity hash and the program's unique ID —
+are recorded as surrogates that **preserve the equality and collision relation
+of the observed raw values** while replacing the values themselves; the raw
+numbers never enter the fixture.
 
 **A fixture replay is not a substitute for real-binary verification.** The
 recording proxy is not a Java object, so Ghidra's `isinstance` / Java static-API
