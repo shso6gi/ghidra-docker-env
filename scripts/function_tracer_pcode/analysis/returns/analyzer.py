@@ -60,7 +60,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
 
 class ReturnAnalyzer:
 
-    def __init__(self, program, debug: bool=False, binary_id: Optional[str]=None, *, enable_completed_recovery_proofs: bool=True, external_call_effect_policy=None):
+    def __init__(self, program, debug: bool=False, binary_id: Optional[str]=None, *, enable_completed_recovery_proofs: bool=True, external_call_effect_policy=None, decompiler=None):
         self.program = program
         self._region_facts = RegionFacts(program)
         self._debug_reporter = DebugReporter(debug_flag=lambda: self.debug)
@@ -78,7 +78,10 @@ class ReturnAnalyzer:
         self.debug = debug
         self._binary_id = binary_id
         self.enable_completed_recovery_proofs = bool(enable_completed_recovery_proofs)
-        self._decompiler = None
+        # ``decompiler`` を与えた呼び出しでは lifecycle の遅延生成分岐
+        # （``DecompInterface()`` の import と ``openProgram()``）に入らない。
+        # 与えない既定の呼び出しでは従来どおり None から始める。
+        self._decompiler = decompiler
         self._analysis_session = AnalysisSession()
         # 長寿命の可変 runtime 状態と bounded-call 設定は collaborator 構築より前に所有者を作る（6a-2 / 6a-3）。
         self._runtime_state = AnalysisRuntimeState()

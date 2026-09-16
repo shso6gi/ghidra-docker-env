@@ -39,6 +39,14 @@ python3 -B -m scripts.function_tracer_pcode.cli.main \
 # Other useful flags: --binary-ids A B, --equiv-timeout, --timeout (decompile), --pairwise-timeout[-hard],
 # --strategy, --list-functions, --assume-fp-non-nan, --no-retry-phases
 
+# Record a Ghidra P-code fixture (needs PyGhidra; see tests/fixtures/pcode/SCHEMA.md)
+docker compose run --rm ghidra-dev python3 -B -m scripts.function_tracer_pcode.tests.tools.record_pcode_fixture \
+  --left <binary> --right <binary> --function snippet --binary-ids B1 B2 \
+  --fixture-id <case> --output-dir scripts/function_tracer_pcode/tests/fixtures/pcode/<case> \
+  --work-dir tmp/record-pcode
+# Compare two recordings of the same input (no Ghidra needed)
+python3 -B -m scripts.function_tracer_pcode.tests.tools.record_pcode_fixture --compare <dir-a> <dir-b>
+
 # Shell script syntax check before touching a runner
 bash -n eqbench_run_all_32jobs.sh neqbench_run_all_32jobs.sh rerun_eqbench_errors.sh
 
@@ -76,6 +84,8 @@ Layered packages; imports point **downward only** (`core` at the bottom) and eve
 Service-function convention: `ReturnAnalyzer`, `StructuralRecurrenceSummarizer`, `CheckStrategy`, `PairwiseStrategy` and the `effects.summary` facade get their methods from module-level `_impl_<name>(self, ...)` functions in topical sibling modules (e.g. `analysis/returns/parameters.py`, `analysis/recurrence/varnode_algebra.py`, `proof/strategies/pairwise_services/method_b_closure.py`), bound explicitly in the host class body (`name = _svc_module._impl_name`). To add a method: write `_impl_<name>` in the module whose topic fits and add one binding line (plus an entry in `implementations()` for `proof_gates`/`pairwise_services`, whose table is snapshotted to seal the producer-proof bundle). Each family's `_shared.py` is its import hub; `_api.py` late-binds a few facade names so tests can monkeypatch them.
 
 Large classes are composed from mixins living next to the host: `EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, RecoveryProofMixin, RecurrenceStageMixin)` in `checker/`, `PcodeTracer(CallRecoveryMixin, ParameterStorageMixin, AddressRefMixin)` in `analysis/`, `ExpressionExpander(...)` in `semantics/transform/`, `MonolithicStrategy(...)` in `proof/strategies/`, `ConditionSimplifier(...)` in `analysis/condition/`; helpers shared by a host and its mixins live in `<host>_support.py` (mixins never import their host). `core/runtime_refs/` and `core/render_smt/` are packages whose `__init__` re-exports everything, so `from ...core.runtime_refs import LoopSummaryRef` keeps working; sibling modules import each other at the module tail (or lazily) to stay cycle-free. When a test monkeypatches a module-level name, patch the module where the method that reads it now lives.
+
+Two collaborator injection points exist so the same production path can be driven over recorded Ghidra output (Issue #109): `ReturnAnalyzer(program, decompiler=...)` skips the lazy `DecompInterface` construction, and `EquivalenceChecker(analyzer_factory=...)` is the single place `checker/reanalysis.py` builds analyzers. Both default to the existing behaviour when omitted; do not add further DI for tests.
 
 Known remaining upward dependencies to work off (tracked as tech debt, not bugs): `proof → authority` (producers emit authority signals), `proof → checker` / `proof → reporting`, `authority → checker`, `ghidra → authority`, `ghidra → cli` (the runtime entry modules dispatch to `cli.commands`), `core → analysis` (`core/analysis.py` lazily imports condition simplifier / effect summary), `analysis → semantics` / `analysis → proof` / `analysis → authority`. The exact importing modules are pinned as a baseline in `tests/unit/test_import_layers.py`; that test fails on any new upward edge (add no baseline entries — move the code to the owning layer) and on stale entries (remove them when debt is paid).
 

@@ -73,6 +73,40 @@ the benchmark evaluation oracle (`scripts/eqbench/function_diff_manifest.py`,
 `reporting/benchmark_validation_gate.py`), never to the semantic judgement,
 its provenance, or the signed execution identity.
 
+### Recorded P-code fixtures (Issue #109)
+
+`scripts/function_tracer_pcode/tests/fixtures/pcode/` holds recordings of what
+real Ghidra returned for one pair of EqBench binaries, so the production
+`check_from_binaries` path can be replayed in CI without Ghidra. Record with
+
+```bash
+docker compose run --rm ghidra-dev python3 -B -m scripts.function_tracer_pcode.tests.tools.record_pcode_fixture \
+  --left  <working-root>/bess/bessj0/Eq/source/newV-arm64-clang-O0 \
+  --right <working-root>/bess/bessj0/Eq/source/newV-arm64-clang-O1 \
+  --function snippet --binary-ids B1 B2 --fixture-id bessj0_snippet_B1_B2 \
+  --output-dir scripts/function_tracer_pcode/tests/fixtures/pcode/bessj0_snippet_B1_B2 \
+  --work-dir tmp/record-pcode
+```
+
+Read the binaries from a **writable working root**, not from the canonical
+`targets/EqBench/` checkout: the runners write `Eq/source/` into whatever root
+they are pointed at, so keep the canonical checkout read-only.
+
+```bash
+W=tmp/eqbench-work/3724fce5
+[[ ! -e "$W" ]] || { echo "working root exists: $W (rm -rf it first)" >&2; exit 1; }
+mkdir -p "$W/benchmarks" && cp -a targets/EqBench/benchmarks/. "$W/benchmarks/"
+export EQBENCH_ROOT="$PWD/$W/benchmarks" NEQ_ROOT="$PWD/$W/benchmarks"
+```
+
+**A fixture replay is not a substitute for real-binary verification.** The
+recording proxy is not a Java object, so Ghidra's `isinstance` / Java static-API
+paths fall back to the object-API branches during recording as well as during
+replay; the fixture reproduces that recorded run, not necessarily a proxy-free
+CLI run. Keep running the fixed subset on real binaries for regression evidence.
+`scripts/function_tracer_pcode/tests/fixtures/pcode/SCHEMA.md` documents the
+format, what is recorded, and the measured determinism.
+
 ## Generated outputs
 
 These paths are intentionally not git-managed:
