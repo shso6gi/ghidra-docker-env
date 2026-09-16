@@ -8,7 +8,7 @@
  ],
  "expected_stable_reason_ids": [],
  "final_outcome": "EQUIVALENT",
- "recorded_at_commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
+ "recorded_at_commit": "b526e14d1cd309aea2b2dfc6a1e21ad329d5eaa2",
  "schema": "recorded-pair-expected-v1",
  "stage_path": [
   "IDENTICAL_FUNCTION_IDENTITY"

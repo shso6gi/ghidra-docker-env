@@ -265,6 +265,10 @@ def _validate_expectation(expected: Mapping[str, Any], where: str) -> None:
         where + ": a reason is both stable and unstable: "
         + repr(sorted(set(stable) & set(unstable)))
     )
+    assert len(expected["recorded_at_commit"]) == 40, (
+        where + ": recorded_at_commit must name the commit whose fixtures "
+        "produced these values"
+    )
     for row in unstable_rows:
         assert row.get("justification"), (
             where + ": unstable reason " + row["reason_id"]
