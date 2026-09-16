@@ -1558,6 +1558,35 @@ def test_every_indexed_accessor_uses_the_same_counter_contract(
     assert len(observations[fixture_schema.attr_key(counter)]) == 1
 
 
+def test_every_saturation_attempt_is_behind_the_settled_predicate():
+    """観測数を進捗の指標にできる根拠を構造で固定する。
+
+    どの経路も settled な member を二度と試さないからこそ、``observation_count``
+    の増加が本当の進捗になる。1 つでも迂回すると、到達できない member の失敗
+    観測を毎周回積んで偽の進捗を作る。
+    """
+
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+    import inspect
+    import re
+
+    source = inspect.getsource(record_pcode_fixture.Recorder)
+    lines = source.splitlines()
+    attempts = [
+        number for number, line in enumerate(lines)
+        if re.search(r"self\._safe_call\(", line)
+    ]
+    # 定義そのものを除いた、実際の呼び出し箇所。
+    attempts = [
+        number for number in attempts
+        if not lines[number].lstrip().startswith("def ")
+    ]
+    assert attempts, "no saturation attempt sites found"
+    for number in attempts:
+        window = "\n".join(lines[max(0, number - 6):number + 1])
+        assert "saturation_is_settled" in window, lines[number]
+
+
 def test_counter_lookup_uses_the_shared_settled_predicate():
     """`_counted` が専用の terminal 判定を再実装していないこと。"""
 
