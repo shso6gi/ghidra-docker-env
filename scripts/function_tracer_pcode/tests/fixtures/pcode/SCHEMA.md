@@ -75,7 +75,7 @@ object 引数が**同一性ではなく Java 同値類**なのは、`Memory.getB
 ### 値の tag
 
 `none` / `bool` / `int` / `float`(repr 文字列) / `str` / `bytes`(hex) /
-`list`(`items`) / `ref`(`id`) / `identity_surrogate`(`value` + `member`)。
+`list`(`items`) / `ref`(`id`) / `identity_surrogate`(`value` + `member` + `group`)。
 
 ### identity surrogate（唯一、raw 値を記録しない面）
 
