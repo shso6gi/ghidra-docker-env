@@ -1,7 +1,7 @@
 {
  "cases": [
   {
-   "budget_seconds": 20,
+   "budget_seconds": 40,
    "case_id": "surface_SurfaceConstructor_N_B2_O_B4",
    "dataset_label": "Neq",
    "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
@@ -17,7 +17,10 @@
     "fixture": "left.json",
     "sha256": "8eddabebfa95d2fe33ad713ee23d39fd6fb3a2618548df9763dcdd84867078e4"
    },
-   "measured_seconds": 3.79,
+   "measured_seconds": {
+    "container": 3.9,
+    "github_hosted_runner": 9.7
+   },
    "recording": {
     "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
     "dirty": true,
@@ -35,7 +38,7 @@
    ]
   },
   {
-   "budget_seconds": 238,
+   "budget_seconds": 554,
    "case_id": "barthe2big_f_B3_B11",
    "dataset_label": "Eq",
    "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
@@ -51,7 +54,10 @@
     "fixture": "left.json",
     "sha256": "9617343c60efcef52e3ce324496965839e32e878a79466d6561e73a59d4cd20f"
    },
-   "measured_seconds": 131.91,
+   "measured_seconds": {
+    "container": 129.6,
+    "github_hosted_runner": 346.1
+   },
    "recording": {
     "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
     "dirty": true,
@@ -69,7 +75,7 @@
    ]
   },
   {
-   "budget_seconds": 554,
+   "budget_seconds": 626,
    "case_id": "wood_wood_N_B2_O_B4",
    "dataset_label": "Neq",
    "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
@@ -85,7 +91,10 @@
     "fixture": "left.json",
     "sha256": "7fd91a72d7eb1f1c4f8b902215f0bf3ae41f2c8f7a9849db8ff2e48f98127c0f"
    },
-   "measured_seconds": 307.43,
+   "measured_seconds": {
+    "container": 306.7,
+    "github_hosted_runner": 390.7
+   },
    "recording": {
     "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
     "dirty": true,
@@ -103,7 +112,7 @@
    ]
   },
   {
-   "budget_seconds": 20,
+   "budget_seconds": 40,
    "case_id": "max_snippet_N_B2_O_B4",
    "dataset_label": "Neq",
    "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
@@ -119,7 +128,10 @@
     "fixture": "left.json",
     "sha256": "a23da413efb632d6ad82b3b69c974ac362aec628762ac86f5bee9ccdc5dfdd7b"
    },
-   "measured_seconds": 1.28,
+   "measured_seconds": {
+    "container": 1.4,
+    "github_hosted_runner": 3.3
+   },
    "recording": {
     "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
     "dirty": false,
@@ -137,7 +149,7 @@
    ]
   },
   {
-   "budget_seconds": 20,
+   "budget_seconds": 40,
    "case_id": "sign_snippet_N_B2_O_B4",
    "dataset_label": "Neq",
    "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
@@ -153,7 +165,10 @@
     "fixture": "left.json",
     "sha256": "73c6d6e35b4ac13eca06824eb28e3bc8341a761c2423e36aee4e321dd104b91e"
    },
-   "measured_seconds": 3.43,
+   "measured_seconds": {
+    "container": 3.5,
+    "github_hosted_runner": 8.4
+   },
    "recording": {
     "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
     "dirty": true,
@@ -171,7 +186,7 @@
    ]
   },
   {
-   "budget_seconds": 20,
+   "budget_seconds": 40,
    "case_id": "gammln_snippet_B1_B2",
    "dataset_label": "Eq",
    "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
@@ -187,7 +202,10 @@
     "fixture": "left.json",
     "sha256": "5b14ed6589359fc5fdebbd2400004fdf71009df1ef55becc03002df36161e88f"
    },
-   "measured_seconds": 2.53,
+   "measured_seconds": {
+    "container": 2.7,
+    "github_hosted_runner": 6.8
+   },
    "recording": {
     "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
     "dirty": true,
@@ -205,7 +223,7 @@
    ]
   },
   {
-   "budget_seconds": 20,
+   "budget_seconds": 40,
    "case_id": "bessj0_snippet_B10_B11",
    "dataset_label": "Eq",
    "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
@@ -222,7 +240,10 @@
     "fixture": "left.json",
     "sha256": "225287e732c96865681a2e5ac7aca9f772028f599c468d8b36f1879527a084e9"
    },
-   "measured_seconds": 7.05,
+   "measured_seconds": {
+    "container": 7.5,
+    "github_hosted_runner": 18.5
+   },
    "recording": {
     "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
     "dirty": true,
@@ -241,7 +262,7 @@
    ]
   },
   {
-   "budget_seconds": 20,
+   "budget_seconds": 40,
    "case_id": "sphere_SphereConstructor_N_B2_O_B4",
    "dataset_label": "Neq",
    "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
@@ -256,7 +277,10 @@
     "fixture": "left.json",
     "sha256": "55fd9f11d9112e8b9f681c9aaa8da087dd2879c1c3d7e538eda6aa134af82667"
    },
-   "measured_seconds": 6.03,
+   "measured_seconds": {
+    "container": 6.4,
+    "github_hosted_runner": 15.9
+   },
    "recording": {
     "commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
     "dirty": true,
@@ -281,14 +305,18 @@
   "which points at scripts/eqbench/neq_ground_truth.tsv (or at the",
   "eq_sample_single_source rule).  Nothing in this file reaches the",
   "checker; it is test metadata only.",
-  "budget_seconds is a regression guard on one replay's wall clock, derived",
-  "from measured_seconds (the slowest of the three PR-109-B passes at",
-  "recording.commit) with headroom.  It is a test-harness failure",
-  "condition and never becomes a production timeout or an UNKNOWN reason.",
+  "budget_seconds guards one replay against a regression in the checker,",
+  "not against a slow machine, so it is derived from the SLOWEST measured",
+  "environment (measured_seconds) with headroom, with a floor for the",
+  "cheap cases.  A GitHub-hosted runner was 2.7x slower than the container",
+  "on barthe2big, so a budget derived from the container alone would fail",
+  "there for reasons that have nothing to do with the checker.  It is a",
+  "test-harness failure condition and never becomes a production timeout",
+  "or an UNKNOWN reason.",
   "corpus_budget_seconds is the Issue #109 acceptance criterion for all",
-  "replays of test_recorded_pairs.py together.  It is NOT met today: the",
-  "three passes measured 443-464 s, of which wood (291-307 s) and",
-  "barthe2big (128-132 s) are 94 %.  Both pairs also TIMEOUT on real",
+  "replays of test_recorded_pairs.py together.  It is NOT met: the three",
+  "container passes measured 443-464 s and the GitHub-hosted runner 801 s,",
+  "of which wood and barthe2big are 94 %.  Both pairs also TIMEOUT on real",
   "binaries at the subset's 240 s pair deadline.  The budget stays at the",
   "acceptance value on purpose: cases are not dropped and no recorded",
   "surface is trimmed to fit it."

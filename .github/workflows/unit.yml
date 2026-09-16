@@ -13,7 +13,11 @@ jobs:
   unit:
     name: import check, compileall, unit suite
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The recorded-pair corpus (Issue #109) adds ~13 minutes on a hosted
+    # runner, which took the job from ~7 to ~21 minutes.  30 left too little
+    # room: a hard job timeout reads as an infrastructure failure, not as the
+    # acceptance-criteria miss the corpus budget reports on its own.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
