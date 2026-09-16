@@ -1,9 +1,9 @@
 {
  "header": {
-  "analysis_source_digest": "8b4a0222041124f31224ed13114fcc46d9bd2ee9ddc9e65ca83c0baccfe5030c",
+  "analysis_source_digest": "ff543c0dc6100026650a4f12190077878d9bd618b4e0b7f22f26eb3bd82374fa",
   "binary": {
    "binary_id": "B2",
-   "eqbench_relative_path": "benchmarks/bess/bessj0/Eq/source/newV-arm64-clang-O1",
+   "eqbench_relative_path": "bess/bessj0/Eq/source/newV-arm64-clang-O1",
    "kind": "object",
    "sha256": "11546a677e25bdf03937ca5c727308c3a72e38f0d5c49edecbf397a30b81c284",
    "size": 2800
@@ -15,9 +15,9 @@
   "fixture_id": "bessj0_snippet_B1_B2",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-09-16T00:30:12+00:00",
-  "recorder_version": "1",
-  "recording_commit": "bb7e9e05def07e16e90c97fabd75efe742cc99c2",
+  "recorded_at_utc": "2026-09-16T03:14:43+00:00",
+  "recorder_version": "2",
+  "recording_commit": "f5a32cfd97494c193b28cec6776b3875d0ae848d",
   "recording_dirty": true,
   "recording_mode": {
    "connector": "production",
@@ -338,8 +338,9 @@
     },
     "call:getUniqueProgramID()": {
      "v": {
-      "kind": "int",
-      "value": 3752892431905616939
+      "kind": "identity_surrogate",
+      "member": "getUniqueProgramID",
+      "value": 2000000000000
      }
     }
    }
@@ -184970,8 +184971,9 @@
     },
     "call:hashCode()": {
      "v": {
-      "kind": "int",
-      "value": 1476941631
+      "kind": "identity_surrogate",
+      "member": "hashCode",
+      "value": 2000000001824
      }
     }
    }
@@ -186822,8 +186824,9 @@
     },
     "call:hashCode()": {
      "v": {
-      "kind": "int",
-      "value": 1182178262
+      "kind": "identity_surrogate",
+      "member": "hashCode",
+      "value": 2000000001841
      }
     }
    }
@@ -270999,8 +271002,9 @@
     },
     "call:hashCode()": {
      "v": {
-      "kind": "int",
-      "value": 1470844979
+      "kind": "identity_surrogate",
+      "member": "hashCode",
+      "value": 2000000000035
      }
     }
    }
@@ -277212,8 +277216,9 @@
     },
     "call:hashCode()": {
      "v": {
-      "kind": "int",
-      "value": 1692352331
+      "kind": "identity_surrogate",
+      "member": "hashCode",
+      "value": 2000000000036
      }
     }
    }
@@ -283356,8 +283361,9 @@
     },
     "call:hashCode()": {
      "v": {
-      "kind": "int",
-      "value": 1420395577
+      "kind": "identity_surrogate",
+      "member": "hashCode",
+      "value": 2000000000037
      }
     }
    }
@@ -292929,8 +292935,9 @@
     },
     "call:hashCode()": {
      "v": {
-      "kind": "int",
-      "value": 1260434481
+      "kind": "identity_surrogate",
+      "member": "hashCode",
+      "value": 2000000000038
      }
     }
    }
@@ -357350,8 +357357,9 @@
     },
     "call:hashCode()": {
      "v": {
-      "kind": "int",
-      "value": 493428047
+      "kind": "identity_surrogate",
+      "member": "hashCode",
+      "value": 2000000000643
      }
     }
    }

@@ -77,27 +77,36 @@ its provenance, or the signed execution identity.
 
 `scripts/function_tracer_pcode/tests/fixtures/pcode/` holds recordings of what
 real Ghidra returned for one pair of EqBench binaries, so the production
-`check_from_binaries` path can be replayed in CI without Ghidra. Record with
+`check_from_binaries` path can be replayed in CI without Ghidra.
 
-```bash
-docker compose run --rm ghidra-dev python3 -B -m scripts.function_tracer_pcode.tests.tools.record_pcode_fixture \
-  --left  <working-root>/bess/bessj0/Eq/source/newV-arm64-clang-O0 \
-  --right <working-root>/bess/bessj0/Eq/source/newV-arm64-clang-O1 \
-  --function snippet --binary-ids B1 B2 --fixture-id bessj0_snippet_B1_B2 \
-  --output-dir scripts/function_tracer_pcode/tests/fixtures/pcode/bessj0_snippet_B1_B2 \
-  --work-dir tmp/record-pcode
-```
-
-Read the binaries from a **writable working root**, not from the canonical
-`targets/EqBench/` checkout: the runners write `Eq/source/` into whatever root
-they are pointed at, so keep the canonical checkout read-only.
+Read the binaries from a **fresh writable working root**, never from the
+canonical `targets/EqBench/` checkout: the runners write `Eq/source/` into
+whatever root they are pointed at, so the canonical checkout stays read-only.
+The recorder enforces this — it takes the working root explicitly and refuses a
+binary that lies outside it, or a working root inside the canonical checkout.
 
 ```bash
 W=tmp/eqbench-work/3724fce5
 [[ ! -e "$W" ]] || { echo "working root exists: $W (rm -rf it first)" >&2; exit 1; }
 mkdir -p "$W/benchmarks" && cp -a targets/EqBench/benchmarks/. "$W/benchmarks/"
-export EQBENCH_ROOT="$PWD/$W/benchmarks" NEQ_ROOT="$PWD/$W/benchmarks"
+
+docker compose run --rm ghidra-dev python3 -B -m scripts.function_tracer_pcode.tests.tools.record_pcode_fixture \
+  --eqbench-root /workspace/$W/benchmarks \
+  --left  /workspace/$W/benchmarks/bess/bessj0/Eq/source/newV-arm64-clang-O0 \
+  --right /workspace/$W/benchmarks/bess/bessj0/Eq/source/newV-arm64-clang-O1 \
+  --function snippet --binary-ids B1 B2 --fixture-id bessj0_snippet_B1_B2 \
+  --output-dir scripts/function_tracer_pcode/tests/fixtures/pcode/bessj0_snippet_B1_B2 \
+  --work-dir tmp/record-pcode
 ```
+
+`binary.eqbench_relative_path` / `sha256` describe the file that was actually
+read from the working root; `eqbench.upstream_url` / `commit` come from the
+canonical read-only checkout. The two are separate facts and are recorded
+separately.
+
+Recording the same input twice is byte-identical (compare with
+`--compare <dir-a> <dir-b>`, which only excludes the volatile
+`recorded_at_utc` / `recording_dirty` header fields).
 
 **A fixture replay is not a substitute for real-binary verification.** The
 recording proxy is not a Java object, so Ghidra's `isinstance` / Java static-API
@@ -105,7 +114,7 @@ paths fall back to the object-API branches during recording as well as during
 replay; the fixture reproduces that recorded run, not necessarily a proxy-free
 CLI run. Keep running the fixed subset on real binaries for regression evidence.
 `scripts/function_tracer_pcode/tests/fixtures/pcode/SCHEMA.md` documents the
-format, what is recorded, and the measured determinism.
+format, what is recorded, the identity surrogates, and the measured determinism.
 
 ## Generated outputs
 

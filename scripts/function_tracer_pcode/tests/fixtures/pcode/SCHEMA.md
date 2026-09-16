@@ -14,7 +14,8 @@ connector 付きの `check_from_binaries` を同じ経路で再生する**ため
 1. **fixture は記録であって model ではない。** 「この object のこの member を
    こう呼んだらこれが返った」という観測しか持たない。Ghidra の object graph を
    別表現へ組み直さないので、再生器は値を引くだけで、推論・既定値・
-   Ghidra API の再実装を持たない。
+   Ghidra API の再実装を持たない。唯一の例外は identity 由来の 2 面で、
+   意味（一致 / 不一致）を保ったまま決定的な surrogate に正規化する（下記）。
 2. **未記録は None でも空でも既定値でもない。** 記録された値は envelope
    `{"v": ...}` に入り、`{"v": {"kind": "none"}}` は「None が返った」、
    `{"v": {"kind": "list", "items": []}}` は「空列が返った」。key 自体が無ければ
@@ -73,20 +74,38 @@ object 引数が**同一性ではなく Java 同値類**なのは、`Memory.getB
 ### 値の tag
 
 `none` / `bool` / `int` / `float`(repr 文字列) / `str` / `bytes`(hex) /
-`list`(`items`) / `ref`(`id`)。
+`list`(`items`) / `ref`(`id`) / `identity_surrogate`(`value` + `member`)。
 
-### 観測列（状態を持つ API）
+### identity surrogate（唯一、raw 値を記録しない面）
 
-同じ key の観測がすべて同一なら 1 件に畳む。**同一でなければ**
-`{"seq": [<envelope>, ...]}` として呼び出し順に並べる。Ghidra には
-`Iterator.hasNext` / `next` のように状態を持つ API と、`getBody()` /
-`getImageBase()` / `getIterator()` のように**呼ぶたびに新しい instance を返す**
-getter がある。1 key = 1 値に畳むと再生が実体と食い違う。
-`seq` を使い切った後の呼び出しは**未記録**（欠落履歴 + 例外）になる。
+`Object.hashCode()` と `Program.getUniqueProgramID()` は Ghidra / JVM が
+**import ごとに違う値**を返す。具体値そのものに意味は無い — Java の契約は
+「equal な object は equal な hash」だけで、program ID は不透明な handle —
+production はどちらも「等しいか」だけに使う（`condition/tracker.py` の block
+索引、runtime ref / parameter の owner 識別）。raw 値を記録すると同じ入力の
+再記録が byte 一致しないので、**値の一致 / 不一致関係を保ったまま**
+fixture-local な決定的 surrogate へ正規化する:
 
-畳めるかどうかは object 参照の**同一性**で見る。`equals` で畳むと、
-「どの instance に何を要求したか」が instance をまたいで散っているのに、
-再生では 1 つの代表へ集まってしまう。
+```
+surrogate = (side_ordinal + 1) * IDENTITY_SURROGATE_SIDE_STRIDE + eq_group
+```
+
+`eq_group` は受け手 object の Java 同値類なので、
+
+- `equals` な object は同じ surrogate（hashCode の契約と一致）
+- 別の同値類は別の surrogate（lookup が壊れない）
+- side ordinal を掛けるので**左右の fixture で surrogate は衝突しない**
+
+記録器は surrogate を **production にもそのまま返す**ので、記録時と再生時に
+production が見る値は同一になる。正規化するのは
+`schema.IDENTITY_DERIVED_METHODS` に宣言した member だけで、validator は
+
+- 宣言外の member を `identity_surrogate` にできない
+- `member` と key の member 名が一致する
+- 値が `side` の帯域に入っている
+
+ことを検査する。**削除で production surface を欠落させることはしない**
+（production はどちらの値も実際に読む）。
 
 ### 例外
 
@@ -94,17 +113,56 @@ getter がある。1 key = 1 値に畳むと再生が実体と食い違う。
 記録し、再生では `RecordedCallFailure` として送出する。記録しないと、再生側で
 「未記録」と区別できない。
 
+### schema 検証は fail-closed
+
+`validate_fixture` は**完全一致**で検査する（migration 機構は持たない）:
+
+- top-level / header / `binary` / `eqbench` / `target` / `recording_mode` /
+  `roots` / object entry / member envelope / tagged value / 例外 payload の
+  **許可 key 集合を明示**し、余剰 field を黙って受理しない
+- scalar は変換で救済せず exact 型（exact bool / bool を受けない exact int /
+  exact str）
+- SHA-256 と `analysis_source_digest` は 64 桁の小文字 hex、
+  `recording_commit` / `eqbench.commit` は 40 桁
+- `side` は `left` / `right`、`recording_mode.connector` は `production`
+- `eqbench_relative_path` は working root からの canonical relative path
+  （絶対 path や `..` を含まない）
+- `ref` の参照先 object id が実在する
+- 不正な fixture は**再生前に**落ちる。再生時に意味のある値へ coercion しない
+
 ## header
 
 `schema` / `fixture_id` / `side` / `recorded_at_utc` / `recording_commit` /
 `recording_dirty` / `analysis_source_digest` / `recorder_version` /
-`ghidra_version` / `pyghidra_version` / `binary{binary_id, eqbench_relative_path,
-sha256, size, kind}` / `eqbench{upstream_url, commit}` /
-`target{function_name, entry}` / `recording_mode{identical_fast_path, connector}`。
+`ghidra_version` / `pyghidra_version` / `binary{binary_id,
+eqbench_relative_path, sha256, size, kind}` / `eqbench{upstream_url, commit}` /
+`target{function_name, entry}` / `recording_mode{identical_fast_path,
+connector}`。
 
-`analysis_source_digest` は記録時の `execution_identity.source_tree_digest`
-（出自の記録であって、再生時に一致を要求する値ではない。fixture 自身を commit
-すれば digest は変わる）。
+### working root と upstream provenance は別の事実
+
+- **`binary.eqbench_relative_path`**: binary を実際に読んだ **writable working
+  root**（runner の `EQBENCH_ROOT` と同じ `benchmarks` 直下）からの relative
+  path。root の外の file を basename へ縮退させると出自が消えるので、記録器は
+  **fail-closed** にする（`--eqbench-root` 必須）。
+- **`binary.sha256` / `size`**: その working-root file から計算する。
+- **`eqbench.upstream_url` / `eqbench.commit`**: canonical な **read-only**
+  checkout（既定 `targets/EqBench`、`--eqbench-canonical-checkout`）から読む
+  upstream の出自。取れなければ記録しない。
+- 記録器は working root が canonical checkout の中にある場合も拒否する
+  （canonical checkout を runner の workspace として使わない、という運用を
+  記録側でも守る）。
+
+`analysis_source_digest` は**記録が走った時点の解析 source** の
+`execution_identity.source_tree_digest`。再生時に一致を要求する値ではない。
+
+digest の対象（`SOURCE_ROOTS`）には `tests/` も入るので、書き出した fixture 自身は
+その digest に含まれない（含めようとすると自己参照で固定点が無い）。したがって:
+
+- **同じ tree の状態から続けて記録すれば**、`recording_commit` も
+  `analysis_source_digest` も含めて byte 一致する（これが決定性の性質）。
+- 生成した fixture を tree に入れると tree が変わるので、その後の記録は別の
+  digest を持つ。これは非決定ではなく、出自が正しく変わったということ。
 
 ## 記録される範囲
 
@@ -114,7 +172,8 @@ sha256, size, kind}` / `eqbench{upstream_url, commit}` /
   （`getNumInputs` / `getInSize` / `getOutSize`）で回す。API 名を先回りで
   並べることはしない。
 - **同値類の飽和**: Java の `equals` で等しい object のどれか 1 つに出た要求は
-  全員へ出す。
+  全員へ出す。飽和が **production の観測列を乱さない**こと: 既に記録のある key は
+  呼び直さない（件数 API も記録済みの値を読む）。dunder は飽和しない。
 - **Program / Memory / Listing / SymbolTable / FunctionManager /
   DataTypeManager など**は要求駆動のまま。
 
@@ -123,10 +182,19 @@ observation を削らない）。
 
 ## 記録と再生
 
+binary は canonical な `targets/EqBench` ではなく **fresh writable working
+root** から読む（runner は入力 root の `Eq/source/` に書き込むので、canonical
+checkout は read-only に保つ）。
+
 ```bash
+W=tmp/eqbench-work/3724fce5
+[[ ! -e "$W" ]] || { echo "working root exists: $W (rm -rf it first)" >&2; exit 1; }
+mkdir -p "$W/benchmarks" && cp -a targets/EqBench/benchmarks/. "$W/benchmarks/"
+
 docker compose run --rm ghidra-dev python3 -B -m scripts.function_tracer_pcode.tests.tools.record_pcode_fixture \
-  --left  targets/EqBench/benchmarks/bess/bessj0/Eq/source/newV-arm64-clang-O0 \
-  --right targets/EqBench/benchmarks/bess/bessj0/Eq/source/newV-arm64-clang-O1 \
+  --eqbench-root /workspace/$W/benchmarks \
+  --left  /workspace/$W/benchmarks/bess/bessj0/Eq/source/newV-arm64-clang-O0 \
+  --right /workspace/$W/benchmarks/bess/bessj0/Eq/source/newV-arm64-clang-O1 \
   --function snippet --binary-ids B1 B2 \
   --fixture-id bessj0_snippet_B1_B2 \
   --output-dir scripts/function_tracer_pcode/tests/fixtures/pcode/bessj0_snippet_B1_B2 \
@@ -146,24 +214,21 @@ docker compose run --rm ghidra-dev python3 -B -m scripts.function_tracer_pcode.t
 
 ## 決定性
 
-同じ入力で 2 回記録し、`header` の `recorded_at_utc` / `recording_dirty` /
-`analysis_source_digest` / `recording_commit` を除いて比較する:
+同じ入力で 2 回以上記録し、比較する:
 
 ```bash
 python3 -B -m scripts.function_tracer_pcode.tests.tools.record_pcode_fixture --compare <dir-a> <dir-b>
 ```
 
-`bessj0_snippet_B1_B2` の実測（Ghidra 12.0.1 / PyGhidra 3.0.2）:
-`analysis_snapshot.json` と `check_snapshot.json` は byte 一致。fixture 本体は
-**8 member を除いて** byte 一致で、差分は
+比較から外すのは **volatile な header field だけ**
+（`recorded_at_utc` / `recording_dirty`）。`recording_commit` と
+`analysis_source_digest` は同じ source からの再記録なら一致すべき出自なので
+隠さない。
 
-- `ProgramDB.getUniqueProgramID()`（Ghidra が import ごとに振る一意 ID）
-- `PcodeBlockBasic.hashCode()` 7 件（JVM の identity hash）
-
-のみ。どちらも **Ghidra 自身が import をまたいで再現しない値**で、production は
-どちらも実際に使う（`ConditionTracker` の block index、runtime ref の owner）。
-記録から外すと再生が未記録になるので、値をすり替えたり除いたりはしない。
-解析結果と判定結果に効いていないことは 2 つの snapshot の byte 一致が示す。
+`bessj0_snippet_B1_B2` の実測（Ghidra 12.0.1 / PyGhidra 3.0.2）: `left.json` /
+`right.json` / `analysis_snapshot.json` / `check_snapshot.json` の 4 file とも
+**byte 一致**（差分 0）。identity 由来の 2 面（`getUniqueProgramID` /
+`hashCode`）は上記の surrogate で正規化されている。
 
 ## 既知の制約
 
@@ -174,5 +239,31 @@ python3 -B -m scripts.function_tracer_pcode.tests.tools.record_pcode_fixture --c
   再生環境（import 自体が失敗する）と**同じ分岐**へ落ちる。つまり record と
   replay は一致するが、**proxy を挟まない実 CLI 実行とは一致しない可能性がある**。
   fixture test は real-binary 検証の代替ではない。
+- 記録された例外は型名と文字列で再生する（`RecordedCallFailure`）。production が
+  Ghidra の例外クラスで分岐する経路があれば、そこは再生できない。
 - fixture は判定意味論を持たない。schema は文字列 1 本の完全一致で検査し、
   migration 機構は持たない。
+
+## なぜ計画書 (v5 §3.3) の構造化 schema ではないのか
+
+計画 v5 は `high_functions{blocks, ops, varnodes, high_variables, ...}` という
+**Ghidra の object graph を写した構造化 schema** を書いていた。実 Ghidra での
+end-to-end 記録で次が分かり、観測の一様記録へ設計を更新した（計画の目的 —
+Ghidra 無し再生・soundness・決定性・provenance・fail-closed — はそのまま）。
+
+1. **状態を持つ API がある。** `Iterator.hasNext` / `next` は呼ぶたびに違う値を
+   返す。構造化 schema は「1 つの構造」を書く形なので、この時間的な列を持てない。
+2. **同じ getter が毎回新しい instance を返す。** `getBody()` / `getImageBase()`
+   / `getIterator()` は fresh object を返す。構造で写すと「どの instance に何を
+   要求したか」が失われ、再生で取り違える（実測でこの取り違えが起きた）。
+3. **Java の equality と identity の使い分けが要る。** lookup の引数（`Address`）は
+   `equals` で引くのが正しく、戻り値の畳み込みは identity で見るのが正しい。
+   構造化 schema にはこの 2 つを別々に表す場所が無い。
+4. **構造化すると再生側が Ghidra の object graph を組み直す。** `getDef()` /
+   `getInput(i)` / `getHigh()` を id 参照から復元するのは Ghidra API の再実装で、
+   「recorded object に意味論を実装しない」という PR-109-A の前提に反する。
+
+観測の一様記録は、記録器が「呼ばれたことを書く」だけ、再生器が「書いてあることを
+返す」だけで済み、上の 4 点をそのまま表せる。構造化 schema が持つはずだった面
+（block / op / varnode / high variable / prototype / local symbol map）は、
+HighFunction 系の飽和記録によってすべて fixture に載る。

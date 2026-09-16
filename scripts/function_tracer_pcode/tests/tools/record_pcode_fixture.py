@@ -50,6 +50,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts.function_tracer_pcode.tests.fixtures.pcode import schema as fixture_schema
 from scripts.function_tracer_pcode.tests.fixtures.pcode.schema import (
+    IDENTITY_DERIVED_METHODS,
     MEMBER_ABSENT,
     MEMBER_METHOD,
     MEMBER_VALUE,
@@ -58,6 +59,7 @@ from scripts.function_tracer_pcode.tests.fixtures.pcode.schema import (
     VALUE_BOOL,
     VALUE_BYTES,
     VALUE_FLOAT,
+    VALUE_IDENTITY,
     VALUE_INT,
     VALUE_LIST,
     VALUE_NONE,
@@ -66,6 +68,7 @@ from scripts.function_tracer_pcode.tests.fixtures.pcode.schema import (
     ObjectRef,
     attr_key,
     call_key,
+    identity_surrogate,
     is_recordable_member,
 )
 from scripts.function_tracer_pcode.tests.fixtures.pcode.recorded_program import (
@@ -129,8 +132,9 @@ def _simple_name(kind: str) -> str:
 class Recorder:
     """1 side 分の記録状態（object 表・同一性・同値類）。"""
 
-    def __init__(self, jpype: Any) -> None:
+    def __init__(self, jpype: Any, side: str) -> None:
         self._jpype = jpype
+        self.side = side
         self._Integer = jpype.JClass("java.lang.Integer")
         self._identity = jpype.JClass("java.util.IdentityHashMap")()
         self._equality = jpype.JClass("java.util.HashMap")()
@@ -251,6 +255,34 @@ class Recorder:
             "recorded call argument type is outside the fixture schema: "
             + _java_class_name(value)
         )
+
+    def identity_surrogate_for(self, receiver_index: int, member_name: str) -> int:
+        """identity 由来の戻り値を、決定的な fixture-local surrogate にする。
+
+        raw の ``hashCode`` / ``getUniqueProgramID`` は Ghidra / JVM が import
+        ごとに変える値で、具体値に意味は無い（production は「等しいか」だけを
+        使う）。受け手の Java 同値類から作るので、``equals`` な object は同じ
+        surrogate になり（hashCode の契約と一致）、side ごとに帯域が分かれる。
+        """
+
+        if member_name not in IDENTITY_DERIVED_METHODS:
+            raise RecordingError(
+                "member is not declared as identity-derived: " + member_name
+            )
+        return identity_surrogate(
+            self.side, self._entries[receiver_index]["eq_group"]
+        )
+
+    def recorded_observation(self, index: int, member_key: str) -> Any:
+        """すでに記録済みの観測（無ければ ``None``）。
+
+        状態を持つ API を飽和のために呼び直さないために使う。
+        """
+
+        observations = self._entries[index]["observations"].get(member_key)
+        if not observations:
+            return None
+        return observations[0]
 
     def note_call(self, index: int, member_key: str, name: str, args: Tuple) -> None:
         self._calls[index].setdefault(member_key, (name, args))
@@ -402,7 +434,23 @@ class Recorder:
         return progressed
 
     def _counted(self, proxy: "RecordingProxy", counter: str) -> Optional[int]:
-        value = self._safe_call(proxy, counter, ())
+        """index accessor を回すための件数。
+
+        すでに記録済みなら**呼び直さない**。飽和のために production が観測した
+        key を再度呼ぶと、状態を持つ API だった場合に production の観測列を
+        乱す（記録済み key へ観測を足してしまう）。
+        """
+
+        recorded = proxy._rec_recorder.recorded_observation(
+            proxy._rec_index, call_key(counter, ())
+        )
+        if recorded is not None:
+            tagged = recorded.get("v")
+            if not isinstance(tagged, Mapping) or tagged.get("kind") != VALUE_INT:
+                return None
+            value: Any = tagged["value"]
+        else:
+            value = self._safe_call(proxy, counter, ())
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return None
         return value
@@ -473,9 +521,37 @@ class RecordingProxy:
         except Exception as exc:
             recorder.store(self._rec_index, key, _raises(exc))
             raise
-        value, tagged = recorder.capture(raw)
+        if name in IDENTITY_DERIVED_METHODS:
+            value, tagged = self._rec_identity_surrogate(name, args, raw)
+        else:
+            value, tagged = recorder.capture(raw)
         recorder.store(self._rec_index, key, {"v": tagged})
         return value
+
+    def _rec_identity_surrogate(
+        self, name: str, args: Tuple, raw: Any,
+    ) -> Tuple[Any, Mapping[str, Any]]:
+        """identity 由来の戻り値を surrogate へ差し替える。
+
+        **production にも surrogate を返す**ので、記録時と再生時に production が
+        見る値は同一になる。宣言した面（無引数で整数を返す）から外れていたら、
+        raw の非決定値をそのまま記録せずに記録を失敗させる。
+        """
+
+        if args:
+            raise RecordingError(
+                "identity-derived member {} was called with arguments".format(name)
+            )
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise RecordingError(
+                "identity-derived member {} did not return an integer: {}".format(
+                    name, type(raw).__name__
+                )
+            )
+        surrogate = self._rec_recorder.identity_surrogate_for(self._rec_index, name)
+        return surrogate, {
+            "kind": VALUE_IDENTITY, "value": surrogate, "member": name,
+        }
 
     # -- 記録対象の dunder --------------------------------------------------
     #
@@ -527,12 +603,10 @@ class RecordingProxy:
         return not result
 
     def __hash__(self) -> int:
-        # 再生側と同じ規則。``id()`` のような run ごとに変わる値は混ぜない
-        # （set / dict の反復順が変わり、記録が非決定になる）。
-        return hash((
-            "recorded-eq-group",
-            self._rec_recorder.entry(self._rec_index)["eq_group"],
-        ))
+        # 再生側と同じ規則。``id()`` や**文字列**を混ぜない（Python の文字列
+        # hash は process ごとに randomize されるので、set / dict の反復順が
+        # run 間で変わり、記録が非決定になる）。
+        return hash(self._rec_recorder.entry(self._rec_index)["eq_group"])
 
     def __copy__(self) -> "RecordingProxy":
         return self
@@ -627,26 +701,56 @@ def _git(*arguments: str) -> str:
         return ""
 
 
-def _eqbench_provenance(binary_path: Path) -> Tuple[Mapping[str, Any], str]:
-    checkout = REPO_ROOT / "targets" / "EqBench"
-    commit = ""
-    url = ""
+def eqbench_relative_path(binary_path: Path, eqbench_root: Path) -> str:
+    """記録した binary の、**working root からの** canonical relative path。
+
+    binary は canonical な ``targets/EqBench`` ではなく fresh writable working
+    root（runner の ``EQBENCH_ROOT`` と同じ ``benchmarks`` 直下）から読む。
+    root の外の file を basename へ縮退させると出自が消えるので fail-closed。
+    """
+
     try:
-        commit = subprocess.run(
-            ("git", "rev-parse", "HEAD"), cwd=checkout, check=True,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        ).stdout.decode().strip()
-        url = subprocess.run(
-            ("git", "remote", "get-url", "origin"), cwd=checkout, check=True,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        ).stdout.decode().strip()
-    except Exception:
-        pass
-    try:
-        relative = str(binary_path.resolve().relative_to(checkout.resolve()))
-    except Exception:
-        relative = binary_path.name
-    return {"upstream_url": url, "commit": commit}, relative
+        relative = binary_path.resolve().relative_to(eqbench_root.resolve())
+    except ValueError as exc:
+        raise RecordingError(
+            "recorded binary is outside the EqBench working root: "
+            "binary={} root={}".format(binary_path, eqbench_root)
+        ) from exc
+    text = relative.as_posix()
+    if not text or text.startswith("/") or ".." in text.split("/"):
+        raise RecordingError(
+            "recorded binary path is not canonical inside the working root: " + text
+        )
+    return text
+
+
+def eqbench_upstream_provenance(checkout: Path) -> Mapping[str, Any]:
+    """**canonical な read-only checkout** からの upstream 出自。
+
+    「binary をどこから読んだか（working root）」とは別の事実なので、別の
+    field に分けて持つ。取れなければ fail-closed（出自不明の fixture を
+    作らない）。
+    """
+
+    def read(*arguments: str) -> str:
+        try:
+            return subprocess.run(
+                ("git", *arguments), cwd=checkout, check=True,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            ).stdout.decode().strip()
+        except Exception as exc:  # pragma: no cover - 記録環境依存
+            raise RecordingError(
+                "EqBench canonical checkout provenance is unavailable at "
+                + str(checkout)
+            ) from exc
+
+    commit = read("rev-parse", "HEAD")
+    url = read("remote", "get-url", "origin")
+    if len(commit) != 40 or not url:
+        raise RecordingError(
+            "EqBench canonical checkout provenance is incomplete at " + str(checkout)
+        )
+    return {"upstream_url": url, "commit": commit}
 
 
 def _analysis_source_digest() -> str:
@@ -666,11 +770,12 @@ def _source_roots_dirty() -> bool:
 
 def _header(
     *, side: str, fixture_id: str, binary_path: Path, binary_id: str,
+    eqbench_root: Path, eqbench: Mapping[str, Any],
     function_name: str, entry: Optional[str], identical_fast_path: bool,
     ghidra_version: str, pyghidra_version: str, analysis_source_digest: str,
     recording_commit: str, recording_dirty: bool,
 ) -> Dict[str, Any]:
-    eqbench, relative = _eqbench_provenance(binary_path)
+    relative = eqbench_relative_path(binary_path, eqbench_root)
     return {
         "schema": RECORDED_PCODE_FIXTURE_SCHEMA,
         "fixture_id": fixture_id,
@@ -691,7 +796,7 @@ def _header(
             "size": binary_path.stat().st_size,
             "kind": _binary_kind(binary_path),
         },
-        "eqbench": eqbench,
+        "eqbench": dict(eqbench),
         "target": {"function_name": function_name, "entry": entry},
         "recording_mode": {
             "identical_fast_path": identical_fast_path,
@@ -704,7 +809,45 @@ def _content_identity(path: Path) -> Tuple[str, str]:
     return ("sha256", _sha256_file(path))
 
 
+def resolve_binary_provenance(
+    args: argparse.Namespace,
+) -> Tuple[Path, Path, Mapping[str, Any]]:
+    """working root と upstream 出自を、Ghidra を起動する**前に**確定する。
+
+    binary を読む working root（writable な copy）と、upstream URL / commit を
+    読む canonical な read-only checkout は別の事実として扱う。どちらかが
+    使えなければ fixture を作らない（fail-closed）。
+    """
+
+    eqbench_root = Path(args.eqbench_root).resolve()
+    canonical_checkout = Path(args.eqbench_canonical_checkout).resolve()
+    if not eqbench_root.is_dir():
+        raise RecordingError(
+            "EqBench working root is not a directory: " + str(eqbench_root)
+        )
+    if eqbench_root == canonical_checkout or canonical_checkout in eqbench_root.parents:
+        raise RecordingError(
+            "EqBench working root must be a writable copy outside the canonical "
+            "read-only checkout: root={} canonical={}".format(
+                eqbench_root, canonical_checkout
+            )
+        )
+    left_path = Path(args.left).resolve()
+    right_path = Path(args.right).resolve()
+    for path in (left_path, right_path):
+        if not path.is_file():
+            raise RecordingError("recorded binary is not a file: " + str(path))
+        # 出自の確認は記録の前に済ませる（root の外なら fixture を作らない）。
+        eqbench_relative_path(path, eqbench_root)
+    return left_path, right_path, eqbench_upstream_provenance(canonical_checkout)
+
+
 def record(args: argparse.Namespace) -> int:
+    left_path, right_path, eqbench = resolve_binary_provenance(args)
+    eqbench_root = Path(args.eqbench_root).resolve()
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     import pyghidra
 
     pyghidra.start()
@@ -720,11 +863,6 @@ def record(args: argparse.Namespace) -> int:
         activate_process_worker_execution_authority_deployment,
     )
     from scripts.function_tracer_pcode.checker import EquivalenceChecker
-
-    left_path = Path(args.left).resolve()
-    right_path = Path(args.right).resolve()
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     ghidra_version = ""
     try:
@@ -772,7 +910,7 @@ def record(args: argparse.Namespace) -> int:
             loaded = loader.__enter__()
             program = loaded.getPrimaryDomainObject()
             pyghidra.analyze(program)
-            recorder = Recorder(jpype)
+            recorder = Recorder(jpype, side)
             recorders[side] = recorder
             program_proxy = recorder.proxy_for(program)
             decompiler_class = jpype.JClass("ghidra.app.decompiler.DecompInterface")
@@ -834,6 +972,7 @@ def record(args: argparse.Namespace) -> int:
             header = _header(
                 side=side, fixture_id=args.fixture_id, binary_path=path,
                 binary_id=args.binary_ids[position],
+                eqbench_root=eqbench_root, eqbench=eqbench,
                 function_name=args.function, entry=entries[side],
                 identical_fast_path=args.identical_fast_path,
                 ghidra_version=ghidra_version, pyghidra_version=pyghidra_version,
@@ -900,19 +1039,19 @@ def record(args: argparse.Namespace) -> int:
             pass
 
 
-#: 記録を 2 回比べるときに外す header field（記録の出自であって観測ではない）。
-NON_OBSERVATION_HEADER_FIELDS = (
-    "recorded_at_utc", "recording_dirty", "analysis_source_digest",
-    "recording_commit",
-)
+#: 記録を 2 回比べるときに外す header field。**volatile なものだけ**。
+#: ``recording_commit`` / ``analysis_source_digest`` は同じ source からの再記録なら
+#: 一致すべき出自なので、比較から隠さない。
+VOLATILE_HEADER_FIELDS = ("recorded_at_utc", "recording_dirty")
 
 
 def compare(first: Path, second: Path) -> int:
     """同じ入力で 2 回記録した出力を比べる（Ghidra 不要）。
 
-    差分は「object id, member key」の単位で出す。Ghidra 自身が import をまたいで
-    再現しない値（``getUniqueProgramID`` / identity hash）はここで見えるように
-    残してある（すり替えない）。
+    差分は「object id, member key」の単位で出す。除外するのは volatile な
+    header field（:data:`VOLATILE_HEADER_FIELDS`）だけで、``recording_commit``
+    や ``analysis_source_digest`` は同じ source からの再記録なら一致すべき出自
+    なので隠さない。
     """
 
     status = 0
@@ -921,7 +1060,7 @@ def compare(first: Path, second: Path) -> int:
         left = json.loads((first / name).read_text(encoding="utf-8"))
         right = json.loads((second / name).read_text(encoding="utf-8"))
         if isinstance(left, dict) and "header" in left:
-            for field in NON_OBSERVATION_HEADER_FIELDS:
+            for field in VOLATILE_HEADER_FIELDS:
                 left["header"].pop(field, None)
                 right["header"].pop(field, None)
         if json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True):
@@ -959,6 +1098,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--left")
     parser.add_argument("--right")
+    parser.add_argument(
+        "--eqbench-root",
+        help=(
+            "binary を読む writable working root（runner の EQBENCH_ROOT と同じ "
+            "benchmarks 直下）。canonical な targets/EqBench は使わない"
+        ),
+    )
+    parser.add_argument(
+        "--eqbench-canonical-checkout", default=str(REPO_ROOT / "targets" / "EqBench"),
+        help="upstream URL / commit を読む read-only の canonical checkout",
+    )
     parser.add_argument("--function")
     parser.add_argument("--binary-ids", nargs=2)
     parser.add_argument("--fixture-id")
@@ -972,7 +1122,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return compare(Path(args.compare[0]), Path(args.compare[1]))
     missing = [
         name for name in
-        ("left", "right", "function", "binary_ids", "fixture_id", "output_dir")
+        ("left", "right", "function", "binary_ids", "fixture_id", "output_dir",
+         "eqbench_root")
         if getattr(args, name) is None
     ]
     if missing:

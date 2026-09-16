@@ -343,19 +343,28 @@ def test_deleting_one_memory_read_is_detected_even_though_the_outcome_matches(mo
 # --- 記録済み None / 空 / 未記録の区別 --------------------------------------
 
 
-def _minimal_payload(members: Mapping[str, Any]) -> Dict[str, Any]:
+def _minimal_payload(
+    members: Mapping[str, Any], *, side: str = "left",
+) -> Dict[str, Any]:
+    """schema を満たす最小の fixture（欠落 / 区別 / 検証 test の土台）。"""
+
     return {
         "header": {
             "schema": fixture_schema.RECORDED_PCODE_FIXTURE_SCHEMA,
-            "fixture_id": "unit", "side": "left", "recorded_at_utc": "1970-01-01T00:00:00+00:00",
-            "recording_commit": "", "recording_dirty": False,
-            "analysis_source_digest": "", "recorder_version": "1",
-            "ghidra_version": "", "pyghidra_version": "",
+            "fixture_id": "unit", "side": side,
+            "recorded_at_utc": "1970-01-01T00:00:00+00:00",
+            "recording_commit": "a" * 40, "recording_dirty": False,
+            "analysis_source_digest": "b" * 64, "recorder_version": "2",
+            "ghidra_version": "12.0.1", "pyghidra_version": "3.0.2",
             "binary": {
-                "binary_id": "B1", "eqbench_relative_path": "x",
+                "binary_id": "B1",
+                "eqbench_relative_path": "bess/bessj0/Eq/source/newV-arm64-clang-O0",
                 "sha256": "0" * 64, "size": 1, "kind": "object",
             },
-            "eqbench": {"upstream_url": "", "commit": ""},
+            "eqbench": {
+                "upstream_url": "git@github.com:shrBadihi/EqBench.git",
+                "commit": "c" * 40,
+            },
             "target": {"function_name": "f", "entry": "00100000"},
             "recording_mode": {"identical_fast_path": False, "connector": "production"},
         },
@@ -460,6 +469,121 @@ def test_a_different_decompile_timeout_is_missing_not_a_decompile_failure():
     ]
 
 
+def test_sequence_exhaustion_is_a_missing_access_not_a_repeat():
+    """状態を持つ API の観測列を使い切ったら、既定値にも最後の値にもしない。"""
+
+    program = recorded_program_from_payload(_minimal_payload({
+        "attr:getIterator": {"v": {"kind": "method"}},
+        "call:getIterator()": {"seq": [
+            {"v": {"kind": "int", "value": 1}},
+            {"v": {"kind": "int", "value": 2}},
+        ]},
+    }))
+    assert program.getIterator() == 1
+    assert program.getIterator() == 2
+    assert program.missing_accesses == []
+    with pytest.raises(RecordedSurfaceMissing):
+        program.getIterator()
+    assert [access.member_key for access in program.missing_accesses] == [
+        "call:getIterator()#2"
+    ]
+    # 使い切った後も、繰り返すたびに欠落として積まれる（黙って通さない）。
+    with pytest.raises(RecordedSurfaceMissing):
+        program.getIterator()
+    assert len(program.missing_accesses) == 2
+
+
+def test_sequence_positions_are_tracked_per_object_and_key():
+    payload = _minimal_payload({
+        "attr:getIterator": {"v": {"kind": "method"}},
+        "call:getIterator()": {"seq": [
+            {"v": {"kind": "int", "value": 1}},
+            {"v": {"kind": "int", "value": 2}},
+        ]},
+        "attr:getName": {"v": {"kind": "method"}},
+        "call:getName()": {"seq": [
+            {"v": {"kind": "str", "value": "a"}},
+            {"v": {"kind": "str", "value": "b"}},
+        ]},
+    })
+    program = recorded_program_from_payload(payload)
+    other = recorded_program_from_payload(copy.deepcopy(payload))
+    assert program.getIterator() == 1
+    assert program.getName() == "a"
+    assert program.getIterator() == 2
+    # 別 fixture の位置は独立している。
+    assert other.getIterator() == 1
+    assert program.missing_accesses == []
+    assert other.missing_accesses == []
+
+
+def test_record_and_replay_agree_on_java_equality_and_identity():
+    """同値類と同一性の意味が、記録側 proxy と再生側 object で一致すること。"""
+
+    from scripts.function_tracer_pcode.tests.tools import record_pcode_fixture
+
+    recording = record_pcode_fixture.RecordingProxy
+    replayed = RecordedObject
+    # どちらも「同じ recorder / context の、同じ同値類」だけを等しいとする。
+    for owner in (recording, replayed):
+        assert "__eq__" in owner.__dict__
+        assert "__ne__" in owner.__dict__
+        assert "__hash__" in owner.__dict__
+
+    class _FakeRecorder:
+        """``RecordingProxy`` が同値類の比較に使う面だけを持つ最小の recorder。"""
+
+        def __init__(self, groups):
+            self._groups = groups
+
+        def object_id(self, index):
+            return "o{}".format(index)
+
+        def entry(self, index):
+            return {"eq_group": self._groups[index]}
+
+    left_recorder = _FakeRecorder({0: 7, 1: 7, 2: 9})
+    right_recorder = _FakeRecorder({0: 7})
+    a = recording(left_recorder, 0, object())
+    b = recording(left_recorder, 1, object())
+    c = recording(left_recorder, 2, object())
+    other_side = recording(right_recorder, 0, object())
+    assert a == b and hash(a) == hash(b)
+    assert a != c
+    assert a != other_side        # 左右の同値類 id は別採番
+    assert a != object()
+
+    payload = _minimal_payload({
+        "attr:getMemory": {"v": {"kind": "method"}},
+        "call:getMemory()": {"v": {"kind": "ref", "id": "o2"}},
+        "attr:getListing": {"v": {"kind": "method"}},
+        "call:getListing()": {"v": {"kind": "ref", "id": "o3"}},
+    })
+    payload["objects"]["o2"] = {
+        "kind": "ghidra.program.model.address.GenericAddress", "eq_group": 7,
+        "members": {},
+    }
+    payload["objects"]["o3"] = {
+        "kind": "ghidra.program.model.address.GenericAddress", "eq_group": 9,
+        "members": {},
+    }
+    program = recorded_program_from_payload(payload)
+    replay_a = program.getMemory()
+    replay_c = program.getListing()
+    # 記録側と同じ結論になる（同値類 7 同士は等しく、7 と 9 は等しくない）。
+    assert (a == b) == (replay_a == program.getMemory())
+    assert (a == c) == (replay_a == replay_c)
+    assert hash(replay_a) == hash(a)
+
+
+def test_recorded_object_hash_does_not_use_randomized_string_hash():
+    """hash は同値類の int だけから決める（process ごとに変わらない）。"""
+
+    program = recorded_program_from_payload(_minimal_payload({}))
+    assert hash(program) == hash(0)
+    assert hash(fixture_schema.ObjectRef("o0", 5)) == hash(5)
+
+
 def test_recorded_objects_share_identity_and_java_equality_classes():
     payload = _minimal_payload({
         "attr:getMemory": {"v": {"kind": "method"}},
@@ -505,28 +629,268 @@ def test_fixture_serialization_round_trip_is_byte_stable():
         assert fixture_schema.dumps(json.loads(fixture_schema.dumps(payload))) == text
 
 
-def test_fixture_schema_is_checked_for_exact_equality():
+def _rejects(payload: Any) -> None:
+    with pytest.raises(fixture_schema.RecordedFixtureInvalid):
+        fixture_schema.validate_fixture(payload)
+
+
+def test_fixture_schema_rejects_unknown_and_missing_keys():
     payload = _minimal_payload({})
     fixture_schema.validate_fixture(payload)
-    broken = copy.deepcopy(payload)
-    broken["header"]["schema"] = "recorded-pcode-fixture-v2"
-    with pytest.raises(fixture_schema.RecordedFixtureInvalid):
-        fixture_schema.validate_fixture(broken)
+
     for key in ("header", "roots", "objects"):
         missing = copy.deepcopy(payload)
         del missing[key]
-        with pytest.raises(fixture_schema.RecordedFixtureInvalid):
-            fixture_schema.validate_fixture(missing)
-    unknown_member = copy.deepcopy(payload)
+        _rejects(missing)
+    extra = copy.deepcopy(payload)
+    extra["extra"] = 1
+    _rejects(extra)
+
+    for key in sorted(fixture_schema.HEADER_KEYS):
+        missing = copy.deepcopy(payload)
+        del missing["header"][key]
+        _rejects(missing)
+    unknown_header = copy.deepcopy(payload)
+    unknown_header["header"]["note"] = "x"
+    _rejects(unknown_header)
+
+    for section, keys in (
+        ("binary", fixture_schema.BINARY_KEYS),
+        ("eqbench", fixture_schema.EQBENCH_KEYS),
+        ("target", fixture_schema.TARGET_KEYS),
+        ("recording_mode", fixture_schema.RECORDING_MODE_KEYS),
+    ):
+        for key in sorted(keys):
+            missing = copy.deepcopy(payload)
+            del missing["header"][section][key]
+            _rejects(missing)
+        unknown = copy.deepcopy(payload)
+        unknown["header"][section]["note"] = "x"
+        _rejects(unknown)
+
+    for key in sorted(fixture_schema.ROOT_KEYS):
+        missing = copy.deepcopy(payload)
+        del missing["roots"][key]
+        _rejects(missing)
+    unknown_root = copy.deepcopy(payload)
+    unknown_root["roots"]["other"] = "o0"
+    _rejects(unknown_root)
+    dangling_root = copy.deepcopy(payload)
+    dangling_root["roots"]["program"] = "o404"
+    _rejects(dangling_root)
+
+    for key in sorted(fixture_schema.OBJECT_KEYS):
+        missing = copy.deepcopy(payload)
+        del missing["objects"]["o0"][key]
+        _rejects(missing)
+    unknown_object = copy.deepcopy(payload)
+    unknown_object["objects"]["o0"]["note"] = "x"
+    _rejects(unknown_object)
+
+
+def test_fixture_schema_rejects_inexact_scalars():
+    payload = _minimal_payload({})
+    _rejects(_with_header(payload, "schema", "recorded-pcode-fixture-v2"))
+    _rejects(_with_header(payload, "side", "middle"))
+    _rejects(_with_header(payload, "recording_commit", "a" * 39))
+    _rejects(_with_header(payload, "recording_commit", "A" * 40))
+    _rejects(_with_header(payload, "analysis_source_digest", "b" * 63))
+    _rejects(_with_header(payload, "recording_dirty", 0))
+    _rejects(_with_header(payload, "recorder_version", 2))
+
+    binary = copy.deepcopy(payload)
+    binary["header"]["binary"]["sha256"] = "0" * 63
+    _rejects(binary)
+    binary = copy.deepcopy(payload)
+    binary["header"]["binary"]["size"] = "1"
+    _rejects(binary)
+    binary = copy.deepcopy(payload)
+    binary["header"]["binary"]["size"] = 0
+    _rejects(binary)
+    binary = copy.deepcopy(payload)
+    binary["header"]["binary"]["eqbench_relative_path"] = "/abs/path"
+    _rejects(binary)
+    binary = copy.deepcopy(payload)
+    binary["header"]["binary"]["eqbench_relative_path"] = "../escape"
+    _rejects(binary)
+
+    eqbench = copy.deepcopy(payload)
+    eqbench["header"]["eqbench"]["commit"] = "c" * 41
+    _rejects(eqbench)
+
+    mode = copy.deepcopy(payload)
+    mode["header"]["recording_mode"]["connector"] = "fixture"
+    _rejects(mode)
+    mode = copy.deepcopy(payload)
+    mode["header"]["recording_mode"]["identical_fast_path"] = 0
+    _rejects(mode)
+
+    entry = copy.deepcopy(payload)
+    entry["header"]["target"]["entry"] = None
+    _rejects(entry)
+
+    eq_group = copy.deepcopy(payload)
+    eq_group["objects"]["o0"]["eq_group"] = True
+    _rejects(eq_group)
+
+
+def _with_header(payload: Mapping[str, Any], key: str, value: Any) -> Dict[str, Any]:
+    broken = copy.deepcopy(payload)
+    broken["header"][key] = value
+    return broken
+
+
+def test_fixture_schema_rejects_malformed_members_and_values():
+    base = _minimal_payload({})
+
+    unknown_member = copy.deepcopy(base)
     unknown_member["objects"]["o0"]["members"]["getImageBase"] = {"v": {"kind": "none"}}
-    with pytest.raises(fixture_schema.RecordedFixtureInvalid):
-        fixture_schema.validate_fixture(unknown_member)
-    both = copy.deepcopy(payload)
+    _rejects(unknown_member)
+
+    both = copy.deepcopy(base)
     both["objects"]["o0"]["members"]["attr:x"] = {
         "v": {"kind": "none"}, "raises": {"type": "t", "message": "m"},
     }
-    with pytest.raises(fixture_schema.RecordedFixtureInvalid):
-        fixture_schema.validate_fixture(both)
+    _rejects(both)
+
+    for envelope in (
+        {"v": {"kind": "bool", "value": 1}},
+        {"v": {"kind": "int", "value": True}},
+        {"v": {"kind": "int", "value": "1"}},
+        {"v": {"kind": "str", "value": 1}},
+        {"v": {"kind": "float", "value": 1.5}},
+        {"v": {"kind": "float", "value": "not-a-float"}},
+        {"v": {"kind": "bytes", "value": "0g"}},
+        {"v": {"kind": "list", "items": {}}},
+        {"v": {"kind": "ref", "id": "o404"}},
+        {"v": {"kind": "ref"}},
+        {"v": {"kind": "none", "value": 1}},
+        {"v": {"kind": "smuggled", "value": 1}},
+        {"raises": {"type": "t"}},
+        {"raises": {"type": "t", "message": "m", "extra": 1}},
+        {"seq": [{"v": {"kind": "none"}}]},
+        {"seq": {"0": {"v": {"kind": "none"}}}},
+        {"seq": [{"v": {"kind": "none"}}, {"v": {"kind": "smuggled"}}]},
+    ):
+        broken = copy.deepcopy(base)
+        broken["objects"]["o0"]["members"]["call:probe()"] = envelope
+        _rejects(broken)
+
+    for member in (
+        {"kind": "method", "value": {"kind": "none"}},
+        {"kind": "value"},
+        {"kind": "smuggled"},
+    ):
+        broken = copy.deepcopy(base)
+        broken["objects"]["o0"]["members"]["attr:probe"] = {"v": member}
+        _rejects(broken)
+
+    unclosed = copy.deepcopy(base)
+    unclosed["objects"]["o0"]["members"]["call:probe("] = {"v": {"kind": "none"}}
+    _rejects(unclosed)
+
+
+def test_fixture_schema_rejects_identity_surrogates_outside_their_contract():
+    base = _minimal_payload({
+        "attr:hashCode": {"v": {"kind": "method"}},
+    })
+    good = copy.deepcopy(base)
+    good["objects"]["o0"]["members"]["call:hashCode()"] = {
+        "v": {
+            "kind": "identity_surrogate",
+            "value": fixture_schema.identity_surrogate("left", 0),
+            "member": "hashCode",
+        },
+    }
+    fixture_schema.validate_fixture(good)
+
+    # 宣言されていない member を identity surrogate にできない。
+    undeclared = copy.deepcopy(good)
+    undeclared["objects"]["o0"]["members"]["call:getName()"] = {
+        "v": {
+            "kind": "identity_surrogate",
+            "value": fixture_schema.identity_surrogate("left", 0),
+            "member": "getName",
+        },
+    }
+    _rejects(undeclared)
+
+    # member 名と key がずれていたら拒否する。
+    mismatched = copy.deepcopy(good)
+    mismatched["objects"]["o0"]["members"]["call:hashCode()"]["v"]["member"] = (
+        "getUniqueProgramID"
+    )
+    _rejects(mismatched)
+
+    # 反対側の帯域の surrogate は拒否する（左右の取り違え）。
+    wrong_side = copy.deepcopy(good)
+    wrong_side["objects"]["o0"]["members"]["call:hashCode()"]["v"]["value"] = (
+        fixture_schema.identity_surrogate("right", 0)
+    )
+    _rejects(wrong_side)
+
+    not_int = copy.deepcopy(good)
+    not_int["objects"]["o0"]["members"]["call:hashCode()"]["v"]["value"] = "1"
+    _rejects(not_int)
+
+
+def test_identity_surrogates_preserve_equality_and_stay_side_disjoint():
+    """identity 由来の値は、意味（一致 / 不一致）を保ったまま決定的になる。"""
+
+    left = fixture_schema.loads((CASE_DIR / "left.json").read_text(encoding="utf-8"))
+    right = fixture_schema.loads((CASE_DIR / "right.json").read_text(encoding="utf-8"))
+
+    def surrogates(payload):
+        found = {}
+        for object_id, entry in payload["objects"].items():
+            for member_key, envelope in entry["members"].items():
+                tagged = envelope.get("v")
+                if isinstance(tagged, Mapping) and tagged.get("kind") == "identity_surrogate":
+                    found[(object_id, member_key)] = (
+                        entry["eq_group"], tagged["value"], tagged["member"],
+                    )
+        return found
+
+    left_found = surrogates(left)
+    right_found = surrogates(right)
+    assert left_found and right_found
+    # 記録された identity 面は hashCode と getUniqueProgramID だけ。
+    assert {item[2] for item in left_found.values()} <= fixture_schema.IDENTITY_DERIVED_METHODS
+
+    for payload, found, side in ((left, left_found, "left"), (right, right_found, "right")):
+        low, high = fixture_schema.identity_surrogate_band(side)
+        by_eq_group = {}
+        for (_object_id, _member_key), (eq_group, value, _member) in found.items():
+            assert low <= value < high
+            assert value == fixture_schema.identity_surrogate(side, eq_group)
+            # 同じ Java 同値類なら同じ surrogate（hashCode の契約と一致）。
+            by_eq_group.setdefault(eq_group, set()).add(value)
+        assert all(len(values) == 1 for values in by_eq_group.values())
+        # 別の同値類なら別の surrogate。
+        assert len({next(iter(v)) for v in by_eq_group.values()}) == len(by_eq_group)
+
+    # 左右で surrogate は決して衝突しない。
+    assert not (
+        {value for _eq, value, _m in left_found.values()}
+        & {value for _eq, value, _m in right_found.values()}
+    )
+
+
+def test_identity_surrogate_is_what_replay_returns():
+    """記録された surrogate と再生が返す値が同じであること。"""
+
+    program = load_recorded_program(CASE_DIR / "left.json")
+    payload = fixture_schema.loads(
+        (CASE_DIR / "left.json").read_text(encoding="utf-8")
+    )
+    recorded = payload["objects"][payload["roots"]["program"]]["members"][
+        "call:getUniqueProgramID()"
+    ]["v"]
+    assert recorded["kind"] == "identity_surrogate"
+    replayed = program.getUniqueProgramID()
+    assert replayed == recorded["value"]
+    assert type(replayed) is int
+    assert program.missing_accesses == []
 
 
 def test_load_recorded_program_reads_the_case_files():

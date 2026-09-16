@@ -39,9 +39,11 @@ python3 -B -m scripts.function_tracer_pcode.cli.main \
 # Other useful flags: --binary-ids A B, --equiv-timeout, --timeout (decompile), --pairwise-timeout[-hard],
 # --strategy, --list-functions, --assume-fp-non-nan, --no-retry-phases
 
-# Record a Ghidra P-code fixture (needs PyGhidra; see tests/fixtures/pcode/SCHEMA.md)
+# Record a Ghidra P-code fixture (needs PyGhidra; see tests/fixtures/pcode/SCHEMA.md).
+# Binaries must come from a writable working root, not from targets/EqBench.
 docker compose run --rm ghidra-dev python3 -B -m scripts.function_tracer_pcode.tests.tools.record_pcode_fixture \
-  --left <binary> --right <binary> --function snippet --binary-ids B1 B2 \
+  --eqbench-root <working-root>/benchmarks --left <binary> --right <binary> \
+  --function snippet --binary-ids B1 B2 \
   --fixture-id <case> --output-dir scripts/function_tracer_pcode/tests/fixtures/pcode/<case> \
   --work-dir tmp/record-pcode
 # Compare two recordings of the same input (no Ghidra needed)

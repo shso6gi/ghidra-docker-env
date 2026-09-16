@@ -118,6 +118,7 @@ class _RecordedContext:
             return self.instance(tagged["id"])
         if kind == VALUE_LIST:
             return [self.resolve(item) for item in tagged["items"]]
+        # identity surrogate も含め、検証済みの値をそのまま返す（救済しない）。
         return decode_scalar(tagged)
 
 
@@ -240,9 +241,10 @@ class RecordedObject:
 
     def __hash__(self) -> int:
         # ``__eq__`` は context も見るが、hash は同値類だけで決める。等しい
-        # object の hash が一致すればよく、``id()`` のような run ごとに変わる
-        # 値を混ぜると set / dict の反復順が run 間で変わる。
-        return hash(("recorded-eq-group", self._rec_eq_group))
+        # object の hash が一致すればよい。``id()`` や**文字列**を混ぜない:
+        # Python の文字列 hash は process ごとに randomize されるので、set /
+        # dict の反復順が run 間で変わり、記録が非決定になる。
+        return hash(self._rec_eq_group)
 
     # Ghidra object は解析にとって不透明な runtime leaf で、``_semantic_copy``
     # も identity を保つ（``core/analysis.py`` の ``deepcopy`` fallback）。
