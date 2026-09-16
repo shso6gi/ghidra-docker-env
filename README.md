@@ -60,7 +60,12 @@ Container.
 ## Target binaries
 
 The analysis target is EqBench (`targets/EqBench/`, git-ignored; clone or copy
-the benchmark tree there). `eqbench_run_all_32jobs.sh` compiles every
+the benchmark tree there). Upstream is <https://github.com/shrBadihi/EqBench>,
+pinned at commit `3724fce5b287cc63165028444daf904f25b0158b` and distributed
+under the MIT licence (`targets/EqBench/LICENSE.md`; a copy of the licence text
+and of what the checked-in fixtures derive from it is in
+`scripts/function_tracer_pcode/tests/fixtures/pcode/NOTICE.md`).
+`eqbench_run_all_32jobs.sh` compiles every
 `Eq/newV.c` / `Eq/new.c` sample into `Eq/source/` with
 `scripts/eqbench/compile_all_arm_mips.sh` (arm64/mips64 x gcc/clang x O0-O3)
 before running the matrix, so no manual build step is needed. Set
@@ -76,8 +81,20 @@ its provenance, or the signed execution identity.
 ### Recorded P-code fixtures (Issue #109)
 
 `scripts/function_tracer_pcode/tests/fixtures/pcode/` holds recordings of what
-real Ghidra returned for one pair of EqBench binaries, so the production
+real Ghidra returned for a pair of EqBench binaries, so the production
 `check_from_binaries` path can be replayed in CI without Ghidra.
+
+`cases.json` describes the eight-case corpus `tests/unit/test_recorded_pairs.py`
+replays; `expected/` holds one regression expectation per case (and per variant
+for the byte-identical pair, which is replayed with the identity fast path both
+on and off from a single fast-path-**off** recording). `ground_truth/` holds
+*references* to the semantic relation, never the relation itself: the source of
+truth is `scripts/eqbench/neq_ground_truth.tsv` (reviewed, with an independent
+native execution witness) plus `function_diff_manifest`'s single-source rule for
+Eq samples, and `scripts/eqbench/ground_truth_conditional_compatibility.json`
+for whether a relation survives a conditional proof's premises. The EqBench
+directory lane (`Eq` / `Neq`) is a dataset label, not a ground truth, and never
+decides a soundness violation on its own. The checker reads none of these files.
 
 Read the binaries from a **fresh writable working root**, never from the
 canonical `targets/EqBench/` checkout: the runners write `Eq/source/` into

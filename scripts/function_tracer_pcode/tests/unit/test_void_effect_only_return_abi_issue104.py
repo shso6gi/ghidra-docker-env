@@ -409,10 +409,13 @@ class _Program:
         return self._name
 
 
-def _run_production_check(monkeypatch, case_id, left, right):
+def _run_production_check(case_id, left, right):
     """Run the real phase workflow, pairwise strategy, z3 and the production
-    cutover connector; only the Ghidra analysis step is replaced."""
-    import scripts.function_tracer_pcode.analysis as analysis_package
+    cutover connector; only the Ghidra analysis step is replaced.
+
+    The analyzer goes in through ``EquivalenceChecker(analyzer_factory=...)``
+    (Issue #109), which is the collaborator production itself builds analyzers
+    with -- not a package attribute swapped underneath it."""
     from scripts.function_tracer_pcode.authority.decision.production_cutover import (
         build_default_cutover_connector,
     )
@@ -444,8 +447,7 @@ def _run_production_check(monkeypatch, case_id, left, right):
         def dispose(self):
             pass
 
-    monkeypatch.setattr(analysis_package, "ReturnAnalyzer", FakeReturnAnalyzer)
-    checker = EquivalenceChecker(debug=False)
+    checker = EquivalenceChecker(debug=False, analyzer_factory=FakeReturnAnalyzer)
     checker.v2_dual_write_pilot_connector = build_default_cutover_connector()
     result = checker.check_from_binaries(
         _Program("left"), _Program("right"), "f", "f",
@@ -465,28 +467,28 @@ def _e2e_void(side, value, **kwargs):
     return analysis
 
 
-def test_e2e_same_void_global_effect_is_equivalent(monkeypatch):
-    result = _run_production_check(monkeypatch, "same", _e2e_void("left", _param_x()), _e2e_void("right", _param_x()))
+def test_e2e_same_void_global_effect_is_equivalent():
+    result = _run_production_check("same", _e2e_void("left", _param_x()), _e2e_void("right", _param_x()))
     assert result["final_outcome"] == "EQUIVALENT", result.get("unknown_reasons")
     assert result["is_equivalent"] is True
     assert result["stage_path"] == ["S_PAIRWISE"]
 
 
-def test_e2e_different_void_global_effect_is_not_equivalent(monkeypatch):
+def test_e2e_different_void_global_effect_is_not_equivalent():
     other = Expression.binary_op("INT_ADD", _param_x(), Expression.constant(1, size=4))
-    result = _run_production_check(monkeypatch, "diff", _e2e_void("left", _param_x()), _e2e_void("right", other))
+    result = _run_production_check("diff", _e2e_void("left", _param_x()), _e2e_void("right", other))
     assert result["final_outcome"] == "NOT_EQ"
     assert result["is_equivalent"] is False
 
 
-def test_e2e_incomplete_void_effect_stays_unknown_with_the_abi_blocker(monkeypatch):
+def test_e2e_incomplete_void_effect_stays_unknown_with_the_abi_blocker():
     right = _e2e_void("right", _param_x(), incomplete=("effect_store_location_unmodeled",))
-    result = _run_production_check(monkeypatch, "incomplete", _e2e_void("left", _param_x()), right)
+    result = _run_production_check("incomplete", _e2e_void("left", _param_x()), right)
     assert result["final_outcome"] == "UNKNOWN"
     assert "return_abi_provenance_unavailable" in {r.get("reason_id") for r in result["unknown_reasons"]}
 
 
-def test_e2e_void_effect_only_versus_complete_non_void_is_never_equivalent(monkeypatch):
+def test_e2e_void_effect_only_versus_complete_non_void_is_never_equivalent():
     """Mixed pair: a void effect-only surface (40-bit effect) against an int
     function with a real return storage (32-bit value).  The observation
     widths cannot be joined, so the pair must not close as EQUIVALENT."""
@@ -496,7 +498,7 @@ def test_e2e_void_effect_only_versus_complete_non_void_is_never_equivalent(monke
         [ReturnInfo("0x2010", _param_x(), [])], return_type="int", binary_id="bin-right",
     )
     right.return_abi_facts = _abi_facts(return_type="/int", type_length=4, storage="PRESENT")
-    result = _run_production_check(monkeypatch, "mixed", left, right)
+    result = _run_production_check("mixed", left, right)
     assert result["final_outcome"] != "EQUIVALENT"
     assert result["is_equivalent"] is not True
     assert result["final_outcome"] in {"UNKNOWN", "NOT_EQ"}
@@ -522,7 +524,7 @@ def _matching_width_non_void(side="right"):
     return analysis
 
 
-def test_e2e_matching_width_void_effect_versus_non_void_value_is_never_equivalent(monkeypatch):
+def test_e2e_matching_width_void_effect_versus_non_void_value_is_never_equivalent():
     """Adversarial mixed pair: the void side's memory-effect surface and the
     non-void side's return value are the same 40-bit solver term.  Ignoring
     the surface kind would make the pair EQUIVALENT although one function
@@ -532,7 +534,7 @@ def test_e2e_matching_width_void_effect_versus_non_void_value_is_never_equivalen
     right = _matching_width_non_void()
     assert left.comparison_surface.explicit_bit_width == 40
     assert right.returns[0].value.get_bit_width() == 40
-    result = _run_production_check(monkeypatch, "mixed-width", left, right)
+    result = _run_production_check("mixed-width", left, right)
     assert result["final_outcome"] != "EQUIVALENT", result.get("unknown_reasons")
     assert result["is_equivalent"] is not True
     reasons = {r.get("reason_id") for r in result["unknown_reasons"]}
@@ -597,7 +599,7 @@ def _matching_width_non_void_value(side="right", *, width_bytes=9):
     return analysis
 
 
-def test_e2e_matching_width_non_void_memory_effect_versus_return_value_is_never_equivalent(monkeypatch):
+def test_e2e_matching_width_non_void_memory_effect_versus_return_value_is_never_equivalent():
     """Adversarial mixed pair on two *non-void* functions: ``int f(int x){ g = x;
     return 0; }`` (stores ⊕ return, 72 bit) against ``undefined9 f(int x)``
     returning the identical 72-bit term.  Both ABI seeds are complete, so the
@@ -605,7 +607,7 @@ def test_e2e_matching_width_non_void_memory_effect_versus_return_value_is_never_
     left = _non_void_with_global_store("left")
     right = _matching_width_non_void_value("right")
     assert right.returns[0].value.get_bit_width() == 72
-    result = _run_production_check(monkeypatch, "mixed-nonvoid", left, right)
+    result = _run_production_check("mixed-nonvoid", left, right)
     assert result["final_outcome"] != "EQUIVALENT", result.get("unknown_reasons")
     assert result["is_equivalent"] is not True
 
@@ -646,8 +648,8 @@ def test_relation_assessment_refuses_malformed_surface_kind():
     assert assessment.relation_assessment.status.value == "UNPROVEN"
 
 
-def test_e2e_same_non_void_memory_effect_surfaces_are_equivalent(monkeypatch):
-    result = _run_production_check(monkeypatch, "nonvoid-same", _non_void_with_global_store("left"), _non_void_with_global_store("right"))
+def test_e2e_same_non_void_memory_effect_surfaces_are_equivalent():
+    result = _run_production_check("nonvoid-same", _non_void_with_global_store("left"), _non_void_with_global_store("right"))
     assert result["final_outcome"] == "EQUIVALENT", result.get("unknown_reasons")
 
 

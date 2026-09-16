@@ -1,0 +1,70 @@
+{
+ "binary_concrete_witness": null,
+ "binary_linkage": {
+  "left_binary_relative_path": "airy/MAX/Neq/source/newV-arm64-clang-O1",
+  "left_sha256": "a23da413efb632d6ad82b3b69c974ac362aec628762ac86f5bee9ccdc5dfdd7b",
+  "pair": "N_B2_O_B4",
+  "produced_from": {
+   "compile_script": "scripts/eqbench/compile_all_arm_mips.sh",
+   "source_paths": [
+    "benchmarks/airy/MAX/Neq/newV.c",
+    "benchmarks/airy/MAX/Neq/oldV.c"
+   ]
+  },
+  "right_binary_relative_path": "airy/MAX/Neq/source/oldV-arm64-clang-O3",
+  "right_sha256": "d5616247acbfd8ede422bd5c8a3f34e7e9b2d1cdd4677b0d872631c29c9004d5"
+ },
+ "case_id": "max_snippet_N_B2_O_B4",
+ "conditional_compatibility_ref": {
+  "entries": [
+   {
+    "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+    "status": "not_applicable",
+    "subject": "*"
+   }
+  ],
+  "file": "scripts/eqbench/ground_truth_conditional_compatibility.json"
+ },
+ "implementation_capability": {
+  "last_observed_outcome": "NOT_EQ",
+  "note": "The pairwise lane proved NOT_EQ with a SAFE_COUNTEREXAMPLE on the first replay; recorded for information only, never asserted",
+  "status": "unconfirmed"
+ },
+ "native_execution_witness": {
+  "command": "gcc -O0 -std=c11 probe.c -lm && ./probe  # probe includes both newV.c and oldV.c with snippet renamed per version",
+  "input": "a=1.0, b=2.0",
+  "left_output": "new=0",
+  "right_output": "old=2",
+  "toolchain": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, x86_64-linux-gnu, -O0 -std=c11 -lm"
+ },
+ "observation_contract": {
+  "basis": "observe_return_value=True",
+  "contract_name": "eqbench_single_threaded_c_abi",
+  "covered_by_contract": true,
+  "observed_surface": "return_value"
+ },
+ "registry": {
+  "file": "scripts/eqbench/neq_ground_truth.tsv",
+  "function": "snippet",
+  "sample": "airy/MAX/Neq/newV-oldV"
+ },
+ "relation": "NOT_EQ",
+ "schema": "verified-ground-truth-ref-v1",
+ "semantic_truth": {
+  "eqbench_commit": "3724fce5b287cc63165028444daf904f25b0158b",
+  "source_paths": [
+   "benchmarks/airy/MAX/Neq/newV.c",
+   "benchmarks/airy/MAX/Neq/oldV.c"
+  ],
+  "source_witness": {
+   "differing_observable": "return value",
+   "input": "a=1.0, b=2.0 (double)",
+   "left_observation": "new snippet returns 0",
+   "right_observation": "old snippet returns 2"
+  }
+ },
+ "verification_basis": "source review of both versions plus an independent native execution of the two definitions on the recorded input; the verdict and the same evidence are registered in the tsv, which is the source of truth",
+ "verification_status": "verified",
+ "verified_at": "2026-09-16T00:00:00Z",
+ "verified_by": "Issue #109 PR-109-B (source review + independent native execution)"
+}

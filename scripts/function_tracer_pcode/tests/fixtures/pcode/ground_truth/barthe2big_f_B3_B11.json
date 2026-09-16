@@ -1,0 +1,57 @@
+{
+ "binary_concrete_witness": null,
+ "binary_linkage": {
+  "left_binary_relative_path": "REVE/barthe2big/Eq/source/new-arm64-clang-O2",
+  "left_sha256": "9617343c60efcef52e3ce324496965839e32e878a79466d6561e73a59d4cd20f",
+  "pair": "B3_B11",
+  "produced_from": {
+   "compile_script": "scripts/eqbench/compile_all_arm_mips.sh",
+   "source_paths": [
+    "benchmarks/REVE/barthe2big/Eq/new.c"
+   ]
+  },
+  "right_binary_relative_path": "REVE/barthe2big/Eq/source/new-mips64-clang-O2",
+  "right_sha256": "7888e3b987d3e2eb802a3d8eb9e55441c8642832d375fb23a706d470b1292a02"
+ },
+ "case_id": "barthe2big_f_B3_B11",
+ "conditional_compatibility_ref": {
+  "entries": [
+   {
+    "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+    "status": "not_applicable",
+    "subject": "*"
+   }
+  ],
+  "file": "scripts/eqbench/ground_truth_conditional_compatibility.json"
+ },
+ "implementation_capability": {
+  "last_observed_outcome": "UNKNOWN",
+  "note": "UNKNOWN on the first replay (Issue #22 owns the expression growth on this sample)",
+  "status": "unconfirmed"
+ },
+ "native_execution_witness": null,
+ "observation_contract": {
+  "basis": "observe_return_value=True",
+  "contract_name": "eqbench_single_threaded_c_abi",
+  "covered_by_contract": true,
+  "observed_surface": "return_value"
+ },
+ "registry": {
+  "function": "f",
+  "kind": "eq_sample_single_source",
+  "sample": "REVE/barthe2big/Eq/new"
+ },
+ "relation": "EQ",
+ "schema": "verified-ground-truth-ref-v1",
+ "semantic_truth": {
+  "eqbench_commit": "3724fce5b287cc63165028444daf904f25b0158b",
+  "source_paths": [
+   "benchmarks/REVE/barthe2big/Eq/new.c"
+  ],
+  "source_witness": null
+ },
+ "verification_basis": "EqBench Eq sample: both binaries of the pair are compiled from the one source file listed below, so every function of the sample is CONFIRMED_EQ by construction.  This is the same rule function_diff_manifest.build_eq_sample applies to every Eq sample, and the runner's benchmark gate already enforces it on every Eq pair; no separate execution probe exists or is needed because there is no second definition to compare against",
+ "verification_status": "verified",
+ "verified_at": "2026-09-16T00:00:00Z",
+ "verified_by": "Issue #109 PR-109-B (source review + independent native execution)"
+}

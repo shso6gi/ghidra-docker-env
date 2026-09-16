@@ -1,0 +1,70 @@
+{
+ "binary_concrete_witness": null,
+ "binary_linkage": {
+  "left_binary_relative_path": "raytrace/surface/Neq/source/newV-arm64-clang-O1",
+  "left_sha256": "8eddabebfa95d2fe33ad713ee23d39fd6fb3a2618548df9763dcdd84867078e4",
+  "pair": "N_B2_O_B4",
+  "produced_from": {
+   "compile_script": "scripts/eqbench/compile_all_arm_mips.sh",
+   "source_paths": [
+    "benchmarks/raytrace/surface/Neq/newV.c",
+    "benchmarks/raytrace/surface/Neq/oldV.c"
+   ]
+  },
+  "right_binary_relative_path": "raytrace/surface/Neq/source/oldV-arm64-clang-O3",
+  "right_sha256": "1abc8b82bb0f15c86219d3e03c306b6266a97f8a6940c83b84921f6bbce30d6b"
+ },
+ "case_id": "surface_SurfaceConstructor_N_B2_O_B4",
+ "conditional_compatibility_ref": {
+  "entries": [
+   {
+    "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+    "status": "unverified",
+    "subject": "*"
+   }
+  ],
+  "file": "scripts/eqbench/ground_truth_conditional_compatibility.json"
+ },
+ "implementation_capability": {
+  "last_observed_outcome": "ERROR",
+  "note": "The first replay ended in ERROR (strategy_exception: z3 rejected in_stack_00000000), which is Issue #16.  ERROR is not EQUIVALENT, so the soundness rule holds; the regression expectation records the ERROR so a fix for #16 shows up as a transition",
+  "status": "unconfirmed"
+ },
+ "native_execution_witness": {
+  "command": "gcc -O0 -std=c11 probe_<version>.c -lm && ./probe_<version>  # one program per version; reconfirmed for PR-109-B",
+  "input": "gval=2.0f, r=8.0f",
+  "left_output": "new: ig=10 kr=2040.00452",
+  "right_output": "old: ig=2 kr=0.0313724801",
+  "toolchain": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, x86_64-linux-gnu, -O0 -std=c11 -lm"
+ },
+ "observation_contract": {
+  "basis": "observe_return_value=True and observe_parameter_reachable_memory=True",
+  "contract_name": "eqbench_single_threaded_c_abi",
+  "covered_by_contract": true,
+  "observed_surface": "memory_effect"
+ },
+ "registry": {
+  "file": "scripts/eqbench/neq_ground_truth.tsv",
+  "function": "SurfaceConstructor",
+  "sample": "raytrace/surface/Neq/newV-oldV"
+ },
+ "relation": "NOT_EQ",
+ "schema": "verified-ground-truth-ref-v1",
+ "semantic_truth": {
+  "eqbench_commit": "3724fce5b287cc63165028444daf904f25b0158b",
+  "source_paths": [
+   "benchmarks/raytrace/surface/Neq/newV.c",
+   "benchmarks/raytrace/surface/Neq/oldV.c"
+  ],
+  "source_witness": {
+   "differing_observable": "the constructed Surface returned by value (ig and kr members)",
+   "input": "rval=1.0f, gval=2.0f, bval=3.0f, a=0.1f, d=0.2f, s=0.3f, n=4.0f, r=8.0f, t=0.5f, index=1.5f",
+   "left_observation": "new obj.ig=10, obj.kr=2040.00452 (kr = r/I255)",
+   "right_observation": "old obj.ig=2, obj.kr=0.0313724801 (kr = r*I255)"
+  }
+ },
+ "verification_basis": "source review of both versions plus an independent native execution of the two definitions on the recorded input; the verdict and the same evidence are registered in the tsv, which is the source of truth",
+ "verification_status": "verified",
+ "verified_at": "2026-09-16T00:00:00Z",
+ "verified_by": "Issue #109 PR-109-B (source review + independent native execution)"
+}

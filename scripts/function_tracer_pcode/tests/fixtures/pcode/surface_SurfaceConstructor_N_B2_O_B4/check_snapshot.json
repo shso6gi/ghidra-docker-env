@@ -1,0 +1,21 @@
+{
+ "binary1_name": "newV-arm64-clang-O1",
+ "binary2_name": "oldV-arm64-clang-O3",
+ "c_active_reason_ids": [],
+ "canonical_outcome": "ERROR",
+ "conditional_outcome": null,
+ "decisive_proof_kinds": [],
+ "decisive_proof_provenance_kind": null,
+ "error_kind": "strategy_exception",
+ "final_outcome": "ERROR",
+ "function1_name": "SurfaceConstructor",
+ "function2_name": "SurfaceConstructor",
+ "identical_fast_path_disposition": null,
+ "is_equivalent": null,
+ "q_open_proof_kinds": [],
+ "schema": "recorded-pcode-check-snapshot-v1",
+ "stage_path": [
+  "S_PAIRWISE",
+  "S_MONOLITHIC_FALLBACK"
+ ]
+}

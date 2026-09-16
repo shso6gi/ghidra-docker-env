@@ -1,0 +1,70 @@
+{
+ "binary_concrete_witness": null,
+ "binary_linkage": {
+  "left_binary_relative_path": "optimization/wood/Neq/source/newV-arm64-clang-O1",
+  "left_sha256": "7fd91a72d7eb1f1c4f8b902215f0bf3ae41f2c8f7a9849db8ff2e48f98127c0f",
+  "pair": "N_B2_O_B4",
+  "produced_from": {
+   "compile_script": "scripts/eqbench/compile_all_arm_mips.sh",
+   "source_paths": [
+    "benchmarks/optimization/wood/Neq/newV.c",
+    "benchmarks/optimization/wood/Neq/oldV.c"
+   ]
+  },
+  "right_binary_relative_path": "optimization/wood/Neq/source/oldV-arm64-clang-O3",
+  "right_sha256": "6827d18431feeb81b2a5af310c3e83c593c706d7e4d92acff1913fd7e94b0710"
+ },
+ "case_id": "wood_wood_N_B2_O_B4",
+ "conditional_compatibility_ref": {
+  "entries": [
+   {
+    "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+    "status": "unverified",
+    "subject": "*"
+   }
+  ],
+  "file": "scripts/eqbench/ground_truth_conditional_compatibility.json"
+ },
+ "implementation_capability": {
+  "last_observed_outcome": "UNKNOWN",
+  "note": "wood returns void and the difference is an IO effect.  Issue #109 adds no IO proof model, so the checker is not expected to prove NOT_EQ here; the relation is not weakened to match that.  The only assertion made from it is that EQUIVALENT is forbidden",
+  "status": "unconfirmed"
+ },
+ "native_execution_witness": {
+  "command": "gcc -O0 -std=c11 probe_<version>.c -lm && ./probe_<version> | wc -c  # one program per version, because the observable is stdout",
+  "input": "x1=5.0, x2=25.0, x3=2.0, x4=4.0",
+  "left_output": "new: 23 bytes, \"Solved Wood constraint\\n\"",
+  "right_output": "old: 0 bytes",
+  "toolchain": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, x86_64-linux-gnu, -O0 -std=c11 -lm"
+ },
+ "observation_contract": {
+  "basis": "observe_io=True",
+  "contract_name": "eqbench_single_threaded_c_abi",
+  "covered_by_contract": true,
+  "observed_surface": "io"
+ },
+ "registry": {
+  "file": "scripts/eqbench/neq_ground_truth.tsv",
+  "function": "wood",
+  "sample": "optimization/wood/Neq/newV-oldV"
+ },
+ "relation": "NOT_EQ",
+ "schema": "verified-ground-truth-ref-v1",
+ "semantic_truth": {
+  "eqbench_commit": "3724fce5b287cc63165028444daf904f25b0158b",
+  "source_paths": [
+   "benchmarks/optimization/wood/Neq/newV.c",
+   "benchmarks/optimization/wood/Neq/oldV.c"
+  ],
+  "source_witness": {
+   "differing_observable": "stdout (the printf the function performs)",
+   "input": "x1=5.0, x2=25.0, x3=2.0, x4=4.0 (double)",
+   "left_observation": "new wood writes \"Solved Wood constraint\\n\" to stdout",
+   "right_observation": "old wood writes nothing to stdout"
+  }
+ },
+ "verification_basis": "source review of both versions plus an independent native execution of the two definitions on the recorded input; the verdict and the same evidence are registered in the tsv, which is the source of truth",
+ "verification_status": "verified",
+ "verified_at": "2026-09-16T00:00:00Z",
+ "verified_by": "Issue #109 PR-109-B (source review + independent native execution)"
+}

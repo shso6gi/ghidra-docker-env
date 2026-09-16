@@ -1,0 +1,1119 @@
+{
+ "analyzer_programs": [
+  "B2",
+  "B4"
+ ],
+ "schema": "recorded-pcode-analysis-snapshot-v1",
+ "sides": {
+  "B2": [
+   {
+    "analysis_notes": [],
+    "effect_summary": {
+     "effects": [
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 0,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        0,
+        4
+       ],
+       "order_index": 0,
+       "order_key": 268518400,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "param_2"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 8,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        8,
+        4
+       ],
+       "order_index": 1,
+       "order_key": 268520450,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "param_4"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 12,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        12,
+        4
+       ],
+       "order_index": 2,
+       "order_key": 268522500,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "param_5"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 16,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        16,
+        4
+       ],
+       "order_index": 3,
+       "order_key": 268524550,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "param_6"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 20,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        20,
+        4
+       ],
+       "order_index": 4,
+       "order_key": 268527624,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "param_7"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 24,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        24,
+        4
+       ],
+       "order_index": 5,
+       "order_key": 268528650,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "param_8"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 4,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        4,
+        4
+       ],
+       "order_index": 6,
+       "order_key": 268530701,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "1092616192"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 28,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        28,
+        4
+       ],
+       "order_index": 7,
+       "order_key": 268531727,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "in_stack_00000000"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 36,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        36,
+        4
+       ],
+       "order_index": 8,
+       "order_key": 268532753,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "in_stack_00000008"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 32,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        32,
+        4
+       ],
+       "order_index": 9,
+       "order_key": 268533779,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "(param_9 / 998277230)"
+      }
+     ],
+     "has_unsupported_call": false,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1",
+      "param_2",
+      "param_3",
+      "param_4",
+      "param_5",
+      "param_6",
+      "param_7",
+      "param_8",
+      "param_9"
+     ],
+     "synthetic_expr": "((((((((((((((((((((PHI(1, 0) << 32) | PHI(param_2, 0)) << 40) | ((PHI(1, 0) << 32) | PHI(1092616192, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_4, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_5, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_6, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_7, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_8, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(in_stack_00000000, 0))) << 40) | ((PHI(1, 0) << 32) | PHI((param_9 / 998277230), 0))) << 40) | ((PHI(1, 0) << 32) | PHI(in_stack_00000008, 0)))",
+     "unsupported_call_sites": []
+    },
+    "entry_point": "00100140",
+    "expansion_budget_truncations": [],
+    "function_name": "SurfaceConstructor",
+    "incomplete_control_flow": false,
+    "parameters": [
+     {
+      "data_type": "undefined4 *",
+      "index": 0,
+      "is_signed": false,
+      "name": "param_1",
+      "owner_entry_offset": 1048896,
+      "size": 8,
+      "storage": {
+       "base_register_name": "x8",
+       "base_register_size": 8,
+       "base_register_size_bits": 64,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 16448,
+       "register_name": "x8",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined4",
+      "index": 1,
+      "is_signed": true,
+      "name": "param_2",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z0",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20480,
+       "register_name": "s0",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined1[16]",
+      "index": 2,
+      "is_signed": true,
+      "name": "param_3",
+      "owner_entry_offset": 1048896,
+      "size": 16,
+      "storage": {
+       "base_register_name": "z1",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20512,
+       "register_name": "q1",
+       "size": 16,
+       "size_bits": 128,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined4",
+      "index": 3,
+      "is_signed": true,
+      "name": "param_4",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z2",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20544,
+       "register_name": "s2",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined4",
+      "index": 4,
+      "is_signed": true,
+      "name": "param_5",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z3",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20576,
+       "register_name": "s3",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined4",
+      "index": 5,
+      "is_signed": true,
+      "name": "param_6",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z4",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20608,
+       "register_name": "s4",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined4",
+      "index": 6,
+      "is_signed": true,
+      "name": "param_7",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z5",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20640,
+       "register_name": "s5",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined4",
+      "index": 7,
+      "is_signed": true,
+      "name": "param_8",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z6",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20672,
+       "register_name": "s6",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "float",
+      "index": 8,
+      "is_signed": true,
+      "name": "param_9",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z7",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20704,
+       "register_name": "s7",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": false,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__cdecl"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/void",
+       0
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "MISSING",
+      "value": null
+     },
+     "schema_version": 1
+    },
+    "return_type": "void",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 0,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "void",
+     "return_type_source": "decompiler_return_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "00100140",
+      "branch_index": 0,
+      "conditions": [],
+      "order_index": 0,
+      "pcode_identity": null,
+      "pcode_order": null,
+      "pcode_time": null,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "((((((((((((((((((((PHI(1, 0) << 32) | PHI(param_2, 0)) << 40) | ((PHI(1, 0) << 32) | PHI(1092616192, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_4, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_5, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_6, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_7, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_8, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(in_stack_00000000, 0))) << 40) | ((PHI(1, 0) << 32) | PHI((param_9 / 998277230), 0))) << 40) | ((PHI(1, 0) << 32) | PHI(in_stack_00000008, 0)))"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 0,
+      "signed_medium": 0,
+      "signed_strong": 0,
+      "unsigned": 0
+     },
+     "opcode_counts": {},
+     "signedness": "unknown"
+    },
+    "unknown_event_reasons": []
+   }
+  ],
+  "B4": [
+   {
+    "analysis_notes": [],
+    "effect_summary": {
+     "effects": [
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 0,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        0,
+        4
+       ],
+       "order_index": 0,
+       "order_key": 268518400,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "param_2"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 4,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        4,
+        4
+       ],
+       "order_index": 1,
+       "order_key": 268520450,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "param_3"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 8,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        8,
+        4
+       ],
+       "order_index": 2,
+       "order_key": 268521476,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "param_4"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 12,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        12,
+        4
+       ],
+       "order_index": 3,
+       "order_key": 268524550,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "param_5"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 16,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        16,
+        4
+       ],
+       "order_index": 4,
+       "order_key": 268526600,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "param_6"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 20,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        20,
+        4
+       ],
+       "order_index": 5,
+       "order_key": 268527626,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "param_7"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 24,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        24,
+        4
+       ],
+       "order_index": 6,
+       "order_key": 268528652,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "param_8"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 28,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        28,
+        4
+       ],
+       "order_index": 7,
+       "order_key": 268530703,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "in_stack_00000000"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 36,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        36,
+        4
+       ],
+       "order_index": 8,
+       "order_key": 268531729,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "in_stack_00000008"
+      },
+      {
+       "conditions": [],
+       "location": {
+        "base_ref": {
+         "display_name": "param_1",
+         "kind": "parameter",
+         "parameter_index": 0,
+         "parameter_name": "param_1"
+        },
+        "offset": 32,
+        "size": 4,
+        "steps": []
+       },
+       "location_stable_key": [
+        [
+         "parameter",
+         0
+        ],
+        [],
+        32,
+        4
+       ],
+       "order_index": 9,
+       "order_key": 268532755,
+       "provenance_complete": true,
+       "provenance_source_kind": "local_store",
+       "value": "(param_9 * 998277230)"
+      }
+     ],
+     "has_unsupported_call": false,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1",
+      "param_2",
+      "param_3",
+      "param_4",
+      "param_5",
+      "param_6",
+      "param_7",
+      "param_8",
+      "param_9"
+     ],
+     "synthetic_expr": "((((((((((((((((((((PHI(1, 0) << 32) | PHI(param_2, 0)) << 40) | ((PHI(1, 0) << 32) | PHI(param_3, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_4, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_5, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_6, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_7, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_8, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(in_stack_00000000, 0))) << 40) | ((PHI(1, 0) << 32) | PHI((param_9 * 998277230), 0))) << 40) | ((PHI(1, 0) << 32) | PHI(in_stack_00000008, 0)))",
+     "unsupported_call_sites": []
+    },
+    "entry_point": "00100140",
+    "expansion_budget_truncations": [],
+    "function_name": "SurfaceConstructor",
+    "incomplete_control_flow": false,
+    "parameters": [
+     {
+      "data_type": "undefined4 *",
+      "index": 0,
+      "is_signed": false,
+      "name": "param_1",
+      "owner_entry_offset": 1048896,
+      "size": 8,
+      "storage": {
+       "base_register_name": "x8",
+       "base_register_size": 8,
+       "base_register_size_bits": 64,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 16448,
+       "register_name": "x8",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined4",
+      "index": 1,
+      "is_signed": true,
+      "name": "param_2",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z0",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20480,
+       "register_name": "s0",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined4",
+      "index": 2,
+      "is_signed": true,
+      "name": "param_3",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z1",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20512,
+       "register_name": "s1",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined4",
+      "index": 3,
+      "is_signed": true,
+      "name": "param_4",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z2",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20544,
+       "register_name": "s2",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined4",
+      "index": 4,
+      "is_signed": true,
+      "name": "param_5",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z3",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20576,
+       "register_name": "s3",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined4",
+      "index": 5,
+      "is_signed": true,
+      "name": "param_6",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z4",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20608,
+       "register_name": "s4",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined4",
+      "index": 6,
+      "is_signed": true,
+      "name": "param_7",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z5",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20640,
+       "register_name": "s5",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "undefined4",
+      "index": 7,
+      "is_signed": true,
+      "name": "param_8",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z6",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20672,
+       "register_name": "s6",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "float",
+      "index": 8,
+      "is_signed": true,
+      "name": "param_9",
+      "owner_entry_offset": 1048896,
+      "size": 4,
+      "storage": {
+       "base_register_name": "z7",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20704,
+       "register_name": "s7",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": false,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__cdecl"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/void",
+       0
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "MISSING",
+      "value": null
+     },
+     "schema_version": 1
+    },
+    "return_type": "void",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 0,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "void",
+     "return_type_source": "decompiler_return_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "00100140",
+      "branch_index": 0,
+      "conditions": [],
+      "order_index": 0,
+      "pcode_identity": null,
+      "pcode_order": null,
+      "pcode_time": null,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "((((((((((((((((((((PHI(1, 0) << 32) | PHI(param_2, 0)) << 40) | ((PHI(1, 0) << 32) | PHI(param_3, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_4, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_5, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_6, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_7, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(param_8, 0))) << 40) | ((PHI(1, 0) << 32) | PHI(in_stack_00000000, 0))) << 40) | ((PHI(1, 0) << 32) | PHI((param_9 * 998277230), 0))) << 40) | ((PHI(1, 0) << 32) | PHI(in_stack_00000008, 0)))"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 0,
+      "signed_medium": 0,
+      "signed_strong": 0,
+      "unsigned": 0
+     },
+     "opcode_counts": {},
+     "signedness": "unknown"
+    },
+    "unknown_event_reasons": []
+   }
+  ]
+ }
+}

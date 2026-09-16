@@ -1,0 +1,17 @@
+{
+ "allowed_unstable_reason_ids": [],
+ "case_id": "bessj0_snippet_B10_B11",
+ "conditional_assumption_kinds": [],
+ "conditional_outcome": null,
+ "decisive_proof_kinds": [
+  "EQ_CLOSURE"
+ ],
+ "expected_stable_reason_ids": [],
+ "final_outcome": "EQUIVALENT",
+ "recorded_at_commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
+ "schema": "recorded-pair-expected-v1",
+ "stage_path": [
+  "IDENTICAL_FUNCTION_IDENTITY"
+ ],
+ "variant": "fast_path_on"
+}

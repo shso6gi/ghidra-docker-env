@@ -1,0 +1,57 @@
+{
+ "binary_concrete_witness": null,
+ "binary_linkage": {
+  "left_binary_relative_path": "ran/gammln/Eq/source/newV-arm64-clang-O0",
+  "left_sha256": "5b14ed6589359fc5fdebbd2400004fdf71009df1ef55becc03002df36161e88f",
+  "pair": "B1_B2",
+  "produced_from": {
+   "compile_script": "scripts/eqbench/compile_all_arm_mips.sh",
+   "source_paths": [
+    "benchmarks/ran/gammln/Eq/newV.c"
+   ]
+  },
+  "right_binary_relative_path": "ran/gammln/Eq/source/newV-arm64-clang-O1",
+  "right_sha256": "ec95a4f119ae6ed85192cc62bd2213e8e4fa94dd791023fac1bada4c6f459b11"
+ },
+ "case_id": "gammln_snippet_B1_B2",
+ "conditional_compatibility_ref": {
+  "entries": [
+   {
+    "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+    "status": "unverified",
+    "subject": "*"
+   }
+  ],
+  "file": "scripts/eqbench/ground_truth_conditional_compatibility.json"
+ },
+ "implementation_capability": {
+  "last_observed_outcome": "UNKNOWN",
+  "note": "UNKNOWN on the first replay with pure_call_semantics_unproven (the libm call, Issue #20)",
+  "status": "unconfirmed"
+ },
+ "native_execution_witness": null,
+ "observation_contract": {
+  "basis": "observe_return_value=True",
+  "contract_name": "eqbench_single_threaded_c_abi",
+  "covered_by_contract": true,
+  "observed_surface": "return_value"
+ },
+ "registry": {
+  "function": "snippet",
+  "kind": "eq_sample_single_source",
+  "sample": "ran/gammln/Eq/newV"
+ },
+ "relation": "EQ",
+ "schema": "verified-ground-truth-ref-v1",
+ "semantic_truth": {
+  "eqbench_commit": "3724fce5b287cc63165028444daf904f25b0158b",
+  "source_paths": [
+   "benchmarks/ran/gammln/Eq/newV.c"
+  ],
+  "source_witness": null
+ },
+ "verification_basis": "EqBench Eq sample: both binaries of the pair are compiled from the one source file listed below, so every function of the sample is CONFIRMED_EQ by construction.  This is the same rule function_diff_manifest.build_eq_sample applies to every Eq sample, and the runner's benchmark gate already enforces it on every Eq pair; no separate execution probe exists or is needed because there is no second definition to compare against",
+ "verification_status": "verified",
+ "verified_at": "2026-09-16T00:00:00Z",
+ "verified_by": "Issue #109 PR-109-B (source review + independent native execution)"
+}

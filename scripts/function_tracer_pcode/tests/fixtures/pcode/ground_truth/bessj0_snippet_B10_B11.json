@@ -1,0 +1,57 @@
+{
+ "binary_concrete_witness": null,
+ "binary_linkage": {
+  "left_binary_relative_path": "bess/bessj0/Eq/source/newV-mips64-clang-O1",
+  "left_sha256": "225287e732c96865681a2e5ac7aca9f772028f599c468d8b36f1879527a084e9",
+  "pair": "B10_B11",
+  "produced_from": {
+   "compile_script": "scripts/eqbench/compile_all_arm_mips.sh",
+   "source_paths": [
+    "benchmarks/bess/bessj0/Eq/newV.c"
+   ]
+  },
+  "right_binary_relative_path": "bess/bessj0/Eq/source/newV-mips64-clang-O2",
+  "right_sha256": "225287e732c96865681a2e5ac7aca9f772028f599c468d8b36f1879527a084e9"
+ },
+ "case_id": "bessj0_snippet_B10_B11",
+ "conditional_compatibility_ref": {
+  "entries": [
+   {
+    "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+    "status": "unverified",
+    "subject": "*"
+   }
+  ],
+  "file": "scripts/eqbench/ground_truth_conditional_compatibility.json"
+ },
+ "implementation_capability": {
+  "last_observed_outcome": "UNKNOWN (fast path off) / EQUIVALENT (fast path on)",
+  "note": "The two binaries of this pair have the same SHA-256, so the identity fast path proves EQUIVALENT when it is on (Issue #15).  That is a checker-side proof, not the ground truth: with the fast path off the same fixture ends in UNKNOWN and the relation is unchanged",
+  "status": "unconfirmed"
+ },
+ "native_execution_witness": null,
+ "observation_contract": {
+  "basis": "observe_return_value=True",
+  "contract_name": "eqbench_single_threaded_c_abi",
+  "covered_by_contract": true,
+  "observed_surface": "return_value"
+ },
+ "registry": {
+  "function": "snippet",
+  "kind": "eq_sample_single_source",
+  "sample": "bess/bessj0/Eq/newV"
+ },
+ "relation": "EQ",
+ "schema": "verified-ground-truth-ref-v1",
+ "semantic_truth": {
+  "eqbench_commit": "3724fce5b287cc63165028444daf904f25b0158b",
+  "source_paths": [
+   "benchmarks/bess/bessj0/Eq/newV.c"
+  ],
+  "source_witness": null
+ },
+ "verification_basis": "EqBench Eq sample: both binaries of the pair are compiled from the one source file listed below, so every function of the sample is CONFIRMED_EQ by construction.  This is the same rule function_diff_manifest.build_eq_sample applies to every Eq sample, and the runner's benchmark gate already enforces it on every Eq pair; no separate execution probe exists or is needed because there is no second definition to compare against",
+ "verification_status": "verified",
+ "verified_at": "2026-09-16T00:00:00Z",
+ "verified_by": "Issue #109 PR-109-B (source review + independent native execution)"
+}

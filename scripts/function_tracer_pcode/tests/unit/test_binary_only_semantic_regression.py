@@ -22,7 +22,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import scripts.function_tracer_pcode.analysis as analysis_layer
 import scripts.function_tracer_pcode.checker as checker_layer
 from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
 from scripts.function_tracer_pcode.cli.args import build_parser
@@ -131,6 +130,9 @@ def _make_recording_checker_class(observations):
         def __init__(self, *args, **kwargs):
             kwargs["canonical_decision_cutover"] = False
             kwargs["call_proof_decision_mode"] = "legacy_post_pairwise"
+            # Issue #109: 解析器は checker の collaborator として渡す
+            # （package 属性を裏で差し替えない）。
+            kwargs["analyzer_factory"] = _FakeReturnAnalyzer
             super().__init__(*args, **kwargs)
             self.solver_runner.get_available_solvers = lambda: ["mock"]
             self.pairwise_strategy.check = self._fake_pairwise_check
@@ -228,7 +230,6 @@ def _run_cli(monkeypatch, directory, observations):
         return context, context
 
     monkeypatch.setattr(equivalence_cli, "_load_program_context", _fake_load_program_context)
-    monkeypatch.setattr(analysis_layer, "ReturnAnalyzer", _FakeReturnAnalyzer)
     monkeypatch.setattr(
         checker_layer,
         "EquivalenceChecker",

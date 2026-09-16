@@ -1,0 +1,22 @@
+{
+ "binary1_name": "newV-arm64-clang-O1",
+ "binary2_name": "oldV-arm64-clang-O3",
+ "c_active_reason_ids": [],
+ "canonical_outcome": "NOT_EQ",
+ "conditional_outcome": null,
+ "decisive_proof_kinds": [
+  "SAFE_COUNTEREXAMPLE"
+ ],
+ "decisive_proof_provenance_kind": null,
+ "error_kind": null,
+ "final_outcome": "NOT_EQ",
+ "function1_name": "snippet",
+ "function2_name": "snippet",
+ "identical_fast_path_disposition": null,
+ "is_equivalent": false,
+ "q_open_proof_kinds": [],
+ "schema": "recorded-pcode-check-snapshot-v1",
+ "stage_path": [
+  "S_PAIRWISE"
+ ]
+}

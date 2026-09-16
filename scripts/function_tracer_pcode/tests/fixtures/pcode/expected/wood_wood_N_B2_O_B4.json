@@ -1,0 +1,18 @@
+{
+ "allowed_unstable_reason_ids": [],
+ "case_id": "wood_wood_N_B2_O_B4",
+ "conditional_assumption_kinds": [],
+ "conditional_outcome": null,
+ "decisive_proof_kinds": [],
+ "expected_stable_reason_ids": [
+  "outcome_path_region_completeness_unproven",
+  "pure_call_semantics_unproven"
+ ],
+ "final_outcome": "UNKNOWN",
+ "recorded_at_commit": "06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
+ "schema": "recorded-pair-expected-v1",
+ "stage_path": [
+  "S_PAIRWISE"
+ ],
+ "variant": "default"
+}
