@@ -2,15 +2,37 @@ name: eqbench-subset
 
 # The fixed measurement subset (scripts/function_tracer_pcode/reporting/
 # eqbench_subset.json) run against REAL binaries: EqBench is checked out and
-# compiled, Ghidra decompiles, the solvers run, and both gates judge the
-# result.  That is hours of work, so it is opt-in and never on anybody's
-# critical path -- no `pull_request`, no `push` to main.
+# compiled, Ghidra decompiles, the solvers run, and the gates judge the
+# result.  That takes about 85 minutes on a hosted runner, so it runs AFTER a
+# pull request has landed on main and never while one is open.
+#
+# Why `pull_request: types: [closed]` and not `push: branches: [main]`:
+#   * `closed` is the only pull_request activity here, so opening a PR,
+#     pushing to its branch or reopening it starts nothing.  There is no
+#     `opened` / `synchronize` / `reopened` in this list, and GitHub only
+#     dispatches the activity types a workflow names.
+#   * the job's `if` then keeps out the other way a PR closes -- closed
+#     without being merged -- so nothing runs for an abandoned PR.
+#   * `push: branches: [main]` would also fire for a direct push to main,
+#     which is not "a pull request was reviewed and merged".
+# The checkout below takes the PR's merge commit, which IS the commit that
+# landed on main -- not the temporary test-merge ref a pull_request event
+# otherwise checks out.
+#
+# `workflow_dispatch` stays as the manual escape hatch (a re-run after a
+# runner outage, or the Issue #15 oracle with identical_fast_path=0).  It is
+# never automatic, so it does not put this job on anyone's critical path.
+# There is deliberately no `schedule`: the run is tied to what landed, not to
+# the calendar.
 #
 # This is not the recorded P-code corpus.  `unit.yml` (unit-fast /
 # recorded-fast) and `recorded-full.yml` are Ghidra-free fixture regressions
 # and are untouched by this workflow; a fixture replay is not a real-binary
 # verification and neither stands in for the other (Issue #109).
 on:
+  pull_request:
+    branches: [main]
+    types: [closed]
   workflow_dispatch:
     inputs:
       subset_scope:
@@ -31,10 +53,6 @@ on:
         description: "EqBench commit or ref to check out"
         type: string
         default: "3724fce5b287cc63165028444daf904f25b0158b"
-  schedule:
-    # Mondays 03:00 UTC.  A scheduled event carries no inputs at all, which is
-    # why every setting is normalised once in the first step below.
-    - cron: "0 3 * * 1"
 
 permissions:
   contents: read
@@ -46,27 +64,60 @@ defaults:
 jobs:
   subset:
     name: fixed subset (real binaries)
+    # A pull request also closes without being merged; that is not a commit on
+    # main and must start nothing.  A manual dispatch has no pull_request in
+    # its event, so it is let through by the first clause.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      # RAW_* are the event-dependent values and are empty on `schedule`.
-      # NOTHING below reads them: the normalisation step turns them into the
-      # settings every later step uses, so there is exactly one place where a
-      # default is chosen and no step can invent its own.
+      # RAW_* are the event-dependent values and are empty for a merged pull
+      # request, which carries no inputs at all.  NOTHING below reads them:
+      # the normalisation step turns them into the settings every later step
+      # uses, so there is exactly one place where a default is chosen and no
+      # step can invent its own.
       RAW_SUBSET_SCOPE: ${{ inputs.subset_scope }}
       RAW_PAIR_PROCESS_TIMEOUT: ${{ inputs.pair_process_timeout }}
       RAW_IDENTICAL_FAST_PATH: ${{ inputs.identical_fast_path }}
       RAW_EQBENCH_REF: ${{ inputs.eqbench_ref }}
+      #: The commit that landed on main, when this run is a merged PR.
+      MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+      PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # A pull_request event otherwise checks out refs/pull/N/merge -- the
+          # test merge GitHub computed while the PR was open, which is not the
+          # commit that landed.  Empty for workflow_dispatch, where the action
+          # falls back to the dispatched ref.
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      # The run must be OF the merged commit, not of a test merge that happens
+      # to have the same tree.  Fail closed: an event that says it was merged
+      # but gives no merge commit is not something to carry on from.
+      - name: This run is of the commit that landed on main
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          checked_out="$(git rev-parse HEAD)"
+          echo "pull request:  #${PULL_REQUEST_NUMBER:-?}"
+          echo "merge commit:  ${MERGE_COMMIT_SHA:-(none)}"
+          echo "checked out:   $checked_out"
+          [[ -n "${MERGE_COMMIT_SHA:-}" ]] \
+            || { echo "::error::the merged pull request carries no merge commit"; exit 1; }
+          [[ "$checked_out" == "$MERGE_COMMIT_SHA" ]] \
+            || { echo "::error::checked out $checked_out, not the merge commit"; exit 1; }
 
       # ------------------------------------------------------------------
       # 1. One normalisation, one set of settings
       # ------------------------------------------------------------------
-      # `${VAR:-default}` treats ONLY unset/empty as absent, so
-      # identical_fast_path=0 stays 0.  A GitHub expression `||` would decide
-      # that in its own truthiness rules, which is exactly the kind of quiet
-      # change of a value this step exists to prevent.
+      # A merged pull request carries no inputs, so every setting is decided
+      # here and nowhere else.  `${VAR:-default}` treats ONLY unset/empty as
+      # absent, so identical_fast_path=0 stays 0.  A GitHub expression `||`
+      # would decide that in its own truthiness rules, which is exactly the
+      # kind of quiet change of a value this step exists to prevent.
       - name: Normalise the inputs
         id: normalise
         run: |
@@ -127,6 +178,7 @@ jobs:
             echo "RUN_DIR_CONTAINER=$RUN_DIR_CONTAINER"
             echo "DRYRUN_DIR_CONTAINER=$DRYRUN_DIR_CONTAINER"
             echo "JOB_START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "ANALYSED_COMMIT=$(git rev-parse HEAD)"
           } >> "$GITHUB_ENV"
 
           export SUBSET_SCOPE SUBSET_HALVES PAIR_PROCESS_TIMEOUT \
@@ -424,6 +476,12 @@ jobs:
               # fields: SUBSET_PR names a pull request, not a CI execution.
               "ci": {
                   "run_id": value("GITHUB_RUN_ID"),
+                  # Which commit this run is OF.  For a merged pull request
+                  # that is the merge commit on main, not the pull_request
+                  # event's own GITHUB_SHA (a test merge ref).
+                  "analysed_commit": value("ANALYSED_COMMIT"),
+                  "merged_pull_request": value("PULL_REQUEST_NUMBER"),
+                  "merge_commit_sha": value("MERGE_COMMIT_SHA"),
                   "run_attempt": value("GITHUB_RUN_ATTEMPT"),
                   "run_number": value("GITHUB_RUN_NUMBER"),
                   "workflow": value("GITHUB_WORKFLOW"),

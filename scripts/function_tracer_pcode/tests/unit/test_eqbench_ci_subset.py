@@ -1077,3 +1077,74 @@ def test_the_publication_manifest_is_required_evidence(tmp_path):
     assert "neq/matrix-publication-manifest.json" not in ci_subset.required_artifacts(
         ("eq",)
     )
+
+
+# --------------------------------------------------------------------------
+# a repeated expected path must not be absorbed by a set
+# --------------------------------------------------------------------------
+
+
+def test_unique_expected_paths_still_pass(tmp_path):
+    """The existing case is unchanged: distinct paths, nothing to complain of."""
+
+    run_dir = make_run(tmp_path, "all")
+    for half in ("eq", "neq"):
+        paths = expected_pair_paths(half)
+        assert len(paths) == len(set(paths))
+    assert run_verify(run_dir, "all").passed
+
+
+def test_a_repeated_expected_path_fails(tmp_path):
+    """64 listed paths of which two are the same is not 64 expected pairs."""
+
+    run_dir = make_run(tmp_path, "eq")
+    paths = expected_pair_paths("eq")
+    write_half_workload(run_dir, "eq", expected_paths=paths + [paths[0]])
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    check = next(
+        c for c in report.checks if c.name == "workload.eq.publication_manifest"
+    )
+    assert not check.passed
+    assert "repeat" in check.detail and paths[0] in check.detail
+
+
+def test_a_repeat_fails_even_though_the_sets_would_agree(tmp_path):
+    """The (sample, pair) set is unchanged by the repeat -- the count is not.
+
+    This is the case a set comparison cannot see: coverage against the subset
+    definition still matches, and every path on disk is still expected, so
+    without the list-level check the run would pass.
+    """
+
+    run_dir = make_run(tmp_path, "eq")
+    paths = expected_pair_paths("eq")
+    duplicated = paths + [paths[-1]]
+    write_half_workload(run_dir, "eq", expected_paths=duplicated)
+
+    identities = {ci_subset.pair_identity_from_status_path(p) for p in duplicated}
+    definition, _, _ = ci_subset.subset_definition_pairs(
+        "eq", write_definition(tmp_path),
+    )
+    assert identities == set(definition)              # coverage would agree
+    assert set(duplicated) == set(paths)              # the path set would agree
+
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    assert "workload.eq.publication_manifest" in failed_checks(report)
+
+
+def test_the_repeat_check_names_how_many_and_which(tmp_path):
+    run_dir = make_run(tmp_path, "neq")
+    paths = expected_pair_paths("neq")
+    write_half_workload(
+        run_dir, "neq", expected_paths=paths + [paths[0], paths[1]],
+    )
+    check = next(
+        c for c in run_verify(run_dir, "neq").checks
+        if c.name == "workload.neq.publication_manifest"
+    )
+    assert not check.passed
+    assert f"{len(paths) + 2} expected pair statuses" in check.detail
+    assert f"only {len(paths)} distinct" in check.detail
+    assert "2 path(s) repeat" in check.detail

@@ -649,6 +649,19 @@ def _publication_manifest(run_dir: Path, half: str) -> Mapping[str, object]:
         raise SubsetCiError(
             f"{half}/{PUBLICATION_MANIFEST_FILE} lists no expected pair statuses"
         )
+    # Every comparison below is between SETS, and turning a list into a set
+    # loses a repeated entry silently: a manifest listing 64 paths of which two
+    # are the same would then agree with a run of 63 pairs.  So the list is
+    # checked for repeats first, while it is still a list.
+    repeated = sorted(
+        {path for path in paths if paths.count(path) > 1}
+    )
+    if repeated:
+        raise SubsetCiError(
+            f"{half}/{PUBLICATION_MANIFEST_FILE} lists {len(paths)} expected pair "
+            f"statuses but only {len(set(paths))} distinct ones: "
+            f"{len(repeated)} path(s) repeat, e.g. {repeated[0]}"
+        )
     return payload
 
 

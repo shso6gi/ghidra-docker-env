@@ -167,9 +167,9 @@ recording proxy is not a Java object, so Ghidra's `isinstance` / Java static-API
 paths fall back to the object-API branches during recording as well as during
 replay; the fixture reproduces that recorded run, not necessarily a proxy-free
 CLI run. Keep running the fixed subset on real binaries for regression evidence --
-by hand, or through the opt-in `eqbench-subset` workflow described under
-"Running the subset in CI" below, which is a different workflow from
-`recorded-full` and never runs on a PR or on a push to `main`.
+by hand, or through the `eqbench-subset` workflow described under "Running the
+subset in CI" below, which is a different workflow from `recorded-full` and
+runs only after a pull request has been merged into `main`.
 `scripts/function_tracer_pcode/tests/fixtures/pcode/SCHEMA.md` documents the
 format, what is recorded, the identity surrogates, and the measured determinism.
 
@@ -342,14 +342,37 @@ of each half plus this run's soundness gate are then saved next to the results.
 Note that the subset uses a 240 s pair timeout instead of the 600 s of full
 runs, so TIMEOUT counts are not comparable with the full trees.
 
-#### Running the subset in CI (opt-in)
+#### Running the subset in CI (after a merge)
 
 `.github/workflows/eqbench-subset.yml` runs the same subset against real
-binaries on a GitHub-hosted runner. It is **`workflow_dispatch` plus a weekly
-`schedule` only** — no `pull_request`, no `push` to `main` — because it
-compiles EqBench, imports every binary into Ghidra and runs the solvers, and
-that belongs on nobody's critical path. The job budget is
-`timeout-minutes: 180`.
+binaries on a GitHub-hosted runner. It compiles EqBench, imports every binary
+into Ghidra and runs the solvers — about **85 minutes** on a hosted runner — so
+it runs **after a pull request has landed on `main`, and never while one is
+open**. The job budget is `timeout-minutes: 180`.
+
+```yaml
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]     # the only activity type: not opened/synchronize
+  workflow_dispatch:     # manual escape hatch; never automatic
+```
+
+with `if: github.event_name != 'pull_request' || github.event.pull_request.merged == true`
+on the job, so a PR that is closed without being merged starts nothing either.
+
+Why this and not `push: branches: [main]`: a direct push to `main` is not "a
+pull request was reviewed and merged", and the `push` event would not tell the
+run which PR it belongs to. The cost is that a `pull_request` event checks out
+`refs/pull/N/merge` — the test merge GitHub computed while the PR was open, not
+the commit that landed — so the checkout is pinned to
+`github.event.pull_request.merge_commit_sha` and a step then asserts that
+`git rev-parse HEAD` equals it. `ci_metadata.json` records that commit as
+`analysed_commit` next to the PR number.
+
+There is deliberately no `schedule`: the run is tied to what landed, not to the
+calendar. Nothing here runs while a pull request is open, so the per-PR gate
+stays `unit-fast` + `recorded-fast` (and `recorded-full` on `main`).
 
 | input | default | used for |
 |---|---|---|
@@ -366,8 +389,8 @@ since a fresh EqBench checkout has no binaries yet. Everything else
 `eqbench_subset.json` unchanged, and both values are recorded in
 `subset_manifest.txt`.
 
-A `schedule` event carries no inputs at all, so **every setting is normalised
-once**, in the first step, with `${VAR:-default}` — not with a GitHub
+A merged pull request carries no inputs at all, so **every setting is
+normalised once**, in the first step, with `${VAR:-default}` — not with a GitHub
 expression `||`, whose truthiness rules would quietly turn
 `identical_fast_path=0` into `1`. No later step has a default of its own; the
 normalised values, the raw ones and which of them the event actually carried
@@ -424,7 +447,9 @@ benchmark gates and `exit_status=0` — a `TIMEOUT` violates nothing. So the
 workload is checked too, per in-scope half:
 
 - the half's `matrix-publication-manifest.json` is readable, is schema
-  `eqbench-matrix-publication-manifest-v3` and is not a dry run;
+  `eqbench-matrix-publication-manifest-v3`, is not a dry run, and lists no
+  expected pair status twice (every comparison below is between sets, and a
+  repeated entry would vanish into one);
 - the `(sample, pair id)` identities it expected are exactly the ones
   `eqbench_subset.json` defines — the subset's own definition, so the expected
   set is never a count written into the checker. Several selected functions per
