@@ -486,5 +486,10 @@ jobs:
           # The CI run identity belongs here and in ci_metadata.json.
           name: eqbench-subset-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/eqbench-subset-artifacts
+          # The runners keep per-pair stack dumps and runtime receipts under
+          # `.runtime-metrics/`, and upload-artifact drops dotted paths unless
+          # told otherwise -- which silently cost ~290 of the 731 collected
+          # files, the stack dumps among them.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 30

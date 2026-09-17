@@ -1,0 +1,35 @@
+name: tmp-artifact-probe
+
+# TEMPORARY (removed before review): proves that upload-artifact@v4 keeps
+# dotted paths when include-hidden-files is set, which is what the
+# eqbench-subset artifact needs for the runners' .runtime-metrics/ stack dumps.
+on:
+  push:
+    branches: [feat/issue-109c-eqbench-subset-ci]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: |
+          mkdir -p probe/pair/.runtime-metrics
+          echo plain > probe/pair/visible.log
+          echo dump > probe/pair/.runtime-metrics/pair.stack-dump.txt
+          find probe -type f | sort
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-with-hidden
+          path: probe
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-default
+          path: probe
+          if-no-files-found: error
+          retention-days: 1
