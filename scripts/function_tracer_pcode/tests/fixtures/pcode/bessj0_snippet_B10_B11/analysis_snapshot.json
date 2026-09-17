@@ -1,0 +1,311 @@
+{
+ "analyzer_programs": [
+  "B10",
+  "B11"
+ ],
+ "schema": "recorded-pcode-analysis-snapshot-v1",
+ "sides": {
+  "B10": [
+   {
+    "analysis_notes": [
+     "effect_call_argument_evidence",
+     "bounded_call_refinement_deferred_expanded",
+     "bounded_call_refinement_preserved_unresolved_deferred_call",
+     "bounded_call_refinement",
+     "deferred_call_return_unresolved"
+    ],
+    "effect_summary": {
+     "effects": [],
+     "has_unsupported_call": true,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1"
+     ],
+     "synthetic_expr": null,
+     "unsupported_call_sites": [
+      {
+       "arguments": [
+        "(FLOAT_ABS(param_1) + MEM[PTRADD(1048576, 488, 1)])"
+       ],
+       "order_key": 268517401,
+       "path_conditions": [
+        "(not (FLOAT_ABS(param_1) FLOAT_LESS MEM[1049040]))"
+       ],
+       "reason": "callee_effect_summary_missing",
+       "target_expr": "1052672"
+      }
+     ]
+    },
+    "entry_point": "00100000",
+    "expansion_budget_truncations": [],
+    "function_name": "snippet",
+    "incomplete_control_flow": true,
+    "parameters": [
+     {
+      "data_type": "double",
+      "index": 0,
+      "is_signed": true,
+      "name": "param_1",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "f12",
+       "base_register_size": 8,
+       "base_register_size_bits": 64,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 4192,
+       "register_name": "f12",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": true,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__stdcall"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/double",
+       8
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_storage_v1",
+       [
+        [
+         "ghidra_return_storage_member_v1",
+         "register",
+         4096,
+         8
+        ]
+       ]
+      ]
+     },
+     "schema_version": 1
+    },
+    "return_type": "double",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 64,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "double",
+     "return_type_source": "decompiler_return_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "001001c8",
+      "branch_index": 1000,
+      "conditions": [
+       "(FLOAT_ABS(param_1) FLOAT_LESS MEM[1049040])"
+      ],
+      "order_index": 0,
+      "pcode_identity": "001001c8:t208",
+      "pcode_order": 5,
+      "pcode_time": 208,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "((((param_1 * param_1) * (((param_1 * param_1) * (((param_1 * param_1) * (((param_1 * param_1) * (((param_1 * param_1) * 13864081828381383458) + 4680054773643236994)) + 13935654345594015580)) + 4738749390097324442)) + 13981675489502167040)) + 4767850423327129600) / (((param_1 * param_1) * (((param_1 * param_1) * (((param_1 * param_1) * (((param_1 * param_1) * ((param_1 * param_1) + 4643419740771166694)) + 4678379184366681231)) + 4711359028498389795)) + 4741919557000626176)) + 4767850423305764864))"
+     },
+     {
+      "acceptance_status": null,
+      "address": "001001c8",
+      "branch_index": 0,
+      "conditions": [
+       "(not (FLOAT_ABS(param_1) FLOAT_LESS MEM[PTRADD(1048576, 464, 1)]))"
+      ],
+      "order_index": 1,
+      "pcode_identity": "001001c8:t208",
+      "pcode_order": 5,
+      "pcode_time": 208,
+      "return_kind": "phi_expansion",
+      "validation_blockers": [],
+      "value": "(((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * 4507006509970434145) + 13745378071113473105)) + MEM[PTRADD((1048576 INDIRECT 115), 552, 1)])) + MEM[PTRADD((1048576 INDIRECT 115), 520, 1)])) + MEM[PTRADD((1048576 INDIRECT 115), 544, 1)]) - ((sin@0x100140 * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * 13725028710809132841) + 4515301147868079785)) + MEM[PTRADD((1048576 INDIRECT 115), 512, 1)])) + MEM[PTRADD((1048576 INDIRECT 115), 528, 1)])) + MEM[PTRADD((1048576 INDIRECT 115), 536, 1)])))"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 0,
+      "signed_medium": 0,
+      "signed_strong": 0,
+      "unsigned": 0
+     },
+     "opcode_counts": {},
+     "signedness": "unknown"
+    },
+    "unknown_event_reasons": []
+   }
+  ],
+  "B11": [
+   {
+    "analysis_notes": [
+     "effect_call_argument_evidence",
+     "bounded_call_refinement_deferred_expanded",
+     "bounded_call_refinement_preserved_unresolved_deferred_call",
+     "bounded_call_refinement",
+     "deferred_call_return_unresolved"
+    ],
+    "effect_summary": {
+     "effects": [],
+     "has_unsupported_call": true,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1"
+     ],
+     "synthetic_expr": null,
+     "unsupported_call_sites": [
+      {
+       "arguments": [
+        "(FLOAT_ABS(param_1) + MEM[PTRADD(1048576, 488, 1)])"
+       ],
+       "order_key": 268517401,
+       "path_conditions": [
+        "(not (FLOAT_ABS(param_1) FLOAT_LESS MEM[1049040]))"
+       ],
+       "reason": "callee_effect_summary_missing",
+       "target_expr": "1052672"
+      }
+     ]
+    },
+    "entry_point": "00100000",
+    "expansion_budget_truncations": [],
+    "function_name": "snippet",
+    "incomplete_control_flow": true,
+    "parameters": [
+     {
+      "data_type": "double",
+      "index": 0,
+      "is_signed": true,
+      "name": "param_1",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "f12",
+       "base_register_size": 8,
+       "base_register_size_bits": 64,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 4192,
+       "register_name": "f12",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": true,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__stdcall"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/double",
+       8
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_storage_v1",
+       [
+        [
+         "ghidra_return_storage_member_v1",
+         "register",
+         4096,
+         8
+        ]
+       ]
+      ]
+     },
+     "schema_version": 1
+    },
+    "return_type": "double",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 64,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "double",
+     "return_type_source": "decompiler_return_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "001001c8",
+      "branch_index": 1000,
+      "conditions": [
+       "(FLOAT_ABS(param_1) FLOAT_LESS MEM[1049040])"
+      ],
+      "order_index": 0,
+      "pcode_identity": "001001c8:t208",
+      "pcode_order": 5,
+      "pcode_time": 208,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "((((param_1 * param_1) * (((param_1 * param_1) * (((param_1 * param_1) * (((param_1 * param_1) * (((param_1 * param_1) * 13864081828381383458) + 4680054773643236994)) + 13935654345594015580)) + 4738749390097324442)) + 13981675489502167040)) + 4767850423327129600) / (((param_1 * param_1) * (((param_1 * param_1) * (((param_1 * param_1) * (((param_1 * param_1) * ((param_1 * param_1) + 4643419740771166694)) + 4678379184366681231)) + 4711359028498389795)) + 4741919557000626176)) + 4767850423305764864))"
+     },
+     {
+      "acceptance_status": null,
+      "address": "001001c8",
+      "branch_index": 0,
+      "conditions": [
+       "(not (FLOAT_ABS(param_1) FLOAT_LESS MEM[PTRADD(1048576, 464, 1)]))"
+      ],
+      "order_index": 1,
+      "pcode_identity": "001001c8:t208",
+      "pcode_order": 5,
+      "pcode_time": 208,
+      "return_kind": "phi_expansion",
+      "validation_blockers": [],
+      "value": "(((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * 4507006509970434145) + 13745378071113473105)) + MEM[PTRADD((1048576 INDIRECT 115), 552, 1)])) + MEM[PTRADD((1048576 INDIRECT 115), 520, 1)])) + MEM[PTRADD((1048576 INDIRECT 115), 544, 1)]) - ((sin@0x100140 * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * ((((4620693217682128896 / FLOAT_ABS(param_1)) * (4620693217682128896 / FLOAT_ABS(param_1))) * 13725028710809132841) + 4515301147868079785)) + MEM[PTRADD((1048576 INDIRECT 115), 512, 1)])) + MEM[PTRADD((1048576 INDIRECT 115), 528, 1)])) + MEM[PTRADD((1048576 INDIRECT 115), 536, 1)])))"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 0,
+      "signed_medium": 0,
+      "signed_strong": 0,
+      "unsigned": 0
+     },
+     "opcode_counts": {},
+     "signedness": "unknown"
+    },
+    "unknown_event_reasons": []
+   }
+  ]
+ }
+}

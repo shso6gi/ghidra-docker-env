@@ -17,13 +17,15 @@ production path（production connector 付き ``check_from_binaries``）を走�
 
 欠落注入 test は、fixture から (a) 必須 API 1 件 (b) memory read 1 件を消して
 再生し、**最終 outcome が偶然一致しても** 欠落履歴で fail することを示す。
+
+実際に再生を走らせる 3 件には `recorded_replay` marker が付いており、PR ごとの
+`recorded-fast` job が走らせる（`unit-fast` は deselect）。この file の残りは
+fixture を読むだけの schema / 構造 test なので `unit-fast` に残る。
 """
 
 import copy
 import importlib
 import json
-import shutil
-import sys
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple, cast
 
@@ -36,11 +38,16 @@ from scripts.function_tracer_pcode.tests.fixtures.pcode.recorded_program import 
     RecordedProgram,
     RecordedSurfaceMissing,
     load_recorded_program,
-    recorded_analyzer_factory,
     recorded_program_from_payload,
 )
+from scripts.function_tracer_pcode.tests.fixtures.pcode.replay import (
+    assert_no_real_decompiler_was_built,
+    replay_recorded_pair,
+)
+from scripts.function_tracer_pcode.tests.fixtures.pcode.replay_validation import (
+    require_z3,
+)
 from scripts.function_tracer_pcode.tests.fixtures.pcode.snapshot import (
-    AnalysisSnapshotCollector,
     check_snapshot,
 )
 
@@ -48,39 +55,8 @@ from scripts.function_tracer_pcode.tests.fixtures.pcode.snapshot import (
 CASE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "pcode" / "bessj0_snippet_B1_B2"
 
 
-def _z3_available() -> bool:
-    return shutil.which("z3") is not None
-
-
 def _read(name: str) -> Any:
     return json.loads((CASE_DIR / name).read_text(encoding="utf-8"))
-
-
-class _BlockedImportFinder:
-    """再生中に Ghidra / PyGhidra / JPype を使わせない。
-
-    ``ImportError`` を出すのは、Ghidra の無い環境と**同じ**振る舞いにするため。
-    production には ``from ghidra... import X`` を ``try/except Exception`` で
-    包んで object API へ落とす型判定 probe が複数あり（``core/signature.py``）、
-    ここで別の例外を出すとその経路だけ再生と記録で食い違う。遮断した名前は
-    記録しておき、decompiler が作られていないことを別に assert する。
-    """
-
-    def __init__(self, *prefixes: str) -> None:
-        self._prefixes = prefixes
-        self.blocked: list = []
-
-    def find_module(self, fullname, path=None):  # pragma: no cover - 互換 API
-        return self.find_spec(fullname, path)
-
-    def find_spec(self, fullname, path=None, target=None):
-        for prefix in self._prefixes:
-            if fullname == prefix or fullname.startswith(prefix + "."):
-                self.blocked.append(fullname)
-                raise ImportError(
-                    "replay must not use a real Ghidra runtime: " + fullname
-                )
-        return None
 
 
 def _replay(
@@ -90,77 +66,29 @@ def _replay(
     case_id: str,
     monkeypatch,
 ) -> Tuple[RecordedProgram, RecordedProgram, Optional[Dict[str, Any]], Any, Any]:
-    """記録と同じ production path を、記録済み object の上で走らせる。"""
+    """記録と同じ production path を、記録済み object の上で走らせる。
 
-    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-        build_canonical_result_finalization_bundle,
-        validate_canonical_result_finalization_bundle,
-    )
-    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
-        build_default_cutover_connector,
-    )
-    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
-        activate_process_worker_execution_authority_deployment,
-    )
-    from scripts.function_tracer_pcode.checker import EquivalenceChecker
+    経路の定義は ``tests/fixtures/pcode/replay.py`` が 1 つだけ持つ（PR-B の
+    recorded-pair test と同じ関数）。ここはその戻り値をこの file の既存の
+    形に合わせて展開するだけ。
+    """
 
-    left = recorded_program_from_payload(left_payload)
-    right = recorded_program_from_payload(right_payload)
-    left_header = left.fixture_header
-    right_header = right.fixture_header
-
-    activate_process_worker_execution_authority_deployment(
-        key_id="issue109a-replay-" + case_id,
-        key=(case_id.encode() * 32)[:32],
-        key_source_id="/tmp/issue109a-replay-" + case_id,
+    # z3 が無ければ **fail**。skip にすると、solver の無い環境で「E2E を飛ばした
+    # から green」という状態が作れてしまう（recorded corpus と同じ契約）。
+    require_z3()
+    outcome = replay_recorded_pair(
+        left_payload, right_payload, case_id=case_id, monkeypatch=monkeypatch,
     )
-    blocker = _BlockedImportFinder("ghidra", "pyghidra", "jpype")
-    monkeypatch.setattr(sys, "meta_path", [blocker, *sys.meta_path])
-
-    collector = AnalysisSnapshotCollector()
-    checker = EquivalenceChecker(
-        debug=False,
-        identical_fast_path=bool(
-            left_header["recording_mode"]["identical_fast_path"]
-        ),
-        analyzer_factory=collector.wrap(recorded_analyzer_factory),
-    )
-    checker.v2_dual_write_pilot_connector = build_default_cutover_connector()
-    payload: Optional[Dict[str, Any]] = None
-    failure: Optional[BaseException] = None
-    try:
-        result = checker.check_from_binaries(
-            left, right,
-            left_header["target"]["function_name"],
-            right_header["target"]["function_name"],
-            binary1_id=left_header["binary"]["binary_id"],
-            binary2_id=right_header["binary"]["binary_id"],
-            binary1_content_identity=("sha256", left_header["binary"]["sha256"]),
-            binary2_content_identity=("sha256", right_header["binary"]["sha256"]),
-        )
-        payload = result.to_dict()
-        finalization = getattr(result, "_canonical_finalization_context", None)
-        if finalization is not None:
-            evidence, session = finalization
-            bundle = build_canonical_result_finalization_bundle(
-                result_payload_preimage=payload,
-                evidence=evidence, session=session,
-            )
-            validate_canonical_result_finalization_bundle(
-                bundle, result_payload_preimage=payload,
-            )
-            payload["canonical_result_finalization_bundle"] = bundle
-    except Exception as exc:  # 欠落注入では production 側が途中で落ちることもある
-        failure = exc
-        result = None
     # 実 decompiler を組み立てる経路（``lifecycle.get_decompiler`` の遅延生成）
     # に入っていないこと。型判定 probe の import 失敗は Ghidra 無し環境と同じ。
-    assert "ghidra.app.decompiler" not in sys.modules
-    assert "ghidra.app.decompiler" not in blocker.blocked
-    return left, right, payload, collector, (result, failure)
+    assert_no_real_decompiler_was_built(outcome)
+    return (
+        outcome.left, outcome.right, outcome.payload, outcome.collector,
+        (outcome.result, outcome.failure),
+    )
 
 
-@pytest.mark.skipif(not _z3_available(), reason="z3 is not available in PATH")
+@pytest.mark.recorded_replay
 def test_recorded_pair_replays_the_production_check_without_ghidra(monkeypatch):
     left_payload = _read("left.json")
     right_payload = _read("right.json")
@@ -278,7 +206,7 @@ def _delete_member(
     )
 
 
-@pytest.mark.skipif(not _z3_available(), reason="z3 is not available in PATH")
+@pytest.mark.recorded_replay
 def test_deleting_one_required_api_is_detected(monkeypatch):
     """必須 API を 1 件消したら、欠落履歴と例外の両方で検出される。"""
 
@@ -307,7 +235,7 @@ def test_deleting_one_required_api_is_detected(monkeypatch):
     assert isinstance(failure, RecordedSurfaceMissing)
 
 
-@pytest.mark.skipif(not _z3_available(), reason="z3 is not available in PATH")
+@pytest.mark.recorded_replay
 def test_deleting_one_memory_read_is_detected_even_though_the_outcome_matches(monkeypatch):
     """memory read を 1 件消しても最終 outcome と判定面は変わらない。
 

@@ -1,0 +1,152 @@
+name: recorded-full
+
+# The whole recorded P-code corpus: all eight cases, nine replays, every one
+# through the same validator the per-PR recorded-fast job uses. This is off the
+# PR critical path because two replays (wood, barthe2big) are ~92% of the
+# corpus wall clock -- not because anything about them is checked less.
+#
+# This is a Ghidra-free fixture regression. The real-binary fixed subset is a
+# different workflow and belongs to PR-109-C; it is not started here.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # Mondays 03:20 UTC, offset from the hour to avoid the scheduling spike.
+    - cron: "20 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  # The matrix comes from cases.json, so adding a case to the manifest adds a
+  # shard here with no workflow edit and no chance of the two drifting apart.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      replays: ${{ steps.manifest.outputs.replays }}
+      count: ${{ steps.manifest.outputs.count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - id: manifest
+        name: Read the replay list from the case manifest
+        run: |
+          python3 -B - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from scripts.function_tracer_pcode.tests.fixtures.pcode.corpus import (
+              select_replays, TIER_FULL,
+          )
+          replays = [spec.variant_id for spec in select_replays(tier=TIER_FULL)]
+          assert replays, "the manifest lists no replays"
+          print("replays=" + json.dumps(replays))
+          print("count=" + str(len(replays)))
+          PY
+      - name: Show the plan
+        run: |
+          echo "replays: ${{ steps.manifest.outputs.replays }}"
+          echo "count:   ${{ steps.manifest.outputs.count }}"
+
+  replay:
+    name: replay ${{ matrix.replay }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      # One failing replay must not cancel the others: the aggregate is more
+      # useful when it can say which ones passed and which did not.
+      fail-fast: false
+      matrix:
+        replay: ${{ fromJSON(needs.plan.outputs.replays) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements-test.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-test.txt
+
+      - name: Put the z3 CLI on PATH
+        run: |
+          if ! command -v z3 >/dev/null 2>&1; then
+            echo "$(python3 -c 'import sys; print(sys.prefix)')/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: z3 CLI is reachable
+        run: |
+          command -v z3
+          z3 --version
+
+      # One shard runs one replay, selected by its manifest id -- not by a -k
+      # match on a test name. The record under reports/ is written only after
+      # every check passes, so its presence is what "this replay passed" means
+      # to the aggregate.
+      - name: Replay ${{ matrix.replay }}
+        run: >
+          python3 -B -m pytest
+          scripts/function_tracer_pcode/tests/unit/test_recorded_pairs.py
+          -q -rs -p no:cacheprovider
+          --recorded-replay "${{ matrix.replay }}"
+          --recorded-report-dir reports
+
+      - name: Upload this replay's record
+        uses: actions/upload-artifact@v4
+        with:
+          name: recorded-replay-${{ matrix.replay }}
+          path: reports/
+          if-no-files-found: error
+          retention-days: 30
+
+  aggregate:
+    name: aggregate
+    needs: [plan, replay]
+    # Run even when a shard failed: the aggregate then reports the missing
+    # replay rather than the workflow simply going red with no corpus view.
+    # It cannot hide a shard failure -- a failed shard writes no record, and a
+    # missing record is a hard failure there.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Download every shard's record
+        uses: actions/download-artifact@v4
+        with:
+          pattern: recorded-replay-*
+          path: reports
+          merge-multiple: true
+
+      # Replays nothing. Checks that the expected nine variants each appear
+      # exactly once and passed, and that the SUM of their times is inside the
+      # corpus budget. The budget is never read as the workflow's wall clock:
+      # running the corpus as a matrix shortens the workflow and changes
+      # nothing about the Issue #109 criterion.
+      - name: Corpus completeness and budget
+        run: >
+          python3 -B -m
+          scripts.function_tracer_pcode.tests.tools.recorded_corpus_aggregate
+          --reports-dir reports
+          --json recorded-corpus-aggregate.json
+
+      - name: Upload the aggregate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recorded-corpus-aggregate
+          path: recorded-corpus-aggregate.json
+          if-no-files-found: warn
+          retention-days: 30

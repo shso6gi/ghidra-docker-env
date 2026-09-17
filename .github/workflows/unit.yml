@@ -9,9 +9,14 @@ on:
 permissions:
   contents: read
 
+# The per-PR gate is two independent jobs so they start together: the ordinary
+# suite and the light recorded replays. The two heavy replays (wood,
+# barthe2big) dominate the corpus wall clock and run in the recorded-full
+# workflow, which covers all nine with the same validator -- keeping them off
+# the critical path is a scheduling decision, not a coverage one.
 jobs:
-  unit:
-    name: import check, compileall, unit suite
+  unit-fast:
+    name: unit-fast
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -29,8 +34,7 @@ jobs:
           python -m pip install -r requirements-test.txt
 
       # Layer packages re-export lazily (PEP 562); importing each one must not
-      # need Ghidra/Java and must not create an import cycle. An import-layer
-      # test can be added to the unit suite later without touching this job.
+      # need Ghidra/Java and must not create an import cycle.
       - name: Package import check
         run: |
           python3 -B - <<'PY'
@@ -48,5 +52,87 @@ jobs:
       - name: compileall
         run: python3 -B -m compileall -q scripts
 
-      - name: Unit suite
-        run: python3 -B -m pytest scripts/function_tracer_pcode/tests/unit -q -p no:cacheprovider
+      # -m "not recorded_replay" DESELECTS every test that drives a real
+      # replay; it does not skip them. That covers the corpus replays and the
+      # PR-109-A round-trip E2Es alike -- a test carrying the marker is one
+      # that replays, and a contract test holds that classification against
+      # the code rather than against test names.
+      # Everything else runs, including the cheap recorded-corpus contract
+      # tests (manifest, ground-truth drift, verification metadata, clean
+      # provenance, deadline behaviour, marker classification) and the fixture
+      # schema and structure tests in test_recorded_program_roundtrip.py.
+      # -rs proves no test turned into a skip to get here.
+      - name: Unit suite (recorded replays deselected)
+        run: >
+          python3 -B -m pytest scripts/function_tracer_pcode/tests/unit
+          -q -rs --durations=25 -p no:cacheprovider
+          -m "not recorded_replay"
+
+  recorded-fast:
+    name: recorded-fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements-test.txt
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-test.txt
+
+      # The recorded corpus drives the real solver through the production path
+      # and is written to fail rather than skip when z3 is missing, so the CLI
+      # has to be on PATH. `z3-solver` ships `bin/z3` next to the interpreter;
+      # add that directory when the CLI is not already reachable, and prove the
+      # result in a fresh shell below.
+      - name: Put the z3 CLI on PATH
+        run: |
+          if ! command -v z3 >/dev/null 2>&1; then
+            echo "$(python3 -c 'import sys; print(sys.prefix)')/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: z3 CLI is reachable
+        run: |
+          command -v z3
+          z3 --version
+
+      # Everything that drives a real replay, selected by marker rather than by
+      # -k patterns or a list of node ids that go stale when a test is renamed:
+      #   * the corpus replays cases.json marks pr_gate=true (default tier)
+      #   * the PR-109-A round-trip and missing-surface E2Es, which replay a
+      #     recorded pair through the same production path
+      # The corpus validator here is the one recorded-full uses; nothing is
+      # weakened for the gate. The corpus prints each replay's wall clock.
+      - name: Recorded replays (PR gate)
+        run: >
+          python3 -B -m pytest scripts/function_tracer_pcode/tests/unit
+          -q -rs --durations=25 -p no:cacheprovider
+          -m recorded_replay
+
+      # The manifest contract is about the CORPUS, not about how many pytest
+      # tests this job ran: the job also runs the PR-109-A E2Es, which are not
+      # corpus replays. Keep the two counts apart.
+      - name: The gate covers exactly the manifest's pr_gate corpus replays
+        run: |
+          python3 -B - <<'PY'
+          from scripts.function_tracer_pcode.tests.fixtures.pcode.corpus import (
+              ALL_REPLAYS, PR_GATE_REPLAYS,
+          )
+          gate = [spec.variant_id for spec in PR_GATE_REPLAYS]
+          print("corpus replays in the PR gate ({}):".format(len(gate)))
+          for name in gate:
+              print("  " + name)
+          outside = [s.variant_id for s in ALL_REPLAYS if not s.pr_gate]
+          print("corpus replays run by recorded-full only ({}): {}".format(
+              len(outside), ", ".join(outside)))
+          print("this job also runs the PR-109-A recorded E2Es, which are not "
+                "corpus replays and are not counted here")
+          assert len(gate) == 7, gate
+          assert len(ALL_REPLAYS) == 9, ALL_REPLAYS
+          PY

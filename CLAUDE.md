@@ -41,6 +41,8 @@ python3 -B -m scripts.function_tracer_pcode.cli.main \
 
 # Record a Ghidra P-code fixture (needs PyGhidra; see tests/fixtures/pcode/SCHEMA.md).
 # Binaries must come from a writable working root, not from targets/EqBench.
+# Add --identical-fast-path off (the default) for a byte-identical pair: recording
+# with it on returns early and never reaches the P-code the OFF replay needs.
 docker compose run --rm ghidra-dev python3 -B -m scripts.function_tracer_pcode.tests.tools.record_pcode_fixture \
   --eqbench-root <working-root>/benchmarks --left <binary> --right <binary> \
   --function snippet --binary-ids B1 B2 \
@@ -56,7 +58,7 @@ bash -n eqbench_run_all_32jobs.sh neqbench_run_all_32jobs.sh rerun_eqbench_error
 docker compose run --rm ghidra-dev python3 -B -m pytest scripts/function_tracer_pcode/tests/unit -q
 ```
 
-The suite is pure Python except one opt-in smoke test (`RUN_PYGHIDRA_REGRESSIONS=1`, in `test_cli_equivalence_import_fallback.py`) that needs a real EqBench binary; everything else uses the mocks in `tests/conftest.py` (`MockProgram`, `create_mock_analysis`, `create_mock_result`) and golden cases from `tests/fixtures/cases.yml`. Note that running the checker outside the runner's supervisor/execution-identity harness yields `ERROR` from the v2 authority layer by design — real-binary tests must go through that harness.
+The suite is pure Python except one opt-in smoke test (`RUN_PYGHIDRA_REGRESSIONS=1`, in `test_cli_equivalence_import_fallback.py`) that needs a real EqBench binary; everything else uses the mocks in `tests/conftest.py` (`MockProgram`, `create_mock_analysis`, `create_mock_result`), golden cases from `tests/fixtures/cases.yml`, and the recorded Ghidra output in `tests/fixtures/pcode/` (`test_recorded_pairs.py` replays the recorded corpus through the production path, one replay per subprocess with `budget_seconds` as a hard deadline; it needs the `z3` CLI on `PATH` and **fails rather than skips** without it, and the semantic relations it asserts come from `scripts/eqbench/neq_ground_truth.tsv`, never from the `Eq` / `Neq` directory name). Which replays run is a manifest decision, not a `-k` string: `cases.json` marks the `pr_gate` subset that the per-PR `recorded-fast` job runs, `--recorded-tier=full` runs all nine, and `--recorded-replay=<variant_id>` runs one (the `recorded-full` matrix). Every path calls the same `validate_replay`, and the corpus completeness/budget contract lives once in `tests/fixtures/pcode/corpus.py`. The cheap contracts (manifest, ground-truth drift, verification metadata, clean provenance, deadline behaviour) are in `test_recorded_corpus_contracts.py` and run in `unit-fast`. Note that running the checker outside the runner's supervisor/execution-identity harness yields `ERROR` from the v2 authority layer by design — real-binary tests must go through that harness.
 
 ### EqBench matrix runs
 

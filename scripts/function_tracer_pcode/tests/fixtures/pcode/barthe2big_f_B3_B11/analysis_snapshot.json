@@ -1,0 +1,574 @@
+{
+ "analyzer_programs": [
+  "B3",
+  "B11"
+ ],
+ "schema": "recorded-pcode-analysis-snapshot-v1",
+ "sides": {
+  "B11": [
+   {
+    "analysis_notes": [],
+    "effect_summary": {
+     "effects": [],
+     "has_unsupported_call": false,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1"
+     ],
+     "synthetic_expr": null,
+     "unsupported_call_sites": []
+    },
+    "entry_point": "00100000",
+    "expansion_budget_truncations": [],
+    "function_name": "f",
+    "incomplete_control_flow": false,
+    "parameters": [
+     {
+      "data_type": "int",
+      "index": 0,
+      "is_signed": true,
+      "name": "param_1",
+      "owner_entry_offset": 1048576,
+      "size": 4,
+      "storage": {
+       "base_register_name": "a0",
+       "base_register_size": 8,
+       "base_register_size_bits": 64,
+       "bit_offset_in_base": 32,
+       "is_register": true,
+       "offset": 36,
+       "register_name": "a0_lo",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": true,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__stdcall"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/int",
+       4
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_storage_v1",
+       [
+        [
+         "ghidra_return_storage_member_v1",
+         "register",
+         20,
+         4
+        ]
+       ]
+      ]
+     },
+     "schema_version": 1
+    },
+    "return_type": "int",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 32,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "int",
+     "return_type_source": "decompiler_return_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "00100054",
+      "branch_index": 100,
+      "conditions": [
+       "(0 < param_1)",
+       "(not (((phi_circular + 4294967295) + 4294967295) != 0))"
+      ],
+      "order_index": 0,
+      "pcode_identity": "00100054:t54",
+      "pcode_order": 2,
+      "pcode_time": 54,
+      "return_kind": "phi_expansion",
+      "validation_blockers": [],
+      "value": "(((5 + (param_1 * 2)) + (((int((param_1 - 1)) * int((param_1 - 2))) >> 1) & 4294967295)) + 4294967295)"
+     },
+     {
+      "acceptance_status": null,
+      "address": "00100054",
+      "branch_index": 0,
+      "conditions": [
+       "(not (0 < param_1))"
+      ],
+      "order_index": 1,
+      "pcode_identity": "00100054:t54",
+      "pcode_order": 2,
+      "pcode_time": 54,
+      "return_kind": "phi_expansion",
+      "validation_blockers": [],
+      "value": "1"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 2,
+      "signed_medium": 0,
+      "signed_strong": 0,
+      "unsigned": 1
+     },
+     "opcode_counts": {
+      "INT_RIGHT": 1
+     },
+     "signedness": "unsigned"
+    },
+    "unknown_event_reasons": []
+   }
+  ],
+  "B3": [
+   {
+    "analysis_notes": [
+     "object_centric_scalar_signedness_repair",
+     "object_centric_callother_userop_normalization"
+    ],
+    "effect_summary": {
+     "effects": [],
+     "has_unsupported_call": false,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1"
+     ],
+     "synthetic_expr": null,
+     "unsupported_call_sites": []
+    },
+    "entry_point": "00100000",
+    "expansion_budget_truncations": [
+     {
+      "dedup": {
+       "candidate_count": 256,
+       "kept_count": 64,
+       "limit": 64
+      },
+      "event_id": "8ffe4178782d13de03c2fa025866fb8a96eb5272cf45494d14c0e5c19b15ee40",
+      "kind": "dedup_case_limit",
+      "label": "INT_MULT combinations",
+      "owner_scope_key": [
+       "analysis_scope",
+       [
+        "function",
+        1001000000000,
+        1048576
+       ],
+       [],
+       []
+      ],
+      "pcode_op_ref": {
+       "address_offset": 1048664,
+       "binary_id": "B3",
+       "block_index": 5,
+       "function_entry_offset": 1048576,
+       "function_entry_space": "ram",
+       "input_sizes": [
+        4,
+        4
+       ],
+       "kind": "pcode_op",
+       "local_op_ordinal": 21,
+       "mnemonic": "INT_MULT",
+       "opcode": 32,
+       "output_size": 4,
+       "program_uid": 1001000000000,
+       "seq_order": 21,
+       "seq_time": 159,
+       "target_offset": 1048664,
+       "target_space": "ram"
+      },
+      "surface": "return_value"
+     },
+     {
+      "dedup": {
+       "candidate_count": 88,
+       "kept_count": 64,
+       "limit": 64
+      },
+      "event_id": "b4cd66a8c1754fdb4e6488e9feb9bd847a0082ad822cfe4e7fdaad140fcd2d41",
+      "kind": "dedup_case_limit",
+      "label": "SUBPIECE input[0]",
+      "owner_scope_key": [
+       "analysis_scope",
+       [
+        "function",
+        1001000000000,
+        1048576
+       ],
+       [],
+       []
+      ],
+      "pcode_op_ref": {
+       "address_offset": 1048664,
+       "binary_id": "B3",
+       "block_index": 5,
+       "function_entry_offset": 1048576,
+       "function_entry_space": "ram",
+       "input_sizes": [
+        16,
+        4
+       ],
+       "kind": "pcode_op",
+       "local_op_ordinal": 22,
+       "mnemonic": "SUBPIECE",
+       "opcode": 63,
+       "output_size": 4,
+       "program_uid": 1001000000000,
+       "seq_order": 22,
+       "seq_time": 343,
+       "target_offset": 1048664,
+       "target_space": "ram"
+      },
+      "surface": "return_value"
+     },
+     {
+      "dedup": {
+       "candidate_count": 88,
+       "kept_count": 64,
+       "limit": 64
+      },
+      "event_id": "caaac415c000c9d44f2bf56ccdd1581bca26a6ed80db1f5f1f4ca91176b2f3a7",
+      "kind": "dedup_case_limit",
+      "label": "SUBPIECE input[0]",
+      "owner_scope_key": [
+       "analysis_scope",
+       [
+        "function",
+        1001000000000,
+        1048576
+       ],
+       [],
+       []
+      ],
+      "pcode_op_ref": {
+       "address_offset": 1048664,
+       "binary_id": "B3",
+       "block_index": 5,
+       "function_entry_offset": 1048576,
+       "function_entry_space": "ram",
+       "input_sizes": [
+        16,
+        4
+       ],
+       "kind": "pcode_op",
+       "local_op_ordinal": 20,
+       "mnemonic": "SUBPIECE",
+       "opcode": 63,
+       "output_size": 4,
+       "program_uid": 1001000000000,
+       "seq_order": 20,
+       "seq_time": 340,
+       "target_offset": 1048664,
+       "target_space": "ram"
+      },
+      "surface": "return_value"
+     },
+     {
+      "dedup": {
+       "candidate_count": 256,
+       "kept_count": 64,
+       "limit": 64
+      },
+      "event_id": "e880d7178f8317e04628695653505387223154e745f52b3275bba625078cde86",
+      "kind": "dedup_case_limit",
+      "label": "INT_MULT combinations",
+      "owner_scope_key": [
+       "analysis_scope",
+       [
+        "function",
+        1001000000000,
+        1048576
+       ],
+       [],
+       []
+      ],
+      "pcode_op_ref": {
+       "address_offset": 1048664,
+       "binary_id": "B3",
+       "block_index": 5,
+       "function_entry_offset": 1048576,
+       "function_entry_space": "ram",
+       "input_sizes": [
+        4,
+        4
+       ],
+       "kind": "pcode_op",
+       "local_op_ordinal": 23,
+       "mnemonic": "INT_MULT",
+       "opcode": 32,
+       "output_size": 4,
+       "program_uid": 1001000000000,
+       "seq_order": 23,
+       "seq_time": 160,
+       "target_offset": 1048664,
+       "target_space": "ram"
+      },
+      "surface": "return_value"
+     },
+     {
+      "dedup": {
+       "candidate_count": 256,
+       "kept_count": 64,
+       "limit": 64
+      },
+      "event_id": "f3ad7eb5bc50f31c7a25175e200f56cb36cb913011c23297572b89dd034bfba4",
+      "kind": "dedup_case_limit",
+      "label": "PIECE combinations",
+      "owner_scope_key": [
+       "analysis_scope",
+       [
+        "function",
+        1001000000000,
+        1048576
+       ],
+       [],
+       []
+      ],
+      "pcode_op_ref": {
+       "address_offset": 1048660,
+       "binary_id": "B3",
+       "block_index": 5,
+       "function_entry_offset": 1048576,
+       "function_entry_space": "ram",
+       "input_sizes": [
+        4,
+        12
+       ],
+       "kind": "pcode_op",
+       "local_op_ordinal": 11,
+       "mnemonic": "PIECE",
+       "opcode": 62,
+       "output_size": 16,
+       "program_uid": 1001000000000,
+       "seq_order": 11,
+       "seq_time": 314,
+       "target_offset": 1048660,
+       "target_space": "ram"
+      },
+      "surface": "return_value"
+     },
+     {
+      "dedup": {
+       "candidate_count": 256,
+       "kept_count": 64,
+       "limit": 64
+      },
+      "event_id": "f86cca2562505b965d34bf74449bb0d63a6309e1240a6d81813e73ad416f56cc",
+      "kind": "dedup_case_limit",
+      "label": "PIECE combinations",
+      "owner_scope_key": [
+       "analysis_scope",
+       [
+        "function",
+        1001000000000,
+        1048576
+       ],
+       [],
+       []
+      ],
+      "pcode_op_ref": {
+       "address_offset": 1048660,
+       "binary_id": "B3",
+       "block_index": 5,
+       "function_entry_offset": 1048576,
+       "function_entry_space": "ram",
+       "input_sizes": [
+        4,
+        12
+       ],
+       "kind": "pcode_op",
+       "local_op_ordinal": 18,
+       "mnemonic": "PIECE",
+       "opcode": 62,
+       "output_size": 16,
+       "program_uid": 1001000000000,
+       "seq_order": 18,
+       "seq_time": 317,
+       "target_offset": 1048660,
+       "target_space": "ram"
+      },
+      "surface": "return_value"
+     }
+    ],
+    "function_name": "f",
+    "incomplete_control_flow": false,
+    "parameters": [
+     {
+      "data_type": "uint",
+      "index": 0,
+      "is_signed": false,
+      "name": "param_1",
+      "owner_entry_offset": 1048576,
+      "size": 4,
+      "storage": {
+       "base_register_name": "x0",
+       "base_register_size": 8,
+       "base_register_size_bits": 64,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 16384,
+       "register_name": "w0",
+       "size": 4,
+       "size_bits": 32,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": false,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__cdecl"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/int",
+       4
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_storage_v1",
+       [
+        [
+         "ghidra_return_storage_member_v1",
+         "register",
+         16384,
+         4
+        ]
+       ]
+      ]
+     },
+     "schema_version": 1
+    },
+    "return_type": "int",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 32,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "int",
+     "return_type_source": "decompiler_return_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "001000a4",
+      "branch_index": 10200,
+      "conditions": [
+       "(0 < param_1)",
+       "(not (param_1 < 8))",
+       "(not ((param_1 & 4294967288) == param_1))",
+       "(not (((param_1 & 4294967288) - 8) != 0))",
+       "(not ((((param_1 - ((param_1 & 4294967288) | 1)) + 1) + 4294967295) != 0))"
+      ],
+      "order_index": 0,
+      "pcode_identity": "001000a4:t94",
+      "pcode_order": 2,
+      "pcode_time": 94,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "((((((25 * (NEON_ext(((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), ((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), 8, 1) & 4294967295)) * (25 * ((NEON_ext(((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), ((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), 8, 1) >> 32) & 4294967295))) * 5) + (param_1 * 2)) + (((int((param_1 - 1)) * int((param_1 - 2))) >> 1) & 4294967295)) + 4294967295)"
+     },
+     {
+      "acceptance_status": null,
+      "address": "001000a4",
+      "branch_index": 10000,
+      "conditions": [
+       "(param_1 < 8)",
+       "(0 < param_1)",
+       "(not ((((param_1 - 1) + 1) + 4294967295) != 0))"
+      ],
+      "order_index": 1,
+      "pcode_identity": "001000a4:t94",
+      "pcode_order": 2,
+      "pcode_time": 94,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "(((5 + (param_1 * 2)) + (((int((param_1 - 1)) * int((param_1 - 2))) >> 1) & 4294967295)) + 4294967295)"
+     },
+     {
+      "acceptance_status": null,
+      "address": "001000a4",
+      "branch_index": 10100,
+      "conditions": [
+       "(0 < param_1)",
+       "((param_1 & 4294967288) == param_1)",
+       "(not (((param_1 & 4294967288) - 8) != 0))"
+      ],
+      "order_index": 2,
+      "pcode_identity": "001000a4:t94",
+      "pcode_order": 2,
+      "pcode_time": 94,
+      "return_kind": "phi_expansion",
+      "validation_blockers": [],
+      "value": "(((((25 * (NEON_ext(((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), ((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), 8, 1) & 4294967295)) * (25 * ((NEON_ext(((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), ((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), 8, 1) >> 32) & 4294967295))) + (param_1 * 2)) + (((int((param_1 - 1)) * int((param_1 - 2))) >> 1) & 4294967295)) + 4294967295)"
+     },
+     {
+      "acceptance_status": null,
+      "address": "00100020",
+      "branch_index": 0,
+      "conditions": [
+       "(param_1 < 1)"
+      ],
+      "order_index": 3,
+      "pcode_identity": "00100020:t173",
+      "pcode_order": 1,
+      "pcode_time": 173,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "1"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 2,
+      "signed_medium": 0,
+      "signed_strong": 0,
+      "unsigned": 1
+     },
+     "opcode_counts": {
+      "INT_RIGHT": 1
+     },
+     "signedness": "unsigned"
+    },
+    "unknown_event_reasons": []
+   }
+  ]
+ }
+}

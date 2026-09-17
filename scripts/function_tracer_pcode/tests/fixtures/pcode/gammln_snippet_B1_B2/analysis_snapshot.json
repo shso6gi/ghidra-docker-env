@@ -1,0 +1,284 @@
+{
+ "analyzer_programs": [
+  "B1",
+  "B2"
+ ],
+ "schema": "recorded-pcode-analysis-snapshot-v1",
+ "sides": {
+  "B1": [
+   {
+    "analysis_notes": [
+     "effect_call_argument_evidence",
+     "bounded_call_refinement_deferred_expanded",
+     "bounded_call_refinement_preserved_unresolved_deferred_call",
+     "deferred_call_return_unresolved"
+    ],
+    "effect_summary": {
+     "effects": [],
+     "has_unsupported_call": true,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1"
+     ],
+     "synthetic_expr": null,
+     "unsupported_call_sites": [
+      {
+       "arguments": [
+        "PTRSUB(sp, (-112))",
+        "0",
+        "48"
+       ],
+       "order_key": 268448789,
+       "path_conditions": [],
+       "reason": "callee_effect_summary_missing",
+       "target_expr": "1052672"
+      },
+      {
+       "arguments": [
+        "((param_1 INDIRECT 43) + 4617878467915022336)"
+       ],
+       "order_key": 268481593,
+       "path_conditions": [],
+       "reason": "callee_effect_summary_missing",
+       "target_expr": "1052680"
+      }
+     ]
+    },
+    "entry_point": "00100000",
+    "expansion_budget_truncations": [],
+    "function_name": "snippet",
+    "incomplete_control_flow": true,
+    "parameters": [
+     {
+      "data_type": "double",
+      "index": 0,
+      "is_signed": true,
+      "name": "param_1",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "z0",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20480,
+       "register_name": "d0",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": false,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__cdecl"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/undefined1[16]",
+       16
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_storage_v1",
+       [
+        [
+         "ghidra_return_storage_member_v1",
+         "register",
+         20480,
+         16
+        ]
+       ]
+      ]
+     },
+     "schema_version": 1
+    },
+    "return_type": "undefined1[16]",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 128,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "undefined1[16]",
+     "return_type_source": "undefined_decompiler_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "0010017c",
+      "branch_index": 0,
+      "conditions": [],
+      "order_index": 0,
+      "pcode_identity": "0010017c:t327",
+      "pcode_order": 36,
+      "pcode_time": 327,
+      "return_kind": "phi_expansion",
+      "validation_blockers": [],
+      "value": "(((param_1 + 4617878467915022336) - (log@0x1000b4 * (param_1 + 4602678819172646912))) + log@0x100164)"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 0,
+      "signed_medium": 0,
+      "signed_strong": 1,
+      "unsigned": 0
+     },
+     "opcode_counts": {
+      "INT_SEXT": 1
+     },
+     "signedness": "signed"
+    },
+    "unknown_event_reasons": []
+   }
+  ],
+  "B2": [
+   {
+    "analysis_notes": [
+     "effect_call_argument_evidence",
+     "bounded_call_refinement_deferred_expanded",
+     "bounded_call_refinement_preserved_unresolved_deferred_call",
+     "deferred_call_return_unresolved"
+    ],
+    "effect_summary": {
+     "effects": [],
+     "has_unsupported_call": true,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1"
+     ],
+     "synthetic_expr": null,
+     "unsupported_call_sites": [
+      {
+       "arguments": [
+        "(param_1 + 4617878467915022336)"
+       ],
+       "order_key": 268474383,
+       "path_conditions": [],
+       "reason": "callee_effect_summary_missing",
+       "target_expr": "1052672"
+      }
+     ]
+    },
+    "entry_point": "00100000",
+    "expansion_budget_truncations": [],
+    "function_name": "snippet",
+    "incomplete_control_flow": true,
+    "parameters": [
+     {
+      "data_type": "double",
+      "index": 0,
+      "is_signed": true,
+      "name": "param_1",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "z0",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20480,
+       "register_name": "d0",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": false,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__cdecl"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/undefined1[16]",
+       16
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_storage_v1",
+       [
+        [
+         "ghidra_return_storage_member_v1",
+         "register",
+         20480,
+         16
+        ]
+       ]
+      ]
+     },
+     "schema_version": 1
+    },
+    "return_type": "undefined1[16]",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 128,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "undefined1[16]",
+     "return_type_source": "undefined_decompiler_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "00100104",
+      "branch_index": 0,
+      "conditions": [],
+      "order_index": 0,
+      "pcode_identity": "00100104:t218",
+      "pcode_order": 19,
+      "pcode_time": 218,
+      "return_kind": "phi_expansion",
+      "validation_blockers": [],
+      "value": "(log@0x1000f0 - ((param_1 + 4617878467915022336) - (log@0x100098 * (param_1 + 4602678819172646912))))"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 0,
+      "signed_medium": 0,
+      "signed_strong": 0,
+      "unsigned": 0
+     },
+     "opcode_counts": {},
+     "signedness": "unknown"
+    },
+    "unknown_event_reasons": []
+   }
+  ]
+ }
+}

@@ -664,10 +664,12 @@ def _run_production_check(
     """本物の workflow / authority connector で 1 pair 実行する。
 
     Ghidra 解析だけを差し替え、fast path が発火するときは解析器を
-    インスタンス化しようとした時点で `AssertionError` にする。
+    インスタンス化しようとした時点で `AssertionError` にする。解析器は
+    `EquivalenceChecker(analyzer_factory=...)`（Issue #109）で渡す。
+    production 自身が解析器を作る経路がそこなので、package 属性を裏で
+    差し替えるより test が本番に近い。
     """
 
-    import scripts.function_tracer_pcode.analysis as analysis_package
     from scripts.function_tracer_pcode.authority.decision.production_cutover import (
         build_default_cutover_connector,
     )
@@ -707,7 +709,6 @@ def _run_production_check(
     def _no_solver(*_args, **_kwargs):
         raise AssertionError("a solver ran on the identical fast path")
 
-    monkeypatch.setattr(analysis_package, "ReturnAnalyzer", _RecordingReturnAnalyzer)
     for name in ("run_single", "run_parallel", "run_sequential"):
         monkeypatch.setattr(ParallelSolverRunner, name, _no_solver)
     finder = _ForbiddenImportFinder("ghidra.app.decompiler")
@@ -715,9 +716,16 @@ def _run_production_check(
 
     if checker is None:
         checker = EquivalenceChecker(
-            debug=False, identical_fast_path=identical_fast_path_enabled
+            debug=False, identical_fast_path=identical_fast_path_enabled,
+            analyzer_factory=_RecordingReturnAnalyzer,
         )
         checker.v2_dual_write_pilot_connector = build_default_cutover_connector()
+    else:
+        # 使い回しの checker は、この 1 回のために解析器 collaborator を
+        # 差し替える（呼び出しごとに probe と `forbid_analysis` が変わる）。
+        monkeypatch.setattr(
+            checker, "analyzer_factory", _RecordingReturnAnalyzer, raising=False,
+        )
     result = checker.check_from_binaries(
         program1,
         program2,

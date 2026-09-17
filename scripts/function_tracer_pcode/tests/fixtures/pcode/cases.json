@@ -1,0 +1,351 @@
+{
+ "cases": [
+  {
+   "budget_seconds": 40,
+   "case_id": "surface_SurfaceConstructor_N_B2_O_B4",
+   "dataset_label": "Neq",
+   "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
+   "function_name": "SurfaceConstructor",
+   "ground_truth_file": "ground_truth/surface_SurfaceConstructor_N_B2_O_B4.json",
+   "issue_refs": [
+    "#109",
+    "#16"
+   ],
+   "left": {
+    "binary_id": "B2",
+    "eqbench_relative_path": "raytrace/surface/Neq/source/newV-arm64-clang-O1",
+    "fixture": "left.json",
+    "sha256": "8eddabebfa95d2fe33ad713ee23d39fd6fb3a2618548df9763dcdd84867078e4"
+   },
+   "measured_seconds": {
+    "container": 3.9,
+    "github_hosted_runner": 9.7
+   },
+   "pr_gate": true,
+   "recording": {
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
+    "identical_fast_path": false
+   },
+   "right": {
+    "binary_id": "B4",
+    "eqbench_relative_path": "raytrace/surface/Neq/source/oldV-arm64-clang-O3",
+    "fixture": "right.json",
+    "sha256": "1abc8b82bb0f15c86219d3e03c306b6266a97f8a6940c83b84921f6bbce30d6b"
+   },
+   "sample_identity": "raytrace/surface/Neq/newV-oldV",
+   "variants": [
+    "default"
+   ]
+  },
+  {
+   "budget_seconds": 554,
+   "case_id": "barthe2big_f_B3_B11",
+   "dataset_label": "Eq",
+   "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
+   "function_name": "f",
+   "ground_truth_file": "ground_truth/barthe2big_f_B3_B11.json",
+   "issue_refs": [
+    "#109",
+    "#22"
+   ],
+   "left": {
+    "binary_id": "B3",
+    "eqbench_relative_path": "REVE/barthe2big/Eq/source/new-arm64-clang-O2",
+    "fixture": "left.json",
+    "sha256": "9617343c60efcef52e3ce324496965839e32e878a79466d6561e73a59d4cd20f"
+   },
+   "measured_seconds": {
+    "container": 129.6,
+    "github_hosted_runner": 346.1
+   },
+   "pr_gate": false,
+   "recording": {
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
+    "identical_fast_path": false
+   },
+   "right": {
+    "binary_id": "B11",
+    "eqbench_relative_path": "REVE/barthe2big/Eq/source/new-mips64-clang-O2",
+    "fixture": "right.json",
+    "sha256": "7888e3b987d3e2eb802a3d8eb9e55441c8642832d375fb23a706d470b1292a02"
+   },
+   "sample_identity": "REVE/barthe2big/Eq/new",
+   "variants": [
+    "default"
+   ]
+  },
+  {
+   "budget_seconds": 626,
+   "case_id": "wood_wood_N_B2_O_B4",
+   "dataset_label": "Neq",
+   "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
+   "function_name": "wood",
+   "ground_truth_file": "ground_truth/wood_wood_N_B2_O_B4.json",
+   "issue_refs": [
+    "#109",
+    "#104"
+   ],
+   "left": {
+    "binary_id": "B2",
+    "eqbench_relative_path": "optimization/wood/Neq/source/newV-arm64-clang-O1",
+    "fixture": "left.json",
+    "sha256": "7fd91a72d7eb1f1c4f8b902215f0bf3ae41f2c8f7a9849db8ff2e48f98127c0f"
+   },
+   "measured_seconds": {
+    "container": 306.7,
+    "github_hosted_runner": 390.7
+   },
+   "pr_gate": false,
+   "recording": {
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
+    "identical_fast_path": false
+   },
+   "right": {
+    "binary_id": "B4",
+    "eqbench_relative_path": "optimization/wood/Neq/source/oldV-arm64-clang-O3",
+    "fixture": "right.json",
+    "sha256": "6827d18431feeb81b2a5af310c3e83c593c706d7e4d92acff1913fd7e94b0710"
+   },
+   "sample_identity": "optimization/wood/Neq/newV-oldV",
+   "variants": [
+    "default"
+   ]
+  },
+  {
+   "budget_seconds": 40,
+   "case_id": "max_snippet_N_B2_O_B4",
+   "dataset_label": "Neq",
+   "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
+   "function_name": "snippet",
+   "ground_truth_file": "ground_truth/max_snippet_N_B2_O_B4.json",
+   "issue_refs": [
+    "#109",
+    "#18"
+   ],
+   "left": {
+    "binary_id": "B2",
+    "eqbench_relative_path": "airy/MAX/Neq/source/newV-arm64-clang-O1",
+    "fixture": "left.json",
+    "sha256": "a23da413efb632d6ad82b3b69c974ac362aec628762ac86f5bee9ccdc5dfdd7b"
+   },
+   "measured_seconds": {
+    "container": 1.4,
+    "github_hosted_runner": 3.3
+   },
+   "pr_gate": true,
+   "recording": {
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
+    "identical_fast_path": false
+   },
+   "right": {
+    "binary_id": "B4",
+    "eqbench_relative_path": "airy/MAX/Neq/source/oldV-arm64-clang-O3",
+    "fixture": "right.json",
+    "sha256": "d5616247acbfd8ede422bd5c8a3f34e7e9b2d1cdd4677b0d872631c29c9004d5"
+   },
+   "sample_identity": "airy/MAX/Neq/newV-oldV",
+   "variants": [
+    "default"
+   ]
+  },
+  {
+   "budget_seconds": 40,
+   "case_id": "sign_snippet_N_B2_O_B4",
+   "dataset_label": "Neq",
+   "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
+   "function_name": "snippet",
+   "ground_truth_file": "ground_truth/sign_snippet_N_B2_O_B4.json",
+   "issue_refs": [
+    "#109",
+    "#19"
+   ],
+   "left": {
+    "binary_id": "B2",
+    "eqbench_relative_path": "bess/SIGN/Neq/source/newV-arm64-clang-O1",
+    "fixture": "left.json",
+    "sha256": "73c6d6e35b4ac13eca06824eb28e3bc8341a761c2423e36aee4e321dd104b91e"
+   },
+   "measured_seconds": {
+    "container": 3.5,
+    "github_hosted_runner": 8.4
+   },
+   "pr_gate": true,
+   "recording": {
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
+    "identical_fast_path": false
+   },
+   "right": {
+    "binary_id": "B4",
+    "eqbench_relative_path": "bess/SIGN/Neq/source/oldV-arm64-clang-O3",
+    "fixture": "right.json",
+    "sha256": "8dc862df0021e87877543fa4ff91095732e6b75a745f6ae9ae1b1428016234e6"
+   },
+   "sample_identity": "bess/SIGN/Neq/newV-oldV",
+   "variants": [
+    "default"
+   ]
+  },
+  {
+   "budget_seconds": 40,
+   "case_id": "gammln_snippet_B1_B2",
+   "dataset_label": "Eq",
+   "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
+   "function_name": "snippet",
+   "ground_truth_file": "ground_truth/gammln_snippet_B1_B2.json",
+   "issue_refs": [
+    "#109",
+    "#20"
+   ],
+   "left": {
+    "binary_id": "B1",
+    "eqbench_relative_path": "ran/gammln/Eq/source/newV-arm64-clang-O0",
+    "fixture": "left.json",
+    "sha256": "5b14ed6589359fc5fdebbd2400004fdf71009df1ef55becc03002df36161e88f"
+   },
+   "measured_seconds": {
+    "container": 2.7,
+    "github_hosted_runner": 6.8
+   },
+   "pr_gate": true,
+   "recording": {
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
+    "identical_fast_path": false
+   },
+   "right": {
+    "binary_id": "B2",
+    "eqbench_relative_path": "ran/gammln/Eq/source/newV-arm64-clang-O1",
+    "fixture": "right.json",
+    "sha256": "ec95a4f119ae6ed85192cc62bd2213e8e4fa94dd791023fac1bada4c6f459b11"
+   },
+   "sample_identity": "ran/gammln/Eq/newV",
+   "variants": [
+    "default"
+   ]
+  },
+  {
+   "budget_seconds": 40,
+   "case_id": "bessj0_snippet_B10_B11",
+   "dataset_label": "Eq",
+   "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
+   "function_name": "snippet",
+   "ground_truth_file": "ground_truth/bessj0_snippet_B10_B11.json",
+   "issue_refs": [
+    "#109",
+    "#15",
+    "#21"
+   ],
+   "left": {
+    "binary_id": "B10",
+    "eqbench_relative_path": "bess/bessj0/Eq/source/newV-mips64-clang-O1",
+    "fixture": "left.json",
+    "sha256": "225287e732c96865681a2e5ac7aca9f772028f599c468d8b36f1879527a084e9"
+   },
+   "measured_seconds": {
+    "container": 7.5,
+    "github_hosted_runner": 18.5
+   },
+   "pr_gate": true,
+   "recording": {
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
+    "identical_fast_path": false
+   },
+   "right": {
+    "binary_id": "B11",
+    "eqbench_relative_path": "bess/bessj0/Eq/source/newV-mips64-clang-O2",
+    "fixture": "right.json",
+    "sha256": "225287e732c96865681a2e5ac7aca9f772028f599c468d8b36f1879527a084e9"
+   },
+   "sample_identity": "bess/bessj0/Eq/newV",
+   "variants": [
+    "fast_path_on",
+    "fast_path_off"
+   ]
+  },
+  {
+   "budget_seconds": 40,
+   "case_id": "sphere_SphereConstructor_N_B2_O_B4",
+   "dataset_label": "Neq",
+   "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
+   "function_name": "SphereConstructor",
+   "ground_truth_file": "ground_truth/sphere_SphereConstructor_N_B2_O_B4.json",
+   "issue_refs": [
+    "#109"
+   ],
+   "left": {
+    "binary_id": "B2",
+    "eqbench_relative_path": "raytrace/sphere/Neq/source/newV-arm64-clang-O1",
+    "fixture": "left.json",
+    "sha256": "55fd9f11d9112e8b9f681c9aaa8da087dd2879c1c3d7e538eda6aa134af82667"
+   },
+   "measured_seconds": {
+    "container": 6.4,
+    "github_hosted_runner": 15.9
+   },
+   "pr_gate": true,
+   "recording": {
+    "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+    "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+    "dirty": false,
+    "identical_fast_path": false
+   },
+   "right": {
+    "binary_id": "B4",
+    "eqbench_relative_path": "raytrace/sphere/Neq/source/oldV-arm64-clang-O3",
+    "fixture": "right.json",
+    "sha256": "1abc8b82bb0f15c86219d3e03c306b6266a97f8a6940c83b84921f6bbce30d6b"
+   },
+   "sample_identity": "raytrace/sphere/Neq/newV-oldV",
+   "variants": [
+    "default"
+   ]
+  }
+ ],
+ "corpus_budget_seconds": 1200,
+ "note": [
+  "dataset_label is the EqBench directory lane (Eq / Neq).  It is NOT a",
+  "ground truth: the semantic relation comes from ground_truth_file,",
+  "which points at scripts/eqbench/neq_ground_truth.tsv (or at the",
+  "eq_sample_single_source rule).  Nothing in this file reaches the",
+  "checker; it is test metadata only.",
+  "pr_gate selects the replays the per-PR gate runs (job recorded-fast).",
+  "It is a scheduling decision, not a coverage one: every case runs in the",
+  "recorded-full workflow, with the same validator and the same assertions.",
+  "The two cases outside the gate are the ones that dominate the wall clock",
+  "(wood and barthe2big, ~92 %); excluding them keeps the PR critical path",
+  "short without weakening any case's checks.  Nothing may be dropped from",
+  "the full corpus to make a budget fit.",
+  "budget_seconds is applied as a real deadline: the replay worker's process",
+  "group is killed when it expires, so a hung worker fails fast instead of",
+  "running into the job timeout.  It guards one replay against a regression",
+  "in the checker, not against a slow machine, so it comes from the SLOWEST",
+  "measured environment (measured_seconds) with headroom, with a floor for",
+  "the cheap cases.  A GitHub-hosted runner was 2.7x slower than the",
+  "container on barthe2big, so a budget derived from the container alone",
+  "would fail there for reasons that have nothing to do with the checker.",
+  "Exceeding it is a test-harness failure and never becomes a production",
+  "UNKNOWN or TIMEOUT outcome.",
+  "corpus_budget_seconds is the Issue #109 time acceptance criterion as",
+  "revised on 2026-09-17: 1200 s for ALL nine replays on a GitHub-hosted",
+  "runner.  It is the SUM of the measured replay times, never the wall clock",
+  "of a parallel workflow -- running the corpus as a matrix shortens the",
+  "workflow but changes nothing about the criterion.  The original 180 s was",
+  "a placeholder that the measurements disproved.  The corpus is not shrunk",
+  "to fit a budget: cases are not dropped, recorded surface is not trimmed,",
+  "and a harness timeout is never reported as an UNKNOWN."
+ ],
+ "schema": "recorded-pcode-cases-v1"
+}

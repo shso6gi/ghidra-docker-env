@@ -1,0 +1,596 @@
+{
+ "analyzer_programs": [
+  "B2",
+  "B4"
+ ],
+ "schema": "recorded-pcode-analysis-snapshot-v1",
+ "sides": {
+  "B2": [
+   {
+    "analysis_notes": [
+     "effect_call_argument_evidence",
+     "bounded_call_refinement_deferred_expanded",
+     "bounded_call_refinement_preserved_unresolved_deferred_call",
+     "deferred_call_return_unresolved"
+    ],
+    "effect_summary": {
+     "effects": [],
+     "has_unsupported_call": true,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1",
+      "param_2",
+      "param_3",
+      "param_4",
+      "param_5"
+     ],
+     "synthetic_expr": null,
+     "unsupported_call_sites": [
+      {
+       "arguments": [
+        "1048676"
+       ],
+       "order_key": 268457985,
+       "path_conditions": [
+        "((4617315517961601024 - param_1) FLOAT_EQUAL 0)",
+        "(((param_2 - (param_1 * param_1)) * 4621819117588971520) FLOAT_EQUAL 0)",
+        "((4611686018427387904 - param_3) FLOAT_EQUAL 0)",
+        "(((param_4 - (param_3 * param_3)) * 4620693217682128896) FLOAT_EQUAL 0)"
+       ],
+       "reason": "callee_effect_summary_missing",
+       "target_expr": "1052672"
+      }
+     ]
+    },
+    "entry_point": "00100000",
+    "expansion_budget_truncations": [],
+    "function_name": "wood",
+    "incomplete_control_flow": true,
+    "parameters": [
+     {
+      "data_type": "double",
+      "index": 0,
+      "is_signed": true,
+      "name": "param_1",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "z0",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20480,
+       "register_name": "d0",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "double",
+      "index": 1,
+      "is_signed": true,
+      "name": "param_2",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "z1",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20512,
+       "register_name": "d1",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "double",
+      "index": 2,
+      "is_signed": true,
+      "name": "param_3",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "z2",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20544,
+       "register_name": "d2",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "double",
+      "index": 3,
+      "is_signed": true,
+      "name": "param_4",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "z3",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20576,
+       "register_name": "d3",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "ulong",
+      "index": 4,
+      "is_signed": false,
+      "name": "param_5",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "x0",
+       "base_register_size": 8,
+       "base_register_size_bits": 64,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 16384,
+       "register_name": "x0",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": false,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__cdecl"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/ulong",
+       8
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_storage_v1",
+       [
+        [
+         "ghidra_return_storage_member_v1",
+         "register",
+         16384,
+         8
+        ]
+       ]
+      ]
+     },
+     "schema_version": 1
+    },
+    "return_type": "ulong",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 64,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "ulong",
+     "return_type_source": "decompiler_return_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "00100060",
+      "branch_index": 3000,
+      "conditions": [
+       "((4617315517961601024 - param_1) FLOAT_EQUAL 0)",
+       "((4611686018427387904 - param_3) FLOAT_EQUAL 0)",
+       "(((param_2 - (param_1 * param_1)) * 4621819117588971520) FLOAT_EQUAL 0)",
+       "(not (((param_4 - (param_3 * param_3)) * 4620693217682128896) FLOAT_EQUAL 0))"
+      ],
+      "order_index": 0,
+      "pcode_identity": "00100060:t121",
+      "pcode_order": 1,
+      "pcode_time": 121,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "param_5"
+     },
+     {
+      "acceptance_status": null,
+      "address": "00100060",
+      "branch_index": 4000,
+      "conditions": [
+       "((4617315517961601024 - param_1) FLOAT_EQUAL 0)",
+       "((4611686018427387904 - param_3) FLOAT_EQUAL 0)",
+       "(((param_2 - (param_1 * param_1)) * 4621819117588971520) FLOAT_EQUAL 0)",
+       "(((param_4 - (param_3 * param_3)) * 4620693217682128896) FLOAT_EQUAL 0)"
+      ],
+      "order_index": 1,
+      "pcode_identity": "00100060:t121",
+      "pcode_order": 1,
+      "pcode_time": 121,
+      "return_kind": "phi_expansion",
+      "validation_blockers": [],
+      "value": "int(puts@0x100058)"
+     },
+     {
+      "acceptance_status": null,
+      "address": "00100060",
+      "branch_index": 94000,
+      "conditions": [
+       "((4617315517961601024 - param_1) FLOAT_EQUAL 0)",
+       "((4611686018427387904 - param_3) FLOAT_EQUAL 0)",
+       "(((param_2 - (param_1 * param_1)) * 4621819117588971520) FLOAT_EQUAL 0)",
+       "(((param_4 - (param_3 * param_3)) * 4620693217682128896) FLOAT_EQUAL 0)"
+      ],
+      "order_index": 2,
+      "pcode_identity": "00100060:t121",
+      "pcode_order": 1,
+      "pcode_time": 121,
+      "return_kind": "phi_reachability_fallback",
+      "validation_blockers": [],
+      "value": "int(puts@0x100058)"
+     },
+     {
+      "acceptance_status": null,
+      "address": "00100060",
+      "branch_index": 2000,
+      "conditions": [
+       "((4617315517961601024 - param_1) FLOAT_EQUAL 0)",
+       "(((param_2 - (param_1 * param_1)) * 4621819117588971520) FLOAT_EQUAL 0)",
+       "(not ((4611686018427387904 - param_3) FLOAT_EQUAL 0))"
+      ],
+      "order_index": 3,
+      "pcode_identity": "00100060:t121",
+      "pcode_order": 1,
+      "pcode_time": 121,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "param_5"
+     },
+     {
+      "acceptance_status": null,
+      "address": "00100060",
+      "branch_index": 1000,
+      "conditions": [
+       "((4617315517961601024 - param_1) FLOAT_EQUAL 0)",
+       "(not (((param_2 - (param_1 * param_1)) * 4621819117588971520) FLOAT_EQUAL 0))"
+      ],
+      "order_index": 4,
+      "pcode_identity": "00100060:t121",
+      "pcode_order": 1,
+      "pcode_time": 121,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "param_5"
+     },
+     {
+      "acceptance_status": null,
+      "address": "00100060",
+      "branch_index": 0,
+      "conditions": [
+       "(not ((4617315517961601024 - param_1) FLOAT_EQUAL 0))"
+      ],
+      "order_index": 5,
+      "pcode_identity": "00100060:t121",
+      "pcode_order": 1,
+      "pcode_time": 121,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "param_5"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 1,
+      "signed_medium": 0,
+      "signed_strong": 0,
+      "unsigned": 0
+     },
+     "opcode_counts": {},
+     "signedness": "unknown"
+    },
+    "unknown_event_reasons": []
+   }
+  ],
+  "B4": [
+   {
+    "analysis_notes": [
+     "effect_call_argument_evidence",
+     "bounded_call_refinement_deferred_expanded",
+     "bounded_call_refinement_preserved_unresolved_deferred_call",
+     "bounded_call_refinement",
+     "deferred_call_return_unresolved"
+    ],
+    "effect_summary": {
+     "effects": [],
+     "has_unsupported_call": true,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1",
+      "param_2",
+      "param_3",
+      "param_4",
+      "param_5"
+     ],
+     "synthetic_expr": null,
+     "unsupported_call_sites": [
+      {
+       "arguments": [
+        "1048660"
+       ],
+       "order_key": 268454913,
+       "path_conditions": [
+        "((4617315517961601024 - param_1) FLOAT_EQUAL 0)",
+        "(not FLOAT_NAN(((param_2 - (param_1 * param_1)) * 4621819117588971520)))",
+        "(((param_2 - (param_1 * param_1)) * 4621819117588971520) FLOAT_EQUAL 4621819117588971520)",
+        "((4611686018427387904 - param_3) FLOAT_EQUAL 0)",
+        "(((param_4 - (param_3 * param_3)) * 4620693217682128896) FLOAT_EQUAL 0)"
+       ],
+       "reason": "callee_effect_summary_missing",
+       "target_expr": "1052672"
+      }
+     ]
+    },
+    "entry_point": "00100000",
+    "expansion_budget_truncations": [],
+    "function_name": "wood",
+    "incomplete_control_flow": true,
+    "parameters": [
+     {
+      "data_type": "double",
+      "index": 0,
+      "is_signed": true,
+      "name": "param_1",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "z0",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20480,
+       "register_name": "d0",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "double",
+      "index": 1,
+      "is_signed": true,
+      "name": "param_2",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "z1",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20512,
+       "register_name": "d1",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "double",
+      "index": 2,
+      "is_signed": true,
+      "name": "param_3",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "z2",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20544,
+       "register_name": "d2",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "double",
+      "index": 3,
+      "is_signed": true,
+      "name": "param_4",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "z3",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20576,
+       "register_name": "d3",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     },
+     {
+      "data_type": "ulong",
+      "index": 4,
+      "is_signed": false,
+      "name": "param_5",
+      "owner_entry_offset": 1048576,
+      "size": 8,
+      "storage": {
+       "base_register_name": "x0",
+       "base_register_size": 8,
+       "base_register_size_bits": 64,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 16384,
+       "register_name": "x0",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": false,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__cdecl"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/ulong",
+       8
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_storage_v1",
+       [
+        [
+         "ghidra_return_storage_member_v1",
+         "register",
+         16384,
+         8
+        ]
+       ]
+      ]
+     },
+     "schema_version": 1
+    },
+    "return_type": "ulong",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 64,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "ulong",
+     "return_type_source": "decompiler_return_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "0010004c",
+      "branch_index": 0,
+      "conditions": [
+       "PHI(0 if (not ((4617315517961601024 - param_1) FLOAT_EQUAL 0)), 0 if (((4617315517961601024 - param_1) FLOAT_EQUAL 0) and FLOAT_NAN(((param_2 - (param_1 * param_1)) * 4621819117588971520))), (((param_2 - (param_1 * param_1)) * 4621819117588971520) FLOAT_EQUAL 4621819117588971520) if (((4617315517961601024 - param_1) FLOAT_EQUAL 0) and (not FLOAT_NAN(((param_2 - (param_1 * param_1)) * 4621819117588971520)))))",
+       "((4617315517961601024 - param_1) FLOAT_EQUAL 0)",
+       "((4611686018427387904 - param_3) FLOAT_EQUAL 0)",
+       "(((param_4 - (param_3 * param_3)) * 4620693217682128896) FLOAT_EQUAL 0)",
+       "(not FLOAT_NAN(((param_2 - (param_1 * param_1)) * 4621819117588971520)))"
+      ],
+      "order_index": 0,
+      "pcode_identity": "0010004c:t112",
+      "pcode_order": 4,
+      "pcode_time": 112,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "int(puts@0x10004c)"
+     },
+     {
+      "acceptance_status": null,
+      "address": "00100050",
+      "branch_index": 104000,
+      "conditions": [
+       "((4617315517961601024 - param_1) FLOAT_EQUAL 0)",
+       "((4611686018427387904 - param_3) FLOAT_EQUAL 0)",
+       "(((param_2 - (param_1 * param_1)) * 4621819117588971520) FLOAT_EQUAL 4621819117588971520)",
+       "(not (((param_4 - (param_3 * param_3)) * 4620693217682128896) FLOAT_EQUAL 0))"
+      ],
+      "order_index": 1,
+      "pcode_identity": "00100050:t114",
+      "pcode_order": 0,
+      "pcode_time": 114,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "param_5"
+     },
+     {
+      "acceptance_status": null,
+      "address": "00100050",
+      "branch_index": 103000,
+      "conditions": [
+       "((4617315517961601024 - param_1) FLOAT_EQUAL 0)",
+       "(((param_2 - (param_1 * param_1)) * 4621819117588971520) FLOAT_EQUAL 4621819117588971520)",
+       "(not ((4611686018427387904 - param_3) FLOAT_EQUAL 0))"
+      ],
+      "order_index": 2,
+      "pcode_identity": "00100050:t114",
+      "pcode_order": 0,
+      "pcode_time": 114,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "param_5"
+     },
+     {
+      "acceptance_status": null,
+      "address": "00100050",
+      "branch_index": 100000,
+      "conditions": [
+       "(not PHI(0 if (not ((4617315517961601024 - param_1) FLOAT_EQUAL 0)), 0 if (((4617315517961601024 - param_1) FLOAT_EQUAL 0) and FLOAT_NAN(((param_2 - (param_1 * param_1)) * 4621819117588971520))), (((param_2 - (param_1 * param_1)) * 4621819117588971520) FLOAT_EQUAL 4621819117588971520) if (((4617315517961601024 - param_1) FLOAT_EQUAL 0) and (not FLOAT_NAN(((param_2 - (param_1 * param_1)) * 4621819117588971520))))))"
+      ],
+      "order_index": 3,
+      "pcode_identity": "00100050:t114",
+      "pcode_order": 0,
+      "pcode_time": 114,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "param_5"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 1,
+      "signed_medium": 0,
+      "signed_strong": 0,
+      "unsigned": 0
+     },
+     "opcode_counts": {},
+     "signedness": "unknown"
+    },
+    "unknown_event_reasons": []
+   }
+  ]
+ }
+}

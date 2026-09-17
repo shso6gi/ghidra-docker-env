@@ -12,6 +12,59 @@ if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
 pytest = cast(Any, importlib.import_module("pytest"))
+
+# Issue #109: 1 replay の検証は test module ではなく
+# `tests/fixtures/pcode/replay_validation.py` が持つ（fast / full が共有する
+# 唯一の実装）。assertion rewriting の対象へ明示的に入れておかないと、そこだけ
+# 素の `assert` になって失敗時に値が出なくなる。import より前に登録する。
+pytest.register_assert_rewrite(
+    "scripts.function_tracer_pcode.tests.fixtures.pcode.replay_validation"
+)
+pytest.register_assert_rewrite(
+    "scripts.function_tracer_pcode.tests.fixtures.pcode.corpus"
+)
+
+
+def pytest_addoption(parser):
+    """記録済み corpus の選択肢（Issue #109）。
+
+    どれを走らせるかを test 名の文字列一致（`-k`）ではなく manifest と明示の
+    id で決めるための入口。CI の job 名と workflow が安定して参照できる。
+    """
+
+    group = parser.getgroup("recorded corpus")
+    group.addoption(
+        "--recorded-tier", action="store", default="pr_gate",
+        choices=("pr_gate", "full"),
+        help=(
+            "which recorded replays to run: pr_gate (cases.json pr_gate=true, "
+            "the per-PR gate) or full (all of them)"
+        ),
+    )
+    group.addoption(
+        "--recorded-replay", action="append", default=[], metavar="VARIANT_ID",
+        help=(
+            "run only this recorded replay (repeatable); overrides "
+            "--recorded-tier. Used by one shard of the recorded-full matrix"
+        ),
+    )
+    group.addoption(
+        "--recorded-report-dir", action="store", default=None, metavar="DIR",
+        help=(
+            "write one machine-readable record per replay that passed every "
+            "check, for the recorded-full aggregate job"
+        ),
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "recorded_replay: runs a recorded P-code replay (Issue #109). The "
+        "per-PR unit-fast job deselects these; recorded-fast and "
+        "recorded-full run them.",
+    )
+
 yaml = cast(Any, importlib.import_module("yaml"))
 from dataclasses import dataclass, field
 from unittest.mock import Mock
