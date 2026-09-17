@@ -76,6 +76,9 @@ OWNED_SUMMARY_FUNCTIONS = debug_render.BOUNDED_DEBUG_RENDERERS
 #: 名前に ``debug`` を含むが sink ではない述語（呼んでも何も出力しない）。
 DEBUG_PREDICATES = debug_render.DEBUG_AVAILABILITY_PREDICATES
 
+#: 出力可否を表す属性名（``self.debug`` 等）。guard 節の形の判定に使う。
+DEBUG_FLAGS = debug_render.DEBUG_AVAILABILITY_FLAGS
+
 #: full render を持ってはいけない dunder。
 RENDER_FREE_DUNDERS = frozenset({"__repr__", "__str__"})
 
@@ -176,20 +179,38 @@ def _is_simple_argument(node: ast.AST) -> bool:
     return False
 
 
+def _is_debug_availability_test(node: ast.AST) -> bool:
+    """``self._debug_available()`` / ``self.debug`` / ``debug`` だけを認める。
+
+    「debug 述語以外の呼び出しが無い」ではなく「debug 述語そのものである」を
+    要求する（``if widget:`` や ``if self.some_flag:`` を guard と認めない）。
+    """
+
+    if isinstance(node, ast.Call):
+        if node.args or node.keywords:
+            return False
+        return _called_name(node) in DEBUG_PREDICATES
+    if isinstance(node, ast.Attribute):
+        return node.attr in DEBUG_PREDICATES or node.attr in DEBUG_FLAGS
+    if isinstance(node, ast.Name):
+        return node.id in DEBUG_PREDICATES or node.id in DEBUG_FLAGS
+    return False
+
+
 def _is_debug_guard_clause(statement: ast.stmt) -> bool:
     """``if not self._debug_available(): return "<debug-suppressed>"`` 型の前置き。
 
-    test に許すのは debug 述語の呼び出しだけ（``len(x) > 1000`` のような走査は
-    許さない）。本体は「定数文字列を返す」か「そのまま return」だけ。
+    test は「debug 可否そのもの」の否定だけ。``and`` / ``or`` や他の条件を
+    混ぜた形は認めない（fail-closed）。本体は定数文字列を返すか、そのまま
+    return するだけ。
     """
 
     if not isinstance(statement, ast.If) or statement.orelse:
         return False
-    for node in ast.walk(statement.test):
-        if isinstance(node, ast.Call) and _called_name(node) not in DEBUG_PREDICATES:
-            return False
-        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            return False
+    if not _is_negated(statement.test):
+        return False
+    if not _is_debug_availability_test(statement.test.operand):
+        return False
     if len(statement.body) != 1 or not isinstance(statement.body[0], ast.Return):
         return False
     value = statement.body[0].value
@@ -567,6 +588,47 @@ def test_scanner_refuses_a_wrapper_that_does_its_own_work(body, label):
     """
 
     source = "class Host:\n    def _debug_widget_summary(self, widget):\n" + body
+    assert _wrappers_in(source) == set(), label
+
+
+@pytest.mark.parametrize(
+    "guard, label",
+    [
+        ("        if not self._debug_available():\n            return '<suppressed>'\n", "predicate call"),
+        ("        if not self.debug:\n            return '<suppressed>'\n", "debug flag"),
+        ("        if not self.debug_flag():\n            return ''\n", "flag accessor"),
+    ],
+)
+def test_scanner_accepts_only_a_debug_availability_guard(guard, label):
+    source = (
+        "class Host:\n"
+        "    def _debug_widget_summary(self, widget):\n"
+        + guard
+        + "        return summarize_widget(widget)\n"
+    )
+    assert _wrappers_in(source) == {"_debug_widget_summary"}, label
+
+
+@pytest.mark.parametrize(
+    "guard, label",
+    [
+        ("        if widget:\n            return '<suppressed>'\n", "unrelated name"),
+        ("        if self.some_flag:\n            return '<suppressed>'\n", "unrelated attribute"),
+        ("        if self.debug or widget:\n            return '<suppressed>'\n", "or-ed condition"),
+        ("        if not (self.debug and widget):\n            return '<suppressed>'\n", "and-ed condition"),
+        ("        if not self._debug_available(widget):\n            return '<suppressed>'\n", "predicate with an argument"),
+        ("        if widget is None:\n            return 'None'\n", "value test"),
+    ],
+)
+def test_scanner_refuses_a_guard_that_is_not_about_debug(guard, label):
+    """guard は「debug 可否そのもの」の否定だけ。他の条件を混ぜた形は認めない。"""
+
+    source = (
+        "class Host:\n"
+        "    def _debug_widget_summary(self, widget):\n"
+        + guard
+        + "        return summarize_widget(widget)\n"
+    )
     assert _wrappers_in(source) == set(), label
 
 
