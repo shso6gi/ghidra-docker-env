@@ -166,7 +166,10 @@ python3 -B -m scripts.function_tracer_pcode.tests.tools.recorded_corpus_aggregat
 recording proxy is not a Java object, so Ghidra's `isinstance` / Java static-API
 paths fall back to the object-API branches during recording as well as during
 replay; the fixture reproduces that recorded run, not necessarily a proxy-free
-CLI run. Keep running the fixed subset on real binaries for regression evidence.
+CLI run. Keep running the fixed subset on real binaries for regression evidence --
+by hand, or through the opt-in `eqbench-subset` workflow described under
+"Running the subset in CI" below, which is a different workflow from
+`recorded-full` and never runs on a PR or on a push to `main`.
 `scripts/function_tracer_pcode/tests/fixtures/pcode/SCHEMA.md` documents the
 format, what is recorded, the identity surrogates, and the measured determinism.
 
@@ -338,6 +341,86 @@ against; it is checked before the first pair starts, and the transition report
 of each half plus this run's soundness gate are then saved next to the results.
 Note that the subset uses a 240 s pair timeout instead of the 600 s of full
 runs, so TIMEOUT counts are not comparable with the full trees.
+
+#### Running the subset in CI (opt-in)
+
+`.github/workflows/eqbench-subset.yml` runs the same subset against real
+binaries on a GitHub-hosted runner. It is **`workflow_dispatch` plus a weekly
+`schedule` only** — no `pull_request`, no `push` to `main` — because it
+compiles EqBench, imports every binary into Ghidra and runs the solvers, and
+that belongs on nobody's critical path. The job budget is
+`timeout-minutes: 180`.
+
+| input | default | used for |
+|---|---|---|
+| `subset_scope` | `all` | which halves run *and* which halves are verified (`eq` / `neq` / `all`) |
+| `pair_process_timeout` | `240s` | `PAIR_PROCESS_TIMEOUT` for both halves |
+| `identical_fast_path` | `1` | Issue #15 fast path; `0` runs the oracle path |
+| `eqbench_ref` | `3724fce5b287cc63165028444daf904f25b0158b` | the EqBench commit to check out |
+
+A `schedule` event carries no inputs at all, so **every setting is normalised
+once**, in the first step, with `${VAR:-default}` — not with a GitHub
+expression `||`, whose truthiness rules would quietly turn
+`identical_fast_path=0` into `1`. No later step has a default of its own; the
+normalised values, the raw ones and which of them the event actually carried
+are saved as `normalized_inputs.json`.
+
+**Canonical checkout and working copy are separate trees.** EqBench is cloned
+to `$RUNNER_TEMP/eqbench-canonical`, *outside* the repository, and is only ever
+read; the runners are pointed at a fresh `cp -a` copy in `tmp/eqbench-work`
+(`EQBENCH_ROOT` for the Eq half, `NEQ_ROOT` for the Neq half — the two runners
+name it differently). A working copy left over from an earlier run is a failure,
+not something to reuse, and the job re-checks after the run that the canonical
+checkout is still clean and still at the same commit.
+
+Settings are passed to the container explicitly as `env KEY="$VALUE"`, and the
+chain `workflow input -> shell env -> container env -> eqbench_run_subset.sh ->
+child runner` is checked twice before any pair runs: a container round trip, and
+a `DRY_RUN=1` pass whose per-half source census shows the absolute paths each
+runner read (the Eq runner also writes its run manifest in that mode; the Neq
+runner exits before its own manifest block, so its settings are read back from
+the real run instead).
+
+Success is decided in one place, `scripts/eqbench/ci_subset.py`:
+
+```bash
+python3 -B -m scripts.eqbench.ci_subset verify \
+    --run-dir logs/EqBench/ci_subset --scope all --profile full \
+    --working-root /workspace/tmp/eqbench-work/benchmarks \
+    --pair-process-timeout 240s --identical-fast-path 1 --runner-exit-status 0
+```
+
+- the subset runner exited 0 and `subset_manifest.txt` records `exit_status=0`;
+- the **shared soundness gate** `soundness_gate.json` has
+  `schema == "soundness-gate-v2"` and `passed == true`;
+- every in-scope half's **benchmark validation gate** says `PASS` — a separate
+  contract from the soundness gate, read from the half's own
+  `benchmark_validation_gate.json` and `run_manifest.txt`, never from the
+  soundness gate's file;
+- each half ran against the working root, with the timeout and fast-path
+  setting asked for;
+- the artifacts that scope needs exist, including a binary manifest built
+  **after** the run from the pair statuses (`scripts/eqbench/binary_manifest.py`
+  `build`), so it names the binaries the pairs actually compared.
+
+A scope only asks for its own halves: a `scope=eq` run has no `neq` tree, no
+`neq_root` and no Neq gate, and none of them are required. A half the scope
+*does* ask for and that is missing is a failure.
+
+Everything collected is uploaded with `if: always()` as
+`eqbench-subset-<run id>-<attempt>` (30 days): the normalised inputs, the
+resolved EqBench commit, run and subset manifests, both gates, the function
+diff manifests, every `*.pair-status.json`, the health summaries, the half
+console logs, up to 100 logs of pairs a gate flagged or that ended `ERROR` /
+`TIMEOUT`, stack dumps, the verification ledger row, the binary manifests, the
+verification reports and `ci_metadata.json`. Getting artifacts is not itself a
+success condition — the verification step above is.
+
+**The GitHub run id stays out of the measurement's provenance.** The workflow
+never sets `SUBSET_PR` (the run records `pr=none`, and the verification
+requires that): `SUBSET_PR` says which pull request a measurement belongs to,
+and a CI execution is not one. The run id lives in `ci_metadata.json` and in
+the artifact name.
 
 Compare two runs with the outcome transition table (rows: before, columns:
 after; `--fail-on-change` exits 2 on any difference, which is how determinism
