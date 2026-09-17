@@ -358,8 +358,11 @@ on:
   workflow_dispatch:     # manual escape hatch; never automatic
 ```
 
-with `if: github.event_name != 'pull_request' || github.event.pull_request.merged == true`
-on the job, so a PR that is closed without being merged starts nothing either.
+with
+`if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true`
+on the job, so a PR that is closed without being merged starts nothing either —
+and a trigger added later without thinking about this policy leaves a visibly
+skipped job rather than quietly running 85 minutes of work.
 
 Why this and not `push: branches: [main]`: a direct push to `main` is not "a
 pull request was reviewed and merged", and the `push` event would not tell the
