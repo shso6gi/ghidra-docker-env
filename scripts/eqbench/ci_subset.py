@@ -667,6 +667,10 @@ def _verify_workload(
         try:
             manifest = _publication_manifest(run_dir, half)
         except SubsetCiError as exc:
+            # Without the manifest there is no expectation to check the half
+            # against, so the rest of its workload checks would be guesses.
+            # The verdict is already FAIL, and the run tree is collected whole,
+            # so the outcome counts stay recoverable from the artifact.
             report.add(
                 f"workload.{half}.publication_manifest", GATE_WORKLOAD, False,
                 str(exc), manifest_source,

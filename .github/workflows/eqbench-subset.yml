@@ -363,9 +363,13 @@ jobs:
       # Success is: the runner exited 0, the run recorded exit_status=0, the
       # SHARED soundness gate passed (schema soundness-gate-v2, passed=true),
       # every in-scope half's BENCHMARK VALIDATION gate says PASS, the halves
-      # ran against the working root with the settings asked for, and the
-      # artifacts the scope needs are there.  Two gates, two contracts; the
-      # rules live in scripts/eqbench/ci_subset.py and are unit tested.
+      # ran against the working root with the settings asked for, the subset
+      # was actually EXECUTED (every expected pair status present and readable,
+      # nothing reused, and at least one pair per half that the analysis
+      # decided -- both gates pass a run whose every pair was killed at its
+      # deadline), and the artifacts the scope needs are there.  Separate
+      # contracts, kept separate; the rules live in
+      # scripts/eqbench/ci_subset.py and are unit tested.
       - name: Verify the run (scope aware, both gates)
         run: |
           set -euo pipefail

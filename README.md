@@ -450,8 +450,9 @@ collected as evidence.
 
 Everything collected is uploaded with `if: always()` as
 `eqbench-subset-<run id>-<attempt>` (30 days): the normalised inputs, the
-resolved EqBench commit, run and subset manifests, both gates, the function
-diff manifests, every `*.pair-status.json`, the health summaries, the half
+resolved EqBench commit, the run, subset and publication manifests, both
+gates, the function diff manifests, every `*.pair-status.json` and its stage
+journal, the health summaries, the half
 console logs, up to 100 logs of pairs a gate flagged or that ended `ERROR` /
 `TIMEOUT`, stack dumps, the verification ledger row, the binary manifests, the
 verification reports and `ci_metadata.json`. Getting artifacts is not itself a
