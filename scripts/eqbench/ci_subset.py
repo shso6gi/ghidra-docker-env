@@ -105,7 +105,7 @@ DRY_RUN_SOURCES_FILE = "dry_run_sources.txt"
 #: only the sources it selected.  This allows an ABSENT manifest for that half
 #: and nothing else: a manifest that is there is always checked, so the day the
 #: two runners are made symmetric this check tightens on its own rather than
-#: leaving a stale allowance behind.
+#: leaving a stale allowance behind.  The asymmetry itself is Issue #174.
 DRY_RUN_MANIFEST_OPTIONAL: Tuple[str, ...] = ("neq",)
 
 #: Outcomes whose pair log is worth keeping even when no gate complained.

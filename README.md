@@ -378,8 +378,8 @@ chain `workflow input -> shell env -> container env -> eqbench_run_subset.sh ->
 child runner` is checked twice before any pair runs: a container round trip, and
 a `DRY_RUN=1` pass whose per-half source census shows the absolute paths each
 runner read (the Eq runner also writes its run manifest in that mode; the Neq
-runner exits before its own manifest block, so its settings are read back from
-the real run instead).
+runner exits before its own manifest block — Issue #174 — so its settings are
+read back from the real run instead).
 
 Success is decided in one place, `scripts/eqbench/ci_subset.py`:
 
