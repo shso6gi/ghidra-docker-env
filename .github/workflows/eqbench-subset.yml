@@ -479,7 +479,11 @@ jobs:
             cp -a "$DRYRUN_REL/." "$dest/dry_run/" || true
           fi
           du -sh "$dest" || true
-          find "$dest" -maxdepth 2 | sort | head -60
+          # `| head` would SIGPIPE `sort` and, under pipefail, fail this step
+          # once the listing grows past the cut -- write it out, then show a
+          # bounded part of the file.
+          find "$dest" -maxdepth 2 | sort > "$dest/artifact_listing.txt"
+          head -n 60 "$dest/artifact_listing.txt"
 
       - name: Upload the evidence
         if: always()
