@@ -52,11 +52,15 @@ jobs:
       - name: compileall
         run: python3 -B -m compileall -q scripts
 
-      # -m "not recorded_replay" DESELECTS the recorded replays; it does not
-      # skip them. Everything else runs, including the cheap recorded-corpus
-      # contract tests (manifest, ground-truth drift, verification metadata,
-      # clean provenance, deadline behaviour) in
-      # tests/unit/test_recorded_corpus_contracts.py.
+      # -m "not recorded_replay" DESELECTS every test that drives a real
+      # replay; it does not skip them. That covers the corpus replays and the
+      # PR-109-A round-trip E2Es alike -- a test carrying the marker is one
+      # that replays, and a contract test holds that classification against
+      # the code rather than against test names.
+      # Everything else runs, including the cheap recorded-corpus contract
+      # tests (manifest, ground-truth drift, verification metadata, clean
+      # provenance, deadline behaviour, marker classification) and the fixture
+      # schema and structure tests in test_recorded_program_roundtrip.py.
       # -rs proves no test turned into a skip to get here.
       - name: Unit suite (recorded replays deselected)
         run: >
@@ -98,31 +102,37 @@ jobs:
           command -v z3
           z3 --version
 
-      # Default tier is pr_gate: the replays cases.json marks pr_gate=true.
-      # Which ones those are is a manifest decision, not a -k string here.
-      # The same validator runs in recorded-full; nothing is weakened for the
-      # gate. The test prints each replay's wall clock before it reports.
+      # Everything that drives a real replay, selected by marker rather than by
+      # -k patterns or a list of node ids that go stale when a test is renamed:
+      #   * the corpus replays cases.json marks pr_gate=true (default tier)
+      #   * the PR-109-A round-trip and missing-surface E2Es, which replay a
+      #     recorded pair through the same production path
+      # The corpus validator here is the one recorded-full uses; nothing is
+      # weakened for the gate. The corpus prints each replay's wall clock.
       - name: Recorded replays (PR gate)
         run: >
-          python3 -B -m pytest
-          scripts/function_tracer_pcode/tests/unit/test_recorded_pairs.py
+          python3 -B -m pytest scripts/function_tracer_pcode/tests/unit
           -q -rs --durations=25 -p no:cacheprovider
+          -m recorded_replay
 
-      # The gate must run exactly the manifest's pr_gate set: neither a silent
-      # drop (a replay stops running) nor a silent widening.
-      - name: The gate ran exactly the manifest's pr_gate replays
+      # The manifest contract is about the CORPUS, not about how many pytest
+      # tests this job ran: the job also runs the PR-109-A E2Es, which are not
+      # corpus replays. Keep the two counts apart.
+      - name: The gate covers exactly the manifest's pr_gate corpus replays
         run: |
           python3 -B - <<'PY'
           from scripts.function_tracer_pcode.tests.fixtures.pcode.corpus import (
               ALL_REPLAYS, PR_GATE_REPLAYS,
           )
           gate = [spec.variant_id for spec in PR_GATE_REPLAYS]
-          print("pr_gate replays ({}):".format(len(gate)))
+          print("corpus replays in the PR gate ({}):".format(len(gate)))
           for name in gate:
               print("  " + name)
           outside = [s.variant_id for s in ALL_REPLAYS if not s.pr_gate]
-          print("run by recorded-full only ({}): {}".format(
+          print("corpus replays run by recorded-full only ({}): {}".format(
               len(outside), ", ".join(outside)))
+          print("this job also runs the PR-109-A recorded E2Es, which are not "
+                "corpus replays and are not counted here")
           assert len(gate) == 7, gate
           assert len(ALL_REPLAYS) == 9, ALL_REPLAYS
           PY

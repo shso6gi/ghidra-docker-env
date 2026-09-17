@@ -16,6 +16,7 @@ PR ごとの `unit-fast` job が持つ:
 
 from __future__ import annotations
 
+import ast
 import importlib
 import os
 import subprocess
@@ -111,6 +112,107 @@ def test_no_case_is_dropped_from_the_full_corpus():
         "the replays left out of the PR gate are not the slow ones, so the "
         "split is not doing what it claims"
     )
+
+
+#: 実際に再生を走らせる test を持つ module と、その中で再生を起動する呼び出し。
+#: marker の付け忘れを名前の綴りではなく **呼び出しの有無**で検出する。
+REPLAY_ENTRY_POINTS = {
+    "test_recorded_program_roundtrip.py": "_replay",
+    "test_recorded_pairs.py": "validate_replay",
+}
+RECORDED_REPLAY_MARKER = "recorded_replay"
+
+
+def _module_marks(module: ast.Module) -> Set[str]:
+    """module-level `pytestmark` が立てている marker 名。"""
+
+    names: Set[str] = set()
+    for node in module.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "pytestmark"
+            for target in node.targets
+        ):
+            continue
+        for attribute in ast.walk(node.value):
+            if isinstance(attribute, ast.Attribute):
+                names.add(attribute.attr)
+    return names
+
+
+def _decorator_marks(function: ast.FunctionDef) -> Set[str]:
+    names: Set[str] = set()
+    for decorator in function.decorator_list:
+        for attribute in ast.walk(decorator):
+            if isinstance(attribute, ast.Attribute):
+                names.add(attribute.attr)
+    return names
+
+
+@pytest.mark.parametrize("module_name", sorted(REPLAY_ENTRY_POINTS))
+def test_every_test_that_runs_a_replay_carries_the_marker(module_name):
+    """再生を走らせる test には必ず `recorded_replay` が付いていること。
+
+    付いていない test は `unit-fast` で走ってしまい、重い実 replay が PR の
+    critical path に戻る。判定は名前ではなく **再生の起動を呼んでいるか**で
+    行うので、test を足しても綴りに依存しない。
+    """
+
+    path = Path(__file__).resolve().parent / module_name
+    module = ast.parse(path.read_text(encoding="utf-8"))
+    entry_point = REPLAY_ENTRY_POINTS[module_name]
+    module_marks = _module_marks(module)
+
+    runs_a_replay = []
+    for node in module.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if not node.name.startswith("test_"):
+            continue
+        calls = {
+            call.func.id
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        }
+        if entry_point in calls:
+            runs_a_replay.append(node)
+
+    assert runs_a_replay, (
+        "{}: no test calls {}(); the detector would pass vacuously".format(
+            module_name, entry_point
+        )
+    )
+    unmarked = [
+        node.name for node in runs_a_replay
+        if RECORDED_REPLAY_MARKER not in (_decorator_marks(node) | module_marks)
+    ]
+    assert not unmarked, (
+        "{}: these tests run a real replay but carry no {} marker, so the "
+        "per-PR unit-fast job would run them: {}".format(
+            module_name, RECORDED_REPLAY_MARKER, ", ".join(sorted(unmarked))
+        )
+    )
+
+
+def test_a_replay_test_cannot_skip_itself_when_z3_is_missing():
+    """再生 test が z3 の不在を skip で逃がしていないこと。
+
+    `skipif` で逃がすと、solver の無い環境で「E2E を飛ばしたから green」に
+    なる。corpus と同じく fail-closed でなければならない。
+    """
+
+    for module_name in sorted(REPLAY_ENTRY_POINTS):
+        path = Path(__file__).resolve().parent / module_name
+        module = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(module):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            marks = _decorator_marks(node)
+            assert "skipif" not in marks and "skip" not in marks, (
+                "{}::{} skips instead of failing; z3 must be required, not "
+                "optional".format(module_name, node.name)
+            )
 
 
 def test_selecting_a_replay_that_does_not_exist_fails_closed():

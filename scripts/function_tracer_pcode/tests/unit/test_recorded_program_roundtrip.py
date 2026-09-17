@@ -17,12 +17,15 @@ production path（production connector 付き ``check_from_binaries``）を走�
 
 欠落注入 test は、fixture から (a) 必須 API 1 件 (b) memory read 1 件を消して
 再生し、**最終 outcome が偶然一致しても** 欠落履歴で fail することを示す。
+
+実際に再生を走らせる 3 件には `recorded_replay` marker が付いており、PR ごとの
+`recorded-fast` job が走らせる（`unit-fast` は deselect）。この file の残りは
+fixture を読むだけの schema / 構造 test なので `unit-fast` に残る。
 """
 
 import copy
 import importlib
 import json
-import shutil
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple, cast
 
@@ -41,16 +44,15 @@ from scripts.function_tracer_pcode.tests.fixtures.pcode.replay import (
     assert_no_real_decompiler_was_built,
     replay_recorded_pair,
 )
+from scripts.function_tracer_pcode.tests.fixtures.pcode.replay_validation import (
+    require_z3,
+)
 from scripts.function_tracer_pcode.tests.fixtures.pcode.snapshot import (
     check_snapshot,
 )
 
 
 CASE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "pcode" / "bessj0_snippet_B1_B2"
-
-
-def _z3_available() -> bool:
-    return shutil.which("z3") is not None
 
 
 def _read(name: str) -> Any:
@@ -71,6 +73,9 @@ def _replay(
     形に合わせて展開するだけ。
     """
 
+    # z3 が無ければ **fail**。skip にすると、solver の無い環境で「E2E を飛ばした
+    # から green」という状態が作れてしまう（recorded corpus と同じ契約）。
+    require_z3()
     outcome = replay_recorded_pair(
         left_payload, right_payload, case_id=case_id, monkeypatch=monkeypatch,
     )
@@ -83,7 +88,7 @@ def _replay(
     )
 
 
-@pytest.mark.skipif(not _z3_available(), reason="z3 is not available in PATH")
+@pytest.mark.recorded_replay
 def test_recorded_pair_replays_the_production_check_without_ghidra(monkeypatch):
     left_payload = _read("left.json")
     right_payload = _read("right.json")
@@ -201,7 +206,7 @@ def _delete_member(
     )
 
 
-@pytest.mark.skipif(not _z3_available(), reason="z3 is not available in PATH")
+@pytest.mark.recorded_replay
 def test_deleting_one_required_api_is_detected(monkeypatch):
     """必須 API を 1 件消したら、欠落履歴と例外の両方で検出される。"""
 
@@ -230,7 +235,7 @@ def test_deleting_one_required_api_is_detected(monkeypatch):
     assert isinstance(failure, RecordedSurfaceMissing)
 
 
-@pytest.mark.skipif(not _z3_available(), reason="z3 is not available in PATH")
+@pytest.mark.recorded_replay
 def test_deleting_one_memory_read_is_detected_even_though_the_outcome_matches(monkeypatch):
     """memory read を 1 件消しても最終 outcome と判定面は変わらない。
 
