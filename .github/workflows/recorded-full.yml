@@ -9,7 +9,10 @@ name: recorded-full
 # different workflow and belongs to PR-109-C; it is not started here.
 on:
   push:
-    branches: [main]
+    # TEMPORARY (reverted in the next commit): workflow_dispatch is only
+    # offered for workflows that already exist on the default branch, so the
+    # matrix has to be proved from the feature branch by a push trigger.
+    branches: [main, feat/issue-109b-recorded-pair-corpus]
   workflow_dispatch:
   schedule:
     # Mondays 03:20 UTC, offset from the hour to avoid the scheduling spike.
