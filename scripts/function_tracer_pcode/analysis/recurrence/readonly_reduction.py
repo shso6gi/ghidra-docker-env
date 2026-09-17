@@ -1037,7 +1037,7 @@ def _impl__record_readonly_reduction_return_region_proof(
                 "Declined readonly reduction proof: coverage proof unavailable "
                 f"(summary_conditions={summarize_conditions(summary_conditions or ())}, "
                 f"summary_ops={summarize_values(summary_ops)}, "
-                f"retained_exact_returns={len(tuple(retained_exact_returns or ()))}, "
+                f"retained_exact_returns={len(retained_exact_returns or ())}, "
                 f"retained_condition_ops={summarize_values(retained_condition_ops)})"
             )
         return None

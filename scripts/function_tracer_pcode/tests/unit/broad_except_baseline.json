@@ -404,7 +404,7 @@
     "analysis.returns.return_extraction": {
       "_build_return_value_flow_certificate": {"logged": 0, "unlogged": 3},
       "_impl__append_smt_lowerable_phi_return_fallback_infos": {"logged": 0, "unlogged": 1},
-      "_impl__dump_return_infos": {"logged": 0, "unlogged": 2},
+      "_impl__dump_return_infos": {"logged": 0, "unlogged": 1},
       "_impl__function_body_has_phase1_pure_return_forbidden_ops": {"logged": 0, "unlogged": 4},
       "_impl__function_has_no_return": {"logged": 0, "unlogged": 1},
       "_impl__get_current_prototype_return_varnodes": {"logged": 0, "unlogged": 1},

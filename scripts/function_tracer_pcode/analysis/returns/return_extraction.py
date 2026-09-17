@@ -53,6 +53,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     _expressions_equivalent_under_conditions,
     lower_post_state_expression_for_smt,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_conditions
 
 
 def _impl__return_site_key(self, ret_info: ReturnInfo) -> str:
@@ -363,14 +364,15 @@ def _impl__dump_return_infos(self, analysis: FunctionReturnAnalysis):
         # 展開するので、debug dump のためだけに解析時間を使ってしまう
         # （Issue #22）。上の ``value:`` が同じ式の有界サマリーを出している。
 
-        # 条件リスト（簡約版）
+        # 条件リスト。``get_simplified_condition_string`` は条件ごとに構造キー
+        # を組み立てる（runtime ref の stable key まで辿る）ので、dump のため
+        # だけに走らせない。有界サマリーで先頭数件だけ出す（Issue #22）。
         if ret_info.conditions:
-            try:
-                cond_strs = [ConditionSimplifier.get_simplified_condition_string(c)
-                            for c in ret_info.conditions]
-                self._debug_print(f"    conditions({len(ret_info.conditions)}): {cond_strs}", 1)
-            except Exception as e:
-                self._debug_print(f"    conditions: (error: {e})", 1)
+            self._debug_print(
+                f"    conditions({len(ret_info.conditions)}): "
+                f"{summarize_conditions(ret_info.conditions)}",
+                1,
+            )
         else:
             self._debug_print("    conditions: (unconditional/always)", 1)
 

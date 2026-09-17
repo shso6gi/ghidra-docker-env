@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """Debug-only expression rendering regressions."""
 
+from dataclasses import dataclass, field
+from typing import Tuple
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.analysis.debug import render
 from scripts.function_tracer_pcode.analysis.debug.render import (
     summarize_conditions,
+    summarize_expression_identity,
     summarize_expressions,
     summarize_runtime_ref,
     summarize_values,
@@ -154,16 +157,81 @@ def test_repr_of_an_expanded_value_stays_bounded():
     assert len(text) < 400
 
 
-def test_runtime_ref_summary_does_not_format_the_raw_object():
-    class _Ref:
+
+# ------------------------------- runtime ref 表示の走査量（Issue #22 レビュー）
+
+
+#: ``stable_key`` / ``semantic_key`` が呼ばれた記録。例外は production 側の
+#: 広い ``except`` に握られることがあるので、raise ではなく呼び出し自体を数える。
+_HEAVY_KEY_CALLS: list = []
+
+
+@dataclass(frozen=True, repr=False)
+class _ExplosiveRuntimeRef:
+    """重いキー生成と ``repr`` を持つ runtime ref。
+
+    実際の ``LoopSummaryRef.stable_key`` は seed / witness / guard / case を
+    全部辿って式のキーを組み立てる。debug 表示のために起動してはいけない。
+    """
+
+    kind: str = "loop"
+    count: int = 3
+    keyable: bool = True
+    descriptor: Tuple[int, ...] = field(default_factory=lambda: tuple(range(10_000)))
+
+    def stable_key(self):
+        _HEAVY_KEY_CALLS.append("stable_key")
+        return ("loop", self.descriptor)
+
+    def semantic_key(self):
+        _HEAVY_KEY_CALLS.append("semantic_key")
+        return ("loop", self.descriptor)
+
+    def __repr__(self):  # pragma: no cover - 呼ばれたら失敗
+        raise AssertionError("debug summary must not repr a runtime ref")
+
+
+def test_runtime_ref_summary_never_builds_a_stable_key():
+    _HEAVY_KEY_CALLS.clear()
+
+    summary = summarize_runtime_ref(_ExplosiveRuntimeRef())
+
+    assert summary == "_ExplosiveRuntimeRef[kind=loop, count=3, keyable=True]"
+    assert "descriptor" not in summary
+    assert _HEAVY_KEY_CALLS == []
+
+
+def test_runtime_ref_summary_falls_back_to_the_type_name():
+    _HEAVY_KEY_CALLS.clear()
+
+    class _Opaque:
         def stable_key(self):
-            return ("loop", "x" * 300, *range(50))
+            _HEAVY_KEY_CALLS.append("stable_key")
+            return ("opaque",)
 
-        def __repr__(self):  # pragma: no cover - 呼ばれたら失敗
-            raise AssertionError("debug summary must not repr a runtime ref")
+    assert summarize_runtime_ref(_Opaque()) == "_Opaque"
+    assert summarize_runtime_ref(None) == "None"
+    assert _HEAVY_KEY_CALLS == []
 
-    summary = summarize_runtime_ref(_Ref())
 
-    assert summary.startswith("_Ref[loop, ")
-    assert "+44 more" in summary
-    assert len(summary) < 300
+def test_expression_identity_summary_does_not_walk_the_runtime_ref():
+    """structural key は node 予算で有界。runtime ref のキーは組み立てない。"""
+
+    expr = Expression.binary_op(
+        "INT_ADD", Expression.variable("v", 4), Expression.constant(2, 4)
+    )
+    expr.runtime_ref = _ExplosiveRuntimeRef()
+    expr.operands[0].runtime_ref = _ExplosiveRuntimeRef()
+    _HEAVY_KEY_CALLS.clear()
+
+    text = summarize_expression_identity(expr)
+
+    assert _HEAVY_KEY_CALLS == []
+    assert "structural=" in text
+    assert "structural=None" not in text
+    assert "runtime_ref=_ExplosiveRuntimeRef[kind=loop" in text
+
+
+def test_value_summary_does_not_stringify_arbitrary_objects():
+    assert summarize_values([_ExplosiveRuntimeRef()]) == "[<_ExplosiveRuntimeRef>]"
+    assert summarize_values([1, "a", None, True]) == "[1, a, None, True]"

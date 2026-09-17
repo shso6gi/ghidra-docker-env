@@ -58,7 +58,13 @@ def test_debug_expr_identity_summary_reports_the_structural_key_for_a_real_expre
     analyzer = _analyzer()
     expr = Expression.binary_op("INT_ADD", Expression.variable("param_1", 4), Expression.constant(2, 4))
     text = analyzer._debug_expr_identity_summary(expr)
-    expected = expression_key_safe(expr, include_memory_read_order=True)
+    # debug 経路は runtime ref の semantic key を組み立てない（走査量を node
+    # 予算だけで抑えるため）。期待値も同じ option で作る。
+    expected = expression_key_safe(
+        expr,
+        include_memory_read_order=True,
+        include_semantic_runtime_refs=False,
+    )
     assert expected is not None
     assert f"structural={expected}" in text
     assert "structural=None" not in text

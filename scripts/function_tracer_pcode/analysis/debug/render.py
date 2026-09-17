@@ -26,8 +26,10 @@ debug guard の置き方: guard が複数 module に散る family は host class
 from __future__ import annotations
 
 from collections.abc import Sized
+from dataclasses import fields, is_dataclass
+from enum import Enum
 from itertools import islice
-from typing import Any, Callable, FrozenSet, Iterable, Optional, Set
+from typing import Any, Callable, FrozenSet, Iterable, Optional, Set, Tuple
 
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.structural import expression_key_safe
@@ -203,32 +205,69 @@ def summarize_values(
     limit = max(0, int(max_text))
 
     def _render(value: Any) -> str:
-        text = "None" if value is None else str(value)
+        text = _primitive_text(value)
         return text if len(text) <= limit else text[:limit] + "..."
 
     return _summarize_sequence(values, _render, max_items)
 
 
-def summarize_runtime_ref(runtime_ref: Any) -> str:
-    """runtime ref を型名 + 有界な stable key で表す。
+def _primitive_text(value: Any) -> str:
+    """定数時間で作れる表示だけを返す。
 
-    frozen dataclass の ``repr`` は field を再帰的に展開する（式を抱えた ref
-    なら列の長さだけ膨らむ）ので、debug 表示のために生 object を format しない。
+    ``str(value)`` を無条件に呼ぶと、frozen dataclass のように field を再帰
+    展開する ``__repr__`` を起動してしまう。primitive でないものは型名だけに
+    落とす（debug 表示のために入力を辿らない、が契約）。
+    """
+
+    if value is None:
+        return "None"
+    if isinstance(value, Enum):
+        return value.name
+    if isinstance(value, (bool, int, float, str)):
+        return str(value)
+    return f"<{type(value).__name__}>"
+
+
+def summarize_runtime_ref(runtime_ref: Any, max_fields: int = DEFAULT_MAX_ITEMS) -> str:
+    """runtime ref を型名 + 定数時間で読める primitive field で表す。
+
+    ``stable_key()`` は **呼ばない**。``LoopSummaryRef.stable_key`` のように
+    seed / witness / guard / case を全部辿って式のキーを組み立てる実装があり、
+    debug 表示のために起動してよい処理ではない（Issue #22）。``repr`` も同じ
+    理由で使わない（frozen dataclass は field を再帰展開する）。
+
+    出す情報は「型名」と「dataclass field のうち primitive なもの」だけで、
+    どちらも ref の中身の大きさに依存しない。識別子が要る場面では判定側の
+    structural key を見ること（debug 表示は identity ではない）。
     """
 
     if runtime_ref is None:
         return "None"
     type_name = type(runtime_ref).__name__
-    stable_key = getattr(runtime_ref, "stable_key", None)
-    if not callable(stable_key):
+    items = _primitive_dataclass_fields(runtime_ref, max_fields)
+    if not items:
         return type_name
-    try:
-        key = stable_key()
-    except _RECOVERABLE_IDENTITY_ERRORS:
-        return f"{type_name}[<unavailable>]"
-    if isinstance(key, Sized) and not isinstance(key, (str, bytes)):
-        return f"{type_name}{summarize_values(key)}"
-    return f"{type_name}{summarize_values([key])}"
+    return f"{type_name}{summarize_values(items, max_items=max_fields)}"
+
+
+def _primitive_dataclass_fields(value: Any, max_fields: int) -> Tuple[str, ...]:
+    """dataclass の primitive field を ``name=value`` の列で返す（先頭 N 件）。
+
+    field の数は型ごとに定数で、各 field の読み出しも O(1)。入れ子の式・列は
+    型名に落ちるので、ref が抱える中身を辿ることはない。
+    """
+
+    if not is_dataclass(value) or isinstance(value, type):
+        return ()
+    limit = max(0, int(max_fields))
+    items = []
+    for field in fields(value):
+        if len(items) >= limit:
+            break
+        attribute = getattr(value, field.name, None)
+        if attribute is None or isinstance(attribute, (bool, int, float, str, Enum)):
+            items.append(f"{field.name}={_primitive_text(attribute)}")
+    return tuple(items)
 
 
 def summarize_expression_identity(
@@ -239,7 +278,8 @@ def summarize_expression_identity(
 
     ``structural`` は予算付きの :func:`expression_key_safe` なので、予算超過や
     opaque node では ``None`` になる。この識別子を失わないことは #76 のレビュー
-    指摘で ``tests/unit/test_debug_reporter.py`` が固定している。
+    指摘で ``tests/unit/test_debug_reporter.py`` が固定している。走査量を
+    node 予算だけで抑えるため、runtime ref の semantic key は含めない。
     """
 
     if expr is None:
@@ -248,7 +288,16 @@ def summarize_expression_identity(
     read_order_key = getattr(expr, "read_order_key", None)
     runtime_ref_summary = summarize_runtime_ref(getattr(expr, "runtime_ref", None))
     try:
-        structural_key = expression_key_safe(expr, include_memory_read_order=True)
+        # ``include_semantic_runtime_refs=True``（既定）は node ごとに
+        # ``runtime_ref.stable_key()`` を呼ぶ。node 数は budget で有界でも
+        # 1 つの key の構築は有界ではないので、debug 表示では切る。ref の
+        # 情報は上の ``runtime_ref`` 欄が別に出す。判定側が使う structural
+        # key の既定は変えていない。
+        structural_key = expression_key_safe(
+            expr,
+            include_memory_read_order=True,
+            include_semantic_runtime_refs=False,
+        )
     except _RECOVERABLE_IDENTITY_ERRORS:
         structural_key = None
     return (
