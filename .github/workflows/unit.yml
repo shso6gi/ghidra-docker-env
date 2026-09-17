@@ -70,8 +70,10 @@ jobs:
 
       # -rs prints the reason for every skip: the recorded-pair tests must
       # contribute none, and a new skip elsewhere has to be visible.
-      # --durations prints the per-case wall clock of the recorded corpus on
-      # this runner, which is what the Issue #109 time criterion is measured
-      # against; without it the number is only visible when the budget fails.
+      # --durations is a whole-suite performance view (the slowest 25 tests on
+      # this runner); it does not cover the cheapest replays. The recorded
+      # corpus reports its own per-replay wall clock and total from
+      # test_recorded_pairs.py, which is what the Issue #109 time criterion is
+      # measured against.
       - name: Unit suite
         run: python3 -B -m pytest scripts/function_tracer_pcode/tests/unit -q -rs --durations=25 -p no:cacheprovider

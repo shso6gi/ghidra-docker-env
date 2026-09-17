@@ -707,12 +707,40 @@ def test_recorded_pair(case_id, variant, record_property):
 # ---------------------------------------------------------------------------
 
 
-def test_recorded_corpus_stays_within_its_wall_clock_budget():
+def _write_corpus_summary(pytestconfig, lines: Sequence[str]) -> None:
+    """pytest の terminal へ直接書く。
+
+    `record_property` は junit XML にしか出ず、通常の `print` は passing test
+    では捕捉されたまま表示されない。改訂 AC は「実測時間を PR ごとに報告する」
+    ことを求めているので、budget が通っている run でも数字が見える経路が要る。
+    terminal reporter は capture を通らないので `-q` でも出る。
+
+    ここは **報告だけ**で、判定には関与しない（budget の判定は `MEASURED` の
+    合計が正本）。
+    """
+
+    reporter = None
+    plugin_manager = getattr(pytestconfig, "pluginmanager", None)
+    if plugin_manager is not None:
+        reporter = plugin_manager.getplugin("terminalreporter")
+    if reporter is None:  # pragma: no cover - terminal reporter の無い実行
+        for line in lines:
+            print(line)
+        return
+    reporter.ensure_newline()
+    for line in lines:
+        reporter.write_line(line)
+
+
+def test_recorded_corpus_stays_within_its_wall_clock_budget(pytestconfig):
     """corpus 全体の所要。**file 全体を走らせたときだけ**意味がある。
 
     Issue #109 の時間 AC（2026-09-17 改訂）は「GitHub-hosted runner で 1200 秒
     以内」。超過したときに case を削ったり記録面を削ったりして帳尻を合わせない
     こと。合わせるべきは corpus ではなく、遅くなった原因のほう。
+
+    所要は判定の前に必ず出す。超過した run だけ数字が見える状態だと、
+    「今どれくらいなのか」を報告するのに一度落とす必要が出てしまう。
     """
 
     missing = [
@@ -725,6 +753,24 @@ def test_recorded_corpus_stays_within_its_wall_clock_budget():
         "(missing: {})".format(len(VARIANTS), ", ".join(missing))
     )
     total = sum(MEASURED.values())
+
+    # 報告（判定より先。これ自体は何も決めない）。
+    width = max(len(_variant_id(*key)) for key in MEASURED)
+    summary = [
+        "recorded corpus wall clock -- {} replays, Issue #109 time criterion "
+        "(revised 2026-09-17)".format(len(VARIANTS)),
+    ]
+    for key in sorted(MEASURED, key=lambda item: -MEASURED[item]):
+        case_id, variant = key
+        summary.append("  {:<{width}}  {:8.2f}s  (case budget {}s)".format(
+            _variant_id(case_id, variant), MEASURED[key],
+            CASES[case_id]["budget_seconds"], width=width,
+        ))
+    summary.append("  {:<{width}}  {:8.2f}s  (corpus budget {}s)".format(
+        "TOTAL", total, CORPUS_BUDGET_SECONDS, width=width,
+    ))
+    _write_corpus_summary(pytestconfig, summary)
+
     if total > CORPUS_BUDGET_SECONDS:
         pytest.fail(
             "the recorded corpus took {:.1f}s, over the {}s budget (Issue #109 "
