@@ -21,6 +21,7 @@
     "container": 3.9,
     "github_hosted_runner": 9.7
    },
+   "pr_gate": true,
    "recording": {
     "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
     "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
@@ -59,6 +60,7 @@
     "container": 129.6,
     "github_hosted_runner": 346.1
    },
+   "pr_gate": false,
    "recording": {
     "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
     "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
@@ -97,6 +99,7 @@
     "container": 306.7,
     "github_hosted_runner": 390.7
    },
+   "pr_gate": false,
    "recording": {
     "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
     "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
@@ -135,6 +138,7 @@
     "container": 1.4,
     "github_hosted_runner": 3.3
    },
+   "pr_gate": true,
    "recording": {
     "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
     "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
@@ -173,6 +177,7 @@
     "container": 3.5,
     "github_hosted_runner": 8.4
    },
+   "pr_gate": true,
    "recording": {
     "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
     "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
@@ -211,6 +216,7 @@
     "container": 2.7,
     "github_hosted_runner": 6.8
    },
+   "pr_gate": true,
    "recording": {
     "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
     "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
@@ -250,6 +256,7 @@
     "container": 7.5,
     "github_hosted_runner": 18.5
    },
+   "pr_gate": true,
    "recording": {
     "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
     "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
@@ -288,6 +295,7 @@
     "container": 6.4,
     "github_hosted_runner": 15.9
    },
+   "pr_gate": true,
    "recording": {
     "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
     "commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
@@ -313,6 +321,13 @@
   "which points at scripts/eqbench/neq_ground_truth.tsv (or at the",
   "eq_sample_single_source rule).  Nothing in this file reaches the",
   "checker; it is test metadata only.",
+  "pr_gate selects the replays the per-PR gate runs (job recorded-fast).",
+  "It is a scheduling decision, not a coverage one: every case runs in the",
+  "recorded-full workflow, with the same validator and the same assertions.",
+  "The two cases outside the gate are the ones that dominate the wall clock",
+  "(wood and barthe2big, ~92 %); excluding them keeps the PR critical path",
+  "short without weakening any case's checks.  Nothing may be dropped from",
+  "the full corpus to make a budget fit.",
   "budget_seconds is applied as a real deadline: the replay worker's process",
   "group is killed when it expires, so a hung worker fails fast instead of",
   "running into the job timeout.  It guards one replay against a regression",
@@ -324,13 +339,13 @@
   "Exceeding it is a test-harness failure and never becomes a production",
   "UNKNOWN or TIMEOUT outcome.",
   "corpus_budget_seconds is the Issue #109 time acceptance criterion as",
-  "revised on 2026-09-17: 1200 s for all replays of test_recorded_pairs.py",
-  "on a GitHub-hosted runner.  The original 180 s was a placeholder that the",
-  "measurements disproved -- wood and barthe2big alone are ~92 % of the time",
-  "and both TIMEOUT on real binaries at the subset's 240 s pair deadline.",
-  "The corpus is not shrunk to fit a budget: cases are not dropped, recorded",
-  "surface is not trimmed, and a harness timeout is never reported as an",
-  "UNKNOWN."
+  "revised on 2026-09-17: 1200 s for ALL nine replays on a GitHub-hosted",
+  "runner.  It is the SUM of the measured replay times, never the wall clock",
+  "of a parallel workflow -- running the corpus as a matrix shortens the",
+  "workflow but changes nothing about the criterion.  The original 180 s was",
+  "a placeholder that the measurements disproved.  The corpus is not shrunk",
+  "to fit a budget: cases are not dropped, recorded surface is not trimmed,",
+  "and a harness timeout is never reported as an UNKNOWN."
  ],
  "schema": "recorded-pcode-cases-v1"
 }

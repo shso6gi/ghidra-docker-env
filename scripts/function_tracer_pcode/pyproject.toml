@@ -35,6 +35,9 @@ python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
 addopts = "-v --tb=short"
+markers = [
+    "recorded_replay: runs a recorded P-code replay (Issue #109); deselected by the per-PR unit-fast job",
+]
 
 [tool.coverage.run]
 source = ["."]

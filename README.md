@@ -91,10 +91,11 @@ on and off from a single fast-path-**off** recording). Each replay runs in its
 own process, the way production runs one pair per process, and `budget_seconds`
 is applied as a real deadline: the worker's process group is killed when it
 expires, so a hung replay fails fast instead of running into the job timeout.
-Both that budget and the whole-corpus `corpus_budget_seconds` (1200 s on a
-GitHub-hosted runner, the Issue #109 time criterion revised on 2026-09-17) are
-test-harness failure conditions and never become a production UNKNOWN or
-TIMEOUT. `ground_truth/` holds
+Both that budget and the whole-corpus `corpus_budget_seconds` (1200 s, the
+Issue #109 time criterion revised on 2026-09-17, measured as the **sum** of the
+replay times and never as a parallel workflow's wall clock) are test-harness
+failure conditions and never become a production UNKNOWN or TIMEOUT.
+`ground_truth/` holds
 *references* to the semantic relation, never the relation itself: the source of
 truth is `scripts/eqbench/neq_ground_truth.tsv` (reviewed, with an independent
 native execution witness) plus `function_diff_manifest`'s single-source rule for
@@ -138,6 +139,28 @@ numbers never enter the fixture. A legal `hashCode()` collision between two
 unequal objects survives as a collision, and a recording stops outright if
 Java-equal receivers report different hashes — a contract the fixture loader
 re-checks with the same implementation.
+
+Where the replays run:
+
+| | runs | replays |
+|---|---|---|
+| `unit-fast` (every PR) | the ordinary suite plus the cheap corpus contracts in `tests/unit/test_recorded_corpus_contracts.py` | none -- `-m "not recorded_replay"` **deselects** them (it does not skip them) |
+| `recorded-fast` (every PR, parallel with `unit-fast`) | `tests/unit/test_recorded_pairs.py` at its default `pr_gate` tier | the 7 replays `cases.json` marks `pr_gate: true` |
+| `recorded-full` (push to `main`, `workflow_dispatch`, weekly) | one replay per matrix shard, then an aggregate job | all 9, `fail-fast: false` |
+
+Both gates and the full matrix call the same `validate_replay`, so no case is
+checked less anywhere; `wood` and `barthe2big` are outside the PR gate only
+because they are ~92 % of the corpus wall clock. The aggregate job replays
+nothing: it reads one record per shard -- written only after that replay passed
+every check, so a missing record is a hard failure, never a skip -- and applies
+the completeness and budget contract from
+`tests/fixtures/pcode/corpus.py`, the same function the serial run uses.
+
+```bash
+# the whole corpus locally, then the same aggregate the matrix job runs
+python3 -B -m pytest scripts/function_tracer_pcode/tests/unit/test_recorded_pairs.py   --recorded-tier=full --recorded-report-dir tmp/recorded-reports
+python3 -B -m scripts.function_tracer_pcode.tests.tools.recorded_corpus_aggregate   --reports-dir tmp/recorded-reports
+```
 
 **A fixture replay is not a substitute for real-binary verification.** The
 recording proxy is not a Java object, so Ghidra's `isinstance` / Java static-API
