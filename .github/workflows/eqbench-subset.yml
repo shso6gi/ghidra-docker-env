@@ -472,7 +472,7 @@ jobs:
               --json "$dest/collected_run.json" \
               || echo "::warning::collecting the run tree failed"
           else
-            echo "::warning::no run tree to collect: $RUN_REL"
+            echo "::warning::no run tree to collect: ${RUN_REL:-(no run directory was chosen)}"
           fi
           if [[ -d "${DRYRUN_REL:-}" ]]; then
             mkdir -p "$dest/dry_run"
