@@ -369,14 +369,20 @@ def _verify_run_status(
     )
     if not full:
         return
-    if runner_exit_status is not None:
-        report.add(
-            "run.runner_exit_status",
-            GATE_RUN_STATUS,
-            runner_exit_status == 0,
-            f"the subset runner step exited {runner_exit_status} (expected 0)",
-            "workflow step",
-        )
+    # Not supplied is not "fine": in the full profile this is one of the
+    # success conditions, so a caller that omits it gets a failure rather than
+    # a check that quietly does not happen.
+    report.add(
+        "run.runner_exit_status",
+        GATE_RUN_STATUS,
+        runner_exit_status == 0,
+        (
+            f"the subset runner step exited {runner_exit_status} (expected 0)"
+            if runner_exit_status is not None
+            else "no runner exit status was supplied (--runner-exit-status)"
+        ),
+        "workflow step",
+    )
     # The dataset provenance field must not have been used to carry a CI
     # identifier.  Only a real run writes this; a dry run has no pairs and no
     # measurement to attribute.

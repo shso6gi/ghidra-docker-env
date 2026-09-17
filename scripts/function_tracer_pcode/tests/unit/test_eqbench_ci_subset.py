@@ -664,3 +664,15 @@ def test_the_propagation_profile_does_not_ask_for_a_pr_field(tmp_path):
     report = run_verify(run_dir, "eq", profile=ci_subset.PROFILE_PROPAGATION)
     assert report.passed, failed_checks(report)
     assert "run.subset_pr" not in [check.name for check in report.checks]
+
+
+def test_the_full_profile_requires_the_runner_exit_status_to_be_supplied(tmp_path):
+    """Omitting it must not turn a success condition into a skipped check."""
+
+    run_dir = make_run(tmp_path, "all")
+    report = ci_subset.verify(
+        run_dir=run_dir, scope="all", working_root=WORKING_ROOT,
+        pair_process_timeout=TIMEOUT, identical_fast_path=FAST_PATH,
+    )
+    assert not report.passed
+    assert "run.runner_exit_status" in failed_checks(report)
