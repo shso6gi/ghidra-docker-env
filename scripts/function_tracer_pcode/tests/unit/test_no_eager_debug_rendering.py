@@ -164,6 +164,38 @@ def _is_debug_sink(node: ast.Call, renderers: FrozenSet[str]) -> bool:
     return name == "print" or "debug" in name.lower()
 
 
+def _is_simple_argument(node: ast.AST) -> bool:
+    """委譲呼び出しの引数として認める形（走査を起こさない式だけ）。"""
+
+    if isinstance(node, (ast.Name, ast.Constant)):
+        return True
+    if isinstance(node, ast.Attribute):
+        return _is_simple_argument(node.value)
+    if isinstance(node, ast.Starred):
+        return _is_simple_argument(node.value)
+    return False
+
+
+def _is_debug_guard_clause(statement: ast.stmt) -> bool:
+    """``if not self._debug_available(): return "<debug-suppressed>"`` 型の前置き。
+
+    test に許すのは debug 述語の呼び出しだけ（``len(x) > 1000`` のような走査は
+    許さない）。本体は「定数文字列を返す」か「そのまま return」だけ。
+    """
+
+    if not isinstance(statement, ast.If) or statement.orelse:
+        return False
+    for node in ast.walk(statement.test):
+        if isinstance(node, ast.Call) and _called_name(node) not in DEBUG_PREDICATES:
+            return False
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            return False
+    if len(statement.body) != 1 or not isinstance(statement.body[0], ast.Return):
+        return False
+    value = statement.body[0].value
+    return value is None or (isinstance(value, ast.Constant) and isinstance(value.value, str))
+
+
 def _delegates_to_a_bounded_renderer(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
     known: FrozenSet[str],
@@ -171,39 +203,32 @@ def _delegates_to_a_bounded_renderer(
     """`node` が既知の bounded renderer へ **委譲するだけ** の wrapper か。
 
     family 側の ``_debug_expr_summary`` などを名前で数え上げずに拾うための規則。
-    委譲だけ = (a) 呼び出しは既知 renderer か debug 述語しか無い、(b) 返り値は
-    定数文字列か既知 renderer の呼び出しだけ、(c) 入れ子の関数定義が無い。
-    ここから外れる helper（自分で走査するもの）は renderer と見なさないので、
-    その呼び出しは「guard が要る任意の呼び出し」として扱われる。
+    判定は fail-closed で、認めるのは次の形だけ:
+
+        [docstring]
+        [debug 述語だけの guard 節（定数を返す）]*
+        return <既知 renderer>(<単純な引数>)
+
+    ループ・内包表記・``try``・``with``・代入・入れ子定義・複雑な引数のどれか
+    があれば wrapper と認めない。自分で走査する helper を「有界」と誤認すると、
+    その呼び出しが guard 無しで debug message に入っても R3 が気付かなくなる。
     """
 
-    returns: List[ast.AST] = []
-    for sub in ast.walk(node):
-        if sub is not node and isinstance(
-            sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
-        ):
-            return False
-        if isinstance(sub, ast.Return):
-            returns.append(sub.value)
-        elif isinstance(sub, ast.Call):
-            name = _called_name(sub)
-            if name not in known and name not in DEBUG_PREDICATES:
-                return False
-    delegations = [
-        value
-        for value in returns
-        if isinstance(value, ast.Call) and _called_name(value) in known
-    ]
-    if not delegations:
-        # 定数しか返さない関数は renderer ではない（委譲が 1 つも無い）。
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]  # docstring
+    if not body:
         return False
-    for value in returns:
-        if isinstance(value, ast.Constant) and isinstance(value.value, str):
-            continue  # `return "<debug-suppressed>"` のような guard 節の戻り値
-        if value in delegations:
-            continue
+    *guards, last = body
+    if not all(_is_debug_guard_clause(statement) for statement in guards):
         return False
-    return True
+    if not isinstance(last, ast.Return) or not isinstance(last.value, ast.Call):
+        return False
+    call = last.value
+    if _called_name(call) not in known:
+        return False
+    arguments = list(call.args) + [keyword.value for keyword in call.keywords]
+    return all(_is_simple_argument(argument) for argument in arguments)
 
 
 @lru_cache(maxsize=None)
@@ -215,19 +240,22 @@ def bounded_renderer_names(root: Path = PACKAGE_ROOT) -> FrozenSet[str]:
     owner だけでよく、この test も家族側の module も変えなくてよい。
     """
 
-    definitions = [
-        node
-        for path in _iter_source_files(Path(root))
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    ]
+    definitions: dict[str, List[ast.AST]] = {}
+    for path in _iter_source_files(Path(root)):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                definitions.setdefault(node.name, []).append(node)
     known = set(OWNED_SUMMARY_FUNCTIONS)
     while True:
+        frozen = frozenset(known)
         discovered = {
-            node.name
-            for node in definitions
-            if node.name not in known
-            and _delegates_to_a_bounded_renderer(node, frozenset(known))
+            name
+            for name, nodes in definitions.items()
+            if name not in known
+            # 同名の定義が複数あるなら、**全部**が単純委譲のときだけ認める
+            # （1 つでも違えば、どの定義を指しているか判断できないので拒否）。
+            and all(_delegates_to_a_bounded_renderer(node, frozen) for node in nodes)
         }
         if not discovered:
             return frozenset(known)
@@ -464,25 +492,101 @@ def test_a_new_owner_renderer_needs_no_change_here():
     ]
 
 
-def test_scanner_treats_a_delegating_wrapper_as_a_bounded_renderer():
-    source = (
-        "class Host:\n"
-        "    def _debug_widget_summary(self, widget):\n"
-        "        if not self._debug_available():\n"
-        "            return '<debug-suppressed>'\n"
-        "        return summarize_widget(widget)\n"
-        "    def _reason(self):\n"
-        "        return 'constant'\n"
-    )
+def _wrappers_in(source: str, known=frozenset({"summarize_widget"})):
     tree = ast.parse(source)
-    known = frozenset({"summarize_widget"})
-    wrappers = {
+    return {
         node.name
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef)
         and _delegates_to_a_bounded_renderer(node, known)
     }
-    assert wrappers == {"_debug_widget_summary"}
+
+
+def test_scanner_treats_a_delegating_wrapper_as_a_bounded_renderer():
+    assert _wrappers_in(
+        "class Host:\n"
+        "    def _debug_widget_summary(self, widget):\n"
+        '        "docstring"\n'
+        "        if not self._debug_available():\n"
+        "            return '<debug-suppressed>'\n"
+        "        return summarize_widget(widget)\n"
+        "    def _reason(self):\n"
+        "        return 'constant'\n"
+    ) == {"_debug_widget_summary"}
+
+
+@pytest.mark.parametrize(
+    "body, label",
+    [
+        (
+            "        parts = [summarize_widget(w) for w in widget]\n"
+            "        return summarize_widget(parts)\n",
+            "comprehension",
+        ),
+        (
+            "        for part in widget:\n"
+            "            pass\n"
+            "        return summarize_widget(widget)\n",
+            "for-loop",
+        ),
+        (
+            "        while widget:\n"
+            "            break\n"
+            "        return summarize_widget(widget)\n",
+            "while-loop",
+        ),
+        (
+            "        try:\n"
+            "            pass\n"
+            "        except ValueError:\n"
+            "            pass\n"
+            "        return summarize_widget(widget)\n",
+            "try",
+        ),
+        (
+            "        return summarize_widget(sorted(widget))\n",
+            "argument that walks the input",
+        ),
+        (
+            "        return summarize_widget(w for w in widget)\n",
+            "generator argument",
+        ),
+        (
+            "        if len(widget) > 1000:\n"
+            "            return 'big'\n"
+            "        return summarize_widget(widget)\n",
+            "guard clause that walks the input",
+        ),
+    ],
+)
+def test_scanner_refuses_a_wrapper_that_does_its_own_work(body, label):
+    """自分で走査する helper を bounded renderer と誤認しない（fail-closed）。
+
+    どれも「owner renderer へ委譲している」点では以前の規則を満たすので、
+    修正前は bounded renderer として通っていた。
+    """
+
+    source = "class Host:\n    def _debug_widget_summary(self, widget):\n" + body
+    assert _wrappers_in(source) == set(), label
+
+
+def test_scanner_refuses_an_ambiguous_wrapper_name():
+    """同名の定義が混在するなら、どちらを指すか決められないので認めない。"""
+
+    source = (
+        "class Good:\n"
+        "    def _debug_widget_summary(self, widget):\n"
+        "        return summarize_widget(widget)\n"
+        "class Bad:\n"
+        "    def _debug_widget_summary(self, widget):\n"
+        "        joined = [summarize_widget(w) for w in widget]\n"
+        "        return summarize_widget(joined)\n"
+    )
+    definitions = [
+        node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.FunctionDef)
+    ]
+    known = frozenset({"summarize_widget"})
+    assert not all(_delegates_to_a_bounded_renderer(node, known) for node in definitions)
 
 
 # ------------------------------------------------------------- scanner 自体
