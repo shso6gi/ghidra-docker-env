@@ -31,6 +31,12 @@ on:
         description: "EqBench commit or ref to check out"
         type: string
         default: "3724fce5b287cc63165028444daf904f25b0158b"
+  # TEMPORARY (reverted before review): workflow_dispatch cannot be used from a
+  # branch until the workflow is on the default branch, so this proves the job
+  # on a GitHub-hosted runner once.  A push event carries no inputs, so it runs
+  # exactly the normalised defaults the schedule will use.
+  push:
+    branches: [feat/issue-109c-eqbench-subset-ci]
   schedule:
     # Mondays 03:00 UTC.  A scheduled event carries no inputs at all, which is
     # why every setting is normalised once in the first step below.
