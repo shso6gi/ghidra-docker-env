@@ -1,0 +1,559 @@
+name: eqbench-subset
+
+# The fixed measurement subset (scripts/function_tracer_pcode/reporting/
+# eqbench_subset.json) run against REAL binaries: EqBench is checked out and
+# compiled, Ghidra decompiles, the solvers run, and the gates judge the
+# result.  That takes about 85 minutes on a hosted runner, so it runs AFTER a
+# pull request has landed on main and never while one is open.
+#
+# Why `pull_request: types: [closed]` and not `push: branches: [main]`:
+#   * `closed` is the only pull_request activity here, so opening a PR,
+#     pushing to its branch or reopening it starts nothing.  There is no
+#     `opened` / `synchronize` / `reopened` in this list, and GitHub only
+#     dispatches the activity types a workflow names.
+#   * the job's `if` then keeps out the other way a PR closes -- closed
+#     without being merged -- so nothing runs for an abandoned PR.
+#   * `push: branches: [main]` would also fire for a direct push to main,
+#     which is not "a pull request was reviewed and merged".
+# The checkout below takes the PR's merge commit, which IS the commit that
+# landed on main -- not the temporary test-merge ref a pull_request event
+# otherwise checks out.
+#
+# `workflow_dispatch` stays as the manual escape hatch (a re-run after a
+# runner outage, or the Issue #15 oracle with identical_fast_path=0).  It is
+# never automatic, so it does not put this job on anyone's critical path.
+# There is deliberately no `schedule`: the run is tied to what landed, not to
+# the calendar.
+#
+# This is not the recorded P-code corpus.  `unit.yml` (unit-fast /
+# recorded-fast) and `recorded-full.yml` are Ghidra-free fixture regressions
+# and are untouched by this workflow; a fixture replay is not a real-binary
+# verification and neither stands in for the other (Issue #109).
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      subset_scope:
+        description: "Halves of the fixed subset to run and verify"
+        type: choice
+        options: [all, eq, neq]
+        default: all
+      pair_process_timeout:
+        description: "Per-pair process timeout (<seconds>s)"
+        type: string
+        default: "240s"
+      identical_fast_path:
+        description: "Issue #15 identical-input fast path: 1 = on, 0 = off (oracle)"
+        type: choice
+        options: ["1", "0"]
+        default: "1"
+      eqbench_ref:
+        description: "EqBench commit or ref to check out"
+        type: string
+        default: "3724fce5b287cc63165028444daf904f25b0158b"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  subset:
+    name: fixed subset (real binaries)
+    # A pull request also closes without being merged; that is not a commit on
+    # main and must start nothing.  The two allowed events are named rather
+    # than excluded, so a trigger added later without thinking about this
+    # policy leaves a visibly skipped job instead of quietly running 85
+    # minutes of work.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      # RAW_* are the event-dependent values and are empty for a merged pull
+      # request, which carries no inputs at all.  NOTHING below reads them:
+      # the normalisation step turns them into the settings every later step
+      # uses, so there is exactly one place where a default is chosen and no
+      # step can invent its own.
+      RAW_SUBSET_SCOPE: ${{ inputs.subset_scope }}
+      RAW_PAIR_PROCESS_TIMEOUT: ${{ inputs.pair_process_timeout }}
+      RAW_IDENTICAL_FAST_PATH: ${{ inputs.identical_fast_path }}
+      RAW_EQBENCH_REF: ${{ inputs.eqbench_ref }}
+      # The commit that landed on main, when this run is a merged PR.
+      MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+      PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A pull_request event otherwise checks out refs/pull/N/merge -- the
+          # test merge GitHub computed while the PR was open, which is not the
+          # commit that landed.  Empty for workflow_dispatch, where the action
+          # falls back to the dispatched ref.
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      # The run must be OF the merged commit, not of a test merge that happens
+      # to have the same tree.  Fail closed: an event that says it was merged
+      # but gives no merge commit is not something to carry on from.
+      - name: This run is of the commit that landed on main
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          checked_out="$(git rev-parse HEAD)"
+          echo "pull request:  #${PULL_REQUEST_NUMBER:-?}"
+          echo "merge commit:  ${MERGE_COMMIT_SHA:-(none)}"
+          echo "checked out:   $checked_out"
+          [[ -n "${MERGE_COMMIT_SHA:-}" ]] \
+            || { echo "::error::the merged pull request carries no merge commit"; exit 1; }
+          [[ "$checked_out" == "$MERGE_COMMIT_SHA" ]] \
+            || { echo "::error::checked out $checked_out, not the merge commit"; exit 1; }
+
+      # ------------------------------------------------------------------
+      # 1. One normalisation, one set of settings
+      # ------------------------------------------------------------------
+      # A merged pull request carries no inputs, so every setting is decided
+      # here and nowhere else.  `${VAR:-default}` treats ONLY unset/empty as
+      # absent, so identical_fast_path=0 stays 0.  A GitHub expression `||`
+      # would decide that in its own truthiness rules, which is exactly the
+      # kind of quiet change of a value this step exists to prevent.
+      - name: Normalise the inputs
+        id: normalise
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+
+          SUBSET_SCOPE="${RAW_SUBSET_SCOPE:-all}"
+          PAIR_PROCESS_TIMEOUT="${RAW_PAIR_PROCESS_TIMEOUT:-240s}"
+          EQBENCH_IDENTICAL_FAST_PATH="${RAW_IDENTICAL_FAST_PATH:-1}"
+          EQBENCH_REF="${RAW_EQBENCH_REF:-3724fce5b287cc63165028444daf904f25b0158b}"
+
+          case "$SUBSET_SCOPE" in
+            eq|neq|all) ;;
+            *) fail "subset_scope must be eq, neq or all: '$SUBSET_SCOPE'" ;;
+          esac
+          [[ "$PAIR_PROCESS_TIMEOUT" =~ ^[0-9]+s$ ]] \
+            || fail "pair_process_timeout must look like 240s: '$PAIR_PROCESS_TIMEOUT'"
+          case "$EQBENCH_IDENTICAL_FAST_PATH" in
+            0|1) ;;
+            *) fail "identical_fast_path must be 0 or 1: '$EQBENCH_IDENTICAL_FAST_PATH'" ;;
+          esac
+          [[ "$EQBENCH_REF" =~ ^[A-Za-z0-9._/-]+$ ]] \
+            || fail "eqbench_ref is not a plausible git ref: '$EQBENCH_REF'"
+
+          # The scope -> halves mapping has one owner (scripts/eqbench/
+          # ci_subset.py), so the shell loops below and the verification
+          # cannot drift apart.
+          SUBSET_HALVES="$(python3 -B -c \
+            'import sys; from scripts.eqbench.ci_subset import halves_for_scope; print(" ".join(halves_for_scope(sys.argv[1])))' \
+            "$SUBSET_SCOPE")"
+
+          PARALLEL_JOBS="$(nproc)"
+          ARTIFACT_DIR="$RUNNER_TEMP/eqbench-subset-artifacts"
+          EQBENCH_CANONICAL_DIR="$RUNNER_TEMP/eqbench-canonical"
+          WORK_REL="tmp/eqbench-work"
+          RUN_REL="logs/EqBench/ci_subset"
+          DRYRUN_REL="logs/EqBench/ci_subset_dryrun"
+          # Container paths: the runners record these in their manifests, and
+          # the verification compares against them.
+          WORK_ROOT_CONTAINER="/workspace/$WORK_REL/benchmarks"
+          RUN_DIR_CONTAINER="/workspace/$RUN_REL"
+          DRYRUN_DIR_CONTAINER="/workspace/$DRYRUN_REL"
+
+          mkdir -p "$ARTIFACT_DIR"
+          {
+            echo "SUBSET_SCOPE=$SUBSET_SCOPE"
+            echo "SUBSET_HALVES=$SUBSET_HALVES"
+            echo "PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT"
+            echo "EQBENCH_IDENTICAL_FAST_PATH=$EQBENCH_IDENTICAL_FAST_PATH"
+            echo "EQBENCH_REF=$EQBENCH_REF"
+            echo "PARALLEL_JOBS=$PARALLEL_JOBS"
+            echo "ARTIFACT_DIR=$ARTIFACT_DIR"
+            echo "EQBENCH_CANONICAL_DIR=$EQBENCH_CANONICAL_DIR"
+            echo "WORK_REL=$WORK_REL"
+            echo "RUN_REL=$RUN_REL"
+            echo "DRYRUN_REL=$DRYRUN_REL"
+            echo "WORK_ROOT_CONTAINER=$WORK_ROOT_CONTAINER"
+            echo "RUN_DIR_CONTAINER=$RUN_DIR_CONTAINER"
+            echo "DRYRUN_DIR_CONTAINER=$DRYRUN_DIR_CONTAINER"
+            echo "JOB_START_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "ANALYSED_COMMIT=$(git rev-parse HEAD)"
+          } >> "$GITHUB_ENV"
+
+          export SUBSET_SCOPE SUBSET_HALVES PAIR_PROCESS_TIMEOUT \
+                 EQBENCH_IDENTICAL_FAST_PATH EQBENCH_REF PARALLEL_JOBS \
+                 WORK_ROOT_CONTAINER
+          python3 -B - <<'PY' > "$ARTIFACT_DIR/normalized_inputs.json"
+          import json, os
+          raw = {
+              "subset_scope": os.environ.get("RAW_SUBSET_SCOPE", ""),
+              "pair_process_timeout": os.environ.get("RAW_PAIR_PROCESS_TIMEOUT", ""),
+              "identical_fast_path": os.environ.get("RAW_IDENTICAL_FAST_PATH", ""),
+              "eqbench_ref": os.environ.get("RAW_EQBENCH_REF", ""),
+          }
+          print(json.dumps({
+              "schema": "eqbench-ci-subset-inputs-v1",
+              "event_name": os.environ.get("GITHUB_EVENT_NAME", ""),
+              # What the event carried (empty on `schedule`) next to what the
+              # one normalisation turned it into.
+              "raw_inputs": raw,
+              "raw_inputs_present": {k: bool(v) for k, v in raw.items()},
+              "normalized": {
+                  "subset_scope": os.environ["SUBSET_SCOPE"],
+                  "subset_halves": os.environ["SUBSET_HALVES"].split(),
+                  "pair_process_timeout": os.environ["PAIR_PROCESS_TIMEOUT"],
+                  "identical_fast_path": os.environ["EQBENCH_IDENTICAL_FAST_PATH"],
+                  "eqbench_ref": os.environ["EQBENCH_REF"],
+                  "parallel_jobs": os.environ["PARALLEL_JOBS"],
+                  "eqbench_working_root_container": os.environ["WORK_ROOT_CONTAINER"],
+              },
+          }, indent=1, sort_keys=True))
+          PY
+          cat "$ARTIFACT_DIR/normalized_inputs.json"
+
+      # ------------------------------------------------------------------
+      # 2. Container
+      # ------------------------------------------------------------------
+      - name: Build the analysis container
+        run: |
+          set -euo pipefail
+          df -h / | tee "$ARTIFACT_DIR/disk_before.txt"
+          # The container runs as this runner's user so that everything it
+          # writes into the bind mount stays readable by later steps.
+          printf 'DOCKER_UID=%s\n' "$(id -u)" > .env
+          printf 'DOCKER_GID=%s\n' "$(id -g)" >> .env
+          docker compose build
+          docker compose run --rm -T ghidra-dev sh -c \
+            'id; python3 --version; z3 --version; ls -d "$GHIDRA_INSTALL_DIR"' \
+            | tee "$ARTIFACT_DIR/container_identity.txt"
+
+      # ------------------------------------------------------------------
+      # 3. EqBench: canonical checkout (reference only) + fresh working copy
+      # ------------------------------------------------------------------
+      # The canonical checkout lives OUTSIDE the repository workspace, so
+      # nothing the runners resolve relative to the repository can reach it:
+      # EQBENCH_ROOT / NEQ_ROOT name the working copy below, and NEQ_ROOT is
+      # required to be inside the repository anyway.  That it stayed untouched
+      # is then checked after the run rather than assumed.
+      - name: Check out EqBench (canonical, reference only)
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          [[ ! -e "$EQBENCH_CANONICAL_DIR" ]] \
+            || fail "canonical checkout already exists: $EQBENCH_CANONICAL_DIR"
+          git clone --quiet https://github.com/shrBadihi/EqBench "$EQBENCH_CANONICAL_DIR"
+          git -C "$EQBENCH_CANONICAL_DIR" checkout --quiet --detach "$EQBENCH_REF"
+          commit="$(git -C "$EQBENCH_CANONICAL_DIR" rev-parse HEAD)"
+          git -C "$EQBENCH_CANONICAL_DIR" status --porcelain --untracked-files=all \
+            > "$ARTIFACT_DIR/canonical_status_before.txt"
+          [[ ! -s "$ARTIFACT_DIR/canonical_status_before.txt" ]] \
+            || fail "the canonical checkout is not clean right after cloning"
+          cp "$EQBENCH_CANONICAL_DIR/LICENSE.md" "$ARTIFACT_DIR/EqBench-LICENSE.md"
+          {
+            echo "eqbench_ref_requested=$EQBENCH_REF"
+            echo "eqbench_commit=$commit"
+            echo "canonical_dir=$EQBENCH_CANONICAL_DIR"
+            echo "canonical_inside_workspace=no"
+          } > "$ARTIFACT_DIR/eqbench_checkout.txt"
+          cat "$ARTIFACT_DIR/eqbench_checkout.txt"
+          echo "EQBENCH_COMMIT=$commit" >> "$GITHUB_ENV"
+
+      - name: Make a fresh writable working copy
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          # Fresh-only: a working copy left over from an earlier run would make
+          # "which binaries did this run compare?" unanswerable, so it is a
+          # failure rather than something to clean up and carry on from.
+          [[ ! -e "$WORK_REL" ]] \
+            || fail "a working copy already exists and is never reused: $WORK_REL"
+          mkdir -p "$WORK_REL/benchmarks"
+          cp -a "$EQBENCH_CANONICAL_DIR/benchmarks/." "$WORK_REL/benchmarks/"
+          [[ ! -e "$WORK_REL/benchmarks/benchmarks" ]] \
+            || fail "the copy doubled a directory level: $WORK_REL/benchmarks/benchmarks"
+          [[ -d "$WORK_REL/benchmarks/REVE" ]] \
+            || fail "the working copy does not look like an EqBench benchmarks tree"
+          samples="$(find "$WORK_REL/benchmarks" -name '*.c' | wc -l)"
+          echo "working copy: $WORK_REL/benchmarks ($samples C sources)"
+          echo "working_copy_c_sources=$samples" >> "$ARTIFACT_DIR/eqbench_checkout.txt"
+
+      # ------------------------------------------------------------------
+      # 4. env propagation, before anything expensive
+      # ------------------------------------------------------------------
+      # (a) the shell -> container hop, with the same `env KEY="$VALUE"` form
+      #     the real run uses.  `env NAME ...` without a value would treat NAME
+      #     as the command to run, which is why every value is written out.
+      - name: Env propagation — container round trip
+        run: |
+          set -euo pipefail
+          docker compose run --rm -T ghidra-dev env \
+            SUBSET_SCOPE="$SUBSET_SCOPE" \
+            PAIR_PROCESS_TIMEOUT="$PAIR_PROCESS_TIMEOUT" \
+            EQBENCH_IDENTICAL_FAST_PATH="$EQBENCH_IDENTICAL_FAST_PATH" \
+            EQBENCH_ROOT="$WORK_ROOT_CONTAINER" \
+            NEQ_ROOT="$WORK_ROOT_CONTAINER" \
+            PARALLEL_JOBS="$PARALLEL_JOBS" \
+            sh -c 'printf "%s\n" \
+              "SUBSET_SCOPE=$SUBSET_SCOPE" \
+              "PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT" \
+              "EQBENCH_IDENTICAL_FAST_PATH=$EQBENCH_IDENTICAL_FAST_PATH" \
+              "EQBENCH_ROOT=$EQBENCH_ROOT" \
+              "NEQ_ROOT=$NEQ_ROOT" \
+              "PARALLEL_JOBS=$PARALLEL_JOBS"' \
+            > "$ARTIFACT_DIR/env_propagation_container.txt"
+          {
+            echo "SUBSET_SCOPE=$SUBSET_SCOPE"
+            echo "PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT"
+            echo "EQBENCH_IDENTICAL_FAST_PATH=$EQBENCH_IDENTICAL_FAST_PATH"
+            echo "EQBENCH_ROOT=$WORK_ROOT_CONTAINER"
+            echo "NEQ_ROOT=$WORK_ROOT_CONTAINER"
+            echo "PARALLEL_JOBS=$PARALLEL_JOBS"
+          } > "$ARTIFACT_DIR/env_propagation_expected.txt"
+          diff -u "$ARTIFACT_DIR/env_propagation_expected.txt" \
+                  "$ARTIFACT_DIR/env_propagation_container.txt" \
+            || { echo "::error::a setting changed on the way into the container"; exit 1; }
+          echo "container env matches the normalised settings"
+
+      # (b) the rest of the chain: eqbench_run_subset.sh -> the Eq / Neq child
+      #     runner.  DRY_RUN=1 stops each runner right after it has written the
+      #     run manifest, so this costs seconds and still proves the settings
+      #     arrived where the pairs would have used them.
+      - name: Env propagation — dry run through the runners
+        run: |
+          set -euo pipefail
+          docker compose run --rm -T ghidra-dev env \
+            DRY_RUN=1 \
+            SUBSET_SCOPE="$SUBSET_SCOPE" \
+            PAIR_PROCESS_TIMEOUT="$PAIR_PROCESS_TIMEOUT" \
+            EQBENCH_IDENTICAL_FAST_PATH="$EQBENCH_IDENTICAL_FAST_PATH" \
+            EQBENCH_ROOT="$WORK_ROOT_CONTAINER" \
+            NEQ_ROOT="$WORK_ROOT_CONTAINER" \
+            EQBENCH_BUILD_POLICY=REUSE_OR_COMPILE \
+            NEQ_BUILD_POLICY=REUSE_OR_COMPILE \
+            PARALLEL_JOBS="$PARALLEL_JOBS" \
+            OUTPUT_BASE_DIR="$DRYRUN_DIR_CONTAINER" \
+            VERIFICATION_LEDGER="$DRYRUN_DIR_CONTAINER/verification_ledger.jsonl" \
+            SUBSET_ISSUE=109 \
+            SUBSET_REQUESTED_SCOPE=subset \
+            ./eqbench_run_subset.sh \
+            > "$ARTIFACT_DIR/dry_run_console.txt" 2>&1 \
+            || { tail -40 "$ARTIFACT_DIR/dry_run_console.txt"; exit 1; }
+          tail -20 "$ARTIFACT_DIR/dry_run_console.txt"
+          python3 -B -m scripts.eqbench.ci_subset verify \
+            --run-dir "$DRYRUN_REL" \
+            --scope "$SUBSET_SCOPE" \
+            --profile propagation \
+            --working-root "$WORK_ROOT_CONTAINER" \
+            --pair-process-timeout "$PAIR_PROCESS_TIMEOUT" \
+            --identical-fast-path "$EQBENCH_IDENTICAL_FAST_PATH" \
+            --json "$ARTIFACT_DIR/propagation_verification.json" \
+            --text "$ARTIFACT_DIR/propagation_verification.txt"
+
+      # ------------------------------------------------------------------
+      # 5. The run itself
+      # ------------------------------------------------------------------
+      # SUBSET_PR is deliberately not set: that field records which PR a
+      # measurement belongs to, and a CI run identifier is not that.  The run
+      # id lives in ci_metadata.json and in the artifact name.
+      - name: Run the fixed subset
+        run: |
+          set -euo pipefail
+          started="$(date +%s)"
+          status=0
+          docker compose run --rm -T ghidra-dev env \
+            SUBSET_SCOPE="$SUBSET_SCOPE" \
+            PAIR_PROCESS_TIMEOUT="$PAIR_PROCESS_TIMEOUT" \
+            EQBENCH_IDENTICAL_FAST_PATH="$EQBENCH_IDENTICAL_FAST_PATH" \
+            EQBENCH_ROOT="$WORK_ROOT_CONTAINER" \
+            NEQ_ROOT="$WORK_ROOT_CONTAINER" \
+            EQBENCH_BUILD_POLICY=REUSE_OR_COMPILE \
+            NEQ_BUILD_POLICY=REUSE_OR_COMPILE \
+            PARALLEL_JOBS="$PARALLEL_JOBS" \
+            OUTPUT_BASE_DIR="$RUN_DIR_CONTAINER" \
+            VERIFICATION_LEDGER="$RUN_DIR_CONTAINER/verification_ledger.jsonl" \
+            SUBSET_ISSUE=109 \
+            SUBSET_REQUESTED_SCOPE=subset \
+            ./eqbench_run_subset.sh || status=$?
+          elapsed=$(( $(date +%s) - started ))
+          # The step does not fail here: the verification below is the single
+          # place that decides, and it needs this status as one of its inputs.
+          # Failing here would also cost every artifact collected after it.
+          echo "SUBSET_RUNNER_STATUS=$status" >> "$GITHUB_ENV"
+          echo "SUBSET_ELAPSED_SECONDS=$elapsed" >> "$GITHUB_ENV"
+          echo "subset runner exit=$status elapsed=${elapsed}s"
+          df -h / | tee "$ARTIFACT_DIR/disk_after.txt"
+
+      # The manifest of the binaries this run actually compared, built AFTER
+      # the run from the signed pair statuses (`pair_execution_target`) and
+      # re-hashed against the files still on disk.  A list made from a fresh
+      # checkout would name binaries that did not exist yet.
+      - name: Binary manifest from the finished run
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUN_REL:-}" || ! -d "${RUN_REL:-}" ]]; then
+            echo "::warning::no run tree: the job failed before the subset ran"
+            exit 0
+          fi
+          for half in ${SUBSET_HALVES:-}; do
+            docker compose run --rm -T ghidra-dev python3 -B -m scripts.eqbench.binary_manifest \
+              build --run-dir "$RUN_REL/$half" --binary-root /workspace \
+              --output "$RUN_REL/binary_manifest_$half.txt" \
+              || echo "::warning::binary manifest for the $half half could not be built"
+          done
+
+      # ------------------------------------------------------------------
+      # 6. The verdict
+      # ------------------------------------------------------------------
+      # Success is: the runner exited 0, the run recorded exit_status=0, the
+      # SHARED soundness gate passed (schema soundness-gate-v2, passed=true),
+      # every in-scope half's BENCHMARK VALIDATION gate says PASS, the halves
+      # ran against the working root with the settings asked for, the subset
+      # was actually EXECUTED (every expected pair status present and readable,
+      # nothing reused, and at least one pair per half that the analysis
+      # decided -- both gates pass a run whose every pair was killed at its
+      # deadline), and the artifacts the scope needs are there.  Separate
+      # contracts, kept separate; the rules live in
+      # scripts/eqbench/ci_subset.py and are unit tested.
+      - name: Verify the run (scope aware, both gates)
+        run: |
+          set -euo pipefail
+          python3 -B -m scripts.eqbench.ci_subset verify \
+            --run-dir "$RUN_REL" \
+            --scope "$SUBSET_SCOPE" \
+            --profile full \
+            --working-root "$WORK_ROOT_CONTAINER" \
+            --pair-process-timeout "$PAIR_PROCESS_TIMEOUT" \
+            --identical-fast-path "$EQBENCH_IDENTICAL_FAST_PATH" \
+            --runner-exit-status "$SUBSET_RUNNER_STATUS" \
+            --json "$ARTIFACT_DIR/subset_verification.json" \
+            --text "$ARTIFACT_DIR/subset_verification.txt"
+
+      # ------------------------------------------------------------------
+      # 7. Evidence, whatever happened
+      # ------------------------------------------------------------------
+      - name: The canonical checkout is unchanged
+        if: always()
+        run: |
+          set -euo pipefail
+          if [[ ! -d "${EQBENCH_CANONICAL_DIR:-}" ]]; then
+            echo "no canonical checkout: the run failed before it was made"
+            exit 0
+          fi
+          git -C "$EQBENCH_CANONICAL_DIR" status --porcelain --untracked-files=all \
+            > "$ARTIFACT_DIR/canonical_status_after.txt"
+          after="$(git -C "$EQBENCH_CANONICAL_DIR" rev-parse HEAD)"
+          echo "canonical_head_after=$after" >> "$ARTIFACT_DIR/eqbench_checkout.txt"
+          if [[ -s "$ARTIFACT_DIR/canonical_status_after.txt" ]]; then
+            head -40 "$ARTIFACT_DIR/canonical_status_after.txt"
+            echo "::error::the canonical EqBench checkout was written to"
+            exit 1
+          fi
+          # Not `${EQBENCH_COMMIT:-$after}`: with no recorded commit there is
+          # nothing to compare against, and "I could not look" must not pass.
+          [[ -n "${EQBENCH_COMMIT:-}" ]] \
+            || { echo "::error::no recorded EqBench commit to compare against"; exit 1; }
+          [[ "$after" == "$EQBENCH_COMMIT" ]] \
+            || { echo "::error::the canonical checkout moved to $after"; exit 1; }
+          echo "canonical checkout unchanged at $after"
+
+      - name: CI metadata
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "${ARTIFACT_DIR:-$RUNNER_TEMP/eqbench-subset-artifacts}"
+          python3 -B - <<'PY' > "${ARTIFACT_DIR:-$RUNNER_TEMP/eqbench-subset-artifacts}/ci_metadata.json"
+          import datetime, json, os
+
+          def value(name):
+              return os.environ.get(name) or None
+
+          print(json.dumps({
+              "schema": "eqbench-ci-subset-metadata-v1",
+              # The CI identity of the run.  Kept here and in the artifact
+              # name, and deliberately out of the run's own provenance
+              # fields: SUBSET_PR names a pull request, not a CI execution.
+              "ci": {
+                  "run_id": value("GITHUB_RUN_ID"),
+                  # Which commit this run is OF.  For a merged pull request
+                  # that is the merge commit on main, not the pull_request
+                  # event's own GITHUB_SHA (a test merge ref).
+                  "analysed_commit": value("ANALYSED_COMMIT"),
+                  "merged_pull_request": value("PULL_REQUEST_NUMBER"),
+                  "merge_commit_sha": value("MERGE_COMMIT_SHA"),
+                  "run_attempt": value("GITHUB_RUN_ATTEMPT"),
+                  "run_number": value("GITHUB_RUN_NUMBER"),
+                  "workflow": value("GITHUB_WORKFLOW"),
+                  "event_name": value("GITHUB_EVENT_NAME"),
+                  "repository": value("GITHUB_REPOSITORY"),
+                  "sha": value("GITHUB_SHA"),
+                  "ref": value("GITHUB_REF"),
+                  "runner_os": value("RUNNER_OS"),
+                  "runner_arch": value("RUNNER_ARCH"),
+              },
+              "settings": {
+                  "subset_scope": value("SUBSET_SCOPE"),
+                  "subset_halves": (os.environ.get("SUBSET_HALVES") or "").split(),
+                  "pair_process_timeout": value("PAIR_PROCESS_TIMEOUT"),
+                  "identical_fast_path": value("EQBENCH_IDENTICAL_FAST_PATH"),
+                  "parallel_jobs": value("PARALLEL_JOBS"),
+                  "eqbench_working_root_container": value("WORK_ROOT_CONTAINER"),
+              },
+              "eqbench": {
+                  "ref_requested": value("EQBENCH_REF"),
+                  "commit": value("EQBENCH_COMMIT"),
+              },
+              "timing": {
+                  "job_start_utc": value("JOB_START_UTC"),
+                  "metadata_written_utc": datetime.datetime.now(
+                      datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  "subset_elapsed_seconds": value("SUBSET_ELAPSED_SECONDS"),
+              },
+              "subset_runner_exit_status": value("SUBSET_RUNNER_STATUS"),
+          }, indent=1, sort_keys=True))
+          PY
+          cat "${ARTIFACT_DIR:-$RUNNER_TEMP/eqbench-subset-artifacts}/ci_metadata.json"
+
+      - name: Collect the evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          dest="${ARTIFACT_DIR:-$RUNNER_TEMP/eqbench-subset-artifacts}"
+          mkdir -p "$dest"
+          if [[ -d "${RUN_REL:-}" ]]; then
+            python3 -B -m scripts.eqbench.ci_subset collect \
+              --run-dir "$RUN_REL" --dest "$dest/run" \
+              --scope "${SUBSET_SCOPE:-all}" --max-pair-logs 100 \
+              --json "$dest/collected_run.json" \
+              || echo "::warning::collecting the run tree failed"
+          else
+            echo "::warning::no run tree to collect: ${RUN_REL:-(no run directory was chosen)}"
+          fi
+          if [[ -d "${DRYRUN_REL:-}" ]]; then
+            mkdir -p "$dest/dry_run"
+            cp -a "$DRYRUN_REL/." "$dest/dry_run/" || true
+          fi
+          du -sh "$dest" || true
+          # `| head` would SIGPIPE `sort` and, under pipefail, fail this step
+          # once the listing grows past the cut -- write it out, then show a
+          # bounded part of the file.
+          find "$dest" -maxdepth 2 | sort > "$dest/artifact_listing.txt"
+          head -n 60 "$dest/artifact_listing.txt"
+
+      - name: Upload the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # The CI run identity belongs here and in ci_metadata.json.
+          name: eqbench-subset-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/eqbench-subset-artifacts
+          # The runners keep per-pair stack dumps and runtime receipts under
+          # `.runtime-metrics/`, and upload-artifact drops dotted paths unless
+          # told otherwise -- which silently cost ~290 of the 731 collected
+          # files, the stack dumps among them.
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
