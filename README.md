@@ -358,6 +358,14 @@ that belongs on nobody's critical path. The job budget is
 | `identical_fast_path` | `1` | Issue #15 fast path; `0` runs the oracle path |
 | `eqbench_ref` | `3724fce5b287cc63165028444daf904f25b0158b` | the EqBench commit to check out |
 
+Two of the manifest's own `run_settings` are overridden, because a hosted
+runner is not the measurement host: `PARALLEL_JOBS` becomes `nproc` instead of
+20, and the build policy becomes `REUSE_OR_COMPILE` instead of `PREBUILT_ONLY`,
+since a fresh EqBench checkout has no binaries yet. Everything else
+(`EQBENCH_RESOURCE_ADMISSION`, the sources and pair ids) comes from
+`eqbench_subset.json` unchanged, and both values are recorded in
+`subset_manifest.txt`.
+
 A `schedule` event carries no inputs at all, so **every setting is normalised
 once**, in the first step, with `${VAR:-default}` — not with a GitHub
 expression `||`, whose truthiness rules would quietly turn
