@@ -22,6 +22,23 @@ WORKING_ROOT = "/workspace/tmp/eqbench-work/benchmarks"
 TIMEOUT = "240s"
 FAST_PATH = "1"
 
+#: A miniature stand-in for scripts/function_tracer_pcode/reporting/
+#: eqbench_subset.json: two sources and two pair ids per half, so the expected
+#: pair set is small but derived the same way the real one is -- from the
+#: definition, never from a number written into the test.
+DEFINITION = {
+    "schema": ci_subset.SUBSET_DEFINITION_SCHEMA,
+    "eq": {
+        "sources": ["fam/a/Eq/new", "fam/b/Eq/newV"],
+        "pair_ids": ["B1_B2", "B3_B11"],
+    },
+    "neq": {
+        "sources": ["fam/a/Neq/new-old", "fam/c/Neq/newV-oldV"],
+        "pair_ids": ["N_B1_O_B1", "N_B2_O_B4"],
+    },
+}
+FUNCTION = "fn"
+
 
 def _run_manifest_text(half: str, **overrides: str) -> str:
     values = {
@@ -40,11 +57,70 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _binary_manifest_text(rows: int = 2) -> str:
+def _binary_manifest_text(half: str = "eq") -> str:
+    """A binary manifest naming exactly the half's samples, as a real one does."""
+
     lines = [ci_subset.BINARY_MANIFEST_HEADER, "sample_identity\tbinary_id\tpath\tsha256"]
-    for index in range(rows):
-        lines.append(f"s/{index}\tB{index}\ttmp/eqbench-work/benchmarks/b{index}\t" + "0" * 64)
+    for index, source in enumerate(DEFINITION[half]["sources"]):
+        lines.append(
+            f"{source}\tB{index + 1}\ttmp/eqbench-work/benchmarks/{source}/b\t" + "0" * 64
+        )
     return "\n".join(lines) + "\n"
+
+
+def write_definition(tmp_path: Path, payload=None, name="eqbench_subset.json") -> Path:
+    path = tmp_path / name
+    _write(path, json.dumps(DEFINITION if payload is None else payload))
+    return path
+
+
+def expected_pair_paths(half: str) -> list:
+    """The pair-status paths the definition implies, laid out as the runners do."""
+
+    return [
+        f"{source}/{FUNCTION}/{FUNCTION}_{pair_id}{ci_subset.PAIR_STATUS_SUFFIX}"
+        for source in DEFINITION[half]["sources"]
+        for pair_id in DEFINITION[half]["pair_ids"]
+    ]
+
+
+def write_half_workload(
+    run_dir: Path,
+    half: str,
+    outcomes=None,
+    expected_paths=None,
+    written_paths=None,
+    dry_run: int = 0,
+    reused: list = (),
+    skipped_jobs: int = 0,
+    run_pair_failures: int = 0,
+    schema: str = None,
+) -> None:
+    """A half's publication manifest plus the pair statuses it expected.
+
+    ``outcomes`` maps a pair path to its canonical outcome; anything not named
+    gets ``UNKNOWN``, which is a result the analysis produced.
+    """
+
+    paths = list(expected_pair_paths(half) if expected_paths is None else expected_paths)
+    _write(
+        run_dir / half / ci_subset.PUBLICATION_MANIFEST_FILE,
+        json.dumps(
+            {
+                "schema": ci_subset.PUBLICATION_MANIFEST_SCHEMA if schema is None else schema,
+                "dry_run": dry_run,
+                "expected_pair_status_paths": paths,
+                "verified_skipped_pair_status_paths": list(reused),
+                "total_skipped_pair_jobs": skipped_jobs,
+                "run_pair_failures": run_pair_failures,
+            }
+        ),
+    )
+    outcomes = dict(outcomes or {})
+    for relative in (paths if written_paths is None else written_paths):
+        outcome = outcomes.get(relative, outcomes.get("*", "UNKNOWN"))
+        payload = {"canonical_outcome": outcome} if outcome is not None else {}
+        _write(run_dir / half / relative, json.dumps(payload))
 
 
 def make_run(tmp_path: Path, scope: str, **kwargs: object) -> Path:
@@ -79,7 +155,8 @@ def make_run(tmp_path: Path, scope: str, **kwargs: object) -> Path:
         _write(run_dir / half / "run_health_summary.json", "{}\n")
         _write(run_dir / half / "run_health_summary.txt", "health\n")
         _write(run_dir / f"{half}.log", "console\n")
-        _write(run_dir / f"binary_manifest_{half}.txt", _binary_manifest_text())
+        _write(run_dir / f"binary_manifest_{half}.txt", _binary_manifest_text(half))
+        write_half_workload(run_dir, half)
     return run_dir
 
 
@@ -89,6 +166,7 @@ def run_verify(run_dir: Path, scope: str, **kwargs: object) -> ci_subset.Report:
         "pair_process_timeout": TIMEOUT,
         "identical_fast_path": FAST_PATH,
         "runner_exit_status": 0,
+        "subset_definition": write_definition(run_dir.parent),
     }
     params.update(kwargs)
     return ci_subset.verify(run_dir=run_dir, scope=scope, **params)  # type: ignore[arg-type]
@@ -589,6 +667,7 @@ def test_cli_verify_writes_both_reports_and_returns_the_verdict(tmp_path, capsys
             "--pair-process-timeout", TIMEOUT,
             "--identical-fast-path", FAST_PATH,
             "--runner-exit-status", "0",
+            "--subset-definition", str(write_definition(tmp_path)),
             "--json", str(json_path), "--text", str(text_path),
         ]
     )
@@ -607,6 +686,7 @@ def test_cli_verify_fails_the_step_when_a_gate_did_not_pass(tmp_path, capsys):
             "--pair-process-timeout", TIMEOUT,
             "--identical-fast-path", FAST_PATH,
             "--runner-exit-status", "0",
+            "--subset-definition", str(write_definition(tmp_path)),
         ]
     )
     assert code == ci_subset.EXIT_FAIL
@@ -676,3 +756,324 @@ def test_the_full_profile_requires_the_runner_exit_status_to_be_supplied(tmp_pat
     )
     assert not report.passed
     assert "run.runner_exit_status" in failed_checks(report)
+
+
+# --------------------------------------------------------------------------
+# workload completeness and non-vacuity
+#
+# The two gates are about the pairs that were judged, so on their own they are
+# content with a run that judged nothing: every pair killed at its deadline is
+# a passing soundness gate, passing benchmark gates and exit_status=0. These
+# are the checks that make such a run fail.
+# --------------------------------------------------------------------------
+
+
+def test_a_run_that_decided_something_passes(tmp_path):
+    report = run_verify(make_run(tmp_path, "all"), "all")
+    assert report.passed, failed_checks(report)
+    decided = next(c for c in report.checks if c.name == "workload.eq.semantic_outcomes")
+    assert "4 of 4" in decided.detail
+
+
+@pytest.mark.parametrize("outcome", ["TIMEOUT", "ERROR"])
+@pytest.mark.parametrize("scope", ["eq", "neq", "all"])
+def test_a_run_where_no_pair_produced_a_result_fails(tmp_path, outcome, scope):
+    """This is the `pair_process_timeout=1s` shape: nothing was decided."""
+
+    run_dir = make_run(tmp_path, scope)
+    for half in ci_subset.halves_for_scope(scope):
+        write_half_workload(run_dir, half, outcomes={"*": outcome})
+    report = run_verify(run_dir, scope)
+    assert not report.passed
+    for half in ci_subset.halves_for_scope(scope):
+        assert f"workload.{half}.semantic_outcomes" in failed_checks(report)
+    # ... and nothing else complained: the gates are happy with such a run.
+    assert [name for name in failed_checks(report)
+            if not name.endswith(".semantic_outcomes")] == []
+
+
+def test_a_mix_of_timeouts_and_results_passes(tmp_path):
+    """A few TIMEOUT pairs are normal; one of them must not fail the run."""
+
+    run_dir = make_run(tmp_path, "all")
+    eq_paths = expected_pair_paths("eq")
+    write_half_workload(run_dir, "eq", outcomes={eq_paths[0]: "TIMEOUT"})
+    neq_paths = expected_pair_paths("neq")
+    write_half_workload(
+        run_dir, "neq",
+        outcomes={neq_paths[0]: "TIMEOUT", neq_paths[1]: "ERROR", neq_paths[2]: "NOT_EQ"},
+    )
+    report = run_verify(run_dir, "all")
+    assert report.passed, failed_checks(report)
+
+
+@pytest.mark.parametrize("outcome", ["EQUIVALENT", "NOT_EQ", "UNKNOWN"])
+def test_every_outcome_the_authority_calls_a_result_counts(tmp_path, outcome):
+    """UNKNOWN is a result the analysis produced -- the dominant one here."""
+
+    assert outcome in ci_subset.semantic_outcomes()
+    run_dir = make_run(tmp_path, "eq")
+    write_half_workload(run_dir, "eq", outcomes={"*": outcome})
+    assert run_verify(run_dir, "eq").passed
+
+
+@pytest.mark.parametrize("outcome", ["TIMEOUT", "ERROR"])
+def test_the_non_decisive_outcomes_come_from_the_authority_table(outcome):
+    assert outcome not in ci_subset.semantic_outcomes()
+
+
+def test_a_missing_expected_pair_status_fails(tmp_path):
+    run_dir = make_run(tmp_path, "all")
+    (run_dir / "neq" / expected_pair_paths("neq")[0]).unlink()
+    report = run_verify(run_dir, "all")
+    assert not report.passed
+    assert "workload.neq.pair_statuses" in failed_checks(report)
+    check = next(c for c in report.checks if c.name == "workload.neq.pair_statuses")
+    assert "1 missing" in check.detail
+
+
+def test_a_pair_status_the_run_never_expected_fails(tmp_path):
+    run_dir = make_run(tmp_path, "eq")
+    _write(
+        run_dir / "eq" / "fam/a/Eq/new" / FUNCTION / f"{FUNCTION}_B9_B10.pair-status.json",
+        json.dumps({"canonical_outcome": "UNKNOWN"}),
+    )
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    assert "workload.eq.pair_statuses" in failed_checks(report)
+
+
+def test_a_pair_status_without_an_outcome_is_not_a_result(tmp_path):
+    run_dir = make_run(tmp_path, "eq")
+    write_half_workload(run_dir, "eq", outcomes={"*": None})
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    assert "workload.eq.readable_outcomes" in failed_checks(report)
+    assert "workload.eq.semantic_outcomes" in failed_checks(report)
+
+
+def test_reused_pair_statuses_are_not_this_run_executing_the_subset(tmp_path):
+    run_dir = make_run(tmp_path, "eq")
+    write_half_workload(
+        run_dir, "eq", reused=[expected_pair_paths("eq")[0]], skipped_jobs=1,
+    )
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    assert "workload.eq.executed_not_reused" in failed_checks(report)
+
+
+def test_a_pair_the_harness_failed_to_run_fails(tmp_path):
+    run_dir = make_run(tmp_path, "eq")
+    write_half_workload(run_dir, "eq", run_pair_failures=2)
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    assert "workload.eq.run_pair_failures" in failed_checks(report)
+
+
+def test_a_dry_run_tree_is_not_a_real_run(tmp_path):
+    run_dir = make_run(tmp_path, "eq")
+    write_half_workload(run_dir, "eq", dry_run=1)
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    assert "workload.eq.publication_manifest" in failed_checks(report)
+
+
+@pytest.mark.parametrize(
+    "mutate,expected",
+    [
+        (lambda p: p.unlink(), "publication_manifest"),
+        (lambda p: p.write_text("{not json", encoding="utf-8"), "publication_manifest"),
+        (lambda p: p.write_text("[]", encoding="utf-8"), "publication_manifest"),
+    ],
+)
+def test_an_unusable_publication_manifest_fails_rather_than_being_skipped(
+    tmp_path, mutate, expected,
+):
+    run_dir = make_run(tmp_path, "eq")
+    mutate(run_dir / "eq" / ci_subset.PUBLICATION_MANIFEST_FILE)
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    assert f"workload.eq.{expected}" in failed_checks(report)
+
+
+def test_a_publication_manifest_of_another_schema_fails(tmp_path):
+    run_dir = make_run(tmp_path, "eq")
+    write_half_workload(run_dir, "eq", schema="eqbench-matrix-publication-manifest-v2")
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    assert "workload.eq.publication_manifest" in failed_checks(report)
+
+
+def test_a_run_that_expected_fewer_samples_than_the_subset_fails(tmp_path):
+    """A filter that quietly selected less is not the fixed subset."""
+
+    run_dir = make_run(tmp_path, "eq")
+    write_half_workload(run_dir, "eq", expected_paths=expected_pair_paths("eq")[:2])
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    assert "workload.eq.subset_coverage" in failed_checks(report)
+
+
+def test_a_run_that_expected_a_sample_outside_the_subset_fails(tmp_path):
+    run_dir = make_run(tmp_path, "eq")
+    extra = f"other/x/Eq/new/{FUNCTION}/{FUNCTION}_B1_B2{ci_subset.PAIR_STATUS_SUFFIX}"
+    write_half_workload(
+        run_dir, "eq", expected_paths=expected_pair_paths("eq") + [extra],
+    )
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    assert "workload.eq.subset_coverage" in failed_checks(report)
+
+
+def test_the_coverage_check_is_robust_to_several_functions_per_sample(tmp_path):
+    """Two functions of one sample still cover the same (sample, pair) set."""
+
+    run_dir = make_run(tmp_path, "eq")
+    sources = DEFINITION["eq"]["sources"]
+    pair_ids = DEFINITION["eq"]["pair_ids"]
+    paths = [
+        f"{source}/{fn}/{fn}_{pair_id}{ci_subset.PAIR_STATUS_SUFFIX}"
+        for source in sources for fn in ("fn", "helper") for pair_id in pair_ids
+    ]
+    write_half_workload(run_dir, "eq", expected_paths=paths)
+    report = run_verify(run_dir, "eq")
+    assert report.passed, failed_checks(report)
+
+
+def test_an_unusable_subset_definition_fails(tmp_path):
+    run_dir = make_run(tmp_path, "eq")
+    broken = write_definition(tmp_path, {"schema": "something-else"}, name="broken.json")
+    report = run_verify(run_dir, "eq", subset_definition=broken)
+    assert not report.passed
+    assert "workload.eq.subset_coverage" in failed_checks(report)
+
+
+def test_a_missing_subset_definition_fails(tmp_path):
+    run_dir = make_run(tmp_path, "eq")
+    report = run_verify(run_dir, "eq", subset_definition=tmp_path / "absent.json")
+    assert not report.passed
+    assert "workload.eq.subset_coverage" in failed_checks(report)
+
+
+def test_the_repository_subset_definition_is_the_one_shipped(tmp_path):
+    """The default points at the file that defines the subset, and it parses."""
+
+    assert ci_subset.SUBSET_DEFINITION_FILE.name == "eqbench_subset.json"
+    for half, sources, pairs in (("eq", 8, 8), ("neq", 10, 8)):
+        identities, source_count, pair_count = ci_subset.subset_definition_pairs(
+            half, ci_subset.SUBSET_DEFINITION_FILE,
+        )
+        assert (source_count, pair_count) == (sources, pairs)
+        assert len(identities) == sources * pairs
+
+
+@pytest.mark.parametrize("scope,absent", [("eq", "neq"), ("neq", "eq")])
+def test_the_workload_gate_only_asks_about_halves_in_scope(tmp_path, scope, absent):
+    run_dir = make_run(tmp_path, scope)
+    report = run_verify(run_dir, scope)
+    assert report.passed, failed_checks(report)
+    workload = [c.name for c in report.checks if c.gate == ci_subset.GATE_WORKLOAD]
+    assert workload and all(f".{absent}." not in name for name in workload)
+
+
+def test_the_workload_gate_asks_about_both_halves_for_scope_all(tmp_path):
+    report = run_verify(make_run(tmp_path, "all"), "all")
+    workload = [c.name for c in report.checks if c.gate == ci_subset.GATE_WORKLOAD]
+    assert [n for n in workload if ".eq." in n]
+    assert [n for n in workload if ".neq." in n]
+
+
+def test_the_propagation_profile_has_no_workload_gate(tmp_path):
+    """A dry run runs no pairs, so there is no workload to be complete."""
+
+    report = run_verify(
+        make_dry_run(tmp_path, "all"), "all", profile=ci_subset.PROFILE_PROPAGATION,
+    )
+    assert report.passed, failed_checks(report)
+    assert ci_subset.GATE_WORKLOAD not in report.as_dict()["gates"]
+
+
+def test_pair_identity_from_status_path_reads_both_halves_layouts():
+    assert ci_subset.pair_identity_from_status_path(
+        "CLEVER/LoopSub/Eq/new/foo/foo_B1_B2.pair-status.json"
+    ) == ("CLEVER/LoopSub/Eq/new", "B1_B2")
+    assert ci_subset.pair_identity_from_status_path(
+        "CLEVER/LoopSub/Neq/new-old/foo/foo_N_B1_O_B1.pair-status.json"
+    ) == ("CLEVER/LoopSub/Neq/new-old", "N_B1_O_B1")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "foo_B1_B2.pair-status.json",             # no sample, no function
+        "sample/foo/bar_B1_B2.pair-status.json",  # the file is not this function's
+        "sample/foo/foo_.pair-status.json",       # no pair id
+        "sample/foo/foo_B1_B2.log",               # not a pair status at all
+    ],
+)
+def test_a_path_that_is_not_a_pair_status_identity_is_not_guessed(path):
+    assert ci_subset.pair_identity_from_status_path(path) is None
+
+
+def test_the_binary_manifest_must_name_this_half_s_samples(tmp_path):
+    """A well-formed manifest of another run's samples is not this run's."""
+
+    run_dir = make_run(tmp_path, "eq")
+    _write(
+        run_dir / "binary_manifest_eq.txt",
+        ci_subset.BINARY_MANIFEST_HEADER
+        + "\nsample_identity\tbinary_id\tpath\tsha256\n"
+        + "somewhere/else/Eq/new\tB1\ttmp/x\t" + "0" * 64 + "\n",
+    )
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    assert "workload.eq.binary_manifest_samples" in failed_checks(report)
+
+
+def test_a_binary_manifest_missing_a_subset_sample_fails(tmp_path):
+    run_dir = make_run(tmp_path, "eq")
+    rows = "".join(
+        f"{source}\tB1\ttmp/{index}\t{'0' * 64}\n"
+        for index, source in enumerate(DEFINITION["eq"]["sources"][:1])
+    )
+    _write(
+        run_dir / "binary_manifest_eq.txt",
+        ci_subset.BINARY_MANIFEST_HEADER
+        + "\nsample_identity\tbinary_id\tpath\tsha256\n" + rows,
+    )
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    check = next(
+        c for c in report.checks if c.name == "workload.eq.binary_manifest_samples"
+    )
+    assert not check.passed and "1 subset sample(s) absent" in check.detail
+
+
+def test_binary_manifest_samples_refuses_to_read_a_foreign_format(tmp_path):
+    path = tmp_path / "m.txt"
+    _write(path, "sample\tid\tpath\tsha\nrow\n")
+    with pytest.raises(ci_subset.SubsetCiError):
+        ci_subset.binary_manifest_samples(path)
+    _write(path, ci_subset.BINARY_MANIFEST_HEADER + "\ncols\n")
+    with pytest.raises(ci_subset.SubsetCiError):
+        ci_subset.binary_manifest_samples(path)
+    with pytest.raises(ci_subset.SubsetCiError):
+        ci_subset.binary_manifest_samples(tmp_path / "absent.txt")
+
+
+def test_a_run_attributed_to_nothing_fails(tmp_path):
+    run_dir = make_run(tmp_path, "eq")
+    _write(
+        run_dir / ci_subset.SUBSET_MANIFEST_FILE,
+        "scope=eq\nexit_status=0\nissue=none\npr=none\n",
+    )
+    report = run_verify(run_dir, "eq")
+    assert not report.passed
+    assert "run.subset_issue" in failed_checks(report)
+
+
+def test_the_publication_manifest_is_required_evidence(tmp_path):
+    assert "eq/matrix-publication-manifest.json" in ci_subset.required_artifacts(("eq",))
+    assert "neq/matrix-publication-manifest.json" not in ci_subset.required_artifacts(
+        ("eq",)
+    )

@@ -398,7 +398,8 @@ python3 -B -m scripts.eqbench.ci_subset verify \
     --pair-process-timeout 240s --identical-fast-path 1 --runner-exit-status 0
 ```
 
-- the subset runner exited 0 and `subset_manifest.txt` records `exit_status=0`;
+- the subset runner exited 0 and `subset_manifest.txt` records `exit_status=0`,
+  with `pr=none` and an `issue` that says what the run was made for;
 - the **shared soundness gate** `soundness_gate.json` has
   `schema == "soundness-gate-v2"` and `passed == true`;
 - every in-scope half's **benchmark validation gate** says `PASS` — a separate
@@ -407,6 +408,7 @@ python3 -B -m scripts.eqbench.ci_subset verify \
   soundness gate's file;
 - each half ran against the working root, with the timeout and fast-path
   setting asked for;
+- **the subset was actually executed** (see below);
 - the artifacts that scope needs exist, including a binary manifest built
   **after** the run from the pair statuses (`scripts/eqbench/binary_manifest.py`
   `build`), so it names the binaries the pairs actually compared.
@@ -414,6 +416,37 @@ python3 -B -m scripts.eqbench.ci_subset verify \
 A scope only asks for its own halves: a `scope=eq` run has no `neq` tree, no
 `neq_root` and no Neq gate, and none of them are required. A half the scope
 *does* ask for and that is missing is a failure.
+
+**Both gates are about the pairs that were judged, so on their own they are
+content with a run that judged nothing.** With `pair_process_timeout=1s` all
+144 pairs end `TIMEOUT`, and that is a passing soundness gate, two passing
+benchmark gates and `exit_status=0` — a `TIMEOUT` violates nothing. So the
+workload is checked too, per in-scope half:
+
+- the half's `matrix-publication-manifest.json` is readable, is schema
+  `eqbench-matrix-publication-manifest-v3` and is not a dry run;
+- the `(sample, pair id)` identities it expected are exactly the ones
+  `eqbench_subset.json` defines — the subset's own definition, so the expected
+  set is never a count written into the checker. Several selected functions per
+  sample cover the same identities and are fine;
+- every expected `*.pair-status.json` is on disk, nothing else is, and each one
+  reads back with a canonical outcome (a status with none is `INVALID`, which
+  fails rather than dropping out of the counts);
+- no pair was reused from an earlier run
+  (`verified_skipped_pair_status_paths` and `total_skipped_pair_jobs` are 0) and
+  `run_pair_failures` is 0;
+- the binary manifest names exactly that half's subset samples;
+- **at least one pair produced a result.** Which outcomes count is not a list
+  kept here: the authority layer's `BATCH_RESUME_DISPOSITION_BY_OUTCOME` already
+  says that `TIMEOUT` is a deadline backlog and `ERROR` an infrastructure
+  failure, and those two are exactly the ones that say nothing about the pair.
+  `UNKNOWN` is a result — it is the dominant one on this benchmark. A few
+  `TIMEOUT` pairs are normal and pass; nothing but `TIMEOUT` / `ERROR` does not.
+
+The verification ledger row is deliberately *not* a success condition: the
+runner treats failing to write it as a diagnostic (`ledger_record_status`) and
+not as a failed run, so the CI verdict does the same. The row is still
+collected as evidence.
 
 Everything collected is uploaded with `if: always()` as
 `eqbench-subset-<run id>-<attempt>` (30 days): the normalised inputs, the

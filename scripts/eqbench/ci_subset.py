@@ -36,6 +36,18 @@ runner.
     which is the far end of ``workflow input -> shell env -> container env ->
     eqbench_run_subset.sh -> child runner``.
 
+    *workload completeness* -- the gates above are about the pairs that were
+    judged, so on their own they are happy with a run that judged nothing: a
+    subset run whose every pair was killed at its deadline passes the soundness
+    gate and both benchmark gates with ``exit_status=0``, because a ``TIMEOUT``
+    violates nothing.  So the scope's pairs are also required to be *there and
+    attempted*: the expected set comes from the fixed subset definition and the
+    run's own publication manifest rather than from a count written here, every
+    expected pair status must exist and be readable, none may have been reused
+    from an earlier run, and each half must carry at least one outcome the
+    analysis actually produced.  A run with some ``TIMEOUT`` pairs is normal
+    and passes; a run with nothing but ``TIMEOUT`` / ``ERROR`` does not.
+
 ``collect``
     Copy the evidence of a run into an artifact directory, bounded: everything
     except the per-pair ``.log`` files, plus the logs of the pairs that are
@@ -111,6 +123,39 @@ DRY_RUN_MANIFEST_OPTIONAL: Tuple[str, ...] = ("neq",)
 #: Outcomes whose pair log is worth keeping even when no gate complained.
 DIAGNOSTIC_OUTCOMES = ("ERROR", "TIMEOUT")
 
+#: The run's own account of the pairs it meant to produce (Issue #104 / #123).
+PUBLICATION_MANIFEST_FILE = "matrix-publication-manifest.json"
+PUBLICATION_MANIFEST_SCHEMA = "eqbench-matrix-publication-manifest-v3"
+
+#: The fixed subset's definition -- the source of truth for which samples and
+#: pair ids the subset is, so the expected pair set is never a number written
+#: into this module.
+SUBSET_DEFINITION_FILE = (
+    Path(__file__).resolve().parents[1]
+    / "function_tracer_pcode" / "reporting" / "eqbench_subset.json"
+)
+SUBSET_DEFINITION_SCHEMA = "eqbench-measurement-subset-v1"
+
+#: Which canonical outcomes mean "the analysis produced a judgement about this
+#: pair".  Not a list invented here: the authority layer already says what each
+#: outcome means for resuming a batch, and the two outcomes it calls a deadline
+#: backlog and an infrastructure failure are exactly the two that say nothing
+#: about the pair.  Imported lazily so that a caller who only wants ``collect``
+#: does not pay for it.
+def semantic_outcomes() -> frozenset:
+    """Outcomes that are a result, as the authority layer classifies them."""
+
+    from scripts.function_tracer_pcode.authority.contracts import (
+        BATCH_RESUME_DISPOSITION_BY_OUTCOME,
+    )
+
+    not_a_result = {"RESUMABLE_DEADLINE_BACKLOG", "FAILED_INFRASTRUCTURE"}
+    return frozenset(
+        outcome.value
+        for outcome, disposition in BATCH_RESUME_DISPOSITION_BY_OUTCOME.items()
+        if disposition not in not_a_result
+    )
+
 #: ``verify --profile propagation`` checks only that the settings reached the
 #: child runners; it is used after a ``DRY_RUN=1`` pass, which writes the run
 #: manifests but no pairs, no gates and no binaries.
@@ -123,6 +168,7 @@ PROFILES = (PROFILE_FULL, PROFILE_PROPAGATION)
 GATE_SCOPE = "scope"
 GATE_RUN_STATUS = "run_status"
 GATE_ENV_PROPAGATION = "env_propagation"
+GATE_WORKLOAD = "workload"
 GATE_SHARED_SOUNDNESS = "shared_soundness_gate"
 GATE_BENCHMARK_VALIDATION = "benchmark_validation_gate"
 GATE_ARTIFACTS = "artifacts"
@@ -130,6 +176,7 @@ GATE_ORDER = (
     GATE_SCOPE,
     GATE_RUN_STATUS,
     GATE_ENV_PROPAGATION,
+    GATE_WORKLOAD,
     GATE_SHARED_SOUNDNESS,
     GATE_BENCHMARK_VALIDATION,
     GATE_ARTIFACTS,
@@ -390,6 +437,16 @@ def _verify_run_status(
         report, run_dir, "run.subset_pr", GATE_RUN_STATUS, manifest_path,
         manifest, "pr", SUBSET_PR_UNSET,
     )
+    # ... and the run does say what it was made for.  Which issue is the
+    # workflow's business, so this asks only that the attribution exists: a run
+    # recorded as belonging to nothing cannot be found again from the ledger.
+    issue = manifest.get("issue")
+    report.add(
+        "run.subset_issue", GATE_RUN_STATUS,
+        bool(issue) and issue != SUBSET_PR_UNSET,
+        f"issue={issue!r} (must name what the run was made for)",
+        _relative(run_dir, manifest_path),
+    )
 
 
 def _verify_dry_run_sources(
@@ -478,6 +535,307 @@ def _verify_env_propagation(
             report, run_dir, f"env.{half}.analysis_config_schema",
             GATE_ENV_PROPAGATION, manifest_path, manifest,
             "analysis_config_schema", str(expected["analysis_config_schema"]),
+        )
+
+
+def pair_identity_from_status_path(relative_path: str) -> Optional[Tuple[str, str]]:
+    """``(sample identity, pair id)`` out of a ``<sample>/<fn>/<fn>_<pair>`` path.
+
+    The runners lay a pair status out that way and the publication manifest
+    lists exactly those paths, so this is a read of their layout rather than a
+    guess.  ``None`` means "not a pair status path", which the callers treat as
+    a manifest they cannot check -- never as one that agrees.
+    """
+
+    path = PurePosixPath(relative_path)
+    name = path.name
+    if not name.endswith(PAIR_STATUS_SUFFIX):
+        return None
+    parts = path.parts
+    if len(parts) < 3:
+        return None
+    function = parts[-2]
+    sample = "/".join(parts[:-2])
+    stem = name[: -len(PAIR_STATUS_SUFFIX)]
+    prefix = function + "_"
+    if not sample or not function or not stem.startswith(prefix):
+        return None
+    pair_id = stem[len(prefix):]
+    return (sample, pair_id) if pair_id else None
+
+
+def subset_definition_pairs(
+    half: str, definition_path: Path,
+) -> Tuple[frozenset, int, int]:
+    """The ``(sample, pair id)`` set the fixed subset *is*, for one half.
+
+    Read from ``eqbench_subset.json``, which is the subset's definition -- so
+    "did this run cover the subset?" is answered against the thing that defines
+    the subset, not against a number kept in this file.
+    """
+
+    payload = read_json(definition_path)
+    if not isinstance(payload, dict):
+        raise SubsetCiError(f"{definition_path} is not a JSON object")
+    schema = payload.get("schema")
+    if schema != SUBSET_DEFINITION_SCHEMA:
+        raise SubsetCiError(
+            f"{definition_path} has schema {schema!r}, expected "
+            f"{SUBSET_DEFINITION_SCHEMA!r}"
+        )
+    section = payload.get(half)
+    if not isinstance(section, dict):
+        raise SubsetCiError(f"{definition_path} has no {half!r} section")
+    sources = section.get("sources")
+    pair_ids = section.get("pair_ids")
+    for name, value in (("sources", sources), ("pair_ids", pair_ids)):
+        if not isinstance(value, list) or not value or not all(
+            isinstance(item, str) and item for item in value
+        ):
+            raise SubsetCiError(
+                f"{definition_path}: {half}.{name} is not a non-empty list of strings"
+            )
+    return (
+        frozenset((source, pair_id) for source in sources for pair_id in pair_ids),
+        len(sources),
+        len(pair_ids),
+    )
+
+
+def binary_manifest_samples(path: Path) -> frozenset:
+    """The ``sample_identity`` column of a binary manifest, as a set.
+
+    The format is ``scripts/eqbench/binary_manifest.py``'s: a header line, a
+    column row, then tab-separated rows.  A file that is not one raises rather
+    than returning an empty set, because "no samples" and "I could not read
+    the samples" must not look the same.
+    """
+
+    try:
+        lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
+    except OSError as exc:
+        raise SubsetCiError(f"cannot read {path.name}: {exc}")
+    if not lines or lines[0] != BINARY_MANIFEST_HEADER:
+        raise SubsetCiError(
+            f"{path.name} does not start with {BINARY_MANIFEST_HEADER!r}"
+        )
+    samples = set()
+    for line in lines[2:]:
+        fields = line.split("\t")
+        if len(fields) < 4 or not fields[0]:
+            raise SubsetCiError(f"{path.name} has a row with no sample identity")
+        samples.add(fields[0])
+    if not samples:
+        raise SubsetCiError(f"{path.name} names no binaries")
+    return frozenset(samples)
+
+
+def _publication_manifest(run_dir: Path, half: str) -> Mapping[str, object]:
+    payload = read_json(run_dir / half / PUBLICATION_MANIFEST_FILE)
+    if not isinstance(payload, dict):
+        raise SubsetCiError(
+            f"{half}/{PUBLICATION_MANIFEST_FILE} is not a JSON object"
+        )
+    schema = payload.get("schema")
+    if schema != PUBLICATION_MANIFEST_SCHEMA:
+        raise SubsetCiError(
+            f"{half}/{PUBLICATION_MANIFEST_FILE} has schema {schema!r}, expected "
+            f"{PUBLICATION_MANIFEST_SCHEMA!r}"
+        )
+    paths = payload.get("expected_pair_status_paths")
+    if not isinstance(paths, list) or not paths or not all(
+        isinstance(item, str) and item for item in paths
+    ):
+        raise SubsetCiError(
+            f"{half}/{PUBLICATION_MANIFEST_FILE} lists no expected pair statuses"
+        )
+    return payload
+
+
+def _verify_workload(
+    report: Report, run_dir: Path, definition_path: Path,
+) -> None:
+    """The scope's pairs were there, were run, and produced something.
+
+    Everything here is about whether the run happened, not about whether any
+    judgement was right -- that is the two gates' business.  It exists because
+    a run that judged nothing at all satisfies both of them.
+    """
+
+    for half in report.halves:
+        manifest_source = f"{half}/{PUBLICATION_MANIFEST_FILE}"
+        try:
+            manifest = _publication_manifest(run_dir, half)
+        except SubsetCiError as exc:
+            report.add(
+                f"workload.{half}.publication_manifest", GATE_WORKLOAD, False,
+                str(exc), manifest_source,
+            )
+            continue
+        expected_paths = [str(item) for item in manifest["expected_pair_status_paths"]]
+        dry_run = manifest.get("dry_run")
+        report.add(
+            f"workload.{half}.publication_manifest", GATE_WORKLOAD,
+            dry_run in (0, False),
+            (
+                f"{len(expected_paths)} expected pair statuses, dry_run={dry_run!r}"
+                if dry_run in (0, False)
+                else f"the run recorded dry_run={dry_run!r}; it executed no pairs"
+            ),
+            manifest_source,
+        )
+
+        # (a) does the run's own expectation cover the subset it claims to be?
+        try:
+            definition, source_count, pair_count = subset_definition_pairs(
+                half, definition_path,
+            )
+        except SubsetCiError as exc:
+            report.add(
+                f"workload.{half}.subset_coverage", GATE_WORKLOAD, False,
+                f"the subset definition is unusable: {exc}", str(definition_path),
+            )
+            definition = None
+        if definition is not None:
+            identities = {pair_identity_from_status_path(path) for path in expected_paths}
+            unreadable = sum(1 for item in identities if item is None)
+            covered = frozenset(item for item in identities if item is not None)
+            missing = sorted(definition - covered)
+            extra = sorted(covered - definition)
+            passed = not unreadable and not missing and not extra
+            if passed:
+                detail = (
+                    f"{len(covered)} (sample, pair) identities = the definition's "
+                    f"{source_count} sources x {pair_count} pair ids"
+                )
+            else:
+                detail = (
+                    f"{len(missing)} definition pair(s) not expected "
+                    f"(e.g. {missing[0] if missing else '-'}), "
+                    f"{len(extra)} unexpected (e.g. {extra[0] if extra else '-'}), "
+                    f"{unreadable} path(s) not readable as a pair status"
+                )
+            report.add(
+                f"workload.{half}.subset_coverage", GATE_WORKLOAD, passed, detail,
+                manifest_source,
+            )
+
+        # (b) is every expected pair status actually on disk, and nothing else?
+        half_dir = run_dir / half
+        on_disk = {
+            str(path.relative_to(half_dir)).replace("\\", "/")
+            for path in half_dir.rglob("*" + PAIR_STATUS_SUFFIX)
+        } if half_dir.is_dir() else set()
+        expected_set = set(expected_paths)
+        absent = sorted(expected_set - on_disk)
+        unexpected = sorted(on_disk - expected_set)
+        report.add(
+            f"workload.{half}.pair_statuses", GATE_WORKLOAD,
+            not absent and not unexpected,
+            (
+                f"{len(on_disk)} pair statuses, all expected"
+                if not absent and not unexpected
+                else f"{len(absent)} missing (e.g. {absent[0] if absent else '-'}), "
+                     f"{len(unexpected)} unexpected "
+                     f"(e.g. {unexpected[0] if unexpected else '-'})"
+            ),
+            f"{half}/",
+        )
+
+        # (c) a CI run executes its pairs; it does not inherit them.  The
+        #     runners reuse a completed pair status when one is already there
+        #     (SKIP_COMPLETED_RESULTS), and a reused pair is not evidence that
+        #     this run can still produce it.
+        reused = manifest.get("verified_skipped_pair_status_paths")
+        skipped_jobs = manifest.get("total_skipped_pair_jobs")
+        reused_count = len(reused) if isinstance(reused, list) else None
+        report.add(
+            f"workload.{half}.executed_not_reused", GATE_WORKLOAD,
+            reused_count == 0 and skipped_jobs == 0,
+            f"reused pair statuses={reused_count!r}, skipped pair jobs={skipped_jobs!r} "
+            "(both must be 0)",
+            manifest_source,
+        )
+        failures = manifest.get("run_pair_failures")
+        report.add(
+            f"workload.{half}.run_pair_failures", GATE_WORKLOAD, failures == 0,
+            f"run_pair_failures={failures!r} (expected 0)", manifest_source,
+        )
+
+        # (d) non-vacuity: at least one pair the analysis actually decided.
+        #     Read through the same reader the soundness gate and the transition
+        #     report use, so an unreadable status is INVALID here too rather
+        #     than silently absent from the counts.
+        try:
+            from scripts.function_tracer_pcode.reporting.pair_outcomes import (
+                OUTCOME_INVALID, OUTCOME_MISSING, iter_pair_outcomes,
+            )
+            counts: Dict[str, int] = {}
+            for row in iter_pair_outcomes(half_dir):
+                counts[row.outcome] = counts.get(row.outcome, 0) + 1
+        except (ImportError, OSError, ValueError) as exc:
+            # Narrow on purpose: the reader turns a malformed pair status into
+            # INVALID itself, so what is left here is "the reader is not
+            # available" or "the tree cannot be read" -- and an unexpected
+            # failure should surface as a traceback, not as a tidy FAIL row.
+            report.add(
+                f"workload.{half}.readable_outcomes", GATE_WORKLOAD, False,
+                f"the pair statuses could not be read: {exc}", f"{half}/",
+            )
+            continue
+        summary = ", ".join(f"{name}={counts[name]}" for name in sorted(counts))
+        unusable = counts.get(OUTCOME_INVALID, 0) + counts.get(OUTCOME_MISSING, 0)
+        report.add(
+            f"workload.{half}.readable_outcomes", GATE_WORKLOAD, unusable == 0,
+            (
+                f"{sum(counts.values())} pair statuses read ({summary or 'none'})"
+                if unusable == 0
+                else f"{unusable} pair status(es) carry no usable outcome ({summary})"
+            ),
+            f"{half}/",
+        )
+        # (e) the binary manifest is built from this run's pair statuses, so the
+        #     samples it names must be the subset's samples for this half.  A
+        #     well-formed manifest left over from another run would otherwise
+        #     satisfy the artifact check on its own.
+        if definition is not None:
+            manifest_path = run_dir / f"binary_manifest_{half}.txt"
+            wanted = {source for source, _ in definition}
+            try:
+                named = binary_manifest_samples(manifest_path)
+            except SubsetCiError as exc:
+                report.add(
+                    f"workload.{half}.binary_manifest_samples", GATE_WORKLOAD, False,
+                    str(exc), f"binary_manifest_{half}.txt",
+                )
+            else:
+                missing_samples = sorted(wanted - named)
+                extra_samples = sorted(named - wanted)
+                report.add(
+                    f"workload.{half}.binary_manifest_samples", GATE_WORKLOAD,
+                    not missing_samples and not extra_samples,
+                    (
+                        f"{len(named)} samples, exactly the subset's"
+                        if not missing_samples and not extra_samples
+                        else f"{len(missing_samples)} subset sample(s) absent "
+                             f"(e.g. {missing_samples[0] if missing_samples else '-'}), "
+                             f"{len(extra_samples)} foreign "
+                             f"(e.g. {extra_samples[0] if extra_samples else '-'})"
+                    ),
+                    f"binary_manifest_{half}.txt",
+                )
+
+        decided = sum(counts.get(name, 0) for name in semantic_outcomes())
+        report.add(
+            f"workload.{half}.semantic_outcomes", GATE_WORKLOAD, decided > 0,
+            (
+                f"{decided} of {sum(counts.values())} pairs produced a result "
+                f"({summary or 'none'})"
+                if decided
+                else "no pair produced a result: every outcome is a deadline or an "
+                     f"infrastructure failure ({summary or 'none'})"
+            ),
+            f"{half}/",
         )
 
 
@@ -576,6 +934,7 @@ def required_artifacts(halves: Sequence[str]) -> List[str]:
         names.extend(
             [
                 f"{half}/{RUN_MANIFEST_FILE}",
+                f"{half}/{PUBLICATION_MANIFEST_FILE}",
                 f"{half}/{BENCHMARK_GATE_JSON}",
                 f"{half}/{BENCHMARK_GATE_TEXT}",
                 f"{half}/function_diff_manifest.json",
@@ -633,6 +992,7 @@ def verify(
     analysis_config_schema: str = DEFAULT_ANALYSIS_CONFIG_SCHEMA,
     profile: str = PROFILE_FULL,
     runner_exit_status: Optional[int] = None,
+    subset_definition: Path = SUBSET_DEFINITION_FILE,
 ) -> Report:
     if profile not in PROFILES:
         raise SubsetCiError(f"profile must be one of {', '.join(PROFILES)}: {profile!r}")
@@ -642,6 +1002,7 @@ def verify(
         "pair_process_timeout": pair_process_timeout,
         "identical_fast_path": identical_fast_path,
         "analysis_config_schema": analysis_config_schema,
+        "subset_definition": str(subset_definition),
     }
     report = Report(profile=profile, scope=scope, halves=halves, expected=expected)
     if not run_dir.is_dir():
@@ -659,6 +1020,7 @@ def verify(
         dry_run=profile == PROFILE_PROPAGATION,
     )
     if profile == PROFILE_FULL:
+        _verify_workload(report, run_dir, subset_definition)
         _verify_shared_soundness_gate(report, run_dir)
         _verify_benchmark_validation_gates(report, run_dir)
         _verify_artifacts(report, run_dir)
@@ -831,6 +1193,11 @@ def build_parser() -> argparse.ArgumentParser:
     verify_command.add_argument(
         "--analysis-config-schema", default=DEFAULT_ANALYSIS_CONFIG_SCHEMA,
     )
+    verify_command.add_argument(
+        "--subset-definition", type=Path, default=SUBSET_DEFINITION_FILE,
+        help="the fixed subset's definition, which says which samples and pair "
+             "ids the run had to cover (full profile)",
+    )
     verify_command.add_argument("--profile", default=PROFILE_FULL, choices=PROFILES)
     verify_command.add_argument(
         "--runner-exit-status", type=int, default=None,
@@ -863,6 +1230,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 analysis_config_schema=args.analysis_config_schema,
                 profile=args.profile,
                 runner_exit_status=args.runner_exit_status,
+                subset_definition=args.subset_definition,
             )
             text = report.as_text()
             sys.stdout.write(text)
