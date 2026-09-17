@@ -1435,8 +1435,8 @@ def _impl__return_infos_have_conflicting_overlap(
                 ]
                 self._debug_print(
                     "Control-region recovery rejected due to overlapping regions: "
-                    f"left={self._debug_expr_identity_summary(left.value)} "
-                    f"right={self._debug_expr_identity_summary(right.value)} "
+                    f"left={self._debug_expr_details_summary(left.value)} "
+                    f"right={self._debug_expr_details_summary(right.value)} "
                     f"conditions={cond_dump}"
                 )
             return True
@@ -2459,7 +2459,7 @@ def _impl__build_return_infos_from_expansions(
                 for c in simplified_conds
             ]
             self._debug_print(
-                f"Expansion {i}: raw={self._debug_expr_identity_summary(ev.value)}"
+                f"Expansion {i}: raw={self._debug_expr_details_summary(ev.value)}"
             )
             self._debug_print(f"  raw_conditions={cond_strs}")
         split_cases = self._split_effect_sensitive_return_case(
@@ -2483,7 +2483,7 @@ def _impl__build_return_infos_from_expansions(
                     for c in split_conditions
                 ]
                 self._debug_print(
-                    f"Expansion {i}.{split_index}: split={self._debug_expr_identity_summary(split_value)}"
+                    f"Expansion {i}.{split_index}: split={self._debug_expr_details_summary(split_value)}"
                 )
                 self._debug_print(f"  split_conditions={split_cond_strs}")
             preserve_split_value = (
@@ -2502,7 +2502,7 @@ def _impl__build_return_infos_from_expansions(
             if self.debug and normalized_value is not split_value:
                 self._debug_print(
                     "  normalized="
-                    f"{self._debug_expr_identity_summary(normalized_value)}"
+                    f"{self._debug_expr_details_summary(normalized_value)}"
                 )
             resolved_value = self._concretize_readonly_loads(
                 normalized_value,
@@ -2512,7 +2512,7 @@ def _impl__build_return_infos_from_expansions(
             if self.debug and resolved_value is not normalized_value:
                 self._debug_print(
                     "  concretized="
-                    f"{self._debug_expr_identity_summary(resolved_value)}"
+                    f"{self._debug_expr_details_summary(resolved_value)}"
                 )
 
             if self.debug:
@@ -2603,7 +2603,7 @@ def _impl__split_object_centric_return_case(
     if self.debug and len(deduplicated) > 1:
         self._debug_print(
             "Split return into object-centric value cases: "
-            f"{self._debug_expr_identity_summary(value)}"
+            f"{self._debug_expr_details_summary(value)}"
         )
         for case_index, (case_value, case_conditions) in enumerate(deduplicated):
             cond_dump = [
@@ -2611,7 +2611,7 @@ def _impl__split_object_centric_return_case(
                 for cond in case_conditions
             ]
             self._debug_print(
-                f"  value-case[{case_index}]: {self._debug_expr_identity_summary(case_value)}"
+                f"  value-case[{case_index}]: {self._debug_expr_details_summary(case_value)}"
             )
             self._debug_print(f"    conditions={cond_dump}")
     return deduplicated or [(value, conditions)]

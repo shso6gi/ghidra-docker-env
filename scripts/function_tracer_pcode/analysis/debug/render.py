@@ -35,8 +35,7 @@ debug guard の置き方: guard が複数 module に散る family は host class
 
 from __future__ import annotations
 
-from collections.abc import Sized
-from dataclasses import fields, is_dataclass
+from dataclasses import is_dataclass
 from enum import Enum
 from itertools import islice
 from typing import Any, Callable, FrozenSet, Iterable, List, Optional, Set, Tuple
@@ -125,7 +124,8 @@ def _container_length(value: Any) -> str:
 
     if value is None:
         return "0"
-    return str(len(value)) if type(value) in (list, tuple, dict, set, frozenset) else "?"
+    length = _known_length(value)
+    return "?" if length is None else str(length)
 
 
 def _first_children(value: Any, count: int) -> list:
@@ -155,12 +155,31 @@ DEFAULT_MAX_TEXT = 80
 #: 整数をそのまま 10 進で出す上限。これを超えたら桁数ではなく bit 幅で示す。
 DEFAULT_MAX_INT_BITS = 64
 
+#: そのまま値を出してよい型（exact 判定。subclass の ``__str__`` は起動しない）。
+_PRIMITIVE_TYPES = (bool, int, float, str, bytes)
+
+#: ``getattr`` の「無い」を表す番兵。``None`` を持つ field と区別する。
+_MISSING = object()
+
 #: :func:`summarize_structural_preview` が見る node 数の上限。
 DEFAULT_MAX_PREVIEW_NODES = 24
 
 #: 1 node から辿る子の数の上限（fan-out）。CALL / INTRINSIC の巨大 operand 群や
 #: PHI の巨大 branch 群を全部辿らないための hard bound。
 DEFAULT_MAX_PREVIEW_FANOUT = 4
+
+#: runtime ref で **中を見る** field 数の上限（primitive を見つけた数ではない）。
+DEFAULT_MAX_FIELDS = 12
+
+#: ``len()`` が O(1) だと分かっている組み込み容器。これ以外の ``__len__`` /
+#: ``__bool__`` は何をするか分からないので debug のために呼ばない。
+_SIZED_BUILTINS = (list, tuple, dict, set, frozenset, str, bytes, bytearray, range)
+
+
+def _known_length(value: Any) -> Optional[int]:
+    """O(1) で長さが分かる容器だけ長さを返す。それ以外は ``None``。"""
+
+    return len(value) if type(value) in _SIZED_BUILTINS else None
 
 
 def _summarize_sequence(
@@ -170,16 +189,17 @@ def _summarize_sequence(
 ) -> str:
     """列を ``[a, b, +3 more]`` 形式の有界文字列にする。
 
-    **走査も有界**: 長さを O(1) で聞ける列（``Sized``）なら先頭 ``max_items``
-    個だけを読み、残数は ``len()`` から求める。長さの分からない iterable /
-    generator は ``max_items + 1`` 個までしか読まず、残数は数えずに ``+more``
-    とだけ書く。「debug のために列を最後まで回す」ことが起きないのが契約。
+    **走査も有界**: 長さが O(1) で分かる組み込み容器なら先頭 ``max_items``
+    個だけを読み、残数は ``len()`` から求める。それ以外（generator も、``__len__``
+    を持つ独自 class も）は長さ不明として扱い、``max_items + 1`` 個までしか
+    読まず、残数は数えずに ``+more`` とだけ書く。独自 ``__len__`` が O(1) とは
+    限らないので、debug のために呼ばない。
     """
 
     if items is None:
         return "[]"
     limit = max(0, int(max_items))
-    total = len(items) if isinstance(items, Sized) else None
+    total = _known_length(items)
     # 長さが分かるなら余分な 1 個も読まない。分からないときだけ 1 個だけ
     # 先読みして「まだ続きがある」ことを知る。
     head = list(islice(iter(items), limit if total is not None else limit + 1))
@@ -275,8 +295,9 @@ def _primitive_text(value: Any, max_text: int = DEFAULT_MAX_TEXT) -> str:
         return value if len(value) <= limit else value[:limit] + "..."
     if kind is bytes:
         return f"<bytes len={len(value)}>"
-    if kind in (list, tuple, dict, set, frozenset):
-        return f"<{kind.__name__} len={len(value)}>"
+    length = _known_length(value)
+    if length is not None:
+        return f"<{kind.__name__} len={length}>"
     if isinstance(value, Enum):
         name = getattr(value, "name", None)
         if type(name) is str:
@@ -284,7 +305,7 @@ def _primitive_text(value: Any, max_text: int = DEFAULT_MAX_TEXT) -> str:
     return f"<{kind.__name__}>"
 
 
-def summarize_runtime_ref(runtime_ref: Any, max_fields: int = DEFAULT_MAX_ITEMS) -> str:
+def summarize_runtime_ref(runtime_ref: Any, max_fields: int = DEFAULT_MAX_FIELDS) -> str:
     """runtime ref を型名 + 定数時間で読める primitive field で表す。
 
     ``stable_key()`` は **呼ばない**。``LoopSummaryRef.stable_key`` のように
@@ -292,9 +313,10 @@ def summarize_runtime_ref(runtime_ref: Any, max_fields: int = DEFAULT_MAX_ITEMS)
     debug 表示のために起動してよい処理ではない（Issue #22）。``repr`` も同じ
     理由で使わない（frozen dataclass は field を再帰展開する）。
 
-    出す情報は「型名」と「dataclass field のうち primitive なもの」だけで、
-    どちらも ref の中身の大きさに依存しない。識別子が要る場面では判定側の
-    structural key を見ること（debug 表示は identity ではない）。
+    出す情報は「型名」と「先頭 ``max_fields`` 個の field のうち primitive な
+    もの」だけ。**見る field 数そのものが上限つき**なので、field が何個あっても
+    ref の中身が何を抱えていても仕事量は変わらない。識別子が要る場面では判定側
+    の structural key を見ること（debug 表示は identity ではない）。
     """
 
     if runtime_ref is None:
@@ -307,22 +329,26 @@ def summarize_runtime_ref(runtime_ref: Any, max_fields: int = DEFAULT_MAX_ITEMS)
 
 
 def _primitive_dataclass_fields(value: Any, max_fields: int) -> Tuple[str, ...]:
-    """dataclass の primitive field を ``name=value`` の列で返す（先頭 N 件）。
+    """先頭 ``max_fields`` 個の field を **見て**、primitive なものだけ返す。
 
-    field の数は型ごとに定数で、各 field の読み出しも O(1)。入れ子の式・列は
-    型名に落ちるので、ref が抱える中身を辿ることはない。
+    bound がかかるのは「返す件数」ではなく「中を見る field 数」。primitive で
+    ない field が並んでいても、そこで打ち切って残りには触らない。``fields()``
+    は全 field の tuple を作るので使わず、``__dataclass_fields__`` を先頭から
+    ``islice`` する。
     """
 
-    if not is_dataclass(value) or isinstance(value, type):
+    if isinstance(value, type) or not is_dataclass(value):
         return ()
-    limit = max(0, int(max_fields))
+    declared = getattr(value, "__dataclass_fields__", None)
+    if type(declared) is not dict:
+        return ()
     items = []
-    for field in fields(value):
-        if len(items) >= limit:
-            break
-        attribute = getattr(value, field.name, None)
-        if attribute is None or isinstance(attribute, (bool, int, float, str, Enum)):
-            items.append(f"{field.name}={_primitive_text(attribute)}")
+    for name in islice(declared, max(0, int(max_fields))):
+        attribute = getattr(value, name, _MISSING)
+        if attribute is _MISSING:
+            continue  # InitVar など、実体を持たない宣言
+        if attribute is None or type(attribute) in _PRIMITIVE_TYPES or isinstance(attribute, Enum):
+            items.append(f"{name}={_primitive_text(attribute)}")
     return tuple(items)
 
 
@@ -345,7 +371,10 @@ def summarize_structural_preview(
     * 1 node の local 表示は :func:`_primitive_text` だけを使う（任意 object の
       ``__str__`` / ``stable_key()`` / ``to_dict()`` を起動しない）
 
-    これは identity ではなく triage 用の手掛かり。等価性の判断には使わない。
+    **これは identity ではない。** node 数と fan-out を切っているので、構造の
+    違う式が同じ preview になり得る（collision を許す）。cache key / 等価判定 /
+    digest / 証明の入力に使ってはいけない。用途は診断と triage だけで、判定に
+    使う structural key は ``core.structural`` が所有する。
     """
 
     if expr is None:
@@ -411,24 +440,29 @@ def _phi_branch_values(branches: Any, max_fanout: int) -> List[Any]:
 
     values = []
     for branch in _first_children(branches, max_fanout):
-        if isinstance(branch, (tuple, list)) and len(branch) == 2:
-            values.append(branch[1])
-        else:
-            values.append(branch)
+        # branch は ``(condition, value)``。``len()`` を呼ばずに先頭 2 つだけ
+        # 読む（要素数を名乗る実装が何をするか分からないため）。
+        pair = _first_children(branch, 2)
+        values.append(pair[1] if len(pair) == 2 else branch)
     return values
 
 
-def summarize_expression_identity(
+def summarize_expression_details(
     expr: Optional[Expression],
     max_depth: int = 3,
 ) -> str:
-    """式の identity を debug 用に有界表示する（要約 + 構造 preview + 由来）。
+    """式の詳細を debug 用に有界表示する（要約 + 構造 preview + 由来）。
 
-    3 つの欄はいずれも hard bound つき: ``summarize_expression`` が深さ、
+    4 つの欄はいずれも hard bound つき: ``summarize_expression`` が深さ、
     ``summarize_structural_preview`` が node 数と fan-out、
-    ``summarize_runtime_ref`` が field 数を縛る。production の structural key は
-    ここでは作らない（#76 のレビュー指摘は「debug 行が式を識別できること」で、
-    ``tests/unit/test_debug_reporter.py`` がそれを固定している）。
+    ``summarize_runtime_ref`` が見る field 数、``_primitive_text`` が 1 値の
+    サイズを縛る。
+
+    **identity key ではない。** production の structural key はここでは作らない
+    （作ると走査量が入力サイズに依存する）。この文字列を cache key / 等価判定 /
+    digest / 証明の入力に使ってはいけない。用途は診断と triage だけ。#76 の
+    レビュー指摘「debug 行が式を識別できる情報を持つこと」は
+    ``tests/unit/test_debug_reporter.py`` が固定している。
     """
 
     if expr is None:
@@ -454,7 +488,7 @@ BOUNDED_DEBUG_RENDERERS: FrozenSet[str] = frozenset({
     "summarize_values",
     "summarize_runtime_ref",
     "summarize_structural_preview",
-    "summarize_expression_identity",
+    "summarize_expression_details",
 })
 
 #: 共有 DAG を木として全展開する描画。debug message に入れてはいけない。

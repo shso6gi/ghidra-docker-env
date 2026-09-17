@@ -973,8 +973,8 @@ class EffectIntegrationService:
         if self.debug_flag() and rewritten is not None and not _expressions_equivalent(rewritten, value):
             self.debug_reporter.debug_print(
                 "Effect-sensitive rewrite candidate: "
-                f"{self.debug_reporter.debug_expr_identity_summary(value)} -> "
-                f"{self.debug_reporter.debug_expr_identity_summary(rewritten)}"
+                f"{self.debug_reporter.debug_expr_details_summary(value)} -> "
+                f"{self.debug_reporter.debug_expr_details_summary(rewritten)}"
             )
         if rewritten is None or _expressions_equivalent(rewritten, value):
             return [(value, conditions)]
@@ -1007,7 +1007,7 @@ class EffectIntegrationService:
                 ]
                 self.debug_reporter.debug_print(
                     "  effect-sensitive case "
-                    f"[{case_index}]: {self.debug_reporter.debug_expr_identity_summary(case_value)}"
+                    f"[{case_index}]: {self.debug_reporter.debug_expr_details_summary(case_value)}"
                 )
                 self.debug_reporter.debug_print(f"    conditions={cond_dump}")
         if (
@@ -1040,8 +1040,8 @@ class EffectIntegrationService:
             if self.debug_flag():
                 self.debug_reporter.debug_print(
                     "Resolved return to precise object-state carrier before generic rewrite: "
-                    f"{self.debug_reporter.debug_expr_identity_summary(value)} -> "
-                    f"{self.debug_reporter.debug_expr_identity_summary(precise_object_state_value)}"
+                    f"{self.debug_reporter.debug_expr_details_summary(value)} -> "
+                    f"{self.debug_reporter.debug_expr_details_summary(precise_object_state_value)}"
                 )
             return precise_object_state_value
 
@@ -1303,8 +1303,8 @@ class EffectIntegrationService:
                 if self.debug_flag():
                     self.debug_reporter.debug_print(
                         "Collapsed duplicate effect-sensitive binary wrapper: "
-                        f"{self.debug_reporter.debug_expr_identity_summary(rewritten)} -> "
-                        f"{self.debug_reporter.debug_expr_identity_summary(post_state_read or rewritten_operand)}"
+                        f"{self.debug_reporter.debug_expr_details_summary(rewritten)} -> "
+                        f"{self.debug_reporter.debug_expr_details_summary(post_state_read or rewritten_operand)}"
                     )
                 return post_state_read or rewritten_operand
 
@@ -1381,8 +1381,8 @@ class EffectIntegrationService:
             if self.debug_flag():
                 self.debug_reporter.debug_print(
                     "Rebuilt effect-sensitive wrapper around branch-local effect value: "
-                    f"{self.debug_reporter.debug_expr_identity_summary(rewritten)} -> "
-                    f"{self.debug_reporter.debug_expr_identity_summary(rebuilt)}"
+                    f"{self.debug_reporter.debug_expr_details_summary(rewritten)} -> "
+                    f"{self.debug_reporter.debug_expr_details_summary(rebuilt)}"
                 )
             return rebuilt
 
@@ -1460,8 +1460,8 @@ class EffectIntegrationService:
         if self.debug_flag() and not accepted:
             self.debug_reporter.debug_print(
                 f"Rejected {rewrite_kind} rewrite without object-centric precision gain: "
-                f"{self.debug_reporter.debug_expr_identity_summary(original)} -> "
-                f"{self.debug_reporter.debug_expr_identity_summary(rewritten)} "
+                f"{self.debug_reporter.debug_expr_details_summary(original)} -> "
+                f"{self.debug_reporter.debug_expr_details_summary(rewritten)} "
                 f"rank {original_rank} -> {rewritten_rank} "
                 f"precision {original_precision} -> {rewritten_precision}"
             )

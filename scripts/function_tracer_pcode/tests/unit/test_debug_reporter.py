@@ -28,7 +28,7 @@ def test_every_delegator_forwards_to_the_reporter():
         "debug_available",
         "debug_print",
         "debug_expr_summary",
-        "debug_expr_identity_summary",
+        "debug_expr_details_summary",
     }
     for name in names:
         sentinel = object()
@@ -48,7 +48,7 @@ def test_debug_print_respects_the_flag_at_call_time(capsys):
     assert "hidden" not in out and "  [ReturnAnalyzer] shown" in out
 
 
-def test_debug_expr_identity_summary_discriminates_a_real_expression():
+def test_debug_expr_details_summary_discriminates_a_real_expression():
     """#76 レビュー指摘: debug 行が式を識別できる情報を持ち続けること。
 
     旧実装では ``expression_key_safe`` の import 漏れが try/except に握り潰され、
@@ -60,7 +60,7 @@ def test_debug_expr_identity_summary_discriminates_a_real_expression():
     analyzer = _analyzer()
     expr = Expression.binary_op("INT_ADD", Expression.variable("param_1", 4), Expression.constant(2, 4))
 
-    text = analyzer._debug_expr_identity_summary(expr)
+    text = analyzer._debug_expr_details_summary(expr)
 
     assert "structural_preview=[BINARY_OP:INT_ADD:size=4," in text
     assert "VARIABLE:param_1:size=4" in text
@@ -68,8 +68,8 @@ def test_debug_expr_identity_summary_discriminates_a_real_expression():
     assert "<unavailable>" not in text and "structural_preview=[]" not in text
 
     other = Expression.binary_op("INT_SUB", Expression.variable("param_1", 4), Expression.constant(2, 4))
-    assert analyzer._debug_expr_identity_summary(other) != text
-    assert analyzer._debug_expr_identity_summary(None) == "None"
+    assert analyzer._debug_expr_details_summary(other) != text
+    assert analyzer._debug_expr_details_summary(None) == "None"
 
 
 def test_every_collaborator_shares_the_single_reporter():

@@ -9,7 +9,7 @@ from scripts.function_tracer_pcode.analysis.debug import render
 from scripts.function_tracer_pcode.analysis.debug.render import (
     summarize_conditions,
     summarize_expression,
-    summarize_expression_identity,
+    summarize_expression_details,
     summarize_expressions,
     summarize_runtime_ref,
     summarize_structural_preview,
@@ -226,7 +226,7 @@ def test_expression_identity_summary_does_not_walk_the_runtime_ref():
     expr.operands[0].runtime_ref = _ExplosiveRuntimeRef()
     _HEAVY_KEY_CALLS.clear()
 
-    text = summarize_expression_identity(expr)
+    text = summarize_expression_details(expr)
 
     assert _HEAVY_KEY_CALLS == []
     assert "structural_preview=[BINARY_OP:INT_ADD" in text
@@ -349,3 +349,67 @@ def test_expression_summary_does_not_materialize_a_constant_value():
     constant.value = 1 << 5000
 
     assert summarize_expression(constant) == f"CONST(<int bits={(1 << 5000).bit_length()}>)"
+
+class _HostileSized:
+    """``__len__`` / ``__bool__`` が呼ばれたら失敗する列（Sized を名乗る）。"""
+
+    def __init__(self, items):
+        self._items = list(items)
+        self.consumed = 0
+
+    def __len__(self):  # pragma: no cover - 呼ばれたら失敗
+        raise AssertionError("debug summary must not call __len__ on a custom Sized")
+
+    def __bool__(self):  # pragma: no cover - 呼ばれたら失敗
+        raise AssertionError("debug summary must not call __bool__ on a custom Sized")
+
+    def __iter__(self):
+        for item in self._items:
+            self.consumed += 1
+            yield item
+
+
+def test_sequence_summary_does_not_ask_a_custom_sized_for_its_length():
+    """独自 ``__len__`` は O(1) とは限らないので debug のために呼ばない。"""
+
+    items = _HostileSized(_expressions(1000))
+
+    summary = summarize_expressions(items, max_items=3)
+
+    assert summary == "[PARAM(p0), PARAM(p1), PARAM(p2), +more]"
+    assert items.consumed == 4
+
+
+def test_container_length_only_trusts_builtin_containers():
+    assert render._container_length([1, 2, 3]) == "3"
+    assert render._container_length(None) == "0"
+    assert render._container_length(_HostileSized([1, 2])) == "?"
+    assert render._primitive_text(_HostileSized([1, 2])) == "<_HostileSized>"
+
+
+def test_runtime_ref_summary_inspects_only_the_first_fields():
+    """primitive が見つからなくても、上限より後ろの field には触らない。"""
+
+    inspected = []
+
+    class _Watched:
+        def __init__(self, name, value):
+            self._name = name
+            self._value = value
+
+        def __get__(self, instance, owner=None):
+            inspected.append(self._name)
+            return self._value
+
+    names = [f"f{index}" for index in range(40)]
+    namespace = {
+        "__dataclass_fields__": {name: object() for name in names},
+        **{name: _Watched(name, object()) for name in names[:6]},
+        **{name: _Watched(name, index) for index, name in enumerate(names[6:], start=6)},
+    }
+    ref = type("_ManyFieldRef", (), namespace)()
+
+    summary = summarize_runtime_ref(ref, max_fields=8)
+
+    assert inspected == names[:8]
+    assert summary == "_ManyFieldRef[f6=6, f7=7]"
