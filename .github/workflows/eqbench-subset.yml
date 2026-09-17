@@ -400,7 +400,11 @@ jobs:
             echo "::error::the canonical EqBench checkout was written to"
             exit 1
           fi
-          [[ "$after" == "${EQBENCH_COMMIT:-$after}" ]] \
+          # Not `${EQBENCH_COMMIT:-$after}`: with no recorded commit there is
+          # nothing to compare against, and "I could not look" must not pass.
+          [[ -n "${EQBENCH_COMMIT:-}" ]] \
+            || { echo "::error::no recorded EqBench commit to compare against"; exit 1; }
+          [[ "$after" == "$EQBENCH_COMMIT" ]] \
             || { echo "::error::the canonical checkout moved to $after"; exit 1; }
           echo "canonical checkout unchanged at $after"
 
