@@ -3,8 +3,18 @@
 
 debug message に式・条件を載せる手段は本 module だけが持つ。``to_string()`` /
 ``to_smt()`` は共有 DAG を木として全展開するので、debug 出力からは呼ばない。
-ここにある renderer は **出力量も走査量も有界** で、巨大な式・長い列を渡されても
-先頭だけを見る。
+ここにある renderer は **出力量も走査量も有界**。巨大な式・長い列・巨大な値を
+渡されても、見る量が入力サイズに依存しない:
+
+* 深さ（``summarize_expression``）、node 数と fan-out
+  （``summarize_structural_preview``）、列の件数（``summarize_*s``）、
+  dataclass field 数（``summarize_runtime_ref``）をそれぞれ上限で縛る
+* 1 要素の表示は ``_primitive_text`` だけを使う。exact type で判定し、任意
+  object の ``__str__`` / ``__repr__`` / ``stable_key()`` / ``to_dict()`` を
+  起動しない。大きい int は 10 進化せず bit 幅、長い str は slice で示す
+* 判定に使う structural key（``core.structural``）は debug から呼ばない。
+  あちらの予算は node 数しか縛らないので、operand / branch / value の中身を
+  辿り得る
 
 本 module は「契約の語彙」も所有する。静的 guard
 （``tests/unit/test_no_eager_debug_rendering.py``）はこの 3 つを import して
@@ -29,10 +39,9 @@ from collections.abc import Sized
 from dataclasses import fields, is_dataclass
 from enum import Enum
 from itertools import islice
-from typing import Any, Callable, FrozenSet, Iterable, Optional, Set, Tuple
+from typing import Any, Callable, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
-from scripts.function_tracer_pcode.core.structural import expression_key_safe
 
 
 def summarize_expression(expr: Optional[Expression], max_depth: int = 4) -> str:
@@ -55,55 +64,79 @@ def summarize_expression(expr: Optional[Expression], max_depth: int = 4) -> str:
 
         try:
             expr_type = getattr(node, "expr_type", None)
-            expr_type_name = getattr(expr_type, "name", str(expr_type))
+            # 既定値を ``str(expr_type)`` にすると、name が無いときに任意
+            # object の ``__str__`` が走る。名前は bounded な取り方で得る。
+            expr_type_name = _expression_kind(node)
 
             if expr_type == ExpressionType.CONSTANT:
-                try:
-                    value = int(node.value)
-                except Exception:
-                    value = getattr(node, "value", "?")
-                return f"CONST({value})"
+                return f"CONST({_primitive_text(getattr(node, 'value', None))})"
 
             if expr_type == ExpressionType.PARAMETER:
-                return f"PARAM({node.name or '?'})"
+                return f"PARAM({_node_name(node)})"
 
             if expr_type == ExpressionType.VARIABLE:
-                return f"VAR({node.name or '?'})"
+                return f"VAR({_node_name(node)})"
 
             if expr_type == ExpressionType.UNKNOWN:
-                return f"UNKNOWN({node.name or '?'})"
+                return f"UNKNOWN({_node_name(node)})"
 
             if expr_type == ExpressionType.CALL:
-                arg_count = len(node.operands or [])
-                return f"CALL({node.name or '?'}, argc={arg_count})"
+                return f"CALL({_node_name(node)}, argc={_container_length(node.operands)})"
 
             if expr_type == ExpressionType.INTRINSIC:
-                arg_count = len(node.operands or [])
-                return f"INTRINSIC({node.name or '?'}, argc={arg_count})"
+                return f"INTRINSIC({_node_name(node)}, argc={_container_length(node.operands)})"
 
             if expr_type == ExpressionType.MEMORY:
-                inner = _render((node.operands or [None])[0], depth - 1)
-                return f"MEM[{inner}]"
+                children = _first_children(node.operands, 1)
+                return f"MEM[{_render(children[0] if children else None, depth - 1)}]"
 
             if expr_type == ExpressionType.UNARY_OP:
-                inner = _render((node.operands or [None])[0], depth - 1)
-                return f"{node.operator or 'UNARY'}({inner})"
+                children = _first_children(node.operands, 1)
+                operator = _primitive_text(node.operator) if node.operator else "UNARY"
+                return f"{operator}({_render(children[0] if children else None, depth - 1)})"
 
             if expr_type == ExpressionType.BINARY_OP:
-                operands = node.operands or []
+                operands = _first_children(node.operands, 2)
                 left = _render(operands[0] if len(operands) > 0 else None, depth - 1)
                 right = _render(operands[1] if len(operands) > 1 else None, depth - 1)
-                return f"{node.operator or 'BINARY'}({left}, {right})"
+                return f"{_primitive_text(node.operator) if node.operator else 'BINARY'}({left}, {right})"
 
             if expr_type == ExpressionType.PHI:
-                branches = node.value or []
-                return f"PHI(branches={len(branches)})"
+                return f"PHI(branches={_container_length(node.value)})"
 
             return expr_type_name
         finally:
             visited.discard(node_id)
 
     return _render(expr, max_depth)
+
+
+def _node_name(node: Any) -> str:
+    name = getattr(node, "name", None)
+    return _primitive_text(name) if name else "?"
+
+
+def _container_length(value: Any) -> str:
+    """要素数を O(1) で聞ける組み込み容器だけ数える。
+
+    任意 object の ``__len__`` / ``__bool__`` は何をするか分からないので、
+    exact type で判定して外れたら件数を名乗らない。
+    """
+
+    if value is None:
+        return "0"
+    return str(len(value)) if type(value) in (list, tuple, dict, set, frozenset) else "?"
+
+
+def _first_children(value: Any, count: int) -> list:
+    """子の先頭 ``count`` 個だけを読む（列全体を反復しない）。"""
+
+    if value is None:
+        return []
+    try:
+        return list(islice(iter(value), max(0, int(count))))
+    except TypeError:
+        return []
 
 
 def summarize_condition(condition: Optional[Condition], max_depth: int = 4) -> str:
@@ -116,12 +149,18 @@ def summarize_condition(condition: Optional[Condition], max_depth: int = 4) -> s
 #: debug サマリーに並べる要素数の既定上限。列の長さ自体は打ち切り件数で示す。
 DEFAULT_MAX_ITEMS = 8
 
-#: :func:`summarize_values` の 1 要素あたり最大文字数。
+#: 1 要素あたりの最大文字数（テキスト化の上限）。
 DEFAULT_MAX_TEXT = 80
 
-#: identity 表示の途中で握れる失敗。構造キーの走査は不正な node / 深い入れ子で
-#: これらを投げうる。debug 表示のためにそれ以外を握り潰さない（#108 の方向）。
-_RECOVERABLE_IDENTITY_ERRORS = (AttributeError, TypeError, ValueError, RecursionError)
+#: 整数をそのまま 10 進で出す上限。これを超えたら桁数ではなく bit 幅で示す。
+DEFAULT_MAX_INT_BITS = 64
+
+#: :func:`summarize_structural_preview` が見る node 数の上限。
+DEFAULT_MAX_PREVIEW_NODES = 24
+
+#: 1 node から辿る子の数の上限（fan-out）。CALL / INTRINSIC の巨大 operand 群や
+#: PHI の巨大 branch 群を全部辿らないための hard bound。
+DEFAULT_MAX_PREVIEW_FANOUT = 4
 
 
 def _summarize_sequence(
@@ -202,30 +241,47 @@ def summarize_values(
     （:func:`summarize_expressions` / :func:`summarize_conditions` を使う）。
     """
 
-    limit = max(0, int(max_text))
-
-    def _render(value: Any) -> str:
-        text = _primitive_text(value)
-        return text if len(text) <= limit else text[:limit] + "..."
-
-    return _summarize_sequence(values, _render, max_items)
+    return _summarize_sequence(
+        values, lambda value: _primitive_text(value, max_text), max_items
+    )
 
 
-def _primitive_text(value: Any) -> str:
-    """定数時間で作れる表示だけを返す。
+def _primitive_text(value: Any, max_text: int = DEFAULT_MAX_TEXT) -> str:
+    """入力サイズに依存しない表示だけを返す。
 
-    ``str(value)`` を無条件に呼ぶと、frozen dataclass のように field を再帰
-    展開する ``__repr__`` を起動してしまう。primitive でないものは型名だけに
-    落とす（debug 表示のために入力を辿らない、が契約）。
+    ``str(value)`` / ``repr(value)`` は任意 object の実装を起動するので使わない
+    （frozen dataclass は field を再帰展開する）。判定は **exact type** で行い、
+    subclass の ``__str__`` には触れない。大きい値も「作ってから切る」のでは
+    なく、最初から作らない:
+
+    * ``int`` は ``DEFAULT_MAX_INT_BITS`` を超えたら 10 進化せず bit 幅で示す
+    * ``str`` は先頭 ``max_text`` 文字だけを slice する
+    * ``bytes`` は長さだけ（16 進化しない）
+    * 容器・その他の object は型名（と組み込み容器なら要素数）だけ
     """
 
+    limit = max(0, int(max_text))
+    kind = type(value)
     if value is None:
         return "None"
+    if kind is bool:
+        return "True" if value else "False"
+    if kind is int:
+        bits = value.bit_length()
+        return str(value) if bits <= DEFAULT_MAX_INT_BITS else f"<int bits={bits}>"
+    if kind is float:
+        return repr(value)
+    if kind is str:
+        return value if len(value) <= limit else value[:limit] + "..."
+    if kind is bytes:
+        return f"<bytes len={len(value)}>"
+    if kind in (list, tuple, dict, set, frozenset):
+        return f"<{kind.__name__} len={len(value)}>"
     if isinstance(value, Enum):
-        return value.name
-    if isinstance(value, (bool, int, float, str)):
-        return str(value)
-    return f"<{type(value).__name__}>"
+        name = getattr(value, "name", None)
+        if type(name) is str:
+            return name if len(name) <= limit else name[:limit] + "..."
+    return f"<{kind.__name__}>"
 
 
 def summarize_runtime_ref(runtime_ref: Any, max_fields: int = DEFAULT_MAX_ITEMS) -> str:
@@ -270,41 +326,120 @@ def _primitive_dataclass_fields(value: Any, max_fields: int) -> Tuple[str, ...]:
     return tuple(items)
 
 
-def summarize_expression_identity(
+def summarize_structural_preview(
     expr: Optional[Expression],
-    max_depth: int = 3,
+    max_nodes: int = DEFAULT_MAX_PREVIEW_NODES,
+    max_fanout: int = DEFAULT_MAX_PREVIEW_FANOUT,
 ) -> str:
-    """式の identity を debug 用に有界表示する（要約 + 構造キー + 由来）。
+    """式の構造を **hard bound つきで** 覗く debug 専用 preview。
 
-    ``structural`` は予算付きの :func:`expression_key_safe` なので、予算超過や
-    opaque node では ``None`` になる。この識別子を失わないことは #76 のレビュー
-    指摘で ``tests/unit/test_debug_reporter.py`` が固定している。走査量を
-    node 予算だけで抑えるため、runtime ref の semantic key は含めない。
+    判定に使う structural key（``core.structural.expression_key``）は debug から
+    呼ばない。あちらの予算は「何 node 辿るか」しか縛らないので、CALL /
+    INTRINSIC の operand 全件、PHI の branch 全件、``value`` に入った巨大な
+    容器や ``stable_key()`` を持つ object を辿り得る。
+
+    ここで保証するのは 3 つとも hard bound であること:
+
+    * 見る node 数 ≤ ``max_nodes``
+    * 1 node から辿る子の数 ≤ ``max_fanout``（列の残りは読まない）
+    * 1 node の local 表示は :func:`_primitive_text` だけを使う（任意 object の
+      ``__str__`` / ``stable_key()`` / ``to_dict()`` を起動しない）
+
+    これは identity ではなく triage 用の手掛かり。等価性の判断には使わない。
     """
 
     if expr is None:
         return "None"
 
-    read_order_key = getattr(expr, "read_order_key", None)
-    runtime_ref_summary = summarize_runtime_ref(getattr(expr, "runtime_ref", None))
-    try:
-        # ``include_semantic_runtime_refs=True``（既定）は node ごとに
-        # ``runtime_ref.stable_key()`` を呼ぶ。node 数は budget で有界でも
-        # 1 つの key の構築は有界ではないので、debug 表示では切る。ref の
-        # 情報は上の ``runtime_ref`` 欄が別に出す。判定側が使う structural
-        # key の既定は変えていない。
-        structural_key = expression_key_safe(
-            expr,
-            include_memory_read_order=True,
-            include_semantic_runtime_refs=False,
-        )
-    except _RECOVERABLE_IDENTITY_ERRORS:
-        structural_key = None
+    node_limit = max(1, int(max_nodes))
+    fanout_limit = max(0, int(max_fanout))
+    records: List[str] = []
+    visited: Set[int] = set()
+    pending: List[Any] = [expr]
+    truncated = False
+
+    while pending:
+        if len(records) >= node_limit:
+            truncated = True
+            break
+        node = pending.pop(0)
+        if node is None:
+            continue
+        node_id = id(node)
+        if node_id in visited:
+            records.append("<shared>")
+            continue
+        visited.add(node_id)
+        records.append(_structural_node_record(node))
+        children = _first_children(getattr(node, "operands", None), fanout_limit)
+        if _expression_kind(node) == "PHI":
+            children = _phi_branch_values(getattr(node, "value", None), fanout_limit)
+        pending.extend(children)
+
+    if truncated or pending:
+        records.append("+more")
+    return "[" + ", ".join(records) + "]"
+
+
+def _expression_kind(node: Any) -> str:
+    expr_type = getattr(node, "expr_type", None)
+    name = getattr(expr_type, "name", None)
+    return name if type(name) is str else "?"
+
+
+def _structural_node_record(node: Any) -> str:
+    """1 node の local 表示。すべて定数時間の field だけで作る。"""
+
+    parts = [_expression_kind(node)]
+    operator = getattr(node, "operator", None)
+    if operator:
+        parts.append(_primitive_text(operator))
+    name = getattr(node, "name", None)
+    if name:
+        parts.append(_primitive_text(name))
+    size = getattr(node, "size", None)
+    if size is not None:
+        parts.append(f"size={_primitive_text(size)}")
+    value = getattr(node, "value", None)
+    if value is not None and _expression_kind(node) != "PHI":
+        parts.append(f"value={_primitive_text(value)}")
+    return ":".join(parts)
+
+
+def _phi_branch_values(branches: Any, max_fanout: int) -> List[Any]:
+    """PHI branch の先頭数件から値側だけを取り出す（全 branch を読まない）。"""
+
+    values = []
+    for branch in _first_children(branches, max_fanout):
+        if isinstance(branch, (tuple, list)) and len(branch) == 2:
+            values.append(branch[1])
+        else:
+            values.append(branch)
+    return values
+
+
+def summarize_expression_identity(
+    expr: Optional[Expression],
+    max_depth: int = 3,
+) -> str:
+    """式の identity を debug 用に有界表示する（要約 + 構造 preview + 由来）。
+
+    3 つの欄はいずれも hard bound つき: ``summarize_expression`` が深さ、
+    ``summarize_structural_preview`` が node 数と fan-out、
+    ``summarize_runtime_ref`` が field 数を縛る。production の structural key は
+    ここでは作らない（#76 のレビュー指摘は「debug 行が式を識別できること」で、
+    ``tests/unit/test_debug_reporter.py`` がそれを固定している）。
+    """
+
+    if expr is None:
+        return "None"
+
     return (
         f"{summarize_expression(expr, max_depth=max_depth)} "
-        f"[type={expr.expr_type.name}, size={expr.size}, "
-        f"read_order={read_order_key}, runtime_ref={runtime_ref_summary}, "
-        f"structural={structural_key}]"
+        f"[type={_expression_kind(expr)}, size={_primitive_text(getattr(expr, 'size', None))}, "
+        f"read_order={_primitive_text(getattr(expr, 'read_order_key', None))}, "
+        f"runtime_ref={summarize_runtime_ref(getattr(expr, 'runtime_ref', None))}, "
+        f"structural_preview={summarize_structural_preview(expr)}]"
     )
 
 
@@ -318,6 +453,7 @@ BOUNDED_DEBUG_RENDERERS: FrozenSet[str] = frozenset({
     "summarize_conditions",
     "summarize_values",
     "summarize_runtime_ref",
+    "summarize_structural_preview",
     "summarize_expression_identity",
 })
 
@@ -330,3 +466,6 @@ DEBUG_AVAILABILITY_PREDICATES: FrozenSet[str] = frozenset({
     "_debug_available",
     "debug_flag",
 })
+
+#: 出力可否を表す属性。guard 節の形を静的 guard が判定するのに使う。
+DEBUG_AVAILABILITY_FLAGS: FrozenSet[str] = frozenset({"debug", "DEBUG"})

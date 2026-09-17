@@ -12,9 +12,6 @@
     "analysis.condition.tracker": {
       "ConditionTracker._detect_branch_condition": {"logged": 0, "unlogged": 1}
     },
-    "analysis.debug.render": {
-      "summarize_expression.<locals>._render": {"logged": 0, "unlogged": 1}
-    },
     "analysis.debug.unknown_trace": {
       "PcodeOpInfo.from_pcodeop": {"logged": 0, "unlogged": 1},
       "VarnodeInfo.from_varnode": {"logged": 0, "unlogged": 1}

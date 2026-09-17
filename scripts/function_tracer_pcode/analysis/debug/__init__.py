@@ -10,6 +10,7 @@ from scripts.function_tracer_pcode.analysis.debug.unknown_trace import (
 )
 from scripts.function_tracer_pcode.analysis.debug.render import (
     BOUNDED_DEBUG_RENDERERS,
+    DEBUG_AVAILABILITY_FLAGS,
     DEBUG_AVAILABILITY_PREDICATES,
     UNBOUNDED_RENDER_CALLS,
     summarize_expression,
@@ -18,6 +19,7 @@ from scripts.function_tracer_pcode.analysis.debug.render import (
     summarize_conditions,
     summarize_expression_identity,
     summarize_runtime_ref,
+    summarize_structural_preview,
     summarize_values,
 )
 
@@ -28,6 +30,7 @@ __all__ = [
     'VarnodeInfo',
     'PcodeOpInfo',
     'BOUNDED_DEBUG_RENDERERS',
+    'DEBUG_AVAILABILITY_FLAGS',
     'DEBUG_AVAILABILITY_PREDICATES',
     'UNBOUNDED_RENDER_CALLS',
     'summarize_expression',
@@ -36,5 +39,6 @@ __all__ = [
     'summarize_conditions',
     'summarize_expression_identity',
     'summarize_runtime_ref',
+    'summarize_structural_preview',
     'summarize_values',
 ]

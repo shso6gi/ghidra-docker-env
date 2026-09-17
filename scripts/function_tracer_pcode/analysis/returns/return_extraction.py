@@ -323,7 +323,10 @@ def _impl__dump_return_infos(self, analysis: FunctionReturnAnalysis):
     - branch_index（分岐識別子）
     - address（アドレス）
     - value（式の有界サマリー）
-    - conditions（簡約後の条件リスト）
+    - conditions（生の条件の有界サマリー。件数と先頭数件だけ）
+
+    debug のために条件簡約や構造キー生成を起動しない（Issue #22）。簡約後の
+    表示が要るときは、解析そのものを走らせて結果を見ること。
     """
     if not self.debug:
         return

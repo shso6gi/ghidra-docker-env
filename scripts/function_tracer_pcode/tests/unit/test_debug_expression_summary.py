@@ -8,9 +8,11 @@ from unittest.mock import Mock
 from scripts.function_tracer_pcode.analysis.debug import render
 from scripts.function_tracer_pcode.analysis.debug.render import (
     summarize_conditions,
+    summarize_expression,
     summarize_expression_identity,
     summarize_expressions,
     summarize_runtime_ref,
+    summarize_structural_preview,
     summarize_values,
 )
 from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
@@ -227,11 +229,123 @@ def test_expression_identity_summary_does_not_walk_the_runtime_ref():
     text = summarize_expression_identity(expr)
 
     assert _HEAVY_KEY_CALLS == []
-    assert "structural=" in text
-    assert "structural=None" not in text
+    assert "structural_preview=[BINARY_OP:INT_ADD" in text
     assert "runtime_ref=_ExplosiveRuntimeRef[kind=loop" in text
 
 
 def test_value_summary_does_not_stringify_arbitrary_objects():
     assert summarize_values([_ExplosiveRuntimeRef()]) == "[<_ExplosiveRuntimeRef>]"
     assert summarize_values([1, "a", None, True]) == "[1, a, None, True]"
+
+# ------------------------------ preview の hard bound（Issue #22 レビュー 3 巡目）
+
+
+class _CountingSequence:
+    """反復された要素数を数える列。exact な組み込み型ではない。"""
+
+    def __init__(self, items):
+        self._items = list(items)
+        self.consumed = 0
+
+    def __len__(self):
+        return len(self._items)
+
+    def __iter__(self):
+        for item in self._items:
+            self.consumed += 1
+            yield item
+
+
+class _HostileInt(int):
+    def __str__(self):  # pragma: no cover - 呼ばれたら失敗
+        raise AssertionError("debug summary must not call __str__ on a subclass")
+
+    __repr__ = __str__
+
+
+class _HostileStr(str):
+    def __str__(self):  # pragma: no cover - 呼ばれたら失敗
+        raise AssertionError("debug summary must not call __str__ on a subclass")
+
+    __repr__ = __str__
+
+
+def _records(preview: str):
+    return preview[1:-1].split(", ") if preview not in ("[]", "None") else []
+
+
+def test_structural_preview_reads_only_max_fanout_call_arguments():
+    arguments = _CountingSequence(_expressions(10_000))
+    call = Expression.call("f", [])
+    call.operands = arguments
+
+    preview = summarize_structural_preview(call, max_fanout=3)
+
+    assert arguments.consumed == 3
+    assert len(_records(preview)) <= render.DEFAULT_MAX_PREVIEW_NODES + 1
+
+
+def test_structural_preview_reads_only_max_fanout_phi_branches():
+    branches = _CountingSequence(
+        (Condition(Expression.parameter(f"c{index}")), Expression.parameter(f"v{index}"))
+        for index in range(10_000)
+    )
+    phi = Expression.phi([])
+    phi.value = branches
+
+    preview = summarize_structural_preview(phi, max_fanout=2)
+
+    assert branches.consumed == 2
+    assert preview.startswith("[PHI")
+
+
+def test_structural_preview_stops_at_the_node_limit():
+    expr = Expression.parameter("p0")
+    for index in range(200):
+        expr = Expression.binary_op("INT_ADD", expr, Expression.parameter(f"p{index}"))
+
+    preview = summarize_structural_preview(expr, max_nodes=6)
+
+    records = _records(preview)
+    assert records[-1] == "+more"
+    assert len(records) == 7
+
+
+def test_structural_preview_never_expands_a_node_value():
+    node = Expression.variable("v", 4)
+    node.value = list(range(100_000))
+
+    preview = summarize_structural_preview(node)
+
+    assert "value=<list len=100000>" in preview
+    assert "0, 1, 2" not in preview
+
+
+def test_structural_preview_is_cycle_safe():
+    left = Expression.parameter("a")
+    shared = Expression.binary_op("INT_ADD", left, left)
+
+    preview = summarize_structural_preview(shared)
+
+    assert "<shared>" in preview
+
+
+def test_primitive_text_never_materializes_a_large_value():
+    huge = 1 << 5000
+    assert render._primitive_text(huge) == f"<int bits={huge.bit_length()}>"
+    assert render._primitive_text(255) == "255"
+    assert render._primitive_text("x" * 500, max_text=8) == "xxxxxxxx..."
+    assert render._primitive_text(b"\x00" * 4096) == "<bytes len=4096>"
+    assert render._primitive_text(list(range(10_000))) == "<list len=10000>"
+
+
+def test_primitive_text_does_not_run_a_subclass_dunder():
+    assert render._primitive_text(_HostileInt(5)) == "<_HostileInt>"
+    assert render._primitive_text(_HostileStr("x")) == "<_HostileStr>"
+
+
+def test_expression_summary_does_not_materialize_a_constant_value():
+    constant = Expression.constant(0, 4)
+    constant.value = 1 << 5000
+
+    assert summarize_expression(constant) == f"CONST(<int bits={(1 << 5000).bit_length()}>)"
