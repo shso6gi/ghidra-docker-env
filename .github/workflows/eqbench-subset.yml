@@ -65,10 +65,12 @@ jobs:
   subset:
     name: fixed subset (real binaries)
     # A pull request also closes without being merged; that is not a commit on
-    # main and must start nothing.  A manual dispatch has no pull_request in
-    # its event, so it is let through by the first clause.
+    # main and must start nothing.  The two allowed events are named rather
+    # than excluded, so a trigger added later without thinking about this
+    # policy leaves a visibly skipped job instead of quietly running 85
+    # minutes of work.
     if: >-
-      github.event_name != 'pull_request'
+      github.event_name == 'workflow_dispatch'
       || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     timeout-minutes: 180
@@ -82,7 +84,7 @@ jobs:
       RAW_PAIR_PROCESS_TIMEOUT: ${{ inputs.pair_process_timeout }}
       RAW_IDENTICAL_FAST_PATH: ${{ inputs.identical_fast_path }}
       RAW_EQBENCH_REF: ${{ inputs.eqbench_ref }}
-      #: The commit that landed on main, when this run is a merged PR.
+      # The commit that landed on main, when this run is a merged PR.
       MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
       PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
     steps:
