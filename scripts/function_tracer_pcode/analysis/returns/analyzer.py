@@ -1045,6 +1045,8 @@ class ReturnAnalyzer:
     def _constant_int_value(self, expr):
         return self._stack_protector.constant_int_value(expr)
     _current_function_entry_address = _svc_lifecycle._impl__current_function_entry_address
+    def _debug_available(self):
+        return self._debug_reporter.debug_available()
     def _debug_expr_identity_summary(self, expr, max_depth=3):
         return self._debug_reporter.debug_expr_identity_summary(expr, max_depth)
     def _debug_expr_summary(self, expr, max_depth=4):

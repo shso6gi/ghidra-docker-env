@@ -18,6 +18,7 @@ from scripts.function_tracer_pcode.semantics.param_semantics import (
     hint_objects_by_identity,
     parameter_identity_key_from_descriptor,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_expression
 
 
 class MIPS64Handler:
@@ -688,7 +689,7 @@ class MIPS64Handler:
 
         if recorded and self.debug:
             self._debug_print(
-                f"  Detected signed comparison evidence in {expr.to_string()}"
+                f"  Detected signed comparison evidence in {summarize_expression(expr)}"
             )
 
     def _record_signed_operand_evidence(

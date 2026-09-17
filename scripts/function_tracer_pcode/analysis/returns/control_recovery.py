@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
 from scripts.function_tracer_pcode.analysis.session import AnalysisSession
 from scripts.function_tracer_pcode.analysis.returns._api import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.core import CallTargetRef
+from scripts.function_tracer_pcode.analysis.debug import summarize_conditions, summarize_expression
 
 if TYPE_CHECKING:  # 他 collaborator は本 module（BlockGraphService / 純関数）を import するため、型注釈の import は循環回避のため遅延
     from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
@@ -648,8 +649,8 @@ class BranchGuardedWhileProofService:
                 self.debug_reporter.debug_print(
                     "Outcome branch-guarded affine candidate skipped: "
                     f"step={step}, implies_target={implies_target}, "
-                    f"value={getattr(value, 'to_string', lambda: value)()}, "
-                    f"conditions={[condition.to_string() for condition in conditions]}"
+                    f"value={summarize_expression(value)}, "
+                    f"conditions={summarize_conditions(conditions)}"
                 )
             ignored_artifacts.append(ret)
 
@@ -727,8 +728,8 @@ class BranchGuardedWhileProofService:
                 for artifact in ignored_artifacts:
                     self.debug_reporter.debug_print(
                         "Outcome branch-guarded affine artifact retained: "
-                        f"value={getattr(getattr(artifact, 'value', None), 'to_string', lambda: getattr(artifact, 'value', None))()}, "
-                        f"conditions={[condition.to_string() for condition in tuple(getattr(artifact, 'conditions', ()) or ())]}, "
+                        f"value={summarize_expression(getattr(artifact, 'value', None))}, "
+                        f"conditions={summarize_conditions(tuple(getattr(artifact, 'conditions', ()) or ()))}, "
                         f"site={self.return_site_key(artifact)}"
                     )
         proof_returns = list(exact_base_returns) + [ret for ret, _step in recursive_returns]
@@ -2227,7 +2228,7 @@ def _impl__is_noreturn_control_transfer_op(self, pcode_op, tracer: PcodeTracer) 
     if self.debug and not resolved_targets:
         try:
             traced_target = tracer.trace_varnode(pcode_op.getInput(0), use_cache=False)
-            traced_summary = traced_target.to_string()
+            traced_summary = summarize_expression(traced_target)
         except Exception:
             traced_summary = "<unavailable>"
         self._debug_print(

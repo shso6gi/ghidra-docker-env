@@ -16,6 +16,7 @@ from scripts.function_tracer_pcode.core import (
     PTRSUB_OPCODE,
     ReadonlyReductionRef,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_conditions
 
 
 MAX_ENUMERATED_INDEX_VALUES = 16
@@ -497,7 +498,7 @@ def _try_resolve_readonly_load(
     candidate_indices = _enumerate_candidate_indices(pattern, conditions, param_info, debug)
     if not candidate_indices:
         if debug:
-            cond_strs = [cond.to_string() for cond in conditions]
+            cond_strs = summarize_conditions(conditions)
             print(
                 "[MemoryResolver] no candidate indices for "
                 f"{pattern.index_param_name} with conditions {cond_strs}"

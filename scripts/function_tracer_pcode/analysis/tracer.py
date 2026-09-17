@@ -42,6 +42,7 @@ from scripts.function_tracer_pcode.analysis.tracer_support import (
     _callable_accepts_positional_args,
     ParameterStorageDescriptor,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_expression
 
 if TYPE_CHECKING:
     from scripts.function_tracer_pcode.analysis.phi_resolver import PhiHandler
@@ -467,7 +468,7 @@ class PcodeTracer(CallRecoveryMixin, ParameterStorageMixin, AddressRefMixin):
                         if self._debug_available():
                             self._debug_print(
                                 "  -> Bound parameter argument: "
-                                f"{bound_expr.to_string()}"
+                                f"{summarize_expression(bound_expr)}"
                             )
                         return bound_expr
                     
@@ -550,7 +551,7 @@ class PcodeTracer(CallRecoveryMixin, ParameterStorageMixin, AddressRefMixin):
             if self._debug_available():
                 self._debug_print(
                     "  -> Parameter (storage-backed fallback): "
-                    f"{storage_backed_param.to_string()}"
+                    f"{summarize_expression(storage_backed_param)}"
                 )
             return storage_backed_param
         

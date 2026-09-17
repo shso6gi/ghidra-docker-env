@@ -21,6 +21,7 @@ from scripts.function_tracer_pcode.core import (
     ExpressionType,
     Condition,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_expression
 
 # 型チェック用のインポート（循環参照を避けるため）
 if TYPE_CHECKING:
@@ -270,9 +271,11 @@ class UbConstraintBuilder:
                 width = int(param_info.bit_width)
             else:
                 if not signed_context:
-                    self._debug_print(
-                        f"Skipping negation outside signed context: {operand.to_string()}"
-                    )
+                    if self.debug:
+                        self._debug_print(
+                            "Skipping negation outside signed context: "
+                            f"{summarize_expression(operand)}"
+                        )
                     continue
                 width = int(operand.get_bit_width() or 0)
                 if width <= 0:

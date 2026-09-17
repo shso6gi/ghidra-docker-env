@@ -6,6 +6,7 @@ from typing import Optional, Set
 from scripts.function_tracer_pcode.core import Expression, ExpressionType, StructuralKey
 from scripts.function_tracer_pcode.core.signature import is_floating_data_type
 from scripts.function_tracer_pcode.semantics.normalize.fact_types import SignFacts, expr_key
+from scripts.function_tracer_pcode.analysis.debug import summarize_expression
 
 
 def is_zero(expr: Expression) -> bool:
@@ -50,7 +51,7 @@ def record_expr_fact(
         return
     target.add(key)
     if debug:
-        print(f"[Facts] {message}: {expr.to_string()}")
+        print(f"[Facts] {message}: {summarize_expression(expr)}")
 
 
 def is_integral_expression(expr: Expression) -> bool:

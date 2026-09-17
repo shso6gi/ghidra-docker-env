@@ -25,7 +25,12 @@ def test_reporter_holds_only_the_debug_flag_supplier():
 def test_every_delegator_forwards_to_the_reporter():
     analyzer = _analyzer()
     names = [n for n, _ in inspect.getmembers(DebugReporter, predicate=inspect.isfunction) if n != "__init__"]
-    assert set(names) == {"debug_print", "debug_expr_summary", "debug_expr_identity_summary"}
+    assert set(names) == {
+        "debug_available",
+        "debug_print",
+        "debug_expr_summary",
+        "debug_expr_identity_summary",
+    }
     for name in names:
         sentinel = object()
         with patch.object(analyzer._debug_reporter, name, return_value=sentinel) as mocked:

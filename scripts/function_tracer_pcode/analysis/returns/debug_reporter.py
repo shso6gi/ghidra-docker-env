@@ -18,6 +18,16 @@ class DebugReporter:
     def __init__(self, *, debug_flag: Callable[[], bool]) -> None:
         self.debug_flag = debug_flag
 
+    def debug_available(self) -> bool:
+        """debug 出力が有効か。
+
+        returns family の debug guard の唯一の判定点。呼び出し側は message の
+        組み立てごとこれで囲み、full render（``to_string`` / ``to_smt``）は
+        使わずに ``summarize_expression`` 等の有界サマリーを渡す。
+        """
+
+        return bool(self.debug_flag())
+
     def debug_print(self, msg: str, indent: int = 0):
         if self.debug_flag():
             prefix = "  " * indent

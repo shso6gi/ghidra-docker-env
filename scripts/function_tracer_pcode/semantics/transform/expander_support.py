@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Hashable, List, Optional, Tuple, Any
 from scripts.function_tracer_pcode.core import Expression, Condition, CanonicalLocation, PcodeOpRef
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
+from scripts.function_tracer_pcode.analysis.debug import summarize_conditions, summarize_expression
 
 
 def _pcode_op_stable_key(pcode_op) -> Tuple[Any, ...]:
@@ -50,8 +51,13 @@ class ExpandedValue:
         return ConditionSimplifier.object_centric_conditions_signature(self.conditions)
     
     def __repr__(self):
-        conds = [c.to_string() for c in self.conditions]
-        return f"ExpandedValue(value={self.value.to_string()}, conds={conds})"
+        # ``repr()`` は logging / 例外 / デバッガから暗黙に呼ばれる。full render
+        # だと debug を切っていても巨大 DAG を展開しうるので、有界サマリーを返す
+        # （Issue #22）。
+        return (
+            f"ExpandedValue(value={summarize_expression(self.value)}, "
+            f"conds={summarize_conditions(self.conditions)})"
+        )
 
 
 @dataclass(frozen=True)

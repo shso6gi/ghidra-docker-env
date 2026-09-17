@@ -870,10 +870,11 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                 output_size=output_size,
             )
             if traced_value is not None and not self._expression_contains_unknown_or_call(traced_value) and not self._expression_contains_phi(traced_value):
-                self._debug_print(
-                    f"  Direct operation trace resolved: {self._debug_expr_summary(traced_value)}",
-                    depth,
-                )
+                if self._debug_available():
+                    self._debug_print(
+                        f"  Direct operation trace resolved: {self._debug_expr_summary(traced_value)}",
+                        depth,
+                    )
                 return [ExpandedValue(traced_value, conditions)]
             if traced_value is not None and self._expression_contains_phi(traced_value):
                 self._debug_print(
@@ -997,10 +998,11 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                 depth,
             )
             if traced_value is not None and not self._expression_contains_unknown_or_call(traced_value) and not self._expression_contains_phi(traced_value):
-                self._debug_print(
-                    f"  Direct operation trace resolved: {self._debug_expr_summary(traced_value)}",
-                    depth,
-                )
+                if self._debug_available():
+                    self._debug_print(
+                        f"  Direct operation trace resolved: {self._debug_expr_summary(traced_value)}",
+                        depth,
+                    )
                 return [ExpandedValue(traced_value, base_conditions)]
             if traced_value is not None and self._expression_contains_phi(traced_value):
                 self._debug_print(
@@ -1158,11 +1160,12 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
         if not expanded_traced:
             return None
 
-        self._debug_print(
-            f"Using whole-{context_label} object-centric expansion shortcut: "
-            f"{self._debug_expr_summary(traced_value)} -> {len(expanded_traced)} case(s)",
-            depth,
-        )
+        if self._debug_available():
+            self._debug_print(
+                f"Using whole-{context_label} object-centric expansion shortcut: "
+                f"{self._debug_expr_summary(traced_value)} -> {len(expanded_traced)} case(s)",
+                depth,
+            )
         return self._deduplicate_expanded_values(
             expanded_traced,
             depth,

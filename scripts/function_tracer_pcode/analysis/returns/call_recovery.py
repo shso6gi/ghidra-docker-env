@@ -60,6 +60,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
 )
 from scripts.function_tracer_pcode.analysis.returns._api import resolve_call_targets
 from scripts.function_tracer_pcode.analysis.runtime_state import SuccessfulDecompileParameterSnapshot
+from scripts.function_tracer_pcode.analysis.debug import summarize_expression, summarize_expressions
 
 
 def _impl__direct_call_target_function_key(self, op) -> Optional[Tuple[object, ...]]:
@@ -452,16 +453,11 @@ def _impl__make_deferred_call_recorder(self, current_function=None):
         )
         self._current_deferred_calls[deferred_call_ref.stable_key()] = info
         if self.debug:
-            arg_dump = ", ".join(arg.to_string() for arg in cloned_args)
-            target_expr_dump = (
-                cloned_target_expr.to_string()
-                if cloned_target_expr is not None
-                else "<none>"
-            )
             self._debug_print(
                 f"Recorded deferred call in '{current_function_ref.display_name()}': "
-                f"{info.placeholder_name} -> {target_ref.display_name()}([{arg_dump}]) "
-                f"target_expr={target_expr_dump}"
+                f"{info.placeholder_name} -> "
+                f"{target_ref.display_name()}({summarize_expressions(cloned_args)}) "
+                f"target_expr={summarize_expression(cloned_target_expr)}"
             )
         return info.unknown_ref
 
@@ -2003,9 +1999,11 @@ def _impl__expand_linear_code_target(self, addr, tracer, current_function=None):
                     local_memory,
                     current_function,
                 )
-                self._debug_print(
-                    f"Resolved local target {typed_instruction.getAddress()} to return expression {value.to_string()}"
-                )
+                if self._debug_available():
+                    self._debug_print(
+                        f"Resolved local target {typed_instruction.getAddress()} "
+                        f"to return expression {summarize_expression(value)}"
+                    )
                 return [ExpandedValue(value=value, conditions=[])]
 
             if mnemonic == "STORE":

@@ -13,6 +13,7 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.core.signature import get_data_type_display_name
 from scripts.function_tracer_pcode.analysis.tracer_support import _callable_accepts_positional_args
+from scripts.function_tracer_pcode.analysis.debug import summarize_expressions
 
 
 class CallRecoveryMixin:
@@ -81,7 +82,7 @@ class CallRecoveryMixin:
             if self._debug_available():
                 self._debug_print(
                     "  [CallArgRecovery] recovered implicit CALL args via shared effect model: "
-                    + ", ".join(arg.to_string() for arg in shared_recovered[: len(parameters)])
+                    + summarize_expressions(shared_recovered[: len(parameters)])
                 )
             return shared_recovered[: len(parameters)]
         if self._debug_available():

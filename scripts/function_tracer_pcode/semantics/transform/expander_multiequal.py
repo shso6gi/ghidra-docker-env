@@ -452,7 +452,7 @@ class MultiequalExpansionMixin:
             self.parameters,
             return_conditions=conditions,
         )
-        if collapsed is not None:
+        if collapsed is not None and self._debug_available():
             self._debug_print(
                 f"Collapsed nested MULTIEQUAL to canonical memory: {self._debug_expr_summary(collapsed)}",
                 depth,

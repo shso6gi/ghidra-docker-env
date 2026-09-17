@@ -321,7 +321,7 @@ def _impl__dump_return_infos(self, analysis: FunctionReturnAnalysis):
     各ReturnInfoについて以下を出力：
     - branch_index（分岐識別子）
     - address（アドレス）
-    - value（式の文字列表現とSMT表現）
+    - value（式の有界サマリー）
     - conditions（簡約後の条件リスト）
     """
     if not self.debug:
@@ -359,15 +359,9 @@ def _impl__dump_return_infos(self, analysis: FunctionReturnAnalysis):
         except Exception as e:
             self._debug_print(f"    value: (error converting to string: {e})", 1)
 
-        # SMT表現（エラー時はスキップ）- 引数なし
-        try:
-            smt_str = ret_info.value.to_smt()
-            # 長すぎる場合は切り詰め
-            if len(smt_str) > 300:
-                smt_str = smt_str[:300] + "..."
-            self._debug_print(f"    smt: {smt_str}", 1)
-        except Exception as e:
-            self._debug_print(f"    smt: (error: {e})", 1)
+        # SMT 表現はここでは出さない。``to_smt()`` は共有 DAG を木として
+        # 展開するので、debug dump のためだけに解析時間を使ってしまう
+        # （Issue #22）。上の ``value:`` が同じ式の有界サマリーを出している。
 
         # 条件リスト（簡約版）
         if ret_info.conditions:

@@ -21,6 +21,7 @@ from ._shared import ConditionSimplifier
 from ._shared import _reduce_expression_under_conditions
 from ._shared import _runtime_conditions_signature
 from ._shared import eval_constant_raw
+from scripts.function_tracer_pcode.analysis.debug import summarize_conditions, summarize_expression
 
 
 def _impl_try_summarize_function(self, function, high_function, analysis) -> Optional[Tuple[List[ReturnInfo], str]]:
@@ -469,6 +470,16 @@ def _impl__debug(self, message: str) -> None:
         print(f"[RecurrenceSummary] {message}")
 
 
+def _impl__debug_available(self) -> bool:
+    """debug 出力が有効か。呼び出し側は message 構築ごとこれで囲む。
+
+    recurrence family の debug guard の唯一の判定点。出力方針（抑止・件数上限
+    など）を変えるときはここと :func:`_impl__debug` だけを触ればよい。
+    """
+
+    return bool(self.debug)
+
+
 def _impl__fp_denominator_is_count_parameter(
     self,
     expr: Optional[Expression],
@@ -705,23 +716,26 @@ def _impl__synthesize_one_step_cases_from_effects(
         conds = grouped_effects[0][0]
         has_nonnull = any(self._condition_is_pointer_nonnull(cond, pointer_name) for cond in conds)
         if require_pointer_nonnull and not has_nonnull:
-            self._debug(
-                "Skipping effect-derived one-step candidate: missing local pointer-nonnull guard "
-                f"for conditions {[cond.to_string() for cond in conds]}"
-            )
+            if self._debug_available():
+                self._debug(
+                    "Skipping effect-derived one-step candidate: missing local pointer-nonnull guard "
+                    f"for conditions {summarize_conditions(conds)}"
+                )
             continue
         if not any(self._condition_is_less(cond, start_name, limit_name) for cond in conds):
-            self._debug(
-                "Skipping effect-derived one-step candidate: missing loop-progress guard "
-                f"for conditions {[cond.to_string() for cond in conds]}"
-            )
+            if self._debug_available():
+                self._debug(
+                    "Skipping effect-derived one-step candidate: missing loop-progress guard "
+                    f"for conditions {summarize_conditions(conds)}"
+                )
             continue
         parity = self._extract_counter_parity(conds, start_name)
         if parity is None:
-            self._debug(
-                "Skipping effect-derived one-step candidate: could not determine counter parity "
-                f"for conditions {[cond.to_string() for cond in conds]}"
-            )
+            if self._debug_available():
+                self._debug(
+                    "Skipping effect-derived one-step candidate: could not determine counter parity "
+                    f"for conditions {summarize_conditions(conds)}"
+                )
             continue
         step_eq = Condition(
             Expression.binary_op(
@@ -737,10 +751,11 @@ def _impl__synthesize_one_step_cases_from_effects(
         )
         step_context = ConditionSimplifier.simplify_conditions_object_centric(list(conds) + [step_eq])
         if ConditionSimplifier.object_centric_is_contradiction(step_context):
-            self._debug(
-                "Skipping effect-derived one-step candidate: one-step context is contradictory "
-                f"for conditions {[cond.to_string() for cond in conds]}"
-            )
+            if self._debug_available():
+                self._debug(
+                    "Skipping effect-derived one-step candidate: one-step context is contradictory "
+                    f"for conditions {summarize_conditions(conds)}"
+                )
             continue
 
         delta_terms: List[Expression] = []
@@ -754,21 +769,23 @@ def _impl__synthesize_one_step_cases_from_effects(
                 step_context,
             )
             if delta_expr is None:
-                self._debug(
-                    "Aborting effect-derived one-step synthesis: could not isolate store delta "
-                    f"for location={effect.location} value={effect.value.to_string()} "
-                    f"conditions={[cond.to_string() for cond in step_context]}"
-                )
+                if self._debug_available():
+                    self._debug(
+                        "Aborting effect-derived one-step synthesis: could not isolate store delta "
+                        f"for location={effect.location} value={summarize_expression(effect.value)} "
+                        f"conditions={summarize_conditions(step_context)}"
+                    )
                 return []
             reduced_delta = _reduce_expression_under_conditions(delta_expr, step_context)
             scaled = self._scale_expression(reduced_delta, coeff)
             if scaled is not None:
                 delta_terms.append(scaled)
         if not delta_terms:
-            self._debug(
-                "Skipping effect-derived one-step candidate: no additive delta terms matched "
-                f"for conditions {[cond.to_string() for cond in conds]}"
-            )
+            if self._debug_available():
+                self._debug(
+                    "Skipping effect-derived one-step candidate: no additive delta terms matched "
+                    f"for conditions {summarize_conditions(conds)}"
+                )
             continue
 
         delta_sum = self._sum_expression_terms(delta_terms)

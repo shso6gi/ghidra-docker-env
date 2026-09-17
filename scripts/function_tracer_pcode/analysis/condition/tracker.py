@@ -6,6 +6,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple, Any
 from scripts.function_tracer_pcode.core import Expression, Condition
 from scripts.function_tracer_pcode.core.runtime_refs import ExpansionBudgetTruncation
 from scripts.function_tracer_pcode.analysis.condition.normalizer import ConditionNormalizer
+from scripts.function_tracer_pcode.analysis.debug import summarize_expression
 
 
 class BasicBlockInfo:
@@ -204,7 +205,10 @@ class ConditionTracker:
                     cond_expr = self.tracer.trace_varnode(cond_varnode)
                     block_info.branch_condition = cond_expr
                     block_info.branch_condition_varnode = cond_varnode
-                    self._debug_print(f"  CBRANCH condition: {cond_expr.to_string()}", 1)
+                    if self.debug:
+                        self._debug_print(
+                            f"  CBRANCH condition: {summarize_expression(cond_expr)}", 1
+                        )
                     break
 
     def refine_branch_conditions(
@@ -285,7 +289,7 @@ class ConditionTracker:
             if self.debug:
                 self._debug_print(
                     f"  Refined branch condition for block {block_info.index}: "
-                    f"{raw_condition.to_string()} -> {refined.to_string()}",
+                    f"{summarize_expression(raw_condition)} -> {summarize_expression(refined)}",
                     1,
                 )
             block_info.branch_condition = refined

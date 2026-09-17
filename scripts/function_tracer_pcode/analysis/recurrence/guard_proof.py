@@ -21,6 +21,7 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     _runtime_conditions_signature,
     _runtime_expression_signature,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_conditions
 
 def _impl__condition_conjunction_unsat_with_solver(
     self,
@@ -158,11 +159,12 @@ def _impl__nonzero_returns_are_disjoint_from_base_guard(
         except Exception:
             is_unsat = None
         if is_unsat is not True:
-            self._debug(
-                "Declined vectorized affine progression summary: nonzero return/base overlap proof failed "
-                f"(branch_index={getattr(ret, 'branch_index', None)}, "
-                f"conditions={[condition.to_string() for condition in conditions]})"
-            )
+            if self._debug_available():
+                self._debug(
+                    "Declined vectorized affine progression summary: nonzero return/base overlap proof failed "
+                    f"(branch_index={getattr(ret, 'branch_index', None)}, "
+                    f"conditions={summarize_conditions(conditions)})"
+                )
             return False
     return True
 
@@ -394,12 +396,13 @@ def _impl__prove_summary_conditions_plus_exact_returns_cover_active_precondition
     except Exception:
         miss_unsat = None
     if miss_unsat is not True:
-        self._debug(
-            "Declined summary-region coverage proof: summary plus disjoint exact returns is not total "
-            f"(disjoint_returns={len(disjoint_returns)}, status={miss_unsat}, "
-            f"summary_conditions={[cond.to_string() for cond in normalized_summary_conditions or ()]}, "
-            f"exact_return_conditions={[[cond.to_string() for cond in self._canonicalize_condition_parameters_for_analysis(getattr(ret, 'conditions', None) or (), parameters)] for ret in exact_returns or ()]})"
-        )
+        if self._debug_available():
+            self._debug(
+                "Declined summary-region coverage proof: summary plus disjoint exact returns is not total "
+                f"(disjoint_returns={len(disjoint_returns)}, status={miss_unsat}, "
+                f"summary_conditions={summarize_conditions(normalized_summary_conditions or ())}, "
+                f"exact_return_conditions={[summarize_conditions(self._canonicalize_condition_parameters_for_analysis(getattr(ret, 'conditions', None) or (), parameters)) for ret in exact_returns or ()]})"
+            )
         return None
     return (
         "return_region_coverage",

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Optional, Set
+from typing import Any, Callable, Iterable, List, Optional, Set
 
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
 
@@ -84,3 +84,50 @@ def summarize_condition(condition: Optional[Condition], max_depth: int = 4) -> s
         return "None"
     expr_summary = summarize_expression(condition.expression, max_depth=max_depth)
     return f"(not {expr_summary})" if condition.negated else expr_summary
+
+
+#: debug サマリーに並べる要素数の既定上限。列の長さ自体は打ち切り件数で示す。
+DEFAULT_MAX_ITEMS = 8
+
+
+def _summarize_sequence(
+    items: Optional[Iterable[Any]],
+    renderer: Callable[..., str],
+    max_depth: int,
+    max_items: int,
+) -> str:
+    """列を ``[a, b, +3 more]`` 形式の有界文字列にする。"""
+
+    if items is None:
+        return "[]"
+    rendered: List[str] = []
+    overflow = 0
+    for item in items:
+        if len(rendered) >= max_items:
+            overflow += 1
+            continue
+        rendered.append(renderer(item, max_depth=max_depth))
+    body = ", ".join(rendered)
+    if overflow:
+        body = f"{body}, +{overflow} more" if body else f"+{overflow} more"
+    return f"[{body}]"
+
+
+def summarize_expressions(
+    expressions: Optional[Iterable[Optional[Expression]]],
+    max_depth: int = 4,
+    max_items: int = DEFAULT_MAX_ITEMS,
+) -> str:
+    """式列の有界サマリー。full render しないので debug 出力から安全に呼べる。"""
+
+    return _summarize_sequence(expressions, summarize_expression, max_depth, max_items)
+
+
+def summarize_conditions(
+    conditions: Optional[Iterable[Optional[Condition]]],
+    max_depth: int = 4,
+    max_items: int = DEFAULT_MAX_ITEMS,
+) -> str:
+    """条件列の有界サマリー。full render しないので debug 出力から安全に呼べる。"""
+
+    return _summarize_sequence(conditions, summarize_condition, max_depth, max_items)
