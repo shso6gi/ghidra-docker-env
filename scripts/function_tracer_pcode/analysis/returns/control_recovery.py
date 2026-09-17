@@ -729,7 +729,7 @@ class BranchGuardedWhileProofService:
                     self.debug_reporter.debug_print(
                         "Outcome branch-guarded affine artifact retained: "
                         f"value={summarize_expression(getattr(artifact, 'value', None))}, "
-                        f"conditions={summarize_conditions(tuple(getattr(artifact, 'conditions', ()) or ()))}, "
+                        f"conditions={summarize_conditions(getattr(artifact, 'conditions', ()) or ())}, "
                         f"site={self.return_site_key(artifact)}"
                     )
         proof_returns = list(exact_base_returns) + [ret for ret, _step in recursive_returns]

@@ -21,7 +21,7 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     _runtime_conditions_signature,
     _runtime_expression_signature,
 )
-from scripts.function_tracer_pcode.analysis.debug import summarize_conditions
+from scripts.function_tracer_pcode.analysis.debug import summarize_conditions, summarize_values
 
 def _impl__condition_conjunction_unsat_with_solver(
     self,
@@ -397,11 +397,20 @@ def _impl__prove_summary_conditions_plus_exact_returns_cover_active_precondition
         miss_unsat = None
     if miss_unsat is not True:
         if self._debug_available():
+            # generator を渡すので、要約に載る先頭数件しか正規化しない。
+            exact_return_condition_summaries = (
+                summarize_conditions(
+                    self._canonicalize_condition_parameters_for_analysis(
+                        getattr(ret, "conditions", None) or (), parameters
+                    )
+                )
+                for ret in exact_returns or ()
+            )
             self._debug(
                 "Declined summary-region coverage proof: summary plus disjoint exact returns is not total "
                 f"(disjoint_returns={len(disjoint_returns)}, status={miss_unsat}, "
                 f"summary_conditions={summarize_conditions(normalized_summary_conditions or ())}, "
-                f"exact_return_conditions={[summarize_conditions(self._canonicalize_condition_parameters_for_analysis(getattr(ret, 'conditions', None) or (), parameters)) for ret in exact_returns or ()]})"
+                f"exact_return_conditions={summarize_values(exact_return_condition_summaries)})"
             )
         return None
     return (

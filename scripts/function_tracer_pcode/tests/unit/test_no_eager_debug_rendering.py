@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
-from typing import Iterator, List, Sequence, Tuple
+from typing import FrozenSet, Iterator, List, Sequence, Tuple
 
 import pytest
 
+from scripts.function_tracer_pcode.analysis.debug import render as debug_render
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch
 from scripts.function_tracer_pcode.analysis.recurrence import counted_loop
 from scripts.function_tracer_pcode.analysis.recurrence.models import StateTransitionLoopModel
@@ -60,27 +62,19 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 #: 走査しない package 直下のディレクトリ（テスト自身は対象外）。
 EXCLUDED_TOP_LEVEL_DIRS = frozenset({"tests"})
 
+# 契約の語彙は production 側の owner（analysis.debug.render）が持つ。ここで
+# 名前を再定義すると二重管理になり、新しい renderer を足すたびに test も直す
+# ことになるので、import して使う。
+#
 #: DAG を木として展開する rendering method。
-RENDER_METHODS = frozenset({"to_string", "to_smt"})
+RENDER_METHODS = debug_render.UNBOUNDED_RENDER_CALLS
 
-#: 有界 summary。debug message に入れてよいが guard の中に限る。
-SUMMARY_FUNCTIONS = frozenset({
-    "summarize_expression",
-    "summarize_condition",
-    "summarize_expressions",
-    "summarize_conditions",
-    "_debug_expr_summary",
-    "_debug_condition_summary",
-    "_debug_conditions_summary",
-    "debug_expr_summary",
-    "debug_condition_summary",
-    "debug_conditions_summary",
-    "_debug_expr_identity_summary",
-    "debug_expr_identity_summary",
-})
+#: owner が所有する bounded renderer。family 側の wrapper はここへ委譲するだけ
+#: なので列挙しない（:func:`bounded_renderer_names` が委譲を辿って足す）。
+OWNED_SUMMARY_FUNCTIONS = debug_render.BOUNDED_DEBUG_RENDERERS
 
 #: 名前に ``debug`` を含むが sink ではない述語（呼んでも何も出力しない）。
-DEBUG_PREDICATES = frozenset({"debug_available", "_debug_available", "debug_flag"})
+DEBUG_PREDICATES = debug_render.DEBUG_AVAILABILITY_PREDICATES
 
 #: full render を持ってはいけない dunder。
 RENDER_FREE_DUNDERS = frozenset({"__repr__", "__str__"})
@@ -157,17 +151,87 @@ def _render_call_label(node: ast.AST) -> str:
     return ""
 
 
-def _summary_call_label(node: ast.AST) -> str:
-    if isinstance(node, ast.Call) and _called_name(node) in SUMMARY_FUNCTIONS:
+def _summary_call_label(node: ast.AST, renderers: FrozenSet[str]) -> str:
+    if isinstance(node, ast.Call) and _called_name(node) in renderers:
         return f"{_called_name(node)}()"
     return ""
 
 
-def _is_debug_sink(node: ast.Call) -> bool:
+def _is_debug_sink(node: ast.Call, renderers: FrozenSet[str]) -> bool:
     name = _called_name(node)
-    if not name or name in SUMMARY_FUNCTIONS or name in DEBUG_PREDICATES:
+    if not name or name in renderers or name in DEBUG_PREDICATES:
         return False
     return name == "print" or "debug" in name.lower()
+
+
+def _delegates_to_a_bounded_renderer(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    known: FrozenSet[str],
+) -> bool:
+    """`node` が既知の bounded renderer へ **委譲するだけ** の wrapper か。
+
+    family 側の ``_debug_expr_summary`` などを名前で数え上げずに拾うための規則。
+    委譲だけ = (a) 呼び出しは既知 renderer か debug 述語しか無い、(b) 返り値は
+    定数文字列か既知 renderer の呼び出しだけ、(c) 入れ子の関数定義が無い。
+    ここから外れる helper（自分で走査するもの）は renderer と見なさないので、
+    その呼び出しは「guard が要る任意の呼び出し」として扱われる。
+    """
+
+    returns: List[ast.AST] = []
+    for sub in ast.walk(node):
+        if sub is not node and isinstance(
+            sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+        ):
+            return False
+        if isinstance(sub, ast.Return):
+            returns.append(sub.value)
+        elif isinstance(sub, ast.Call):
+            name = _called_name(sub)
+            if name not in known and name not in DEBUG_PREDICATES:
+                return False
+    delegations = [
+        value
+        for value in returns
+        if isinstance(value, ast.Call) and _called_name(value) in known
+    ]
+    if not delegations:
+        # 定数しか返さない関数は renderer ではない（委譲が 1 つも無い）。
+        return False
+    for value in returns:
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            continue  # `return "<debug-suppressed>"` のような guard 節の戻り値
+        if value in delegations:
+            continue
+        return False
+    return True
+
+
+@lru_cache(maxsize=None)
+def bounded_renderer_names(root: Path = PACKAGE_ROOT) -> FrozenSet[str]:
+    """owner の宣言 + そこへ委譲する family wrapper の名前を返す。
+
+    owner（``analysis.debug.render``）が宣言した名前を種にして、委譲するだけの
+    wrapper を不動点まで足す。新しい bounded renderer を足すときに触るのは
+    owner だけでよく、この test も家族側の module も変えなくてよい。
+    """
+
+    definitions = [
+        node
+        for path in _iter_source_files(Path(root))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    known = set(OWNED_SUMMARY_FUNCTIONS)
+    while True:
+        discovered = {
+            node.name
+            for node in definitions
+            if node.name not in known
+            and _delegates_to_a_bounded_renderer(node, frozenset(known))
+        }
+        if not discovered:
+            return frozenset(known)
+        known |= discovered
 
 
 def _mentions_debug(node: ast.AST) -> bool:
@@ -190,9 +254,15 @@ def _always_exits(body: Sequence[ast.stmt]) -> bool:
 class _EagerDebugRenderingScanner:
     """1 module 分の AST を走査して 4 契約の違反を集める。"""
 
-    def __init__(self, module: str, violations: EagerDebugRenderingViolations) -> None:
+    def __init__(
+        self,
+        module: str,
+        violations: EagerDebugRenderingViolations,
+        renderers: FrozenSet[str] = OWNED_SUMMARY_FUNCTIONS,
+    ) -> None:
         self.module = module
         self.violations = violations
+        self.renderers = renderers
 
     # -- entry ---------------------------------------------------------------
     def scan(self, tree: ast.Module) -> None:
@@ -268,7 +338,7 @@ class _EagerDebugRenderingScanner:
             label = _render_call_label(sub)
             if label and guarded:
                 self.violations.render_in_debug_guard.append((self.module, sub.lineno, label))
-            if not isinstance(sub, ast.Call) or not _is_debug_sink(sub):
+            if not isinstance(sub, ast.Call) or not _is_debug_sink(sub, self.renderers):
                 continue
             arguments: List[ast.AST] = list(sub.args) + [kw.value for kw in sub.keywords]
             for argument in arguments:
@@ -278,18 +348,24 @@ class _EagerDebugRenderingScanner:
                         self.violations.render_in_debug_sink.append(
                             (self.module, sub.lineno, f"{_called_name(sub)}(... {render} ...)")
                         )
-                    summary = _summary_call_label(inner)
+                    summary = _summary_call_label(inner, self.renderers)
                     if summary and not guarded:
                         self.violations.unguarded_summary_in_debug_sink.append(
                             (self.module, sub.lineno, f"{_called_name(sub)}(... {summary} ...)")
                         )
 
 
-def scan_source(module: str, source: str) -> EagerDebugRenderingViolations:
+def scan_source(
+    module: str,
+    source: str,
+    renderers: FrozenSet[str] = OWNED_SUMMARY_FUNCTIONS,
+) -> EagerDebugRenderingViolations:
     """1 module 分のソース文字列を走査する（self-test 用の入口でもある）。"""
 
     violations = EagerDebugRenderingViolations()
-    _EagerDebugRenderingScanner(module, violations).scan(ast.parse(source, filename=module))
+    _EagerDebugRenderingScanner(module, violations, renderers).scan(
+        ast.parse(source, filename=module)
+    )
     return violations
 
 
@@ -310,11 +386,12 @@ def _module_name(root: Path, path: Path) -> str:
 
 
 def scan_package(root: Path = PACKAGE_ROOT) -> EagerDebugRenderingViolations:
+    renderers = bounded_renderer_names(root)
     violations = EagerDebugRenderingViolations()
     for path in _iter_source_files(Path(root)):
         module = _module_name(Path(root), path)
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        _EagerDebugRenderingScanner(module, violations).scan(tree)
+        _EagerDebugRenderingScanner(module, violations, renderers).scan(tree)
     return violations
 
 
@@ -339,6 +416,73 @@ def test_debug_messages_with_summaries_are_guarded():
 def test_repr_and_str_do_not_full_render():
     violations = scan_package()
     assert not violations.render_in_dunder, violations.describe()
+
+
+# --------------------------------------------- 契約 owner と wrapper の導出
+
+
+def test_owned_renderer_names_exist_in_the_owner_module():
+    """宣言した名前が owner module に実在すること（宣言と実装のずれを防ぐ）。"""
+
+    for name in OWNED_SUMMARY_FUNCTIONS:
+        assert callable(getattr(debug_render, name, None)), name
+
+
+def test_family_wrappers_are_derived_from_the_owner_contract():
+    """family の wrapper は名前を並べずに委譲から導かれる。
+
+    ここが壊れると、wrapper 経由の debug message が guard 無しで書かれても
+    R3 が気付かなくなる。
+    """
+
+    derived = bounded_renderer_names()
+
+    assert OWNED_SUMMARY_FUNCTIONS <= derived
+    assert {
+        "_debug_expr_summary",
+        "_debug_condition_summary",
+        "debug_expr_summary",
+        "debug_expr_identity_summary",
+        "_debug_expr_identity_summary",
+    } <= derived
+    # 定数しか返さない関数は renderer ではない。
+    assert "reason_id" not in derived
+
+
+def test_a_new_owner_renderer_needs_no_change_here():
+    """owner に renderer を 1 つ足すだけで、wrapper も呼び出し側も追随する。"""
+
+    renderers = OWNED_SUMMARY_FUNCTIONS | {"summarize_widget"}
+    violations = scan_source(
+        "sample",
+        "def f(self, widget):\n"
+        "    self._debug_print(f'w={summarize_widget(widget)}')\n",
+        renderers,
+    )
+    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
+        "_debug_print(... summarize_widget() ...)"
+    ]
+
+
+def test_scanner_treats_a_delegating_wrapper_as_a_bounded_renderer():
+    source = (
+        "class Host:\n"
+        "    def _debug_widget_summary(self, widget):\n"
+        "        if not self._debug_available():\n"
+        "            return '<debug-suppressed>'\n"
+        "        return summarize_widget(widget)\n"
+        "    def _reason(self):\n"
+        "        return 'constant'\n"
+    )
+    tree = ast.parse(source)
+    known = frozenset({"summarize_widget"})
+    wrappers = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and _delegates_to_a_bounded_renderer(node, known)
+    }
+    assert wrappers == {"_debug_widget_summary"}
 
 
 # ------------------------------------------------------------- scanner 自体

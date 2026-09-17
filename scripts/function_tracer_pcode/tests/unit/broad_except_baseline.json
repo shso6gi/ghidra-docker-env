@@ -316,9 +316,6 @@
       "_impl__recover_explicit_return_from_block_paths": {"logged": 0, "unlogged": 1},
       "address_offset_for_block_endpoint": {"logged": 0, "unlogged": 1}
     },
-    "analysis.returns.debug_reporter": {
-      "DebugReporter.debug_expr_identity_summary": {"logged": 0, "unlogged": 1}
-    },
     "analysis.returns.divergence_proofs": {
       "DivergenceProofService.collect_guard_dependency_varnodes": {"logged": 0, "unlogged": 4},
       "DivergenceProofService.conditional_progress_guard_keys_from_structural_proof": {"logged": 0, "unlogged": 1},

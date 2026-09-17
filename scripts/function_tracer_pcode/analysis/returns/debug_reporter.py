@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 from scripts.function_tracer_pcode.core.expression import Expression
-from scripts.function_tracer_pcode.core.structural import expression_key_safe
-from scripts.function_tracer_pcode.analysis.returns._shared import summarize_expression
+from scripts.function_tracer_pcode.analysis.debug import (
+    summarize_expression,
+    summarize_expression_identity,
+)
 
 
 class DebugReporter:
@@ -41,22 +43,4 @@ class DebugReporter:
         expr: Optional[Expression],
         max_depth: int = 3,
     ) -> str:
-        if expr is None:
-            return "None"
-
-        runtime_ref = getattr(expr, "runtime_ref", None)
-        read_order_key = getattr(expr, "read_order_key", None)
-        runtime_tag = type(runtime_ref).__name__ if runtime_ref is not None else "None"
-        try:
-            structural_key = expression_key_safe(
-                expr,
-                include_memory_read_order=True,
-            )
-        except Exception:
-            structural_key = None
-        return (
-            f"{summarize_expression(expr, max_depth=max_depth)} "
-            f"[type={expr.expr_type.name}, size={expr.size}, "
-            f"read_order={read_order_key}, runtime_ref={runtime_tag}:{runtime_ref}, "
-            f"structural={structural_key}]"
-        )
+        return summarize_expression_identity(expr, max_depth=max_depth)
