@@ -179,24 +179,6 @@ def _is_simple_argument(node: ast.AST) -> bool:
     return False
 
 
-def _is_debug_availability_test(node: ast.AST) -> bool:
-    """``self._debug_available()`` / ``self.debug`` / ``debug`` だけを認める。
-
-    「debug 述語以外の呼び出しが無い」ではなく「debug 述語そのものである」を
-    要求する（``if widget:`` や ``if self.some_flag:`` を guard と認めない）。
-    """
-
-    if isinstance(node, ast.Call):
-        if node.args or node.keywords:
-            return False
-        return _called_name(node) in DEBUG_PREDICATES
-    if isinstance(node, ast.Attribute):
-        return node.attr in DEBUG_PREDICATES or node.attr in DEBUG_FLAGS
-    if isinstance(node, ast.Name):
-        return node.id in DEBUG_PREDICATES or node.id in DEBUG_FLAGS
-    return False
-
-
 def _is_debug_guard_clause(statement: ast.stmt) -> bool:
     """``if not self._debug_available(): return "<debug-suppressed>"`` 型の前置き。
 
@@ -283,12 +265,32 @@ def bounded_renderer_names(root: Path = PACKAGE_ROOT) -> FrozenSet[str]:
         known |= discovered
 
 
-def _mentions_debug(node: ast.AST) -> bool:
-    for sub in ast.walk(node):
-        if isinstance(sub, ast.Name) and "debug" in sub.id.lower():
-            return True
-        if isinstance(sub, ast.Attribute) and "debug" in sub.attr.lower():
-            return True
+def _is_debug_availability_test(node: ast.AST) -> bool:
+    """「この式が真なら debug 出力が有効」と構文的に言い切れる形だけ。
+
+    * 引数なしの述語呼び出し（``self._debug_available()`` / ``self.debug_flag()``）
+    * flag そのもの（``self.debug`` / ``debug``）
+
+    呼び出しは Call のときだけ述語と認める（``self._debug_available`` という
+    method object を flag 扱いしない）。flag は Name / Attribute のときだけ。
+    ``and`` / ``or`` / 比較 / それ以外の式は **すべて guard と認めない**
+    （``if self.debug or force:`` は debug が偽でも入る）。
+    """
+
+    if isinstance(node, ast.BoolOp):
+        # ``and`` は全項が真でないと body に入らないので、1 項が debug 可否なら
+        # 「入った時点で debug は有効」と言い切れる。``or`` は言い切れない。
+        return isinstance(node.op, ast.And) and any(
+            _is_debug_availability_test(value) for value in node.values
+        )
+    if isinstance(node, ast.Call):
+        if node.args or node.keywords:
+            return False
+        return _called_name(node) in DEBUG_PREDICATES
+    if isinstance(node, ast.Attribute):
+        return node.attr in DEBUG_FLAGS
+    if isinstance(node, ast.Name):
+        return node.id in DEBUG_FLAGS
     return False
 
 
@@ -335,17 +337,23 @@ class _EagerDebugRenderingScanner:
     # -- statement walk ------------------------------------------------------
     def _walk_body(self, body: Sequence[ast.stmt], *, guarded: bool) -> None:
         for statement in body:
-            if isinstance(statement, ast.If) and _mentions_debug(statement.test):
+            if isinstance(statement, ast.If) and _is_debug_availability_test(statement.test):
+                # `if <debug available>:` — body に入るなら debug は必ず有効。
                 self._visit_expression(statement.test, guarded=guarded)
-                if _is_negated(statement.test):
-                    # `if not <debug>: return` 型の guard 節。以降は debug 専用。
-                    self._walk_body(statement.body, guarded=False)
-                    self._walk_body(statement.orelse, guarded=True)
-                    if not statement.orelse and _always_exits(statement.body):
-                        guarded = True
-                else:
-                    self._walk_body(statement.body, guarded=True)
-                    self._walk_body(statement.orelse, guarded=guarded)
+                self._walk_body(statement.body, guarded=True)
+                self._walk_body(statement.orelse, guarded=guarded)
+                continue
+            if (
+                isinstance(statement, ast.If)
+                and _is_negated(statement.test)
+                and _is_debug_availability_test(statement.test.operand)
+            ):
+                # `if not <debug available>: return` — 抜けた先は debug 専用。
+                self._visit_expression(statement.test, guarded=guarded)
+                self._walk_body(statement.body, guarded=False)
+                self._walk_body(statement.orelse, guarded=True)
+                if not statement.orelse and _always_exits(statement.body):
+                    guarded = True
                 continue
             self._walk_statement(statement, guarded=guarded)
 
@@ -491,8 +499,8 @@ def test_family_wrappers_are_derived_from_the_owner_contract():
         "_debug_expr_summary",
         "_debug_condition_summary",
         "debug_expr_summary",
-        "debug_expr_identity_summary",
-        "_debug_expr_identity_summary",
+        "debug_expr_details_summary",
+        "_debug_expr_details_summary",
     } <= derived
     # 定数しか返さない関数は renderer ではない。
     assert "reason_id" not in derived
@@ -597,6 +605,7 @@ def test_scanner_refuses_a_wrapper_that_does_its_own_work(body, label):
         ("        if not self._debug_available():\n            return '<suppressed>'\n", "predicate call"),
         ("        if not self.debug:\n            return '<suppressed>'\n", "debug flag"),
         ("        if not self.debug_flag():\n            return ''\n", "flag accessor"),
+        ("        if not (self.debug and widget):\n            return '<suppressed>'\n", "and-ed guard (抜けたら debug は有効)"),
     ],
 )
 def test_scanner_accepts_only_a_debug_availability_guard(guard, label):
@@ -615,7 +624,8 @@ def test_scanner_accepts_only_a_debug_availability_guard(guard, label):
         ("        if widget:\n            return '<suppressed>'\n", "unrelated name"),
         ("        if self.some_flag:\n            return '<suppressed>'\n", "unrelated attribute"),
         ("        if self.debug or widget:\n            return '<suppressed>'\n", "or-ed condition"),
-        ("        if not (self.debug and widget):\n            return '<suppressed>'\n", "and-ed condition"),
+        ("        if self.debug == False:\n            return '<suppressed>'\n", "comparison"),
+        ("        if self._debug_available:\n            return '<suppressed>'\n", "predicate as a method object"),
         ("        if not self._debug_available(widget):\n            return '<suppressed>'\n", "predicate with an argument"),
         ("        if widget is None:\n            return 'None'\n", "value test"),
     ],
@@ -717,6 +727,56 @@ def test_scanner_accepts_an_early_return_debug_guard():
         "    self._debug_print(f'value={summarize_expression(expr)}')\n",
     )
     assert not violations, violations.describe()
+
+
+@pytest.mark.parametrize(
+    "test_source, guarded, label",
+    [
+        ("if self.debug:", True, "flag attribute"),
+        ("if debug:", True, "flag name"),
+        ("if self._debug_available():", True, "predicate call"),
+        ("if self.debug and force:", True, "and: 入った時点で debug は有効"),
+        ("if self.debug or force:", False, "or: debug が偽でも入る"),
+        ("if debug_payload:", False, "名前に debug を含むだけの値"),
+        ("if self.debug == False:", False, "比較"),
+        ("if self._debug_available:", False, "呼んでいない method object"),
+        ("if self.some_flag:", False, "無関係な flag"),
+    ],
+)
+def test_scanner_decides_a_guard_by_shape_not_by_name(test_source, guarded, label):
+    """R1 / R3 の guard 判定は「入ったら debug は必ず有効」と言える形だけ。
+
+    名前の部分一致で guarded に倒すと、``if self.debug or force:`` のような
+    形で先行評価が素通りする。
+    """
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, force, debug, debug_payload):\n"
+        f"    {test_source}\n"
+        "        self._debug_print(f'v={summarize_expression(expr)}')\n",
+    )
+    assert bool(violations.unguarded_summary_in_debug_sink) is not guarded, label
+
+
+def test_scanner_treats_an_early_return_guard_clause_by_shape():
+    guarded = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    if not self._debug_available():\n"
+        "        return\n"
+        "    self._debug_print(f'v={summarize_expression(expr)}')\n",
+    )
+    assert not guarded, guarded.describe()
+
+    unguarded = scan_source(
+        "sample",
+        "def f(self, expr, force):\n"
+        "    if not force:\n"
+        "        return\n"
+        "    self._debug_print(f'v={summarize_expression(expr)}')\n",
+    )
+    assert unguarded.unguarded_summary_in_debug_sink
 
 
 def test_scanner_detects_full_render_in_repr():
