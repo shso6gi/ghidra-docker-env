@@ -6,6 +6,7 @@ from typing import List, Optional, Set, Dict, Any, Hashable, Tuple
 from scripts.function_tracer_pcode.core import Expression, Condition, PcodeOpRef, UnknownValueRef
 from scripts.function_tracer_pcode.core.intrinsics import resolve_pcode_intrinsic
 from scripts.function_tracer_pcode.analysis.debug import (
+    bounded_items,
     summarize_conditions,
     summarize_expression,
 )
@@ -363,7 +364,7 @@ class PhiHandler:
             self._debug_print(f"MULTIEQUAL summary: self_refs={self_ref_count}/{num_inputs}, "
                               f"valid={len(all_branches)}", depth)
             if self_ref_reasons:
-                for r in self_ref_reasons:
+                for r in bounded_items(self_ref_reasons):
                     self._debug_print(f"  - {r}", depth + 1)
         
         # 全入力が自己参照 → debug時はエラー

@@ -413,3 +413,56 @@ def test_runtime_ref_summary_inspects_only_the_first_fields():
 
     assert inspected == names[:8]
     assert summary == "_ManyFieldRef[f6=6, f7=7]"
+
+class _HostileBool:
+    """``__bool__`` / ``__str__`` が呼ばれたら失敗する値。"""
+
+    def __bool__(self):  # pragma: no cover - 呼ばれたら失敗
+        raise AssertionError("debug summary must not ask an object for truthiness")
+
+    def __str__(self):  # pragma: no cover - 呼ばれたら失敗
+        raise AssertionError("debug summary must not stringify an object")
+
+    __repr__ = __str__
+
+
+def test_expression_summary_does_not_ask_fields_for_truthiness():
+    """``if node.name`` / ``if node.operator`` で任意 object の dunder を起動しない。"""
+
+    node = Expression.binary_op(
+        "INT_ADD", Expression.parameter("a"), Expression.parameter("b")
+    )
+    node.operator = _HostileBool()
+    node.name = _HostileBool()
+
+    summary = summarize_expression(node)
+
+    assert summary.startswith("BINARY(")
+    assert "PARAM(a)" in summary and "PARAM(b)" in summary
+
+
+def test_structural_preview_does_not_ask_fields_for_truthiness():
+    node = Expression.variable("v", 4)
+    node.name = _HostileBool()
+    node.operator = _HostileBool()
+
+    preview = summarize_structural_preview(node)
+
+    assert preview.startswith("[VARIABLE:size=4")
+
+
+def test_node_name_only_accepts_an_exact_string():
+    assert render._node_name(Expression.parameter("p")) == "p"
+    empty = Expression.variable("", 4)
+    empty.name = ""
+    assert render._node_name(empty) == "?"
+
+
+def test_bounded_enumerate_reads_only_the_first_items():
+    items = _HostileSized(range(1000))
+
+    pairs = render.bounded_enumerate(items, max_items=3)
+
+    assert [index for index, _item in pairs] == [0, 1, 2]
+    assert items.consumed == 3
+    assert render.bounded_enumerate(None) == []

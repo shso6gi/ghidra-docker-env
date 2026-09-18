@@ -1454,9 +1454,10 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
         elif to_index == false_index:
             condition = Condition(from_block_info.branch_condition, negated=True)
         
-        if self.debug and condition:
-            cond_str = ConditionNormalizer.get_simplified_string(condition)
+        if self._debug_available():
             self._debug_print(
-                f"Edge: block {from_block_info.index} -> {to_index}: {cond_str}", 2
+                f"Edge: block {from_block_info.index} -> {to_index}: "
+                f"{summarize_condition(condition)}",
+                2,
             )
         return condition

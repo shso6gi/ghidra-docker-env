@@ -80,6 +80,7 @@ from scripts.function_tracer_pcode.analysis.returns.phi_origins import PhiOrigin
 from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import DivergenceProofService
 from scripts.function_tracer_pcode.analysis.returns.parameters import ParameterService
 from scripts.function_tracer_pcode.analysis.returns.region_facts import RegionFacts
+from scripts.function_tracer_pcode.analysis.debug import bounded_enumerate, summarize_conditions
 
 if TYPE_CHECKING:  # local_values は本 module の local_memory_key を import するため循環回避
     from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
@@ -1000,11 +1001,8 @@ class EffectIntegrationService:
 
         deduplicated = self.expression_cases.deduplicate_expression_cases(expanded)
         if self.debug_flag() and deduplicated:
-            for case_index, (case_value, case_conditions) in enumerate(deduplicated):
-                cond_dump = [
-                    ConditionSimplifier.get_simplified_condition_string(cond)
-                    for cond in case_conditions
-                ]
+            for case_index, (case_value, case_conditions) in bounded_enumerate(deduplicated):
+                cond_dump = summarize_conditions(case_conditions)
                 self.debug_reporter.debug_print(
                     "  effect-sensitive case "
                     f"[{case_index}]: {self.debug_reporter.debug_expr_details_summary(case_value)}"

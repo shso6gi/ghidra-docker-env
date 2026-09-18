@@ -86,6 +86,7 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     subtract_implied_conditions,
 )
 from scripts.function_tracer_pcode.analysis.debug import (
+    bounded_items,
     summarize_conditions,
     summarize_expression,
     summarize_expressions,
@@ -806,7 +807,7 @@ def _impl_summarize_store_effects(
         if unmatched:
             incomplete_reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
             if debug:
-                for _tag, half in unmatched:
+                for _tag, half in bounded_items(unmatched):
                     print(
                         "[EffectSummary] unmatched unaligned store half: "
                         f"side={half.side} base={summarize_expression(half.base_expr)}"

@@ -17,12 +17,14 @@ debug message に式・条件を載せる手段は本 module だけが持つ。`
   辿り得る
 
 本 module は「契約の語彙」も所有する。静的 guard
-（``tests/unit/test_no_eager_debug_rendering.py``）はこの 3 つを import して
-使うので、新しい bounded renderer を足すときに触るのは本 module だけでよい:
+（``tests/unit/test_no_eager_debug_rendering.py``）はこれらを import して使う
+ので、新しい bounded renderer を足すときに触るのは本 module だけでよい:
 
 * :data:`BOUNDED_DEBUG_RENDERERS` — debug message に入れてよい描画関数
 * :data:`UNBOUNDED_RENDER_CALLS` — debug message に入れてはいけない描画 method
+* :data:`HEAVY_DIAGNOSTIC_CALLS` — debug 表示から呼んではいけない重い helper
 * :data:`DEBUG_AVAILABILITY_PREDICATES` — 出力可否を答えるだけの述語
+* :data:`DEBUG_AVAILABILITY_FLAGS` — 出力可否を表す属性名
 
 family 側の wrapper（``_debug_expr_summary`` など）は本 module の renderer へ
 委譲するだけなので名前を数え上げない。静的 guard が委譲を辿って同一視する。
@@ -91,14 +93,15 @@ def summarize_expression(expr: Optional[Expression], max_depth: int = 4) -> str:
 
             if expr_type == ExpressionType.UNARY_OP:
                 children = _first_children(node.operands, 1)
-                operator = _primitive_text(node.operator) if node.operator else "UNARY"
+                operator = _text_or(getattr(node, "operator", None), "UNARY")
                 return f"{operator}({_render(children[0] if children else None, depth - 1)})"
 
             if expr_type == ExpressionType.BINARY_OP:
                 operands = _first_children(node.operands, 2)
                 left = _render(operands[0] if len(operands) > 0 else None, depth - 1)
                 right = _render(operands[1] if len(operands) > 1 else None, depth - 1)
-                return f"{_primitive_text(node.operator) if node.operator else 'BINARY'}({left}, {right})"
+                operator = _text_or(getattr(node, "operator", None), "BINARY")
+                return f"{operator}({left}, {right})"
 
             if expr_type == ExpressionType.PHI:
                 return f"PHI(branches={_container_length(node.value)})"
@@ -110,9 +113,18 @@ def summarize_expression(expr: Optional[Expression], max_depth: int = 4) -> str:
     return _render(expr, max_depth)
 
 
+def _text_or(value: Any, fallback: str) -> str:
+    """exact な文字列だけをそのまま使う。
+
+    ``if value:`` と書くと任意 object の ``__bool__`` が走る。debug 表示のために
+    呼び出し側の dunder を起動しない、が本 module の契約。
+    """
+
+    return value if type(value) is str and value else fallback
+
+
 def _node_name(node: Any) -> str:
-    name = getattr(node, "name", None)
-    return _primitive_text(name) if name else "?"
+    return _text_or(getattr(node, "name", None), "?")
 
 
 def _container_length(value: Any) -> str:
@@ -129,7 +141,7 @@ def _container_length(value: Any) -> str:
 
 
 def _first_children(value: Any, count: int) -> list:
-    """子の先頭 ``count`` 個だけを読む（列全体を反復しない）。"""
+    """子の先頭 ``count`` 個だけを読む（列全体を反復せず、``__bool__`` も見ない）。"""
 
     if value is None:
         return []
@@ -247,6 +259,29 @@ def summarize_conditions(
         lambda item: summarize_condition(item, max_depth=max_depth),
         max_items,
     )
+
+
+def bounded_items(
+    items: Optional[Iterable[Any]],
+    max_items: int = DEFAULT_MAX_ITEMS,
+) -> List[Any]:
+    """debug 用に列の先頭 ``max_items`` 件だけを返す。
+
+    「1 件ごとの表示は有界だが、件数分だけ loop を回している」形を無くすための
+    helper。読むのは先頭 ``max_items`` 件だけで、``__len__`` / ``__bool__`` は
+    呼ばない。全件を出したい用途（production の出力）には使わない。
+    """
+
+    return _first_children(items, max_items)
+
+
+def bounded_enumerate(
+    items: Optional[Iterable[Any]],
+    max_items: int = DEFAULT_MAX_ITEMS,
+) -> List[Tuple[int, Any]]:
+    """:func:`bounded_items` に元の index を付けて返す。"""
+
+    return list(enumerate(bounded_items(items, max_items)))
 
 
 def summarize_values(
@@ -419,18 +454,19 @@ def _expression_kind(node: Any) -> str:
 def _structural_node_record(node: Any) -> str:
     """1 node の local 表示。すべて定数時間の field だけで作る。"""
 
-    parts = [_expression_kind(node)]
-    operator = getattr(node, "operator", None)
-    if operator:
-        parts.append(_primitive_text(operator))
-    name = getattr(node, "name", None)
-    if name:
-        parts.append(_primitive_text(name))
+    kind = _expression_kind(node)
+    parts = [kind]
+    operator = _text_or(getattr(node, "operator", None), "")
+    if operator != "":
+        parts.append(operator)
+    name = _text_or(getattr(node, "name", None), "")
+    if name != "":
+        parts.append(name)
     size = getattr(node, "size", None)
     if size is not None:
         parts.append(f"size={_primitive_text(size)}")
     value = getattr(node, "value", None)
-    if value is not None and _expression_kind(node) != "PHI":
+    if value is not None and kind != "PHI":
         parts.append(f"value={_primitive_text(value)}")
     return ":".join(parts)
 
@@ -493,6 +529,23 @@ BOUNDED_DEBUG_RENDERERS: FrozenSet[str] = frozenset({
 
 #: 共有 DAG を木として全展開する描画。debug message に入れてはいけない。
 UNBOUNDED_RENDER_CALLS: FrozenSet[str] = frozenset({"to_string", "to_smt"})
+
+#: debug 表示から呼んではいけない「重い診断 helper」。1 要素ごとに構造キー生成や
+#: 正規化を起動するので、``[f(c) for c in conditions]`` の形で使うと件数 × 走査
+#: コストになる。表示が要るなら bounded renderer（:data:`BOUNDED_DEBUG_RENDERERS`）
+#: を使う。判定・証明側がこれらを呼ぶのは本 module の関知するところではない。
+HEAVY_DIAGNOSTIC_CALLS: FrozenSet[str] = frozenset({
+    "get_simplified_condition_string",
+    "get_simplified_string",
+    "expression_key",
+    "expression_key_safe",
+    "expression_signature",
+    "conditions_signature",
+    "condition_key",
+    "structural_key",
+    "stable_key",
+    "semantic_key",
+})
 
 #: 出力可否を答えるだけの述語（呼んでも何も描画しない）。
 DEBUG_AVAILABILITY_PREDICATES: FrozenSet[str] = frozenset({

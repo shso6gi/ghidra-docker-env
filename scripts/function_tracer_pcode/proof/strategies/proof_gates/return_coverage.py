@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.proof.obligations import (
     UnaryProducerResult,
     prove_unary_partition,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_runtime_ref
 
 
 def _unary_header_context(base_ctx: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -593,7 +594,7 @@ def _prove_unary_outcome_for_analysis(
             if not complete and getattr(self, "debug", False):
                 self._debug_print(
                     "Return terminal path evidence mismatch: "
-                    f"terminal={terminal_id!r}, op={op_ref.stable_key() if op_ref is not None else None!r}, "
+                    f"terminal={terminal_id!r}, op={summarize_runtime_ref(op_ref)}, "
                     f"statuses={tuple(getattr(e, 'coverage_status', None) for e in evidences)!r}, "
                     f"evidence_guards={evidence_guard_keys!r}, "
                     f"region_guards={actual_guard_keys!r}, pruning={tuple(getattr(e, 'pruning_proof_keys', None) for e in evidences)!r}, "

@@ -26,7 +26,7 @@ from scripts.function_tracer_pcode.semantics.transform.expander_support import (
     ExpandedValue,
     _pcode_op_ref_from_tracer,
 )
-from scripts.function_tracer_pcode.analysis.debug import summarize_conditions
+from scripts.function_tracer_pcode.analysis.debug import bounded_items, summarize_conditions
 
 
 class CallExpansionMixin:
@@ -63,7 +63,7 @@ class CallExpansionMixin:
             debug=self.debug,
         )
         if self._debug_available() and resolved_targets:
-            for target_ref, target_conditions in resolved_targets:
+            for target_ref, target_conditions in bounded_items(resolved_targets):
                 self._debug_print(
                     f"Resolved {pcode_op.getMnemonic()} target -> {target_ref.display_name()} "
                     f"with conditions {summarize_conditions(target_conditions)}",

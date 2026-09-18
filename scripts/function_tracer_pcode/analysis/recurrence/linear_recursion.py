@@ -17,7 +17,7 @@ from scripts.function_tracer_pcode.core.recurrence_contracts import (
     ImmutableRecurrenceCondition,
     ImmutableRecurrenceExpression,
 )
-from scripts.function_tracer_pcode.analysis.debug import summarize_conditions, summarize_expression
+from scripts.function_tracer_pcode.analysis.debug import bounded_enumerate, summarize_conditions, summarize_expression
 
 def _recurrence_semantic_expression_key(expr):
     if expr is None:
@@ -104,7 +104,7 @@ def _impl__try_summarize_linear_self_recursion(self, function, high_function, an
             f"Declined '{function_name}': expected exactly one recursive return, found {len(recursive_returns)}"
         )
         if self._debug_available():
-            for index, ret in enumerate(recursive_returns):
+            for index, ret in bounded_enumerate(recursive_returns):
                 self._debug(
                     f"  recursive[{index}] value={summarize_expression(ret.value)} "
                     f"guards={summarize_conditions(ret.conditions)}"

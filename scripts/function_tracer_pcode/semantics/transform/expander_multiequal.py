@@ -30,6 +30,7 @@ from scripts.function_tracer_pcode.semantics.transform.expander_support import (
     ExpandedValue,
     MultiequalBranchObservation,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_conditions
 
 
 def replace_pcode_op_ref(
@@ -156,11 +157,12 @@ class MultiequalExpansionMixin:
                     path_conditions,
                     edge_cond,
                 )
-                if self.debug:
-                    self._debug_print(f"  Path[{path_idx}]: {len(path_conditions)} condition(s)", depth + 1)
-                    for pc in path_conditions:
-                        pc_str = ConditionNormalizer.get_simplified_string(pc)
-                        self._debug_print(f"    - {pc_str}", depth + 2)
+                if self._debug_available():
+                    self._debug_print(
+                        f"  Path[{path_idx}]: {len(path_conditions)} condition(s) "
+                        f"{summarize_conditions(path_conditions)}",
+                        depth + 1,
+                    )
                 if ConditionSimplifier.object_centric_is_contradiction(input_conditions):
                     self._debug_print(f"  Path[{path_idx}] -> SKIP (contradictory)", depth + 1)
                     continue
