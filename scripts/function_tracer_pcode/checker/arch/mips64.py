@@ -687,7 +687,7 @@ class MIPS64Handler:
         if self._is_zero_or_minus_one_constant(left):
             recorded = self._record_signed_operand_evidence(right, evidence) or recorded
 
-        if recorded and self.debug:
+        if self.debug and recorded:
             self._debug_print(
                 f"  Detected signed comparison evidence in {summarize_expression(expr)}"
             )

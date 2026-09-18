@@ -26,6 +26,7 @@ debug message に式・条件を載せる手段は本 module だけが持つ。`
 * :data:`BOUNDED_DEBUG_PREPARATION` — guard の中でだけ呼んでよい前準備 helper
 * :data:`DEBUG_AVAILABILITY_PREDICATES` — 出力可否を答えるだけの述語
 * :data:`DEBUG_AVAILABILITY_FLAGS` — 出力可否を表す属性名
+* :data:`DEBUG_AVAILABILITY_RECEIVERS` — その述語 / flag を持つ受け手の根
 
 family 側の wrapper（``_debug_expr_summary`` など）は本 module の renderer へ
 委譲するだけなので名前を数え上げない。静的 guard が委譲を辿って同一視する。
@@ -560,6 +561,18 @@ DEBUG_AVAILABILITY_PREDICATES: FrozenSet[str] = frozenset({
 
 #: 出力可否を表す属性。guard 節の形を静的 guard が判定するのに使う。
 DEBUG_AVAILABILITY_FLAGS: FrozenSet[str] = frozenset({"debug", "DEBUG"})
+
+#: debug 可否を持つ受け手として認める **根の名前**。本 package で実際に
+#: 使われている形（``self`` / ``cls`` / 純関数へ渡す ``context`` /
+#: strategy facade の ``strategy``）だけを並べる。``other.debug`` のような
+#: 任意の受け手を guard と誤認しないための allow list なので、新しい受け手が
+#: 要るときだけここへ足す（静的 guard はこれ以外を guard と認めない）。
+DEBUG_AVAILABILITY_RECEIVERS: FrozenSet[str] = frozenset({
+    "self",
+    "cls",
+    "context",
+    "strategy",
+})
 
 #: debug message を組み立てる **前準備** の helper。描画はしないが、列を
 #: 先読みする（= 入力に触る）ので debug guard の中でだけ呼んでよい。静的 guard

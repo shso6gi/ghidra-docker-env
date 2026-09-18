@@ -412,7 +412,7 @@ class MultiequalExpansionMixin:
             observations,
             depth + 1,
         )
-        if inferred is not None and self.debug:
+        if self.debug and inferred is not None:
             candidate = memory_expression_for_location(inferred, self.parameters)
             if candidate is not None:
                 self._debug_print(
@@ -452,7 +452,7 @@ class MultiequalExpansionMixin:
             self.parameters,
             return_conditions=conditions,
         )
-        if collapsed is not None and self._debug_available():
+        if self._debug_available() and collapsed is not None:
             self._debug_print(
                 f"Collapsed nested MULTIEQUAL to canonical memory: {self._debug_expr_summary(collapsed)}",
                 depth,

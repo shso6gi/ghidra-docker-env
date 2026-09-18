@@ -724,7 +724,7 @@ class BranchGuardedWhileProofService:
                     parameters=getattr(analysis, "parameters", ()) or (),
                 )
             ]
-            if ignored_artifacts and self.debug_flag():
+            if self.debug_flag() and ignored_artifacts:
                 for artifact in bounded_items(ignored_artifacts):
                     self.debug_reporter.debug_print(
                         "Outcome branch-guarded affine artifact retained: "

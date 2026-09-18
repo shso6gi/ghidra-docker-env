@@ -1602,7 +1602,7 @@ def _impl__resolve_implicit_return_tracked_values(
             tracked_values.append(candidate)
 
     tracked_values = self._deduplicate_tracked_return_values(tracked_values)
-    if tracked_values and self.debug:
+    if self.debug and tracked_values:
         for tracked in bounded_items(tracked_values):
             if tracked.producer_op is not None:
                 self._debug_print(
@@ -2656,7 +2656,7 @@ def _impl__prune_less_precise_return_infos(
             continue
 
         dropped = len(unresolved_group)
-        if dropped > 0 and self.debug:
+        if self.debug and dropped > 0:
             self._debug_print(
                 "Dropped less precise unresolved return cases under an "
                 "already-resolved condition region"
