@@ -25,7 +25,6 @@ debug message に式・条件を載せる手段は本 module だけが持つ。`
 * :data:`HEAVY_DIAGNOSTIC_CALLS` — debug 表示から呼んではいけない重い helper
 * :data:`BOUNDED_DEBUG_PREPARATION` — guard の中でだけ呼んでよい前準備 helper
 * :data:`DEBUG_GUARD_SHAPES` — debug 可否の確認として認める形（exact descriptor）
-* :data:`DEBUG_SHAPED_NON_GUARDS` — 名前は debug でも可否の確認ではない形
 * :data:`DEBUG_RENDER_CALL_TARGETS` — renderer / 前準備を呼んでよい対象の形
 
 family 側の wrapper（``_debug_expr_summary`` など）は本 module の renderer へ
@@ -575,6 +574,10 @@ GuardShape = Tuple[Any, ...]
 #: 足すときは「production に実際にその形を書いてから」。静的 guard 側の
 #: 棚卸し test（recognizer を使わずに AST から候補を集める）が、宣言と実測の
 #: ずれを増減どちらの方向でも FAIL させる。
+#:
+#: 「名前は debug だが guard ではない」形の一覧は **持たない**。あれは repository
+#: の現状の観測であって production の契約ではないので、static test 側
+#: (``tests/unit/_debug_guard_baseline.py``) が所有する。
 DEBUG_GUARD_SHAPES: FrozenSet[GuardShape] = frozenset({
     ("name", "debug"),
     ("attr", ("self",), "debug"),
@@ -586,54 +589,6 @@ DEBUG_GUARD_SHAPES: FrozenSet[GuardShape] = frozenset({
     ("call", ("self",), "debug_flag"),
     ("call", ("self", "debug_reporter"), "debug_available"),
     ("getattr", ("self",), "debug", False),
-})
-
-#: 名前に ``debug`` を含むが **debug 可否の確認ではない** 形。
-#:
-#: 出力の抑止状態（``_debug_suppressed``）、診断 payload の有無
-#: (``debug_trace`` / ``pairwise_debug_stats``)、message 数の上限、
-#: ``block_debug_key`` によるグラフ比較などを見ているだけで、「ここへ入ったら
-#: debug が有効」とは言えない。棚卸し test が「宣言し忘れ」と区別できるよう、
-#: **意図的に guard ではない**ものを明示する。
-#:
-#: ``("unsupported", <AST 種別>, <debug を含む名前>, <直下の子の descriptor>)``
-#: は、canonical guard descriptor に落とせない形（比較・引数付き呼び出しなど）を
-#: それでも捨てずに残すための descriptor。棚卸しが descriptor 文法の外側でも
-#: fail-closed になるようにするためのもので、``self.debug is True`` のような
-#: 未知の形を production に足すと、ここに無い descriptor として必ず FAIL する。
-DEBUG_SHAPED_NON_GUARDS: FrozenSet[GuardShape] = frozenset({
-    # 出力の抑止状態 / 診断 payload の有無
-    ("attr", ("self",), "_debug_suppressed"),
-    ("attr", ("cls",), "_debug_suppressed"),
-    ("attr", ("self",), "debug_trace"),
-    ("attr", ("self",), "pairwise_debug_stats"),
-    # message 数の上限（出力するかではなく、抑止に入るかを見ている）
-    ("unsupported", "Compare", ("_debug_message_count", "_debug_message_limit"),
-     (("attr", ("self",), "_debug_message_count"),
-      ("attr", ("self",), "_debug_message_limit"))),
-    ("unsupported", "Compare", ("_DEBUG_MESSAGE_LIMIT", "_debug_message_count"),
-     (("attr", ("cls",), "_debug_message_count"),
-      ("attr", ("cls",), "_DEBUG_MESSAGE_LIMIT"))),
-    ("unsupported", "Compare", ("_DEBUG_REPEAT_LIMIT",),
-     (("attr", ("cls",), "_DEBUG_REPEAT_LIMIT"),)),
-    ("unsupported", "Compare", ("_DEBUG_REPEAT_LIMIT",), ()),
-    ("unsupported", "Compare", ("_debug_repeat_counts",), ()),
-    # 診断 payload の型 / 有無
-    ("unsupported", "Call", ("debug_trace",), ()),
-    ("unsupported", "Call", ("debug_trace",), (("name", "debug_trace"),)),
-    ("unsupported", "Compare", ("debug_trace",), (("attr", ("result",), "debug_trace"),)),
-    ("unsupported", "Compare", ("extracted_for_debug",), (("name", "extracted_for_debug"),)),
-    # block の識別キー比較（グラフ構造の話で、出力の可否ではない）
-    ("unsupported", "Compare", ("block_debug_key",), ()),
-    ("unsupported", "Compare", ("_block_debug_key",), ()),
-    # その他: CLI 引数の有無 / 文字列前置き / key 参照 / 引数渡し
-    ("unsupported", "Compare", ("debug",), ()),
-    ("unsupported", "Call", ("debug",), ()),
-    ("unsupported", "Call", ("debug:",), ()),
-    ("unsupported", "Call", ("_debug_print",), ()),
-    ("unsupported", "Compare", ("_FINAL_DISPOSITION_DEBUG_KEYS",),
-     (("name", "_FINAL_DISPOSITION_DEBUG_KEYS"),)),
-    ("unsupported", "Compare", ("debug_key",), (("name", "debug_key"),)),
 })
 
 #: bounded renderer / 前準備 helper を **呼んでよい対象**の形。

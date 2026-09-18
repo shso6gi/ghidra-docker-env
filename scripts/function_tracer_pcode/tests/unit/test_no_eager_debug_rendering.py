@@ -31,9 +31,15 @@
   後続 conjunct は debug が有効なときだけ評価されるので body と同じ扱いだが、
   条件式は「出すかどうかを決める」場所なので、描画は message 側へ置く。
 
-契約語彙（禁止呼び出し・renderer・前準備・guard の形）は production 側の owner
-``analysis/debug/render.py`` が単独所有し、本 test は import して使う。ここで
-名前を並べ直さない。
+契約語彙（禁止呼び出し・renderer・前準備・guard の形・描画の呼び出し対象）は
+production 側の owner ``analysis/debug/render.py`` が単独所有し、本 test は
+import して使う。ここで名前を並べ直さない。
+
+owner が持つのは **設計判断**（何を guard と認めるか / どの対象で呼んだ描画を
+有界と認めるか）だけ。「名前は debug だが guard ではない構文が **いま** どれだけ
+あるか」は repository の観測結果で変更軸が違うので、static test 側の
+:mod:`_debug_guard_baseline` が所有する（production の診断 helper が test の
+都合で太らないように）。
 
 **guard の形は exact shape で持つ**。受け手 / flag 名 / 述語名を別々の allow
 list にして組み合わせると、production に無い ``self.DEBUG`` / ``cls.debug`` /
@@ -49,7 +55,14 @@ guard ではない形（``self._debug_suppressed`` 等）は
 :func:`test_the_declared_guard_shapes_are_exactly_the_ones_the_package_has` が
 両方向のずれ（未宣言 / stale）を FAIL にする。descriptor 文法に落とせない形
 （``self.debug is True`` / ``debug_available(config)``）も
-:func:`unsupported_guard_descriptor` で残すので、**文法の外側でも fail-closed**。
+:func:`unsupported_guard_descriptor` が ``ast.dump`` の正規形で残すので、
+**文法の外側でも fail-closed**（``x is True`` と ``x is False`` のように意味が
+違えば別 descriptor になり、未知形が baseline に紛れない）。
+
+名前の追跡は :func:`walk_lexical_scope` で **scope 単位**に切る。入れ子の
+``def`` / ``lambda`` / ``class`` / comprehension が同じ名前を束縛し直していても、
+外側の判定は変わらない（内側の read を「production も読んでいる」と誤解して
+見逃すことも、内側の read を外側の値と取り違えることもない）。
 
 **renderer / 前準備を呼んでよい対象も exact shape**（:data:`DEBUG_RENDER_CALL_TARGETS`）。
 任意の Attribute chain を pure とみなすと ``self.expensive_property.summarize_expression(x)``
@@ -80,6 +93,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, FrozenSet, Iterator, List, Optional, Sequence, Tuple
@@ -98,6 +112,7 @@ from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression
 from scripts.function_tracer_pcode.semantics.transform.expander_support import ExpandedValue
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
+from scripts.function_tracer_pcode.tests.unit import _debug_guard_baseline
 from scripts.function_tracer_pcode.tests.unit._recurrence_fixtures import (
     _FakeFunction,
     _FakeTracer,
@@ -130,9 +145,10 @@ OWNED_SUMMARY_FUNCTIONS = debug_render.BOUNDED_DEBUG_RENDERERS
 #: 通るので、owner は実在する形そのものを宣言する。
 DEBUG_GUARD_SHAPES = debug_render.DEBUG_GUARD_SHAPES
 
-#: 名前は debug でも可否の確認ではない形（抑止状態・診断 payload の有無など）。
-#: 棚卸し test が「宣言し忘れ」と区別するために owner が明示する。
-DEBUG_SHAPED_NON_GUARDS = debug_render.DEBUG_SHAPED_NON_GUARDS
+#: 名前は debug でも guard ではない、**この repository の現状**の一覧。
+#: production の契約ではなく static test 側の観測 baseline なので owner は持たない
+#: （:mod:`_debug_guard_baseline` の docstring に責務分離の理由）。
+DEBUG_SHAPED_NON_GUARDS = _debug_guard_baseline.DEBUG_SHAPED_NON_GUARDS
 
 #: bounded renderer / 前準備 helper を呼んでよい対象の形。任意の Attribute
 #: chain を許すと property / descriptor 経由の任意処理が通るので、実在する
@@ -349,6 +365,55 @@ def _is_declared_render_target(func: ast.AST) -> bool:
     return call_target_shape(func) in DEBUG_RENDER_CALL_TARGETS
 
 
+#: 別の scope を作る構文。代入 1 段の追跡はここへ降りない。
+#: comprehension も Python 3 では独自の scope を持つ（``[x for summary in ...]``
+#: の ``summary`` は外側の束縛ではない）。
+NESTED_SCOPE_NODES = (
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Lambda,
+    ast.ClassDef,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+)
+
+#: comprehension の **最初の** iterable だけは外側の scope で評価される
+#: （``[f(x) for x in summary]`` の ``summary`` は外側の名前）。
+_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def walk_lexical_scope(node: ast.AST) -> Iterator[ast.AST]:
+    """``node`` 以下を、**入れ子の scope へは降りずに**辿る。
+
+    ``def`` / ``async def`` / ``lambda`` / ``class`` / comprehension の中の名前は
+    別の束縛なので、
+    外側の局所名の読み出しとして数えてはいけない。``ast.walk`` で全部辿ると、
+    内側の同名 parameter への read が「production も読んでいる」と誤解され、
+    外側の R2 / R3 / R6 をすり抜けられる（逆に、内側の read を外側の局所名と
+    取り違えて誤検出もする）。
+
+    代入・読み出し・sink・guard 条件の収集はすべてこの 1 つの走査を使う。
+    入れ子の scope は scanner 本体が別 scope として独立に解析する。名前解決は
+    しない（必要なのは「この scope の構文か」だけ）。
+    """
+
+    stack: List[ast.AST] = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        for child in ast.iter_child_nodes(current):
+            if isinstance(child, _COMPREHENSIONS):
+                # 中は別 scope だが、最初の iterable だけは外側で評価される。
+                if child.generators:
+                    stack.append(child.generators[0].iter)
+                continue
+            if isinstance(child, NESTED_SCOPE_NODES):
+                continue
+            stack.append(child)
+
+
 def _debug_only_locals(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     renderers: FrozenSet[str],
@@ -365,6 +430,9 @@ def _debug_only_locals(
       receiver の構築で任意処理が走り得るので guard の中でも不可）
     * ``"renderer"`` — 有界 renderer（R3。guard の外で組み立ててはいけない）
 
+    走査は :func:`walk_lexical_scope`、つまり **この関数自身の scope だけ**。
+    入れ子の ``def`` / ``lambda`` / ``class`` の同名変数は別の束縛なので混ぜない。
+
     production が同じ値を使っている場合（``smt = expr.to_smt()`` を制約に使い、
     ついでに debug にも出す）は対象外。その仕事は debug の有無に関わらず起きる
     ので debug 側の問題ではない。判定は「その名前の読み出しが **すべて** debug
@@ -373,7 +441,7 @@ def _debug_only_locals(
     """
 
     labels: Dict[str, Tuple[str, str]] = {}
-    for node in ast.walk(function):
+    for node in walk_lexical_scope(function):
         targets: List[ast.AST] = []
         if isinstance(node, ast.Assign):
             targets = list(node.targets)
@@ -405,7 +473,7 @@ def _debug_only_locals(
 
     in_sink = {
         id(name)
-        for call in ast.walk(function)
+        for call in walk_lexical_scope(function)
         if isinstance(call, ast.Call) and _is_debug_sink(call, renderers)
         for argument in list(call.args) + [keyword.value for keyword in call.keywords]
         for name in ast.walk(argument)
@@ -416,14 +484,14 @@ def _debug_only_locals(
     # でしか読まない形は、sink 引数だけ見ていると debug-only と判定できない。
     in_sink |= {
         id(name)
-        for branch in ast.walk(function)
+        for branch in walk_lexical_scope(function)
         if isinstance(branch, (ast.If, ast.IfExp))
         for conjunct in debug_only_conjuncts(branch.test)
         for name in ast.walk(conjunct)
         if isinstance(name, ast.Name)
     }
     reads: Dict[str, List[bool]] = {}
-    for node in ast.walk(function):
+    for node in walk_lexical_scope(function):
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in labels:
             reads.setdefault(node.id, []).append(id(node) in in_sink)
     return {
@@ -657,28 +725,21 @@ def unsupported_guard_descriptor(node: ast.AST) -> debug_render.GuardShape:
     できないから」と捨てると、未知の guard を production に足しても棚卸しに
     現れず、contract のずれに気付けない（= 文法の外側で fail-open になる）。
 
-    そこで形を残す: ``("unsupported", <AST 種別>, <debug を含む名前>,
-    <直下の子のうち debug らしい descriptor>)``。子の descriptor まで見るのは、
-    ``self.debug is True``（``self.debug`` を読んでいる）と
-    ``type(debug) is not bool``（読んでいない）を別物として扱うため。debug と
-    無関係な名前は入れないので、周りの局所名を変えただけでは descriptor は
-    変わらない。
+    そこで構文をそのまま残す: ``("unsupported", ast.dump(node,
+    include_attributes=False))``。``ast.dump`` は node 種別・演算子種別・子の構造・
+    属性名 / 識別子・定数の値と型を保つ一方、行番号や桁といった非意味情報は
+    含まない。よって
+
+    * 同値な構文は同じ descriptor（決定的）
+    * ``x is True`` / ``x is False`` / ``x == y`` / ``x != y`` / ``x is not y``
+      のように**意味が違えば別の descriptor**
+
+    になる。要約した descriptor（node 種別 + 名前だけ等）では上のような形が
+    衝突し、未知形が既知の baseline と偶然一致して素通りしてしまう。source
+    文字列ではなく AST の正規化なので、空白や括弧の付け方には依存しない。
     """
 
-    children = []
-    for child in ast.iter_child_nodes(node):
-        descriptor = guard_descriptor(child)
-        if descriptor is None:
-            continue
-        name = descriptor[1] if descriptor[0] == "name" else descriptor[2]
-        if _mentions_debug(name):
-            children.append(descriptor)
-    return (
-        "unsupported",
-        type(node).__name__,
-        _debug_names_in(node),
-        tuple(children),
-    )
+    return ("unsupported", ast.dump(node, include_attributes=False))
 
 
 def is_pure_debug_availability_test(node: ast.AST) -> bool:
@@ -766,9 +827,39 @@ class _EagerDebugRenderingScanner:
         self.module = module
         self.violations = violations
         self.renderers = renderers
-        #: 現在の関数で debug のためだけに作られた局所名 -> ``(種別, 呼び出し名)``。
-        #: 種別は ``"forbidden"``（R2）か ``"renderer"``（R3）。
+        #: 現在の scope で debug のためだけに作られた局所名 -> ``(種別, 呼び出し名)``。
+        #: 種別は ``"forbidden"`` / ``"unsafe_renderer"``（R2・R6）か
+        #: ``"renderer"``（R3）。
         self.debug_only_labels: Dict[str, Tuple[str, str]] = {}
+        #: その scope に構文として属する ``Name`` node の id。入れ子の
+        #: ``lambda`` / ``def`` が同じ名前を束縛し直していても取り違えない。
+        self.scope_name_ids: FrozenSet[int] = frozenset()
+
+    @contextmanager
+    def _scope(self, function: Optional[ast.AST]) -> Iterator[None]:
+        """lexical scope を 1 つ入れ替える（代入 1 段の追跡はこの単位）。"""
+
+        outer_labels, outer_names = self.debug_only_labels, self.scope_name_ids
+        if function is None:
+            self.debug_only_labels, self.scope_name_ids = {}, frozenset()
+        else:
+            self.debug_only_labels = _debug_only_locals(function, self.renderers)
+            self.scope_name_ids = frozenset(
+                id(node)
+                for node in walk_lexical_scope(function)
+                if isinstance(node, ast.Name)
+            )
+        try:
+            yield
+        finally:
+            self.debug_only_labels, self.scope_name_ids = outer_labels, outer_names
+
+    def _label_for(self, node: ast.Name) -> Tuple[str, str]:
+        """この scope の名前なら追跡結果を返す（他 scope の同名は無関係）。"""
+
+        if id(node) not in self.scope_name_ids:
+            return ("", "")
+        return self.debug_only_labels.get(node.id, ("", ""))
 
     # -- entry ---------------------------------------------------------------
     def scan(self, tree: ast.Module) -> None:
@@ -817,15 +908,13 @@ class _EagerDebugRenderingScanner:
             # 別の呼び出し文脈で実行されるので guard を引き継がない。
             for decorator in statement.decorator_list:
                 self._visit_expression(decorator, guarded=guarded)
-            outer = self.debug_only_labels
-            self.debug_only_labels = _debug_only_locals(statement, self.renderers)
-            try:
+            with self._scope(statement):
                 self._walk_body(statement.body, guarded=False)
-            finally:
-                self.debug_only_labels = outer
             return
         if isinstance(statement, ast.ClassDef):
-            self._walk_body(statement.body, guarded=False)
+            # class 本体も別 scope。外側の局所名の追跡を持ち込まない。
+            with self._scope(None):
+                self._walk_body(statement.body, guarded=False)
             return
         for name, value in ast.iter_fields(statement):
             if name in {"body", "orelse", "finalbody"}:
@@ -875,7 +964,7 @@ class _EagerDebugRenderingScanner:
                 continue
             if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
                 # 一度局所名へ入れてから条件式で読む形も同じ扱い（代入 1 段）。
-                kind, label = self.debug_only_labels.get(sub.id, ("", ""))
+                kind, label = self._label_for(sub)
                 if kind == "forbidden":
                     self.violations.render_in_debug_guard.append(
                         (self.module, sub.lineno, f"{sub.id} = {label}")
@@ -936,7 +1025,7 @@ class _EagerDebugRenderingScanner:
                             (self.module, sub.lineno, f"{_called_name(sub)}(... {call_label} ...)")
                         )
                     if isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load):
-                        kind, label = self.debug_only_labels.get(inner.id, ("", ""))
+                        kind, label = self._label_for(inner)
                         detail = f"{_called_name(sub)}(... {inner.id} = {label} ...)"
                         if kind in ("forbidden", "unsafe_renderer"):
                             self.violations.render_in_debug_sink.append(
@@ -1971,6 +2060,177 @@ def test_a_comparison_on_a_guard_flag_is_not_confused_with_an_unrelated_one(tmp_
     # 後者は production に実在するので宣言済み、前者は未知。
     assert right in DEBUG_SHAPED_NON_GUARDS
     assert left not in (DEBUG_GUARD_SHAPES | DEBUG_SHAPED_NON_GUARDS)
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        [
+            "type(debug) is not bool",
+            "type(debug) is bool",
+            "type(debug) == bool",
+            "type(debug) != bool",
+        ],
+        ["self.debug is True", "self.debug is False"],
+        ["self.debug > 0", "self.debug >= 0", "self.debug < 0"],
+        ["debug_available(config)", "debug_available(other)", "debug_enabled(config)"],
+    ],
+)
+def test_unsupported_descriptors_do_not_collide(sources):
+    """意味の違う式は別 descriptor（衝突すると未知形が baseline に紛れる）。"""
+
+    descriptors = [
+        unsupported_guard_descriptor(ast.parse(source, mode="eval").body)
+        for source in sources
+    ]
+    assert len(set(descriptors)) == len(sources), descriptors
+
+
+def test_an_unsupported_descriptor_is_deterministic_and_location_free():
+    """同値な構文は同じ descriptor。行や空白・括弧には依存しない。"""
+
+    first = unsupported_guard_descriptor(ast.parse("self.debug is True", mode="eval").body)
+    again = unsupported_guard_descriptor(ast.parse("self.debug is True", mode="eval").body)
+    spaced = unsupported_guard_descriptor(
+        ast.parse("(  self.debug   is   True  )", mode="eval").body
+    )
+    moved = unsupported_guard_descriptor(
+        ast.parse("\n\n\nself.debug is True", mode="eval").body
+    )
+    assert first == again == spaced == moved
+    assert "lineno" not in first[1] and "col_offset" not in first[1]
+
+
+def test_a_new_unknown_guard_does_not_collide_with_the_existing_baseline():
+    """未知形が既存 baseline と偶然一致して素通りしないこと。"""
+
+    unknown = {
+        unsupported_guard_descriptor(ast.parse(source, mode="eval").body)
+        for source in (
+            "self.debug is True",
+            "self.debug is False",
+            "type(debug) is bool",
+            "debug_available(config)",
+            "self.debug_level > 0",
+        )
+    }
+    assert not unknown & (DEBUG_GUARD_SHAPES | DEBUG_SHAPED_NON_GUARDS)
+
+
+_NESTED_SCOPE_SHADOWS = [
+    (
+        "内側の def が同名 parameter を持つ",
+        "    def unrelated(summary):\n"
+        "        consume(summary)\n",
+    ),
+    (
+        "内側の lambda が同名 parameter を持つ",
+        "    unrelated = lambda summary: consume(summary)\n",
+    ),
+    (
+        "内側の class の method が同名 local を持つ",
+        "    class Holder:\n"
+        "        def take(self, summary):\n"
+        "            return consume(summary)\n",
+    ),
+    (
+        "内側の comprehension が同名を束縛する",
+        "    consumed = [consume(summary) for summary in items]\n",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "label, nested", _NESTED_SCOPE_SHADOWS, ids=[case[0] for case in _NESTED_SCOPE_SHADOWS]
+)
+def test_a_nested_scope_with_the_same_name_does_not_hide_an_unguarded_summary(label, nested):
+    """内側 scope の同名変数があっても外側の R3 判定は変わらない。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, items, consume):\n"
+        "    summary = summarize_expression(expr)\n"
+        + nested
+        + "    self._debug_print(summary)\n",
+    )
+    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
+        "_debug_print(... summary = summarize_expression() ...)"
+    ], label
+
+
+@pytest.mark.parametrize(
+    "label, nested", _NESTED_SCOPE_SHADOWS, ids=[case[0] for case in _NESTED_SCOPE_SHADOWS]
+)
+def test_a_nested_scope_with_the_same_name_does_not_hide_a_forbidden_call(label, nested):
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, items, consume):\n"
+        "    summary = expr.to_string()\n"
+        + nested
+        + "    self._debug_print(summary)\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [
+        "_debug_print(... summary = to_string() ...)"
+    ], label
+
+
+def test_a_nested_scope_name_is_not_attributed_to_the_outer_local():
+    """逆向きも: 内側 scope の同名読み出しを外側の追跡結果と取り違えない。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, apply):\n"
+        "    summary = summarize_expression(expr)\n"
+        "    if self.debug:\n"
+        "        self._debug_print(summary)\n"
+        "    apply(lambda summary: self._debug_print(summary))\n",
+    )
+    # 外側は guard 内なので R3 ではない。内側 lambda の ``summary`` は別の束縛
+    # （引数）なので、それを外側の renderer 結果として報告してはいけない。
+    assert not violations.unguarded_summary_in_debug_sink, violations.describe()
+
+
+def test_a_nested_scope_is_still_analysed_on_its_own():
+    """内側 scope を無視するのではなく、独立した scope として解析する。"""
+
+    violations = scan_source(
+        "sample",
+        "def outer(self, expr):\n"
+        "    def inner(self, expr):\n"
+        "        summary = summarize_expression(expr)\n"
+        "        self._debug_print(summary)\n"
+        "    return inner\n",
+    )
+    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
+        "_debug_print(... summary = summarize_expression() ...)"
+    ]
+
+
+def test_a_comprehensions_first_iterable_is_still_an_outer_read():
+    """``[f(x) for x in smt]`` の ``smt`` は外側の読み出し（過検出しないため）。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, g):\n"
+        "    smt = expr.to_smt()\n"
+        "    kept = [g(x) for x in smt]\n"
+        "    self._debug_print(smt)\n"
+        "    return kept\n",
+    )
+    assert not violations.render_in_debug_sink, violations.describe()
+
+
+def test_a_value_production_also_uses_is_still_exempt_across_scopes():
+    """production も読む値は従来どおり対象外（過検出しない）。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, solver):\n"
+        "    smt = expr.to_smt()\n"
+        "    solver.add(smt)\n"
+        "    self._debug_print(smt)\n",
+    )
+    assert not violations.render_in_debug_sink, violations.describe()
 
 
 def test_the_two_declared_sets_do_not_overlap():
