@@ -23,6 +23,7 @@ debug message に式・条件を載せる手段は本 module だけが持つ。`
 * :data:`BOUNDED_DEBUG_RENDERERS` — debug message に入れてよい描画関数
 * :data:`UNBOUNDED_RENDER_CALLS` — debug message に入れてはいけない描画 method
 * :data:`HEAVY_DIAGNOSTIC_CALLS` — debug 表示から呼んではいけない重い helper
+* :data:`BOUNDED_DEBUG_PREPARATION` — guard の中でだけ呼んでよい前準備 helper
 * :data:`DEBUG_AVAILABILITY_PREDICATES` — 出力可否を答えるだけの述語
 * :data:`DEBUG_AVAILABILITY_FLAGS` — 出力可否を表す属性名
 
@@ -270,6 +271,9 @@ def bounded_items(
     「1 件ごとの表示は有界だが、件数分だけ loop を回している」形を無くすための
     helper。読むのは先頭 ``max_items`` 件だけで、``__len__`` / ``__bool__`` は
     呼ばない。全件を出したい用途（production の出力）には使わない。
+
+    有界とはいえ列に触るので、**debug guard の中でだけ**呼ぶこと
+    （:data:`BOUNDED_DEBUG_PREPARATION`。静的 guard が固定している）。
     """
 
     return _first_children(items, max_items)
@@ -556,3 +560,11 @@ DEBUG_AVAILABILITY_PREDICATES: FrozenSet[str] = frozenset({
 
 #: 出力可否を表す属性。guard 節の形を静的 guard が判定するのに使う。
 DEBUG_AVAILABILITY_FLAGS: FrozenSet[str] = frozenset({"debug", "DEBUG"})
+
+#: debug message を組み立てる **前準備** の helper。描画はしないが、列を
+#: 先読みする（= 入力に触る）ので debug guard の中でだけ呼んでよい。静的 guard
+#: はこれらが guard の外で走る形を検出する。renderer とは別契約。
+BOUNDED_DEBUG_PREPARATION: FrozenSet[str] = frozenset({
+    "bounded_items",
+    "bounded_enumerate",
+})

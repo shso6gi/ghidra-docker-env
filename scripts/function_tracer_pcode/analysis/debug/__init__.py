@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.analysis.debug.unknown_trace import (
     PcodeOpInfo,
 )
 from scripts.function_tracer_pcode.analysis.debug.render import (
+    BOUNDED_DEBUG_PREPARATION,
     BOUNDED_DEBUG_RENDERERS,
     DEBUG_AVAILABILITY_FLAGS,
     DEBUG_AVAILABILITY_PREDICATES,
@@ -32,6 +33,7 @@ __all__ = [
     'UnknownReason',
     'VarnodeInfo',
     'PcodeOpInfo',
+    'BOUNDED_DEBUG_PREPARATION',
     'BOUNDED_DEBUG_RENDERERS',
     'DEBUG_AVAILABILITY_FLAGS',
     'DEBUG_AVAILABILITY_PREDICATES',

@@ -30,7 +30,7 @@ from scripts.function_tracer_pcode.semantics.transform.expander_support import (
     ExpandedValue,
     MultiequalBranchObservation,
 )
-from scripts.function_tracer_pcode.analysis.debug import summarize_conditions
+from scripts.function_tracer_pcode.analysis.debug import summarize_condition, summarize_conditions
 
 
 def replace_pcode_op_ref(
@@ -146,9 +146,10 @@ class MultiequalExpansionMixin:
             self._debug_print(f"  valid_paths: {len(all_valid_paths)}", depth + 1)
 
             edge_cond = self._get_edge_condition(in_block_info, phi_parent)
-            if edge_cond:
-                edge_str = ConditionNormalizer.get_simplified_string(edge_cond)
-                self._debug_print(f"  edge_condition: {edge_str}", depth + 1)
+            if self._debug_available():
+                self._debug_print(
+                    f"  edge_condition: {summarize_condition(edge_cond)}", depth + 1
+                )
 
             cases_emitted = 0
             for path_idx, path_conditions in enumerate(all_valid_paths):
