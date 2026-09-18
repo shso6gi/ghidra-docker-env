@@ -8,7 +8,6 @@ from scripts.function_tracer_pcode.core.expression import Condition, Expression,
 from scripts.function_tracer_pcode.core.structural import StructuralKey
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionNormalizer,
-    ConditionSimplifier,
 )
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import decompose_comparison_condition
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter

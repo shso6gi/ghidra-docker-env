@@ -12,10 +12,7 @@ from scripts.function_tracer_pcode.core import (
     UnknownValueRef,
     CanonicalLocation,
 )
-from scripts.function_tracer_pcode.analysis.condition import (
-    ConditionSimplifier,
-    ConditionNormalizer,
-)
+from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.effects.summary import (
     _reduce_expression_under_conditions,
     _expressions_equivalent,
