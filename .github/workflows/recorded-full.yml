@@ -5,14 +5,20 @@ name: recorded-full
 # PR critical path because two replays (wood, barthe2big) are ~92% of the
 # corpus wall clock -- not because anything about them is checked less.
 #
+# Automatic runs are weekly only.  `workflow_dispatch` stays as the manual
+# escape hatch and is not part of that budget.
+#
 # This is a Ghidra-free fixture regression. The real-binary fixed subset is a
 # different workflow and belongs to PR-109-C; it is not started here.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
   schedule:
-    # Mondays 03:20 UTC, offset from the hour to avoid the scheduling spike.
+    # Mondays 03:20 UTC (cron is always UTC), offset from the hour to avoid
+    # the scheduling spike.  Weekly rather than per push to main: the full
+    # corpus is the expensive half of the recorded regression and the free
+    # Actions allowance is the constraint.  The cheap half (recorded-fast in
+    # unit.yml) still runs on every pull request, so a PR that breaks a
+    # pr_gate replay is caught before it merges.
     - cron: "20 3 * * 1"
 
 permissions:

@@ -169,7 +169,7 @@ replay; the fixture reproduces that recorded run, not necessarily a proxy-free
 CLI run. Keep running the fixed subset on real binaries for regression evidence --
 by hand, or through the `eqbench-subset` workflow described under "Running the
 subset in CI" below, which is a different workflow from `recorded-full` and
-runs only after a pull request has been merged into `main`.
+runs automatically once a week (plus on demand).
 `scripts/function_tracer_pcode/tests/fixtures/pcode/SCHEMA.md` documents the
 format, what is recorded, the identity surrogates, and the measured determinism.
 
@@ -342,21 +342,33 @@ of each half plus this run's soundness gate are then saved next to the results.
 Note that the subset uses a 240 s pair timeout instead of the 600 s of full
 runs, so TIMEOUT counts are not comparable with the full trees.
 
-#### Running the subset in CI (after a merge)
+#### Running the subset in CI (weekly, or on demand)
 
 `.github/workflows/eqbench-subset.yml` runs the same subset against real
 binaries on a GitHub-hosted runner. It compiles EqBench, imports every binary
-into Ghidra and runs the solvers — about **85 minutes** on a hosted runner — so
-it runs **after a pull request has landed on `main`, and never while one is
-open**. The job budget is `timeout-minutes: 180`.
+into Ghidra and runs the solvers — about **85 minutes** on a hosted runner. That
+is the most expensive thing this repository can start on its own, so it runs
+**once a week** rather than on every merge, and verifies whatever is on `main`
+at that moment. The job budget is `timeout-minutes: 180`.
 
 ```yaml
 on:
-  pull_request:
-    branches: [main]
-    types: [closed]     # the only activity type: not opened/synchronize
-  workflow_dispatch:     # manual escape hatch; never automatic
+  schedule:
+    - cron: "40 5 * * 4"   # Thursdays 05:40 UTC; cron is always UTC
+  workflow_dispatch:       # manual escape hatch; never automatic
 ```
+
+Nothing about the run itself changed with the cadence: the same subset, the
+same per-pair timeout, the same soundness gate and the same per-half benchmark
+validation gate. When a particular merge needs real-binary evidence sooner than
+the next scheduled run, dispatch it by hand — `workflow_dispatch` takes a ref
+and the four inputs below, and is not part of the weekly budget.
+
+The other heavy workflow, `recorded-full`, is weekly too (Mondays 03:20 UTC) and
+no longer runs on every push to `main`; the two are deliberately on different
+days so they never queue against each other. The cheap gates in `unit.yml`
+(`unit-fast`, `recorded-fast`) are unchanged and still run on every pull
+request.
 
 with
 `if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true`
@@ -392,7 +404,7 @@ since a fresh EqBench checkout has no binaries yet. Everything else
 `eqbench_subset.json` unchanged, and both values are recorded in
 `subset_manifest.txt`.
 
-A merged pull request carries no inputs at all, so **every setting is
+A scheduled run carries no inputs at all, so **every setting is
 normalised once**, in the first step, with `${VAR:-default}` — not with a GitHub
 expression `||`, whose truthiness rules would quietly turn
 `identical_fast_path=0` into `1`. No later step has a default of its own; the

@@ -3,36 +3,40 @@ name: eqbench-subset
 # The fixed measurement subset (scripts/function_tracer_pcode/reporting/
 # eqbench_subset.json) run against REAL binaries: EqBench is checked out and
 # compiled, Ghidra decompiles, the solvers run, and the gates judge the
-# result.  That takes about 85 minutes on a hosted runner, so it runs AFTER a
-# pull request has landed on main and never while one is open.
+# result.  That takes about 85 minutes on a hosted runner.
 #
-# Why `pull_request: types: [closed]` and not `push: branches: [main]`:
-#   * `closed` is the only pull_request activity here, so opening a PR,
-#     pushing to its branch or reopening it starts nothing.  There is no
-#     `opened` / `synchronize` / `reopened` in this list, and GitHub only
-#     dispatches the activity types a workflow names.
-#   * the job's `if` then keeps out the other way a PR closes -- closed
-#     without being merged -- so nothing runs for an abandoned PR.
-#   * `push: branches: [main]` would also fire for a direct push to main,
-#     which is not "a pull request was reviewed and merged".
-# The checkout below takes the PR's merge commit, which IS the commit that
-# landed on main -- not the temporary test-merge ref a pull_request event
-# otherwise checks out.
+# Why weekly and not per merge:
+#   * 85 minutes of hosted runner time per merge is the single most expensive
+#     thing this repository can start automatically, and the free Actions
+#     allowance is the constraint.  Running it once a week keeps the same
+#     verification without paying for it on every merge.
+#   * the run therefore verifies WHAT IS ON MAIN at the scheduled moment, not
+#     one particular merge.  `schedule` checks out the default branch's head,
+#     which is exactly that.
+#   * nothing about the run itself is weakened: the same subset, the same
+#     per-pair timeout, the same soundness gate and the same per-half
+#     benchmark validation gate as before.
 #
-# `workflow_dispatch` stays as the manual escape hatch (a re-run after a
-# runner outage, or the Issue #15 oracle with identical_fast_path=0).  It is
-# never automatic, so it does not put this job on anyone's critical path.
-# There is deliberately no `schedule`: the run is tied to what landed, not to
-# the calendar.
+# `workflow_dispatch` stays as the manual escape hatch and is NOT part of the
+# weekly budget: a re-run after a runner outage, a check of a specific commit
+# before merging something risky, or the Issue #15 oracle with
+# identical_fast_path=0.  Use it whenever a merge needs the real-binary
+# evidence sooner than the next scheduled run.
+#
+# Cron is UTC.  `recorded-full` already holds Monday 03:20 UTC; this one takes
+# Thursday so the two heavy workflows never queue against each other (and so a
+# regression landing early in the week is seen before the following Monday).
 #
 # This is not the recorded P-code corpus.  `unit.yml` (unit-fast /
 # recorded-fast) and `recorded-full.yml` are Ghidra-free fixture regressions
 # and are untouched by this workflow; a fixture replay is not a real-binary
 # verification and neither stands in for the other (Issue #109).
 on:
-  pull_request:
-    branches: [main]
-    types: [closed]
+  schedule:
+    # Thursdays 05:40 UTC (cron is always UTC).  Offset from the hour to avoid
+    # the scheduling spike, and away from recorded-full's Monday 03:20 UTC so
+    # the two heavy workflows do not run at the same time.
+    - cron: "40 5 * * 4"
   workflow_dispatch:
     inputs:
       subset_scope:
@@ -64,53 +68,53 @@ defaults:
 jobs:
   subset:
     name: fixed subset (real binaries)
-    # A pull request also closes without being merged; that is not a commit on
-    # main and must start nothing.  The two allowed events are named rather
-    # than excluded, so a trigger added later without thinking about this
-    # policy leaves a visibly skipped job instead of quietly running 85
-    # minutes of work.
+    # The two allowed events are named rather than excluded, so a trigger
+    # added later without thinking about this policy leaves a visibly skipped
+    # job instead of quietly running 85 minutes of work.
     if: >-
       github.event_name == 'workflow_dispatch'
-      || github.event.pull_request.merged == true
+      || github.event_name == 'schedule'
+
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
-      # RAW_* are the event-dependent values and are empty for a merged pull
-      # request, which carries no inputs at all.  NOTHING below reads them:
-      # the normalisation step turns them into the settings every later step
-      # uses, so there is exactly one place where a default is chosen and no
-      # step can invent its own.
+      # RAW_* are the event-dependent values and are empty for a scheduled
+      # run, which carries no inputs at all.  NOTHING below reads them: the
+      # normalisation step turns them into the settings every later step uses,
+      # so there is exactly one place where a default is chosen and no step can
+      # invent its own.  That is what makes the scheduled run well defined --
+      # it takes the same defaults the dispatch form shows.
       RAW_SUBSET_SCOPE: ${{ inputs.subset_scope }}
       RAW_PAIR_PROCESS_TIMEOUT: ${{ inputs.pair_process_timeout }}
       RAW_IDENTICAL_FAST_PATH: ${{ inputs.identical_fast_path }}
       RAW_EQBENCH_REF: ${{ inputs.eqbench_ref }}
-      # The commit that landed on main, when this run is a merged PR.
-      MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
-      PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
     steps:
+      # No `ref:`.  A schedule event checks out the default branch's head,
+      # which is what this run is meant to verify; a workflow_dispatch checks
+      # out the ref the operator chose.  Naming a ref here would take that
+      # choice away from the manual escape hatch.
       - uses: actions/checkout@v4
-        with:
-          # A pull_request event otherwise checks out refs/pull/N/merge -- the
-          # test merge GitHub computed while the PR was open, which is not the
-          # commit that landed.  Empty for workflow_dispatch, where the action
-          # falls back to the dispatched ref.
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
 
-      # The run must be OF the merged commit, not of a test merge that happens
-      # to have the same tree.  Fail closed: an event that says it was merged
-      # but gives no merge commit is not something to carry on from.
-      - name: This run is of the commit that landed on main
-        if: github.event_name == 'pull_request'
+      # A scheduled run must be OF the head of the default branch -- not of a
+      # commit that moved on while the runner was being handed out.  Fail
+      # closed: if what was checked out is not that head, the evidence would
+      # be labelled with the wrong commit.
+      - name: This scheduled run is of the default branch head
+        if: github.event_name == 'schedule'
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           checked_out="$(git rev-parse HEAD)"
-          echo "pull request:  #${PULL_REQUEST_NUMBER:-?}"
-          echo "merge commit:  ${MERGE_COMMIT_SHA:-(none)}"
-          echo "checked out:   $checked_out"
-          [[ -n "${MERGE_COMMIT_SHA:-}" ]] \
-            || { echo "::error::the merged pull request carries no merge commit"; exit 1; }
-          [[ "$checked_out" == "$MERGE_COMMIT_SHA" ]] \
-            || { echo "::error::checked out $checked_out, not the merge commit"; exit 1; }
+          echo "default branch: ${DEFAULT_BRANCH:-(none)}"
+          echo "checked out:    $checked_out"
+          [[ -n "${DEFAULT_BRANCH:-}" ]] \
+            || { echo "::error::the schedule event carries no default branch"; exit 1; }
+          git fetch --no-tags --depth=1 origin "$DEFAULT_BRANCH"
+          head="$(git rev-parse FETCH_HEAD)"
+          echo "branch head:    $head"
+          [[ "$checked_out" == "$head" ]] \
+            || { echo "::error::checked out $checked_out, not $DEFAULT_BRANCH head $head"; exit 1; }
 
       # ------------------------------------------------------------------
       # 1. One normalisation, one set of settings
@@ -478,10 +482,14 @@ jobs:
               # fields: SUBSET_PR names a pull request, not a CI execution.
               "ci": {
                   "run_id": value("GITHUB_RUN_ID"),
-                  # Which commit this run is OF.  For a merged pull request
-                  # that is the merge commit on main, not the pull_request
-                  # event's own GITHUB_SHA (a test merge ref).
+                  # Which commit this run is OF: for the weekly run that is
+                  # the default branch head the checkout resolved to, and for
+                  # a manual dispatch the ref the operator chose.  Read from
+                  # the working tree, never from the event payload.
                   "analysed_commit": value("ANALYSED_COMMIT"),
+                  # Kept in the schema and null now that the run is not tied
+                  # to one merge; a reader of an older artifact still finds
+                  # the fields where they were.
                   "merged_pull_request": value("PULL_REQUEST_NUMBER"),
                   "merge_commit_sha": value("MERGE_COMMIT_SHA"),
                   "run_attempt": value("GITHUB_RUN_ATTEMPT"),
