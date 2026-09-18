@@ -6,7 +6,7 @@
 これらを呼ぶと、``--debug`` を付けていなくても引数が先に評価される（helper が
 関数の中で flag を見ても遅い）。本 test は AST 走査でその形を 0 件に固定する。
 
-固定する 5 つの契約:
+固定する 6 つの契約:
 
 * **R1** debug guard の中で禁止呼び出し（``analysis.debug.render`` の
   :data:`UNBOUNDED_RENDER_CALLS` と :data:`HEAVY_DIAGNOSTIC_CALLS`、および
@@ -27,27 +27,43 @@
   ``bounded_items`` / ``bounded_enumerate``）も debug guard の中で呼ぶ。有界
   とはいえ列を先読みするので、debug OFF で走ってよい仕事ではない。
 
-契約語彙（禁止呼び出し・renderer・前準備・述語・flag）は production 側の owner
+* **R6** debug guard の **条件式**で bounded renderer を呼ばない。``and`` の
+  後続 conjunct は debug が有効なときだけ評価されるので body と同じ扱いだが、
+  条件式は「出すかどうかを決める」場所なので、描画は message 側へ置く。
+
+契約語彙（禁止呼び出し・renderer・前準備・guard の形）は production 側の owner
 ``analysis/debug/render.py`` が単独所有し、本 test は import して使う。ここで
 名前を並べ直さない。
+
+**guard の形は exact shape で持つ**。受け手 / flag 名 / 述語名を別々の allow
+list にして組み合わせると、production に無い ``self.DEBUG`` / ``cls.debug`` /
+``strategy.debug_flag()`` / ``self.debug_reporter.debug_flag()`` まで guard と
+して通ってしまう。そこで owner は :data:`DEBUG_GUARD_SHAPES` に
+``("attr", ("self",), "debug")`` のような **canonical descriptor**
+（:func:`guard_descriptor`）を並べ、判定は完全一致だけで行う。名前は debug でも
+guard ではない形（``self._debug_suppressed`` 等）は
+:data:`DEBUG_SHAPED_NON_GUARDS` に明示する。
+
+宣言が実測とずれないよう、:func:`observed_guard_shapes` は **recognizer を
+通さずに** production の AST から候補を集め、
+:func:`test_the_declared_guard_shapes_are_exactly_the_ones_the_package_has` が
+両方向のずれ（未宣言 / stale）を FAIL にする。
 
 **guard の判定は 2 つの別契約**（見ている性質が違う）:
 
 * :func:`branch_implies_debug_enabled` — 「この branch に入ったら debug は必ず
-  有効か」。R1 / R3 / R5 の到達条件。``and`` は **先頭項が** debug 可否のとき
-  だけ認める（短絡評価により、後続の項は debug が有効なときしか評価されない）。
-  ``or`` / 比較 / 無関係な名前 / 呼んでいない method object は認めない。
+  有効か」。R1 / R3 / R5 / R6 の到達条件。``and`` は **先頭項が** debug 可否の
+  ときだけ認める（短絡評価により、後続の項は debug が有効なときしか評価され
+  ない）。``or`` / 比較 / 無関係な名前 / 呼んでいない method object は認めない。
+  後続 conjunct は :func:`debug_only_conjuncts` が debug 専用経路として
+  body と同じ規則で検査する。
 * :func:`is_pure_debug_availability_test` — 「guard 自体が debug 可否の確認
   しかしていないか」。wrapper 導出が使う。``and`` は認めない
   （``if not (expensive() and self.debug): return`` は debug OFF でも
   ``expensive()`` を走らせる）。
 
-認める atom は **production を棚卸しして実在した形だけ**（受け手は
-:data:`DEBUG_AVAILABILITY_RECEIVERS`）。``other.debug`` /
-``factory().debug_available()`` / ``registry[key].debug`` のように受け手を
-計算する形は、「flag を読むだけ」ではないので guard と認めない。どちらも
-fail-closed で、認識できない形はすべて「guard ではない」に倒す。名前の部分
-一致では判定しない。
+どちらも fail-closed で、認識できない形はすべて「guard ではない」に倒す。名前の
+部分一致では判定しない。
 """
 
 from __future__ import annotations
@@ -56,7 +72,7 @@ import ast
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, FrozenSet, Iterator, List, Sequence, Tuple
+from typing import Dict, FrozenSet, Iterator, List, Optional, Sequence, Tuple
 
 import pytest
 
@@ -99,8 +115,20 @@ RENDER_METHODS = debug_render.UNBOUNDED_RENDER_CALLS | debug_render.HEAVY_DIAGNO
 #: なので列挙しない（:func:`bounded_renderer_names` が委譲を辿って足す）。
 OWNED_SUMMARY_FUNCTIONS = debug_render.BOUNDED_DEBUG_RENDERERS
 
+#: **debug 可否の確認そのもの**として認める形（exact descriptor の集合）。
+#: 受け手 / flag 名 / 述語名を別々に持って組み合わせると production に無い形まで
+#: 通るので、owner は実在する形そのものを宣言する。
+DEBUG_GUARD_SHAPES = debug_render.DEBUG_GUARD_SHAPES
+
+#: 名前は debug でも可否の確認ではない形（抑止状態・診断 payload の有無）。
+#: 棚卸し test が「宣言し忘れ」と区別するために owner が明示する。
+DEBUG_SHAPED_NON_GUARDS = debug_render.DEBUG_SHAPED_NON_GUARDS
+
 #: 名前に ``debug`` を含むが sink ではない述語（呼んでも何も出力しない）。
-DEBUG_PREDICATES = debug_render.DEBUG_AVAILABILITY_PREDICATES
+#: 契約から導出するので、ここで名前を並べ直さない。
+DEBUG_PREDICATES = frozenset(
+    shape[2] for shape in DEBUG_GUARD_SHAPES if shape[0] == "call"
+)
 
 #: debug message の前準備 helper。描画はしないが列を先読みするので、guard の
 #: 中でだけ呼んでよい（R5）。renderer とは別契約。
@@ -109,11 +137,11 @@ PREPARATION_FUNCTIONS = debug_render.BOUNDED_DEBUG_PREPARATION
 #: 契約語彙そのものを持つ owner。ここでの定義・呼び出しは R5 の対象外。
 CONTRACT_OWNER_MODULE = "analysis.debug.render"
 
-#: 出力可否を表す属性名（``self.debug`` 等）。guard 節の形の判定に使う。
-DEBUG_FLAGS = debug_render.DEBUG_AVAILABILITY_FLAGS
+#: 名前で辿れない受け手を潰す印（宣言には現れないので fail-closed）。
+COMPUTED_RECEIVER: Tuple[str, ...] = ("<computed>",)
 
-#: debug 可否を持つ受け手の根（``self`` / ``cls`` / ``context`` / ``strategy``）。
-DEBUG_RECEIVERS = debug_render.DEBUG_AVAILABILITY_RECEIVERS
+#: ``getattr`` の引数が静的に読めないときに使う印。
+UNREADABLE = "<expr>"
 
 #: full render を持ってはいけない dunder。
 RENDER_FREE_DUNDERS = frozenset({"__repr__", "__str__"})
@@ -121,13 +149,14 @@ RENDER_FREE_DUNDERS = frozenset({"__repr__", "__str__"})
 
 @dataclass
 class EagerDebugRenderingViolations:
-    """5 契約（R1〜R5）それぞれの違反。すべて空なら PASS。"""
+    """6 契約（R1〜R6）それぞれの違反。すべて空なら PASS。"""
 
     render_in_debug_guard: List[Tuple[str, int, str]] = field(default_factory=list)
     render_in_debug_sink: List[Tuple[str, int, str]] = field(default_factory=list)
     unguarded_summary_in_debug_sink: List[Tuple[str, int, str]] = field(default_factory=list)
     render_in_dunder: List[Tuple[str, int, str]] = field(default_factory=list)
     unguarded_debug_preparation: List[Tuple[str, int, str]] = field(default_factory=list)
+    renderer_in_guard_condition: List[Tuple[str, int, str]] = field(default_factory=list)
 
     def __bool__(self) -> bool:
         return bool(
@@ -136,6 +165,7 @@ class EagerDebugRenderingViolations:
             or self.unguarded_summary_in_debug_sink
             or self.render_in_dunder
             or self.unguarded_debug_preparation
+            or self.renderer_in_guard_condition
         )
 
     def describe(self) -> str:
@@ -164,6 +194,11 @@ class EagerDebugRenderingViolations:
             lines.append(
                 f"R5 {module}:{lineno}: {detail} reads the head of a sequence outside a "
                 "debug guard; wrap the call site in `if <debug available>:`"
+            )
+        for module, lineno, detail in self.renderer_in_guard_condition:
+            lines.append(
+                f"R6 {module}:{lineno}: {detail} runs in the guard condition itself; "
+                "a guard only decides whether to emit -- move the call into the message"
             )
         return "\n".join(lines)
 
@@ -275,8 +310,9 @@ def _debug_only_locals(
 
     production が同じ値を使っている場合（``smt = expr.to_smt()`` を制約に使い、
     ついでに debug にも出す）は対象外。その仕事は debug の有無に関わらず起きる
-    ので debug 側の問題ではない。判定は「その名前の読み出しが **すべて**
-    debug sink の引数の中か」で行う。
+    ので debug 側の問題ではない。判定は「その名前の読み出しが **すべて** debug
+    専用の位置（debug sink の引数、または guard 条件の後続 conjunct）にあるか」
+    で行う。
     """
 
     labels: Dict[str, Tuple[str, str]] = {}
@@ -313,6 +349,17 @@ def _debug_only_locals(
         if isinstance(call, ast.Call) and _is_debug_sink(call, renderers)
         for argument in list(call.args) + [keyword.value for keyword in call.keywords]
         for name in ast.walk(argument)
+        if isinstance(name, ast.Name)
+    }
+    # guard 条件の後続 conjunct も debug 専用の読み出し位置。
+    # ``summary = summarize_expression(expr)`` を ``if self.debug and summary:``
+    # でしか読まない形は、sink 引数だけ見ていると debug-only と判定できない。
+    in_sink |= {
+        id(name)
+        for branch in ast.walk(function)
+        if isinstance(branch, (ast.If, ast.IfExp))
+        for conjunct in debug_only_conjuncts(branch.test)
+        for name in ast.walk(conjunct)
         if isinstance(name, ast.Name)
     }
     reads: Dict[str, List[bool]] = {}
@@ -417,39 +464,87 @@ def bounded_renderer_names(root: Path = PACKAGE_ROOT) -> FrozenSet[str]:
         known |= discovered
 
 
-def _is_debug_receiver(node: ast.AST) -> bool:
-    """debug 可否を持つ受け手として認める形。
+def _receiver_path(node: ast.AST) -> Tuple[str, ...]:
+    """受け手を **根から辿った名前の列**にする。
 
-    本 package を棚卸しして出てきた形だけ:
-
-    * ``self`` / ``cls`` / ``context`` / ``strategy``（:data:`DEBUG_RECEIVERS`）
-    * その 1 段下の属性（``self.debug_reporter``）
-
-    ``other.debug`` / ``factory().debug_available()`` / ``registry[key].debug``
-    は認めない。受け手を計算する形は「flag を読むだけ」ではないため。
+    ``self`` → ``("self",)``、``self.debug_reporter`` →
+    ``("self", "debug_reporter")``。名前で辿れない受け手（``factory()`` /
+    ``registry[key]`` / 任意の式）は ``("<computed>",)`` に潰す。潰した形は
+    owner の宣言に載らないので、そのまま fail-closed になる。
     """
 
     if isinstance(node, ast.Name):
-        return node.id in DEBUG_RECEIVERS
+        return (node.id,)
     if isinstance(node, ast.Attribute):
-        return isinstance(node.value, ast.Name) and node.value.id in DEBUG_RECEIVERS
-    return False
+        inner = _receiver_path(node.value)
+        return inner + (node.attr,) if inner != COMPUTED_RECEIVER else COMPUTED_RECEIVER
+    return COMPUTED_RECEIVER
+
+
+def guard_descriptor(node: ast.AST) -> Optional[debug_render.GuardShape]:
+    """式を **canonical guard descriptor** にする（guard 形でなければ None）。
+
+    owner の :data:`DEBUG_GUARD_SHAPES` と完全一致で突き合わせるための正規形。
+    ここは「その形が guard か」を判定せず、**形を写すだけ**なので、recognizer
+    にも棚卸しにも同じものが使える（判定と観測で別実装を持たない）。
+
+    ``getattr`` は receiver / 属性名 / 既定値がすべて静的に読めるときだけ
+    その形を写し、読めない引数があれば ``("getattr", ("<computed>",), …)``
+    に潰す（宣言と一致しないので拒否される）。
+    """
+
+    if isinstance(node, ast.Name):
+        return ("name", node.id)
+    if isinstance(node, ast.Attribute):
+        return ("attr", _receiver_path(node.value), node.attr)
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "getattr":
+            if not node.keywords and 2 <= len(node.args) <= 3:
+                attribute = node.args[1]
+                default = node.args[2] if len(node.args) == 3 else None
+                if isinstance(attribute, ast.Constant) and type(attribute.value) is str:
+                    if default is None or isinstance(default, ast.Constant):
+                        return (
+                            "getattr",
+                            _receiver_path(node.args[0]),
+                            attribute.value,
+                            None if default is None else default.value,
+                        )
+            return ("getattr", COMPUTED_RECEIVER, UNREADABLE, UNREADABLE)
+        if node.args or node.keywords:
+            # 引数を取る呼び出しは「可否を答えるだけ」ではない。
+            return None
+        if isinstance(func, ast.Attribute):
+            return ("call", _receiver_path(func.value), func.attr)
+        if isinstance(func, ast.Name):
+            return ("call", (), func.id)
+    return None
+
+
+def short_circuit_atoms(node: ast.AST) -> Iterator[ast.AST]:
+    """条件式のうち、**必ず最初に評価される**位置の式を列挙する。
+
+    ``not X`` の ``X``、``A and B`` / ``A or B`` の ``A`` を辿る。2 項目以降は
+    先頭項の結果しだいなので、guard そのものの位置ではない（``x and self.debug``
+    は debug を見る前に ``x`` を評価する）。
+    """
+
+    yield node
+    if _is_negated(node):
+        yield from short_circuit_atoms(node.operand)
+    elif isinstance(node, ast.BoolOp) and node.values:
+        yield from short_circuit_atoms(node.values[0])
 
 
 def is_pure_debug_availability_test(node: ast.AST) -> bool:
-    """**debug 可否の確認そのもの**か（他の仕事を一切しない、実在する形だけ）。
+    """**debug 可否の確認そのもの**か（owner が宣言した実在形との完全一致）。
 
-    production を棚卸しして出てきた形だけを認める:
-
-    * ``debug``（純関数の引数）
-    * ``self.debug`` / ``cls.DEBUG`` / ``context.debug`` / ``strategy.debug``
-    * ``self._debug_available()`` / ``cls._debug_available()`` / ``self.debug_flag()``
-    * ``self.debug_reporter.debug_available()``
-    * ``getattr(self, "debug", False)``
-
-    受け手は :func:`_is_debug_receiver` に限る。述語は **呼び出しのときだけ**
-    述語と認める（``self._debug_available`` という method object を flag 扱い
-    しない）。``and`` / ``or`` / 比較 / 添字 / その他の式はすべて拒否する。
+    受け手・flag 名・述語名を別々の allow list で持って組み合わせると、
+    production に存在しない ``self.DEBUG`` / ``cls.debug`` /
+    ``strategy.debug_flag()`` / ``self.debug_reporter.debug_flag()`` まで
+    guard として通ってしまう。判定は :data:`DEBUG_GUARD_SHAPES` との exact
+    match だけで行い、直積は作らない。認識できない形はすべて「guard ではない」。
 
     wrapper 導出（:func:`_is_debug_guard_clause`）が使う contract。wrapper の
     guard 節は「debug 可否を見るだけ」でなければならない: ``if not
@@ -457,43 +552,23 @@ def is_pure_debug_availability_test(node: ast.AST) -> bool:
     ``expensive_check()`` を走らせるので、bounded wrapper とは呼べない。
     """
 
-    if isinstance(node, ast.Call):
-        if _called_name(node) == "getattr":
-            # ``getattr(self, "debug", False)`` だけを flag 読み出しとして認める。
-            if node.keywords or not (2 <= len(node.args) <= 3):
-                return False
-            receiver, attribute, *default = node.args
-            if not isinstance(receiver, ast.Name) or receiver.id not in DEBUG_RECEIVERS:
-                return False
-            if not isinstance(attribute, ast.Constant) or type(attribute.value) is not str:
-                return False
-            if default and not isinstance(default[0], ast.Constant):
-                return False
-            return attribute.value in DEBUG_FLAGS
-        if node.args or node.keywords:
-            return False
-        if not isinstance(node.func, ast.Attribute):
-            return False
-        return node.func.attr in DEBUG_PREDICATES and _is_debug_receiver(node.func.value)
-    if isinstance(node, ast.Attribute):
-        return node.attr in DEBUG_FLAGS and _is_debug_receiver(node.value)
-    if isinstance(node, ast.Name):
-        return node.id in DEBUG_FLAGS
-    return False
+    return guard_descriptor(node) in DEBUG_GUARD_SHAPES
 
 
 def branch_implies_debug_enabled(node: ast.AST) -> bool:
     """**この式が真なら debug が有効**と構文的に言えるか。
 
-    scanner（R1 / R3 / R5）が使う contract。``and`` は **先頭が** debug 可否の
-    ときだけ認める: 短絡評価により後続の項は debug が有効なときしか評価されない
-    ので、「debug OFF で診断用の処理が走らない」が成り立つ。順番が逆の
-    ``if expensive() and self.debug:`` は debug OFF でも ``expensive()`` を
-    走らせるため guard と認めない（production 側の ``and`` guard はすべて
-    debug を先頭に置く形へ揃えてある）。``or`` は debug が偽でも入るので不可。
+    scanner（R1 / R3 / R5 / R6）が使う contract。``and`` は **先頭が** debug
+    可否のときだけ認める: 短絡評価により後続の項は debug が有効なときしか
+    評価されないので、「debug OFF で診断用の処理が走らない」が成り立つ。
+    順番が逆の ``if expensive() and self.debug:`` は debug OFF でも
+    ``expensive()`` を走らせるため guard と認めない（production 側の ``and``
+    guard はすべて debug を先頭に置く形へ揃えてある）。``or`` は debug が偽でも
+    入るので不可。
 
     :func:`is_pure_debug_availability_test` より緩いのは意図的で、見ている
-    性質が違う（到達条件 vs guard 自体の純粋さ）。
+    性質が違う（到達条件 vs guard 自体の純粋さ）。後続 conjunct は
+    :func:`debug_only_conjuncts` が debug 専用経路として別途検査する。
     """
 
     if isinstance(node, ast.BoolOp):
@@ -505,6 +580,28 @@ def branch_implies_debug_enabled(node: ast.AST) -> bool:
     return is_pure_debug_availability_test(node)
 
 
+def debug_only_conjuncts(node: ast.AST) -> List[ast.AST]:
+    """debug atom が短絡評価で成立した **あとにだけ**評価される式。
+
+    ``if self.debug and expr.to_string():`` の ``expr.to_string()`` は branch の
+    body と同じく debug 専用の仕事なので、body と同じ規則で検査する必要がある
+    （条件式の中だから見逃す、では guard の意味が無い）。``not`` を挟んだ
+    ``if not (self.debug and expensive()): return`` も同じ（debug が有効なとき
+    だけ ``expensive()`` が走る）。
+    """
+
+    if _is_negated(node):
+        return debug_only_conjuncts(node.operand)
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.And) and node.values:
+        head, *rest = node.values
+        if is_pure_debug_availability_test(head):
+            return list(rest)
+        # ``(self.debug and a) and b`` — 入れ子でも debug が先頭なら後続は debug 専用。
+        inner = debug_only_conjuncts(head)
+        return inner + list(rest) if inner else []
+    return []
+
+
 def _is_negated(test: ast.AST) -> bool:
     return isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
 
@@ -514,7 +611,7 @@ def _always_exits(body: Sequence[ast.stmt]) -> bool:
 
 
 class _EagerDebugRenderingScanner:
-    """1 module 分の AST を走査して 5 契約（R1〜R5）の違反を集める。"""
+    """1 module 分の AST を走査して 6 契約（R1〜R6）の違反を集める。"""
 
     def __init__(
         self,
@@ -553,7 +650,7 @@ class _EagerDebugRenderingScanner:
         for statement in body:
             if isinstance(statement, ast.If) and branch_implies_debug_enabled(statement.test):
                 # `if <debug available>:` — body に入るなら debug は必ず有効。
-                self._visit_expression(statement.test, guarded=guarded)
+                self._visit_guard_condition(statement.test, guarded=guarded)
                 self._walk_body(statement.body, guarded=True)
                 self._walk_body(statement.orelse, guarded=guarded)
                 continue
@@ -563,7 +660,7 @@ class _EagerDebugRenderingScanner:
                 and branch_implies_debug_enabled(statement.test.operand)
             ):
                 # `if not <debug available>: return` — 抜けた先は debug 専用。
-                self._visit_expression(statement.test, guarded=guarded)
+                self._visit_guard_condition(statement.test, guarded=guarded)
                 self._walk_body(statement.body, guarded=False)
                 self._walk_body(statement.orelse, guarded=True)
                 if not statement.orelse and _always_exits(statement.body):
@@ -607,6 +704,55 @@ class _EagerDebugRenderingScanner:
                     self._visit_expression(value, guarded=guarded)
 
     # -- expression walk -----------------------------------------------------
+    def _visit_guard_condition(self, test: ast.AST, *, guarded: bool) -> None:
+        """guard の条件式を検査する。
+
+        ``and`` の後続 conjunct は **debug が有効なときだけ**評価されるので、
+        body と同じく debug 専用経路として扱う（条件式の中だから見逃す、では
+        guard の意味が無い）。先頭の debug atom は owner が宣言した形そのもの
+        で、禁止呼び出しも renderer も前準備も含み得ないため走査しない。
+
+        条件式は「出すかどうかを決める」だけの場所なので、後続 conjunct で
+        renderer を呼ぶ形は R6、前準備 helper を呼ぶ形は R5 として報告する
+        （禁止呼び出しは debug 専用経路の R1）。
+        """
+
+        trailing = debug_only_conjuncts(test)
+        if not trailing:
+            self._visit_expression(test, guarded=guarded)
+            return
+        for conjunct in trailing:
+            self._visit_expression(conjunct, guarded=True)
+            self._flag_guard_condition_work(conjunct)
+
+    def _flag_guard_condition_work(self, node: ast.AST) -> None:
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Lambda):
+                continue
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                # 一度局所名へ入れてから条件式で読む形も同じ扱い（代入 1 段）。
+                kind, label = self.debug_only_labels.get(sub.id, ("", ""))
+                if kind == "forbidden":
+                    self.violations.render_in_debug_guard.append(
+                        (self.module, sub.lineno, f"{sub.id} = {label}")
+                    )
+                elif kind == "renderer":
+                    self.violations.renderer_in_guard_condition.append(
+                        (self.module, sub.lineno, f"{sub.id} = {label}")
+                    )
+                continue
+            if not isinstance(sub, ast.Call):
+                continue
+            name = _called_name(sub)
+            if name in self.renderers:
+                self.violations.renderer_in_guard_condition.append(
+                    (self.module, sub.lineno, f"{name}()")
+                )
+            elif name in PREPARATION_FUNCTIONS and self.module != CONTRACT_OWNER_MODULE:
+                self.violations.unguarded_debug_preparation.append(
+                    (self.module, sub.lineno, f"{name}()")
+                )
+
     def _visit_expression(self, node: ast.AST, *, guarded: bool) -> None:
         for sub in ast.walk(node):
             if isinstance(sub, ast.Lambda):
@@ -726,6 +872,11 @@ def test_debug_messages_with_summaries_are_guarded():
 def test_repr_and_str_do_not_full_render():
     violations = scan_package()
     assert not violations.render_in_dunder, violations.describe()
+
+def test_no_renderer_in_a_guard_condition():
+    violations = scan_package()
+    assert not violations.renderer_in_guard_condition, violations.describe()
+
 
 def test_no_unguarded_debug_preparation():
     violations = scan_package()
@@ -1213,7 +1364,7 @@ def test_wrapper_arguments_must_be_cheap(call, accepted, label):
     "test_source, pure, label",
     [
         ('getattr(self, "debug", False)', True, "flag 読み出し"),
-        ('getattr(self, "debug")', True, "default 無し"),
+        ('getattr(self, "debug")', False, "default 無し（production に無い形）"),
         ('getattr(factory(), "debug", False)', False, "receiver が任意式"),
         ('getattr(self, "debug", expensive_default())', False, "default が任意式"),
         ('getattr(self, name, False)', False, "属性名が定数でない"),
@@ -1310,21 +1461,22 @@ def test_wrapper_call_target_and_arguments_are_fail_closed(call, accepted, label
     assert bool(_wrappers_in(source)) is accepted, label
 
 
-@pytest.mark.parametrize(
-    "atom",
-    [
-        "debug",
-        "self.debug",
-        "cls.DEBUG",
-        "context.debug",
-        "strategy.debug",
-        "self._debug_available()",
-        "cls._debug_available()",
-        "self.debug_flag()",
-        "self.debug_reporter.debug_available()",
-        'getattr(self, "debug", False)',
-    ],
-)
+#: production を棚卸しして出てきた guard atom（owner の宣言と一致すること）。
+_PACKAGE_GUARD_ATOMS = [
+    "debug",
+    "self.debug",
+    "cls.DEBUG",
+    "context.debug",
+    "strategy.debug",
+    "self._debug_available()",
+    "cls._debug_available()",
+    "self.debug_flag()",
+    "self.debug_reporter.debug_available()",
+    'getattr(self, "debug", False)',
+]
+
+
+@pytest.mark.parametrize("atom", _PACKAGE_GUARD_ATOMS)
 def test_every_guard_atom_the_package_actually_uses_is_accepted(atom):
     """production を棚卸しして出てきた形（これだけが許可集合）。"""
 
@@ -1348,39 +1500,263 @@ def test_an_unknown_guard_atom_is_refused(atom, label):
     assert not is_pure_debug_availability_test(ast.parse(atom, mode="eval").body), label
 
 
-def _guard_receiver_roots() -> FrozenSet[str]:
-    """production で実際に guard atom の受け手になっている根の名前。"""
+@pytest.mark.parametrize(
+    "atom, label",
+    [
+        ("self.DEBUG", "flag 名だけ入れ替えた（実在しない）"),
+        ("cls.debug", "受け手だけ入れ替えた（実在しない）"),
+        ("context.DEBUG", "受け手と flag の組み合わせが実在しない"),
+        ("strategy.debug_flag()", "述語を持たない受け手"),
+        ("context._debug_available()", "述語を持たない受け手"),
+        ("self.debug_reporter.debug_flag()", "受け手と述語の組み合わせが実在しない"),
+        ('getattr(strategy, "DEBUG", False)', "getattr の受け手と属性が実在しない"),
+        ("self.cache.debug_available()", "未知の受け手 path"),
+        ("self.debug_reporter.owner.debug_available()", "受け手 path が 1 段深い"),
+        ("cls.debug_reporter.debug_available()", "受け手 path の根が違う"),
+    ],
+)
+def test_a_shape_that_only_exists_as_a_combination_is_refused(atom, label):
+    """受け手 × flag × 述語の直積を作らない。
 
-    roots = set()
-    for path in _iter_source_files(PACKAGE_ROOT):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if not is_pure_debug_availability_test(node):
-                continue
-            receiver = None
-            if isinstance(node, ast.Attribute):
-                receiver = node.value
-            elif isinstance(node, ast.Call):
-                if _called_name(node) == "getattr":
-                    receiver = node.args[0]
-                elif isinstance(node.func, ast.Attribute):
-                    receiver = node.func.value
-            while isinstance(receiver, ast.Attribute):
-                receiver = receiver.value
-            if isinstance(receiver, ast.Name):
-                roots.add(receiver.id)
-    return frozenset(roots)
-
-
-def test_the_declared_receivers_are_exactly_the_ones_the_package_uses():
-    """allow list が実測とずれたら FAIL（黙って広がらないように縛る）。
-
-    増やす方向のずれは「使っていない受け手まで guard と認めている」＝
-    contract の緩み、減る方向のずれは「消えた形が残っている」＝ stale。
-    どちらも owner (:data:`DEBUG_AVAILABILITY_RECEIVERS`) を直す合図。
+    3 つを別々の allow list で持つと、production に無い組み合わせまで guard と
+    して通る。owner は **実在する形そのもの**を宣言し、判定は完全一致だけ。
     """
 
-    assert _guard_receiver_roots() == DEBUG_RECEIVERS
+    assert not is_pure_debug_availability_test(ast.parse(atom, mode="eval").body), label
+
+
+def test_the_accepted_atoms_cover_every_declared_shape():
+    """上の「実在する形」list と owner の宣言がずれていないこと。"""
+
+    accepted = {
+        guard_descriptor(ast.parse(atom, mode="eval").body)
+        for atom in _PACKAGE_GUARD_ATOMS
+    }
+    assert accepted == set(DEBUG_GUARD_SHAPES)
+
+
+@pytest.mark.parametrize(
+    "test_source, expected, label",
+    [
+        (
+            "if self.debug and expr.to_string():\n    pass\n",
+            ("render_in_debug_guard", "to_string()"),
+            "後続 conjunct の full render は R1",
+        ),
+        (
+            "if self.debug and get_simplified_string(cond):\n    pass\n",
+            ("render_in_debug_guard", "get_simplified_string()"),
+            "後続 conjunct の重い helper も R1",
+        ),
+        (
+            "if self.debug and summarize_expression(expr):\n    pass\n",
+            ("renderer_in_guard_condition", "summarize_expression()"),
+            "後続 conjunct の renderer は R6",
+        ),
+        (
+            "if self.debug and bounded_items(items):\n    pass\n",
+            ("unguarded_debug_preparation", "bounded_items()"),
+            "後続 conjunct の前準備は R5",
+        ),
+    ],
+)
+def test_work_after_the_debug_atom_in_an_and_guard_is_checked(test_source, expected, label):
+    """``and`` の後続 conjunct は debug 専用経路として検査する。
+
+    branch が guarded と判定されても、条件式の中でやっている仕事は見逃さない。
+    """
+
+    source = "def f(self, expr, cond, items):\n" + "".join(
+        "    " + line if line.strip() else line for line in test_source.splitlines(True)
+    )
+    violations = scan_source("sample", source)
+    bucket, detail = expected
+    assert [entry[2] for entry in getattr(violations, bucket)] == [detail], label
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "self.debug and items",
+        "self.debug and count > 0",
+        "self.debug and expr is not None",
+        "self._debug_available() and tracked",
+    ],
+)
+def test_a_cheap_second_conjunct_is_still_fine(condition):
+    """production の正当な形（安い真偽判定）は通す。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, items, tracked, count):\n"
+        f"    if {condition}:\n"
+        "        self._debug_print('x')\n",
+    )
+    assert not violations, violations.describe()
+
+
+def test_a_renderer_read_only_in_a_guard_condition_is_caught():
+    """代入 1 段で条件式へ渡す形も同じ（debug OFF でも renderer は走る）。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    summary = summarize_expression(expr)\n"
+        "    if self.debug and summary:\n"
+        "        self._debug_print(summary)\n",
+    )
+    assert [entry[2] for entry in violations.renderer_in_guard_condition] == [
+        "summary = summarize_expression()"
+    ]
+
+
+def test_a_forbidden_call_read_only_in_a_guard_condition_is_caught():
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    rendered = expr.to_string()\n"
+        "    if self.debug and rendered:\n"
+        "        self._debug_print(rendered)\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_guard] == [
+        "rendered = to_string()"
+    ]
+
+
+def test_a_value_production_also_uses_is_not_a_guard_condition_problem():
+    """production も読む値は対象外（過検出で production を書き換えない）。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, solver):\n"
+        "    smt = expr.to_smt()\n"
+        "    solver.add(smt)\n"
+        "    if self.debug and smt:\n"
+        "        self._debug_print('x')\n",
+    )
+    assert not violations.renderer_in_guard_condition
+    assert not violations.render_in_debug_guard
+
+
+def test_a_negated_and_guard_also_checks_the_work_after_the_atom():
+    """``if not (self.debug and heavy()): return`` も debug ON でだけ heavy が走る。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    if not (self.debug and expr.to_string()):\n"
+        "        return\n"
+        "    self._debug_print('x')\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_guard] == ["to_string()"]
+
+
+def observed_guard_shapes(root: Path = PACKAGE_ROOT) -> Dict[debug_render.GuardShape, str]:
+    """production の **guard 候補**を、recognizer も allow list も使わずに集める。
+
+    「recognizer が認めたものを数える」と、未知の guard が増えても recognizer が
+    拒否した時点で観測から消え、棚卸し test が PASS してしまう（契約が実測から
+    ずれていても気付けない）。そこで、まず AST から候補を独立に取り出し、
+    canonical descriptor にしてから owner の宣言と突き合わせる。
+
+    候補の位置は「短絡評価で必ず最初に評価される」ところ（:func:`short_circuit_atoms`）:
+    ``if <expr>:`` / ``if not <expr>: return`` / ``and`` ・ ``or`` の先頭項。
+    そのうち **名前に debug を含む** descriptor だけを候補とする（名前で絞るのは
+    観測の範囲を決めるためで、guard かどうかの判定ではない）。
+
+    返り値は descriptor → 最初に見つけた場所（FAIL したとき直せるように）。
+    """
+
+    observed: Dict[debug_render.GuardShape, str] = {}
+    for path in _iter_source_files(root):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.If, ast.IfExp)):
+                continue
+            for atom in short_circuit_atoms(node.test):
+                shape = guard_descriptor(atom)
+                if shape is None:
+                    continue
+                name = shape[1] if shape[0] == "name" else shape[2]
+                if "debug" not in str(name).lower():
+                    continue
+                observed.setdefault(
+                    shape, f"{path.relative_to(root)}:{node.lineno}"
+                )
+    return observed
+
+
+def test_the_declared_guard_shapes_are_exactly_the_ones_the_package_has():
+    """宣言した exact shape と実測がずれたら FAIL（両方向）。
+
+    * production に未知の debug guard を 1 つ足す → 観測にだけ現れて FAIL。
+      足した人は「guard として認める」(:data:`DEBUG_GUARD_SHAPES`) か
+      「名前は debug でも guard ではない」(:data:`DEBUG_SHAPED_NON_GUARDS`) かを
+      owner で明示することになる。
+    * production から消えた形が宣言に残っている → 宣言にだけ現れて FAIL。
+
+    受け手 / flag 名 / 述語名の直積ではなく **形そのもの**を宣言しているので、
+    ``self.DEBUG`` や ``strategy.debug_flag()`` のような実在しない組み合わせは
+    そもそも宣言に現れない。
+    """
+
+    observed = observed_guard_shapes()
+    declared = DEBUG_GUARD_SHAPES | DEBUG_SHAPED_NON_GUARDS
+    missing = {shape: where for shape, where in observed.items() if shape not in declared}
+    stale = declared - set(observed)
+    assert not missing, f"undeclared debug guard shapes: {missing}"
+    assert not stale, f"declared shapes no longer in the package: {sorted(stale)}"
+
+
+def test_the_two_declared_sets_do_not_overlap():
+    """同じ形を「guard」と「guard ではない」の両方に置かない。"""
+
+    assert not (DEBUG_GUARD_SHAPES & DEBUG_SHAPED_NON_GUARDS)
+
+
+def test_a_new_unknown_guard_shape_would_be_noticed(tmp_path):
+    """棚卸しが non-vacuous か: 未知の形を 1 つ置いたら観測に現れる。"""
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "sample.py").write_text(
+        "def f(self):\n"
+        "    if self.cache.debug_available():\n"
+        "        pass\n"
+        "    if self.debug:\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    observed = observed_guard_shapes(package)
+    assert ("call", ("self", "cache"), "debug_available") in observed
+    assert ("call", ("self", "cache"), "debug_available") not in DEBUG_GUARD_SHAPES
+    # 既知の形は観測されても宣言済みなので FAIL の原因にならない。
+    assert ("attr", ("self",), "debug") in DEBUG_GUARD_SHAPES
+
+
+def test_the_inventory_does_not_go_through_the_recognizer(tmp_path):
+    """棚卸しは recognizer に依存しない（拒否された形も観測に残る）。"""
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "sample.py").write_text(
+        "def f(self, registry, key, factory, other):\n"
+        "    if registry[key].debug:\n"
+        "        pass\n"
+        "    if factory().debug_available():\n"
+        "        pass\n"
+        "    if other.debug:\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    observed = set(observed_guard_shapes(package))
+    assert observed == {
+        ("attr", COMPUTED_RECEIVER, "debug"),
+        ("call", COMPUTED_RECEIVER, "debug_available"),
+        ("attr", ("other",), "debug"),
+    }
+    # どれも recognizer は拒否する。観測されることと認めることは別。
+    assert not observed & DEBUG_GUARD_SHAPES
 
 
 @pytest.mark.parametrize(

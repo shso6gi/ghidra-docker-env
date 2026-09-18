@@ -24,9 +24,8 @@ debug message に式・条件を載せる手段は本 module だけが持つ。`
 * :data:`UNBOUNDED_RENDER_CALLS` — debug message に入れてはいけない描画 method
 * :data:`HEAVY_DIAGNOSTIC_CALLS` — debug 表示から呼んではいけない重い helper
 * :data:`BOUNDED_DEBUG_PREPARATION` — guard の中でだけ呼んでよい前準備 helper
-* :data:`DEBUG_AVAILABILITY_PREDICATES` — 出力可否を答えるだけの述語
-* :data:`DEBUG_AVAILABILITY_FLAGS` — 出力可否を表す属性名
-* :data:`DEBUG_AVAILABILITY_RECEIVERS` — その述語 / flag を持つ受け手の根
+* :data:`DEBUG_GUARD_SHAPES` — debug 可否の確認として認める形（exact descriptor）
+* :data:`DEBUG_SHAPED_NON_GUARDS` — 名前は debug でも可否の確認ではない形
 
 family 側の wrapper（``_debug_expr_summary`` など）は本 module の renderer へ
 委譲するだけなので名前を数え上げない。静的 guard が委譲を辿って同一視する。
@@ -552,26 +551,53 @@ HEAVY_DIAGNOSTIC_CALLS: FrozenSet[str] = frozenset({
     "semantic_key",
 })
 
-#: 出力可否を答えるだけの述語（呼んでも何も描画しない）。
-DEBUG_AVAILABILITY_PREDICATES: FrozenSet[str] = frozenset({
-    "debug_available",
-    "_debug_available",
-    "debug_flag",
+#: guard の形を表す **canonical descriptor** の型。
+#:
+#: * ``("name", <名前>)`` — ``debug``（純関数の引数）
+#: * ``("attr", <受け手の path>, <属性名>)`` — ``self.debug``
+#: * ``("call", <受け手の path>, <述語名>)`` — ``self._debug_available()``
+#: * ``("getattr", <受け手の path>, <属性名>, <既定値>)`` — ``getattr(self, "debug", False)``
+#:
+#: 受け手の path は根から辿った名前の列（``self.debug_reporter`` なら
+#: ``("self", "debug_reporter")``）。名前で辿れない受け手（``factory()`` /
+#: ``registry[key]``）は ``("<computed>",)`` に潰れるので、宣言と一致しない。
+GuardShape = Tuple[Any, ...]
+
+#: **debug 可否の確認そのもの**として認める形の全体。
+#:
+#: 受け手・flag 名・述語名を別々の集合で持って組み合わせると、production に
+#: 存在しない形（``self.DEBUG`` / ``cls.debug`` / ``strategy.debug_flag()`` /
+#: ``self.debug_reporter.debug_flag()`` …）まで guard として通ってしまう。
+#: そこで **実在する形そのもの**を exact descriptor で並べる。静的 guard は
+#: この集合との完全一致だけで判定し、直積は作らない。
+#:
+#: 足すときは「production に実際にその形を書いてから」。静的 guard 側の
+#: 棚卸し test（recognizer を使わずに AST から候補を集める）が、宣言と実測の
+#: ずれを増減どちらの方向でも FAIL させる。
+DEBUG_GUARD_SHAPES: FrozenSet[GuardShape] = frozenset({
+    ("name", "debug"),
+    ("attr", ("self",), "debug"),
+    ("attr", ("cls",), "DEBUG"),
+    ("attr", ("context",), "debug"),
+    ("attr", ("strategy",), "debug"),
+    ("call", ("self",), "_debug_available"),
+    ("call", ("cls",), "_debug_available"),
+    ("call", ("self",), "debug_flag"),
+    ("call", ("self", "debug_reporter"), "debug_available"),
+    ("getattr", ("self",), "debug", False),
 })
 
-#: 出力可否を表す属性。guard 節の形を静的 guard が判定するのに使う。
-DEBUG_AVAILABILITY_FLAGS: FrozenSet[str] = frozenset({"debug", "DEBUG"})
-
-#: debug 可否を持つ受け手として認める **根の名前**。本 package で実際に
-#: 使われている形（``self`` / ``cls`` / 純関数へ渡す ``context`` /
-#: strategy facade の ``strategy``）だけを並べる。``other.debug`` のような
-#: 任意の受け手を guard と誤認しないための allow list なので、新しい受け手が
-#: 要るときだけここへ足す（静的 guard はこれ以外を guard と認めない）。
-DEBUG_AVAILABILITY_RECEIVERS: FrozenSet[str] = frozenset({
-    "self",
-    "cls",
-    "context",
-    "strategy",
+#: 名前に ``debug`` を含むが **debug 可否の確認ではない** 形。
+#:
+#: 出力の抑止状態（``_debug_suppressed``）や診断 payload の有無
+#: (``debug_trace`` / ``pairwise_debug_stats``) を見ているだけで、「ここへ
+#: 入ったら debug が有効」とは言えない。棚卸し test が「宣言し忘れ」と
+#: 区別できるよう、**意図的に guard ではない**ものを明示する。
+DEBUG_SHAPED_NON_GUARDS: FrozenSet[GuardShape] = frozenset({
+    ("attr", ("self",), "_debug_suppressed"),
+    ("attr", ("cls",), "_debug_suppressed"),
+    ("attr", ("self",), "debug_trace"),
+    ("attr", ("self",), "pairwise_debug_stats"),
 })
 
 #: debug message を組み立てる **前準備** の helper。描画はしないが、列を
