@@ -47,7 +47,17 @@ guard ではない形（``self._debug_suppressed`` 等）は
 宣言が実測とずれないよう、:func:`observed_guard_shapes` は **recognizer を
 通さずに** production の AST から候補を集め、
 :func:`test_the_declared_guard_shapes_are_exactly_the_ones_the_package_has` が
-両方向のずれ（未宣言 / stale）を FAIL にする。
+両方向のずれ（未宣言 / stale）を FAIL にする。descriptor 文法に落とせない形
+（``self.debug is True`` / ``debug_available(config)``）も
+:func:`unsupported_guard_descriptor` で残すので、**文法の外側でも fail-closed**。
+
+**renderer / 前準備を呼んでよい対象も exact shape**（:data:`DEBUG_RENDER_CALL_TARGETS`）。
+任意の Attribute chain を pure とみなすと ``self.expensive_property.summarize_expression(x)``
+のように property / descriptor 経由で任意処理が起動する形まで「有界な描画」に
+なってしまう。実在するのは素の関数呼び出しと ``self`` / ``cls`` 束縛 method、
+reporter 1 段だけ。契約の外で呼んだ renderer は **``unsafe_renderer``** として、
+guard の中でも、局所変数を挟んでも拒否する（:func:`_summary_call`）。
+renderer 認識・wrapper 導出・代入追跡はこの 1 つの判定を共有する。
 
 **guard の判定は 2 つの別契約**（見ている性質が違う）:
 
@@ -120,9 +130,14 @@ OWNED_SUMMARY_FUNCTIONS = debug_render.BOUNDED_DEBUG_RENDERERS
 #: 通るので、owner は実在する形そのものを宣言する。
 DEBUG_GUARD_SHAPES = debug_render.DEBUG_GUARD_SHAPES
 
-#: 名前は debug でも可否の確認ではない形（抑止状態・診断 payload の有無）。
+#: 名前は debug でも可否の確認ではない形（抑止状態・診断 payload の有無など）。
 #: 棚卸し test が「宣言し忘れ」と区別するために owner が明示する。
 DEBUG_SHAPED_NON_GUARDS = debug_render.DEBUG_SHAPED_NON_GUARDS
+
+#: bounded renderer / 前準備 helper を呼んでよい対象の形。任意の Attribute
+#: chain を許すと property / descriptor 経由の任意処理が通るので、実在する
+#: 形だけを owner が宣言する。
+DEBUG_RENDER_CALL_TARGETS = debug_render.DEBUG_RENDER_CALL_TARGETS
 
 #: 名前に ``debug`` を含むが sink ではない述語（呼んでも何も出力しない）。
 #: 契約から導出するので、ここで名前を並べ直さない。
@@ -241,21 +256,38 @@ def _render_call_label(node: ast.AST) -> str:
     return ""
 
 
-def _summary_call_label(node: ast.AST, renderers: FrozenSet[str]) -> str:
-    """bounded renderer の呼び出しならその名前。
+def _summary_call(node: ast.AST, renderers: FrozenSet[str]) -> Tuple[str, str]:
+    """renderer 呼び出しを **種別つき**で返す（``(種別, 表示)``）。
 
-    呼び出し対象も :func:`_is_pure_call_target` に限る。
-    ``expensive_factory().summarize_expression(x)`` は renderer 契約の外
-    （receiver の構築で任意処理が走るので「有界な描画」と言えない）。
+    * ``("renderer", "summarize_expression()")`` — 宣言された対象で呼んでいる。
+      有界なので debug guard の中でなら使ってよい（R3）。
+    * ``("unsafe_renderer", "<computed>.summarize_expression()")`` — renderer の
+      名前だが対象が契約の外（``expensive_factory().summarize_expression(x)`` /
+      ``self.expensive_property.summarize_expression(x)``）。receiver の構築で
+      任意処理が走り得るので「有界な描画」とは言えず、guard の中でも不可。
+    * ``("", "")`` — renderer ではない。
+
+    種別を分けるのは、名前だけで renderer と認めて対象を捨てると、局所変数を
+    1 つ挟むだけで契約を抜けられるため（``s = factory().summarize_expression(x)``
+    → ``self._debug_print(s)``）。:func:`_debug_only_locals` は同じ種別で
+    追跡する。
     """
 
-    if (
-        isinstance(node, ast.Call)
-        and _called_name(node) in renderers
-        and _is_pure_call_target(node.func)
-    ):
-        return f"{_called_name(node)}()"
-    return ""
+    if not isinstance(node, ast.Call):
+        return ("", "")
+    name = _called_name(node)
+    if name not in renderers:
+        return ("", "")
+    if _is_declared_render_target(node.func):
+        return ("renderer", f"{name}()")
+    return ("unsafe_renderer", f"<computed>.{name}()")
+
+
+def _summary_call_label(node: ast.AST, renderers: FrozenSet[str]) -> str:
+    """宣言された対象で呼ばれた bounded renderer ならその名前（R3 用）。"""
+
+    kind, label = _summary_call(node, renderers)
+    return label if kind == "renderer" else ""
 
 
 def _is_debug_sink(node: ast.Call, renderers: FrozenSet[str]) -> bool:
@@ -278,20 +310,43 @@ def _is_simple_argument(node: ast.AST) -> bool:
     return isinstance(node, (ast.Name, ast.Constant))
 
 
-def _is_pure_call_target(func: ast.AST) -> bool:
-    """委譲先の呼び出し対象として認める形。
+def call_target_shape(func: ast.AST) -> Optional[debug_render.RenderCallTarget]:
+    """呼び出し対象を canonical な形にする（表せなければ None）。
 
-    名前そのもの（``summarize_expression``）か、**名前を根とする属性の連なり**
-    （``self._debug_reporter.debug_expr_summary``）だけ。``factory().render``・
-    ``registry[key].render`` のように receiver 側で計算する形は拒否する
-    （``_called_name`` は末尾の属性名しか見ないので、ここで受け止める）。
+    ``summarize_expression`` → ``("name",)``、
+    ``self._debug_expr_summary`` → ``("attr", "self", ())``、
+    ``self._debug_reporter.debug_expr_summary`` →
+    ``("attr", "self", ("_debug_reporter",))``。``factory().render`` /
+    ``registry[key].render`` のように receiver を計算する形は None。
     """
 
     if isinstance(func, ast.Name):
-        return True
+        return ("name",)
     if isinstance(func, ast.Attribute):
-        return _is_pure_call_target(func.value)
-    return False
+        path: List[str] = []
+        node: ast.AST = func.value
+        while isinstance(node, ast.Attribute):
+            path.append(node.attr)
+            node = node.value
+        if isinstance(node, ast.Name):
+            return ("attr", node.id, tuple(reversed(path)))
+    return None
+
+
+def _is_declared_render_target(func: ast.AST) -> bool:
+    """renderer / 前準備 / wrapper 委譲を呼んでよい対象か。
+
+    owner の :data:`DEBUG_RENDER_CALL_TARGETS` との完全一致。任意の
+    Attribute chain を許すと ``self.expensive_property.summarize_expression(x)``
+    のように **property / descriptor 経由で任意処理が起動する**形まで「有界な
+    描画」として通る。本 package に実在するのは素の関数呼び出しと
+    ``self`` / ``cls`` に束縛された method、および reporter 1 段だけなので、
+    それ以外は fail-closed にする。
+
+    renderer 認識・wrapper 導出・代入追跡がこの 1 か所を共有する。
+    """
+
+    return call_target_shape(func) in DEBUG_RENDER_CALL_TARGETS
 
 
 def _debug_only_locals(
@@ -306,6 +361,8 @@ def _debug_only_locals(
     data-flow は要らない。種別は 2 つ:
 
     * ``"forbidden"`` — 禁止された呼び出し（R2。guard の有無に関わらず不可）
+    * ``"unsafe_renderer"`` — renderer の名前だが対象が契約の外（R2 / R6。
+      receiver の構築で任意処理が走り得るので guard の中でも不可）
     * ``"renderer"`` — 有界 renderer（R3。guard の外で組み立ててはいけない）
 
     production が同じ値を使っている場合（``smt = expr.to_smt()`` を制約に使い、
@@ -332,9 +389,12 @@ def _debug_only_locals(
             if forbidden:
                 entry = ("forbidden", forbidden)
                 break
-            summary = _summary_call_label(inner, renderers)
-            if summary and not entry[0]:
-                entry = ("renderer", summary)
+            kind, label = _summary_call(inner, renderers)
+            # unsafe は renderer より強い（対象が契約の外なので guard 内でも不可）。
+            if kind == "unsafe_renderer":
+                entry = (kind, label)
+            elif kind == "renderer" and not entry[0]:
+                entry = (kind, label)
         if not entry[0]:
             continue
         for target in targets:
@@ -423,7 +483,7 @@ def _delegates_to_a_bounded_renderer(
     if not isinstance(last, ast.Return) or not isinstance(last.value, ast.Call):
         return False
     call = last.value
-    if _called_name(call) not in known or not _is_pure_call_target(call.func):
+    if _called_name(call) not in known or not _is_declared_render_target(call.func):
         return False
     if any(isinstance(argument, ast.Starred) for argument in call.args):
         return False  # ``*items``
@@ -522,19 +582,103 @@ def guard_descriptor(node: ast.AST) -> Optional[debug_render.GuardShape]:
     return None
 
 
-def short_circuit_atoms(node: ast.AST) -> Iterator[ast.AST]:
-    """条件式のうち、**必ず最初に評価される**位置の式を列挙する。
+def guard_shape_source(shape: debug_render.GuardShape) -> str:
+    """canonical descriptor を、それを表す Python 式に戻す。
 
-    ``not X`` の ``X``、``A and B`` / ``A or B`` の ``A`` を辿る。2 項目以降は
-    先頭項の結果しだいなので、guard そのものの位置ではない（``x and self.debug``
-    は debug を見る前に ``x`` を評価する）。
+    owner が宣言した形から test 入力を作るための逆写像。test 側で production の
+    guard 一覧を書き写さないで済むので、新しい guard を足すときに触るのは
+    production と owner contract の 2 か所だけになる。
+
+    ``("unsupported", ...)``（descriptor 文法の外の形）は式に戻せないので
+    :class:`ValueError`。
     """
 
-    yield node
+    kind = shape[0]
+    if kind == "name":
+        return shape[1]
+    if kind == "attr":
+        return ".".join(shape[1] + (shape[2],))
+    if kind == "call":
+        prefix = ".".join(shape[1])
+        return f"{prefix}.{shape[2]}()" if prefix else f"{shape[2]}()"
+    if kind == "getattr":
+        receiver = ".".join(shape[1])
+        if shape[3] is None:
+            return f'getattr({receiver}, "{shape[2]}")'
+        return f'getattr({receiver}, "{shape[2]}", {shape[3]!r})'
+    raise ValueError(f"not a source-representable guard shape: {shape!r}")
+
+
+def short_circuit_head(node: ast.AST) -> ast.AST:
+    """条件式のうち **必ず最初に評価される** 末端の式。
+
+    ``not X`` の ``X``、``A and B`` / ``A or B`` の ``A`` を辿り切る。2 項目
+    以降は先頭項の結果しだいなので guard の位置ではない（``x and self.debug``
+    は debug を見る前に ``x`` を評価する）。
+
+    ``not``・boolean 演算子そのものは合成なので観測の対象にしない（中身の末端を
+    見れば足りる）。棚卸しが同じ式を何通りにも数えないための正規化でもある。
+    """
+
     if _is_negated(node):
-        yield from short_circuit_atoms(node.operand)
-    elif isinstance(node, ast.BoolOp) and node.values:
-        yield from short_circuit_atoms(node.values[0])
+        return short_circuit_head(node.operand)
+    if isinstance(node, ast.BoolOp) and node.values:
+        return short_circuit_head(node.values[0])
+    return node
+
+
+def _mentions_debug(text: object) -> bool:
+    return "debug" in str(text).lower()
+
+
+def _debug_names_in(node: ast.AST) -> Tuple[str, ...]:
+    """式の中に現れる **debug を含む名前**（識別子・属性名・文字列定数）。"""
+
+    found = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and _mentions_debug(sub.id):
+            found.add(sub.id)
+        elif isinstance(sub, ast.Attribute) and _mentions_debug(sub.attr):
+            found.add(sub.attr)
+        elif (
+            isinstance(sub, ast.Constant)
+            and type(sub.value) is str
+            and _mentions_debug(sub.value)
+        ):
+            found.add(sub.value)
+    return tuple(sorted(found))
+
+
+def unsupported_guard_descriptor(node: ast.AST) -> debug_render.GuardShape:
+    """canonical descriptor に落とせない **debug らしい式**の descriptor。
+
+    比較（``self.debug is True``）や引数付き呼び出し（``debug_available(config)``）
+    は :func:`guard_descriptor` の文法の外にある。これを「descriptor に
+    できないから」と捨てると、未知の guard を production に足しても棚卸しに
+    現れず、contract のずれに気付けない（= 文法の外側で fail-open になる）。
+
+    そこで形を残す: ``("unsupported", <AST 種別>, <debug を含む名前>,
+    <直下の子のうち debug らしい descriptor>)``。子の descriptor まで見るのは、
+    ``self.debug is True``（``self.debug`` を読んでいる）と
+    ``type(debug) is not bool``（読んでいない）を別物として扱うため。debug と
+    無関係な名前は入れないので、周りの局所名を変えただけでは descriptor は
+    変わらない。
+    """
+
+    children = []
+    for child in ast.iter_child_nodes(node):
+        descriptor = guard_descriptor(child)
+        if descriptor is None:
+            continue
+        name = descriptor[1] if descriptor[0] == "name" else descriptor[2]
+        if _mentions_debug(name):
+            children.append(descriptor)
+    return (
+        "unsupported",
+        type(node).__name__,
+        _debug_names_in(node),
+        tuple(children),
+    )
 
 
 def is_pure_debug_availability_test(node: ast.AST) -> bool:
@@ -736,7 +880,7 @@ class _EagerDebugRenderingScanner:
                     self.violations.render_in_debug_guard.append(
                         (self.module, sub.lineno, f"{sub.id} = {label}")
                     )
-                elif kind == "renderer":
+                elif kind in ("renderer", "unsafe_renderer"):
                     self.violations.renderer_in_guard_condition.append(
                         (self.module, sub.lineno, f"{sub.id} = {label}")
                     )
@@ -784,24 +928,17 @@ class _EagerDebugRenderingScanner:
                         self.violations.unguarded_summary_in_debug_sink.append(
                             (self.module, sub.lineno, f"{_called_name(sub)}(... {summary} ...)")
                         )
-                    if (
-                        isinstance(inner, ast.Call)
-                        and _called_name(inner) in self.renderers
-                        and not _is_pure_call_target(inner.func)
-                    ):
-                        # renderer の名前でも、受け手を計算して呼ぶ形は
-                        # 「有界な描画」ではない（receiver 構築が任意処理）。
+                    call_kind, call_label = _summary_call(inner, self.renderers)
+                    if call_kind == "unsafe_renderer":
+                        # renderer の名前でも、対象が契約の外なら「有界な描画」
+                        # ではない（receiver の構築が任意処理）。
                         self.violations.render_in_debug_sink.append(
-                            (
-                                self.module,
-                                sub.lineno,
-                                f"{_called_name(sub)}(... <computed>.{_called_name(inner)}() ...)",
-                            )
+                            (self.module, sub.lineno, f"{_called_name(sub)}(... {call_label} ...)")
                         )
                     if isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load):
                         kind, label = self.debug_only_labels.get(inner.id, ("", ""))
                         detail = f"{_called_name(sub)}(... {inner.id} = {label} ...)"
-                        if kind == "forbidden":
+                        if kind in ("forbidden", "unsafe_renderer"):
                             self.violations.render_in_debug_sink.append(
                                 (self.module, sub.lineno, detail)
                             )
@@ -1445,7 +1582,10 @@ def test_a_renderer_result_production_also_reads_is_not_a_debug_problem():
     "call, accepted, label",
     [
         ("summarize_widget(widget)", True, "直接呼び出し"),
-        ("self.renderer.summarize_widget(widget)", True, "名前を根とする属性の連なり"),
+        ("self.summarize_widget(widget)", True, "self に束縛された method"),
+        ("self._debug_reporter.summarize_widget(widget)", True, "宣言された reporter 1 段"),
+        ("self.renderer.summarize_widget(widget)", False, "未宣言の受け手（property かもしれない）"),
+        ("self.expensive_property.summarize_widget(widget)", False, "descriptor 経由"),
         ("expensive_factory().summarize_widget(widget)", False, "receiver で計算する"),
         ("registry[key].summarize_widget(widget)", False, "receiver が添字"),
         ("summarize_widget(self.expensive_property)", False, "引数が属性参照（descriptor）"),
@@ -1461,26 +1601,23 @@ def test_wrapper_call_target_and_arguments_are_fail_closed(call, accepted, label
     assert bool(_wrappers_in(source)) is accepted, label
 
 
-#: production を棚卸しして出てきた guard atom（owner の宣言と一致すること）。
-_PACKAGE_GUARD_ATOMS = [
-    "debug",
-    "self.debug",
-    "cls.DEBUG",
-    "context.debug",
-    "strategy.debug",
-    "self._debug_available()",
-    "cls._debug_available()",
-    "self.debug_flag()",
-    "self.debug_reporter.debug_available()",
-    'getattr(self, "debug", False)',
-]
+#: owner が宣言した形（descriptor）から test 入力を作る。ここで production の
+#: guard を書き写さない（書き写すと production / owner / test の 3 か所管理になる）。
+_DECLARED_GUARD_SHAPES = sorted(DEBUG_GUARD_SHAPES, key=repr)
 
 
-@pytest.mark.parametrize("atom", _PACKAGE_GUARD_ATOMS)
-def test_every_guard_atom_the_package_actually_uses_is_accepted(atom):
-    """production を棚卸しして出てきた形（これだけが許可集合）。"""
+@pytest.mark.parametrize("shape", _DECLARED_GUARD_SHAPES, ids=repr)
+def test_every_declared_guard_shape_round_trips(shape):
+    """宣言 → 式 → descriptor が一致し、recognizer が受理すること。
 
-    assert is_pure_debug_availability_test(ast.parse(atom, mode="eval").body), atom
+    owner の宣言そのものを入力にしているので、test 側に guard 一覧の写しは無い。
+    網羅性は :func:`test_the_declared_guard_shapes_are_exactly_the_ones_the_package_has`
+    （production からの独立した棚卸し）が担保する。
+    """
+
+    node = ast.parse(guard_shape_source(shape), mode="eval").body
+    assert guard_descriptor(node) == shape
+    assert is_pure_debug_availability_test(node)
 
 
 @pytest.mark.parametrize(
@@ -1523,16 +1660,6 @@ def test_a_shape_that_only_exists_as_a_combination_is_refused(atom, label):
     """
 
     assert not is_pure_debug_availability_test(ast.parse(atom, mode="eval").body), label
-
-
-def test_the_accepted_atoms_cover_every_declared_shape():
-    """上の「実在する形」list と owner の宣言がずれていないこと。"""
-
-    accepted = {
-        guard_descriptor(ast.parse(atom, mode="eval").body)
-        for atom in _PACKAGE_GUARD_ATOMS
-    }
-    assert accepted == set(DEBUG_GUARD_SHAPES)
 
 
 @pytest.mark.parametrize(
@@ -1659,10 +1786,15 @@ def observed_guard_shapes(root: Path = PACKAGE_ROOT) -> Dict[debug_render.GuardS
     ずれていても気付けない）。そこで、まず AST から候補を独立に取り出し、
     canonical descriptor にしてから owner の宣言と突き合わせる。
 
-    候補の位置は「短絡評価で必ず最初に評価される」ところ（:func:`short_circuit_atoms`）:
+    候補の位置は「短絡評価で必ず最初に評価される」ところ（:func:`short_circuit_head`）:
     ``if <expr>:`` / ``if not <expr>: return`` / ``and`` ・ ``or`` の先頭項。
-    そのうち **名前に debug を含む** descriptor だけを候補とする（名前で絞るのは
+    そのうち **debug を含む名前が出てくる**式だけを候補とする（名前で絞るのは
     観測の範囲を決めるためで、guard かどうかの判定ではない）。
+
+    canonical descriptor に落とせない式（比較・引数付き呼び出しなど）は捨てず、
+    :func:`unsupported_guard_descriptor` の形で観測に残す。捨てると descriptor
+    文法の外側で fail-open になり、``if self.debug is True:`` のような未知形を
+    足しても棚卸しが素通りしてしまう。
 
     返り値は descriptor → 最初に見つけた場所（FAIL したとき直せるように）。
     """
@@ -1673,16 +1805,19 @@ def observed_guard_shapes(root: Path = PACKAGE_ROOT) -> Dict[debug_render.GuardS
         for node in ast.walk(tree):
             if not isinstance(node, (ast.If, ast.IfExp)):
                 continue
-            for atom in short_circuit_atoms(node.test):
-                shape = guard_descriptor(atom)
-                if shape is None:
-                    continue
+            atom = short_circuit_head(node.test)
+            shape = guard_descriptor(atom)
+            if shape is not None:
                 name = shape[1] if shape[0] == "name" else shape[2]
-                if "debug" not in str(name).lower():
+                if not _mentions_debug(name):
                     continue
-                observed.setdefault(
-                    shape, f"{path.relative_to(root)}:{node.lineno}"
-                )
+            elif _debug_names_in(atom):
+                # descriptor 文法の外でも捨てない（捨てると未知形が観測から
+                # 消えて、棚卸しが文法の外側で fail-open になる）。
+                shape = unsupported_guard_descriptor(atom)
+            else:
+                continue
+            observed.setdefault(shape, f"{path.relative_to(root)}:{node.lineno}")
     return observed
 
 
@@ -1706,6 +1841,136 @@ def test_the_declared_guard_shapes_are_exactly_the_ones_the_package_has():
     stale = declared - set(observed)
     assert not missing, f"undeclared debug guard shapes: {missing}"
     assert not stale, f"declared shapes no longer in the package: {sorted(stale)}"
+
+
+def observed_render_call_targets(root: Path = PACKAGE_ROOT) -> Dict[debug_render.RenderCallTarget, str]:
+    """production が renderer / 前準備 helper を **どの形で呼んでいるか**。
+
+    guard の棚卸しと同じ考え方で、宣言（:data:`DEBUG_RENDER_CALL_TARGETS`）が
+    実測からずれたら気付けるようにするための観測。表せない形（receiver を計算
+    する形）は ``None`` キーで残すので、黙って落ちることはない。
+    """
+
+    renderers = bounded_renderer_names(root)
+    observed: Dict[debug_render.RenderCallTarget, str] = {}
+    for path in _iter_source_files(root):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if _called_name(node) not in renderers | PREPARATION_FUNCTIONS:
+                continue
+            observed.setdefault(
+                call_target_shape(node.func), f"{path.relative_to(root)}:{node.lineno}"
+            )
+    return observed
+
+
+def test_the_declared_render_call_targets_are_the_ones_the_package_uses():
+    """renderer を呼ぶ形の宣言が実測とずれたら FAIL（両方向）。
+
+    広がる方向のずれは「使っていない受け手まで有界な描画とみなす」＝ contract の
+    緩み、狭まる方向は stale。どちらも owner を直す合図。
+    """
+
+    observed = observed_render_call_targets()
+    assert None not in observed, f"renderer called on a computed receiver: {observed.get(None)}"
+    assert set(observed) == set(DEBUG_RENDER_CALL_TARGETS)
+
+
+@pytest.mark.parametrize(
+    "call, safe, label",
+    [
+        ("summarize_expression(expr)", True, "素の関数呼び出し"),
+        ("self.summarize_expression(expr)", True, "self に束縛された method"),
+        ("cls.summarize_expression(expr)", True, "cls に束縛された method"),
+        ("self.debug_reporter.summarize_expression(expr)", True, "宣言された reporter"),
+        ("self._debug_reporter.summarize_expression(expr)", True, "宣言された reporter"),
+        ("self.expensive_property.summarize_expression(expr)", False, "descriptor 経由"),
+        ("self.a.b.summarize_expression(expr)", False, "未宣言の 2 段"),
+        ("other.summarize_expression(expr)", False, "未宣言の受け手"),
+        ("expensive_factory().summarize_expression(expr)", False, "receiver を計算する"),
+        ("registry[key].summarize_expression(expr)", False, "receiver が添字"),
+    ],
+)
+def test_a_renderer_is_only_bounded_when_its_target_is_declared(call, safe, label):
+    node = ast.parse(call, mode="eval").body
+    kind, _ = _summary_call(node, frozenset({"summarize_expression"}))
+    assert (kind == "renderer") is safe, label
+    assert kind in ("renderer", "unsafe_renderer")
+
+
+@pytest.mark.parametrize(
+    "reader, bucket",
+    [
+        ("    self._debug_print(summary)\n", "render_in_debug_sink"),
+        ("    if self.debug and summary:\n        self._debug_print('x')\n",
+         "renderer_in_guard_condition"),
+    ],
+)
+def test_an_unsafe_renderer_survives_a_local_assignment(reader, bucket):
+    """局所変数を 1 つ挟んでも、契約外の対象で呼んだ renderer は通さない。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    summary = expensive_factory().summarize_expression(expr)\n"
+        + reader,
+    )
+    entries = [entry[2] for entry in getattr(violations, bucket)]
+    assert entries and all("summarize_expression" in entry for entry in entries), entries
+
+
+def test_an_unsafe_renderer_is_refused_inside_a_debug_guard_too():
+    """guard の中でも不可（receiver の構築は debug ON でも任意処理）。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    if self.debug:\n"
+        "        self._debug_print(self.expensive_property.summarize_expression(expr))\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [
+        "_debug_print(... <computed>.summarize_expression() ...)"
+    ]
+
+
+@pytest.mark.parametrize(
+    "test_source, label",
+    [
+        ("self.debug is True", "比較（descriptor 文法の外）"),
+        ("debug_available(config)", "引数付きの述語呼び出し"),
+        ("some_debug_expression(a, b)", "未知の debug 複合式"),
+        ("self.debug_level > 0 and other", "`and` の先頭項が未知の複合式"),
+    ],
+)
+def test_an_unknown_debug_shape_outside_the_grammar_is_still_observed(tmp_path, test_source, label):
+    """descriptor に落とせない未知形も棚卸しに残る（文法の外でも fail-closed）。"""
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "sample.py").write_text(
+        f"def f(self, config, a, b, other, fallback_debug_flag):\n"
+        f"    if {test_source}:\n"
+        f"        pass\n",
+        encoding="utf-8",
+    )
+    observed = set(observed_guard_shapes(package))
+    assert observed, label
+    assert all(shape[0] == "unsupported" for shape in observed), observed
+    # 宣言に無いので、これを production へ足すと棚卸し test が FAIL する。
+    assert not observed & (DEBUG_GUARD_SHAPES | DEBUG_SHAPED_NON_GUARDS), label
+
+
+def test_a_comparison_on_a_guard_flag_is_not_confused_with_an_unrelated_one(tmp_path):
+    """``self.debug is True`` と ``type(debug) is not bool`` を別物として扱う。"""
+
+    left = unsupported_guard_descriptor(ast.parse("self.debug is True", mode="eval").body)
+    right = unsupported_guard_descriptor(ast.parse("type(debug) is not bool", mode="eval").body)
+    assert left != right
+    # 後者は production に実在するので宣言済み、前者は未知。
+    assert right in DEBUG_SHAPED_NON_GUARDS
+    assert left not in (DEBUG_GUARD_SHAPES | DEBUG_SHAPED_NON_GUARDS)
 
 
 def test_the_two_declared_sets_do_not_overlap():

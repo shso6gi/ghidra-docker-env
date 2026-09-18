@@ -26,6 +26,7 @@ debug message に式・条件を載せる手段は本 module だけが持つ。`
 * :data:`BOUNDED_DEBUG_PREPARATION` — guard の中でだけ呼んでよい前準備 helper
 * :data:`DEBUG_GUARD_SHAPES` — debug 可否の確認として認める形（exact descriptor）
 * :data:`DEBUG_SHAPED_NON_GUARDS` — 名前は debug でも可否の確認ではない形
+* :data:`DEBUG_RENDER_CALL_TARGETS` — renderer / 前準備を呼んでよい対象の形
 
 family 側の wrapper（``_debug_expr_summary`` など）は本 module の renderer へ
 委譲するだけなので名前を数え上げない。静的 guard が委譲を辿って同一視する。
@@ -589,15 +590,71 @@ DEBUG_GUARD_SHAPES: FrozenSet[GuardShape] = frozenset({
 
 #: 名前に ``debug`` を含むが **debug 可否の確認ではない** 形。
 #:
-#: 出力の抑止状態（``_debug_suppressed``）や診断 payload の有無
-#: (``debug_trace`` / ``pairwise_debug_stats``) を見ているだけで、「ここへ
-#: 入ったら debug が有効」とは言えない。棚卸し test が「宣言し忘れ」と
-#: 区別できるよう、**意図的に guard ではない**ものを明示する。
+#: 出力の抑止状態（``_debug_suppressed``）、診断 payload の有無
+#: (``debug_trace`` / ``pairwise_debug_stats``)、message 数の上限、
+#: ``block_debug_key`` によるグラフ比較などを見ているだけで、「ここへ入ったら
+#: debug が有効」とは言えない。棚卸し test が「宣言し忘れ」と区別できるよう、
+#: **意図的に guard ではない**ものを明示する。
+#:
+#: ``("unsupported", <AST 種別>, <debug を含む名前>, <直下の子の descriptor>)``
+#: は、canonical guard descriptor に落とせない形（比較・引数付き呼び出しなど）を
+#: それでも捨てずに残すための descriptor。棚卸しが descriptor 文法の外側でも
+#: fail-closed になるようにするためのもので、``self.debug is True`` のような
+#: 未知の形を production に足すと、ここに無い descriptor として必ず FAIL する。
 DEBUG_SHAPED_NON_GUARDS: FrozenSet[GuardShape] = frozenset({
+    # 出力の抑止状態 / 診断 payload の有無
     ("attr", ("self",), "_debug_suppressed"),
     ("attr", ("cls",), "_debug_suppressed"),
     ("attr", ("self",), "debug_trace"),
     ("attr", ("self",), "pairwise_debug_stats"),
+    # message 数の上限（出力するかではなく、抑止に入るかを見ている）
+    ("unsupported", "Compare", ("_debug_message_count", "_debug_message_limit"),
+     (("attr", ("self",), "_debug_message_count"),
+      ("attr", ("self",), "_debug_message_limit"))),
+    ("unsupported", "Compare", ("_DEBUG_MESSAGE_LIMIT", "_debug_message_count"),
+     (("attr", ("cls",), "_debug_message_count"),
+      ("attr", ("cls",), "_DEBUG_MESSAGE_LIMIT"))),
+    ("unsupported", "Compare", ("_DEBUG_REPEAT_LIMIT",),
+     (("attr", ("cls",), "_DEBUG_REPEAT_LIMIT"),)),
+    ("unsupported", "Compare", ("_DEBUG_REPEAT_LIMIT",), ()),
+    ("unsupported", "Compare", ("_debug_repeat_counts",), ()),
+    # 診断 payload の型 / 有無
+    ("unsupported", "Call", ("debug_trace",), ()),
+    ("unsupported", "Call", ("debug_trace",), (("name", "debug_trace"),)),
+    ("unsupported", "Compare", ("debug_trace",), (("attr", ("result",), "debug_trace"),)),
+    ("unsupported", "Compare", ("extracted_for_debug",), (("name", "extracted_for_debug"),)),
+    # block の識別キー比較（グラフ構造の話で、出力の可否ではない）
+    ("unsupported", "Compare", ("block_debug_key",), ()),
+    ("unsupported", "Compare", ("_block_debug_key",), ()),
+    # その他: CLI 引数の有無 / 文字列前置き / key 参照 / 引数渡し
+    ("unsupported", "Compare", ("debug",), ()),
+    ("unsupported", "Call", ("debug",), ()),
+    ("unsupported", "Call", ("debug:",), ()),
+    ("unsupported", "Call", ("_debug_print",), ()),
+    ("unsupported", "Compare", ("_FINAL_DISPOSITION_DEBUG_KEYS",),
+     (("name", "_FINAL_DISPOSITION_DEBUG_KEYS"),)),
+    ("unsupported", "Compare", ("debug_key",), (("name", "debug_key"),)),
+})
+
+#: bounded renderer / 前準備 helper を **呼んでよい対象**の形。
+#:
+#: ``("name",)`` は素の関数呼び出し（``summarize_expression(x)``）、
+#: ``("attr", <根>, <途中の属性>)`` は ``self._debug_expr_summary(x)`` /
+#: ``self._debug_reporter.debug_expr_summary(x)`` のような束縛済み method。
+#:
+#: 任意の Attribute chain を許すと、``self.expensive_property.summarize_expression(x)``
+#: のように **property / descriptor 経由で任意処理が起動する**形まで「有界な
+#: 描画」として通ってしまう。本 package に実在するのは下の 5 形だけなので、
+#: それだけを許して残りは fail-closed にする（``factory().renderer`` /
+#: ``registry[key].renderer`` / 未知の receiver は拒否）。
+RenderCallTarget = Tuple[Any, ...]
+
+DEBUG_RENDER_CALL_TARGETS: FrozenSet[RenderCallTarget] = frozenset({
+    ("name",),
+    ("attr", "self", ()),
+    ("attr", "cls", ()),
+    ("attr", "self", ("debug_reporter",)),
+    ("attr", "self", ("_debug_reporter",)),
 })
 
 #: debug message を組み立てる **前準備** の helper。描画はしないが、列を
