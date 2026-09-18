@@ -66,8 +66,9 @@ EXCLUDED_TOP_LEVEL_DIRS = frozenset({"tests"})
 # 名前を再定義すると二重管理になり、新しい renderer を足すたびに test も直す
 # ことになるので、import して使う。
 #
-#: DAG を木として展開する rendering method。
-RENDER_METHODS = debug_render.UNBOUNDED_RENDER_CALLS
+#: debug 表示から呼んではいけない呼び出し。DAG を木として展開する描画と、
+#: 1 要素ごとに構造キー生成を起動する重い診断 helper。
+RENDER_METHODS = debug_render.UNBOUNDED_RENDER_CALLS | debug_render.HEAVY_DIAGNOSTIC_CALLS
 
 #: owner が所有する bounded renderer。family 側の wrapper はここへ委譲するだけ
 #: なので列挙しない（:func:`bounded_renderer_names` が委譲を辿って足す）。
@@ -182,16 +183,17 @@ def _is_simple_argument(node: ast.AST) -> bool:
 def _is_debug_guard_clause(statement: ast.stmt) -> bool:
     """``if not self._debug_available(): return "<debug-suppressed>"`` 型の前置き。
 
-    test は「debug 可否そのもの」の否定だけ。``and`` / ``or`` や他の条件を
-    混ぜた形は認めない（fail-closed）。本体は定数文字列を返すか、そのまま
-    return するだけ。
+    test は :func:`is_pure_debug_availability_test` の否定だけ。``and`` / ``or``
+    や他の条件を混ぜた形は認めない（``not (expensive() and self.debug)`` は
+    debug OFF でも ``expensive()`` を走らせる）。本体は定数文字列を返すか、
+    そのまま return するだけ。
     """
 
     if not isinstance(statement, ast.If) or statement.orelse:
         return False
     if not _is_negated(statement.test):
         return False
-    if not _is_debug_availability_test(statement.test.operand):
+    if not is_pure_debug_availability_test(statement.test.operand):
         return False
     if len(statement.body) != 1 or not isinstance(statement.body[0], ast.Return):
         return False
@@ -265,25 +267,32 @@ def bounded_renderer_names(root: Path = PACKAGE_ROOT) -> FrozenSet[str]:
         known |= discovered
 
 
-def _is_debug_availability_test(node: ast.AST) -> bool:
-    """「この式が真なら debug 出力が有効」と構文的に言い切れる形だけ。
+def is_pure_debug_availability_test(node: ast.AST) -> bool:
+    """**debug 可否の確認そのもの**か（他の仕事を一切しない形）。
+
+    認めるのは 2 つだけ:
 
     * 引数なしの述語呼び出し（``self._debug_available()`` / ``self.debug_flag()``）
     * flag そのもの（``self.debug`` / ``debug``）
 
     呼び出しは Call のときだけ述語と認める（``self._debug_available`` という
     method object を flag 扱いしない）。flag は Name / Attribute のときだけ。
-    ``and`` / ``or`` / 比較 / それ以外の式は **すべて guard と認めない**
-    （``if self.debug or force:`` は debug が偽でも入る）。
+    ``and`` / ``or`` / 比較 / 添字 / その他の式はすべて拒否する。
+
+    wrapper 導出（:func:`_is_debug_guard_clause`）が使う contract。wrapper の
+    guard 節は「debug 可否を見るだけ」でなければならない: ``if not
+    (expensive_check() and self.debug): return`` は debug が偽でも
+    ``expensive_check()`` を走らせるので、bounded wrapper とは呼べない。
     """
 
-    if isinstance(node, ast.BoolOp):
-        # ``and`` は全項が真でないと body に入らないので、1 項が debug 可否なら
-        # 「入った時点で debug は有効」と言い切れる。``or`` は言い切れない。
-        return isinstance(node.op, ast.And) and any(
-            _is_debug_availability_test(value) for value in node.values
-        )
     if isinstance(node, ast.Call):
+        if _called_name(node) == "getattr":
+            # ``getattr(self, "debug", False)`` は flag の読み出しそのもの。
+            arguments = node.args
+            if len(arguments) >= 2 and isinstance(arguments[1], ast.Constant):
+                attribute = arguments[1].value
+                return type(attribute) is str and attribute in DEBUG_FLAGS
+            return False
         if node.args or node.keywords:
             return False
         return _called_name(node) in DEBUG_PREDICATES
@@ -292,6 +301,24 @@ def _is_debug_availability_test(node: ast.AST) -> bool:
     if isinstance(node, ast.Name):
         return node.id in DEBUG_FLAGS
     return False
+
+
+def branch_implies_debug_enabled(node: ast.AST) -> bool:
+    """**この式が真なら debug が有効**と構文的に言えるか。
+
+    scanner（R1 / R3）が使う contract。body に入った時点で debug が有効だと
+    保証できればよいので、``and`` は 1 項が debug 可否なら認める（全項が真で
+    ないと入らないため）。``or`` は debug が偽でも入るので認めない。
+
+    :func:`is_pure_debug_availability_test` より緩いのは意図的で、見ている
+    性質が違う（到達条件 vs guard 自体の純粋さ）。
+    """
+
+    if isinstance(node, ast.BoolOp):
+        return isinstance(node.op, ast.And) and any(
+            branch_implies_debug_enabled(value) for value in node.values
+        )
+    return is_pure_debug_availability_test(node)
 
 
 def _is_negated(test: ast.AST) -> bool:
@@ -337,7 +364,7 @@ class _EagerDebugRenderingScanner:
     # -- statement walk ------------------------------------------------------
     def _walk_body(self, body: Sequence[ast.stmt], *, guarded: bool) -> None:
         for statement in body:
-            if isinstance(statement, ast.If) and _is_debug_availability_test(statement.test):
+            if isinstance(statement, ast.If) and branch_implies_debug_enabled(statement.test):
                 # `if <debug available>:` — body に入るなら debug は必ず有効。
                 self._visit_expression(statement.test, guarded=guarded)
                 self._walk_body(statement.body, guarded=True)
@@ -346,7 +373,7 @@ class _EagerDebugRenderingScanner:
             if (
                 isinstance(statement, ast.If)
                 and _is_negated(statement.test)
-                and _is_debug_availability_test(statement.test.operand)
+                and branch_implies_debug_enabled(statement.test.operand)
             ):
                 # `if not <debug available>: return` — 抜けた先は debug 専用。
                 self._visit_expression(statement.test, guarded=guarded)
@@ -605,7 +632,6 @@ def test_scanner_refuses_a_wrapper_that_does_its_own_work(body, label):
         ("        if not self._debug_available():\n            return '<suppressed>'\n", "predicate call"),
         ("        if not self.debug:\n            return '<suppressed>'\n", "debug flag"),
         ("        if not self.debug_flag():\n            return ''\n", "flag accessor"),
-        ("        if not (self.debug and widget):\n            return '<suppressed>'\n", "and-ed guard (抜けたら debug は有効)"),
     ],
 )
 def test_scanner_accepts_only_a_debug_availability_guard(guard, label):
@@ -625,6 +651,7 @@ def test_scanner_accepts_only_a_debug_availability_guard(guard, label):
         ("        if self.some_flag:\n            return '<suppressed>'\n", "unrelated attribute"),
         ("        if self.debug or widget:\n            return '<suppressed>'\n", "or-ed condition"),
         ("        if self.debug == False:\n            return '<suppressed>'\n", "comparison"),
+        ("        if not (self.debug and widget):\n            return '<suppressed>'\n", "and: guard が debug 可否以外も見る"),
         ("        if self._debug_available:\n            return '<suppressed>'\n", "predicate as a method object"),
         ("        if not self._debug_available(widget):\n            return '<suppressed>'\n", "predicate with an argument"),
         ("        if widget is None:\n            return 'None'\n", "value test"),
@@ -777,6 +804,84 @@ def test_scanner_treats_an_early_return_guard_clause_by_shape():
         "    self._debug_print(f'v={summarize_expression(expr)}')\n",
     )
     assert unguarded.unguarded_summary_in_debug_sink
+
+
+def test_scanner_refuses_a_heavy_diagnostic_helper_in_debug_output():
+    """既知の重い helper は debug 表示から呼べない（owner が名前を所有する）。
+
+    ``get_simplified_condition_string`` は条件ごとに正規化と構造キー生成を
+    起動するので、``[f(c) for c in conditions]`` の形で使うと件数 × 走査コスト
+    になる。guard の中でも sink の引数でも許さない。
+    """
+
+    assert "get_simplified_condition_string" in debug_render.HEAVY_DIAGNOSTIC_CALLS
+
+    in_guard = scan_source(
+        "sample",
+        "def f(self, conditions):\n"
+        "    if self.debug:\n"
+        "        dump = [ConditionSimplifier.get_simplified_condition_string(c) for c in conditions]\n"
+        "        self._debug_print(f'conds={dump}')\n",
+    )
+    assert [entry[2] for entry in in_guard.render_in_debug_guard] == [
+        "get_simplified_condition_string()"
+    ]
+
+    in_arguments = scan_source(
+        "sample",
+        "def f(self, cond):\n"
+        "    self._debug_print(f'c={ConditionSimplifier.get_simplified_condition_string(cond)}')\n",
+    )
+    assert in_arguments.render_in_debug_sink
+
+
+@pytest.mark.parametrize(
+    "name",
+    sorted(debug_render.HEAVY_DIAGNOSTIC_CALLS),
+)
+def test_every_declared_heavy_helper_is_refused_in_debug_output(name):
+    violations = scan_source(
+        "sample",
+        "def f(self, value):\n"
+        "    if self.debug:\n"
+        f"        self._debug_print(f'v={{owner.{name}(value)}}')\n",
+    )
+    assert violations.render_in_debug_guard and violations.render_in_debug_sink
+
+
+@pytest.mark.parametrize(
+    "test_source, scanner_guarded, wrapper_accepted, label",
+    [
+        ("self.debug", True, True, "flag"),
+        ("self._debug_available()", True, True, "predicate call"),
+        ("self.debug and force", True, False, "and: 到達条件は満たすが guard は純粋でない"),
+        ("self.debug or force", False, False, "or"),
+        ("expensive_check() and self.debug", True, False, "debug 判定の前に仕事をする"),
+        ("force", False, False, "無関係"),
+    ],
+)
+def test_the_two_guard_contracts_are_separate(
+    test_source, scanner_guarded, wrapper_accepted, label
+):
+    """scanner と wrapper 導出は別の性質を見る。
+
+    * scanner: 「この branch に入ったら debug は有効か」（到達条件）
+    * wrapper: 「guard 自体が debug 可否の確認しかしていないか」（純粋さ）
+
+    ``if not (expensive_check() and self.debug): return`` は前者を満たすが
+    後者を満たさない（debug OFF でも ``expensive_check()`` が走る）。
+    """
+
+    assert branch_implies_debug_enabled(ast.parse(test_source, mode="eval").body) is scanner_guarded, label
+
+    source = (
+        "class Host:\n"
+        "    def _debug_widget_summary(self, widget, force):\n"
+        f"        if not ({test_source}):\n"
+        "            return '<suppressed>'\n"
+        "        return summarize_widget(widget)\n"
+    )
+    assert bool(_wrappers_in(source)) is wrapper_accepted, label
 
 
 def test_scanner_detects_full_render_in_repr():
