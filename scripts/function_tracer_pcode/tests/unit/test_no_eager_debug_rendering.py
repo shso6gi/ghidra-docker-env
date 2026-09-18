@@ -74,8 +74,14 @@ guard ではない形（``self._debug_suppressed`` 等）は
 代入 1 段の追跡は **読み出し node の id** を鍵にする。名前でまとめると、同じ名前
 への複数代入（``key = a.stable_key()`` … ``key = b.stable_key()`` は本 package に
 67 関数ある）で「前の代入が production に読まれている」だけで後の debug 専用代入
-まで免除されてしまう。読み出しは source 順で直前の代入に割り当てる。CFG は作らず、
-割り当て先が決まらない読み出しは免除側に倒す。
+まで免除されてしまう。
+
+上書きの判定は **control flow を混ぜない**。後の代入が前の定義を消したと言える
+のは、その代入が「読み出しへ行き着く前に必ず実行される」= 読み出しを含む文の
+祖先 block の直下に、先に並んでいるときだけ（:func:`_unconditionally_precedes`）。
+``if cond: summary = cheap`` / 0 回あり得る loop / ``try`` の中の代入は前の定義を
+消さないので、renderer の値が sink へ届き得る形は免除されない。CFG は作らず、
+判断できない場合は免除を与えない（fail-closed）。
 
 **renderer / 前準備を呼んでよい対象も exact shape**（:data:`DEBUG_RENDER_CALL_TARGETS`）。
 任意の Attribute chain を pure とみなすと ``self.expensive_property.summarize_expression(x)``
@@ -509,9 +515,36 @@ def walk_evaluated_now(node: ast.AST) -> Iterator[ast.AST]:
     の本体は :meth:`_EagerDebugRenderingScanner._visit_deferred_scopes` が別
     scope として改めて解析する（無視はしない）。comprehension と class 本体は
     その場で評価されるので、そのまま辿る。
+
+    ``node`` 自身が ``lambda``（``thunk = lambda: ...``）のこともあるので、根にも
+    境界を当てる。式の走査（:meth:`_visit_expression`）と代入の分類
+    （:func:`_assignment_kind`）はどちらもこの 1 つの入口を使う — 評価の意味を
+    二か所で定義しない。
     """
 
-    return _walk_bounded(node, _evaluation_boundary)
+    crossed = _evaluation_boundary(node)
+    if crossed is None:
+        yield from _walk_bounded(node, _evaluation_boundary)
+        return
+    for part in crossed:
+        yield from _walk_bounded(part, _evaluation_boundary)
+
+
+def deferred_scopes_in(node: ast.AST) -> List[ast.Lambda]:
+    """``node`` を評価しても **その場では走らない** lambda 本体。
+
+    根が lambda のこともあるので根も候補にする。``def`` は文なので式の中には
+    現れず、:meth:`_EagerDebugRenderingScanner._walk_statement` が扱う。
+    """
+
+    found = [node] if isinstance(node, ast.Lambda) else []
+    found += [
+        child
+        for sub in walk_evaluated_now(node)
+        for child in ast.iter_child_nodes(sub)
+        if isinstance(child, ast.Lambda)
+    ]
+    return found
 
 
 def function_body_nodes(
@@ -540,10 +573,16 @@ def function_body_nodes(
 
 
 def _assignment_kind(value: ast.AST, renderers: FrozenSet[str]) -> Tuple[str, str]:
-    """代入の右辺が debug 用に何を作るか（``(種別, 表示)``）。"""
+    """代入の右辺が **その代入の時点で** debug 用に何を作るか（``(種別, 表示)``）。
+
+    走査は :func:`walk_evaluated_now`。``thunk = lambda: expr.to_string()`` は
+    代入の時点では何も描画しないので、この代入を「禁止呼び出しを作った」と
+    分類してはいけない（lambda 本体は別 scope として改めて解析される）。
+    lambda の default 引数のように定義時に評価されるものは含む。
+    """
 
     entry = ("", "")
-    for inner in ast.walk(value):
+    for inner in walk_evaluated_now(value):
         forbidden = _render_call_label(inner)
         if forbidden:
             return ("forbidden", forbidden)
@@ -554,6 +593,94 @@ def _assignment_kind(value: ast.AST, renderers: FrozenSet[str]) -> Tuple[str, st
         elif kind == "renderer" and not entry[0]:
             entry = (kind, label)
     return entry
+
+
+#: 文の位置。``[(その文が属する statement list の id, その中の index), ...]`` を
+#: 関数本体から下へ並べたもの。``if`` / ``for`` / ``try`` の中に入るたびに 1 段
+#: 深くなるので、「同じ直列区間にいるか」がこれだけで判る。
+StatementPath = Tuple[Tuple[int, int], ...]
+
+
+def _statement_own_boundary(child: ast.AST) -> Optional[Sequence[ast.AST]]:
+    """1 つの文の **自分の部分**だけを見るための境界。
+
+    入れ子の文（``if`` の body など）は別の :data:`StatementPath` を持つので、
+    ここでは辿らない。``except`` 節や ``match`` の case も、判定に使う式
+    （例外型・guard）だけを自分の部分として残し、body は別に数える。
+    """
+
+    if isinstance(child, ast.stmt):
+        return []
+    if isinstance(child, ast.excepthandler):
+        return [child.type] if child.type is not None else []
+    if isinstance(child, ast.match_case):
+        return [part for part in (child.pattern, child.guard) if part is not None]
+    return _binding_boundary(child)
+
+
+def _nested_blocks(statement: ast.stmt) -> Iterator[List[ast.stmt]]:
+    """``statement`` が直接持つ入れ子の文ブロック。"""
+
+    for _field, value in ast.iter_fields(statement):
+        if isinstance(value, list) and value and isinstance(value[0], ast.stmt):
+            yield value
+    for handler in getattr(statement, "handlers", []):
+        yield handler.body
+    for case in getattr(statement, "cases", []):
+        yield case.body
+
+
+def _statement_paths(
+    function: "ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda",
+) -> Dict[int, StatementPath]:
+    """この scope の各 node → それを含む文の :data:`StatementPath`。
+
+    入れ子の束縛 scope（``def`` / ``lambda`` / ``class`` / comprehension）へは
+    降りない。本体だけを、文の並びとして辿る。
+    """
+
+    paths: Dict[int, StatementPath] = {}
+
+    def walk_block(block: Sequence[ast.stmt], prefix: StatementPath) -> None:
+        block_id = id(block)
+        for index, statement in enumerate(block):
+            path = prefix + ((block_id, index),)
+            crossed = _binding_boundary(statement)
+            if crossed is not None:
+                # ``def`` / ``class`` — header だけがこの scope の話。
+                for part in crossed:
+                    for node in walk_lexical_scope(part):
+                        paths[id(node)] = path
+                continue
+            for node in _walk_bounded(statement, _statement_own_boundary):
+                paths[id(node)] = path
+            for nested in _nested_blocks(statement):
+                walk_block(nested, path)
+
+    body = (
+        [function.body]
+        if isinstance(function, ast.Lambda)
+        else list(function.body)
+    )
+    walk_block(body, ())
+    return paths
+
+
+def _unconditionally_precedes(killer: StatementPath, reader: StatementPath) -> bool:
+    """``killer`` の文が ``reader`` へ行き着く前に **必ず**実行されるか。
+
+    真になるのは「``killer`` が、``reader`` を含む文の祖先 block の直下にあり、
+    その block の中で先に並んでいる」ときだけ。``if`` / ``for`` / ``while`` /
+    ``try`` / ``match`` の中にある代入は、そこが 0 回や別経路になり得るので、
+    外側の定義を kill したとは言えない — その場合ここは偽を返し、前の定義は
+    生き残る（免除を与えず fail-closed）。
+
+    CFG は作らない。判るのは「同じ直列区間にあるか」だけで、それで十分。
+    """
+
+    if len(killer) > len(reader):
+        return False
+    return killer[:-1] == reader[: len(killer) - 1] and killer[-1][1] < reader[len(killer) - 1][1]
 
 
 def _debug_only_locals(
@@ -575,10 +702,13 @@ def _debug_only_locals(
     鍵は **名前ではなく読み出し node の id**。同じ名前へ複数回代入する関数は
     珍しくなく（``key = a.stable_key()`` … ``key = b.stable_key()`` は本 package
     に 67 関数ある）、名前でまとめると「前の代入が production に読まれている」
-    だけで後の debug 専用代入まで免除されてしまう。読み出しは **source 順で
-    直前の代入**に割り当てる。分岐や loop を追う CFG は作らない: 先行代入が
-    無い読み出しはどの代入にも割り当てないので、判断できないものは黙って
-    免除側（= 報告しない）に倒れる。
+    だけで後の debug 専用代入まで免除されてしまう。
+
+    読み出しから見て「まだ生きている」定義は **同じ直列区間で後の代入に
+    上書きされていないもの全部**（:func:`_unconditionally_precedes`）。
+    ``if cond: summary = cheap`` のような条件付き再代入は前の定義を kill しない
+    ので、renderer の値が sink へ届き得る形は免除されない。control flow を
+    たどるのではなく「必ず実行されると言えるか」だけを見る。
 
     走査は :func:`function_body_nodes`、つまり **この関数の本体だけ**。
     decorator / default 引数 / annotation は関数を定義する側の scope で評価され
@@ -587,17 +717,18 @@ def _debug_only_locals(
 
     production が同じ値を使っている場合（``smt = expr.to_smt()`` を制約に使い、
     ついでに debug にも出す）は対象外。その仕事は debug の有無に関わらず起きる
-    ので debug 側の問題ではない。判定は「その代入の読み出しが **すべて** debug
-    専用の位置（debug sink の引数、または guard 条件の後続 conjunct）にあるか」
-    で行う。
+    ので debug 側の問題ではない。判定は「その定義に届き得る読み出しが
+    **すべて** debug 専用の位置（debug sink の引数、または guard 条件の後続
+    conjunct）にあるか」で行う。
 
     返り値は ``id(<Name node>) -> (種別, 表示)``。その読み出しだけが報告対象。
     """
 
     body = list(function_body_nodes(function))
+    paths = _statement_paths(function)
 
-    #: (行, 桁) 順に並べた代入。``definitions[name]`` は source 順。
-    definitions: Dict[str, List[Tuple[Tuple[int, int], Tuple[str, str]]]] = {}
+    #: name -> [(source 位置, 文の path, 種別)]（source 順）
+    definitions: Dict[str, List[Tuple[Tuple[int, int], StatementPath, Tuple[str, str]]]] = {}
     for node in body:
         targets: List[ast.AST] = []
         if isinstance(node, ast.Assign):
@@ -610,9 +741,12 @@ def _debug_only_locals(
             continue
         entry = _assignment_kind(node.value, renderers)
         position = (node.lineno, node.col_offset)
+        path = paths.get(id(node))
+        if path is None:
+            continue
         for target in targets:
             if isinstance(target, ast.Name):
-                definitions.setdefault(target.id, []).append((position, entry))
+                definitions.setdefault(target.id, []).append((position, path, entry))
     if not definitions:
         return {}
     for places in definitions.values():
@@ -638,7 +772,7 @@ def _debug_only_locals(
         if isinstance(name, ast.Name)
     }
 
-    #: 代入（name, source 順の index）-> その代入を読んでいる Name node
+    #: 定義（name, source 順の index）-> 届き得る読み出し
     reads: Dict[Tuple[str, int], List[ast.Name]] = {}
     for node in body:
         if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
@@ -646,19 +780,24 @@ def _debug_only_locals(
         places = definitions.get(node.id)
         if not places:
             continue
-        here = (node.lineno, node.col_offset)
-        index = -1
-        for candidate, (position, _entry) in enumerate(places):
-            if position < here:
-                index = candidate
-        if index < 0:
-            # 最初の代入より前の読み出しは、この関数が作った値ではない。
+        read_path = paths.get(id(node))
+        if read_path is None:
             continue
-        reads.setdefault((node.id, index), []).append(node)
+        here = (node.lineno, node.col_offset)
+        for index, (position, path, _entry) in enumerate(places):
+            if not position < here:
+                continue
+            overwritten = any(
+                later_position < here
+                and _unconditionally_precedes(later_path, read_path)
+                for later_position, later_path, _later in places[index + 1:]
+            )
+            if not overwritten:
+                reads.setdefault((node.id, index), []).append(node)
 
     reported: Dict[int, Tuple[str, str]] = {}
     for name, places in definitions.items():
-        for index, (_position, entry) in enumerate(places):
+        for index, (_position, _path, entry) in enumerate(places):
             if not entry[0]:
                 continue
             names = reads.get((name, index))
@@ -1064,20 +1203,21 @@ class _EagerDebugRenderingScanner:
             self._walk_statement(statement, guarded=guarded)
 
     def _walk_statement(self, statement: ast.stmt, *, guarded: bool) -> None:
-        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            # 別の呼び出し文脈で実行されるので guard を引き継がない。
-            for decorator in statement.decorator_list:
-                self._visit_expression(decorator, guarded=guarded)
-            with self._scope(statement):
-                self._walk_body(statement.body, guarded=False)
-            return
-        if isinstance(statement, ast.ClassDef):
-            # 束縛としては別 scope なので局所名の追跡は持ち込まないが、本体は
-            # **その場で**実行されるので guard 状態は引き継ぐ。
-            for decorator in statement.decorator_list:
-                self._visit_expression(decorator, guarded=guarded)
-            with self._scope(None):
-                self._walk_body(statement.body, guarded=guarded)
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # decorator / default 引数 / annotation / base class / metaclass は
+            # **この文が実行される時点で**評価されるので、今の guard 文脈で見る。
+            # 入口は :func:`_defining_scope_parts` の 1 つだけ（lambda と同じ
+            # 評価モデル）。本体だけが別の実行文脈になる。
+            for part in _defining_scope_parts(statement):
+                self._visit_expression(part, guarded=guarded)
+            if isinstance(statement, ast.ClassDef):
+                # 束縛としては別 scope だが、本体は**その場で**実行される。
+                with self._scope(None):
+                    self._walk_body(statement.body, guarded=guarded)
+            else:
+                # 別の呼び出し文脈で実行されるので guard を引き継がない。
+                with self._scope(statement):
+                    self._walk_body(statement.body, guarded=False)
             return
         for name, value in ast.iter_fields(statement):
             if name in {"body", "orelse", "finalbody"}:
@@ -1113,14 +1253,7 @@ class _EagerDebugRenderingScanner:
         根も候補に含める。
         """
 
-        candidates = [node] if isinstance(node, ast.Lambda) else []
-        candidates += [
-            child
-            for sub in walk_evaluated_now(node)
-            for child in ast.iter_child_nodes(sub)
-            if isinstance(child, ast.Lambda)
-        ]
-        for lambda_node in candidates:
+        for lambda_node in deferred_scopes_in(node):
             with self._scope(lambda_node):
                 self._visit_expression(lambda_node.body, guarded=False)
 
@@ -1173,13 +1306,6 @@ class _EagerDebugRenderingScanner:
 
     def _visit_expression(self, node: ast.AST, *, guarded: bool) -> None:
         self._visit_deferred_scopes(node)
-        crossed = _evaluation_boundary(node)
-        if crossed is not None:
-            # 式そのものが遅延 scope（``lambda``）。本体は上で別に見たので、
-            # ここでは定義時に評価される header だけを今の文脈で見る。
-            for part in crossed:
-                self._visit_expression(part, guarded=guarded)
-            return
         for sub in walk_evaluated_now(node):
             label = _render_call_label(sub)
             if label and guarded:
@@ -2619,6 +2745,196 @@ def test_a_class_body_is_evaluated_where_it_is_written():
         "        return Holder\n",
     )
     assert [entry[2] for entry in violations.render_in_debug_guard] == ["to_string()"]
+
+
+# -- A1: control flow をまたぐ再代入 -------------------------------------------
+
+_CONDITIONAL_REASSIGNMENTS = [
+    ("if", "    if cond:\n        summary = cheap\n"),
+    ("if/else", "    if cond:\n        summary = cheap\n    else:\n        pass\n"),
+    ("0 回あり得る for", "    for item in items:\n        summary = cheap\n"),
+    ("0 回あり得る while", "    while cond:\n        summary = cheap\n"),
+    ("try", "    try:\n        summary = cheap\n    except Exception:\n        pass\n"),
+    ("except 側", "    try:\n        pass\n    except Exception:\n        summary = cheap\n"),
+    ("with の中の if", "    with lock:\n        if cond:\n            summary = cheap\n"),
+]
+
+
+@pytest.mark.parametrize(
+    "label, reassignment",
+    _CONDITIONAL_REASSIGNMENTS,
+    ids=[case[0] for case in _CONDITIONAL_REASSIGNMENTS],
+)
+def test_a_conditional_reassignment_does_not_kill_a_renderer(label, reassignment):
+    """条件付きの再代入は前の定義を殺さない（renderer の値が sink へ届き得る）。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, cheap, cond, items, lock):\n"
+        "    summary = summarize_expression(expr)\n"
+        + reassignment
+        + "    self._debug_print(summary)\n",
+    )
+    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
+        "_debug_print(... summary = summarize_expression() ...)"
+    ], label
+
+
+@pytest.mark.parametrize(
+    "label, reassignment",
+    _CONDITIONAL_REASSIGNMENTS,
+    ids=[case[0] for case in _CONDITIONAL_REASSIGNMENTS],
+)
+def test_a_conditional_reassignment_does_not_kill_a_forbidden_call(label, reassignment):
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, cheap, cond, items, lock):\n"
+        "    summary = expr.to_string()\n"
+        + reassignment
+        + "    self._debug_print(summary)\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [
+        "_debug_print(... summary = to_string() ...)"
+    ], label
+
+
+def test_a_straight_line_reassignment_still_kills_the_earlier_definition():
+    """同じ直列区間の再代入は従来どおり上書きとして扱う。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, a, b, consume):\n"
+        "    summary = summarize_expression(a)\n"
+        "    consume(summary)\n"
+        "    summary = summarize_expression(b)\n"
+        "    self._debug_print(summary)\n",
+    )
+    # 前半は production に読まれて免除、後半だけが報告される。
+    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
+        "_debug_print(... summary = summarize_expression() ...)"
+    ]
+
+
+def test_a_straight_line_reassignment_inside_a_branch_still_kills():
+    """直列かどうかは block 単位。``if`` の中でも同じ block なら上書き。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, a, b, cond, consume):\n"
+        "    if cond:\n"
+        "        summary = summarize_expression(a)\n"
+        "        consume(summary)\n"
+        "        summary = b\n"
+        "        self._debug_print(summary)\n",
+    )
+    assert not violations.unguarded_summary_in_debug_sink, violations.describe()
+
+
+def test_an_outer_assignment_reaches_a_read_inside_a_branch():
+    """外側の直列代入は、あとから入る branch の中の読み出しにも届く。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, cond):\n"
+        "    summary = summarize_expression(expr)\n"
+        "    if cond:\n"
+        "        self._debug_print(summary)\n",
+    )
+    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
+        "_debug_print(... summary = summarize_expression() ...)"
+    ]
+
+
+def test_a_conditionally_reassigned_value_production_also_reads_is_exempt():
+    """条件付き再代入でも、production が読むなら従来どおり免除。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, cheap, cond, solver):\n"
+        "    smt = expr.to_smt()\n"
+        "    if cond:\n"
+        "        smt = cheap\n"
+        "    solver.add(smt)\n"
+        "    self._debug_print(smt)\n",
+    )
+    assert not violations.render_in_debug_sink, violations.describe()
+
+
+# -- A2: 定義時に評価される式 ---------------------------------------------------
+
+@pytest.mark.parametrize(
+    "definition, label",
+    [
+        ("def inner(x=expr.to_string()):\n            pass", "default 引数"),
+        ("def inner(x: expr.to_string() = None):\n            pass", "parameter annotation"),
+        ("def inner() -> expr.to_string():\n            pass", "戻り値 annotation"),
+        ("@decorate(expr.to_string())\n        def inner():\n            pass", "decorator"),
+        ("class Holder(expr.to_string()):\n            pass", "class base"),
+        ("class Holder(metaclass=expr.to_string()):\n            pass", "class keyword"),
+        ("@decorate(expr.to_string())\n        class Holder:\n            pass", "class decorator"),
+    ],
+)
+def test_a_defining_time_expression_inside_a_guard_is_checked(definition, label):
+    """定義時に**その場で**評価される式は R1 の対象。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, decorate):\n"
+        "    if self.debug:\n"
+        f"        {definition}\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_guard] == ["to_string()"], label
+
+
+def test_a_nested_function_body_does_not_inherit_the_guard():
+    """本体は別の実行文脈。定義時の式だけが今の文脈。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    if self.debug:\n"
+        "        def inner():\n"
+        "            return expr.to_string()\n",
+    )
+    assert not violations.render_in_debug_guard, violations.describe()
+
+
+# -- A3: 代入分類と式走査で評価の意味をそろえる --------------------------------
+
+def test_a_lambda_assignment_is_not_classified_as_a_forbidden_call():
+    """``thunk = lambda: expr.to_string()`` は代入の時点では何も描画しない。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    thunk = lambda: expr.to_string()\n"
+        "    self._debug_print(thunk)\n",
+    )
+    assert not violations.render_in_debug_sink, violations.describe()
+
+
+def test_a_lambda_default_in_an_assignment_is_still_classified():
+    """default 引数は定義時に評価されるので、この代入の仕事。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    thunk = lambda rendered=expr.to_string(): rendered\n"
+        "    self._debug_print(thunk)\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [
+        "_debug_print(... thunk = to_string() ...)"
+    ]
+
+
+def test_the_assignment_classifier_and_the_scanner_share_one_boundary():
+    """評価の意味を二か所で定義していないこと（同じ入口を使う）。"""
+
+    source = "thunk = lambda: expr.to_string()"
+    value = ast.parse(source, mode="exec").body[0].value
+    walked = {type(node).__name__ for node in walk_evaluated_now(value)}
+    assert "Call" not in walked, walked
+    assert _assignment_kind(value, OWNED_SUMMARY_FUNCTIONS) == ("", "")
 
 
 def test_the_two_declared_sets_do_not_overlap():
