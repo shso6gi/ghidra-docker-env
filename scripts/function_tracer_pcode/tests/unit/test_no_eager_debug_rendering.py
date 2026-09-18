@@ -114,7 +114,7 @@ RENDER_FREE_DUNDERS = frozenset({"__repr__", "__str__"})
 
 @dataclass
 class EagerDebugRenderingViolations:
-    """4 契約それぞれの違反。すべて空なら PASS。"""
+    """5 契約（R1〜R5）それぞれの違反。すべて空なら PASS。"""
 
     render_in_debug_guard: List[Tuple[str, int, str]] = field(default_factory=list)
     render_in_debug_sink: List[Tuple[str, int, str]] = field(default_factory=list)
@@ -171,15 +171,24 @@ def _called_name(node: ast.Call) -> str:
 
 
 def _render_call_label(node: ast.AST) -> str:
-    """`node` が full render の呼び出しならその名前、そうでなければ空文字。"""
+    """`node` が禁止された呼び出しならその名前、そうでなければ空文字。
+
+    判定は **呼び出しの綴り方に依らない**: ``obj.get_simplified_string(c)`` も
+    ``from ... import get_simplified_string`` 後の ``get_simplified_string(c)``
+    も同じ contract（owner の :data:`RENDER_METHODS`）で見る。import の形で
+    guard を回避できないようにするため。
+    """
 
     if not isinstance(node, ast.Call):
         return ""
     func = node.func
     if isinstance(func, ast.Attribute) and func.attr in RENDER_METHODS:
         return f"{func.attr}()"
-    if isinstance(func, ast.Name) and func.id == "repr":
-        return "repr()"
+    if isinstance(func, ast.Name):
+        if func.id in RENDER_METHODS:
+            return f"{func.id}()"
+        if func.id == "repr":
+            return "repr()"
     # `getattr(expr, "to_string", ...)()`: 呼び出し対象が getattr でも full render。
     if isinstance(func, ast.Call) and _called_name(func) == "getattr":
         arguments = func.args
@@ -204,32 +213,51 @@ def _is_debug_sink(node: ast.Call, renderers: FrozenSet[str]) -> bool:
 
 
 def _is_simple_argument(node: ast.AST) -> bool:
-    """委譲呼び出しの引数として認める形（評価が明らかに軽い式だけ）。
+    """委譲呼び出しの引数として認める形。
 
-    ``*items`` / ``**mapping`` は拒否する: 展開の時点で任意 iterable / mapping を
-    読むので、「guard の外で入力に触らない」という wrapper の前提を壊す。
+    局所名と定数だけ。``self.foo`` のような属性参照も認めない: property /
+    descriptor は任意の処理を起動でき、それが軽いと構文からは言えないため
+    （実在の wrapper はどれも局所名と定数しか渡していないので、狭めても困らない）。
+    ``*items`` / ``**mapping`` も拒否する（展開の時点で任意 iterable / mapping を
+    読む）。
     """
 
-    if isinstance(node, (ast.Name, ast.Constant)):
+    return isinstance(node, (ast.Name, ast.Constant))
+
+
+def _is_pure_call_target(func: ast.AST) -> bool:
+    """委譲先の呼び出し対象として認める形。
+
+    名前そのもの（``summarize_expression``）か、**名前を根とする属性の連なり**
+    （``self._debug_reporter.debug_expr_summary``）だけ。``factory().render``・
+    ``registry[key].render`` のように receiver 側で計算する形は拒否する
+    （``_called_name`` は末尾の属性名しか見ないので、ここで受け止める）。
+    """
+
+    if isinstance(func, ast.Name):
         return True
-    if isinstance(node, ast.Attribute):
-        return _is_simple_argument(node.value)
+    if isinstance(func, ast.Attribute):
+        return _is_pure_call_target(func.value)
     return False
 
 
-def _render_bearing_locals(
+def _debug_only_locals(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     renderers: FrozenSet[str],
 ) -> dict:
-    """**debug のためだけに**禁止された呼び出しを受けた局所名 → その呼び出し名。
+    """**debug のためだけに**作られた局所名 → ``(種別, 呼び出し名)``。
 
-    ``rendered = ConditionNormalizer.get_simplified_string(cond)`` のように
-    一度変数へ入れてから debug message に渡す形を捕まえるための、**代入 1 段**
-    だけの追跡。汎用 data-flow は要らない。
+    ``rendered = ConditionNormalizer.get_simplified_string(cond)`` や
+    ``summary = summarize_expression(expr)`` のように、一度変数へ入れてから
+    debug message に渡す形を捕まえるための **代入 1 段**だけの追跡。汎用
+    data-flow は要らない。種別は 2 つ:
+
+    * ``"forbidden"`` — 禁止された呼び出し（R2。guard の有無に関わらず不可）
+    * ``"renderer"`` — 有界 renderer（R3。guard の外で組み立ててはいけない）
 
     production が同じ値を使っている場合（``smt = expr.to_smt()`` を制約に使い、
     ついでに debug にも出す）は対象外。その仕事は debug の有無に関わらず起きる
-    ので、debug 側の問題ではない。判定は「その名前の読み出しが **すべて**
+    ので debug 側の問題ではない。判定は「その名前の読み出しが **すべて**
     debug sink の引数の中か」で行う。
     """
 
@@ -244,19 +272,20 @@ def _render_bearing_locals(
             continue
         if node.value is None:
             continue
-        label = next(
-            (
-                found
-                for found in (_render_call_label(inner) for inner in ast.walk(node.value))
-                if found
-            ),
-            "",
-        )
-        if not label:
+        entry = ("", "")
+        for inner in ast.walk(node.value):
+            forbidden = _render_call_label(inner)
+            if forbidden:
+                entry = ("forbidden", forbidden)
+                break
+            summary = _summary_call_label(inner, renderers)
+            if summary and not entry[0]:
+                entry = ("renderer", summary)
+        if not entry[0]:
             continue
         for target in targets:
             if isinstance(target, ast.Name):
-                labels[target.id] = label
+                labels[target.id] = entry
     if not labels:
         return labels
 
@@ -273,8 +302,8 @@ def _render_bearing_locals(
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in labels:
             reads.setdefault(node.id, []).append(id(node) in in_sink)
     return {
-        name: label
-        for name, label in labels.items()
+        name: entry
+        for name, entry in labels.items()
         if reads.get(name) and all(reads[name])
     }
 
@@ -329,7 +358,7 @@ def _delegates_to_a_bounded_renderer(
     if not isinstance(last, ast.Return) or not isinstance(last.value, ast.Call):
         return False
     call = last.value
-    if _called_name(call) not in known:
+    if _called_name(call) not in known or not _is_pure_call_target(call.func):
         return False
     if any(isinstance(argument, ast.Starred) for argument in call.args):
         return False  # ``*items``
@@ -395,8 +424,8 @@ def is_pure_debug_availability_test(node: ast.AST) -> bool:
             if node.keywords or not (2 <= len(node.args) <= 3):
                 return False
             receiver, attribute, *default = node.args
-            if not _is_simple_argument(receiver):
-                return False
+            if not isinstance(receiver, ast.Name):
+                return False  # ``getattr(self, ...)`` 相当だけ。receiver で計算しない
             if not isinstance(attribute, ast.Constant) or type(attribute.value) is not str:
                 return False
             if default and not isinstance(default[0], ast.Constant):
@@ -501,7 +530,7 @@ class _EagerDebugRenderingScanner:
             for decorator in statement.decorator_list:
                 self._visit_expression(decorator, guarded=guarded)
             outer = self.assigned_render_labels
-            self.assigned_render_labels = _render_bearing_locals(statement, self.renderers)
+            self.assigned_render_labels = _debug_only_locals(statement, self.renderers)
             try:
                 self._walk_body(statement.body, guarded=False)
             finally:
@@ -563,14 +592,15 @@ class _EagerDebugRenderingScanner:
                             (self.module, sub.lineno, f"{_called_name(sub)}(... {summary} ...)")
                         )
                     if isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load):
-                        indirect = self.assigned_render_labels.get(inner.id)
-                        if indirect:
+                        kind, label = self.assigned_render_labels.get(inner.id, ("", ""))
+                        detail = f"{_called_name(sub)}(... {inner.id} = {label} ...)"
+                        if kind == "forbidden":
                             self.violations.render_in_debug_sink.append(
-                                (
-                                    self.module,
-                                    sub.lineno,
-                                    f"{_called_name(sub)}(... {inner.id} = {indirect} ...)",
-                                )
+                                (self.module, sub.lineno, detail)
+                            )
+                        elif kind == "renderer" and not guarded:
+                            self.violations.unguarded_summary_in_debug_sink.append(
+                                (self.module, sub.lineno, detail)
                             )
 
 
@@ -1103,7 +1133,7 @@ def test_every_declared_preparation_helper_needs_a_guard(name):
     [
         ("summarize_widget(widget)", True, "name"),
         ("summarize_widget(widget, max_depth=depth)", True, "keyword name"),
-        ("summarize_widget(self.widget)", True, "attribute"),
+        ("summarize_widget(self.widget)", False, "属性参照は descriptor を起動しうる"),
         ("summarize_widget(*items)", False, "*args は iterable を展開する"),
         ("summarize_widget(**mapping)", False, "**kwargs は mapping を展開する"),
         ("summarize_widget(sorted(widget))", False, "引数が入力を走査する"),
@@ -1133,6 +1163,90 @@ def test_wrapper_arguments_must_be_cheap(call, accepted, label):
 def test_getattr_is_only_a_flag_read_in_an_exact_shape(test_source, pure, label):
     node = ast.parse(test_source, mode="eval").body
     assert is_pure_debug_availability_test(node) is pure, label
+
+
+@pytest.mark.parametrize("name", sorted(debug_render.HEAVY_DIAGNOSTIC_CALLS | debug_render.UNBOUNDED_RENDER_CALLS))
+def test_a_forbidden_call_is_caught_however_it_is_spelled(name):
+    """``obj.f(x)`` でも ``from ... import f`` 後の ``f(x)`` でも同じ扱い。"""
+
+    qualified = scan_source(
+        "sample",
+        "def f(self, value):\n"
+        f"    self._debug_print(f'v={{owner.{name}(value)}}')\n",
+    )
+    direct = scan_source(
+        "sample",
+        "def f(self, value):\n"
+        f"    self._debug_print(f'v={{{name}(value)}}')\n",
+    )
+    assert qualified.render_in_debug_sink, name
+    assert direct.render_in_debug_sink, name
+
+
+def test_a_direct_forbidden_call_is_caught_through_a_local():
+    violations = scan_source(
+        "sample",
+        "def f(self, cond):\n"
+        "    rendered = get_simplified_string(cond)\n"
+        "    self._debug_print(rendered)\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [
+        "_debug_print(... rendered = get_simplified_string() ...)"
+    ]
+
+
+def test_a_bounded_renderer_through_a_local_still_needs_a_guard():
+    """``summary = summarize_expression(expr)`` も debug OFF で走ってはいけない。"""
+
+    unguarded = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    summary = summarize_expression(expr)\n"
+        "    self._debug_print(summary)\n",
+    )
+    assert [entry[2] for entry in unguarded.unguarded_summary_in_debug_sink] == [
+        "_debug_print(... summary = summarize_expression() ...)"
+    ]
+
+    guarded = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    if self.debug:\n"
+        "        summary = summarize_expression(expr)\n"
+        "        self._debug_print(summary)\n",
+    )
+    assert not guarded.unguarded_summary_in_debug_sink
+
+
+def test_a_renderer_result_production_also_reads_is_not_a_debug_problem():
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    summary = summarize_expression(expr)\n"
+        "    record(summary)\n"
+        "    self._debug_print(summary)\n",
+    )
+    assert not violations.unguarded_summary_in_debug_sink
+
+
+@pytest.mark.parametrize(
+    "call, accepted, label",
+    [
+        ("summarize_widget(widget)", True, "直接呼び出し"),
+        ("self.renderer.summarize_widget(widget)", True, "名前を根とする属性の連なり"),
+        ("expensive_factory().summarize_widget(widget)", False, "receiver で計算する"),
+        ("registry[key].summarize_widget(widget)", False, "receiver が添字"),
+        ("summarize_widget(self.expensive_property)", False, "引数が属性参照（descriptor）"),
+        ("summarize_widget(container[index])", False, "引数が添字"),
+    ],
+)
+def test_wrapper_call_target_and_arguments_are_fail_closed(call, accepted, label):
+    source = (
+        "class Host:\n"
+        "    def _debug_widget_summary(self, widget, container, index, key):\n"
+        f"        return {call}\n"
+    )
+    assert bool(_wrappers_in(source)) is accepted, label
 
 
 def test_scanner_detects_full_render_in_repr():
