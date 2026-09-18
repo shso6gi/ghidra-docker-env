@@ -371,23 +371,25 @@ days so they never queue against each other. The cheap gates in `unit.yml`
 request.
 
 with
-`if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true`
-on the job, so a PR that is closed without being merged starts nothing either —
-and a trigger added later without thinking about this policy leaves a visibly
-skipped job rather than quietly running 85 minutes of work.
+`if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'`
+on the job: the two allowed events are named rather than excluded, so a trigger
+added later without thinking about this policy leaves a visibly skipped job
+rather than quietly running 85 minutes of work.
 
-Why this and not `push: branches: [main]`: a direct push to `main` is not "a
-pull request was reviewed and merged", and the `push` event would not tell the
-run which PR it belongs to. The cost is that a `pull_request` event checks out
-`refs/pull/N/merge` — the test merge GitHub computed while the PR was open, not
-the commit that landed — so the checkout is pinned to
-`github.event.pull_request.merge_commit_sha` and a step then asserts that
-`git rev-parse HEAD` equals it. `ci_metadata.json` records that commit as
-`analysed_commit` next to the PR number.
+**Which commit a scheduled run verifies.** A `schedule` event fixes a commit
+when it fires — `GITHUB_SHA`, the default branch's head at that moment — and
+`actions/checkout` with no `ref:` checks out exactly that. A step asserts
+`git rev-parse HEAD` equals `GITHUB_SHA` and nothing else; it never re-fetches
+the branch, because a commit landing on `main` while the runner is being handed
+out would then fail a run that is doing exactly what it should. The run is of
+the commit the event named, and `ci_metadata.json` records it as
+`analysed_commit`. A manual dispatch keeps the ref the operator chose, for the
+same reason the checkout pins no ref of its own.
 
-There is deliberately no `schedule`: the run is tied to what landed, not to the
-calendar. Nothing here runs while a pull request is open, so the per-PR gate
-stays `unit-fast` + `recorded-fast` (and `recorded-full` on `main`).
+The policy that only `unit.yml` runs automatically per push or pull request,
+and that every other workflow starts automatically only once a week, is held
+by `tests/unit/test_ci_workflow_policy.py` against the workflow files
+themselves.
 
 | input | default | used for |
 |---|---|---|

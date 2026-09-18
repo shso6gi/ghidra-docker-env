@@ -1,19 +1,27 @@
 # -*- coding: utf-8 -*-
 """GitHub Actions の起動方針を固定する。
 
-無料枠が制約なので、**自動で走る重い workflow は各 1 本 / 週**に限る。安い gate
-（``unit.yml`` の ``unit-fast`` / ``recorded-fast``）は従来どおり pull request
-ごとに走る。ここで縛るのは **いつ走るか**だけで、走った後の検証内容には触れない。
+要求はひとつ:
 
-重さは workflow 名ではなく **宣言された budget**（``timeout-minutes``）で決める。
-新しく重い workflow を足した人が、この test の存在を知らなくても policy に
-引っかかるようにするため。
+    **通常 CI (``unit.yml``) 以外の自動 CI は週 1 回だけ。**
+    手動の ``workflow_dispatch`` は許可。
+
+Actions の無料枠（2000 分/月）が制約なので、``unit.yml`` 以外の workflow は
+「週 1 回の ``schedule``」と「人が押す ``workflow_dispatch``」しか持ってはいけない。
+``push`` / ``pull_request`` / ``workflow_run`` / ``release`` などの自動 event は
+1 つも許さない。
+
+**重さでは分類しない。** ``timeout-minutes`` のような代理指標だと、timeout を
+書かない workflow、30 分 × 大量 matrix、``.yaml`` 拡張子、``workflow_run`` の
+ような別経路で方針をすり抜けられる。ここで見るのは「自動で起動するか」そのもの。
+
+ここで縛るのは **いつ走るか**だけで、走った後の検証内容には触れない。
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Set
 
 import pytest
 import yaml
@@ -21,15 +29,14 @@ import yaml
 
 WORKFLOW_DIR = Path(__file__).resolve().parents[4] / ".github" / "workflows"
 
-#: 安い gate が自分に許している時間（``unit.yml`` の 2 job がともに 30 分）。
-#: それより長い budget を要求する job を 1 つでも持つ workflow は「重い」。
-#: 「PR gate より時間を要求するものは自動では週 1 回」という線の引き方なので、
-#: 新しい workflow を足した人がこの test を知らなくても引っかかる。
-CHEAP_GATE_TIMEOUT_MINUTES = 30
+#: 唯一の「通常 CI」。pull request ごとに走ってよいのはこれだけ。
+NORMAL_CI_WORKFLOW = "unit.yml"
 
-#: 安い gate を持つ workflow と、pull request で必ず走る job。
-CHEAP_GATE_WORKFLOW = "unit.yml"
+#: その通常 CI が必ず持つ job（安い gate を弱めていないことの確認）。
 REQUIRED_PR_JOBS = ("unit-fast", "recorded-fast")
+
+#: ``unit.yml`` 以外に許す trigger。``schedule`` は週 1 本だけ（下で確認）。
+ALLOWED_TRIGGERS_ELSEWHERE = {"schedule", "workflow_dispatch"}
 
 
 def _load(path: Path) -> dict:
@@ -40,118 +47,134 @@ def _load(path: Path) -> dict:
     return document
 
 
-def _workflows() -> Dict[str, dict]:
-    return {path.name: _load(path) for path in sorted(WORKFLOW_DIR.glob("*.yml"))}
+def _workflow_files() -> List[Path]:
+    """``.yml`` と ``.yaml`` の両方（拡張子で漏らさない）。"""
+
+    return sorted(
+        path
+        for pattern in ("*.yml", "*.yaml")
+        for path in WORKFLOW_DIR.glob(pattern)
+    )
 
 
-def _job_timeouts(document: dict) -> List[int]:
-    return [
-        job["timeout-minutes"]
-        for job in document.get("jobs", {}).values()
-        if isinstance(job, dict) and isinstance(job.get("timeout-minutes"), int)
-    ]
+ALL_WORKFLOWS: Dict[str, dict] = {path.name: _load(path) for path in _workflow_files()}
+OTHER_WORKFLOWS: List[str] = sorted(set(ALL_WORKFLOWS) - {NORMAL_CI_WORKFLOW})
 
 
-def _is_heavy(document: dict) -> bool:
-    return any(timeout > CHEAP_GATE_TIMEOUT_MINUTES for timeout in _job_timeouts(document))
+def _triggers(name: str) -> Set[str]:
+    declared = ALL_WORKFLOWS[name]["on"]
+    if isinstance(declared, str):
+        return {declared}
+    if isinstance(declared, list):
+        return set(declared)
+    return set(declared)
 
 
-ALL_WORKFLOWS = _workflows()
-HEAVY_WORKFLOWS = sorted(name for name, doc in ALL_WORKFLOWS.items() if _is_heavy(doc))
+def test_every_workflow_file_is_readable_and_classified():
+    """棚卸しに漏れが無いこと（新しい workflow は自動でこの policy に掛かる）。"""
 
-
-def test_the_workflow_directory_is_readable_yaml():
     assert ALL_WORKFLOWS, "no workflows found"
+    assert NORMAL_CI_WORKFLOW in ALL_WORKFLOWS, f"{NORMAL_CI_WORKFLOW} is gone"
     for name, document in ALL_WORKFLOWS.items():
         assert "on" in document, f"{name} declares no triggers"
         assert document.get("jobs"), f"{name} declares no jobs"
+    on_disk = {path.name for path in _workflow_files()}
+    assert on_disk == set(ALL_WORKFLOWS), on_disk ^ set(ALL_WORKFLOWS)
 
 
-def test_the_expected_workflows_are_classified_as_heavy():
-    """棚卸しが実態とずれたら FAIL（重い workflow を見落とさないため）。"""
+@pytest.mark.parametrize("name", OTHER_WORKFLOWS)
+def test_only_the_normal_ci_starts_itself_outside_a_weekly_schedule(name):
+    """``unit.yml`` 以外の自動起動は weekly ``schedule`` だけ。
 
-    assert HEAVY_WORKFLOWS == ["eqbench-subset.yml", "recorded-full.yml"]
-    assert not _is_heavy(ALL_WORKFLOWS[CHEAP_GATE_WORKFLOW])
-    assert max(_job_timeouts(ALL_WORKFLOWS[CHEAP_GATE_WORKFLOW])) == CHEAP_GATE_TIMEOUT_MINUTES
+    ``push`` / ``pull_request`` / ``pull_request_target`` / ``workflow_run`` /
+    ``repository_dispatch`` / ``release`` など、名前を問わず他の自動 event を
+    許さない（allow list なので、新しい event 種別も既定で拒否される）。
+    """
 
-
-@pytest.mark.parametrize("name", HEAVY_WORKFLOWS)
-def test_a_heavy_workflow_does_not_start_on_a_push(name):
-    """merge / push ごとに 1 時間超の仕事を始めない。"""
-
-    assert "push" not in ALL_WORKFLOWS[name]["on"], f"{name} still starts on a push"
+    extra = _triggers(name) - ALLOWED_TRIGGERS_ELSEWHERE
+    assert not extra, f"{name} starts automatically on {sorted(extra)}"
 
 
-@pytest.mark.parametrize("name", HEAVY_WORKFLOWS)
-def test_a_heavy_workflow_does_not_start_on_a_pull_request(name):
-    """merged PR ごとの自動起動も含めて、pull request では始めない。"""
-
-    assert "pull_request" not in ALL_WORKFLOWS[name]["on"], name
-    assert "pull_request_target" not in ALL_WORKFLOWS[name]["on"], name
-
-
-@pytest.mark.parametrize("name", HEAVY_WORKFLOWS)
-def test_a_heavy_workflow_has_exactly_one_weekly_schedule(name):
-    """自動起動は週 1 回だけ。日を指定しない cron は毎日走るので拒否する。"""
+@pytest.mark.parametrize("name", OTHER_WORKFLOWS)
+def test_a_non_normal_workflow_has_exactly_one_weekly_schedule(name):
+    """自動起動は週 1 回だけ。曜日を絞らない cron は毎日走るので拒否する。"""
 
     schedule = ALL_WORKFLOWS[name]["on"].get("schedule")
     assert schedule, f"{name} has no schedule"
-    assert len(schedule) == 1, f"{name} has {len(schedule)} schedules, not 1"
+    assert len(schedule) == 1, f"{name} declares {len(schedule)} schedules, not 1"
     minute, hour, day_of_month, month, day_of_week = schedule[0]["cron"].split()
     assert day_of_week not in ("*", "?"), f"{name} runs every day: {schedule[0]['cron']}"
-    assert "," not in day_of_week and "/" not in day_of_week and "-" not in day_of_week, (
-        f"{name} runs on more than one weekday: {schedule[0]['cron']}"
-    )
+    for separator in (",", "/", "-"):
+        assert separator not in day_of_week, (
+            f"{name} runs on more than one weekday: {schedule[0]['cron']}"
+        )
     assert day_of_month == "*", f"{name} mixes day-of-month into a weekly cron"
     assert month == "*", f"{name} is not weekly: {schedule[0]['cron']}"
-    assert minute.isdigit() and hour.isdigit(), f"{name} has a fanned-out cron"
+    assert minute.isdigit() and hour.isdigit(), (
+        f"{name} fans its cron out over several times: {schedule[0]['cron']}"
+    )
 
 
-@pytest.mark.parametrize("name", HEAVY_WORKFLOWS)
-def test_a_heavy_workflow_keeps_its_manual_escape_hatch(name):
-    """手動起動は週 1 回の制限に含めない（障害時・任意検証用）。"""
+@pytest.mark.parametrize("name", OTHER_WORKFLOWS)
+def test_a_non_normal_workflow_keeps_its_manual_escape_hatch(name):
+    """手動起動は週 1 回の枠に含めない（障害時・任意検証用）。"""
 
-    assert "workflow_dispatch" in ALL_WORKFLOWS[name]["on"], name
-
-
-def test_the_heavy_workflows_do_not_share_a_time_slot():
-    """重い workflow を同じ時刻に集中させない。"""
-
-    slots = [
-        ALL_WORKFLOWS[name]["on"]["schedule"][0]["cron"]
-        for name in HEAVY_WORKFLOWS
-    ]
-    weekdays = [cron.split()[4] for cron in slots]
-    assert len(set(weekdays)) == len(weekdays), f"heavy workflows share a weekday: {slots}"
+    assert "workflow_dispatch" in _triggers(name), name
 
 
-def test_the_cheap_gate_still_runs_on_every_pull_request():
+def test_the_weekly_workflows_do_not_share_a_day():
+    """自動実行を同じ日に集中させない。"""
+
+    days = {
+        name: ALL_WORKFLOWS[name]["on"]["schedule"][0]["cron"].split()[4]
+        for name in OTHER_WORKFLOWS
+    }
+    assert len(set(days.values())) == len(days), f"weekly workflows share a day: {days}"
+
+
+def test_the_normal_ci_still_runs_on_every_pull_request():
     """安い gate を弱めていないこと。"""
 
-    triggers = ALL_WORKFLOWS[CHEAP_GATE_WORKFLOW]["on"]
-    assert "pull_request" in triggers
+    triggers = ALL_WORKFLOWS[NORMAL_CI_WORKFLOW]["on"]
     assert triggers["pull_request"]["branches"] == ["main"]
-    jobs = ALL_WORKFLOWS[CHEAP_GATE_WORKFLOW]["jobs"]
+    assert triggers["push"]["branches"] == ["main"]
+    jobs = ALL_WORKFLOWS[NORMAL_CI_WORKFLOW]["jobs"]
     for job in REQUIRED_PR_JOBS:
-        assert job in jobs, f"{job} is gone from {CHEAP_GATE_WORKFLOW}"
+        assert job in jobs, f"{job} is gone from {NORMAL_CI_WORKFLOW}"
         assert "if" not in jobs[job], f"{job} became conditional"
 
 
-def test_the_subset_run_takes_the_branch_head_rather_than_a_named_ref():
-    """schedule ではその時点の main HEAD、dispatch では操作者が選んだ ref。
+def test_the_subset_checkout_leaves_the_ref_to_the_event():
+    """schedule は event が決めた commit、dispatch は操作者が選んだ ref。
 
-    ``ref:`` を書くと dispatch の選択を奪うので、checkout に ref を渡さない
-    （schedule event の既定が default branch の head）。
+    ``ref:`` を書くと dispatch の選択を奪うので、checkout に ref を渡さない。
     """
 
-    document = ALL_WORKFLOWS["eqbench-subset.yml"]
-    steps = document["jobs"]["subset"]["steps"]
-    checkouts = [step for step in steps if str(step.get("uses", "")).startswith("actions/checkout")]
+    steps = ALL_WORKFLOWS["eqbench-subset.yml"]["jobs"]["subset"]["steps"]
+    checkouts = [
+        step for step in steps if str(step.get("uses", "")).startswith("actions/checkout")
+    ]
     assert checkouts, "the subset job does not check anything out"
     for step in checkouts:
         assert "ref" not in (step.get("with") or {}), "the checkout pins a ref"
+
+
+def test_a_scheduled_subset_run_is_verified_against_the_event_commit():
+    """race にならない identity 確認: event が固定した commit と比べる。
+
+    ``git fetch`` で「いまの branch head」を取り直すと、runner が割り当てられる
+    間に main が進んだだけで正常な run が落ちる。
+    """
+
+    source = (WORKFLOW_DIR / "eqbench-subset.yml").read_text(encoding="utf-8")
+    steps = ALL_WORKFLOWS["eqbench-subset.yml"]["jobs"]["subset"]["steps"]
     guards = [step for step in steps if step.get("if") == "github.event_name == 'schedule'"]
     assert guards, "nothing verifies what a scheduled run checked out"
+    guard = guards[0]
+    assert guard["env"]["EVENT_SHA"] == "${{ github.sha }}", guard["env"]
+    assert '"$checked_out" == "$EVENT_SHA"' in guard["run"]
+    assert "git fetch" not in guard["run"], "the identity check re-fetches the branch"
+    assert "FETCH_HEAD" not in source, "a branch head is fetched somewhere in this workflow"
 
 
 def test_the_subset_job_runs_only_for_a_schedule_or_a_manual_dispatch():
@@ -187,3 +210,13 @@ def test_the_normalisation_defaults_match_the_dispatch_form(setting, default):
     source = (WORKFLOW_DIR / "eqbench-subset.yml").read_text(encoding="utf-8")
     assert f'{setting}="${{RAW_' in source, f"{setting} is not normalised in one place"
     assert f':-{default}}}"' in source, f"{setting} does not default to {default}"
+
+
+def test_no_workflow_still_reads_a_pull_request_payload():
+    """merged-PR 前提が残っていないこと（``unit.yml`` 以外は PR で走らない）。"""
+
+    for path in _workflow_files():
+        if path.name == NORMAL_CI_WORKFLOW:
+            continue
+        source = path.read_text(encoding="utf-8")
+        assert "github.event.pull_request" not in source, path.name

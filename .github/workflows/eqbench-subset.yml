@@ -10,9 +10,10 @@ name: eqbench-subset
 #     thing this repository can start automatically, and the free Actions
 #     allowance is the constraint.  Running it once a week keeps the same
 #     verification without paying for it on every merge.
-#   * the run therefore verifies WHAT IS ON MAIN at the scheduled moment, not
-#     one particular merge.  `schedule` checks out the default branch's head,
-#     which is exactly that.
+#   * the run therefore verifies the commit the schedule event named -- the
+#     default branch head at the moment it fired -- not one particular merge.
+#     That commit is fixed by the event, so a push landing on main while the
+#     runner is being handed out cannot make the run disagree with itself.
 #   * nothing about the run itself is weakened: the same subset, the same
 #     per-pair timeout, the same soundness gate and the same per-half
 #     benchmark validation gate as before.
@@ -95,26 +96,27 @@ jobs:
       # choice away from the manual escape hatch.
       - uses: actions/checkout@v4
 
-      # A scheduled run must be OF the head of the default branch -- not of a
-      # commit that moved on while the runner was being handed out.  Fail
-      # closed: if what was checked out is not that head, the evidence would
-      # be labelled with the wrong commit.
-      - name: This scheduled run is of the default branch head
+      # A scheduled run verifies the commit THE EVENT NAMED: a schedule event
+      # fixes GITHUB_SHA -- the default branch head at the moment it fired --
+      # and the checkout above resolves to exactly that.  Compare against the
+      # event's own identity and nothing else.  Re-fetching the branch here
+      # would fail a perfectly good run whenever a commit landed while the
+      # runner was being handed out, which is a race, not a problem.  If a
+      # newer commit is what needs the evidence, dispatch the workflow by hand
+      # against it.
+      - name: This scheduled run is of the commit the event named
         if: github.event_name == 'schedule'
         env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           checked_out="$(git rev-parse HEAD)"
-          echo "default branch: ${DEFAULT_BRANCH:-(none)}"
-          echo "checked out:    $checked_out"
-          [[ -n "${DEFAULT_BRANCH:-}" ]] \
-            || { echo "::error::the schedule event carries no default branch"; exit 1; }
-          git fetch --no-tags --depth=1 origin "$DEFAULT_BRANCH"
-          head="$(git rev-parse FETCH_HEAD)"
-          echo "branch head:    $head"
-          [[ "$checked_out" == "$head" ]] \
-            || { echo "::error::checked out $checked_out, not $DEFAULT_BRANCH head $head"; exit 1; }
+          echo "event commit:  ${EVENT_SHA:-(none)}"
+          echo "checked out:   $checked_out"
+          [[ -n "${EVENT_SHA:-}" ]] \
+            || { echo "::error::the schedule event carries no commit"; exit 1; }
+          [[ "$checked_out" == "$EVENT_SHA" ]] \
+            || { echo "::error::checked out $checked_out, not the event commit $EVENT_SHA"; exit 1; }
 
       # ------------------------------------------------------------------
       # 1. One normalisation, one set of settings
