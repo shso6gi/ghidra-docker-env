@@ -36,6 +36,8 @@ NORMAL_CI_WORKFLOW = "unit.yml"
 REQUIRED_PR_JOBS = ("unit-fast", "recorded-fast")
 
 #: ``unit.yml`` 以外に許す trigger。``schedule`` は週 1 本だけ（下で確認）。
+#: ``workflow_dispatch`` は人が押すものなので「週 1 回」の枠には含めず、
+#: **任意**（必須にはしない — 要求は自動実行の頻度だけ）。
 ALLOWED_TRIGGERS_ELSEWHERE = {"schedule", "workflow_dispatch"}
 
 
@@ -115,27 +117,43 @@ def test_a_non_normal_workflow_has_exactly_one_weekly_schedule(name):
     )
 
 
-@pytest.mark.parametrize("name", OTHER_WORKFLOWS)
-def test_a_non_normal_workflow_keeps_its_manual_escape_hatch(name):
-    """手動起動は週 1 回の枠に含めない（障害時・任意検証用）。"""
+def test_the_manual_escape_hatch_is_allowed_but_not_required():
+    """``workflow_dispatch`` は **任意**（要求は「自動実行は週 1 回」だけ）。
 
-    assert "workflow_dispatch" in _triggers(name), name
+    いま持っている 2 本は手動起動も残しているので、それは事実として確認する。
+    将来 dispatch を持たない weekly workflow を足しても、それ自体は方針違反では
+    ない（上の allow list が自動 event を止めているので十分）。
+    """
+
+    assert "workflow_dispatch" in ALLOWED_TRIGGERS_ELSEWHERE
+    for name in ("recorded-full.yml", "eqbench-subset.yml"):
+        assert "workflow_dispatch" in _triggers(name), name
 
 
-def test_the_weekly_workflows_do_not_share_a_day():
-    """自動実行を同じ日に集中させない。"""
+def test_the_two_heavy_workflows_do_not_share_a_day():
+    """いまある 2 本が同じ日に重ならないこと。
+
+    「すべての weekly workflow は別々の曜日」という一般則にはしない — workflow が
+    増えれば曜日は足りなくなるし、要求は「各 workflow 週 1 回」であって
+    「全体で 1 日 1 本」ではない。
+    """
 
     days = {
         name: ALL_WORKFLOWS[name]["on"]["schedule"][0]["cron"].split()[4]
-        for name in OTHER_WORKFLOWS
+        for name in ("recorded-full.yml", "eqbench-subset.yml")
     }
-    assert len(set(days.values())) == len(days), f"weekly workflows share a day: {days}"
+    assert len(set(days.values())) == 2, f"the two heavy workflows share a day: {days}"
 
 
 def test_the_normal_ci_still_runs_on_every_pull_request():
-    """安い gate を弱めていないこと。"""
+    """安い gate を弱めていないこと。trigger 集合も固定する。
+
+    ``unit.yml`` に ``schedule`` や ``workflow_run`` が足されたらここで FAIL する
+    （通常 CI は「PR と main への push」だけ、という取り決め）。
+    """
 
     triggers = ALL_WORKFLOWS[NORMAL_CI_WORKFLOW]["on"]
+    assert set(triggers) == {"push", "pull_request"}, sorted(triggers)
     assert triggers["pull_request"]["branches"] == ["main"]
     assert triggers["push"]["branches"] == ["main"]
     jobs = ALL_WORKFLOWS[NORMAL_CI_WORKFLOW]["jobs"]

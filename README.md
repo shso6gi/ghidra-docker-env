@@ -146,7 +146,7 @@ Where the replays run:
 |---|---|---|
 | `unit-fast` (every PR) | the ordinary suite plus the cheap corpus contracts in `tests/unit/test_recorded_corpus_contracts.py` | none -- `-m "not recorded_replay"` **deselects** them (it does not skip them) |
 | `recorded-fast` (every PR, parallel with `unit-fast`) | `tests/unit/test_recorded_pairs.py` at its default `pr_gate` tier | the 7 replays `cases.json` marks `pr_gate: true` |
-| `recorded-full` (push to `main`, `workflow_dispatch`, weekly) | one replay per matrix shard, then an aggregate job | all 9, `fail-fast: false` |
+| `recorded-full` (weekly, plus `workflow_dispatch`) | one replay per matrix shard, then an aggregate job | all 9, `fail-fast: false` |
 
 Both gates and the full matrix call the same `validate_replay`, so no case is
 checked less anywhere; `wood` and `barthe2big` are outside the PR gate only
@@ -364,11 +364,11 @@ validation gate. When a particular merge needs real-binary evidence sooner than
 the next scheduled run, dispatch it by hand — `workflow_dispatch` takes a ref
 and the four inputs below, and is not part of the weekly budget.
 
-The other heavy workflow, `recorded-full`, is weekly too (Mondays 03:20 UTC) and
-no longer runs on every push to `main`; the two are deliberately on different
-days so they never queue against each other. The cheap gates in `unit.yml`
-(`unit-fast`, `recorded-fast`) are unchanged and still run on every pull
-request.
+The other heavy workflow, `recorded-full`, is weekly too (Mondays 03:20 UTC);
+the two are on different days so they never queue against each other. The cheap
+gates in `unit.yml` (`unit-fast`, `recorded-fast`) are unchanged and still run
+on every pull request — `unit.yml` is the only workflow that starts itself per
+push or pull request.
 
 with
 `if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'`

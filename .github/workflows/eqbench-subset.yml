@@ -121,7 +121,7 @@ jobs:
       # ------------------------------------------------------------------
       # 1. One normalisation, one set of settings
       # ------------------------------------------------------------------
-      # A merged pull request carries no inputs, so every setting is decided
+      # A scheduled run carries no inputs, so every setting is decided
       # here and nowhere else.  `${VAR:-default}` treats ONLY unset/empty as
       # absent, so identical_fast_path=0 stays 0.  A GitHub expression `||`
       # would decide that in its own truthiness rules, which is exactly the
