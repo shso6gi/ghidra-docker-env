@@ -27,13 +27,13 @@ from scripts.function_tracer_pcode.checker.phases.handler import (
     PhaseSpec,
 )
 from scripts.function_tracer_pcode.checker.pair_execution import (
-    AnalysisFailureError,
     apply_pair_failure_gate,
     binary_display_name,
     pair_allows_semantic_analysis,
     pair_failure_result_for_exception,
     pair_stop_state,
 )
+from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 
 

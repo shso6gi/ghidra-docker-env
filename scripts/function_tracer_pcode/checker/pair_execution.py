@@ -33,7 +33,6 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from scripts.function_tracer_pcode.core.errors import (
-    AnalysisFailureError,
     PairFailureKind,
     PairPendingFailure,
     PairStopState,
@@ -228,9 +227,6 @@ def _failure_already_in_result(result, failure: PairPendingFailure) -> bool:
 
 
 __all__ = [
-    "AnalysisFailureError",
-    "PairPendingFailure",
-    "PairStopState",
     "apply_pair_failure_gate",
     "binary_display_name",
     "pair_allows_semantic_analysis",
@@ -240,3 +236,4 @@ __all__ = [
     "pending_pair_failure",
     "raise_pending_pair_failure",
 ]
+

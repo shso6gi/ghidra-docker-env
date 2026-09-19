@@ -14,14 +14,16 @@ from scripts.function_tracer_pcode.checker.workflow import (
 # Issue #106 PR-106-0: pair の実行制御。boundary は lifecycle（scope の開閉）と
 # 呼び出し順序だけを所有し、結果の組み立ては `checker.pair_execution` に置く。
 from scripts.function_tracer_pcode.checker.pair_execution import (
-    AnalysisFailureError,
     apply_pair_failure_gate,
     binary_display_name,
     pair_allows_semantic_analysis,
     pair_failure_result_for_exception,
     pair_stop_state,
 )
-from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+from scripts.function_tracer_pcode.core.errors import (
+    AnalysisFailureError,
+    pair_failure_scope,
+)
 from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     production_signal_scope,
 )

@@ -546,6 +546,10 @@ def pair_failure_scope(
     いちばん内側の台帳が `pair_identity` / `session_identity` の **両方** で
     一致するなら、その台帳をそのまま貸す（再入）。片方でも違えば新しい台帳を
     積み、scope を抜けるときに捨てる。捨てるので次 pair へ状態が漏れない。
+
+    前提は **process = pair 1 件 + 同期的な入れ子実行**。別 thread からの
+    producer は一般の extension point として保証しない（`_PAIR_LEDGERS` の
+    コメントを参照）。
     """
     with _PAIR_LEDGER_LOCK:
         active = _PAIR_LEDGERS[-1] if _PAIR_LEDGERS else None
@@ -641,7 +645,12 @@ def raise_limitation(
 
 
 def record_internal_bug(exc: BaseException, *, site: str) -> None:
-    """内部バグを台帳へ記録する（raise はしない。呼び出し側がそのまま raise する）。"""
+    """内部バグを台帳へ記録する（raise はしない。呼び出し側がそのまま raise する）。
+
+    記録したあと生の例外をそのまま上へ投げてよい。握り潰されれば gate が台帳から
+    拾い直し、握り潰されずに境界まで来れば `adopt_pair_failure` が拾う。どちらの
+    経路でも `internal_exception` の ERROR に落ちる。
+    """
     ledger = current_pair_ledger()
     if ledger is not None:
         ledger.record_internal_bug(exc, site=site)
