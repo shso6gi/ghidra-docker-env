@@ -10,9 +10,12 @@
 
 * **検出** — 違反を見つける。debug sink / guard / 入れ子の並びまで必要なだけ辿る
   （:func:`statement_scope_nodes` / :func:`walk_evaluated_now`）
-* **免除の証明** — production も使う値かを示す。:func:`direct_production_expressions`
-  が statement 種別ごとに明示した **直接式だけ**を見る。「広く見てから条件で
-  削る」のではなく、最初から狭い positive set
+* **免除の証明** — production も使う値かを示す。**2 段の positive grammar**
+  だけで決まる: statement 段（:func:`direct_production_expressions` — その文を
+  実行したら必ず評価される式はどれか）と expression 段
+  （:func:`direct_production_reads` — その式を評価したらその名前を必ず読むか）。
+  どちらも whitelist で、載っていない形は証拠ゼロ。「広く見てから条件で削る」
+  のではなく、最初から狭い positive set
 
 **この checker が保証すること / しないこと。**
 
@@ -822,29 +825,126 @@ def direct_production_expressions(statement: ast.stmt) -> Optional[List[ast.AST]
     return found
 
 
+def _certain_subexpressions(node: ast.expr) -> Optional[List[ast.expr]]:
+    """``node`` を評価したら **必ず**評価される直下の部分式。未対応なら ``None``。
+
+    「この式を評価すれば、この名前を確実に読む」を局所的に言うためだけの表。
+    Python の式を全部理解する必要は無く、production が実際に使っている形
+    （:func:`direct_production_reads` の docstring に棚卸し結果）だけを並べる。
+
+    条件付きに評価される部分は **入れない**:
+
+    * ``BoolOp`` は先頭の operand だけ（``a and b`` の ``b`` は ``a`` 次第）
+    * ``IfExp`` は ``test`` だけ（``body`` / ``orelse`` は分岐の先）
+    * ``Compare`` は ``left`` と最初の comparator だけ（``a < b < c`` は連鎖で短絡）
+    * comprehension は最初の iterable だけ（要素式・filter は別の束縛・別の回数）
+    * ``lambda`` 本体、generator 本体は評価されない
+
+    ここに無い種別（``Yield`` / ``YieldFrom`` / ``Lambda`` / ``Slice`` など）は
+    ``None`` を返し、証拠ゼロとして扱われる（fail-closed）。
+    """
+
+    if isinstance(node, ast.Name):
+        return []
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return list(node.elts)
+    if isinstance(node, ast.Dict):
+        return [key for key in node.keys if key is not None] + list(node.values)
+    if isinstance(node, ast.Call):
+        return [node.func] + list(node.args) + [keyword.value for keyword in node.keywords]
+    if isinstance(node, ast.Subscript):
+        return [node.value, node.slice]
+    if isinstance(node, ast.Attribute):
+        return [node.value]
+    if isinstance(node, ast.BinOp):
+        return [node.left, node.right]
+    if isinstance(node, ast.UnaryOp):
+        return [node.operand]
+    if isinstance(node, ast.Compare):
+        # ``a < b < c`` は ``a < b`` が偽なら ``c`` を読まない。
+        return [node.left] + node.comparators[:1]
+    if isinstance(node, ast.JoinedStr):
+        return list(node.values)
+    if isinstance(node, ast.FormattedValue):
+        return [node.value] + ([node.format_spec] if node.format_spec is not None else [])
+    if isinstance(node, ast.BoolOp):
+        return node.values[:1]
+    if isinstance(node, ast.IfExp):
+        return [node.test]
+    if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+        # 最初の iterable だけが外側の scope で、かつ必ず評価される。
+        return [node.generators[0].iter] if node.generators else []
+    if isinstance(node, ast.Lambda):
+        # 本体は呼ばれるまで走らない。default 引数は定義時に走るが、本 package に
+        # その形は無いので証拠にしない（要るようになったらここへ足す）。
+        return []
+    if isinstance(node, ast.Constant):
+        return []
+    return None
+
+
+def direct_production_reads(
+    expression: ast.expr, name: str, debug_reads: Set[int] = frozenset()
+) -> bool:
+    """``expression`` を評価すれば ``name`` を **確実に読む**と局所的に言えるか。
+
+    production 共有の免除は、これが真の読み出しだけを証拠にする。``walk_evaluated_now``
+    は「今の評価フェーズで走り得る部分」を表すので広すぎる — 短絡の後ろ側、
+    ``IfExp`` の枝、comprehension の中の別束縛まで含んでしまう。免除には
+    「必ず読む」が要るので、専用の狭い表（:func:`_certain_subexpressions`）で判定する。
+
+    本 package が実際に必要としている形（337 の exemption site を棚卸しした結果）:
+    ``Name`` / ``Tuple`` / ``List`` / ``Dict`` / ``Call`` の func・引数・keyword /
+    ``Subscript`` / ``Attribute`` / ``BinOp`` / ``UnaryOp`` / ``Compare`` /
+    f-string / ``BoolOp`` の先頭 / ``IfExp`` の test / comprehension の最初の iterable。
+    それ以外は証拠ゼロ。
+
+    lexical scope は跨がない: comprehension や ``lambda`` の中は辿らないので、
+    ``[rendered for rendered in items]`` の内側の束縛を外側の名前と取り違えない。
+    Python の式評価器を作るものではなく、限定的な構文ヒューリスティックである。
+
+    ``debug_reads`` に入っている読み出し（debug sink の引数・guard 条件）は
+    production の証拠にしない — それ自体が「debug のために読んでいる」場所。
+    """
+
+    stack: List[ast.expr] = [expression]
+    while stack:
+        node = stack.pop()
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id == name
+            and id(node) not in debug_reads
+        ):
+            return True
+        parts = _certain_subexpressions(node)
+        if parts is None:
+            continue
+        stack.extend(parts)
+    return False
+
+
 def _has_direct_production_read(
     window: Sequence[ast.stmt], name: str, debug_reads: Set[int]
 ) -> bool:
-    """``window`` の直接式に、debug 以外の読み出しが見えるか。
+    """``window`` に production 共有の証拠があるか。
 
-    これだけが production 共有の根拠。式の中の評価タイミング（``lambda`` 本体や
-    generator の中身が後回しであること）は :func:`walk_evaluated_now` に任せる
-    ので、ここで新しい意味を足さない。
+    2 段の positive grammar だけで決まる:
+
+    * statement 段 — :func:`direct_production_expressions`（その文を実行したら
+      必ず評価される式はどれか）
+    * expression 段 — :func:`direct_production_reads`（その式を評価したら
+      その名前を必ず読むか）
+
+    どちらも whitelist で、載っていない形は証拠ゼロ。検出側の走査
+    （:func:`statement_scope_nodes` / :func:`walk_evaluated_now`）はここでは
+    使わない — 見たいものが違う（「走り得るか」ではなく「必ず読むか」）。
     """
 
     for statement in window:
-        expressions = direct_production_expressions(statement)
-        if not expressions:
-            continue
-        for expression in expressions:
-            for node in walk_evaluated_now(expression):
-                if (
-                    isinstance(node, ast.Name)
-                    and isinstance(node.ctx, ast.Load)
-                    and node.id == name
-                    and id(node) not in debug_reads
-                ):
-                    return True
+        for expression in direct_production_expressions(statement) or ():
+            if direct_production_reads(expression, name, debug_reads):
+                return True
     return False
 
 
@@ -865,15 +965,20 @@ def _debug_only_locals(
     （R3: debug guard の中か、owner か、renderer 定義の中か、``__repr__`` /
     ``__str__``）ので、値がどこへ流れるかを調べる必要が無い。
 
-    **production 共有の免除は、同一 lexical scope・同一 local window
-    （:func:`_local_window`）の中で、:func:`direct_production_expressions` が
-    「その文を実行したら必ず評価される」と認めた直接式に読み出しが見えるときだけ**
-    （:func:`_has_direct_production_read`）。許す位置は statement 種別ごとの表
-    :data:`_DIRECT_PRODUCTION_FIELDS` 1 か所で決まり、表に無い種別は証拠なし。
+    **production 共有の免除は 2 段の positive grammar だけで決まる**
+    （:func:`_has_direct_production_read`）。同一 lexical scope・同一 local window
+    （:func:`_local_window`）の中で:
 
-    ``if`` / loop / ``try`` / ``match`` の body、``except`` の型、``match`` の
-    case guard は、そこを通るかどうかが control flow 次第なので免除の根拠に
-    しない。検出のほう（debug 位置の読み出し）は別の走査でその中まで見るので、
+    * statement 段 — :data:`_DIRECT_PRODUCTION_FIELDS` / :func:`direct_production_expressions`
+      「その文を実行したら必ず評価される式はどれか」
+    * expression 段 — :func:`_certain_subexpressions` / :func:`direct_production_reads`
+      「その式を評価したらその名前を必ず読むか」
+
+    どちらも whitelist。``if`` / loop / ``try`` / ``match`` の body、``except`` の
+    型、``match`` の case guard、短絡の後ろ側、``IfExp`` の枝、comprehension の
+    中の別束縛、``lambda`` 本体は、いずれも証拠にしない。
+
+    検出のほう（debug 位置の読み出し）は別の走査でその中まで見るので、
     ``rendered = expr.to_string()`` → ``if self.debug: self._debug_print(rendered)``
     は従来どおり捕まる。証明できなければ免除しない（fail-closed）。
 
@@ -3523,6 +3628,123 @@ def test_a_nested_function_body_is_not_reachable_from_repr():
         "        return self.value.to_string()\n",
     )
     assert [entry[2] for entry in direct.render_in_dunder] == ["__repr__ calls to_string()"]
+
+
+# -- expression 段の positive grammar ------------------------------------------
+
+def _exempts_expression(tail: str) -> bool:
+    """``rendered`` が production 共有として免除されるか。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, cond, items, cheap, key, consume):\n"
+        "    rendered = expr.to_string()\n"
+        + tail
+        + "    self._debug_print(rendered)\n",
+    )
+    return not violations.render_in_debug_sink
+
+
+#: (ラベル, 文, 免除されるか)。「この式を評価すれば必ずその名前を読む」と
+#: 局所的に言える位置だけが証拠。条件付き・別束縛・後回しの位置は対象外。
+_EXPRESSION_GRAMMAR = [
+    # 必ず読む位置 → 証拠になる
+    ("そのまま渡す", "    consume(rendered)\n", True),
+    ("Call の keyword", "    consume(key=rendered)\n", True),
+    ("Tuple の要素", "    consume((rendered, 1))\n", True),
+    ("List の要素", "    consume([rendered])\n", True),
+    ("Dict の値", "    consume({'k': rendered})\n", True),
+    ("Subscript の添字", "    consume(items[rendered])\n", True),
+    ("Subscript の対象", "    consume(rendered[0])\n", True),
+    ("Attribute の対象", "    consume(rendered.attr)\n", True),
+    ("BinOp", "    consume(rendered + cheap)\n", True),
+    ("UnaryOp", "    consume(not rendered)\n", True),
+    ("Compare の左", "    consume(rendered == cond)\n", True),
+    ("Compare の最初の comparator", "    consume(cond == rendered)\n", True),
+    ("f-string", "    consume(f'{rendered}')\n", True),
+    ("BoolOp の先頭", "    consume(rendered and cond)\n", True),
+    ("IfExp の test", "    consume(cheap if rendered else cheap)\n", True),
+    ("comprehension の最初の iterable", "    consume([x for x in rendered])\n", True),
+    ("Call の func", "    consume(rendered())\n", True),
+    # 条件付き・別束縛・後回し → 証拠にしない
+    ("BoolOp and の後ろ", "    consume(cond and rendered)\n", False),
+    ("BoolOp or の後ろ", "    consume(cond or rendered)\n", False),
+    ("IfExp の body", "    consume(rendered if cond else cheap)\n", False),
+    ("IfExp の orelse", "    consume(cheap if cond else rendered)\n", False),
+    ("Compare の 2 つ目の comparator", "    consume(cond < cheap < rendered)\n", False),
+    ("comprehension の shadow", "    consume([rendered for rendered in items])\n", False),
+    ("comprehension の要素式", "    consume([rendered for x in items])\n", False),
+    ("comprehension の filter", "    consume([x for x in items if rendered])\n", False),
+    ("generator 本体", "    consume(x for x in items if rendered)\n", False),
+    ("lambda 本体", "    consume(lambda: rendered)\n", False),
+    ("lambda の default（実在しないので対象外）", "    consume(lambda x=rendered: x)\n", False),
+]
+
+
+@pytest.mark.parametrize(
+    "label, tail, exempt",
+    _EXPRESSION_GRAMMAR,
+    ids=[case[0] for case in _EXPRESSION_GRAMMAR],
+)
+def test_the_expression_exemption_grammar_is_fixed(label, tail, exempt):
+    """免除の証拠になる式の位置を固定する。
+
+    statement 段（:func:`direct_production_expressions`）で「その文を実行したら
+    必ず評価される式」を選んだあと、expression 段
+    （:func:`direct_production_reads`）で「その式を評価したら必ずその名前を読むか」
+    を見る。2 段とも whitelist で、載っていない形は証拠ゼロ。
+    """
+
+    assert _exempts_expression(tail) is exempt, label
+
+
+@pytest.mark.parametrize(
+    "source, supported",
+    [
+        ("rendered", True),
+        ("(rendered,)", True),
+        ("[rendered]", True),
+        ("{'k': rendered}", True),
+        ("f(rendered)", True),
+        ("items[rendered]", True),
+        ("rendered.attr", True),
+        ("rendered + 1", True),
+        ("not rendered", True),
+        ("rendered == 1", True),
+        ("f'{rendered}'", True),
+        ("rendered and x", True),
+        ("rendered if x else y", True),
+        ("[x for x in rendered]", True),
+        ("lambda: rendered", True),   # 形は既知（本体は辿らない）
+        ("1", True),
+    ],
+)
+def test_the_expression_grammar_covers_what_production_uses(source, supported):
+    """棚卸しで出た形はすべて表にあること（``None`` を返さない）。"""
+
+    node = ast.parse(source, mode="eval").body
+    assert (_certain_subexpressions(node) is not None) is supported, source
+
+
+def test_an_unsupported_expression_kind_gives_no_evidence():
+    """表に無い式（``yield`` 等）は証拠ゼロ（fail-closed）。"""
+
+    function = ast.parse("def g():\n    x = yield rendered\n").body[0]
+    yielded = function.body[0].value
+    assert _certain_subexpressions(yielded) is None
+    assert not direct_production_reads(yielded, "rendered")
+
+
+def test_a_debug_read_is_never_production_evidence():
+    """sink の引数そのものを production の証拠にしない。"""
+
+    call = ast.parse("self._debug_print(rendered)", mode="eval").body
+    name = next(
+        node for node in ast.walk(call)
+        if isinstance(node, ast.Name) and node.id == "rendered"
+    )
+    assert direct_production_reads(call, "rendered")
+    assert not direct_production_reads(call, "rendered", {id(name)})
 
 
 def test_the_two_declared_sets_do_not_overlap():

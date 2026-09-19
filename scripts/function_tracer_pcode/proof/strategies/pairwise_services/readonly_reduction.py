@@ -613,6 +613,19 @@ def _impl__readonly_contract_pairwise_extra_assertions(
     )
 
 
+def _readonly_base_keys_agree(left_base_key: Any, right_base_key: Any) -> bool:
+    """pointer base の semantic key が **両方とも判っていて一致する**か。
+
+    片方でも取れなければ surface が同じとは言えない。条件式に 3 項ならべる
+    代わりにここで名前を付けている（真偽値は
+    ``left is None or right is None or left != right`` の否定と同じ）。
+    """
+
+    if left_base_key is None or right_base_key is None:
+        return False
+    return bool(left_base_key == right_base_key)
+
+
 def _impl__readonly_reduction_contract_shortcut_decision(
     self,
     left_ref,
@@ -645,11 +658,10 @@ def _impl__readonly_reduction_contract_shortcut_decision(
     )
     if effective_result_size is None:
         return _RuntimeShortcutDecision(False, requires_guard_equivalence, reason="readonly_contract_result_width_mismatch")
+    base_keys_agree = _readonly_base_keys_agree(left_base_key, right_base_key)
     if (
         getattr(left_ref, "reduction_kind", None) != getattr(right_ref, "reduction_kind", None)
-        or left_base_key is None
-        or right_base_key is None
-        or left_base_key != right_base_key
+        or not base_keys_agree
         or not self._readonly_contract_count_identities_compatible(left_ref, right_ref)
         or self._normalize_constant_bias(int(getattr(left_ref, "constant_bias", 0) or 0), effective_result_size)
         != self._normalize_constant_bias(int(getattr(right_ref, "constant_bias", 0) or 0), effective_result_size)
