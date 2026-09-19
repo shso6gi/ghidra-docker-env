@@ -6,9 +6,12 @@
 読み手が同じ規則を書き写さずに済むようにするだけの薄い層。ここには
 
 * 失敗の優先順位（内部バグ > 限界）
-* 「未解消の失敗があるなら、その場で例外にして handler へ渡す」
+* 「未解消の失敗があるなら、その場で例外にして handler へ渡す」（G1 / G2）
+* 「その失敗がまだ結果に出ていないなら、pair 単位で組み直す」（G3 / G4-a / G5）
 
-の 2 つだけを置く。**UNKNOWN / ERROR の最終判断も receipt も JSON も持たない**。
+の 3 つだけを置く。**UNKNOWN / ERROR の最終判断も receipt も JSON も持たない**。
+判定規則そのものは `checker.result_assembly` と authority が持ち、ここはどの
+規則をいつ適用するかだけを決める。
 
 G1（初回 / 再解析の直後）と G2（`check()` の result assembly 直前）はどちらも
 `raise_pending_pair_failure()` を呼ぶ。限界が途中の `except Exception` に握り
