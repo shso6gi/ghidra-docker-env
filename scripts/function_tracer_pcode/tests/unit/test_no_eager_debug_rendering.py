@@ -10,16 +10,20 @@
 
 * **検出** — 違反を見つける。debug sink / guard / 入れ子の並びまで必要なだけ辿る
   （:func:`statement_scope_nodes` / :func:`walk_evaluated_now`）
-* **免除の証明** — production も使う値かを示す。**3 段の positive grammar**
-  だけで決まり、どれも whitelist（載っていない形は証拠ゼロ / 不明）:
+* **alias の追跡** — 一段だけの追跡。**問いが 3 つあり、MAY と MUST を混ぜない**:
 
-  * statement 段 :func:`direct_production_expressions` — その文を実行したら
-    必ず評価される式はどれか
-  * expression 段 :func:`direct_production_reads` — その式を評価したらその
-    名前を必ず読むか
-  * binding 段 :func:`bound_names` / :func:`statement_rebinds` — どの代入先が
-    どの局所名を束縛するか、どの構文が **必ず**束縛し直すか
+  * producer origin（**MAY**）:func:`tracked_producer_bindings` — 走ったら
+    producer の値がこの名前へ入り **得る**か。短絡の後ろのような条件付きの位置も
+    数える（走るかもしれないなら origin）
+  * rebind（**MUST**）:func:`statement_rebinds` — この文を実行したら **必ず**
+    別の値へ束縛し直すか。window の終端
+  * production 共有（**MUST**）:func:`_has_direct_production_read` — この区間で
+    production が **必ず**読むか。読むなら免除
 
+  構文の意味づけは positive grammar の owner が持ち、どれも whitelist（載って
+  いない形は証拠ゼロ / 不明）: :func:`direct_production_expressions`（statement）、
+  :func:`direct_production_reads`（expression）、:func:`bound_names`（binding）。
+  束縛先の形が判らない producer は黙って飛ばさず契約違反として報告する。
   「広く見てから条件で削る」のではなく、最初から狭い positive set
 
 **この checker が保証すること / しないこと。**
@@ -258,7 +262,7 @@ RENDER_FREE_DUNDERS = frozenset({"__repr__", "__str__"})
 
 @dataclass
 class EagerDebugRenderingViolations:
-    """6 契約（R1〜R6）それぞれの違反。すべて空なら PASS。"""
+    """6 契約（R1〜R6）と binding contract の違反。すべて空なら PASS。"""
 
     render_in_debug_guard: List[Tuple[str, int, str]] = field(default_factory=list)
     render_in_debug_sink: List[Tuple[str, int, str]] = field(default_factory=list)
@@ -266,6 +270,7 @@ class EagerDebugRenderingViolations:
     render_in_dunder: List[Tuple[str, int, str]] = field(default_factory=list)
     unguarded_debug_preparation: List[Tuple[str, int, str]] = field(default_factory=list)
     renderer_in_guard_condition: List[Tuple[str, int, str]] = field(default_factory=list)
+    unsupported_producer_binding: List[Tuple[str, int, str]] = field(default_factory=list)
 
     def __bool__(self) -> bool:
         return bool(
@@ -275,6 +280,7 @@ class EagerDebugRenderingViolations:
             or self.render_in_dunder
             or self.unguarded_debug_preparation
             or self.renderer_in_guard_condition
+            or self.unsupported_producer_binding
         )
 
     def describe(self) -> str:
@@ -308,6 +314,12 @@ class EagerDebugRenderingViolations:
             lines.append(
                 f"R6 {module}:{lineno}: {detail} runs in the guard condition itself; "
                 "a guard only decides whether to emit -- move the call into the message"
+            )
+        for module, lineno, detail in self.unsupported_producer_binding:
+            lines.append(
+                f"B1 {module}:{lineno}: {detail} binds a tracked debug producer to a "
+                "target shape this contract does not cover; assign it to a plain name, "
+                "or add the shape to bound_names()"
             )
         return "\n".join(lines)
 
@@ -791,29 +803,86 @@ def statement_rebinds(statement: ast.stmt, name: str) -> bool:
     return False
 
 
-def _produced_names(statement: ast.stmt) -> Optional[Set[str]]:
-    """tracked producer の値が入り **得る**局所名。判らなければ ``None``。
+#: 一段追跡する producer の種別。bounded renderer は R3 が呼び出し位置で決めるので
+#: ここには入らない。
+TRACKED_PRODUCER_KINDS = ("forbidden", "unsafe_renderer")
 
-    ``rendered, other = (expr.to_string(), 0)`` のような分解代入では、どの要素に
-    どの値が入るかまでは追わない（位置対応を解く評価器は作らない）。束縛される
-    名前すべてを「入り得る」として扱う保守的な may-origin。production には
-    分解代入で tracked producer を受ける形が 1 件も無いので、これで足りる。
+
+class ProducerBinding(NamedTuple):
+    """tracked producer の値が入り **得る** 束縛（MAY origin）。
+
+    ``name`` が ``None`` なら「束縛先の形が判らない」。呼び出し側は黙って飛ばさず
+    契約違反として報告する（:attr:`EagerDebugRenderingViolations.unsupported_producer_binding`）。
     """
 
-    targets: List[ast.AST] = []
-    if isinstance(statement, ast.Assign):
-        targets = list(statement.targets)
-    elif isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
-        targets = [statement.target]
-    else:
-        return set()
-    names: Set[str] = set()
-    for target in targets:
-        found = bound_names(target)
-        if found is None:
-            return None
-        names |= found
-    return names
+    name: Optional[str]
+    kind: str
+    label: str
+    lineno: int
+    #: 束縛した構文。``:=`` のときはその :class:`ast.NamedExpr`、代入文なら ``None``。
+    walrus: Optional[ast.NamedExpr] = None
+
+
+def tracked_producer_bindings(
+    statement: ast.stmt, renderers: FrozenSet[str]
+) -> List[ProducerBinding]:
+    """この文の **現在の実行フェーズ**で tracked producer が入り得る局所名。
+
+    3 つの問いのうち **MAY** を担当する owner:
+
+    * producer origin（ここ）— 実行されたとき、その値がこの名前へ入り **得る**か
+    * rebind（:func:`statement_rebinds`）— 実行したら **必ず**束縛し直すか
+    * production 共有（:func:`_has_direct_production_read`）— **必ず**読むか
+
+    MAY なので、短絡の後ろのような条件付きの位置でも「走ったら束縛し得る」なら
+    origin として数える（``cond and (rendered := expr.to_string())``）。ただし
+    ``lambda`` 本体や generator 本体のように **この文では走らない**部分、および
+    別 lexical scope へは降りない — :func:`walk_evaluated_now` の意味をそのまま
+    使い、新しい評価規則は作らない。
+
+    束縛の形は :func:`bound_names` が唯一の owner。分解代入は「束縛される名前
+    すべてが値を持ち得る」という保守的な扱いで、位置対応は解かない。
+    """
+
+    events: List[ProducerBinding] = []
+
+    def record(
+        target: ast.AST,
+        kind: str,
+        label: str,
+        lineno: int,
+        walrus: Optional[ast.NamedExpr] = None,
+    ) -> None:
+        names = bound_names(target)
+        if names is None:
+            events.append(ProducerBinding(None, kind, label, lineno, walrus))
+            return
+        events.extend(
+            ProducerBinding(name, kind, label, lineno, walrus) for name in sorted(names)
+        )
+
+    if (
+        isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+        and statement.value is not None
+    ):
+        kind, label = _assignment_kind(statement.value, renderers)
+        if kind in TRACKED_PRODUCER_KINDS:
+            targets = (
+                list(statement.targets)
+                if isinstance(statement, ast.Assign)
+                else [statement.target]
+            )
+            for target in targets:
+                record(target, kind, label, statement.lineno)
+
+    # ``(name := producer)`` は式のどこにでも書ける。この文で走り得る範囲だけ見る。
+    for node in walk_evaluated_now(statement):
+        if not isinstance(node, ast.NamedExpr):
+            continue
+        kind, label = _assignment_kind(node.value, renderers)
+        if kind in TRACKED_PRODUCER_KINDS:
+            record(node.target, kind, label, node.lineno, node)
+    return events
 
 
 def _statement_lists(
@@ -1051,10 +1120,45 @@ def direct_production_reads(
     )
 
 
+def _walrus_value_is_consumed(
+    statement: ast.stmt, walrus: ast.NamedExpr, renderers: FrozenSet[str]
+) -> bool:
+    """``(name := producer)`` の **値がその場で** production に渡されるか。
+
+    ``consume(rendered := expr.to_string())`` は、名前を読み直さなくても値が
+    ``consume`` へ渡っている。名前の読み出しを探すだけでは見えないので、
+    ``:=`` 自身の位置を見る: その文の直接式の中で **必ず評価される** 位置にあり、
+    かつ debug sink の引数の中でなく、式全体そのものではない（``(x := f())``
+    だけなら値は捨てられる）とき、production が使っていると見なす。
+
+    使う道具は既存の owner だけ（:func:`direct_production_expressions` /
+    :func:`_certainly_evaluated`）。値の流れを追う解析は作らない。
+    """
+
+    discarded = {
+        id(expression)
+        for expression in direct_production_expressions(statement) or ()
+    }
+    in_debug_sink = {
+        id(node)
+        for call in statement_scope_nodes(statement)
+        if isinstance(call, ast.Call) and _is_debug_sink(call, renderers)
+        for argument in list(call.args) + [keyword.value for keyword in call.keywords]
+        for node in ast.walk(argument)
+    }
+    if id(walrus) in in_debug_sink:
+        return False
+    for expression in direct_production_expressions(statement) or ():
+        for node in _certainly_evaluated(expression):
+            if node is walrus:
+                return id(walrus) not in discarded
+    return False
+
+
 def _has_direct_production_read(
     window: Sequence[ast.stmt], name: str, debug_reads: Set[int]
 ) -> bool:
-    """``window`` に production 共有の証拠があるか。
+    """``window`` に production 共有の証拠があるか（**MUST** の問い）。
 
     2 段の positive grammar だけで決まる:
 
@@ -1066,6 +1170,8 @@ def _has_direct_production_read(
     どちらも whitelist で、載っていない形は証拠ゼロ。検出側の走査
     （:func:`statement_scope_nodes` / :func:`walk_evaluated_now`）はここでは
     使わない — 見たいものが違う（「走り得るか」ではなく「必ず読むか」）。
+    producer origin だけが **MAY**（:func:`tracked_producer_bindings`）で、
+    rebind と免除は **MUST**。
     """
 
     for statement in window:
@@ -1078,75 +1184,53 @@ def _has_direct_production_read(
 def _debug_only_locals(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     renderers: FrozenSet[str],
-) -> Dict[int, Tuple[str, str]]:
+) -> Tuple[Dict[int, Tuple[str, str]], List[ProducerBinding]]:
     """**debug のためだけに**作られた値を読んでいる名前 → ``(種別, 呼び出し名)``。
 
-    対象は 2 種類だけ:
+    AST の意味づけはここに持たない。3 つの owner を組み合わせるだけ:
 
-    * ``"forbidden"`` — 禁止された呼び出し（``to_string`` / ``to_smt`` / 重い
-      診断 helper）。production でも正当に使う呼び出しなので、「debug のために
-      だけ作ったか」を見ないと判断できない
-    * ``"unsafe_renderer"`` — renderer の名前だが対象が契約の外
+    * :func:`tracked_producer_bindings` — **MAY**: producer の値がどの名前へ
+      入り得るか
+    * :func:`statement_rebinds`（:func:`_local_window` 経由）— **MUST**: どこで
+      その名前が必ず束縛し直されるか
+    * :func:`_has_direct_production_read` — **MUST**: その区間で production が
+      必ず読むか（読むなら免除）
 
-    bounded renderer はここで追わない。**呼んでよい場所**が構文で決まっている
-    （R3: debug guard の中か、owner か、renderer 定義の中か、``__repr__`` /
-    ``__str__``）ので、値がどこへ流れるかを調べる必要が無い。
+    追う producer は :data:`TRACKED_PRODUCER_KINDS` の 2 つだけ。``to_string`` /
+    ``to_smt`` は production でも正当に使う呼び出しなので、「debug のためだけに
+    作ったか」を見ないと判断できない。bounded renderer は R3 が呼び出し位置で
+    決めるので追わない。
 
-    **production 共有の免除は 2 段の positive grammar だけで決まる**
-    （:func:`_has_direct_production_read`）。同一 lexical scope・同一 local window
-    （:func:`_local_window`）の中で:
-
-    * statement 段 — :data:`_DIRECT_PRODUCTION_FIELDS` / :func:`direct_production_expressions`
-      「その文を実行したら必ず評価される式はどれか」
-    * expression 段 — :func:`_certain_subexpressions` / :func:`direct_production_reads`
-      「その式を評価したらその名前を必ず読むか」
-
-    * binding 段 — :func:`bound_names` / :func:`statement_rebinds`
-      「どの代入先がどの局所名を束縛するか」「どの構文が必ず束縛し直すか」
-
-    どれも whitelist。``if`` / loop / ``try`` / ``match`` の body、``except`` の
-    型、``match`` の case guard、短絡の後ろ側、``IfExp`` の枝、comprehension の
-    中の別束縛、``lambda`` 本体、annotation（module 次第で評価されない）は、
-    いずれも証拠にしない。
-
-    検出のほう（debug 位置の読み出し）は別の走査でその中まで見るので、
-    ``rendered = expr.to_string()`` → ``if self.debug: self._debug_print(rendered)``
-    は従来どおり捕まる。証明できなければ免除しない（fail-closed）。
-
-    返り値は ``id(<Name node>) -> (種別, 表示)``。その読み出しだけが報告対象。
+    返り値は ``(報告対象の読み出し, 束縛先が判らなかった producer)``。後者は
+    黙って捨てず、呼び出し側が契約違反として報告する。
     """
 
     reported: Dict[int, Tuple[str, str]] = {}
+    unsupported: List[ProducerBinding] = []
     for block in _statement_lists(function):
         for index, statement in enumerate(block):
-            if not isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-                continue
-            if statement.value is None:
-                continue
-            kind, label = _assignment_kind(statement.value, renderers)
-            if kind not in ("forbidden", "unsafe_renderer"):
-                continue
-            produced = _produced_names(statement)
-            if produced is None:
-                # 束縛先が判らない形。証拠として扱わず、追跡もしない。
-                continue
-            for name in produced:
-                window = _local_window(block, index, name)
+            for binding in tracked_producer_bindings(statement, renderers):
+                if binding.name is None:
+                    unsupported.append(binding)
+                    continue
+                if binding.walrus is not None and _walrus_value_is_consumed(
+                    statement, binding.walrus, renderers
+                ):
+                    continue  # 値がその場で production へ渡っている
+                window = _local_window(block, index, binding.name)
                 debug_reads = _debug_read_positions(window, renderers)
-                if _has_direct_production_read(window, name, debug_reads):
+                if _has_direct_production_read(window, binding.name, debug_reads):
                     continue  # production も読む値 — debug 側の問題ではない
-                marked = [
-                    node
-                    for target in window
-                    for node in statement_scope_nodes(target)
-                    if isinstance(node, ast.Name)
-                    and isinstance(node.ctx, ast.Load)
-                    and node.id == name
-                    and id(node) in debug_reads
-                ]
-                for node in marked:
-                    reported[id(node)] = (kind, label)
-    return reported
+                for target in window:
+                    for node in statement_scope_nodes(target):
+                        if (
+                            isinstance(node, ast.Name)
+                            and isinstance(node.ctx, ast.Load)
+                            and node.id == binding.name
+                            and id(node) in debug_reads
+                        ):
+                            reported[id(node)] = (binding.kind, binding.label)
+    return reported, unsupported
 
 
 def _debug_read_positions(
@@ -1535,9 +1619,17 @@ class _EagerDebugRenderingScanner:
         """lexical scope を 1 つ入れ替える（代入 1 段の追跡はこの単位）。"""
 
         outer = self.debug_only_reads
-        self.debug_only_reads = (
-            {} if function is None else _debug_only_locals(function, self.renderers)
-        )
+        if function is None:
+            self.debug_only_reads = {}
+        else:
+            self.debug_only_reads, unsupported = _debug_only_locals(
+                function, self.renderers
+            )
+            for binding in unsupported:
+                # 束縛先の形が判らない producer を黙って飛ばさない。
+                self.violations.unsupported_producer_binding.append(
+                    (self.module, binding.lineno, binding.label)
+                )
         try:
             yield
         finally:
@@ -4035,6 +4127,119 @@ def test_detection_treats_an_annotation_the_same_either_way(future):
         "            pass\n",
     )
     assert [entry[2] for entry in violations.render_in_debug_guard] == ["to_string()"]
+
+
+# -- producer origin は MAY、rebind と免除は MUST ------------------------------
+
+def _producer_case(body: str) -> EagerDebugRenderingViolations:
+    return scan_source(
+        "sample",
+        "def f(self, expr, cond, consume, rendered):\n" + body,
+    )
+
+
+@pytest.mark.parametrize(
+    "label, body, detected",
+    [
+        (
+            "walrus 単独",
+            "    (rendered := expr.to_string())\n    self._debug_print(rendered)\n",
+            True,
+        ),
+        (
+            "walrus が短絡の後ろ（MAY origin）",
+            "    cond and (rendered := expr.to_string())\n    self._debug_print(rendered)\n",
+            True,
+        ),
+        (
+            "walrus が IfExp の枝（MAY origin）",
+            "    keep = (rendered := expr.to_string()) if cond else 0\n"
+            "    self._debug_print(rendered)\n",
+            True,
+        ),
+        (
+            "walrus の値をその場で production が消費",
+            "    consume(rendered := expr.to_string())\n    self._debug_print(rendered)\n",
+            False,
+        ),
+        (
+            "walrus の値を debug sink が消費",
+            "    self._debug_print(rendered := expr.to_string())\n",
+            True,
+        ),
+        (
+            "chained assign",
+            "    other = rendered = expr.to_string()\n    self._debug_print(rendered)\n",
+            True,
+        ),
+        (
+            "AugAssign",
+            "    rendered += expr.to_string()\n    self._debug_print(rendered)\n",
+            True,
+        ),
+        (
+            "分解代入",
+            "    rendered, other = (expr.to_string(), 0)\n    self._debug_print(rendered)\n",
+            True,
+        ),
+    ],
+)
+def test_the_producer_origin_is_a_may_question(label, body, detected):
+    """producer origin は **MAY** — 走ったら束縛し得る位置ならすべて拾う。
+
+    短絡の後ろや ``IfExp`` の枝は「必ず読む」とは言えない（免除の証拠にはしない）
+    が、「走ったら producer が動いてこの名前に入る」ことはあり得るので origin
+    としては数える。MAY と MUST を取り違えると、条件付きの producer を見失う。
+    """
+
+    assert bool(_producer_case(body).render_in_debug_sink) is detected, label
+
+
+def test_a_deferred_walrus_is_not_an_origin_here():
+    """``lambda`` / generator の中の ``:=`` はこの文では走らない。"""
+
+    violations = _producer_case(
+        "    thunk = lambda: (rendered := expr.to_string())\n"
+        "    self._debug_print(rendered)\n"
+    )
+    assert not violations.render_in_debug_sink, violations.describe()
+
+
+def test_an_unsupported_producer_binding_fails_loudly():
+    """束縛先の形が判らない producer を黙って飛ばさない。"""
+
+    class _FutureTarget(ast.expr):
+        _fields = ()
+        _attributes = ("lineno", "col_offset")
+
+    assert bound_names(_FutureTarget()) is None
+
+    source = "def f(self, expr):\n    rendered = expr.to_string()\n"
+    tree = ast.parse(source)
+    assignment = tree.body[0].body[0]
+    unknown = _FutureTarget()
+    unknown.lineno, unknown.col_offset = assignment.lineno, 0
+    assignment.targets = [unknown]
+
+    violations = EagerDebugRenderingViolations()
+    _EagerDebugRenderingScanner("sample", violations, OWNED_SUMMARY_FUNCTIONS).scan(tree)
+    assert [entry[2] for entry in violations.unsupported_producer_binding] == [
+        "to_string()"
+    ]
+    assert bool(violations) is True
+    assert "B1 " in violations.describe()
+
+
+def test_a_supported_binding_reports_nothing_unsupported():
+    violations = _producer_case(
+        "    rendered = expr.to_string()\n    self._debug_print(rendered)\n"
+    )
+    assert not violations.unsupported_producer_binding
+
+
+def test_no_unsupported_producer_binding_in_the_package():
+    violations = scan_package()
+    assert not violations.unsupported_producer_binding, violations.describe()
 
 
 def test_the_two_declared_sets_do_not_overlap():
