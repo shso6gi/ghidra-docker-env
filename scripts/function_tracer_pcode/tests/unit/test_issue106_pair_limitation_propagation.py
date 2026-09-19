@@ -43,10 +43,16 @@ from scripts.function_tracer_pcode.core.errors import (
     record_internal_bug,
     reset_pair_failure_scopes,
 )
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+    production_signal_scope,
+)
 from scripts.function_tracer_pcode.smt import SolverStatus
 from scripts.function_tracer_pcode.tests.unit.test_issue125_limitation_finalization import (
     _connector,
     _sat_blocker,
+)
+from scripts.function_tracer_pcode.tests.unit.test_monolithic_region_split import (
+    _analysis,
 )
 
 from conftest import MockProgram, create_mock_analysis, create_mock_result
@@ -353,20 +359,23 @@ def test_e0f_limitation_during_phase_reanalysis_is_not_lost():
 
 
 def test_e0f_phase_loop_stops_after_a_swallowed_limitation():
-    """E0f 補: 限界が握り潰されても次 phase の再解析を始めない。"""
+    """E0f 補: 限界が握り潰されても次 phase の再解析を始めない。
+
+    限界は **初回解析より後**（stage plan の中）で握り潰させる。解析中に置くと
+    G1 がその場で例外に戻してしまい、phase loop の停止そのものを通らない。
+    """
     analysis1, analysis2 = _analyses()
     calls = {"func1": 0, "func2": 0}
 
     def _analyze(self, name, timeout):
         calls[name] += 1
-        if name == "func2" and calls["func2"] == 1:
-            try:
-                raise_limitation(_plain_limitation(site="effect_summary"))
-            except Exception:
-                pass
         return analysis1 if name == "func1" else analysis2
 
     def _stage_plan(*_args, **_kwargs):
+        try:
+            raise_limitation(_plain_limitation(site="effect_summary"))
+        except Exception:
+            pass
         return create_mock_result(
             is_equivalent=None, solver_status=SolverStatus.UNKNOWN,
         )
@@ -389,6 +398,58 @@ def test_e0f_phase_loop_stops_after_a_swallowed_limitation():
     assert calls == {"func1": 1, "func2": 1}
     assert phase_handler.execute_phase.call_count == 0
     assert result.pair_stop_state == PairStopState.PAIR_TERMINAL_LIMITATION.value
+
+
+def test_e0f_g2_gate_turns_a_swallowed_limitation_into_unknown_inside_check():
+    """G2: `check()` の中で握り潰された限界を、結果を組む直前に拾い直す。
+
+    `check()` の内側だけを通す（stage plan を差し替えない）ので、G2 が無ければ
+    monolithic strategy が同一 analysis 2 件から EQUIVALENT を返してしまう。
+    """
+    connector = _connector()
+    session = connector.begin({"case": "issue106-g2"})
+    checker = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5,
+        canonical_decision_cutover=False,
+    )
+    checker._active_v2_dual_write_pilot_session = session
+    pair = ("b1", "b2", None, None, "L", "R")
+
+    with production_signal_scope(session):
+        with pair_failure_scope(pair, session.identity.result_occurrence_id):
+            try:
+                raise_limitation(_budget_limitation(site="expand"))
+            except Exception:
+                pass
+            result = checker.check(
+                _analysis("left", 7), _analysis("right", 7), "L", "R",
+            )
+
+    assert result.is_equivalent is None
+    assert result.error_message is None
+    assert _reason_ids(result) == [BUDGET_REASON]
+    assert _failure_block(result, "analysis_limitation")["site"] == "expand"
+
+
+def test_a_healthy_check_without_a_limitation_still_reaches_its_verdict():
+    """G2 対照: 台帳が空なら `check()` は従来どおり判定まで進む。"""
+    connector = _connector()
+    session = connector.begin({"case": "issue106-g2-control"})
+    checker = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5,
+        canonical_decision_cutover=False,
+    )
+    checker._active_v2_dual_write_pilot_session = session
+    pair = ("b1", "b2", None, None, "L", "R")
+
+    with production_signal_scope(session):
+        with pair_failure_scope(pair, session.identity.result_occurrence_id):
+            result = checker.check(
+                _analysis("left", 7), _analysis("right", 7), "L", "R",
+            )
+
+    assert result.is_equivalent is True
+    assert result.pair_stop_state is None
 
 
 # ---------------------------------------------------------------------------
