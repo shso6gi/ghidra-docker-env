@@ -12,11 +12,14 @@
   （:func:`statement_scope_nodes` / :func:`walk_evaluated_now`）
 * **alias の追跡** — 一段だけ。**問いは 3 つで、混ぜない**:
 
-  * producer origin :func:`tracked_producer_bindings` — producer の値がどの名前に
-    入ったか。**支持するのは production 実測の 2 形だけ**（``name = producer`` と
-    ``name: T = producer``）。chained / 分解 / ``AugAssign`` / ``:=`` は、正しく
-    追うのに値と名前の対応を解く必要があり、production に 1 件も無いので
-    **解かずに B1 で拒否**する
+  * producer origin :func:`tracked_producer_bindings` — producer の戻り値が
+    どの名前に入ったか。**target × RHS root の両方**が条件を満たすときだけ追う:
+    単一の局所 ``Name`` と、:func:`direct_tracked_producer`（RHS root そのものが
+    producer）。``rendered = consume(expr.to_string())`` は producer が **走る**
+    だけで ``rendered`` はその戻り値を受けていないので alias ではない（本 package
+    に 145 箇所。root が producer なのは 191 箇所）。direct producer を chained /
+    分解 / ``AugAssign`` / ``:=`` で束縛する形は、値と名前の対応を解かずに
+    **B1 で拒否**する
   * rebind（**MUST**）:func:`statement_rebinds` — この文を実行したら **必ず**
     別の値へ束縛し直すか。window の終端
   * production 共有（**MUST**）:func:`_has_direct_production_read` — この区間で
@@ -697,27 +700,34 @@ def function_body_nodes(
         yield from statement_scope_nodes(statement)
 
 
-def _assignment_kind(value: ast.AST, renderers: FrozenSet[str]) -> Tuple[str, str]:
-    """代入の右辺が **その代入の時点で** debug 用に何を作るか（``(種別, 表示)``）。
+def direct_tracked_producer(
+    value: ast.AST, renderers: FrozenSet[str]
+) -> Tuple[str, str]:
+    """``value`` **そのもの**が tracked producer の呼び出しか（``(種別, 表示)``）。
 
-    走査は :func:`walk_evaluated_now`。``thunk = lambda: expr.to_string()`` は
-    代入の時点では何も描画しないので、この代入を「禁止呼び出しを作った」と
-    分類してはいけない（lambda 本体は別 scope として改めて解析される）。
-    lambda の default 引数のように定義時に評価されるものは含む。
+    「その式の値が producer の戻り値である」ことだけを答える。中は見ない:
+
+    * ``rendered = expr.to_string()`` — 値は ``to_string()`` の戻り値 → producer
+    * ``rendered = consume(expr.to_string())`` — 値は ``consume()`` の戻り値。
+      ``to_string()`` は **RHS の中で走るが**、``rendered`` が受け取るのはその
+      結果ではない → producer ではない
+
+    この 2 つを混同すると、``rendered`` を producer の別名とみなして「debug 専用に
+    作った値」と誤認する。本 package には後者が 145 箇所ある（root が producer
+    なのは 191 箇所）。**どちらなのかは root を見れば判る**ので、値の流れを追う
+    解析は要らない。
+
+    「RHS の中で producer が走るか」は別の性質で、検出側（R1 / R2）が見る。
+    provenance の判定にその問いを流用しない。
     """
 
-    entry = ("", "")
-    for inner in walk_evaluated_now(value):
-        forbidden = _render_call_label(inner)
-        if forbidden:
-            return ("forbidden", forbidden)
-        kind, label = _summary_call(inner, renderers)
-        # unsafe は renderer より強い（対象が契約の外なので guard 内でも不可）。
-        if kind == "unsafe_renderer":
-            entry = (kind, label)
-        elif kind == "renderer" and not entry[0]:
-            entry = (kind, label)
-    return entry
+    forbidden = _render_call_label(value)
+    if forbidden:
+        return ("forbidden", forbidden)
+    kind, label = _summary_call(value, renderers)
+    if kind == "unsafe_renderer":
+        return (kind, label)
+    return ("", "")
 
 
 def bound_names(target: ast.AST) -> Optional[Set[str]]:
@@ -841,22 +851,32 @@ def tracked_producer_bindings(
     * rebind（:func:`statement_rebinds`）— 実行したら **必ず**束縛し直すか
     * production 共有（:func:`_has_direct_production_read`）— **必ず**読むか
 
-    **支持する形は production の実測だけ**（tracked producer を受ける束縛は
-    ``Assign`` の単純 ``Name`` が 355、``AnnAssign`` の単純 ``Name`` が 1、
-    ``Subscript`` / ``Attribute`` が 6、それ以外は 0 件）:
+    追跡は **target × RHS root** の両方が条件を満たすときだけ:
 
-    * ``name = <producer>`` — 単一の ``Name`` target
-    * ``name: T = <producer>`` — 同上
+    * RHS root が :func:`direct_tracked_producer` — 値が producer の戻り値そのもの
+    * target が単一の局所 ``Name``
+
+    実測（tracked producer を含む代入 336 件）: RHS root が producer なのは 191、
+    残り 145 は ``consume(producer)`` のように **RHS の中で走るだけ**。後者は
+    ``rendered`` が producer の戻り値を受けていないので alias ではない
+    （B1 でもない — 正当な production の書き方）。target 側は ``Name`` 355 /
+    ``Subscript``・``Attribute`` 6 / それ以外 0。
+
+    * ``name = <producer>`` / ``name: T = <producer>`` — 追跡する
     * ``obj.attr = <producer>`` / ``obj[key] = <producer>`` — 局所名を作らないので
       追う対象が無い（unsupported ではない）
 
-    それ以外で tracked producer を束縛する形は **B1 unsupported** に倒す:
+    **direct producer を**それ以外の形で束縛しようとしたら **B1 unsupported**:
     chained assignment、分解代入（Tuple / List / Starred）、``AugAssign``、
     ``:=``。どれも production に 1 件も無いのに、正しく追うには値と名前の対応を
     解く必要がある（``used = rendered = f()`` は 2 つの名前が同じ値を指すので
     片方の production 使用がもう片方を免除する。``other, rendered = (f(), 0)``
     は位置で値が決まる）。**そういう解析は作らない** — 書かれたら拒否して、
     単純な形へ直してもらう。
+
+    RHS root が producer **でない**ときは、target の形が何であれ B1 にしない。
+    ``a = b = consume(producer)`` は alias を作っていないだけで、正当な production
+    の書き方だから。
 
     :func:`bound_names` は構文として何が束縛されるかを答えるが、**構文を認識
     できることと、producer の値がどの名前に入ったかを言えることは別**。ここでは
@@ -875,7 +895,7 @@ def tracked_producer_bindings(
     events: List[ProducerBinding] = []
     value = getattr(statement, "value", None)
     if targets and value is not None:
-        kind, label = _assignment_kind(value, renderers)
+        kind, label = direct_tracked_producer(value, renderers)
         if kind in TRACKED_PRODUCER_KINDS:
             single = targets[0] if len(targets) == 1 else None
             if isinstance(statement, ast.AugAssign) or single is None:
@@ -894,7 +914,7 @@ def tracked_producer_bindings(
     for node in walk_evaluated_now(statement):
         if not isinstance(node, ast.NamedExpr):
             continue
-        kind, label = _assignment_kind(node.value, renderers)
+        kind, label = direct_tracked_producer(node.value, renderers)
         if kind in TRACKED_PRODUCER_KINDS:
             events.append(ProducerBinding(None, kind, label, node.lineno))
     return events
@@ -3242,8 +3262,16 @@ def test_a_lambda_assignment_is_not_classified_as_a_forbidden_call():
     assert not violations.render_in_debug_sink, violations.describe()
 
 
-def test_a_lambda_default_in_an_assignment_is_still_classified():
-    """default 引数は定義時に評価されるので、この代入の仕事。"""
+def test_a_lambda_default_in_an_assignment_is_not_a_producer_alias():
+    """``thunk = lambda rendered=expr.to_string(): ...`` の値は lambda。
+
+    ``to_string()`` は代入の時点で走る（default 引数なので）が、``thunk`` が
+    受け取るのは lambda であって producer の戻り値ではない。alias にはしない。
+    走ってしまうこと自体は検出側（R2）の仕事。
+    """
+
+    value = ast.parse("lambda rendered=expr.to_string(): rendered", mode="eval").body
+    assert direct_tracked_producer(value, OWNED_SUMMARY_FUNCTIONS) == ("", "")
 
     violations = scan_source(
         "sample",
@@ -3251,19 +3279,23 @@ def test_a_lambda_default_in_an_assignment_is_still_classified():
         "    thunk = lambda rendered=expr.to_string(): rendered\n"
         "    self._debug_print(thunk)\n",
     )
-    assert [entry[2] for entry in violations.render_in_debug_sink] == [
-        "_debug_print(... thunk = to_string() ...)"
-    ]
+    assert not violations.unsupported_producer_binding, violations.describe()
+    # sink へ渡るのは thunk なので、alias 由来の R2 にはならない。
+    assert not [
+        entry for entry in violations.render_in_debug_sink if "thunk =" in entry[2]
+    ], violations.describe()
 
 
-def test_the_assignment_classifier_and_the_scanner_share_one_boundary():
-    """評価の意味を二か所で定義していないこと（同じ入口を使う）。"""
+def test_the_producer_classifier_looks_only_at_the_root():
+    """provenance は root だけを見る（中で producer が走るかは別の性質）。"""
 
-    source = "thunk = lambda: expr.to_string()"
-    value = ast.parse(source, mode="exec").body[0].value
-    walked = {type(node).__name__ for node in walk_evaluated_now(value)}
-    assert "Call" not in walked, walked
-    assert _assignment_kind(value, OWNED_SUMMARY_FUNCTIONS) == ("", "")
+    direct = ast.parse("expr.to_string()", mode="eval").body
+    nested = ast.parse("consume(expr.to_string())", mode="eval").body
+    deferred = ast.parse("lambda: expr.to_string()", mode="eval").body
+
+    assert direct_tracked_producer(direct, OWNED_SUMMARY_FUNCTIONS)[0] == "forbidden"
+    assert direct_tracked_producer(nested, OWNED_SUMMARY_FUNCTIONS) == ("", "")
+    assert direct_tracked_producer(deferred, OWNED_SUMMARY_FUNCTIONS) == ("", "")
 
 
 # -- 評価モデルの表 -------------------------------------------------------------
@@ -3987,7 +4019,7 @@ def test_a_destructured_producer_is_refused_not_guessed():
     violations = scan_source(
         "sample",
         "def f(self, expr):\n"
-        "    rendered, other = (expr.to_string(), 0)\n"
+        "    rendered, other = expr.to_string()\n"
         "    self._debug_print(rendered)\n",
     )
     assert not violations.render_in_debug_sink
@@ -4000,7 +4032,7 @@ def test_a_starred_producer_target_is_refused_too():
     violations = scan_source(
         "sample",
         "def f(self, expr):\n"
-        "    rendered, *rest = (expr.to_string(), 0)\n"
+        "    rendered, *rest = expr.to_string()\n"
         "    self._debug_print(rendered)\n",
     )
     assert [entry[2] for entry in violations.unsupported_producer_binding] == [
@@ -4123,9 +4155,8 @@ _PRODUCER_ORIGIN_GRAMMAR = [
     ("単純な Assign", "    rendered = expr.to_string()\n", True),
     ("AnnAssign", "    rendered: str = expr.to_string()\n", True),
     ("chained assign", "    other = rendered = expr.to_string()\n", False),
-    ("分解代入", "    rendered, other = (expr.to_string(), 0)\n", False),
-    ("分解代入（位置が逆）", "    other, rendered = (expr.to_string(), 0)\n", False),
-    ("starred", "    rendered, *rest = (expr.to_string(), 0)\n", False),
+    ("分解代入", "    rendered, other = expr.to_string()\n", False),
+    ("starred", "    rendered, *rest = expr.to_string()\n", False),
     ("AugAssign", "    rendered += expr.to_string()\n", False),
     ("walrus 単独", "    (rendered := expr.to_string())\n", False),
     ("walrus を呼び出しの引数で", "    consume(rendered := expr.to_string())\n", False),
@@ -4225,6 +4256,96 @@ def test_a_supported_binding_reports_nothing_unsupported():
 def test_no_unsupported_producer_binding_in_the_package():
     violations = scan_package()
     assert not violations.unsupported_producer_binding, violations.describe()
+
+
+# -- producer が「走る」ことと「値が入る」ことは別 ------------------------------
+
+_RHS_ROOT_GRAMMAR = [
+    # (ラベル, RHS, root が producer か)
+    ("producer そのもの", "expr.to_string()", True),
+    ("unsafe renderer そのもの", "expensive_factory().summarize_expression(expr)", True),
+    ("別の呼び出しの戻り値", "consume(expr.to_string())", False),
+    ("組み込みの戻り値", "len(expr.to_string())", False),
+    ("変換関数の戻り値", "transform(expr.to_string())", False),
+    ("tuple の要素", "(expr.to_string(), other)", False),
+    ("list の要素", "[expr.to_string()]", False),
+    ("dict の値", "{'k': expr.to_string()}", False),
+    ("f-string", "f'{expr.to_string()}'", False),
+    ("連結", "expr.to_string() + other", False),
+    ("比較", "expr.to_string() == other", False),
+    ("条件式", "expr.to_string() if cond else other", False),
+    ("添字", "expr.to_string()[0]", False),
+    ("属性", "expr.to_string().upper", False),
+    ("lambda（本体で走る）", "lambda: expr.to_string()", False),
+]
+
+
+@pytest.mark.parametrize(
+    "label, source, is_root",
+    _RHS_ROOT_GRAMMAR,
+    ids=[case[0] for case in _RHS_ROOT_GRAMMAR],
+)
+def test_the_producer_value_contract_looks_at_the_rhs_root(label, source, is_root):
+    """「値が producer の戻り値か」は root だけで決まる。
+
+    ``rendered = consume(expr.to_string())`` は ``to_string()`` を走らせるが、
+    ``rendered`` が受け取るのは ``consume()`` の戻り値。両者を混同すると
+    ``rendered`` を producer の別名とみなしてしまう（本 package に 145 箇所）。
+    """
+
+    value = ast.parse(source, mode="eval").body
+    kind, _ = direct_tracked_producer(value, OWNED_SUMMARY_FUNCTIONS)
+    assert bool(kind) is is_root, label
+
+
+@pytest.mark.parametrize(
+    "label, rhs",
+    [
+        ("別の呼び出しの戻り値", "consume(expr.to_string())"),
+        ("組み込みの戻り値", "len(expr.to_string())"),
+        ("tuple の要素", "(expr.to_string(), other)"),
+        ("f-string", "f'{expr.to_string()}'"),
+        ("変換関数の戻り値", "transform(expr.to_string())"),
+    ],
+)
+def test_a_nested_producer_is_not_an_alias_and_not_a_violation(label, rhs):
+    """RHS の中で producer が走るだけなら alias ではない（B1 でもない）。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, consume, transform, other):\n"
+        f"    rendered = {rhs}\n"
+        "    self._debug_print(rendered)\n",
+    )
+    assert not [
+        entry for entry in violations.render_in_debug_sink if "rendered =" in entry[2]
+    ], (label, violations.describe())
+    assert not violations.unsupported_producer_binding, label
+
+
+@pytest.mark.parametrize(
+    "label, body",
+    [
+        ("chained", "    a = rendered = consume(expr.to_string())\n"),
+        ("分解", "    rendered, other = consume(expr.to_string())\n"),
+        ("AugAssign", "    rendered += consume(expr.to_string())\n"),
+        ("walrus", "    (rendered := consume(expr.to_string()))\n"),
+    ],
+)
+def test_an_unsupported_target_with_a_nested_producer_is_not_refused(label, body):
+    """B1 は **direct producer** を追えないときだけ。
+
+    ``a = b = consume(producer)`` は alias を作っていないだけで、正当な
+    production の書き方。target の形だけを理由に拒否しない。
+    """
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, consume, a, other, rendered):\n"
+        + body
+        + "    self._debug_print(rendered)\n",
+    )
+    assert not violations.unsupported_producer_binding, (label, violations.describe())
 
 
 def test_the_two_declared_sets_do_not_overlap():
