@@ -363,6 +363,59 @@ class _PairFailureRecord:
         )
 
 
+def _default_limitation_stop_state(exc: "AnalysisLimitation") -> PairStopState:
+    """限界の既定 stop state（時間予算だけが deadline。派生型も deadline 扱い）。"""
+    return (
+        PairStopState.PAIR_TERMINAL_DEADLINE
+        if isinstance(exc, DeadlineExceeded)
+        else PairStopState.PAIR_TERMINAL_LIMITATION
+    )
+
+
+def _limitation_record(
+    exc: "AnalysisLimitation", stop_state: PairStopState,
+) -> _PairFailureRecord:
+    return _PairFailureRecord(
+        kind=PairFailureKind.LIMITATION,
+        site=exc.site,
+        reason_id=exc.reason_id,
+        target_key=exc.target_key,
+        exception=exc,
+        stop_state=stop_state,
+    )
+
+
+def _internal_bug_record(exc: BaseException, site: str) -> _PairFailureRecord:
+    return _PairFailureRecord(
+        kind=PairFailureKind.INTERNAL_BUG,
+        site=site,
+        reason_id=None,
+        target_key=(type(exc).__name__,),
+        exception=exc,
+        stop_state=_STOP_STATE_FOR_KIND[PairFailureKind.INTERNAL_BUG],
+    )
+
+
+def classify_typed_failure(exc: BaseException) -> Optional[_PairFailureRecord]:
+    """typed failure 1 件を台帳の記録へ落とす。**例外型 → 種別の対応はここだけ**。
+
+    `AnalysisFailureError` 族のうち、`AnalysisLimitation` は限界、それ以外
+    （`InternalError` / `FrozenExpressionError` / `ExpressionCycleError` …）は
+    内部バグ。新しい failure class は `AnalysisFailureError` を継承するだけで
+    この表に乗り、gate 側にも consumer 側にも分岐は増えない。族の外の例外は
+    `None`（従来の generic 経路）。
+    """
+    if isinstance(exc, AnalysisLimitation):
+        return _limitation_record(exc, _default_limitation_stop_state(exc))
+    if isinstance(exc, AnalysisFailureError):
+        site = (
+            exc.site if isinstance(exc, InternalError)
+            else _site_of_unrecorded(exc)
+        )
+        return _internal_bug_record(exc, site)
+    return None
+
+
 class PairExecutionControl:
     """pair 境界が持つ実行制御の **安定 interface**（`PairFailureLedger` が実装）。
 
@@ -428,36 +481,17 @@ class PairFailureLedger(PairExecutionControl):
     ) -> None:
         if not isinstance(exc, AnalysisLimitation):
             raise TypeError("pair ledger records exact analysis limitations")
-        stop_state = stop if stop is not None else (
-            # 時間予算だけが deadline。派生型も deadline として扱う。
-            PairStopState.PAIR_TERMINAL_DEADLINE
-            if isinstance(exc, DeadlineExceeded)
-            else PairStopState.PAIR_TERMINAL_LIMITATION
-        )
+        stop_state = stop if stop is not None else _default_limitation_stop_state(exc)
         if stop_state is PairStopState.NONE:
             raise ValueError("a recorded limitation cannot leave the pair runnable")
-        self._append(_PairFailureRecord(
-            kind=PairFailureKind.LIMITATION,
-            site=exc.site,
-            reason_id=exc.reason_id,
-            target_key=exc.target_key,
-            exception=exc,
-            stop_state=stop_state,
-        ))
+        self._append(_limitation_record(exc, stop_state))
 
     def record_internal_bug(self, exc: BaseException, *, site: str) -> None:
         if not isinstance(exc, BaseException):
             raise TypeError("pair ledger records the original exception object")
         if type(site) is not str or not site:
             raise ValueError("an internal bug record needs an exact observation site")
-        self._append(_PairFailureRecord(
-            kind=PairFailureKind.INTERNAL_BUG,
-            site=site,
-            reason_id=None,
-            target_key=(type(exc).__name__,),
-            exception=exc,
-            stop_state=_STOP_STATE_FOR_KIND[PairFailureKind.INTERNAL_BUG],
-        ))
+        self._append(_internal_bug_record(exc, site))
 
     def _append(self, record: _PairFailureRecord) -> None:
         if not self._already_recorded(record):
@@ -586,41 +620,23 @@ def pending_pair_failure() -> Optional[PairPendingFailure]:
 def adopt_pair_failure(exc: BaseException) -> Optional[PairPendingFailure]:
     """境界を抜けようとしている例外を canonical failure へ解決する。
 
-    1. 例外自体が typed failure（`AnalysisFailureError` 族）なら、まだ台帳に
-       無くてもここで記録する。`raise_limitation` を経由せずに raise された
-       限界や、`record_internal_bug` してそのまま raise された内部バグを、
-       **同じ 1 本の経路** に載せるため。
+    1. 例外自体が typed failure なら、まだ台帳に無くてもここで記録する
+       （`classify_typed_failure` が型 → 記録の対応を持つ）。`raise_limitation`
+       を経由せずに raise された限界も、`record_internal_bug` してそのまま
+       raise された内部バグも、**同じ 1 本の経路** に載せるため。
     2. そのうえで台帳の優先順位解決の結果を返す。記録済みの内部バグがあれば、
        今 raise されているのが限界でも内部バグが勝つ。
     3. typed failure でもなく台帳も空なら `None`（呼び出し側は従来の generic
        経路へ落とす）。
-
-    どの例外型がどの種別になるかを決めるのはこの関数だけで、consumer に型分岐を
-    置かない。新しい failure class は `AnalysisFailureError` を継承するだけで
-    この経路に乗る。
     """
+    record = classify_typed_failure(exc)
     ledger = current_pair_ledger()
     if ledger is not None:
-        if isinstance(exc, AnalysisLimitation):
-            ledger.record_limitation(exc)
-        elif isinstance(exc, InternalError):
-            ledger.record_internal_bug(exc, site=exc.site)
-        elif isinstance(exc, AnalysisFailureError):
-            ledger.record_internal_bug(exc, site=_site_of_unrecorded(exc))
+        if record is not None:
+            ledger._append(record)
         return ledger.pending_failure()
-    # scope の外（直接 `check()` を呼ぶ test など）でも型だけは正規化する。
-    if isinstance(exc, AnalysisLimitation):
-        return PairPendingFailure(
-            PairFailureKind.LIMITATION,
-            PairStopState.PAIR_TERMINAL_LIMITATION, exc.site, exc,
-        )
-    if isinstance(exc, AnalysisFailureError):
-        site = exc.site if isinstance(exc, InternalError) else _site_of_unrecorded(exc)
-        wrapped = exc if isinstance(exc, InternalError) else InternalError(exc, site=site)
-        return PairPendingFailure(
-            PairFailureKind.INTERNAL_BUG, PairStopState.INTERNAL_BUG, site, wrapped,
-        )
-    return None
+    # scope の外（`check()` を直接呼ぶ test など）でも型だけは正規化する。
+    return None if record is None else record.as_pending()
 
 
 def _site_of_unrecorded(exc: BaseException) -> str:
