@@ -146,7 +146,7 @@ Where the replays run:
 |---|---|---|
 | `unit-fast` (every PR) | the ordinary suite plus the cheap corpus contracts in `tests/unit/test_recorded_corpus_contracts.py` | none -- `-m "not recorded_replay"` **deselects** them (it does not skip them) |
 | `recorded-fast` (every PR, parallel with `unit-fast`) | `tests/unit/test_recorded_pairs.py` at its default `pr_gate` tier | the 7 replays `cases.json` marks `pr_gate: true` |
-| `recorded-full` (push to `main`, `workflow_dispatch`, weekly) | one replay per matrix shard, then an aggregate job | all 9, `fail-fast: false` |
+| `recorded-full` (weekly, plus `workflow_dispatch`) | one replay per matrix shard, then an aggregate job | all 9, `fail-fast: false` |
 
 Both gates and the full matrix call the same `validate_replay`, so no case is
 checked less anywhere; `wood` and `barthe2big` are outside the PR gate only
@@ -169,7 +169,7 @@ replay; the fixture reproduces that recorded run, not necessarily a proxy-free
 CLI run. Keep running the fixed subset on real binaries for regression evidence --
 by hand, or through the `eqbench-subset` workflow described under "Running the
 subset in CI" below, which is a different workflow from `recorded-full` and
-runs only after a pull request has been merged into `main`.
+runs automatically once a week (plus on demand).
 `scripts/function_tracer_pcode/tests/fixtures/pcode/SCHEMA.md` documents the
 format, what is recorded, the identity surrogates, and the measured determinism.
 
@@ -342,40 +342,54 @@ of each half plus this run's soundness gate are then saved next to the results.
 Note that the subset uses a 240 s pair timeout instead of the 600 s of full
 runs, so TIMEOUT counts are not comparable with the full trees.
 
-#### Running the subset in CI (after a merge)
+#### Running the subset in CI (weekly, or on demand)
 
 `.github/workflows/eqbench-subset.yml` runs the same subset against real
 binaries on a GitHub-hosted runner. It compiles EqBench, imports every binary
-into Ghidra and runs the solvers — about **85 minutes** on a hosted runner — so
-it runs **after a pull request has landed on `main`, and never while one is
-open**. The job budget is `timeout-minutes: 180`.
+into Ghidra and runs the solvers — about **85 minutes** on a hosted runner. That
+is the most expensive thing this repository can start on its own, so it runs
+**once a week** rather than on every merge, and verifies whatever is on `main`
+at that moment. The job budget is `timeout-minutes: 180`.
 
 ```yaml
 on:
-  pull_request:
-    branches: [main]
-    types: [closed]     # the only activity type: not opened/synchronize
-  workflow_dispatch:     # manual escape hatch; never automatic
+  schedule:
+    - cron: "40 5 * * 4"   # Thursdays 05:40 UTC; cron is always UTC
+  workflow_dispatch:       # manual escape hatch; never automatic
 ```
 
+Nothing about the run itself changed with the cadence: the same subset, the
+same per-pair timeout, the same soundness gate and the same per-half benchmark
+validation gate. When a particular merge needs real-binary evidence sooner than
+the next scheduled run, dispatch it by hand — `workflow_dispatch` takes a ref
+and the four inputs below, and is not part of the weekly budget.
+
+The other heavy workflow, `recorded-full`, is weekly too (Mondays 03:20 UTC);
+the two are on different days so they never queue against each other. The cheap
+gates in `unit.yml` (`unit-fast`, `recorded-fast`) are unchanged and still run
+on every pull request — `unit.yml` is the only workflow that starts itself per
+push or pull request.
+
 with
-`if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true`
-on the job, so a PR that is closed without being merged starts nothing either —
-and a trigger added later without thinking about this policy leaves a visibly
-skipped job rather than quietly running 85 minutes of work.
+`if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'`
+on the job: the two allowed events are named rather than excluded, so a trigger
+added later without thinking about this policy leaves a visibly skipped job
+rather than quietly running 85 minutes of work.
 
-Why this and not `push: branches: [main]`: a direct push to `main` is not "a
-pull request was reviewed and merged", and the `push` event would not tell the
-run which PR it belongs to. The cost is that a `pull_request` event checks out
-`refs/pull/N/merge` — the test merge GitHub computed while the PR was open, not
-the commit that landed — so the checkout is pinned to
-`github.event.pull_request.merge_commit_sha` and a step then asserts that
-`git rev-parse HEAD` equals it. `ci_metadata.json` records that commit as
-`analysed_commit` next to the PR number.
+**Which commit a scheduled run verifies.** A `schedule` event fixes a commit
+when it fires — `GITHUB_SHA`, the default branch's head at that moment — and
+`actions/checkout` with no `ref:` checks out exactly that. A step asserts
+`git rev-parse HEAD` equals `GITHUB_SHA` and nothing else; it never re-fetches
+the branch, because a commit landing on `main` while the runner is being handed
+out would then fail a run that is doing exactly what it should. The run is of
+the commit the event named, and `ci_metadata.json` records it as
+`analysed_commit`. A manual dispatch keeps the ref the operator chose, for the
+same reason the checkout pins no ref of its own.
 
-There is deliberately no `schedule`: the run is tied to what landed, not to the
-calendar. Nothing here runs while a pull request is open, so the per-PR gate
-stays `unit-fast` + `recorded-fast` (and `recorded-full` on `main`).
+The policy that only `unit.yml` runs automatically per push or pull request,
+and that every other workflow starts automatically only once a week, is held
+by `tests/unit/test_ci_workflow_policy.py` against the workflow files
+themselves.
 
 | input | default | used for |
 |---|---|---|
@@ -392,7 +406,7 @@ since a fresh EqBench checkout has no binaries yet. Everything else
 `eqbench_subset.json` unchanged, and both values are recorded in
 `subset_manifest.txt`.
 
-A merged pull request carries no inputs at all, so **every setting is
+A scheduled run carries no inputs at all, so **every setting is
 normalised once**, in the first step, with `${VAR:-default}` — not with a GitHub
 expression `||`, whose truthiness rules would quietly turn
 `identical_fast_path=0` into `1`. No later step has a default of its own; the

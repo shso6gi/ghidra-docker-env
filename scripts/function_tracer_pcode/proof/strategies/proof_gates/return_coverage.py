@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.proof.obligations import (
     UnaryProducerResult,
     prove_unary_partition,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_runtime_ref
 
 
 def _unary_header_context(base_ctx: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -479,7 +480,7 @@ def _prove_unary_outcome_for_analysis(
             and all_blocks_reachable
             and all_return_exits_reachable
         )
-        if not complete and getattr(self, "debug", False):
+        if getattr(self, "debug", False) and not complete:
             self._debug_print(
                 "Unary outcome CFG prerequisite incomplete: "
                 f"typed={profile_is_typed}, pcode={getattr(profile, 'pcode_enumeration_complete', False)}, "
@@ -590,10 +591,10 @@ def _prove_unary_outcome_for_analysis(
             )
             member_evidence_key = tuple(sorted(evidence_keys, key=repr)) if complete else None
             return_member_proofs.append((terminal_id, complete, member_evidence_key))
-            if not complete and getattr(self, "debug", False):
+            if getattr(self, "debug", False) and not complete:
                 self._debug_print(
                     "Return terminal path evidence mismatch: "
-                    f"terminal={terminal_id!r}, op={op_ref.stable_key() if op_ref is not None else None!r}, "
+                    f"terminal={terminal_id!r}, op={summarize_runtime_ref(op_ref)}, "
                     f"statuses={tuple(getattr(e, 'coverage_status', None) for e in evidences)!r}, "
                     f"evidence_guards={evidence_guard_keys!r}, "
                     f"region_guards={actual_guard_keys!r}, pruning={tuple(getattr(e, 'pruning_proof_keys', None) for e in evidences)!r}, "
@@ -629,7 +630,9 @@ def _prove_unary_outcome_for_analysis(
             and (not return_regions or all_return_members_exact)
             and (not divergence_regions or validated_divergence_payloads() is not None)
         )
-        if not (general_return_exact or guarded_divergence_exact or termination_exact) and getattr(self, "debug", False):
+        if getattr(self, "debug", False) and not (
+                general_return_exact or guarded_divergence_exact or termination_exact
+            ):
             self._debug_print(
                 "Unary outcome path prerequisite incomplete: "
                 f"base={base_complete}, return_regions={len(return_regions)}, "

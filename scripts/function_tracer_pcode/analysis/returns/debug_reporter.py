@@ -2,21 +2,35 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 from scripts.function_tracer_pcode.core.expression import Expression
-from scripts.function_tracer_pcode.core.structural import expression_key_safe
-from scripts.function_tracer_pcode.analysis.returns._shared import summarize_expression
+from scripts.function_tracer_pcode.analysis.debug import (
+    summarize_expression,
+    summarize_expression_details,
+)
 
 
 class DebugReporter:
     """デバッグ出力と式要約の collaborator。facade 状態のうち読むのは debug フラグのみ（supplier 経由）。
 
     lifecycle family の横断 utility（``_debug_print`` / ``_debug_expr_summary`` /
-    ``_debug_expr_identity_summary``）を切り出したもの。他の collaborator は本 class を直接依存として受け取る。
+    ``_debug_expr_details_summary``）を切り出したもの。他の collaborator は本 class を直接依存として受け取る。
+
+    ここが返す文字列はすべて診断専用の有界表示で、identity ではない。
     """
 
     def __init__(self, *, debug_flag: Callable[[], bool]) -> None:
         self.debug_flag = debug_flag
+
+    def debug_available(self) -> bool:
+        """debug 出力が有効か。
+
+        returns family の debug guard の唯一の判定点。呼び出し側は message の
+        組み立てごとこれで囲み、full render（``to_string`` / ``to_smt``）は
+        使わずに ``summarize_expression`` 等の有界サマリーを渡す。
+        """
+
+        return bool(self.debug_flag())
 
     def debug_print(self, msg: str, indent: int = 0):
         if self.debug_flag():
@@ -26,27 +40,15 @@ class DebugReporter:
     def debug_expr_summary(self, expr: Optional[Expression], max_depth: int = 4) -> str:
         return summarize_expression(expr, max_depth=max_depth)
 
-    def debug_expr_identity_summary(
+    def debug_expr_details_summary(
         self,
         expr: Optional[Expression],
         max_depth: int = 3,
     ) -> str:
-        if expr is None:
-            return "None"
+        """診断用の式詳細（有界）。identity ではないので判定に使わない。
 
-        runtime_ref = getattr(expr, "runtime_ref", None)
-        read_order_key = getattr(expr, "read_order_key", None)
-        runtime_tag = type(runtime_ref).__name__ if runtime_ref is not None else "None"
-        try:
-            structural_key = expression_key_safe(
-                expr,
-                include_memory_read_order=True,
-            )
-        except Exception:
-            structural_key = None
-        return (
-            f"{summarize_expression(expr, max_depth=max_depth)} "
-            f"[type={expr.expr_type.name}, size={expr.size}, "
-            f"read_order={read_order_key}, runtime_ref={runtime_tag}:{runtime_ref}, "
-            f"structural={structural_key}]"
-        )
+        cache key / 等価判定 / digest / 証明の入力にしないこと
+        （:func:`summarize_expression_details` の契約）。
+        """
+
+        return summarize_expression_details(expr, max_depth=max_depth)

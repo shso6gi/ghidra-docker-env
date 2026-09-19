@@ -32,6 +32,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     _PendingLoopSummaryPair,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_conditions
 
 
 def _impl__unknown_reason_id_for_loop_fallback(self, reason: Optional[str]):
@@ -1335,7 +1336,7 @@ def _impl__case_pair_counted_loop_summaries_match_by_closed_values(
             f"{getattr(left_case, 'branch_index', None)} "
             f"right_case={getattr(right_case, 'index', None)}:"
             f"{getattr(right_case, 'branch_index', None)} "
-            f"conditions={ConditionNormalizer.conditions_signature(tuple(conditions))}"
+            f"conditions={summarize_conditions(conditions)}"
         )
     return False
 

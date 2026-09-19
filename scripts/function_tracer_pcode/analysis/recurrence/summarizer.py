@@ -106,6 +106,7 @@ class StructuralRecurrenceSummarizer:
     _counter_plus_constant_delta = _svc_varnode_algebra._impl__counter_plus_constant_delta
     _counter_value_satisfies_relation = _svc_coordinator._impl__counter_value_satisfies_relation
     _debug = _svc_coordinator._impl__debug
+    _debug_available = _svc_coordinator._impl__debug_available
     _dedupe_pcode_refs = _svc_cfg_blocks._impl__dedupe_pcode_refs
     _expr_matches_counter_placeholder = _svc_coordinator._impl__expr_matches_counter_placeholder
     _expr_matches_placeholder = _svc_coordinator._impl__expr_matches_placeholder

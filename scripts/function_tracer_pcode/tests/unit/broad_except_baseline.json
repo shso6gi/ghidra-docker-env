@@ -12,9 +12,6 @@
     "analysis.condition.tracker": {
       "ConditionTracker._detect_branch_condition": {"logged": 0, "unlogged": 1}
     },
-    "analysis.debug.render": {
-      "summarize_expression.<locals>._render": {"logged": 0, "unlogged": 1}
-    },
     "analysis.debug.unknown_trace": {
       "PcodeOpInfo.from_pcodeop": {"logged": 0, "unlogged": 1},
       "VarnodeInfo.from_varnode": {"logged": 0, "unlogged": 1}
@@ -316,9 +313,6 @@
       "_impl__recover_explicit_return_from_block_paths": {"logged": 0, "unlogged": 1},
       "address_offset_for_block_endpoint": {"logged": 0, "unlogged": 1}
     },
-    "analysis.returns.debug_reporter": {
-      "DebugReporter.debug_expr_identity_summary": {"logged": 0, "unlogged": 1}
-    },
     "analysis.returns.divergence_proofs": {
       "DivergenceProofService.collect_guard_dependency_varnodes": {"logged": 0, "unlogged": 4},
       "DivergenceProofService.conditional_progress_guard_keys_from_structural_proof": {"logged": 0, "unlogged": 1},
@@ -407,7 +401,7 @@
     "analysis.returns.return_extraction": {
       "_build_return_value_flow_certificate": {"logged": 0, "unlogged": 3},
       "_impl__append_smt_lowerable_phi_return_fallback_infos": {"logged": 0, "unlogged": 1},
-      "_impl__dump_return_infos": {"logged": 0, "unlogged": 3},
+      "_impl__dump_return_infos": {"logged": 0, "unlogged": 1},
       "_impl__function_body_has_phase1_pure_return_forbidden_ops": {"logged": 0, "unlogged": 4},
       "_impl__function_has_no_return": {"logged": 0, "unlogged": 1},
       "_impl__get_current_prototype_return_varnodes": {"logged": 0, "unlogged": 1},

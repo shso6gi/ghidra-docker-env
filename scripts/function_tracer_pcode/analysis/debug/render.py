@@ -1,9 +1,47 @@
 # -*- coding: utf-8 -*-
-"""Lightweight debug rendering helpers."""
+"""debug 表示の所有者（Issue #22）。
+
+debug message に式・条件を載せる手段は本 module だけが持つ。``to_string()`` /
+``to_smt()`` は共有 DAG を木として全展開するので、debug 出力からは呼ばない。
+ここにある renderer は **出力量も走査量も有界**。巨大な式・長い列・巨大な値を
+渡されても、見る量が入力サイズに依存しない:
+
+* 深さ（``summarize_expression``）、node 数と fan-out
+  （``summarize_structural_preview``）、列の件数（``summarize_*s``）、
+  dataclass field 数（``summarize_runtime_ref``）をそれぞれ上限で縛る
+* 1 要素の表示は ``_primitive_text`` だけを使う。exact type で判定し、任意
+  object の ``__str__`` / ``__repr__`` / ``stable_key()`` / ``to_dict()`` を
+  起動しない。大きい int は 10 進化せず bit 幅、長い str は slice で示す
+* 判定に使う structural key（``core.structural``）は debug から呼ばない。
+  あちらの予算は node 数しか縛らないので、operand / branch / value の中身を
+  辿り得る
+
+本 module は「契約の語彙」も所有する。静的 guard
+（``tests/unit/test_no_eager_debug_rendering.py``）はこれらを import して使う
+ので、新しい bounded renderer を足すときに触るのは本 module だけでよい:
+
+* :data:`BOUNDED_DEBUG_RENDERERS` — debug message に入れてよい描画関数
+* :data:`UNBOUNDED_RENDER_CALLS` — debug message に入れてはいけない描画 method
+* :data:`HEAVY_DIAGNOSTIC_CALLS` — debug 表示から呼んではいけない重い helper
+* :data:`BOUNDED_DEBUG_PREPARATION` — guard の中でだけ呼んでよい前準備 helper
+* :data:`DEBUG_GUARD_SHAPES` — debug 可否の確認として認める形（exact descriptor）
+* :data:`DEBUG_RENDER_CALL_TARGETS` — renderer / 前準備を呼んでよい対象の形
+
+family 側の wrapper（``_debug_expr_summary`` など）は本 module の renderer へ
+委譲するだけなので名前を数え上げない。静的 guard が委譲を辿って同一視する。
+
+debug guard の置き方: guard が複数 module に散る family は host class に
+``_debug_available()`` / ``debug_available()`` を 1 つ持ち、そこだけを判定点に
+する（recurrence / returns / expander / PHI / simplifier）。guard が 1 module に
+閉じる class は ``self.debug`` がその判定点。
+"""
 
 from __future__ import annotations
 
-from typing import Optional, Set
+from dataclasses import is_dataclass
+from enum import Enum
+from itertools import islice
+from typing import Any, Callable, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
 
@@ -28,49 +66,46 @@ def summarize_expression(expr: Optional[Expression], max_depth: int = 4) -> str:
 
         try:
             expr_type = getattr(node, "expr_type", None)
-            expr_type_name = getattr(expr_type, "name", str(expr_type))
+            # 既定値を ``str(expr_type)`` にすると、name が無いときに任意
+            # object の ``__str__`` が走る。名前は bounded な取り方で得る。
+            expr_type_name = _expression_kind(node)
 
             if expr_type == ExpressionType.CONSTANT:
-                try:
-                    value = int(node.value)
-                except Exception:
-                    value = getattr(node, "value", "?")
-                return f"CONST({value})"
+                return f"CONST({_primitive_text(getattr(node, 'value', None))})"
 
             if expr_type == ExpressionType.PARAMETER:
-                return f"PARAM({node.name or '?'})"
+                return f"PARAM({_node_name(node)})"
 
             if expr_type == ExpressionType.VARIABLE:
-                return f"VAR({node.name or '?'})"
+                return f"VAR({_node_name(node)})"
 
             if expr_type == ExpressionType.UNKNOWN:
-                return f"UNKNOWN({node.name or '?'})"
+                return f"UNKNOWN({_node_name(node)})"
 
             if expr_type == ExpressionType.CALL:
-                arg_count = len(node.operands or [])
-                return f"CALL({node.name or '?'}, argc={arg_count})"
+                return f"CALL({_node_name(node)}, argc={_container_length(node.operands)})"
 
             if expr_type == ExpressionType.INTRINSIC:
-                arg_count = len(node.operands or [])
-                return f"INTRINSIC({node.name or '?'}, argc={arg_count})"
+                return f"INTRINSIC({_node_name(node)}, argc={_container_length(node.operands)})"
 
             if expr_type == ExpressionType.MEMORY:
-                inner = _render((node.operands or [None])[0], depth - 1)
-                return f"MEM[{inner}]"
+                children = _first_children(node.operands, 1)
+                return f"MEM[{_render(children[0] if children else None, depth - 1)}]"
 
             if expr_type == ExpressionType.UNARY_OP:
-                inner = _render((node.operands or [None])[0], depth - 1)
-                return f"{node.operator or 'UNARY'}({inner})"
+                children = _first_children(node.operands, 1)
+                operator = _text_or(getattr(node, "operator", None), "UNARY")
+                return f"{operator}({_render(children[0] if children else None, depth - 1)})"
 
             if expr_type == ExpressionType.BINARY_OP:
-                operands = node.operands or []
+                operands = _first_children(node.operands, 2)
                 left = _render(operands[0] if len(operands) > 0 else None, depth - 1)
                 right = _render(operands[1] if len(operands) > 1 else None, depth - 1)
-                return f"{node.operator or 'BINARY'}({left}, {right})"
+                operator = _text_or(getattr(node, "operator", None), "BINARY")
+                return f"{operator}({left}, {right})"
 
             if expr_type == ExpressionType.PHI:
-                branches = node.value or []
-                return f"PHI(branches={len(branches)})"
+                return f"PHI(branches={_container_length(node.value)})"
 
             return expr_type_name
         finally:
@@ -79,8 +114,508 @@ def summarize_expression(expr: Optional[Expression], max_depth: int = 4) -> str:
     return _render(expr, max_depth)
 
 
+def _text_or(value: Any, fallback: str) -> str:
+    """exact な文字列だけをそのまま使う。
+
+    ``if value:`` と書くと任意 object の ``__bool__`` が走る。debug 表示のために
+    呼び出し側の dunder を起動しない、が本 module の契約。
+    """
+
+    return value if type(value) is str and value else fallback
+
+
+def _node_name(node: Any) -> str:
+    return _text_or(getattr(node, "name", None), "?")
+
+
+def _container_length(value: Any) -> str:
+    """要素数を O(1) で聞ける組み込み容器だけ数える。
+
+    任意 object の ``__len__`` / ``__bool__`` は何をするか分からないので、
+    exact type で判定して外れたら件数を名乗らない。
+    """
+
+    if value is None:
+        return "0"
+    length = _known_length(value)
+    return "?" if length is None else str(length)
+
+
+def _first_children(value: Any, count: int) -> list:
+    """子の先頭 ``count`` 個だけを読む（列全体を反復せず、``__bool__`` も見ない）。"""
+
+    if value is None:
+        return []
+    try:
+        return list(islice(iter(value), max(0, int(count))))
+    except TypeError:
+        return []
+
+
 def summarize_condition(condition: Optional[Condition], max_depth: int = 4) -> str:
     if condition is None:
         return "None"
     expr_summary = summarize_expression(condition.expression, max_depth=max_depth)
     return f"(not {expr_summary})" if condition.negated else expr_summary
+
+
+#: debug サマリーに並べる要素数の既定上限。列の長さ自体は打ち切り件数で示す。
+DEFAULT_MAX_ITEMS = 8
+
+#: 1 要素あたりの最大文字数（テキスト化の上限）。
+DEFAULT_MAX_TEXT = 80
+
+#: 整数をそのまま 10 進で出す上限。これを超えたら桁数ではなく bit 幅で示す。
+DEFAULT_MAX_INT_BITS = 64
+
+#: そのまま値を出してよい型（exact 判定。subclass の ``__str__`` は起動しない）。
+_PRIMITIVE_TYPES = (bool, int, float, str, bytes)
+
+#: ``getattr`` の「無い」を表す番兵。``None`` を持つ field と区別する。
+_MISSING = object()
+
+#: :func:`summarize_structural_preview` が見る node 数の上限。
+DEFAULT_MAX_PREVIEW_NODES = 24
+
+#: 1 node から辿る子の数の上限（fan-out）。CALL / INTRINSIC の巨大 operand 群や
+#: PHI の巨大 branch 群を全部辿らないための hard bound。
+DEFAULT_MAX_PREVIEW_FANOUT = 4
+
+#: runtime ref で **中を見る** field 数の上限（primitive を見つけた数ではない）。
+DEFAULT_MAX_FIELDS = 12
+
+#: ``len()`` が O(1) だと分かっている組み込み容器。これ以外の ``__len__`` /
+#: ``__bool__`` は何をするか分からないので debug のために呼ばない。
+_SIZED_BUILTINS = (list, tuple, dict, set, frozenset, str, bytes, bytearray, range)
+
+
+def _known_length(value: Any) -> Optional[int]:
+    """O(1) で長さが分かる容器だけ長さを返す。それ以外は ``None``。"""
+
+    return len(value) if type(value) in _SIZED_BUILTINS else None
+
+
+def _summarize_sequence(
+    items: Optional[Iterable[Any]],
+    render_item: Callable[[Any], str],
+    max_items: int,
+) -> str:
+    """列を ``[a, b, +3 more]`` 形式の有界文字列にする。
+
+    **走査も有界**: 長さが O(1) で分かる組み込み容器なら先頭 ``max_items``
+    個だけを読み、残数は ``len()`` から求める。それ以外（generator も、``__len__``
+    を持つ独自 class も）は長さ不明として扱い、``max_items + 1`` 個までしか
+    読まず、残数は数えずに ``+more`` とだけ書く。独自 ``__len__`` が O(1) とは
+    限らないので、debug のために呼ばない。
+    """
+
+    if items is None:
+        return "[]"
+    limit = max(0, int(max_items))
+    total = _known_length(items)
+    # 長さが分かるなら余分な 1 個も読まない。分からないときだけ 1 個だけ
+    # 先読みして「まだ続きがある」ことを知る。
+    head = list(islice(iter(items), limit if total is not None else limit + 1))
+    overflowed = total is None and len(head) > limit
+    if overflowed:
+        head = head[:limit]
+    rendered = [render_item(item) for item in head]
+
+    body = ", ".join(rendered)
+    if total is not None and total > len(rendered):
+        suffix = f"+{total - len(rendered)} more"
+    elif overflowed:
+        # 残数は数えない（数えると列を最後まで回すことになる）。
+        suffix = "+more"
+    else:
+        suffix = ""
+    if suffix:
+        body = f"{body}, {suffix}" if body else suffix
+    return f"[{body}]"
+
+
+def summarize_expressions(
+    expressions: Optional[Iterable[Optional[Expression]]],
+    max_depth: int = 4,
+    max_items: int = DEFAULT_MAX_ITEMS,
+) -> str:
+    """式列の有界サマリー。full render しないので debug 出力から安全に呼べる。"""
+
+    return _summarize_sequence(
+        expressions,
+        lambda item: summarize_expression(item, max_depth=max_depth),
+        max_items,
+    )
+
+
+def summarize_conditions(
+    conditions: Optional[Iterable[Optional[Condition]]],
+    max_depth: int = 4,
+    max_items: int = DEFAULT_MAX_ITEMS,
+) -> str:
+    """条件列の有界サマリー。full render しないので debug 出力から安全に呼べる。"""
+
+    return _summarize_sequence(
+        conditions,
+        lambda item: summarize_condition(item, max_depth=max_depth),
+        max_items,
+    )
+
+
+def bounded_items(
+    items: Optional[Iterable[Any]],
+    max_items: int = DEFAULT_MAX_ITEMS,
+) -> List[Any]:
+    """debug 用に列の先頭 ``max_items`` 件だけを返す。
+
+    「1 件ごとの表示は有界だが、件数分だけ loop を回している」形を無くすための
+    helper。読むのは先頭 ``max_items`` 件だけで、``__len__`` / ``__bool__`` は
+    呼ばない。全件を出したい用途（production の出力）には使わない。
+
+    有界とはいえ列に触るので、**debug guard の中でだけ**呼ぶこと
+    （:data:`BOUNDED_DEBUG_PREPARATION`。静的 guard が固定している）。
+    """
+
+    return _first_children(items, max_items)
+
+
+def bounded_enumerate(
+    items: Optional[Iterable[Any]],
+    max_items: int = DEFAULT_MAX_ITEMS,
+) -> List[Tuple[int, Any]]:
+    """:func:`bounded_items` に元の index を付けて返す。"""
+
+    return list(enumerate(bounded_items(items, max_items)))
+
+
+def summarize_values(
+    values: Optional[Iterable[Any]],
+    max_text: int = DEFAULT_MAX_TEXT,
+    max_items: int = DEFAULT_MAX_ITEMS,
+) -> str:
+    """既に短いテキストの列（演算子名・別 renderer の出力）を束ねる。
+
+    件数と 1 要素の長さを bound する。要素自体を有界にするのは呼び出し側の
+    責任で、式や条件をそのまま渡してはいけない
+    （:func:`summarize_expressions` / :func:`summarize_conditions` を使う）。
+    """
+
+    return _summarize_sequence(
+        values, lambda value: _primitive_text(value, max_text), max_items
+    )
+
+
+def _primitive_text(value: Any, max_text: int = DEFAULT_MAX_TEXT) -> str:
+    """入力サイズに依存しない表示だけを返す。
+
+    ``str(value)`` / ``repr(value)`` は任意 object の実装を起動するので使わない
+    （frozen dataclass は field を再帰展開する）。判定は **exact type** で行い、
+    subclass の ``__str__`` には触れない。大きい値も「作ってから切る」のでは
+    なく、最初から作らない:
+
+    * ``int`` は ``DEFAULT_MAX_INT_BITS`` を超えたら 10 進化せず bit 幅で示す
+    * ``str`` は先頭 ``max_text`` 文字だけを slice する
+    * ``bytes`` は長さだけ（16 進化しない）
+    * 容器・その他の object は型名（と組み込み容器なら要素数）だけ
+    """
+
+    limit = max(0, int(max_text))
+    kind = type(value)
+    if value is None:
+        return "None"
+    if kind is bool:
+        return "True" if value else "False"
+    if kind is int:
+        bits = value.bit_length()
+        return str(value) if bits <= DEFAULT_MAX_INT_BITS else f"<int bits={bits}>"
+    if kind is float:
+        return repr(value)
+    if kind is str:
+        return value if len(value) <= limit else value[:limit] + "..."
+    if kind is bytes:
+        return f"<bytes len={len(value)}>"
+    length = _known_length(value)
+    if length is not None:
+        return f"<{kind.__name__} len={length}>"
+    if isinstance(value, Enum):
+        name = getattr(value, "name", None)
+        if type(name) is str:
+            return name if len(name) <= limit else name[:limit] + "..."
+    return f"<{kind.__name__}>"
+
+
+def summarize_runtime_ref(runtime_ref: Any, max_fields: int = DEFAULT_MAX_FIELDS) -> str:
+    """runtime ref を型名 + 定数時間で読める primitive field で表す。
+
+    ``stable_key()`` は **呼ばない**。``LoopSummaryRef.stable_key`` のように
+    seed / witness / guard / case を全部辿って式のキーを組み立てる実装があり、
+    debug 表示のために起動してよい処理ではない（Issue #22）。``repr`` も同じ
+    理由で使わない（frozen dataclass は field を再帰展開する）。
+
+    出す情報は「型名」と「先頭 ``max_fields`` 個の field のうち primitive な
+    もの」だけ。**見る field 数そのものが上限つき**なので、field が何個あっても
+    ref の中身が何を抱えていても仕事量は変わらない。識別子が要る場面では判定側
+    の structural key を見ること（debug 表示は identity ではない）。
+    """
+
+    if runtime_ref is None:
+        return "None"
+    type_name = type(runtime_ref).__name__
+    items = _primitive_dataclass_fields(runtime_ref, max_fields)
+    if not items:
+        return type_name
+    return f"{type_name}{summarize_values(items, max_items=max_fields)}"
+
+
+def _primitive_dataclass_fields(value: Any, max_fields: int) -> Tuple[str, ...]:
+    """先頭 ``max_fields`` 個の field を **見て**、primitive なものだけ返す。
+
+    bound がかかるのは「返す件数」ではなく「中を見る field 数」。primitive で
+    ない field が並んでいても、そこで打ち切って残りには触らない。``fields()``
+    は全 field の tuple を作るので使わず、``__dataclass_fields__`` を先頭から
+    ``islice`` する。
+    """
+
+    if isinstance(value, type) or not is_dataclass(value):
+        return ()
+    declared = getattr(value, "__dataclass_fields__", None)
+    if type(declared) is not dict:
+        return ()
+    items = []
+    for name in islice(declared, max(0, int(max_fields))):
+        attribute = getattr(value, name, _MISSING)
+        if attribute is _MISSING:
+            continue  # InitVar など、実体を持たない宣言
+        if attribute is None or type(attribute) in _PRIMITIVE_TYPES or isinstance(attribute, Enum):
+            items.append(f"{name}={_primitive_text(attribute)}")
+    return tuple(items)
+
+
+def summarize_structural_preview(
+    expr: Optional[Expression],
+    max_nodes: int = DEFAULT_MAX_PREVIEW_NODES,
+    max_fanout: int = DEFAULT_MAX_PREVIEW_FANOUT,
+) -> str:
+    """式の構造を **hard bound つきで** 覗く debug 専用 preview。
+
+    判定に使う structural key（``core.structural.expression_key``）は debug から
+    呼ばない。あちらの予算は「何 node 辿るか」しか縛らないので、CALL /
+    INTRINSIC の operand 全件、PHI の branch 全件、``value`` に入った巨大な
+    容器や ``stable_key()`` を持つ object を辿り得る。
+
+    ここで保証するのは 3 つとも hard bound であること:
+
+    * 見る node 数 ≤ ``max_nodes``
+    * 1 node から辿る子の数 ≤ ``max_fanout``（列の残りは読まない）
+    * 1 node の local 表示は :func:`_primitive_text` だけを使う（任意 object の
+      ``__str__`` / ``stable_key()`` / ``to_dict()`` を起動しない）
+
+    **これは identity ではない。** node 数と fan-out を切っているので、構造の
+    違う式が同じ preview になり得る（collision を許す）。cache key / 等価判定 /
+    digest / 証明の入力に使ってはいけない。用途は診断と triage だけで、判定に
+    使う structural key は ``core.structural`` が所有する。
+    """
+
+    if expr is None:
+        return "None"
+
+    node_limit = max(1, int(max_nodes))
+    fanout_limit = max(0, int(max_fanout))
+    records: List[str] = []
+    visited: Set[int] = set()
+    pending: List[Any] = [expr]
+    truncated = False
+
+    while pending:
+        if len(records) >= node_limit:
+            truncated = True
+            break
+        node = pending.pop(0)
+        if node is None:
+            continue
+        node_id = id(node)
+        if node_id in visited:
+            records.append("<shared>")
+            continue
+        visited.add(node_id)
+        records.append(_structural_node_record(node))
+        children = _first_children(getattr(node, "operands", None), fanout_limit)
+        if _expression_kind(node) == "PHI":
+            children = _phi_branch_values(getattr(node, "value", None), fanout_limit)
+        pending.extend(children)
+
+    if truncated or pending:
+        records.append("+more")
+    return "[" + ", ".join(records) + "]"
+
+
+def _expression_kind(node: Any) -> str:
+    expr_type = getattr(node, "expr_type", None)
+    name = getattr(expr_type, "name", None)
+    return name if type(name) is str else "?"
+
+
+def _structural_node_record(node: Any) -> str:
+    """1 node の local 表示。すべて定数時間の field だけで作る。"""
+
+    kind = _expression_kind(node)
+    parts = [kind]
+    operator = _text_or(getattr(node, "operator", None), "")
+    if operator != "":
+        parts.append(operator)
+    name = _text_or(getattr(node, "name", None), "")
+    if name != "":
+        parts.append(name)
+    size = getattr(node, "size", None)
+    if size is not None:
+        parts.append(f"size={_primitive_text(size)}")
+    value = getattr(node, "value", None)
+    if value is not None and kind != "PHI":
+        parts.append(f"value={_primitive_text(value)}")
+    return ":".join(parts)
+
+
+def _phi_branch_values(branches: Any, max_fanout: int) -> List[Any]:
+    """PHI branch の先頭数件から値側だけを取り出す（全 branch を読まない）。"""
+
+    values = []
+    for branch in _first_children(branches, max_fanout):
+        # branch は ``(condition, value)``。``len()`` を呼ばずに先頭 2 つだけ
+        # 読む（要素数を名乗る実装が何をするか分からないため）。
+        pair = _first_children(branch, 2)
+        values.append(pair[1] if len(pair) == 2 else branch)
+    return values
+
+
+def summarize_expression_details(
+    expr: Optional[Expression],
+    max_depth: int = 3,
+) -> str:
+    """式の詳細を debug 用に有界表示する（要約 + 構造 preview + 由来）。
+
+    4 つの欄はいずれも hard bound つき: ``summarize_expression`` が深さ、
+    ``summarize_structural_preview`` が node 数と fan-out、
+    ``summarize_runtime_ref`` が見る field 数、``_primitive_text`` が 1 値の
+    サイズを縛る。
+
+    **identity key ではない。** production の structural key はここでは作らない
+    （作ると走査量が入力サイズに依存する）。この文字列を cache key / 等価判定 /
+    digest / 証明の入力に使ってはいけない。用途は診断と triage だけ。#76 の
+    レビュー指摘「debug 行が式を識別できる情報を持つこと」は
+    ``tests/unit/test_debug_reporter.py`` が固定している。
+    """
+
+    if expr is None:
+        return "None"
+
+    return (
+        f"{summarize_expression(expr, max_depth=max_depth)} "
+        f"[type={_expression_kind(expr)}, size={_primitive_text(getattr(expr, 'size', None))}, "
+        f"read_order={_primitive_text(getattr(expr, 'read_order_key', None))}, "
+        f"runtime_ref={summarize_runtime_ref(getattr(expr, 'runtime_ref', None))}, "
+        f"structural_preview={summarize_structural_preview(expr)}]"
+    )
+
+
+#: debug message に入れてよい描画関数（本 module が所有する）。
+#: family 側の wrapper はここへ委譲するだけなので列挙しない。静的 guard が
+#: 委譲を辿って同一視する。
+BOUNDED_DEBUG_RENDERERS: FrozenSet[str] = frozenset({
+    "summarize_expression",
+    "summarize_condition",
+    "summarize_expressions",
+    "summarize_conditions",
+    "summarize_values",
+    "summarize_runtime_ref",
+    "summarize_structural_preview",
+    "summarize_expression_details",
+})
+
+#: 共有 DAG を木として全展開する描画。debug message に入れてはいけない。
+UNBOUNDED_RENDER_CALLS: FrozenSet[str] = frozenset({"to_string", "to_smt"})
+
+#: debug 表示から呼んではいけない「重い診断 helper」。1 要素ごとに構造キー生成や
+#: 正規化を起動するので、``[f(c) for c in conditions]`` の形で使うと件数 × 走査
+#: コストになる。表示が要るなら bounded renderer（:data:`BOUNDED_DEBUG_RENDERERS`）
+#: を使う。判定・証明側がこれらを呼ぶのは本 module の関知するところではない。
+HEAVY_DIAGNOSTIC_CALLS: FrozenSet[str] = frozenset({
+    "get_simplified_condition_string",
+    "get_simplified_string",
+    "expression_key",
+    "expression_key_safe",
+    "expression_signature",
+    "conditions_signature",
+    "condition_key",
+    "structural_key",
+    "stable_key",
+    "semantic_key",
+})
+
+#: guard の形を表す **canonical descriptor** の型。
+#:
+#: * ``("name", <名前>)`` — ``debug``（純関数の引数）
+#: * ``("attr", <受け手の path>, <属性名>)`` — ``self.debug``
+#: * ``("call", <受け手の path>, <述語名>)`` — ``self._debug_available()``
+#: * ``("getattr", <受け手の path>, <属性名>, <既定値>)`` — ``getattr(self, "debug", False)``
+#:
+#: 受け手の path は根から辿った名前の列（``self.debug_reporter`` なら
+#: ``("self", "debug_reporter")``）。名前で辿れない受け手（``factory()`` /
+#: ``registry[key]``）は ``("<computed>",)`` に潰れるので、宣言と一致しない。
+GuardShape = Tuple[Any, ...]
+
+#: **debug 可否の確認そのもの**として認める形の全体。
+#:
+#: 受け手・flag 名・述語名を別々の集合で持って組み合わせると、production に
+#: 存在しない形（``self.DEBUG`` / ``cls.debug`` / ``strategy.debug_flag()`` /
+#: ``self.debug_reporter.debug_flag()`` …）まで guard として通ってしまう。
+#: そこで **実在する形そのもの**を exact descriptor で並べる。静的 guard は
+#: この集合との完全一致だけで判定し、直積は作らない。
+#:
+#: 足すときは「production に実際にその形を書いてから」。静的 guard 側の
+#: 棚卸し test（recognizer を使わずに AST から候補を集める）が、宣言と実測の
+#: ずれを増減どちらの方向でも FAIL させる。
+#:
+#: 「名前は debug だが guard ではない」形の一覧は **持たない**。あれは repository
+#: の現状の観測であって production の契約ではないので、static test 側
+#: (``tests/unit/_debug_guard_baseline.py``) が所有する。
+DEBUG_GUARD_SHAPES: FrozenSet[GuardShape] = frozenset({
+    ("name", "debug"),
+    ("attr", ("self",), "debug"),
+    ("attr", ("cls",), "DEBUG"),
+    ("attr", ("context",), "debug"),
+    ("attr", ("strategy",), "debug"),
+    ("call", ("self",), "_debug_available"),
+    ("call", ("cls",), "_debug_available"),
+    ("call", ("self",), "debug_flag"),
+    ("call", ("self", "debug_reporter"), "debug_available"),
+    ("getattr", ("self",), "debug", False),
+})
+
+#: bounded renderer / 前準備 helper を **呼んでよい対象**の形。
+#:
+#: ``("name",)`` は素の関数呼び出し（``summarize_expression(x)``）、
+#: ``("attr", <根>, <途中の属性>)`` は ``self._debug_expr_summary(x)`` /
+#: ``self._debug_reporter.debug_expr_summary(x)`` のような束縛済み method。
+#:
+#: 任意の Attribute chain を許すと、``self.expensive_property.summarize_expression(x)``
+#: のように **property / descriptor 経由で任意処理が起動する**形まで「有界な
+#: 描画」として通ってしまう。本 package に実在するのは下の 5 形だけなので、
+#: それだけを許して残りは fail-closed にする（``factory().renderer`` /
+#: ``registry[key].renderer`` / 未知の receiver は拒否）。
+RenderCallTarget = Tuple[Any, ...]
+
+DEBUG_RENDER_CALL_TARGETS: FrozenSet[RenderCallTarget] = frozenset({
+    ("name",),
+    ("attr", "self", ()),
+    ("attr", "cls", ()),
+    ("attr", "self", ("debug_reporter",)),
+    ("attr", "self", ("_debug_reporter",)),
+})
+
+#: debug message を組み立てる **前準備** の helper。描画はしないが、列を
+#: 先読みする（= 入力に触る）ので debug guard の中でだけ呼んでよい。静的 guard
+#: はこれらが guard の外で走る形を検出する。renderer とは別契約。
+BOUNDED_DEBUG_PREPARATION: FrozenSet[str] = frozenset({
+    "bounded_items",
+    "bounded_enumerate",
+})

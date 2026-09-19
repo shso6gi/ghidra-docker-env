@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.analysis.returns._api import (
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import BlockGraphService
+from scripts.function_tracer_pcode.analysis.debug import summarize_condition
 
 if TYPE_CHECKING:  # placeholder_algebra は本 module の純関数を import するため循環回避
     from scripts.function_tracer_pcode.analysis.returns.placeholder_algebra import PlaceholderAlgebraService
@@ -238,10 +239,12 @@ class DivergenceProofService:
                     self.debug_reporter.debug_print("Outcome loop divergence proof declined: SCC exit without edge guard")
                     return None
                 if not self.single_guard_conditions_are_contradictory(divergence_guard, edge_condition, param):
-                    self.debug_reporter.debug_print(
-                        "Outcome loop divergence proof declined: SCC exit is feasible under divergence guard "
-                        f"(divergence={divergence_guard.to_string()}, exit={edge_condition.to_string()})"
-                    )
+                    if self.debug_reporter.debug_available():
+                        self.debug_reporter.debug_print(
+                            "Outcome loop divergence proof declined: SCC exit is feasible under divergence guard "
+                            f"(divergence={summarize_condition(divergence_guard)}, "
+                            f"exit={summarize_condition(edge_condition)})"
+                        )
                     return None
                 exit_proofs.append(
                     {
@@ -283,10 +286,12 @@ class DivergenceProofService:
                         }
                     )
                 else:
-                    self.debug_reporter.debug_print(
-                        "Outcome loop divergence proof declined: SCC entry guard does not match divergence guard "
-                        f"(divergence={divergence_guard.to_string()}, entry={edge_condition.to_string()})"
-                    )
+                    if self.debug_reporter.debug_available():
+                        self.debug_reporter.debug_print(
+                            "Outcome loop divergence proof declined: SCC entry guard does not match divergence guard "
+                            f"(divergence={summarize_condition(divergence_guard)}, "
+                            f"entry={summarize_condition(edge_condition)})"
+                        )
                     return None
 
         if not has_guarded_entry and not has_unconditional_entry:

@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _resolve_function_ref_from_address,
     resolve_call_targets,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_conditions, summarize_expression
 
 def _impl__resolve_call_targets_for_effect_summary(
     tracer,
@@ -199,7 +200,7 @@ def _impl_resolve_call_targets(
     target_varnode = op.getInput(0)
     target_expr = tracer.trace_varnode(target_varnode, use_cache=False)
     if debug:
-        print(f"[CallTargetResolver] traced target expr: {target_expr.to_string()}")
+        print(f"[CallTargetResolver] traced target expr: {summarize_expression(target_expr)}")
 
     if read_memory_value is not None:
         try:
@@ -215,7 +216,7 @@ def _impl_resolve_call_targets(
             if debug:
                 print("[CallTargetResolver] readonly target concretization failed")
     if debug:
-        print(f"[CallTargetResolver] rewritten target expr: {target_expr.to_string()}")
+        print(f"[CallTargetResolver] rewritten target expr: {summarize_expression(target_expr)}")
 
     resolved: List[Tuple[CallTargetRef, List[Condition]]] = []
     for branch_conditions, address_value in _enumerate_constant_expression_branches(target_expr):
@@ -225,7 +226,7 @@ def _impl_resolve_call_targets(
         simplified = ConditionSimplifier.simplify_conditions(branch_conditions)
         resolved.append((target_ref, simplified))
         if debug:
-            cond_strs = [cond.to_string() for cond in simplified]
+            cond_strs = summarize_conditions(simplified)
             print(
                 "[CallTargetResolver] resolved indirect target "
                 f"0x{address_value:x} -> {target_ref.display_name()} under {cond_strs}"

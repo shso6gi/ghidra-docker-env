@@ -20,6 +20,7 @@ from scripts.function_tracer_pcode.core.structural import StructuralKey
 from scripts.function_tracer_pcode.analysis.returns.effect_integration import local_memory_key
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import clone_expression
+from scripts.function_tracer_pcode.analysis.debug import summarize_expression
 
 
 class LocalValueResolver:
@@ -195,11 +196,13 @@ class LocalValueResolver:
                 continue
             aliased = clone_expression(candidate_expr)
             aliased.size = target_storage.size
-            self.debug_reporter.debug_print(
-                "Local alias resolution: "
-                f"{getattr(candidate_storage, 'register_name', None)} -> "
-                f"{getattr(target_storage, 'register_name', None)} as {aliased.to_string()}"
-            )
+            if self.debug_reporter.debug_available():
+                self.debug_reporter.debug_print(
+                    "Local alias resolution: "
+                    f"{getattr(candidate_storage, 'register_name', None)} -> "
+                    f"{getattr(target_storage, 'register_name', None)} as "
+                    f"{summarize_expression(aliased)}"
+                )
             return aliased
         return None
 

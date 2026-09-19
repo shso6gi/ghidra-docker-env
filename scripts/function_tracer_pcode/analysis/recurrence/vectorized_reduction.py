@@ -17,6 +17,7 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     ResidueLoopCase,
     _reduce_expression_under_conditions,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_conditions, summarize_expression
 
 def _impl__try_summarize_vectorized_affine_progression_sum(
     self,
@@ -293,11 +294,12 @@ def _impl__positive_returns_match_vectorized_affine_summary(
             signed_counter_guard=signed_counter_guard,
         )
         if positive_counter_cases is None:
-            self._debug(
-                "Declined vectorized affine progression summary: positive return overlap proof unknown "
-                f"(branch_index={getattr(ret, 'branch_index', None)}, "
-                f"conditions={[condition.to_string() for condition in conditions]})"
-            )
+            if self._debug_available():
+                self._debug(
+                    "Declined vectorized affine progression summary: positive return overlap proof unknown "
+                    f"(branch_index={getattr(ret, 'branch_index', None)}, "
+                    f"conditions={summarize_conditions(conditions)})"
+                )
             return False
         if len(positive_counter_cases) == 0:
             continue
@@ -315,12 +317,13 @@ def _impl__positive_returns_match_vectorized_affine_summary(
             )
             for positive_condition, counter_expr in positive_counter_cases
         ):
-            self._debug(
-                "Declined vectorized affine progression summary: positive return fragment mismatch "
-                f"(branch_index={getattr(ret, 'branch_index', None)}, "
-                f"conditions={[condition.to_string() for condition in conditions]}, "
-                f"value={value.to_string()[:240]})"
-            )
+            if self._debug_available():
+                self._debug(
+                    "Declined vectorized affine progression summary: positive return fragment mismatch "
+                    f"(branch_index={getattr(ret, 'branch_index', None)}, "
+                    f"conditions={summarize_conditions(conditions)}, "
+                    f"value={summarize_expression(value)})"
+                )
             return False
     return positive_case_count > 0
 

@@ -35,6 +35,7 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     _runtime_conditions_signature,
     _runtime_expression_signature,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_expression
 
 
 def _impl_try_summarize_pre_return_counted_scalar_loop(
@@ -1781,32 +1782,35 @@ def _impl__build_state_decrement_accumulator_sum_value(
         model.state_guard_expr,
         model.state_placeholder,
     ):
-        self._debug(
-            "Declined state-affine accumulator sum: state guard is not signed-positive "
-            f"({model.state_guard_expr.to_string()}); "
-            f"transition={model.state_transition_expr.to_string()}; "
-            f"delta={model.accumulator_delta_expr.to_string()}"
-        )
+        if self._debug_available():
+            self._debug(
+                "Declined state-affine accumulator sum: state guard is not signed-positive "
+                f"({summarize_expression(model.state_guard_expr)}); "
+                f"transition={summarize_expression(model.state_transition_expr)}; "
+                f"delta={summarize_expression(model.accumulator_delta_expr)}"
+            )
         return None
     transition_affine = self._extract_affine_placeholder_term(
         model.state_transition_expr,
         model.state_placeholder,
     )
     if transition_affine != (1, -1):
-        self._debug(
-            "Declined state-affine accumulator sum: transition is not unit decrement "
-            f"({model.state_transition_expr.to_string()} -> {transition_affine})"
-        )
+        if self._debug_available():
+            self._debug(
+                "Declined state-affine accumulator sum: transition is not unit decrement "
+                f"({summarize_expression(model.state_transition_expr)} -> {transition_affine})"
+            )
         return None
     delta_affine = self._extract_affine_placeholder_term(
         model.accumulator_delta_expr,
         model.state_placeholder,
     )
     if delta_affine is None:
-        self._debug(
-            "Declined state-affine accumulator sum: accumulator delta is not affine in state "
-            f"({model.accumulator_delta_expr.to_string()})"
-        )
+        if self._debug_available():
+            self._debug(
+                "Declined state-affine accumulator sum: accumulator delta is not affine in state "
+                f"({summarize_expression(model.accumulator_delta_expr)})"
+            )
         return None
     coeff, bias = delta_affine
     closed_form = self._build_closed_form(

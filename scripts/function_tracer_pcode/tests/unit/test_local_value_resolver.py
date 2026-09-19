@@ -73,7 +73,10 @@ class _Storage:
 
 
 def _resolver(messages=None):
-    reporter = SimpleNamespace(debug_print=lambda msg, indent=0: (messages if messages is not None else []).append(msg))
+    reporter = SimpleNamespace(
+        debug_available=lambda: True,
+        debug_print=lambda msg, indent=0: (messages if messages is not None else []).append(msg),
+    )
     return LocalValueResolver(debug_reporter=reporter)
 
 

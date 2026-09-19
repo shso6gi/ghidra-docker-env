@@ -53,6 +53,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
     _expressions_equivalent_under_conditions,
     lower_post_state_expression_for_smt,
 )
+from scripts.function_tracer_pcode.analysis.debug import bounded_enumerate, bounded_items, summarize_conditions
 
 
 def _impl__return_site_key(self, ret_info: ReturnInfo) -> str:
@@ -321,8 +322,11 @@ def _impl__dump_return_infos(self, analysis: FunctionReturnAnalysis):
     各ReturnInfoについて以下を出力：
     - branch_index（分岐識別子）
     - address（アドレス）
-    - value（式の文字列表現とSMT表現）
-    - conditions（簡約後の条件リスト）
+    - value（式の有界サマリー）
+    - conditions（生の条件の有界サマリー。件数と先頭数件だけ）
+
+    debug のために条件簡約や構造キー生成を起動しない（Issue #22）。簡約後の
+    表示が要るときは、解析そのものを走らせて結果を見ること。
     """
     if not self.debug:
         return
@@ -334,7 +338,7 @@ def _impl__dump_return_infos(self, analysis: FunctionReturnAnalysis):
         self._debug_print(f"Analysis notes: {analysis.analysis_notes}")
     self._debug_print("=" * 60)
 
-    for i, ret_info in enumerate(analysis.returns):
+    for i, ret_info in bounded_enumerate(analysis.returns):
         self._debug_print(f"[{i}] branch_index={ret_info.branch_index}")
         self._debug_print(f"    address: {ret_info.address}", 1)
         if ret_info.pcode_identity is not None:
@@ -359,24 +363,19 @@ def _impl__dump_return_infos(self, analysis: FunctionReturnAnalysis):
         except Exception as e:
             self._debug_print(f"    value: (error converting to string: {e})", 1)
 
-        # SMT表現（エラー時はスキップ）- 引数なし
-        try:
-            smt_str = ret_info.value.to_smt()
-            # 長すぎる場合は切り詰め
-            if len(smt_str) > 300:
-                smt_str = smt_str[:300] + "..."
-            self._debug_print(f"    smt: {smt_str}", 1)
-        except Exception as e:
-            self._debug_print(f"    smt: (error: {e})", 1)
+        # SMT 表現はここでは出さない。``to_smt()`` は共有 DAG を木として
+        # 展開するので、debug dump のためだけに解析時間を使ってしまう
+        # （Issue #22）。上の ``value:`` が同じ式の有界サマリーを出している。
 
-        # 条件リスト（簡約版）
+        # 条件リスト。``get_simplified_condition_string`` は条件ごとに構造キー
+        # を組み立てる（runtime ref の stable key まで辿る）ので、dump のため
+        # だけに走らせない。有界サマリーで先頭数件だけ出す（Issue #22）。
         if ret_info.conditions:
-            try:
-                cond_strs = [ConditionSimplifier.get_simplified_condition_string(c)
-                            for c in ret_info.conditions]
-                self._debug_print(f"    conditions({len(ret_info.conditions)}): {cond_strs}", 1)
-            except Exception as e:
-                self._debug_print(f"    conditions: (error: {e})", 1)
+            self._debug_print(
+                f"    conditions({len(ret_info.conditions)}): "
+                f"{summarize_conditions(ret_info.conditions)}",
+                1,
+            )
         else:
             self._debug_print("    conditions: (unconditional/always)", 1)
 
@@ -1430,14 +1429,11 @@ def _impl__return_infos_have_conflicting_overlap(
             if _expressions_equivalent(left.value, right.value):
                 continue
             if self.debug:
-                cond_dump = [
-                    ConditionSimplifier.get_simplified_condition_string(cond)
-                    for cond in combined_conditions
-                ]
+                cond_dump = summarize_conditions(combined_conditions)
                 self._debug_print(
                     "Control-region recovery rejected due to overlapping regions: "
-                    f"left={self._debug_expr_identity_summary(left.value)} "
-                    f"right={self._debug_expr_identity_summary(right.value)} "
+                    f"left={self._debug_expr_details_summary(left.value)} "
+                    f"right={self._debug_expr_details_summary(right.value)} "
                     f"conditions={cond_dump}"
                 )
             return True
@@ -1606,8 +1602,8 @@ def _impl__resolve_implicit_return_tracked_values(
             tracked_values.append(candidate)
 
     tracked_values = self._deduplicate_tracked_return_values(tracked_values)
-    if tracked_values and self.debug:
-        for tracked in tracked_values:
+    if self.debug and tracked_values:
+        for tracked in bounded_items(tracked_values):
             if tracked.producer_op is not None:
                 self._debug_print(
                     "Implicit return source matched to terminal producer "
@@ -1896,7 +1892,7 @@ def _impl__analyze_return_op(
     )
 
     if self.debug and path_conditions:
-        cond_strs = [ConditionSimplifier.get_simplified_condition_string(c) for c in path_conditions]
+        cond_strs = summarize_conditions(path_conditions)
         self._debug_print(f"Path conditions to RETURN: {cond_strs}")
     if self.debug and len(all_valid_path_conditions) > 1:
         self._debug_print(
@@ -2238,10 +2234,7 @@ def _impl__analyze_return_value(
         expanded_values = []
         for path_idx, conds in enumerate(path_condition_sets):
             if self.debug and len(path_condition_sets) > 1:
-                cond_strs = [
-                    ConditionSimplifier.get_simplified_condition_string(c)
-                    for c in conds
-                ]
+                cond_strs = summarize_conditions(conds)
                 self._debug_print(
                     f"Expanding non-PHI return with path[{path_idx}]: {cond_strs}"
                 )
@@ -2455,12 +2448,9 @@ def _impl__build_return_infos_from_expansions(
             ev.conditions
         )
         if self.debug:
-            cond_strs = [
-                ConditionSimplifier.get_simplified_condition_string(c)
-                for c in simplified_conds
-            ]
+            cond_strs = summarize_conditions(simplified_conds)
             self._debug_print(
-                f"Expansion {i}: raw={self._debug_expr_identity_summary(ev.value)}"
+                f"Expansion {i}: raw={self._debug_expr_details_summary(ev.value)}"
             )
             self._debug_print(f"  raw_conditions={cond_strs}")
         split_cases = self._split_effect_sensitive_return_case(
@@ -2479,12 +2469,9 @@ def _impl__build_return_infos_from_expansions(
         branch_base = return_index * 100 + i
         for split_index, (split_value, split_conditions) in enumerate(split_cases):
             if self.debug:
-                split_cond_strs = [
-                    ConditionSimplifier.get_simplified_condition_string(c)
-                    for c in split_conditions
-                ]
+                split_cond_strs = summarize_conditions(split_conditions)
                 self._debug_print(
-                    f"Expansion {i}.{split_index}: split={self._debug_expr_identity_summary(split_value)}"
+                    f"Expansion {i}.{split_index}: split={self._debug_expr_details_summary(split_value)}"
                 )
                 self._debug_print(f"  split_conditions={split_cond_strs}")
             preserve_split_value = (
@@ -2503,7 +2490,7 @@ def _impl__build_return_infos_from_expansions(
             if self.debug and normalized_value is not split_value:
                 self._debug_print(
                     "  normalized="
-                    f"{self._debug_expr_identity_summary(normalized_value)}"
+                    f"{self._debug_expr_details_summary(normalized_value)}"
                 )
             resolved_value = self._concretize_readonly_loads(
                 normalized_value,
@@ -2513,14 +2500,11 @@ def _impl__build_return_infos_from_expansions(
             if self.debug and resolved_value is not normalized_value:
                 self._debug_print(
                     "  concretized="
-                    f"{self._debug_expr_identity_summary(resolved_value)}"
+                    f"{self._debug_expr_details_summary(resolved_value)}"
                 )
 
             if self.debug:
-                cond_strs = [
-                    ConditionSimplifier.get_simplified_condition_string(c)
-                    for c in split_conditions
-                ]
+                cond_strs = summarize_conditions(split_conditions)
                 self._debug_print(
                     f"Expansion {i}.{split_index}: value={self._debug_expr_summary(resolved_value)}"
                 )
@@ -2604,15 +2588,12 @@ def _impl__split_object_centric_return_case(
     if self.debug and len(deduplicated) > 1:
         self._debug_print(
             "Split return into object-centric value cases: "
-            f"{self._debug_expr_identity_summary(value)}"
+            f"{self._debug_expr_details_summary(value)}"
         )
-        for case_index, (case_value, case_conditions) in enumerate(deduplicated):
-            cond_dump = [
-                ConditionSimplifier.get_simplified_condition_string(cond)
-                for cond in case_conditions
-            ]
+        for case_index, (case_value, case_conditions) in bounded_enumerate(deduplicated):
+            cond_dump = summarize_conditions(case_conditions)
             self._debug_print(
-                f"  value-case[{case_index}]: {self._debug_expr_identity_summary(case_value)}"
+                f"  value-case[{case_index}]: {self._debug_expr_details_summary(case_value)}"
             )
             self._debug_print(f"    conditions={cond_dump}")
     return deduplicated or [(value, conditions)]
@@ -2675,7 +2656,7 @@ def _impl__prune_less_precise_return_infos(
             continue
 
         dropped = len(unresolved_group)
-        if dropped > 0 and self.debug:
+        if self.debug and dropped > 0:
             self._debug_print(
                 "Dropped less precise unresolved return cases under an "
                 "already-resolved condition region"
@@ -3098,10 +3079,7 @@ def _impl__can_safely_collapse_complementary_return_pair(
             continue
 
         if self.debug:
-            cond_dump = [
-                ConditionSimplifier.get_simplified_condition_string(cond)
-                for cond in overlap_conditions
-            ]
+            cond_dump = summarize_conditions(overlap_conditions)
             self._debug_print(
                 "skipping complementary return-case collapse due to overlapping "
                 f"different-valued case: value={self._debug_expr_summary(other.value)} "
@@ -3156,10 +3134,7 @@ def _impl__make_merged_return_info(
         list(merged_conditions)
     )
     if self.debug:
-        cond_dump = [
-            ConditionSimplifier.get_simplified_condition_string(cond)
-            for cond in normalized_conditions
-        ]
+        cond_dump = summarize_conditions(normalized_conditions)
         self._debug_print(
             f"{reason}: value={self._debug_expr_summary(primary.value)} conditions={cond_dump}"
         )

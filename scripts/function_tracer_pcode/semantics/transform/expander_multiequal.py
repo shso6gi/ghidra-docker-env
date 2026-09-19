@@ -12,10 +12,7 @@ from scripts.function_tracer_pcode.core import (
     UnknownValueRef,
     CanonicalLocation,
 )
-from scripts.function_tracer_pcode.analysis.condition import (
-    ConditionSimplifier,
-    ConditionNormalizer,
-)
+from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.effects.summary import (
     _reduce_expression_under_conditions,
     _expressions_equivalent,
@@ -30,6 +27,7 @@ from scripts.function_tracer_pcode.semantics.transform.expander_support import (
     ExpandedValue,
     MultiequalBranchObservation,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_condition, summarize_conditions
 
 
 def replace_pcode_op_ref(
@@ -145,9 +143,10 @@ class MultiequalExpansionMixin:
             self._debug_print(f"  valid_paths: {len(all_valid_paths)}", depth + 1)
 
             edge_cond = self._get_edge_condition(in_block_info, phi_parent)
-            if edge_cond:
-                edge_str = ConditionNormalizer.get_simplified_string(edge_cond)
-                self._debug_print(f"  edge_condition: {edge_str}", depth + 1)
+            if self._debug_available():
+                self._debug_print(
+                    f"  edge_condition: {summarize_condition(edge_cond)}", depth + 1
+                )
 
             cases_emitted = 0
             for path_idx, path_conditions in enumerate(all_valid_paths):
@@ -156,11 +155,12 @@ class MultiequalExpansionMixin:
                     path_conditions,
                     edge_cond,
                 )
-                if self.debug:
-                    self._debug_print(f"  Path[{path_idx}]: {len(path_conditions)} condition(s)", depth + 1)
-                    for pc in path_conditions:
-                        pc_str = ConditionNormalizer.get_simplified_string(pc)
-                        self._debug_print(f"    - {pc_str}", depth + 2)
+                if self._debug_available():
+                    self._debug_print(
+                        f"  Path[{path_idx}]: {len(path_conditions)} condition(s) "
+                        f"{summarize_conditions(path_conditions)}",
+                        depth + 1,
+                    )
                 if ConditionSimplifier.object_centric_is_contradiction(input_conditions):
                     self._debug_print(f"  Path[{path_idx}] -> SKIP (contradictory)", depth + 1)
                     continue
@@ -412,7 +412,7 @@ class MultiequalExpansionMixin:
             observations,
             depth + 1,
         )
-        if inferred is not None and self.debug:
+        if self.debug and inferred is not None:
             candidate = memory_expression_for_location(inferred, self.parameters)
             if candidate is not None:
                 self._debug_print(
@@ -452,7 +452,7 @@ class MultiequalExpansionMixin:
             self.parameters,
             return_conditions=conditions,
         )
-        if collapsed is not None:
+        if self._debug_available() and collapsed is not None:
             self._debug_print(
                 f"Collapsed nested MULTIEQUAL to canonical memory: {self._debug_expr_summary(collapsed)}",
                 depth,

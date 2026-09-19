@@ -7,7 +7,6 @@ from scripts.function_tracer_pcode.analysis.returns import lifecycle
 from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.core.expression import Expression
-from scripts.function_tracer_pcode.core.structural import expression_key_safe
 
 
 def _analyzer(debug=False):
@@ -25,7 +24,12 @@ def test_reporter_holds_only_the_debug_flag_supplier():
 def test_every_delegator_forwards_to_the_reporter():
     analyzer = _analyzer()
     names = [n for n, _ in inspect.getmembers(DebugReporter, predicate=inspect.isfunction) if n != "__init__"]
-    assert set(names) == {"debug_print", "debug_expr_summary", "debug_expr_identity_summary"}
+    assert set(names) == {
+        "debug_available",
+        "debug_print",
+        "debug_expr_summary",
+        "debug_expr_details_summary",
+    }
     for name in names:
         sentinel = object()
         with patch.object(analyzer._debug_reporter, name, return_value=sentinel) as mocked:
@@ -44,20 +48,28 @@ def test_debug_print_respects_the_flag_at_call_time(capsys):
     assert "hidden" not in out and "  [ReturnAnalyzer] shown" in out
 
 
-def test_debug_expr_identity_summary_reports_the_structural_key_for_a_real_expression():
-    """#76 レビュー指摘: 旧実装が表示していた structural identity が移動後も失われていないこと。
+def test_debug_expr_details_summary_discriminates_a_real_expression():
+    """#76 レビュー指摘: debug 行が式を識別できる情報を持ち続けること。
 
-    expression_key_safe の import 漏れは try/except に握りつぶされて常に structural=None になり、
-    compileall / import / unit / subset のいずれにも現れない。実行して非 None を固定する。
+    旧実装では ``expression_key_safe`` の import 漏れが try/except に握り潰され、
+    ``structural=None`` が出続けても compileall / import / unit / subset のどれにも
+    現れなかった。今の debug 行は判定用の structural key を作らない（走査量が
+    node 予算だけでは抑えられないため）ので、代わりに有界 preview が構造を
+    名乗っていること、および**構造の違う式が違う行になる**ことを固定する。
     """
     analyzer = _analyzer()
     expr = Expression.binary_op("INT_ADD", Expression.variable("param_1", 4), Expression.constant(2, 4))
-    text = analyzer._debug_expr_identity_summary(expr)
-    expected = expression_key_safe(expr, include_memory_read_order=True)
-    assert expected is not None
-    assert f"structural={expected}" in text
-    assert "structural=None" not in text
-    assert analyzer._debug_expr_identity_summary(None) == "None"
+
+    text = analyzer._debug_expr_details_summary(expr)
+
+    assert "structural_preview=[BINARY_OP:INT_ADD:size=4," in text
+    assert "VARIABLE:param_1:size=4" in text
+    assert "CONSTANT:size=4:value=2" in text
+    assert "<unavailable>" not in text and "structural_preview=[]" not in text
+
+    other = Expression.binary_op("INT_SUB", Expression.variable("param_1", 4), Expression.constant(2, 4))
+    assert analyzer._debug_expr_details_summary(other) != text
+    assert analyzer._debug_expr_details_summary(None) == "None"
 
 
 def test_every_collaborator_shares_the_single_reporter():

@@ -8,10 +8,10 @@ from scripts.function_tracer_pcode.core.expression import Condition, Expression,
 from scripts.function_tracer_pcode.core.structural import StructuralKey
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionNormalizer,
-    ConditionSimplifier,
 )
 from scripts.function_tracer_pcode.analysis.returns.lifecycle import decompose_comparison_condition
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
+from scripts.function_tracer_pcode.analysis.debug import summarize_conditions
 
 
 class StackProtectorService:
@@ -65,14 +65,14 @@ class StackProtectorService:
 
             changed = True
             if self.debug_flag():
-                removed_dump = [
-                    ConditionSimplifier.get_simplified_condition_string(cond)
+                removed = (
+                    cond
                     for cond in info.conditions
                     if cond not in retained_conditions
-                ]
+                )
                 self.debug_reporter.debug_print(
                     "Dropped object-centric stack-protector guard conditions from "
-                    f"return case: {removed_dump}"
+                    f"return case: {summarize_conditions(removed)}"
                 )
 
             stripped_infos.append(

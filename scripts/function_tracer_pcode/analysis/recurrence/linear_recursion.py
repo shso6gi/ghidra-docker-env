@@ -17,6 +17,7 @@ from scripts.function_tracer_pcode.core.recurrence_contracts import (
     ImmutableRecurrenceCondition,
     ImmutableRecurrenceExpression,
 )
+from scripts.function_tracer_pcode.analysis.debug import bounded_enumerate, summarize_conditions, summarize_expression
 
 def _recurrence_semantic_expression_key(expr):
     if expr is None:
@@ -102,11 +103,12 @@ def _impl__try_summarize_linear_self_recursion(self, function, high_function, an
         self._debug(
             f"Declined '{function_name}': expected exactly one recursive return, found {len(recursive_returns)}"
         )
-        for index, ret in enumerate(recursive_returns):
-            self._debug(
-                f"  recursive[{index}] value={ret.value.to_string()} "
-                f"guards={[condition.to_string() for condition in ret.conditions]}"
-            )
+        if self._debug_available():
+            for index, ret in bounded_enumerate(recursive_returns):
+                self._debug(
+                    f"  recursive[{index}] value={summarize_expression(ret.value)} "
+                    f"guards={summarize_conditions(ret.conditions)}"
+                )
         return None
 
     base_returns = [
@@ -196,26 +198,29 @@ def _impl__try_summarize_linear_self_recursion(self, function, high_function, an
     call_arg_expr = self.tracer.trace_varnode(self_call_ops[0].getInput(1), use_cache=False)
     step = self._extract_unit_step_from_call_argument(call_arg_expr, param_name)
     if step != -1:
-        self._debug(
-            f"Declined '{function_name}': recursive call argument is not a unit decrement "
-            f"({call_arg_expr.to_string()})"
-        )
+        if self._debug_available():
+            self._debug(
+                f"Declined '{function_name}': recursive call argument is not a unit decrement "
+                f"({summarize_expression(call_arg_expr)})"
+            )
         return None
 
     addend_expr = self._extract_addend_expression(recursive_ret.value, function_name)
     if addend_expr is None:
-        self._debug(
-            f"Declined '{function_name}': could not isolate non-recursive addend from "
-            f"{recursive_ret.value.to_string()}"
-        )
+        if self._debug_available():
+            self._debug(
+                f"Declined '{function_name}': could not isolate non-recursive addend from "
+                f"{summarize_expression(recursive_ret.value)}"
+            )
         return None
 
     affine = self._extract_affine_term(addend_expr, param_name)
     if affine is None:
-        self._debug(
-            f"Declined '{function_name}': addend is not affine in the counter "
-            f"({addend_expr.to_string()})"
-        )
+        if self._debug_available():
+            self._debug(
+                f"Declined '{function_name}': addend is not affine in the counter "
+                f"({summarize_expression(addend_expr)})"
+            )
         return None
     coeff, bias = affine
 

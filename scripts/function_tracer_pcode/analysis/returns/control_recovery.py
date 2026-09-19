@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
 from scripts.function_tracer_pcode.analysis.session import AnalysisSession
 from scripts.function_tracer_pcode.analysis.returns._api import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.core import CallTargetRef
+from scripts.function_tracer_pcode.analysis.debug import bounded_items, summarize_conditions, summarize_expression
 
 if TYPE_CHECKING:  # 他 collaborator は本 module（BlockGraphService / 純関数）を import するため、型注釈の import は循環回避のため遅延
     from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
@@ -648,8 +649,8 @@ class BranchGuardedWhileProofService:
                 self.debug_reporter.debug_print(
                     "Outcome branch-guarded affine candidate skipped: "
                     f"step={step}, implies_target={implies_target}, "
-                    f"value={getattr(value, 'to_string', lambda: value)()}, "
-                    f"conditions={[condition.to_string() for condition in conditions]}"
+                    f"value={summarize_expression(value)}, "
+                    f"conditions={summarize_conditions(conditions)}"
                 )
             ignored_artifacts.append(ret)
 
@@ -723,12 +724,12 @@ class BranchGuardedWhileProofService:
                     parameters=getattr(analysis, "parameters", ()) or (),
                 )
             ]
-            if ignored_artifacts and self.debug_flag():
-                for artifact in ignored_artifacts:
+            if self.debug_flag() and ignored_artifacts:
+                for artifact in bounded_items(ignored_artifacts):
                     self.debug_reporter.debug_print(
                         "Outcome branch-guarded affine artifact retained: "
-                        f"value={getattr(getattr(artifact, 'value', None), 'to_string', lambda: getattr(artifact, 'value', None))()}, "
-                        f"conditions={[condition.to_string() for condition in tuple(getattr(artifact, 'conditions', ()) or ())]}, "
+                        f"value={summarize_expression(getattr(artifact, 'value', None))}, "
+                        f"conditions={summarize_conditions(getattr(artifact, 'conditions', ()) or ())}, "
                         f"site={self.return_site_key(artifact)}"
                     )
         proof_returns = list(exact_base_returns) + [ret for ret, _step in recursive_returns]
@@ -1856,10 +1857,7 @@ def _impl__recover_switch_like_returns_from_pcode(
                 )
             if not resolved:
                 if self.debug:
-                    cond_dump = [
-                        ConditionSimplifier.get_simplified_condition_string(cond)
-                        for cond in branch_conditions
-                    ]
+                    cond_dump = summarize_conditions(branch_conditions)
                     self._debug_print(
                         "Switch recovery aborted: local target expansion failed for "
                         f"0x{address_value:x} under {cond_dump}"
@@ -1981,10 +1979,7 @@ def _impl__recover_switch_like_returns_from_pcode(
                 )
             if not resolved:
                 if self.debug:
-                    cond_dump = [
-                        ConditionSimplifier.get_simplified_condition_string(cond)
-                        for cond in branch_conditions
-                    ]
+                    cond_dump = summarize_conditions(branch_conditions)
                     self._debug_print(
                         "Switch recovery aborted: local target expansion failed for "
                         f"0x{address_value:x} under {cond_dump}"
@@ -2138,10 +2133,7 @@ def _impl__switch_recovery_conflicts_with_unaffected_returns(
             if _expressions_equivalent(existing.value, candidate.value):
                 continue
             if self.debug:
-                cond_dump = [
-                    ConditionSimplifier.get_simplified_condition_string(cond)
-                    for cond in overlap_conditions
-                ]
+                cond_dump = summarize_conditions(overlap_conditions)
                 self._debug_print(
                     "Switch recovery rejected due to overlap with unaffected return case: "
                     f"existing={self._debug_expr_summary(existing.value)} "
@@ -2204,10 +2196,7 @@ def _impl__filter_noreturn_return_path_entries(
                 "conditions": tuple(conditions or ()),
             })
             if self.debug:
-                cond_strs = [
-                    ConditionSimplifier.get_simplified_condition_string(c)
-                    for c in conditions
-                ]
+                cond_strs = summarize_conditions(conditions)
                 block_indexes = [getattr(block, "index", "?") for block in block_path]
                 self._debug_print(
                     "Pruned RETURN path that contains a noreturn call: "
@@ -2227,7 +2216,7 @@ def _impl__is_noreturn_control_transfer_op(self, pcode_op, tracer: PcodeTracer) 
     if self.debug and not resolved_targets:
         try:
             traced_target = tracer.trace_varnode(pcode_op.getInput(0), use_cache=False)
-            traced_summary = traced_target.to_string()
+            traced_summary = summarize_expression(traced_target)
         except Exception:
             traced_summary = "<unavailable>"
         self._debug_print(

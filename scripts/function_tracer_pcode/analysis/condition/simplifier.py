@@ -486,10 +486,12 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         active_reduction_keys = set() if _active_reduction_keys is None else _active_reduction_keys
         reduction_key = cls._reduction_context_key(expr, conditions)
         if reduction_key in active_reduction_keys:
-            cls._debug_print(
-                f"Detected circular reduction context; skip recursion for {cls._debug_expr_summary(expr)}",
-                2,
-            )
+            if cls._debug_available():
+                cls._debug_print(
+                    "Detected circular reduction context; skip recursion for "
+                    f"{cls._debug_expr_summary(expr)}",
+                    2,
+                )
             return expr
         active_reduction_keys.add(reduction_key)
         try:

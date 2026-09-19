@@ -6,6 +6,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple, Any
 from scripts.function_tracer_pcode.core import Expression, Condition
 from scripts.function_tracer_pcode.core.runtime_refs import ExpansionBudgetTruncation
 from scripts.function_tracer_pcode.analysis.condition.normalizer import ConditionNormalizer
+from scripts.function_tracer_pcode.analysis.debug import bounded_enumerate, summarize_conditions, summarize_expression
 
 
 class BasicBlockInfo:
@@ -204,7 +205,10 @@ class ConditionTracker:
                     cond_expr = self.tracer.trace_varnode(cond_varnode)
                     block_info.branch_condition = cond_expr
                     block_info.branch_condition_varnode = cond_varnode
-                    self._debug_print(f"  CBRANCH condition: {cond_expr.to_string()}", 1)
+                    if self.debug:
+                        self._debug_print(
+                            f"  CBRANCH condition: {summarize_expression(cond_expr)}", 1
+                        )
                     break
 
     def refine_branch_conditions(
@@ -285,7 +289,7 @@ class ConditionTracker:
             if self.debug:
                 self._debug_print(
                     f"  Refined branch condition for block {block_info.index}: "
-                    f"{raw_condition.to_string()} -> {refined.to_string()}",
+                    f"{summarize_expression(raw_condition)} -> {summarize_expression(refined)}",
                     1,
                 )
             block_info.branch_condition = refined
@@ -446,7 +450,7 @@ class ConditionTracker:
             # 最も条件が少ないパスを選択
             best_path = min(valid_paths, key=len)
             if self.debug:
-                best_conds = [ConditionSimplifier.get_simplified_condition_string(c) for c in best_path]
+                best_conds = summarize_conditions(best_path)
                 self._debug_print(f"  Selected valid path ({len(best_path)} conditions): {best_conds}", 1)
             self._single_path_cache[target_block.index] = self._clone_conditions(best_path)
             return self._clone_conditions(best_path)
@@ -781,11 +785,8 @@ class ConditionTracker:
 
         if self.debug:
             self._debug_print(f"  Returning {len(valid_paths)} valid paths:", 1)
-            for i, (_blocks, conditions) in enumerate(valid_paths):
-                conds = [
-                    ConditionSimplifier.get_simplified_condition_string(c)
-                    for c in conditions
-                ]
+            for i, (_blocks, conditions) in bounded_enumerate(valid_paths):
+                conds = summarize_conditions(conditions)
                 self._debug_print(f"    Path {i} ({len(conditions)} conditions): {conds}", 2)
 
         return valid_paths, tuple(truncations)

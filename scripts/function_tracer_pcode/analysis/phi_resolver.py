@@ -5,7 +5,11 @@ from itertools import product
 from typing import List, Optional, Set, Dict, Any, Hashable, Tuple
 from scripts.function_tracer_pcode.core import Expression, Condition, PcodeOpRef, UnknownValueRef
 from scripts.function_tracer_pcode.core.intrinsics import resolve_pcode_intrinsic
-from scripts.function_tracer_pcode.analysis.debug import summarize_expression
+from scripts.function_tracer_pcode.analysis.debug import (
+    bounded_items,
+    summarize_conditions,
+    summarize_expression,
+)
 from scripts.function_tracer_pcode.analysis.condition import (
     ConditionSimplifier,
     ConditionNormalizer,
@@ -59,8 +63,13 @@ class ExpandedBranch:
         return ConditionSimplifier.simplify_conditions(self.conditions)
     
     def __repr__(self):
-        conds = [c.to_string() for c in self.conditions]
-        return f"ExpandedBranch(conds={conds}, value={self.value.to_string()})"
+        # ``repr()`` は logging / 例外 / デバッガから暗黙に呼ばれる。full render
+        # だと debug を切っていても巨大 DAG を展開しうるので、有界サマリーを返す
+        # （Issue #22）。
+        return (
+            f"ExpandedBranch(conds={summarize_conditions(self.conditions)}, "
+            f"value={summarize_expression(self.value)})"
+        )
 
     def get_condition_signature(self) -> Hashable:
         return ConditionNormalizer.conditions_signature(self.conditions)
@@ -111,6 +120,11 @@ class PhiHandler:
         self._debug_message_count += 1
         prefix = "  " * indent
         print(f"{prefix}[PhiHandler] {msg}")
+
+    def _debug_available(self) -> bool:
+        """debug 出力が有効か（抑止上限も含む）。message 構築ごとこれで囲む。"""
+
+        return self.debug and self._debug_message_count < self._debug_message_limit
 
     def _condition_signature(self, conditions: List[Condition]) -> Hashable:
         return ConditionNormalizer.conditions_signature(conditions)
@@ -318,10 +332,10 @@ class PhiHandler:
                             input_condition_sets.append(input_conditions)
 
             for cond_index, input_conditions in enumerate(input_condition_sets):
-                if self.debug:
-                    cond_strs = [c.to_string() for c in input_conditions]
+                if self._debug_available():
                     self._debug_print(
-                        f"Input conditions[{cond_index}] ({len(input_conditions)}): {cond_strs}",
+                        f"Input conditions[{cond_index}] ({len(input_conditions)}): "
+                        f"{summarize_conditions(input_conditions)}",
                         depth + 1
                     )
 
@@ -337,10 +351,11 @@ class PhiHandler:
 
                 for ev in expanded_values:
                     if ev.is_valid():
-                        self._debug_print(
-                            f"Valid branch: {self._debug_expr_summary(ev.value)}",
-                            depth + 1,
-                        )
+                        if self._debug_available():
+                            self._debug_print(
+                                f"Valid branch: {self._debug_expr_summary(ev.value)}",
+                                depth + 1,
+                            )
                         all_branches.append(ev)
         
         # ★ 統計サマリー
@@ -349,7 +364,7 @@ class PhiHandler:
             self._debug_print(f"MULTIEQUAL summary: self_refs={self_ref_count}/{num_inputs}, "
                               f"valid={len(all_branches)}", depth)
             if self_ref_reasons:
-                for r in self_ref_reasons:
+                for r in bounded_items(self_ref_reasons):
                     self._debug_print(f"  - {r}", depth + 1)
         
         # 全入力が自己参照 → debug時はエラー

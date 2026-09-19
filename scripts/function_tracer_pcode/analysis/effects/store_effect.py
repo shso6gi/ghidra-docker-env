@@ -85,6 +85,12 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     substitute_location,
     subtract_implied_conditions,
 )
+from scripts.function_tracer_pcode.analysis.debug import (
+    bounded_items,
+    summarize_conditions,
+    summarize_expression,
+    summarize_expressions,
+)
 
 def _impl_summarize_store_effects(
     block_infos: Iterable,
@@ -353,7 +359,7 @@ def _impl_summarize_store_effects(
                     if debug:
                         print(
                             "[EffectSummary] unmodeled store location: "
-                            f"addr={addr_expr.to_string() if addr_expr is not None else None}"
+                            f"addr={summarize_expression(addr_expr)}"
                         )
                     continue
                 if store_kind == "global":
@@ -402,7 +408,7 @@ def _impl_summarize_store_effects(
             ]
             target_expr = _resolve_call_target_expression(tracer, op)
             if debug:
-                explicit_dump = ", ".join(arg.to_string() for arg in explicit_args)
+                explicit_dump = summarize_expressions(explicit_args)
             for path_conditions in path_sets:
                 normalized_path_conditions = ConditionSimplifier.simplify_conditions(list(path_conditions))
                 resolved_targets = _resolve_call_targets_for_effect_summary(
@@ -513,12 +519,11 @@ def _impl_summarize_store_effects(
                         recovery_status=argument_recovery_status,
                     )
                     if debug:
-                        recovered_dump = ", ".join(arg.to_string() for arg in args)
                         print(
                             "[EffectSummary] call arguments: "
-                            f"target={target_label} explicit=[{explicit_dump}] "
-                            f"path=[{', '.join(cond.to_string() for cond in call_path_conditions)}] "
-                            f"recovered=[{recovered_dump}]"
+                            f"target={target_label} explicit={explicit_dump} "
+                            f"path={summarize_conditions(call_path_conditions)} "
+                            f"recovered={summarize_expressions(args)}"
                         )
                     if callee_parameters and not argument_coverage_complete:
                         if argument_recovery_status != CallArgumentEvidence.RECOVERY_RECOVERABLE_PARTIAL:
@@ -721,10 +726,10 @@ def _impl_summarize_store_effects(
                                     )
                                 )
                                 if debug:
-                                    arg_dump = ", ".join(arg.to_string() for arg in substitution_args)
                                     print(
                                         "[EffectSummary] skip substituted effect: "
-                                        f"callee_loc={effect.location} args=[{arg_dump}]"
+                                        f"callee_loc={effect.location} "
+                                        f"args={summarize_expressions(substitution_args)}"
                                     )
                                 continue
                             substitutions = _build_parameter_replacements(
@@ -752,14 +757,13 @@ def _impl_summarize_store_effects(
                                 merged_conditions,
                             )
                             if debug:
-                                cond_dump = ", ".join(cond.to_string() for cond in substituted_conditions)
-                                variant_dump = ", ".join(cond.to_string() for cond in variant_conditions)
-                                merged_dump = ", ".join(cond.to_string() for cond in merged_conditions)
                                 print(
                                     "[EffectSummary] substituted effect: "
                                     f"callee_loc={effect.location} caller_loc={substituted_location} "
-                                    f"value={substituted_value.to_string()} conditions=[{cond_dump}] "
-                                    f"arg_variant_conditions=[{variant_dump}] merged_conditions=[{merged_dump}]"
+                                    f"value={summarize_expression(substituted_value)} "
+                                    f"conditions={summarize_conditions(substituted_conditions)} "
+                                    f"arg_variant_conditions={summarize_conditions(variant_conditions)} "
+                                    f"merged_conditions={summarize_conditions(merged_conditions)}"
                                 )
                             effects.append(
                                 StoreEffect(
@@ -803,8 +807,11 @@ def _impl_summarize_store_effects(
         if unmatched:
             incomplete_reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
             if debug:
-                for _tag, half in unmatched:
-                    print(f"[EffectSummary] unmatched unaligned store half: side={half.side} base={half.base_expr.to_string()}")
+                for _tag, half in bounded_items(unmatched):
+                    print(
+                        "[EffectSummary] unmatched unaligned store half: "
+                        f"side={half.side} base={summarize_expression(half.base_expr)}"
+                    )
         for _left_tag, right_tag, half in pairs:
             right_op, right_path_sets, right_block_ref = right_tag
             store_kind, location = classify_store_address(half.base_expr, parameters, size=half.width)
@@ -813,7 +820,10 @@ def _impl_summarize_store_effects(
             if store_kind == "unresolved" or location is None:
                 incomplete_reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
                 if debug:
-                    print(f"[EffectSummary] unmodeled unaligned store base: {half.base_expr.to_string()}")
+                    print(
+                        "[EffectSummary] unmodeled unaligned store base: "
+                        f"{summarize_expression(half.base_expr)}"
+                    )
                 continue
             if store_kind == "global":
                 store_path_global_locations.append(location)

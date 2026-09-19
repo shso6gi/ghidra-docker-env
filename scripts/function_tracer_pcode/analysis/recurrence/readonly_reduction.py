@@ -35,6 +35,11 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     _reduce_expression_under_conditions,
     canonicalize_location,
 )
+from scripts.function_tracer_pcode.analysis.debug import (
+    bounded_items,
+    summarize_conditions,
+    summarize_values,
+)
 
 
 def _impl__has_readonly_pointer_reduction_candidate(
@@ -663,11 +668,12 @@ def _impl__try_summarize_readonly_pointer_reduction(
             ret.conditions or [],
             str(count_param.get("name") or ""),
         )
-        self._debug(
-            "Readonly overlapping positive return classification: "
-            f"exact_count={exact_count}, "
-            f"conditions={[cond.to_string() for cond in ret.conditions or ()]}"
-        )
+        if self._debug_available():
+            self._debug(
+                "Readonly overlapping positive return classification: "
+                f"exact_count={exact_count}, "
+                f"conditions={summarize_conditions(ret.conditions or ())}"
+            )
         if exact_count is None:
             retained_positive_returns.append(ret)
             continue
@@ -727,11 +733,12 @@ def _impl__try_summarize_readonly_pointer_reduction(
             ret.conditions or [],
             str(count_param.get("name") or ""),
         )
-        self._debug(
-            "Readonly analysis positive return classification: "
-            f"exact_count={exact_count}, "
-            f"conditions={[cond.to_string() for cond in ret.conditions or ()]}"
-        )
+        if self._debug_available():
+            self._debug(
+                "Readonly analysis positive return classification: "
+                f"exact_count={exact_count}, "
+                f"conditions={summarize_conditions(ret.conditions or ())}"
+            )
         if exact_count is None or int(exact_count) in preserved_exact_counts:
             continue
         absorbable = self._readonly_exact_positive_return_is_absorbable(
@@ -1020,25 +1027,24 @@ def _impl__record_readonly_reduction_return_region_proof(
         parameters=getattr(analysis, "parameters", None),
     )
     if coverage_key is None:
-        retained_condition_ops = []
-        for ret in retained_exact_returns or ():
-            retained_condition_ops.append(
-                tuple(
-                    (
-                        getattr(getattr(cond, "expression", None), "operator", None),
-                        bool(getattr(cond, "negated", False)),
-                        cond.to_string(),
-                    )
-                    for cond in (getattr(ret, "conditions", None) or ())
-                )
+        if self._debug_available():
+            # 評価するのは要約に載る先頭数件だけ。件数の上限は
+            # ``bounded_items`` でここに書く（消費側の遅延評価に頼らない）。
+            retained_condition_ops = [
+                summarize_conditions(getattr(ret, "conditions", None) or ())
+                for ret in bounded_items(retained_exact_returns or ())
+            ]
+            summary_ops = [
+                getattr(getattr(cond, "expression", None), "operator", None)
+                for cond in bounded_items(summary_conditions or ())
+            ]
+            self._debug(
+                "Declined readonly reduction proof: coverage proof unavailable "
+                f"(summary_conditions={summarize_conditions(summary_conditions or ())}, "
+                f"summary_ops={summarize_values(summary_ops)}, "
+                f"retained_exact_returns={len(retained_exact_returns or ())}, "
+                f"retained_condition_ops={summarize_values(retained_condition_ops)})"
             )
-        self._debug(
-            "Declined readonly reduction proof: coverage proof unavailable "
-            f"(summary_conditions={[cond.to_string() for cond in summary_conditions or ()]}, "
-            f"summary_ops={[getattr(getattr(cond, 'expression', None), 'operator', None) for cond in summary_conditions or ()]}, "
-            f"retained_exact_returns={len(tuple(retained_exact_returns or ()))}, "
-            f"retained_condition_ops={retained_condition_ops})"
-        )
         return None
     source_key = self._summary_value_source_key(summary_value)
     if source_key is None:

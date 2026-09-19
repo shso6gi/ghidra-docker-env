@@ -30,6 +30,7 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     _runtime_conditions_signature,
     _runtime_expression_signature,
 )
+from scripts.function_tracer_pcode.analysis.debug import summarize_expression
 
 
 def _impl__counted_loop_transition_evidence_key_from_parts(
@@ -711,8 +712,8 @@ def _impl__prior_counted_state_transition_base_value(
                 "Considering prior state-transition handoff candidate: "
                 f"prior_header={self._block_key(prior_header)}, "
                 f"current_header={current_header_key}, "
-                f"start={prior_induction.init_expr.to_string()}, "
-                f"limit={prior_guard.bound_expr.to_string()}, "
+                f"start={summarize_expression(prior_induction.init_expr)}, "
+                f"limit={summarize_expression(prior_guard.bound_expr)}, "
                 f"step={prior_induction.step}, "
                 f"cases={len(model.transition_cases)}"
             )
