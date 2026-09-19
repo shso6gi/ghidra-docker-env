@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+import pytest
+
 from scripts.function_tracer_pcode.analysis.memory_resolver import concretize_readonly_loads
 from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.semantics.normalize import (
@@ -375,3 +377,41 @@ def test_formula_builder_skips_concrete_address_anchor_extra_vars() -> None:
     assert "lookup_anchor_2" not in result.formula
     assert "Extra variables for mem_rodata_lookup_like" not in result.formula
     assert "(_ bv1122392 64)" in result.formula
+
+
+# --- readonly contract の surface 判定 (Issue #22 PR-22-A) --------------------
+#
+# ``_readonly_base_keys_agree`` は、以前 mismatch 条件に直接書かれていた 3 項
+# ``left is None or right is None or left != right`` に名前を付けたもの。判定を
+# 変えていないことをここで固定する（proof の決定・reason・gate は不変）。
+
+@pytest.mark.parametrize(
+    "left, right",
+    [
+        (left, right)
+        for left in (None, "a", "b", 0, (), ("k",), False)
+        for right in (None, "a", "b", 0, (), ("k",), False)
+    ],
+)
+def test_readonly_base_keys_agree_matches_the_condition_it_replaced(left, right):
+    """置き換え前の 3 項と真偽が完全に一致すること。"""
+
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services.readonly_reduction import (
+        _readonly_base_keys_agree,
+    )
+
+    mismatched_before = (left is None) or (right is None) or (left != right)
+    assert (not _readonly_base_keys_agree(left, right)) is mismatched_before
+
+
+def test_readonly_base_keys_agree_requires_both_keys():
+    """片方でも取れなければ surface が同じとは言わない。"""
+
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services.readonly_reduction import (
+        _readonly_base_keys_agree,
+    )
+
+    assert _readonly_base_keys_agree("k", "k") is True
+    assert _readonly_base_keys_agree("k", None) is False
+    assert _readonly_base_keys_agree(None, "k") is False
+    assert _readonly_base_keys_agree(None, None) is False

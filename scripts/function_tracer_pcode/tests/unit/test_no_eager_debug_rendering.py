@@ -10,12 +10,17 @@
 
 * **検出** — 違反を見つける。debug sink / guard / 入れ子の並びまで必要なだけ辿る
   （:func:`statement_scope_nodes` / :func:`walk_evaluated_now`）
-* **免除の証明** — production も使う値かを示す。**2 段の positive grammar**
-  だけで決まる: statement 段（:func:`direct_production_expressions` — その文を
-  実行したら必ず評価される式はどれか）と expression 段
-  （:func:`direct_production_reads` — その式を評価したらその名前を必ず読むか）。
-  どちらも whitelist で、載っていない形は証拠ゼロ。「広く見てから条件で削る」
-  のではなく、最初から狭い positive set
+* **免除の証明** — production も使う値かを示す。**3 段の positive grammar**
+  だけで決まり、どれも whitelist（載っていない形は証拠ゼロ / 不明）:
+
+  * statement 段 :func:`direct_production_expressions` — その文を実行したら
+    必ず評価される式はどれか
+  * expression 段 :func:`direct_production_reads` — その式を評価したらその
+    名前を必ず読むか
+  * binding 段 :func:`bound_names` / :func:`statement_rebinds` — どの代入先が
+    どの局所名を束縛するか、どの構文が **必ず**束縛し直すか
+
+  「広く見てから条件で削る」のではなく、最初から狭い positive set
 
 **この checker が保証すること / しないこと。**
 
@@ -449,12 +454,24 @@ class Region(NamedTuple):
     binds: bool
 
 
-def _header_parts(node: ast.AST) -> List[ast.AST]:
+def _header_parts(node: ast.AST, *, annotations: bool = True) -> List[ast.AST]:
     """``def`` / ``lambda`` / ``class`` の header（定義する側で評価される部分）。
 
-    decorator / default 引数 / annotation / base class / keyword は、関数や
-    class を作るその場で評価され、外側の名前を読む
-    （``def f(x=summary):`` の ``summary`` は外側の ``summary``）。
+    decorator / default 引数 / base class / keyword は、関数や class を作る
+    その場で必ず評価され、外側の名前を読む（``def f(x=summary):`` の ``summary``
+    は外側の ``summary``）。
+
+    **annotation は module 次第**。``from __future__ import annotations`` がある
+    module では文字列として保存されるだけで評価されない（本 package の production
+    module 250 個がこれを使っている）。``annotations=False`` で外せる:
+
+    * **免除の証明**では外す — 評価されるとは限らないものを production 共有の
+      証拠にできない。これで exemption 側は module mode に依存しなくなる。
+    * **検出**では入れたまま（安全側）。annotation の中で禁止呼び出しを走らせて
+      いれば報告する。future import がある module では実際には走らないので
+      過検出になり得るが、本 package の annotation 25,273 個のうち禁止呼び出し /
+      renderer / 前準備を含むものは **0 件**で、どちらに倒しても現状は同じ。
+      module 単位の評価モードを持ち込むより、安全側 1 つで済ませる。
     """
 
     parts: List[ast.AST] = []
@@ -462,17 +479,18 @@ def _header_parts(node: ast.AST) -> List[ast.AST]:
     if isinstance(arguments, ast.arguments):
         parts += [default for default in arguments.defaults if default is not None]
         parts += [default for default in arguments.kw_defaults if default is not None]
-        for argument in (
-            arguments.posonlyargs + arguments.args + arguments.kwonlyargs
-            + [arguments.vararg, arguments.kwarg]
-        ):
-            if argument is not None and argument.annotation is not None:
-                parts.append(argument.annotation)
+        if annotations:
+            for argument in (
+                arguments.posonlyargs + arguments.args + arguments.kwonlyargs
+                + [arguments.vararg, arguments.kwarg]
+            ):
+                if argument is not None and argument.annotation is not None:
+                    parts.append(argument.annotation)
     parts += list(getattr(node, "decorator_list", []))
     parts += list(getattr(node, "bases", []))
     parts += [keyword.value for keyword in getattr(node, "keywords", [])]
     returns = getattr(node, "returns", None)
-    if returns is not None:
+    if annotations and returns is not None:
         parts.append(returns)
     return parts
 
@@ -687,15 +705,115 @@ def _assignment_kind(value: ast.AST, renderers: FrozenSet[str]) -> Tuple[str, st
     return entry
 
 
-def _assigned_names(statement: ast.stmt) -> Set[str]:
-    """その文が **その並びの中で直接**束縛する名前。"""
+def bound_names(target: ast.AST) -> Optional[Set[str]]:
+    """代入先が束縛する **局所名**。表に無い形は ``None``（不明）。
+
+    3 番目の positive grammar。statement / expression と同じで、知っている形だけを
+    並べ、知らない形は黙って無視せず「不明」と言う。
+
+    * ``Name`` — その名前
+    * ``Tuple`` / ``List`` — 要素が束縛する名前すべて（位置の対応は追わない）
+    * ``Starred`` — 中身
+    * ``Subscript`` / ``Attribute`` — 局所名は束縛しない（既知・空集合）
+
+    ``a[i] = v`` や ``o.x = v`` は「知らない」ではなく「局所名を作らない」なので
+    空集合。本当に知らない形だけが ``None`` で、呼び出し側が安全側に倒す。
+    """
+
+    if isinstance(target, ast.Name):
+        return {target.id}
+    if isinstance(target, (ast.Tuple, ast.List)):
+        names: Set[str] = set()
+        for element in target.elts:
+            found = bound_names(element)
+            if found is None:
+                return None
+            names |= found
+        return names
+    if isinstance(target, ast.Starred):
+        return bound_names(target.value)
+    if isinstance(target, (ast.Subscript, ast.Attribute)):
+        return set()
+    return None
+
+
+def statement_rebinds(statement: ast.stmt, name: str) -> bool:
+    """その文を実行すると ``name`` が **必ず**束縛し直されるか。
+
+    window を切るのに使う。ここも positive grammar で、**無条件に**束縛する
+    構文だけを数える:
+
+    * ``Assign`` / ``AnnAssign``（値つき）/ ``AugAssign`` の代入先
+    * ``with`` / ``async with`` の ``as``（本体に入る前に必ず束縛される）
+    * ``def`` / ``async def`` / ``class`` が作る名前
+    * ``import`` / ``from ... import`` が作る名前
+    * その文の直接式にある ``:=``（:func:`direct_production_expressions` と
+      :func:`_certain_subexpressions` で「必ず評価される」と言える位置のもの）
+
+    数えないもの — そこを通るとは限らないから:
+
+    * ``for`` の target（列が空なら束縛されない）
+    * ``except ... as`` / ``match`` の capture（例外・case 次第）
+    * 入れ子の文の並びの中の代入（別 branch かもしれない。18 巡目までの
+      「条件付き再代入は前の定義を打ち消さない」契約と同じ）
+
+    判らない代入先（:func:`bound_names` が ``None``）は「束縛したかもしれない」
+    に倒す — 見落とすと、もう届かない値の読み出しを古い代入のせいにしてしまう。
+    """
+
+    targets: List[ast.AST] = []
+    if isinstance(statement, ast.Assign):
+        targets += list(statement.targets)
+    elif isinstance(statement, ast.AugAssign):
+        targets.append(statement.target)
+    elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+        targets.append(statement.target)
+    elif isinstance(statement, (ast.With, ast.AsyncWith)):
+        targets += [
+            item.optional_vars for item in statement.items if item.optional_vars is not None
+        ]
+    elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return statement.name == name
+    elif isinstance(statement, (ast.Import, ast.ImportFrom)):
+        return any(
+            (alias.asname or alias.name.split(".")[0]) == name for alias in statement.names
+        )
+    for expression in direct_production_expressions(statement) or ():
+        targets += [
+            node.target
+            for node in _certainly_evaluated(expression)
+            if isinstance(node, ast.NamedExpr)
+        ]
+    for target in targets:
+        names = bound_names(target)
+        if names is None or name in names:
+            return True
+    return False
+
+
+def _produced_names(statement: ast.stmt) -> Optional[Set[str]]:
+    """tracked producer の値が入り **得る**局所名。判らなければ ``None``。
+
+    ``rendered, other = (expr.to_string(), 0)`` のような分解代入では、どの要素に
+    どの値が入るかまでは追わない（位置対応を解く評価器は作らない）。束縛される
+    名前すべてを「入り得る」として扱う保守的な may-origin。production には
+    分解代入で tracked producer を受ける形が 1 件も無いので、これで足りる。
+    """
 
     targets: List[ast.AST] = []
     if isinstance(statement, ast.Assign):
         targets = list(statement.targets)
     elif isinstance(statement, (ast.AnnAssign, ast.AugAssign)):
         targets = [statement.target]
-    return {target.id for target in targets if isinstance(target, ast.Name)}
+    else:
+        return set()
+    names: Set[str] = set()
+    for target in targets:
+        found = bound_names(target)
+        if found is None:
+            return None
+        names |= found
+    return names
 
 
 def _statement_lists(
@@ -730,7 +848,7 @@ def _local_window(block: List[ast.stmt], index: int, name: str) -> List[ast.stmt
 
     window: List[ast.stmt] = []
     for statement in block[index + 1:]:
-        if name in _assigned_names(statement):
+        if statement_rebinds(statement, name):
             break
         window.append(statement)
     return window
@@ -759,7 +877,7 @@ _DIRECT_PRODUCTION_FIELDS: Dict[str, Tuple[str, ...]] = {
     "Assign": ("targets", "value"),
     "AugAssign": ("target", "value"),
     # annotation は ``from __future__ import annotations`` の有無で評価されたり
-    # されなかったりするので証拠にしない（fail-closed）。
+    # されなかったりするので証拠にしない（``__header__`` と同じ扱い）。
     "AnnAssign": ("target", "value"),
     "Raise": ("exc", "cause"),
     "Assert": ("test",),
@@ -810,7 +928,8 @@ def direct_production_expressions(statement: ast.stmt) -> Optional[List[ast.AST]
     found: List[ast.AST] = []
     for field in fields:
         if field == "__header__":
-            found += _header_parts(statement)
+            # annotation は module 次第で評価されないので証拠にしない。
+            found += _header_parts(statement, annotations=False)
             continue
         value = getattr(statement, field, None)
         if value is None:
@@ -883,6 +1002,22 @@ def _certain_subexpressions(node: ast.expr) -> Optional[List[ast.expr]]:
     return None
 
 
+def _certainly_evaluated(expression: ast.expr) -> Iterator[ast.expr]:
+    """``expression`` を評価したら **必ず**評価される部分式をすべて辿る。
+
+    :func:`_certain_subexpressions` の表を閉包しただけ。証拠の判定
+    （:func:`direct_production_reads`）と ``:=`` の束縛判定が同じ走査を使う。
+    """
+
+    stack: List[ast.expr] = [expression]
+    while stack:
+        node = stack.pop()
+        yield node
+        parts = _certain_subexpressions(node)
+        if parts is not None:
+            stack.extend(parts)
+
+
 def direct_production_reads(
     expression: ast.expr, name: str, debug_reads: Set[int] = frozenset()
 ) -> bool:
@@ -907,21 +1042,13 @@ def direct_production_reads(
     production の証拠にしない — それ自体が「debug のために読んでいる」場所。
     """
 
-    stack: List[ast.expr] = [expression]
-    while stack:
-        node = stack.pop()
-        if (
-            isinstance(node, ast.Name)
-            and isinstance(node.ctx, ast.Load)
-            and node.id == name
-            and id(node) not in debug_reads
-        ):
-            return True
-        parts = _certain_subexpressions(node)
-        if parts is None:
-            continue
-        stack.extend(parts)
-    return False
+    return any(
+        isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+        and node.id == name
+        and id(node) not in debug_reads
+        for node in _certainly_evaluated(expression)
+    )
 
 
 def _has_direct_production_read(
@@ -974,9 +1101,13 @@ def _debug_only_locals(
     * expression 段 — :func:`_certain_subexpressions` / :func:`direct_production_reads`
       「その式を評価したらその名前を必ず読むか」
 
-    どちらも whitelist。``if`` / loop / ``try`` / ``match`` の body、``except`` の
+    * binding 段 — :func:`bound_names` / :func:`statement_rebinds`
+      「どの代入先がどの局所名を束縛するか」「どの構文が必ず束縛し直すか」
+
+    どれも whitelist。``if`` / loop / ``try`` / ``match`` の body、``except`` の
     型、``match`` の case guard、短絡の後ろ側、``IfExp`` の枝、comprehension の
-    中の別束縛、``lambda`` 本体は、いずれも証拠にしない。
+    中の別束縛、``lambda`` 本体、annotation（module 次第で評価されない）は、
+    いずれも証拠にしない。
 
     検出のほう（debug 位置の読み出し）は別の走査でその中まで見るので、
     ``rendered = expr.to_string()`` → ``if self.debug: self._debug_print(rendered)``
@@ -995,7 +1126,11 @@ def _debug_only_locals(
             kind, label = _assignment_kind(statement.value, renderers)
             if kind not in ("forbidden", "unsafe_renderer"):
                 continue
-            for name in _assigned_names(statement):
+            produced = _produced_names(statement)
+            if produced is None:
+                # 束縛先が判らない形。証拠として扱わず、追跡もしない。
+                continue
+            for name in produced:
                 window = _local_window(block, index, name)
                 debug_reads = _debug_read_positions(window, renderers)
                 if _has_direct_production_read(window, name, debug_reads):
@@ -3745,6 +3880,161 @@ def test_a_debug_read_is_never_production_evidence():
     )
     assert direct_production_reads(call, "rendered")
     assert not direct_production_reads(call, "rendered", {id(name)})
+
+
+# -- binding grammar ------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "source, expected, label",
+    [
+        ("name = 0", {"name"}, "単純な名前"),
+        ("a, b = 0, 1", {"a", "b"}, "tuple 分解"),
+        ("[a, b] = 0, 1", {"a", "b"}, "list 分解"),
+        ("a, *rest = items", {"a", "rest"}, "starred"),
+        ("(a, (b, c)) = x", {"a", "b", "c"}, "入れ子の分解"),
+        ("items[0] = x", set(), "添字は局所名を作らない"),
+        ("obj.attr = x", set(), "属性は局所名を作らない"),
+        ("a, obj.attr = x", {"a"}, "分解の一部が属性"),
+    ],
+)
+def test_the_binding_grammar_is_fixed(source, expected, label):
+    """代入先が束縛する局所名を 1 か所で決める（3 番目の positive grammar）。"""
+
+    target = ast.parse(source).body[0].targets[0]
+    assert bound_names(target) == expected, label
+
+
+def test_an_unknown_target_shape_is_unknown_not_empty():
+    """知らない形は空集合ではなく ``None``（呼び出し側が安全側に倒せるように）。"""
+
+    class _FutureTarget(ast.expr):
+        _fields = ()
+
+    assert bound_names(_FutureTarget()) is None
+
+
+def test_a_producer_bound_by_destructuring_is_not_missed():
+    """分解代入で受けた producer を見逃さない（位置対応は追わない）。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    rendered, other = (expr.to_string(), 0)\n"
+        "    self._debug_print(rendered)\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [
+        "_debug_print(... rendered = to_string() ...)"
+    ]
+
+
+def test_a_starred_target_is_tracked_too():
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    rendered, *rest = (expr.to_string(), 0)\n"
+        "    self._debug_print(rendered)\n",
+    )
+    assert violations.render_in_debug_sink
+
+
+@pytest.mark.parametrize(
+    "rebind, ends, label",
+    [
+        ("    rendered, other = ('cheap', 0)\n", True, "分解代入"),
+        ("    rendered = 'cheap'\n", True, "単純な再代入"),
+        ("    with lock as rendered:\n        pass\n", True, "with の as"),
+        ("    def rendered():\n        pass\n", True, "同名の def"),
+        ("    class rendered:\n        pass\n", True, "同名の class"),
+        ("    import rendered\n", True, "import"),
+        ("    from pkg import thing as rendered\n", True, "from import as"),
+        ("    for rendered in items:\n        pass\n", False, "for の target（0 回あり得る）"),
+        ("    try:\n        pass\n    except Exception as rendered:\n        pass\n",
+         False, "except の as（例外次第）"),
+        ("    if cond:\n        rendered = 'cheap'\n", False, "入れ子の並びの中の代入"),
+    ],
+)
+def test_only_an_unconditional_rebinding_ends_the_window(rebind, ends, label):
+    """window を切るのは **必ず**束縛し直す構文だけ。
+
+    切りすぎると、届いている値の読み出しを見逃す。切らなすぎると、もう届かない
+    値の読み出しを古い代入のせいにする。
+    """
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, cond, items, lock):\n"
+        "    rendered = expr.to_string()\n"
+        + rebind
+        + "    self._debug_print(rendered)\n",
+    )
+    # 束縛し直されていれば、その sink 読み出しは古い代入のものではない。
+    assert bool(violations.render_in_debug_sink) is not ends, label
+
+
+# -- annotation は免除の証拠にしない --------------------------------------------
+
+@pytest.mark.parametrize(
+    "header, label",
+    [
+        ("def inner(x: rendered):\n        pass", "parameter annotation"),
+        ("def inner() -> rendered:\n        pass", "戻り値 annotation"),
+    ],
+)
+@pytest.mark.parametrize("future", [True, False], ids=["future あり", "future なし"])
+def test_an_annotation_is_never_production_evidence(header, label, future):
+    """annotation は module 次第で評価されないので、免除の証拠にしない。
+
+    ``from __future__ import annotations`` の有無で判定が変わらないこと
+    （exemption 側は module の評価モードに依存しない）。
+    """
+
+    prologue = "from __future__ import annotations\n" if future else ""
+    violations = scan_source(
+        "sample",
+        prologue
+        + "def outer(self, expr):\n"
+        "    rendered = expr.to_string()\n"
+        f"    {header}\n"
+        "    self._debug_print(rendered)\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [
+        "_debug_print(... rendered = to_string() ...)"
+    ], (label, future)
+
+
+def test_a_default_argument_is_still_production_evidence():
+    """default は必ず定義時に評価されるので証拠のまま。"""
+
+    violations = scan_source(
+        "sample",
+        "def outer(self, expr):\n"
+        "    rendered = expr.to_string()\n"
+        "    def inner(x=rendered):\n"
+        "        return x\n"
+        "    self._debug_print(rendered)\n",
+    )
+    assert not violations.render_in_debug_sink, violations.describe()
+
+
+@pytest.mark.parametrize("future", [True, False], ids=["future あり", "future なし"])
+def test_detection_treats_an_annotation_the_same_either_way(future):
+    """検出側は安全側に倒して module mode に依存しない。
+
+    本 package の annotation 25,273 個に禁止呼び出しは 0 件なので、どちらに
+    倒しても現状の判定は変わらない。過検出側（= 評価されるとみなす）に統一し、
+    module 単位の評価モードを持ち込まない。
+    """
+
+    prologue = "from __future__ import annotations\n" if future else ""
+    violations = scan_source(
+        "sample",
+        prologue
+        + "def f(self, expr):\n"
+        "    if self.debug:\n"
+        "        def inner(x: expr.to_string()):\n"
+        "            pass\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_guard] == ["to_string()"]
 
 
 def test_the_two_declared_sets_do_not_overlap():
