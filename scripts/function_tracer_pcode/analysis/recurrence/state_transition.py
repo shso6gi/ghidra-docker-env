@@ -15,6 +15,7 @@ from scripts.function_tracer_pcode.core import (
     STATE_TRANSITION_LOOP_COUNT_OPCODE,
     StateTransitionLoopSummaryRef,
 )
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     ConditionSMTOracle,
     ConditionSimplifier,
@@ -1386,6 +1387,10 @@ def _impl__state_transition_exact_return_exclusion_conditions(
                 loop_implies_exact_region = ConditionSMTOracle.conjunction_is_unsat(
                     list(loop_conditions or ()) + [exclusion]
                 ) is True
+            except AnalysisLimitation:
+                # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+                # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+                raise
             except Exception:
                 loop_implies_exact_region = False
             if loop_implies_exact_region:
@@ -1644,6 +1649,10 @@ def _impl__state_transition_guard_false_at_stop_value(
                 Condition(self._canonicalize_expression(state_guard), False),
             ]
         ) is True
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         return False
 

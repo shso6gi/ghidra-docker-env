@@ -16,6 +16,7 @@ from scripts.function_tracer_pcode.core import (
     PcodeOpRef,
 )
 from scripts.function_tracer_pcode.core.intrinsics import resolve_pcode_intrinsic
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.analysis.condition import (
     ConditionSimplifier,
     ConditionNormalizer,
@@ -774,6 +775,10 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
     ) -> Optional[Expression]:
         try:
             traced = self.tracer._trace_pcode_op(pcode_op, depth, use_cache=False)
+        except AnalysisLimitation:
+            # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+            # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+            raise
         except Exception:
             return None
 

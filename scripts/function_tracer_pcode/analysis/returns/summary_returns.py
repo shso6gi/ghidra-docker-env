@@ -31,6 +31,7 @@ from scripts.function_tracer_pcode.core.recurrence_contracts import (
 )
 from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
 from scripts.function_tracer_pcode.core.structural import key_contains_placeholder
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 import scripts.function_tracer_pcode.analysis.effects.summary as effect_summary
 from scripts.function_tracer_pcode.analysis.effects.summary import canonicalize_location
 from scripts.function_tracer_pcode.analysis.condition.normalizer import ConditionNormalizer
@@ -1392,6 +1393,10 @@ def _conditions_unsat(
         return False
     try:
         solver_unsat = ConditionSMTOracle.conjunction_is_unsat(condition_list)
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         solver_unsat = None
     if solver_unsat is not None:
@@ -1415,6 +1420,10 @@ def _conditions_unsat(
     try:
         if ConditionSimplifier.object_centric_is_contradiction(condition_list):
             return True
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         pass
     return None

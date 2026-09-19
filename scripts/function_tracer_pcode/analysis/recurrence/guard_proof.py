@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.core import (
     ExpressionType,
     ReturnInfo,
 )
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
@@ -35,6 +36,10 @@ def _impl__condition_conjunction_unsat_with_solver(
 ) -> Optional[bool]:
     try:
         is_unsat = ConditionSMTOracle.conjunction_is_unsat(conditions)
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         is_unsat = None
     if is_unsat is True or is_unsat is False:
@@ -78,6 +83,10 @@ def _impl__positive_counter_conditions_for_return(
         )
         try:
             is_unsat = ConditionSMTOracle.conjunction_is_unsat(list(conditions) + [positive])
+        except AnalysisLimitation:
+            # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+            # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+            raise
         except Exception:
             return None
         if is_unsat is False:
@@ -126,6 +135,10 @@ def _impl__zero_base_guard_cover_for_positive_counter_guard(
         uncovered_is_unsat = ConditionSMTOracle.conjunction_is_unsat(
             [positive_guard.negate(), base_guard.negate()]
         )
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         uncovered_is_unsat = None
     if uncovered_is_unsat is True:
@@ -160,6 +173,10 @@ def _impl__nonzero_returns_are_disjoint_from_base_guard(
             continue
         try:
             is_unsat = ConditionSMTOracle.conjunction_is_unsat(list(conditions) + [base_guard])
+        except AnalysisLimitation:
+            # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+            # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+            raise
         except Exception:
             is_unsat = None
         if is_unsat is not True:
@@ -285,6 +302,10 @@ def _impl__conditions_overlap_conditions(
         return ConditionSMTOracle.conjunction_is_unsat(
             list(left or ()) + list(right or ())
         ) is not True
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         return False
 
@@ -397,6 +418,10 @@ def _impl__prove_summary_conditions_plus_exact_returns_cover_active_precondition
         miss_unsat = ConditionSMTOracle.conjunction_is_unsat(
             list(normalized_active_preconditions or ()) + [miss_condition]
         )
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         miss_unsat = None
     if miss_unsat is not True:
@@ -525,6 +550,10 @@ def _impl__conditions_overlap_for_analysis_parameters(
         return ConditionSMTOracle.conjunction_is_unsat(
             list(normalized_left or ()) + list(normalized_right or ())
         ) is not True
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         return self._conditions_overlap_conditions(normalized_left, normalized_right)
 
@@ -547,6 +576,10 @@ def _impl__conditions_are_disjoint_from_conditions(
         return ConditionSMTOracle.conjunction_is_unsat(
             list(left or []) + list(right or ())
         ) is True
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         pass
     for left_condition in left or ():
@@ -642,6 +675,10 @@ def _impl__prove_return_conditions_cover_region(
         miss_unsat = ConditionSMTOracle.conjunction_is_unsat(
             list(region_conditions or ()) + [miss_condition]
         )
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         miss_unsat = None
     if miss_unsat is not True:
@@ -747,6 +784,10 @@ def _impl__two_way_condition_partition_is_total(
         return False
     try:
         overlap_unsat = ConditionSMTOracle.conjunction_is_unsat(list(base) + list(cont))
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         overlap_unsat = None
     if overlap_unsat is not True:
@@ -767,6 +808,10 @@ def _impl__two_way_condition_partition_is_total(
     disjunction.size = 1
     try:
         coverage_unsat = ConditionSMTOracle.conjunction_is_unsat([Condition(disjunction, True)])
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         coverage_unsat = None
     return coverage_unsat is True
@@ -809,6 +854,10 @@ def _impl__condition_sets_equivalent(
         right_implies_left = ConditionSMTOracle.conjunction_is_unsat(
             [Condition(right_and_not_left, False)]
         )
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         return False
     return left_implies_right is True and right_implies_left is True
@@ -871,6 +920,10 @@ def _impl__guard_handoff_key(
             Condition(not_current_entry, False),
         ]
         implication_unsat = ConditionSMTOracle.conjunction_is_unsat(implication_obligation)
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         return None
     if implication_unsat is not True:

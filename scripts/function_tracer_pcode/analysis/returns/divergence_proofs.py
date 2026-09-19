@@ -8,6 +8,7 @@ from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.render_smt import expression_contains_unsupported_smt_ops
 from scripts.function_tracer_pcode.core.structural import expression_key_safe
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionNormalizer,
     ConditionSMTOracle,
@@ -633,6 +634,10 @@ class DivergenceProofService:
             try:
                 if ConditionSMTOracle.conjunction_is_unsat([guard] + list(invariant_conditions or ())) is not True:
                     return False
+            except AnalysisLimitation:
+                # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+                # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+                raise
             except Exception:
                 return False
         return True
@@ -658,6 +663,10 @@ class DivergenceProofService:
                 try:
                     if ConditionSMTOracle.conjunction_is_unsat([left_condition, right_condition]) is True:
                         return True
+                except AnalysisLimitation:
+                    # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+                    # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+                    raise
                 except Exception:
                     continue
         return False

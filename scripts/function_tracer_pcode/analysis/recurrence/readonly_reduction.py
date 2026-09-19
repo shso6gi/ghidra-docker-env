@@ -19,6 +19,7 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
 from scripts.function_tracer_pcode.core.signature import get_declared_type_signedness, is_pointer_data_type
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     ConditionConstraintSet,
     ConditionSMTOracle,
@@ -272,6 +273,10 @@ def _impl__base_witnesses_exactly_cover_region(
                 list(ret_conditions)
                 + [condition.negate() for condition in base_conditions or ()]
             )
+        except AnalysisLimitation:
+            # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+            # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+            raise
         except Exception:
             return False
         if base_implies_ret is True and ret_implies_base is True:

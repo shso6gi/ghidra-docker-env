@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple, cast
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionNormalizer,
     ConditionSMTOracle,
@@ -148,6 +149,10 @@ class ConditionLogicService:
     def conditions_are_unsat(self, conditions: Sequence[Condition]) -> bool:
         try:
             solver_result = ConditionSMTOracle.conjunction_is_unsat(list(conditions or []))
+        except AnalysisLimitation:
+            # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+            # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+            raise
         except Exception:
             solver_result = None
         if solver_result is not None:
@@ -182,6 +187,10 @@ class ConditionLogicService:
                     return False
         try:
             return ConditionSMTOracle.conjunction_is_unsat(list(left or ()) + list(right or ())) is not True
+        except AnalysisLimitation:
+            # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+            # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+            raise
         except Exception:
             return False
 
@@ -203,6 +212,10 @@ class ConditionLogicService:
             try:
                 if ConditionSMTOracle.conjunction_is_unsat(list(left or ()) + [condition.negate()]) is not True:
                     return False
+            except AnalysisLimitation:
+                # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+                # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+                raise
             except Exception:
                 return False
         return True
@@ -221,6 +234,10 @@ class ConditionLogicService:
         equality = Condition(Expression.binary_op("INT_NOTEQUAL", left, right), False)
         try:
             return ConditionSMTOracle.conjunction_is_unsat(list(conditions or ()) + [equality]) is True
+        except AnalysisLimitation:
+            # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+            # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+            raise
         except Exception:
             return False
 
@@ -246,6 +263,10 @@ class ConditionLogicService:
                 continue
         try:
             return ConditionSMTOracle.conjunction_is_unsat(list(others or ()) + [condition]) is True
+        except AnalysisLimitation:
+            # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+            # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+            raise
         except Exception:
             return False
 

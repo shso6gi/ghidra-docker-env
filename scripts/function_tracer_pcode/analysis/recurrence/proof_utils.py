@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.render_smt import collect_intrinsic_smt_declarations, collect_unknown_smt_declarations, expression_smt_bit_width
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
@@ -62,6 +63,10 @@ def _impl__implied_counter_constant_expression(
         try:
             if ConditionSMTOracle.conjunction_is_unsat(proof_conditions) is True:
                 return Expression.constant(value, size=size)
+        except AnalysisLimitation:
+            # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+            # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+            raise
         except Exception:
             pass
         try:

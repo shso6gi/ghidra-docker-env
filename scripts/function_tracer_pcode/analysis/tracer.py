@@ -27,6 +27,7 @@ from scripts.function_tracer_pcode.core.signature import (
     get_data_type_display_name,
     is_unsigned_data_type,
 )
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.config.settings import MAX_TRACE_DEPTH
 from scripts.function_tracer_pcode.analysis.debug.unknown_trace import (
     UnknownTracker,
@@ -807,6 +808,10 @@ class PcodeTracer(CallRecoveryMixin, ParameterStorageMixin, AddressRefMixin):
                 phi_expr.size = output.getSize() if output else 0
                 return phi_expr
             
+            except AnalysisLimitation:
+                # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+                # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+                raise
             except Exception as e:
                 if self.debug:
                     import traceback as tb
@@ -934,6 +939,10 @@ class PcodeTracer(CallRecoveryMixin, ParameterStorageMixin, AddressRefMixin):
                         inputs[0],
                         inputs[0].getSize(),
                     )
+                except AnalysisLimitation:
+                    # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+                    # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+                    raise
                 except Exception:
                     input_location = None
             if (

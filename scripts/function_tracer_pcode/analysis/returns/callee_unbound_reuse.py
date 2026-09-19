@@ -59,6 +59,7 @@ from scripts.function_tracer_pcode.analysis.runtime_state import (
     UNBOUND_REUSE_UNBOUND_ANALYSIS_UNAVAILABLE,
     CalleeUnboundReuseVerdict,
 )
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 
 
 #: eligibility 判定のための decompile に使う timeout（``_decompile_function`` 既定と同じ）。
@@ -348,6 +349,10 @@ def _impl__reuse_unbound_placeholder_analysis(
         self._callee_unbound_reuse_cache_ownership.record_view(analysis_scope_key, reused)
         stats.record_reuse(identity)
         return reused
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception as exc:  # 再利用の失敗で解析を止めない
         self._debug_print(f"Unbound callee reuse skipped for '{identity}': {exc}")
         return None
@@ -381,6 +386,10 @@ def _shadow_validated_reuse(
                 bound_parameter_storage_values=bound_parameter_storage_values,
             )
         matched = shadow_results_match(reused, bound_sensitive)
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception as exc:
         stats.record_shadow(identity, False)
         self._debug_print(f"Unbound callee reuse shadow failed for '{identity}': {exc}")

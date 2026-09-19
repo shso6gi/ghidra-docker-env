@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.core import (
     StorageInfo,
 )
 from scripts.function_tracer_pcode.core.runtime_refs import UnknownValueRef
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
@@ -80,6 +81,10 @@ def _impl__prove_return_value_equals_summary_closed_form(
     try:
         if ConditionSMTOracle.conjunction_is_unsat(proof_conditions) is True:
             return True
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         pass
     try:
