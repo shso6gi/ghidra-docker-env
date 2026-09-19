@@ -16,6 +16,13 @@
 process 単位で集めるための診断 sink で、**判定にも proof にも読ませない**
 （`tests/unit/test_issue125_typed_failures.py` が source で固定する）。
 
+Issue #106 PR-106-0 はここに **pair 単位の実行制御**（`PairExecutionControl` =
+`PairFailureLedger` + `PairStopState`）を足す。低レベルの処理は
+`raise_limitation()` / `record_internal_bug()` で「限界が起きた」ことを台帳へ
+通知するだけで、**UNKNOWN / ERROR の最終判断・receipt・JSON・表示は一切持たない**
+（それらは既存の authority / output 層が所有する）。台帳が例外とは別に事実を
+持つので、途中の `except Exception` が限界を握り潰しても pair 境界で失われない。
+
 dependency rule: この module は標準ライブラリ以外を import しない。`core` は
 最下層なので、上位層（`authority` / `proof` / `checker` …）の型をここへ持ち
 込むと層が壊れる。`CauseAttributionKey` が `IdentityScope` ではなくその
@@ -27,8 +34,10 @@ from __future__ import annotations
 import hashlib
 import threading
 import traceback
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from enum import Enum
+from typing import Any, Dict, Iterator, List, NoReturn, Optional, Tuple
 
 
 #: 既存 cause へ帰属させるときに指定できる identity scope の値（Enum は authority 側）。
@@ -176,6 +185,23 @@ class InternalError(AnalysisFailureError):
         return hashlib.sha256(payload.encode("utf-8", "replace")).hexdigest()
 
 
+class FrozenExpressionError(AnalysisFailureError):
+    """凍結済みの意味 object を書き換えようとした（内部バグ、Issue #22 / #106）。
+
+    `TypeError` / `AttributeError` / `ValueError` の派生に **しない**。派生に
+    すると `_CONDITION_RECOVERABLE_ERRORS` のような「回復可能」tuple に吸収され、
+    バグが UNKNOWN や `None` に化けてしまう。限界（`AnalysisLimitation`）でも
+    ないので、帰属先 cause を探さずそのまま ERROR へ落とす。
+    """
+
+
+class ExpressionCycleError(AnalysisFailureError):
+    """意味 graph に閉路を見つけた（内部バグ、Issue #22 / #106）。
+
+    `FrozenExpressionError` と同じ理由で標準の型階層へは混ぜない。
+    """
+
+
 class DeadlineExceeded(AnalysisLimitation):
     """解析の予算（時間・段数）を使い切って打ち切った限界。
 
@@ -204,6 +230,271 @@ class DeadlineExceeded(AnalysisLimitation):
             evidence_refs=evidence_refs,
             attribution=attribution,
         )
+
+
+# ---------------------------------------------------------------------------
+# pair 単位の実行制御（Issue #106 PR-106-0）
+# ---------------------------------------------------------------------------
+#
+# 所有するもの: 限界 event、内部バグ、stop state、pair / session の lifecycle。
+# 所有しないもの: UNKNOWN / ERROR の最終判断、receipt、JSON、表示。
+#
+# 例外だけで伝えると、途中の `except Exception` に握り潰された瞬間に「限界が
+# あった」事実そのものが消える。台帳は例外と **独立に** 事実を持つので、握り
+# 潰されても pair 境界（`authority/lifecycle/production_boundary.py`）が拾える。
+
+
+class PairStopState(Enum):
+    """pair 1 件の実行をどこまで進めてよいか。
+
+    `allows_finalization()` が全値で真なのは意図どおり。解析を止めることと、
+    既に確定した判定を authority に確定させて receipt / JSON を出すことは別で、
+    後者を止めると「限界で止めたのに結果が無い」状態になってしまう。
+    """
+
+    NONE = "NONE"
+    PAIR_TERMINAL_LIMITATION = "PAIR_TERMINAL_LIMITATION"
+    PAIR_TERMINAL_DEADLINE = "PAIR_TERMINAL_DEADLINE"
+    INTERNAL_BUG = "INTERNAL_BUG"
+
+    def allows_semantic_analysis(self) -> bool:
+        """新しい意味解析（phase 再解析・conditional lane・新規 query）を始めてよいか。"""
+        return self is PairStopState.NONE
+
+    def allows_finalization(self) -> bool:
+        """確定処理（authority finalize・receipt・serialization・teardown）を続けてよいか。"""
+        return True
+
+
+#: stop state の強さ（大きいほど優先。内部バグが限界に勝つ）。
+_STOP_STATE_RANK = {
+    PairStopState.NONE: 0,
+    PairStopState.PAIR_TERMINAL_LIMITATION: 1,
+    PairStopState.PAIR_TERMINAL_DEADLINE: 1,
+    PairStopState.INTERNAL_BUG: 2,
+}
+
+
+@dataclass(frozen=True)
+class PairFailureRecord:
+    """台帳に残る 1 件（限界 / 内部バグの区別と、畳み込みに使う identity）。"""
+
+    kind: str  # "limitation" | "internal_bug"
+    site: str
+    reason_id: Optional[str]
+    target_key: tuple
+    exception: BaseException
+    stop_state: PairStopState
+
+    @property
+    def fold_key(self) -> Tuple[str, str, Optional[str], tuple]:
+        """同じ限界の再 raise を 1 件に畳むためのキー（`(kind, site, reason, target)`）。"""
+        return (self.kind, self.site, self.reason_id, self.target_key)
+
+
+class PairExecutionControl:
+    """pair 境界が持つ実行制御の **安定 interface**（`PairFailureLedger` が実装）。
+
+    consumer（workflow / reanalysis / checker / production boundary）はこの
+    5 つ + `pending()` しか使わない。実装を差し替えても consumer は変わらない。
+    """
+
+    def record_limitation(
+        self, exc: "AnalysisLimitation", *, stop: Optional[PairStopState] = None,
+    ) -> None:
+        raise NotImplementedError
+
+    def record_internal_bug(self, exc: BaseException, *, site: str) -> None:
+        raise NotImplementedError
+
+    def stop_state(self) -> PairStopState:
+        raise NotImplementedError
+
+    def allows_semantic_analysis(self) -> bool:
+        raise NotImplementedError
+
+    def allows_finalization(self) -> bool:
+        raise NotImplementedError
+
+    def pending(self) -> Optional["AnalysisLimitation"]:
+        raise NotImplementedError
+
+
+class PairFailureLedger(PairExecutionControl):
+    """1 pair / 1 session ぶんの限界・内部バグ・stop state。
+
+    `pair_identity` と `session_identity` の **両方** が一致する再入だけが同じ
+    台帳を共有する（同 pair の phase 再解析・再帰 `check()`・recurrence
+    promotion）。別 pair / 別 session は別の台帳になり、外側へ漏れない。
+    """
+
+    def __init__(self, pair_identity: Any, session_identity: Any) -> None:
+        self.pair_identity = pair_identity
+        self.session_identity = session_identity
+        self._records: List[PairFailureRecord] = []
+        self._fold_keys: set = set()
+        self._stop_state = PairStopState.NONE
+
+    # -- identity ----------------------------------------------------------
+
+    def matches(self, pair_identity: Any, session_identity: Any) -> bool:
+        return (
+            self.pair_identity == pair_identity
+            and self.session_identity == session_identity
+        )
+
+    # -- 記録 --------------------------------------------------------------
+
+    def record_limitation(
+        self, exc: "AnalysisLimitation", *, stop: Optional[PairStopState] = None,
+    ) -> None:
+        if not isinstance(exc, AnalysisLimitation):
+            raise TypeError("pair ledger records exact analysis limitations")
+        stop_state = stop if stop is not None else (
+            # 時間予算だけが deadline。派生型も deadline として扱う。
+            PairStopState.PAIR_TERMINAL_DEADLINE
+            if isinstance(exc, DeadlineExceeded)
+            else PairStopState.PAIR_TERMINAL_LIMITATION
+        )
+        if stop_state is PairStopState.NONE:
+            raise ValueError("a recorded limitation cannot leave the pair runnable")
+        self._append(PairFailureRecord(
+            kind="limitation",
+            site=exc.site,
+            reason_id=exc.reason_id,
+            target_key=exc.target_key,
+            exception=exc,
+            stop_state=stop_state,
+        ))
+
+    def record_internal_bug(self, exc: BaseException, *, site: str) -> None:
+        if not isinstance(exc, BaseException):
+            raise TypeError("pair ledger records the original exception object")
+        if type(site) is not str or not site:
+            raise ValueError("an internal bug record needs an exact observation site")
+        self._append(PairFailureRecord(
+            kind="internal_bug",
+            site=site,
+            reason_id=None,
+            target_key=(type(exc).__name__,),
+            exception=exc,
+            stop_state=PairStopState.INTERNAL_BUG,
+        ))
+
+    def _append(self, record: PairFailureRecord) -> None:
+        if record.fold_key not in self._fold_keys:
+            self._fold_keys.add(record.fold_key)
+            self._records.append(record)
+        if _STOP_STATE_RANK[record.stop_state] > _STOP_STATE_RANK[self._stop_state]:
+            self._stop_state = record.stop_state
+
+    # -- 参照 --------------------------------------------------------------
+
+    def stop_state(self) -> PairStopState:
+        return self._stop_state
+
+    def allows_semantic_analysis(self) -> bool:
+        return self._stop_state.allows_semantic_analysis()
+
+    def allows_finalization(self) -> bool:
+        return self._stop_state.allows_finalization()
+
+    def pending(self) -> Optional[AnalysisLimitation]:
+        """未解消の限界の先頭（内部バグがあるときは `None`）。
+
+        内部バグは限界より優先して ERROR にするので、「限界として結果化する
+        対象」はここでは返さない。呼び出し側は `internal_bugs()` を先に見る。
+        """
+        if self.internal_bugs():
+            return None
+        for record in self._records:
+            if record.kind == "limitation":
+                return record.exception  # type: ignore[return-value]
+        return None
+
+    def internal_bugs(self) -> Tuple[PairFailureRecord, ...]:
+        return tuple(r for r in self._records if r.kind == "internal_bug")
+
+    def limitations(self) -> Tuple[PairFailureRecord, ...]:
+        return tuple(r for r in self._records if r.kind == "limitation")
+
+    def is_empty(self) -> bool:
+        return not self._records
+
+
+# 台帳の stack。process = pair 1 件なので module 単位で持つ。solver worker
+# thread から `raise_limitation` しても同じ pair の台帳へ入る（thread local に
+# すると worker 側の限界が消える）。
+_PAIR_LEDGER_LOCK = threading.Lock()
+_PAIR_LEDGERS: List[PairFailureLedger] = []
+
+
+def current_pair_ledger() -> Optional[PairFailureLedger]:
+    """今いちばん内側で開いている pair の台帳（無ければ `None`）。"""
+    with _PAIR_LEDGER_LOCK:
+        return _PAIR_LEDGERS[-1] if _PAIR_LEDGERS else None
+
+
+@contextmanager
+def pair_failure_scope(
+    pair_identity: Any, session_identity: Any,
+) -> Iterator[PairFailureLedger]:
+    """pair 1 件の実行制御 scope。
+
+    いちばん内側の台帳が `pair_identity` / `session_identity` の **両方** で
+    一致するなら、その台帳をそのまま貸す（再入）。片方でも違えば新しい台帳を
+    積み、scope を抜けるときに捨てる。捨てるので次 pair へ状態が漏れない。
+    """
+    with _PAIR_LEDGER_LOCK:
+        active = _PAIR_LEDGERS[-1] if _PAIR_LEDGERS else None
+        reentrant = active is not None and active.matches(
+            pair_identity, session_identity
+        )
+        if reentrant:
+            ledger = active
+        else:
+            ledger = PairFailureLedger(pair_identity, session_identity)
+            _PAIR_LEDGERS.append(ledger)
+    try:
+        yield ledger
+    finally:
+        if not reentrant:
+            with _PAIR_LEDGER_LOCK:
+                if _PAIR_LEDGERS and _PAIR_LEDGERS[-1] is ledger:
+                    _PAIR_LEDGERS.pop()
+                elif ledger in _PAIR_LEDGERS:
+                    # 入れ子が正しく閉じなかった場合でも、この台帳から上は
+                    # まとめて捨てる（次 pair へ持ち越さないことを優先する）。
+                    del _PAIR_LEDGERS[_PAIR_LEDGERS.index(ledger):]
+
+
+def raise_limitation(
+    exc: AnalysisLimitation, *, stop: Optional[PairStopState] = None,
+) -> NoReturn:
+    """限界を台帳へ記録してから raise する（記録が先、例外は後）。
+
+    先に記録するのは、途中の `except Exception` が例外を握り潰しても
+    「限界があった」事実を pair 境界が読めるようにするため。
+    """
+    if not isinstance(exc, AnalysisLimitation):
+        raise TypeError("raise_limitation needs an exact analysis limitation")
+    ledger = current_pair_ledger()
+    if ledger is not None:
+        ledger.record_limitation(exc, stop=stop)
+    raise exc
+
+
+def record_internal_bug(exc: BaseException, *, site: str) -> None:
+    """内部バグを台帳へ記録する（raise はしない。呼び出し側がそのまま raise する）。"""
+    ledger = current_pair_ledger()
+    if ledger is not None:
+        ledger.record_internal_bug(exc, site=site)
+
+
+def reset_pair_failure_scopes() -> None:
+    """台帳 stack を空にする（ペア 1 件の実行の冒頭で呼ぶ二重の保証）。"""
+    with _PAIR_LEDGER_LOCK:
+        _PAIR_LEDGERS.clear()
 
 
 # ---------------------------------------------------------------------------
