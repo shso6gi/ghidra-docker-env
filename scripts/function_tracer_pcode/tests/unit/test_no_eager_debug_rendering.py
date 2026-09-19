@@ -10,11 +10,13 @@
 
 * **検出** — 違反を見つける。debug sink / guard / 入れ子の並びまで必要なだけ辿る
   （:func:`statement_scope_nodes` / :func:`walk_evaluated_now`）
-* **alias の追跡** — 一段だけの追跡。**問いが 3 つあり、MAY と MUST を混ぜない**:
+* **alias の追跡** — 一段だけ。**問いは 3 つで、混ぜない**:
 
-  * producer origin（**MAY**）:func:`tracked_producer_bindings` — 走ったら
-    producer の値がこの名前へ入り **得る**か。短絡の後ろのような条件付きの位置も
-    数える（走るかもしれないなら origin）
+  * producer origin :func:`tracked_producer_bindings` — producer の値がどの名前に
+    入ったか。**支持するのは production 実測の 2 形だけ**（``name = producer`` と
+    ``name: T = producer``）。chained / 分解 / ``AugAssign`` / ``:=`` は、正しく
+    追うのに値と名前の対応を解く必要があり、production に 1 件も無いので
+    **解かずに B1 で拒否**する
   * rebind（**MUST**）:func:`statement_rebinds` — この文を実行したら **必ず**
     別の値へ束縛し直すか。window の終端
   * production 共有（**MUST**）:func:`_has_direct_production_read` — この区間で
@@ -22,9 +24,10 @@
 
   構文の意味づけは positive grammar の owner が持ち、どれも whitelist（載って
   いない形は証拠ゼロ / 不明）: :func:`direct_production_expressions`（statement）、
-  :func:`direct_production_reads`（expression）、:func:`bound_names`（binding）。
-  束縛先の形が判らない producer は黙って飛ばさず契約違反として報告する。
-  「広く見てから条件で削る」のではなく、最初から狭い positive set
+  :func:`direct_production_reads`（expression）、:func:`bound_names`（binding
+  構文の認識）。**構文を認識できることと provenance を言えることは別**で、後者は
+  producer origin の狭い表が答える。「広く見てから条件で削る」のではなく、
+  最初から狭い positive set
 
 **この checker が保証すること / しないこと。**
 
@@ -57,7 +60,7 @@ reaching definition も持たない）。曖昧な production site は checker �
   「今走るか / 後で走るか / どこから別束縛か」だけを担当する
 * **debug 規則の checker** — 下の R1〜R6。局所的な構文だけを見る
 
-固定する 6 つの契約:
+固定する 6 つの契約（と、追えない束縛を拒否する B1）:
 
 * **R1** debug guard の中で禁止呼び出し（``analysis.debug.render`` の
   :data:`UNBOUNDED_RENDER_CALLS` と :data:`HEAVY_DIAGNOSTIC_CALLS`、および
@@ -730,6 +733,11 @@ def bound_names(target: ast.AST) -> Optional[Set[str]]:
 
     ``a[i] = v`` や ``o.x = v`` は「知らない」ではなく「局所名を作らない」なので
     空集合。本当に知らない形だけが ``None`` で、呼び出し側が安全側に倒す。
+
+    **構文として何が束縛されるかを答えるだけ**。「その producer の値がどの名前に
+    入ったか」は別の問いで、:func:`tracked_producer_bindings` が支持する形を
+    明示的に並べて答える（構文を認識できることは provenance を言えることを
+    意味しない）。ここは :func:`statement_rebinds` のような構文認識に使う。
     """
 
     if isinstance(target, ast.Name):
@@ -809,79 +817,86 @@ TRACKED_PRODUCER_KINDS = ("forbidden", "unsafe_renderer")
 
 
 class ProducerBinding(NamedTuple):
-    """tracked producer の値が入り **得る** 束縛（MAY origin）。
+    """tracked producer の値が入った局所名、または「追えない束縛」。
 
-    ``name`` が ``None`` なら「束縛先の形が判らない」。呼び出し側は黙って飛ばさず
-    契約違反として報告する（:attr:`EagerDebugRenderingViolations.unsupported_producer_binding`）。
+    ``name`` が ``None`` なら **unsupported** — その束縛の形では、producer の値が
+    どの名前に入ったかを局所的に言えない。呼び出し側は黙って飛ばさず契約違反と
+    して報告する（:attr:`EagerDebugRenderingViolations.unsupported_producer_binding`）。
     """
 
     name: Optional[str]
     kind: str
     label: str
     lineno: int
-    #: 束縛した構文。``:=`` のときはその :class:`ast.NamedExpr`、代入文なら ``None``。
-    walrus: Optional[ast.NamedExpr] = None
 
 
 def tracked_producer_bindings(
     statement: ast.stmt, renderers: FrozenSet[str]
 ) -> List[ProducerBinding]:
-    """この文の **現在の実行フェーズ**で tracked producer が入り得る局所名。
+    """tracked producer の値がどの局所名に入ったか（**追えた形だけ**）。
 
-    3 つの問いのうち **MAY** を担当する owner:
+    3 つの問いのうち producer origin を担当する owner:
 
-    * producer origin（ここ）— 実行されたとき、その値がこの名前へ入り **得る**か
+    * producer origin（ここ）— その値がどの名前に入ったか
     * rebind（:func:`statement_rebinds`）— 実行したら **必ず**束縛し直すか
     * production 共有（:func:`_has_direct_production_read`）— **必ず**読むか
 
-    MAY なので、短絡の後ろのような条件付きの位置でも「走ったら束縛し得る」なら
-    origin として数える（``cond and (rendered := expr.to_string())``）。ただし
-    ``lambda`` 本体や generator 本体のように **この文では走らない**部分、および
-    別 lexical scope へは降りない — :func:`walk_evaluated_now` の意味をそのまま
-    使い、新しい評価規則は作らない。
+    **支持する形は production の実測だけ**（tracked producer を受ける束縛は
+    ``Assign`` の単純 ``Name`` が 355、``AnnAssign`` の単純 ``Name`` が 1、
+    ``Subscript`` / ``Attribute`` が 6、それ以外は 0 件）:
 
-    束縛の形は :func:`bound_names` が唯一の owner。分解代入は「束縛される名前
-    すべてが値を持ち得る」という保守的な扱いで、位置対応は解かない。
+    * ``name = <producer>`` — 単一の ``Name`` target
+    * ``name: T = <producer>`` — 同上
+    * ``obj.attr = <producer>`` / ``obj[key] = <producer>`` — 局所名を作らないので
+      追う対象が無い（unsupported ではない）
+
+    それ以外で tracked producer を束縛する形は **B1 unsupported** に倒す:
+    chained assignment、分解代入（Tuple / List / Starred）、``AugAssign``、
+    ``:=``。どれも production に 1 件も無いのに、正しく追うには値と名前の対応を
+    解く必要がある（``used = rendered = f()`` は 2 つの名前が同じ値を指すので
+    片方の production 使用がもう片方を免除する。``other, rendered = (f(), 0)``
+    は位置で値が決まる）。**そういう解析は作らない** — 書かれたら拒否して、
+    単純な形へ直してもらう。
+
+    :func:`bound_names` は構文として何が束縛されるかを答えるが、**構文を認識
+    できることと、producer の値がどの名前に入ったかを言えることは別**。ここでは
+    前者に頼らず、追える形を明示的に並べる。
     """
 
+    if isinstance(statement, ast.AnnAssign):
+        targets: List[ast.AST] = [statement.target]
+    elif isinstance(statement, ast.Assign):
+        targets = list(statement.targets)
+    elif isinstance(statement, ast.AugAssign):
+        targets = [statement.target]
+    else:
+        targets = []
+
     events: List[ProducerBinding] = []
-
-    def record(
-        target: ast.AST,
-        kind: str,
-        label: str,
-        lineno: int,
-        walrus: Optional[ast.NamedExpr] = None,
-    ) -> None:
-        names = bound_names(target)
-        if names is None:
-            events.append(ProducerBinding(None, kind, label, lineno, walrus))
-            return
-        events.extend(
-            ProducerBinding(name, kind, label, lineno, walrus) for name in sorted(names)
-        )
-
-    if (
-        isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign))
-        and statement.value is not None
-    ):
-        kind, label = _assignment_kind(statement.value, renderers)
+    value = getattr(statement, "value", None)
+    if targets and value is not None:
+        kind, label = _assignment_kind(value, renderers)
         if kind in TRACKED_PRODUCER_KINDS:
-            targets = (
-                list(statement.targets)
-                if isinstance(statement, ast.Assign)
-                else [statement.target]
-            )
-            for target in targets:
-                record(target, kind, label, statement.lineno)
+            single = targets[0] if len(targets) == 1 else None
+            if isinstance(statement, ast.AugAssign) or single is None:
+                # ``x += producer`` は元の値と混ざり、chained は 1 つの値が複数の
+                # 名前に入る。どちらも production に無いので追わない。
+                events.append(ProducerBinding(None, kind, label, statement.lineno))
+            elif isinstance(single, ast.Name):
+                events.append(ProducerBinding(single.id, kind, label, statement.lineno))
+            elif isinstance(single, (ast.Subscript, ast.Attribute)):
+                pass  # 局所名を作らないので追う対象が無い
+            else:
+                events.append(ProducerBinding(None, kind, label, statement.lineno))
 
-    # ``(name := producer)`` は式のどこにでも書ける。この文で走り得る範囲だけ見る。
+    # ``(name := producer)`` は production に 1 件も無い。値の行き先を言うには
+    # 式の中の消費まで見ることになるので、追わず拒否する。
     for node in walk_evaluated_now(statement):
         if not isinstance(node, ast.NamedExpr):
             continue
         kind, label = _assignment_kind(node.value, renderers)
         if kind in TRACKED_PRODUCER_KINDS:
-            record(node.target, kind, label, node.lineno, node)
+            events.append(ProducerBinding(None, kind, label, node.lineno))
     return events
 
 
@@ -1120,41 +1135,6 @@ def direct_production_reads(
     )
 
 
-def _walrus_value_is_consumed(
-    statement: ast.stmt, walrus: ast.NamedExpr, renderers: FrozenSet[str]
-) -> bool:
-    """``(name := producer)`` の **値がその場で** production に渡されるか。
-
-    ``consume(rendered := expr.to_string())`` は、名前を読み直さなくても値が
-    ``consume`` へ渡っている。名前の読み出しを探すだけでは見えないので、
-    ``:=`` 自身の位置を見る: その文の直接式の中で **必ず評価される** 位置にあり、
-    かつ debug sink の引数の中でなく、式全体そのものではない（``(x := f())``
-    だけなら値は捨てられる）とき、production が使っていると見なす。
-
-    使う道具は既存の owner だけ（:func:`direct_production_expressions` /
-    :func:`_certainly_evaluated`）。値の流れを追う解析は作らない。
-    """
-
-    discarded = {
-        id(expression)
-        for expression in direct_production_expressions(statement) or ()
-    }
-    in_debug_sink = {
-        id(node)
-        for call in statement_scope_nodes(statement)
-        if isinstance(call, ast.Call) and _is_debug_sink(call, renderers)
-        for argument in list(call.args) + [keyword.value for keyword in call.keywords]
-        for node in ast.walk(argument)
-    }
-    if id(walrus) in in_debug_sink:
-        return False
-    for expression in direct_production_expressions(statement) or ():
-        for node in _certainly_evaluated(expression):
-            if node is walrus:
-                return id(walrus) not in discarded
-    return False
-
-
 def _has_direct_production_read(
     window: Sequence[ast.stmt], name: str, debug_reads: Set[int]
 ) -> bool:
@@ -1213,10 +1193,6 @@ def _debug_only_locals(
                 if binding.name is None:
                     unsupported.append(binding)
                     continue
-                if binding.walrus is not None and _walrus_value_is_consumed(
-                    statement, binding.walrus, renderers
-                ):
-                    continue  # 値がその場で production へ渡っている
                 window = _local_window(block, index, binding.name)
                 debug_reads = _debug_read_positions(window, renderers)
                 if _has_direct_production_read(window, binding.name, debug_reads):
@@ -4005,8 +3981,8 @@ def test_an_unknown_target_shape_is_unknown_not_empty():
     assert bound_names(_FutureTarget()) is None
 
 
-def test_a_producer_bound_by_destructuring_is_not_missed():
-    """分解代入で受けた producer を見逃さない（位置対応は追わない）。"""
+def test_a_destructured_producer_is_refused_not_guessed():
+    """分解代入は位置で値が決まる。解かずに B1 で拒否する。"""
 
     violations = scan_source(
         "sample",
@@ -4014,19 +3990,22 @@ def test_a_producer_bound_by_destructuring_is_not_missed():
         "    rendered, other = (expr.to_string(), 0)\n"
         "    self._debug_print(rendered)\n",
     )
-    assert [entry[2] for entry in violations.render_in_debug_sink] == [
-        "_debug_print(... rendered = to_string() ...)"
+    assert not violations.render_in_debug_sink
+    assert [entry[2] for entry in violations.unsupported_producer_binding] == [
+        "to_string()"
     ]
 
 
-def test_a_starred_target_is_tracked_too():
+def test_a_starred_producer_target_is_refused_too():
     violations = scan_source(
         "sample",
         "def f(self, expr):\n"
         "    rendered, *rest = (expr.to_string(), 0)\n"
         "    self._debug_print(rendered)\n",
     )
-    assert violations.render_in_debug_sink
+    assert [entry[2] for entry in violations.unsupported_producer_binding] == [
+        "to_string()"
+    ]
 
 
 @pytest.mark.parametrize(
@@ -4138,71 +4117,77 @@ def _producer_case(body: str) -> EagerDebugRenderingViolations:
     )
 
 
-@pytest.mark.parametrize(
-    "label, body, detected",
-    [
-        (
-            "walrus 単独",
-            "    (rendered := expr.to_string())\n    self._debug_print(rendered)\n",
-            True,
-        ),
-        (
-            "walrus が短絡の後ろ（MAY origin）",
-            "    cond and (rendered := expr.to_string())\n    self._debug_print(rendered)\n",
-            True,
-        ),
-        (
-            "walrus が IfExp の枝（MAY origin）",
-            "    keep = (rendered := expr.to_string()) if cond else 0\n"
-            "    self._debug_print(rendered)\n",
-            True,
-        ),
-        (
-            "walrus の値をその場で production が消費",
-            "    consume(rendered := expr.to_string())\n    self._debug_print(rendered)\n",
-            False,
-        ),
-        (
-            "walrus の値を debug sink が消費",
-            "    self._debug_print(rendered := expr.to_string())\n",
-            True,
-        ),
-        (
-            "chained assign",
-            "    other = rendered = expr.to_string()\n    self._debug_print(rendered)\n",
-            True,
-        ),
-        (
-            "AugAssign",
-            "    rendered += expr.to_string()\n    self._debug_print(rendered)\n",
-            True,
-        ),
-        (
-            "分解代入",
-            "    rendered, other = (expr.to_string(), 0)\n    self._debug_print(rendered)\n",
-            True,
-        ),
-    ],
-)
-def test_the_producer_origin_is_a_may_question(label, body, detected):
-    """producer origin は **MAY** — 走ったら束縛し得る位置ならすべて拾う。
+#: (ラベル, 文, 追えるか)。支持するのは production 実測の 2 形だけ。
+#: それ以外で tracked producer を束縛する形は B1（unsupported）。
+_PRODUCER_ORIGIN_GRAMMAR = [
+    ("単純な Assign", "    rendered = expr.to_string()\n", True),
+    ("AnnAssign", "    rendered: str = expr.to_string()\n", True),
+    ("chained assign", "    other = rendered = expr.to_string()\n", False),
+    ("分解代入", "    rendered, other = (expr.to_string(), 0)\n", False),
+    ("分解代入（位置が逆）", "    other, rendered = (expr.to_string(), 0)\n", False),
+    ("starred", "    rendered, *rest = (expr.to_string(), 0)\n", False),
+    ("AugAssign", "    rendered += expr.to_string()\n", False),
+    ("walrus 単独", "    (rendered := expr.to_string())\n", False),
+    ("walrus を呼び出しの引数で", "    consume(rendered := expr.to_string())\n", False),
+    ("walrus が短絡の後ろ", "    cond and (rendered := expr.to_string())\n", False),
+]
 
-    短絡の後ろや ``IfExp`` の枝は「必ず読む」とは言えない（免除の証拠にはしない）
-    が、「走ったら producer が動いてこの名前に入る」ことはあり得るので origin
-    としては数える。MAY と MUST を取り違えると、条件付きの producer を見失う。
+
+@pytest.mark.parametrize(
+    "label, body, supported",
+    _PRODUCER_ORIGIN_GRAMMAR,
+    ids=[case[0] for case in _PRODUCER_ORIGIN_GRAMMAR],
+)
+def test_the_producer_origin_contract_is_inventory_backed(label, body, supported):
+    """producer の値がどの名前に入ったかを言えるのは、実測にある 2 形だけ。
+
+    ``used = rendered = f()`` は 1 つの値が 2 つの名前を指すので、片方の
+    production 使用がもう片方を免除する。``other, rendered = (f(), 0)`` は位置で
+    値が決まる。どちらも正しく追うには値と名前の対応を解く解析が要るが、
+    production には 1 件も無い。だから **解かずに拒否**する。
     """
 
-    assert bool(_producer_case(body).render_in_debug_sink) is detected, label
+    violations = _producer_case(body + "    self._debug_print(rendered)\n")
+    assert bool(violations.render_in_debug_sink) is supported, label
+    assert bool(violations.unsupported_producer_binding) is not supported, label
+
+
+def test_a_chained_producer_does_not_lose_its_production_use():
+    """chained を推論していた頃の誤検出が出ないこと。
+
+    ``used`` は production が読んでいるので、同じ値を指す ``rendered`` を
+    「debug 専用」と報告してはいけない。B1 に倒すことで誤検出が消える。
+    """
+
+    violations = _producer_case(
+        "    used = rendered = expr.to_string()\n"
+        "    consume(used)\n"
+        "    self._debug_print(rendered)\n"
+    )
+    assert not violations.render_in_debug_sink, violations.describe()
+    assert violations.unsupported_producer_binding
+
+
+def test_a_target_that_binds_no_local_is_not_unsupported():
+    """``obj.attr = producer`` / ``d[k] = producer`` は追う対象が無いだけ。"""
+
+    for body in ("    obj.attr = expr.to_string()\n", "    store[key] = expr.to_string()\n"):
+        violations = scan_source(
+            "sample", "def f(self, expr, obj, store, key):\n" + body
+        )
+        assert not violations.unsupported_producer_binding, body
+        assert not violations, violations.describe()
 
 
 def test_a_deferred_walrus_is_not_an_origin_here():
-    """``lambda`` / generator の中の ``:=`` はこの文では走らない。"""
+    """``lambda`` 本体の ``:=`` はこの文では走らないので B1 にもしない。"""
 
     violations = _producer_case(
         "    thunk = lambda: (rendered := expr.to_string())\n"
         "    self._debug_print(rendered)\n"
     )
     assert not violations.render_in_debug_sink, violations.describe()
+    assert not violations.unsupported_producer_binding, violations.describe()
 
 
 def test_an_unsupported_producer_binding_fails_loudly():
