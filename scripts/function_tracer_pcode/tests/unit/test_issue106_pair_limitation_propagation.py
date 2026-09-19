@@ -32,6 +32,7 @@ from scripts.function_tracer_pcode.checker.phases.handler import (
     PhaseResult,
 )
 from scripts.function_tracer_pcode.core.errors import (
+    AnalysisFailureError,
     AnalysisLimitation,
     DeadlineExceeded,
     ExpressionCycleError,
@@ -1018,6 +1019,188 @@ def test_the_ledger_folds_an_exception_that_is_recorded_and_then_adopted():
 
 
 # ---------------------------------------------------------------------------
+# 変更軸の分離（failure kind / stop state / 例外型 を混ぜない）
+# ---------------------------------------------------------------------------
+
+def _scope():
+    return pair_failure_scope(("b1", "b2", None, None, "f", "f"), "session-axis")
+
+
+@pytest.mark.parametrize("bug_first", [False, True], ids=["limitation_first", "bug_first"])
+def test_failure_precedence_does_not_depend_on_the_recording_order(bug_first):
+    """内部バグ > 限界 は記録順に依らない。"""
+    def _record_limitation():
+        try:
+            raise_limitation(_budget_limitation(site="oracle"))
+        except AnalysisLimitation:
+            pass
+
+    def _record_bug():
+        record_internal_bug(
+            FrozenExpressionError("frozen"), site="core.expression.__setattr__",
+        )
+
+    with _scope() as ledger:
+        steps = [_record_bug, _record_limitation] if bug_first else [
+            _record_limitation, _record_bug
+        ]
+        for step in steps:
+            step()
+        failure = ledger.pending_failure()
+        assert failure.kind is PairFailureKind.INTERNAL_BUG
+        assert failure.site == "core.expression.__setattr__"
+        assert ledger.recorded_failure_count() == 2
+
+
+def test_stop_state_rank_does_not_decide_the_failure_winner(monkeypatch):
+    """stop state の強さ（軸 D）を入れ替えても、勝つ failure（軸 B）は変わらない。
+
+    2 つを同じ rank で代用していると、この monkeypatch で winner が反転する。
+    """
+    from scripts.function_tracer_pcode.core import errors as errors_module
+
+    inverted = {
+        PairStopState.NONE: 0,
+        PairStopState.PAIR_TERMINAL_LIMITATION: 9,
+        PairStopState.PAIR_TERMINAL_DEADLINE: 9,
+        PairStopState.INTERNAL_BUG: 1,
+    }
+    monkeypatch.setattr(errors_module, "_STOP_STATE_RANK", inverted)
+    with _scope() as ledger:
+        try:
+            raise_limitation(_budget_limitation(site="oracle"))
+        except AnalysisLimitation:
+            pass
+        record_internal_bug(
+            FrozenExpressionError("frozen"), site="core.expression.__setattr__",
+        )
+        assert ledger.pending_failure().kind is PairFailureKind.INTERNAL_BUG
+
+
+def test_stop_state_escalation_still_follows_its_own_rank():
+    """軸 D は軸 B と独立に効く: 限界のあとの内部バグで stop state も上がる。"""
+    with _scope() as ledger:
+        try:
+            raise_limitation(_budget_limitation(site="oracle"))
+        except AnalysisLimitation:
+            pass
+        assert ledger.stop_state() is PairStopState.PAIR_TERMINAL_DEADLINE
+        record_internal_bug(FrozenExpressionError("frozen"), site="core.expression")
+        assert ledger.stop_state() is PairStopState.INTERNAL_BUG
+        # 逆順（内部バグのあとに限界）でも stop state は下がらない。
+    with _scope() as ledger:
+        record_internal_bug(FrozenExpressionError("frozen"), site="core.expression")
+        try:
+            raise_limitation(_budget_limitation(site="oracle"))
+        except AnalysisLimitation:
+            pass
+        assert ledger.stop_state() is PairStopState.INTERNAL_BUG
+
+
+@pytest.mark.parametrize(
+    "stop_state",
+    [PairStopState.PAIR_TERMINAL_LIMITATION, PairStopState.PAIR_TERMINAL_DEADLINE],
+)
+def test_a_limitation_accepts_the_stop_states_that_mean_something_for_it(stop_state):
+    with _scope() as ledger:
+        ledger.record_limitation(_plain_limitation(site="expand"), stop=stop_state)
+        assert ledger.stop_state() is stop_state
+        assert ledger.pending_failure().stop_state is stop_state
+
+
+@pytest.mark.parametrize(
+    "stop_state", [PairStopState.NONE, PairStopState.INTERNAL_BUG],
+)
+def test_a_limitation_rejects_a_stop_state_that_is_not_its_own(stop_state):
+    """`stop=INTERNAL_BUG` のような組み合わせを黙って通さない。
+
+    通すと、限界が内部バグと同じ強さで記録され、順位の解釈が壊れる。
+    """
+    with _scope() as ledger:
+        with pytest.raises(ValueError, match="not meaningful"):
+            ledger.record_limitation(_plain_limitation(site="expand"), stop=stop_state)
+        assert ledger.pending_failure() is None
+        assert ledger.recorded_failure_count() == 0
+
+
+# ---------------------------------------------------------------------------
+# producer API と gate の catch 族が一致していること
+# ---------------------------------------------------------------------------
+
+#: gate（G3 / G5）が catch する族。producer の受理範囲と一致していること。
+GATE_CATCH_FAMILY = AnalysisFailureError
+
+_SAMPLE_EXCEPTIONS = (
+    DeadlineExceeded("budget", site="s"),
+    AnalysisLimitation(BUDGET_REASON, "detail", site="s"),
+    FrozenExpressionError("frozen"),
+    ExpressionCycleError("cycle"),
+    InternalError(ValueError("boom"), site="s"),
+    RuntimeError("generic"),
+    ValueError("generic"),
+    KeyboardInterrupt(),
+)
+
+
+def test_the_producer_api_accepts_exactly_what_the_gate_can_catch():
+    """`record_*` が受理する集合 == gate が catch する族。
+
+    ずれていると「台帳には残ったのに raw exception が境界を抜ける」状態ができる。
+    """
+    from scripts.function_tracer_pcode.core.errors import classify_failure_kind
+
+    for exc in _SAMPLE_EXCEPTIONS:
+        kind = classify_failure_kind(exc)
+        catchable = isinstance(exc, GATE_CATCH_FAMILY)
+        assert (kind is not None) is catchable, type(exc).__name__
+        with _scope() as ledger:
+            if kind is PairFailureKind.LIMITATION:
+                ledger.record_limitation(exc)
+                accepted = True
+            else:
+                try:
+                    ledger.record_internal_bug(exc, site="probe")
+                    accepted = True
+                except TypeError:
+                    accepted = False
+            assert accepted is catchable, type(exc).__name__
+
+
+def test_record_internal_bug_refuses_what_the_boundary_could_not_catch():
+    """族の外を渡したら **記録時に** 失敗する（記録だけ成功させない）。"""
+    with _scope() as ledger:
+        with pytest.raises(TypeError, match="InternalError"):
+            record_internal_bug(RuntimeError("generic"), site="probe")
+        assert ledger.pending_failure() is None
+        assert ledger.recorded_failure_count() == 0
+        # 明示的に包めば受理され、以後は通常の内部バグと同じ経路に乗る。
+        record_internal_bug(
+            InternalError(RuntimeError("generic"), site="probe"), site="probe",
+        )
+        assert ledger.pending_failure().kind is PairFailureKind.INTERNAL_BUG
+
+
+def test_an_internal_bug_wrapped_by_hand_still_ends_as_internal_exception():
+    """generic な例外を `InternalError` に包んで記録 → raise でも ERROR になる。"""
+    analysis1, analysis2 = _analyses()
+
+    def _analyze(self, name, timeout):
+        if name == "func1":
+            bug = InternalError(RuntimeError("generic"), site="analysis.probe")
+            record_internal_bug(bug, site="analysis.probe")
+            raise bug
+        return analysis2
+
+    result = _run_pair(
+        analyze=_analyze, stage_plan=_equivalent_stage_plan, connector=_connector(),
+    )
+    assert result.final_outcome == "ERROR"
+    assert result.failure_status == "internal_exception"
+    assert result.pair_stop_state == PairStopState.INTERNAL_BUG.value
+    assert _failure_block(result, "internal_exception")["site"] == "analysis.probe"
+
+
+# ---------------------------------------------------------------------------
 # stable interface（consumer が具象台帳の内部を読まない）
 # ---------------------------------------------------------------------------
 
@@ -1025,8 +1208,10 @@ def test_the_ledger_folds_an_exception_that_is_recorded_and_then_adopted():
 STABLE_CONTROL_API = frozenset({
     "record_limitation", "record_internal_bug", "pending_failure",
     "stop_state", "allows_semantic_analysis", "allows_finalization",
-    "recorded_failure_count",
 })
+
+#: 具象台帳が診断・test 向けに出している窓口（安定 contract には含めない）。
+LEDGER_DIAGNOSTIC_API = frozenset({"recorded_failure_count"})
 
 #: 台帳 object に対して consumer が呼んでよい名前（安定 contract + identity）。
 LEDGER_ALLOWED_ATTRIBUTES = STABLE_CONTROL_API | {
@@ -1035,16 +1220,27 @@ LEDGER_ALLOWED_ATTRIBUTES = STABLE_CONTROL_API | {
 
 
 def test_the_stable_control_contract_is_exactly_what_consumers_need():
-    """`PairExecutionControl` の公開面が増減していないことを固定する。"""
+    """`PairExecutionControl` の公開面が増減していないことを固定する。
+
+    診断・test 専用の窓口（`recorded_failure_count`）は **契約に入れない**。
+    入れると、production consumer が畳み込みの件数に依存してよいことになる。
+    """
     public = {
         name for name in vars(PairExecutionControl)
         if not name.startswith("_")
     }
     assert public == STABLE_CONTROL_API
+    assert not (public & LEDGER_DIAGNOSTIC_API)
     ledger_cls = type(_ledger_for_contract_check())
     assert issubclass(ledger_cls, PairExecutionControl)
     for name in STABLE_CONTROL_API:
         assert callable(getattr(ledger_cls, name)), name
+    for name in LEDGER_DIAGNOSTIC_API:
+        assert callable(getattr(ledger_cls, name)), name
+    # 使われなくなった窓口を公開したままにしない。
+    assert not hasattr(ledger_cls, "is_empty")
+    assert not hasattr(ledger_cls, "internal_bugs")
+    assert not hasattr(ledger_cls, "limitations")
 
 
 def _ledger_for_contract_check():
@@ -1111,16 +1307,85 @@ def test_consumers_do_not_read_concrete_ledger_internals():
     )
 
 
-def test_the_priority_rule_lives_in_the_execution_control_owner():
-    """優先順位の語彙（stop state の強さ表）が `core/errors.py` の外に無いこと。"""
+#: 変更軸ごとの唯一の owner。名前は `core/errors.py` の外に現れてはいけない。
+AXIS_OWNER_TABLES = {
+    "B: failure kind -> precedence": "_FAILURE_KIND_RANK",
+    "C: failure kind -> stop states": "_STOP_STATES_BY_KIND",
+    "D: stop state -> severity": "_STOP_STATE_RANK",
+}
+
+
+def test_each_change_axis_has_exactly_one_owner_and_it_is_in_core_errors():
+    """軸ごとの規則表が 1 つずつ、`core/errors.py` にだけ在ることを固定する。
+
+    どれかが外へ漏れていると、その軸を変えたときに無関係な module まで
+    変更が波及する。`core/errors.py` の中でも定義は 1 回だけ。
+    """
+    from scripts.function_tracer_pcode.core import errors as errors_module
+
+    core_source = pathlib.Path(errors_module.__file__).read_text(encoding="utf-8")
+    core_tree = ast.parse(core_source)
+    for axis, table in AXIS_OWNER_TABLES.items():
+        assert hasattr(errors_module, table), axis
+        definitions = [
+            node for node in core_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(t, ast.Name) and t.id == table for t in node.targets
+            )
+        ]
+        assert len(definitions) == 1, f"{axis}: {table} は 1 回だけ定義する"
     offenders = []
     for rel, _path, tree in _source_modules():
         if rel == "core/errors.py":
             continue
         for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and node.id == "_STOP_STATE_RANK":
-                offenders.append(f"{rel}:{node.lineno}")
-    assert offenders == []
+            if isinstance(node, ast.Name) and node.id in AXIS_OWNER_TABLES.values():
+                offenders.append(f"{rel}:{node.lineno} {node.id}")
+    assert offenders == [], "\n".join(offenders)
+
+
+def test_the_classification_rule_is_not_duplicated_outside_its_owner():
+    """例外型 → 種別（軸 A）の `isinstance` 判定が owner の外に無いこと。
+
+    `classify_failure_kind` 以外で `AnalysisLimitation` / `AnalysisFailureError`
+    を `isinstance` で振り分け始めたら、分類規則が二重化している。
+    """
+    from scripts.function_tracer_pcode.core import errors as errors_module
+
+    classified = {"AnalysisLimitation", "AnalysisFailureError"}
+    owner_functions = {
+        "classify_failure_kind", "_represented_exception_ids",
+        "record_limitation", "adopt_pair_failure", "raise_limitation",
+        "classify_typed_failure", "_default_stop_state",
+    }
+    core_tree = ast.parse(
+        pathlib.Path(errors_module.__file__).read_text(encoding="utf-8")
+    )
+    stack, offenders = [], []
+
+    class Visitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node):
+            stack.append(node.name)
+            self.generic_visit(node)
+            stack.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            if (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "isinstance"
+                and len(node.args) == 2
+                and isinstance(node.args[1], ast.Name)
+                and node.args[1].id in classified
+                and not (set(stack) & owner_functions)
+            ):
+                offenders.append(f"core/errors.py:{node.lineno} {'.'.join(stack)}")
+            self.generic_visit(node)
+
+    Visitor().visit(core_tree)
+    assert offenders == [], "\n".join(offenders)
 
 
 # ---------------------------------------------------------------------------

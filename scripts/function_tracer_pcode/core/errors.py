@@ -266,7 +266,8 @@ class PairStopState(Enum):
         return True
 
 
-#: stop state の強さ（大きいほど優先）。順位の決定はこの module が所有する。
+#: **軸 D: stop state → 実行の厳しさ**。`_append` の escalation だけが読む。
+#: ここを変えても「どの failure を結果化するか」は変わらない（軸 B が別表）。
 _STOP_STATE_RANK = {
     PairStopState.NONE: 0,
     PairStopState.PAIR_TERMINAL_LIMITATION: 1,
@@ -300,9 +301,23 @@ class PairFailureKind(Enum):
     INTERNAL_BUG = "internal_bug"
 
 
-#: 種別ごとの stop state（限界は raise 側が deadline を指定できる）。
-_STOP_STATE_FOR_KIND = {
-    PairFailureKind.INTERNAL_BUG: PairStopState.INTERNAL_BUG,
+#: **軸 B: failure kind → 結果化の優先順位**（大きいほど勝つ）。
+#: 「どの failure を結果にするか」だけを決める。stop state の強さ（軸 D）とは
+#: 独立で、片方を変えても他方は変わらない。
+_FAILURE_KIND_RANK = {
+    PairFailureKind.LIMITATION: 0,
+    PairFailureKind.INTERNAL_BUG: 1,
+}
+
+#: **軸 C: failure kind → 取り得る stop state**。既定は先頭要素。
+#: `record_limitation(stop=...)` の検証もここを読む（種別に意味の無い stop state
+#: を受け付けない）。種別を足したらここへ 1 行足す。
+_STOP_STATES_BY_KIND = {
+    PairFailureKind.LIMITATION: (
+        PairStopState.PAIR_TERMINAL_LIMITATION,
+        PairStopState.PAIR_TERMINAL_DEADLINE,
+    ),
+    PairFailureKind.INTERNAL_BUG: (PairStopState.INTERNAL_BUG,),
 }
 
 
@@ -363,13 +378,32 @@ class _PairFailureRecord:
         )
 
 
-def _default_limitation_stop_state(exc: "AnalysisLimitation") -> PairStopState:
-    """限界の既定 stop state（時間予算だけが deadline。派生型も deadline 扱い）。"""
-    return (
-        PairStopState.PAIR_TERMINAL_DEADLINE
-        if isinstance(exc, DeadlineExceeded)
-        else PairStopState.PAIR_TERMINAL_LIMITATION
-    )
+def _default_stop_state(kind: PairFailureKind, exc: BaseException) -> PairStopState:
+    """**軸 C の owner**: 種別（と例外型）から既定の stop state を決める。
+
+    時間予算だけが deadline で、派生型も deadline として扱う。それ以外は種別の
+    既定（`_STOP_STATES_BY_KIND` の先頭）。
+    """
+    if kind is PairFailureKind.LIMITATION and isinstance(exc, DeadlineExceeded):
+        return PairStopState.PAIR_TERMINAL_DEADLINE
+    return _STOP_STATES_BY_KIND[kind][0]
+
+
+def _checked_stop_state(
+    kind: PairFailureKind, stop_state: PairStopState,
+) -> PairStopState:
+    """種別に対して意味のある stop state かを検証する（軸 C の一部）。
+
+    限界に `INTERNAL_BUG` を、内部バグに `PAIR_TERMINAL_LIMITATION` を渡すような
+    組み合わせは、順位の解釈を壊すのでその場で拒否する（黙って通さない）。
+    """
+    allowed = _STOP_STATES_BY_KIND[kind]
+    if stop_state not in allowed:
+        raise ValueError(
+            f"stop state {stop_state.value} is not meaningful for "
+            f"{kind.value}; allowed: {[state.value for state in allowed]}"
+        )
+    return stop_state
 
 
 def _limitation_record(
@@ -392,22 +426,40 @@ def _internal_bug_record(exc: BaseException, site: str) -> _PairFailureRecord:
         reason_id=None,
         target_key=(type(exc).__name__,),
         exception=exc,
-        stop_state=_STOP_STATE_FOR_KIND[PairFailureKind.INTERNAL_BUG],
+        stop_state=_default_stop_state(PairFailureKind.INTERNAL_BUG, exc),
     )
+
+
+def classify_failure_kind(exc: BaseException) -> Optional[PairFailureKind]:
+    """**軸 A の owner**: 例外型 → failure kind（族の外なら `None`）。
+
+    `AnalysisFailureError` 族のうち `AnalysisLimitation` は限界、それ以外
+    （`InternalError` / `FrozenExpressionError` / `ExpressionCycleError` …）は
+    内部バグ。gate の catch 族（`AnalysisFailureError`）と producer の受理範囲は
+    この 1 関数で一致する。新しい failure class は族を継承するだけでここに乗る。
+    """
+    if isinstance(exc, AnalysisLimitation):
+        return PairFailureKind.LIMITATION
+    if isinstance(exc, AnalysisFailureError):
+        return PairFailureKind.INTERNAL_BUG
+    return None
+
+
+def classify_internal_bug_kind(exc: BaseException) -> Optional[PairFailureKind]:
+    """`record_internal_bug` が受理するかの判定（軸 A の再利用）。"""
+    return classify_failure_kind(exc)
 
 
 def classify_typed_failure(exc: BaseException) -> Optional[_PairFailureRecord]:
     """typed failure 1 件を台帳の記録へ落とす。**例外型 → 種別の対応はここだけ**。
 
-    `AnalysisFailureError` 族のうち、`AnalysisLimitation` は限界、それ以外
-    （`InternalError` / `FrozenExpressionError` / `ExpressionCycleError` …）は
-    内部バグ。新しい failure class は `AnalysisFailureError` を継承するだけで
-    この表に乗り、gate 側にも consumer 側にも分岐は増えない。族の外の例外は
-    `None`（従来の generic 経路）。
+    種別の判定は `classify_failure_kind`（軸 A）に委ね、ここは「種別 → 記録の
+    組み立て」だけを行う。族の外の例外は `None`（従来の generic 経路）。
     """
-    if isinstance(exc, AnalysisLimitation):
-        return _limitation_record(exc, _default_limitation_stop_state(exc))
-    if isinstance(exc, AnalysisFailureError):
+    kind = classify_failure_kind(exc)
+    if kind is PairFailureKind.LIMITATION:
+        return _limitation_record(exc, _default_stop_state(kind, exc))
+    if kind is PairFailureKind.INTERNAL_BUG:
         site = (
             exc.site if isinstance(exc, InternalError)
             else _site_of_unrecorded(exc)
@@ -420,8 +472,9 @@ class PairExecutionControl:
     """pair 境界が持つ実行制御の **安定 interface**（`PairFailureLedger` が実装）。
 
     consumer（workflow / reanalysis / checker / production boundary）はこの 6 つ
-    しか使わない。記録の保存形式・畳み込み・優先順位の解決は **すべて実装側**
-    にあるので、それらを変えても consumer は変わらない。
+    しか使わない。記録の保存形式・畳み込み・優先順位の解決・stop state の
+    escalation は **すべて実装側** にあるので、それらを変えても consumer は
+    変わらない。診断・test 専用の窓口はここに入れない（実装側に置く）。
     """
 
     def record_limitation(
@@ -443,10 +496,6 @@ class PairExecutionControl:
         raise NotImplementedError
 
     def allows_finalization(self) -> bool:
-        raise NotImplementedError
-
-    def recorded_failure_count(self) -> int:
-        """畳み込み後の記録件数（診断・test 用。判定には使わない）。"""
         raise NotImplementedError
 
 
@@ -481,16 +530,28 @@ class PairFailureLedger(PairExecutionControl):
     ) -> None:
         if not isinstance(exc, AnalysisLimitation):
             raise TypeError("pair ledger records exact analysis limitations")
-        stop_state = stop if stop is not None else _default_limitation_stop_state(exc)
-        if stop_state is PairStopState.NONE:
-            raise ValueError("a recorded limitation cannot leave the pair runnable")
+        kind = PairFailureKind.LIMITATION
+        stop_state = _checked_stop_state(
+            kind, stop if stop is not None else _default_stop_state(kind, exc),
+        )
         self._append(_limitation_record(exc, stop_state))
 
     def record_internal_bug(self, exc: BaseException, *, site: str) -> None:
-        if not isinstance(exc, BaseException):
-            raise TypeError("pair ledger records the original exception object")
+        """内部バグを 1 件記録する。
+
+        受け付けるのは **gate が受けられる型だけ**（`AnalysisFailureError` 族の
+        うち限界でないもの）。記録だけ成功して、raise された生の例外が境界を
+        素通りする状態を作らないための制限で、族の外の例外はここで拒否する
+        （`InternalError` に包んでから渡す）。
+        """
         if type(site) is not str or not site:
             raise ValueError("an internal bug record needs an exact observation site")
+        if classify_internal_bug_kind(exc) is not PairFailureKind.INTERNAL_BUG:
+            raise TypeError(
+                "pair ledger records internal bugs the boundary can also catch: "
+                f"{type(exc).__name__} is not an AnalysisFailureError that is not "
+                "an AnalysisLimitation; wrap it in InternalError first"
+            )
         self._append(_internal_bug_record(exc, site))
 
     def _append(self, record: _PairFailureRecord) -> None:
@@ -529,23 +590,28 @@ class PairFailureLedger(PairExecutionControl):
     def pending_failure(self) -> Optional[PairPendingFailure]:
         """優先順位を解決した failure 1 件。
 
-        順位は stop state の強さ（`_STOP_STATE_RANK`）で決める。同じ強さなら
-        記録順の先頭。**内部バグが限界に勝つ** のはこの 1 箇所の帰結で、
-        consumer 側には順位の知識を持たせない。
+        順位は **failure kind**（`_FAILURE_KIND_RANK`、軸 B）だけで決める。
+        同じ種別なら記録順の先頭。stop state の強さ（軸 D）は実行をどこまで
+        止めるかの話で、ここには効かない — stop state の値や順位を変えても
+        「内部バグが限界に勝つ」は動かない。
         """
         if not self._records:
             return None
         winner = max(
             enumerate(self._records),
-            key=lambda item: (_STOP_STATE_RANK[item[1].stop_state], -item[0]),
+            key=lambda item: (_FAILURE_KIND_RANK[item[1].kind], -item[0]),
         )[1]
         return winner.as_pending()
 
-    def recorded_failure_count(self) -> int:
-        return len(self._records)
+    # -- 診断・test 専用（安定 contract には含めない） ----------------------
 
-    def is_empty(self) -> bool:
-        return not self._records
+    def recorded_failure_count(self) -> int:
+        """畳み込み後の記録件数。
+
+        production の consumer は呼ばない（`PairExecutionControl` に無い）。
+        畳み込みが効いているかを test / 診断から確かめるためだけの窓口。
+        """
+        return len(self._records)
 
 
 # 台帳の stack。**process = pair 1 件 + 同期的な入れ子実行** を前提に module
