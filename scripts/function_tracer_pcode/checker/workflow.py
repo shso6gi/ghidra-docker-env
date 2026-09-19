@@ -26,6 +26,15 @@ from scripts.function_tracer_pcode.checker.phases.handler import (
     PhaseResult,
     PhaseSpec,
 )
+from scripts.function_tracer_pcode.checker.pair_execution import (
+    AnalysisLimitation,
+    InternalError,
+    apply_pair_failure_gate,
+    binary_display_name,
+    pair_allows_semantic_analysis,
+    pair_failure_result,
+    pair_stop_state,
+)
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 
 
@@ -54,19 +63,42 @@ def run_check_from_binaries(
     previous_timeline = getattr(checker, "_phase_timeline", _NO_PHASE_TIMELINE)
     checker._phase_timeline = phase_timeline
     result = None
+    pair_started = time.time()
     try:
-        result = _run_phase_plan(
-            checker,
-            program1,
-            program2,
-            function_name1,
-            function_name2,
-            decompile_timeout=decompile_timeout,
-            save_formula=save_formula,
-            retry_with_type_fix=retry_with_type_fix,
-            binary1_id=binary1_id,
-            binary2_id=binary2_id,
-        )
+        try:
+            result = _run_phase_plan(
+                checker,
+                program1,
+                program2,
+                function_name1,
+                function_name2,
+                decompile_timeout=decompile_timeout,
+                save_formula=save_formula,
+                retry_with_type_fix=retry_with_type_fix,
+                binary1_id=binary1_id,
+                binary2_id=binary2_id,
+            )
+        except (AnalysisLimitation, InternalError) as exc:
+            # G3（Issue #106 PR-106-0）: 初回解析など `check()` の外で起きた
+            # 限界 / 内部バグはここで結果になる。判定規則は `check()` の
+            # handler と同じで、違うのは「両側 analysis が無くても組める」点。
+            result = pair_failure_result(
+                checker,
+                exc,
+                function_name1=function_name1,
+                function_name2=function_name2,
+                binary1_name=binary_display_name(program1, "binary1"),
+                binary2_name=binary_display_name(program2, "binary2"),
+                start_time=pair_started,
+            )
+        else:
+            result = apply_pair_failure_gate(
+                checker,
+                result,
+                function_name1=function_name1,
+                function_name2=function_name2,
+                start_time=pair_started,
+            )
         return result
     finally:
         try:
@@ -225,6 +257,16 @@ def _run_phase_stages(
     for phase_spec in DEFAULT_PHASE_PLAN.copy():
         phase_id = phase_spec.phase_id
 
+        if not first_phase and not pair_allows_semantic_analysis():
+            # Issue #106 PR-106-0: pair が terminal になったら次の phase を
+            # 始めない。限界が深部で握り潰されて result が普通に返ってきた場合
+            # （例外が消えている場合）でも、台帳には残っているのでここで止まる。
+            checker._debug_print(
+                f"Stopping before phase {phase_id.value}: "
+                f"pair execution is terminal ({pair_stop_state().value})"
+            )
+            break
+
         checker._debug_print("=" * 60)
         checker._debug_print(f"Phase {phase_id.value}: {phase_spec.description}")
         checker._debug_print("=" * 60)
@@ -333,6 +375,18 @@ def _run_phase_stages(
             phase_diagnostics=phase_record,
         )
         attempt_id += 1
+
+        if not pair_allows_semantic_analysis():
+            # Issue #106 PR-106-0: この phase の途中で pair が terminal に
+            # なった。SAT 後の再試行（4-B / 4-C / 4-A）も次の phase も始めず、
+            # 得られた結果のまま境界へ返す（判定の差し替えは G3 が行う）。
+            checker._debug_print(
+                f"Phase {phase_id.value}: pair execution is terminal "
+                f"({pair_stop_state().value}) - stopping"
+            )
+            return _attach_trace_and_return(
+                result, debug_trace, start_time, result.is_equivalent
+            )
 
         finalized = _finalize_if_terminal(
             checker, result, debug_trace, start_time, phase_id.value
@@ -445,7 +499,13 @@ def _run_phase_stages(
 
         checker._debug_print(f"Proceeding to next phase ({retry_reason})")
 
-    if retry_with_type_fix and type_fixer1 and type_fixer2 and result is not None:
+    if (
+        retry_with_type_fix
+        and type_fixer1
+        and type_fixer2
+        and result is not None
+        and pair_allows_semantic_analysis()
+    ):
         result, attempt_id = _run_phase4a_tail(
             checker,
             ctx,

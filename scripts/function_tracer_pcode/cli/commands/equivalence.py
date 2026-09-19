@@ -338,10 +338,17 @@ def run_equivalence_check(args):
         attach_stage_timing,
     )
     from scripts.function_tracer_pcode.checker.cause_aggregate import attach_cause_aggregate
-    from scripts.function_tracer_pcode.core.errors import reset_swallowed_exceptions
+    from scripts.function_tracer_pcode.core.errors import (
+        reset_pair_failure_scopes,
+        reset_swallowed_exceptions,
+    )
 
     # Issue #125: 握り潰した例外の集計はペア 1 件の実行ごとに取り直す。
     reset_swallowed_exceptions()
+    # Issue #106 PR-106-0: pair 台帳 stack も同じ理由で空から始める。process =
+    # pair 1 件なので通常は既に空だが、前の pair の状態を引き継がないことを
+    # 入口でも保証する（台帳 scope 自体の破棄と二重の保証）。
+    reset_pair_failure_scopes()
     stage_clock = StageClock()
 
     # Issue #124 PR-124-B: journal と stack dump handler は **in-process の JVM を

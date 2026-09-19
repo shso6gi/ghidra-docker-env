@@ -22,6 +22,15 @@ from scripts.function_tracer_pcode.analysis.failure import (
     ANALYSIS_STATUS_FUNCTION_LOOKUP_MISS,
     ANALYSIS_STATUS_HIGH_FUNCTION_MISSING,
 )
+from scripts.function_tracer_pcode.checker.pair_execution import (
+    raise_pending_pair_failure,
+)
+
+
+# G1（Issue #106 PR-106-0）: この module の各解析の直後に
+# `raise_pending_pair_failure()` を置く。位置は「解析 1 側ぶんが終わった直後で、
+# `None` だったときの early return よりも **前**」。早期 return が先に走ると、
+# 限界が `DECOMPILATION_FAILED` などの運用 UNKNOWN / ERROR に化けてしまう。
 
 
 def analyze_and_check_with_analysis(
@@ -64,6 +73,7 @@ def analyze_and_check_with_analysis(
         timer.record_callee_parameter_cache("function1", analyzer1)
         timer.record_callee_analysis_cache("function1", analyzer1)
         timer.record_callee_unbound_reuse("function1", analyzer1)
+        raise_pending_pair_failure()
         if analysis1 is None:
             failure = analyzer1.get_last_analysis_failure()
             failure_status = getattr(failure, "status", None)
@@ -111,6 +121,7 @@ def analyze_and_check_with_analysis(
         timer.record_callee_parameter_cache("function2", analyzer2)
         timer.record_callee_analysis_cache("function2", analyzer2)
         timer.record_callee_unbound_reuse("function2", analyzer2)
+        raise_pending_pair_failure()
         if analysis2 is None:
             failure = analyzer2.get_last_analysis_failure()
             failure_status = getattr(failure, "status", None)
@@ -236,6 +247,7 @@ def selective_reanalysis_and_check(
             timer.record_callee_parameter_cache(side, analyzer)
             timer.record_callee_analysis_cache(side, analyzer)
             timer.record_callee_unbound_reuse(side, analyzer)
+            raise_pending_pair_failure()
             if fresh_analysis is None:
                 failure = analyzer.get_last_analysis_failure()
                 failure_status = getattr(failure, "status", None)

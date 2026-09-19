@@ -68,6 +68,9 @@ from scripts.function_tracer_pcode.checker.result_assembly import (
     internal_error_result,
     unsupported_smt_result,
 )
+from scripts.function_tracer_pcode.checker.pair_execution import (
+    raise_pending_pair_failure,
+)
 from scripts.function_tracer_pcode.checker.strategy_execution import (
     build_prepared_dispatch_frame,
     prepare_preflight_projection,
@@ -79,6 +82,10 @@ from scripts.function_tracer_pcode.checker.preflight_gate import PreflightGateMi
 from scripts.function_tracer_pcode.checker.root_causes import RootCauseMixin
 from scripts.function_tracer_pcode.checker.recovery_proofs import RecoveryProofMixin
 from scripts.function_tracer_pcode.checker.recurrence_stage import RecurrenceStageMixin
+
+
+#: `check()` が自分の名前で例外へ site を書くときの観測点（既存の文字列と同じ）。
+_CHECK_SITE = "checker.checker.EquivalenceChecker.check"
 
 
 # ============================================================================
@@ -780,6 +787,11 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                                 )
                             finally:
                                 del self._active_recurrence_promotion_authority
+                # G2（Issue #106 PR-106-0）: 結果を組む直前に、この pair で
+                # 未解消の限界 / 内部バグが残っていないかを台帳へ確かめる。
+                # 深部の `except Exception` に握り潰されていても、ここで例外に
+                # 戻して下の handler（限界 → UNKNOWN、内部バグ → ERROR）へ渡す。
+                raise_pending_pair_failure()
                 # 6b-5: E・F 段（結果組み立て + 私的付帯 3 つ）は段関数。mixin は call 時に self から解決する。
                 with stage_region("result_assembly"):
                     return assemble_equivalence_result(
@@ -885,9 +897,7 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                 # Issue #125: 型の付いていない例外は内部エラーとして分類する
                 # （`legacy_compatibility_error` には落とさない）。
                 return internal_error_result(
-                    InternalError(
-                        e, site="checker.checker.EquivalenceChecker.check",
-                    ),
+                    InternalError(e, site=_CHECK_SITE),
                     analysis1=analysis1,
                     analysis2=analysis2,
                     binary1_name=binary1_name,
