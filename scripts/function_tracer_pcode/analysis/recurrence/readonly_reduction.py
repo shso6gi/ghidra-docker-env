@@ -35,7 +35,11 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     _reduce_expression_under_conditions,
     canonicalize_location,
 )
-from scripts.function_tracer_pcode.analysis.debug import summarize_conditions, summarize_values
+from scripts.function_tracer_pcode.analysis.debug import (
+    bounded_items,
+    summarize_conditions,
+    summarize_values,
+)
 
 
 def _impl__has_readonly_pointer_reduction_candidate(
@@ -1024,15 +1028,16 @@ def _impl__record_readonly_reduction_return_region_proof(
     )
     if coverage_key is None:
         if self._debug_available():
-            # generator を渡すので、要約に載る先頭数件しか評価されない。
-            retained_condition_ops = (
+            # 評価するのは要約に載る先頭数件だけ。件数の上限は
+            # ``bounded_items`` でここに書く（消費側の遅延評価に頼らない）。
+            retained_condition_ops = [
                 summarize_conditions(getattr(ret, "conditions", None) or ())
-                for ret in retained_exact_returns or ()
-            )
-            summary_ops = (
+                for ret in bounded_items(retained_exact_returns or ())
+            ]
+            summary_ops = [
                 getattr(getattr(cond, "expression", None), "operator", None)
-                for cond in summary_conditions or ()
-            )
+                for cond in bounded_items(summary_conditions or ())
+            ]
             self._debug(
                 "Declined readonly reduction proof: coverage proof unavailable "
                 f"(summary_conditions={summarize_conditions(summary_conditions or ())}, "

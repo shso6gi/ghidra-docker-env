@@ -48,9 +48,11 @@ reaching definition も持たない）。曖昧な production site は checker �
   禁止呼び出しを含めない。guard の有無に関わらず禁止（debug ON でも辿らない）。
   引数に直接書いた場合だけでなく、**同じ関数で一度変数へ入れてから渡す形**も
   見る（代入 1 段。production も使う値は対象外）。
-* **R3** debug sink の引数で bounded renderer（``summarize_expression`` 等）を
-  使うときは debug guard の中で行う。renderer は有界だが、message の f-string
-  組み立て自体を debug OFF 時に走らせないため。
+* **R3** bounded renderer（``summarize_expression`` 等）を呼んでよいのは
+  debug guard の中だけ。renderer は有界だが、debug OFF のときに走らせる理由が
+  無い。**値の行き先は見ない — 呼んだ場所だけで決まる。** 例外は棚卸しで出た
+  3 つ（契約の owner module / 別の renderer の定義の中 / ``__repr__`` ・
+  ``__str__``）で、production 全体でもその 3 つしか無い。
 * **R4** ``__repr__`` / ``__str__`` が full render を呼ばない。``repr()`` は
   logging・例外・デバッガから暗黙に呼ばれるので、full render を持つと
   「debug OFF なら安全」が成立しない。
@@ -102,11 +104,14 @@ guard ではない形（``self._debug_suppressed`` 等）は
   するのは誤検出）。無視ではなく別 scope として改めて解析する。comprehension と
   class 本体はその場で走るのでそのまま辿る。
 
-代入 1 段の追跡は **読み出し node の id** を鍵にし、担当範囲は「その代入から、
-**同じ文の並び**で次に同じ名前へ代入する文まで」。別 branch・loop・``try`` の中の
-代入は何も打ち消さない（どちらの値が届くかは control flow の話で、この checker は
-それを推論しない）。``key = a.stable_key()`` … ``key = b.stable_key()`` のような
-直列の置き換え（本 package に 67 関数）だけが上書きとして効く。
+代入 1 段の追跡が要るのは **forbidden / unsafe renderer だけ**。あれらは
+production でも正当に使う呼び出しなので、「debug のためだけに作ったか」を見ないと
+判断できない。bounded renderer は R3 が呼んだ場所で決めるので追跡しない。
+
+追跡の担当範囲は「その代入から、**同じ文の並び**で次に同じ名前へ代入する文まで」。
+**production 共有の免除も、その範囲の中に debug 以外の読み出しが構文として見える
+ときだけ**与える。別 branch・loop・``try``・入れ子 scope の読み出しは、そこを本当に
+通るかが control flow 次第なので免除の根拠にしない（証明できなければ免除しない）。
 
 **renderer / 前準備を呼んでよい対象も exact shape**（:data:`DEBUG_RENDER_CALL_TARGETS`）。
 任意の Attribute chain を pure とみなすと ``self.expensive_property.summarize_expression(x)``
@@ -239,7 +244,7 @@ class EagerDebugRenderingViolations:
 
     render_in_debug_guard: List[Tuple[str, int, str]] = field(default_factory=list)
     render_in_debug_sink: List[Tuple[str, int, str]] = field(default_factory=list)
-    unguarded_summary_in_debug_sink: List[Tuple[str, int, str]] = field(default_factory=list)
+    renderer_outside_a_guard: List[Tuple[str, int, str]] = field(default_factory=list)
     render_in_dunder: List[Tuple[str, int, str]] = field(default_factory=list)
     unguarded_debug_preparation: List[Tuple[str, int, str]] = field(default_factory=list)
     renderer_in_guard_condition: List[Tuple[str, int, str]] = field(default_factory=list)
@@ -248,7 +253,7 @@ class EagerDebugRenderingViolations:
         return bool(
             self.render_in_debug_guard
             or self.render_in_debug_sink
-            or self.unguarded_summary_in_debug_sink
+            or self.renderer_outside_a_guard
             or self.render_in_dunder
             or self.unguarded_debug_preparation
             or self.renderer_in_guard_condition
@@ -266,9 +271,9 @@ class EagerDebugRenderingViolations:
                 f"R2 {module}:{lineno}: {detail} is evaluated to build a debug message; "
                 "use summarize_expression()/summarize_conditions() instead"
             )
-        for module, lineno, detail in self.unguarded_summary_in_debug_sink:
+        for module, lineno, detail in self.renderer_outside_a_guard:
             lines.append(
-                f"R3 {module}:{lineno}: {detail} builds a debug message outside a debug guard; "
+                f"R3 {module}:{lineno}: {detail} runs outside a debug guard; "
                 "wrap the call site in `if <debug available>:`"
             )
         for module, lineno, detail in self.render_in_dunder:
@@ -331,7 +336,7 @@ def _summary_call(node: ast.AST, renderers: FrozenSet[str]) -> Tuple[str, str]:
     """renderer 呼び出しを **種別つき**で返す（``(種別, 表示)``）。
 
     * ``("renderer", "summarize_expression()")`` — 宣言された対象で呼んでいる。
-      有界なので debug guard の中でなら使ってよい（R3）。
+      有界なので debug guard の中でだけ使ってよい（R3。判定は呼んだ場所だけ）。
     * ``("unsafe_renderer", "<computed>.summarize_expression()")`` — renderer の
       名前だが対象が契約の外（``expensive_factory().summarize_expression(x)`` /
       ``self.expensive_property.summarize_expression(x)``）。receiver の構築で
@@ -616,6 +621,22 @@ def deferred_regions_in(node: ast.AST) -> List[ast.AST]:
     return found
 
 
+def statement_scope_nodes(statement: ast.stmt) -> Iterator[ast.AST]:
+    """1 つの文のうち、**この scope に属する**部分を辿る。
+
+    文そのものが ``def`` / ``class`` のときは header だけ（本体は別 scope）。
+    :func:`walk_lexical_scope` は境界を子にしか当てないので、根が入れ子 scope の
+    ときのためにここで受け止める。
+    """
+
+    crossed = _binding_crossing(statement)
+    if crossed is None:
+        yield from walk_lexical_scope(statement)
+        return
+    for part in crossed:
+        yield from walk_lexical_scope(part)
+
+
 def function_body_nodes(
     function: "ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda",
 ) -> Iterator[ast.AST]:
@@ -627,13 +648,7 @@ def function_body_nodes(
 
     body = [function.body] if isinstance(function, ast.Lambda) else list(function.body)
     for statement in body:
-        crossed = _binding_crossing(statement)
-        if crossed is None:
-            yield from walk_lexical_scope(statement)
-        else:
-            # 本体の中の ``def`` / ``class`` — header だけがこの scope の話。
-            for part in crossed:
-                yield from walk_lexical_scope(part)
+        yield from statement_scope_nodes(statement)
 
 
 def _assignment_kind(value: ast.AST, renderers: FrozenSet[str]) -> Tuple[str, str]:
@@ -657,30 +672,6 @@ def _assignment_kind(value: ast.AST, renderers: FrozenSet[str]) -> Tuple[str, st
         elif kind == "renderer" and not entry[0]:
             entry = (kind, label)
     return entry
-
-
-def _next_sibling_assignment(
-    function: "ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda",
-    assignment: ast.stmt,
-    name: str,
-) -> Optional[Tuple[int, int]]:
-    """``assignment`` と **同じ文の並び**で、その次に ``name`` へ代入する位置。
-
-    見るのは自分がいる statement list だけ。``if`` / loop / ``try`` の中や別の
-    branch にある代入は数えない — そこへ本当に到達するかは control flow の話で、
-    この checker は control flow を推論しない（:func:`_debug_only_locals` の
-    docstring に方針）。
-    """
-
-    for block in _statement_lists(function):
-        if assignment not in block:
-            continue
-        start = block.index(assignment)
-        for statement in block[start + 1:]:
-            if name in _assigned_names(statement):
-                return (statement.lineno, statement.col_offset)
-        return None
-    return None
 
 
 def _assigned_names(statement: ast.stmt) -> Set[str]:
@@ -718,96 +709,104 @@ def _statement_lists(
                 stack.append(case.body)
 
 
+def _local_window(block: List[ast.stmt], index: int, name: str) -> List[ast.stmt]:
+    """``block[index]`` の代入が担当する範囲 — 次に同名へ代入する文の手前まで。
+
+    **同じ文の並びの中だけ**。別 branch / loop / ``try`` の文は入らない。
+    """
+
+    window: List[ast.stmt] = []
+    for statement in block[index + 1:]:
+        if name in _assigned_names(statement):
+            break
+        window.append(statement)
+    return window
+
+
 def _debug_only_locals(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     renderers: FrozenSet[str],
 ) -> Dict[int, Tuple[str, str]]:
     """**debug のためだけに**作られた値を読んでいる名前 → ``(種別, 呼び出し名)``。
 
-    ``rendered = ConditionNormalizer.get_simplified_string(cond)`` を
-    ``self._debug_print(rendered)`` へ渡す形を捕まえるための **代入 1 段**だけの
-    追跡。種別は 3 つ:
+    対象は 2 種類だけ:
 
-    * ``"forbidden"`` — 禁止された呼び出し（R2。guard の有無に関わらず不可）
-    * ``"unsafe_renderer"`` — renderer の名前だが対象が契約の外（R2 / R6）
-    * ``"renderer"`` — 有界 renderer（R3。guard の外で組み立ててはいけない）
+    * ``"forbidden"`` — 禁止された呼び出し（``to_string`` / ``to_smt`` / 重い
+      診断 helper）。production でも正当に使う呼び出しなので、「debug のために
+      だけ作ったか」を見ないと判断できない
+    * ``"unsafe_renderer"`` — renderer の名前だが対象が契約の外
 
-    **control flow は推論しない。** 1 つの代入が「その後どの読み出しに届くか」は
-    次の 2 つだけで決める:
+    bounded renderer はここで追わない。**呼んでよい場所**が構文で決まっている
+    （R3: debug guard の中か、owner か、renderer 定義の中か、``__repr__`` /
+    ``__str__``）ので、値がどこへ流れるかを調べる必要が無い。
 
-    * 読み出しがその代入より後ろにある（source 順）
-    * **同じ文の並び**でその名前へ次に代入する文より手前にある
+    **production 共有の免除は、同じ文の並びの中だけで証明する。** ある代入が
+    担当するのは :func:`_local_window`（次に同名へ代入する文の手前まで、同じ
+    並びの中）で、そこに debug 以外の読み出しがあれば「production も使う値」と
+    して免除する。別 branch・loop・``try``・入れ子 scope の読み出しは免除の
+    根拠にしない — その経路を本当に通るかは control flow の話で、この checker は
+    それを推論しないため。証明できなければ免除しない（fail-closed）。
 
-    ``if`` / ``else`` / loop / ``try`` / ``match`` の別 branch にある代入は、
-    到達するかどうかが control flow 次第なので何も打ち消さない。分岐を跨いで
-    「どの代入の値が届くか」を証明しようとはしない（そこまで要るなら、その
-    production site を guard の中へ寄せる方が正しい — 契約は
-    「debug 専用の下ごしらえは guard の中」）。
-
-    production が同じ値を使っている場合（``smt = expr.to_smt()`` を制約に使い、
-    ついでに debug にも出す）は対象外。判定は「その代入に届く読み出しが
-    **すべて** debug 専用の位置（debug sink の引数、または guard 条件の後続
-    conjunct）にあるか」で行う。
-
-    走査は :func:`function_body_nodes`（この関数の本体だけ）。返り値は
-    ``id(<Name node>) -> (種別, 表示)``。その読み出しだけが報告対象。
+    返り値は ``id(<Name node>) -> (種別, 表示)``。その読み出しだけが報告対象。
     """
 
-    body = list(function_body_nodes(function))
+    reported: Dict[int, Tuple[str, str]] = {}
+    for block in _statement_lists(function):
+        for index, statement in enumerate(block):
+            if not isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                continue
+            if statement.value is None:
+                continue
+            kind, label = _assignment_kind(statement.value, renderers)
+            if kind not in ("forbidden", "unsafe_renderer"):
+                continue
+            for name in _assigned_names(statement):
+                window = _local_window(block, index, name)
+                reads = [
+                    node
+                    for target in window
+                    for node in statement_scope_nodes(target)
+                    if isinstance(node, ast.Name)
+                    and isinstance(node.ctx, ast.Load)
+                    and node.id == name
+                ]
+                if not reads:
+                    continue
+                debug_reads = _debug_read_positions(window, renderers)
+                if not all(id(node) in debug_reads for node in reads):
+                    continue  # production も読む値 — debug 側の問題ではない
+                for node in reads:
+                    reported[id(node)] = (kind, label)
+    return reported
 
-    assignments: List[Tuple[str, Tuple[int, int], Optional[Tuple[int, int]], Tuple[str, str]]] = []
-    for statement in body:
-        if not isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-            continue
-        if statement.value is None:
-            continue
-        entry = _assignment_kind(statement.value, renderers)
-        if not entry[0]:
-            continue
-        position = (statement.lineno, statement.col_offset)
-        for name in _assigned_names(statement):
-            assignments.append(
-                (name, position, _next_sibling_assignment(function, statement, name), entry)
-            )
-    if not assignments:
-        return {}
 
-    debug_positions = {
+def _debug_read_positions(
+    window: Sequence[ast.stmt], renderers: FrozenSet[str]
+) -> Set[int]:
+    """``window`` の中で **debug 専用の読み出し位置**にある ``Name`` node。
+
+    debug sink の引数か、debug guard 条件の後続 conjunct。
+    """
+
+    positions = {
         id(name)
-        for call in body
+        for statement in window
+        for call in statement_scope_nodes(statement)
         if isinstance(call, ast.Call) and _is_debug_sink(call, renderers)
         for argument in list(call.args) + [keyword.value for keyword in call.keywords]
         for name in walk_evaluated_now(argument)
         if isinstance(name, ast.Name)
     }
-    # guard 条件の後続 conjunct も debug 専用の読み出し位置。
-    debug_positions |= {
+    positions |= {
         id(name)
-        for branch in body
+        for statement in window
+        for branch in statement_scope_nodes(statement)
         if isinstance(branch, (ast.If, ast.IfExp))
         for conjunct in debug_only_conjuncts(branch.test)
         for name in walk_evaluated_now(conjunct)
         if isinstance(name, ast.Name)
     }
-
-    reads: Dict[str, List[ast.Name]] = {}
-    for node in body:
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-            reads.setdefault(node.id, []).append(node)
-
-    reported: Dict[int, Tuple[str, str]] = {}
-    for name, position, stop, entry in assignments:
-        window = [
-            node
-            for node in reads.get(name, ())
-            if position < (node.lineno, node.col_offset)
-            and (stop is None or (node.lineno, node.col_offset) < stop)
-        ]
-        if not window or not all(id(node) in debug_positions for node in window):
-            continue
-        for node in window:
-            reported[id(node)] = entry
-    return reported
+    return positions
 
 
 def _is_debug_guard_clause(statement: ast.stmt) -> bool:
@@ -1143,6 +1142,23 @@ class _EagerDebugRenderingScanner:
         #: 鍵が読み出し node そのものなので、同名の別束縛（入れ子 scope の
         #: parameter、同じ scope の別の代入）と取り違えようがない。
         self.debug_only_reads: Dict[int, Tuple[str, str]] = {}
+        #: いま走査している関数名（内側が末尾）。R3 の免除判定に使う。
+        self.function_names: List[str] = []
+
+    def _may_render_here(self) -> bool:
+        """有界 renderer を guard 無しで呼んでよい場所か。
+
+        棚卸しで出た 3 つだけ: 契約の owner module、別の renderer の定義の中
+        （wrapper の委譲）、``__repr__`` / ``__str__``（そこで有界な要約を返すのが
+        R4 の目的そのもの）。ほかは guard の中でだけ。
+        """
+
+        if self.module == CONTRACT_OWNER_MODULE:
+            return True
+        if not self.function_names:
+            return False
+        innermost = self.function_names[-1]
+        return innermost in self.renderers or innermost in RENDER_FREE_DUNDERS
 
     @contextmanager
     def _scope(self, function: Optional[ast.AST]) -> Iterator[None]:
@@ -1222,10 +1238,14 @@ class _EagerDebugRenderingScanner:
                 # 束縛としては別 scope だが、本体は**その場で**実行される。
                 with self._scope(None):
                     self._walk_body(statement.body, guarded=guarded)
-            else:
-                # 別の呼び出し文脈で実行されるので guard を引き継がない。
+                return
+            # 別の呼び出し文脈で実行されるので guard を引き継がない。
+            self.function_names.append(statement.name)
+            try:
                 with self._scope(statement):
                     self._walk_body(statement.body, guarded=False)
+            finally:
+                self.function_names.pop()
             return
         for name, value in ast.iter_fields(statement):
             if name in {"body", "orelse", "finalbody"}:
@@ -1317,6 +1337,14 @@ class _EagerDebugRenderingScanner:
             label = _render_call_label(sub)
             if label and guarded:
                 self.violations.render_in_debug_guard.append((self.module, sub.lineno, label))
+            call_kind, call_label = _summary_call(sub, self.renderers)
+            if call_kind == "renderer" and not guarded and not self._may_render_here():
+                # R3: 有界 renderer を呼んでよいのは debug guard の中だけ
+                # （owner / renderer 定義 / ``__repr__`` を除く）。値がどこへ
+                # 流れるかは見ない — 呼んだ場所だけで決まる。
+                self.violations.renderer_outside_a_guard.append(
+                    (self.module, sub.lineno, call_label)
+                )
             if (
                 isinstance(sub, ast.Call)
                 and not guarded
@@ -1339,10 +1367,6 @@ class _EagerDebugRenderingScanner:
                             (self.module, sub.lineno, f"{_called_name(sub)}(... {render} ...)")
                         )
                     call_kind, call_label = _summary_call(inner, self.renderers)
-                    if call_kind == "renderer" and not guarded:
-                        self.violations.unguarded_summary_in_debug_sink.append(
-                            (self.module, sub.lineno, f"{_called_name(sub)}(... {call_label} ...)")
-                        )
                     if call_kind == "unsafe_renderer":
                         # renderer の名前でも、対象が契約の外なら「有界な描画」
                         # ではない（receiver の構築が任意処理）。
@@ -1352,12 +1376,8 @@ class _EagerDebugRenderingScanner:
                     if isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load):
                         kind, label = self._label_for(inner)
                         detail = f"{_called_name(sub)}(... {inner.id} = {label} ...)"
-                        if kind in ("forbidden", "unsafe_renderer"):
+                        if kind:
                             self.violations.render_in_debug_sink.append(
-                                (self.module, sub.lineno, detail)
-                            )
-                        elif kind == "renderer" and not guarded:
-                            self.violations.unguarded_summary_in_debug_sink.append(
                                 (self.module, sub.lineno, detail)
                             )
 
@@ -1417,7 +1437,7 @@ def test_no_full_render_in_debug_sink_arguments():
 
 def test_debug_messages_with_summaries_are_guarded():
     violations = scan_package()
-    assert not violations.unguarded_summary_in_debug_sink, violations.describe()
+    assert not violations.renderer_outside_a_guard, violations.describe()
 
 
 def test_repr_and_str_do_not_full_render():
@@ -1475,8 +1495,8 @@ def test_a_new_owner_renderer_needs_no_change_here():
         "    self._debug_print(f'w={summarize_widget(widget)}')\n",
         renderers,
     )
-    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
-        "_debug_print(... summarize_widget() ...)"
+    assert [entry[2] for entry in violations.renderer_outside_a_guard] == [
+        "summarize_widget()"
     ]
 
 
@@ -1662,8 +1682,8 @@ def test_scanner_detects_unguarded_summary_in_a_debug_message():
         "def f(self, expr):\n"
         "    self._debug_print(f'value={summarize_expression(expr)}')\n",
     )
-    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
-        "_debug_print(... summarize_expression() ...)"
+    assert [entry[2] for entry in violations.renderer_outside_a_guard] == [
+        "summarize_expression()"
     ]
 
 
@@ -1715,7 +1735,7 @@ def test_scanner_decides_a_guard_by_shape_not_by_name(test_source, guarded, labe
         f"    {test_source}\n"
         "        self._debug_print(f'v={summarize_expression(expr)}')\n",
     )
-    assert bool(violations.unguarded_summary_in_debug_sink) is not guarded, label
+    assert bool(violations.renderer_outside_a_guard) is not guarded, label
 
 
 def test_scanner_treats_an_early_return_guard_clause_by_shape():
@@ -1735,7 +1755,7 @@ def test_scanner_treats_an_early_return_guard_clause_by_shape():
         "        return\n"
         "    self._debug_print(f'v={summarize_expression(expr)}')\n",
     )
-    assert unguarded.unguarded_summary_in_debug_sink
+    assert unguarded.renderer_outside_a_guard
 
 
 def test_scanner_refuses_a_heavy_diagnostic_helper_in_debug_output():
@@ -1946,52 +1966,6 @@ def test_a_forbidden_call_is_caught_however_it_is_spelled(name):
     assert direct.render_in_debug_sink, name
 
 
-def test_a_direct_forbidden_call_is_caught_through_a_local():
-    violations = scan_source(
-        "sample",
-        "def f(self, cond):\n"
-        "    rendered = get_simplified_string(cond)\n"
-        "    self._debug_print(rendered)\n",
-    )
-    assert [entry[2] for entry in violations.render_in_debug_sink] == [
-        "_debug_print(... rendered = get_simplified_string() ...)"
-    ]
-
-
-def test_a_bounded_renderer_through_a_local_still_needs_a_guard():
-    """``summary = summarize_expression(expr)`` も debug OFF で走ってはいけない。"""
-
-    unguarded = scan_source(
-        "sample",
-        "def f(self, expr):\n"
-        "    summary = summarize_expression(expr)\n"
-        "    self._debug_print(summary)\n",
-    )
-    assert [entry[2] for entry in unguarded.unguarded_summary_in_debug_sink] == [
-        "_debug_print(... summary = summarize_expression() ...)"
-    ]
-
-    guarded = scan_source(
-        "sample",
-        "def f(self, expr):\n"
-        "    if self.debug:\n"
-        "        summary = summarize_expression(expr)\n"
-        "        self._debug_print(summary)\n",
-    )
-    assert not guarded.unguarded_summary_in_debug_sink
-
-
-def test_a_renderer_result_production_also_reads_is_not_a_debug_problem():
-    violations = scan_source(
-        "sample",
-        "def f(self, expr):\n"
-        "    summary = summarize_expression(expr)\n"
-        "    record(summary)\n"
-        "    self._debug_print(summary)\n",
-    )
-    assert not violations.unguarded_summary_in_debug_sink
-
-
 @pytest.mark.parametrize(
     "call, accepted, label",
     [
@@ -2134,23 +2108,6 @@ def test_a_cheap_second_conjunct_is_still_fine(condition):
         "        self._debug_print('x')\n",
     )
     assert not violations, violations.describe()
-
-
-def test_a_renderer_read_only_in_a_guard_condition_is_caught():
-    """代入 1 段で条件式へ渡す形も同じ（debug OFF でも renderer は走る）。"""
-
-    violations = scan_source(
-        "sample",
-        "def f(self, expr):\n"
-        "    summary = summarize_expression(expr)\n"
-        "    if self.debug and summary:\n"
-        "        self._debug_print(summary)\n",
-    )
-    assert [entry[2] for entry in violations.renderer_in_guard_condition] == [
-        "summary = summarize_expression()"
-    ]
-
-
 def test_a_forbidden_call_read_only_in_a_guard_condition_is_caught():
     violations = scan_source(
         "sample",
@@ -2465,54 +2422,19 @@ _NESTED_SCOPE_SHADOWS = [
 ]
 
 
-@pytest.mark.parametrize(
-    "label, nested", _NESTED_SCOPE_SHADOWS, ids=[case[0] for case in _NESTED_SCOPE_SHADOWS]
-)
-def test_a_nested_scope_with_the_same_name_does_not_hide_an_unguarded_summary(label, nested):
-    """内側 scope の同名変数があっても外側の R3 判定は変わらない。"""
-
-    violations = scan_source(
-        "sample",
-        "def f(self, expr, items, consume):\n"
-        "    summary = summarize_expression(expr)\n"
-        + nested
-        + "    self._debug_print(summary)\n",
-    )
-    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
-        "_debug_print(... summary = summarize_expression() ...)"
-    ], label
-
-
-@pytest.mark.parametrize(
-    "label, nested", _NESTED_SCOPE_SHADOWS, ids=[case[0] for case in _NESTED_SCOPE_SHADOWS]
-)
-def test_a_nested_scope_with_the_same_name_does_not_hide_a_forbidden_call(label, nested):
-    violations = scan_source(
-        "sample",
-        "def f(self, expr, items, consume):\n"
-        "    summary = expr.to_string()\n"
-        + nested
-        + "    self._debug_print(summary)\n",
-    )
-    assert [entry[2] for entry in violations.render_in_debug_sink] == [
-        "_debug_print(... summary = to_string() ...)"
-    ], label
-
-
 def test_a_nested_scope_name_is_not_attributed_to_the_outer_local():
-    """逆向きも: 内側 scope の同名読み出しを外側の追跡結果と取り違えない。"""
+    """内側 scope の同名読み出しを外側の追跡結果と取り違えない。"""
 
     violations = scan_source(
         "sample",
-        "def f(self, expr, apply):\n"
-        "    summary = summarize_expression(expr)\n"
-        "    if self.debug:\n"
-        "        self._debug_print(summary)\n"
-        "    apply(lambda summary: self._debug_print(summary))\n",
+        "def f(self, expr, apply, consume):\n"
+        "    rendered = expr.to_string()\n"
+        "    consume(rendered)\n"
+        "    apply(lambda rendered: self._debug_print(rendered))\n",
     )
-    # 外側は guard 内なので R3 ではない。内側 lambda の ``summary`` は別の束縛
-    # （引数）なので、それを外側の renderer 結果として報告してはいけない。
-    assert not violations.unguarded_summary_in_debug_sink, violations.describe()
+    # 外側の ``rendered`` は production も読むので免除。内側 lambda の
+    # ``rendered`` は別の束縛（引数）なので、外側の値として報告してはいけない。
+    assert not violations.render_in_debug_sink, violations.describe()
 
 
 def test_a_nested_scope_is_still_analysed_on_its_own():
@@ -2526,8 +2448,8 @@ def test_a_nested_scope_is_still_analysed_on_its_own():
         "        self._debug_print(summary)\n"
         "    return inner\n",
     )
-    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
-        "_debug_print(... summary = summarize_expression() ...)"
+    assert [entry[2] for entry in violations.renderer_outside_a_guard] == [
+        "summarize_expression()"
     ]
 
 
@@ -2580,26 +2502,26 @@ def test_a_function_header_name_is_not_a_body_read(header, label):
         "        summary = summarize_expression(expr)\n"
         "        self._debug_print(summary)\n",
     )
-    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
-        "_debug_print(... summary = summarize_expression() ...)"
+    assert [entry[2] for entry in violations.renderer_outside_a_guard] == [
+        "summarize_expression()"
     ], label
 
 
 def test_a_nested_function_header_reads_the_outer_name():
-    """逆向き: 内側 ``def`` の default は外側の名前を読む（過検出しない）。"""
+    """内側 ``def`` の default は外側の名前を読む（過検出しない）。"""
 
     violations = scan_source(
         "sample",
         "def f(self, expr):\n"
-        "    summary = summarize_expression(expr)\n"
-        "    def inner(x=summary):\n"
+        "    rendered = expr.to_string()\n"
+        "    def inner(x=rendered):\n"
         "        return x\n"
-        "    self._debug_print(summary)\n"
+        "    self._debug_print(rendered)\n"
         "    return inner\n",
     )
-    # 外側 ``summary`` は sink 以外（inner の default）でも読まれているので
+    # 外側 ``rendered`` は sink 以外（inner の default）でも読まれているので
     # production 共有として免除される。
-    assert not violations.unguarded_summary_in_debug_sink, violations.describe()
+    assert not violations.render_in_debug_sink, violations.describe()
 
 
 # -- A2: 同名への再代入 --------------------------------------------------------
@@ -2607,8 +2529,6 @@ def test_a_nested_function_header_reads_the_outer_name():
 @pytest.mark.parametrize(
     "producer, bucket, detail",
     [
-        ("summarize_expression(b)", "unguarded_summary_in_debug_sink",
-         "_debug_print(... summary = summarize_expression() ...)"),
         ("b.to_string()", "render_in_debug_sink",
          "_debug_print(... summary = to_string() ...)"),
         ("expensive_factory().summarize_expression(b)", "render_in_debug_sink",
@@ -2657,8 +2577,8 @@ def test_an_earlier_debug_only_assignment_is_not_excused_by_a_later_production_o
         "    summary = compute(b)\n"
         "    consume(summary)\n",
     )
-    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
-        "_debug_print(... summary = summarize_expression() ...)"
+    assert [entry[2] for entry in violations.renderer_outside_a_guard] == [
+        "summarize_expression()"
     ]
 
 
@@ -2725,13 +2645,13 @@ def test_a_lambda_body_is_still_analysed_as_its_own_scope():
         "def f(self, expr):\n"
         "    return lambda: self._debug_print(summarize_expression(expr))\n",
     )
-    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
-        "_debug_print(... summarize_expression() ...)"
+    assert [entry[2] for entry in violations.renderer_outside_a_guard] == [
+        "summarize_expression()"
     ]
 
 
 def test_a_comprehension_is_evaluated_where_it_is_written():
-    """comprehension は遅延しない（generator 式も含め、その場で組み立てる）。"""
+    """list / set / dict の内包表記はその場で全部走る（generator とは別）。"""
 
     violations = scan_source(
         "sample",
@@ -2768,58 +2688,20 @@ _CONDITIONAL_REASSIGNMENTS = [
 ]
 
 
-@pytest.mark.parametrize(
-    "label, reassignment",
-    _CONDITIONAL_REASSIGNMENTS,
-    ids=[case[0] for case in _CONDITIONAL_REASSIGNMENTS],
-)
-def test_a_conditional_reassignment_does_not_kill_a_renderer(label, reassignment):
-    """条件付きの再代入は前の定義を殺さない（renderer の値が sink へ届き得る）。"""
-
-    violations = scan_source(
-        "sample",
-        "def f(self, expr, cheap, cond, items, lock):\n"
-        "    summary = summarize_expression(expr)\n"
-        + reassignment
-        + "    self._debug_print(summary)\n",
-    )
-    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
-        "_debug_print(... summary = summarize_expression() ...)"
-    ], label
-
-
-@pytest.mark.parametrize(
-    "label, reassignment",
-    _CONDITIONAL_REASSIGNMENTS,
-    ids=[case[0] for case in _CONDITIONAL_REASSIGNMENTS],
-)
-def test_a_conditional_reassignment_does_not_kill_a_forbidden_call(label, reassignment):
-    violations = scan_source(
-        "sample",
-        "def f(self, expr, cheap, cond, items, lock):\n"
-        "    summary = expr.to_string()\n"
-        + reassignment
-        + "    self._debug_print(summary)\n",
-    )
-    assert [entry[2] for entry in violations.render_in_debug_sink] == [
-        "_debug_print(... summary = to_string() ...)"
-    ], label
-
-
 def test_a_straight_line_reassignment_still_kills_the_earlier_definition():
     """同じ直列区間の再代入は従来どおり上書きとして扱う。"""
 
     violations = scan_source(
         "sample",
         "def f(self, a, b, consume):\n"
-        "    summary = summarize_expression(a)\n"
-        "    consume(summary)\n"
-        "    summary = summarize_expression(b)\n"
-        "    self._debug_print(summary)\n",
+        "    rendered = a.to_string()\n"
+        "    consume(rendered)\n"
+        "    rendered = b.to_string()\n"
+        "    self._debug_print(rendered)\n",
     )
     # 前半は production に読まれて免除、後半だけが報告される。
-    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
-        "_debug_print(... summary = summarize_expression() ...)"
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [
+        "_debug_print(... rendered = to_string() ...)"
     ]
 
 
@@ -2830,12 +2712,12 @@ def test_a_straight_line_reassignment_inside_a_branch_still_kills():
         "sample",
         "def f(self, a, b, cond, consume):\n"
         "    if cond:\n"
-        "        summary = summarize_expression(a)\n"
-        "        consume(summary)\n"
-        "        summary = b\n"
-        "        self._debug_print(summary)\n",
+        "        rendered = a.to_string()\n"
+        "        consume(rendered)\n"
+        "        rendered = b\n"
+        "        self._debug_print(rendered)\n",
     )
-    assert not violations.unguarded_summary_in_debug_sink, violations.describe()
+    assert not violations.render_in_debug_sink, violations.describe()
 
 
 def test_an_outer_assignment_reaches_a_read_inside_a_branch():
@@ -2848,8 +2730,8 @@ def test_an_outer_assignment_reaches_a_read_inside_a_branch():
         "    if cond:\n"
         "        self._debug_print(summary)\n",
     )
-    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
-        "_debug_print(... summary = summarize_expression() ...)"
+    assert [entry[2] for entry in violations.renderer_outside_a_guard] == [
+        "summarize_expression()"
     ]
 
 
@@ -3020,8 +2902,8 @@ def test_an_ordinary_expression_makes_no_region():
             "    if self.debug:\n"
             "        gen = (self._debug_print(summarize_expression(x)) for x in items)\n"
             "        return gen\n",
-            "unguarded_summary_in_debug_sink",
-            "_debug_print(... summarize_expression() ...)",
+            "renderer_outside_a_guard",
+            "summarize_expression()",
         ),
         (
             "filter は後で評価",
@@ -3029,8 +2911,8 @@ def test_an_ordinary_expression_makes_no_region():
             "    if self.debug:\n"
             "        gen = (x for x in items if self._debug_print(summarize_expression(x)))\n"
             "        return gen\n",
-            "unguarded_summary_in_debug_sink",
-            "_debug_print(... summarize_expression() ...)",
+            "renderer_outside_a_guard",
+            "summarize_expression()",
         ),
         (
             "2 本目の iterable は後で評価",
@@ -3038,8 +2920,8 @@ def test_an_ordinary_expression_makes_no_region():
             "    if self.debug:\n"
             "        gen = (y for x in items for y in self._debug_print(summarize_expression(x)))\n"
             "        return gen\n",
-            "unguarded_summary_in_debug_sink",
-            "_debug_print(... summarize_expression() ...)",
+            "renderer_outside_a_guard",
+            "summarize_expression()",
         ),
     ],
 )
@@ -3083,40 +2965,20 @@ _SIBLING_REASSIGNMENTS = [
 ]
 
 
-@pytest.mark.parametrize(
-    "label, tail", _SIBLING_REASSIGNMENTS, ids=[case[0] for case in _SIBLING_REASSIGNMENTS]
-)
-def test_a_reassignment_in_another_block_does_not_hide_the_renderer(label, tail):
-    """別 branch / loop / try の再代入は前の代入を打ち消さない。
-
-    どちらの値が届くかは control flow の話で、この checker は推論しない。
-    到達し得る以上、renderer は debug OFF でも走っている。
-    """
-
-    violations = scan_source(
-        "sample",
-        "def f(self, expr, cheap, cond, items):\n"
-        "    summary = summarize_expression(expr)\n" + tail,
-    )
-    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
-        "_debug_print(... summary = summarize_expression() ...)"
-    ], label
-
-
 def test_only_the_next_assignment_in_the_same_statement_list_ends_the_window():
     """同じ並びの次の代入までが、その代入の担当範囲。"""
 
     violations = scan_source(
         "sample",
         "def f(self, a, b, consume):\n"
-        "    summary = summarize_expression(a)\n"
-        "    consume(summary)\n"
-        "    summary = summarize_expression(b)\n"
-        "    self._debug_print(summary)\n",
+        "    rendered = a.to_string()\n"
+        "    consume(rendered)\n"
+        "    rendered = b.to_string()\n"
+        "    self._debug_print(rendered)\n",
     )
     # 前半は production も読むので免除、後半だけが報告される。
-    assert [entry[2] for entry in violations.unguarded_summary_in_debug_sink] == [
-        "_debug_print(... summary = summarize_expression() ...)"
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [
+        "_debug_print(... rendered = to_string() ...)"
     ]
 
 
@@ -3127,6 +2989,176 @@ def test_the_checker_keeps_no_statement_path_machinery():
 
     for gone in ("StatementPath", "_unconditionally_precedes", "_statement_paths"):
         assert not hasattr(module, gone), f"{gone} is back"
+
+
+# -- R3: 有界 renderer は「呼んだ場所」で決まる ---------------------------------
+
+def test_a_renderer_outside_a_guard_is_refused_wherever_the_value_goes():
+    """値の行き先は見ない。guard の外で呼んだ時点で違反。"""
+
+    for tail in (
+        "    return summary\n",
+        "    self._debug_print(summary)\n",
+        "    consume(summary)\n",
+        "",
+    ):
+        violations = scan_source(
+            "sample",
+            "def f(self, expr, consume):\n"
+            "    summary = summarize_expression(expr)\n" + tail,
+        )
+        assert [entry[2] for entry in violations.renderer_outside_a_guard] == [
+            "summarize_expression()"
+        ], tail
+
+
+def test_a_renderer_inside_a_guard_is_fine():
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    if self._debug_available():\n"
+        "        summary = summarize_expression(expr)\n"
+        "        self._debug_print(summary)\n",
+    )
+    assert not violations, violations.describe()
+
+
+@pytest.mark.parametrize(
+    "module, source, label",
+    [
+        (
+            CONTRACT_OWNER_MODULE,
+            "def summarize_widget(value):\n    return summarize_expression(value)\n",
+            "owner module",
+        ),
+        (
+            "sample",
+            "def _debug_expr_summary(self, expr):\n    return summarize_expression(expr)\n",
+            "renderer 定義の中（wrapper の委譲）",
+        ),
+        (
+            "sample",
+            "class Holder:\n"
+            "    def __repr__(self):\n"
+            "        return f'Holder({summarize_expression(self.value)})'\n",
+            "__repr__（有界な要約を返すのが R4 の目的）",
+        ),
+    ],
+)
+def test_the_three_places_a_renderer_may_run_without_a_guard(module, source, label):
+    """棚卸しで出た 3 つの免除だけ。ほかは guard の中でだけ。"""
+
+    renderers = OWNED_SUMMARY_FUNCTIONS | {"_debug_expr_summary"}
+    violations = scan_source(module, source, renderers)
+    assert not violations.renderer_outside_a_guard, label
+
+
+def test_an_ordinary_function_is_not_exempt():
+    """免除は 3 つだけ — ふつうの関数名では効かない。"""
+
+    violations = scan_source(
+        "sample",
+        "def build_report(self, expr):\n    return summarize_expression(expr)\n",
+    )
+    assert [entry[2] for entry in violations.renderer_outside_a_guard] == [
+        "summarize_expression()"
+    ]
+
+
+# -- production 共有の免除は「同じ文の並び」でだけ証明する ----------------------
+
+_OTHER_BLOCK_READS = [
+    ("sibling if / else",
+     "def f(self, expr, cheap, cond, consume):\n"
+     "    rendered = cheap\n"
+     "    if cond:\n"
+     "        rendered = expr.to_string()\n"
+     "        self._debug_print(rendered)\n"
+     "    else:\n"
+     "        consume(rendered)\n"),
+    ("try / except",
+     "def f(self, expr, consume):\n"
+     "    try:\n"
+     "        rendered = expr.to_string()\n"
+     "        self._debug_print(rendered)\n"
+     "    except Exception:\n"
+     "        consume(rendered)\n"),
+    ("match の別 case",
+     "def f(self, expr, cond, consume):\n"
+     "    match cond:\n"
+     "        case 1:\n"
+     "            rendered = expr.to_string()\n"
+     "            self._debug_print(rendered)\n"
+     "        case _:\n"
+     "            consume(rendered)\n"),
+    ("loop の外",
+     "def f(self, expr, items, consume):\n"
+     "    for item in items:\n"
+     "        rendered = expr.to_string()\n"
+     "        self._debug_print(rendered)\n"
+     "    consume(rendered)\n"),
+    ("入れ子 scope",
+     "def f(self, expr, consume):\n"
+     "    rendered = expr.to_string()\n"
+     "    self._debug_print(rendered)\n"
+     "    def later(rendered=None):\n"
+     "        return consume(rendered)\n"
+     "    return later\n"),
+]
+
+
+@pytest.mark.parametrize(
+    "label, source", _OTHER_BLOCK_READS, ids=[case[0] for case in _OTHER_BLOCK_READS]
+)
+def test_a_production_read_in_another_block_does_not_grant_exemption(label, source):
+    """別 branch / loop / 入れ子 scope の read は免除の根拠にしない。
+
+    その経路を本当に通るかは control flow の話で、この checker は推論しない。
+    証明できなければ免除しない（fail-closed）。
+    """
+
+    violations = scan_source("sample", source)
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [
+        "_debug_print(... rendered = to_string() ...)"
+    ], label
+
+
+@pytest.mark.parametrize(
+    "producer, detail",
+    [
+        ("expr.to_string()", "_debug_print(... rendered = to_string() ...)"),
+        ("expr.to_smt()", "_debug_print(... rendered = to_smt() ...)"),
+        (
+            "expensive_factory().summarize_expression(expr)",
+            "_debug_print(... rendered = <computed>.summarize_expression() ...)",
+        ),
+    ],
+)
+def test_the_sibling_branch_rule_holds_for_every_tracked_producer(producer, detail):
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, cheap, cond, consume):\n"
+        "    rendered = cheap\n"
+        "    if cond:\n"
+        f"        rendered = {producer}\n"
+        "        self._debug_print(rendered)\n"
+        "    else:\n"
+        "        consume(rendered)\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [detail]
+
+
+def test_a_production_read_in_the_same_statement_list_does_grant_exemption():
+    """同じ並びで production read が構文的に見えるときだけ免除する。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, solver):\n"
+        "    smt = expr.to_smt()\n"
+        "    solver.add(smt)\n"
+        "    self._debug_print(smt)\n",
+    )
+    assert not violations.render_in_debug_sink, violations.describe()
 
 
 def test_the_two_declared_sets_do_not_overlap():
