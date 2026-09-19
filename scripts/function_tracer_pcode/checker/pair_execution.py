@@ -24,7 +24,7 @@ checker.result_assembly / authority … UNKNOWN / ERROR の判定・receipt・JS
 新しい failure class（`AnalysisFailureError` 派生）が増えても、この module も
 workflow / boundary も変更点は無い。`PairFailureKind` が 1 つ増えるとき — つまり
 「UNKNOWN でも `internal_exception` ERROR でもない新しい結果の種類」を足すとき —
-だけ、下の `_RESULT_FACTORY_BY_KIND` が唯一の対応点になる。
+だけ、下の `_HANDLING_BY_KIND` が唯一の対応点になる。
 """
 
 from __future__ import annotations
