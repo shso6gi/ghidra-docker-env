@@ -4,7 +4,7 @@
 このPRは **新しい限界の raise 箇所を作らない**。作るのは「限界が起きたら pair
 全体をどう止め、どう結果化するか」の土台だけなので、test は
 
-* 台帳（`PairFailureLedger`）の lifecycle と共有条件
+* 台帳（`PairExecutionControl`）の lifecycle と共有条件
 * G1〜G5 の各経路で限界 / 内部バグが失われないこと
 * 限界の後に **新しい意味解析** を始めないこと（phase / conditional lane）
 * 逆に **確定処理**（`connector.finish` / receipt / serialization）は続くこと
@@ -34,8 +34,11 @@ from scripts.function_tracer_pcode.checker.phases.handler import (
 from scripts.function_tracer_pcode.core.errors import (
     AnalysisLimitation,
     DeadlineExceeded,
+    ExpressionCycleError,
     FrozenExpressionError,
-    PairFailureLedger,
+    InternalError,
+    PairExecutionControl,
+    PairFailureKind,
     PairStopState,
     current_pair_ledger,
     pair_failure_scope,
@@ -530,7 +533,7 @@ def test_e0g_recursive_check_reports_one_unknown_with_one_cause():
     assert len(seen_ledgers) == 2
     assert seen_ledgers[0] is seen_ledgers[1] is not None
     # 同じ `(site, target_key)` の再 raise は 1 件に畳む。
-    assert len(seen_ledgers[0].limitations()) == 1
+    assert seen_ledgers[0].recorded_failure_count() == 1
     assert result.is_equivalent is None and result.error_message is None
     assert _reason_ids(result) == [BUDGET_REASON]
     assert len(result.canonical_c_active_base) == 1
@@ -892,7 +895,271 @@ def test_e0k_an_internal_bug_outranks_a_limitation_in_the_same_pair():
 
 
 # ---------------------------------------------------------------------------
-# E0l: 台詞の生存範囲（boundary 全体）
+# 握り潰されずに上がってきた内部バグ（PR-22-B が使う経路）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "bug_factory, exception_type",
+    [
+        (lambda: FrozenExpressionError("frozen expression was mutated"),
+         "FrozenExpressionError"),
+        (lambda: ExpressionCycleError("expression graph has a cycle"),
+         "ExpressionCycleError"),
+    ],
+    ids=["frozen", "cycle"],
+)
+def test_an_unswallowed_internal_bug_becomes_an_internal_exception_error(
+    bug_factory, exception_type,
+):
+    """記録してそのまま raise した内部バグが、pair 境界で ERROR になる。
+
+    PR-22-B の freeze violation はこの形（`record_internal_bug` → `raise`）で
+    上がってくる。握り潰されないので G1 には届かず、`AnalysisLimitation` でも
+    `InternalError` でもないため、型を catch list へ足す設計だと素通りする。
+    2 つの型を同じ test で通しているのは、**型を足さずに** 乗ることの確認。
+    """
+    analysis1, analysis2 = _analyses()
+    site = "core.expression.__setattr__"
+
+    def _analyze(self, name, timeout):
+        if name == "func1":
+            bug = bug_factory()
+            record_internal_bug(bug, site=site)
+            raise bug
+        return analysis2
+
+    result = _run_pair(
+        analyze=_analyze, stage_plan=_equivalent_stage_plan, connector=_connector(),
+    )
+
+    assert result.is_equivalent is None
+    assert result.final_outcome == "ERROR"
+    assert result.failure_status == "internal_exception"
+    assert result.unknown_reasons == [], "限界の UNKNOWN へ化けさせない"
+    assert result.pair_stop_state == PairStopState.INTERNAL_BUG.value
+    failure = _failure_block(result, "internal_exception")
+    assert failure["exception_type"] == exception_type
+    assert failure["site"] == site
+
+
+def test_an_unswallowed_internal_bug_outranks_a_recorded_limitation():
+    """限界を記録したあとに内部バグを raw で投げたら、内部バグが勝つ。"""
+    analysis1, analysis2 = _analyses()
+
+    def _analyze(self, name, timeout):
+        if name == "func1":
+            try:
+                raise_limitation(_budget_limitation(site="decompile"))
+            except Exception:
+                pass
+            bug = FrozenExpressionError("frozen")
+            record_internal_bug(bug, site="core.expression.__setattr__")
+            raise bug
+        return analysis2
+
+    result = _run_pair(
+        analyze=_analyze, stage_plan=_equivalent_stage_plan, connector=_connector(),
+    )
+
+    assert result.final_outcome == "ERROR"
+    assert result.failure_status == "internal_exception"
+    assert result.unknown_reasons == [], "限界の UNKNOWN へ格下げしない"
+    assert result.pair_stop_state == PairStopState.INTERNAL_BUG.value
+
+
+def test_a_raw_limitation_that_skipped_raise_limitation_is_still_adopted():
+    """`raise_limitation` を経由せず raise された限界も同じ経路に乗る。"""
+    analysis1, analysis2 = _analyses()
+
+    def _analyze(self, name, timeout):
+        if name == "func1":
+            raise _budget_limitation(site="decompile")
+        return analysis2
+
+    result = _run_pair(
+        analyze=_analyze, stage_plan=_equivalent_stage_plan, connector=_connector(),
+    )
+
+    assert result.is_equivalent is None and result.error_message is None
+    assert result.final_outcome == "UNKNOWN"
+    assert _reason_ids(result) == [BUDGET_REASON]
+    assert result.pair_stop_state == PairStopState.PAIR_TERMINAL_DEADLINE.value
+
+
+def test_a_generic_exception_without_a_recorded_failure_keeps_the_old_path():
+    """台帳にも型にも根拠が無い例外は、従来どおりの経路のまま（勝手に握らない）。"""
+    analysis1, analysis2 = _analyses()
+
+    def _analyze(self, name, timeout):
+        if name == "func1":
+            raise RuntimeError("something unrelated")
+        return analysis2
+
+    with pytest.raises(RuntimeError, match="something unrelated"):
+        _run_pair(
+            analyze=_analyze, stage_plan=_equivalent_stage_plan,
+            connector=_connector(),
+        )
+
+
+def test_the_ledger_folds_an_exception_that_is_recorded_and_then_adopted():
+    """記録 → raise → 境界で拾い直し、を 1 件として数える。"""
+    from scripts.function_tracer_pcode.core.errors import adopt_pair_failure
+
+    with pair_failure_scope(("b1", "b2", None, None, "f", "f"), "s") as ledger:
+        bug = FrozenExpressionError("frozen")
+        record_internal_bug(bug, site="core.expression.__setattr__")
+        first = adopt_pair_failure(bug)
+        # 上位が `InternalError` に包み直してから再度拾っても増えない。
+        second = adopt_pair_failure(InternalError(bug, site="checker.workflow"))
+        assert ledger.recorded_failure_count() == 1
+        assert first.site == second.site == "core.expression.__setattr__"
+        assert first.exception.exception_type == "FrozenExpressionError"
+
+
+# ---------------------------------------------------------------------------
+# stable interface（consumer が具象台帳の内部を読まない）
+# ---------------------------------------------------------------------------
+
+#: `PairExecutionControl` が公開する契約。consumer はこれ以外を呼ばない。
+STABLE_CONTROL_API = frozenset({
+    "record_limitation", "record_internal_bug", "pending_failure",
+    "stop_state", "allows_semantic_analysis", "allows_finalization",
+    "recorded_failure_count",
+})
+
+#: 台帳 object に対して consumer が呼んでよい名前（安定 contract + identity）。
+LEDGER_ALLOWED_ATTRIBUTES = STABLE_CONTROL_API | {
+    "matches", "pair_identity", "session_identity",
+}
+
+
+def test_the_stable_control_contract_is_exactly_what_consumers_need():
+    """`PairExecutionControl` の公開面が増減していないことを固定する。"""
+    public = {
+        name for name in vars(PairExecutionControl)
+        if not name.startswith("_")
+    }
+    assert public == STABLE_CONTROL_API
+    ledger_cls = type(_ledger_for_contract_check())
+    assert issubclass(ledger_cls, PairExecutionControl)
+    for name in STABLE_CONTROL_API:
+        assert callable(getattr(ledger_cls, name)), name
+
+
+def _ledger_for_contract_check():
+    with pair_failure_scope(("x", "y", None, None, "f", "f"), None) as ledger:
+        return ledger
+
+
+def _ledger_bound_names(tree):
+    """その module で台帳 object を束縛している名前を集める。
+
+    `with pair_failure_scope(...) as name` と `name = current_pair_ledger()` の
+    2 形だけを追う。どちらでもない形で台帳を持ち回る consumer が現れたら、
+    この規則では検出できないので形ごと足すこと。
+    """
+    names = set()
+
+    def _call_name(node):
+        func = getattr(node, "func", None)
+        if isinstance(func, ast.Name):
+            return func.id
+        if isinstance(func, ast.Attribute):
+            return func.attr
+        return None
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.withitem):
+            if (
+                isinstance(node.context_expr, ast.Call)
+                and _call_name(node.context_expr) == "pair_failure_scope"
+                and isinstance(node.optional_vars, ast.Name)
+            ):
+                names.add(node.optional_vars.id)
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            if _call_name(node.value) == "current_pair_ledger":
+                names.update(
+                    t.id for t in node.targets if isinstance(t, ast.Name)
+                )
+    return names
+
+
+def test_consumers_do_not_read_concrete_ledger_internals():
+    """`core/errors.py` の外が台帳の内部表現に触れていないことを AST で固定。
+
+    触れていると、保存形式・畳み込み・優先順位を変えるたびに checker / authority
+    まで変更が波及する。優先順位の解決は台帳側の責務として閉じておく。
+    """
+    offenders = []
+    for rel, _path, tree in _source_modules():
+        if rel == "core/errors.py":
+            continue
+        bound = _ledger_bound_names(tree)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in bound
+                and node.attr not in LEDGER_ALLOWED_ATTRIBUTES
+            ):
+                offenders.append(f"{rel}:{node.lineno} {node.value.id}.{node.attr}")
+            if isinstance(node, ast.Name) and node.id == "PairFailureLedger":
+                offenders.append(f"{rel}:{node.lineno} PairFailureLedger")
+    assert offenders == [], (
+        "具象台帳の内部を consumer が読んでいる:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_priority_rule_lives_in_the_execution_control_owner():
+    """優先順位の語彙（stop state の強さ表）が `core/errors.py` の外に無いこと。"""
+    offenders = []
+    for rel, _path, tree in _source_modules():
+        if rel == "core/errors.py":
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == "_STOP_STATE_RANK":
+                offenders.append(f"{rel}:{node.lineno}")
+    assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# thread / 入れ子 pair の契約
+# ---------------------------------------------------------------------------
+
+def test_the_pair_scope_is_process_wide_and_not_thread_local():
+    """scope は process 単位。**worker thread からの producer は保証しない**。
+
+    別 thread から見えるのは「そのとき最内の scope」なので、入れ子で別 pair の
+    scope が開いている最中に外側 pair の worker が記録すると内側へ入る。この
+    test はその挙動を契約として固定するためのもので、worker から
+    `raise_limitation` してよいという意味ではない（`core/errors.py` の
+    `_PAIR_LEDGERS` のコメントを参照）。
+    """
+    import threading
+
+    seen = {}
+
+    def _look():
+        seen["ledger"] = current_pair_ledger()
+
+    outer_pair = ("b1", "b2", None, None, "f", "f")
+    with pair_failure_scope(outer_pair, "s") as outer:
+        worker = threading.Thread(target=_look)
+        worker.start()
+        worker.join()
+        assert seen["ledger"] is outer, "thread local ではない（process 単位）"
+
+        with pair_failure_scope(("c1", "c2", None, None, "g", "g"), "s") as inner:
+            worker = threading.Thread(target=_look)
+            worker.start()
+            worker.join()
+            # 入れ子の最中は内側が見える = 外側 pair の worker は誤帰属し得る。
+            assert seen["ledger"] is inner
+
+
+# ---------------------------------------------------------------------------
+# E0l: 台帳の生存範囲（boundary 全体）
 # ---------------------------------------------------------------------------
 
 def test_e0l_the_ledger_is_readable_while_the_connector_finishes():
@@ -913,7 +1180,7 @@ def test_e0l_the_ledger_is_readable_while_the_connector_finishes():
     def _spy_finish(connector, session, result):
         ledger = current_pair_ledger()
         observed["ledger"] = ledger
-        observed["pending"] = None if ledger is None else ledger.pending()
+        observed["pending"] = None if ledger is None else ledger.pending_failure()
         return original_finish(connector, session, result)
 
     with patch.object(production_boundary, "_profiled_finish", _spy_finish):
@@ -922,8 +1189,9 @@ def test_e0l_the_ledger_is_readable_while_the_connector_finishes():
             connector=_connector(),
         )
 
-    assert isinstance(observed["ledger"], PairFailureLedger)
-    assert isinstance(observed["pending"], AnalysisLimitation)
+    assert isinstance(observed["ledger"], PairExecutionControl)
+    assert observed["pending"].kind is PairFailureKind.LIMITATION
+    assert isinstance(observed["pending"].exception, AnalysisLimitation)
     assert result.final_outcome == "UNKNOWN"
 
 
@@ -1037,9 +1305,9 @@ def test_e0p_the_same_pair_and_session_reenter_the_same_ledger():
             pass
         with pair_failure_scope(pair, "session-1") as inner:
             assert inner is outer
-            assert isinstance(inner.pending(), AnalysisLimitation)
+            assert isinstance(inner.pending_failure().exception, AnalysisLimitation)
         # 内側の scope を抜けても外側の台帳は残る。
-        assert isinstance(outer.pending(), AnalysisLimitation)
+        assert isinstance(outer.pending_failure().exception, AnalysisLimitation)
         assert current_pair_ledger() is outer
     assert current_pair_ledger() is None
 
@@ -1065,8 +1333,8 @@ def test_e0q_a_different_pair_or_session_gets_its_own_ledger(
             pass
         with pair_failure_scope(other_pair, other_session) as inner:
             assert inner is not outer
-            assert inner.is_empty()
-            assert inner.pending() is None
+            assert inner.recorded_failure_count() == 0
+            assert inner.pending_failure() is None
             assert inner.allows_semantic_analysis() is True
         # 内側で新しく積んだ台帳は抜けるときに捨てる。
         assert current_pair_ledger() is outer

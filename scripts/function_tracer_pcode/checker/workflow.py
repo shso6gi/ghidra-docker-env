@@ -27,12 +27,11 @@ from scripts.function_tracer_pcode.checker.phases.handler import (
     PhaseSpec,
 )
 from scripts.function_tracer_pcode.checker.pair_execution import (
-    AnalysisLimitation,
-    InternalError,
+    AnalysisFailureError,
     apply_pair_failure_gate,
     binary_display_name,
     pair_allows_semantic_analysis,
-    pair_failure_result,
+    pair_failure_result_for_exception,
     pair_stop_state,
 )
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
@@ -78,11 +77,13 @@ def run_check_from_binaries(
                 binary1_id=binary1_id,
                 binary2_id=binary2_id,
             )
-        except (AnalysisLimitation, InternalError) as exc:
+        except AnalysisFailureError as exc:
             # G3（Issue #106 PR-106-0）: 初回解析など `check()` の外で起きた
-            # 限界 / 内部バグはここで結果になる。判定規則は `check()` の
+            # failure はここで結果になる。握り潰された failure も、握り潰されずに
+            # そのまま上がってきた failure も、台帳が優先順位を解決した 1 件に
+            # 合流する（型ごとの分岐はここに置かない）。判定規則は `check()` の
             # handler と同じで、違うのは「両側 analysis が無くても組める」点。
-            result = pair_failure_result(
+            result = pair_failure_result_for_exception(
                 checker,
                 exc,
                 function_name1=function_name1,
@@ -91,6 +92,8 @@ def run_check_from_binaries(
                 binary2_name=binary_display_name(program2, "binary2"),
                 start_time=pair_started,
             )
+            if result is None:  # 台帳にも型にも根拠が無い: 従来どおり上へ返す
+                raise
         else:
             result = apply_pair_failure_gate(
                 checker,

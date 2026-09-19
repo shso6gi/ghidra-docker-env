@@ -1,32 +1,45 @@
 # -*- coding: utf-8 -*-
-"""pair 実行制御の **consumer 側** 補助（Issue #106 PR-106-0）。
+"""pair 実行制御の **consumer 側**（Issue #106 PR-106-0）。
 
-台帳（`core.errors.PairFailureLedger`）を所有するのは pair 境界
-（`authority/lifecycle/production_boundary.py`）で、この module は checker 側の
-読み手が同じ規則を書き写さずに済むようにするだけの薄い層。ここには
+責務の境界:
 
-* 失敗の優先順位（内部バグ > 限界）
-* 「未解消の失敗があるなら、その場で例外にして handler へ渡す」（G1 / G2）
-* 「その失敗がまだ結果に出ていないなら、pair 単位で組み直す」（G3 / G4-a / G5）
+```text
+core.errors.PairFailureLedger      … 記録 / 畳み込み / 優先順位 / stop state
+        ↓ PairExecutionControl（安定 interface）+ PairPendingFailure（値）
+checker.pair_execution             … 「今止めるべき failure」を結果へ変換する
+        ↓
+checker.result_assembly / authority … UNKNOWN / ERROR の判定・receipt・JSON
+```
 
-の 3 つだけを置く。**UNKNOWN / ERROR の最終判断も receipt も JSON も持たない**。
-判定規則そのものは `checker.result_assembly` と authority が持ち、ここはどの
-規則をいつ適用するかだけを決める。
+この module が持つのは **変換だけ** で、
 
-G1（初回 / 再解析の直後）と G2（`check()` の result assembly 直前）はどちらも
-`raise_pending_pair_failure()` を呼ぶ。限界が途中の `except Exception` に握り
-潰されていても台帳には残っているので、ここで改めて例外に戻せる。
+* どの failure が勝つか（内部バグ > 限界）
+* 記録をどう保存・畳み込むか
+* stop state をどう上げるか
+
+は一切知らない。台帳から受け取るのは優先順位解決済みの `PairPendingFailure`
+1 件だけで、`PairFailureLedger` の内部（records / internal_bugs / limitations）
+には触れない（`test_issue106_pair_limitation_propagation.py` が静的に固定する）。
+
+新しい failure class（`AnalysisFailureError` 派生）が増えても、この module も
+workflow / boundary も変更点は無い。`PairFailureKind` が 1 つ増えるとき — つまり
+「UNKNOWN でも `internal_exception` ERROR でもない新しい結果の種類」を足すとき —
+だけ、下の `_RESULT_FACTORY_BY_KIND` が唯一の対応点になる。
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from scripts.function_tracer_pcode.core.errors import (
-    AnalysisLimitation,
-    InternalError,
+    AnalysisFailureError,
+    PairFailureKind,
+    PairPendingFailure,
     PairStopState,
+    adopt_pair_failure,
     current_pair_ledger,
+    pending_pair_failure,
 )
 from scripts.function_tracer_pcode.checker.result_assembly import (
     INTERNAL_EXCEPTION_STATUS,
@@ -47,36 +60,85 @@ def pair_allows_semantic_analysis() -> bool:
     return pair_stop_state().allows_semantic_analysis()
 
 
-def pending_pair_failure() -> Optional[BaseException]:
-    """未解消の失敗を 1 件、例外 object として返す（無ければ `None`）。
-
-    内部バグは限界より優先する。限界を UNKNOWN にする前に「壊れていた」ことを
-    ERROR として出す必要があるため。`InternalError` の `site` は **記録された
-    観測点**（バグが起きた場所）で、gate の場所ではない。
-    """
-    ledger = current_pair_ledger()
-    if ledger is None:
-        return None
-    bugs = ledger.internal_bugs()
-    if bugs:
-        return InternalError(bugs[0].exception, site=bugs[0].site)
-    return ledger.pending()
-
-
 def raise_pending_pair_failure() -> None:
-    """未解消の失敗があればここで raise する（G1 / G2 の本体）。"""
+    """未解消の failure があればここで raise する（G1 / G2 の本体）。
+
+    raise するのは台帳が正規化した例外なので、握り潰された内部バグは
+    `InternalError`、限界は `AnalysisLimitation` として下の handler へ届く。
+    """
     failure = pending_pair_failure()
     if failure is not None:
-        raise failure
+        raise failure.exception
 
 
 def binary_display_name(program, fallback: str) -> str:
     return program.getName() if hasattr(program, "getName") else fallback
 
 
+@dataclass(frozen=True)
+class _KindHandling:
+    """1 つの `PairFailureKind` について consumer が知るべきことのすべて。
+
+    `build_result` = その種別の結果をどう組むか。
+    `already_in_result` = その種別が既に結果の判定面に出ているか。
+
+    種別が増えたときに触るのはこの表の 1 行だけで、gate 側（workflow /
+    boundary）にも `pair_failure_result` 本体にも分岐は増えない。
+    """
+
+    build_result: Callable[..., Any]
+    already_in_result: Callable[[Any, PairPendingFailure], bool]
+
+
+def _build_limitation_result(checker, failure, **common):
+    return analysis_limitation_result_for_pair(
+        failure.exception,
+        session=getattr(checker, "_active_v2_dual_write_pilot_session", None),
+        **common,
+    )
+
+
+def _build_internal_bug_result(checker, failure, **common):
+    return internal_error_result_for_pair(failure.exception, **common)
+
+
+def _limitation_already_in_result(result, failure) -> bool:
+    """EQ / NOT_EQ なら必ず作り直す。UNKNOWN / ERROR は既に出ていれば作り直さない。
+
+    既存の ERROR を意味的な UNKNOWN へ格下げしないために、ERROR は「出ている」
+    扱いにする。
+    """
+    if result.is_equivalent is not None:
+        return False
+    if getattr(result, "error_message", None):
+        return True
+    reason_id = getattr(failure.exception, "reason_id", None)
+    return any(
+        getattr(reason, "reason_id", None) == reason_id
+        for reason in (getattr(result, "unknown_reasons", None) or ())
+    )
+
+
+def _internal_bug_already_in_result(result, failure) -> bool:
+    """限界の UNKNOWN 結果であっても ERROR へ上書きする（内部バグが優先）。"""
+    return getattr(result, "failure_status", None) == INTERNAL_EXCEPTION_STATUS
+
+
+#: 種別 → 扱い方。`PairFailureKind` に member を足したらここへ 1 行足す。
+#: 足し忘れは `KeyError` で即座に落ちる（黙って別種別として扱わない）。
+_HANDLING_BY_KIND = {
+    PairFailureKind.LIMITATION: _KindHandling(
+        _build_limitation_result, _limitation_already_in_result,
+    ),
+    PairFailureKind.INTERNAL_BUG: _KindHandling(
+        _build_internal_bug_result, _internal_bug_already_in_result,
+    ),
+}
+
+
 def pair_failure_result(
     checker,
-    exc,
+    failure: PairPendingFailure,
     *,
     function_name1: str,
     function_name2: str,
@@ -85,13 +147,14 @@ def pair_failure_result(
     start_time: float,
     result=None,
 ):
-    """限界 / 内部バグを pair 1 件の結果にする（G3 / G5 の共通本体）。
+    """`PairPendingFailure` 1 件を pair の結果にする（G3 / G4-a / G5 の共通本体）。
 
-    内部バグを限界より優先するのは `pair_execution` と同じ規則。`result` を
-    渡した場合は、その結果の **診断だけ** を引き継いで判定面は作り直す。
+    `result` を渡した場合は、その結果の **診断だけ** を引き継いで判定面は作り直す。
     """
-    common = dict(
-        stop_state=pair_stop_state(),
+    return _HANDLING_BY_KIND[failure.kind].build_result(
+        checker,
+        failure,
+        stop_state=failure.stop_state,
         function_name1=function_name1,
         function_name2=function_name2,
         binary1_name=binary1_name,
@@ -99,13 +162,24 @@ def pair_failure_result(
         start_time=start_time,
         carry_from=result,
     )
-    if isinstance(exc, InternalError):
-        return internal_error_result_for_pair(exc, **common)
-    return analysis_limitation_result_for_pair(
-        exc,
-        session=getattr(checker, "_active_v2_dual_write_pilot_session", None),
-        **common,
-    )
+
+
+def pair_failure_result_for_exception(
+    checker,
+    exc: BaseException,
+    **kwargs,
+):
+    """境界を抜けようとした例外を pair の結果にする（G3 / G5 の入口）。
+
+    例外そのものではなく **台帳が優先順位を解決した failure** を結果にする。
+    握り潰されずに上がってきた内部バグも、`raise_limitation` を経由しなかった
+    限界も、ここで同じ 1 本の経路に合流する。台帳にも型情報にも根拠が無い場合
+    だけ `None` を返し、呼び出し側は従来の generic 経路へ落とす。
+    """
+    failure = adopt_pair_failure(exc)
+    if failure is None:
+        return None
+    return pair_failure_result(checker, failure, **kwargs)
 
 
 def apply_pair_failure_gate(
@@ -116,19 +190,15 @@ def apply_pair_failure_gate(
     function_name2: str,
     start_time: float,
 ):
-    """未解消の限界 / 内部バグが結果に出ないまま返させない（G3 / G4-a）。
+    """未解消の failure が結果に出ないまま返させない（G3 / G4-a）。
 
-    置き換えるのは「その失敗がまだ結果に出ていない」ときだけ。同じ pair で
+    置き換えるのは「その failure がまだ結果に出ていない」ときだけ。同じ pair で
     G3（workflow）と G4-a（boundary）の 2 回通るので、2 度目が同じ結果を作り
     直さないように、出ているかどうかを結果そのもの（`failure_status` と
     reason 集合）から判断する。診断 block は読まない。
 
-    * 内部バグ → 既に `internal_exception` の ERROR でなければ置き換える
-      （限界より優先する。UNKNOWN の限界結果でも ERROR へ上書きする）。
-    * 限界 → EQ / NOT_EQ なら必ず置き換える。UNKNOWN / ERROR のときは、
-      既に ERROR か、その reason が既に出ているなら置き換えない
-      （基盤の ERROR を意味的な UNKNOWN へ格下げしない）。
-    * どの分岐でも stop state は結果へ写す（診断）。
+    「出ているか」の判定は種別ごとに `_HANDLING_BY_KIND` が持つ。どの分岐でも
+    stop state は結果へ写す（診断）。
 
     台帳が無い（pair scope の外で呼ばれた）ときは何もしない。
     """
@@ -138,7 +208,7 @@ def apply_pair_failure_gate(
     if failure is None:
         return result
     if _failure_already_in_result(result, failure):
-        attach_pair_stop_state(result, pair_stop_state())
+        attach_pair_stop_state(result, failure.stop_state)
         return result
     return pair_failure_result(
         checker,
@@ -152,28 +222,20 @@ def apply_pair_failure_gate(
     )
 
 
-def _failure_already_in_result(result, failure) -> bool:
-    """この失敗が既に結果の **判定面** に出ているか（診断 block は見ない）。"""
-    if isinstance(failure, InternalError):
-        return getattr(result, "failure_status", None) == INTERNAL_EXCEPTION_STATUS
-    if result.is_equivalent is not None:
-        return False
-    if getattr(result, "error_message", None):
-        return True
-    return any(
-        getattr(reason, "reason_id", None) == failure.reason_id
-        for reason in (getattr(result, "unknown_reasons", None) or ())
-    )
+def _failure_already_in_result(result, failure: PairPendingFailure) -> bool:
+    """この failure が既に結果の **判定面** に出ているか（診断 block は見ない）。"""
+    return _HANDLING_BY_KIND[failure.kind].already_in_result(result, failure)
 
 
 __all__ = [
-    "AnalysisLimitation",
-    "InternalError",
+    "AnalysisFailureError",
+    "PairPendingFailure",
     "PairStopState",
     "apply_pair_failure_gate",
     "binary_display_name",
     "pair_allows_semantic_analysis",
     "pair_failure_result",
+    "pair_failure_result_for_exception",
     "pair_stop_state",
     "pending_pair_failure",
     "raise_pending_pair_failure",

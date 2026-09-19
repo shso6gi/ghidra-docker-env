@@ -14,12 +14,11 @@ from scripts.function_tracer_pcode.checker.workflow import (
 # Issue #106 PR-106-0: pair の実行制御。boundary は lifecycle（scope の開閉）と
 # 呼び出し順序だけを所有し、結果の組み立ては `checker.pair_execution` に置く。
 from scripts.function_tracer_pcode.checker.pair_execution import (
-    AnalysisLimitation,
-    InternalError,
+    AnalysisFailureError,
     apply_pair_failure_gate,
     binary_display_name,
     pair_allows_semantic_analysis,
-    pair_failure_result,
+    pair_failure_result_for_exception,
     pair_stop_state,
 )
 from scripts.function_tracer_pcode.core.errors import pair_failure_scope
@@ -323,8 +322,13 @@ def _run_legacy_with_pair_gate(
             function_name2,
             **kwargs,
         )
-    except (AnalysisLimitation, InternalError) as exc:  # G5
-        return pair_failure_result(checker, exc, start_time=started, **names)
+    except AnalysisFailureError as exc:  # G5
+        failure_result = pair_failure_result_for_exception(
+            checker, exc, start_time=started, **names,
+        )
+        if failure_result is None:  # 台帳にも型にも根拠が無い: 従来どおり上へ
+            raise
+        return failure_result
     return apply_pair_failure_gate(  # G4-a
         checker,
         result,
