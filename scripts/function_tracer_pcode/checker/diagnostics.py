@@ -55,6 +55,10 @@ DIAGNOSTICS_SCHEMA = "result-diagnostics-v1"
 FAILURE_ANALYSIS_LIMITATION = "analysis_limitation"
 FAILURE_INTERNAL_EXCEPTION = "internal_exception"
 FAILURE_SWALLOWED_EXCEPTIONS = "swallowed_exceptions"
+# Issue #106 PR-106-0: pair 1 件をどこで打ち切ったか（`PairStopState` の値）。
+# 打ち切っていない pair には **書かない** ので、通常の結果 JSON の key 集合は
+# 変わらない。判定には読ませない診断で、control authority は台帳側が持つ。
+FAILURE_PAIR_STOP_STATE = "pair_stop_state"
 
 
 def record_failure_diagnostic(result: Any, kind: str, payload: Any) -> None:

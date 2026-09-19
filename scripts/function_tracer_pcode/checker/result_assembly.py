@@ -13,6 +13,10 @@ module-level の関数に移す。トップレベルの ``try/except`` 自体、
   帰属できた限界は UNKNOWN、帰属できなければ ``limitation_unattributed`` /
   ``unregistered_reason`` の ERROR（fail-closed）。
 - :func:`internal_error_result` — ``InternalError`` handler の本体。``internal_exception`` の ERROR。
+- :func:`analysis_limitation_result_for_pair` / :func:`internal_error_result_for_pair` —
+  pair 境界（Issue #106 PR-106-0）用。両側 analysis を前提にせずに同じ判定規則で
+  結果を組む。判定規則は ``analysis_limitation_result`` / ``internal_error_result``
+  と同一で、違うのは入力の前提だけ。
 
 checker の mixin メソッド（identity / 反例整形 / completed proof payload / completion contexts / recurrence receipt）は
 callable として受け取る（instance patch seam 維持）。
@@ -23,7 +27,11 @@ from __future__ import annotations
 import time
 from typing import Any, Callable, Optional
 
-from scripts.function_tracer_pcode.core.errors import AnalysisLimitation, InternalError
+from scripts.function_tracer_pcode.core.errors import (
+    AnalysisLimitation,
+    InternalError,
+    PairStopState,
+)
 from scripts.function_tracer_pcode.proof.obligations.branch_context import BranchCheckContext
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.checker.result_factory import create_error_result
@@ -325,6 +333,10 @@ def canonical_abi_error_result(
     )
 
 
+#: 内部バグの ERROR に載せる `failure_status`（`LegacyBoundaryErrorKind` と同値）。
+INTERNAL_EXCEPTION_STATUS = "internal_exception"
+
+
 def analysis_limitation_result(
     exc: AnalysisLimitation,
     *,
@@ -452,7 +464,7 @@ def internal_error_result(
         retry_count=retry_count,
         original_signature1=original_signature1,
         original_signature2=original_signature2,
-        failure_status="internal_exception",
+        failure_status=INTERNAL_EXCEPTION_STATUS,
         failure_message=str(exc),
     )
     record_failure_diagnostic(result, FAILURE_INTERNAL_EXCEPTION, {
@@ -460,5 +472,233 @@ def internal_error_result(
         "site": exc.site,
         "stack": list(exc.stack_lines()),
         "stack_digest": exc.stack_digest(),
+    })
+    return result
+
+
+def analysis_limitation_result_for_pair(
+    exc: AnalysisLimitation,
+    *,
+    session,
+    stop_state,
+    function_name1: str,
+    function_name2: str,
+    binary1_name: str,
+    binary2_name: str,
+    start_time: float,
+    analysis1=None,
+    analysis2=None,
+    type_fix_result=None,
+    retry_count: int = 0,
+    original_signature1: Optional[FunctionSignature] = None,
+    original_signature2: Optional[FunctionSignature] = None,
+    carry_from=None,
+) -> EquivalenceResult:
+    """pair 境界で限界を結果化する（Issue #106 PR-106-0）。
+
+    :func:`analysis_limitation_result` との違いは **両側 analysis を前提にしない**
+    ことだけ。初回解析の途中で限界が出た pair には `FunctionReturnAnalysis` が
+    片側も無いことがあり、その場合でも判定 authority へ UNKNOWN を渡せる必要が
+    ある（`create_context_unknown_result` と同じ考え方）。
+
+    判定規則そのものは変えない。帰属できた限界は reason 付き UNKNOWN、帰属でき
+    なければ ``limitation_unattributed`` の ERROR（fail-closed、pilot 無し経路）。
+    `stop_state` は診断としてだけ載せる（control authority にはしない）。
+    """
+    from scripts.function_tracer_pcode.authority.decision.limitation_attribution import (
+        attribute_analysis_limitation,
+    )
+    from scripts.function_tracer_pcode.checker.diagnostics import (
+        FAILURE_ANALYSIS_LIMITATION,
+        record_failure_diagnostic,
+    )
+
+    attribution = attribute_analysis_limitation(session, exc)
+    diagnostic = {
+        **attribution.to_diagnostic(),
+        "site": exc.site,
+        "exception_type": type(exc).__name__,
+        "evidence_refs": list(exc.evidence_refs),
+        "message": str(exc)[:500],
+        "pair_scoped": True,
+    }
+    effective1 = (
+        FunctionSignature.from_analysis(analysis1)
+        if analysis1 is not None else original_signature1
+    )
+    effective2 = (
+        FunctionSignature.from_analysis(analysis2)
+        if analysis2 is not None else original_signature2
+    )
+    common = dict(
+        function1_name=(
+            analysis1.function_name if analysis1 is not None else function_name1
+        ),
+        function2_name=(
+            analysis2.function_name if analysis2 is not None else function_name2
+        ),
+        binary1_name=binary1_name,
+        binary2_name=binary2_name,
+        solver_results=ParallelResult(results=[]),
+        total_time=time.time() - start_time,
+        type_fix_result=type_fix_result,
+        retry_count=retry_count,
+        function1_signature=original_signature1,
+        function2_signature=original_signature2,
+        effective_function1_signature=effective1,
+        effective_function2_signature=effective2,
+        function1_signature_hypotheses=(
+            list(analysis1.signature_hypotheses) if analysis1 is not None else []
+        ),
+        function2_signature_hypotheses=(
+            list(analysis2.signature_hypotheses) if analysis2 is not None else []
+        ),
+        constrained_fragments=[],
+    )
+    if not attribution.is_attributed:
+        result = EquivalenceResult(
+            is_equivalent=None,
+            error_message=attribution.failure_status,
+            failure_status=attribution.failure_status,
+            failure_message=f"{attribution.detail}: {exc}",
+            **common,
+        )
+    else:
+        result = EquivalenceResult(
+            is_equivalent=None,
+            counterexample=None,
+            smt_formula=None,
+            pairwise_debug_stats={"analysis_limitation": 1},
+            unknown_reasons=[
+                make_internal_v2_reason_diagnostic(
+                    exc.reason_id,
+                    stage="S_ANALYSIS_LIMITATION",
+                    evidence_refs=(exc.site, *exc.evidence_refs),
+                    object_target_key=(
+                        "analysis_limitation_v1",
+                        exc.reason_id,
+                        exc.site,
+                        exc.target_key,
+                    ),
+                    detail=exc.detail,
+                )
+            ],
+            **common,
+        )
+    _carry_pair_diagnostics(result, carry_from)
+    attach_pair_stop_state(result, stop_state)
+    record_failure_diagnostic(result, FAILURE_ANALYSIS_LIMITATION, diagnostic)
+    return result
+
+
+def _carry_pair_diagnostics(result: EquivalenceResult, carry_from) -> None:
+    """差し替え前の結果が持っていた **診断だけ** を引き継ぐ（判定面は引き継がない）。
+
+    `debug_trace` と `diagnostics` は観測で、`is_equivalent` / `solver_results` /
+    `decision_receipt` のような判定面は新しい結果側の空値のままにする。型が想定
+    外のときは黙って捨てる（包括捕捉は増やさない）。
+    """
+    if carry_from is None or carry_from is result:
+        return
+    trace = getattr(carry_from, "debug_trace", None)
+    if trace is not None:
+        result.debug_trace = trace
+        result.emit_debug_trace = bool(getattr(carry_from, "emit_debug_trace", True))
+    carried = getattr(carry_from, "diagnostics", None)
+    if isinstance(carried, dict) and carried:
+        merged = dict(carried)
+        current = getattr(result, "diagnostics", None)
+        if isinstance(current, dict):
+            merged.update(current)
+        result.diagnostics = merged
+
+
+def attach_pair_stop_state(result: EquivalenceResult, stop_state) -> None:
+    """pair の stop state を結果へ写す（object 属性 + 診断、Issue #106 PR-106-0）。
+
+    `PairStopState.NONE` のときは何も書かない。限界が無い pair の出力 schema を
+    変えないための条件で、診断 block の key 集合は従来どおりになる。
+    """
+    from scripts.function_tracer_pcode.checker.diagnostics import (
+        FAILURE_PAIR_STOP_STATE,
+        record_failure_diagnostic,
+    )
+
+    if stop_state is None or stop_state is PairStopState.NONE:
+        return
+    result.pair_stop_state = stop_state.value
+    record_failure_diagnostic(result, FAILURE_PAIR_STOP_STATE, stop_state.value)
+
+
+def internal_error_result_for_pair(
+    exc: InternalError,
+    *,
+    stop_state,
+    function_name1: str,
+    function_name2: str,
+    binary1_name: str,
+    binary2_name: str,
+    start_time: float,
+    analysis1=None,
+    analysis2=None,
+    type_fix_result=None,
+    retry_count: int = 0,
+    original_signature1: Optional[FunctionSignature] = None,
+    original_signature2: Optional[FunctionSignature] = None,
+    carry_from=None,
+) -> EquivalenceResult:
+    """pair 境界で内部バグを結果化する（`internal_exception` の ERROR）。
+
+    限界と内部バグが同時にあるときは **内部バグを優先** してこちらを使う。
+    限界のときと同じく両側 analysis を前提にしない。
+    """
+    from scripts.function_tracer_pcode.checker.diagnostics import (
+        FAILURE_INTERNAL_EXCEPTION,
+        record_failure_diagnostic,
+    )
+
+    result = EquivalenceResult(
+        is_equivalent=None,
+        function1_name=(
+            analysis1.function_name if analysis1 is not None else function_name1
+        ),
+        function2_name=(
+            analysis2.function_name if analysis2 is not None else function_name2
+        ),
+        binary1_name=binary1_name,
+        binary2_name=binary2_name,
+        solver_results=ParallelResult(results=[]),
+        total_time=time.time() - start_time,
+        error_message=str(exc),
+        failure_status=INTERNAL_EXCEPTION_STATUS,
+        failure_message=str(exc),
+        type_fix_result=type_fix_result,
+        retry_count=retry_count,
+        function1_signature=original_signature1,
+        function2_signature=original_signature2,
+        effective_function1_signature=(
+            FunctionSignature.from_analysis(analysis1)
+            if analysis1 is not None else original_signature1
+        ),
+        effective_function2_signature=(
+            FunctionSignature.from_analysis(analysis2)
+            if analysis2 is not None else original_signature2
+        ),
+        function1_signature_hypotheses=(
+            list(analysis1.signature_hypotheses) if analysis1 is not None else []
+        ),
+        function2_signature_hypotheses=(
+            list(analysis2.signature_hypotheses) if analysis2 is not None else []
+        ),
+        constrained_fragments=[],
+    )
+    _carry_pair_diagnostics(result, carry_from)
+    attach_pair_stop_state(result, stop_state)
+    record_failure_diagnostic(result, FAILURE_INTERNAL_EXCEPTION, {
+        "exception_type": exc.exception_type,
+        "site": exc.site,
+        "stack": list(exc.stack_lines()),
+        "stack_digest": exc.stack_digest(),
+        "pair_scoped": True,
     })
     return result
