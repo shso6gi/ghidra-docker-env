@@ -12,7 +12,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
     UnknownSmtExtensionWidthError,
     UnsupportedSmtOperatorError,
 )
-from scripts.function_tracer_pcode.core.errors import AnalysisLimitation, InternalError
+from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
 from scripts.function_tracer_pcode.core.stage_clock import open_stage_region, stage_region
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner, ParallelResult
 from scripts.function_tracer_pcode.proof.formula import FormulaBuilder
@@ -62,13 +62,13 @@ from scripts.function_tracer_pcode.checker.recurrence_promotion import (
     prepare_recurrence_promotion,
 )
 from scripts.function_tracer_pcode.checker.result_assembly import (
-    analysis_limitation_result,
     assemble_equivalence_result,
     canonical_abi_error_result,
-    internal_error_result,
+    generic_internal_error_result,
     unsupported_smt_result,
 )
 from scripts.function_tracer_pcode.checker.pair_execution import (
+    pair_failure_result_from_check,
     raise_pending_pair_failure,
 )
 from scripts.function_tracer_pcode.checker.strategy_execution import (
@@ -835,30 +835,20 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                     original_signature2=original_signature2,
                 )
 
-            except AnalysisLimitation as e:
-                # 6b-5 / Issue #125: 解析の限界。判定は帰属先 cause が決める。
-                self._debug_print(f"Check stopped by an analysis limitation: {e}")
-                return analysis_limitation_result(
-                    e,
-                    session=getattr(self, "_active_v2_dual_write_pilot_session", None),
-                    analysis1=analysis1,
-                    analysis2=analysis2,
-                    binary1_name=binary1_name,
-                    binary2_name=binary2_name,
-                    start_time=start_time,
-                    type_fix_result=type_fix_result,
-                    retry_count=retry_count,
-                    original_signature1=original_signature1,
-                    original_signature2=original_signature2,
-                )
-
-            except InternalError as e:
-                # Issue #125: 内部エラーは `internal_exception` として分類する。
-                self._debug_print(f"Internal error in check: {e}")
+            except AnalysisFailureError as e:
+                # Issue #106 PR-106-0: typed な pair failure（限界 / 内部バグ）。
+                # **どれを結果化するかは execution control が決める**ので、ここは
+                # 捕まえた例外で直接結果を作らず、台帳へ渡して winner を受け取る。
+                # `check()` の中で raise された failure も、その前に記録されて
+                # 握り潰された failure も、同じ 1 本の winner 解決を通る。
+                # 例外型ごとの分岐はここに置かない（新しい failure class が
+                # 増えても この handler は変わらない）。
+                self._debug_print(f"Check stopped by a typed failure: {e}")
                 if self.debug:
                     import traceback
                     print(traceback.format_exc())
-                return internal_error_result(
+                typed_result = pair_failure_result_from_check(
+                    self,
                     e,
                     analysis1=analysis1,
                     analysis2=analysis2,
@@ -870,6 +860,11 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                     original_signature1=original_signature1,
                     original_signature2=original_signature2,
                 )
+                if typed_result is None:
+                    # `AnalysisFailureError` は必ず分類できるので到達しない。
+                    # 分類できない型が族に入ったら、黙って結果にせず上へ返す。
+                    raise
+                return typed_result
 
             except Exception as e:
                 self._debug_print(f"Exception in check: {e}")
@@ -895,9 +890,12 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                     )
             
                 # Issue #125: 型の付いていない例外は内部エラーとして分類する
-                # （`legacy_compatibility_error` には落とさない）。
-                return internal_error_result(
-                    InternalError(e, site=_CHECK_SITE),
+                # （`legacy_compatibility_error` には落とさない）。Issue #106
+                # PR-106-0: これは pair failure の結果化ではなく、族の外の例外
+                # 用の legacy fallback（軸 F）。観測点はここになる。
+                return generic_internal_error_result(
+                    e,
+                    site=_CHECK_SITE,
                     analysis1=analysis1,
                     analysis2=analysis2,
                     binary1_name=binary1_name,

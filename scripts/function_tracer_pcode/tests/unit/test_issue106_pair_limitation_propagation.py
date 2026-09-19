@@ -25,7 +25,13 @@ from unittest.mock import Mock, patch
 import pytest
 
 from scripts.function_tracer_pcode.authority.lifecycle import production_boundary
-from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+from scripts.function_tracer_pcode.checker.checker import (
+    _CHECK_SITE,
+    EquivalenceChecker,
+)
+from scripts.function_tracer_pcode.checker.pair_execution import (
+    PAIR_FAILURE_IDENTITY_ATTRIBUTE,
+)
 from scripts.function_tracer_pcode.checker.phases.handler import (
     PhaseHandler,
     PhaseID,
@@ -1019,6 +1025,185 @@ def test_the_ledger_folds_an_exception_that_is_recorded_and_then_adopted():
 
 
 # ---------------------------------------------------------------------------
+# `check()` の中で起きた typed failure も台帳の winner を通る
+# ---------------------------------------------------------------------------
+
+def _run_check_in_scope(checker, session, raiser, pair=("b1", "b2", None, None, "L", "R")):
+    """pair scope + pilot session の中で `check()` を 1 回だけ回す。"""
+    from scripts.function_tracer_pcode.checker import checker as checker_module
+
+    with production_signal_scope(session):
+        with pair_failure_scope(pair, session.identity.result_occurrence_id) as ledger:
+            with patch.object(
+                checker_module, "assemble_equivalence_result", side_effect=raiser,
+            ):
+                result = checker.check(
+                    _analysis("left", 7), _analysis("right", 7), "L", "R",
+                )
+            return result, ledger
+
+
+def _checker_with(session):
+    checker = EquivalenceChecker(
+        strategy="monolithic", timeout=5, monolithic_timeout=5,
+        canonical_decision_cutover=False,
+    )
+    checker._active_v2_dual_write_pilot_session = session
+    return checker
+
+
+@pytest.mark.parametrize(
+    "bug_factory, exception_type",
+    [
+        (lambda: FrozenExpressionError("frozen"), "FrozenExpressionError"),
+        (lambda: ExpressionCycleError("cycle"), "ExpressionCycleError"),
+    ],
+    ids=["frozen", "cycle"],
+)
+def test_a_raw_typed_bug_inside_check_keeps_its_recorded_site(
+    bug_factory, exception_type,
+):
+    """`check()` の中で記録 → raw raise した内部バグが、記録した観測点のまま ERROR。
+
+    `check()` には generic な `except Exception` があるので、型付きの failure を
+    そこへ落とすと観測点が `check` に書き換わり、台帳の winner とも無関係な結果に
+    なる。2 つの型を同じ test で通しているのは、**型ごとの catch を足さずに**
+    乗ることの確認。
+    """
+    site = "core.expression.__setattr__"
+    connector = _connector()
+    session = connector.begin({"case": f"issue106-raw-{exception_type}"})
+
+    def _raise(*_args, **_kwargs):
+        bug = bug_factory()
+        record_internal_bug(bug, site=site)
+        raise bug
+
+    result, ledger = _run_check_in_scope(_checker_with(session), session, _raise)
+
+    assert result.is_equivalent is None
+    assert result.failure_status == "internal_exception"
+    assert result.unknown_reasons == []
+    failure = _failure_block(result, "internal_exception")
+    assert failure["exception_type"] == exception_type
+    assert failure["site"] == site, "`check()` の観測点へ書き換えない"
+    assert failure["site"] != _CHECK_SITE
+    # 台帳の winner と結果が同じ failure を指している。
+    assert getattr(result, PAIR_FAILURE_IDENTITY_ATTRIBUTE) == (
+        ledger.pending_failure().identity
+    )
+
+
+def test_the_result_represents_the_ledger_winner_not_the_raised_exception():
+    """同 kind が 2 件あるとき、結果は **winner（先に記録した A）** を表す。
+
+    A を記録して握り潰し、その後 B を記録して raw raise する。`check()` が
+    捕まえるのは B だが、台帳の winner は A（同 kind は記録順で先頭）なので、
+    結果も A でなければならない。
+    """
+    connector = _connector()
+    session = connector.begin({"case": "issue106-winner-vs-raised"})
+
+    def _raise(*_args, **_kwargs):
+        swallowed = FrozenExpressionError("A")
+        record_internal_bug(swallowed, site="core.expression.A")
+        try:
+            raise swallowed
+        except Exception:
+            pass
+        raised = ExpressionCycleError("B")
+        record_internal_bug(raised, site="core.structural.B")
+        raise raised
+
+    result, ledger = _run_check_in_scope(_checker_with(session), session, _raise)
+
+    winner = ledger.pending_failure()
+    assert winner.site == "core.expression.A", "同 kind は記録順で先頭が winner"
+    assert ledger.recorded_failure_count() == 2
+    failure = _failure_block(result, "internal_exception")
+    assert failure["site"] == "core.expression.A"
+    assert failure["exception_type"] == "FrozenExpressionError"
+    assert getattr(result, PAIR_FAILURE_IDENTITY_ATTRIBUTE) == winner.identity
+
+
+def test_a_limitation_inside_check_still_reports_through_the_winner():
+    """`check()` の中の限界も winner 経由（内部バグが居れば内部バグが勝つ）。"""
+    connector = _connector()
+    session = connector.begin({"case": "issue106-check-precedence"})
+
+    def _raise(*_args, **_kwargs):
+        bug = FrozenExpressionError("frozen")
+        record_internal_bug(bug, site="core.expression.__setattr__")
+        raise_limitation(_budget_limitation(site="result_assembly"))
+
+    result, ledger = _run_check_in_scope(_checker_with(session), session, _raise)
+
+    assert ledger.pending_failure().kind is PairFailureKind.INTERNAL_BUG
+    assert result.failure_status == "internal_exception"
+    assert result.unknown_reasons == [], "限界の UNKNOWN へ格下げしない"
+
+
+def test_a_generic_exception_inside_check_keeps_the_legacy_path():
+    """族の外の例外は従来どおり `check` の観測点で `internal_exception` にする。"""
+    connector = _connector()
+    session = connector.begin({"case": "issue106-check-generic"})
+
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("generic")
+
+    result, ledger = _run_check_in_scope(_checker_with(session), session, _raise)
+
+    assert result.failure_status == "internal_exception"
+    failure = _failure_block(result, "internal_exception")
+    assert failure["exception_type"] == "RuntimeError"
+    assert failure["site"] == _CHECK_SITE
+    # pair failure としては採用しない（台帳は空のまま）。
+    assert ledger.pending_failure() is None
+    assert getattr(result, PAIR_FAILURE_IDENTITY_ATTRIBUTE, None) is None
+
+
+# ---------------------------------------------------------------------------
+# already-materialized 判定は identity で行う
+# ---------------------------------------------------------------------------
+
+def _pending(site, exception_type=FrozenExpressionError):
+    with _scope() as ledger:
+        record_internal_bug(exception_type("x"), site=site)
+        return ledger.pending_failure()
+
+
+def test_a_result_for_the_same_failure_is_not_rebuilt():
+    from scripts.function_tracer_pcode.checker.pair_execution import (
+        _failure_already_in_result,
+    )
+
+    failure = _pending("core.expression.A")
+    result = create_mock_result(is_equivalent=None, error_message="internal")
+    result.failure_status = "internal_exception"
+    setattr(result, PAIR_FAILURE_IDENTITY_ATTRIBUTE, failure.identity)
+    assert _failure_already_in_result(result, failure) is True
+
+
+def test_a_result_for_a_different_failure_of_the_same_kind_is_rebuilt():
+    """同じ `internal_exception` でも、別 failure を表す結果は作り直す。
+
+    種別だけで「既に出ている」と判定すると、winner ではない failure の結果が
+    そのまま最終結果になってしまう。
+    """
+    from scripts.function_tracer_pcode.checker.pair_execution import (
+        _failure_already_in_result,
+    )
+
+    winner = _pending("core.expression.A")
+    other = _pending("core.structural.B", ExpressionCycleError)
+    assert winner.identity != other.identity
+    result = create_mock_result(is_equivalent=None, error_message="internal")
+    result.failure_status = "internal_exception"
+    setattr(result, PAIR_FAILURE_IDENTITY_ATTRIBUTE, other.identity)
+    assert _failure_already_in_result(result, winner) is False
+
+
+# ---------------------------------------------------------------------------
 # 変更軸の分離（failure kind / stop state / 例外型 を混ぜない）
 # ---------------------------------------------------------------------------
 
@@ -1342,6 +1527,85 @@ def test_each_change_axis_has_exactly_one_owner_and_it_is_in_core_errors():
         for node in ast.walk(tree):
             if isinstance(node, ast.Name) and node.id in AXIS_OWNER_TABLES.values():
                 offenders.append(f"{rel}:{node.lineno} {node.id}")
+    assert offenders == [], "\n".join(offenders)
+
+
+#: pair failure を結果へ変える関数（定義は `result_assembly`）。
+PAIR_RESULT_BUILDERS = frozenset({
+    "analysis_limitation_result", "internal_error_result",
+    "analysis_limitation_result_for_pair", "internal_error_result_for_pair",
+})
+
+#: それらを呼んでよい唯一の module（軸 E の owner）と、定義 module。
+RESULT_CONVERSION_OWNERS = frozenset({
+    "checker/pair_execution.py", "checker/result_assembly.py",
+})
+
+
+def test_pair_failures_are_turned_into_results_in_exactly_one_place():
+    """結果化の owner が 1 つであることを固定する（軸 E）。
+
+    別の module が直接 builder を呼ぶと、そこが 2 つ目の owner になり、台帳の
+    winner を通らない結果が生まれる（`checker.check()` がまさにそれだった）。
+    """
+    offenders = []
+    for rel, _path, tree in _source_modules():
+        if rel in RESULT_CONVERSION_OWNERS:
+            continue
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in PAIR_RESULT_BUILDERS
+            ):
+                offenders.append(f"{rel}:{node.lineno} {node.func.id}()")
+    assert offenders == [], (
+        "pair failure の結果化が owner の外にある:\n" + "\n".join(offenders)
+    )
+
+
+def test_no_gate_branches_on_a_concrete_failure_exception_type():
+    """gate（`check()` / workflow / boundary）が failure の **型名** を見ないこと。
+
+    型名で分岐し始めると、新しい failure class を足すたびに gate を触ることに
+    なる。gate が知ってよいのは族（`AnalysisFailureError`）だけ。
+    """
+    gates = {
+        "checker/checker.py",
+        "checker/workflow.py",
+        "authority/lifecycle/production_boundary.py",
+    }
+    concrete = {
+        "AnalysisLimitation", "DeadlineExceeded",
+        "FrozenExpressionError", "ExpressionCycleError",
+    }
+    offenders = []
+    for rel, _path, tree in _source_modules():
+        if rel not in gates:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ExceptHandler) and node.type is not None:
+                names = (
+                    [node.type.id] if isinstance(node.type, ast.Name)
+                    else [e.id for e in getattr(node.type, "elts", [])
+                          if isinstance(e, ast.Name)]
+                )
+                for name in names:
+                    if name in concrete:
+                        offenders.append(f"{rel}:{node.lineno} except {name}")
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id == "isinstance" and len(node.args) == 2:
+                    target = node.args[1]
+                    names = (
+                        [target.id] if isinstance(target, ast.Name)
+                        else [e.id for e in getattr(target, "elts", [])
+                              if isinstance(e, ast.Name)]
+                    )
+                    for name in names:
+                        if name in concrete:
+                            offenders.append(
+                                f"{rel}:{node.lineno} isinstance(..., {name})"
+                            )
     assert offenders == [], "\n".join(offenders)
 
 

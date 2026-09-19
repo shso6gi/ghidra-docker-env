@@ -335,6 +335,7 @@ class PairPendingFailure:
     stop_state: PairStopState
     site: str
     exception: BaseException
+    identity: Tuple[str, str, Optional[str], tuple]
 
     @property
     def is_internal_bug(self) -> bool:
@@ -353,8 +354,15 @@ class _PairFailureRecord:
     stop_state: PairStopState
 
     @property
-    def fold_key(self) -> Tuple[str, str, Optional[str], tuple]:
-        """同じ failure の再記録を 1 件に畳むためのキー。"""
+    def identity(self) -> Tuple[str, str, Optional[str], tuple]:
+        """この failure 1 件を指す最小の安定キー。
+
+        用途は 2 つで、**同じ値**を使う: (a) 同じ failure の再記録を 1 件へ畳む、
+        (b) 「今 winner になっている failure を、その結果が表しているか」の照合。
+        種別だけ・観測点だけでは同種の別 failure を区別できないので、種別・観測点・
+        reason・target をまとめて 1 つの識別子にする。診断でも authority でもなく、
+        `PairPendingFailure` と結果の private field の突き合わせにだけ使う。
+        """
         return (self.kind.value, self.site, self.reason_id, self.target_key)
 
     def canonical_exception(self) -> BaseException:
@@ -375,6 +383,7 @@ class _PairFailureRecord:
             stop_state=self.stop_state,
             site=self.site,
             exception=self.canonical_exception(),
+            identity=self.identity,
         )
 
 
@@ -556,7 +565,7 @@ class PairFailureLedger(PairExecutionControl):
 
     def _append(self, record: _PairFailureRecord) -> None:
         if not self._already_recorded(record):
-            self._fold_keys.add(record.fold_key)
+            self._fold_keys.add(record.identity)
             self._exception_ids.update(_represented_exception_ids(record.exception))
             self._records.append(record)
         if _STOP_STATE_RANK[record.stop_state] > _STOP_STATE_RANK[self._stop_state]:
@@ -565,12 +574,12 @@ class PairFailureLedger(PairExecutionControl):
     def _already_recorded(self, record: _PairFailureRecord) -> bool:
         """同じ failure の再記録か。畳む条件は 2 つ。
 
-        (a) `(種別, 観測点, reason, target)` が同じ再 raise。
+        (a) `identity`（種別・観測点・reason・target）が同じ再 raise。
         (b) **同じ例外 object**。`raise` したものを上位の gate が拾い直す経路が
             あるので、観測点が違っても 2 件に増やさない（`InternalError` に
             包み直されている場合は、包まれた原因で一致させる）。
         """
-        if record.fold_key in self._fold_keys:
+        if record.identity in self._fold_keys:
             return True
         return bool(
             _represented_exception_ids(record.exception) & self._exception_ids

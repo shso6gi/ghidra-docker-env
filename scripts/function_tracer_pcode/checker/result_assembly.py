@@ -13,6 +13,8 @@ module-level の関数に移す。トップレベルの ``try/except`` 自体、
   帰属できた限界は UNKNOWN、帰属できなければ ``limitation_unattributed`` /
   ``unregistered_reason`` の ERROR（fail-closed）。
 - :func:`internal_error_result` — ``InternalError`` handler の本体。``internal_exception`` の ERROR。
+- :func:`generic_internal_error_result` — **族の外**の例外用（Issue #106 PR-106-0 の
+  軸 F）。pair failure の結果化とは別経路で、観測点は捕まえた場所になる。
 - :func:`analysis_limitation_result_for_pair` / :func:`internal_error_result_for_pair` —
   pair 境界（Issue #106 PR-106-0）用。両側 analysis を前提にせずに同じ判定規則で
   結果を組む。判定規則は ``analysis_limitation_result`` / ``internal_error_result``
@@ -474,6 +476,42 @@ def internal_error_result(
         "stack_digest": exc.stack_digest(),
     })
     return result
+
+
+def generic_internal_error_result(
+    exc: BaseException,
+    *,
+    site: str,
+    analysis1,
+    analysis2,
+    binary1_name: str,
+    binary2_name: str,
+    start_time: float,
+    type_fix_result,
+    retry_count: int,
+    original_signature1: Optional[FunctionSignature],
+    original_signature2: Optional[FunctionSignature],
+) -> EquivalenceResult:
+    """**族の外**の例外を従来どおり `internal_exception` の ERROR にする。
+
+    これは pair failure の結果化 **ではない**（Issue #106 PR-106-0 の軸 F）。
+    `AnalysisFailureError` 族は execution control が winner を決めてから
+    `checker.pair_execution` が結果にするので、この関数は通らない。ここを通るのは
+    「台帳に対応する failure が無く、型でも pair failure と分からない例外」だけで、
+    観測点は **捕まえた場所** になる（台帳が持つ観測点ではない）。
+    """
+    return internal_error_result(
+        InternalError(exc, site=site),
+        analysis1=analysis1,
+        analysis2=analysis2,
+        binary1_name=binary1_name,
+        binary2_name=binary2_name,
+        start_time=start_time,
+        type_fix_result=type_fix_result,
+        retry_count=retry_count,
+        original_signature1=original_signature1,
+        original_signature2=original_signature2,
+    )
 
 
 def analysis_limitation_result_for_pair(
