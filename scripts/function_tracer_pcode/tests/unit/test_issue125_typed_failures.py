@@ -64,7 +64,12 @@ def test_core_errors_types_and_dependency_rule():
                 raise AssertionError("core/errors.py must not use relative imports")
             imported.add(node.module or "")
     # 標準ライブラリは可、パッケージ内（上位層含む）は不可。
-    assert imported == {"__future__", "dataclasses", "hashlib", "threading", "traceback", "typing"}
+    # `contextlib` / `enum` は Issue #106 PR-106-0 の pair 実行制御
+    # （`pair_failure_scope` / `PairStopState`）が使う標準ライブラリ。
+    assert imported == {
+        "__future__", "contextlib", "dataclasses", "enum", "hashlib",
+        "threading", "traceback", "typing",
+    }
     assert not any(name.startswith("scripts.") for name in imported)
 
 
@@ -395,7 +400,10 @@ def test_cli_attaches_failure_diagnostics_before_the_aggregate():
 
     source = inspect.getsource(equivalence.run_equivalence_check)
     order = [
-        source.index("reset_swallowed_exceptions()\n    stage_clock"),
+        source.index("    reset_swallowed_exceptions()\n"),
+        # Issue #106 PR-106-0: pair 台帳の reset も同じ「ペア冒頭」区画に置く。
+        source.index("    reset_pair_failure_scopes()\n"),
+        source.index("stage_clock = StageClock()"),
         source.index("attach_stage_timing(result, stage_clock)"),
         source.index("attach_failure_diagnostics(result)"),
         source.index("attach_cause_aggregate(result)"),
