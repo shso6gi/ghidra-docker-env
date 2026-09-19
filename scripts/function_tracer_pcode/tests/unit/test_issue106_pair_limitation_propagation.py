@@ -400,6 +400,45 @@ def test_e0f_phase_loop_stops_after_a_swallowed_limitation():
     assert result.pair_stop_state == PairStopState.PAIR_TERMINAL_LIMITATION.value
 
 
+def test_e0f_sat_retries_stop_inside_the_phase_that_went_terminal():
+    """E0f 補: phase の途中で terminal になったら SAT 後の再試行も始めない。
+
+    phase の先頭 gate では止められない区画（4-B / 4-C / 4-A）を通るので、
+    phase 内側の gate が無いと型修正リトライが走ってしまう。
+    """
+    analysis1, analysis2 = _analyses()
+
+    def _analyze(self, name, timeout):
+        return analysis1 if name == "func1" else analysis2
+
+    def _stage_plan(*_args, **_kwargs):
+        try:
+            raise_limitation(_plain_limitation(site="query_build"))
+        except Exception:
+            pass
+        return create_mock_result(
+            is_equivalent=False, solver_status=SolverStatus.SAT,
+        )
+
+    phase_handler = Mock(spec=PhaseHandler)
+    phase_handler.run_phase4_mips64_retry.return_value = None
+    phase_handler.should_fix_return_type.return_value = True
+    phase_handler.should_retry.return_value = False
+    phase_handler.get_retry_reason.return_value = "NOT_EQUIVALENT"
+
+    result = _run_pair(
+        analyze=_analyze, stage_plan=_stage_plan, connector=_connector(),
+        retry_with_type_fix=True, phase_handler=phase_handler,
+    )
+
+    # 4-B の適格判定は gate より前で 1 回だけ走る。そこから先は始めない。
+    assert phase_handler.run_phase4_mips64_retry.call_count == 1
+    assert phase_handler.should_fix_return_type.call_count == 0
+    assert phase_handler.execute_phase.call_count == 0
+    assert result.pair_stop_state == PairStopState.PAIR_TERMINAL_LIMITATION.value
+    assert result.is_equivalent is None, "限界の残った pair を NOT_EQ で返さない"
+
+
 def test_e0f_g2_gate_turns_a_swallowed_limitation_into_unknown_inside_check():
     """G2: `check()` の中で握り潰された限界を、結果を組む直前に拾い直す。
 
