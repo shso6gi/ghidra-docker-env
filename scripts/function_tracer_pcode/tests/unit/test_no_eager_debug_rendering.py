@@ -6,6 +6,14 @@
 これらを呼ぶと、``--debug`` を付けていなくても引数が先に評価される（helper が
 関数の中で flag を見ても遅い）。本 test は AST 走査でその形を 0 件に固定する。
 
+走査の責務は 2 つに分かれていて、helper を互いに流用しない:
+
+* **検出** — 違反を見つける。debug sink / guard / 入れ子の並びまで必要なだけ辿る
+  （:func:`statement_scope_nodes` / :func:`walk_evaluated_now`）
+* **免除の証明** — production も使う値かを示す。:func:`direct_production_expressions`
+  が statement 種別ごとに明示した **直接式だけ**を見る。「広く見てから条件で
+  削る」のではなく、最初から狭い positive set
+
 **この checker が保証すること / しないこと。**
 
 保証する（すべて局所的な構文規則）:
@@ -48,8 +56,8 @@ reaching definition も持たない）。曖昧な production site は checker �
   禁止呼び出し（と契約外の renderer）を含めない。guard の有無に関わらず禁止
   （debug ON でも辿らない）。引数に直接書いた場合だけでなく、**一度変数へ入れて
   から渡す形**も見る（one-hop alias）。``to_string`` / ``to_smt`` は production
-  でも正当に使うので、免除は「同じ straight-line statement list の中で production
-  の読み出しが直接見えるとき」だけ（:func:`_has_direct_production_read`）。
+  でも正当に使うので、免除は :func:`direct_production_expressions` が認めた
+  **直接式**に読み出しが見えるときだけ（statement 種別ごとの positive な表）。
 * **R3** bounded renderer（``summarize_expression`` 等）を呼んでよいのは
   debug guard の中だけ。renderer は有界だが、debug OFF のときに走らせる理由が
   無い。**値の行き先は見ない — 呼んだ場所だけで決まる。** 例外は棚卸しで出た
@@ -725,57 +733,119 @@ def _local_window(block: List[ast.stmt], index: int, name: str) -> List[ast.stmt
     return window
 
 
-def _straight_line_crossing(child: ast.AST) -> Optional[Sequence[ast.AST]]:
-    """直列区間の境界 — 入れ子の **文**へは降りない。
+#: production 共有の証拠として見てよい直接式を、**statement 種別ごとに**決める表。
+#:
+#: 値が「production でも使われている」と言えるのは、その文を実行したときに
+#: **必ずその場で評価される**式で読まれているときだけ。入れ子の文の並び
+#: （``if`` の body、loop の body、``try`` の body、``match`` の case）は、そこへ
+#: 到達するかが control flow 次第なので証拠にしない。``except`` の型や ``match``
+#: の case guard も同じ（例外が起きたとき / その case を試すときにしか評価
+#: されない）。
+#:
+#: 各要素は「その文の、どの field を直接式として見るか」。``()`` は「直接式は
+#: 無い」（``pass`` や ``import`` のように式を評価しない文、および ``try`` の
+#: ように中身が全部別の並びになる文）。
+#:
+#: ここに **無い種別は既定で証拠なし**（:func:`direct_production_expressions` が
+#: ``None`` を返す）。新しい文法が増えても、黙って免除が広がることはない。
+_DIRECT_PRODUCTION_FIELDS: Dict[str, Tuple[str, ...]] = {
+    # 式をそのまま評価する文
+    "Expr": ("value",),
+    "Return": ("value",),
+    "Delete": ("targets",),
+    "Assign": ("targets", "value"),
+    "AugAssign": ("target", "value"),
+    # annotation は ``from __future__ import annotations`` の有無で評価されたり
+    # されなかったりするので証拠にしない（fail-closed）。
+    "AnnAssign": ("target", "value"),
+    "Raise": ("exc", "cause"),
+    "Assert": ("test",),
+    # 判定だけがその場で走る文（body / orelse は別の並び）
+    "If": ("test",),
+    "While": ("test",),
+    "For": ("iter",),
+    "AsyncFor": ("iter",),
+    "Match": ("subject",),
+    # ``with`` は context manager 式だけがその場で評価される
+    "With": ("items",),
+    "AsyncWith": ("items",),
+    # 定義時に評価される header だけ（本体は別 scope・別のタイミング）
+    "FunctionDef": ("__header__",),
+    "AsyncFunctionDef": ("__header__",),
+    "ClassDef": ("__header__",),
+    # 直接式を持たない文
+    "Try": (),
+    "Import": (),
+    "ImportFrom": (),
+    "Global": (),
+    "Nonlocal": (),
+    "Pass": (),
+    "Break": (),
+    "Continue": (),
+    # Python 3.11+。``try`` と同じく中身は全部別の並び。
+    "TryStar": (),
+}
 
-    ``if`` / loop / ``try`` / ``match`` の body は、そこを通るかどうかが control
-    flow 次第なので別の区間。``except`` 節と ``match`` の case は、その場で
-    評価される式（例外型・guard）だけを自分の部分として残す。入れ子 scope は
-    :func:`_binding_crossing` と同じく header だけ。
+
+def direct_production_expressions(statement: ast.stmt) -> Optional[List[ast.AST]]:
+    """``statement`` を実行したとき **その場で必ず評価される**直接式。
+
+    production 共有の免除は、この式の中の読み出しだけを証拠にする
+    （:func:`_has_direct_production_read`）。表は :data:`_DIRECT_PRODUCTION_FIELDS`
+    ただ 1 つで、statement 種別ごとに明示してある。
+
+    知らない種別には ``None`` を返す（証拠なし = 免除しない）。新しい文法が
+    増えても既定で fail-closed。
+
+    これは **限定的な構文ヒューリスティック**であって、実行時にその値がどこから
+    来たかを証明するものではない。分岐・loop・例外を跨いだ値の追跡はしない。
     """
 
-    if isinstance(child, ast.stmt):
-        return []
-    if isinstance(child, ast.excepthandler):
-        return [child.type] if child.type is not None else []
-    if isinstance(child, ast.match_case):
-        return [part for part in (child.pattern, child.guard) if part is not None]
-    return _binding_crossing(child)
-
-
-def straight_line_nodes(statement: ast.stmt) -> Iterator[ast.AST]:
-    """その文のうち、**この直列区間で直接**評価される部分。
-
-    production 共有を証明するための走査。``if cond: consume(x)`` の
-    ``consume(x)`` は「同じ並びで直接見える読み出し」ではないので含めない
-    （:func:`statement_scope_nodes` はそこへ降りるので、証明には流用しない）。
-    """
-
-    crossed = _binding_crossing(statement)
-    if crossed is not None:
-        for part in crossed:
-            yield from _walk_bounded(part, _straight_line_crossing)
-        return
-    yield from _walk_bounded(statement, _straight_line_crossing)
+    fields = _DIRECT_PRODUCTION_FIELDS.get(type(statement).__name__)
+    if fields is None:
+        return None
+    found: List[ast.AST] = []
+    for field in fields:
+        if field == "__header__":
+            found += _header_parts(statement)
+            continue
+        value = getattr(statement, field, None)
+        if value is None:
+            continue
+        if field == "items":
+            found += [item.context_expr for item in value]
+            continue
+        if isinstance(value, list):
+            found += [part for part in value if isinstance(part, ast.AST)]
+            continue
+        found.append(value)
+    return found
 
 
 def _has_direct_production_read(
     window: Sequence[ast.stmt], name: str, debug_reads: Set[int]
 ) -> bool:
-    """``window`` の **直列部分**に、debug 以外の読み出しが直接見えるか。
+    """``window`` の直接式に、debug 以外の読み出しが見えるか。
 
-    これだけが production 共有の根拠。入れ子の文の中の読み出しは、そこを通るか
-    どうかが control flow 次第なので根拠にしない（証明できなければ免除しない）。
+    これだけが production 共有の根拠。式の中の評価タイミング（``lambda`` 本体や
+    generator の中身が後回しであること）は :func:`walk_evaluated_now` に任せる
+    ので、ここで新しい意味を足さない。
     """
 
-    return any(
-        isinstance(node, ast.Name)
-        and isinstance(node.ctx, ast.Load)
-        and node.id == name
-        and id(node) not in debug_reads
-        for statement in window
-        for node in straight_line_nodes(statement)
-    )
+    for statement in window:
+        expressions = direct_production_expressions(statement)
+        if not expressions:
+            continue
+        for expression in expressions:
+            for node in walk_evaluated_now(expression):
+                if (
+                    isinstance(node, ast.Name)
+                    and isinstance(node.ctx, ast.Load)
+                    and node.id == name
+                    and id(node) not in debug_reads
+                ):
+                    return True
+    return False
 
 
 def _debug_only_locals(
@@ -795,14 +865,15 @@ def _debug_only_locals(
     （R3: debug guard の中か、owner か、renderer 定義の中か、``__repr__`` /
     ``__str__``）ので、値がどこへ流れるかを調べる必要が無い。
 
-    **production 共有の免除は、同一 lexical scope・同一 straight-line statement
-    list・同一 local window の中で、読み出しが直接見えるときだけ**
-    （:func:`_has_direct_production_read`）。担当範囲は :func:`_local_window`
-    （次に同名へ代入する文の手前まで、同じ並びの中）。
+    **production 共有の免除は、同一 lexical scope・同一 local window
+    （:func:`_local_window`）の中で、:func:`direct_production_expressions` が
+    「その文を実行したら必ず評価される」と認めた直接式に読み出しが見えるときだけ**
+    （:func:`_has_direct_production_read`）。許す位置は statement 種別ごとの表
+    :data:`_DIRECT_PRODUCTION_FIELDS` 1 か所で決まり、表に無い種別は証拠なし。
 
-    ``if`` / loop / ``try`` / ``match`` の body や入れ子 scope の読み出しは、
-    そこを通るかどうかが control flow 次第なので免除の根拠にしない。検出のほう
-    （debug 位置の読み出し）はその中まで見るので、
+    ``if`` / loop / ``try`` / ``match`` の body、``except`` の型、``match`` の
+    case guard は、そこを通るかどうかが control flow 次第なので免除の根拠に
+    しない。検出のほう（debug 位置の読み出し）は別の走査でその中まで見るので、
     ``rendered = expr.to_string()`` → ``if self.debug: self._debug_print(rendered)``
     は従来どおり捕まる。証明できなければ免除しない（fail-closed）。
 
@@ -1195,7 +1266,8 @@ class _EagerDebugRenderingScanner:
         self.renderers = renderers
         #: **debug のためだけに作られた値を読んでいる** ``Name`` node の id ->
         #: ``(種別, 呼び出し名)``。種別は ``"forbidden"`` / ``"unsafe_renderer"``
-        #: （R2・R6）か ``"renderer"``（R3）。
+        #: だけ（R2 / R6）。bounded renderer は R3 が呼び出し位置で決めるので
+        #: ここには現れない。
         #:
         #: 鍵が読み出し node そのものなので、同名の別束縛（入れ子 scope の
         #: parameter、同じ scope の別の代入）と取り違えようがない。
@@ -1249,11 +1321,12 @@ class _EagerDebugRenderingScanner:
             if node.name not in RENDER_FREE_DUNDERS:
                 continue
             # ``repr()`` が走らせるのは本体のうち **その場で評価される**部分。
-            # 中の ``lambda`` / generator 本体は呼ばれるまで走らない。
+            # 中の ``lambda`` / ``def`` / generator の本体は呼ばれるまで走らない
+            # （根が入れ子 ``def`` のときも降りないよう、root を見る入口を使う）。
             for sub in (
                 inner
                 for statement in node.body
-                for inner in _walk_bounded(statement, _now_crossing)
+                for inner in walk_evaluated_now(statement)
             ):
                 label = _render_call_label(sub)
                 if label:
@@ -3219,104 +3292,6 @@ def test_a_production_read_in_the_same_statement_list_does_grant_exemption():
     assert not violations.render_in_debug_sink, violations.describe()
 
 
-# -- production 共有の免除は「直列区間で直接見える read」だけ --------------------
-
-_NESTED_PRODUCTION_READS = [
-    ("if の body",
-     "    if cond:\n        consume(rendered)\n"),
-    ("if / else の body",
-     "    if cond:\n        pass\n    else:\n        consume(rendered)\n"),
-    ("loop の body",
-     "    for item in items:\n        consume(rendered)\n"),
-    ("while の body",
-     "    while cond:\n        consume(rendered)\n"),
-    ("try の body",
-     "    try:\n        consume(rendered)\n    except Exception:\n        pass\n"),
-    ("except の body",
-     "    try:\n        pass\n    except Exception:\n        consume(rendered)\n"),
-    ("finally の body",
-     "    try:\n        pass\n    finally:\n        consume(rendered)\n"),
-    ("match の case",
-     "    match cond:\n        case 1:\n            consume(rendered)\n"),
-    ("with の body",
-     "    with lock:\n        consume(rendered)\n"),
-]
-
-
-@pytest.mark.parametrize(
-    "label, nested",
-    _NESTED_PRODUCTION_READS,
-    ids=[case[0] for case in _NESTED_PRODUCTION_READS],
-)
-def test_a_nested_body_read_does_not_grant_production_sharing(label, nested):
-    """入れ子の文の中の読み出しは免除の根拠にしない。
-
-    そこを通るかどうかは control flow 次第で、この checker はそれを推論しない。
-    証明できなければ免除しない（fail-closed）。
-    """
-
-    violations = scan_source(
-        "sample",
-        "def f(self, expr, cond, items, lock, consume):\n"
-        "    rendered = expr.to_string()\n"
-        + nested
-        + "    self._debug_print(rendered)\n",
-    )
-    assert [entry[2] for entry in violations.render_in_debug_sink] == [
-        "_debug_print(... rendered = to_string() ...)"
-    ], label
-
-
-@pytest.mark.parametrize(
-    "producer, detail",
-    [
-        ("expr.to_string()", "_debug_print(... rendered = to_string() ...)"),
-        ("expr.to_smt()", "_debug_print(... rendered = to_smt() ...)"),
-        (
-            "expensive_factory().summarize_expression(expr)",
-            "_debug_print(... rendered = <computed>.summarize_expression() ...)",
-        ),
-    ],
-)
-def test_the_nested_body_rule_holds_for_every_tracked_producer(producer, detail):
-    violations = scan_source(
-        "sample",
-        "def f(self, expr, cond, consume):\n"
-        f"    rendered = {producer}\n"
-        "    if cond:\n"
-        "        consume(rendered)\n"
-        "    self._debug_print(rendered)\n",
-    )
-    assert [entry[2] for entry in violations.render_in_debug_sink] == [detail]
-
-
-def test_a_read_in_the_same_straight_line_list_does_grant_production_sharing():
-    """同じ並びで直接見える読み出しだけが免除の根拠。"""
-
-    violations = scan_source(
-        "sample",
-        "def f(self, expr, solver):\n"
-        "    smt = expr.to_smt()\n"
-        "    solver.add(smt)\n"
-        "    self._debug_print(smt)\n",
-    )
-    assert not violations.render_in_debug_sink, violations.describe()
-
-
-def test_a_nested_definition_header_still_grants_production_sharing():
-    """入れ子 ``def`` の default はその場で評価されるので、直列部分の読み出し。"""
-
-    violations = scan_source(
-        "sample",
-        "def f(self, expr):\n"
-        "    rendered = expr.to_string()\n"
-        "    def inner(x=rendered):\n"
-        "        return x\n"
-        "    self._debug_print(rendered)\n"
-        "    return inner\n",
-    )
-    assert not violations.render_in_debug_sink, violations.describe()
-
 
 def test_a_debug_read_inside_a_nested_body_is_still_detected():
     """検出のほうは入れ子の中まで見る（免除だけが直列区間に限られる）。"""
@@ -3333,23 +3308,221 @@ def test_a_debug_read_inside_a_nested_body_is_still_detected():
     ]
 
 
-def test_straight_line_nodes_stops_at_a_nested_statement():
-    """免除用の走査が入れ子の文へ降りないこと（helper の契約）。"""
+def test_the_exemption_grammar_stops_at_a_nested_statement():
+    """免除用の直接式に入れ子の文が含まれないこと（owner contract）。"""
 
     statement = ast.parse("if cond:\n    consume(rendered)\n").body[0]
     names = {
         node.id
-        for node in straight_line_nodes(statement)
+        for expression in direct_production_expressions(statement)
+        for node in walk_evaluated_now(expression)
         if isinstance(node, ast.Name)
     }
     assert names == {"cond"}, names
-    # 比較用: 検出側の走査は中まで見る。
+    # 比較用: 検出側の走査は中まで見る（別 helper・別責務）。
     wider = {
         node.id
         for node in statement_scope_nodes(statement)
         if isinstance(node, ast.Name)
     }
     assert wider == {"cond", "consume", "rendered"}, wider
+
+
+# -- production 共有の免除: statement 種別ごとの表 ------------------------------
+
+def _exempts(source: str) -> bool:
+    """``rendered`` が production 共有として免除されるか（違反 0 なら免除）。"""
+
+    violations = scan_source("sample", source)
+    return not violations.render_in_debug_sink
+
+
+def _with_statement(statement: str) -> str:
+    body = "".join(f"    {line}\n" for line in statement.splitlines())
+    return (
+        "def f(self, expr, cond, items, lock, value, consume, Holder):\n"
+        "    rendered = expr.to_string()\n"
+        + body
+        + "    self._debug_print(rendered)\n"
+    )
+
+
+#: (ラベル, 文, 免除されるか)。「その文を実行したら必ず評価される位置」に
+#: ``rendered`` があるときだけ免除。入れ子の並び・例外型・case guard は対象外。
+_EXEMPTION_GRAMMAR = [
+    # 直接式 → 免除される
+    ("Expr の value", "consume(rendered)", True),
+    ("Assign の value", "keep = rendered", True),
+    ("Assign の target 添字", "items[rendered] = 1", True),
+    ("AnnAssign の value", "keep: str = rendered", True),
+    ("AugAssign の value", "value += rendered", True),
+    ("Return の value", "return rendered", True),
+    ("Delete の target", "del items[rendered]", True),
+    ("Raise の exc", "raise ValueError(rendered)", True),
+    ("Assert の test", "assert rendered", True),
+    ("If の test", "if rendered:\n    pass", True),
+    ("While の test", "while rendered:\n    break", True),
+    ("For の iter", "for item in rendered:\n    pass", True),
+    ("AsyncFor の iter", None, True),  # 下で async 関数として別に組む
+    ("With の context", "with rendered:\n    pass", True),
+    ("Match の subject", "match rendered:\n    case _:\n        pass", True),
+    ("FunctionDef の default", "def inner(x=rendered):\n    pass", True),
+    ("ClassDef の base", "class Sub(rendered):\n    pass", True),
+    # 入れ子の並び・条件付きの位置 → 免除されない
+    ("If の body", "if cond:\n    consume(rendered)", False),
+    ("If の orelse", "if cond:\n    pass\nelse:\n    consume(rendered)", False),
+    ("While の body", "while cond:\n    consume(rendered)", False),
+    ("For の body", "for item in items:\n    consume(rendered)", False),
+    ("With の body", "with lock:\n    consume(rendered)", False),
+    ("Try の body", "try:\n    consume(rendered)\nexcept Exception:\n    pass", False),
+    ("Try の except 型", "try:\n    pass\nexcept rendered:\n    pass", False),
+    ("Try の handler body", "try:\n    pass\nexcept Exception:\n    consume(rendered)", False),
+    ("Try の orelse", "try:\n    pass\nexcept Exception:\n    pass\nelse:\n    consume(rendered)", False),
+    ("Try の finally", "try:\n    pass\nfinally:\n    consume(rendered)", False),
+    ("Match の case guard", "match value:\n    case 1 if rendered:\n        pass", False),
+    ("Match の case body", "match value:\n    case _:\n        consume(rendered)", False),
+    ("FunctionDef の本体", "def inner():\n    return consume(rendered)", False),
+    ("ClassDef の本体", "class Sub:\n    kept = rendered", False),
+]
+
+
+@pytest.mark.parametrize(
+    "label, statement, exempt",
+    [case for case in _EXEMPTION_GRAMMAR if case[1] is not None],
+    ids=[case[0] for case in _EXEMPTION_GRAMMAR if case[1] is not None],
+)
+def test_the_exemption_grammar_is_fixed(label, statement, exempt):
+    """免除の根拠になる位置を statement 種別ごとに固定する。
+
+    「必ずその場で評価される直接式」だけが production 共有の証拠。入れ子の文の
+    並び、``except`` の型、``match`` の case guard は条件付きなので対象外。
+    """
+
+    assert _exempts(_with_statement(statement)) is exempt, label
+
+
+def test_an_async_for_iterable_is_a_direct_expression():
+    """``async for`` の iterable も直接式（body は対象外）。"""
+
+    exempted = scan_source(
+        "sample",
+        "async def f(self, expr, consume):\n"
+        "    rendered = expr.to_string()\n"
+        "    async for item in rendered:\n"
+        "        pass\n"
+        "    self._debug_print(rendered)\n",
+    )
+    assert not exempted.render_in_debug_sink, exempted.describe()
+    reported = scan_source(
+        "sample",
+        "async def f(self, expr, items, consume):\n"
+        "    rendered = expr.to_string()\n"
+        "    async for item in items:\n"
+        "        consume(rendered)\n"
+        "    self._debug_print(rendered)\n",
+    )
+    assert [entry[2] for entry in reported.render_in_debug_sink] == [
+        "_debug_print(... rendered = to_string() ...)"
+    ]
+
+
+def test_an_async_with_context_is_a_direct_expression():
+    exempted = scan_source(
+        "sample",
+        "async def f(self, expr):\n"
+        "    rendered = expr.to_string()\n"
+        "    async with rendered:\n"
+        "        pass\n"
+        "    self._debug_print(rendered)\n",
+    )
+    assert not exempted.render_in_debug_sink, exempted.describe()
+
+
+def test_every_statement_kind_is_in_the_exemption_grammar():
+    """この Python の全 statement 種別が表にあること。
+
+    新しい種別が増えたらここで FAIL する。表に載せるまでは
+    :func:`direct_production_expressions` が ``None`` を返すので、黙って免除が
+    広がることはない（既定 fail-closed）。
+    """
+
+    present = {kind.__name__ for kind in ast.stmt.__subclasses__()}
+    missing = present - set(_DIRECT_PRODUCTION_FIELDS)
+    assert not missing, f"statement kinds with no declared exemption grammar: {sorted(missing)}"
+
+
+def test_an_unknown_statement_kind_grants_no_exemption():
+    """表に無い種別は既定で証拠なし（permissive に通らない）。"""
+
+    class _FutureStatement(ast.stmt):
+        _fields = ("value",)
+
+    unknown = _FutureStatement()
+    unknown.value = ast.parse("rendered", mode="eval").body
+    assert direct_production_expressions(unknown) is None
+    assert not _has_direct_production_read([unknown], "rendered", set())
+
+
+@pytest.mark.parametrize(
+    "producer, detail",
+    [
+        ("expr.to_string()", "_debug_print(... rendered = to_string() ...)"),
+        ("expr.to_smt()", "_debug_print(... rendered = to_smt() ...)"),
+        (
+            "expensive_factory().summarize_expression(expr)",
+            "_debug_print(... rendered = <computed>.summarize_expression() ...)",
+        ),
+    ],
+)
+def test_a_conditional_position_grants_no_exemption_for_any_producer(producer, detail):
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, consume):\n"
+        f"    rendered = {producer}\n"
+        "    try:\n"
+        "        pass\n"
+        "    except rendered:\n"
+        "        pass\n"
+        "    self._debug_print(rendered)\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [detail]
+
+
+def test_a_deferred_body_inside_a_direct_expression_is_not_evidence():
+    """直接式の中でも、``lambda`` 本体のように後回しの部分は証拠にしない。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, apply):\n"
+        "    rendered = expr.to_string()\n"
+        "    apply(lambda: consume(rendered))\n"
+        "    self._debug_print(rendered)\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [
+        "_debug_print(... rendered = to_string() ...)"
+    ]
+
+
+def test_a_nested_function_body_is_not_reachable_from_repr():
+    """R4: ``__repr__`` の中の ``def`` 本体は呼ばれるまで走らない。"""
+
+    violations = scan_source(
+        "sample",
+        "class Sample:\n"
+        "    def __repr__(self):\n"
+        "        def later():\n"
+        "            return self.value.to_string()\n"
+        "        return 'Sample'\n",
+    )
+    assert not violations.render_in_dunder, violations.describe()
+    # 本体が直接書かれていれば従来どおり検出する。
+    direct = scan_source(
+        "sample",
+        "class Sample:\n"
+        "    def __repr__(self):\n"
+        "        return self.value.to_string()\n",
+    )
+    assert [entry[2] for entry in direct.render_in_dunder] == ["__repr__ calls to_string()"]
 
 
 def test_the_two_declared_sets_do_not_overlap():
