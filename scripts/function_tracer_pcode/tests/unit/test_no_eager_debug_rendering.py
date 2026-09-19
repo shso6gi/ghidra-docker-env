@@ -323,9 +323,12 @@ class EagerDebugRenderingViolations:
             )
         for module, lineno, detail in self.unsupported_producer_binding:
             lines.append(
-                f"B1 {module}:{lineno}: {detail} binds a tracked debug producer to a "
-                "target shape this contract does not cover; assign it to a plain name, "
-                "or add the shape to bound_names()"
+                f"B1 {module}:{lineno}: {detail} binds the value of a tracked debug "
+                "producer through a shape whose provenance this contract deliberately "
+                "does not follow; give the producer its own plain local name first "
+                "(`name = <producer>`) and read that name, or -- only when the shape "
+                "itself has to become supported -- widen the producer-binding "
+                "contract in tracked_producer_bindings() on purpose"
             )
         return "\n".join(lines)
 
@@ -856,11 +859,12 @@ def tracked_producer_bindings(
     * RHS root が :func:`direct_tracked_producer` — 値が producer の戻り値そのもの
     * target が単一の局所 ``Name``
 
-    実測（tracked producer を含む代入 336 件）: RHS root が producer なのは 191、
-    残り 145 は ``consume(producer)`` のように **RHS の中で走るだけ**。後者は
-    ``rendered`` が producer の戻り値を受けていないので alias ではない
-    （B1 でもない — 正当な production の書き方）。target 側は ``Name`` 355 /
-    ``Subscript``・``Attribute`` 6 / それ以外 0。
+    実測（この文の実行で tracked producer が走る代入 336 件）: RHS root が
+    producer なのは 191、残り 145 は ``consume(producer)`` のように **RHS の中で
+    走るだけ**。後者は ``rendered`` が producer の戻り値を受けていないので alias
+    ではない（B1 でもない — 正当な production の書き方）。target 側は同じ 336 件で
+    ``Name`` 330 / ``Subscript`` 3 / ``Attribute`` 3、chained・分解・``AugAssign``
+    は 0。
 
     * ``name = <producer>`` / ``name: T = <producer>`` — 追跡する
     * ``obj.attr = <producer>`` / ``obj[key] = <producer>`` — 局所名を作らないので
