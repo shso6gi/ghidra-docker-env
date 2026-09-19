@@ -45,9 +45,11 @@ reaching definition も持たない）。曖昧な production site は checker �
   専用なので、そこにある full render や重い診断 helper は「debug のためだけに
   入力を辿っている」ことを意味する。
 * **R2** debug sink（``print`` と名前に ``debug`` を含む呼び出し）の引数に
-  禁止呼び出しを含めない。guard の有無に関わらず禁止（debug ON でも辿らない）。
-  引数に直接書いた場合だけでなく、**同じ関数で一度変数へ入れてから渡す形**も
-  見る（代入 1 段。production も使う値は対象外）。
+  禁止呼び出し（と契約外の renderer）を含めない。guard の有無に関わらず禁止
+  （debug ON でも辿らない）。引数に直接書いた場合だけでなく、**一度変数へ入れて
+  から渡す形**も見る（one-hop alias）。``to_string`` / ``to_smt`` は production
+  でも正当に使うので、免除は「同じ straight-line statement list の中で production
+  の読み出しが直接見えるとき」だけ（:func:`_has_direct_production_read`）。
 * **R3** bounded renderer（``summarize_expression`` 等）を呼んでよいのは
   debug guard の中だけ。renderer は有界だが、debug OFF のときに走らせる理由が
   無い。**値の行き先は見ない — 呼んだ場所だけで決まる。** 例外は棚卸しで出た
@@ -723,6 +725,59 @@ def _local_window(block: List[ast.stmt], index: int, name: str) -> List[ast.stmt
     return window
 
 
+def _straight_line_crossing(child: ast.AST) -> Optional[Sequence[ast.AST]]:
+    """直列区間の境界 — 入れ子の **文**へは降りない。
+
+    ``if`` / loop / ``try`` / ``match`` の body は、そこを通るかどうかが control
+    flow 次第なので別の区間。``except`` 節と ``match`` の case は、その場で
+    評価される式（例外型・guard）だけを自分の部分として残す。入れ子 scope は
+    :func:`_binding_crossing` と同じく header だけ。
+    """
+
+    if isinstance(child, ast.stmt):
+        return []
+    if isinstance(child, ast.excepthandler):
+        return [child.type] if child.type is not None else []
+    if isinstance(child, ast.match_case):
+        return [part for part in (child.pattern, child.guard) if part is not None]
+    return _binding_crossing(child)
+
+
+def straight_line_nodes(statement: ast.stmt) -> Iterator[ast.AST]:
+    """その文のうち、**この直列区間で直接**評価される部分。
+
+    production 共有を証明するための走査。``if cond: consume(x)`` の
+    ``consume(x)`` は「同じ並びで直接見える読み出し」ではないので含めない
+    （:func:`statement_scope_nodes` はそこへ降りるので、証明には流用しない）。
+    """
+
+    crossed = _binding_crossing(statement)
+    if crossed is not None:
+        for part in crossed:
+            yield from _walk_bounded(part, _straight_line_crossing)
+        return
+    yield from _walk_bounded(statement, _straight_line_crossing)
+
+
+def _has_direct_production_read(
+    window: Sequence[ast.stmt], name: str, debug_reads: Set[int]
+) -> bool:
+    """``window`` の **直列部分**に、debug 以外の読み出しが直接見えるか。
+
+    これだけが production 共有の根拠。入れ子の文の中の読み出しは、そこを通るか
+    どうかが control flow 次第なので根拠にしない（証明できなければ免除しない）。
+    """
+
+    return any(
+        isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+        and node.id == name
+        and id(node) not in debug_reads
+        for statement in window
+        for node in straight_line_nodes(statement)
+    )
+
+
 def _debug_only_locals(
     function: ast.FunctionDef | ast.AsyncFunctionDef,
     renderers: FrozenSet[str],
@@ -740,12 +795,16 @@ def _debug_only_locals(
     （R3: debug guard の中か、owner か、renderer 定義の中か、``__repr__`` /
     ``__str__``）ので、値がどこへ流れるかを調べる必要が無い。
 
-    **production 共有の免除は、同じ文の並びの中だけで証明する。** ある代入が
-    担当するのは :func:`_local_window`（次に同名へ代入する文の手前まで、同じ
-    並びの中）で、そこに debug 以外の読み出しがあれば「production も使う値」と
-    して免除する。別 branch・loop・``try``・入れ子 scope の読み出しは免除の
-    根拠にしない — その経路を本当に通るかは control flow の話で、この checker は
-    それを推論しないため。証明できなければ免除しない（fail-closed）。
+    **production 共有の免除は、同一 lexical scope・同一 straight-line statement
+    list・同一 local window の中で、読み出しが直接見えるときだけ**
+    （:func:`_has_direct_production_read`）。担当範囲は :func:`_local_window`
+    （次に同名へ代入する文の手前まで、同じ並びの中）。
+
+    ``if`` / loop / ``try`` / ``match`` の body や入れ子 scope の読み出しは、
+    そこを通るかどうかが control flow 次第なので免除の根拠にしない。検出のほう
+    （debug 位置の読み出し）はその中まで見るので、
+    ``rendered = expr.to_string()`` → ``if self.debug: self._debug_print(rendered)``
+    は従来どおり捕まる。証明できなければ免除しない（fail-closed）。
 
     返り値は ``id(<Name node>) -> (種別, 表示)``。その読み出しだけが報告対象。
     """
@@ -762,20 +821,19 @@ def _debug_only_locals(
                 continue
             for name in _assigned_names(statement):
                 window = _local_window(block, index, name)
-                reads = [
+                debug_reads = _debug_read_positions(window, renderers)
+                if _has_direct_production_read(window, name, debug_reads):
+                    continue  # production も読む値 — debug 側の問題ではない
+                marked = [
                     node
                     for target in window
                     for node in statement_scope_nodes(target)
                     if isinstance(node, ast.Name)
                     and isinstance(node.ctx, ast.Load)
                     and node.id == name
+                    and id(node) in debug_reads
                 ]
-                if not reads:
-                    continue
-                debug_reads = _debug_read_positions(window, renderers)
-                if not all(id(node) in debug_reads for node in reads):
-                    continue  # production も読む値 — debug 側の問題ではない
-                for node in reads:
+                for node in marked:
                     reported[id(node)] = (kind, label)
     return reported
 
@@ -3159,6 +3217,139 @@ def test_a_production_read_in_the_same_statement_list_does_grant_exemption():
         "    self._debug_print(smt)\n",
     )
     assert not violations.render_in_debug_sink, violations.describe()
+
+
+# -- production 共有の免除は「直列区間で直接見える read」だけ --------------------
+
+_NESTED_PRODUCTION_READS = [
+    ("if の body",
+     "    if cond:\n        consume(rendered)\n"),
+    ("if / else の body",
+     "    if cond:\n        pass\n    else:\n        consume(rendered)\n"),
+    ("loop の body",
+     "    for item in items:\n        consume(rendered)\n"),
+    ("while の body",
+     "    while cond:\n        consume(rendered)\n"),
+    ("try の body",
+     "    try:\n        consume(rendered)\n    except Exception:\n        pass\n"),
+    ("except の body",
+     "    try:\n        pass\n    except Exception:\n        consume(rendered)\n"),
+    ("finally の body",
+     "    try:\n        pass\n    finally:\n        consume(rendered)\n"),
+    ("match の case",
+     "    match cond:\n        case 1:\n            consume(rendered)\n"),
+    ("with の body",
+     "    with lock:\n        consume(rendered)\n"),
+]
+
+
+@pytest.mark.parametrize(
+    "label, nested",
+    _NESTED_PRODUCTION_READS,
+    ids=[case[0] for case in _NESTED_PRODUCTION_READS],
+)
+def test_a_nested_body_read_does_not_grant_production_sharing(label, nested):
+    """入れ子の文の中の読み出しは免除の根拠にしない。
+
+    そこを通るかどうかは control flow 次第で、この checker はそれを推論しない。
+    証明できなければ免除しない（fail-closed）。
+    """
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, cond, items, lock, consume):\n"
+        "    rendered = expr.to_string()\n"
+        + nested
+        + "    self._debug_print(rendered)\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [
+        "_debug_print(... rendered = to_string() ...)"
+    ], label
+
+
+@pytest.mark.parametrize(
+    "producer, detail",
+    [
+        ("expr.to_string()", "_debug_print(... rendered = to_string() ...)"),
+        ("expr.to_smt()", "_debug_print(... rendered = to_smt() ...)"),
+        (
+            "expensive_factory().summarize_expression(expr)",
+            "_debug_print(... rendered = <computed>.summarize_expression() ...)",
+        ),
+    ],
+)
+def test_the_nested_body_rule_holds_for_every_tracked_producer(producer, detail):
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, cond, consume):\n"
+        f"    rendered = {producer}\n"
+        "    if cond:\n"
+        "        consume(rendered)\n"
+        "    self._debug_print(rendered)\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [detail]
+
+
+def test_a_read_in_the_same_straight_line_list_does_grant_production_sharing():
+    """同じ並びで直接見える読み出しだけが免除の根拠。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr, solver):\n"
+        "    smt = expr.to_smt()\n"
+        "    solver.add(smt)\n"
+        "    self._debug_print(smt)\n",
+    )
+    assert not violations.render_in_debug_sink, violations.describe()
+
+
+def test_a_nested_definition_header_still_grants_production_sharing():
+    """入れ子 ``def`` の default はその場で評価されるので、直列部分の読み出し。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    rendered = expr.to_string()\n"
+        "    def inner(x=rendered):\n"
+        "        return x\n"
+        "    self._debug_print(rendered)\n"
+        "    return inner\n",
+    )
+    assert not violations.render_in_debug_sink, violations.describe()
+
+
+def test_a_debug_read_inside_a_nested_body_is_still_detected():
+    """検出のほうは入れ子の中まで見る（免除だけが直列区間に限られる）。"""
+
+    violations = scan_source(
+        "sample",
+        "def f(self, expr):\n"
+        "    rendered = expr.to_string()\n"
+        "    if self.debug:\n"
+        "        self._debug_print(rendered)\n",
+    )
+    assert [entry[2] for entry in violations.render_in_debug_sink] == [
+        "_debug_print(... rendered = to_string() ...)"
+    ]
+
+
+def test_straight_line_nodes_stops_at_a_nested_statement():
+    """免除用の走査が入れ子の文へ降りないこと（helper の契約）。"""
+
+    statement = ast.parse("if cond:\n    consume(rendered)\n").body[0]
+    names = {
+        node.id
+        for node in straight_line_nodes(statement)
+        if isinstance(node, ast.Name)
+    }
+    assert names == {"cond"}, names
+    # 比較用: 検出側の走査は中まで見る。
+    wider = {
+        node.id
+        for node in statement_scope_nodes(statement)
+        if isinstance(node, ast.Name)
+    }
+    assert wider == {"cond", "consume", "rendered"}, wider
 
 
 def test_the_two_declared_sets_do_not_overlap():
