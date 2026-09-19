@@ -909,10 +909,11 @@ def test_check_region_opens_at_method_entry_without_widening_the_catch_scope():
     ]
     # 判定用 try の handler の種類と順序（Issue #125 で typed 分岐を 2 つ足した）。
     # region は計時だけで catch scope を広げていないことがここで固定される。
+    # Issue #106 PR-106-0: typed handler は族 1 つ（`AnalysisFailureError`）。
+    # catch scope は変えていないので、region の開き位置の契約はそのまま。
     assert [ast.unparse(handler.type) for handler in judgement[0].handlers] == [
         "(UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError)",
-        "AnalysisLimitation",
-        "InternalError",
+        "AnalysisFailureError",
         "Exception",
     ]
     assert judgement[0].finalbody == []

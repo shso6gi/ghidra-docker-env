@@ -51,43 +51,51 @@ def test_check_no_longer_constructs_equivalence_result_directly():
 
 
 def test_top_level_try_except_handlers_keep_their_types_order_and_bodies():
-    """Issue #125: typed handler 2 つ（限界 / 内部エラー）を generic の前に足した。
+    """Issue #125 → #106 PR-106-0: typed handler を **族 1 つ** に集約した。
 
-    generic 例外の handler は `self._create_error_result` ではなく
-    `internal_error_result(InternalError(...))` を返す（`legacy_compatibility_error`
-    ではなく `internal_exception` に分類するための意図的な契約変更）。
+    Issue #125 では限界 / 内部エラーを型ごとに 2 つ持っていたが、型ごとの handler は
+    「新しい failure class を足すたびに `check()` を触る」構造だった。PR-106-0 では
+    `AnalysisFailureError` 族を 1 つで受け、**どれを結果化するかは execution control
+    が決める**（`pair_failure_result_from_check`）。捕まえた例外から直接結果を組まない
+    のが要点で、そうしないと台帳の winner と結果が食い違う。
+
+    族の外の generic 例外は従来どおり別 handler で、`generic_internal_error_result`
+    が `internal_exception` に分類する（`legacy_compatibility_error` ではない）。
     """
     fn, _ = _check_fn()
     tr = _top_try(fn)
-    assert len(tr.handlers) == 4 and not tr.orelse and not tr.finalbody
+    assert len(tr.handlers) == 3 and not tr.orelse and not tr.finalbody
     assert [ast.unparse(handler.type) for handler in tr.handlers] == [
         "(UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError)",
-        "AnalysisLimitation",
-        "InternalError",
+        "AnalysisFailureError",
         "Exception",
     ]
     # handler 1: debug print → unsupported_smt_result を返す
     h1 = tr.handlers[0]
     assert len(_calls(h1, "unsupported_smt_result")) == 1
     assert isinstance(h1.body[-1], ast.Return) and getattr(h1.body[-1].value.func, "id", "") == "unsupported_smt_result"
-    # handler 2: 限界 → analysis_limitation_result（帰属は authority が決める）
+    # handler 2: typed pair failure → winner を execution control から受け取る。
+    # 具象型の分岐（`isinstance` / 型別 except）をここに置かない。
     h2 = tr.handlers[1]
-    assert isinstance(h2.body[-1], ast.Return) and getattr(h2.body[-1].value.func, "id", "") == "analysis_limitation_result"
-    assert "session" in {k.arg for k in h2.body[-1].value.keywords}
-    # handler 3: 内部エラー → internal_error_result（例外はそのまま渡す）
+    assert len(_calls(h2, "pair_failure_result_from_check")) == 1
+    assert isinstance(h2.body[-1], ast.Return)
+    assert getattr(h2.body[-1].value, "id", "") == "typed_result"
+    assert not [
+        n for n in ast.walk(h2)
+        if isinstance(n, ast.Call) and getattr(n.func, "id", "") in {
+            "analysis_limitation_result", "internal_error_result",
+        }
+    ], "捕まえた例外から直接結果を組まない（winner 経由だけ）"
+    # handler 3: debug print / traceback → ReturnAbiAuthorityInvalid なら canonical helper、
+    # それ以外は generic fallback（pair failure の結果化とは別経路）
     h3 = tr.handlers[2]
-    assert isinstance(h3.body[-1], ast.Return) and getattr(h3.body[-1].value.func, "id", "") == "internal_error_result"
-    # handler 4: debug print / traceback → ReturnAbiAuthorityInvalid なら canonical helper、
-    # それ以外は InternalError で包んで internal_error_result
-    h4 = tr.handlers[3]
-    ifs = [n for n in h4.body if isinstance(n, ast.If)]
+    ifs = [n for n in h3.body if isinstance(n, ast.If)]
     # if self.debug: traceback（従来どおり）と isinstance 分岐の 2 つ、この順
     assert [ast.unparse(n.test) for n in ifs] == ["self.debug", "isinstance(e, ReturnAbiAuthorityInvalid)"] and not ifs[1].orelse
     ifs = ifs[1:]
     assert isinstance(ifs[0].body[-1], ast.Return) and getattr(ifs[0].body[-1].value.func, "id", "") == "canonical_abi_error_result"
-    assert isinstance(h4.body[-1], ast.Return) and getattr(h4.body[-1].value.func, "id", "") == "internal_error_result"
-    wrapped = _calls(h4.body[-1], "InternalError")
-    assert len(wrapped) == 1 and {k.arg for k in wrapped[0].keywords} == {"site"}
+    assert isinstance(h3.body[-1], ast.Return) and getattr(h3.body[-1].value.func, "id", "") == "generic_internal_error_result"
+    assert {k.arg for k in h3.body[-1].value.keywords} >= {"site"}
 
 
 def test_all_stage_calls_stay_inside_the_top_level_try_body():
