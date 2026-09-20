@@ -296,7 +296,9 @@ class SemanticEdge(NamedTuple):
     child: Any
 
 
-def local_semantic_payload(expr: Any) -> LocalPayload:
+def local_semantic_payload(
+    expr: Any, snapshot: Optional[SemanticSnapshot] = None
+) -> LocalPayload:
     """node の「子以外の意味 field」。`expression_key` と同じ field 集合を見る。
 
     ここに field を足すと candidate hash・完全比較・graph snapshot の 3 つが
@@ -306,13 +308,17 @@ def local_semantic_payload(expr: Any) -> LocalPayload:
     凍結済みの node では凍結時に 1 回作った payload をそのまま返す。完全比較は
     同じ node の payload を何度も見る（`Condition.equals` は解析中に何万回も
     呼ばれる）ので、そのたびに tuple を組み直さない。
+
+    `snapshot` は検証中の呼び出し（まだ node へ書いていない投影）で渡す。
+    渡さないと `semantic_projection()` が生 object を読み直してしまい、
+    「宣言型は凍結時に 1 回だけ読む」が崩れる。
     """
 
     cached = getattr(expr, "_local_payload", None)
     if cached is not None:
         return cached
     kind = _kind_name(expr)
-    projection = semantic_projection(expr)
+    projection = snapshot if snapshot is not None else semantic_projection(expr)
     size = _int_atom(getattr(expr, "size", 0), "invalid_size")
     name = getattr(expr, "name", None) or ""
     operator = getattr(expr, "operator", None) or ""

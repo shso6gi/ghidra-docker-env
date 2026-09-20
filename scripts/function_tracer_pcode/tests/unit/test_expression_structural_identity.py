@@ -294,7 +294,7 @@ def test_forced_hash_collisions_do_not_change_equality_or_dedup(monkeypatch):
 
     constant = b"\x00" * structural.CANDIDATE_DIGEST_SIZE
     monkeypatch.setattr(
-        structural, "compose_candidate_digest", lambda node, child_digests: constant
+        structural, "compose_candidate_digest", lambda node, child_digests, **_kw: constant
     )
     for expr in corpus:
         expr.__dict__["_structural_hash"] = constant
@@ -310,7 +310,7 @@ def test_commutative_pairing_survives_a_degenerate_hash(monkeypatch):
     crossed = Expression.binary_op("INT_ADD", right, left)
     constant = b"\x01" * structural.CANDIDATE_DIGEST_SIZE
     monkeypatch.setattr(
-        structural, "compose_candidate_digest", lambda node, child_digests: constant
+        structural, "compose_candidate_digest", lambda node, child_digests, **_kw: constant
     )
     assert structural.structural_equals(straight, crossed) is True
 

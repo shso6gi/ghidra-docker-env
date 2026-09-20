@@ -7,10 +7,12 @@
 
 PR-22-B が置く境界:
 
-* **生 object を読むのは `core/semantic_projection.py` だけ**。意味 consumer
-  （structural identity / renderer / solver query / loop lowering）は
-  `semantic_key()` / `stable_key()` / `storage_identity_key()` / 宣言型を自分で
-  読まない。読むと、同じ問いに複数の答えが生まれ、凍結後に意味が動く。
+* **生 object を読むのは投影側の 2 module だけ** — `core/semantic_projection.py`
+  （`semantic_key()` / `stable_key()` / `storage_identity_key()` / 宣言型）と
+  `core/loop_lowering_semantics.py`（loop summary ref の schema）。意味 consumer
+  （structural identity / renderer / solver query / loop lowering の描画）は
+  どちらの生 object も自分で読まない。読むと、同じ問いに複数の答えが生まれ、
+  凍結後に意味が動く。
 * 意味の表現（`core/semantic_snapshot.py`）は生 object の読み方を知らない
   （projection owner への一方向）。authority / CLI / checker / config / env も、
   失敗の台帳（`record_internal_bug` 等）も読まない。
@@ -20,6 +22,10 @@ PR-22-B が置く境界:
 * **公開（producer の宣言）を成立させられるのは公開境界だけ**。identity /
   表現 / 投影 / renderer は検証（`validated`）までしか進められない。1 bit で
   兼ねていると、candidate hash を 1 回取っただけで solver へ渡せる値になる。
+* **lifecycle state を進めるのは commit だけ**。`mark_validated` /
+  `mark_published` を staging の途中で呼ぶと、失敗した closure の root だけが
+  「成功した」状態で残る（partial commit）。再入防止に public state を流用
+  しないことも同じ理由で要る。
 * **loop lowering の意味は `core/loop_lowering_semantics.py` が所有**。SMT
   renderer は loop summary ref の schema（class も field 名も）を知らず、
   凍結済みの `LoopLoweringSemantics` だけを読む。厳密 lowering の可否は健全性
@@ -690,3 +696,57 @@ def test_publication_implies_validation_by_construction():
     assert (
         state_of({"_frozen": True, "_published": True}) is SemanticLifecycle.PUBLISHED
     )
+
+
+#: lifecycle state を進めてよい関数（commit のみ）。
+_LIFECYCLE_COMMIT_FUNCTIONS = {"_commit_validation", "_commit_publication"}
+#: state を進める呼び出し。
+_LIFECYCLE_MARK_NAMES = {"mark_validated", "mark_published"}
+
+
+def test_lifecycle_state_only_moves_forward_inside_a_commit():
+    """`mark_*` は commit の中だけ。staging の途中では state を動かさない。
+
+    途中で動かすと、closure の検証が失敗したときに root だけ VALIDATED で
+    残る（partial commit）。「検証中」は operation-local な staging が持つ。
+    """
+
+    path = PACKAGE_ROOT / _PUBLICATION_OWNER
+    tree = _parse(path)
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name in _LIFECYCLE_COMMIT_FUNCTIONS:
+            continue
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            func = inner.func
+            called = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if called in _LIFECYCLE_MARK_NAMES:
+                offenders.append(
+                    f"{_PUBLICATION_OWNER}:{inner.lineno} {node.name}() calls {called}()"
+                )
+    assert offenders == [], offenders
+
+
+def test_the_commit_functions_exist_and_are_the_only_state_writers():
+    """commit 関数が実在し、`mark_*` の呼び出し元が他に無いこと。"""
+
+    callers = set()
+    for path in _module_files():
+        tree = _parse(path)
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for inner in ast.walk(node):
+                if not isinstance(inner, ast.Call):
+                    continue
+                func = inner.func
+                called = (
+                    func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+                )
+                if called in _LIFECYCLE_MARK_NAMES:
+                    callers.add(node.name)
+    assert callers == _LIFECYCLE_COMMIT_FUNCTIONS, callers

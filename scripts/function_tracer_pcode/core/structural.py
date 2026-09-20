@@ -77,6 +77,24 @@ def expression_key(
     deliberately *not* memoised: a placeholder describes the position it was
     produced in -- the remaining budget, or the path that reached the node --
     and reusing it elsewhere would report a node as unresolved when it is not.
+
+    **これは construction-safe な legacy key であって、validated identity API
+    ではない**。lifecycle を進めない（`validated()` を呼ばない）し、未検証の
+    graph でも答えを返す。閉路も予算切れも `("cycle", …)` / `("truncated", …)`
+    の placeholder で表し、consumer は `key_contains_placeholder()` で「どこま
+    で見えているか」を判断する。
+
+    意図的にそうしてある理由は 2 つ:
+
+    * 解析の途中（まだ組み立て中の式）を鍵にする consumer が居る。ここで
+      検証を要求すると、構築中の graph に identity の契約を持ち込むことになる
+    * この key は `object_target_key` 等の preimage に入っていて、reason
+      identity として外へ出る。形を変えると判定名が広く動く
+
+    「この graph は identity を計算してよい形か」を要求するのは
+    `candidate_hash()` / `structural_equals()` / `structural_identity_digest()`
+    の 3 つで、そちらは入口で `validated()` を通し、閉路は typed failure に
+    なる（placeholder を作らない）。
     """
 
     visited: set[int] = set()
@@ -762,6 +780,7 @@ def _compose_merkle_digest(
     digest_size: int,
     person: bytes,
     null_child: bytes,
+    payload: Any = None,
 ) -> bytes:
     """local payload と子 digest から Merkle digest を O(1) で合成する。
 
@@ -770,9 +789,13 @@ def _compose_merkle_digest(
     同じ digest になる。合成規則を 1 本にしてあるのは、candidate hash と
     equivalence digest で正規化が食い違わないようにするため — 値が違うのは
     `person` による domain separation の結果で、規則の違いではない。
+
+    `payload` は検証中の呼び出し（まだ node へ書いていない local payload）で
+    渡す。渡さないと組み直しになり、生 object を読み直してしまう。
     """
 
-    payload = local_semantic_payload(node)
+    if payload is None:
+        payload = local_semantic_payload(node)
     digest = hashlib.blake2b(digest_size=digest_size, person=person)
     digest.update(_atoms_to_bytes(payload.identity_atoms))
     resolved = [null_child if child is None else child for child in child_digests]
@@ -784,7 +807,9 @@ def _compose_merkle_digest(
     return digest.digest()
 
 
-def compose_candidate_digest(node: Any, child_digests: Tuple[Optional[bytes], ...]) -> bytes:
+def compose_candidate_digest(
+    node: Any, child_digests: Tuple[Optional[bytes], ...], *, payload: Any = None
+) -> bytes:
     """**候補絞り込み専用** の 16 byte hash（freeze が各 node に付ける）。
 
     用途は bucket と早期棄却だけ。衝突は起こり得るものとして設計してあり、
@@ -797,10 +822,13 @@ def compose_candidate_digest(node: Any, child_digests: Tuple[Optional[bytes], ..
         digest_size=CANDIDATE_DIGEST_SIZE,
         person=_CANDIDATE_PERSON,
         null_child=_NULL_CHILD_DIGEST,
+        payload=payload,
     )
 
 
-def compose_equivalence_digest(node: Any, child_digests: Tuple[Optional[bytes], ...]) -> bytes:
+def compose_equivalence_digest(
+    node: Any, child_digests: Tuple[Optional[bytes], ...], *, payload: Any = None
+) -> bytes:
     """**完全比較と同じ同値関係** を持つ 32 byte digest（freeze が各 node に付ける）。
 
     `structural_equals(a, b)` が真なら値が一致する。prefilter として使ってよいが、
@@ -813,6 +841,7 @@ def compose_equivalence_digest(node: Any, child_digests: Tuple[Optional[bytes], 
         digest_size=EQUIVALENCE_DIGEST_SIZE,
         person=_EQUIVALENCE_PERSON,
         null_child=_NULL_EQUIVALENCE_CHILD_DIGEST,
+        payload=payload,
     )
 
 

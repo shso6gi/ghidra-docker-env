@@ -28,6 +28,12 @@
 construction/refinement → publication → consumption の順序が identity 経由で
 迂回できる。分けてあるので、**identity consumer は公開権限を持たない**。
 
+**状態を進める操作は failure-atomic**。検証も公開も、派生値と印を operation
+内の staging へ積んでから、失敗しない commit 段で一括して書く。「検証中」「公開
+中」を公開 state で表さないので、closure の一部だけが VALIDATED / PUBLISHED で
+残ることが起きない。検証と公開で transaction の粒度が違う理由は
+`_run_publication` に書いてある。
+
 **閉路の判定はこの module の中だけには無い**。走査そのものは
 `core/semantic_snapshot.traverse_semantic_graph` にあり、freeze・公開・graph
 snapshot が同じ 1 実装を共有する（実装を 2 つ持つと片方だけが直るため）。
@@ -68,7 +74,6 @@ from scripts.function_tracer_pcode.core.semantic_snapshot import (
 
 
 FREEZE_SITE = "core.semantic_freeze.freeze_expression"
-PUBLISH_SITE = "core.semantic_freeze.publish"
 
 #: `tree_size` の飽和上限。共有 DAG の木換算 node 数は深さに対して指数に
 #: なり得るので、診断のための数値のために bignum を育てない。
@@ -81,52 +86,167 @@ _PUBLISH_LEAF_SCALARS = (str, bytes, int, float, bool, type)
 _PACKAGE_PREFIX = "scripts.function_tracer_pcode."
 
 
-def is_frozen(value: Any) -> bool:
-    """`Expression` / `Condition` が検証済み（immutable snapshot 確定済み）か。
+class _LifecycleStaging:
+    """1 回の lifecycle 操作のあいだだけ生きる作業領域。
 
-    **公開済みかは言っていない**。solver consumer が見るのは `is_published`。
+    **公開 state（`_frozen` / `_published`）を再入防止 flag に流用しない**ため
+    に要る。流用すると「検証中」と「検証済み」が区別できず、途中で失敗した
+    closure の root だけが検証済みとして残る（partial commit）。ここへ積んで
+    おき、closure 全体が成功したときだけ一括で書く。
+
+    `entered` は式・条件・runtime ref を `id` で覚える。back-reference（ref の
+    中の式が元の node を指す）も、同じ値を 2 度積むこともここで止まる。
     """
 
-    return is_validated(value)
+    __slots__ = ("entered", "derived", "expressions", "conditions")
+
+    def __init__(self) -> None:
+        self.entered: Dict[int, bool] = {}
+        #: `id(expression)` → 確定させる派生値（commit まで公開状態へ書かない）
+        self.derived: Dict[int, Dict[str, Any]] = {}
+        #: commit 順（子が先）
+        self.expressions: List[Expression] = []
+        self.conditions: List[Any] = []
+
+    def enter(self, value: Any) -> bool:
+        """この操作で初めて見た値なら真。2 度目は偽（再入・back-reference）。"""
+
+        value_id = id(value)
+        if value_id in self.entered:
+            return False
+        self.entered[value_id] = True
+        return True
+
+    def seen(self, value: Any) -> bool:
+        return id(value) in self.entered
+
+    def derived_fields(self, node: Any) -> Dict[str, Any]:
+        """子から畳み上げる値の読み口（この操作で積んだ分 → commit 済みの順）。"""
+
+        staged = self.derived.get(id(node))
+        return staged if staged is not None else node.__dict__
 
 
 def freeze_expression(expr: Optional[Expression]) -> Optional[Expression]:
-    """式 graph を検証して凍結し、`expr` を返す（冪等）。
+    """式 graph の意味 closure を検証して凍結し、`expr` を返す（冪等）。
 
-    凍結済み node には入り直さないので、同じ graph を何度凍結しても費用は
-    「新しく足された node の数」に比例する。凍結済みの subtree に閉路が隠れる
-    ことは無い（凍結できた時点で検証済みなので）。
+    **失敗したら何も確定しない**。closure（graph の node・PHI の条件・runtime
+    ref が抱える式と条件）を全部検証し終えてから、派生値と VALIDATED の印を
+    一括で書く。途中で閉路が見つかれば staging ごと捨てるので、root だけが
+    検証済みになったり、書きかけの snapshot / hash / digest が次回の成功結果
+    として読まれたりしない。
+
+    検証済みの closure には入り直さないので、同じ graph を何度凍結しても費用は
+    「新しく足された node の数」に比例する。
     """
 
-    if expr is None:
-        return None
-    if getattr(expr, "_frozen", False):
+    if expr is None or is_validated(expr):
         return expr
-
-    try:
-        traversal = traverse_semantic_graph(expr, prune=is_frozen)
-    except ExpressionCycleError as exc:
-        # 記録が先、raise が後。途中の `except Exception` に握り潰されても
-        # pair 境界が台帳から拾い直せる。
-        record_internal_bug(exc, site=FREEZE_SITE)
-        raise
-
-    visited_refs: Dict[int, bool] = {}
-    for node in traversal.post_order:
-        _finalize_node(node)
-        _validate_runtime_ref_values(node, visited_refs)
+    _run_validation(lambda staging: _stage_expression_validation(expr, staging))
     return expr
 
 
 def freeze_condition(condition: Any) -> Any:
-    """条件を検証して凍結する（式も一緒に凍る）。公開はしない。"""
+    """条件の意味 closure を検証して凍結する（式も一緒に凍る）。公開はしない。
 
-    if condition is None:
-        return None
-    if not is_validated(condition):
-        freeze_expression(getattr(condition, "expression", None))
-        mark_validated(condition.__dict__)
+    式と同じく failure-atomic: 式側の検証が失敗したら、条件にも印を付けない。
+    """
+
+    if condition is None or is_validated(condition):
+        return condition
+    _run_validation(lambda staging: _stage_condition_validation(condition, staging))
     return condition
+
+
+def _run_validation(stage: Any) -> None:
+    """staging → commit の 1 transaction。失敗したら 1 つも確定させない。
+
+    閉路は記録してから raise する（PR-106-0 の経路）。記録が先なのは、途中の
+    `except Exception` に握り潰されても pair 境界が台帳から拾い直せるため。
+    """
+
+    staging = _LifecycleStaging()
+    try:
+        stage(staging)
+    except ExpressionCycleError as exc:
+        record_internal_bug(exc, site=FREEZE_SITE)
+        raise
+    _commit_validation(staging)
+
+
+def _stage_expression_validation(expr: Any, staging: _LifecycleStaging) -> None:
+    """式 graph とその closure を staging へ積む（公開状態は動かさない）。"""
+
+    if expr is None or is_validated(expr) or staging.seen(expr):
+        return
+
+    def _prune(node: Any) -> bool:
+        # 検証済み（= closure ごと確定済み）と、この操作で既に積んだ node。
+        return is_validated(node) or staging.seen(node)
+
+    traversal = traverse_semantic_graph(expr, prune=_prune)
+    # 先に「この操作で見た」印を付ける。ref の中の式が graph へ戻ってきても
+    # ここで止まり、無限再帰にも二重計上にもならない。
+    for node in traversal.post_order:
+        staging.enter(node)
+    # 子が先に積まれている前提で派生値を畳み上げる（post-order）。
+    for node in traversal.post_order:
+        staging.derived[id(node)] = _derive_node_fields(node, staging)
+        staging.expressions.append(node)
+    # graph の辺では見えない closure（PHI の条件 object、runtime ref が抱える値）。
+    for node in traversal.post_order:
+        _stage_node_closure_validation(node, staging)
+
+
+def _stage_condition_validation(condition: Any, staging: _LifecycleStaging) -> None:
+    if condition is None or is_validated(condition) or not staging.enter(condition):
+        return
+    staging.conditions.append(condition)
+    _stage_expression_validation(getattr(condition, "expression", None), staging)
+
+
+def _stage_node_closure_validation(node: Any, staging: _LifecycleStaging) -> None:
+    """graph の辺には現れない意味 closure を積む。
+
+    * PHI の branch 条件 object（辺として見えるのは条件 **式** だけ）
+    * runtime ref が抱える式と条件（`transition_expr` など。ref は frozen
+      dataclass だが、中の式は別 object なので放っておくと意味が動く）
+    """
+
+    for condition in _phi_branch_conditions(node):
+        _stage_condition_validation(condition, staging)
+    runtime_ref = node.__dict__.get("runtime_ref")
+    if runtime_ref is None or not staging.enter(runtime_ref):
+        return
+    _walk_semantic_carriers(
+        runtime_ref,
+        lambda expr: _stage_expression_validation(expr, staging),
+        lambda cond: _stage_condition_validation(cond, staging),
+    )
+
+
+def _commit_validation(staging: _LifecycleStaging) -> None:
+    """closure 全体の検証が成功したので、派生値と VALIDATED を一括で書く。
+
+    ここは失敗しない（計算は staging で終わっている）。だから「一部だけ
+    VALIDATED」は原理的に起きない。
+    """
+
+    for node in staging.expressions:
+        fields = node.__dict__
+        fields.update(staging.derived[id(node)])
+        mark_validated(fields)
+    for condition in staging.conditions:
+        mark_validated(condition.__dict__)
+
+
+def _phi_branch_conditions(node: Any):
+    if node.expr_type != ExpressionType.PHI:
+        return
+    for branch in node.__dict__.get("value") or ():
+        condition = branch[0] if isinstance(branch, (tuple, list)) and branch else None
+        if isinstance(condition, Condition):
+            yield condition
 
 
 def validated(expr: Optional[Expression]) -> Optional[Expression]:
@@ -134,6 +254,8 @@ def validated(expr: Optional[Expression]) -> Optional[Expression]:
 
     検証済みなら何もしない。未検証なら凍らせることで検証する。閉路はここで
     typed failure になるので、identity API ごとに判定を書き足さなくてよい。
+    失敗したときは何も確定しないので、**同じ入力で呼び直せば同じように失敗
+    する**（途中結果を成功扱いで拾わない）。
 
     **これは公開ではない**。identity は「この graph は計算してよい形か」を
     要求しているだけで、「作った側が完成を宣言したか」は聞いていない。ここで
@@ -147,10 +269,6 @@ def validated(expr: Optional[Expression]) -> Optional[Expression]:
 
 
 # ---------------------------------------------------------------------------
-# publication — producer が完成を宣言する境界
-# ---------------------------------------------------------------------------
-
-
 def publish(value: Any) -> Any:
     """producer が「この意味値は確定した」と宣言する入口（**安定 interface**）。
 
@@ -175,37 +293,29 @@ def publish(value: Any) -> Any:
 
 
 def publish_expression(expr: Optional[Expression]) -> Optional[Expression]:
-    """式 graph を検証してから公開する（冪等）。
+    """式 graph を検証してから公開する（冪等・failure-atomic）。
 
     公開は root だけに付ける印ではない。`to_smt()` は子も PHI の条件も
     runtime ref が抱える式も描くので、**そこから到達できる意味値が同じ宣言に
-    載っていなければ「公開済みの入力だけを受ける」が成り立たない**。公開済みの
+    載っていなければ「公開済みの入力だけを受ける」が成り立たない**。
+
+    宣言が途中で失敗したら **1 つも公開しない**。「producer の宣言が失敗した
+    のに一部だけ solver-consumable」という状態を作らないため。公開済みの
     subtree には入り直さないので、費用は新しく足された node の数に比例する。
     """
 
-    if expr is None:
-        return None
-    if is_published(expr):
+    if expr is None or is_published(expr):
         return expr
-    freeze_expression(expr)
-
-    traversal = traverse_semantic_graph(expr, prune=is_published)
-    visited_refs: Dict[int, bool] = {}
-    for node in traversal.post_order:
-        _publish_node(node, visited_refs)
+    _run_publication(lambda staging: _stage_expression_publication(expr, staging))
     return expr
 
 
 def publish_condition(condition: Any) -> Any:
-    """条件を検証してから公開する（式も一緒に公開される）。"""
+    """条件を検証してから公開する（式も一緒に公開される・failure-atomic）。"""
 
-    if condition is None:
-        return None
-    if is_published(condition):
+    if condition is None or is_published(condition):
         return condition
-    freeze_condition(condition)
-    publish_expression(getattr(condition, "expression", None))
-    mark_published(condition.__dict__)
+    _run_publication(lambda staging: _stage_condition_publication(condition, staging))
     return condition
 
 
@@ -221,20 +331,82 @@ def publish_semantic_values(container: Any) -> Any:
     部分だけ。どの field に式が入っているかを carrier ごとに数え上げると、field を
     1 つ足したときに公開だけが置いていかれるので、**到達できる意味値をすべて
     公開する**という 1 つの規則（`_walk_semantic_carriers`）にしてある。
+
+    入れ物 1 つ分が 1 transaction。途中の値で検証が失敗したら、その入れ物からは
+    1 つも公開されない（sibling だけ solver へ渡せる状態を作らない）。
     """
 
-    return _walk_semantic_carriers(container, publish_expression, publish_condition)
+    _run_publication(
+        lambda staging: _walk_semantic_carriers(
+            container,
+            lambda expr: _stage_expression_publication(expr, staging),
+            lambda cond: _stage_condition_publication(cond, staging),
+        )
+    )
+    return container
 
 
-def validate_semantic_values(container: Any) -> Any:
-    """`container` が抱えている意味値をすべて検証・凍結する（公開はしない）。
+def _run_publication(stage: Any) -> None:
+    """staging → commit の 1 transaction。失敗したら 1 つも公開しない。
 
-    公開と同じ到達規則に別の操作を載せる。freeze が runtime ref の抱える式を
-    固定するのにこれを使う — ref の中の式が後から変わると「凍結後も意味が動く」
-    経路が残るが、**ref を凍らせたことは producer の宣言ではない**。
+    **検証と公開で transaction の粒度が違う**のは、答えている問いが違うから:
+
+    * 検証は「この closure は計算してよい形か」。値ごとに閉じた事実なので、
+      値の closure 1 つが 1 transaction（公開が失敗しても、検証済みの値が
+      検証済みのまま残るのは正しい — 意味は確かに immutable になっている）。
+    * 公開は「producer がこの宣言を出した」。宣言は producer の 1 回の意思
+      表示なので、**宣言 1 回が 1 transaction**。途中で落ちたら宣言は無かった
+      ことにする。
+
+    どちらも「途中の状態を公開 state で表さない」点は同じ。
     """
 
-    return _walk_semantic_carriers(container, freeze_expression, freeze_condition)
+    staging = _LifecycleStaging()
+    stage(staging)
+    _commit_publication(staging)
+
+
+def _stage_expression_publication(expr: Any, staging: _LifecycleStaging) -> None:
+    if expr is None or is_published(expr) or staging.seen(expr):
+        return
+    # 検証は別 transaction。ここで失敗したら公開 staging は捨てられる。
+    freeze_expression(expr)
+
+    def _prune(node: Any) -> bool:
+        return is_published(node) or staging.seen(node)
+
+    traversal = traverse_semantic_graph(expr, prune=_prune)
+    for node in traversal.post_order:
+        if staging.enter(node):
+            staging.expressions.append(node)
+    for node in traversal.post_order:
+        for condition in _phi_branch_conditions(node):
+            _stage_condition_publication(condition, staging)
+        runtime_ref = node.__dict__.get("runtime_ref")
+        if runtime_ref is None or not staging.enter(runtime_ref):
+            continue
+        _walk_semantic_carriers(
+            runtime_ref,
+            lambda value: _stage_expression_publication(value, staging),
+            lambda value: _stage_condition_publication(value, staging),
+        )
+
+
+def _stage_condition_publication(condition: Any, staging: _LifecycleStaging) -> None:
+    if condition is None or is_published(condition) or not staging.enter(condition):
+        return
+    freeze_condition(condition)
+    staging.conditions.append(condition)
+    _stage_expression_publication(getattr(condition, "expression", None), staging)
+
+
+def _commit_publication(staging: _LifecycleStaging) -> None:
+    """宣言が closure 全体で成立したので、PUBLISHED を一括で付ける。"""
+
+    for node in staging.expressions:
+        mark_published(node.__dict__)
+    for condition in staging.conditions:
+        mark_published(condition.__dict__)
 
 
 def _walk_semantic_carriers(container: Any, on_expression, on_condition) -> Any:
@@ -296,31 +468,6 @@ def _walk_semantic_carriers(container: Any, on_expression, on_condition) -> Any:
     return container
 
 
-def _publish_node(node: Expression, visited_refs: Dict[int, bool]) -> None:
-    """検証済みの node 1 つを公開する。
-
-    印を先に付けてから ref を辿る。ref の中の式が同じ node へ戻ってくる形でも、
-    そこで止まる。
-    """
-
-    if is_published(node):
-        return
-    mark_published(node.__dict__)
-    # PHI の branch 条件は graph の辺としては「条件式」しか見えない。条件
-    # object そのものも consumer（`Condition.to_smt`）が描くので、同じ宣言に
-    # 載せる。
-    if node.expr_type == ExpressionType.PHI:
-        for branch in node.__dict__.get("value") or ():
-            condition = branch[0] if isinstance(branch, (tuple, list)) and branch else None
-            if isinstance(condition, Condition):
-                publish_condition(condition)
-    runtime_ref = node.__dict__.get("runtime_ref")
-    if runtime_ref is None or id(runtime_ref) in visited_refs:
-        return
-    visited_refs[id(runtime_ref)] = True
-    publish_semantic_values(runtime_ref)
-
-
 def _is_owned_object(value: Any) -> bool:
     """この package が定義した object か（外の object の属性は探らない）。"""
 
@@ -328,29 +475,19 @@ def _is_owned_object(value: Any) -> bool:
     return module.startswith(_PACKAGE_PREFIX)
 
 
-def _validate_runtime_ref_values(node: Any, visited: Dict[int, bool]) -> None:
-    """node の runtime ref が抱える式を検証・凍結する（公開はしない）。
+def _derive_node_fields(node: Expression, staging: _LifecycleStaging) -> Dict[str, Any]:
+    """node 1 つ分の派生値を組み立てて返す（**公開状態へは書かない**）。
 
-    ref は frozen dataclass だが、中の `Expression` は別 object なので、それを
-    凍らせない限り「凍結後も意味が動く」経路が残る（loop summary の
-    `transition_expr` など）。node 自身を凍らせた **後** に辿るので、ref から
-    node へ戻る参照があってもそこで止まる。
+    戻り値は commit のときに `__dict__` へ一括で入る。失敗して commit されな
+    ければ、snapshot も hash も digest も node には残らない。
+
+    唯一その場で書くのは **正準化**（`operands` を tuple、PHI branch を
+    `PhiBranch` へ）。意味を変えず冪等で、identity の派生値でもない一方、
+    snapshot と digest はこの形を前提に計算するので後回しにできない。書いても
+    node は CONSTRUCTION のままなので、検証済みと誤認されることはない。
+
+    子の派生値は `staging` 経由で読む（この操作で積んだ分 → commit 済みの順）。
     """
-
-    runtime_ref = node.__dict__.get("runtime_ref")
-    if runtime_ref is None:
-        return
-    if id(runtime_ref) in visited:
-        return
-    visited[id(runtime_ref)] = True
-    validate_semantic_values(runtime_ref)
-
-
-def _finalize_node(node: Expression) -> None:
-    """子が全部凍った node を確定させる。"""
-
-    if is_validated(node):
-        return
 
     fields = node.__dict__
     operands = fields.get("operands")
@@ -362,10 +499,11 @@ def _finalize_node(node: Expression) -> None:
 
     # snapshot を先に置く。candidate hash は `semantic_projection()` 経由で
     # snapshot を読むので、順番が逆だと生 object を読んでしまう。
-    fields["_snapshot"] = build_semantic_snapshot(node)
+    # 生 object を読むのはここ 1 回だけ。まだ node へは書いていないので、
+    # payload にも同じ投影を渡す（渡さないと読み直しになる）。
+    snapshot = build_semantic_snapshot(node)
     # 完全比較が何度も見る local payload はここで 1 回だけ組む。
-    payload = local_semantic_payload(node)
-    fields["_local_payload"] = payload
+    payload = local_semantic_payload(node, snapshot)
 
     # 子 digest と `tree_size` は **辺の正準順**（`ordered_semantic_edges`）で
     # 集める。`operands` を直接読むと PHI の欠けた条件や二項演算の欠けた
@@ -378,7 +516,7 @@ def _finalize_node(node: Expression) -> None:
     identity_complete = (
         payload.comparable
         and payload.identity_complete
-        and not _projection_has_unsupported_value(fields["_snapshot"])
+        and not _projection_has_unsupported_value(snapshot)
     )
     for edge in ordered_semantic_edges(node):
         child = edge.child
@@ -386,24 +524,27 @@ def _finalize_node(node: Expression) -> None:
             candidate_children.append(None)
             equivalence_children.append(None)
             continue
-        candidate_children.append(child.__dict__.get("_structural_hash"))
-        equivalence_children.append(child.__dict__.get("_equivalence_digest"))
-        tree_size += int(child.__dict__.get("_tree_size") or 1)
+        child_fields = staging.derived_fields(child)
+        candidate_children.append(child_fields.get("_structural_hash"))
+        equivalence_children.append(child_fields.get("_equivalence_digest"))
+        tree_size += int(child_fields.get("_tree_size") or 1)
         identity_complete = identity_complete and bool(
-            child.__dict__.get("_identity_complete", False)
+            child_fields.get("_identity_complete", False)
         )
     # 2 つの digest は契約が違う（bucket 専用 / 外へ出す安定 identity）ので
     # 値も分けてある。合成規則は 1 本なので、正規化が食い違うことはない。
-    fields["_structural_hash"] = _structural.compose_candidate_digest(
-        node, tuple(candidate_children)
-    )
-    fields["_equivalence_digest"] = _structural.compose_equivalence_digest(
-        node, tuple(equivalence_children)
-    )
-    fields["_tree_size"] = min(TREE_SIZE_CAP, tree_size)
-    fields["_identity_complete"] = identity_complete
-    # 検証が終わった印。公開ではない（`core/semantic_lifecycle.py`）。
-    mark_validated(fields)
+    return {
+        "_snapshot": snapshot,
+        "_local_payload": payload,
+        "_structural_hash": _structural.compose_candidate_digest(
+            node, tuple(candidate_children), payload=payload
+        ),
+        "_equivalence_digest": _structural.compose_equivalence_digest(
+            node, tuple(equivalence_children), payload=payload
+        ),
+        "_tree_size": min(TREE_SIZE_CAP, tree_size),
+        "_identity_complete": identity_complete,
+    }
 
 
 def _projection_has_unsupported_value(snapshot: Any) -> bool:

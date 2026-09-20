@@ -1,4 +1,4 @@
-"""Import-binding hygiene guardrail (Issue #51).
+"""Module-level binding hygiene guardrail (Issue #51).
 
 Issue #51 で除去した「同じ module-level 名が 2 回以上 bind される」状態の再発を
 防ぐための test。対象はそれだけで、import surface 全体を仕様化はしない。
@@ -10,6 +10,11 @@ Issue #51 で除去した「同じ module-level 名が 2 回以上 bind され�
 module 実行後に有効な binding を保存したまま shadow 側だけを消した。
 
 対象範囲は `ast.Module.body` **直下**の `Import` / `ImportFrom` のみ。
+
+同じ「module-level の名前が 2 回 bind される」問題には、`def` / `class` を重ねる
+形もある（`test_no_module_level_definition_shadows_another`）。import の重複は
+どちらを読んでも同じ object に行き着くのに対し、定義の重複は **前の本体を実行
+されないまま残す**ので、そちらは無条件に defect として扱う。
 
 * 同じ 1 つの import 文の中で同じ alias を 2 回書いた場合も検出する。
 * 関数内 / class 本体内の import は対象外。循環回避のための意図的な遅延 import で
@@ -71,6 +76,93 @@ def test_no_module_level_import_binds_the_same_name_twice():
         "effect after the module finishes executing and delete the shadowed one "
         "(Issue #51):\n" + "\n".join(offenders)
     )
+
+
+def _shadowed_definitions(path):
+    """`Module.body` 直下で同じ名前を 2 回以上束ねる `def` / `class` を返す。
+
+    後から評価された定義が勝つという規則は import と同じだが、結果が違う。
+    import の重複は指す先が同じなので挙動を変えない。定義の重複は前の本体を
+    **どこからも呼ばれない死んだ code** にするので、読み手はそれを生きている
+    実装だと思って読み、直したつもりで何も直らない。
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    seen = defaultdict(list)
+    for stmt in tree.body:
+        if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if _is_overload(stmt):
+            continue
+        seen[stmt.name].append(stmt.lineno)
+    return {name: lines for name, lines in seen.items() if len(lines) > 1}
+
+
+def _is_overload(stmt):
+    """`@overload` / `@typing.overload` は同じ名前を重ねるのが仕様。"""
+    for decorator in getattr(stmt, "decorator_list", ()):
+        node = decorator.func if isinstance(decorator, ast.Call) else decorator
+        name = node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", None)
+        if name == "overload":
+            return True
+    return False
+
+
+def test_no_module_level_definition_shadows_another():
+    """後から来た `def` / `class` が前の定義を殺していないこと。
+
+    tests も対象に入れる。test 関数が shadow されると、消えた test は失敗もせず
+    収集もされないので、通っているように見える。
+    """
+    offenders = []
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        for name, lines in sorted(_shadowed_definitions(path).items()):
+            trail = " -> ".join(f"L{lineno}" for lineno in lines)
+            offenders.append(f"{path.relative_to(PACKAGE_ROOT)}: {name}: {trail}")
+    assert offenders == [], (
+        "module-level definitions shadow each other; keep the one that is in "
+        "effect after the module finishes executing and delete the dead one:\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_the_definition_detector_sees_a_redefined_function(tmp_path):
+    sample = tmp_path / "sample.py"
+    sample.write_text("def f():\n    return 1\n\n\ndef f():\n    return 2\n", encoding="utf-8")
+    assert _shadowed_definitions(sample) == {"f": [1, 5]}
+
+
+def test_the_definition_detector_ignores_nested_definitions(tmp_path):
+    """関数内 / class 本体の再定義は対象外（import 側と同じ `Module.body` 直下だけ）。"""
+    sample = tmp_path / "sample.py"
+    sample.write_text(
+        "def outer():\n"
+        "    def inner():\n"
+        "        pass\n"
+        "    def inner():\n"
+        "        pass\n"
+        "    return inner\n"
+        "class C:\n"
+        "    def m(self):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    assert _shadowed_definitions(sample) == {}
+
+
+def test_the_definition_detector_ignores_typing_overloads(tmp_path):
+    sample = tmp_path / "sample.py"
+    sample.write_text(
+        "import typing\n"
+        "from typing import overload\n"
+        "@overload\n"
+        "def f(x: int) -> int: ...\n"
+        "@typing.overload\n"
+        "def f(x: str) -> str: ...\n"
+        "def f(x):\n"
+        "    return x\n",
+        encoding="utf-8",
+    )
+    assert _shadowed_definitions(sample) == {}
 
 
 def test_the_duplicate_detector_sees_aliases_repeated_inside_one_statement(tmp_path):

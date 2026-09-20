@@ -57,8 +57,15 @@ class Condition:
     向きを変えたいときは `negate()` が新しい条件を返す。
 
     凍結は **公開ではない**（`core/semantic_lifecycle.py`）。式と同じく、solver
-    へ渡せるのは producer が `publish()` で宣言したものだけ。`negate()` が返す
-    新しい条件も CONSTRUCTION から始まる。
+    へ渡せるのは producer が `publish()` で宣言したものだけ。
+
+    したがって条件の lifecycle は式より短い:
+
+    * 構築した時点で **VALIDATED**（CONSTRUCTION に留まる時間が無い）
+    * `publish()` で **PUBLISHED**
+    * `negate()` が返す新しい条件も構築と同時に VALIDATED で、元が PUBLISHED
+      なら PUBLISHED で始まる（反転には仕上げる余地が残らないため。詳細は
+      `negate()` の docstring）
     """
 
     _frozen: bool = False

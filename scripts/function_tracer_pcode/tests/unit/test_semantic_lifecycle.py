@@ -21,6 +21,7 @@ import pytest
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.errors import (
     AnalysisFailureError,
+    ExpressionCycleError,
     UnpublishedSemanticInputError,
     pair_failure_scope,
 )
@@ -362,3 +363,204 @@ def test_a_swallowed_refusal_still_leaves_the_ledger_entry():
         except Exception:  # 深部の包括捕捉を再現する（test 側の模擬）
             pass
         assert ledger.pending_failure() is not None
+
+
+# ---------------------------------------------------------------------------
+# 6. lifecycle transition は failure-atomic
+# ---------------------------------------------------------------------------
+
+_DERIVED_FIELDS = (
+    "_snapshot",
+    "_local_payload",
+    "_structural_hash",
+    "_equivalence_digest",
+    "_tree_size",
+    "_identity_complete",
+)
+
+
+def _cyclic_expression() -> Expression:
+    """閉路。`operands` へ直接書いて構築時の検査を通り抜ける。"""
+
+    node = Expression.unary_op("BOOL_NEGATE", Expression.constant(1, 1))
+    node.__dict__["operands"] = [node]
+    return node
+
+
+def _root_with_cyclic_runtime_ref():
+    """graph 自体は健全で、runtime ref の中だけが閉路になっている root。
+
+    ここが blocker の形: root の graph を先に確定させてから ref を検証すると、
+    root だけ VALIDATED で残る。
+    """
+
+    from scripts.function_tracer_pcode.core.runtime_refs import CountedLoopSummaryRef
+
+    cyclic = _cyclic_expression()
+    ref = CountedLoopSummaryRef(
+        induction_step=1,
+        result_size=4,
+        signed_loop=False,
+        residue_cases=((1, 0, 1, 0),),
+        residue_bias_terms=((1, 0, cyclic),),
+    )
+    child = Expression.parameter("start", 0, size=4)
+    root = Expression.intrinsic(
+        "COUNTED_LOOP_SUM", [Expression.constant(0, size=4), child], size=4,
+        runtime_ref=ref,
+    )
+    return root, child, cyclic
+
+
+def _assert_nothing_committed(node: Expression) -> None:
+    assert node.lifecycle is SemanticLifecycle.CONSTRUCTION, node.lifecycle
+    leaked = [name for name in _DERIVED_FIELDS if name in node.__dict__]
+    assert leaked == [], leaked
+
+
+def test_a_cycle_inside_a_runtime_ref_leaves_nothing_validated():
+    """closure の一部が失敗したら root も子も確定しない。"""
+
+    root, child, cyclic = _root_with_cyclic_runtime_ref()
+
+    with pytest.raises(ExpressionCycleError):
+        root.freeze()
+
+    _assert_nothing_committed(root)
+    _assert_nothing_committed(child)
+    _assert_nothing_committed(cyclic)
+
+
+def test_retrying_a_failed_validation_detects_the_cycle_again():
+    """失敗後の再試行が、途中で作った派生値を成功結果として拾わない。"""
+
+    root, child, _cyclic = _root_with_cyclic_runtime_ref()
+
+    for _attempt in range(3):
+        with pytest.raises(ExpressionCycleError):
+            root.freeze()
+        _assert_nothing_committed(root)
+        _assert_nothing_committed(child)
+
+
+@pytest.mark.parametrize(
+    "identity_call",
+    [
+        pytest.param(lambda expr: candidate_hash(expr), id="candidate_hash"),
+        pytest.param(lambda expr: structural_identity_digest(expr), id="identity_digest"),
+    ],
+)
+def test_identity_apis_re_detect_the_cycle_after_a_failed_validation(identity_call):
+    """identity 経由の検証でも同じ contract（1 回目も 2 回目も落ちる）。"""
+
+    root, _child, _cyclic = _root_with_cyclic_runtime_ref()
+
+    with pytest.raises(ExpressionCycleError):
+        root.freeze()
+    for _attempt in range(2):
+        with pytest.raises(ExpressionCycleError):
+            identity_call(root)
+        _assert_nothing_committed(root)
+
+
+def test_a_failed_validation_is_recorded_as_an_internal_bug():
+    """PR-106-0 の経路は維持（記録してから raise）。"""
+
+    root, _child, _cyclic = _root_with_cyclic_runtime_ref()
+
+    with pair_failure_scope(("bin1", "bin2"), None) as ledger:
+        with pytest.raises(ExpressionCycleError):
+            root.freeze()
+        pending = ledger.pending_failure()
+
+    assert pending is not None
+    assert pending.is_internal_bug is True
+    assert pending.site == "core.semantic_freeze.freeze_expression"
+
+
+def test_a_runtime_ref_pointing_back_at_the_root_terminates():
+    """back-reference（ref の中の式が root を指す）で無限再帰しない。
+
+    「検証中」を公開 state で表していないので、まだ VALIDATED でない root へ
+    戻ってきても止まらなければならない — 止めているのは operation-local な
+    staging の方。
+    """
+
+    root = Expression.binary_op(
+        "INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4)
+    )
+    # tuple なので `_walk_semantic_carriers` が中を辿る（module 名に依存しない）。
+    object.__setattr__(root, "runtime_ref", (root, root.operands[0]))
+
+    assert root.freeze() is root
+    assert root.lifecycle is SemanticLifecycle.VALIDATED
+    assert root.operands[0].lifecycle is SemanticLifecycle.VALIDATED
+    # 2 度目は費用ゼロで、状態も動かない。
+    assert root.freeze().lifecycle is SemanticLifecycle.VALIDATED
+
+
+def test_a_published_value_reached_through_its_own_runtime_ref_terminates():
+    """公開でも同じ（back-reference で止まり、closure は published になる）。"""
+
+    root = Expression.binary_op(
+        "INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4)
+    )
+    object.__setattr__(root, "runtime_ref", (root,))
+
+    publish(root)
+
+    assert root.is_published is True
+    assert all(child.is_published for child in root.operands)
+
+
+@pytest.mark.parametrize("healthy_first", [True, False], ids=["healthy_first", "broken_first"])
+def test_publication_of_a_carrier_is_all_or_nothing(healthy_first):
+    """入れ物の一部が検証できないなら、sibling も solver へ渡せない。
+
+    走査順に依らない性質なので両向きで確かめる。片方の向きでは healthy が
+    staging まで進んでから捨てられる（そこが commit されないことが要点）。
+    """
+
+    healthy = _sum()
+    healthy.freeze()  # 検証は済ませておく（公開だけが失敗する形にする）
+    broken = Expression.unary_op("INT_ZEXT", _cyclic_expression())
+    values = [healthy, broken] if healthy_first else [broken, healthy]
+
+    with pytest.raises(ExpressionCycleError):
+        publish_semantic_values(values)
+
+    assert healthy.is_published is False
+    assert healthy.lifecycle is SemanticLifecycle.VALIDATED
+    _assert_nothing_committed(broken)
+
+
+def test_publication_does_not_leave_the_root_published_when_the_closure_fails():
+    """root だけ PUBLISHED で残らない（宣言は 1 回の意思表示なので全か無か）。"""
+
+    root, child, _cyclic = _root_with_cyclic_runtime_ref()
+
+    with pytest.raises(ExpressionCycleError):
+        publish(root)
+
+    assert root.is_published is False
+    assert child.is_published is False
+    _assert_nothing_committed(root)
+
+
+def test_publication_leaves_validation_alone_when_it_fails():
+    """検証は別 transaction。公開が失敗しても、検証済みの値は検証済みのまま。
+
+    意味が immutable になったこと自体は事実なので取り消さない。取り消す必要が
+    あるのは「producer が宣言した」という主張の側だけ。
+    """
+
+    healthy = _sum()
+    healthy.freeze()
+    broken = Expression.unary_op("INT_ZEXT", _cyclic_expression())
+    carrier = _Carrier(value=healthy, conditions=[], by_name={"broken": broken})
+
+    with pytest.raises(ExpressionCycleError):
+        publish_semantic_values(carrier)
+
+    assert healthy.lifecycle is SemanticLifecycle.VALIDATED
+    assert healthy.is_published is False
