@@ -14,6 +14,10 @@ from typing import Any, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
+from scripts.function_tracer_pcode.core.semantic_snapshot import (
+    local_semantic_payload,
+    ordered_semantic_edges,
+)
 
 
 StructuralKey = Tuple[Any, ...]
@@ -138,11 +142,54 @@ def _semantic_runtime_ref_key(value: Any) -> Optional[StructuralKey]:
     return None
 
 
+def _frozen_snapshot(expr: Any) -> Any:
+    """凍結済みなら固定済みの意味投影、未凍結なら `None`。
+
+    意味 consumer はまずここを見る。凍結済みなら生 object（`runtime_ref` /
+    `storage_info` / `data_type_obj`）を二度と読まないので、凍結後に生 object を
+    書き換えても structural key も solver query identity も動かない。
+    未凍結のときだけ従来どおりその場で評価する（値も費用も従来と同じ）。
+    """
+
+    return getattr(expr, "_snapshot", None)
+
+
 def _expression_runtime_metadata(expr: Expression) -> tuple[StructuralKey, ...]:
-    runtime_key = _semantic_runtime_ref_key(getattr(expr, "runtime_ref", None))
+    snapshot = _frozen_snapshot(expr)
+    if snapshot is not None:
+        runtime_key = snapshot.runtime_structural_key
+    else:
+        runtime_key = _semantic_runtime_ref_key(getattr(expr, "runtime_ref", None))
     if runtime_key is None:
         return ()
     return (("runtime_ref", runtime_key),)
+
+
+def projected_storage_identity(expr: Any) -> Optional[StructuralKey]:
+    """凍結済みなら snapshot の、未凍結ならその場で作る storage identity。"""
+
+    snapshot = _frozen_snapshot(expr)
+    if snapshot is not None:
+        return snapshot.storage_identity
+    return _expression_storage_key(expr)
+
+
+def projected_parameter_runtime_key(expr: Any) -> Optional[StructuralKey]:
+    """凍結済みなら snapshot の、未凍結ならその場で作る parameter runtime key。"""
+
+    snapshot = _frozen_snapshot(expr)
+    if snapshot is not None:
+        return snapshot.parameter_runtime_key
+    return _parameter_runtime_ref_key(expr)
+
+
+def projected_runtime_stable_key(expr: Any) -> Any:
+    """凍結済みなら snapshot の、未凍結ならその場で作る runtime stable key。"""
+
+    snapshot = _frozen_snapshot(expr)
+    if snapshot is not None:
+        return snapshot.runtime_stable_key
+    return _raw_stable_key_or_none(getattr(expr, "runtime_ref", None))
 
 
 def _is_all_ones_mask_for_size(expr: Optional[Expression], size: int) -> bool:
@@ -165,223 +212,190 @@ def expression_key(
     include_memory_read_order: bool = True,
     include_semantic_runtime_refs: bool = True,
 ) -> StructuralKey:
-    """Return a stable, hashable structural key for an expression tree."""
+    """Return a stable, hashable structural key for an expression tree.
+
+    The traversal is DAG-aware: a node reached twice is built once and its key
+    object is reused, so ``budget`` counts *distinct* nodes instead of tree
+    positions and a shared subgraph is not re-walked per parent.  Sharing the
+    key objects also makes comparing two keys cheap, because tuple comparison
+    short-circuits on identical elements.
+
+    A key that carries a placeholder (``truncated`` / ``cycle`` / ``opaque``) is
+    deliberately *not* memoised: a placeholder describes the position it was
+    produced in -- the remaining budget, or the path that reached the node --
+    and reusing it elsewhere would report a node as unresolved when it is not.
+    """
 
     visited: set[int] = set()
+    memo: dict[int, StructuralKey] = {}
+    # 予算と placeholder 件数は再帰の外で数える（key の memo 可否の判定に使う）。
+    state = {"remaining": int(budget), "placeholders": 0}
 
-    def _build(node: Optional[Expression], remaining: int) -> tuple[StructuralKey, int]:
+    def _build(node: Optional[Expression]) -> StructuralKey:
         if node is None:
-            return (("none",), remaining)
-        if remaining <= 0:
-            return (
-                (
-                    "truncated",
-                    node.expr_type.name,
-                    node.operator or "",
-                    node.name or "",
-                    int(node.size or 0),
-                ),
-                remaining,
-            )
-
+            return ("none",)
         node_id = id(node)
-        if node_id in visited:
-            return (("cycle", node.expr_type.name, node.name or "", int(node.size or 0)), remaining)
-        visited.add(node_id)
-
-        try:
-            remaining -= 1
-            current = node
-
-            if strip_width_adapters:
-                while (
-                    current.expr_type == ExpressionType.UNARY_OP
-                    and current.operator in WIDTH_ADAPTER_OPS
-                    and current.operands
-                ):
-                    current = current.operands[0]
-
-            if (
-                collapse_full_masks
-                and current.expr_type == ExpressionType.BINARY_OP
-                and current.operator == "INT_AND"
-                and len(current.operands) == 2
-            ):
-                left, right = current.operands
-                mask_size = current.size or right.size or left.size or 0
-                if _is_all_ones_mask_for_size(left, mask_size):
-                    return _build(right, remaining)
-                if _is_all_ones_mask_for_size(right, mask_size):
-                    return _build(left, remaining)
-
-            expr_type = current.expr_type
-
-            if expr_type == ExpressionType.CONSTANT:
-                return (
-                    (
-                        "const",
-                        _atom_key(current.value),
-                        int(current.size or 0),
-                    ),
-                    remaining,
-                )
-
-            if expr_type == ExpressionType.LITERAL:
-                return (
-                    (
-                        "literal",
-                        _atom_key(current.value),
-                        int(current.size or 0),
-                    ),
-                    remaining,
-                )
-
-            if expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
-                return (
-                    (
-                        expr_type.name.lower(),
-                        current.name or "",
-                        _atom_key(current.value),
-                        int(current.size or 0),
-                    ),
-                    remaining,
-                )
-
-            if expr_type == ExpressionType.UNKNOWN:
-                runtime_metadata = (
-                    _expression_runtime_metadata(current) if include_semantic_runtime_refs else ()
-                )
-                return (
-                    (
-                        "unknown",
-                        current.name or "",
-                        _atom_key(current.value),
-                        int(current.size or 0),
-                        *runtime_metadata,
-                    ),
-                    remaining,
-                )
-
-            if expr_type == ExpressionType.UNARY_OP:
-                operand = current.operands[0] if current.operands else None
-                operand_key, remaining = _build(operand, remaining)
-                return (
-                    (
-                        "unary",
-                        current.operator or "",
-                        int(current.size or 0),
-                        operand_key,
-                    ),
-                    remaining,
-                )
-
-            if expr_type == ExpressionType.BINARY_OP:
-                left = current.operands[0] if current.operands else None
-                right = current.operands[1] if len(current.operands) > 1 else None
-                left_key, remaining = _build(left, remaining)
-                right_key, remaining = _build(right, remaining)
-                if normalize_commutative and (current.operator or "") in COMMUTATIVE_BINARY_OPS:
-                    if right_key < left_key:
-                        left_key, right_key = right_key, left_key
-                return (
-                    (
-                        "binary",
-                        current.operator or "",
-                        int(current.size or 0),
-                        left_key,
-                        right_key,
-                    ),
-                    remaining,
-                )
-
-            if expr_type == ExpressionType.MEMORY:
-                address = current.operands[0] if current.operands else None
-                address_key, remaining = _build(address, remaining)
-                runtime_metadata = (
-                    _expression_runtime_metadata(current) if include_semantic_runtime_refs else ()
-                )
-                return (
-                    (
-                        "memory",
-                        int(current.size or 0),
-                        address_key,
-                        (
-                            "read_order",
-                            int(current.read_order_key),
-                        )
-                        if include_memory_read_order and current.read_order_key is not None
-                        else ("read_order", None),
-                        *runtime_metadata,
-                    ),
-                    remaining,
-                )
-
-            if expr_type == ExpressionType.CALL:
-                arg_keys = []
-                for operand in current.operands:
-                    arg_key, remaining = _build(operand, remaining)
-                    arg_keys.append(arg_key)
-                return (
-                    (
-                        "call",
-                        current.name or "",
-                        int(current.size or 0),
-                        tuple(arg_keys),
-                    ),
-                    remaining,
-                )
-
-            if expr_type == ExpressionType.INTRINSIC:
-                arg_keys = []
-                for operand in current.operands:
-                    arg_key, remaining = _build(operand, remaining)
-                    arg_keys.append(arg_key)
-                return (
-                    (
-                        "intrinsic",
-                        current.name or "",
-                        None if getattr(current, "opcode", None) is None else int(current.opcode),
-                        int(current.size or 0),
-                        tuple(arg_keys),
-                    ),
-                    remaining,
-                )
-
-            if expr_type == ExpressionType.PHI:
-                branches = []
-                for condition, value in current.value or []:
-                    cond_key: StructuralKey
-                    if condition is None:
-                        cond_key = ("none",)
-                    else:
-                        expr_key_value, remaining = _build(condition.expression, remaining)
-                        cond_key = ("cond", expr_key_value, bool(condition.negated))
-                    value_key, remaining = _build(value, remaining)
-                    branches.append((cond_key, value_key))
-                return (
-                    (
-                        "phi",
-                        int(current.size or 0),
-                        tuple(branches),
-                    ),
-                    remaining,
-                )
-
+        cached = memo.get(node_id)
+        if cached is not None:
+            return cached
+        if state["remaining"] <= 0:
+            state["placeholders"] += 1
             return (
-                (
-                    "opaque",
-                    expr_type.name,
-                    current.operator or "",
-                    current.name or "",
-                    int(current.size or 0),
-                ),
-                remaining,
+                "truncated",
+                node.expr_type.name,
+                node.operator or "",
+                node.name or "",
+                int(node.size or 0),
             )
+        if node_id in visited:
+            state["placeholders"] += 1
+            return ("cycle", node.expr_type.name, node.name or "", int(node.size or 0))
+
+        visited.add(node_id)
+        placeholders_before = state["placeholders"]
+        try:
+            state["remaining"] -= 1
+            key = _build_node(node)
         finally:
             visited.discard(node_id)
+        if state["placeholders"] == placeholders_before:
+            memo[node_id] = key
+        return key
 
-    key, _remaining = _build(expr, budget)
-    return key
+    def _build_node(node: Expression) -> StructuralKey:
+        current = node
+
+        if strip_width_adapters:
+            while (
+                current.expr_type == ExpressionType.UNARY_OP
+                and current.operator in WIDTH_ADAPTER_OPS
+                and current.operands
+            ):
+                current = current.operands[0]
+
+        if (
+            collapse_full_masks
+            and current.expr_type == ExpressionType.BINARY_OP
+            and current.operator == "INT_AND"
+            and len(current.operands) == 2
+        ):
+            left, right = current.operands
+            mask_size = current.size or right.size or left.size or 0
+            if _is_all_ones_mask_for_size(left, mask_size):
+                return _build(right)
+            if _is_all_ones_mask_for_size(right, mask_size):
+                return _build(left)
+
+        expr_type = current.expr_type
+
+        if expr_type == ExpressionType.CONSTANT:
+            return ("const", _atom_key(current.value), int(current.size or 0))
+
+        if expr_type == ExpressionType.LITERAL:
+            return ("literal", _atom_key(current.value), int(current.size or 0))
+
+        if expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
+            return (
+                expr_type.name.lower(),
+                current.name or "",
+                _atom_key(current.value),
+                int(current.size or 0),
+            )
+
+        if expr_type == ExpressionType.UNKNOWN:
+            runtime_metadata = (
+                _expression_runtime_metadata(current) if include_semantic_runtime_refs else ()
+            )
+            return (
+                "unknown",
+                current.name or "",
+                _atom_key(current.value),
+                int(current.size or 0),
+                *runtime_metadata,
+            )
+
+        if expr_type == ExpressionType.UNARY_OP:
+            operand = current.operands[0] if current.operands else None
+            return (
+                "unary",
+                current.operator or "",
+                int(current.size or 0),
+                _build(operand),
+            )
+
+        if expr_type == ExpressionType.BINARY_OP:
+            left = current.operands[0] if current.operands else None
+            right = current.operands[1] if len(current.operands) > 1 else None
+            left_key = _build(left)
+            right_key = _build(right)
+            if normalize_commutative and (current.operator or "") in COMMUTATIVE_BINARY_OPS:
+                if right_key < left_key:
+                    left_key, right_key = right_key, left_key
+            return (
+                "binary",
+                current.operator or "",
+                int(current.size or 0),
+                left_key,
+                right_key,
+            )
+
+        if expr_type == ExpressionType.MEMORY:
+            address = current.operands[0] if current.operands else None
+            address_key = _build(address)
+            runtime_metadata = (
+                _expression_runtime_metadata(current) if include_semantic_runtime_refs else ()
+            )
+            return (
+                "memory",
+                int(current.size or 0),
+                address_key,
+                (
+                    "read_order",
+                    int(current.read_order_key),
+                )
+                if include_memory_read_order and current.read_order_key is not None
+                else ("read_order", None),
+                *runtime_metadata,
+            )
+
+        if expr_type == ExpressionType.CALL:
+            return (
+                "call",
+                current.name or "",
+                int(current.size or 0),
+                tuple(_build(operand) for operand in current.operands),
+            )
+
+        if expr_type == ExpressionType.INTRINSIC:
+            return (
+                "intrinsic",
+                current.name or "",
+                None if getattr(current, "opcode", None) is None else int(current.opcode),
+                int(current.size or 0),
+                tuple(_build(operand) for operand in current.operands),
+            )
+
+        if expr_type == ExpressionType.PHI:
+            branches = []
+            for condition, value in current.value or []:
+                cond_key: StructuralKey
+                if condition is None:
+                    cond_key = ("none",)
+                else:
+                    cond_key = ("cond", _build(condition.expression), bool(condition.negated))
+                branches.append((cond_key, _build(value)))
+            return ("phi", int(current.size or 0), tuple(branches))
+
+        state["placeholders"] += 1
+        return (
+            "opaque",
+            expr_type.name,
+            current.operator or "",
+            current.name or "",
+            int(current.size or 0),
+        )
+
+    return _build(expr)
 
 
 def condition_key(
@@ -500,15 +514,15 @@ def expression_provenance_key(
     if expr is None:
         return ("none",)
 
-    parameter_runtime_key = _parameter_runtime_ref_key(expr)
+    parameter_runtime_key = projected_parameter_runtime_key(expr)
     if parameter_runtime_key is not None:
         return ("runtime_ref", parameter_runtime_key)
 
-    storage_key = _expression_storage_key(expr)
+    storage_key = projected_storage_identity(expr)
     if storage_key is not None:
         return ("storage", storage_key)
 
-    runtime_key = _raw_stable_key_or_none(getattr(expr, "runtime_ref", None))
+    runtime_key = projected_runtime_stable_key(expr)
     if runtime_key is not None:
         return ("runtime_ref", runtime_key)
 
@@ -571,11 +585,8 @@ def _expression_provenance_payload(
                 _expression_descriptor(node),
                 ("value", _stable_value_key(getattr(node, "value", None))),
                 ("data_type", getattr(node, "data_type", None)),
-                ("storage", _expression_storage_key(node)),
-                (
-                    "runtime_ref",
-                    _semantic_runtime_ref_key(getattr(node, "runtime_ref", None)),
-                ),
+                ("storage", projected_storage_identity(node)),
+                ("runtime_ref", _projected_semantic_runtime_key(node)),
                 ("read_order", getattr(node, "read_order_key", None)),
                 ("opcode", getattr(node, "opcode", None)),
                 ("operands", tuple(operand_digests)),
@@ -658,11 +669,8 @@ def _expression_subtree_digest_and_source_atoms(
                 _expression_descriptor(node),
                 ("value", _stable_value_key(getattr(node, "value", None))),
                 ("data_type", getattr(node, "data_type", None)),
-                ("storage", _expression_storage_key(node)),
-                (
-                    "runtime_ref",
-                    _semantic_runtime_ref_key(getattr(node, "runtime_ref", None)),
-                ),
+                ("storage", projected_storage_identity(node)),
+                ("runtime_ref", _projected_semantic_runtime_key(node)),
                 ("read_order", getattr(node, "read_order_key", None)),
                 ("opcode", getattr(node, "opcode", None)),
                 ("operands", tuple(operand_digests)),
@@ -694,6 +702,13 @@ def _expression_subtree_digest_and_source_atoms(
     return digest_by_id.get(id(expr), none_digest), source_atoms, bool(complete), int(count)
 
 
+def _projected_semantic_runtime_key(expr: Any) -> Optional[StructuralKey]:
+    snapshot = _frozen_snapshot(expr)
+    if snapshot is not None:
+        return snapshot.runtime_structural_key
+    return _semantic_runtime_ref_key(getattr(expr, "runtime_ref", None))
+
+
 def _digest_structural_payload(payload: StructuralKey) -> str:
     encoded = json.dumps(
         payload,
@@ -717,16 +732,21 @@ def _expression_descriptor(expr: Expression) -> StructuralKey:
 
 
 def _expression_source_atom(expr: Expression) -> Optional[StructuralKey]:
-    parameter_runtime_key = _parameter_runtime_ref_key(expr)
+    snapshot = _frozen_snapshot(expr)
+    semantic_runtime_key = (
+        snapshot.runtime_structural_key
+        if snapshot is not None
+        else _semantic_runtime_ref_key(getattr(expr, "runtime_ref", None))
+    )
+    parameter_runtime_key = projected_parameter_runtime_key(expr)
     if parameter_runtime_key is not None:
-        return ("runtime_ref", _semantic_runtime_ref_key(getattr(expr, "runtime_ref", None)))
+        return ("runtime_ref", semantic_runtime_key)
 
-    storage_key = _expression_storage_key(expr)
+    storage_key = projected_storage_identity(expr)
     if storage_key is not None:
         return ("storage", storage_key)
-    runtime_key = _semantic_runtime_ref_key(getattr(expr, "runtime_ref", None))
-    if runtime_key is not None:
-        return ("runtime_ref", runtime_key)
+    if semantic_runtime_key is not None:
+        return ("runtime_ref", semantic_runtime_key)
     expr_type = getattr(expr, "expr_type", None)
     expr_type_name = getattr(expr_type, "name", None)
     if expr_type in {
@@ -821,3 +841,338 @@ def _stable_value_key(value: Any) -> StructuralKey:
         except Exception:
             pass
     return ("opaque", type(value).__module__, type(value).__qualname__)
+
+
+# ---------------------------------------------------------------------------
+# structural identity（Issue #22 PR-22-B）
+# ---------------------------------------------------------------------------
+#
+# ここは **「2 つの式が同じか」だけ** を所有する。node の意味の分解は
+# `core/semantic_snapshot.py`（`local_semantic_payload` / `ordered_semantic_edges`）
+# にあり、hash・完全比較・graph snapshot の 3 つは同じ分解を共有する。
+#
+# 3 つの層を混ぜないこと:
+#
+#   candidate hash   候補の絞り込み（bucket / 早期棄却）だけ。**等価の確定にも
+#                    digest にも使わない**。衝突しても完全比較が食い止める。
+#   完全比較         `structural_equals`。distinct な node 組の数に比例し、
+#                    共有部分木を親ごとに再走査しない。
+#   graph digest     `structural_identity_digest`。DAG snapshot 全体の安定な
+#                    digest で、`id()` を含まない。
+#
+# solver query identity / rewrite identity / authority digest は **別の概念** で、
+# ここへ統合しない（PR-105-A が `walk_dag` だけを共有して別型で持つ）。
+
+#: 完全比較の既定予算（distinct な node 組の数）。従来の `condition_key`
+#: （木の訪問回数 256）と同じ桁で、共有 DAG ではより深くまで比較できる。
+DEFAULT_STRUCTURAL_COMPARISON_BUDGET = 256
+
+#: candidate hash の長さ。候補の絞り込み専用なので 16 byte で足りる。
+CANDIDATE_DIGEST_SIZE = 16
+
+_NULL_CHILD_DIGEST = b"\x00" * CANDIDATE_DIGEST_SIZE
+
+#: memo の「まだ評価していない」を「評価中（None）」と区別するための番兵。
+_MISSING = object()
+
+
+def _encode_atoms(value: Any, parts: list) -> None:
+    """atom を **型を落とさずに** 決定的な文字列へ符号化する。
+
+    `repr()` を使わないのは、未知の object が混ざると `id()` が入って run 間で
+    digest が変わってしまうため。未知の型は型名だけにする（区別できなくなるが、
+    hash は候補の絞り込みなので完全比較が正しく不一致にする）。
+    """
+
+    if value is None:
+        parts.append("n;")
+    elif value is True or value is False:
+        parts.append("b1;" if value else "b0;")
+    elif isinstance(value, int):
+        parts.append("i%d;" % value)
+    elif isinstance(value, float):
+        parts.append("f%r;" % value)
+    elif isinstance(value, str):
+        parts.append("s%d:%s;" % (len(value), value))
+    elif isinstance(value, bytes):
+        parts.append("y%s;" % value.hex())
+    elif isinstance(value, (tuple, list)):
+        parts.append("(t" if isinstance(value, tuple) else "(l")
+        parts.append("%d;" % len(value))
+        for item in value:
+            _encode_atoms(item, parts)
+        parts.append(")")
+    else:
+        parts.append("o%s.%s;" % (type(value).__module__, type(value).__qualname__))
+
+
+def _atoms_to_bytes(value: Any) -> bytes:
+    parts: list = []
+    _encode_atoms(value, parts)
+    return "".join(parts).encode("utf-8", "surrogatepass")
+
+
+def compose_candidate_digest(node: Any, child_digests: Tuple[Optional[bytes], ...]) -> bytes:
+    """local payload と子 digest から候補 hash を O(1) で合成する。
+
+    `child_digests` は `ordered_semantic_edges(node)` と同じ並びであること。
+    可換二項演算は子 digest を整列してから混ぜるので、`expression_key` の
+    可換正規化と同じ式が同じ hash になる（不変条件 I-1）。
+    """
+
+    payload = local_semantic_payload(node)
+    digest = hashlib.blake2b(digest_size=CANDIDATE_DIGEST_SIZE)
+    digest.update(_atoms_to_bytes(payload.identity_atoms))
+    resolved = [
+        _NULL_CHILD_DIGEST if child is None else child for child in child_digests
+    ]
+    if (
+        len(resolved) == 2
+        and getattr(node, "expr_type", None) == ExpressionType.BINARY_OP
+        and (getattr(node, "operator", None) or "") in COMMUTATIVE_BINARY_OPS
+    ):
+        resolved.sort()
+    digest.update(b"|%d|" % len(resolved))
+    for child in resolved:
+        digest.update(child)
+    return digest.digest()
+
+
+def candidate_hash(expr: Optional[Expression]) -> Optional[bytes]:
+    """式の candidate hash（`None` は式が無いとき）。
+
+    凍結済みなら freeze 時に確定した値をそのまま返す。未凍結なら DAG を 1 回
+    走査して作る（同じ node は 1 回だけ）。**この値だけで等価を確定しないこと**。
+    """
+
+    if expr is None:
+        return None
+    cached = expr.__dict__.get("_structural_hash") if hasattr(expr, "__dict__") else None
+    if cached is not None:
+        return cached
+
+    digests: dict[int, bytes] = {}
+    stack: list[tuple[Any, bool]] = [(expr, False)]
+    active: set[int] = set()
+    while stack:
+        node, exiting = stack.pop()
+        node_id = id(node)
+        if exiting:
+            active.discard(node_id)
+            child_digests = tuple(
+                None if edge.child is None else digests.get(id(edge.child))
+                for edge in ordered_semantic_edges(node)
+            )
+            digests[node_id] = compose_candidate_digest(node, child_digests)
+            continue
+        if node_id in digests:
+            continue
+        cached_child = node.__dict__.get("_structural_hash") if hasattr(node, "__dict__") else None
+        if cached_child is not None:
+            digests[node_id] = cached_child
+            continue
+        if node_id in active:
+            # 閉路は凍結できない（= 内部不整合）。未凍結 graph に対しては
+            # 一致させない値を返し、完全比較側が不一致として扱う。
+            digests[node_id] = hashlib.blake2b(
+                b"cycle", digest_size=CANDIDATE_DIGEST_SIZE
+            ).digest()
+            continue
+        active.add(node_id)
+        stack.append((node, True))
+        for edge in reversed(ordered_semantic_edges(node)):
+            if edge.child is not None:
+                stack.append((edge.child, False))
+    return digests.get(id(expr))
+
+
+class _ComparisonFrame:
+    """完全比較 1 組分の作業状態（明示 stack 用）。"""
+
+    __slots__ = ("key", "alternatives", "alt_index", "pair_index")
+
+    def __init__(self, key, alternatives):
+        self.key = key
+        self.alternatives = alternatives
+        self.alt_index = 0
+        self.pair_index = 0
+
+
+def structural_equals(
+    left: Optional[Expression],
+    right: Optional[Expression],
+    *,
+    budget: int = DEFAULT_STRUCTURAL_COMPARISON_BUDGET,
+) -> bool:
+    """2 つの式が構造的に同じか（DAG-aware な完全比較）。
+
+    費用は **distinct な node 組** の数に比例する。同じ組を 2 回評価しないので、
+    共有部分木を親ごとに展開しない。candidate hash は凍結済みどうしの早期棄却に
+    だけ使い、一致の確定には使わない（hash を定数にしても判定は変わらない）。
+
+    一致としない場合:
+
+    * 予算超過（比較不能 → cache miss。誤って一致としない）
+    * 未知の node 種別（`expression_key` の `opaque` 枝と同じ）
+    * 閉路（凍結できない graph。内部不整合なので一致としない）
+
+    互換契約: 旧実装が木の予算内で比較できた式は同じ結果になり、旧実装が予算
+    超過で比較不能だった式が新しい DAG 予算で比較できるようになった場合だけ、
+    一致を認める（判定能力の改善）。
+    """
+
+    if left is right:
+        return left is not None
+    if left is None or right is None:
+        return False
+
+    memo: dict[tuple, Optional[bool]] = {}
+    remaining = [int(budget)]
+    exhausted = [False]
+
+    def _quick(x, y) -> Optional[bool]:
+        if x is y:
+            return x is not None
+        if x is None or y is None:
+            return False
+        known = memo.get((id(x), id(y)), _MISSING)
+        if known is _MISSING:
+            return None
+        if known is None:
+            # 評価中の組へ戻ってきた = 閉路。一致としない。
+            return False
+        return known
+
+    def _open(x, y) -> Optional[_ComparisonFrame]:
+        """組の局所比較を行い、子の組み合わせ候補を作る（不一致なら `None`）。"""
+
+        key = (id(x), id(y))
+        if remaining[0] <= 0:
+            exhausted[0] = True
+            memo[key] = False
+            return None
+        remaining[0] -= 1
+        memo[key] = None
+
+        left_payload = local_semantic_payload(x)
+        right_payload = local_semantic_payload(y)
+        if not left_payload.comparable or not right_payload.comparable:
+            memo[key] = False
+            return None
+        if left_payload.compare_atoms != right_payload.compare_atoms:
+            memo[key] = False
+            return None
+
+        left_digest = x.__dict__.get("_structural_hash") if hasattr(x, "__dict__") else None
+        right_digest = y.__dict__.get("_structural_hash") if hasattr(y, "__dict__") else None
+        if left_digest is not None and right_digest is not None and left_digest != right_digest:
+            memo[key] = False
+            return None
+
+        left_edges = ordered_semantic_edges(x)
+        right_edges = ordered_semantic_edges(y)
+        if len(left_edges) != len(right_edges):
+            memo[key] = False
+            return None
+        straight = [
+            (left_edge.child, right_edge.child)
+            for left_edge, right_edge in zip(left_edges, right_edges)
+        ]
+        alternatives = [straight]
+        if (
+            len(straight) == 2
+            and getattr(x, "expr_type", None) == ExpressionType.BINARY_OP
+            and (getattr(x, "operator", None) or "") in COMMUTATIVE_BINARY_OPS
+        ):
+            # 可換演算は入れ替えた組み合わせも試す。hash で並びを決めないのは、
+            # hash が衝突している場合に取り違えて「違う」と言ってしまうため。
+            alternatives.append(
+                [(straight[0][0], straight[1][1]), (straight[1][0], straight[0][1])]
+            )
+        return _ComparisonFrame(key, alternatives)
+
+    frame = _open(left, right)
+    if frame is None:
+        return False
+    stack = [frame]
+    result: Optional[bool] = None
+
+    while stack:
+        if exhausted[0]:
+            return False
+        frame = stack[-1]
+        if result is not None:
+            if result:
+                frame.pair_index += 1
+            else:
+                frame.alt_index += 1
+                frame.pair_index = 0
+            result = None
+        if frame.alt_index >= len(frame.alternatives):
+            memo[frame.key] = False
+            stack.pop()
+            result = False
+            continue
+        alternative = frame.alternatives[frame.alt_index]
+        if frame.pair_index >= len(alternative):
+            memo[frame.key] = True
+            stack.pop()
+            result = True
+            continue
+        child_left, child_right = alternative[frame.pair_index]
+        known = _quick(child_left, child_right)
+        if known is not None:
+            result = known
+            continue
+        child_frame = _open(child_left, child_right)
+        if child_frame is None:
+            result = False
+            continue
+        stack.append(child_frame)
+
+    return bool(result)
+
+
+def structural_identity_digest(expr: Optional[Expression]) -> Optional[str]:
+    """DAG snapshot 全体に対する安定な identity digest。
+
+    `id()` にも process 状態にも依存しない。snapshot のどこかが object 表現へ
+    落ちている（`identity_complete` が偽）なら `None` を返す — 区別できない値を
+    同じ digest にして「同じ式」と言わせないため。
+    """
+
+    from scripts.function_tracer_pcode.core.semantic_snapshot import walk_dag
+
+    if expr is None:
+        return None
+    graph = walk_dag(expr)
+    if not graph.comparable or not graph.identity_complete:
+        return None
+    payload = (
+        "semantic_graph_v1",
+        graph.root_no,
+        tuple(
+            (node.canonical_node_no, node.local_payload, node.ordered_edges)
+            for node in graph.nodes
+        ),
+    )
+    return hashlib.blake2b(_atoms_to_bytes(payload), digest_size=32).hexdigest()
+
+
+class StructuralIdentity:
+    """structural identity の安定 interface（この module が唯一の owner）。
+
+    比較方針を変えたいときに触るのはこの class の実装だけで、consumer
+    （`Condition.equals` / dedup / cache）は変わらない。solver query identity や
+    rewrite identity と **統合しない**: 同じ式でも solver 宣言や rewrite 文脈が
+    違えば別物で、片方の都合で他方の一致条件を動かしてはいけない。
+    """
+
+    #: 候補の絞り込み専用（等価の確定にも digest にも使わない）
+    candidate_hash = staticmethod(candidate_hash)
+    #: 完全比較（distinct な node 組に比例、可換正規化あり）
+    equals = staticmethod(structural_equals)
+    #: 予算付きの canonical key（placeholder を含むものは比較に使わない）
+    key = staticmethod(expression_key)
+    #: DAG snapshot 全体の安定 digest（`id()` を含まない）
+    identity_digest = staticmethod(structural_identity_digest)
