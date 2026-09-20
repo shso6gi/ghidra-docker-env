@@ -3,12 +3,26 @@
 from __future__ import annotations
 
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict
 
 from scripts.function_tracer_pcode.checker.workflow import (
     run_check_from_binaries as _run_legacy_check_from_binaries,
+)
+# Issue #106 PR-106-0: pair の実行制御。boundary は lifecycle（scope の開閉）と
+# 呼び出し順序だけを所有し、結果の組み立ては `checker.pair_execution` に置く。
+from scripts.function_tracer_pcode.checker.pair_execution import (
+    apply_pair_failure_gate,
+    binary_display_name,
+    pair_allows_semantic_analysis,
+    pair_failure_result_for_exception,
+    pair_stop_state,
+)
+from scripts.function_tracer_pcode.core.errors import (
+    AnalysisFailureError,
+    pair_failure_scope,
 )
 from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     production_signal_scope,
@@ -215,21 +229,32 @@ def _run_conditional_lane(checker: Any, result: Any, *, projection: Any) -> None
 
     lane 自身が fail closed（例外を投げず、条件を満たさなければ列を作らない）
     なので、ここでは呼び出し口を用意して診断を書くだけにする。
+
+    Issue #106 PR-106-0（G4-c）: pair が terminal なら lane を **起動しない**。
+    lane は追加の solver query を出す新しい意味解析なので、限界 / deadline で
+    打ち切った pair では始めてはいけない。確定処理（`connector.finish`・receipt・
+    finalization context）はこれとは別で、stop state に関わらず実行する。
     """
 
     from scripts.function_tracer_pcode.authority.decision.conditional_lane import (
         run_production_conditional_lane,
     )
 
-    diagnostics = run_production_conditional_lane(
-        result,
-        projection=projection,
-        analyses=getattr(result, "_conditional_lane_analyses", None),
-        observation_policy=getattr(checker, "external_call_effect_policy", None),
-        solver_runner=getattr(checker, "solver_runner", None),
-        timeout=getattr(checker, "timeout", None),
-        debug=bool(getattr(checker, "debug", False)),
-    )
+    if pair_allows_semantic_analysis():
+        diagnostics = run_production_conditional_lane(
+            result,
+            projection=projection,
+            analyses=getattr(result, "_conditional_lane_analyses", None),
+            observation_policy=getattr(checker, "external_call_effect_policy", None),
+            solver_runner=getattr(checker, "solver_runner", None),
+            timeout=getattr(checker, "timeout", None),
+            debug=bool(getattr(checker, "debug", False)),
+        )
+    else:
+        diagnostics = {
+            "skipped": "pair_terminal",
+            "pair_stop_state": pair_stop_state().value,
+        }
     if diagnostics is None:
         return
     try:
@@ -238,6 +263,81 @@ def _run_conditional_lane(checker: Any, result: Any, *, projection: Any) -> None
         result.diagnostics = current
     except Exception:
         return
+
+
+def _pair_identity(
+    checker: Any,
+    function_name1: str,
+    function_name2: str,
+    kwargs: Dict[str, Any],
+) -> tuple:
+    """pair 1 件を指す identity（台帳の共有条件の片方）。
+
+    `execution_payload` が pilot session を作るときに使う入力と同じものを並べる
+    （F-24）。session identity ともう片方の条件になるので、別 binary / 別関数の
+    入れ子実行（preflight 経由など）は別の台帳になる。
+    """
+    content = getattr(checker, "_active_binary_content_identities", (None, None))
+    return (
+        kwargs.get("binary1_id"),
+        kwargs.get("binary2_id"),
+        content[0],
+        content[1],
+        function_name1,
+        function_name2,
+    )
+
+
+def _session_identity(session: Any) -> Any:
+    if session is None:
+        return None
+    return getattr(getattr(session, "identity", None), "result_occurrence_id", None)
+
+
+def _run_legacy_with_pair_gate(
+    checker: Any,
+    program1: Any,
+    program2: Any,
+    function_name1: str,
+    function_name2: str,
+    kwargs: Dict[str, Any],
+) -> Any:
+    """legacy workflow を呼び、限界 / 内部バグを pair 単位で結果化する（G4-a / G5）。
+
+    G3（`checker.workflow`）が受け損ねた例外 — workflow の外で投げられたもの —
+    をここで受け、同じ規則で結果にする。正常に返った結果についても、台帳に未解消
+    の失敗があるのに EQ / NOT_EQ になっていないかを確かめる。
+    """
+    started = time.time()
+    names = dict(
+        function_name1=function_name1,
+        function_name2=function_name2,
+        binary1_name=binary_display_name(program1, "binary1"),
+        binary2_name=binary_display_name(program2, "binary2"),
+    )
+    try:
+        result = _run_legacy_check_from_binaries(
+            checker,
+            program1,
+            program2,
+            function_name1,
+            function_name2,
+            **kwargs,
+        )
+    except AnalysisFailureError as exc:  # G5
+        failure_result = pair_failure_result_for_exception(
+            checker, exc, start_time=started, **names,
+        )
+        if failure_result is None:  # 台帳にも型にも根拠が無い: 従来どおり上へ
+            raise
+        return failure_result
+    return apply_pair_failure_gate(  # G4-a
+        checker,
+        result,
+        function_name1=function_name1,
+        function_name2=function_name2,
+        start_time=started,
+    )
 
 
 def run_check_from_binaries_with_v2_pilot(
@@ -249,15 +349,15 @@ def run_check_from_binaries_with_v2_pilot(
     **kwargs: Any,
 ) -> Any:
     connector = getattr(checker, "v2_dual_write_pilot_connector", None)
+    pair_identity = _pair_identity(checker, function_name1, function_name2, kwargs)
     if connector is None:
-        return _run_legacy_check_from_binaries(
-            checker,
-            program1,
-            program2,
-            function_name1,
-            function_name2,
-            **kwargs,
-        )
+        # pilot 無しの legacy 経路。台帳の scope は同じように張る（限界は帰属
+        # できないので `limitation_unattributed` の ERROR になる = fail-closed）。
+        with pair_failure_scope(pair_identity, None):
+            return _run_legacy_with_pair_gate(
+                checker, program1, program2,
+                function_name1, function_name2, kwargs,
+            )
     execution_payload = {
         "binary1_id": kwargs.get("binary1_id"),
         "binary2_id": kwargs.get("binary2_id"),
@@ -353,16 +453,21 @@ def run_check_from_binaries_with_v2_pilot(
     checker.emit_v2_dual_write_pilot_event = session.emit
     checker.terminalize_v2_dual_write_pilot_timeout = session.terminalize
     boundary_seconds["session_begin"] = time.monotonic() - begin_started
+    # Issue #106 PR-106-0: pair の実行制御 scope。`connector.begin` が成功して
+    # から `return result` までを覆う（初回解析・phase・再帰 check・finish・
+    # reconciliation・conditional lane・finalization context）。既存の `finally`
+    # が session を戻すのと同じ場所で閉じたいので、`with` を 1 つ増やして本体
+    # 全体を字下げし直すのではなく `ExitStack` で lifetime を合わせる。
+    pair_scope = ExitStack()
     try:
+        pair_scope.enter_context(
+            pair_failure_scope(pair_identity, _session_identity(session))
+        )
         check_started = time.monotonic()
         with production_signal_scope(session):
-            result = _run_legacy_check_from_binaries(
-                checker,
-                program1,
-                program2,
-                function_name1,
-                function_name2,
-                **kwargs,
+            result = _run_legacy_with_pair_gate(
+                checker, program1, program2,
+                function_name1, function_name2, kwargs,
             )
         boundary_seconds["check_body"] = time.monotonic() - check_started
         _attach_boundary_seconds(result, boundary_seconds)
@@ -541,6 +646,7 @@ def run_check_from_binaries_with_v2_pilot(
         _attach_boundary_seconds(result, boundary_seconds)
         return result
     finally:
+        pair_scope.close()
         if previous_session is None:
             del checker._active_v2_dual_write_pilot_session
         else:

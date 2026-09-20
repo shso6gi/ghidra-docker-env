@@ -39,6 +39,7 @@ from scripts.function_tracer_pcode.proof.obligations.pair_closure_producers impo
 )
 import time
 from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.smt import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
@@ -778,6 +779,10 @@ def _impl_check(
                         v2_loop_blocker_signal,
                         producer_site_manifest_id="pairwise-loop-fallback-blocker",
                     )
+                except AnalysisLimitation:
+                    # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+                    # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+                    raise
                 except Exception as exc:
                     from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
                         record_production_pilot_shadow_error,
@@ -851,6 +856,10 @@ def _impl_check(
                     # Return-observation ABI/width causes are owned exclusively
                     # by return_width_surface.py.  Pairwise fallback classification
                     # remains diagnostic and must not reconstruct the same C/Q.
+                except AnalysisLimitation:
+                    # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+                    # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+                    raise
                 except Exception as exc:
                     from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
                         record_production_pilot_shadow_error,
@@ -950,6 +959,10 @@ def _impl_check(
                                         "loop v2 query preflight returned an "
                                         "unknown variant"
                                     )
+                        except AnalysisLimitation:
+                            # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+                            # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+                            raise
                         except Exception as exc:
                             from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
                                 record_production_pilot_shadow_error,
@@ -1685,6 +1698,10 @@ def _impl_check(
                     ),
                     producer_site_manifest_id="pairwise-pending-loop-blocker",
                 )
+            except AnalysisLimitation:
+                # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+                # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+                raise
             except Exception as exc:
                 from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
                     record_production_pilot_shadow_error,

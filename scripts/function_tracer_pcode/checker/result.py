@@ -125,6 +125,12 @@ class EquivalenceResult:
     )
     # 非署名の診断（Issue #17）: 解析時間・式サイズ。to_dict で結果統計と合成する。
     diagnostics: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
+    # Issue #106 PR-106-0: pair 1 件を打ち切った理由（`PairStopState` の値）。
+    # 台帳（`core.errors.PairFailureLedger`）が所有する stop state を、境界で
+    # 1 度だけ結果へ写したもの。**判定 authority の入力ではない**（UNKNOWN /
+    # ERROR を決めるのは既存の attribution と authority）。打ち切っていない
+    # pair では `None` のままで、JSON にも出ない。
+    pair_stop_state: Optional[str] = field(default=None, repr=False, compare=False)
     # Issue #128 PR-128-A: `debug_trace` を省いても原因分析を失わないための
     # lossless な compact 集計。canonical bundle を組む前に確定させる
     # （`checker.cause_aggregate.attach_cause_aggregate`）。未設定なら to_dict が

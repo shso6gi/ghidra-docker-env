@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
     expression_smt_bit_width,
     smt_logic_name,
 )
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 
 
 class ConditionSMTOracle:
@@ -96,6 +97,10 @@ class ConditionSMTOracle:
             if query_key is not None:
                 cls._remember(query_key, None)
             return None
+        except AnalysisLimitation:
+            # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+            # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+            raise
         except Exception:
             return None
 

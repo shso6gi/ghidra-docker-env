@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.core import (
     LoopSideEffectProfileRef,
     ReturnInfo,
 )
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     ConditionSMTOracle,
     ResidueLoopCase,
@@ -256,6 +257,10 @@ def _impl__multiplicative_phi_return_summary_conditions(
     try:
         if ConditionSMTOracle.conjunction_is_unsat(result) is not False:
             return ()
+    except AnalysisLimitation:
+        # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
+        # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
+        raise
     except Exception:
         return ()
     return tuple(result)

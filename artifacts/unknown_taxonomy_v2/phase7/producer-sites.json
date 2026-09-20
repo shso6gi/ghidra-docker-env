@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "daeee4700d5b8d5d51f9c664305fca766ad0635c9f28e10de655ca7d88d1852c",
+  "manifest_digest": "243a033c719496e4666725e33823bbe071d99e3b066ba47a2f62e20f862caf34",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 32,
   "sites": [
@@ -499,10 +499,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 777,
+      "line": 778,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-loop-fallback-blocker",
-      "source_sha256": "2e2cbe469aaf711496aa1346e6420a814341a0f232d3789361aee9c96fb1d2a3"
+      "source_sha256": "e36a2b36705ff7e87159ed4dbd57c9373b46e439d81068e23c4c802487e23708"
     },
     {
       "allowed_dispositions": [
@@ -633,10 +633,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1677,
+      "line": 1690,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-pending-loop-blocker",
-      "source_sha256": "2e2cbe469aaf711496aa1346e6420a814341a0f232d3789361aee9c96fb1d2a3"
+      "source_sha256": "e36a2b36705ff7e87159ed4dbd57c9373b46e439d81068e23c4c802487e23708"
     },
     {
       "allowed_dispositions": [
@@ -662,10 +662,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 843,
+      "line": 848,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-readonly-correspondence-member",
-      "source_sha256": "2e2cbe469aaf711496aa1346e6420a814341a0f232d3789361aee9c96fb1d2a3"
+      "source_sha256": "e36a2b36705ff7e87159ed4dbd57c9373b46e439d81068e23c4c802487e23708"
     },
     {
       "allowed_dispositions": [
@@ -691,10 +691,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 820,
+      "line": 825,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-readonly-identity-blocker",
-      "source_sha256": "2e2cbe469aaf711496aa1346e6420a814341a0f232d3789361aee9c96fb1d2a3"
+      "source_sha256": "e36a2b36705ff7e87159ed4dbd57c9373b46e439d81068e23c4c802487e23708"
     },
     {
       "allowed_dispositions": [
