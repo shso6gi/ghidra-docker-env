@@ -654,8 +654,16 @@ def _carry_pair_diagnostics(result: EquivalenceResult, carry_from) -> None:
 def attach_pair_stop_state(result: EquivalenceResult, stop_state) -> None:
     """pair の stop state を結果へ写す（object 属性 + 診断、Issue #106 PR-106-0）。
 
-    `PairStopState.NONE` のときは何も書かない。限界が無い pair の出力 schema を
-    変えないための条件で、診断 block の key 集合は従来どおりになる。
+    渡ってくるのは **winner になった failure 自身の stop state**
+    （`PairPendingFailure.stop_state`）で、台帳の aggregate
+    （`PairExecutionControl.stop_state()`）ではない。結果は「この結果を作らせた
+    failure」を説明するものなので、その failure の stop state を書く。現 scope
+    では同一 kind に異なる severity が無いので両者は一致する。
+
+    どちらにせよ **診断であって判定入力ではない**（判定は `failure_status` /
+    `unknown_reasons` 側が持つ）。`PairStopState.NONE` のときは何も書かない —
+    限界が無い pair の出力 schema を変えないための条件で、診断 block の key
+    集合は従来どおりになる。
     """
     from scripts.function_tracer_pcode.checker.diagnostics import (
         FAILURE_PAIR_STOP_STATE,

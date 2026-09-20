@@ -289,12 +289,18 @@ def _represented_exception_ids(exc: BaseException) -> set:
 
 
 class PairFailureKind(Enum):
-    """pair を止めた failure の種別。**結果の種類** と 1 対 1 に対応する。
+    """pair を止めた failure の **failure handling / result-conversion policy**
+    の category。
+
+    最終 outcome そのものではない。`LIMITATION` は attribution の結果しだいで
+    reason 付き UNKNOWN にも `limitation_unattributed` の ERROR にもなる —
+    どちらにするかを決めるのは従来どおり authority 側で、この enum が決めるのは
+    「どの変換規則（`_HANDLING_BY_KIND` の 1 行）へ渡すか」だけ。
 
     失敗の *クラス* が増えても（`FrozenExpressionError` / `ExpressionCycleError` /
     新しい `AnalysisLimitation` 派生）この enum は増えない。増えるとしたら
-    「UNKNOWN でも `internal_exception` ERROR でもない、新しい結果の種類」を
-    足すときだけで、そのときは consumer 側の変換表 1 箇所が対応点になる。
+    「既存のどちらの変換規則にも載らない失敗」を足すときだけで、そのときは
+    consumer 側の変換表 1 箇所が対応点になる。
     """
 
     LIMITATION = "limitation"
@@ -329,6 +335,15 @@ class PairPendingFailure:
     勝つか」を知らなくてよい。`exception` は結果化にそのまま渡せる canonical 型
     （`INTERNAL_BUG` なら `InternalError`、`LIMITATION` なら `AnalysisLimitation`）
     で、記録された生の例外型は外へ出さない。
+
+    `stop_state` は **winner になった failure record 自身の stop state** で、
+    pair 全体の状態ではない。pair 全体の aggregate execution state は
+    `PairExecutionControl.stop_state()` が返す（escalation 済みで、下がらない）。
+    現 scope では同じ failure kind の中に異なる severity が無いので両者が食い違う
+    組み合わせは作れないが、**PR-106-A 以降で同一 kind に異なる severity を足す
+    ときはこの契約を確認し直すこと**（例: 限界の中に deadline より強い停止を足す
+    と、winner の stop_state < aggregate になり得る。診断へ書くのはどちらか、
+    gate が読むのはどちらかを先に決める）。
     """
 
     kind: PairFailureKind
@@ -499,6 +514,11 @@ class PairExecutionControl:
         raise NotImplementedError
 
     def stop_state(self) -> PairStopState:
+        """pair 全体の aggregate execution state（escalation 済み・下がらない）。
+
+        `pending_failure().stop_state`（= winner の record 自身の stop state）とは
+        別物。gate が「どこまで実行してよいか」を判断するのは **こちら**。
+        """
         raise NotImplementedError
 
     def allows_semantic_analysis(self) -> bool:
@@ -588,6 +608,7 @@ class PairFailureLedger(PairExecutionControl):
     # -- 参照 --------------------------------------------------------------
 
     def stop_state(self) -> PairStopState:
+        """pair 全体の aggregate execution state（`_append` が escalation する）。"""
         return self._stop_state
 
     def allows_semantic_analysis(self) -> bool:
