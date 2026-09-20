@@ -7,6 +7,7 @@ from scripts.function_tracer_pcode.core import (
     expression_key_or_identity,
 )
 from scripts.function_tracer_pcode.semantics.normalize.context import NormalizationContext
+from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
 
 
 SIGNED_DIV_OPS = frozenset({"INT_SDIV", "SDIV", "//"})
@@ -53,8 +54,8 @@ def normalize_modulo_patterns(
     rewritten.size = expr.size
     context.record_rule(
         rule_name="MODULO_CANONICALIZATION",
-        before_expr=expr.to_smt(),
-        after_expr=rewritten.to_smt(),
+        before_expr=render_expression_smt_evidence(expr),
+        after_expr=render_expression_smt_evidence(rewritten),
         reason="Canonicalized remainder expansion to modulo operator",
     )
     return rewritten

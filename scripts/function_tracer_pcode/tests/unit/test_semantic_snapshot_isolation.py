@@ -102,10 +102,10 @@ def test_unknown_declaration_ignores_runtime_ref_mutation_after_freeze():
     expr, ref = _unknown_expression()
     expr.freeze()
     before = collect_unknown_smt_declarations(expr)
-    before_smt = expr.to_smt()
+    before_smt = expr.freeze().to_smt()
     ref.key = ("unknown_source", 999)
     assert collect_unknown_smt_declarations(expr) == before
-    assert expr.to_smt() == before_smt
+    assert expr.freeze().to_smt() == before_smt
 
 
 def test_declared_signedness_ignores_data_type_mutation_after_freeze():
@@ -249,10 +249,10 @@ def rendering_corpus():
 def test_freeze_does_not_change_to_string_or_to_smt(rendering_corpus):
     for expr in rendering_corpus:
         before_string = expr.to_string()
-        before_smt = expr.to_smt()
+        before_smt = expr.freeze().to_smt()
         expr.freeze()
         assert expr.to_string() == before_string
-        assert expr.to_smt() == before_smt
+        assert expr.freeze().to_smt() == before_smt
 
 
 def test_freeze_does_not_change_to_string_for_intrinsics():
@@ -287,14 +287,14 @@ def test_smt_generation_freezes_its_input():
         "INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4)
     )
     assert expr.is_frozen is False
-    rendered = expr.to_smt()
+    rendered = expr.freeze().to_smt()
     assert expr.is_frozen is True
     # 生成したあとで意味を書き換えられない = 論理式ともとの意味がずれない。
     from scripts.function_tracer_pcode.core.errors import FrozenExpressionError
 
     with pytest.raises(FrozenExpressionError):
         expr.size = 8
-    assert expr.to_smt() == rendered
+    assert expr.freeze().to_smt() == rendered
 
 
 def test_smt_generation_refuses_a_graph_that_cannot_be_frozen():
@@ -303,7 +303,7 @@ def test_smt_generation_refuses_a_graph_that_cannot_be_frozen():
     cyclic = Expression.unary_op("BOOL_NEGATE", Expression.constant(1, 1))
     cyclic.__dict__["operands"] = [cyclic]
     with pytest.raises(ExpressionCycleError):
-        cyclic.to_smt()
+        cyclic.freeze().to_smt()
 
 
 def test_global_address_identity_is_pinned_at_freeze():
@@ -381,6 +381,74 @@ def test_variable_symbol_declaration_is_decided_by_the_projection():
     )
     located.freeze()
     assert semantic_projection(located).declares_variable_symbol is True
+
+
+def test_expressions_inside_a_runtime_ref_are_published_with_the_node():
+    """runtime ref が抱える式も、node の公開と同時に凍る。
+
+    ref が frozen dataclass でも、中の `Expression` は別 object なので、凍らせ
+    ない限り「凍結後も意味が動く」経路が残る（loop summary の `transition_expr`
+    など）。
+    """
+
+    from dataclasses import dataclass
+    from typing import Optional
+
+    from scripts.function_tracer_pcode.core.errors import FrozenExpressionError
+
+    @dataclass(frozen=True)
+    class NestedRef:
+        transition_expr: Optional[Expression]
+        cases: tuple
+
+        def stable_key(self):
+            return ("nested", 1)
+
+    inner = Expression.binary_op(
+        "INT_ADD", Expression.parameter("s", 0, size=4), Expression.constant(1, size=4)
+    )
+    nested = Expression.unary_op("INT_ZEXT", Expression.parameter("t", 1, size=4))
+    expr = Expression.variable("acc", size=4, runtime_ref=NestedRef(inner, (nested,)))
+
+    assert inner.is_frozen is False
+    expr.freeze()
+
+    assert inner.is_frozen is True, "a runtime ref's expressions are part of the meaning"
+    assert nested.is_frozen is True, "nested containers are published too"
+    with pytest.raises(FrozenExpressionError):
+        inner.size = 8
+
+
+def test_unsupported_values_are_not_kept_as_raw_objects():
+    """値として固定できないものを snapshot がそのまま抱えないこと。"""
+
+    from scripts.function_tracer_pcode.core.semantic_projection import (
+        UnsupportedSemanticValue,
+        contains_unsupported_value,
+    )
+
+    class Wobbly:
+        pass
+
+    payload = Wobbly()
+
+    class RefWithRawValue:
+        def stable_key(self):
+            return ("ref", payload)
+
+    expr = Expression.unknown("u", runtime_ref=RefWithRawValue())
+    expr.freeze()
+
+    projection = semantic_projection(expr)
+    assert contains_unsupported_value(projection.runtime_stable_key)
+    assert any(
+        isinstance(item, UnsupportedSemanticValue)
+        for item in projection.runtime_stable_key
+    )
+    # 区別できない値を digest に載せない。
+    from scripts.function_tracer_pcode.core.structural import structural_identity_digest
+
+    assert structural_identity_digest(expr) is None
 
 
 def test_bit_width_of_a_frozen_expression_is_stable():

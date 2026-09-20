@@ -17,6 +17,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import ConditionNorm
 from scripts.function_tracer_pcode.analysis.returns._api import PcodeTracer
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import address_offset_for_block_endpoint
+from scripts.function_tracer_pcode.core.semantic_freeze import publish_semantic_values
 
 
 def decompose_comparison_condition(condition: Condition) -> Optional[Tuple[bool, str, Expression, Expression]]:
@@ -58,7 +59,11 @@ def _impl_analyze_function_by_name(self, function_name: str, timeout: int = 60) 
         self._debug_print(self._last_function_lookup_error)
         return None
     try:
-        return self.analyze_function(function, timeout)
+        # 解析が終わった時点が意味の公開境界。ここから先（proof / render /
+        # authority）は確定した意味だけを見るので、結果が抱えている式・条件を
+        # まとめて凍らせる。個々の consumer に「まだ凍っていないかも」を
+        # 気にさせないための 1 箇所。
+        return publish_semantic_values(self.analyze_function(function, timeout))
     except Exception as exc:
         self._last_analysis_failure = AnalysisFailure(
             status=ANALYSIS_STATUS_ANALYSIS_EXCEPTION,

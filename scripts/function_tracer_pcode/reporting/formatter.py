@@ -4,6 +4,7 @@
 import json
 from typing import List, Optional
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
+from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
 
 
 class OutputFormatter:
@@ -147,7 +148,7 @@ class OutputFormatter:
             if ret.conditions:
                 cond_parts = []
                 for c in ret.conditions:
-                    cond_smt = c.to_smt()
+                    cond_smt = render_expression_smt_evidence(c.expression)
                     cond_parts.append(cond_smt)
                 
                 if len(cond_parts) == 1:
@@ -161,7 +162,7 @@ class OutputFormatter:
                 lines.append("; Condition: true (unconditional)")
             
             # 戻り値のSMT式
-            value_smt = ret.value.to_smt()
+            value_smt = render_expression_smt_evidence(ret.value)
             lines.append(f"; Value: {value_smt}")
             
             return_defs.append({
@@ -277,7 +278,7 @@ class OutputFormatter:
             lines.append(f"  {ret.value.to_string()}")
             lines.append("")
             lines.append("Expression (SMT):")
-            lines.append(f"  {ret.value.to_smt()}")
+            lines.append(f"  {render_expression_smt_evidence(ret.value)}")
             lines.append("")
             lines.append("Expression (AST):")
             lines.append(f"  {json.dumps(ret.value.to_dict(), indent=4)}")
@@ -287,7 +288,7 @@ class OutputFormatter:
                 lines.append("Conditions:")
                 for j, cond in enumerate(ret.conditions):
                     lines.append(f"  [{j + 1}] {cond.to_string()}")
-                    lines.append(f"      SMT: {cond.to_smt()}")
+                    lines.append(f"      SMT: {render_expression_smt_evidence(cond.expression)}")
             else:
                 lines.append("Conditions: (unconditional)")
             

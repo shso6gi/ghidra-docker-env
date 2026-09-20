@@ -7,6 +7,7 @@ import importlib
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core import Condition
+from scripts.function_tracer_pcode.core.semantic_freeze import freeze_expression
 from scripts.function_tracer_pcode.core.semantic_projection import project_runtime_ref
 from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
 from scripts.function_tracer_pcode.core.structural import condition_key, key_contains_placeholder
@@ -422,6 +423,9 @@ class ConditionSMTOracle:
             expr,
             symbol_names,
         )
+        # symbol 名を差し替えた式は **この query のための新しい意味値**。作った側
+        # が公開してから renderer へ渡す（renderer に lifecycle を進めさせない）。
+        freeze_expression(rewritten)
         condition_smt = rewritten.to_smt(float_mode="fp")
         if getattr(condition, "negated", False):
             return f"(not {condition_smt})"

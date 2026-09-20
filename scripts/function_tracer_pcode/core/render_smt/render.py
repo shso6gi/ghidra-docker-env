@@ -180,27 +180,75 @@ def expression_to_smt(
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
     float_mode: str = "uf",
 ) -> str:
-    """式を SMT-LIB 文字列へ変換する。
+    """式を **solver へ渡す** SMT-LIB 文字列へ変換する。
 
-    SMT 生成は **凍結済みの意味に対してだけ** 行う。渡された式がまだ凍って
-    いなければここで凍らせるので、生成した論理式のもとになった意味があとから
-    書き換わることがない。凍らせられない graph（閉路）は placeholder を入れて
-    続けず、内部不整合として落ちる — 見えていない部分を無視した論理式で
-    EQUIVALENT / NOT_EQUIVALENT を出す方が危険だから。
+    渡された式がまだ公開されていなければ、ここで公開する（凍結）。本来は値を
+    作った側が公開すべきで、その形にできた経路（解析結果・条件・oracle の
+    rewrite clone）ではすでに公開済みのまま届く。ここでの公開は、まだ公開点を
+    持たない producer のための保険であって、**consumer が lifecycle を決めて
+    よいという意味ではない**（PR 本文「未充足」の項を参照）。
 
-    凍結は差分的で、すでに凍っている node には入り直さない。symbol 名を
-    差し替えた clone のように新しい node だけが増えた木では、費用はその
-    新しい node の数に比例する。
+    凍らせられない graph（閉路）は placeholder を入れて続けず、内部不整合と
+    して落ちる — 見えていない部分を無視した論理式で判定を出す方が危険だから。
+
+    証拠・表示のためのテキストが欲しいときは `render_expression_smt_evidence()`
+    を使うこと。あちらは solver へ渡さない前提なので、公開を要求しない。
     """
 
-    freeze = getattr(expr, "freeze", None)
-    if callable(freeze) and not getattr(expr, "_frozen", False):
-        freeze()
+    if expr is not None and not _is_validated_semantic_input(expr):
+        expr.freeze()
     return _to_smt_internal(
         expr,
         symbol_name_mapping=symbol_name_mapping,
         float_mode=float_mode,
     )
+
+
+def render_expression_smt_evidence(
+    expr,
+    *,
+    symbol_name_mapping: Optional[Mapping[str, str]] = None,
+    float_mode: str = "uf",
+) -> str:
+    """**証拠・表示のための** SMT 風テキスト（solver へは渡さない）。
+
+    書き換え規則が「この式がこの式になった」と記録するときの before / after や、
+    人向けの report がこれを使う。記録の対象はまだ組み立て中の中間値でよいので、
+    `expression_to_smt()` のように検証済みを要求しない。
+
+    逆に言うと、**ここで作った文字列を solver へ渡してはいけない**。判定に使う
+    論理式は確定した意味から作る必要があり、その入口は `expression_to_smt()`
+    だけ。呼び分けを型ではなく関数名で見えるようにしてあるのは、「どちらの
+    consumer か」が call site で分かる方が後から追いやすいため。
+    """
+
+    return _to_smt_internal(
+        expr,
+        symbol_name_mapping=symbol_name_mapping,
+        float_mode=float_mode,
+    )
+
+
+_EXPRESSION_TYPE = None
+
+
+def _is_validated_semantic_input(expr) -> bool:
+    """意味 object として公開済み（凍結済み）か。
+
+    判定は `isinstance` で行う。`hasattr` で属性を探ると、renderer に渡された
+    Ghidra object（記録再生中は proxy）に対して観測が走ってしまい、記録済みの
+    観測列に無い問い合わせを作ってしまう。対象は `Expression` だけで、それ以外
+    （mock / 文字列 / Ghidra object）はこの判定の外。
+    """
+
+    global _EXPRESSION_TYPE
+    if _EXPRESSION_TYPE is None:
+        from scripts.function_tracer_pcode.core.expression import Expression
+
+        _EXPRESSION_TYPE = Expression
+    if not isinstance(expr, _EXPRESSION_TYPE):
+        return True
+    return bool(expr.__dict__.get("_frozen", False))
 
 
 def expression_returns_bool(expr) -> bool:

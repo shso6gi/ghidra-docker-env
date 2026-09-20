@@ -13,6 +13,7 @@ from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
 from scripts.function_tracer_pcode.core.semantic_freeze import freeze_expression
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.effects.summary import (
@@ -254,7 +255,7 @@ class MultiequalExpansionMixin:
             traced_value = self._canonicalize_traced_expression(traced_value, [])
             self._debug_expr("  traced_value: ", traced_value, depth)
             try:
-                smt_str = traced_value.to_smt()
+                smt_str = render_expression_smt_evidence(traced_value)
                 if len(smt_str) > 100:
                     smt_str = smt_str[:100] + "..."
                 self._debug_print(f"  traced_smt: {smt_str}", depth)
