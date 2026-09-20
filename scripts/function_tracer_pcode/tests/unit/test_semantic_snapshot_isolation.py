@@ -155,13 +155,11 @@ def test_projection_is_pinned_at_freeze_time():
     assert again.declared_signedness == pinned_signedness is True
 
 
-def test_freezing_does_not_query_the_declared_type():
-    """凍結は JVM 呼び出しを増やさない。
+def test_declared_type_is_read_exactly_once_at_freeze():
+    """宣言型は **凍結時に 1 回だけ** 読み、以後は値として固定される。
 
-    宣言型の signedness は「最初に必要になったとき 1 回だけ」解決して固定する。
-    凍結時に前倒しで全部読むと、解析が触らなかった型 object にまで問い合わせる
-    ことになり、記録済みの観測列（`tests/fixtures/pcode/`）とも実行コストとも
-    食い違う。
+    遅延セルを snapshot の中に残すと「凍結 → 生 object 書き換え → 初回参照」で
+    意味が動いてしまう。読むのは凍結の瞬間だけ。
     """
 
     expr, _ref, _storage, data_type = _parameter_expression()
@@ -169,13 +167,61 @@ def test_freezing_does_not_query_the_declared_type():
     data_type.isSigned = lambda: (queried.append(1), True)[1]
 
     expr.freeze()
-    assert queried == []
+    assert len(queried) == 1, "the declared type must be resolved while freezing"
 
+    data_type.isSigned = lambda: (queried.append(1), False)[1]
     projection = semantic_projection(expr)
     assert projection.declared_signedness is True
-    assert len(queried) == 1
     assert projection.declared_signedness is True
-    assert len(queried) == 1, "the raw data type object must be read only once"
+    assert len(queried) == 1, "the raw data type object must never be read again"
+
+
+def test_pointer_parameters_do_not_ask_the_type_object_at_all():
+    """宣言名で pointer と分かる型は、型 object へ問い合わせない。
+
+    `get_declared_type_signedness` は pointer には常に `False` を返すので意味は
+    同じで、**解析が読まなかった型 object を凍結が新しく叩かない**という性質
+    だけが増える（記録済みの観測列に無い問い合わせを作らない）。
+    """
+
+    data_type = MutableDataType(True)
+    queried = []
+    data_type.isSigned = lambda: (queried.append(1), True)[1]
+    expr = Expression.parameter(
+        "p", 0, size=8, data_type="int *", data_type_obj=data_type
+    )
+    expr.freeze()
+
+    assert queried == []
+    assert semantic_projection(expr).declared_signedness is False
+    assert _expr_prefers_signed_extension(expr) is False
+
+
+def test_freeze_then_mutate_then_first_read_keeps_the_meaning():
+    """`freeze → raw mutation → first semantic read` でも意味が動かない。
+
+    凍結してから **一度も意味を読まないうちに** 生 object を書き換えても、
+    最初に読んだ意味は凍結時のもの。遅延セルが残っているとここで負ける。
+    """
+
+    expr, ref, storage, data_type = _parameter_expression()
+    expr.freeze()
+
+    ref.key = ("parameter", 99, "mutated")
+    storage.key = ("stack", 9999)
+    data_type.signed = False
+
+    projection = semantic_projection(expr)
+    assert projection.runtime_stable_key == ("parameter", 0, "a")
+    assert projection.runtime_semantic_key == ("parameter", 0, "a")
+    assert projection.storage_identity is not None
+    assert projection.declared_signedness is True
+    assert _expr_prefers_signed_extension(expr) is True
+    assert ConditionSMTOracle._expression_identity_key(expr) == (
+        "runtime_ref",
+        "parameter",
+        ("semantic", ("parameter", 0, "a")),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +304,83 @@ def test_smt_generation_refuses_a_graph_that_cannot_be_frozen():
     cyclic.__dict__["operands"] = [cyclic]
     with pytest.raises(ExpressionCycleError):
         cyclic.to_smt()
+
+
+def test_global_address_identity_is_pinned_at_freeze():
+    """global object のアドレス identity も凍結時の値で固定される。"""
+
+    from scripts.function_tracer_pcode.core.render_smt.unknowns import (
+        global_address_identity,
+        global_address_smt,
+    )
+
+    from scripts.function_tracer_pcode.core.runtime_refs import AddressValueRef
+
+    class MutableAddressRef(AddressValueRef):
+        """`AddressValueRef` の値のうち identity だけを可変にした代役。"""
+
+        def __init__(self):
+            super().__init__(address_offset=0x1000)
+            object.__setattr__(self, "identity", ("g_counter", 4, 0))
+
+        def global_object_identity(self):
+            return self.identity
+
+    ref = MutableAddressRef()
+    expr = Expression.variable("g", size=4, runtime_ref=ref)
+    expr.freeze()
+
+    before_identity = global_address_identity(expr)
+    before_smt = global_address_smt(expr, 64)
+    assert before_identity == ("g_counter", 4, 0)
+
+    object.__setattr__(ref, "identity", ("other_object", 8, 16))
+
+    assert global_address_identity(expr) == before_identity
+    assert global_address_smt(expr, 64) == before_smt
+
+
+def test_loop_lowering_identity_is_pinned_at_freeze():
+    """loop lowering の SMT function identity も凍結時の値で固定される。"""
+
+    from scripts.function_tracer_pcode.core.render_smt.loop_lowering import (
+        _runtime_ref_smt_identity,
+    )
+
+    class MutableLoopRef:
+        reduction_kind = "sum"
+
+        def __init__(self):
+            self.key = ("readonly", 1)
+
+        def semantic_key(self):
+            return self.key
+
+        def stable_key(self):
+            return self.key
+
+    ref = MutableLoopRef()
+    expr = Expression.variable("acc", size=4, runtime_ref=ref)
+    expr.freeze()
+
+    before = _runtime_ref_smt_identity(expr, ref)
+    ref.key = ("readonly", 999)
+    assert _runtime_ref_smt_identity(expr, ref) == before
+
+
+def test_variable_symbol_declaration_is_decided_by_the_projection():
+    """VARIABLE をそのまま宣言する種別かどうかも投影が持つ。"""
+
+    from scripts.function_tracer_pcode.core.runtime_refs import CanonicalLocation
+
+    plain = Expression.variable("v", size=4)
+    assert semantic_projection(plain).declares_variable_symbol is False
+
+    located = Expression.variable(
+        "v", size=4, runtime_ref=CanonicalLocation("param_1", offset=16, size=4)
+    )
+    located.freeze()
+    assert semantic_projection(located).declares_variable_symbol is True
 
 
 def test_bit_width_of_a_frozen_expression_is_stable():

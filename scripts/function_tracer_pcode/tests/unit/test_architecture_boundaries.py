@@ -7,17 +7,22 @@
 
 PR-22-B が置く境界:
 
-* 意味 snapshot は authority / CLI / checker / config / env を読まない。
-  失敗の台帳（`core.errors` の `record_internal_bug` 等）も読まない — 内部バグを
-  記録するのは freeze 境界の責務。
+* **生 object を読むのは `core/semantic_projection.py` だけ**。意味 consumer
+  （structural identity / renderer / solver query / loop lowering）は
+  `semantic_key()` / `stable_key()` / `storage_identity_key()` / 宣言型を自分で
+  読まない。読むと、同じ問いに複数の答えが生まれ、凍結後に意味が動く。
+* 意味の表現（`core/semantic_snapshot.py`）は生 object の読み方を知らない
+  （projection owner への一方向）。authority / CLI / checker / config / env も、
+  失敗の台帳（`record_internal_bug` 等）も読まない。
+* `core/runtime_refs/` の ref は **frozen な value object**。凍結後の consumer が
+  ref の構造を辿ってよいのは、これが型で保証されているから。
+* 閉路の判定は 1 実装（`traverse_semantic_graph`）。identity API ごとに書かない。
 * candidate hash で「一致」を決めてよいのは structural identity の owner だけ。
   他所で `structural_hash() == ...` を等価判定に使うと、衝突がそのまま誤判定に
   なる。
-* 意味 consumer（identity / renderer / solver query）は凍結済みの式から生の
-  runtime object を読み直さない。
 
 後続 PR（budget policy / solver backend / output envelope）が足す境界も、
-`_BANNED_IMPORTS` / `_BANNED_ATTRIBUTE_READS` に 1 行足して表現する。
+ここの表に 1 行足して表現する。
 """
 
 from __future__ import annotations
@@ -34,7 +39,23 @@ PACKAGE_PREFIX = "scripts.function_tracer_pcode."
 
 #: module（package からの相対 path）→ import してはいけない module 接頭辞。
 _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
+    "core/semantic_projection.py": (
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        # 表現にも identity にも依存しない: 投影は「生 object の読み方」だけを
+        # 知っていればよく、読んだ値が何に使われるかは知らない。
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.expression",
+        "os",
+    ),
     "core/semantic_snapshot.py": (
+        # 責務の逆転（表現が identity の private helper を借りる）を禁じる。
+        "scripts.function_tracer_pcode.core.structural",
         "scripts.function_tracer_pcode.authority",
         "scripts.function_tracer_pcode.checker",
         "scripts.function_tracer_pcode.cli",
@@ -74,7 +95,11 @@ _LEDGER_NAMES = frozenset(
         "PairExecutionControl",
     }
 )
-_LEDGER_FREE_MODULES = ("core/semantic_snapshot.py", "core/structural.py")
+_LEDGER_FREE_MODULES = (
+    "core/semantic_snapshot.py",
+    "core/semantic_projection.py",
+    "core/structural.py",
+)
 
 #: candidate hash / graph digest で等価を決めてよい唯一の module。
 _STRUCTURAL_IDENTITY_OWNER = "core/structural.py"
@@ -90,11 +115,28 @@ _IDENTITY_API_MODULES = (
     "scripts.function_tracer_pcode.core.structural",
 )
 
-#: 凍結済みの式から読み直してはいけない生 object（意味 consumer 側）。
-_RAW_SEMANTIC_ATTRIBUTES = frozenset({"data_type_obj"})
+#: 凍結済みの式から読み直してはいけない可変な生 object。
+_RAW_SEMANTIC_ATTRIBUTES = frozenset({"data_type_obj", "storage_info"})
+
+#: 生 object から identity を作る method。**projection owner だけ**が呼ぶ。
+_RAW_IDENTITY_CALLS = frozenset(
+    {"semantic_key", "stable_key", "storage_identity_key", "global_object_identity"}
+)
+_RAW_PROJECTION_OWNER = "core/semantic_projection.py"
+
+#: 閉路を「受理しない」と決めてよい唯一の module（走査そのものを持つ側）。
+_CYCLE_JUDGEMENT_OWNER = "core/semantic_snapshot.py"
+
+#: 凍結後に意味を読む consumer。ここが生 object を読むと、同じ式の意味が
+#: 「いつ読んだか」で変わり得る。
 _SNAPSHOT_ONLY_MODULES = (
+    "core/structural.py",
+    "core/semantic_snapshot.py",
+    "core/render_smt/render.py",
     "core/render_smt/widths.py",
     "core/render_smt/unknowns.py",
+    "core/render_smt/loop_lowering.py",
+    "analysis/condition/smt_oracle.py",
 )
 
 
@@ -212,10 +254,16 @@ def _identity_name(node: ast.AST):
 
 @pytest.mark.parametrize("module_path", _SNAPSHOT_ONLY_MODULES)
 def test_semantic_consumers_read_the_projection_not_the_raw_objects(module_path):
-    """SMT 側の意味 consumer は凍結済みの投影を読む。
+    """凍結後に意味を読む consumer は、可変な生 object を読み直さない。
 
-    生の `data_type_obj`（JVM object）をここで読み直すと、凍結後にその object が
-    変わったときに幅や宣言だけが黙って変わってしまう。
+    生の `data_type_obj`（JVM object）や `StorageInfo`（可変 dataclass）をここで
+    読み直すと、凍結後にその object が変わったときに幅や宣言だけが黙って変わって
+    しまう。
+
+    対象は「凍結済みの意味を読む側」に限る。解析中に Ghidra から descriptor を
+    組み立てる層（`analysis/tracer_*` 等）は、まさに生 object を読むのが仕事
+    なのでここには入らない — 境界は「構築か消費か」であって「core かどうか」
+    ではない。
     """
 
     path = PACKAGE_ROOT / module_path
@@ -233,6 +281,84 @@ def test_semantic_consumers_read_the_projection_not_the_raw_objects(module_path)
         ):
             offenders.append(f"{module_path}:{node.lineno} reads {node.args[1].value!r}")
     assert offenders == [], offenders
+
+
+@pytest.mark.parametrize("module_path", _SNAPSHOT_ONLY_MODULES)
+def test_semantic_consumers_do_not_build_identity_from_raw_objects(module_path):
+    """identity を生 object から作ってよいのは projection owner だけ。
+
+    `semantic_key()` を 4 箇所で別々に呼んでいた頃は、`except` の範囲すら
+    3 通りに分かれていた。答えが 1 つになるよう、呼ぶ場所を 1 つにする。
+    """
+
+    path = PACKAGE_ROOT / module_path
+    offenders = []
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in _RAW_IDENTITY_CALLS:
+            offenders.append(f"{module_path}:{node.lineno} calls .{func.attr}()")
+    assert offenders == [], offenders
+
+
+def test_runtime_refs_are_immutable_value_objects():
+    """凍結後の consumer が ref の構造を辿ってよい根拠を型で固定する。
+
+    ref が可変だと「凍結済みの式の意味」が ref 経由で動いてしまう。ここが
+    崩れたら、consumer 側の読み方ではなく ref の定義を直すのが正しい。
+    """
+
+    import dataclasses
+    import enum
+    import importlib
+    import inspect
+
+    #: ref ではないもの（例外・収集器）は対象外。
+    allowed_mutable = {"MissingSideDiscriminator", "ExpansionBudgetCollector"}
+    offenders = []
+    package = PACKAGE_ROOT / "core" / "runtime_refs"
+    for path in sorted(package.glob("*.py")):
+        module_name = (
+            "scripts.function_tracer_pcode.core.runtime_refs."
+            + path.stem
+        )
+        module = importlib.import_module(module_name)
+        for name, obj in vars(module).items():
+            if not inspect.isclass(obj) or obj.__module__ != module_name:
+                continue
+            if name in allowed_mutable:
+                continue
+            if issubclass(obj, BaseException) or issubclass(obj, enum.Enum):
+                continue
+            if issubclass(obj, tuple):  # NamedTuple
+                continue
+            if dataclasses.is_dataclass(obj):
+                if not obj.__dataclass_params__.frozen:
+                    offenders.append(f"{module_name}.{name} is a mutable dataclass")
+                continue
+            offenders.append(f"{module_name}.{name} is neither frozen nor a value type")
+    assert offenders == [], offenders
+
+
+def test_cycle_detection_has_a_single_implementation():
+    """閉路の判定は 1 箇所。
+
+    API ごとに書くと、辺の判定順を 1 行間違えた実装だけが残る（実際それで
+    back-edge を取り逃していた）。走査は `traverse_semantic_graph` 1 本で、
+    ほかの module は例外型を捕まえる / 通すだけ。
+    """
+
+    raising: List[str] = []
+    for path in _module_files():
+        for node in ast.walk(_parse(path)):
+            if not isinstance(node, ast.Raise) or node.exc is None:
+                continue
+            exc = node.exc
+            name = exc.func if isinstance(exc, ast.Call) else exc
+            if isinstance(name, ast.Name) and name.id == "ExpressionCycleError":
+                raising.append(_relative(path))
+    assert raising == [_CYCLE_JUDGEMENT_OWNER], raising
 
 
 def test_identity_kinds_are_not_merged_into_one_type():

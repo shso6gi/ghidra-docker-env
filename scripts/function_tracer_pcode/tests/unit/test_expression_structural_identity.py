@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from scripts.function_tracer_pcode.core.condition import Condition
+from scripts.function_tracer_pcode.core.errors import ExpressionCycleError
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 from scripts.function_tracer_pcode.core import structural
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
@@ -440,12 +441,121 @@ def test_unknown_node_kinds_are_never_equal():
     assert structural.structural_equals(first, second) is False
 
 
-def test_cyclic_graphs_are_never_reported_equal():
-    left = Expression.unary_op("BOOL_NEGATE", Expression.constant(1, 1))
-    left.__dict__["operands"] = [left]
-    right = Expression.unary_op("BOOL_NEGATE", Expression.constant(1, 1))
-    right.__dict__["operands"] = [right]
-    assert structural.structural_equals(left, right) is False
+def _cyclic_expression() -> Expression:
+    """自分自身を operand に持つ式（検証を通らない graph）。"""
+
+    node = Expression.unary_op("BOOL_NEGATE", Expression.constant(1, 1))
+    node.__dict__["operands"] = [node]
+    return node
+
+
+def test_cyclic_graphs_fail_closed_in_every_identity_entry_point():
+    """閉路はどの入口から入っても同じ typed failure になる（fail closed）。
+
+    identity API は validated graph を前提にする。検証は凍結が 1 箇所で行うので、
+    API ごとに閉路判定を書き足していない — にもかかわらず全部の入口で止まる、
+    というのがこの test の主張。
+    """
+
+    from scripts.function_tracer_pcode.core.semantic_snapshot import walk_dag
+
+    left = _cyclic_expression()
+    right = _cyclic_expression()
+
+    with pytest.raises(ExpressionCycleError):
+        structural.structural_equals(left, right)
+    with pytest.raises(ExpressionCycleError):
+        structural.candidate_hash(left)
+    with pytest.raises(ExpressionCycleError):
+        structural.structural_identity_digest(left)
+    with pytest.raises(ExpressionCycleError):
+        walk_dag(left)
+
+
+def test_self_comparison_of_a_cycle_is_not_answered_by_the_identity_shortcut():
+    """`structural_equals(x, x)` が閉路を素通りしない。
+
+    同じ object どうしの近道を検証より先に置くと、壊れた graph が「同じ」として
+    通ってしまう。検証が先。
+    """
+
+    cyclic = _cyclic_expression()
+    with pytest.raises(ExpressionCycleError):
+        structural.structural_equals(cyclic, cyclic)
+
+
+def test_walk_dag_detects_a_back_edge_to_an_already_numbered_node():
+    """共有（同じ node へ 2 回）と閉路（経路上の node へ戻る）を取り違えない。"""
+
+    from scripts.function_tracer_pcode.core.semantic_snapshot import walk_dag
+
+    leaf = Expression.parameter("p", 0, size=4)
+    shared = Expression.binary_op("INT_SUB", leaf, leaf)
+    # 共有は正常: distinct node は 2。
+    assert walk_dag(shared).distinct_node_count == 2
+
+    # root が自分の子孫から参照される = back-edge。root は入口で番号が付くので、
+    # 「番号を先に見る」実装ではここを共有と誤認する。
+    root = Expression.binary_op("INT_ADD", leaf, leaf)
+    child = Expression.unary_op("BOOL_NEGATE", root)
+    root.__dict__["operands"] = (leaf, child)
+    with pytest.raises(ExpressionCycleError):
+        walk_dag(root)
+
+
+def test_identity_digest_agrees_with_full_comparison_on_commutative_operands():
+    """`ADD(a, 3)` と `ADD(3, a)`: 等価なら digest も等しい。"""
+
+    left = Expression.parameter("a", 0, size=4)
+    right = Expression.constant(3, size=4)
+    straight = Expression.binary_op("INT_ADD", left, right)
+    crossed = Expression.binary_op("INT_ADD", right, left)
+
+    assert structural.structural_equals(straight, crossed) is True
+    assert structural.structural_identity_digest(straight) == (
+        structural.structural_identity_digest(crossed)
+    )
+
+
+def test_identity_digest_agrees_with_full_comparison_on_sharing_topology():
+    """同じ部分式を 2 回参照する DAG と、それを 2 個複製した木は同じ digest。
+
+    digest を完全比較の前置きに使う以上、「等価なのに digest が違う」は
+    prefilter が正解を落とすことを意味する。共有の仕方は表現の違いであって
+    意味の違いではない。
+    """
+
+    shared_leaf = Expression.parameter("p", 0, size=4)
+    shared = Expression.binary_op("INT_SUB", shared_leaf, shared_leaf)
+    duplicated = Expression.binary_op(
+        "INT_SUB",
+        Expression.parameter("p", 0, size=4),
+        Expression.parameter("p", 0, size=4),
+    )
+
+    assert structural.structural_equals(shared, duplicated) is True
+    assert structural.structural_identity_digest(shared) == (
+        structural.structural_identity_digest(duplicated)
+    )
+    # 表現（graph snapshot）の方は共有の仕方を残す — identity ではないので。
+    from scripts.function_tracer_pcode.core.semantic_snapshot import walk_dag
+
+    assert walk_dag(shared).distinct_node_count != walk_dag(duplicated).distinct_node_count
+
+
+def test_identity_digest_is_a_prefilter_for_the_full_comparison():
+    """等価な組では必ず digest も一致する（corpus 全体で確認）。"""
+
+    corpus = _corpus(60)
+    for index, left in enumerate(corpus):
+        for right in corpus[index:]:
+            if not structural.structural_equals(left, right, budget=4096):
+                continue
+            left_digest = structural.structural_identity_digest(left)
+            right_digest = structural.structural_identity_digest(right)
+            if left_digest is None or right_digest is None:
+                continue  # identity が不完全な式は digest を名乗らない
+            assert left_digest == right_digest
 
 
 def test_graph_digest_is_independent_of_object_identity():
