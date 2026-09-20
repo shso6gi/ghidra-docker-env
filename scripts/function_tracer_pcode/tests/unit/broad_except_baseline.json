@@ -2,9 +2,6 @@
   "schema": "broad-except-baseline-v1",
   "entries": {
     "analysis.condition.smt_oracle": {
-      "ConditionSMTOracle._expression_identity_key": {"logged": 0, "unlogged": 1},
-      "ConditionSMTOracle._runtime_ref_identity": {"logged": 0, "unlogged": 2},
-      "ConditionSMTOracle._runtime_ref_is_parameter_ref": {"logged": 0, "unlogged": 2},
       "ConditionSMTOracle.conjunction_is_unsat": {"logged": 0, "unlogged": 1},
       "ConditionSMTOracle.has_object_identity_support": {"logged": 0, "unlogged": 1},
       "ConditionSMTOracle.is_available": {"logged": 0, "unlogged": 1}
@@ -673,8 +670,6 @@
       "_coerce_expr_to_bool": {"logged": 0, "unlogged": 1}
     },
     "core.render_smt.unknowns": {
-      "_unknown_runtime_identity_key": {"logged": 0, "unlogged": 2},
-      "_unknown_runtime_stable_origin_key": {"logged": 0, "unlogged": 1},
       "global_address_identity": {"logged": 0, "unlogged": 1}
     },
     "core.render_smt.widths": {

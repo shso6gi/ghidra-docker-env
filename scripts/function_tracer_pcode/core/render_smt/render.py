@@ -179,7 +179,22 @@ def expression_to_smt(
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
     float_mode: str = "uf",
 ) -> str:
-    """式を SMT-LIB 文字列へ変換する。"""
+    """式を SMT-LIB 文字列へ変換する。
+
+    SMT 生成は **凍結済みの意味に対してだけ** 行う。渡された式がまだ凍って
+    いなければここで凍らせるので、生成した論理式のもとになった意味があとから
+    書き換わることがない。凍らせられない graph（閉路）は placeholder を入れて
+    続けず、内部不整合として落ちる — 見えていない部分を無視した論理式で
+    EQUIVALENT / NOT_EQUIVALENT を出す方が危険だから。
+
+    凍結は差分的で、すでに凍っている node には入り直さない。symbol 名を
+    差し替えた clone のように新しい node だけが増えた木では、費用はその
+    新しい node の数に比例する。
+    """
+
+    freeze = getattr(expr, "freeze", None)
+    if callable(freeze) and not getattr(expr, "_frozen", False):
+        freeze()
     return _to_smt_internal(
         expr,
         symbol_name_mapping=symbol_name_mapping,

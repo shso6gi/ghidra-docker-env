@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
     PostStateReadRef,
     PostStateValueRef,
 )
+from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
 
 
 GLOBAL_ADDRESS_BITS = 64
@@ -137,48 +138,29 @@ def _iter_expression_nodes(expr) -> List[Any]:
 
 
 def _unknown_runtime_identity_key(expr) -> Tuple[Any, ...]:
-    runtime_ref = getattr(expr, "runtime_ref", None)
-    semantic_key = getattr(runtime_ref, "semantic_key", None)
-    if callable(semantic_key):
-        try:
-            identity = semantic_key()
-        except Exception:
-            identity = None
-        if identity is not None:
-            return ("runtime_ref_semantic", identity)
-    stable_key = getattr(runtime_ref, "stable_key", None)
-    if callable(stable_key):
-        try:
-            identity = stable_key()
-        except Exception:
-            identity = None
-        if identity is not None:
-            stable_origin = _unknown_runtime_stable_origin_key(runtime_ref)
-            if stable_origin is not None:
-                return ("runtime_ref_with_origin", identity, stable_origin)
-            return ("runtime_ref", identity)
+    """unknown symbol の宣言 identity。
+
+    凍結済みの式では runtime_ref の意味 key は凍結時に確定した投影から読む。
+    宣言 identity が生 object の後からの変化で動くと、同じ式に対して別の
+    unknown symbol が宣言されてしまう。
+    """
+
+    projection = semantic_projection(expr)
+    if projection.runtime_semantic_key is not None:
+        return ("runtime_ref_semantic", projection.runtime_semantic_key)
+    if projection.runtime_stable_key is not None:
+        if projection.runtime_stable_origin is not None:
+            return (
+                "runtime_ref_with_origin",
+                projection.runtime_stable_key,
+                projection.runtime_stable_origin,
+            )
+        return ("runtime_ref", projection.runtime_stable_key)
     return (
         "expression_unknown_instance",
         id(expr),
         int(expression_smt_bit_width(expr) or 1),
     )
-
-
-def _unknown_runtime_stable_origin_key(runtime_ref) -> Optional[Tuple[Any, ...]]:
-    origin_kind = getattr(runtime_ref, "origin_kind", None)
-    origin_ref = getattr(runtime_ref, "origin_ref", None)
-    if origin_kind is None or origin_ref is None:
-        return None
-    stable_key = getattr(origin_ref, "stable_key", None)
-    if not callable(stable_key):
-        return None
-    try:
-        origin_key = stable_key()
-    except Exception:
-        return None
-    if origin_key is None:
-        return None
-    return (origin_kind, origin_key)
 
 
 def _unknown_smt_symbol_name(expr) -> str:
