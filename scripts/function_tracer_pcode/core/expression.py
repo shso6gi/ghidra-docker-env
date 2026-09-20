@@ -99,6 +99,7 @@ _FREEZE_STATE_FIELDS = (
     "_snapshot",
     "_local_payload",
     "_structural_hash",
+    "_equivalence_digest",
     "_tree_size",
     "_identity_complete",
 )
@@ -111,7 +112,7 @@ class Expression:
     生存期間は construction → freeze → immutable consumption の 3 段階
     （`core/semantic_freeze.py`）。凍結後に意味 field を書き換えようとすると
     `FrozenExpressionError`（内部バグ）になるので、値を変えたい処理は
-    `clone_with(...)` / `with_semantic_fields(...)` で新しい式を作る。
+    `clone_with(...)` / `derive_with(...)` で新しい式を作る。
     """
     
     # クラス変数: 定数表示形式 ("dec", "hex", "auto")
@@ -123,6 +124,7 @@ class Expression:
     _snapshot: Any = None
     _local_payload: Any = None
     _structural_hash: Optional[bytes] = None
+    _equivalence_digest: Optional[bytes] = None
     _tree_size: Optional[int] = None
     _identity_complete: bool = False
     _recurrence_semantic_key: Any = None
@@ -225,8 +227,9 @@ class Expression:
     def structural_hash(self) -> Optional[bytes]:
         """凍結時に確定した candidate hash（未凍結なら `None`）。
 
-        **候補の絞り込み専用**。等価の確定や digest にそのまま使ってはいけない
-        （`core/structural.py` の `structural_equals` が完全比較を行う）。
+        **候補の絞り込み専用**。等価の確定にも、外へ出す stable identity にも
+        使ってはいけない（前者は `structural_equals`、後者は
+        `structural_identity_digest` が担う）。
         """
 
         return self.__dict__.get("_structural_hash")
@@ -245,23 +248,22 @@ class Expression:
 
         return semantic_projection(self)
 
-    def with_semantic_fields(self, **fields: Any) -> 'Expression':
-        """意味 field を持った式を返す（構築中は自分を、凍結後は新しい式を）。
+    def derive_with(self, **fields: Any) -> 'Expression':
+        """指定した意味 field を持つ **新しい式** を返す。元の式は変えない。
 
-        「construction → freeze → immutable consumption」の lifecycle をそのまま
-        表した API。まだ凍っていない（=まだ誰にも公開していない）式は従来どおり
-        その場で更新し、凍った式は `clone_with(...)` で新しい値を作って **元の式
-        を変えない**。呼び出し側に「この式は凍っているか」を判断させないための
-        入口で、凍結点が増えても call site は変わらない。
+        自分が作ったのではない式（引数で受け取った式、helper が返した式、
+        cache から来た式）へ幅などを書き足す site はこれを使う。凍結の有無で
+        振る舞いを変えない: 未凍結でも複製する。未凍結なら書き換えてよい、に
+        すると「まだ誰も見ていない」という前提が共有 node では成り立たず、
+        同じ式を持つ別の consumer に変更が漏れる。
+
+        自分がその場で作った式（factory の直後に幅を入れる等）はこの API の
+        対象ではない。そちらは構築中なので直接代入してよい。
         """
 
         if not fields:
             return self
-        if self.__dict__.get("_frozen", False):
-            return self.clone_with(**fields)
-        for name, value in fields.items():
-            setattr(self, name, value)
-        return self
+        return self.clone_with(**fields)
     
     @classmethod
     def set_constant_format(cls, fmt: str, threshold: int = 256):

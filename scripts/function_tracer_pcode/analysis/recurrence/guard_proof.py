@@ -1361,7 +1361,7 @@ def _impl__negated_return_region_condition(
             expr = Expression.unary_op("BOOL_NEGATE", expr)
             expr.size = 1
         region_expr = expr if region_expr is None else Expression.binary_op("BOOL_AND", region_expr, expr)
-        region_expr = region_expr.with_semantic_fields(size=1)
+        region_expr = region_expr.derive_with(size=1)
     if region_expr is None:
         return None
     negated = Expression.unary_op("BOOL_NEGATE", self._canonicalize_expression(region_expr))

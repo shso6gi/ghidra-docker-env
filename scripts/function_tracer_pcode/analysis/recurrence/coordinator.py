@@ -900,7 +900,7 @@ def _impl__build_parity_split_loop_value(
         first_even = Expression.binary_op("INT_ADD", start_expr, one)
         first_odd = start_expr
     n_even, n_odd, first_even, first_odd = (
-        item.with_semantic_fields(size=size)
+        item.derive_with(size=size)
         for item in (n_even, n_odd, first_even, first_odd)
     )
 
@@ -1252,7 +1252,7 @@ def _impl__triangular(self, expr: Expression, size: int, shift_amount: Expressio
 def _impl__zero_extend_bitpattern(self, expr: Expression, target_size: int) -> Expression:
     source_size = expr.size or 0
     if source_size <= 0 or source_size >= target_size:
-        copied = expr.with_semantic_fields(size=max(source_size, target_size))
+        copied = expr.derive_with(size=max(source_size, target_size))
         if source_size > target_size:
             return self._truncate_to_width(copied, target_size)
         return copied
@@ -1263,7 +1263,7 @@ def _impl__zero_extend_bitpattern(self, expr: Expression, target_size: int) -> E
 
 def _impl__truncate_to_width(self, expr: Expression, target_size: int) -> Expression:
     if (expr.size or 0) <= target_size:
-        return expr.with_semantic_fields(size=target_size)
+        return expr.derive_with(size=target_size)
     truncated = Expression.binary_op("SUBPIECE", expr, Expression.constant(0, 4))
     truncated.size = target_size
     return truncated
@@ -1278,7 +1278,7 @@ def _impl__scale_term(
     if factor == 0:
         return None
     if factor == 1:
-        return expr.with_semantic_fields(size=wide_size)
+        return expr.derive_with(size=wide_size)
     if factor == -1:
         negated = Expression.unary_op("INT_2COMP", expr)
         negated.size = wide_size

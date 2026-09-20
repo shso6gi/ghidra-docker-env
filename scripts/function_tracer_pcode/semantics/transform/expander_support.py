@@ -33,8 +33,8 @@ def resized_expanded_values(values, output_size: int):
 
     値そのものは書き換えない。展開値は tracer の cache と同じ式 object を指して
     いることがあり、その場で幅を書き込むと「この演算の出力幅」が cache 側の
-    別の文脈へ漏れてしまう。凍結済みの式なら `with_semantic_fields` が新しい式を
-    作り、構築途中の式なら従来どおりその場で幅が入る。
+    別の文脈へ漏れてしまう（凍結の有無に関わらず）。`derive_with` は常に新しい
+    式を作るので、幅はこの展開値だけに付く。
     """
 
     if not output_size or output_size <= 0:
@@ -44,7 +44,7 @@ def resized_expanded_values(values, output_size: int):
     for expanded in values:
         value = expanded.value
         if getattr(value, "size", 0) == 0:
-            updated = value.with_semantic_fields(size=output_size)
+            updated = value.derive_with(size=output_size)
             if updated is not value:
                 changed = True
                 resized.append(ExpandedValue(updated, expanded.conditions))

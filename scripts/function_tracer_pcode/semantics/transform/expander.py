@@ -328,7 +328,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
 
         current_size = getattr(value, "size", 0) or 0
         if current_size <= 0:
-            return value.with_semantic_fields(size=output_size)
+            return value.derive_with(size=output_size)
 
         if current_size == output_size:
             return value
@@ -405,7 +405,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
             value = self.tracer.trace_varnode(varnode, depth, use_cache=False)
             # サイズを確実に設定
             if value.size == 0:
-                value = value.with_semantic_fields(size=varnode_size)
+                value = value.derive_with(size=varnode_size)
             return [ExpandedValue(value, conditions)]
         
         mnemonic = def_op.getMnemonic()
@@ -424,7 +424,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                     # サイズを確実に設定
                     value = ev.value
                     if value.size == 0:
-                        value = value.with_semantic_fields(size=varnode_size)
+                        value = value.derive_with(size=varnode_size)
                     result.append(ExpandedValue(value, combined_conditions))
             return result if result else [ExpandedValue(Expression.unknown("nested_phi_fail"), conditions)]
         
@@ -823,7 +823,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
         ):
             return branch_sensitive_observed
         if output_size > 0 and getattr(canonicalized, "size", 0) == 0:
-            canonicalized = canonicalized.with_semantic_fields(size=output_size)
+            canonicalized = canonicalized.derive_with(size=output_size)
         return canonicalized
     
     def _expand_input_operation(
@@ -900,7 +900,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                 value = self._canonicalize_traced_expression(value, conditions)
                 # 出力サイズを設定
                 if value.size == 0 and output_size > 0:
-                    value = value.with_semantic_fields(size=output_size)
+                    value = value.derive_with(size=output_size)
                 return [ExpandedValue(value, conditions)]
 
         self._debug_print("  Recursive expansion target found in inputs, expanding recursively", depth)

@@ -1908,7 +1908,7 @@ def _impl__unroll_counted_state_transition_value(
         return None
     for _ in range(int(iteration_count)):
         value = self._replace_expression_node(transition_expr, state_placeholder, value)
-        value = value.with_semantic_fields(
+        value = value.derive_with(
             size=max(
                 1,
                 int(

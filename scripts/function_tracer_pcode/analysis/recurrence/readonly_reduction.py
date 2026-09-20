@@ -4346,7 +4346,7 @@ def _impl__build_readonly_reduction_expression_from_terms(
         components.append(Expression.constant(normalized_bias, size=max(1, int(result_size or 0))))
     expr = self._sum_expression_terms(components)
     if expr is not None:
-        expr = expr.with_semantic_fields(size=max(1, int(result_size or 0)))
+        expr = expr.derive_with(size=max(1, int(result_size or 0)))
     return expr
 
 

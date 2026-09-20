@@ -145,21 +145,53 @@ def test_deepcopy_thaws_the_copy_without_touching_the_source():
 # ---------------------------------------------------------------------------
 
 
-def test_with_semantic_fields_updates_in_place_before_freeze():
-    expr = Expression.parameter("a", 0, size=0)
-    updated = expr.with_semantic_fields(size=4)
-    assert updated is expr
-    assert expr.size == 4
+@pytest.mark.parametrize("freeze_first", [False, True])
+def test_derive_with_always_returns_a_new_expression(freeze_first):
+    """凍結の有無で振る舞いを変えない。未凍結でも元の式は動かない。"""
 
-
-def test_with_semantic_fields_derives_a_new_value_after_freeze():
     expr = Expression.parameter("a", 0, size=0)
-    expr.freeze()
-    updated = expr.with_semantic_fields(size=4)
+    if freeze_first:
+        expr.freeze()
+    updated = expr.derive_with(size=4)
     assert updated is not expr
     assert updated.size == 4
     assert expr.size == 0
     assert updated.is_frozen is False
+
+
+def test_two_owners_of_an_unfrozen_expression_do_not_see_each_others_width():
+    """共有された未凍結の式に、片方の文脈の幅が漏れない。
+
+    展開値や trace cache は同じ式 object を複数の文脈から指すことがある。
+    「まだ凍っていないから書き換えてよい」にすると、この漏れが起きる。
+    """
+
+    shared = Expression.parameter("a", 0, size=0)
+    owner_a_value = shared
+    owner_b_value = shared
+
+    owner_a_value = owner_a_value.derive_with(size=4)
+
+    assert owner_a_value.size == 4
+    assert owner_b_value.size == 0
+    assert shared.size == 0
+    assert owner_a_value is not shared
+
+
+def test_a_shared_expansion_value_is_not_resized_for_other_consumers():
+    """実際の site（展開値の幅合わせ）でも共有元が動かないこと。"""
+
+    from scripts.function_tracer_pcode.semantics.transform.expander_support import (
+        ExpandedValue,
+        resized_expanded_values,
+    )
+
+    shared = Expression.parameter("a", 0, size=0)
+    values = [ExpandedValue(shared, []), ExpandedValue(shared, [])]
+    resized = resized_expanded_values(values, 4)
+
+    assert [item.value.size for item in resized] == [4, 4]
+    assert shared.size == 0, "the shared expression must not be widened in place"
 
 
 MUTATION_SITES = [
@@ -190,7 +222,7 @@ MUTATION_SITES = [
 _FRESH_CALLS = frozenset(
     {
         "constant", "parameter", "variable", "binary_op", "unary_op", "call",
-        "intrinsic", "memory", "phi", "unknown", "clone_with", "with_semantic_fields",
+        "intrinsic", "memory", "phi", "unknown", "clone_with", "derive_with",
         "deepcopy",
     }
 )
@@ -222,7 +254,7 @@ def test_no_shared_object_mutation_site_assigns_semantic_fields_directly():
 
     ここに並ぶのは「引数や helper の戻り値（= 他所と共有され得る式）へ幅などを
     書き足していた」関数。凍結済みの式が来ると内部バグになるので、値を作り直す
-    入口（`with_semantic_fields` / `clone_with`）を通すよう直してある。
+    入口（`derive_with` / `clone_with`）を通すよう直してある。
 
     その場で作った式（`x = Expression.binary_op(...)` の直後に幅を入れる等）は
     構築中なので対象外。判定は AST で行うので、行が動いただけでは落ちない。
@@ -260,7 +292,7 @@ def test_no_shared_object_mutation_site_assigns_semantic_fields_directly():
                 )
     assert offenders == [], (
         "these sites still write a semantic field onto an expression they do not own; "
-        "use with_semantic_fields(...) / clone_with(...): " + ", ".join(offenders)
+        "use derive_with(...) / clone_with(...): " + ", ".join(offenders)
     )
 
 

@@ -4,6 +4,7 @@
 from unittest.mock import Mock, patch
 
 from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
+from scripts.function_tracer_pcode.core.structural import structural_equals
 from scripts.function_tracer_pcode.analysis.condition import ConditionTracker
 from scripts.function_tracer_pcode.core import (
     AddressValueRef,
@@ -754,7 +755,11 @@ def test_condition_tracker_refined_branch_dedup_does_not_require_to_string(monke
         condition_simplifier=_Simplifier(),
     )
 
-    assert refined is shared
+    # 共有された値をその場で広げない（Issue #22 PR-22-B）。返るのは同じ意味の
+    # 別の式で、渡した式は動かない。
+    assert refined is not shared
+    assert structural_equals(refined, shared)
+    assert shared.size == 1
 
 
 def test_return_analyzer_expands_non_multiequal_return_for_each_valid_path():
