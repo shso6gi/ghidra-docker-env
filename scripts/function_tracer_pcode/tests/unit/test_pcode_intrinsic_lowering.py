@@ -398,7 +398,7 @@ def test_pairwise_auxiliary_query_uses_fp_logic_for_float_guards():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     a = Expression.parameter("a", index=0, data_type="double", size=8)
     b = Expression.parameter("b", index=1, data_type="double", size=8)
-    condition = Condition(Expression.binary_op("FLOAT_LESS", a, b), False)
+    condition = published(Condition(Expression.binary_op("FLOAT_LESS", a, b), False))
 
     query = strategy._build_intrinsic_equivalence_query(
         a,
@@ -519,7 +519,7 @@ def test_expression_safety_reachability_query_uses_base_fp_logic():
 
     a = Expression.parameter("a", index=0, data_type="double", size=8)
     b = Expression.parameter("b", index=1, data_type="double", size=8)
-    condition = Condition(Expression.binary_op("FLOAT_LESS", a, b), False)
+    condition = published(Condition(Expression.binary_op("FLOAT_LESS", a, b), False))
     checker = ExpressionSafetyChecker(
         solver_runner=FakeRunner(),
         debug_print=lambda *_args, **_kwargs: None,

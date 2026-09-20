@@ -85,8 +85,10 @@ def collect_unknown_smt_declarations(expr) -> List[Tuple[str, int]]:
         elif node.expr_type == expr_kind.UNKNOWN:
             decl = _unknown_smt_declaration(node)
         elif node.expr_type == expr_kind.VARIABLE and projection.declares_variable_symbol:
+            # 宣言名を作るための内部描画。公開入口（`expression_to_smt`）へ
+            # 戻らない — 外から来た式の検査は入口が 1 回だけ行う。
             decl = (
-                node.to_smt(),
+                _to_smt_internal(node),
                 max(1, int(expression_smt_bit_width(node) or 1)),
             )
         if decl is None:
@@ -166,6 +168,7 @@ def _unknown_smt_declaration(expr) -> Tuple[str, int]:
 
 
 # Sibling modules reference each other at call time; import them last to avoid cycles.
+from scripts.function_tracer_pcode.core.render_smt.render import _to_smt_internal
 from scripts.function_tracer_pcode.core.render_smt.widths import (
     expression_smt_bit_width,
 )

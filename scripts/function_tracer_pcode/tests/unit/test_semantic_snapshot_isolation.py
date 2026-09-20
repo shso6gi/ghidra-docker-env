@@ -101,12 +101,12 @@ def test_structural_key_ignores_runtime_ref_mutation_after_freeze():
 
 def test_unknown_declaration_ignores_runtime_ref_mutation_after_freeze():
     expr, ref = _unknown_expression()
-    expr.freeze()
+    published(expr)
     before = collect_unknown_smt_declarations(expr)
-    before_smt = expr.freeze().to_smt()
+    before_smt = expr.to_smt()
     ref.key = ("unknown_source", 999)
     assert collect_unknown_smt_declarations(expr) == before
-    assert expr.freeze().to_smt() == before_smt
+    assert expr.to_smt() == before_smt
 
 
 def test_declared_signedness_ignores_data_type_mutation_after_freeze():
@@ -250,10 +250,10 @@ def rendering_corpus():
 def test_freeze_does_not_change_to_string_or_to_smt(rendering_corpus):
     for expr in rendering_corpus:
         before_string = expr.to_string()
-        before_smt = expr.freeze().to_smt()
+        before_smt = published(expr).to_smt()
         expr.freeze()
         assert expr.to_string() == before_string
-        assert expr.freeze().to_smt() == before_smt
+        assert expr.to_smt() == before_smt
 
 
 def test_freeze_does_not_change_to_string_for_intrinsics():
@@ -275,7 +275,7 @@ def test_condition_rendering_is_unchanged_by_freeze():
         negated=True,
     )
     assert condition.to_string() == "(not (a < 1))"
-    assert condition.to_smt().startswith("(not ")
+    assert published(condition).to_smt().startswith("(not ")
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.proof.ub.constraints import UbConstraintBuilder
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def _param(name, size=4):
@@ -35,11 +36,14 @@ def _mul(left, right):
 
 
 def _analysis(returns, params):
-    return FunctionReturnAnalysis(
-        function_name="snippet",
-        entry_point="0x1000",
-        parameters=[{"name": p.original_name, "size": p.bit_width // 8, "index": p.index, "is_signed": p.is_signed} for p in params],
-        returns=returns,
+    # test がこの解析の producer。組み立て終えたここで公開する。
+    return published(
+        FunctionReturnAnalysis(
+            function_name="snippet",
+            entry_point="0x1000",
+            parameters=[{"name": p.original_name, "size": p.bit_width // 8, "index": p.index, "is_signed": p.is_signed} for p in params],
+            returns=returns,
+        )
     )
 
 

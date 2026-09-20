@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.core.structural import structural_equals
 from scripts.function_tracer_pcode.analysis.condition import ConditionTracker
+from scripts.function_tracer_pcode.tests.unit._publication import published
 from scripts.function_tracer_pcode.core import (
     AddressValueRef,
     CanonicalLocation,
@@ -927,7 +928,7 @@ def test_expression_expander_prunes_multiequal_paths_that_become_contradictory_a
     )
 
     assert len(expanded) == 1
-    assert expanded[0].value.to_smt() == "(_ bv7 32)"
+    assert published(expanded[0].value).to_smt() == "(_ bv7 32)"
     assert [cond.to_string() for cond in expanded[0].conditions] == ["(param_1 == 0)"]
 
 

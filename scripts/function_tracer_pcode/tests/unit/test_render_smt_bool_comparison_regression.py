@@ -669,8 +669,8 @@ def test_condition_to_smt_coerces_bitvector_conditions_to_bool():
     low_byte = _binary("SUBPIECE", _param("param_1", size=4), _const(0, size=4))
     low_byte.size = 1
 
-    assert Condition(low_byte).to_smt() == "(not (= ((_ extract 7 0) param_1) (_ bv0 8)))"
-    assert Condition(low_byte, True).to_smt() == (
+    assert published(Condition(low_byte)).to_smt() == "(not (= ((_ extract 7 0) param_1) (_ bv0 8)))"
+    assert published(Condition(low_byte, True)).to_smt() == (
         "(not (not (= ((_ extract 7 0) param_1) (_ bv0 8))))"
     )
 

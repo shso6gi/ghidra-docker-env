@@ -13,6 +13,7 @@ from typing import Any, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
+from scripts.function_tracer_pcode.core.semantic_lifecycle import is_validated
 from scripts.function_tracer_pcode.core.semantic_projection import (
     canonical_atom as _atom_key,
 )
@@ -698,13 +699,18 @@ _validate = None
 def _validated(expr: Optional[Expression]) -> Optional[Expression]:
     """identity API の入口で graph を検証する（`core/semantic_freeze.py` が owner）。
 
-    「凍結済み = 検証済み」なので、凍結済みなら費用ゼロ。未凍結なら凍らせる
-    ことで検証し、閉路はそこで typed failure になる。ここで各 API ごとに閉路
-    判定を書かないのは、判定が 2 つあると片方だけ直るから。
+    検証済みなら費用ゼロ。未検証なら凍らせることで検証し、閉路はそこで typed
+    failure になる。ここで各 API ごとに閉路判定を書かないのは、判定が 2 つある
+    と片方だけ直るから。
+
+    **identity layer は公開権限を持たない**。ここで進めるのは VALIDATED まで
+    で、`publish` にも `mark_published` にも触れない（`test_architecture_
+    boundaries.py` が固定している）。candidate hash を取っただけの精錬中の値が
+    solver へ渡せるようになってはいけない。
     """
 
     global _validate
-    if expr is None or expr.__dict__.get("_frozen", False):
+    if expr is None or is_validated(expr):
         return expr
     if _validate is None:
         from scripts.function_tracer_pcode.core.semantic_freeze import validated

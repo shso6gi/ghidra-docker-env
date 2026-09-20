@@ -1,6 +1,7 @@
 from scripts.function_tracer_pcode.tests.unit._recurrence_fixtures import *
 from scripts.function_tracer_pcode.analysis.recurrence import state_transition as state_transition_1
 from scripts.function_tracer_pcode.analysis.recurrence.models import StateTransitionLoopModel
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def test_small_modulus_state_transition_lowers_bitand_delta_to_residue_summary():
@@ -149,7 +150,7 @@ def test_state_transition_loop_summary_recovers_branch_driven_trip_count():
     loop_case = next(ret for ret in summarized_returns if ret.value.expr_type == ExpressionType.INTRINSIC)
     assert loop_case.value.opcode == STATE_TRANSITION_LOOP_COUNT_OPCODE
     assert isinstance(loop_case.value.runtime_ref, StateTransitionLoopSummaryRef)
-    loop_smt = expression_to_smt(loop_case.value)
+    loop_smt = expression_to_smt(published(loop_case.value))
     assert "rt_state_transition_loop_count_" in loop_smt
     assert "rtunk_" not in loop_smt
 
@@ -182,7 +183,7 @@ def test_state_transition_loop_summary_preserves_nonzero_accumulator_seed():
     positive_case = next(ret for ret in summarized_returns if ret.conditions[0].negated is False)
     assert base_case.value.structural_key() == _const(5).structural_key()
     assert expression_has_unresolved_value(positive_case.value) is False
-    positive_smt = expression_to_smt(positive_case.value)
+    positive_smt = expression_to_smt(published(positive_case.value))
     assert "rt_state_transition_loop_count_" in positive_smt
     assert "(bvadd (_ bv5 32)" in positive_smt
 
@@ -236,7 +237,7 @@ def test_state_transition_loop_summary_recovers_state_affine_accumulator_sum():
     assert positive_case.conditions[0].to_string() == "(0 < param_1)"
     assert expression_has_unresolved_value(positive_case.value) is False
     assert positive_case.value.expr_type != ExpressionType.INTRINSIC
-    positive_smt = expression_to_smt(positive_case.value)
+    positive_smt = expression_to_smt(published(positive_case.value))
     assert "rt_state_transition_loop_count_" not in positive_smt
     assert "zero_extend" in positive_smt
     assert "(bvmul ((_ zero_extend" in positive_smt
@@ -281,7 +282,7 @@ def test_state_transition_loop_summary_recovers_progress_guarded_unit_step():
     ]
     assert positive_case.value.structural_key() == _param("param_2").structural_key()
     assert expression_has_unresolved_value(positive_case.value) is False
-    positive_smt = expression_to_smt(positive_case.value)
+    positive_smt = expression_to_smt(published(positive_case.value))
     assert "rt_state_transition_loop_count_" not in positive_smt
     assert "rtunk_" not in positive_smt
 
@@ -1118,7 +1119,7 @@ def test_state_transition_loop_summary_recovers_latch_exit_decrement_sum_without
     assert positive_case.conditions[0].to_string() == "(0 < param_1)"
     assert expression_has_unresolved_value(positive_case.value) is False
     assert positive_case.value.expr_type != ExpressionType.INTRINSIC
-    positive_smt = expression_to_smt(positive_case.value)
+    positive_smt = expression_to_smt(published(positive_case.value))
     assert "rt_state_transition_loop_count_" not in positive_smt
     assert "(bvmul (bvsub param_1 (_ bv1 32)) (bvsub param_1 (_ bv1 32)))" in positive_smt
     assert "bvlshr" in positive_smt

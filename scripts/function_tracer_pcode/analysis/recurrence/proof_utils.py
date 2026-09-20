@@ -469,8 +469,11 @@ def _impl__render_summary_auxiliary_smt(
             if cloned_expr is None:
                 return None
             # 差し替えの組み立て完了点。以後手は入らない。
-            publish(cloned_expr)
-            return Condition(cloned_expr, bool(getattr(node, "negated", False))).to_smt()
+            # 条件も 1 つの意味値。式だけ公開しても、包んだ条件は別 object
+            # なので producer が宣言し直す必要がある。
+            return publish(
+                Condition(cloned_expr, bool(getattr(node, "negated", False)))
+            ).to_smt()
         if isinstance(node, Expression):
             cloned_expr = self._clone_summary_expression_for_smt(node, identity_to_spec)
             if cloned_expr is None:

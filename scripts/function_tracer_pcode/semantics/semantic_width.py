@@ -17,6 +17,7 @@ from scripts.function_tracer_pcode.core import (
     StorageInfo,
 )
 from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
+from scripts.function_tracer_pcode.core.semantic_freeze import publish_semantic_values
 from scripts.function_tracer_pcode.core.analysis import derive_memory_effect_bit_width
 from scripts.function_tracer_pcode.semantics.param_semantics import (
     ParameterSemanticHint,
@@ -698,10 +699,16 @@ def normalize_analysis_semantic_width(
     fragment_infos_by_name = _build_fragment_info_map(fragment_infos)
 
     normalizer = SemanticWidthNormalizer(hints_by_identity, fragment_infos_by_name)
-    return _rewrite_analysis_expressions(
-        analysis,
-        normalizer.rewrite_expression,
-        simplify_conditions=True,
+    # **この関数の出口が公開点**。`_rewrite_analysis_expressions` は途中段
+    # （`_synchronize_parameter_expression_metadata`）でも使う書き換えの「手順」
+    # なので、そちらで公開すると、まだ幅を直している最中の値を確定扱いにして
+    # しまう。完成を宣言できるのは、書き換えを全部終えたここだけ。
+    return publish_semantic_values(
+        _rewrite_analysis_expressions(
+            analysis,
+            normalizer.rewrite_expression,
+            simplify_conditions=True,
+        )
     )
 
 

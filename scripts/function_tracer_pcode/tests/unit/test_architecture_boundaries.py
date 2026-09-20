@@ -17,6 +17,9 @@ PR-22-B が置く境界:
 * `core/runtime_refs/` の ref は **frozen な value object**。凍結後の consumer が
   ref の構造を辿ってよいのは、これが型で保証されているから。
 * 閉路の判定は 1 実装（`traverse_semantic_graph`）。identity API ごとに書かない。
+* **公開（producer の宣言）を成立させられるのは公開境界だけ**。identity /
+  表現 / 投影 / renderer は検証（`validated`）までしか進められない。1 bit で
+  兼ねていると、candidate hash を 1 回取っただけで solver へ渡せる値になる。
 * **loop lowering の意味は `core/loop_lowering_semantics.py` が所有**。SMT
   renderer は loop summary ref の schema（class も field 名も）を知らず、
   凍結済みの `LoopLoweringSemantics` だけを読む。厳密 lowering の可否は健全性
@@ -61,6 +64,26 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
     "core/semantic_snapshot.py": (
         # 責務の逆転（表現が identity の private helper を借りる）を禁じる。
         "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "os",
+    ),
+    "core/semantic_lifecycle.py": (
+        # 状態の定義は何にも依存しない（式も条件も知らない duck typing）。
+        "scripts.function_tracer_pcode.core.expression",
+        "scripts.function_tracer_pcode.core.condition",
+        "scripts.function_tracer_pcode.core.semantic_freeze",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.semantic_projection",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.analysis",
+        "scripts.function_tracer_pcode.semantics",
+        "scripts.function_tracer_pcode.proof",
         "scripts.function_tracer_pcode.authority",
         "scripts.function_tracer_pcode.checker",
         "scripts.function_tracer_pcode.cli",
@@ -155,6 +178,32 @@ _RAW_PROJECTION_OWNER = "core/semantic_projection.py"
 
 #: 閉路を「受理しない」と決めてよい唯一の module（走査そのものを持つ側）。
 _CYCLE_JUDGEMENT_OWNER = "core/semantic_snapshot.py"
+
+#: producer の宣言（PUBLISHED）を成立させてよい唯一の module。
+_PUBLICATION_OWNER = "core/semantic_freeze.py"
+#: 公開を成立させる名前。呼ぶ / import するだけで公開権限を持つことになる。
+_PUBLICATION_NAMES = frozenset(
+    {
+        "publish",
+        "publish_expression",
+        "publish_condition",
+        "publish_semantic_values",
+        "mark_published",
+    }
+)
+#: 凍結済みの意味を読む側 + 状態を定義する側。ここが公開を成立させてはいけない。
+_PUBLICATION_FREE_MODULES = (
+    "core/structural.py",
+    "core/semantic_snapshot.py",
+    "core/semantic_projection.py",
+    "core/semantic_lifecycle.py",
+    "core/loop_lowering_semantics.py",
+    "core/render_smt/render.py",
+    "core/render_smt/widths.py",
+    "core/render_smt/unknowns.py",
+    "core/render_smt/loop_lowering.py",
+    "core/render_smt/intrinsics.py",
+)
 
 #: loop lowering の意味を決めてよい唯一の module。
 _LOWERING_SEMANTICS_OWNER = "core/loop_lowering_semantics.py"
@@ -550,3 +599,94 @@ def test_only_the_lowering_owner_classifies_loop_summary_refs():
                 if name in ref_names:
                     offenders.append(f"{relative}:{node.lineno} classifies {name}")
     assert offenders == [], offenders
+
+
+@pytest.mark.parametrize("module_path", _PUBLICATION_FREE_MODULES)
+def test_identity_and_consumers_cannot_publish(module_path):
+    """identity / 表現 / renderer は producer の宣言を成立させられない。
+
+    `validated()` が「未検証なら凍らせる」のは identity の計算可能性のためで、
+    producer の宣言ではない。同じ場所が公開もできると、candidate hash を 1 回
+    取っただけの精錬中の値が solver へ渡せるようになる（この PR の blocker）。
+    """
+
+    path = PACKAGE_ROOT / module_path
+    assert path.exists(), module_path
+    offenders = []
+    for name, lineno in _imported_names(_parse(path)):
+        if name in _PUBLICATION_NAMES:
+            offenders.append(f"{module_path}:{lineno} imports {name}")
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        called = None
+        if isinstance(func, ast.Name):
+            called = func.id
+        elif isinstance(func, ast.Attribute):
+            called = func.attr
+        if called in _PUBLICATION_NAMES:
+            offenders.append(f"{module_path}:{node.lineno} calls {called}()")
+    assert offenders == [], offenders
+
+
+def test_only_the_publication_owner_marks_a_value_published():
+    """`mark_published` を呼ぶ module は 1 つだけ。"""
+
+    callers = set()
+    for path in _module_files():
+        for node in ast.walk(_parse(path)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            called = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            if called == "mark_published":
+                callers.add(_relative(path))
+    assert callers == {_PUBLICATION_OWNER}, callers
+
+
+def test_the_lifecycle_state_is_owned_by_one_module():
+    """状態 field を直接書く場所を増やさない。
+
+    `_frozen` / `_published` を各所で読み書きすると、「published は validated を
+    含む」のような不変条件が module ごとに解釈される。読み書きの規則は
+    `core/semantic_lifecycle.py` に集め、他の module は名前付きの述語を使う。
+    """
+
+    from scripts.function_tracer_pcode.core import semantic_lifecycle as owner
+
+    state_fields = set(owner.LIFECYCLE_STATE_FIELDS)
+    assert state_fields == {"_frozen", "_published"}
+
+    allowed = {
+        _PUBLICATION_OWNER,
+        "core/semantic_lifecycle.py",
+        # carrier は class 既定値としてだけ持つ（下の assert で形を固定する）。
+        "core/expression.py",
+        "core/condition.py",
+    }
+    offenders = []
+    for path in _module_files():
+        relative = _relative(path)
+        if relative in allowed:
+            continue
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.Constant) and node.value in state_fields:
+                offenders.append(f"{relative}:{node.lineno} names {node.value!r}")
+    assert offenders == [], offenders
+
+
+def test_publication_implies_validation_by_construction():
+    """`_published` 単独では PUBLISHED にならない（表現の側で閉じている）。"""
+
+    from scripts.function_tracer_pcode.core.semantic_lifecycle import (
+        SemanticLifecycle,
+        state_of,
+    )
+
+    assert state_of({}) is SemanticLifecycle.CONSTRUCTION
+    assert state_of({"_published": True}) is SemanticLifecycle.CONSTRUCTION
+    assert state_of({"_frozen": True}) is SemanticLifecycle.VALIDATED
+    assert (
+        state_of({"_frozen": True, "_published": True}) is SemanticLifecycle.PUBLISHED
+    )

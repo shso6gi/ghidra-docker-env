@@ -5,9 +5,10 @@
 （solver renderer / identity）へ渡す。式を自分で組み立てて renderer へ渡す test
 は、その producer の役をしているので、同じ宣言を通す。
 
-`expr.freeze()` を直接書かずにこれを使うのは、call site で「凍らせている」では
-なく「公開している」と読めるようにするため — 凍結は公開の実装手段であって、
-test がやりたいことではない。
+`expr.freeze()` では代わりにならない。凍結は「閉路が無く意味が確定した」ことしか
+言っておらず、producer の宣言ではないので、凍らせただけの値は solver renderer に
+拒否される（`core/semantic_lifecycle.py`）。ここを通すのは、test が producer の役を
+していることを call site で読めるようにするため。
 """
 
 from __future__ import annotations

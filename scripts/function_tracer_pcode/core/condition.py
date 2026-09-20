@@ -5,6 +5,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Mapping
 
+from scripts.function_tracer_pcode.core.semantic_lifecycle import (
+    SemanticLifecycle,
+    state_of,
+)
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 
 if TYPE_CHECKING:
@@ -15,6 +19,7 @@ if TYPE_CHECKING:
 SEMANTIC_FIELDS = frozenset({"expression", "negated"})
 
 _freeze_condition = None
+_publish_condition = None
 
 
 def _freeze(condition: "Condition") -> None:
@@ -30,16 +35,34 @@ def _freeze(condition: "Condition") -> None:
     _freeze_condition(condition)
 
 
+def _publish(condition: "Condition") -> "Condition":
+    """条件を公開する（`core/semantic_freeze.py` を遅延解決して呼ぶ）。"""
+
+    global _publish_condition
+    if _publish_condition is None:
+        from scripts.function_tracer_pcode.core.semantic_freeze import (
+            publish_condition as _resolved,
+        )
+
+        _publish_condition = _resolved
+    return _publish_condition(condition)
+
+
 class Condition:
     """条件式を表現するクラス
 
-    `Condition` は **構築と同時に凍結される**。条件は「この式がこの向きで成り
-    立つ」という 1 つの意味の単位で、後から式や向きを差し替えられると、その
+    `Condition` は **構築と同時に検証・凍結される**。条件は「この式がこの向きで
+    成り立つ」という 1 つの意味の単位で、後から式や向きを差し替えられると、その
     条件を key にした cache・dedup・PHI の branch がすべて意味を変えてしまう。
     向きを変えたいときは `negate()` が新しい条件を返す。
+
+    凍結は **公開ではない**（`core/semantic_lifecycle.py`）。式と同じく、solver
+    へ渡せるのは producer が `publish()` で宣言したものだけ。`negate()` が返す
+    新しい条件も CONSTRUCTION から始まる。
     """
 
     _frozen: bool = False
+    _published: bool = False
 
     def __init__(self, expression: Optional["Expression"], negated: bool = False):
         if expression is None:
@@ -58,11 +81,39 @@ class Condition:
         object.__setattr__(self, name, value)
 
     @property
+    def lifecycle(self) -> SemanticLifecycle:
+        """今どの段階に居るか（`core/semantic_lifecycle.py` が定義）。"""
+
+        return state_of(self.__dict__)
+
+    @property
     def is_frozen(self) -> bool:
-        return bool(self.__dict__.get("_frozen", False))
+        """検証済みか。公開済みかは問わない。"""
+
+        return self.lifecycle >= SemanticLifecycle.VALIDATED
+
+    @property
+    def is_published(self) -> bool:
+        """producer が完成を宣言済みか。"""
+
+        return self.lifecycle is SemanticLifecycle.PUBLISHED
 
     def negate(self) -> "Condition":
-        return Condition(self.expression, not self.negated)
+        """向きを反転した **新しい条件**。
+
+        公開済みの条件を反転したものは公開済みで始まる。条件には「あとで仕上げ
+        る」段階が無く（構築と同時に凍結される）、反転は同じ確定済みの式の向き
+        を変えただけなので、producer が宣言し直すものが何も残らない。
+
+        式の複製（`clone_with` / `derive_with` / `deepcopy`）が公開を引き継が
+        ないのとは事情が違う: あちらは **これから仕上げる材料** で、仕上げた
+        結果を宣言できるのは作った側だけ。
+        """
+
+        negated = Condition(self.expression, not self.negated)
+        if self.is_published:
+            _publish(negated)
+        return negated
 
     def to_string(self) -> str:
         expr_str = self.expression.to_string()
@@ -76,16 +127,15 @@ class Condition:
         symbol_name_mapping: Optional[Mapping[str, str]] = None,
         float_mode: str = "uf",
     ) -> str:
-        from scripts.function_tracer_pcode.core.render_smt import _coerce_expr_to_bool
+        """solver へ渡す SMT-LIB 文字列（公開済みの条件だけ受け取る）。"""
 
-        expr_smt = self.expression.to_smt(
+        from scripts.function_tracer_pcode.core.render_smt import condition_to_smt
+
+        return condition_to_smt(
+            self,
             symbol_name_mapping=symbol_name_mapping,
             float_mode=float_mode,
         )
-        expr_smt = _coerce_expr_to_bool(self.expression, expr_smt)
-        if self.negated:
-            return f"(not {expr_smt})"
-        return expr_smt
 
     def __eq__(self, other: Any) -> bool:
         if not isinstance(other, Condition):

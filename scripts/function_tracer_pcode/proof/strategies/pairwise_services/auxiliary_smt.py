@@ -639,8 +639,11 @@ def _impl__render_auxiliary_smt(
             return None
         # 差し替えの組み立てはここで終わり。以後この式に手は入らないので、
         # **完了点として** 公開する（描画するから公開するのではない）。
-        publish(cloned_expr)
-        return Condition(cloned_expr, bool(getattr(node, "negated", False))).to_smt(float_mode="fp")
+        # 条件も 1 つの意味値。式だけ公開しても、包んだ条件は別 object なので
+        # producer が宣言し直す必要がある。
+        return publish(
+            Condition(cloned_expr, bool(getattr(node, "negated", False)))
+        ).to_smt(float_mode="fp")
     if isinstance(node, Expression):
         cloned_expr = self._clone_auxiliary_expression_for_smt(
             node,

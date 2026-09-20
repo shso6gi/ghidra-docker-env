@@ -5,6 +5,11 @@ from enum import Enum, auto
 from typing import List, NamedTuple, Optional, Any, Dict, Set, Mapping
 from dataclasses import is_dataclass, fields
 
+from scripts.function_tracer_pcode.core.semantic_lifecycle import (
+    LIFECYCLE_STATE_FIELDS,
+    SemanticLifecycle,
+    state_of,
+)
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.render_python import (
     expression_to_string,
@@ -93,9 +98,8 @@ SEMANTIC_FIELDS = frozenset({
     "_recurrence_semantic_key",
 })
 
-#: 凍結そのものを表す内部 field（deepcopy では引き継がない）。
-_FREEZE_STATE_FIELDS = (
-    "_frozen",
+#: 凍結時に確定する派生値（deepcopy では引き継がない）。
+_DERIVED_FREEZE_FIELDS = (
     "_snapshot",
     "_local_payload",
     "_structural_hash",
@@ -103,6 +107,10 @@ _FREEZE_STATE_FIELDS = (
     "_tree_size",
     "_identity_complete",
 )
+
+#: 複製が引き継がない内部 field = 状態（`LIFECYCLE_STATE_FIELDS`）+ 派生値。
+#: 状態の一覧を自分で書かないのは、`core/semantic_lifecycle.py` が owner だから。
+_FREEZE_STATE_FIELDS = tuple(LIFECYCLE_STATE_FIELDS) + _DERIVED_FREEZE_FIELDS
 
 
 class Expression:
@@ -119,8 +127,11 @@ class Expression:
     _constant_format: str = "dec"
     _hex_threshold: int = 256
 
-    #: 凍結状態の既定値（instance が持たない限りこれが読まれる）。
+    #: lifecycle 状態の既定値（instance が持たない限りこれが読まれる）。
+    #: 意味は `core/semantic_lifecycle.py` が決める: `_frozen` = 検証済み、
+    #: `_published` = producer が完成を宣言済み（`_frozen` を含む）。
     _frozen: bool = False
+    _published: bool = False
     _snapshot: Any = None
     _local_payload: Any = None
     _structural_hash: Optional[bytes] = None
@@ -212,7 +223,13 @@ class Expression:
     # -- freeze 境界 --------------------------------------------------------
 
     def freeze(self) -> 'Expression':
-        """式 graph を凍結して自分を返す（冪等）。"""
+        """式 graph を検証して凍結し、自分を返す（冪等）。
+
+        **これは公開ではない**。凍結は「閉路が無く、意味が immutable snapshot
+        として確定した」ことしか言っておらず、作った側が「完成した」と宣言した
+        ことにはならない。solver へ渡せる値にするのは
+        `core/semantic_freeze.publish()` だけ。
+        """
 
         if self.__dict__.get("_frozen", False):
             return self
@@ -221,8 +238,22 @@ class Expression:
         return freeze_expression(self)
 
     @property
+    def lifecycle(self) -> SemanticLifecycle:
+        """今どの段階に居るか（`core/semantic_lifecycle.py` が定義）。"""
+
+        return state_of(self.__dict__)
+
+    @property
     def is_frozen(self) -> bool:
-        return bool(self.__dict__.get("_frozen", False))
+        """検証済み（immutable snapshot 確定済み）か。公開済みかは問わない。"""
+
+        return self.lifecycle >= SemanticLifecycle.VALIDATED
+
+    @property
+    def is_published(self) -> bool:
+        """producer が完成を宣言済みか。solver へ渡せるのはこれだけ。"""
+
+        return self.lifecycle is SemanticLifecycle.PUBLISHED
 
     def structural_hash(self) -> Optional[bytes]:
         """凍結時に確定した candidate hash（未凍結なら `None`）。
@@ -259,6 +290,9 @@ class Expression:
 
         自分がその場で作った式（factory の直後に幅を入れる等）はこの API の
         対象ではない。そちらは構築中なので直接代入してよい。
+
+        できた式は **CONSTRUCTION から始まる**（元が公開済みでも引き継がない）。
+        精緻化した値は別の値なので、その完成を宣言できるのは作った側だけ。
         """
 
         if not fields:
