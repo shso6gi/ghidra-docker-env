@@ -10,8 +10,8 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
     CountedLoopSummaryRef,
     ReadonlyReductionRef,
     StateTransitionLoopSummaryRef,
-    loop_summary_method_b_key,
 )
+from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
 
 
 def _neon_ext_operands_are_smt_supported(expr) -> bool:
@@ -48,62 +48,15 @@ def _readonly_reduction_ref(expr) -> Optional[ReadonlyReductionRef]:
 
 
 def _runtime_ref_smt_identity(expr, runtime_ref):
-    loop_summary = getattr(runtime_ref, "loop_summary", None)
-    if loop_summary is not None:
-        requires_effect_proof = getattr(loop_summary, "requires_effect_proof", None)
-        requires_path_proof = getattr(loop_summary, "requires_path_proof", None)
-        if (
-            (callable(requires_effect_proof) and requires_effect_proof())
-            or (callable(requires_path_proof) and requires_path_proof())
-        ):
-            return (
-                "opaque_loop_summary_identity",
-                type(runtime_ref).__module__,
-                type(runtime_ref).__qualname__,
-                (
-                    "effect_proof_required"
-                    if callable(requires_effect_proof) and requires_effect_proof()
-                    else "path_proof_required"
-                ),
-                id(runtime_ref),
-                id(loop_summary),
-                id(expr),
-            )
-        method_b_key = loop_summary_method_b_key(loop_summary)
-        if method_b_key is not None:
-            return (
-                "loop_summary_method_b_runtime",
-                type(runtime_ref).__module__,
-                type(runtime_ref).__qualname__,
-                ("ref_constant_bias", int(getattr(runtime_ref, "constant_bias", 0) or 0)),
-                method_b_key,
-            )
-        loop_key = loop_summary.stable_key()
-        if loop_key is None:
-            return (
-                "opaque_loop_summary_identity",
-                type(runtime_ref).__module__,
-                type(runtime_ref).__qualname__,
-                "unkeyable",
-                id(runtime_ref),
-                id(loop_summary),
-                id(expr),
-            )
-    semantic_key = getattr(runtime_ref, "semantic_key", None)
-    if callable(semantic_key):
-        identity = semantic_key()
-        if identity is not None:
-            return identity
-    stable_key = getattr(runtime_ref, "stable_key", None)
-    if callable(stable_key):
-        return stable_key()
-    return (
-        "opaque_runtime_ref",
-        type(runtime_ref).__module__,
-        type(runtime_ref).__qualname__,
-        id(runtime_ref),
-        id(expr),
-    )
+    """loop lowering が SMT function 名に使う identity。
+
+    凍結時に確定した投影を読む。生の ref から毎回組み立てると、同じ式に対する
+    SMT function 名が「いつ描画したか」に依存し得る。ref そのもの（`loop_summary`
+    や `transition_expr`）を lowering のために辿るのは従来どおり — あれらは
+    `core/runtime_refs/` の frozen な value object で、後から変わらない。
+    """
+
+    return semantic_projection(expr).runtime_lowering_identity
 
 
 def _readonly_sum_function_name(expr) -> str:

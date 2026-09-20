@@ -669,9 +669,6 @@
     "core.render_smt.render": {
       "_coerce_expr_to_bool": {"logged": 0, "unlogged": 1}
     },
-    "core.render_smt.unknowns": {
-      "global_address_identity": {"logged": 0, "unlogged": 1}
-    },
     "core.render_smt.widths": {
       "_expr_constant_int": {"logged": 0, "unlogged": 1}
     },
@@ -709,10 +706,6 @@
       "process_age_seconds": {"logged": 0, "unlogged": 1}
     },
     "core.structural": {
-      "_atom_key": {"logged": 0, "unlogged": 2},
-      "_expression_storage_key": {"logged": 0, "unlogged": 1},
-      "_raw_stable_key_or_none": {"logged": 0, "unlogged": 1},
-      "_semantic_runtime_ref_key": {"logged": 0, "unlogged": 1},
       "_stable_value_key": {"logged": 0, "unlogged": 1}
     },
     "ghidra.decompilation_broker": {

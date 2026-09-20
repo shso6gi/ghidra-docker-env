@@ -7,12 +7,8 @@ import importlib
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core import Condition
-from scripts.function_tracer_pcode.core.semantic_snapshot import (
-    runtime_is_parameter_ref as _runtime_is_parameter_ref,
-    runtime_semantic_key as _runtime_semantic_key,
-    runtime_stable_key as _runtime_stable_key,
-    semantic_projection,
-)
+from scripts.function_tracer_pcode.core.semantic_projection import project_runtime_ref
+from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
 from scripts.function_tracer_pcode.core.structural import condition_key, key_contains_placeholder
 from scripts.function_tracer_pcode.core.render_smt import (
     CallDeclarationConflict,
@@ -361,24 +357,32 @@ class ConditionSMTOracle:
 
     @classmethod
     def _runtime_ref_identity(cls, runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
-        """生の runtime_ref から identity を作る（未凍結の式・直接呼び出し用）。"""
+        """生の ref から identity を作る（式を持たない直接呼び出し用）。
+
+        生 object を読むのは `core/semantic_projection.py` だけなので、ここでも
+        投影を作ってから同じ規則を適用する。
+        """
 
         if runtime_ref is None:
             return None
-        return cls._runtime_ref_identity_from_parts(
-            semantic_identity=_runtime_semantic_key(runtime_ref),
-            stable_identity=_runtime_stable_key(runtime_ref),
-            parameter_ref=_runtime_is_parameter_ref(runtime_ref),
+        return cls._runtime_ref_identity_from_projection(
+            project_runtime_ref(None, runtime_ref)
         )
 
     @classmethod
     def _runtime_ref_identity_from_projection(cls, projection) -> Optional[Tuple[Any, ...]]:
-        if not projection.has_runtime_ref:
-            return None
+        """投影 1 つから identity を決める（`SemanticSnapshot` でも `RuntimeRefProjection` でも）。"""
+
         return cls._runtime_ref_identity_from_parts(
-            semantic_identity=projection.runtime_semantic_key,
-            stable_identity=projection.runtime_stable_key,
-            parameter_ref=projection.runtime_is_parameter_ref,
+            semantic_identity=projection.runtime_semantic_key
+            if hasattr(projection, "runtime_semantic_key")
+            else projection.semantic_key,
+            stable_identity=projection.runtime_stable_key
+            if hasattr(projection, "runtime_stable_key")
+            else projection.stable_key,
+            parameter_ref=projection.runtime_is_parameter_ref
+            if hasattr(projection, "runtime_is_parameter_ref")
+            else projection.is_parameter_ref,
         )
 
     @classmethod
@@ -403,7 +407,7 @@ class ConditionSMTOracle:
 
     @staticmethod
     def _runtime_ref_is_parameter_ref(runtime_ref: Any) -> bool:
-        return _runtime_is_parameter_ref(runtime_ref)
+        return project_runtime_ref(None, runtime_ref).is_parameter_ref
 
     @classmethod
     def _condition_to_smt(

@@ -9,187 +9,40 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import fields, is_dataclass
 from typing import Any, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
+from scripts.function_tracer_pcode.core.semantic_projection import (
+    canonical_atom as _atom_key,
+)
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
+    COMMUTATIVE_BINARY_OPS,
+    children_are_commutative,
     local_semantic_payload,
     ordered_semantic_edges,
+    semantic_projection,
+    walk_dag,
 )
 
 
 StructuralKey = Tuple[Any, ...]
-COMMUTATIVE_BINARY_OPS = frozenset(
-    {
-        "INT_ADD",
-        "INT_MULT",
-        "INT_AND",
-        "INT_OR",
-        "INT_XOR",
-        "INT_EQUAL",
-        "INT_NOTEQUAL",
-        "BOOL_AND",
-        "BOOL_OR",
-        "BOOL_XOR",
-    }
-)
+#: 可換演算の集合は node の意味なので `semantic_snapshot` が owner。
+#: `expression_key` の正規化がそれを読む（再 export は既存 import のため）。
 WIDTH_ADAPTER_OPS = frozenset({"INT_ZEXT", "INT_SEXT"})
 
 
-def _atom_key(value: Any) -> StructuralKey:
-    if value is None:
-        return ("none", "")
-    if isinstance(value, bool):
-        return ("bool", int(value))
-    if isinstance(value, int):
-        return ("int", value)
-    if isinstance(value, str):
-        return ("str", value)
-    if isinstance(value, bytes):
-        return ("bytes", value.hex())
-    if isinstance(value, tuple):
-        return ("tuple", tuple(_atom_key(item) for item in value))
-    if isinstance(value, list):
-        return ("list", tuple(_atom_key(item) for item in value))
-    if isinstance(value, dict):
-        items = [(_atom_key(key), _atom_key(item)) for key, item in value.items()]
-        items.sort()
-        return ("dict", tuple(items))
-    stable_key = getattr(value, "stable_key", None)
-    if callable(stable_key):
-        try:
-            return ("stable", _atom_key(stable_key()))
-        except Exception:
-            pass
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        try:
-            return ("object_dict", _atom_key(to_dict()))
-        except Exception:
-            pass
-    if is_dataclass(value):
-        return (
-            "dataclass",
-            type(value).__module__,
-            type(value).__qualname__,
-            tuple((field.name, _atom_key(getattr(value, field.name))) for field in fields(value)),
-        )
-    obj_dict = getattr(value, "__dict__", None)
-    if isinstance(obj_dict, dict) and obj_dict:
-        items = [(_atom_key(key), _atom_key(item)) for key, item in obj_dict.items() if not str(key).startswith("_")]
-        items.sort()
-        return (
-            "object_attrs",
-            type(value).__module__,
-            type(value).__qualname__,
-            tuple(items),
-        )
-    return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
-
-
-def _semantic_runtime_ref_key(value: Any) -> Optional[StructuralKey]:
-    """Return a stable key only for runtime refs that expose semantic identity.
-
-    We intentionally ignore arbitrary object attributes here. Debug-only or
-    incidental runtime objects should not perturb structural equality unless
-    they provide an explicit stable semantic key.
-    """
-
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return ("bool", int(value))
-    if isinstance(value, int):
-        return ("int", value)
-    if isinstance(value, str):
-        return ("str", value)
-    if isinstance(value, bytes):
-        return ("bytes", value.hex())
-    if isinstance(value, tuple):
-        items = []
-        for item in value:
-            item_key = _semantic_runtime_ref_key(item)
-            if item_key is None:
-                return None
-            items.append(item_key)
-        return ("tuple", tuple(items))
-    if isinstance(value, list):
-        items = []
-        for item in value:
-            item_key = _semantic_runtime_ref_key(item)
-            if item_key is None:
-                return None
-            items.append(item_key)
-        return ("list", tuple(items))
-    if isinstance(value, dict):
-        items = []
-        for key, item in value.items():
-            key_key = _semantic_runtime_ref_key(key)
-            item_key = _semantic_runtime_ref_key(item)
-            if key_key is None or item_key is None:
-                return None
-            items.append((key_key, item_key))
-        items.sort()
-        return ("dict", tuple(items))
-    stable_key = getattr(value, "stable_key", None)
-    if callable(stable_key):
-        try:
-            return ("stable_runtime_ref", _atom_key(stable_key()))
-        except Exception:
-            return None
-    return None
-
-
-def _frozen_snapshot(expr: Any) -> Any:
-    """凍結済みなら固定済みの意味投影、未凍結なら `None`。
-
-    意味 consumer はまずここを見る。凍結済みなら生 object（`runtime_ref` /
-    `storage_info` / `data_type_obj`）を二度と読まないので、凍結後に生 object を
-    書き換えても structural key も solver query identity も動かない。
-    未凍結のときだけ従来どおりその場で評価する（値も費用も従来と同じ）。
-    """
-
-    return getattr(expr, "_snapshot", None)
-
-
 def _expression_runtime_metadata(expr: Expression) -> tuple[StructuralKey, ...]:
-    snapshot = _frozen_snapshot(expr)
-    if snapshot is not None:
-        runtime_key = snapshot.runtime_structural_key
-    else:
-        runtime_key = _semantic_runtime_ref_key(getattr(expr, "runtime_ref", None))
+    """structural key に載せる runtime ref の意味 key。
+
+    生 object は読まない。`semantic_projection()` は凍結済みなら固定済みの値を、
+    未凍結ならその場で作った値を返す（どちらも pure value）。
+    """
+
+    runtime_key = semantic_projection(expr).runtime_structural_key
     if runtime_key is None:
         return ()
     return (("runtime_ref", runtime_key),)
-
-
-def projected_storage_identity(expr: Any) -> Optional[StructuralKey]:
-    """凍結済みなら snapshot の、未凍結ならその場で作る storage identity。"""
-
-    snapshot = _frozen_snapshot(expr)
-    if snapshot is not None:
-        return snapshot.storage_identity
-    return _expression_storage_key(expr)
-
-
-def projected_parameter_runtime_key(expr: Any) -> Optional[StructuralKey]:
-    """凍結済みなら snapshot の、未凍結ならその場で作る parameter runtime key。"""
-
-    snapshot = _frozen_snapshot(expr)
-    if snapshot is not None:
-        return snapshot.parameter_runtime_key
-    return _parameter_runtime_ref_key(expr)
-
-
-def projected_runtime_stable_key(expr: Any) -> Any:
-    """凍結済みなら snapshot の、未凍結ならその場で作る runtime stable key。"""
-
-    snapshot = _frozen_snapshot(expr)
-    if snapshot is not None:
-        return snapshot.runtime_stable_key
-    return _raw_stable_key_or_none(getattr(expr, "runtime_ref", None))
 
 
 def _is_all_ones_mask_for_size(expr: Optional[Expression], size: int) -> bool:
@@ -514,17 +367,15 @@ def expression_provenance_key(
     if expr is None:
         return ("none",)
 
-    parameter_runtime_key = projected_parameter_runtime_key(expr)
-    if parameter_runtime_key is not None:
-        return ("runtime_ref", parameter_runtime_key)
+    projection = semantic_projection(expr)
+    if projection.parameter_runtime_key is not None:
+        return ("runtime_ref", projection.parameter_runtime_key)
 
-    storage_key = projected_storage_identity(expr)
-    if storage_key is not None:
-        return ("storage", storage_key)
+    if projection.storage_identity is not None:
+        return ("storage", projection.storage_identity)
 
-    runtime_key = projected_runtime_stable_key(expr)
-    if runtime_key is not None:
-        return ("runtime_ref", runtime_key)
+    if projection.runtime_stable_key is not None:
+        return ("runtime_ref", projection.runtime_stable_key)
 
     safe = expression_key_safe(
         expr,
@@ -585,8 +436,8 @@ def _expression_provenance_payload(
                 _expression_descriptor(node),
                 ("value", _stable_value_key(getattr(node, "value", None))),
                 ("data_type", getattr(node, "data_type", None)),
-                ("storage", projected_storage_identity(node)),
-                ("runtime_ref", _projected_semantic_runtime_key(node)),
+                ("storage", semantic_projection(node).storage_identity),
+                ("runtime_ref", semantic_projection(node).runtime_structural_key),
                 ("read_order", getattr(node, "read_order_key", None)),
                 ("opcode", getattr(node, "opcode", None)),
                 ("operands", tuple(operand_digests)),
@@ -669,8 +520,8 @@ def _expression_subtree_digest_and_source_atoms(
                 _expression_descriptor(node),
                 ("value", _stable_value_key(getattr(node, "value", None))),
                 ("data_type", getattr(node, "data_type", None)),
-                ("storage", projected_storage_identity(node)),
-                ("runtime_ref", _projected_semantic_runtime_key(node)),
+                ("storage", semantic_projection(node).storage_identity),
+                ("runtime_ref", semantic_projection(node).runtime_structural_key),
                 ("read_order", getattr(node, "read_order_key", None)),
                 ("opcode", getattr(node, "opcode", None)),
                 ("operands", tuple(operand_digests)),
@@ -702,13 +553,6 @@ def _expression_subtree_digest_and_source_atoms(
     return digest_by_id.get(id(expr), none_digest), source_atoms, bool(complete), int(count)
 
 
-def _projected_semantic_runtime_key(expr: Any) -> Optional[StructuralKey]:
-    snapshot = _frozen_snapshot(expr)
-    if snapshot is not None:
-        return snapshot.runtime_structural_key
-    return _semantic_runtime_ref_key(getattr(expr, "runtime_ref", None))
-
-
 def _digest_structural_payload(payload: StructuralKey) -> str:
     encoded = json.dumps(
         payload,
@@ -732,19 +576,13 @@ def _expression_descriptor(expr: Expression) -> StructuralKey:
 
 
 def _expression_source_atom(expr: Expression) -> Optional[StructuralKey]:
-    snapshot = _frozen_snapshot(expr)
-    semantic_runtime_key = (
-        snapshot.runtime_structural_key
-        if snapshot is not None
-        else _semantic_runtime_ref_key(getattr(expr, "runtime_ref", None))
-    )
-    parameter_runtime_key = projected_parameter_runtime_key(expr)
-    if parameter_runtime_key is not None:
+    projection = semantic_projection(expr)
+    semantic_runtime_key = projection.runtime_structural_key
+    if projection.parameter_runtime_key is not None:
         return ("runtime_ref", semantic_runtime_key)
 
-    storage_key = projected_storage_identity(expr)
-    if storage_key is not None:
-        return ("storage", storage_key)
+    if projection.storage_identity is not None:
+        return ("storage", projection.storage_identity)
     if semantic_runtime_key is not None:
         return ("runtime_ref", semantic_runtime_key)
     expr_type = getattr(expr, "expr_type", None)
@@ -763,42 +601,6 @@ def _expression_source_atom(expr: Expression) -> Optional[StructuralKey]:
             _stable_value_key(getattr(expr, "value", None)),
             int(getattr(expr, "size", 0) or 0),
         )
-    return None
-
-
-def _expression_storage_key(expr: Expression) -> Optional[StructuralKey]:
-    storage_info = getattr(expr, "storage_info", None)
-    storage_key_fn = getattr(storage_info, "storage_identity_key", None)
-    if callable(storage_key_fn):
-        try:
-            storage_key = storage_key_fn()
-            if storage_key is not None:
-                return _stable_value_key(storage_key)
-        except Exception:
-            return None
-    return None
-
-
-def _parameter_runtime_ref_key(expr: Expression) -> Optional[StructuralKey]:
-    runtime_key = _raw_stable_key_or_none(getattr(expr, "runtime_ref", None))
-    if (
-        isinstance(runtime_key, tuple)
-        and len(runtime_key) >= 1
-        and runtime_key[0] == "parameter"
-    ):
-        return runtime_key
-    return None
-
-
-def _raw_stable_key_or_none(value: Any) -> Optional[StructuralKey]:
-    stable_key = getattr(value, "stable_key", None)
-    if callable(stable_key):
-        try:
-            key = stable_key()
-            if key is not None:
-                return key
-        except Exception:
-            pass
     return None
 
 
@@ -875,6 +677,26 @@ _NULL_CHILD_DIGEST = b"\x00" * CANDIDATE_DIGEST_SIZE
 #: memo の「まだ評価していない」を「評価中（None）」と区別するための番兵。
 _MISSING = object()
 
+_validate = None
+
+
+def _validated(expr: Optional[Expression]) -> Optional[Expression]:
+    """identity API の入口で graph を検証する（`core/semantic_freeze.py` が owner）。
+
+    「凍結済み = 検証済み」なので、凍結済みなら費用ゼロ。未凍結なら凍らせる
+    ことで検証し、閉路はそこで typed failure になる。ここで各 API ごとに閉路
+    判定を書かないのは、判定が 2 つあると片方だけ直るから。
+    """
+
+    global _validate
+    if expr is None or expr.__dict__.get("_frozen", False):
+        return expr
+    if _validate is None:
+        from scripts.function_tracer_pcode.core.semantic_freeze import validated
+
+        _validate = validated
+    return _validate(expr)
+
 
 def _encode_atoms(value: Any, parts: list) -> None:
     """atom を **型を落とさずに** 決定的な文字列へ符号化する。
@@ -926,11 +748,7 @@ def compose_candidate_digest(node: Any, child_digests: Tuple[Optional[bytes], ..
     resolved = [
         _NULL_CHILD_DIGEST if child is None else child for child in child_digests
     ]
-    if (
-        len(resolved) == 2
-        and getattr(node, "expr_type", None) == ExpressionType.BINARY_OP
-        and (getattr(node, "operator", None) or "") in COMMUTATIVE_BINARY_OPS
-    ):
+    if len(resolved) == 2 and children_are_commutative(node):
         resolved.sort()
     digest.update(b"|%d|" % len(resolved))
     for child in resolved:
@@ -941,49 +759,17 @@ def compose_candidate_digest(node: Any, child_digests: Tuple[Optional[bytes], ..
 def candidate_hash(expr: Optional[Expression]) -> Optional[bytes]:
     """式の candidate hash（`None` は式が無いとき）。
 
-    凍結済みなら freeze 時に確定した値をそのまま返す。未凍結なら DAG を 1 回
-    走査して作る（同じ node は 1 回だけ）。**この値だけで等価を確定しないこと**。
+    validated graph を前提にする: 未凍結なら入口で検証して凍らせるので、閉路は
+    ここで typed failure になり、placeholder の hash が出回ることはない。
+
+    **この値だけで等価を確定しないこと**。候補の絞り込み（bucket / 早期棄却）
+    専用で、衝突は `structural_equals` が食い止める。
     """
 
+    expr = _validated(expr)
     if expr is None:
         return None
-    cached = expr.__dict__.get("_structural_hash") if hasattr(expr, "__dict__") else None
-    if cached is not None:
-        return cached
-
-    digests: dict[int, bytes] = {}
-    stack: list[tuple[Any, bool]] = [(expr, False)]
-    active: set[int] = set()
-    while stack:
-        node, exiting = stack.pop()
-        node_id = id(node)
-        if exiting:
-            active.discard(node_id)
-            child_digests = tuple(
-                None if edge.child is None else digests.get(id(edge.child))
-                for edge in ordered_semantic_edges(node)
-            )
-            digests[node_id] = compose_candidate_digest(node, child_digests)
-            continue
-        if node_id in digests:
-            continue
-        cached_child = node.__dict__.get("_structural_hash") if hasattr(node, "__dict__") else None
-        if cached_child is not None:
-            digests[node_id] = cached_child
-            continue
-        if node_id in active:
-            # 閉路は凍結できない（= 内部不整合）。未凍結 graph に対しては
-            # 一致させない値を返し、完全比較側が不一致として扱う。
-            digests[node_id] = hashlib.blake2b(
-                b"cycle", digest_size=CANDIDATE_DIGEST_SIZE
-            ).digest()
-            continue
-        active.add(node_id)
-        stack.append((node, True))
-        for edge in reversed(ordered_semantic_edges(node)):
-            if edge.child is not None:
-                stack.append((edge.child, False))
-    return digests.get(id(expr))
+    return expr.__dict__.get("_structural_hash")
 
 
 class _ComparisonFrame:
@@ -1021,6 +807,11 @@ def structural_equals(
     一致を認める（判定能力の改善）。
     """
 
+    # 検証が先、identity shortcut が後。逆にすると `structural_equals(x, x)` が
+    # 閉路を含む x でも True を返してしまい、壊れた graph が「同じ」として
+    # 通過する。
+    left = _validated(left)
+    right = _validated(right)
     if left is right:
         # 同じ object、または「両方とも無い」。旧実装の key も `("none",)`
         # どうしを一致として扱っていた。
@@ -1083,11 +874,7 @@ def structural_equals(
             for left_edge, right_edge in zip(left_edges, right_edges)
         ]
         alternatives = [straight]
-        if (
-            len(straight) == 2
-            and getattr(x, "expr_type", None) == ExpressionType.BINARY_OP
-            and (getattr(x, "operator", None) or "") in COMMUTATIVE_BINARY_OPS
-        ):
+        if len(straight) == 2 and children_are_commutative(x):
             # 可換演算は入れ替えた組み合わせも試す。hash で並びを決めないのは、
             # hash が衝突している場合に取り違えて「違う」と言ってしまうため。
             alternatives.append(
@@ -1138,29 +925,31 @@ def structural_equals(
 
 
 def structural_identity_digest(expr: Optional[Expression]) -> Optional[str]:
-    """DAG snapshot 全体に対する安定な identity digest。
+    """完全比較と **同じ同値関係** を持つ安定 digest。
 
-    `id()` にも process 状態にも依存しない。snapshot のどこかが object 表現へ
-    落ちている（`identity_complete` が偽）なら `None` を返す — 区別できない値を
-    同じ digest にして「同じ式」と言わせないため。
+    `structural_equals(a, b)` が真なら `identity_digest(a) == identity_digest(b)`。
+    これは「digest を完全比較の前置き（prefilter）として使ってよい」という契約
+    そのもので、逆向き（digest 一致 ⇒ 等価）は保証しない（衝突は完全比較が
+    食い止める）。
+
+    実装は candidate hash **そのもの**で、別の合成規則を持たない。2 つの
+    digest を別々に組むと、片方だけに正規化が入って `ADD(a, 3)` と
+    `ADD(3, a)` の digest が割れる — 実際それが起きたので、同値関係を担保
+    する唯一の方法として 1 本にしてある。
+
+    `id()` にも process 状態にも依存しない。graph のどこかが object 表現へ
+    落ちていて digest だけでは区別できない場合は `None` を返す — 区別できない
+    値を同じ digest にして「同じ式」と言わせないため。**辺の順や共有の仕方が
+    残る表現が要るなら `walk_dag()` を使うこと**（あれは identity ではない）。
     """
 
-    from scripts.function_tracer_pcode.core.semantic_snapshot import walk_dag
-
+    expr = _validated(expr)
     if expr is None:
         return None
-    graph = walk_dag(expr)
-    if not graph.comparable or not graph.identity_complete:
+    if not expr.__dict__.get("_identity_complete", False):
         return None
-    payload = (
-        "semantic_graph_v1",
-        graph.root_no,
-        tuple(
-            (node.canonical_node_no, node.local_payload, node.ordered_edges)
-            for node in graph.nodes
-        ),
-    )
-    return hashlib.blake2b(_atoms_to_bytes(payload), digest_size=32).hexdigest()
+    digest = expr.__dict__.get("_structural_hash")
+    return None if digest is None else digest.hex()
 
 
 class StructuralIdentity:
@@ -1178,5 +967,5 @@ class StructuralIdentity:
     equals = staticmethod(structural_equals)
     #: 予算付きの canonical key（placeholder を含むものは比較に使わない）
     key = staticmethod(expression_key)
-    #: DAG snapshot 全体の安定 digest（`id()` を含まない）
+    #: 完全比較と同じ同値関係を持つ安定 digest（prefilter に使える）
     identity_digest = staticmethod(structural_identity_digest)

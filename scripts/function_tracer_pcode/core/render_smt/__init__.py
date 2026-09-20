@@ -93,7 +93,6 @@ from scripts.function_tracer_pcode.core.render_smt.render import (  # noqa: F401
     smt_logic_name,
 )
 from scripts.function_tracer_pcode.core.render_smt.unknowns import (  # noqa: F401
-    _coerce_address_value_ref,
     _iter_expression_nodes,
     _unknown_runtime_identity_key,
     _unknown_smt_declaration,

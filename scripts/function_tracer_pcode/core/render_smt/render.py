@@ -6,6 +6,7 @@ import hashlib
 import re
 from typing import Mapping, Optional
 from scripts.function_tracer_pcode.core.intrinsics import is_supported_pcode_intrinsic
+from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
 
 
 _BOOLEAN_BINARY_OPERATORS = {
@@ -441,13 +442,13 @@ def _to_smt_internal(
 
     if expr_type == expr_kind.VARIABLE:
         if address_context:
-            address_ref = _coerce_address_value_ref(expr)
-            if address_ref is not None:
+            projection = semantic_projection(expr)
+            if projection.is_address_value_ref and projection.address_offset is not None:
                 bits = max(1, expression_smt_bit_width(expr))
                 global_address = global_address_smt(expr, bits)
                 if global_address is not None:
                     return global_address
-                return f"(_ bv{int(address_ref.address_offset)} {bits})"
+                return f"(_ bv{projection.address_offset} {bits})"
         name = expr.name if expr.name else "var"
         if symbol_name_mapping is None:
             return name
@@ -977,7 +978,6 @@ from scripts.function_tracer_pcode.core.render_smt.loop_lowering import (
 )
 from scripts.function_tracer_pcode.core.render_smt.unknowns import (
     global_address_smt,
-    _coerce_address_value_ref,
     _unknown_smt_symbol_name,
 )
 from scripts.function_tracer_pcode.core.render_smt.widths import (
