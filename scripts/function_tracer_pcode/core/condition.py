@@ -11,14 +11,55 @@ if TYPE_CHECKING:
     from scripts.function_tracer_pcode.core.expression import Expression
 
 
+#: 凍結後に書き換えてはいけない意味 field。
+SEMANTIC_FIELDS = frozenset({"expression", "negated"})
+
+_freeze_condition = None
+
+
+def _freeze(condition: "Condition") -> None:
+    """条件と式を凍結する（`core/semantic_freeze.py` を遅延解決して呼ぶ）。"""
+
+    global _freeze_condition
+    if _freeze_condition is None:
+        from scripts.function_tracer_pcode.core.semantic_freeze import (
+            freeze_condition as _resolved,
+        )
+
+        _freeze_condition = _resolved
+    _freeze_condition(condition)
+
+
 class Condition:
-    """条件式を表現するクラス"""
+    """条件式を表現するクラス
+
+    `Condition` は **構築と同時に凍結される**。条件は「この式がこの向きで成り
+    立つ」という 1 つの意味の単位で、後から式や向きを差し替えられると、その
+    条件を key にした cache・dedup・PHI の branch がすべて意味を変えてしまう。
+    向きを変えたいときは `negate()` が新しい条件を返す。
+    """
+
+    _frozen: bool = False
 
     def __init__(self, expression: Optional["Expression"], negated: bool = False):
         if expression is None:
             raise ValueError("Condition expression must not be None")
-        self.expression = expression
-        self.negated = negated
+        self.__dict__["expression"] = expression
+        self.__dict__["negated"] = negated
+        _freeze(self)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in SEMANTIC_FIELDS and self.__dict__.get("_frozen", False):
+            from scripts.function_tracer_pcode.core.semantic_freeze import (
+                frozen_mutation_error,
+            )
+
+            raise frozen_mutation_error(self, name)
+        object.__setattr__(self, name, value)
+
+    @property
+    def is_frozen(self) -> bool:
+        return bool(self.__dict__.get("_frozen", False))
 
     def negate(self) -> "Condition":
         return Condition(self.expression, not self.negated)
@@ -52,23 +93,36 @@ class Condition:
         return self.equals(other)
 
     def __hash__(self) -> int:
-        stable_key = self._safe_structural_key()
-        if stable_key is None:
+        """candidate hash に基づく bucket 値。
+
+        等価の確定には使わない（`equals` が完全比較する）。`equals` が真なら
+        構造が同じなので hash も同じ、という向きだけを守る。
+        """
+
+        from scripts.function_tracer_pcode.core.structural import candidate_hash
+
+        digest = candidate_hash(self.expression)
+        if digest is None:
             return hash(("uncomparable_condition", id(self)))
-        return hash(stable_key)
+        return hash((digest, bool(self.negated)))
 
     def equals(self, other: "Condition") -> bool:
-        """条件が等価かどうかを判定"""
+        """条件が等価かどうかを判定（DAG-aware な完全比較）。
+
+        hash はあくまで候補の絞り込みで、一致は構造の完全比較で決める。共有
+        部分木は distinct な node 組として 1 回だけ比較するので、同じ部分式を
+        親ごとに展開し直さない。
+        """
         if not isinstance(other, Condition):
             return False
         if self is other:
             return True
-
-        self_key = self._safe_structural_key()
-        other_key = other._safe_structural_key()
-        if self_key is None or other_key is None:
+        if bool(self.negated) != bool(other.negated):
             return False
-        return self_key == other_key
+
+        from scripts.function_tracer_pcode.core.structural import structural_equals
+
+        return structural_equals(self.expression, other.expression)
 
     def structural_key(self, *, budget: int = 256):
         from scripts.function_tracer_pcode.core.structural import condition_key

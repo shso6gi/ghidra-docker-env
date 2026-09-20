@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """式の表現クラス"""
+import copy
 from enum import Enum, auto
-from typing import List, Optional, Any, Dict, Set, Mapping
+from typing import List, NamedTuple, Optional, Any, Dict, Set, Mapping
 from dataclasses import is_dataclass, fields
 
 from scripts.function_tracer_pcode.core.storage import StorageInfo
@@ -23,6 +24,40 @@ from scripts.function_tracer_pcode.core.variable_collection import (
 _EXPR_UNSET = object()
 
 
+class PhiBranch(NamedTuple):
+    """PHI の 1 分岐（条件と値）。
+
+    `tuple` の subclass なので、`isinstance(branch, tuple)` / `len(branch) == 2` /
+    unpack / index で branch を読む既存の consumer はそのまま動く。型を与えるのは
+    凍結後の branch を **不変** にし、`branch.condition` / `branch.value` という
+    名前で読めるようにするため。
+    """
+
+    condition: Optional["Condition"]
+    value: "Expression"
+
+
+def coerce_phi_branches(branches: Any) -> tuple:
+    """PHI の branch 列を `PhiBranch` の tuple へ正規化する。
+
+    形が `(condition, value)` でない要素はそのまま通す。ここで別の例外型に
+    化けさせるより、`to_dict()` / renderer の既存の typed な失敗で落ちる方が
+    どこが壊れているか分かりやすい。
+    """
+
+    if branches is None:
+        return ()
+    normalized = []
+    for branch in branches:
+        if isinstance(branch, PhiBranch):
+            normalized.append(branch)
+        elif isinstance(branch, (tuple, list)) and len(branch) == 2:
+            normalized.append(PhiBranch(branch[0], branch[1]))
+        else:
+            normalized.append(branch)
+    return tuple(normalized)
+
+
 class ExpressionType(Enum):
     """式の種類"""
     CONSTANT = auto()
@@ -39,14 +74,52 @@ class ExpressionType(Enum):
 
 
 
+#: 凍結後に書き換えてはいけない **意味 field**。ここに無い属性（診断用の
+#: 補助 flag 等）は凍結後も置けるが、意味 consumer はそれを読まない。
+SEMANTIC_FIELDS = frozenset({
+    "expr_type",
+    "value",
+    "operator",
+    "operands",
+    "size",
+    "name",
+    "data_type",
+    "data_type_obj",
+    "storage_info",
+    "read_order_key",
+    "runtime_ref",
+    "opcode",
+    "call_argument_width_evidence",
+    "_recurrence_semantic_key",
+})
+
+#: 凍結そのものを表す内部 field（deepcopy では引き継がない）。
+_FREEZE_STATE_FIELDS = (
+    "_frozen", "_snapshot", "_local_payload", "_structural_hash", "_tree_size",
+)
+
+
 class Expression:
     """
     式を表現するクラス（AST的な構造）
+
+    生存期間は construction → freeze → immutable consumption の 3 段階
+    （`core/semantic_freeze.py`）。凍結後に意味 field を書き換えようとすると
+    `FrozenExpressionError`（内部バグ）になるので、値を変えたい処理は
+    `clone_with(...)` / `with_semantic_fields(...)` で新しい式を作る。
     """
     
     # クラス変数: 定数表示形式 ("dec", "hex", "auto")
     _constant_format: str = "dec"
     _hex_threshold: int = 256
+
+    #: 凍結状態の既定値（instance が持たない限りこれが読まれる）。
+    _frozen: bool = False
+    _snapshot: Any = None
+    _local_payload: Any = None
+    _structural_hash: Optional[bytes] = None
+    _tree_size: Optional[int] = None
+    _recurrence_semantic_key: Any = None
     
     def __init__(
         self,
@@ -63,24 +136,126 @@ class Expression:
         runtime_ref: Any = None,
         opcode: Optional[int] = None,
         call_argument_width_evidence: Any = None,
+        recurrence_semantic_key: Any = None,
     ):
-        self.expr_type = expr_type
-        self.value = value
-        self.operator = operator
-        self.operands = []
+        resolved_operands = []
         for operand in operands or []:
             if operand is None:
                 raise ValueError("Expression operands must not contain None")
-            self.operands.append(operand)
-        self.size = size
-        self.name = name
-        self.data_type = data_type
-        self.data_type_obj = data_type_obj
-        self.storage_info = storage_info
-        self.read_order_key = read_order_key
-        self.runtime_ref = runtime_ref
-        self.opcode = opcode
-        self.call_argument_width_evidence = call_argument_width_evidence
+            resolved_operands.append(operand)
+        # 構築は必ず未凍結なので `__setattr__` の判定を通す必要がない。
+        # `__dict__` へ直接置いて構築費用を増やさない。
+        self.__dict__.update(
+            expr_type=expr_type,
+            value=value,
+            operator=operator,
+            operands=resolved_operands,
+            size=size,
+            name=name,
+            data_type=data_type,
+            data_type_obj=data_type_obj,
+            storage_info=storage_info,
+            read_order_key=read_order_key,
+            runtime_ref=runtime_ref,
+            opcode=opcode,
+            call_argument_width_evidence=call_argument_width_evidence,
+        )
+        if recurrence_semantic_key is not None:
+            self.__dict__["_recurrence_semantic_key"] = recurrence_semantic_key
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """凍結後の意味 field 書き換えを内部バグとして拒否する。
+
+        `TypeError` / `AttributeError` 派生ではない専用の型を投げるのは、
+        「回復可能」な例外 tuple に吸収されて UNKNOWN や `None` に化けるのを
+        防ぐため（`core/errors.py` の `FrozenExpressionError` を参照）。
+        """
+
+        if name in SEMANTIC_FIELDS and self.__dict__.get("_frozen", False):
+            from scripts.function_tracer_pcode.core.semantic_freeze import (
+                frozen_mutation_error,
+            )
+
+            raise frozen_mutation_error(self, name)
+        object.__setattr__(self, name, value)
+
+    def __deepcopy__(self, memo: Dict[int, Any]) -> 'Expression':
+        """凍結を引き継がない deep copy。
+
+        deep copy は「これから組み立て直す材料」なので、凍結状態と snapshot は
+        持ち越さない。持ち越すと copy 先で size を直すだけの既存処理が内部バグ
+        扱いになってしまう。
+        """
+
+        cls = self.__class__
+        clone = cls.__new__(cls)
+        memo[id(self)] = clone
+        state = {
+            key: copy.deepcopy(item, memo)
+            for key, item in self.__dict__.items()
+            if key not in _FREEZE_STATE_FIELDS
+        }
+        operands = state.get("operands")
+        if isinstance(operands, tuple):
+            state["operands"] = list(operands)
+        clone.__dict__.update(state)
+        return clone
+
+    # -- freeze 境界 --------------------------------------------------------
+
+    def freeze(self) -> 'Expression':
+        """式 graph を凍結して自分を返す（冪等）。"""
+
+        if self.__dict__.get("_frozen", False):
+            return self
+        from scripts.function_tracer_pcode.core.semantic_freeze import freeze_expression
+
+        return freeze_expression(self)
+
+    @property
+    def is_frozen(self) -> bool:
+        return bool(self.__dict__.get("_frozen", False))
+
+    def structural_hash(self) -> Optional[bytes]:
+        """凍結時に確定した candidate hash（未凍結なら `None`）。
+
+        **候補の絞り込み専用**。等価の確定や digest にそのまま使ってはいけない
+        （`core/structural.py` の `structural_equals` が完全比較を行う）。
+        """
+
+        return self.__dict__.get("_structural_hash")
+
+    def tree_size(self) -> Optional[int]:
+        """木に展開したときの node 数（未凍結なら `None`）。共有は展開して数える。"""
+
+        return self.__dict__.get("_tree_size")
+
+    def semantic_projection(self):
+        """凍結時に固定した意味投影（未凍結ならその場で作る）。"""
+
+        from scripts.function_tracer_pcode.core.semantic_snapshot import (
+            semantic_projection,
+        )
+
+        return semantic_projection(self)
+
+    def with_semantic_fields(self, **fields: Any) -> 'Expression':
+        """意味 field を持った式を返す（構築中は自分を、凍結後は新しい式を）。
+
+        「construction → freeze → immutable consumption」の lifecycle をそのまま
+        表した API。まだ凍っていない（=まだ誰にも公開していない）式は従来どおり
+        その場で更新し、凍った式は `clone_with(...)` で新しい値を作って **元の式
+        を変えない**。呼び出し側に「この式は凍っているか」を判断させないための
+        入口で、凍結点が増えても call site は変わらない。
+        """
+
+        if not fields:
+            return self
+        if self.__dict__.get("_frozen", False):
+            return self.clone_with(**fields)
+        for name, value in fields.items():
+            setattr(self, name, value)
+        return self
     
     @classmethod
     def set_constant_format(cls, fmt: str, threshold: int = 256):
@@ -238,7 +413,7 @@ class Expression:
     @classmethod
     def phi(cls, branches: List[tuple]) -> 'Expression':
         """PHIノード（条件分岐による値の選択）を作成"""
-        return cls(expr_type=ExpressionType.PHI, value=branches)
+        return cls(expr_type=ExpressionType.PHI, value=coerce_phi_branches(branches))
     
     @classmethod
     def unknown(cls, description: str = "unknown", runtime_ref: Any = None) -> 'Expression':
@@ -383,7 +558,12 @@ class Expression:
         opcode: Any = _EXPR_UNSET,
         call_argument_width_evidence: Any = _EXPR_UNSET,
     ) -> 'Expression':
-        """Clone an expression while preserving semantic metadata by default."""
+        """Clone an expression while preserving semantic metadata by default.
+
+        The clone is **not** frozen even when the source is: a clone exists to be
+        finished, and the recurrence semantic key rides along so that deriving a
+        value does not silently drop the canonical identity it was given.
+        """
 
         resolved_operands = self.operands if operands is _EXPR_UNSET else operands
         return Expression(
@@ -404,6 +584,7 @@ class Expression:
                 if call_argument_width_evidence is _EXPR_UNSET
                 else call_argument_width_evidence
             ),
+            recurrence_semantic_key=getattr(self, "_recurrence_semantic_key", None),
         )
     
     def equals(self, other: 'Expression') -> bool:
