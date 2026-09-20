@@ -26,6 +26,10 @@ PR-22-B が置く境界:
   `mark_published` を staging の途中で呼ぶと、失敗した closure の root だけが
   「成功した」状態で残る（partial commit）。再入防止に public state を流用
   しないことも同じ理由で要る。
+* **複製・派生は公開の権限を持たない**。lifecycle state を持つ型は `__copy__` /
+  `__deepcopy__` を自分で定義して、状態と派生値を落とす（既定の複製は `__dict__`
+  を写すので、公開済みを名乗る外側の下に未公開の中身がぶら下がる）。「何を
+  引き継がないか」は `core/semantic_lifecycle.py` が 1 箇所で決める。
 * **loop lowering の意味は `core/loop_lowering_semantics.py` が所有**。SMT
   renderer は loop summary ref の schema（class も field 名も）を知らず、
   凍結済みの `LoopLoweringSemantics` だけを読む。厳密 lowering の可否は健全性
@@ -198,7 +202,12 @@ _PUBLICATION_NAMES = frozenset(
     }
 )
 #: 凍結済みの意味を読む側 + 状態を定義する側。ここが公開を成立させてはいけない。
+#: 公開を成立させてはいけない module。`core/condition.py` が入っていないのは
+#: 意図的で、`Condition.negate()` だけが宣言を引き継ぐ唯一の派生
+#: （式 object をそのまま持つので closure が壊れない）。値の型そのものが公開
+#: できないことは `core/expression.py` の側で固定する。
 _PUBLICATION_FREE_MODULES = (
+    "core/expression.py",
     "core/structural.py",
     "core/semantic_snapshot.py",
     "core/semantic_projection.py",
@@ -696,6 +705,102 @@ def test_publication_implies_validation_by_construction():
     assert (
         state_of({"_frozen": True, "_published": True}) is SemanticLifecycle.PUBLISHED
     )
+
+
+#: lifecycle state を持つ意味型（carrier）。既定の複製に任せてはいけない。
+_LIFECYCLE_VALUE_TYPES = (
+    ("core/expression.py", "Expression"),
+    ("core/condition.py", "Condition"),
+)
+
+
+def test_every_lifecycle_value_type_defines_its_own_copy():
+    """状態を持つ型は `__copy__` / `__deepcopy__` を自分で定義していること。
+
+    既定の複製は `__dict__` をそのまま写すので、`_published` を持った複製が
+    できる。複製の中身（式）は作り直されて未公開なので、**外側だけ公開済み**
+    という closure を 1 行も書かずに作れてしまう。型を足したときにこの穴が
+    再発しないよう、定義の有無を構造で固定する。
+    """
+
+    missing = []
+    for relative, type_name in _LIFECYCLE_VALUE_TYPES:
+        tree = _parse(PACKAGE_ROOT / relative)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef) or node.name != type_name:
+                continue
+            defined = {
+                inner.name
+                for inner in node.body
+                if isinstance(inner, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+            for hook in ("__copy__", "__deepcopy__"):
+                if hook not in defined:
+                    missing.append(f"{relative}: {type_name} has no {hook}")
+            break
+        else:  # pragma: no cover - 型名が変わったら test を直す合図
+            missing.append(f"{relative}: {type_name} not found")
+    assert missing == [], missing
+
+
+def test_the_fields_a_copy_drops_are_the_fields_validation_writes():
+    """複製が捨てる派生値と、検証が書く派生値が同じ表から出ていること。
+
+    2 つの表に分かれていると、派生値を 1 つ足したときに片方だけ直って、
+    「未検証なのに digest を持つ複製」ができる。
+    """
+
+    from scripts.function_tracer_pcode.core import semantic_lifecycle as owner
+
+    tree = _parse(PACKAGE_ROOT / _PUBLICATION_OWNER)
+    derived_keys = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != "_derive_node_fields":
+            continue
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Dict):
+                continue
+            for key in inner.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    derived_keys.add(key.value)
+    assert derived_keys, "_derive_node_fields not found"
+    assert derived_keys == set(owner.DERIVED_STATE_FIELDS), derived_keys
+    assert set(owner.NON_INHERITED_FIELDS) == set(owner.LIFECYCLE_STATE_FIELDS) | set(
+        owner.DERIVED_STATE_FIELDS
+    )
+
+
+def test_only_the_lifecycle_owner_lists_the_fields_a_new_value_drops():
+    """引き継がない field の**一覧**を owner 以外が持っていないこと。
+
+    個々の field を読むのは consumer の仕事（`structural_hash()` など）なので
+    禁じない。禁じるのは「落とす field はこれ」という表を 2 つ持つこと —
+    それをやると、派生値が 1 つ増えたときに片方だけ直って、状態を捨てたつもり
+    の複製が digest だけ引き継ぐ。
+    """
+
+    from scripts.function_tracer_pcode.core import semantic_lifecycle as owner
+
+    names = set(owner.NON_INHERITED_FIELDS)
+    offenders = []
+    for path in _module_files():
+        relative = _relative(path)
+        if relative == "core/semantic_lifecycle.py":
+            continue
+        for node in ast.walk(_parse(path)):
+            if not isinstance(node, (ast.Tuple, ast.Set, ast.List)):
+                continue
+            literals = [
+                element.value
+                for element in node.elts
+                if isinstance(element, ast.Constant) and isinstance(element.value, str)
+            ]
+            listed = names.intersection(literals)
+            if len(listed) >= 2:
+                offenders.append(f"{relative}:{node.lineno} lists {sorted(listed)}")
+    assert offenders == [], offenders
 
 
 #: lifecycle state を進めてよい関数（commit のみ）。

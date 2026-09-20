@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Mapping
 
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
@@ -66,6 +67,8 @@ class Condition:
     * `negate()` が返す新しい条件も構築と同時に VALIDATED で、元が PUBLISHED
       なら PUBLISHED で始まる（反転には仕上げる余地が残らないため。詳細は
       `negate()` の docstring）
+    * `copy` / `deepcopy` は構築と同じ道を通る新しい条件で、**公開は引き継が
+      ない**（`__deepcopy__` の docstring）
     """
 
     _frozen: bool = False
@@ -74,6 +77,16 @@ class Condition:
     def __init__(self, expression: Optional["Expression"], negated: bool = False):
         if expression is None:
             raise ValueError("Condition expression must not be None")
+        self._assemble(expression, negated)
+
+    def _assemble(self, expression: "Expression", negated: bool) -> None:
+        """意味 field を置いて検証する。**条件が出来上がる唯一の道**。
+
+        構築（`__init__`）と複製（`__deepcopy__`）が共有する。複製が別経路で
+        field を置くと、「構築した条件は必ず VALIDATED」という不変条件が複製に
+        だけ効かない、という形の食い違いが生まれる。
+        """
+
         self.__dict__["expression"] = expression
         self.__dict__["negated"] = negated
         _freeze(self)
@@ -105,6 +118,39 @@ class Condition:
 
         return self.lifecycle is SemanticLifecycle.PUBLISHED
 
+    def __copy__(self) -> "Condition":
+        """式を共有する浅い複製。**公開は引き継がない**。
+
+        構築と同じ道を通るので、できた条件は VALIDATED で始まる（条件には
+        「あとで仕上げる」段階が無い）。元が公開済みでも、複製の完成を宣言
+        できるのは複製を作った側だけ。
+        """
+
+        return Condition(self.expression, self.negated)
+
+    def __deepcopy__(self, memo: Dict[int, Any]) -> "Condition":
+        """式まで複製する deep copy。**公開は引き継がない**。
+
+        既定の deepcopy に任せると `__dict__` がそのまま写り、`_published` を
+        持った条件の下に **未公開の複製式** がぶら下がる。外側だけ公開済みに
+        見えるので、(a) 公開走査はその条件で早期 return して式へ降りず、
+        (b) solver renderer は条件の公開だけ見て内部の式を描いてしまう。
+        つまり「PUBLISHED な値から未公開の意味値へ到達できない」という closure
+        の不変条件が、複製 1 回で破れていた。
+
+        複製した式で **新しい条件を組み立て直す**ので、条件と式の状態が食い違う
+        形を作れない。producer が必要なら複製に対して `publish()` を呼ぶ。
+
+        式を複製する前に memo へ載せるのは、同じ条件が 2 度現れたとき（例:
+        `ReturnCase.conditions` と PHI の branch）に 1 つの複製を共有するため。
+        """
+
+        cls = self.__class__
+        copied = cls.__new__(cls)
+        memo[id(self)] = copied
+        copied._assemble(copy.deepcopy(self.expression, memo), self.negated)
+        return copied
+
     def negate(self) -> "Condition":
         """向きを反転した **新しい条件**。
 
@@ -112,9 +158,15 @@ class Condition:
         る」段階が無く（構築と同時に凍結される）、反転は同じ確定済みの式の向き
         を変えただけなので、producer が宣言し直すものが何も残らない。
 
-        式の複製（`clone_with` / `derive_with` / `deepcopy`）が公開を引き継が
-        ないのとは事情が違う: あちらは **これから仕上げる材料** で、仕上げた
-        結果を宣言できるのは作った側だけ。
+        式の複製（`clone_with` / `derive_with` / `copy` / `deepcopy`）や条件の
+        複製（`__copy__` / `__deepcopy__`）が公開を引き継がないのとは事情が
+        違う: あちらは **これから仕上げる材料** で、仕上げた結果を宣言できるの
+        は作った側だけ。
+
+        **closure は保たれる**: 反転は元の式 object を**そのまま**持つので、
+        元が PUBLISHED なら式とその子孫もすでに PUBLISHED。新しい条件へ印を
+        付けても、未公開の意味値がぶら下がることはない（複製はここが違う。
+        式まで作り直すので、公開を引き継ぐと closure が壊れる）。
         """
 
         negated = Condition(self.expression, not self.negated)

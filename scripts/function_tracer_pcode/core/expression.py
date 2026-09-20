@@ -6,8 +6,8 @@ from typing import List, NamedTuple, Optional, Any, Dict, Set, Mapping
 from dataclasses import is_dataclass, fields
 
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
-    LIFECYCLE_STATE_FIELDS,
     SemanticLifecycle,
+    inherited_by_a_new_value,
     state_of,
 )
 from scripts.function_tracer_pcode.core.storage import StorageInfo
@@ -63,6 +63,18 @@ def coerce_phi_branches(branches: Any) -> tuple:
     return tuple(normalized)
 
 
+def _new_value_fields(fields: Mapping[str, Any]) -> Dict[str, Any]:
+    """既存の値の `__dict__` から、**新しい値**が持ってよい分だけを取り出す。
+
+    落とす field を決めるのは `core/semantic_lifecycle.py`（状態の owner）。
+    ここは「どの複製もその規則を通る」ことだけを担う。
+    """
+
+    return {
+        key: item for key, item in fields.items() if inherited_by_a_new_value(key)
+    }
+
+
 class ExpressionType(Enum):
     """式の種類"""
     CONSTANT = auto()
@@ -98,29 +110,16 @@ SEMANTIC_FIELDS = frozenset({
     "_recurrence_semantic_key",
 })
 
-#: 凍結時に確定する派生値（deepcopy では引き継がない）。
-_DERIVED_FREEZE_FIELDS = (
-    "_snapshot",
-    "_local_payload",
-    "_structural_hash",
-    "_equivalence_digest",
-    "_tree_size",
-    "_identity_complete",
-)
-
-#: 複製が引き継がない内部 field = 状態（`LIFECYCLE_STATE_FIELDS`）+ 派生値。
-#: 状態の一覧を自分で書かないのは、`core/semantic_lifecycle.py` が owner だから。
-_FREEZE_STATE_FIELDS = tuple(LIFECYCLE_STATE_FIELDS) + _DERIVED_FREEZE_FIELDS
-
-
 class Expression:
     """
     式を表現するクラス（AST的な構造）
 
-    生存期間は construction → freeze → immutable consumption の 3 段階
-    （`core/semantic_freeze.py`）。凍結後に意味 field を書き換えようとすると
-    `FrozenExpressionError`（内部バグ）になるので、値を変えたい処理は
-    `clone_with(...)` / `derive_with(...)` で新しい式を作る。
+    生存期間は CONSTRUCTION → VALIDATED → PUBLISHED → solver consumption
+    （状態は `core/semantic_lifecycle.py`、遷移は `core/semantic_freeze.py`）。
+    検証後に意味 field を書き換えようとすると `FrozenExpressionError`（内部
+    バグ）になるので、値を変えたい処理は `clone_with(...)` / `derive_with(...)`
+    で新しい式を作る。複製（`copy` / `deepcopy` を含む）は状態も派生値も
+    引き継がず CONSTRUCTION から始まる。
     """
     
     # クラス変数: 定数表示形式 ("dec", "hex", "auto")
@@ -198,12 +197,26 @@ class Expression:
             raise frozen_mutation_error(self, name)
         object.__setattr__(self, name, value)
 
-    def __deepcopy__(self, memo: Dict[int, Any]) -> 'Expression':
-        """凍結を引き継がない deep copy。
+    def __copy__(self) -> 'Expression':
+        """子を共有する浅い複製。**状態は引き継がない**。
 
-        deep copy は「これから組み立て直す材料」なので、凍結状態と snapshot は
-        持ち越さない。持ち越すと copy 先で size を直すだけの既存処理が内部バグ
-        扱いになってしまう。
+        deep copy と規則を揃えてあるのは、`copy.copy` を「安い deepcopy」と
+        思って使った site が、そこだけ公開済みの値を作れてしまわないようにする
+        ため。複製は複製で、深さは関係ない。
+        """
+
+        clone = self.__class__.__new__(self.__class__)
+        clone.__dict__.update(_new_value_fields(self.__dict__))
+        return clone
+
+    def __deepcopy__(self, memo: Dict[int, Any]) -> 'Expression':
+        """子まで複製する deep copy。**状態は引き継がない**。
+
+        複製は「これから組み立て直す材料」なので、状態（`_frozen` /
+        `_published`）も検証時の派生値（snapshot / digest）も持ち越さない。
+        持ち越すと (a) copy 先で size を直すだけの既存処理が内部バグ扱いになり、
+        (b) 元の宣言を名乗る複製が solver へ渡せてしまう。何を引き継がないかは
+        `core/semantic_lifecycle.inherited_by_a_new_value` が決める。
         """
 
         cls = self.__class__
@@ -211,11 +224,11 @@ class Expression:
         memo[id(self)] = clone
         state = {
             key: copy.deepcopy(item, memo)
-            for key, item in self.__dict__.items()
-            if key not in _FREEZE_STATE_FIELDS
+            for key, item in _new_value_fields(self.__dict__).items()
         }
         operands = state.get("operands")
         if isinstance(operands, tuple):
+            # 複製はまだ組み立て中なので、検証で畳んだ tuple を list へ戻す。
             state["operands"] = list(operands)
         clone.__dict__.update(state)
         return clone

@@ -39,11 +39,26 @@ solver consumption」という契約が identity API 経由で破れる。
 両方の bit を見る）ので、「published は validated を含む」は表現の側で閉じている。
 
 **遷移は単調**。逆行する API は置かない。値を変えたいときは新しい値を作る
-（`derive_with` / `clone_with` / `deepcopy`）。新しい値は必ず CONSTRUCTION から
-始まる — 状態 field を引き継がないのは各 carrier の責務で、その一覧が
-`LIFECYCLE_STATE_FIELDS`。**これから仕上げる材料だから**であって、「派生値は
-公開しない」という規則ではない: `Condition.negate()` は仕上げる余地の無い派生
-（条件には refinement 段階が無い）なので、公開済みの条件からは公開済みで始まる。
+（`derive_with` / `clone_with` / `copy` / `deepcopy`）。
+
+**複製・派生は公開の権限を持たない**。新しい値は CONSTRUCTION から始まり、
+`NON_INHERITED_FIELDS` に挙げた field を 1 つも引き継がない。**これから仕上げる
+材料だから**であって、「派生値は公開しない」という規則ではない:
+`Condition.negate()` は仕上げる余地の無い派生（条件には refinement 段階が無い）
+なので、公開済みの条件からは公開済みで始まる。**その 1 つだけが例外**で、
+理由と closure の保たれ方は `Condition.negate()` の docstring にある。
+
+引き継がない規則を carrier 側の書き忘れに頼らないため、「新しい値が持ってよい
+field か」の判定はこの module が答える（`inherited_by_a_new_value`）。汎用の
+copy 機構は置かない: 複製の作り方（何を deep に、何を共有するか）は値の型が
+決めることで、**lifecycle が決めるのは「何を引き継がないか」だけ**。
+
+.. code-block:: text
+
+    値の型が決める            lifecycle が決める
+    ---------------------     ------------------------------
+    どの field を deep copy   状態と派生値を引き継がない
+    どう再構築するか          （`NON_INHERITED_FIELDS`）
 """
 
 from __future__ import annotations
@@ -64,9 +79,38 @@ class SemanticLifecycle(IntEnum):
     PUBLISHED = 2
 
 
-#: 状態そのものを表す field。複製（`clone_with` / `deepcopy`）はこれを **引き
-#: 継がない**: 複製は「これから仕上げる材料」なので、元の値の宣言を名乗れない。
+#: 状態そのものを表す field。複製（`clone_with` / `copy` / `deepcopy`）はこれを
+#: **引き継がない**: 複製は「これから仕上げる材料」なので、元の値の宣言を名乗れない。
 LIFECYCLE_STATE_FIELDS = ("_frozen", "_published")
+
+#: 検証のときに確定する派生値の field。状態そのものではないが、**状態と対に
+#: なってしか意味を持たない**: VALIDATED でない値に載った snapshot / digest は
+#: 「まだ確かめていない graph を投影した何か」でしかない。だから状態と一緒に
+#: 引き継がない。名前の一覧をここに置くのは、`core/semantic_freeze` が作る
+#: 派生値と、複製が捨てる field が 1 つの表から出るようにするため。
+DERIVED_STATE_FIELDS = (
+    "_snapshot",
+    "_local_payload",
+    "_structural_hash",
+    "_equivalence_digest",
+    "_tree_size",
+    "_identity_complete",
+)
+
+#: **新しい値へ引き継いではいけない field**（状態 + 状態から導いた値）。
+NON_INHERITED_FIELDS = LIFECYCLE_STATE_FIELDS + DERIVED_STATE_FIELDS
+
+
+def inherited_by_a_new_value(name: str) -> bool:
+    """`name` を新しい値（複製・派生）の `__dict__` へ持ち越してよいか。
+
+    複製・派生の実装（`Expression.__copy__` / `__deepcopy__` / `clone_with`、
+    `Condition.__copy__` / `__deepcopy__`）が **唯一参照する規則**。各 call site
+    が「どの field を落とすか」を自前で列挙すると、状態や派生値が 1 つ増えた
+    ときに片方だけ直って、公開済みを名乗る半端な複製ができる。
+    """
+
+    return name not in NON_INHERITED_FIELDS
 
 
 def state_of(fields: Dict[str, Any]) -> SemanticLifecycle:

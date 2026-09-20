@@ -360,8 +360,9 @@ class ConditionSMTOracle:
     def _runtime_ref_identity(cls, runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
         """生の ref から identity を作る（式を持たない直接呼び出し用）。
 
-        生 object を読むのは `core/semantic_projection.py` だけなので、ここでも
-        投影を作ってから同じ規則を適用する。
+        生 object を読むのは投影側（`core/semantic_projection.py` と、loop
+        summary ref の schema を持つ `core/loop_lowering_semantics.py`）だけ
+        なので、ここでも投影を作ってから同じ規則を適用する。
         """
 
         if runtime_ref is None:

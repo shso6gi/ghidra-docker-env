@@ -48,7 +48,7 @@ freeze と公開は同じ到達規則に別の操作を載せるだけなので�
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import structural as _structural
 from scripts.function_tracer_pcode.core.errors import (
@@ -57,7 +57,11 @@ from scripts.function_tracer_pcode.core.errors import (
     record_internal_bug,
 )
 from scripts.function_tracer_pcode.core.condition import Condition
-from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType, PhiBranch
+from scripts.function_tracer_pcode.core.expression import (
+    Expression,
+    ExpressionType,
+    coerce_phi_branches,
+)
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     is_published,
     is_validated,
@@ -346,6 +350,53 @@ def publish_semantic_values(container: Any) -> Any:
     return container
 
 
+def unpublished_semantic_values(container: Any) -> Tuple[Any, ...]:
+    """`container` から solver が到達する意味値のうち、**まだ公開されていない**もの。
+
+    公開の不変条件を外から確かめるための読み取り専用の問い合わせ:
+
+    .. code-block:: text
+
+        PUBLISHED(value) ⇒ solver が到達する意味 closure もすべて PUBLISHED
+
+    走査は公開とまったく同じ規則を使う（`_walk_semantic_carriers` + graph の辺
+    + PHI の branch 条件 + runtime ref が抱える値）。別の走査を書くと「公開は
+    辿るのに検査は辿らない」隙間ができるので、到達規則は 1 つに保つ。
+
+    状態は動かさない。未検証の値は公開されていないので、当然ここに現れる。
+    """
+
+    found: Dict[int, Any] = {}
+    seen: Dict[int, bool] = {}
+    # 明示 stack（graph が深くても再帰上限に当たらない。module の他の走査と同じ形）
+    pending: List[Any] = []
+
+    def enqueue(value: Any) -> None:
+        if value is None or id(value) in seen:
+            return
+        seen[id(value)] = True
+        if not is_published(value):
+            found.setdefault(id(value), value)
+        pending.append(value)
+
+    _walk_semantic_carriers(container, enqueue, enqueue)
+    while pending:
+        value = pending.pop()
+        if isinstance(value, Condition):
+            enqueue(value.expression)
+            continue
+        for edge in ordered_semantic_edges(value):
+            enqueue(edge.child)
+        for condition in _phi_branch_conditions(value):
+            enqueue(condition)
+        runtime_ref = value.__dict__.get("runtime_ref")
+        if runtime_ref is None or id(runtime_ref) in seen:
+            continue
+        seen[id(runtime_ref)] = True
+        _walk_semantic_carriers(runtime_ref, enqueue, enqueue)
+    return tuple(found.values())
+
+
 def _run_publication(stage: Any) -> None:
     """staging → commit の 1 transaction。失敗したら 1 つも公開しない。
 
@@ -495,7 +546,9 @@ def _derive_node_fields(node: Expression, staging: _LifecycleStaging) -> Dict[st
         fields["operands"] = tuple(operands or ())
 
     if node.expr_type == ExpressionType.PHI:
-        fields["value"] = _frozen_branches(fields.get("value"))
+        # 正準化だけ（lifecycle は動かさない）。branch 条件の検証は
+        # `_stage_node_closure_validation` が staging へ積む。
+        fields["value"] = coerce_phi_branches(fields.get("value"))
 
     # snapshot を先に置く。candidate hash は `semantic_projection()` 経由で
     # snapshot を読むので、順番が逆だと生 object を読んでしまう。
@@ -564,31 +617,6 @@ def _projection_has_unsupported_value(snapshot: Any) -> bool:
             snapshot.storage.identity,
         )
     )
-
-
-def _frozen_branches(value: Any) -> Tuple[Any, ...]:
-    """PHI の branch を `PhiBranch` の tuple へ畳む。
-
-    `PhiBranch` は `tuple` の subclass なので、`isinstance(branch, tuple)` /
-    `len(branch) == 2` / unpack / index を使う既存 consumer はそのまま動く。
-    """
-
-    branches = []
-    for branch in value or ():
-        if isinstance(branch, PhiBranch):
-            frozen_branch = branch
-        elif isinstance(branch, (tuple, list)) and len(branch) == 2:
-            frozen_branch = PhiBranch(branch[0], branch[1])
-        else:
-            # 形が違う branch はここでは直さない。`to_dict()` / renderer が
-            # 従来どおり typed な失敗を出す方が、ここで別の例外型に化けるより
-            # 追いやすい。
-            branches.append(branch)
-            continue
-        if frozen_branch.condition is not None:
-            freeze_condition(frozen_branch.condition)
-        branches.append(frozen_branch)
-    return tuple(branches)
 
 
 def frozen_mutation_error(node: Any, field: str) -> FrozenExpressionError:

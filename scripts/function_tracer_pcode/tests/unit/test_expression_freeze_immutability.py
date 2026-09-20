@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """凍結境界の契約（Issue #22 PR-22-B、計画 B1 / B7 / B10 / B13）。
 
-construction → freeze → immutable consumption の 3 段階がそれぞれ何を許し何を
-拒むかを固定する。
+CONSTRUCTION → VALIDATED → PUBLISHED → solver consumption のそれぞれが何を許し
+何を拒むかを固定する（この file が見るのは前半、CONSTRUCTION と VALIDATED の
+境目。公開の側は `test_semantic_lifecycle.py`、複製の側は
+`test_semantic_lifecycle_copy.py`）。
 """
 
 from __future__ import annotations

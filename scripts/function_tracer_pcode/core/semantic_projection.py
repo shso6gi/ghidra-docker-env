@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 """生 runtime object → immutable な意味値（Issue #22 PR-22-B）。
 
-**この module が「生 object をどう読むか」を決める唯一の場所**。ここから外へ出る
-のは pure な value だけで、生 object への参照も、あとから生 object を読み直す
-遅延セルも渡さない。
+**生 object を読んでよい 2 つの module のうちの 1 つ**。この module が汎用の
+読み方（`semantic_key()` / storage / 宣言型 / global address）を決め、loop summary
+ref の schema だけは `core/loop_lowering_semantics.py` が持つ（厳密 lowering の
+可否という別の判断と一緒に置いてあり、この module はその結果を受け取る）。
+どちらから外へ出るのも pure な value だけで、生 object への参照も、あとから生
+object を読み直す遅延セルも渡さない。
 
 なぜ 1 owner にするか: `runtime_ref.semantic_key()` を「identity として何に使うか」
 という判断が、structural key・solver query・unknown 宣言・loop lowering の 4 箇所に
