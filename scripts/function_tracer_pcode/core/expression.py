@@ -95,7 +95,12 @@ SEMANTIC_FIELDS = frozenset({
 
 #: 凍結そのものを表す内部 field（deepcopy では引き継がない）。
 _FREEZE_STATE_FIELDS = (
-    "_frozen", "_snapshot", "_local_payload", "_structural_hash", "_tree_size",
+    "_frozen",
+    "_snapshot",
+    "_local_payload",
+    "_structural_hash",
+    "_tree_size",
+    "_identity_complete",
 )
 
 
@@ -119,6 +124,7 @@ class Expression:
     _local_payload: Any = None
     _structural_hash: Optional[bytes] = None
     _tree_size: Optional[int] = None
+    _identity_complete: bool = False
     _recurrence_semantic_key: Any = None
     
     def __init__(
