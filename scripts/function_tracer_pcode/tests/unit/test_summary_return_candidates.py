@@ -2,6 +2,9 @@
 
 from dataclasses import replace
 
+import pytest
+
+from scripts.function_tracer_pcode.core.errors import ExpressionCycleError
 from scripts.function_tracer_pcode.analysis.effects.summary import EffectSummary
 from scripts.function_tracer_pcode.analysis.recurrence.summarizer import (
     StructuralRecurrenceSummarizer,
@@ -374,12 +377,29 @@ def test_unresolved_exact_return_is_not_used_as_summary_seed():
     assert not _return_is_exact_seed(ret)
 
 
-def test_cyclic_exact_return_expression_is_not_used_as_summary_seed():
-    phi = Expression.phi([])
-    phi.value.append((None, phi))
-    ret = ReturnInfo(address="0x1000", value=phi, return_kind="exact")
+def _cyclic_phi() -> Expression:
+    """自分自身を branch に持つ PHI。
 
-    assert not _return_is_exact_seed(ret)
+    公開 API では作れない形（`Expression.phi()` の branch は不変）なので、
+    内部表現を直接書いて「壊れた graph が来たら」を再現する。
+    """
+
+    phi = Expression.phi([])
+    phi.__dict__["value"] = ((None, phi),)
+    return phi
+
+
+def test_cyclic_exact_return_expression_is_rejected_as_an_internal_bug():
+    """Issue #22 PR-22-B: 閉路は seed 判定にすら到達せず、内部不整合になる。
+
+    以前はこの graph を「summary seed に使わない」ことで無害化していた。閉路の
+    ある式は凍結できないので、解析結果（`ReturnInfo`）を組み立てた時点で内部
+    バグとして落ちる。placeholder を置いて意味処理を続けるより、どこで壊れたかが
+    はっきりする。seed 側の guard は防御として残してある。
+    """
+
+    with pytest.raises(ExpressionCycleError):
+        ReturnInfo(address="0x1000", value=_cyclic_phi(), return_kind="exact")
 
 
 def test_resolved_call_exact_return_can_remain_summary_seed():

@@ -451,27 +451,21 @@ def test_loop_template_derives_exact_parameter_from_negated_notequal_conditions(
     residual_expr = Expression.binary_op("INT_SUB", p1, mask_expr)
     residual_expr.size = 4
 
-    masked_equals_eight = Condition(
-        Expression.binary_op(
-            "INT_NOTEQUAL",
-            Expression.binary_op("INT_SUB", mask_expr, _const(8)),
-            _const(0),
-        ),
-        True,
+    masked_difference = Expression.binary_op("INT_SUB", mask_expr, _const(8))
+    masked_difference.size = 4
+    masked_equals_eight_expr = Expression.binary_op(
+        "INT_NOTEQUAL", masked_difference, _const(0)
     )
-    masked_equals_eight.expression.operands[0].size = 4
-    masked_equals_eight.expression.size = 1
+    masked_equals_eight_expr.size = 1
+    masked_equals_eight = Condition(masked_equals_eight_expr, True)
 
-    residual_equals_one = Condition(
-        Expression.binary_op(
-            "INT_NOTEQUAL",
-            Expression.binary_op("INT_ADD", _neg(_const(1)), residual_expr),
-            _const(0),
-        ),
-        True,
+    residual_difference = Expression.binary_op("INT_ADD", _neg(_const(1)), residual_expr)
+    residual_difference.size = 4
+    residual_equals_one_expr = Expression.binary_op(
+        "INT_NOTEQUAL", residual_difference, _const(0)
     )
-    residual_equals_one.expression.operands[0].size = 4
-    residual_equals_one.expression.size = 1
+    residual_equals_one_expr.size = 1
+    residual_equals_one = Condition(residual_equals_one_expr, True)
 
     norm_lhs, norm_rhs = _normalize_values_under_exact_conditions(
         _mul(_exact_triangular(p1), _exact_triangular(p2)),

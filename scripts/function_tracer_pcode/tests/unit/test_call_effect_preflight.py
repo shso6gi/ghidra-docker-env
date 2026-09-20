@@ -519,11 +519,11 @@ def test_preflight_does_not_self_certify_monkeypatched_normalizer(monkeypatch):
     pytest.importorskip("z3")
     left = create_mock_analysis(
         "left",
-        returns=[ReturnInfo("0x1", [], Expression.constant(0, size=4))],
+        returns=[ReturnInfo("0x1", Expression.constant(0, size=4))],
     )
     right = create_mock_analysis(
         "right",
-        returns=[ReturnInfo("0x2", [], Expression.constant(1, size=4))],
+        returns=[ReturnInfo("0x2", Expression.constant(1, size=4))],
     )
     invoked = []
 

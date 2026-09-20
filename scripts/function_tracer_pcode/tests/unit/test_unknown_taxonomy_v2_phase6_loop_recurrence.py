@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.function_tracer_pcode.authority.contracts import IdentityScope, authority_digest
+from scripts.function_tracer_pcode.core.errors import ExpressionCycleError
 from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
     ProducerStageRegistry,
 )
@@ -94,12 +95,31 @@ def test_phi_return_authority_serialization_is_recursive_and_canonical():
     )
 
 
-def test_cyclic_phi_return_authority_serialization_uses_structural_reference():
-    value = Expression.phi([])
-    value.value.append((None, value))
+def _cyclic_phi():
+    """自分自身を branch に持つ PHI（公開 API では作れないので内部表現を書く）。"""
 
-    payload = ReturnInfo("0x1000", value).to_dict()
-    cycle_payload = payload["value"]["value"][0]["value"]
+    value = Expression.phi([])
+    value.__dict__["value"] = ((None, value),)
+    return value
+
+
+def test_cyclic_phi_return_is_rejected_before_it_reaches_authority():
+    """Issue #22 PR-22-B: 閉路のある戻り値は結果化まで進まない。
+
+    閉路を `cycle_ref` に畳んだ payload を authority へ渡すと、「見えていない
+    部分」を無視した digest で判定が確定してしまう。凍結できない graph は
+    `ReturnInfo` を組み立てる時点で内部バグになる。
+    """
+
+    with pytest.raises(ExpressionCycleError):
+        ReturnInfo("0x1000", _cyclic_phi())
+
+
+def test_cycle_placeholders_remain_available_for_unfrozen_debug_serialization():
+    """未凍結の式の `to_dict()` は従来どおり `cycle_ref` を出す（表示用）。"""
+
+    payload = _cyclic_phi().to_dict()
+    cycle_payload = payload["value"][0]["value"]
 
     assert cycle_payload["type"] == "PHI"
     assert "cycle_ref" in cycle_payload
