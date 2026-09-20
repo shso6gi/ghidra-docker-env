@@ -1908,7 +1908,16 @@ def _impl__unroll_counted_state_transition_value(
         return None
     for _ in range(int(iteration_count)):
         value = self._replace_expression_node(transition_expr, state_placeholder, value)
-        value.size = max(1, int(getattr(runtime_ref, "result_size", 0) or getattr(value, "size", 0) or 0))
+        value = value.with_semantic_fields(
+            size=max(
+                1,
+                int(
+                    getattr(runtime_ref, "result_size", 0)
+                    or getattr(value, "size", 0)
+                    or 0
+                ),
+            )
+        )
     return value
 
 

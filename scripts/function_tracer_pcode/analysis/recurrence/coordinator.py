@@ -899,8 +899,10 @@ def _impl__build_parity_split_loop_value(
         n_odd = Expression.binary_op("INT_SDIV", Expression.binary_op("INT_ADD", n_expr, one), two)
         first_even = Expression.binary_op("INT_ADD", start_expr, one)
         first_odd = start_expr
-    for item in (n_even, n_odd, first_even, first_odd):
-        item.size = size
+    n_even, n_odd, first_even, first_odd = (
+        item.with_semantic_fields(size=size)
+        for item in (n_even, n_odd, first_even, first_odd)
+    )
 
     sum_even = self._build_arithmetic_progression_sum(first_even, n_even, size)
     sum_odd = self._build_arithmetic_progression_sum(first_odd, n_odd, size)
@@ -1250,8 +1252,7 @@ def _impl__triangular(self, expr: Expression, size: int, shift_amount: Expressio
 def _impl__zero_extend_bitpattern(self, expr: Expression, target_size: int) -> Expression:
     source_size = expr.size or 0
     if source_size <= 0 or source_size >= target_size:
-        copied = expr
-        copied.size = max(source_size, target_size)
+        copied = expr.with_semantic_fields(size=max(source_size, target_size))
         if source_size > target_size:
             return self._truncate_to_width(copied, target_size)
         return copied
@@ -1262,8 +1263,7 @@ def _impl__zero_extend_bitpattern(self, expr: Expression, target_size: int) -> E
 
 def _impl__truncate_to_width(self, expr: Expression, target_size: int) -> Expression:
     if (expr.size or 0) <= target_size:
-        expr.size = target_size
-        return expr
+        return expr.with_semantic_fields(size=target_size)
     truncated = Expression.binary_op("SUBPIECE", expr, Expression.constant(0, 4))
     truncated.size = target_size
     return truncated
@@ -1278,8 +1278,7 @@ def _impl__scale_term(
     if factor == 0:
         return None
     if factor == 1:
-        expr.size = wide_size
-        return expr
+        return expr.with_semantic_fields(size=wide_size)
     if factor == -1:
         negated = Expression.unary_op("INT_2COMP", expr)
         negated.size = wide_size

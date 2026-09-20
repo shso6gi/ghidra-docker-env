@@ -116,10 +116,9 @@ def _simplify_mult_identities(expr: Expression) -> Expression:
         zero.size = expr.size or zero.size
         return zero
     if _is_one_constant(left):
-        right.size = expr.size or right.size
-        return right
+        return right.with_semantic_fields(size=expr.size or right.size)
     if _is_one_constant(right):
-        left.size = expr.size or left.size
+        return left.with_semantic_fields(size=expr.size or left.size)
         return left
     return expr
 
