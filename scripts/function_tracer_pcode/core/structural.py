@@ -1022,7 +1022,9 @@ def structural_equals(
     """
 
     if left is right:
-        return left is not None
+        # 同じ object、または「両方とも無い」。旧実装の key も `("none",)`
+        # どうしを一致として扱っていた。
+        return True
     if left is None or right is None:
         return False
 
@@ -1032,7 +1034,9 @@ def structural_equals(
 
     def _quick(x, y) -> Optional[bool]:
         if x is y:
-            return x is not None
+            # 欠けた operand（二項演算の右辺が無い等）は「両方とも無い」なら
+            # 一致。片方だけ無いなら下で不一致になる。
+            return True
         if x is None or y is None:
             return False
         known = memo.get((id(x), id(y)), _MISSING)

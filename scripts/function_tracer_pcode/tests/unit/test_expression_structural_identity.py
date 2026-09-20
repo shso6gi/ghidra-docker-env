@@ -413,6 +413,21 @@ def test_budget_exhaustion_never_reports_equality():
     assert structural.structural_equals(left, left, budget=1) is True
 
 
+def test_missing_operands_match_only_when_both_sides_are_missing():
+    """欠けた operand は「両方とも無い」ときだけ一致（旧 key と同じ扱い）。"""
+
+    complete = Expression.binary_op(
+        "INT_SUB", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4)
+    )
+    truncated = complete.clone_with(operands=[Expression.parameter("a", 0, size=4)])
+    other_truncated = complete.clone_with(operands=[Expression.parameter("a", 0, size=4)])
+
+    assert structural.structural_equals(truncated, other_truncated) is True
+    assert structural.structural_equals(truncated, complete) is False
+    assert structural.structural_equals(None, None) is True
+    assert structural.structural_equals(None, complete) is False
+
+
 def test_unknown_node_kinds_are_never_equal():
     class FakeKind:
         name = "MADE_UP"
