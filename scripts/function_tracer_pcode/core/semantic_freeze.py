@@ -29,7 +29,7 @@ PR-106-0 の経路で `internal_exception` の ERROR になる。
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import structural as _structural
 from scripts.function_tracer_pcode.core.errors import (

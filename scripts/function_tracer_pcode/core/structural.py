@@ -22,7 +22,6 @@ from scripts.function_tracer_pcode.core.semantic_snapshot import (
     local_semantic_payload,
     ordered_semantic_edges,
     semantic_projection,
-    walk_dag,
 )
 
 
