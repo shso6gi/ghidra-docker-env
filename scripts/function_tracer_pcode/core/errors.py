@@ -202,6 +202,18 @@ class ExpressionCycleError(AnalysisFailureError):
     """
 
 
+class UnpublishedSemanticInputError(AnalysisFailureError):
+    """公開されていない（構築・精錬の途中の）意味 object を consumer が受け取った。
+
+    solver へ渡す論理式は「確定した意味」から作る。renderer が自分で確定させて
+    しまうと、まだ組み立て途中の式が確定扱いになり、どの時点の意味を論理式に
+    したのかが呼び出し順で変わる。公開する責務は値を作った側（producer）にある
+    ので、ここへ未公開が届くのは公開点が抜けている印 — 内部バグとして扱う。
+
+    `FrozenExpressionError` と同じ理由で標準の型階層へは混ぜない。
+    """
+
+
 class DeadlineExceeded(AnalysisLimitation):
     """解析の予算（時間・段数）を使い切って打ち切った限界。
 

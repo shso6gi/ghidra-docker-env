@@ -52,14 +52,16 @@ from scripts.function_tracer_pcode.core import (
     StorageInfo,
 )
 from conftest import resolve_mock_data_type
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def _param(name: str) -> Expression:
-    return Expression(ExpressionType.PARAMETER, name=name, size=8)
+    # leaf は作った時点で完成しているので、公開して返す。
+    return published(Expression(ExpressionType.PARAMETER, name=name, size=8))
 
 
 def _const(value: int) -> Expression:
-    return Expression(ExpressionType.CONSTANT, value=value, size=8)
+    return published(Expression(ExpressionType.CONSTANT, value=value, size=8))
 
 
 def _loc(name: str, offset: int, size: int) -> CanonicalLocation:
@@ -322,7 +324,7 @@ def test_extract_return_cases_deduplicates_after_safe_value_normalization():
 
     assert len(cases) == 1
     assert cases[0].source_indices == [0, 1]
-    assert cases[0].value_expr.to_smt() == _param("param_1").to_smt()
+    assert published(cases[0].value_expr).to_smt() == _param("param_1").to_smt()
 
 
 def test_extract_return_cases_keeps_distinct_conditions_separate():
@@ -370,7 +372,7 @@ def test_extract_return_cases_skips_contradictory_condition_regions():
     cases = extract_return_cases(analysis)
 
     assert len(cases) == 1
-    assert cases[0].value_expr.to_smt() == _const(7).to_smt()
+    assert published(cases[0].value_expr).to_smt() == _const(7).to_smt()
 
 
 def test_extract_return_cases_prunes_impossible_or_region():
@@ -395,7 +397,7 @@ def test_extract_return_cases_prunes_impossible_or_region():
     cases = extract_return_cases(analysis)
 
     assert len(cases) == 1
-    assert cases[0].value_expr.to_smt() == _const(7).to_smt()
+    assert published(cases[0].value_expr).to_smt() == _const(7).to_smt()
 
 
 def test_return_case_value_smt_lowers_symbolic_post_state_reads_with_effect_summary():
@@ -1364,7 +1366,7 @@ def test_nested_zero_extend_uses_rendered_operand_width_without_double_extension
         size=8,
     )
 
-    smt = outer_zext.to_smt()
+    smt = published(outer_zext).to_smt()
 
     assert "((_ zero_extend 32) (bvmul" not in smt
     assert smt == "(bvmul (_ bv2 64) ((_ zero_extend 32) (bvadd param_1 (_ bv7 32))))"

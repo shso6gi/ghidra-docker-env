@@ -55,9 +55,11 @@ FREEZE_SITE = "core.semantic_freeze.freeze_expression"
 #: なり得るので、診断のための数値のために bignum を育てない。
 TREE_SIZE_CAP = 1 << 62
 
-#: 公開走査の深さ上限。解析結果の入れ子はこれより浅い（診断用の深い object
-#: 網まで辿らないための歯止め）。
-_PUBLISH_MAX_DEPTH = 32
+#: 公開走査で葉として扱う値（中に意味値が入らない型）。
+_PUBLISH_LEAF_SCALARS = (str, bytes, int, float, bool, type)
+
+#: この package の接頭辞（外の object の属性を探らないための判定に使う）。
+_PACKAGE_PREFIX = "scripts.function_tracer_pcode."
 
 
 def is_frozen(value: Any) -> bool:
@@ -94,20 +96,122 @@ def freeze_expression(expr: Optional[Expression]) -> Optional[Expression]:
     return expr
 
 
-def publish_semantic_values(container: Any) -> Any:
-    """`container` が抱えている意味 object を公開（凍結）する。
+def freeze_condition(condition: Any) -> Any:
+    """条件を検証して凍結する（式も一緒に凍る）。"""
 
-    解析結果は「確定した意味の入れ物」なので、渡した時点で中の式も条件も
-    凍っていてほしい。どの field に式が入っているかを型ごとに数え上げるのでは
-    なく、**到達できる式をすべて凍らせる** 1 つの規則にしてある: 新しい結果型や
-    新しい runtime ref 種別が増えても、公開の仕方を書き足さなくてよい。
+    if condition is None:
+        return None
+    if not getattr(condition, "_frozen", False):
+        freeze_expression(getattr(condition, "expression", None))
+        object.__setattr__(condition, "_frozen", True)
+    return condition
 
-    走査するのは dataclass / NamedTuple / tuple / list / dict / set まで。任意の
-    object の `__dict__` までは辿らない（解析の作業用 object まで巻き込まない）。
+
+def validated(expr: Optional[Expression]) -> Optional[Expression]:
+    """意味 identity の安定 API がその入口で呼ぶ検証。
+
+    「凍結済み = 検証済み」なので、凍結済みなら何もしない。未凍結なら凍らせる
+    ことで検証する。閉路はここで typed failure になるので、identity API ごとに
+    判定を書き足さなくてよい。
+
+    これは identity の **計算可能性** のための検証であって、意味の公開
+    （`publish`）とは別の関心。公開は producer が、検証は identity が行う。
     """
 
-    _publish_reachable(container, {})
+    if expr is None or getattr(expr, "_frozen", False):
+        return expr
+    return freeze_expression(expr)
+
+
+def publish(value: Any) -> Any:
+    """producer が「この意味値は確定した」と宣言する入口（**安定 interface**）。
+
+    式・条件そのものを渡す。渡した値を公開（検証 + 凍結）して返すので、
+    `value = publish(build_something())` と書ける。
+
+    consumer（solver renderer / identity / proof）は公開済みの値しか受け取らない。
+    公開するのは **値を作った側** で、consumer 側で「まだなら公開する」と救済しない
+    — 救済すると「描画されたから確定」という順序になり、まだ精錬中の値が確定扱いに
+    なる。
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, Condition):
+        return freeze_condition(value)
+    if isinstance(value, Expression):
+        return freeze_expression(value)
+    return publish_semantic_values(value)
+
+
+def publish_semantic_values(container: Any) -> Any:
+    """`container` が抱えている意味値をすべて公開する。
+
+    **これは carrier を探し回る仕組みではない**。「この入れ物の中身はもう確定
+    した」と言えるのは入れ物を組み立てた側だけなので、呼ぶのは常に carrier 自身
+    （`__post_init__` や、値を差し替える method）であって、外から container を
+    見つけて回る層は無い。registry も、型ごとの登録も、注入点も持たない。
+
+    ここが担うのは「宣言したあと、中の式と条件を漏れなく凍らせる」という機械的な
+    部分だけ。どの field に式が入っているかを carrier ごとに数え上げると、field を
+    1 つ足したときに公開だけが置いていかれるので、**到達できる意味値をすべて
+    公開する**という 1 つの規則にしてある。
+
+    走査の範囲は明示してある（黙って諦める経路を作らない）:
+
+    * 式 / 条件 → 公開する
+    * dataclass / NamedTuple / tuple / list / dict / set → 中へ入る
+    * **この package で定義された** その他の object → `__dict__` の値へ入る。
+      新しい carrier 型が dataclass でなくても取りこぼさないため
+    * それ以外（Ghidra object・mock・標準ライブラリ）→ 葉。意味の入れ物ではない。
+      **属性を探らない**: 記録再生中の proxy に観測を作ってしまうため
+
+    深さで打ち切らない（明示 stack なので再帰上限も無い）。`id` で一度見た
+    object は二度見ないので、循環があっても止まる。
+    """
+
+    stack: List[Any] = [container]
+    seen: Dict[int, bool] = {}
+    while stack:
+        value = stack.pop()
+        if value is None or isinstance(value, _PUBLISH_LEAF_SCALARS):
+            continue
+        value_id = id(value)
+        if value_id in seen:
+            continue
+        seen[value_id] = True
+
+        # 型は `isinstance` で見る。`hasattr` で属性を探ると、解析結果が抱えて
+        # いる Ghidra object（記録再生中は proxy）に観測が走ってしまう。
+        if isinstance(value, Expression):
+            freeze_expression(value)
+            continue
+        if isinstance(value, Condition):
+            freeze_condition(value)
+            continue
+        if isinstance(value, (tuple, list, set, frozenset)):
+            stack.extend(value)
+            continue
+        if isinstance(value, dict):
+            stack.extend(value.values())
+            continue
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            stack.extend(
+                getattr(value, field.name, None) for field in dataclasses.fields(value)
+            )
+            continue
+        if _is_owned_object(value):
+            owned_state = getattr(value, "__dict__", None)
+            if isinstance(owned_state, dict):
+                stack.extend(owned_state.values())
     return container
+
+
+def _is_owned_object(value: Any) -> bool:
+    """この package が定義した object か（外の object の属性は探らない）。"""
+
+    module = type(value).__module__ or ""
+    return module.startswith(_PACKAGE_PREFIX)
 
 
 def _publish_runtime_ref_values(node: Any, published: Dict[int, bool]) -> None:
@@ -122,63 +226,10 @@ def _publish_runtime_ref_values(node: Any, published: Dict[int, bool]) -> None:
     runtime_ref = node.__dict__.get("runtime_ref")
     if runtime_ref is None:
         return
-    _publish_reachable(runtime_ref, published)
-
-
-def _publish_reachable(value: Any, published: Dict[int, bool], depth: int = 0) -> None:
-    if value is None or depth > _PUBLISH_MAX_DEPTH:
+    if id(runtime_ref) in published:
         return
-    if isinstance(value, (str, bytes, int, float, bool)):
-        return
-    value_id = id(value)
-    if value_id in published:
-        return
-    published[value_id] = True
-
-    # 型は `isinstance` で見る。`hasattr` で属性を探ると、解析結果が抱えている
-    # Ghidra object（記録再生中は proxy）に観測が走り、記録済みの観測列に無い
-    # 問い合わせを作ってしまう。
-    if isinstance(value, Expression):
-        freeze_expression(value)
-        return
-    if isinstance(value, Condition):
-        freeze_condition(value)
-        return
-    if isinstance(value, (tuple, list, set, frozenset)):
-        for item in value:
-            _publish_reachable(item, published, depth + 1)
-        return
-    if isinstance(value, dict):
-        for item in value.values():
-            _publish_reachable(item, published, depth + 1)
-        return
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        for field in dataclasses.fields(value):
-            _publish_reachable(getattr(value, field.name, None), published, depth + 1)
-
-
-def validated(expr: Optional[Expression]) -> Optional[Expression]:
-    """意味 identity の安定 API がその入口で呼ぶ検証。
-
-    「凍結済み = 検証済み」なので、凍結済みなら何もしない。未凍結なら凍らせる
-    ことで検証する。閉路はここで typed failure になるので、identity API ごとに
-    判定を書き足さなくてよい。
-    """
-
-    if expr is None or getattr(expr, "_frozen", False):
-        return expr
-    return freeze_expression(expr)
-
-
-def freeze_condition(condition: Any) -> Any:
-    """条件を凍結する（式も一緒に凍る）。"""
-
-    if condition is None:
-        return None
-    if not getattr(condition, "_frozen", False):
-        freeze_expression(getattr(condition, "expression", None))
-        object.__setattr__(condition, "_frozen", True)
-    return condition
+    published[id(runtime_ref)] = True
+    publish_semantic_values(runtime_ref)
 
 
 def _finalize_node(node: Expression) -> None:

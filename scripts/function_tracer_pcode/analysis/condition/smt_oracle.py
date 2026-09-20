@@ -7,7 +7,6 @@ import importlib
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core import Condition
-from scripts.function_tracer_pcode.core.semantic_freeze import freeze_expression
 from scripts.function_tracer_pcode.core.semantic_projection import project_runtime_ref
 from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
 from scripts.function_tracer_pcode.core.structural import condition_key, key_contains_placeholder
@@ -26,6 +25,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
     smt_logic_name,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.core.semantic_freeze import publish
 
 
 class ConditionSMTOracle:
@@ -423,9 +423,6 @@ class ConditionSMTOracle:
             expr,
             symbol_names,
         )
-        # symbol 名を差し替えた式は **この query のための新しい意味値**。作った側
-        # が公開してから renderer へ渡す（renderer に lifecycle を進めさせない）。
-        freeze_expression(rewritten)
         condition_smt = rewritten.to_smt(float_mode="fp")
         if getattr(condition, "negated", False):
             return f"(not {condition_smt})"
@@ -439,8 +436,18 @@ class ConditionSMTOracle:
         active: Optional[set[int]] = None,
         memo: Optional[Dict[int, Any]] = None,
     ):
+        """symbol 名を差し替えた query 用の式を作る。**この関数が公開点**。
+
+        外から呼ばれたとき（`active` / `memo` を渡されないとき）が「1 本作り
+        終えた」単位なので、そこで公開する。内部の再帰は組み立ての途中なので
+        公開しない。
+        """
         if expr is None:
             return expr
+        if active is None and memo is None:
+            return publish(
+                cls._rewrite_expr_with_symbol_names(expr, symbol_names, set(), {})
+            )
         if active is None:
             active = set()
         if memo is None:

@@ -18,6 +18,7 @@ from scripts.function_tracer_pcode.core import (
     PTRSUB_OPCODE,
     ReturnInfo,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def _param(name: str, *, size: int, is_signed: bool) -> dict:
@@ -327,7 +328,7 @@ def test_memory_address_smt_uses_structured_runtime_address_symbol() -> None:
         size=4,
     )
 
-    assert expr.to_smt() == "(select mem32 (_ bv1122392 64))"
+    assert published(expr).to_smt() == "(select mem32 (_ bv1122392 64))"
 
 
 def test_formula_builder_skips_concrete_address_anchor_extra_vars() -> None:

@@ -22,6 +22,7 @@ from normalization_helpers import (
     make_neg,
     make_param,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def test_normalize_expression_preserves_extension_with_unknown_output_width() -> None:
@@ -117,12 +118,13 @@ def _make_canonical_triangular(base: Expression) -> Expression:
         operands=[product, make_const(1, size=8)],
         size=8,
     )
-    return Expression(
+    # 期待値もここで組み立て終わり。producer として公開してから比べる。
+    return published(Expression(
         ExpressionType.BINARY_OP,
         operator="SUBPIECE",
         operands=[shifted, make_const(0, size=4)],
         size=4,
-    )
+    ))
 
 
 def test_normalize_division_signs_uses_min_exclusion_safely():
@@ -241,7 +243,7 @@ def test_normalize_expression_extracts_high_half_from_shifted_piece():
     context = NormalizationContext()
     normalized = normalize_expression(expr, context)
 
-    assert normalized.to_smt() == high.to_smt()
+    assert published(normalized).to_smt() == published(high).to_smt()
     assert any(
         rule.rule_name == "WIDTH_ADAPTER_SIMPLIFICATION"
         for rule in context.applied_rules
@@ -267,7 +269,7 @@ def test_normalize_expression_extracts_high_subpiece_from_piece() -> None:
     context = NormalizationContext()
     normalized = normalize_expression(expr, context)
 
-    assert normalized.to_smt() == high.to_smt()
+    assert published(normalized).to_smt() == published(high).to_smt()
     assert any(
         rule.rule_name == "WIDTH_ADAPTER_SIMPLIFICATION"
         for rule in context.applied_rules
@@ -340,9 +342,9 @@ def test_normalize_expression_reconstructs_masked_bytes_when_positive_guard_prov
 
     normalized = normalize_expression(reconstructed, context)
 
-    assert normalized.to_smt() in {
-        value.to_smt(),
-        f"((_ extract 31 0) {value.to_smt()})",
+    assert published(normalized).to_smt() in {
+        published(value).to_smt(),
+        f"((_ extract 31 0) {published(value).to_smt()})",
     }
     assert any(
         rule.rule_name == "FACT_MASK_SIMPLIFICATION"
@@ -432,9 +434,9 @@ def test_normalize_expression_reconstructs_bytes_with_commuted_masked_sources() 
     context = NormalizationContext()
     normalized = normalize_expression(reconstructed, context)
 
-    assert normalized.to_smt() in {
-        param.to_smt(),
-        f"((_ extract 31 0) {param.to_smt()})",
+    assert published(normalized).to_smt() in {
+        published(param).to_smt(),
+        f"((_ extract 31 0) {published(param).to_smt()})",
     }
     assert any(
         rule.rule_name == "BYTE_RECONSTRUCTION"
@@ -497,7 +499,7 @@ def test_normalize_expression_reconstructs_shifted_piece_bytes_then_simplifies_h
     context = NormalizationContext()
     normalized = normalize_expression(reconstructed, context)
 
-    assert normalized.to_smt() == high.to_smt()
+    assert published(normalized).to_smt() == published(high).to_smt()
     assert any(
         rule.rule_name == "BYTE_RECONSTRUCTION"
         for rule in context.applied_rules
@@ -550,9 +552,9 @@ def test_normalize_expression_canonicalizes_sub_and_add_neg_to_same_form():
     normalized_sub = normalize_expression(expr_sub, NormalizationContext())
     normalized_add_neg = normalize_expression(expr_add_neg, NormalizationContext())
 
-    assert normalized_sub.to_smt() == normalized_add_neg.to_smt()
-    assert "(bvadd param_1" in normalized_sub.to_smt()
-    assert "bvneg" in normalized_sub.to_smt()
+    assert published(normalized_sub).to_smt() == published(normalized_add_neg).to_smt()
+    assert "(bvadd param_1" in published(normalized_sub).to_smt()
+    assert "bvneg" in published(normalized_sub).to_smt()
 
 
 def test_normalize_expression_removes_add_zero_identity():
@@ -590,7 +592,7 @@ def test_normalize_expression_flattens_and_sorts_add_tree():
     )
 
     normalized = normalize_expression(expr, NormalizationContext())
-    assert normalized.to_smt() == "(bvadd param_1 param_2)"
+    assert published(normalized).to_smt() == "(bvadd param_1 param_2)"
 
 
 def test_normalize_expression_simplifies_width_adapters():
@@ -720,7 +722,7 @@ def test_normalize_expression_canonicalizes_arithmetic_series_closed_form():
 
     normalized = normalize_expression(expr, NormalizationContext())
 
-    assert normalized.to_smt() != _make_canonical_triangular(param).to_smt()
+    assert published(normalized).to_smt() != _make_canonical_triangular(param).to_smt()
 
 
 def test_normalize_expression_canonicalizes_triangular_prev_plus_affine_completion():
@@ -784,7 +786,7 @@ def test_normalize_expression_canonicalizes_triangular_prev_plus_affine_completi
 
     normalized = normalize_expression(expr, NormalizationContext())
 
-    assert normalized.to_smt() != _make_canonical_triangular(param).to_smt()
+    assert published(normalized).to_smt() != _make_canonical_triangular(param).to_smt()
 
 
 def test_normalize_expression_canonicalizes_exact_triangular_phi():
@@ -827,7 +829,7 @@ def test_normalize_expression_canonicalizes_exact_triangular_phi():
     expected.operands[0].operands[0].operands[0].size = 8
     expected.operands[0].operands[0].operands[1].size = 8
 
-    assert normalized.to_smt() == expected.to_smt()
+    assert published(normalized).to_smt() == published(expected).to_smt()
 
 
 def test_normalize_expression_canonicalizes_wrapped_exact_triangular_phi() -> None:
@@ -853,7 +855,7 @@ def test_normalize_expression_canonicalizes_wrapped_exact_triangular_phi() -> No
     phi.size = 8
 
     normalized = normalize_expression(phi, NormalizationContext())
-    smt = normalized.to_smt()
+    smt = published(normalized).to_smt()
     assert "ite" not in smt
     assert "bvlshr" in smt
     assert "bvmul" in smt
@@ -893,7 +895,7 @@ def test_normalize_expression_canonicalizes_exact_phi_prev_plus_affine_completio
 
     normalized = normalize_expression(expr, NormalizationContext())
 
-    assert normalized.to_smt() != _make_canonical_triangular(param).to_smt()
+    assert published(normalized).to_smt() != _make_canonical_triangular(param).to_smt()
 
 
 def test_normalize_expression_canonicalizes_logged_affine_exact_phi_completion():
@@ -945,7 +947,7 @@ def test_normalize_expression_canonicalizes_logged_affine_exact_phi_completion()
 
     normalized = normalize_expression(expr, NormalizationContext())
 
-    assert normalized.to_smt() != _make_canonical_triangular(param).to_smt()
+    assert published(normalized).to_smt() != _make_canonical_triangular(param).to_smt()
 
 
 def test_normalize_expression_canonicalizes_logged_pair_2_5_shape():
@@ -1027,7 +1029,7 @@ def test_normalize_expression_canonicalizes_logged_pair_2_5_shape():
 
     normalized = normalize_expression(expr, NormalizationContext())
 
-    assert normalized.to_smt() != _make_canonical_triangular(param).to_smt()
+    assert published(normalized).to_smt() != _make_canonical_triangular(param).to_smt()
 
 
 def test_normalize_expression_canonicalizes_triangular_prev_plus_base():
@@ -1072,7 +1074,7 @@ def test_normalize_expression_canonicalizes_triangular_prev_plus_base():
 
     normalized = normalize_expression(expr, NormalizationContext())
 
-    assert normalized.to_smt() != _make_canonical_triangular(param).to_smt()
+    assert published(normalized).to_smt() != _make_canonical_triangular(param).to_smt()
 
 
 def test_normalize_expression_canonicalizes_modulo_expansion():
@@ -1083,7 +1085,7 @@ def test_normalize_expression_canonicalizes_modulo_expansion():
     normalized = normalize_expression(expr, context)
 
     assert normalized.operator == "INT_SREM"
-    assert normalized.to_smt() == "(bvsrem param_1 param_2)"
+    assert published(normalized).to_smt() == "(bvsrem param_1 param_2)"
     assert [rule.rule_name for rule in context.applied_rules] == [
         "MODULO_CANONICALIZATION"
     ]
@@ -1120,7 +1122,7 @@ def test_normalize_expression_reduces_abs_bit_hack_when_expr_nonnegative():
     context = NormalizationContext(nonneg_exprs={value.structural_key(normalize_commutative=True)})
     normalized = normalize_expression(expr, context)
 
-    assert normalized.to_smt() == value.to_smt()
+    assert published(normalized).to_smt() == published(value).to_smt()
     assert "BITWISE_ABS_CANONICALIZATION" in [
         rule.rule_name for rule in context.applied_rules
     ]
@@ -1158,7 +1160,7 @@ def test_normalize_expression_reduces_abs_bit_hack_when_expr_negative():
     normalized = normalize_expression(expr, context)
 
     assert normalized.operator == "INT_2COMP"
-    assert normalized.operands[0].to_smt() == value.to_smt()
+    assert published(normalized).operands[0].to_smt() == published(value).to_smt()
     assert "BITWISE_ABS_CANONICALIZATION" in [
         rule.rule_name for rule in context.applied_rules
     ]

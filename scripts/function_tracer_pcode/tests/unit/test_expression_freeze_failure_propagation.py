@@ -22,7 +22,7 @@ from scripts.function_tracer_pcode.core.errors import (
     reset_pair_failure_scopes,
 )
 from scripts.function_tracer_pcode.core.expression import Expression
-from scripts.function_tracer_pcode.core.semantic_freeze import freeze_expression
+from scripts.function_tracer_pcode.core.semantic_freeze import freeze_expression, publish
 from scripts.function_tracer_pcode.tests.unit.test_issue106_pair_limitation_propagation import (
     _analyses,
     _equivalent_stage_plan,
@@ -77,10 +77,10 @@ def test_frozen_mutation_records_the_bug_in_the_ledger_before_raising():
 
 
 def test_a_cycle_is_not_rendered_into_a_proof():
-    """閉路は placeholder を置いて SMT 化せず、内部不整合として落ちる。"""
+    """閉路は公開の時点で落ち、solver renderer まで到達しない。"""
 
     with pytest.raises(ExpressionCycleError):
-        _cyclic_expression().to_smt()
+        publish(_cyclic_expression()).to_smt()
 
 
 def test_a_swallowed_cycle_still_leaves_the_ledger_entry():

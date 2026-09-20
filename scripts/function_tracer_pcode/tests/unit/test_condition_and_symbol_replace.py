@@ -4,6 +4,7 @@
 from scripts.function_tracer_pcode.proof.formula.symbol_replace import build_symbol_replacer
 from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.core import CanonicalLocation, Condition, Expression
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 class _DummyRuntimeRef:
@@ -154,8 +155,8 @@ def test_symbol_replacer_handles_ast_and_string_without_collision():
         Expression.parameter("p1", 1, size=4),
     )
 
-    assert replace_symbol(expr) == "(bvadd p_1 p1_1)"
-    assert replace_symbol(Expression.parameter("p_abc", 0, size=4)) == "p_abc"
+    assert replace_symbol(published(expr)) == "(bvadd p_1 p1_1)"
+    assert replace_symbol(published(Expression.parameter("p_abc", 0, size=4))) == "p_abc"
     assert replace_symbol(" (and p p1 p_1 p1_1)") == " (and p_1 p1_1 p_1 p1_1)"
 
 

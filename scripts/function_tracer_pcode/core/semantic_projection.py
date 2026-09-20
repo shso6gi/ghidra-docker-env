@@ -14,12 +14,14 @@
 読み取りの境界（凍結後に何を読んでよいか）:
 
 * `SemanticSnapshot` の pure value — 常に可
-* `core/runtime_refs/` の **frozen な value object の構造**（`isinstance` 判定、
-  `loop_summary` / `transition_expr` などの下位構造）— 可。これらは凍結
-  dataclass で、後から変わらないことが型で保証されている
-  （`test_architecture_boundaries.py` が全 ref 種別について固定している）
-* 可変な生 object（Ghidra の `data_type_obj`、`StorageInfo`）— **不可**。
-  identity は必ずこの module が凍結時に作った値を読む
+* 生 object（`runtime_ref`、Ghidra の `data_type_obj`、`StorageInfo`）— **不可**。
+  consumer が読むのは、この module が凍結時に作った値だけ
+
+ref の構造を辿る必要がある判断は、この module が凍結時に済ませて値にする。
+loop lowering はそれが一番大きいので、判断そのものは
+`core/loop_lowering_semantics.py` が持ち、ここはそれを 1 回呼んで
+`RuntimeRefProjection.loop_lowering` に入れる（`isinstance` による ref 種別の
+振り分けも、厳密 lowering の可否も、向こうに 1 つだけある）。
 
 失敗の扱い: identity が取れないことは「無い」であって例外ではない（従来の
 包括捕捉と同じ結果）。ただし捕まえる型は列挙する — 包括捕捉を増やさないため。
@@ -32,6 +34,11 @@ from types import MappingProxyType
 from enum import Enum
 from typing import Any, NamedTuple, Optional, Tuple
 
+from scripts.function_tracer_pcode.core.loop_lowering_semantics import (
+    ABSENT_LOWERING,
+    LoopLoweringSemantics,
+    project_loop_lowering,
+)
 from scripts.function_tracer_pcode.core.runtime_refs import (
     AddressValueRef,
     CanonicalLocation,
@@ -336,6 +343,8 @@ class RuntimeRefProjection:
     address_object_identity: Optional[Tuple[Any, ...]]
     #: loop lowering の SMT function identity
     lowering_identity: Optional[Tuple[Any, ...]]
+    #: loop lowering に必要な意味（renderer が見るのはこれだけ）
+    loop_lowering: LoopLoweringSemantics
     #: VARIABLE がそのまま unknown symbol として宣言される種別か
     declares_variable_symbol: bool
 
@@ -351,6 +360,7 @@ _ABSENT_RUNTIME = RuntimeRefProjection(
     address_offset=None,
     address_object_identity=None,
     lowering_identity=None,
+    loop_lowering=ABSENT_LOWERING,
     declares_variable_symbol=False,
 )
 
@@ -443,6 +453,7 @@ def project_runtime_ref(expr: Any, runtime_ref: Any) -> RuntimeRefProjection:
         return _ABSENT_RUNTIME
     stable = _stable_key_or_none(runtime_ref)
     semantic = _semantic_key_or_none(runtime_ref)
+    lowering_identity = _lowering_identity(expr, runtime_ref, stable, semantic)
     return RuntimeRefProjection(
         structural_key=semantic_runtime_ref_key(runtime_ref),
         stable_key=stable,
@@ -453,7 +464,10 @@ def project_runtime_ref(expr: Any, runtime_ref: Any) -> RuntimeRefProjection:
         is_address_value_ref=isinstance(runtime_ref, AddressValueRef),
         address_offset=_address_offset(runtime_ref),
         address_object_identity=_address_object_identity(runtime_ref),
-        lowering_identity=_lowering_identity(expr, runtime_ref, stable, semantic),
+        lowering_identity=lowering_identity,
+        loop_lowering=project_loop_lowering(
+            expr, runtime_ref, identity=lowering_identity
+        ),
         declares_variable_symbol=isinstance(
             runtime_ref, (CanonicalLocation, PostStateReadRef, PostStateValueRef)
         ),

@@ -1,4 +1,5 @@
 from scripts.function_tracer_pcode.tests.unit._recurrence_fixtures import *
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 def test_return_region_summary_coverage_rejects_positive_guard_with_one_gap():
     summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
@@ -785,7 +786,7 @@ def test_counted_loop_summary_value_uses_intrinsic_for_negative_step_single_resi
     assert expr.expr_type == ExpressionType.INTRINSIC
     assert expr.opcode == COUNTED_LOOP_SUM_OPCODE
     assert expression_has_unresolved_value(expr) is False
-    assert "rt_counted_loop_sum_" not in expression_to_smt(expr)
+    assert "rt_counted_loop_sum_" not in expression_to_smt(published(expr))
 
 def test_counted_loop_latch_guard_rejects_boolean_bound_expression():
     summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)

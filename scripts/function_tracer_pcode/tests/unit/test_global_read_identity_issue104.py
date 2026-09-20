@@ -48,6 +48,7 @@ from scripts.function_tracer_pcode.tests.unit.test_global_effect_surface_issue10
 )
 from unittest.mock import Mock
 from conftest import resolve_mock_data_type
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def _run_z3(query: str) -> str:
@@ -68,26 +69,26 @@ def test_global_address_constant_renders_as_the_shared_base_symbol():
     left = _const_addr(_global_ref("g", 0x1000d0, 4, program_id=1))
     right = _const_addr(_global_ref("g", 0x2020a0, 4, program_id=2))
     symbol = global_address_symbol_name(("g", 4, 0))
-    assert left.to_smt() == symbol
-    assert right.to_smt() == symbol
+    assert published(left).to_smt() == symbol
+    assert published(right).to_smt() == symbol
     inner = _const_addr(_global_ref("h", 0x1000d8, 16, addr=0x1000dc))
-    assert inner.to_smt() == f"(bvadd {global_address_symbol_name(('h', 16, 0))} (_ bv4 64))"
+    assert published(inner).to_smt() == f"(bvadd {global_address_symbol_name(('h', 16, 0))} (_ bv4 64))"
     # a 32-bit constant carrying an identity keeps its width
     narrow = Expression.constant(0x1000d0, 4, runtime_ref=_global_ref("g", 0x1000d0, 4))
-    assert narrow.to_smt() == f"((_ extract 31 0) {symbol})"
+    assert published(narrow).to_smt() == f"((_ extract 31 0) {symbol})"
 
 
 def test_global_reads_on_two_binaries_select_the_same_shared_cell():
     left = _global_read(_global_ref("g", 0x1000d0, 4, program_id=1), 4)
     right = _global_read(_global_ref("g", 0x2020a0, 4, program_id=2), 4)
-    assert left.to_smt() == right.to_smt()
-    assert left.to_smt() == f"(select mem32 {global_address_symbol_name(('g', 4, 0))})"
+    assert published(left).to_smt() == published(right).to_smt()
+    assert published(left).to_smt() == f"(select mem32 {global_address_symbol_name(('g', 4, 0))})"
 
 
 def test_constants_without_identity_still_render_literally():
-    assert Expression.constant(0x1000d0, 8).to_smt() == "(_ bv1048784 64)"
+    assert published(Expression.constant(0x1000d0, 8)).to_smt() == "(_ bv1048784 64)"
     readonly = AddressValueRef(address_offset=0x3000, can_write=False, is_volatile=False, object_symbol_name="tbl", object_base_offset=0x3000, object_size=8)
-    assert Expression.constant(0x3000, 8, runtime_ref=readonly).to_smt() == "(_ bv12288 64)"
+    assert published(Expression.constant(0x3000, 8, runtime_ref=readonly)).to_smt() == "(_ bv12288 64)"
 
 
 def test_global_base_symbols_are_declared_with_the_runtime_unknowns_and_collected():

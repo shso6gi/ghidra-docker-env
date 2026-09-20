@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 from scripts.function_tracer_pcode.analysis.condition import ConditionTracker
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.semantics.transform.expander import ExpandedValue
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def _param(name: str, index: int, size: int = 4) -> Expression:
@@ -81,8 +82,8 @@ def test_condition_tracker_refines_unknown_branch_condition_via_call_summary():
     refined = block_info.branch_condition
     assert refined.expr_type == ExpressionType.PHI
     assert "call_out_of_scope" not in refined.to_string()
-    assert "unknown" not in refined.to_smt()
-    assert "ite" in refined.to_smt()
+    assert "unknown" not in published(refined).to_smt()
+    assert "ite" in published(refined).to_smt()
 
 
 def test_condition_tracker_refines_phi_branch_condition_via_expander():

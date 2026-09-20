@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.render_smt import collect_intrinsic_smt_declarations, collect_unknown_smt_declarations, expression_smt_bit_width
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
@@ -467,10 +468,15 @@ def _impl__render_summary_auxiliary_smt(
             cloned_expr = self._clone_summary_expression_for_smt(node.expression, identity_to_spec)
             if cloned_expr is None:
                 return None
+            # 差し替えの組み立て完了点。以後手は入らない。
+            publish(cloned_expr)
             return Condition(cloned_expr, bool(getattr(node, "negated", False))).to_smt()
         if isinstance(node, Expression):
             cloned_expr = self._clone_summary_expression_for_smt(node, identity_to_spec)
-            return cloned_expr.to_smt() if cloned_expr is not None else None
+            if cloned_expr is None:
+                return None
+            publish(cloned_expr)
+            return cloned_expr.to_smt()
     except UnsupportedSmtSemanticsError:
         # Auxiliary recurrence proofs are optional promotion evidence.  An
         # expression without an exact SMT lowering must reject that proof

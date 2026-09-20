@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.core.render_smt.widths import (
 )
 from scripts.function_tracer_pcode.core import structural
 from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 class MutableRuntimeRef:
@@ -278,23 +279,102 @@ def test_condition_rendering_is_unchanged_by_freeze():
 
 
 # ---------------------------------------------------------------------------
-# B12: SMT 生成は凍結済みの意味に対してだけ行う
+# B12: solver へ渡す SMT は、公開済みの意味からしか作らない
 # ---------------------------------------------------------------------------
 
 
-def test_smt_generation_freezes_its_input():
-    expr = Expression.binary_op(
+def _unpublished_sum() -> Expression:
+    return Expression.binary_op(
         "INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4)
     )
+
+
+def test_smt_generation_refuses_an_unpublished_expression():
+    """未公開の式は solver 用の論理式にならない。
+
+    ここで代わりに公開してしまうと、「確定した」と誰も言っていない中間値から
+    判定用の論理式が作れてしまう。公開点を持たない producer は落ちて見つかる
+    のが正しい。
+    """
+
+    from scripts.function_tracer_pcode.core.errors import (
+        AnalysisFailureError,
+        UnpublishedSemanticInputError,
+    )
+
+    expr = _unpublished_sum()
+
+    with pytest.raises(UnpublishedSemanticInputError) as raised:
+        expr.to_smt()
+
+    # PR-106-0 の失敗族に属する = 既存の 1 本の経路で ERROR internal_exception。
+    assert isinstance(raised.value, AnalysisFailureError)
+
+
+def test_the_renderer_does_not_advance_the_lifecycle():
+    """描画は状態を読むだけで、値を確定させない。"""
+
+    expr = _unpublished_sum()
+
+    with pytest.raises(Exception):
+        expr.to_smt()
+
     assert expr.is_frozen is False
-    rendered = expr.freeze().to_smt()
-    assert expr.is_frozen is True
-    # 生成したあとで意味を書き換えられない = 論理式ともとの意味がずれない。
+    # 拒否されたあとでも、まだ組み立て中の値として書き換えられる。
+    expr.size = 8
+    assert expr.size == 8
+
+
+def test_the_refusal_is_recorded_before_it_is_raised():
+    """握り潰されても pair 境界が拾えるよう、記録してから raise する。"""
+
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+
+    with pair_failure_scope(("bin1", "bin2"), None) as ledger:
+        try:
+            _unpublished_sum().to_smt()
+        except Exception:  # 深部の包括捕捉を再現する（test 側の模擬）
+            pass
+        pending = ledger.pending_failure()
+        assert pending is not None
+        assert pending.is_internal_bug is True
+        assert pending.site == "core.render_smt.expression_to_smt"
+
+
+def test_a_published_expression_renders_and_stays_fixed():
+    expr = published(_unpublished_sum())
+
+    rendered = expr.to_smt()
+
     from scripts.function_tracer_pcode.core.errors import FrozenExpressionError
 
     with pytest.raises(FrozenExpressionError):
         expr.size = 8
-    assert expr.freeze().to_smt() == rendered
+    assert expr.to_smt() == rendered
+
+
+def test_the_evidence_renderer_is_a_separate_entry_point():
+    """証拠テキストは組み立て中の値にも出せるが、solver 入口とは別。
+
+    同じ関数が「公開を要求する/しない」を引数で切り替える形にすると、call site
+    を見ても solver へ行く値かどうか分からない。入口を分けてあること自体が
+    contract なので、ここで固定する。
+    """
+
+    from scripts.function_tracer_pcode.core.render_smt import (
+        expression_to_smt,
+        render_expression_smt_evidence,
+    )
+
+    expr = _unpublished_sum()
+
+    evidence = render_expression_smt_evidence(expr)
+    assert evidence
+
+    # 証拠は文字列で返る = そのまま solver 入口へ渡せる型ではない。
+    assert isinstance(evidence, str)
+    with pytest.raises(Exception):
+        expression_to_smt(expr)
 
 
 def test_smt_generation_refuses_a_graph_that_cannot_be_frozen():
@@ -303,7 +383,7 @@ def test_smt_generation_refuses_a_graph_that_cannot_be_frozen():
     cyclic = Expression.unary_op("BOOL_NEGATE", Expression.constant(1, 1))
     cyclic.__dict__["operands"] = [cyclic]
     with pytest.raises(ExpressionCycleError):
-        cyclic.freeze().to_smt()
+        published(cyclic).to_smt()
 
 
 def test_global_address_identity_is_pinned_at_freeze():
@@ -343,10 +423,6 @@ def test_global_address_identity_is_pinned_at_freeze():
 def test_loop_lowering_identity_is_pinned_at_freeze():
     """loop lowering の SMT function identity も凍結時の値で固定される。"""
 
-    from scripts.function_tracer_pcode.core.render_smt.loop_lowering import (
-        _runtime_ref_smt_identity,
-    )
-
     class MutableLoopRef:
         reduction_kind = "sum"
 
@@ -363,9 +439,9 @@ def test_loop_lowering_identity_is_pinned_at_freeze():
     expr = Expression.variable("acc", size=4, runtime_ref=ref)
     expr.freeze()
 
-    before = _runtime_ref_smt_identity(expr, ref)
+    before = semantic_projection(expr).loop_lowering.identity
     ref.key = ("readonly", 999)
-    assert _runtime_ref_smt_identity(expr, ref) == before
+    assert semantic_projection(expr).loop_lowering.identity == before
 
 
 def test_variable_symbol_declaration_is_decided_by_the_projection():

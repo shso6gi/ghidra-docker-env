@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "243a033c719496e4666725e33823bbe071d99e3b066ba47a2f62e20f862caf34",
+  "manifest_digest": "1d3adf69e3d47af582a1cfdd7c07c42b2beb2f1f6b8b16e5192487a8abfb189f",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 32,
   "sites": [
@@ -56,10 +56,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 2608,
+      "line": 2615,
       "path": "scripts/function_tracer_pcode/proof/call_effect/producer.py",
       "producer_site_manifest_id": "call-effect-producer-blocker",
-      "source_sha256": "eecac16486036645886e7982914deb8523a08ee674a33c6ae5ef5e3d2cd34d5d"
+      "source_sha256": "a75727fedaca8c42051bcbf112cb0d338e049b57860f633eee4e0dca31c40251"
     },
     {
       "allowed_dispositions": [
@@ -115,10 +115,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 2603,
+      "line": 2610,
       "path": "scripts/function_tracer_pcode/proof/call_effect/producer.py",
       "producer_site_manifest_id": "call-effect-producer-prerequisite",
-      "source_sha256": "eecac16486036645886e7982914deb8523a08ee674a33c6ae5ef5e3d2cd34d5d"
+      "source_sha256": "a75727fedaca8c42051bcbf112cb0d338e049b57860f633eee4e0dca31c40251"
     },
     {
       "allowed_dispositions": [

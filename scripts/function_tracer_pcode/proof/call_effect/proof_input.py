@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.analysis.effects.summary import (
     StoreEffect,
 )
 from scripts.function_tracer_pcode.core import ReturnInfo
+from scripts.function_tracer_pcode.core.semantic_freeze import publish_semantic_values
 
 
 CALL_EFFECT_PRODUCER_KIND = "internal_typed_pure_direct_call_stage_producer"
@@ -40,6 +41,16 @@ class PureDirectCallProofInput:
     left_caller_call_effects: Tuple[CallSiteEffectSummaryEvidence, ...]
     right_caller_call_effects: Tuple[CallSiteEffectSummaryEvidence, ...]
 
+    def __post_init__(self) -> None:
+        """組み立て完了点。この入力が抱える意味値をここで公開する。
+
+        proof の入力は解析結果から組み上げた **この証明のための値** で、
+        作り終えた時点が確定点。consumer（SMT 生成）側で公開すると「描画したから
+        確定」という順序になってしまうので、carrier 自身が宣言する。
+        """
+
+        publish_semantic_values(self)
+
 
 @dataclass(frozen=True)
 class PureCallRegionProofInput:
@@ -66,3 +77,8 @@ class PureCallRegionProofInput:
     right_caller_profile: Any
     left_caller_call_effects: Tuple[CallSiteEffectSummaryEvidence, ...]
     right_caller_call_effects: Tuple[CallSiteEffectSummaryEvidence, ...]
+
+    def __post_init__(self) -> None:
+        """組み立て完了点。この入力が抱える意味値をここで公開する。"""
+
+        publish_semantic_values(self)

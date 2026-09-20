@@ -30,6 +30,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.errors import ExpressionCycleError
+from scripts.function_tracer_pcode.core.loop_lowering_semantics import (
+    LoopLoweringSemantics,
+)
 from scripts.function_tracer_pcode.core.semantic_projection import (
     DeclaredTypeProjection,
     RuntimeRefProjection,
@@ -98,8 +101,8 @@ class SemanticSnapshot:
     """凍結時に確定した、1 node 分の意味値。
 
     ここに無い生 object（`data_type_obj`、`StorageInfo`、`runtime_ref` object）は
-    **意味 consumer が identity として読んではいけない**。凍結済み ref の構造を
-    lowering のために辿るのは可（`core/runtime_refs/` は frozen な value object）。
+    **意味 consumer が読んではいけない**。ref の構造を辿る必要がある判断
+    （loop lowering）も、辿った結果は `loop_lowering` に値として入っている。
     """
 
     #: `canonical_value_key(value)`
@@ -157,6 +160,12 @@ class SemanticSnapshot:
     @property
     def runtime_lowering_identity(self) -> Optional[Tuple[Any, ...]]:
         return self.runtime.lowering_identity
+
+    @property
+    def loop_lowering(self) -> LoopLoweringSemantics:
+        """loop lowering に必要な意味（`core/loop_lowering_semantics.py` が所有）。"""
+
+        return self.runtime.loop_lowering
 
     @property
     def declares_variable_symbol(self) -> bool:

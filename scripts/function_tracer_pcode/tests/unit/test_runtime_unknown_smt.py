@@ -49,6 +49,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 import scripts.function_tracer_pcode.proof.strategies.monolithic_counterexamples as _mx_monolithic_counterexamples
 import scripts.function_tracer_pcode.proof.strategies.monolithic_return_width as _mx_monolithic_return_width
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def _build_formula(builder, *args, **kwargs):
@@ -63,9 +64,9 @@ def test_expression_unknown_uses_object_centric_runtime_identity_for_smt():
     assert getattr(expr.runtime_ref, "kind", None) == "opaque_unknown"
 
     declarations = collect_unknown_smt_declarations(expr)
-    assert declarations == [(expr.to_smt(), 32)]
-    assert expr.to_smt().startswith("rtunk_")
-    assert expr.to_smt() != "unknown"
+    assert declarations == [(published(expr).to_smt(), 32)]
+    assert published(expr).to_smt().startswith("rtunk_")
+    assert published(expr).to_smt() != "unknown"
 
 
 def test_loop_variable_identity_uses_stable_key_for_unknown_smt_symbol():
@@ -77,7 +78,7 @@ def test_loop_variable_identity_uses_stable_key_for_unknown_smt_symbol():
     expr_left = Expression.unknown("loop_var", runtime_ref=runtime_ref)
     expr_right = Expression.unknown("loop_var", runtime_ref=runtime_ref)
 
-    assert expr_left.to_smt() == expr_right.to_smt()
+    assert published(expr_left).to_smt() == published(expr_right).to_smt()
 
 
 def test_unknown_smt_symbol_ignores_nonstable_diagnostic_origin_repr():
@@ -102,7 +103,7 @@ def test_unknown_smt_symbol_ignores_nonstable_diagnostic_origin_repr():
     )
 
     assert repr(left.runtime_ref.diagnostic_key()) != repr(right.runtime_ref.diagnostic_key())
-    assert left.to_smt() == right.to_smt()
+    assert published(left).to_smt() == published(right).to_smt()
 
 
 def test_unknown_smt_symbol_uses_stable_diagnostic_origin_key_when_available():
@@ -130,7 +131,7 @@ def test_unknown_smt_symbol_uses_stable_diagnostic_origin_key_when_available():
         ),
     )
 
-    assert left.to_smt() != right.to_smt()
+    assert published(left).to_smt() != published(right).to_smt()
 
 
 def test_unresolved_parameter_runtime_unknowns_do_not_share_smt_identity():
@@ -148,9 +149,9 @@ def test_unresolved_parameter_runtime_unknowns_do_not_share_smt_identity():
     names = [name for name, _bits in declarations]
 
     assert len(names) == 2
-    assert left.to_smt() in names
-    assert right.to_smt() in names
-    assert left.to_smt() != right.to_smt()
+    assert published(left).to_smt() in names
+    assert published(right).to_smt() in names
+    assert published(left).to_smt() != published(right).to_smt()
 
 
 def test_pairwise_query_declares_runtime_unknown_symbols():
@@ -172,14 +173,14 @@ def test_pairwise_query_declares_runtime_unknown_symbols():
         base_ctx,
         extract_return_cases(analysis1)[0],
         extract_return_cases(analysis2)[0],
-        lambda expr: expr.to_smt(),
-        lambda expr: expr.to_smt(),
+        lambda expr: published(expr).to_smt(),
+        lambda expr: published(expr).to_smt(),
         "0,0",
     )
 
     declared_symbol, bit_width = base_ctx["runtime_unknown_declarations"][0]
     assert bit_width == 32
-    assert declared_symbol == unknown_expr.to_smt()
+    assert declared_symbol == published(unknown_expr).to_smt()
     assert f"(declare-const {declared_symbol} (_ BitVec 32))" in "\n".join(base_ctx["header_lines"])
     assert f"(declare-const {declared_symbol} (_ BitVec 32))" in query
     assert " unknown" not in query
@@ -1541,8 +1542,8 @@ def test_return_definition_orders_guard_specific_readonly_summary_before_broad_o
 
     formula, _, _ = _build_formula(FormulaBuilder(), analysis1, analysis2)
     return_block = formula.split("; Return value for left", 1)[1].split("; Return value for right", 1)[0]
-    broad_symbol = re.match(r"\(([^ ]+)", broad_expr.to_smt()).group(1)
-    specific_symbol = re.match(r"\(([^ ]+)", specific_expr.to_smt()).group(1)
+    broad_symbol = re.match(r"\(([^ ]+)", published(broad_expr).to_smt()).group(1)
+    specific_symbol = re.match(r"\(([^ ]+)", published(specific_expr).to_smt()).group(1)
 
     assert specific_symbol != broad_symbol
     assert return_block.index(broad_symbol) < return_block.index(specific_symbol)
@@ -1716,8 +1717,8 @@ def test_return_definition_keeps_unrelated_readonly_summaries_in_condition_order
 
     formula, _, _ = _build_formula(FormulaBuilder(), analysis1, analysis2)
     return_block = formula.split("; Return value for left", 1)[1].split("; Return value for right", 1)[0]
-    broad_symbol = re.match(r"\(([^ ]+)", broad_expr.to_smt()).group(1)
-    unrelated_symbol = re.match(r"\(([^ ]+)", unrelated_expr.to_smt()).group(1)
+    broad_symbol = re.match(r"\(([^ ]+)", published(broad_expr).to_smt()).group(1)
+    unrelated_symbol = re.match(r"\(([^ ]+)", published(unrelated_expr).to_smt()).group(1)
 
     assert return_block.index(broad_symbol) < return_block.index(unrelated_symbol)
 
@@ -1870,7 +1871,7 @@ def test_monolithic_counterexample_validation_uses_render_analysis_cases(monkeyp
         return analysis
 
     def _capture_validate(_strategy, _base_ctx, cases1, _cases2, *_args):
-        captured["value_smt"] = cases1[0].get_value_smt(lambda expr: expr.to_smt())
+        captured["value_smt"] = cases1[0].get_value_smt(lambda expr: published(expr).to_smt())
         return True
 
     monkeypatch.setattr(monolithic_module, "normalize_analysis_semantic_width", _fake_normalize)

@@ -107,10 +107,8 @@ class LoopTemplatePairwiseStrategy(PairwiseStrategy):
         if required_projection_bindings:
             template_case1 = deepcopy(case1)
             template_case2 = deepcopy(case2)
-            template_case1.value_expr = template_value1
-            template_case1.normalized_value_expr = template_value1
-            template_case2.value_expr = template_value2
-            template_case2.normalized_value_expr = template_value2
+            template_case1.replace_value(template_value1)
+            template_case2.replace_value(template_value2)
             template_query = build_pair_query(
                 base_ctx,
                 template_case1,

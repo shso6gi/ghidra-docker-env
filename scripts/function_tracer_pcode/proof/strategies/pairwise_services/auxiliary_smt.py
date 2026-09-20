@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
     smt_logic_name,
 )
 from scripts.function_tracer_pcode.core.signature import is_floating_data_type
+from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.smt import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
@@ -636,13 +637,19 @@ def _impl__render_auxiliary_smt(
         )
         if cloned_expr is None:
             return None
+        # 差し替えの組み立てはここで終わり。以後この式に手は入らないので、
+        # **完了点として** 公開する（描画するから公開するのではない）。
+        publish(cloned_expr)
         return Condition(cloned_expr, bool(getattr(node, "negated", False))).to_smt(float_mode="fp")
     if isinstance(node, Expression):
         cloned_expr = self._clone_auxiliary_expression_for_smt(
             node,
             identity_to_spec,
         )
-        return cloned_expr.to_smt(float_mode="fp") if cloned_expr is not None else None
+        if cloned_expr is None:
+            return None
+        publish(cloned_expr)
+        return cloned_expr.to_smt(float_mode="fp")
     return None
 
 def _impl__auxiliary_smt_logic(

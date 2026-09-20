@@ -43,6 +43,7 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.smt.parallel import ParallelResult
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 class _CompleteProfile:
@@ -984,9 +985,9 @@ def _base_ctx():
 def _replace_param(symbol: str):
     def _replace(obj):
         if isinstance(obj, Condition):
-            smt = obj.to_smt(float_mode="fp")
+            smt = published(obj).to_smt(float_mode="fp")
         elif isinstance(obj, Expression):
-            smt = obj.to_smt(float_mode="fp")
+            smt = published(obj).to_smt(float_mode="fp")
         else:
             smt = str(obj)
         return smt.replace("param_1", symbol)
@@ -997,9 +998,9 @@ def _replace_param(symbol: str):
 def _replace_params(mapping):
     def _replace(obj):
         if isinstance(obj, Condition):
-            smt = obj.to_smt(float_mode="fp")
+            smt = published(obj).to_smt(float_mode="fp")
         elif isinstance(obj, Expression):
-            smt = obj.to_smt(float_mode="fp")
+            smt = published(obj).to_smt(float_mode="fp")
         else:
             smt = str(obj)
         for source, target in mapping.items():

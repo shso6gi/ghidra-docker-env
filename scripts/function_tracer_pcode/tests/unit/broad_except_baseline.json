@@ -662,8 +662,6 @@
     },
     "core.render_smt.loop_lowering": {
       "_counted_loop_sum_exact_smt.<locals>._render_bias_term": {"logged": 0, "unlogged": 1},
-      "_counted_state_transition_case_signature_matches_expr": {"logged": 0, "unlogged": 1},
-      "_counted_state_transition_exact_multiplier": {"logged": 0, "unlogged": 2},
       "_neon_ext_operands_are_smt_supported": {"logged": 0, "unlogged": 1}
     },
     "core.render_smt.render": {

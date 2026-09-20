@@ -8,6 +8,7 @@ from scripts.function_tracer_pcode.analysis.returns.effect_integration import lo
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import clone_expression
 from scripts.function_tracer_pcode.analysis.returns.local_values import LocalValueResolver
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 class _Varnode:
@@ -144,12 +145,12 @@ def test_lookup_alias_and_for_storage_report_through_injected_debug_print():
 def test_pure_helpers_and_facade_delegation():
     expr = Expression.binary_op("INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(1, 4))
     copy = clone_expression(expr)
-    assert copy is not expr and copy.operands[0] is not expr.operands[0] and copy.to_smt() == expr.to_smt()
+    assert copy is not expr and copy.operands[0] is not expr.operands[0] and published(copy).to_smt() == published(expr).to_smt()
 
     analyzer = ReturnAnalyzer(program=None)
     assert isinstance(analyzer._local_values, LocalValueResolver)
     assert analyzer._local_varnode_key(_Varnode("register", 0x20, 8)) == ("register", 0x20, 8)
-    assert analyzer._clone_expression(expr).to_smt() == expr.to_smt()
+    assert published(analyzer._clone_expression(expr)).to_smt() == published(expr).to_smt()
     assert analyzer._local_memory_key(Expression.constant(0x1000, 8), 4) == local_memory_key(Expression.constant(0x1000, 8), 4)
     tracer = _Tracer()
     fallback = analyzer._evaluate_local_varnode_expression(_Varnode("register", 0x30, 8), tracer, {}, {}, {})

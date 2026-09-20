@@ -26,6 +26,7 @@ from scripts.function_tracer_pcode.core import (
     FunctionReturnAnalysis,
     expression_provenance_key,
 )
+from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.core.signature import get_declared_type_signedness
 from scripts.function_tracer_pcode.core.render_smt import (
     collect_unknown_smt_declarations,
@@ -1077,6 +1078,12 @@ def _render_call_region_guard_stage(
 def _region_parameter_expressions(
     parameters: Sequence[Mapping[str, Any]],
 ) -> Tuple[Expression, ...]:
+    """region 側 ABI 入力を表す parameter 式を組み立てて公開する。
+
+    ここが唯一の producer なので、組み立て終えた時点で公開し、以降の
+    consumer（幅の問い合わせ・solver renderer）は確定値だけを見る。
+    """
+
     ordered = sorted(parameters, key=lambda item: int(item.get("index", 0)))
     result: List[Expression] = []
     for parameter in ordered:
@@ -1090,7 +1097,7 @@ def _region_parameter_expressions(
                 size=size,
             )
         )
-    return tuple(result)
+    return tuple(publish(expression) for expression in result)
 
 
 def _render_call_region_argument_stage(

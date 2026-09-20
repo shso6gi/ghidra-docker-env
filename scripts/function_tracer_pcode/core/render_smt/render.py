@@ -182,21 +182,24 @@ def expression_to_smt(
 ) -> str:
     """式を **solver へ渡す** SMT-LIB 文字列へ変換する。
 
-    渡された式がまだ公開されていなければ、ここで公開する（凍結）。本来は値を
-    作った側が公開すべきで、その形にできた経路（解析結果・条件・oracle の
-    rewrite clone）ではすでに公開済みのまま届く。ここでの公開は、まだ公開点を
-    持たない producer のための保険であって、**consumer が lifecycle を決めて
-    よいという意味ではない**（PR 本文「未充足」の項を参照）。
+    入力は **公開済み**（`core/semantic_freeze.publish`）でなければならない。
+    未公開なら typed な内部バグとして落とす。ここで代わりに公開してしまうと、
+    「この値はもう確定した」と誰も言っていない中間値から判定用の論理式が作れて
+    しまい、公開点を持たない producer がいつまでも見つからない。
 
-    凍らせられない graph（閉路）は placeholder を入れて続けず、内部不整合と
-    して落ちる — 見えていない部分を無視した論理式で判定を出す方が危険だから。
+    描画は式の lifecycle を進めない — consumer は状態を読むだけで、値が確定した
+    と宣言できるのは作った側だけ。producer 別・型別の分岐もここには置かない
+    （どの種類の式でも「公開済みか」だけを見る）。
+
+    凍らせられない graph（閉路）は公開の時点で落ちるので、placeholder を入れた
+    論理式が solver へ届くことはない。
 
     証拠・表示のためのテキストが欲しいときは `render_expression_smt_evidence()`
     を使うこと。あちらは solver へ渡さない前提なので、公開を要求しない。
     """
 
     if expr is not None and not _is_validated_semantic_input(expr):
-        expr.freeze()
+        raise _unpublished_semantic_input(expr)
     return _to_smt_internal(
         expr,
         symbol_name_mapping=symbol_name_mapping,
@@ -230,6 +233,28 @@ def render_expression_smt_evidence(
 
 
 _EXPRESSION_TYPE = None
+
+
+def _unpublished_semantic_input(expr):
+    """未公開入力を内部バグとして記録し、typed failure を作る。
+
+    記録してから raise するので、途中の `except Exception` に握り潰されても
+    pair 境界が台帳から拾い直して `internal_exception` の ERROR にできる。
+    renderer 側に producer 別・型別の分岐は置かない。
+    """
+
+    from scripts.function_tracer_pcode.core.errors import (
+        UnpublishedSemanticInputError,
+        record_internal_bug,
+    )
+
+    kind = getattr(getattr(expr, "expr_type", None), "name", None)
+    exc = UnpublishedSemanticInputError(
+        f"solver SMT generation received an unpublished {kind} expression; "
+        "publish it where it is produced (see core/semantic_freeze.publish)"
+    )
+    record_internal_bug(exc, site="core.render_smt.expression_to_smt")
+    return exc
 
 
 def _is_validated_semantic_input(expr) -> bool:

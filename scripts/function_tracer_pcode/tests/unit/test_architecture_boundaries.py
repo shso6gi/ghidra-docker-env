@@ -17,6 +17,10 @@ PR-22-B が置く境界:
 * `core/runtime_refs/` の ref は **frozen な value object**。凍結後の consumer が
   ref の構造を辿ってよいのは、これが型で保証されているから。
 * 閉路の判定は 1 実装（`traverse_semantic_graph`）。identity API ごとに書かない。
+* **loop lowering の意味は `core/loop_lowering_semantics.py` が所有**。SMT
+  renderer は loop summary ref の schema（class も field 名も）を知らず、
+  凍結済みの `LoopLoweringSemantics` だけを読む。厳密 lowering の可否は健全性
+  に直結するので、判断が renderer 側の `getattr` 既定値に散るとまずい。
 * candidate hash で「一致」を決めてよいのは structural identity の owner だけ。
   他所で `structural_hash() == ...` を等価判定に使うと、衝突がそのまま誤判定に
   なる。
@@ -28,6 +32,7 @@ PR-22-B が置く境界:
 from __future__ import annotations
 
 import ast
+import enum
 import pathlib
 from typing import Dict, Iterable, List, Tuple
 
@@ -80,6 +85,30 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
         "scripts.function_tracer_pcode.config",
         "os",
     ),
+    "core/render_smt/loop_lowering.py": (
+        # ref の class を知らない = どの lowering かを renderer が判定しない。
+        "scripts.function_tracer_pcode.core.runtime_refs",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "os",
+    ),
+    "core/loop_lowering_semantics.py": (
+        # 意味の owner は描画も identity も知らない（投影 owner から呼ばれる側）。
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.semantic_projection",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "os",
+    ),
 }
 
 #: 意味 snapshot が **台帳** へ依存しないこと（例外型の import は許す）。
@@ -126,6 +155,29 @@ _RAW_PROJECTION_OWNER = "core/semantic_projection.py"
 
 #: 閉路を「受理しない」と決めてよい唯一の module（走査そのものを持つ側）。
 _CYCLE_JUDGEMENT_OWNER = "core/semantic_snapshot.py"
+
+#: loop lowering の意味を決めてよい唯一の module。
+_LOWERING_SEMANTICS_OWNER = "core/loop_lowering_semantics.py"
+#: loop summary ref **だけ**が持つ生 field 名。renderer がこれらを名指しで読むと、
+#: schema が変わったとき既定値に落ちて厳密 lowering の可否が黙って変わる。
+#: `induction_step` などは投影（`LoopLoweringSemantics`）にも同じ名前であり、
+#: そちらを読むのは正しいので、ここには入れない（下の assert で照合する）。
+_RAW_LOWERING_FIELDS = frozenset(
+    {
+        "side_effect_profile",
+        "transition_cases",
+        "transition_expr",
+        "state_placeholder",
+        "step_expr",
+        "loop_summary",
+        "requires_effect_proof",
+        "requires_path_proof",
+        "effect_descriptors",
+        "context_descriptors",
+    }
+)
+#: 生 ref そのものを読んではいけない module（凍結後の描画側）。
+_RUNTIME_REF_FREE_MODULES = ("core/render_smt/loop_lowering.py",)
 
 #: 凍結後に意味を読む consumer。ここが生 object を読むと、同じ式の意味が
 #: 「いつ読んだか」で変わり得る。
@@ -375,3 +427,126 @@ def test_identity_kinds_are_not_merged_into_one_type():
     assert exposed == {"candidate_hash", "equals", "key", "identity_digest"}, exposed
     for forbidden in ("solver_query", "rewrite", "authority_digest", "query_identity"):
         assert not hasattr(identity, forbidden), forbidden
+
+
+@pytest.mark.parametrize("module_path", _RUNTIME_REF_FREE_MODULES)
+def test_the_lowering_renderer_does_not_read_the_raw_runtime_ref(module_path):
+    """描画側は `expr.runtime_ref` を読まない。
+
+    読むと「どの lowering か」の答えが描画のたびに作り直され、ref の schema が
+    変わったときに renderer だけが古い読み方で残る。種別の判定は凍結時に
+    `core/loop_lowering_semantics.py` が 1 回だけ下す。
+    """
+
+    path = PACKAGE_ROOT / module_path
+    offenders = []
+    for node in ast.walk(_parse(path)):
+        if isinstance(node, ast.Attribute) and node.attr == "runtime_ref":
+            offenders.append(f"{module_path}:{node.lineno} reads .runtime_ref")
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "runtime_ref"
+        ):
+            offenders.append(f"{module_path}:{node.lineno} reads 'runtime_ref'")
+    assert offenders == [], offenders
+
+
+@pytest.mark.parametrize("module_path", _RUNTIME_REF_FREE_MODULES)
+def test_exact_lowering_is_not_decided_from_raw_summary_fields(module_path):
+    """厳密 lowering の可否を、renderer が生 field から組み立て直さない。
+
+    厳密 lowering は「未解釈関数ではなく閉じた式で表してよい」という健全性の
+    判断なので、`getattr(ref, "induction_step", 0)` のような既定値付きの読み方が
+    描画側に散ると、schema の変化が黙って判断を変えてしまう。
+    """
+
+    path = PACKAGE_ROOT / module_path
+    offenders = []
+    for node in ast.walk(_parse(path)):
+        if isinstance(node, ast.Attribute) and node.attr in _RAW_LOWERING_FIELDS:
+            offenders.append(f"{module_path}:{node.lineno} reads .{node.attr}")
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in _RAW_LOWERING_FIELDS
+        ):
+            offenders.append(f"{module_path}:{node.lineno} reads {node.args[1].value!r}")
+    assert offenders == [], offenders
+
+
+def test_the_raw_lowering_field_names_are_not_projection_field_names():
+    """生 field 名の表が、投影 field 名と衝突していないこと。
+
+    衝突していると「投影を読んでいるだけ」の行まで違反に数えてしまい、
+    上の 2 つの guard が意味を失う。
+    """
+
+    import dataclasses
+
+    from scripts.function_tracer_pcode.core import loop_lowering_semantics as owner
+
+    projection_fields = {
+        field.name for field in dataclasses.fields(owner.LoopLoweringSemantics)
+    }
+    assert _RAW_LOWERING_FIELDS.isdisjoint(projection_fields), (
+        _RAW_LOWERING_FIELDS & projection_fields
+    )
+
+
+def test_the_lowering_semantics_are_an_immutable_value():
+    """lowering の意味は凍結された値。consumer が書き換えられない。"""
+
+    import dataclasses
+
+    from scripts.function_tracer_pcode.core import loop_lowering_semantics as owner
+
+    assert dataclasses.is_dataclass(owner.LoopLoweringSemantics)
+    assert owner.LoopLoweringSemantics.__dataclass_params__.frozen
+    # 種別は列挙で閉じる（文字列比較が各所に散らないように）。
+    assert issubclass(owner.LoweringKind, enum.Enum)
+    kinds = {member.name for member in owner.LoweringKind}
+    assert "NONE" in kinds and len(kinds) >= 5, kinds
+
+
+def test_only_the_lowering_owner_classifies_loop_summary_refs():
+    """どの loop summary ref がどの lowering かを決めるのは owner だけ。
+
+    `isinstance(ref, CountedLoopSummaryRef)` が消費側にも増えると、新しい ref
+    種別を足したときに片方だけ更新されて、もう片方が黙って未解釈関数へ落ちる。
+
+    対象は「凍結済みの意味を読む側」。ref を **作る** 側（`analysis` の
+    summarizer 等）が自分の作った ref を種別で扱うのは構築であって消費ではない。
+    """
+
+    ref_names = {
+        "CountedLoopSummaryRef",
+        "CountedStateTransitionLoopSummaryRef",
+        "ReadonlyReductionRef",
+        "StateTransitionLoopSummaryRef",
+    }
+    offenders = []
+    for relative in _SNAPSHOT_ONLY_MODULES:
+        path = PACKAGE_ROOT / relative
+        for node in ast.walk(_parse(path)):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (isinstance(node.func, ast.Name) and node.func.id == "isinstance"):
+                continue
+            if len(node.args) < 2:
+                continue
+            checked = node.args[1]
+            candidates = (
+                checked.elts if isinstance(checked, (ast.Tuple, ast.List)) else [checked]
+            )
+            for candidate in candidates:
+                name = candidate.id if isinstance(candidate, ast.Name) else None
+                if name in ref_names:
+                    offenders.append(f"{relative}:{node.lineno} classifies {name}")
+    assert offenders == [], offenders

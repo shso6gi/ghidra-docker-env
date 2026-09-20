@@ -70,6 +70,9 @@ from scripts.function_tracer_pcode.authority.census_contract import (
     join_outcome_relations,
 )
 from scripts.function_tracer_pcode.authority.decision.decision import FinalizationAuthority
+from scripts.function_tracer_pcode.core.semantic_freeze import (
+    publish_semantic_values as published_analysis,
+)
 from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
     ExecutionAuthorityDeploymentPolicy,
     ProducerStageContract,
@@ -2207,7 +2210,7 @@ def _phase2_manifest_with_certificate(left, right):
         binary2_name="right",
     )
     EquivalenceChecker._attach_structural_coverage_certificate(manifest)
-    return manifest
+    return published_analysis(manifest)
 
 
 def _attach_scalar_store_callee_effect(

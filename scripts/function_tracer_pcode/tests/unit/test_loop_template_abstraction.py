@@ -11,10 +11,12 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_models import Retur
 from scripts.function_tracer_pcode.core import Condition, Expression
 from scripts.function_tracer_pcode.core.analysis import ReturnInfo
 from scripts.function_tracer_pcode.smt import ParallelResult
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def _const(value: int, size: int = 4) -> Expression:
-    return Expression.constant(value, size=size)
+    # 定数は作った時点で完成しているので、そのまま公開して返す。
+    return published(Expression.constant(value, size=size))
 
 
 def _param(name: str) -> Expression:
@@ -439,8 +441,8 @@ def test_loop_template_derives_exact_parameter_from_mask_and_residual_conditions
         [Condition(masked_equals_eight, False), Condition(residual_equals_one, False)],
     )
 
-    assert norm_lhs.to_smt() == _const(9).to_smt()
-    assert norm_rhs.to_smt() == _const(9).to_smt()
+    assert published(norm_lhs).to_smt() == _const(9).to_smt()
+    assert published(norm_rhs).to_smt() == _const(9).to_smt()
 
 
 def test_loop_template_derives_exact_parameter_from_negated_notequal_conditions() -> None:
@@ -473,7 +475,7 @@ def test_loop_template_derives_exact_parameter_from_negated_notequal_conditions(
         [masked_equals_eight, residual_equals_one],
     )
 
-    assert norm_lhs.to_smt() == norm_rhs.to_smt()
+    assert published(norm_lhs).to_smt() == published(norm_rhs).to_smt()
 
 
 def test_loop_template_derives_exact_parameter_from_mask_equality_chain() -> None:
@@ -497,8 +499,8 @@ def test_loop_template_derives_exact_parameter_from_mask_equality_chain() -> Non
         [Condition(masked_equals_eight, False), Condition(param_equals_mask, False)],
     )
 
-    assert norm_lhs.to_smt() == _const(36).to_smt()
-    assert norm_rhs.to_smt() == _const(36).to_smt()
+    assert published(norm_lhs).to_smt() == _const(36).to_smt()
+    assert published(norm_rhs).to_smt() == _const(36).to_smt()
 
 
 def test_loop_template_uses_commutatively_normalized_mask_fact_keys() -> None:
@@ -519,8 +521,8 @@ def test_loop_template_uses_commutatively_normalized_mask_fact_keys() -> None:
         [Condition(cond_expr, False)],
     )
 
-    assert norm_lhs.to_smt() == _const(8).to_smt()
-    assert norm_rhs.to_smt() == _const(8).to_smt()
+    assert published(norm_lhs).to_smt() == _const(8).to_smt()
+    assert published(norm_rhs).to_smt() == _const(8).to_smt()
 
 
 def test_loop_template_strategy_proves_equivalence_after_normalization_unknown() -> None:
