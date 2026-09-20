@@ -558,6 +558,78 @@ def test_identity_digest_is_a_prefilter_for_the_full_comparison():
             assert left_digest == right_digest
 
 
+def test_candidate_hash_and_identity_digest_are_different_values():
+    """bucket 用の hash と、外へ出す identity digest を取り違えられないこと。
+
+    同じ正規化から作るが契約が違う（片方は衝突前提の 16 byte、片方は 32 byte の
+    安定 identity）。値が同じだと「bucket が一致したから同じ式」という誤用が
+    素通りしてしまうので、domain separation で値そのものを分けてある。
+    """
+
+    expr = Expression.binary_op(
+        "INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(3, size=4)
+    )
+    expr.freeze()
+
+    candidate = structural.candidate_hash(expr)
+    identity = structural.structural_identity_digest(expr)
+    assert len(candidate) == structural.CANDIDATE_DIGEST_SIZE
+    assert len(identity) == structural.EQUIVALENCE_DIGEST_SIZE * 2  # hex
+    assert identity != candidate.hex()
+    assert not identity.startswith(candidate.hex())
+
+
+def test_graph_representation_digest_keeps_what_identity_normalises():
+    """表現の digest と等価の digest は **別の同値関係**。
+
+    `walk_dag()` の digest は辺の順と共有の仕方を保つので、可換演算を入れ替えた
+    式は別の値になる。等価を聞きたい consumer がこちらを使うと、同じ式を
+    別物と判断してしまう — だから名前も contract も分けてある。
+    """
+
+    from scripts.function_tracer_pcode.core.semantic_snapshot import (
+        graph_representation_digest,
+        walk_dag,
+    )
+
+    left = Expression.parameter("a", 0, size=4)
+    right = Expression.constant(3, size=4)
+    straight = Expression.binary_op("INT_ADD", left, right)
+    crossed = Expression.binary_op("INT_ADD", right, left)
+    straight.freeze()
+    crossed.freeze()
+
+    # 等価 digest は一致する（完全比較と同じ同値関係）。
+    assert structural.structural_equals(straight, crossed) is True
+    assert structural.structural_identity_digest(straight) == (
+        structural.structural_identity_digest(crossed)
+    )
+    # 表現 digest は一致しない（並びを保つ）。
+    assert graph_representation_digest(walk_dag(straight)) != (
+        graph_representation_digest(walk_dag(crossed))
+    )
+    # 同じ表現なら一致する。
+    assert graph_representation_digest(walk_dag(straight)) == (
+        graph_representation_digest(walk_dag(straight))
+    )
+
+
+def test_node_records_carry_the_bucket_digest_for_cache_narrowing():
+    """graph snapshot の node は候補 digest を運ぶ（絞り込み用、確定用ではない）。"""
+
+    from scripts.function_tracer_pcode.core.semantic_snapshot import walk_dag
+
+    expr = Expression.binary_op(
+        "INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(3, size=4)
+    )
+    expr.freeze()
+    graph = walk_dag(expr)
+    assert all(node.candidate_digest is not None for node in graph.nodes)
+    assert graph.nodes[graph.root_no].candidate_digest == structural.candidate_hash(expr)
+    # payload は digest ではなく完全な local payload（hit は完全比較で確定する）。
+    assert all(isinstance(node.local_payload, tuple) for node in graph.nodes)
+
+
 def test_graph_digest_is_independent_of_object_identity():
     first = _shared_dag(6)
     second = _shared_dag(6)

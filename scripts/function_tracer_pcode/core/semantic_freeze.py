@@ -29,7 +29,8 @@ PR-106-0 の経路で `internal_exception` の ERROR になる。
 
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+import dataclasses
+from typing import Any, Dict, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import structural as _structural
 from scripts.function_tracer_pcode.core.errors import (
@@ -37,7 +38,9 @@ from scripts.function_tracer_pcode.core.errors import (
     FrozenExpressionError,
     record_internal_bug,
 )
+from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType, PhiBranch
+from scripts.function_tracer_pcode.core.semantic_projection import contains_unsupported_value
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
     build_semantic_snapshot,
     local_semantic_payload,
@@ -51,6 +54,10 @@ FREEZE_SITE = "core.semantic_freeze.freeze_expression"
 #: `tree_size` の飽和上限。共有 DAG の木換算 node 数は深さに対して指数に
 #: なり得るので、診断のための数値のために bignum を育てない。
 TREE_SIZE_CAP = 1 << 62
+
+#: 公開走査の深さ上限。解析結果の入れ子はこれより浅い（診断用の深い object
+#: 網まで辿らないための歯止め）。
+_PUBLISH_MAX_DEPTH = 32
 
 
 def is_frozen(value: Any) -> bool:
@@ -80,9 +87,74 @@ def freeze_expression(expr: Optional[Expression]) -> Optional[Expression]:
         record_internal_bug(exc, site=FREEZE_SITE)
         raise
 
+    published_refs: Dict[int, bool] = {}
     for node in traversal.post_order:
         _finalize_node(node)
+        _publish_runtime_ref_values(node, published_refs)
     return expr
+
+
+def publish_semantic_values(container: Any) -> Any:
+    """`container` が抱えている意味 object を公開（凍結）する。
+
+    解析結果は「確定した意味の入れ物」なので、渡した時点で中の式も条件も
+    凍っていてほしい。どの field に式が入っているかを型ごとに数え上げるのでは
+    なく、**到達できる式をすべて凍らせる** 1 つの規則にしてある: 新しい結果型や
+    新しい runtime ref 種別が増えても、公開の仕方を書き足さなくてよい。
+
+    走査するのは dataclass / NamedTuple / tuple / list / dict / set まで。任意の
+    object の `__dict__` までは辿らない（解析の作業用 object まで巻き込まない）。
+    """
+
+    _publish_reachable(container, {})
+    return container
+
+
+def _publish_runtime_ref_values(node: Any, published: Dict[int, bool]) -> None:
+    """node の runtime ref が抱える式を公開する。
+
+    ref は frozen dataclass だが、中の `Expression` は別 object なので、それを
+    凍らせない限り「凍結後も意味が動く」経路が残る（loop summary の
+    `transition_expr` など）。node 自身を凍らせた **後** に辿るので、ref から
+    node へ戻る参照があってもそこで止まる。
+    """
+
+    runtime_ref = node.__dict__.get("runtime_ref")
+    if runtime_ref is None:
+        return
+    _publish_reachable(runtime_ref, published)
+
+
+def _publish_reachable(value: Any, published: Dict[int, bool], depth: int = 0) -> None:
+    if value is None or depth > _PUBLISH_MAX_DEPTH:
+        return
+    if isinstance(value, (str, bytes, int, float, bool)):
+        return
+    value_id = id(value)
+    if value_id in published:
+        return
+    published[value_id] = True
+
+    # 型は `isinstance` で見る。`hasattr` で属性を探ると、解析結果が抱えている
+    # Ghidra object（記録再生中は proxy）に観測が走り、記録済みの観測列に無い
+    # 問い合わせを作ってしまう。
+    if isinstance(value, Expression):
+        freeze_expression(value)
+        return
+    if isinstance(value, Condition):
+        freeze_condition(value)
+        return
+    if isinstance(value, (tuple, list, set, frozenset)):
+        for item in value:
+            _publish_reachable(item, published, depth + 1)
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _publish_reachable(item, published, depth + 1)
+        return
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        for field in dataclasses.fields(value):
+            _publish_reachable(getattr(value, field.name, None), published, depth + 1)
 
 
 def validated(expr: Optional[Expression]) -> Optional[Expression]:
@@ -133,27 +205,58 @@ def _finalize_node(node: Expression) -> None:
     # 子 digest と `tree_size` は **辺の正準順**（`ordered_semantic_edges`）で
     # 集める。`operands` を直接読むと PHI の欠けた条件や二項演算の欠けた
     # operand の位置がずれて、hash と完全比較が別の並びを見てしまう。
-    child_digests = []
+    candidate_children = []
+    equivalence_children = []
     tree_size = 1
     # 「digest だけで他と区別できるか」も子から上へ畳む。root で 1 度見れば
-    # よくなるので、identity digest が走査を増やさない。
-    identity_complete = payload.comparable and payload.identity_complete
+    # よくなるので、equivalence digest が走査を増やさない。
+    identity_complete = (
+        payload.comparable
+        and payload.identity_complete
+        and not _projection_has_unsupported_value(fields["_snapshot"])
+    )
     for edge in ordered_semantic_edges(node):
         child = edge.child
         if child is None:
-            child_digests.append(None)
+            candidate_children.append(None)
+            equivalence_children.append(None)
             continue
-        child_digests.append(child.__dict__.get("_structural_hash"))
+        candidate_children.append(child.__dict__.get("_structural_hash"))
+        equivalence_children.append(child.__dict__.get("_equivalence_digest"))
         tree_size += int(child.__dict__.get("_tree_size") or 1)
         identity_complete = identity_complete and bool(
             child.__dict__.get("_identity_complete", False)
         )
+    # 2 つの digest は契約が違う（bucket 専用 / 外へ出す安定 identity）ので
+    # 値も分けてある。合成規則は 1 本なので、正規化が食い違うことはない。
     fields["_structural_hash"] = _structural.compose_candidate_digest(
-        node, tuple(child_digests)
+        node, tuple(candidate_children)
+    )
+    fields["_equivalence_digest"] = _structural.compose_equivalence_digest(
+        node, tuple(equivalence_children)
     )
     fields["_tree_size"] = min(TREE_SIZE_CAP, tree_size)
     fields["_identity_complete"] = identity_complete
     fields["_frozen"] = True
+
+
+def _projection_has_unsupported_value(snapshot: Any) -> bool:
+    """snapshot が「値として固定できなかったもの」を含むか。
+
+    含むなら equivalence digest はその式を他と区別できないので、digest を
+    名乗らせない（`identity_complete` を落とす）。
+    """
+
+    runtime = snapshot.runtime
+    return any(
+        contains_unsupported_value(value)
+        for value in (
+            runtime.stable_key,
+            runtime.semantic_key,
+            runtime.stable_origin,
+            snapshot.storage.identity,
+        )
+    )
 
 
 def _frozen_branches(value: Any) -> Tuple[Any, ...]:

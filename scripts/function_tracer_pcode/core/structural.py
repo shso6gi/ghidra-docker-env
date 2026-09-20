@@ -654,15 +654,21 @@ def _stable_value_key(value: Any) -> StructuralKey:
 #
 # 3 つの層を混ぜないこと:
 #
-#   candidate hash   候補の絞り込み（bucket / 早期棄却）だけ。**等価の確定にも
-#                    digest にも使わない**。衝突しても完全比較が食い止める。
-#   完全比較         `structural_equals`。distinct な node 組の数に比例し、
-#                    共有部分木を親ごとに再走査しない。
-#   graph digest     `structural_identity_digest`。DAG snapshot 全体の安定な
-#                    digest で、`id()` を含まない。
+#   candidate hash        16 byte。bucket / 早期棄却だけ。**等価の確定にも
+#                         外部 identity にも使わない**。衝突は設計上あり得る。
+#   equivalence digest    32 byte。完全比較と同じ同値関係を持つ安定 digest。
+#                         prefilter に使ってよいが hit は確定しない。
+#   完全比較              `structural_equals`。distinct な node 組の数に比例し、
+#                         共有部分木を親ごとに再走査しない。**唯一の決定者**。
 #
-# solver query identity / rewrite identity / authority digest は **別の概念** で、
-# ここへ統合しない（PR-105-A が `walk_dag` だけを共有して別型で持つ）。
+# 表現の digest（辺の順と共有の仕方を残す）は別概念で、graph の owner が持つ:
+# `semantic_snapshot.graph_representation_digest()`。
+#
+# PR-105-A の `SolverQueryIdentity` / `RewriteIdentity` が再利用してよいのは
+# `walk_dag()` の graph と `graph_representation_digest()` / `candidate_hash()`
+# の **prefilter** まで。一致の確定は各々が自分の完全比較で行う（solver 宣言や
+# rewrite 文脈は structural identity が見ていないので、ここの digest では
+# 足りない）。
 
 #: 完全比較の既定予算（distinct な node 組の数）。従来の `condition_key`
 #: （木の訪問回数 256）と同じ桁で、共有 DAG ではより深くまで比較できる。
@@ -671,7 +677,17 @@ DEFAULT_STRUCTURAL_COMPARISON_BUDGET = 256
 #: candidate hash の長さ。候補の絞り込み専用なので 16 byte で足りる。
 CANDIDATE_DIGEST_SIZE = 16
 
+#: equivalence digest の長さ。外へ出す安定 identity なので広く取る。
+EQUIVALENCE_DIGEST_SIZE = 32
+
+#: 2 つの digest が **別物であること** を byte 列の段階で担保する domain
+#: separation。同じ入力でも値が一致しないので、片方を他方の代わりに使うと
+#: すぐ気づく（どちらも Merkle で同じ正規化を使うが、契約が違う）。
+_CANDIDATE_PERSON = b"cand-v1"
+_EQUIVALENCE_PERSON = b"equiv-v1"
+
 _NULL_CHILD_DIGEST = b"\x00" * CANDIDATE_DIGEST_SIZE
+_NULL_EQUIVALENCE_CHILD_DIGEST = b"\x00" * EQUIVALENCE_DIGEST_SIZE
 
 #: memo の「まだ評価していない」を「評価中（None）」と区別するための番兵。
 _MISSING = object()
@@ -733,26 +749,65 @@ def _atoms_to_bytes(value: Any) -> bytes:
     return "".join(parts).encode("utf-8", "surrogatepass")
 
 
-def compose_candidate_digest(node: Any, child_digests: Tuple[Optional[bytes], ...]) -> bytes:
-    """local payload と子 digest から候補 hash を O(1) で合成する。
+def _compose_merkle_digest(
+    node: Any,
+    child_digests: Tuple[Optional[bytes], ...],
+    *,
+    digest_size: int,
+    person: bytes,
+    null_child: bytes,
+) -> bytes:
+    """local payload と子 digest から Merkle digest を O(1) で合成する。
 
     `child_digests` は `ordered_semantic_edges(node)` と同じ並びであること。
-    可換二項演算は子 digest を整列してから混ぜるので、`expression_key` の
-    可換正規化と同じ式が同じ hash になる（不変条件 I-1）。
+    可換二項演算は子 digest を整列してから混ぜるので、完全比較が一致とみなす式は
+    同じ digest になる。合成規則を 1 本にしてあるのは、candidate hash と
+    equivalence digest で正規化が食い違わないようにするため — 値が違うのは
+    `person` による domain separation の結果で、規則の違いではない。
     """
 
     payload = local_semantic_payload(node)
-    digest = hashlib.blake2b(digest_size=CANDIDATE_DIGEST_SIZE)
+    digest = hashlib.blake2b(digest_size=digest_size, person=person)
     digest.update(_atoms_to_bytes(payload.identity_atoms))
-    resolved = [
-        _NULL_CHILD_DIGEST if child is None else child for child in child_digests
-    ]
+    resolved = [null_child if child is None else child for child in child_digests]
     if len(resolved) == 2 and children_are_commutative(node):
         resolved.sort()
     digest.update(b"|%d|" % len(resolved))
     for child in resolved:
         digest.update(child)
     return digest.digest()
+
+
+def compose_candidate_digest(node: Any, child_digests: Tuple[Optional[bytes], ...]) -> bytes:
+    """**候補絞り込み専用** の 16 byte hash（freeze が各 node に付ける）。
+
+    用途は bucket と早期棄却だけ。衝突は起こり得るものとして設計してあり、
+    一致の確定にも、外へ出す stable identity にも使ってはいけない。
+    """
+
+    return _compose_merkle_digest(
+        node,
+        child_digests,
+        digest_size=CANDIDATE_DIGEST_SIZE,
+        person=_CANDIDATE_PERSON,
+        null_child=_NULL_CHILD_DIGEST,
+    )
+
+
+def compose_equivalence_digest(node: Any, child_digests: Tuple[Optional[bytes], ...]) -> bytes:
+    """**完全比較と同じ同値関係** を持つ 32 byte digest（freeze が各 node に付ける）。
+
+    `structural_equals(a, b)` が真なら値が一致する。prefilter として使ってよいが、
+    一致の確定は完全比較が行う（逆向きは保証しない）。
+    """
+
+    return _compose_merkle_digest(
+        node,
+        child_digests,
+        digest_size=EQUIVALENCE_DIGEST_SIZE,
+        person=_EQUIVALENCE_PERSON,
+        null_child=_NULL_EQUIVALENCE_CHILD_DIGEST,
+    )
 
 
 def candidate_hash(expr: Optional[Expression]) -> Optional[bytes]:
@@ -924,22 +979,21 @@ def structural_equals(
 
 
 def structural_identity_digest(expr: Optional[Expression]) -> Optional[str]:
-    """完全比較と **同じ同値関係** を持つ安定 digest。
+    """完全比較と **同じ同値関係** を持つ安定 digest（equivalence digest）。
 
     `structural_equals(a, b)` が真なら `identity_digest(a) == identity_digest(b)`。
-    これは「digest を完全比較の前置き（prefilter）として使ってよい」という契約
-    そのもので、逆向き（digest 一致 ⇒ 等価）は保証しない（衝突は完全比較が
-    食い止める）。
+    これは「完全比較の前置き（prefilter）として使ってよい」という契約そのもので、
+    逆向き（digest 一致 ⇒ 等価）は保証しない。
 
-    実装は candidate hash **そのもの**で、別の合成規則を持たない。2 つの
-    digest を別々に組むと、片方だけに正規化が入って `ADD(a, 3)` と
-    `ADD(3, a)` の digest が割れる — 実際それが起きたので、同値関係を担保
-    する唯一の方法として 1 本にしてある。
+    candidate hash とは **別の値**（domain separation 済み）で、契約も違う:
+    candidate hash は bucket 専用の 16 byte、こちらは外へ出せる 32 byte の
+    安定 identity。混同すると「bucket が一致したから同じ式」という誤用が通って
+    しまうので、値そのものを分けてある。
 
-    `id()` にも process 状態にも依存しない。graph のどこかが object 表現へ
-    落ちていて digest だけでは区別できない場合は `None` を返す — 区別できない
-    値を同じ digest にして「同じ式」と言わせないため。**辺の順や共有の仕方が
-    残る表現が要るなら `walk_dag()` を使うこと**（あれは identity ではない）。
+    `id()` にも process 状態にも依存しない。graph のどこかが値として固定でき
+    ない object を含み digest だけでは区別できない場合は `None` を返す。
+    辺の順や共有の仕方が残る **表現** の digest が要るなら
+    `semantic_snapshot.graph_representation_digest()`（別の同値関係）。
     """
 
     expr = _validated(expr)
@@ -947,7 +1001,7 @@ def structural_identity_digest(expr: Optional[Expression]) -> Optional[str]:
         return None
     if not expr.__dict__.get("_identity_complete", False):
         return None
-    digest = expr.__dict__.get("_structural_hash")
+    digest = expr.__dict__.get("_equivalence_digest")
     return None if digest is None else digest.hex()
 
 
@@ -960,11 +1014,12 @@ class StructuralIdentity:
     違えば別物で、片方の都合で他方の一致条件を動かしてはいけない。
     """
 
-    #: 候補の絞り込み専用（等価の確定にも digest にも使わない）
+    #: bucket / 早期棄却の専用値（16 byte）。等価の確定にも外部 identity にも
+    #: 使わない。衝突は設計上あり得る。
     candidate_hash = staticmethod(candidate_hash)
-    #: 完全比較（distinct な node 組に比例、可換正規化あり）
+    #: 完全比較（distinct な node 組に比例、可換正規化あり）。**唯一の決定者**。
     equals = staticmethod(structural_equals)
     #: 予算付きの canonical key（placeholder を含むものは比較に使わない）
     key = staticmethod(expression_key)
-    #: 完全比較と同じ同値関係を持つ安定 digest（prefilter に使える）
+    #: 完全比較と同じ同値関係を持つ安定 digest（32 byte、prefilter に使える）
     identity_digest = staticmethod(structural_identity_digest)

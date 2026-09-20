@@ -25,6 +25,7 @@ authority / CLI / checker / config / env も、失敗の台帳（`record_interna
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
@@ -439,12 +440,15 @@ def ordered_semantic_edges(expr: Any) -> Tuple[SemanticEdge, ...]:
 class NodeRecord:
     """graph snapshot の 1 node。
 
-    `local_payload` は digest ではなく **完全な local payload**。ここに digest を
-    置かないのは、graph snapshot が「表現」であって identity ではないから
-    （identity は `core/structural.py` が所有する）。
+    `local_payload` は digest ではなく **完全な local payload**。digest だけでは
+    一致を確定できない（`candidate_digest` は bucket 専用）ので、cache の hit は
+    payload と辺の完全比較まで進んでから確定する。
     """
 
     canonical_node_no: int
+    #: 候補絞り込み専用の digest（凍結時に identity owner が付けた値をそのまま運ぶ。
+    #: **等価の確定にも stable identity にも使わない**）
+    candidate_digest: Optional[bytes]
     local_payload: StructuralAtoms
     ordered_edges: Tuple[Tuple[Tuple[Any, ...], Optional[int]], ...]
     comparable: bool
@@ -555,6 +559,73 @@ def traverse_semantic_graph(root: Any, *, prune=None) -> SemanticTraversal:
     return SemanticTraversal(tuple(entry_order), tuple(post_order))
 
 
+def graph_representation_digest(graph: ImmutableSemanticGraph) -> Optional[str]:
+    """**表現** としての graph に対する安定 digest。
+
+    `walk_dag()` が作った番号・local payload・順序付き辺をそのまま digest する。
+    可換演算の並びも共有の仕方も **保たれる** ので、`structural_equals` とは
+    別の同値関係になる（`ADD(a,3)` と `ADD(3,a)` は別の digest）。
+
+    用途は「この式をこの形で扱ったか」を鍵にしたい consumer —
+    PR-105-A の rewrite identity が root の graph snapshot を memo する、
+    といった **表現に依存する cache の前段**。意味の等価を聞きたいなら
+    `core/structural.py` の `structural_identity_digest` を使うこと。
+
+    どちらの digest も **hit を確定しない**。確定するのは完全比較だけ。
+    """
+
+    if graph.root_no is None:
+        return None
+    if not graph.comparable or not graph.identity_complete:
+        return None
+    payload = (
+        "semantic_graph_representation_v1",
+        graph.root_no,
+        tuple(
+            (node.canonical_node_no, node.local_payload, node.ordered_edges)
+            for node in graph.nodes
+        ),
+    )
+    digest = hashlib.blake2b(digest_size=32, person=b"graph-repr-v1")
+    digest.update(_encode_atoms_to_bytes(payload))
+    return digest.hexdigest()
+
+
+def _encode_atoms_to_bytes(value: Any) -> bytes:
+    """atom を **型を落とさずに** 決定的な byte 列へ符号化する。
+
+    `repr()` を使わないのは、未知の object が混ざると `id()` が入って run 間で
+    digest が変わってしまうため。未知の型は型名だけにする。
+    """
+
+    parts: List[str] = []
+    _encode_atoms(value, parts)
+    return "".join(parts).encode("utf-8", "surrogatepass")
+
+
+def _encode_atoms(value: Any, parts: List[str]) -> None:
+    if value is None:
+        parts.append("n;")
+    elif value is True or value is False:
+        parts.append("b1;" if value else "b0;")
+    elif isinstance(value, int):
+        parts.append("i%d;" % value)
+    elif isinstance(value, float):
+        parts.append("f%r;" % value)
+    elif isinstance(value, str):
+        parts.append("s%d:%s;" % (len(value), value))
+    elif isinstance(value, bytes):
+        parts.append("y%s;" % value.hex())
+    elif isinstance(value, (tuple, list)):
+        parts.append("(t" if isinstance(value, tuple) else "(l")
+        parts.append("%d;" % len(value))
+        for item in value:
+            _encode_atoms(item, parts)
+        parts.append(")")
+    else:
+        parts.append("o%s.%s;" % (type(value).__module__, type(value).__qualname__))
+
+
 def walk_dag(root: Any) -> ImmutableSemanticGraph:
     """root から到達できる DAG の canonical な **表現** を作る。
 
@@ -582,6 +653,9 @@ def walk_dag(root: Any) -> ImmutableSemanticGraph:
         records.append(
             NodeRecord(
                 canonical_node_no=number,
+                candidate_digest=node.__dict__.get("_structural_hash")
+                if hasattr(node, "__dict__")
+                else None,
                 local_payload=payload.identity_atoms,
                 ordered_edges=edges,
                 comparable=payload.comparable,

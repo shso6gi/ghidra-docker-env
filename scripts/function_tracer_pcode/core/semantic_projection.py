@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
+from enum import Enum
 from typing import Any, NamedTuple, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.runtime_refs import (
@@ -180,28 +181,63 @@ def value_key_is_opaque(key: CanonicalAtoms) -> bool:
     return bool(key) and key[0] == "opaque_value"
 
 
-def immutable_value(value: Any) -> Any:
-    """`stable_key()` / `semantic_key()` の戻り値を不変な形へ畳む。
+#: snapshot がそのまま値として抱えてよい型。ここに無い型は「値」ではないので
+#: canonical な表現へ落とすか、落とせないなら unsupported として印を付ける。
+IMMUTABLE_SCALARS = (type(None), bool, int, float, str, bytes)
 
-    実装が list や dict を返しても、snapshot がそれをそのまま抱えると「凍結後も
-    中身が変わり得る値」を意味として持ってしまう。ここで tuple へ畳んで、以後は
-    値としてだけ扱う。
+
+class UnsupportedSemanticValue(NamedTuple):
+    """値として固定できなかったものの印。
+
+    `stable_key()` が可変な object を返したとき、それを snapshot が抱えると
+    「凍結後も中身が変わり得る値」を意味として持つことになる。かといって捨てると
+    別の値と同一視してしまうので、**型名だけを残して「支えられない」と明示**し、
+    identity の完全性（`identity_complete`）を落とす。
     """
 
-    if isinstance(value, tuple):
-        return tuple(immutable_value(item) for item in value)
-    if isinstance(value, list):
+    type_module: str
+    type_qualname: str
+
+
+def immutable_value(value: Any) -> Any:
+    """`stable_key()` / `semantic_key()` の戻り値を不変な値へ畳む。
+
+    container は tuple へ、Enum は値へ、`stable_key()` を持つ object はその key へ
+    再帰的に落とす。どれでもない object は `UnsupportedSemanticValue` にする
+    （生 object を snapshot に残さない）。
+    """
+
+    if isinstance(value, IMMUTABLE_SCALARS):
+        return value
+    if isinstance(value, (tuple, list)):
         return tuple(immutable_value(item) for item in value)
     if isinstance(value, (set, frozenset)):
-        return tuple(sorted(immutable_value(item) for item in value))
+        return tuple(sorted((immutable_value(item) for item in value), key=repr))
     if isinstance(value, (dict, MappingProxyType)):
         return tuple(
             sorted(
-                (immutable_value(key), immutable_value(item))
-                for key, item in value.items()
+                ((immutable_value(key), immutable_value(item)) for key, item in value.items()),
+                key=repr,
             )
         )
-    return value
+    if isinstance(value, Enum):
+        return immutable_value(value.value)
+    nested = _stable_key_or_none(value)
+    if nested is not None:
+        return nested
+    return UnsupportedSemanticValue(
+        type(value).__module__, type(value).__qualname__
+    )
+
+
+def contains_unsupported_value(value: Any) -> bool:
+    """`immutable_value` が値として固定できなかったものを含むか。"""
+
+    if isinstance(value, UnsupportedSemanticValue):
+        return True
+    if isinstance(value, tuple):
+        return any(contains_unsupported_value(item) for item in value)
+    return False
 
 
 def _stable_key_or_none(value: Any) -> Any:
