@@ -4,30 +4,17 @@
 `let` で 1 回だけ定義する（`bindings`）。描画文脈（`context`）が違う同じ node は
 別の束縛になる。node 属性の評価（幅 / Bool sort / 符号拡張の好み）は
 `attributes` が反復 + DAG memo で回す。
+
+**この package が外へ出す面は描画の入口だけ**（`expression_to_smt` /
+`condition_to_smt` / 証拠用の 2 つ / `render_smt_term` / `SMT_RENDER_SCHEMA`）。
+共有方針・束縛名・型付きの項・属性評価は描画の実装どうしの取り決めなので、
+`bindings` / `context` / `attributes` / `render` を直接 import する側だけが見る。
+外へ出すと、共有の条件や性質の持ち方を変えるたびに外部 consumer が壊れる。
+ここに並ぶそれ以外の名前は PR-22-C より前からある再 export（既存 import の互換）。
 """
 
-from scripts.function_tracer_pcode.core.render_smt.attributes import (  # noqa: F401
-    any_node,
-    attribute_cache,
-    evaluate_attribute,
-    iter_expression_nodes,
-    render_attribute_scope,
-)
 from scripts.function_tracer_pcode.core.render_smt.bindings import (  # noqa: F401
-    SMT_BINDING_PREFIX,
-    SMT_BINDING_TEMPLATE,
     SMT_RENDER_SCHEMA,
-    SMT_SHARING_POLICY,
-    SMT_SYMBOL_RE,
-    assign_binding_names,
-    binding_dependency_order_is_valid,
-    rendered_binding_names,
-    smt_binding_namespace,
-    write_let_term,
-)
-from scripts.function_tracer_pcode.core.render_smt.context import (  # noqa: F401
-    SmtRenderContext,
-    build_smt_render_context,
 )
 from scripts.function_tracer_pcode.core.render_smt.calls import (  # noqa: F401
     CallDeclarationConflict,
@@ -102,13 +89,8 @@ from scripts.function_tracer_pcode.core.render_smt.render import (  # noqa: F401
     _SUPPORTED_UNARY_OPERATORS,
     _coerce_bool_to_bitvec,
     _coerce_expr_to_bool,
-    SmtTermProperties,
     _to_smt_internal,
-    classify_smt_fragment,
     render_smt_term,
-    smt_term,
-    term_boolean_literal,
-    term_is_fp_rendered,
     expression_contains_signed_comparison,
     expression_contains_unsupported_smt_ops,
     expression_node_has_unsupported_smt_ops,
