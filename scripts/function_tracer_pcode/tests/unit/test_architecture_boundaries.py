@@ -1137,3 +1137,67 @@ def test_identity_is_never_built_from_the_human_rendering():
                 ):
                     offenders.append(f"{relative}:{node.lineno} in {function.name}")
     assert offenders == [], offenders
+
+
+#: 描画を打ち切る / 内部不整合を告げる型。回復 handler に吸わせない。
+_RENDER_FAILURE_TYPES = frozenset(
+    {
+        "RenderOutputLimitExceeded",
+        "RenderPlanInvariantError",
+        "RenderedTermContractError",
+        "RenderGraphCycleError",
+    }
+)
+
+
+@pytest.mark.parametrize("module_path", _RENDER_BODY_MODULES)
+def test_a_render_abort_is_never_swallowed_by_a_recovery_handler(module_path):
+    """子を描く `try` の周りの `except Exception` は、打ち切りを先に通すこと。
+
+    上限で止めたことが「この枝は描けなかった」に化けると、予算が効かないまま
+    解析が続き、切り詰めた表現が下流へ出る。`except Exception` を消せない
+    （baseline は delete-only）ので、その手前に typed な再送出を置く。
+    """
+
+    path = PACKAGE_ROOT / module_path
+    offenders = []
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Try):
+            continue
+        renders_a_child = any(
+            isinstance(inner, ast.Call)
+            and (
+                (isinstance(inner.func, ast.Name) and inner.func.id in {"render_child", "_to_smt_internal"})
+                or (isinstance(inner.func, ast.Attribute) and inner.func.attr == "render_child")
+            )
+            for statement in node.body
+            for inner in ast.walk(statement)
+        )
+        if not renders_a_child:
+            continue
+        broad = [
+            handler
+            for handler in node.handlers
+            if handler.type is None
+            or (isinstance(handler.type, ast.Name) and handler.type.id == "Exception")
+        ]
+        if not broad:
+            continue
+        reraises = []
+        for handler in node.handlers:
+            names = set()
+            if isinstance(handler.type, ast.Name):
+                names.add(handler.type.id)
+            elif isinstance(handler.type, ast.Tuple):
+                names.update(
+                    element.id for element in handler.type.elts if isinstance(element, ast.Name)
+                )
+            if names & _RENDER_FAILURE_TYPES:
+                reraises.append(handler)
+        if not reraises:
+            offenders.append(f"{module_path}:{node.lineno}")
+            continue
+        first_broad = node.handlers.index(broad[0])
+        if all(node.handlers.index(handler) > first_broad for handler in reraises):
+            offenders.append(f"{module_path}:{node.lineno} (typed handler comes too late)")
+    assert offenders == [], offenders

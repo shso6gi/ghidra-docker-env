@@ -332,6 +332,11 @@ def _counted_loop_sum_exact_smt(
         bias_bits = max(1, int(expression_smt_bit_width(bias_expr) or result_bits or 1))
         try:
             bias_smt = render_child(bias_expr)
+        except (RenderOutputLimitExceeded, RenderPlanInvariantError, RenderedTermContractError):
+            # 予算の打ち切りと内部不整合は「この項は描けなかった」ではない。
+            # 下の broad handler へ落とすと、上限で止めたことが lowering の
+            # 断念に化けて、予算が効かないまま解析が続く。
+            raise
         except Exception:
             return None
         bias_smt = _coerce_expr_to_bitvec_width(
@@ -436,6 +441,11 @@ def _counted_loop_sum_exact_smt(
 
 
 # Sibling modules reference each other at call time; import them last to avoid cycles.
+from scripts.function_tracer_pcode.core.render_output import RenderOutputLimitExceeded
+from scripts.function_tracer_pcode.core.render_plan import (
+    RenderPlanInvariantError,
+    RenderedTermContractError,
+)
 from scripts.function_tracer_pcode.core.render_smt.render import (
     _detached_child_renderer,
 )
