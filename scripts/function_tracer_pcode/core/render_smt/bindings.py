@@ -91,28 +91,3 @@ def write_let_term(
         writer.write(")) ")
     write_expansion(writer, plan, plan.root_index, names)
     writer.write_repeated(")", len(order))
-
-
-def binding_dependency_order_is_valid(plan: RenderPlan, names: Dict[int, str]) -> bool:
-    """束縛が自分より前の束縛しか参照しないこと（test 用の検査）。"""
-
-    defined: set = set()
-    for index in plan.bound_order:
-        for child in plan.instances[index].used_children:
-            if child in names and child not in defined:
-                return False
-        defined.add(index)
-    return True
-
-
-def rendered_binding_names(text: str) -> Tuple[str, ...]:
-    """text 中に現れる束縛名（`?sh` 接頭辞の引用符付き symbol）。"""
-
-    found: List[str] = []
-    for match in SMT_SYMBOL_RE.finditer(text):
-        quoted = match.groupdict().get("quoted")
-        if quoted is None:
-            continue
-        if quoted.startswith(SMT_BINDING_PREFIX) and f"|{quoted}|" not in found:
-            found.append(f"|{quoted}|")
-    return tuple(found)

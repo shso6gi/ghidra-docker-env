@@ -55,9 +55,8 @@ from scripts.function_tracer_pcode.core.render_smt import _to_smt_internal
 from scripts.function_tracer_pcode.core.render_smt.bindings import (
     SMT_BINDING_PREFIX,
     SMT_SHARING_POLICY,
+    SMT_SYMBOL_RE,
     assign_binding_names,
-    binding_dependency_order_is_valid,
-    rendered_binding_names,
     smt_binding_namespace,
 )
 from scripts.function_tracer_pcode.core.render_smt.attributes import render_attribute_scope
@@ -131,6 +130,40 @@ def _linear_chain(depth: int, leaf: Expression) -> Expression:
     for _ in range(depth):
         node = _binary("INT_ADD", node, step)
     return node
+
+
+def _rendered_binding_names(text: str) -> tuple:
+    """描かれた text に現れる束縛名。**test の観測**であって production の面ではない。
+
+    描かれた text を読むのは test だけがしてよいこと。production に置くと、
+    「描いた結果から意味を読み戻す」経路が復活する入口になる。
+    """
+
+    found = []
+    for match in SMT_SYMBOL_RE.finditer(text):
+        quoted = match.groupdict().get("quoted")
+        if quoted is None:
+            continue
+        if quoted.startswith(SMT_BINDING_PREFIX) and f"|{quoted}|" not in found:
+            found.append(f"|{quoted}|")
+    return tuple(found)
+
+
+def _binding_dependency_order_is_valid(plan, names) -> bool:
+    """束縛が自分より前の束縛しか参照しないこと。
+
+    production の `check_plan_invariants` が同じ性質を落とす形で持っている。
+    こちらは「落とす」ではなく「真偽で観る」ための test 側の目で、判定を
+    2 箇所に増やさないよう production には置かない。
+    """
+
+    defined = set()
+    for index in plan.bound_order:
+        for child in plan.instances[index].used_children:
+            if child in names and child not in defined:
+                return False
+        defined.add(index)
+    return True
 
 
 def _smt_body(node, node_context, resolve):
@@ -369,7 +402,7 @@ def test_c2_rendering_is_deterministic_for_the_same_graph():
 def test_c2_binding_dependency_order_is_nested_and_acyclic():
     a = _param("a", 0)
     rendered = _to_smt_internal(_doubling_dag(20, a))
-    names = rendered_binding_names(rendered)
+    names = _rendered_binding_names(rendered)
     assert names
     for position, name in enumerate(names):
         definition = rendered.index(f"(let (({name} ")
@@ -393,7 +426,7 @@ def test_c3_generated_bindings_do_not_capture_program_symbols():
     rendered = _to_smt_internal(_doubling_dag(20, _binary("INT_ADD", colliding, _param("a", 0))))
 
     assert "?sh_0" in rendered  # program symbol はそのまま出る
-    names = rendered_binding_names(rendered)
+    names = _rendered_binding_names(rendered)
     assert names
     assert all(name != "|?sh_0|" for name in names)
 
@@ -677,7 +710,7 @@ def test_plan_and_output_agree_on_the_reference_topology():
     for instance in plan.instances:
         assert tuple(fragment_children(instance.fragment)) == instance.used_children
         assert set(instance.used_children) <= set(instance.child_indices)
-    assert binding_dependency_order_is_valid(plan, names)
+    assert _binding_dependency_order_is_valid(plan, names)
 
     writer = CountingWriter()
     write_expansion(writer, plan, plan.root_index, names)
@@ -1026,7 +1059,7 @@ def test_published_solver_entry_still_requires_publication():
 
 def test_binding_names_use_the_reserved_prefix():
     a = _param("a", 0)
-    names = rendered_binding_names(_to_smt_internal(_doubling_dag(24, a)))
+    names = _rendered_binding_names(_to_smt_internal(_doubling_dag(24, a)))
     assert names
     assert all(name.startswith(f"|{SMT_BINDING_PREFIX}") for name in names)
     assert NO_SHARING_POLICY.binds(references=9, inline_bytes=10**9, tree_nodes=10**9) is False
