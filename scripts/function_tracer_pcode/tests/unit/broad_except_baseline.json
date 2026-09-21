@@ -664,12 +664,6 @@
       "_counted_loop_sum_exact_smt.<locals>._render_bias_term": {"logged": 0, "unlogged": 1},
       "_neon_ext_operands_are_smt_supported": {"logged": 0, "unlogged": 1}
     },
-    "core.render_smt.render": {
-      "_coerce_expr_to_bool": {"logged": 0, "unlogged": 1}
-    },
-    "core.render_smt.widths": {
-      "_expr_constant_int": {"logged": 0, "unlogged": 1}
-    },
     "core.runtime_refs.locations": {
       "LocationBaseRef.__post_init__": {"logged": 0, "unlogged": 1},
       "LocationBaseRef.matches_parameter": {"logged": 0, "unlogged": 1}

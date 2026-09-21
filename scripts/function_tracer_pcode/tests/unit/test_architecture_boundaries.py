@@ -1150,14 +1150,24 @@ _RENDER_FAILURE_TYPES = frozenset(
     }
 )
 
+#: source 側でそれらを再送出するときに書く名前（`render_plan` が唯一の owner）。
+_RENDER_FAILURE_TUPLE = "RENDER_FAILURES"
+
 
 @pytest.mark.parametrize("module_path", _RENDER_BODY_MODULES)
 def test_a_render_abort_is_never_swallowed_by_a_recovery_handler(module_path):
-    """子を描く `try` の周りの `except Exception` は、打ち切りを先に通すこと。
+    """描画 module の広い `except` は、打ち切りを **必ず** 先に通すこと。
 
-    上限で止めたことが「この枝は描けなかった」に化けると、予算が効かないまま
-    解析が続き、切り詰めた表現が下流へ出る。`except Exception` を消せない
-    （baseline は delete-only）ので、その手前に typed な再送出を置く。
+    上限で止めたこと・閉路だったことが「この枝は描けなかった」に化けると、
+    予算も閉路検出も効かないまま解析が続き、切り詰めた表現が下流へ出る。
+
+    規則であって一覧ではない: 「子を描く呼び出しを含む `try` だけ」を見ると、
+    何が打ち切りを投げ得るかの一覧を持つことになり、投げ得る場所が増えるたび
+    （属性の評価が反復 driver を回すようになった、など）に一覧の方が古くなる。
+    だからこれらの module では、広い `except` すべてに typed な再送出を課す。
+    その `try` が本当に何も描かないなら、再送出は何もしない 1 行で済む — 一覧を
+    保守し続けるより安い。`except Exception` を消せるならその方が良い
+    （baseline は delete-only）。
     """
 
     path = PACKAGE_ROOT / module_path
@@ -1165,27 +1175,16 @@ def test_a_render_abort_is_never_swallowed_by_a_recovery_handler(module_path):
     for node in ast.walk(_parse(path)):
         if not isinstance(node, ast.Try):
             continue
-        renders_a_child = any(
-            isinstance(inner, ast.Call)
-            and (
-                (isinstance(inner.func, ast.Name) and inner.func.id in {"render_child", "_to_smt_internal"})
-                or (isinstance(inner.func, ast.Attribute) and inner.func.attr == "render_child")
-            )
-            for statement in node.body
-            for inner in ast.walk(statement)
-        )
-        if not renders_a_child:
-            continue
         broad = [
-            handler
-            for handler in node.handlers
+            index
+            for index, handler in enumerate(node.handlers)
             if handler.type is None
             or (isinstance(handler.type, ast.Name) and handler.type.id == "Exception")
         ]
         if not broad:
             continue
         reraises = []
-        for handler in node.handlers:
+        for index, handler in enumerate(node.handlers):
             names = set()
             if isinstance(handler.type, ast.Name):
                 names.add(handler.type.id)
@@ -1193,15 +1192,40 @@ def test_a_render_abort_is_never_swallowed_by_a_recovery_handler(module_path):
                 names.update(
                     element.id for element in handler.type.elts if isinstance(element, ast.Name)
                 )
-            if names & _RENDER_FAILURE_TYPES:
-                reraises.append(handler)
+            if _RENDER_FAILURE_TUPLE in names:
+                reraises.append(index)
         if not reraises:
-            offenders.append(f"{module_path}:{node.lineno}")
+            offenders.append(f"{module_path}:{node.lineno} (nothing lets a render abort through)")
             continue
-        first_broad = node.handlers.index(broad[0])
-        if all(node.handlers.index(handler) > first_broad for handler in reraises):
+        if all(index > broad[0] for index in reraises):
             offenders.append(f"{module_path}:{node.lineno} (typed handler comes too late)")
     assert offenders == [], offenders
+
+
+def test_the_render_failure_types_have_one_owner():
+    """再送出する型の一覧が `render_plan.RENDER_FAILURES` 1 箇所であること。
+
+    同じ一覧が module ごとに手書きされると、型を足したときに一部だけが追従して
+    「その module では吸われる」状態が静かに残る。
+    """
+
+    from scripts.function_tracer_pcode.core import render_plan
+
+    assert {failure.__name__ for failure in render_plan.RENDER_FAILURES} == set(
+        _RENDER_FAILURE_TYPES
+    )
+    for module_path in _RENDER_BODY_MODULES:
+        source = (PACKAGE_ROOT / module_path).read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.ExceptHandler) or not isinstance(node.type, ast.Tuple):
+                continue
+            names = {
+                element.id for element in node.type.elts if isinstance(element, ast.Name)
+            }
+            assert not (names & _RENDER_FAILURE_TYPES), (
+                f"{module_path}:{node.lineno} spells out the render failure types; "
+                f"catch render_plan.{_RENDER_FAILURE_TUPLE} instead"
+            )
 
 
 def test_the_complete_identity_is_not_built_from_a_digest():

@@ -586,7 +586,7 @@ def _coerce_expr_to_bool(expr, expr_smt: str) -> str:
     if expr_kind is not None and expr_type == expr_kind.CONSTANT:
         try:
             return "false" if int(getattr(expr, "value", 0) or 0) == 0 else "true"
-        except Exception:
+        except (TypeError, ValueError):
             return "false"
 
     bits = expression_smt_bit_width(expr)

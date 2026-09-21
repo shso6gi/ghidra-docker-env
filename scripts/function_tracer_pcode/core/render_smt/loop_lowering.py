@@ -32,6 +32,10 @@ def _neon_ext_operands_are_smt_supported(expr) -> bool:
         first_bits = expression_smt_bit_width(first)
         second_bits = expression_smt_bit_width(second)
         result_bits = max(1, int(expression_smt_bit_width(expr) or 0))
+    except RENDER_FAILURES:
+        # 属性の評価も反復 driver を回すので、閉路や内部不整合を告げてくる。
+        # それを「この形は SMT に落とせない」に化けさせない。
+        raise
     except Exception:
         return False
     if first_bits <= 0 or second_bits <= 0:
@@ -332,7 +336,7 @@ def _counted_loop_sum_exact_smt(
         bias_bits = max(1, int(expression_smt_bit_width(bias_expr) or result_bits or 1))
         try:
             bias_smt = render_child(bias_expr)
-        except (RenderOutputLimitExceeded, RenderPlanInvariantError, RenderedTermContractError):
+        except RENDER_FAILURES:
             # 予算の打ち切りと内部不整合は「この項は描けなかった」ではない。
             # 下の broad handler へ落とすと、上限で止めたことが lowering の
             # 断念に化けて、予算が効かないまま解析が続く。
@@ -441,11 +445,7 @@ def _counted_loop_sum_exact_smt(
 
 
 # Sibling modules reference each other at call time; import them last to avoid cycles.
-from scripts.function_tracer_pcode.core.render_output import RenderOutputLimitExceeded
-from scripts.function_tracer_pcode.core.render_plan import (
-    RenderPlanInvariantError,
-    RenderedTermContractError,
-)
+from scripts.function_tracer_pcode.core.render_plan import RENDER_FAILURES
 from scripts.function_tracer_pcode.core.render_smt.render import (
     _detached_child_renderer,
 )

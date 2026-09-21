@@ -105,6 +105,21 @@ class RenderedTermContractError(AnalysisFailureError):
     """
 
 
+#: 描画を打ち切る / 内部不整合を告げる型（**この tuple が唯一の owner**）。
+#:
+#: 描画経路には `except Exception` の回復 handler が実在する。そこへこれらが
+#: 吸われると「上限で止めた」「閉路だった」が「その枝は描けなかった」に化け、
+#: 予算も閉路検出も効かないまま解析が続く。回復 handler の手前でこの tuple を
+#: 再送出すること。`tests/unit/test_architecture_boundaries.py` が、描画 module
+#: の広い `except` すべてについてそれを固定している。
+RENDER_FAILURES = (
+    RenderGraphCycleError,
+    RenderPlanInvariantError,
+    RenderedTermContractError,
+    RenderOutputLimitExceeded,
+)
+
+
 class _NeedChild(BaseException):
     """まだ解決していない子が要る、という driver 内部の合図。
 

@@ -128,7 +128,7 @@ def _expr_constant_int(expr) -> Optional[int]:
         return None
     try:
         return int(getattr(expr, "value", 0) or 0)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
