@@ -21,7 +21,11 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
     PcodeOpRef,
 )
 from scripts.function_tracer_pcode.core.storage import StorageInfo
-from scripts.function_tracer_pcode.core.structural import StructuralKey, expression_key_safe
+from scripts.function_tracer_pcode.core.structural import (
+    StructuralKey,
+    condition_key,
+    expression_key_safe,
+)
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSimplifier,
     ConditionTracker,
@@ -1252,7 +1256,11 @@ def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Tuple[Any,
         "return_info",
         self._return_site_key(ret),
         tuple(
-            getattr(condition, "structural_key", lambda: ("condition", condition.to_string()))()
+            # identity に人向けの表示文字列を使わない。表示は書式が変われば
+            # 変わるので、書式を直しただけで dedup の当たり外れが動いてしまう。
+            # 構造 identity（`core/structural`）は DAG を 1 回だけ辿る同じ規則で
+            # 作られ、`Condition.equals` と同じ一致条件を持つ。
+            condition_key(condition)
             for condition in tuple(getattr(ret, "conditions", ()) or ())
         ),
         expression_key_safe(getattr(ret, "value", None)),

@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.core.analysis import (
     UnknownOutcome,
 )
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.structural import condition_key
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSimplifier,
     ConditionTracker,
@@ -1111,7 +1112,10 @@ class BranchGuardedWhileProofService:
                         ("nonprogress_backedges", tuple(sorted(acc_nonprogress_indices))),
                         ("conditional_progress_backedges", tuple(sorted(acc_conditional_progress_keys))),
                         ("conditional_progress_guard_keys", tuple(sorted(acc_conditional_progress_keys.items(), key=repr))),
-                        ("target", tuple(condition.to_string() for condition in target_conditions or ())),
+                        # 証明鍵に人向けの表示文字列を使わない（表示の書式が
+                        # 変わると証明の一致条件が動く）。構造 identity は
+                        # `Condition.equals` と同じ規則で、DAG を 1 回だけ辿る。
+                        ("target", tuple(condition_key(condition) for condition in target_conditions or ())),
                         ("target_guard_keys", tuple(sorted((self.divergence_proofs.condition_identity_key(condition) for condition in target_conditions or ()), key=repr))),
                     )
         self.debug_reporter.debug_print(
