@@ -125,8 +125,10 @@ def render_human_text(
             template=HUMAN_SHARED_TEMPLATE,
         )
         shapes = _fragment_shape_digests(plan)
-        seeds = [shapes[index] for index in plan.bound_order]
-        allocated = namespace.allocate_keyed(seeds, digest=_shared_reference_digest)
+        # 種はすでに形の digest。名前空間 owner は衝突解決だけを担う。
+        allocated = namespace.allocate_keyed(
+            [shapes[index] for index in plan.bound_order], digest=lambda seed: seed
+        )
         names = {index: allocated[position] for position, index in enumerate(plan.bound_order)}
     check_plan_invariants(plan, names)
     counters.case_count += _phi_case_count(plan)
