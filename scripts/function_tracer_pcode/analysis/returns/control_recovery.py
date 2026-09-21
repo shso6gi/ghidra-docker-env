@@ -11,7 +11,7 @@ from scripts.function_tracer_pcode.core.analysis import (
     UnknownOutcome,
 )
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
-from scripts.function_tracer_pcode.core.structural import condition_key
+from scripts.function_tracer_pcode.core.structural import condition_identities
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSimplifier,
     ConditionTracker,
@@ -747,6 +747,14 @@ class BranchGuardedWhileProofService:
             self.return_info_summary_identity_key(ret)
             for ret in proof_returns
         )
+        if any(key is None for key in source_keys):
+            # summary identity を組めない return がある。候補の source key は
+            # 「同じ候補か」を言うためのものなので、言えないなら候補を出さない。
+            self.debug_reporter.debug_print(
+                "Outcome branch-guarded affine proof declined: "
+                "a source return has no complete summary identity"
+            )
+            return None
         return ReturnInfo(
             address=str(getattr(anchor, "address", None) or getattr(analysis, "entry_point", None) or "outcome-summary"),
             value=c_param,
@@ -1102,6 +1110,15 @@ class BranchGuardedWhileProofService:
                     ):
                         continue
                     saw_state_guard = True
+                    target_identities = condition_identities(target_conditions or ())
+                    if target_identities is None:
+                        # 完全 identity を組めない条件が混ざっている。「同じ
+                        # 条件か」を言えないまま証明鍵に載せない（fail-closed）。
+                        self.debug_reporter.debug_print(
+                            "Outcome branch-guarded structural proof declined: "
+                            "target condition has no complete structural identity"
+                        )
+                        return None
                     return (
                         "branch_guarded_affine_unit_count_structural_proof",
                         ("schema_version", 1),
@@ -1112,10 +1129,12 @@ class BranchGuardedWhileProofService:
                         ("nonprogress_backedges", tuple(sorted(acc_nonprogress_indices))),
                         ("conditional_progress_backedges", tuple(sorted(acc_conditional_progress_keys))),
                         ("conditional_progress_guard_keys", tuple(sorted(acc_conditional_progress_keys.items(), key=repr))),
-                        # 証明鍵に人向けの表示文字列を使わない（表示の書式が
-                        # 変わると証明の一致条件が動く）。構造 identity は
-                        # `Condition.equals` と同じ規則で、DAG を 1 回だけ辿る。
-                        ("target", tuple(condition_key(condition) for condition in target_conditions or ())),
+                        # 証明鍵は **完全な** 構造 identity（`condition_identities`）。
+                        # 人向けの表示文字列は書式が変われば変わるし、予算付きの
+                        # legacy key は深い条件で別物を同一視し得る。identity を
+                        # 組めない条件が 1 つでもあれば、この証明は出さない
+                        # （上の `target_identities is None` で落としてある）。
+                        ("target", target_identities),
                         ("target_guard_keys", tuple(sorted((self.divergence_proofs.condition_identity_key(condition) for condition in target_conditions or ()), key=repr))),
                     )
         self.debug_reporter.debug_print(

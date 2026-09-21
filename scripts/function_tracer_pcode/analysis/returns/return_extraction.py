@@ -23,7 +23,7 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.structural import (
     StructuralKey,
-    condition_key,
+    condition_identities,
     expression_key_safe,
 )
 from scripts.function_tracer_pcode.analysis.returns._shared import (
@@ -1251,18 +1251,26 @@ def _impl__return_conditions_cover_region(
     return self._conditions_are_unsat(tuple(region_conditions or ()) + (Condition(disjunction, True),))
 
 
-def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Tuple[Any, ...]:
+def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Optional[Tuple[Any, ...]]:
+    """候補 summary の identity。組めないときは `None`（fail-closed）。
+
+    条件は **完全な** 構造 identity（`condition_identities`）で並べる。人向けの
+    表示文字列は書式が変われば変わるし、予算付きの legacy key は深い条件で
+    末尾だけ違うものを同一視し得る — どちらも「同じ候補か」を言う鍵には使えない。
+
+    この鍵は同じ producer が作った鍵とだけ比べられる（`control_recovery` の
+    候補 source key）。`analysis/returns/summary_returns.py` と
+    `analysis/recurrence/object_identity.py` にある同名の鍵は別の鍵空間で、
+    そちらは予算付きのまま（#22 の追記で別途追跡）。
+    """
+
+    identities = condition_identities(getattr(ret, "conditions", ()) or ())
+    if identities is None:
+        return None
     return (
         "return_info",
         self._return_site_key(ret),
-        tuple(
-            # identity に人向けの表示文字列を使わない。表示は書式が変われば
-            # 変わるので、書式を直しただけで dedup の当たり外れが動いてしまう。
-            # 構造 identity（`core/structural`）は DAG を 1 回だけ辿る同じ規則で
-            # 作られ、`Condition.equals` と同じ一致条件を持つ。
-            condition_key(condition)
-            for condition in tuple(getattr(ret, "conditions", ()) or ())
-        ),
+        identities,
         expression_key_safe(getattr(ret, "value", None)),
     )
 
