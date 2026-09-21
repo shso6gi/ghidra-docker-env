@@ -354,12 +354,27 @@ _RAW_LOWERING_FIELDS = frozenset(
 #: 生 ref そのものを読んではいけない module（凍結後の描画側）。
 _RUNTIME_REF_FREE_MODULES = ("core/render_smt/loop_lowering.py",)
 
-#: 子の描画 text を **文字列として見る** 判定を持ってよい唯一の関数。
+#: 描画テキストを **文字列として見て**よい唯一の関数。
 #:
-#: DAG 描画は計画 pass で子の代わりに代表 token を返すので、text を見る判定が
-#: 登録外に増えると、計画 pass と出力 pass で辿る分岐が食い違う（共有の数え方が
-#: ずれる）。見る側を 1 つに閉じ、`core/render_plan.TextObservation` に登録する。
-_TEXT_OBSERVATION_OWNER = ("core/render_smt/float_theory.py", "_looks_like_fp_expr")
+#: 子の描画結果は参照 1 個（`RenderedTerm`）なので、その文字を見て分岐すると、
+#: 参照が名前になった / 展開されたで判定が変わる。判定に要る性質は型付きの
+#: property（`SmtTermProperties`）で運び、text を見るのは「その node 自身の
+#: fragment を 1 回だけ分類する」この関数だけにする。
+_TEXT_INSPECTION_OWNER = ("core/render_smt/float_theory.py", "_looks_like_fp_expr")
+#: 分類器（唯一の呼び出し元）。fragment を見てよいのはこの 2 つだけ。
+_FRAGMENT_CLASSIFIER = ("core/render_smt/render.py", "classify_smt_fragment")
+_FRAGMENT_READERS = frozenset({_TEXT_INSPECTION_OWNER, _FRAGMENT_CLASSIFIER})
+#: 描画テキストを保持していそうな名前。ここに挙げた名前に対する文字列検査と
+#: 文字列リテラルとの比較を、body module では 0 件で固定する。
+_RENDERED_TEXT_NAMES = (
+    "_smt",
+    "_str",
+    "_text",
+    "fragment",
+)
+_TEXT_INSPECTION_METHODS = frozenset(
+    {"startswith", "endswith", "strip", "lstrip", "rstrip", "split", "replace", "find", "index", "count"}
+)
 #: node 本体を持つ描画 module（ここでの text 検査だけを見る）。
 _RENDER_BODY_MODULES = (
     "core/render_smt/render.py",
@@ -620,7 +635,15 @@ def test_identity_kinds_are_not_merged_into_one_type():
 
     identity = structural.StructuralIdentity
     exposed = {name for name in vars(identity) if not name.startswith("_")}
-    assert exposed == {"candidate_hash", "equals", "key", "identity_digest"}, exposed
+    # 構造 identity の面だけ。solver query / rewrite の一致条件はここに入れない。
+    assert exposed == {
+        "candidate_hash",
+        "equals",
+        "key",
+        "identity_digest",
+        "condition_identity",
+        "condition_identities",
+    }, exposed
     for forbidden in ("solver_query", "rewrite", "authority_digest", "query_identity"):
         assert not hasattr(identity, forbidden), forbidden
 
@@ -989,51 +1012,97 @@ def test_the_commit_functions_exist_and_are_the_only_state_writers():
     assert callers == _LIFECYCLE_COMMIT_FUNCTIONS, callers
 
 
-@pytest.mark.parametrize("module_path", _RENDER_BODY_MODULES)
-def test_only_one_function_inspects_the_rendered_child_text(module_path):
-    """描画 text の文字列検査は 1 箇所（`_looks_like_fp_expr`）。
+def _rendered_text_name(node: ast.AST):
+    if not isinstance(node, ast.Name):
+        return None
+    return node.id if node.id.endswith(_RENDERED_TEXT_NAMES) else None
 
-    DAG 描画の計画 pass は子の代わりに **観測クラスの代表 token** を返す。
-    登録外の場所で text の接頭辞を見ると、計画 pass だけ別の枝へ入り、共有の
-    数え方が実際の出力と食い違う。判定を増やすときは `TextObservation` を
-    1 つ足して代表 token を決める。
+
+@pytest.mark.parametrize("module_path", _RENDER_BODY_MODULES)
+def test_no_renderer_body_inspects_rendered_text(module_path):
+    """描画テキストを文字列として見る分岐は renderer に **1 つも無い**。
+
+    子の描画結果は参照 1 個なので、その文字を見た分岐は「共有したか」で答えが
+    変わる。判定に要る性質は型付きの property で運ぶ（`SmtTermProperties`）。
+    この test は種類を列挙して 0 件に固定するので、同種の分岐が後から足されれば
+    落ちる。
     """
 
-    owner_module, owner_function = _TEXT_OBSERVATION_OWNER
     path = PACKAGE_ROOT / module_path
     offenders = []
-    for node in ast.walk(_parse(path)):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    for function in ast.walk(_parse(path)):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if module_path == owner_module and node.name == owner_function:
+        if (module_path, function.name) in _FRAGMENT_READERS:
             continue
-        for inner in ast.walk(node):
+        for node in ast.walk(function):
             if (
-                isinstance(inner, ast.Call)
-                and isinstance(inner.func, ast.Attribute)
-                and inner.func.attr in {"startswith", "endswith"}
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _TEXT_INSPECTION_METHODS
+                and _rendered_text_name(node.func.value)
             ):
-                offenders.append(f"{module_path}:{inner.lineno} in {node.name}")
+                offenders.append(
+                    f"{module_path}:{node.lineno} {function.name} inspects "
+                    f"{_rendered_text_name(node.func.value)}.{node.func.attr}()"
+                )
+            if isinstance(node, ast.Compare):
+                operands = [node.left, *node.comparators]
+                names = [name for name in map(_rendered_text_name, operands) if name]
+                literals = [
+                    item
+                    for item in operands
+                    if isinstance(item, ast.Constant) and isinstance(item.value, str)
+                ]
+                if names and literals:
+                    offenders.append(
+                        f"{module_path}:{node.lineno} {function.name} compares "
+                        f"{names[0]} with a string literal"
+                    )
     assert offenders == [], offenders
 
 
-def test_the_text_observation_owner_is_registered_with_the_planner():
-    """text を見る判定は必ず観測として登録されていること。"""
+def test_the_only_text_inspection_is_reached_from_the_fragment_classifier():
+    """text を見る唯一の関数は、分類器からしか呼ばれない。
 
-    from scripts.function_tracer_pcode.core.render_smt import float_theory, render
+    分類器は node 自身の fragment を 1 回だけ見て型付きの性質を決める。他所から
+    呼べると「子の描画結果を見る」経路が復活する。
+    """
 
-    registered = {
-        observation.name: observation for observation in render._SMT_TEXT_OBSERVATIONS
-    }
-    assert "fp" in registered
-    # 登録側の判定が owner の実装を呼んでいること（別実装を持っていない）。
-    assert registered["fp"].matches("(fp.add a b)") is True
-    assert registered["fp"].matches("(bvadd a b)") is False
-    assert float_theory._looks_like_fp_expr("(fp.add a b)") is True
-    # 既定クラスが必ずあること（未登録の text が落ちない）。
-    assert any(
-        observation.name == "other" for observation in render._SMT_TEXT_OBSERVATIONS
+    owner_module, owner_function = _TEXT_INSPECTION_OWNER
+    classifier_module, classifier_function = _FRAGMENT_CLASSIFIER
+    callers = []
+    for path in _module_files():
+        relative = _relative(path)
+        if relative == owner_module:
+            continue
+        for function in ast.walk(_parse(path)):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(function):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == owner_function
+                ):
+                    callers.append((relative, function.name))
+    assert callers == [(classifier_module, classifier_function)], callers
+
+
+def test_the_typed_term_properties_carry_every_observation_the_renderer_needs():
+    """性質は node/fragment から決まり、共有の有無で変わらない。"""
+
+    from scripts.function_tracer_pcode.core.render_smt.render import (
+        SmtTermProperties,
+        classify_smt_fragment,
     )
+
+    assert set(SmtTermProperties._fields) == {"is_fp_term", "boolean_literal"}
+    assert classify_smt_fragment("(fp.add a b)", None, False).is_fp_term is True
+    assert classify_smt_fragment("(bvadd a b)", None, False).is_fp_term is False
+    assert classify_smt_fragment("true", None, False).boolean_literal is True
+    assert classify_smt_fragment("false", None, False).boolean_literal is False
+    assert classify_smt_fragment("(ite c a b)", None, False).boolean_literal is None
 
 
 def test_identity_is_never_built_from_the_human_rendering():

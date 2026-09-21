@@ -1,0 +1,415 @@
+{
+ "cases": {
+  "arith_mixed_operators": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvxor (bvmul (bvsub a b) (_ bv3 32)) (bvand (bvor a b) (_ bv255 32)))",
+   "sort": "bitvec"
+  },
+  "arith_shifts": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvor (bvshl (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (_ bv3 32)) (bvashr (bvadd (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b))) (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b)))) (_ bv2 32)))",
+   "sort": "bitvec"
+  },
+  "arith_signed_division": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvsdiv (bvsrem (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) b) (_ bv7 32))",
+   "sort": "bitvec"
+  },
+  "arith_small": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd a b)",
+   "sort": "bitvec"
+  },
+  "bool_connectives": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(or (and (bvult (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) b) (distinct (bvadd (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b))) (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b)))) a)) (not (= a b)))",
+   "sort": "bool"
+  },
+  "bool_to_bitvector": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd (ite (bvult (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) b) (_ bv1 32) (_ bv0 32)) (bvadd (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b))) (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b)))))",
+   "sort": "bitvec"
+  },
+  "compare_equality_of_bools": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(= (bvult a b) (bvule b a))",
+   "sort": "bool"
+  },
+  "compare_signed": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvslt (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b))) (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b)))) (bvadd (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b))) (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b))))))",
+   "sort": "bool"
+  },
+  "compare_unsigned": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvult (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b))) (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b)))) (bvadd (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b))) (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b))))))",
+   "sort": "bool"
+  },
+  "context_address": {
+   "address_context": true,
+   "declarations": [
+    "(declare-const gvar (_ BitVec 64))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd (bvadd (bvadd (_ bv8192 64) (_ bv8192 64)) (bvadd (_ bv8192 64) (_ bv8192 64))) (bvadd (bvadd (_ bv8192 64) (_ bv8192 64)) (bvadd (_ bv8192 64) (_ bv8192 64))))",
+   "sort": "bitvec"
+  },
+  "context_global_as_address_and_value": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const gvar (_ BitVec 64))",
+    "(declare-const mem32 (Array (_ BitVec 64) (_ BitVec 32)))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd (bvadd (bvadd (bvadd (bvadd (select mem32 (_ bv8192 64)) (select mem32 (_ bv8192 64))) (bvadd (select mem32 (_ bv8192 64)) (select mem32 (_ bv8192 64)))) (bvadd (bvadd (select mem32 (_ bv8192 64)) (select mem32 (_ bv8192 64))) (bvadd (select mem32 (_ bv8192 64)) (select mem32 (_ bv8192 64))))) (bvadd (bvadd (bvadd (select mem32 (_ bv8192 64)) (select mem32 (_ bv8192 64))) (bvadd (select mem32 (_ bv8192 64)) (select mem32 (_ bv8192 64)))) (bvadd (bvadd (select mem32 (_ bv8192 64)) (select mem32 (_ bv8192 64))) (bvadd (select mem32 (_ bv8192 64)) (select mem32 (_ bv8192 64)))))) (bvadd (bvadd (bvadd (bvadd ((_ extract 31 0) gvar) ((_ extract 31 0) gvar)) (bvadd ((_ extract 31 0) gvar) ((_ extract 31 0) gvar))) (bvadd (bvadd ((_ extract 31 0) gvar) ((_ extract 31 0) gvar)) (bvadd ((_ extract 31 0) gvar) ((_ extract 31 0) gvar)))) (bvadd (bvadd (bvadd ((_ extract 31 0) gvar) ((_ extract 31 0) gvar)) (bvadd ((_ extract 31 0) gvar) ((_ extract 31 0) gvar))) (bvadd (bvadd ((_ extract 31 0) gvar) ((_ extract 31 0) gvar)) (bvadd ((_ extract 31 0) gvar) ((_ extract 31 0) gvar))))))",
+   "sort": "bitvec"
+  },
+  "context_prefer_signed_arithmetic": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const q (_ BitVec 8))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": true,
+   "smt": "(bvadd ((_ sign_extend 24) q) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))))",
+   "sort": "bitvec"
+  },
+  "float_arithmetic_uf": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const f (_ BitVec 32))",
+    "(declare-const g (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(float_add (bvadd (bvadd (bvadd f f) (bvadd f f)) (bvadd (bvadd f f) (bvadd f f))) g)",
+   "sort": "bitvec"
+  },
+  "float_predicate_uf": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const f (_ BitVec 32))",
+    "(declare-const g (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(float_less (bvadd (bvadd (bvadd f f) (bvadd f f)) (bvadd (bvadd f f) (bvadd f f))) g)",
+   "sort": "bool"
+  },
+  "float_unary_uf": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const f (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvand (bvadd (bvadd (bvadd f f) (bvadd f f)) (bvadd (bvadd f f) (bvadd f f))) (_ bv2147483647 32))",
+   "sort": "bitvec"
+  },
+  "fp_arithmetic": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const f (_ BitVec 32))",
+    "(declare-const g (_ BitVec 32))"
+   ],
+   "float_mode": "fp",
+   "prefer_signed_arithmetic": false,
+   "smt": "(fp.add RNE ((_ to_fp 8 24) (bvadd (bvadd (bvadd f f) (bvadd f f)) (bvadd (bvadd f f) (bvadd f f)))) ((_ to_fp 8 24) g))",
+   "sort": "bitvec"
+  },
+  "fp_double_width": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const d (_ BitVec 64))",
+    "(declare-const e (_ BitVec 64))"
+   ],
+   "float_mode": "fp",
+   "prefer_signed_arithmetic": false,
+   "smt": "(fp.div RNE ((_ to_fp 11 53) (bvadd (bvadd d d) (bvadd d d))) ((_ to_fp 11 53) e))",
+   "sort": "bitvec"
+  },
+  "fp_int_to_float": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))"
+   ],
+   "float_mode": "fp",
+   "prefer_signed_arithmetic": false,
+   "smt": "((_ to_fp 8 24) RNE (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))",
+   "sort": "bitvec"
+  },
+  "fp_mixed_with_integer": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const f (_ BitVec 32))",
+    "(declare-const g (_ BitVec 32))"
+   ],
+   "float_mode": "fp",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd (ite (fp.lt ((_ to_fp 8 24) f) ((_ to_fp 8 24) g)) (_ bv1 32) (_ bv0 32)) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))",
+   "sort": "bitvec"
+  },
+  "fp_nested_arithmetic": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const f (_ BitVec 32))",
+    "(declare-const g (_ BitVec 32))"
+   ],
+   "float_mode": "fp",
+   "prefer_signed_arithmetic": false,
+   "smt": "(fp.mul RNE (fp.add RNE ((_ to_fp 8 24) f) ((_ to_fp 8 24) g)) (fp.sub RNE ((_ to_fp 8 24) f) ((_ to_fp 8 24) g)))",
+   "sort": "bitvec"
+  },
+  "fp_predicate": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const f (_ BitVec 32))",
+    "(declare-const g (_ BitVec 32))"
+   ],
+   "float_mode": "fp",
+   "prefer_signed_arithmetic": false,
+   "smt": "(fp.lt ((_ to_fp 8 24) (bvadd (bvadd (bvadd f f) (bvadd f f)) (bvadd (bvadd f f) (bvadd f f)))) ((_ to_fp 8 24) g))",
+   "sort": "bool"
+  },
+  "fp_predicate_over_arithmetic": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const f (_ BitVec 32))",
+    "(declare-const g (_ BitVec 32))"
+   ],
+   "float_mode": "fp",
+   "prefer_signed_arithmetic": false,
+   "smt": "(fp.eq (fp.add RNE ((_ to_fp 8 24) f) ((_ to_fp 8 24) g)) (fp.mul RNE ((_ to_fp 8 24) f) ((_ to_fp 8 24) g)))",
+   "sort": "bool"
+  },
+  "intrinsic_ptradd": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const i (_ BitVec 64))",
+    "(declare-const w (_ BitVec 64))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd (bvadd (bvadd (bvadd w w) (bvadd w w)) (bvadd (bvadd w w) (bvadd w w))) (bvmul i (_ bv4 64)))",
+   "sort": "bitvec"
+  },
+  "linear_depth_200": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32)) (_ bv1 32))",
+   "sort": "bitvec"
+  },
+  "memory_of_global": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const gvar (_ BitVec 64))",
+    "(declare-const mem32 (Array (_ BitVec 64) (_ BitVec 32)))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(select mem32 (_ bv8192 64))",
+   "sort": "bitvec"
+  },
+  "memory_read": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const mem32 (Array (_ BitVec 64) (_ BitVec 32)))",
+    "(declare-const w (_ BitVec 64))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd (bvadd (bvadd (bvadd (bvadd (select mem32 w) (select mem32 w)) (bvadd (select mem32 w) (select mem32 w))) (bvadd (bvadd (select mem32 w) (select mem32 w)) (bvadd (select mem32 w) (select mem32 w)))) (bvadd (bvadd (bvadd (select mem32 w) (select mem32 w)) (bvadd (select mem32 w) (select mem32 w))) (bvadd (bvadd (select mem32 w) (select mem32 w)) (bvadd (select mem32 w) (select mem32 w))))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))))",
+   "sort": "bitvec"
+  },
+  "memory_width_8": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const mem8 (Array (_ BitVec 64) (_ BitVec 8)))",
+    "(declare-const w (_ BitVec 64))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd ((_ zero_extend 24) (select mem8 w)) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))",
+   "sort": "bitvec"
+  },
+  "phi_bool_branches": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(ite (bvult a b) (= a b) (distinct a b))",
+   "sort": "bool"
+  },
+  "phi_negated_condition": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(ite (not (bvult a b)) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b))) (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b)))))",
+   "sort": "bitvec"
+  },
+  "phi_with_condition": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd (bvadd (bvadd (bvadd (ite (bvult a b) (bvadd a b) (bvmul a a)) (ite (bvult a b) (bvadd a b) (bvmul a a))) (bvadd (ite (bvult a b) (bvadd a b) (bvmul a a)) (ite (bvult a b) (bvadd a b) (bvmul a a)))) (bvadd (bvadd (ite (bvult a b) (bvadd a b) (bvmul a a)) (ite (bvult a b) (bvadd a b) (bvmul a a))) (bvadd (ite (bvult a b) (bvadd a b) (bvmul a a)) (ite (bvult a b) (bvadd a b) (bvmul a a))))) (bvadd (bvadd (bvadd (ite (bvult a b) (bvadd a b) (bvmul a a)) (ite (bvult a b) (bvadd a b) (bvmul a a))) (bvadd (ite (bvult a b) (bvadd a b) (bvmul a a)) (ite (bvult a b) (bvadd a b) (bvmul a a)))) (bvadd (bvadd (ite (bvult a b) (bvadd a b) (bvmul a a)) (ite (bvult a b) (bvadd a b) (bvmul a a))) (bvadd (ite (bvult a b) (bvadd a b) (bvmul a a)) (ite (bvult a b) (bvadd a b) (bvmul a a))))))",
+   "sort": "bitvec"
+  },
+  "phi_with_expression_condition": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd (bvadd (bvadd (ite (bvslt a b) (bvadd a b) b) (ite (bvslt a b) (bvadd a b) b)) (bvadd (ite (bvslt a b) (bvadd a b) b) (ite (bvslt a b) (bvadd a b) b))) (bvadd (bvadd (ite (bvslt a b) (bvadd a b) b) (ite (bvslt a b) (bvadd a b) b)) (bvadd (ite (bvslt a b) (bvadd a b) b) (ite (bvslt a b) (bvadd a b) b))))",
+   "sort": "bitvec"
+  },
+  "shared_dag_depth_10": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))))) (bvadd (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvadd (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))))))))",
+   "sort": "bitvec"
+  },
+  "unknown_symbol": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const rtunk_57cf249782f05e51_32 (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd (bvadd (bvadd (bvadd (bvadd rtunk_57cf249782f05e51_32 rtunk_57cf249782f05e51_32) (bvadd rtunk_57cf249782f05e51_32 rtunk_57cf249782f05e51_32)) (bvadd (bvadd rtunk_57cf249782f05e51_32 rtunk_57cf249782f05e51_32) (bvadd rtunk_57cf249782f05e51_32 rtunk_57cf249782f05e51_32))) (bvadd (bvadd (bvadd rtunk_57cf249782f05e51_32 rtunk_57cf249782f05e51_32) (bvadd rtunk_57cf249782f05e51_32 rtunk_57cf249782f05e51_32)) (bvadd (bvadd rtunk_57cf249782f05e51_32 rtunk_57cf249782f05e51_32) (bvadd rtunk_57cf249782f05e51_32 rtunk_57cf249782f05e51_32)))) (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))))",
+   "sort": "bitvec"
+  },
+  "width_negate_and_twos_complement": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd (bvnot (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))))) (bvneg (bvadd (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b))) (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b))))))",
+   "sort": "bitvec"
+  },
+  "width_piece_subpiece": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const b (_ BitVec 32))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "((_ extract 47 16) (concat (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd b b) (bvadd b b)) (bvadd (bvadd b b) (bvadd b b)))))",
+   "sort": "bitvec"
+  },
+  "width_sign_extension": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const n (_ BitVec 8))",
+    "(declare-const q (_ BitVec 8))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvadd ((_ sign_extend 24) (bvadd (bvadd (bvadd (bvadd n n) (bvadd n n)) (bvadd (bvadd n n) (bvadd n n))) (bvadd (bvadd (bvadd n n) (bvadd n n)) (bvadd (bvadd n n) (bvadd n n))))) ((_ zero_extend 24) (bvadd (bvadd (bvadd (bvadd q q) (bvadd q q)) (bvadd (bvadd q q) (bvadd q q))) (bvadd (bvadd (bvadd q q) (bvadd q q)) (bvadd (bvadd q q) (bvadd q q))))))",
+   "sort": "bitvec"
+  },
+  "width_signed_widening_in_arithmetic": {
+   "address_context": false,
+   "declarations": [
+    "(declare-const a (_ BitVec 32))",
+    "(declare-const q (_ BitVec 8))"
+   ],
+   "float_mode": "uf",
+   "prefer_signed_arithmetic": false,
+   "smt": "(bvmul ((_ sign_extend 24) q) (bvsdiv (bvadd (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a))) (bvadd (bvadd (bvadd a a) (bvadd a a)) (bvadd (bvadd a a) (bvadd a a)))) (_ bv3 32)))",
+   "sort": "bitvec"
+  }
+ },
+ "corpus": "scripts.function_tracer_pcode.tests.fixtures.render.corpus.build_corpus",
+ "generator": "scripts.function_tracer_pcode.tests.tools.record_render_baseline",
+ "note": "SMT rendered by the renderer as it was before PR-22-C. The differential test renders the same corpus with the current renderer and asks a solver whether the two can differ.",
+ "recorded_at_commit": "15e05826db7b4e06339dca9a125de2e4f523db0f",
+ "schema": "render-baseline-smt-v1",
+ "skipped": {}
+}

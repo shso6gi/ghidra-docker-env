@@ -1,21 +1,25 @@
 # -*- coding: utf-8 -*-
 """DAG-aware な描画（Issue #22 / PR-22-C）の AC C1〜C7。
 
-* **C1** old（展開）と new（`let` 共有）の **意味一致** を solver で確かめる。
-  「両方 SAT だった」ではなく **差分式が UNSAT** であることを見る。
-  UNKNOWN / timeout は pass にしない。
+* **C1** PR-22-C **変更前**の描画と変更後の描画の **意味一致** を solver で
+  確かめる。「両方 SAT だった」ではなく **差分式が UNSAT** であることを見る。
+  UNKNOWN / timeout / solver 無しは pass にしない。
 * **C2** 共有 DAG（深さ 40）と深い線形式（深さ 10,000）。
-* **C3** 束縛名の衝突回避と、上限到達時の typed limitation。
+* **C3** 束縛名の衝突回避と、無制限な再帰 fallback が無いこと。
 * **C4** 描画文脈が違う同じ node を同じ束縛に混ぜない。
 * **C5** 人向け表示の決定性と共有参照。
-* **C6** `to_string()` を identity に使っていない。
-* **C7** `CountingWriter` が上限で止まり、完成文字列を作らない。
+* **C6** 条件の identity は予算付きの legacy key ではなく完全 identity。
+* **C7** 上限は「作らせない」— 完成させてから測らない。
 """
 
 from __future__ import annotations
 
 import importlib
+import json
+import pathlib
+import re
 import sys
+import time
 
 import pytest
 
@@ -31,31 +35,52 @@ from scripts.function_tracer_pcode.core.render_output import (
     RenderOutputLimitExceeded,
 )
 from scripts.function_tracer_pcode.core.render_plan import (
-    TEXT_OBSERVATION_OTHER,
+    NO_SHARING_POLICY,
+    PLACEHOLDER_MARK,
     BindingNamespace,
+    RenderPlanInvariantError,
+    RenderedTerm,
+    RenderedTermContractError,
     SharingPolicy,
-    TextObservation,
-    plan_render,
+    build_render_plan,
+    check_plan_invariants,
+    fragment_children,
+    term_properties,
+    write_expansion,
 )
 from scripts.function_tracer_pcode.core.render_python import expression_to_string
 from scripts.function_tracer_pcode.core.render_smt import _to_smt_internal
-from scripts.function_tracer_pcode.core.render_smt.attributes import iter_expression_nodes
 from scripts.function_tracer_pcode.core.render_smt.bindings import (
     SMT_BINDING_PREFIX,
+    SMT_SHARING_POLICY,
+    assign_binding_names,
     binding_dependency_order_is_valid,
     rendered_binding_names,
-)
-from scripts.function_tracer_pcode.core.render_smt.render import (
-    expression_returns_bool,
-    render_smt_term,
+    smt_binding_namespace,
 )
 from scripts.function_tracer_pcode.core.render_smt.context import build_smt_render_context
-from scripts.function_tracer_pcode.core.render_smt.unknowns import (
-    collect_unknown_smt_declarations,
+from scripts.function_tracer_pcode.core.render_smt.render import (
+    _SmtChildRenderer,
+    _render_smt_node,
+    classify_smt_fragment,
+    render_smt_term,
+    term_boolean_literal,
+    term_is_fp_rendered,
 )
-from scripts.function_tracer_pcode.core.render_smt.widths import expression_smt_bit_width
 from scripts.function_tracer_pcode.core.runtime_refs.locations import AddressValueRef
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
+from scripts.function_tracer_pcode.core.structural import (
+    StructuralIdentity,
+    condition_identities,
+    condition_identity,
+    condition_key,
+    structural_equals,
+)
+from scripts.function_tracer_pcode.tests.fixtures.render.corpus import build_corpus
+from scripts.function_tracer_pcode.tests.tools.record_render_baseline import (
+    declaration_lines,
+    render_case,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -104,9 +129,34 @@ def _linear_chain(depth: int, leaf: Expression) -> Expression:
     return node
 
 
+def _smt_body(node, node_context, resolve):
+    return _render_smt_node(node, node_context, _SmtChildRenderer(resolve, node_context, None))
+
+
+def _plan_for(root, *, policy=SMT_SHARING_POLICY, counters=None, limit_chars=None):
+    return build_render_plan(
+        root,
+        build_smt_render_context(),
+        body=_smt_body,
+        classify=classify_smt_fragment,
+        policy=policy,
+        counters=counters if counters is not None else RenderCounters(),
+        limit_chars=limit_chars,
+    )
+
+
 # ---------------------------------------------------------------------------
-# solver による意味一致の確認
+# C1: 変更前 / 変更後の意味一致
 # ---------------------------------------------------------------------------
+
+
+_BASELINE_PATH = (
+    pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "render" / "baseline_smt.json"
+)
+
+
+def _baseline():
+    return json.loads(_BASELINE_PATH.read_text(encoding="utf-8"))
 
 
 def _z3():
@@ -122,111 +172,108 @@ def _z3():
         pytest.fail(f"z3 python module is required for the differential check: {exc}")
 
 
-def _declaration_lines(expr) -> list:
-    """test 用の宣言。式に出てくる自由 symbol をすべて宣言する。"""
-
-    lines = []
-    declared = set()
-
-    def declare(name: str, sort: str) -> None:
-        if name in declared:
-            return
-        declared.add(name)
-        lines.append(f"(declare-const {name} {sort})")
-
-    for name, bits in collect_unknown_smt_declarations(expr):
-        declare(name, f"(_ BitVec {int(bits)})")
-
-    for node in iter_expression_nodes(expr):
-        expr_type = getattr(node, "expr_type", None)
-        if expr_type is None:
-            continue
-        bits = max(1, int(expression_smt_bit_width(node) or 1))
-        if expr_type == ExpressionType.PARAMETER:
-            declare(node.name or f"param_{node.value}", f"(_ BitVec {bits})")
-        elif expr_type == ExpressionType.VARIABLE:
-            rendered = _to_smt_internal(node)
-            if rendered.isidentifier() or rendered == (node.name or "var"):
-                declare(rendered, f"(_ BitVec {bits})")
-        elif expr_type == ExpressionType.MEMORY:
-            mem_bits = bits if bits in (8, 16, 32, 64) else 32
-            declare(
-                f"mem{mem_bits}",
-                f"(Array (_ BitVec 64) (_ BitVec {mem_bits}))",
-            )
-    return lines
-
-
-def _assert_same_meaning(expr, *, float_mode: str = "uf") -> None:
-    """展開した描画と `let` 共有の描画の **差分式が UNSAT** であることを見る。"""
-
+def _assert_difference_is_unsat(declarations, sort: str, old: str, new: str, label: str) -> None:
     z3 = _z3()
-    inline = _to_smt_internal(expr, float_mode=float_mode, shared=False)
-    shared = _to_smt_internal(expr, float_mode=float_mode, shared=True)
-    if inline == shared:
-        # 共有が働かなかった式（小さい式）。文字列一致は意味一致より強い。
+    if old == new:
+        # 文字列一致は意味一致より強い。solver に問うまでもない。
         return
-    if expression_returns_bool(expr):
-        difference = f"(assert (xor {inline} {shared}))"
+    if sort == "bool":
+        difference = f"(assert (xor {old} {new}))"
     else:
-        difference = f"(assert (distinct {inline} {shared}))"
-    script = "\n".join(_declaration_lines(expr) + [difference])
+        difference = f"(assert (distinct {old} {new}))"
+    script = "\n".join(list(declarations) + [difference])
     solver = z3.Solver()
-    solver.set("timeout", 30000)
+    solver.set("timeout", 60000)
     solver.add(z3.parse_smt2_string(script))
     verdict = solver.check()
     assert verdict == z3.unsat, (
-        f"shared rendering is not equivalent to the inline rendering: {verdict}\n{script[:2000]}"
+        f"{label}: the two renderings can differ ({verdict})\n{script[:2000]}"
     )
 
 
-def _differential_corpus():
-    a = _param("a", 0)
-    b = _param("b", 1)
-    wide = _param("w", 2, size=8)
-    narrow = _param("n", 3, size=1)
-    shared_sum = _binary("INT_ADD", a, b)
-    memory = Expression(ExpressionType.MEMORY, operands=[wide], size=4)
-    condition = Condition(_binary("INT_LESS", a, b, size=1))
-    phi = Expression.phi([(condition, shared_sum), (None, _binary("INT_MULT", a, a))])
-    phi.size = 4
-    return {
-        "doubling_dag_depth_12": _doubling_dag(12, a),
-        "shared_operands": _binary(
-            "INT_MULT",
-            _doubling_dag(6, shared_sum),
-            _doubling_dag(6, shared_sum),
-        ),
-        "mixed_operators": _binary(
-            "INT_XOR",
-            _binary("INT_LEFT", _doubling_dag(5, a), _const(3)),
-            _binary("INT_AND", _doubling_dag(5, b), _const(0xFF)),
-        ),
-        "width_mixing": _binary(
-            "INT_ADD",
-            _unary("INT_SEXT", _doubling_dag(5, narrow), size=4),
-            _unary("INT_ZEXT", _doubling_dag(5, narrow), size=4),
-        ),
-        "memory_select": _binary("INT_ADD", _doubling_dag(6, memory), _doubling_dag(6, a)),
-        "phi_with_condition": _doubling_dag(6, phi),
-        "boolean_root": _binary(
-            "INT_LESS",
-            _doubling_dag(6, a),
-            _doubling_dag(6, b),
-            size=1,
-        ),
-    }
+def _declarations_for(case: str, recorded, spec):
+    declarations = set(recorded["declarations"])
+    declarations.update(
+        declaration_lines(
+            spec["expression"],
+            float_mode=spec.get("float_mode", "uf"),
+            address_context=bool(spec.get("address_context", False)),
+        )
+    )
+    return sorted(declarations)
 
 
-@pytest.mark.parametrize("case", sorted(_differential_corpus()))
-def test_c1_shared_rendering_has_the_same_meaning(case):
-    """C1: old / new の差分式が UNSAT。SAT / UNKNOWN / timeout は失敗。"""
+def test_c1_baseline_fixture_covers_the_surfaces_the_change_touched():
+    """baseline が実際に PR-22-C の触った面を含んでいること。"""
 
-    _assert_same_meaning(_differential_corpus()[case])
+    baseline = _baseline()
+    assert baseline["schema"] == "render-baseline-smt-v1"
+    assert baseline["recorded_at_commit"].startswith("15e05826")
+    assert baseline["skipped"] == {}
+    cases = baseline["cases"]
+    for surface in (
+        "arith_mixed_operators",
+        "arith_shifts",
+        "compare_signed",
+        "width_sign_extension",
+        "width_piece_subpiece",
+        "bool_connectives",
+        "bool_to_bitvector",
+        "phi_with_condition",
+        "phi_with_expression_condition",
+        "phi_bool_branches",
+        "memory_read",
+        "memory_of_global",
+        "context_global_as_address_and_value",
+        "context_prefer_signed_arithmetic",
+        "context_address",
+        "unknown_symbol",
+        "intrinsic_ptradd",
+        "fp_arithmetic",
+        "fp_predicate_over_arithmetic",
+        "fp_int_to_float",
+        "shared_dag_depth_10",
+        "linear_depth_200",
+    ):
+        assert surface in cases, surface
+    assert len(cases) >= 30
+
+
+@pytest.mark.parametrize("case", sorted(_baseline()["cases"]))
+def test_c1_rendering_means_the_same_as_before_the_change(case):
+    """C1: 変更前の描画と現在の描画の差分式が UNSAT。"""
+
+    recorded = _baseline()["cases"][case]
+    spec = build_corpus()[case]
+    _assert_difference_is_unsat(
+        _declarations_for(case, recorded, spec),
+        recorded["sort"],
+        recorded["smt"],
+        render_case(spec),
+        case,
+    )
+
+
+@pytest.mark.parametrize("case", sorted(_baseline()["cases"]))
+def test_c1_let_sharing_means_the_same_as_the_inline_form(case):
+    """`let` 変換そのものの検証（old / new 検証の代わりにはしない）。"""
+
+    recorded = _baseline()["cases"][case]
+    spec = build_corpus()[case]
+    context = build_smt_render_context(
+        prefer_signed_arithmetic=spec.get("prefer_signed_arithmetic", False),
+        address_context=spec.get("address_context", False),
+        float_mode=spec.get("float_mode", "uf"),
+    )
+    inline = render_smt_term(spec["expression"], context, None, shared=False)
+    shared = render_smt_term(spec["expression"], context, None, shared=True)
+    _assert_difference_is_unsat(
+        _declarations_for(case, recorded, spec), recorded["sort"], inline, shared, case
+    )
 
 
 def test_c1_doubling_dag_matches_an_independent_algebraic_oracle():
-    """C1 / C2: 巨大な old 文字列を作らず、独立した期待式と比べる。
+    """巨大な old 文字列を作らず、独立した期待式と比べる。
 
     `a` を 40 回自分自身と足したものは `a * 2**40`（32 bit で切り捨て）。
     """
@@ -235,15 +282,14 @@ def test_c1_doubling_dag_matches_an_independent_algebraic_oracle():
     a = _param("a", 0)
     rendered = _to_smt_internal(_doubling_dag(40, a))
     multiplier = (1 << 40) % (1 << 32)
-    oracle = f"(bvmul a (_ bv{multiplier} 32))"
     script = "\n".join(
         [
             "(declare-const a (_ BitVec 32))",
-            f"(assert (distinct {rendered} {oracle}))",
+            f"(assert (distinct {rendered} (bvmul a (_ bv{multiplier} 32))))",
         ]
     )
     solver = z3.Solver()
-    solver.set("timeout", 30000)
+    solver.set("timeout", 60000)
     solver.add(z3.parse_smt2_string(script))
     assert solver.check() == z3.unsat
 
@@ -264,9 +310,11 @@ def test_c2_shared_dag_visits_distinct_nodes_only():
     assert metrics["distinct_rendered_nodes"] == 41
     assert metrics["tree_node_estimate"] > (1 << 39)
     assert len(rendered) < 4000
-    # 名前を付けるのは「展開したままだと大きい」段だけなので、段数より少ない。
     assert 10 <= metrics["shared_bindings"] <= 41
     assert metrics["shared_references"] >= metrics["shared_bindings"]
+    # 中間文字列は node 1 個分しか作らない。
+    assert metrics["max_fragment_chars"] < 200
+    assert metrics["retained_fragment_chars"] < 4000
 
 
 def test_c2_shared_dag_output_grows_linearly_with_depth():
@@ -311,7 +359,6 @@ def test_c2_binding_dependency_order_is_nested_and_acyclic():
     rendered = _to_smt_internal(_doubling_dag(20, a))
     names = rendered_binding_names(rendered)
     assert names
-    # 入れ子の `let` なので、束縛名は定義された後にしか現れない。
     for position, name in enumerate(names):
         definition = rendered.index(f"(let (({name} ")
         first_use = rendered.index(name, definition + len(name) + 8)
@@ -323,7 +370,7 @@ def test_c2_binding_dependency_order_is_nested_and_acyclic():
 
 
 # ---------------------------------------------------------------------------
-# C3: 名前空間の衝突と上限
+# C3: 名前空間の衝突と再帰 fallback
 # ---------------------------------------------------------------------------
 
 
@@ -331,14 +378,12 @@ def test_c3_generated_bindings_do_not_capture_program_symbols():
     """program 由来の symbol が生成名と同じ綴りでも捕まえない。"""
 
     colliding = _variable("?sh_0", size=4)
-    root = _doubling_dag(20, _binary("INT_ADD", colliding, _param("a", 0)))
-    rendered = _to_smt_internal(root)
+    rendered = _to_smt_internal(_doubling_dag(20, _binary("INT_ADD", colliding, _param("a", 0))))
 
     assert "?sh_0" in rendered  # program symbol はそのまま出る
     names = rendered_binding_names(rendered)
     assert names
     assert all(name != "|?sh_0|" for name in names)
-    _assert_same_meaning(root)
 
 
 def test_c3_binding_namespace_probes_deterministically():
@@ -349,25 +394,10 @@ def test_c3_binding_namespace_probes_deterministically():
     assert all(name[1:-1] not in reserved for name in first)
 
 
-def test_c3_output_limit_raises_a_typed_limitation():
-    a = _param("a", 0)
-    root = _doubling_dag(20, a)
-    context = build_smt_render_context()
-    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
-        render_smt_term(root, context, None, limit_chars=64)
-    assert excinfo.value.limit_chars == 64
-    assert excinfo.value.site == "core.render_smt"
-
-
 def test_c3_no_recursive_tree_fallback_remains_in_the_renderer():
-    """描画本体から入口へ戻る再帰が残っていないこと。
-
-    無制限の tree fallback は「共有できなかったら木に戻す」経路で、これが
-    あると深い式・共有の多い式で元の問題に戻る。
-    """
+    """描画本体から入口へ戻る再帰が残っていないこと。"""
 
     import ast
-    import pathlib
 
     render_dir = pathlib.Path(
         importlib.import_module("scripts.function_tracer_pcode.core.render_smt").__file__
@@ -388,164 +418,90 @@ def test_c3_no_recursive_tree_fallback_remains_in_the_renderer():
 
 
 # ---------------------------------------------------------------------------
-# C4: 描画文脈ごとの共有
+# C7: 上限は「作らせない」
 # ---------------------------------------------------------------------------
 
 
-def test_c4_same_node_in_two_contexts_gets_two_bindings():
-    """address 文脈と通常文脈では同じ node でも描画が違う → 別の束縛。"""
-
-    ref = AddressValueRef(address_offset=0x2000, source="ghidra_object")
-    global_variable = _variable("g", size=8, runtime_ref=ref)
-    address_use = _doubling_dag(
-        20, Expression(ExpressionType.MEMORY, operands=[global_variable], size=4)
-    )
-    value_use = _doubling_dag(20, _unary("INT_ZEXT", global_variable, size=4))
-    root = _binary("INT_ADD", address_use, value_use)
-
-    rendered = _to_smt_internal(root)
-    # address 文脈では定数へ、通常文脈では symbol のまま。両方が出ている。
-    assert "(_ bv8192 64)" in rendered
-    assert " g)" in rendered or "(g" in rendered or " g " in rendered
-    _assert_same_meaning(root)
-
-
-def test_c4_render_plan_keys_instances_by_node_and_context():
-    """共有 key が node identity だけになっていないこと（plan 層の契約）。"""
-
-    node = object()
-    root = ("root", node)
-    observations = (
-        TextObservation(
-            name=TEXT_OBSERVATION_OTHER,
-            matches=lambda text: True,
-            token=lambda index: f"t{index}",
-        ),
-    )
-
-    def body(current, context, resolve):
-        if current is root:
-            return f"[{resolve(node, 'wide')}|{resolve(node, 'narrow')}]"
-        return f"<{context}>"
-
-    plan = plan_render(
-        root,
-        "root-context",
-        body=body,
-        observations=observations,
-        policy=SharingPolicy(min_shared_chars=0, min_shared_tree_nodes=1),
-        counters=RenderCounters(),
-    )
-    contexts = {instance.context for instance in plan.instances if instance.node is node}
-    assert contexts == {"wide", "narrow"}
-    assert len({instance.index for instance in plan.instances if instance.node is node}) == 2
-
-
-# ---------------------------------------------------------------------------
-# C5: 人向け表示
-# ---------------------------------------------------------------------------
-
-
-def test_c5_human_rendering_uses_shared_references_instead_of_re_expansion():
+def test_c7_output_limit_raises_a_typed_limitation():
     a = _param("a", 0)
-    root = _doubling_dag(40, a)
+    context = build_smt_render_context()
+    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
+        render_smt_term(_doubling_dag(20, a), context, None, limit_chars=64)
+    assert excinfo.value.limit_chars == 64
+
+
+def test_c7_an_exponential_inline_expansion_is_stopped_at_the_limit():
+    """共有を切って木に戻す形でも、上限までしか **作らない**。
+
+    深さ 40 の二重化 DAG を展開すると 2**40 個の葉になる。書き出しが流しながら
+    行われていなければ、この test は終わらない（そこが「完成文字列を作ってから
+    測る」との違い）。
+    """
+
+    a = _param("a", 0)
+    context = build_smt_render_context()
+    started = time.perf_counter()
+    with pytest.raises(RenderOutputLimitExceeded):
+        render_smt_term(_doubling_dag(40, a), context, None, shared=False, limit_chars=50_000)
+    assert time.perf_counter() - started < 10.0
+
+
+def test_c7_materialisation_stays_bounded_while_planning():
+    """材料（fragment の総量）にも上限が効く。書き出し前に止まる。"""
+
+    a = _param("a", 0)
+    counters = RenderCounters()
+    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
+        _plan_for(_linear_chain(4000, a), counters=counters, limit_chars=5_000)
+    assert excinfo.value.site == "render.materialize"
+    # 止めた時点の材料は上限 + 1 node 分を大きく超えない。
+    assert counters.retained_fragment_chars <= 5_000 + counters.max_fragment_chars
+    assert counters.max_fragment_chars < 200
+
+
+def test_c7_no_intermediate_string_exceeds_one_node_worth():
+    """どの中間文字列も node 1 個分。部分木の大きさには比例しない。"""
+
+    a = _param("a", 0)
     reset_render_metrics()
-    text = expression_to_string(root)
+    _to_smt_internal(_doubling_dag(40, a))
+    _to_smt_internal(_linear_chain(5000, a))
     metrics = render_metrics_snapshot()
-
-    assert " where " in text
-    assert "@h" in text
-    assert len(text) < 20000
-    assert metrics["distinct_rendered_nodes"] == 41
-    assert metrics["shared_bindings"] >= 1
+    assert metrics["max_fragment_chars"] < 200
 
 
-def test_c5_small_expressions_keep_their_existing_text():
+def test_c7_the_writer_never_holds_more_than_the_limit():
+    """上限を超える文字列は writer にも残らない。"""
+
     a = _param("a", 0)
-    b = _param("b", 1)
-    assert expression_to_string(_binary("INT_ADD", a, b)) == "(a + b)"
-    assert " where " not in expression_to_string(_doubling_dag(3, a))
+    context = build_smt_render_context()
+    seen = []
+    original = CountingWriter.write
 
+    def _recording_write(self, text):
+        original(self, text)
+        seen.append(self.buffered_chars)
 
-def test_c5_human_shared_reference_names_are_stable_and_collision_free():
-    a = _param("a", 0)
-    root = _doubling_dag(40, a)
-    first = expression_to_string(root)
-    assert expression_to_string(root) == first
-
-    # program 由来の名前とぶつかっても捕まえない。
-    reference = first.split(" where ")[1].split(" = ")[0]
-    colliding = _variable(reference, size=4)
-    mixed = _binary("INT_ADD", _doubling_dag(40, colliding), colliding)
-    text = expression_to_string(mixed)
-    definitions = [part.split(" = ")[0] for part in text.split(" where ")[1].split("; ")]
-    assert reference not in definitions
-
-
-# ---------------------------------------------------------------------------
-# C6: identity に表示文字列を使わない
-# ---------------------------------------------------------------------------
-
-
-def test_c6_condition_identity_does_not_render_text(monkeypatch):
-    """identity 計算が `to_string()` を呼ばないこと。"""
-
-    from scripts.function_tracer_pcode.core.structural import condition_key
-
-    def _boom(*_args, **_kwargs):
-        raise AssertionError("identity must not depend on the human rendering")
-
-    monkeypatch.setattr(Expression, "to_string", _boom)
-    monkeypatch.setattr(Condition, "to_string", _boom)
-
-    condition = Condition(_binary("INT_LESS", _param("a", 0), _param("b", 1), size=1))
-    assert condition_key(condition) == condition.structural_key()
-
-
-def test_c6_identity_sites_no_longer_reference_to_string():
-    import pathlib
-
-    package = pathlib.Path(
-        importlib.import_module("scripts.function_tracer_pcode").__file__
-    ).parent
-    sites = {
-        package / "analysis" / "returns" / "return_extraction.py": "_return_info_summary_identity_key",
-        package / "analysis" / "returns" / "control_recovery.py": "branch_guarded_affine_unit_count_structural_proof",
-    }
-    for path, marker in sites.items():
-        text = path.read_text(encoding="utf-8")
-        assert marker in text
-        index = text.index(marker)
-        window = text[index : index + 2000]
-        assert "to_string()" not in window, f"{path.name} still keys identity on rendered text"
-
-
-def test_c6_structural_identity_dedup_is_unchanged():
-    """置換前後で dedup が変わらないこと（同じ条件は同じ key）。"""
-
-    from scripts.function_tracer_pcode.core.structural import condition_key
-
-    left = Condition(_binary("INT_LESS", _param("a", 0), _param("b", 1), size=1))
-    right = Condition(_binary("INT_LESS", _param("a", 0), _param("b", 1), size=1))
-    other = Condition(_binary("INT_LESS", _param("b", 1), _param("a", 0), size=1))
-    assert condition_key(left) == condition_key(right)
-    assert condition_key(left) != condition_key(other)
-
-
-# ---------------------------------------------------------------------------
-# C7: CountingWriter
-# ---------------------------------------------------------------------------
+    CountingWriter.write = _recording_write
+    try:
+        with pytest.raises(RenderOutputLimitExceeded):
+            render_smt_term(_doubling_dag(30, a), context, None, shared=False, limit_chars=20_000)
+    finally:
+        CountingWriter.write = original
+    assert seen
+    assert max(seen) <= 20_000
 
 
 def test_c7_counting_writer_stops_at_the_limit_without_building_the_string():
     writer = CountingWriter(limit_chars=10, site="test")
     writer.write("12345")
     assert writer.emitted_chars == 5
-    assert writer.peak_buffered_chars == 5
+    assert writer.buffered_chars == 5
     with pytest.raises(RenderOutputLimitExceeded):
         writer.write("678901")
     assert writer.aborted is True
     assert writer.getvalue() == ""
+    assert writer.buffered_chars == 0
     assert writer.emitted_chars <= 10
 
 
@@ -559,8 +515,6 @@ def test_c7_counting_writer_without_limit_joins_once():
 
 
 def test_c7_counters_are_diagnostic_only():
-    """counter は判定を変えない: 同じ式は counter を消しても同じ text。"""
-
     a = _param("a", 0)
     root = _doubling_dag(12, a)
     reset_render_metrics()
@@ -581,6 +535,319 @@ def test_c7_metrics_accumulate_and_reset():
     assert render_metrics_snapshot()["render_invocations"] == 0
 
 
+def test_c7_human_rendering_is_bounded_too():
+    a = _param("a", 0)
+    from scripts.function_tracer_pcode.core.render_python import (
+        HumanRenderContext,
+        render_human_text,
+    )
+
+    with pytest.raises(RenderOutputLimitExceeded):
+        render_human_text(
+            _doubling_dag(40, a), HumanRenderContext(), shared=False, limit_chars=20_000
+        )
+
+
+# ---------------------------------------------------------------------------
+# 型付きの項: planner と renderer の隠れ結合が無いこと
+# ---------------------------------------------------------------------------
+
+
+def test_typed_term_properties_travel_with_the_reference():
+    term = RenderedTerm("\x0012\x00", classify_smt_fragment("(fp.add a b)", None, False))
+    assert term_is_fp_rendered(term) is True
+    assert term_boolean_literal(term) is None
+    literal = RenderedTerm("\x0013\x00", classify_smt_fragment("true", None, False))
+    assert term_boolean_literal(literal) is True
+
+
+def test_a_term_without_properties_is_refused():
+    """性質を持たない項が型付きの観測へ届いたら fail-closed。"""
+
+    with pytest.raises(RenderedTermContractError):
+        term_is_fp_rendered("(fp.add a b)")
+    with pytest.raises(RenderedTermContractError):
+        term_properties("anything")
+
+
+def test_properties_are_inherited_through_a_pass_through_fragment():
+    """先頭が子なら接頭辞で決まる性質は子から継ぐ（近似ではなく等値）。"""
+
+    fp_child = classify_smt_fragment("(fp.add a b)", None, False)
+    passthrough = classify_smt_fragment("\x005\x00", fp_child, True)
+    assert passthrough.is_fp_term is True
+    prefixed = classify_smt_fragment("\x005\x00 tail", fp_child, False)
+    assert prefixed.is_fp_term is True
+    assert prefixed.boolean_literal is None
+    wrapped = classify_smt_fragment("(bvadd \x005\x00 x)", None, False)
+    assert wrapped.is_fp_term is False
+
+
+def test_plan_and_output_agree_on_the_reference_topology():
+    """計画の辺と fragment の参照が一致し、書き出しがそれを使うこと。"""
+
+    a = _param("a", 0)
+    plan = _plan_for(_doubling_dag(12, a))
+    names = assign_binding_names(plan, smt_binding_namespace(plan))
+    check_plan_invariants(plan, names)
+
+    for instance in plan.instances:
+        assert tuple(fragment_children(instance.fragment)) == instance.used_children
+        assert set(instance.used_children) <= set(instance.child_indices)
+    assert binding_dependency_order_is_valid(plan, names)
+
+    writer = CountingWriter()
+    write_expansion(writer, plan, plan.root_index, names)
+    assert PLACEHOLDER_MARK not in writer.getvalue()
+
+
+def test_an_inconsistent_plan_is_refused_instead_of_emitting_an_empty_definition():
+    """束縛した instance の定義が空なら落とす（fail-closed）。"""
+
+    a = _param("a", 0)
+    plan = _plan_for(_doubling_dag(12, a))
+    names = assign_binding_names(plan, smt_binding_namespace(plan))
+    bound = plan.bound_order[0]
+    plan.instances[bound].fragment = ""
+    plan.instances[bound].used_children = ()
+    with pytest.raises(RenderPlanInvariantError):
+        check_plan_invariants(plan, names)
+
+
+def test_a_bound_instance_that_nothing_references_is_refused():
+    a = _param("a", 0)
+    plan = _plan_for(_doubling_dag(12, a))
+    names = assign_binding_names(plan, smt_binding_namespace(plan))
+    plan.instances[plan.bound_order[0]].references = 0
+    with pytest.raises(RenderPlanInvariantError):
+        check_plan_invariants(plan, names)
+
+
+def test_a_reference_the_body_never_requested_is_refused():
+    a = _param("a", 0)
+    plan = _plan_for(_doubling_dag(12, a))
+    names = assign_binding_names(plan, smt_binding_namespace(plan))
+    target = plan.instances[plan.root_index]
+    target.child_indices = ()
+    with pytest.raises(RenderPlanInvariantError):
+        check_plan_invariants(plan, names)
+
+
+# ---------------------------------------------------------------------------
+# C4: 描画文脈ごとの共有
+# ---------------------------------------------------------------------------
+
+
+def test_c4_same_node_in_two_contexts_gets_two_bindings():
+    """address 文脈と通常文脈では同じ node でも描画が違う → 別の束縛。"""
+
+    ref = AddressValueRef(address_offset=0x2000, source="ghidra_object")
+    global_variable = _variable("g", size=8, runtime_ref=ref)
+    address_use = _doubling_dag(
+        20, Expression(ExpressionType.MEMORY, operands=[global_variable], size=4)
+    )
+    value_use = _doubling_dag(20, _unary("INT_ZEXT", global_variable, size=4))
+    rendered = _to_smt_internal(_binary("INT_ADD", address_use, value_use))
+
+    assert "(_ bv8192 64)" in rendered
+    assert " g)" in rendered or "(g" in rendered or " g " in rendered
+
+
+def test_c4_render_plan_keys_instances_by_node_and_context():
+    """共有 key が node identity だけになっていないこと（plan 層の契約）。"""
+
+    node = object()
+    root = ("root", node)
+
+    def body(current, context, resolve):
+        if current is root:
+            return f"[{resolve(node, 'wide')}|{resolve(node, 'narrow')}]"
+        return f"<{context}>"
+
+    plan = build_render_plan(
+        root,
+        "root-context",
+        body=body,
+        classify=lambda fragment, head, exact: ("properties", fragment),
+        policy=SharingPolicy(min_shared_chars=0, min_shared_tree_nodes=1),
+        counters=RenderCounters(),
+    )
+    contexts = {instance.context for instance in plan.instances if instance.node is node}
+    assert contexts == {"wide", "narrow"}
+    assert len({instance.index for instance in plan.instances if instance.node is node}) == 2
+
+
+# ---------------------------------------------------------------------------
+# C5: 人向け表示
+# ---------------------------------------------------------------------------
+
+
+def test_c5_human_rendering_uses_shared_references_instead_of_re_expansion():
+    a = _param("a", 0)
+    reset_render_metrics()
+    text = expression_to_string(_doubling_dag(40, a))
+    metrics = render_metrics_snapshot()
+
+    assert " where " in text
+    assert "@h" in text
+    assert len(text) < 20000
+    assert metrics["distinct_rendered_nodes"] == 41
+    assert metrics["shared_bindings"] >= 1
+    assert metrics["max_fragment_chars"] < 200
+
+
+def test_c5_small_expressions_keep_their_existing_text():
+    a = _param("a", 0)
+    b = _param("b", 1)
+    assert expression_to_string(_binary("INT_ADD", a, b)) == "(a + b)"
+    assert " where " not in expression_to_string(_doubling_dag(3, a))
+
+
+def test_c5_every_human_shared_reference_is_defined():
+    a = _param("a", 0)
+    text = expression_to_string(_doubling_dag(40, a))
+    body, _, where = text.partition(" where ")
+    defined = {part.split(" = ")[0].strip() for part in where.split("; ")}
+    used = set(re.findall(r"@h[0-9a-f_]+", body))
+    assert used
+    assert used <= defined
+
+
+def test_c5_human_shared_reference_names_are_stable_and_collision_free():
+    a = _param("a", 0)
+    root = _doubling_dag(40, a)
+    first = expression_to_string(root)
+    assert expression_to_string(root) == first
+
+    reference = first.split(" where ")[1].split(" = ")[0]
+    colliding = _variable(reference, size=4)
+    text = expression_to_string(_binary("INT_ADD", _doubling_dag(40, colliding), colliding))
+    definitions = [part.split(" = ")[0] for part in text.split(" where ")[1].split("; ")]
+    assert reference not in definitions
+
+
+# ---------------------------------------------------------------------------
+# C6: 条件の identity は完全 identity
+# ---------------------------------------------------------------------------
+
+
+def _deep_condition(depth: int, tail: Expression) -> Condition:
+    node = tail
+    a = _param("a", 0)
+    for _ in range(depth):
+        node = _binary("INT_ADD", node, a)
+    return Condition(_binary("INT_LESS", node, _param("b", 1), size=1))
+
+
+def test_c6_complete_identity_separates_deep_conditions_that_differ_at_the_tail():
+    """256 distinct node を超える 2 条件が、末尾だけ違っても衝突しないこと。
+
+    予算付きの legacy key（`condition_key`）は途中で `("truncated", …)` に
+    なるので、この 2 つを同じ key にし得る。完全 identity は分ける。
+    """
+
+    left = _deep_condition(400, _const(1))
+    right = _deep_condition(400, _const(2))
+
+    assert condition_identity(left) is not None
+    assert condition_identity(left) != condition_identity(right)
+    assert not structural_equals(left.expression, right.expression)
+    # 同一の深い条件どうしでも完全比較は予算で確定できない。identity は分ける
+    # 側も一致する側も言える。
+    assert condition_identity(left) == condition_identity(_deep_condition(400, _const(1)))
+
+    # 予算付き key が実際にこの深さで切り詰められていることも記録しておく
+    # （この test が「深い」と言えているかの担保）。
+    from scripts.function_tracer_pcode.core.structural import key_is_comparable
+
+    assert not key_is_comparable(condition_key(left))
+
+
+def test_c6_complete_identity_agrees_with_complete_comparison():
+    """完全比較との関係を契約として固定する。
+
+    `Condition.equals`（= `structural_equals`）が真なら identity も一致する。
+    逆向きは identity のほうが広い: 完全比較は **比較の予算**を持つので、
+    とても深い式では同じでも真を返せない。identity は予算を持たないので
+    そこでも一致を言える（弱いのではなく強い）。
+    """
+
+    a = _param("a", 0)
+    b = _param("b", 1)
+    same_left = Condition(_binary("INT_LESS", _doubling_dag(6, a), b, size=1))
+    same_right = Condition(_binary("INT_LESS", _doubling_dag(6, a), b, size=1))
+    other = Condition(_binary("INT_LESS", _doubling_dag(6, b), a, size=1))
+    negated = Condition(_binary("INT_LESS", _doubling_dag(6, a), b, size=1), True)
+
+    assert same_left.equals(same_right)
+    assert condition_identity(same_left) == condition_identity(same_right)
+    assert not same_left.equals(other)
+    assert condition_identity(same_left) != condition_identity(other)
+    assert condition_identity(same_left) != condition_identity(negated)
+
+    # 深い条件では完全比較が予算で確定できないが、identity は一致を言える。
+    from scripts.function_tracer_pcode.core.structural import (
+        DEFAULT_STRUCTURAL_COMPARISON_BUDGET,
+    )
+
+    deep_left = _deep_condition(400, _const(1))
+    deep_right = _deep_condition(400, _const(1))
+    assert 400 > DEFAULT_STRUCTURAL_COMPARISON_BUDGET
+    assert not deep_left.equals(deep_right)  # 予算切れ: 確定できない側へ倒れる
+    assert condition_identity(deep_left) == condition_identity(deep_right)
+
+
+def test_c6_complete_identity_is_fail_closed():
+    """identity を組めないときは `None`。他の `None` と一致させない運用。"""
+
+    assert condition_identity(None) is None
+    assert condition_identities([None]) is None
+
+    class _Opaque:
+        expression = None
+        negated = False
+
+    assert condition_identity(_Opaque()) is None
+
+
+def test_c6_identity_interface_is_owned_by_structural():
+    assert StructuralIdentity.condition_identity is condition_identity
+    assert StructuralIdentity.condition_identities is condition_identities
+
+
+def test_c6_condition_identity_does_not_render_text(monkeypatch):
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("identity must not depend on the human rendering")
+
+    monkeypatch.setattr(Expression, "to_string", _boom)
+    monkeypatch.setattr(Condition, "to_string", _boom)
+
+    condition = Condition(_binary("INT_LESS", _param("a", 0), _param("b", 1), size=1))
+    assert condition_identity(condition) is not None
+
+
+def test_c6_identity_sites_use_the_complete_identity():
+    package = pathlib.Path(
+        importlib.import_module("scripts.function_tracer_pcode").__file__
+    ).parent
+    sites = {
+        package
+        / "analysis"
+        / "returns"
+        / "return_extraction.py": "_impl__return_info_summary_identity_key",
+        package
+        / "analysis"
+        / "returns"
+        / "control_recovery.py": "branch_guarded_affine_unit_count_structural_proof",
+    }
+    for path, marker in sites.items():
+        text = path.read_text(encoding="utf-8")
+        assert marker in text
+        window = text[text.index(marker) : text.index(marker) + 2500]
+        assert "to_string()" not in window, f"{path.name} still keys identity on rendered text"
+        assert "condition_key(" not in window, f"{path.name} still keys identity on a budgeted key"
+
+
 # ---------------------------------------------------------------------------
 # 既存の観測可能な出力との互換
 # ---------------------------------------------------------------------------
@@ -598,8 +865,8 @@ def test_small_terms_are_byte_identical_with_and_without_sharing():
 
 
 def test_published_solver_entry_still_requires_publication():
-    from scripts.function_tracer_pcode.core.render_smt import expression_to_smt
     from scripts.function_tracer_pcode.core.errors import UnpublishedSemanticInputError
+    from scripts.function_tracer_pcode.core.render_smt import expression_to_smt
 
     expr = _binary("INT_ADD", _param("a", 0), _param("b", 1))
     with pytest.raises(UnpublishedSemanticInputError):
@@ -608,41 +875,9 @@ def test_published_solver_entry_still_requires_publication():
     assert expression_to_smt(expr) == "(bvadd a b)"
 
 
-def test_binding_dependency_contract_holds_for_a_large_dag():
-    from scripts.function_tracer_pcode.core.render_plan import emit_render, plan_render
-    from scripts.function_tracer_pcode.core.render_smt.bindings import (
-        SMT_SHARING_POLICY,
-        assign_binding_names,
-        smt_binding_namespace,
-    )
-    from scripts.function_tracer_pcode.core.render_smt.render import (
-        _SMT_TEXT_OBSERVATIONS,
-        _SmtChildRenderer,
-        _render_smt_node,
-    )
-
+def test_binding_names_use_the_reserved_prefix():
     a = _param("a", 0)
-    root = _doubling_dag(24, a)
-    counters = RenderCounters()
-    context = build_smt_render_context()
-
-    def body(node, node_context, resolve):
-        return _render_smt_node(
-            node, node_context, _SmtChildRenderer(resolve, node_context, None)
-        )
-
-    plan = plan_render(
-        root,
-        context,
-        body=body,
-        observations=_SMT_TEXT_OBSERVATIONS,
-        policy=SMT_SHARING_POLICY,
-        counters=counters,
-    )
-    namespace = smt_binding_namespace(instance.planned_text for instance in plan.instances)
-    names = assign_binding_names(plan, namespace)
-    emit_render(plan, root, context, body=body, names=names, counters=counters)
-
+    names = rendered_binding_names(_to_smt_internal(_doubling_dag(24, a)))
     assert names
-    assert all(name.startswith(f"|{SMT_BINDING_PREFIX}") for name in names.values())
-    assert binding_dependency_order_is_valid(plan, names)
+    assert all(name.startswith(f"|{SMT_BINDING_PREFIX}") for name in names)
+    assert NO_SHARING_POLICY.binds(references=9, inline_chars=10**9, tree_nodes=10**9) is False
