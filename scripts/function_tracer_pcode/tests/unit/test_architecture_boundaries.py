@@ -74,6 +74,10 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
     "core/semantic_snapshot.py": (
         # 責務の逆転（表現が identity の private helper を借りる）を禁じる。
         "scripts.function_tracer_pcode.core.structural",
+        # 描画（共有方針・束縛名・出力量）を変えても表現は動かない。
+        "scripts.function_tracer_pcode.core.render_plan",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.render_python",
         "scripts.function_tracer_pcode.authority",
         "scripts.function_tracer_pcode.checker",
         "scripts.function_tracer_pcode.cli",
@@ -111,6 +115,11 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
         "os",
     ),
     "core/structural.py": (
+        # 描画規則を変えても構造 identity は動かない（`to_string()` を key に
+        # しないという契約を import の向きでも固定する）。
+        "scripts.function_tracer_pcode.core.render_plan",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.render_python",
         "scripts.function_tracer_pcode.authority",
         "scripts.function_tracer_pcode.checker",
         "scripts.function_tracer_pcode.cli",
@@ -126,6 +135,98 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
         "scripts.function_tracer_pcode.cli",
         "scripts.function_tracer_pcode.reporting",
         "scripts.function_tracer_pcode.config",
+        "os",
+    ),
+    # --- PR-22-C: 描画層の責務分割 ---------------------------------------
+    "core/render_plan.py": (
+        # 走査と共有計画は「何を描くか」を知らない（人向けにも SMT にも使う）。
+        # 式の型を知り始めると、node 種別が増えるたびにここも触ることになる。
+        "scripts.function_tracer_pcode.core.expression",
+        "scripts.function_tracer_pcode.core.condition",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.render_python",
+        "scripts.function_tracer_pcode.analysis",
+        "scripts.function_tracer_pcode.semantics",
+        "scripts.function_tracer_pcode.proof",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "os",
+    ),
+    "core/render_output.py": (
+        # 出力口と counter は描画規則も式の型も知らない。
+        "scripts.function_tracer_pcode.core.expression",
+        "scripts.function_tracer_pcode.core.condition",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.render_plan",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.render_python",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "os",
+    ),
+    "core/render_metrics.py": (
+        "scripts.function_tracer_pcode.core.expression",
+        "scripts.function_tracer_pcode.core.condition",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.render_python",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "os",
+    ),
+    "core/render_smt/context.py": (
+        # 描画文脈は identity でも表現でもない（共有可否だけを決める）。
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.render_smt.render",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "os",
+    ),
+    "core/render_smt/bindings.py": (
+        # 名前空間 owner は式の型も identity も知らない。描画 text だけを見る。
+        "scripts.function_tracer_pcode.core.expression",
+        "scripts.function_tracer_pcode.core.condition",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.render_smt.render",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "os",
+    ),
+    "core/render_python.py": (
+        # 人向け表示を変えても SMT 側は動かない（逆向きも同じ）。
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
         "os",
     ),
     "core/loop_lowering_semantics.py": (
@@ -161,6 +262,11 @@ _LEDGER_FREE_MODULES = (
     "core/semantic_snapshot.py",
     "core/semantic_projection.py",
     "core/structural.py",
+    # 描画層も失敗の記録は持たない（限界の記録先は呼び出し側の境界）。
+    "core/render_plan.py",
+    "core/render_output.py",
+    "core/render_metrics.py",
+    "core/render_python.py",
 )
 
 #: candidate hash / graph digest で等価を決めてよい唯一の module。
@@ -218,6 +324,11 @@ _PUBLICATION_FREE_MODULES = (
     "core/render_smt/unknowns.py",
     "core/render_smt/loop_lowering.py",
     "core/render_smt/intrinsics.py",
+    "core/render_smt/bindings.py",
+    "core/render_smt/context.py",
+    "core/render_smt/attributes.py",
+    "core/render_plan.py",
+    "core/render_python.py",
 )
 
 #: loop lowering の意味を決めてよい唯一の module。
@@ -243,11 +354,32 @@ _RAW_LOWERING_FIELDS = frozenset(
 #: 生 ref そのものを読んではいけない module（凍結後の描画側）。
 _RUNTIME_REF_FREE_MODULES = ("core/render_smt/loop_lowering.py",)
 
+#: 子の描画 text を **文字列として見る** 判定を持ってよい唯一の関数。
+#:
+#: DAG 描画は計画 pass で子の代わりに代表 token を返すので、text を見る判定が
+#: 登録外に増えると、計画 pass と出力 pass で辿る分岐が食い違う（共有の数え方が
+#: ずれる）。見る側を 1 つに閉じ、`core/render_plan.TextObservation` に登録する。
+_TEXT_OBSERVATION_OWNER = ("core/render_smt/float_theory.py", "_looks_like_fp_expr")
+#: node 本体を持つ描画 module（ここでの text 検査だけを見る）。
+_RENDER_BODY_MODULES = (
+    "core/render_smt/render.py",
+    "core/render_smt/widths.py",
+    "core/render_smt/float_theory.py",
+    "core/render_smt/intrinsics.py",
+    "core/render_smt/loop_lowering.py",
+    "core/render_smt/unknowns.py",
+    "core/render_python.py",
+)
+#: 表示文字列を identity にしてはいけない（書式を変えると判定が動く）。
+_RENDERED_TEXT_CALLS = frozenset({"to_string"})
+
 #: 凍結後に意味を読む consumer。ここが生 object を読むと、同じ式の意味が
 #: 「いつ読んだか」で変わり得る。
 _SNAPSHOT_ONLY_MODULES = (
     "core/structural.py",
     "core/semantic_snapshot.py",
+    "core/render_python.py",
+    "core/render_smt/attributes.py",
     "core/render_smt/render.py",
     "core/render_smt/widths.py",
     "core/render_smt/unknowns.py",
@@ -855,3 +987,84 @@ def test_the_commit_functions_exist_and_are_the_only_state_writers():
                 if called in _LIFECYCLE_MARK_NAMES:
                     callers.add(node.name)
     assert callers == _LIFECYCLE_COMMIT_FUNCTIONS, callers
+
+
+@pytest.mark.parametrize("module_path", _RENDER_BODY_MODULES)
+def test_only_one_function_inspects_the_rendered_child_text(module_path):
+    """描画 text の文字列検査は 1 箇所（`_looks_like_fp_expr`）。
+
+    DAG 描画の計画 pass は子の代わりに **観測クラスの代表 token** を返す。
+    登録外の場所で text の接頭辞を見ると、計画 pass だけ別の枝へ入り、共有の
+    数え方が実際の出力と食い違う。判定を増やすときは `TextObservation` を
+    1 つ足して代表 token を決める。
+    """
+
+    owner_module, owner_function = _TEXT_OBSERVATION_OWNER
+    path = PACKAGE_ROOT / module_path
+    offenders = []
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if module_path == owner_module and node.name == owner_function:
+            continue
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Call)
+                and isinstance(inner.func, ast.Attribute)
+                and inner.func.attr in {"startswith", "endswith"}
+            ):
+                offenders.append(f"{module_path}:{inner.lineno} in {node.name}")
+    assert offenders == [], offenders
+
+
+def test_the_text_observation_owner_is_registered_with_the_planner():
+    """text を見る判定は必ず観測として登録されていること。"""
+
+    from scripts.function_tracer_pcode.core.render_smt import float_theory, render
+
+    registered = {
+        observation.name: observation for observation in render._SMT_TEXT_OBSERVATIONS
+    }
+    assert "fp" in registered
+    # 登録側の判定が owner の実装を呼んでいること（別実装を持っていない）。
+    assert registered["fp"].matches("(fp.add a b)") is True
+    assert registered["fp"].matches("(bvadd a b)") is False
+    assert float_theory._looks_like_fp_expr("(fp.add a b)") is True
+    # 既定クラスが必ずあること（未登録の text が落ちない）。
+    assert any(
+        observation.name == "other" for observation in render._SMT_TEXT_OBSERVATIONS
+    )
+
+
+def test_identity_is_never_built_from_the_human_rendering():
+    """`to_string()` の結果を identity / cache key / digest に使わない。
+
+    人向けの表示は読みやすさのために変わる。identity に使うと、書式を直した
+    だけで cache の当たり外れと証明の一致条件が動く（PR-22-C で共有参照を
+    入れたのがまさにその変更）。
+    """
+
+    offenders: List[str] = []
+    for path in _module_files():
+        relative = _relative(path)
+        tree = _parse(path)
+        for function in ast.walk(tree):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            name = function.name.lower()
+            builds_identity = (
+                name.endswith("_key")
+                or "identity" in name
+                or "digest" in name
+                or "fingerprint" in name
+            )
+            if not builds_identity:
+                continue
+            for node in ast.walk(function):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in _RENDERED_TEXT_CALLS
+                ):
+                    offenders.append(f"{relative}:{node.lineno} in {function.name}")
+    assert offenders == [], offenders
