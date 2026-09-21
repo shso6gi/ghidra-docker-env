@@ -781,6 +781,7 @@ def render_smt_term(
                 policy=policy,
                 counters=counters,
                 limit_bytes=limit_bytes,
+                site="core.render_smt",
             )
         except RenderGraphCycleError:
             # 閉路を「受け入れない」と決めるのは走査 owner。ここは進めないと
@@ -794,7 +795,7 @@ def render_smt_term(
         )
         check_plan_invariants(plan, names)
         counters.case_count += _phi_case_count(plan)
-        writer = CountingWriter(limit_bytes=limit_bytes, site="core.render_smt")
+        writer = CountingWriter(limit_bytes=limit_bytes, site="core.render_smt.emit")
         write_let_term(writer, plan, names)
         text = writer.getvalue()
     counters.emitted_bytes = writer.emitted_bytes

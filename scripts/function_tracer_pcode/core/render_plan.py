@@ -297,11 +297,12 @@ class _Driver:
     足す人がここへ手を入れる必要は無い。
     """
 
-    def __init__(self, body, classify, counters: RenderCounters, limit_bytes) -> None:
+    def __init__(self, body, classify, counters: RenderCounters, limit_bytes, site: str) -> None:
         self._body = body
         self._classify = classify
         self._counters = counters
         self._limit = limit_bytes
+        self._site = str(site)
         self.instances: List[RenderInstance] = []
         self.post_order: List[int] = []
         self.index_by_key: Dict[Tuple[int, Any], int] = {}
@@ -333,7 +334,7 @@ class _Driver:
             # 幅の広い node はここで止める。fragment が完成してから測ると、
             # 10,000 引数の `join` はもう出来上がっている。
             self._pending_bytes += len(term)
-            self._check_material(self._pending_bytes, "render.materialize")
+            self._check_material(self._pending_bytes, f"{self._site}.materialize")
         return term
 
     def run(self, root: Any, context: Any) -> int:
@@ -428,7 +429,7 @@ class _Driver:
                     # 「捨てるから」という理由で作ってしまう。上限超過は収集の
                     # 失敗ではないので握らない。
                     _pending[0] += len(term)
-                    self._check_material(_pending[0], "render.materialize")
+                    self._check_material(_pending[0], f"{self._site}.materialize")
                     return term
 
                 self._counters.node_body_executions += 1
@@ -460,7 +461,7 @@ class _Driver:
         self.retained_bytes += length
         if length > self._counters.max_fragment_bytes:
             self._counters.max_fragment_bytes = length
-        self._check_material(0, "render.materialize")
+        self._check_material(0, f"{self._site}.materialize")
 
     def _check_material(self, pending_bytes: int, site: str) -> None:
         """renderer が抱えている材料の量を上限と比べる。
@@ -523,10 +524,17 @@ def build_render_plan(
     policy: SharingPolicy,
     counters: RenderCounters,
     limit_bytes: Optional[int] = None,
+    site: str = "render",
 ) -> RenderPlan:
-    """DAG を 1 回だけ辿り、fragment・参照回数・名前を付ける instance を決める。"""
+    """DAG を 1 回だけ辿り、fragment・参照回数・名前を付ける instance を決める。
 
-    driver = _Driver(body, classify, counters, limit_bytes)
+    `site` は打ち切りを報告するときの名乗り。`"<owner>.materialize"` の形になり、
+    書き出し口の `"<owner>.emit"` と対になる — どの renderer の、どちらの段で
+    止まったのかが 1 つの文字列で分かる。PR-22-D はこの文字列を登録済み reason
+    へ写すので、段と owner の綴りはここで決めてある。
+    """
+
+    driver = _Driver(body, classify, counters, limit_bytes, site)
     root_index = driver.run(root, context)
 
     instances = driver.instances

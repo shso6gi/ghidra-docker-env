@@ -111,6 +111,7 @@ def render_human_text(
             policy=policy,
             counters=counters,
             limit_bytes=limit_bytes,
+            site="core.render_python",
         )
     except RenderGraphCycleError:
         # 閉路を受け入れないという判定は走査 owner が持つ。表示側は「進めない」
@@ -133,7 +134,7 @@ def render_human_text(
     check_plan_invariants(plan, names)
     counters.case_count += _phi_case_count(plan)
 
-    writer = CountingWriter(limit_bytes=limit_bytes, site="core.render_python")
+    writer = CountingWriter(limit_bytes=limit_bytes, site="core.render_python.emit")
     write_expansion(writer, plan, plan.root_index, names)
     if plan.bound_order:
         writer.write(" where ")

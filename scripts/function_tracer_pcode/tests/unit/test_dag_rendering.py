@@ -153,6 +153,7 @@ def _plan_for(root, *, policy=SMT_SHARING_POLICY, counters=None, limit_bytes=Non
             policy=policy,
             counters=counters if counters is not None else RenderCounters(),
             limit_bytes=limit_bytes,
+            site="core.render_smt",
         )
 
 
@@ -433,6 +434,37 @@ def test_c3_no_recursive_tree_fallback_remains_in_the_renderer():
 # ---------------------------------------------------------------------------
 
 
+def test_c7_the_abort_says_which_renderer_and_which_stage():
+    """打ち切りの名乗りが `<owner>.<段>` で揃っていること。
+
+    PR-22-D はこの文字列を登録済み reason へ写す。段（材料を抱えたのか、書き出し
+    で溢れたのか）と owner（SMT か人向けか）のどちらかが読めない綴りだと、
+    向こうで文字列を割り直すことになる。
+    """
+
+    from scripts.function_tracer_pcode.core.render_python import (
+        HumanRenderContext,
+        render_human_text,
+    )
+
+    a = _param("a", 0)
+    deep = _doubling_dag(40, a)
+
+    with pytest.raises(RenderOutputLimitExceeded) as smt_material:
+        _plan_for(_wide_phi(4000), limit_bytes=200)
+    with pytest.raises(RenderOutputLimitExceeded) as smt_emit:
+        render_smt_term(deep, build_smt_render_context(), None, shared=False, limit_bytes=20_000)
+    with pytest.raises(RenderOutputLimitExceeded) as human_material:
+        render_human_text(_wide_phi(4000), HumanRenderContext(simplify=False), limit_bytes=200)
+    with pytest.raises(RenderOutputLimitExceeded) as human_emit:
+        render_human_text(deep, HumanRenderContext(), shared=False, limit_bytes=20_000)
+
+    assert smt_material.value.site == "core.render_smt.materialize"
+    assert smt_emit.value.site == "core.render_smt.emit"
+    assert human_material.value.site == "core.render_python.materialize"
+    assert human_emit.value.site == "core.render_python.emit"
+
+
 def test_c7_output_limit_raises_a_typed_limitation():
     a = _param("a", 0)
     context = build_smt_render_context()
@@ -464,7 +496,7 @@ def test_c7_materialisation_stays_bounded_while_planning():
     counters = RenderCounters()
     with pytest.raises(RenderOutputLimitExceeded) as excinfo:
         _plan_for(_linear_chain(4000, a), counters=counters, limit_bytes=5_000)
-    assert excinfo.value.site == "render.materialize"
+    assert excinfo.value.site == "core.render_smt.materialize"
     # 止めた時点の材料は上限 + 1 node 分を大きく超えない。
     assert counters.retained_fragment_bytes <= 5_000 + counters.max_fragment_bytes
     assert counters.max_fragment_bytes < 200
@@ -1043,7 +1075,7 @@ def test_a_wide_node_is_stopped_before_its_own_fragment_is_built(build):
     with pytest.raises(RenderOutputLimitExceeded) as excinfo:
         _plan_for(root, counters=counters, limit_bytes=600)
     assert time.perf_counter() - started < 5.0
-    assert excinfo.value.site == "render.materialize"
+    assert excinfo.value.site == "core.render_smt.materialize"
     # 止めた時点で抱えている材料は上限 + node 1 個分を大きく超えない。
     assert counters.retained_fragment_bytes <= 600 + counters.max_fragment_bytes
     assert counters.max_fragment_bytes <= 600
