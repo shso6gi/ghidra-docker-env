@@ -33,6 +33,7 @@ from scripts.function_tracer_pcode.core.render_output import (
     CountingWriter,
     RenderCounters,
     RenderOutputLimitExceeded,
+    utf8_length,
 )
 from scripts.function_tracer_pcode.core.render_plan import (
     NO_SHARING_POLICY,
@@ -75,6 +76,7 @@ from scripts.function_tracer_pcode.core.structural import (
     condition_identity,
     condition_key,
     structural_equals,
+    structural_identity_form,
 )
 from scripts.function_tracer_pcode.tests.fixtures.render.corpus import build_corpus
 from scripts.function_tracer_pcode.tests.tools.record_render_baseline import (
@@ -133,7 +135,7 @@ def _smt_body(node, node_context, resolve):
     return _render_smt_node(node, node_context, _SmtChildRenderer(resolve, node_context, None))
 
 
-def _plan_for(root, *, policy=SMT_SHARING_POLICY, counters=None, limit_chars=None):
+def _plan_for(root, *, policy=SMT_SHARING_POLICY, counters=None, limit_bytes=None):
     return build_render_plan(
         root,
         build_smt_render_context(),
@@ -141,7 +143,7 @@ def _plan_for(root, *, policy=SMT_SHARING_POLICY, counters=None, limit_chars=Non
         classify=classify_smt_fragment,
         policy=policy,
         counters=counters if counters is not None else RenderCounters(),
-        limit_chars=limit_chars,
+        limit_bytes=limit_bytes,
     )
 
 
@@ -313,8 +315,8 @@ def test_c2_shared_dag_visits_distinct_nodes_only():
     assert 10 <= metrics["shared_bindings"] <= 41
     assert metrics["shared_references"] >= metrics["shared_bindings"]
     # 中間文字列は node 1 個分しか作らない。
-    assert metrics["max_fragment_chars"] < 200
-    assert metrics["retained_fragment_chars"] < 4000
+    assert metrics["max_fragment_bytes"] < 200
+    assert metrics["retained_fragment_bytes"] < 4000
 
 
 def test_c2_shared_dag_output_grows_linearly_with_depth():
@@ -426,8 +428,8 @@ def test_c7_output_limit_raises_a_typed_limitation():
     a = _param("a", 0)
     context = build_smt_render_context()
     with pytest.raises(RenderOutputLimitExceeded) as excinfo:
-        render_smt_term(_doubling_dag(20, a), context, None, limit_chars=64)
-    assert excinfo.value.limit_chars == 64
+        render_smt_term(_doubling_dag(20, a), context, None, limit_bytes=64)
+    assert excinfo.value.limit_bytes == 64
 
 
 def test_c7_an_exponential_inline_expansion_is_stopped_at_the_limit():
@@ -442,7 +444,7 @@ def test_c7_an_exponential_inline_expansion_is_stopped_at_the_limit():
     context = build_smt_render_context()
     started = time.perf_counter()
     with pytest.raises(RenderOutputLimitExceeded):
-        render_smt_term(_doubling_dag(40, a), context, None, shared=False, limit_chars=50_000)
+        render_smt_term(_doubling_dag(40, a), context, None, shared=False, limit_bytes=50_000)
     assert time.perf_counter() - started < 10.0
 
 
@@ -452,11 +454,11 @@ def test_c7_materialisation_stays_bounded_while_planning():
     a = _param("a", 0)
     counters = RenderCounters()
     with pytest.raises(RenderOutputLimitExceeded) as excinfo:
-        _plan_for(_linear_chain(4000, a), counters=counters, limit_chars=5_000)
+        _plan_for(_linear_chain(4000, a), counters=counters, limit_bytes=5_000)
     assert excinfo.value.site == "render.materialize"
     # 止めた時点の材料は上限 + 1 node 分を大きく超えない。
-    assert counters.retained_fragment_chars <= 5_000 + counters.max_fragment_chars
-    assert counters.max_fragment_chars < 200
+    assert counters.retained_fragment_bytes <= 5_000 + counters.max_fragment_bytes
+    assert counters.max_fragment_bytes < 200
 
 
 def test_c7_no_intermediate_string_exceeds_one_node_worth():
@@ -467,7 +469,7 @@ def test_c7_no_intermediate_string_exceeds_one_node_worth():
     _to_smt_internal(_doubling_dag(40, a))
     _to_smt_internal(_linear_chain(5000, a))
     metrics = render_metrics_snapshot()
-    assert metrics["max_fragment_chars"] < 200
+    assert metrics["max_fragment_bytes"] < 200
 
 
 def test_c7_the_writer_never_holds_more_than_the_limit():
@@ -480,12 +482,12 @@ def test_c7_the_writer_never_holds_more_than_the_limit():
 
     def _recording_write(self, text):
         original(self, text)
-        seen.append(self.buffered_chars)
+        seen.append(self.buffered_bytes)
 
     CountingWriter.write = _recording_write
     try:
         with pytest.raises(RenderOutputLimitExceeded):
-            render_smt_term(_doubling_dag(30, a), context, None, shared=False, limit_chars=20_000)
+            render_smt_term(_doubling_dag(30, a), context, None, shared=False, limit_bytes=20_000)
     finally:
         CountingWriter.write = original
     assert seen
@@ -493,16 +495,16 @@ def test_c7_the_writer_never_holds_more_than_the_limit():
 
 
 def test_c7_counting_writer_stops_at_the_limit_without_building_the_string():
-    writer = CountingWriter(limit_chars=10, site="test")
+    writer = CountingWriter(limit_bytes=10, site="test")
     writer.write("12345")
-    assert writer.emitted_chars == 5
-    assert writer.buffered_chars == 5
+    assert writer.emitted_bytes == 5
+    assert writer.buffered_bytes == 5
     with pytest.raises(RenderOutputLimitExceeded):
         writer.write("678901")
     assert writer.aborted is True
     assert writer.getvalue() == ""
-    assert writer.buffered_chars == 0
-    assert writer.emitted_chars <= 10
+    assert writer.buffered_bytes == 0
+    assert writer.emitted_bytes <= 10
 
 
 def test_c7_counting_writer_without_limit_joins_once():
@@ -510,7 +512,7 @@ def test_c7_counting_writer_without_limit_joins_once():
     for part in ("a", "b", "c"):
         writer.write(part)
     assert writer.getvalue() == "abc"
-    assert writer.emitted_chars == 3
+    assert writer.emitted_bytes == 3
     assert writer.part_count == 3
 
 
@@ -544,7 +546,7 @@ def test_c7_human_rendering_is_bounded_too():
 
     with pytest.raises(RenderOutputLimitExceeded):
         render_human_text(
-            _doubling_dag(40, a), HumanRenderContext(), shared=False, limit_chars=20_000
+            _doubling_dag(40, a), HumanRenderContext(), shared=False, limit_bytes=20_000
         )
 
 
@@ -669,7 +671,7 @@ def test_c4_render_plan_keys_instances_by_node_and_context():
         "root-context",
         body=body,
         classify=lambda fragment, head, exact: ("properties", fragment),
-        policy=SharingPolicy(min_shared_chars=0, min_shared_tree_nodes=1),
+        policy=SharingPolicy(min_shared_bytes=0, min_shared_tree_nodes=1),
         counters=RenderCounters(),
     )
     contexts = {instance.context for instance in plan.instances if instance.node is node}
@@ -693,7 +695,7 @@ def test_c5_human_rendering_uses_shared_references_instead_of_re_expansion():
     assert len(text) < 20000
     assert metrics["distinct_rendered_nodes"] == 41
     assert metrics["shared_bindings"] >= 1
-    assert metrics["max_fragment_chars"] < 200
+    assert metrics["max_fragment_bytes"] < 200
 
 
 def test_c5_small_expressions_keep_their_existing_text():
@@ -880,4 +882,328 @@ def test_binding_names_use_the_reserved_prefix():
     names = rendered_binding_names(_to_smt_internal(_doubling_dag(24, a)))
     assert names
     assert all(name.startswith(f"|{SMT_BINDING_PREFIX}") for name in names)
-    assert NO_SHARING_POLICY.binds(references=9, inline_chars=10**9, tree_nodes=10**9) is False
+    assert NO_SHARING_POLICY.binds(references=9, inline_bytes=10**9, tree_nodes=10**9) is False
+
+
+# ---------------------------------------------------------------------------
+# 幅の広い node と非 ASCII: 上限は「作らせない」
+# ---------------------------------------------------------------------------
+
+
+def _wide_call(arity: int) -> Expression:
+    args = [_param(f"p{index}", index) for index in range(arity)]
+    return Expression(ExpressionType.CALL, name="wide", operands=args, size=4)
+
+
+def _wide_phi(branches: int) -> Expression:
+    a = _param("a", 0)
+    b = _param("b", 1)
+    cases = [
+        (Condition(_binary("INT_EQUAL", a, _const(index), size=1)), _binary("INT_ADD", b, _const(index)))
+        for index in range(branches)
+    ]
+    cases.append((None, b))
+    phi = Expression.phi(cases)
+    phi.size = 4
+    return phi
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda: _wide_call(4000), id="wide_call"),
+        pytest.param(lambda: _wide_phi(2000), id="wide_phi"),
+    ],
+)
+def test_a_wide_node_is_stopped_before_its_own_fragment_is_built(build):
+    """幅の広い node（引数の多い CALL、branch の多い PHI）でも上限で止まる。
+
+    fragment が出来てから測る設計だと、`join` や連結が終わったあとでしか
+    気付けない。子を解決するたびに見ているので、並べ終わる前に止まる。
+    """
+
+    root = build()
+    context = build_smt_render_context()
+    counters = RenderCounters()
+    started = time.perf_counter()
+    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
+        build_render_plan(
+            root,
+            context,
+            body=_smt_body,
+            classify=classify_smt_fragment,
+            policy=SMT_SHARING_POLICY,
+            counters=counters,
+            limit_bytes=600,
+        )
+    assert time.perf_counter() - started < 5.0
+    assert excinfo.value.site == "render.materialize"
+    # 止めた時点で抱えている材料は上限 + node 1 個分を大きく超えない。
+    assert counters.retained_fragment_bytes <= 600 + counters.max_fragment_bytes
+    assert counters.max_fragment_bytes <= 600
+
+
+def test_a_wide_node_renders_completely_without_a_limit():
+    """上限が無ければ幅の広い node はそのまま描ける（止めるのは上限のときだけ）。"""
+
+    rendered = _to_smt_internal(_wide_call(200))
+    assert rendered.count("p0 ") + rendered.count(" p0") >= 1
+    assert rendered.startswith("(call_wide ")
+
+
+def test_the_budget_is_counted_in_utf8_bytes_not_characters():
+    """単位は byte。非 ASCII の symbol 名で文字数と byte 数がずれる。"""
+
+    name = "変数" * 8  # 16 文字 / 48 byte
+    assert len(name) == 16
+    assert utf8_length(name) == 48
+
+    writer = CountingWriter(limit_bytes=40, site="test")
+    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
+        writer.write(name)
+    assert excinfo.value.limit_bytes == 40
+    assert excinfo.value.requested_bytes == 48
+
+    # 同じ文字数の ASCII なら収まる（文字数で数えていたら区別できない）。
+    ascii_writer = CountingWriter(limit_bytes=40, site="test")
+    ascii_writer.write("x" * 16)
+    assert ascii_writer.emitted_bytes == 16
+
+
+def test_a_non_ascii_symbol_is_measured_in_bytes_by_the_renderer():
+    variable = _variable("変数" * 8, size=4)
+    root = _binary("INT_ADD", variable, _param("a", 0))
+    context = build_smt_render_context()
+    counters = RenderCounters()
+    plan = build_render_plan(
+        root,
+        context,
+        body=_smt_body,
+        classify=classify_smt_fragment,
+        policy=SMT_SHARING_POLICY,
+        counters=counters,
+    )
+    rendered = render_smt_term(root, context, None)
+    assert counters.max_fragment_bytes >= 48
+    assert utf8_length(rendered) > len(rendered)
+    # 文字数で測っていたら通ってしまう上限で、byte なら止まる。
+    with pytest.raises(RenderOutputLimitExceeded):
+        render_smt_term(root, context, None, limit_bytes=len(rendered))
+    assert plan.instances
+
+
+# ---------------------------------------------------------------------------
+# identity: digest 一致だけで同一性を決めない
+# ---------------------------------------------------------------------------
+
+
+def test_identity_does_not_rest_on_a_digest(monkeypatch):
+    """digest を全部同じ値にしても、違う条件は違う identity のままであること。
+
+    この package は「hash / digest は候補の絞り込み専用で、一致の確定には
+    使わない」を契約にしている。identity がその契約の外にあると、衝突が
+    そのまま誤った同一性になる。
+    """
+
+    from scripts.function_tracer_pcode.core import structural
+
+    constant = b"\x00" * 32
+    monkeypatch.setattr(
+        structural, "compose_equivalence_digest", lambda *a, **k: constant
+    )
+    monkeypatch.setattr(
+        structural, "compose_candidate_digest", lambda *a, **k: constant[:16]
+    )
+
+    a = _param("a", 0)
+    b = _param("b", 1)
+    left = Condition(_binary("INT_LESS", _doubling_dag(4, a), b, size=1))
+    right = Condition(_binary("INT_LESS", _doubling_dag(4, b), a, size=1))
+
+    assert condition_identity(left) != condition_identity(right)
+    assert structural_identity_form(left.expression) != structural_identity_form(
+        right.expression
+    )
+
+
+def test_identity_contains_no_digest_at_all():
+    """identity の中身は payload と番号だけ（digest が混ざっていないこと）。"""
+
+    a = _param("a", 0)
+    identity = condition_identity(Condition(_binary("INT_LESS", a, _param("b", 1), size=1)))
+    assert identity is not None
+
+    def _atoms(value):
+        if isinstance(value, (tuple, list)):
+            for item in value:
+                yield from _atoms(item)
+        else:
+            yield value
+
+    values = list(_atoms(identity))
+    assert all(not isinstance(value, bytes) for value in values)
+    # 16 / 32 byte digest を hex にしたものが紛れていないこと。
+    assert not any(
+        isinstance(value, str) and len(value) in (32, 64) and _is_hex(value)
+        for value in values
+    )
+
+
+def _is_hex(value: str) -> bool:
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
+
+
+def test_identity_is_refused_beyond_its_node_limit():
+    """大きすぎる条件は identity を返さない（切り詰めた key を返さない）。"""
+
+    from scripts.function_tracer_pcode.core.structural import (
+        CONDITION_IDENTITY_NODE_LIMIT,
+    )
+
+    a = _param("a", 0)
+    node = a
+    for index in range(CONDITION_IDENTITY_NODE_LIMIT + 16):
+        node = _binary("INT_ADD", node, _const(index))
+    huge = Condition(_binary("INT_LESS", node, _param("b", 1), size=1))
+    assert condition_identity(huge) is None
+    assert condition_identities([huge]) is None
+
+
+def test_identity_is_json_serialisable():
+    """証明鍵は直列化される。plain な値であること。"""
+
+    from scripts.function_tracer_pcode.core.analysis import _jsonable_nested_tuple
+
+    a = _param("a", 0)
+    identity = condition_identity(Condition(_binary("INT_LESS", a, _param("b", 1), size=1)))
+    json.dumps(_jsonable_nested_tuple(identity), sort_keys=True)
+
+
+def test_identity_equality_implies_structural_equality():
+    """identity が一致するなら構造も一致する（誤った同一視が無い）。"""
+
+    a = _param("a", 0)
+    b = _param("b", 1)
+    pairs = [
+        (_binary("INT_ADD", a, b), _binary("INT_ADD", a, b), True),
+        (_binary("INT_ADD", a, b), _binary("INT_SUB", a, b), False),
+        (_doubling_dag(5, a), _doubling_dag(5, a), True),
+        (_doubling_dag(5, a), _doubling_dag(5, b), False),
+        (_unary("INT_SEXT", a, size=4), _unary("INT_ZEXT", a, size=4), False),
+    ]
+    for left, right, expected in pairs:
+        same_identity = structural_identity_form(left) == structural_identity_form(right)
+        assert same_identity is expected
+        if same_identity:
+            assert structural_equals(left, right)
+
+
+def test_a_wide_node_costs_time_proportional_to_its_width():
+    """幅の広い node が幅の 2 乗にならないこと。
+
+    「子を 1 個積んでやり直す」だけだと、幅 n の node の本体を n 回回すので
+    幅の 2 乗になる（幅 1024 の PHI で実測 6.5 秒 → 0.13 秒）。回した回数で
+    「要求をまとめて集める」実行へ切り替えることで線形に戻している。
+    """
+
+    def elapsed(build, width):
+        root = build(width)
+        started = time.perf_counter()
+        _to_smt_internal(root)
+        return time.perf_counter() - started
+
+    narrow = elapsed(_wide_phi, 128)
+    wide = elapsed(_wide_phi, 512)
+    # 幅 4 倍。2 乗なら 16 倍、線形なら 4 倍。余裕を見て 8 倍未満で固定する。
+    assert wide < max(narrow * 8, 0.5), (narrow, wide)
+
+    narrow_call = elapsed(_wide_call, 256)
+    wide_call = elapsed(_wide_call, 1024)
+    assert wide_call < max(narrow_call * 8, 0.5), (narrow_call, wide_call)
+
+
+def test_collecting_requests_does_not_swallow_the_budget_abort():
+    """要求をまとめて集める実行が、上限の打ち切りを飲み込まないこと。
+
+    あの実行は偽の子で走らせるので本番では起きない失敗を無視するが、予算・
+    閉路・契約違反は本番でも起きる本物の停止理由なので通す。
+    """
+
+    root = _wide_phi(600)
+    counters = RenderCounters()
+    with pytest.raises(RenderOutputLimitExceeded):
+        build_render_plan(
+            root,
+            build_smt_render_context(),
+            body=_smt_body,
+            classify=classify_smt_fragment,
+            policy=SMT_SHARING_POLICY,
+            counters=counters,
+            limit_bytes=400,
+        )
+
+
+def test_collected_requests_do_not_change_the_output():
+    """要求収集を通る幅と通らない幅で、同じ式なら同じ出力になること。"""
+
+    from scripts.function_tracer_pcode.core import render_plan
+
+    root = _wide_phi(64)
+    with_collection = _to_smt_internal(root)
+    original = render_plan.DISCOVERY_AFTER_RETRIES
+    try:
+        render_plan.DISCOVERY_AFTER_RETRIES = 1 << 30  # 収集へ切り替えない
+        without_collection = _to_smt_internal(root)
+    finally:
+        render_plan.DISCOVERY_AFTER_RETRIES = original
+    assert with_collection == without_collection
+
+
+def test_the_render_package_exposes_only_the_rendering_entry_points():
+    """描画 package の外向きの面は入口だけ。
+
+    共有方針・束縛名・型付きの項・属性評価は描画の実装どうしの取り決めで、
+    外へ出すと変えるたびに外部 consumer が壊れる。PR-22-C が足した名前が
+    package の facade に載っていないことを固定する。
+    """
+
+    import scripts.function_tracer_pcode.core.render_smt as package
+
+    internal = (
+        "SmtTermProperties",
+        "classify_smt_fragment",
+        "smt_term",
+        "term_is_fp_rendered",
+        "term_boolean_literal",
+        "SmtRenderContext",
+        "build_smt_render_context",
+        "SMT_SHARING_POLICY",
+        "SMT_BINDING_PREFIX",
+        "SMT_SYMBOL_RE",
+        "smt_binding_namespace",
+        "assign_binding_names",
+        "write_let_term",
+        "rendered_binding_names",
+        "binding_dependency_order_is_valid",
+        "iter_expression_nodes",
+        "render_attribute_scope",
+        "evaluate_attribute",
+        "attribute_cache",
+        "any_node",
+    )
+    exposed = [name for name in internal if hasattr(package, name)]
+    assert exposed == [], exposed
+    # 入口は出ている。
+    for name in (
+        "expression_to_smt",
+        "condition_to_smt",
+        "render_expression_smt_evidence",
+        "render_condition_smt_evidence",
+        "render_smt_term",
+        "SMT_RENDER_SCHEMA",
+    ):
+        assert hasattr(package, name), name

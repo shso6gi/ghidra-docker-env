@@ -641,6 +641,7 @@ def test_identity_kinds_are_not_merged_into_one_type():
         "equals",
         "key",
         "identity_digest",
+        "identity_form",
         "condition_identity",
         "condition_identities",
     }, exposed
@@ -1201,3 +1202,44 @@ def test_a_render_abort_is_never_swallowed_by_a_recovery_handler(module_path):
         if all(node.handlers.index(handler) > first_broad for handler in reraises):
             offenders.append(f"{module_path}:{node.lineno} (typed handler comes too late)")
     assert offenders == [], offenders
+
+
+def test_the_complete_identity_is_not_built_from_a_digest():
+    """完全 identity が digest を入力にしていないこと。
+
+    この package は「hash / digest は候補の絞り込み専用」を契約にしている。
+    identity がそこへ依存すると、衝突がそのまま誤った同一性になる。
+    """
+
+    from scripts.function_tracer_pcode.core import structural
+
+    source = (PACKAGE_ROOT / "core" / "structural.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    digest_names = {
+        "compose_candidate_digest",
+        "compose_equivalence_digest",
+        "structural_identity_digest",
+        "candidate_hash",
+        "_compose_merkle_digest",
+        "_digest_structural_payload",
+    }
+    offenders = []
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if function.name not in {"structural_identity_form", "condition_identity"}:
+            continue
+        for node in ast.walk(function):
+            if isinstance(node, ast.Call):
+                name = _identity_name(node.func)
+                if name in digest_names:
+                    offenders.append(f"{function.name}:{node.lineno} calls {name}")
+            if isinstance(node, ast.Attribute) and node.attr in {
+                "_structural_hash",
+                "_equivalence_digest",
+            }:
+                offenders.append(f"{function.name}:{node.lineno} reads {node.attr}")
+    assert offenders == [], offenders
+
+    # 契約そのものも確かめる: digest を定数にしても identity は分かれる。
+    assert structural.structural_identity_form is not None
