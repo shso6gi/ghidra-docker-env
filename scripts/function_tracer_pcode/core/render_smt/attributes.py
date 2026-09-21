@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 from scripts.function_tracer_pcode.core.render_plan import RenderGraphCycleError
 

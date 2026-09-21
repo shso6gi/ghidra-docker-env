@@ -15,19 +15,20 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional
 
 from scripts.function_tracer_pcode.core.render_metrics import record_render
 from scripts.function_tracer_pcode.core.render_output import CountingWriter, RenderCounters
 from scripts.function_tracer_pcode.core.render_plan import (
-    TEXT_OBSERVATION_OTHER,
+    NO_SHARING_POLICY,
+    PLACEHOLDER_MARK,
     BindingNamespace,
     RenderGraphCycleError,
     SharingPolicy,
-    TextObservation,
+    build_render_plan,
+    check_plan_invariants,
     collect_reserved_symbols,
-    emit_render,
-    plan_render,
+    write_expansion,
 )
 from scripts.function_tracer_pcode.core.semantic_snapshot import traverse_semantic_graph
 
@@ -41,6 +42,9 @@ class HumanRenderContext(NamedTuple):
 #: 表示に現れる名前（変数名・関数名・共有参照）。共有参照の名前がこれらと
 #: ぶつからないことを namespace owner が保証する。
 _HUMAN_SYMBOL_RE = re.compile(r"(?P<bare>[@A-Za-z_][A-Za-z0-9_@.]*)")
+
+#: fragment 中の子の参照（番号ごと）。
+_PLACEHOLDER_RE = re.compile(PLACEHOLDER_MARK + r"\d+" + PLACEHOLDER_MARK)
 
 #: 共有参照の接頭辞と形。
 HUMAN_SHARED_PREFIX = "@h"
@@ -59,23 +63,18 @@ HUMAN_SHARING_POLICY = SharingPolicy(
     reference_chars_estimate=11,
 )
 
-#: 共有を止めた表示（差分確認や小さい式の比較用）。
-_HUMAN_NO_SHARING_POLICY = SharingPolicy(
-    min_shared_chars=1 << 62,
-    inline_max_chars=1 << 62,
-    min_shared_tree_nodes=1 << 62,
-    reference_chars_estimate=11,
-)
+#: 人向け表示の項の性質（現状は空。足すならここと分類器の 2 箇所）。
+_HUMAN_TERM_PROPERTIES = ()
 
-#: 人向け表示には「描画 text を見て分岐する」下流が無いので、観測は既定の 1 つ。
-#: （SMT 側は float 理論の正規化が text を見るため観測が要る。）
-_HUMAN_TEXT_OBSERVATIONS = (
-    TextObservation(
-        name=TEXT_OBSERVATION_OTHER,
-        matches=lambda text: True,
-        token=lambda index: f"@t{index}",
-    ),
-)
+
+def _classify_human_fragment(fragment: str, head, exact: bool):
+    """人向け表示には「描画結果を見て分岐する」下流が無い。
+
+    それでも分類器を通すのは、性質が必要になったときに足す場所を 1 つに
+    しておくため（`RenderedTerm` は常に性質を持つ）。
+    """
+
+    return _HUMAN_TERM_PROPERTIES
 
 
 def expression_to_string(expr, simplify: bool = True, *, shared: bool = True) -> str:
@@ -91,22 +90,27 @@ def render_human_text(
     shared: bool = True,
     limit_chars: Optional[int] = None,
 ) -> str:
-    """DAG を 1 回だけ辿って表示文字列を作る。"""
+    """DAG を 1 回だけ辿って表示文字列を作る。
+
+    node 本体が作るのは自分の分と子の参照だけで、木への展開は
+    `CountingWriter` へ流しながら行う（上限に達したらそこで止まる）。
+    """
 
     counters = RenderCounters(render_invocations=1)
 
     def body(node, node_context, resolve):
         return _render_human_node(node, node_context, resolve)
 
-    policy = HUMAN_SHARING_POLICY if shared else _HUMAN_NO_SHARING_POLICY
+    policy = HUMAN_SHARING_POLICY if shared else NO_SHARING_POLICY
     try:
-        plan = plan_render(
+        plan = build_render_plan(
             root,
             context,
             body=body,
-            observations=_HUMAN_TEXT_OBSERVATIONS,
+            classify=_classify_human_fragment,
             policy=policy,
             counters=counters,
+            limit_chars=limit_chars,
         )
     except RenderGraphCycleError:
         # 閉路を受け入れないという判定は走査 owner が持つ。表示側は「進めない」
@@ -116,21 +120,19 @@ def render_human_text(
     names: Dict[int, str] = {}
     if plan.bound_order:
         namespace = BindingNamespace(
-            collect_reserved_symbols(
-                (instance.planned_text for instance in plan.instances),
-                pattern=_HUMAN_SYMBOL_RE,
-            ),
+            collect_reserved_symbols(plan, pattern=_HUMAN_SYMBOL_RE),
             prefix=HUMAN_SHARED_PREFIX,
             template=HUMAN_SHARED_TEMPLATE,
         )
-        seeds = [plan.instances[index].planned_text for index in plan.bound_order]
+        shapes = _fragment_shape_digests(plan)
+        seeds = [shapes[index] for index in plan.bound_order]
         allocated = namespace.allocate_keyed(seeds, digest=_shared_reference_digest)
         names = {index: allocated[position] for position, index in enumerate(plan.bound_order)}
-    emit_render(plan, root, context, body=body, names=names, counters=counters)
+    check_plan_invariants(plan, names)
     counters.case_count += _phi_case_count(plan)
 
     writer = CountingWriter(limit_chars=limit_chars, site="core.render_python")
-    writer.write(plan.instances[plan.root_index].text)
+    write_expansion(writer, plan, plan.root_index, names)
     if plan.bound_order:
         writer.write(" where ")
         for position, index in enumerate(plan.bound_order):
@@ -138,12 +140,32 @@ def render_human_text(
                 writer.write("; ")
             writer.write(names[index])
             writer.write(" = ")
-            writer.write(plan.instances[index].text)
+            write_expansion(writer, plan, index, names)
     text = writer.getvalue()
     counters.emitted_chars = writer.emitted_chars
-    counters.observe_buffered(writer.peak_buffered_chars)
     record_render(counters)
     return text
+
+
+def _fragment_shape_digests(plan) -> Dict[int, str]:
+    """各 instance の「形」の digest。同じ形の部分式には同じ名前が付く。
+
+    fragment は子を走査順の番号で指すので、番号をそのまま種にすると同じ形でも
+    走査の都合で名前が変わる。番号は印に潰し、子の digest を畳み込む。子が先に
+    決まる順（post-order）で回すので再帰しない。
+    """
+
+    digests: Dict[int, str] = {}
+    for index in plan.post_order:
+        instance = plan.instances[index]
+        parts = [_strip_placeholder_indices(instance.fragment)]
+        parts.extend(digests[child] for child in instance.used_children)
+        digests[index] = _shared_reference_digest("\x01".join(parts))
+    return digests
+
+
+def _strip_placeholder_indices(fragment: str) -> str:
+    return _PLACEHOLDER_RE.sub(PLACEHOLDER_MARK, fragment)
 
 
 def _phi_case_count(plan) -> int:

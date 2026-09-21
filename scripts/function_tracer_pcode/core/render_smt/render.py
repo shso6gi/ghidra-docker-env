@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Mapping, NamedTuple, Optional
 from scripts.function_tracer_pcode.core.intrinsics import is_supported_pcode_intrinsic
 from scripts.function_tracer_pcode.core.render_smt.attributes import (
     any_node,
@@ -15,12 +15,12 @@ from scripts.function_tracer_pcode.core.render_smt.attributes import (
 from scripts.function_tracer_pcode.core.render_output import CountingWriter, RenderCounters
 from scripts.function_tracer_pcode.core.render_metrics import record_render
 from scripts.function_tracer_pcode.core.render_plan import (
-    TEXT_OBSERVATION_OTHER,
+    NO_SHARING_POLICY,
     RenderGraphCycleError,
-    SharingPolicy,
-    TextObservation,
-    emit_render,
-    plan_render,
+    RenderedTerm,
+    build_render_plan,
+    check_plan_invariants,
+    term_properties,
 )
 from scripts.function_tracer_pcode.core.render_smt.bindings import (
     SMT_SHARING_POLICY,
@@ -686,44 +686,59 @@ def _detached_child_renderer(**kwargs) -> _DetachedChildRenderer:
     return _DetachedChildRenderer(**kwargs)
 
 
-#: 下流が子の描画 text を文字列として見る観測の一覧（`core/render_plan` の契約）。
-#:
-#: * `fp` — `_normalize_to_fp_expr` が「もう FP 項か」を text の接頭辞で見る。
-#:   名前へ置き換えると見え方が変わるので、node 自身を見ても FP 項だと分かる
-#:   もの（`_is_float_rendered_expr`）だけ共有してよい。
-#: * `true` / `false` — PHI の branch 条件が恒真 / 恒偽なら ITE を畳む。
-_SMT_TEXT_OBSERVATIONS = (
-    TextObservation(
-        name="fp",
-        matches=lambda text: _looks_like_fp_expr(text),
-        token=lambda index: f"(fp.sh{index})",
-        shareable_when=lambda node: _is_float_rendered_expr(node),
-    ),
-    TextObservation(
-        name="true",
-        matches=lambda text: text == "true",
-        token=lambda index: "true",
-    ),
-    TextObservation(
-        name="false",
-        matches=lambda text: text == "false",
-        token=lambda index: "false",
-    ),
-    TextObservation(
-        name=TEXT_OBSERVATION_OTHER,
-        matches=lambda text: True,
-        token=lambda index: f"sh{index}",
-    ),
-)
+class SmtTermProperties(NamedTuple):
+    """子の描画結果について、**下流の分岐が見てよい**性質。
+
+    描画 text を見る代わりにこれを見る。参照が名前になっても展開されても値は
+    変わらないので、共有の有無で判定が動かない。新しい「描画結果を見る分岐」が
+    要るときは field を 1 つ足し、`classify_smt_fragment` に 1 行足す。
+    """
+
+    #: 既に FP 理論の項として描かれているか（`_normalize_to_fp_expr` が見る）
+    is_fp_term: bool = False
+    #: 恒真 / 恒偽の literal なら True / False、そうでなければ None（PHI が見る）
+    boolean_literal: Optional[bool] = None
 
 
-#: 共有を止めたいときの方針（差分検証で「`let` 無しの形」を作るために使う）。
-_SMT_NO_SHARING_POLICY = SharingPolicy(
-    min_shared_chars=1 << 62,
-    inline_max_chars=1 << 62,
-    min_shared_tree_nodes=1 << 62,
-    reference_chars_estimate=SMT_SHARING_POLICY.reference_chars_estimate,
-)
+def classify_smt_fragment(fragment: str, head, exact: bool) -> SmtTermProperties:
+    """fragment から型付きの性質を 1 回だけ決める（**この関数だけが text を見る**）。
+
+    展開後のテキストの先頭は、fragment の先頭が子ならその子の展開の先頭になる。
+    だから接頭辞で決まる `is_fp_term` は子から継ぎ、テキスト全体が literal かは
+    「fragment が子の参照ちょうど」で決まる。近似ではなく等値。
+    """
+
+    if head is not None:
+        return SmtTermProperties(
+            is_fp_term=head.is_fp_term,
+            boolean_literal=head.boolean_literal if exact else None,
+        )
+    literal = True if fragment == "true" else False if fragment == "false" else None
+    return SmtTermProperties(
+        is_fp_term=_looks_like_fp_expr(fragment),
+        boolean_literal=literal,
+    )
+
+
+def term_is_fp_rendered(term) -> bool:
+    """項が既に FP 理論の項として描かれているか。性質が無ければ fail-closed。"""
+
+    return bool(term_properties(term).is_fp_term)
+
+
+def term_boolean_literal(term) -> Optional[bool]:
+    """項が恒真 / 恒偽の literal か。性質が無ければ fail-closed。"""
+
+    return term_properties(term).boolean_literal
+
+
+def smt_term(text: str, *, is_fp_term: bool = False, boolean_literal=None) -> RenderedTerm:
+    """driver の外で型付きの項を作る（detached renderer と test 用）。"""
+
+    return RenderedTerm(
+        text,
+        SmtTermProperties(is_fp_term=is_fp_term, boolean_literal=boolean_literal),
+    )
 
 
 def render_smt_term(
@@ -736,8 +751,10 @@ def render_smt_term(
 ) -> str:
     """DAG を 1 回だけ辿って SMT 項を書く（renderer の本体入口）。
 
-    共有部分式は `let` で 1 回だけ定義する。束縛が 0 個なら出力は展開したもの
-    と同じ文字列になるので、小さい式の観測可能な text は変わらない。
+    走査は 1 回だけで、node 本体が作るのは自分の分と子の参照（fragment）。木への
+    展開は `CountingWriter` へ流しながら行うので、上限に達した時点でそれ以上は
+    作られない。共有部分式は `let` で 1 回だけ定義する。束縛が 0 個なら出力は
+    展開したものと同じ文字列になるので、小さい式の観測可能な text は変わらない。
     """
 
     counters = RenderCounters(render_invocations=1)
@@ -749,22 +766,34 @@ def render_smt_term(
             _SmtChildRenderer(resolve, node_context, symbol_name_mapping),
         )
 
-    policy = SMT_SHARING_POLICY if shared else _SMT_NO_SHARING_POLICY
+    policy = SMT_SHARING_POLICY if shared else NO_SHARING_POLICY
     with render_attribute_scope():
         try:
-            plan, names = _plan_and_name(root, context, body, policy, counters)
+            plan = build_render_plan(
+                root,
+                context,
+                body=body,
+                classify=classify_smt_fragment,
+                policy=policy,
+                counters=counters,
+                limit_chars=limit_chars,
+            )
         except RenderGraphCycleError:
             # 閉路を「受け入れない」と決めるのは走査 owner。ここは進めないと
             # 言うだけで、種別の判定を renderer 側に増やさない。
             traverse_semantic_graph(root)
             raise
-        emit_render(plan, root, context, body=body, names=names, counters=counters)
+        names = (
+            assign_binding_names(plan, smt_binding_namespace(plan))
+            if plan.bound_order
+            else {}
+        )
+        check_plan_invariants(plan, names)
         counters.case_count += _phi_case_count(plan)
         writer = CountingWriter(limit_chars=limit_chars, site="core.render_smt")
         write_let_term(writer, plan, names)
         text = writer.getvalue()
     counters.emitted_chars = writer.emitted_chars
-    counters.observe_buffered(writer.peak_buffered_chars)
     record_render(counters)
     return text
 
@@ -785,26 +814,6 @@ def _phi_case_count(plan) -> int:
         if expr_type == expr_type.__class__.PHI:
             total += len(getattr(node, "value", None) or ())
     return total
-
-
-def _plan_and_name(root, context, body, policy, counters):
-    """計画と束縛名。名前は依存順の通し番号から決まる（`id()` に依らない）。"""
-
-    plan = plan_render(
-        root,
-        context,
-        body=body,
-        observations=_SMT_TEXT_OBSERVATIONS,
-        policy=policy,
-        counters=counters,
-    )
-    names: Dict[int, str] = {}
-    if plan.bound_order:
-        namespace = smt_binding_namespace(
-            instance.planned_text for instance in plan.instances
-        )
-        names = assign_binding_names(plan, namespace)
-    return plan, names
 
 
 def _to_smt_internal(
@@ -1321,13 +1330,16 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
                     address_context=False,
                 )
             else:
-                cond_str = "true"
+                cond_str = smt_term("true", boolean_literal=True)
 
             val_str = render_branch_value(val)
 
-            if cond_str == "true":
+            # 恒真 / 恒偽の畳み込みは **型付きの性質**で決める。描画文字列を
+            # 見ると、その条件に名前が付いた瞬間に畳み込みが消える。
+            literal = term_boolean_literal(cond_str)
+            if literal is True:
                 result = val_str
-            elif cond_str != "false":
+            elif literal is not False:
                 result = f"(ite {cond_str} {val_str} {result})"
 
         return result

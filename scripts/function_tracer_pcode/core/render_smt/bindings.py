@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core.render_output import CountingWriter
 from scripts.function_tracer_pcode.core.render_plan import (
@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.core.render_plan import (
     RenderPlan,
     SharingPolicy,
     collect_reserved_symbols,
+    write_expansion,
 )
 
 
@@ -52,11 +53,11 @@ SMT_SHARING_POLICY = SharingPolicy(
 SMT_RENDER_SCHEMA = "smt-shared-let-v1"
 
 
-def smt_binding_namespace(texts: Iterable[str]) -> BindingNamespace:
-    """描画 text に現れる symbol を避ける名前空間を作る。"""
+def smt_binding_namespace(plan: RenderPlan) -> BindingNamespace:
+    """fragment に現れる symbol を避ける名前空間を作る。"""
 
     return BindingNamespace(
-        collect_reserved_symbols(texts, pattern=SMT_SYMBOL_RE),
+        collect_reserved_symbols(plan, pattern=SMT_SYMBOL_RE),
         prefix=SMT_BINDING_PREFIX,
         template=SMT_BINDING_TEMPLATE,
     )
@@ -76,37 +77,31 @@ def write_let_term(
 ) -> None:
     """`(let ((n body)) ...)` を依存順に入れ子で書き出す。
 
-    束縛が 0 個なら root の text をそのまま書く（既存の出力と同じ）。
+    書き出しは fragment を **流しながら**展開する（`write_expansion`）。途中で
+    1 つの大きな文字列を組み立てないので、上限に達した時点で止まる。束縛が
+    0 個なら root を展開しただけの文字列になる（既存の出力と同じ）。
     """
 
-    root_text = plan.instances[plan.root_index].text
     order: Sequence[int] = plan.bound_order
-    if not order:
-        writer.write(root_text)
-        return
     for index in order:
         writer.write("(let ((")
         writer.write(names[index])
         writer.write(" ")
-        writer.write(plan.instances[index].text)
+        write_expansion(writer, plan, index, names)
         writer.write(")) ")
-    writer.write(root_text)
+    write_expansion(writer, plan, plan.root_index, names)
     writer.write_repeated(")", len(order))
 
 
 def binding_dependency_order_is_valid(plan: RenderPlan, names: Dict[int, str]) -> bool:
     """束縛が自分より前の束縛しか参照しないこと（test 用の検査）。"""
 
-    seen: List[str] = []
+    defined: set = set()
     for index in plan.bound_order:
-        text = plan.instances[index].text
-        for match in SMT_SYMBOL_RE.finditer(text):
-            quoted = match.groupdict().get("quoted")
-            symbol = quoted if quoted is not None else match.group("bare")
-            candidate = f"|{symbol}|"
-            if candidate in names.values() and candidate not in seen:
+        for child in plan.instances[index].used_children:
+            if child in names and child not in defined:
                 return False
-        seen.append(names[index])
+        defined.add(index)
     return True
 
 

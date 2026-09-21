@@ -275,6 +275,14 @@ def expression_renders_as_fp_sort(expr, *, float_mode: str = "uf") -> bool:
 
 
 def _looks_like_fp_expr(expr_smt: str) -> bool:
+    """**この式自身の**描画が FP 理論の項の形か。
+
+    引数は「子の描画結果」ではなく、`classify_smt_fragment` が 1 回だけ渡す
+    その node の fragment。子の描画結果に対してこれを呼んではいけない（子は
+    参照 1 個なので、参照が名前になったか展開されたかで答えが変わる）。判定は
+    型付きの性質（`SmtTermProperties.is_fp_term`）で受け取る。
+    """
+
     expr_smt = expr_smt.strip()
     return expr_smt.startswith("(fp.") or expr_smt.startswith("((_ to_fp ")
 
@@ -289,7 +297,7 @@ def _normalize_to_fp_expr(
     bits = int(bits or 0)
     if float_mode != "fp" or bits <= 0 or bits not in _FLOAT_BV_WIDTH_TO_SORT:
         return expr_smt
-    if _looks_like_fp_expr(expr_smt):
+    if term_is_fp_rendered(expr_smt):
         return expr_smt
     if _is_float_rendered_expr(expr):
         return expr_smt
@@ -486,6 +494,7 @@ def _float_unary_value_to_smt(
 
 # Sibling modules reference each other at call time; import them last to avoid cycles.
 from scripts.function_tracer_pcode.core.render_smt.render import (
+    term_is_fp_rendered,
     UnsupportedSmtOperatorError,
     _FLOAT_ARITHMETIC_FP_SPECS,
     _FLOAT_ARITHMETIC_SMT_NAMES,

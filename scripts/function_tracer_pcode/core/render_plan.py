@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""DAG 描画の **走査と共有計画**（renderer から描画規則を分けた層）。
+"""DAG 描画の **走査・共有計画・書き出し**（renderer から描画規則を分けた層）。
 
 renderer（人向け / SMT）が持つのは「この node をどう書くか」だけで、
 
@@ -7,9 +7,23 @@ renderer（人向け / SMT）が持つのは「この node をどう書くか」
 * 深い式で Python の再帰に頼らない
 * どの部分式に名前を付けて 1 回だけ書くか
 * 名前の付け方と依存順
+* 上限を超える文字列を **作らない**
 
 はここが持つ。node 種別が増えても触るのは renderer 側の本体だけで、この層は
-変わらない（逆に、共有の条件を変えたいときに renderer 本体を読む必要もない）。
+変わらない（逆に、共有の条件や上限の効かせ方を変えたいときに renderer 本体を
+読む必要もない）。
+
+## 断片（fragment）— 1 node 分しか作らない
+
+node 本体は子の描画結果として **参照 1 個**（`RenderedTerm`）を受け取る。だから
+本体が返す文字列（= その node の *fragment*）は常に「自分が書く分 + 子の参照」で、
+部分木の大きさに比例しない。木への展開は最後の書き出しで、`CountingWriter` へ
+**流しながら**行う。
+
+これが「完成文字列を作ってから測る」との違い: 上限に達した時点で書き出しが
+止まるので、上限を超える中間文字列も完成文字列も存在しない。保持している生の
+材料（fragment の総量）にも同じ上限が効く（どの fragment も出力に最低 1 回は
+現れるので、材料が上限を超えるなら出力も必ず超える）。
 
 ## 描画 instance という単位
 
@@ -25,28 +39,27 @@ RenderInstanceIdentity = 意味 node の identity + 描画に効く文脈
 identity** で、`StructuralIdentity` / `SolverQueryIdentity` / `RewriteIdentity`
 とは別物。混ぜてはいけない（片方の都合で他方の一致条件が動く）。
 
-## 2 段で計画する理由
+## 子の描画結果は「文字列」ではなく「型のある項」
 
-「どの instance に名前を付けるか」は参照回数が分かってからでないと決まらず、
-参照回数は node 本体を走らせてみないと分からない。一方、本体を実 text で
-走らせると共有部分式がそのまま展開されて指数になる。そこで
-
-1. **計画 pass** — 子の text の代わりに短い *観測 token* を返して本体を走らせ、
-   辺（どの instance を何回参照したか）と local な大きさを得る。
-2. **出力 pass** — 名前を決めた後、同じ本体を実 text（名前 or 展開）で走らせる。
-
-観測 token は好きな文字列でよいわけではない。下流が子の描画 text を
-**文字列として見る**箇所があるので（`TextObservation`）、token は同じ観測結果に
-なる代表値でなければ、計画 pass と出力 pass で辿る分岐が食い違う。
+下流が子の描画 **文字列**を見て分岐すると（float 理論の正規化、PHI の恒真条件の
+畳み込み）、参照へ置き換えた瞬間に判定が変わる。そこで子は `RenderedTerm` として
+渡し、判定に要る性質は **型付きの property** で持つ。性質は renderer が与える
+分類器が fragment から 1 回だけ決め、子から親へは「先頭が子ならその性質を継ぐ」
+という規則で正確に伝わる（近似ではなく等値）。文字列を見る分岐は renderer に
+1 つも残らない（`tests/unit/test_architecture_boundaries.py` が 0 で固定）。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
-from scripts.function_tracer_pcode.core.render_output import RenderCounters
+from scripts.function_tracer_pcode.core.render_output import (
+    CountingWriter,
+    RenderCounters,
+    RenderOutputLimitExceeded,
+)
 
 
 class RenderGraphCycleError(AnalysisFailureError):
@@ -62,6 +75,22 @@ class RenderGraphCycleError(AnalysisFailureError):
     """
 
 
+class RenderPlanInvariantError(AnalysisFailureError):
+    """計画と書き出しの前提が崩れた（内部不整合、**fail-closed**）。
+
+    名前を付けた instance の本体が空、fragment が知らない参照を含む、参照が
+    後ろの instance を指している、といった状態で書き出しを続けると、空の定義や
+    未定義の symbol を含む論理式が solver へ届く。「共有が減るだけ」では済まない。
+    """
+
+
+class RenderedTermContractError(AnalysisFailureError):
+    """型付きの性質を要求する場所へ、性質を持たない項が届いた（fail-closed）。
+
+    「性質が無ければ文字列を見る」という後退をさせない。後退させると、参照へ
+    置き換えた瞬間に下流の判定が変わる経路が復活する。
+    """
+
 
 class _NeedChild(BaseException):
     """まだ解決していない子が要る、という driver 内部の合図。
@@ -72,39 +101,43 @@ class _NeedChild(BaseException):
     """
 
 
-#: 観測クラスの既定名（どの観測にも当たらない text）
-TEXT_OBSERVATION_OTHER = "other"
+#: fragment の中で子を指す印。実テキストに現れ得ない制御文字で挟む。
+PLACEHOLDER_MARK = "\x00"
 
 #: 見積りの飽和点。これ以上は数えない（巨大整数と無駄な走査を作らない）
 SATURATION = 1 << 40
 
 
-@dataclass(frozen=True)
-class TextObservation:
-    """下流が子の描画 text を文字列として見る観測の 1 クラス。
+def child_placeholder(index: int) -> str:
+    return f"{PLACEHOLDER_MARK}{index}{PLACEHOLDER_MARK}"
 
-    計画 pass は子の代わりに `token(index)` を返すので、本体の分岐は実 text の
-    ときと一致する。新しく「描画 text を見る」判定を足すときは、観測を 1 つ
-    足して代表 token を決める（足さないと、計画と出力で辺が食い違う）。
+
+class RenderedTerm(str):
+    """子の描画結果。文字列としては **参照 1 個**、性質は型で持つ。
+
+    `str` の subclass なので、node 本体の f-string や `join` はそのまま動く。
+    本体が見てよいのは `properties` だけで、文字そのものを見てはいけない
+    （見ると、参照が名前になった / 展開されたで判定が変わる）。
     """
 
-    name: str
-    matches: Callable[[str], bool]
-    #: instance 番号を受け取り、この観測になる代表 token を返す
-    token: Callable[[int], str]
-    #: 名前（参照）へ置き換えても観測結果が変わらないか。
-    #: 変わるものは共有できない（共有すると下流の判定が静かに変わる）。
-    shareable: bool = True
-    #: text の観測が変わっても、node 自身を見た結果が同じなら共有してよい、と
-    #: 言える場合の述語。下流が「text で判定 → 駄目なら node で判定」の順に
-    #: なっている観測（float 理論の正規化がそれ）で、後段と同じ答えになる node
-    #: だけを共有可能にするために使う。
-    shareable_when: Optional[Callable[[Any], bool]] = None
+    __slots__ = ("properties",)
 
-    def allows_sharing(self, node: Any) -> bool:
-        if not self.shareable:
-            return False
-        return self.shareable_when is None or bool(self.shareable_when(node))
+    def __new__(cls, text: str, properties: Any = None) -> "RenderedTerm":
+        term = super().__new__(cls, text)
+        term.properties = properties
+        return term
+
+
+def term_properties(term: Any) -> Any:
+    """項の型付き性質。持たない項が来たら fail-closed。"""
+
+    properties = getattr(term, "properties", None)
+    if properties is None:
+        raise RenderedTermContractError(
+            "a rendered child term reached a typed observation without properties; "
+            "render children through the driver so their properties travel with them"
+        )
+    return properties
 
 
 @dataclass(frozen=True)
@@ -114,8 +147,7 @@ class SharingPolicy:
     2 つの理由で名前を付ける:
 
     * **共有** — 2 回以上参照される部分式（DAG を木に戻さないため）
-    * **大きさ** — 1 つの instance へ展開し続けると中間文字列が深さに比例して
-      伸び、連結費用が深さの 2 乗になる。一定量で切って名前にする
+    * **大きさ** — 展開したままだと書き出しが大きくなる部分式を 1 回にまとめる
 
     小さい式は今までどおり展開する（`min_shared_chars` 未満）。共有だけを理由に
     葉へ名前を付けると、短い式の出力が読みにくくなるうえ、既存の観測可能な
@@ -139,6 +171,14 @@ class SharingPolicy:
         return inline_chars > self.inline_max_chars
 
 
+#: 名前を付けない方針（`let` 無しの形を作る比較用）。
+NO_SHARING_POLICY = SharingPolicy(
+    min_shared_chars=1 << 62,
+    inline_max_chars=1 << 62,
+    min_shared_tree_nodes=1 << 62,
+)
+
+
 @dataclass
 class RenderInstance:
     """1 つの (意味 node, 描画文脈) の描画。"""
@@ -146,13 +186,16 @@ class RenderInstance:
     index: int
     node: Any
     context: Any
-    #: 本体が子を要求した順（同じ instance を 2 回参照したら 2 回入る）
+    #: この node が書く分 + 子の参照。部分木の大きさには比例しない
+    fragment: str = ""
+    #: 本体が子を **要求した** 順（要求しても捨てることがある: 定数条件を
+    #: `true` / `false` へ畳む枝など）。診断用
     child_indices: Tuple[int, ...] = ()
-    #: 計画 pass の text（観測 token 入り。出力には使わない）
-    planned_text: str = ""
-    #: 計画 pass の text から観測したクラス名
-    observation: str = TEXT_OBSERVATION_OTHER
-    #: 子を除いた、この node 自身が書く文字数
+    #: fragment に **実際に現れる** 子（出力に効くのはこちら）
+    used_children: Tuple[int, ...] = ()
+    #: renderer が決めた型付きの性質（FP 項か、恒真 / 恒偽か など）
+    properties: Any = None
+    #: 子の参照を除いた、この node 自身が書く文字数
     local_chars: int = 0
     #: 木として展開したときの node 数（飽和付き）
     tree_nodes: int = 1
@@ -162,13 +205,11 @@ class RenderInstance:
     references: int = 0
     #: 名前を付けるか
     bound: bool = False
-    #: 出力 pass の text（名前を付けた instance ではその本体）
-    text: str = ""
 
 
 @dataclass
 class RenderPlan:
-    """計画 pass の結果。出力 pass はこれを読んで名前と展開を決める。"""
+    """走査の結果。書き出しはこれを読んで名前と展開を決める。"""
 
     instances: List[RenderInstance] = field(default_factory=list)
     #: 子が必ず先に来る順（= 依存順）
@@ -185,44 +226,44 @@ class RenderPlan:
 class _Driver:
     """反復 post-order の走査。Python の再帰を使わない。
 
-    node 本体は「子の text が要る」ところで `_NeedChild` を投げるので、driver は
-    その子を積んでから同じ本体をもう一度走らせる。本体を書き換えずに反復化
-    できるのが利点で、**最後に成功した実行だけ**が採用される（途中の実行の
-    結果も辺も捨てる）ので、偽の子 text が出力へ混ざることはない。
+    node 本体は「子が要る」ところで `_NeedChild` を投げるので、driver はその子を
+    積んでから同じ本体をもう一度走らせる。本体を書き換えずに反復化できるのが
+    利点で、**最後に成功した実行だけ**が採用される。
     """
 
-    def __init__(self, body, text_of, counters: RenderCounters, on_complete=None) -> None:
+    def __init__(self, body, classify, counters: RenderCounters, limit_chars) -> None:
         self._body = body
-        self._text_of = text_of
+        self._classify = classify
         self._counters = counters
-        self._on_complete = on_complete
+        self._limit = limit_chars
         self.instances: List[RenderInstance] = []
         self.post_order: List[int] = []
         self.index_by_key: Dict[Tuple[int, Any], int] = {}
         self._done: Dict[int, bool] = {}
+        self._terms: Dict[int, RenderedTerm] = {}
         self._edges: Optional[List[int]] = None
         self._missing: Optional[Tuple[Any, Any]] = None
+        self.retained_chars = 0
 
-    def resolve(self, node: Any, context: Any) -> str:
-        """node 本体が子の text を要求する口。"""
+    def resolve(self, node: Any, context: Any) -> RenderedTerm:
+        """node 本体が子を要求する口。返るのは **参照 1 個 + 型付きの性質**。"""
 
         key = (id(node), context)
         index = self.index_by_key.get(key)
         if index is None or index not in self._done or self.instances[index].node is not node:
             # 最後の条件は `id()` の使い回し避け。instance は node への強参照を
-            # 持つので生きている間は起きないが、起きたときに別の式の text を
+            # 持つので生きている間は起きないが、起きたときに別の式の結果を
             # 黙って返さない。
             self._missing = (node, context)
             raise _NeedChild
         if self._edges is not None:
             self._edges.append(index)
-        return self._text_of(self.instances[index])
+        return self._terms[index]
 
     def run(self, root: Any, context: Any) -> int:
         stack: List[Tuple[Any, Any]] = [(root, context)]
         on_path: Dict[int, int] = {}
         _enter_path(on_path, root)
-        root_index: Optional[int] = None
         while stack:
             node, ctx = stack[-1]
             key = (id(node), ctx)
@@ -239,7 +280,7 @@ class _Driver:
             self._edges = edges
             self._missing = None
             try:
-                text = self._body(node, ctx, self.resolve)
+                fragment = self._body(node, ctx, self.resolve)
             except _NeedChild:
                 self._counters.node_body_executions += 1
                 child_node, child_context = self._missing or (None, None)
@@ -253,20 +294,58 @@ class _Driver:
             finally:
                 self._edges = None
             self._counters.node_body_executions += 1
-            instance = self.instances[index]
-            instance.child_indices = tuple(edges)
-            instance.text = text
-            self._done[index] = True
-            self.post_order.append(index)
-            if self._on_complete is not None:
-                self._on_complete(instance)
+            self._complete(index, str(fragment), tuple(edges))
             _leave_path(on_path, node)
             stack.pop()
-            if not stack:
-                root_index = index
-        if root_index is None:
-            root_index = self.index_by_key[(id(root), context)]
-        return root_index
+        return self.index_by_key[(id(root), context)]
+
+    def _complete(self, index: int, fragment: str, child_indices: Tuple[int, ...]) -> None:
+        instance = self.instances[index]
+        instance.fragment = fragment
+        instance.child_indices = child_indices
+        head, exact = leading_child(fragment)
+        instance.properties = self._classify(
+            fragment,
+            None if head is None else self.instances[head].properties,
+            exact,
+        )
+        self._terms[index] = RenderedTerm(child_placeholder(index), instance.properties)
+        self._done[index] = True
+        self.post_order.append(index)
+
+        length = len(fragment)
+        self.retained_chars += length
+        if length > self._counters.max_fragment_chars:
+            self._counters.max_fragment_chars = length
+        # 保持している材料にも上限を効かせる。どの fragment も出力に最低 1 回は
+        # 現れるので、材料が上限を超えるなら出力も必ず超える — 完成させてから
+        # 測るのでは「作らせない」という約束にならない。
+        if self._limit is not None and self.retained_chars > self._limit:
+            raise RenderOutputLimitExceeded(
+                limit_chars=self._limit,
+                requested_chars=self.retained_chars,
+                site="render.materialize",
+            )
+
+
+def leading_child(fragment: str) -> Tuple[Optional[int], bool]:
+    """fragment の先頭が子の参照ならその index と「参照ちょうどか」を返す。
+
+    展開後のテキストの先頭は、先頭が子ならその子の展開の先頭になる。だから
+    接頭辞で決まる性質は子から継げばよく、テキスト全体が 1 つの literal かは
+    「fragment が参照ちょうど」で決まる。近似ではなく等値の判定。
+    """
+
+    if not fragment.startswith(PLACEHOLDER_MARK):
+        return None, False
+    end = fragment.find(PLACEHOLDER_MARK, 1)
+    if end < 0:
+        return None, False
+    try:
+        index = int(fragment[1:end])
+    except ValueError:
+        return None, False
+    return index, end == len(fragment) - 1
 
 
 def _enter_path(on_path: Dict[int, int], node: Any) -> None:
@@ -282,50 +361,43 @@ def _leave_path(on_path: Dict[int, int], node: Any) -> None:
         on_path.pop(node_id, None)
 
 
-def plan_render(
+def build_render_plan(
     root: Any,
     context: Any,
     *,
     body,
-    observations: Sequence[TextObservation],
+    classify: Callable[[str, Any, bool], Any],
     policy: SharingPolicy,
     counters: RenderCounters,
+    limit_chars: Optional[int] = None,
 ) -> RenderPlan:
-    """計画 pass: 辺・大きさ・観測クラスを集め、名前を付ける instance を決める。"""
+    """DAG を 1 回だけ辿り、fragment・参照回数・名前を付ける instance を決める。"""
 
-    classes = {observation.name: observation for observation in observations}
-    if TEXT_OBSERVATION_OTHER not in classes:
-        raise ValueError("observations must include the default class")
-    token_of: Dict[int, str] = {}
-
-    def text_of(instance: RenderInstance) -> str:
-        return token_of[instance.index]
-
-    def on_complete(instance: RenderInstance) -> None:
-        # 観測クラスは子が先に決まっている必要がある: 子の text をそのまま
-        # 返す node（通し）では、親の観測は子の観測になる。
-        instance.planned_text = instance.text
-        instance.observation = _classify(instance.text, observations)
-        token_of[instance.index] = classes[instance.observation].token(instance.index)
-
-    driver = _Driver(body, text_of, counters, on_complete=on_complete)
+    driver = _Driver(body, classify, counters, limit_chars)
     root_index = driver.run(root, context)
 
     instances = driver.instances
     post_order = tuple(driver.post_order)
 
+    # 参照回数は **fragment に実際に現れる**子で数える。要求されたが捨てられた
+    # 子（定数条件を `true` へ畳む枝など）まで数えると、出力に 1 度も現れない
+    # instance へ名前が付き、空の参照先を持つ `let` が残る。
+    for instance in instances:
+        instance.used_children = tuple(fragment_children(instance.fragment))
     for index in post_order:
-        for child_index in instances[index].child_indices:
+        for child_index in instances[index].used_children:
             instances[child_index].references += 1
 
     shared_references = 0
     for index in post_order:
         instance = instances[index]
-        child_token_chars = sum(len(token_of[child]) for child in instance.child_indices)
-        instance.local_chars = max(0, len(instance.planned_text) - child_token_chars)
+        placeholder_chars = sum(
+            len(child_placeholder(child)) for child in instance.used_children
+        )
+        instance.local_chars = max(0, len(instance.fragment) - placeholder_chars)
         tree_nodes = 1
         inline_chars = instance.local_chars
-        for child_index in instance.child_indices:
+        for child_index in instance.used_children:
             child = instances[child_index]
             tree_nodes = min(SATURATION, tree_nodes + child.tree_nodes)
             if child.bound:
@@ -335,25 +407,19 @@ def plan_render(
                 inline_chars = min(SATURATION, inline_chars + child.inline_chars)
         instance.tree_nodes = tree_nodes
         instance.inline_chars = min(SATURATION, inline_chars)
-        shareable = classes[instance.observation].allows_sharing(instance.node)
-        if not shareable:
-            counters.unshareable_observations += 1
-        instance.bound = (
-            index != root_index
-            and shareable
-            and policy.binds(
-                references=instance.references,
-                inline_chars=instance.inline_chars,
-                tree_nodes=instance.tree_nodes,
-            )
+        instance.bound = index != root_index and policy.binds(
+            references=instance.references,
+            inline_chars=instance.inline_chars,
+            tree_nodes=instance.tree_nodes,
         )
-        # 計画 pass の text は捨てる。出力 pass が実 text を作り直す。
-        instance.text = ""
 
     bound_order = tuple(index for index in post_order if instances[index].bound)
     counters.distinct_rendered_nodes += len(instances)
     counters.shared_bindings += len(bound_order)
     counters.shared_references += shared_references
+    counters.retained_fragment_chars = max(
+        counters.retained_fragment_chars, driver.retained_chars
+    )
     if instances:
         counters.tree_node_estimate = max(
             counters.tree_node_estimate, instances[root_index].tree_nodes
@@ -366,54 +432,106 @@ def plan_render(
     )
 
 
-def emit_render(
-    plan: RenderPlan,
-    root: Any,
-    context: Any,
-    *,
-    body,
-    names: Dict[int, str],
-    counters: RenderCounters,
-) -> None:
-    """出力 pass: 名前を決めた後の実 text を各 instance に入れる。
+def check_plan_invariants(plan: RenderPlan, names: Dict[int, str]) -> None:
+    """書き出す前に前提を確かめる（崩れていたら **落とす**）。
 
-    名前を付けた instance の `text` は **その本体**（参照ではない）。参照は
-    `names` の側。計画に無い子を本体が要求しても driver が普通に描くので、
-    観測の取りこぼしがあっても壊れず、共有が 1 つ減るだけで済む。
+    * fragment に現れる参照が、走査中に要求した子の **部分集合**である
+      （要求して捨てるのは正しい。要求していない子が現れるのは不整合）
+    * 参照は自分より **先に完成した** instance だけを指す（入れ子の `let` の依存順）
+    * 名前を付けた instance には本体があり、名前も付いていて、**実際に
+      参照されている**（出力に現れない定義を残さない）
+
+    `used_children` は fragment から導いた値なので、ここで文字列を走査し直さない
+    （描画のたびに走るので、同じ走査を 2 回したくない）。導出そのものが壊れて
+    いないことは test 側が fragment を読み直して確かめる。
     """
 
-    def text_of(instance: RenderInstance) -> str:
-        name = names.get(instance.index)
-        return instance.text if name is None else name
-
+    known = len(plan.instances)
+    # 番号は「最初に積まれた順」なので、依存順は完成順（post-order）で見る。
+    rank = {index: position for position, index in enumerate(plan.post_order)}
     for instance in plan.instances:
-        instance.child_indices = ()
-        instance.text = ""
-    driver = _Driver(body, text_of, counters)
-    driver.instances = plan.instances
-    driver.index_by_key = {
-        (id(instance.node), instance.context): instance.index
-        for instance in plan.instances
-    }
-    plan.root_index = driver.run(root, context)
-    plan.post_order = tuple(driver.post_order)
-    for instance in plan.instances:
-        counters.observe_buffered(len(instance.text))
+        requested = set(instance.child_indices)
+        for child in instance.used_children:
+            if child < 0 or child >= known:
+                raise RenderPlanInvariantError(
+                    f"instance {instance.index} references unknown child {child}"
+                )
+            if rank.get(child, known) >= rank.get(instance.index, -1):
+                raise RenderPlanInvariantError(
+                    f"instance {instance.index} references {child}, "
+                    "which did not finish first"
+                )
+            if child not in requested:
+                raise RenderPlanInvariantError(
+                    f"instance {instance.index} references child {child} it never requested"
+                )
+        if instance.bound and not instance.fragment:
+            raise RenderPlanInvariantError(
+                f"bound instance {instance.index} has an empty definition"
+            )
+        if instance.bound and instance.references <= 0:
+            raise RenderPlanInvariantError(
+                f"bound instance {instance.index} is never referenced"
+            )
+    for index in plan.bound_order:
+        if index not in names:
+            raise RenderPlanInvariantError(f"bound instance {index} has no name")
 
 
-def _classify(text: str, observations: Sequence[TextObservation]) -> str:
-    for observation in observations:
-        if observation.name == TEXT_OBSERVATION_OTHER:
-            continue
-        if observation.matches(text):
-            return observation.name
-    return TEXT_OBSERVATION_OTHER
+def fragment_children(fragment: str) -> Iterator[int]:
+    position = 0
+    while True:
+        start = fragment.find(PLACEHOLDER_MARK, position)
+        if start < 0:
+            return
+        end = fragment.find(PLACEHOLDER_MARK, start + 1)
+        if end < 0:
+            raise RenderPlanInvariantError("fragment has an unterminated child reference")
+        yield int(fragment[start + 1 : end])
+        position = end + 1
+
+
+def write_expansion(
+    writer: CountingWriter,
+    plan: RenderPlan,
+    index: int,
+    names: Dict[int, str],
+) -> None:
+    """1 つの instance を書き出す。名前の付いた子は名前、他は展開。
+
+    展開は明示 stack で **流しながら**行う。途中で 1 つの大きな文字列を組み立て
+    ないので、上限に達した時点で `CountingWriter` が止め、それ以上は作らない。
+    """
+
+    stack: List[Tuple[str, int]] = [(plan.instances[index].fragment, 0)]
+    while stack:
+        fragment, position = stack.pop()
+        while position < len(fragment):
+            start = fragment.find(PLACEHOLDER_MARK, position)
+            if start < 0:
+                writer.write(fragment[position:])
+                position = len(fragment)
+                break
+            if start > position:
+                writer.write(fragment[position:start])
+            end = fragment.find(PLACEHOLDER_MARK, start + 1)
+            if end < 0:
+                raise RenderPlanInvariantError("fragment has an unterminated child reference")
+            child = int(fragment[start + 1 : end])
+            position = end + 1
+            name = names.get(child)
+            if name is not None:
+                writer.write(name)
+                continue
+            stack.append((fragment, position))
+            stack.append((plan.instances[child].fragment, 0))
+            break
 
 
 class BindingNamespace:
     """生成する名前の owner。予約済み symbol と衝突しない名前を決める。
 
-    予約済み symbol は **描画 text から実際に拾う**。宣言を作る側（unknown /
+    予約済み symbol は **fragment から実際に拾う**。宣言を作る側（unknown /
     CALL / memory / global address / 対応表）を列挙して回ると、新しい symbol の
     出所が増えたときに漏れる。描かれた text に出てこない symbol は、名前を
     奪われても意味が変わらない。
@@ -476,14 +594,14 @@ def symbol_content(name: str) -> str:
     return name
 
 
-def collect_reserved_symbols(texts, *, pattern) -> frozenset:
-    """描画 text に現れる symbol（引用符付きも中身で）を集める。"""
+def collect_reserved_symbols(plan: RenderPlan, *, pattern) -> frozenset:
+    """fragment に現れる symbol（引用符付きも中身で）を集める。"""
 
     reserved: set = set()
-    for text in texts:
-        if not text:
+    for instance in plan.instances:
+        if not instance.fragment:
             continue
-        for match in pattern.finditer(text):
+        for match in pattern.finditer(instance.fragment):
             quoted = match.groupdict().get("quoted")
             reserved.add(quoted if quoted is not None else match.group("bare"))
     return frozenset(reserved)

@@ -1040,6 +1040,56 @@ def structural_identity_digest(expr: Optional[Expression]) -> Optional[str]:
     return None if digest is None else digest.hex()
 
 
+def condition_identity(condition: Optional[Condition]) -> Optional[StructuralKey]:
+    """条件の **完全な** identity。作れないときは `None`（fail-closed）。
+
+    `condition_key()` との違いが要点: あちらは構築中にも使える **予算付き**の
+    canonical key で、深い式では `("truncated", …)` が入る。末尾だけ違う 2 つの
+    深い条件が同じ key になり得るので、証明の一致条件には使えない。こちらは
+    **予算を持たない** equivalence digest（`structural_identity_digest`）に
+    向きを足したもの。
+
+    完全比較との関係（正確に）:
+
+    * `structural_equals(a, b)` が真 ⇒ identity も一致する。
+    * identity が一致 ⇒ 2 つは構造的に同じ（digest は全 node の payload と辺を
+      畳んだもの）。ただし `structural_equals` は **比較の予算**を持つので、
+      とても深い式では「同じ」と確認しきれずに偽を返すことがある。つまり
+      identity のほうが確定できる範囲は広い（弱くはない）。
+
+    値として固定できない要素があって identity を組めないときは `None` を返す。
+    呼び出し側は `None` を「同じかどうか言えない」として扱うこと — 他の `None`
+    と一致させない（一致させると、identity を作れなかった 2 つの条件が同じ
+    ものとして証明に載る）。
+
+    `candidate_hash`（bucket 専用）・`condition_key`（予算付き legacy key）・
+    `semantic_snapshot.graph_representation_digest`（表現の digest）・solver
+    query identity とは **別物**。相互に代用しない。
+    """
+
+    if condition is None:
+        return None
+    expression = getattr(condition, "expression", None)
+    if expression is None:
+        return None
+    digest = structural_identity_digest(expression)
+    if digest is None:
+        return None
+    return ("condition_identity", "v1", digest, bool(getattr(condition, "negated", False)))
+
+
+def condition_identities(conditions) -> Optional[Tuple[StructuralKey, ...]]:
+    """条件列の完全 identity。1 つでも組めなければ `None`（fail-closed）。"""
+
+    identities = []
+    for condition in tuple(conditions or ()):
+        identity = condition_identity(condition)
+        if identity is None:
+            return None
+        identities.append(identity)
+    return tuple(identities)
+
+
 class StructuralIdentity:
     """structural identity の安定 interface（この module が唯一の owner）。
 
@@ -1058,3 +1108,9 @@ class StructuralIdentity:
     key = staticmethod(expression_key)
     #: 完全比較と同じ同値関係を持つ安定 digest（32 byte、prefilter に使える）
     identity_digest = staticmethod(structural_identity_digest)
+    #: 条件の **完全な** identity（予算なし、組めなければ None）。証明 key や
+    #: 「同じ条件か」を言う必要がある consumer はこれを使う（`key` は予算付きの
+    #: legacy key なので、深い条件では別物を同一視し得る）
+    condition_identity = staticmethod(condition_identity)
+    #: 条件列版（1 つでも組めなければ None）
+    condition_identities = staticmethod(condition_identities)

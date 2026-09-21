@@ -4,9 +4,10 @@
 ここが持つのは 2 つだけ:
 
 * `CountingWriter` — 「完成した文字列を作ってから長さを測る」をやめるための
-  書き込み口。上限に届いた時点で書き込みを止め、途中まで貯めた断片も捨てる。
-  完成文字列を一度作ってしまうと、上限の意味が「作らせない」ではなく
-  「作った後で捨てる」になり、メモリと時間の保護にならない。
+  書き込み口。renderer は木を **流しながら**ここへ書くので、上限に届いた時点で
+  それ以上は作られない。届いた時点で貯めた断片も捨てる。完成文字列を一度
+  作ってしまうと、上限の意味が「作らせない」ではなく「作った後で捨てる」に
+  なり、メモリと時間の保護にならない。
 * `RenderCounters` — 1 回の描画で観測した量。**診断専用**で、判定にも
   authority にも使わない（PR-22-D が既定値を決めるための実測値）。
 
@@ -46,25 +47,36 @@ class RenderOutputLimitExceeded(AnalysisFailureError):
 class CountingWriter:
     """上限付きの追記口。断片を貯め、`getvalue()` で 1 回だけ連結する。
 
-    `emitted_chars` は書けた文字数、`peak_buffered_chars` は同時に保持した
-    最大文字数。上限に達したら `RenderOutputLimitExceeded` を投げ、貯めた断片を
-    捨てる（**完成文字列は作らない**）。
+    `emitted_chars` は書けた文字数、`buffered_chars` は **この口が同時に保持して
+    いる**文字数（`getvalue()` するまで貯まり続けるので、書き終わりでは
+    `emitted_chars` と等しい）。renderer 側の中間文字列の大きさは
+    `RenderCounters.max_fragment_chars` / `retained_fragment_chars` が持つ —
+    live memory は「この口の保持量 + renderer の保持量」で、片方だけを
+    「peak」と呼ぶと実態とずれるので名前を分けてある。
+
+    上限に達したら `RenderOutputLimitExceeded` を投げ、貯めた断片を捨てる
+    （**完成文字列は作らない**）。
     """
 
-    __slots__ = ("_parts", "_limit", "_site", "emitted_chars", "peak_buffered_chars", "part_count", "aborted")
+    __slots__ = ("_parts", "_limit", "_site", "emitted_chars", "part_count", "aborted")
 
     def __init__(self, *, limit_chars: Optional[int] = None, site: str = "render") -> None:
         self._parts: List[str] = []
         self._limit = None if limit_chars is None else int(limit_chars)
         self._site = str(site)
         self.emitted_chars = 0
-        self.peak_buffered_chars = 0
         self.part_count = 0
         self.aborted = False
 
     @property
     def limit_chars(self) -> Optional[int]:
         return self._limit
+
+    @property
+    def buffered_chars(self) -> int:
+        """この口が今まさに保持している文字数。"""
+
+        return sum(len(part) for part in self._parts)
 
     def would_exceed(self, extra_chars: int) -> bool:
         """`extra_chars` を足したら上限を超えるか（書かずに確かめる）。"""
@@ -88,8 +100,6 @@ class CountingWriter:
         self._parts.append(text)
         self.emitted_chars += length
         self.part_count += 1
-        if self.emitted_chars > self.peak_buffered_chars:
-            self.peak_buffered_chars = self.emitted_chars
 
     def write_repeated(self, text: str, count: int) -> None:
         """同じ断片を `count` 回。閉じ括弧の列を先に作らずに済ませる。"""
@@ -143,15 +153,15 @@ class RenderCounters:
     case_count: int = 0
     #: 最終出力の文字数
     emitted_chars: int = 0
-    #: 同時に保持した最大文字数（instance 1 個の中間文字列と出力口の両方）
-    peak_buffered_chars: int = 0
+    #: renderer が作った **1 個の中間文字列**の最大長（= node 1 個分の fragment）
+    max_fragment_chars: int = 0
+    #: renderer が同時に保持した中間文字列の総量（fragment の合計）
+    retained_fragment_chars: int = 0
     #: 木として展開したら幾つの node になったかの飽和付き見積り
     tree_node_estimate: int = 0
-    #: 共有名を付けられなかった instance 数（下流が描画文字列を見る種別）
-    unshareable_observations: int = 0
 
     def merge(self, other: "RenderCounters") -> None:
-        """別の描画の観測を足し込む（peak は最大、他は総和）。"""
+        """別の描画の観測を足し込む（最大値は最大、他は総和）。"""
 
         self.render_invocations += other.render_invocations
         self.distinct_rendered_nodes += other.distinct_rendered_nodes
@@ -160,13 +170,11 @@ class RenderCounters:
         self.shared_references += other.shared_references
         self.case_count += other.case_count
         self.emitted_chars += other.emitted_chars
-        self.peak_buffered_chars = max(self.peak_buffered_chars, other.peak_buffered_chars)
+        self.max_fragment_chars = max(self.max_fragment_chars, other.max_fragment_chars)
+        self.retained_fragment_chars = max(
+            self.retained_fragment_chars, other.retained_fragment_chars
+        )
         self.tree_node_estimate = max(self.tree_node_estimate, other.tree_node_estimate)
-        self.unshareable_observations += other.unshareable_observations
-
-    def observe_buffered(self, chars: int) -> None:
-        if chars > self.peak_buffered_chars:
-            self.peak_buffered_chars = int(chars)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -177,7 +185,7 @@ class RenderCounters:
             "shared_references": self.shared_references,
             "case_count": self.case_count,
             "emitted_chars": self.emitted_chars,
-            "peak_buffered_chars": self.peak_buffered_chars,
+            "max_fragment_chars": self.max_fragment_chars,
+            "retained_fragment_chars": self.retained_fragment_chars,
             "tree_node_estimate": self.tree_node_estimate,
-            "unshareable_observations": self.unshareable_observations,
         }
