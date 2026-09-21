@@ -135,8 +135,6 @@ _UNRESOLVED_CHILD_TEXT = "?"
 _DISCOVERY_IGNORED = (
     ArithmeticError,
     AttributeError,
-    IndexError,
-    KeyError,
     LookupError,
     TypeError,
     ValueError,
@@ -379,6 +377,7 @@ class _Driver:
             return RenderedTerm(_UNRESOLVED_CHILD_TEXT, self._classify("", None, False))
 
         previous_edges, self._edges = self._edges, None
+        self._counters.node_body_executions += 1
         try:
             self._body(node, context, collect)
         except _DISCOVERY_IGNORED:
