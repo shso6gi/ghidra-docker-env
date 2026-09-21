@@ -679,7 +679,11 @@ class _DetachedChildRenderer:
             prefer_signed_arithmetic=prefer_signed_arithmetic,
             address_context=address_context,
         )
-        return render_smt_term(node, context, self.mapping, shared=self._shared)
+        text = render_smt_term(node, context, self.mapping, shared=self._shared)
+        # driver の外で描いても、返す項は型付きでなければならない。素の文字列を
+        # 返すと、受け取った側の型付き観測が「性質が無い」で落ちる（そこで文字を
+        # 見る後退を許すと、共有の有無で判定が変わる経路が復活する）。
+        return RenderedTerm(text, classify_smt_fragment(text, None, False))
 
 
 def _detached_child_renderer(**kwargs) -> _DetachedChildRenderer:
