@@ -1668,6 +1668,72 @@ def test_a_missing_return_value_is_not_the_same_as_an_unbuildable_one():
     assert small is not None and small != absent
 
 
+def test_the_complete_identity_only_ever_refuses_more_than_the_budgeted_key():
+    """新しい鍵は古い鍵より **細かい**（fail-closed の向き）ことを固定する。
+
+    `condition_identity_key()` を予算付きの `expression_key_safe()` から完全
+    identity へ移した。この鍵で門を作っている側（進行ガードの同一性判定、
+    証明鍵）は「一致しなければ降りる」なので、**新しい鍵が古い鍵より細かい**
+    限り、変更は「今まで通せていたものを通さなくなる」方向にしかいかない。
+    逆向き（今まで別物だったものが一致する）が起きると、成り立たない証明が
+    通り得る。
+
+    確かめるのは含意「新しい鍵が一致 ⇒ 古い鍵も一致」。古い鍵は可換演算を
+    正規化して `a+b` と `b+a` を同一視し、深い式では truncate して別物を
+    同一視するので、新しい鍵はその両方を区別する（= 真に細かい）。
+    """
+
+    from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import (
+        condition_identity_key,
+    )
+    from scripts.function_tracer_pcode.core.structural import expression_key_safe
+
+    a = _param("a", 0)
+    b = _param("b", 1)
+
+    def deep(tail: int, depth: int = 400):
+        node = a
+        for index in range(depth):
+            node = _binary("INT_ADD", node, _const(index))
+        return Condition(_binary("INT_LESS", node, _const(tail), size=1))
+
+    cases = [
+        Condition(_binary("INT_ADD", a, b, size=1)),
+        Condition(_binary("INT_ADD", b, a, size=1)),          # 可換の並べ替え
+        Condition(_binary("INT_ADD", a, b, size=1), True),    # 向きだけ違う
+        Condition(_binary("INT_LESS", a, b, size=1)),
+        deep(1),
+        deep(2),                                              # 末尾だけ違う深い条件
+    ]
+
+    def old_key(condition):
+        return (
+            "condition",
+            expression_key_safe(getattr(condition, "expression", None)),
+            bool(getattr(condition, "negated", False)),
+        )
+
+    saw_strictly_finer = False
+    for left in cases:
+        for right in cases:
+            new_left, new_right = condition_identity_key(left), condition_identity_key(right)
+            same_old = old_key(left) == old_key(right)
+            if new_left is not None and new_right is not None and new_left == new_right:
+                # 新しい鍵が一致するなら、古い鍵も一致していたはず
+                assert same_old, (left, right)
+            if same_old and not (
+                new_left is not None and new_right is not None and new_left == new_right
+            ):
+                saw_strictly_finer = True
+
+    # 「常に一致しない」に退化していないこと、かつ実際に細かくなっている場所が在ること
+    assert saw_strictly_finer
+    assert condition_identity_key(cases[0]) is not None
+    assert condition_identity_key(cases[0]) == condition_identity_key(
+        Condition(_binary("INT_ADD", _param("a", 0), _param("b", 1), size=1))
+    )
+
+
 def test_identity_tuple_refuses_a_missing_part():
     """組み立ての combinator が欠けた部品を埋めないこと。"""
 
