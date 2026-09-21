@@ -1,5 +1,34 @@
-"""SMT-LIB rendering of expressions: core renderer, width coercion, float theory, loop lowerings, intrinsics and unknown-symbol declarations."""
+"""SMT-LIB rendering of expressions: core renderer, width coercion, float theory, loop lowerings, intrinsics and unknown-symbol declarations.
 
+描画は DAG を 1 回だけ辿る反復実装（`core/render_plan`）で、共有部分式は
+`let` で 1 回だけ定義する（`bindings`）。描画文脈（`context`）が違う同じ node は
+別の束縛になる。node 属性の評価（幅 / Bool sort / 符号拡張の好み）は
+`attributes` が反復 + DAG memo で回す。
+"""
+
+from scripts.function_tracer_pcode.core.render_smt.attributes import (  # noqa: F401
+    any_node,
+    attribute_cache,
+    evaluate_attribute,
+    iter_expression_nodes,
+    render_attribute_scope,
+)
+from scripts.function_tracer_pcode.core.render_smt.bindings import (  # noqa: F401
+    SMT_BINDING_PREFIX,
+    SMT_BINDING_TEMPLATE,
+    SMT_RENDER_SCHEMA,
+    SMT_SHARING_POLICY,
+    SMT_SYMBOL_RE,
+    assign_binding_names,
+    binding_dependency_order_is_valid,
+    rendered_binding_names,
+    smt_binding_namespace,
+    write_let_term,
+)
+from scripts.function_tracer_pcode.core.render_smt.context import (  # noqa: F401
+    SmtRenderContext,
+    build_smt_render_context,
+)
 from scripts.function_tracer_pcode.core.render_smt.calls import (  # noqa: F401
     CallDeclarationConflict,
     CallSmtDeclarations,
@@ -74,6 +103,7 @@ from scripts.function_tracer_pcode.core.render_smt.render import (  # noqa: F401
     _coerce_bool_to_bitvec,
     _coerce_expr_to_bool,
     _to_smt_internal,
+    render_smt_term,
     expression_contains_signed_comparison,
     expression_contains_unsupported_smt_ops,
     expression_node_has_unsupported_smt_ops,

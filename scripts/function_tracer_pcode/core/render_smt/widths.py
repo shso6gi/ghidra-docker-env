@@ -13,7 +13,18 @@ from scripts.function_tracer_pcode.core.signature import get_declared_type_signe
 
 
 def expression_smt_bit_width(expr) -> int:
-    """式を SMT 化したときの bitvector 幅を推定する。"""
+    """式を SMT 化したときの bitvector 幅を推定する。
+
+    規則は node ごと。走り方（反復 + DAG memo）は `attributes` が持つので、
+    深い式でも共有だらけの式でも、distinct node 1 回ずつで済む。
+    """
+
+    if expr is None:
+        return 0
+    return evaluate_attribute(expr, _node_smt_bit_width, attribute_cache("smt_bit_width"))
+
+
+def _node_smt_bit_width(expr, child) -> int:
     if expr is None:
         return 0
 
@@ -34,7 +45,7 @@ def expression_smt_bit_width(expr) -> int:
         opcode = getattr(expr, "opcode", None)
         mnemonic = getattr(expr, "name", None) or ""
         operand_bits = max(
-            (expression_smt_bit_width(operand) for operand in getattr(expr, "operands", []) or []),
+            (child(operand) for operand in getattr(expr, "operands", []) or []),
             default=0,
         )
         if opcode == READONLY_SUM_OPCODE or mnemonic == "READONLY_SUM":
@@ -47,7 +58,7 @@ def expression_smt_bit_width(expr) -> int:
 
     if expr_type == expr_kind.UNARY_OP:
         operand = expr.operands[0] if getattr(expr, "operands", None) else None
-        operand_bits = expression_smt_bit_width(operand)
+        operand_bits = 0 if operand is None else child(operand)
         if expr.operator in {"INT2FLOAT", "INT_ZEXT", "INT_SEXT"}:
             explicit_bits = (expr.size or 0) * 8
             return explicit_bits
@@ -59,8 +70,8 @@ def expression_smt_bit_width(expr) -> int:
     if expr_type == expr_kind.BINARY_OP:
         left = expr.operands[0] if len(getattr(expr, "operands", [])) >= 1 else None
         right = expr.operands[1] if len(getattr(expr, "operands", [])) >= 2 else None
-        left_bits = expression_smt_bit_width(left)
-        right_bits = expression_smt_bit_width(right)
+        left_bits = 0 if left is None else child(left)
+        right_bits = 0 if right is None else child(right)
 
         if expr.operator == "PIECE":
             explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
@@ -85,7 +96,7 @@ def expression_smt_bit_width(expr) -> int:
         branches = expr.value or []
         explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
         branch_bits = max(
-            (expression_smt_bit_width(branch_value) for _, branch_value in branches),
+            (0 if branch_value is None else child(branch_value) for _, branch_value in branches),
             default=0,
         )
         return max(explicit_bits, branch_bits)
@@ -143,6 +154,12 @@ def _smt_width_if_known(expr) -> int:
 
     if expr is None:
         return 0
+    return evaluate_attribute(expr, _node_smt_width_if_known, attribute_cache("smt_width_if_known"))
+
+
+def _node_smt_width_if_known(expr, child) -> int:
+    if expr is None:
+        return 0
     if expression_returns_bool(expr):
         return 1
     size_bytes = _safe_size_bytes(expr)
@@ -166,27 +183,27 @@ def _smt_width_if_known(expr) -> int:
     if expr_type == expr_kind.UNARY_OP:
         if getattr(expr, "operator", None) in {"INT2FLOAT", "INT_ZEXT", "INT_SEXT"}:
             return 0
-        return _smt_width_if_known(operands[0]) if len(operands) == 1 else 0
+        return child(operands[0]) if len(operands) == 1 and operands[0] is not None else 0
     if expr_type == expr_kind.BINARY_OP:
         operator = getattr(expr, "operator", None)
         if operator == "PIECE" and len(operands) == 2:
-            left_bits = _smt_width_if_known(operands[0])
-            right_bits = _smt_width_if_known(operands[1])
+            left_bits = 0 if operands[0] is None else child(operands[0])
+            right_bits = 0 if operands[1] is None else child(operands[1])
             return left_bits + right_bits if left_bits > 0 and right_bits > 0 else 0
         if operator == "SUBPIECE":
             return 0
         if operator in _BOOLEAN_BINARY_OPERATORS:
             return 1
         if len(operands) == 2:
-            left_bits = _smt_width_if_known(operands[0])
-            right_bits = _smt_width_if_known(operands[1])
+            left_bits = 0 if operands[0] is None else child(operands[0])
+            right_bits = 0 if operands[1] is None else child(operands[1])
             if left_bits > 0 and right_bits > 0:
                 return max(left_bits, right_bits)
         return 0
     if expr_type == expr_kind.PHI:
         branches = getattr(expr, "value", None) or ()
         branch_widths = tuple(
-            _smt_width_if_known(branch_value)
+            0 if branch_value is None else child(branch_value)
             for _condition, branch_value in branches
         )
         if not branch_widths or any(width <= 0 for width in branch_widths):
@@ -387,6 +404,14 @@ def _expr_prefers_signed_extension(expr) -> bool:
     """式を widening するとき sign-extend を優先すべきか判定する。"""
     if expr is None:
         return False
+    return evaluate_attribute(
+        expr, _node_prefers_signed_extension, attribute_cache("prefers_signed_extension")
+    )
+
+
+def _node_prefers_signed_extension(expr, child) -> bool:
+    if expr is None:
+        return False
 
     expr_type = expr.expr_type
     expr_kind = expr_type.__class__
@@ -410,20 +435,22 @@ def _expr_prefers_signed_extension(expr) -> bool:
         if expr.operator == "INT_ZEXT":
             return False
         operands = getattr(expr, "operands", None) or []
-        return any(_expr_prefers_signed_extension(operand) for operand in operands)
+        return any(child(operand) for operand in operands if operand is not None)
 
     if expr_type == expr_kind.BINARY_OP:
         if expr.operator in {"INT_SDIV", "INT_SREM", "INT_SRIGHT"}:
             return True
         operands = getattr(expr, "operands", None) or []
-        return any(_expr_prefers_signed_extension(operand) for operand in operands)
+        return any(child(operand) for operand in operands if operand is not None)
 
     if expr_type == expr_kind.PHI:
         branches = getattr(expr, "value", None) or []
-        return any(_expr_prefers_signed_extension(branch_value) for _, branch_value in branches)
+        return any(
+            child(branch_value) for _, branch_value in branches if branch_value is not None
+        )
 
     operands = getattr(expr, "operands", None) or []
-    return any(_expr_prefers_signed_extension(operand) for operand in operands)
+    return any(child(operand) for operand in operands if operand is not None)
 
 
 def _smt_bv_const(value: int, bits: int) -> str:
@@ -471,6 +498,10 @@ def _smt_scale_term(expr_smt: str, factor: int, bits: int) -> Optional[str]:
 
 
 # Sibling modules reference each other at call time; import them last to avoid cycles.
+from scripts.function_tracer_pcode.core.render_smt.attributes import (
+    attribute_cache,
+    evaluate_attribute,
+)
 from scripts.function_tracer_pcode.core.render_smt.float_theory import (
     expression_renders_as_fp_sort,
 )

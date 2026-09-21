@@ -4,13 +4,42 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Mapping, Optional
+from typing import Any, Dict, Mapping, Optional
 from scripts.function_tracer_pcode.core.intrinsics import is_supported_pcode_intrinsic
+from scripts.function_tracer_pcode.core.render_smt.attributes import (
+    any_node,
+    attribute_cache,
+    evaluate_attribute,
+    render_attribute_scope,
+)
+from scripts.function_tracer_pcode.core.render_output import CountingWriter, RenderCounters
+from scripts.function_tracer_pcode.core.render_metrics import record_render
+from scripts.function_tracer_pcode.core.render_plan import (
+    TEXT_OBSERVATION_OTHER,
+    RenderGraphCycleError,
+    SharingPolicy,
+    TextObservation,
+    emit_render,
+    plan_render,
+)
+from scripts.function_tracer_pcode.core.render_smt.bindings import (
+    SMT_SHARING_POLICY,
+    assign_binding_names,
+    smt_binding_namespace,
+    write_let_term,
+)
+from scripts.function_tracer_pcode.core.render_smt.context import (
+    SmtRenderContext,
+    build_smt_render_context,
+)
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     SemanticLifecycle,
     state_of,
 )
-from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
+from scripts.function_tracer_pcode.core.semantic_snapshot import (
+    semantic_projection,
+    traverse_semantic_graph,
+)
 
 
 _BOOLEAN_BINARY_OPERATORS = {
@@ -183,6 +212,7 @@ def expression_to_smt(
     *,
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
     float_mode: str = "uf",
+    shared: bool = True,
 ) -> str:
     """式を **solver へ渡す** SMT-LIB 文字列へ変換する。
 
@@ -208,6 +238,7 @@ def expression_to_smt(
         expr,
         symbol_name_mapping=symbol_name_mapping,
         float_mode=float_mode,
+        shared=shared,
     )
 
 
@@ -216,6 +247,7 @@ def render_expression_smt_evidence(
     *,
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
     float_mode: str = "uf",
+    shared: bool = True,
 ) -> str:
     """**証拠・表示のための** SMT 風テキスト（solver へは渡さない）。
 
@@ -233,6 +265,7 @@ def render_expression_smt_evidence(
         expr,
         symbol_name_mapping=symbol_name_mapping,
         float_mode=float_mode,
+        shared=shared,
     )
 
 
@@ -241,6 +274,7 @@ def condition_to_smt(
     *,
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
     float_mode: str = "uf",
+    shared: bool = True,
 ) -> str:
     """条件を **solver へ渡す** SMT-LIB 文字列へ変換する。
 
@@ -255,6 +289,7 @@ def condition_to_smt(
         condition,
         symbol_name_mapping=symbol_name_mapping,
         float_mode=float_mode,
+        shared=shared,
     )
 
 
@@ -263,6 +298,7 @@ def render_condition_smt_evidence(
     *,
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
     float_mode: str = "uf",
+    shared: bool = True,
 ) -> str:
     """**証拠・表示のための** 条件テキスト（solver へは渡さない）。"""
 
@@ -270,6 +306,7 @@ def render_condition_smt_evidence(
         condition,
         symbol_name_mapping=symbol_name_mapping,
         float_mode=float_mode,
+        shared=shared,
     )
 
 
@@ -280,28 +317,29 @@ def _condition_to_smt_internal(
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
     address_context: Any = None,
     float_mode: str = "uf",
+    shared: bool = True,
 ) -> str:
-    """条件の描画本体。**renderer 内部の再帰はここを通る**。
+    """条件の描画入口。**renderer 内部の再帰はここを通らない**。
 
-    内部の再帰が公開入口（`Condition.to_smt`）へ戻ると、証拠 renderer から
-    描いた PHI の branch 条件が solver 入口の検査に当たってしまう（実際に
-    当たっていた）。入口は外から来た値にだけ効かせる。
+    条件も 1 つの描画 instance なので、式と同じ driver で描く（PHI の branch
+    条件から共有できるのもこのため）。入口が公開検査を持つのは外から来た値だけ
+    で、内部は driver が直接 node 本体を呼ぶ。
     """
 
     if condition is None:
         return "true"
-    expression = getattr(condition, "expression", None)
-    expr_smt = _to_smt_internal(
-        expression,
-        prefer_sign_extension,
-        symbol_name_mapping,
-        address_context,
-        float_mode,
+    context = build_smt_render_context(
+        prefer_signed_arithmetic=prefer_sign_extension,
+        address_context=address_context,
+        float_mode=float_mode,
+        symbol_name_mapping=symbol_name_mapping,
     )
-    expr_smt = _coerce_expr_to_bool(expression, expr_smt)
-    if getattr(condition, "negated", False):
-        return f"(not {expr_smt})"
-    return expr_smt
+    return render_smt_term(
+        condition,
+        context,
+        symbol_name_mapping,
+        shared=shared,
+    )
 
 
 _EXPRESSION_TYPE = None
@@ -361,6 +399,12 @@ def expression_returns_bool(expr) -> bool:
     """式が SMT 上で Bool sort を返すか判定する。"""
     if expr is None:
         return False
+    return evaluate_attribute(expr, _node_returns_bool, attribute_cache("returns_bool"))
+
+
+def _node_returns_bool(expr, child) -> bool:
+    if expr is None:
+        return False
 
     expr_type = expr.expr_type
     expr_kind = expr_type.__class__
@@ -374,7 +418,8 @@ def expression_returns_bool(expr) -> bool:
     if expr_type == expr_kind.PHI:
         branches = expr.value or []
         return bool(branches) and all(
-            expression_returns_bool(branch_value) for _, branch_value in branches
+            branch_value is not None and child(branch_value)
+            for _, branch_value in branches
         )
 
     return False
@@ -390,32 +435,29 @@ def normalize_call_symbol_name(name: Optional[str]) -> str:
 
 
 def expression_contains_signed_comparison(expr) -> bool:
-    """式木のどこかに signed 比較が含まれるか判定する。"""
+    """式木のどこかに signed 比較が含まれるか判定する。
+
+    走査は distinct node 1 回ずつ（`iter_expression_nodes`）。共有部分式を
+    親ごとに数え直すと、DAG では node 数に対して指数になる。
+
+    PHI の branch 条件は `Condition` でも式そのものでも辿る（描画側が両方を
+    描くので、片方だけ見ると符号比較を取り逃す）。
+    """
+
     if expr is None:
         return False
+    return any_node(expr, _node_is_signed_comparison, include_expression_conditions=True)
 
-    expr_type = expr.expr_type
-    expr_kind = expr_type.__class__
 
-    if expr_type == expr_kind.BINARY_OP and expr.operator in _SIGNED_COMPARISON_OPERATORS:
-        return True
-
-    if getattr(expr, "operands", None):
-        for operand in expr.operands:
-            if expression_contains_signed_comparison(operand):
-                return True
-
-    if expr_type == expr_kind.PHI and expr.value:
-        for cond, branch_value in expr.value:
-            if cond is not None:
-                if hasattr(cond, "expression") and expression_contains_signed_comparison(cond.expression):
-                    return True
-                if hasattr(cond, "operands") and expression_contains_signed_comparison(cond):
-                    return True
-            if expression_contains_signed_comparison(branch_value):
-                return True
-
-    return False
+def _node_is_signed_comparison(node) -> bool:
+    expr_type = getattr(node, "expr_type", None)
+    expr_kind = getattr(expr_type, "__class__", None)
+    if expr_type is None or expr_kind is None:
+        return False
+    return (
+        expr_type == expr_kind.BINARY_OP
+        and getattr(node, "operator", None) in _SIGNED_COMPARISON_OPERATORS
+    )
 
 
 def expression_node_has_unsupported_smt_ops(
@@ -483,32 +525,19 @@ def expression_node_has_unsupported_smt_ops(
 
 
 def expression_contains_unsupported_smt_ops(expr, *, allow_call: bool = False) -> bool:
-    """SMT renderer が直接扱えない演算子を含むか判定する。"""
+    """SMT renderer が直接扱えない演算子を含むか判定する。
+
+    走査は distinct node 1 回ずつ。判定は node ごとに閉じている
+    （`expression_node_has_unsupported_smt_ops`）ので、共有を 1 回で済ませても
+    答えは変わらない。
+    """
+
     if expr is None:
         return False
-
-    if expression_node_has_unsupported_smt_ops(expr, allow_call=allow_call):
-        return True
-
-    expr_type = expr.expr_type
-    expr_kind = expr_type.__class__
-
-    if getattr(expr, "operands", None):
-        for operand in expr.operands:
-            if expression_contains_unsupported_smt_ops(operand, allow_call=allow_call):
-                return True
-
-    if expr_type == expr_kind.PHI and expr.value:
-        for cond, branch_value in expr.value:
-            if cond is not None and expression_contains_unsupported_smt_ops(
-                cond.expression,
-                allow_call=allow_call,
-            ):
-                return True
-            if expression_contains_unsupported_smt_ops(branch_value, allow_call=allow_call):
-                return True
-
-    return False
+    return any_node(
+        expr,
+        lambda node: expression_node_has_unsupported_smt_ops(node, allow_call=allow_call),
+    )
 
 
 def expression_uses_smt_uf(expr, *, float_mode: str = "fp") -> bool:
@@ -566,13 +595,271 @@ def _coerce_expr_to_bool(expr, expr_smt: str) -> str:
     return f"(not (= {expr_smt} (_ bv0 {bits})))"
 
 
+def _is_condition_node(node) -> bool:
+    """`Condition`（式 + 反転）か。式 node と描き方が違うので分けて扱う。"""
+
+    return getattr(node, "expr_type", None) is None and hasattr(node, "expression")
+
+
+class _SmtChildRenderer:
+    """node 本体が子を描く唯一の口。
+
+    本体は「どんな文脈で子を描くか」だけを言い、実際の描画は driver が行う。
+    直接の再帰呼び出しを残すと、深い式で Python の stack が尽き、共有部分式が
+    木として何度も展開される。
+    """
+
+    __slots__ = ("_resolve", "_context", "mapping")
+
+    def __init__(self, resolve, context: SmtRenderContext, mapping) -> None:
+        self._resolve = resolve
+        self._context = context
+        self.mapping = mapping
+
+    @property
+    def context(self) -> SmtRenderContext:
+        return self._context
+
+    def __call__(
+        self,
+        node,
+        *,
+        prefer_signed_arithmetic=None,
+        address_context=None,
+    ) -> str:
+        return self._resolve(
+            node,
+            self._context.derive(
+                prefer_signed_arithmetic=prefer_signed_arithmetic,
+                address_context=address_context,
+            ),
+        )
+
+
+class _DetachedChildRenderer:
+    """driver の外から子を描く口（test や helper の単体利用向け）。
+
+    `_SmtChildRenderer` と同じ呼び方だが、1 回ごとに独立した反復 driver を
+    起こす。共有は driver をまたがないので `let` が減るだけで、意味は変わらない。
+    **再帰する renderer へは戻らない**（無制限の再帰 fallback を作らない）。
+    """
+
+    __slots__ = ("_base", "mapping", "_shared")
+
+    def __init__(
+        self,
+        *,
+        prefer_signed_arithmetic=False,
+        symbol_name_mapping=None,
+        address_context=False,
+        float_mode: str = "uf",
+        shared: bool = True,
+    ) -> None:
+        self._base = build_smt_render_context(
+            prefer_signed_arithmetic=prefer_signed_arithmetic,
+            address_context=address_context,
+            float_mode=float_mode,
+            symbol_name_mapping=symbol_name_mapping,
+        )
+        self.mapping = symbol_name_mapping
+        self._shared = shared
+
+    @property
+    def context(self) -> SmtRenderContext:
+        return self._base
+
+    def __call__(
+        self,
+        node,
+        *,
+        prefer_signed_arithmetic=None,
+        address_context=None,
+    ) -> str:
+        context = self._base.derive(
+            prefer_signed_arithmetic=prefer_signed_arithmetic,
+            address_context=address_context,
+        )
+        return render_smt_term(node, context, self.mapping, shared=self._shared)
+
+
+def _detached_child_renderer(**kwargs) -> _DetachedChildRenderer:
+    return _DetachedChildRenderer(**kwargs)
+
+
+#: 下流が子の描画 text を文字列として見る観測の一覧（`core/render_plan` の契約）。
+#:
+#: * `fp` — `_normalize_to_fp_expr` が「もう FP 項か」を text の接頭辞で見る。
+#:   名前へ置き換えると見え方が変わるので、node 自身を見ても FP 項だと分かる
+#:   もの（`_is_float_rendered_expr`）だけ共有してよい。
+#: * `true` / `false` — PHI の branch 条件が恒真 / 恒偽なら ITE を畳む。
+_SMT_TEXT_OBSERVATIONS = (
+    TextObservation(
+        name="fp",
+        matches=lambda text: _looks_like_fp_expr(text),
+        token=lambda index: f"(fp.sh{index})",
+        shareable_when=lambda node: _is_float_rendered_expr(node),
+    ),
+    TextObservation(
+        name="true",
+        matches=lambda text: text == "true",
+        token=lambda index: "true",
+    ),
+    TextObservation(
+        name="false",
+        matches=lambda text: text == "false",
+        token=lambda index: "false",
+    ),
+    TextObservation(
+        name=TEXT_OBSERVATION_OTHER,
+        matches=lambda text: True,
+        token=lambda index: f"sh{index}",
+    ),
+)
+
+
+#: 共有を止めたいときの方針（差分検証で「`let` 無しの形」を作るために使う）。
+_SMT_NO_SHARING_POLICY = SharingPolicy(
+    min_shared_chars=1 << 62,
+    inline_max_chars=1 << 62,
+    min_shared_tree_nodes=1 << 62,
+    reference_chars_estimate=SMT_SHARING_POLICY.reference_chars_estimate,
+)
+
+
+def render_smt_term(
+    root,
+    context: SmtRenderContext,
+    symbol_name_mapping: Optional[Mapping[str, str]] = None,
+    *,
+    shared: bool = True,
+    limit_chars: Optional[int] = None,
+) -> str:
+    """DAG を 1 回だけ辿って SMT 項を書く（renderer の本体入口）。
+
+    共有部分式は `let` で 1 回だけ定義する。束縛が 0 個なら出力は展開したもの
+    と同じ文字列になるので、小さい式の観測可能な text は変わらない。
+    """
+
+    counters = RenderCounters(render_invocations=1)
+
+    def body(node, node_context, resolve):
+        return _render_smt_node(node, node_context, resolve, symbol_name_mapping)
+
+    policy = SMT_SHARING_POLICY if shared else _SMT_NO_SHARING_POLICY
+    with render_attribute_scope():
+        try:
+            plan, names = _plan_and_name(root, context, body, policy, counters)
+        except RenderGraphCycleError:
+            # 閉路を「受け入れない」と決めるのは走査 owner。ここは進めないと
+            # 言うだけで、種別の判定を renderer 側に増やさない。
+            traverse_semantic_graph(root)
+            raise
+        emit_render(plan, root, context, body=body, names=names, counters=counters)
+        counters.case_count += _phi_case_count(plan)
+        writer = CountingWriter(limit_chars=limit_chars, site="core.render_smt")
+        write_let_term(writer, plan, names)
+        text = writer.getvalue()
+    counters.emitted_chars = writer.emitted_chars
+    counters.observe_buffered(writer.peak_buffered_chars)
+    record_render(counters)
+    return text
+
+
+def _phi_case_count(plan) -> int:
+    """描いた PHI branch（case）の数。
+
+    node 本体の中で数えると、子の解決による再実行の回数だけ水増しされる。
+    counter は診断用なので、数えるのは「何を描いたか」が確定してから。
+    """
+
+    total = 0
+    for instance in plan.instances:
+        node = instance.node
+        expr_type = getattr(node, "expr_type", None)
+        if expr_type is None:
+            continue
+        if expr_type == expr_type.__class__.PHI:
+            total += len(getattr(node, "value", None) or ())
+    return total
+
+
+def _plan_and_name(root, context, body, policy, counters):
+    """計画と束縛名。名前は依存順の通し番号から決まる（`id()` に依らない）。"""
+
+    plan = plan_render(
+        root,
+        context,
+        body=body,
+        observations=_SMT_TEXT_OBSERVATIONS,
+        policy=policy,
+        counters=counters,
+    )
+    names: Dict[int, str] = {}
+    if plan.bound_order:
+        namespace = smt_binding_namespace(
+            instance.planned_text for instance in plan.instances
+        )
+        names = assign_binding_names(plan, namespace)
+    return plan, names
+
+
 def _to_smt_internal(
     expr,
     prefer_signed_arithmetic: bool = False,
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
     address_context: bool = False,
     float_mode: str = "uf",
+    *,
+    shared: bool = True,
 ) -> str:
+    """描画の内部入口。**反復**で DAG を 1 回だけ辿る。
+
+    引数の並びは従来どおり（呼び出し側は変わらない）。再帰は driver が持つ
+    明示 stack へ移したので、深い式でも Python の再帰制限に当たらない。
+    """
+
+    context = build_smt_render_context(
+        prefer_signed_arithmetic=prefer_signed_arithmetic,
+        address_context=address_context,
+        float_mode=float_mode,
+        symbol_name_mapping=symbol_name_mapping,
+    )
+    return render_smt_term(
+        expr,
+        context,
+        symbol_name_mapping,
+        shared=shared,
+    )
+
+
+def _render_smt_node(node, context: SmtRenderContext, resolve, symbol_name_mapping) -> str:
+    """1 つの描画 instance の本体。子は `render_child` 経由でしか描かない。
+
+    本体は counter を持たない。子の解決のたびに同じ本体をもう一度走らせるので、
+    ここで数えると再実行の回数だけ水増しされる（数えるのは計画が確定してから）。
+    """
+
+    render_child = _SmtChildRenderer(resolve, context, symbol_name_mapping)
+    if _is_condition_node(node):
+        return _render_condition_node(node, context, render_child)
+    return _render_expression_node(node, context, render_child)
+
+
+def _render_condition_node(condition, context: SmtRenderContext, render_child) -> str:
+    expression = getattr(condition, "expression", None)
+    expr_smt = render_child(expression)
+    expr_smt = _coerce_expr_to_bool(expression, expr_smt)
+    if getattr(condition, "negated", False):
+        return f"(not {expr_smt})"
+    return expr_smt
+
+
+def _render_expression_node(expr, context: SmtRenderContext, render_child) -> str:
+    prefer_signed_arithmetic = context.prefer_signed_arithmetic
+    address_context = context.address_context
+    float_mode = context.float_mode
+    symbol_name_mapping = render_child.mapping
+
     expr_type = expr.expr_type
     expr_kind = expr_type.__class__
 
@@ -618,6 +905,7 @@ def _to_smt_internal(
             symbol_name_mapping=symbol_name_mapping,
             address_context=address_context,
             float_mode=float_mode,
+            render_child=render_child,
         )
 
     if expr_type == expr_kind.BINARY_OP:
@@ -645,20 +933,8 @@ def _to_smt_internal(
             left, right = operands
 
             if operator == "PIECE":
-                left_smt = _to_smt_internal(
-                    left,
-                    prefer_signed_arithmetic,
-                    symbol_name_mapping,
-                    address_context,
-                    float_mode,
-                )
-                right_smt = _to_smt_internal(
-                    right,
-                    prefer_signed_arithmetic,
-                    symbol_name_mapping,
-                    address_context,
-                    float_mode,
-                )
+                left_smt = render_child(left)
+                right_smt = render_child(right)
                 left_smt = _coerce_expr_to_bitvec_width(
                     left, left_smt, left_bits, float_mode=float_mode
                 )
@@ -667,13 +943,7 @@ def _to_smt_internal(
                 )
                 return f"(concat {left_smt} {right_smt})"
 
-            source_smt = _to_smt_internal(
-                left,
-                prefer_signed_arithmetic,
-                symbol_name_mapping,
-                address_context,
-                float_mode,
-            )
+            source_smt = render_child(left)
             source_smt = _coerce_expr_to_bitvec_width(
                 left, source_smt, left_bits, float_mode=float_mode
             )
@@ -688,8 +958,62 @@ def _to_smt_internal(
 
         left_bits = expression_smt_bit_width(left)
         right_bits = expression_smt_bit_width(right)
-        left_smt = _to_smt_internal(left, prefer_signed_arithmetic, symbol_name_mapping, address_context, float_mode)
-        right_smt = _to_smt_internal(right, prefer_signed_arithmetic, symbol_name_mapping, address_context, float_mode)
+
+        if expr.operator in [
+            "INT_EQUAL",
+            "INT_NOTEQUAL",
+            "INT_LESS",
+            "INT_SLESS",
+            "INT_LESSEQUAL",
+            "INT_SLESSEQUAL",
+        ]:
+            # 比較の被演算子は符号拡張の好みを引き継がない（従来どおり）。
+            # 先に分岐を決めてから子を描くので、同じ子を 2 つの文脈で描いて
+            # 片方を捨てる、ということが起きない。
+            prefer_sign_extension = expr.operator in _SIGNED_COMPARISON_OPERATORS
+            left_is_bool = expression_returns_bool(left)
+            right_is_bool = expression_returns_bool(right)
+            left_smt = render_child(left, prefer_signed_arithmetic=False)
+            right_smt = render_child(right, prefer_signed_arithmetic=False)
+
+            # Bool sort を含む比較は、そのまま zero/sign-extend すると
+            # SMT 上で sort error になる。bitvector 比較が必要な場合のみ
+            # 0/1 へ変換してから幅を揃える。
+            if left_is_bool or right_is_bool:
+                should_compare_as_bool = (
+                    left_is_bool
+                    and right_is_bool
+                    and expr.operator in {"INT_EQUAL", "INT_NOTEQUAL"}
+                )
+                if not should_compare_as_bool:
+                    target_bits = max(left_bits, right_bits, 1)
+                    left_smt = _coerce_expr_to_bitvec_width(
+                        left,
+                        left_smt,
+                        target_bits,
+                        prefer_sign_extension=prefer_sign_extension,
+                        float_mode=float_mode,
+                    )
+                    right_smt = _coerce_expr_to_bitvec_width(
+                        right,
+                        right_smt,
+                        target_bits,
+                        prefer_sign_extension=prefer_sign_extension,
+                        float_mode=float_mode,
+                    )
+            elif left_bits != right_bits:
+                target_bits = max(left_bits, right_bits)
+                if left_bits < target_bits:
+                    op = "sign_extend" if prefer_sign_extension else "zero_extend"
+                    left_smt = f"((_ {op} {target_bits - left_bits}) {left_smt})"
+                if right_bits < target_bits:
+                    op = "sign_extend" if prefer_sign_extension else "zero_extend"
+                    right_smt = f"((_ {op} {target_bits - right_bits}) {right_smt})"
+            op = expr._get_smt_operator(expr.operator)
+            return f"({op} {left_smt} {right_smt})"
+
+        left_smt = render_child(left)
+        right_smt = render_child(right)
 
         if (
             float_mode == "fp"
@@ -777,56 +1101,6 @@ def _to_smt_internal(
             op = expr._get_smt_operator(expr.operator)
             return f"({op} {left_smt} {right_smt})"
 
-        if expr.operator in [
-            "INT_EQUAL",
-            "INT_NOTEQUAL",
-            "INT_LESS",
-            "INT_SLESS",
-            "INT_LESSEQUAL",
-            "INT_SLESSEQUAL",
-        ]:
-            prefer_sign_extension = expr.operator in _SIGNED_COMPARISON_OPERATORS
-            left_is_bool = expression_returns_bool(left)
-            right_is_bool = expression_returns_bool(right)
-            left_smt = _to_smt_internal(left, False, symbol_name_mapping, address_context, float_mode)
-            right_smt = _to_smt_internal(right, False, symbol_name_mapping, address_context, float_mode)
-
-            # Bool sort を含む比較は、そのまま zero/sign-extend すると
-            # SMT 上で sort error になる。bitvector 比較が必要な場合のみ
-            # 0/1 へ変換してから幅を揃える。
-            if left_is_bool or right_is_bool:
-                should_compare_as_bool = (
-                    left_is_bool
-                    and right_is_bool
-                    and expr.operator in {"INT_EQUAL", "INT_NOTEQUAL"}
-                )
-                if not should_compare_as_bool:
-                    target_bits = max(left_bits, right_bits, 1)
-                    left_smt = _coerce_expr_to_bitvec_width(
-                        left,
-                        left_smt,
-                        target_bits,
-                        prefer_sign_extension=prefer_sign_extension,
-                        float_mode=float_mode,
-                    )
-                    right_smt = _coerce_expr_to_bitvec_width(
-                        right,
-                        right_smt,
-                        target_bits,
-                        prefer_sign_extension=prefer_sign_extension,
-                        float_mode=float_mode,
-                    )
-            elif left_bits != right_bits:
-                target_bits = max(left_bits, right_bits)
-                if left_bits < target_bits:
-                    op = "sign_extend" if prefer_sign_extension else "zero_extend"
-                    left_smt = f"((_ {op} {target_bits - left_bits}) {left_smt})"
-                if right_bits < target_bits:
-                    op = "sign_extend" if prefer_sign_extension else "zero_extend"
-                    right_smt = f"((_ {op} {target_bits - right_bits}) {right_smt})"
-            op = expr._get_smt_operator(expr.operator)
-            return f"({op} {left_smt} {right_smt})"
-
         if expr.operator in {"BOOL_AND", "BOOL_OR", "BOOL_XOR"}:
             op = expr._get_smt_operator(expr.operator)
             return (
@@ -847,13 +1121,7 @@ def _to_smt_internal(
 
     if expr_type == expr_kind.UNARY_OP:
         operand = expr.operands[0]
-        operand_smt = _to_smt_internal(
-            operand,
-            prefer_signed_arithmetic,
-            symbol_name_mapping,
-            address_context,
-            float_mode,
-        )
+        operand_smt = render_child(operand)
         operand_bits = expression_smt_bit_width(operand)
 
         if expr.operator == "INT2FLOAT":
@@ -971,16 +1239,7 @@ def _to_smt_internal(
         return f"({op} {operand_smt})"
 
     if expr_type == expr_kind.CALL:
-        args = " ".join(
-            _to_smt_internal(
-                operand,
-                prefer_signed_arithmetic,
-                symbol_name_mapping,
-                address_context,
-                float_mode,
-            )
-            for operand in expr.operands
-        )
+        args = " ".join(render_child(operand) for operand in expr.operands)
         raw_func_name = getattr(expr, "name", None)
         func_name = normalize_call_symbol_name(raw_func_name)
         if symbol_name_mapping is not None:
@@ -999,13 +1258,7 @@ def _to_smt_internal(
         if mem_bits not in _MEMORY_ARRAY_WIDTHS:
             mem_bits = 32
         addr_expr = expr.operands[0]
-        addr_smt = _to_smt_internal(
-            addr_expr,
-            prefer_signed_arithmetic,
-            symbol_name_mapping,
-            True,
-            float_mode,
-        )
+        addr_smt = render_child(addr_expr, address_context=True)
         addr_smt = _coerce_expr_to_bitvec_width(
             addr_expr,
             addr_smt,
@@ -1026,12 +1279,9 @@ def _to_smt_internal(
 
         def render_branch_value(branch_expr):
             if hasattr(branch_expr, "_to_smt_internal"):
-                branch_smt = _to_smt_internal(
+                branch_smt = render_child(
                     branch_expr,
-                    prefer_sign_extension,
-                    symbol_name_mapping,
-                    address_context,
-                    float_mode,
+                    prefer_signed_arithmetic=prefer_sign_extension,
                 )
             else:
                 branch_smt = str(branch_expr)
@@ -1053,22 +1303,19 @@ def _to_smt_internal(
         for index in range(len(branches) - 2, -1, -1):
             cond, val = branches[index]
             if cond is not None and hasattr(cond, "_to_smt_internal"):
-                cond_str = _to_smt_internal(
+                cond_str = render_child(
                     cond,
-                    prefer_sign_extension,
-                    symbol_name_mapping,
-                    address_context,
-                    float_mode,
+                    prefer_signed_arithmetic=prefer_sign_extension,
                 )
             elif cond is not None and hasattr(cond, "expression"):
                 # 内部の再帰。公開入口（`Condition.to_smt`）へ戻らない。
                 # 引数は公開入口と同じだけ渡す（`prefer_sign_extension` /
                 # `address_context` は条件の描画に伝播させない）— 伝播させると
                 # PHI の branch 条件の描画が変わり、判定が動く。
-                cond_str = _condition_to_smt_internal(
+                cond_str = render_child(
                     cond,
-                    symbol_name_mapping=symbol_name_mapping,
-                    float_mode=float_mode,
+                    prefer_signed_arithmetic=False,
+                    address_context=False,
                 )
             else:
                 cond_str = "true"
@@ -1129,6 +1376,7 @@ from scripts.function_tracer_pcode.core.render_smt.float_theory import (
     _float_unary_to_bitvec_smt,
     _float_unary_value_to_smt,
     _is_float_rendered_expr,
+    _looks_like_fp_expr,
     collect_float_predicate_smt_declarations,
 )
 from scripts.function_tracer_pcode.core.render_smt.intrinsics import (
