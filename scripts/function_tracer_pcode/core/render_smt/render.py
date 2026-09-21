@@ -751,7 +751,7 @@ def render_smt_term(
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
     *,
     shared: bool = True,
-    limit_chars: Optional[int] = None,
+    limit_bytes: Optional[int] = None,
 ) -> str:
     """DAG を 1 回だけ辿って SMT 項を書く（renderer の本体入口）。
 
@@ -780,7 +780,7 @@ def render_smt_term(
                 classify=classify_smt_fragment,
                 policy=policy,
                 counters=counters,
-                limit_chars=limit_chars,
+                limit_bytes=limit_bytes,
             )
         except RenderGraphCycleError:
             # 閉路を「受け入れない」と決めるのは走査 owner。ここは進めないと
@@ -794,10 +794,10 @@ def render_smt_term(
         )
         check_plan_invariants(plan, names)
         counters.case_count += _phi_case_count(plan)
-        writer = CountingWriter(limit_chars=limit_chars, site="core.render_smt")
+        writer = CountingWriter(limit_bytes=limit_bytes, site="core.render_smt")
         write_let_term(writer, plan, names)
         text = writer.getvalue()
-    counters.emitted_chars = writer.emitted_chars
+    counters.emitted_bytes = writer.emitted_bytes
     record_render(counters)
     return text
 

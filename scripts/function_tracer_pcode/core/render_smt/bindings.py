@@ -40,13 +40,13 @@ SMT_BINDING_PREFIX = "?sh"
 SMT_BINDING_TEMPLATE = "|{prefix}_{index}|"
 
 #: SMT 描画の共有方針。小さい式は今までどおり展開する（既存の出力が理由なく
-#: 変わらない）。`inline_max_chars` は深い線形式で中間文字列が伸び続けるのを
+#: 変わらない）。`inline_max_bytes` は深い線形式で中間文字列が伸び続けるのを
 #: 止めるためのもので、出力量の上限ではない（上限は `CountingWriter`）。
 SMT_SHARING_POLICY = SharingPolicy(
-    min_shared_chars=32,
-    inline_max_chars=8192,
+    min_shared_bytes=32,
+    inline_max_bytes=8192,
     min_shared_tree_nodes=2,
-    reference_chars_estimate=len(SMT_BINDING_TEMPLATE.format(prefix=SMT_BINDING_PREFIX, index=0)),
+    reference_bytes_estimate=len(SMT_BINDING_TEMPLATE.format(prefix=SMT_BINDING_PREFIX, index=0)),
 )
 
 #: 出力 schema の名前。`let` 共有を入れた描画であることを consumer が言える。

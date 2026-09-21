@@ -54,13 +54,13 @@ HUMAN_SHARED_TEMPLATE = "{prefix}{index}"
 #:
 #: 共有参照は「同じ部分式が 2 回以上出る」かつ「それなりに大きい」ときだけ。
 #: 小さい式に参照を挟むとかえって読みにくく、既存の表示が理由なく変わる。
-#: `inline_max_chars` は深い式で中間文字列が伸び続けるのを止めるためのもので、
+#: `inline_max_bytes` は深い式で中間文字列が伸び続けるのを止めるためのもので、
 #: これが無いと深さに対して連結費用が 2 乗になる。
 HUMAN_SHARING_POLICY = SharingPolicy(
-    min_shared_chars=64,
-    inline_max_chars=4096,
+    min_shared_bytes=64,
+    inline_max_bytes=4096,
     min_shared_tree_nodes=64,
-    reference_chars_estimate=11,
+    reference_bytes_estimate=11,
 )
 
 #: 人向け表示の項の性質（現状は空。足すならここと分類器の 2 箇所）。
@@ -88,7 +88,7 @@ def render_human_text(
     context: HumanRenderContext,
     *,
     shared: bool = True,
-    limit_chars: Optional[int] = None,
+    limit_bytes: Optional[int] = None,
 ) -> str:
     """DAG を 1 回だけ辿って表示文字列を作る。
 
@@ -110,7 +110,7 @@ def render_human_text(
             classify=_classify_human_fragment,
             policy=policy,
             counters=counters,
-            limit_chars=limit_chars,
+            limit_bytes=limit_bytes,
         )
     except RenderGraphCycleError:
         # 閉路を受け入れないという判定は走査 owner が持つ。表示側は「進めない」
@@ -133,7 +133,7 @@ def render_human_text(
     check_plan_invariants(plan, names)
     counters.case_count += _phi_case_count(plan)
 
-    writer = CountingWriter(limit_chars=limit_chars, site="core.render_python")
+    writer = CountingWriter(limit_bytes=limit_bytes, site="core.render_python")
     write_expansion(writer, plan, plan.root_index, names)
     if plan.bound_order:
         writer.write(" where ")
@@ -144,7 +144,7 @@ def render_human_text(
             writer.write(" = ")
             write_expansion(writer, plan, index, names)
     text = writer.getvalue()
-    counters.emitted_chars = writer.emitted_chars
+    counters.emitted_bytes = writer.emitted_bytes
     record_render(counters)
     return text
 

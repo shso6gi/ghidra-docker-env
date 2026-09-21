@@ -11,9 +11,14 @@
 * `RenderCounters` — 1 回の描画で観測した量。**診断専用**で、判定にも
   authority にも使わない（PR-22-D が既定値を決めるための実測値）。
 
+上限の単位は **UTF-8 byte**（計画 v5 の `render_bytes`）。文字数ではないのは、
+最終的に JSON へ出るのも solver へ渡るのも byte 列で、非 ASCII を含む symbol 名
+では 1 文字が 1 byte とは限らないから。長さの数え方はこの module の
+`utf8_length()` が唯一の owner で、renderer も出力口も同じ関数を使う。
+
 上限は PR-22-C では既定 `None`（無効）。PR-22-D が `BudgetPolicy` からこの口へ
-上限を渡し、超過を登録済み reason の限界へ変換する。だから上限の値そのものは
-ここでは決めず、`limit_chars` を受け取るだけにしてある。
+値を渡し、超過を登録済み reason の限界へ変換する。だから上限の **値** はここで
+決めず、`limit_bytes` を受け取るだけにしてある。
 """
 
 from __future__ import annotations
@@ -22,6 +27,16 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
+
+
+def utf8_length(text: str) -> int:
+    """`text` を UTF-8 で書いたときの byte 数（**長さの唯一の数え方**）。
+
+    ASCII のときは文字数と同じなので、その場合は encode しない（描画は短い断片を
+    大量に測るので、ここが素直な encode だと無視できない費用になる）。
+    """
+
+    return len(text) if text.isascii() else len(text.encode("utf-8"))
 
 
 class RenderOutputLimitExceeded(AnalysisFailureError):
@@ -34,23 +49,23 @@ class RenderOutputLimitExceeded(AnalysisFailureError):
     `AnalysisLimitation` へ写す。
     """
 
-    def __init__(self, *, limit_chars: int, requested_chars: int, site: str) -> None:
+    def __init__(self, *, limit_bytes: int, requested_bytes: int, site: str) -> None:
         super().__init__(
-            f"render output exceeded {limit_chars} chars at {site} "
-            f"(needed at least {requested_chars})"
+            f"render output exceeded {limit_bytes} bytes at {site} "
+            f"(needed at least {requested_bytes})"
         )
-        self.limit_chars = int(limit_chars)
-        self.requested_chars = int(requested_chars)
+        self.limit_bytes = int(limit_bytes)
+        self.requested_bytes = int(requested_bytes)
         self.site = str(site)
 
 
 class CountingWriter:
     """上限付きの追記口。断片を貯め、`getvalue()` で 1 回だけ連結する。
 
-    `emitted_chars` は書けた文字数、`buffered_chars` は **この口が同時に保持して
-    いる**文字数（`getvalue()` するまで貯まり続けるので、書き終わりでは
-    `emitted_chars` と等しい）。renderer 側の中間文字列の大きさは
-    `RenderCounters.max_fragment_chars` / `retained_fragment_chars` が持つ —
+    `emitted_bytes` は書けた byte 数、`buffered_bytes` は **この口が同時に保持して
+    いる** byte 数（`getvalue()` するまで貯まり続けるので、書き終わりでは
+    `emitted_bytes` と等しい）。renderer 側の中間文字列の大きさは
+    `RenderCounters.max_fragment_bytes` / `retained_fragment_bytes` が持つ —
     live memory は「この口の保持量 + renderer の保持量」で、片方だけを
     「peak」と呼ぶと実態とずれるので名前を分けてある。
 
@@ -58,47 +73,47 @@ class CountingWriter:
     （**完成文字列は作らない**）。
     """
 
-    __slots__ = ("_parts", "_limit", "_site", "emitted_chars", "part_count", "aborted")
+    __slots__ = ("_parts", "_limit", "_site", "emitted_bytes", "part_count", "aborted")
 
-    def __init__(self, *, limit_chars: Optional[int] = None, site: str = "render") -> None:
+    def __init__(self, *, limit_bytes: Optional[int] = None, site: str = "render") -> None:
         self._parts: List[str] = []
-        self._limit = None if limit_chars is None else int(limit_chars)
+        self._limit = None if limit_bytes is None else int(limit_bytes)
         self._site = str(site)
-        self.emitted_chars = 0
+        self.emitted_bytes = 0
         self.part_count = 0
         self.aborted = False
 
     @property
-    def limit_chars(self) -> Optional[int]:
+    def limit_bytes(self) -> Optional[int]:
         return self._limit
 
     @property
-    def buffered_chars(self) -> int:
-        """この口が今まさに保持している文字数。"""
+    def buffered_bytes(self) -> int:
+        """この口が今まさに保持している byte 数。"""
 
-        return sum(len(part) for part in self._parts)
+        return sum(utf8_length(part) for part in self._parts)
 
-    def would_exceed(self, extra_chars: int) -> bool:
-        """`extra_chars` を足したら上限を超えるか（書かずに確かめる）。"""
+    def would_exceed(self, extra_bytes: int) -> bool:
+        """`extra_bytes` を足したら上限を超えるか（書かずに確かめる）。"""
 
         if self._limit is None:
             return False
-        return self.emitted_chars + int(extra_chars) > self._limit
+        return self.emitted_bytes + int(extra_bytes) > self._limit
 
-    def reserve(self, extra_chars: int) -> None:
+    def reserve(self, extra_bytes: int) -> None:
         """見積り分の余地があるかを先に確かめる（無ければ打ち切り）。"""
 
-        if self.would_exceed(extra_chars):
-            self._abort(int(extra_chars))
+        if self.would_exceed(extra_bytes):
+            self._abort(int(extra_bytes))
 
     def write(self, text: str) -> None:
         if not text:
             return
-        length = len(text)
+        length = utf8_length(text)
         if self.would_exceed(length):
             self._abort(length)
         self._parts.append(text)
-        self.emitted_chars += length
+        self.emitted_bytes += length
         self.part_count += 1
 
     def write_repeated(self, text: str, count: int) -> None:
@@ -107,7 +122,7 @@ class CountingWriter:
         count = int(count)
         if count <= 0 or not text:
             return
-        self.reserve(len(text) * count)
+        self.reserve(utf8_length(text) * count)
         self.write(text * count)
 
     def getvalue(self) -> str:
@@ -119,14 +134,14 @@ class CountingWriter:
             return joined
         return self._parts[0] if self._parts else ""
 
-    def _abort(self, requested_chars: int) -> None:
+    def _abort(self, requested_bytes: int) -> None:
         self.aborted = True
         # 途中まで貯めた断片も捨てる。ここで残すと「上限を超える文字列を
         # 作らない」という約束が、作ってから捨てるだけになる。
         self._parts = []
         raise RenderOutputLimitExceeded(
-            limit_chars=int(self._limit if self._limit is not None else 0),
-            requested_chars=int(requested_chars),
+            limit_bytes=int(self._limit if self._limit is not None else 0),
+            requested_bytes=int(requested_bytes),
             site=self._site,
         )
 
@@ -151,12 +166,13 @@ class RenderCounters:
     shared_references: int = 0
     #: PHI branch（case）を描いた回数
     case_count: int = 0
-    #: 最終出力の文字数
-    emitted_chars: int = 0
+    #: 最終出力の byte 数
+    emitted_bytes: int = 0
     #: renderer が作った **1 個の中間文字列**の最大長（= node 1 個分の fragment）
-    max_fragment_chars: int = 0
-    #: renderer が同時に保持した中間文字列の総量（fragment の合計）
-    retained_fragment_chars: int = 0
+    max_fragment_bytes: int = 0
+    #: renderer が同時に保持した中間文字列の総量（要求して捨てた子の分も含む）。
+    #: 出力量の下界ではない — renderer が抱える材料の量（memory / 仕事の目安）
+    retained_fragment_bytes: int = 0
     #: 木として展開したら幾つの node になったかの飽和付き見積り
     tree_node_estimate: int = 0
 
@@ -169,10 +185,10 @@ class RenderCounters:
         self.shared_bindings += other.shared_bindings
         self.shared_references += other.shared_references
         self.case_count += other.case_count
-        self.emitted_chars += other.emitted_chars
-        self.max_fragment_chars = max(self.max_fragment_chars, other.max_fragment_chars)
-        self.retained_fragment_chars = max(
-            self.retained_fragment_chars, other.retained_fragment_chars
+        self.emitted_bytes += other.emitted_bytes
+        self.max_fragment_bytes = max(self.max_fragment_bytes, other.max_fragment_bytes)
+        self.retained_fragment_bytes = max(
+            self.retained_fragment_bytes, other.retained_fragment_bytes
         )
         self.tree_node_estimate = max(self.tree_node_estimate, other.tree_node_estimate)
 
@@ -184,8 +200,8 @@ class RenderCounters:
             "shared_bindings": self.shared_bindings,
             "shared_references": self.shared_references,
             "case_count": self.case_count,
-            "emitted_chars": self.emitted_chars,
-            "max_fragment_chars": self.max_fragment_chars,
-            "retained_fragment_chars": self.retained_fragment_chars,
+            "emitted_bytes": self.emitted_bytes,
+            "max_fragment_bytes": self.max_fragment_bytes,
+            "retained_fragment_bytes": self.retained_fragment_bytes,
             "tree_node_estimate": self.tree_node_estimate,
         }

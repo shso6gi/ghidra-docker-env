@@ -20,10 +20,22 @@ node 本体は子の描画結果として **参照 1 個**（`RenderedTerm`）�
 部分木の大きさに比例しない。木への展開は最後の書き出しで、`CountingWriter` へ
 **流しながら**行う。
 
-これが「完成文字列を作ってから測る」との違い: 上限に達した時点で書き出しが
-止まるので、上限を超える中間文字列も完成文字列も存在しない。保持している生の
-材料（fragment の総量）にも同じ上限が効く（どの fragment も出力に最低 1 回は
-現れるので、材料が上限を超えるなら出力も必ず超える）。
+上限は 3 つの場所で効く。どれも **node 種別を知らない**ので、新しい種別を足す
+人が忘れる余地が無い:
+
+1. **子を解決するたび**（`resolve`）。幅の広い node（引数の多い CALL、branch の
+   多い PHI）の大きさは子の参照の数で決まるので、`" ".join(...)` が 10,000 個を
+   並べ終わる前に止まる。
+2. **fragment が出来たとき**（`_complete`）。子を持たずに自分だけで大きい node
+   はここで止まる。
+3. **書き出し**（`CountingWriter`）。木への展開は流しながら行うので、上限に
+   達した時点でそれ以上は作らない。
+
+1 と 2 が見ているのは **renderer が抱える材料の量**（`retained_fragment_bytes`）で、
+出力量の下界ではない — 本体は要求した子を捨てることがある（定数条件を `true` に
+畳む枝など）ので、材料 > 上限でも出力が上限を超えるとは限らない。それでも
+止めるのは、出力の何倍もの材料を抱え込むこと自体が防ぎたい費用だから。出力量
+そのものの上限は 3 が持つ。
 
 ## 描画 instance という単位
 
@@ -59,6 +71,7 @@ from scripts.function_tracer_pcode.core.render_output import (
     CountingWriter,
     RenderCounters,
     RenderOutputLimitExceeded,
+    utf8_length,
 )
 
 
@@ -107,6 +120,28 @@ PLACEHOLDER_MARK = "\x00"
 #: 見積りの飽和点。これ以上は数えない（巨大整数と無駄な走査を作らない）
 SATURATION = 1 << 40
 
+#: 同じ node の本体をこの回数だけ回しても子が尽きないなら、幅の広い node と
+#: 見なして「要求を一度に集める」実行へ切り替える。狭い node（ほとんど）は
+#: 切り替えに入らないので、投機的な実行の費用を払わない。
+DISCOVERY_AFTER_RETRIES = 4
+
+#: 要求収集の実行が、まだ描いていない子の代わりに返す値。placeholder とは別物
+#: （出力には決して入らない）。
+_UNRESOLVED_CHILD_TEXT = "?"
+
+#: 要求収集の実行だけで無視してよい失敗。偽の子で走らせているので、本番の実行
+#: では起きない失敗が出ることがある。**予算・閉路・契約違反（`AnalysisFailureError`
+#: 派生）はここに入れない** — それらは本番でも起きる本物の停止理由。
+_DISCOVERY_IGNORED = (
+    ArithmeticError,
+    AttributeError,
+    IndexError,
+    KeyError,
+    LookupError,
+    TypeError,
+    ValueError,
+)
+
 
 def child_placeholder(index: int) -> str:
     return f"{PLACEHOLDER_MARK}{index}{PLACEHOLDER_MARK}"
@@ -149,32 +184,32 @@ class SharingPolicy:
     * **共有** — 2 回以上参照される部分式（DAG を木に戻さないため）
     * **大きさ** — 展開したままだと書き出しが大きくなる部分式を 1 回にまとめる
 
-    小さい式は今までどおり展開する（`min_shared_chars` 未満）。共有だけを理由に
+    小さい式は今までどおり展開する（`min_shared_bytes` 未満）。共有だけを理由に
     葉へ名前を付けると、短い式の出力が読みにくくなるうえ、既存の観測可能な
     text が理由なく変わる。
     """
 
-    #: これ未満の大きさの instance には名前を付けない
-    min_shared_chars: int = 32
-    #: 展開したままの大きさがこれを超えたら（参照が 1 回でも）名前を付ける
-    inline_max_chars: int = 8192
+    #: これ未満の大きさの instance には名前を付けない（byte）
+    min_shared_bytes: int = 32
+    #: 展開したままの大きさがこれを超えたら（参照が 1 回でも）名前を付ける（byte）
+    inline_max_bytes: int = 8192
     #: 共有を理由に名前を付ける最小の木 node 数
     min_shared_tree_nodes: int = 2
-    #: 名前 1 個の文字数の見積り（大きさ計算用）
-    reference_chars_estimate: int = 10
+    #: 名前 1 個の byte 数の見積り（大きさ計算用）
+    reference_bytes_estimate: int = 10
 
-    def binds(self, *, references: int, inline_chars: int, tree_nodes: int) -> bool:
-        if inline_chars < self.min_shared_chars:
+    def binds(self, *, references: int, inline_bytes: int, tree_nodes: int) -> bool:
+        if inline_bytes < self.min_shared_bytes:
             return False
         if references >= 2 and tree_nodes >= self.min_shared_tree_nodes:
             return True
-        return inline_chars > self.inline_max_chars
+        return inline_bytes > self.inline_max_bytes
 
 
 #: 名前を付けない方針（`let` 無しの形を作る比較用）。
 NO_SHARING_POLICY = SharingPolicy(
-    min_shared_chars=1 << 62,
-    inline_max_chars=1 << 62,
+    min_shared_bytes=1 << 62,
+    inline_max_bytes=1 << 62,
     min_shared_tree_nodes=1 << 62,
 )
 
@@ -195,12 +230,12 @@ class RenderInstance:
     used_children: Tuple[int, ...] = ()
     #: renderer が決めた型付きの性質（FP 項か、恒真 / 恒偽か など）
     properties: Any = None
-    #: 子の参照を除いた、この node 自身が書く文字数
-    local_chars: int = 0
+    #: 子の参照を除いた、この node 自身が書く byte 数
+    local_bytes: int = 0
     #: 木として展開したときの node 数（飽和付き）
     tree_nodes: int = 1
-    #: 展開したままの文字数の見積り（飽和付き）
-    inline_chars: int = 0
+    #: 展開したままの byte 数の見積り（飽和付き）
+    inline_bytes: int = 0
     #: 他の instance から参照された回数
     references: int = 0
     #: 名前を付けるか
@@ -229,13 +264,23 @@ class _Driver:
     node 本体は「子が要る」ところで `_NeedChild` を投げるので、driver はその子を
     積んでから同じ本体をもう一度走らせる。本体を書き換えずに反復化できるのが
     利点で、**最後に成功した実行だけ**が採用される。
+
+    子が多い node（引数の多い CALL、branch の多い PHI）では「1 個ずつ積んで
+    やり直す」が幅の 2 乗になる。そこで同じ node を数回回しても終わらなければ、
+    **要求を一度に集める実行**へ切り替える: 未解決の子には偽の値を返して本体を
+    最後まで走らせ、要求された子をまとめて積む。その実行の結果は捨てる
+    （採用されるのは本物の値で走った実行だけ）ので、偽の値が出力へ混ざることは
+    ない。収集が取りこぼしても、いつもの 1 個ずつの経路が続きを拾う。
+
+    切り替えの判断は **回した回数** だけで、node の種別を知らない。新しい種別を
+    足す人がここへ手を入れる必要は無い。
     """
 
-    def __init__(self, body, classify, counters: RenderCounters, limit_chars) -> None:
+    def __init__(self, body, classify, counters: RenderCounters, limit_bytes) -> None:
         self._body = body
         self._classify = classify
         self._counters = counters
-        self._limit = limit_chars
+        self._limit = limit_bytes
         self.instances: List[RenderInstance] = []
         self.post_order: List[int] = []
         self.index_by_key: Dict[Tuple[int, Any], int] = {}
@@ -243,7 +288,9 @@ class _Driver:
         self._terms: Dict[int, RenderedTerm] = {}
         self._edges: Optional[List[int]] = None
         self._missing: Optional[Tuple[Any, Any]] = None
-        self.retained_chars = 0
+        self.retained_bytes = 0
+        #: 組み立て中の node が今までに受け取った子の参照の byte 数
+        self._pending_bytes = 0
 
     def resolve(self, node: Any, context: Any) -> RenderedTerm:
         """node 本体が子を要求する口。返るのは **参照 1 個 + 型付きの性質**。"""
@@ -256,13 +303,19 @@ class _Driver:
             # 黙って返さない。
             self._missing = (node, context)
             raise _NeedChild
+        term = self._terms[index]
         if self._edges is not None:
             self._edges.append(index)
-        return self._terms[index]
+            # 幅の広い node はここで止める。fragment が完成してから測ると、
+            # 10,000 引数の `join` はもう出来上がっている。
+            self._pending_bytes += len(term)
+            self._check_material(self._pending_bytes, "render.materialize")
+        return term
 
     def run(self, root: Any, context: Any) -> int:
         stack: List[Tuple[Any, Any]] = [(root, context)]
         on_path: Dict[int, int] = {}
+        attempts: Dict[int, int] = {}
         _enter_path(on_path, root)
         while stack:
             node, ctx = stack[-1]
@@ -278,18 +331,23 @@ class _Driver:
                 self.index_by_key[key] = index
             edges: List[int] = []
             self._edges = edges
+            self._pending_bytes = 0
             self._missing = None
             try:
                 fragment = self._body(node, ctx, self.resolve)
             except _NeedChild:
                 self._counters.node_body_executions += 1
-                child_node, child_context = self._missing or (None, None)
-                if id(child_node) in on_path:
-                    raise RenderGraphCycleError(
-                        "render traversal returned to a node already on the path"
-                    )
-                stack.append((child_node, child_context))
-                _enter_path(on_path, child_node)
+                attempts[index] = attempts.get(index, 0) + 1
+                pending = [self._missing or (None, None)]
+                if attempts[index] >= DISCOVERY_AFTER_RETRIES:
+                    pending = self._collect_requests(node, ctx) or pending
+                for child_node, child_context in reversed(pending):
+                    if id(child_node) in on_path:
+                        raise RenderGraphCycleError(
+                            "render traversal returned to a node already on the path"
+                        )
+                    stack.append((child_node, child_context))
+                    _enter_path(on_path, child_node)
                 continue
             finally:
                 self._edges = None
@@ -298,6 +356,38 @@ class _Driver:
             _leave_path(on_path, node)
             stack.pop()
         return self.index_by_key[(id(root), context)]
+
+    def _collect_requests(self, node: Any, context: Any):
+        """本体を偽の子で一度走らせ、要求された未解決の子をまとめて返す。
+
+        結果の text は使わない（採用されるのは本物の値で走った実行だけ）。偽の
+        値で走らせているので本番では起きない失敗が出ることがあり、それは無視して
+        いつもの 1 個ずつの経路へ戻す。予算・閉路・契約違反はここで握らない。
+        """
+
+        missing: List[Tuple[Any, Any]] = []
+        seen: set = set()
+
+        def collect(child: Any, child_context: Any):
+            key = (id(child), child_context)
+            index = self.index_by_key.get(key)
+            if index is not None and index in self._done and self.instances[index].node is child:
+                return self._terms[index]
+            if key not in seen:
+                seen.add(key)
+                missing.append((child, child_context))
+            return RenderedTerm(_UNRESOLVED_CHILD_TEXT, self._classify("", None, False))
+
+        previous_edges, self._edges = self._edges, None
+        try:
+            self._body(node, context, collect)
+        except _DISCOVERY_IGNORED:
+            pass
+        except _NeedChild:  # pragma: no cover - collect never raises it
+            pass
+        finally:
+            self._edges = previous_edges
+        return missing
 
     def _complete(self, index: int, fragment: str, child_indices: Tuple[int, ...]) -> None:
         instance = self.instances[index]
@@ -313,18 +403,29 @@ class _Driver:
         self._done[index] = True
         self.post_order.append(index)
 
-        length = len(fragment)
-        self.retained_chars += length
-        if length > self._counters.max_fragment_chars:
-            self._counters.max_fragment_chars = length
-        # 保持している材料にも上限を効かせる。どの fragment も出力に最低 1 回は
-        # 現れるので、材料が上限を超えるなら出力も必ず超える — 完成させてから
-        # 測るのでは「作らせない」という約束にならない。
-        if self._limit is not None and self.retained_chars > self._limit:
+        length = utf8_length(fragment)
+        self.retained_bytes += length
+        if length > self._counters.max_fragment_bytes:
+            self._counters.max_fragment_bytes = length
+        self._check_material(0, "render.materialize")
+
+    def _check_material(self, pending_bytes: int, site: str) -> None:
+        """renderer が抱えている材料の量を上限と比べる。
+
+        これは出力量ではなく **材料**（`retained_fragment_bytes`）。本体は要求
+        した子を捨てることがあるので、材料が上限を超えても出力が超えるとは
+        限らない。それでも止めるのは、出力の何倍もの材料を先に作ること自体が
+        防ぎたい費用だから。出力量そのものの上限は書き出し口が持つ。
+        """
+
+        if self._limit is None:
+            return
+        total = self.retained_bytes + int(pending_bytes)
+        if total > self._limit:
             raise RenderOutputLimitExceeded(
-                limit_chars=self._limit,
-                requested_chars=self.retained_chars,
-                site="render.materialize",
+                limit_bytes=self._limit,
+                requested_bytes=total,
+                site=site,
             )
 
 
@@ -369,11 +470,11 @@ def build_render_plan(
     classify: Callable[[str, Any, bool], Any],
     policy: SharingPolicy,
     counters: RenderCounters,
-    limit_chars: Optional[int] = None,
+    limit_bytes: Optional[int] = None,
 ) -> RenderPlan:
     """DAG を 1 回だけ辿り、fragment・参照回数・名前を付ける instance を決める。"""
 
-    driver = _Driver(body, classify, counters, limit_chars)
+    driver = _Driver(body, classify, counters, limit_bytes)
     root_index = driver.run(root, context)
 
     instances = driver.instances
@@ -391,25 +492,25 @@ def build_render_plan(
     shared_references = 0
     for index in post_order:
         instance = instances[index]
-        placeholder_chars = sum(
+        placeholder_bytes = sum(
             len(child_placeholder(child)) for child in instance.used_children
         )
-        instance.local_chars = max(0, len(instance.fragment) - placeholder_chars)
+        instance.local_bytes = max(0, utf8_length(instance.fragment) - placeholder_bytes)
         tree_nodes = 1
-        inline_chars = instance.local_chars
+        inline_bytes = instance.local_bytes
         for child_index in instance.used_children:
             child = instances[child_index]
             tree_nodes = min(SATURATION, tree_nodes + child.tree_nodes)
             if child.bound:
-                inline_chars += policy.reference_chars_estimate
+                inline_bytes += policy.reference_bytes_estimate
                 shared_references += 1
             else:
-                inline_chars = min(SATURATION, inline_chars + child.inline_chars)
+                inline_bytes = min(SATURATION, inline_bytes + child.inline_bytes)
         instance.tree_nodes = tree_nodes
-        instance.inline_chars = min(SATURATION, inline_chars)
+        instance.inline_bytes = min(SATURATION, inline_bytes)
         instance.bound = index != root_index and policy.binds(
             references=instance.references,
-            inline_chars=instance.inline_chars,
+            inline_bytes=instance.inline_bytes,
             tree_nodes=instance.tree_nodes,
         )
 
@@ -417,8 +518,8 @@ def build_render_plan(
     counters.distinct_rendered_nodes += len(instances)
     counters.shared_bindings += len(bound_order)
     counters.shared_references += shared_references
-    counters.retained_fragment_chars = max(
-        counters.retained_fragment_chars, driver.retained_chars
+    counters.retained_fragment_bytes = max(
+        counters.retained_fragment_bytes, driver.retained_bytes
     )
     if instances:
         counters.tree_node_estimate = max(
