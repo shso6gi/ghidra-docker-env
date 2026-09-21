@@ -617,6 +617,7 @@ def test_binding_dependency_contract_holds_for_a_large_dag():
     )
     from scripts.function_tracer_pcode.core.render_smt.render import (
         _SMT_TEXT_OBSERVATIONS,
+        _SmtChildRenderer,
         _render_smt_node,
     )
 
@@ -626,7 +627,9 @@ def test_binding_dependency_contract_holds_for_a_large_dag():
     context = build_smt_render_context()
 
     def body(node, node_context, resolve):
-        return _render_smt_node(node, node_context, resolve, None, counters)
+        return _render_smt_node(
+            node, node_context, _SmtChildRenderer(resolve, node_context, None)
+        )
 
     plan = plan_render(
         root,

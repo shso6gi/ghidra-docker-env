@@ -85,6 +85,13 @@ def evaluate_attribute(
     使い回しで別の式の答えを返すことがない（同時に node を生かしておく）。
     """
 
+    hit = cache.get(id(root))
+    if hit is not None and hit[0] is root:
+        # 覚えている答えは走査の machinery を組まずに返す。1 回の描画で同じ
+        # node の幅は何度も訊かれるので、ここが素通りだと反復 driver の
+        # 組み立て費用がその回数だけ乗る。
+        return hit[1]
+
     stack: List[Any] = [root]
     on_path: Dict[int, int] = {id(root): 1}
     missing: List[Any] = []

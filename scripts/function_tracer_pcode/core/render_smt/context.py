@@ -45,6 +45,8 @@ class SmtRenderContext(NamedTuple):
         （変える呼び出し側が無い）。変える必要が出たらここに引数を足す。
         """
 
+        if prefer_signed_arithmetic is None and address_context is None:
+            return self
         return SmtRenderContext(
             prefer_signed_arithmetic=(
                 self.prefer_signed_arithmetic

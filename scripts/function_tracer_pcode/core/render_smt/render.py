@@ -743,7 +743,11 @@ def render_smt_term(
     counters = RenderCounters(render_invocations=1)
 
     def body(node, node_context, resolve):
-        return _render_smt_node(node, node_context, resolve, symbol_name_mapping)
+        return _render_smt_node(
+            node,
+            node_context,
+            _SmtChildRenderer(resolve, node_context, symbol_name_mapping),
+        )
 
     policy = SMT_SHARING_POLICY if shared else _SMT_NO_SHARING_POLICY
     with render_attribute_scope():
@@ -832,14 +836,13 @@ def _to_smt_internal(
     )
 
 
-def _render_smt_node(node, context: SmtRenderContext, resolve, symbol_name_mapping) -> str:
+def _render_smt_node(node, context: SmtRenderContext, render_child) -> str:
     """1 つの描画 instance の本体。子は `render_child` 経由でしか描かない。
 
     本体は counter を持たない。子の解決のたびに同じ本体をもう一度走らせるので、
     ここで数えると再実行の回数だけ水増しされる（数えるのは計画が確定してから）。
     """
 
-    render_child = _SmtChildRenderer(resolve, context, symbol_name_mapping)
     if _is_condition_node(node):
         return _render_condition_node(node, context, render_child)
     return _render_expression_node(node, context, render_child)
