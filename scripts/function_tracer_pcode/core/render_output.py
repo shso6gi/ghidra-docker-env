@@ -158,8 +158,10 @@ class RenderCounters:
     render_invocations: int = 0
     #: (node, render context) の組（= 描画 instance）の数
     distinct_rendered_nodes: int = 0
-    #: node 本体を実行した回数（instance 数 + 子の解決による再実行）
+    #: node 本体を実行した回数（instance 数 + 子の解決による再実行 + 要求収集）
     node_body_executions: int = 0
+    #: 本体へ子の項を渡した回数（幅の広い node の費用と、上限で止めた位置が見える）
+    child_requests: int = 0
     #: 共有として名前を付けた instance 数
     shared_bindings: int = 0
     #: 共有名を参照した回数
@@ -182,6 +184,7 @@ class RenderCounters:
         self.render_invocations += other.render_invocations
         self.distinct_rendered_nodes += other.distinct_rendered_nodes
         self.node_body_executions += other.node_body_executions
+        self.child_requests += other.child_requests
         self.shared_bindings += other.shared_bindings
         self.shared_references += other.shared_references
         self.case_count += other.case_count
@@ -197,6 +200,7 @@ class RenderCounters:
             "render_invocations": self.render_invocations,
             "distinct_rendered_nodes": self.distinct_rendered_nodes,
             "node_body_executions": self.node_body_executions,
+            "child_requests": self.child_requests,
             "shared_bindings": self.shared_bindings,
             "shared_references": self.shared_references,
             "case_count": self.case_count,

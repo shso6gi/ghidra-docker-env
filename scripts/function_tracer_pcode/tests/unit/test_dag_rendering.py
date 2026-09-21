@@ -59,6 +59,7 @@ from scripts.function_tracer_pcode.core.render_smt.bindings import (
     rendered_binding_names,
     smt_binding_namespace,
 )
+from scripts.function_tracer_pcode.core.render_smt.attributes import render_attribute_scope
 from scripts.function_tracer_pcode.core.render_smt.context import build_smt_render_context
 from scripts.function_tracer_pcode.core.render_smt.render import (
     _SmtChildRenderer,
@@ -136,15 +137,22 @@ def _smt_body(node, node_context, resolve):
 
 
 def _plan_for(root, *, policy=SMT_SHARING_POLICY, counters=None, limit_bytes=None):
-    return build_render_plan(
-        root,
-        build_smt_render_context(),
-        body=_smt_body,
-        classify=classify_smt_fragment,
-        policy=policy,
-        counters=counters if counters is not None else RenderCounters(),
-        limit_bytes=limit_bytes,
-    )
+    """`render_smt_term` と同じ条件で計画だけを組む。
+
+    属性の memo scope を張るのを忘れると、node 属性が呼び出しごとに計算し直され、
+    幅の広い node では実際の描画と桁違いの費用になる（test だけが遅くなる）。
+    """
+
+    with render_attribute_scope():
+        return build_render_plan(
+            root,
+            build_smt_render_context(),
+            body=_smt_body,
+            classify=classify_smt_fragment,
+            policy=policy,
+            counters=counters if counters is not None else RenderCounters(),
+            limit_bytes=limit_bytes,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -923,19 +931,10 @@ def test_a_wide_node_is_stopped_before_its_own_fragment_is_built(build):
     """
 
     root = build()
-    context = build_smt_render_context()
     counters = RenderCounters()
     started = time.perf_counter()
     with pytest.raises(RenderOutputLimitExceeded) as excinfo:
-        build_render_plan(
-            root,
-            context,
-            body=_smt_body,
-            classify=classify_smt_fragment,
-            policy=SMT_SHARING_POLICY,
-            counters=counters,
-            limit_bytes=600,
-        )
+        _plan_for(root, counters=counters, limit_bytes=600)
     assert time.perf_counter() - started < 5.0
     assert excinfo.value.site == "render.materialize"
     # 止めた時点で抱えている材料は上限 + node 1 個分を大きく超えない。
@@ -975,14 +974,7 @@ def test_a_non_ascii_symbol_is_measured_in_bytes_by_the_renderer():
     root = _binary("INT_ADD", variable, _param("a", 0))
     context = build_smt_render_context()
     counters = RenderCounters()
-    plan = build_render_plan(
-        root,
-        context,
-        body=_smt_body,
-        classify=classify_smt_fragment,
-        policy=SMT_SHARING_POLICY,
-        counters=counters,
-    )
+    plan = _plan_for(root, counters=counters)
     rendered = render_smt_term(root, context, None)
     assert counters.max_fragment_bytes >= 48
     assert utf8_length(rendered) > len(rendered)
@@ -1133,18 +1125,8 @@ def test_collecting_requests_does_not_swallow_the_budget_abort():
     閉路・契約違反は本番でも起きる本物の停止理由なので通す。
     """
 
-    root = _wide_phi(600)
-    counters = RenderCounters()
     with pytest.raises(RenderOutputLimitExceeded):
-        build_render_plan(
-            root,
-            build_smt_render_context(),
-            body=_smt_body,
-            classify=classify_smt_fragment,
-            policy=SMT_SHARING_POLICY,
-            counters=counters,
-            limit_bytes=400,
-        )
+        _plan_for(_wide_phi(600), limit_bytes=400)
 
 
 def test_collected_requests_do_not_change_the_output():
@@ -1207,3 +1189,29 @@ def test_the_render_package_exposes_only_the_rendering_entry_points():
         "SMT_RENDER_SCHEMA",
     ):
         assert hasattr(package, name), name
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(lambda: _wide_call(20000), id="wide_call"),
+        pytest.param(lambda: _wide_phi(8000), id="wide_phi"),
+    ],
+)
+def test_the_request_collecting_run_is_bounded_too(build):
+    """要求をまとめて集める実行も、幅の分だけ作り切ってはいけない。
+
+    あの実行は結果を捨てるが、捨てるまでに幅の分の文字列を組み立ててしまえば
+    「上限を超えるものは作らない」という約束は破れている。子を渡すたびに同じ
+    上限を見ているので、幅 20,000 でも上限相当の要求数で止まる。
+    """
+
+    root = build()
+    counters = RenderCounters()
+    started = time.perf_counter()
+    with pytest.raises(RenderOutputLimitExceeded):
+        _plan_for(root, counters=counters, limit_bytes=50)
+    assert time.perf_counter() - started < 2.0
+    # 上限 50 byte に対して、渡した子の数は桁で言えば同じ order に留まる。
+    assert counters.child_requests < 400, counters.child_requests
+    assert counters.max_fragment_bytes <= 50

@@ -23,7 +23,11 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Tuple
 
-from scripts.function_tracer_pcode.core.render_plan import RenderGraphCycleError
+from scripts.function_tracer_pcode.core.render_plan import (
+    DISCOVERY_AFTER_RETRIES,
+    DISCOVERY_IGNORED_FAILURES,
+    RenderGraphCycleError,
+)
 
 
 class _NeedValue(BaseException):
@@ -83,6 +87,11 @@ def evaluate_attribute(
 
     cache は `id(node) -> (node, value)`。値と一緒に node を持つので、`id()` の
     使い回しで別の式の答えを返すことがない（同時に node を生かしておく）。
+
+    子が多い node（branch の多い PHI、引数の多い intrinsic）では「1 個ずつ解いて
+    やり直す」が幅の 2 乗になる。描画 driver と **同じ規則**（`render_plan` が
+    owner）で、数回回しても終わらなければ要求をまとめて集める実行へ切り替える。
+    その実行の答えは捨てるので、仮の値が結果に混ざることはない。
     """
 
     hit = cache.get(id(root))
@@ -95,6 +104,7 @@ def evaluate_attribute(
     stack: List[Any] = [root]
     on_path: Dict[int, int] = {id(root): 1}
     missing: List[Any] = []
+    attempts: Dict[int, int] = {}
 
     def child(sub: Any) -> Any:
         entry = cache.get(id(sub))
@@ -114,19 +124,67 @@ def evaluate_attribute(
         try:
             value = node_fn(node, child)
         except _NeedValue:
-            pending = missing[0]
-            if id(pending) in on_path:
-                raise RenderGraphCycleError(
-                    "render attribute evaluation returned to a node already on the path"
-                )
-            stack.append(pending)
-            _enter(on_path, pending)
+            node_id = id(node)
+            attempts[node_id] = attempts.get(node_id, 0) + 1
+            pending = missing
+            if attempts[node_id] >= DISCOVERY_AFTER_RETRIES:
+                pending = _collect_values(node, node_fn, cache) or missing
+            for sub in pending:
+                if id(sub) in on_path:
+                    raise RenderGraphCycleError(
+                        "render attribute evaluation returned to a node already on the path"
+                    )
+            for sub in reversed(pending):
+                stack.append(sub)
+                _enter(on_path, sub)
             continue
         cache[id(node)] = (node, value)
         stack.pop()
         _leave(on_path, node)
 
     return cache[id(root)][1]
+
+
+def _collect_values(
+    node: Any,
+    node_fn: Callable[[Any, Callable[[Any], Any]], Any],
+    cache: Dict[int, Tuple[Any, Any]],
+) -> List[Any]:
+    """規則を仮の子の値で一度走らせ、要求された未解決の子をまとめて返す。
+
+    `child()` が 1 個目の欠けで止めるだけだと、branch の多い PHI や引数の多い
+    intrinsic で幅の 2 乗になる（1 回の実行で 1 個しか進まない）。描画 driver と
+    同じ規則で、数回で終わらなければまとめて集める実行へ切り替える。
+
+    仮の値で走らせた答えは **捨てる**。採用されるのは本物の値だけで揃った実行
+    の答えなので、仮の値が結果に混ざることはない。規則は `all()` / `any()` で
+    途中打ち切りすることがあるので、偽・真の両方の仮の値で走らせて、どちらの
+    側の子も見落とさないようにする。仮の値は本番では起きない失敗を起こせる
+    ので、型の合わない演算などは無視していつもの 1 個ずつの経路へ戻す。閉路と
+    契約違反はここで握らない。
+    """
+
+    collected: List[Any] = []
+    seen: set = set()
+
+    for neutral in (0, 1):
+
+        def collect(sub: Any, _neutral=neutral) -> Any:
+            entry = cache.get(id(sub))
+            if entry is not None and entry[0] is sub:
+                return entry[1]
+            if id(sub) not in seen:
+                seen.add(id(sub))
+                collected.append(sub)
+            return _neutral
+
+        try:
+            node_fn(node, collect)
+        except DISCOVERY_IGNORED_FAILURES:
+            pass
+        except _NeedValue:  # pragma: no cover - collect never raises it
+            pass
+    return collected
 
 
 def _enter(on_path: Dict[int, int], node: Any) -> None:

@@ -123,16 +123,24 @@ SATURATION = 1 << 40
 #: 同じ node の本体をこの回数だけ回しても子が尽きないなら、幅の広い node と
 #: 見なして「要求を一度に集める」実行へ切り替える。狭い node（ほとんど）は
 #: 切り替えに入らないので、投機的な実行の費用を払わない。
+#:
+#: 描画 driver と node 属性の評価（`core/render_smt/attributes.py`）は同じ形の
+#: 反復をするので、**切り替えの規則はここが唯一の owner**。片方だけ直ると、
+#: 直っていない側が幅の 2 乗のまま残る（実際そうなっていた）。
 DISCOVERY_AFTER_RETRIES = 4
 
 #: 要求収集の実行が、まだ描いていない子の代わりに返す値。placeholder とは別物
 #: （出力には決して入らない）。
-_UNRESOLVED_CHILD_TEXT = "?"
+#:
+#: **真と偽の 2 通りで走らせる**。本体には `all(...)` / `any(...)` のように子の
+#: 値で打ち切るものがあり、片方だけだと最初の 1 個しか集まらず、幅の 2 乗のまま
+#: 残る（実際そうなっていた）。2 回とも O(幅) なので、集め損ねるより安い。
+_UNRESOLVED_CHILD_TEXTS = ("?", "")
 
 #: 要求収集の実行だけで無視してよい失敗。偽の子で走らせているので、本番の実行
 #: では起きない失敗が出ることがある。**予算・閉路・契約違反（`AnalysisFailureError`
 #: 派生）はここに入れない** — それらは本番でも起きる本物の停止理由。
-_DISCOVERY_IGNORED = (
+DISCOVERY_IGNORED_FAILURES = (
     ArithmeticError,
     AttributeError,
     LookupError,
@@ -302,6 +310,7 @@ class _Driver:
             self._missing = (node, context)
             raise _NeedChild
         term = self._terms[index]
+        self._counters.child_requests += 1
         if self._edges is not None:
             self._edges.append(index)
             # 幅の広い node はここで止める。fragment が完成してから測ると、
@@ -365,25 +374,42 @@ class _Driver:
 
         missing: List[Tuple[Any, Any]] = []
         seen: set = set()
-
-        def collect(child: Any, child_context: Any):
-            key = (id(child), child_context)
-            index = self.index_by_key.get(key)
-            if index is not None and index in self._done and self.instances[index].node is child:
-                return self._terms[index]
-            if key not in seen:
-                seen.add(key)
-                missing.append((child, child_context))
-            return RenderedTerm(_UNRESOLVED_CHILD_TEXT, self._classify("", None, False))
-
         previous_edges, self._edges = self._edges, None
-        self._counters.node_body_executions += 1
         try:
-            self._body(node, context, collect)
-        except _DISCOVERY_IGNORED:
-            pass
-        except _NeedChild:  # pragma: no cover - collect never raises it
-            pass
+            for text in _UNRESOLVED_CHILD_TEXTS:
+                unresolved = RenderedTerm(text, self._classify("", None, False))
+                pending = [0]
+
+                def collect(child: Any, child_context: Any, _term=unresolved, _pending=pending):
+                    self._counters.child_requests += 1
+                    key = (id(child), child_context)
+                    index = self.index_by_key.get(key)
+                    if (
+                        index is not None
+                        and index in self._done
+                        and self.instances[index].node is child
+                    ):
+                        term = self._terms[index]
+                    else:
+                        if key not in seen:
+                            seen.add(key)
+                            missing.append((child, child_context))
+                        term = _term
+                    # 収集の実行も本体を最後まで走らせる = 幅の分だけ文字列を
+                    # 組み立てる。ここを数えないと、上限より大きい fragment を
+                    # 「捨てるから」という理由で作ってしまう。上限超過は収集の
+                    # 失敗ではないので握らない。
+                    _pending[0] += len(term)
+                    self._check_material(_pending[0], "render.materialize")
+                    return term
+
+                self._counters.node_body_executions += 1
+                try:
+                    self._body(node, context, collect)
+                except DISCOVERY_IGNORED_FAILURES:
+                    pass
+                except _NeedChild:  # pragma: no cover - collect never raises it
+                    pass
         finally:
             self._edges = previous_edges
         return missing
