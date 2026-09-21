@@ -39,6 +39,7 @@ from scripts.function_tracer_pcode.core.render_plan import (
     NO_SHARING_POLICY,
     PLACEHOLDER_MARK,
     BindingNamespace,
+    RenderGraphCycleError,
     RenderPlanInvariantError,
     RenderedTerm,
     RenderedTermContractError,
@@ -685,6 +686,72 @@ def test_c4_render_plan_keys_instances_by_node_and_context():
     contexts = {instance.context for instance in plan.instances if instance.node is node}
     assert contexts == {"wide", "narrow"}
     assert len({instance.index for instance in plan.instances if instance.node is node}) == 2
+
+
+def test_c4_one_node_under_two_contexts_is_not_a_cycle_when_requests_are_collected():
+    """幅の広い node が同じ子を 2 つの文脈で要求しても閉路と見なさないこと。
+
+    走査の「今いる経路」を node だけで持つと、要求をまとめて積む実行のときに
+    同じ node の 2 つ目の文脈が「もう経路に居る」と見えて、閉路でもないのに
+    落ちる。経路は描画 instance（node + 文脈）で持たなければならない。
+
+    要求収集の実行へ入るだけの幅（`DISCOVERY_AFTER_RETRIES` 超）が要るので、
+    子を 8 個とその 2 文脈で要求する本体にしてある。
+    """
+
+    shared = object()
+    children = [("child", index) for index in range(8)]
+    root = ("root", shared)
+
+    def body(current, context, resolve):
+        if current is root:
+            parts = [resolve(child, "plain") for child in children]
+            parts.append(resolve(shared, "wide"))
+            parts.append(resolve(shared, "narrow"))
+            return "[" + "|".join(parts) + "]"
+        return f"<{context}>"
+
+    counters = RenderCounters()
+    plan = build_render_plan(
+        root,
+        "root-context",
+        body=body,
+        classify=lambda fragment, head, exact: ("properties", fragment),
+        policy=SharingPolicy(min_shared_bytes=0, min_shared_tree_nodes=1),
+        counters=counters,
+    )
+
+    contexts = {instance.context for instance in plan.instances if instance.node is shared}
+    assert contexts == {"wide", "narrow"}
+    # 収集の実行に入っていること（入っていなければこの test は守るものを守れない）
+    assert counters.node_body_executions > len(children)
+    writer = CountingWriter()
+    write_expansion(writer, plan, plan.root_index, {})
+    assert writer.getvalue().count("<plain>") == len(children)
+
+
+def test_a_real_cycle_is_still_refused_when_requests_are_collected():
+    """文脈まで含めて経路を持っても、本物の閉路は止まること。"""
+
+    children = [("child", index) for index in range(8)]
+    root = ["root"]
+
+    def body(current, context, resolve):
+        if current is root:
+            parts = [resolve(child, context) for child in children]
+            return "[" + "|".join(parts) + "]"
+        # 子が root を要求し返す = 閉路
+        return f"<{resolve(root, context)}>"
+
+    with pytest.raises(RenderGraphCycleError):
+        build_render_plan(
+            root,
+            "same-context",
+            body=body,
+            classify=lambda fragment, head, exact: ("properties", fragment),
+            policy=SharingPolicy(min_shared_bytes=0, min_shared_tree_nodes=1),
+            counters=RenderCounters(),
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -89,9 +89,14 @@ class CountingWriter:
 
     @property
     def buffered_bytes(self) -> int:
-        """この口が今まさに保持している byte 数。"""
+        """この口が今まさに保持している byte 数。
 
-        return sum(utf8_length(part) for part in self._parts)
+        書いた分は貯めたままなので `emitted_bytes` と同じ値になり、打ち切った
+        後だけ 0 になる（捨てるので）。断片を数え直さないのは、上限の判定と
+        同じ数え方を 2 通り持ちたくないから。
+        """
+
+        return 0 if self.aborted else self.emitted_bytes
 
     def would_exceed(self, extra_bytes: int) -> bool:
         """`extra_bytes` を足したら上限を超えるか（書かずに確かめる）。"""
@@ -117,7 +122,12 @@ class CountingWriter:
         self.part_count += 1
 
     def write_repeated(self, text: str, count: int) -> None:
-        """同じ断片を `count` 回。閉じ括弧の列を先に作らずに済ませる。"""
+        """同じ断片を `count` 回。
+
+        並びを組み立てる **前に** 全長を上限と比べる（`let` の閉じ括弧は入れ子の
+        深さだけ並ぶので、深い式では無視できない長さになる）。上限があるとき、
+        ここで作られる文字列は必ず上限以下。
+        """
 
         count = int(count)
         if count <= 0 or not text:

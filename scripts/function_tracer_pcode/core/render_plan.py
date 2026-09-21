@@ -301,6 +301,9 @@ class _Driver:
     def resolve(self, node: Any, context: Any) -> RenderedTerm:
         """node 本体が子を要求する口。返るのは **参照 1 個 + 型付きの性質**。"""
 
+        # 解決できた分だけを数えると、幅の広い node を 1 個ずつ解いて回った
+        # 費用が見えなくなる。要求は要求として数える。
+        self._counters.child_requests += 1
         key = (id(node), context)
         index = self.index_by_key.get(key)
         if index is None or index not in self._done or self.instances[index].node is not node:
@@ -310,7 +313,6 @@ class _Driver:
             self._missing = (node, context)
             raise _NeedChild
         term = self._terms[index]
-        self._counters.child_requests += 1
         if self._edges is not None:
             self._edges.append(index)
             # 幅の広い node はここで止める。fragment が完成してから測ると、
@@ -321,16 +323,19 @@ class _Driver:
 
     def run(self, root: Any, context: Any) -> int:
         stack: List[Tuple[Any, Any]] = [(root, context)]
-        on_path: Dict[int, int] = {}
+        # 経路は **描画 instance**（node + 文脈）で持つ。node だけで持つと、
+        # 同じ node を 2 つの文脈で要求する本体（比較の被演算子と PHI の条件が
+        # 同じ式、など）が、閉路でもないのに閉路と判定される。
+        on_path: Dict[Tuple[int, Any], int] = {}
         attempts: Dict[int, int] = {}
-        _enter_path(on_path, root)
+        _enter_path(on_path, (id(root), context))
         while stack:
             node, ctx = stack[-1]
             key = (id(node), ctx)
             index = self.index_by_key.get(key)
             if index is not None and index in self._done:
                 stack.pop()
-                _leave_path(on_path, node)
+                _leave_path(on_path, key)
                 continue
             if index is None:
                 index = len(self.instances)
@@ -345,22 +350,30 @@ class _Driver:
             except _NeedChild:
                 self._counters.node_body_executions += 1
                 attempts[index] = attempts.get(index, 0) + 1
-                pending = [self._missing or (None, None)]
+                if self._missing is None:
+                    # `_NeedChild` は `resolve` が要求を控えてから投げる合図で、
+                    # 控えの無い合図は driver の不整合。何を積むか分からない
+                    # まま進めない。
+                    raise RenderPlanInvariantError(
+                        "a child was requested without recording which one"
+                    )
+                pending = [self._missing]
                 if attempts[index] >= DISCOVERY_AFTER_RETRIES:
                     pending = self._collect_requests(node, ctx) or pending
                 for child_node, child_context in reversed(pending):
-                    if id(child_node) in on_path:
+                    child_key = (id(child_node), child_context)
+                    if child_key in on_path:
                         raise RenderGraphCycleError(
                             "render traversal returned to a node already on the path"
                         )
                     stack.append((child_node, child_context))
-                    _enter_path(on_path, child_node)
+                    _enter_path(on_path, child_key)
                 continue
             finally:
                 self._edges = None
             self._counters.node_body_executions += 1
             self._complete(index, str(fragment), tuple(edges))
-            _leave_path(on_path, node)
+            _leave_path(on_path, key)
             stack.pop()
         return self.index_by_key[(id(root), context)]
 
@@ -474,17 +487,16 @@ def leading_child(fragment: str) -> Tuple[Optional[int], bool]:
     return index, end == len(fragment) - 1
 
 
-def _enter_path(on_path: Dict[int, int], node: Any) -> None:
-    on_path[id(node)] = on_path.get(id(node), 0) + 1
+def _enter_path(on_path: Dict[Any, int], key: Any) -> None:
+    on_path[key] = on_path.get(key, 0) + 1
 
 
-def _leave_path(on_path: Dict[int, int], node: Any) -> None:
-    node_id = id(node)
-    remaining = on_path.get(node_id, 0) - 1
+def _leave_path(on_path: Dict[Any, int], key: Any) -> None:
+    remaining = on_path.get(key, 0) - 1
     if remaining > 0:
-        on_path[node_id] = remaining
+        on_path[key] = remaining
     else:
-        on_path.pop(node_id, None)
+        on_path.pop(key, None)
 
 
 def build_render_plan(
