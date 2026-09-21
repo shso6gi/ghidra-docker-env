@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.core.semantic_snapshot import (
     local_semantic_payload,
     ordered_semantic_edges,
     semantic_projection,
+    traverse_semantic_graph,
 )
 
 
@@ -1040,27 +1041,98 @@ def structural_identity_digest(expr: Optional[Expression]) -> Optional[str]:
     return None if digest is None else digest.hex()
 
 
+#: 完全 identity が扱う distinct node の上限。超えたら identity を返さない
+#: （切り詰めた key を返すのではなく「言えない」と言う）。証明鍵は直列化される
+#: ので、無制限に大きい値を payload へ流さないための上限でもある。
+CONDITION_IDENTITY_NODE_LIMIT = 4096
+
+
+def structural_identity_form(expr: Optional[Expression]) -> Optional[StructuralKey]:
+    """式の **完全な** 構造 identity を平坦な値として返す（無ければ `None`）。
+
+    digest ではない。この package では hash / digest は候補の絞り込み専用で、
+    「hash が一致したから同じ式」は成り立たせない契約になっている
+    （`compose_candidate_digest` / `structural_identity_digest` の docstring）。
+    証明鍵や dedup 鍵はその契約の外にあってはいけないので、identity は
+    **中身そのもの** で表す。
+
+    表現は hash-consing した平坦形:
+
+    * 走査は post-order（子が先、`traverse_semantic_graph`）。閉路は typed failure
+    * 各 node の記録は `(local payload, 子の番号)`。子の番号は「同じ形なら同じ
+      番号」になるよう、記録そのものを key にした表で採番する — 番号の一致は
+      Python の `==`（完全一致）で決まり、hash はその辞書の内部でしか使われない
+    * 可換な二項は子の番号を整列する。同じ表の中では `add(x, y)` と
+      `add(y, x)` が同じ記録になる
+
+    **この identity は「表現として同一か」を言う**。値が等しければ 2 つの式は
+    構造的に等しい（誤って同一視することは無い）。逆向きは成り立たない:
+    `structural_equals` は可換演算の並べ替えを同一視するが、番号は走査順で
+    付くので、別々に組んだ `a + b` と `b + a` は違う値になる。だから
+    「同じと言えないときは言わない」側へ倒れる（fail-closed）。
+    比較は distinct node 数に比例し、木に戻さない
+
+    値として固定できない要素がある（`identity_complete` が偽）か、node 数が
+    `CONDITION_IDENTITY_NODE_LIMIT` を超えるときは `None`。呼び出し側は `None` を
+    「同じかどうか言えない」として扱うこと（他の `None` と一致させない）。
+    """
+
+    expr = _validated(expr)
+    if expr is None:
+        return None
+    traversal = traverse_semantic_graph(expr)
+    records: List[StructuralKey] = []
+    index_of_record: Dict[StructuralKey, int] = {}
+    index_of_node: Dict[int, int] = {}
+    for node in traversal.post_order:
+        payload = local_semantic_payload(node)
+        if not payload.comparable or not payload.identity_complete:
+            return None
+        children = []
+        for edge in ordered_semantic_edges(node):
+            child = edge.child
+            if child is None:
+                children.append(-1)
+                continue
+            child_index = index_of_node.get(id(child))
+            if child_index is None:
+                # 走査は子が先なので、ここへ来るのは走査が届かない子だけ。
+                return None
+            children.append(child_index)
+        if len(children) == 2 and children_are_commutative(node):
+            children.sort()
+        record = (payload.identity_atoms, tuple(children))
+        index = index_of_record.get(record)
+        if index is None:
+            if len(records) >= CONDITION_IDENTITY_NODE_LIMIT:
+                return None
+            index = len(records)
+            index_of_record[record] = index
+            records.append(record)
+        index_of_node[id(node)] = index
+    root_index = index_of_node.get(id(expr))
+    if root_index is None:
+        return None
+    return ("structural_identity_form", "v2", root_index, tuple(records))
+
+
 def condition_identity(condition: Optional[Condition]) -> Optional[StructuralKey]:
     """条件の **完全な** identity。作れないときは `None`（fail-closed）。
 
     `condition_key()` との違いが要点: あちらは構築中にも使える **予算付き**の
     canonical key で、深い式では `("truncated", …)` が入る。末尾だけ違う 2 つの
     深い条件が同じ key になり得るので、証明の一致条件には使えない。こちらは
-    **予算を持たない** equivalence digest（`structural_identity_digest`）に
-    向きを足したもの。
+    予算付きの切り詰めも digest も使わず、構造そのものを平坦に持つ
+    （`structural_identity_form`）。
 
     完全比較との関係（正確に）:
 
-    * `structural_equals(a, b)` が真 ⇒ identity も一致する。
-    * identity が一致 ⇒ 2 つは構造的に同じ（digest は全 node の payload と辺を
-      畳んだもの）。ただし `structural_equals` は **比較の予算**を持つので、
-      とても深い式では「同じ」と確認しきれずに偽を返すことがある。つまり
-      identity のほうが確定できる範囲は広い（弱くはない）。
-
-    値として固定できない要素があって identity を組めないときは `None` を返す。
-    呼び出し側は `None` を「同じかどうか言えない」として扱うこと — 他の `None`
-    と一致させない（一致させると、identity を作れなかった 2 つの条件が同じ
-    ものとして証明に載る）。
+    * identity が等しい ⇒ 2 つの条件は構造的に等しい。**digest の衝突が同一性に
+      化ける経路は無い**（digest を使っていない）。
+    * 逆向きは成り立たない。`structural_equals` が同一視する可換演算の並べ替えを
+      identity は分ける。誤って同一視するより言わない側へ倒す。
+    * `structural_equals` は **比較の予算**を持つので、とても深い式では同じでも
+      真を返せない。identity はその深さでも「同じ」と言える。
 
     `candidate_hash`（bucket 専用）・`condition_key`（予算付き legacy key）・
     `semantic_snapshot.graph_representation_digest`（表現の digest）・solver
@@ -1072,10 +1144,10 @@ def condition_identity(condition: Optional[Condition]) -> Optional[StructuralKey
     expression = getattr(condition, "expression", None)
     if expression is None:
         return None
-    digest = structural_identity_digest(expression)
-    if digest is None:
+    form = structural_identity_form(expression)
+    if form is None:
         return None
-    return ("condition_identity", "v1", digest, bool(getattr(condition, "negated", False)))
+    return ("condition_identity", "v2", form, bool(getattr(condition, "negated", False)))
 
 
 def condition_identities(conditions) -> Optional[Tuple[StructuralKey, ...]]:
@@ -1108,9 +1180,11 @@ class StructuralIdentity:
     key = staticmethod(expression_key)
     #: 完全比較と同じ同値関係を持つ安定 digest（32 byte、prefilter に使える）
     identity_digest = staticmethod(structural_identity_digest)
-    #: 条件の **完全な** identity（予算なし、組めなければ None）。証明 key や
-    #: 「同じ条件か」を言う必要がある consumer はこれを使う（`key` は予算付きの
-    #: legacy key なので、深い条件では別物を同一視し得る）
+    #: 式の **完全な** identity（平坦な値。digest ではない）
+    identity_form = staticmethod(structural_identity_form)
+    #: 条件の **完全な** identity（組めなければ None）。証明 key や「同じ条件か」
+    #: を言う必要がある consumer はこれを使う（`key` は予算付きの legacy key
+    #: なので、深い条件では別物を同一視し得る）
     condition_identity = staticmethod(condition_identity)
     #: 条件列版（1 つでも組めなければ None）
     condition_identities = staticmethod(condition_identities)
