@@ -1049,19 +1049,17 @@ def structural_identity_digest(expr: Optional[Expression]) -> Optional[str]:
 #: 走査が返した post-order の長さ（= DAG の distinct node 数）をそのまま見る。
 #: これを超える式は identity を組まない（`None`）。
 #:
-#: 制限しているのは **record を組む仕事と payload の入力量**。走査そのものの
-#: 仕事量はここでは制限していない — 走査は `traverse_semantic_graph` の持ち物で、
-#: distinct node 数に比例する（DAG を木に展開しない）。解析全体の work / budget は
-#: PR-22-D の `BudgetPolicy` の担当で、この定数ではない。
-IDENTITY_MAX_SEMANTIC_NODES = 4096
-
-#: identity の payload に入る **unique な構造 record** の上限。
+#: **何を制限しているか**: record を組む仕事と、直列化した identity の大きさ。
+#: 両方をこの 1 つで抑えられるのは `unique record 数 <= distinct node 数` が
+#: 常に成り立つから（hash-cons は減らすだけで増やさない）。record 数に別の上限を
+#: 置いても到達しないので置かない — 到達しない定数は、名前だけがある contract に
+#: なる。`tests/unit/test_dag_rendering.py` がこの関係を固定している。
 #:
-#: record は hash-cons 後の値なので、distinct node 数とは一致しない（共有が
-#: あれば record は少なくなる）。こちらは **直列化した identity の大きさ**を
-#: 抑える。2 つを 1 つの定数で兼ねると、名前と実際に測っているものが食い違う
-#: （実際そうなっていた: 定数名は node 上限を名乗り、実装は record を見ていた）。
-IDENTITY_MAX_RECORDS = 4096
+#: **何を制限していないか**: 走査そのものの仕事量。走査は
+#: `traverse_semantic_graph` の持ち物で、distinct node 数に比例する（DAG を木に
+#: 展開しない）。解析全体の work / budget は PR-22-D の `BudgetPolicy` の担当で、
+#: この定数ではない。
+IDENTITY_MAX_SEMANTIC_NODES = 4096
 
 
 def structural_identity_form(expr: Optional[Expression]) -> Optional[StructuralKey]:
@@ -1090,8 +1088,8 @@ def structural_identity_form(expr: Optional[Expression]) -> Optional[StructuralK
     比較は distinct node 数に比例し、木に戻さない
 
     値として固定できない要素がある（`identity_complete` が偽）か、node 数が
-    distinct な意味 node が `IDENTITY_MAX_SEMANTIC_NODES` を超えるか、unique な
-    構造 record が `IDENTITY_MAX_RECORDS` を超えるときは `None`。呼び出し側は `None` を
+    distinct な意味 node が `IDENTITY_MAX_SEMANTIC_NODES` を超えるときは `None`。
+    呼び出し側は `None` を
     「同じかどうか言えない」として扱うこと（他の `None` と一致させない）。
     """
 
@@ -1126,8 +1124,6 @@ def structural_identity_form(expr: Optional[Expression]) -> Optional[StructuralK
         record = (payload.identity_atoms, tuple(children))
         index = index_of_record.get(record)
         if index is None:
-            if len(records) >= IDENTITY_MAX_RECORDS:
-                return None
             index = len(records)
             index_of_record[record] = index
             records.append(record)

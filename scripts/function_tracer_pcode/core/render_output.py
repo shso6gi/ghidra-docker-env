@@ -49,14 +49,30 @@ class RenderOutputLimitExceeded(AnalysisFailureError):
     `AnalysisLimitation` へ写す。
     """
 
-    def __init__(self, *, limit_bytes: int, requested_bytes: int, site: str) -> None:
+    #: 上限の種類。`"output"` は出力量そのもの、`"material"` は renderer が抱える
+    #: 材料の許容量（出力上限そのものではない）。1 つの field で両方を名乗ると、
+    #: 受け取った側は `limit_bytes` が何の上限か分からない — 材料側は出力上限の
+    #: 数倍になるので、そのまま「出力が N byte を超えた」と読むと誤る。
+    OUTPUT = "output"
+    MATERIAL = "material"
+
+    def __init__(
+        self,
+        *,
+        limit_bytes: int,
+        requested_bytes: int,
+        site: str,
+        limit_kind: str = OUTPUT,
+    ) -> None:
         super().__init__(
-            f"render output exceeded {limit_bytes} bytes at {site} "
+            f"render {limit_kind} exceeded {limit_bytes} bytes at {site} "
             f"(needed at least {requested_bytes})"
         )
+        #: 超えた上限（`limit_kind` の上限）
         self.limit_bytes = int(limit_bytes)
         self.requested_bytes = int(requested_bytes)
         self.site = str(site)
+        self.limit_kind = str(limit_kind)
 
 
 class CountingWriter:
@@ -153,6 +169,7 @@ class CountingWriter:
             limit_bytes=int(self._limit if self._limit is not None else 0),
             requested_bytes=int(requested_bytes),
             site=self._site,
+            limit_kind=RenderOutputLimitExceeded.OUTPUT,
         )
 
 

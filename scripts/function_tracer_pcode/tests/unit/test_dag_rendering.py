@@ -498,6 +498,18 @@ def test_c7_the_abort_says_which_renderer_and_which_stage():
     assert human_material.value.site == "core.render_python.materialize"
     assert human_emit.value.site == "core.render_python.emit"
 
+    # どの上限を超えたのかも名乗ること。材料の許容量は出力上限そのものでは
+    # ないので、`limit_bytes` だけでは受け取った側が何の上限か分からない。
+    from scripts.function_tracer_pcode.core.render_plan import MATERIAL_ALLOWANCE
+
+    assert smt_material.value.limit_kind == RenderOutputLimitExceeded.MATERIAL
+    assert human_material.value.limit_kind == RenderOutputLimitExceeded.MATERIAL
+    assert smt_emit.value.limit_kind == RenderOutputLimitExceeded.OUTPUT
+    assert human_emit.value.limit_kind == RenderOutputLimitExceeded.OUTPUT
+    # 材料側が名乗る上限は「出力上限 × 許容量」で、出力上限そのものではない
+    assert smt_material.value.limit_bytes == 200 * MATERIAL_ALLOWANCE
+    assert smt_emit.value.limit_bytes == 20_000
+
 
 # ---------------------------------------------------------------------------
 # 上限: 材料と出力は別の量。どちらの側にも偽陰性・偽陽性を出さないこと
@@ -1664,15 +1676,18 @@ def test_identity_is_refused_beyond_its_distinct_node_limit():
     assert structural_identity_form(small) is not None
 
 
-def test_the_record_limit_is_about_the_payload_not_the_node_count():
-    """record 上限は直列化した identity の大きさを抑えるもの、と実装が一致すること。
+def test_one_limit_covers_both_the_work_and_the_payload():
+    """`unique record 数 <= distinct node 数` を固定する。
 
-    共有の多い式（depth 4000 の二重化 DAG）は distinct node が上限以下でも
-    record は更に少ない。2 つの上限が別の量を測っていることを固定する。
+    この関係が成り立つ限り、distinct node の上限 1 つで「record を組む仕事」も
+    「直列化した identity の大きさ」も抑えられる。成り立たなくなったら payload
+    側にも上限が要る — そのときここが落ちる。
+
+    形が同じで object が全部別な木（distinct node は幅の分だけ増え、record は
+    深さの分しか増えない）が、両者が別の量であることを示す。
     """
 
     from scripts.function_tracer_pcode.core.structural import (
-        IDENTITY_MAX_RECORDS,
         IDENTITY_MAX_SEMANTIC_NODES,
         structural_identity_form,
     )
@@ -1680,15 +1695,26 @@ def test_the_record_limit_is_about_the_payload_not_the_node_count():
         traverse_semantic_graph,
     )
 
-    a = _param("a", 0)
-    shared = _doubling_dag(2000, a)
-    nodes = len(traverse_semantic_graph(shared).post_order)
-    assert nodes <= IDENTITY_MAX_SEMANTIC_NODES
-    form = structural_identity_form(shared)
-    assert form is not None
-    records = form[-1]
-    assert len(records) <= nodes <= IDENTITY_MAX_SEMANTIC_NODES
-    assert len(records) < IDENTITY_MAX_RECORDS
+    def identical_shape_tree(depth):
+        if depth == 0:
+            return _param("a", 0)
+        return _binary("INT_ADD", identical_shape_tree(depth - 1), identical_shape_tree(depth - 1))
+
+    for depth in (4, 8):
+        root = identical_shape_tree(depth)
+        nodes = len(traverse_semantic_graph(root).post_order)
+        form = structural_identity_form(root)
+        assert form is not None
+        records = len(form[-1])
+        assert records <= nodes
+        # この形では record は深さぶんしかない（2 つが別の量であること）
+        assert records < nodes
+
+    # distinct node が上限を超えれば、record が少なくても identity は組まない
+    big = identical_shape_tree(13)
+    nodes = len(traverse_semantic_graph(big).post_order)
+    assert nodes > IDENTITY_MAX_SEMANTIC_NODES
+    assert structural_identity_form(big) is None
 
 
 def test_identity_is_json_serialisable():
@@ -1798,6 +1824,10 @@ def test_the_render_package_exposes_only_the_rendering_entry_points():
         "rendered_binding_names",
         "binding_dependency_order_is_valid",
         "iter_expression_nodes",
+        "ResolutionSchedule",
+        "FragmentBuilder",
+        "ChildResolver",
+        "MATERIAL_ALLOWANCE",
         "render_attribute_scope",
         "evaluate_attribute",
         "attribute_cache",
