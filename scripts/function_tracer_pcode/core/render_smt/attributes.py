@@ -24,9 +24,8 @@ from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Tuple
 
 from scripts.function_tracer_pcode.core.render_plan import (
-    DISCOVERY_AFTER_RETRIES,
     DISCOVERY_IGNORED_FAILURES,
-    RenderGraphCycleError,
+    ResolutionSchedule,
 )
 
 
@@ -89,9 +88,13 @@ def evaluate_attribute(
     使い回しで別の式の答えを返すことがない（同時に node を生かしておく）。
 
     子が多い node（branch の多い PHI、引数の多い intrinsic）では「1 個ずつ解いて
-    やり直す」が幅の 2 乗になる。描画 driver と **同じ規則**（`render_plan` が
-    owner）で、数回回しても終わらなければ要求をまとめて集める実行へ切り替える。
-    その実行の答えは捨てるので、仮の値が結果に混ざることはない。
+    やり直す」が幅の 2 乗になる。予定表（`render_plan.ResolutionSchedule`）が
+    切り替えどきを言ってきたら、要求をまとめて集める実行へ切り替える。その実行の
+    答えは捨てるので、仮の値が結果に混ざることはない。
+
+    予定・経路・切り替えの規則は **描画 driver と同じ実装**を使う。ここに写すと
+    片方だけが直る（実際、閉路判定が scheduled を active と数える同じ誤りが
+    両方にあった）。
     """
 
     hit = cache.get(id(root))
@@ -101,10 +104,10 @@ def evaluate_attribute(
         # 組み立て費用がその回数だけ乗る。
         return hit[1]
 
-    stack: List[Any] = [root]
-    on_path: Dict[int, int] = {id(root): 1}
+    # 予定と経路の管理は描画 driver と同じ実装（`render_plan`）。閉路判定が
+    # 何を見るか（= active な祖先だけ）をここに書き写すと、片方だけが直る。
+    schedule = ResolutionSchedule(root, key_of=id)
     missing: List[Any] = []
-    attempts: Dict[int, int] = {}
 
     def child(sub: Any) -> Any:
         entry = cache.get(id(sub))
@@ -113,34 +116,23 @@ def evaluate_attribute(
         missing.append(sub)
         raise _NeedValue
 
-    while stack:
-        node = stack[-1]
+    while schedule:
+        node = schedule.current()
         entry = cache.get(id(node))
         if entry is not None and entry[0] is node:
-            stack.pop()
-            _leave(on_path, node)
+            schedule.settle()
             continue
         del missing[:]
         try:
             value = node_fn(node, child)
         except _NeedValue:
-            node_id = id(node)
-            attempts[node_id] = attempts.get(node_id, 0) + 1
             pending = missing
-            if attempts[node_id] >= DISCOVERY_AFTER_RETRIES:
+            if schedule.should_collect_requests():
                 pending = _collect_values(node, node_fn, cache) or missing
-            for sub in pending:
-                if id(sub) in on_path:
-                    raise RenderGraphCycleError(
-                        "render attribute evaluation returned to a node already on the path"
-                    )
-            for sub in reversed(pending):
-                stack.append(sub)
-                _enter(on_path, sub)
+            schedule.need(pending)
             continue
         cache[id(node)] = (node, value)
-        stack.pop()
-        _leave(on_path, node)
+        schedule.settle()
 
     return cache[id(root)][1]
 
@@ -185,19 +177,6 @@ def _collect_values(
         except _NeedValue:  # pragma: no cover - collect never raises it
             pass
     return collected
-
-
-def _enter(on_path: Dict[int, int], node: Any) -> None:
-    on_path[id(node)] = on_path.get(id(node), 0) + 1
-
-
-def _leave(on_path: Dict[int, int], node: Any) -> None:
-    node_id = id(node)
-    remaining = on_path.get(node_id, 0) - 1
-    if remaining > 0:
-        on_path[node_id] = remaining
-    else:
-        on_path.pop(node_id, None)
 
 
 def iter_expression_nodes(

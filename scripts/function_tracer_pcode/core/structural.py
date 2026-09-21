@@ -1044,7 +1044,24 @@ def structural_identity_digest(expr: Optional[Expression]) -> Optional[str]:
 #: 完全 identity が扱う distinct node の上限。超えたら identity を返さない
 #: （切り詰めた key を返すのではなく「言えない」と言う）。証明鍵は直列化される
 #: ので、無制限に大きい値を payload へ流さないための上限でもある。
-CONDITION_IDENTITY_NODE_LIMIT = 4096
+#: identity が覆う **distinct な意味 node** の上限。
+#:
+#: 走査が返した post-order の長さ（= DAG の distinct node 数）をそのまま見る。
+#: これを超える式は identity を組まない（`None`）。
+#:
+#: 制限しているのは **record を組む仕事と payload の入力量**。走査そのものの
+#: 仕事量はここでは制限していない — 走査は `traverse_semantic_graph` の持ち物で、
+#: distinct node 数に比例する（DAG を木に展開しない）。解析全体の work / budget は
+#: PR-22-D の `BudgetPolicy` の担当で、この定数ではない。
+IDENTITY_MAX_SEMANTIC_NODES = 4096
+
+#: identity の payload に入る **unique な構造 record** の上限。
+#:
+#: record は hash-cons 後の値なので、distinct node 数とは一致しない（共有が
+#: あれば record は少なくなる）。こちらは **直列化した identity の大きさ**を
+#: 抑える。2 つを 1 つの定数で兼ねると、名前と実際に測っているものが食い違う
+#: （実際そうなっていた: 定数名は node 上限を名乗り、実装は record を見ていた）。
+IDENTITY_MAX_RECORDS = 4096
 
 
 def structural_identity_form(expr: Optional[Expression]) -> Optional[StructuralKey]:
@@ -1073,7 +1090,8 @@ def structural_identity_form(expr: Optional[Expression]) -> Optional[StructuralK
     比較は distinct node 数に比例し、木に戻さない
 
     値として固定できない要素がある（`identity_complete` が偽）か、node 数が
-    `CONDITION_IDENTITY_NODE_LIMIT` を超えるときは `None`。呼び出し側は `None` を
+    distinct な意味 node が `IDENTITY_MAX_SEMANTIC_NODES` を超えるか、unique な
+    構造 record が `IDENTITY_MAX_RECORDS` を超えるときは `None`。呼び出し側は `None` を
     「同じかどうか言えない」として扱うこと（他の `None` と一致させない）。
     """
 
@@ -1081,6 +1099,10 @@ def structural_identity_form(expr: Optional[Expression]) -> Optional[StructuralK
     if expr is None:
         return None
     traversal = traverse_semantic_graph(expr)
+    # distinct な意味 node の数は走査結果そのもの。record を組む前に見る
+    # （組んでから数えると、抑えたい仕事はもう済んでいる）。
+    if len(traversal.post_order) > IDENTITY_MAX_SEMANTIC_NODES:
+        return None
     records: List[StructuralKey] = []
     index_of_record: Dict[StructuralKey, int] = {}
     index_of_node: Dict[int, int] = {}
@@ -1104,7 +1126,7 @@ def structural_identity_form(expr: Optional[Expression]) -> Optional[StructuralK
         record = (payload.identity_atoms, tuple(children))
         index = index_of_record.get(record)
         if index is None:
-            if len(records) >= CONDITION_IDENTITY_NODE_LIMIT:
+            if len(records) >= IDENTITY_MAX_RECORDS:
                 return None
             index = len(records)
             index_of_record[record] = index
@@ -1150,6 +1172,48 @@ def condition_identity(condition: Optional[Condition]) -> Optional[StructuralKey
     return ("condition_identity", "v2", form, bool(getattr(condition, "negated", False)))
 
 
+def expression_identity(expr: Optional[Expression]) -> Optional[StructuralKey]:
+    """式の完全 identity。`None` は **組めなかった**という意味だけを持つ。
+
+    `structural_identity_form()` との違いは 1 点で、しかし鍵の正しさに直結する:
+    式が無いこと（`None`）は **情報が揃っている**状態なので、専用の値で表して
+    `None` を返さない。`None` に両方を担わせると、
+
+    * 深すぎて identity を組めなかった 2 つの別の式
+    * 値が無い 2 つの site
+
+    が同じ鍵になる。呼び出し側は `None` を見て「言えない」と判断できなくなる。
+
+    予算付きの legacy key（`expression_key_safe`）を鍵に埋めるのも同じ理由で
+    誤り: あれは truncate すると `None` を返すので、末尾だけ違う深い式 2 つが
+    同じ鍵になる。
+    """
+
+    if expr is None:
+        return ("expression_identity", "v2", "absent")
+    form = structural_identity_form(expr)
+    if form is None:
+        return None
+    return ("expression_identity", "v2", form)
+
+
+def identity_tuple(tag: str, *parts: Optional[StructuralKey]) -> Optional[StructuralKey]:
+    """部品がすべて揃っているときだけ identity を組む（欠けたら `None`）。
+
+    `None` を tuple へ埋めると「作れなかった」が「そういう値」に化け、別物
+    2 つが同じ鍵になる。埋める前に落とす — これが「完全 identity を組めなければ
+    候補・証明を出さない」という contract の実装側の姿。
+
+    「値が無い」は欠落ではないので、そういう部品は `expression_identity()` の
+    ように専用の値で表してからここへ渡すこと。
+    """
+
+    for part in parts:
+        if part is None:
+            return None
+    return (tag, "v2") + tuple(parts)
+
+
 def condition_identities(conditions) -> Optional[Tuple[StructuralKey, ...]]:
     """条件列の完全 identity。1 つでも組めなければ `None`（fail-closed）。"""
 
@@ -1188,3 +1252,8 @@ class StructuralIdentity:
     condition_identity = staticmethod(condition_identity)
     #: 条件列版（1 つでも組めなければ None）
     condition_identities = staticmethod(condition_identities)
+    #: 式の完全 identity。`None` は「組めなかった」だけを意味し、「式が無い」は
+    #: 専用の値で表す（予算付き key を鍵に埋めるのと同じ誤りを防ぐ）
+    expression_identity = staticmethod(expression_identity)
+    #: 部品がすべて揃っているときだけ鍵を組む combinator（欠けたら None）
+    identity_tuple = staticmethod(identity_tuple)

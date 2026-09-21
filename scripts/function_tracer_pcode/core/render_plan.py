@@ -135,6 +135,22 @@ PLACEHOLDER_MARK = "\x00"
 #: 見積りの飽和点。これ以上は数えない（巨大整数と無駄な走査を作らない）
 SATURATION = 1 << 40
 
+#: 材料の許容量は、出力上限の何倍までか。
+#:
+#: **材料と出力は別の量**。材料（renderer が同時に抱える fragment の総量）は
+#: 出力量の下界ではない — placeholder は指す先より長いことも短いこともあり
+#: （1 byte の葉を 5 byte の印が指す）、本体は要求した子を捨てることもある。
+#: だから出力上限をそのまま材料に当てると、**出力が上限に収まる描画まで
+#: 拒める**。葉の短い幅の広い node でまさにそうなっていた（64 引数の CALL は
+#: 出力 257 byte、材料 507 byte）。
+#:
+#: それでも材料を放置しないのは、出力の何倍もの中間文字列を先に作ること自体が
+#: 防ぎたい費用だから。倍率は「出力 1 byte あたり印と参照名で数 byte」という
+#: 実測から取った余裕で、**判定には使わない**（出力量そのものの上限は
+#: 書き出し口が持つ）。`tests/unit/test_dag_rendering.py` が「出力が上限に
+#: 収まる描画は拒まれない」を全ての形について固定している。
+MATERIAL_ALLOWANCE = 8
+
 #: 同じ node の本体をこの回数だけ回しても子が尽きないなら、幅の広い node と
 #: 見なして「要求を一度に集める」実行へ切り替える。狭い node（ほとんど）は
 #: 切り替えに入らないので、投機的な実行の費用を払わない。
@@ -164,6 +180,108 @@ DISCOVERY_IGNORED_FAILURES = (
 )
 
 
+class ResolutionSchedule:
+    """子が先に済む反復走査の **予定表**（走査 machinery の唯一の owner）。
+
+    描画 driver と node 属性の評価は、形の同じ反復をする: 本体を走らせ、答えの
+    無い子があればそれを先に片付けてから本体をやり直す。その「予定と経路」の
+    管理をここ 1 箇所に置く。2 実装あると片方だけが直る。
+
+    ## 4 つの状態を混ぜない
+
+    * **scheduled** — 予定表に載っているが、本体はまだ 1 度も動いていない
+    * **active** — 本体が動き始め、子を待って中断している = **祖先の連鎖**
+    * **completed** — 答えが決まった（memo の持ち物。予定表は知らない）
+    * それ以外 — まだ何も知らない
+
+    **閉路判定が見るのは `active` だけ。** scheduled を混ぜると、要求をまとめて
+    積んだ sibling どうしの依存が閉路に見える:
+
+    ```text
+    root
+    ├─ A
+    │  └─ x
+    └─ x
+    ```
+
+    `root` の要求をまとめて積むと `A` と `x` が同時に scheduled になる。次に
+    `A` の本体が `x` を要求するが、`x` は「まだ動いていない予定」であって
+    `A` の祖先ではない。ここを `active` として数えると、閉路でない DAG が
+    `RenderGraphCycleError` になる（実際そうなっていた）。
+
+    ## 状態が動くのは 2 箇所だけ
+
+    * `need()` — 本体が子を待った。呼び出し元が **active** になり、子が
+      **scheduled** になる
+    * `settle()` — 本体が答えを出した（または既に答えがあった）。**active** から
+      外れて予定表から降りる
+
+    `active` へ入るのは `need()` だけ、出るのは `settle()` だけ。予定表へ
+    載せる操作は `active` を触らない — この分離が上の不変条件そのもの。
+    """
+
+    __slots__ = ("_key_of", "_stack", "_active", "_attempts")
+
+    def __init__(self, root: Any, *, key_of: Callable[[Any], Any]) -> None:
+        self._key_of = key_of
+        self._stack: List[Tuple[Any, Any]] = [(key_of(root), root)]
+        #: 本体が動き始めて子を待っている項目 = 祖先の連鎖。閉路判定はここだけを見る
+        self._active: set = set()
+        self._attempts: Dict[Any, int] = {}
+
+    def __bool__(self) -> bool:
+        return bool(self._stack)
+
+    def current(self) -> Any:
+        """今片付ける項目（予定表の先頭）。"""
+
+        return self._stack[-1][1]
+
+    def current_key(self) -> Any:
+        return self._stack[-1][0]
+
+    def is_active(self, key: Any) -> bool:
+        """`key` が **祖先の連鎖**に居るか（scheduled は含まない）。"""
+
+        return key in self._active
+
+    def should_collect_requests(self) -> bool:
+        """1 個ずつ解くのを諦めて、要求をまとめて集める実行へ切り替えるか。
+
+        切り替えの規則はここが owner。driver 側に閾値を書かせない（片方だけが
+        直って、直っていない側が幅の 2 乗のまま残る、を防ぐ）。
+        """
+
+        return self._attempts.get(self._stack[-1][0], 0) >= DISCOVERY_AFTER_RETRIES
+
+    def need(self, items) -> None:
+        """今の項目は子を待つ。自分が active になり、子が scheduled になる。
+
+        子が **active**（= 祖先）なら閉路。scheduled な子は閉路ではないので、
+        そのまま予定表の上へ積む — 先に積んだものが先に片付くので、要求元が
+        本体をやり直すときには答えが揃っている。同じ項目が予定表に 2 度載っても
+        害はない（2 度目は「もう答えがある」で降りるだけ）。
+        """
+
+        key = self._stack[-1][0]
+        self._attempts[key] = self._attempts.get(key, 0) + 1
+        self._active.add(key)
+        pending = [(self._key_of(item), item) for item in items]
+        for child_key, _item in pending:
+            if child_key in self._active:
+                raise RenderGraphCycleError(
+                    "the traversal was asked for a node that is still on the active path"
+                )
+        self._stack.extend(reversed(pending))
+
+    def settle(self) -> None:
+        """今の項目は答えが出た（または既に答えがあった）。active から外して降りる。"""
+
+        key, _item = self._stack.pop()
+        self._active.discard(key)
+        self._attempts.pop(key, None)
+
+
 def child_placeholder(index: int) -> str:
     return f"{PLACEHOLDER_MARK}{index}{PLACEHOLDER_MARK}"
 
@@ -182,6 +300,100 @@ class RenderedTerm(str):
         term = super().__new__(cls, text)
         term.properties = properties
         return term
+
+
+class FragmentBuilder:
+    """node 1 個分の fragment を **数えながら**組み立てる。
+
+    ## なぜ必要か
+
+    `resolve` は子の参照を渡すたびに上限と比べるが、本体が自分で書く分
+    （区切り、演算子名、括弧）はそこに乗らない。だから
+
+    ```text
+    子の参照の合計 < 上限 < 完成した fragment
+    ```
+
+    という幅では、上限超えの文字列を **作ってから**しか止められなかった。
+    さらに `result = f"(ite … {result})"` のような積み直しは、branch 数に対して
+    文字列 copy が幅の 2 乗になる。
+
+    ここを通すと、自分で書く分も **置く前に**上限と比べ、積み直しをしない
+    （最後に 1 回だけ連結する。そのときの全長は既に上限以下と分かっている）。
+
+    ## 使い分け
+
+    * `literal()` / `repeat()` — 自分で書く文字。置く前に数える
+    * `term()` — `resolve` が返した子の参照。byte は `resolve` が既に数えて
+      いるので二重には数えない
+
+    幅が子の数に比例する node（引数の多い CALL、branch の多い PHI）は **必ず**
+    ここを通すこと。`tests/unit/test_architecture_boundaries.py` が、描画本体の
+    中で可変長の子を `join` / 積み直しで畳む書き方を禁止して固定している。
+    """
+
+    __slots__ = ("_parts", "_note")
+
+    def __init__(self, note: Callable[[int], None]) -> None:
+        self._parts: List[str] = []
+        self._note = note
+
+    def literal(self, text: str) -> "FragmentBuilder":
+        """自分で書く文字を置く（置く **前に** 上限と比べる）。"""
+
+        if text:
+            self._note(utf8_length(text))
+            self._parts.append(text)
+        return self
+
+    def term(self, term: Any) -> "FragmentBuilder":
+        """子の参照を置く（byte は `resolve` が既に数えている）。"""
+
+        if term:
+            self._parts.append(str(term))
+        return self
+
+    def repeat(self, text: str, count: int) -> "FragmentBuilder":
+        """同じ文字を `count` 回置く（並びを作る **前に** 全長を数える）。
+
+        入れ子の閉じ括弧のように、深さ / 幅の分だけ並ぶものはここを通す。
+        """
+
+        count = int(count)
+        if count > 0 and text:
+            self._note(utf8_length(text) * count)
+            self._parts.append(text * count)
+        return self
+
+    def build(self) -> str:
+        """組み立てた fragment。ここまでの全長は既に上限以下。"""
+
+        if len(self._parts) == 1:
+            return self._parts[0]
+        return "".join(self._parts)
+
+
+class ChildResolver:
+    """node 本体が driver から受け取る口。
+
+    本体にできるのは 2 つだけ: **子を要求する**（`__call__`）と、**自分の分を
+    書く**（`fragment()`）。どちらも上限を通るので、本体側に大きさの判定を
+    書かせない。node 種別が増えても、上限を効かせ忘れる余地が無い。
+    """
+
+    __slots__ = ("_resolve", "_new_fragment")
+
+    def __init__(self, resolve, new_fragment) -> None:
+        self._resolve = resolve
+        self._new_fragment = new_fragment
+
+    def __call__(self, node: Any, context: Any) -> "RenderedTerm":
+        return self._resolve(node, context)
+
+    def fragment(self) -> FragmentBuilder:
+        """数えながら組み立てる fragment builder。"""
+
+        return self._new_fragment()
 
 
 def term_properties(term: Any) -> Any:
@@ -280,21 +492,22 @@ class RenderPlan:
 
 
 class _Driver:
-    """反復 post-order の走査。Python の再帰を使わない。
+    """描画 instance の構築。予定と経路の管理は `ResolutionSchedule` が持つ。
 
     node 本体は「子が要る」ところで `_NeedChild` を投げるので、driver はその子を
-    積んでから同じ本体をもう一度走らせる。本体を書き換えずに反復化できるのが
-    利点で、**最後に成功した実行だけ**が採用される。
+    予定表へ積んでから同じ本体をもう一度走らせる。本体を書き換えずに反復化
+    できるのが利点で、**最後に成功した実行だけ**が採用される。
 
     子が多い node（引数の多い CALL、branch の多い PHI）では「1 個ずつ積んで
-    やり直す」が幅の 2 乗になる。そこで同じ node を数回回しても終わらなければ、
+    やり直す」が幅の 2 乗になる。予定表が「切り替えどき」を言ってきたら、
     **要求を一度に集める実行**へ切り替える: 未解決の子には偽の値を返して本体を
     最後まで走らせ、要求された子をまとめて積む。その実行の結果は捨てる
     （採用されるのは本物の値で走った実行だけ）ので、偽の値が出力へ混ざることは
     ない。収集が取りこぼしても、いつもの 1 個ずつの経路が続きを拾う。
 
-    切り替えの判断は **回した回数** だけで、node の種別を知らない。新しい種別を
-    足す人がここへ手を入れる必要は無い。
+    この class が種別について知っていることは無い。上限は 2 つの口
+    （`resolve` と `FragmentBuilder`）を通るので、新しい種別が上限を素通りする
+    余地が無い。
     """
 
     def __init__(self, body, classify, counters: RenderCounters, limit_bytes, site: str) -> None:
@@ -302,6 +515,10 @@ class _Driver:
         self._classify = classify
         self._counters = counters
         self._limit = limit_bytes
+        #: 材料に当てる許容量（出力上限そのものではない。上の定数の docstring）
+        self._material_limit = (
+            None if limit_bytes is None else int(limit_bytes) * MATERIAL_ALLOWANCE
+        )
         self._site = str(site)
         self.instances: List[RenderInstance] = []
         self.post_order: List[int] = []
@@ -338,20 +555,13 @@ class _Driver:
         return term
 
     def run(self, root: Any, context: Any) -> int:
-        stack: List[Tuple[Any, Any]] = [(root, context)]
-        # 経路は **描画 instance**（node + 文脈）で持つ。node だけで持つと、
-        # 同じ node を 2 つの文脈で要求する本体（比較の被演算子と PHI の条件が
-        # 同じ式、など）が、閉路でもないのに閉路と判定される。
-        on_path: Dict[Tuple[int, Any], int] = {}
-        attempts: Dict[int, int] = {}
-        _enter_path(on_path, (id(root), context))
-        while stack:
-            node, ctx = stack[-1]
-            key = (id(node), ctx)
+        schedule = ResolutionSchedule((root, context), key_of=_instance_key)
+        while schedule:
+            node, ctx = schedule.current()
+            key = schedule.current_key()
             index = self.index_by_key.get(key)
             if index is not None and index in self._done:
-                stack.pop()
-                _leave_path(on_path, key)
+                schedule.settle()
                 continue
             if index is None:
                 index = len(self.instances)
@@ -362,10 +572,9 @@ class _Driver:
             self._pending_bytes = 0
             self._missing = None
             try:
-                fragment = self._body(node, ctx, self.resolve)
+                fragment = self._body(node, ctx, self._child_resolver())
             except _NeedChild:
                 self._counters.node_body_executions += 1
-                attempts[index] = attempts.get(index, 0) + 1
                 if self._missing is None:
                     # `_NeedChild` は `resolve` が要求を控えてから投げる合図で、
                     # 控えの無い合図は driver の不整合。何を積むか分からない
@@ -374,24 +583,28 @@ class _Driver:
                         "a child was requested without recording which one"
                     )
                 pending = [self._missing]
-                if attempts[index] >= DISCOVERY_AFTER_RETRIES:
+                if schedule.should_collect_requests():
                     pending = self._collect_requests(node, ctx) or pending
-                for child_node, child_context in reversed(pending):
-                    child_key = (id(child_node), child_context)
-                    if child_key in on_path:
-                        raise RenderGraphCycleError(
-                            "render traversal returned to a node already on the path"
-                        )
-                    stack.append((child_node, child_context))
-                    _enter_path(on_path, child_key)
+                schedule.need(pending)
                 continue
             finally:
                 self._edges = None
             self._counters.node_body_executions += 1
             self._complete(index, str(fragment), tuple(edges))
-            _leave_path(on_path, key)
-            stack.pop()
+            schedule.settle()
         return self.index_by_key[(id(root), context)]
+
+    def _child_resolver(self) -> ChildResolver:
+        return ChildResolver(self.resolve, self._new_fragment)
+
+    def _new_fragment(self) -> FragmentBuilder:
+        """本体が自分の分を書く口。書いた byte は今の本体の材料として数える。"""
+
+        return FragmentBuilder(self._note_local_bytes)
+
+    def _note_local_bytes(self, extra_bytes: int) -> None:
+        self._pending_bytes += int(extra_bytes)
+        self._check_material(self._pending_bytes, f"{self._site}.materialize")
 
     def _collect_requests(self, node: Any, context: Any):
         """本体を偽の子で一度走らせ、要求された未解決の子をまとめて返す。
@@ -434,7 +647,18 @@ class _Driver:
 
                 self._counters.node_body_executions += 1
                 try:
-                    self._body(node, context, collect)
+                    # 収集の実行も本体を最後まで走らせるので、本体が自分で書く
+                    # 分も同じ上限を通す。通さないと「捨てるから」という理由で
+                    # 上限超えの文字列を作ってしまう。
+                    def note(extra_bytes: int, _pending=pending) -> None:
+                        _pending[0] += int(extra_bytes)
+                        self._check_material(_pending[0], f"{self._site}.materialize")
+
+                    self._body(
+                        node,
+                        context,
+                        ChildResolver(collect, lambda: FragmentBuilder(note)),
+                    )
                 except DISCOVERY_IGNORED_FAILURES:
                     pass
                 except _NeedChild:  # pragma: no cover - collect never raises it
@@ -464,20 +688,19 @@ class _Driver:
         self._check_material(0, f"{self._site}.materialize")
 
     def _check_material(self, pending_bytes: int, site: str) -> None:
-        """renderer が抱えている材料の量を上限と比べる。
+        """renderer が抱えている材料の量を、**材料の許容量**と比べる。
 
-        これは出力量ではなく **材料**（`retained_fragment_bytes`）。本体は要求
-        した子を捨てることがあるので、材料が上限を超えても出力が超えるとは
-        限らない。それでも止めるのは、出力の何倍もの材料を先に作ること自体が
-        防ぎたい費用だから。出力量そのものの上限は書き出し口が持つ。
+        比べる相手は出力上限そのものではない（`MATERIAL_ALLOWANCE` 倍）。材料は
+        出力量の下界ではないので、出力上限をそのまま当てると出力が収まる描画まで
+        拒めてしまう。出力量そのものの上限は書き出し口（`CountingWriter`）が持つ。
         """
 
-        if self._limit is None:
+        if self._material_limit is None:
             return
         total = self.retained_bytes + int(pending_bytes)
-        if total > self._limit:
+        if total > self._material_limit:
             raise RenderOutputLimitExceeded(
-                limit_bytes=self._limit,
+                limit_bytes=self._material_limit,
                 requested_bytes=total,
                 site=site,
             )
@@ -503,16 +726,16 @@ def leading_child(fragment: str) -> Tuple[Optional[int], bool]:
     return index, end == len(fragment) - 1
 
 
-def _enter_path(on_path: Dict[Any, int], key: Any) -> None:
-    on_path[key] = on_path.get(key, 0) + 1
+def _instance_key(item: Tuple[Any, Any]) -> Tuple[int, Any]:
+    """描画 instance の同一性 = (意味 node, 描画文脈)。
 
+    node だけを key にすると、別の幅 / 文脈で描いた式を同じ束縛に束ねてしまう。
+    予定表も memo もこの同じ単位で動く（別の単位を持つと、片方が「同じ」と
+    言うものを他方が「別」と言う）。
+    """
 
-def _leave_path(on_path: Dict[Any, int], key: Any) -> None:
-    remaining = on_path.get(key, 0) - 1
-    if remaining > 0:
-        on_path[key] = remaining
-    else:
-        on_path.pop(key, None)
+    node, context = item
+    return (id(node), context)
 
 
 def build_render_plan(

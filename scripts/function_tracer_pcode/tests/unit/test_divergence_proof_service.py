@@ -79,10 +79,13 @@ def test_condition_identity_key_is_one_pure_module_function():
     p = Expression.variable("param_1", 4)
     cond = Condition(Expression.binary_op("INT_EQUAL", p, Expression.constant(0, 4)), False)
     key = condition_identity_key(cond)
-    assert key[0] == "condition" and key[2] is False
+    # 鍵の中身の並びではなく契約を見る: 同じ 1 つの関数が答え、向きを区別し、
+    # 組めない条件には鍵を与えない（`core/structural.condition_identity`）。
+    assert key is not None
     assert DivergenceProofService.condition_identity_key(cond) == key
     assert ReturnAnalyzer._condition_identity_key(cond) == key
-    assert condition_identity_key(Condition(cond.expression, True))[2] is True
+    negated = condition_identity_key(Condition(cond.expression, True))
+    assert negated is not None and negated != key
 
 
 def test_suppliers_read_analyzer_state_at_call_time():

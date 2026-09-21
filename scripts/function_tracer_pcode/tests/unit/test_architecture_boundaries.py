@@ -644,6 +644,8 @@ def test_identity_kinds_are_not_merged_into_one_type():
         "identity_form",
         "condition_identity",
         "condition_identities",
+        "expression_identity",
+        "identity_tuple",
     }, exposed
     for forbidden in ("solver_query", "rewrite", "authority_digest", "query_identity"):
         assert not hasattr(identity, forbidden), forbidden
@@ -1267,3 +1269,261 @@ def test_the_complete_identity_is_not_built_from_a_digest():
 
     # 契約そのものも確かめる: digest を定数にしても identity は分かれる。
     assert structural.structural_identity_form is not None
+
+
+# ---------------------------------------------------------------------------
+# 走査 machinery の owner（`render_plan.ResolutionSchedule`）
+#
+# 描画 driver と node 属性の評価は同じ形の反復をする。予定・経路・切り替えの
+# 規則を両方に書くと片方だけが直る（実際、閉路判定が scheduled を active と
+# 数える同じ誤りが両方にあった）。規則は 1 実装に寄せ、借りる側が別実装へ
+# 戻ったらここで落ちる。
+# ---------------------------------------------------------------------------
+
+#: 走査 machinery を所有する module。
+_TRAVERSAL_OWNER = "core/render_plan.py"
+
+#: 反復走査を回す（= 予定表を借りる）module。
+_TRAVERSAL_BORROWERS = ("core/render_smt/attributes.py",)
+
+
+def test_the_cycle_judgement_has_one_implementation():
+    """`RenderGraphCycleError` を投げるのは予定表だけであること。
+
+    閉路かどうかを言うには「今の経路に居るか」を知らねばならず、それを知って
+    いるのは予定表だけ。別 module が投げているなら、その module が経路を自分で
+    持っている（= 2 実装目がある）。
+    """
+
+    offenders = []
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        relative = path.relative_to(PACKAGE_ROOT).as_posix()
+        if relative.startswith("tests/") or relative == _TRAVERSAL_OWNER:
+            continue
+        for node in ast.walk(_parse(path)):
+            if not isinstance(node, ast.Raise) or node.exc is None:
+                continue
+            raised = node.exc
+            name = None
+            if isinstance(raised, ast.Call) and isinstance(raised.func, ast.Name):
+                name = raised.func.id
+            elif isinstance(raised, ast.Name):
+                name = raised.id
+            if name == "RenderGraphCycleError":
+                offenders.append(f"{relative}:{node.lineno}")
+    assert offenders == [], offenders
+
+
+def test_the_collection_switch_rule_has_one_owner():
+    """切り替えの閾値を読むのは予定表だけであること。
+
+    driver 側が閾値を読むと、切り替えの規則が実質 2 つになる。予定表が
+    `should_collect_requests()` で答える。
+    """
+
+    offenders = []
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        relative = path.relative_to(PACKAGE_ROOT).as_posix()
+        if relative.startswith("tests/") or relative == _TRAVERSAL_OWNER:
+            continue
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.Name) and node.id == "DISCOVERY_AFTER_RETRIES":
+                offenders.append(f"{relative}:{node.lineno}")
+    assert offenders == [], offenders
+
+
+@pytest.mark.parametrize("module_path", _TRAVERSAL_BORROWERS)
+def test_a_borrower_keeps_no_active_path_of_its_own(module_path):
+    """予定表を借りる側が、経路の帳簿を自分で持たないこと。
+
+    自前の `on_path` / `active` を持った瞬間に、閉路判定が何を見るかという
+    判断が 2 箇所になる。借りる側は `ResolutionSchedule` を使うだけ。
+    """
+
+    path = PACKAGE_ROOT / module_path
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    assert "ResolutionSchedule" in source, module_path
+    bookkeeping = {"on_path", "active", "_active", "_enter", "_leave", "_enter_path", "_leave_path"}
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in bookkeeping:
+            offenders.append(f"{module_path}:{node.lineno} assigns {node.id}")
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in bookkeeping:
+            offenders.append(f"{module_path}:{node.lineno} defines {node.name}")
+    assert offenders == [], offenders
+
+
+# ---------------------------------------------------------------------------
+# 上限: 幅が子の数に比例する本体は、数えながら組み立てること
+# ---------------------------------------------------------------------------
+
+#: 可変長の子を 1 つの文字列へ畳んでよい唯一の道。
+_FRAGMENT_BUILDER = "fragment"
+
+
+def _iterates_a_child_collection(node: ast.AST) -> bool:
+    """`expr.operands` / `branches` のような **可変長の子**を回しているか。"""
+
+    sources = {"operands", "branches", "value", "cases", "arguments", "args"}
+    for inner in ast.walk(node):
+        if isinstance(inner, ast.Attribute) and inner.attr in sources:
+            return True
+        if isinstance(inner, ast.Name) and inner.id in sources:
+            return True
+    return False
+
+
+@pytest.mark.parametrize("module_path", _RENDER_BODY_MODULES)
+def test_a_wide_body_does_not_fold_its_children_into_one_string(module_path):
+    """**可変長の子**を `join` / 積み直しで一度に畳まないこと（規則、一覧ではない）。
+
+    子の参照は `resolve` が 1 個ずつ数えるが、本体が自分で書く区切り・演算子・
+    括弧はそこに乗らない。`join` で一度に畳むと
+
+    ```text
+    子の参照の合計 < 上限 < 完成した fragment
+    ```
+
+    の幅で、上限超えの文字列を **作ってから**しか止められない。さらに
+    `result = f"(… {result})"` の積み直しは幅の 2 乗の文字列 copy になる。
+
+    見るのは「子の集まり（`operands` / `branches` …）を回しているか」だけ。
+    深さや幅で決まらない繰り返し（結果幅で決まる `let` の入れ子、固定個数の
+    `concat`）は対象にしない — そこは幅と無関係に上限以下に収まる。新しい node
+    種別が幅を持ったときに同じ罠を踏まないよう、書き方そのものを禁じる
+    （`FragmentBuilder` を通せば置く前に数える）。
+    """
+
+    path = PACKAGE_ROOT / module_path
+    offenders = []
+    tree = _parse(path)
+
+    # 1. 可変長の子に対する str.join（loop の内外を問わない）
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "join"
+            and node.args
+            and isinstance(node.args[0], (ast.GeneratorExp, ast.ListComp, ast.SetComp))
+            and _iterates_a_child_collection(node.args[0])
+        ):
+            offenders.append(f"{module_path}:{node.lineno} joins a child collection")
+
+    # 2 / 3. 子の集まりを回す loop の中での積み直しと += 累積
+    for loop in ast.walk(tree):
+        if not isinstance(loop, (ast.For, ast.AsyncFor)):
+            continue
+        if not _iterates_a_child_collection(loop.iter):
+            continue
+        for node in ast.walk(loop):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name) and isinstance(node.value, ast.JoinedStr):
+                    reread = any(
+                        isinstance(part, ast.FormattedValue)
+                        and isinstance(part.value, ast.Name)
+                        and part.value.id == target.id
+                        for part in node.value.values
+                    )
+                    if reread:
+                        offenders.append(
+                            f"{module_path}:{node.lineno} rebuilds {target.id} from itself "
+                            "while walking a child collection"
+                        )
+            if (
+                isinstance(node, ast.AugAssign)
+                and isinstance(node.op, ast.Add)
+                and isinstance(node.target, ast.Name)
+                and isinstance(node.value, (ast.JoinedStr, ast.Constant))
+                and isinstance(getattr(node.value, "value", ""), str)
+            ):
+                offenders.append(
+                    f"{module_path}:{node.lineno} accumulates a string with += "
+                    "while walking a child collection"
+                )
+    assert offenders == [], offenders
+
+
+# ---------------------------------------------------------------------------
+# identity: 予算付きの key を鍵に埋めない
+# ---------------------------------------------------------------------------
+
+#: 予算超過で `None` を返す key。鍵に埋めると「作れなかった」が「そういう値」に
+#: 化け、末尾だけ違う深い式 2 つが同じ鍵になる。
+_BUDGETED_KEY_CALLS = frozenset({"expression_key", "expression_key_safe", "condition_key"})
+#: 「同じものか」を言う鍵を作る関数の名前の型。
+_IDENTITY_FUNCTION_MARKERS = ("identity_key", "_identity", "identity_form")
+
+#: 予算付きの key を埋めたまま残っている既知の場所。**owner が居るものだけ**。
+#: 削除専用（増やさない）。#181 がこの 2 件を所有する — monolithic の proof cache
+#: という別の決定面なので、PR-22-C では触らずに記録する。
+_BUDGETED_KEY_IN_IDENTITY_ALLOWLIST = frozenset(
+    {
+        # #181: monolithic case identity（proof cache bundle の同一性判定）
+        ("proof/strategies/monolithic_support.py", "_monolithic_case_identity"),
+        ("proof/monolithic_authority.py", "_case_identity"),
+    }
+)
+
+
+def test_an_identity_key_is_not_built_from_a_budgeted_key():
+    """identity / 証明鍵を作る関数が、予算付きの key を使っていないこと。
+
+    予算付きの key は truncate すると `None` を返す。それを鍵の tuple へ入れると
+    深い値 2 つが同じ鍵になり、「完全 identity を組めなければ候補・証明を出さない」
+    という contract が鍵の一部だけにしか効かない状態になる（実際そうなっていた）。
+    """
+
+    offenders = []
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        relative = path.relative_to(PACKAGE_ROOT).as_posix()
+        if relative.startswith("tests/") or relative == "core/structural.py":
+            continue
+        for function in ast.walk(_parse(path)):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not any(marker in function.name for marker in _IDENTITY_FUNCTION_MARKERS):
+                continue
+            if (relative, function.name) in _BUDGETED_KEY_IN_IDENTITY_ALLOWLIST:
+                continue
+            for node in ast.walk(function):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id in _BUDGETED_KEY_CALLS
+                ):
+                    offenders.append(
+                        f"{relative}:{node.lineno} in {function.name} uses {node.func.id}"
+                    )
+    assert offenders == [], offenders
+
+
+def test_the_budgeted_key_allowlist_still_describes_real_places():
+    """allowlist が古くなっていないこと（直したのに残っている、を残さない）。
+
+    削除専用の運用なので、直したら行を消す。消し忘れると「owner が居る既知の
+    問題」の一覧が実態とずれ、次の人が同じ調査をやり直す。
+    """
+
+    stale = []
+    for relative, function_name in sorted(_BUDGETED_KEY_IN_IDENTITY_ALLOWLIST):
+        path = PACKAGE_ROOT / relative
+        assert path.exists(), relative
+        found = False
+        for function in ast.walk(_parse(path)):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if function.name != function_name:
+                continue
+            found = any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in _BUDGETED_KEY_CALLS
+                for node in ast.walk(function)
+            )
+        if not found:
+            stale.append(f"{relative}::{function_name}")
+    assert stale == [], stale

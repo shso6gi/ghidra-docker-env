@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib
 import json
+from types import SimpleNamespace
 import pathlib
 import re
 import sys
@@ -498,6 +499,127 @@ def test_c7_the_abort_says_which_renderer_and_which_stage():
     assert human_emit.value.site == "core.render_python.emit"
 
 
+# ---------------------------------------------------------------------------
+# 上限: 材料と出力は別の量。どちらの側にも偽陰性・偽陽性を出さないこと
+# ---------------------------------------------------------------------------
+
+
+def _wide_call(arity: int) -> Expression:
+    args = [_param(f"p{index}", index) for index in range(arity)]
+    return Expression(ExpressionType.CALL, name="wide", operands=args, size=4)
+
+
+def _wide_phi(branches: int) -> Expression:
+    a = _param("a", 0)
+    b = _param("b", 1)
+    cases = [
+        (Condition(_binary("INT_EQUAL", a, _const(index), size=1)), _binary("INT_ADD", b, _const(index)))
+        for index in range(branches)
+    ]
+    cases.append((None, b))
+    phi = Expression.phi(cases)
+    phi.size = 4
+    return phi
+
+
+def _human(root, limit_bytes=None, *, simplify=False):
+    from scripts.function_tracer_pcode.core.render_python import (
+        HumanRenderContext,
+        render_human_text,
+    )
+
+    return render_human_text(
+        root, HumanRenderContext(simplify=simplify), limit_bytes=limit_bytes
+    )
+
+
+def _smt(root, limit_bytes=None):
+    return render_smt_term(root, build_smt_render_context(), None, limit_bytes=limit_bytes)
+
+
+_BOUNDED_SHAPES = (
+    ("wide_call_64", lambda: _wide_call(64)),
+    ("wide_call_512", lambda: _wide_call(512)),
+    ("wide_phi_64", lambda: _wide_phi(64)),
+    ("wide_phi_512", lambda: _wide_phi(512)),
+    ("shared_dag_40", lambda: _doubling_dag(40, _param("a", 0))),
+    ("linear_2000", lambda: _linear_chain(2000, _param("a", 0))),
+)
+
+
+@pytest.mark.parametrize("shape,build", _BOUNDED_SHAPES)
+@pytest.mark.parametrize("render", [_smt, _human], ids=["smt", "human"])
+def test_a_render_that_fits_the_limit_is_never_refused(shape, build, render):
+    """**出力が上限に収まる描画は拒まれない**（材料の許容量が出力上限を兼ねない）。
+
+    材料（renderer が同時に抱える fragment の総量）は出力量の下界ではない。
+    placeholder は指す先より長いことがあり（1 byte の葉を 5 byte の印が指す）、
+    本体は要求した子を捨てることもある。だから出力上限をそのまま材料に当てると、
+    **出力が上限に収まる描画まで拒める** — 葉の短い幅の広い node でまさに
+    そうなっていた（64 引数の CALL は出力 257 byte、材料 507 byte）。
+
+    上限ちょうどでも、上限なしと同じ文字列が出ること。
+    """
+
+    root = build()
+    full = render(root)
+    assert render(root, len(full.encode("utf-8"))) == full
+
+
+@pytest.mark.parametrize("shape,build", _BOUNDED_SHAPES)
+@pytest.mark.parametrize("render", [_smt, _human], ids=["smt", "human"])
+def test_one_byte_under_the_output_size_is_refused(shape, build, render):
+    """逆向き: 出力に 1 byte 足りない上限なら必ず打ち切ること（緩めていない）。"""
+
+    root = build()
+    full = render(root)
+    with pytest.raises(RenderOutputLimitExceeded):
+        render(root, len(full.encode("utf-8")) - 1)
+
+
+@pytest.mark.parametrize(
+    "shape,build",
+    [("wide_call", lambda: _wide_call(20000)), ("wide_phi", lambda: _wide_phi(8000))],
+)
+@pytest.mark.parametrize("render", [_smt, _human], ids=["smt", "human"])
+def test_a_wide_body_stops_before_it_finishes_its_own_delimiters(shape, build, render):
+    """区切り・演算子・括弧まで含めて、上限超えの fragment を **作らない**こと。
+
+    子の参照だけを数えていたときは
+
+    ```text
+    子の参照の合計 < 上限 < 完成した fragment
+    ```
+
+    の幅で、上限超えの文字列を作ってからしか止められなかった。本体が自分で
+    書く分も `FragmentBuilder` を通るので、置く前に止まる。
+    """
+
+    root = build()
+    started = time.perf_counter()
+    with pytest.raises(RenderOutputLimitExceeded):
+        render(root, 200)
+    assert time.perf_counter() - started < 5.0
+
+
+@pytest.mark.parametrize("render", [_smt, _human], ids=["smt", "human"])
+def test_a_wide_phi_does_not_rebuild_its_nesting(render):
+    """branch 数に対して文字列 copy が 2 乗にならないこと。
+
+    入れ子を後ろから `result = f"(ite … {result})"` で積み直すと、幅 4 倍で
+    時間 16 倍になる。前から 1 段ずつ置けば 4 倍で済む。
+    """
+
+    timings = []
+    for width in (256, 1024, 4096):
+        root = _wide_phi(width)
+        started = time.perf_counter()
+        render(root)
+        timings.append(time.perf_counter() - started)
+    # 幅 16 倍で 16 倍程度（2 乗なら 256 倍）。計測揺れを見て 6 倍を上限にする
+    assert timings[2] < timings[0] * 16 * 6, timings
+
+
 def test_c7_output_limit_raises_a_typed_limitation():
     a = _param("a", 0)
     context = build_smt_render_context()
@@ -793,6 +915,196 @@ def test_c4_render_plan_keys_instances_by_node_and_context():
     assert len({instance.index for instance in plan.instances if instance.node is node}) == 2
 
 
+# ---------------------------------------------------------------------------
+# 走査の形: 予定表（scheduled）と経路（active）を混ぜていないこと
+#
+# 描画 driver と属性評価は同じ予定表を使うので、同じ形を **両方** で確かめる。
+# 片方だけ見ていると、借りている側が別実装へ戻ったことに気付けない。
+# ---------------------------------------------------------------------------
+
+#: 要求収集へ切り替わるだけの幅（`DISCOVERY_AFTER_RETRIES` 超）。依存のある
+#: 子を収集より後ろに置くために使う。
+_COLLECTION_FILLERS = tuple(("filler", index) for index in range(8))
+
+
+def test_a_sibling_dependency_is_not_a_cycle_in_either_traversal():
+    """一括で積んだ sibling どうしの依存を閉路と言わないこと。
+
+    ```text
+    root
+    ├─ A
+    │  └─ x
+    └─ x
+    ```
+
+    `root` の要求をまとめて積むと `A` と `x` が同時に **scheduled** になる。
+    そのあと `A` が `x` を要求するが、`x` は「まだ動いていない予定」であって
+    `A` の祖先ではない。予定を経路として数えると、閉路でない DAG が落ちる。
+
+    依存のある sibling は収集が起きる位置より **後ろ**に置く（前だと収集前に
+    解決されてしまい、この test が守るものを通らない）。
+    """
+
+    x = ["x"]
+    a = ["A"]
+    root = ["root"]
+
+    def body(node, context, resolve):
+        if node is root:
+            parts = [resolve(filler, context) for filler in _COLLECTION_FILLERS]
+            parts.append(resolve(a, context))
+            parts.append(resolve(x, context))
+            return "[" + "|".join(parts) + "]"
+        if node is a:
+            return f"<A {resolve(x, context)}>"
+        return "leaf"
+
+    plan = build_render_plan(
+        root,
+        "context",
+        body=body,
+        classify=lambda fragment, head, exact: ("properties", fragment),
+        policy=SharingPolicy(min_shared_bytes=0, min_shared_tree_nodes=1),
+        counters=RenderCounters(),
+    )
+    # x は 1 instance だけ（A と root の両方から参照される）
+    assert len([i for i in plan.instances if i.node is x]) == 1
+
+    def rule(node, child):
+        if node is root:
+            return 1 + max([child(f) for f in _COLLECTION_FILLERS] + [child(a), child(x)])
+        if node is a:
+            return 1 + child(x)
+        return 1
+
+    from scripts.function_tracer_pcode.core.render_smt.attributes import evaluate_attribute
+
+    assert evaluate_attribute(root, rule, {}) == 3
+
+
+def test_a_diamond_dag_is_not_a_cycle_in_either_traversal():
+    """菱形（2 つの親が同じ子を持つ）を閉路と言わないこと。"""
+
+    shared = ["shared"]
+    left = ["left"]
+    right = ["right"]
+    root = ["root"]
+
+    def body(node, context, resolve):
+        if node is root:
+            parts = [resolve(filler, context) for filler in _COLLECTION_FILLERS]
+            parts += [resolve(left, context), resolve(right, context)]
+            return "[" + "|".join(parts) + "]"
+        if node is left:
+            return f"<L {resolve(shared, context)}>"
+        if node is right:
+            return f"<R {resolve(shared, context)}>"
+        return "leaf"
+
+    plan = build_render_plan(
+        root,
+        "context",
+        body=body,
+        classify=lambda fragment, head, exact: ("properties", fragment),
+        policy=SharingPolicy(min_shared_bytes=0, min_shared_tree_nodes=1),
+        counters=RenderCounters(),
+    )
+    assert len([i for i in plan.instances if i.node is shared]) == 1
+
+    def rule(node, child):
+        if node is root:
+            return 1 + max([child(f) for f in _COLLECTION_FILLERS] + [child(left), child(right)])
+        if node in (left, right):
+            return 1 + child(shared)
+        return 1
+
+    from scripts.function_tracer_pcode.core.render_smt.attributes import evaluate_attribute
+
+    assert evaluate_attribute(root, rule, {}) == 3
+
+
+def test_a_real_cycle_is_refused_in_either_traversal():
+    """本物の閉路（子が祖先を要求し返す）は、収集が起きる幅でも止まること。"""
+
+    root = ["root"]
+    child_node = ["child"]
+
+    def body(node, context, resolve):
+        if node is root:
+            parts = [resolve(filler, context) for filler in _COLLECTION_FILLERS]
+            parts.append(resolve(child_node, context))
+            return "[" + "|".join(parts) + "]"
+        return f"<{resolve(root, context)}>"
+
+    with pytest.raises(RenderGraphCycleError):
+        build_render_plan(
+            root,
+            "context",
+            body=body,
+            classify=lambda fragment, head, exact: ("properties", fragment),
+            policy=SharingPolicy(min_shared_bytes=0, min_shared_tree_nodes=1),
+            counters=RenderCounters(),
+        )
+
+    def rule(node, child):
+        if node is root:
+            return 1 + max([child(f) for f in _COLLECTION_FILLERS] + [child(child_node)])
+        return 1 + child(root)
+
+    from scripts.function_tracer_pcode.core.render_smt.attributes import evaluate_attribute
+
+    with pytest.raises(RenderGraphCycleError):
+        evaluate_attribute(root, rule, {})
+
+
+def test_a_node_reached_twice_on_one_path_is_a_cycle_not_sharing():
+    """直接の自己参照も閉路として止まること（収集に入らない幅でも）。"""
+
+    root = ["root"]
+
+    def body(node, context, resolve):
+        return f"<{resolve(root, context)}>"
+
+    with pytest.raises(RenderGraphCycleError):
+        build_render_plan(
+            root,
+            "context",
+            body=body,
+            classify=lambda fragment, head, exact: ("properties", fragment),
+            policy=SharingPolicy(min_shared_bytes=0, min_shared_tree_nodes=1),
+            counters=RenderCounters(),
+        )
+
+
+def test_the_schedule_separates_scheduled_from_active():
+    """予定表そのものの契約: 積んだだけの項目は active ではないこと。"""
+
+    from scripts.function_tracer_pcode.core.render_plan import ResolutionSchedule
+
+    schedule = ResolutionSchedule("root", key_of=lambda item: item)
+    assert schedule.current() == "root"
+    assert not schedule.is_active("root")
+
+    schedule.need(["a", "x"])
+    # 要求した側（root）だけが active。積まれた子は scheduled
+    assert schedule.is_active("root")
+    assert not schedule.is_active("a")
+    assert not schedule.is_active("x")
+    # 先に要求したものが先に片付く
+    assert schedule.current() == "a"
+
+    # a が x を要求するのは閉路ではない
+    schedule.need(["x"])
+    assert schedule.is_active("a")
+    assert schedule.current() == "x"
+    schedule.settle()
+    assert not schedule.is_active("x")
+
+    # 祖先を要求し返すのは閉路
+    with pytest.raises(RenderGraphCycleError):
+        schedule.need(["root"])
+
+
 def test_c4_one_node_under_two_contexts_is_not_a_cycle_when_requests_are_collected():
     """幅の広い node が同じ子を 2 つの文脈で要求しても閉路と見なさないこと。
 
@@ -1070,24 +1382,6 @@ def test_binding_names_use_the_reserved_prefix():
 # ---------------------------------------------------------------------------
 
 
-def _wide_call(arity: int) -> Expression:
-    args = [_param(f"p{index}", index) for index in range(arity)]
-    return Expression(ExpressionType.CALL, name="wide", operands=args, size=4)
-
-
-def _wide_phi(branches: int) -> Expression:
-    a = _param("a", 0)
-    b = _param("b", 1)
-    cases = [
-        (Condition(_binary("INT_EQUAL", a, _const(index), size=1)), _binary("INT_ADD", b, _const(index)))
-        for index in range(branches)
-    ]
-    cases.append((None, b))
-    phi = Expression.phi(cases)
-    phi.size = 4
-    return phi
-
-
 @pytest.mark.parametrize(
     "build",
     [
@@ -1221,20 +1515,180 @@ def _is_hex(value: str) -> bool:
     return True
 
 
-def test_identity_is_refused_beyond_its_node_limit():
-    """大きすぎる条件は identity を返さない（切り詰めた key を返さない）。"""
+def test_summary_identity_does_not_collide_on_deep_return_values():
+    """site と条件が同じで **戻り値の末尾だけ違う**候補が同じ鍵にならないこと。
+
+    かつて鍵は戻り値だけ予算付きの `expression_key_safe()` を直に埋めていた。
+    あれは予算超過で `None` を返すので、深い値 2 つがどちらも `None` になり
+
+    ```text
+    ("return_info", 同じ site, 同じ条件, None)
+    ```
+
+    として同一視され得た（条件側だけ fail-closed でも鍵全体は fail-closed
+    ではない）。鍵は組めるなら値まで完全に識別し、組めないなら鍵自体を
+    作らない、のどちらかでなければならない。
+    """
+
+    from scripts.function_tracer_pcode.analysis.returns.return_extraction import (
+        _impl__return_info_summary_identity_key,
+    )
+    from scripts.function_tracer_pcode.core.structural import expression_key_safe
+
+    class _Site:
+        def _return_site_key(self, ret):
+            return "same-site"
+
+    def deep_value(tail: int, depth: int = 400):
+        node = _param("a", 0)
+        for index in range(depth):
+            node = _binary("INT_ADD", node, _const(index))
+        return _binary("INT_ADD", node, _const(tail))
+
+    conditions = [Condition(_binary("INT_LESS", _param("a", 0), _param("b", 1), size=1))]
+    left = SimpleNamespace(value=deep_value(1), conditions=conditions)
+    right = SimpleNamespace(value=deep_value(2), conditions=conditions)
+
+    # 前提: legacy の予算付き key は両方 None（この test が守るものの前提）
+    assert expression_key_safe(left.value) is None
+    assert expression_key_safe(right.value) is None
+
+    site = _Site()
+    left_key = _impl__return_info_summary_identity_key(site, left)
+    right_key = _impl__return_info_summary_identity_key(site, right)
+
+    # 組めたなら別物として区別できていること、組めないなら両方 None
+    if left_key is None or right_key is None:
+        assert left_key is None and right_key is None
+    else:
+        assert left_key != right_key
+
+    # 同じ値なら同じ鍵（fail-closed が「常に None」に退化していないこと）
+    same = SimpleNamespace(value=deep_value(1), conditions=conditions)
+    assert _impl__return_info_summary_identity_key(site, same) == left_key
+    assert left_key is not None
+
+
+def test_summary_identity_is_refused_when_a_part_cannot_be_built():
+    """部品が 1 つでも組めないときは鍵を作らないこと（`None` を埋めない）。"""
+
+    from scripts.function_tracer_pcode.analysis.returns.return_extraction import (
+        _impl__return_info_summary_identity_key,
+    )
+    from scripts.function_tracer_pcode.core.structural import IDENTITY_MAX_SEMANTIC_NODES
+
+    class _Site:
+        def _return_site_key(self, ret):
+            return "same-site"
+
+    node = _param("a", 0)
+    for index in range(IDENTITY_MAX_SEMANTIC_NODES + 16):
+        node = _binary("INT_ADD", node, _const(index))
+
+    site = _Site()
+    # 戻り値が大きすぎて identity が組めない
+    assert _impl__return_info_summary_identity_key(
+        site, SimpleNamespace(value=node, conditions=[])
+    ) is None
+    # 条件が大きすぎて identity が組めない
+    assert _impl__return_info_summary_identity_key(
+        site,
+        SimpleNamespace(
+            value=_param("a", 0),
+            conditions=[Condition(_binary("INT_LESS", node, _param("b", 1), size=1))],
+        ),
+    ) is None
+
+
+def test_a_missing_return_value_is_not_the_same_as_an_unbuildable_one():
+    """「値が無い」と「identity を組めなかった」を同じ値で表さないこと。"""
 
     from scripts.function_tracer_pcode.core.structural import (
-        CONDITION_IDENTITY_NODE_LIMIT,
+        IDENTITY_MAX_SEMANTIC_NODES,
+        expression_identity,
+    )
+
+    absent = expression_identity(None)
+    assert absent is not None
+
+    node = _param("a", 0)
+    for index in range(IDENTITY_MAX_SEMANTIC_NODES + 16):
+        node = _binary("INT_ADD", node, _const(index))
+    assert expression_identity(node) is None
+
+    small = expression_identity(_param("a", 0))
+    assert small is not None and small != absent
+
+
+def test_identity_tuple_refuses_a_missing_part():
+    """組み立ての combinator が欠けた部品を埋めないこと。"""
+
+    from scripts.function_tracer_pcode.core.structural import identity_tuple
+
+    assert identity_tuple("tag", ("a", 1), ("b", 2)) is not None
+    assert identity_tuple("tag", ("a", 1), None) is None
+    assert identity_tuple("tag", None) is None
+    # 別の部品からは別の鍵
+    assert identity_tuple("tag", ("a", 1)) != identity_tuple("tag", ("a", 2))
+
+
+def test_identity_is_refused_beyond_its_distinct_node_limit():
+    """distinct な意味 node が多すぎる条件は identity を返さない。
+
+    上限が数えているのは **走査が返した distinct node** で、hash-cons 後の
+    record 数ではない（record は共有があれば少なくなるので、node 上限を名乗り
+    ながら record を数えると、名前と実測が食い違う）。
+    """
+
+    from scripts.function_tracer_pcode.core.structural import (
+        IDENTITY_MAX_SEMANTIC_NODES,
+        structural_identity_form,
+    )
+    from scripts.function_tracer_pcode.core.semantic_snapshot import (
+        traverse_semantic_graph,
     )
 
     a = _param("a", 0)
     node = a
-    for index in range(CONDITION_IDENTITY_NODE_LIMIT + 16):
+    for index in range(IDENTITY_MAX_SEMANTIC_NODES + 16):
         node = _binary("INT_ADD", node, _const(index))
     huge = Condition(_binary("INT_LESS", node, _param("b", 1), size=1))
+    assert len(traverse_semantic_graph(huge.expression).post_order) > IDENTITY_MAX_SEMANTIC_NODES
     assert condition_identity(huge) is None
     assert condition_identities([huge]) is None
+
+    # ちょうど上限以下なら組める（上限が「組めない理由」を名乗れていること）
+    small = a
+    for index in range(8):
+        small = _binary("INT_ADD", small, _const(index))
+    assert structural_identity_form(small) is not None
+
+
+def test_the_record_limit_is_about_the_payload_not_the_node_count():
+    """record 上限は直列化した identity の大きさを抑えるもの、と実装が一致すること。
+
+    共有の多い式（depth 4000 の二重化 DAG）は distinct node が上限以下でも
+    record は更に少ない。2 つの上限が別の量を測っていることを固定する。
+    """
+
+    from scripts.function_tracer_pcode.core.structural import (
+        IDENTITY_MAX_RECORDS,
+        IDENTITY_MAX_SEMANTIC_NODES,
+        structural_identity_form,
+    )
+    from scripts.function_tracer_pcode.core.semantic_snapshot import (
+        traverse_semantic_graph,
+    )
+
+    a = _param("a", 0)
+    shared = _doubling_dag(2000, a)
+    nodes = len(traverse_semantic_graph(shared).post_order)
+    assert nodes <= IDENTITY_MAX_SEMANTIC_NODES
+    form = structural_identity_form(shared)
+    assert form is not None
+    records = form[-1]
+    assert len(records) <= nodes <= IDENTITY_MAX_SEMANTIC_NODES
+    assert len(records) < IDENTITY_MAX_RECORDS
 
 
 def test_identity_is_json_serialisable():

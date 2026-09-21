@@ -16,7 +16,9 @@ from scripts.function_tracer_pcode.core.render_output import CountingWriter, Ren
 from scripts.function_tracer_pcode.core.render_metrics import record_render
 from scripts.function_tracer_pcode.core.render_plan import (
     NO_SHARING_POLICY,
+    FragmentBuilder,
     RenderGraphCycleError,
+    RenderPlanInvariantError,
     RenderedTerm,
     build_render_plan,
     check_plan_invariants,
@@ -620,6 +622,15 @@ class _SmtChildRenderer:
     def context(self) -> SmtRenderContext:
         return self._context
 
+    def fragment(self) -> FragmentBuilder:
+        """自分の分を **数えながら**書く口（driver 所有）。
+
+        幅が子の数に比例する node はここを通す。`join` で一度に畳むと、上限
+        超えの文字列を作ってからしか止められない。
+        """
+
+        return self._resolve.fragment()
+
     def __call__(
         self,
         node,
@@ -667,6 +678,19 @@ class _DetachedChildRenderer:
     @property
     def context(self) -> SmtRenderContext:
         return self._base
+
+    def fragment(self):
+        """driver の外には上限の owner が居ないので、ここは **開けない**。
+
+        開けてしまうと、幅が子の数に比例する本体が driver の外から呼ばれた
+        ときだけ上限を素通りする。素通りさせるより、そういう経路を作った時点で
+        止める（今は本体がこの口から呼ばれることは無い）。
+        """
+
+        raise RenderPlanInvariantError(
+            "a node body asked for a counted fragment outside the render driver; "
+            "render through render_smt_term so the limit has an owner"
+        )
 
     def __call__(
         self,
@@ -1256,7 +1280,6 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
         return f"({op} {operand_smt})"
 
     if expr_type == expr_kind.CALL:
-        args = " ".join(render_child(operand) for operand in expr.operands)
         raw_func_name = getattr(expr, "name", None)
         func_name = normalize_call_symbol_name(raw_func_name)
         if symbol_name_mapping is not None:
@@ -1266,9 +1289,16 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
                 else func_name
             )
             func_name = symbol_name_mapping.get(func_name, func_name)
-        if args:
-            return f"({func_name} {args})"
-        return f"{func_name}"
+        operands = getattr(expr, "operands", None) or ()
+        if not operands:
+            return f"{func_name}"
+        # 引数の数だけ長くなる node なので、`join` で一度に畳まず 1 個ずつ
+        # 数えながら置く（上限に達した時点で止まる）。
+        fragment = render_child.fragment()
+        fragment.literal(f"({func_name}")
+        for operand in operands:
+            fragment.literal(" ").term(render_child(operand))
+        return fragment.literal(")").build()
 
     if expr_type == expr_kind.MEMORY:
         mem_bits = expression_smt_bit_width(expr) or 32
@@ -1314,40 +1344,52 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
                 float_mode=float_mode,
             )
 
-        last_val = branches[-1][1]
-        result = render_branch_value(last_val)
-
-        for index in range(len(branches) - 2, -1, -1):
-            cond, val = branches[index]
+        def render_branch_condition(cond):
             if cond is not None and hasattr(cond, "_to_smt_internal"):
-                cond_str = render_child(
+                return render_child(
                     cond,
                     prefer_signed_arithmetic=prefer_sign_extension,
                 )
-            elif cond is not None and hasattr(cond, "expression"):
+            if cond is not None and hasattr(cond, "expression"):
                 # 内部の再帰。公開入口（`Condition.to_smt`）へ戻らない。
                 # 引数は公開入口と同じだけ渡す（`prefer_sign_extension` /
                 # `address_context` は条件の描画に伝播させない）— 伝播させると
                 # PHI の branch 条件の描画が変わり、判定が動く。
-                cond_str = render_child(
+                return render_child(
                     cond,
                     prefer_signed_arithmetic=False,
                     address_context=False,
                 )
-            else:
-                cond_str = smt_term("true", boolean_literal=True)
+            return smt_term("true", boolean_literal=True)
 
-            val_str = render_branch_value(val)
-
+        # branch 数だけ入れ子になる node なので、**前から** 1 段ずつ置く。
+        # 後ろから `result = f"(ite … {result})"` で積み直すと、文字列 copy が
+        # branch 数の 2 乗になり、上限を超える中間文字列も出来てしまう。
+        #
+        # 畳み込みの意味は積み直し版と同じ: 恒真の条件が出たらその値が最内に
+        # なり、後ろの branch は届かない（積み直し版では最後に処理される
+        # 最小 index の恒真条件が result を置き換えるので、前から見て最初の
+        # 恒真条件と同じ）。恒偽の条件は段を作らない。
+        fragment = render_child.fragment()
+        opened = 0
+        innermost = None
+        for cond, val in branches[:-1]:
+            cond_str = render_branch_condition(cond)
             # 恒真 / 恒偽の畳み込みは **型付きの性質**で決める。描画文字列を
             # 見ると、その条件に名前が付いた瞬間に畳み込みが消える。
             literal = term_boolean_literal(cond_str)
+            if literal is False:
+                continue
+            val_str = render_branch_value(val)
             if literal is True:
-                result = val_str
-            elif literal is not False:
-                result = f"(ite {cond_str} {val_str} {result})"
-
-        return result
+                innermost = val_str
+                break
+            fragment.literal("(ite ").term(cond_str).literal(" ").term(val_str).literal(" ")
+            opened += 1
+        if innermost is None:
+            innermost = render_branch_value(branches[-1][1])
+        fragment.term(innermost)
+        return fragment.repeat(")", opened).build()
 
     return "unknown"
 

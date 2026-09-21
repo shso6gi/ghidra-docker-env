@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.core.render_plan import (
     PLACEHOLDER_MARK,
     BindingNamespace,
     RenderGraphCycleError,
+    RenderPlanInvariantError,
     SharingPolicy,
     build_render_plan,
     check_plan_invariants,
@@ -208,6 +209,15 @@ class _HumanChildRenderer:
     def context(self) -> HumanRenderContext:
         return self._context
 
+    def fragment(self):
+        """自分の分を **数えながら**書く口（driver 所有）。
+
+        幅が子の数に比例する node はここを通す。`join` で一度に畳むと、上限
+        超えの文字列を作ってからしか止められない。
+        """
+
+        return self._resolve.fragment()
+
     def __call__(self, node, *, simplify=None) -> str:
         context = (
             self._context if simplify is None else HumanRenderContext(simplify=bool(simplify))
@@ -226,6 +236,17 @@ class _DetachedHumanChildRenderer:
     @property
     def context(self) -> HumanRenderContext:
         return self._context
+
+    def fragment(self):
+        """driver の外には上限の owner が居ないので、ここは **開けない**。
+
+        素通りさせるより、そういう経路を作った時点で止める。
+        """
+
+        raise RenderPlanInvariantError(
+            "a node body asked for a counted fragment outside the render driver; "
+            "render through render_human_text so the limit has an owner"
+        )
 
     def __call__(self, node, *, simplify=None) -> str:
         context = (
@@ -304,13 +325,16 @@ def _render_expression_text(expr, context: HumanRenderContext, render_child) -> 
             return f"({op}{operand})"
         return f"{op}({operand})"
 
-    if expr_type == expr_kind.CALL:
-        args = ", ".join(render_child(operand) for operand in expr.operands)
-        return f"{expr.name}({args})"
-
-    if expr_type == expr_kind.INTRINSIC:
-        args = ", ".join(render_child(operand) for operand in expr.operands)
-        return f"{expr.name}({args})"
+    if expr_type in (expr_kind.CALL, expr_kind.INTRINSIC):
+        # 引数の数だけ長くなる node なので、`join` で一度に畳まず 1 個ずつ
+        # 数えながら置く（上限に達した時点で止まる）。
+        fragment = render_child.fragment()
+        fragment.literal(f"{expr.name}(")
+        for position, operand in enumerate(getattr(expr, "operands", None) or ()):
+            if position:
+                fragment.literal(", ")
+            fragment.term(render_child(operand))
+        return fragment.literal(")").build()
 
     if expr_type == expr_kind.MEMORY:
         addr = render_child(expr.operands[0])
@@ -326,23 +350,26 @@ def _render_expression_text(expr, context: HumanRenderContext, render_child) -> 
                 return render_child(val)
             return str(val)
 
-        parts: List[str] = []
-        for cond, val in branches:
+        # branch の数だけ長くなる node なので、`join` で一度に畳まない。
+        fragment = render_child.fragment()
+        fragment.literal("PHI(")
+        for position, (cond, val) in enumerate(branches):
+            if position:
+                fragment.literal(", ")
             if _is_expression_node(val):
-                val_str = render_child(val)
+                fragment.term(render_child(val))
             else:
-                val_str = str(val)
-            if cond is not None:
-                if _is_expression_node(cond):
-                    cond_str = render_child(cond)
-                elif hasattr(cond, "to_string"):
-                    cond_str = render_child(cond, simplify=True)
-                else:
-                    cond_str = str(cond)
-                parts.append(f"{val_str} if {cond_str}")
+                fragment.literal(str(val))
+            if cond is None:
+                continue
+            fragment.literal(" if ")
+            if _is_expression_node(cond):
+                fragment.term(render_child(cond))
+            elif hasattr(cond, "to_string"):
+                fragment.term(render_child(cond, simplify=True))
             else:
-                parts.append(val_str)
-        return "PHI(" + ", ".join(parts) + ")"
+                fragment.literal(str(cond))
+        return fragment.literal(")").build()
 
     return expr.name if expr.name else "UNKNOWN"
 

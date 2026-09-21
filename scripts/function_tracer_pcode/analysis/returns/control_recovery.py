@@ -365,12 +365,15 @@ class BranchGuardedWhileProofService:
             structural_proof,
             "target_guard_keys",
         )
-        current_target_keys = tuple(
-            sorted(
-                (self.divergence_proofs.condition_identity_key(condition) for condition in tuple(getattr(initial_c_ret, "conditions", ()) or ())),
-                key=repr,
-            )
-        )
+        current_target_key_list = [
+            self.divergence_proofs.condition_identity_key(condition)
+            for condition in tuple(getattr(initial_c_ret, "conditions", ()) or ())
+        ]
+        if any(key is None for key in current_target_key_list):
+            # identity を組めない条件がある。組めないもの同士を `None` で一致
+            # させると、別の条件列を「同じ証明の対象」と見なしてしまう。
+            return False
+        current_target_keys = tuple(sorted(current_target_key_list, key=repr))
         if proof_target_keys != current_target_keys:
             return False
         acc_phi_key = self.divergence_proofs.field_value_from_structural_proof(structural_proof, "acc_phi")
@@ -1110,8 +1113,14 @@ class BranchGuardedWhileProofService:
                     ):
                         continue
                     saw_state_guard = True
+                    target_guard_key_list = [
+                        self.divergence_proofs.condition_identity_key(condition)
+                        for condition in target_conditions or ()
+                    ]
                     target_identities = condition_identities(target_conditions or ())
-                    if target_identities is None:
+                    if target_identities is None or any(
+                        key is None for key in target_guard_key_list
+                    ):
                         # 完全 identity を組めない条件が混ざっている。「同じ
                         # 条件か」を言えないまま証明鍵に載せない（fail-closed）。
                         self.debug_reporter.debug_print(
@@ -1135,7 +1144,7 @@ class BranchGuardedWhileProofService:
                         # 組めない条件が 1 つでもあれば、この証明は出さない
                         # （上の `target_identities is None` で落としてある）。
                         ("target", target_identities),
-                        ("target_guard_keys", tuple(sorted((self.divergence_proofs.condition_identity_key(condition) for condition in target_conditions or ()), key=repr))),
+                        ("target_guard_keys", tuple(sorted(target_guard_key_list, key=repr))),
                     )
         self.debug_reporter.debug_print(
             "Outcome branch-guarded structural proof declined: "

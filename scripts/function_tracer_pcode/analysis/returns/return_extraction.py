@@ -24,7 +24,8 @@ from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.structural import (
     StructuralKey,
     condition_identities,
-    expression_key_safe,
+    expression_identity,
+    identity_tuple,
 )
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSimplifier,
@@ -48,9 +49,6 @@ from scripts.function_tracer_pcode.core import (
     TerminationContractRef,
     TerminationPathEffectEvidence,
     VarnodeFlowRef,
-)
-from scripts.function_tracer_pcode.core.structural import (
-    expression_key_safe as _outcome_expression_key_safe,
 )
 from scripts.function_tracer_pcode.core.structural import expression_provenance_key
 from scripts.function_tracer_pcode.analysis.returns._shared import (
@@ -857,7 +855,11 @@ def _build_function_outcome_seed(analysis: FunctionReturnAnalysis) -> None:
                 info.return_path_evidence.stable_key(),
             ) if info is not None and info.return_path_evidence is not None else (
                 "return_path_evidence_missing",
-                _outcome_expression_key_safe(getattr(outcome, "value", None)),
+                # 値の完全 identity が組めないときに `None` を置くと、別の深い値を
+                # 持つ 2 つの terminal が同じ evidence key になる。組めないなら
+                # terminal 固有の値へ倒して「同じ」と言わせない。
+                expression_identity(getattr(outcome, "value", None))
+                or ("identity_unavailable", terminal_id),
             ),
             observed_value=getattr(outcome, "value", None),
         ))
@@ -1254,9 +1256,16 @@ def _impl__return_conditions_cover_region(
 def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Optional[Tuple[Any, ...]]:
     """候補 summary の identity。組めないときは `None`（fail-closed）。
 
-    条件は **完全な** 構造 identity（`condition_identities`）で並べる。人向けの
-    表示文字列は書式が変われば変わるし、予算付きの legacy key は深い条件で
-    末尾だけ違うものを同一視し得る — どちらも「同じ候補か」を言う鍵には使えない。
+    条件 **と戻り値の両方**を完全な構造 identity で並べる。人向けの表示文字列は
+    書式が変われば変わるし、予算付きの legacy key（`expression_key_safe`）は深い
+    式で末尾だけ違うものを同一視し得る — どちらも「同じ候補か」を言う鍵には
+    使えない。
+
+    戻り値はかつて `expression_key_safe()` の結果をこの tuple へ直に入れていた。
+    あれは truncate すると `None` を返すので、**末尾だけ違う深い値 2 つが同じ鍵**
+    になった（条件側だけを fail-closed にしても、鍵全体は fail-closed ではない）。
+    組み立ては `identity_tuple()` に任せる: 部品が 1 つでも欠けたら鍵を作らない。
+    「戻り値が無い」は欠落ではないので `expression_identity()` が専用の値で表す。
 
     この鍵は同じ producer が作った鍵とだけ比べられる（`control_recovery` の
     候補 source key）。`analysis/returns/summary_returns.py` と
@@ -1264,14 +1273,11 @@ def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Optional[T
     そちらは予算付きのまま（#22 の追記で別途追跡）。
     """
 
-    identities = condition_identities(getattr(ret, "conditions", ()) or ())
-    if identities is None:
-        return None
-    return (
+    return identity_tuple(
         "return_info",
-        self._return_site_key(ret),
-        identities,
-        expression_key_safe(getattr(ret, "value", None)),
+        ("site", self._return_site_key(ret)),
+        condition_identities(getattr(ret, "conditions", ()) or ()),
+        expression_identity(getattr(ret, "value", None)),
     )
 
 
