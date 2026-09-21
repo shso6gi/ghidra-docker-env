@@ -559,6 +559,46 @@ def test_c7_human_rendering_is_bounded_too():
         )
 
 
+@pytest.mark.parametrize(
+    "name,build",
+    [
+        ("wide_call", lambda: _wide_call(20000)),
+        ("wide_phi", lambda: _wide_phi(8000)),
+    ],
+)
+def test_c7_a_wide_node_is_bounded_in_the_human_renderer_too(name, build):
+    """人向け描画でも、幅の広い node の中間文字列を作り切らないこと。
+
+    上限は描画規則ではなく走査・書き出しの層が持つので、SMT と人向けで別々に
+    効かせる必要は無い — が、「別々に効かせる必要が無い」こと自体を確かめないと、
+    どちらか一方だけで試して満足する状態になる。
+    """
+
+    from scripts.function_tracer_pcode.core.render_python import (
+        HumanRenderContext,
+        render_human_text,
+    )
+
+    root = build()
+    started = time.perf_counter()
+    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
+        render_human_text(root, HumanRenderContext(simplify=False), limit_bytes=200)
+    assert time.perf_counter() - started < 5.0
+    assert excinfo.value.requested_bytes <= excinfo.value.limit_bytes * 4
+
+
+def test_c7_a_wide_node_renders_completely_in_the_human_renderer_without_a_limit():
+    """上限が無いときは幅の広い node も最後まで描けること（打ち切りが常時 on でない）。"""
+
+    from scripts.function_tracer_pcode.core.render_python import (
+        HumanRenderContext,
+        render_human_text,
+    )
+
+    text = render_human_text(_wide_call(256), HumanRenderContext(simplify=False))
+    assert text.count("p255") >= 1
+
+
 # ---------------------------------------------------------------------------
 # 型付きの項: planner と renderer の隠れ結合が無いこと
 # ---------------------------------------------------------------------------
