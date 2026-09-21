@@ -342,9 +342,13 @@ class FragmentBuilder:
 
     ## 使い分け
 
-    * `literal()` / `repeat()` — 自分で書く文字。置く前に数える
-    * `term()` — `resolve` が返した子の参照。byte は `resolve` が既に数えて
-      いるので二重には数えない
+    置くものはすべて、**置く前に**数える。`term()` に渡るのは `resolve` が
+    返した参照だけとは限らない（条件の無い branch に置く `true`、式でない
+    branch 値の `str()` など、本体が作った項もここへ来る）。そういう項は
+    `resolve` を通っていないので、`term()` が数えないと素通りする。参照の分は
+    `resolve` でも数えているため二重に乗るが、材料の許容量は出力上限そのもの
+    ではないので（`MATERIAL_ALLOWANCE`）、収まる描画を拒むことはない — それは
+    test が全ての形について固定している。
 
     幅が子の数に比例する node（引数の多い CALL、branch の多い PHI）は **必ず**
     ここを通すこと。`tests/unit/test_architecture_boundaries.py` が、描画本体の
@@ -366,10 +370,12 @@ class FragmentBuilder:
         return self
 
     def term(self, term: Any) -> "FragmentBuilder":
-        """子の参照を置く（byte は `resolve` が既に数えている）。"""
+        """項を置く（子の参照でも、本体が作った項でも。置く前に数える）。"""
 
         if term:
-            self._parts.append(str(term))
+            text = str(term)
+            self._note(utf8_length(text))
+            self._parts.append(text)
         return self
 
     def repeat(self, text: str, count: int) -> "FragmentBuilder":

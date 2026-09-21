@@ -1373,7 +1373,8 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
         fragment = render_child.fragment()
         opened = 0
         innermost = None
-        for cond, val in branches[:-1]:
+        for index in range(len(branches) - 1):
+            cond, val = branches[index]
             cond_str = render_branch_condition(cond)
             # 恒真 / 恒偽の畳み込みは **型付きの性質**で決める。描画文字列を
             # 見ると、その条件に名前が付いた瞬間に畳み込みが消える。

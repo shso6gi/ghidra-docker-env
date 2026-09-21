@@ -632,6 +632,42 @@ def test_a_wide_phi_does_not_rebuild_its_nesting(render):
     assert timings[2] < timings[0] * 16 * 6, timings
 
 
+def test_the_builder_counts_terms_the_body_made_itself():
+    """本体が自分で作った項も数えること（`resolve` を通らない項の穴）。
+
+    `term()` に渡るのは driver が返した参照だけではない。条件の無い branch に
+    置く `true`、式でない branch 値の `str()` など、本体が作った項もここへ来る。
+    それを「参照は `resolve` が数えているから」と素通りさせると、幅の広い node が
+    上限を超えても止まらない。
+    """
+
+    from scripts.function_tracer_pcode.core.render_plan import MATERIAL_ALLOWANCE
+
+    root = ["root"]
+
+    def body(node, context, resolve):
+        fragment = resolve.fragment()
+        # 子を 1 度も要求せず、自作の項だけを 10,000 個置く
+        for _ in range(10_000):
+            fragment.term(RenderedTerm("synthetic", ("properties", "synthetic")))
+        return fragment.build()
+
+    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
+        build_render_plan(
+            root,
+            "context",
+            body=body,
+            classify=lambda fragment, head, exact: ("properties", fragment),
+            policy=SharingPolicy(min_shared_bytes=0, min_shared_tree_nodes=1),
+            counters=RenderCounters(),
+            limit_bytes=100,
+            site="test",
+        )
+    # 自作の項は 9 byte。上限に達した直後で止まっていること（作り切っていない）
+    assert excinfo.value.limit_kind == RenderOutputLimitExceeded.MATERIAL
+    assert excinfo.value.requested_bytes <= 100 * MATERIAL_ALLOWANCE + 9
+
+
 def test_c7_output_limit_raises_a_typed_limitation():
     a = _param("a", 0)
     context = build_smt_render_context()
