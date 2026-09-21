@@ -119,11 +119,12 @@ class Condition:
         return self.lifecycle is SemanticLifecycle.PUBLISHED
 
     def __copy__(self) -> "Condition":
-        """式を共有する浅い複製。**公開は引き継がない**。
+        """浅い複製。**新しい条件は VALIDATED、式 object は元と共有する**。
 
-        構築と同じ道を通るので、できた条件は VALIDATED で始まる（条件には
-        「あとで仕上げる」段階が無い）。元が公開済みでも、複製の完成を宣言
-        できるのは複製を作った側だけ。
+        独立した複製ではない（式は同じ object）。独立が要るときは
+        `copy.deepcopy`。構築と同じ道を通るので検証までは済んでいるが、
+        **公開は引き継がない**: 元が公開済みでも、複製の完成を宣言できるのは
+        複製を作った側だけ。
         """
 
         return Condition(self.expression, self.negated)

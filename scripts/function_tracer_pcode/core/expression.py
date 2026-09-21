@@ -198,15 +198,26 @@ class Expression:
         object.__setattr__(self, name, value)
 
     def __copy__(self) -> 'Expression':
-        """子を共有する浅い複製。**状態は引き継がない**。
+        """浅い複製。**新しい root は CONSTRUCTION、子 object は元と共有する**。
 
-        deep copy と規則を揃えてあるのは、`copy.copy` を「安い deepcopy」と
-        思って使った site が、そこだけ公開済みの値を作れてしまわないようにする
-        ため。複製は複製で、深さは関係ない。
+        独立した複製ではない: 子は同じ object なので、子を書き換えれば元の式
+        からも見える（子が検証済みならその書き換え自体が
+        `FrozenExpressionError` になる）。独立が要るときは `copy.deepcopy`。
+
+        root だけは独立している。`operands` は新しい list に入れ直すので、
+        複製に子を足しても元の式は変わらない。これが無いと、検証済みの式を
+        浅く複製したときに「CONSTRUCTION なのに `operands` が tuple」という
+        仕上げられない値になる。
+
+        状態を落とす規則を deep copy と揃えてあるのは、`copy.copy` を「安い
+        deepcopy」と思って使った site が、そこだけ公開済みの値を作れてしまわ
+        ないようにするため。複製は複製で、深さは関係ない。
         """
 
         clone = self.__class__.__new__(self.__class__)
-        clone.__dict__.update(_new_value_fields(self.__dict__))
+        state = _new_value_fields(self.__dict__)
+        state["operands"] = list(state.get("operands") or ())
+        clone.__dict__.update(state)
         return clone
 
     def __deepcopy__(self, memo: Dict[int, Any]) -> 'Expression':

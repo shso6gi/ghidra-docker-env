@@ -181,6 +181,28 @@ def test_an_expression_derivation_keeps_no_derived_identity(label, derive, start
     assert derived.__dict__.get("_equivalence_digest") is None, label
 
 
+@pytest.mark.parametrize("start", [CONSTRUCTION, VALIDATED, PUBLISHED])
+def test_a_shallow_copy_shares_the_children_but_owns_its_operand_list(start):
+    """浅い複製は子を共有し、root だけ独立している。
+
+    `operands` を入れ直さないと、検証済みの式を浅く複製したときに
+    「CONSTRUCTION なのに `operands` が tuple」という、仕上げられない値ができる。
+    """
+
+    expr = _expression_in(start)
+
+    clone = copy.copy(expr)
+
+    # 子は同じ object（浅い複製なので）。
+    assert list(clone.operands) == list(expr.operands)
+    for cloned_child, child in zip(clone.operands, expr.operands):
+        assert cloned_child is child
+    # 入れ物は複製のもの。仕上げられる形で始まる。
+    assert isinstance(clone.operands, list)
+    clone.operands.append(Expression.constant(9, size=4))
+    assert len(expr.operands) == 2
+
+
 _CONDITION_DERIVATIONS = (
     # (label, 操作, 元が VALIDATED のときの結果, 元が PUBLISHED のときの結果)
     ("copy", lambda cond: copy.copy(cond), VALIDATED, VALIDATED),
