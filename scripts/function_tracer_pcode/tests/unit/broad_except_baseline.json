@@ -2,9 +2,6 @@
   "schema": "broad-except-baseline-v1",
   "entries": {
     "analysis.condition.smt_oracle": {
-      "ConditionSMTOracle._expression_identity_key": {"logged": 0, "unlogged": 1},
-      "ConditionSMTOracle._runtime_ref_identity": {"logged": 0, "unlogged": 2},
-      "ConditionSMTOracle._runtime_ref_is_parameter_ref": {"logged": 0, "unlogged": 2},
       "ConditionSMTOracle.conjunction_is_unsat": {"logged": 0, "unlogged": 1},
       "ConditionSMTOracle.has_object_identity_support": {"logged": 0, "unlogged": 1},
       "ConditionSMTOracle.is_available": {"logged": 0, "unlogged": 1}
@@ -665,17 +662,10 @@
     },
     "core.render_smt.loop_lowering": {
       "_counted_loop_sum_exact_smt.<locals>._render_bias_term": {"logged": 0, "unlogged": 1},
-      "_counted_state_transition_case_signature_matches_expr": {"logged": 0, "unlogged": 1},
-      "_counted_state_transition_exact_multiplier": {"logged": 0, "unlogged": 2},
       "_neon_ext_operands_are_smt_supported": {"logged": 0, "unlogged": 1}
     },
     "core.render_smt.render": {
       "_coerce_expr_to_bool": {"logged": 0, "unlogged": 1}
-    },
-    "core.render_smt.unknowns": {
-      "_unknown_runtime_identity_key": {"logged": 0, "unlogged": 2},
-      "_unknown_runtime_stable_origin_key": {"logged": 0, "unlogged": 1},
-      "global_address_identity": {"logged": 0, "unlogged": 1}
     },
     "core.render_smt.widths": {
       "_expr_constant_int": {"logged": 0, "unlogged": 1}
@@ -714,10 +704,6 @@
       "process_age_seconds": {"logged": 0, "unlogged": 1}
     },
     "core.structural": {
-      "_atom_key": {"logged": 0, "unlogged": 2},
-      "_expression_storage_key": {"logged": 0, "unlogged": 1},
-      "_raw_stable_key_or_none": {"logged": 0, "unlogged": 1},
-      "_semantic_runtime_ref_key": {"logged": 0, "unlogged": 1},
       "_stable_value_key": {"logged": 0, "unlogged": 1}
     },
     "ghidra.decompilation_broker": {

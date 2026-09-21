@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
+from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.proof.obligations import (
     SolverQueryExecutionReceipt,
     issue_structural_equality_receipt,
@@ -314,12 +315,18 @@ def _clone_case_with_value_expr(case: ReturnCase, value_expr: Expression) -> Ret
 
 
 def _build_rewrite_candidate(expr: Expression, settings: NormalizationSettings) -> Expression:
+    """書き換え候補を 1 本組み立てる。**この関数の出口が公開点**。
+
+    候補はここで完成し、以後は鍵にされ・照合され・solver へ渡されるだけなので、
+    確定した意味として公開してから返す。
+    """
+
     pre_rewritten = _apply_solver_proven_candidate_rewrites(expr)
     normalized = normalize_expression(
         pre_rewritten,
         NormalizationContext(settings=settings),
     )
-    return _apply_solver_proven_candidate_rewrites(normalized)
+    return publish(_apply_solver_proven_candidate_rewrites(normalized))
 
 
 def _apply_solver_proven_candidate_rewrites(expr: Expression) -> Expression:

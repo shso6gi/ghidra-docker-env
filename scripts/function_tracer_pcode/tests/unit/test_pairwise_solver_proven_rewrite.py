@@ -36,6 +36,7 @@ from scripts.function_tracer_pcode.proof.obligations import (
 )
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType, ReturnInfo
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def _unsat_query_result(query: str, pair_id: str, stage: str) -> QueryResult:
@@ -139,8 +140,8 @@ def test_solver_proven_rewrite_equivalence_proves_and_retries(monkeypatch):
         _base_ctx(),
         case1,
         case2,
-        lambda obj: obj.to_smt(),
-        lambda obj: obj.to_smt(),
+        lambda obj: published(obj).to_smt(),
+        lambda obj: published(obj).to_smt(),
         "(0,0)",
     )
 
@@ -185,8 +186,8 @@ def test_solver_proven_rewrite_returns_after_structural_match(monkeypatch):
         _base_ctx(),
         case1,
         case2,
-        lambda obj: obj.to_smt(),
-        lambda obj: obj.to_smt(),
+        lambda obj: published(obj).to_smt(),
+        lambda obj: published(obj).to_smt(),
         "(0,0)",
     )
 
@@ -248,8 +249,8 @@ def test_structural_rewrite_executes_full_query_for_projection_binding(monkeypat
         base_ctx,
         case1,
         case2,
-        lambda obj: obj.to_smt(),
-        lambda obj: obj.to_smt(),
+        lambda obj: published(obj).to_smt(),
+        lambda obj: published(obj).to_smt(),
         "(0,0)",
     )
 
@@ -308,8 +309,8 @@ def test_solve_query_twostage_uses_solver_proven_rewrite_after_timeout():
         _base_ctx(),
         case1,
         case2,
-        lambda obj: obj.to_smt(),
-        lambda obj: obj.to_smt(),
+        lambda obj: published(obj).to_smt(),
+        lambda obj: published(obj).to_smt(),
         "(0,1)",
     )
 
@@ -344,8 +345,8 @@ def test_solver_rewrite_no_change_carries_object_target_and_proof_id():
         _base_ctx(),
         case1,
         case2,
-        lambda obj: obj.to_smt(),
-        lambda obj: obj.to_smt(),
+        lambda obj: published(obj).to_smt(),
+        lambda obj: published(obj).to_smt(),
         "(0,1)",
     )
 
@@ -414,8 +415,8 @@ def test_solver_rewrite_proof_failed_carries_object_target_to_both_actions(monke
         _base_ctx(),
         case1,
         case2,
-        lambda obj: obj.to_smt(),
-        lambda obj: obj.to_smt(),
+        lambda obj: published(obj).to_smt(),
+        lambda obj: published(obj).to_smt(),
         "(0,1)",
     )
 
@@ -489,8 +490,8 @@ def test_solve_query_twostage_propagates_solver_rewrite_object_target():
         _base_ctx(),
         case1,
         case2,
-        lambda obj: obj.to_smt(),
-        lambda obj: obj.to_smt(),
+        lambda obj: published(obj).to_smt(),
+        lambda obj: published(obj).to_smt(),
         "(0,1)",
     )
 
@@ -510,7 +511,7 @@ def test_build_rewrite_candidate_canonicalizes_commuted_add_for_solver():
     rewritten_canonical = _build_rewrite_candidate(canonical, NormalizationSettings.safe())
     rewritten_commuted = _build_rewrite_candidate(commuted, NormalizationSettings.safe())
 
-    assert rewritten_canonical.to_smt() == rewritten_commuted.to_smt()
+    assert published(rewritten_canonical).to_smt() == published(rewritten_commuted).to_smt()
 
 
 def test_build_rewrite_candidate_collapses_division_remainder_expansion():
@@ -522,7 +523,7 @@ def test_build_rewrite_candidate_collapses_division_remainder_expansion():
     rewritten = _build_rewrite_candidate(expanded, NormalizationSettings.safe())
 
     assert rewritten.operator == "INT_SREM"
-    assert [operand.to_smt() for operand in rewritten.operands] == [a.to_smt(), b.to_smt()]
+    assert [published(operand).to_smt() for operand in rewritten.operands] == [published(a).to_smt(), published(b).to_smt()]
 
 
 def test_rewrite_proof_query_targets_minimal_changed_subexpression():
@@ -536,7 +537,7 @@ def test_rewrite_proof_query_targets_minimal_changed_subexpression():
     query = _build_rewrite_proof_query(
         _base_ctx(),
         case,
-        lambda obj: obj.to_smt(),
+        lambda obj: published(obj).to_smt(),
         rewritten,
         "rewrite-proof-1",
     )

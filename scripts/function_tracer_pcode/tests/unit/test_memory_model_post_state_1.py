@@ -1,4 +1,5 @@
 from scripts.function_tracer_pcode.tests.unit._memory_model_fixtures import *
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 def test_effect_summary_rewrites_stack_local_post_state_reads_in_arithmetic_expression():
     a = Expression.parameter("a", 0, size=4)
@@ -1196,7 +1197,7 @@ def test_lower_post_state_expression_for_smt_replays_symbolic_reads_under_merged
     )
 
     assert lowered is not None
-    lowered_smt = lowered.to_smt()
+    lowered_smt = published(lowered).to_smt()
     assert "__locread__" not in lowered_smt
     assert "ite" in lowered_smt
     assert "bvneg start" in lowered_smt
@@ -1294,7 +1295,7 @@ def test_lower_post_state_expression_for_smt_rewrites_nested_symbolic_effect_val
     )
 
     assert lowered is not None
-    lowered_smt = lowered.to_smt()
+    lowered_smt = published(lowered).to_smt()
     assert "__locread__" not in lowered_smt
     assert "select mem32 trace" in lowered_smt
     assert "select mem32 (bvadd trace (_ bv4 64))" in lowered_smt
@@ -1407,7 +1408,7 @@ def test_lower_post_state_expression_for_smt_materializes_iteration_delta_wrappe
     )
 
     assert lowered is not None
-    lowered_smt = lowered.to_smt()
+    lowered_smt = published(lowered).to_smt()
     assert "__locread__" not in lowered_smt
     assert "select mem32 trace" in lowered_smt
     assert "select mem32 (bvadd trace (_ bv4 64))" in lowered_smt

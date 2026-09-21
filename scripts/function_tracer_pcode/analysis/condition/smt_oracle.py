@@ -7,6 +7,8 @@ import importlib
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core import Condition
+from scripts.function_tracer_pcode.core.semantic_projection import project_runtime_ref
+from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
 from scripts.function_tracer_pcode.core.structural import condition_key, key_contains_placeholder
 from scripts.function_tracer_pcode.core.render_smt import (
     CallDeclarationConflict,
@@ -23,6 +25,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
     smt_logic_name,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.core.semantic_freeze import publish
 
 
 class ConditionSMTOracle:
@@ -286,13 +289,20 @@ class ConditionSMTOracle:
 
     @classmethod
     def _expression_identity_key(cls, expr) -> Optional[Tuple[Any, ...]]:
+        """solver query 用の object identity。
+
+        凍結済みの式では runtime_ref / storage の意味 key を **凍結時に確定した
+        投影** から読む。query identity が生 object の後からの変化で動くと、
+        同じ query に別の cache 行が当たってしまう。
+        """
+
         expr_type = getattr(expr, "expr_type", None)
         expr_kind = getattr(expr_type, "__class__", None)
         if expr_type is None or expr_kind is None:
             return None
         if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
-            runtime_ref = getattr(expr, "runtime_ref", None)
-            runtime_identity = cls._runtime_ref_identity(runtime_ref)
+            projection = semantic_projection(expr)
+            runtime_identity = cls._runtime_ref_identity_from_projection(projection)
             if runtime_identity is not None:
                 return (
                     "runtime_ref",
@@ -314,17 +324,10 @@ class ConditionSMTOracle:
                         return ("parameter_index", parameter_index)
                 except (TypeError, ValueError):
                     parameter_index = None
-                storage_info = getattr(expr, "storage_info", None)
-                storage_identity = getattr(storage_info, "storage_identity_key", None)
-                if storage_identity is not None:
-                    if callable(storage_identity):
-                        try:
-                            storage_identity = storage_identity()
-                        except Exception:
-                            storage_identity = None
-                    if storage_identity is None:
+                if projection.storage_identity_supported:
+                    if projection.storage_identity is None:
                         return None
-                    return ("parameter_storage", storage_identity)
+                    return ("parameter_storage", projection.storage_identity)
                 if parameter_name:
                     return ("parameter_name", str(parameter_name))
             return None
@@ -355,49 +358,58 @@ class ConditionSMTOracle:
 
     @classmethod
     def _runtime_ref_identity(cls, runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
+        """生の ref から identity を作る（式を持たない直接呼び出し用）。
+
+        生 object を読むのは投影側（`core/semantic_projection.py` と、loop
+        summary ref の schema を持つ `core/loop_lowering_semantics.py`）だけ
+        なので、ここでも投影を作ってから同じ規則を適用する。
+        """
+
         if runtime_ref is None:
             return None
-        parameter_ref = cls._runtime_ref_is_parameter_ref(runtime_ref)
-        semantic_key = getattr(runtime_ref, "semantic_key", None)
-        semantic_identity = None
-        if callable(semantic_key):
-            try:
-                semantic_identity = semantic_key()
-            except Exception:
-                semantic_identity = None
-            if semantic_identity is not None:
-                return ("semantic", semantic_identity)
-        stable_key = getattr(runtime_ref, "stable_key", None)
-        if callable(stable_key):
-            try:
-                identity = stable_key()
-            except Exception:
-                identity = None
-            if identity is not None:
-                if parameter_ref and semantic_identity is None:
-                    return ("parameter_without_semantic_identity", identity)
-                return ("stable", identity)
-        if parameter_ref and semantic_identity is None:
+        return cls._runtime_ref_identity_from_projection(
+            project_runtime_ref(None, runtime_ref)
+        )
+
+    @classmethod
+    def _runtime_ref_identity_from_projection(cls, projection) -> Optional[Tuple[Any, ...]]:
+        """投影 1 つから identity を決める（`SemanticSnapshot` でも `RuntimeRefProjection` でも）。"""
+
+        return cls._runtime_ref_identity_from_parts(
+            semantic_identity=projection.runtime_semantic_key
+            if hasattr(projection, "runtime_semantic_key")
+            else projection.semantic_key,
+            stable_identity=projection.runtime_stable_key
+            if hasattr(projection, "runtime_stable_key")
+            else projection.stable_key,
+            parameter_ref=projection.runtime_is_parameter_ref
+            if hasattr(projection, "runtime_is_parameter_ref")
+            else projection.is_parameter_ref,
+        )
+
+    @classmethod
+    def _runtime_ref_identity_from_parts(
+        cls,
+        *,
+        semantic_identity: Any,
+        stable_identity: Any,
+        parameter_ref: bool,
+    ) -> Optional[Tuple[Any, ...]]:
+        """identity の **決め方** はここ 1 箇所（生 object 経由も投影経由も同じ）。"""
+
+        if semantic_identity is not None:
+            return ("semantic", semantic_identity)
+        if stable_identity is not None:
+            if parameter_ref:
+                return ("parameter_without_semantic_identity", stable_identity)
+            return ("stable", stable_identity)
+        if parameter_ref:
             return ("parameter_without_semantic_identity", None)
         return None
 
     @staticmethod
     def _runtime_ref_is_parameter_ref(runtime_ref: Any) -> bool:
-        is_parameter = getattr(runtime_ref, "is_parameter", None)
-        if callable(is_parameter):
-            try:
-                return bool(is_parameter())
-            except Exception:
-                return False
-        try:
-            stable_key = runtime_ref.stable_key()
-        except Exception:
-            stable_key = None
-        return (
-            isinstance(stable_key, tuple)
-            and bool(stable_key)
-            and stable_key[0] == "parameter"
-        )
+        return project_runtime_ref(None, runtime_ref).is_parameter_ref
 
     @classmethod
     def _condition_to_smt(
@@ -425,8 +437,18 @@ class ConditionSMTOracle:
         active: Optional[set[int]] = None,
         memo: Optional[Dict[int, Any]] = None,
     ):
+        """symbol 名を差し替えた query 用の式を作る。**この関数が公開点**。
+
+        外から呼ばれたとき（`active` / `memo` を渡されないとき）が「1 本作り
+        終えた」単位なので、そこで公開する。内部の再帰は組み立ての途中なので
+        公開しない。
+        """
         if expr is None:
             return expr
+        if active is None and memo is None:
+            return publish(
+                cls._rewrite_expr_with_symbol_names(expr, symbol_names, set(), {})
+            )
         if active is None:
             active = set()
         if memo is None:

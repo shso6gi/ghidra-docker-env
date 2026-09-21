@@ -6,6 +6,7 @@ from scripts.function_tracer_pcode.proof.formula.returns import (
     require_equal_return_bit_widths,
 )
 from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult
+from scripts.function_tracer_pcode.core.semantic_freeze import publish
 
 
 def try_normalization_equivalence(
@@ -198,6 +199,10 @@ def try_normalization_equivalence(
         if callable(to_smt):
             return to_smt(float_mode="fp")
         return str(rendered)
+
+    # 正規化（＝この pair 用の精錬）はここで終わり。確定した値として公開する。
+    value1_norm = publish(value1_norm)
+    value2_norm = publish(value2_norm)
 
     value1_smt_orig = _render_with_replacer(value1_orig, param_replace_fn1)
     value2_smt_orig = _render_with_replacer(value2_orig, param_replace_fn2)

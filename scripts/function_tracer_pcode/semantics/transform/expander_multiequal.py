@@ -13,6 +13,8 @@ from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
+from scripts.function_tracer_pcode.core.semantic_freeze import freeze_expression
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.effects.summary import (
     _reduce_expression_under_conditions,
@@ -253,7 +255,7 @@ class MultiequalExpansionMixin:
             traced_value = self._canonicalize_traced_expression(traced_value, [])
             self._debug_expr("  traced_value: ", traced_value, depth)
             try:
-                smt_str = traced_value.to_smt()
+                smt_str = render_expression_smt_evidence(traced_value)
                 if len(smt_str) > 100:
                     smt_str = smt_str[:100] + "..."
                 self._debug_print(f"  traced_smt: {smt_str}", depth)
@@ -353,6 +355,10 @@ class MultiequalExpansionMixin:
 
         for ev in values:
             normalized = self._normalize_expanded_value(ev)
+            # dedup は structural identity で畳む。畳んだあとに代表の式を
+            # 書き換えられると、同じ key の別の展開値まで意味が変わるので、
+            # key を作る前に凍らせる。
+            freeze_expression(normalized.value)
             key = (
                 self._expansion_expression_signature(normalized.value),
                 normalized.get_condition_signature(),

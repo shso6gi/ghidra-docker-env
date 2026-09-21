@@ -10,6 +10,7 @@ from scripts.function_tracer_pcode.core import (
     condition_key,
     key_contains_placeholder,
 )
+from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
 from scripts.function_tracer_pcode.core.structural import expression_provenance_key
 from scripts.function_tracer_pcode.analysis.debug import summarize_expression, summarize_condition
@@ -108,6 +109,17 @@ class ConditionConstraintSet:
             return False
         combined = list(self.conditions) + list(other_set.conditions)
         return not ConditionConstraintSet.from_conditions(combined).is_contradictory
+
+
+def _published_conditions(conditions):
+    """簡約が作り直した条件集合を公開して返す。
+
+    `Condition` は構築と同時に凍結されるので、条件そのものに「まだ精緻化する」
+    段階は無い。作り直したこの集合が完成形なので、**作ったここが公開点**。
+    呼び手（式の描画側）は consumer なので、向こうで公開させない。
+    """
+
+    return [publish(condition) for condition in conditions]
 
 
 class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugMixin):
@@ -1139,7 +1151,9 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
     ) -> List[Condition]:
         # Issue #124: 条件簡約の公開 entry（同名 region に合算される）。
         with stage_region("condition_simplify"):
-            return cls.build_object_centric_condition_basis(conditions)
+            return _published_conditions(
+                cls.build_object_centric_condition_basis(conditions)
+            )
 
     @classmethod
     def subtract_implied_conditions(
@@ -1171,7 +1185,9 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         """条件リストを object-centric に簡略化する。"""
         # Issue #124: 条件簡約の公開 entry（同名 region に合算される）。
         with stage_region("condition_simplify"):
-            return cls.build_constraint_set(conditions).simplified_conditions()
+            return _published_conditions(
+                cls.build_constraint_set(conditions).simplified_conditions()
+            )
 
     @classmethod
     def reduce_expression_under_conditions(

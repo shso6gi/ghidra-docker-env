@@ -28,6 +28,31 @@ def _pcode_op_ref_from_tracer(tracer: Any, pcode_op: Any) -> Optional[PcodeOpRef
     return PcodeOpRef.from_pcode_op(pcode_op)
 
 
+def resized_expanded_values(values, output_size: int):
+    """幅が決まっていない展開値に P-code 出力幅を与えた列を返す。
+
+    値そのものは書き換えない。展開値は tracer の cache と同じ式 object を指して
+    いることがあり、その場で幅を書き込むと「この演算の出力幅」が cache 側の
+    別の文脈へ漏れてしまう（凍結の有無に関わらず）。`derive_with` は常に新しい
+    式を作るので、幅はこの展開値だけに付く。
+    """
+
+    if not output_size or output_size <= 0:
+        return values
+    resized = []
+    changed = False
+    for expanded in values:
+        value = expanded.value
+        if getattr(value, "size", 0) == 0:
+            updated = value.derive_with(size=output_size)
+            if updated is not value:
+                changed = True
+                resized.append(ExpandedValue(updated, expanded.conditions))
+                continue
+        resized.append(expanded)
+    return resized if changed else values
+
+
 class ExpandedValue:
     """展開された値と条件のペア"""
     

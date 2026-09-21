@@ -168,38 +168,57 @@ def expression_stats(analysis: Any) -> Dict[str, int]:
     明示スタックによる反復走査（再帰しない）。深い式でも RecursionError を
     起こさず、走査中に何か失敗しても診断は判定本体に影響しない（fail-open で
     ``error`` を残す）。
+
+    ``node_count`` は distinct な node 数で、``tree_node_count`` は木に展開した
+    ときの node 数（共有部分木を親の数だけ数える）。両方を出すのは、DAG として
+    小さい式が木としては桁違いに大きいことがあり、その差が rendering や
+    serialization の費用そのものだから。木換算は凍結時に確定するので、未凍結の
+    式が混ざると ``tree_node_count_complete`` が偽になる。``cycle_nodes`` は
+    走査中に経路上の node へ戻った回数で、0 以外は凍結できない graph
+    （内部不整合）を意味する。
     """
     node_count = 0
     max_depth = 0
+    cycle_nodes = 0
     seen: set = set()
+    active: set = set()
     stack: list = []
     returns = tuple(getattr(analysis, "returns", ()) or ())
     for ret in returns:
-        stack.append((getattr(ret, "value", None), 1))
+        stack.append((getattr(ret, "value", None), 1, False))
         for cond in getattr(ret, "conditions", ()) or ():
-            stack.append((getattr(cond, "expression", None), 1))
+            stack.append((getattr(cond, "expression", None), 1, False))
     try:
         while stack:
-            expr, depth = stack.pop()
+            expr, depth, exiting = stack.pop()
             if expr is None:
+                continue
+            if exiting:
+                active.discard(id(expr))
                 continue
             if depth > max_depth:
                 max_depth = depth
             key = id(expr)
+            if key in active:
+                # 経路上の node へ戻った = 閉路。数えるだけで展開はしない。
+                cycle_nodes += 1
+                continue
             if key in seen:
                 # shared sub-expression: depth already accounted, do not re-expand
                 continue
             seen.add(key)
+            active.add(key)
             node_count += 1
+            stack.append((expr, depth, True))
             for child in getattr(expr, "operands", None) or ():
-                stack.append((child, depth + 1))
+                stack.append((child, depth + 1, False))
             branches = getattr(expr, "value", None)
             if isinstance(branches, (list, tuple)):
                 for item in branches:
                     if isinstance(item, tuple) and len(item) == 2:
                         cond, value = item
-                        stack.append((getattr(cond, "expression", None), depth + 1))
-                        stack.append((value, depth + 1))
+                        stack.append((getattr(cond, "expression", None), depth + 1, False))
+                        stack.append((value, depth + 1, False))
     except Exception as exc:  # diagnostics never fail the verdict
         return {
             "return_case_count": len(returns),
@@ -207,11 +226,36 @@ def expression_stats(analysis: Any) -> Dict[str, int]:
             "max_depth": max_depth,
             "error": f"{type(exc).__name__}: {exc}"[:200],
         }
+    tree_total, tree_complete = _tree_node_total(returns)
     return {
         "return_case_count": len(returns),
         "node_count": node_count,
         "max_depth": max_depth,
+        "tree_node_count": tree_total,
+        "tree_node_count_complete": tree_complete,
+        "cycle_nodes": cycle_nodes,
     }
+
+
+def _tree_node_total(returns: Any) -> tuple:
+    """凍結時に確定した木換算 node 数の合計（未凍結が混ざれば不完全）。"""
+
+    total = 0
+    complete = True
+    for ret in returns:
+        roots = [getattr(ret, "value", None)]
+        for cond in getattr(ret, "conditions", ()) or ():
+            roots.append(getattr(cond, "expression", None))
+        for root in roots:
+            if root is None:
+                continue
+            tree_size = getattr(root, "tree_size", None)
+            size = tree_size() if callable(tree_size) else None
+            if size is None:
+                complete = False
+                continue
+            total += int(size)
+    return total, complete
 
 
 _CACHE_STAT_COUNTERS = ("hits", "misses", "snapshots_stored", "invalidations")

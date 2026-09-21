@@ -11,10 +11,12 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_models import Retur
 from scripts.function_tracer_pcode.core import Condition, Expression
 from scripts.function_tracer_pcode.core.analysis import ReturnInfo
 from scripts.function_tracer_pcode.smt import ParallelResult
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def _const(value: int, size: int = 4) -> Expression:
-    return Expression.constant(value, size=size)
+    # 定数は作った時点で完成しているので、そのまま公開して返す。
+    return published(Expression.constant(value, size=size))
 
 
 def _param(name: str) -> Expression:
@@ -439,8 +441,8 @@ def test_loop_template_derives_exact_parameter_from_mask_and_residual_conditions
         [Condition(masked_equals_eight, False), Condition(residual_equals_one, False)],
     )
 
-    assert norm_lhs.to_smt() == _const(9).to_smt()
-    assert norm_rhs.to_smt() == _const(9).to_smt()
+    assert published(norm_lhs).to_smt() == _const(9).to_smt()
+    assert published(norm_rhs).to_smt() == _const(9).to_smt()
 
 
 def test_loop_template_derives_exact_parameter_from_negated_notequal_conditions() -> None:
@@ -451,27 +453,21 @@ def test_loop_template_derives_exact_parameter_from_negated_notequal_conditions(
     residual_expr = Expression.binary_op("INT_SUB", p1, mask_expr)
     residual_expr.size = 4
 
-    masked_equals_eight = Condition(
-        Expression.binary_op(
-            "INT_NOTEQUAL",
-            Expression.binary_op("INT_SUB", mask_expr, _const(8)),
-            _const(0),
-        ),
-        True,
+    masked_difference = Expression.binary_op("INT_SUB", mask_expr, _const(8))
+    masked_difference.size = 4
+    masked_equals_eight_expr = Expression.binary_op(
+        "INT_NOTEQUAL", masked_difference, _const(0)
     )
-    masked_equals_eight.expression.operands[0].size = 4
-    masked_equals_eight.expression.size = 1
+    masked_equals_eight_expr.size = 1
+    masked_equals_eight = Condition(masked_equals_eight_expr, True)
 
-    residual_equals_one = Condition(
-        Expression.binary_op(
-            "INT_NOTEQUAL",
-            Expression.binary_op("INT_ADD", _neg(_const(1)), residual_expr),
-            _const(0),
-        ),
-        True,
+    residual_difference = Expression.binary_op("INT_ADD", _neg(_const(1)), residual_expr)
+    residual_difference.size = 4
+    residual_equals_one_expr = Expression.binary_op(
+        "INT_NOTEQUAL", residual_difference, _const(0)
     )
-    residual_equals_one.expression.operands[0].size = 4
-    residual_equals_one.expression.size = 1
+    residual_equals_one_expr.size = 1
+    residual_equals_one = Condition(residual_equals_one_expr, True)
 
     norm_lhs, norm_rhs = _normalize_values_under_exact_conditions(
         _mul(_exact_triangular(p1), _exact_triangular(p2)),
@@ -479,7 +475,7 @@ def test_loop_template_derives_exact_parameter_from_negated_notequal_conditions(
         [masked_equals_eight, residual_equals_one],
     )
 
-    assert norm_lhs.to_smt() == norm_rhs.to_smt()
+    assert published(norm_lhs).to_smt() == published(norm_rhs).to_smt()
 
 
 def test_loop_template_derives_exact_parameter_from_mask_equality_chain() -> None:
@@ -503,8 +499,8 @@ def test_loop_template_derives_exact_parameter_from_mask_equality_chain() -> Non
         [Condition(masked_equals_eight, False), Condition(param_equals_mask, False)],
     )
 
-    assert norm_lhs.to_smt() == _const(36).to_smt()
-    assert norm_rhs.to_smt() == _const(36).to_smt()
+    assert published(norm_lhs).to_smt() == _const(36).to_smt()
+    assert published(norm_rhs).to_smt() == _const(36).to_smt()
 
 
 def test_loop_template_uses_commutatively_normalized_mask_fact_keys() -> None:
@@ -525,8 +521,8 @@ def test_loop_template_uses_commutatively_normalized_mask_fact_keys() -> None:
         [Condition(cond_expr, False)],
     )
 
-    assert norm_lhs.to_smt() == _const(8).to_smt()
-    assert norm_rhs.to_smt() == _const(8).to_smt()
+    assert published(norm_lhs).to_smt() == _const(8).to_smt()
+    assert published(norm_rhs).to_smt() == _const(8).to_smt()
 
 
 def test_loop_template_strategy_proves_equivalence_after_normalization_unknown() -> None:

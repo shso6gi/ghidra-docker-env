@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.core import (
     expression_key_or_identity,
 )
 from scripts.function_tracer_pcode.semantics.normalize.context import NormalizationContext
+from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
 
 
 def normalize_series_patterns(
@@ -22,8 +23,8 @@ def normalize_series_patterns(
 
     context.record_rule(
         rule_name="SERIES_CANONICALIZATION",
-        before_expr=expr.to_smt(),
-        after_expr=canonical.to_smt(),
+        before_expr=render_expression_smt_evidence(expr),
+        after_expr=render_expression_smt_evidence(canonical),
         reason="Canonicalized equivalent arithmetic-series closed form",
     )
     return canonical

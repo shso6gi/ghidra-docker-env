@@ -28,6 +28,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder impor
     extract_return_cases,
 )
 from scripts.function_tracer_pcode.semantics.semantic_width import normalize_analysis_semantic_width
+from scripts.function_tracer_pcode.tests.unit._publication import published
 from conftest import resolve_mock_data_type
 
 
@@ -120,7 +121,7 @@ def test_functions_that_differ_only_in_a_store_get_different_surfaces():
     analyzer = _analyzer()
     old, new = _old_and_new_constructors()
     # The return values were identical (the pointer); the surfaces now are not.
-    assert old.returns[0].value.to_smt() != new.returns[0].value.to_smt()
+    assert published(old.returns[0].value).to_smt() != published(new.returns[0].value).to_smt()
 
 
 def test_surface_is_not_built_for_void_or_untrusted_or_storeless_functions():

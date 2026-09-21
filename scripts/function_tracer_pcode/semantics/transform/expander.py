@@ -61,6 +61,7 @@ from scripts.function_tracer_pcode.semantics.transform.expander_support import (
     _pcode_op_ref_from_tracer,
     ExpandedValue,
     MultiequalBranchObservation,
+    resized_expanded_values as _resized_expanded_values,
 )
 
 
@@ -327,8 +328,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
 
         current_size = getattr(value, "size", 0) or 0
         if current_size <= 0:
-            value.size = output_size
-            return value
+            return value.derive_with(size=output_size)
 
         if current_size == output_size:
             return value
@@ -405,7 +405,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
             value = self.tracer.trace_varnode(varnode, depth, use_cache=False)
             # サイズを確実に設定
             if value.size == 0:
-                value.size = varnode_size
+                value = value.derive_with(size=varnode_size)
             return [ExpandedValue(value, conditions)]
         
         mnemonic = def_op.getMnemonic()
@@ -422,9 +422,10 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                 combined_conditions = conditions + ev.conditions
                 if not ConditionSimplifier.is_contradiction(combined_conditions):
                     # サイズを確実に設定
-                    if ev.value.size == 0:
-                        ev.value.size = varnode_size
-                    result.append(ExpandedValue(ev.value, combined_conditions))
+                    value = ev.value
+                    if value.size == 0:
+                        value = value.derive_with(size=varnode_size)
+                    result.append(ExpandedValue(value, combined_conditions))
             return result if result else [ExpandedValue(Expression.unknown("nested_phi_fail"), conditions)]
         
         elif mnemonic in ("COPY", "CAST"):
@@ -434,9 +435,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                 output = def_op.getOutput()
                 if output:
                     output_size = output.getSize()
-                    for ev in result:
-                        if ev.value.size == 0:
-                            ev.value.size = output_size
+                    result = _resized_expanded_values(result, output_size)
                 return result
             return [ExpandedValue(Expression.unknown(f"{mnemonic}_no_input"), conditions)]
         
@@ -447,9 +446,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
             output = def_op.getOutput()
             if output:
                 output_size = output.getSize()
-                for ev in result:
-                    if ev.value.size == 0:
-                        ev.value.size = output_size
+                result = _resized_expanded_values(result, output_size)
             return result
 
     def _varnode_requires_recursive_expansion(self, varnode) -> bool:
@@ -826,7 +823,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
         ):
             return branch_sensitive_observed
         if output_size > 0 and getattr(canonicalized, "size", 0) == 0:
-            canonicalized.size = output_size
+            canonicalized = canonicalized.derive_with(size=output_size)
         return canonicalized
     
     def _expand_input_operation(
@@ -903,7 +900,7 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
                 value = self._canonicalize_traced_expression(value, conditions)
                 # 出力サイズを設定
                 if value.size == 0 and output_size > 0:
-                    value.size = output_size
+                    value = value.derive_with(size=output_size)
                 return [ExpandedValue(value, conditions)]
 
         self._debug_print("  Recursive expansion target found in inputs, expanding recursively", depth)

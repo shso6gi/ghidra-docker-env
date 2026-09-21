@@ -3,6 +3,7 @@
 
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
 from scripts.function_tracer_pcode.semantics.normalize.context import NormalizationContext
+from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
 
 
 SHIFT_OPS = frozenset({"INT_LEFT", "INT_RIGHT", "INT_SRIGHT"})
@@ -37,8 +38,8 @@ def normalize_shift_amounts(
         zero.size = expr.size or zero.size
         context.record_rule(
             rule_name="SHIFT_ZERO_SIMPLIFICATION",
-            before_expr=expr.to_smt(),
-            after_expr=zero.to_smt(),
+            before_expr=render_expression_smt_evidence(expr),
+            after_expr=render_expression_smt_evidence(zero),
             reason="Shifted zero remains zero for all shift counts",
         )
         return zero
@@ -46,8 +47,8 @@ def normalize_shift_amounts(
     if right.expr_type == ExpressionType.CONSTANT and int(right.value) == 0:
         context.record_rule(
             rule_name="SHIFT_ZERO_SIMPLIFICATION",
-            before_expr=expr.to_smt(),
-            after_expr=left.to_smt(),
+            before_expr=render_expression_smt_evidence(expr),
+            after_expr=render_expression_smt_evidence(left),
             reason="Shift by zero preserves the left operand",
         )
         return left
@@ -60,8 +61,8 @@ def normalize_shift_amounts(
     normalized.size = expr.size
     context.record_rule(
         rule_name="SHIFT_AMOUNT_NORMALIZATION",
-        before_expr=expr.to_smt(),
-        after_expr=normalized.to_smt(),
+        before_expr=render_expression_smt_evidence(expr),
+        after_expr=render_expression_smt_evidence(normalized),
         reason="Normalized shift count using range/origin facts",
     )
     return normalized

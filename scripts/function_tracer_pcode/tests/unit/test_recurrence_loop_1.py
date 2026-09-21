@@ -1,4 +1,5 @@
 from scripts.function_tracer_pcode.tests.unit._recurrence_fixtures import *
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 def test_return_region_summary_coverage_rejects_positive_guard_with_one_gap():
     summarizer = StructuralRecurrenceSummarizer(tracer=None, debug=False)
@@ -436,7 +437,7 @@ def test_structural_recurrence_summarizer_recovers_counted_scalar_loop_from_pcod
     loop_case = next(ret for ret in summarized_returns if ret.conditions and ret.conditions[0].to_string() == "(0 < param_1)")
     assert loop_case.summary_candidate_source_key is not None
     assert loop_case.summary_transition_evidence_key is not None
-    loop_smt = expression_to_smt(loop_case.value)
+    loop_smt = expression_to_smt(published(loop_case.value))
     assert "rtunk_" not in loop_smt
     assert "rt_counted_loop_sum_" not in loop_smt
     assert "(ite " in loop_smt
@@ -707,7 +708,7 @@ def test_structural_recurrence_summarizer_recovers_multi_backedge_counted_loop_c
     assert all(expression_has_unresolved_value(ret.value) is False for ret in summarized_returns)
     loop_case = next(ret for ret in summarized_returns if ret.value.to_string() != "0")
     assert any("param_1" in condition.to_string() for condition in loop_case.conditions)
-    loop_smt = expression_to_smt(loop_case.value)
+    loop_smt = expression_to_smt(published(loop_case.value))
     assert "rtunk_" not in loop_smt
     assert "rt_counted_loop_sum_" not in loop_smt
     assert "(ite " in loop_smt
@@ -785,7 +786,7 @@ def test_counted_loop_summary_value_uses_intrinsic_for_negative_step_single_resi
     assert expr.expr_type == ExpressionType.INTRINSIC
     assert expr.opcode == COUNTED_LOOP_SUM_OPCODE
     assert expression_has_unresolved_value(expr) is False
-    assert "rt_counted_loop_sum_" not in expression_to_smt(expr)
+    assert "rt_counted_loop_sum_" not in expression_to_smt(published(expr))
 
 def test_counted_loop_latch_guard_rejects_boolean_bound_expression():
     summarizer = StructuralRecurrenceSummarizer(_FakeTracer("unused", _const(0)), debug=False)

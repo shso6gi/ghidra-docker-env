@@ -70,6 +70,7 @@ from dataclasses import dataclass, field
 from unittest.mock import Mock
 
 # 完全なパッケージパスでインポート
+from scripts.function_tracer_pcode.core.semantic_freeze import publish_semantic_values
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
@@ -398,7 +399,9 @@ def create_mock_analysis(
     if signedness:
         analysis.signedness_result = SignednessResult(signedness=signedness)
     
-    return analysis
+    # 本番の公開境界（`analyze_function_by_name`）と同じ扱いにする: test も
+    # 解析結果の producer なので、返す前に抱えている意味値を公開する。
+    return publish_semantic_values(analysis)
 
 
 def create_mock_result(

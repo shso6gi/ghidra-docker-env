@@ -1,4 +1,5 @@
 from scripts.function_tracer_pcode.tests.unit._recurrence_fixtures import *
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 def test_counted_loop_affine_case_preserves_parameter_bias_expression():
     summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)
@@ -319,7 +320,7 @@ def test_multiplicative_phi_return_region_recovers_direct_state_value():
     assert positive_case.value.opcode == COUNTED_STATE_TRANSITION_VALUE_OPCODE
     assert isinstance(positive_case.value.runtime_ref, CountedStateTransitionLoopSummaryRef)
     assert expression_has_unresolved_value(positive_case.value) is False
-    positive_smt = expression_to_smt(positive_case.value)
+    positive_smt = expression_to_smt(published(positive_case.value))
     assert "rt_counted_state_transition_value_" not in positive_smt
     assert "pow_acc" in positive_smt
     assert positive_case.summary_transition_evidence_key is not None

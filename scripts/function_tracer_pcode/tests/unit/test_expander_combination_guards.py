@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.semantics.transform.expander import (
     ExpandedValue,
     ExpressionExpander,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def test_combine_input_expansions_deduplicates_duplicate_pairs_before_simplify(monkeypatch):
@@ -120,7 +121,7 @@ def test_combine_input_expansions_preserves_extension_output_width(
     rebuilt = result[0].value
     assert rebuilt.size == 8
     assert expression_smt_bit_width(rebuilt) == 64
-    smt = rebuilt.to_smt()
+    smt = published(rebuilt).to_smt()
     assert smt.count(f"((_ {smt_operator} 32)") == 1
 
 
@@ -145,7 +146,7 @@ def test_combine_input_expansions_preserves_int2float_output_width(monkeypatch):
     rebuilt = result[0].value
     assert rebuilt.operator == "INT2FLOAT"
     assert rebuilt.size == 8
-    assert rebuilt.to_smt(float_mode="fp") == "((_ to_fp 11 53) RNE n)"
+    assert published(rebuilt).to_smt(float_mode="fp") == "((_ to_fp 11 53) RNE n)"
 
 
 @pytest.mark.parametrize("mnemonic", ["INT_ZEXT", "INT_SEXT"])
@@ -159,7 +160,7 @@ def test_unknown_extension_output_width_fails_closed(mnemonic):
     assert expression_smt_bit_width(extension) == 0
     assert expression_contains_unsupported_smt_ops(extension)
     with pytest.raises(UnknownSmtExtensionWidthError):
-        extension.to_smt()
+        published(extension).to_smt()
 
 
 def test_combine_input_expansions_counts_unique_results_for_budget(monkeypatch):

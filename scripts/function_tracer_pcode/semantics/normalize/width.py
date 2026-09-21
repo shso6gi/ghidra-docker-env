@@ -3,6 +3,7 @@
 
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
 from scripts.function_tracer_pcode.semantics.normalize.context import NormalizationContext
+from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
 
 
 def normalize_width_adapters(
@@ -26,8 +27,8 @@ def normalize_width_adapters(
 
     context.record_rule(
         rule_name="WIDTH_ADAPTER_SIMPLIFICATION",
-        before_expr=expr.to_smt(),
-        after_expr=simplified.to_smt(),
+        before_expr=render_expression_smt_evidence(expr),
+        after_expr=render_expression_smt_evidence(simplified),
         reason="Collapsed redundant extension/subpiece pattern",
     )
     return simplified

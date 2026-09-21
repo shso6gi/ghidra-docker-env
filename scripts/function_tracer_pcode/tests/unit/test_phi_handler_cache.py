@@ -3,6 +3,7 @@
 
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch, PhiHandler
 from scripts.function_tracer_pcode.core import Condition, Expression, PcodeOpRef
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 class _FakeAddressSpace:
@@ -348,7 +349,7 @@ def test_phi_handler_budget_unknown_uses_origin_specific_smt_symbol():
 
     assert first.name == "phi_expansion_budget_exceeded"
     assert second.name == "phi_expansion_budget_exceeded"
-    assert first.to_smt() != second.to_smt()
+    assert published(first).to_smt() != published(second).to_smt()
 
 
 def test_phi_handler_budget_origin_uses_tracer_binary_context_for_smt_symbol():
@@ -395,7 +396,7 @@ def test_phi_handler_budget_origin_uses_tracer_binary_context_for_smt_symbol():
         ),
     )[0].value
 
-    assert left_value.to_smt() != right_value.to_smt()
+    assert published(left_value).to_smt() != published(right_value).to_smt()
 
 
 def test_phi_handler_budget_unknown_does_not_require_unknown_event_hook():

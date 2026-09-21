@@ -77,6 +77,7 @@ from scripts.function_tracer_pcode.tests.unit.test_issue131_expansion_budget_obs
     _loop_cfg,
     _record,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +212,8 @@ def _total_return_analysis(*, truncations=()) -> FunctionReturnAnalysis:
         control_flow_evidence_key=_CompleteProfile().stable_key(),
     )
     analysis.effect_summary = _EffectSummaryStub()
-    return analysis
+    # test がこの解析の producer。組み立て終えたここで公開する。
+    return published(analysis)
 
 
 # ---------------------------------------------------------------------------

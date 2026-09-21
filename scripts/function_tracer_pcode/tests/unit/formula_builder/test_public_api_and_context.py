@@ -26,6 +26,7 @@ from scripts.function_tracer_pcode.core import (
     ReturnInfo,
 )
 from conftest import resolve_mock_data_type
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def _simple_analysis(func_name: str, param_name: str, size: int = 4) -> FunctionReturnAnalysis:
@@ -648,7 +649,7 @@ class TestBooleanReturnNormalization:
             Expression(ExpressionType.CONSTANT, value=2, size=4),
         )
 
-        smt = expr.to_smt()
+        smt = published(expr).to_smt()
 
         assert smt == "(bvadd (ite (bvslt (_ bv100 32) x) (_ bv1 32) (_ bv0 32)) (_ bv2 32))"
         assert "zero_extend" not in smt

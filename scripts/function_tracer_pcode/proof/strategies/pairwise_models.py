@@ -4,6 +4,7 @@
 from typing import Any, Dict, List, Optional
 
 from scripts.function_tracer_pcode.core import Condition, ReturnInfo
+from scripts.function_tracer_pcode.core.semantic_freeze import publish_semantic_values
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.effects.summary import (
     lower_post_state_expression_for_smt_if_needed,
@@ -48,6 +49,18 @@ class ReturnCase:
         self.program_is_big_endian = program_is_big_endian
         self._conditions_smt_cache: Dict[tuple, List[str]] = {}
         self._value_smt_cache: Dict[tuple, str] = {}
+        self._publish_semantic_values()
+
+    def _publish_semantic_values(self) -> None:
+        """このケースが抱える意味値を公開する（組み立て・精緻化の完了点）。
+
+        ケースは「この分岐の戻り値と経路条件はこれ」と宣言する carrier で、
+        その先は solver と identity しか読まない。公開をこの 1 箇所に置くと、
+        値を差し替える経路（`update_conditions` / `replace_value`）を通った
+        ものも必ず公開済みになる。
+        """
+
+        publish_semantic_values(self)
 
     def update_conditions(
         self,
@@ -59,6 +72,21 @@ class ReturnCase:
         self.summary_conditions = list(summary_conditions or self.conditions)
         self._conditions_smt_cache.clear()
         self._value_smt_cache.clear()
+        self._publish_semantic_values()
+
+    def replace_value(self, value_expr, normalized_value_expr=None) -> None:
+        """精緻化で戻り値式を差し替える唯一の入口。
+
+        描画済み SMT の cache は値に紐づくので、差し替えたら必ず捨てる。
+        呼び手が属性へ直接代入すると、この後始末と公開が抜ける。
+        """
+
+        self.value_expr = value_expr
+        self.normalized_value_expr = (
+            normalized_value_expr if normalized_value_expr is not None else value_expr
+        )
+        self._value_smt_cache.clear()
+        self._publish_semantic_values()
 
     @staticmethod
     def _coerce_rendered_smt(rendered) -> str:

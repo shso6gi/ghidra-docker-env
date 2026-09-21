@@ -6,6 +6,11 @@ import hashlib
 import re
 from typing import Mapping, Optional
 from scripts.function_tracer_pcode.core.intrinsics import is_supported_pcode_intrinsic
+from scripts.function_tracer_pcode.core.semantic_lifecycle import (
+    SemanticLifecycle,
+    state_of,
+)
+from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
 
 
 _BOOLEAN_BINARY_OPERATORS = {
@@ -179,12 +184,177 @@ def expression_to_smt(
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
     float_mode: str = "uf",
 ) -> str:
-    """式を SMT-LIB 文字列へ変換する。"""
+    """式を **solver へ渡す** SMT-LIB 文字列へ変換する。
+
+    入力は **公開済み**（`core/semantic_freeze.publish`）でなければならない。
+    未公開なら typed な内部バグとして落とす。ここで代わりに公開してしまうと、
+    「この値はもう確定した」と誰も言っていない中間値から判定用の論理式が作れて
+    しまい、公開点を持たない producer がいつまでも見つからない。
+
+    描画は式の lifecycle を進めない — consumer は状態を読むだけで、値が確定した
+    と宣言できるのは作った側だけ。producer 別・型別の分岐もここには置かない
+    （どの種類の式でも「公開済みか」だけを見る）。
+
+    凍らせられない graph（閉路）は公開の時点で落ちるので、placeholder を入れた
+    論理式が solver へ届くことはない。
+
+    証拠・表示のためのテキストが欲しいときは `render_expression_smt_evidence()`
+    を使うこと。あちらは solver へ渡さない前提なので、公開を要求しない。
+    """
+
+    if expr is not None and not _is_published_semantic_input(expr):
+        raise _unpublished_semantic_input(expr)
     return _to_smt_internal(
         expr,
         symbol_name_mapping=symbol_name_mapping,
         float_mode=float_mode,
     )
+
+
+def render_expression_smt_evidence(
+    expr,
+    *,
+    symbol_name_mapping: Optional[Mapping[str, str]] = None,
+    float_mode: str = "uf",
+) -> str:
+    """**証拠・表示のための** SMT 風テキスト（solver へは渡さない）。
+
+    書き換え規則が「この式がこの式になった」と記録するときの before / after や、
+    人向けの report がこれを使う。記録の対象はまだ組み立て中の中間値でよいので、
+    `expression_to_smt()` のように検証済みを要求しない。
+
+    逆に言うと、**ここで作った文字列を solver へ渡してはいけない**。判定に使う
+    論理式は確定した意味から作る必要があり、その入口は `expression_to_smt()`
+    だけ。呼び分けを型ではなく関数名で見えるようにしてあるのは、「どちらの
+    consumer か」が call site で分かる方が後から追いやすいため。
+    """
+
+    return _to_smt_internal(
+        expr,
+        symbol_name_mapping=symbol_name_mapping,
+        float_mode=float_mode,
+    )
+
+
+def condition_to_smt(
+    condition,
+    *,
+    symbol_name_mapping: Optional[Mapping[str, str]] = None,
+    float_mode: str = "uf",
+) -> str:
+    """条件を **solver へ渡す** SMT-LIB 文字列へ変換する。
+
+    式と同じ契約: 公開済みの条件しか受け取らない（`Condition.to_smt` の実体）。
+    条件も「この式がこの向きで成り立つ」という 1 つの意味の単位なので、
+    lifecycle も式と同じ。
+    """
+
+    if condition is not None and not _is_published_semantic_input(condition):
+        raise _unpublished_semantic_input(condition)
+    return _condition_to_smt_internal(
+        condition,
+        symbol_name_mapping=symbol_name_mapping,
+        float_mode=float_mode,
+    )
+
+
+def render_condition_smt_evidence(
+    condition,
+    *,
+    symbol_name_mapping: Optional[Mapping[str, str]] = None,
+    float_mode: str = "uf",
+) -> str:
+    """**証拠・表示のための** 条件テキスト（solver へは渡さない）。"""
+
+    return _condition_to_smt_internal(
+        condition,
+        symbol_name_mapping=symbol_name_mapping,
+        float_mode=float_mode,
+    )
+
+
+def _condition_to_smt_internal(
+    condition,
+    *,
+    prefer_sign_extension: bool = False,
+    symbol_name_mapping: Optional[Mapping[str, str]] = None,
+    address_context: Any = None,
+    float_mode: str = "uf",
+) -> str:
+    """条件の描画本体。**renderer 内部の再帰はここを通る**。
+
+    内部の再帰が公開入口（`Condition.to_smt`）へ戻ると、証拠 renderer から
+    描いた PHI の branch 条件が solver 入口の検査に当たってしまう（実際に
+    当たっていた）。入口は外から来た値にだけ効かせる。
+    """
+
+    if condition is None:
+        return "true"
+    expression = getattr(condition, "expression", None)
+    expr_smt = _to_smt_internal(
+        expression,
+        prefer_sign_extension,
+        symbol_name_mapping,
+        address_context,
+        float_mode,
+    )
+    expr_smt = _coerce_expr_to_bool(expression, expr_smt)
+    if getattr(condition, "negated", False):
+        return f"(not {expr_smt})"
+    return expr_smt
+
+
+_EXPRESSION_TYPE = None
+_CONDITION_TYPE = None
+
+
+def _unpublished_semantic_input(expr):
+    """未公開入力を内部バグとして記録し、typed failure を作る。
+
+    記録してから raise するので、途中の `except Exception` に握り潰されても
+    pair 境界が台帳から拾い直して `internal_exception` の ERROR にできる。
+    renderer 側に producer 別・型別の分岐は置かない。
+    """
+
+    from scripts.function_tracer_pcode.core.errors import (
+        UnpublishedSemanticInputError,
+        record_internal_bug,
+    )
+
+    expr_type = getattr(expr, "expr_type", None)
+    kind = getattr(expr_type, "name", None) if expr_type is not None else "CONDITION"
+    exc = UnpublishedSemanticInputError(
+        f"solver SMT generation received an unpublished {kind} value; "
+        "publish it where it is produced (see core/semantic_freeze.publish)"
+    )
+    record_internal_bug(exc, site="core.render_smt.expression_to_smt")
+    return exc
+
+
+def _is_published_semantic_input(expr) -> bool:
+    """producer が公開を宣言した意味 object か。
+
+    **凍結済みでは足りない**。identity API（candidate hash / 完全比較）は計算の
+    ために未凍結の入力をその場で凍らせるので、「凍結済み」を条件にすると、
+    identity を 1 回取っただけの精錬中の値が solver へ流れ込める
+    （`core/semantic_lifecycle.py`）。
+
+    判定は `isinstance` で行う。`hasattr` で属性を探ると、renderer に渡された
+    Ghidra object（記録再生中は proxy）に対して観測が走ってしまい、記録済みの
+    観測列に無い問い合わせを作ってしまう。対象は `Expression` だけで、それ以外
+    （mock / 文字列 / Ghidra object）はこの判定の外。
+    """
+
+    global _EXPRESSION_TYPE, _CONDITION_TYPE
+    if _EXPRESSION_TYPE is None:
+        from scripts.function_tracer_pcode.core.condition import Condition
+        from scripts.function_tracer_pcode.core.expression import Expression
+
+        _EXPRESSION_TYPE = Expression
+        _CONDITION_TYPE = Condition
+    if not isinstance(expr, (_EXPRESSION_TYPE, _CONDITION_TYPE)):
+        return True
+    return state_of(expr.__dict__) is SemanticLifecycle.PUBLISHED
 
 
 def expression_returns_bool(expr) -> bool:
@@ -426,13 +596,13 @@ def _to_smt_internal(
 
     if expr_type == expr_kind.VARIABLE:
         if address_context:
-            address_ref = _coerce_address_value_ref(expr)
-            if address_ref is not None:
+            projection = semantic_projection(expr)
+            if projection.is_address_value_ref and projection.address_offset is not None:
                 bits = max(1, expression_smt_bit_width(expr))
                 global_address = global_address_smt(expr, bits)
                 if global_address is not None:
                     return global_address
-                return f"(_ bv{int(address_ref.address_offset)} {bits})"
+                return f"(_ bv{projection.address_offset} {bits})"
         name = expr.name if expr.name else "var"
         if symbol_name_mapping is None:
             return name
@@ -890,8 +1060,16 @@ def _to_smt_internal(
                     address_context,
                     float_mode,
                 )
-            elif cond is not None and hasattr(cond, "to_smt"):
-                cond_str = cond.to_smt(symbol_name_mapping=symbol_name_mapping, float_mode=float_mode)
+            elif cond is not None and hasattr(cond, "expression"):
+                # 内部の再帰。公開入口（`Condition.to_smt`）へ戻らない。
+                # 引数は公開入口と同じだけ渡す（`prefer_sign_extension` /
+                # `address_context` は条件の描画に伝播させない）— 伝播させると
+                # PHI の branch 条件の描画が変わり、判定が動く。
+                cond_str = _condition_to_smt_internal(
+                    cond,
+                    symbol_name_mapping=symbol_name_mapping,
+                    float_mode=float_mode,
+                )
             else:
                 cond_str = "true"
 
@@ -962,7 +1140,6 @@ from scripts.function_tracer_pcode.core.render_smt.loop_lowering import (
 )
 from scripts.function_tracer_pcode.core.render_smt.unknowns import (
     global_address_smt,
-    _coerce_address_value_ref,
     _unknown_smt_symbol_name,
 )
 from scripts.function_tracer_pcode.core.render_smt.widths import (

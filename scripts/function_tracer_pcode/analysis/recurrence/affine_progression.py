@@ -198,8 +198,7 @@ def _impl__summarize_affine_loop_state_phi(
         if linear_term is None:
             return None
         if init_affine[1] == 0:
-            linear_term.size = size
-            return linear_term
+            return linear_term.derive_with(size=size)
         bias_expr = Expression.constant(init_affine[1], size)
         expr = Expression.binary_op("INT_ADD", linear_term, bias_expr)
         expr.size = size
@@ -275,8 +274,7 @@ def _impl__build_affine_delta_expression(
     counter = self._copy_symbol_expression(counter_expr, max(1, size))
     coeff_term = self._scale_expression(counter, coeff)
     if coeff_term is not None:
-        coeff_term.size = max(1, size)
-        terms.append(coeff_term)
+        terms.append(coeff_term.derive_with(size=max(1, size)))
     if bias != 0:
         terms.append(Expression.constant(bias, max(1, size)))
     if bias_expr is not None:
@@ -285,7 +283,7 @@ def _impl__build_affine_delta_expression(
         return Expression.constant(0, max(1, size))
     result = self._sum_expression_terms(terms)
     if result is not None:
-        result.size = max(1, size)
+        result = result.derive_with(size=max(1, size))
     return result
 
 def _impl__binary_comparison_matches_affine_constant(

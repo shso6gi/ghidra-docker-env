@@ -8,6 +8,7 @@ from scripts.function_tracer_pcode.core.intrinsics import (
     COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     READONLY_SUM_OPCODE,
 )
+from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
 from scripts.function_tracer_pcode.core.signature import get_declared_type_signedness
 
 
@@ -391,16 +392,13 @@ def _expr_prefers_signed_extension(expr) -> bool:
     expr_kind = expr_type.__class__
 
     if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
-        data_type_obj = getattr(expr, "data_type_obj", None)
-        if data_type_obj is not None:
-            return bool(
-                get_declared_type_signedness(
-                    data_type_obj,
-                    fallback_name=None,
-                    fallback_signed=False,
-                )
-            )
-        return False
+        # 宣言 signedness は凍結時に 1 回だけ評価した投影から読む。生の
+        # `data_type_obj`（JVM object）をここで読み直すと、凍結後にその object が
+        # 変わったときに SMT の幅合わせだけが黙って変わってしまう。
+        projection = semantic_projection(expr)
+        if not projection.has_data_type_obj:
+            return False
+        return bool(projection.declared_signedness)
 
     if expr_type == expr_kind.CONSTANT:
         value = getattr(expr, "value", None)

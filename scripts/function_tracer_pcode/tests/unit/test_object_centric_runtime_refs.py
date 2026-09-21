@@ -68,7 +68,14 @@ def _typed_method_b_reason(target):
         object_target_key=target,
     )
 from scripts.function_tracer_pcode.proof.formula.returns import _readonly_refs_share_surface
-from scripts.function_tracer_pcode.core.render_smt import _runtime_ref_smt_identity
+from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
+
+
+def _lowering_identity(expr):
+    """loop lowering が SMT function 名に使う identity（凍結時に確定した値）。"""
+
+    return semantic_projection(expr).loop_lowering.identity
+
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
 
@@ -3014,14 +3021,8 @@ def test_method_b_smt_identity_uses_seed_compensated_loop_summary():
         )
     )
 
-    assert _runtime_ref_smt_identity(full, full.runtime_ref) == _runtime_ref_smt_identity(
-        suffix,
-        suffix.runtime_ref,
-    )
-    assert _runtime_ref_smt_identity(full, full.runtime_ref) != _runtime_ref_smt_identity(
-        suffix_with_gap,
-        suffix_with_gap.runtime_ref,
-    )
+    assert _lowering_identity(full) == _lowering_identity(suffix)
+    assert _lowering_identity(full) != _lowering_identity(suffix_with_gap)
 
 
 def test_loop_side_effect_stable_key_distinguishes_function_context_descriptors():
@@ -3208,7 +3209,7 @@ def test_effect_aware_loop_summary_disables_exact_and_smt_shortcuts():
     assert summary.stable_key() is not None
     assert summary.pairwise_exact_key() is None
     assert ref.pairwise_exact_key() is None
-    smt_identity = _runtime_ref_smt_identity(expr, ref)
+    smt_identity = _lowering_identity(expr)
     assert smt_identity[0] == "opaque_loop_summary_identity"
     assert smt_identity[3] == "effect_proof_required"
 
@@ -3244,7 +3245,7 @@ def test_path_sensitive_loop_summary_disables_exact_and_smt_identity_shortcuts()
     assert summary.requires_path_proof() is True
     assert summary.pairwise_exact_key() is None
     assert ref.pairwise_exact_key() is None
-    smt_identity = _runtime_ref_smt_identity(expr, ref)
+    smt_identity = _lowering_identity(expr)
     assert smt_identity[0] == "opaque_loop_summary_identity"
     assert smt_identity[3] == "path_proof_required"
 
@@ -3846,10 +3847,7 @@ def test_method_b_smt_identity_uses_loop_semantics_across_owner_scoped_binaries(
 
     assert left_expr.runtime_ref.stable_key() != right_expr.runtime_ref.stable_key()
     assert left_expr.runtime_ref.semantic_key() == right_expr.runtime_ref.semantic_key()
-    assert _runtime_ref_smt_identity(left_expr, left_expr.runtime_ref) == _runtime_ref_smt_identity(
-        right_expr,
-        right_expr.runtime_ref,
-    )
+    assert _lowering_identity(left_expr) == _lowering_identity(right_expr)
 
 
 def test_loop_summary_method_b_key_keeps_vector_width_shape_distinct():

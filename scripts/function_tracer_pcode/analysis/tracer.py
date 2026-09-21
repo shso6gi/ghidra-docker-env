@@ -28,6 +28,7 @@ from scripts.function_tracer_pcode.core.signature import (
     is_unsigned_data_type,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.core.semantic_freeze import freeze_expression
 from scripts.function_tracer_pcode.config.settings import MAX_TRACE_DEPTH
 from scripts.function_tracer_pcode.analysis.debug.unknown_trace import (
     UnknownTracker,
@@ -366,7 +367,7 @@ class PcodeTracer(CallRecoveryMixin, ParameterStorageMixin, AddressRefMixin):
         if self._debug_available():
             self._debug_print_varnode(varnode, depth)
         
-        return self._trace_varnode_internal(varnode, depth, use_cache)
+        return freeze_expression(self._trace_varnode_internal(varnode, depth, use_cache))
     
     def _debug_print_varnode(self, varnode, depth: int):
         """Varnodeのデバッグ情報を出力"""
@@ -624,6 +625,11 @@ class PcodeTracer(CallRecoveryMixin, ParameterStorageMixin, AddressRefMixin):
         try:
             result = self._trace_pcode_op_internal(pcode_op, depth, use_cache)
             if use_cache:
+                # cache へ入れた式は他の演算からも共有される「公開済みの値」に
+                # なる。凍らせておくことで、あとから幅などを書き足した副作用が
+                # 別の文脈の cache 行へ漏れない（漏れると同じ varnode の trace が
+                # 呼ばれた順番で変わってしまう）。
+                freeze_expression(result)
                 self._trace_cache[op_key] = result
             return result
         finally:

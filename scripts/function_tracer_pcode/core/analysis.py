@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.core.signature import (
     parameters_without_runtime_objects,
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
+from scripts.function_tracer_pcode.core.semantic_freeze import freeze_condition, freeze_expression
 from scripts.function_tracer_pcode.core.runtime_refs import (
     EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON,
     EXPANSION_CASE_BUDGET_EXCEEDED_REASON,
@@ -247,6 +248,14 @@ class ReturnInfo:
     retained_exact_return_ref: Optional[Tuple[Any, ...]] = None
     validation_blockers: Tuple[str, ...] = field(default_factory=tuple)
     return_path_evidence: Optional[ReturnPathEvidence] = None
+
+    def __post_init__(self) -> None:
+        # 解析結果は **確定した意味** なので、組み上がった時点で凍らせる。
+        # ここから先（proof / render / authority）は snapshot だけを読み、
+        # 値を変えたい処理は新しい `ReturnInfo` を作る。
+        freeze_expression(self.value)
+        for condition in self.conditions or ():
+            freeze_condition(condition)
 
     def site_key(self) -> str:
         """return site の安定識別子を返す。"""

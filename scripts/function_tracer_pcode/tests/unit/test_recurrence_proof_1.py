@@ -1,5 +1,6 @@
 from unittest.mock import Mock
 from scripts.function_tracer_pcode.tests.unit._recurrence_fixtures import *
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 def test_condition_implication_keeps_named_parameters_with_placeholder_indices_distinct():
     param_2_placeholder = Expression.parameter("param_2", index=0, data_type="int", size=4)
@@ -632,7 +633,7 @@ def test_structural_recurrence_summary_uses_widened_closed_form():
     assert summary is not None
     summarized_returns, _ = summary
     recursive_case = next(ret for ret in summarized_returns if ret.value.to_string() != "0")
-    recursive_smt = recursive_case.value.to_smt()
+    recursive_smt = published(recursive_case.value).to_smt()
     assert "zero_extend" in recursive_smt
     assert "extract 31 0" in recursive_smt
     assert "(bvmul ((_ zero_extend" in recursive_smt

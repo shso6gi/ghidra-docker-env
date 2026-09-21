@@ -416,8 +416,8 @@ class ImmutableRecurrenceExpression:
                 self.parameter_index if expr_type == ExpressionType.PARAMETER else None
             ), operator=self.operator or None, operands=operands, size=self.size,
             name=name, runtime_ref=runtime_ref, opcode=opcode,
+            recurrence_semantic_key=self.stable_key(),
         )
-        expression._recurrence_semantic_key = self.stable_key()
         return expression
 
 

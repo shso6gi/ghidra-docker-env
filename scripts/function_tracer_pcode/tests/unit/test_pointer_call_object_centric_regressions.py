@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.core import (
     StorageInfo,
 )
 from scripts.function_tracer_pcode.core.render_smt import collect_unknown_smt_declarations
+from scripts.function_tracer_pcode.tests.unit._publication import published
 from scripts.function_tracer_pcode.core.runtime_refs import PostStateReadRef
 from scripts.function_tracer_pcode.proof.recursive_abstraction import abstract_recursive_calls
 from scripts.function_tracer_pcode.semantics.transform.expander import ExpandedValue
@@ -512,6 +513,6 @@ def test_collect_unknown_smt_declarations_includes_symbolic_post_state_variables
         ),
     )
 
-    assert collect_unknown_smt_declarations(expr) == [
+    assert collect_unknown_smt_declarations(published(expr)) == [
         ("poststate_stackframe_tail_n32_size_4", 32)
     ]

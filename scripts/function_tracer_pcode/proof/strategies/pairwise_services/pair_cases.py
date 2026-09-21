@@ -529,12 +529,13 @@ def _impl__rewrite_cases_with_parameter_fragments(
             continue
 
         case.update_conditions(rewritten_conditions, summary_conditions=rewritten_conditions)
-        case.value_expr = rewritten_value
-        case.normalized_value_expr = normalize_expression(
+        case.replace_value(
             rewritten_value,
-            NormalizationContext(settings=self.normalization_settings),
+            normalize_expression(
+                rewritten_value,
+                NormalizationContext(settings=self.normalization_settings),
+            ),
         )
-        case._value_smt_cache.clear()
 
 
 def _impl__rewrite_expr_with_parameter_fragments(

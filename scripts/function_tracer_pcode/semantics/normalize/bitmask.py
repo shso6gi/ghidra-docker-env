@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
 from scripts.function_tracer_pcode.semantics.normalize.context import NormalizationContext
+from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
 
 
 def normalize_fact_mask_patterns(
@@ -18,8 +19,8 @@ def normalize_fact_mask_patterns(
     if simplified is not expr:
         context.record_rule(
             rule_name="SHIFT_BOUND_SIMPLIFICATION",
-            before_expr=expr.to_smt(),
-            after_expr=simplified.to_smt(),
+            before_expr=render_expression_smt_evidence(expr),
+            after_expr=render_expression_smt_evidence(simplified),
             reason="Collapsed width-bounded shift/subpiece into a constant",
         )
         expr = simplified
@@ -28,8 +29,8 @@ def normalize_fact_mask_patterns(
     if simplified is not expr:
         context.record_rule(
             rule_name="FACT_MASK_SIMPLIFICATION",
-            before_expr=expr.to_smt(),
-            after_expr=simplified.to_smt(),
+            before_expr=render_expression_smt_evidence(expr),
+            after_expr=render_expression_smt_evidence(simplified),
             reason="Folded fact-proven comparison into a constant mask/guard",
         )
         expr = simplified
@@ -38,8 +39,8 @@ def normalize_fact_mask_patterns(
     if simplified is not expr:
         context.record_rule(
             rule_name="CONSTANT_FOLDING",
-            before_expr=expr.to_smt(),
-            after_expr=simplified.to_smt(),
+            before_expr=render_expression_smt_evidence(expr),
+            after_expr=render_expression_smt_evidence(simplified),
             reason="Folded constant bit-vector expression",
         )
         expr = simplified
@@ -48,8 +49,8 @@ def normalize_fact_mask_patterns(
     if simplified is not expr:
         context.record_rule(
             rule_name="BYTE_RECONSTRUCTION",
-            before_expr=expr.to_smt(),
-            after_expr=simplified.to_smt(),
+            before_expr=render_expression_smt_evidence(expr),
+            after_expr=render_expression_smt_evidence(simplified),
             reason="Reconstructed contiguous byte slices into the original value",
         )
         expr = simplified

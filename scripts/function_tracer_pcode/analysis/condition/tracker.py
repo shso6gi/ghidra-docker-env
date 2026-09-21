@@ -346,8 +346,9 @@ class ConditionTracker:
             only_conditions, only_value = valid_branches[0]
             if only_conditions:
                 return None
-            only_value.size = only_value.size or output_size
-            return only_value
+            return only_value.derive_with(
+                size=only_value.size or output_size
+            )
 
         branches = []
         conditional_branches = []

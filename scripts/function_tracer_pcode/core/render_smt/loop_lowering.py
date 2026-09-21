@@ -1,17 +1,22 @@
-"""Exact SMT lowerings of counted-loop sums, state-transition loops and read-only reductions."""
+"""counted-loop sum / state-transition loop / read-only reduction の SMT 描画。
+
+ここは **描画だけ** を担う。どの lowering か・厳密 lowering が可能か・その
+parameter は何かは `core/loop_lowering_semantics.py` が凍結時に決めており、
+この module は `semantic_projection(expr).loop_lowering` が返す不変な値を読む。
+loop summary ref の class も field 名もここでは出てこない。
+"""
 
 from __future__ import annotations
 
 import hashlib
 import re
 from typing import Any, List, Mapping, Optional, Tuple
-from scripts.function_tracer_pcode.core.runtime_refs import (
-    CountedStateTransitionLoopSummaryRef,
-    CountedLoopSummaryRef,
-    ReadonlyReductionRef,
-    StateTransitionLoopSummaryRef,
-    loop_summary_method_b_key,
+
+from scripts.function_tracer_pcode.core.loop_lowering_semantics import (
+    LoopLoweringSemantics,
+    LoweringKind,
 )
+from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
 
 
 def _neon_ext_operands_are_smt_supported(expr) -> bool:
@@ -40,130 +45,63 @@ def _neon_ext_operands_are_smt_supported(expr) -> bool:
     return 0 <= int(byte_offset) and int(byte_offset) + result_bytes <= source_bytes
 
 
-def _readonly_reduction_ref(expr) -> Optional[ReadonlyReductionRef]:
-    runtime_ref = getattr(expr, "runtime_ref", None)
-    if isinstance(runtime_ref, ReadonlyReductionRef):
-        return runtime_ref
-    return None
+def _lowering(expr) -> LoopLoweringSemantics:
+    """この式の lowering 意味（凍結時に確定済み）。
+
+    生の `runtime_ref` を読まないのは、SMT 関数名と厳密 lowering の可否が
+    「描画のときに ref をどう読んだか」で決まらないようにするため。
+    """
+
+    return semantic_projection(expr).loop_lowering
 
 
-def _runtime_ref_smt_identity(expr, runtime_ref):
-    loop_summary = getattr(runtime_ref, "loop_summary", None)
-    if loop_summary is not None:
-        requires_effect_proof = getattr(loop_summary, "requires_effect_proof", None)
-        requires_path_proof = getattr(loop_summary, "requires_path_proof", None)
-        if (
-            (callable(requires_effect_proof) and requires_effect_proof())
-            or (callable(requires_path_proof) and requires_path_proof())
-        ):
-            return (
-                "opaque_loop_summary_identity",
-                type(runtime_ref).__module__,
-                type(runtime_ref).__qualname__,
-                (
-                    "effect_proof_required"
-                    if callable(requires_effect_proof) and requires_effect_proof()
-                    else "path_proof_required"
-                ),
-                id(runtime_ref),
-                id(loop_summary),
-                id(expr),
-            )
-        method_b_key = loop_summary_method_b_key(loop_summary)
-        if method_b_key is not None:
-            return (
-                "loop_summary_method_b_runtime",
-                type(runtime_ref).__module__,
-                type(runtime_ref).__qualname__,
-                ("ref_constant_bias", int(getattr(runtime_ref, "constant_bias", 0) or 0)),
-                method_b_key,
-            )
-        loop_key = loop_summary.stable_key()
-        if loop_key is None:
-            return (
-                "opaque_loop_summary_identity",
-                type(runtime_ref).__module__,
-                type(runtime_ref).__qualname__,
-                "unkeyable",
-                id(runtime_ref),
-                id(loop_summary),
-                id(expr),
-            )
-    semantic_key = getattr(runtime_ref, "semantic_key", None)
-    if callable(semantic_key):
-        identity = semantic_key()
-        if identity is not None:
-            return identity
-    stable_key = getattr(runtime_ref, "stable_key", None)
-    if callable(stable_key):
-        return stable_key()
-    return (
-        "opaque_runtime_ref",
-        type(runtime_ref).__module__,
-        type(runtime_ref).__qualname__,
-        id(runtime_ref),
-        id(expr),
+def _lowering_of_kind(expr, kind: LoweringKind) -> Optional[LoopLoweringSemantics]:
+    """期待する種別のときだけ lowering 意味を返す。"""
+
+    lowering = _lowering(expr)
+    return lowering if lowering.kind is kind else None
+
+
+def _identity_digest(lowering: LoopLoweringSemantics) -> str:
+    return hashlib.sha1(repr(lowering.identity).encode("utf-8")).hexdigest()[:16]
+
+
+def _operand_bit_widths(expr, count: int) -> Tuple[int, ...]:
+    operands = getattr(expr, "operands", None) or []
+    return tuple(
+        expression_smt_bit_width(operands[index]) if len(operands) > index else 0
+        for index in range(count)
     )
 
 
 def _readonly_sum_function_name(expr) -> str:
-    operands = getattr(expr, "operands", None) or []
-    base_bits = expression_smt_bit_width(operands[0]) if len(operands) >= 1 else 0
-    count_bits = expression_smt_bit_width(operands[1]) if len(operands) >= 2 else 0
+    base_bits, count_bits = _operand_bit_widths(expr, 2)
     result_bits = max(1, int(expression_smt_bit_width(expr) or 1))
-    reduction_ref = _readonly_reduction_ref(expr)
-    if reduction_ref is None:
+    lowering = _lowering_of_kind(expr, LoweringKind.READONLY_REDUCTION)
+    if lowering is None:
         return f"rt_readonly_sum_{base_bits}_{count_bits}_{result_bits}"
-    reduction_kind = re.sub(r"[^A-Za-z0-9_]+", "_", reduction_ref.reduction_kind or "sum")
-    identity = _runtime_ref_smt_identity(expr, reduction_ref)
-    digest = hashlib.sha1(repr(identity).encode("utf-8")).hexdigest()[:16]
+    reduction_kind = re.sub(r"[^A-Za-z0-9_]+", "_", lowering.reduction_kind or "sum")
+    digest = _identity_digest(lowering)
     return f"rt_{reduction_kind}_{digest}_{base_bits}_{count_bits}_{result_bits}"
 
 
-def _counted_loop_sum_ref(expr) -> Optional[CountedLoopSummaryRef]:
-    runtime_ref = getattr(expr, "runtime_ref", None)
-    if isinstance(runtime_ref, CountedLoopSummaryRef):
-        return runtime_ref
-    return None
-
-
-def _state_transition_loop_count_ref(expr) -> Optional[StateTransitionLoopSummaryRef]:
-    runtime_ref = getattr(expr, "runtime_ref", None)
-    if isinstance(runtime_ref, StateTransitionLoopSummaryRef):
-        return runtime_ref
-    return None
-
-
-def _counted_state_transition_value_ref(expr) -> Optional[CountedStateTransitionLoopSummaryRef]:
-    runtime_ref = getattr(expr, "runtime_ref", None)
-    if isinstance(runtime_ref, CountedStateTransitionLoopSummaryRef):
-        return runtime_ref
-    return None
-
-
 def _state_transition_loop_count_function_name(expr) -> str:
-    operands = getattr(expr, "operands", None) or []
-    state_bits = expression_smt_bit_width(operands[0]) if len(operands) >= 1 else 0
+    (state_bits,) = _operand_bit_widths(expr, 1)
     result_bits = max(1, int(expression_smt_bit_width(expr) or 1))
-    summary_ref = _state_transition_loop_count_ref(expr)
-    if summary_ref is None:
+    lowering = _lowering_of_kind(expr, LoweringKind.STATE_TRANSITION_LOOP_COUNT)
+    if lowering is None:
         return f"rt_state_transition_loop_count_{state_bits}_{result_bits}"
-    identity = _runtime_ref_smt_identity(expr, summary_ref)
-    digest = hashlib.sha1(repr(identity).encode("utf-8")).hexdigest()[:16]
+    digest = _identity_digest(lowering)
     return f"rt_state_transition_loop_count_{digest}_{state_bits}_{result_bits}"
 
 
 def _counted_state_transition_value_function_name(expr) -> str:
-    operands = getattr(expr, "operands", None) or []
-    init_bits = expression_smt_bit_width(operands[0]) if len(operands) >= 1 else 0
-    start_bits = expression_smt_bit_width(operands[1]) if len(operands) >= 2 else 0
-    limit_bits = expression_smt_bit_width(operands[2]) if len(operands) >= 3 else 0
+    init_bits, start_bits, limit_bits = _operand_bit_widths(expr, 3)
     result_bits = max(1, int(expression_smt_bit_width(expr) or 1))
-    summary_ref = _counted_state_transition_value_ref(expr)
-    if summary_ref is None:
+    lowering = _lowering_of_kind(expr, LoweringKind.COUNTED_STATE_TRANSITION_VALUE)
+    if lowering is None:
         return f"rt_counted_state_transition_value_{init_bits}_{start_bits}_{limit_bits}_{result_bits}"
-    identity = _runtime_ref_smt_identity(expr, summary_ref)
-    digest = hashlib.sha1(repr(identity).encode("utf-8")).hexdigest()[:16]
+    digest = _identity_digest(lowering)
     return (
         f"rt_counted_state_transition_value_{digest}_"
         f"{init_bits}_{start_bits}_{limit_bits}_{result_bits}"
@@ -171,101 +109,8 @@ def _counted_state_transition_value_function_name(expr) -> str:
 
 
 def _counted_state_transition_value_has_exact_lowering(expr) -> bool:
-    return _counted_state_transition_exact_multiplier(expr) is not None
-
-
-def _counted_state_transition_exact_multiplier(expr) -> Optional[int]:
-    runtime_ref = _counted_state_transition_value_ref(expr)
-    if runtime_ref is None:
-        return None
-    step_expr = getattr(runtime_ref, "step_expr", None)
-    if _expr_constant_int(step_expr) != 1:
-        return None
-    profile = getattr(runtime_ref, "side_effect_profile", None)
-    if profile is None:
-        return None
-    requires_effect_proof = getattr(profile, "requires_effect_proof", None)
-    if callable(requires_effect_proof):
-        try:
-            if requires_effect_proof():
-                return None
-        except Exception:
-            return None
-    for flag in (
-        "memory_reads",
-        "memory_writes",
-        "calls",
-        "escapes",
-        "context_memory_writes",
-        "context_calls",
-        "context_escapes",
-        "context_conditional_guards",
-    ):
-        if bool(getattr(profile, flag, False)):
-            return None
-    if tuple(getattr(profile, "context_descriptors", ()) or ()):
-        return None
-    effect_descriptors = tuple(getattr(profile, "effect_descriptors", ()) or ())
-    if any(getattr(effect, "kind", None) != "conditional_guard" for effect in effect_descriptors):
-        return None
-    transition_cases = tuple(getattr(runtime_ref, "transition_cases", ()) or ())
-    if len(transition_cases) != 1:
-        return None
-    case = transition_cases[0]
-    if not isinstance(case, tuple) or len(case) != 2:
-        return None
-    condition_signature, transition_signature = case
-    if condition_signature not in {(), (("none",),), None}:
-        return None
-    transition_expr = getattr(runtime_ref, "transition_expr", None)
-    state_placeholder = getattr(runtime_ref, "state_placeholder", None)
-    if transition_expr is None or state_placeholder is None:
-        return None
-    if not _counted_state_transition_case_signature_matches_expr(
-        transition_signature,
-        transition_expr,
-    ):
-        return None
-    if getattr(transition_expr, "expr_type", None) != transition_expr.expr_type.__class__.BINARY_OP:
-        return None
-    if getattr(transition_expr, "operator", None) != "INT_MULT":
-        return None
-    operands = list(getattr(transition_expr, "operands", ()) or ())
-    if len(operands) != 2:
-        return None
-    for maybe_state, maybe_const in ((operands[0], operands[1]), (operands[1], operands[0])):
-        try:
-            state_matches = maybe_state.equals(state_placeholder)
-        except Exception:
-            state_matches = False
-        if not state_matches:
-            continue
-        multiplier = _expr_constant_int(maybe_const)
-        if multiplier is None:
-            return None
-        return int(multiplier)
-    return None
-
-
-def _counted_state_transition_case_signature_matches_expr(
-    transition_signature: Any,
-    transition_expr,
-) -> bool:
-    if transition_signature is None or transition_expr is None:
-        return False
-    try:
-        expr_signature = transition_expr.structural_key()
-    except Exception:
-        return False
-    return _normalize_signature_tuple(transition_signature) == _normalize_signature_tuple(expr_signature)
-
-
-def _normalize_signature_tuple(value: Any) -> Any:
-    if isinstance(value, list):
-        return tuple(_normalize_signature_tuple(item) for item in value)
-    if isinstance(value, tuple):
-        return tuple(_normalize_signature_tuple(item) for item in value)
-    return value
+    lowering = _lowering_of_kind(expr, LoweringKind.COUNTED_STATE_TRANSITION_VALUE)
+    return lowering is not None and lowering.exact_lowering_available
 
 
 def _counted_state_transition_exact_smt(
@@ -279,17 +124,15 @@ def _counted_state_transition_exact_smt(
     limit_bits: int,
     result_bits: int,
 ) -> Optional[str]:
-    multiplier = _counted_state_transition_exact_multiplier(expr)
-    if multiplier is None:
+    lowering = _lowering_of_kind(expr, LoweringKind.COUNTED_STATE_TRANSITION_VALUE)
+    if lowering is None or lowering.exact_multiplier is None:
         return None
-    runtime_ref = _counted_state_transition_value_ref(expr)
-    if runtime_ref is None:
-        return None
+    multiplier = lowering.exact_multiplier
     count_bits = max(1, int(start_bits), int(limit_bits))
     start_count = _coerce_smt_bitvec_width(start_smt, start_bits, count_bits, prefer_sign_extension=False)
     limit_count = _coerce_smt_bitvec_width(limit_smt, limit_bits, count_bits, prefer_sign_extension=False)
     zero_count = f"(_ bv0 {count_bits})"
-    if bool(getattr(runtime_ref, "signed_loop", False)):
+    if lowering.signed_loop:
         active_count = f"(ite (bvsle {limit_count} {start_count}) {zero_count} (bvsub {limit_count} {start_count}))"
     else:
         active_count = f"(ite (bvule {limit_count} {start_count}) {zero_count} (bvsub {limit_count} {start_count}))"
@@ -337,16 +180,12 @@ def _constant_multiplier_pow_smt(
 
 
 def _counted_loop_sum_function_name(expr) -> str:
-    operands = getattr(expr, "operands", None) or []
-    base_bits = expression_smt_bit_width(operands[0]) if len(operands) >= 1 else 0
-    start_bits = expression_smt_bit_width(operands[1]) if len(operands) >= 2 else 0
-    limit_bits = expression_smt_bit_width(operands[2]) if len(operands) >= 3 else 0
+    base_bits, start_bits, limit_bits = _operand_bit_widths(expr, 3)
     result_bits = max(1, int(expression_smt_bit_width(expr) or 1))
-    summary_ref = _counted_loop_sum_ref(expr)
-    if summary_ref is None:
+    lowering = _lowering_of_kind(expr, LoweringKind.COUNTED_LOOP_SUM)
+    if lowering is None:
         return f"rt_counted_loop_sum_{base_bits}_{start_bits}_{limit_bits}_{result_bits}"
-    identity = _runtime_ref_smt_identity(expr, summary_ref)
-    digest = hashlib.sha1(repr(identity).encode("utf-8")).hexdigest()[:16]
+    digest = _identity_digest(lowering)
     return (
         f"rt_counted_loop_sum_{digest}_"
         f"{base_bits}_{start_bits}_{limit_bits}_{result_bits}"
@@ -354,26 +193,8 @@ def _counted_loop_sum_function_name(expr) -> str:
 
 
 def _counted_loop_sum_has_exact_lowering(expr) -> bool:
-    operands = getattr(expr, "operands", None) or []
-    if len(operands) != 3:
-        return False
-    summary_ref = _counted_loop_sum_ref(expr)
-    if summary_ref is None:
-        return False
-    induction_step = int(getattr(summary_ref, "induction_step", 0) or 0)
-    residue_cases = tuple(getattr(summary_ref, "residue_cases", ()) or ())
-    if induction_step == 0 or not residue_cases:
-        return False
-    if induction_step != 1:
-        return all(int(modulus) == 1 for modulus, _residue, _coeff, _bias in residue_cases)
-    for modulus, _residue, _coeff, _bias in residue_cases:
-        modulus = int(modulus)
-        if modulus <= 1:
-            continue
-        mask = modulus - 1
-        if mask <= 0 or (mask & (mask + 1)) != 0:
-            return False
-    return True
+    lowering = _lowering_of_kind(expr, LoweringKind.COUNTED_LOOP_SUM)
+    return lowering is not None and lowering.exact_lowering_available
 
 
 def _lower_neon_ext_operands_to_smt(
@@ -456,17 +277,17 @@ def _counted_loop_sum_exact_smt(
     address_context: Optional[Mapping[str, Any]] = None,
     float_mode: str = "real",
 ) -> Optional[str]:
-    summary_ref = _counted_loop_sum_ref(expr)
-    if summary_ref is None:
+    lowering = _lowering_of_kind(expr, LoweringKind.COUNTED_LOOP_SUM)
+    if lowering is None:
         return None
 
-    induction_step = int(getattr(summary_ref, "induction_step", 0) or 0)
-    residue_cases = tuple(getattr(summary_ref, "residue_cases", ()) or ())
-    residue_bias_terms = tuple(getattr(summary_ref, "residue_bias_terms", ()) or ())
+    induction_step = lowering.induction_step
+    residue_cases = lowering.residue_cases
+    residue_bias_terms = lowering.residue_bias_terms
     if induction_step == 0 or not residue_cases:
         return None
 
-    signed_loop = bool(getattr(summary_ref, "signed_loop", False))
+    signed_loop = lowering.signed_loop
     wide_bits = max(64, result_bits * 2, base_bits, start_bits, limit_bits)
     wide_base = _smt_extend_to_width(expr.operands[0], base_smt, wide_bits, signed=signed_loop)
     wide_start = _smt_extend_to_width(expr.operands[1], start_smt, wide_bits, signed=signed_loop)
@@ -498,9 +319,9 @@ def _counted_loop_sum_exact_smt(
 
     def _bias_terms_for_case(modulus: int, residue: int) -> Tuple[Any, ...]:
         return tuple(
-            bias_expr
-            for bias_modulus, bias_residue, bias_expr in residue_bias_terms
-            if int(bias_modulus) == int(modulus) and int(bias_residue) == int(residue)
+            term.bias_expression
+            for term in residue_bias_terms
+            if term.modulus == int(modulus) and term.residue == int(residue)
         )
 
     def _render_bias_term(bias_expr) -> Optional[str]:
@@ -555,11 +376,11 @@ def _counted_loop_sum_exact_smt(
         no_iteration = _loop_le(wide_limit, wide_start)
         count_all_expr = f"(ite {no_iteration} {zero} {n_expr})"
         total = wide_base
-        for modulus, residue, coeff, bias in residue_cases:
-            modulus = int(modulus)
-            residue = int(residue)
-            coeff = int(coeff)
-            bias = int(bias)
+        for case in residue_cases:
+            modulus = case.modulus
+            residue = case.residue
+            coeff = case.coefficient
+            bias = case.bias
             if modulus <= 1:
                 count_expr = count_all_expr
                 offset_expr = zero
@@ -588,7 +409,7 @@ def _counted_loop_sum_exact_smt(
                 return None
         return _smt_low_bits(total, wide_bits, result_bits)
 
-    if any(int(modulus) != 1 for modulus, _residue, _coeff, _bias in residue_cases):
+    if any(case.modulus != 1 for case in residue_cases):
         return None
 
     if induction_step > 0:
@@ -604,13 +425,13 @@ def _counted_loop_sum_exact_smt(
     count_expr = f"(ite {no_iteration} {zero} {count_nonzero})"
     progression_sum = _exact_progression_sum(wide_start, count_expr, step=induction_step)
     total = wide_base
-    for _modulus, _residue, coeff, bias in residue_cases:
-        coeff_term = _smt_scale_term(progression_sum, int(coeff), wide_bits)
-        bias_term = _smt_scale_term(count_expr, int(bias), wide_bits)
+    for case in residue_cases:
+        coeff_term = _smt_scale_term(progression_sum, case.coefficient, wide_bits)
+        bias_term = _smt_scale_term(count_expr, case.bias, wide_bits)
         for term in (coeff_term, bias_term):
             if term is not None:
                 total = f"(bvadd {total} {term})"
-        total = _add_bias_expression_terms(total, count_expr, int(_modulus), int(_residue))
+        total = _add_bias_expression_terms(total, count_expr, case.modulus, case.residue)
         if total is None:
             return None
     return _smt_low_bits(total, wide_bits, result_bits)

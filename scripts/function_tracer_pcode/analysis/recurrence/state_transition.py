@@ -1874,12 +1874,11 @@ def _impl__add_state_transition_accumulator_seed(
         signed=self._expression_prefers_signed_extension(accumulator_init),
     )
     if self._raw_constant_value(accumulator_init) == 0:
-        loop_value.size = result_size
-        return loop_value
+        return loop_value.derive_with(size=result_size)
     combined = self._sum_expression_terms([accumulator_init, loop_value])
     if combined is None:
         return None
-    combined.size = result_size
+    combined = combined.derive_with(size=result_size)
     return self._canonicalize_expression(combined)
 
 
@@ -2389,7 +2388,7 @@ def _impl__combine_conditions_for_state_transition(
             cond_expr = Expression.unary_op("BOOL_NEGATE", cond_expr)
             cond_expr.size = 1
         expr = cond_expr if expr is None else Expression.binary_op("BOOL_AND", expr, cond_expr)
-        expr.size = 1
+        expr = expr.derive_with(size=1)
     return Condition(self._canonicalize_expression(expr), False)
 
 

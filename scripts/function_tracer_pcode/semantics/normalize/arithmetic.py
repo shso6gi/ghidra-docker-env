@@ -3,6 +3,7 @@
 
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
 from scripts.function_tracer_pcode.semantics.normalize.context import NormalizationContext
+from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
 
 
 def normalize_arithmetic(
@@ -38,8 +39,8 @@ def normalize_arithmetic(
     if expr is not expr_before:
         context.record_rule(
             rule_name="ARITHMETIC_CANONICALIZATION",
-            before_expr=expr_before.to_smt(),
-            after_expr=expr.to_smt(),
+            before_expr=render_expression_smt_evidence(expr_before),
+            after_expr=render_expression_smt_evidence(expr),
             reason="Canonicalized add/sub using modulo-safe bit-vector identities",
         )
 
@@ -116,10 +117,9 @@ def _simplify_mult_identities(expr: Expression) -> Expression:
         zero.size = expr.size or zero.size
         return zero
     if _is_one_constant(left):
-        right.size = expr.size or right.size
-        return right
+        return right.derive_with(size=expr.size or right.size)
     if _is_one_constant(right):
-        left.size = expr.size or left.size
+        return left.derive_with(size=expr.size or left.size)
         return left
     return expr
 

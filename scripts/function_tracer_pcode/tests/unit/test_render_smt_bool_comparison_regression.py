@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
     CountedStateTransitionLoopSummaryRef,
     LoopSideEffectProfileRef,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def _param(name: str, size: int = 4, data_type: Optional[str] = None) -> Expression:
@@ -84,7 +85,7 @@ def _state_times_const_summary(
 def test_counted_state_transition_pure_multiply_lowers_without_uf():
     expr = _state_times_const_summary(5)
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert "rt_counted_state_transition_value" not in smt
     assert "(bvmul (_ bv1 32)" in smt
@@ -101,7 +102,7 @@ def test_counted_state_transition_effectful_multiply_stays_uf():
         ),
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert "rt_counted_state_transition_value" in smt
     assert expression_uses_smt_uf(expr)
@@ -110,7 +111,7 @@ def test_counted_state_transition_effectful_multiply_stays_uf():
 def test_counted_state_transition_mismatched_case_signature_stays_uf():
     expr = _state_times_const_summary(5, transition_case_multiplier=6)
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert "rt_counted_state_transition_value" in smt
     assert expression_uses_smt_uf(expr)
@@ -125,7 +126,7 @@ def test_expression_to_smt_lowers_neon_ext_byte_extract():
         size=16,
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert "((_ extract 63 56) v_second)" in smt
     assert "((_ extract 7 0) v_second)" in smt
@@ -143,7 +144,7 @@ def test_expression_to_smt_rejects_neon_ext_nonconstant_offset():
 
     assert expression_contains_unsupported_smt_ops(expr)
     try:
-        expression_to_smt(expr)
+        expression_to_smt(published(expr))
     except ValueError as exc:
         assert "constant byte offset" in str(exc)
     else:
@@ -159,7 +160,7 @@ def test_expression_to_smt_rejects_neon_ext_element_size_other_than_one():
 
     assert expression_contains_unsupported_smt_ops(expr)
     try:
-        expression_to_smt(expr)
+        expression_to_smt(published(expr))
     except ValueError as exc:
         assert "element_size operand 1" in str(exc)
     else:
@@ -176,7 +177,7 @@ def test_expression_to_smt_keeps_raw_callother_id_150_unsupported_without_userop
 
     assert expression_contains_unsupported_smt_ops(expr)
     try:
-        expression_to_smt(expr)
+        expression_to_smt(published(expr))
     except ValueError as exc:
         assert "Unsupported intrinsic" in str(exc)
     else:
@@ -187,7 +188,7 @@ def test_expression_to_smt_coerces_bool_vs_bitvector_equality_without_sort_error
     bool_expr = _binary("INT_SLESS", _param("param_2"), _param("param_1"))
     expr = _binary("INT_EQUAL", bool_expr, _const(0, 4))
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert "((_ zero_extend 31) (bvslt" not in smt
     assert "(ite (bvslt param_2 param_1) (_ bv1 32) (_ bv0 32))" in smt
@@ -202,7 +203,7 @@ def test_float_binary_arithmetic_is_supported_by_smt_gate():
     )
 
     assert expression_contains_unsupported_smt_ops(expr) is False
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
     assert "(fp.add RNE" in smt
     assert "(fp.mul RNE" in smt
     assert "(fp.sub RNE" in smt
@@ -215,7 +216,7 @@ def test_piece_converts_both_fp_operands_before_concat():
     right = _binary("FLOAT_SUB", _param("right_a", size=8), _param("right_b", size=8))
     expr = _binary("PIECE", left, right)
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
 
     assert smt.count("((_ fp.to_ieee_bv) (fp.") == 2
     assert smt.startswith("(concat ")
@@ -238,7 +239,7 @@ def test_piece_converts_only_fp_operand_in_mixed_fp_bitvector_concat():
     fp_value = _binary("FLOAT_ADD", _param("a", size=8), _param("b", size=8))
     expr = _binary("PIECE", fp_value, _param("tail", size=8))
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
 
     assert smt.count("fp.to_ieee_bv") == 1
     assert smt.endswith(" tail)")
@@ -250,7 +251,7 @@ def test_subpiece_converts_fp_source_before_extract():
     expr = _binary("SUBPIECE", source, _const(0, size=4))
     expr.size = 4
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
 
     assert smt.startswith("((_ extract 31 0) ((_ fp.to_ieee_bv) (fp.add RNE")
 
@@ -272,7 +273,7 @@ def test_piece_and_subpiece_width_contracts_fail_closed():
     ):
         assert expression_contains_unsupported_smt_ops(expr)
         with pytest.raises(UnsupportedSmtOperatorError, match=reason):
-            expression_to_smt(expr, float_mode="fp")
+            expression_to_smt(published(expr), float_mode="fp")
 
 
 @pytest.mark.parametrize("operator", ["PIECE", "SUBPIECE"])
@@ -286,7 +287,7 @@ def test_piece_and_subpiece_malformed_size_is_typed_at_direct_renderer_boundary(
 
     assert expression_contains_unsupported_smt_ops(expr)
     with pytest.raises(UnsupportedSmtOperatorError, match="result width is invalid"):
-        expression_to_smt(expr, float_mode="fp")
+        expression_to_smt(published(expr), float_mode="fp")
 
 
 @pytest.mark.parametrize("operator", ["PIECE", "SUBPIECE"])
@@ -296,7 +297,7 @@ def test_piece_and_subpiece_bad_arity_is_typed_at_direct_renderer_boundary(opera
 
     assert expression_contains_unsupported_smt_ops(expr)
     with pytest.raises(UnsupportedSmtOperatorError, match="requires exactly two operands"):
-        expression_to_smt(expr, float_mode="fp")
+        expression_to_smt(published(expr), float_mode="fp")
 
 
 def test_piece_and_subpiece_reject_phi_with_an_unknown_branch_width():
@@ -320,7 +321,7 @@ def test_piece_and_subpiece_reject_phi_with_an_unknown_branch_width():
     ):
         assert expression_contains_unsupported_smt_ops(expr)
         with pytest.raises(UnsupportedSmtOperatorError, match=reason):
-            expression_to_smt(expr, float_mode="fp")
+            expression_to_smt(published(expr), float_mode="fp")
 
 
 def test_int2float_signed_i32_to_binary64_uses_exact_fp_theory_lowering():
@@ -330,7 +331,7 @@ def test_int2float_signed_i32_to_binary64_uses_exact_fp_theory_lowering():
     expr = Expression.unary_op("INT2FLOAT", operand)
     expr.size = 8
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
 
     assert smt == "((_ to_fp 11 53) RNE n)"
     assert "to_fp_unsigned" not in smt
@@ -354,7 +355,7 @@ def test_int2float_signed_i32_to_binary32_preserves_output_sort():
     expr = Expression.unary_op("INT2FLOAT", operand)
     expr.size = 4
 
-    assert expression_to_smt(expr, float_mode="fp") == "((_ to_fp 8 24) RNE n)"
+    assert expression_to_smt(published(expr), float_mode="fp") == "((_ to_fp 8 24) RNE n)"
     assert expression_smt_sort_kind(expr, float_mode="fp") == "FP"
 
 
@@ -368,7 +369,7 @@ def test_int2float_float_div_uf_mode_refuses_before_emitting_mixed_sorts():
 
     assert expression_smt_sort_kind(numerator, float_mode="uf") == "BV"
     with pytest.raises(UnsupportedSmtOperatorError) as exc:
-        expression_to_smt(expr, float_mode="uf")
+        expression_to_smt(published(expr), float_mode="uf")
     assert exc.value.operator == "INT2FLOAT"
     assert (
         exc.value.reason
@@ -396,7 +397,7 @@ def test_int2float_unknown_output_width_fails_closed():
 
     assert expression_contains_unsupported_smt_ops(expr)
     with pytest.raises(UnsupportedSmtOperatorError) as exc:
-        expression_to_smt(expr, float_mode="fp")
+        expression_to_smt(published(expr), float_mode="fp")
     assert exc.value.reason == "output floating-point width is unsupported"
 
 
@@ -410,7 +411,7 @@ def test_mixed_precision_int2float_division_fails_closed():
 
     assert expression_contains_unsupported_smt_ops(expr)
     with pytest.raises(UnsupportedSmtOperatorError) as exc:
-        expression_to_smt(expr, float_mode="fp")
+        expression_to_smt(published(expr), float_mode="fp")
     assert exc.value.operator == "FLOAT_DIV"
     assert exc.value.reason == "floating-point operand/result precisions do not match"
 
@@ -421,7 +422,7 @@ def test_generic_unsupported_unary_operator_never_becomes_smt_function():
 
     assert expression_contains_unsupported_smt_ops(expr)
     with pytest.raises(UnsupportedSmtOperatorError) as exc:
-        expression_to_smt(expr, float_mode="fp")
+        expression_to_smt(published(expr), float_mode="fp")
     assert exc.value.operator == "FLOAT2INT"
     assert exc.value.reason == "unsupported unary operator"
 
@@ -431,7 +432,7 @@ def test_generic_unsupported_binary_operator_never_becomes_smt_function():
 
     assert expression_contains_unsupported_smt_ops(expr)
     with pytest.raises(UnsupportedSmtOperatorError) as exc:
-        expression_to_smt(expr)
+        expression_to_smt(published(expr))
     assert exc.value.operator == "ADD"
     assert exc.value.reason == "unsupported binary operator"
 
@@ -439,7 +440,7 @@ def test_generic_unsupported_binary_operator_never_becomes_smt_function():
 def test_float_binary_arithmetic_declares_uninterpreted_function_for_non_fp_width():
     expr = _binary("FLOAT_MULT", _param("param_2", size=10), _param("param_1", size=10))
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
     declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
 
     assert smt == "(float_mult param_2 param_1)"
@@ -451,7 +452,7 @@ def test_float_binary_arithmetic_declares_uninterpreted_function_for_non_fp_widt
 def test_float_predicate_smt_declarations_are_collected_for_ufbv_queries():
     expr = _binary("FLOAT_LESS", _param("param_2", size=8), _param("param_1", size=8))
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
     declarations = collect_float_predicate_smt_declarations(expr)
 
     assert smt == "(float_less param_2 param_1)"
@@ -463,7 +464,7 @@ def test_float_predicate_smt_declarations_are_collected_for_ufbv_queries():
 def test_float_predicate_can_render_with_ieee754_fp_theory():
     expr = _binary("FLOAT_LESS", _param("param_2", size=8), _param("param_1", size=8))
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
     declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
 
     assert smt == "(fp.lt ((_ to_fp 11 53) param_2) ((_ to_fp 11 53) param_1))"
@@ -473,7 +474,7 @@ def test_float_predicate_can_render_with_ieee754_fp_theory():
 def test_float_mixed_width_binary_skips_fp_arithmetic_path():
     expr = _binary("FLOAT_ADD", _param("param_2", size=10), _param("param_1", size=8))
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
     declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
 
     assert smt == "(float_add param_2 param_1)"
@@ -485,7 +486,7 @@ def test_float_mixed_width_binary_skips_fp_arithmetic_path():
 def test_float_signed_division_uses_fp_theory_for_non_exceptional_widths():
     expr = _binary("FLOAT_SDIV", _param("param_2", size=8), _param("param_1", size=8))
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
     declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
 
     assert smt == "(fp.div RNE ((_ to_fp 11 53) param_2) ((_ to_fp 11 53) param_1))"
@@ -495,7 +496,7 @@ def test_float_signed_division_uses_fp_theory_for_non_exceptional_widths():
 def test_float_signed_division_known_zero_divisor_falls_back_to_ufbv():
     expr = _binary("FLOAT_SDIV", _param("param_2", size=8), _const(0, size=8))
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
     declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
 
     assert smt == "(float_div param_2 (_ bv0 64))"
@@ -508,7 +509,7 @@ def test_float_signed_division_known_zero_divisor_falls_back_to_ufbv():
 def test_float_signed_remainder_known_nan_operand_falls_back_to_ufbv():
     expr = _binary("FLOAT_SREM", _const(0x7FF8000000000000, size=8), _param("param_1", size=8))
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
     declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
 
     assert smt == "(float_rem (_ bv9221120237041090560 64) param_1)"
@@ -520,7 +521,7 @@ def test_float_signed_remainder_known_nan_operand_falls_back_to_ufbv():
 def test_unsupported_float_width_keeps_uf_logic_visible():
     expr = _binary("FLOAT_LESS", _param("param_2", size=10), _param("param_1", size=10))
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
     declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
 
     assert smt == "(float_less param_2 param_1)"
@@ -535,7 +536,7 @@ def test_unsupported_float_width_keeps_uf_logic_visible():
 def test_float_notequal_uses_ieee754_not_fp_eq_in_fp_mode():
     expr = _binary("FLOAT_NOTEQUAL", _param("param_2", size=8), _param("param_1", size=8))
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
 
     assert smt == "(not (fp.eq ((_ to_fp 11 53) param_2) ((_ to_fp 11 53) param_1)))"
 
@@ -544,7 +545,7 @@ def test_float_neg_lowers_to_bit_preserving_sign_flip():
     expr = Expression.unary_op("FLOAT_NEG", _param("param_1", size=8, data_type="double"))
     expr.size = 8
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
 
     assert smt == "(bvxor param_1 (_ bv9223372036854775808 64))"
     assert "float_neg" not in smt
@@ -554,7 +555,7 @@ def test_float_abs_lowers_to_bit_preserving_sign_clear():
     expr = Expression.unary_op("FLOAT_ABS", _param("param_1", size=4, data_type="float"))
     expr.size = 4
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
 
     assert smt == "(bvand param_1 (_ bv2147483647 32))"
     assert "float_abs" not in smt
@@ -582,7 +583,7 @@ def test_float_nan_of_sqrt_uses_ieee754_fp_theory_in_fp_mode():
     expr = Expression.unary_op("FLOAT_NAN", sqrt_expr)
     expr.size = 1
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
 
     assert smt == (
         "(fp.isNaN ((_ to_fp 11 53) "
@@ -594,7 +595,7 @@ def test_float_sqrt_uses_ieee754_fp_theory_in_fp_mode():
     expr = Expression.unary_op("FLOAT_SQRT", _param("param_1", size=8, data_type="double"))
     expr.size = 8
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
     declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
 
     assert expression_uses_smt_float_theory(expr) is True
@@ -606,7 +607,7 @@ def test_float_sqrt_uses_declared_uf_for_ufbv_queries():
     expr = Expression.unary_op("FLOAT_SQRT", _param("param_1", size=8, data_type="double"))
     expr.size = 8
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
     declarations = collect_float_predicate_smt_declarations(expr)
 
     assert smt == "(float_sqrt param_1)"
@@ -620,7 +621,7 @@ def test_float_nan_uses_ieee754_fp_theory_in_fp_mode():
     expr = Expression.unary_op("FLOAT_NAN", _param("param_1", size=8, data_type="double"))
     expr.size = 1
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
     declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
 
     assert smt == "(fp.isNaN ((_ to_fp 11 53) param_1))"
@@ -631,7 +632,7 @@ def test_float_nan_uses_declared_uf_for_ufbv_queries():
     expr = Expression.unary_op("FLOAT_NAN", _param("param_1", size=10))
     expr.size = 1
 
-    smt = expression_to_smt(expr, float_mode="fp")
+    smt = expression_to_smt(published(expr), float_mode="fp")
     declarations = collect_float_predicate_smt_declarations(expr, float_mode="fp")
 
     assert smt == "(float_nan param_1)"
@@ -645,7 +646,7 @@ def test_expression_to_smt_coerces_bool_before_integer_twos_complement():
     bool_expr = _binary("INT_EQUAL", _binary("INT_AND", _param("param_1", size=1), _const(1, size=1)), _const(0, size=1))
     expr = Expression.unary_op("INT_2COMP", bool_expr)
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert "(bvneg (=" not in smt
     assert smt == (
@@ -659,7 +660,7 @@ def test_expression_to_smt_coerces_bitvector_before_bool_negate():
     low_byte.size = 1
     expr = Expression.unary_op("BOOL_NEGATE", low_byte)
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert smt == "(not (not (= ((_ extract 7 0) param_1) (_ bv0 8))))"
 
@@ -668,8 +669,8 @@ def test_condition_to_smt_coerces_bitvector_conditions_to_bool():
     low_byte = _binary("SUBPIECE", _param("param_1", size=4), _const(0, size=4))
     low_byte.size = 1
 
-    assert Condition(low_byte).to_smt() == "(not (= ((_ extract 7 0) param_1) (_ bv0 8)))"
-    assert Condition(low_byte, True).to_smt() == (
+    assert published(Condition(low_byte)).to_smt() == "(not (= ((_ extract 7 0) param_1) (_ bv0 8)))"
+    assert published(Condition(low_byte, True)).to_smt() == (
         "(not (not (= ((_ extract 7 0) param_1) (_ bv0 8))))"
     )
 
@@ -680,7 +681,7 @@ def test_expression_to_smt_respects_explicit_shift_width_inside_piece():
     piece = _binary("PIECE", shifted, _const(0x12, size=1))
     piece.size = 2
 
-    smt = expression_to_smt(piece)
+    smt = expression_to_smt(published(piece))
 
     assert smt == (
         "(concat ((_ extract 7 0) "
@@ -719,7 +720,7 @@ def test_expression_to_smt_handles_bool_phi_compared_against_zero():
         ]
     )
 
-    smt = expression_to_smt(bool_phi)
+    smt = expression_to_smt(published(bool_phi))
 
     assert smt.startswith("(ite ")
     assert "((_ zero_extend 31) (bvslt" not in smt
@@ -738,7 +739,7 @@ def test_expression_to_smt_collapses_unconditional_phi_branch():
     )
     expr.size = 4
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert smt == "(_ bv0 32)"
 
@@ -750,7 +751,7 @@ def test_expression_to_smt_sign_extends_narrow_operand_for_signed_width_mismatch
         _binary("INT_ADD", _param("param_1", size=4, data_type="int"), _const(10, size=8)),
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert "((_ sign_extend 32) param_3)" not in smt
     assert "(bvadd param_1 (_ bv10 32))" in smt
@@ -790,7 +791,7 @@ def test_expression_to_smt_sign_extends_signed_operands_inside_nested_signed_com
         ]
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert "(bvadd param_1 (_ bv10 32))" in smt
     assert "(bvmul param_2 (_ bv3 32))" in smt
@@ -808,7 +809,7 @@ def test_expression_to_smt_preserves_32bit_wrap_before_signed_compare_extension(
         ),
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert "(bvmul (_ bv3 32) param_2)" in smt
     assert "(bvadd (_ bv1 32) (bvmul (_ bv3 32) param_2))" in smt
@@ -827,7 +828,7 @@ def test_expression_to_smt_prefers_signed_extension_from_datatype_object_not_nam
         _const(0, size=8),
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert "((_ sign_extend 32) param_1)" in smt
 
@@ -839,7 +840,7 @@ def test_expression_to_smt_coerces_constant_zero_inside_bool_or():
         _const(0, size=1),
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert smt == "(or (= param_1 (_ bv0 64)) false)"
 
@@ -851,7 +852,7 @@ def test_expression_to_smt_coerces_bitvector_operand_inside_bool_and():
         _binary("INT_EQUAL", _param("param_1", size=8), _const(0, size=8)),
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert smt == "(and (not (= flag (_ bv0 8))) (= param_1 (_ bv0 64)))"
 
@@ -862,7 +863,7 @@ def test_float_phi_mixed_fp_and_bitvec_branches_returns_bitvec_ite():
     phi = Expression.phi([(cond, updated), (None, _param("acc", size=8))])
     phi.size = 8
 
-    smt = expression_to_smt(phi, float_mode="fp")
+    smt = expression_to_smt(published(phi), float_mode="fp")
 
     assert "((_ fp.to_ieee_bv) (fp.add RNE" in smt
     assert "(ite " in smt
@@ -875,7 +876,7 @@ def test_float_phi_uf_mode_does_not_wrap_bitvector_float_uf_with_fp_to_bv():
     phi = Expression.phi([(cond, updated), (None, _param("acc", size=8))])
     phi.size = 8
 
-    smt = expression_to_smt(phi)
+    smt = expression_to_smt(published(phi))
 
     assert "fp.to_ieee_bv" not in smt
     assert smt == "(ite (= selector (_ bv0 32)) (float_add acc delta) acc)"
@@ -888,7 +889,7 @@ def test_float_phi_all_fp_branches_returns_bitvec_ite_without_double_fp_to_bv():
     phi = Expression.phi([(cond, left), (None, right)])
     phi.size = 8
 
-    smt = expression_to_smt(phi, float_mode="fp")
+    smt = expression_to_smt(published(phi), float_mode="fp")
 
     assert smt.startswith("(ite ")
     assert smt.count("((_ fp.to_ieee_bv) (fp.") == 2
@@ -902,7 +903,7 @@ def test_float_phi_all_fp_branches_return_boundary_does_not_double_convert():
     phi = Expression.phi([(cond, left), (None, right)])
     phi.size = 8
 
-    expr_smt = expression_to_smt(phi, float_mode="fp")
+    expr_smt = expression_to_smt(published(phi), float_mode="fp")
     return_smt = coerce_return_value_to_bitvec(phi, expr_smt, 64)
 
     assert expression_smt_sort_kind(phi, float_mode="fp") == "BV"

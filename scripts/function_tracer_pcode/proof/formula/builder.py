@@ -13,6 +13,7 @@ from scripts.function_tracer_pcode.core import (
     ReadonlyReductionRef,
     loop_summary_method_b_key,
 )
+from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.core.signature import is_floating_data_type
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
 from scripts.function_tracer_pcode.core.render_smt import (
@@ -77,7 +78,12 @@ from scripts.function_tracer_pcode.proof.formula.variable import VariableClassif
 
 
 def _rewrite_guard_parameter_metadata_for_smt(guard, param_infos):
-    """Align proof/runtime guard parameter widths with active SMT declarations."""
+    """Align proof/runtime guard parameter widths with active SMT declarations.
+
+    書き換えた guard は **この query のための新しい意味値**。作った側が完成を
+    宣言してから renderer へ渡す（renderer に lifecycle を進めさせない）。
+    書き換えが起きなかったときは元の値をそのまま返すので、公開は増えない。
+    """
     if not param_infos:
         return guard
     params_by_index, params_by_name = _param_info_lookup(param_infos)
@@ -89,13 +95,14 @@ def _rewrite_guard_parameter_metadata_for_smt(guard, param_infos):
         )
         if rewritten_expr is guard.expression:
             return guard
-        return Condition(rewritten_expr, guard.negated)
+        return publish(Condition(rewritten_expr, guard.negated))
     if isinstance(guard, Expression):
-        return _rewrite_expr_parameter_metadata_for_smt(
+        rewritten = _rewrite_expr_parameter_metadata_for_smt(
             guard,
             params_by_index,
             params_by_name,
         )
+        return guard if rewritten is guard else publish(rewritten)
     return guard
 
 

@@ -7,6 +7,7 @@ from scripts.function_tracer_pcode.core import (
     expression_key_or_identity,
 )
 from scripts.function_tracer_pcode.semantics.normalize.context import NormalizationContext
+from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
 
 
 def normalize_bitwise_abs(
@@ -53,8 +54,10 @@ def _rewrite_abs_if_sign_known(
     if context.is_expr_nonneg(inner):
         context.record_rule(
             rule_name="BITWISE_ABS_CANONICALIZATION",
-            before_expr=Expression.binary_op("INT_XOR", left, right).to_smt(),
-            after_expr=inner.to_smt(),
+            before_expr=render_expression_smt_evidence(
+                Expression.binary_op("INT_XOR", left, right)
+            ),
+            after_expr=render_expression_smt_evidence(inner),
             reason="Reduced abs bit-hack to original value using nonnegative fact",
         )
         return inner
@@ -64,8 +67,10 @@ def _rewrite_abs_if_sign_known(
         negated.size = inner.size
         context.record_rule(
             rule_name="BITWISE_ABS_CANONICALIZATION",
-            before_expr=Expression.binary_op("INT_XOR", left, right).to_smt(),
-            after_expr=negated.to_smt(),
+            before_expr=render_expression_smt_evidence(
+                Expression.binary_op("INT_XOR", left, right)
+            ),
+            after_expr=render_expression_smt_evidence(negated),
             reason="Reduced abs bit-hack to negation using negative fact",
         )
         return negated

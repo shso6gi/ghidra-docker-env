@@ -43,6 +43,7 @@ from scripts.function_tracer_pcode.semantics.transform.expander import (
     ExpandedValue,
     ExpressionExpander,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 
 def _param(name: str, size: int = 8) -> Expression:
@@ -76,7 +77,7 @@ def test_expression_to_smt_lowers_ptradd_intrinsic_without_uninterpreted_symbol(
         opcode=PTRADD_OPCODE,
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert expression_contains_unsupported_smt_ops(expr) is False
     assert smt == "(bvadd base (bvmul (_ bv1 64) (_ bv8 64)))"
@@ -114,7 +115,7 @@ def test_expression_to_smt_lowers_readonly_sum_as_declared_object_centric_functi
         opcode=READONLY_SUM_OPCODE,
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
     declarations = collect_intrinsic_smt_declarations(expr)
     declared_name = re.search(r"\(declare-fun ([^ ]+)", declarations[0]).group(1)
 
@@ -140,7 +141,7 @@ def test_counted_loop_sum_lowers_to_exact_smt_without_uninterpreted_symbol():
         opcode=COUNTED_LOOP_SUM_OPCODE,
     )
 
-    smt = expression_to_smt(left)
+    smt = expression_to_smt(published(left))
 
     assert collect_intrinsic_smt_declarations(left) == []
     assert "rt_counted_loop_sum_" not in smt
@@ -162,7 +163,7 @@ def test_counted_loop_sum_exact_smt_clamps_no_iteration_span_to_base():
         opcode=COUNTED_LOOP_SUM_OPCODE,
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
     query = "\n".join(
         [
             "(set-logic QF_BV)",
@@ -191,7 +192,7 @@ def test_counted_loop_sum_exact_smt_supports_parameter_bias_term():
         ),
         opcode=COUNTED_LOOP_SUM_OPCODE,
     )
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
     bias64 = "((_ sign_extend 32) bias)"
     expected64 = f"(bvadd (bvmul (_ bv7 64) {bias64}) (_ bv105 64))"
     expected32 = f"((_ extract 31 0) {expected64})"
@@ -224,7 +225,7 @@ def test_counted_loop_sum_exact_smt_uses_bias_signedness_for_bias_term_extension
         ),
         opcode=COUNTED_LOOP_SUM_OPCODE,
     )
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
 
     assert "((_ zero_extend 32) bias)" in smt
     assert "((_ sign_extend 32) bias)" not in smt
@@ -244,7 +245,7 @@ def test_counted_loop_sum_exact_smt_uses_unsigned_clamp_for_unsigned_loop():
         opcode=COUNTED_LOOP_SUM_OPCODE,
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
     query = "\n".join(
         [
             "(set-logic QF_BV)",
@@ -273,7 +274,7 @@ def test_counted_loop_sum_exact_smt_avoids_unsigned_ceil_div_overflow():
     )
     expected = ((1 << 64) // 3) & 0xFFFFFFFF
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
     query = "\n".join(
         [
             "(set-logic QF_BV)",
@@ -301,7 +302,7 @@ def test_counted_loop_sum_exact_smt_uses_unsigned_distance_for_signed_residue_re
         opcode=COUNTED_LOOP_SUM_OPCODE,
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
     query = "\n".join(
         [
             "(set-logic QF_BV)",
@@ -330,7 +331,7 @@ def test_counted_loop_sum_fallback_declares_uninterpreted_function():
         opcode=COUNTED_LOOP_SUM_OPCODE,
     )
 
-    smt = expression_to_smt(expr)
+    smt = expression_to_smt(published(expr))
     declarations = collect_intrinsic_smt_declarations(expr)
     declared_name = re.search(r"\(declare-fun ([^ ]+)", declarations[0]).group(1)
 
@@ -397,7 +398,7 @@ def test_pairwise_auxiliary_query_uses_fp_logic_for_float_guards():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     a = Expression.parameter("a", index=0, data_type="double", size=8)
     b = Expression.parameter("b", index=1, data_type="double", size=8)
-    condition = Condition(Expression.binary_op("FLOAT_LESS", a, b), False)
+    condition = published(Condition(Expression.binary_op("FLOAT_LESS", a, b), False))
 
     query = strategy._build_intrinsic_equivalence_query(
         a,
@@ -423,8 +424,8 @@ def test_return_case_smt_cache_is_scoped_by_renderer_float_mode():
     condition = Condition(comparison, False)
     case = ReturnCase(0, [condition], comparison, ReturnInfo("float_case", comparison))
 
-    uf_renderer = lambda node: node.to_smt()
-    fp_renderer = lambda node: node.to_smt(float_mode="fp")
+    uf_renderer = lambda node: published(node).to_smt()
+    fp_renderer = lambda node: published(node).to_smt(float_mode="fp")
 
     uf_conditions = case.get_conditions_smt(uf_renderer)
     fp_conditions = case.get_conditions_smt(fp_renderer)
@@ -500,9 +501,9 @@ def test_return_case_update_conditions_clears_condition_dependent_value_cache(mo
         fake_lower,
     )
 
-    before = case.get_value_smt(lambda expr: expr.to_smt(float_mode="fp"))
+    before = case.get_value_smt(lambda expr: published(expr).to_smt(float_mode="fp"))
     case.update_conditions([first_condition, second_condition])
-    after = case.get_value_smt(lambda expr: expr.to_smt(float_mode="fp"))
+    after = case.get_value_smt(lambda expr: published(expr).to_smt(float_mode="fp"))
 
     assert before == "(_ bv1 32)"
     assert after == "(_ bv2 32)"
@@ -518,7 +519,7 @@ def test_expression_safety_reachability_query_uses_base_fp_logic():
 
     a = Expression.parameter("a", index=0, data_type="double", size=8)
     b = Expression.parameter("b", index=1, data_type="double", size=8)
-    condition = Condition(Expression.binary_op("FLOAT_LESS", a, b), False)
+    condition = published(Condition(Expression.binary_op("FLOAT_LESS", a, b), False))
     checker = ExpressionSafetyChecker(
         solver_runner=FakeRunner(),
         debug_print=lambda *_args, **_kwargs: None,
@@ -1065,7 +1066,7 @@ def test_expander_combines_three_input_ptradd_as_intrinsic(monkeypatch):
     assert len(result) == 1
     assert result[0].value.expr_type == ExpressionType.INTRINSIC
     assert result[0].value.opcode == PTRADD_OPCODE
-    assert expression_to_smt(result[0].value) == "(bvadd base (bvmul (_ bv3 64) (_ bv8 64)))"
+    assert expression_to_smt(published(result[0].value)) == "(bvadd base (bvmul (_ bv3 64) (_ bv8 64)))"
 
 
 def test_phi_handler_combines_ptrsub_as_intrinsic_even_for_two_inputs():
@@ -1087,7 +1088,7 @@ def test_phi_handler_combines_ptrsub_as_intrinsic_even_for_two_inputs():
     assert len(result) == 1
     assert result[0].value.expr_type == ExpressionType.INTRINSIC
     assert result[0].value.opcode == PTRSUB_OPCODE
-    assert expression_to_smt(result[0].value) == "(bvadd base (_ bv32 64))"
+    assert expression_to_smt(published(result[0].value)) == "(bvadd base (_ bv32 64))"
 
 
 def test_tracer_emits_ptrsub_intrinsic_with_derived_address_runtime_ref():

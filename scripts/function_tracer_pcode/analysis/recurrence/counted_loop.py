@@ -1675,10 +1675,12 @@ def _impl__validate_counted_loop_update_cases(
         expected_update = self._sum_expression_terms([accumulator.placeholder, affine_delta])
         if expected_update is None:
             return False
-        expected_update.size = max(
-            int(getattr(expected_update, "size", 0) or 0),
-            int(getattr(case.update_expr, "size", 0) or 0),
-            int(getattr(accumulator.placeholder, "size", 0) or 0),
+        expected_update = expected_update.derive_with(
+            size=max(
+                int(getattr(expected_update, "size", 0) or 0),
+                int(getattr(case.update_expr, "size", 0) or 0),
+                int(getattr(accumulator.placeholder, "size", 0) or 0),
+            )
         )
         if not self._prove_expression_equivalence_under_conditions(
             case.update_expr,

@@ -5,12 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from typing import Any, List, Optional, Tuple
-from scripts.function_tracer_pcode.core.runtime_refs import (
-    AddressValueRef,
-    CanonicalLocation,
-    PostStateReadRef,
-    PostStateValueRef,
-)
+from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
 
 
 GLOBAL_ADDRESS_BITS = 64
@@ -35,14 +30,13 @@ def global_address_symbol_name(identity: Tuple[str, int, int]) -> str:
 
 def global_address_identity(expr) -> Optional[Tuple[str, int, int]]:
     """``(symbol, size, offset)`` when ``expr`` is a constant address inside a
-    named writable global object, else ``None``."""
-    address_ref = _coerce_address_value_ref(expr)
-    if address_ref is None:
-        return None
-    try:
-        return address_ref.global_object_identity()
-    except Exception:
-        return None
+    named writable global object, else ``None``.
+
+    凍結時に確定した投影から読む。生の ``AddressValueRef`` を読み直すと、同じ
+    式に対する global object の共有 symbol が後から動き得る。
+    """
+
+    return semantic_projection(expr).address_object_identity
 
 
 def global_address_smt(expr, bits: int) -> Optional[str]:
@@ -83,19 +77,18 @@ def collect_unknown_smt_declarations(expr) -> List[Tuple[str, int]]:
         if node is None or getattr(node, "expr_type", None) is None:
             continue
         expr_kind = node.expr_type.__class__
-        runtime_ref = getattr(node, "runtime_ref", None)
+        projection = semantic_projection(node)
         decl = None
         identity = global_address_identity(node)
         if identity is not None:
             decl = (global_address_symbol_name(identity), GLOBAL_ADDRESS_BITS)
         elif node.expr_type == expr_kind.UNKNOWN:
             decl = _unknown_smt_declaration(node)
-        elif (
-            node.expr_type == expr_kind.VARIABLE
-            and isinstance(runtime_ref, (CanonicalLocation, PostStateReadRef, PostStateValueRef))
-        ):
+        elif node.expr_type == expr_kind.VARIABLE and projection.declares_variable_symbol:
+            # 宣言名を作るための内部描画。公開入口（`expression_to_smt`）へ
+            # 戻らない — 外から来た式の検査は入口が 1 回だけ行う。
             decl = (
-                node.to_smt(),
+                _to_smt_internal(node),
                 max(1, int(expression_smt_bit_width(node) or 1)),
             )
         if decl is None:
@@ -137,48 +130,29 @@ def _iter_expression_nodes(expr) -> List[Any]:
 
 
 def _unknown_runtime_identity_key(expr) -> Tuple[Any, ...]:
-    runtime_ref = getattr(expr, "runtime_ref", None)
-    semantic_key = getattr(runtime_ref, "semantic_key", None)
-    if callable(semantic_key):
-        try:
-            identity = semantic_key()
-        except Exception:
-            identity = None
-        if identity is not None:
-            return ("runtime_ref_semantic", identity)
-    stable_key = getattr(runtime_ref, "stable_key", None)
-    if callable(stable_key):
-        try:
-            identity = stable_key()
-        except Exception:
-            identity = None
-        if identity is not None:
-            stable_origin = _unknown_runtime_stable_origin_key(runtime_ref)
-            if stable_origin is not None:
-                return ("runtime_ref_with_origin", identity, stable_origin)
-            return ("runtime_ref", identity)
+    """unknown symbol の宣言 identity。
+
+    凍結済みの式では runtime_ref の意味 key は凍結時に確定した投影から読む。
+    宣言 identity が生 object の後からの変化で動くと、同じ式に対して別の
+    unknown symbol が宣言されてしまう。
+    """
+
+    projection = semantic_projection(expr)
+    if projection.runtime_semantic_key is not None:
+        return ("runtime_ref_semantic", projection.runtime_semantic_key)
+    if projection.runtime_stable_key is not None:
+        if projection.runtime_stable_origin is not None:
+            return (
+                "runtime_ref_with_origin",
+                projection.runtime_stable_key,
+                projection.runtime_stable_origin,
+            )
+        return ("runtime_ref", projection.runtime_stable_key)
     return (
         "expression_unknown_instance",
         id(expr),
         int(expression_smt_bit_width(expr) or 1),
     )
-
-
-def _unknown_runtime_stable_origin_key(runtime_ref) -> Optional[Tuple[Any, ...]]:
-    origin_kind = getattr(runtime_ref, "origin_kind", None)
-    origin_ref = getattr(runtime_ref, "origin_ref", None)
-    if origin_kind is None or origin_ref is None:
-        return None
-    stable_key = getattr(origin_ref, "stable_key", None)
-    if not callable(stable_key):
-        return None
-    try:
-        origin_key = stable_key()
-    except Exception:
-        return None
-    if origin_key is None:
-        return None
-    return (origin_kind, origin_key)
 
 
 def _unknown_smt_symbol_name(expr) -> str:
@@ -193,14 +167,8 @@ def _unknown_smt_declaration(expr) -> Tuple[str, int]:
     return (_unknown_smt_symbol_name(expr), bits)
 
 
-def _coerce_address_value_ref(expr) -> Optional[AddressValueRef]:
-    runtime_ref = getattr(expr, "runtime_ref", None)
-    if isinstance(runtime_ref, AddressValueRef):
-        return runtime_ref
-    return None
-
-
 # Sibling modules reference each other at call time; import them last to avoid cycles.
+from scripts.function_tracer_pcode.core.render_smt.render import _to_smt_internal
 from scripts.function_tracer_pcode.core.render_smt.widths import (
     expression_smt_bit_width,
 )

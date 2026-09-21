@@ -20,6 +20,7 @@ from scripts.function_tracer_pcode.analysis.effects._shared import (
     EffectSummary,
     StoreEffect,
 )
+from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _all_residual_guards_empty,
     _attach_materialized_post_state_value_ref,
@@ -1950,7 +1951,11 @@ def _impl_lower_post_state_expression_for_smt_if_needed(
         effects,
         parameters,
     )
-    return lowered if lowered is not None else expr
+    if lowered is None:
+        return expr
+    # solver へ渡すために降ろした派生値。作ったここが公開点。
+    return publish(lowered)
+
 
 def _impl__rewrite_definite_post_state_subexpressions(
     expr: Optional[Expression],

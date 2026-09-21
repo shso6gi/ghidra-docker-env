@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise import (
     ReturnCase,
     QueryResult,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import published
 
 _P = 'scripts.function_tracer_pcode.proof.strategies.pairwise'
 
@@ -189,8 +190,8 @@ class TestStructuralShortcutSafety:
         expr_after = normalize_expression(expr_before, norm_context)
         
         # 正規化で変化があったか確認
-        before_smt = expr_before.to_smt()
-        after_smt = expr_after.to_smt()
+        before_smt = published(expr_before).to_smt()
+        after_smt = published(expr_after).to_smt()
         
         print(f"\n[NORMALIZATION TEST]")
         print(f"  Before: {before_smt}")
@@ -278,7 +279,8 @@ class TestStructuralMatchSolverInvocation:
     def _create_simple_case(self, value_expr, index=0):
         """最小限の ReturnCase モックを作成"""
         case = Mock(spec=ReturnCase)
-        case.value_expr = value_expr
+        # test がこのケースの producer なので、値はここで公開する。
+        case.value_expr = published(value_expr)
         case.conditions = []
         case.index = index
         case.get_conditions_smt = Mock(return_value=[])

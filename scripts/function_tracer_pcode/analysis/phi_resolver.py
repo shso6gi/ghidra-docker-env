@@ -554,7 +554,7 @@ class PhiHandler:
                 pcode_op=pcode_op,
             )
             if output_size > 0 and getattr(new_value, "size", 0) == 0:
-                new_value.size = output_size
+                new_value = new_value.derive_with(size=output_size)
             result.append(ExpandedBranch(combined_conds, new_value))
 
         return result if result else [ExpandedBranch(base_conditions, Expression.unknown(f"{mnemonic}_fail"))]

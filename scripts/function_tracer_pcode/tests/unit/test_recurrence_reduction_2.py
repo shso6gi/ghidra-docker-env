@@ -1,5 +1,15 @@
 from scripts.function_tracer_pcode.tests.unit._recurrence_fixtures import *
 
+def _circular_phi_placeholder() -> Expression:
+    """幅 4 の未解決値（PHI が閉じなかった場所に立つ placeholder）。
+
+    解析結果（`ReturnInfo`）は構築時に凍るので、作ってから幅を直すのではなく
+    最初から幅を与える。
+    """
+
+    return Expression.unknown("phi_circular").clone_with(size=4)
+
+
 def test_readonly_reduction_summary_accepts_sign_extended_load_when_return_width_is_low_lane():
     params = [
         {"name": "param_1", "index": 0, "data_type": "int *", "size": 8},
@@ -27,7 +37,7 @@ def test_readonly_reduction_summary_accepts_sign_extended_load_when_return_width
             ),
             ReturnInfo(
                 address="0x1008",
-                value=Expression.unknown("phi_circular"),
+                value=_circular_phi_placeholder(),
                 conditions=[
                     _cond("INT_NOTEQUAL", pointer_expr, Expression.constant(0, size=8)),
                     _cond("INT_SLESS", _const(0), count_expr),
@@ -35,7 +45,6 @@ def test_readonly_reduction_summary_accepts_sign_extended_load_when_return_width
             ),
         ],
     )
-    analysis.returns[2].value.size = 4
 
     ptr_param = _FakeVarnode("param_1", size=8, expr=pointer_expr)
     count_param = _FakeVarnode("param_2", size=4, expr=count_expr)
