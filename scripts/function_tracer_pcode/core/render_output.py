@@ -63,8 +63,8 @@ class RenderOutputLimitExceeded(AnalysisFailureError):
         #: その時点で必要だった **総** byte 数（既に書いた分 + これから書く分）。
         #: 追加分ではないので、`limit_bytes` とそのまま比べられる
         self.requested_bytes = int(requested_bytes)
-        #: どこで気付いたか。`<owner>.fragment`（node が自分で書く分）か
-        #: `<owner>.emit`（出力そのもの）
+        #: どこで気付いたか。予算を持つのは書き出し口だけなので
+        #: `<owner>.emit` の形になる
         self.site = str(site)
 
 
@@ -82,14 +82,13 @@ class CountingWriter:
     （**完成文字列は作らない**）。
     """
 
-    __slots__ = ("_parts", "_limit", "_site", "emitted_bytes", "part_count", "aborted")
+    __slots__ = ("_parts", "_limit", "_site", "emitted_bytes", "aborted")
 
     def __init__(self, *, limit_bytes: Optional[int] = None, site: str = "render") -> None:
         self._parts: List[str] = []
         self._limit = None if limit_bytes is None else int(limit_bytes)
         self._site = str(site)
         self.emitted_bytes = 0
-        self.part_count = 0
         self.aborted = False
 
     @property
@@ -139,7 +138,6 @@ class CountingWriter:
 
         self._parts.append(text)
         self.emitted_bytes += length
-        self.part_count += 1
 
     def write_repeated(self, text: str, count: int) -> None:
         """同じ断片を `count` 回。
@@ -166,7 +164,7 @@ class CountingWriter:
 
     def _abort(self, requested_bytes: int) -> None:
         self.aborted = True
-        # 途中まで貯めた断片も捨てる。ここで残すと「上限を超える文字列を
+        # 途中まで貯めた断片も捨てる。ここで残すと「完成した出力文字列を
         # 作らない」という約束が、作ってから捨てるだけになる。
         self._parts = []
         raise RenderOutputLimitExceeded(
@@ -190,7 +188,7 @@ class RenderCounters:
     distinct_rendered_nodes: int = 0
     #: node 本体を実行した回数（instance 数 + 子の解決による再実行 + 要求収集）
     node_body_executions: int = 0
-    #: 本体へ子の項を渡した回数（幅の広い node の費用と、上限で止めた位置が見える）
+    #: 本体へ子の項を渡した回数（幅の広い node の費用が見える）
     child_requests: int = 0
     #: 共有として名前を付けた instance 数
     shared_bindings: int = 0

@@ -113,9 +113,6 @@ def render_human_text(
             classify=_classify_human_fragment,
             policy=policy,
             counters=counters,
-            # 出力予算は書き出し口が持つ。計画側へ渡すと speculative な
-            # 材料を出力予算で裁くことになり、収まる描画を拒める。
-            site="core.render_python",
         )
     except RenderGraphCycleError:
         # 閉路を受け入れないという判定は走査 owner が持つ。表示側は「進めない」
@@ -213,10 +210,10 @@ class _HumanChildRenderer:
         return self._context
 
     def fragment(self):
-        """自分の分を **数えながら**書く口（driver 所有）。
+        """自分の分を書く口（driver 所有）。
 
-        幅が子の数に比例する node はここを通す。`join` で一度に畳むと、上限
-        超えの文字列を作ってからしか止められない。
+        幅が子の数に比例する node はここを通す。後ろから積み直すと文字列 copy
+        が幅の 2 乗になる。予算とは関係しない（C2 / performance）。
         """
 
         return self._resolve.fragment()
@@ -241,14 +238,14 @@ class _DetachedHumanChildRenderer:
         return self._context
 
     def fragment(self):
-        """driver の外には上限の owner が居ないので、ここは **開けない**。
+        """driver の外では開けない（組み立ては driver が持つ計画の一部）。
 
         素通りさせるより、そういう経路を作った時点で止める。
         """
 
         raise RenderPlanInvariantError(
-            "a node body asked for a counted fragment outside the render driver; "
-            "render through render_human_text so the limit has an owner"
+            "a node body asked for a fragment builder outside the render driver; "
+            "render through render_human_text"
         )
 
     def __call__(self, node, *, simplify=None) -> str:

@@ -7,11 +7,10 @@ renderer（人向け / SMT）が持つのは「この node をどう書くか」
 * 深い式で Python の再帰に頼らない
 * どの部分式に名前を付けて 1 回だけ書くか
 * 名前の付け方と依存順
-* 上限を超える文字列を **作らない**
 
 はここが持つ。node 種別が増えても触るのは renderer 側の本体だけで、この層は
-変わらない（逆に、共有の条件や上限の効かせ方を変えたいときに renderer 本体を
-読む必要もない）。
+変わらない（逆に、共有の条件を変えたいときに renderer 本体を読む必要もない）。
+**出力予算はこの層の持ち物ではない**（下記）。
 
 ## 断片（fragment）— 1 node 分しか作らない
 
@@ -22,10 +21,17 @@ node 本体は子の描画結果として **参照 1 個**（`RenderedTerm`）�
 
 ## 出力予算はこの層の持ち物ではない
 
-`render_bytes`（= 出力予算）が意味するのは **最終的に書き出した byte 数**だけで、
-その契約を持つのは書き出し口（`core/render_output.CountingWriter`）。木への展開は
-流しながら行うので、**完成した出力文字列を作ってから測る、ということをしない** —
-上限に達した時点で書き出しを止める。C7 が保証するのはここまで。
+役割は 3 つに分かれている:
+
+```text
+FragmentBuilder  : 幅方向の組み立てを O(n) にするだけ。予算を知らない。
+RenderCounters   : 中間作業の観測（診断 / PR-22-D の既定値決定用）。判定に使わない。
+CountingWriter   : 書き出した byte の **唯一の** 予算 enforcement point。
+```
+
+`render_bytes`（= 出力予算）が意味するのは **書き出した byte 数**だけ。木への
+展開は流しながら行うので、予算に達したらそこで書き出しを止める（= 完成した出力
+文字列を作らない）。C7 が保証するのはここまで。
 
 この層が組み立てる fragment は **speculative**: 本体は要求した子を捨てることが
 あるし、要求された instance が最終出力に一度も現れないこともある。だから
@@ -35,19 +41,16 @@ node 本体は子の描画結果として **参照 1 個**（`RenderedTerm`）�
 ```
 
 が両立する。出力予算でここを裁くと **正しい描画を拒める**ので、裁かない。
-
-中間作業（fragment の総量、placeholder の分）に予算を付けるかどうかと、その値は
-PR-22-D の `BudgetPolicy` の担当。この層は `RenderCounters`
-（`retained_fragment_bytes` / `max_fragment_bytes` / `child_requests`）で
-**観測値を渡すだけ**で、上限の仕組みは持たない — 本番で使わない仕組みを置くと、
-test だけがそれを使って「有界だ」と言えてしまう。
+中間作業に予算を付けるかどうかと、その値は PR-22-D の `BudgetPolicy` の担当で、
+この層は観測値を渡すだけ（本番で使わない上限の仕組みは置かない — 置くと test
+だけがそれを使って production に無い保証を主張できる）。
 
 ## 組み立ては線形に
 
 `FragmentBuilder` は fragment を **前から 1 回で**組み立てる口。幅が子の数に
 比例する node（引数の多い CALL、branch の多い PHI）を
 `result = f"(ite … {result})"` のように後ろから積み直すと、文字列 copy が幅の
-2 乗になる。これは renderer の書き方の問題（PR-22-C の変更軸）で、予算とは別の話。
+2 乗になる。これは renderer の書き方の問題（C2 / performance）で、予算とは別の話。
 
 ## 予定と経路は `ResolutionSchedule` が持つ
 
@@ -127,7 +130,7 @@ class RenderedTermContractError(AnalysisFailureError):
 #: 描画を打ち切る / 内部不整合を告げる型（**この tuple が唯一の owner**）。
 #:
 #: 描画経路には `except Exception` の回復 handler が実在する。そこへこれらが
-#: 吸われると「上限で止めた」「閉路だった」が「その枝は描けなかった」に化け、
+#: 吸われると「予算で止めた」「閉路だった」が「その枝は描けなかった」に化け、
 #: 予算も閉路検出も効かないまま解析が続く。回復 handler の手前でこの tuple を
 #: 再送出すること。`tests/unit/test_architecture_boundaries.py` が、描画 module
 #: の広い `except` すべてについてそれを固定している。
@@ -153,26 +156,6 @@ PLACEHOLDER_MARK = "\x00"
 
 #: 見積りの飽和点。これ以上は数えない（巨大整数と無駄な走査を作らない）
 SATURATION = 1 << 40
-
-#: 予算は **1 つ**（出力の byte 数）で、倍率も導出上限も無い。
-#:
-#: 以前はここに「材料の許容量 = 出力上限 × 8」があった。材料（renderer が同時に
-#: 抱える fragment の総量）と出力量の比には **普遍的な有限上限が無い** —
-#: 要求した子を最終 fragment で捨てれば、出力が小さくても材料は幾らでも
-#: 大きくなれる。だから倍率は原理的に決められず、倍率を上げ下げする議論は
-#: 形状に合わせた heuristic の調整でしかない。
-#:
-#: 代わりに **出力予算だけ**を、健全に効かせられる 2 箇所で見る:
-#:
-#: 1. 組み立て中の node が **自分で書く byte**（`FragmentBuilder`）。子の参照
-#:    （placeholder）は出力に出ないので数えない。使われる instance の自分で書く
-#:    byte は、出力に少なくとも 1 回現れる — つまり出力量の下界。だから出力予算と
-#:    **そのまま**比べられる（倍率が要らない）。
-#: 2. 出力そのもの（`CountingWriter`）。
-#:
-#: 中間作業量（fragment の総量、placeholder の分）は PR-22-C では **観測だけ**
-#: する（`RenderCounters.retained_fragment_bytes` / `max_fragment_bytes`）。
-#: 中間作業に予算を付けるかどうかと、その値は PR-22-D の `BudgetPolicy` の担当。
 
 #: 同じ node の本体をこの回数だけ回しても子が尽きないなら、幅の広い node と
 #: 見なして「要求を一度に集める」実行へ切り替える。狭い node（ほとんど）は
@@ -332,9 +315,9 @@ class FragmentBuilder:
     と積み直すと文字列 copy が幅の 2 乗になる（実際そうなっていた）。前から
     置いて最後に 1 回だけ連結すれば線形。
 
-    **予算は持たない**。組み立て中の fragment は speculative（捨てられることが
-    ある）なので、出力予算で裁くと正しい描画を拒める。中間作業に予算を付けるか
-    どうかは PR-22-D の担当で、この class は「どう組み立てるか」だけを持つ。
+    **予算を知らない**。組み立て中の fragment は speculative（捨てられることが
+    ある）ので、出力予算で裁くと正しい描画を拒める。この class が持つのは
+    「どう組み立てるか」だけ。
     """
 
     __slots__ = ("_parts",)
@@ -376,8 +359,8 @@ class ChildResolver:
     """node 本体が driver から受け取る口。
 
     本体にできるのは 2 つだけ: **子を要求する**（`__call__`）と、**自分の分を
-    書く**（`fragment()`）。どちらも上限を通るので、本体側に大きさの判定を
-    書かせない。node 種別が増えても、上限を効かせ忘れる余地が無い。
+    書く**（`fragment()`）。どちらも予算を知らない — 予算を見るのは書き出し口
+    だけで、この層が組み立てるのは捨てられ得る speculative な材料。
     """
 
     __slots__ = ("_resolve", "_new_fragment")
@@ -390,7 +373,7 @@ class ChildResolver:
         return self._resolve(node, context)
 
     def fragment(self) -> FragmentBuilder:
-        """数えながら組み立てる fragment builder。"""
+        """前から 1 回で組み立てる fragment builder（予算は知らない）。"""
 
         return self._new_fragment()
 
@@ -504,18 +487,16 @@ class _Driver:
     （採用されるのは本物の値で走った実行だけ）ので、偽の値が出力へ混ざることは
     ない。収集が取りこぼしても、いつもの 1 個ずつの経路が続きを拾う。
 
-    この class が種別について知っていることは無い。上限は 2 つの口
-    （`resolve` と `FragmentBuilder`）を通るので、新しい種別が上限を素通りする
-    余地が無い。
+    この class が種別について知っていることは無い。出力予算も知らない
+    （enforcement point は `CountingWriter` だけ）。
     """
 
     def __init__(
-        self, body, classify, counters: RenderCounters, site: str
+        self, body, classify, counters: RenderCounters
     ) -> None:
         self._body = body
         self._classify = classify
         self._counters = counters
-        self._site = str(site)
         self.instances: List[RenderInstance] = []
         self.post_order: List[int] = []
         self.index_by_key: Dict[Tuple[int, Any], int] = {}
@@ -623,10 +604,6 @@ class _Driver:
 
                 self._counters.node_body_executions += 1
                 try:
-                    # 収集の実行も本体を最後まで走らせるので、本体が自分で書く
-                    # 分は同じ出力予算を通す。通さないと「捨てるから」という
-                    # 理由で予算超えの文字列を作ってしまう。上限超過は収集の
-                    # 失敗ではないので握らない。
                     self._body(node, context, ChildResolver(collect, FragmentBuilder))
                 except DISCOVERY_IGNORED_FAILURES:
                     pass
@@ -707,15 +684,14 @@ def build_render_plan(
     classify: Callable[[str, Any, bool], Any],
     policy: SharingPolicy,
     counters: RenderCounters,
-    site: str = "render",
 ) -> RenderPlan:
     """DAG を 1 回だけ辿り、fragment・参照回数・名前を付ける instance を決める。
 
     計画は出力予算を見ない（speculative な作業なので、出力予算で裁くと正しい
-    描画を拒める）。`site` は診断のための名乗り。
+    描画を拒める）。
     """
 
-    driver = _Driver(body, classify, counters, site)
+    driver = _Driver(body, classify, counters)
     root_index = driver.run(root, context)
 
     instances = driver.instances
@@ -837,7 +813,8 @@ def write_expansion(
     """1 つの instance を書き出す。名前の付いた子は名前、他は展開。
 
     展開は明示 stack で **流しながら**行う。途中で 1 つの大きな文字列を組み立て
-    ないので、上限に達した時点で `CountingWriter` が止め、それ以上は作らない。
+    ないので、予算に達した時点で `CountingWriter` が止められる（= 完成した出力
+    文字列を作らない）。
     """
 
     stack: List[Tuple[str, int]] = [(plan.instances[index].fragment, 0)]

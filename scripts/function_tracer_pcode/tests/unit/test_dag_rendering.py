@@ -8,8 +8,9 @@
 * **C3** 束縛名の衝突回避と、無制限な再帰 fallback が無いこと。
 * **C4** 描画文脈が違う同じ node を同じ束縛に混ぜない。
 * **C5** 人向け表示の決定性と共有参照。
-* **C6** 条件の identity は予算付きの legacy key ではなく完全 identity。
-* **C7** `CountingWriter` が上限で中断し、完成出力文字列を作らない。
+* **C6** `to_string()` を identity に使う site 0。**dedup の同値関係は base のまま**。
+* **C7** `CountingWriter` が書き出した byte を制限し、完成出力文字列を作らない。
+  計画 / 中間作業は予算で裁かず counter で観測する。
 """
 
 from __future__ import annotations
@@ -182,7 +183,6 @@ def _plan_for(root, *, policy=SMT_SHARING_POLICY, counters=None):
             classify=classify_smt_fragment,
             policy=policy,
             counters=counters if counters is not None else RenderCounters(),
-            site="core.render_smt",
         )
 
 
@@ -644,7 +644,8 @@ def test_c7_counting_writer_without_limit_joins_once():
         writer.write(part)
     assert writer.getvalue() == "abc"
     assert writer.emitted_bytes == 3
-    assert writer.part_count == 3
+    # 2 度目も同じ（連結は 1 回だけで、状態は壊れない）
+    assert writer.getvalue() == "abc"
 
 
 def test_c7_counters_are_diagnostic_only():

@@ -623,10 +623,10 @@ class _SmtChildRenderer:
         return self._context
 
     def fragment(self) -> FragmentBuilder:
-        """自分の分を **数えながら**書く口（driver 所有）。
+        """自分の分を書く口（driver 所有）。
 
-        幅が子の数に比例する node はここを通す。`join` で一度に畳むと、上限
-        超えの文字列を作ってからしか止められない。
+        幅が子の数に比例する node はここを通す。後ろから積み直すと文字列 copy
+        が幅の 2 乗になる。予算とは関係しない（C2 / performance）。
         """
 
         return self._resolve.fragment()
@@ -680,16 +680,15 @@ class _DetachedChildRenderer:
         return self._base
 
     def fragment(self):
-        """driver の外には上限の owner が居ないので、ここは **開けない**。
+        """driver の外では開けない（組み立ては driver が持つ計画の一部）。
 
-        開けてしまうと、幅が子の数に比例する本体が driver の外から呼ばれた
-        ときだけ上限を素通りする。素通りさせるより、そういう経路を作った時点で
-        止める（今は本体がこの口から呼ばれることは無い）。
+        素通りさせるより、そういう経路を作った時点で止める（今は本体がこの口
+        から呼ばれることは無い）。
         """
 
         raise RenderPlanInvariantError(
-            "a node body asked for a counted fragment outside the render driver; "
-            "render through render_smt_term so the limit has an owner"
+            "a node body asked for a fragment builder outside the render driver; "
+            "render through render_smt_term"
         )
 
     def __call__(
@@ -780,8 +779,8 @@ def render_smt_term(
     """DAG を 1 回だけ辿って SMT 項を書く（renderer の本体入口）。
 
     走査は 1 回だけで、node 本体が作るのは自分の分と子の参照（fragment）。木への
-    展開は `CountingWriter` へ流しながら行うので、上限に達した時点でそれ以上は
-    作られない。共有部分式は `let` で 1 回だけ定義する。束縛が 0 個なら出力は
+    展開は `CountingWriter` へ流しながら行うので、予算に達した時点で書き出しを
+    止める（= 完成した出力文字列を作らない）。共有部分式は `let` で 1 回だけ定義する。束縛が 0 個なら出力は
     展開したものと同じ文字列になるので、小さい式の観測可能な text は変わらない。
     """
 
@@ -804,8 +803,6 @@ def render_smt_term(
                 classify=classify_smt_fragment,
                 policy=policy,
                 counters=counters,
-                # 出力予算は書き出し口が持つ（上と同じ理由）。
-                site="core.render_smt",
             )
         except RenderGraphCycleError:
             # 閉路を「受け入れない」と決めるのは走査 owner。ここは進めないと
@@ -1364,7 +1361,7 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
 
         # branch 数だけ入れ子になる node なので、**前から** 1 段ずつ置く。
         # 後ろから `result = f"(ite … {result})"` で積み直すと、文字列 copy が
-        # branch 数の 2 乗になり、上限を超える中間文字列も出来てしまう。
+        # branch 数の 2 乗になる。
         #
         # 畳み込みの意味は積み直し版と同じ: 恒真の条件が出たらその値が最内に
         # なり、後ろの branch は届かない（積み直し版では最後に処理される
