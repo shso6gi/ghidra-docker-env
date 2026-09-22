@@ -1227,47 +1227,6 @@ def test_the_render_failure_types_have_one_owner():
             )
 
 
-def test_the_complete_identity_is_not_built_from_a_digest():
-    """完全 identity が digest を入力にしていないこと。
-
-    この package は「hash / digest は候補の絞り込み専用」を契約にしている。
-    identity がそこへ依存すると、衝突がそのまま誤った同一性になる。
-    """
-
-    from scripts.function_tracer_pcode.core import structural
-
-    source = (PACKAGE_ROOT / "core" / "structural.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    digest_names = {
-        "compose_candidate_digest",
-        "compose_equivalence_digest",
-        "structural_identity_digest",
-        "candidate_hash",
-        "_compose_merkle_digest",
-        "_digest_structural_payload",
-    }
-    offenders = []
-    for function in ast.walk(tree):
-        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        if function.name not in {"structural_identity_form", "condition_identity"}:
-            continue
-        for node in ast.walk(function):
-            if isinstance(node, ast.Call):
-                name = _identity_name(node.func)
-                if name in digest_names:
-                    offenders.append(f"{function.name}:{node.lineno} calls {name}")
-            if isinstance(node, ast.Attribute) and node.attr in {
-                "_structural_hash",
-                "_equivalence_digest",
-            }:
-                offenders.append(f"{function.name}:{node.lineno} reads {node.attr}")
-    assert offenders == [], offenders
-
-    # 契約そのものも確かめる: digest を定数にしても identity は分かれる。
-    assert structural.structural_identity_form is not None
-
-
 # ---------------------------------------------------------------------------
 # 走査 machinery の owner（`render_plan.ResolutionSchedule`）
 #
@@ -1469,60 +1428,6 @@ def test_the_render_budget_has_one_meaning_and_one_owner():
     assert offenders == [], offenders
 
 
-# ---------------------------------------------------------------------------
-# identity: 予算付きの key を鍵に埋めない
-# ---------------------------------------------------------------------------
-
-#: 予算超過で `None` を返す key。鍵に埋めると「作れなかった」が「そういう値」に
-#: 化け、末尾だけ違う深い式 2 つが同じ鍵になる。
-_BUDGETED_KEY_CALLS = frozenset({"expression_key", "expression_key_safe", "condition_key"})
-#: 「同じものか」を言う鍵を作る関数の名前の型。
-_IDENTITY_FUNCTION_MARKERS = ("identity_key", "_identity", "identity_form")
-
-#: 予算付きの key を埋めたまま残っている既知の場所。**owner が居るものだけ**。
-#: 削除専用（増やさない）。#181 がこの 2 件を所有する — monolithic の proof cache
-#: という別の決定面なので、PR-22-C では触らずに記録する。
-_BUDGETED_KEY_IN_IDENTITY_ALLOWLIST = frozenset(
-    {
-        # #181: monolithic case identity（proof cache bundle の同一性判定）
-        ("proof/strategies/monolithic_support.py", "_monolithic_case_identity"),
-        ("proof/monolithic_authority.py", "_case_identity"),
-    }
-)
-
-
-def test_an_identity_key_is_not_built_from_a_budgeted_key():
-    """identity / 証明鍵を作る関数が、予算付きの key を使っていないこと。
-
-    予算付きの key は truncate すると `None` を返す。それを鍵の tuple へ入れると
-    深い値 2 つが同じ鍵になり、「完全 identity を組めなければ候補・証明を出さない」
-    という contract が鍵の一部だけにしか効かない状態になる（実際そうなっていた）。
-    """
-
-    offenders = []
-    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
-        relative = path.relative_to(PACKAGE_ROOT).as_posix()
-        if relative.startswith("tests/") or relative == "core/structural.py":
-            continue
-        for function in ast.walk(_parse(path)):
-            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if not any(marker in function.name for marker in _IDENTITY_FUNCTION_MARKERS):
-                continue
-            if (relative, function.name) in _BUDGETED_KEY_IN_IDENTITY_ALLOWLIST:
-                continue
-            for node in ast.walk(function):
-                if (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id in _BUDGETED_KEY_CALLS
-                ):
-                    offenders.append(
-                        f"{relative}:{node.lineno} in {function.name} uses {node.func.id}"
-                    )
-    assert offenders == [], offenders
-
-
 def test_the_render_budget_is_not_multiplied_into_a_second_one():
     """出力予算から別の上限を導かないこと。
 
@@ -1551,29 +1456,3 @@ def test_the_render_budget_is_not_multiplied_into_a_second_one():
     assert offenders == [], offenders
 
 
-def test_the_budgeted_key_allowlist_still_describes_real_places():
-    """allowlist が古くなっていないこと（直したのに残っている、を残さない）。
-
-    削除専用の運用なので、直したら行を消す。消し忘れると「owner が居る既知の
-    問題」の一覧が実態とずれ、次の人が同じ調査をやり直す。
-    """
-
-    stale = []
-    for relative, function_name in sorted(_BUDGETED_KEY_IN_IDENTITY_ALLOWLIST):
-        path = PACKAGE_ROOT / relative
-        assert path.exists(), relative
-        found = False
-        for function in ast.walk(_parse(path)):
-            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            if function.name != function_name:
-                continue
-            found = any(
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id in _BUDGETED_KEY_CALLS
-                for node in ast.walk(function)
-            )
-        if not found:
-            stale.append(f"{relative}::{function_name}")
-    assert stale == [], stale

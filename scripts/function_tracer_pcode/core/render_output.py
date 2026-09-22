@@ -3,11 +3,11 @@
 
 ここが持つのは 2 つだけ:
 
-* `CountingWriter` — 「完成した文字列を作ってから長さを測る」をやめるための
-  書き込み口。renderer は木を **流しながら**ここへ書くので、上限に届いた時点で
-  それ以上は作られない。届いた時点で貯めた断片も捨てる。完成文字列を一度
-  作ってしまうと、上限の意味が「作らせない」ではなく「作った後で捨てる」に
-  なり、メモリと時間の保護にならない。
+* `CountingWriter` — **出力予算の唯一の owner**。renderer は木を **流しながら**
+  ここへ書くので、予算に届いた時点で書き出しを止め、貯めた断片も捨てる
+  （= 完成した出力文字列を作らない）。**C7 が保証するのはここまで**。
+  計画中に作る fragment は speculative（捨てられ得る）なので、そこは予算では
+  裁かない — 裁くと、出力が収まる描画まで拒める。
 * `RenderCounters` — 1 回の描画で観測した量。**診断専用**で、判定にも
   authority にも使わない（PR-22-D が既定値を決めるための実測値）。
 
@@ -60,7 +60,8 @@ class RenderOutputLimitExceeded(AnalysisFailureError):
         )
         #: 超えた **出力予算**。予算は 1 つなので、どの site から来ても同じ意味
         self.limit_bytes = int(limit_bytes)
-        #: その予算を超えると分かった時点で必要だった byte 数（下界）
+        #: その時点で必要だった **総** byte 数（既に書いた分 + これから書く分）。
+        #: 追加分ではないので、`limit_bytes` とそのまま比べられる
         self.requested_bytes = int(requested_bytes)
         #: どこで気付いたか。`<owner>.fragment`（node が自分で書く分）か
         #: `<owner>.emit`（出力そのもの）
@@ -117,14 +118,25 @@ class CountingWriter:
         """見積り分の余地があるかを先に確かめる（無ければ打ち切り）。"""
 
         if self.would_exceed(extra_bytes):
-            self._abort(int(extra_bytes))
+            self._abort(self._needed_bytes(extra_bytes))
+
+    def _needed_bytes(self, extra_bytes: int) -> int:
+        """その時点で必要だった **総** byte 数（既に書いた分 + これから書く分）。
+
+        `requested_bytes` が意味するのはこれ。追加分だけを渡すと、上限 10 で
+        5 byte 書いたあとに 6 byte 書こうとしたとき「6 が必要だった」になり、
+        上限と比べられない値になる（必要なのは 11）。
+        """
+
+        return self.emitted_bytes + int(extra_bytes)
 
     def write(self, text: str) -> None:
         if not text:
             return
         length = utf8_length(text)
         if self.would_exceed(length):
-            self._abort(length)
+            self._abort(self._needed_bytes(length))
+
         self._parts.append(text)
         self.emitted_bytes += length
         self.part_count += 1

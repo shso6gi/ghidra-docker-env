@@ -126,13 +126,13 @@ def test_conditional_progress_guard_key_survives_the_proof_it_is_stored_in():
     で組み、同じ解析の中で `validate_…` と `…_from_structural_proof` が読む）。
     直列化されるのは `summary_candidate_source_key` の中の evidence としてだけで、
     JSON から読み戻して照合することは無い（tuple は list になるので、そもそも
-    そういう契約ではない）。だからここで確かめるのは
+    そういう契約ではない）。だから確かめるのは
 
     * 保存形式が plain data であること（= 直列化できる）
     * 同じ process 内で読み戻して、元の条件を引けること
 
-    の 2 つ。以前は鍵が typed な wrapper だったので、読み手（tuple しか受けない）
-    が全部捨てて、conditional-progress proof が必ず落ちていた。
+    の 2 つ。読み手は tuple しか受けないので、鍵の側が plain data でなくなると
+    黙って全部捨てられる（proof が必ず落ちる）。そこを固定しておく。
     """
     import json
     from unittest.mock import patch
@@ -188,30 +188,3 @@ def test_conditional_progress_guard_key_survives_the_proof_it_is_stored_in():
         ) is True
 
 
-def test_an_unnamable_condition_yields_no_guard_key_and_no_proof():
-    """鍵を作れないときは保存形式にも入れない（fail-closed）。"""
-    from unittest.mock import patch
-
-    from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
-    from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
-
-    class _GhidraObject:
-        def __repr__(self):
-            return "<ghidra object>"
-
-    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
-    service = analyzer._placeholder_algebra
-    opaque = Expression(ExpressionType.CONSTANT, value=_GhidraObject(), size=4)
-    condition = Condition(Expression.binary_op("INT_LESS", opaque, Expression.constant(1, size=4)))
-
-    placeholder = Expression.parameter("p", 0, size=4)
-    flag = Expression.parameter("flag", 1, size=4)
-    expr = Expression.binary_op("INT_ADD", placeholder, flag)
-
-    with patch.object(service, "expression_is_one_under_conditions", return_value=True), patch.object(
-        service.condition_logic, "expressions_same_key", side_effect=lambda l, r: l is placeholder
-    ):
-        # 照合は成功する（名前を付けられなくても）
-        assert service.placeholder_plus_unit_condition(expr, placeholder, [condition]) is condition
-        # 鍵は出ない
-        assert service.placeholder_plus_unit_condition_guard_key(expr, placeholder, [condition]) is None

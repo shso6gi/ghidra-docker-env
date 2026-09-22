@@ -1292,8 +1292,8 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
         operands = getattr(expr, "operands", None) or ()
         if not operands:
             return f"{func_name}"
-        # 引数の数だけ長くなる node なので、`join` で一度に畳まず 1 個ずつ
-        # 数えながら置く（上限に達した時点で止まる）。
+        # 引数の数だけ長くなる node なので、前から 1 回で組み立てる。
+        # 前から 1 回で組み立てる（後ろから積み直すと幅の 2 乗になる）。
         fragment = render_child.fragment()
         fragment.literal(f"({func_name}")
         for operand in operands:

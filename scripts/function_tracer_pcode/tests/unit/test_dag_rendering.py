@@ -9,7 +9,7 @@
 * **C4** 描画文脈が違う同じ node を同じ束縛に混ぜない。
 * **C5** 人向け表示の決定性と共有参照。
 * **C6** 条件の identity は予算付きの legacy key ではなく完全 identity。
-* **C7** 上限は「作らせない」— 完成させてから測らない。
+* **C7** `CountingWriter` が上限で中断し、完成出力文字列を作らない。
 """
 
 from __future__ import annotations
@@ -459,7 +459,11 @@ def test_c3_no_recursive_tree_fallback_remains_in_the_renderer():
 
 
 # ---------------------------------------------------------------------------
-# C7: 上限は「作らせない」
+# C7: `CountingWriter` が上限で中断し、完成出力文字列を作らない
+#
+# 計画中の fragment は speculative なので出力予算では裁かない（捨てられる子が
+# 予算より大きくても、収まる描画は成功する）。幅の広い node の線形時間化は C2 /
+# performance の話で、ここには混ぜない。
 # ---------------------------------------------------------------------------
 
 
@@ -590,6 +594,50 @@ def test_c7_counting_writer_stops_at_the_limit_without_building_the_string():
     assert writer.emitted_bytes <= 10
 
 
+def test_c7_requested_bytes_is_the_total_needed_not_the_increment():
+    """`requested_bytes` は **その時点で必要だった総 byte 数**であること。
+
+    追加分だけを渡すと `limit_bytes` と比べられない値になる。上限 10 に 5 byte
+    書いたあと 6 byte 書こうとしたなら、必要だったのは 11。
+
+    `write` / `reserve` / `write_repeated` の 3 つで同じ意味にする。
+    """
+
+    writer = CountingWriter(limit_bytes=10, site="test")
+    writer.write("12345")
+    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
+        writer.write("678901")
+    assert excinfo.value.limit_bytes == 10
+    assert excinfo.value.requested_bytes == 11
+
+    # reserve も同じ意味
+    writer = CountingWriter(limit_bytes=10, site="test")
+    writer.write("12345")
+    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
+        writer.reserve(6)
+    assert excinfo.value.requested_bytes == 11
+
+    # write_repeated も同じ意味（`reserve` 経由で落ちる）
+    writer = CountingWriter(limit_bytes=10, site="test")
+    writer.write("12345")
+    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
+        writer.write_repeated(")", 6)
+    assert excinfo.value.requested_bytes == 11
+
+    # 何も書いていなければ追加分と総量は一致する
+    writer = CountingWriter(limit_bytes=3, site="test")
+    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
+        writer.write("abcd")
+    assert excinfo.value.requested_bytes == 4
+
+    # 非 ASCII も byte で数える
+    writer = CountingWriter(limit_bytes=4, site="test")
+    writer.write("あ")  # 3 byte
+    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
+        writer.write("い")  # +3 byte -> 6 必要
+    assert excinfo.value.requested_bytes == 6
+
+
 def test_c7_counting_writer_without_limit_joins_once():
     writer = CountingWriter()
     for part in ("a", "b", "c"):
@@ -620,7 +668,7 @@ def test_c7_metrics_accumulate_and_reset():
     assert render_metrics_snapshot()["render_invocations"] == 0
 
 
-def test_c7_human_rendering_is_bounded_too():
+def test_c7_human_rendering_stops_at_the_output_budget_too():
     a = _param("a", 0)
     from scripts.function_tracer_pcode.core.render_python import (
         HumanRenderContext,
@@ -640,12 +688,12 @@ def test_c7_human_rendering_is_bounded_too():
         ("wide_phi", lambda: _wide_phi(8000)),
     ],
 )
-def test_c7_a_wide_node_is_bounded_in_the_human_renderer_too(name, build):
-    """人向け描画でも、幅の広い node の中間文字列を作り切らないこと。
+def test_c7_a_wide_node_stops_at_the_output_budget_in_the_human_renderer_too(name, build):
+    """人向け描画でも、**書き出し**が出力予算で止まること。
 
-    上限は描画規則ではなく走査・書き出しの層が持つので、SMT と人向けで別々に
-    効かせる必要は無い — が、「別々に効かせる必要が無い」こと自体を確かめないと、
-    どちらか一方だけで試して満足する状態になる。
+    止まるのは書き出し口で、計画（fragment の組み立て）ではない。予算は描画
+    規則ではなく書き出し口が持つので SMT と人向けで別々に効かせる必要は無い —
+    が、それ自体を確かめないと、どちらか一方だけで試して満足する状態になる。
     """
 
     from scripts.function_tracer_pcode.core.render_python import (
@@ -658,7 +706,9 @@ def test_c7_a_wide_node_is_bounded_in_the_human_renderer_too(name, build):
     with pytest.raises(RenderOutputLimitExceeded) as excinfo:
         render_human_text(root, HumanRenderContext(simplify=False), limit_bytes=200)
     assert time.perf_counter() - started < 5.0
-    assert excinfo.value.requested_bytes <= excinfo.value.limit_bytes * 4
+    assert excinfo.value.site == "core.render_python.emit"
+    # 予算を超えると分かった時点で止まっている（書き切っていない）
+    assert excinfo.value.requested_bytes > excinfo.value.limit_bytes
 
 
 def test_c7_a_wide_node_renders_completely_in_the_human_renderer_without_a_limit():

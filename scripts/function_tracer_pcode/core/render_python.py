@@ -93,8 +93,10 @@ def render_human_text(
 ) -> str:
     """DAG を 1 回だけ辿って表示文字列を作る。
 
-    node 本体が作るのは自分の分と子の参照だけで、木への展開は
-    `CountingWriter` へ流しながら行う（上限に達したらそこで止まる）。
+    node 本体が作るのは自分の分と子の参照だけで、木への展開は `CountingWriter`
+    へ流しながら行う（`limit_bytes` は **書き出した byte** の予算で、予算に
+    達したらそこで止める = 完成出力文字列を作らない）。計画中の fragment は
+    speculative なので予算では裁かない。
     """
 
     counters = RenderCounters(render_invocations=1)
@@ -327,8 +329,8 @@ def _render_expression_text(expr, context: HumanRenderContext, render_child) -> 
         return f"{op}({operand})"
 
     if expr_type in (expr_kind.CALL, expr_kind.INTRINSIC):
-        # 引数の数だけ長くなる node なので、`join` で一度に畳まず 1 個ずつ
-        # 数えながら置く（上限に達した時点で止まる）。
+        # 引数の数だけ長くなる node なので、前から 1 回で組み立てる。
+        # 前から 1 回で組み立てる（後ろから積み直すと幅の 2 乗になる）。
         fragment = render_child.fragment()
         fragment.literal(f"{expr.name}(")
         for position, operand in enumerate(getattr(expr, "operands", None) or ()):
@@ -351,7 +353,7 @@ def _render_expression_text(expr, context: HumanRenderContext, render_child) -> 
                 return render_child(val)
             return str(val)
 
-        # branch の数だけ長くなる node なので、`join` で一度に畳まない。
+        # branch の数だけ長くなる node なので、前から 1 回で組み立てる。
         fragment = render_child.fragment()
         fragment.literal("PHI(")
         for position, (cond, val) in enumerate(branches):
