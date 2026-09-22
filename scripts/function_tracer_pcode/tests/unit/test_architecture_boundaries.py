@@ -1536,10 +1536,12 @@ def test_the_output_budget_never_reaches_the_planning_layer():
     出力予算の契約を持つのは書き出し口だけ。
     """
 
-    modules = ("core/render_smt/render.py", "core/render_python.py")
     offenders = []
-    for module_path in modules:
-        for node in ast.walk(_parse(PACKAGE_ROOT / module_path)):
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        relative = path.relative_to(PACKAGE_ROOT).as_posix()
+        if relative.startswith("tests/"):
+            continue
+        for node in ast.walk(_parse(path)):
             if not isinstance(node, ast.Call):
                 continue
             name = None
@@ -1551,7 +1553,7 @@ def test_the_output_budget_never_reaches_the_planning_layer():
                 continue
             for keyword in node.keywords:
                 if keyword.arg in {"limit_bytes", "fragment_limit_bytes"}:
-                    offenders.append(f"{module_path}:{node.lineno} passes {keyword.arg}")
+                    offenders.append(f"{relative}:{node.lineno} passes {keyword.arg}")
     assert offenders == [], offenders
 
 

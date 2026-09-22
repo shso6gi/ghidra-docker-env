@@ -291,7 +291,7 @@ class PlaceholderAlgebraService:
         expr: Optional[Expression],
         conditions: Sequence[Condition],
     ) -> Optional[Tuple[Any, ...]]:
-        """照合した条件の厳密な identity（載せられないなら `None`）。"""
+        """照合した条件の identity を **保存形式**（plain data）で。無ければ `None`。"""
 
         return condition_identity_key(self.unit_condition_for_expression(expr, conditions))
 
@@ -327,7 +327,7 @@ class PlaceholderAlgebraService:
         expr: Optional[Expression],
         conditions: Sequence[Condition],
     ) -> Optional[Tuple[Any, ...]]:
-        """照合した条件の厳密な identity（載せられないなら `None`）。"""
+        """照合した条件の identity を **保存形式**（plain data）で。無ければ `None`。"""
 
         return condition_identity_key(
             self.negated_unit_condition_for_expression(expr, conditions)

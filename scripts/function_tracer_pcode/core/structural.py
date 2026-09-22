@@ -1269,6 +1269,11 @@ def definite_atoms(tag: str, value: Any) -> CompleteIdentity:
     確かめてから包む。どちらも満たさなければ **その場で落とす** — fail-closed の
     `None`（= 組めなかった）ではなく、組み立て側の間違いなので例外にする。
 
+    `CompleteIdentity.__post_init__` より `None` に厳しいのは意図的。あちらが
+    受けるのは走査が作った payload で、そこでは `None` が「その field は無い」と
+    いう確定値として使われる（`("read_order", None)`）。こちらが受けるのは
+    呼び出し側が持ち込む素のデータで、そこに `None` の取り決めは無い。
+
     型を絞るのは、鍵が直列化されるから。任意の object を通すと「直列化したら
     何になるか」が呼び出し側任せになり、`repr` 経由で `id()` のような
     process 固有の値が鍵へ入り得る。
