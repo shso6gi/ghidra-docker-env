@@ -733,6 +733,9 @@ class _Driver:
         instance = self.instances[index]
         instance.fragment = fragment
         instance.child_indices = child_indices
+        # fragment に **実際に現れる** 子。要求しても捨てられた子は入らない
+        # （出力に効くのはこちら）。fragment を読み直すのはここ 1 回だけ。
+        instance.used_children = tuple(fragment_children(fragment))
         head, exact = leading_child(fragment)
         instance.properties = self._classify(
             fragment,
@@ -747,12 +750,17 @@ class _Driver:
         self.retained_bytes += length
         if length > self._counters.max_fragment_bytes:
             self._counters.max_fragment_bytes = length
-        # builder を通さずに組み立てた本体（f-string 1 個で済む狭い node）も
-        # ここで捕まえる。placeholder の分は差し引く — 出力に出ないので。
+        # この node が **自分で書いた** byte 数を、fragment が出来たこの 1 箇所で
+        # 決める（placeholder の分は出力に出ないので差し引く）。あとで共有の
+        # 見積りにも同じ値が要るが、2 度数えると「同じ量の owner が 2 つ」に
+        # なるので instance に残す。
         placeholder_bytes = sum(
-            len(child_placeholder(child)) for child in fragment_children(fragment)
+            len(child_placeholder(child)) for child in instance.used_children
         )
-        self._check_own_bytes(max(0, length - placeholder_bytes))
+        instance.local_bytes = max(0, length - placeholder_bytes)
+        # builder を通さずに組み立てた本体（f-string 1 個で済む狭い node）も
+        # ここで捕まる。
+        self._check_own_bytes(instance.local_bytes)
 
 
 def leading_child(fragment: str) -> Tuple[Optional[int], bool]:
@@ -812,11 +820,10 @@ def build_render_plan(
     instances = driver.instances
     post_order = tuple(driver.post_order)
 
-    # 参照回数は **fragment に実際に現れる**子で数える。要求されたが捨てられた
-    # 子（定数条件を `true` へ畳む枝など）まで数えると、出力に 1 度も現れない
-    # instance へ名前が付き、空の参照先を持つ `let` が残る。
-    for instance in instances:
-        instance.used_children = tuple(fragment_children(instance.fragment))
+    # 参照回数は **fragment に実際に現れる**子で数える（`used_children` は
+    # fragment が出来たときに決めてある）。要求されたが捨てられた子（定数条件を
+    # `true` へ畳む枝など）まで数えると、出力に 1 度も現れない instance へ名前が
+    # 付き、空の参照先を持つ `let` が残る。
     for index in post_order:
         for child_index in instances[index].used_children:
             instances[child_index].references += 1
@@ -824,10 +831,6 @@ def build_render_plan(
     shared_references = 0
     for index in post_order:
         instance = instances[index]
-        placeholder_bytes = sum(
-            len(child_placeholder(child)) for child in instance.used_children
-        )
-        instance.local_bytes = max(0, utf8_length(instance.fragment) - placeholder_bytes)
         tree_nodes = 1
         inline_bytes = instance.local_bytes
         for child_index in instance.used_children:

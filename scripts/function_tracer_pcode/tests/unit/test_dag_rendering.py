@@ -1753,6 +1753,38 @@ def test_the_complete_identity_only_ever_refuses_more_than_the_budgeted_key():
     )
 
 
+def test_the_size_limit_gates_availability_and_never_the_content():
+    """上限は identity の **有無**だけを決め、中身は変えないこと。
+
+    上限が中身を変えるなら、上限を持つ側（証明鍵）と持たない側（in-memory の
+    比較）で同じ式に別の identity が付き、同じ式が「別物」になる。上限は
+    resource policy として安全に足し引きできなければならない。
+    """
+
+    from scripts.function_tracer_pcode.core.structural import (
+        condition_identity,
+        structural_identity_form,
+    )
+    from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
+        proof_condition_identity,
+    )
+
+    a = _param("a", 0)
+    condition = Condition(_binary("INT_LESS", _doubling_dag(6, a), _param("b", 1), size=1))
+
+    unbounded = condition_identity(condition)
+    bounded = proof_condition_identity(condition)
+    generous = condition_identity(condition, max_semantic_nodes=1_000_000)
+    assert unbounded is not None and bounded is not None
+    # 上限の有無・大きさで中身が変わらない
+    assert unbounded == bounded == generous
+
+    # 上限を下げると「作らない」になるだけ（別の中身にはならない）
+    tight = condition_identity(condition, max_semantic_nodes=1)
+    assert tight is None
+    assert structural_identity_form(condition.expression, max_semantic_nodes=1) is None
+
+
 def test_the_composition_only_accepts_parts_that_were_checked():
     """鍵の組み立てが「確かめた部品」しか受けないこと。
 
