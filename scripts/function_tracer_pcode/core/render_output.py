@@ -11,7 +11,11 @@
 * `RenderCounters` — 1 回の描画で観測した量。**診断専用**で、判定にも
   authority にも使わない（PR-22-D が既定値を決めるための実測値）。
 
-上限の単位は **UTF-8 byte**（計画 v5 の `render_bytes`）。文字数ではないのは、
+予算は **1 つ**（出力の byte 数 = 計画 v5 の `render_bytes`）。ここから導いた別の
+上限は作らない — 中間作業量に予算を付けるかどうかは PR-22-D の担当で、この層は
+`RenderCounters` で観測値を渡すだけ。
+
+単位は **UTF-8 byte**。文字数ではないのは、
 最終的に JSON へ出るのも solver へ渡るのも byte 列で、非 ASCII を含む symbol 名
 では 1 文字が 1 byte とは限らないから。長さの数え方はこの module の
 `utf8_length()` が唯一の owner で、renderer も出力口も同じ関数を使う。
@@ -49,30 +53,18 @@ class RenderOutputLimitExceeded(AnalysisFailureError):
     `AnalysisLimitation` へ写す。
     """
 
-    #: 上限の種類。`"output"` は出力量そのもの、`"material"` は renderer が抱える
-    #: 材料の許容量（出力上限そのものではない）。1 つの field で両方を名乗ると、
-    #: 受け取った側は `limit_bytes` が何の上限か分からない — 材料側は出力上限の
-    #: 数倍になるので、そのまま「出力が N byte を超えた」と読むと誤る。
-    OUTPUT = "output"
-    MATERIAL = "material"
-
-    def __init__(
-        self,
-        *,
-        limit_bytes: int,
-        requested_bytes: int,
-        site: str,
-        limit_kind: str = OUTPUT,
-    ) -> None:
+    def __init__(self, *, limit_bytes: int, requested_bytes: int, site: str) -> None:
         super().__init__(
-            f"render {limit_kind} exceeded {limit_bytes} bytes at {site} "
+            f"render output exceeded {limit_bytes} bytes at {site} "
             f"(needed at least {requested_bytes})"
         )
-        #: 超えた上限（`limit_kind` の上限）
+        #: 超えた **出力予算**。予算は 1 つなので、どの site から来ても同じ意味
         self.limit_bytes = int(limit_bytes)
+        #: その予算を超えると分かった時点で必要だった byte 数（下界）
         self.requested_bytes = int(requested_bytes)
+        #: どこで気付いたか。`<owner>.fragment`（node が自分で書く分）か
+        #: `<owner>.emit`（出力そのもの）
         self.site = str(site)
-        self.limit_kind = str(limit_kind)
 
 
 class CountingWriter:
@@ -169,7 +161,6 @@ class CountingWriter:
             limit_bytes=int(self._limit if self._limit is not None else 0),
             requested_bytes=int(requested_bytes),
             site=self._site,
-            limit_kind=RenderOutputLimitExceeded.OUTPUT,
         )
 
 
@@ -200,7 +191,9 @@ class RenderCounters:
     #: renderer が作った **1 個の中間文字列**の最大長（= node 1 個分の fragment）
     max_fragment_bytes: int = 0
     #: renderer が同時に保持した中間文字列の総量（要求して捨てた子の分も含む）。
-    #: 出力量の下界ではない — renderer が抱える材料の量（memory / 仕事の目安）
+    #: **観測専用**。出力量の下界ではないので予算には使えない — 要求した子を
+    #: 捨てれば出力が小さくてもここは幾らでも大きくなれる。中間作業に予算を
+    #: 付けるかどうかは PR-22-D が決める
     retained_fragment_bytes: int = 0
     #: 木として展開したら幾つの node になったかの飽和付き見積り
     tree_node_estimate: int = 0

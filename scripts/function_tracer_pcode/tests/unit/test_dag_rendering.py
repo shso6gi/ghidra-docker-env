@@ -493,22 +493,17 @@ def test_c7_the_abort_says_which_renderer_and_which_stage():
     with pytest.raises(RenderOutputLimitExceeded) as human_emit:
         render_human_text(deep, HumanRenderContext(), shared=False, limit_bytes=20_000)
 
-    assert smt_material.value.site == "core.render_smt.materialize"
+    assert smt_material.value.site == "core.render_smt.fragment"
     assert smt_emit.value.site == "core.render_smt.emit"
-    assert human_material.value.site == "core.render_python.materialize"
+    assert human_material.value.site == "core.render_python.fragment"
     assert human_emit.value.site == "core.render_python.emit"
 
-    # どの上限を超えたのかも名乗ること。材料の許容量は出力上限そのものでは
-    # ないので、`limit_bytes` だけでは受け取った側が何の上限か分からない。
-    from scripts.function_tracer_pcode.core.render_plan import MATERIAL_ALLOWANCE
-
-    assert smt_material.value.limit_kind == RenderOutputLimitExceeded.MATERIAL
-    assert human_material.value.limit_kind == RenderOutputLimitExceeded.MATERIAL
-    assert smt_emit.value.limit_kind == RenderOutputLimitExceeded.OUTPUT
-    assert human_emit.value.limit_kind == RenderOutputLimitExceeded.OUTPUT
-    # 材料側が名乗る上限は「出力上限 × 許容量」で、出力上限そのものではない
-    assert smt_material.value.limit_bytes == 200 * MATERIAL_ALLOWANCE
+    # 予算は 1 つなので、どの site から来ても `limit_bytes` は同じ意味（渡した
+    # 出力予算そのもの）。倍率で膨らんだ別の上限を名乗ることはない。
+    assert smt_material.value.limit_bytes == 200
+    assert human_material.value.limit_bytes == 200
     assert smt_emit.value.limit_bytes == 20_000
+    assert human_emit.value.limit_bytes == 20_000
 
 
 # ---------------------------------------------------------------------------
@@ -641,8 +636,6 @@ def test_the_builder_counts_terms_the_body_made_itself():
     上限を超えても止まらない。
     """
 
-    from scripts.function_tracer_pcode.core.render_plan import MATERIAL_ALLOWANCE
-
     root = ["root"]
 
     def body(node, context, resolve):
@@ -663,9 +656,9 @@ def test_the_builder_counts_terms_the_body_made_itself():
             limit_bytes=100,
             site="test",
         )
-    # 自作の項は 9 byte。上限に達した直後で止まっていること（作り切っていない）
-    assert excinfo.value.limit_kind == RenderOutputLimitExceeded.MATERIAL
-    assert excinfo.value.requested_bytes <= 100 * MATERIAL_ALLOWANCE + 9
+    # 自作の項は 9 byte。予算に達した直後で止まっていること（作り切っていない）
+    assert excinfo.value.site == "test.fragment"
+    assert excinfo.value.requested_bytes <= 100 + 9
 
 
 def test_c7_output_limit_raises_a_typed_limitation():
@@ -692,17 +685,36 @@ def test_c7_an_exponential_inline_expansion_is_stopped_at_the_limit():
     assert time.perf_counter() - started < 10.0
 
 
-def test_c7_materialisation_stays_bounded_while_planning():
-    """材料（fragment の総量）にも上限が効く。書き出し前に止まる。"""
+def test_c7_intermediate_work_is_observed_and_not_budgeted():
+    """中間作業量は **観測だけ**。予算は出力にしか掛からないこと。
+
+    以前はここに「材料（fragment の総量）が出力上限 × 倍率を超えたら止める」が
+    あった。材料と出力の比には普遍的な有限上限が無いので、その倍率は原理的に
+    決められない（要求した子を捨てれば出力が小さくても材料は幾らでも大きく
+    なれる）。だから中間作業量は counter で観測し、止めるのは出力予算だけにした。
+
+    4000 段の線形式は、どの node も自分で書く分は小さい（20 byte 程度）ので
+    **計画は通る** — 抱えている fragment の総量が出力予算を大きく超えていても。
+    出力予算に引っかかるのは書き出しのとき。
+    """
 
     a = _param("a", 0)
     counters = RenderCounters()
-    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
-        _plan_for(_linear_chain(4000, a), counters=counters, limit_bytes=5_000)
-    assert excinfo.value.site == "core.render_smt.materialize"
-    # 止めた時点の材料は上限 + 1 node 分を大きく超えない。
-    assert counters.retained_fragment_bytes <= 5_000 + counters.max_fragment_bytes
+    plan = _plan_for(_linear_chain(4000, a), counters=counters, limit_bytes=5_000)
+
+    # 中間作業量は予算を超えているが、計画は止まっていない（観測だけ）
+    assert plan.distinct_instances > 4_000
+    assert counters.retained_fragment_bytes > 5_000
+    # どの 1 個の中間文字列も node 1 個分（= 幅にも深さにも比例しない）
     assert counters.max_fragment_bytes < 200
+
+    # 出力予算に引っかかるのは書き出し口
+    with pytest.raises(RenderOutputLimitExceeded) as excinfo:
+        render_smt_term(
+            _linear_chain(4000, a), build_smt_render_context(), None, limit_bytes=5_000
+        )
+    assert excinfo.value.site == "core.render_smt.emit"
+    assert excinfo.value.limit_bytes == 5_000
 
 
 def test_c7_no_intermediate_string_exceeds_one_node_worth():
@@ -1437,23 +1449,28 @@ def test_binding_names_use_the_reserved_prefix():
         pytest.param(lambda: _wide_phi(2000), id="wide_phi"),
     ],
 )
-def test_a_wide_node_is_stopped_before_its_own_fragment_is_built(build):
-    """幅の広い node（引数の多い CALL、branch の多い PHI）でも上限で止まる。
+def test_a_wide_node_is_stopped_before_its_own_fragment_is_built(build, request):
+    """幅の広い node は、自分で書く分が出力予算に届いた時点で止まること。
 
-    fragment が出来てから測る設計だと、`join` や連結が終わったあとでしか
-    気付けない。子を解決するたびに見ているので、並べ終わる前に止まる。
+    止まる位置が **幅ではなく予算**で決まるのが要点。区切りを 1 個書くたびに
+    数えているので、要求した子の数も組み立てた文字列も予算に比例し、node の
+    幅には比例しない（`join` が並べ終わってから測る設計との違い）。
     """
 
+    limit = 600
     root = build()
     counters = RenderCounters()
     started = time.perf_counter()
     with pytest.raises(RenderOutputLimitExceeded) as excinfo:
-        _plan_for(root, counters=counters, limit_bytes=600)
+        _plan_for(root, counters=counters, limit_bytes=limit)
     assert time.perf_counter() - started < 5.0
-    assert excinfo.value.site == "core.render_smt.materialize"
-    # 止めた時点で抱えている材料は上限 + node 1 個分を大きく超えない。
-    assert counters.retained_fragment_bytes <= 600 + counters.max_fragment_bytes
-    assert counters.max_fragment_bytes <= 600
+    assert excinfo.value.site == "core.render_smt.fragment"
+    assert excinfo.value.limit_bytes == limit
+    # 予算を超えたと分かった時点で止まっている（作り切っていない）
+    assert limit < excinfo.value.requested_bytes <= limit + 64
+    # 要求した子の数も予算に比例する（幅は 2000〜4000）
+    width = 4000 if "call" in request.node.callspec.id else 2000
+    assert counters.child_requests <= limit + 64 < width
 
 
 def test_a_wide_node_renders_completely_without_a_limit():
@@ -1929,7 +1946,6 @@ def test_the_render_package_exposes_only_the_rendering_entry_points():
         "ResolutionSchedule",
         "FragmentBuilder",
         "ChildResolver",
-        "MATERIAL_ALLOWANCE",
         "render_attribute_scope",
         "evaluate_attribute",
         "attribute_cache",
