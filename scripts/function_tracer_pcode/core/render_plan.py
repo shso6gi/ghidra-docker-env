@@ -22,29 +22,32 @@ node 本体は子の描画結果として **参照 1 個**（`RenderedTerm`）�
 
 ## 出力予算はこの層の持ち物ではない
 
-`render_bytes`（= 出力予算）が意味するのは **最終的に書き出した byte 数**
-だけで、その契約を持つのは書き出し口（`core/render_output.CountingWriter`）。
-木への展開は流しながら行うので、予算に達した時点でそれ以上は作られない。
+`render_bytes`（= 出力予算）が意味するのは **最終的に書き出した byte 数**だけで、
+その契約を持つのは書き出し口（`core/render_output.CountingWriter`）。木への展開は
+流しながら行うので、**完成した出力文字列を作ってから測る、ということをしない** —
+上限に達した時点で書き出しを止める。C7 が保証するのはここまで。
 
-この層が組み立て中に作るもの（fragment、要求収集の実行）は **speculative**:
-本体は要求した子を捨てることがあるし、要求された instance が最終出力に
-一度も現れないこともある。だから
+この層が組み立てる fragment は **speculative**: 本体は要求した子を捨てることが
+あるし、要求された instance が最終出力に一度も現れないこともある。だから
 
 ```text
 捨てられる子の fragment > 出力予算   かつ   最終出力 <= 出力予算
 ```
 
-が両立する。ここで出力予算を使って拒むと、**正しい描画を
-`RenderOutputLimitExceeded` にできてしまう**。speculative な作業量を
-correctness-visible な出力予算で裁かない。
+が両立する。出力予算でここを裁くと **正しい描画を拒める**ので、裁かない。
 
-代わりにこの層が持つのは **仕組みと観測**:
+中間作業（fragment の総量、placeholder の分）に予算を付けるかどうかと、その値は
+PR-22-D の `BudgetPolicy` の担当。この層は `RenderCounters`
+（`retained_fragment_bytes` / `max_fragment_bytes` / `child_requests`）で
+**観測値を渡すだけ**で、上限の仕組みは持たない — 本番で使わない仕組みを置くと、
+test だけがそれを使って「有界だ」と言えてしまう。
 
-* `FragmentBuilder` — 置く前に数える組み立て口。`fragment_limit_bytes` を
-  渡せば組み立てを途中で止められる。**PR-22-C では渡さない**（既定 `None`）。
-  中間作業に予算を付けるかどうかと、その値は PR-22-D の `BudgetPolicy` の担当。
-* `RenderCounters` — `retained_fragment_bytes` / `max_fragment_bytes` /
-  `child_requests`。PR-22-D が既定値を決めるための実測値。
+## 組み立ては線形に
+
+`FragmentBuilder` は fragment を **前から 1 回で**組み立てる口。幅が子の数に
+比例する node（引数の多い CALL、branch の多い PHI）を
+`result = f"(ite … {result})"` のように後ろから積み直すと、文字列 copy が幅の
+2 乗になる。これは renderer の書き方の問題（PR-22-C の変更軸）で、予算とは別の話。
 
 ## 予定と経路は `ResolutionSchedule` が持つ
 
@@ -306,22 +309,6 @@ def child_placeholder(index: int) -> str:
     return f"{PLACEHOLDER_MARK}{index}{PLACEHOLDER_MARK}"
 
 
-def is_child_reference(text: str) -> bool:
-    """`text` が子の参照ちょうどか（= 出力には現れない印か）。
-
-    印を作るのも読むのもこの層なので、ここで文字を見るのは「描画結果の text を
-    見て意味を決める」こととは別（印は renderer の出力ではなく、この層の内部
-    表現）。予算に数えるかどうかの判定にだけ使う。
-    """
-
-    return (
-        len(text) >= 3
-        and text[0] == PLACEHOLDER_MARK
-        and text[-1] == PLACEHOLDER_MARK
-        and text.find(PLACEHOLDER_MARK, 1) == len(text) - 1
-    )
-
-
 class RenderedTerm(str):
     """子の描画結果。文字列としては **参照 1 個**、性質は型で持つ。
 
@@ -339,84 +326,46 @@ class RenderedTerm(str):
 
 
 class FragmentBuilder:
-    """node 1 個分の fragment を **数えながら**組み立てる。
+    """node 1 個分の fragment を **前から 1 回で**組み立てる。
 
-    ## なぜ必要か
+    幅が子の数に比例する node はここを通す。後ろから `result = f"(… {result})"`
+    と積み直すと文字列 copy が幅の 2 乗になる（実際そうなっていた）。前から
+    置いて最後に 1 回だけ連結すれば線形。
 
-    `resolve` は子の参照を渡すたびに上限と比べるが、本体が自分で書く分
-    （区切り、演算子名、括弧）はそこに乗らない。だから
-
-    ```text
-    子の参照の合計 < 上限 < 完成した fragment
-    ```
-
-    という幅では、上限超えの文字列を **作ってから**しか止められなかった。
-    さらに `result = f"(ite … {result})"` のような積み直しは、branch 数に対して
-    文字列 copy が幅の 2 乗になる。
-
-    ここを通すと、自分で書く分も **置く前に**上限と比べ、積み直しをしない
-    （最後に 1 回だけ連結する。そのときの全長は既に上限以下と分かっている）。
-
-    ## 使い分け
-
-    数えるのは **出力に出る分だけ**。自分で書く文字（`literal` / `repeat`）と、
-    本体が自分で作った項（`term` に渡る `true` など）は出力に出るので置く前に
-    数える。driver が返した子の参照は出力に印としては現れない（展開か束縛名に
-    置き換わる）ので数えない。
-
-    こう数えると「自分で書いた分」は出力量の下界になり、**出力予算とそのまま**
-    比べられる（倍率も導出上限も要らない）。
-
-    幅が子の数に比例する node（引数の多い CALL、branch の多い PHI）は **必ず**
-    ここを通すこと。`tests/unit/test_architecture_boundaries.py` が、描画本体の
-    中で可変長の子を `join` / 積み直しで畳む書き方を禁止して固定している。
+    **予算は持たない**。組み立て中の fragment は speculative（捨てられることが
+    ある）なので、出力予算で裁くと正しい描画を拒める。中間作業に予算を付けるか
+    どうかは PR-22-D の担当で、この class は「どう組み立てるか」だけを持つ。
     """
 
-    __slots__ = ("_parts", "_note")
+    __slots__ = ("_parts",)
 
-    def __init__(self, note: Callable[[int], None]) -> None:
+    def __init__(self) -> None:
         self._parts: List[str] = []
-        self._note = note
 
     def literal(self, text: str) -> "FragmentBuilder":
-        """自分で書く文字を置く（置く **前に** 上限と比べる）。"""
+        """自分で書く文字を置く。"""
 
         if text:
-            self._note(utf8_length(text))
             self._parts.append(text)
         return self
 
     def term(self, term: Any) -> "FragmentBuilder":
-        """項を置く。**出力に出る分だけ**数える。
-
-        driver が返した子の参照は出力に placeholder としては現れない（展開か
-        束縛名に置き換わる）ので数えない。本体が自分で作った項（条件の無い
-        branch に置く `true`、式でない branch 値の `str()` など）は出力にその
-        まま出るので数える — `resolve` を通っていないので、ここで数えないと
-        素通りする。
-        """
+        """項を置く（子の参照でも、本体が作った項でも）。"""
 
         if term:
-            text = str(term)
-            if not is_child_reference(text):
-                self._note(utf8_length(text))
-            self._parts.append(text)
+            self._parts.append(str(term))
         return self
 
     def repeat(self, text: str, count: int) -> "FragmentBuilder":
-        """同じ文字を `count` 回置く（並びを作る **前に** 全長を数える）。
-
-        入れ子の閉じ括弧のように、深さ / 幅の分だけ並ぶものはここを通す。
-        """
+        """同じ文字を `count` 回置く（入れ子の閉じ括弧など）。"""
 
         count = int(count)
         if count > 0 and text:
-            self._note(utf8_length(text) * count)
             self._parts.append(text * count)
         return self
 
     def build(self) -> str:
-        """組み立てた fragment。ここまでの全長は既に上限以下。"""
+        """組み立てた fragment（連結はここで 1 回だけ）。"""
 
         if len(self._parts) == 1:
             return self._parts[0]
@@ -561,16 +510,11 @@ class _Driver:
     """
 
     def __init__(
-        self, body, classify, counters: RenderCounters, fragment_limit_bytes, site: str
+        self, body, classify, counters: RenderCounters, site: str
     ) -> None:
         self._body = body
         self._classify = classify
         self._counters = counters
-        #: 組み立てを止める上限（**出力予算ではない**）。PR-22-C は渡さないので
-        #: 既定は `None` = 止めない。値と policy の owner は PR-22-D。
-        self._fragment_limit = (
-            None if fragment_limit_bytes is None else int(fragment_limit_bytes)
-        )
         self._site = str(site)
         self.instances: List[RenderInstance] = []
         self.post_order: List[int] = []
@@ -581,9 +525,6 @@ class _Driver:
         self._missing: Optional[Tuple[Any, Any]] = None
         #: 観測のみ（予算ではない）。renderer が同時に抱える fragment の総量
         self.retained_bytes = 0
-        #: 組み立て中の node が **自分で書いた** byte 数（子の参照は含まない）。
-        #: これが出力予算を超えたら、その node が使われる限り出力も超える。
-        self._own_bytes = 0
 
     def resolve(self, node: Any, context: Any) -> RenderedTerm:
         """node 本体が子を要求する口。返るのは **参照 1 個 + 型付きの性質**。"""
@@ -621,7 +562,6 @@ class _Driver:
                 self.index_by_key[key] = index
             edges: List[int] = []
             self._edges = edges
-            self._own_bytes = 0
             self._missing = None
             try:
                 fragment = self._body(node, ctx, self._child_resolver())
@@ -647,36 +587,7 @@ class _Driver:
         return self.index_by_key[(id(root), context)]
 
     def _child_resolver(self) -> ChildResolver:
-        return ChildResolver(self.resolve, self._new_fragment)
-
-    def _new_fragment(self) -> FragmentBuilder:
-        """本体が自分の分を書く口。書いた byte を出力予算と比べる。"""
-
-        return FragmentBuilder(self._note_own_bytes)
-
-    def _note_own_bytes(self, extra_bytes: int) -> None:
-        self._own_bytes += int(extra_bytes)
-        self._check_own_bytes(self._own_bytes)
-
-    def _check_own_bytes(self, own_bytes: int) -> None:
-        """組み立て中の node が自分で書いた byte を、**組み立ての上限**と比べる。
-
-        比べる相手は出力予算ではない。ここで作っているのは speculative な
-        材料で、最終出力に一度も現れないことがある（本体が要求した子を捨てる、
-        instance が誰からも参照されない）。出力予算で裁くと、収まる描画を拒める。
-
-        PR-22-C は上限を渡さないので、既定ではここは素通りする。組み立てを
-        止めたい policy（と値）を持つのは PR-22-D。
-        """
-
-        if self._fragment_limit is None:
-            return
-        if own_bytes > self._fragment_limit:
-            raise RenderOutputLimitExceeded(
-                limit_bytes=self._fragment_limit,
-                requested_bytes=own_bytes,
-                site=f"{self._site}.fragment",
-            )
+        return ChildResolver(self.resolve, FragmentBuilder)
 
     def _collect_requests(self, node: Any, context: Any):
         """本体を偽の子で一度走らせ、要求された未解決の子をまとめて返す。
@@ -692,9 +603,8 @@ class _Driver:
         try:
             for text in _UNRESOLVED_CHILD_TEXTS:
                 unresolved = RenderedTerm(text, self._classify("", None, False))
-                pending = [0]
 
-                def collect(child: Any, child_context: Any, _term=unresolved, _pending=pending):
+                def collect(child: Any, child_context: Any, _term=unresolved):
                     self._counters.child_requests += 1
                     key = (id(child), child_context)
                     index = self.index_by_key.get(key)
@@ -709,7 +619,6 @@ class _Driver:
                             seen.add(key)
                             missing.append((child, child_context))
                         term = _term
-                    # 子の参照は出力に出ないので数えない（本番の実行と同じ規則）。
                     return term
 
                 self._counters.node_body_executions += 1
@@ -718,15 +627,7 @@ class _Driver:
                     # 分は同じ出力予算を通す。通さないと「捨てるから」という
                     # 理由で予算超えの文字列を作ってしまう。上限超過は収集の
                     # 失敗ではないので握らない。
-                    def note(extra_bytes: int, _pending=pending) -> None:
-                        _pending[0] += int(extra_bytes)
-                        self._check_own_bytes(_pending[0])
-
-                    self._body(
-                        node,
-                        context,
-                        ChildResolver(collect, lambda: FragmentBuilder(note)),
-                    )
+                    self._body(node, context, ChildResolver(collect, FragmentBuilder))
                 except DISCOVERY_IGNORED_FAILURES:
                     pass
                 except _NeedChild:  # pragma: no cover - collect never raises it
@@ -764,9 +665,6 @@ class _Driver:
             len(child_placeholder(child)) for child in instance.used_children
         )
         instance.local_bytes = max(0, length - placeholder_bytes)
-        # builder を通さずに組み立てた本体（f-string 1 個で済む狭い node）も
-        # ここで捕まる。
-        self._check_own_bytes(instance.local_bytes)
 
 
 def leading_child(fragment: str) -> Tuple[Optional[int], bool]:
@@ -809,21 +707,15 @@ def build_render_plan(
     classify: Callable[[str, Any, bool], Any],
     policy: SharingPolicy,
     counters: RenderCounters,
-    fragment_limit_bytes: Optional[int] = None,
     site: str = "render",
 ) -> RenderPlan:
     """DAG を 1 回だけ辿り、fragment・参照回数・名前を付ける instance を決める。
 
-    `fragment_limit_bytes` は **組み立ての上限で、出力予算ではない**。ここで
-    作るのは speculative な材料なので、出力予算で裁くと正しい描画を拒める。
-    PR-22-C は渡さない（既定 `None` = 止めない）。
-
-    `site` は打ち切りを報告するときの名乗り。`"<owner>.fragment"` の形になり、
-    書き出し口の `"<owner>.emit"` と対になる。PR-22-D はこの文字列を登録済み
-    reason へ写すので、段と owner の綴りはここで決めてある。
+    計画は出力予算を見ない（speculative な作業なので、出力予算で裁くと正しい
+    描画を拒める）。`site` は診断のための名乗り。
     """
 
-    driver = _Driver(body, classify, counters, fragment_limit_bytes, site)
+    driver = _Driver(body, classify, counters, site)
     root_index = driver.run(root, context)
 
     instances = driver.instances

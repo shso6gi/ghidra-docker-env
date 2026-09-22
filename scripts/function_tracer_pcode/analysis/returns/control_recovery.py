@@ -11,9 +11,7 @@ from scripts.function_tracer_pcode.core.analysis import (
     UnknownOutcome,
 )
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
-from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
-    proof_condition_keys,
-)
+from scripts.function_tracer_pcode.core.structural import condition_identities
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSimplifier,
     ConditionTracker,
@@ -1119,7 +1117,7 @@ class BranchGuardedWhileProofService:
                         self.divergence_proofs.condition_identity_key(condition)
                         for condition in target_conditions or ()
                     ]
-                    target_identities = proof_condition_keys(target_conditions or ())
+                    target_identities = condition_identities(target_conditions or ())
                     if target_identities is None or any(
                         key is None for key in target_guard_key_list
                     ):

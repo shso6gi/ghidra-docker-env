@@ -21,12 +21,10 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
     PcodeOpRef,
 )
 from scripts.function_tracer_pcode.core.storage import StorageInfo
-from scripts.function_tracer_pcode.core.structural import StructuralKey
-from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
-    compose_proof_key,
-    definite_proof_part,
-    proof_condition_identities,
-    proof_expression_identity,
+from scripts.function_tracer_pcode.core.structural import (
+    StructuralKey,
+    condition_identities,
+    structural_identity_form,
 )
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSimplifier,
@@ -860,7 +858,7 @@ def _build_function_outcome_seed(analysis: FunctionReturnAnalysis) -> None:
                 # 持つ 2 つの terminal が同じ evidence key になる。組めないなら
                 # terminal 固有の値へ倒して「同じ」と言わせない。
                 _identity_or_terminal(
-                    proof_expression_identity(getattr(outcome, "value", None)), terminal_id
+                    structural_identity_form(getattr(outcome, "value", None)), terminal_id
                 ),
             ),
             observed_value=getattr(outcome, "value", None),
@@ -1266,7 +1264,7 @@ def _identity_or_terminal(identity, terminal_id) -> Tuple[Any, ...]:
 
     if identity is None:
         return ("identity_unavailable", terminal_id)
-    return identity.key
+    return identity
 
 
 def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Optional[Tuple[Any, ...]]:
@@ -1280,9 +1278,9 @@ def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Optional[T
     戻り値はかつて `expression_key_safe()` の結果をこの tuple へ直に入れていた。
     あれは truncate すると `None` を返すので、**末尾だけ違う深い値 2 つが同じ鍵**
     になった（条件側だけを fail-closed にしても、鍵全体は fail-closed ではない）。
-    組み立ては `compose_proof_key()` に任せる: 受け取るのは完全 identity か
-    `None` だけで、部品が 1 つでも欠けたら鍵を作らない。
-    「戻り値が無い」は欠落ではないので `expression_identity()` が専用の値で表す。
+    部品が 1 つでも組めなければ鍵を作らない。「戻り値が無い」は欠落ではなく
+    確定した情報なので、`None` ではなく専用の値で表す — そうしないと「組め
+    なかった」と同じ値になる。
 
     この鍵は同じ producer が作った鍵とだけ比べられる（`control_recovery` の
     候補 source key）。`analysis/returns/summary_returns.py` と
@@ -1290,12 +1288,21 @@ def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Optional[T
     そちらは予算付きのまま（#22 の追記で別途追跡）。
     """
 
-    return compose_proof_key(
-        "return_info",
-        definite_proof_part("site", self._return_site_key(ret)),
-        proof_condition_identities(getattr(ret, "conditions", ()) or ()),
-        proof_expression_identity(getattr(ret, "value", None)),
-    )
+    identities = condition_identities(getattr(ret, "conditions", ()) or ())
+    if identities is None:
+        return None
+    value = getattr(ret, "value", None)
+    if value is None:
+        # 「戻り値が無い」は欠落ではなく確定した情報。`None` をそのまま鍵へ
+        # 埋めると「identity を組めなかった」と同じ値になり、別物 2 つが同じ
+        # 鍵になる。
+        value_identity: StructuralKey = ("return_value", "absent")
+    else:
+        form = structural_identity_form(value)
+        if form is None:
+            return None
+        value_identity = ("return_value", form)
+    return ("return_info", self._return_site_key(ret), identities, value_identity)
 
 
 def _impl__try_apply_triangular_mod_optimized_outcomes(

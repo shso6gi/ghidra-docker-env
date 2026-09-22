@@ -636,15 +636,13 @@ def test_identity_kinds_are_not_merged_into_one_type():
     identity = structural.StructuralIdentity
     exposed = {name for name in vars(identity) if not name.startswith("_")}
     # 構造 identity の面だけ。solver query / rewrite の一致条件はここに入れない。
+    # **PR-22-B が公開した 4 つのまま**: identity 型は PR-22-C の must-not-change
+    # なので、renderer の PR が facade を広げない。
     assert exposed == {
         "candidate_hash",
         "equals",
         "key",
         "identity_digest",
-        "identity_form",
-        "condition_identity",
-        "condition_identities",
-        "expression_identity",
     }, exposed
     for forbidden in ("solver_query", "rewrite", "authority_digest", "query_identity"):
         assert not hasattr(identity, forbidden), forbidden
@@ -1375,44 +1373,24 @@ def _iterates_a_child_collection(node: ast.AST) -> bool:
 
 
 @pytest.mark.parametrize("module_path", _RENDER_BODY_MODULES)
-def test_a_wide_body_does_not_fold_its_children_into_one_string(module_path):
-    """**可変長の子**を `join` / 積み直しで一度に畳まないこと（規則、一覧ではない）。
+def test_a_wide_body_builds_its_fragment_in_one_pass(module_path):
+    """**可変長の子**を後ろから積み直さないこと（規則、一覧ではない）。
 
-    子の参照は `resolve` が 1 個ずつ数えるが、本体が自分で書く区切り・演算子・
-    括弧はそこに乗らない。`join` で一度に畳むと
+    `result = f"(ite … {result})"` のように後ろから積み直すと、文字列 copy が
+    branch 数の 2 乗になる。前から置いて最後に 1 回連結すれば線形。
 
-    ```text
-    子の参照の合計 < 上限 < 完成した fragment
-    ```
+    これは **予算の話ではない**（組み立て中の fragment は speculative なので、
+    出力予算では裁かない）。renderer の書き方の問題で、PR-22-C の変更軸そのもの。
+    `join` は線形なので禁じない — 禁じるのは 2 乗になる形だけ。
 
-    の幅で、上限超えの文字列を **作ってから**しか止められない。さらに
-    `result = f"(… {result})"` の積み直しは幅の 2 乗の文字列 copy になる。
-
-    見るのは「子の集まり（`operands` / `branches` …）を回しているか」だけ。
-    深さや幅で決まらない繰り返し（結果幅で決まる `let` の入れ子、固定個数の
-    `concat`）は対象にしない — そこは幅と無関係に上限以下に収まる。新しい node
-    種別が幅を持ったときに同じ罠を踏まないよう、書き方そのものを禁じる
-    （`FragmentBuilder` を通せば置く前に数える）。
+    見るのは「子の集まり（`operands` / `branches` …）を回しているか」。深さや幅で
+    決まらない繰り返し（結果幅で決まる `let` の入れ子、固定個数の `concat`）は
+    対象にしない。
     """
 
     path = PACKAGE_ROOT / module_path
     offenders = []
-    tree = _parse(path)
-
-    # 1. 可変長の子に対する str.join（loop の内外を問わない）
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "join"
-            and node.args
-            and isinstance(node.args[0], (ast.GeneratorExp, ast.ListComp, ast.SetComp))
-            and _iterates_a_child_collection(node.args[0])
-        ):
-            offenders.append(f"{module_path}:{node.lineno} joins a child collection")
-
-    # 2 / 3. 子の集まりを回す loop の中での積み直しと += 累積
-    for loop in ast.walk(tree):
+    for loop in ast.walk(_parse(path)):
         if not isinstance(loop, (ast.For, ast.AsyncFor)):
             continue
         if not _iterates_a_child_collection(loop.iter):
@@ -1443,6 +1421,51 @@ def test_a_wide_body_does_not_fold_its_children_into_one_string(module_path):
                     f"{module_path}:{node.lineno} accumulates a string with += "
                     "while walking a child collection"
                 )
+    assert offenders == [], offenders
+
+
+def test_the_render_budget_has_one_meaning_and_one_owner():
+    """出力予算を書き出し口以外へ渡さないこと。
+
+    `render_bytes` が意味するのは書き出した byte 数だけ。計画中に作る fragment は
+    speculative（本体が要求した子を捨てる、instance が出力に現れない）なので、
+    そこへ出力予算を当てると **正しい描画を拒める**。
+
+    予算を受け取ってよいのは `CountingWriter` だけ。計画側が予算引数を持つと、
+    「本番では渡さないが test では渡す」形になり、production で成立しない保証を
+    test が主張できてしまう。
+    """
+
+    import inspect
+
+    from scripts.function_tracer_pcode.core import render_plan
+
+    # 計画側は予算引数を持たない
+    parameters = set(inspect.signature(render_plan.build_render_plan).parameters)
+    assert not [name for name in parameters if "limit" in name or "budget" in name], parameters
+
+    # 予算を渡す呼び出しは書き出し口だけ
+    offenders = []
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        relative = path.relative_to(PACKAGE_ROOT).as_posix()
+        if relative.startswith("tests/"):
+            continue
+        for node in ast.walk(_parse(path)):
+            if not isinstance(node, ast.Call):
+                continue
+            name = None
+            if isinstance(node.func, ast.Name):
+                name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                name = node.func.attr
+            if name in {"CountingWriter", "RenderOutputLimitExceeded"}:
+                continue  # 予算の owner と、それが投げる typed failure
+            for keyword in node.keywords:
+                if keyword.arg in {"limit_bytes", "fragment_limit_bytes"}:
+                    target = name or "<call>"
+                    if target in {"render_smt_term", "render_human_text", "_to_smt_internal"}:
+                        continue  # 入口どうしの受け渡し（最終的に writer へ届く）
+                    offenders.append(f"{relative}:{node.lineno} passes {keyword.arg} to {target}")
     assert offenders == [], offenders
 
 
@@ -1525,153 +1548,6 @@ def test_the_render_budget_is_not_multiplied_into_a_second_one():
             }
             if any("limit" in name.lower() or "budget" in name.lower() for name in names):
                 offenders.append(f"{module_path}:{node.lineno}")
-    assert offenders == [], offenders
-
-
-def test_the_output_budget_never_reaches_the_planning_layer():
-    """出力予算を計画（speculative な作業）へ渡さないこと。
-
-    計画中に作るものは最終出力に一度も現れないことがある。そこへ出力予算を
-    当てると、捨てられる子が予算より大きいだけで **収まる描画を拒める**。
-    出力予算の契約を持つのは書き出し口だけ。
-    """
-
-    offenders = []
-    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
-        relative = path.relative_to(PACKAGE_ROOT).as_posix()
-        if relative.startswith("tests/"):
-            continue
-        for node in ast.walk(_parse(path)):
-            if not isinstance(node, ast.Call):
-                continue
-            name = None
-            if isinstance(node.func, ast.Name):
-                name = node.func.id
-            elif isinstance(node.func, ast.Attribute):
-                name = node.func.attr
-            if name != "build_render_plan":
-                continue
-            for keyword in node.keywords:
-                if keyword.arg in {"limit_bytes", "fragment_limit_bytes"}:
-                    offenders.append(f"{relative}:{node.lineno} passes {keyword.arg}")
-    assert offenders == [], offenders
-
-
-def test_a_persisted_proof_key_is_plain_data():
-    """保存境界を越えるものが plain data であること。
-
-    typed な wrapper を structural proof / source key に入れると、plain data を
-    契約として読む読み手が黙って捨てる。名前で境界が分かるようにしてある:
-    `*_key` は plain、`*_identity` は typed。
-    """
-
-    from scripts.function_tracer_pcode.analysis.returns import proof_identity
-    from scripts.function_tracer_pcode.core.structural import CompleteIdentity
-    from scripts.function_tracer_pcode.core.expression import Expression
-    from scripts.function_tracer_pcode.core.condition import Condition
-
-    condition = Condition(
-        Expression.binary_op(
-            "INT_LESS", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4)
-        )
-    )
-    # *_key は plain data
-    for builder in (proof_identity.proof_condition_key, proof_identity.proof_expression_key):
-        value = builder(condition if builder is proof_identity.proof_condition_key else None)
-        assert not isinstance(value, CompleteIdentity), builder.__name__
-    # *_identity は typed
-    assert isinstance(proof_identity.proof_condition_identity(condition), CompleteIdentity)
-
-
-def test_a_guard_key_that_reaches_a_proof_is_not_typed():
-    """proof へ入る鍵を作る関数が typed な wrapper を返さないこと。"""
-
-    from unittest.mock import Mock, patch
-
-    from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
-    from scripts.function_tracer_pcode.core.structural import CompleteIdentity
-    from scripts.function_tracer_pcode.core.expression import Expression
-    from scripts.function_tracer_pcode.core.condition import Condition
-
-    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
-    condition = Condition(
-        Expression.binary_op(
-            "INT_LESS", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4)
-        )
-    )
-    key = analyzer._condition_identity_key(condition)
-    assert key is not None and not isinstance(key, CompleteIdentity)
-
-    service = analyzer._placeholder_algebra
-    placeholder = Expression.parameter("p", 0, size=4)
-    flag = Expression.parameter("flag", 1, size=4)
-    expr = Expression.binary_op("INT_ADD", placeholder, flag)
-    with patch.object(service, "expression_is_one_under_conditions", return_value=True), patch.object(
-        service.condition_logic, "expressions_same_key", side_effect=lambda l, r: l is placeholder
-    ):
-        guard_key = service.placeholder_plus_unit_condition_guard_key(
-            expr, placeholder, [condition]
-        )
-    assert guard_key is not None and not isinstance(guard_key, CompleteIdentity)
-
-
-def test_pr_22_c_owns_no_identity_size_policy():
-    """identity の大きさの policy を PR-22-C が持たないこと。
-
-    identity は任意の有限 DAG に対して定義できるので、node 数の上限は意味では
-    なく resource policy。しかも identity の有無が候補・証明の可否を決めるので
-    correctness-visible で、**budget policy の owner は PR-22-D**。暫定の固定値を
-    置いて「後で引き取る」にすると、その間ずっと PR-22-C が policy を持つ。
-
-    仕組み（引数）は在ってよい — PR-22-D は値を渡すだけで済む。
-    """
-
-    import inspect
-
-    from scripts.function_tracer_pcode.analysis.returns import proof_identity
-    from scripts.function_tracer_pcode.core import structural
-
-    # どちらの層にも固定値を置かない
-    for module in (structural, proof_identity):
-        assert not [
-            name
-            for name in vars(module)
-            if name.isupper() and ("MAX_SEMANTIC" in name or "IDENTITY_MAX" in name)
-        ], module.__name__
-
-    # 仕組みは在り、既定は上限なし
-    assert (
-        inspect.signature(structural.structural_identity_form)
-        .parameters["max_semantic_nodes"]
-        .default
-        is None
-    )
-
-
-def test_a_proof_key_identity_goes_through_the_policy_module():
-    """証明鍵に載せる identity は policy module 経由で作ること。
-
-    `core/structural` の constructor を直接呼ぶと上限が掛からず、直列化する鍵の
-    大きさが誰の持ち物でもなくなる。
-    """
-
-    consumers = (
-        "analysis/returns/return_extraction.py",
-        "analysis/returns/control_recovery.py",
-        "analysis/returns/divergence_proofs.py",
-    )
-    raw_constructors = {"condition_identity", "condition_identities", "expression_identity"}
-    offenders = []
-    for module_path in consumers:
-        tree = _parse(PACKAGE_ROOT / module_path)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ImportFrom) or not node.module:
-                continue
-            if not node.module.endswith("core.structural"):
-                continue
-            for alias in node.names:
-                if alias.name in raw_constructors:
-                    offenders.append(f"{module_path}:{node.lineno} imports {alias.name}")
     assert offenders == [], offenders
 
 

@@ -125,10 +125,8 @@ def _unnamable_condition():
     Ghidra 由来の object が値に入っていると `identity_complete` が偽になる。
     深さではなく **値の性質**なので、通常の入力で起きる。
     """
-    from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
-        proof_condition_identity,
-    )
     from scripts.function_tracer_pcode.core.expression import ExpressionType
+    from scripts.function_tracer_pcode.core.structural import condition_identity
 
     class _GhidraObject:
         def __repr__(self):
@@ -136,7 +134,7 @@ def _unnamable_condition():
 
     opaque = Expression(ExpressionType.CONSTANT, value=_GhidraObject(), size=4)
     condition = Condition(Expression.binary_op("INT_LESS", opaque, Expression.constant(1, size=4)))
-    assert proof_condition_identity(condition) is None
+    assert condition_identity(condition) is None
     return condition
 
 

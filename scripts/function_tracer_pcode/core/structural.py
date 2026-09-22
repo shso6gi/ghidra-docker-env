@@ -1045,65 +1045,7 @@ def structural_identity_digest(expr: Optional[Expression]) -> Optional[str]:
 #: 完全 identity が扱う distinct node の上限。超えたら identity を返さない
 #: （切り詰めた key を返すのではなく「言えない」と言う）。証明鍵は直列化される
 #: ので、無制限に大きい値を payload へ流さないための上限でもある。
-#: 鍵に現れてよい葉。`None` は **payload の「その field は無い」** を表す確定値で
-#: （凍結した投影が入れる。例: `("read_order", None)`）、「identity を組めなかった」
-#: とは別物 — 後者は constructor が `CompleteIdentity` を作らないことで表す。
-#: `bytes` は入れない（digest を identity に昇格させない契約）。
-_STABLE_LEAVES = (str, int, bool, float, type(None))
-
-
-@dataclass(frozen=True)
-class CompleteIdentity:
-    """**完全に識別できたと構築時に確かめた** identity。
-
-    この型を持っていることが、そのまま次を意味する:
-
-        `key` は安定した plain data（`str` / `int` / `bool` / `float` / `None` と
-        その tuple / list の入れ子）だけでできていて、process 固有の object も
-        digest も含まない。
-
-    その保証は **`__post_init__` の 1 箇所**にある。どの経路で作っても通るので、
-    「constructor を使わずに直接作れば不正な値を入れられる」余地が無い。
-    docstring や呼び出し側の注意力ではなく、型の構築そのものが不変条件を持つ。
-
-    `None` を取り違えないための型でもある: 「identity を組めなかった」は
-    `CompleteIdentity` を **作らない**（`None` を返す）ことで表すので、
-    組み立てる側は「`CompleteIdentity` か `None` か」しか受け取らない。
-
-    **保存境界では `.key`（plain data）を使う**。structural proof / source key /
-    JSON へ入れるのは常にこちらで、wrapper object を保存形式へ混ぜない
-    （読み手は plain data を契約として読む）。
-    """
-
-    key: StructuralKey
-
-    def __post_init__(self) -> None:
-        _require_stable_identity_value(self.key)
-
-
-def _require_stable_identity_value(value: Any, *, depth: int = 0) -> None:
-    """安定 plain data であることを確かめる（`CompleteIdentity` の唯一の門）。"""
-
-    if depth > 200:
-        raise ValueError("identity value nests too deeply to validate")
-    if isinstance(value, bool) or isinstance(value, _STABLE_LEAVES):
-        return
-    if isinstance(value, (tuple, list)):
-        for item in value:
-            _require_stable_identity_value(item, depth=depth + 1)
-        return
-    raise TypeError(
-        f"an identity may only contain stable plain data; got {type(value).__name__}. "
-        "Build identities through condition_identity / expression_identity / "
-        "definite_atoms so the value is checked once, here."
-    )
-
-
-def structural_identity_form(
-    expr: Optional[Expression],
-    *,
-    max_semantic_nodes: Optional[int] = None,
-) -> Optional[StructuralKey]:
+def structural_identity_form(expr: Optional[Expression]) -> Optional[StructuralKey]:
     """式の **完全な** 構造 identity を平坦な値として返す（無ければ `None`）。
 
     digest ではない。この package では hash / digest は候補の絞り込み専用で、
@@ -1132,28 +1074,16 @@ def structural_identity_form(
     呼び出し側は `None` を「同じかどうか言えない」として扱うこと（他の `None` と
     一致させない）。
 
-    `max_semantic_nodes` は **resource policy で、identity の意味ではない**。
-    identity は任意の有限 DAG に対して定義できるので、既定は上限なし
-    （`None`）。上限を渡すと、distinct な意味 node がそれを超える式には identity を
-    作らない。渡すのは「作った identity を直列化して鍵に載せる」側 — 大きさの
-    費用を払うのがそこだから（`analysis/returns/proof_identity.py` が
-    その policy の owner で、値は PR-22-D の `BudgetPolicy` が引き取る）。
-    `expression_key(budget=…)` / `expression_provenance_key(max_digest_nodes=…)`
-    と同じ、鍵を作る関数の引数という既存の形に合わせてある。
-
-    上限が 1 つで足りるのは `unique record 数 <= distinct node 数` が常に
-    成り立つから（hash-cons は減らすだけ）。record 側に別の上限を置いても
-    到達しない。
+    **大きさの上限は持たない**。identity は任意の有限 DAG に対して定義できるので
+    node 数の上限は identity の意味ではなく resource policy で、その owner は
+    PR-22-D（`BudgetPolicy`）。renderer の PR が暫定値を置くと、その間ずっと
+    解析 policy を持つことになる。
     """
 
     expr = _validated(expr)
     if expr is None:
         return None
     traversal = traverse_semantic_graph(expr)
-    # distinct な意味 node の数は走査結果そのもの。record を組む前に見る
-    # （組んでから数えると、抑えたい仕事はもう済んでいる）。
-    if max_semantic_nodes is not None and len(traversal.post_order) > int(max_semantic_nodes):
-        return None
     records: List[StructuralKey] = []
     index_of_record: Dict[StructuralKey, int] = {}
     index_of_node: Dict[int, int] = {}
@@ -1187,11 +1117,7 @@ def structural_identity_form(
     return ("structural_identity_form", "v2", root_index, tuple(records))
 
 
-def condition_identity(
-    condition: Optional[Condition],
-    *,
-    max_semantic_nodes: Optional[int] = None,
-) -> Optional[CompleteIdentity]:
+def condition_identity(condition: Optional[Condition]) -> Optional[StructuralKey]:
     """条件の **完全な** identity。作れないときは `None`（fail-closed）。
 
     `condition_key()` との違いが要点: あちらは構築中にも使える **予算付き**の
@@ -1219,140 +1145,22 @@ def condition_identity(
     expression = getattr(condition, "expression", None)
     if expression is None:
         return None
-    form = structural_identity_form(expression, max_semantic_nodes=max_semantic_nodes)
+    form = structural_identity_form(expression)
     if form is None:
         return None
-    return CompleteIdentity(
-        ("condition_identity", "v2", form, bool(getattr(condition, "negated", False)))
-    )
+    return ("condition_identity", "v2", form, bool(getattr(condition, "negated", False)))
 
 
-def expression_identity(
-    expr: Optional[Expression],
-    *,
-    max_semantic_nodes: Optional[int] = None,
-) -> Optional[CompleteIdentity]:
-    """式の完全 identity。`None` は **組めなかった**という意味だけを持つ。
-
-    `structural_identity_form()` との違いは 1 点で、しかし鍵の正しさに直結する:
-    式が無いこと（`None`）は **情報が揃っている**状態なので、専用の値で表して
-    `None` を返さない。`None` に両方を担わせると、
-
-    * 深すぎて identity を組めなかった 2 つの別の式
-    * 値が無い 2 つの site
-
-    が同じ鍵になる。呼び出し側は `None` を見て「言えない」と判断できなくなる。
-
-    予算付きの legacy key（`expression_key_safe`）を鍵に埋めるのも同じ理由で
-    誤り: あれは truncate すると `None` を返すので、末尾だけ違う深い式 2 つが
-    同じ鍵になる。
-    """
-
-    if expr is None:
-        return CompleteIdentity(("expression_identity", "v2", "absent"))
-    form = structural_identity_form(expr, max_semantic_nodes=max_semantic_nodes)
-    if form is None:
-        return None
-    return CompleteIdentity(("expression_identity", "v2", form))
-
-
-#: 鍵に載せてよい素のデータの型。鍵は直列化されるので、ここに無い型は
-#: 「直列化したら何になるか」が呼び出し側任せになる（`repr` に `id()` が
-#: 混ざる、など）。
-_DEFINITE_SCALARS = (str, int, bool, float)
-
-
-def definite_atoms(tag: str, value: Any) -> CompleteIdentity:
-    """identity ではない **確定した素のデータ**（site 名など）を部品にする。
-
-    受けるのは直列化できる素のデータだけで、`None` をどこにも含まないことを
-    確かめてから包む。どちらも満たさなければ **その場で落とす** — fail-closed の
-    `None`（= 組めなかった）ではなく、組み立て側の間違いなので例外にする。
-
-    `CompleteIdentity.__post_init__` より `None` に厳しいのは意図的。あちらが
-    受けるのは走査が作った payload で、そこでは `None` が「その field は無い」と
-    いう確定値として使われる（`("read_order", None)`）。こちらが受けるのは
-    呼び出し側が持ち込む素のデータで、そこに `None` の取り決めは無い。
-
-    型を絞るのは、鍵が直列化されるから。任意の object を通すと「直列化したら
-    何になるか」が呼び出し側任せになり、`repr` 経由で `id()` のような
-    process 固有の値が鍵へ入り得る。
-    """
-
-    _require_definite(tag, value)
-    return CompleteIdentity(("definite", tag, value))
-
-
-def _require_definite(tag: str, value: Any) -> None:
-    if value is None:
-        raise ValueError(
-            f"definite_atoms({tag!r}) was given None (or a value containing it); "
-            "a missing part must be expressed by an identity constructor returning None"
-        )
-    if isinstance(value, _DEFINITE_SCALARS):
-        return
-    if isinstance(value, (tuple, list)):
-        for item in value:
-            _require_definite(tag, item)
-        return
-    raise TypeError(
-        f"definite_atoms({tag!r}) was given {type(value).__name__}; "
-        "pass serialisable plain data (str/int/bool/float, or tuples/lists of them)"
-    )
-
-
-def identity_key_of(identity: Optional[CompleteIdentity]) -> Optional[StructuralKey]:
-    """保存境界で使う plain data（`None` はそのまま `None`）。
-
-    wrapper object を保存形式へ混ぜないための一方向の変換。読み手は plain data
-    を契約として読むので、ここを通っていない値が proof / source key に入ると
-    読み手が黙って捨てる（実際そうなっていた）。
-    """
-
-    return None if identity is None else identity.key
-
-
-def compose_complete_identity(
-    tag: str,
-    *parts: Optional[CompleteIdentity],
-) -> Optional[StructuralKey]:
-    """部品がすべて揃っているときだけ鍵を組む（欠けたら `None`）。
-
-    受け取るのは `CompleteIdentity` か `None` **だけ**。生の tuple を渡せない
-    ので、部品のどこかに「組めなかった」が埋まったまま鍵になる書き方ができない
-    （以前の generic な版は top-level の `None` しか見ていなかったので、
-    `("nested", None)` のような部品をそのまま通した）。
-
-    素のデータを部品にしたいときは `definite_atoms()` で包む。返る値は直列化
-    できる plain data。
-    """
-
-    for position, part in enumerate(parts):
-        if part is None:
-            return None
-        if not isinstance(part, CompleteIdentity):
-            raise TypeError(
-                f"compose_complete_identity({tag!r}) part {position} is "
-                f"{type(part).__name__}; pass a CompleteIdentity (or None), "
-                "wrapping plain data with definite_atoms()"
-            )
-    return (tag, "v2") + tuple(part.key for part in parts)
-
-
-def condition_identities(
-    conditions,
-    *,
-    max_semantic_nodes: Optional[int] = None,
-) -> Optional[CompleteIdentity]:
+def condition_identities(conditions) -> Optional[Tuple[StructuralKey, ...]]:
     """条件列の完全 identity。1 つでも組めなければ `None`（fail-closed）。"""
 
     identities = []
     for condition in tuple(conditions or ()):
-        identity = condition_identity(condition, max_semantic_nodes=max_semantic_nodes)
+        identity = condition_identity(condition)
         if identity is None:
             return None
-        identities.append(identity.key)
-    return CompleteIdentity(("condition_identities", "v2", tuple(identities)))
+        identities.append(identity)
+    return tuple(identities)
 
 
 class StructuralIdentity:
@@ -1373,14 +1181,3 @@ class StructuralIdentity:
     key = staticmethod(expression_key)
     #: 完全比較と同じ同値関係を持つ安定 digest（32 byte、prefilter に使える）
     identity_digest = staticmethod(structural_identity_digest)
-    #: 式の **完全な** identity（平坦な値。digest ではない）
-    identity_form = staticmethod(structural_identity_form)
-    #: 条件の **完全な** identity（組めなければ None）。証明 key や「同じ条件か」
-    #: を言う必要がある consumer はこれを使う（`key` は予算付きの legacy key
-    #: なので、深い条件では別物を同一視し得る）
-    condition_identity = staticmethod(condition_identity)
-    #: 条件列版（1 つでも組めなければ None）
-    condition_identities = staticmethod(condition_identities)
-    #: 式の完全 identity。`None` は「組めなかった」だけを意味し、「式が無い」は
-    #: 専用の値で表す（予算付き key を鍵に埋めるのと同じ誤りを防ぐ）
-    expression_identity = staticmethod(expression_identity)

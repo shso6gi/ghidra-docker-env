@@ -119,12 +119,20 @@ def test_high_function_has_cfg_cycle_matches_facade_result():
         assert analyzer._high_function_has_cfg_cycle(hf) == analyzer._divergence_proofs.high_function_has_cfg_cycle(hf)
 
 
-def test_conditional_progress_guard_key_round_trips_through_the_proof():
-    """guard key が **保存 → 読み戻し → 照合 → validate** を通ること。
+def test_conditional_progress_guard_key_survives_the_proof_it_is_stored_in():
+    """guard key が structural proof に入れて読み戻しても使えること。
 
-    内部の typed な `CompleteIdentity` をそのまま structural proof へ入れると、
-    読み手（plain data を契約として読む）が黙って捨て、conditional-progress
-    proof が保存後の再検証で必ず落ちる。境界では plain data にする。
+    **この proof の寿命は process 内**（`branch_guarded_structural_proof_from_return`
+    で組み、同じ解析の中で `validate_…` と `…_from_structural_proof` が読む）。
+    直列化されるのは `summary_candidate_source_key` の中の evidence としてだけで、
+    JSON から読み戻して照合することは無い（tuple は list になるので、そもそも
+    そういう契約ではない）。だからここで確かめるのは
+
+    * 保存形式が plain data であること（= 直列化できる）
+    * 同じ process 内で読み戻して、元の条件を引けること
+
+    の 2 つ。以前は鍵が typed な wrapper だったので、読み手（tuple しか受けない）
+    が全部捨てて、conditional-progress proof が必ず落ちていた。
     """
     import json
     from unittest.mock import patch
@@ -152,7 +160,6 @@ def test_conditional_progress_guard_key_round_trips_through_the_proof():
             expr, placeholder, [condition]
         )
 
-    # 1. 保存形式は plain data
     assert guard_key is not None and isinstance(guard_key, tuple)
 
     proof = (
@@ -160,18 +167,16 @@ def test_conditional_progress_guard_key_round_trips_through_the_proof():
         ("conditional_progress_guard_keys", tuple(sorted({3: guard_key}.items(), key=repr))),
     )
 
-    # 2. 直列化できる（wrapper object が混ざっていない）
+    # evidence として直列化できる（wrapper object が混ざっていない）
     marker = "<not-plain-data>"
     assert marker not in json.dumps(proof, default=lambda o: marker)
 
-    # 3. 読み戻せる
+    # 同じ process 内で読み戻して照合できる
     restored = divergence.conditional_progress_guard_keys_from_structural_proof(proof)
     assert restored == {3: guard_key}
-
-    # 4. 読み戻した鍵で元の条件を引ける
     assert divergence.condition_for_identity_key(restored[3], [condition]) is condition
 
-    # 5. validate が通る（矛盾する invariant を与えたとき True になる）
+    # その鍵で validate が通る
     with patch.object(
         divergence, "condition_for_identity_key", return_value=condition
     ), patch(
