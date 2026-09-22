@@ -1500,6 +1500,34 @@ def test_an_identity_key_is_not_built_from_a_budgeted_key():
     assert offenders == [], offenders
 
 
+def test_the_render_budget_is_not_multiplied_into_a_second_one():
+    """出力予算から別の上限を導かないこと。
+
+    以前は「材料の許容量 = 出力予算 × 8」があった。材料と出力の比には普遍的な
+    有限上限が無いので、その倍率は原理的に決められない。倍率を書ける形が残ると、
+    次に困ったときまた倍率を足す（そして形状に合わせて調整する）ことになる。
+    """
+
+    modules = ("core/render_plan.py", "core/render_output.py")
+    offenders = []
+    for module_path in modules:
+        for node in ast.walk(_parse(PACKAGE_ROOT / module_path)):
+            if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Mult):
+                continue
+            names = {
+                inner.id
+                for inner in ast.walk(node)
+                if isinstance(inner, ast.Name)
+            } | {
+                inner.attr
+                for inner in ast.walk(node)
+                if isinstance(inner, ast.Attribute)
+            }
+            if any("limit" in name.lower() or "budget" in name.lower() for name in names):
+                offenders.append(f"{module_path}:{node.lineno}")
+    assert offenders == [], offenders
+
+
 def test_the_identity_size_policy_has_one_owner_outside_core():
     """identity の大きさの policy を `core/structural` に置かないこと。
 

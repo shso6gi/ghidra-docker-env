@@ -1783,6 +1783,16 @@ def test_the_composition_only_accepts_parts_that_were_checked():
     # 素のデータは包むときに中身まで確かめる
     with pytest.raises(ValueError):
         definite_atoms("site", ("nested", None))
+    with pytest.raises(ValueError):
+        definite_atoms("site", None)
+    # 直列化できない型も通さない（`repr` 経由で `id()` が鍵へ入るのを防ぐ）
+    with pytest.raises(TypeError):
+        definite_atoms("site", object())
+    with pytest.raises(TypeError):
+        definite_atoms("site", {"a": 1})
+    # 素のデータなら通る
+    assert definite_atoms("site", "same-site") is not None
+    assert definite_atoms("site", ("a", 1, True)) is not None
 
 
 def test_identity_is_refused_beyond_its_distinct_node_limit():

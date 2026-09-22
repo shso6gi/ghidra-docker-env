@@ -1221,31 +1221,44 @@ def expression_identity(
     return CompleteIdentity(("expression_identity", "v2", form))
 
 
+#: 鍵に載せてよい素のデータの型。鍵は直列化されるので、ここに無い型は
+#: 「直列化したら何になるか」が呼び出し側任せになる（`repr` に `id()` が
+#: 混ざる、など）。
+_DEFINITE_SCALARS = (str, int, bool, float)
+
+
 def definite_atoms(tag: str, value: Any) -> CompleteIdentity:
     """identity ではない **確定した素のデータ**（site 名など）を部品にする。
 
-    `None` を含まないことを確かめてから包む。含んでいたら **その場で落とす**
-    （fail-closed の `None` ではなく、組み立て側の間違いなので例外）。
+    受けるのは直列化できる素のデータだけで、`None` をどこにも含まないことを
+    確かめてから包む。どちらも満たさなければ **その場で落とす** — fail-closed の
+    `None`（= 組めなかった）ではなく、組み立て側の間違いなので例外にする。
+
+    型を絞るのは、鍵が直列化されるから。任意の object を通すと「直列化したら
+    何になるか」が呼び出し側任せになり、`repr` 経由で `id()` のような
+    process 固有の値が鍵へ入り得る。
     """
 
-    if _contains_none(value):
-        raise ValueError(
-            f"definite_atoms({tag!r}) was given a value containing None; "
-            "a missing part must be expressed by an identity constructor returning None"
-        )
+    _require_definite(tag, value)
     return CompleteIdentity(("definite", tag, value))
 
 
-def _contains_none(value: Any) -> bool:
+def _require_definite(tag: str, value: Any) -> None:
     if value is None:
-        return True
-    if isinstance(value, (tuple, list, set, frozenset)):
-        return any(_contains_none(item) for item in value)
-    if isinstance(value, dict):
-        return any(_contains_none(item) for item in value.keys()) or any(
-            _contains_none(item) for item in value.values()
+        raise ValueError(
+            f"definite_atoms({tag!r}) was given None (or a value containing it); "
+            "a missing part must be expressed by an identity constructor returning None"
         )
-    return False
+    if isinstance(value, _DEFINITE_SCALARS):
+        return
+    if isinstance(value, (tuple, list)):
+        for item in value:
+            _require_definite(tag, item)
+        return
+    raise TypeError(
+        f"definite_atoms({tag!r}) was given {type(value).__name__}; "
+        "pass serialisable plain data (str/int/bool/float, or tuples/lists of them)"
+    )
 
 
 def compose_complete_identity(
