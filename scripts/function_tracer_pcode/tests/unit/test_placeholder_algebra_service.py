@@ -30,7 +30,7 @@ def test_collaborator_holds_only_its_dependencies():
 def test_every_delegator_forwards_to_the_collaborator():
     analyzer = _analyzer()
     names = [n for n, _ in inspect.getmembers(PlaceholderAlgebraService, predicate=inspect.isfunction) if n != "__init__"]
-    assert len(names) == 18
+    assert len(names) == 22
     static = {"strip_transparent_unary"}
     for name in names:
         sentinel = object()
@@ -117,3 +117,76 @@ def test_placeholder_minus_one_matches_facade_result():
     assert analyzer._expression_is_placeholder_minus_one(expr, p) is True
     assert analyzer._placeholder_algebra.expression_is_placeholder_minus_one(expr, p) is True
     assert analyzer._expression_is_placeholder_minus_one(p, p) is False
+
+
+def _unnamable_condition():
+    """厳密な identity を組めない条件（distinct node が identity の上限を超える）。
+
+    Ghidra 由来の opaque な値を含む条件でも同じことが起きる（`identity_complete`
+    が偽になる）が、上限超えの方が test として決定的に作れる。
+    """
+    from scripts.function_tracer_pcode.core.structural import (
+        IDENTITY_MAX_SEMANTIC_NODES,
+        condition_identity,
+    )
+
+    node = Expression.parameter("a", 0, size=4)
+    for index in range(IDENTITY_MAX_SEMANTIC_NODES + 16):
+        node = Expression.binary_op("INT_ADD", node, Expression.constant(index, size=4))
+    condition = Condition(Expression.binary_op("INT_LESS", node, Expression.constant(1, size=4)))
+    assert condition_identity(condition) is None
+    return condition
+
+
+def test_recognition_does_not_depend_on_whether_the_condition_can_be_named():
+    """照合（recognition）が identity の可否に引きずられないこと。
+
+    「この式が置換子 ± 単位条件の形か」は SMT 裏付けの照合で決まり、条件に
+    どれだけ細かい名前を付けられるかとは無関係。一方、証明鍵に載せるには厳密な
+    名前が要る（無ければ出さない）。
+
+    1 つの関数で両方を返していたときは、名前を付けられない条件で **照合そのもの
+    が失敗したことになり**、解析が別の式を組み立てていた（固定 subset の 1 pair
+    で `node_count` が 44→36 に動いたのがこれ）。照合と命名を分けたので、照合は
+    名前の可否に依らない。
+    """
+    analyzer = _analyzer()
+    service = analyzer._placeholder_algebra
+    condition = _unnamable_condition()
+    flag = Expression.parameter("flag", 1, size=4)
+
+    with patch.object(service, "expression_is_one_under_conditions", return_value=True):
+        # 照合は成功する（名前を付けられなくても）
+        assert service.unit_condition_for_expression(flag, [condition]) is condition
+        # 証明鍵は出ない（fail-closed）
+        assert service.unit_condition_key_for_expression(flag, [condition]) is None
+
+    placeholder = Expression.parameter("p", 0, size=4)
+    expr = Expression.binary_op("INT_ADD", placeholder, flag)
+    with patch.object(service, "expression_is_one_under_conditions", return_value=True):
+        with patch.object(service.condition_logic, "expressions_same_key",
+                          side_effect=lambda left, right: left is placeholder):
+            # 認識の gate は True のまま（以前はここが False に化けていた）
+            assert service.expression_is_placeholder_plus_unit_condition(
+                expr, placeholder, [condition]
+            )
+            assert service.placeholder_plus_unit_condition(expr, placeholder, [condition]) is condition
+            # 証明鍵だけが出ない
+            assert service.placeholder_plus_unit_condition_guard_key(
+                expr, placeholder, [condition]
+            ) is None
+
+
+def test_a_namable_condition_still_produces_a_guard_key():
+    """fail-closed が「常に鍵を出さない」へ退化していないこと。"""
+    analyzer = _analyzer()
+    service = analyzer._placeholder_algebra
+    condition = Condition(
+        Expression.binary_op(
+            "INT_LESS", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4)
+        )
+    )
+    flag = Expression.parameter("flag", 1, size=4)
+    with patch.object(service, "expression_is_one_under_conditions", return_value=True):
+        assert service.unit_condition_for_expression(flag, [condition]) is condition
+        assert service.unit_condition_key_for_expression(flag, [condition]) is not None

@@ -1100,6 +1100,8 @@ class ReturnAnalyzer:
         return self._stack_protector.is_zero_constant(expr)
     def _merge_parameter_descriptors(self, existing, candidate):
         return self._parameters.merge_parameter_descriptors(existing, candidate)
+    def _negated_unit_condition_for_expression(self, expr, conditions):
+        return self._placeholder_algebra.negated_unit_condition_for_expression(expr, conditions)
     def _negated_unit_condition_key_for_expression(self, expr, conditions):
         return self._placeholder_algebra.negated_unit_condition_key_for_expression(expr, conditions)
     def _parameter_descriptor_from_expression(self, expr):
@@ -1117,8 +1119,12 @@ class ReturnAnalyzer:
     _phase1_body_contains_address = staticmethod(_svc_analyze_function._impl__phase1_body_contains_address)
     def _phi_circular_origin_stable_keys(self, expr):
         return self._phi_origins.phi_circular_origin_stable_keys(expr)
+    def _placeholder_minus_one_unit_condition(self, expr, placeholder, conditions):
+        return self._placeholder_algebra.placeholder_minus_one_unit_condition(expr, placeholder, conditions)
     def _placeholder_minus_one_unit_condition_guard_key(self, expr, placeholder, conditions):
         return self._placeholder_algebra.placeholder_minus_one_unit_condition_guard_key(expr, placeholder, conditions)
+    def _placeholder_plus_unit_condition(self, expr, placeholder, conditions):
+        return self._placeholder_algebra.placeholder_plus_unit_condition(expr, placeholder, conditions)
     def _placeholder_plus_unit_condition_guard_key(self, expr, placeholder, conditions):
         return self._placeholder_algebra.placeholder_plus_unit_condition_guard_key(expr, placeholder, conditions)
     def _prove_scc_must_diverge_under_guard(self, scc, *, all_blocks, divergence_guard, param, tracer):
@@ -1161,6 +1167,8 @@ class ReturnAnalyzer:
     @staticmethod
     def _tuple_field_from_structural_proof(proof, field_name):
         return DivergenceProofService.tuple_field_from_structural_proof(proof, field_name)
+    def _unit_condition_for_expression(self, expr, conditions):
+        return self._placeholder_algebra.unit_condition_for_expression(expr, conditions)
     def _unit_condition_key_for_expression(self, expr, conditions):
         return self._placeholder_algebra.unit_condition_key_for_expression(expr, conditions)
     def _varnode_guard_dependency_key(self, varnode):
