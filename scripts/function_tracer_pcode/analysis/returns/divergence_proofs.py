@@ -22,7 +22,10 @@ from scripts.function_tracer_pcode.analysis.returns._api import (
 )
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
-from scripts.function_tracer_pcode.core.structural import condition_identity
+from scripts.function_tracer_pcode.core.structural import CompleteIdentity
+from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
+    proof_condition_identity,
+)
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import BlockGraphService
 from scripts.function_tracer_pcode.analysis.debug import summarize_condition
 
@@ -39,12 +42,12 @@ def condition_identity_key(condition: Condition) -> Optional[Tuple[Any, ...]]:
     （`control_recovery` の `target_guard_keys`）に使われるので、そこで別物が
     一致すると、成り立たない証明が通り得る。
 
-    完全な構造 identity（`core/structural.condition_identity`）を使い、組めない
+    完全な構造 identity（`proof_identity.proof_condition_identity`）を使い、組めない
     条件には鍵を与えない。呼び出し側は `None` を「言えない」として扱うこと
     （他の `None` と一致させない）。
     """
 
-    return condition_identity(condition)
+    return proof_condition_identity(condition)
 
 
 class DivergenceProofService:
@@ -620,7 +623,10 @@ class DivergenceProofService:
         key: Tuple[Any, ...],
         conditions: Sequence[Condition],
     ) -> Optional[Condition]:
-        if not isinstance(key, tuple):
+        # 鍵は `CompleteIdentity`（構築時に「完全に識別できた」を確かめた型）。
+        # 生の tuple を受け付けると、確かめていない値との一致で条件を選べて
+        # しまう。組めなかった鍵（`None`）は誰とも一致しない。
+        if not isinstance(key, CompleteIdentity):
             return None
         for condition in conditions or ():
             if condition is not None and self.condition_identity_key(condition) == key:

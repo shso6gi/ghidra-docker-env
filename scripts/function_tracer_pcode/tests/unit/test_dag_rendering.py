@@ -1640,14 +1640,16 @@ def test_summary_identity_is_refused_when_a_part_cannot_be_built():
     from scripts.function_tracer_pcode.analysis.returns.return_extraction import (
         _impl__return_info_summary_identity_key,
     )
-    from scripts.function_tracer_pcode.core.structural import IDENTITY_MAX_SEMANTIC_NODES
+    from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
+        PROOF_KEY_MAX_SEMANTIC_NODES as _LIMIT,
+    )
 
     class _Site:
         def _return_site_key(self, ret):
             return "same-site"
 
     node = _param("a", 0)
-    for index in range(IDENTITY_MAX_SEMANTIC_NODES + 16):
+    for index in range(_LIMIT + 16):
         node = _binary("INT_ADD", node, _const(index))
 
     site = _Site()
@@ -1668,20 +1670,20 @@ def test_summary_identity_is_refused_when_a_part_cannot_be_built():
 def test_a_missing_return_value_is_not_the_same_as_an_unbuildable_one():
     """「値が無い」と「identity を組めなかった」を同じ値で表さないこと。"""
 
-    from scripts.function_tracer_pcode.core.structural import (
-        IDENTITY_MAX_SEMANTIC_NODES,
-        expression_identity,
+    from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
+        PROOF_KEY_MAX_SEMANTIC_NODES,
+        proof_expression_identity,
     )
 
-    absent = expression_identity(None)
+    absent = proof_expression_identity(None)
     assert absent is not None
 
     node = _param("a", 0)
-    for index in range(IDENTITY_MAX_SEMANTIC_NODES + 16):
+    for index in range(PROOF_KEY_MAX_SEMANTIC_NODES + 16):
         node = _binary("INT_ADD", node, _const(index))
-    assert expression_identity(node) is None
+    assert proof_expression_identity(node) is None
 
-    small = expression_identity(_param("a", 0))
+    small = proof_expression_identity(_param("a", 0))
     assert small is not None and small != absent
 
 
@@ -1751,16 +1753,36 @@ def test_the_complete_identity_only_ever_refuses_more_than_the_budgeted_key():
     )
 
 
-def test_identity_tuple_refuses_a_missing_part():
-    """組み立ての combinator が欠けた部品を埋めないこと。"""
+def test_the_composition_only_accepts_parts_that_were_checked():
+    """鍵の組み立てが「確かめた部品」しか受けないこと。
 
-    from scripts.function_tracer_pcode.core.structural import identity_tuple
+    以前の generic な版は top-level の `None` だけを見ていたので、
+    `("nested", None)` のような生の tuple をそのまま通した。今は
+    `CompleteIdentity` か `None` しか受けないので、確かめていない部品を
+    鍵にする書き方ができない（consumer の注意力に依存しない）。
+    """
 
-    assert identity_tuple("tag", ("a", 1), ("b", 2)) is not None
-    assert identity_tuple("tag", ("a", 1), None) is None
-    assert identity_tuple("tag", None) is None
+    from scripts.function_tracer_pcode.core.structural import (
+        compose_complete_identity,
+        definite_atoms,
+    )
+
+    left = definite_atoms("a", 1)
+    right = definite_atoms("b", 2)
+    assert compose_complete_identity("tag", left, right) is not None
+    # 欠けた部品では鍵を作らない
+    assert compose_complete_identity("tag", left, None) is None
+    assert compose_complete_identity("tag", None) is None
     # 別の部品からは別の鍵
-    assert identity_tuple("tag", ("a", 1)) != identity_tuple("tag", ("a", 2))
+    assert compose_complete_identity("tag", left) != compose_complete_identity("tag", right)
+
+    # 確かめていない生の部品は通らない（埋め込まれた None もここで止まる）
+    for raw in (("a", 1), ("nested", None), "plain", 7):
+        with pytest.raises(TypeError):
+            compose_complete_identity("tag", raw)
+    # 素のデータは包むときに中身まで確かめる
+    with pytest.raises(ValueError):
+        definite_atoms("site", ("nested", None))
 
 
 def test_identity_is_refused_beyond_its_distinct_node_limit():
@@ -1771,28 +1793,36 @@ def test_identity_is_refused_beyond_its_distinct_node_limit():
     ながら record を数えると、名前と実測が食い違う）。
     """
 
-    from scripts.function_tracer_pcode.core.structural import (
-        IDENTITY_MAX_SEMANTIC_NODES,
-        structural_identity_form,
+    from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
+        PROOF_KEY_MAX_SEMANTIC_NODES,
+        proof_condition_identities,
+        proof_condition_identity,
     )
+    from scripts.function_tracer_pcode.core.structural import structural_identity_form
     from scripts.function_tracer_pcode.core.semantic_snapshot import (
         traverse_semantic_graph,
     )
 
     a = _param("a", 0)
     node = a
-    for index in range(IDENTITY_MAX_SEMANTIC_NODES + 16):
+    for index in range(PROOF_KEY_MAX_SEMANTIC_NODES + 16):
         node = _binary("INT_ADD", node, _const(index))
     huge = Condition(_binary("INT_LESS", node, _param("b", 1), size=1))
-    assert len(traverse_semantic_graph(huge.expression).post_order) > IDENTITY_MAX_SEMANTIC_NODES
-    assert condition_identity(huge) is None
-    assert condition_identities([huge]) is None
+    nodes = len(traverse_semantic_graph(huge.expression).post_order)
+    assert nodes > PROOF_KEY_MAX_SEMANTIC_NODES
 
-    # ちょうど上限以下なら組める（上限が「組めない理由」を名乗れていること）
+    # 上限は identity の意味ではなく policy: 既定（上限なし）では組める
+    assert condition_identity(huge) is not None
+    assert structural_identity_form(huge.expression) is not None
+    # 証明鍵に載せる側は上限を掛けるので、組まない（fail-closed）
+    assert proof_condition_identity(huge) is None
+    assert proof_condition_identities([huge]) is None
+
+    # ちょうど上限以下なら証明鍵側でも組める
     small = a
     for index in range(8):
         small = _binary("INT_ADD", small, _const(index))
-    assert structural_identity_form(small) is not None
+    assert proof_condition_identity(Condition(_binary("INT_LESS", small, a, size=1))) is not None
 
 
 def test_one_limit_covers_both_the_work_and_the_payload():
@@ -1806,10 +1836,10 @@ def test_one_limit_covers_both_the_work_and_the_payload():
     深さの分しか増えない）が、両者が別の量であることを示す。
     """
 
-    from scripts.function_tracer_pcode.core.structural import (
-        IDENTITY_MAX_SEMANTIC_NODES,
-        structural_identity_form,
+    from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
+        PROOF_KEY_MAX_SEMANTIC_NODES,
     )
+    from scripts.function_tracer_pcode.core.structural import structural_identity_form
     from scripts.function_tracer_pcode.core.semantic_snapshot import (
         traverse_semantic_graph,
     )
@@ -1830,10 +1860,12 @@ def test_one_limit_covers_both_the_work_and_the_payload():
         assert records < nodes
 
     # distinct node が上限を超えれば、record が少なくても identity は組まない
-    big = identical_shape_tree(13)
+    big = identical_shape_tree(14)
     nodes = len(traverse_semantic_graph(big).post_order)
-    assert nodes > IDENTITY_MAX_SEMANTIC_NODES
-    assert structural_identity_form(big) is None
+    assert nodes > PROOF_KEY_MAX_SEMANTIC_NODES
+    assert structural_identity_form(big, max_semantic_nodes=PROOF_KEY_MAX_SEMANTIC_NODES) is None
+    # 上限を渡さなければ組める（上限は policy で、identity の意味ではない）
+    assert structural_identity_form(big) is not None
 
 
 def test_identity_is_json_serialisable():
@@ -1843,7 +1875,8 @@ def test_identity_is_json_serialisable():
 
     a = _param("a", 0)
     identity = condition_identity(Condition(_binary("INT_LESS", a, _param("b", 1), size=1)))
-    json.dumps(_jsonable_nested_tuple(identity), sort_keys=True)
+    assert identity is not None
+    json.dumps(_jsonable_nested_tuple(identity.key), sort_keys=True)
 
 
 def test_identity_equality_implies_structural_equality():

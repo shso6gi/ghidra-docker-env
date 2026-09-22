@@ -645,7 +645,6 @@ def test_identity_kinds_are_not_merged_into_one_type():
         "condition_identity",
         "condition_identities",
         "expression_identity",
-        "identity_tuple",
     }, exposed
     for forbidden in ("solver_query", "rewrite", "authority_digest", "query_identity"):
         assert not hasattr(identity, forbidden), forbidden
@@ -1498,6 +1497,62 @@ def test_an_identity_key_is_not_built_from_a_budgeted_key():
                     offenders.append(
                         f"{relative}:{node.lineno} in {function.name} uses {node.func.id}"
                     )
+    assert offenders == [], offenders
+
+
+def test_the_identity_size_policy_has_one_owner_outside_core():
+    """identity の大きさの policy を `core/structural` に置かないこと。
+
+    identity は任意の有限 DAG に対して定義できるので、大きさの上限は意味では
+    なく resource policy。上限を持つのは「直列化して鍵に載せる」側（費用を
+    払う側）で、値は PR-22-D の `BudgetPolicy` が引き取る。
+
+    core 側に固定値の上限が戻ると、解析 policy を core が所有することになり、
+    identity が使える / 使えないで候補・証明の可否が core の定数で決まる。
+    """
+
+    from scripts.function_tracer_pcode.analysis.returns import proof_identity
+    from scripts.function_tracer_pcode.core import structural
+
+    # policy の値は consumer 側に 1 つだけ
+    assert isinstance(proof_identity.PROOF_KEY_MAX_SEMANTIC_NODES, int)
+    assert not [
+        name
+        for name in vars(structural)
+        if "MAX_SEMANTIC_NODES" in name or "IDENTITY_MAX" in name
+    ]
+
+    # core の既定は上限なし（意味としての identity）
+    import inspect
+
+    signature = inspect.signature(structural.structural_identity_form)
+    assert signature.parameters["max_semantic_nodes"].default is None
+
+
+def test_a_proof_key_identity_goes_through_the_policy_module():
+    """証明鍵に載せる identity は policy module 経由で作ること。
+
+    `core/structural` の constructor を直接呼ぶと上限が掛からず、直列化する鍵の
+    大きさが誰の持ち物でもなくなる。
+    """
+
+    consumers = (
+        "analysis/returns/return_extraction.py",
+        "analysis/returns/control_recovery.py",
+        "analysis/returns/divergence_proofs.py",
+    )
+    raw_constructors = {"condition_identity", "condition_identities", "expression_identity"}
+    offenders = []
+    for module_path in consumers:
+        tree = _parse(PACKAGE_ROOT / module_path)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or not node.module:
+                continue
+            if not node.module.endswith("core.structural"):
+                continue
+            for alias in node.names:
+                if alias.name in raw_constructors:
+                    offenders.append(f"{module_path}:{node.lineno} imports {alias.name}")
     assert offenders == [], offenders
 
 
