@@ -1528,33 +1528,122 @@ def test_the_render_budget_is_not_multiplied_into_a_second_one():
     assert offenders == [], offenders
 
 
-def test_the_identity_size_policy_has_one_owner_outside_core():
-    """identity の大きさの policy を `core/structural` に置かないこと。
+def test_the_output_budget_never_reaches_the_planning_layer():
+    """出力予算を計画（speculative な作業）へ渡さないこと。
 
-    identity は任意の有限 DAG に対して定義できるので、大きさの上限は意味では
-    なく resource policy。上限を持つのは「直列化して鍵に載せる」側（費用を
-    払う側）で、値は PR-22-D の `BudgetPolicy` が引き取る。
-
-    core 側に固定値の上限が戻ると、解析 policy を core が所有することになり、
-    identity が使える / 使えないで候補・証明の可否が core の定数で決まる。
+    計画中に作るものは最終出力に一度も現れないことがある。そこへ出力予算を
+    当てると、捨てられる子が予算より大きいだけで **収まる描画を拒める**。
+    出力予算の契約を持つのは書き出し口だけ。
     """
+
+    modules = ("core/render_smt/render.py", "core/render_python.py")
+    offenders = []
+    for module_path in modules:
+        for node in ast.walk(_parse(PACKAGE_ROOT / module_path)):
+            if not isinstance(node, ast.Call):
+                continue
+            name = None
+            if isinstance(node.func, ast.Name):
+                name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                name = node.func.attr
+            if name != "build_render_plan":
+                continue
+            for keyword in node.keywords:
+                if keyword.arg in {"limit_bytes", "fragment_limit_bytes"}:
+                    offenders.append(f"{module_path}:{node.lineno} passes {keyword.arg}")
+    assert offenders == [], offenders
+
+
+def test_a_persisted_proof_key_is_plain_data():
+    """保存境界を越えるものが plain data であること。
+
+    typed な wrapper を structural proof / source key に入れると、plain data を
+    契約として読む読み手が黙って捨てる。名前で境界が分かるようにしてある:
+    `*_key` は plain、`*_identity` は typed。
+    """
+
+    from scripts.function_tracer_pcode.analysis.returns import proof_identity
+    from scripts.function_tracer_pcode.core.structural import CompleteIdentity
+    from scripts.function_tracer_pcode.core.expression import Expression
+    from scripts.function_tracer_pcode.core.condition import Condition
+
+    condition = Condition(
+        Expression.binary_op(
+            "INT_LESS", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4)
+        )
+    )
+    # *_key は plain data
+    for builder in (proof_identity.proof_condition_key, proof_identity.proof_expression_key):
+        value = builder(condition if builder is proof_identity.proof_condition_key else None)
+        assert not isinstance(value, CompleteIdentity), builder.__name__
+    # *_identity は typed
+    assert isinstance(proof_identity.proof_condition_identity(condition), CompleteIdentity)
+
+
+def test_a_guard_key_that_reaches_a_proof_is_not_typed():
+    """proof へ入る鍵を作る関数が typed な wrapper を返さないこと。"""
+
+    from unittest.mock import Mock, patch
+
+    from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
+    from scripts.function_tracer_pcode.core.structural import CompleteIdentity
+    from scripts.function_tracer_pcode.core.expression import Expression
+    from scripts.function_tracer_pcode.core.condition import Condition
+
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    condition = Condition(
+        Expression.binary_op(
+            "INT_LESS", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4)
+        )
+    )
+    key = analyzer._condition_identity_key(condition)
+    assert key is not None and not isinstance(key, CompleteIdentity)
+
+    service = analyzer._placeholder_algebra
+    placeholder = Expression.parameter("p", 0, size=4)
+    flag = Expression.parameter("flag", 1, size=4)
+    expr = Expression.binary_op("INT_ADD", placeholder, flag)
+    with patch.object(service, "expression_is_one_under_conditions", return_value=True), patch.object(
+        service.condition_logic, "expressions_same_key", side_effect=lambda l, r: l is placeholder
+    ):
+        guard_key = service.placeholder_plus_unit_condition_guard_key(
+            expr, placeholder, [condition]
+        )
+    assert guard_key is not None and not isinstance(guard_key, CompleteIdentity)
+
+
+def test_pr_22_c_owns_no_identity_size_policy():
+    """identity の大きさの policy を PR-22-C が持たないこと。
+
+    identity は任意の有限 DAG に対して定義できるので、node 数の上限は意味では
+    なく resource policy。しかも identity の有無が候補・証明の可否を決めるので
+    correctness-visible で、**budget policy の owner は PR-22-D**。暫定の固定値を
+    置いて「後で引き取る」にすると、その間ずっと PR-22-C が policy を持つ。
+
+    仕組み（引数）は在ってよい — PR-22-D は値を渡すだけで済む。
+    """
+
+    import inspect
 
     from scripts.function_tracer_pcode.analysis.returns import proof_identity
     from scripts.function_tracer_pcode.core import structural
 
-    # policy の値は consumer 側に 1 つだけ
-    assert isinstance(proof_identity.PROOF_KEY_MAX_SEMANTIC_NODES, int)
-    assert not [
-        name
-        for name in vars(structural)
-        if "MAX_SEMANTIC_NODES" in name or "IDENTITY_MAX" in name
-    ]
+    # どちらの層にも固定値を置かない
+    for module in (structural, proof_identity):
+        assert not [
+            name
+            for name in vars(module)
+            if name.isupper() and ("MAX_SEMANTIC" in name or "IDENTITY_MAX" in name)
+        ], module.__name__
 
-    # core の既定は上限なし（意味としての identity）
-    import inspect
-
-    signature = inspect.signature(structural.structural_identity_form)
-    assert signature.parameters["max_semantic_nodes"].default is None
+    # 仕組みは在り、既定は上限なし
+    assert (
+        inspect.signature(structural.structural_identity_form)
+        .parameters["max_semantic_nodes"]
+        .default
+        is None
+    )
 
 
 def test_a_proof_key_identity_goes_through_the_policy_module():

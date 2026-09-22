@@ -12,7 +12,7 @@ from scripts.function_tracer_pcode.core.analysis import (
 )
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
-    proof_condition_identities,
+    proof_condition_keys,
 )
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSimplifier,
@@ -1119,7 +1119,7 @@ class BranchGuardedWhileProofService:
                         self.divergence_proofs.condition_identity_key(condition)
                         for condition in target_conditions or ()
                     ]
-                    target_identities = proof_condition_identities(target_conditions or ())
+                    target_identities = proof_condition_keys(target_conditions or ())
                     if target_identities is None or any(
                         key is None for key in target_guard_key_list
                     ):
@@ -1145,7 +1145,7 @@ class BranchGuardedWhileProofService:
                         # legacy key は深い条件で別物を同一視し得る。identity を
                         # 組めない条件が 1 つでもあれば、この証明は出さない
                         # （上の `target_identities is None` で落としてある）。
-                        ("target", target_identities.key),
+                        ("target", target_identities),
                         ("target_guard_keys", tuple(sorted(target_guard_key_list, key=repr))),
                     )
         self.debug_reporter.debug_print(

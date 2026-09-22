@@ -120,20 +120,22 @@ def test_placeholder_minus_one_matches_facade_result():
 
 
 def _unnamable_condition():
-    """厳密な identity を組めない条件（distinct node が identity の上限を超える）。
+    """厳密な identity を組めない条件。
 
-    Ghidra 由来の opaque な値を含む条件でも同じことが起きる（`identity_complete`
-    が偽になる）が、上限超えの方が test として決定的に作れる。
+    Ghidra 由来の object が値に入っていると `identity_complete` が偽になる。
+    深さではなく **値の性質**なので、通常の入力で起きる。
     """
     from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
-        PROOF_KEY_MAX_SEMANTIC_NODES,
         proof_condition_identity,
     )
+    from scripts.function_tracer_pcode.core.expression import ExpressionType
 
-    node = Expression.parameter("a", 0, size=4)
-    for index in range(PROOF_KEY_MAX_SEMANTIC_NODES + 16):
-        node = Expression.binary_op("INT_ADD", node, Expression.constant(index, size=4))
-    condition = Condition(Expression.binary_op("INT_LESS", node, Expression.constant(1, size=4)))
+    class _GhidraObject:
+        def __repr__(self):
+            return "<ghidra object>"
+
+    opaque = Expression(ExpressionType.CONSTANT, value=_GhidraObject(), size=4)
+    condition = Condition(Expression.binary_op("INT_LESS", opaque, Expression.constant(1, size=4)))
     assert proof_condition_identity(condition) is None
     return condition
 

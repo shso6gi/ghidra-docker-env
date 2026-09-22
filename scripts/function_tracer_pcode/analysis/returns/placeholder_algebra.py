@@ -218,7 +218,7 @@ class PlaceholderAlgebraService:
         placeholder: Expression,
         conditions: Sequence[Condition],
     ) -> Optional[Tuple[Any, ...]]:
-        """証明鍵に載せる形。名前を付けられないなら `None`（fail-closed）。"""
+        """証明鍵に載せる **保存形式**（plain data）。付けられないなら `None`。"""
 
         return condition_identity_key(
             self.placeholder_minus_one_unit_condition(expr, placeholder, conditions)
@@ -263,7 +263,7 @@ class PlaceholderAlgebraService:
         placeholder: Expression,
         conditions: Sequence[Condition],
     ) -> Optional[Tuple[Any, ...]]:
-        """証明鍵に載せる形。名前を付けられないなら `None`（fail-closed）。"""
+        """証明鍵に載せる **保存形式**（plain data）。付けられないなら `None`。"""
 
         return condition_identity_key(
             self.placeholder_plus_unit_condition(expr, placeholder, conditions)

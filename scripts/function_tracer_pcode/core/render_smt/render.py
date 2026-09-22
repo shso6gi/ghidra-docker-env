@@ -804,7 +804,7 @@ def render_smt_term(
                 classify=classify_smt_fragment,
                 policy=policy,
                 counters=counters,
-                limit_bytes=limit_bytes,
+                # 出力予算は書き出し口が持つ（上と同じ理由）。
                 site="core.render_smt",
             )
         except RenderGraphCycleError:

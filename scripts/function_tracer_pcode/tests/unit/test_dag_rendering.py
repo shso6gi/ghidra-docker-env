@@ -171,11 +171,14 @@ def _smt_body(node, node_context, resolve):
     return _render_smt_node(node, node_context, _SmtChildRenderer(resolve, node_context, None))
 
 
-def _plan_for(root, *, policy=SMT_SHARING_POLICY, counters=None, limit_bytes=None):
+def _plan_for(root, *, policy=SMT_SHARING_POLICY, counters=None, fragment_limit_bytes=None):
     """`render_smt_term` と同じ条件で計画だけを組む。
 
     属性の memo scope を張るのを忘れると、node 属性が呼び出しごとに計算し直され、
     幅の広い node では実際の描画と桁違いの費用になる（test だけが遅くなる）。
+
+    `fragment_limit_bytes` は **組み立ての上限で、出力予算ではない**。production
+    は渡さない（PR-22-D の担当）ので、渡すのは仕組みを直接確かめる test だけ。
     """
 
     with render_attribute_scope():
@@ -186,7 +189,7 @@ def _plan_for(root, *, policy=SMT_SHARING_POLICY, counters=None, limit_bytes=Non
             classify=classify_smt_fragment,
             policy=policy,
             counters=counters if counters is not None else RenderCounters(),
-            limit_bytes=limit_bytes,
+            fragment_limit_bytes=fragment_limit_bytes,
             site="core.render_smt",
         )
 
@@ -484,26 +487,23 @@ def test_c7_the_abort_says_which_renderer_and_which_stage():
     a = _param("a", 0)
     deep = _doubling_dag(40, a)
 
-    with pytest.raises(RenderOutputLimitExceeded) as smt_material:
-        _plan_for(_wide_phi(4000), limit_bytes=200)
+    # 出力予算で止まるのは **書き出し口だけ**。計画は speculative な作業なので
+    # 出力予算では裁かない。
     with pytest.raises(RenderOutputLimitExceeded) as smt_emit:
         render_smt_term(deep, build_smt_render_context(), None, shared=False, limit_bytes=20_000)
-    with pytest.raises(RenderOutputLimitExceeded) as human_material:
-        render_human_text(_wide_phi(4000), HumanRenderContext(simplify=False), limit_bytes=200)
     with pytest.raises(RenderOutputLimitExceeded) as human_emit:
         render_human_text(deep, HumanRenderContext(), shared=False, limit_bytes=20_000)
-
-    assert smt_material.value.site == "core.render_smt.fragment"
     assert smt_emit.value.site == "core.render_smt.emit"
-    assert human_material.value.site == "core.render_python.fragment"
     assert human_emit.value.site == "core.render_python.emit"
-
-    # 予算は 1 つなので、どの site から来ても `limit_bytes` は同じ意味（渡した
-    # 出力予算そのもの）。倍率で膨らんだ別の上限を名乗ることはない。
-    assert smt_material.value.limit_bytes == 200
-    assert human_material.value.limit_bytes == 200
     assert smt_emit.value.limit_bytes == 20_000
     assert human_emit.value.limit_bytes == 20_000
+
+    # 組み立ての上限（PR-22-D の担当。production は渡さない）を直接渡したときは
+    # 組み立て段で名乗る。
+    with pytest.raises(RenderOutputLimitExceeded) as fragment_stage:
+        _plan_for(_wide_phi(4000), fragment_limit_bytes=200)
+    assert fragment_stage.value.site == "core.render_smt.fragment"
+    assert fragment_stage.value.limit_bytes == 200
 
 
 # ---------------------------------------------------------------------------
@@ -653,12 +653,99 @@ def test_the_builder_counts_terms_the_body_made_itself():
             classify=lambda fragment, head, exact: ("properties", fragment),
             policy=SharingPolicy(min_shared_bytes=0, min_shared_tree_nodes=1),
             counters=RenderCounters(),
-            limit_bytes=100,
+            fragment_limit_bytes=100,
             site="test",
         )
-    # 自作の項は 9 byte。予算に達した直後で止まっていること（作り切っていない）
+    # 自作の項は 9 byte。上限に達した直後で止まっていること（作り切っていない）
     assert excinfo.value.site == "test.fragment"
     assert excinfo.value.requested_bytes <= 100 + 9
+
+
+def test_a_discarded_oversized_child_does_not_refuse_a_render_that_fits():
+    """**捨てられる子が出力予算より大きくても、収まる描画は成功すること。**
+
+    組み立て中に作るものは speculative で、最終出力に一度も現れないことがある。
+    そこへ出力予算を当てると
+
+    ```text
+    捨てられる子の fragment > 出力予算   かつ   最終出力 <= 出力予算
+    ```
+
+    という形で **正しい描画を `RenderOutputLimitExceeded` にできてしまう**。
+    出力予算が見るのは書き出した byte だけ。
+
+    root は巨大な子を要求するが、最終 fragment ではそれを捨てる。
+    """
+
+    huge = ["huge"]
+    root = ["root"]
+    huge_text = "H" * 5_000
+
+    def body(node, context, resolve):
+        if node is root:
+            fragment = resolve.fragment()
+            # 要求はする（= 子は組み立てられ、巨大な fragment になる）
+            resolve(huge, context)
+            # しかし最終 fragment では捨てて、小さい出力だけを残す
+            return fragment.literal("(small)").build()
+        return huge_text
+
+    limit = 32
+    counters = RenderCounters()
+    plan = build_render_plan(
+        root,
+        "context",
+        body=body,
+        classify=lambda fragment, head, exact: ("properties", fragment),
+        policy=SharingPolicy(min_shared_bytes=0, min_shared_tree_nodes=1),
+        counters=counters,
+        site="test",
+    )
+    # 巨大な子は確かに作られている（中間作業は観測されるだけ）
+    assert counters.max_fragment_bytes >= len(huge_text)
+    assert counters.retained_fragment_bytes > limit
+
+    writer = CountingWriter(limit_bytes=limit, site="test.emit")
+    write_expansion(writer, plan, plan.root_index, {})
+    bounded = writer.getvalue()
+
+    unbounded_writer = CountingWriter()
+    write_expansion(unbounded_writer, plan, plan.root_index, {})
+    assert bounded == unbounded_writer.getvalue() == "(small)"
+    assert len(bounded.encode("utf-8")) <= limit
+
+
+def test_a_discarded_oversized_child_is_fine_through_the_real_renderers():
+    """同じことを実経路でも確かめる（PHI の恒偽 branch は要求されて捨てられる）。"""
+
+    from scripts.function_tracer_pcode.core.render_python import (
+        HumanRenderContext,
+        render_human_text,
+    )
+
+    a = _param("a", 0)
+    # 恒偽の条件を持つ branch は描画を要求されるが、最終 fragment には現れない
+    false_condition = Condition(_binary("INT_EQUAL", _const(0), _const(1), size=1))
+    phi = Expression.phi(
+        [
+            (false_condition, _doubling_dag(20, a)),
+            (None, a),
+        ]
+    )
+    phi.size = 4
+
+    context = build_smt_render_context()
+    full_smt = render_smt_term(phi, context, None)
+    full_human = render_human_text(phi, HumanRenderContext(simplify=False))
+
+    # 出力ちょうどの予算でも通る（捨てられた深い枝が予算判定に効かない）
+    assert render_smt_term(phi, context, None, limit_bytes=len(full_smt.encode())) == full_smt
+    assert (
+        render_human_text(
+            phi, HumanRenderContext(simplify=False), limit_bytes=len(full_human.encode())
+        )
+        == full_human
+    )
 
 
 def test_c7_output_limit_raises_a_typed_limitation():
@@ -700,7 +787,7 @@ def test_c7_intermediate_work_is_observed_and_not_budgeted():
 
     a = _param("a", 0)
     counters = RenderCounters()
-    plan = _plan_for(_linear_chain(4000, a), counters=counters, limit_bytes=5_000)
+    plan = _plan_for(_linear_chain(4000, a), counters=counters)
 
     # 中間作業量は予算を超えているが、計画は止まっていない（観測だけ）
     assert plan.distinct_instances > 4_000
@@ -1462,7 +1549,7 @@ def test_a_wide_node_is_stopped_before_its_own_fragment_is_built(build, request)
     counters = RenderCounters()
     started = time.perf_counter()
     with pytest.raises(RenderOutputLimitExceeded) as excinfo:
-        _plan_for(root, counters=counters, limit_bytes=limit)
+        _plan_for(root, counters=counters, fragment_limit_bytes=limit)
     assert time.perf_counter() - started < 5.0
     assert excinfo.value.site == "core.render_smt.fragment"
     assert excinfo.value.limit_bytes == limit
@@ -1580,6 +1667,21 @@ def _is_hex(value: str) -> bool:
     return True
 
 
+def _opaque_valued_expression() -> Expression:
+    """identity を組めない式（`identity_complete` が偽）。
+
+    Ghidra 由来の object が値に入っている式がこれで、**深さではなく値の性質**で
+    identity が作れない。node 数の上限を撤去したので、これが「組めない」の
+    現実的な形（そして実際に解析で起きる形）。
+    """
+
+    class _GhidraObject:
+        def __repr__(self):
+            return "<ghidra object>"
+
+    return Expression(ExpressionType.CONSTANT, value=_GhidraObject(), size=4)
+
+
 def test_summary_identity_does_not_collide_on_deep_return_values():
     """site と条件が同じで **戻り値の末尾だけ違う**候補が同じ鍵にならないこと。
 
@@ -1640,117 +1742,44 @@ def test_summary_identity_is_refused_when_a_part_cannot_be_built():
     from scripts.function_tracer_pcode.analysis.returns.return_extraction import (
         _impl__return_info_summary_identity_key,
     )
-    from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
-        PROOF_KEY_MAX_SEMANTIC_NODES as _LIMIT,
-    )
 
     class _Site:
         def _return_site_key(self, ret):
             return "same-site"
 
-    node = _param("a", 0)
-    for index in range(_LIMIT + 16):
-        node = _binary("INT_ADD", node, _const(index))
-
+    opaque = _opaque_valued_expression()
     site = _Site()
-    # 戻り値が大きすぎて identity が組めない
+    # 戻り値の identity が組めない
     assert _impl__return_info_summary_identity_key(
-        site, SimpleNamespace(value=node, conditions=[])
+        site, SimpleNamespace(value=opaque, conditions=[])
     ) is None
-    # 条件が大きすぎて identity が組めない
+    # 条件の identity が組めない
     assert _impl__return_info_summary_identity_key(
         site,
         SimpleNamespace(
             value=_param("a", 0),
-            conditions=[Condition(_binary("INT_LESS", node, _param("b", 1), size=1))],
+            conditions=[Condition(_binary("INT_LESS", opaque, _param("b", 1), size=1))],
         ),
     ) is None
+    # 組めるときは鍵が出る（fail-closed が「常に None」へ退化していない）
+    assert _impl__return_info_summary_identity_key(
+        site, SimpleNamespace(value=_param("a", 0), conditions=[])
+    ) is not None
 
 
 def test_a_missing_return_value_is_not_the_same_as_an_unbuildable_one():
     """「値が無い」と「identity を組めなかった」を同じ値で表さないこと。"""
 
     from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
-        PROOF_KEY_MAX_SEMANTIC_NODES,
         proof_expression_identity,
     )
 
     absent = proof_expression_identity(None)
     assert absent is not None
-
-    node = _param("a", 0)
-    for index in range(PROOF_KEY_MAX_SEMANTIC_NODES + 16):
-        node = _binary("INT_ADD", node, _const(index))
-    assert proof_expression_identity(node) is None
+    assert proof_expression_identity(_opaque_valued_expression()) is None
 
     small = proof_expression_identity(_param("a", 0))
     assert small is not None and small != absent
-
-
-def test_the_complete_identity_only_ever_refuses_more_than_the_budgeted_key():
-    """新しい鍵は古い鍵より **細かい**（fail-closed の向き）ことを固定する。
-
-    `condition_identity_key()` を予算付きの `expression_key_safe()` から完全
-    identity へ移した。この鍵で門を作っている側（進行ガードの同一性判定、
-    証明鍵）は「一致しなければ降りる」なので、**新しい鍵が古い鍵より細かい**
-    限り、変更は「今まで通せていたものを通さなくなる」方向にしかいかない。
-    逆向き（今まで別物だったものが一致する）が起きると、成り立たない証明が
-    通り得る。
-
-    確かめるのは含意「新しい鍵が一致 ⇒ 古い鍵も一致」。古い鍵は可換演算を
-    正規化して `a+b` と `b+a` を同一視し、深い式では truncate して別物を
-    同一視するので、新しい鍵はその両方を区別する（= 真に細かい）。
-    """
-
-    from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import (
-        condition_identity_key,
-    )
-    from scripts.function_tracer_pcode.core.structural import expression_key_safe
-
-    a = _param("a", 0)
-    b = _param("b", 1)
-
-    def deep(tail: int, depth: int = 400):
-        node = a
-        for index in range(depth):
-            node = _binary("INT_ADD", node, _const(index))
-        return Condition(_binary("INT_LESS", node, _const(tail), size=1))
-
-    cases = [
-        Condition(_binary("INT_ADD", a, b, size=1)),
-        Condition(_binary("INT_ADD", b, a, size=1)),          # 可換の並べ替え
-        Condition(_binary("INT_ADD", a, b, size=1), True),    # 向きだけ違う
-        Condition(_binary("INT_LESS", a, b, size=1)),
-        deep(1),
-        deep(2),                                              # 末尾だけ違う深い条件
-    ]
-
-    def old_key(condition):
-        return (
-            "condition",
-            expression_key_safe(getattr(condition, "expression", None)),
-            bool(getattr(condition, "negated", False)),
-        )
-
-    saw_strictly_finer = False
-    for left in cases:
-        for right in cases:
-            new_left, new_right = condition_identity_key(left), condition_identity_key(right)
-            same_old = old_key(left) == old_key(right)
-            if new_left is not None and new_right is not None and new_left == new_right:
-                # 新しい鍵が一致するなら、古い鍵も一致していたはず
-                assert same_old, (left, right)
-            if same_old and not (
-                new_left is not None and new_right is not None and new_left == new_right
-            ):
-                saw_strictly_finer = True
-
-    # 「常に一致しない」に退化していないこと、かつ実際に細かくなっている場所が在ること
-    assert saw_strictly_finer
-    assert condition_identity_key(cases[0]) is not None
-    assert condition_identity_key(cases[0]) == condition_identity_key(
-        Condition(_binary("INT_ADD", _param("a", 0), _param("b", 1), size=1))
-    )
 
 
 def test_the_size_limit_gates_availability_and_never_the_content():
@@ -1783,6 +1812,75 @@ def test_the_size_limit_gates_availability_and_never_the_content():
     tight = condition_identity(condition, max_semantic_nodes=1)
     assert tight is None
     assert structural_identity_form(condition.expression, max_semantic_nodes=1) is None
+
+
+def test_a_complete_identity_cannot_be_forged():
+    """`CompleteIdentity` を持っていること自体が不変条件であること。
+
+    以前は素の dataclass だったので `CompleteIdentity(("nested", None))` を直接
+    作れ、そのまま組み立てを通せた。つまり「consumer の注意力に依存しない」と
+    いう主張を型が保証していなかった。今は **構築のその場**で確かめるので、
+    どの経路で作っても同じ門を通る。
+
+    `None` は payload の「その field は無い」という確定値として現れるので
+    （凍結した投影が入れる）拒まない。「identity を組めなかった」は
+    `CompleteIdentity` を **作らない**ことで表す。
+    """
+
+    from scripts.function_tracer_pcode.core.structural import (
+        CompleteIdentity,
+        compose_complete_identity,
+    )
+
+    class _ProcessLocal:
+        def __repr__(self):
+            return f"<object at {id(self):#x}>"
+
+    forgeries = [
+        ("arbitrary object", ("tag", _ProcessLocal())),
+        ("nested arbitrary object", ("tag", ("inner", _ProcessLocal()))),
+        ("dict", ("tag", {"a": 1})),
+        ("set", ("tag", {1, 2})),
+        ("frozenset", ("tag", frozenset({1}))),
+        ("bytes digest", ("tag", b"\x00" * 16)),
+        ("bare object", _ProcessLocal()),
+    ]
+    for label, value in forgeries:
+        with pytest.raises(TypeError):
+            CompleteIdentity(value)
+        # 組み立てを通す経路も無い
+        with pytest.raises(TypeError):
+            compose_complete_identity("tag", CompleteIdentity(value))
+
+    # payload の確定した「無い」は通る（走査が実際に入れる形）
+    assert CompleteIdentity(("memory", 4, ("read_order", None))) is not None
+    assert CompleteIdentity(("tag", "name", 1, True, 1.5, ("nested", 2))) is not None
+
+
+def test_every_real_identity_satisfies_the_type_invariant():
+    """実際に作られる identity が、その門を通ること（門が厳しすぎないこと）。"""
+
+    from scripts.function_tracer_pcode.core.structural import CompleteIdentity
+
+    a = _param("a", 0)
+    samples = [
+        condition_identity(Condition(_binary("INT_LESS", a, _param("b", 1), size=1))),
+        condition_identities([Condition(_binary("INT_LESS", a, _param("b", 1), size=1))]),
+    ]
+    from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
+        proof_expression_identity,
+    )
+
+    samples.append(proof_expression_identity(None))
+    samples.append(
+        proof_expression_identity(
+            Expression(ExpressionType.MEMORY, operands=[_param('p', 0)], size=4)
+        )
+    )
+    for identity in samples:
+        assert identity is not None
+        # 同じ値で作り直せる = 門を通る
+        assert CompleteIdentity(identity.key) == identity
 
 
 def test_the_composition_only_accepts_parts_that_were_checked():
@@ -1827,60 +1925,65 @@ def test_the_composition_only_accepts_parts_that_were_checked():
     assert definite_atoms("site", ("a", 1, True)) is not None
 
 
-def test_identity_is_refused_beyond_its_distinct_node_limit():
-    """distinct な意味 node が多すぎる条件は identity を返さない。
+def test_identity_is_refused_when_a_value_cannot_be_pinned_down():
+    """identity が組めないのは **値の性質**であって大きさではないこと。
 
-    上限が数えているのは **走査が返した distinct node** で、hash-cons 後の
-    record 数ではない（record は共有があれば少なくなるので、node 上限を名乗り
-    ながら record を数えると、名前と実測が食い違う）。
+    PR-22-C は node 数の上限を持たない（resource policy は PR-22-D の担当）。
+    組めないのは、値として固定できない要素がある場合 — Ghidra 由来の object が
+    入っている式など。深いだけの式は組める。
     """
 
-    from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
-        PROOF_KEY_MAX_SEMANTIC_NODES,
-        proof_condition_identities,
-        proof_condition_identity,
-    )
     from scripts.function_tracer_pcode.core.structural import structural_identity_form
-    from scripts.function_tracer_pcode.core.semantic_snapshot import (
-        traverse_semantic_graph,
+
+    opaque = _opaque_valued_expression()
+    assert structural_identity_form(opaque) is None
+    opaque_condition = Condition(_binary("INT_LESS", opaque, _param("a", 0), size=1))
+    assert condition_identity(opaque_condition) is None
+    assert condition_identities([opaque_condition]) is None
+
+    # 深いだけなら組める（上限で拒まない）
+    node = _param("a", 0)
+    for index in range(6000):
+        node = _binary("INT_ADD", node, _const(index))
+    assert structural_identity_form(node) is not None
+    assert condition_identity(Condition(_binary("INT_LESS", node, _param("b", 1), size=1))) is not None
+
+
+def test_the_node_limit_is_a_mechanism_pr_22_c_does_not_use():
+    """上限の **仕組み**は在るが、PR-22-C は値を持たないこと。
+
+    PR-22-D が `BudgetPolicy` から値を渡せるように引数は在る。既定は上限なしで、
+    渡したときは identity の **有無**だけが変わり、中身は変わらない。
+    """
+
+    import inspect
+
+    from scripts.function_tracer_pcode.core.structural import structural_identity_form
+    from scripts.function_tracer_pcode.analysis.returns import proof_identity
+
+    assert (
+        inspect.signature(structural_identity_form).parameters["max_semantic_nodes"].default
+        is None
     )
+    # PR-22-C 側に固定値は無い
+    assert not [name for name in vars(proof_identity) if "MAX" in name]
 
     a = _param("a", 0)
-    node = a
-    for index in range(PROOF_KEY_MAX_SEMANTIC_NODES + 16):
-        node = _binary("INT_ADD", node, _const(index))
-    huge = Condition(_binary("INT_LESS", node, _param("b", 1), size=1))
-    nodes = len(traverse_semantic_graph(huge.expression).post_order)
-    assert nodes > PROOF_KEY_MAX_SEMANTIC_NODES
-
-    # 上限は identity の意味ではなく policy: 既定（上限なし）では組める
-    assert condition_identity(huge) is not None
-    assert structural_identity_form(huge.expression) is not None
-    # 証明鍵に載せる側は上限を掛けるので、組まない（fail-closed）
-    assert proof_condition_identity(huge) is None
-    assert proof_condition_identities([huge]) is None
-
-    # ちょうど上限以下なら証明鍵側でも組める
-    small = a
-    for index in range(8):
-        small = _binary("INT_ADD", small, _const(index))
-    assert proof_condition_identity(Condition(_binary("INT_LESS", small, a, size=1))) is not None
+    condition = Condition(_binary("INT_LESS", _doubling_dag(6, a), _param("b", 1), size=1))
+    assert condition_identity(condition, max_semantic_nodes=1) is None
+    assert condition_identity(condition, max_semantic_nodes=1_000_000) == condition_identity(
+        condition
+    )
 
 
-def test_one_limit_covers_both_the_work_and_the_payload():
+def test_unique_records_never_outnumber_distinct_nodes():
     """`unique record 数 <= distinct node 数` を固定する。
 
-    この関係が成り立つ限り、distinct node の上限 1 つで「record を組む仕事」も
-    「直列化した identity の大きさ」も抑えられる。成り立たなくなったら payload
-    側にも上限が要る — そのときここが落ちる。
-
-    形が同じで object が全部別な木（distinct node は幅の分だけ増え、record は
-    深さの分しか増えない）が、両者が別の量であることを示す。
+    上限を入れたくなったとき（PR-22-D）、distinct node の上限 1 つで record を
+    組む仕事も直列化した大きさも抑えられる、という関係。成り立たなくなったら
+    payload 側にも別の上限が要る — そのときここが落ちる。
     """
 
-    from scripts.function_tracer_pcode.analysis.returns.proof_identity import (
-        PROOF_KEY_MAX_SEMANTIC_NODES,
-    )
     from scripts.function_tracer_pcode.core.structural import structural_identity_form
     from scripts.function_tracer_pcode.core.semantic_snapshot import (
         traverse_semantic_graph,
@@ -1900,14 +2003,6 @@ def test_one_limit_covers_both_the_work_and_the_payload():
         assert records <= nodes
         # この形では record は深さぶんしかない（2 つが別の量であること）
         assert records < nodes
-
-    # distinct node が上限を超えれば、record が少なくても identity は組まない
-    big = identical_shape_tree(14)
-    nodes = len(traverse_semantic_graph(big).post_order)
-    assert nodes > PROOF_KEY_MAX_SEMANTIC_NODES
-    assert structural_identity_form(big, max_semantic_nodes=PROOF_KEY_MAX_SEMANTIC_NODES) is None
-    # 上限を渡さなければ組める（上限は policy で、identity の意味ではない）
-    assert structural_identity_form(big) is not None
 
 
 def test_identity_is_json_serialisable():
@@ -1972,7 +2067,7 @@ def test_collecting_requests_does_not_swallow_the_budget_abort():
     """
 
     with pytest.raises(RenderOutputLimitExceeded):
-        _plan_for(_wide_phi(600), limit_bytes=400)
+        _plan_for(_wide_phi(600), fragment_limit_bytes=400)
 
 
 def test_collected_requests_do_not_change_the_output():
@@ -2059,7 +2154,7 @@ def test_the_request_collecting_run_is_bounded_too(build):
     counters = RenderCounters()
     started = time.perf_counter()
     with pytest.raises(RenderOutputLimitExceeded):
-        _plan_for(root, counters=counters, limit_bytes=50)
+        _plan_for(root, counters=counters, fragment_limit_bytes=50)
     assert time.perf_counter() - started < 2.0
     # 上限 50 byte に対して、渡した子の数は桁で言えば同じ order に留まる。
     assert counters.child_requests < 400, counters.child_requests

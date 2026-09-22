@@ -111,7 +111,8 @@ def render_human_text(
             classify=_classify_human_fragment,
             policy=policy,
             counters=counters,
-            limit_bytes=limit_bytes,
+            # 出力予算は書き出し口が持つ。計画側へ渡すと speculative な
+            # 材料を出力予算で裁くことになり、収まる描画を拒める。
             site="core.render_python",
         )
     except RenderGraphCycleError:

@@ -1045,23 +1045,58 @@ def structural_identity_digest(expr: Optional[Expression]) -> Optional[str]:
 #: 完全 identity が扱う distinct node の上限。超えたら identity を返さない
 #: （切り詰めた key を返すのではなく「言えない」と言う）。証明鍵は直列化される
 #: ので、無制限に大きい値を payload へ流さないための上限でもある。
+#: 鍵に現れてよい葉。`None` は **payload の「その field は無い」** を表す確定値で
+#: （凍結した投影が入れる。例: `("read_order", None)`）、「identity を組めなかった」
+#: とは別物 — 後者は constructor が `CompleteIdentity` を作らないことで表す。
+#: `bytes` は入れない（digest を identity に昇格させない契約）。
+_STABLE_LEAVES = (str, int, bool, float, type(None))
+
+
 @dataclass(frozen=True)
 class CompleteIdentity:
     """**完全に識別できたと構築時に確かめた** identity。
 
-    `None` と取り違えられないための型。作れるのは `condition_identity` /
-    `condition_identities` / `expression_identity` / `definite_atoms` だけで、
-    どれも「完全に識別できたか」を確かめてからでないと値を作らない。
+    この型を持っていることが、そのまま次を意味する:
 
-    生の tuple を鍵に組み上げる書き方だと、部品のどこかに `None`（= 組めなかった）
-    が埋まっていても気付けない。型が付いていれば、組み立てる側は
-    「`CompleteIdentity` か `None` か」しか受け取らないので、埋め込み忘れが
-    consumer の注意力に依存しない。
+        `key` は安定した plain data（`str` / `int` / `bool` / `float` / `None` と
+        その tuple / list の入れ子）だけでできていて、process 固有の object も
+        digest も含まない。
 
-    直列化するときだけ `.key`（plain data）を取り出す。
+    その保証は **`__post_init__` の 1 箇所**にある。どの経路で作っても通るので、
+    「constructor を使わずに直接作れば不正な値を入れられる」余地が無い。
+    docstring や呼び出し側の注意力ではなく、型の構築そのものが不変条件を持つ。
+
+    `None` を取り違えないための型でもある: 「identity を組めなかった」は
+    `CompleteIdentity` を **作らない**（`None` を返す）ことで表すので、
+    組み立てる側は「`CompleteIdentity` か `None` か」しか受け取らない。
+
+    **保存境界では `.key`（plain data）を使う**。structural proof / source key /
+    JSON へ入れるのは常にこちらで、wrapper object を保存形式へ混ぜない
+    （読み手は plain data を契約として読む）。
     """
 
     key: StructuralKey
+
+    def __post_init__(self) -> None:
+        _require_stable_identity_value(self.key)
+
+
+def _require_stable_identity_value(value: Any, *, depth: int = 0) -> None:
+    """安定 plain data であることを確かめる（`CompleteIdentity` の唯一の門）。"""
+
+    if depth > 200:
+        raise ValueError("identity value nests too deeply to validate")
+    if isinstance(value, bool) or isinstance(value, _STABLE_LEAVES):
+        return
+    if isinstance(value, (tuple, list)):
+        for item in value:
+            _require_stable_identity_value(item, depth=depth + 1)
+        return
+    raise TypeError(
+        f"an identity may only contain stable plain data; got {type(value).__name__}. "
+        "Build identities through condition_identity / expression_identity / "
+        "definite_atoms so the value is checked once, here."
+    )
 
 
 def structural_identity_form(
@@ -1259,6 +1294,17 @@ def _require_definite(tag: str, value: Any) -> None:
         f"definite_atoms({tag!r}) was given {type(value).__name__}; "
         "pass serialisable plain data (str/int/bool/float, or tuples/lists of them)"
     )
+
+
+def identity_key_of(identity: Optional[CompleteIdentity]) -> Optional[StructuralKey]:
+    """保存境界で使う plain data（`None` はそのまま `None`）。
+
+    wrapper object を保存形式へ混ぜないための一方向の変換。読み手は plain data
+    を契約として読むので、ここを通っていない値が proof / source key に入ると
+    読み手が黙って捨てる（実際そうなっていた）。
+    """
+
+    return None if identity is None else identity.key
 
 
 def compose_complete_identity(

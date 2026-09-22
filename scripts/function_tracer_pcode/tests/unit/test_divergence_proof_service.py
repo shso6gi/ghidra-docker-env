@@ -117,3 +117,96 @@ def test_high_function_has_cfg_cycle_matches_facade_result():
     hf = Mock()
     with patch.object(analyzer._block_graph, "iter_high_basic_blocks", return_value=[]):
         assert analyzer._high_function_has_cfg_cycle(hf) == analyzer._divergence_proofs.high_function_has_cfg_cycle(hf)
+
+
+def test_conditional_progress_guard_key_round_trips_through_the_proof():
+    """guard key が **保存 → 読み戻し → 照合 → validate** を通ること。
+
+    内部の typed な `CompleteIdentity` をそのまま structural proof へ入れると、
+    読み手（plain data を契約として読む）が黙って捨て、conditional-progress
+    proof が保存後の再検証で必ず落ちる。境界では plain data にする。
+    """
+    import json
+    from unittest.mock import patch
+
+    from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
+    from scripts.function_tracer_pcode.core.expression import Expression
+
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    service = analyzer._placeholder_algebra
+    divergence = analyzer._divergence_proofs
+
+    placeholder = Expression.parameter("p", 0, size=4)
+    flag = Expression.parameter("flag", 1, size=4)
+    expr = Expression.binary_op("INT_ADD", placeholder, flag)
+    condition = Condition(
+        Expression.binary_op(
+            "INT_LESS", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4)
+        )
+    )
+
+    with patch.object(service, "expression_is_one_under_conditions", return_value=True), patch.object(
+        service.condition_logic, "expressions_same_key", side_effect=lambda l, r: l is placeholder
+    ):
+        guard_key = service.placeholder_plus_unit_condition_guard_key(
+            expr, placeholder, [condition]
+        )
+
+    # 1. 保存形式は plain data
+    assert guard_key is not None and isinstance(guard_key, tuple)
+
+    proof = (
+        "branch_guarded_affine_unit_count_structural_proof",
+        ("conditional_progress_guard_keys", tuple(sorted({3: guard_key}.items(), key=repr))),
+    )
+
+    # 2. 直列化できる（wrapper object が混ざっていない）
+    marker = "<not-plain-data>"
+    assert marker not in json.dumps(proof, default=lambda o: marker)
+
+    # 3. 読み戻せる
+    restored = divergence.conditional_progress_guard_keys_from_structural_proof(proof)
+    assert restored == {3: guard_key}
+
+    # 4. 読み戻した鍵で元の条件を引ける
+    assert divergence.condition_for_identity_key(restored[3], [condition]) is condition
+
+    # 5. validate が通る（矛盾する invariant を与えたとき True になる）
+    with patch.object(
+        divergence, "condition_for_identity_key", return_value=condition
+    ), patch(
+        "scripts.function_tracer_pcode.analysis.returns.divergence_proofs.ConditionSMTOracle.conjunction_is_unsat",
+        return_value=True,
+    ):
+        assert divergence.conditional_progress_guards_contradict_invariant(
+            restored, target_conditions=(condition,), invariant_conditions=(condition,)
+        ) is True
+
+
+def test_an_unnamable_condition_yields_no_guard_key_and_no_proof():
+    """鍵を作れないときは保存形式にも入れない（fail-closed）。"""
+    from unittest.mock import patch
+
+    from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
+    from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
+
+    class _GhidraObject:
+        def __repr__(self):
+            return "<ghidra object>"
+
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    service = analyzer._placeholder_algebra
+    opaque = Expression(ExpressionType.CONSTANT, value=_GhidraObject(), size=4)
+    condition = Condition(Expression.binary_op("INT_LESS", opaque, Expression.constant(1, size=4)))
+
+    placeholder = Expression.parameter("p", 0, size=4)
+    flag = Expression.parameter("flag", 1, size=4)
+    expr = Expression.binary_op("INT_ADD", placeholder, flag)
+
+    with patch.object(service, "expression_is_one_under_conditions", return_value=True), patch.object(
+        service.condition_logic, "expressions_same_key", side_effect=lambda l, r: l is placeholder
+    ):
+        # 照合は成功する（名前を付けられなくても）
+        assert service.placeholder_plus_unit_condition(expr, placeholder, [condition]) is condition
+        # 鍵は出ない
+        assert service.placeholder_plus_unit_condition_guard_key(expr, placeholder, [condition]) is None

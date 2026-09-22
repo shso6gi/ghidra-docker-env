@@ -20,28 +20,31 @@ node 本体は子の描画結果として **参照 1 個**（`RenderedTerm`）�
 部分木の大きさに比例しない。木への展開は最後の書き出しで、`CountingWriter` へ
 **流しながら**行う。
 
-## 予算は 1 つ、効く口は 2 つ
+## 出力予算はこの層の持ち物ではない
 
-本体にできるのは 2 つだけ — **子を要求する**（`resolve`）と **自分の分を書く**
-（`FragmentBuilder`）。node 種別が増えても予算を効かせ忘れる余地が無い
-（種別を知っているのは本体だけで、予算を知っているのはこの層だけ）。
+`render_bytes`（= 出力予算）が意味するのは **最終的に書き出した byte 数**
+だけで、その契約を持つのは書き出し口（`core/render_output.CountingWriter`）。
+木への展開は流しながら行うので、予算に達した時点でそれ以上は作られない。
 
-予算は **出力の byte 数だけ**で、そこから導いた別の上限は作らない:
+この層が組み立て中に作るもの（fragment、要求収集の実行）は **speculative**:
+本体は要求した子を捨てることがあるし、要求された instance が最終出力に
+一度も現れないこともある。だから
 
-1. **node が自分で書く byte**（`FragmentBuilder`）。子の参照（placeholder）は
-   出力に出ないので数えない。使われる instance が自分で書く byte は出力に
-   少なくとも 1 回現れる = 出力量の下界なので、**出力予算とそのまま比べられる**。
-   区切り・演算子・括弧もここを通るので、幅の広い node は並べ終わる前に止まる。
-2. **出力そのもの**（`CountingWriter`）。木への展開は流しながら行うので、予算に
-   達した時点でそれ以上は作らない。
+```text
+捨てられる子の fragment > 出力予算   かつ   最終出力 <= 出力予算
+```
 
-**中間作業量には予算を付けない**。renderer が同時に抱える fragment の総量や
-placeholder の分は `RenderCounters`（`retained_fragment_bytes` /
-`max_fragment_bytes`）で **観測だけ**する。以前はここに「材料の許容量 = 出力
-予算 × 8」があったが、材料と出力の比には普遍的な有限上限が無い（要求した子を
-捨てれば出力が小さくても材料は幾らでも大きくなる）ので、倍率は原理的に決め
-られない。中間作業に予算を付けるかどうかとその値は PR-22-D の `BudgetPolicy`
-の担当で、この層は観測値を渡すだけ。
+が両立する。ここで出力予算を使って拒むと、**正しい描画を
+`RenderOutputLimitExceeded` にできてしまう**。speculative な作業量を
+correctness-visible な出力予算で裁かない。
+
+代わりにこの層が持つのは **仕組みと観測**:
+
+* `FragmentBuilder` — 置く前に数える組み立て口。`fragment_limit_bytes` を
+  渡せば組み立てを途中で止められる。**PR-22-C では渡さない**（既定 `None`）。
+  中間作業に予算を付けるかどうかと、その値は PR-22-D の `BudgetPolicy` の担当。
+* `RenderCounters` — `retained_fragment_bytes` / `max_fragment_bytes` /
+  `child_requests`。PR-22-D が既定値を決めるための実測値。
 
 ## 予定と経路は `ResolutionSchedule` が持つ
 
@@ -557,12 +560,17 @@ class _Driver:
     余地が無い。
     """
 
-    def __init__(self, body, classify, counters: RenderCounters, limit_bytes, site: str) -> None:
+    def __init__(
+        self, body, classify, counters: RenderCounters, fragment_limit_bytes, site: str
+    ) -> None:
         self._body = body
         self._classify = classify
         self._counters = counters
-        #: 出力予算（byte）。導出上限は作らない — 予算は 1 つ
-        self._limit = None if limit_bytes is None else int(limit_bytes)
+        #: 組み立てを止める上限（**出力予算ではない**）。PR-22-C は渡さないので
+        #: 既定は `None` = 止めない。値と policy の owner は PR-22-D。
+        self._fragment_limit = (
+            None if fragment_limit_bytes is None else int(fragment_limit_bytes)
+        )
         self._site = str(site)
         self.instances: List[RenderInstance] = []
         self.post_order: List[int] = []
@@ -651,23 +659,21 @@ class _Driver:
         self._check_own_bytes(self._own_bytes)
 
     def _check_own_bytes(self, own_bytes: int) -> None:
-        """node が自分で書く byte を **出力予算** と比べる（倍率なし）。
+        """組み立て中の node が自分で書いた byte を、**組み立ての上限**と比べる。
 
-        使われる instance が自分で書く byte は、出力に少なくとも 1 回現れる。
-        だから「自分で書く分だけで出力予算を超える」なら、その node が使われる
-        限り出力も超える — 出力予算をそのまま当てられる。
+        比べる相手は出力予算ではない。ここで作っているのは speculative な
+        材料で、最終出力に一度も現れないことがある（本体が要求した子を捨てる、
+        instance が誰からも参照されない）。出力予算で裁くと、収まる描画を拒める。
 
-        子の参照は数えない（出力には placeholder ではなく展開か束縛名が出る）。
-        要求しただけで捨てられる instance は出力に現れないので、この判定は
-        その場合だけ「収まる描画を拒む」側へ倒れ得る。1 つの捨てられる node が
-        自分で書く分だけで出力予算全部を超える、という形が要る。
+        PR-22-C は上限を渡さないので、既定ではここは素通りする。組み立てを
+        止めたい policy（と値）を持つのは PR-22-D。
         """
 
-        if self._limit is None:
+        if self._fragment_limit is None:
             return
-        if own_bytes > self._limit:
+        if own_bytes > self._fragment_limit:
             raise RenderOutputLimitExceeded(
-                limit_bytes=self._limit,
+                limit_bytes=self._fragment_limit,
                 requested_bytes=own_bytes,
                 site=f"{self._site}.fragment",
             )
@@ -803,18 +809,21 @@ def build_render_plan(
     classify: Callable[[str, Any, bool], Any],
     policy: SharingPolicy,
     counters: RenderCounters,
-    limit_bytes: Optional[int] = None,
+    fragment_limit_bytes: Optional[int] = None,
     site: str = "render",
 ) -> RenderPlan:
     """DAG を 1 回だけ辿り、fragment・参照回数・名前を付ける instance を決める。
 
-    `site` は打ち切りを報告するときの名乗り。`"<owner>.materialize"` の形になり、
-    書き出し口の `"<owner>.emit"` と対になる — どの renderer の、どちらの段で
-    止まったのかが 1 つの文字列で分かる。PR-22-D はこの文字列を登録済み reason
-    へ写すので、段と owner の綴りはここで決めてある。
+    `fragment_limit_bytes` は **組み立ての上限で、出力予算ではない**。ここで
+    作るのは speculative な材料なので、出力予算で裁くと正しい描画を拒める。
+    PR-22-C は渡さない（既定 `None` = 止めない）。
+
+    `site` は打ち切りを報告するときの名乗り。`"<owner>.fragment"` の形になり、
+    書き出し口の `"<owner>.emit"` と対になる。PR-22-D はこの文字列を登録済み
+    reason へ写すので、段と owner の綴りはここで決めてある。
     """
 
-    driver = _Driver(body, classify, counters, limit_bytes, site)
+    driver = _Driver(body, classify, counters, fragment_limit_bytes, site)
     root_index = driver.run(root, context)
 
     instances = driver.instances
