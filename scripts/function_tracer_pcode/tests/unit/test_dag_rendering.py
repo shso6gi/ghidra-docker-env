@@ -73,12 +73,8 @@ from scripts.function_tracer_pcode.core.render_smt.render import (
 from scripts.function_tracer_pcode.core.runtime_refs.locations import AddressValueRef
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.core.structural import (
-    StructuralIdentity,
-    condition_identities,
-    condition_identity,
     condition_key,
-    structural_equals,
-    structural_identity_form,
+    expression_key_safe,
 )
 from scripts.function_tracer_pcode.tests.fixtures.render.corpus import build_corpus
 from scripts.function_tracer_pcode.tests.tools.record_render_baseline import (
@@ -1112,142 +1108,208 @@ def test_c5_human_shared_reference_names_are_stable_and_collision_free():
 
 
 # ---------------------------------------------------------------------------
-# C6: 条件の identity は完全 identity
+# C6: `to_string()` を identity に使う site 0、**置換前後で dedup 同一**
+#
+# C6 が求めるのは「表示文字列への依存を外すこと」と「dedup の同値関係を変えない
+# こと」の 2 つ。鍵の同値関係そのもの（予算付き key の切り詰め、可換正規化）は
+# ここでは直さない — それは identity の owner の話で、この PR の変更軸ではない。
 # ---------------------------------------------------------------------------
 
 
-def _deep_condition(depth: int, tail: Expression) -> Condition:
-    node = tail
-    a = _param("a", 0)
-    for _ in range(depth):
-        node = _binary("INT_ADD", node, a)
-    return Condition(_binary("INT_LESS", node, _param("b", 1), size=1))
+def _c6_corpus():
+    """dedup 関係を比べるための adversarial な条件の組。
 
-
-def test_c6_complete_identity_separates_deep_conditions_that_differ_at_the_tail():
-    """256 distinct node を超える 2 条件が、末尾だけ違っても衝突しないこと。
-
-    予算付きの legacy key（`condition_key`）は途中で `("truncated", …)` に
-    なるので、この 2 つを同じ key にし得る。完全 identity は分ける。
-    """
-
-    left = _deep_condition(400, _const(1))
-    right = _deep_condition(400, _const(2))
-
-    assert condition_identity(left) is not None
-    assert condition_identity(left) != condition_identity(right)
-    assert not structural_equals(left.expression, right.expression)
-    # 同一の深い条件どうしでも完全比較は予算で確定できない。identity は分ける
-    # 側も一致する側も言える。
-    assert condition_identity(left) == condition_identity(_deep_condition(400, _const(1)))
-
-    # 予算付き key が実際にこの深さで切り詰められていることも記録しておく
-    # （この test が「深い」と言えているかの担保）。
-    from scripts.function_tracer_pcode.core.structural import key_is_comparable
-
-    assert not key_is_comparable(condition_key(left))
-
-
-def test_c6_complete_identity_agrees_with_complete_comparison():
-    """完全比較との関係を契約として固定する。
-
-    `Condition.equals`（= `structural_equals`）が真なら identity も一致する。
-    逆向きは identity のほうが広い: 完全比較は **比較の予算**を持つので、
-    とても深い式では同じでも真を返せない。identity は予算を持たないので
-    そこでも一致を言える（弱いのではなく強い）。
+    review で挙がった形を網羅する: 予算超過で切り詰められる深い式、可換な並べ
+    替え、同じ構造を別 object で組んだもの、否定、共有 DAG と同型の非共有構造、
+    opaque な値。
     """
 
     a = _param("a", 0)
     b = _param("b", 1)
-    same_left = Condition(_binary("INT_LESS", _doubling_dag(6, a), b, size=1))
-    same_right = Condition(_binary("INT_LESS", _doubling_dag(6, a), b, size=1))
-    other = Condition(_binary("INT_LESS", _doubling_dag(6, b), a, size=1))
-    negated = Condition(_binary("INT_LESS", _doubling_dag(6, a), b, size=1), True)
 
-    assert same_left.equals(same_right)
-    assert condition_identity(same_left) == condition_identity(same_right)
-    assert not same_left.equals(other)
-    assert condition_identity(same_left) != condition_identity(other)
-    assert condition_identity(same_left) != condition_identity(negated)
+    def deep(tail: int, depth: int = 400):
+        node = _param("a", 0)
+        for index in range(depth):
+            node = _binary("INT_ADD", node, _const(index))
+        return _binary("INT_LESS", node, _const(tail), size=1)
 
-    # 深い条件では完全比較が予算で確定できないが、identity は一致を言える。
-    from scripts.function_tracer_pcode.core.structural import (
-        DEFAULT_STRUCTURAL_COMPARISON_BUDGET,
-    )
-
-    deep_left = _deep_condition(400, _const(1))
-    deep_right = _deep_condition(400, _const(1))
-    assert 400 > DEFAULT_STRUCTURAL_COMPARISON_BUDGET
-    assert not deep_left.equals(deep_right)  # 予算切れ: 確定できない側へ倒れる
-    assert condition_identity(deep_left) == condition_identity(deep_right)
-
-
-def test_c6_complete_identity_is_fail_closed():
-    """identity を組めないときは `None`。他の `None` と一致させない運用。"""
-
-    assert condition_identity(None) is None
-    assert condition_identities([None]) is None
+    def unshared_doubling(depth: int):
+        if depth == 0:
+            return _param("a", 0)
+        return _binary("INT_ADD", unshared_doubling(depth - 1), unshared_doubling(depth - 1))
 
     class _Opaque:
-        expression = None
-        negated = False
+        def __repr__(self):
+            return "<ghidra object>"
 
-    assert condition_identity(_Opaque()) is None
+    opaque = Expression(ExpressionType.CONSTANT, value=_Opaque(), size=4)
+
+    return [
+        ("add_ab", Condition(_binary("INT_ADD", a, b, size=1))),
+        ("add_ba_commuted", Condition(_binary("INT_ADD", b, a, size=1))),
+        ("add_ab_rebuilt", Condition(_binary("INT_ADD", _param("a", 0), _param("b", 1), size=1))),
+        ("add_ab_negated", Condition(_binary("INT_ADD", a, b, size=1), True)),
+        ("less_ab", Condition(_binary("INT_LESS", a, b, size=1))),
+        ("deep_tail_1", Condition(deep(1))),
+        ("deep_tail_2", Condition(deep(2))),
+        ("shared_dag", Condition(_binary("INT_LESS", _doubling_dag(4, a), b, size=1))),
+        ("unshared_same_shape", Condition(_binary("INT_LESS", unshared_doubling(4), b, size=1))),
+        ("opaque_value", Condition(_binary("INT_LESS", opaque, b, size=1))),
+    ]
 
 
-def test_c6_identity_interface_is_owned_by_structural():
-    """identity の面は `core/structural` が持ち、PR-22-C は **増やさない**こと。
+def _base_summary_identity_key(ret, site_key):
+    """base（`15e05826`）の実装そのまま。dedup 関係の比較対象。"""
 
-    実装計画で identity 型は PR-22-C の must-not-change。renderer の PR が
-    identity の公開面を広げると、「renderer 変更が identity へ波及しない」という
-    完了条件が崩れる。C6 が要るのは `to_string()` を使っていた 2 site を
-    DAG-aware な完全 identity へ移すことだけで、新しい型や facade ではない。
+    return (
+        "return_info",
+        site_key,
+        tuple(
+            getattr(condition, "structural_key", lambda: ("condition", condition.to_string()))()
+            for condition in tuple(getattr(ret, "conditions", ()) or ())
+        ),
+        expression_key_safe(getattr(ret, "value", None)),
+    )
+
+
+def test_c6_the_summary_identity_dedup_relation_is_unchanged_from_base():
+    """**置換前後で dedup 同一**: base と head で同値関係が一致すること。
+
+    比べるのは鍵の値そのものではなく `key(x) == key(y)` の真偽。C6 は表示文字列
+    依存を外すことを求めているだけで、既存の同値関係（深い式の切り詰めや可換
+    正規化を含む）を直すことは求めていない。直すなら別 owner の仕事。
     """
 
-    from scripts.function_tracer_pcode.core import structural
+    from scripts.function_tracer_pcode.analysis.returns.return_extraction import (
+        _impl__return_info_summary_identity_key,
+    )
 
-    exposed = {
-        name for name in vars(structural.StructuralIdentity) if not name.startswith("_")
-    }
-    # PR-22-B が公開した 4 つのまま
-    assert exposed == {"candidate_hash", "equals", "key", "identity_digest"}
+    class _Site:
+        def _return_site_key(self, ret):
+            return "same-site"
 
-    # 移行先の identity は module 関数として在る（facade は広げない）
-    for name in ("structural_identity_form", "condition_identity", "condition_identities"):
-        assert callable(getattr(structural, name))
+    site = _Site()
+    corpus = _c6_corpus()
+    # 条件の組 + 戻り値の有無 / 深さ違いを掛け合わせる
+    values = [
+        ("absent", None),
+        ("param", _param("a", 0)),
+        ("deep_1", _c6_deep_value(1)),
+        ("deep_2", _c6_deep_value(2)),
+    ]
+    rets = []
+    for condition_name, condition in corpus:
+        for value_name, value in values:
+            rets.append(
+                (f"{condition_name}/{value_name}", SimpleNamespace(value=value, conditions=[condition]))
+            )
+
+    mismatches = []
+    for left_name, left in rets:
+        for right_name, right in rets:
+            old_same = _base_summary_identity_key(left, "same-site") == _base_summary_identity_key(
+                right, "same-site"
+            )
+            new_same = _impl__return_info_summary_identity_key(
+                site, left
+            ) == _impl__return_info_summary_identity_key(site, right)
+            if old_same != new_same:
+                mismatches.append((left_name, right_name, old_same, new_same))
+    assert mismatches == [], mismatches[:8]
+
+    # 関係が「全部同じ」や「全部違う」に潰れていないこと（比較が意味を持つ）
+    keys = [_impl__return_info_summary_identity_key(site, ret) for _name, ret in rets]
+    assert 1 < len({repr(key) for key in keys}) < len(keys)
 
 
-def test_c6_condition_identity_does_not_render_text(monkeypatch):
-    def _boom(*_args, **_kwargs):
-        raise AssertionError("identity must not depend on the human rendering")
-
-    monkeypatch.setattr(Expression, "to_string", _boom)
-    monkeypatch.setattr(Condition, "to_string", _boom)
-
-    condition = Condition(_binary("INT_LESS", _param("a", 0), _param("b", 1), size=1))
-    assert condition_identity(condition) is not None
+def _c6_deep_value(tail: int, depth: int = 400):
+    node = _param("a", 0)
+    for index in range(depth):
+        node = _binary("INT_ADD", node, _const(index))
+    return _binary("INT_ADD", node, _const(tail))
 
 
-def test_c6_identity_sites_use_the_complete_identity():
-    package = pathlib.Path(
-        importlib.import_module("scripts.function_tracer_pcode").__file__
-    ).parent
-    sites = {
-        package
-        / "analysis"
-        / "returns"
-        / "return_extraction.py": "_impl__return_info_summary_identity_key",
-        package
-        / "analysis"
-        / "returns"
-        / "control_recovery.py": "branch_guarded_affine_unit_count_structural_proof",
-    }
-    for path, marker in sites.items():
-        text = path.read_text(encoding="utf-8")
-        assert marker in text
-        window = text[text.index(marker) : text.index(marker) + 2500]
-        assert "to_string()" not in window, f"{path.name} still keys identity on rendered text"
-        assert "condition_key(" not in window, f"{path.name} still keys identity on a budgeted key"
+def test_c6_the_proof_target_keys_are_the_base_relation():
+    """証明側の dedup 関係も base のままであること。
+
+    structural proof で実際に比較されるのは `target_guard_keys`
+    （`divergence_proofs.condition_identity_key`）。この PR はそこを触っていない
+    ので、関係は base と同一。
+    """
+
+    from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import (
+        condition_identity_key,
+    )
+
+    def base_condition_identity_key(condition):
+        return (
+            "condition",
+            expression_key_safe(getattr(condition, "expression", None)),
+            bool(getattr(condition, "negated", False)),
+        )
+
+    corpus = _c6_corpus()
+    for _left_name, left in corpus:
+        for _right_name, right in corpus:
+            assert (
+                base_condition_identity_key(left) == base_condition_identity_key(right)
+            ) == (condition_identity_key(left) == condition_identity_key(right))
+
+
+def test_c6_no_rendered_text_is_used_as_an_identity():
+    """`to_string()` の結果を identity（等値比較 / 辞書 key）に使わないこと。
+
+    移行した 2 site（`return_extraction` の条件列、`control_recovery` の
+    `("target", …)`）に表示文字列が残っていないことを、構造で確かめる。
+    """
+
+    import ast as _ast
+
+    for module_path in (
+        "analysis/returns/return_extraction.py",
+        "analysis/returns/control_recovery.py",
+    ):
+        path = (
+            pathlib.Path(__file__).resolve().parents[2] / module_path
+        )
+        tree = _ast.parse(path.read_text(encoding="utf-8"))
+        for node in _ast.walk(tree):
+            # 等値比較の両辺に to_string() が現れない
+            if isinstance(node, _ast.Compare) and any(
+                isinstance(op, (_ast.Eq, _ast.NotEq)) for op in node.ops
+            ):
+                for part in [node.left] + list(node.comparators):
+                    for inner in _ast.walk(part):
+                        if (
+                            isinstance(inner, _ast.Call)
+                            and isinstance(inner.func, _ast.Attribute)
+                            and inner.func.attr == "to_string"
+                        ):
+                            raise AssertionError(f"{module_path}:{node.lineno} compares to_string()")
+
+
+def test_c6_the_migrated_sites_have_no_rendered_text(monkeypatch):
+    """移行した site が描画を **呼ばない** こと（実行で確かめる）。"""
+
+    from scripts.function_tracer_pcode.analysis.returns.return_extraction import (
+        _impl__return_info_summary_identity_key,
+    )
+    from scripts.function_tracer_pcode.core import condition as condition_module
+
+    def _forbidden(self, *args, **kwargs):
+        raise AssertionError("identity must not render text")
+
+    monkeypatch.setattr(condition_module.Condition, "to_string", _forbidden)
+
+    class _Site:
+        def _return_site_key(self, ret):
+            return "site"
+
+    a = _param("a", 0)
+    ret = SimpleNamespace(
+        value=a, conditions=[Condition(_binary("INT_LESS", a, _param("b", 1), size=1))]
+    )
+    assert _impl__return_info_summary_identity_key(_Site(), ret) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1356,228 +1418,6 @@ def test_a_non_ascii_symbol_is_measured_in_bytes_by_the_renderer():
 # ---------------------------------------------------------------------------
 # identity: digest 一致だけで同一性を決めない
 # ---------------------------------------------------------------------------
-
-
-def test_identity_does_not_rest_on_a_digest(monkeypatch):
-    """digest を全部同じ値にしても、違う条件は違う identity のままであること。
-
-    この package は「hash / digest は候補の絞り込み専用で、一致の確定には
-    使わない」を契約にしている。identity がその契約の外にあると、衝突が
-    そのまま誤った同一性になる。
-    """
-
-    from scripts.function_tracer_pcode.core import structural
-
-    constant = b"\x00" * 32
-    monkeypatch.setattr(
-        structural, "compose_equivalence_digest", lambda *a, **k: constant
-    )
-    monkeypatch.setattr(
-        structural, "compose_candidate_digest", lambda *a, **k: constant[:16]
-    )
-
-    a = _param("a", 0)
-    b = _param("b", 1)
-    left = Condition(_binary("INT_LESS", _doubling_dag(4, a), b, size=1))
-    right = Condition(_binary("INT_LESS", _doubling_dag(4, b), a, size=1))
-
-    assert condition_identity(left) != condition_identity(right)
-    assert structural_identity_form(left.expression) != structural_identity_form(
-        right.expression
-    )
-
-
-def test_identity_contains_no_digest_at_all():
-    """identity の中身は payload と番号だけ（digest が混ざっていないこと）。"""
-
-    a = _param("a", 0)
-    identity = condition_identity(Condition(_binary("INT_LESS", a, _param("b", 1), size=1)))
-    assert identity is not None
-
-    def _atoms(value):
-        if isinstance(value, (tuple, list)):
-            for item in value:
-                yield from _atoms(item)
-        else:
-            yield value
-
-    values = list(_atoms(identity))
-    assert all(not isinstance(value, bytes) for value in values)
-    # 16 / 32 byte digest を hex にしたものが紛れていないこと。
-    assert not any(
-        isinstance(value, str) and len(value) in (32, 64) and _is_hex(value)
-        for value in values
-    )
-
-
-def _is_hex(value: str) -> bool:
-    try:
-        int(value, 16)
-    except ValueError:
-        return False
-    return True
-
-
-def _opaque_valued_expression() -> Expression:
-    """identity を組めない式（`identity_complete` が偽）。
-
-    Ghidra 由来の object が値に入っている式がこれで、**深さではなく値の性質**で
-    identity が作れない。node 数の上限を撤去したので、これが「組めない」の
-    現実的な形（そして実際に解析で起きる形）。
-    """
-
-    class _GhidraObject:
-        def __repr__(self):
-            return "<ghidra object>"
-
-    return Expression(ExpressionType.CONSTANT, value=_GhidraObject(), size=4)
-
-
-def test_summary_identity_does_not_collide_on_deep_return_values():
-    """site と条件が同じで **戻り値の末尾だけ違う**候補が同じ鍵にならないこと。
-
-    かつて鍵は戻り値だけ予算付きの `expression_key_safe()` を直に埋めていた。
-    あれは予算超過で `None` を返すので、深い値 2 つがどちらも `None` になり
-
-    ```text
-    ("return_info", 同じ site, 同じ条件, None)
-    ```
-
-    として同一視され得た（条件側だけ fail-closed でも鍵全体は fail-closed
-    ではない）。鍵は組めるなら値まで完全に識別し、組めないなら鍵自体を
-    作らない、のどちらかでなければならない。
-    """
-
-    from scripts.function_tracer_pcode.analysis.returns.return_extraction import (
-        _impl__return_info_summary_identity_key,
-    )
-    from scripts.function_tracer_pcode.core.structural import expression_key_safe
-
-    class _Site:
-        def _return_site_key(self, ret):
-            return "same-site"
-
-    def deep_value(tail: int, depth: int = 400):
-        node = _param("a", 0)
-        for index in range(depth):
-            node = _binary("INT_ADD", node, _const(index))
-        return _binary("INT_ADD", node, _const(tail))
-
-    conditions = [Condition(_binary("INT_LESS", _param("a", 0), _param("b", 1), size=1))]
-    left = SimpleNamespace(value=deep_value(1), conditions=conditions)
-    right = SimpleNamespace(value=deep_value(2), conditions=conditions)
-
-    # 前提: legacy の予算付き key は両方 None（この test が守るものの前提）
-    assert expression_key_safe(left.value) is None
-    assert expression_key_safe(right.value) is None
-
-    site = _Site()
-    left_key = _impl__return_info_summary_identity_key(site, left)
-    right_key = _impl__return_info_summary_identity_key(site, right)
-
-    # 組めたなら別物として区別できていること、組めないなら両方 None
-    if left_key is None or right_key is None:
-        assert left_key is None and right_key is None
-    else:
-        assert left_key != right_key
-
-    # 同じ値なら同じ鍵（fail-closed が「常に None」に退化していないこと）
-    same = SimpleNamespace(value=deep_value(1), conditions=conditions)
-    assert _impl__return_info_summary_identity_key(site, same) == left_key
-    assert left_key is not None
-
-
-def test_summary_identity_is_refused_when_a_part_cannot_be_built():
-    """部品が 1 つでも組めないときは鍵を作らないこと（`None` を埋めない）。"""
-
-    from scripts.function_tracer_pcode.analysis.returns.return_extraction import (
-        _impl__return_info_summary_identity_key,
-    )
-
-    class _Site:
-        def _return_site_key(self, ret):
-            return "same-site"
-
-    opaque = _opaque_valued_expression()
-    site = _Site()
-    # 戻り値の identity が組めない
-    assert _impl__return_info_summary_identity_key(
-        site, SimpleNamespace(value=opaque, conditions=[])
-    ) is None
-    # 条件の identity が組めない
-    assert _impl__return_info_summary_identity_key(
-        site,
-        SimpleNamespace(
-            value=_param("a", 0),
-            conditions=[Condition(_binary("INT_LESS", opaque, _param("b", 1), size=1))],
-        ),
-    ) is None
-    # 組めるときは鍵が出る（fail-closed が「常に None」へ退化していない）
-    assert _impl__return_info_summary_identity_key(
-        site, SimpleNamespace(value=_param("a", 0), conditions=[])
-    ) is not None
-
-
-def test_a_missing_return_value_is_not_the_same_as_an_unbuildable_one():
-    """「戻り値が無い」と「identity を組めなかった」を同じ鍵にしないこと。
-
-    区別するのは鍵を組む **その 1 箇所**。専用の型を持ち込まず、site で
-    「無い」を確定値として書き、「組めない」では鍵自体を作らない。
-    """
-
-    from scripts.function_tracer_pcode.analysis.returns.return_extraction import (
-        _impl__return_info_summary_identity_key,
-    )
-
-    class _Site:
-        def _return_site_key(self, ret):
-            return "same-site"
-
-    site = _Site()
-    absent = _impl__return_info_summary_identity_key(
-        site, SimpleNamespace(value=None, conditions=[])
-    )
-    present = _impl__return_info_summary_identity_key(
-        site, SimpleNamespace(value=_param("a", 0), conditions=[])
-    )
-    unbuildable = _impl__return_info_summary_identity_key(
-        site, SimpleNamespace(value=_opaque_valued_expression(), conditions=[])
-    )
-
-    assert absent is not None
-    assert present is not None and present != absent
-    # 組めないときは鍵を作らない（「無い」と同じ値にならない）
-    assert unbuildable is None
-
-
-def test_identity_is_json_serialisable():
-    """証明鍵は直列化される。plain な値であること。"""
-
-    from scripts.function_tracer_pcode.core.analysis import _jsonable_nested_tuple
-
-    a = _param("a", 0)
-    identity = condition_identity(Condition(_binary("INT_LESS", a, _param("b", 1), size=1)))
-    assert identity is not None
-    json.dumps(_jsonable_nested_tuple(identity), sort_keys=True)
-
-
-def test_identity_equality_implies_structural_equality():
-    """identity が一致するなら構造も一致する（誤った同一視が無い）。"""
-
-    a = _param("a", 0)
-    b = _param("b", 1)
-    pairs = [
-        (_binary("INT_ADD", a, b), _binary("INT_ADD", a, b), True),
-        (_binary("INT_ADD", a, b), _binary("INT_SUB", a, b), False),
-        (_doubling_dag(5, a), _doubling_dag(5, a), True),
-        (_doubling_dag(5, a), _doubling_dag(5, b), False),
-        (_unary("INT_SEXT", a, size=4), _unary("INT_ZEXT", a, size=4), False),
-    ]
-    for left, right, expected in pairs:
-        same_identity = structural_identity_form(left) == structural_identity_form(right)
-        assert same_identity is expected
-        if same_identity:
-            assert structural_equals(left, right)
 
 
 def test_a_wide_node_costs_time_proportional_to_its_width():

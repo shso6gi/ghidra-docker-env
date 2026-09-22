@@ -155,39 +155,20 @@ class PlaceholderAlgebraService:
             self.session().parameters or (),
         )
 
-    # ------------------------------------------------------------------
-    # 照合（recognition）と命名（identity）を分ける
-    #
-    # 「この式が置換子 ± 単位条件の形か」を **見付ける**のは SMT 裏付けの照合で、
-    # 条件にどれだけ細かい名前を付けられるかとは無関係。一方、証明鍵に載せる
-    # ときは **厳密に名前を付けられること**が要る（付けられないなら証明を
-    # 出さない）。
-    #
-    # 1 つの関数で両方を返すと、名前を付けられない条件（Ghidra 由来の opaque な
-    # 値を含むものなど）で **照合そのものが失敗したことになり**、解析が別の式を
-    # 作ってしまう。実際にそうなっていた（固定 subset の 1 pair で、組み立て
-    # られる式が変わった）。だから照合を primitive にして、鍵はそこから導く。
-    # ------------------------------------------------------------------
-
     def expression_is_placeholder_minus_one_unit_condition(
         self,
         expr: Optional[Expression],
         placeholder: Expression,
         conditions: Sequence[Condition],
     ) -> bool:
-        return (
-            self.placeholder_minus_one_unit_condition(expr, placeholder, conditions)
-            is not None
-        )
+        return self.placeholder_minus_one_unit_condition_guard_key(expr, placeholder, conditions) is not None
 
-    def placeholder_minus_one_unit_condition(
+    def placeholder_minus_one_unit_condition_guard_key(
         self,
         expr: Optional[Expression],
         placeholder: Expression,
         conditions: Sequence[Condition],
-    ) -> Optional[Condition]:
-        """置換子 - 1 の形を作っている条件そのもの（照合）。"""
-
+    ) -> Optional[Tuple[Any, ...]]:
         current = self.strip_transparent_unary(expr)
         if current is None or getattr(current, "expr_type", None) != ExpressionType.BINARY_OP:
             return None
@@ -197,9 +178,9 @@ class PlaceholderAlgebraService:
                 return None
             left, right = operands
             if self.condition_logic.expressions_same_key(left, placeholder):
-                return self.negated_unit_condition_for_expression(right, conditions)
+                return self.negated_unit_condition_key_for_expression(right, conditions)
             if self.condition_logic.expressions_same_key(right, placeholder):
-                return self.negated_unit_condition_for_expression(left, conditions)
+                return self.negated_unit_condition_key_for_expression(left, conditions)
             return None
         if getattr(current, "operator", None) != "INT_SUB":
             return None
@@ -208,20 +189,9 @@ class PlaceholderAlgebraService:
             return None
         if not self.condition_logic.expressions_same_key(operands[0], placeholder):
             return None
-        return self.unit_condition_for_expression(
-            operands[1], conditions
-        ) or self.negated_unit_condition_for_expression(operands[1], conditions)
-
-    def placeholder_minus_one_unit_condition_guard_key(
-        self,
-        expr: Optional[Expression],
-        placeholder: Expression,
-        conditions: Sequence[Condition],
-    ) -> Optional[Tuple[Any, ...]]:
-        """証明鍵に載せる **保存形式**（plain data）。付けられないなら `None`。"""
-
-        return condition_identity_key(
-            self.placeholder_minus_one_unit_condition(expr, placeholder, conditions)
+        return (
+            self.unit_condition_key_for_expression(operands[1], conditions)
+            or self.negated_unit_condition_key_for_expression(operands[1], conditions)
         )
 
     def expression_is_placeholder_plus_unit_condition(
@@ -230,18 +200,14 @@ class PlaceholderAlgebraService:
         placeholder: Expression,
         conditions: Sequence[Condition],
     ) -> bool:
-        return (
-            self.placeholder_plus_unit_condition(expr, placeholder, conditions) is not None
-        )
+        return self.placeholder_plus_unit_condition_guard_key(expr, placeholder, conditions) is not None
 
-    def placeholder_plus_unit_condition(
+    def placeholder_plus_unit_condition_guard_key(
         self,
         expr: Optional[Expression],
         placeholder: Expression,
         conditions: Sequence[Condition],
-    ) -> Optional[Condition]:
-        """置換子 + 単位条件の形を作っている条件そのもの（照合）。"""
-
+    ) -> Optional[Tuple[Any, ...]]:
         current = self.strip_transparent_unary(expr)
         if current is None or getattr(current, "expr_type", None) != ExpressionType.BINARY_OP:
             return None
@@ -252,38 +218,9 @@ class PlaceholderAlgebraService:
             return None
         left, right = operands
         if self.condition_logic.expressions_same_key(left, placeholder):
-            return self.unit_condition_for_expression(right, conditions)
+            return self.unit_condition_key_for_expression(right, conditions)
         if self.condition_logic.expressions_same_key(right, placeholder):
-            return self.unit_condition_for_expression(left, conditions)
-        return None
-
-    def placeholder_plus_unit_condition_guard_key(
-        self,
-        expr: Optional[Expression],
-        placeholder: Expression,
-        conditions: Sequence[Condition],
-    ) -> Optional[Tuple[Any, ...]]:
-        """証明鍵に載せる **保存形式**（plain data）。付けられないなら `None`。"""
-
-        return condition_identity_key(
-            self.placeholder_plus_unit_condition(expr, placeholder, conditions)
-        )
-
-    def unit_condition_for_expression(
-        self,
-        expr: Optional[Expression],
-        conditions: Sequence[Condition],
-    ) -> Optional[Condition]:
-        """`expr` が 1 になる条件そのもの（照合）。"""
-
-        current = self.strip_transparent_unary(expr)
-        if current is None:
-            return None
-        for condition in conditions or ():
-            if condition is None:
-                continue
-            if self.expression_is_one_under_conditions(current, (condition,)):
-                return condition
+            return self.unit_condition_key_for_expression(left, conditions)
         return None
 
     def unit_condition_key_for_expression(
@@ -291,17 +228,21 @@ class PlaceholderAlgebraService:
         expr: Optional[Expression],
         conditions: Sequence[Condition],
     ) -> Optional[Tuple[Any, ...]]:
-        """照合した条件の identity を **保存形式**（plain data）で。無ければ `None`。"""
+        current = self.strip_transparent_unary(expr)
+        if current is None:
+            return None
+        for condition in conditions or ():
+            if condition is None:
+                continue
+            if self.expression_is_one_under_conditions(current, (condition,)):
+                return condition_identity_key(condition)
+        return None
 
-        return condition_identity_key(self.unit_condition_for_expression(expr, conditions))
-
-    def negated_unit_condition_for_expression(
+    def negated_unit_condition_key_for_expression(
         self,
         expr: Optional[Expression],
         conditions: Sequence[Condition],
-    ) -> Optional[Condition]:
-        """`expr` が「旗 - 1」の形になる条件そのもの（照合）。"""
-
+    ) -> Optional[Tuple[Any, ...]]:
         current = self.strip_transparent_unary(expr)
         if current is None or getattr(current, "expr_type", None) != ExpressionType.BINARY_OP:
             return None
@@ -316,22 +257,12 @@ class PlaceholderAlgebraService:
         for condition in conditions or ():
             if condition is None:
                 continue
-            if self.expression_is_zero_under_conditions(
-                flag_expr, (condition,)
-            ) and self.expression_is_one_under_conditions(flag_expr, (condition.negate(),)):
-                return condition
+            if self.expression_is_zero_under_conditions(flag_expr, (condition,)) and self.expression_is_one_under_conditions(
+                flag_expr,
+                (condition.negate(),),
+            ):
+                return condition_identity_key(condition)
         return None
-
-    def negated_unit_condition_key_for_expression(
-        self,
-        expr: Optional[Expression],
-        conditions: Sequence[Condition],
-    ) -> Optional[Tuple[Any, ...]]:
-        """照合した条件の identity を **保存形式**（plain data）で。無ければ `None`。"""
-
-        return condition_identity_key(
-            self.negated_unit_condition_for_expression(expr, conditions)
-        )
 
     @staticmethod
     def strip_transparent_unary(expr: Optional[Expression]) -> Optional[Expression]:

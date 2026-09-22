@@ -21,11 +21,7 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
     PcodeOpRef,
 )
 from scripts.function_tracer_pcode.core.storage import StorageInfo
-from scripts.function_tracer_pcode.core.structural import (
-    StructuralKey,
-    condition_identities,
-    structural_identity_form,
-)
+from scripts.function_tracer_pcode.core.structural import StructuralKey, expression_key_safe
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSimplifier,
     ConditionTracker,
@@ -48,6 +44,9 @@ from scripts.function_tracer_pcode.core import (
     TerminationContractRef,
     TerminationPathEffectEvidence,
     VarnodeFlowRef,
+)
+from scripts.function_tracer_pcode.core.structural import (
+    expression_key_safe as _outcome_expression_key_safe,
 )
 from scripts.function_tracer_pcode.core.structural import expression_provenance_key
 from scripts.function_tracer_pcode.analysis.returns._shared import (
@@ -854,12 +853,7 @@ def _build_function_outcome_seed(analysis: FunctionReturnAnalysis) -> None:
                 info.return_path_evidence.stable_key(),
             ) if info is not None and info.return_path_evidence is not None else (
                 "return_path_evidence_missing",
-                # 値の完全 identity が組めないときに `None` を置くと、別の深い値を
-                # 持つ 2 つの terminal が同じ evidence key になる。組めないなら
-                # terminal 固有の値へ倒して「同じ」と言わせない。
-                _identity_or_terminal(
-                    structural_identity_form(getattr(outcome, "value", None)), terminal_id
-                ),
+                _outcome_expression_key_safe(getattr(outcome, "value", None)),
             ),
             observed_value=getattr(outcome, "value", None),
         ))
@@ -1253,56 +1247,28 @@ def _impl__return_conditions_cover_region(
     return self._conditions_are_unsat(tuple(region_conditions or ()) + (Condition(disjunction, True),))
 
 
-def _identity_or_terminal(identity, terminal_id) -> Tuple[Any, ...]:
-    """identity が組めたならそれを、組めないなら terminal 固有の値を返す。
+def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Tuple[Any, ...]:
+    """候補 summary の identity。
 
-    ここは証明鍵ではなく **evidence key**（「どの terminal の証拠か」）なので、
-    identity が無いことで候補を落とす必要はない。ただし `None` を置くと、別の
-    深い値を持つ 2 つの terminal が同じ evidence key になるので、terminal を
-    区別する値へ倒す。
+    条件は `Condition.structural_key()`（構造 key）で並べる。以前はここに
+    `to_string()` の fallback があったが、**表示文字列を identity に使わない**
+    （書式を変えると鍵が変わる）。`Condition` は必ず `structural_key` を持つので
+    fallback は実際には使われておらず、外しても鍵は変わらない — この site の
+    dedup 関係は base と同一。
+
+    鍵の同値関係そのもの（予算付き key の切り詰めや可換正規化）はここでは
+    変えない。それは identity の owner（PR-22-B / #181）の話。
     """
 
-    if identity is None:
-        return ("identity_unavailable", terminal_id)
-    return identity
-
-
-def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Optional[Tuple[Any, ...]]:
-    """候補 summary の identity。組めないときは `None`（fail-closed）。
-
-    条件 **と戻り値の両方**を完全な構造 identity で並べる。人向けの表示文字列は
-    書式が変われば変わるし、予算付きの legacy key（`expression_key_safe`）は深い
-    式で末尾だけ違うものを同一視し得る — どちらも「同じ候補か」を言う鍵には
-    使えない。
-
-    戻り値はかつて `expression_key_safe()` の結果をこの tuple へ直に入れていた。
-    あれは truncate すると `None` を返すので、**末尾だけ違う深い値 2 つが同じ鍵**
-    になった（条件側だけを fail-closed にしても、鍵全体は fail-closed ではない）。
-    部品が 1 つでも組めなければ鍵を作らない。「戻り値が無い」は欠落ではなく
-    確定した情報なので、`None` ではなく専用の値で表す — そうしないと「組め
-    なかった」と同じ値になる。
-
-    この鍵は同じ producer が作った鍵とだけ比べられる（`control_recovery` の
-    候補 source key）。`analysis/returns/summary_returns.py` と
-    `analysis/recurrence/object_identity.py` にある同名の鍵は別の鍵空間で、
-    そちらは予算付きのまま（#22 の追記で別途追跡）。
-    """
-
-    identities = condition_identities(getattr(ret, "conditions", ()) or ())
-    if identities is None:
-        return None
-    value = getattr(ret, "value", None)
-    if value is None:
-        # 「戻り値が無い」は欠落ではなく確定した情報。`None` をそのまま鍵へ
-        # 埋めると「identity を組めなかった」と同じ値になり、別物 2 つが同じ
-        # 鍵になる。
-        value_identity: StructuralKey = ("return_value", "absent")
-    else:
-        form = structural_identity_form(value)
-        if form is None:
-            return None
-        value_identity = ("return_value", form)
-    return ("return_info", self._return_site_key(ret), identities, value_identity)
+    return (
+        "return_info",
+        self._return_site_key(ret),
+        tuple(
+            condition.structural_key()
+            for condition in tuple(getattr(ret, "conditions", ()) or ())
+        ),
+        expression_key_safe(getattr(ret, "value", None)),
+    )
 
 
 def _impl__try_apply_triangular_mod_optimized_outcomes(

@@ -11,7 +11,6 @@ from scripts.function_tracer_pcode.core.analysis import (
     UnknownOutcome,
 )
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
-from scripts.function_tracer_pcode.core.structural import condition_identities
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionSimplifier,
     ConditionTracker,
@@ -365,15 +364,12 @@ class BranchGuardedWhileProofService:
             structural_proof,
             "target_guard_keys",
         )
-        current_target_key_list = [
-            self.divergence_proofs.condition_identity_key(condition)
-            for condition in tuple(getattr(initial_c_ret, "conditions", ()) or ())
-        ]
-        if any(key is None for key in current_target_key_list):
-            # identity を組めない条件がある。組めないもの同士を `None` で一致
-            # させると、別の条件列を「同じ証明の対象」と見なしてしまう。
-            return False
-        current_target_keys = tuple(sorted(current_target_key_list, key=repr))
+        current_target_keys = tuple(
+            sorted(
+                (self.divergence_proofs.condition_identity_key(condition) for condition in tuple(getattr(initial_c_ret, "conditions", ()) or ())),
+                key=repr,
+            )
+        )
         if proof_target_keys != current_target_keys:
             return False
         acc_phi_key = self.divergence_proofs.field_value_from_structural_proof(structural_proof, "acc_phi")
@@ -750,14 +746,6 @@ class BranchGuardedWhileProofService:
             self.return_info_summary_identity_key(ret)
             for ret in proof_returns
         )
-        if any(key is None for key in source_keys):
-            # summary identity を組めない return がある。候補の source key は
-            # 「同じ候補か」を言うためのものなので、言えないなら候補を出さない。
-            self.debug_reporter.debug_print(
-                "Outcome branch-guarded affine proof declined: "
-                "a source return has no complete summary identity"
-            )
-            return None
         return ReturnInfo(
             address=str(getattr(anchor, "address", None) or getattr(analysis, "entry_point", None) or "outcome-summary"),
             value=c_param,
@@ -1113,21 +1101,6 @@ class BranchGuardedWhileProofService:
                     ):
                         continue
                     saw_state_guard = True
-                    target_guard_key_list = [
-                        self.divergence_proofs.condition_identity_key(condition)
-                        for condition in target_conditions or ()
-                    ]
-                    target_identities = condition_identities(target_conditions or ())
-                    if target_identities is None or any(
-                        key is None for key in target_guard_key_list
-                    ):
-                        # 完全 identity を組めない条件が混ざっている。「同じ
-                        # 条件か」を言えないまま証明鍵に載せない（fail-closed）。
-                        self.debug_reporter.debug_print(
-                            "Outcome branch-guarded structural proof declined: "
-                            "target condition has no complete structural identity"
-                        )
-                        return None
                     return (
                         "branch_guarded_affine_unit_count_structural_proof",
                         ("schema_version", 1),
@@ -1138,13 +1111,13 @@ class BranchGuardedWhileProofService:
                         ("nonprogress_backedges", tuple(sorted(acc_nonprogress_indices))),
                         ("conditional_progress_backedges", tuple(sorted(acc_conditional_progress_keys))),
                         ("conditional_progress_guard_keys", tuple(sorted(acc_conditional_progress_keys.items(), key=repr))),
-                        # 証明鍵は **完全な** 構造 identity（`condition_identities`）。
-                        # 人向けの表示文字列は書式が変われば変わるし、予算付きの
-                        # legacy key は深い条件で別物を同一視し得る。identity を
-                        # 組めない条件が 1 つでもあれば、この証明は出さない
-                        # （上の `target_identities is None` で落としてある）。
-                        ("target", target_identities),
-                        ("target_guard_keys", tuple(sorted(target_guard_key_list, key=repr))),
+                        # 表示文字列を証跡の鍵にしない（書式を変えると値が変わる）。
+                        # 隣の `target_guard_keys` と同じ構造 key を使う。この field は
+                        # どこからも読み戻されない証跡なので、dedup の関係は動かない。
+                        ("target", tuple(
+                            condition.structural_key() for condition in target_conditions or ()
+                        )),
+                        ("target_guard_keys", tuple(sorted((self.divergence_proofs.condition_identity_key(condition) for condition in target_conditions or ()), key=repr))),
                     )
         self.debug_reporter.debug_print(
             "Outcome branch-guarded structural proof declined: "

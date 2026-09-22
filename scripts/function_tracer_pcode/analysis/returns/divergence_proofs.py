@@ -22,7 +22,6 @@ from scripts.function_tracer_pcode.analysis.returns._api import (
 )
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
 from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
-from scripts.function_tracer_pcode.core.structural import condition_identity
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import BlockGraphService
 from scripts.function_tracer_pcode.analysis.debug import summarize_condition
 
@@ -30,25 +29,13 @@ if TYPE_CHECKING:  # placeholder_algebra は本 module の純関数を import �
     from scripts.function_tracer_pcode.analysis.returns.placeholder_algebra import PlaceholderAlgebraService
 
 
-def condition_identity_key(condition: Condition) -> Optional[Tuple[Any, ...]]:
-    """条件の identity 鍵。組めないときは `None`（fail-closed）。純関数。
-
-    以前は予算付きの `expression_key_safe()` を鍵へ直に入れていた。あれは予算
-    超過で `None` を返すので、**末尾だけ違う深い条件 2 つが同じ鍵**になった。
-    この鍵は進行ガードの同一性判定（`condition_for_identity_key`）と証明鍵
-    （`control_recovery` の `target_guard_keys`）に使われるので、そこで別物が
-    一致すると、成り立たない証明が通り得る。
-
-    完全な構造 identity（`core/structural.condition_identity`）を使い、組めない
-    条件には鍵を与えない。呼び出し側は `None` を「言えない」として扱うこと
-    （他の `None` と一致させない）。
-
-    返るのは plain data。この鍵は structural proof の
-    `conditional_progress_guard_keys` に入り、読み手も plain data として読む
-    （同じ process 内で組んで読む。直列化されるのは evidence としてだけ）。
-    """
-
-    return condition_identity(condition)
+def condition_identity_key(condition: Condition) -> Tuple[Any, ...]:
+    """条件の identity 鍵。純関数（facade 状態なし）。"""
+    return (
+        "condition",
+        expression_key_safe(getattr(condition, "expression", None)),
+        bool(getattr(condition, "negated", False)),
+    )
 
 
 class DivergenceProofService:
@@ -599,7 +586,7 @@ class DivergenceProofService:
         return None
 
     @staticmethod
-    def condition_identity_key(condition: Condition) -> Optional[Tuple[Any, ...]]:
+    def condition_identity_key(condition: Condition) -> Tuple[Any, ...]:
         return condition_identity_key(condition)
 
     def conditional_progress_guard_keys_from_structural_proof(
@@ -624,8 +611,6 @@ class DivergenceProofService:
         key: Tuple[Any, ...],
         conditions: Sequence[Condition],
     ) -> Optional[Condition]:
-        # 鍵は保存形式（plain data）。proof から読み戻した鍵と、今作った鍵を
-        # 同じ形で比べる。組めなかった鍵（`None`）は誰とも一致しない。
         if not isinstance(key, tuple):
             return None
         for condition in conditions or ():
