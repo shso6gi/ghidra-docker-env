@@ -347,11 +347,15 @@ class SerializationWork:
     * `tree(expr)` — 式の木表現。DAG のまま大きさを見積もり（distinct node ごとに
       1 回、`core/expression.estimate_legacy_dict_bytes`）、byte と distinct node を
       足して予算と比べてから、木を作る。指数的に大きい木は作られない。
-    * `value(v)` — 既に在る値（list / dict / 文字列）。写す前に JSON の byte 数を
-      数える（残り予算で打ち切り。写さない）。
-    * `record(build)` / `records(items, build)` — record 1 件分の表現を作らせ、その
-      byte 数を足す（中の木は `tree` が数え済みなので数え直さず中へも入らない）。
-      列は 1 件ずつなので、超えた時点で残りの record を作らない。
+    * `value(v)` — 既に在る値（list / dict / 文字列）。写す前に、要素 1 つずつ
+      書き出し器（`JsonEncodingPolicy.measure_elements`）で数える。予算を超えた
+      時点で残りの要素を数えない（写さない）。
+    * `record(build)` / `records(items, build)` — record 1 件分の表現を作らせ、
+      書き出し器で 1 回で数える。中の木は `tree` が数え済みなので、その byte を
+      引く（木の byte は書き出し器の byte と等しい）。codec が木を別の形へ写した
+      record だけは、写した側を避けて辿る。列は 1 件ずつなので、超えた時点で
+      残りの record を作らない。**eager に作るのは record 1 件分まで**。
+    * `object_framing(mapping)` — 値を別に数えた object の括弧・区切り・key。
 
     単位:
 

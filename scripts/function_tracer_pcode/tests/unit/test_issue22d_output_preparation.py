@@ -1215,6 +1215,16 @@ def test_projection_counts_cjk_non_bmp_and_escapes_like_the_encoder(policy):
         policy.prepare(value, max_bytes=prepared.encoded_bytes - 1)
 
 
+@pytest.mark.parametrize("policy", _POLICIES, ids=["default", "ascii", "compact", "odd"])
+def test_string_bytes_follow_the_json_escape_rule(policy):
+    """文字列の byte 数（json の escape 関数で数える）が escape の規則と一致する。"""
+    for text in _STRINGS + ["\ud800 lone surrogate", "\u2028\u2029", "\x7f\x80"]:
+        assert policy._string_chunk_bytes(text) == policy._string_chunk_bytes_by_rule(text)
+        assert policy.string_bytes(text) == len(
+            json.dumps(text, ensure_ascii=policy.ensure_ascii).encode("utf-8", "surrogatepass")
+        )
+
+
 def test_a_long_string_is_counted_in_chunks_and_stops_early():
     text = "😀" * 5_000_000
     started = time.perf_counter()

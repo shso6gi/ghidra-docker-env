@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from json.encoder import encode_basestring, encode_basestring_ascii
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Iterator, List, Optional, Tuple
 
@@ -242,6 +243,9 @@ def _float_text(value: float) -> str:
     return float.__repr__(value)
 
 
+_PLAIN_CONTAINERS = (dict, list, tuple)
+
+
 def _resolve(item: Any) -> Any:
     """遅延構成子と `json_view()` を、JSON の値の形になるまで解く。"""
 
@@ -332,7 +336,21 @@ class JsonEncodingPolicy:
     # -- 文字列と key ----------------------------------------------------------
 
     def _string_chunk_bytes(self, text: str) -> int:
-        """引用符を除いた、文字列の一部を書いたときの byte 数。"""
+        """引用符を除いた、文字列の一部を書いたときの byte 数。
+
+        `json` の escape 関数（C 実装）で書いた長さから引用符 2 つを引く。escape の
+        規則は `json` そのものなので、書き出し器と食い違わない。
+        """
+
+        if self.ensure_ascii:
+            return len(encode_basestring_ascii(text)) - 2
+        quoted = encode_basestring(text)
+        if quoted.isascii():
+            return len(quoted) - 2
+        return len(quoted.encode("utf-8", "surrogatepass")) - 2
+
+    def _string_chunk_bytes_by_rule(self, text: str) -> int:
+        """`_string_chunk_bytes` と同じ値を escape の規則から数える（test の照合用）。"""
 
         if self.ensure_ascii:
             total = len(text)
@@ -518,7 +536,19 @@ class JsonEncodingPolicy:
             return "".join(parts)
 
         def enter(item, parent, key) -> None:
-            item = _resolve(item)
+            kind_of = type(item)
+            if kind_of is str:
+                charge(self.string_bytes(item, max_bytes=remaining()))
+                if build:
+                    parent[key] = item
+                return
+            if kind_of is int:
+                charge(len(int.__repr__(item)))
+                if build:
+                    parent[key] = item
+                return
+            if kind_of not in _PLAIN_CONTAINERS and item is not None and item is not True and item is not False:
+                item = _resolve(item)
             if item is None or item is True or item is False:
                 charge(4 if item is not False else 5)
                 result = item
