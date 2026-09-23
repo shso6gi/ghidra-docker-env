@@ -362,7 +362,7 @@ class SerializationWork:
 
     __slots__ = (
         "site", "enabled", "_target_parts", "tree_bytes", "value_bytes", "trees",
-        "records_built", "_meter", "_tree_ids", "_trees_kept",
+        "records_built", "_meter", "_tree_ids", "_trees_kept", "_aliases",
     )
 
     def __init__(self, *, site: str, target_parts: Tuple[Any, ...], enabled: bool = True) -> None:
@@ -382,6 +382,8 @@ class SerializationWork:
         #: 数え済みの木表現（id と、id の再利用を防ぐための参照）
         self._tree_ids: set = set()
         self._trees_kept: List[Any] = []
+        #: 数え済みの木を別の形へ写した回数（`alias_tree`）
+        self._aliases = 0
 
     # -- 勘定 ----------------------------------------------------------------
 
@@ -451,11 +453,13 @@ class SerializationWork:
             )
             self._enforce()
         built = expr._to_dict(set())
-        if size is not None:
-            self._register_tree(built)
-        else:
+        if size is None:
             # 見積りできない形（閉路・JSON にならない key）: 作った木をそのまま数える
-            self._count(built, holds_trees=True)
+            size = self._measure(built, holds_trees=True)
+            self.trees += 1
+            self.tree_bytes += int(size)
+            self._enforce()
+        self._register_tree(built)
         return built
 
     def value(self, value: Any) -> Any:
@@ -472,15 +476,24 @@ class SerializationWork:
         """record 1 件分の表現を作らせ、その byte 数を足す（中の木は数え直さない）。"""
 
         trees_before = len(self._tree_ids)
+        tree_bytes_before = self.tree_bytes
+        aliases_before = self._aliases
         built = build()
         if not self.enabled:
             return built
         self.records_built += 1
-        # record の中で木を作った（数え済みの木を含む）ときだけ、木を避けて辿る
-        self._count(built, holds_trees=len(self._tree_ids) != trees_before)
+        if len(self._tree_ids) == trees_before:
+            self._count(built, holds_trees=False)
+        elif self._aliases == aliases_before:
+            # 中の木はこの record の間に作られ、byte は数え済み（木の byte は書き出し
+            # 器の byte と等しい）。record 全体を書いた byte から木の分を引く
+            self._count(built, holds_trees=False, already=self.tree_bytes - tree_bytes_before)
+        else:
+            # 木を codec が別の形へ写した: 写した側を避けて辿る
+            self._count(built, holds_trees=True)
         return built
 
-    def _count(self, value: Any, *, holds_trees: bool) -> None:
+    def _measure(self, value: Any, *, holds_trees: bool, already: int = 0) -> int:
         from scripts.function_tracer_pcode.core.json_encoding import (
             RESULT_JSON_POLICY,
             JsonBudgetExhausted,
@@ -489,19 +502,21 @@ class SerializationWork:
         remaining = self.remaining_bytes()
         try:
             if holds_trees:
-                size = RESULT_JSON_POLICY.measure(
+                return RESULT_JSON_POLICY.measure(
                     value,
                     max_bytes=remaining,
                     exclude_ids=self._tree_ids,
                     opaque_bytes=_opaque_leaf_bytes,
                 )
-            else:
-                size = RESULT_JSON_POLICY.measure_elements(
-                    value, max_bytes=remaining, opaque_text=_opaque_leaf_text,
-                )
+            limit = None if remaining is None else remaining + already
+            return RESULT_JSON_POLICY.measure_elements(
+                value, max_bytes=limit, opaque_text=_opaque_leaf_text,
+            ) - already
         except JsonBudgetExhausted as exc:
-            size = exc.consumed_bytes
-        self.value_bytes += int(size)
+            return exc.consumed_bytes - already
+
+    def _count(self, value: Any, *, holds_trees: bool, already: int = 0) -> None:
+        self.value_bytes += int(self._measure(value, holds_trees=holds_trees, already=already))
         self._enforce()
 
     def records(self, items: Iterable[Any], build: Optional[Callable[[Any], Any]] = None) -> List[Any]:
@@ -549,6 +564,7 @@ class SerializationWork:
         """
 
         if self.enabled and id(source) in self._tree_ids:
+            self._aliases += 1
             self._register_tree(derived)
 
     def _register_tree(self, built: Any) -> None:
