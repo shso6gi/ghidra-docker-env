@@ -30,8 +30,6 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     RIGHT as INPUT_RIGHT,
 )
 from scripts.function_tracer_pcode.proof.strategies.monolithic_support import (
-    active_input_authorization,
-    active_input_correspondence,
     _MonolithicReturnWidthQueryBundle,
     _monolithic_case_identity,
     _MonolithicDecisionExecutionContext,
@@ -45,17 +43,19 @@ class ReturnWidthObservationMixin:
         self,
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
+        *,
+        input_correspondence,
     ):
         runtime = getattr(self, "_obligation_runtime_session", None)
         cases1 = extract_return_cases(
             analysis1,
             self.normalization_settings,
-            authorization=active_input_authorization(self, INPUT_LEFT),
+            authorization=input_correspondence.authorization(INPUT_LEFT),
         )
         cases2 = extract_return_cases(
             analysis2,
             self.normalization_settings,
-            authorization=active_input_authorization(self, INPUT_RIGHT),
+            authorization=input_correspondence.authorization(INPUT_RIGHT),
         )
         if not cases1 or not cases2:
             return None
@@ -64,7 +64,7 @@ class ReturnWidthObservationMixin:
         base_ctx = self.formula_builder.build_base_context(
             analysis1,
             analysis2,
-            input_correspondence=active_input_correspondence(self),
+            input_correspondence=input_correspondence,
         )
         replace1 = build_symbol_replacer(
             base_ctx["params1"], base_ctx.get("extra_vars1", []), float_mode="fp"
@@ -190,10 +190,10 @@ class ReturnWidthObservationMixin:
         hints1 = infer_parameter_semantics(analysis1)
         hints2 = infer_parameter_semantics(analysis2)
         normalized1 = normalize_analysis_semantic_width(
-            analysis1, hints1, authorization=active_input_authorization(self, INPUT_LEFT)
+            analysis1, hints1, authorization=decision_context.authorization(INPUT_LEFT)
         )
         normalized2 = normalize_analysis_semantic_width(
-            analysis2, hints2, authorization=active_input_authorization(self, INPUT_RIGHT)
+            analysis2, hints2, authorization=decision_context.authorization(INPUT_RIGHT)
         )
         return align_return_value_extension_surfaces(
             normalized1,
@@ -215,12 +215,12 @@ class ReturnWidthObservationMixin:
         preliminary_cases1 = extract_return_cases(
             normalized1,
             self.normalization_settings,
-            authorization=active_input_authorization(self, INPUT_LEFT),
+            authorization=decision_context.authorization(INPUT_LEFT),
         )
         preliminary_cases2 = extract_return_cases(
             normalized2,
             self.normalization_settings,
-            authorization=active_input_authorization(self, INPUT_RIGHT),
+            authorization=decision_context.authorization(INPUT_RIGHT),
         )
         if self._return_cases_have_object_centric_total_coverage(
             preliminary_cases1
@@ -230,7 +230,7 @@ class ReturnWidthObservationMixin:
         base_ctx = self.formula_builder.build_base_context(
             normalized1,
             normalized2,
-            input_correspondence=active_input_correspondence(self),
+            input_correspondence=decision_context.input_correspondence,
         )
         if decision_context.uses_prepared_surface:
             render_analysis1, render_analysis2 = normalized1, normalized2
@@ -239,12 +239,12 @@ class ReturnWidthObservationMixin:
             render_analysis1 = normalize_analysis_semantic_width(
                 normalized1,
                 infer_parameter_semantics(normalized1),
-                authorization=active_input_authorization(self, INPUT_LEFT),
+                authorization=decision_context.authorization(INPUT_LEFT),
             )
             render_analysis2 = normalize_analysis_semantic_width(
                 normalized2,
                 infer_parameter_semantics(normalized2),
-                authorization=active_input_authorization(self, INPUT_RIGHT),
+                authorization=decision_context.authorization(INPUT_RIGHT),
             )
             render_analysis1, render_analysis2 = align_return_value_extension_surfaces(
                 render_analysis1,
@@ -253,12 +253,12 @@ class ReturnWidthObservationMixin:
         cases1 = extract_return_cases(
             render_analysis1,
             self.normalization_settings,
-            authorization=active_input_authorization(self, INPUT_LEFT),
+            authorization=decision_context.authorization(INPUT_LEFT),
         )
         cases2 = extract_return_cases(
             render_analysis2,
             self.normalization_settings,
-            authorization=active_input_authorization(self, INPUT_RIGHT),
+            authorization=decision_context.authorization(INPUT_RIGHT),
         )
         replace1 = build_symbol_replacer(
             base_ctx["params1"],

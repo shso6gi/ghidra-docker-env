@@ -7,7 +7,6 @@ from functools import cmp_to_key
 from typing import Any, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
-from scripts.function_tracer_pcode.core.storage import storage_identity_key_of as _storage_identity_key
 from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
@@ -19,7 +18,10 @@ from scripts.function_tracer_pcode.analysis.condition.simplifier import Conditio
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
 from scripts.function_tracer_pcode.semantics.param_semantics import hint_objects_by_identity
 from scripts.function_tracer_pcode.semantics.rewrite_contract import RewriteAuthorization
-from scripts.function_tracer_pcode.semantics.semantic_width import SemanticWidthNormalizer
+from scripts.function_tracer_pcode.semantics.semantic_width import (
+    SemanticWidthNormalizer,
+    parameter_metadata_synchronizer,
+)
 from scripts.function_tracer_pcode.semantics.normalize import (
     normalize_expression,
     NormalizationContext,
@@ -295,7 +297,7 @@ def _build_condition_rewriter(
     analysis: FunctionReturnAnalysis,
     authorization: Optional[RewriteAuthorization] = None,
 ):
-    parameter_rewriter = _ParameterMetadataRewriter(getattr(analysis, "parameters", []) or [])
+    parameter_rewriter = parameter_metadata_synchronizer(getattr(analysis, "parameters", []) or [])
     semantic_rewriter = SemanticWidthNormalizer(
         hint_objects_by_identity(analysis),
         authorization,
@@ -304,130 +306,10 @@ def _build_condition_rewriter(
     def rewrite(expr: Expression | None) -> Expression | None:
         if expr is None:
             return None
-        metadata_normalized = parameter_rewriter.rewrite(expr)
+        metadata_normalized = parameter_rewriter(expr)
         return semantic_rewriter(metadata_normalized)
 
     return rewrite
-
-
-class _ParameterMetadataRewriter:
-    """Align parameter Expression objects with the active analysis descriptors."""
-
-    def __init__(self, parameters):
-        self._params_by_index: Dict[int, Dict[str, Any]] = {}
-        self._params_by_storage: Dict[Tuple[object, ...], Dict[str, Any]] = {}
-        params_by_storage: Dict[Tuple[object, ...], List[Dict[str, Any]]] = {}
-        for parameter in parameters or []:
-            descriptor = dict(parameter or {})
-            index = descriptor.get("index")
-            if isinstance(index, int) and index >= 0:
-                self._params_by_index[index] = descriptor
-            storage_key = _storage_identity_key(descriptor.get("storage_info", descriptor.get("storage")))
-            if storage_key is not None:
-                params_by_storage.setdefault(storage_key, []).append(descriptor)
-        self._params_by_storage = {
-            storage_key: descriptors[0]
-            for storage_key, descriptors in params_by_storage.items()
-            if len(descriptors) == 1
-        }
-
-    def rewrite(self, expr: Expression | None) -> Expression | None:
-        if expr is None:
-            return None
-        if expr.expr_type == ExpressionType.PARAMETER:
-            return self._rewrite_parameter(expr)
-        if expr.expr_type == ExpressionType.PHI and expr.value:
-            return self._rewrite_phi(expr)
-
-        operands = getattr(expr, "operands", None) or []
-        if not operands:
-            return expr
-        rewritten_operands = [self.rewrite(operand) for operand in operands]
-        if all(new is old for new, old in zip(rewritten_operands, operands)):
-            return expr
-        return _clone_expression_with(expr, operands=rewritten_operands)
-
-    def _rewrite_parameter(self, expr: Expression) -> Expression:
-        descriptor = None
-        has_index = isinstance(expr.value, int) and expr.value >= 0
-        if has_index:
-            descriptor = self._params_by_index.get(expr.value)
-        else:
-            storage_key = _storage_identity_key(getattr(expr, "storage_info", None))
-            if storage_key is not None:
-                descriptor = self._params_by_storage.get(storage_key)
-        if descriptor is None:
-            return expr
-
-        desired_size = int(descriptor.get("size", 0) or 0)
-        desired_type = descriptor.get("data_type") or expr.data_type
-        desired_index = descriptor.get("index", expr.value)
-        if (
-            desired_size <= 0
-            or (
-                desired_size == expr.size
-                and desired_type == expr.data_type
-                and desired_index == expr.value
-            )
-        ):
-            return expr
-
-        return Expression(
-            expr_type=expr.expr_type,
-            value=desired_index,
-            operator=expr.operator,
-            operands=list(expr.operands or []),
-            size=desired_size,
-            name=expr.name,
-            data_type=desired_type,
-            data_type_obj=getattr(expr, "data_type_obj", None),
-            storage_info=expr.storage_info,
-            read_order_key=expr.read_order_key,
-            runtime_ref=getattr(expr, "runtime_ref", None),
-            opcode=getattr(expr, "opcode", None),
-        )
-
-    def _rewrite_phi(self, expr: Expression) -> Expression:
-        changed = False
-        branches = []
-        for condition, value in expr.value:
-            rewritten_condition = None
-            if condition is not None:
-                rewritten_condition_expr = self.rewrite(condition.expression)
-                rewritten_condition = Condition(rewritten_condition_expr, condition.negated)
-                changed = changed or (rewritten_condition_expr is not condition.expression)
-            rewritten_value = self.rewrite(value)
-            changed = changed or (rewritten_value is not value)
-            branches.append((rewritten_condition, rewritten_value))
-
-        if not changed:
-            return expr
-        rebuilt = Expression.phi(branches)
-        rebuilt.size = expr.size
-        rebuilt.data_type = expr.data_type
-        rebuilt.data_type_obj = getattr(expr, "data_type_obj", None)
-        rebuilt.storage_info = expr.storage_info
-        rebuilt.read_order_key = expr.read_order_key
-        rebuilt.runtime_ref = getattr(expr, "runtime_ref", None)
-        return rebuilt
-
-
-def _clone_expression_with(expr: Expression, *, operands) -> Expression:
-    return Expression(
-        expr_type=expr.expr_type,
-        value=expr.value,
-        operator=expr.operator,
-        operands=list(operands or []),
-        size=expr.size,
-        name=expr.name,
-        data_type=expr.data_type,
-        data_type_obj=getattr(expr, "data_type_obj", None),
-        storage_info=expr.storage_info,
-        read_order_key=expr.read_order_key,
-        runtime_ref=getattr(expr, "runtime_ref", None),
-        opcode=getattr(expr, "opcode", None),
-    )
-
 
 
 def _runtime_summary_guard_conditions(

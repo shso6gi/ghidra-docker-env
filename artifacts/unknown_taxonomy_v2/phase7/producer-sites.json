@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "bdf1d23493ec554f6530cdc863db65a1360f9b89bb133f1995c9359495700946",
+  "manifest_digest": "c28c9b385d35c951c556e21a1756a033e790478f4b80ef5d0f75868d492a9911",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 32,
   "sites": [
@@ -1104,10 +1104,10 @@
       "emitter": "emit_sat_safety_signal",
       "enclosing_function": "check",
       "expected_cause_slots": [],
-      "line": 1345,
+      "line": 1346,
       "path": "scripts/function_tracer_pcode/proof/strategies/monolithic.py",
       "producer_site_manifest_id": "safe-counterexample-monolithic-production",
-      "source_sha256": "7a817a629dac3e87c07d8d2c30e1ef10c22649f7a0ab41428dfcb17b89fb10ed"
+      "source_sha256": "22533d9b79df73a05a1e9483ca51138c28696be2312d258162e4712f2bca3643"
     },
     {
       "allowed_dispositions": [

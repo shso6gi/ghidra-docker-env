@@ -220,11 +220,11 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                 source_analysis1, source_analysis2
             )
         # Issue #167: この check の builder / normalizer / decisive gate は全部
-        # この 1 つの relation を使う（mixin は monolithic_support 経由で読む）。
-        self._active_input_correspondence = input_correspondence
+        # この 1 つの relation を使う（mixin へは decision context と引数で渡す）。
         decision_context = _MonolithicDecisionExecutionContext.create(
             analysis1,
             analysis2,
+            input_correspondence=input_correspondence,
             decision_surface=(
                 "prepared" if dispatch_frame is not None else "legacy_source"
             ),
@@ -371,6 +371,7 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                         ),
                         QueryExecutionRecord=QueryExecutionRecord,
                         started_at=start_time,
+                        input_correspondence=input_correspondence,
                         base_ctx=region_base_ctx,
                         expected_query_set=expected_query_set,
                         shared_region_session=shared_region_session,
@@ -401,7 +402,7 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                 except ReturnWidthMismatchError:
                     canonical_width_observation = (
                         self._canonical_return_width_observation_for_analyses(
-                            analysis1, analysis2
+                            analysis1, analysis2, input_correspondence=input_correspondence
                         )
                     )
                     bridge_narrow_bits = (

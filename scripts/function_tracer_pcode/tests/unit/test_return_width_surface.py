@@ -46,6 +46,7 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.core.structural import expression_provenance_key
 import scripts.function_tracer_pcode.proof.strategies.monolithic_return_width as _mx_monolithic_return_width
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 def _analysis(binary_id, entry, storage_bits, *, extension=None):
@@ -944,6 +945,7 @@ def test_monolithic_replay_reuses_original_query_bundle_and_fails_closed(monkeyp
         left,
         right,
         decision_surface="legacy_source",
+        input_correspondence=build_input_correspondence_set(left, right),
     ).with_return_width_query_bundle(bundle)
     strategy = module.MonolithicStrategy(Mock(), Mock())
     base_ctx = {"return_size1": 32, "return_size2": 64}

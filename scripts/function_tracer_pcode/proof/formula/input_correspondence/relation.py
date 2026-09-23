@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.evidence import (
@@ -160,9 +160,19 @@ def _relation_for_pair(
             (f"missing_side:only_{present}",),
         )
 
+    # 同じ入力を別名で読む箇所（register 別名、未解決 leaf、宣言と幅の違う leaf）は
+    # どの規則の tie にも入らない。どの relation になっても十分性を持たない。
+    hidden = tuple(
+        f"{side}:{ref}"
+        for side, parameter in ((LEFT, left), (RIGHT, right))
+        for ref in contexts[side].hidden_inputs(parameter)
+    )
+
     # R1 / R2 / R2'
     bound = _extension_bound(left, right, contexts)
     if bound is not None:
+        if hidden:
+            return replace(bound, decisive_sufficient=False, evidence=("hidden_input", *hidden))
         return bound
 
     min_bits = min(left.bit_width, right.bit_width)
@@ -174,16 +184,15 @@ def _relation_for_pair(
         left_closed, _ = contexts[LEFT].closed_at(left, bits)
         right_closed, _ = contexts[RIGHT].closed_at(right, bits)
         if left_closed and right_closed:
+            if hidden:
+                return InputCorrespondence(
+                    left, right, InputRelationKind.SEMANTIC_PROJECTION, "R3", bits, (), False,
+                    ("hidden_input", *hidden),
+                )
             return InputCorrespondence(
                 left, right, InputRelationKind.SEMANTIC_PROJECTION, "R3", bits, (), True,
                 (f"closure:left@{bits}", f"closure:right@{bits}"),
             )
-
-    hidden = tuple(
-        f"{side}:{ref}"
-        for side, parameter in ((LEFT, left), (RIGHT, right))
-        for ref in contexts[side].hidden_inputs(parameter)
-    )
 
     # R4
     if left.bit_width == right.bit_width:

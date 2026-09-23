@@ -439,6 +439,11 @@ def _impl__readonly_projection_extension_proof_content_is_complete(
     # 入力 extension の出所は最終 InputCorrespondence だけ（Issue #167）。Ghidra の
     # 推論型や semantic hint を出所とする proof は受理しない。記録された entailed
     # 仮定が、proof content の parameter・幅・ext の種類と一致していること。
+    # relation との束縛: proof は producer がこの check の relation から作り、この
+    # check の prepared analysis object にだけ記録する。prepared pair は certificate で
+    # その relation の digest に束縛されているので、別の relation で作った proof が
+    # 同じ object に載ることはない。この gate は pinned 実装（producer-proof bundle）で
+    # relation を引数に取らないため、digest はここでは形式だけを検査する。
     expected_assumption = (
         "rewrite_assumption_v1",
         parameter_index,

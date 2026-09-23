@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 from scripts.function_tracer_pcode.core import (
@@ -952,17 +952,19 @@ def _expression_bit_width(expr: Optional[Expression]) -> int:
     return 0
 
 
-def _synchronize_parameter_expression_metadata(
-    analysis: FunctionReturnAnalysis,
-) -> FunctionReturnAnalysis:
-    parameters = list(analysis.parameters or [])
-    if not parameters:
-        return analysis
+def parameter_metadata_synchronizer(parameters: Any) -> Callable[[Optional[Expression]], Optional[Expression]]:
+    """PARAMETER leaf の index・型・幅を parameter 表の descriptor に揃える書き換え。
+
+    意味は変えない前提の metadata 同期で、leaf は descriptor の parameter symbol
+    として描かれる。宣言と幅の違う leaf は同期で幅の情報を失うので、最終 relation の
+    closure 走査（``projection_closure``）がその leaf を hidden input として数え、
+    relation を不十分にする（Issue #167）。この同期の owner はここだけ。
+    """
 
     params_by_index: Dict[int, Dict[str, Any]] = {}
     params_by_storage_candidates: Dict[Tuple[object, ...], list[Dict[str, Any]]] = {}
-    for param in parameters:
-        descriptor = dict(param)
+    for param in list(parameters or []):
+        descriptor = dict(param or {})
         index = descriptor.get("index")
         if isinstance(index, int) and index >= 0:
             params_by_index[index] = descriptor
@@ -974,14 +976,18 @@ def _synchronize_parameter_expression_metadata(
         for storage_key, descriptors in params_by_storage_candidates.items()
         if len(descriptors) == 1
     }
+    return lambda expr: _rewrite_parameter_expression_metadata(expr, params_by_index, params_by_storage)
 
+
+def _synchronize_parameter_expression_metadata(
+    analysis: FunctionReturnAnalysis,
+) -> FunctionReturnAnalysis:
+    parameters = list(analysis.parameters or [])
+    if not parameters:
+        return analysis
     return _rewrite_analysis_expressions(
         analysis,
-        lambda expr: _rewrite_parameter_expression_metadata(
-            expr,
-            params_by_index,
-            params_by_storage,
-        ),
+        parameter_metadata_synchronizer(parameters),
         simplify_conditions=False,
     )
 

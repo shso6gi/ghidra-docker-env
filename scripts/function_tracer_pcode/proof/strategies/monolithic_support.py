@@ -98,6 +98,9 @@ class _MonolithicDecisionExecutionContext:
     analysis_object_ids: tuple[int, int]
     prepared_surface_digest: Optional[str] = None
     return_width_query_bundle: Optional[_MonolithicReturnWidthQueryBundle] = None
+    #: この check の最終 InputCorrespondence（Issue #167）。builder・normalizer・gate は
+    #: 全部これを使う。check ごとに作る値なので、入れ子の check と混ざらない。
+    input_correspondence: Any = field(default=None, repr=False, compare=False)
 
     @classmethod
     def create(
@@ -106,8 +109,11 @@ class _MonolithicDecisionExecutionContext:
         analysis2: FunctionReturnAnalysis,
         *,
         decision_surface: str,
+        input_correspondence: InputCorrespondenceSet,
         prepared_surface_digest: Optional[str] = None,
     ) -> "_MonolithicDecisionExecutionContext":
+        if type(input_correspondence) is not InputCorrespondenceSet:
+            raise TypeError("monolithic decision context requires the final InputCorrespondenceSet")
         if decision_surface not in {"prepared", "legacy_source"}:
             raise ValueError("invalid_monolithic_decision_surface")
         if decision_surface == "prepared" and not prepared_surface_digest:
@@ -118,7 +124,11 @@ class _MonolithicDecisionExecutionContext:
             decision_surface=decision_surface,
             analysis_object_ids=(id(analysis1), id(analysis2)),
             prepared_surface_digest=prepared_surface_digest,
+            input_correspondence=input_correspondence,
         )
+
+    def authorization(self, side: str):
+        return self.input_correspondence.authorization(side)
 
     def assert_bound_to(
         self,
@@ -173,24 +183,6 @@ class _MonolithicRegionExecution:
     sat_replay_census: Any = field(default=None, repr=False, compare=False)
     # Issue #167: region query の premise を描いた base context の最終 relation。
     input_correspondence: Any = field(default=None, repr=False, compare=False)
-
-
-def active_input_correspondence(strategy: Any) -> Optional[InputCorrespondenceSet]:
-    """実行中の ``check()`` が使う最終 InputCorrespondence（Issue #167）。
-
-    ``MonolithicStrategy.check`` が冒頭で dispatch frame（無ければ raw pair）から
-    1 回だけ決めて ``_active_input_correspondence`` に置く。mixin はここからだけ
-    読み、builder と normalizer へ同じ値を渡す。未設定なら None（builder は渡された
-    raw analysis から作る）。
-    """
-
-    correspondence = getattr(strategy, "_active_input_correspondence", None)
-    return correspondence if type(correspondence) is InputCorrespondenceSet else None
-
-
-def active_input_authorization(strategy: Any, side: str):
-    correspondence = active_input_correspondence(strategy)
-    return None if correspondence is None else correspondence.authorization(side)
 
 
 

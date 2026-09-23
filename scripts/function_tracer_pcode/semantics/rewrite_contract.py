@@ -241,7 +241,14 @@ _REWRITTEN_SURFACES: "weakref.WeakValueDictionary[int, Any]" = weakref.WeakValue
 
 
 def mark_rewritten_surface(analysis: Any) -> Any:
-    """書き換え（semantic-width normalize / 出力面の揃え）が作った analysis を記録して返す。"""
+    """書き換え（semantic-width normalize / 出力面の揃え）が作った analysis を記録して返す。
+
+    これは多層防御の印で、境界そのものではない: object identity で記録するので、
+    ``replace`` 等で複製した値には付かない。raw / 書き換え済みの取り違えを防ぐ主な
+    境界は (1) 最終 relation を作るのが raw の入口（dispatch frame の source pair、
+    checker の ``produce_final_input_correspondence``、互換経路の raw 引数）だけで、
+    (2) FormulaBuilder が relation を作らず必須引数として受け取ること。
+    """
 
     try:
         _REWRITTEN_SURFACES[id(analysis)] = analysis

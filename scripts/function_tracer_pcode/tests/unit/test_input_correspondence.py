@@ -729,26 +729,101 @@ def test_store_destination_through_the_parameter_register_is_a_witness():
     assert _witness(_closure(no_identity), "store_destination", "store_destination_alias_unknown")
 
 
-def test_parameter_leaf_wider_than_its_declaration_is_a_hidden_input():
-    """leaf が宣言幅（32）より広い 64 bit を読むと、上位 32 bit は parameter の外
-    （register の残り）。metadata 同期は leaf を宣言幅へ縮めるので、その bit は relation
-    のどの tie にも入らない。全幅の R4 も十分とは言えない（旧実装は COMPLETE にした）。
+@pytest.mark.parametrize(("declared", "leaf"), [(4, 8), (8, 4)])
+def test_parameter_leaf_whose_width_differs_from_its_declaration_is_a_hidden_input(declared, leaf):
+    """leaf の幅が宣言幅と違うと、metadata 同期は leaf を宣言幅の symbol に揃える。
+
+    宣言より広い leaf の上位 bit（register の残り）はどの tie にも入らず、宣言より
+    狭い leaf はどの bit を読んでいたか（big-endian の register では上位側のことも
+    ある）が同期で失われる。全幅の R4 も十分とは言えない（旧実装は COMPLETE にした）。
     """
 
-    wide_leaf = _param("x", 8)
-    for value in (wide_leaf, _low(wide_leaf, 4)):
+    wrong_width_leaf = _param("x", leaf)
+    for value in (wrong_width_leaf, _low(wrong_width_leaf, min(declared, leaf) // 2 or 1)):
         def analysis():
-            return _analysis("f", [_desc("x", 4)], [_ret(value)])
+            return _analysis("f", [_desc("x", declared)], [_ret(value)], return_type="long")
 
-        demand = scan_parameter_demand(analysis(), 0, 32)
-        assert any(item.reason == "parameter_leaf_wider_than_declaration" for item in demand.hidden_inputs)
+        demand = scan_parameter_demand(analysis(), 0, declared * 8)
+        assert any(
+            item.reason == "parameter_leaf_width_differs_from_declaration" for item in demand.hidden_inputs
+        )
         relation = build_input_correspondence_set(analysis(), analysis())
         (item,) = relation.correspondences
-        assert item.kind is InputRelationKind.FULL_REGISTER_EQUALITY
+        # 裸の leaf は R4、狭い extract の下なら closure は成り立つので R3。どちらでも
+        # hidden input が十分性を壊す。
+        assert item.kind in {InputRelationKind.FULL_REGISTER_EQUALITY, InputRelationKind.SEMANTIC_PROJECTION}
         assert not item.decisive_sufficient
+        assert item.evidence[0] == "hidden_input"
 
-    narrow_leaf = _analysis("f", [_desc("x", 4)], [_ret(_param("x", 4))])
-    assert scan_parameter_demand(narrow_leaf, 0, 32).hidden_inputs == ()
+    same_width = _analysis("f", [_desc("x", 4)], [_ret(_param("x", 4))])
+    assert scan_parameter_demand(same_width, 0, 32).hidden_inputs == ()
+
+
+def _alias_pair(*, left_iee: bool):
+    """左は 64 bit の a0 parameter と、同じ a0 を別名で読む ``in_a0_hi``。"""
+
+    a0 = StorageInfo(
+        is_register=True, space_name="register", offset=0x20, size=8, size_bits=64,
+        register_name="a0", base_register_name="a0", base_register_offset=0x20,
+        base_register_size=8, base_register_size_bits=64,
+    )
+    a0_hi = StorageInfo(
+        is_register=True, space_name="register", offset=0x20, size=4, size_bits=32,
+        register_name="a0_hi", base_register_name="a0", base_register_offset=0x20,
+        base_register_size=8, base_register_size_bits=64,
+    )
+    x = _param("x", 8, storage_info=a0)
+    hi = Expression(ExpressionType.VARIABLE, name="in_a0_hi", size=4, storage_info=a0_hi)
+    left = _with_binary(_analysis(
+        "f", [_desc("x", 8, storage_info=a0)],
+        [_ret(_bin("INT_ADD", _low(x, 4), hi, 4))],
+    ), "L")
+    right = _with_binary(_analysis("f", [_desc("x", 4)], [_ret(_param("x", 4))]), "R")
+    evidence = ()
+    if left_iee:
+        evidence = (_synthetic_iee(left, 0, logical_bits=32, storage_bits=64, kind=ExtensionKind.SIGN),)
+    return build_input_correspondence_set(left, right, input_extension_evidence=evidence)
+
+
+def test_hidden_input_makes_an_extension_bound_insufficient():
+    """R2 でも同じ register の別名読み（relation の外の自由 symbol）は十分性を壊す。
+
+    修正前は R1/R2/R2' を hidden input の検査より先に返していた（IEE があると COMPLETE）。
+    """
+
+    without = _alias_pair(left_iee=False)
+    (item,) = without.correspondences
+    assert (item.kind, item.decisive_sufficient) == (InputRelationKind.WIDTH_OVERLAP, False)
+
+    with_iee = _alias_pair(left_iee=True)
+    (item,) = with_iee.correspondences
+    assert item.kind is InputRelationKind.EXTENSION_BOUND
+    assert item.entailed  # 仮定そのものは入力の値について正しいので書き換えには使える
+    assert not item.decisive_sufficient
+    assert item.evidence[0] == "hidden_input"
+    assert with_iee.status is InputCorrespondenceStatus.INSUFFICIENT
+
+
+def test_stack_passed_parameter_read_through_an_alias_is_a_hidden_input():
+    """stack で渡された parameter の slot を ``in_stack_…`` で読むと、その bit は tie の外。"""
+
+    slot = StorageInfo(is_register=False, space_name="stack", space_id=3, offset=8, size=8)
+    alias = StorageInfo(is_register=False, space_name="stack", space_id=3, offset=12, size=4)
+    other = StorageInfo(is_register=False, space_name="stack", space_id=3, offset=16, size=4)
+    x = _param("x", 8, storage_info=slot)
+
+    def analysis(variable_storage):
+        high = Expression(ExpressionType.VARIABLE, name="in_stack_c", size=4, storage_info=variable_storage)
+        return _analysis(
+            "f", [_desc("x", 8, storage_info=slot)],
+            [_ret(_bin("INT_ADD", _low(x, 4), high, 4))],
+        )
+
+    demand = scan_parameter_demand(analysis(alias), 0, 64)
+    assert any(item.reason == "memory_alias" for item in demand.hidden_inputs)
+    (item,) = build_input_correspondence_set(analysis(alias), analysis(alias)).correspondences
+    assert not item.decisive_sufficient
+    assert scan_parameter_demand(analysis(other), 0, 64).hidden_inputs == ()
 
 
 def test_loop_renderer_takes_the_final_relation_instead_of_rebuilding_it():

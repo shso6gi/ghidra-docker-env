@@ -25,7 +25,6 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor impo
     execute_guard_overlap,
 )
 from scripts.function_tracer_pcode.proof.strategies.monolithic_support import (
-    active_input_correspondence,
     _monolithic_case_identity,
     _MonolithicRegionPlan,
     _MonolithicRegionExecution,
@@ -130,6 +129,7 @@ class RegionExecutionMixin:
         call_width_receipt_assertion_digests: Tuple[Tuple[str, str], ...],
         QueryExecutionRecord,
         started_at: float,
+        input_correspondence: Any,
         base_ctx: Optional[Mapping[str, Any]] = None,
         expected_query_set: Any = None,
         shared_region_session: Any = None,
@@ -145,7 +145,7 @@ class RegionExecutionMixin:
             else self.formula_builder.build_base_context(
                 analysis1,
                 analysis2,
-                input_correspondence=active_input_correspondence(self),
+                input_correspondence=input_correspondence,
             )
         )
         if call_projection_assertions and not base_ctx_was_provided:
@@ -385,7 +385,7 @@ class RegionExecutionMixin:
                 replay = self.formula_builder.build_equivalence_formula_extended(
                     analysis1,
                     analysis2,
-                    input_correspondence=active_input_correspondence(self),
+                    input_correspondence=input_correspondence,
                     extra_assertions=[
                         *list(call_projection_assertions),
                         *list(model_assertions),

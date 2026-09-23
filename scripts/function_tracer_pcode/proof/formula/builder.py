@@ -39,7 +39,6 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
 )
 from scripts.function_tracer_pcode.proof.formula.params import (
     build_symbol_name_mapping,
-    collect_param_info,
     merge_param_and_extra_vars,
 )
 from scripts.function_tracer_pcode.proof.formula.returns import (
@@ -1969,14 +1968,6 @@ class FormulaBuilder:
         if int(return_bits) == int(narrow_bits):
             return return_var
         return f"((_ extract {int(narrow_bits) - 1} 0) {return_var})"
-    
-    def _collect_param_info(
-        self,
-        params: List[Dict],
-        suffix: str
-    ) -> List[ParameterInfo]:
-        """パラメータ情報を収集"""
-        return collect_param_info(params, suffix)
     
     def _get_return_size(self, analysis: FunctionReturnAnalysis) -> int:
         """return値のビット幅を取得"""

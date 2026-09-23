@@ -12,12 +12,14 @@ from scripts.function_tracer_pcode.proof.formula import builder as formula_build
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.proof.formula.types import ExtraVariableInfo, ParameterInfo
-from scripts.function_tracer_pcode.semantics.semantic_width import RETURN_EXTENSION_SURFACE_SOURCE
+from scripts.function_tracer_pcode.semantics.semantic_width import (
+    RETURN_EXTENSION_SURFACE_SOURCE,
+    parameter_metadata_synchronizer,
+)
 from scripts.function_tracer_pcode.proof.strategies import monolithic as monolithic_module
 from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
 from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
-    _ParameterMetadataRewriter,
     build_pair_query,
     extract_return_cases,
 )
@@ -1263,14 +1265,14 @@ def test_extract_return_cases_rewrites_parameter_metadata_by_index_before_name()
 
 def test_pairwise_parameter_metadata_rewriter_does_not_infer_index_from_position():
     stale_index_param = Expression.parameter("stale_count", index=1, data_type="short", size=2)
-    rewriter = _ParameterMetadataRewriter(
+    rewriter = parameter_metadata_synchronizer(
         [
             {"name": "base", "size": 8, "data_type": "int *"},
             {"name": "count", "size": 4, "data_type": "int"},
         ]
     )
 
-    rewritten_param = rewriter.rewrite(stale_index_param)
+    rewritten_param = rewriter(stale_index_param)
 
     assert rewritten_param.value == 1
     assert rewritten_param.name == "stale_count"
@@ -1280,13 +1282,13 @@ def test_pairwise_parameter_metadata_rewriter_does_not_infer_index_from_position
 
 def test_pairwise_parameter_metadata_rewriter_does_not_rewrite_indexed_expr_by_name():
     stale_index_param = Expression.parameter("count", index=7, data_type="long", size=8)
-    rewriter = _ParameterMetadataRewriter(
+    rewriter = parameter_metadata_synchronizer(
         [
             {"name": "count", "size": 4, "data_type": "int"},
         ]
     )
 
-    rewritten_param = rewriter.rewrite(stale_index_param)
+    rewritten_param = rewriter(stale_index_param)
 
     assert rewritten_param.value == 7
     assert rewritten_param.name == "count"
@@ -1296,13 +1298,13 @@ def test_pairwise_parameter_metadata_rewriter_does_not_rewrite_indexed_expr_by_n
 
 def test_pairwise_parameter_metadata_rewriter_does_not_rewrite_no_index_expr_by_name():
     name_only_param = Expression.parameter("count", data_type="long", size=8)
-    rewriter = _ParameterMetadataRewriter(
+    rewriter = parameter_metadata_synchronizer(
         [
             {"name": "count", "index": 0, "size": 4, "data_type": "int"},
         ]
     )
 
-    rewritten_param = rewriter.rewrite(name_only_param)
+    rewritten_param = rewriter(name_only_param)
 
     assert rewritten_param.value == -1
     assert rewritten_param.name == "count"
@@ -1320,7 +1322,7 @@ def test_pairwise_parameter_metadata_rewriter_rewrites_no_index_expr_by_storage_
         size_bits=64,
     )
     storage_param = Expression.parameter("stale_count", data_type="long", size=8, storage_info=storage)
-    rewriter = _ParameterMetadataRewriter(
+    rewriter = parameter_metadata_synchronizer(
         [
             {
                 "name": "count",
@@ -1332,7 +1334,7 @@ def test_pairwise_parameter_metadata_rewriter_rewrites_no_index_expr_by_storage_
         ]
     )
 
-    rewritten_param = rewriter.rewrite(storage_param)
+    rewritten_param = rewriter(storage_param)
 
     assert rewritten_param.value == 0
     assert rewritten_param.name == "stale_count"

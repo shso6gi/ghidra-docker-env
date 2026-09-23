@@ -107,7 +107,8 @@ HIDDEN_INPUT_REASONS = frozenset({
     "register_alias_unknown",
     "parameter_storage_unknown",
     "parameter_identity_unknown",
-    "parameter_leaf_wider_than_declaration",
+    "memory_alias",
+    "parameter_leaf_width_differs_from_declaration",
 })
 
 
@@ -218,6 +219,14 @@ def _variable_aliases_target(node: Any, target: _ParameterTarget) -> Optional[st
     if storage is None:
         return "variable_storage_unknown"
     if not getattr(storage, "is_register", False):
+        # stack で渡された parameter の slot を別名で読む変数（``in_stack_…``）。
+        variable_key = _storage_identity_key(storage)
+        if (
+            variable_key is not None
+            and target.storage_key is not None
+            and _storage_keys_overlap(tuple(variable_key), tuple(target.storage_key))
+        ):
+            return "memory_alias"
         return None
     if target.storage is None or not getattr(target.storage, "is_register", False):
         return "parameter_storage_unknown"
@@ -229,20 +238,25 @@ def _variable_aliases_target(node: Any, target: _ParameterTarget) -> Optional[st
     return None
 
 
-def _wider_than_declaration(leaf: Any, target: _ParameterTarget) -> Optional[Tuple[str, str]]:
-    """target の leaf が宣言幅より広い bit を読むなら hidden input の理由。
+def _width_differs_from_declaration(leaf: Any, target: _ParameterTarget) -> Optional[Tuple[str, str]]:
+    """target の leaf の幅が宣言幅と違うなら hidden input の理由。
 
-    lowering は leaf を宣言幅の parameter symbol として描く（metadata 同期で幅も
-    宣言幅へ揃う）ので、宣言を超える bit（register の残り）は relation のどの tie
-    にも入らない入力になる。
+    lowering は leaf を宣言幅の parameter symbol として描き、metadata 同期
+    （``semantic_width._synchronize_parameter_expression_metadata``）は leaf の幅を
+    宣言幅へ揃える。宣言より広い leaf の上位 bit（register の残り）はどの tie にも
+    入らず、宣言より狭い leaf はどの bit を読んでいたか（big-endian の register では
+    上位側のこともある）が同期で失われる。どちらも relation では対応が言えない。
     """
 
     try:
         leaf_bits = int(leaf.get_bit_width())
     except (AttributeError, TypeError, ValueError):
-        return ("parameter_leaf_wider_than_declaration", _node_label(leaf) + ":width_unknown")
-    if leaf_bits > int(target.bit_width):
-        return ("parameter_leaf_wider_than_declaration", f"{_node_label(leaf)}:{leaf_bits}>{target.bit_width}")
+        return ("parameter_leaf_width_differs_from_declaration", _node_label(leaf) + ":width_unknown")
+    if leaf_bits != int(target.bit_width):
+        return (
+            "parameter_leaf_width_differs_from_declaration",
+            f"{_node_label(leaf)}:{leaf_bits}!={target.bit_width}",
+        )
     return None
 
 
@@ -264,7 +278,7 @@ def _subpiece_demand(node: Any, target: _ParameterTarget) -> Optional[_Demand]:
         return _broken("extract_width_unknown", _node_label(node))
     if byte_offset < 0 or result_bits <= 0:
         return _broken("extract_width_unknown", _node_label(node))
-    return _Demand(byte_offset * 8 + result_bits, hidden=_wider_than_declaration(source, target))
+    return _Demand(byte_offset * 8 + result_bits, hidden=_width_differs_from_declaration(source, target))
 
 
 def _structural_fragment_witness(node: Any, target: _ParameterTarget) -> Optional[Tuple[str, str]]:
@@ -310,14 +324,14 @@ def _evaluate_node(node: Any, target: _ParameterTarget, child: Callable[[Any], _
     if kind == ExpressionType.PARAMETER:
         occurrence = _parameter_occurrence(node, target)
         if occurrence == "match":
-            return _Demand(0, ("bare_parameter", _node_label(node)), _wider_than_declaration(node, target))
+            return _Demand(0, ("bare_parameter", _node_label(node)), _width_differs_from_declaration(node, target))
         if occurrence == "unknown":
             return _broken("parameter_identity_unknown", _node_label(node))
         return _NO_DEMAND
     if kind == ExpressionType.VARIABLE:
         occurrence = _variable_occurrence(node, target)
         if occurrence == "match":
-            return _Demand(0, ("bare_parameter", _node_label(node)), _wider_than_declaration(node, target))
+            return _Demand(0, ("bare_parameter", _node_label(node)), _width_differs_from_declaration(node, target))
         if occurrence == "other":
             return _NO_DEMAND
         alias = _variable_aliases_target(node, target)

@@ -144,14 +144,18 @@ def _pair_digest(pair: Tuple[Any, Any]) -> str:
     return _digest(tuple(_analysis_digest(item) for item in pair))
 
 
-def _normalize_source_pair(source_pair: "StrategySourceAnalysisPair") -> Tuple[Any, Any]:
+def _normalize_source_pair(
+    source_pair: "StrategySourceAnalysisPair",
+    correspondence: Optional[InputCorrespondenceSet] = None,
+) -> Tuple[Any, Any]:
     """raw source を、その raw から決めた最終 relation の authorization で書き換える。
 
-    prepared surface の構築と certificate の独立再構築はどちらもここを通るので、
-    二重 normalize が同じ authorization を使うことが構造で保証される。
+    prepared surface の構築と certificate の独立再構築はどちらもここを通る。再構築は
+    relation も raw から作り直して渡す（cache を読むと relation の照合が自己一致になる）。
     """
 
-    correspondence = source_pair.input_correspondence()
+    if correspondence is None:
+        correspondence = source_pair.input_correspondence()
     return (
         _trusted_normalize_semantic_width(
             source_pair.analysis1,
@@ -311,7 +315,9 @@ class NormalizationCertificate:
 
     @staticmethod
     def _rebuild_candidate(source_pair: "StrategySourceAnalysisPair") -> Tuple[Any, Any]:
-        return _trusted_align_return_surfaces(*_normalize_source_pair(source_pair))
+        return _trusted_align_return_surfaces(
+            *_normalize_source_pair(source_pair, source_pair.rebuild_input_correspondence())
+        )
 
     def validate(self, source_pair: "StrategySourceAnalysisPair", candidate_pair: Tuple[Any, Any]) -> bool:
         if self.status != "proven":
@@ -327,7 +333,7 @@ class NormalizationCertificate:
             return False
         if self.transformation_kind != "trusted_semantic_width_normalization":
             return False
-        if source_pair.input_correspondence().digest != self.input_correspondence_digest:
+        if source_pair.rebuild_input_correspondence().digest != self.input_correspondence_digest:
             return False
         if not self.surface_delta_audit.validate(source_pair, candidate_pair):
             return False
@@ -426,6 +432,17 @@ class StrategySourceAnalysisPair:
             )
             object.__setattr__(self, "_input_correspondence_cache", cached)
         return cached
+
+    def rebuild_input_correspondence(self) -> InputCorrespondenceSet:
+        """cache を使わず raw から最終 relation を作り直す（certificate の独立検査用）。"""
+
+        if not self.is_unchanged():
+            raise ValueError("prepared_analysis_mutated")
+        return build_input_correspondence_set(
+            self.analysis1,
+            self.analysis2,
+            input_extension_evidence=self.input_extension_evidence,
+        )
 
     def current_side_digests(self) -> Tuple[str, str]:
         return (

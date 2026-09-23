@@ -431,6 +431,75 @@ def test_comparison_of_parameter_needs_the_entailed_extension(rule, op, assumpti
     assert counterexample_exists(original, rewritten, [("p", 64)])
 
 
+@pytest.mark.parametrize("op", ["INT_LESS", "INT_EQUAL"])
+def test_comparison_through_a_mask_image_is_certified(op):
+    """``p & 0xffffffff`` は恒等的に zext 像（mask 規則が発火しない signed hint でも）。"""
+
+    masked = _bin("INT_AND", p64, _const(0xFFFFFFFF, 8), 8)
+    original = _bin(op, masked, _const(0x10, 8), 1)
+    hints = _hints(i0=ParameterSemanticHint(32, "signed"))
+    rule = "unsigned_order_on_zero_extension_images" if op == "INT_LESS" else "equality_on_extension_images"
+    certify(rule, original, [("p", 64)], hints=hints)
+
+
+@pytest.mark.parametrize("constant", [5, 0xFFFFFFFFFFFFFFFB, 0x7FFFFFFF])
+def test_comparison_of_a_syntactic_image_with_a_constant_in_its_image(constant):
+    original = _bin("INT_SLESS", _un("INT_SEXT", a32, 8), _const(constant, 8), 1)
+    certify("signed_order_on_sign_extension_images", original, [("a", 32)])
+
+
+def test_normalize_analysis_preserves_every_return_value_and_condition():
+    """analysis 全体の書き換え（metadata 同期・規則・条件の簡約）でも、各 return の値と
+    条件が元と同じ意味（全入力で一致）であること。"""
+
+    from scripts.function_tracer_pcode.core import Condition, ReturnInfo
+    from scripts.function_tracer_pcode.semantics.semantic_width import normalize_analysis_semantic_width
+    from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
+
+    ring = _low(_bin("INT_ADD", _un("INT_SEXT", a32, 8), _un("INT_ZEXT", b32, 8), 8), 4)
+    guard = _bin("INT_SLESS", _un("INT_SEXT", a32, 8), _const(0xFFFFFFFFFFFFFFFB, 8), 1)
+    zero_guard = _bin("INT_EQUAL", b32, _const(0, 8), 1)
+    analysis = create_mock_analysis(
+        "f",
+        parameters=[
+            {"name": "a", "index": 0, "size": 4, "data_type": "int", "is_signed": True},
+            {"name": "b", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        returns=[
+            ReturnInfo(address="0x1000", conditions=[Condition(guard), Condition(zero_guard, True)], value=ring),
+            ReturnInfo(address="0x1004", conditions=[Condition(guard, True)], value=_const(0, 4)),
+        ],
+    )
+    normalized = normalize_analysis_semantic_width(analysis)
+    params = [("a", 32), ("b", 32)]
+    changed = 0
+    for before, after in zip(analysis.returns, normalized.returns):
+        pairs = [(before.value, after.value)]
+        # 条件は簡約で並びや個数が変わり得るので、連言どうしを比べる。
+        pairs.append((
+            _conjunction(before.conditions),
+            _conjunction(after.conditions),
+        ))
+        for original, rewritten in pairs:
+            if publish(original).to_smt() != publish(rewritten).to_smt():
+                changed += 1
+            assert _check(_declarations(params) + _differs(original, rewritten)) == z3.unsat
+    assert changed
+
+
+def _conjunction(conditions):
+    """条件列を 1 つの Bool 式にする（test 用。lowering は Condition と同じ）。"""
+
+    expr = Expression(ExpressionType.CONSTANT, value=1, size=1)
+    expr = _bin("INT_EQUAL", expr, _const(1, 1), 1)
+    for condition in conditions:
+        term = condition.expression
+        if condition.negated:
+            term = _un("BOOL_NEGATE", term, 1)
+        expr = _bin("BOOL_AND", expr, term, 1)
+    return expr
+
+
 def test_signed_to_unsigned_comparison_conversion_is_not_performed():
     """v5 §4.6 必須反例: ``sext32(0x80000000) <u 0`` は偽、``<s 0`` は真。
 
