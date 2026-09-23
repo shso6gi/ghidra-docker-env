@@ -917,3 +917,31 @@ def test_the_cli_reports_an_envelope_violation_as_an_internal_error(monkeypatch,
     # 確定済みの判定は ERROR の証跡に残す（UNKNOWN にも書き換えない）
     assert "decided_outcome=UNKNOWN" in payload["error_message"]
     assert decided.decision_receipt.receipt_digest in payload["error_message"]
+
+
+def test_growing_observations_reach_the_stage_journal_logarithmically(tmp_path):
+    """kill された pair でも膨張の大きさを読めるよう、2 の冪を越えたときだけ残す。"""
+    from scripts.function_tracer_pcode.core.stage_journal import (
+        StageJournal,
+        close_active_stage_journal,
+        set_active_stage_journal,
+    )
+    from scripts.function_tracer_pcode.tests.unit.test_issue124b_stage_journal import (
+        read_journal,
+    )
+
+    path = tmp_path / "budget.stage.jsonl"
+    previous = set_active_stage_journal(StageJournal(path))
+    try:
+        with budget_policy_scope(BudgetPolicy.unlimited()):
+            for value in range(1, 1025):
+                enforce_budget(BudgetKind.EXPRESSION_NODES, value, site="s", target_key=())
+    finally:
+        close_active_stage_journal()
+        set_active_stage_journal(previous)
+    rows, _broken = read_journal(path)
+    values = [
+        row["payload"]["value"] for row in rows
+        if row["payload"].get("note") == "expression_budget_observed"
+    ]
+    assert values == [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]

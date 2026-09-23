@@ -44,6 +44,7 @@ from scripts.function_tracer_pcode.core.errors import (
     PairStopState,
     raise_limitation,
 )
+from scripts.function_tracer_pcode.core.stage_journal import journal_note
 
 
 class BudgetKind(str, Enum):
@@ -143,13 +144,28 @@ class BudgetObservations:
         self._lock = threading.Lock()
         self._maxima: Dict[Tuple[str, str], int] = {}
         self._counts: Dict[Tuple[str, str], int] = {}
+        self._journaled: Dict[Tuple[str, str], int] = {}
 
     def observe(self, kind: BudgetKind, value: int, *, site: str) -> None:
         key = (BudgetKind(kind).value, str(site))
+        value = int(value)
+        crossed = False
         with self._lock:
             self._counts[key] = self._counts.get(key, 0) + 1
-            if int(value) > self._maxima.get(key, -1):
-                self._maxima[key] = int(value)
+            if value > self._maxima.get(key, -1):
+                self._maxima[key] = value
+            # 最大値が 2 の冪を越えたときだけ journal にも残す（書き込みは値の
+            # 桁数ぶん = 対数回）。kill された pair は結果 JSON を出さないので、
+            # 膨張していった大きさを後から読めるのはここだけになる。
+            bucket = value.bit_length()
+            if bucket > self._journaled.get(key, 0):
+                self._journaled[key] = bucket
+                crossed = True
+        if crossed:
+            journal_note(
+                "expression_budget_observed",
+                {"budget": key[0], "site": key[1], "value": value},
+            )
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
