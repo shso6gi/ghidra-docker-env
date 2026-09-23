@@ -1,30 +1,12 @@
 import os
-from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.ghidra.decompilation_broker import (
-    TOP_LEVEL_SOURCE_CONTRACT,
-    decompile_function,
-)
 from scripts.function_tracer_pcode.authority.contracts import authority_digest
-from scripts.function_tracer_pcode.authority.process.operational_extraction import (
-    OPERATIONAL_REASON_REGISTRY,
-    OPERATIONAL_RECOVERY_REGISTRY,
-    OperationalBlockerSignal,
-    OperationalCompletionSignal,
-    OperationalExtractionPilotEncoder,
-)
-from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
-    ProductionDualWritePilotSession,
-    ProductionPilotExecutionIdentity,
-)
 from scripts.function_tracer_pcode.authority.process.supervisor import (
-    CheckpointState,
     DurableCheckpointStore,
     ProcessSupervisorAuthorityFactory,
 )
-from scripts.function_tracer_pcode.authority.process.census import ProcessAttemptCensusFactory
 from scripts.function_tracer_pcode.authority.process.supervisor_command import (
     CHILD_ENV_LAUNCH,
     CHILD_ENV_NONCE,
@@ -41,78 +23,6 @@ from scripts.function_tracer_pcode.authority.process.worker_runtime import (
     ProcessWorkerRuntime,
     require_canonical_supervisor_projection,
 )
-from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
-    CompositeProductionSignalEncoder,
-    production_signal_scope,
-)
-from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
-from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
-    BrokerAnalyzer,
-    BrokerDecompiler,
-    Function,
-    Program,
-    Result,
-)
-
-
-def _runtime_case(tmp_path, *, result, case):
-    manager = type("Manager", (), {
-        "getFunctions": lambda self, forward: iter(())
-    })()
-    program = Program(manager)
-    function = Function(program=program)
-    result.function = function
-    encoder = OperationalExtractionPilotEncoder()
-    session = ProductionDualWritePilotSession(
-        ProductionPilotExecutionIdentity.create({"case": case}),
-        ShadowLifecycleReducer(
-            reason_registry=OPERATIONAL_REASON_REGISTRY,
-            recovery_registry=OPERATIONAL_RECOVERY_REGISTRY,
-        ),
-        CompositeProductionSignalEncoder({
-            OperationalBlockerSignal: encoder,
-            OperationalCompletionSignal: encoder,
-        }),
-    )
-    session.domain_signal_state["operational_program_binary_identities"] = {
-        id(program): "sha256:binary",
-    }
-    process_factory = ProcessSupervisorAuthorityFactory(
-        supervisor_signing_key_id="supervisor-key-v1",
-        supervisor_signing_key=b"s" * 32,
-        worker_signing_key_id="worker-key-v1",
-        worker_signing_key=b"w" * 32,
-    )
-    launch = process_factory.issue_launch(
-        result_occurrence_id=session.identity.result_occurrence_id,
-        manifest_entry_preimage_digest="manifest-preimage",
-        execution_nonce="execution-nonce-1",
-        child_pid=os.getpid(), child_start_token="test-start-token",
-        stream_id=f"stream-{session.identity.result_occurrence_id}",
-        source_snapshot_fingerprint=session.identity.source_snapshot_fingerprint,
-        deadline_policy_digest="deadline-policy-digest",
-    )
-    store = DurableCheckpointStore(
-        tmp_path, process_factory, "execution-nonce-1"
-    )
-    store.persist_launch(launch)
-    runtime = ProcessWorkerRuntime.for_testing(
-        process_factory=process_factory, store=store, launch=launch,
-        worker_start_token="test-start-token",
-    )
-    session.domain_signal_state[
-        "unknown_taxonomy_v2_process_worker_runtime"
-    ] = runtime
-    analyzer = BrokerAnalyzer(program, BrokerDecompiler(result))
-    return session, store, analyzer, function
-
-
-def process_factory_receipt(store, filename):
-    import json
-
-    return store.factory.decode(json.loads(
-        (store.directory / filename).read_text(encoding="utf-8")
-    ))
 
 
 def test_invalid_supervisor_projection_only_invalidates_canonical_census():

@@ -203,56 +203,6 @@ class Result:
         return self.message
 
 
-def target(entry=0x1000, binary="sha256:binary", factory=None):
-    factory = factory or OperationalExtractionAuthorityFactory.for_testing()
-    return factory.target_from_fixture(
-        binary_content_identity=binary,
-        program_identity=("program", "ELF", 0x400000),
-        language_id="x86:LE:64:default",
-        compiler_spec_id="gcc",
-        function_entry=("ram", entry),
-        function_body_ranges=(("ram", entry, entry + 0x20),),
-    )
-
-
-def surface(*, signature="int(int)", factory=None):
-    factory = factory or OperationalExtractionAuthorityFactory.for_testing()
-    return factory.input_surface_from_fixture(
-        prototype_identity=("prototype", signature),
-        calling_convention_identity="__cdecl",
-        parameter_storage_identities=(("register", "RDI", 8),),
-        return_storage_identity=("register", "RAX", 8),
-    )
-
-
-def setup_invocation(*, budget=60, ordinal=1, signature="int(int)", proof_requirement_id="q-decomp"):
-    factory = OperationalExtractionAuthorityFactory.for_testing()
-    t = target(factory=factory)
-    s = surface(signature=signature, factory=factory)
-    inv = factory.issue_invocation(
-        target=t, input_surface=s, proof_requirement_id=proof_requirement_id,
-        invocation_identity=f"invocation-{ordinal}",
-        invocation_ordinal=ordinal, configured_timeout_seconds=budget,
-    )
-    return factory, t, s, inv
-
-
-def completed_chain(*, message="timeout warning", high=None, proof_requirement_id="q-decomp"):
-    factory, t, s, inv = setup_invocation(proof_requirement_id=proof_requirement_id)
-    result = Result(
-        completed=True, function=Function(), high=high, message=message,
-    )
-    observed = factory.capture_attempt_observation(inv, result)
-    attempted = factory.issue_attempt(
-        invocation=inv, observation=observed, target=t, input_surface=s,
-    )
-    artifact = factory.issue_decompilation_artifact(
-        target=t, input_surface=s, invocation=inv,
-        observation=observed, attempt=attempted,
-    )
-    return factory, t, s, inv, result, observed, attempted, artifact
-
-
 class Seq:
     def __init__(self, address, time):
         self.address = Address(address)
