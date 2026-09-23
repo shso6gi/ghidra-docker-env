@@ -9,7 +9,13 @@ from collections.abc import Mapping as _AbcMapping
 from types import MappingProxyType
 from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
-from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
+
+from scripts.function_tracer_pcode.core.canonical_digest import (
+    RawLeaf as _RawLeaf,
+    canonical_children as _canonical_children,
+    canonical_merkle_digest,
+)
 
 
 SCHEMA_VERSION = 2
@@ -82,32 +88,19 @@ def authority_digest(value: Any) -> str:
 #
 # 大きい証拠（legacy reason の object_target_key など）は authority 確定前に有界な
 # 表現へ置き換える。そのとき「canonical_value が等しいか」の照合に使う digest を、
-# canonical_value の写しを作らずに求める。`canonical_value` と同じ規則で値を辿り
-# （再帰しない）、同じ byte 列を hash へ流すので、結果は次と一致する:
+# canonical_value の写しを作らずに求める。
 #
-# * `streaming_authority_digest(v) == authority_digest(v)`
-# * `streaming_canonical_str_digest(v) == sha256(str(canonical_value(v)).encode())`
-
-_OPEN = object()
-_CLOSE = object()
-
-
-class _RawLeaf:
-    """canonical_value がそのまま返す非基底型の値（enum の値など、小さい定数）。"""
-
-    __slots__ = ("value",)
-
-    def __init__(self, value: Any) -> None:
-        self.value = value
+# * `canonical_merkle_digest(v)`（`core/canonical_digest`）— canonical_value の形の Merkle
+#   digest（**DAG-aware**: 同じ容器 object は 1 回だけ辿る）と distinct な node 数。2 つの
+#   値の digest が等しい ⇔ `canonical_value` が `==` で等しい（数値は `==` と同じく
+#   1 / 1.0 / True を同一視）。
+# * `streaming_canonical_str_digest(v)` — `sha256(str(canonical_value(v)))` と同じ値
+#   （文字列の id との照合用。木として辿るので辿る数に上限を持つ）。
 
 
 def _canonical_events(value: Any):
-    """`canonical_value(value)` の形を event 列として辿る（`_OPEN` / `_CLOSE` / 葉）。
+    """`canonical_value(value)` の形を event 列として辿る（`_OPEN` / `_CLOSE` / 葉）。"""
 
-    mapping / dataclass の 1 組は `canonical_value` と同じく 2 要素の tuple として辿る。
-    """
-
-    # (iterator, 容器か)。容器の frame が尽きたら `_CLOSE`
     stack: list = [(iter((value,)), False)]
     while stack:
         iterator, is_container = stack[-1]
@@ -125,67 +118,40 @@ def _canonical_events(value: Any):
             yield raw if raw is None or type(raw) in _PRIMITIVE_TYPES else _RawLeaf(raw)
         elif hasattr(item, "to_authority_dict"):
             stack.append((iter((item.to_authority_dict(),)), False))
-        elif is_dataclass(item):
+        elif is_dataclass(item) or isinstance(item, _AbcMapping):
             yield _OPEN
-            stack.append((_field_pairs(item), True))
-        elif isinstance(item, _AbcMapping):
-            yield _OPEN
-            stack.append((_mapping_pairs(item), True))
+            stack.append((iter(_canonical_children(item)), True))
         elif isinstance(item, (list, tuple)):
             yield _OPEN
             stack.append((iter(item), True))
         elif isinstance(item, (set, frozenset)):
             yield _OPEN
-            stack.append((iter(sorted(item, key=streaming_authority_digest)), True))
+            stack.append((iter(sorted(item, key=authority_digest)), True))
         elif isinstance(item, (str, int, float, bool)):
             yield exact_primitive(item)
         else:
             raise TypeError(f"unsupported authority value: {type(item).__name__}")
 
 
-def _field_pairs(item: Any):
-    for field_info in fields(item):
-        yield (field_info.name, getattr(item, field_info.name))
+_OPEN = object()
+_CLOSE = object()
 
 
-def _mapping_pairs(item: Any):
-    for key, child in sorted(item.items(), key=lambda pair: str(pair[0])):
-        yield (str(key), child)
+class CanonicalWalkLimitExceeded(ValueError):
+    """`streaming_canonical_str_digest` が辿る数の上限を超えた。"""
 
 
-def _json_leaf(value: Any) -> str:
-    if type(value) is _RawLeaf:
-        return json.dumps(value.value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return json.dumps(value, ensure_ascii=False)
+def streaming_canonical_str_digest(value: Any, *, max_events: Optional[int] = None) -> str:
+    """`sha256(str(canonical_value(value)))` と同じ digest を、写しを作らずに求める。
 
-
-def streaming_authority_digest(value: Any) -> str:
-    """`authority_digest(value)` と同じ digest を、canonical_value を作らずに求める。"""
-
-    digest = hashlib.sha256()
-    counts = [0]
-    for event in _canonical_events(value):
-        if event is _CLOSE:
-            counts.pop()
-            digest.update(b"]")
-            continue
-        if counts[-1]:
-            digest.update(b",")
-        counts[-1] += 1
-        if event is _OPEN:
-            digest.update(b"[")
-            counts.append(0)
-        else:
-            digest.update(_json_leaf(event).encode("utf-8"))
-    return digest.hexdigest()
-
-
-def streaming_canonical_str_digest(value: Any) -> str:
-    """`sha256(str(canonical_value(value)))` と同じ digest を、写しを作らずに求める。"""
+    木として辿るので、`max_events` を超えたら `CanonicalWalkLimitExceeded`。
+    """
 
     digest = hashlib.sha256()
     counts: list = []
-    for event in _canonical_events(value):
+    for index, event in enumerate(_canonical_events(value)):
+        if max_events is not None and index > max_events:
+            raise CanonicalWalkLimitExceeded(f"canonical walk exceeded {max_events} events")
         if event is _CLOSE:
             if counts.pop() == 1:
                 digest.update(b",")

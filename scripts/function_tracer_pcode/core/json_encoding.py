@@ -319,6 +319,8 @@ class BoundedEvidence:
     kind: str
     encoded_bytes_over: int = EVIDENCE_INLINE_BYTES
     match_digests: Tuple[Tuple[str, str], ...] = ()
+    #: 元の値の distinct な node の数（DAG-aware に数えられたときだけ）
+    distinct_nodes: Optional[int] = None
 
     def __post_init__(self) -> None:
         for name, limit in (
@@ -337,13 +339,16 @@ class BoundedEvidence:
         return None
 
     def summary(self) -> dict:
-        return {
+        payload = {
             "bounded_evidence": "v1",
             "identity": self.identity,
             "identity_kind": self.identity_kind,
             "kind": self.kind,
             "encoded_bytes_over": int(self.encoded_bytes_over),
         }
+        if self.distinct_nodes is not None:
+            payload["distinct_nodes"] = int(self.distinct_nodes)
+        return payload
 
     def to_authority_dict(self) -> dict:
         return self.summary()
@@ -361,13 +366,28 @@ class BoundedEvidence:
 
 #: `BoundedEvidence.summary()` を書いたときの byte 数の上限（schema 上の上限）
 EVIDENCE_SUMMARY_MAX_BYTES = (
-    2 + 5 * 4  # 括弧と区切り（5 member、区切りは最大 2 byte と見積もる）
+    2 + 6 * 4  # 括弧と区切り（6 member、区切りは最大 2 byte と見積もる）
     + len('"bounded_evidence": "v1"')
     + len('"identity": ') + 2 + EVIDENCE_IDENTITY_MAX_CHARS
     + len('"identity_kind": ') + 2 + EVIDENCE_KIND_MAX_CHARS
     + len('"kind": ') + 2 + EVIDENCE_KIND_MAX_CHARS
     + len('"encoded_bytes_over": ') + 20
+    + len('"distinct_nodes": ') + 20
 )
+
+
+def _source_value(value: Any) -> Any:
+    """source の包み（`each` / `nested` / `raw`）なら中の値（Merkle digest は値で求める）。"""
+
+    if isinstance(value, _Each) and value.fn in (None, _RAW):
+        return value.items
+    if isinstance(value, (_Nested, _Raw)):
+        return value.value
+    if isinstance(value, _MappingOf) and value.fn in (None, _RAW) and not isinstance(value.mapping, _PairsView):
+        return value.mapping
+    if isinstance(value, _Source):
+        raise TypeError("a lazy source is summarized by its token digest")
+    return value
 
 
 def _value_kind(value: Any) -> str:
@@ -810,14 +830,32 @@ class JsonEncodingPolicy:
         return digest.hexdigest()
 
 
+def evidence_kind(value: Any) -> str:
+    """有界な証拠の `kind`（元の値の型と、容器なら要素数）。"""
+
+    return _value_kind(value)
+
+
 def _summarize_evidence(policy: JsonEncodingPolicy, value: Any, identity: Any) -> BoundedEvidence:
     if callable(identity):
         identity = identity(value)
     if identity is None:
+        from scripts.function_tracer_pcode.core.canonical_digest import canonical_merkle_digest
+
+        try:
+            # canonical な形の値は DAG-aware な Merkle digest（共有部分を 1 回だけ辿る）
+            merkle, distinct = canonical_merkle_digest(_source_value(value))
+        except (TypeError, UnicodeError):
+            return BoundedEvidence(
+                identity=policy.evidence_digest(value),
+                identity_kind="sha256",
+                kind=_value_kind(value),
+            )
         return BoundedEvidence(
-            identity=policy.evidence_digest(value),
-            identity_kind="sha256",
+            identity=merkle,
+            identity_kind="canonical_merkle_sha256",
             kind=_value_kind(value),
+            distinct_nodes=distinct,
         )
     return BoundedEvidence(
         identity=str(identity)[:EVIDENCE_IDENTITY_MAX_CHARS],
@@ -1543,6 +1581,7 @@ __all__ = [
     "counts_max_bytes",
     "each",
     "evidence",
+    "evidence_kind",
     "inline",
     "is_json_record",
     "is_prepared_json",

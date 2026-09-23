@@ -503,9 +503,9 @@ def make_internal_v2_reason_diagnostic(
 #
 # * key / evidence（`object_target_key` / `object_evidence` / `proof_obligation_id` /
 #   `typed_cause_key` / `proof_requirement_ids` の各要素）: 小さければそのまま、大きければ
-#   `BoundedEvidence`（型つき digest + 種類）。照合用に `canonical_value` の digest を
-#   2 つ付ける（`authority` = `authority_digest` と同じ値、`canonical_str` =
-#   `str(canonical_value(...))` の sha256）。
+#   `BoundedEvidence`（DAG-aware な Merkle digest + distinct な node 数 + 種類）。照合用に
+#   `canonical_value` の digest を 2 つ付ける（`authority` = Merkle digest、`canonical_str`
+#   = `str(canonical_value(...))` の sha256）。
 # * 自由文（`detail` / `stage` / `pair_or_case`）: 行 schema の文字数まで（超えた分は
 #   明示の marker）。
 
@@ -542,19 +542,31 @@ class LegacyReasonEvidence:
         return row_items(LEGACY_REASON_EVIDENCE_ROW, self._record)
 
 
+#: `canonical_str` digest（文字列の id との照合）で木として辿る event の上限
+_CANONICAL_STR_MAX_EVENTS = 1 << 20
+
+
 def bounded_match_evidence(value: Any) -> Any:
-    """`value` が大きければ照合用 digest つきの `BoundedEvidence`、小さければ `value`。"""
+    """`value` が大きければ照合用 digest つきの `BoundedEvidence`、小さければ `value`。
+
+    identity は `canonical_value` の形の **DAG-aware な Merkle digest**（共有部分を 1 回
+    だけ辿る）で、distinct な node の数も持つ。照合用 digest は 2 つ: `authority`（同じ
+    Merkle digest。等しさ ⇔ `canonical_value` の `==`）と `canonical_str`（文字列の id
+    との照合。辿る数が上限を超える値には付けない）。
+    """
 
     from scripts.function_tracer_pcode.authority.contracts import (
-        streaming_authority_digest,
+        CanonicalWalkLimitExceeded,
         streaming_canonical_str_digest,
     )
+    from scripts.function_tracer_pcode.core.canonical_digest import canonical_merkle_digest
     from scripts.function_tracer_pcode.core.json_encoding import (
         EVIDENCE_INLINE_BYTES,
         LEGACY,
         RESULT_JSON_POLICY,
         BoundedEvidence,
         JsonBudgetExhausted,
+        evidence_kind,
     )
 
     if value is None or type(value) is BoundedEvidence:
@@ -564,21 +576,29 @@ def bounded_match_evidence(value: Any) -> Any:
         return value
     except JsonBudgetExhausted:
         pass
+    kind = evidence_kind(value)
     try:
-        digests = (
-            (MATCH_AUTHORITY_DIGEST, streaming_authority_digest(value)),
-            (MATCH_CANONICAL_STR_DIGEST, streaming_canonical_str_digest(value)),
-        )
+        merkle, distinct = canonical_merkle_digest(value)
     except (TypeError, UnicodeError):
-        # authority の値にならない証拠は照合に使えない（照合しない = 付けない）
-        digests = ()
-    summary = RESULT_JSON_POLICY.bounded_evidence(value)
+        # authority の値にならない証拠（Expression など）は照合に使えない: 型つき token の digest
+        summary = RESULT_JSON_POLICY.bounded_evidence(value)
+        return BoundedEvidence(
+            identity=summary.identity, identity_kind=summary.identity_kind, kind=kind,
+        )
+    digests = [(MATCH_AUTHORITY_DIGEST, merkle)]
+    try:
+        digests.append((
+            MATCH_CANONICAL_STR_DIGEST,
+            streaming_canonical_str_digest(value, max_events=_CANONICAL_STR_MAX_EVENTS),
+        ))
+    except (CanonicalWalkLimitExceeded, UnicodeError):
+        pass
     return BoundedEvidence(
-        identity=summary.identity,
-        identity_kind=summary.identity_kind,
-        kind=summary.kind,
-        encoded_bytes_over=summary.encoded_bytes_over,
-        match_digests=digests,
+        identity=merkle,
+        identity_kind="canonical_merkle_sha256",
+        kind=kind,
+        match_digests=tuple(digests),
+        distinct_nodes=distinct,
     )
 
 
@@ -586,9 +606,10 @@ def match_digest(value: Any, name: str) -> Optional[str]:
     """照合用 digest（有界化した証拠なら付けた値、それ以外は今求める）。"""
 
     from scripts.function_tracer_pcode.authority.contracts import (
-        streaming_authority_digest,
+        CanonicalWalkLimitExceeded,
         streaming_canonical_str_digest,
     )
+    from scripts.function_tracer_pcode.core.canonical_digest import canonical_merkle_digest
     from scripts.function_tracer_pcode.core.json_encoding import BoundedEvidence
 
     if value is None:
@@ -597,9 +618,9 @@ def match_digest(value: Any, name: str) -> Optional[str]:
         return value.match_digest(name)
     try:
         if name == MATCH_AUTHORITY_DIGEST:
-            return streaming_authority_digest(value)
-        return streaming_canonical_str_digest(value)
-    except (TypeError, UnicodeError):
+            return canonical_merkle_digest(value)[0]
+        return streaming_canonical_str_digest(value, max_events=_CANONICAL_STR_MAX_EVENTS)
+    except (TypeError, UnicodeError, CanonicalWalkLimitExceeded):
         return None
 
 
