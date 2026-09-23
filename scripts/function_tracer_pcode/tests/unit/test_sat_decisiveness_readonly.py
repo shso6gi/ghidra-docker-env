@@ -1,5 +1,15 @@
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _gate_runs_in_the_fixture_comparison():
+    # readonly projection の proof は、それを作った比較（relation）の中でだけ
+    # 採用される（Issue #167）。各 test はその比較の中で gate を呼ぶ。
+    with _readonly_fixture_comparison():
+        yield
+
 def test_readonly_identity_completed_evidence_connects_to_recovery_gate():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     reason = _readonly_identity_reason()

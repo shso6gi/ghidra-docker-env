@@ -6,6 +6,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    ComparisonAuthorityBinding,
+    current_comparison,
+    evidence_authority_holds,
+    run_in_current_comparison,
+)
 from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
@@ -31,6 +37,7 @@ from scripts.function_tracer_pcode.proof.obligations.snapshot import (
     AnalysisSnapshot,
     DerivedAnalysisView,
     SnapshotFingerprintCodec,
+    comparison_pair_identity,
 )
 from scripts.function_tracer_pcode.proof.obligations.unary_premise import (
     build_function_unary_premise,
@@ -82,9 +89,38 @@ class PendingCounterexampleSafety:
     counterexample_raw: Any
 
 
+class ComparisonRuntimeMismatch(RuntimeError):
+    """別の比較（raw pair か最終 relation が違う）の仕事を、この runtime に持ち込もうとした。"""
+
+
+def _planner_in_current_comparison(planner: Callable[..., Any]) -> Callable[..., Any]:
+    """replanner とそれが返す producer を、登録した比較の範囲の下で実行する。
+
+    replanner は後の gate 完了から呼ばれるので、呼ばれた時点の範囲ではなく、
+    それを登録した比較の authority で証拠を照合する（Issue #167）。
+    """
+
+    def plan(*args: Any) -> Any:
+        requirement, kind, producer = planner(*args)
+        if producer is not None:
+            producer = run_in_current_comparison(producer)
+        return requirement, kind, producer
+
+    return run_in_current_comparison(plan)
+
+
 @dataclass
 class ObligationRuntimeSession:
-    """Owns immutable views, proof artifacts, and the executable worklist."""
+    """Owns immutable views, proof artifacts, and the executable worklist.
+
+    Issue #167: 1 つの runtime は 1 つの比較（``ComparisonAuthorityBinding``: raw pair と
+    最終 relation）だけに仕える。artifact・view・dependency・producer・replanner・
+    outcome・cache はすべてこの比較の state で、別の比較の仕事を持ち込むと
+    ``ComparisonRuntimeMismatch`` で拒否する（別の比較は自分の runtime を使う。
+    ``checker/strategy_execution.prepare_strategy_runtime``）。比較の外（binding の無い
+    範囲）からは、比較の証拠も state も読まない仕事（branch の実行・view の記録）だけを
+    受け付け、gate の計画・完了証拠の適用・outcome の読み出しは仕える比較の中でだけ行う。
+    """
 
     base_view: DerivedAnalysisView
     current_view: DerivedAnalysisView
@@ -105,10 +141,19 @@ class ObligationRuntimeSession:
     proof_outcomes: Dict[Tuple[Any, ...], FunctionProofOutcome] = field(default_factory=dict)
     pending_counterexamples: Dict[Tuple[Any, ...], PendingCounterexampleSafety] = field(default_factory=dict)
     reason_requirements: Dict[int, Tuple[ProofRequirementId, ...]] = field(default_factory=dict)
+    #: ``reason_requirements`` の key（``id``）の持ち主。runtime が参照を保つので id は再利用されず、
+    #: 読むときも同じ object であることを確かめる（object の id を authority の代わりにしない）。
+    planned_reasons: Dict[int, Any] = field(default_factory=dict)
     unary_artifact_cache: ValidatedUnaryArtifactCache = field(
         default_factory=lambda: GLOBAL_VALIDATED_UNARY_ARTIFACT_CACHE
     )
     pair_ledger_manager: PairLedgerManager = field(default_factory=PairLedgerManager)
+    #: この runtime が仕える比較（最初にこの runtime を使った比較が決める）。
+    comparison_binding: Optional[ComparisonAuthorityBinding] = None
+    #: 作ったときの raw pair の identity（``comparison_pair_identity``。to_dict の無い簡易
+    #: object では None）。``reserve_for_its_raw_pair`` の後は、この raw pair の比較だけに仕える。
+    raw_pair_digest: Optional[str] = None
+    reserved_for_raw_pair: bool = False
 
     @classmethod
     def create(cls, analysis1: Any, analysis2: Any) -> "ObligationRuntimeSession":
@@ -135,6 +180,8 @@ class ObligationRuntimeSession:
             )
             session = cls(view, view)
             session.view_records[view.view_id] = ViewPremiseRecord(view.view_id, premise)
+            if callable(getattr(analysis1, "to_dict", None)) and callable(getattr(analysis2, "to_dict", None)):
+                session.raw_pair_digest = comparison_pair_identity(left, right)
             return session
 
     @classmethod
@@ -468,6 +515,59 @@ class ObligationRuntimeSession:
     def premise_digest(self) -> str:
         return self.view_records[self.current_view.view_id].premise_digest
 
+    def reserve_for_its_raw_pair(self) -> None:
+        """この runtime を、作ったときの raw pair の比較だけに仕えさせる（Issue #167）。
+
+        stage runner は自分の raw pair の比較のために runtime を作る。予約すると、別の raw
+        pair の比較（再帰抽象化の抽象 pair など）が先にこの runtime を使っても、それに仕え
+        させない（その比較は自分の runtime を得る）。
+        """
+
+        if self.raw_pair_digest is not None:
+            self.reserved_for_raw_pair = True
+
+    def serves_comparison(self, binding: Optional[ComparisonAuthorityBinding]) -> bool:
+        """``binding`` の比較の仕事をこの runtime で扱ってよいか。"""
+
+        if binding is None:
+            return True
+        if self.reserved_for_raw_pair and binding.raw_pair_digest != self.raw_pair_digest:
+            return False
+        return self.comparison_binding is None or self.comparison_binding == binding
+
+    def claim_comparison(self, binding: Optional[ComparisonAuthorityBinding]) -> None:
+        """この runtime を ``binding`` の比較に仕えさせる（別の比較なら拒否）。"""
+
+        if not self.serves_comparison(binding):
+            raise ComparisonRuntimeMismatch("obligation_runtime_comparison_mismatch")
+        if binding is not None and self.comparison_binding is None:
+            self.comparison_binding = binding
+
+    def _enter_current_comparison(self) -> None:
+        self.claim_comparison(current_comparison())
+
+    def _require_current_comparison(self) -> None:
+        """authority を読む・作る仕事は、この runtime が仕える比較の中でだけ行う。
+
+        比較の外（binding の無い範囲）から、ある比較に仕える runtime の artifact・outcome を
+        読ませない（証拠 record の照合だけでは、runtime の state が漏れる）。
+        """
+
+        current = current_comparison()
+        if self.comparison_binding is not None and current != self.comparison_binding:
+            raise ComparisonRuntimeMismatch("obligation_runtime_comparison_mismatch")
+        self.claim_comparison(current)
+
+    def _bound_producer(self, callback: Optional[Callable[[], Any]]) -> Optional[Callable[[], Any]]:
+        """producer を、積んだ比較の範囲で実行する形にし、その比較をこの runtime に求める。"""
+
+        if callback is None:
+            self._enter_current_comparison()
+            return None
+        bound = run_in_current_comparison(callback)
+        self.claim_comparison(bound.binding)
+        return bound
+
     def schedule(
         self,
         requirement: ProofRequirementId,
@@ -479,6 +579,7 @@ class ObligationRuntimeSession:
     ) -> WorkItem:
         # Issue #124: obligation の構築（scheduling）を計測する。producer の実行は run_next 側なので含まない。
         with stage_region("obligation_build"):
+            callback = self._bound_producer(callback)
             instance = ObligationInstanceId(
                 requirement,
                 self.current_view.view_id,
@@ -504,6 +605,7 @@ class ObligationRuntimeSession:
         depends_on: Iterable[ProofRequirementId] = (),
     ) -> Any:
         """Schedule and execute one concrete producer in the current view."""
+        producer = self._bound_producer(producer)
         instance = ObligationInstanceId(
             requirement,
             self.current_view.view_id,
@@ -525,8 +627,14 @@ class ObligationRuntimeSession:
         return value
 
     def open_pair_ledger(self, binding: PairLedgerBinding, expected_pairs: int) -> PairDispositionLedger:
+        self._enter_current_comparison()
         if binding.derived_view_id != self.current_view.view_id or binding.premise_digest != self.premise_digest:
             raise ValueError("pair ledger binding is not current runtime generation")
+        if (
+            self.comparison_binding is not None
+            and binding.comparison_authority_digest != self.comparison_binding.digest
+        ):
+            raise ComparisonRuntimeMismatch("pair ledger belongs to another comparison")
         return self.pair_ledger_manager.open(binding, expected_pairs)
 
     def pair_quiescence_certificate(self, ledger: PairDispositionLedger) -> RuntimeQuiescenceCertificate:
@@ -591,12 +699,13 @@ class ObligationRuntimeSession:
         callback = self.callbacks.get(key)
         value = callback() if callback is not None else item.payload
         self.results[key] = value
+        outcomes = self.proof_outcomes
         pending_safety: Optional[PendingCounterexampleSafety] = None
         result_role = getattr(value, "result_role", WorkResultRole.PROOF_DECISION)
         if result_role == WorkResultRole.NON_DECISIONAL_EXECUTION:
             pass
         elif isinstance(value, FunctionProofOutcome):
-            self.proof_outcomes[item.obligation_id.requirement_id.to_key()] = value
+            outcomes[item.obligation_id.requirement_id.to_key()] = value
         elif hasattr(value, "is_equivalent"):
             semantic = getattr(value, "is_equivalent", None)
             if semantic is True:
@@ -619,7 +728,7 @@ class ObligationRuntimeSession:
                 outcome = FunctionProofOutcome.NOT_EQUIVALENT
             else:
                 outcome = FunctionProofOutcome.INCONCLUSIVE
-            self.proof_outcomes[item.obligation_id.requirement_id.to_key()] = outcome
+            outcomes[item.obligation_id.requirement_id.to_key()] = outcome
         if item.state == ExecutionState.RUNNING:
             self.worklist.complete(item)
             event = "completed"
@@ -641,6 +750,7 @@ class ObligationRuntimeSession:
         gate_for_kind: Mapping[str, str],
         producer_factory: Callable[[str, Any, ProofRequirementId], Callable[[], FunctionProofOutcome]],
     ) -> Tuple[ProofRequirementId, ...]:
+        self._require_current_comparison()
         requirements: List[ProofRequirementId] = []
         seen: Set[Tuple[Any, ...]] = set()
         reasons = tuple(getattr(result, "unknown_reasons", ()) or ())
@@ -684,6 +794,7 @@ class ObligationRuntimeSession:
                     continue
                 seen.add(requirement.to_key())
                 requirements.append(requirement)
+                self.planned_reasons[id(reason)] = reason
                 self.reason_requirements.setdefault(id(reason), tuple())
                 self.reason_requirements[id(reason)] += (requirement,)
                 self.schedule(
@@ -719,22 +830,27 @@ class ObligationRuntimeSession:
         kind: str,
         replanner: Callable[[], Tuple[ProofRequirementId, str, Callable[[], Any]]],
     ) -> None:
-        self.pair_query_replanners[(str(pair_id), str(kind))] = replanner
+        self._enter_current_comparison()
+        self.pair_query_replanners[(str(pair_id), str(kind))] = _planner_in_current_comparison(replanner)
 
     def register_target_query_replanner(
         self,
         target_key: Any,
         replanner: Callable[[], Tuple[ProofRequirementId, str, Callable[[], Any]]],
     ) -> None:
+        self._enter_current_comparison()
         frozen = SnapshotFingerprintCodec.freeze(target_key)
-        self.target_query_replanners.setdefault(frozen, []).append(replanner)
+        self.target_query_replanners.setdefault(frozen, []).append(
+            _planner_in_current_comparison(replanner)
+        )
 
     def register_counterexample_safety_replanner(
         self,
         pair_id: str,
         replanner: Callable[[PendingCounterexampleSafety], Tuple[ProofRequirementId, str, Callable[[], Any]]],
     ) -> None:
-        self.counterexample_safety_replanners[str(pair_id)] = replanner
+        self._enter_current_comparison()
+        self.counterexample_safety_replanners[str(pair_id)] = _planner_in_current_comparison(replanner)
 
     def _schedule_counterexample_safety(
         self,
@@ -780,10 +896,14 @@ class ObligationRuntimeSession:
         *,
         reasons: Iterable[Any] = (),
     ) -> Tuple[DerivedAnalysisView, ...]:
+        self._require_current_comparison()
         produced: List[DerivedAnalysisView] = []
         for wrapper in evidence_wrappers:
             evidence = wrapper.get("evidence", wrapper)
             if not isinstance(evidence, Mapping):
+                continue
+            if not evidence_authority_holds(evidence):
+                # 別の比較で作った証拠・scope の無い証拠から、この比較の view を作らない（Issue #167）。
                 continue
             status = str(evidence.get("proof_status") or evidence.get("status") or "").lower()
             if status not in {"complete", "completed", "discharged", "proven", "verified"}:
@@ -926,7 +1046,12 @@ class ObligationRuntimeSession:
         return derived
 
     def outcome_for_reason(self, reason: Any) -> FunctionProofOutcome:
-        requirements = self.reason_requirements.get(id(reason), ())
+        self._require_current_comparison()
+        requirements = (
+            self.reason_requirements.get(id(reason), ())
+            if self.planned_reasons.get(id(reason)) is reason
+            else ()
+        )
         validated = {artifact.requirement_id.to_key() for artifact in self.artifacts}
         outcomes = tuple(
             (
@@ -981,24 +1106,3 @@ class ObligationRuntimeSession:
             self.requirement_dependents.setdefault(completed.to_key(), set()).add(
                 requirement.to_key()
             )
-
-    def create_recursive_view(self, analysis1: Any, analysis2: Any, matches: Iterable[Any]) -> DerivedAnalysisView:
-        match_digest = SnapshotFingerprintCodec.digest(tuple(matches))
-        requirement = ProofRequirementId.create(
-            "recursive_call_abstraction",
-            ("recursive_matches", match_digest),
-            ProofRequirementContract(
-                proposition="matched recursive calls share an abstract return",
-                observation_surface=("return_and_effect",),
-                active_precondition=(self.current_view.view_id,),
-            ),
-        )
-        evidence = {
-            "proof_requirement_id": requirement.to_dict(),
-            "status": "complete",
-            "proof_source": "recursive_abstraction_acceptance_gate",
-            "match_digest": match_digest,
-            "left_snapshot": self._snapshot(analysis1, "recursive_left").semantic_fingerprint,
-            "right_snapshot": self._snapshot(analysis2, "recursive_right").semantic_fingerprint,
-        }
-        return self._apply_artifact(requirement, evidence)

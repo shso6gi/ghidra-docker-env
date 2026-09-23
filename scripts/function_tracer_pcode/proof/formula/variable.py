@@ -4,8 +4,11 @@
 パラメータ以外の変数（in_a1_hi等）を検出・分析し、
 ストレージ情報に基づいてパラメータ断片かどうかを判定する。
 
-パラメータ断片と判定された場合は、0固定ではなく
-sign/zero extension から導かれる値として拘束する。
+パラメータ断片と判定しても SMT 上では拘束しない（自由な入力のまま）。
+「上位 bit は ext(param) に等しい」は入力 extension 仮定であり、その根拠は
+Ghidra の ``is_signed`` ではなく最終 ``InputCorrespondence``
+（``proof/formula/input_correspondence``）だけが持てる（Issue #167）。
+断片の有無は raw closure 走査が register alias として扱う。
 """
 
 from typing import List, Dict, Set, Optional, Tuple
@@ -50,39 +53,11 @@ class ParameterFragmentInfo:
     base_register_name: str
     base_register_size_bits: int
     
-    def get_smt_constraint(self, fragment_smt_name: str, param_smt_name: str) -> str:
-        """
-        SMT制約を生成
-        
-        断片 = extract(extend(param), high_bit, low_bit)
-        
-        符号拡張/ゼロ拡張後の上位ビットを抽出する。
-        メモリ配置（エンディアン）に関係なく、値としての上位ビットを取得。
-        
-        例: in_a1_hi (32bit) = extract(sign_extend(param_2, 64), 63, 32)
-        """
-        extend_bits = self.base_register_size_bits - self.parent_param_bit_width
-        
-        if extend_bits <= 0:
-            # 拡張不要の場合（通常は発生しない）
-            extended = param_smt_name
-        elif self.extension_type == ExtensionType.SIGN_EXTEND:
-            extended = f"((_ sign_extend {extend_bits}) {param_smt_name})"
-        else:
-            extended = f"((_ zero_extend {extend_bits}) {param_smt_name})"
-        
-        # 上位ビットを抽出（値としての上位、メモリ配置ではない）
-        # sign_extend/zero_extend は常に上位ビットに拡張される
-        high_bit = self.base_register_size_bits - 1
-        low_bit = self.parent_param_bit_width
-        
-        return f"(assert (= {fragment_smt_name} ((_ extract {high_bit} {low_bit}) {extended})))"
-    
     def get_reason_string(self) -> str:
-        """制約の理由を説明する文字列"""
+        """診断用の説明（``extension_type`` は Ghidra の型ラベル由来で、制約には使わない）"""
         ext_str = "sign_extend" if self.extension_type == ExtensionType.SIGN_EXTEND else "zero_extend"
         return (f"Upper bits of {self.parent_param_name} in {self.base_register_name} "
-                f"(constrained via {ext_str})")
+                f"(declared-type label {ext_str}; unconstrained)")
     
     def to_dict(self) -> Dict:
         return {
@@ -111,16 +86,6 @@ class ExtraVariableAnalysis:
     def is_parameter_fragment(self) -> bool:
         """パラメータ断片かどうか"""
         return self.classification == VariableClassification.PARAMETER_FRAGMENT
-    
-    def can_safely_constrain(self) -> bool:
-        """安全に制約できるか（パラメータ断片の場合）"""
-        return self.is_parameter_fragment() and self.fragment_info is not None
-    
-    def get_smt_constraint(self, fragment_smt_name: str, param_smt_name: str) -> Optional[str]:
-        """SMT制約を取得"""
-        if self.fragment_info:
-            return self.fragment_info.get_smt_constraint(fragment_smt_name, param_smt_name)
-        return None
     
     def to_dict(self) -> Dict:
         result = {
@@ -617,34 +582,3 @@ class VariableAnalyzer:
             for cond, val in expr.value:
                 if hasattr(val, 'expr_type'):
                     self._collect_variable_sizes(val, var_sizes)
-
-
-def get_parameter_fragment_constraints(
-    analyses: Dict[str, ExtraVariableAnalysis],
-    suffix: str
-) -> Tuple[List[str], List[str]]:
-    """
-    パラメータ断片のSMT制約を生成
-    
-    Args:
-        analyses: 変数名 -> 分析結果 のマッピング
-        suffix: SMT変数名のサフィックス（"_1" or "_2"）
-    
-    Returns:
-        (制約行のリスト, 制約された変数名のリスト)
-    """
-    lines = []
-    constrained_vars = []
-    
-    for name, analysis in analyses.items():
-        if analysis.is_parameter_fragment() and analysis.fragment_info:
-            fragment_smt = f"{name}{suffix}"
-            param_smt = f"{analysis.fragment_info.parent_param_name}{suffix}"
-            
-            constraint = analysis.get_smt_constraint(fragment_smt, param_smt)
-            if constraint:
-                lines.append(f"; {name}: {analysis.reason}")
-                lines.append(constraint)
-                constrained_vars.append(fragment_smt)
-    
-    return lines, constrained_vars

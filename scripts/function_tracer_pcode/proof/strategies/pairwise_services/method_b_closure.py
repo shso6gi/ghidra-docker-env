@@ -10,6 +10,8 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     _ExactReadonlyReductionProof,
     _MethodBCoveringCaseProof,
     build_unknown_recovery_actions,
+    comparison_evidence,
+    store_comparison_evidence,
 )
 
 
@@ -98,7 +100,7 @@ def _impl__record_completed_method_b_covering_case_proof_if_safe(
     ]
     existing_ids = {
         self._normalize_nested_tuple(item.get("proof_obligation_id"))
-        for item in records
+        for item in comparison_evidence(records)
     }
     changed = self._append_completed_method_b_covering_case_evidence(
         records,
@@ -147,7 +149,7 @@ def _impl__record_completed_method_b_covering_case_proof_if_safe(
             covering=covering,
         ) or changed
     if changed:
-        analysis.completed_recovery_proof_evidence = tuple(records)
+        store_comparison_evidence(analysis, records)
 
 
 def _impl__append_completed_method_b_covering_case_evidence(

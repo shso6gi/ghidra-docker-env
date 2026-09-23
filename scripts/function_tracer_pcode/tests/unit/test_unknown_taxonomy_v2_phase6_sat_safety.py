@@ -35,6 +35,7 @@ from scripts.function_tracer_pcode.authority.domains.sat_safety import (
 from scripts.function_tracer_pcode.core import Condition
 from scripts.function_tracer_pcode.core import PcodeOpRef
 from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_of
 
 
 def _param(name: str, index: int = 0, size: int = 4):
@@ -462,7 +463,7 @@ def test_real_sat_safety_producer_observes_completes_and_issues_decisive_authori
     session = connector.begin({"phase": "6.1", "case": "sat-safety-complete"})
     strategy, analysis1, analysis2, case1, case2 = _strategy_and_surface()
     model = {"x_1": 0, "x_2": 1}
-    with production_signal_scope(session):
+    with production_signal_scope(session), comparison_of(analysis1, analysis2):
         reason = strategy._make_sat_unsafety_unknown_reason(
             (
                 "function1:incomplete_control_flow",

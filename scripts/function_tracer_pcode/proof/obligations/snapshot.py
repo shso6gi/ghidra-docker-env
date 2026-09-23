@@ -24,6 +24,35 @@ SEMANTIC_ANALYSIS_NOTES = frozenset({
     "effect_call_argument_evidence_incomplete",
 })
 
+#: 比較（pair の comparison）が自分の観測として raw analysis に書き戻す note（Issue #167）。
+#: semantic fingerprint には入る（blocker を知らずに作った証明を別の前提として扱う）が、
+#: 比較の authority が束縛する raw pair の identity（``comparison_fingerprint``）には入らない:
+#: 比較が自分で書いた観測で、比べている raw pair が別物になるわけではない。書くのは
+#: ``record_comparison_annotation`` だけ（ここに無い note を比較が書くと identity が変わり、
+#: 以後の branch は別の比較として扱われる = fail-closed）。
+COMPARISON_ANNOTATION_NOTES = frozenset({
+    "return_case_coverage_gap",
+    "return_case_coverage_inconclusive",
+})
+
+
+def comparison_pair_identity(left: "AnalysisSnapshot", right: "AnalysisSnapshot") -> str:
+    """比較の authority が束縛する raw pair の identity（左右の ``comparison_fingerprint`` の組）。"""
+
+    return SnapshotFingerprintCodec.digest(
+        ("comparison_raw_pair_v1", left.comparison_fingerprint, right.comparison_fingerprint)
+    )
+
+
+def record_comparison_annotation(analysis: Any, note: str) -> None:
+    """比較の観測 ``note`` を raw analysis に書き戻す（登録済みの note だけ）。"""
+
+    if note not in COMPARISON_ANNOTATION_NOTES:
+        raise ValueError(f"unregistered comparison annotation: {note!r}")
+    if note not in analysis.analysis_notes:
+        analysis.analysis_notes.append(note)
+
+
 # Every FunctionReturnAnalysis dataclass field must be classified here.  Fields
 # represented by a normalized projection still remain listed explicitly.
 FUNCTION_ANALYSIS_FIELD_CLASSIFICATION = MappingProxyType({
@@ -162,6 +191,20 @@ class AnalysisSnapshot:
             semantic_fingerprint=SnapshotFingerprintCodec.digest(payload),
             extraction_schema_version=extraction_schema_version,
             diagnostic_refs=deep_freeze(dict(diagnostic_refs or {})),
+        )
+
+    @property
+    def comparison_fingerprint(self) -> str:
+        """比較の authority が束縛する identity（比較自身が書いた note を除く、Issue #167）。"""
+
+        semantic_fields = dict(self.semantic_fields)
+        semantic_fields["semantic_analysis_notes"] = tuple(
+            note
+            for note in semantic_fields.get("semantic_analysis_notes", ()) or ()
+            if note not in COMPARISON_ANNOTATION_NOTES
+        )
+        return SnapshotFingerprintCodec.digest(
+            ("comparison_identity_v1", self.extraction_schema_version, self.snapshot_id, semantic_fields)
         )
 
     @classmethod

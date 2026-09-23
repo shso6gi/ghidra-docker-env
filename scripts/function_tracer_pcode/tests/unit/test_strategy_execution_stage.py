@@ -19,13 +19,18 @@ RUNTIME_MOD = "scripts.function_tracer_pcode.proof.obligations.runtime.Obligatio
 
 
 def _runtime(pending=None):
-    return SimpleNamespace(pair_ledger_manager=SimpleNamespace(pending_successor=pending))
+    # 同じ比較に仕える既存 runtime（比較の authority の規則は test_input_correspondence_binding）。
+    return SimpleNamespace(
+        pair_ledger_manager=SimpleNamespace(pending_successor=pending),
+        serves_comparison=lambda _comparison: True,
+        claim_comparison=lambda _comparison: None,
+    )
 
 
 # ---- prepare_strategy_runtime: 決定表 ----------------------------------------------------------
 
 def test_no_existing_runtime_creates_one_and_stores_it_on_the_facade():
-    fresh = object()
+    fresh = Mock()
     with patch(RUNTIME_MOD + ".create", return_value=fresh) as create:
         prep = se.prepare_strategy_runtime(None, None, "a1", "a2")
     assert prep.runtime is fresh and prep.store_on_facade is True
@@ -42,7 +47,7 @@ def test_existing_runtime_without_pending_successor_is_reused_and_not_stored():
 
 def test_stale_pending_successor_without_replan_gets_a_branch_local_runtime_that_is_not_stored():
     existing = _runtime(pending=object())
-    fresh = object()
+    fresh = Mock()
     with patch(RUNTIME_MOD + ".create", return_value=fresh):
         prep = se.prepare_strategy_runtime(existing, None, "a1", "a2")
     assert prep.runtime is fresh and prep.runtime is not existing
@@ -70,8 +75,9 @@ def test_obligation_runtime_store_is_guarded_and_precedes_run_strategy_branch():
     fn, src = _check_fn()
     stores = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
               and any(isinstance(t, ast.Attribute) and t.attr == "_obligation_runtime_session" for t in n.targets)]
-    # B 段の保存（store_on_facade ガード付き）と D 段（recurrence runtime）の 2 箇所のみ
-    assert len(stores) == 2
+    # B 段の保存（store_on_facade ガード付き）と D 段（recurrence runtime の切り替えと、finally での
+    # 元の比較の runtime への復帰、Issue #167）の 3 箇所のみ
+    assert len(stores) == 3
     guarded = [n for n in ast.walk(fn) if isinstance(n, ast.If) and "store_on_facade" in ast.unparse(n.test)]
     assert len(guarded) == 1 and any(isinstance(b, ast.Assign) for b in guarded[0].body) and not guarded[0].orelse
     b_store_line = guarded[0].body[0].lineno
@@ -101,9 +107,11 @@ def _ctx(strategy, branch_id="DirectCall", lease=None, replan=None):
                               production_branch_authority_lease=lease)
 
 
-def _frame():
+def _frame(input_correspondence=None):
     return SimpleNamespace(obligation_runtime=None, replan_successor_plan=None, pair_disposition_ledger=None,
-                           receipt=None, cleanup_complete=False, close=Mock(name="frame.close"))
+                           receipt=None, cleanup_complete=False, close=Mock(name="frame.close"),
+                           prepared=SimpleNamespace(input_correspondence=input_correspondence),
+                           comparison_binding=None)
 
 
 def _projection_prep(manifest=None, projection=None):

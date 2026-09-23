@@ -1,6 +1,17 @@
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 import pytest
 
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _gate_runs_in_the_fixture_comparison():
+    # fixture の比較中の証拠は、それを作った比較（raw pair と relation）の中でだけ採用される
+    # （Issue #167）。gate を直接呼ぶ test はその比較の中で呼ぶ。strategy.check は自分の比較を開く。
+    with _fixture_comparison():
+        yield
 
 
 def _formula_bound_sat_result(model):
@@ -61,7 +72,7 @@ def test_function_return_analysis_treats_lowerable_post_state_reads_as_sat_safe(
     assert "symbolic_post_state_reads" not in analysis.get_decisive_sat_unsafety_reasons()
 
 def test_pairwise_strategy_downgrades_sat_when_analysis_retains_symbolic_post_state_reads(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],
@@ -193,7 +204,7 @@ def test_monolithic_strategy_downgrades_ambiguous_sat_counterexample_to_unknown(
 
     params1 = [ParameterInfo(original_name="x", smt_name="x_1", bit_width=32, index=0)]
     params2 = [ParameterInfo(original_name="x", smt_name="x_2", bit_width=32, index=0)]
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
         formula="(set-logic QF_BV)\n(check-sat)",
         return_var1="return_1",
@@ -242,7 +253,7 @@ def test_monolithic_sat_requires_counterexample_replay(monkeypatch):
                 ]
             )
 
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
         formula="(set-logic QF_BV)\n(check-sat)",
         return_var1="return_1",
@@ -306,7 +317,7 @@ def test_monolithic_sat_rejects_prior_replay_proof_without_witness_binding(monke
                 ]
             )
 
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
         formula="(set-logic QF_BV)\n(check-sat)",
         return_var1="return_1",
@@ -373,7 +384,7 @@ def test_monolithic_sat_with_unfixed_model_is_unknown():
         def run_sequential(self, _query: str, timeout=None):
             raise AssertionError("unfixed model should be rejected before replay queries")
 
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
         formula="(set-logic QF_BV)\n(check-sat)",
         return_var1="return_1",
@@ -418,7 +429,7 @@ def test_monolithic_sat_with_unfixed_model_is_unknown():
     assert analysis1.completed_recovery_proof_evidence == ()
 
 def test_sat_counterexample_ambiguous_reason_has_object_proof_action():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = FunctionReturnAnalysis(
         function_name="func1",
         entry_point="0x1000",
@@ -485,7 +496,7 @@ def test_sat_counterexample_ambiguous_reason_has_object_proof_action():
     )
 
 def test_pairwise_sat_unsafety_emits_object_derived_pending_proof_backlog(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -541,7 +552,7 @@ def test_pairwise_sat_unsafety_emits_object_derived_pending_proof_backlog(monkey
     assert actions[0].proof_obligation_id == reason.proof_obligation_id
 
 def test_pairwise_sat_unsafety_proof_without_attempt_binding_remains_unknown(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -627,7 +638,7 @@ def test_pairwise_sat_unsafety_proof_without_attempt_binding_remains_unknown(mon
 def test_pairwise_sat_promotion_requires_exact_query_execution_receipt(
     monkeypatch, last_query, executed_query, expected_equivalent,
 ):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -725,7 +736,7 @@ def test_pairwise_sat_promotion_requires_exact_query_execution_receipt(
 def test_pairwise_sat_with_fixed_model_records_bound_replay_proof_and_is_decisive(monkeypatch):
     """Issue #28: the pairwise case-partition replay, bound to the terminal query,
     model, premise and pair, is the replay evidence; a SAT with a fixed model is decisive."""
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -793,7 +804,7 @@ def test_pairwise_sat_with_fixed_model_records_bound_replay_proof_and_is_decisiv
     assert len(replay["solver_execution_receipt_digest"]) == 64
 
 def test_pairwise_sat_without_model_still_requires_counterexample_replay(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -856,7 +867,7 @@ def test_pairwise_sat_without_model_still_requires_counterexample_replay(monkeyp
     assert reason.proof_obligation_id is not None
 
 def test_pairwise_sat_with_unfixed_model_still_requires_counterexample_replay(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -994,7 +1005,7 @@ def test_sat_unsafety_completed_proof_requires_fixed_counterexample_replay_model
 
 def test_sat_unsafety_completed_proof_requires_current_counterexample_model_match():
     action = _sat_unsafety_resolution_action()
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = FunctionReturnAnalysis(
         function_name="func1",
         entry_point="0x1000",
@@ -1070,7 +1081,7 @@ def test_sat_unsafety_completed_proof_rejects_nested_blocker_fields_inside_proof
     assert PairwiseStrategy._sat_unsafety_resolution_proof_id_from_evidence(evidence) is None
 
 def test_pairwise_sat_unsafety_metadata_only_completed_proof_does_not_recover(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1122,7 +1133,7 @@ def test_pairwise_sat_unsafety_metadata_only_completed_proof_does_not_recover(mo
 
 def test_pairwise_phi_circular_guard_solver_replay_sat_stays_unknown(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = base_ctx
     solver_runner = Mock()
     solver_runner.timeout = 5

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """解析と再解析のヘルパー"""
 
+import functools
 from typing import Optional, Tuple
 import time
 
@@ -11,6 +12,7 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext, PhaseResult
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.checker.arch.input_extension import produce_final_input_correspondence
 from scripts.function_tracer_pcode.checker.diagnostics import AnalysisTimer, phase_timeline_of
 from scripts.function_tracer_pcode.checker.result_factory import (
     create_context_error_result,
@@ -365,6 +367,11 @@ def bind_conditional_lane_analyses(result, analysis1, analysis2) -> None:
         return
     try:
         result._conditional_lane_analyses = (analysis1, analysis2)
+        # lane の formula の parameter premise は、この raw pair の最終 relation だけ
+        # から作る（Issue #167）。lane は起動したときだけ作るので遅延させる。
+        result._conditional_lane_input_correspondence_factory = functools.partial(
+            produce_final_input_correspondence, analysis1, analysis2
+        )
     except Exception:
         return
 

@@ -15,6 +15,10 @@ from scripts.function_tracer_pcode.checker.debug_trace import (
 )
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementId
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    comparison_scope,
+    evidence_authority_holds,
+)
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 from scripts.function_tracer_pcode.checker.unknown_reason import coerce_unknown_reason_records
 from scripts.function_tracer_pcode.smt import ParallelResult
@@ -208,9 +212,17 @@ def _record_explicit_proof_completions(
         _freeze_identity(item.proof_requirement_id)
         for item in debug_trace.proof_completion_events
     }
-    for wrapper in result.completed_recovery_proof_evidence or ():
-        if not isinstance(wrapper, Mapping):
-            continue
+    # この attempt の比較（raw pair と relation）で有効な証拠だけを、この attempt の完了として
+    # 数える（別の比較で作った record は raw analysis に残っていても数えない。Issue #167）。
+    frame = getattr(result, "_prepared_dispatch_frame", None)
+    comparison = frame.comparison_binding if getattr(frame, "source", None) is not None else None
+    with comparison_scope(comparison):
+        wrappers = tuple(
+            wrapper for wrapper in result.completed_recovery_proof_evidence or ()
+            if isinstance(wrapper, Mapping)
+            and evidence_authority_holds(wrapper.get("evidence"))
+        )
+    for wrapper in wrappers:
         evidence = wrapper.get("evidence")
         if not isinstance(evidence, Mapping):
             continue

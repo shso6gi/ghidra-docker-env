@@ -4,13 +4,6 @@
 from dataclasses import replace
 
 from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
-from scripts.function_tracer_pcode.proof.formula.types import ExtraVariableInfo
-from scripts.function_tracer_pcode.proof.formula.variable import (
-    ExtensionType,
-    ExtraVariableAnalysis,
-    ParameterFragmentInfo,
-    VariableClassification,
-)
 from scripts.function_tracer_pcode.semantics.semantic_width import (
     align_return_value_extension_surfaces,
     normalize_analysis_semantic_width,
@@ -23,8 +16,6 @@ from scripts.function_tracer_pcode.analysis.effects.summary import (
     CanonicalLocation,
     EffectSummary,
     StoreEffect,
-    lower_post_state_expression_for_smt_if_needed,
-    post_state_read_expression_for_location,
 )
 from scripts.function_tracer_pcode.core import (
     Condition,
@@ -40,6 +31,7 @@ from scripts.function_tracer_pcode.core import (
     ReturnInfo,
     StorageInfo,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 def _param(name: str, size: int, *, index: int | None = None, storage_info=None) -> Expression:
@@ -169,35 +161,14 @@ def _readonly_sum_expr(
     )
 
 
-def _fragment_info(fragment_name: str, parent_name: str, parent_index: int) -> ExtraVariableInfo:
-    fragment_info = ParameterFragmentInfo(
-        fragment_name=fragment_name,
-        fragment_bit_width=32,
-        parent_param_name=parent_name,
-        parent_param_index=parent_index,
-        parent_param_bit_width=32,
-        extension_type=ExtensionType.SIGN_EXTEND,
-        bit_offset_in_base=0,
-        bit_length=32,
-        base_register_name=f"a{parent_index}",
-        base_register_size_bits=64,
-    )
-    analysis = ExtraVariableAnalysis(
-        name=fragment_name,
-        bit_width=32,
-        classification=VariableClassification.PARAMETER_FRAGMENT,
-        fragment_info=fragment_info,
-        reason="test fragment",
-    )
-    return ExtraVariableInfo(
-        original_name=fragment_name,
-        smt_name=f"{fragment_name}_2",
-        bit_width=32,
-        analysis=analysis,
-    )
+def test_normalize_analysis_keeps_widened_signed_division_at_the_wide_width():
+    """Issue #167: 除算・剰余の狭めは有効な規則ではない。
 
-
-def test_normalize_analysis_collapses_widened_signed_division_back_to_32bit():
+    ``SUBPIECE(sdiv(sext(a), sext(b)), 0) == sdiv(a, b)`` は幅に依らない恒等式だが、
+    production 幅（64→32）で実 lowering の certificate が得られない（z3 が決着しない、
+    ``tests/fixtures/issue167/README.md``）。未証明の規則は有効にしないので、広い除算を
+    そのまま描く（意味は元式と同じ）。周囲の ring 演算の狭めは恒等規則なので残る。
+    """
     widened_div = _binary(
         "INT_SDIV",
         _unary("INT_SEXT", _param("param_1", 4), 8),
@@ -229,11 +200,18 @@ def test_normalize_analysis_collapses_widened_signed_division_back_to_32bit():
     normalized = normalize_analysis_semantic_width(analysis)
     value_smt = normalized.returns[0].value.to_smt()
 
-    assert "(bvsdiv param_1 param_2)" in value_smt
-    assert "((_ extract 31 0) (bvsdiv ((_ sign_extend 32) param_1) ((_ sign_extend 32) param_2)))" not in value_smt
+    assert "(bvsdiv param_1 param_2)" not in value_smt
+    assert "((_ extract 31 0) (bvsdiv ((_ sign_extend 32) param_1) ((_ sign_extend 32) param_2)))" in value_smt
 
 
-def test_normalize_analysis_rewrites_raw_wide_xor_of_semantically_narrow_params():
+def test_normalize_analysis_keeps_wide_xor_at_full_width_despite_narrow_hints():
+    """64 bit の XOR を 32 bit へ裸で狭めない（Issue #167, v5 §4.6）。
+
+    修正前は hint だけで ``p2 ^ p3``（64 bit）を ``low32(p2) ^ low32(p3)``（32 bit）へ
+    書き換えていた。式の sort が変わり、全幅の値も保存しない。hint は
+    ``SUBPIECE(p2 ^ p3, 0)`` のように下位 bit だけを読む文脈でだけ効く。
+    """
+    wide_xor = _binary("INT_XOR", _param("param_2", 8), _param("param_3", 8), 8)
     analysis = FunctionReturnAnalysis(
         function_name="fc_wide_xor_wrapper_like",
         entry_point="0x1000",
@@ -246,8 +224,9 @@ def test_normalize_analysis_rewrites_raw_wide_xor_of_semantically_narrow_params(
             ReturnInfo(
                 address="0x1000",
                 conditions=[Condition(_binary("INT_NOTEQUAL", _binary("INT_AND", _param("param_1", 8), _const(1, 8), 8), _const(0, 8), 1))],
-                value=_binary("INT_XOR", _param("param_2", 8), _param("param_3", 8), 8),
-            )
+                value=wide_xor,
+            ),
+            ReturnInfo(address="0x1004", conditions=[], value=_subpiece(wide_xor, 4)),
         ],
         return_type="long",
     )
@@ -260,11 +239,14 @@ def test_normalize_analysis_rewrites_raw_wide_xor_of_semantically_narrow_params(
         },
     )
 
-    value = normalized.returns[0].value
-    assert value.operator == "INT_XOR"
-    assert value.size == 4
-    assert value.operands[0].operator == "SUBPIECE"
-    assert value.operands[1].operator == "SUBPIECE"
+    wide = normalized.returns[0].value
+    assert wide.operator == "INT_XOR"
+    assert wide.size == 8
+    assert all(operand.expr_type == ExpressionType.PARAMETER for operand in wide.operands)
+    low = normalized.returns[1].value
+    assert low.operator == "INT_XOR"
+    assert low.size == 4
+    assert [operand.operator for operand in low.operands] == ["SUBPIECE", "SUBPIECE"]
 
 
 def test_normalize_analysis_does_not_apply_semantic_width_hint_by_no_index_name():
@@ -351,7 +333,8 @@ def test_normalize_analysis_applies_semantic_width_hint_by_parameter_storage_ide
             ReturnInfo(
                 address="0x1000",
                 conditions=[],
-                value=_binary("INT_XOR", left, right, 8),
+                # 下位 32 bit だけを読む文脈（恒等規則の対象）で hint の解決を見る。
+                value=_subpiece(_binary("INT_XOR", left, right, 8), 4),
             )
         ],
         return_type="long",
@@ -397,7 +380,8 @@ def test_normalize_analysis_applies_semantic_width_hint_from_serialized_paramete
             ReturnInfo(
                 address="0x1000",
                 conditions=[],
-                value=_binary("INT_XOR", left, right, 8),
+                # 下位 32 bit だけを読む文脈（恒等規則の対象）で hint の解決を見る。
+                value=_subpiece(_binary("INT_XOR", left, right, 8), 4),
             )
         ],
         return_type="long",
@@ -446,8 +430,10 @@ def test_normalize_analysis_keeps_inferred_storage_hints_when_index_hints_are_pa
         returns=[
             ReturnInfo(
                 address="0x1000",
-                conditions=[],
-                value=_binary("INT_XOR", masked, plain, 8),
+                # mask の use が storage 単位の hint を作る。値は下位 32 bit だけを読む
+                # 文脈（恒等規則の対象）に置く。
+                conditions=[Condition(_binary("INT_NOTEQUAL", masked, _const(0, 8), 1))],
+                value=_subpiece(_binary("INT_XOR", plain, plain, 8), 4),
             )
         ],
         return_type="long",
@@ -465,7 +451,13 @@ def test_normalize_analysis_keeps_inferred_storage_hints_when_index_hints_are_pa
     assert value.operands[1].operator == "SUBPIECE"
 
 
-def test_normalize_analysis_collapses_fragment_backed_widening_patterns():
+def test_normalize_analysis_keeps_fragment_backed_widening_patterns():
+    """``(in_a0_hi << 32) | param_1`` を ``sext(param_1)`` へ畳まない（Issue #167）。
+
+    修正前は fragment の ``is_signed`` ラベルだけで畳み、SDIV まで 32 bit へ狭めて
+    いた。上位断片が同じ引数の拡張であることは信頼済み IEE が無ければ言えない
+    （独立した上位 bit では値が変わる）ので、式を保つ。
+    """
     wide_div = _binary(
         "INT_SDIV",
         _wide_param("in_a0_hi", "param_1"),
@@ -509,21 +501,15 @@ def test_normalize_analysis_collapses_fragment_backed_widening_patterns():
         return_type="long",
     )
 
-    normalized = normalize_analysis_semantic_width(
-        analysis,
-        fragment_infos=[
-            _fragment_info("in_a0_hi", "param_1", 0),
-            _fragment_info("in_a1_hi", "param_2", 1),
-        ],
-    )
+    normalized = normalize_analysis_semantic_width(analysis)
     value_smt = normalized.returns[0].value.to_smt()
     cond_smt = normalized.returns[0].conditions[0].to_smt()
 
-    assert "in_a0_hi" not in value_smt
-    assert "in_a1_hi" not in value_smt
-    assert "(bvsdiv param_1 param_2)" in value_smt
-    assert "((_ sign_extend 32) param_2)" not in cond_smt
-    assert "(distinct param_2 (_ bv0 32))" in cond_smt
+    assert "in_a0_hi" in value_smt
+    assert "in_a1_hi" in value_smt
+    assert "(bvsdiv param_1 param_2)" not in value_smt
+    assert "in_a1_hi" in cond_smt
+    assert "(distinct param_2 (_ bv0 32))" not in cond_smt
 
 
 def test_normalize_analysis_deduplicates_wide_nonzero_and_masked_nonzero_conditions():
@@ -609,78 +595,44 @@ def test_formula_builder_applies_semantic_width_normalization_before_lowering():
         return_type="int",
     )
 
-    formula = builder.build_equivalence_formula_extended(narrow_analysis, widened_analysis).formula
+    formula = builder.build_equivalence_formula_extended(narrow_analysis, widened_analysis, input_correspondence=build_input_correspondence_set(narrow_analysis, widened_analysis)).formula
 
-    assert "(bvsdiv param_1_2 param_2_2)" in formula
-    assert "((_ extract 31 0) (bvsdiv ((_ sign_extend 32) param_1_2) ((_ sign_extend 32) param_2_2)))" not in formula
+    # 除算の狭めは無効（上の test を参照）。広い除算のまま lowering する。
+    assert "(bvsdiv param_1_2 param_2_2)" not in formula
+    assert "((_ extract 31 0) (bvsdiv ((_ sign_extend 32) param_1_2) ((_ sign_extend 32) param_2_2)))" in formula
     assert "(distinct param_2_2 (_ bv0 32))" in formula
 
 
-def test_normalize_analysis_rewrites_effect_summary_for_fragment_backed_pointer_reads():
+def test_normalize_analysis_keeps_fragment_backed_pointer_reads_unassumed():
+    """store 値の pointer ``(in_a0_hi << 32) | param_1`` を ``ext(param_1)`` と仮定しない。
+
+    修正前は fragment tag から ``sext(param_1)`` へ畳んでいた（Issue #167）。
+    """
     params = [
         {"name": "param_1", "data_type": "int *", "size": 4, "index": 0, "is_signed": True},
         {"name": "param_2", "data_type": "int", "size": 4, "index": 1, "is_signed": False},
         {"name": "param_3", "data_type": "int", "size": 4, "index": 2, "is_signed": False},
     ]
     loc0 = CanonicalLocation(base_ref=LocationBaseRef.parameter("param_1", index=0), offset=0, size=4)
-    loc4 = CanonicalLocation(base_ref=LocationBaseRef.parameter("param_1", index=0), offset=4, size=4)
-    symbolic_sum = _binary(
-        "INT_ADD",
-        post_state_read_expression_for_location(loc0, params, symbolic=True),
-        post_state_read_expression_for_location(loc4, params, symbolic=True),
-        4,
-    )
+    effect_value = _mem_addr(_wide_param("in_a0_hi", "param_1"))
     analysis = FunctionReturnAnalysis(
         function_name="lr_loop_with_side_effect",
         entry_point="0x1000",
         parameters=params,
-        returns=[ReturnInfo(address="0x1000", conditions=[], value=symbolic_sum)],
+        returns=[ReturnInfo(address="0x1000", conditions=[], value=_const(0, 4))],
         return_type="int",
         effect_summary=EffectSummary(
             parameter_names=["param_1", "param_2", "param_3"],
-            effects=[
-                StoreEffect(
-                    location=loc0,
-                    value=_mem_addr(_wide_param("in_a0_hi", "param_1")),
-                    conditions=[],
-                    order_key=1,
-                ),
-                StoreEffect(
-                    location=loc4,
-                    value=_mem_addr(
-                        _binary(
-                            "INT_ADD",
-                            _wide_param("in_a0_hi", "param_1"),
-                            _const(4, 8),
-                            8,
-                        )
-                    ),
-                    conditions=[],
-                    order_key=2,
-                ),
-            ],
+            effects=[StoreEffect(location=loc0, value=effect_value, conditions=[], order_key=1)],
         ),
     )
 
-    normalized = normalize_analysis_semantic_width(
-        analysis,
-        fragment_infos=[_fragment_info("in_a0_hi", "param_1", 0)],
-    )
-    lowered = lower_post_state_expression_for_smt_if_needed(
-        normalized.returns[0].value,
-        normalized.returns[0].conditions,
-        normalized.effect_summary.effects,
-        normalized.parameters,
-    )
+    normalized = normalize_analysis_semantic_width(analysis)
+    stored_smt = normalized.effect_summary.effects[0].value.to_smt()
 
-    assert lowered is not None
-    lowered_smt = lowered.to_smt()
-    assert (
-        "((_ sign_extend 32) param_1)" in lowered_smt
-        or "((_ zero_extend 32) param_1)" in lowered_smt
-    )
-    assert "(bvadd (_ bv4 64) param_1)" not in lowered_smt
-    assert "in_a0_hi" not in lowered_smt
+    assert "in_a0_hi" in stored_smt
+    # zero_extend は描画時の幅合わせ（in_a0_hi << 32）で、畳み込みではない。
+    assert "((_ sign_extend 32) param_1)" not in stored_smt
 
 
 def test_normalize_analysis_synchronizes_parameter_expr_widths_with_declared_metadata():
@@ -767,7 +719,7 @@ def test_formula_builder_handles_mips64_abi_param_width_mismatch_in_return_exprs
         return_type="int",
     )
 
-    formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+    formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
 
     assert "(declare-const param_1_2 (_ BitVec 32))" in formula
     assert "(select mem32 param_1_2)" not in formula
@@ -1192,7 +1144,12 @@ def test_normalize_analysis_parameter_metadata_does_not_infer_index_from_positio
     assert rewritten_param.data_type == "short"
 
 
-def test_normalize_analysis_rewrites_unsigned_guard_to_signed_when_hint_is_explicit():
+def test_normalize_analysis_keeps_unsigned_guard_unsigned_despite_explicit_signed_hint():
+    """unsigned 比較を signed 比較へ変えない（Issue #167, v5 §4.6）。
+
+    修正前は explicit signed hint だけで ``3 <u count`` を ``3 <s count`` にしていた。
+    ``count = 0x80000000`` で結果が変わる（sign 拡張の前提があっても同じ）。
+    """
     count = _param("count", 4)
     analysis = FunctionReturnAnalysis(
         function_name="signed_count_tail_like",
@@ -1216,5 +1173,7 @@ def test_normalize_analysis_rewrites_unsigned_guard_to_signed_when_hint_is_expli
     )
     cond_smt = normalized.returns[0].conditions[0].to_smt()
 
-    assert "(bvslt (_ bv3 32) count)" in cond_smt
-    assert "(bvult (_ bv3 32) count)" not in cond_smt
+    assert "(bvult (_ bv3 32) count)" in cond_smt
+    assert "bvslt" not in cond_smt
+
+

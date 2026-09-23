@@ -3373,7 +3373,12 @@ def test_typed_call_to_region_refutes_different_inline_result():
     ]
 
 
-def test_typed_call_to_region_proves_explicit_signed_abi_width_bridge():
+def test_typed_call_to_region_refuses_a_declared_signedness_abi_width_bridge():
+    """Issue #167: region が parameter を宣言より広く読むとき、宣言型の符号から
+    ``wide == ext(declared)`` を仮定しない。上位 bit は parameter の外（register の
+    残り）で、最終 InputCorrespondence はそれを含意しない。以前はこの仮定で
+    3 段とも proven になっていた（入力領域を狭めた未証明の proof）。
+    """
     pytest.importorskip("z3")
     left, right, _ = _call_to_region_proof_inputs()
     right.parameters[0]["is_signed"] = True
@@ -3407,10 +3412,9 @@ def test_typed_call_to_region_proves_explicit_signed_abi_width_bridge():
         timeout_seconds=5,
     )
 
-    assert [item.record.status for item in production.artifacts] == [
-        "proven",
-        "proven",
-        "proven",
+    assert production.artifacts == ()
+    assert [cause.rsplit(":", 1)[1] for cause in production.failure_causes] == [
+        "inline_region_parameter_wider_than_declaration",
     ]
 
 

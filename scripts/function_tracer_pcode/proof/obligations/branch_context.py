@@ -5,7 +5,7 @@ canonical path は ``proof.obligations.branch_context``。checker 配下の旧 p
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
@@ -70,3 +70,15 @@ def build_branch_check_context(
         decision_mode=decision_mode,
         production_branch_authority_lease=production_branch_authority_lease,
     )
+
+
+def successor_branch_context(ctx: BranchCheckContext) -> BranchCheckContext:
+    """recurrence promotion の後継 pair の比較へ渡す context（Issue #167）。
+
+    後継 pair は別の比較なので、元の比較の replan plan（後継 ledger の intent）は持ち込まない。
+    replan でなければ同じ object をそのまま渡す。
+    """
+
+    if ctx.replan_plan is None:
+        return ctx
+    return replace(ctx, replan_plan=None)

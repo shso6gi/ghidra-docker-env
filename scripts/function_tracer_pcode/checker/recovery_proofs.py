@@ -5,6 +5,13 @@ from __future__ import annotations
 from typing import Dict, Any, List, Mapping
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.core.evidence_authority import (
+    AUTHORITY_SCOPE_KEY,
+    COMPARISON_AUTHORITY_KEY,
+)
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    merge_new_evidence,
+)
 from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec
 from scripts.function_tracer_pcode.authority.lifecycle.production_boundary import (
     run_check_from_binaries_with_v2_pilot as run_check_from_binaries,
@@ -56,6 +63,8 @@ class RecoveryProofMixin:
                     or evidence.get("proof_obligation_id")
                     or evidence
                 ),
+                evidence.get(AUTHORITY_SCOPE_KEY),
+                evidence.get(COMPARISON_AUTHORITY_KEY),
             )
             unique.setdefault(identity, item)
         return list(unique.values())
@@ -142,14 +151,11 @@ class RecoveryProofMixin:
             evidence = item.get("evidence")
             if not isinstance(evidence, Mapping):
                 continue
-            records = [
-                dict(record)
-                for record in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
-                if isinstance(record, Mapping)
-            ]
-            proof_id = evidence.get("proof_obligation_id")
-            existing_ids = {record.get("proof_obligation_id") for record in records}
-            if proof_id is not None and proof_id in existing_ids:
-                continue
-            records.append(dict(evidence))
-            analysis.completed_recovery_proof_evidence = tuple(records)
+            # 証拠の authority（Issue #167）はそのまま持ち込む。同じ proof でも
+            # 別の比較で作った record は、別の証拠として並べる。
+            merged = merge_new_evidence(
+                getattr(analysis, "completed_recovery_proof_evidence", ()) or (),
+                (evidence,),
+            )
+            if merged is not None:
+                analysis.completed_recovery_proof_evidence = tuple(merged)

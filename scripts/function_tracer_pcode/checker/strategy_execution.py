@@ -24,6 +24,12 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict
 
+from scripts.function_tracer_pcode.checker.arch.input_extension import (
+    provide_input_extension_evidence,
+)
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    comparison_scope,
+)
 from scripts.function_tracer_pcode.proof.obligations.branch_context import BranchCheckContext
 from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     PreparedDispatchFrame,
@@ -61,7 +67,13 @@ def prepare_preflight_projection(
     enable_completed_recovery_proofs: bool,
     call_effect_shadow_manifest: Callable[..., Dict[str, Any]],
 ) -> PreflightProjectionPreparation:
-    source_pair = StrategySourceAnalysisPair.create(analysis1, analysis2)
+    # raw pair と、validator を通った入力 extension 証拠（現在の provider は
+    # 信頼済み signature が無いので発行しない。Issue #167）。
+    source_pair = StrategySourceAnalysisPair.create(
+        analysis1,
+        analysis2,
+        input_extension_evidence=provide_input_extension_evidence(analysis1, analysis2),
+    )
     prepared_pair = prepare_solver_surface(
         source_pair,
         observation_contract_digest=observation_contract_id,
@@ -139,15 +151,36 @@ class StrategyRuntimePreparation:
     store_on_facade: bool
 
 
-def prepare_strategy_runtime(existing_runtime, replan_plan, analysis1, analysis2) -> StrategyRuntimePreparation:
-    """旧 ``check()`` と同じ規則。
+def prepare_strategy_runtime(
+    existing_runtime, replan_plan, analysis1, analysis2, comparison=None,
+) -> StrategyRuntimePreparation:
+    """旧 ``check()`` と同じ規則に、比較の authority（Issue #167）の規則を加える。
 
+    - 既存 runtime が別の比較（raw pair か最終 relation が違う）に仕えている場合:
+      runtime の state（artifact・view・dependency・producer・replanner・outcome）を共有しない
+      ため **新しい runtime をローカルに作るが facade には保存しない**（再帰抽象化の抽象 pair、
+      recurrence promotion の後継 pair）。replan は同じ比較の中でだけ行う。
     - 既存 runtime があり、replan 中でなく、branch-local な ``pending_successor`` を持つ場合:
       successor intent を他の strategy に消費させないため **新しい runtime をローカルに作るが facade には保存しない**。
     - 既存 runtime が無い場合: 新しい runtime を作り **facade に保存する**。
     - それ以外: 既存 runtime をそのまま使い、保存しない。
+
+    どの場合も、返す runtime は ``comparison`` の比較に仕える（``claim_comparison``）。
     """
+    from scripts.function_tracer_pcode.proof.obligations.runtime import (
+        ObligationRuntimeSession,
+    )
+
+    def fresh(store_on_facade: bool) -> StrategyRuntimePreparation:
+        runtime = ObligationRuntimeSession.create(analysis1, analysis2)
+        runtime.claim_comparison(comparison)
+        return StrategyRuntimePreparation(runtime, store_on_facade)
+
     obligation_runtime = existing_runtime
+    if obligation_runtime is not None and not obligation_runtime.serves_comparison(comparison):
+        if replan_plan is not None:
+            raise RuntimeError("pair_replan_comparison_authority_changed")
+        return fresh(False)
     if (
         obligation_runtime is not None
         and replan_plan is None
@@ -155,17 +188,10 @@ def prepare_strategy_runtime(existing_runtime, replan_plan, analysis1, analysis2
     ):
         # A successor intent is branch-local authority.  Recursive
         # abstraction or another strategy must not consume it.
-        from scripts.function_tracer_pcode.proof.obligations.runtime import (
-            ObligationRuntimeSession,
-        )
-
-        return StrategyRuntimePreparation(ObligationRuntimeSession.create(analysis1, analysis2), False)
+        return fresh(False)
     if obligation_runtime is None:
-        from scripts.function_tracer_pcode.proof.obligations.runtime import (
-            ObligationRuntimeSession,
-        )
-
-        return StrategyRuntimePreparation(ObligationRuntimeSession.create(analysis1, analysis2), True)
+        return fresh(True)
+    obligation_runtime.claim_comparison(comparison)
     return StrategyRuntimePreparation(obligation_runtime, False)
 
 
@@ -206,40 +232,43 @@ def run_strategy_branch(
         dispatch_frame.replan_successor_plan = replan_plan
 
     debug_print(f"Using strategy: {strategy.__class__.__name__}")
-    if isinstance(strategy, (PairwiseStrategy, MonolithicStrategy)):
-        token = None
-        try:
-            token = push_prepared_dispatch_frame(dispatch_frame)
-            strategy_result = strategy.check(analysis1, analysis2, save_formula)
-            if (
-                isinstance(strategy, PairwiseStrategy)
-                and dispatch_frame.pair_disposition_ledger is not None
-                and dispatch_frame.receipt is None
-            ):
-                strategy_result.comparison_execution_receipt = (
-                    finalize_pairwise_comparison_receipt(dispatch_frame)
-                )
-        finally:
-            if token is None:
+    # Issue #167: この比較の authority は frame の raw pair と最終 InputCorrespondence の組。
+    # strategy が作る証拠・obligation・closure はこれに束縛され、gate はこれと照合する。
+    with comparison_scope(dispatch_frame.comparison_binding):
+        if isinstance(strategy, (PairwiseStrategy, MonolithicStrategy)):
+            token = None
+            try:
+                token = push_prepared_dispatch_frame(dispatch_frame)
+                strategy_result = strategy.check(analysis1, analysis2, save_formula)
+                if (
+                    isinstance(strategy, PairwiseStrategy)
+                    and dispatch_frame.pair_disposition_ledger is not None
+                    and dispatch_frame.receipt is None
+                ):
+                    strategy_result.comparison_execution_receipt = (
+                        finalize_pairwise_comparison_receipt(dispatch_frame)
+                    )
+            finally:
+                if token is None:
+                    dispatch_frame.close()
+                    dispatch_frame.cleanup_complete = True
+                    cleanup_complete = True
+                else:
+                    cleanup_complete = close_prepared_dispatch_frame(dispatch_frame, token)
+                if locally_issued_branch_authority is not None:
+                    from scripts.function_tracer_pcode.proof.monolithic_authority import (
+                        revoke_production_branch_authority,
+                    )
+                    revoke_production_branch_authority(locally_issued_branch_authority)
+        else:
+            # Non-built-in compatibility branches cannot consume a
+            # projection.  Their EQ is vetoed below whenever call proof
+            # preflight is required.
+            try:
+                strategy_result = strategy.check(analysis1, analysis2, save_formula)
+            finally:
                 dispatch_frame.close()
                 dispatch_frame.cleanup_complete = True
-                cleanup_complete = True
-            else:
-                cleanup_complete = close_prepared_dispatch_frame(dispatch_frame, token)
-            if locally_issued_branch_authority is not None:
-                from scripts.function_tracer_pcode.proof.monolithic_authority import (
-                    revoke_production_branch_authority,
-                )
-                revoke_production_branch_authority(locally_issued_branch_authority)
-    else:
-        # Non-built-in compatibility branches cannot consume a
-        # projection.  Their EQ is vetoed below whenever call proof
-        # preflight is required.
-        try:
-            strategy_result = strategy.check(analysis1, analysis2, save_formula)
-        finally:
-            dispatch_frame.close()
-            dispatch_frame.cleanup_complete = True
     ordinary_outcome = strategy_result.is_equivalent
     stage_runner_owns_finalization = str(ctx.branch_id).startswith("S_")
     if (

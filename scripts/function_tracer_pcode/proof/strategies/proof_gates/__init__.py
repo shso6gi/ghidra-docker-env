@@ -253,6 +253,7 @@ def implementations() -> dict[str, Callable[..., Any]]:
         "_rewrite_atom_encoded_program_identity_key": _object_keys._impl__rewrite_atom_encoded_program_identity_key,
         "_rewrite_program_identity_keys": _object_keys._impl__rewrite_program_identity_keys,
         "_counterexample_replay_reasons": _sat_safety._impl__counterexample_replay_reasons,
+        "_input_correspondence_unsafety_reasons": _sat_safety._impl__input_correspondence_unsafety_reasons,
         "_pair_return_width_unsafety_reasons": _sat_safety._impl__pair_return_width_unsafety_reasons,
         "_sat_counterexample_ambiguous_object_target_key": _sat_safety._impl__sat_counterexample_ambiguous_object_target_key,
         "_sat_unsafety_object_evidence": _sat_safety._impl__sat_unsafety_object_evidence,

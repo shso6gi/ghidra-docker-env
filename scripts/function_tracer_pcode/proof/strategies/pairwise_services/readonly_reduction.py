@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
 from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
@@ -12,6 +13,11 @@ from scripts.function_tracer_pcode.core import (
     ReadonlyReductionTermRef,
 )
 from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    LEFT as INPUT_LEFT,
+    RIGHT as INPUT_RIGHT,
+    InputCorrespondenceSet,
+)
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ConditionSMTOracle,
     ConditionSimplifier,
@@ -22,11 +28,17 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     _ReadonlyLoopSummaryProofAdapter,
     _RuntimeShortcutDecision,
     build_unknown_recovery_actions,
+    comparison_evidence,
     parameter_identity_key_from_expression,
+    store_comparison_evidence,
 )
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     canonicalize_location,
 )
+
+
+#: readonly identity projection proof の入力 extension の唯一の出所（Issue #167）。
+FINAL_INPUT_CORRESPONDENCE_PROOF_SOURCE = "final_input_correspondence"
 
 
 def _impl__cases_have_equivalent_runtime_reductions(
@@ -988,6 +1000,8 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
     analysis2: FunctionReturnAnalysis,
     case1: ReturnCase,
     case2: ReturnCase,
+    *,
+    input_correspondence: Any,
 ) -> None:
     if not self.enable_completed_recovery_proofs:
         return
@@ -1010,11 +1024,10 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
     if not self._case_pair_has_runtime_guard_coverage_or_equivalence(case1, case2):
         return
     extension_evidence = self._readonly_projection_parameter_extension_evidence(
-        analysis1,
-        analysis2,
         left_ref,
         right_ref,
         relation,
+        input_correspondence=input_correspondence,
     )
     if extension_evidence is None:
         return
@@ -1033,7 +1046,7 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
     ]
     existing_ids = {
         self._normalize_nested_tuple(item.get("proof_obligation_id"))
-        for item in records
+        for item in comparison_evidence(records)
     }
     if proof_id in existing_ids:
         return
@@ -1062,6 +1075,8 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
         },
         "parameter_extension": extension_evidence,
     }
+    # proof はこの比較の relation が含意した extension から作った。store_comparison_evidence が
+    # この比較（raw pair と relation）に束縛する（raw analysis に残っても別の比較では採用されない）。
     records.append(
         {
             "object_derived": True,
@@ -1078,7 +1093,7 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
             "proof_content": proof_content,
         }
     )
-    analysis1.completed_recovery_proof_evidence = tuple(records)
+    store_comparison_evidence(analysis1, records)
 
 
 def _impl__readonly_projection_term_contracts_match(
@@ -1142,12 +1157,21 @@ def _impl__readonly_semantic_witness_keys(self, readonly_ref: ReadonlyReductionR
 
 def _impl__readonly_projection_parameter_extension_evidence(
     self,
-    analysis1: FunctionReturnAnalysis,
-    analysis2: FunctionReturnAnalysis,
     left_ref: ReadonlyReductionRef,
     right_ref: ReadonlyReductionRef,
     relation: Tuple[Any, ...],
+    *,
+    input_correspondence: Any,
 ) -> Optional[Dict[str, Any]]:
+    """wide 側 count と narrow 側 count を結ぶ入力 extension の証拠（Issue #167）。
+
+    wide 側の register 値が narrow 側の値の extension であることは、最終
+    ``InputCorrespondence`` が含意したときだけ言える: その parameter の relation が
+    ``EXTENSION_BOUND``（tie = narrow 幅）で、wide 側に ``p == ext(low_N(p))`` の
+    入力仮定が entail されていること。Ghidra の推論型（wide storage 上の narrow 宣言型）
+    や semantic hint は証拠にしない。無ければ None（blocker は残り UNKNOWN）。
+    """
+
     try:
         left_bits = self._readonly_projection_span(relation, "left_bits")
         right_bits = self._readonly_projection_span(relation, "right_bits")
@@ -1163,31 +1187,24 @@ def _impl__readonly_projection_parameter_extension_evidence(
         wide_side, narrow_side = "left", "right"
         wide_bits, narrow_bits = left_size, right_size
         wide_low, narrow_low = left_low, right_low
-        wide_analysis, narrow_analysis = analysis1, analysis2
         wide_ref, narrow_ref = left_ref, right_ref
     else:
         wide_side, narrow_side = "right", "left"
         wide_bits, narrow_bits = right_size, left_size
         wide_low, narrow_low = right_low, left_low
-        wide_analysis, narrow_analysis = analysis2, analysis1
         wide_ref, narrow_ref = right_ref, left_ref
     shared_index = self._readonly_shared_parameter_index(left_ref, right_ref)
     if shared_index is None:
         return None
-    signedness = self._readonly_declared_narrow_parameter_signedness(
-        wide_analysis,
-        shared_index,
-        narrow_bits,
-        wide_bits,
-    )
-    source = (
-        "declared_parameter_narrow_type_on_wide_storage"
-        if signedness is not None
-        else None
-    )
-    if signedness is None:
+    if type(input_correspondence) is not InputCorrespondenceSet:
         return None
-    if self._readonly_declared_parameter_bits(narrow_analysis, shared_index) != narrow_bits:
+    assumption = input_correspondence.entailed_projection_extension(
+        INPUT_LEFT if wide_side == "left" else INPUT_RIGHT,
+        shared_index,
+        wide_bits,
+        narrow_bits,
+    )
+    if assumption is None:
         return None
     if not self._readonly_projection_ref_storage_matches(
         wide_ref,
@@ -1202,6 +1219,7 @@ def _impl__readonly_projection_parameter_extension_evidence(
         size_bits=narrow_bits,
     ):
         return None
+    signed = assumption.kind.value == "sign"
     return {
         "object_derived": True,
         "status": "proven",
@@ -1210,11 +1228,13 @@ def _impl__readonly_projection_parameter_extension_evidence(
         "wide_side": wide_side,
         "narrow_side": narrow_side,
         "parameter_index": shared_index,
-        "signedness": signedness,
+        "signedness": "signed" if signed else "unsigned",
         "narrow_bits": narrow_bits,
         "wide_bits": wide_bits,
-        "extension": "sign_extend" if signedness == "signed" else "zero_extend",
-        "proof_source": source,
+        "extension": assumption.kind.smt_operator,
+        "proof_source": FINAL_INPUT_CORRESPONDENCE_PROOF_SOURCE,
+        "input_correspondence_digest": input_correspondence.digest,
+        "entailed_assumption": assumption.stable_key(),
     }
 
 
@@ -1242,76 +1262,6 @@ def _impl__readonly_shared_parameter_index(
         and left_index[1] == right_index[1]
     ):
         return int(left_index[1])
-    return None
-
-
-def _impl__readonly_declared_parameter_bits(
-    analysis: FunctionReturnAnalysis,
-    index: int,
-) -> Optional[int]:
-    for param in getattr(analysis, "parameters", ()) or ():
-        try:
-            if int(param.get("index", -1)) != int(index):
-                continue
-            return int(param.get("size", 0)) * 8
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def _impl__readonly_declared_narrow_parameter_signedness(
-    self,
-    analysis: FunctionReturnAnalysis,
-    index: int,
-    narrow_bits: int,
-    wide_bits: int,
-) -> Optional[str]:
-    for param in getattr(analysis, "parameters", ()) or ():
-        try:
-            if int(param.get("index", -1)) != int(index):
-                continue
-            size_bits = int(param.get("size", 0)) * 8
-        except (TypeError, ValueError):
-            return None
-        storage_info = param.get("storage_info") or param.get("storage")
-        storage_key_fn = getattr(storage_info, "storage_identity_key", None)
-        storage_key = storage_key_fn() if callable(storage_key_fn) else None
-        if size_bits != int(narrow_bits):
-            continue
-        if storage_key is None:
-            continue
-        components = self._register_storage_identity_components(("parameter_storage", tuple(storage_key)))
-        if components is None or components[2] != int(wide_bits):
-            continue
-        signedness = self._readonly_parameter_declared_signedness(param)
-        if signedness is None:
-            return None
-        return signedness
-    return None
-
-
-def _impl__readonly_parameter_declared_signedness(param: Mapping[str, Any]) -> Optional[str]:
-    if "is_signed" in param:
-        explicit_signedness = param.get("is_signed")
-        if explicit_signedness is True:
-            return "signed"
-        if explicit_signedness is False:
-            return "unsigned"
-        return None
-    data_type_obj = param.get("data_type_obj")
-    if data_type_obj is None:
-        return None
-    is_signed = getattr(data_type_obj, "isSigned", None)
-    if not callable(is_signed):
-        return None
-    try:
-        signed_value = is_signed()
-    except Exception:
-        return None
-    if signed_value is True:
-        return "signed"
-    if signed_value is False:
-        return "unsigned"
     return None
 
 

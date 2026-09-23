@@ -2186,18 +2186,24 @@ def _impl__filter_noreturn_return_path_entries(
                     CallTargetRef.from_function(target_function).stable_key(),
                 ))
             argument_keys = []
+            argument_expressions = []
             try:
                 for input_index in range(1, int(noreturn_op.getNumInputs())):
                     expression = tracer.trace_varnode(noreturn_op.getInput(input_index), use_cache=False)
                     argument_keys.append(expression.structural_key())
+                    argument_expressions.append(expression)
             except Exception:
                 argument_keys = []
+                argument_expressions = None
             site = self._describe_pcode_site(noreturn_op, "unknown")
             self._current_noreturn_terminal_observations.append({
                 "pcode_op_ref": site.get("pcode_op_ref"),
                 "target_refs": targets,
                 "noreturn_contract_keys": tuple(noreturn_contract_keys),
                 "argument_keys": tuple(argument_keys),
+                "argument_expressions": (
+                    tuple(argument_expressions) if argument_expressions is not None else None
+                ),
                 "conditions": tuple(conditions or ()),
             })
             if self.debug:

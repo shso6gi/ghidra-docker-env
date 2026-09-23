@@ -1,4 +1,5 @@
 from scripts.function_tracer_pcode.tests.unit._memory_model_fixtures import *
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 def test_summarize_store_effects_marks_real_op_unknown_order_incomplete():
     class FakeCoverage:
@@ -101,7 +102,7 @@ def test_formula_builder_declares_memory_arrays_for_memory_returns():
     )
 
     builder = FormulaBuilder(debug=False, exclude_ub=False)
-    formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+    formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
 
     assert "(declare-const mem32 (Array (_ BitVec 64) (_ BitVec 32)))" in formula
     assert "(select mem32 p_1)" in formula

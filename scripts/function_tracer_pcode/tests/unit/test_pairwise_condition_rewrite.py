@@ -30,6 +30,7 @@ from scripts.function_tracer_pcode.smt import (
     SolverResult,
     SolverStatus,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 def _solver_runner():
@@ -393,7 +394,7 @@ def test_pairwise_unresolved_check_avoids_condition_simplifier_recursion(monkeyp
     analysis2 = FunctionReturnAnalysis(
         function_name="branch_sign_bucket_right",
         entry_point="0x2000",
-        parameters=[{"name": "param_1", "size": 4, "data_type": "int", "index": 0}],
+        parameters=[{"name": "param_1", "size": 8, "data_type": "long", "index": 0}],
         returns=[
             ReturnInfo(
                 address="0x2001",
@@ -410,7 +411,7 @@ def test_pairwise_unresolved_check_avoids_condition_simplifier_recursion(monkeyp
     )
 
     formula_builder = FormulaBuilder()
-    base_ctx = formula_builder.build_base_context(analysis1, analysis2)
+    base_ctx = formula_builder.build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     replace_fn1 = build_symbol_replacer(base_ctx["params1"], base_ctx.get("extra_vars1", []))
     replace_fn2 = build_symbol_replacer(base_ctx["params2"], base_ctx.get("extra_vars2", []))
 
@@ -449,10 +450,13 @@ def test_pairwise_unresolved_check_avoids_condition_simplifier_recursion(monkeyp
 
 
 def test_pairwise_strategy_completes_for_mixed_signed_guard_pair():
+    # leaf は 64 bit で読むので、parameter も 64 bit で宣言する。宣言より広い leaf は
+    # relation のどの tie にも入らない入力（Issue #167 の hidden input）になり、
+    # この test の主題（符号の混ざった guard）と別の理由で判定が止まる。
     analysis1 = FunctionReturnAnalysis(
         function_name="branch_sign_bucket_left",
         entry_point="0x1000",
-        parameters=[{"name": "param_1", "size": 4, "data_type": "int", "index": 0}],
+        parameters=[{"name": "param_1", "size": 8, "data_type": "long", "index": 0}],
         returns=[
             ReturnInfo(
                 address="0x1001",
@@ -475,7 +479,7 @@ def test_pairwise_strategy_completes_for_mixed_signed_guard_pair():
     analysis2 = FunctionReturnAnalysis(
         function_name="branch_sign_bucket_right",
         entry_point="0x2000",
-        parameters=[{"name": "param_1", "size": 4, "data_type": "int", "index": 0}],
+        parameters=[{"name": "param_1", "size": 8, "data_type": "long", "index": 0}],
         returns=[
             ReturnInfo(
                 address="0x2001",

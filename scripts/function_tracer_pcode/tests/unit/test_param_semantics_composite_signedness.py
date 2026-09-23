@@ -21,6 +21,7 @@ from scripts.function_tracer_pcode.core import (
 )
 
 from conftest import create_mock_analysis
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 def _param(name: str, size: int = 8, *, index: int = -1, storage_info=None) -> Expression:
@@ -668,7 +669,7 @@ def test_formula_builder_emits_signed_semantic_constraints_for_or_guard():
     builder = FormulaBuilder(debug=False)
     analysis = _analysis_with_guard(_or_guard_condition("param_1", "param_2"))
 
-    formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+    formula = builder.build_equivalence_formula_extended(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis)).formula
 
     assert "; param_1_1: constrain to signed 32-bit semantic value" not in formula
     assert "; param_2_1: constrain to signed 32-bit semantic value" not in formula
@@ -680,7 +681,7 @@ def test_formula_builder_does_not_emit_signedness_constraints_for_width_only_hin
     builder = FormulaBuilder(debug=False)
     analysis = _analysis_with_storage_backed_narrowing()
 
-    formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+    formula = builder.build_equivalence_formula_extended(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis)).formula
 
     assert "; count_1: constrain to signed 32-bit semantic value" not in formula
     assert "; count_1: constrain to unsigned 32-bit semantic value" not in formula

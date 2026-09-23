@@ -25,6 +25,10 @@ from scripts.function_tracer_pcode.proof.monolithic_authority import (
 from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
     extract_return_cases,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    LEFT as INPUT_LEFT,
+    RIGHT as INPUT_RIGHT,
+)
 from scripts.function_tracer_pcode.proof.strategies.monolithic_support import (
     _MonolithicReturnWidthQueryBundle,
     _monolithic_case_identity,
@@ -39,15 +43,29 @@ class ReturnWidthObservationMixin:
         self,
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
+        *,
+        input_correspondence,
     ):
         runtime = getattr(self, "_obligation_runtime_session", None)
-        cases1 = extract_return_cases(analysis1, self.normalization_settings)
-        cases2 = extract_return_cases(analysis2, self.normalization_settings)
+        cases1 = extract_return_cases(
+            analysis1,
+            self.normalization_settings,
+            authorization=input_correspondence.authorization(INPUT_LEFT),
+        )
+        cases2 = extract_return_cases(
+            analysis2,
+            self.normalization_settings,
+            authorization=input_correspondence.authorization(INPUT_RIGHT),
+        )
         if not cases1 or not cases2:
             return None
         prepared1 = prepare_function_return_widths(analysis1, cases1)
         prepared2 = prepare_function_return_widths(analysis2, cases2)
-        base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
+        base_ctx = self.formula_builder.build_base_context(
+            analysis1,
+            analysis2,
+            input_correspondence=input_correspondence,
+        )
         replace1 = build_symbol_replacer(
             base_ctx["params1"], base_ctx.get("extra_vars1", []), float_mode="fp"
         )
@@ -171,8 +189,12 @@ class ReturnWidthObservationMixin:
             return analysis1, analysis2
         hints1 = infer_parameter_semantics(analysis1)
         hints2 = infer_parameter_semantics(analysis2)
-        normalized1 = normalize_analysis_semantic_width(analysis1, hints1)
-        normalized2 = normalize_analysis_semantic_width(analysis2, hints2)
+        normalized1 = normalize_analysis_semantic_width(
+            analysis1, hints1, authorization=decision_context.authorization(INPUT_LEFT)
+        )
+        normalized2 = normalize_analysis_semantic_width(
+            analysis2, hints2, authorization=decision_context.authorization(INPUT_RIGHT)
+        )
         return align_return_value_extension_surfaces(
             normalized1,
             normalized2,
@@ -190,14 +212,26 @@ class ReturnWidthObservationMixin:
             analysis2,
             decision_context,
         )
-        preliminary_cases1 = extract_return_cases(normalized1, self.normalization_settings)
-        preliminary_cases2 = extract_return_cases(normalized2, self.normalization_settings)
+        preliminary_cases1 = extract_return_cases(
+            normalized1,
+            self.normalization_settings,
+            authorization=decision_context.authorization(INPUT_LEFT),
+        )
+        preliminary_cases2 = extract_return_cases(
+            normalized2,
+            self.normalization_settings,
+            authorization=decision_context.authorization(INPUT_RIGHT),
+        )
         if self._return_cases_have_object_centric_total_coverage(
             preliminary_cases1
         ) and self._return_cases_have_object_centric_total_coverage(preliminary_cases2):
             return []
 
-        base_ctx = self.formula_builder.build_base_context(normalized1, normalized2)
+        base_ctx = self.formula_builder.build_base_context(
+            normalized1,
+            normalized2,
+            input_correspondence=decision_context.input_correspondence,
+        )
         if decision_context.uses_prepared_surface:
             render_analysis1, render_analysis2 = normalized1, normalized2
             assert render_analysis1 is analysis1 and render_analysis2 is analysis2
@@ -205,19 +239,27 @@ class ReturnWidthObservationMixin:
             render_analysis1 = normalize_analysis_semantic_width(
                 normalized1,
                 infer_parameter_semantics(normalized1),
-                base_ctx.get("extra_vars1", []),
+                authorization=decision_context.authorization(INPUT_LEFT),
             )
             render_analysis2 = normalize_analysis_semantic_width(
                 normalized2,
                 infer_parameter_semantics(normalized2),
-                base_ctx.get("extra_vars2", []),
+                authorization=decision_context.authorization(INPUT_RIGHT),
             )
             render_analysis1, render_analysis2 = align_return_value_extension_surfaces(
                 render_analysis1,
                 render_analysis2,
             )
-        cases1 = extract_return_cases(render_analysis1, self.normalization_settings)
-        cases2 = extract_return_cases(render_analysis2, self.normalization_settings)
+        cases1 = extract_return_cases(
+            render_analysis1,
+            self.normalization_settings,
+            authorization=decision_context.authorization(INPUT_LEFT),
+        )
+        cases2 = extract_return_cases(
+            render_analysis2,
+            self.normalization_settings,
+            authorization=decision_context.authorization(INPUT_RIGHT),
+        )
         replace1 = build_symbol_replacer(
             base_ctx["params1"],
             base_ctx.get("extra_vars1", []),
@@ -246,11 +288,10 @@ class ReturnWidthObservationMixin:
         analysis2: FunctionReturnAnalysis,
         reasons: list[str],
     ) -> None:
+        from scripts.function_tracer_pcode.proof.obligations.snapshot import record_comparison_annotation
+
         for label, analysis in (("function1", analysis1), ("function2", analysis2)):
-            if f"{label}:return_coverage_gap" in reasons and "return_case_coverage_gap" not in analysis.analysis_notes:
-                analysis.analysis_notes.append("return_case_coverage_gap")
-            if (
-                f"{label}:return_coverage_inconclusive" in reasons
-                and "return_case_coverage_inconclusive" not in analysis.analysis_notes
-            ):
-                analysis.analysis_notes.append("return_case_coverage_inconclusive")
+            if f"{label}:return_coverage_gap" in reasons:
+                record_comparison_annotation(analysis, "return_case_coverage_gap")
+            if f"{label}:return_coverage_inconclusive" in reasons:
+                record_comparison_annotation(analysis, "return_case_coverage_inconclusive")

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from collections import Counter
 from dataclasses import replace
+from scripts.function_tracer_pcode.core.evidence_authority import record_function_unary_evidence
 from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
@@ -1105,7 +1106,7 @@ def _impl__record_readonly_reduction_return_region_proof(
             ),
         },
     }
-    analysis.completed_recovery_proof_evidence = existing + (evidence,)
+    record_function_unary_evidence(analysis, evidence)
     return proof_ref
 
 

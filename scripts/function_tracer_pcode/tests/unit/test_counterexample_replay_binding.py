@@ -1,4 +1,5 @@
 """Issue #28: replay proofs are bound to one witness and required for every SAT."""
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_of, echo_input_correspondence
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
@@ -32,7 +33,7 @@ def _base_ctx():
 
 
 def test_replay_requirement_no_longer_depends_on_function_names():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     assert strategy._counterexample_replay_reasons(_analysis("f"), _analysis("g")) == (
         "counterexample_replay_missing",
     )
@@ -53,7 +54,7 @@ def test_replay_validation_fails_closed_without_a_model():
 
 
 def _strategy_with_reason(binding):
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1, analysis2 = _analysis("f"), _analysis("f")
     reason = strategy._make_sat_unsafety_unknown_reason(
         ("counterexample_replay_missing",), analysis1, analysis2,
@@ -68,32 +69,33 @@ def test_bound_replay_proof_completes_only_for_the_same_witness():
     strategy, analysis1, analysis2, reason = _strategy_with_reason(binding)
     model = {"x_1": 7, "x_2": 7}
 
-    assert strategy._record_pairwise_counterexample_replay_proof(
-        reason, analysis1, analysis2, base_ctx=_base_ctx(), counterexample_raw=model,
-        binding=binding, execution_receipt_digest="c" * 64, pair_id="(0,0)",
-    ) is True
-    assert strategy._sat_unsafety_resolution_proof_is_complete(
-        reason, analysis1, analysis2, current_counterexample_raw=model,
-        expected_binding=binding, expected_execution_receipt_digest="c" * 64,
-    ) is True
-
-    # Another query / premise / pair / receipt must not be discharged by this proof.
-    for other in (
-        _binding(formula="d" * 64), _binding(premise="premise-2"), _binding(pair=(1, 0)),
-    ):
+    with comparison_of(analysis1, analysis2):
+        assert strategy._record_pairwise_counterexample_replay_proof(
+            reason, analysis1, analysis2, base_ctx=_base_ctx(), counterexample_raw=model,
+            binding=binding, execution_receipt_digest="c" * 64, pair_id="(0,0)",
+        ) is True
         assert strategy._sat_unsafety_resolution_proof_is_complete(
             reason, analysis1, analysis2, current_counterexample_raw=model,
-            expected_binding=other, expected_execution_receipt_digest="c" * 64,
+            expected_binding=binding, expected_execution_receipt_digest="c" * 64,
+        ) is True
+
+        # Another query / premise / pair / receipt must not be discharged by this proof.
+        for other in (
+            _binding(formula="d" * 64), _binding(premise="premise-2"), _binding(pair=(1, 0)),
+        ):
+            assert strategy._sat_unsafety_resolution_proof_is_complete(
+                reason, analysis1, analysis2, current_counterexample_raw=model,
+                expected_binding=other, expected_execution_receipt_digest="c" * 64,
+            ) is False
+        assert strategy._sat_unsafety_resolution_proof_is_complete(
+            reason, analysis1, analysis2, current_counterexample_raw=model,
+            expected_binding=binding, expected_execution_receipt_digest="e" * 64,
         ) is False
-    assert strategy._sat_unsafety_resolution_proof_is_complete(
-        reason, analysis1, analysis2, current_counterexample_raw=model,
-        expected_binding=binding, expected_execution_receipt_digest="e" * 64,
-    ) is False
-    # A different model is not this witness either.
-    assert strategy._sat_unsafety_resolution_proof_is_complete(
-        reason, analysis1, analysis2, current_counterexample_raw={"x_1": 8, "x_2": 8},
-        expected_binding=binding, expected_execution_receipt_digest="c" * 64,
-    ) is False
+        # A different model is not this witness either.
+        assert strategy._sat_unsafety_resolution_proof_is_complete(
+            reason, analysis1, analysis2, current_counterexample_raw={"x_1": 8, "x_2": 8},
+            expected_binding=binding, expected_execution_receipt_digest="c" * 64,
+        ) is False
 
 
 def test_replay_proof_requires_model_fixed_assertions_binding_and_receipt():
@@ -137,7 +139,7 @@ def test_validated_witness_supersedes_rejected_witnesses_of_other_pairs(monkeypa
     from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult, ReturnCase
     from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = {
         "header_lines": ["(declare-const x_1 (_ BitVec 32))", "(declare-const x_2 (_ BitVec 32))", "(assert (= x_1 x_2))"],
         **_base_ctx(), "constrained_fragments": [], "return_size1": 32, "return_size2": 32,
@@ -215,7 +217,7 @@ def test_validated_witness_supersedes_rejected_witnesses_of_other_pairs(monkeypa
 
 def test_blocked_return_width_observation_blocks_sat_decisiveness():
     from types import SimpleNamespace
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     blocked = SimpleNamespace(
         proven=False,
         blockers=(SimpleNamespace(blocker_kind="input_correspondence", missing_slot="param_1"),),
@@ -241,7 +243,7 @@ def test_pairwise_sat_on_pair_with_blocked_width_observation_is_unknown(monkeypa
     from scripts.function_tracer_pcode.proof.strategies.pairwise_models import QueryResult, ReturnCase
     from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = {
         "header_lines": ["(declare-const x_1 (_ BitVec 32))", "(declare-const x_2 (_ BitVec 32))", "(assert (= x_1 x_2))"],
         **_base_ctx(), "constrained_fragments": [], "return_size1": 32, "return_size2": 32,
@@ -295,7 +297,7 @@ def test_monolithic_reason_with_binding_only_completes_with_matching_bound_proof
     """Issue #39: the monolithic self-recorded proof carries the witness binding and
     the safety-receipt digest; a proof for another witness does not complete it."""
     from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
-    strategy = MonolithicStrategy(Mock(), Mock(), debug=False)
+    strategy = MonolithicStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1, analysis2 = _analysis("f"), _analysis("f")
     binding = _binding(pair=("monolithic", "region:0"))
     reason = strategy._make_sat_unsafety_unknown_reason(
@@ -304,23 +306,24 @@ def test_monolithic_reason_with_binding_only_completes_with_matching_bound_proof
         counterexample_binding=binding,
     )
     model = {"x_1": 0, "x_2": 0}
-    strategy._record_completed_sat_counterexample_replay_proof(
-        reason, analysis1, analysis2, counterexample_raw=model, fixed_model_assertion_count=2,
-        replay_source="monolithic-counterexample-safety-receipt:" + "r" * 64,
-        evidence_binding=binding, execution_receipt_digest="r" * 64,
-    )
-    assert strategy._sat_unsafety_resolution_proof_is_complete(
-        reason, analysis1, analysis2, current_counterexample_raw=model,
-        expected_binding=binding, expected_execution_receipt_digest="r" * 64,
-    ) is True
-    assert strategy._sat_unsafety_resolution_proof_is_complete(
-        reason, analysis1, analysis2, current_counterexample_raw=model,
-        expected_binding=_binding(pair=("monolithic", "region:1")), expected_execution_receipt_digest="r" * 64,
-    ) is False
-    assert strategy._sat_unsafety_resolution_proof_is_complete(
-        reason, analysis1, analysis2, current_counterexample_raw=model,
-        expected_binding=binding, expected_execution_receipt_digest="s" * 64,
-    ) is False
+    with comparison_of(analysis1, analysis2):
+        strategy._record_completed_sat_counterexample_replay_proof(
+            reason, analysis1, analysis2, counterexample_raw=model, fixed_model_assertion_count=2,
+            replay_source="monolithic-counterexample-safety-receipt:" + "r" * 64,
+            evidence_binding=binding, execution_receipt_digest="r" * 64,
+        )
+        assert strategy._sat_unsafety_resolution_proof_is_complete(
+            reason, analysis1, analysis2, current_counterexample_raw=model,
+            expected_binding=binding, expected_execution_receipt_digest="r" * 64,
+        ) is True
+        assert strategy._sat_unsafety_resolution_proof_is_complete(
+            reason, analysis1, analysis2, current_counterexample_raw=model,
+            expected_binding=_binding(pair=("monolithic", "region:1")), expected_execution_receipt_digest="r" * 64,
+        ) is False
+        assert strategy._sat_unsafety_resolution_proof_is_complete(
+            reason, analysis1, analysis2, current_counterexample_raw=model,
+            expected_binding=binding, expected_execution_receipt_digest="s" * 64,
+        ) is False
 
 
 def _open_formula_analysis(name, delta):

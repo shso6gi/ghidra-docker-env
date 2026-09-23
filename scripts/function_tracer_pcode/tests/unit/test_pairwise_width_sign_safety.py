@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -81,7 +82,7 @@ def _analysis(
 
 
 def test_pairwise_keeps_constant_return_width_sign_sat_decisive_without_surface_evidence():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     strategy.formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],
@@ -119,7 +120,7 @@ def test_pairwise_keeps_constant_return_width_sign_sat_decisive_without_surface_
 
 
 def test_pairwise_keeps_constant_return_width_sign_sat_artifact_not_equivalent_with_surface_evidence():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     strategy.formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],
@@ -161,7 +162,7 @@ def test_pairwise_keeps_constant_return_width_sign_sat_artifact_not_equivalent_w
 
 
 def test_pairwise_keeps_subsurface_constant_sign_artifact_decisive_for_wider_surface():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     strategy.formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],
@@ -203,7 +204,7 @@ def test_pairwise_keeps_subsurface_constant_sign_artifact_decisive_for_wider_sur
 
 
 def test_pairwise_keeps_constant_return_width_sign_sat_decisive_with_one_sided_surface_evidence():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     strategy.formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],
@@ -243,7 +244,7 @@ def test_pairwise_keeps_constant_return_width_sign_sat_decisive_with_one_sided_s
 
 
 def test_pairwise_keeps_constant_return_width_sign_sat_decisive_with_detached_surface_evidence():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     strategy.formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],
@@ -283,7 +284,7 @@ def test_pairwise_keeps_constant_return_width_sign_sat_decisive_with_detached_su
 
 
 def test_pairwise_keeps_true_constant_sat_decisive():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     strategy.formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],

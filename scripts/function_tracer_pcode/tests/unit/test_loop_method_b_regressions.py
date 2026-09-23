@@ -8,6 +8,7 @@ path-sensitive summaries remain proof-required and must not silently fall
 through legacy shortcuts.
 """
 
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 from dataclasses import replace
 from unittest.mock import Mock
 
@@ -60,7 +61,14 @@ from scripts.function_tracer_pcode.core import (
     loop_summary_method_b_key,
 )
 from scripts.function_tracer_pcode.core.runtime_refs import UnknownValueRef
+from scripts.function_tracer_pcode.semantics.rewrite_contract import (
+    ExtensionKind,
+    RewriteAssumption,
+)
 
+
+#: 最終 relation が ``param_1 == sext64(low32(param_1))`` を含意した、という合成入力。
+_ENTAILED_SIGN32_PARAM0 = RewriteAssumption(0, 64, 32, ExtensionKind.SIGN)
 
 def _base_param() -> Expression:
     return Expression.parameter("base", index=0, data_type="int *", size=8)
@@ -142,7 +150,7 @@ def _phi_circular_exit_guard(phi_expr: Expression) -> Condition:
 
 
 def test_pairwise_auxiliary_smt_accepts_exact_int2float_in_case_condition():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     converted = Expression.unary_op("INT2FLOAT", _count_param())
     converted.size = 8
     condition_expr = Expression.binary_op(
@@ -174,7 +182,7 @@ def test_pairwise_auxiliary_smt_accepts_exact_int2float_in_case_condition():
 
 
 def test_pairwise_auxiliary_smt_accepts_exact_int2float_over_phi_circular_unknown():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     converted = Expression.unary_op(
         "INT2FLOAT",
         _phi_circular_unknown(seq_time=144),
@@ -186,7 +194,7 @@ def test_pairwise_auxiliary_smt_accepts_exact_int2float_over_phi_circular_unknow
 
 
 def test_pairwise_auxiliary_smt_rejects_int2float_without_output_width():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     converted = Expression.unary_op("INT2FLOAT", _count_param())
     converted.size = 0
 
@@ -616,7 +624,7 @@ def test_object_centric_coverage_falls_back_to_legacy_query_on_solver_inconclusi
     strategy.solver_runner.run_sequential = Mock(
         return_value=Mock(is_equivalent=None, get_counterexample=Mock(return_value=None))
     )
-    strategy.formula_builder = Mock()
+    strategy.formula_builder = echo_input_correspondence(Mock())
 
     monkeypatch.setattr(
         "scripts.function_tracer_pcode.analysis.condition.smt_oracle.ConditionSMTOracle.conjunction_is_unsat",
@@ -1285,7 +1293,7 @@ def _branch_returns(value: Expression):
 def _pairwise_strategy() -> PairwiseStrategy:
     runner = ParallelSolverRunner(timeout=5)
     runner.run_sequential = Mock(wraps=runner.run_sequential)
-    strategy = PairwiseStrategy(Mock(), runner, debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), runner, debug=False)
     strategy.formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],
@@ -4942,7 +4950,9 @@ def test_counted_loop_summary_affine_step5_mips64_without_semantic_width_is_not_
     ) is False
 
 
-def test_counted_loop_summary_affine_step5_mips64_with_semantic_width_is_direct_eq():
+def test_counted_loop_summary_affine_step5_mips64_with_entailed_extension_is_direct_eq():
+    # Issue #167: 幅の事実は最終 InputCorrespondence が含意した extension としてだけ
+    # 補助証明に届く（synthetic consumer test。production provider は IEE を出さない）。
     left_counted, right_counted, left_case, right_case = _mips64_step5_affine_counted_loop_pair()
     strategy = _pairwise_strategy()
     semantic_sources = (
@@ -4952,8 +4962,7 @@ def test_counted_loop_summary_affine_step5_mips64_with_semantic_width_is_direct_
             bit_width=64,
             index=0,
             is_signed=True,
-            semantic_narrow_bits=32,
-            semantic_signedness="signed",
+            entailed_extension=_ENTAILED_SIGN32_PARAM0,
         ),
         ParameterInfo("param_2", "param_2_1", 32, 1, is_signed=True),
         ParameterInfo(
@@ -4962,8 +4971,7 @@ def test_counted_loop_summary_affine_step5_mips64_with_semantic_width_is_direct_
             bit_width=64,
             index=0,
             is_signed=True,
-            semantic_narrow_bits=32,
-            semantic_signedness="signed",
+            entailed_extension=_ENTAILED_SIGN32_PARAM0,
         ),
         ParameterInfo("param_2", "param_2_2", 32, 1, is_signed=True),
     )
@@ -5063,7 +5071,7 @@ def test_counted_loop_summary_vs_mips64_long_limit_without_semantic_width_stays_
     strategy.solver_runner.run_sequential.assert_called()
 
 
-def test_counted_loop_summary_vs_mips64_long_limit_with_semantic_width_uses_smt():
+def test_counted_loop_summary_vs_mips64_long_limit_with_entailed_extension_uses_smt():
     analysis_left, analysis_right = _mips64_counted_loop_vs_low32_closed_form_fixture()
     strategy = _pairwise_strategy()
     strategy.formula_builder.build_base_context.return_value["params1"] = [
@@ -5073,8 +5081,7 @@ def test_counted_loop_summary_vs_mips64_long_limit_with_semantic_width_uses_smt(
             bit_width=64,
             index=0,
             is_signed=True,
-            semantic_narrow_bits=32,
-            semantic_signedness="signed",
+            entailed_extension=_ENTAILED_SIGN32_PARAM0,
         ),
         ParameterInfo("param_2", "param_2_1", 32, 1, is_signed=True),
     ]
@@ -5276,7 +5283,7 @@ def test_pure_and_path_sensitive_loop_shape_mismatch_stays_unknown():
 
 
 def test_phi_circular_lowering_rejects_seq_time_only_origin_drift_without_completed_proof():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     value = Expression.binary_op("INT_MULT", _count_param(), _const(2))
     value.size = 4
     left_case = ReturnCase(
@@ -5303,7 +5310,7 @@ def test_phi_circular_lowering_rejects_seq_time_only_origin_drift_without_comple
 
 
 def test_phi_circular_lowering_rejects_non_seq_time_origin_drift():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     value = Expression.binary_op("INT_MULT", _count_param(), _const(2))
     value.size = 4
     left_case = ReturnCase(
@@ -5330,7 +5337,7 @@ def test_phi_circular_lowering_rejects_non_seq_time_origin_drift():
 
 
 def test_phi_circular_lowering_rejects_guard_shape_mismatch():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     value = Expression.binary_op("INT_MULT", _count_param(), _const(2))
     value.size = 4
     left_case = ReturnCase(
@@ -5359,7 +5366,7 @@ def test_phi_circular_lowering_rejects_guard_shape_mismatch():
 
 
 def test_phi_circular_lowering_rejects_unknown_value_shape_mismatch():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     left_value = _phi_circular_unknown(seq_time=144)
     right_value = Expression.binary_op("INT_ADD", _phi_circular_unknown(seq_time=141), _const(1))
     right_value.size = 4
@@ -5387,7 +5394,7 @@ def test_phi_circular_lowering_rejects_unknown_value_shape_mismatch():
 
 
 def test_return_coverage_does_not_drop_phi_circular_guard_without_completed_proof():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     value = Expression.binary_op("INT_MULT", _count_param(), _const(2))
     value.size = 4
     positive_case = ReturnCase(
@@ -5421,7 +5428,7 @@ def test_return_coverage_does_not_drop_phi_circular_guard_without_completed_proo
 
 
 def test_return_coverage_does_not_treat_single_phi_circular_guard_case_as_total():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     value = _const(1)
     guarded_case = ReturnCase(
         0,
@@ -5434,7 +5441,7 @@ def test_return_coverage_does_not_treat_single_phi_circular_guard_case_as_total(
 
 
 def test_bounded_state_transition_unroll_rejects_multi_case_transition():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     state = Expression.variable("__state", size=4)
     transition = Expression.binary_op("INT_MULT", state, _const(5))
     transition.size = 4
@@ -5482,7 +5489,7 @@ def test_bounded_state_transition_unroll_rejects_multi_case_transition():
 
 
 def test_bounded_state_transition_unroll_rejects_transition_signature_mismatch():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     state = Expression.variable("__state", size=4)
     transition = Expression.binary_op("INT_MULT", state, _const(5))
     transition.size = 4
@@ -5527,7 +5534,7 @@ def test_bounded_state_transition_unroll_rejects_transition_signature_mismatch()
 
 
 def test_bounded_state_transition_unroll_accepts_small_nonwrapping_counted_case():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     state = Expression.variable("__state", size=4)
     transition = Expression.binary_op("INT_MULT", state, _const(5))
     transition.size = 4
@@ -5576,7 +5583,7 @@ def test_bounded_state_transition_unroll_accepts_small_nonwrapping_counted_case(
 
 
 def test_bounded_state_transition_unroll_rejects_intrinsic_operand_ref_mismatch():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     state = Expression.variable("__state", size=4)
     transition = Expression.binary_op("INT_MULT", state, _const(5))
     transition.size = 4
@@ -5622,7 +5629,7 @@ def test_bounded_state_transition_unroll_rejects_intrinsic_operand_ref_mismatch(
 
 
 def test_bounded_state_transition_unroll_rejects_effectful_summary():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     state = Expression.variable("__state", size=4)
     transition = Expression.binary_op("INT_MULT", state, _const(5))
     transition.size = 4
@@ -5672,7 +5679,7 @@ def test_bounded_state_transition_unroll_rejects_effectful_summary():
 
 
 def test_bounded_state_transition_unroll_allows_pure_conditional_guard_summary():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     state = Expression.variable("__state", size=4)
     transition = Expression.binary_op("INT_MULT", state, _const(5))
     transition.size = 4
@@ -5726,7 +5733,7 @@ def test_bounded_state_transition_unroll_allows_pure_conditional_guard_summary()
 
 
 def test_bounded_state_transition_unroll_rejects_wrapping_trip_count_match():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     state = Expression.variable("__state8", size=1)
     transition = Expression.binary_op("INT_ADD", state, Expression.constant(1, size=1))
     transition.size = 1
@@ -5772,7 +5779,7 @@ def test_bounded_state_transition_unroll_rejects_wrapping_trip_count_match():
 
 
 def test_bounded_state_transition_unroll_preserves_phi_condition_negation():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     state = Expression.variable("__state", size=4)
     replacement = _const(7)
     positive_condition = Condition(

@@ -4,7 +4,7 @@
 import hashlib
 import os
 from functools import cmp_to_key
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
 from scripts.function_tracer_pcode.core import (
@@ -13,12 +13,15 @@ from scripts.function_tracer_pcode.core import (
     ExpressionType,
     FunctionReturnAnalysis,
     ReturnInfo,
-    StorageInfo,
 )
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
 from scripts.function_tracer_pcode.semantics.param_semantics import hint_objects_by_identity
-from scripts.function_tracer_pcode.semantics.semantic_width import SemanticWidthNormalizer
+from scripts.function_tracer_pcode.semantics.rewrite_contract import RewriteAuthorization
+from scripts.function_tracer_pcode.semantics.semantic_width import (
+    SemanticWidthNormalizer,
+    parameter_metadata_synchronizer,
+)
 from scripts.function_tracer_pcode.semantics.normalize import (
     normalize_expression,
     NormalizationContext,
@@ -161,12 +164,18 @@ def extract_return_cases(
     normalization_settings: NormalizationSettings | None = None,
     *,
     apply_effective_partition: bool = True,
+    authorization: Optional[RewriteAuthorization] = None,
 ) -> List[ReturnCase]:
-    """FunctionReturnAnalysis から ReturnCase を抽出"""
+    """FunctionReturnAnalysis から ReturnCase を抽出
+
+    ``authorization`` は prepared surface を作ったときと同じ最終
+    ``InputCorrespondence`` 由来の値を渡す（二重 normalize も同じ前提で行う）。
+    省略時は空で、恒等規則だけが効く。
+    """
     cases = []
     merged_cases: Dict[Tuple[tuple, tuple], ReturnCase] = {}
     settings = normalization_settings or NormalizationSettings.safe()
-    condition_rewriter = _build_condition_rewriter(analysis)
+    condition_rewriter = _build_condition_rewriter(analysis, authorization)
 
     for index, ret_info in enumerate(analysis.returns):
         raw_conditions = [
@@ -284,182 +293,23 @@ def append_ordered_ite_default_case(
     return [*cases, default_case]
 
 
-def _build_condition_rewriter(analysis: FunctionReturnAnalysis):
-    parameter_rewriter = _ParameterMetadataRewriter(getattr(analysis, "parameters", []) or [])
-    semantic_rewriter = SemanticWidthNormalizer(hint_objects_by_identity(analysis)).rewrite_expression
+def _build_condition_rewriter(
+    analysis: FunctionReturnAnalysis,
+    authorization: Optional[RewriteAuthorization] = None,
+):
+    parameter_rewriter = parameter_metadata_synchronizer(getattr(analysis, "parameters", []) or [])
+    semantic_rewriter = SemanticWidthNormalizer(
+        hint_objects_by_identity(analysis),
+        authorization,
+    ).rewrite_expression
 
     def rewrite(expr: Expression | None) -> Expression | None:
         if expr is None:
             return None
-        metadata_normalized = parameter_rewriter.rewrite(expr)
+        metadata_normalized = parameter_rewriter(expr)
         return semantic_rewriter(metadata_normalized)
 
     return rewrite
-
-
-class _ParameterMetadataRewriter:
-    """Align parameter Expression objects with the active analysis descriptors."""
-
-    def __init__(self, parameters):
-        self._params_by_index: Dict[int, Dict[str, Any]] = {}
-        self._params_by_storage: Dict[Tuple[object, ...], Dict[str, Any]] = {}
-        params_by_storage: Dict[Tuple[object, ...], List[Dict[str, Any]]] = {}
-        for parameter in parameters or []:
-            descriptor = dict(parameter or {})
-            index = descriptor.get("index")
-            if isinstance(index, int) and index >= 0:
-                self._params_by_index[index] = descriptor
-            storage_key = _storage_identity_key(descriptor.get("storage_info", descriptor.get("storage")))
-            if storage_key is not None:
-                params_by_storage.setdefault(storage_key, []).append(descriptor)
-        self._params_by_storage = {
-            storage_key: descriptors[0]
-            for storage_key, descriptors in params_by_storage.items()
-            if len(descriptors) == 1
-        }
-
-    def rewrite(self, expr: Expression | None) -> Expression | None:
-        if expr is None:
-            return None
-        if expr.expr_type == ExpressionType.PARAMETER:
-            return self._rewrite_parameter(expr)
-        if expr.expr_type == ExpressionType.PHI and expr.value:
-            return self._rewrite_phi(expr)
-
-        operands = getattr(expr, "operands", None) or []
-        if not operands:
-            return expr
-        rewritten_operands = [self.rewrite(operand) for operand in operands]
-        if all(new is old for new, old in zip(rewritten_operands, operands)):
-            return expr
-        return _clone_expression_with(expr, operands=rewritten_operands)
-
-    def _rewrite_parameter(self, expr: Expression) -> Expression:
-        descriptor = None
-        has_index = isinstance(expr.value, int) and expr.value >= 0
-        if has_index:
-            descriptor = self._params_by_index.get(expr.value)
-        else:
-            storage_key = _storage_identity_key(getattr(expr, "storage_info", None))
-            if storage_key is not None:
-                descriptor = self._params_by_storage.get(storage_key)
-        if descriptor is None:
-            return expr
-
-        desired_size = int(descriptor.get("size", 0) or 0)
-        desired_type = descriptor.get("data_type") or expr.data_type
-        desired_index = descriptor.get("index", expr.value)
-        if (
-            desired_size <= 0
-            or (
-                desired_size == expr.size
-                and desired_type == expr.data_type
-                and desired_index == expr.value
-            )
-        ):
-            return expr
-
-        return Expression(
-            expr_type=expr.expr_type,
-            value=desired_index,
-            operator=expr.operator,
-            operands=list(expr.operands or []),
-            size=desired_size,
-            name=expr.name,
-            data_type=desired_type,
-            data_type_obj=getattr(expr, "data_type_obj", None),
-            storage_info=expr.storage_info,
-            read_order_key=expr.read_order_key,
-            runtime_ref=getattr(expr, "runtime_ref", None),
-            opcode=getattr(expr, "opcode", None),
-        )
-
-    def _rewrite_phi(self, expr: Expression) -> Expression:
-        changed = False
-        branches = []
-        for condition, value in expr.value:
-            rewritten_condition = None
-            if condition is not None:
-                rewritten_condition_expr = self.rewrite(condition.expression)
-                rewritten_condition = Condition(rewritten_condition_expr, condition.negated)
-                changed = changed or (rewritten_condition_expr is not condition.expression)
-            rewritten_value = self.rewrite(value)
-            changed = changed or (rewritten_value is not value)
-            branches.append((rewritten_condition, rewritten_value))
-
-        if not changed:
-            return expr
-        rebuilt = Expression.phi(branches)
-        rebuilt.size = expr.size
-        rebuilt.data_type = expr.data_type
-        rebuilt.data_type_obj = getattr(expr, "data_type_obj", None)
-        rebuilt.storage_info = expr.storage_info
-        rebuilt.read_order_key = expr.read_order_key
-        rebuilt.runtime_ref = getattr(expr, "runtime_ref", None)
-        return rebuilt
-
-
-def _clone_expression_with(expr: Expression, *, operands) -> Expression:
-    return Expression(
-        expr_type=expr.expr_type,
-        value=expr.value,
-        operator=expr.operator,
-        operands=list(operands or []),
-        size=expr.size,
-        name=expr.name,
-        data_type=expr.data_type,
-        data_type_obj=getattr(expr, "data_type_obj", None),
-        storage_info=expr.storage_info,
-        read_order_key=expr.read_order_key,
-        runtime_ref=getattr(expr, "runtime_ref", None),
-        opcode=getattr(expr, "opcode", None),
-    )
-
-
-def _storage_identity_key(storage_info) -> Tuple[object, ...] | None:
-    storage_info = _coerce_storage_info(storage_info)
-    if storage_info is None:
-        return None
-    storage_key_fn = getattr(storage_info, "storage_identity_key", None)
-    if not callable(storage_key_fn):
-        return None
-    try:
-        return storage_key_fn()
-    except (TypeError, ValueError):
-        return None
-
-
-def _coerce_storage_info(storage_info) -> StorageInfo | None:
-    if storage_info is None:
-        return None
-    if isinstance(storage_info, StorageInfo):
-        return storage_info
-    if not isinstance(storage_info, dict):
-        return None
-    try:
-        kind = str(storage_info.get("kind", "") or storage_info.get("space_name", "") or "").lower()
-        is_register = bool(storage_info.get("is_register", False)) or kind == "register"
-        return StorageInfo(
-            is_register=is_register,
-            space_name=str(storage_info.get("space_name") or ("register" if is_register else "")),
-            space_id=storage_info.get("space_id"),
-            offset=int(storage_info.get("offset", 0) or 0),
-            size=int(storage_info.get("size", 0) or 0),
-            size_bits=int(storage_info.get("size_bits", 0) or 0),
-            register_name=storage_info.get("register_name"),
-            register_offset=storage_info.get("register_offset"),
-            register_size=storage_info.get("register_size"),
-            register_size_bits=storage_info.get("register_size_bits"),
-            base_register_name=storage_info.get("base_register_name"),
-            base_register_offset=int(storage_info.get("base_register_offset", 0) or 0),
-            base_register_size=int(storage_info.get("base_register_size", 0) or 0),
-            base_register_size_bits=int(storage_info.get("base_register_size_bits", 0) or 0),
-            bit_offset_in_base=int(storage_info.get("bit_offset_in_base", 0) or 0),
-            is_stack_pointer=bool(storage_info.get("is_stack_pointer", False)),
-            is_frame_pointer=bool(storage_info.get("is_frame_pointer", False)),
-        )
-    except Exception:
-        return None
 
 
 def _runtime_summary_guard_conditions(

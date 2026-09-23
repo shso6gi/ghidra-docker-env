@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from scripts.function_tracer_pcode.core.evidence_authority import record_function_unary_evidence
 from scripts.function_tracer_pcode.core import (
     COUNTED_STATE_TRANSITION_VALUE_OPCODE,
     Condition,
@@ -863,7 +864,8 @@ def _impl__record_completed_prior_state_transition_handoff_proof(
     proof_content = self._prior_state_transition_handoff_proof_content(object_target_key)
     if proof_content is None:
         return False
-    records.append(
+    record_function_unary_evidence(
+        analysis,
         {
             "object_derived": True,
             "status": "complete",
@@ -875,9 +877,8 @@ def _impl__record_completed_prior_state_transition_handoff_proof(
             "proof_obligation_id": proof_obligation_id,
             "proof_source": "object_level_edge_specific_handoff",
             "proof_content": proof_content,
-        }
+        },
     )
-    analysis.completed_recovery_proof_evidence = tuple(records)
     return True
 
 

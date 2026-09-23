@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from scripts.function_tracer_pcode.core.evidence_authority import record_function_unary_evidence
 from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
@@ -171,7 +172,7 @@ def _impl__record_return_region_summary_proof(
             ),
         },
     }
-    analysis.completed_recovery_proof_evidence = existing + (evidence,)
+    record_function_unary_evidence(analysis, evidence)
     return proof_ref
 
 def _impl__summary_excluded_counter_values(

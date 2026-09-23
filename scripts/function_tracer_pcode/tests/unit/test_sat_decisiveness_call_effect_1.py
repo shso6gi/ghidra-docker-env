@@ -1,4 +1,15 @@
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _gate_runs_in_the_fixture_comparison():
+    # fixture の比較中の証拠は、それを作った比較（raw pair と relation）の中でだけ採用される
+    # （Issue #167）。gate を直接呼ぶ test はその比較の中で呼ぶ。strategy.check は自分の比較を開く。
+    with _fixture_comparison():
+        yield
 
 def test_function_return_analysis_marks_effect_sensitive_raw_memory_reads_as_sat_unsafe():
     params = [_param("trace", index=0, size=8, data_type="int *")]
@@ -135,7 +146,7 @@ def test_function_return_analysis_blocks_equivalence_when_effect_summary_is_unsu
     assert "unsupported_call_effect_summary" in analysis.get_equivalence_blocking_unsafety_reasons()
 
 def test_unsupported_call_effect_reason_group_is_used_for_signature_matching():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
 
     assert strategy._unsupported_call_effect_reason_is_compatible(
         "target_identity_unavailable",
@@ -152,7 +163,7 @@ def test_unsupported_call_effect_reason_group_is_used_for_signature_matching():
     assert "callee_unsupported_call_may_expose_parameter_memory" in signature
 
 def test_unsupported_call_effect_semantics_respects_compatible_reason_groups():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
 
     left = (
         "unsupported_call_effect",
@@ -288,7 +299,7 @@ def test_call_effect_blocker_completed_proof_revalidates_selected_candidate_poli
     assert _completed_proof_ids_for_call_effect_evidence(incomplete) == ()
 
 def test_unsupported_call_effect_semantics_requires_exact_target_expression_match_for_same_reason():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
 
     left = (
         "unsupported_call_effect",
@@ -334,7 +345,7 @@ def test_unsupported_call_effect_semantics_requires_exact_target_expression_matc
     assert not strategy._unsupported_call_effects_semantically_match(left, right)
 
 def test_pairwise_strategy_does_not_prove_equivalent_with_incomplete_effect_summary(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = {
         "header_lines": [
             "(declare-const x_1 (_ BitVec 32))",
@@ -409,7 +420,7 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_incomplete_effect_summ
     assert result.unknown_pairs == 0
 
 def test_pairwise_strategy_does_not_prove_equivalent_with_unsupported_effect_summary(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = {
         "header_lines": [
             "(declare-const x_1 (_ BitVec 32))",
@@ -484,7 +495,7 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_unsupported_effect_sum
     assert result.unknown_pairs == 0
 
 def test_pairwise_call_effect_summary_proof_pending_blocks_equivalent(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -507,7 +518,7 @@ def test_pairwise_call_effect_summary_proof_pending_blocks_equivalent(monkeypatc
     assert result.unknown_reasons[0].proof_obligation_id is not None
 
 def test_pairwise_call_effect_summary_proof_wrong_id_does_not_recover(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -544,7 +555,7 @@ def test_pairwise_call_effect_summary_proof_wrong_id_does_not_recover(monkeypatc
     assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
 
 def test_pairwise_call_effect_summary_bare_completed_proof_id_does_not_recover(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -573,7 +584,7 @@ def test_pairwise_call_effect_summary_bare_completed_proof_id_does_not_recover(m
     assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
 
 def test_pairwise_call_effect_summary_missing_completed_proof_id_does_not_recover(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -607,7 +618,7 @@ def test_pairwise_call_effect_summary_missing_completed_proof_id_does_not_recove
     assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
 
 def test_pairwise_call_effect_summary_producer_connects_completed_target_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -634,6 +645,7 @@ def test_pairwise_call_effect_summary_producer_connects_completed_target_proof(m
     )
     _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
 
+    _evidence_of_this_pair(analysis1, analysis2)
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is True
@@ -642,7 +654,7 @@ def test_pairwise_call_effect_summary_producer_connects_completed_target_proof(m
     assert result.unknown_pairs == 0
 
 def test_pairwise_self_recursive_no_store_requires_validated_recurrence_artifact(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -671,7 +683,7 @@ def test_pairwise_self_recursive_no_store_requires_validated_recurrence_artifact
     assert evidence == []
 
 def test_pairwise_preproducer_complete_call_argument_evidence_requires_pending_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -716,7 +728,7 @@ def test_pairwise_preproducer_complete_call_argument_evidence_requires_pending_p
     )
 
 def test_pairwise_complete_call_argument_evidence_requires_explicit_phase15_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -744,7 +756,7 @@ def test_pairwise_complete_call_argument_evidence_requires_explicit_phase15_proo
     assert evidence == []
 
 def test_pairwise_preserves_call_effect_reason_alongside_return_coverage_gap(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -771,7 +783,7 @@ def test_pairwise_preserves_call_effect_reason_alongside_return_coverage_gap(mon
     )
 
 def test_pairwise_matched_unknown_indirect_no_store_call_effect_recovers(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -824,7 +836,7 @@ def test_pairwise_matched_unknown_indirect_no_store_call_effect_recovers(monkeyp
         assert content["callsite_storage"]["matched_argument_keys"]
 
 def test_pairwise_unknown_indirect_callsite_path_guard_mismatch_keeps_unknown(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -856,7 +868,7 @@ def test_pairwise_unknown_indirect_callsite_path_guard_mismatch_keeps_unknown(mo
     ]
 
 def test_call_effect_summary_proof_rejects_occurrence_index_mismatch():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _analysis_with_unknown_indirect_call_effect(
         function_name="func1",
         binary_id="B10",
@@ -881,7 +893,7 @@ def test_call_effect_summary_proof_rejects_occurrence_index_mismatch():
     assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
 
 def test_pairwise_unknown_indirect_output_used_as_later_call_argument_keeps_unknown(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -935,7 +947,7 @@ def test_pairwise_unknown_indirect_output_used_as_later_call_argument_keeps_unkn
     ]
 
 def test_pairwise_unknown_indirect_duplicate_call_effect_does_not_auto_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -988,7 +1000,7 @@ def test_pairwise_unknown_indirect_duplicate_call_effect_does_not_auto_proof(mon
     ]
 
 def test_pairwise_matched_parameter_exposure_unsupported_call_effect_recovers(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1027,7 +1039,7 @@ def test_pairwise_matched_parameter_exposure_unsupported_call_effect_recovers(mo
         )
 
 def test_pairwise_mixed_unsupported_call_reason_is_compatible_recovers(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1058,7 +1070,7 @@ def test_pairwise_mixed_unsupported_call_reason_is_compatible_recovers(monkeypat
     ]) == 2
 
 def test_pairwise_incompatible_unsupported_call_reason_keeps_unknown(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1095,7 +1107,7 @@ def test_pairwise_incompatible_unsupported_call_reason_keeps_unknown(monkeypatch
     )
 
 def test_pairwise_matched_deferred_call_argument_evidence_recovers(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1132,7 +1144,7 @@ def test_pairwise_matched_deferred_call_argument_evidence_recovers(monkeypatch):
 
 def test_pairwise_unresolved_deferred_call_return_lowers_with_matched_argument_evidence(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = base_ctx
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1190,7 +1202,7 @@ def test_pairwise_unresolved_deferred_call_return_lowers_with_matched_argument_e
     assert ("lowering_kind", "deferred_call") in evidence[0]
 
 def test_pairwise_unresolved_deferred_call_missing_target_expr_stays_unknown(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1229,7 +1241,7 @@ def test_pairwise_unresolved_deferred_call_missing_target_expr_stays_unknown(mon
     strategy._solve_query_after_guard.assert_not_called()
 
 def test_pairwise_unresolved_deferred_call_width_mismatch_stays_unknown(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1260,7 +1272,7 @@ def test_pairwise_unresolved_deferred_call_width_mismatch_stays_unknown(monkeypa
     strategy._solve_query_after_guard.assert_not_called()
 
 def test_pairwise_deferred_call_missing_target_expr_does_not_auto_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1296,7 +1308,7 @@ def test_pairwise_deferred_call_missing_target_expr_does_not_auto_proof(monkeypa
     ]
 
 def test_pairwise_deferred_call_argument_mismatch_does_not_auto_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1327,7 +1339,7 @@ def test_pairwise_deferred_call_argument_mismatch_does_not_auto_proof(monkeypatc
     ]
 
 def test_pairwise_deferred_call_empty_arguments_does_not_auto_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1363,7 +1375,7 @@ def test_pairwise_deferred_call_empty_arguments_does_not_auto_proof(monkeypatch)
     ]
 
 def test_pairwise_unresolved_deferred_call_empty_arguments_stays_unknown(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1397,7 +1409,7 @@ def test_pairwise_unresolved_deferred_call_empty_arguments_stays_unknown(monkeyp
 
 def test_pairwise_unresolved_deferred_call_store_effect_stays_unknown(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = base_ctx
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1433,7 +1445,7 @@ def test_pairwise_unresolved_deferred_call_store_effect_stays_unknown(monkeypatc
 
 def test_pairwise_unresolved_deferred_call_incomplete_summary_stays_unknown(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = base_ctx
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1461,7 +1473,7 @@ def test_pairwise_unresolved_deferred_call_incomplete_summary_stays_unknown(monk
     strategy._solve_query_after_guard.assert_not_called()
 
 def test_pairwise_deferred_call_duplicate_candidate_does_not_auto_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1491,7 +1503,7 @@ def test_pairwise_deferred_call_duplicate_candidate_does_not_auto_proof(monkeypa
     ]
 
 def test_pairwise_deferred_call_weak_completed_evidence_does_not_recover(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1545,13 +1557,14 @@ def test_pairwise_deferred_call_weak_completed_evidence_does_not_recover(monkeyp
     )
     _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
 
+    _evidence_of_this_pair(analysis1, analysis2)
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is None
     assert result.unknown_reasons
 
 def test_pairwise_deferred_call_empty_argument_completed_evidence_does_not_recover(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1633,7 +1646,7 @@ def test_pairwise_deferred_call_empty_argument_completed_evidence_does_not_recov
     assert result.unknown_reasons
 
 def test_pairwise_incomplete_call_argument_evidence_does_not_auto_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1675,7 +1688,7 @@ def test_pairwise_incomplete_call_argument_evidence_does_not_auto_proof(monkeypa
     ]
 
 def test_pairwise_bounded_call_argument_evidence_auto_records_phase15_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1714,7 +1727,7 @@ def test_pairwise_bounded_call_argument_evidence_auto_records_phase15_proof(monk
     assert content["bounded_refinement"]["evidence_kind"] == "bounded_call_refinement_expansion"
 
 def test_pairwise_bounded_call_argument_note_without_evidence_does_not_auto_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5

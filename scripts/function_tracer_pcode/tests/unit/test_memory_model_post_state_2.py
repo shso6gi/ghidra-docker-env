@@ -1,4 +1,5 @@
 from scripts.function_tracer_pcode.tests.unit._memory_model_fixtures import *
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 def test_formula_builder_lowers_nested_symbolic_post_state_reads_before_smt_emission():
     trace = Expression.parameter("trace", 0, size=8)
@@ -129,7 +130,7 @@ def test_formula_builder_lowers_nested_symbolic_post_state_reads_before_smt_emis
 
     formula = FormulaBuilder(debug=False, exclude_ub=False).build_equivalence_formula_extended(
         analysis1,
-        analysis2,
+        analysis2,input_correspondence=build_input_correspondence_set(analysis1, analysis2),
     ).formula
 
     assert "__locread__" not in formula

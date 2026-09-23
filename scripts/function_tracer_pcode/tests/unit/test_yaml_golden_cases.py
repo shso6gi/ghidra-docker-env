@@ -370,9 +370,15 @@ class TestMonolithicStrategyBackwardCompatibility:
         from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
         from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilderResult
         from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
-        from unittest.mock import Mock
+        from unittest.mock import ANY, Mock
+        from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+            InputCorrespondenceStatus,
+        )
+        from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import (
+            echo_input_correspondence,
+        )
 
-        formula_builder = Mock()
+        formula_builder = echo_input_correspondence(Mock())
         formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
             formula="(set-logic QF_BV)\n(check-sat)",
             return_var1="return_1",
@@ -400,8 +406,13 @@ class TestMonolithicStrategyBackwardCompatibility:
         result = strategy.check(analysis1, analysis2)
 
         formula_builder.build_equivalence_formula_extended.assert_called_once_with(
-            analysis1, analysis2
+            analysis1, analysis2, input_correspondence=ANY
         )
+        # Issue #167: 両側 0 parameter の EMPTY は十分（decisive gate を通る）。
+        passed = formula_builder.build_equivalence_formula_extended.call_args.kwargs[
+            "input_correspondence"
+        ]
+        assert passed.status is InputCorrespondenceStatus.EMPTY
         assert result.is_equivalent is True
         assert result.smt_formula == "(set-logic QF_BV)\n(check-sat)"
         assert result.return_var1 == "return_1"

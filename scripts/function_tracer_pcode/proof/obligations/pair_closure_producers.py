@@ -18,6 +18,9 @@ from types import FunctionType, MappingProxyType
 from typing import Any, Mapping, Optional, Tuple
 
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    comparison_digest_is_current,
+)
 
 from scripts.function_tracer_pcode.proof.obligations.pair_disposition import (
     AggregatePartitionClosureArtifact,
@@ -38,6 +41,7 @@ class PairClosureCandidate:
     derived_view_id: Tuple[Any, ...]
     premise_digest: str
     graph_generation: int
+    comparison_authority_digest: str
     proposition: Any
     evidence: Any
 
@@ -54,15 +58,21 @@ class PairClosureCandidate:
             binding.derived_view_id,
             binding.premise_digest,
             binding.graph_generation,
+            binding.comparison_authority_digest,
             proposition,
             evidence,
         )
 
     def is_current_for(self, binding: PairLedgerBinding) -> bool:
+        # Issue #167: closure は ledger の比較（raw pair と最終 relation）の下でだけ成り立つ。
+        # ledger と candidate が同じ比較を名乗り、それがいま実行している比較であること
+        # （pinned proof が照合する証拠の authority と同じ値）。
         return (
             self.derived_view_id == binding.derived_view_id
             and self.premise_digest == binding.premise_digest
             and self.graph_generation == binding.graph_generation
+            and self.comparison_authority_digest == binding.comparison_authority_digest
+            and comparison_digest_is_current(binding.comparison_authority_digest)
         )
 
 
