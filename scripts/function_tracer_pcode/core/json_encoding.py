@@ -37,6 +37,11 @@ JSON 値で、元の object を参照しない。書き出しはこの値を `de
 `list(...)` などで表現を先に作らない（作るのは `prepare` だけ）。record 1 件分の
 表現を `to_dict` に任せるときは `JsonLazy(record.to_dict)` と **呼ばずに** 渡す。
 
+数えるだけの入口は 2 つ: `measure`（`prepare` と同じ走査。数え済みの部分を避けて
+辿れる）と `measure_elements`（既に在る値を要素 1 つずつ C 実装の encoder で書いて
+数える。snapshot の aggregate が使う）。どちらも書き出し器と同じ byte 数を返し、
+上限を超えた時点で止まる。
+
 単位は UTF-8 byte（`core/render_output.utf8_length` と同じ数え方）。
 """
 

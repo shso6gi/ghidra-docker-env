@@ -248,7 +248,7 @@ class ExpressionSizeBudgetExceeded(AnalysisLimitation):
     """式の大きさの予算（distinct node / case / 出力 byte）を超えて打ち切った限界。
 
     Issue #22 PR-22-D。予算は 3 箇所で見る — 展開（expander）・solver へ渡す描画・
-    直列化（出力の準備と木表現の `to_dict`）— が、**reason は 1 つ**で、どこで
+    直列化（出力の準備と、解析 1 件分の表現 = snapshot / `to_dict`）— が、**reason は 1 つ**で、どこで
     超えたかは `site`、何を超えたかは `evidence_refs` が持つ。reason を site ごとに
     分けないのは、どこで超えても「式が大きすぎて解析を完了できなかった」という
     同じ事実で、authority 側の扱い（`blocks_decision`・pair terminal）も同じだから。
