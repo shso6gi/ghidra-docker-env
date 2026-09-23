@@ -271,3 +271,33 @@ def test_monolithic_not_eq_gate_carries_the_input_correspondence_reason(monkeypa
     assert result.is_equivalent is not False or not blocked
     refs = _reason_refs(result)
     assert any("input_correspondence" in ref for ref in refs) is blocked
+
+
+
+def test_monolithic_region_query_relation_comes_from_the_query_that_was_built():
+    """region split の gate が照合する relation は region query を描いた base context から読む。
+
+    region 実行が relation を記録していなければ None（``unavailable:query``）で、check の
+    relation 自身で代用しない（代用すると digest 照合が恒真になる）。
+    """
+
+    from types import SimpleNamespace
+
+    from scripts.function_tracer_pcode.proof.strategies.monolithic_support import (
+        region_query_input_correspondence,
+    )
+
+    built = build_input_correspondence_set(*_same_width_pair())
+    other = build_input_correspondence_set(*_insufficient_pair())
+    region = SimpleNamespace(input_correspondence=other)
+    assert region_query_input_correspondence(region, {"input_correspondence": built}) is built
+    assert region_query_input_correspondence(region, None) is other
+    unrecorded = SimpleNamespace(input_correspondence=None)
+    assert region_query_input_correspondence(unrecorded, None) is None
+    strategy = MonolithicStrategy(Mock(), _Runner(SolverStatus.UNSAT), debug=False)
+    assert strategy._input_correspondence_unsafety_reasons(
+        region_query_input_correspondence(unrecorded, None), authority_correspondence=built,
+    ) == ["pair:input_correspondence:unavailable:query"]
+    assert strategy._input_correspondence_unsafety_reasons(
+        region_query_input_correspondence(region, None), authority_correspondence=built,
+    ) == [f"pair:input_correspondence:unbound:{other.digest[:16]}"]

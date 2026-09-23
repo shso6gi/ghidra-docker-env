@@ -171,6 +171,8 @@ class _MonolithicRegionExecution:
     session_certificate: Any = None
     sat_replay_formula: str = field(default="", repr=False, compare=False)
     sat_replay_census: Any = field(default=None, repr=False, compare=False)
+    # Issue #167: region query の premise を描いた base context の最終 relation。
+    input_correspondence: Any = field(default=None, repr=False, compare=False)
 
 
 def active_input_correspondence(strategy: Any) -> Optional[InputCorrespondenceSet]:
@@ -190,3 +192,18 @@ def active_input_authorization(strategy: Any, side: str):
     correspondence = active_input_correspondence(strategy)
     return None if correspondence is None else correspondence.authorization(side)
 
+
+
+def region_query_input_correspondence(region_execution: Any, region_base_ctx: Any) -> Any:
+    """region split の query の premise を実際に描いた relation（Issue #167）。
+
+    decisive gate はこれを check の relation と digest で突き合わせる。呼び出し側が
+    base context を渡したならそれ、region 実行が自分で作ったなら実行記録に残した
+    もの。どちらにも無ければ None（gate は ``unavailable:query`` で塞ぐ）。check の
+    relation 自身で代用しない（代用すると束縛の検査が恒真になる）。legacy formula
+    のときは builder 結果の ``input_correspondence`` を読む。
+    """
+
+    if region_base_ctx is not None:
+        return region_base_ctx.get("input_correspondence")
+    return getattr(region_execution, "input_correspondence", None)

@@ -526,4 +526,5 @@ class RegionExecutionMixin:
             session_certificate=getattr(shared_region_session, "certificate", None),
             sat_replay_formula=sat_replay_formula,
             sat_replay_census=sat_replay_census,
+            input_correspondence=base_ctx.get("input_correspondence"),
         )
