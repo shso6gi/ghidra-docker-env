@@ -466,6 +466,7 @@ def test_d5s_value_estimate_matches_the_encoder_for_every_character_class(policy
     ]
     for value in values:
         assert policy.measure(value) == _actual(value, policy)
+        assert policy.measure_elements(value) == _actual(value, policy)
         prepared = policy.prepare(value)
         # 準備した値は canonical な JSON（json.loads と同じ形）で、大きさは実際の byte
         assert json.dumps(prepared.value(), sort_keys=True) == json.dumps(
@@ -1713,3 +1714,59 @@ def test_a_malformed_diagnostic_is_a_marker_not_an_error():
     assert "pairwise_debug_stats" in envelope.truncated_metadata
     assert (result.final_outcome, result.decision_receipt) == decided
     assert json.loads(envelope.text)["final_outcome"] == result.final_outcome
+
+
+def test_the_counted_effect_projection_equals_the_codec_projection():
+    """効果要約の投影を要素ごとに数えて作っても、codec の投影と同じ値・同じ fingerprint。"""
+    from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import (
+        AnalysisSnapshot,
+        SnapshotFingerprintCodec,
+        _semantic_effect_summary_projection,
+    )
+    from scripts.function_tracer_pcode.tests.unit.test_effect_comparison_surface import (
+        _equivalent_void_effect_analyses,
+    )
+
+    for analysis in _equivalent_void_effect_analyses():
+        effect_summary = analysis.effect_summary
+        expected = SnapshotFingerprintCodec.freeze(effect_summary)
+        outside = AnalysisSnapshot.from_function_analysis(analysis)
+        with pair_failure_scope(("effects",), None), budget_policy_scope(
+            expression_budget_policy({})
+        ):
+            with serialization_scope(site="t", target_parts=("t",)) as work:
+                counted = _semantic_effect_summary_projection(effect_summary, work)
+                assert work.total_bytes > 0 and work.records_built > 0
+            inside = AnalysisSnapshot.from_function_analysis(analysis)
+        assert counted == expected
+        assert inside.semantic_fingerprint == outside.semantic_fingerprint
+
+
+def test_a_huge_effect_summary_stops_the_snapshot_before_projecting_every_effect(monkeypatch):
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import (
+        AnalysisSnapshot,
+        SnapshotFingerprintCodec,
+    )
+    from scripts.function_tracer_pcode.tests.unit.test_effect_comparison_surface import (
+        _equivalent_void_effect_analyses,
+    )
+
+    analysis = _equivalent_void_effect_analyses()[0]
+    effect = analysis.effect_summary.effects[0]
+    analysis.effect_summary.effects = [effect] * 50_000
+    frozen = []
+    original = SnapshotFingerprintCodec.freeze.__func__
+
+    def _counting(cls, value):
+        if value is effect:
+            frozen.append(value)
+        return original(cls, value)
+
+    monkeypatch.setattr(SnapshotFingerprintCodec, "freeze", classmethod(_counting))
+    policy = BudgetPolicy(serialization_bytes=200_000, envelope_headroom_bytes=0)
+    with pair_failure_scope(("huge-effects",), None), budget_policy_scope(policy):
+        with pytest.raises(ExpressionSizeBudgetExceeded) as caught:
+            AnalysisSnapshot.from_function_analysis(analysis)
+    assert caught.value.site == "proof.obligations.snapshot.from_function_analysis"
+    assert 0 < len(frozen) < 1_000  # 予算に届くまでの効果しか投影していない

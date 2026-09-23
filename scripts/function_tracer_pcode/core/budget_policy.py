@@ -319,17 +319,22 @@ def raise_render_budget_exceeded(exc: Any, *, subject: Any) -> NoReturn:
 # ---------------------------------------------------------------------------
 
 
-def _opaque_leaf_bytes(value: Any) -> int:
-    """JSON 型でない葉（snapshot の codec が別途 canonical にする値）の大きさの代用。
+def _opaque_leaf_text(value: Any) -> str:
+    """JSON 型でない葉（snapshot の codec が別途 canonical にする値）を数えるときの代用。
 
-    enum は値の文字列、それ以外は型名で数える。中へは入らない（snapshot の
-    表現に入る値は解析 object の `to_dict` が作った JSON 型が基本で、ここに来るのは
-    enum などの小さい葉だけ）。
+    enum は値の文字列、それ以外は型名。中へは入らない（snapshot の表現に入る値は
+    解析 object の `to_dict` が作った JSON 型が基本で、ここに来るのは enum などの
+    小さい葉だけ）。
     """
 
     raw = getattr(value, "value", None) if isinstance(value, Enum) else None
-    text = raw if isinstance(raw, str) else type(value).__qualname__
-    return len(text.encode("utf-8", "surrogatepass")) + 2
+    return raw if isinstance(raw, str) else type(value).__qualname__
+
+
+def _opaque_leaf_bytes(value: Any) -> int:
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+    return RESULT_JSON_POLICY.string_bytes(_opaque_leaf_text(value))
 
 
 class SerializationWork:
@@ -410,14 +415,18 @@ class SerializationWork:
         )
 
     def _enforce(self) -> None:
-        evidence = self._evidence()
+        policy = active_budget_policy()
         for kind, observed in (
             (BudgetKind.SERIALIZATION_BYTES, self.total_bytes),
             (BudgetKind.SERIALIZATION_NODES, self.distinct_nodes),
         ):
+            if not policy.exceeds(kind, observed):
+                observe_budget_usage(kind, observed, site=self.site)
+                continue
+            # target と evidence は限界にするときだけ組み立てる
             enforce_budget(
                 kind, observed, site=self.site,
-                target_key=self.target_key(), evidence=evidence,
+                target_key=self.target_key(), evidence=self._evidence(),
             )
 
     # -- producer の入口 -------------------------------------------------------
@@ -446,41 +455,54 @@ class SerializationWork:
             self._register_tree(built)
         else:
             # 見積りできない形（閉路・JSON にならない key）: 作った木をそのまま数える
-            self.value(built)
+            self._count(built, holds_trees=True)
         return built
 
     def value(self, value: Any) -> Any:
-        """既に在る値の JSON byte 数を足す（写さない。超えたら限界）。値をそのまま返す。"""
+        """既に在る値の JSON byte 数を足す（写さない。超えたら限界）。値をそのまま返す。
 
-        from scripts.function_tracer_pcode.core.json_encoding import (
-            RESULT_JSON_POLICY,
-            JsonBudgetExhausted,
-        )
+        要素 1 つずつ数え、予算を超えた時点で残りの要素を数えない。
+        """
 
-        if not self.enabled:
-            return value
-        remaining = self.remaining_bytes()
-        try:
-            size = RESULT_JSON_POLICY.measure(
-                value,
-                max_bytes=remaining,
-                exclude_ids=self._tree_ids,
-                opaque_bytes=_opaque_leaf_bytes,
-            )
-        except JsonBudgetExhausted as exc:
-            size = exc.consumed_bytes
-        self.value_bytes += int(size)
-        self._enforce()
+        if self.enabled:
+            self._count(value, holds_trees=False)
         return value
 
     def record(self, build: Callable[[], Any]) -> Any:
         """record 1 件分の表現を作らせ、その byte 数を足す（中の木は数え直さない）。"""
 
+        trees_before = len(self._tree_ids)
         built = build()
         if not self.enabled:
             return built
         self.records_built += 1
-        return self.value(built)
+        # record の中で木を作った（数え済みの木を含む）ときだけ、木を避けて辿る
+        self._count(built, holds_trees=len(self._tree_ids) != trees_before)
+        return built
+
+    def _count(self, value: Any, *, holds_trees: bool) -> None:
+        from scripts.function_tracer_pcode.core.json_encoding import (
+            RESULT_JSON_POLICY,
+            JsonBudgetExhausted,
+        )
+
+        remaining = self.remaining_bytes()
+        try:
+            if holds_trees:
+                size = RESULT_JSON_POLICY.measure(
+                    value,
+                    max_bytes=remaining,
+                    exclude_ids=self._tree_ids,
+                    opaque_bytes=_opaque_leaf_bytes,
+                )
+            else:
+                size = RESULT_JSON_POLICY.measure_elements(
+                    value, max_bytes=remaining, opaque_text=_opaque_leaf_text,
+                )
+        except JsonBudgetExhausted as exc:
+            size = exc.consumed_bytes
+        self.value_bytes += int(size)
+        self._enforce()
 
     def records(self, items: Iterable[Any], build: Optional[Callable[[Any], Any]] = None) -> List[Any]:
         """record の列を 1 件ずつ作る（超えた時点で残りを作らない）。

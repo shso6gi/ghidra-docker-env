@@ -427,6 +427,58 @@ class JsonEncodingPolicy:
             source, max_bytes, build=False, exclude_ids=exclude_ids, opaque_bytes=opaque_bytes,
         )[1]
 
+    def measure_elements(
+        self,
+        value: Any,
+        *,
+        max_bytes: Optional[int] = None,
+        opaque_text: Optional[Callable[[Any], str]] = None,
+    ) -> int:
+        """既に在る値の byte 数を **1 要素ずつ** 書き出し器で数える（写さない）。
+
+        `measure` と同じ byte 数（書き出し器そのものの長さ）を、C 実装の encoder で
+        要素 1 つずつ求める。container は要素ごとに数えて上限を超えた時点で
+        `JsonBudgetExhausted`（残りの要素は数えない）。文字列は chunk ごとに数える。
+        JSON source でない葉は `opaque_text` の文字列として数える。1 要素の文字列は
+        作るので、`exclude_ids` のように中の一部を数えない必要があるときは `measure`。
+        """
+
+        total = 0
+
+        def charge(size: int) -> None:
+            nonlocal total
+            total += size
+            if max_bytes is not None and total > max_bytes:
+                raise JsonBudgetExhausted(consumed_bytes=total, max_bytes=max_bytes)
+
+        def remaining() -> Optional[int]:
+            return None if max_bytes is None else max_bytes - total
+
+        def one(element: Any) -> int:
+            if isinstance(element, str):
+                return self.string_bytes(element, max_bytes=remaining())
+            try:
+                return utf8_length(self.dumps(element, default=opaque_text))
+            except (TypeError, ValueError, RecursionError):
+                # 混在した key 型・閉路など: 同じ規則の走査で数える
+                return self.measure(element, max_bytes=remaining(), opaque_bytes=(
+                    None if opaque_text is None
+                    else (lambda leaf: self.string_bytes(opaque_text(leaf)))
+                ))
+
+        if isinstance(value, Mapping):
+            charge(self.container_frame_bytes(len(value)))
+            for key, element in value.items():
+                charge(self.key_bytes(key) + utf8_length(self.key_separator))
+                charge(one(element))
+        elif isinstance(value, (list, tuple)):
+            charge(self.container_frame_bytes(len(value)))
+            for element in value:
+                charge(one(element))
+        else:
+            charge(one(value))
+        return total
+
     def materialize(self, source: Any) -> Any:
         """上限なしで canonical な値を作る（`to_dict()` を `json_view()` で定義する側用）。"""
 
