@@ -736,9 +736,9 @@ class Expression:
     def to_dict(self) -> Dict[str, Any]:
         # Issue #22 PR-22-D: この表現は共有部分式を **親ごとに展開した木** なので、
         # 共有 DAG では distinct node が少なくても指数的な大きさになり得る。木は
-        # 直列化の作業量（`core/budget_policy.SerializationWork.tree`）が、DAG のまま
-        # 大きさを見積もって予算と比べてから作る。解析 1 件分の表現を作っている
-        # 最中ならその作業量へ合流し、単独ならこの 1 本だけの作業量になる。
+        # walker（`core/json_encoding`）の sized leaf として、DAG のまま大きさを
+        # 求めて予算と比べてから作る。解析 1 件分の表現を作っている最中なら
+        # その作業量（`SerializationWork`）へ合流し、単独ならこの 1 本だけの作業量。
         from scripts.function_tracer_pcode.core.budget_policy import (
             active_serialization_work,
             budget_scope_is_active,
@@ -747,13 +747,35 @@ class Expression:
 
         work = active_serialization_work()
         if work is not None:
-            return work.tree(self)
+            return work.tree(self, build=True)[0]
         if not budget_scope_is_active():
             return self._to_dict(set())
         with serialization_scope(
             site=LEGACY_TREE_SERIALIZATION_SITE, target_parts=("legacy_tree",),
         ) as work:
-            return work.tree(self)
+            return work.tree(self, build=True)[0]
+
+    # -- walker の sized leaf（`core/json_encoding`）------------------------------
+
+    def __json_tree__(self) -> Dict[str, Any]:
+        """木表現を作る（大きさは呼ぶ側が `__json_tree_bytes__` で確かめ済み）。"""
+
+        return self._to_dict(set())
+
+    def __json_tree_bytes__(self, policy: Any, remaining: Optional[int]) -> Optional[int]:
+        """木表現の byte 数を **作らずに** 求める（`remaining` を超えたら `remaining + 1`）。"""
+
+        try:
+            return estimate_legacy_dict_bytes(self, policy=policy, max_bytes=remaining)
+        except (TypeError, ValueError):
+            return None
+
+    def __json_identity__(self) -> str:
+        """証拠の digest に流す identity（DAG のまま求める構造 digest）。"""
+
+        from scripts.function_tracer_pcode.core.structural import structural_identity_digest
+
+        return str(structural_identity_digest(self))
 
     def _to_dict(self, active: Set[int]) -> Dict[str, Any]:
         node_id = id(self)
@@ -841,38 +863,23 @@ class Expression:
         if self.read_order_key is not None:
             result["read_order_key"] = self.read_order_key
         if self.runtime_ref is not None:
-            result["runtime_ref"] = self._serialize_runtime_ref(self.runtime_ref)
+            if collect is None:
+                result["runtime_ref"] = self._serialize_runtime_ref(self.runtime_ref)
+            else:
+                # 見積り: runtime ref は子と同じく node の外で数える（node の dict に
+                # ref の表現を作らない）
+                collect.append(_RuntimeRefChild(self.runtime_ref))
+                result["runtime_ref"] = 0
         if self.opcode is not None:
             result["opcode"] = int(self.opcode)
         return result
 
     def _serialize_runtime_ref(self, value: Any) -> Any:
-        if value is None or isinstance(value, (bool, int, float, str)):
-            return value
-        if isinstance(value, tuple):
-            return [self._serialize_runtime_ref(item) for item in value]
-        if isinstance(value, list):
-            return [self._serialize_runtime_ref(item) for item in value]
-        if isinstance(value, dict):
-            return {
-                str(key): self._serialize_runtime_ref(item)
-                for key, item in value.items()
-            }
-        to_dict = getattr(value, "to_dict", None)
-        if callable(to_dict):
-            try:
-                return to_dict()
-            except Exception:
-                pass
-        if is_dataclass(value):
-            return {
-                field.name: self._serialize_runtime_ref(getattr(value, field.name))
-                for field in fields(value)
-            }
-        return {
-            "type": f"{type(value).__module__}.{type(value).__qualname__}",
-            "object_id": id(value),
-        }
+        # 木を作るのは大きさ（runtime ref を含む）を数え終えた後なので、ここは数えない
+        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+        return RESULT_JSON_POLICY.materialize(runtime_ref_source(value))
+
     
     def get_all_variables(self) -> Set[str]:
         """式に含まれる全ての変数名（パラメータ・変数）を取得"""
@@ -961,7 +968,12 @@ def estimate_legacy_dict_bytes(
                 policy.dumps(local, default=_opaque_local_text)
             ) - len(children)
             for child in children:
-                size += sizes[id(child)]
+                if type(child) is _RuntimeRefChild:
+                    size += child.measure(
+                        policy, None if max_bytes is None else max_bytes - size,
+                    )
+                else:
+                    size += sizes[id(child)]
             if max_bytes is not None and size > max_bytes:
                 return max_bytes + 1
             sizes[node_id] = size
@@ -984,9 +996,65 @@ def estimate_legacy_dict_bytes(
         pending[node_id] = (node._to_dict_active(None, collect=children), children)
         stack.append((node, True))
         for child in reversed(children):
-            if id(child) not in sizes:
+            if type(child) is not _RuntimeRefChild and id(child) not in sizes:
                 stack.append((child, False))
     return sizes.get(id(root))
+
+
+class _RuntimeRefChild:
+    """見積りで node の外に置く runtime ref（walker が作らずに数える）。"""
+
+    __slots__ = ("ref",)
+
+    def __init__(self, ref: Any) -> None:
+        self.ref = ref
+
+    def measure(self, policy: Any, max_bytes: Optional[int]) -> int:
+        from scripts.function_tracer_pcode.core.json_encoding import (
+            LEGACY,
+            JsonBudgetExhausted,
+        )
+
+        if max_bytes is not None and max_bytes < 0:
+            return 1
+        try:
+            return policy.measure(runtime_ref_source(self.ref), max_bytes=max_bytes, mode=LEGACY)
+        except JsonBudgetExhausted as exc:
+            return exc.consumed_bytes
+
+
+def runtime_ref_source(value: Any) -> Any:
+    """`Expression.runtime_ref` の表現（旧 `_serialize_runtime_ref`）の JSON source。
+
+    scalar はそのまま、tuple / list は配列、dict は key を文字列にした object、
+    record（`json_items()`）は record の表現、dataclass は field の object、それ以外は
+    型と object id。walker が 1 要素ずつ写す（ref の表現を先に作らない）。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import (
+        each,
+        inline,
+        is_json_record,
+        mapping_of,
+        pairs_of,
+    )
+
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (tuple, list)):
+        return each(value, runtime_ref_source)
+    if isinstance(value, dict):
+        return mapping_of(value, runtime_ref_source, key=str)
+    if is_json_record(value):
+        return value
+    if is_dataclass(value) and not isinstance(value, type):
+        return pairs_of(
+            (field.name, runtime_ref_source(getattr(value, field.name))) for field in fields(value)
+        )
+    return inline(
+        ("type", f"{type(value).__module__}.{type(value).__qualname__}"),
+        ("object_id", id(value)),
+    )
 
 
 # Re-exported for callers that import Condition from model.expression.

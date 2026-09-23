@@ -566,87 +566,103 @@ def _elapsed(row: Any) -> float:
 def result_diagnostics_payload(result: Any, *, lazy: bool = False) -> Any:
     """結果 JSON の `diagnostics`（解析時の記録と結果の統計）。
 
-    `lazy=True` は **浅い view**（出力の準備が使う）: 既存の dict / list は参照の
-    まま、attempt ごとの行は generator で渡す（`core/json_encoding` の JSON source
-    規則）。出力の準備が残り予算までしか辿らないので、attempt が大量でも行の list を
-    先に作らない。既定は上限なしで canonical な dict にしたもの（直接の読み手用）。
+    `lazy=True` は JSON source（出力の準備が使う）: 固定の形の view で、attempt ごとの
+    行は walker が 1 つずつ引き出す（`core/json_encoding`）。出力の準備が残り予算まで
+    しか辿らないので、attempt が大量でも行の list を先に作らない。既定は上限なしで
+    作った canonical な dict（直接の読み手用。結果 JSON と同じ値）。
 
     診断は判定結果に影響してはならないため、失敗しても最小のブロックを返す
     （行の generator が行う計算は、ここで合計を数える loop が先に済ませている）。
     """
     try:
-        view = _result_diagnostics_view(result)
+        view = _ResultDiagnosticsView(result)
         if lazy:
             return view
         from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
 
-        return RESULT_JSON_POLICY.materialize(view)
+        return RESULT_JSON_POLICY.prepare(view).value()
     except Exception as exc:
         return {"schema": DIAGNOSTICS_SCHEMA, "error": f"{type(exc).__name__}: {exc}"[:200]}
 
 
-def _attempt_rows(attempts: Any) -> Iterable[Dict[str, Any]]:
+def _attempt_rows(attempts: Any) -> Iterable[Any]:
+    from scripts.function_tracer_pcode.core.json_encoding import inline
+
     for attempt in attempts:
         rows = _solver_rows(getattr(attempt, "solver_results", None))
-        yield {
-            "attempt_id": getattr(attempt, "attempt_id", None),
-            "phase": getattr(attempt, "phase", None),
-            "strategy": getattr(attempt, "strategy", None),
-            "elapsed_seconds": getattr(attempt, "elapsed_time", None),
-            "solver_seconds": round(sum(_elapsed(row) for row in rows), 6),
-            "solver_invocations": len(rows),
-        }
+        yield inline(
+            ("attempt_id", getattr(attempt, "attempt_id", None)),
+            ("phase", getattr(attempt, "phase", None)),
+            ("strategy", getattr(attempt, "strategy", None)),
+            ("elapsed_seconds", getattr(attempt, "elapsed_time", None)),
+            ("solver_seconds", round(sum(_elapsed(row) for row in rows), 6)),
+            ("solver_invocations", len(rows)),
+        )
 
 
-def _result_diagnostics_view(result: Any) -> Any:
-    from scripts.function_tracer_pcode.core.json_encoding import JsonLazyArray
+class _ResultDiagnosticsView:
+    """`diagnostics` の固定の形の view（値は結果の記録への参照、attempt 行は遅延）。
 
-    base = getattr(result, "diagnostics", None) or {}
-    solver_seconds = 0.0
-    solver_invocations = 0
-    trace = getattr(result, "debug_trace", None)
-    attempts = getattr(trace, "attempts", None) or ()
-    for attempt in attempts:
-        # 合計だけを数える（行は下の generator が出力の準備に合わせて作る）
-        rows = _solver_rows(getattr(attempt, "solver_results", None))
-        solver_seconds += sum(_elapsed(row) for row in rows)
-        solver_invocations += len(rows)
-    if not attempts:
-        rows = _solver_rows(getattr(result, "solver_results", None))
-        solver_seconds = sum(_elapsed(row) for row in rows)
-        solver_invocations = len(rows)
-    caches_empty: Dict[str, Any] = {}
-    return {
-        "schema": DIAGNOSTICS_SCHEMA,
-        "timings": {
-            "total_seconds": getattr(result, "total_time", None),
-            "analysis_seconds": base.get("analysis_seconds") or caches_empty,
-            "solver_seconds": round(solver_seconds, 6),
-            "attempts": JsonLazyArray(_attempt_rows(attempts)),
-            "stages": base.get("stages") or caches_empty,
-            "boundary_seconds": base.get("boundary_seconds") or caches_empty,
-            "phases": base.get("phases") or (),
-        },
-        "expressions": base.get("expressions") or caches_empty,
-        "caches": {
-            "callee_parameter_decompile": base.get("callee_parameter_cache") or caches_empty,
-            "callee_analysis": base.get("callee_analysis_cache") or caches_empty,
-            "callee_unbound_reuse": base.get("callee_unbound_reuse") or caches_empty,
-        },
+    C（authority 確定後に合成する診断）なので、結果の記録（`result.diagnostics` /
+    `debug_trace`）を **authority 後に** 読む。判定には使わない。
+    """
+
+    __slots__ = ("_result", "_base", "_attempts", "_solver_seconds", "_solver_invocations")
+
+    def __init__(self, result: Any) -> None:
+        self._result = result
+        self._base = getattr(result, "diagnostics", None) or {}
+        trace = getattr(result, "debug_trace", None)
+        self._attempts = getattr(trace, "attempts", None) or ()
+        solver_seconds = 0.0
+        solver_invocations = 0
+        for attempt in self._attempts:
+            # 合計だけを数える（行は attempt 行の generator が出力の準備に合わせて作る）
+            rows = _solver_rows(getattr(attempt, "solver_results", None))
+            solver_seconds += sum(_elapsed(row) for row in rows)
+            solver_invocations += len(rows)
+        if not self._attempts:
+            rows = _solver_rows(getattr(result, "solver_results", None))
+            solver_seconds = sum(_elapsed(row) for row in rows)
+            solver_invocations = len(rows)
+        self._solver_seconds = solver_seconds
+        self._solver_invocations = solver_invocations
+
+    def json_items(self):
+        from scripts.function_tracer_pcode.core.json_encoding import each, inline
+
+        base = self._base
+        result = self._result
+        caches_empty: Dict[str, Any] = {}
+        yield "schema", DIAGNOSTICS_SCHEMA
+        yield "timings", inline(
+            ("total_seconds", getattr(result, "total_time", None)),
+            ("analysis_seconds", base.get("analysis_seconds") or caches_empty),
+            ("solver_seconds", round(self._solver_seconds, 6)),
+            ("attempts", each(_attempt_rows(self._attempts))),
+            ("stages", base.get("stages") or caches_empty),
+            ("boundary_seconds", base.get("boundary_seconds") or caches_empty),
+            ("phases", base.get("phases") or ()),
+        )
+        yield "expressions", base.get("expressions") or caches_empty
+        yield "caches", inline(
+            ("callee_parameter_decompile", base.get("callee_parameter_cache") or caches_empty),
+            ("callee_analysis", base.get("callee_analysis_cache") or caches_empty),
+            ("callee_unbound_reuse", base.get("callee_unbound_reuse") or caches_empty),
+        )
         # Issue #125: typed failure（限界 / 内部エラー / 握り潰し）の記録。
         # 判定にも semantic projection にも効かない診断。
-        "failures": base.get("failures") or caches_empty,
-        "validated_once_entries": base.get("validated_once_entries"),
+        yield "failures", base.get("failures") or caches_empty
+        yield "validated_once_entries", base.get("validated_once_entries")
         # Issue #20 PR-20-B3: conditional lane が回ったか、回ったなら何で
         # decisive にならなかったか。判定には効かない観測。
-        "conditional_lane": base.get("conditional_lane"),
+        yield "conditional_lane", base.get("conditional_lane")
         # Issue #22 PR-22-D: 式サイズ予算の値・観測した最大値・出力準備の内訳。
         # 判定には効かない観測（既定値の根拠と headroom の使用量を読むため）。
-        "expression_budget": base.get("expression_budget"),
-        "pairs": getattr(result, "pairwise_stats", None) or caches_empty,
-        "solver_invocations": solver_invocations,
-        "stage_path": getattr(result, "stage_path", ()) or (),
-    }
+        yield "expression_budget", base.get("expression_budget")
+        yield "pairs", getattr(result, "pairwise_stats", None) or caches_empty
+        yield "solver_invocations", self._solver_invocations
+        yield "stage_path", getattr(result, "stage_path", ()) or ()
 
 
 PHASE_TIMING_SCHEMA = "phase-timing-v1"

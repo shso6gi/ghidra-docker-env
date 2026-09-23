@@ -674,8 +674,15 @@ def recovery_action_key(action: Any) -> str:
 
 
 def reason_detail_key(record: Any) -> str:
-    """`reason_id | detail` 集計キー（detail 無しは明示する）。"""
-    detail = getattr(record, "detail", None)
+    """`reason_id | detail` 集計キー（detail 無しは明示する）。
+
+    Issue #22 PR-22-D: detail は出力の行 schema と同じ文字数まで（超えた分は marker）。
+    出力の reason 行から読む reporting と、live な record から作る集計で同じ key になる。
+    """
+    from scripts.function_tracer_pcode.checker.unknown_reason import DETAIL_MAX_CHARS
+    from scripts.function_tracer_pcode.core.json_encoding import bounded_text
+
+    detail = bounded_text(getattr(record, "detail", None), DETAIL_MAX_CHARS)
     return f"{record.reason_id} | {detail if detail else '(no detail)'}"
 
 
@@ -819,19 +826,105 @@ def aggregate_is_usable(aggregate: Any) -> bool:
     )
 
 
-def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
+#: authority 確定前（G4-b）に作る、trace 由来の部分の schema。
+TRACE_CAUSE_EVIDENCE_SCHEMA = "unknown-cause-trace-evidence-v1"
+
+
+def build_trace_cause_evidence(
+    result: Any,
+    *,
+    binary_identities: Tuple[Any, Any] = (None, None),
+) -> Dict[str, Any]:
+    """aggregate のうち **trace だけで決まる部分**（Issue #22 PR-22-D）。
+
+    authority 確定 **前**（G4-b、`checker/output_preparation.prepare_pair_output`）に
+    live な trace から 1 回だけ作り、有界な canonical JSON として準備する。authority
+    確定後の aggregate（`build_unknown_cause_aggregate`）はこの準備済みの値と canonical
+    reason だけを読み、live な trace を読み直さない。
+
+    trace に occurrence が無い結果は、root cause を canonical reason から作る
+    （authority 後）ので、ここでは trace の event だけを残す。
+    """
+
     trace = getattr(result, "debug_trace", None)
     attempts = tuple(getattr(trace, "attempts", ()) or ()) if trace is not None else ()
-    occurrences = _occurrence_views(result, attempts)
+    occurrences = _trace_occurrence_views(attempts)
     transitions = _event_views(getattr(trace, "causal_transitions", ()) if trace is not None else ())
     completions = _event_views(getattr(trace, "proof_completion_events", ()) if trace is not None else ())
     reason_completions = _event_views(
         getattr(trace, "reason_completion_events", ()) if trace is not None else ()
     )
+    legacy_attempt, legacy_records = _final_legacy_attempt(trace, attempts)
+    legacy_view = None
+    if trace is not None and legacy_attempt is not None:
+        legacy_view = build_reason_view(legacy_records)
+        legacy_view["source"] = "final_attempt"
+    evidence: Dict[str, Any] = {
+        "schema": TRACE_CAUSE_EVIDENCE_SCHEMA,
+        "trace_present": trace is not None,
+        "has_final_attempt": legacy_attempt is not None,
+        "has_trace_occurrences": bool(occurrences),
+        "legacy_view": legacy_view,
+        "attempts": _attempt_summary(attempts, legacy_attempt) if trace is not None else None,
+    }
+    if occurrences:
+        diagnostics: Dict[str, int] = {}
+        root_causes, root_cause_stats, identity_pool = _build_root_causes(
+            binary_identities,
+            occurrences=occurrences,
+            transitions=transitions,
+            completions=completions,
+            reason_completions=reason_completions,
+            attempts=attempts,
+            diagnostics=diagnostics,
+        )
+        evidence.update({
+            "root_causes": root_causes,
+            "root_cause_stats": root_cause_stats,
+            "identity_pool": identity_pool,
+            "completions": (
+                completion_counts(completions, reason_completions, occurrences)
+                if trace is not None else None
+            ),
+            "transitions": transition_counts(transitions, occurrences) if trace is not None else None,
+        })
+    else:
+        # root cause は authority 後に canonical reason から作る（trace の event だけ残す）
+        evidence.update({
+            "transition_events": transitions,
+            "completion_events": completions,
+            "reason_completion_events": reason_completions,
+            "final_attempt_identity": _final_attempt_identity(attempts, ()),
+        })
+    return evidence
+
+
+def trace_evidence_is_usable(evidence: Any) -> bool:
+    return isinstance(evidence, Mapping) and evidence.get("schema") == TRACE_CAUSE_EVIDENCE_SCHEMA
+
+
+def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
+    evidence = _prepared_trace_evidence(result)
+    if evidence is None:
+        # pair 境界を通らずに組んだ結果（test の直接構築など）: その場で作る
+        evidence = build_trace_cause_evidence(
+            result,
+            binary_identities=(
+                getattr(result, "binary1_content_identity", None),
+                getattr(result, "binary2_content_identity", None),
+            ),
+        )
+    if not trace_evidence_is_usable(evidence):
+        return {
+            "schema": UNKNOWN_CAUSE_AGGREGATE_SCHEMA,
+            "error": "trace_evidence_unavailable:" + str(
+                (evidence or {}).get("reason") if isinstance(evidence, Mapping) else None
+            )[:120],
+        }
+    trace_present = bool(evidence.get("trace_present"))
 
     canonical_records = coerce_unknown_reason_records(getattr(result, "unknown_reasons", ()) or ())
     canonical_available = getattr(result, "decision_receipt", None) is not None
-    legacy_attempt, legacy_records = _final_legacy_attempt(trace, attempts)
 
     final_reasons = build_reason_view(canonical_records) if canonical_available else None
     # `legacy_view` は「trace を見た consumer が診断に使う record 集合」の集計で、
@@ -841,10 +934,9 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
     #   final_attempt   -- 最終 UNKNOWN/TIMEOUT attempt の record（0 件もあり得る）
     #   payload_records -- 最終 attempt が無いので結果の `unknown_reasons`
     legacy_view = None
-    if trace is not None:
-        if legacy_attempt is not None:
-            legacy_view = build_reason_view(legacy_records)
-            legacy_view["source"] = "final_attempt"
+    if trace_present:
+        if evidence.get("has_final_attempt"):
+            legacy_view = evidence.get("legacy_view")
         else:
             legacy_view = build_reason_view(canonical_records)
             legacy_view["source"] = "payload_records"
@@ -854,16 +946,37 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
         else ("legacy" if legacy_view is not None else None)
     )
 
-    diagnostics: Dict[str, int] = {}
-    root_causes, root_cause_stats, identity_pool = _build_root_causes(
-        result,
-        occurrences=occurrences,
-        transitions=transitions,
-        completions=completions,
-        reason_completions=reason_completions,
-        attempts=attempts,
-        diagnostics=diagnostics,
-    )
+    if evidence.get("has_trace_occurrences"):
+        root_causes = evidence.get("root_causes")
+        root_cause_stats = evidence.get("root_cause_stats")
+        identity_pool = evidence.get("identity_pool")
+        completions_block = evidence.get("completions")
+        transitions_block = evidence.get("transitions")
+    else:
+        # trace に occurrence が無い: root cause は canonical reason（authority の出力）から
+        occurrences = _payload_occurrence_views(canonical_records)
+        transitions = list(evidence.get("transition_events") or ())
+        completions = list(evidence.get("completion_events") or ())
+        reason_completions = list(evidence.get("reason_completion_events") or ())
+        diagnostics: Dict[str, int] = {}
+        root_causes, root_cause_stats, identity_pool = _build_root_causes(
+            (
+                getattr(result, "binary1_content_identity", None),
+                getattr(result, "binary2_content_identity", None),
+            ),
+            occurrences=occurrences,
+            transitions=transitions,
+            completions=completions,
+            reason_completions=reason_completions,
+            attempts=(),
+            diagnostics=diagnostics,
+            final_identity=_payload_final_identity(evidence, occurrences),
+        )
+        completions_block = (
+            completion_counts(completions, reason_completions, occurrences)
+            if trace_present else None
+        )
+        transitions_block = transition_counts(transitions, occurrences) if trace_present else None
 
     return {
         "schema": UNKNOWN_CAUSE_AGGREGATE_SCHEMA,
@@ -872,42 +985,55 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
         "effective_source": effective_source,
         "backlog": dict(effective_view["backlog"]) if effective_view is not None else None,
         "operational": dict(effective_view["operational"]) if effective_view is not None else None,
-        "completions": (
-            completion_counts(completions, reason_completions, occurrences)
-            if trace is not None
-            else None
-        ),
-        "transitions": transition_counts(transitions, occurrences) if trace is not None else None,
+        "completions": completions_block,
+        "transitions": transitions_block,
         "root_causes": root_causes,
         "identity_pool": identity_pool,
         "root_cause_stats": root_cause_stats,
-        "attempts": _attempt_summary(attempts, legacy_attempt) if trace is not None else None,
+        "attempts": evidence.get("attempts") if trace_present else None,
         # `evidence_present` は「件数が非 0 か」ではなく **「その情報を観測できたか」**。
         # trace を見られなかったのか、見た上で 0 件だったのかを consumer が区別する
         # ための証言で、block の `null` と対になる。
         # 例: trace 有り・attempt 0 件 -> `attempts={"count": 0,…}` + `True`、
         #     trace 無し             -> `attempts=None`            + `False`。
         "evidence_present": {
-            "debug_trace": trace is not None,
-            "attempts": trace is not None,
-            "completion_events": trace is not None,
-            "causal_transitions": trace is not None,
-            "legacy_records": trace is not None,
+            "debug_trace": trace_present,
+            "attempts": trace_present,
+            "completion_events": trace_present,
+            "causal_transitions": trace_present,
+            "legacy_records": trace_present,
             "canonical_reasons": canonical_available,
         },
     }
 
 
-def _occurrence_views(result: Any, attempts: Sequence[Any]) -> List[Dict[str, Any]]:
-    """`root_blocker_summary._extract_occurrences` と同じ occurrence 列を作る。"""
+def _prepared_trace_evidence(result: Any) -> Any:
+    prepared = getattr(result, "prepared_semantic_payload", None)
+    cause_evidence = getattr(prepared, "cause_evidence", None)
+    if cause_evidence is None:
+        return None
+    return cause_evidence.value()
+
+
+def _trace_occurrence_views(attempts: Sequence[Any]) -> List[Dict[str, Any]]:
+    """trace の occurrence 列（`root_blocker_summary._extract_occurrences` と同じ）。"""
     occurrences: List[Dict[str, Any]] = []
     for attempt in attempts:
         for occurrence in tuple(getattr(attempt, "reason_occurrences", ()) or ()):
             occurrences.append(_as_mapping(occurrence))
-    if occurrences:
-        return occurrences
+    return occurrences
+
+
+def _payload_occurrence_views(records: Sequence[UnknownReasonRecord]) -> List[Dict[str, Any]]:
+    """trace に occurrence が無いときの occurrence 列（結果の reason から作る）。
+
+    Issue #22 PR-22-D: record は出力と同じ有界な表現で読む（authority 後に大きい key を
+    辿り直さない。root cause の identity は `typed_cause_key` から決まる）。
+    """
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
     identity = {"trace_schema_version": 1, "strategy_identity": "payload", "attempt_ordinal": 0}
-    records = coerce_unknown_reason_records(getattr(result, "unknown_reasons", ()) or ())
+    occurrences: List[Dict[str, Any]] = []
     for ordinal, record in enumerate(records):
         occurrences.append({
             "occurrence_id": {
@@ -916,10 +1042,19 @@ def _occurrence_views(result: Any, attempts: Sequence[Any]) -> List[Dict[str, An
                 "reason_ordinal": ordinal,
             },
             "attempt_identity": identity,
-            "reason_record": record.to_dict(),
+            "reason_record": RESULT_JSON_POLICY.prepare(record).value(),
             "initial_causal_status": "unclassified",
         })
     return occurrences
+
+
+def _payload_final_identity(evidence: Mapping[str, Any], occurrences: Sequence[Mapping[str, Any]]):
+    identity = evidence.get("final_attempt_identity")
+    if identity is not None:
+        return freeze_identity(identity)
+    if occurrences:
+        return freeze_identity(occurrences[-1].get("attempt_identity"))
+    return None
 
 
 def _event_views(values: Iterable[Any]) -> List[Dict[str, Any]]:
@@ -1075,7 +1210,7 @@ class _CauseGroup:
 
 
 def _build_root_causes(
-    result: Any,
+    binary_identities: Tuple[Any, Any],
     *,
     occurrences: Sequence[Mapping[str, Any]],
     transitions: Sequence[Mapping[str, Any]],
@@ -1083,9 +1218,10 @@ def _build_root_causes(
     reason_completions: Sequence[Mapping[str, Any]],
     attempts: Sequence[Any],
     diagnostics: Dict[str, int],
+    final_identity: Any = None,
 ):
-    left = identity_tuple(getattr(result, "binary1_content_identity", None))
-    right = identity_tuple(getattr(result, "binary2_content_identity", None))
+    left = identity_tuple(binary_identities[0])
+    right = identity_tuple(binary_identities[1])
     transition_state = resolve_occurrence_transitions(
         occurrences,
         transitions,
@@ -1094,7 +1230,8 @@ def _build_root_causes(
         reason_completions=reason_completions,
     )
     final_ids = set()
-    final_identity = _final_attempt_identity(attempts, occurrences)
+    if final_identity is None:
+        final_identity = _final_attempt_identity(attempts, occurrences)
     if final_identity is not None:
         final_ids = {
             freeze_identity(item.get("occurrence_id"))

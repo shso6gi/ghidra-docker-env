@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 # Re-exports kept for callers that import these names from this module.
 from typing import List  # noqa: F401
+from scripts.function_tracer_pcode.core.json_encoding import materialize
 
 
 class SolverStatus(Enum):
@@ -34,14 +35,15 @@ class SolverResult:
         """等価かどうか"""
         return self.status == SolverStatus.UNSAT
     
+    def json_items(self):
+        yield "solver_name", self.solver_name
+        yield "status", self.status.name
+        yield "elapsed_time", self.elapsed_time
+        yield "model", self.model
+        yield "error_message", self.error_message
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "solver_name": self.solver_name,
-            "status": self.status.name,
-            "elapsed_time": self.elapsed_time,
-            "model": self.model,
-            "error_message": self.error_message,
-        }
+        return materialize(self)
 
 
 class SMTSolver(ABC):

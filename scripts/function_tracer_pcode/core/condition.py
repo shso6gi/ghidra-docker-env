@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 from typing import Any, Dict, List, Optional, TYPE_CHECKING, Mapping
 
+from scripts.function_tracer_pcode.core.json_encoding import materialize
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     SemanticLifecycle,
     state_of,
@@ -300,9 +301,9 @@ class Condition:
         """条件式に含まれる全ての変数名とストレージ情報を取得"""
         return self.expression.get_all_variables_with_storage()
 
+    def json_items(self):
+        yield "expression", self.expression
+        yield "negated", self.negated
+
     def to_dict(self) -> Dict[str, Any]:
-        """辞書形式に変換"""
-        return {
-            "expression": self.expression.to_dict(),
-            "negated": self.negated,
-        }
+        return materialize(self)

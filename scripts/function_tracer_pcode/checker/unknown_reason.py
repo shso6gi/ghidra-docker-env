@@ -3,11 +3,23 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 # Phase 7-1b-1 (#97): pure な定義層は proof.unknown_reason へ移動した。以下は (a) 本 module の実装が使う名前と
 # (b) 旧 path `checker.unknown_reason` からの互換 import のための再輸出（同一 object。再定義しない）。
+from scripts.function_tracer_pcode.core.json_encoding import (
+    EVIDENCE,
+    INT,
+    TEXT,
+    Column,
+    as_dict,
+    as_list,
+    each,
+    materialize,
+    row_items,
+)
 from scripts.function_tracer_pcode.proof.unknown_reason import (  # noqa: F401
     UNKNOWN_TUPLE_MISSING,
     UnknownAggregationUnit,
@@ -40,6 +52,92 @@ from scripts.function_tracer_pcode.proof.unknown_reason import (  # noqa: F401
 )
 
 
+# ---------------------------------------------------------------------------
+# 行の schema（Issue #22 PR-22-D）
+# ---------------------------------------------------------------------------
+#
+# reason / recovery action の行は **列ごとの上限** を型で持つ（`core/json_encoding.Column`）。
+# 出力では語彙の列・自由文の列は文字数まで（超えた分は marker）、key / evidence の列は
+# 有界な証拠（大きければ identity + 要約）になる。行の上限（`row_max_bytes`）は出力
+# schema の headroom の根拠（`checker/output_schema.py`）。`to_dict()` は旧来の構造。
+
+#: 登録語彙（reason class / scope / status など）の列の上限
+VOCAB_MAX_CHARS = 64
+#: 登録 id（reason id / target regression）の列の上限
+ID_MAX_CHARS = 128
+#: 短い自由文（stage / case / evidence kind / recovery action）の列の上限
+LABEL_MAX_CHARS = 256
+#: 自由文（detail）の列の上限
+DETAIL_MAX_CHARS = 1024
+
+
+def _optional_dict(value: Any) -> Any:
+    return as_dict(value) if value else None
+
+
+def _dict_items(values: Any) -> Any:
+    return each(values, as_dict)
+
+
+UNKNOWN_RECOVERY_ACTION_ROW = (
+    Column("count_kind", TEXT, VOCAB_MAX_CHARS),
+    Column("reason_id", TEXT, ID_MAX_CHARS),
+    Column("decision_effect", TEXT, VOCAB_MAX_CHARS),
+    Column("reason_scope", TEXT, VOCAB_MAX_CHARS),
+    Column("proof_kind", TEXT, VOCAB_MAX_CHARS),
+    Column("proof_stage", TEXT, LABEL_MAX_CHARS),
+    Column("status", TEXT, VOCAB_MAX_CHARS),
+    Column("aggregation_unit", TEXT, VOCAB_MAX_CHARS),
+    Column("stage", TEXT, LABEL_MAX_CHARS),
+    Column("pair_or_case", TEXT, LABEL_MAX_CHARS),
+    Column("required_evidence", EVIDENCE, legacy=as_list),
+    Column("evidence_refs", EVIDENCE, legacy=as_list),
+    Column("evidence_kind", TEXT, LABEL_MAX_CHARS),
+    Column("object_target_key", EVIDENCE),
+    Column("proof_obligation_id", EVIDENCE),
+    Column("recovery_action", TEXT, LABEL_MAX_CHARS),
+    Column("target_regression", TEXT, ID_MAX_CHARS),
+    Column("detail", TEXT, DETAIL_MAX_CHARS),
+    Column("object_evidence", EVIDENCE, omit_none=True),
+)
+
+UNKNOWN_REASON_ROW = (
+    Column("count_kind", TEXT, VOCAB_MAX_CHARS),
+    Column("reason_id", TEXT, ID_MAX_CHARS),
+    Column("reason_class", TEXT, VOCAB_MAX_CHARS),
+    Column("decision_effect", TEXT, VOCAB_MAX_CHARS),
+    Column("reason_scope", TEXT, VOCAB_MAX_CHARS),
+    Column("aggregation_unit", TEXT, VOCAB_MAX_CHARS),
+    Column("stage", TEXT, LABEL_MAX_CHARS),
+    Column("pair_or_case", TEXT, LABEL_MAX_CHARS),
+    Column("evidence_refs", EVIDENCE, legacy=as_list),
+    Column("recovery_proof_kind", TEXT, VOCAB_MAX_CHARS),
+    Column("recovery_proof_obligations", EVIDENCE, legacy=each),
+    Column("proof_stage", TEXT, LABEL_MAX_CHARS),
+    Column("evidence_kind", TEXT, LABEL_MAX_CHARS),
+    Column("object_target_key", EVIDENCE),
+    Column("proof_obligation_id", EVIDENCE),
+    Column("typed_cause_key", EVIDENCE, legacy=_optional_dict),
+    Column("proof_requirement_ids", EVIDENCE, legacy=_dict_items),
+    Column("recovery_action", TEXT, LABEL_MAX_CHARS),
+    Column("action_status", TEXT, VOCAB_MAX_CHARS),
+    Column("target_regression", TEXT, ID_MAX_CHARS),
+    Column("detail", TEXT, DETAIL_MAX_CHARS),
+    Column("object_evidence", EVIDENCE, omit_none=True),
+)
+
+
+def _evidence_identity(record: Any) -> Any:
+    """大きい証拠を要約するときの identity。authority の projection なら cause id。"""
+
+    typed_cause_key = getattr(record, "typed_cause_key", None)
+    if isinstance(typed_cause_key, Mapping):
+        cause_id = typed_cause_key.get("cause_id")
+        if isinstance(cause_id, str) and cause_id:
+            return "cause:" + cause_id
+    return None
+
+
 @dataclass(frozen=True)
 class UnknownRecoveryAction:
     count_kind: str
@@ -62,30 +160,11 @@ class UnknownRecoveryAction:
     target_regression: Optional[str] = None
     detail: Optional[str] = None
 
+    def json_items(self):
+        return row_items(UNKNOWN_RECOVERY_ACTION_ROW, self, identity=_evidence_identity(self))
+
     def to_dict(self) -> Dict[str, Any]:
-        payload = {
-            "count_kind": self.count_kind,
-            "reason_id": self.reason_id,
-            "decision_effect": self.decision_effect,
-            "reason_scope": self.reason_scope,
-            "proof_kind": self.proof_kind,
-            "proof_stage": self.proof_stage,
-            "status": self.status,
-            "aggregation_unit": self.aggregation_unit,
-            "stage": self.stage,
-            "pair_or_case": self.pair_or_case,
-            "required_evidence": list(self.required_evidence),
-            "evidence_refs": list(self.evidence_refs),
-            "evidence_kind": self.evidence_kind,
-            "object_target_key": self.object_target_key,
-            "proof_obligation_id": self.proof_obligation_id,
-            "recovery_action": self.recovery_action,
-            "target_regression": self.target_regression,
-            "detail": self.detail,
-        }
-        if self.object_evidence is not None:
-            payload["object_evidence"] = self.object_evidence
-        return payload
+        return materialize(self)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "UnknownRecoveryAction":
@@ -183,35 +262,11 @@ class UnknownReasonRecord:
     target_regression: Optional[str] = None
     detail: Optional[str] = None
 
+    def json_items(self):
+        return row_items(UNKNOWN_REASON_ROW, self, identity=_evidence_identity(self))
+
     def to_dict(self) -> Dict[str, Any]:
-        payload = {
-            "count_kind": self.count_kind,
-            "reason_id": self.reason_id,
-            "reason_class": self.reason_class,
-            "decision_effect": self.decision_effect,
-            "reason_scope": self.reason_scope,
-            "aggregation_unit": self.aggregation_unit,
-            "stage": self.stage,
-            "pair_or_case": self.pair_or_case,
-            "evidence_refs": list(self.evidence_refs),
-            "recovery_proof_kind": self.recovery_proof_kind,
-            "recovery_proof_obligations": [
-                obligation.to_dict() for obligation in self.recovery_proof_obligations
-            ],
-            "proof_stage": self.proof_stage,
-            "evidence_kind": self.evidence_kind,
-            "object_target_key": self.object_target_key,
-            "proof_obligation_id": self.proof_obligation_id,
-            "typed_cause_key": dict(self.typed_cause_key) if self.typed_cause_key else None,
-            "proof_requirement_ids": [dict(item) for item in self.proof_requirement_ids],
-            "recovery_action": self.recovery_action,
-            "action_status": self.action_status,
-            "target_regression": self.target_regression,
-            "detail": self.detail,
-        }
-        if self.object_evidence is not None:
-            payload["object_evidence"] = self.object_evidence
-        return payload
+        return materialize(self)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "UnknownReasonRecord":
@@ -438,6 +493,154 @@ def make_internal_v2_reason_diagnostic(
     )
 
 
+# ---------------------------------------------------------------------------
+# 有界化（Issue #22 PR-22-D, B5）
+# ---------------------------------------------------------------------------
+#
+# legacy reason / recovery action（A）の重い field は、authority 確定 **前**（G4-b）に
+# 有界な表現へ置き換える。以後 authority の finish（projection の診断・legacy の照合）
+# と出力は、置き換えた record しか読まない — 巨大な key を authority 後に辿り直さない。
+#
+# * key / evidence（`object_target_key` / `object_evidence` / `proof_obligation_id` /
+#   `typed_cause_key` / `proof_requirement_ids` の各要素）: 小さければそのまま、大きければ
+#   `BoundedEvidence`（型つき digest + 種類）。照合用に `canonical_value` の digest を
+#   2 つ付ける（`authority` = `authority_digest` と同じ値、`canonical_str` =
+#   `str(canonical_value(...))` の sha256）。
+# * 自由文（`detail` / `stage` / `pair_or_case`）: 行 schema の文字数まで（超えた分は
+#   明示の marker）。
+
+
+#: 照合用 digest の名前
+MATCH_AUTHORITY_DIGEST = "authority"
+MATCH_CANONICAL_STR_DIGEST = "canonical_str"
+
+
+#: `PreparedSemanticPayload.raw_limitation_evidence` の行（legacy reason の有界な証拠）
+LEGACY_REASON_EVIDENCE_ROW = (
+    Column("reason_id", TEXT, ID_MAX_CHARS),
+    Column("stage", TEXT, LABEL_MAX_CHARS),
+    Column("pair_or_case", TEXT, LABEL_MAX_CHARS),
+    Column("detail", TEXT, DETAIL_MAX_CHARS),
+    Column("evidence_refs", EVIDENCE, legacy=as_list),
+    Column("object_target_key", EVIDENCE),
+    Column("proof_obligation_id", EVIDENCE),
+)
+
+
+class LegacyReasonEvidence:
+    """legacy reason 1 件を `LEGACY_REASON_EVIDENCE_ROW` で書く view。"""
+
+    __slots__ = ("_record",)
+
+    def __init__(self, record: Any) -> None:
+        self._record = record
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._record, name)
+
+    def json_items(self):
+        return row_items(LEGACY_REASON_EVIDENCE_ROW, self._record)
+
+
+def bounded_match_evidence(value: Any) -> Any:
+    """`value` が大きければ照合用 digest つきの `BoundedEvidence`、小さければ `value`。"""
+
+    from scripts.function_tracer_pcode.authority.contracts import (
+        streaming_authority_digest,
+        streaming_canonical_str_digest,
+    )
+    from scripts.function_tracer_pcode.core.json_encoding import (
+        EVIDENCE_INLINE_BYTES,
+        LEGACY,
+        RESULT_JSON_POLICY,
+        BoundedEvidence,
+        JsonBudgetExhausted,
+    )
+
+    if value is None or type(value) is BoundedEvidence:
+        return value
+    try:
+        RESULT_JSON_POLICY.measure(value, max_bytes=EVIDENCE_INLINE_BYTES, mode=LEGACY)
+        return value
+    except JsonBudgetExhausted:
+        pass
+    try:
+        digests = (
+            (MATCH_AUTHORITY_DIGEST, streaming_authority_digest(value)),
+            (MATCH_CANONICAL_STR_DIGEST, streaming_canonical_str_digest(value)),
+        )
+    except (TypeError, UnicodeError):
+        # authority の値にならない証拠は照合に使えない（照合しない = 付けない）
+        digests = ()
+    summary = RESULT_JSON_POLICY.bounded_evidence(value)
+    return BoundedEvidence(
+        identity=summary.identity,
+        identity_kind=summary.identity_kind,
+        kind=summary.kind,
+        encoded_bytes_over=summary.encoded_bytes_over,
+        match_digests=digests,
+    )
+
+
+def match_digest(value: Any, name: str) -> Optional[str]:
+    """照合用 digest（有界化した証拠なら付けた値、それ以外は今求める）。"""
+
+    from scripts.function_tracer_pcode.authority.contracts import (
+        streaming_authority_digest,
+        streaming_canonical_str_digest,
+    )
+    from scripts.function_tracer_pcode.core.json_encoding import BoundedEvidence
+
+    if value is None:
+        return None
+    if type(value) is BoundedEvidence:
+        return value.match_digest(name)
+    try:
+        if name == MATCH_AUTHORITY_DIGEST:
+            return streaming_authority_digest(value)
+        return streaming_canonical_str_digest(value)
+    except (TypeError, UnicodeError):
+        return None
+
+
+def _bounded_text(value: Any, max_chars: int) -> Any:
+    from scripts.function_tracer_pcode.core.json_encoding import bounded_text
+
+    return bounded_text(value, max_chars)
+
+
+def finitize_unknown_reason_record(record: UnknownReasonRecord) -> UnknownReasonRecord:
+    """legacy reason 1 件の重い field を有界な表現へ置き換える（reason id などは不変）。"""
+
+    return replace(
+        record,
+        stage=_bounded_text(record.stage, LABEL_MAX_CHARS),
+        pair_or_case=_bounded_text(record.pair_or_case, LABEL_MAX_CHARS),
+        detail=_bounded_text(record.detail, DETAIL_MAX_CHARS),
+        object_target_key=bounded_match_evidence(record.object_target_key),
+        object_evidence=bounded_match_evidence(record.object_evidence),
+        proof_obligation_id=bounded_match_evidence(record.proof_obligation_id),
+        typed_cause_key=bounded_match_evidence(record.typed_cause_key),
+        proof_requirement_ids=tuple(
+            bounded_match_evidence(item) for item in record.proof_requirement_ids
+        ),
+    )
+
+
+def finitize_unknown_recovery_action(action: UnknownRecoveryAction) -> UnknownRecoveryAction:
+    """recovery action 1 件の重い field を有界な表現へ置き換える。"""
+
+    return replace(
+        action,
+        stage=_bounded_text(action.stage, LABEL_MAX_CHARS),
+        pair_or_case=_bounded_text(action.pair_or_case, LABEL_MAX_CHARS),
+        detail=_bounded_text(action.detail, DETAIL_MAX_CHARS),
+        object_target_key=bounded_match_evidence(action.object_target_key),
+        object_evidence=bounded_match_evidence(action.object_evidence),
+        proof_obligation_id=bounded_match_evidence(action.proof_obligation_id),
+    )
+
+
 def build_projection_diagnostic(
     receipt: Any,
     *,
@@ -480,11 +683,13 @@ def build_projection_diagnostic(
             "producer_id": getattr(cause_occurrence, "producer_id", None),
             "evidence_kind": getattr(cause_occurrence, "evidence_kind", None),
             "evidence_refs": list(getattr(cause_occurrence, "evidence_refs", ()) or ()),
-            "canonical_target_key": canonical_value(
-                getattr(cause_id, "canonical_target_key", None)
+            # Issue #22 PR-22-D: cause の key は authority が封印した canonical な値。
+            # 診断には有界な表現（大きければ cause id を identity にした要約）だけを置く
+            "canonical_target_key": _bounded_cause_value(
+                getattr(cause_id, "canonical_target_key", None), cause_id,
             ),
-            "missing_semantic_fact": canonical_value(
-                getattr(cause_id, "missing_semantic_fact", None)
+            "missing_semantic_fact": _bounded_cause_value(
+                getattr(cause_id, "missing_semantic_fact", None), cause_id,
             ),
         }
     matched, match_kind = _match_legacy_reasons(
@@ -508,6 +713,31 @@ def build_projection_diagnostic(
     return diagnostic
 
 
+def _bounded_cause_value(value: Any, cause_id: Any) -> Any:
+    """cause の canonical な値を、小さければそのまま、大きければ cause id の要約にする。"""
+
+    from scripts.function_tracer_pcode.authority.contracts import canonical_value
+    from scripts.function_tracer_pcode.core.json_encoding import (
+        EVIDENCE_INLINE_BYTES,
+        LEGACY,
+        RESULT_JSON_POLICY,
+        BoundedEvidence,
+        JsonBudgetExhausted,
+    )
+
+    if value is None:
+        return None
+    try:
+        RESULT_JSON_POLICY.measure(value, max_bytes=EVIDENCE_INLINE_BYTES, mode=LEGACY)
+    except JsonBudgetExhausted:
+        identity = getattr(cause_id, "value", None)
+        summary = RESULT_JSON_POLICY.bounded_evidence(
+            value, identity=("cause:" + identity) if isinstance(identity, str) else None,
+        )
+        return summary if type(summary) is BoundedEvidence else canonical_value(value)
+    return canonical_value(value)
+
+
 def _match_legacy_reasons(
     reason_id: Any,
     cause_occurrence: Any,
@@ -524,8 +754,11 @@ def _match_legacy_reasons(
        legacy record and exactly one projected cause, so the correspondence is
        1:1 by construction.
     Otherwise nothing is attached; the typed cause occurrence alone is used.
+
+    Issue #22 PR-22-D: 等しさは ``canonical_value`` の digest で比べる（legacy の key は
+    authority 前に有界化され、照合用 digest だけを持つ。cause の key も写しを作らずに
+    digest する）。digest の等しさは ``canonical_value`` の等しさと同じ関係。
     """
-    from scripts.function_tracer_pcode.authority.contracts import canonical_value
 
     candidates = tuple(
         record for record in (legacy_reasons or ())
@@ -534,18 +767,26 @@ def _match_legacy_reasons(
     if not candidates:
         return (), None
     cause_id = getattr(cause_occurrence, "cause_id", None)
-    cause_target = canonical_value(getattr(cause_id, "canonical_target_key", None)) if cause_id is not None else None
+    cause_target = (
+        match_digest(getattr(cause_id, "canonical_target_key", None), MATCH_AUTHORITY_DIGEST)
+        if cause_id is not None else None
+    )
     cause_requirements = set(getattr(cause_occurrence, "proof_requirement_ids", ()) or ()) if cause_occurrence is not None else set()
+    requirement_digests = {
+        hashlib.sha256(str(item).encode("utf-8")).hexdigest() for item in cause_requirements
+    }
     exact = []
     for record in candidates:
-        record_target = canonical_value(getattr(record, "object_target_key", None))
+        record_target = match_digest(
+            getattr(record, "object_target_key", None), MATCH_AUTHORITY_DIGEST,
+        )
         if cause_target is not None and record_target is not None and record_target == cause_target:
             exact.append(record)
             continue
         record_obligation = getattr(record, "proof_obligation_id", None)
-        if record_obligation is not None and cause_requirements and str(
-            canonical_value(record_obligation)
-        ) in {str(item) for item in cause_requirements}:
+        if record_obligation is not None and requirement_digests and match_digest(
+            record_obligation, MATCH_CANONICAL_STR_DIGEST,
+        ) in requirement_digests:
             exact.append(record)
             continue
     if exact:
@@ -561,8 +802,14 @@ def make_production_unknown_reason(
     projection_factory: Any,
     detail: Optional[str] = None,
     diagnostic: Optional[Mapping[str, Any]] = None,
+    cause_occurrence: Any = None,
 ) -> UnknownReasonRecord:
-    """Project one factory-owned active v2 cause to compatibility data."""
+    """Project one factory-owned active v2 cause to compatibility data.
+
+    ``object_target_key`` は cause の封印済み canonical key そのもの（conditional lane が
+    読む。写さない）。診断（``object_evidence``）は有界な表現だけを持つ。出力は行 schema
+    が key を有界に書く（大きければ cause id の要約）。
+    """
 
     from scripts.function_tracer_pcode.authority.sites.activation import (
         TypedResultProjectionFactory,
@@ -618,12 +865,16 @@ def make_production_unknown_reason(
             format_projection_detail(diagnostic) if diagnostic else None
         ),
         pair_or_case=_first_legacy_field(diagnostic, "pair_or_case"),
-        object_target_key=(
-            (diagnostic.get("cause") or {}).get("canonical_target_key")
-            if diagnostic else None
-        ),
+        object_target_key=_production_target_key(cause_occurrence, diagnostic),
         object_evidence=dict(diagnostic) if diagnostic else None,
     )
+
+
+def _production_target_key(cause_occurrence: Any, diagnostic: Optional[Mapping[str, Any]]) -> Any:
+    cause_id = getattr(cause_occurrence, "cause_id", None)
+    if cause_id is not None:
+        return getattr(cause_id, "canonical_target_key", None)
+    return (diagnostic.get("cause") or {}).get("canonical_target_key") if diagnostic else None
 
 
 def _first_legacy_field(diagnostic: Optional[Mapping[str, Any]], field_name: str) -> Any:
@@ -673,10 +924,21 @@ def build_unknown_recovery_actions(
     *,
     primary_by_aggregation_unit: bool = False,
 ) -> Tuple[UnknownRecoveryAction, ...]:
+    return tuple(iter_unknown_recovery_actions(
+        values, primary_by_aggregation_unit=primary_by_aggregation_unit,
+    ))
+
+
+def iter_unknown_recovery_actions(
+    values: Optional[Iterable[Any]],
+    *,
+    primary_by_aggregation_unit: bool = False,
+):
+    """`build_unknown_recovery_actions` と同じ action を 1 つずつ作る（出力の準備が引き出す）。"""
+
     records = coerce_unknown_reason_records(values)
     if primary_by_aggregation_unit:
         records = _select_primary_records_by_aggregation_unit(records)
-    actions = []
     for record in records:
         obligations = record.recovery_proof_obligations
         if not obligations:
@@ -685,7 +947,7 @@ def build_unknown_recovery_actions(
         if not obligations:
             if record.recovery_proof_kind == UnknownRecoveryProofKind.NONE.value:
                 continue
-            actions.append(
+            yield (
                 UnknownRecoveryAction(
                     count_kind=UnknownCountKind.PROOF_ACTION.value,
                     reason_id=record.reason_id,
@@ -736,7 +998,7 @@ def build_unknown_recovery_actions(
                     evidence_kind,
                     record.object_target_key,
                 )
-            actions.append(
+            yield (
                 UnknownRecoveryAction(
                     count_kind=UnknownCountKind.PROOF_ACTION.value,
                     reason_id=record.reason_id,
@@ -759,7 +1021,6 @@ def build_unknown_recovery_actions(
                     detail=obligation.description or record.detail,
                 )
             )
-    return tuple(actions)
 
 
 def summarize_unknown_reason_counts(
@@ -779,13 +1040,14 @@ def summarize_unknown_reason_counts(
 def _select_primary_records_by_aggregation_unit(
     records: Iterable[UnknownReasonRecord],
 ) -> Tuple[UnknownReasonRecord, ...]:
-    primary_records: Dict[Tuple[str, str], UnknownReasonRecord] = {}
+    primary_records: Dict[Tuple[str, Any], UnknownReasonRecord] = {}
     fallback_index = 0
     for record in records:
         aggregation_key = str(record.aggregation_unit or UnknownAggregationUnit.RESULT.value)
         unit_key = record.pair_or_case or record.stage
         if unit_key is None:
-            unit_key = f"record:{fallback_index}"
+            # 単位の無い record は 1 件ずつ別の単位（文字列を作らない key）
+            unit_key = ("record", fallback_index)
             fallback_index += 1
         primary_records.setdefault((aggregation_key, unit_key), record)
     return tuple(primary_records.values())
@@ -831,3 +1093,146 @@ def summarize_unknown_recovery_backlog(
                 entry["proof_obligations"].append(obligation.to_dict())
                 seen_obligations.add(obligation_key)
     return summary
+
+
+
+# ---------------------------------------------------------------------------
+# 集計の出力（Issue #22 PR-22-D）
+# ---------------------------------------------------------------------------
+#
+# 出力の集計は **key を 1 つずつ** 作る: 初出順に key を 1 つ出すたびに、その key の
+# 値を record を数え直して作る。作業中に持つのは「出し終えた key」の集合だけで、
+# それは walker が既に数えた出力の大きさで抑えられる。値は `summarize_*` の dict と
+# 同じ（key の並びも同じ）。
+
+
+def _primary_or_all(values: Optional[Iterable[Any]], primary_by_aggregation_unit: bool):
+    records = coerce_unknown_reason_records(values)
+    if primary_by_aggregation_unit:
+        records = _select_primary_records_by_aggregation_unit(records)
+    return records
+
+
+def _first_seen_reason_ids(records: Sequence[UnknownReasonRecord]):
+    seen = set()
+    for record in records:
+        if record.reason_id not in seen:
+            seen.add(record.reason_id)
+            yield record.reason_id
+
+
+def unknown_reason_counts_source(
+    values: Optional[Iterable[Any]],
+    *,
+    primary_by_aggregation_unit: bool = False,
+) -> Any:
+    """`summarize_unknown_reason_counts` と同じ object を key ごとに作る source。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import pairs_of
+
+    records = _primary_or_all(values, primary_by_aggregation_unit)
+    return pairs_of(
+        (reason_id, sum(1 for record in records if record.reason_id == reason_id))
+        for reason_id in _first_seen_reason_ids(records)
+    )
+
+
+#: backlog の 1 entry（reason id ごと）の列。obligation の件数・列は有界な証拠。
+RECOVERY_BACKLOG_ENTRY_ROW = (
+    Column("count", INT),
+    Column("target_regression", TEXT, ID_MAX_CHARS),
+    Column("recovery_proof_kind", TEXT, VOCAB_MAX_CHARS),
+    Column("proof_obligation_counts", EVIDENCE),
+    Column("proof_obligations", EVIDENCE),
+)
+
+
+class _BacklogEntryView:
+    """backlog の 1 entry（`summarize_unknown_recovery_backlog` の値と同じ内容）。
+
+    件数・代表値は record を 1 回数えて決め、obligation の件数と列は walker が
+    引き出すときに 1 つずつ作る。
+    """
+
+    __slots__ = ("_records", "count", "target_regression", "recovery_proof_kind")
+
+    def __init__(self, records: Sequence[UnknownReasonRecord], reason_id: str) -> None:
+        self._records = tuple(record for record in records if record.reason_id == reason_id)
+        self.count = len(self._records)
+        self.target_regression = None
+        self.recovery_proof_kind = None
+        for index, record in enumerate(self._records):
+            if index == 0:
+                self.target_regression = record.target_regression
+                self.recovery_proof_kind = record.recovery_proof_kind
+                continue
+            if self.target_regression is None:
+                self.target_regression = record.target_regression
+            if (
+                self.recovery_proof_kind == UnknownRecoveryProofKind.NONE.value
+                and record.recovery_proof_kind != UnknownRecoveryProofKind.NONE.value
+            ):
+                self.recovery_proof_kind = record.recovery_proof_kind
+
+    @property
+    def proof_obligation_counts(self) -> Any:
+        from scripts.function_tracer_pcode.core.json_encoding import pairs_of
+
+        def kinds():
+            seen = set()
+            for record in self._records:
+                for obligation in record.recovery_proof_obligations:
+                    if obligation.proof_kind not in seen:
+                        seen.add(obligation.proof_kind)
+                        yield obligation.proof_kind
+
+        return pairs_of(
+            (
+                kind,
+                sum(
+                    1
+                    for record in self._records
+                    for obligation in record.recovery_proof_obligations
+                    if obligation.proof_kind == kind
+                ),
+            )
+            for kind in kinds()
+        )
+
+    @property
+    def proof_obligations(self) -> Any:
+        from scripts.function_tracer_pcode.core.json_encoding import each
+
+        def distinct():
+            seen = set()
+            for record in self._records:
+                for obligation in record.recovery_proof_obligations:
+                    key = (obligation.proof_kind, obligation.proof_stage)
+                    if key not in seen:
+                        seen.add(key)
+                        yield obligation
+
+        return each(distinct())
+
+    def json_items(self):
+        return row_items(RECOVERY_BACKLOG_ENTRY_ROW, self)
+
+
+def recovery_backlog_source(
+    values: Optional[Iterable[Any]],
+    *,
+    primary_by_aggregation_unit: bool = False,
+) -> Any:
+    """`summarize_unknown_recovery_backlog` と同じ object を reason id ごとに作る source。
+
+    出力では entry は行の schema（`RECOVERY_BACKLOG_ENTRY_ROW`）で有界になる。entry の数は
+    reason の行数以下。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import pairs_of
+
+    records = _primary_or_all(values, primary_by_aggregation_unit)
+    return pairs_of(
+        (reason_id, _BacklogEntryView(records, reason_id))
+        for reason_id in _first_seen_reason_ids(records)
+    )

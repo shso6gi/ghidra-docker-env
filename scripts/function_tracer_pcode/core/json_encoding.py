@@ -1,57 +1,53 @@
 # -*- coding: utf-8 -*-
 """JSON の書き方・数え方・live object からの変換（Issue #22 PR-22-D）: **1 つの policy object**。
 
-結果 JSON の大きさを「書く前に数える側」と「実際に書く側」が別々の規則で数えると、
-見積りが実際の byte を下回ったときに予算が効かなくなる。だから次をすべて
-`JsonEncodingPolicy` の method にし、他の module は JSON の規則（区切りの長さ・
-key の型変換・escape）を自分で書かない:
+契約（PR-22-D の中心）:
 
-* 書き方の設定（`ensure_ascii` / `sort_keys` / 区切り 2 種）
-* framing の勘定（`{}` / `[]`、先頭と 2 つ目以降の区切り、key と値の区切り）
-  — `JsonObjectBudget` が 1 つの object へ member を足していく勘定を持つ
-* escape の規則（`"` `\\` 制御文字、`ensure_ascii` なら非 ASCII と surrogate pair）
-* key の型変換（`true` / `false` / `null` / 数値の文字列化。`json` と同じ規則）
-* live な値から **canonical な JSON 値** への変換（`prepare`）と、その上限
-* 書き出し（`encode` / `encode_bounded`）
+> live object から prepared representation までの全経路で、予算を知らない producer が、
+> 入力の大きさに比例して大きくなる完成 container / 文字列を先に作れない。
 
-**live → prepared の唯一の変換境界は `prepare`**。入力は「JSON source」:
+そのための仕組みは 1 つ — **producer は表現を作らず、walker が 1 要素ずつ引き出す**:
 
-* scalar（`None` / `bool` / `int` / `float` / `str`、そのサブクラスは基底型へ）
-* 既に在る container（`list` / `tuple` / `Mapping`）— 参照を渡すだけ
-* `json_view()` を持つ object — 自分の表現を **浅く** 返す（下の規則）
-* `JsonLazy(producer)` — 辿り着いたときに初めて呼ばれる値（record 1 件分の
-  `to_dict` を遅らせるのに使う）
-* `JsonLazyArray(iterable)` — 1 要素ずつ取り出される配列（generator でよい）
-* `JsonLazyObject(pairs)` — (key, 値) を 1 組ずつ取り出す object
+* record は `json_items()`（`(key, source)` の組を 1 つずつ yield する generator）を持つ。
+  record の `to_dict()` は `JsonEncodingPolicy.materialize(record)`（LEGACY mode）で、
+  schema は `json_items()` 1 つだけ。
+* source の文法（これ以外は `JsonValueRejected`）:
 
-それ以外（集合・任意の object）は `JsonValueRejected`。`prepare` は source を
-**1 要素ずつ** 辿りながら数え、上限を超えた時点で `JsonBudgetExhausted` を上げて
-それ以上辿らない（写した量は残り予算 + 超えたことに気付いた 1 要素まで）。出力は
-新しく作った `dict`（key は `str`）/ `list` と immutable な scalar だけの canonical な
-JSON 値で、元の object を参照しない。書き出しはこの値を `default` hook 無しで書く
-だけなので、authority 確定後に初めて型エラーが見つかる経路は無い。
+  - scalar（`None` / `bool` / `int` / `float` / `str`。固定個数の既存値から作った scalar でよい）
+  - 既に在る値への参照（container も。LEGACY では写さずに置き、どちらの mode でも数える）
+  - record（`json_items()` を持つ object）、sized leaf（`__json_tree__` を持つ object =
+    `Expression`: DAG のまま大きさを求めて予算と比べてから木を作る）
+  - `each(items, fn)` / `nested(value)` / `as_list(items)` / `as_dict(mapping)` /
+    `mapping_of(mapping, fn)` / `inline(*pairs)`: collection を 1 要素ずつ引き出す遅延構成子
+  - `evidence(value, identity=)` / `text(value, max_chars)`: 出力（CANONICAL）では有界な表現、
+    `to_dict()`（LEGACY）では元の値
+  - `bounded_summary(fn, max_bytes)`: 出力の大きさが schema から上限を持つ集計（登録 reason
+    ごとの件数など）。walker が残り予算 ≥ 上限を確かめてから作らせ、作った値が上限内かを
+    確かめる（上限を破れば `JsonValueRejected`）
 
-`json_view()` の規則（`tests/unit/test_architecture_boundaries.py` が AST で固定）:
-自分の直下の field を並べた mapping を返し、collection は既存の参照か
-`JsonLazyArray` / generator で渡す。`to_dict()` の呼び出し・複製・内包表記・
-`list(...)` などで表現を先に作らない（作るのは `prepare` だけ）。record 1 件分の
-表現を `to_dict` に任せるときは `JsonLazy(record.to_dict)` と **呼ばずに** 渡す。
+* walker は 1 つで、mode が 2 つ:
 
-数えるだけの入口は 2 つ: `measure`（`prepare` と同じ走査。数え済みの部分を避けて
-辿れる）と `measure_elements`（既に在る値を要素 1 つずつ C 実装の encoder で書いて
-数える。snapshot の aggregate が使う）。どちらも書き出し器と同じ byte 数を返し、
-上限を超えた時点で止まる。
+  - **CANONICAL**（出力の準備）: 新しく作った canonical な JSON 値（`dict[str]` / `list` /
+    scalar）だけを作る。`evidence` / `text` は有界な表現にする。
+  - **LEGACY**（`to_dict()` と解析 1 件分の snapshot）: 旧 `to_dict()` と同じ構造を作る
+    （既存の値への参照はそのまま置き、写さないが数える）。
 
-単位は UTF-8 byte（`core/render_output.utf8_length` と同じ数え方）。
+  どちらも書き出し器と同じ規則で byte を数え、予算（`JsonBudget`）を超えた時点で止まる。
+  止まるまでに作るのは「残り予算 + 超えたことに気付いた 1 要素」まで。
+
+JSON の書き方（区切り・framing・escape・key の型変換）はすべて `JsonEncodingPolicy` の
+method で、他の module は JSON の規則を計算しない。単位は UTF-8 byte。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-from collections.abc import Mapping
-from json.encoder import encode_basestring, encode_basestring_ascii
+from collections.abc import Iterator as _AbcIterator, Mapping
 from dataclasses import dataclass
+from enum import Enum
+from json.encoder import encode_basestring, encode_basestring_ascii
 from typing import Any, Callable, Iterable, Iterator, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
@@ -59,10 +55,7 @@ from scripts.function_tracer_pcode.core.render_output import utf8_length
 
 
 class JsonOutputLimitExceeded(AnalysisFailureError):
-    """bounded encoder が上限に達した（書き出しを止め、完成文字列を作らない）。
-
-    `ValueError` 派生にしない（回復用の handler に吸われると上限が効かなくなる）。
-    """
+    """bounded encoder が上限に達した（書き出しを止め、完成文字列を作らない）。"""
 
     def __init__(self, *, max_bytes: int, requested_bytes: int) -> None:
         super().__init__(
@@ -73,7 +66,7 @@ class JsonOutputLimitExceeded(AnalysisFailureError):
 
 
 class JsonBudgetExhausted(AnalysisFailureError):
-    """`prepare` / `measure` が上限に達した（そこで辿るのをやめた）。
+    """walker が byte の上限に達した（そこで辿るのをやめた）。
 
     `consumed_bytes` は止めた時点までに数えた byte 数（上限 + 1 以上）で、値全体の
     大きさではない（残りは数えていない）。
@@ -86,11 +79,10 @@ class JsonBudgetExhausted(AnalysisFailureError):
 
 
 class JsonValueRejected(AnalysisFailureError):
-    """JSON source の文法に無い値（集合・任意の object・閉路・key の衝突）。
+    """source の文法に無い値（任意の object・閉路・key の衝突・上限を破った集計）。
 
-    **producer のバグ** で、意味の限界ではない。出力の準備（authority 確定前）では
-    内部エラーとして記録される。`TypeError` 派生にしない（回復用の handler に
-    吸われると、canonical でない値が prepared payload に入り得る）。
+    **producer のバグ** で、意味の限界ではない。`TypeError` 派生にしない（回復用の
+    handler に吸われると、canonical でない値が prepared payload に入り得る）。
     """
 
     def __init__(self, message: str, *, path: str) -> None:
@@ -99,59 +91,430 @@ class JsonValueRejected(AnalysisFailureError):
 
 
 # ---------------------------------------------------------------------------
-# JSON source の遅延構成子
+# source の遅延構成子（producer が collection を渡す唯一の方法）
 # ---------------------------------------------------------------------------
 
 
-class JsonLazy:
-    """辿り着いたときに初めて作る値（record 1 件分の `to_dict` など）。
-
-    `producer` は引数なしの callable。返り値もまた JSON source として辿る。
-    """
-
-    __slots__ = ("producer",)
-
-    def __init__(self, producer: Callable[[], Any]) -> None:
-        if not callable(producer):
-            raise TypeError("JsonLazy needs a callable")
-        self.producer = producer
+class _Source:
+    __slots__ = ()
 
 
-class JsonLazyArray:
-    """1 要素ずつ取り出される配列（generator でよい。1 回だけ辿る）。"""
+class _Each(_Source):
+    __slots__ = ("items", "fn")
 
-    __slots__ = ("items",)
-
-    def __init__(self, items: Iterable[Any]) -> None:
+    def __init__(self, items: Iterable[Any], fn: Any) -> None:
         self.items = items
+        self.fn = fn
 
 
-class JsonLazyObject:
-    """(key, 値) の組を 1 つずつ取り出す object（generator でよい。1 回だけ辿る）。
+class _Nested(_Source):
+    __slots__ = ("value",)
 
-    既存の mapping を別の形に並べ直すとき（値の形を変える・一部だけ出す）に、
-    並べ直した dict を先に作らないために使う。
-    """
+    def __init__(self, value: Any) -> None:
+        self.value = value
 
+
+class _MappingOf(_Source):
+    __slots__ = ("mapping", "fn", "key_fn")
+
+    def __init__(self, mapping: Any, fn: Any, key_fn: Optional[Callable[[Any], Any]] = None) -> None:
+        self.mapping = mapping
+        self.fn = fn
+        self.key_fn = key_fn
+
+
+class _Inline(_Source):
     __slots__ = ("pairs",)
 
-    def __init__(self, pairs: Iterable[Tuple[Any, Any]]) -> None:
+    def __init__(self, pairs: Tuple[Tuple[Any, Any], ...]) -> None:
         self.pairs = pairs
 
 
-def lazy_record(value: Any) -> Any:
-    """record 1 件分の表現を、辿り着いたときに初めて `value.to_dict` で作らせる。
+class _Raw(_Source):
+    __slots__ = ("value",)
 
-    偽の値（`None` など）は `None` として出す（従来の `x.to_dict() if x else None`）。
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+
+class _Evidence(_Source):
+    __slots__ = ("value", "identity", "refresh")
+
+    def __init__(self, value: Any, identity: Any, refresh: Optional[Callable[[], Any]] = None) -> None:
+        self.value = value
+        self.identity = identity
+        #: 同じ値の source を作り直す（遅延列は 1 回しか辿れないので、要約の digest 用）
+        self.refresh = refresh
+
+
+class _Text(_Source):
+    __slots__ = ("value", "max_chars")
+
+    def __init__(self, value: Any, max_chars: int) -> None:
+        self.value = value
+        self.max_chars = int(max_chars)
+
+
+class _BoundedSummary(_Source):
+    __slots__ = ("fn", "max_bytes")
+
+    def __init__(self, fn: Callable[[], Any], max_bytes: int) -> None:
+        self.fn = fn
+        self.max_bytes = int(max_bytes)
+
+
+#: 要素をそのまま置く（LEGACY: 旧 `list(x)` / `dict(x)` の要素。CANONICAL では通常どおり）
+_RAW = object()
+#: 要素を `nested` の規則で写す
+_NESTED = object()
+
+
+def each(items: Iterable[Any], fn: Optional[Callable[[Any], Any]] = None) -> _Source:
+    """要素を 1 つずつ引き出す配列（`[fn(x).to_dict() for x in items]` の遅延版）。
+
+    要素（`fn` の返り値）は source として辿る（record は dict になる）。`fn` は要素 1 つ分の
+    source を返す（表現を作らない）。
     """
 
-    return JsonLazy(value.to_dict) if value else None
+    return _Each(items, fn)
 
 
-def lazy_records(values: Iterable[Any]) -> JsonLazyArray:
-    """record の列を、1 件ずつ `to_dict` させる配列にする（列は複製しない）。"""
+def nested(value: Any) -> _Source:
+    """入れ子の値を、tuple を配列にしながら 1 要素ずつ写す（旧 `_jsonable_nested_tuple`）。"""
 
-    return JsonLazyArray(JsonLazy(value.to_dict) for value in values)
+    return _Nested(value)
+
+
+def as_list(items: Iterable[Any]) -> _Source:
+    """既存の iterable を配列として 1 要素ずつ写す（旧 `list(x)`。要素はそのまま）。"""
+
+    return _Each(items, _RAW)
+
+
+def as_dict(mapping: Any) -> _Source:
+    """既存の mapping を 1 組ずつ写す（旧 `dict(x)`。値はそのまま）。"""
+
+    return _MappingOf(mapping, _RAW)
+
+
+def mapping_of(
+    mapping: Any,
+    fn: Optional[Callable[[Any], Any]] = None,
+    *,
+    key: Optional[Callable[[Any], Any]] = None,
+) -> _Source:
+    """既存の mapping の値を 1 つずつ source として辿る（旧 `{key(k): fn(v) ...}`）。"""
+
+    return _MappingOf(mapping, fn, key)
+
+
+class _PairsView:
+    """(key, 値) の組を 1 つずつ返す iterable を mapping の形で見せる（1 回だけ辿る）。"""
+
+    __slots__ = ("_pairs",)
+
+    def __init__(self, pairs: Iterable[Tuple[Any, Any]]) -> None:
+        self._pairs = pairs
+
+    def items(self) -> Iterator[Tuple[Any, Any]]:
+        return iter(self._pairs)
+
+
+def pairs_of(
+    pairs: Iterable[Tuple[Any, Any]],
+    fn: Optional[Callable[[Any], Any]] = None,
+) -> _Source:
+    """(key, 値) の組の遅延列を object として 1 組ずつ写す（旧 `{k: fn(v) for k, v in ...}`）。
+
+    `pairs` は generator でよい（walker が 1 組ずつ引き出す。1 回だけ辿る）。
+    """
+
+    return _MappingOf(_PairsView(pairs), fn)
+
+
+def inline(*pairs: Tuple[Any, Any]) -> _Source:
+    """固定個数の (key, source) から成る object（`each` の要素 1 つ分の表示など）。"""
+
+    return _Inline(tuple(pairs))
+
+
+def is_json_record(value: Any) -> bool:
+    """walker が辿れる object（`json_items()` を持つ record か、sized leaf）か。"""
+
+    kind = type(value)
+    return getattr(kind, "json_items", None) is not None or getattr(kind, "__json_tree__", None) is not None
+
+
+def raw(value: Any) -> _Source:
+    """旧 `to_dict` が値をそのまま置いていた場所（LEGACY では変換しない。数えはする）。"""
+
+    return _Raw(value)
+
+
+def evidence(
+    value: Any, identity: Any = None, *, refresh: Optional[Callable[[], Any]] = None,
+) -> _Source:
+    """重くなり得る証拠（key / evidence）。出力では有界な表現、`to_dict()` では元の値。
+
+    `identity` は大きいときに使う identity（文字列、または値を受け取る callable）。
+    省くと値の型つき token 列の digest を streaming で求める。`value` が遅延列（1 回
+    しか辿れない）を含むなら `refresh` に同じ source を作り直す callable を渡す。
+    """
+
+    return _Evidence(value, identity, refresh)
+
+
+def text(value: Any, max_chars: int) -> _Source:
+    """自由文。出力では `max_chars` 文字まで（超えた分は明示の marker）、`to_dict()` では元の値。"""
+
+    return _Text(value, max_chars)
+
+
+def bounded_summary(fn: Callable[[], Any], max_bytes: int) -> _Source:
+    """出力の大きさが schema で抑えられた集計（作る前に残り予算 ≥ 上限を確かめる）。"""
+
+    return _BoundedSummary(fn, max_bytes)
+
+
+#: `int` 1 つを書いたときの byte 数の上限（64 bit 符号付き）
+INT_MAX_BYTES = 20
+
+
+def counts_max_bytes(keys: Iterable[Any], policy: Optional["JsonEncodingPolicy"] = None) -> int:
+    """key が有限の登録 `keys` に限られる件数 object（`{key: int}`）の byte 数の上限。
+
+    `bounded_summary` に渡す上限を、登録（opcode 表・reason registry など）から求める。
+    """
+
+    policy = RESULT_JSON_POLICY if policy is None else policy
+    sizes = [policy.member_bytes(key, INT_MAX_BYTES) for key in keys]
+    return policy.container_frame_bytes(len(sizes)) + sum(sizes)
+
+
+# ---------------------------------------------------------------------------
+# 有界な証拠
+# ---------------------------------------------------------------------------
+
+
+#: 証拠をそのまま出してよい大きさ（JSON byte）。これを超える証拠は identity + 要約になる
+#: （出力 schema の上限の根拠）。
+EVIDENCE_INLINE_BYTES = 2048
+#: 要約の identity / kind の最大文字数（schema 上の上限）
+EVIDENCE_IDENTITY_MAX_CHARS = 96
+EVIDENCE_KIND_MAX_CHARS = 64
+#: `text()` が超えたときに足す marker の最大文字数（schema 上の上限）
+TEXT_MARKER_MAX_CHARS = 64
+
+
+@dataclass(frozen=True)
+class BoundedEvidence:
+    """大きい証拠の代わりに置く有界な表現（identity・種類・大きさの下限）。
+
+    authority 確定前に作り、以後は元の値を参照しない。等しさは identity で決まる。
+    `match_digests` は生成側が付ける照合用の digest（例: legacy reason と cause の照合）。
+    """
+
+    identity: str
+    identity_kind: str
+    kind: str
+    encoded_bytes_over: int = EVIDENCE_INLINE_BYTES
+    match_digests: Tuple[Tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        for name, limit in (
+            ("identity", EVIDENCE_IDENTITY_MAX_CHARS),
+            ("identity_kind", EVIDENCE_KIND_MAX_CHARS),
+            ("kind", EVIDENCE_KIND_MAX_CHARS),
+        ):
+            value = getattr(self, name)
+            if type(value) is not str or not value.isascii() or len(value) > limit:
+                raise ValueError(f"bounded evidence {name} must be short ASCII")
+
+    def match_digest(self, name: str) -> Optional[str]:
+        for key, value in self.match_digests:
+            if key == name:
+                return value
+        return None
+
+    def summary(self) -> dict:
+        return {
+            "bounded_evidence": "v1",
+            "identity": self.identity,
+            "identity_kind": self.identity_kind,
+            "kind": self.kind,
+            "encoded_bytes_over": int(self.encoded_bytes_over),
+        }
+
+    def to_authority_dict(self) -> dict:
+        return self.summary()
+
+    def __eq__(self, other: Any) -> bool:
+        return (
+            type(other) is BoundedEvidence
+            and other.identity_kind == self.identity_kind
+            and other.identity == self.identity
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.identity_kind, self.identity))
+
+
+#: `BoundedEvidence.summary()` を書いたときの byte 数の上限（schema 上の上限）
+EVIDENCE_SUMMARY_MAX_BYTES = (
+    2 + 5 * 4  # 括弧と区切り（5 member、区切りは最大 2 byte と見積もる）
+    + len('"bounded_evidence": "v1"')
+    + len('"identity": ') + 2 + EVIDENCE_IDENTITY_MAX_CHARS
+    + len('"identity_kind": ') + 2 + EVIDENCE_KIND_MAX_CHARS
+    + len('"kind": ') + 2 + EVIDENCE_KIND_MAX_CHARS
+    + len('"encoded_bytes_over": ') + 20
+)
+
+
+def _value_kind(value: Any) -> str:
+    if isinstance(value, _Each):
+        value = value.items
+    elif isinstance(value, _MappingOf):
+        value = value.mapping
+        if isinstance(value, _PairsView):
+            return "mapping"
+    elif isinstance(value, (_Nested, _Raw)):
+        value = value.value
+    name = type(value).__qualname__
+    if isinstance(value, (list, tuple, Mapping)):
+        try:
+            return f"{name}[{len(value)}]"[:EVIDENCE_KIND_MAX_CHARS]
+        except TypeError:
+            pass
+    return name[:EVIDENCE_KIND_MAX_CHARS]
+
+
+# ---------------------------------------------------------------------------
+# 行の schema（大きさの上限を型で持つ record の書き方）
+# ---------------------------------------------------------------------------
+
+
+#: 列の種類。`TEXT` は文字数の上限つき文字列（出力では超えた分を marker にする）、
+#: `EVIDENCE` は有界な証拠（`evidence()`）、`INT` / `BOOL` は scalar。
+TEXT = "text"
+EVIDENCE = "evidence"
+INT = "int"
+BOOL = "bool"
+_COLUMN_KINDS = frozenset({TEXT, EVIDENCE, INT, BOOL})
+
+
+@dataclass(frozen=True)
+class Column:
+    """行（record の JSON object）の 1 列。**出力での大きさの上限** を型で持つ。
+
+    * `key` — JSON の key。`attr` を省くと同名の属性を読む。
+    * `kind` / `max_chars` — 出力（CANONICAL）での上限。`TEXT` は `max_chars` 文字
+      （+ marker）、`EVIDENCE` は `EVIDENCE_INLINE_BYTES`（大きければ有界な要約）。
+    * `legacy` — `to_dict()`（LEGACY）での写し方（旧 `to_dict` の `list(x)` など）。
+      出力でも同じ構造を辿り、そのうえで上限を掛ける。
+    * `omit_none` — 値が `None` なら member を出さない（旧 `to_dict` の条件付き key）。
+
+    行の上限は `row_max_bytes`（出力 schema の headroom の根拠）。
+    """
+
+    key: str
+    kind: str
+    max_chars: int = 0
+    attr: Optional[str] = None
+    legacy: Optional[Callable[[Any], Any]] = None
+    omit_none: bool = False
+
+    def __post_init__(self) -> None:
+        if self.kind not in _COLUMN_KINDS:
+            raise ValueError(f"unknown column kind {self.kind!r}")
+        if self.kind == TEXT and self.max_chars <= 0:
+            raise ValueError(f"{self.key}: a text column needs max_chars")
+
+    def source(self, value: Any, identity: Any = None, reread: Optional[Callable[[], Any]] = None) -> Any:
+        if self.kind == TEXT:
+            return text(value, self.max_chars)
+        if self.kind == EVIDENCE:
+            return evidence(
+                self._legacy_source(value), identity,
+                refresh=None if reread is None else (lambda: self._legacy_source(reread())),
+            )
+        return value
+
+    def _legacy_source(self, value: Any) -> Any:
+        if value is not None and type(value) is not BoundedEvidence and self.legacy is not None:
+            return self.legacy(value)
+        return value
+
+    def max_value_bytes(self, policy: "JsonEncodingPolicy") -> int:
+        if self.kind == TEXT:
+            return max(4, policy.max_string_bytes(self.max_chars + TEXT_MARKER_MAX_CHARS))
+        if self.kind == EVIDENCE:
+            return max(4, EVIDENCE_INLINE_BYTES, EVIDENCE_SUMMARY_MAX_BYTES)
+        if self.kind == INT:
+            return INT_MAX_BYTES
+        return 5
+
+
+def row_items(row: Tuple[Column, ...], record: Any, *, identity: Any = None):
+    """`row` の列を `record` から読んで `(key, source)` を 1 つずつ返す（`json_items` の本体）。"""
+
+    for column in row:
+        name = column.attr or column.key
+        value = getattr(record, name)
+        if column.omit_none and value is None:
+            continue
+        yield column.key, column.source(
+            value, identity, reread=lambda name=name: getattr(record, name),
+        )
+
+
+def row_max_bytes(row: Tuple[Column, ...], policy: Optional["JsonEncodingPolicy"] = None) -> int:
+    """`row` の行を出力（CANONICAL）で書いたときの byte 数の上限。"""
+
+    policy = RESULT_JSON_POLICY if policy is None else policy
+    sizes = [policy.member_bytes(column.key, column.max_value_bytes(policy)) for column in row]
+    return policy.container_frame_bytes(len(sizes)) + sum(sizes)
+
+
+# ---------------------------------------------------------------------------
+# 予算（walker が数えた byte を渡す相手）
+# ---------------------------------------------------------------------------
+
+
+class JsonBudget:
+    """walker が数えた byte を受け取る相手（上限を超えたら `exceeded()`）。
+
+    snapshot 側の aggregate（`core/budget_policy.SerializationWork`）はこれを継承し、
+    超過を pair terminal な限界に変え、木の distinct node も数える。
+    """
+
+    def __init__(self, max_bytes: Optional[int] = None) -> None:
+        self.max_bytes = max_bytes
+        self.consumed = 0
+
+    def remaining(self) -> Optional[int]:
+        return None if self.max_bytes is None else self.max_bytes - self.consumed
+
+    def charge(self, size: int) -> None:
+        self.consumed += int(size)
+        if self.max_bytes is not None and self.consumed > self.max_bytes:
+            self.exceeded()
+
+    def exceeded(self) -> None:
+        raise JsonBudgetExhausted(consumed_bytes=self.consumed, max_bytes=self.max_bytes)
+
+    def tree(self, leaf: Any, *, build: bool) -> Tuple[Any, int]:
+        """sized leaf の大きさを **作る前に** 求めて足し、`build` なら木を作る。"""
+
+        remaining = self.remaining()
+        size = leaf.__json_tree_bytes__(RESULT_JSON_POLICY, remaining)
+        if size is None:
+            # 見積りできない形（閉路など、未凍結の式の中だけ）: 作ってから数える
+            built = leaf.__json_tree__()
+            size = RESULT_JSON_POLICY.measure(built, mode=LEGACY)
+            self.charge(size)
+            return (built if build else None), size
+        self.charge(size)
+        return (leaf.__json_tree__() if build else None), size
 
 
 # ---------------------------------------------------------------------------
@@ -163,12 +526,7 @@ _PREPARED_TOKEN = object()
 
 
 class PreparedJson:
-    """`prepare` だけが作る canonical な JSON 値と、それを書いたときの byte 数。
-
-    値は新しく作った `dict`（key は `str`）/ `list` と immutable な scalar だけで、
-    live な object を参照しない。外へ渡すのは複製（`value()`）だけなので、受け取った
-    側が壊しても準備済みの値は変わらない。
-    """
+    """CANONICAL walker だけが作る canonical な JSON 値と、それを書いたときの byte 数。"""
 
     __slots__ = ("_value", "encoded_bytes", "policy")
 
@@ -235,6 +593,9 @@ _SHORT_ESCAPES = frozenset('\\"\b\f\n\r\t')
 #: 長い文字列を数えるときの 1 回分の文字数（上限に届いたら残りを数えない単位）。
 _STRING_CHUNK = 1 << 16
 
+CANONICAL = "canonical"
+LEGACY = "legacy"
+
 
 def _float_text(value: float) -> str:
     """`json` が float を書くときの文字列（`allow_nan=True` の既定どおり）。"""
@@ -246,23 +607,6 @@ def _float_text(value: float) -> str:
     if value == -float("inf"):
         return "-Infinity"
     return float.__repr__(value)
-
-
-_PLAIN_CONTAINERS = (dict, list, tuple)
-
-
-def _resolve(item: Any) -> Any:
-    """遅延構成子と `json_view()` を、JSON の値の形になるまで解く。"""
-
-    while True:
-        if type(item) is JsonLazy:
-            item = item.producer()
-            continue
-        view = getattr(type(item), "json_view", None)
-        if view is not None and not isinstance(item, (str, int, float, list, tuple, Mapping)):
-            item = item.json_view()
-            continue
-        return item
 
 
 @dataclass(frozen=True)
@@ -291,10 +635,23 @@ class JsonEncodingPolicy:
         return self.key_bytes(key) + utf8_length(self.key_separator) + int(value_bytes)
 
     def object_bytes(self, member_bytes: Iterable[int]) -> int:
-        """member の byte 数（`member_bytes()` の値）の列から object 全体の byte 数。"""
-
         sizes = [int(size) for size in member_bytes]
         return self.container_frame_bytes(len(sizes)) + sum(sizes)
+
+    def max_member_bytes(self, max_key_chars: int, value_bytes: int) -> int:
+        """key が `max_key_chars` 文字以下の member 1 つの byte 数の上限。"""
+
+        return self.max_string_bytes(max_key_chars) + utf8_length(self.key_separator) + int(value_bytes)
+
+    def added_member_bytes(self, key: Any, value_bytes: int) -> int:
+        """1 つ以上の member を持つ object に member を 1 つ足したときに増える byte 数。"""
+
+        return utf8_length(self.item_separator) + self.member_bytes(key, value_bytes)
+
+    def max_string_bytes(self, max_chars: int) -> int:
+        """`max_chars` 文字以下の文字列を書いたときの byte 数の上限（最悪の escape = 6 byte/文字）。"""
+
+        return 2 + 6 * int(max_chars)
 
     # -- 書き出し ------------------------------------------------------------
 
@@ -306,10 +663,7 @@ class JsonEncodingPolicy:
         )
 
     def dumps(self, value: Any, *, default: Optional[Callable[[Any], Any]] = None) -> str:
-        """上限なしで書く（大きさが既に分かっている小さい値だけに使う）。
-
-        `default` は JSON 型でない値の代用表現（`json.dumps` と同じ意味）。
-        """
+        """上限なしで書く（大きさが既に分かっている小さい値だけに使う）。"""
 
         return json.dumps(
             value,
@@ -320,11 +674,7 @@ class JsonEncodingPolicy:
         )
 
     def encode_bounded(self, value: Any, *, max_bytes: Optional[int]) -> str:
-        """上限付きで書く。上限を超えた時点で止め、途中までの断片も捨てる。
-
-        `json.JSONEncoder.iterencode` の断片を数えながら貯めるので、出力は
-        `dumps()` と同じ文字列になる（同じ encoder・同じ設定・`default` 無し）。
-        """
+        """上限付きで書く。上限を超えた時点で止め、途中までの断片も捨てる。"""
 
         parts: List[str] = []
         written = 0
@@ -332,34 +682,28 @@ class JsonEncodingPolicy:
             written += utf8_length(chunk)
             if max_bytes is not None and written > max_bytes:
                 parts.clear()
-                raise JsonOutputLimitExceeded(
-                    max_bytes=max_bytes, requested_bytes=written,
-                )
+                raise JsonOutputLimitExceeded(max_bytes=max_bytes, requested_bytes=written)
             parts.append(chunk)
         return "".join(parts)
 
     # -- 文字列と key ----------------------------------------------------------
 
-    def _string_chunk_bytes(self, text: str) -> int:
-        """引用符を除いた、文字列の一部を書いたときの byte 数。
-
-        `json` の escape 関数（C 実装）で書いた長さから引用符 2 つを引く。escape の
-        規則は `json` そのものなので、書き出し器と食い違わない。
-        """
+    def _string_chunk_bytes(self, text_value: str) -> int:
+        """引用符を除いた、文字列の一部を書いたときの byte 数（`json` の escape 関数で数える）。"""
 
         if self.ensure_ascii:
-            return len(encode_basestring_ascii(text)) - 2
-        quoted = encode_basestring(text)
+            return len(encode_basestring_ascii(text_value)) - 2
+        quoted = encode_basestring(text_value)
         if quoted.isascii():
             return len(quoted) - 2
         return len(quoted.encode("utf-8", "surrogatepass")) - 2
 
-    def _string_chunk_bytes_by_rule(self, text: str) -> int:
+    def _string_chunk_bytes_by_rule(self, text_value: str) -> int:
         """`_string_chunk_bytes` と同じ値を escape の規則から数える（test の照合用）。"""
 
         if self.ensure_ascii:
-            total = len(text)
-            for match in _ESCAPE_ASCII.finditer(text):
+            total = len(text_value)
+            for match in _ESCAPE_ASCII.finditer(text_value):
                 char = match.group(0)
                 if char in _SHORT_ESCAPES:
                     total += 1
@@ -368,29 +712,30 @@ class JsonEncodingPolicy:
                 else:
                     total += 5  # \uXXXX
             return total
-        total = len(text) if text.isascii() else len(text.encode("utf-8", "surrogatepass"))
-        for match in _ESCAPE_UNICODE.finditer(text):
+        total = (
+            len(text_value) if text_value.isascii()
+            else len(text_value.encode("utf-8", "surrogatepass"))
+        )
+        for match in _ESCAPE_UNICODE.finditer(text_value):
             total += 1 if match.group(0) in _SHORT_ESCAPES else 5
         return total
 
-    def string_bytes(self, text: str, *, max_bytes: Optional[int] = None) -> int:
+    def string_bytes(self, text_value: str, *, max_bytes: Optional[int] = None) -> int:
         """文字列 1 つを JSON 文字列として書いたときの byte 数（引用符を含む）。
 
-        `max_bytes` を渡すと、超えた時点で `max_bytes + 1` を返して残りを数えない
-        （長い文字列を一度に encode しない: `_STRING_CHUNK` 文字ずつ数える）。
-        1 文字は少なくとも 1 byte なので、文字数だけで超えると分かればそこで止まる。
+        `max_bytes` を超えた時点で `max_bytes + 1` を返して残りを数えない（chunk ごと）。
         """
 
-        if max_bytes is not None and len(text) + 2 > max_bytes:
+        if max_bytes is not None and len(text_value) + 2 > max_bytes:
             return max_bytes + 1
-        if max_bytes is None or len(text) <= _STRING_CHUNK:
-            total = self._string_chunk_bytes(text) + 2
+        if max_bytes is None or len(text_value) <= _STRING_CHUNK:
+            total = self._string_chunk_bytes(text_value) + 2
             if max_bytes is not None and total > max_bytes:
                 return max_bytes + 1
             return total
         total = 2
-        for start in range(0, len(text), _STRING_CHUNK):
-            total += self._string_chunk_bytes(text[start:start + _STRING_CHUNK])
+        for start in range(0, len(text_value), _STRING_CHUNK):
+            total += self._string_chunk_bytes(text_value[start:start + _STRING_CHUNK])
             if total > max_bytes:
                 return max_bytes + 1
         return total
@@ -415,237 +760,673 @@ class JsonEncodingPolicy:
         )
 
     def key_bytes(self, key: Any) -> int:
-        """dict の key を書いたときの byte 数。"""
-
         return self.string_bytes(self.canonical_key(key))
 
-    # -- live → canonical ----------------------------------------------------
+    # -- live → 表現 -----------------------------------------------------------
 
     def prepare(self, source: Any, *, max_bytes: Optional[int] = None) -> PreparedJson:
-        """JSON source を **上限まで** 辿って canonical な JSON 値へ変える（唯一の境界）。
+        """source を **上限まで** 引き出して canonical な JSON 値へ変える（出力の唯一の境界）。"""
 
-        上限を超えた時点で `JsonBudgetExhausted`、文法に無い値は `JsonValueRejected`。
-        """
-
-        value, size = self._walk(source, max_bytes, build=True, exclude_ids=None)
-        return PreparedJson(value, size, self, _token=_PREPARED_TOKEN)
+        budget = JsonBudget(max_bytes)
+        value = _Walk(self, CANONICAL, budget, build=True).run(source)
+        return PreparedJson(value, budget.consumed, self, _token=_PREPARED_TOKEN)
 
     def measure(
-        self,
-        source: Any,
-        *,
-        max_bytes: Optional[int] = None,
-        exclude_ids: Optional[Any] = None,
-        opaque_bytes: Optional[Callable[[Any], int]] = None,
+        self, source: Any, *, max_bytes: Optional[int] = None, mode: str = CANONICAL,
     ) -> int:
-        """`prepare` と同じ走査で byte 数だけを数える（写さない）。
+        """`prepare`（mode=LEGACY なら `materialize`）と同じ走査で byte 数だけを数える。"""
 
-        超えたら `JsonBudgetExhausted`。`exclude_ids` に id がある container は数えず
-        中へも入らない（別の勘定で既に数えた部分: 木表現の予算を参照）。
-        `opaque_bytes` を渡すと、JSON source でない葉を拒まずにその大きさで数える
-        （snapshot のように、後段の codec が別途 canonical にする表現を数えるとき）。
-        """
+        budget = JsonBudget(max_bytes)
+        _Walk(self, mode, budget, build=False).run(source)
+        return budget.consumed
 
-        return self._walk(
-            source, max_bytes, build=False, exclude_ids=exclude_ids, opaque_bytes=opaque_bytes,
-        )[1]
+    def materialize(self, source: Any, *, budget: Optional[JsonBudget] = None) -> Any:
+        """LEGACY 表現を作る（record の `to_dict()`・snapshot）。`budget` を渡すとそこへ数える。"""
 
-    def measure_elements(
-        self,
-        value: Any,
-        *,
-        max_bytes: Optional[int] = None,
-        opaque_text: Optional[Callable[[Any], str]] = None,
-        whole: bool = False,
-    ) -> int:
-        """既に在る値の byte 数を **1 要素ずつ** 書き出し器で数える（写さない）。
+        return _Walk(self, LEGACY, budget or JsonBudget(None), build=True).run(source)
 
-        `whole=True` は値全体を 1 回で書いて数える（既に作ってある record 1 件分用）。
+    def count_into(self, source: Any, budget: JsonBudget, *, mode: str = LEGACY) -> None:
+        """source の byte 数を `budget` へ足す（作らない）。"""
 
-        `measure` と同じ byte 数（書き出し器そのものの長さ）を、C 実装の encoder で
-        要素 1 つずつ求める。container は要素ごとに数えて上限を超えた時点で
-        `JsonBudgetExhausted`（残りの要素は数えない）。文字列は chunk ごとに数える。
-        JSON source でない葉は `opaque_text` の文字列として数える。1 要素の文字列は
-        作るので、`exclude_ids` のように中の一部を数えない必要があるときは `measure`。
-        """
+        _Walk(self, mode, budget, build=False).run(source)
 
-        total = 0
+    def bounded_evidence(self, value: Any, identity: Any = None) -> Any:
+        """証拠を有界にする: 小さければ値そのもの、大きければ `BoundedEvidence`。"""
 
-        def charge(size: int) -> None:
-            nonlocal total
-            total += size
-            if max_bytes is not None and total > max_bytes:
-                raise JsonBudgetExhausted(consumed_bytes=total, max_bytes=max_bytes)
+        if type(value) is BoundedEvidence or value is None:
+            return value
+        try:
+            self.measure(value, max_bytes=EVIDENCE_INLINE_BYTES, mode=LEGACY)
+            return value
+        except JsonBudgetExhausted:
+            pass
+        return _summarize_evidence(self, value, identity)
 
-        def remaining() -> Optional[int]:
-            return None if max_bytes is None else max_bytes - total
+    def evidence_digest(self, value: Any) -> str:
+        """証拠の型つき token 列（dict は key 順に整列）の sha256（1 回辿る。作らない）。"""
 
-        def one(element: Any) -> int:
-            if isinstance(element, str):
-                return self.string_bytes(element, max_bytes=remaining())
-            try:
-                return utf8_length(self.dumps(element, default=opaque_text))
-            except (TypeError, ValueError, RecursionError):
-                # 混在した key 型・閉路など: 同じ規則の走査で数える
-                return self.measure(element, max_bytes=remaining(), opaque_bytes=(
-                    None if opaque_text is None
-                    else (lambda leaf: self.string_bytes(opaque_text(leaf)))
-                ))
+        digest = hashlib.sha256()
+        _Walk(self, LEGACY, JsonBudget(None), build=False, token_sink=digest.update).run(value)
+        return digest.hexdigest()
 
-        if whole:
-            charge(one(value))
-        elif isinstance(value, Mapping):
-            charge(self.container_frame_bytes(len(value)))
-            for key, element in value.items():
-                charge(self.key_bytes(key) + utf8_length(self.key_separator))
-                charge(one(element))
-        elif isinstance(value, (list, tuple)):
-            charge(self.container_frame_bytes(len(value)))
-            for element in value:
-                charge(one(element))
+
+def _summarize_evidence(policy: JsonEncodingPolicy, value: Any, identity: Any) -> BoundedEvidence:
+    if callable(identity):
+        identity = identity(value)
+    if identity is None:
+        return BoundedEvidence(
+            identity=policy.evidence_digest(value),
+            identity_kind="sha256",
+            kind=_value_kind(value),
+        )
+    return BoundedEvidence(
+        identity=str(identity)[:EVIDENCE_IDENTITY_MAX_CHARS],
+        identity_kind="authority",
+        kind=_value_kind(value),
+    )
+
+
+def bounded_text(value: Any, max_chars: int) -> Any:
+    """`value` が `max_chars` 文字を超える文字列なら、先頭 + 明示の marker に置き換える。"""
+
+    if isinstance(value, str) and len(value) > max_chars:
+        return _text_marker(value, max_chars)
+    return value
+
+
+def _text_marker(value: str, max_chars: int) -> str:
+    """`max_chars` 文字 **以内** に収まる「先頭 + 明示の marker」（同じ上限で冪等）。"""
+
+    digest = hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+    keep = max(0, max_chars - TEXT_MARKER_MAX_CHARS)
+    tail = f"…[+{len(value) - keep} chars sha256:{digest}]"
+    keep = max(0, max_chars - len(tail))
+    tail = f"…[+{len(value) - keep} chars sha256:{digest}]"
+    return (value[:keep] + tail)[:max(max_chars, len(tail))]
+
+
+class _Frame:
+    __slots__ = (
+        "kind", "iterator", "out", "parent", "key", "count", "source_id", "source", "build",
+        "keys", "fn", "current", "preserve_keys",
+    )
+
+
+#: 短い文字列の JSON byte 数の cache（policy ごと。key の語彙は繰り返し現れる）
+_STRING_BYTES_CACHES: dict = {}
+_STRING_BYTES_CACHE_MAX = 1 << 16
+_SHORT_STRING = 128
+
+
+#: tuple だけから成る部分木の byte 数（policy ごと、id → (値, byte 数)）。pair の終わりに
+#: 空にする（`clear_size_caches`、`core/budget_policy.budget_policy_scope` が呼ぶ）
+_PURE_TUPLE_SIZES: dict = {}
+_PURE_TUPLE_CACHE_MAX = 1 << 18
+
+
+def cached_string_bytes(policy: "JsonEncodingPolicy", text_value: str) -> int:
+    """短い文字列の JSON byte 数（policy ごとの cache を使う。長い文字列は数えるだけ）。"""
+
+    if len(text_value) > _SHORT_STRING:
+        return policy.string_bytes(text_value)
+    cache = _STRING_BYTES_CACHES.get(policy)
+    if cache is None or len(cache) > _STRING_BYTES_CACHE_MAX:
+        cache = _STRING_BYTES_CACHES[policy] = {}
+    size = cache.get(text_value)
+    if size is None:
+        size = cache[text_value] = policy.string_bytes(text_value)
+    return size
+
+
+def clear_size_caches() -> None:
+    """walker の大きさの cache を空にする（pair の終わり。値への参照を手放す）。"""
+
+    _PURE_TUPLE_SIZES.clear()
+
+
+def _copy_pure_tuple(value: tuple) -> list:
+    """tuple だけから成る値の写し（tuple → list）。大きさは数え済み（cache）なので数えない。"""
+
+    root: List[Any] = []
+    stack = [(iter((value,)), root)]
+    while stack:
+        iterator, out = stack[-1]
+        for item in iterator:
+            if type(item) is tuple:
+                child: List[Any] = []
+                out.append(child)
+                stack.append((iter(item), child))
+                break
+            out.append(item)
         else:
-            charge(one(value))
-        return total
+            stack.pop()
+    return root[0]
 
-    def materialize(self, source: Any) -> Any:
-        """上限なしで canonical な値を作る（`to_dict()` を `json_view()` で定義する側用）。"""
 
-        return self._walk(source, None, build=True, exclude_ids=None)[0]
+class _NotPlain(Exception):
+    """純粋なデータ（容器と基底型だけ）の高速経路が扱えない値に出会った。"""
 
-    def _walk(self, value, max_bytes, *, build, exclude_ids, opaque_bytes=None):
-        item_separator = utf8_length(self.item_separator)
-        key_separator = utf8_length(self.key_separator)
-        total = 0
 
-        def charge(size: int) -> None:
-            nonlocal total
-            total += size
-            if max_bytes is not None and total > max_bytes:
-                raise JsonBudgetExhausted(consumed_bytes=total, max_bytes=max_bytes)
+class _Walk:
+    """source を 1 要素ずつ引き出して数え（CANONICAL / LEGACY）、`build` なら作る。
 
-        def remaining() -> Optional[int]:
-            return None if max_bytes is None else max_bytes - total
+    再帰しない（frame の stack）。予算は `JsonBudget` が持ち、超えたらそこで止まる。
+    `token_sink` を渡すと、値の型つき token 列を流す（`evidence_digest`）。
+    """
 
-        holder: List[Any] = [None]
-        active = set()
-        # frame: [kind, iterator, out, parent, parent_key, count, source_id, current_key, keys]
-        stack: List[List[Any]] = []
+    def __init__(
+        self,
+        policy: JsonEncodingPolicy,
+        mode: str,
+        budget: JsonBudget,
+        *,
+        build: bool,
+        token_sink: Optional[Callable[[bytes], None]] = None,
+    ) -> None:
+        self.policy = policy
+        self.mode = mode
+        self.budget = budget
+        self.build = build
+        self.token_sink = token_sink
+        self.item_separator = utf8_length(policy.item_separator)
+        self.key_separator = utf8_length(policy.key_separator)
+        self.stack: List[_Frame] = []
+        self.active: set = set()
+        cache = _STRING_BYTES_CACHES.get(policy)
+        if cache is None or len(cache) > _STRING_BYTES_CACHE_MAX:
+            cache = _STRING_BYTES_CACHES[policy] = {}
+        self.string_cache = cache
+        sizes = _PURE_TUPLE_SIZES.get(policy)
+        if sizes is None:
+            sizes = _PURE_TUPLE_SIZES[policy] = {}
+        self.tuple_sizes = sizes
 
-        def path() -> str:
-            """今辿っている位置（拒むときだけ組み立てる。深い入れ子で 2 乗にしない）。"""
+    # -- 位置（拒むときだけ組み立てる） -------------------------------------------
 
-            parts = ["$"]
-            for frame in stack:
-                current = frame[7]
-                parts.append(f"[{current}]" if isinstance(current, int) else f".{current}")
-            return "".join(parts)
+    def path(self) -> str:
+        parts = ["$"]
+        for frame in self.stack:
+            current = frame.current
+            parts.append(f"[{current}]" if isinstance(current, int) else f".{current}")
+        return "".join(parts)
 
-        def enter(item, parent, key) -> None:
-            kind_of = type(item)
-            if kind_of is str:
-                charge(self.string_bytes(item, max_bytes=remaining()))
-                if build:
-                    parent[key] = item
-                return
-            if kind_of is int:
-                charge(len(int.__repr__(item)))
-                if build:
-                    parent[key] = item
-                return
-            if kind_of not in _PLAIN_CONTAINERS and item is not None and item is not True and item is not False:
-                item = _resolve(item)
-            if item is None or item is True or item is False:
-                charge(4 if item is not False else 5)
-                result = item
-            elif isinstance(item, str):
-                charge(self.string_bytes(item, max_bytes=remaining()))
-                result = item if type(item) is str else str.__str__(item)
-            elif isinstance(item, int):
-                result = int(item)
-                charge(len(int.__repr__(result)))
-            elif isinstance(item, float):
-                result = float(item)
-                charge(len(_float_text(result)))
-            elif isinstance(item, (list, tuple, Mapping, JsonLazyArray, JsonLazyObject)):
-                source_id = id(item)
-                if exclude_ids is not None and source_id in exclude_ids:
-                    return
-                if source_id in active:
-                    raise JsonValueRejected("circular reference", path=path())
-                active.add(source_id)
-                charge(2)
-                if isinstance(item, Mapping):
-                    kind = "dict"
-                    iterator: Iterator[Any] = iter(item.items())
-                    out: Any = {} if build else None
-                elif type(item) is JsonLazyObject:
-                    kind = "dict"
-                    iterator = iter(item.pairs)
-                    out = {} if build else None
-                elif type(item) is JsonLazyArray:
-                    kind = "list"
-                    iterator = iter(item.items)
-                    out = [] if build else None
-                else:
-                    kind = "list"
-                    iterator = iter(item)
-                    out = [] if build else None
-                stack.append([kind, iterator, out, parent, key, 0, source_id, None, set()])
-                return
-            elif opaque_bytes is not None and not build:
-                charge(int(opaque_bytes(item)))
-                return
-            else:
-                raise JsonValueRejected(
-                    f"{type(item).__qualname__} is not a JSON source", path=path(),
+    def reject(self, message: str) -> None:
+        raise JsonValueRejected(message, path=self.path())
+
+    def token(self, text_value: str) -> None:
+        if self.token_sink is not None:
+            self.token_sink(text_value.encode("utf-8", "surrogatepass") + b"\x1f")
+
+    # -- 葉 ------------------------------------------------------------------
+
+    def scalar(self, item: Any) -> Tuple[bool, Any]:
+        """scalar なら数えて (True, 置く値)。LEGACY は元の値（サブクラスも）をそのまま置く。"""
+
+        if item is None or item is True or item is False:
+            self.budget.charge(5 if item is False else 4)
+            if self.token_sink is not None:
+                self.token("n" if item is None else ("b1" if item else "b0"))
+            return True, item
+        kind_of = type(item)
+        if kind_of is str or isinstance(item, str):
+            self.budget.charge(
+                self.string_bytes(item) if kind_of is str
+                else self.policy.string_bytes(item, max_bytes=self.budget.remaining())
+            )
+            if self.token_sink is not None:
+                self.token("s" + item)
+            if kind_of is not str and self.mode == CANONICAL:
+                item = str.__str__(item)
+            return True, item
+        if kind_of is int or isinstance(item, int):
+            value = int(item)
+            self.budget.charge(len(int.__repr__(value)))
+            if self.token_sink is not None:
+                self.token("i" + int.__repr__(value))
+            return True, (value if self.mode == CANONICAL else item)
+        if isinstance(item, float):
+            value = float(item)
+            self.budget.charge(len(_float_text(value)))
+            if self.token_sink is not None:
+                self.token(
+                    ("i" + int.__repr__(int(value))) if value.is_integer() else ("f" + _float_text(value))
                 )
-            if build:
-                parent[key] = result
+            return True, (value if self.mode == CANONICAL else item)
+        return False, None
 
-        enter(value, holder, 0)
-        while stack:
-            frame = stack[-1]
-            kind, iterator, out, parent, key, count, source_id, _current, keys = frame
+    def string_bytes(self, text_value: str) -> int:
+        if len(text_value) <= _SHORT_STRING:
+            size = self.string_cache.get(text_value)
+            if size is None:
+                size = self.string_cache[text_value] = self.policy.string_bytes(text_value)
+            return size
+        return self.policy.string_bytes(text_value, max_bytes=self.budget.remaining())
+
+    # -- 純粋なデータの高速経路 --------------------------------------------------
+
+    def plain(self, value: Any, build: bool) -> Tuple[bool, Any]:
+        """容器（tuple / list / dict）と基底型だけから成る値を、frame を積まずに数えて写す。
+
+        数え方・予算で止まる位置は一般の経路と同じ（1 要素ごとに残り予算と比べ、超えたら
+        その時点で `charge` して止まる）。基底型の subclass・record・sized leaf・source など
+        に出会ったら (False, None) を返し、呼び出し側が一般の経路で辿り直す（それまでの
+        勘定は `charge` していない）。LEGACY は tuple → 配列・dict の key をそのまま、
+        CANONICAL は dict の key を JSON の文字列にする。
+
+        tuple だけから成る（不変な）部分木の byte 数は pair の間 cache する
+        （`_PURE_TUPLE_SIZES`、値への参照を持つので id は再利用されない）。同じ key を
+        何度も書く snapshot は、2 回目から数え直さずに（写すだけで）済む。
+        """
+
+        if self.token_sink is not None:
+            return False, None
+        policy = self.policy
+        canonical = self.mode == CANONICAL
+        sep = self.item_separator
+        key_sep = self.key_separator
+        string_bytes = self.string_bytes
+        sizes = self.tuple_sizes
+        remaining = self.budget.remaining()
+        total = 0
+        root: List[Any] = []
+        active: set = set()
+        # [iterator, out, is_dict, id, total_at_open, pure_tuple, obj]
+        stack: List[List[Any]] = [[iter((value,)), root, False, None, 0, False, None]]
+        try:
+            while stack:
+                entry = stack[-1]
+                try:
+                    item = next(entry[0])
+                except StopIteration:
+                    stack.pop()
+                    if entry[3] is not None:
+                        active.discard(entry[3])
+                    if entry[5]:
+                        if len(sizes) > _PURE_TUPLE_CACHE_MAX:
+                            sizes.clear()
+                        sizes[id(entry[6])] = (entry[6], total - entry[4])
+                    elif stack:
+                        stack[-1][5] = False
+                    continue
+                if entry[2]:
+                    key, item = item
+                    if type(key) is str:
+                        text_key = key
+                    elif key is None or type(key) in (bool, int, float):
+                        text_key = policy.canonical_key(key)
+                    else:
+                        raise _NotPlain
+                    total += string_bytes(text_key) + key_sep
+                    out_key = text_key if canonical else key
+                else:
+                    out_key = None
+                kind = type(item)
+                if kind is str:
+                    total += string_bytes(item)
+                elif item is None:
+                    total += 4
+                elif kind is bool:
+                    total += 4 if item else 5
+                elif kind is int:
+                    total += len(int.__repr__(item))
+                elif kind is float:
+                    total += len(_float_text(item))
+                elif kind is tuple:
+                    known = sizes.get(id(item))
+                    if known is not None and known[0] is item:
+                        total += known[1]
+                        if remaining is not None and total > remaining:
+                            break
+                        if build:
+                            copied = _copy_pure_tuple(item)
+                            if entry[2]:
+                                entry[1][out_key] = copied
+                            else:
+                                entry[1].append(copied)
+                        continue
+                    count = len(item)
+                    total += 2 + (sep * (count - 1) if count else 0)
+                    out = [] if build else None
+                    if build:
+                        if entry[2]:
+                            entry[1][out_key] = out
+                        else:
+                            entry[1].append(out)
+                    stack.append([iter(item), out, False, None, total - (2 + (sep * (count - 1) if count else 0)), True, item])
+                    continue
+                elif kind is list or kind is dict:
+                    count = len(item)
+                    total += 2 + (sep * (count - 1) if count else 0)
+                    identity = id(item)
+                    if identity in active:
+                        raise _NotPlain
+                    active.add(identity)
+                    entry[5] = False
+                    out = ({} if kind is dict else []) if build else None
+                    if build:
+                        if entry[2]:
+                            entry[1][out_key] = out
+                        else:
+                            entry[1].append(out)
+                    stack.append([
+                        iter(item.items()) if kind is dict else iter(item),
+                        out, kind is dict, identity, 0, False, None,
+                    ])
+                    continue
+                else:
+                    raise _NotPlain
+                if build:
+                    if entry[2]:
+                        entry[1][out_key] = item
+                    else:
+                        entry[1].append(item)
+                if remaining is not None and total > remaining:
+                    break
+        except _NotPlain:
+            return False, None
+        self.budget.charge(total)
+        return True, (root[0] if build else None)
+
+    # -- 容器 ------------------------------------------------------------------
+
+    def push(self, kind: str, iterator: Iterator[Any], parent: Any, key: Any, source: Any,
+             *, build: bool, fn: Any = None, preserve_keys: bool = False) -> None:
+        # 閉路の判定は **参照している値**（record / 容器）の identity で行う。遅延構成子の
+        # 包み（`each` など）はその場で作る一時 object なので、中身の値で数える。frame が
+        # 値を保持するので、辿っている間に id が再利用されることは無い。
+        if isinstance(source, _Source):
+            if type(source) is _Each:
+                source = source.items
+            elif type(source) is _MappingOf:
+                source = source.mapping
+            else:
+                source = None
+        source_id = None if source is None else id(source)
+        if source_id is not None:
+            if source_id in self.active:
+                self.reject("circular reference")
+            self.active.add(source_id)
+        self.budget.charge(2)
+        if self.token_sink is not None:
+            self.token("{" if kind == "dict" else "[")
+            if kind == "dict":
+                # digest は dict の並びに依らない（key の文字列で整列）
+                iterator = iter(sorted(iterator, key=lambda pair: self.policy.canonical_key(pair[0])))
+        frame = _Frame()
+        frame.kind = kind
+        frame.iterator = iterator
+        frame.out = ({} if kind == "dict" else []) if build else None
+        frame.parent = parent
+        frame.key = key
+        frame.count = 0
+        frame.source_id = source_id
+        frame.source = source
+        frame.build = build
+        frame.keys = set()
+        frame.fn = fn
+        frame.current = None
+        frame.preserve_keys = preserve_keys
+        self.stack.append(frame)
+
+    def place(self, parent: Any, key: Any, value: Any, build: bool) -> None:
+        if build and parent is not None:
+            parent[key] = value
+
+    def count_only(self, item: Any, *, raw_leaves: bool) -> None:
+        """`item` を数えるだけ（作らない・置かない）。"""
+
+        depth = len(self.stack)
+        if raw_leaves:
+            self.enter_raw(item, None, None, False)
+        else:
+            self.enter(item, None, None, False)
+        self.drain_to(depth)
+
+    def enter(self, item: Any, parent: Any, key: Any, build: bool) -> None:
+        """source 1 つを数え、`build` なら置く（容器なら frame を積む）。"""
+
+        is_scalar, value = self.scalar(item)
+        if is_scalar:
+            self.place(parent, key, value, build)
+            return
+        if isinstance(item, _Source):
+            self.enter_source(item, parent, key, build)
+            return
+        if isinstance(item, _AbcIterator):
+            # iterator（generator を含む）は遅延配列: 1 要素ずつ引き出す（pure layer の
+            # record は source の構成子を import できないので、これで列を渡す）
+            self.push("list", item, parent, key, item, build=build)
+            return
+        if getattr(type(item), "json_items", None) is not None:
+            self.push("dict", iter(item.json_items()), parent, key, item, build=build)
+            return
+        if getattr(type(item), "__json_tree__", None) is not None:
+            built, size = self.budget.tree(item, build=build)
+            if self.token_sink is not None:
+                self.token("t" + item.__json_identity__())
+            if build:
+                if self.mode == CANONICAL:
+                    # 大きさは作る前に数え済み。canonical な複製は予算の外（同じ大きさ）
+                    self.place(parent, key, _canonical_copy_uncounted(self.policy, built), True)
+                else:
+                    self.place(parent, key, built, True)
+            return
+        if type(item) is BoundedEvidence:
+            if self.mode == CANONICAL:
+                self.enter(item.summary(), parent, key, build)
+            else:
+                self.count_only(item.summary(), raw_leaves=False)
+                self.place(parent, key, item, build)
+            return
+        if isinstance(item, (Mapping, list, tuple)):
+            if self.mode == LEGACY:
+                # 既に在る値への参照: 写さずに数え、元の object をそのまま置く
+                done, _ = self.plain(item, False)
+                if not done:
+                    self.count_only(item, raw_leaves=True)
+                self.place(parent, key, item, build)
+                return
+            done, value = self.plain(item, build)
+            if done:
+                self.place(parent, key, value, build)
+                return
+            if isinstance(item, Mapping):
+                self.push("dict", iter(item.items()), parent, key, item, build=build)
+            else:
+                self.push("list", iter(item), parent, key, item, build=build)
+            return
+        if self.mode == LEGACY:
+            self.enter_raw(item, parent, key, build)
+            return
+        self.reject(f"{type(item).__qualname__} is not a JSON source")
+
+    def enter_raw(self, item: Any, parent: Any, key: Any, build: bool) -> None:
+        """LEGACY で元の値をそのまま置く場所（旧 `list(x)` の要素・`nested` の葉・参照）。
+
+        値は変換しないが、後段（snapshot の codec）が表す大きさで数える: container は中身、
+        record は `json_items()`、sized leaf は木の大きさ、それ以外は型名など。
+        """
+
+        if self.mode != LEGACY:
+            self.enter(item, parent, key, build)
+            return
+        is_scalar, value = self.scalar(item)
+        if is_scalar:
+            self.place(parent, key, value, build)
+            return
+        if isinstance(item, (Mapping, list, tuple)):
+            done, _ = self.plain(item, False)
+            if not done:
+                if isinstance(item, Mapping):
+                    self.push("dict", iter(item.items()), None, None, item, build=False,
+                              fn=_RAW, preserve_keys=True)
+                else:
+                    self.push("list", iter(item), None, None, item, build=False, fn=_RAW)
+                self.drain_to(len(self.stack) - 1)
+        elif (
+            getattr(type(item), "json_items", None) is not None
+            or getattr(type(item), "__json_tree__", None) is not None
+            or type(item) is BoundedEvidence
+        ):
+            self.count_only(item, raw_leaves=False)
+        else:
+            self.opaque(item)
+        self.place(parent, key, item, build)
+
+    def opaque(self, item: Any) -> None:
+        """JSON 型でない葉（旧 `to_dict` がそのまま置いた値）: 型名や enum の値で数える。"""
+
+        if isinstance(item, Enum):
+            raw_value = item.value
+            label = raw_value if isinstance(raw_value, str) else type(item).__qualname__
+        else:
+            label = type(item).__qualname__
+        self.budget.charge(self.policy.string_bytes(label))
+        if self.token_sink is not None:
+            self.token("o" + type(item).__qualname__ + ":" + (label if isinstance(item, Enum) else ""))
+
+    def enter_source(self, item: _Source, parent: Any, key: Any, build: bool) -> None:
+        kind = type(item)
+        if kind is _Each:
+            self.push("list", iter(item.items), parent, key, item, build=build, fn=item.fn)
+        elif kind is _MappingOf:
+            pairs: Iterator[Any] = iter(item.mapping.items())
+            if item.key_fn is not None:
+                key_fn = item.key_fn
+                pairs = ((key_fn(child_key), child) for child_key, child in pairs)
+            self.push(
+                "dict", pairs, parent, key, item, build=build,
+                fn=item.fn, preserve_keys=(self.mode == LEGACY),
+            )
+        elif kind is _Inline:
+            self.push("dict", iter(item.pairs), parent, key, item, build=build)
+        elif kind is _Nested:
+            self.enter_nested(item.value, parent, key, build)
+        elif kind is _Raw:
+            self.enter_raw(item.value, parent, key, build)
+        elif kind is _Evidence:
+            self.enter_evidence(item, parent, key, build)
+        elif kind is _Text:
+            value = item.value
+            if self.mode == CANONICAL and isinstance(value, str) and len(value) > item.max_chars:
+                value = _text_marker(value, item.max_chars)
+            self.enter(value, parent, key, build)
+        elif kind is _BoundedSummary:
+            remaining = self.budget.remaining()
+            if remaining is not None and remaining < item.max_bytes:
+                # 上限ぶんの余地が無い: 作る前に止まる
+                self.budget.charge(item.max_bytes)
             try:
-                child = next(iterator)
+                # 宣言した上限まで 1 回だけ作る（超えたら producer の契約違反）
+                value = _Walk(
+                    self.policy, self.mode, JsonBudget(item.max_bytes), build=True,
+                ).run(item.fn())
+            except JsonBudgetExhausted:
+                self.reject(f"bounded summary exceeded its declared {item.max_bytes} bytes")
+            self.enter(value, parent, key, build)
+        else:  # pragma: no cover - 文法の追加漏れ
+            self.reject(f"unknown source {kind.__qualname__}")
+
+    def enter_nested(self, value: Any, parent: Any, key: Any, build: bool) -> None:
+        """旧 `_jsonable_nested_tuple`: dict は dict、tuple / list は配列、それ以外はそのまま。"""
+
+        if isinstance(value, (dict, tuple, list)):
+            done, built = self.plain(value, build)
+            if done:
+                self.place(parent, key, built, build)
+                return
+        if isinstance(value, dict):
+            self.push("dict", iter(value.items()), parent, key, value, build=build, fn=_NESTED,
+                      preserve_keys=(self.mode == LEGACY))
+        elif isinstance(value, (tuple, list)):
+            self.push("list", iter(value), parent, key, value, build=build, fn=_NESTED)
+        else:
+            self.enter_raw(value, parent, key, build)
+
+    def enter_evidence(self, item: _Evidence, parent: Any, key: Any, build: bool) -> None:
+        value = item.value
+        if self.mode == LEGACY or value is None or type(value) is BoundedEvidence:
+            self.enter(value, parent, key, build)
+            return
+        try:
+            # 上限（EVIDENCE_INLINE_BYTES）まで 1 回だけ作る。収まればその値を置く
+            inline_value = _Walk(
+                self.policy, CANONICAL, JsonBudget(EVIDENCE_INLINE_BYTES), build=True,
+            ).run(value)
+        except JsonBudgetExhausted:
+            fresh = item.refresh() if item.refresh is not None else value
+            self.enter(_summarize_evidence(self.policy, fresh, item.identity), parent, key, build)
+            return
+        self.enter(inline_value, parent, key, build)
+
+    # -- 本体 ------------------------------------------------------------------
+
+    def run(self, source: Any) -> Any:
+        holder: List[Any] = [None]
+        self.enter(source, holder, 0, self.build)
+        self.drain_to(0)
+        return holder[0]
+
+    def drain_to(self, depth: int) -> None:
+        stack = self.stack
+        while len(stack) > depth:
+            frame = stack[-1]
+            try:
+                child = next(frame.iterator)
             except StopIteration:
                 stack.pop()
-                active.discard(source_id)
-                if build:
-                    parent[key] = out
+                if frame.source_id is not None:
+                    self.active.discard(frame.source_id)
+                if self.token_sink is not None:
+                    self.token("}" if frame.kind == "dict" else "]")
+                if frame.build and frame.parent is not None:
+                    frame.parent[frame.key] = frame.out
                 continue
-            if count:
-                charge(item_separator)
-            frame[5] = count + 1
-            if kind == "dict":
-                child_key, child_value = child
-                try:
-                    text_key = self.canonical_key(child_key)
-                except TypeError as exc:
-                    raise JsonValueRejected(str(exc), path=path()) from None
-                if text_key in keys:
-                    raise JsonValueRejected(
-                        f"key {text_key!r} collides after JSON key conversion", path=path(),
-                    )
-                keys.add(text_key)
-                frame[7] = text_key
-                charge(self.string_bytes(text_key) + key_separator)
-                enter(child_value, out, text_key)
+            separator = self.item_separator if frame.count else 0
+            frame.count += 1
+            if frame.kind == "dict":
+                child_key, target = child
+                if type(child_key) is str:
+                    text_key = child_key
+                else:
+                    try:
+                        text_key = self.policy.canonical_key(child_key)
+                    except TypeError as exc:
+                        self.reject(str(exc))
+                if text_key in frame.keys:
+                    self.reject(f"key {text_key!r} collides after JSON key conversion")
+                frame.keys.add(text_key)
+                frame.current = text_key
+                self.budget.charge(separator + self.string_bytes(text_key) + self.key_separator)
+                if self.token_sink is not None:
+                    self.token("k" + text_key)
+                out_key = child_key if frame.preserve_keys else text_key
             else:
-                if build:
-                    out.append(None)
-                frame[7] = count
-                enter(child, out, count)
-        return holder[0], total
+                if separator:
+                    self.budget.charge(separator)
+                target = child
+                frame.current = frame.count - 1
+                if frame.build:
+                    frame.out.append(None)
+                out_key = frame.count - 1
+            parent = frame.out if frame.build else None
+            fn = frame.fn
+            if fn is None:
+                self.enter(target, parent, out_key, frame.build)
+            elif fn is _RAW:
+                self.enter_raw(target, parent, out_key, frame.build)
+            elif fn is _NESTED:
+                self.enter_nested(target, parent, out_key, frame.build)
+            else:
+                self.enter(fn(target), parent, out_key, frame.build)
+
+
+def _canonical_copy_uncounted(policy: JsonEncodingPolicy, value: Any) -> Any:
+    return _Walk(policy, CANONICAL, JsonBudget(None), build=True).run(value)
 
 
 class JsonObjectBudget:
-    """1 つの JSON object へ member を順に足していく勘定（framing は policy が決める）。
-
-    出力の準備（authority 確定前）と最終 envelope（authority 確定後）が、同じ
-    object の byte 数を同じ規則で数えるための唯一の道。区切りの長さや先頭 member の
-    扱いを呼ぶ側が計算しない。
-    """
+    """1 つの JSON object へ member を順に足していく勘定（framing は policy が決める）。"""
 
     def __init__(self, policy: JsonEncodingPolicy, max_bytes: Optional[int]) -> None:
         self.policy = policy
@@ -655,8 +1436,6 @@ class JsonObjectBudget:
 
     @property
     def total_bytes(self) -> int:
-        """今の member だけで閉じた object の byte 数。"""
-
         return self.policy.container_frame_bytes(self._count) + self._members
 
     @property
@@ -664,8 +1443,6 @@ class JsonObjectBudget:
         return self._count
 
     def added_bytes(self, key: Any, value_bytes: int) -> int:
-        """member を 1 つ足したときに object が増える byte 数（区切りを含む）。"""
-
         return (
             self.policy.container_frame_bytes(self._count + 1)
             - self.policy.container_frame_bytes(self._count)
@@ -673,8 +1450,6 @@ class JsonObjectBudget:
         )
 
     def remaining_for(self, key: Any) -> Optional[int]:
-        """次に `key` の member を足すとき、値に使ってよい byte 数（負なら入らない）。"""
-
         if self.max_bytes is None:
             return None
         return self.max_bytes - self.total_bytes - self.added_bytes(key, 0)
@@ -685,22 +1460,99 @@ class JsonObjectBudget:
 
 
 #: 結果 JSON（CLI が書く `EQUIVALENCE_RESULT_JSON`）の書き方。**唯一の定義**。
-#: 見積り・準備・bounded encoder・CLI の出力はすべてこれを使う。
 RESULT_JSON_POLICY = JsonEncodingPolicy()
 
 
+def scalar_record_dict(record: Any) -> dict:
+    """**scalar だけ** を yield する固定の形の record の LEGACY 表現（walker を通さない）。
+
+    `json_items()` が固定個数の scalar（`None` / `bool` / `int` / `float` / `str`）しか
+    返さない record（`StorageInfo` など）だけが使う。大きさは field の数と scalar の
+    長さで決まり、入力に比例して育たない。scalar 以外が来たら `TypeError`（schema の
+    誤り。`tests/unit/test_architecture_boundaries.py` が該当 class を固定する）。
+    """
+
+    out = {}
+    for key, value in record.json_items():
+        if value is not None and type(value) not in _SCALAR_TYPES:
+            raise TypeError(
+                f"{type(record).__qualname__}.{key} is not a scalar; use materialize()"
+            )
+        out[key] = value
+    return out
+
+
+_SCALAR_TYPES = frozenset({bool, int, float, str})
+
+
+#: 解析 1 件分の直列化の外で呼ばれた record の `to_dict()` を数える観測点。
+RECORD_SERIALIZATION_SITE = "core.json_encoding.materialize"
+
+
+def materialize(source: Any) -> Any:
+    """record の `to_dict()`（LEGACY 表現）。pair の予算の中では必ず直列化の作業量へ数える。
+
+    解析 1 件分の直列化（`SerializationWork`）の最中ならその作業量へ合流し、そうでなく
+    pair の予算 scope の中なら、この 1 件だけの作業量を開く（木を含む record が予算を
+    知らずに作られる経路を残さない）。予算 scope の外（部品単体の呼び出し）は数えない。
+    """
+
+    from scripts.function_tracer_pcode.core.budget_policy import (
+        active_serialization_work,
+        budget_scope_is_active,
+        serialization_scope,
+    )
+
+    work = active_serialization_work()
+    if work is not None:
+        return RESULT_JSON_POLICY.materialize(source, budget=work)
+    if not budget_scope_is_active():
+        return RESULT_JSON_POLICY.materialize(source)
+    with serialization_scope(
+        site=RECORD_SERIALIZATION_SITE, target_parts=("record", type(source).__qualname__),
+    ) as work:
+        return RESULT_JSON_POLICY.materialize(source, budget=work)
+
+
 __all__ = [
+    "BOOL",
+    "BoundedEvidence",
+    "Column",
+    "EVIDENCE",
+    "INT",
+    "TEXT",
+    "CANONICAL",
+    "EVIDENCE_INLINE_BYTES",
+    "EVIDENCE_SUMMARY_MAX_BYTES",
+    "JsonBudget",
     "JsonBudgetExhausted",
     "JsonEncodingPolicy",
-    "JsonLazy",
-    "JsonLazyArray",
-    "JsonLazyObject",
     "JsonObjectBudget",
     "JsonOutputLimitExceeded",
     "JsonValueRejected",
+    "LEGACY",
     "PreparedJson",
     "RESULT_JSON_POLICY",
+    "TEXT_MARKER_MAX_CHARS",
+    "as_dict",
+    "as_list",
+    "bounded_summary",
+    "bounded_text",
+    "cached_string_bytes",
+    "clear_size_caches",
+    "counts_max_bytes",
+    "each",
+    "evidence",
+    "inline",
+    "is_json_record",
     "is_prepared_json",
-    "lazy_record",
-    "lazy_records",
+    "mapping_of",
+    "materialize",
+    "nested",
+    "pairs_of",
+    "raw",
+    "row_items",
+    "row_max_bytes",
+    "scalar_record_dict",
+    "text",
 ]

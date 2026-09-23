@@ -52,6 +52,10 @@ class UnaryCauseKey:
     schema_version: int = CAUSE_IDENTITY_SCHEMA_VERSION
     identity_scope: str = IdentityScope.UNARY.value
 
+    def json_items(self):
+        # 固定個数の field（値は既存の key への参照）
+        return iter(self.__dict__.items())
+
     def to_dict(self) -> Dict[str, Any]:
         return _cause_to_dict(self)
 
@@ -66,6 +70,10 @@ class RelationalCauseKey:
     schema_version: int = CAUSE_IDENTITY_SCHEMA_VERSION
     identity_scope: str = IdentityScope.RELATIONAL.value
 
+    def json_items(self):
+        # 固定個数の field（値は既存の key への参照）
+        return iter(self.__dict__.items())
+
     def to_dict(self) -> Dict[str, Any]:
         return _cause_to_dict(self)
 
@@ -78,6 +86,10 @@ class ExecutionCauseKey:
     execution_semantics_identity: Tuple[Any, ...]
     schema_version: int = CAUSE_IDENTITY_SCHEMA_VERSION
     identity_scope: str = IdentityScope.EXECUTION.value
+
+    def json_items(self):
+        # 固定個数の field（値は既存の key への参照）
+        return iter(self.__dict__.items())
 
     def to_dict(self) -> Dict[str, Any]:
         return _cause_to_dict(self)
@@ -196,6 +208,12 @@ class ProofRequirementId:
         if not str(proof_kind or "") or not target or not contract_key:
             raise ValueError("proof requirement requires kind, target, and contract")
         return cls(str(proof_kind), target, contract_key)
+
+    def json_items(self):
+        yield "schema_version", self.schema_version
+        yield "proof_kind", self.proof_kind
+        yield "proof_target_key", self.proof_target_key
+        yield "proof_contract_key", self.proof_contract_key
 
     def to_dict(self) -> Dict[str, Any]:
         return {

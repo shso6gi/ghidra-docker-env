@@ -26,6 +26,13 @@ CHECKER_OWNED = (
     "make_production_unknown_reason", "build_projection_diagnostic", "coerce_unknown_reason_record",
     "coerce_unknown_reason_records", "coerce_unknown_recovery_action", "coerce_unknown_recovery_actions",
     "build_unknown_recovery_actions", "summarize_unknown_reason_counts", "summarize_unknown_recovery_backlog",
+    # Issue #22 PR-22-D: 行の schema・有界化（B5）・集計の出力 source（checker の所有）
+    "VOCAB_MAX_CHARS", "ID_MAX_CHARS", "LABEL_MAX_CHARS", "DETAIL_MAX_CHARS",
+    "UNKNOWN_REASON_ROW", "UNKNOWN_RECOVERY_ACTION_ROW", "RECOVERY_BACKLOG_ENTRY_ROW",
+    "LEGACY_REASON_EVIDENCE_ROW", "LegacyReasonEvidence",
+    "MATCH_AUTHORITY_DIGEST", "MATCH_CANONICAL_STR_DIGEST", "bounded_match_evidence", "match_digest",
+    "finitize_unknown_reason_record", "finitize_unknown_recovery_action",
+    "iter_unknown_recovery_actions", "unknown_reason_counts_source", "recovery_backlog_source",
 )
 SNAPSHOT = pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "unknown_reason_registry_snapshot.json"
 

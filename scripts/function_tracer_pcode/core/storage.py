@@ -3,6 +3,7 @@
 
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
+from scripts.function_tracer_pcode.core.json_encoding import scalar_record_dict
 
 
 @dataclass
@@ -229,23 +230,25 @@ class StorageInfo:
             int(self.size),
         )
     
+    def json_items(self):
+        yield "is_register", self.is_register
+        yield "space_name", self.space_name
+        yield "space_id", self.space_id
+        yield "offset", self.offset
+        yield "size", self.size
+        yield "size_bits", self.size_bits
+        yield "register_offset", self.register_offset
+        yield "register_size", self.register_size
+        yield "register_size_bits", self.register_size_bits
+        yield "register_name", self.register_name
+        yield "base_register_name", self.base_register_name
+        yield "base_register_offset", self.base_register_offset
+        yield "base_register_size", self.base_register_size
+        yield "base_register_size_bits", self.base_register_size_bits
+        yield "bit_offset_in_base", self.bit_offset_in_base
+        yield "is_stack_pointer", self.is_stack_pointer
+        yield "is_frame_pointer", self.is_frame_pointer
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "is_register": self.is_register,
-            "space_name": self.space_name,
-            "space_id": self.space_id,
-            "offset": self.offset,
-            "size": self.size,
-            "size_bits": self.size_bits,
-            "register_offset": self.register_offset,
-            "register_size": self.register_size,
-            "register_size_bits": self.register_size_bits,
-            "register_name": self.register_name,
-            "base_register_name": self.base_register_name,
-            "base_register_offset": self.base_register_offset,
-            "base_register_size": self.base_register_size,
-            "base_register_size_bits": self.base_register_size_bits,
-            "bit_offset_in_base": self.bit_offset_in_base,
-            "is_stack_pointer": self.is_stack_pointer,
-            "is_frame_pointer": self.is_frame_pointer,
-        }
+        # 固定個数の scalar だけの record（式の木の node ごとに書くので walker を通さない）
+        return scalar_record_dict(self)

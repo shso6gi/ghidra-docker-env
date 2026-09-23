@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, materialize, pairs_of, raw)
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
@@ -41,16 +42,17 @@ class DeferredCallRef:
             return f"{target_name}@0x{int(self.pcode_op_ref.address_offset):x}"
         return target_name
 
+    def json_items(self):
+        yield "kind", "deferred_call_site"
+        yield "caller_program_id", self.caller_program_id
+        yield "caller_entry_offset", self.caller_entry_offset
+        yield "pcode_op_ref", self.pcode_op_ref if self.pcode_op_ref is not None else None
+        yield "target_ref", self.target_ref if self.target_ref is not None else None
+        yield "sequence", self.sequence
+        yield "display_name", self.display_name()
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "deferred_call_site",
-            "caller_program_id": self.caller_program_id,
-            "caller_entry_offset": self.caller_entry_offset,
-            "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
-            "target_ref": self.target_ref.to_dict() if self.target_ref is not None else None,
-            "sequence": self.sequence,
-            "display_name": self.display_name(),
-        }
+        return materialize(self)
 
 
 def _runtime_ref_stable_key_or_repr(value: Any) -> Optional[Tuple[Any, ...]]:
@@ -212,26 +214,26 @@ class UnknownValueRef:
             return self.target_ref.display_name()
         return self.reason or "unknown"
 
-    def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
-            "kind": self.kind,
-            "display_name": self.display_name(),
-        }
+    def json_items(self):
+        yield "kind", self.kind
+        yield "display_name", self.display_name()
         if self.reason is not None:
-            result["reason"] = self.reason
+            yield "reason", self.reason
         if self.deferred_call_ref is not None:
-            result["deferred_call_ref"] = self.deferred_call_ref.to_dict()
+            yield "deferred_call_ref", self.deferred_call_ref
         if self.target_ref is not None:
-            result["target_ref"] = self.target_ref.to_dict()
+            yield "target_ref", self.target_ref
         if self.origin_kind is not None:
-            result["origin_kind"] = self.origin_kind
+            yield "origin_kind", self.origin_kind
         if self.origin_ref is not None:
-            to_dict = getattr(self.origin_ref, "to_dict", None)
-            if callable(to_dict):
-                result["origin_ref"] = to_dict()
+            if is_json_record(self.origin_ref):
+                yield "origin_ref", self.origin_ref
             else:
-                result["origin_ref"] = _runtime_ref_stable_key_or_repr(self.origin_ref)
-        return result
+                # 旧実装と同じ: 固定個数の要素から成る identity（stable key か repr）をそのまま置く
+                yield "origin_ref", raw(_runtime_ref_stable_key_or_repr(self.origin_ref))
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +309,47 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
         if key is not None:
             return ["stable", _canonical_budget_value(key, depth + 1)]
     return ["opaque", type(value).__module__, type(value).__qualname__]
+
+
+def _canonical_budget_source(value: Any, depth: int = 0) -> Any:
+    """`_canonical_budget_value` と同じ値を 1 要素ずつ作らせる source。
+
+    集合だけは並びを決めるために要素の canonical な値を先に求める（旧実装と同じ順序。
+    集合の要素数ぶんの一時値で、集合自身の大きさに比例する）。
+    """
+
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if depth >= _CANONICAL_BUDGET_MAX_DEPTH:
+        return each(("depth_limited", type(value).__module__, type(value).__qualname__))
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, bytes):
+        return each(("bytes", value.hex()))
+    if isinstance(value, (list, tuple)):
+        return each(value, lambda item: _canonical_budget_source(item, depth + 1))
+    if isinstance(value, (set, frozenset)):
+        ordered = sorted(
+            value,
+            key=lambda item: json.dumps(
+                _canonical_budget_value(item, depth + 1), ensure_ascii=False, sort_keys=True,
+            ),
+        )
+        return each(ordered, lambda item: _canonical_budget_source(item, depth + 1))
+    if isinstance(value, Mapping):
+        return pairs_of(
+            (str(key), _canonical_budget_source(item, depth + 1))
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        )
+    stable_key = getattr(value, "stable_key", None)
+    if callable(stable_key):
+        try:
+            key = stable_key()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            key = None
+        if key is not None:
+            return each(("stable", _canonical_budget_source(key, depth + 1)))
+    return each(("opaque", type(value).__module__, type(value).__qualname__))
 
 
 def _canonical_budget_json(payload: Any) -> str:
@@ -402,41 +445,41 @@ class ExpansionBudgetTruncation:
             return self
         return replace(self, surface=bound_surface, owner_scope_key=bound_owner)
 
-    def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
-            "event_id": self.event_id,
-            "kind": self.kind,
-        }
+    def json_items(self):
+        yield "event_id", self.event_id
+        yield "kind", self.kind
         if self.surface is not None:
-            result["surface"] = self.surface
+            yield "surface", self.surface
         if self.owner_scope_key is not None:
-            result["owner_scope_key"] = _canonical_budget_value(self.owner_scope_key)
+            yield "owner_scope_key", _canonical_budget_source(self.owner_scope_key)
         if self.label is not None:
-            result["label"] = self.label
+            yield "label", self.label
         if self.pcode_op_ref is not None:
-            result["pcode_op_ref"] = self.pcode_op_ref.to_dict()
+            yield "pcode_op_ref", self.pcode_op_ref
         if self.dedup is not None:
-            result["dedup"] = {
-                "candidate_count": self.dedup[0],
-                "kept_count": self.dedup[1],
-                "limit": self.dedup[2],
-            }
+            yield "dedup", inline(
+                ("candidate_count", self.dedup[0]),
+                ("kept_count", self.dedup[1]),
+                ("limit", self.dedup[2]),
+            )
         if self.paths is not None:
-            result["paths"] = {
-                "valid_path_count": self.paths[0],
-                "kept_path_count": self.paths[1],
-                "limit_paths": self.paths[2],
-            }
+            yield "paths", inline(
+                ("valid_path_count", self.paths[0]),
+                ("kept_path_count", self.paths[1]),
+                ("limit_paths", self.paths[2]),
+            )
         if self.conditions is not None:
-            result["conditions"] = {
-                "dropped_path_count": self.conditions[0],
-                "max_conditions": self.conditions[1],
-            }
+            yield "conditions", inline(
+                ("dropped_path_count", self.conditions[0]),
+                ("max_conditions", self.conditions[1]),
+            )
         if self.callee_scope_key is not None:
-            result["callee_scope_key"] = _canonical_budget_value(self.callee_scope_key)
+            yield "callee_scope_key", _canonical_budget_source(self.callee_scope_key)
         if self.referenced_event_ids:
-            result["referenced_event_ids"] = list(self.referenced_event_ids)
-        return result
+            yield "referenced_event_ids", as_list(self.referenced_event_ids)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
 
 def normalize_expansion_budget_truncations(

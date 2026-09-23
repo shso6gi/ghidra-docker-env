@@ -306,11 +306,12 @@ def test_baseline_is_a_frozen_snapshot_with_stable_totals():
     """凍結値そのもの（#108 で減らすときだけ動かす）。"""
 
     entries = load_baseline()
+    # Issue #22 PR-22-D: `Expression._serialize_runtime_ref` の broad except を撤去（-1）
     assert baseline_totals(entries) == {
-        "keys": 600,
+        "keys": 599,
         "logged": 0,
-        "unlogged": 927,
-        "handlers": 927,
+        "unlogged": 926,
+        "handlers": 926,
     }
 
 

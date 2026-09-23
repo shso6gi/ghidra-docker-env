@@ -204,7 +204,14 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             expression_budget_policy,
         )
 
+        from scripts.function_tracer_pcode.checker.output_schema import (
+            validate_envelope_headroom,
+        )
+
         self.budget_policy = expression_budget_policy()
+        # 出力 schema（authority 後の field の上限）から導いた最小値を headroom が
+        # 満たすこと（設定の誤りは構築時に止める）
+        validate_envelope_headroom(self.budget_policy)
         self.type_fixer_config = type_fixer_config or TypeFixerConfig()
         if enable_rewrite is not None or rewrite_direction is not None:
             warnings.warn(

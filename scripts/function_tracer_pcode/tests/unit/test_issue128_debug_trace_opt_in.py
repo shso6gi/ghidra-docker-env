@@ -134,12 +134,19 @@ def _result(trace, reason, *, emit=True):
 # 1. serialize の条件化
 # ---------------------------------------------------------------------------
 
+def _canonical(trace):
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+    return RESULT_JSON_POLICY.prepare(trace).value()
+
+
 def test_to_dict_omits_debug_trace_unless_emit_flag():
     """既定（True）では従来どおり出て、False では **key だけ** が消える。"""
     trace, reason = _rich_trace()
     emitted = _result(trace, reason).to_dict()
     # 既定 True: 従来の出力そのまま。しかも emit 経路で内容を削っていない。
-    assert emitted["debug_trace"] == trace.to_dict()
+    # 出力は trace の canonical な表現（Issue #22 PR-22-D: 出力の準備が作る JSON 値）
+    assert emitted["debug_trace"] == _canonical(trace)
     assert emitted["debug_trace"]["attempts"], "fixture が空 trace では条件化を測れない"
 
     trace2, reason2 = _rich_trace()
@@ -176,7 +183,7 @@ def test_emit_flag_default_keeps_direct_callers_unchanged():
         unknown_reasons=[reason],
     )
     assert result.emit_debug_trace is True
-    assert result.to_dict()["debug_trace"] == trace.to_dict()
+    assert result.to_dict()["debug_trace"] == _canonical(trace)
 
 
 def test_emit_flag_is_the_last_dataclass_field():

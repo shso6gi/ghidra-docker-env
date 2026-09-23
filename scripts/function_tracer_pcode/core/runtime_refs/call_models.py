@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 
 
 CALL_MODEL_CANDIDATE_KIND = "call_model_candidate"
@@ -104,15 +105,26 @@ class CallModelCandidateRef:
     def stable_key(self) -> Tuple[Any, ...]:
         return self.candidate_key
 
+    def json_items(self):
+        yield "kind", CALL_MODEL_CANDIDATE_KIND
+        yield "provider", self.provider
+        yield "candidate_key", _jsonable_key_source(self.candidate_key)
+        yield "canonical_symbol", self.canonical_symbol
+        yield "signature_key", _jsonable_key_source(self.signature_key)
+        yield "provenance_key", _jsonable_key_source(self.provenance_key)
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": CALL_MODEL_CANDIDATE_KIND,
-            "provider": self.provider,
-            "candidate_key": _jsonable_key(self.candidate_key),
-            "canonical_symbol": self.canonical_symbol,
-            "signature_key": _jsonable_key(self.signature_key),
-            "provenance_key": _jsonable_key(self.provenance_key),
-        }
+        return materialize(self)
+
+
+def _jsonable_key_source(value: Any) -> Any:
+    """`_jsonable_key` と同じ値を 1 要素ずつ作らせる source（tuple は配列、それ以外はそのまま）。"""
+
+    if isinstance(value, tuple):
+        return each(value, _jsonable_key_source)
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return raw(value)
 
 
 def _jsonable_key(value: Any) -> Any:

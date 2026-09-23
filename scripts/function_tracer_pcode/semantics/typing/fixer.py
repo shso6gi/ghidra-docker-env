@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
+from scripts.function_tracer_pcode.core.json_encoding import as_dict, materialize
 from scripts.function_tracer_pcode.core import (
     FunctionReturnAnalysis,
     FunctionSignature,
@@ -451,37 +452,35 @@ class TypeFixResult:
             or self.mips64_abi_fixed_binary2
         )
 
-    def to_dict(self) -> dict:
-        result = {
-            "return_type_fixed_binary1": self.return_type_fixed_binary1,
-            "return_type_fixed_binary2": self.return_type_fixed_binary2,
-            "param_types_fixed_binary1": self.param_types_fixed_binary1,
-            "param_types_fixed_binary2": self.param_types_fixed_binary2,
-            "retry_phase": self.retry_phase,
-            "signedness_fixed_binary1": self.signedness_fixed_binary1,
-            "signedness_fixed_binary2": self.signedness_fixed_binary2,
-            "inferred_signedness_binary1": self.inferred_signedness_binary1,
-            "inferred_signedness_binary2": self.inferred_signedness_binary2,
-            "original_type_binary1": self.original_type_binary1,
-            "original_type_binary2": self.original_type_binary2,
-            "fixed_type_binary1": self.fixed_type_binary1,
-            "fixed_type_binary2": self.fixed_type_binary2,
-            "param_signedness_fixed_binary1": self.param_signedness_fixed_binary1,
-            "param_signedness_fixed_binary2": self.param_signedness_fixed_binary2,
-            "mips64_abi_fixed_binary1": self.mips64_abi_fixed_binary1,
-            "mips64_abi_fixed_binary2": self.mips64_abi_fixed_binary2,
-        }
-
+    def json_items(self):
+        yield "return_type_fixed_binary1", self.return_type_fixed_binary1
+        yield "return_type_fixed_binary2", self.return_type_fixed_binary2
+        yield "param_types_fixed_binary1", self.param_types_fixed_binary1
+        yield "param_types_fixed_binary2", self.param_types_fixed_binary2
+        yield "retry_phase", self.retry_phase
+        yield "signedness_fixed_binary1", self.signedness_fixed_binary1
+        yield "signedness_fixed_binary2", self.signedness_fixed_binary2
+        yield "inferred_signedness_binary1", self.inferred_signedness_binary1
+        yield "inferred_signedness_binary2", self.inferred_signedness_binary2
+        yield "original_type_binary1", self.original_type_binary1
+        yield "original_type_binary2", self.original_type_binary2
+        yield "fixed_type_binary1", self.fixed_type_binary1
+        yield "fixed_type_binary2", self.fixed_type_binary2
+        yield "param_signedness_fixed_binary1", self.param_signedness_fixed_binary1
+        yield "param_signedness_fixed_binary2", self.param_signedness_fixed_binary2
+        yield "mips64_abi_fixed_binary1", self.mips64_abi_fixed_binary1
+        yield "mips64_abi_fixed_binary2", self.mips64_abi_fixed_binary2
         if self.param_signedness_override_map_binary1:
-            result["param_signedness_override_map_binary1"] = self.param_signedness_override_map_binary1
+            yield "param_signedness_override_map_binary1", self.param_signedness_override_map_binary1
         if self.param_signedness_override_map_binary2:
-            result["param_signedness_override_map_binary2"] = self.param_signedness_override_map_binary2
+            yield "param_signedness_override_map_binary2", self.param_signedness_override_map_binary2
         if self.mips64_abi_override_map_binary1:
-            result["mips64_abi_override_map_binary1"] = self.mips64_abi_override_map_binary1
+            yield "mips64_abi_override_map_binary1", self.mips64_abi_override_map_binary1
         if self.mips64_abi_override_map_binary2:
-            result["mips64_abi_override_map_binary2"] = self.mips64_abi_override_map_binary2
+            yield "mips64_abi_override_map_binary2", self.mips64_abi_override_map_binary2
 
-        return result
+    def to_dict(self) -> dict:
+        return materialize(self)
 
     def __str__(self) -> str:
         parts = []

@@ -12,6 +12,7 @@ import hashlib
 import json
 from typing import Any, Mapping, Sequence, Tuple
 
+from scripts.function_tracer_pcode.core.json_encoding import each, materialize
 from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 
@@ -356,18 +357,23 @@ class ImmutableRecurrenceExpression:
             self.storage_identity, self.runtime_ref_type, self.provenance,
         )
 
+    def json_items(self):
+        yield "kind", self.kind
+        yield "size", self.size
+        yield "value", self.value
+        yield "operator", self.operator
+        yield "parameter_index", self.parameter_index
+        yield "operands", each(self.operands)
+        yield "intrinsic_identity", self.intrinsic_identity
+        yield "sort", self.sort
+        yield "signedness", self.signedness
+        yield "constant_width_bits", self.constant_width_bits
+        yield "storage_identity", self.storage_identity
+        yield "runtime_ref_type", self.runtime_ref_type
+        yield "provenance", self.provenance
+
     def to_dict(self) -> Mapping[str, Any]:
-        return {
-            "kind": self.kind, "size": self.size, "value": self.value,
-            "operator": self.operator, "parameter_index": self.parameter_index,
-            "operands": [item.to_dict() for item in self.operands],
-            "intrinsic_identity": self.intrinsic_identity,
-            "sort": self.sort, "signedness": self.signedness,
-            "constant_width_bits": self.constant_width_bits,
-            "storage_identity": self.storage_identity,
-            "runtime_ref_type": self.runtime_ref_type,
-            "provenance": self.provenance,
-        }
+        return materialize(self)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "ImmutableRecurrenceExpression":
@@ -888,16 +894,17 @@ class RecurrenceSubproofEvidence:
     def digest(self) -> str:
         return RecurrenceDigestCodec.digest(self.schema_version, self.stable_key())
 
+    def json_items(self):
+        yield "proof_kind", self.proof_kind
+        yield "proposition_key", self.proposition_key
+        yield "proof_method", self.proof_method
+        yield "disposition", self.disposition
+        yield "dependencies", self.dependencies
+        yield "schema_version", self.schema_version
+        yield "digest", self.digest
+
     def to_dict(self) -> Mapping[str, Any]:
-        return {
-            "proof_kind": self.proof_kind,
-            "proposition_key": self.proposition_key,
-            "proof_method": self.proof_method,
-            "disposition": self.disposition,
-            "dependencies": self.dependencies,
-            "schema_version": self.schema_version,
-            "digest": self.digest,
-        }
+        return materialize(self)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "RecurrenceSubproofEvidence":
@@ -1007,15 +1014,16 @@ class RecurrenceValidationEvidence:
     def proof_result_digest(self) -> str:
         return RecurrenceDigestCodec.digest(self.schema_version, self.stable_key())
 
+    def json_items(self):
+        yield "seed_core_digest", self.seed_core_digest
+        yield "proposal_digest", self.proposal_digest
+        yield "function_recurrence_binding_digest", self.function_recurrence_binding_digest
+        yield "subproofs", each(self.subproofs)
+        yield "schema_version", self.schema_version
+        yield "proof_result_digest", self.proof_result_digest
+
     def to_dict(self) -> Mapping[str, Any]:
-        return {
-            "seed_core_digest": self.seed_core_digest,
-            "proposal_digest": self.proposal_digest,
-            "function_recurrence_binding_digest": self.function_recurrence_binding_digest,
-            "subproofs": [item.to_dict() for item in self.subproofs],
-            "schema_version": self.schema_version,
-            "proof_result_digest": self.proof_result_digest,
-        }
+        return materialize(self)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "RecurrenceValidationEvidence":

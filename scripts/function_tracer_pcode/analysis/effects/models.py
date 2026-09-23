@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
+from scripts.function_tracer_pcode.core.json_encoding import as_list, each, inline, materialize
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     CanonicalLocation,
@@ -107,32 +108,17 @@ class StoreEffectProvenance:
             ),
         )
 
+    def json_items(self):
+        yield "source_kind", self.source_kind
+        yield "producer_pcode_op_ref", self.producer_pcode_op_ref
+        yield "producer_block_ref", self.producer_block_ref
+        yield "call_target_ref", self.call_target_ref
+        yield "callee_effect_index", self.callee_effect_index
+        yield "nested_effect_provenance", self.nested_effect_provenance
+        yield "complete", self.is_complete()
+
     def to_dict(self) -> Dict[str, object]:
-        return {
-            "source_kind": self.source_kind,
-            "producer_pcode_op_ref": (
-                self.producer_pcode_op_ref.to_dict()
-                if self.producer_pcode_op_ref is not None
-                else None
-            ),
-            "producer_block_ref": (
-                self.producer_block_ref.to_dict()
-                if self.producer_block_ref is not None
-                else None
-            ),
-            "call_target_ref": (
-                self.call_target_ref.to_dict()
-                if self.call_target_ref is not None
-                else None
-            ),
-            "callee_effect_index": self.callee_effect_index,
-            "nested_effect_provenance": (
-                self.nested_effect_provenance.to_dict()
-                if self.nested_effect_provenance is not None
-                else None
-            ),
-            "complete": self.is_complete(),
-        }
+        return materialize(self)
 
 @dataclass
 class StoreEffect:
@@ -196,17 +182,18 @@ class UnsupportedCallEffectRef:
             int(self.order_key),
         )
 
+    def json_items(self):
+        yield "kind", "unsupported_call_effect"
+        yield "pcode_op_ref", self.pcode_op_ref
+        yield "target_ref", self.target_ref
+        yield "target_expr", self.target_expr
+        yield "arguments", each(self.arguments or ())
+        yield "path_conditions", each(self.path_conditions or ())
+        yield "reason", self.reason
+        yield "order_key", int(self.order_key)
+
     def to_dict(self) -> Dict[str, object]:
-        return {
-            "kind": "unsupported_call_effect",
-            "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
-            "target_ref": self.target_ref.to_dict() if self.target_ref is not None else None,
-            "target_expr": self.target_expr.to_dict() if self.target_expr is not None else None,
-            "arguments": [argument.to_dict() for argument in self.arguments or ()],
-            "path_conditions": [condition.to_dict() for condition in self.path_conditions or ()],
-            "reason": self.reason,
-            "order_key": int(self.order_key),
-        }
+        return materialize(self)
 
 @dataclass(frozen=True)
 class CallTargetResolutionEvidence:
@@ -254,17 +241,18 @@ class CallTargetResolutionEvidence:
             int(self.order_key),
         )
 
+    def json_items(self):
+        yield "kind", "call_target_resolution_evidence"
+        yield "pcode_op_ref", self.pcode_op_ref
+        yield "target_ref", self.target_ref
+        yield "target_expr", self.target_expr
+        yield "resolution_kind", self.resolution_kind
+        yield "path_condition_keys", self.path_condition_keys
+        yield "target_condition_keys", self.target_condition_keys
+        yield "order_key", int(self.order_key)
+
     def to_dict(self) -> Dict[str, object]:
-        return {
-            "kind": "call_target_resolution_evidence",
-            "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
-            "target_ref": self.target_ref.to_dict() if self.target_ref is not None else None,
-            "target_expr": self.target_expr.to_dict() if self.target_expr is not None else None,
-            "resolution_kind": self.resolution_kind,
-            "path_condition_keys": self.path_condition_keys,
-            "target_condition_keys": self.target_condition_keys,
-            "order_key": int(self.order_key),
-        }
+        return materialize(self)
 
 @dataclass(frozen=True)
 class CallSiteEffectSummaryEvidence:
@@ -342,46 +330,32 @@ class CallSiteEffectSummaryEvidence:
             self.source,
         )
 
+    def json_items(self):
+        yield "kind", "call_site_effect_summary_evidence"
+        yield "pcode_op_ref", self.pcode_op_ref
+        yield "target_ref", self.target_ref
+        yield "argument_keys", self.argument_keys
+        yield "path_condition_keys", self.path_condition_keys
+        yield "summary_status", self.summary_status
+        yield "memory_effect_count", int(self.memory_effect_count)
+        yield "has_unsupported_nested_call", bool(self.has_unsupported_nested_call)
+        yield "incomplete_reasons", self.incomplete_reasons
+        yield "callee_control_profile_key", self.callee_control_profile_key
+        yield "callee_ordered_scalar_store_candidate", bool(self.callee_ordered_scalar_store_candidate)
+        yield "callee_cfg_edge_keys", self.callee_cfg_edge_keys
+        yield "callee_recursive_scc_proven", bool(self.callee_recursive_scc_proven)
+        yield "callee_recursive_scc_identity", self.callee_recursive_scc_identity
+        yield "callee_recursive_scc_member_keys", self.callee_recursive_scc_member_keys
+        yield "return_summary_status", self.return_summary_status
+        yield "return_semantic_bit_width", self.return_semantic_bit_width
+        yield "return_signed", self.return_signed
+        yield "return_value_keys", self.return_value_keys
+        yield "return_guard_keys", self.return_guard_keys
+        yield "memory_effects", each(self.memory_effects, _store_effect_source)
+        yield "source", self.source
+
     def to_dict(self) -> Dict[str, object]:
-        return {
-            "kind": "call_site_effect_summary_evidence",
-            "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
-            "target_ref": self.target_ref.to_dict() if self.target_ref is not None else None,
-            "argument_keys": self.argument_keys,
-            "path_condition_keys": self.path_condition_keys,
-            "summary_status": self.summary_status,
-            "memory_effect_count": int(self.memory_effect_count),
-            "has_unsupported_nested_call": bool(self.has_unsupported_nested_call),
-            "incomplete_reasons": self.incomplete_reasons,
-            "callee_control_profile_key": self.callee_control_profile_key,
-            "callee_ordered_scalar_store_candidate": bool(
-                self.callee_ordered_scalar_store_candidate
-            ),
-            "callee_cfg_edge_keys": self.callee_cfg_edge_keys,
-            "callee_recursive_scc_proven": bool(self.callee_recursive_scc_proven),
-            "callee_recursive_scc_identity": self.callee_recursive_scc_identity,
-            "callee_recursive_scc_member_keys": self.callee_recursive_scc_member_keys,
-            "return_summary_status": self.return_summary_status,
-            "return_semantic_bit_width": self.return_semantic_bit_width,
-            "return_signed": self.return_signed,
-            "return_value_keys": self.return_value_keys,
-            "return_guard_keys": self.return_guard_keys,
-            "memory_effects": [
-                {
-                    "location": effect.location.to_dict(),
-                    "value": effect.value.to_dict(),
-                    "conditions": [item.to_dict() for item in effect.conditions],
-                    "order_key": int(effect.order_key),
-                    "provenance": (
-                        effect.provenance.to_dict()
-                        if effect.provenance is not None
-                        else None
-                    ),
-                }
-                for effect in self.memory_effects
-            ],
-            "source": self.source,
-        }
+        return materialize(self)
 
 @dataclass(frozen=True)
 class FunctionControlEffectProfile:
@@ -511,52 +485,61 @@ class FunctionControlEffectProfile:
             bool(self.phase2_memory_free_scalar_candidate),
         )
 
+    def json_items(self):
+        yield "block_count", int(self.block_count)
+        yield "pcode_op_count", int(self.pcode_op_count)
+        yield "return_block_count", int(self.return_block_count)
+        yield "pcode_enumeration_complete", bool(self.pcode_enumeration_complete)
+        yield "cfg_edges_complete", bool(self.cfg_edges_complete)
+        yield "cfg_acyclic", bool(self.cfg_acyclic)
+        yield "terminal_return_coverage_complete", bool(self.terminal_return_coverage_complete)
+        yield "load_count", int(self.load_count)
+        yield "store_count", int(self.store_count)
+        yield "call_count", int(self.call_count)
+        yield "callind_count", int(self.callind_count)
+        yield "callother_count", int(self.callother_count)
+        yield "branchind_count", int(self.branchind_count)
+        yield "float_op_count", int(self.float_op_count)
+        yield "pcode_after_return_count", int(self.pcode_after_return_count)
+        yield "abnormal_terminal_block_count", int(self.abnormal_terminal_block_count)
+        yield "call_like_pcode_op_keys", self.call_like_pcode_op_keys
+        yield "call_like_identity_complete", bool(self.call_like_identity_complete)
+        yield "function_identity_key", self.function_identity_key
+        yield "direct_call_target_keys", self.direct_call_target_keys
+        yield "call_graph_edges_complete", bool(self.call_graph_edges_complete)
+        yield "recursive_scc_proven", bool(self.recursive_scc_proven)
+        yield "recursive_scc_identity", self.recursive_scc_identity
+        yield "recursive_scc_member_keys", self.recursive_scc_member_keys
+        yield "phase2_unsafe_mnemonics", as_list(self.phase2_unsafe_mnemonics)
+        yield "region_entry_block_key", self.region_entry_block_key
+        yield "region_exit_block_keys", self.region_exit_block_keys
+        yield "region_block_keys", self.region_block_keys
+        yield "region_cfg_edge_keys", self.region_cfg_edge_keys
+        yield "region_pcode_op_keys", self.region_pcode_op_keys
+        yield "region_live_in_keys", self.region_live_in_keys
+        yield "region_live_out_keys", self.region_live_out_keys
+        yield "region_identity_complete", bool(self.region_identity_complete)
+        yield "region_single_entry", bool(self.region_single_entry)
+        yield "region_all_exits_enumerated", bool(self.region_all_exits_enumerated)
+        yield "region_cross_edges_enumerated", bool(self.region_cross_edges_enumerated)
+        yield "unsupported_mnemonics", as_list(self.unsupported_mnemonics)
+        yield "phase2_memory_free_scalar_candidate", bool(self.phase2_memory_free_scalar_candidate)
+        yield "phase3_ordered_scalar_store_candidate", bool(self.phase3_ordered_scalar_store_candidate)
+
     def to_dict(self) -> Dict[str, object]:
-        return {
-            "block_count": int(self.block_count),
-            "pcode_op_count": int(self.pcode_op_count),
-            "return_block_count": int(self.return_block_count),
-            "pcode_enumeration_complete": bool(self.pcode_enumeration_complete),
-            "cfg_edges_complete": bool(self.cfg_edges_complete),
-            "cfg_acyclic": bool(self.cfg_acyclic),
-            "terminal_return_coverage_complete": bool(self.terminal_return_coverage_complete),
-            "load_count": int(self.load_count),
-            "store_count": int(self.store_count),
-            "call_count": int(self.call_count),
-            "callind_count": int(self.callind_count),
-            "callother_count": int(self.callother_count),
-            "branchind_count": int(self.branchind_count),
-            "float_op_count": int(self.float_op_count),
-            "pcode_after_return_count": int(self.pcode_after_return_count),
-            "abnormal_terminal_block_count": int(self.abnormal_terminal_block_count),
-            "call_like_pcode_op_keys": self.call_like_pcode_op_keys,
-            "call_like_identity_complete": bool(self.call_like_identity_complete),
-            "function_identity_key": self.function_identity_key,
-            "direct_call_target_keys": self.direct_call_target_keys,
-            "call_graph_edges_complete": bool(self.call_graph_edges_complete),
-            "recursive_scc_proven": bool(self.recursive_scc_proven),
-            "recursive_scc_identity": self.recursive_scc_identity,
-            "recursive_scc_member_keys": self.recursive_scc_member_keys,
-            "phase2_unsafe_mnemonics": list(self.phase2_unsafe_mnemonics),
-            "region_entry_block_key": self.region_entry_block_key,
-            "region_exit_block_keys": self.region_exit_block_keys,
-            "region_block_keys": self.region_block_keys,
-            "region_cfg_edge_keys": self.region_cfg_edge_keys,
-            "region_pcode_op_keys": self.region_pcode_op_keys,
-            "region_live_in_keys": self.region_live_in_keys,
-            "region_live_out_keys": self.region_live_out_keys,
-            "region_identity_complete": bool(self.region_identity_complete),
-            "region_single_entry": bool(self.region_single_entry),
-            "region_all_exits_enumerated": bool(self.region_all_exits_enumerated),
-            "region_cross_edges_enumerated": bool(self.region_cross_edges_enumerated),
-            "unsupported_mnemonics": list(self.unsupported_mnemonics),
-            "phase2_memory_free_scalar_candidate": bool(
-                self.phase2_memory_free_scalar_candidate
-            ),
-            "phase3_ordered_scalar_store_candidate": bool(
-                self.phase3_ordered_scalar_store_candidate
-            ),
-        }
+        return materialize(self)
+
+def _store_effect_source(effect: "StoreEffect") -> object:
+    """`CallSiteEffectSummaryEvidence.memory_effects` の 1 要素の表示（固定個数の member）。"""
+
+    return inline(
+        ("location", effect.location),
+        ("value", effect.value),
+        ("conditions", each(effect.conditions)),
+        ("order_key", int(effect.order_key)),
+        ("provenance", effect.provenance),
+    )
+
 
 @dataclass
 class EffectSummary:

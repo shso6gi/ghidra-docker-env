@@ -217,6 +217,12 @@ def budget_policy_scope(policy: Optional[BudgetPolicy]) -> Iterator[BudgetPolicy
                 _SCOPES.pop()
             elif scope in _SCOPES:
                 del _SCOPES[_SCOPES.index(scope):]
+            outermost = not _SCOPES
+        if outermost:
+            # pair の終わり: walker の大きさの cache が持つ値への参照を手放す
+            from scripts.function_tracer_pcode.core.json_encoding import clear_size_caches
+
+            clear_size_caches()
 
 
 def _active_scope() -> Optional[_BudgetScope]:
@@ -320,42 +326,20 @@ def raise_render_budget_exceeded(exc: Any, *, subject: Any) -> NoReturn:
 # ---------------------------------------------------------------------------
 
 
-def _opaque_leaf_text(value: Any) -> str:
-    """JSON 型でない葉（snapshot の codec が別途 canonical にする値）を数えるときの代用。
-
-    enum は値の文字列、それ以外は型名。中へは入らない（snapshot の表現に入る値は
-    解析 object の `to_dict` が作った JSON 型が基本で、ここに来るのは enum などの
-    小さい葉だけ）。
-    """
-
-    raw = getattr(value, "value", None) if isinstance(value, Enum) else None
-    return raw if isinstance(raw, str) else type(value).__qualname__
-
-
-def _opaque_leaf_bytes(value: Any) -> int:
-    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
-
-    return RESULT_JSON_POLICY.string_bytes(_opaque_leaf_text(value))
-
-
 class SerializationWork:
     """1 回の直列化（解析 1 件分の snapshot など、1 つの出力になる単位）の作業量。
 
-    **snapshot 側の唯一の aggregate**。その単位の表現を作る producer は、作る前か
-    record 1 件を作った直後に、必ずここを通す:
+    **snapshot 側の唯一の aggregate**。`core/json_encoding.JsonBudget` と同じ interface
+    （walker が数えた byte を `charge` で受け取り、sized leaf の大きさを `tree` で作る前に
+    求める）で、上限を超えたら pair terminal な限界にする（`exceeded`）。
 
-    * `tree(expr)` — 式の木表現。DAG のまま大きさを見積もり（distinct node ごとに
-      1 回、`core/expression.estimate_legacy_dict_bytes`）、byte と distinct node を
-      足して予算と比べてから、木を作る。指数的に大きい木は作られない。
-    * `value(v)` — 既に在る値（list / dict / 文字列）。写す前に、要素 1 つずつ
-      書き出し器（`JsonEncodingPolicy.measure_elements`）で数える。予算を超えた
-      時点で残りの要素を数えない（写さない）。
-    * `record(build)` / `records(items, build)` — record 1 件分の表現を作らせ、
-      書き出し器で 1 回で数える。中の木は `tree` が数え済みなので、その byte を
-      引く（木の byte は書き出し器の byte と等しい）。codec が木を別の形へ写した
-      record だけは、写した側を避けて辿る。列は 1 件ずつなので、超えた時点で
-      残りの record を作らない。**eager に作るのは record 1 件分まで**。
-    * `object_framing(mapping)` — 値を別に数えた object の括弧・区切り・key。
+    * 解析の表現（`FunctionReturnAnalysis.to_dict()` など）は walker が record の
+      `json_items()` から 1 要素ずつ引き出し、byte をここへ足しながら作る。超えた時点で
+      残りを作らない（作るのは残り予算 + 気付いた 1 要素まで）。
+    * 式の木（sized leaf）は DAG のまま大きさを求め（`Expression.__json_tree_bytes__`）、
+      byte と distinct node を足して予算と比べてから作る。指数的に大きい木は作られない。
+    * snapshot の codec（`SnapshotFingerprintCodec.freeze(value, budget=work)`）も、
+      写しながら同じ作業量へ足す。
 
     単位:
 
@@ -366,11 +350,19 @@ class SerializationWork:
     """
 
     __slots__ = (
-        "site", "enabled", "_target_parts", "tree_bytes", "value_bytes", "trees",
-        "records_built", "_meter", "_tree_ids", "_trees_kept", "_aliases", "_policy",
+        "site", "enabled", "_target_parts", "max_bytes", "consumed", "tree_bytes",
+        "trees", "_meter", "_policy", "terminal",
     )
 
-    def __init__(self, *, site: str, target_parts: Tuple[Any, ...], enabled: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        site: str,
+        target_parts: Tuple[Any, ...],
+        enabled: bool = True,
+        terminal: bool = True,
+        max_bytes: Optional[int] = None,
+    ) -> None:
         from scripts.function_tracer_pcode.core.semantic_snapshot import (
             SemanticGraphMeter,
         )
@@ -379,24 +371,77 @@ class SerializationWork:
         #: pair の予算 scope の外（部品単体の呼び出し）では数えない（従来どおり）
         self.enabled = bool(enabled)
         self._target_parts = tuple(target_parts)
-        self.tree_bytes = 0
-        self.value_bytes = 0
-        self.trees = 0
-        self.records_built = 0
-        self._meter = SemanticGraphMeter()
-        #: 数え済みの木表現（id と、id の再利用を防ぐための参照）
-        self._tree_ids: set = set()
-        self._trees_kept: List[Any] = []
-        #: 数え済みの木を別の形へ写した回数（`alias_tree`）
-        self._aliases = 0
         #: この直列化の間の policy（scope は直列化より長く生きるので変わらない）
         self._policy = active_budget_policy()
+        #: 超えたときに pair terminal な限界にするか（`False` は診断: `JsonBudgetExhausted`）
+        self.terminal = bool(terminal)
+        limit = self._policy.serialization_bytes if max_bytes is None else max_bytes
+        self.max_bytes = limit if self.enabled else None
+        self.consumed = 0
+        self.tree_bytes = 0
+        self.trees = 0
+        self._meter = SemanticGraphMeter()
+
+    # -- JsonBudget の interface -------------------------------------------------
+
+    def remaining(self) -> Optional[int]:
+        return None if self.max_bytes is None else self.max_bytes - self.consumed
+
+    def charge(self, size: int) -> None:
+        self.consumed += int(size)
+        if self.max_bytes is not None and self.consumed > self.max_bytes:
+            self.exceeded()
+
+    def exceeded(self) -> None:
+        if not self.terminal:
+            from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
+
+            raise JsonBudgetExhausted(consumed_bytes=self.consumed, max_bytes=self.max_bytes)
+        # target と evidence は限界にするときだけ組み立てる
+        enforce_budget(
+            BudgetKind.SERIALIZATION_BYTES, self.consumed, site=self.site,
+            target_key=self.target_key(), evidence=self._evidence(),
+        )
+
+    def tree(self, leaf: Any, *, build: bool) -> Tuple[Any, int]:
+        """sized leaf（式の木）の大きさを **作る前に** 求めて足し、`build` なら作る。"""
+
+        if not self.enabled:
+            return (leaf.__json_tree__() if build else None), 0
+        from scripts.function_tracer_pcode.core.json_encoding import (
+            LEGACY,
+            RESULT_JSON_POLICY,
+        )
+
+        size = leaf.__json_tree_bytes__(RESULT_JSON_POLICY, self.remaining())
+        built = None
+        if size is None:
+            # 見積りできない形（閉路など、未凍結の式の中だけ）: 作ってから数える
+            built = leaf.__json_tree__()
+            size = RESULT_JSON_POLICY.measure(built, max_bytes=self.remaining(), mode=LEGACY)
+        self.trees += 1
+        self.tree_bytes += int(size)
+        self.charge(size)
+        # 数えるのは予算の分まで（超えたと分かれば残りの node は辿らない）
+        self._meter.add_root(leaf, max_distinct=self._policy.serialization_nodes)
+        if self._policy.exceeds(BudgetKind.SERIALIZATION_NODES, self.distinct_nodes):
+            if not self.terminal:
+                from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
+
+                raise JsonBudgetExhausted(consumed_bytes=self.consumed, max_bytes=self.max_bytes)
+            enforce_budget(
+                BudgetKind.SERIALIZATION_NODES, self.distinct_nodes, site=self.site,
+                target_key=self.target_key(), evidence=self._evidence(),
+            )
+        if build and built is None:
+            built = leaf.__json_tree__()
+        return (built if build else None), size
 
     # -- 勘定 ----------------------------------------------------------------
 
     @property
     def total_bytes(self) -> int:
-        return self.tree_bytes + self.value_bytes
+        return self.consumed
 
     @property
     def distinct_nodes(self) -> int:
@@ -405,7 +450,7 @@ class SerializationWork:
     def remaining_bytes(self, policy: Optional[BudgetPolicy] = None) -> Optional[int]:
         policy = self._policy if policy is None else policy
         limit = policy.serialization_bytes
-        return None if limit is None else max(0, limit - self.total_bytes)
+        return None if limit is None else max(0, limit - self.consumed)
 
     def target_key(self) -> Tuple[str, str]:
         from scripts.function_tracer_pcode.core.semantic_snapshot import (
@@ -418,178 +463,16 @@ class SerializationWork:
         return (
             f"trees={self.trees}",
             f"tree_bytes={self.tree_bytes}",
-            f"value_bytes={self.value_bytes}",
-            f"records={self.records_built}",
+            f"value_bytes={self.consumed - self.tree_bytes}",
             f"distinct_nodes={self.distinct_nodes}",
         )
-
-    def _enforce(self) -> None:
-        policy = self._policy
-        for kind, observed in (
-            (BudgetKind.SERIALIZATION_BYTES, self.total_bytes),
-            (BudgetKind.SERIALIZATION_NODES, self.distinct_nodes),
-        ):
-            if policy.exceeds(kind, observed):
-                # target と evidence は限界にするときだけ組み立てる
-                enforce_budget(
-                    kind, observed, site=self.site,
-                    target_key=self.target_key(), evidence=self._evidence(),
-                )
 
     def observe(self) -> None:
         """この直列化の最終的な量を観測値へ残す（量は単調に増えるので最後の値が最大）。"""
 
         if self.enabled:
-            observe_budget_usage(BudgetKind.SERIALIZATION_BYTES, self.total_bytes, site=self.site)
+            observe_budget_usage(BudgetKind.SERIALIZATION_BYTES, self.consumed, site=self.site)
             observe_budget_usage(BudgetKind.SERIALIZATION_NODES, self.distinct_nodes, site=self.site)
-
-    # -- producer の入口 -------------------------------------------------------
-
-    def tree(self, expr: Any) -> Dict[str, Any]:
-        """式の木表現を、大きさを数えて予算と比べてから作る。"""
-
-        from scripts.function_tracer_pcode.core.expression import estimate_legacy_dict_bytes
-
-        if not self.enabled:
-            return expr._to_dict(set())
-        try:
-            size = estimate_legacy_dict_bytes(expr, max_bytes=self.remaining_bytes())
-        except (TypeError, ValueError):
-            size = None
-        if size is not None:
-            self.trees += 1
-            self.tree_bytes += int(size)
-            # 数えるのは予算の分まで（超えたと分かれば残りの node は辿らない）
-            self._meter.add_root(expr, max_distinct=self._policy.serialization_nodes)
-            self._enforce()
-        built = expr._to_dict(set())
-        if size is None:
-            # 見積りできない形（閉路・JSON にならない key）: 作った木をそのまま数える
-            size = self._measure(built, holds_trees=True)
-            self.trees += 1
-            self.tree_bytes += int(size)
-            self._enforce()
-        self._register_tree(built)
-        return built
-
-    def value(self, value: Any) -> Any:
-        """既に在る値の JSON byte 数を足す（写さない。超えたら限界）。値をそのまま返す。
-
-        要素 1 つずつ数え、予算を超えた時点で残りの要素を数えない。
-        """
-
-        if self.enabled:
-            self._count(value, holds_trees=False)
-        return value
-
-    def record(self, build: Callable[[], Any]) -> Any:
-        """record 1 件分の表現を作らせ、その byte 数を足す（中の木は数え直さない）。"""
-
-        trees_before = len(self._tree_ids)
-        tree_bytes_before = self.tree_bytes
-        aliases_before = self._aliases
-        built = build()
-        if not self.enabled:
-            return built
-        self.records_built += 1
-        # record 1 件は 1 回で書いて数える（record の表現は既に作ってある）
-        if len(self._tree_ids) == trees_before:
-            self._count(built, holds_trees=False, whole=True)
-        elif self._aliases == aliases_before:
-            # 中の木はこの record の間に作られ、byte は数え済み（木の byte は書き出し
-            # 器の byte と等しい）。record 全体を書いた byte から木の分を引く
-            self._count(
-                built, holds_trees=False, whole=True,
-                already=self.tree_bytes - tree_bytes_before,
-            )
-        else:
-            # 木を codec が別の形へ写した: 写した側を避けて辿る
-            self._count(built, holds_trees=True)
-        return built
-
-    def _measure(
-        self, value: Any, *, holds_trees: bool, already: int = 0, whole: bool = False,
-    ) -> int:
-        from scripts.function_tracer_pcode.core.json_encoding import (
-            RESULT_JSON_POLICY,
-            JsonBudgetExhausted,
-        )
-
-        remaining = self.remaining_bytes()
-        try:
-            if holds_trees:
-                return RESULT_JSON_POLICY.measure(
-                    value,
-                    max_bytes=remaining,
-                    exclude_ids=self._tree_ids,
-                    opaque_bytes=_opaque_leaf_bytes,
-                )
-            limit = None if remaining is None else remaining + already
-            return RESULT_JSON_POLICY.measure_elements(
-                value, max_bytes=limit, opaque_text=_opaque_leaf_text, whole=whole,
-            ) - already
-        except JsonBudgetExhausted as exc:
-            return exc.consumed_bytes - already
-
-    def _count(
-        self, value: Any, *, holds_trees: bool, already: int = 0, whole: bool = False,
-    ) -> None:
-        self.value_bytes += int(self._measure(
-            value, holds_trees=holds_trees, already=already, whole=whole,
-        ))
-        self._enforce()
-
-    def records(self, items: Iterable[Any], build: Optional[Callable[[Any], Any]] = None) -> List[Any]:
-        """record の列を 1 件ずつ作る（超えた時点で残りを作らない）。
-
-        `build` を省くと各 item の `to_dict()`。
-        """
-
-        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
-
-        out: List[Any] = []
-        frame = RESULT_JSON_POLICY.container_frame_bytes
-        self._charge_raw(frame(0))
-        for item in items:
-            # 要素を 1 つ足すと増える framing（区切りの長さは policy だけが知る）
-            self._charge_raw(frame(len(out) + 1) - frame(len(out)))
-            out.append(self.record(
-                item.to_dict if build is None else (lambda item=item: build(item))
-            ))
-        return out
-
-    def object_framing(self, mapping: Mapping[str, Any]) -> Mapping[str, Any]:
-        """値を別に数えた object の、括弧・区切り・key の byte 数を足す（mapping を返す）。"""
-
-        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
-
-        if self.enabled:
-            self._charge_raw(
-                RESULT_JSON_POLICY.container_frame_bytes(len(mapping))
-                + sum(RESULT_JSON_POLICY.member_bytes(key, 0) for key in mapping)
-            )
-        return mapping
-
-    def _charge_raw(self, size: int) -> None:
-        if not self.enabled:
-            return
-        self.value_bytes += int(size)
-        self._enforce()
-
-    def alias_tree(self, source: Any, derived: Any) -> None:
-        """数え済みの木 `source` から作った別の表現 `derived` も数え済みにする。
-
-        snapshot の codec が木表現を canonical な tuple へ写すとき、写した側を
-        もう一度数えないために使う（大きさは元の木の byte 数で数えてある）。
-        """
-
-        if self.enabled and id(source) in self._tree_ids:
-            self._aliases += 1
-            self._register_tree(derived)
-
-    def _register_tree(self, built: Any) -> None:
-        self._tree_ids.add(id(built))
-        self._trees_kept.append(built)
 
 
 _SERIALIZATION = threading.local()
@@ -602,16 +485,15 @@ def active_serialization_work() -> Optional[SerializationWork]:
     return stack[-1] if stack else None
 
 
-def alias_serialized_tree(source: Any, derived: Any) -> None:
-    """今の作業量で数え済みの木 `source` から作った表現 `derived` を数え済みにする。"""
-
-    work = active_serialization_work()
-    if work is not None:
-        work.alias_tree(source, derived)
-
-
 @contextmanager
-def serialization_scope(*, site: str, target_parts: Tuple[Any, ...]) -> Iterator[SerializationWork]:
+def serialization_scope(
+    *,
+    site: str,
+    target_parts: Tuple[Any, ...],
+    terminal: bool = True,
+    max_bytes: Optional[int] = None,
+    enabled: Optional[bool] = None,
+) -> Iterator[SerializationWork]:
     """直列化 1 つ分の作業量を数える scope（入れ子は外側へ合流する）。
 
     解析 1 件分の表現を作る側（`FunctionReturnAnalysis.to_dict` /
@@ -629,7 +511,9 @@ def serialization_scope(*, site: str, target_parts: Tuple[Any, ...]) -> Iterator
         yield stack[-1]
         return
     work = SerializationWork(
-        site=site, target_parts=target_parts, enabled=budget_scope_is_active(),
+        site=site, target_parts=target_parts,
+        enabled=budget_scope_is_active() if enabled is None else enabled,
+        terminal=terminal, max_bytes=max_bytes,
     )
     stack.append(work)
     try:
@@ -677,5 +561,4 @@ __all__ = [
     "serialization_scope",
     "SerializationWork",
     "active_serialization_work",
-    "alias_serialized_tree",
 ]

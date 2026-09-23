@@ -1285,6 +1285,7 @@ class ProductionDualWritePilotConnector:
                     projection_factory=(
                         session.phase7_runtime_result.projection_factory
                     ),
+                    cause_occurrence=occurrences.get(receipt.occurrence_id),
                     diagnostic=_safe_projection_diagnostic(
                         build_projection_diagnostic,
                         receipt,

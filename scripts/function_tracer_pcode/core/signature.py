@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, TYPE_CHECKING, Tuple
+from scripts.function_tracer_pcode.core.json_encoding import as_dict, each, mapping_of, materialize
 
 if TYPE_CHECKING:
     from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
@@ -457,6 +458,30 @@ def clone_parameter_descriptor(
     return cloned
 
 
+def parameter_descriptor_source(param: Dict[str, Any]) -> Any:
+    """`clone_parameter_descriptor(param, include_data_type_obj=False)` と同じ値の JSON source。
+
+    複製を先に作らず、walker が member を 1 つずつ写す（Issue #22 PR-22-D）。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import pairs_of
+
+    return pairs_of(
+        ((key, value) for key, value in (param or {}).items() if key != "data_type_obj"),
+        _parameter_value_source,
+    )
+
+
+def _parameter_value_source(value: Any) -> Any:
+    from scripts.function_tracer_pcode.core.json_encoding import as_dict, as_list, raw
+
+    if isinstance(value, dict):
+        return as_dict(value)
+    if isinstance(value, list):
+        return as_list(value)
+    return raw(value)
+
+
 def _call_zero_arg(obj: Any, method_name: str) -> Any:
     """0 引数メソッドを安全に呼び出す。"""
     method = getattr(obj, method_name, None)
@@ -504,18 +529,18 @@ class ResolvedTypeSpec:
     source: str = "heuristic"
     data_type_path: Optional[str] = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
-            "type_name": self.type_name,
-            "source": self.source,
-        }
+    def json_items(self):
+        yield "type_name", self.type_name
+        yield "source", self.source
         if self.size_bytes is not None:
-            result["size_bytes"] = self.size_bytes
+            yield "size_bytes", self.size_bytes
         if self.is_signed is not None:
-            result["is_signed"] = self.is_signed
+            yield "is_signed", self.is_signed
         if self.data_type_path:
-            result["data_type_path"] = self.data_type_path
-        return result
+            yield "data_type_path", self.data_type_path
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
     @classmethod
     def from_dict(
@@ -857,25 +882,22 @@ class SignatureHypothesis:
             or bool(self.parameter_type_overrides)
         )
 
-    def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "return_type_override": self.return_type_override,
-            "parameter_type_overrides": dict(self.parameter_type_overrides),
-        }
+    def json_items(self):
+        yield "return_type_override", self.return_type_override
+        yield "parameter_type_overrides", as_dict(self.parameter_type_overrides)
         if self.resolved_return_override is not None:
-            result["resolved_return_override"] = self.resolved_return_override.to_dict()
+            yield "resolved_return_override", self.resolved_return_override
         if self.resolved_parameter_overrides:
-            result["resolved_parameter_overrides"] = {
-                index: spec.to_dict()
-                for index, spec in self.resolved_parameter_overrides.items()
-            }
+            yield "resolved_parameter_overrides", mapping_of(self.resolved_parameter_overrides)
         if self.phase:
-            result["phase"] = self.phase
+            yield "phase", self.phase
         if self.reason:
-            result["reason"] = self.reason
+            yield "reason", self.reason
         if self.evidence:
-            result["evidence"] = dict(self.evidence)
-        return result
+            yield "evidence", as_dict(self.evidence)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
     @classmethod
     def from_dict(
@@ -979,11 +1001,15 @@ class FunctionSignature:
         """完全なシグネチャをフォーマット（例: int func(int a, long b)）"""
         return f"{self.format_return_type()} {func_name}{self.format_parameters()}"
 
+    def json_items(self):
+        yield "return_type", self.format_return_type()
+        yield "parameters", (
+            None if self.parameters is None
+            else each(self.parameters, parameter_descriptor_source)
+        )
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "return_type": self.format_return_type(),
-            "parameters": parameters_without_runtime_objects(self.parameters),
-        }
+        return materialize(self)
 
     def clone(self) -> "FunctionSignature":
         return FunctionSignature(

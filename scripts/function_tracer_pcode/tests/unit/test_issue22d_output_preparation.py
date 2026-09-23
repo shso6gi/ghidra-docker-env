@@ -65,7 +65,9 @@ from scripts.function_tracer_pcode.core.errors import (
 )
 from scripts.function_tracer_pcode.core.expression import estimate_legacy_dict_bytes
 from scripts.function_tracer_pcode.core.json_encoding import (
+    LEGACY,
     RESULT_JSON_POLICY,
+    each,
     JsonBudgetExhausted,
     JsonEncodingPolicy,
     JsonOutputLimitExceeded,
@@ -132,7 +134,7 @@ def _analyze_from(analysis1, analysis2):
 
 
 class _CountingCounterexample:
-    """`to_dict()` を何回呼ばれたか数える反例（重い解析由来 payload の代役）。"""
+    """表現を何回引き出されたか数える反例（重い解析由来 payload の代役）。"""
 
     def __init__(self, payload):
         self.payload = payload
@@ -141,9 +143,14 @@ class _CountingCounterexample:
     def __bool__(self):
         return True
 
-    def to_dict(self):
+    def json_items(self):
         self.calls += 1
-        return dict(self.payload)
+        return iter(self.payload.items())
+
+    def to_dict(self):
+        from scripts.function_tracer_pcode.core.json_encoding import materialize
+
+        return materialize(self)
 
     def to_string(self, format_type="text"):
         return "counterexample"
@@ -466,7 +473,7 @@ def test_d5s_value_estimate_matches_the_encoder_for_every_character_class(policy
     ]
     for value in values:
         assert policy.measure(value) == _actual(value, policy)
-        assert policy.measure_elements(value) == _actual(value, policy)
+        assert policy.measure(value, mode=LEGACY) == _actual(value, policy)
         prepared = policy.prepare(value)
         # 準備した値は canonical な JSON（json.loads と同じ形）で、大きさは実際の byte
         assert json.dumps(prepared.value(), sort_keys=True) == json.dumps(
@@ -482,16 +489,18 @@ def test_d5s_value_estimate_matches_the_encoder_for_every_character_class(policy
 
 
 def test_d5s_estimate_saturates_and_stops_walking():
-    visits = []
+    pulled = []
 
-    def _count(_value):
-        visits.append(1)
-        return 10
+    def _elements():
+        for index in range(100_000):
+            pulled.append(index)
+            yield object()
 
-    payload = [object() for _ in range(100_000)]
+    # LEGACY は JSON 型でない葉を型名で数える。上限に届いた時点で残りを引き出さない
     with pytest.raises(JsonBudgetExhausted):
-        RESULT_JSON_POLICY.measure(payload, max_bytes=50, opaque_bytes=_count)
-    assert len(visits) < 10
+        RESULT_JSON_POLICY.measure(each(_elements()), max_bytes=50, mode=LEGACY)
+    assert len(pulled) < 10
+    payload = [object() for _ in range(100)]
     # 準備（出力）では JSON source でない値は数えずに拒む
     with pytest.raises(JsonValueRejected):
         RESULT_JSON_POLICY.prepare(payload, max_bytes=50)
@@ -705,7 +714,10 @@ def test_o1_the_authority_reason_replaces_the_legacy_one_everywhere(monkeypatch)
     canonical = _reason_ids(result)
     assert canonical and legacy_reason not in canonical
     prepared = result.prepared_semantic_payload
-    assert (legacy_reason, "S_TEST") in prepared.raw_limitation_evidence
+    rows = prepared.raw_limitation_evidence.value()
+    assert any(
+        row["reason_id"] == legacy_reason and row["stage"] == "S_TEST" for row in rows
+    ), rows
     payload = json.loads(build_final_result_envelope(result).text)
     assert [row["reason_id"] for row in payload["unknown_reasons"]] == canonical
     assert legacy_reason not in json.dumps(payload["unknown_reasons"])
@@ -1147,13 +1159,13 @@ def test_a_huge_diagnostic_is_replaced_by_a_marker_without_being_copied(monkeypa
     trace = _trace_with_attempts(20_000, final_smt="t" * 1024, events=20_000)
     result = _huge_result(debug_trace=trace, emit_debug_trace=True)
     views = []
-    original_view = Attempt.json_view
+    original_items = Attempt.json_items
 
-    def _counting_view(self):
+    def _counting_items(self):
         views.append(self)
-        return original_view(self)
+        return original_items(self)
 
-    monkeypatch.setattr(Attempt, "json_view", _counting_view)
+    monkeypatch.setattr(Attempt, "json_items", _counting_items)
     monkeypatch.setattr(
         DebugTrace, "to_dict", lambda self: pytest.fail("the whole trace was built"),
     )
@@ -1752,7 +1764,7 @@ def test_the_counted_effect_projection_equals_the_codec_projection():
         ):
             with serialization_scope(site="t", target_parts=("t",)) as work:
                 counted = _semantic_effect_summary_projection(effect_summary, work)
-                assert work.total_bytes > 0 and work.records_built > 0
+                assert work.total_bytes > 0
             inside = AnalysisSnapshot.from_function_analysis(analysis)
         assert counted == expected
         assert inside.semantic_fingerprint == outside.semantic_fingerprint
@@ -1771,14 +1783,14 @@ def test_a_huge_effect_summary_stops_the_snapshot_before_projecting_every_effect
     effect = analysis.effect_summary.effects[0]
     analysis.effect_summary.effects = [effect] * 50_000
     frozen = []
-    original = SnapshotFingerprintCodec.freeze.__func__
+    original = SnapshotFingerprintCodec._freeze.__func__
 
-    def _counting(cls, value):
+    def _counting(cls, value, meter):
         if value is effect:
             frozen.append(value)
-        return original(cls, value)
+        return original(cls, value, meter)
 
-    monkeypatch.setattr(SnapshotFingerprintCodec, "freeze", classmethod(_counting))
+    monkeypatch.setattr(SnapshotFingerprintCodec, "_freeze", classmethod(_counting))
     policy = BudgetPolicy(serialization_bytes=200_000, envelope_headroom_bytes=0)
     with pair_failure_scope(("huge-effects",), None), budget_policy_scope(policy):
         with pytest.raises(ExpressionSizeBudgetExceeded) as caught:

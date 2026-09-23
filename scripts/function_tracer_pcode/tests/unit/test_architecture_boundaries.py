@@ -1607,7 +1607,10 @@ _POLICY_FIELD_READERS = {
     "expression_nodes": {"semantics/transform/expander_multiequal.py"},
     "expansion_cases": set(),
     "serialization_nodes": set(),
-    "envelope_headroom_bytes": {"core/budget_policy.py", "checker/output_preparation.py"},
+    # 出力 schema が headroom の最小値を確かめる（checker 構築時）
+    "envelope_headroom_bytes": {
+        "core/budget_policy.py", "checker/output_preparation.py", "checker/output_schema.py",
+    },
 }
 
 
@@ -1780,18 +1783,24 @@ def test_the_output_option_is_read_once_when_the_output_is_prepared():
 
 
 # ---------------------------------------------------------------------------
-# live → prepared の変換境界（Issue #22 PR-22-D 修正）
+# live → prepared の変換境界（Issue #22 PR-22-D、3 回目の修正）
 #
-# 表現を作るのは `JsonEncodingPolicy.prepare`（出力）と `SerializationWork`
-# （snapshot）だけ。producer（`json_view` と出力 field の読み方）は参照と遅延
-# 構成子を返すだけで、表現を先に作らない — 同じ欠陥を field / producer を足すたびに
-# 入れ直さないための **規則**（一覧ではない）。
+# 表現を作るのは walker（`core/json_encoding._Walk`: 出力の `prepare` と `to_dict()` /
+# snapshot の `materialize`）だけ。record は `json_items()` で **source**（scalar・既存の
+# 値への参照・record・遅延構成子）を 1 つずつ返し、表現を先に作らない。field / record を
+# 足すたびに同じ欠陥を入れ直さないための **規則**（一覧ではない）:
+#
+# * J1 `json_items()` と出力 field の読み方は、内包表記・`list()` などの複製・`to_dict()`・
+#   `join` をしない（固定個数の scalar を作るのはよい）
+# * J2 record の層（core / analysis / semantics / smt / checker / proof）で `to_dict()` を
+#   持つ class は `json_items()` も持つ（例外は理由つきの固定の形の class だけ）
+# * J3 解析 1 件分の表現は `RESULT_JSON_POLICY.materialize(..., budget=work)` だけで作る
 # ---------------------------------------------------------------------------
 
 #: producer が呼んではいけない「表現を先に作る」操作
 _EAGER_METHODS = frozenset({
     "to_dict", "deepcopy", "copy", "dumps", "asdict", "materialize", "prepare",
-    "project_bounded",
+    "project_bounded", "join", "json_view",
 })
 _EAGER_BUILTINS = frozenset({"list", "dict", "tuple", "sorted", "set", "frozenset", "deepcopy", "asdict"})
 
@@ -1819,8 +1828,13 @@ def _output_field_rows(tree: ast.Module) -> List[ast.Call]:
     raise AssertionError("RESULT_FIELDS not found")
 
 
+#: 読み方の中で呼んでよい集計（authority 後に live な trace を読む診断。出力は TRUNCATE。
+#: builder 自身の有界化は PR-22-D の残件 — `docs` / PR 本文の残件表）
+_KNOWN_EAGER_READERS = frozenset({"RESULT_FIELDS[unknown_cause_aggregate]"})
+
+
 def _reader_nodes() -> List[Tuple[str, ast.AST]]:
-    """出力 field の読み方（lambda / 関数 / その内側の関数）と、全 `json_view`。"""
+    """出力 field の読み方（lambda / 関数）と、package の全 `json_items`。"""
     path = PACKAGE_ROOT / "checker/output_preparation.py"
     tree = _parse(path)
     functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
@@ -1835,66 +1849,112 @@ def _reader_nodes() -> List[Tuple[str, ast.AST]]:
             nodes.append((f"RESULT_FIELDS[{label}]", functions[reader.id]))
         elif isinstance(reader, ast.Call) and isinstance(reader.func, ast.Name):
             nodes.append((f"RESULT_FIELDS[{label}]", functions[reader.func.id]))
-    for name in ("lazy_record", "lazy_records"):
-        json_tree = _parse(PACKAGE_ROOT / "core/json_encoding.py")
-        nodes.extend(
-            (f"core/json_encoding.py:{name}", node) for node in json_tree.body
-            if isinstance(node, ast.FunctionDef) and node.name == name
-        )
-    diagnostics = _parse(PACKAGE_ROOT / "checker/diagnostics.py")
-    nodes.extend(
-        (f"checker/diagnostics.py:{node.name}", node) for node in diagnostics.body
-        if isinstance(node, ast.FunctionDef) and node.name in {"_result_diagnostics_view", "_attempt_rows"}
-    )
     for module in _module_files():
         for node in ast.walk(_parse(module)):
-            if isinstance(node, ast.FunctionDef) and node.name == "json_view":
-                nodes.append((f"{_relative(module)}:json_view@{node.lineno}", node))
+            if isinstance(node, ast.FunctionDef) and node.name in {"json_items", "_json_items"}:
+                nodes.append((f"{_relative(module)}:json_items@{node.lineno}", node))
     return nodes
 
 
 def test_producers_return_json_sources_and_never_build_the_representation():
-    """producer は参照と遅延構成子だけを返す（`to_dict()`・複製・内包表記をしない）。"""
+    """J1: producer は参照と遅延構成子だけを返す（`to_dict()`・複製・内包表記をしない）。"""
 
     nodes = _reader_nodes()
-    assert any("json_view" in label for label, _node in nodes)
+    assert sum(1 for label, _node in nodes if "json_items" in label) >= 80
     assert any(label.startswith("RESULT_FIELDS[debug_trace]") for label, _node in nodes)
     offenders = {
-        label: found for label, node in nodes if (found := _eager_constructions(node))
+        label: found for label, node in nodes
+        if label not in _KNOWN_EAGER_READERS and (found := _eager_constructions(node))
     }
     assert offenders == {}, offenders
 
 
+#: J2 の例外（`to_dict()` を持つが `json_items()` を持たない class）。理由つきで固定する。
+#: 出力・snapshot に届かない報告 / authority の内部表現と、pure layer の固定の形の record。
+_TO_DICT_WITHOUT_JSON_ITEMS = {
+    # authority の lifecycle / receipt の内部表現（出力は authority の payload 関数が作る）
+    "authority/lifecycle/pilot.py", "authority/process/supervisor.py",
+    # log を読む側（run 後の集計。live な解析 object を持たない）
+    "reporting/unknown_reason_summary.py", "reporting/timeout_hotspot_summary.py",
+    "reporting/root_blocker_summary.py", "reporting/result_summary.py",
+    "core/stage_journal_reader.py", "checker/cause_aggregate.py",
+    # proof の内部の証拠（出力へは producer が組んだ dict として入る）
+    "proof/recurrence_promotion.py", "proof/call_effect/preflight.py",
+    "proof/call_effect/candidates.py", "proof/call_effect/obligations.py",
+    "proof/formula/variable.py",
+    # 結果 object 自身（出力は `RESULT_FIELDS` が決める）
+    "checker/result.py",
+}
+
+
+def test_every_serialized_record_exposes_its_json_items():
+    """J2: record の層で `to_dict()` を持つ class は `json_items()` も持つ。"""
+
+    offenders = []
+    for path in _module_files():
+        relative = _relative(path)
+        if relative in _TO_DICT_WITHOUT_JSON_ITEMS or relative.startswith("tests/"):
+            continue
+        for node in ast.walk(_parse(path)):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            methods = {item.name for item in node.body if isinstance(item, ast.FunctionDef)}
+            if "to_dict" in methods and not ({"json_items", "__json_tree__"} & methods):
+                offenders.append(f"{relative}:{node.name}")
+    assert offenders == [], offenders
+
+
+def test_pure_layer_records_keep_to_dict_equal_to_their_json_items():
+    """pure layer（project を import しない）の固定の形の record は `to_dict()` を手で持つ。
+
+    その値が `json_items()` の LEGACY 表現と同じであることを固定する（schema は 1 つ）。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+    from scripts.function_tracer_pcode.proof.cause_identity import (
+        ProofRequirementContract,
+        ProofRequirementId,
+        UnaryCauseKey,
+    )
+    from scripts.function_tracer_pcode.proof.unknown_reason import (
+        UnknownRecoveryPlan,
+        UnknownRecoveryProofObligation,
+    )
+
+    obligation = UnknownRecoveryProofObligation.create(
+        "call_effect_summary", "stage", required_evidence=("a", "b"), description="d",
+    )
+    samples = (
+        obligation,
+        UnknownRecoveryPlan.create("unknown", (obligation,), target_regression="t"),
+        ProofRequirementId.create("k", ("target", 1), ProofRequirementContract("c")),
+        UnaryCauseKey("kind", ("domain",), ("object",), ("fact",)),
+    )
+    for sample in samples:
+        assert RESULT_JSON_POLICY.materialize(sample) == sample.to_dict(), type(sample)
+
+
 def test_the_snapshot_representation_is_built_only_through_the_work():
-    """解析 1 件分の表現は、値も record も `SerializationWork` を通す。"""
+    """J3: 解析 1 件分の表現は、walker が直列化の作業量（`SerializationWork`）で数えながら作る。"""
 
     analysis = _parse(PACKAGE_ROOT / "core/analysis.py")
     (body,) = [
         node for node in ast.walk(analysis)
-        if isinstance(node, ast.FunctionDef) and node.name == "_to_dict_with"
+        if isinstance(node, ast.FunctionDef) and node.name == "_materialize"
     ]
-    assert _eager_constructions(body) == [
-        found for found in _eager_constructions(body) if found.startswith("list()")
-    ], _eager_constructions(body)
-    # `list(...)` は `value(...)` で数えた既存の list の写しだけ
-    for inner in ast.walk(body):
-        if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "list":
-            (argument,) = inner.args
-            assert isinstance(argument, ast.Call) and getattr(argument.func, "id", None) == "value"
-    # dict の値は scalar 定数か `value` / `record` / `records` の結果だけ
-    allowed_calls = {"value", "record", "records", "int", "bool", "_counted_nested_tuple"}
-    for inner in ast.walk(body):
-        if isinstance(inner, ast.Dict):
-            for value in inner.values:
-                if isinstance(value, ast.IfExp):
-                    value = value.body
-                if isinstance(value, ast.Call):
-                    name = getattr(value.func, "id", None) or getattr(value.func, "attr", None)
-                    assert name in allowed_calls | {"list"}, ast.dump(value)[:120]
-        if isinstance(inner, ast.Assign) and isinstance(inner.targets[0], ast.Subscript):
-            value = inner.value
-            name = getattr(value.func, "id", None) if isinstance(value, ast.Call) else None
-            assert name in allowed_calls | {"list"}, ast.dump(value)[:120]
+    scopes = [
+        inner for inner in ast.walk(body)
+        if isinstance(inner, ast.Call) and getattr(inner.func, "id", None) == "serialization_scope"
+    ]
+    assert len(scopes) == 1
+    builds = [
+        inner for inner in ast.walk(body)
+        if isinstance(inner, ast.Call) and getattr(inner.func, "attr", None) == "materialize"
+    ]
+    assert len(builds) == 1
+    (build,) = builds
+    assert [keyword.arg for keyword in build.keywords] == ["budget"]
+    assert isinstance(build.keywords[0].value, ast.Name) and build.keywords[0].value.id == "work"
 
 
 def test_json_framing_and_separators_live_only_in_the_policy():

@@ -9,9 +9,12 @@ import json
 from types import MappingProxyType
 from typing import Any, Mapping, Tuple
 
-from scripts.function_tracer_pcode.core.budget_policy import (
-    alias_serialized_tree,
-    serialization_scope,
+from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+from scripts.function_tracer_pcode.core.json_encoding import (
+    LEGACY,
+    RESULT_JSON_POLICY,
+    cached_string_bytes,
+    is_json_record,
 )
 from scripts.function_tracer_pcode.proof.obligations.model import SemanticFactProvenance
 
@@ -73,38 +76,9 @@ def _semantic_effect_summary_projection(effect_summary: Any, work: Any = None) -
     # The dataclass projection is object-derived and includes stores, calls,
     # completeness reasons, and the function control/effect profile.  freeze()
     # rejects any opaque object that lacks a stable key instead of stringifying it.
-    if work is None or not _is_plain_dataclass(effect_summary):
-        return SnapshotFingerprintCodec.freeze(effect_summary)
-    # Issue #22 PR-22-D: 同じ投影（`freeze` の dataclass 分岐と同じ値）を、field の
-    # collection は 1 要素ずつ作って直列化の作業量へ足す。効果が大量でも、予算を
-    # 超えた時点で残りの要素を投影しない。
-    return (
-        effect_summary.__class__.__qualname__,
-        tuple(
-            (item.name, _freeze_counted(getattr(effect_summary, item.name), work))
-            for item in fields(effect_summary)
-        ),
-    )
-
-
-def _is_plain_dataclass(value: Any) -> bool:
-    """`freeze` が dataclass 分岐で投影する値か（stable key / to_dict を持たない）。"""
-
-    return is_dataclass(value) and not isinstance(value, type) and not any(
-        callable(getattr(value, name, None)) for name in ("stable_key", "to_key", "to_dict")
-    )
-
-
-def _freeze_counted(value: Any, work: Any) -> Any:
-    """`SnapshotFingerprintCodec.freeze(value)` と同じ値を、要素ごとに数えながら作る。"""
-
-    freeze = SnapshotFingerprintCodec.freeze
-    if isinstance(value, (tuple, list)):
-        return tuple(work.records(value, freeze))
-    if isinstance(value, Mapping):
-        items = tuple(work.records(value.items(), lambda pair: (freeze(pair[0]), freeze(pair[1]))))
-        return SnapshotFingerprintCodec.sorted_mapping_items(items)
-    return work.record(lambda: freeze(value))
+    # Issue #22 PR-22-D: 投影は写しながら直列化の作業量へ足す（`freeze(budget=work)`）。
+    # 効果が大量でも、予算を超えた時点で残りを投影しない。
+    return SnapshotFingerprintCodec.freeze(effect_summary, budget=work)
 
 
 def _classify_analysis_notes(notes: Any) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
@@ -127,41 +101,108 @@ class SnapshotFingerprintCodec:
     """Canonicalizes semantic DTO data without stringifying opaque objects."""
 
     @classmethod
-    def freeze(cls, value: Any) -> Any:
+    def freeze(cls, value: Any, *, budget: Any = None) -> Any:
+        """値の canonical な写し。`budget` を渡すと、写す値の byte を写しながら足す。
+
+        `budget`（`JsonBudget` の interface、snapshot では `SerializationWork`）は写した
+        葉と容器の区切りごとに数え、超えた時点で残りを写さない。record の `to_dict()`
+        は walker が同じ `budget` で数えながら作る（作ってから数えない）。
+        """
+
+        if budget is None:
+            return cls._freeze(value, None)
+        return cls._freeze(value, _FreezeMeter(budget))
+
+    @classmethod
+    def _freeze(cls, value: Any, meter: Any) -> Any:
         if value is None or isinstance(value, (bool, int, float, str)):
+            if meter is not None:
+                meter.scalar(value)
             return value
         if isinstance(value, Enum):
+            if meter is not None:
+                meter.frame(2)
+                meter.scalar(value.__class__.__qualname__)
+                meter.scalar(value.value)
             return (value.__class__.__qualname__, value.value)
         if isinstance(value, bytes):
+            if meter is not None:
+                meter.frame(2)
+                meter.scalar("bytes")
+                meter.scalar_bytes(2 * len(value) + 2)
             return ("bytes", value.hex())
         if isinstance(value, Mapping):
-            items = tuple((cls.freeze(key), cls.freeze(item)) for key, item in value.items())
+            if meter is not None:
+                meter.frame(len(value))
+            items = tuple(
+                cls._pair(cls._freeze(key, meter), cls._freeze(item, meter), meter, key_counted=True)
+                for key, item in value.items()
+            )
             return cls.sorted_mapping_items(items)
         if isinstance(value, (tuple, list)):
-            return tuple(cls.freeze(v) for v in value)
+            if meter is not None:
+                meter.frame(len(value))
+            return tuple(cls._freeze(v, meter) for v in value)
         if isinstance(value, (set, frozenset)):
-            return tuple(sorted((cls.freeze(v) for v in value), key=repr))
+            if meter is not None:
+                meter.frame(len(value))
+            return tuple(sorted((cls._freeze(v, meter) for v in value), key=repr))
         stable_key = getattr(value, "stable_key", None)
         if callable(stable_key):
-            return (value.__class__.__qualname__, cls.freeze(stable_key()))
+            return cls._tagged(value, cls._freeze_key(stable_key(), meter), meter)
         to_key = getattr(value, "to_key", None)
         if callable(to_key):
-            return (value.__class__.__qualname__, cls.freeze(to_key()))
+            return cls._tagged(value, cls._freeze_key(to_key(), meter), meter)
         to_dict = getattr(value, "to_dict", None)
         if callable(to_dict):
-            built = to_dict()
-            frozen = cls.freeze(built)
-            # Issue #22 PR-22-D: 木表現を写した側は、元の木として数え済み
-            alias_serialized_tree(built, frozen)
-            return (value.__class__.__qualname__, frozen)
+            if meter is not None and is_json_record(value):
+                # walker が `budget` で数えながら作る。写しは数え済みの値から作る
+                built = RESULT_JSON_POLICY.materialize(value, budget=meter.budget)
+                return cls._tagged(value, cls._freeze(built, None), meter)
+            return cls._tagged(value, cls._freeze(to_dict(), meter), meter)
         if is_dataclass(value):
-            return (
-                value.__class__.__qualname__,
-                tuple((f.name, cls.freeze(getattr(value, f.name))) for f in fields(value)),
+            if meter is not None:
+                meter.frame(len(fields(value)))
+            return cls._tagged(
+                value,
+                tuple(
+                    cls._pair(f.name, cls._freeze(getattr(value, f.name), meter), meter)
+                    for f in fields(value)
+                ),
+                meter,
             )
         raise TypeError(
             f"opaque object {value.__class__.__qualname__} has no object-derived stable identity"
         )
+
+    @classmethod
+    def _freeze_key(cls, key: Any, meter: Any) -> Any:
+        """identity key（`stable_key()` / `to_key()` の値）の写し。
+
+        key は同じ値が何度も現れる（snapshot ごとに同じ効果を投影する）ので、大きさは
+        walker が数え（tuple だけの部分木は pair の間 cache）、予算に収まってから写す。
+        """
+
+        if meter is None:
+            return cls._freeze(key, None)
+        meter.count_value(key)
+        return cls._freeze(key, None)
+
+    @staticmethod
+    def _pair(key: Any, item: Any, meter: Any, *, key_counted: bool = False) -> Tuple[Any, Any]:
+        if meter is not None:
+            meter.frame(2)
+            if not key_counted:
+                meter.scalar(key)
+        return (key, item)
+
+    @staticmethod
+    def _tagged(value: Any, frozen: Any, meter: Any) -> Tuple[str, Any]:
+        name = value.__class__.__qualname__
+        if meter is not None:
+            meter.frame(2)
+            meter.scalar(name)
+        return (name, frozen)
 
     @classmethod
     def sorted_mapping_items(cls, items: Tuple[Tuple[Any, Any], ...]) -> Tuple[Tuple[Any, Any], ...]:
@@ -181,6 +222,45 @@ class SnapshotFingerprintCodec:
         frozen = cls.freeze(value)
         payload = json.dumps(frozen, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+class _FreezeMeter:
+    """`freeze(budget=...)` が写した値の byte を `budget` へ足す（写しの JSON の大きさ）。"""
+
+    __slots__ = ("budget", "_policy")
+
+    def __init__(self, budget: Any) -> None:
+        self.budget = budget
+        self._policy = RESULT_JSON_POLICY
+
+    def frame(self, count: int) -> None:
+        self.budget.charge(self._policy.container_frame_bytes(count))
+
+    def scalar(self, value: Any) -> None:
+        policy = self._policy
+        if type(value) is str:
+            size = cached_string_bytes(policy, value)
+        elif value is None or value is True:
+            size = 4
+        elif value is False:
+            size = 5
+        elif isinstance(value, str):
+            size = policy.string_bytes(value, max_bytes=self.budget.remaining())
+        elif isinstance(value, int):
+            size = len(int.__repr__(int(value)))
+        elif isinstance(value, float):
+            size = len(float.__repr__(float(value)))
+        else:
+            size = policy.string_bytes(type(value).__qualname__)
+        self.budget.charge(size)
+
+    def scalar_bytes(self, size: int) -> None:
+        self.budget.charge(size)
+
+    def count_value(self, value: Any) -> None:
+        """既に在る値（identity key）の JSON byte を、写す前に数えて足す。"""
+
+        self._policy.count_into(value, self.budget, mode=LEGACY)
 
 
 #: snapshot 1 つ分の直列化の作業量を数える観測点。

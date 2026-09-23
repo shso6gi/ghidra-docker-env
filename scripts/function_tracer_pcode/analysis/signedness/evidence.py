@@ -4,6 +4,7 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Dict, Optional, Any, FrozenSet
+from scripts.function_tracer_pcode.core.json_encoding import bounded_summary, counts_max_bytes, each, materialize
 
 
 class SignednessType(Enum):
@@ -52,6 +53,13 @@ FASTPATH_UNSIGNED_OPCODES: FrozenSet[str] = frozenset({
 })
 
 
+#: `SignednessEvidence.get_summary()` / opcode 別件数の JSON byte 数の上限（登録から求める）
+_SUMMARY_MAX_BYTES = counts_max_bytes(
+    ("signed_strong", "signed_medium", "unsigned", "ignored", "excluded_fastpath")
+)
+_OPCODE_COUNTS_MAX_BYTES = counts_max_bytes(OPCODE_EVIDENCE_MAP)
+
+
 @dataclass
 class PcodeEvidence:
     """単一のP-code証拠"""
@@ -62,18 +70,18 @@ class PcodeEvidence:
     excluded: bool = False  # fast-path として除外されたか
     exclusion_reason: Optional[str] = None  # 除外理由
     
-    def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "opcode": self.opcode,
-            "category": self.category.value,
-            "address": self.address,
-        }
+    def json_items(self):
+        yield "opcode", self.opcode
+        yield "category", self.category.value
+        yield "address", self.address
         if self.context:
-            result["context"] = self.context
+            yield "context", self.context
         if self.excluded:
-            result["excluded"] = True
-            result["exclusion_reason"] = self.exclusion_reason
-        return result
+            yield "excluded", True
+            yield "exclusion_reason", self.exclusion_reason
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
 
 @dataclass
@@ -159,20 +167,21 @@ class SignednessEvidence:
             counts[ev.opcode] = counts.get(ev.opcode, 0) + 1
         return counts
     
-    def to_dict(self) -> Dict[str, Any]:
-        """辞書形式に変換"""
-        result = {
-            "result": self.result.value,
-            "summary": self.get_summary(),
-            "opcode_counts": self.get_opcode_counts(),
-            "signed_strong": [e.to_dict() for e in self.signed_strong],
-            "signed_medium": [e.to_dict() for e in self.signed_medium],
-            "unsigned": [e.to_dict() for e in self.unsigned],
-        }
-        
+    def json_items(self):
+        # 件数の object は key が有限の登録（証拠の分類 / `OPCODE_EVIDENCE_MAP`）に
+        # 限られるので、登録から求めた上限つきの集計として渡す
+        yield "result", self.result.value
+        yield "summary", bounded_summary(self.get_summary, _SUMMARY_MAX_BYTES)
+        yield "opcode_counts", bounded_summary(self.get_opcode_counts, _OPCODE_COUNTS_MAX_BYTES)
+        yield "signed_strong", each(self.signed_strong)
+        yield "signed_medium", each(self.signed_medium)
+        yield "unsigned", each(self.unsigned)
         if self.excluded_fastpath:
-            result["excluded_fastpath"] = [e.to_dict() for e in self.excluded_fastpath]
-            result["excluded_opcode_counts"] = self.get_excluded_opcode_counts()
-        
-        return result
+            yield "excluded_fastpath", each(self.excluded_fastpath)
+            yield "excluded_opcode_counts", bounded_summary(
+                self.get_excluded_opcode_counts, _OPCODE_COUNTS_MAX_BYTES,
+            )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
     

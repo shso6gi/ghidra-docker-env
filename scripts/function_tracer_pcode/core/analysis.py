@@ -15,8 +15,18 @@ if TYPE_CHECKING:
     from scripts.function_tracer_pcode.analysis.signedness import SignednessEvidence
     from scripts.function_tracer_pcode.analysis.effects.summary import EffectSummary
     from scripts.function_tracer_pcode.core.signature import SignatureHypothesis, FunctionSignature
+from scripts.function_tracer_pcode.core.json_encoding import (
+    RESULT_JSON_POLICY,
+    as_dict,
+    as_list,
+    each,
+    materialize,
+    nested,
+    pairs_of,
+)
 from scripts.function_tracer_pcode.core.signature import (
     clone_parameter_descriptor,
+    parameter_descriptor_source,
     get_data_type_display_name,
     get_declared_type_size_bits,
     is_void_data_type,
@@ -50,28 +60,8 @@ def _jsonable_nested_tuple(value: Any) -> Any:
     return value
 
 
-def _parameter_without_runtime_objects(parameter: Any) -> Any:
-    """`core.signature.parameters_without_runtime_objects` の 1 要素分（要素ごとに数える）。"""
-
-    return clone_parameter_descriptor(parameter, include_data_type_obj=False)
 
 
-def _counted_nested_tuple(work: Any, value: Any) -> Any:
-    """`_jsonable_nested_tuple(value)` と同じ値を、collection なら要素ごとに数えて作る。
-
-    Issue #22 PR-22-D: collection 全体を先に写してから数えると、要素が大量のとき
-    に予算より先に巨大な写しができる。要素 1 つずつ `work` へ足すので、超えた時点で
-    残りを写さない。
-    """
-
-    if isinstance(value, (tuple, list)):
-        return work.records(value, _jsonable_nested_tuple)
-    if isinstance(value, dict):
-        return work.object_framing({
-            key: work.record(lambda item=item: _jsonable_nested_tuple(item))
-            for key, item in value.items()
-        })
-    return work.record(lambda: _jsonable_nested_tuple(value))
 
 
 def _stable_json_digest(value: Any) -> str:
@@ -156,16 +146,17 @@ class ReturnPathEvidence:
             self.guard_rewrite_proof_keys,
         )
 
+    def json_items(self):
+        yield "schema_version", int(self.schema_version)
+        yield "terminal_op_ref", self.terminal_op_ref
+        yield "coverage_status", self.coverage_status
+        yield "path_block_keys", nested(self.path_block_keys)
+        yield "path_guard_keys", nested(self.path_guard_keys)
+        yield "pruning_proof_keys", nested(self.pruning_proof_keys)
+        yield "guard_rewrite_proof_keys", nested(self.guard_rewrite_proof_keys)
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "schema_version": int(self.schema_version),
-            "terminal_op_ref": self.terminal_op_ref.to_dict() if self.terminal_op_ref is not None else None,
-            "coverage_status": self.coverage_status,
-            "path_block_keys": _jsonable_nested_tuple(self.path_block_keys),
-            "path_guard_keys": _jsonable_nested_tuple(self.path_guard_keys),
-            "pruning_proof_keys": _jsonable_nested_tuple(self.pruning_proof_keys),
-            "guard_rewrite_proof_keys": _jsonable_nested_tuple(self.guard_rewrite_proof_keys),
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -286,52 +277,43 @@ class ReturnInfo:
         """return site の安定識別子を返す。"""
         return self.pcode_identity or self.address
     
-    def to_dict(self) -> Dict:
-        result = {
-            "address": self.address,
-            "value": self.value.to_dict(),
-            "conditions": [c.to_dict() for c in self.conditions],
-            "branch_index": self.branch_index,
-        }
+    def json_items(self):
+        yield "address", self.address
+        yield "value", self.value
+        yield "conditions", each(self.conditions)
+        yield "branch_index", self.branch_index
         if self.pcode_identity is not None:
-            result["pcode_identity"] = self.pcode_identity
+            yield "pcode_identity", self.pcode_identity
         if self.pcode_order is not None:
-            result["pcode_order"] = self.pcode_order
+            yield "pcode_order", self.pcode_order
         if self.pcode_time is not None:
-            result["pcode_time"] = self.pcode_time
+            yield "pcode_time", self.pcode_time
         if self.pcode_op_ref is not None:
-            result["pcode_op_ref"] = self.pcode_op_ref.to_dict()
+            yield "pcode_op_ref", self.pcode_op_ref
         if self.return_value_pcode_op_refs:
-            result["return_value_pcode_op_refs"] = [
-                ref.to_dict() for ref in self.return_value_pcode_op_refs
-            ]
+            yield "return_value_pcode_op_refs", each(self.return_value_pcode_op_refs)
         if self.return_value_flow_certificate is not None:
-            result["return_value_flow_certificate"] = _jsonable_nested_tuple(
-                self.return_value_flow_certificate.stable_key()
-            )
+            # identity の owner（`stable_key`）が作る key をそのまま写す
+            yield "return_value_flow_certificate", nested(self.return_value_flow_certificate.stable_key())
         if self.return_kind != "exact":
-            result["return_kind"] = self.return_kind
+            yield "return_kind", self.return_kind
         if self.retained_exact_return_ref is not None:
-            result["retained_exact_return_ref"] = _jsonable_nested_tuple(
-                self.retained_exact_return_ref
-            )
+            yield "retained_exact_return_ref", nested(self.retained_exact_return_ref)
         if self.acceptance_status is not None:
-            result["acceptance_status"] = self.acceptance_status
+            yield "acceptance_status", self.acceptance_status
         if self.summary_candidate_id is not None:
-            result["summary_candidate_id"] = _jsonable_nested_tuple(self.summary_candidate_id)
+            yield "summary_candidate_id", nested(self.summary_candidate_id)
         if self.summary_candidate_source_key is not None:
-            result["summary_candidate_source_key"] = _jsonable_nested_tuple(
-                self.summary_candidate_source_key
-            )
+            yield "summary_candidate_source_key", nested(self.summary_candidate_source_key)
         if self.summary_transition_evidence_key is not None:
-            result["summary_transition_evidence_key"] = _jsonable_nested_tuple(
-                self.summary_transition_evidence_key
-            )
+            yield "summary_transition_evidence_key", nested(self.summary_transition_evidence_key)
         if self.validation_blockers:
-            result["validation_blockers"] = list(self.validation_blockers)
+            yield "validation_blockers", as_list(self.validation_blockers)
         if self.return_path_evidence is not None:
-            result["return_path_evidence"] = self.return_path_evidence.to_dict()
-        return result
+            yield "return_path_evidence", self.return_path_evidence
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
 
 @dataclass
@@ -344,18 +326,18 @@ class ReturnOutcome:
     provenance: Dict[str, Any] = field(default_factory=dict)
     return_info: Optional[ReturnInfo] = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "kind": "return",
-            "guard": [condition.to_dict() for condition in self.guard],
-            "value": self.value.to_dict(),
-            "provenance": _jsonable_nested_tuple(self.provenance),
-        }
+    def json_items(self):
+        yield "kind", "return"
+        yield "guard", each(self.guard)
+        yield "value", self.value
+        yield "provenance", nested(self.provenance)
         if self.storage is not None:
-            result["storage"] = _jsonable_nested_tuple(self.storage)
+            yield "storage", nested(self.storage)
         if self.return_info is not None:
-            result["return_info"] = self.return_info.to_dict()
-        return result
+            yield "return_info", self.return_info
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
 
 @dataclass
@@ -365,12 +347,13 @@ class DivergenceOutcome:
     guard: Tuple[Condition, ...]
     proof: Dict[str, Any] = field(default_factory=dict)
 
+    def json_items(self):
+        yield "kind", "divergence"
+        yield "guard", each(self.guard)
+        yield "proof", nested(self.proof)
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "divergence",
-            "guard": [condition.to_dict() for condition in self.guard],
-            "proof": _jsonable_nested_tuple(self.proof),
-        }
+        return materialize(self)
 
 
 @dataclass
@@ -381,13 +364,14 @@ class UnknownOutcome:
     reason: str
     evidence: Dict[str, Any] = field(default_factory=dict)
 
+    def json_items(self):
+        yield "kind", "unknown"
+        yield "guard", each(self.guard)
+        yield "reason", self.reason
+        yield "evidence", nested(self.evidence)
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "unknown",
-            "guard": [condition.to_dict() for condition in self.guard],
-            "reason": self.reason,
-            "evidence": _jsonable_nested_tuple(self.evidence),
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -412,16 +396,17 @@ class TerminationContractRef:
             self.source_contract_key,
         )
 
+    def json_items(self):
+        yield "schema_version", int(self.schema_version)
+        yield "termination_class", self.termination_class
+        yield "object_identity_key", nested(self.object_identity_key)
+        yield "payload_key", nested(self.payload_key)
+        yield "effect_key", nested(self.effect_key)
+        yield "observation_contract_key", nested(self.observation_contract_key)
+        yield "source_contract_key", nested(self.source_contract_key)
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "schema_version": int(self.schema_version),
-            "termination_class": self.termination_class,
-            "object_identity_key": _jsonable_nested_tuple(self.object_identity_key),
-            "payload_key": _jsonable_nested_tuple(self.payload_key),
-            "effect_key": _jsonable_nested_tuple(self.effect_key),
-            "observation_contract_key": _jsonable_nested_tuple(self.observation_contract_key),
-            "source_contract_key": _jsonable_nested_tuple(self.source_contract_key),
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -444,17 +429,18 @@ class TerminationPathEffectEvidence:
             self.control_effect_profile_key, self.path_guard_key, self.contract.stable_key(),
         )
 
+    def json_items(self):
+        yield "schema_version", int(self.schema_version)
+        yield "producer_id", self.producer_id
+        yield "terminal_candidate_id", nested(self.terminal_candidate_id)
+        yield "terminal_op_ref", self.terminal_op_ref
+        yield "control_effect_profile_key", nested(self.control_effect_profile_key)
+        yield "path_guard_key", nested(self.path_guard_key)
+        yield "path_guard", each(self.path_guard)
+        yield "contract", self.contract
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "schema_version": int(self.schema_version),
-            "producer_id": self.producer_id,
-            "terminal_candidate_id": _jsonable_nested_tuple(self.terminal_candidate_id),
-            "terminal_op_ref": self.terminal_op_ref.to_dict(),
-            "control_effect_profile_key": _jsonable_nested_tuple(self.control_effect_profile_key),
-            "path_guard_key": _jsonable_nested_tuple(self.path_guard_key),
-            "path_guard": [condition.to_dict() for condition in self.path_guard],
-            "contract": self.contract.to_dict(),
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -481,19 +467,17 @@ class TerminalCandidate:
             self.termination_contract.stable_key() if self.termination_contract is not None else None,
         )
 
+    def json_items(self):
+        yield "candidate_id", nested(self.candidate_id)
+        yield "terminal_kind_candidate", self.terminal_kind_candidate
+        yield "block_ref", self.block_ref
+        yield "op_ref", self.op_ref
+        yield "cfg_reachable", self.cfg_reachable
+        yield "evidence_key", nested(self.evidence_key)
+        yield "termination_contract", self.termination_contract
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "candidate_id": _jsonable_nested_tuple(self.candidate_id),
-            "terminal_kind_candidate": self.terminal_kind_candidate,
-            "block_ref": self.block_ref.to_dict() if self.block_ref is not None else None,
-            "op_ref": self.op_ref.to_dict() if self.op_ref is not None else None,
-            "cfg_reachable": self.cfg_reachable,
-            "evidence_key": _jsonable_nested_tuple(self.evidence_key),
-            "termination_contract": (
-                self.termination_contract.to_dict()
-                if self.termination_contract is not None else None
-            ),
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -507,17 +491,17 @@ class SymbolicRegionCandidate:
     producer_evidence_key: Tuple[Any, ...] = ()
     observed_value: Optional[Expression] = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "candidate_id": _jsonable_nested_tuple(self.candidate_id),
-            "terminal_candidate_id": _jsonable_nested_tuple(self.terminal_candidate_id),
-            "guard": [condition.to_dict() for condition in self.guard],
-            "guard_extraction_complete": bool(self.guard_extraction_complete),
-            "producer_evidence_key": _jsonable_nested_tuple(self.producer_evidence_key),
-        }
+    def json_items(self):
+        yield "candidate_id", nested(self.candidate_id)
+        yield "terminal_candidate_id", nested(self.terminal_candidate_id)
+        yield "guard", each(self.guard)
+        yield "guard_extraction_complete", bool(self.guard_extraction_complete)
+        yield "producer_evidence_key", nested(self.producer_evidence_key)
         if self.observed_value is not None:
-            result["observed_value"] = self.observed_value.to_dict()
-        return result
+            yield "observed_value", self.observed_value
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -546,17 +530,18 @@ class FunctionOutcomeSeed:
             int(self.extraction_schema_version),
         )
 
+    def json_items(self):
+        yield "function_identity", nested(self.function_identity)
+        yield "input_domain_contract", nested(self.input_domain_contract)
+        yield "terminal_candidates", each(self.terminal_candidates)
+        yield "symbolic_regions", each(self.symbolic_regions)
+        yield "unresolved_control_evidence", nested(self.unresolved_control_evidence)
+        yield "control_flow_evidence_key", nested(self.control_flow_evidence_key)
+        yield "partition_revision", int(self.partition_revision)
+        yield "extraction_schema_version", int(self.extraction_schema_version)
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "function_identity": _jsonable_nested_tuple(self.function_identity),
-            "input_domain_contract": _jsonable_nested_tuple(self.input_domain_contract),
-            "terminal_candidates": [item.to_dict() for item in self.terminal_candidates],
-            "symbolic_regions": [item.to_dict() for item in self.symbolic_regions],
-            "unresolved_control_evidence": _jsonable_nested_tuple(self.unresolved_control_evidence),
-            "control_flow_evidence_key": _jsonable_nested_tuple(self.control_flow_evidence_key),
-            "partition_revision": int(self.partition_revision),
-            "extraction_schema_version": int(self.extraction_schema_version),
-        }
+        return materialize(self)
 
 
 @dataclass
@@ -582,29 +567,28 @@ class SummaryReturnCandidate:
     validation_blockers: Tuple[str, ...] = field(default_factory=tuple)
     evidence: Dict[str, Any] = field(default_factory=dict)
 
+    def json_items(self):
+        yield "candidate_id", nested(self.candidate_id)
+        yield "return_info", self.return_info
+        yield "guard_structural_key", nested(self.guard_structural_key)
+        yield "value_structural_key", nested(self.value_structural_key)
+        yield "loop_summary_structural_key", nested(self.loop_summary_structural_key)
+        yield "transition_evidence_key", nested(self.transition_evidence_key)
+        yield "active_precondition_key", nested(self.active_precondition_key)
+        yield "summary_applicability_guard_key", nested(self.summary_applicability_guard_key)
+        yield "effect_region_key", nested(self.effect_region_key)
+        yield "memory_read_set_key", nested(self.memory_read_set_key)
+        yield "memory_write_set_key", nested(self.memory_write_set_key)
+        yield "call_effect_key", nested(self.call_effect_key)
+        yield "ub_assumption_key", nested(self.ub_assumption_key)
+        yield "effect_model_schema_version", self.effect_model_schema_version
+        yield "eq_eligible", bool(self.eq_eligible)
+        yield "acceptance_status", self.acceptance_status
+        yield "validation_blockers", as_list(self.validation_blockers)
+        yield "evidence", nested(self.evidence)
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "candidate_id": _jsonable_nested_tuple(self.candidate_id),
-            "return_info": self.return_info.to_dict(),
-            "guard_structural_key": _jsonable_nested_tuple(self.guard_structural_key),
-            "value_structural_key": _jsonable_nested_tuple(self.value_structural_key),
-            "loop_summary_structural_key": _jsonable_nested_tuple(self.loop_summary_structural_key),
-            "transition_evidence_key": _jsonable_nested_tuple(self.transition_evidence_key),
-            "active_precondition_key": _jsonable_nested_tuple(self.active_precondition_key),
-            "summary_applicability_guard_key": _jsonable_nested_tuple(
-                self.summary_applicability_guard_key
-            ),
-            "effect_region_key": _jsonable_nested_tuple(self.effect_region_key),
-            "memory_read_set_key": _jsonable_nested_tuple(self.memory_read_set_key),
-            "memory_write_set_key": _jsonable_nested_tuple(self.memory_write_set_key),
-            "call_effect_key": _jsonable_nested_tuple(self.call_effect_key),
-            "ub_assumption_key": _jsonable_nested_tuple(self.ub_assumption_key),
-            "effect_model_schema_version": self.effect_model_schema_version,
-            "eq_eligible": bool(self.eq_eligible),
-            "acceptance_status": self.acceptance_status,
-            "validation_blockers": list(self.validation_blockers),
-            "evidence": _jsonable_nested_tuple(self.evidence),
-        }
+        return materialize(self)
 
 
 @dataclass(init=False)
@@ -812,28 +796,28 @@ class DeferredCallInfo:
             target_ref=self.target_ref,
         )
 
-    def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "placeholder_name": self.placeholder_name,
-            "target_name": self.target_name,
-            "deferred_call_ref": self.deferred_call_ref.to_dict(),
-            "target_ref": self.target_ref.to_dict(),
-            "unknown_ref": self.unknown_ref.to_dict(),
-            "arguments": [arg.to_dict() for arg in self.arguments],
-            "call_argument_recovery_status": self.call_argument_recovery_status,
-            "call_argument_recovery_reason": self.call_argument_recovery_reason,
-            "effect_class": self.effect_class,
-            "match_evidence": _jsonable_nested_tuple(self.match_evidence),
-            "domain_policy": _jsonable_nested_tuple(self.domain_policy),
-            "abi_return_width_bits": self.abi_return_width_bits,
-            "abi_return_type_policy": self.abi_return_type_policy,
-            "call_site_multiplicity": self.call_site_multiplicity,
-        }
+    def json_items(self):
+        yield "placeholder_name", self.placeholder_name
+        yield "target_name", self.target_name
+        yield "deferred_call_ref", self.deferred_call_ref
+        yield "target_ref", self.target_ref
+        yield "unknown_ref", self.unknown_ref
+        yield "arguments", each(self.arguments)
+        yield "call_argument_recovery_status", self.call_argument_recovery_status
+        yield "call_argument_recovery_reason", self.call_argument_recovery_reason
+        yield "effect_class", self.effect_class
+        yield "match_evidence", nested(self.match_evidence)
+        yield "domain_policy", nested(self.domain_policy)
+        yield "abi_return_width_bits", self.abi_return_width_bits
+        yield "abi_return_type_policy", self.abi_return_type_policy
+        yield "call_site_multiplicity", self.call_site_multiplicity
         if self.call_target_expr is not None:
-            result["call_target_expr"] = self.call_target_expr.to_dict()
+            yield "call_target_expr", self.call_target_expr
         if self.call_model_candidate is not None:
-            result["call_model_candidate"] = self.call_model_candidate.to_dict()
-        return result
+            yield "call_model_candidate", self.call_model_candidate
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
 
 def _classify_deferred_call_effect(target_ref: CallTargetRef) -> str:
@@ -887,16 +871,16 @@ class SignednessResult:
         """
         return self.is_signed()
     
-    def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "signedness": self.signedness,
-            "evidence_summary": self.evidence_summary,
-            "opcode_counts": self.opcode_counts,
-        }
+    def json_items(self):
+        yield "signedness", self.signedness
+        yield "evidence_summary", self.evidence_summary
+        yield "opcode_counts", self.opcode_counts
         if self.excluded_fastpath_count > 0:
-            result["excluded_fastpath_count"] = self.excluded_fastpath_count
-            result["excluded_opcode_counts"] = self.excluded_opcode_counts
-        return result
+            yield "excluded_fastpath_count", self.excluded_fastpath_count
+            yield "excluded_opcode_counts", self.excluded_opcode_counts
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
     
     @classmethod
     def from_evidence(cls, evidence: 'SignednessEvidence') -> 'SignednessResult':
@@ -932,14 +916,15 @@ class ComparisonSurface:
         if self.kind not in {"return_value", "memory_effect"}:
             raise ValueError(f"Unsupported comparison surface kind: {self.kind}")
 
+    def json_items(self):
+        yield "kind", self.kind
+        yield "explicit_bit_width", self.explicit_bit_width
+        yield "type_name", self.type_name
+        yield "use_sign_extension", self.use_sign_extension
+        yield "evidence", as_dict(self.evidence)
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": self.kind,
-            "explicit_bit_width": self.explicit_bit_width,
-            "type_name": self.type_name,
-            "use_sign_extension": self.use_sign_extension,
-            "evidence": dict(self.evidence),
-        }
+        return materialize(self)
 
 
 _SIGNED_COMPARE_TO_UNSIGNED = {
@@ -1631,22 +1616,7 @@ class FunctionReturnAnalysis:
         self.deferred_calls = normalized
 
     def to_dict(self) -> Dict:
-        # Issue #22 PR-22-D: 解析 1 件分の表現は **まとめて** 1 つの直列化の作業量
-        # （`core/budget_policy.SerializationWork`）。木も木以外の値も、作る前か
-        # record 1 件を作った直後にその作業量へ足され、合計が予算を超えた時点で
-        # 残りを作らずに限界になる。
-        from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
-
-        with serialization_scope(
-            site=ANALYSIS_SERIALIZATION_SITE,
-            target_parts=(
-                "function_return_analysis",
-                self.binary_id,
-                self.function_name,
-                self.entry_point,
-            ),
-        ) as work:
-            return self._to_dict_with(work, include_derived_proof=True)
+        return self._materialize(include_derived_proof=True)
 
     def semantic_snapshot_dict(self) -> Dict:
         """snapshot が使う表現（`to_dict()` から、解析前提でない derived proof を除いたもの）。
@@ -1656,6 +1626,13 @@ class FunctionReturnAnalysis:
         同じ値。
         """
 
+        return self._materialize(include_derived_proof=False)
+
+    def _materialize(self, *, include_derived_proof: bool) -> Dict:
+        # Issue #22 PR-22-D: 解析 1 件分の表現は **まとめて** 1 つの直列化の作業量
+        # （`core/budget_policy.SerializationWork`、`JsonBudget` の一種）。walker が
+        # `json_items()` から 1 要素ずつ引き出して数え、合計が予算を超えた時点で
+        # 残りを作らずに限界になる（木は作る前に DAG のまま大きさを数える）。
         from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
 
         with serialization_scope(
@@ -1667,87 +1644,74 @@ class FunctionReturnAnalysis:
                 self.entry_point,
             ),
         ) as work:
-            return self._to_dict_with(work, include_derived_proof=False)
-
-    def _to_dict_with(self, work, *, include_derived_proof: bool) -> Dict:
-        """表現の本体。**値はすべて `work` を通す**（既存の値は `value`、record は
-        `record` / `records`、木は record の中の `Expression.to_dict` が `tree` を通す）。
-        """
-
-        value, record, records = work.value, work.record, work.records
-        result = {
-            "function_name": value(self.function_name),
-            "entry_point": value(self.entry_point),
-            "binary_id": value(self.binary_id),
-            "function_ref": (
-                record(self.function_ref.to_dict) if self.function_ref is not None else None
-            ),
-            "parameters": (
-                None if self.parameters is None
-                else records(self.parameters, _parameter_without_runtime_objects)
-            ),
-            "returns": records(self.returns),
-            "return_type": value(
-                get_data_type_display_name(self.return_type_obj, self.return_type)
-            ),
-            "unknown_event_count": value(self.unknown_event_count),
-            "unknown_event_reasons": list(value(self.unknown_event_reasons)),
-            "analysis_notes": list(value(self.analysis_notes)),
-            "recovered_from_decompiler": value(self.recovered_from_decompiler),
-            "incomplete_control_flow": value(self.incomplete_control_flow),
-            "deferred_calls": records(self.deferred_calls.values()),
-        }
-        if include_derived_proof and self.completed_recovery_proof_ids:
-            result["completed_recovery_proof_ids"] = records(
-                self.completed_recovery_proof_ids, _jsonable_nested_tuple,
+            return RESULT_JSON_POLICY.materialize(
+                pairs_of(self._json_items(include_derived_proof=include_derived_proof)),
+                budget=work,
             )
+
+    def json_items(self):
+        return self._json_items(include_derived_proof=True)
+
+    def _json_items(self, *, include_derived_proof: bool):
+        """表現の schema（1 つだけ）。値は source で渡し、walker が 1 要素ずつ写す。"""
+
+        yield "function_name", self.function_name
+        yield "entry_point", self.entry_point
+        yield "binary_id", self.binary_id
+        yield "function_ref", self.function_ref
+        yield "parameters", (
+            None if self.parameters is None
+            else each(self.parameters, parameter_descriptor_source)
+        )
+        yield "returns", each(self.returns)
+        yield "return_type", get_data_type_display_name(self.return_type_obj, self.return_type)
+        yield "unknown_event_count", self.unknown_event_count
+        yield "unknown_event_reasons", as_list(self.unknown_event_reasons)
+        yield "analysis_notes", as_list(self.analysis_notes)
+        yield "recovered_from_decompiler", self.recovered_from_decompiler
+        yield "incomplete_control_flow", self.incomplete_control_flow
+        yield "deferred_calls", each(self.deferred_calls.values())
+        if include_derived_proof and self.completed_recovery_proof_ids:
+            yield "completed_recovery_proof_ids", each(self.completed_recovery_proof_ids, nested)
         if include_derived_proof and self.completed_recovery_proof_evidence:
-            result["completed_recovery_proof_evidence"] = records(
-                self.completed_recovery_proof_evidence, _jsonable_nested_tuple,
+            yield "completed_recovery_proof_evidence", each(
+                self.completed_recovery_proof_evidence, nested,
             )
         if self.summary_return_candidates:
-            result["summary_return_candidates"] = records(self.summary_return_candidates)
+            yield "summary_return_candidates", each(self.summary_return_candidates)
         if self.return_outcomes or self.divergence_outcomes or self.unknown_outcomes:
-            result["outcomes"] = records(itertools.chain(
+            yield "outcomes", each(itertools.chain(
                 self.return_outcomes, self.divergence_outcomes, self.unknown_outcomes,
             ))
         if self.outcome_seed is not None:
-            result["outcome_seed"] = record(self.outcome_seed.to_dict)
+            yield "outcome_seed", self.outcome_seed
         if self.termination_path_effect_evidence:
-            result["termination_path_effect_evidence"] = records(
-                self.termination_path_effect_evidence
-            )
+            yield "termination_path_effect_evidence", each(self.termination_path_effect_evidence)
         if self.analysis_scope_key is not None:
-            result["analysis_scope_key"] = value(self.analysis_scope_key)
+            yield "analysis_scope_key", self.analysis_scope_key
         if self.analysis_view_identity is not None:
-            result["analysis_view_identity"] = _counted_nested_tuple(
-                work, self.analysis_view_identity,
-            )
-            result["partition_revision"] = value(int(self.partition_revision or 0))
+            yield "analysis_view_identity", nested(self.analysis_view_identity)
+            yield "partition_revision", int(self.partition_revision or 0)
         if self.program_is_big_endian is not None:
-            result["program_is_big_endian"] = value(bool(self.program_is_big_endian))
+            yield "program_is_big_endian", bool(self.program_is_big_endian)
 
         if self.signedness_result:
-            result["signedness"] = record(self.signedness_result.to_dict)
+            yield "signedness", self.signedness_result
         if self.signature_hypotheses:
-            result["signature_hypotheses"] = list(value(self.signature_hypotheses))
+            yield "signature_hypotheses", as_list(self.signature_hypotheses)
         if self.return_type_provenance:
-            result["return_type_provenance"] = _counted_nested_tuple(
-                work, self.return_type_provenance,
-            )
+            yield "return_type_provenance", nested(self.return_type_provenance)
         if self.return_abi_facts:
-            result["return_abi_facts"] = _counted_nested_tuple(work, self.return_abi_facts)
+            yield "return_abi_facts", nested(self.return_abi_facts)
         if self.comparison_surface is not None:
-            result["comparison_surface"] = record(self.comparison_surface.to_dict)
+            yield "comparison_surface", self.comparison_surface
         if self.expansion_budget_truncations:
             # Issue #131 PR-B: 正規化済みの全記録（参照 event ID 込み）を出す。
             # snapshot fingerprint は ``to_dict`` から作られるので、marker の有無・
             # 参照情報の増加はそのまま解析前提の同一性に反映される。
-            result["expansion_budget_truncations"] = records(
+            yield "expansion_budget_truncations", each(
                 merge_expansion_budget_truncations(self.expansion_budget_truncations)
             )
-
-        return work.object_framing(result)
 
     def should_fix_return_to_signed(self) -> bool:
         """

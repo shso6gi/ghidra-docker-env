@@ -190,7 +190,15 @@ class UnknownRecoveryProofObligation:
             description=description,
         )
 
+    def json_items(self):
+        # pure layer（project の module を import しない）: 列は iterator（walker の遅延配列）
+        yield "proof_kind", self.proof_kind
+        yield "proof_stage", self.proof_stage
+        yield "required_evidence", iter(self.required_evidence)
+        yield "description", self.description
+
     def to_dict(self) -> Dict[str, Any]:
+        # 固定の形（4 field）。`json_items()` と同じ値であることは test が固定する
         return {
             "proof_kind": self.proof_kind,
             "proof_stage": self.proof_stage,
@@ -230,6 +238,12 @@ class UnknownRecoveryPlan:
             target_regression=target_regression,
             description=description,
         )
+
+    def json_items(self):
+        yield "reason_id", self.reason_id
+        yield "proof_obligations", iter(self.proof_obligations)
+        yield "target_regression", self.target_regression
+        yield "description", self.description
 
     def to_dict(self) -> Dict[str, Any]:
         return {

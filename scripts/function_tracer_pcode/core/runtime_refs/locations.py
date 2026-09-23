@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
 )
@@ -81,27 +82,28 @@ class AddressValueRef:
     def display_name(self) -> str:
         return self.display_hint or f"ADDR_{int(self.address_offset):x}"
 
+    def json_items(self):
+        yield "kind", "address"
+        yield "address_offset", int(self.address_offset)
+        yield "source", self.source
+        yield "display_name", self.display_name()
+        yield "program_id", self.program_id
+        yield "space_id", self.space_id
+        yield "space_name", self.space_name
+        yield "symbol_name", self.symbol_name
+        yield "block_name", self.block_name
+        yield "is_initialized", self.is_initialized
+        yield "can_read", self.can_read
+        yield "can_write", self.can_write
+        yield "can_execute", self.can_execute
+        yield "is_volatile", self.is_volatile
+        yield "is_readonly_memory", self.is_readonly_memory()
+        yield "object_symbol_name", self.object_symbol_name
+        yield "object_base_offset", self.object_base_offset
+        yield "object_size", self.object_size
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "address",
-            "address_offset": int(self.address_offset),
-            "source": self.source,
-            "display_name": self.display_name(),
-            "program_id": self.program_id,
-            "space_id": self.space_id,
-            "space_name": self.space_name,
-            "symbol_name": self.symbol_name,
-            "block_name": self.block_name,
-            "is_initialized": self.is_initialized,
-            "can_read": self.can_read,
-            "can_write": self.can_write,
-            "can_execute": self.can_execute,
-            "is_volatile": self.is_volatile,
-            "is_readonly_memory": self.is_readonly_memory(),
-            "object_symbol_name": self.object_symbol_name,
-            "object_base_offset": self.object_base_offset,
-            "object_size": self.object_size,
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -347,30 +349,30 @@ class LocationBaseRef:
             pass
         return False
 
-    def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
-            "kind": self.kind,
-            "display_name": self.display_name(),
-        }
+    def json_items(self):
+        yield "kind", self.kind
+        yield "display_name", self.display_name()
         if self.parameter_name is not None:
-            result["parameter_name"] = self.parameter_name
+            yield "parameter_name", self.parameter_name
         if self.parameter_index is not None:
-            result["parameter_index"] = self.parameter_index
+            yield "parameter_index", self.parameter_index
         if self.owner_program_id is not None:
-            result["owner_program_id"] = self.owner_program_id
+            yield "owner_program_id", self.owner_program_id
         if self.owner_entry_offset is not None:
-            result["owner_entry_offset"] = self.owner_entry_offset
+            yield "owner_entry_offset", self.owner_entry_offset
         if self.storage_space is not None:
-            result["storage_space"] = self.storage_space
+            yield "storage_space", self.storage_space
         if self.storage_space_id is not None:
-            result["storage_space_id"] = self.storage_space_id
+            yield "storage_space_id", self.storage_space_id
         if self.storage_offset is not None:
-            result["storage_offset"] = self.storage_offset
+            yield "storage_offset", self.storage_offset
         if self.storage_size is not None:
-            result["storage_size"] = self.storage_size
+            yield "storage_size", self.storage_size
         if self.storage_identity_key is not None:
-            result["storage_identity_key"] = self.storage_identity_key
-        return result
+            yield "storage_identity_key", self.storage_identity_key
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -385,8 +387,12 @@ class LocationStep:
     def stable_key(self) -> Tuple[str, int]:
         return (self.kind, int(self.value))
 
+    def json_items(self):
+        yield "kind", self.kind
+        yield "value", int(self.value)
+
     def to_dict(self) -> Dict[str, Any]:
-        return {"kind": self.kind, "value": int(self.value)}
+        return materialize(self)
 
 
 @dataclass(frozen=True, init=False)
@@ -427,13 +433,14 @@ class CanonicalLocation:
             int(self.size),
         )
 
+    def json_items(self):
+        yield "base_ref", self.base_ref
+        yield "offset", int(self.offset)
+        yield "size", int(self.size)
+        yield "steps", each(self.steps)
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "base_ref": self.base_ref.to_dict(),
-            "offset": int(self.offset),
-            "size": int(self.size),
-            "steps": [step.to_dict() for step in self.steps],
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -454,14 +461,15 @@ class PostStateValueRef:
             self.state_kind,
         )
 
+    def json_items(self):
+        yield "kind", "post_state_value"
+        yield "location", self.location
+        yield "snapshot_ref", self.snapshot_ref if self.snapshot_ref is not None else None
+        yield "source", self.source
+        yield "state_kind", self.state_kind
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "post_state_value",
-            "location": self.location.to_dict(),
-            "snapshot_ref": self.snapshot_ref.to_dict() if self.snapshot_ref is not None else None,
-            "source": self.source,
-            "state_kind": self.state_kind,
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -485,14 +493,15 @@ class PostStateSnapshotRef:
             self.epoch,
         )
 
+    def json_items(self):
+        yield "kind", "post_state_snapshot"
+        yield "scope", self.scope
+        yield "source", self.source
+        yield "epoch", self.epoch
+        yield "pcode_op_ref", self.pcode_op_ref if self.pcode_op_ref is not None else None
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "post_state_snapshot",
-            "scope": self.scope,
-            "source": self.source,
-            "epoch": self.epoch,
-            "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -529,14 +538,15 @@ class PostStateReadRef:
             state_kind=self.state_kind,
         )
 
+    def json_items(self):
+        yield "kind", "post_state_read"
+        yield "location", self.location
+        yield "snapshot_ref", self.snapshot_ref if self.snapshot_ref is not None else None
+        yield "source", self.source
+        yield "state_kind", self.state_kind
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "post_state_read",
-            "location": self.location.to_dict(),
-            "snapshot_ref": self.snapshot_ref.to_dict() if self.snapshot_ref is not None else None,
-            "source": self.source,
-            "state_kind": self.state_kind,
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -585,15 +595,16 @@ class ObservedMemoryReadRef:
             source=self.source,
         )
 
+    def json_items(self):
+        yield "kind", "observed_memory_read"
+        yield "order_key", self.order_key
+        yield "location", self.location if self.location is not None else None
+        yield "snapshot_ref", self.snapshot_ref if self.snapshot_ref is not None else None
+        yield "pcode_op_ref", self.pcode_op_ref if self.pcode_op_ref is not None else None
+        yield "source", self.source
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "observed_memory_read",
-            "order_key": self.order_key,
-            "location": self.location.to_dict() if self.location is not None else None,
-            "snapshot_ref": self.snapshot_ref.to_dict() if self.snapshot_ref is not None else None,
-            "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
-            "source": self.source,
-        }
+        return materialize(self)
 
 
 # Sibling modules reference each other at call time; import them last to avoid cycles.

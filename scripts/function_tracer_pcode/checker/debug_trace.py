@@ -6,17 +6,19 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 
 from scripts.function_tracer_pcode.core.json_encoding import (
-    RESULT_JSON_POLICY,
-    JsonLazy,
-    lazy_record,
-    lazy_records,
+    as_dict,
+    as_list,
+    each,
+    inline,
+    materialize,
+    raw,
 )
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownReasonRecord,
-    build_unknown_recovery_actions,
     coerce_unknown_reason_records,
-    summarize_unknown_recovery_backlog,
-    summarize_unknown_reason_counts,
+    iter_unknown_recovery_actions,
+    recovery_backlog_source,
+    unknown_reason_counts_source,
 )
 
 
@@ -54,8 +56,13 @@ class AttemptIdentity:
     attempt_ordinal: int
     trace_schema_version: int = 1
 
+    def json_items(self):
+        yield "strategy_identity", self.strategy_identity
+        yield "attempt_ordinal", self.attempt_ordinal
+        yield "trace_schema_version", self.trace_schema_version
+
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -64,12 +71,13 @@ class ReasonOccurrenceId:
     reason_ordinal: int
     occurrence_schema_version: int = 1
 
+    def json_items(self):
+        yield "occurrence_schema_version", self.occurrence_schema_version
+        yield "attempt_identity", self.attempt_identity
+        yield "reason_ordinal", self.reason_ordinal
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "occurrence_schema_version": self.occurrence_schema_version,
-            "attempt_identity": self.attempt_identity.to_dict(),
-            "reason_ordinal": self.reason_ordinal,
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -78,13 +86,14 @@ class ReasonOccurrence:
     reason_record: UnknownReasonRecord
     initial_causal_status: str = CausalStatus.UNCLASSIFIED.value
 
+    def json_items(self):
+        yield "occurrence_id", self.occurrence_id
+        yield "reason_record", self.reason_record
+        yield "attempt_identity", self.occurrence_id.attempt_identity
+        yield "initial_causal_status", self.initial_causal_status
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "occurrence_id": self.occurrence_id.to_dict(),
-            "reason_record": self.reason_record.to_dict(),
-            "attempt_identity": self.occurrence_id.attempt_identity.to_dict(),
-            "initial_causal_status": self.initial_causal_status,
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -95,14 +104,15 @@ class ProofCompletionEvent:
     proof_status: str
     completed_at_attempt: AttemptIdentity
 
+    def json_items(self):
+        yield "completion_id", self.completion_id
+        yield "proof_requirement_id", as_dict(self.proof_requirement_id)
+        yield "proof_artifact_ref", self.proof_artifact_ref
+        yield "proof_status", self.proof_status
+        yield "completed_at_attempt", self.completed_at_attempt
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "completion_id": self.completion_id,
-            "proof_requirement_id": dict(self.proof_requirement_id),
-            "proof_artifact_ref": self.proof_artifact_ref,
-            "proof_status": self.proof_status,
-            "completed_at_attempt": self.completed_at_attempt.to_dict(),
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -118,19 +128,20 @@ class ReasonCompletionEvent:
     completed_at_attempt: AttemptIdentity
     applicability_status: str
 
+    def json_items(self):
+        yield "completion_event_id", self.completion_event_id
+        yield "completed_occurrence_id", self.completed_occurrence_id
+        yield "exact_target_id", self.exact_target_id
+        yield "exact_missing_fact_or_proof_slot", self.exact_missing_fact_or_proof_slot
+        yield "source_snapshot_fingerprint", self.source_snapshot_fingerprint
+        yield "semantic_seed_or_premise_digest", self.semantic_seed_or_premise_digest
+        yield "evidence_or_artifact_digest", self.evidence_or_artifact_digest
+        yield "recognizing_stage", self.recognizing_stage
+        yield "completed_at_attempt", self.completed_at_attempt
+        yield "applicability_status", self.applicability_status
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "completion_event_id": self.completion_event_id,
-            "completed_occurrence_id": self.completed_occurrence_id.to_dict(),
-            "exact_target_id": self.exact_target_id,
-            "exact_missing_fact_or_proof_slot": self.exact_missing_fact_or_proof_slot,
-            "source_snapshot_fingerprint": self.source_snapshot_fingerprint,
-            "semantic_seed_or_premise_digest": self.semantic_seed_or_premise_digest,
-            "evidence_or_artifact_digest": self.evidence_or_artifact_digest,
-            "recognizing_stage": self.recognizing_stage,
-            "completed_at_attempt": self.completed_at_attempt.to_dict(),
-            "applicability_status": self.applicability_status,
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -143,19 +154,19 @@ class ReasonCausalTransition:
     emitted_at_attempt: AttemptIdentity
     transition_ordinal: int
 
-    def to_dict(self) -> Dict[str, Any]:
+    def json_items(self):
         cause_ref = self.cause_ref
-        if hasattr(cause_ref, "to_dict"):
-            cause_ref = cause_ref.to_dict()
-        return {
-            "transition_id": self.transition_id,
-            "target_occurrence_id": self.target_occurrence_id.to_dict(),
-            "transition_kind": self.transition_kind,
-            "cause_kind": self.cause_kind,
-            "cause_ref": cause_ref,
-            "emitted_at_attempt": self.emitted_at_attempt.to_dict(),
-            "transition_ordinal": self.transition_ordinal,
-        }
+        yield "transition_id", self.transition_id
+        yield "target_occurrence_id", self.target_occurrence_id
+        yield "transition_kind", self.transition_kind
+        yield "cause_kind", self.cause_kind
+        # 旧 `to_dict`: 表現を持つ参照は表現に、それ以外はそのまま置く
+        yield "cause_ref", cause_ref if hasattr(cause_ref, "to_dict") else raw(cause_ref)
+        yield "emitted_at_attempt", self.emitted_at_attempt
+        yield "transition_ordinal", self.transition_ordinal
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
 
 @dataclass
@@ -167,14 +178,15 @@ class NormalizationRuleApplication:
     before: Optional[str] = None
     after: Optional[str] = None
     
+    def json_items(self):
+        yield "rule_name", self.rule_name
+        yield "reason", self.reason
+        yield "applied_to", self.applied_to
+        yield "before", self.before
+        yield "after", self.after
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "rule_name": self.rule_name,
-            "reason": self.reason,
-            "applied_to": self.applied_to,
-            "before": self.before,
-            "after": self.after,
-        }
+        return materialize(self)
 
 
 @dataclass
@@ -196,29 +208,24 @@ class PairwiseDecisiveInfo:
     final_query_excerpt: Optional[str] = None  # ★ 互換性のため残す（先頭200文字）
     final_query: Optional[str] = None  # ★ 新規追加: 完全なクエリ
     
-    def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "decisive_result": self.decisive_result,
-            "total_pairs": self.total_pairs,
-            "unsat_pairs": self.unsat_pairs,
-            "sat_pairs": self.sat_pairs,
-            "unknown_pairs": self.unknown_pairs,
-        }
-        
+    def json_items(self):
+        yield "decisive_result", self.decisive_result
+        yield "total_pairs", self.total_pairs
+        yield "unsat_pairs", self.unsat_pairs
+        yield "sat_pairs", self.sat_pairs
+        yield "unknown_pairs", self.unknown_pairs
         if self.decisive_pair is not None:
-            result["decisive_pair"] = {
-                "i": self.decisive_pair[0],
-                "j": self.decisive_pair[1],
-            }
-            result["pair_stage"] = self.pair_stage
-            result["case1_summary"] = self.case1_summary
-            result["case2_summary"] = self.case2_summary
-            result["value1_expr"] = self.value1_expr
-            result["value2_expr"] = self.value2_expr
-            result["final_query_excerpt"] = self.final_query_excerpt
-            result["final_query"] = self.final_query  # ★ 追加
-        
-        return result
+            yield "decisive_pair", inline(("i", self.decisive_pair[0]), ("j", self.decisive_pair[1]))
+            yield "pair_stage", self.pair_stage
+            yield "case1_summary", self.case1_summary
+            yield "case2_summary", self.case2_summary
+            yield "value1_expr", self.value1_expr
+            yield "value2_expr", self.value2_expr
+            yield "final_query_excerpt", self.final_query_excerpt
+            yield "final_query", self.final_query  # ★ 追加
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
 
 @dataclass
@@ -272,49 +279,43 @@ class Attempt:
                 for ordinal, reason in enumerate(self.unknown_reasons)
             ]
     
-    def json_view(self) -> Dict[str, Any]:
-        """結果 JSON での表現（**唯一の schema**）。浅い view で、表現は作らない。
+    def json_items(self):
+        """結果 JSON での表現（**唯一の schema**）。値は source で渡し、walker が写す。"""
 
-        list は参照のまま、record は `to_dict` を 1 件ずつ遅らせて渡す
-        （`core/json_encoding` の JSON source 規則）。出力の準備はこれを残り予算まで
-        しか辿らないので、record が大量でも全体を先に作らない。
-        """
-
-        return {
-            "attempt_id": self.attempt_id,
-            "retry_count": self.retry_count,
-            "phase": self.phase,
-            "stage_path": self.stage_path,
-            "strategy": self.strategy,
-            "result": self.result,
-            "transition_reason": self.transition_reason,
-            "type_fix_result": self.type_fix_result,
-            "original_function1_signature": self.original_function1_signature,
-            "original_function2_signature": self.original_function2_signature,
-            "effective_function1_signature": self.effective_function1_signature,
-            "effective_function2_signature": self.effective_function2_signature,
-            "function1_signature_hypotheses": self.function1_signature_hypotheses,
-            "function2_signature_hypotheses": self.function2_signature_hypotheses,
-            "solver_results": self.solver_results,
-            "final_smt_excerpt": self.final_smt_excerpt,
-            "final_smt": self.final_smt,  # ★ 追加
-            "counterexample": self.counterexample,
-            "pairwise_decisive": lazy_record(self.pairwise_decisive),
-            "pairwise_debug_stats": self.pairwise_debug_stats,
-            "normalization_rules": lazy_records(self.normalization_rules),
-            "unknown_reasons": lazy_records(self.unknown_reasons),
-            "reason_occurrences": lazy_records(self.reason_occurrences),
-            "mips64_abi_constraints": self.mips64_abi_constraints,
-            "elapsed_time": self.elapsed_time,
-            "applied": self.applied,
-            "reanalyzed_sides": self.reanalyzed_sides,
-            "skipped_reason": self.skipped_reason,
-            "reason_before": self.reason_before,
-            "reason_after": self.reason_after,
-        }
+        yield "attempt_id", self.attempt_id
+        yield "retry_count", self.retry_count
+        yield "phase", self.phase
+        yield "stage_path", self.stage_path
+        yield "strategy", self.strategy
+        yield "result", self.result
+        yield "transition_reason", self.transition_reason
+        yield "type_fix_result", self.type_fix_result
+        yield "original_function1_signature", self.original_function1_signature
+        yield "original_function2_signature", self.original_function2_signature
+        yield "effective_function1_signature", self.effective_function1_signature
+        yield "effective_function2_signature", self.effective_function2_signature
+        yield "function1_signature_hypotheses", as_list(self.function1_signature_hypotheses)
+        yield "function2_signature_hypotheses", as_list(self.function2_signature_hypotheses)
+        yield "solver_results", self.solver_results
+        yield "final_smt_excerpt", self.final_smt_excerpt
+        yield "final_smt", self.final_smt  # ★ 追加
+        yield "counterexample", self.counterexample
+        yield "pairwise_decisive", self.pairwise_decisive if self.pairwise_decisive else None
+        yield "pairwise_debug_stats", as_dict(self.pairwise_debug_stats)
+        yield "normalization_rules", each(self.normalization_rules)
+        yield "unknown_reasons", each(self.unknown_reasons)
+        yield "reason_occurrences", each(self.reason_occurrences)
+        yield "mips64_abi_constraints", self.mips64_abi_constraints
+        yield "elapsed_time", self.elapsed_time
+        yield "applied", self.applied
+        yield "reanalyzed_sides", as_list(self.reanalyzed_sides)
+        yield "skipped_reason", self.skipped_reason
+        yield "reason_before", as_list(self.reason_before)
+        yield "reason_after", as_list(self.reason_after)
 
     def to_dict(self) -> Dict[str, Any]:
-        return RESULT_JSON_POLICY.materialize(self.json_view())
+        return materialize(self)
+
 
 
 @dataclass
@@ -411,66 +412,64 @@ class DebugTrace:
 
     def get_phase_usage(self) -> List[Dict[str, Any]]:
         """Phase 利用状況を集約して返す。"""
-        ordered_phases: List[str] = []
-        seen_phases = set()
+        return list(self._iter_phase_usage())
 
+    def get_used_phases(self) -> List[str]:
+        """実際に再解析・再判定まで進んだ Phase の一覧を返す。"""
+        return list(self._iter_used_phases())
+
+    def _iter_phases(self):
+        """`known_phases` → attempt の順で、重複を除いた phase 名を 1 つずつ返す。"""
+
+        seen = set()
         for phase in self.known_phases:
-            if phase not in seen_phases:
-                ordered_phases.append(phase)
-                seen_phases.add(phase)
-
+            if phase not in seen:
+                seen.add(phase)
+                yield phase
         for attempt in self.attempts:
-            if attempt.phase not in seen_phases:
-                ordered_phases.append(attempt.phase)
-                seen_phases.add(attempt.phase)
+            if attempt.phase not in seen:
+                seen.add(attempt.phase)
+                yield attempt.phase
 
-        usage_by_phase: Dict[str, Dict[str, Any]] = {}
-        for phase in ordered_phases:
-            usage_by_phase[phase] = {
-                "phase": phase,
-                "planned": phase in self.planned_phases,
-                "reached": False,
-                "used": False,
-                "attempt_count": 0,
-                "result_attempt_count": 0,
-                "no_change_skip_count": 0,
-                "transition_counts": {
-                    TransitionReason.UNSAT.value: 0,
-                    TransitionReason.SAT.value: 0,
-                    TransitionReason.SAT_PHASE4B.value: 0,
-                    TransitionReason.UNKNOWN.value: 0,
-                    TransitionReason.TIMEOUT.value: 0,
-                    TransitionReason.CRITICAL_ERROR.value: 0,
-                    TransitionReason.NO_CHANGES.value: 0,
-                },
-                "last_transition_reason": None,
-                "last_result": None,
-            }
+    def _iter_phase_usage(self):
+        """phase ごとの利用状況の行を 1 つずつ作る（行は固定の形、件数は phase の数）。
 
+        Issue #22 PR-22-D: 出力の準備が行を引き出すたびにその phase の attempt を数え
+        直す。全 phase 分の表を先に作らない。
+        """
+
+        for phase in self._iter_phases():
+            yield self._phase_usage_row(phase)
+
+    def _iter_used_phases(self):
+        for phase in self._iter_phases():
+            if self._phase_usage_row(phase)["used"]:
+                yield phase
+
+    def _phase_usage_row(self, phase: str) -> Dict[str, Any]:
+        phase_usage: Dict[str, Any] = {
+            "phase": phase,
+            "planned": phase in self.planned_phases,
+            "reached": False,
+            "used": False,
+            "attempt_count": 0,
+            "result_attempt_count": 0,
+            "no_change_skip_count": 0,
+            "transition_counts": {
+                TransitionReason.UNSAT.value: 0,
+                TransitionReason.SAT.value: 0,
+                TransitionReason.SAT_PHASE4B.value: 0,
+                TransitionReason.UNKNOWN.value: 0,
+                TransitionReason.TIMEOUT.value: 0,
+                TransitionReason.CRITICAL_ERROR.value: 0,
+                TransitionReason.NO_CHANGES.value: 0,
+            },
+            "last_transition_reason": None,
+            "last_result": None,
+        }
         for attempt in self.attempts:
-            phase_usage = usage_by_phase.setdefault(
-                attempt.phase,
-                {
-                    "phase": attempt.phase,
-                    "planned": attempt.phase in self.planned_phases,
-                    "reached": False,
-                    "used": False,
-                    "attempt_count": 0,
-                    "result_attempt_count": 0,
-                    "no_change_skip_count": 0,
-                    "transition_counts": {
-                        TransitionReason.UNSAT.value: 0,
-                        TransitionReason.SAT.value: 0,
-                        TransitionReason.SAT_PHASE4B.value: 0,
-                        TransitionReason.UNKNOWN.value: 0,
-                        TransitionReason.TIMEOUT.value: 0,
-                        TransitionReason.CRITICAL_ERROR.value: 0,
-                        TransitionReason.NO_CHANGES.value: 0,
-                    },
-                    "last_transition_reason": None,
-                    "last_result": None,
-                }
-            )
+            if attempt.phase != phase:
+                continue
             phase_usage["reached"] = True
             phase_usage["attempt_count"] += 1
             transition_counts = phase_usage["transition_counts"]
@@ -484,12 +483,7 @@ class DebugTrace:
                 phase_usage["used"] = True
             phase_usage["last_transition_reason"] = attempt.transition_reason
             phase_usage["last_result"] = attempt.result
-
-        return [usage_by_phase[phase] for phase in ordered_phases]
-
-    def get_used_phases(self) -> List[str]:
-        """実際に再解析・再判定まで進んだ Phase の一覧を返す。"""
-        return [entry["phase"] for entry in self.get_phase_usage() if entry["used"]]
+        return phase_usage
 
     def format_phase_usage_summary(self) -> str:
         """人間向けの Phase 利用状況サマリを返す。"""
@@ -553,59 +547,47 @@ class DebugTrace:
                 return list(getattr(attempt, "unknown_reasons", []) or [])
         return []
 
-    def json_view(self) -> Dict[str, Any]:
-        """結果 JSON での表現（**唯一の schema**）。浅い view で、表現は作らない。
+    def json_items(self):
+        """結果 JSON での表現（**唯一の schema**）。
 
-        attempt / event は既存の list を参照のまま渡し（出力の準備が 1 件ずつ辿る）、
-        集計は `JsonLazy` で辿り着いたときに初めて計算する。
+        attempt / event は 1 件ずつ辿る。集計は key / 行を 1 つずつ作る source（`unknown_reason`
+        の `*_source`・phase ごとの行の generator）で渡し、全体の表を先に作らない。
         """
 
-        return {
-            "attempts": self.attempts,
-            "causal_transitions": lazy_records(self.causal_transitions),
-            "proof_completion_events": lazy_records(self.proof_completion_events),
-            "reason_completion_events": lazy_records(self.reason_completion_events),
-            "planned_phases": self.planned_phases,
-            "known_phases": self.known_phases,
-            "used_phases": JsonLazy(self.get_used_phases),
-            "phase_usage": JsonLazy(self.get_phase_usage),
-            "unknown_reason_counts": JsonLazy(
-                lambda: summarize_unknown_reason_counts(
-                    self._final_unknown_reasons(),
-                    primary_by_aggregation_unit=True,
-                )
-            ),
-            "observed_unknown_reason_counts": JsonLazy(
-                lambda: summarize_unknown_reason_counts(self._observed_unknown_reasons())
-            ),
-            "unknown_recovery_backlog": JsonLazy(
-                lambda: summarize_unknown_recovery_backlog(
-                    self._final_unknown_reasons(),
-                    primary_by_aggregation_unit=True,
-                )
-            ),
-            "unknown_recovery_actions": JsonLazy(
-                lambda: lazy_records(
-                    build_unknown_recovery_actions(
-                        self._final_unknown_reasons(),
-                        primary_by_aggregation_unit=True,
-                    )
-                )
-            ),
-            "observed_unknown_recovery_backlog": JsonLazy(
-                lambda: summarize_unknown_recovery_backlog(self._observed_unknown_reasons())
-            ),
-            "observed_unknown_recovery_actions": JsonLazy(
-                lambda: lazy_records(
-                    build_unknown_recovery_actions(self._observed_unknown_reasons())
-                )
-            ),
-            "final_result": self.final_result,
-            "total_time": self.total_time,
-            "error_message": self.error_message,
-            "attempt_count": len(self.attempts),
-        }
+        yield "attempts", each(self.attempts)
+        yield "causal_transitions", each(self.causal_transitions)
+        yield "proof_completion_events", each(self.proof_completion_events)
+        yield "reason_completion_events", each(self.reason_completion_events)
+        yield "planned_phases", self.planned_phases
+        yield "known_phases", self.known_phases
+        yield "used_phases", each(self._iter_used_phases())
+        yield "phase_usage", each(self._iter_phase_usage())
+        yield "unknown_reason_counts", unknown_reason_counts_source(
+            self._final_unknown_reasons(), primary_by_aggregation_unit=True,
+        )
+        yield "observed_unknown_reason_counts", unknown_reason_counts_source(
+            self._observed_unknown_reasons()
+        )
+        yield "unknown_recovery_backlog", recovery_backlog_source(
+            self._final_unknown_reasons(), primary_by_aggregation_unit=True,
+        )
+        yield "unknown_recovery_actions", each(
+            iter_unknown_recovery_actions(
+                self._final_unknown_reasons(), primary_by_aggregation_unit=True,
+            )
+        )
+        yield "observed_unknown_recovery_backlog", recovery_backlog_source(
+            self._observed_unknown_reasons()
+        )
+        yield "observed_unknown_recovery_actions", each(
+            iter_unknown_recovery_actions(self._observed_unknown_reasons())
+        )
+        yield "final_result", self.final_result
+        yield "total_time", self.total_time
+        yield "error_message", self.error_message
+        yield "attempt_count", len(self.attempts)
 
     def to_dict(self) -> Dict[str, Any]:
-        return RESULT_JSON_POLICY.materialize(self.json_view())
+        return materialize(self)
+
     
