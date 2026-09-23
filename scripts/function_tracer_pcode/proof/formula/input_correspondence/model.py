@@ -216,6 +216,42 @@ class InputCorrespondenceSet:
                     return assumption
         return None
 
+    def entailed_projection_extension(
+        self,
+        wide_side: str,
+        parameter_index: int,
+        wide_bits: int,
+        narrow_bits: int,
+    ) -> Optional[RewriteAssumption]:
+        """同じ index の parameter の wide 側が narrow 側の extension であるという仮定。
+
+        pair の relation が ``EXTENSION_BOUND``（tie = ``narrow_bits``）で、wide 側が
+        ``wide_bits``、narrow 側が ``narrow_bits`` の parameter であり、wide 側に
+        ``narrow_bits`` からの extension が entail されているときだけ返す。register の
+        射影（readonly identity の proof）が使ってよい入力仮定はこれだけ。
+        """
+
+        if wide_side not in _SIDES:
+            raise ValueError(f"unknown side: {wide_side!r}")
+        for item in self.correspondences:
+            if item.kind is not InputRelationKind.EXTENSION_BOUND or item.left is None or item.right is None:
+                continue
+            wide = item.left if wide_side == LEFT else item.right
+            narrow = item.right if wide_side == LEFT else item.left
+            if (wide.index, narrow.index) != (parameter_index, parameter_index):
+                continue
+            if (wide.bit_width, narrow.bit_width, item.tie_bits) != (wide_bits, narrow_bits, narrow_bits):
+                return None
+            assumption = self.entailed_assumption(wide_side, parameter_index)
+            if (
+                assumption is None
+                or assumption.parameter_bits != wide_bits
+                or assumption.narrow_bits != narrow_bits
+            ):
+                return None
+            return assumption
+        return None
+
     def premise_lines(
         self,
         params1: Sequence[ParameterInfo],

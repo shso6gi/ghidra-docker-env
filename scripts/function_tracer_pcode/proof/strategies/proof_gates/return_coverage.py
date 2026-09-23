@@ -13,9 +13,11 @@ from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     UnknownReasonRecord,
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
+    bind_evidence_to_comparison,
     build_proof_obligation_id,
     build_unknown_recovery_actions,
     coerce_value_to_bitvec_width,
+    comparison_evidence,
     make_unknown_reason,
 )
 from scripts.function_tracer_pcode.proof.obligations import (
@@ -1017,8 +1019,7 @@ def _impl__record_completed_return_coverage_proof(
     proof_kind = UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION.value
     existing_ids = {
         self._normalize_nested_tuple(item.get("proof_obligation_id"))
-        for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
-        if isinstance(item, Mapping)
+        for item in comparison_evidence(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
     }
     records: List[Dict[str, Any]] = [
         dict(item)
@@ -1068,7 +1069,7 @@ def _impl__record_completed_return_coverage_proof(
         }
         if self._return_coverage_proof_id_from_evidence(candidate) is None:
             continue
-        records.append(candidate)
+        records.append(bind_evidence_to_comparison(candidate))
         existing_ids.add(proof_id)
     analysis.completed_recovery_proof_evidence = tuple(records)
 

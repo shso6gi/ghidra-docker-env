@@ -1,6 +1,7 @@
 from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 import hashlib
 
+from contextlib import contextmanager
 from copy import deepcopy
 
 from typing import Tuple
@@ -1601,6 +1602,55 @@ def _readonly_identity_reason(target=None):
         object_target_key=target or _readonly_identity_target(),
     )
 
+def _readonly_fixture_relation():
+    """readonly projection の fixture proof を作った比較の最終 relation（Issue #167）。
+
+    parameter 1（count）を左 64 bit / 右 32 bit にとり、左に 32 bit からの sign
+    extension を含意する（fixture proof の ``entailed_assumption`` と同じ仮定）。
+    """
+
+    from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        build_input_correspondence_set,
+    )
+    from scripts.function_tracer_pcode.semantics.rewrite_contract import ExtensionKind
+    from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import (
+        synthetic_input_extension_evidence,
+    )
+
+    def analysis(count_size, binary_id, entry_point):
+        return FunctionReturnAnalysis(
+            function_name="readonly_fixture",
+            entry_point=entry_point,
+            parameters=[
+                {"name": "base", "index": 0, "size": 8},
+                {"name": "count", "index": 1, "size": count_size, "is_signed": True},
+            ],
+            returns=[],
+            return_type="int",
+            binary_id=binary_id,
+        )
+
+    left = analysis(8, "left-binary", "0x1000")
+    right = analysis(4, "right-binary", "0x2000")
+    iee = synthetic_input_extension_evidence(left, 1, logical_bits=32, storage_bits=64, kind=ExtensionKind.SIGN)
+    relation = build_input_correspondence_set(left, right, input_extension_evidence=(iee,))
+    assert relation.entailed_projection_extension("left", 1, 64, 32) is not None
+    return relation
+
+
+@contextmanager
+def _readonly_fixture_comparison():
+    """fixture proof と同じ relation の比較の範囲（gate はこの中で照合する）。"""
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        comparison_relation_scope,
+    )
+
+    with comparison_relation_scope(_readonly_fixture_relation()):
+        yield
+
+
 def _readonly_identity_evidence(action, **overrides):
     storage_relation = None
     if len(action.object_target_key) == 5:
@@ -1645,7 +1695,7 @@ def _readonly_identity_evidence(action, **overrides):
                     "extension": "sign_extend",
                     # 入力 extension の出所は最終 InputCorrespondence だけ（Issue #167）。
                     "proof_source": "final_input_correspondence",
-                    "input_correspondence_digest": "c" * 64,
+                    "input_correspondence_digest": _readonly_fixture_relation().digest,
                     "entailed_assumption": ("rewrite_assumption_v1", 1, 64, 32, "sign"),
                 },
             }

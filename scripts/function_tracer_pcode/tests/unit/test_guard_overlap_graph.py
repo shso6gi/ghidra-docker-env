@@ -256,7 +256,7 @@ def test_guard_execution_does_not_publish_function_proof_outcome():
 def _binding(generation=1):
     return PairLedgerBinding(
         "session", "pairwise", "surface", "projection", generation,
-        ("view", generation), "premise", generation,
+        ("view", generation), "premise", generation, "relation-digest",
     )
 
 
@@ -268,7 +268,7 @@ def test_ledger_seals_only_with_exact_generation_bound_closure():
     )
     binding = PairLedgerBinding(
         "session", "pairwise", "surface", "projection", 1,
-        runtime.current_view.view_id, runtime.premise_digest, 1,
+        runtime.current_view.view_id, runtime.premise_digest, 1, "relation-digest",
     )
     ledger = runtime.open_pair_ledger(binding, 1)
     graph = GuardOverlapGraph(binding.derived_view_id, binding.premise_digest, 1)
@@ -639,7 +639,7 @@ def test_runtime_view_transition_retains_old_ledger_until_exact_successor_compos
     )
     binding = PairLedgerBinding(
         "session", "pairwise", "surface", "projection", 1,
-        runtime.current_view.view_id, runtime.premise_digest, 1,
+        runtime.current_view.view_id, runtime.premise_digest, 1, "relation-digest",
     )
     ledger = runtime.open_pair_ledger(binding, 0)
     stale_certificate = runtime.pair_quiescence_certificate(ledger)
@@ -684,7 +684,7 @@ def test_runtime_view_transition_retains_old_ledger_until_exact_successor_compos
         binding.frame_generation + 1,
         successor_plan.derived_view_id,
         successor_plan.premise_digest,
-        binding.graph_generation + 1,
+        binding.graph_generation + 1, "relation-digest",
     )
     successor = runtime.open_pair_ledger(replacement_binding, 0)
     assert ledger.lifecycle == LedgerLifecycle.SUPERSEDED

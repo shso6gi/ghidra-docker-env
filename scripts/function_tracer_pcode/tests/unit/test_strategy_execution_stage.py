@@ -101,9 +101,10 @@ def _ctx(strategy, branch_id="DirectCall", lease=None, replan=None):
                               production_branch_authority_lease=lease)
 
 
-def _frame():
+def _frame(input_correspondence=None):
     return SimpleNamespace(obligation_runtime=None, replan_successor_plan=None, pair_disposition_ledger=None,
-                           receipt=None, cleanup_complete=False, close=Mock(name="frame.close"))
+                           receipt=None, cleanup_complete=False, close=Mock(name="frame.close"),
+                           prepared=SimpleNamespace(input_correspondence=input_correspondence))
 
 
 def _projection_prep(manifest=None, projection=None):

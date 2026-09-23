@@ -10,6 +10,9 @@ from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     UnknownRecoveryProofKind,
     build_proof_obligation_id,
     build_unknown_recovery_actions,
+    comparison_evidence,
+    current_relation,
+    relation_digest_is_current,
 )
 
 def _impl__recovery_proof_is_complete(
@@ -46,11 +49,12 @@ def _impl__completed_recovery_proof_evidence(
     cls,
     *analyses: FunctionReturnAnalysis,
 ) -> Tuple[Mapping[str, Any], ...]:
+    # Issue #167: 別の比較（relation）で作った証拠は、この比較の証拠として読まない。
     evidence_records: List[Mapping[str, Any]] = []
     for analysis in analyses:
-        for evidence in getattr(analysis, "completed_recovery_proof_evidence", ()) or ():
-            if isinstance(evidence, Mapping):
-                evidence_records.append(evidence)
+        evidence_records.extend(
+            comparison_evidence(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
+        )
     return tuple(evidence_records)
 
 def _impl__readonly_identity_proof_is_complete(
@@ -111,7 +115,10 @@ def _impl__produced_recovery_proof_ids(
     analysis: FunctionReturnAnalysis,
 ) -> Tuple[Tuple[Any, ...], ...]:
     proof_ids: List[Tuple[Any, ...]] = []
-    evidence_records = getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+    # Issue #167: 別の比較（relation）で作った証拠は、この比較の proof にしない。
+    evidence_records = comparison_evidence(
+        getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+    )
     if not cls._analysis_has_active_call_effect_proof_blockers(analysis):
         for evidence in evidence_records:
             proof_id = cls._call_effect_summary_proof_id_from_evidence(evidence)
@@ -437,13 +444,11 @@ def _impl__readonly_projection_extension_proof_content_is_complete(
     expected_wide_side = "left" if left_size > right_size else "right"
     expected_narrow_side = "right" if expected_wide_side == "left" else "left"
     # 入力 extension の出所は最終 InputCorrespondence だけ（Issue #167）。Ghidra の
-    # 推論型や semantic hint を出所とする proof は受理しない。記録された entailed
-    # 仮定が、proof content の parameter・幅・ext の種類と一致していること。
-    # relation との束縛: proof は producer がこの check の relation から作り、この
-    # check の prepared analysis object にだけ記録する。prepared pair は certificate で
-    # その relation の digest に束縛されているので、別の relation で作った proof が
-    # 同じ object に載ることはない。この gate は pinned 実装（producer-proof bundle）で
-    # relation を引数に取らないため、digest はここでは形式だけを検査する。
+    # 推論型や semantic hint を出所とする proof は受理しない。proof を作った relation が
+    # いま比較している relation と値で一致し、その relation 自身がこの射影の extension
+    # 仮定を含意すること（記録された仮定の自己申告ではなく、現在の relation から
+    # 導き直して照合する）。proof は raw analysis に残り別の relation の比較からも
+    # 見えるので、object の同一性は束縛にならない。
     expected_assumption = (
         "rewrite_assumption_v1",
         parameter_index,
@@ -451,17 +456,21 @@ def _impl__readonly_projection_extension_proof_content_is_complete(
         narrow_bits,
         "sign" if extension.get("extension") == "sign_extend" else "zero",
     )
-    digest = extension.get("input_correspondence_digest")
-    return (
+    if not (
         extension.get("wide_side") == expected_wide_side
         and extension.get("narrow_side") == expected_narrow_side
         and max(left_size, right_size) == wide_bits
         and min(left_size, right_size) == narrow_bits
         and extension.get("proof_source") == "final_input_correspondence"
-        and isinstance(digest, str)
-        and len(digest) == 64
+        and relation_digest_is_current(extension.get("input_correspondence_digest"))
         and cls._normalize_nested_tuple(extension.get("entailed_assumption")) == expected_assumption
+    ):
+        return False
+    relation = current_relation()
+    entailed = None if relation is None else relation.entailed_projection_extension(
+        expected_wide_side, parameter_index, wide_bits, narrow_bits,
     )
+    return entailed is not None and entailed.stable_key() == expected_assumption
 
 def _impl__method_b_closure_proof_content_is_complete(
     cls,

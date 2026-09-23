@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Pairwise 前の return case 統合に関する回帰テスト"""
 
+import hashlib
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -56,7 +57,11 @@ from scripts.function_tracer_pcode.tests.unit._publication import published
 from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import (
     synthetic_input_extension_evidence,
 )
-from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    InputCorrespondenceSet,
+    build_input_correspondence_set,
+    comparison_relation_scope,
+)
 from scripts.function_tracer_pcode.semantics.rewrite_contract import ExtensionKind
 
 
@@ -1280,17 +1285,25 @@ def test_nested_zero_extend_uses_rendered_operand_width_without_double_extension
 
 
 def _record_readonly_projection_proof(input_correspondence, **fixture):
+    """producer を、渡した relation の比較の中で実行する（production と同じ）。"""
+
     strategy, reason, analysis1, analysis2, left_case, right_case = _readonly_projection_reason_and_analyses(**fixture)
     relation = input_correspondence(analysis1, analysis2) if callable(input_correspondence) else input_correspondence
-    strategy._record_completed_readonly_identity_projection_proof_if_safe(
-        reason,
-        analysis1,
-        analysis2,
-        left_case,
-        right_case,
-        input_correspondence=relation,
-    )
-    return strategy, reason, analysis1, analysis2
+    _record_readonly_projection_proof_in(strategy, reason, analysis1, analysis2, left_case, right_case, relation)
+    return strategy, reason, analysis1, analysis2, relation, (left_case, right_case)
+
+
+def _record_readonly_projection_proof_in(strategy, reason, analysis1, analysis2, left_case, right_case, relation):
+    scope = relation if isinstance(relation, InputCorrespondenceSet) else None
+    with comparison_relation_scope(scope):
+        strategy._record_completed_readonly_identity_projection_proof_if_safe(
+            reason,
+            analysis1,
+            analysis2,
+            left_case,
+            right_case,
+            input_correspondence=relation,
+        )
 
 
 def _relation_with_left_extension(kind):
@@ -1298,6 +1311,16 @@ def _relation_with_left_extension(kind):
         iee = synthetic_input_extension_evidence(analysis1, 1, logical_bits=32, storage_bits=64, kind=kind)
         return build_input_correspondence_set(analysis1, analysis2, input_extension_evidence=(iee,))
     return build
+
+
+def _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation):
+    """``relation`` の比較の中で、readonly の recovery gate が proof を採用するか。"""
+
+    with comparison_relation_scope(relation):
+        complete = strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2)
+        ids = PairwiseStrategy._completed_recovery_proof_ids(analysis1, analysis2)
+    assert complete is (reason.proof_obligation_id in ids)
+    return complete
 
 
 @pytest.mark.parametrize(("kind", "extension"), [
@@ -1308,15 +1331,21 @@ def test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_f
     InputCorrespondence が EXTENSION_BOUND でその仮定を含意したときだけ言える。
     """
 
-    strategy, reason, analysis1, analysis2 = _record_readonly_projection_proof(
+    strategy, reason, analysis1, analysis2, relation, _cases = _record_readonly_projection_proof(
         _relation_with_left_extension(kind), left_param_size=8,
     )
 
-    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is True
-    content = analysis1.completed_recovery_proof_evidence[0]["proof_content"]["parameter_extension"]
+    # 同じ relation の比較では採用される（正当な proof）。
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is True
+    record = analysis1.completed_recovery_proof_evidence[0]
+    assert record["input_correspondence_digest"] == relation.digest
+    content = record["proof_content"]["parameter_extension"]
     assert content["proof_source"] == "final_input_correspondence"
+    assert content["input_correspondence_digest"] == relation.digest
     assert content["extension"] == extension
     assert content["entailed_assumption"] == ("rewrite_assumption_v1", 1, 64, 32, kind.value)
+    # 比較の外（relation の無い範囲）では採用されない。
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
 
 
 def test_readonly_identity_projection_proof_is_not_issued_from_an_inferred_narrow_type():
@@ -1324,28 +1353,149 @@ def test_readonly_identity_projection_proof_is_not_issued_from_an_inferred_narro
     だけでは extension の証拠にならない（旧実装はこれを proven として記録した）。
     """
 
-    strategy, reason, analysis1, analysis2 = _record_readonly_projection_proof(build_input_correspondence_set)
+    strategy, reason, analysis1, analysis2, relation, _cases = _record_readonly_projection_proof(
+        build_input_correspondence_set,
+    )
 
     assert analysis1.completed_recovery_proof_evidence == ()
-    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is False
 
 
 def test_readonly_identity_projection_proof_needs_an_extension_bound_relation():
     """wide 側が 64 bit でも IEE が無ければ relation は WIDTH_OVERLAP で、仮定は含意されない。"""
 
-    strategy, reason, analysis1, analysis2 = _record_readonly_projection_proof(
+    strategy, reason, analysis1, analysis2, relation, _cases = _record_readonly_projection_proof(
         build_input_correspondence_set, left_param_size=8,
     )
     assert analysis1.completed_recovery_proof_evidence == ()
-    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is False
 
-    strategy, reason, analysis1, analysis2 = _record_readonly_projection_proof(None, left_param_size=8)
+    strategy, reason, analysis1, analysis2, _relation, _cases = _record_readonly_projection_proof(
+        None, left_param_size=8,
+    )
     assert analysis1.completed_recovery_proof_evidence == ()
+
+
+# ---- Issue #167 blocker: proof は、それを作った relation の比較でだけ採用される ----------------
+#
+# proof は raw analysis（branch・retry・再帰抽象化をまたいで生き残る object）に残る。
+# 同じ analysis を別の relation で比べ直したとき、前の relation が含意した extension
+# から作った proof を持ち込んではならない。
+
+
+def test_readonly_projection_proof_from_a_sign_relation_is_not_reused_without_the_extension():
+    strategy, reason, analysis1, analysis2, sign_relation, _cases = _record_readonly_projection_proof(
+        _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
+    )
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, sign_relation) is True
+
+    # 同じ analysis を、IEE の無い relation B で比べ直す。
+    no_extension = build_input_correspondence_set(analysis1, analysis2)
+    assert no_extension.digest != sign_relation.digest
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, no_extension) is False
+
+
+def test_readonly_projection_proof_from_a_sign_relation_is_not_reused_under_a_zero_relation():
+    strategy, reason, analysis1, analysis2, sign_relation, cases = _record_readonly_projection_proof(
+        _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
+    )
+    zero_relation = _relation_with_left_extension(ExtensionKind.ZERO)(analysis1, analysis2)
+    assert zero_relation.digest != sign_relation.digest
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, zero_relation) is False
+
+    # relation B の比較は B が含意した仮定から proof を作り直せる（A の proof は数えない）。
+    _record_readonly_projection_proof_in(strategy, reason, analysis1, analysis2, *cases, zero_relation)
+    records = analysis1.completed_recovery_proof_evidence
+    assert [record["input_correspondence_digest"] for record in records] == [
+        sign_relation.digest, zero_relation.digest,
+    ]
+    assert records[1]["proof_content"]["parameter_extension"]["extension"] == "zero_extend"
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, zero_relation) is True
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, sign_relation) is True
+
+
+@pytest.mark.parametrize("forged_digest", ["f" * 64, hashlib.sha256(b"another relation").hexdigest()])
+def test_readonly_projection_proof_with_a_forged_relation_digest_is_rejected(forged_digest):
+    strategy, reason, analysis1, analysis2, relation, _cases = _record_readonly_projection_proof(
+        _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
+    )
+    record = analysis1.completed_recovery_proof_evidence[0]
+    extension = record["proof_content"]["parameter_extension"]
+    for forged in (
+        # content の digest だけ
+        {**record, "proof_content": {
+            **record["proof_content"],
+            "parameter_extension": {**extension, "input_correspondence_digest": forged_digest},
+        }},
+        # record の束縛だけ
+        {**record, "input_correspondence_digest": forged_digest},
+    ):
+        analysis1.completed_recovery_proof_evidence = (forged,)
+        assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is False
+
+
+def test_readonly_projection_proof_relabelled_to_a_relation_without_the_extension_is_rejected():
+    """digest を現在の relation に書き換えても、その relation が仮定を含意しなければ拒否する。"""
+
+    strategy, reason, analysis1, analysis2, _relation, _cases = _record_readonly_projection_proof(
+        _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
+    )
+    no_extension = build_input_correspondence_set(analysis1, analysis2)
+    record = analysis1.completed_recovery_proof_evidence[0]
+    extension = record["proof_content"]["parameter_extension"]
+    analysis1.completed_recovery_proof_evidence = ({
+        **record,
+        "input_correspondence_digest": no_extension.digest,
+        "proof_content": {
+            **record["proof_content"],
+            "parameter_extension": {**extension, "input_correspondence_digest": no_extension.digest},
+        },
+    },)
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, no_extension) is False
+
+
+def test_readonly_identity_validator_binds_the_ledger_to_the_current_relation():
+    """pair closure は ledger の relation の比較の中でだけ発行される。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.pair_closure_producers import (
+        ReadonlyIdentityCandidate,
+        validate_readonly_identity_candidate,
+    )
+    from scripts.function_tracer_pcode.proof.obligations.pair_disposition import PairLedgerBinding
+
+    strategy, reason, analysis1, analysis2, sign_relation, _cases = _record_readonly_projection_proof(
+        _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
+    )
+    zero_relation = _relation_with_left_extension(ExtensionKind.ZERO)(analysis1, analysis2)
+
+    def binding(relation):
+        return PairLedgerBinding(
+            "session", "S_PAIRWISE", "surface", "projection", 1, ("view",), "premise", 1,
+            relation.digest,
+        )
+
+    def validate(ledger_relation, current_relation, candidate_relation=None):
+        ledger = binding(ledger_relation)
+        candidate = ReadonlyIdentityCandidate.create(
+            binding(candidate_relation or ledger_relation), "(0,0)", ("target",),
+            tuple(analysis1.completed_recovery_proof_evidence),
+        )
+        with comparison_relation_scope(current_relation):
+            return validate_readonly_identity_candidate(
+                strategy, ledger, candidate, reason, analysis1, analysis2,
+            )
+
+    assert validate(sign_relation, sign_relation) is not None
+    # ledger・candidate・現在の比較のどれかが別の relation なら発行しない。
+    assert validate(sign_relation, zero_relation) is None
+    assert validate(zero_relation, zero_relation) is None
+    assert validate(sign_relation, sign_relation, candidate_relation=zero_relation) is None
+    assert validate(sign_relation, None) is None
 
 
 @pytest.mark.parametrize("proof_source", ["declared_parameter_narrow_type_on_wide_storage", "param_semantic_hint"])
 def test_readonly_identity_gate_rejects_extension_proofs_from_inferred_types_or_hints(proof_source):
-    strategy, reason, analysis1, analysis2 = _record_readonly_projection_proof(
+    strategy, reason, analysis1, analysis2, relation, _cases = _record_readonly_projection_proof(
         _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
     )
     evidence = analysis1.completed_recovery_proof_evidence[0]
@@ -1353,11 +1503,11 @@ def test_readonly_identity_gate_rejects_extension_proofs_from_inferred_types_or_
     analysis1.completed_recovery_proof_evidence = (
         {**evidence, "proof_content": {**evidence["proof_content"], "parameter_extension": forged}},
     )
-    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is False
 
 
 def test_readonly_identity_gate_rejects_an_assumption_that_disagrees_with_the_content():
-    strategy, reason, analysis1, analysis2 = _record_readonly_projection_proof(
+    strategy, reason, analysis1, analysis2, relation, _cases = _record_readonly_projection_proof(
         _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
     )
     evidence = analysis1.completed_recovery_proof_evidence[0]
@@ -1368,7 +1518,7 @@ def test_readonly_identity_gate_rejects_an_assumption_that_disagrees_with_the_co
     analysis1.completed_recovery_proof_evidence = (
         {**evidence, "proof_content": {**evidence["proof_content"], "parameter_extension": forged}},
     )
-    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is False
 
 
 def test_readonly_identity_projection_producer_rejects_term_contract_mismatch():

@@ -7,7 +7,9 @@ from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     UnknownReasonRecord,
     UnknownRecoveryProofKind,
+    bind_evidence_to_comparison,
     build_proof_obligation_id,
+    comparison_evidence,
 )
 
 
@@ -82,7 +84,7 @@ def _impl__record_completed_call_effect_summary_proof_if_safe(
     ]
     existing_ids = {
         self._normalize_nested_tuple(item.get("proof_obligation_id"))
-        for item in records
+        for item in comparison_evidence(records)
     }
     if proof_obligation_id in existing_ids:
         return
@@ -104,7 +106,7 @@ def _impl__record_completed_call_effect_summary_proof_if_safe(
         else "call_effect_summary_proof"
     )
     records.append(
-        {
+        bind_evidence_to_comparison({
             "object_derived": True,
             "status": "complete",
             "reason_id": reason_record.reason_id,
@@ -115,7 +117,7 @@ def _impl__record_completed_call_effect_summary_proof_if_safe(
             "proof_obligation_id": proof_obligation_id,
             "proof_source": proof_source,
             "proof_content": proof_content,
-        }
+        })
     )
     analysis.completed_recovery_proof_evidence = tuple(records)
 
@@ -526,7 +528,7 @@ def _impl__bounded_call_refinement_evidence_for_call_argument_target(
     if self._normalize_nested_tuple(object_target_key[4]) != expected_callee_key:
         return None
     expected_argument_count = len(tuple(getattr(matching_evidence, "arguments", ()) or ()))
-    records = tuple(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
+    records = comparison_evidence(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
     for record in records:
         if not isinstance(record, Mapping):
             continue
@@ -630,9 +632,8 @@ def _impl__self_recursive_no_store_call_effect_proof_content(
         return None
     recurrence_receipts = tuple(
         item
-        for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
-        if isinstance(item, Mapping)
-        and item.get("status") == "complete"
+        for item in comparison_evidence(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
+        if item.get("status") == "complete"
         and item.get("proof_stage") == "recurrence_validation_complete"
         and item.get("evidence_kind") == "validated_unary_recurrence_artifact"
     )
@@ -1939,7 +1940,9 @@ def _impl__completed_call_effect_summary_proof_ids(
 ) -> Tuple[Tuple[Any, ...], ...]:
     proof_ids: List[Tuple[Any, ...]] = []
     for analysis in analyses:
-        evidence_records = getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+        evidence_records = comparison_evidence(
+            getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+        )
         for evidence in evidence_records:
             proof_id = cls._call_effect_summary_proof_id_from_evidence(evidence)
             if proof_id is not None:

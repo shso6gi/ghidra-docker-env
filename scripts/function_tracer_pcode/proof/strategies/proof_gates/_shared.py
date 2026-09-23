@@ -13,6 +13,12 @@ from scripts.function_tracer_pcode.checker.unknown_reason import (
     make_internal_v2_reason_diagnostic,
     make_unknown_reason,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    bind_evidence_to_comparison,
+    comparison_evidence,
+    current_relation,
+    relation_digest_is_current,
+)
 from scripts.function_tracer_pcode.proof.unknown_reason import (
     UnknownReasonId,
     UnknownRecoveryActionStatus,
@@ -56,4 +62,4 @@ class ReturnCoverageCheckResult:
     coverage_proof_method: Optional[str] = None
     solver_status: Optional[str] = None
 
-__all__ = ('Any', 'ConditionSMTOracle', 'Dict', 'List', 'Optional', 'ParallelResult', 'ReadonlyReductionRef', 'ReturnCoverageCheckResult', 'Set', 'StrategyResult', 'Tuple', 'UnknownReasonId', 'UnknownReasonRecord', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', 'build_proof_obligation_id', 'build_unknown_recovery_actions', 'coerce_unknown_reason_records', 'coerce_value_to_bitvec_width', 'dataclass', 'field', 'make_internal_v2_reason_diagnostic', 'make_unknown_reason')
+__all__ = ('Any', 'ConditionSMTOracle', 'Dict', 'List', 'Optional', 'ParallelResult', 'ReadonlyReductionRef', 'ReturnCoverageCheckResult', 'Set', 'StrategyResult', 'Tuple', 'UnknownReasonId', 'UnknownReasonRecord', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', 'bind_evidence_to_comparison', 'build_proof_obligation_id', 'build_unknown_recovery_actions', 'coerce_unknown_reason_records', 'coerce_value_to_bitvec_width', 'comparison_evidence', 'current_relation', 'dataclass', 'field', 'make_internal_v2_reason_diagnostic', 'make_unknown_reason', 'relation_digest_is_current')

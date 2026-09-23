@@ -1,4 +1,4 @@
-from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_of, echo_input_correspondence
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
 
 def test_pairwise_strategy_downgrades_sat_when_return_cases_leave_coverage_gap(monkeypatch):
@@ -196,9 +196,14 @@ def test_pairwise_return_coverage_covered_side_emits_completed_proof_evidence(mo
         tuple(item["proof_obligation_id"])
         for item in evidence
     } == {action.proof_obligation_id for action in expected_actions}
-    assert PairwiseStrategy._completed_recovery_proof_ids(analysis2) == tuple(
-        action.proof_obligation_id for action in expected_actions
-    )
+    # 証拠はそれを作った比較の relation に束縛され、その比較の中でだけ proof に
+    # なる（Issue #167）。比較の外からは採用されない。
+    with comparison_of(analysis1, analysis2) as relation:
+        assert {item["input_correspondence_digest"] for item in evidence} == {relation.digest}
+        assert PairwiseStrategy._completed_recovery_proof_ids(analysis2) == tuple(
+            action.proof_obligation_id for action in expected_actions
+        )
+    assert PairwiseStrategy._completed_recovery_proof_ids(analysis2) == ()
 
     strategy.check(analysis1, analysis2)
 

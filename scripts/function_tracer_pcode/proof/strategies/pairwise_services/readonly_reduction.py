@@ -17,8 +17,8 @@ from scripts.function_tracer_pcode.core import (
 from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     LEFT as INPUT_LEFT,
+    RIGHT as INPUT_RIGHT,
     InputCorrespondenceSet,
-    InputRelationKind,
 )
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ConditionSMTOracle,
@@ -29,7 +29,9 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     _ExactReadonlyReductionProof,
     _ReadonlyLoopSummaryProofAdapter,
     _RuntimeShortcutDecision,
+    bind_evidence_to_relation,
     build_unknown_recovery_actions,
+    comparison_evidence,
     parameter_identity_key_from_expression,
 )
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
@@ -1042,7 +1044,7 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
     ]
     existing_ids = {
         self._normalize_nested_tuple(item.get("proof_obligation_id"))
-        for item in records
+        for item in comparison_evidence(records)
     }
     if proof_id in existing_ids:
         return
@@ -1071,8 +1073,10 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
         },
         "parameter_extension": extension_evidence,
     }
+    # proof はこの比較の relation が含意した extension から作ったので、その relation に
+    # 束縛する（raw analysis に残っても、別の relation の比較では採用されない）。
     records.append(
-        {
+        bind_evidence_to_relation({
             "object_derived": True,
             "status": "complete",
             "reason_id": UnknownReasonId.READONLY_IDENTITY_MISSING.value,
@@ -1085,7 +1089,7 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
             "proof_obligation_id": proof_id,
             "proof_source": "readonly_same_register_projection_semantic_extension",
             "proof_content": proof_content,
-        }
+        }, input_correspondence)
     )
     analysis1.completed_recovery_proof_evidence = tuple(records)
 
@@ -1190,12 +1194,13 @@ def _impl__readonly_projection_parameter_extension_evidence(
     shared_index = self._readonly_shared_parameter_index(left_ref, right_ref)
     if shared_index is None:
         return None
-    assumption = _entailed_projection_extension(
-        input_correspondence,
-        wide_side=wide_side,
-        parameter_index=shared_index,
-        wide_bits=wide_bits,
-        narrow_bits=narrow_bits,
+    if type(input_correspondence) is not InputCorrespondenceSet:
+        return None
+    assumption = input_correspondence.entailed_projection_extension(
+        INPUT_LEFT if wide_side == "left" else INPUT_RIGHT,
+        shared_index,
+        wide_bits,
+        narrow_bits,
     )
     if assumption is None:
         return None
@@ -1229,43 +1234,6 @@ def _impl__readonly_projection_parameter_extension_evidence(
         "input_correspondence_digest": input_correspondence.digest,
         "entailed_assumption": assumption.stable_key(),
     }
-
-
-def _entailed_projection_extension(
-    input_correspondence: Any,
-    *,
-    wide_side: str,
-    parameter_index: int,
-    wide_bits: int,
-    narrow_bits: int,
-):
-    """最終 relation が parameter ``parameter_index`` の wide 側に含意した extension 仮定。
-
-    pair の relation が ``EXTENSION_BOUND``（tie = ``narrow_bits``）で、wide 側が
-    ``wide_bits``、narrow 側が ``narrow_bits`` の同じ index の parameter であり、
-    wide 側に ``narrow_bits`` からの extension が entail されているときだけ返す。
-    """
-
-    if type(input_correspondence) is not InputCorrespondenceSet:
-        return None
-    for item in input_correspondence.correspondences:
-        if item.kind is not InputRelationKind.EXTENSION_BOUND or item.left is None or item.right is None:
-            continue
-        wide = item.left if wide_side == INPUT_LEFT else item.right
-        narrow = item.right if wide_side == INPUT_LEFT else item.left
-        if (wide.index, narrow.index) != (parameter_index, parameter_index):
-            continue
-        if (wide.bit_width, narrow.bit_width, item.tie_bits) != (wide_bits, narrow_bits, narrow_bits):
-            return None
-        assumption = input_correspondence.entailed_assumption(wide_side, parameter_index)
-        if (
-            assumption is None
-            or assumption.parameter_bits != wide_bits
-            or assumption.narrow_bits != narrow_bits
-        ):
-            return None
-        return assumption
-    return None
 
 
 def _impl__readonly_projection_span(relation: Tuple[Any, ...], tag: str) -> Optional[Tuple[int, int]]:

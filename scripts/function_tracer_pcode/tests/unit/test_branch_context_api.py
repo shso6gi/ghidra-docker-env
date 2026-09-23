@@ -179,14 +179,14 @@ def test_runner_replan_context_takes_the_successor_plan_precedence_and_keeps_the
         captured.append((ctx, kwargs["force_strategy"], ctx.production_branch_authority_lease, checker._call_proof_generation))
         if len(captured) == 1:
             binding = PairLedgerBinding("session", "S_PAIRWISE", "surface", "projection", 1,
-                                        runtime.current_view.view_id, runtime.premise_digest, 1)
+                                        runtime.current_view.view_id, runtime.premise_digest, 1, "relation-digest")
             ledger = runtime.open_pair_ledger(binding, 1)
             first._prepared_dispatch_frame = SimpleNamespace(pair_disposition_ledger=ledger)
             return first
         successor_plan = runtime.pair_ledger_manager.pending_successor
         assert successor_plan is not None and ctx.replan_plan is successor_plan
         replacement_binding = PairLedgerBinding(successor_plan.comparison_session_id, successor_plan.branch_id, "new-surface",
-                                                "new-projection", 2, successor_plan.derived_view_id, runtime.premise_digest, 2)
+                                                "new-projection", 2, successor_plan.derived_view_id, runtime.premise_digest, 2, "relation-digest")
         runtime.open_pair_ledger(replacement_binding, 2)
         second._prepared_dispatch_frame = SimpleNamespace(pair_disposition_ledger=runtime.pair_ledger_manager.current)
         return second

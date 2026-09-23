@@ -59,7 +59,10 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     LEFT as INPUT_LEFT,
     RIGHT as INPUT_RIGHT,
     InputCorrespondenceSet,
+    bind_evidence_to_relation,
     build_input_correspondence_set,
+    comparison_relation_scope,
+    comparison_uses_relation,
 )
 from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     register_builtin_receipt_executor,
@@ -132,11 +135,18 @@ def _impl_check(
         solver_analysis1 = dispatch_frame.prepared.analysis1
         solver_analysis2 = dispatch_frame.prepared.analysis2
         input_correspondence = dispatch_frame.prepared.input_correspondence
+        # Issue #167: この比較で作る証拠は、この relation の比較として束縛される。
+        if not comparison_uses_relation(input_correspondence):
+            raise RuntimeError("comparison_relation_scope_mismatch")
     else:
         # Compatibility-only direct strategy invocation.  Production checker
         # dispatch always supplies a certified prepared frame.  The arguments
         # are the raw pair, so the final relation is built from them first.
         input_correspondence = build_input_correspondence_set(analysis1, analysis2)
+        if not comparison_uses_relation(input_correspondence):
+            # この互換呼び出しを、自分の relation の比較として実行し直す。
+            with comparison_relation_scope(input_correspondence):
+                return _impl_check(self, analysis1, analysis2, save_formula)
         solver_analysis1 = normalize_analysis_semantic_width(
             analysis1,
             infer_parameter_semantics(analysis1),
@@ -416,6 +426,7 @@ def _impl_check(
         tuple(getattr(getattr(runtime, "current_view", None), "view_id", ()) or ()),
         graph.premise_digest,
         graph.generation,
+        input_correspondence.digest,
     )
     if (
         runtime is not None
@@ -1965,13 +1976,15 @@ def _impl_check(
             error_kind=locals().get("strategy_error_kind"),
             error_message=locals().get("strategy_error_message"),
         )
+        # 戻り幅の完了証拠はこの比較の solver surface（relation が許可した書き換えの
+        # 結果）から作ったので、この比較の relation に束縛する（Issue #167）。
         final_result.completed_recovery_proof_evidence = [
             {
                 "side": side,
                 "function_name": getattr(analysis, "function_name", None),
                 "binary_name": getattr(analysis, "binary_id", None),
                 "binary_id": getattr(analysis, "binary_id", None),
-                "evidence": dict(evidence),
+                "evidence": bind_evidence_to_relation(dict(evidence), input_correspondence),
             }
             for side, analysis, prepared in (
                 ("function1", solver_analysis1, prepared_widths1),

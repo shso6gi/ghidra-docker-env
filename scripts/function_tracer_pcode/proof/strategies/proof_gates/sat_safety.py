@@ -12,7 +12,9 @@ from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
     UnknownRecoveryProofObligation,
+    bind_evidence_to_comparison,
     build_proof_obligation_id,
+    comparison_evidence,
     make_internal_v2_reason_diagnostic,
     make_unknown_reason,
 )
@@ -565,14 +567,14 @@ def _impl__record_completed_sat_counterexample_replay_proof(
     ]
     existing_ids = {
         self._normalize_nested_tuple(item.get("proof_obligation_id"))
-        for item in records
+        for item in comparison_evidence(records)
     }
     if proof_obligation_id in existing_ids:
         return
 
     counterexample_keys = tuple(sorted(str(key) for key in (counterexample_raw or {}).keys()))
     records.append(
-        {
+        bind_evidence_to_comparison({
             "object_derived": True,
             "status": "complete",
             "reason_id": reason_record.reason_id,
@@ -603,7 +605,7 @@ def _impl__record_completed_sat_counterexample_replay_proof(
                     "effect_status": "no_active_effect_unsafety_for_replay_gate",
                 },
             },
-        }
+        })
     )
     analysis1.completed_recovery_proof_evidence = tuple(records)
 

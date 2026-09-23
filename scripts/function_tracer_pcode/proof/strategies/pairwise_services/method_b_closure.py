@@ -9,7 +9,9 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     UnknownRecoveryProofKind,
     _ExactReadonlyReductionProof,
     _MethodBCoveringCaseProof,
+    bind_evidence_to_comparison,
     build_unknown_recovery_actions,
+    comparison_evidence,
 )
 
 
@@ -98,7 +100,7 @@ def _impl__record_completed_method_b_covering_case_proof_if_safe(
     ]
     existing_ids = {
         self._normalize_nested_tuple(item.get("proof_obligation_id"))
-        for item in records
+        for item in comparison_evidence(records)
     }
     changed = self._append_completed_method_b_covering_case_evidence(
         records,
@@ -173,7 +175,7 @@ def _impl__append_completed_method_b_covering_case_evidence(
     proof = covering.exact_proof
     count_values = tuple(int(value) for value in (proof.count_values or (proof.count_value,)) if int(value) > 0)
     records.append(
-        {
+        bind_evidence_to_comparison({
             "object_derived": True,
             "status": "complete",
             "reason_id": reason_id,
@@ -201,7 +203,7 @@ def _impl__append_completed_method_b_covering_case_evidence(
                 "result_size": int(proof.result_size),
                 "covering_evidence": proof.evidence,
             },
-        }
+        })
     )
     existing_ids.add(proof_id)
     return True
@@ -235,7 +237,7 @@ def _impl__append_completed_method_b_guard_partition_evidence(
         else "reduction_count_membership_implication"
     )
     records.append(
-        {
+        bind_evidence_to_comparison({
             "object_derived": True,
             "status": "complete",
             "reason_id": reason_id,
@@ -258,7 +260,7 @@ def _impl__append_completed_method_b_guard_partition_evidence(
                 "count_values": count_values,
                 "guard_evidence": guard_evidence,
             },
-        }
+        })
     )
     existing_ids.add(proof_id)
     return True

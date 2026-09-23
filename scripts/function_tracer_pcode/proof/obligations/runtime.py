@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    run_in_current_comparison,
+)
 from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
     ProofRequirementId,
@@ -80,6 +83,22 @@ class PendingCounterexampleSafety:
 
     requirement_key: Tuple[Any, ...]
     counterexample_raw: Any
+
+
+def _planner_in_current_comparison(planner: Callable[..., Any]) -> Callable[..., Any]:
+    """replanner とそれが返す producer を、登録した比較の relation の下で実行する。
+
+    replanner は後の gate 完了から呼ばれるので、呼ばれた時点の比較ではなく、
+    それを登録した比較の relation で証拠を照合する（Issue #167）。
+    """
+
+    def plan(*args: Any) -> Any:
+        requirement, kind, producer = planner(*args)
+        if producer is not None:
+            producer = run_in_current_comparison(producer)
+        return requirement, kind, producer
+
+    return run_in_current_comparison(plan)
 
 
 @dataclass
@@ -488,6 +507,8 @@ class ObligationRuntimeSession:
             self.worklist.add(item)
             key = instance.to_key()
             if callback is not None:
+                # Issue #167: producer は、積んだ比較の relation の下で実行する。
+                callback = run_in_current_comparison(callback)
                 self.callbacks[key] = callback
                 self.producers[requirement.to_key()] = callback
             for dependency in depends_on:
@@ -719,7 +740,7 @@ class ObligationRuntimeSession:
         kind: str,
         replanner: Callable[[], Tuple[ProofRequirementId, str, Callable[[], Any]]],
     ) -> None:
-        self.pair_query_replanners[(str(pair_id), str(kind))] = replanner
+        self.pair_query_replanners[(str(pair_id), str(kind))] = _planner_in_current_comparison(replanner)
 
     def register_target_query_replanner(
         self,
@@ -727,14 +748,16 @@ class ObligationRuntimeSession:
         replanner: Callable[[], Tuple[ProofRequirementId, str, Callable[[], Any]]],
     ) -> None:
         frozen = SnapshotFingerprintCodec.freeze(target_key)
-        self.target_query_replanners.setdefault(frozen, []).append(replanner)
+        self.target_query_replanners.setdefault(frozen, []).append(
+            _planner_in_current_comparison(replanner)
+        )
 
     def register_counterexample_safety_replanner(
         self,
         pair_id: str,
         replanner: Callable[[PendingCounterexampleSafety], Tuple[ProofRequirementId, str, Callable[[], Any]]],
     ) -> None:
-        self.counterexample_safety_replanners[str(pair_id)] = replanner
+        self.counterexample_safety_replanners[str(pair_id)] = _planner_in_current_comparison(replanner)
 
     def _schedule_counterexample_safety(
         self,

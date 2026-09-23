@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_of, echo_input_correspondence
 from unittest.mock import Mock
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner
 
@@ -1511,21 +1511,36 @@ def test_method_b_guard_partition_producer_records_when_count_guard_is_proven():
     )
     reason = _typed_method_b_reason(target)
 
-    strategy._record_completed_method_b_covering_case_proof_if_safe(
-        reason,
-        analysis1,
-        exact_case,
-        summary_case,
-    )
+    with comparison_of(analysis1, analysis2):
+        strategy._record_completed_method_b_covering_case_proof_if_safe(
+            reason,
+            analysis1,
+            exact_case,
+            summary_case,
+        )
 
-    evidence = tuple(analysis1.completed_recovery_proof_evidence)
-    assert [item["proof_stage"] for item in evidence] == [
-        "method_b_covering_case",
-        "method_b_guard_partition",
-    ]
-    assert evidence[1]["proof_content"]["guard_partition"] == "proven"
-    assert evidence[1]["proof_content"]["partition_coverage_proof"] == "covered"
-    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is True
+        evidence = tuple(analysis1.completed_recovery_proof_evidence)
+        assert [item["proof_stage"] for item in evidence] == [
+            "method_b_covering_case",
+            "method_b_guard_partition",
+        ]
+        assert evidence[1]["proof_content"]["guard_partition"] == "proven"
+        assert evidence[1]["proof_content"]["partition_coverage_proof"] == "covered"
+        assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is True
+
+    # Issue #167: Method B の proof は比較の solver surface（relation が許可した書き換え）
+    # から作るので、同じ analysis を別の relation で比べ直した比較では採用しない。
+    widened = FunctionReturnAnalysis(
+        function_name="left",
+        entry_point="0x1000",
+        parameters=[*parameters, {"name": "extra", "index": 2, "data_type": "int", "size": 4}],
+        returns=[exact_return],
+        return_type="int",
+    )
+    with comparison_of(widened, analysis2) as other_relation:
+        assert {item["input_correspondence_digest"] for item in evidence} != {other_relation.digest}
+        assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
+    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
 
 
 def test_method_b_guard_partition_producer_records_count_membership_when_range_is_proven():
@@ -1580,22 +1595,23 @@ def test_method_b_guard_partition_producer_records_count_membership_when_range_i
     )
     reason = _typed_method_b_reason(target)
 
-    strategy._record_completed_method_b_covering_case_proof_if_safe(
-        reason,
-        analysis1,
-        exact_case,
-        summary_case,
-    )
+    with comparison_of(analysis1, analysis2):
+        strategy._record_completed_method_b_covering_case_proof_if_safe(
+            reason,
+            analysis1,
+            exact_case,
+            summary_case,
+        )
 
-    evidence = tuple(analysis1.completed_recovery_proof_evidence)
-    assert [item["proof_stage"] for item in evidence] == [
-        "method_b_covering_case",
-        "method_b_guard_partition",
-    ]
-    assert evidence[0]["proof_content"]["count_values"] == (3, 4)
-    assert evidence[1]["proof_content"]["count_values"] == (3, 4)
-    assert evidence[1]["proof_content"]["guard_evidence"] == "reduction_count_membership_implication"
-    assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is True
+        evidence = tuple(analysis1.completed_recovery_proof_evidence)
+        assert [item["proof_stage"] for item in evidence] == [
+            "method_b_covering_case",
+            "method_b_guard_partition",
+        ]
+        assert evidence[0]["proof_content"]["count_values"] == (3, 4)
+        assert evidence[1]["proof_content"]["count_values"] == (3, 4)
+        assert evidence[1]["proof_content"]["guard_evidence"] == "reduction_count_membership_implication"
+        assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is True
 
 
 def test_method_b_guard_partition_producer_rejects_open_count_range():

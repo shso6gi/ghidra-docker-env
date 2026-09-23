@@ -60,13 +60,17 @@ class PairLedgerBinding:
     derived_view_id: Tuple[Any, ...]
     premise_digest: str
     graph_generation: int
-    schema_version: str = "pair_disposition_ledger_v2"
+    #: この ledger の closure の前提になった最終 InputCorrespondence の digest
+    #: （Issue #167）。validator は現在の比較の relation と値で照合する。
+    input_correspondence_digest: str
+    schema_version: str = "pair_disposition_ledger_v3"
 
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             self.schema_version, self.comparison_session_id, self.branch_id,
             self.prepared_surface_digest, self.projection_id, self.frame_generation,
             self.derived_view_id, self.premise_digest, self.graph_generation,
+            self.input_correspondence_digest,
         )
 
 
@@ -434,10 +438,12 @@ class PairLedgerSuccessorIntent:
     derived_view_id: Tuple[Any, ...]
     premise_digest: str
     graph_generation: int
+    #: 後継も前任と同じ比較（同じ最終 InputCorrespondence）の ledger（Issue #167）。
+    input_correspondence_digest: str
     predecessor_projection_id: str
     projection_refresh_required: bool = False
     state: PairLedgerPromotionState = PairLedgerPromotionState.OPEN
-    schema_version: str = "pair_ledger_successor_intent_v2"
+    schema_version: str = "pair_ledger_successor_intent_v3"
 
     def stable_key(self) -> Tuple[Any, ...]:
         return (
@@ -448,6 +454,7 @@ class PairLedgerSuccessorIntent:
             self.derived_view_id,
             self.premise_digest,
             self.graph_generation,
+            self.input_correspondence_digest,
             self.predecessor_projection_id,
             self.projection_refresh_required,
             self.state.value,
@@ -462,6 +469,7 @@ class PairLedgerSuccessorIntent:
             and binding.derived_view_id == self.derived_view_id
             and binding.premise_digest == self.premise_digest
             and binding.graph_generation == self.graph_generation
+            and binding.input_correspondence_digest == self.input_correspondence_digest
             and (
                 not self.projection_refresh_required
                 or binding.projection_id != self.predecessor_projection_id
@@ -1388,6 +1396,7 @@ class PairLedgerManager:
             tuple(derived_view_id),
             str(premise_digest),
             int(old.graph_generation) + 1,
+            old.input_correspondence_digest,
             old.projection_id,
             bool(projection_refresh_required),
         )

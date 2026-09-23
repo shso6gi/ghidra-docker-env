@@ -31,12 +31,15 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     ParameterInfo,
     QueryResult,
     ReturnCase,
+    bind_evidence_to_comparison,
     build_condition_only_query,
     build_normalized_inequality_query,
     build_pair_query,
     extension_premise_lines,
     build_single_case_condition_query,
     build_unknown_recovery_actions,
+    comparison_evidence,
+    merge_new_evidence,
     parameter_identity_key_from_descriptor,
     parameter_identity_key_from_expression,
     save_unknown_query,
@@ -54,30 +57,14 @@ def _impl__merge_completed_recovery_proofs_from_solver_analyses(
         (analysis1, solver_analysis1),
         (analysis2, solver_analysis2),
     ):
-        source_records = [
-            dict(record)
-            for record in getattr(source, "completed_recovery_proof_evidence", ()) or ()
-            if isinstance(record, Mapping)
-        ]
-        if not source_records:
-            continue
-        target_records = [
-            dict(record)
-            for record in getattr(target, "completed_recovery_proof_evidence", ()) or ()
-            if isinstance(record, Mapping)
-        ]
-        existing_ids = {record.get("proof_obligation_id") for record in target_records}
-        changed = False
-        for record in source_records:
-            proof_id = record.get("proof_obligation_id")
-            if proof_id is not None and proof_id in existing_ids:
-                continue
-            target_records.append(record)
-            if proof_id is not None:
-                existing_ids.add(proof_id)
-            changed = True
-        if changed:
-            target.completed_recovery_proof_evidence = tuple(target_records)
+        # 合流しても record の relation 束縛はそのまま（同じ proof でも relation が
+        # 違う record は別の証拠として残す）。
+        merged = merge_new_evidence(
+            getattr(target, "completed_recovery_proof_evidence", ()) or (),
+            getattr(source, "completed_recovery_proof_evidence", ()) or (),
+        )
+        if merged is not None:
+            target.completed_recovery_proof_evidence = tuple(merged)
 
 def _impl__solve_query_twostage(
     self,
@@ -145,7 +132,7 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
     ]
     existing_ids = {
         self._normalize_nested_tuple(item.get("proof_obligation_id"))
-        for item in records
+        for item in comparison_evidence(records)
     }
     changed = False
     for action in actions:
@@ -161,7 +148,7 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
         if proof_content is None:
             continue
         records.append(
-            {
+            bind_evidence_to_comparison({
                 "object_derived": True,
                 "status": "complete",
                 "reason_id": reason_record.reason_id,
@@ -174,7 +161,7 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
                 "proof_obligation_id": proof_id,
                 "proof_source": "method_b_dual_summary_case_local_solver_equality",
                 "proof_content": proof_content,
-            }
+            })
         )
         existing_ids.add(proof_id)
         changed = True

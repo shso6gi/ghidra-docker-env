@@ -14,8 +14,9 @@ header を手で書いた mock builder を使う test（call effect / coverage /
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import dataclasses
-from typing import Any
+from typing import Any, Iterator
 
 from scripts.function_tracer_pcode.proof.formula.types import FormulaBuilderResult
 
@@ -77,3 +78,21 @@ def synthetic_input_extension_evidence(analysis: Any, index: int, *, logical_bit
     evidence, reasons = iee_contract.validate_input_extension_evidence(rule, classification, storage)
     assert reasons == (), reasons
     return evidence
+
+
+@contextmanager
+def comparison_of(analysis1: Any, analysis2: Any, **relation_options: Any) -> Iterator[Any]:
+    """producer と gate を直接呼ぶ test 用: 1 つの比較（最終 relation）の範囲を開く。
+
+    production では dispatch 境界（``run_strategy_branch``）と stage runner が比較の
+    範囲を開き、比較の中で作った証拠はその relation に束縛される（Issue #167）。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        build_input_correspondence_set,
+        comparison_relation_scope,
+    )
+
+    relation = build_input_correspondence_set(analysis1, analysis2, **relation_options)
+    with comparison_relation_scope(relation):
+        yield relation

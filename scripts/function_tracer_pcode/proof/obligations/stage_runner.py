@@ -15,6 +15,12 @@ from scripts.function_tracer_pcode.proof.obligations.model import (
     ActivationState,
     FunctionProofOutcome,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    comparison_relation_scope,
+)
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.model import (
+    InputCorrespondenceSet,
+)
 from scripts.function_tracer_pcode.proof.obligations.decision import DecisionAggregator
 from scripts.function_tracer_pcode.proof.obligations.proof import (
     BranchActivationController,
@@ -175,6 +181,19 @@ def _cutover_branch_policy(result: Any) -> tuple[Any, tuple[str, ...], bool]:
     actions = RETRY_FALLBACK_MATRIX[attempt_outcome]
     continue_fallback = "FALLBACK_NEXT_STRATEGY" in actions
     return attempt_outcome, actions, continue_fallback
+
+
+def branch_comparison_relation(result: Any) -> Optional[InputCorrespondenceSet]:
+    """branch の結果を作った比較の最終 relation（frame の無い結果には無い）。
+
+    branch の後で実行する gate は、その結果の UNKNOWN reason と証拠を作った比較の
+    relation の下で照合する（Issue #167）。再帰抽象化の branch では、抽象 analysis を
+    比べた内側の比較の relation になる。
+    """
+
+    frame = getattr(result, "_prepared_dispatch_frame", None)
+    relation = getattr(getattr(frame, "prepared", None), "input_correspondence", None)
+    return relation if type(relation) is InputCorrespondenceSet else None
 
 
 def run_obligation_branch_plan(
@@ -371,24 +390,27 @@ def run_obligation_branch_plan(
 
         replan_generation = 0
         while True:
-            runtime.plan_proof_gates(result, _RECOVERY_TO_GATE, gate_producer)
-            while True:
-                gate_item, _gate_value = runtime.run_next()
-                if gate_item is None:
-                    break
-            # Evidence may derive a new analysis view only for an
-            # inconclusive branch.  The old ledger is superseded and the same
-            # pairwise branch is then executed against the successor view.
-            produced_views = ()
-            if _outcome(result) == FunctionProofOutcome.INCONCLUSIVE:
-                produced_views = runtime.apply_completed_evidence(
-                    getattr(result, "completed_recovery_proof_evidence", ()) or (),
-                    reasons=getattr(result, "unknown_reasons", ()) or (),
-                )
+            # Issue #167: gate は、この結果を作った比較の relation の下で証拠を照合する
+            # （別の比較で作った証拠は採用しない。frame の無い結果には relation が無い）。
+            with comparison_relation_scope(branch_comparison_relation(result)):
+                runtime.plan_proof_gates(result, _RECOVERY_TO_GATE, gate_producer)
                 while True:
-                    affected_item, _affected_value = runtime.run_next()
-                    if affected_item is None:
+                    gate_item, _gate_value = runtime.run_next()
+                    if gate_item is None:
                         break
+                # Evidence may derive a new analysis view only for an
+                # inconclusive branch.  The old ledger is superseded and the same
+                # pairwise branch is then executed against the successor view.
+                produced_views = ()
+                if _outcome(result) == FunctionProofOutcome.INCONCLUSIVE:
+                    produced_views = runtime.apply_completed_evidence(
+                        getattr(result, "completed_recovery_proof_evidence", ()) or (),
+                        reasons=getattr(result, "unknown_reasons", ()) or (),
+                    )
+                    while True:
+                        affected_item, _affected_value = runtime.run_next()
+                        if affected_item is None:
+                            break
             if not produced_views:
                 break
             if spec.strategy not in {"pairwise", "loop_template_pairwise"}:

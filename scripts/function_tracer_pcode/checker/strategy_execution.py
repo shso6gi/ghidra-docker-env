@@ -27,6 +27,9 @@ from typing import Any, Callable, Dict
 from scripts.function_tracer_pcode.checker.arch.input_extension import (
     provide_input_extension_evidence,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    comparison_relation_scope,
+)
 from scripts.function_tracer_pcode.proof.obligations.branch_context import BranchCheckContext
 from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     PreparedDispatchFrame,
@@ -215,40 +218,43 @@ def run_strategy_branch(
         dispatch_frame.replan_successor_plan = replan_plan
 
     debug_print(f"Using strategy: {strategy.__class__.__name__}")
-    if isinstance(strategy, (PairwiseStrategy, MonolithicStrategy)):
-        token = None
-        try:
-            token = push_prepared_dispatch_frame(dispatch_frame)
-            strategy_result = strategy.check(analysis1, analysis2, save_formula)
-            if (
-                isinstance(strategy, PairwiseStrategy)
-                and dispatch_frame.pair_disposition_ledger is not None
-                and dispatch_frame.receipt is None
-            ):
-                strategy_result.comparison_execution_receipt = (
-                    finalize_pairwise_comparison_receipt(dispatch_frame)
-                )
-        finally:
-            if token is None:
+    # Issue #167: この比較の relation は frame が決めた最終 InputCorrespondence。
+    # strategy が作る証拠はこの relation に束縛され、gate はこの relation と照合する。
+    with comparison_relation_scope(dispatch_frame.prepared.input_correspondence):
+        if isinstance(strategy, (PairwiseStrategy, MonolithicStrategy)):
+            token = None
+            try:
+                token = push_prepared_dispatch_frame(dispatch_frame)
+                strategy_result = strategy.check(analysis1, analysis2, save_formula)
+                if (
+                    isinstance(strategy, PairwiseStrategy)
+                    and dispatch_frame.pair_disposition_ledger is not None
+                    and dispatch_frame.receipt is None
+                ):
+                    strategy_result.comparison_execution_receipt = (
+                        finalize_pairwise_comparison_receipt(dispatch_frame)
+                    )
+            finally:
+                if token is None:
+                    dispatch_frame.close()
+                    dispatch_frame.cleanup_complete = True
+                    cleanup_complete = True
+                else:
+                    cleanup_complete = close_prepared_dispatch_frame(dispatch_frame, token)
+                if locally_issued_branch_authority is not None:
+                    from scripts.function_tracer_pcode.proof.monolithic_authority import (
+                        revoke_production_branch_authority,
+                    )
+                    revoke_production_branch_authority(locally_issued_branch_authority)
+        else:
+            # Non-built-in compatibility branches cannot consume a
+            # projection.  Their EQ is vetoed below whenever call proof
+            # preflight is required.
+            try:
+                strategy_result = strategy.check(analysis1, analysis2, save_formula)
+            finally:
                 dispatch_frame.close()
                 dispatch_frame.cleanup_complete = True
-                cleanup_complete = True
-            else:
-                cleanup_complete = close_prepared_dispatch_frame(dispatch_frame, token)
-            if locally_issued_branch_authority is not None:
-                from scripts.function_tracer_pcode.proof.monolithic_authority import (
-                    revoke_production_branch_authority,
-                )
-                revoke_production_branch_authority(locally_issued_branch_authority)
-    else:
-        # Non-built-in compatibility branches cannot consume a
-        # projection.  Their EQ is vetoed below whenever call proof
-        # preflight is required.
-        try:
-            strategy_result = strategy.check(analysis1, analysis2, save_formula)
-        finally:
-            dispatch_frame.close()
-            dispatch_frame.cleanup_complete = True
     ordinary_outcome = strategy_result.is_equivalent
     stage_runner_owns_finalization = str(ctx.branch_id).startswith("S_")
     if (

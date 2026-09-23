@@ -391,7 +391,7 @@ def test_completed_proof_replans_pairwise_on_successor_view_and_ledger():
         if len(calls) == 1:
             binding = PairLedgerBinding(
                 "session", "S_PAIRWISE", "surface", "projection", 1,
-                runtime.current_view.view_id, runtime.premise_digest, 1,
+                runtime.current_view.view_id, runtime.premise_digest, 1, "relation-digest",
             )
             ledger = runtime.open_pair_ledger(binding, 1)
             first._prepared_dispatch_frame = SimpleNamespace(
@@ -410,7 +410,7 @@ def test_completed_proof_replans_pairwise_on_successor_view_and_ledger():
             2,
             successor_plan.derived_view_id,
             successor_plan.premise_digest,
-            2,
+            2, "relation-digest",
         )
         replanned_ledgers.append(
             runtime.open_pair_ledger(

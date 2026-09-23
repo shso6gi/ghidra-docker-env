@@ -20,6 +20,8 @@ from scripts.function_tracer_pcode.proof.formula.symbol_replace import build_sym
 from scripts.function_tracer_pcode.proof.formula.returns import ReturnWidthMismatchError
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     build_input_correspondence_set,
+    comparison_relation_scope,
+    comparison_uses_relation,
 )
 from scripts.function_tracer_pcode.semantics.normalize import NormalizationSettings
 from scripts.function_tracer_pcode.semantics.param_semantics import infer_parameter_semantics
@@ -214,11 +216,21 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
             analysis1 = dispatch_frame.prepared.analysis1
             analysis2 = dispatch_frame.prepared.analysis2
             input_correspondence = dispatch_frame.prepared.input_correspondence
+            # Issue #167: この比較で作る証拠は、この relation の比較として束縛される。
+            if not comparison_uses_relation(input_correspondence):
+                raise RuntimeError("comparison_relation_scope_mismatch")
         else:
             # 互換経路: 引数は raw pair なので、そこから最終 relation を作る。
             input_correspondence = build_input_correspondence_set(
                 source_analysis1, source_analysis2
             )
+            if not comparison_uses_relation(input_correspondence):
+                # この互換呼び出しを、自分の relation の比較として実行し直す。
+                with comparison_relation_scope(input_correspondence):
+                    return self.check(
+                        source_analysis1, source_analysis2, save_formula,
+                        _build_query_set, _create_session,
+                    )
         # Issue #167: この check の builder / normalizer / decisive gate は全部
         # この 1 つの relation を使う（mixin へは decision context と引数で渡す）。
         decision_context = _MonolithicDecisionExecutionContext.create(
