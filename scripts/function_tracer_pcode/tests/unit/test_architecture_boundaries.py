@@ -1312,7 +1312,7 @@ def test_a_borrower_keeps_no_active_path_of_its_own(module_path):
 
 
 # ---------------------------------------------------------------------------
-# 上限: 幅が子の数に比例する本体は、数えながら組み立てること
+# 組み立て方: 幅が子の数に比例する本体は、前から 1 回で組み立てること
 # ---------------------------------------------------------------------------
 
 #: 可変長の子を 1 つの文字列へ畳んでよい唯一の道。
@@ -1420,7 +1420,7 @@ def test_the_render_budget_has_one_meaning_and_one_owner():
             if name in {"CountingWriter", "RenderOutputLimitExceeded"}:
                 continue  # 予算の owner と、それが投げる typed failure
             for keyword in node.keywords:
-                if keyword.arg in {"limit_bytes", "fragment_limit_bytes"}:
+                if keyword.arg and keyword.arg.endswith("limit_bytes"):
                     target = name or "<call>"
                     if target in {"render_smt_term", "render_human_text", "_to_smt_internal"}:
                         continue  # 入口どうしの受け渡し（最終的に writer へ届く）
