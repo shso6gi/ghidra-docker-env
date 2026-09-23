@@ -433,8 +433,11 @@ class JsonEncodingPolicy:
         *,
         max_bytes: Optional[int] = None,
         opaque_text: Optional[Callable[[Any], str]] = None,
+        whole: bool = False,
     ) -> int:
         """既に在る値の byte 数を **1 要素ずつ** 書き出し器で数える（写さない）。
+
+        `whole=True` は値全体を 1 回で書いて数える（既に作ってある record 1 件分用）。
 
         `measure` と同じ byte 数（書き出し器そのものの長さ）を、C 実装の encoder で
         要素 1 つずつ求める。container は要素ごとに数えて上限を超えた時点で
@@ -466,7 +469,9 @@ class JsonEncodingPolicy:
                     else (lambda leaf: self.string_bytes(opaque_text(leaf)))
                 ))
 
-        if isinstance(value, Mapping):
+        if whole:
+            charge(one(value))
+        elif isinstance(value, Mapping):
             charge(self.container_frame_bytes(len(value)))
             for key, element in value.items():
                 charge(self.key_bytes(key) + utf8_length(self.key_separator))

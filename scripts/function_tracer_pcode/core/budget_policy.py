@@ -61,9 +61,10 @@ class BudgetKind(str, Enum):
     EXPANSION_CASES = "expansion_cases"
     #: solver へ渡す SMT 項 1 つの byte 数（`CountingWriter` が数える）
     RENDER_BYTES = "render_bytes"
-    #: 直列化 1 つ（結果 JSON / 解析 1 件分の木表現）の byte 数（`core/json_encoding` が数える）
+    #: 直列化 1 つ（結果 JSON 全体 / 解析 1 件分の表現全体 = 木とそれ以外）の JSON byte 数
+    #: （`core/json_encoding` の policy で数える）
     SERIALIZATION_BYTES = "serialization_bytes"
-    #: 直列化 1 つ（解析 1 件分の木表現）が扱う distinct な式 node の数
+    #: 直列化 1 つ（解析 1 件分の表現）の木が参照する distinct な式 node の数
     SERIALIZATION_NODES = "serialization_nodes"
 
 
@@ -362,7 +363,7 @@ class SerializationWork:
 
     __slots__ = (
         "site", "enabled", "_target_parts", "tree_bytes", "value_bytes", "trees",
-        "records_built", "_meter", "_tree_ids", "_trees_kept", "_aliases",
+        "records_built", "_meter", "_tree_ids", "_trees_kept", "_aliases", "_policy",
     )
 
     def __init__(self, *, site: str, target_parts: Tuple[Any, ...], enabled: bool = True) -> None:
@@ -384,6 +385,8 @@ class SerializationWork:
         self._trees_kept: List[Any] = []
         #: 数え済みの木を別の形へ写した回数（`alias_tree`）
         self._aliases = 0
+        #: この直列化の間の policy（scope は直列化より長く生きるので変わらない）
+        self._policy = active_budget_policy()
 
     # -- 勘定 ----------------------------------------------------------------
 
@@ -396,7 +399,7 @@ class SerializationWork:
         return self._meter.distinct_nodes
 
     def remaining_bytes(self, policy: Optional[BudgetPolicy] = None) -> Optional[int]:
-        policy = active_budget_policy() if policy is None else policy
+        policy = self._policy if policy is None else policy
         limit = policy.serialization_bytes
         return None if limit is None else max(0, limit - self.total_bytes)
 
@@ -417,19 +420,24 @@ class SerializationWork:
         )
 
     def _enforce(self) -> None:
-        policy = active_budget_policy()
+        policy = self._policy
         for kind, observed in (
             (BudgetKind.SERIALIZATION_BYTES, self.total_bytes),
             (BudgetKind.SERIALIZATION_NODES, self.distinct_nodes),
         ):
-            if not policy.exceeds(kind, observed):
-                observe_budget_usage(kind, observed, site=self.site)
-                continue
-            # target と evidence は限界にするときだけ組み立てる
-            enforce_budget(
-                kind, observed, site=self.site,
-                target_key=self.target_key(), evidence=self._evidence(),
-            )
+            if policy.exceeds(kind, observed):
+                # target と evidence は限界にするときだけ組み立てる
+                enforce_budget(
+                    kind, observed, site=self.site,
+                    target_key=self.target_key(), evidence=self._evidence(),
+                )
+
+    def observe(self) -> None:
+        """この直列化の最終的な量を観測値へ残す（量は単調に増えるので最後の値が最大）。"""
+
+        if self.enabled:
+            observe_budget_usage(BudgetKind.SERIALIZATION_BYTES, self.total_bytes, site=self.site)
+            observe_budget_usage(BudgetKind.SERIALIZATION_NODES, self.distinct_nodes, site=self.site)
 
     # -- producer の入口 -------------------------------------------------------
 
@@ -448,9 +456,7 @@ class SerializationWork:
             self.trees += 1
             self.tree_bytes += int(size)
             # 数えるのは予算の分まで（超えたと分かれば残りの node は辿らない）
-            self._meter.add_root(
-                expr, max_distinct=active_budget_policy().serialization_nodes,
-            )
+            self._meter.add_root(expr, max_distinct=self._policy.serialization_nodes)
             self._enforce()
         built = expr._to_dict(set())
         if size is None:
@@ -482,18 +488,24 @@ class SerializationWork:
         if not self.enabled:
             return built
         self.records_built += 1
+        # record 1 件は 1 回で書いて数える（record の表現は既に作ってある）
         if len(self._tree_ids) == trees_before:
-            self._count(built, holds_trees=False)
+            self._count(built, holds_trees=False, whole=True)
         elif self._aliases == aliases_before:
             # 中の木はこの record の間に作られ、byte は数え済み（木の byte は書き出し
             # 器の byte と等しい）。record 全体を書いた byte から木の分を引く
-            self._count(built, holds_trees=False, already=self.tree_bytes - tree_bytes_before)
+            self._count(
+                built, holds_trees=False, whole=True,
+                already=self.tree_bytes - tree_bytes_before,
+            )
         else:
             # 木を codec が別の形へ写した: 写した側を避けて辿る
             self._count(built, holds_trees=True)
         return built
 
-    def _measure(self, value: Any, *, holds_trees: bool, already: int = 0) -> int:
+    def _measure(
+        self, value: Any, *, holds_trees: bool, already: int = 0, whole: bool = False,
+    ) -> int:
         from scripts.function_tracer_pcode.core.json_encoding import (
             RESULT_JSON_POLICY,
             JsonBudgetExhausted,
@@ -510,13 +522,17 @@ class SerializationWork:
                 )
             limit = None if remaining is None else remaining + already
             return RESULT_JSON_POLICY.measure_elements(
-                value, max_bytes=limit, opaque_text=_opaque_leaf_text,
+                value, max_bytes=limit, opaque_text=_opaque_leaf_text, whole=whole,
             ) - already
         except JsonBudgetExhausted as exc:
             return exc.consumed_bytes - already
 
-    def _count(self, value: Any, *, holds_trees: bool, already: int = 0) -> None:
-        self.value_bytes += int(self._measure(value, holds_trees=holds_trees, already=already))
+    def _count(
+        self, value: Any, *, holds_trees: bool, already: int = 0, whole: bool = False,
+    ) -> None:
+        self.value_bytes += int(self._measure(
+            value, holds_trees=holds_trees, already=already, whole=whole,
+        ))
         self._enforce()
 
     def records(self, items: Iterable[Any], build: Optional[Callable[[Any], Any]] = None) -> List[Any]:
@@ -616,6 +632,7 @@ def serialization_scope(*, site: str, target_parts: Tuple[Any, ...]) -> Iterator
         yield work
     finally:
         stack.pop()
+        work.observe()
 
 
 def enforce_budget(

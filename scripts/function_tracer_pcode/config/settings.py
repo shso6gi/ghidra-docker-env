@@ -284,7 +284,7 @@ EXPANDER_DEDUP_CASE_LIMIT = _positive_int_setting("FT_EXPANDER_DEDUP_CASE_LIMIT"
 #: (BudgetPolicy の field 名, 環境変数, 既定値)。既定値 `None` は無制限。
 #:
 #: 値の根拠（U-1、PR-22-D 時点の実測。固定 subset 144 pair・recorded corpus・
-#: `ell/ellProgram` B12_B16 の 13 関数・subset の TIMEOUT 5 pair を予算無しで流し、
+#: `ell/ellProgram` B12_B16 の 11 関数・subset の TIMEOUT 5 pair を予算無しで流し、
 #: kill された pair は stage journal の観測値を読んだ）:
 #:
 #: * 観測した最大値はどれも小さい — 展開の distinct node < 2048
