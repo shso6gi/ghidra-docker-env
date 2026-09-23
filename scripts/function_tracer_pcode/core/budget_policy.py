@@ -353,7 +353,7 @@ class SerializationWork:
 
     __slots__ = (
         "site", "enabled", "_target_parts", "max_bytes", "consumed", "tree_bytes",
-        "trees", "_meter", "_policy", "terminal",
+        "trees", "_meter", "_policy", "terminal", "runtime_ref_memo",
     )
 
     def __init__(
@@ -370,6 +370,11 @@ class SerializationWork:
         )
 
         self.site = str(site)
+        #: この直列化 1 回の間だけの、式の木の中の runtime ref の LEGACY 表現の memo
+        #: （`Expression._serialize_runtime_ref`）。共有 DAG を木に展開すると同じ ref が
+        #: 何十回も現れる。直列化の間は解析を書き換えないので、同じ object は同じ表現。
+        #: 大きさは木の見積りが出現ごとに数え済み。値への参照を持つので id は再利用されない。
+        self.runtime_ref_memo: Dict[int, Tuple[Any, Any]] = {}
         #: pair の予算 scope の外（部品単体の呼び出し）では数えない（従来どおり）
         self.enabled = bool(enabled)
         self._target_parts = tuple(target_parts)

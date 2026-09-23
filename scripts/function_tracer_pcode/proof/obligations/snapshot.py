@@ -139,11 +139,52 @@ class SnapshotFingerprintCodec:
         """
 
         if budget is None:
-            return cls._freeze(value, None)
+            return cls._freeze_unmetered(value)
         return cls._freeze(value, _FreezeMeter(budget))
 
     @classmethod
+    def _freeze_unmetered(cls, value: Any) -> Any:
+        """数えない写し（fingerprint の digest など）。`_freeze(value, None)` と同じ値。
+
+        digest は snapshot のたびに値全体を写すので、数える経路の分岐・helper を通さない
+        （`test_the_unmetered_freeze_equals_the_metered_copy` が同じ値であることを固定）。
+        """
+
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, Enum):
+            return (value.__class__.__qualname__, value.value)
+        if isinstance(value, bytes):
+            return ("bytes", value.hex())
+        freeze = cls._freeze_unmetered
+        if isinstance(value, Mapping):
+            return cls.sorted_mapping_items(
+                tuple((freeze(key), freeze(item)) for key, item in value.items())
+            )
+        if isinstance(value, (tuple, list)):
+            return tuple(freeze(v) for v in value)
+        if isinstance(value, (set, frozenset)):
+            return tuple(sorted((freeze(v) for v in value), key=repr))
+        name = value.__class__.__qualname__
+        stable_key = getattr(value, "stable_key", None)
+        if callable(stable_key):
+            return (name, freeze(stable_key()))
+        to_key = getattr(value, "to_key", None)
+        if callable(to_key):
+            return (name, freeze(to_key()))
+        to_dict = getattr(value, "to_dict", None)
+        if callable(to_dict):
+            return (name, freeze(to_dict()))
+        if is_dataclass(value):
+            return (name, tuple((f.name, freeze(getattr(value, f.name))) for f in fields(value)))
+        raise TypeError(
+            f"opaque object {value.__class__.__qualname__} has no object-derived stable identity"
+        )
+
+    @classmethod
     def _freeze(cls, value: Any, meter: Any) -> Any:
+        if meter is None:
+            return cls._freeze_unmetered(value)
         if value is None or isinstance(value, (bool, int, float, str)):
             if meter is not None:
                 meter.scalar(value)

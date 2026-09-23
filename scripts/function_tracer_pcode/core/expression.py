@@ -903,9 +903,22 @@ class Expression:
 
     def _serialize_runtime_ref(self, value: Any) -> Any:
         # 木を作るのは大きさ（runtime ref を含む）を数え終えた後なので、ここは数えない
-        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+        from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
+        from scripts.function_tracer_pcode.core.json_encoding import (
+            RESULT_JSON_POLICY,
+            copy_legacy_containers,
+        )
 
-        return RESULT_JSON_POLICY.materialize(runtime_ref_source(value))
+        work = active_serialization_work()
+        if work is None:
+            return RESULT_JSON_POLICY.materialize(runtime_ref_source(value))
+        # 共有 DAG を木に展開すると同じ ref が何度も現れる。直列化 1 回の間は同じ object
+        # の表現は同じなので memo し、置くたびに容器を作り直す（`SerializationWork`）
+        memo = work.runtime_ref_memo
+        hit = memo.get(id(value))
+        if hit is None or hit[0] is not value:
+            hit = memo[id(value)] = (value, RESULT_JSON_POLICY.materialize(runtime_ref_source(value)))
+        return copy_legacy_containers(hit[1])
 
     
     def get_all_variables(self) -> Set[str]:

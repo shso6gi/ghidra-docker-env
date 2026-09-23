@@ -484,3 +484,88 @@ def test_a_tuple_with_scalar_subclasses_is_cached_without_poisoning_the_canonica
     assert type(legacy["a"][0][0]) is _JavaPrimitiveInt and type(again["b"][1]) is _JavaPrimitiveStr
     assert all(type(item) is int for item in canonical["c"][0])
     assert type(canonical["c"][1]) is str
+
+
+def _shared_ref_tree(depth=6):
+    from scripts.function_tracer_pcode.core.expression import ExpressionType
+    from scripts.function_tracer_pcode.core.runtime_refs import PcodeOpRef
+
+    ref = PcodeOpRef(address_offset=0x1010, seq_time=0, seq_order=0, mnemonic="LOAD", binary_id="B1")
+    node = Expression(ExpressionType.UNKNOWN, name="u", size=4, runtime_ref=ref)
+    for _ in range(depth):
+        node = Expression.binary_op("+", node, node)  # 共有 DAG: 木では葉が 2^depth 回
+    return node, ref
+
+
+def test_a_shared_runtime_ref_is_built_once_per_serialization_and_placed_as_copies(monkeypatch):
+    # 共有 DAG を木に展開すると同じ runtime ref が何十回も現れる（実 pair で 1 snapshot
+    # あたり平均 39 回）。直列化 1 回の間は memo して 1 度だけ作り、置くたびに容器を
+    # 作り直す（書き換えが他の位置へ漏れない）。表現は memo 無しと同じ。
+    from scripts.function_tracer_pcode.core import expression as ex
+    from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+
+    tree, ref = _shared_ref_tree()
+    expected = tree.to_dict()  # 直列化の scope の外: memo しない
+    builds = []
+    original = ex.runtime_ref_source
+
+    def counting_source(value):
+        builds.append(value)
+        return original(value)
+
+    monkeypatch.setattr(ex, "runtime_ref_source", counting_source)
+    with serialization_scope(site="test", target_parts=("t",), enabled=True):
+        built = tree.to_dict()
+    assert built == expected
+    assert len(builds) == 2  # 見積り 1 回 + 構築 1 回（memo が無ければ構築は出現ごとの 64 回）
+
+    def leaves(value):
+        stack = [value]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                if "runtime_ref" in item and isinstance(item["runtime_ref"], dict):
+                    yield item["runtime_ref"]
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
+
+    refs = list(leaves(built))
+    assert len(refs) == 64 and len({id(item) for item in refs}) == 64
+    refs[0]["mutated"] = True
+    assert "mutated" not in refs[1]
+
+
+def test_the_unmetered_freeze_equals_the_metered_copy():
+    # fingerprint の digest は数えない経路（`_freeze_unmetered`）で写す。数える経路と
+    # 同じ値でなければ、予算の有無で fingerprint が変わってしまう。
+    import dataclasses
+
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
+    from scripts.function_tracer_pcode.core.storage import StorageInfo
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec
+
+    class Color(enum.Enum):
+        RED = "red"
+
+    @dataclasses.dataclass
+    class Plain:
+        a: int
+        b: tuple
+
+    class Keyed:
+        def stable_key(self):
+            return ("k", 1, (2, 3))
+
+    tree, _ref = _shared_ref_tree(depth=3)
+    value = {
+        "m": {"z": 1, "a": [Color.RED, b"\x01", frozenset({3, 1})]},
+        "d": Plain(1, (2, "x")),
+        "k": Keyed(),
+        "s": StorageInfo(is_register=True, space_name="register", offset=8, size=8, register_name="x1"),
+        "e": tree,
+        7: None,
+    }
+    unmetered = SnapshotFingerprintCodec.freeze(value)
+    metered = SnapshotFingerprintCodec.freeze(value, budget=JsonBudget(None))
+    assert unmetered == metered

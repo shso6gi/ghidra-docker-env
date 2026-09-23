@@ -1008,6 +1008,55 @@ def _copy_pure_tuple(value: tuple, convert: bool = False) -> list:
     return root[0]
 
 
+def copy_legacy_containers(value: Any) -> Any:
+    """LEGACY 表現の容器（dict / list）だけを作り直した写し（葉はそのまま置く）。
+
+    数え済みの表現を別の位置へもう一度置くときに使う（呼ぶ側が書き換えても元が
+    変わらないように）。再帰しない。
+    """
+
+    kind = type(value)
+    if kind is not dict and kind is not list:
+        return value
+    root: List[Any] = []
+    stack: List[Tuple[Iterator[Any], Any, bool]] = [(iter(((None, value),)), root, False)]
+    while stack:
+        iterator, out, is_dict = stack[-1]
+        for key, item in iterator:
+            kind = type(item)
+            if kind is dict or kind is list:
+                child: Any = {} if kind is dict else []
+                if is_dict:
+                    out[key] = child
+                else:
+                    out.append(child)
+                stack.append(
+                    (iter(item.items()) if kind is dict else iter(zip(_NONE_KEYS, item)),
+                     child, kind is dict)
+                )
+                break
+            if is_dict:
+                out[key] = item
+            else:
+                out.append(item)
+        else:
+            stack.pop()
+    return root[0]
+
+
+class _NoneKeys:
+    """`zip` で list の要素に key `None` を付けるための無限列。"""
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return None
+
+
+_NONE_KEYS = _NoneKeys()
+
+
 class _NotPlain(Exception):
     """純粋なデータ（容器と基底型だけ）の高速経路が扱えない値に出会った。"""
 
