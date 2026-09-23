@@ -468,12 +468,19 @@ def test_scalar_subclasses_stay_on_the_fast_path_with_the_general_path_result(mo
     assert prepared.encoded_bytes == len(RESULT_JSON_POLICY.dumps(canonical).encode("utf-8"))
 
 
-def test_a_tuple_with_scalar_subclasses_does_not_poison_the_canonical_cache():
+def test_a_tuple_with_scalar_subclasses_is_cached_without_poisoning_the_canonical_copy():
+    # 実バイナリの tuple はほぼ必ず Java primitive を含むので、それも pair の間 cache する
+    # （snapshot のたびに数え直さない）。ただし CANONICAL の写しは基底型へ直す。
+    from scripts.function_tracer_pcode.core import json_encoding as je
     from scripts.function_tracer_pcode.core.budget_policy import budget_policy_scope
 
-    shared = tuple(_JavaPrimitiveInt(i) for i in range(64))
+    shared = (tuple(_JavaPrimitiveInt(i) for i in range(64)), _JavaPrimitiveStr("r"))
     with budget_policy_scope(BudgetPolicy()):
-        RESULT_JSON_POLICY.materialize({"a": shared})
-        RESULT_JSON_POLICY.materialize({"b": shared})
+        legacy = RESULT_JSON_POLICY.materialize({"a": shared})
+        cached = je._PURE_TUPLE_SIZES.get(RESULT_JSON_POLICY, {}).get(id(shared))
+        assert cached is not None and cached[0] is shared and cached[2] is True
+        again = RESULT_JSON_POLICY.materialize({"b": shared})
         canonical = RESULT_JSON_POLICY.prepare({"c": shared}).value()
-    assert all(type(item) is int for item in canonical["c"])
+    assert type(legacy["a"][0][0]) is _JavaPrimitiveInt and type(again["b"][1]) is _JavaPrimitiveStr
+    assert all(type(item) is int for item in canonical["c"][0])
+    assert type(canonical["c"][1]) is str

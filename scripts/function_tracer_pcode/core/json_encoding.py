@@ -971,8 +971,26 @@ def clear_size_caches() -> None:
     _PURE_TUPLE_SIZES.clear()
 
 
-def _copy_pure_tuple(value: tuple) -> list:
-    """tuple だけから成る値の写し（tuple → list）。大きさは数え済み（cache）なので数えない。"""
+def _base_scalar(item: Any) -> Any:
+    """基底型の subclass（Java primitive など）を基底型の値へ直す（CANONICAL の写し）。"""
+
+    kind = type(item)
+    if kind is str or kind is int or kind is float or kind is bool or item is None:
+        return item
+    if isinstance(item, str):
+        return str.__str__(item)
+    if isinstance(item, int):
+        return int(item)
+    if isinstance(item, float):
+        return float(item)
+    return item
+
+
+def _copy_pure_tuple(value: tuple, convert: bool = False) -> list:
+    """tuple だけから成る値の写し（tuple → list）。大きさは数え済み（cache）なので数えない。
+
+    `convert` なら基底型の subclass を基底型へ直す（CANONICAL で subclass を含む tuple）。
+    """
 
     root: List[Any] = []
     stack = [(iter((value,)), root)]
@@ -984,7 +1002,7 @@ def _copy_pure_tuple(value: tuple) -> list:
                 out.append(child)
                 stack.append((iter(item), child))
                 break
-            out.append(item)
+            out.append(_base_scalar(item) if convert else item)
         else:
             stack.pop()
     return root[0]
@@ -1117,8 +1135,8 @@ class _Walk:
         total = 0
         root: List[Any] = []
         active: set = set()
-        # [iterator, out, is_dict, id, total_at_open, pure_tuple, obj]
-        stack: List[List[Any]] = [[iter((value,)), root, False, None, 0, False, None]]
+        # [iterator, out, is_dict, id, total_at_open, pure_tuple, obj, has_scalar_subclass]
+        stack: List[List[Any]] = [[iter((value,)), root, False, None, 0, False, None, False]]
         try:
             while stack:
                 entry = stack[-1]
@@ -1131,9 +1149,11 @@ class _Walk:
                     if entry[5]:
                         if len(sizes) > _PURE_TUPLE_CACHE_MAX:
                             sizes.clear()
-                        sizes[id(entry[6])] = (entry[6], total - entry[4])
+                        sizes[id(entry[6])] = (entry[6], total - entry[4], entry[7])
                     elif stack:
                         stack[-1][5] = False
+                    if entry[7] and stack:
+                        stack[-1][7] = True
                     continue
                 if entry[2]:
                     key, item = item
@@ -1163,10 +1183,12 @@ class _Walk:
                     known = sizes.get(id(item))
                     if known is not None and known[0] is item:
                         total += known[1]
+                        if known[2]:
+                            entry[7] = True
                         if remaining is not None and total > remaining:
                             break
                         if build:
-                            copied = _copy_pure_tuple(item)
+                            copied = _copy_pure_tuple(item, canonical and known[2])
                             if entry[2]:
                                 entry[1][out_key] = copied
                             else:
@@ -1180,7 +1202,7 @@ class _Walk:
                             entry[1][out_key] = out
                         else:
                             entry[1].append(out)
-                    stack.append([iter(item), out, False, None, total - (2 + (sep * (count - 1) if count else 0)), True, item])
+                    stack.append([iter(item), out, False, None, total - (2 + (sep * (count - 1) if count else 0)), True, item, False])
                     continue
                 elif kind is list or kind is dict:
                     count = len(item)
@@ -1198,16 +1220,16 @@ class _Walk:
                             entry[1].append(out)
                     stack.append([
                         iter(item.items()) if kind is dict else iter(item),
-                        out, kind is dict, identity, 0, False, None,
+                        out, kind is dict, identity, 0, False, None, False,
                     ])
                     continue
                 elif isinstance(item, (str, int, float)):
                     # 基底型の subclass（PyGhidra の Java primitive `JInt` / `JLong`、IntEnum
                     # など）。一般の経路（`scalar`）と同じく基底型の値で数え、LEGACY はその
                     # まま置き、CANONICAL は基底型へ直す。これを一般の経路へ落とすと、実
-                    # バイナリの値のほとんどが高速経路を外れる。tuple の cache は基底型だけの
-                    # 木に限る（cache の写しは値をそのまま置くので）。
-                    entry[5] = False
+                    # バイナリの値のほとんどが高速経路を外れる。subclass を含む tuple も
+                    # cache するが、CANONICAL の写しでは基底型へ直す（cache の印）。
+                    entry[7] = True
                     if isinstance(item, str):
                         base = str.__str__(item)
                         total += string_bytes(base)
