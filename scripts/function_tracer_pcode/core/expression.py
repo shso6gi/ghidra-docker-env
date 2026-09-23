@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """式の表現クラス"""
 import copy
+import weakref
 from enum import Enum, auto
 from typing import List, NamedTuple, Optional, Any, Dict, Set, Mapping
 from dataclasses import is_dataclass, fields
@@ -11,6 +12,7 @@ from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     state_of,
 )
 from scripts.function_tracer_pcode.core.storage import StorageInfo
+from scripts.function_tracer_pcode.core.render_output import utf8_length
 from scripts.function_tracer_pcode.core.render_python import (
     expression_to_string,
     get_python_operator,
@@ -889,10 +891,20 @@ class Expression:
 LEGACY_TREE_SERIALIZATION_SITE = "core.expression.to_dict"
 
 
-def _opaque_local_bytes(value: Any) -> int:
-    """JSON 型でない local 値（`to_dict` はそのまま置く）の大きさの代用値。"""
+def _opaque_local_text(value: Any) -> str:
+    """JSON 型でない local 値（`to_dict` はそのまま置く）の大きさの代用表現。"""
 
-    return len(type(value).__qualname__) + 2
+    return type(value).__qualname__
+
+
+#: 凍結済み node の木表現の大きさ（JSON byte、飽和していない正確な値）。
+#: 凍結後は field も子も変わらないので、同じ node の大きさを pair の中で何度
+#: 求め直しても同じ値になる。snapshot は同じ解析を何度も `to_dict()` するので、
+#: ここで再利用しないと見積りが `to_dict` 本体より重くなる（実測で 6 倍）。
+#: 弱参照なので式と一緒に消える（process 寿命の identity cache にはならない）。
+_FROZEN_TREE_BYTES: "weakref.WeakKeyDictionary[Expression, int]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def estimate_legacy_dict_bytes(
@@ -905,8 +917,10 @@ def estimate_legacy_dict_bytes(
 
     木表現は同じ子を参照の数だけ展開するので、distinct node ごとに 1 回だけ
     大きさを求め（反復 post-order・memo）、辺の数だけ足す（同じ子への辺が 2 本
-    なら 2 回）。node 1 つ分の大きさは `_to_dict_active` を子 = placeholder で呼んだ
-    dict を `policy` で測る（`_to_dict_active` を共有するので実出力と schema が一致）。
+    なら 2 回）。node 1 つ分の大きさは `_to_dict_active` を子 = placeholder で
+    呼んだ dict を `policy` の encoder で書いた長さ（実出力と schema・encoder を
+    共有するので等しい）。node 1 つ分の dict は小さいので、これは「巨大な値を
+    書いてから測る」ことにはならない — 木全体は作らない。
 
     `max_bytes` を超えた時点で `max_bytes + 1` を返し、残りを計算しない
     （子の大きさは根の大きさ以下なので、どこかの部分木が超えれば根も超える）。
@@ -917,6 +931,7 @@ def estimate_legacy_dict_bytes(
     from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
 
     policy = RESULT_JSON_POLICY if policy is None else policy
+    cache = _FROZEN_TREE_BYTES if policy is RESULT_JSON_POLICY else None
     sizes: Dict[int, int] = {}
     pending: Dict[int, Any] = {}
     active: Set[int] = set()
@@ -928,17 +943,26 @@ def estimate_legacy_dict_bytes(
             active.discard(node_id)
             local, children = pending.pop(node_id)
             # placeholder の `0` は 1 byte。子の実際の大きさと差し替える
-            size = policy.value_bytes(
-                local, max_bytes=max_bytes, opaque_bytes=_opaque_local_bytes,
+            size = utf8_length(
+                policy.dumps(local, default=_opaque_local_text)
             ) - len(children)
             for child in children:
                 size += sizes[id(child)]
             if max_bytes is not None and size > max_bytes:
                 return max_bytes + 1
             sizes[node_id] = size
+            if cache is not None and state_of(node.__dict__) >= SemanticLifecycle.VALIDATED:
+                cache[node] = size
             continue
         if node_id in sizes:
             continue
+        if cache is not None and state_of(node.__dict__) >= SemanticLifecycle.VALIDATED:
+            known = cache.get(node)
+            if known is not None:
+                if max_bytes is not None and known > max_bytes:
+                    return max_bytes + 1
+                sizes[node_id] = known
+                continue
         if node_id in active:
             return None
         active.add(node_id)

@@ -43,7 +43,7 @@ from scripts.function_tracer_pcode.config.settings import (
     EXPRESSION_BUDGET_DEFAULTS,
     expression_budget_policy,
 )
-from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core import Condition, Expression
 from scripts.function_tracer_pcode.core.budget_policy import (
     BudgetKind,
     BudgetPolicy,
@@ -55,7 +55,6 @@ from scripts.function_tracer_pcode.core.budget_policy import (
 from scripts.function_tracer_pcode.core.errors import (
     ExpressionSizeBudgetExceeded,
     PairStopState,
-    current_pair_ledger,
     pair_failure_scope,
     reset_pair_failure_scopes,
 )
@@ -958,3 +957,25 @@ def test_production_defaults_stop_an_exponential_tree_before_building_it():
         assert time.perf_counter() - started < 1.0
     assert caught.value.site == "core.expression.to_dict"
     assert ledger.stop_state() is PairStopState.PAIR_TERMINAL_LIMITATION
+
+
+def test_the_frozen_size_cache_returns_the_same_exact_size_and_skips_the_walk(monkeypatch):
+    """凍結済み node の大きさは再利用する（snapshot は同じ解析を何度も書く）。"""
+    expr = publish(_shared_dag(12, name="名前"))
+    actual = _actual(expr.to_dict())
+    assert estimate_legacy_dict_bytes(expr) == actual
+    built = []
+    original = Expression._to_dict_active
+
+    def _counting(self, *args, **kwargs):
+        built.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Expression, "_to_dict_active", _counting)
+    assert estimate_legacy_dict_bytes(expr) == actual
+    assert built == []  # 2 回目は 1 node も組み立てない
+    # 未凍結の式は cache しない（書き換わり得る）
+    loose = _shared_dag(3)
+    estimate_legacy_dict_bytes(loose)
+    estimate_legacy_dict_bytes(loose)
+    assert len(built) == 2 * 4

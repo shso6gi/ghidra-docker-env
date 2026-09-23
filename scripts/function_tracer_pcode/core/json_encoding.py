@@ -90,14 +90,18 @@ class JsonEncodingPolicy:
 
     # -- 書き出し ------------------------------------------------------------
 
-    def dumps(self, value: Any) -> str:
-        """上限なしで書く（大きさが既に分かっている値だけに使う）。"""
+    def dumps(self, value: Any, *, default: Optional[Callable[[Any], Any]] = None) -> str:
+        """上限なしで書く（大きさが既に分かっている小さい値だけに使う）。
+
+        `default` は JSON 型でない値の代用表現（`json.dumps` と同じ意味）。
+        """
 
         return json.dumps(
             value,
             ensure_ascii=self.ensure_ascii,
             sort_keys=self.sort_keys,
             separators=self.separators,
+            default=default,
         )
 
     def encode_bounded(self, value: Any, *, max_bytes: Optional[int]) -> str:
