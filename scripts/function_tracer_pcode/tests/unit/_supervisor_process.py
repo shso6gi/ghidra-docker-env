@@ -15,16 +15,22 @@ invocation は pytest の process から ``fork`` した process で
 ``ProcessSupervisorCommand(config).run()`` を実行する。fork 先では production
 の外側に観測を入れる（production の中身は変えない）:
 
-* ``subprocess.Popen``: この invocation が起こした worker の PID / start token。
+* ``subprocess.Popen``（barrier の command だけ）: この invocation が起こした
+  worker の PID / start token。
 * barrier の pipe への解放 byte（``os.write(b"1")``）: その瞬間に
   ``launch.json`` が durable か（launch-before-exec の parent 側の観測）。
-* ``authority_output`` への ``os.replace``: この invocation が公開した projection
-  の bytes（公開しなかった invocation の ``projection`` は None）。
-* fd 1 / 2 を pair log へ向ける（runner と同じく worker の出力が pair log に
-  集まり、``classify_pair_status`` はその log の結果 JSON と envelope を
-  突き合わせる）。pair log は production の意味で pair 単位（runner は resume
-  の出力も同じ log に足す）なので case が持つ。invocation は自分が書いた範囲と
-  終了時の digest を持つ。
+* ``authority_output`` への ``os.replace`` / ``os.rename``: この invocation が
+  公開した projection の bytes（公開しなかった invocation の ``projection`` は
+  None。正常に戻ったのに捕まえられなかったら harness の失敗にする）。
+* fd 1 / 2 と ``sys.stdout`` / ``sys.stderr`` を pair log へ向ける（runner と
+  同じく supervisor と worker の出力が pair log に集まり、
+  ``classify_pair_status`` はその log の結果 JSON と envelope を突き合わせる）。
+  pair log は production の意味で pair 単位（runner は resume の出力も同じ log
+  に足す）なので case が持つ。
+
+分類の入力（durable store・pair log・鍵 file）の digest は
+``classification_inputs`` の 1 箇所で数える。run は終了時点の値を持ち、分類の
+ときに今の値と比べる。
 
 fork の時点で pytest の process に他の thread が残っていても、fork 先が lock
 待ちで止まった場合は待ち上限（``timeout + grace + 60s``）で失敗になる。
@@ -96,10 +102,8 @@ class SupervisorRun:
     projection: Optional[Mapping[str, Any]]
     #: invocation が終わった時点の durable store。
     store: StoreSnapshot
-    #: invocation が終わった時点の pair log の sha256 と、この invocation が
-    #: 書いた範囲（byte offset）。
-    pair_log_sha256: str
-    pair_log_span: tuple[int, int]
+    #: invocation が終わった時点の分類の入力（``classification_inputs``）。
+    classification_inputs: Mapping[str, str]
     #: この invocation が起こした worker（restart / 起こす前に落ちたなら None）。
     child: Optional[ChildIdentity]
     #: その worker が本処理の前に書いた launch の観測（無ければ None）。
@@ -151,7 +155,10 @@ def terminate_leftover_workers(case: "SupervisorCase") -> None:
 
     for records in case.records.invocations():
         identity = records.child()
-        if identity is None or not _process_alive(identity):
+        if identity is None:
+            continue
+        if not _process_alive(identity):
+            _reap_if_our_child(identity.pid)
             continue
         try:
             os.killpg(identity.pid, signal.SIGKILL)
@@ -159,13 +166,19 @@ def terminate_leftover_workers(case: "SupervisorCase") -> None:
             continue
         deadline = time.monotonic() + 10.0
         while _process_alive(identity) and time.monotonic() < deadline:
-            try:
-                os.waitpid(identity.pid, os.WNOHANG)  # 孤児が pytest に付け替わった場合
-            except ChildProcessError:
-                pass
+            _reap_if_our_child(identity.pid)
             time.sleep(0.01)
         if _process_alive(identity):
             raise AssertionError(f"worker {identity.pid} survived SIGKILL")
+
+
+def _reap_if_our_child(pid: int) -> None:
+    """孤児が pytest（container の PID 1 など）に付け替わっていたら回収する。"""
+
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +211,22 @@ def restart_supervisor(
 
 def _pair_log_size(case: "SupervisorCase") -> int:
     return case.pair_log.stat().st_size if case.pair_log.exists() else 0
+
+
+def classification_inputs(case: "SupervisorCase") -> Mapping[str, str]:
+    """production の分類器が読む case 側の入力の digest（projection 以外）。"""
+
+    config = case.config
+    inputs = {
+        "pair-log": sha256_of(case.pair_log),
+        "supervisor-key": sha256_of(Path(config.supervisor_signing_key_file)),
+        "worker-key": sha256_of(Path(config.worker_signing_key_file)),
+    }
+    inputs.update({
+        f"store/{name}": digest
+        for name, digest in inspect_store(case.store_directory).digests.items()
+    })
+    return inputs
 
 
 class _SupervisorInvocation:
@@ -262,21 +291,24 @@ class _SupervisorInvocation:
         crashed = status is None and any(
             entry["action"] == "crash" for entry in supervisor_faults
         )
-        log_end = _pair_log_size(case)
         if status is None and not crashed:
             raise AssertionError(
                 f"{records.invocation} ended with {process_status} without a status "
-                f"record; its pair log output:\n{_read_span(case, self.log_start, log_end)}"
+                "record; pair log appended while it ran (other processes included):\n"
+                f"{_read_span(case, self.log_start, _pair_log_size(case))}"
             )
         if status is not None and "exception" in status:
             raise SupervisorRaised(status["exception"])
+        projection = _read_projection(records.projection)
+        if status is not None and projection is None:
+            # run() も _resume() も戻る前に projection を書く。捕まえられなかった
+            # なら production の書き方が変わっている（黙って None にしない）。
+            raise AssertionError(
+                f"{records.invocation} returned but its projection was not captured"
+            )
         child = records.child()
-        child_records = None if child is None else case.records.child(child.pid)
+        child_records = None if child is None else case.records.child(child)
         evidence = None if child_records is None else read_json(child_records.launch_evidence)
-        if evidence is not None and (
-            evidence["pid"], evidence["start_token"]
-        ) != (child.pid, child.start_token):
-            evidence = None  # 同じ PID を名乗る別 process の記録
         at_stop = read_json(records.store_at_child_stop)
         release = read_json(records.barrier_release)
         return SupervisorRun(
@@ -284,10 +316,9 @@ class _SupervisorInvocation:
             invocation=records.invocation,
             exit_code=None if status is None else status["exit_code"],
             crashed=crashed,
-            projection=_read_projection(records.projection),
+            projection=projection,
             store=inspect_store(case.store_directory),
-            pair_log_sha256=sha256_of(case.pair_log),
-            pair_log_span=(self.log_start, log_end),
+            classification_inputs=classification_inputs(case),
             child=child,
             launch_evidence=evidence,
             launch_durable_at_barrier_release=(
@@ -317,6 +348,9 @@ def _supervise_in_fork(  # pragma: no cover - runs in the forked supervisor
         log = os.open(case.pair_log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
         os.dup2(log, 1)
         os.dup2(log, 2)
+        # pytest の capture が持っている Python 側の stdout / stderr も fd へ戻す。
+        sys.stdout = open(1, "w", buffering=1, closefd=False)
+        sys.stderr = open(2, "w", buffering=1, closefd=False)
         _record_started_child(records)
         _observe_barrier_release(case.store_directory, records)
         _capture_projection(case.config.authority_output, records)
@@ -344,16 +378,17 @@ def _supervise_in_fork(  # pragma: no cover - runs in the forked supervisor
 
 
 def _record_started_child(records: InvocationRecords) -> None:
-    """この invocation が起こした worker を、Popen の直後に記録する。"""
+    """この invocation が起こした worker（barrier の process）を Popen の直後に記録する。"""
 
     from scripts.function_tracer_pcode.authority.process.supervisor_command import (
         read_process_start_token,
     )
 
     class RecordingPopen(subprocess.Popen):
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__(*args, **kwargs)
-            if not records.started_child.exists():
+        def __init__(self, args: Any, *rest: Any, **kwargs: Any) -> None:
+            super().__init__(args, *rest, **kwargs)
+            is_barrier = not isinstance(args, (str, bytes)) and "_barrier" in tuple(args)
+            if is_barrier and not records.started_child.exists():
                 write_json(records.started_child, {
                     "pid": self.pid, "start_token": read_process_start_token(self.pid),
                 })
@@ -378,18 +413,20 @@ def _observe_barrier_release(store_directory: Path, records: InvocationRecords) 
 def _capture_projection(authority_output: Path, records: InvocationRecords) -> None:
     """この invocation が ``authority_output`` へ公開した bytes をそのまま残す。"""
 
-    original = os.replace
     target = Path(authority_output).resolve()
 
-    def replace(source: Any, destination: Any, *args: Any, **kwargs: Any) -> Any:
-        if Path(os.fspath(destination)).resolve() != target:
-            return original(source, destination, *args, **kwargs)
-        data = Path(os.fspath(source)).read_bytes()
-        result = original(source, destination, *args, **kwargs)
-        write_bytes(records.projection, data)
-        return result
+    def _wrap(original: Any) -> Any:
+        def publish(source: Any, destination: Any, *args: Any, **kwargs: Any) -> Any:
+            if Path(os.fspath(destination)).resolve() != target:
+                return original(source, destination, *args, **kwargs)
+            data = Path(os.fspath(source)).read_bytes()
+            result = original(source, destination, *args, **kwargs)
+            write_bytes(records.projection, data)
+            return result
+        return publish
 
-    os.replace = replace
+    os.replace = _wrap(os.replace)
+    os.rename = _wrap(os.rename)
 
 
 # ---------------------------------------------------------------------------

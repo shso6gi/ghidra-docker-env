@@ -38,6 +38,7 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_faults import (
     stop_here,
 )
 from scripts.function_tracer_pcode.tests.unit._supervisor_records import (
+    ChildIdentity,
     ChildRecords,
     HarnessRecords,
     write_json,
@@ -161,6 +162,9 @@ def _prove_launch_before_exec(records: ChildRecords) -> Any:
         "launch_child_start_token": runtime.launch.payload["child_start_token"],
         "state_present_at_start": (runtime.store.directory / "state.json").exists(),
     }
+    write_json(records.identity_record, {
+        "pid": records.identity.pid, "start_token": records.identity.start_token,
+    })
     write_json(records.launch_evidence, evidence)
     return runtime
 
@@ -413,8 +417,16 @@ STEP_HANDLERS: dict[str, Callable[[_ChildContext, Mapping[str, Any]], None]] = {
 
 
 def main(arguments: list[str]) -> int:
+    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+        read_process_start_token,
+    )
+
     spec = json.loads(arguments[0])
-    records = HarnessRecords(Path(spec["records"])).child(os.getpid())
+    # exec しても start time は変わらないので、Popen の直後に supervisor 側が
+    # 記録した identity と同じものになる。
+    records = HarnessRecords(Path(spec["records"])).child(
+        ChildIdentity(os.getpid(), read_process_start_token(os.getpid()))
+    )
     runtime = _prove_launch_before_exec(records)
     from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         RESULT_ENTRY_OCCURRENCE_NONCE_ENV,

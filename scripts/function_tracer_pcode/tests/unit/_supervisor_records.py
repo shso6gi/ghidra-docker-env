@@ -11,8 +11,10 @@
   すべてこの directory にだけ書く。別の起動の記録を後から読み違えることがない。
 * **child**（worker process 1 つ）: child 自身が書く観測（launch の検査結果、
   止まった記録、発火した停止点）。child は起動した invocation を知らない
-  （child の command は config の一部で、restart でも変えられない）ので PID で
-  置き、読む側は invocation が記録した PID と start token で照合する。
+  （child の command は config の一部で、restart でも変えられない）ので、
+  process の identity（PID + start token）で置く。読む側は、invocation が
+  Popen の直後に記録した identity でこの directory を引く（PID が再利用されても
+  別 process の記録を読まない）。
 
 file 名はこの module の外に出さない。test は ``SupervisorRun`` の field を読む。
 """
@@ -88,6 +90,10 @@ class ChildIdentity:
     pid: int
     start_token: str
 
+    @property
+    def key(self) -> str:
+        return f"{self.pid}-{self.start_token.rsplit('-', 1)[-1]}"
+
 
 @dataclass(frozen=True)
 class InvocationRecords:
@@ -125,12 +131,16 @@ class InvocationRecords:
 
 @dataclass(frozen=True)
 class ChildRecords:
-    pid: int
+    identity: ChildIdentity
     directory: Path
 
     @property
     def launch_evidence(self) -> Path:
         return self.directory / "launch-evidence.json"
+
+    @property
+    def identity_record(self) -> Path:
+        return self.directory / "identity.json"
 
     @property
     def stopped(self) -> Path:
@@ -170,5 +180,16 @@ class HarnessRecords:
             for path in sorted(base.iterdir())
         )
 
-    def child(self, pid: int) -> ChildRecords:
-        return ChildRecords(pid, self.root / "children" / str(pid))
+    def child(self, identity: ChildIdentity) -> ChildRecords:
+        return ChildRecords(identity, self.root / "children" / identity.key)
+
+    def children_with_pid(self, pid: int) -> tuple[ChildRecords, ...]:
+        """PID が同じ child の記録すべて（identity を知らない呼び出し側向け）。"""
+
+        base = self.root / "children"
+        found = []
+        for path in sorted(base.glob(f"{pid}-*")) if base.is_dir() else ():
+            payload = read_json(path / "identity.json")
+            if payload is not None:
+                found.append(ChildRecords(ChildIdentity(**payload), path))
+        return tuple(found)

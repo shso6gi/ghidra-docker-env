@@ -63,6 +63,7 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_faults import (
 from scripts.function_tracer_pcode.tests.unit._supervisor_process import (
     SupervisorRaised,
     SupervisorRun,
+    classification_inputs,
     restart_supervisor,
     run_supervisor,
     terminate_leftover_workers,
@@ -72,12 +73,8 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_records import (
     HarnessRecords,
     SupervisorInvocationId,
     read_json,
-    sha256_of,
 )
-from scripts.function_tracer_pcode.tests.unit._supervisor_store import (
-    StoreSnapshot,
-    inspect_store,
-)
+from scripts.function_tracer_pcode.tests.unit._supervisor_store import StoreSnapshot
 
 __all__ = (
     "REPO_ROOT", "SupervisorKeys", "SupervisorIdentity", "SupervisorCase",
@@ -284,7 +281,8 @@ def classify(run: SupervisorRun) -> Mapping[str, Any]:
     分類器へ渡す projection は ``run`` 自身が公開した bytes で、case の
     ``authority_output`` のいまの値ではない。store と pair log はその run が
     終わった時点のままでなければならない（あとの invocation や test が変えて
-    いれば ``StaleRunObservation``）。
+    いれば ``StaleRunObservation``）。比べる入力は ``classification_inputs`` が
+    決める（store / pair log / 鍵 file）。
     """
 
     from scripts.function_tracer_pcode.authority.decision.canonical_result import (
@@ -294,10 +292,15 @@ def classify(run: SupervisorRun) -> Mapping[str, Any]:
     case = run.case
     if run.projection is None:
         raise NoProjectionToClassify(f"{run.invocation} published no projection")
-    if inspect_store(case.store_directory).digests != run.store.digests:
-        raise StaleRunObservation(f"the durable store changed after {run.invocation}")
-    if sha256_of(case.pair_log) != run.pair_log_sha256:
-        raise StaleRunObservation(f"the pair log changed after {run.invocation}")
+    now = classification_inputs(case)
+    changed = sorted(
+        name for name in set(now) | set(run.classification_inputs)
+        if now.get(name) != run.classification_inputs.get(name)
+    )
+    if changed:
+        raise StaleRunObservation(
+            f"classification inputs changed after {run.invocation}: {changed}"
+        )
     config = case.config
     return classify_pair_status(
         case.pair_log, run.records.projection,
@@ -310,7 +313,13 @@ def classify(run: SupervisorRun) -> Mapping[str, Any]:
     )
 
 
-def launch_evidence(case: SupervisorCase, pid: int) -> Optional[Mapping[str, Any]]:
-    """PID の worker が本処理の前に書いた launch の観測（書かなければ None）。"""
+def launch_evidence(case: SupervisorCase, pid: int) -> tuple[Mapping[str, Any], ...]:
+    """PID の worker が本処理の前に書いた launch の観測（書いた process ごと）。"""
 
-    return read_json(case.records.child(pid).launch_evidence)
+    return tuple(
+        evidence for evidence in (
+            read_json(records.launch_evidence)
+            for records in case.records.children_with_pid(pid)
+        )
+        if evidence is not None
+    )

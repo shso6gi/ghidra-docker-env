@@ -27,7 +27,6 @@ supervisor・分類器のどれも mock しない。起動・鍵・identity・�
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 
@@ -57,10 +56,6 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
 RESOLVED_KIND = "SupervisorCanonicalResultResolvedReceipt"
 
 
-def _launch(case):
-    return json.loads((case.store_directory / "launch.json").read_text(encoding="utf-8"))
-
-
 def _envelope(case):
     return json.loads(
         (case.store_directory / "canonical-result-envelope.json").read_text(encoding="utf-8")
@@ -79,25 +74,30 @@ def _solver_timeout_events(bundle):
     ]
 
 
-def _assert_child_ran_under_this_launch(case, run):
-    """実 child が起動し、本処理の前に自分を名指す durable launch を見た。
+def _assert_child_ran_under_this_launch(run):
+    """この run が起こした実 child が、本処理の前に自分を名指す durable launch を見た。
 
     parent 側では、supervisor が barrier を解放した瞬間に launch が既に durable
     だったことを観測している（child の起動速度に依存しない順序の証拠）。
+    比べる値はすべてこの run の観測で、case の file を後から読み直さない。
+    返り値はその launch の receipt digest。
     """
 
-    launch = _launch(case)
     assert run.launch_durable_at_barrier_release is True
     evidence = run.launch_evidence
     assert evidence is not None, "worker child never reached its launch check"
-    assert evidence["pid"] == launch["payload"]["child_pid"] != os.getpid()
-    assert evidence["start_token"] == launch["payload"]["child_start_token"]
-    assert evidence["launch_receipt_digest"] == launch["receipt_digest"]
-    assert evidence["launch_sha256"] == hashlib.sha256(
-        (case.store_directory / "launch.json").read_bytes()
-    ).hexdigest()
-    assert run.projection["launch_receipt_digest"] == launch["receipt_digest"]
-    return launch
+    assert run.child is not None and run.child.pid != os.getpid()
+    assert (evidence["pid"], evidence["start_token"]) == (
+        run.child.pid, run.child.start_token,
+    )
+    # launch が名指す process は、この run が Popen で起こした worker 自身。
+    assert (evidence["launch_child_pid"], evidence["launch_child_start_token"]) == (
+        run.child.pid, run.child.start_token,
+    )
+    # child が見た launch.json の bytes は、run が終わった時点の store のもの。
+    assert evidence["launch_sha256"] == run.store.digests["launch.json"]
+    assert run.projection["launch_receipt_digest"] == evidence["launch_receipt_digest"]
+    return evidence["launch_receipt_digest"]
 
 
 def test_process_start_token_is_bound_to_current_linux_process():
@@ -110,7 +110,7 @@ def test_process_start_token_is_bound_to_current_linux_process():
 def test_launch_is_durable_before_the_child_body_and_bundleless_exit_is_error(tmp_path):
     with supervisor_case(tmp_path, ChildScript((Exit(3),))) as case:
         run = run_supervisor(case)
-        launch = _assert_child_ran_under_this_launch(case, run)
+        launch_digest = _assert_child_ran_under_this_launch(run)
         # child は checkpoint を 1 つも持たない状態で起動した。
         assert run.launch_evidence["state_present_at_start"] is False
 
@@ -124,7 +124,7 @@ def test_launch_is_durable_before_the_child_body_and_bundleless_exit_is_error(tm
         assert classified["classification_valid"] is True
         assert classified["error_kind"] == "operational_authority_invalid"
         assert classified["child_exit_disposition"] == "EXIT_CODE_3"
-        assert classified["launch_receipt_digest"] == launch["receipt_digest"]
+        assert classified["launch_receipt_digest"] == launch_digest
         assert classified["finalization_bundle_digest"] == (
             run.projection["finalization_bundle_digest"]
         )
@@ -135,7 +135,7 @@ def test_runner_mode_does_not_resolve_a_child_exit_without_a_canonical_result(tm
         tmp_path, ChildScript((Exit(0),)), allow_child_exit_resolution=True,
     ) as case:
         run = run_supervisor(case)
-        _assert_child_ran_under_this_launch(case, run)
+        _assert_child_ran_under_this_launch(run)
         assert run.exit_code == 2
         assert run.projection["status"] == "INVALID"
         assert run.projection["error_code"] == "CANONICAL_CHILD_RESULT_INVALID"
@@ -161,7 +161,7 @@ def test_deadline_without_a_checkpoint_is_a_durable_timeout(
     script = ChildScript((Stop(ignore_sigterm=ignore_sigterm),))
     with supervisor_case(tmp_path, script, kill_grace=kill_grace) as case:
         run = run_supervisor(case, deadline=Deadline.AT_CHILD_STOP)
-        launch = _assert_child_ran_under_this_launch(case, run)
+        launch_digest = _assert_child_ran_under_this_launch(run)
         # deadline は child が止まった後に来て、その時点で checkpoint は無い。
         assert run.store_at_child_stop is not None
         assert run.store_at_child_stop.files == {"launch.json"}
@@ -176,7 +176,7 @@ def test_deadline_without_a_checkpoint_is_a_durable_timeout(
         assert classified["classification_valid"] is True
         assert classified["supervisor_status"] == "TIMEOUT"
         assert classified["child_exit_disposition"] == disposition
-        assert classified["launch_receipt_digest"] == launch["receipt_digest"]
+        assert classified["launch_receipt_digest"] == launch_digest
         assert classified["finalization_bundle_digest"] == (
             run.projection["finalization_bundle_digest"]
         )
@@ -194,7 +194,7 @@ def test_child_canonical_timeout_is_resolved_by_the_supervisor_and_classified_ti
 ):
     with _canonical_case(tmp_path, "TIMEOUT") as case:
         run = run_supervisor(case)
-        launch = _assert_child_ran_under_this_launch(case, run)
+        launch_digest = _assert_child_ran_under_this_launch(run)
         # child は decompile checkpoint を閉じてから結果を出した。
         assert run.store.state == "RESOLVED"
 
@@ -222,7 +222,7 @@ def test_child_canonical_timeout_is_resolved_by_the_supervisor_and_classified_ti
         receipt = json.loads(
             (case.store_directory / "canonical-resolved-receipt.json").read_text(encoding="utf-8")
         )
-        assert receipt["launch_receipt_digest"] == launch["receipt_digest"]
+        assert receipt["launch_receipt_digest"] == launch_digest
         assert receipt["child_returncode"] == timeout_code
         assert receipt["canonical_result_bundle_digest"] == bundle["bundle_digest"]
         assert receipt["decision_receipt_digest"] == decision["receipt_digest"]
@@ -252,7 +252,7 @@ def test_child_canonical_unknown_is_resolved_and_classified_unknown(tmp_path):
 
     with _canonical_case(tmp_path, "UNKNOWN") as case:
         run = run_supervisor(case)
-        _assert_child_ran_under_this_launch(case, run)
+        _assert_child_ran_under_this_launch(run)
         assert run.exit_code == 0
         assert run.projection["status"] == "RESOLVED"
         assert run.projection["authority_kind"] == RESOLVED_KIND
@@ -283,7 +283,7 @@ def test_corrupt_canonical_envelope_fails_closed(tmp_path, field, reseal):
 
     with _canonical_case(tmp_path, "UNKNOWN", corrupt=field, reseal=reseal) as case:
         run = run_supervisor(case)
-        _assert_child_ran_under_this_launch(case, run)
+        _assert_child_ran_under_this_launch(run)
         envelope = _envelope(case)
         assert _envelope_is_sealed(envelope) is reseal
         bundle = envelope["canonical_result_payload"]["canonical_result_finalization_bundle"]

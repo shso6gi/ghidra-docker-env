@@ -287,7 +287,10 @@ def install_deadline_control(
     original = ProcessSupervisorCommand._wait_for_child_until_deadline
 
     def controlled(self: Any, process: Any, diagnostic: Any, real_deadline: float) -> Any:
-        marker = harness.child(process.pid).stopped
+        started = invocation.child()
+        if started is None or started.pid != process.pid:
+            raise AssertionError(f"{invocation.invocation} did not record the worker it started")
+        marker = harness.child(started).stopped
         while not marker.exists():
             if process.poll() is not None or time.monotonic() >= real_deadline:
                 return original(self, process, diagnostic, real_deadline)

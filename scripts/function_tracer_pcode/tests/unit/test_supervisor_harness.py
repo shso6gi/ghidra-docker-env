@@ -182,7 +182,7 @@ def test_the_child_does_not_run_without_a_launch_that_names_it(tmp_path):
     with supervisor_case(tmp_path, ChildScript((Exit(0),))) as case:
         finished = run_supervisor(case)
         assert finished.launch_evidence is not None
-        assert launch_evidence(case, finished.child.pid) == finished.launch_evidence
+        assert launch_evidence(case, finished.child.pid) == (finished.launch_evidence,)
 
         bare = {
             key: value for key, value in os.environ.items()
@@ -195,7 +195,7 @@ def test_the_child_does_not_run_without_a_launch_that_names_it(tmp_path):
             )
             _, stderr = process.communicate(timeout=120)
             assert process.returncode == LAUNCH_EVIDENCE_EXIT, stderr
-            assert launch_evidence(case, process.pid) is None
+            assert launch_evidence(case, process.pid) == ()
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +280,7 @@ def test_classification_names_the_run_it_classifies(tmp_path):
         restarted = restart_supervisor(case)
         assert restarted.projection is not None
         restarted_status = classify(restarted)
+        assert restarted.invocation > crashed.invocation > first.invocation
         assert restarted_status["supervisor_projection_digest"] == (
             restarted.projection["projection_digest"]
         )
@@ -291,7 +292,38 @@ def test_classification_names_the_run_it_classifies(tmp_path):
             first.projection["projection_digest"]
         )
 
+        # ここまでの restart は store と pair log を変えないので first の組は
+        # そのまま残っている（変わっていれば StaleRunObservation になる）。
         # あとで durable store が変われば、どの run の観測も分類の根拠にしない。
         (case.store_directory / "state.json").write_text("{}", encoding="utf-8")
         with pytest.raises(StaleRunObservation, match=str(restarted.invocation)):
             classify(restarted)
+
+
+def test_a_crash_right_after_projecting_keeps_that_projection(tmp_path):
+    """公開した直後に落ちた run の projection は、その run が公開した bytes。"""
+
+    with supervisor_case(tmp_path, ChildScript((Exit(3),))) as case:
+        run = run_supervisor(case, faults=(crash_at(ProjectionWrite(side="after")),))
+        assert run.crashed is True and run.exit_code is None
+        on_disk = json.loads(case.config.authority_output.read_text(encoding="utf-8"))
+        assert run.projection == on_disk
+        assert classify(run)["canonical_outcome"] == "ERROR"
+
+
+def _allocate(root):
+    from scripts.function_tracer_pcode.tests.unit._supervisor_records import (
+        HarnessRecords,
+    )
+
+    return HarnessRecords(root).allocate_invocation().invocation.ordinal
+
+
+def test_invocation_identities_stay_unique_across_concurrent_processes(tmp_path):
+    """並行に起動した supervisor（#165 T15）でも identity が重複しない。"""
+
+    import multiprocessing
+
+    with multiprocessing.get_context("fork").Pool(8) as pool:
+        ordinals = pool.map(_allocate, [tmp_path] * 32)
+    assert sorted(ordinals) == list(range(32))
