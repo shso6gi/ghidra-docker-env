@@ -868,11 +868,26 @@ def test_a_budget_hit_inside_the_conditional_lane_leaves_the_decision(monkeypatc
         _emit_one_production_signal()
         return create_mock_result(is_equivalent=None, solver_status=SolverStatus.UNKNOWN)
 
+    from scripts.function_tracer_pcode.core.errors import (
+        PairStopState,
+        current_pair_ledger,
+    )
+
+    ledger_seen = []
+
     def _exceeding_proof(*_args, **_kwargs):
-        raise_expression_size_budget_exceeded(
-            BudgetKind.RENDER_BYTES, observed=2, limit=1,
-            site="core.render_smt.emit", target_key=("lane",),
-        )
+        ledger = current_pair_ledger()
+        try:
+            raise_expression_size_budget_exceeded(
+                BudgetKind.RENDER_BYTES, observed=2, limit=1,
+                site="core.render_smt.emit", target_key=("lane",),
+            )
+        finally:
+            ledger_seen.append((
+                ledger.stop_state(),
+                ledger.recorded_failure_count(),
+                ledger.limitations_after_finalization(),
+            ))
 
     monkeypatch.setattr(conditional_lane, "conditional_lane_is_eligible", lambda _d: True)
     monkeypatch.setattr(
@@ -890,7 +905,10 @@ def test_a_budget_hit_inside_the_conditional_lane_leaves_the_decision(monkeypatc
     assert result.final_outcome == "UNKNOWN"
     assert result.conditional_decision_receipt is None
     assert seen[-1] == "finished"
-    # authority 確定後の限界は台帳へ記録されない（stop state は lane の前のまま）
+    # authority 確定後の限界は台帳へ pair failure として記録されない（stop state は
+    # lane の前のまま）。result 側の stop state は lane より前に確定しているので、
+    # 台帳そのものを見る（修正前は lane の中で PAIR_TERMINAL_LIMITATION になっていた）。
+    assert ledger_seen == [(PairStopState.NONE, 0, 1)]
     assert result.pair_stop_state is None
 
 
