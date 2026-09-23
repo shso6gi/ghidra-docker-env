@@ -235,6 +235,10 @@ def test_the_canonical_typed_cause_key_is_never_summarized():
     assert result.unknown_reasons
     worst = {key: "f" * 128 for key in result.unknown_reasons[0].typed_cause_key}
     assert RESULT_JSON_POLICY.measure(worst) <= TYPED_CAUSE_KEY_INLINE_BYTES
+    # 最悪の大きさの canonical な key（digest の列がすべて id の上限）でも要約しない
+    widest = make_unknown_reason("unknown", typed_cause_key=worst)
+    rendered = RESULT_JSON_POLICY.prepare(widest).value()["typed_cause_key"]
+    assert "bounded_evidence" not in rendered and rendered == worst
     envelope = build_final_result_envelope(result)
     for row in envelope.payload["unknown_reasons"]:
         assert "bounded_evidence" not in row["typed_cause_key"]
@@ -270,6 +274,9 @@ def test_receipt_and_relation_rows_match_the_authority_payloads():
 
 def test_string_bounds_cover_the_worst_escape_of_every_policy():
     for policy in (RESULT_JSON_POLICY, JsonEncodingPolicy(ensure_ascii=True)):
+        # 1 文字の最悪の escape（ascii: 非 BMP = 12 byte、それ以外: 制御文字 = 6 byte）
+        for worst_char in ("\x01", "\U0001F600"):
+            assert policy.string_bytes(worst_char * 100) <= policy.max_string_bytes(100)
         column = Column("t", TEXT, 64)
         worst = "\U0001F600" * 64 if policy.ensure_ascii else "\x01" * 64
         prepared = policy.prepare({"t": column.source(worst)}).value()["t"]
