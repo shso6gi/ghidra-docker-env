@@ -6,8 +6,8 @@
 比較（comparison）に依存する authority（比較の中で作った recovery 証拠、proof
 artifact、obligation と gate outcome、pair ledger の closure）は、それが成立した
 
-* raw pair（``StrategySourceAnalysisPair.pair_digest``: 左右の raw analysis の
-  semantic fingerprint。proof 証拠は fingerprint に入らない）と
+* raw pair（``StrategySourceAnalysisPair.comparison_digest``: 左右の raw analysis の
+  fingerprint。proof 証拠と、比較自身が raw analysis に書き戻す観測の note は入らない）と
 * その raw pair に対する最終 ``InputCorrespondence``（``InputCorrespondenceSet.digest``）
 
 の組 ``ComparisonAuthorityBinding`` を値で持ち、採用する側はこの組を値で照合する。
@@ -23,7 +23,11 @@ artifact、obligation と gate outcome、pair ledger の closure）は、それ�
 
 **owner と経路**
 
-* identity の生成と照合はこの module だけが行う（``ComparisonAuthorityBinding``）。
+* raw pair の identity は raw pair の owner（``StrategySourceAnalysisPair.comparison_digest``、
+  fingerprint の規則は ``proof/obligations/snapshot.py`` の ``comparison_fingerprint``）が
+  作り、それと relation の組 ``ComparisonAuthorityBinding`` の生成と照合はこの module だけが
+  行う。比較が raw analysis に書き戻す観測（``record_comparison_annotation``）は raw pair
+  の identity を変えない。それ以外の変化で raw pair が変われば、以後は別の比較になる。
 * 比較の範囲: ``comparison_scope(binding)`` が 1 つの比較の間だけ現在の binding を
   与える。開くのは dispatch 境界（``checker/strategy_execution.run_strategy_branch``）
   と、branch の結果をその結果を作った比較で扱う境界（``proof/obligations/stage_runner``
@@ -41,6 +45,9 @@ artifact、obligation と gate outcome、pair ledger の closure）は、それ�
 * obligation runtime: 1 つの runtime は 1 つの binding の比較だけに仕える
   （``ObligationRuntimeSession.claim_comparison``）。artifact・view・dependency・producer・
   replanner・outcome・cache は runtime の state なので、binding が違う比較とは共有されない。
+  gate の計画・完了証拠の適用・outcome の読み出しは仕える比較の中でだけ行う。別の比較は
+  自分の runtime を使い（``prepare_strategy_runtime``）、stage runner はその結果の runtime で
+  gate と集約を行い、replan は runner 自身の比較の結果だけに行う。
 * pair ledger: ``PairLedgerBinding.comparison_authority_digest`` が ledger の closure の
   前提になった binding で、validator と closure の検証は現在の比較と照合する。
 """
@@ -96,7 +103,7 @@ class ComparisonAuthorityBinding:
 
         if type(relation) is not InputCorrespondenceSet:
             raise TypeError("comparison authority requires the final InputCorrespondenceSet")
-        return cls(str(getattr(source_pair, "pair_digest", "")), relation.digest, relation)
+        return cls(str(getattr(source_pair, "comparison_digest", "")), relation.digest, relation)
 
     @property
     def digest(self) -> str:
@@ -203,6 +210,13 @@ def relation_digest_is_current(digest: Any) -> bool:
 
     current = current_comparison()
     return current is not None and isinstance(digest, str) and digest == current.input_correspondence_digest
+
+
+def comparison_authority_digest() -> str:
+    """現在の比較の binding digest（比較の外・binding の無い比較では、どれとも一致しない値）。"""
+
+    binding = current_comparison()
+    return OUTSIDE_COMPARISON if binding is None else binding.digest
 
 
 def bind_evidence_to_comparison(

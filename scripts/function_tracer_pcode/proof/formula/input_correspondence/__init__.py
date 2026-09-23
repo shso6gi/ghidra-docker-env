@@ -74,6 +74,7 @@ _LAZY = {
             "ComparisonAuthorityBinding",
             "OUTSIDE_COMPARISON",
             "bind_evidence_to_comparison",
+            "comparison_authority_digest",
             "comparison_digest_is_current",
             "comparison_evidence",
             "comparison_is_current",

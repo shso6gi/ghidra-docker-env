@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "3f6ca06a1730443b0d00911b2012aa974ec8d12b9353d50fa1b087847a9db2cf",
+  "manifest_digest": "e942a43d4ac605455d9e07a7f8e0fdaff0dddc2953c5d53726d2b51cfa768529",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 32,
   "sites": [
@@ -502,7 +502,7 @@
       "line": 831,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-loop-fallback-blocker",
-      "source_sha256": "d6ee1591a9f2c400696dd7cdf2314baa0b66656f3c73655923a99f5a4b8ee805"
+      "source_sha256": "c4c51220037bda96623f2e8efbd68bd1989b1d44d2641945f3ba91aea06c07df"
     },
     {
       "allowed_dispositions": [
@@ -636,7 +636,7 @@
       "line": 1745,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-pending-loop-blocker",
-      "source_sha256": "d6ee1591a9f2c400696dd7cdf2314baa0b66656f3c73655923a99f5a4b8ee805"
+      "source_sha256": "c4c51220037bda96623f2e8efbd68bd1989b1d44d2641945f3ba91aea06c07df"
     },
     {
       "allowed_dispositions": [
@@ -665,7 +665,7 @@
       "line": 901,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-readonly-correspondence-member",
-      "source_sha256": "d6ee1591a9f2c400696dd7cdf2314baa0b66656f3c73655923a99f5a4b8ee805"
+      "source_sha256": "c4c51220037bda96623f2e8efbd68bd1989b1d44d2641945f3ba91aea06c07df"
     },
     {
       "allowed_dispositions": [
@@ -694,7 +694,7 @@
       "line": 878,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-readonly-identity-blocker",
-      "source_sha256": "d6ee1591a9f2c400696dd7cdf2314baa0b66656f3c73655923a99f5a4b8ee805"
+      "source_sha256": "c4c51220037bda96623f2e8efbd68bd1989b1d44d2641945f3ba91aea06c07df"
     },
     {
       "allowed_dispositions": [

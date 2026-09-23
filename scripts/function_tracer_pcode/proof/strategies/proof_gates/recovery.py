@@ -444,11 +444,11 @@ def _impl__readonly_projection_extension_proof_content_is_complete(
     expected_wide_side = "left" if left_size > right_size else "right"
     expected_narrow_side = "right" if expected_wide_side == "left" else "left"
     # 入力 extension の出所は最終 InputCorrespondence だけ（Issue #167）。Ghidra の
-    # 推論型や semantic hint を出所とする proof は受理しない。proof を作った relation が
-    # いま比較している relation と値で一致し、その relation 自身がこの射影の extension
-    # 仮定を含意すること（記録された仮定の自己申告ではなく、現在の relation から
-    # 導き直して照合する）。proof は raw analysis に残り別の relation の比較からも
-    # 見えるので、object の同一性は束縛にならない。
+    # 推論型や semantic hint を出所とする proof は受理しない。どの比較（raw pair と
+    # relation）の proof かは record の binding を comparison_evidence が照合済み。ここでは
+    # proof の中身が前提にした relation が現在の比較の relation であり、その relation 自身が
+    # この射影の extension 仮定を含意することを確かめる（記録された仮定の自己申告では
+    # なく、現在の relation から導き直して照合する）。
     expected_assumption = (
         "rewrite_assumption_v1",
         parameter_index,

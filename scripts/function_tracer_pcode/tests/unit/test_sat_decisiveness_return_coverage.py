@@ -3,7 +3,6 @@ from scripts.function_tracer_pcode.tests.unit._input_correspondence_support impo
     comparison_of,
     echo_input_correspondence,
 )
-from scripts.function_tracer_pcode.proof.formula.input_correspondence import comparison_scope
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
 
 import pytest
@@ -215,28 +214,23 @@ def test_pairwise_return_coverage_covered_side_emits_completed_proof_evidence(mo
         for item in evidence
     } == {action.proof_obligation_id for action in expected_actions}
     # 証拠はそれを作った比較（raw pair と relation）に束縛され、その比較の中でだけ proof に
-    # なる（Issue #167）。別の比較（note が付いた後の raw pair）からは採用されない。
+    # なる（Issue #167）。check が raw analysis に書き戻した coverage の note は比較対象を
+    # 変えないので、同じ raw pair の比較は同じ比較のまま。
     assert {item["comparison_authority"] for item in evidence} == {comparison.digest}
-    with comparison_scope(comparison):
+    with comparison_of(analysis1, analysis2) as same:
+        assert same == comparison
         assert PairwiseStrategy._completed_recovery_proof_ids(analysis2) == tuple(
             action.proof_obligation_id for action in expected_actions
         )
-    with comparison_of(analysis1, analysis2) as annotated:
-        assert annotated != comparison
+    other_pair = (analysis1, _return_coverage_gap_analyses()[0])
+    with comparison_of(*other_pair):
         assert PairwiseStrategy._completed_recovery_proof_ids(analysis2) == ()
     assert PairwiseStrategy._completed_recovery_proof_ids(analysis2) == ()
 
-    # 同じ（note の付いた）raw pair を比べ直すと、その比較が自分の証拠を作る。
-    annotated = comparison_binding_of(analysis1, analysis2)
-    strategy.check(analysis1, analysis2)
+    # 同じ比較をやり直しても、同じ proof を重ねて記録しない。
     strategy.check(analysis1, analysis2)
 
-    by_comparison = {}
-    for item in analysis2.completed_recovery_proof_evidence:
-        by_comparison.setdefault(item["comparison_authority"], []).append(item)
-    assert {key: len(items) for key, items in by_comparison.items()} == {
-        comparison.digest: 2, annotated.digest: 2,
-    }
+    assert len(analysis2.completed_recovery_proof_evidence) == 2
 
 def test_pairwise_collect_return_coverage_reason_uses_current_coverage_check_when_notes_are_stale(monkeypatch):
     formula_builder = echo_input_correspondence(Mock())

@@ -323,7 +323,9 @@ def test_branch_gates_use_the_comparison_and_runtime_of_the_result():
 
     assert branch_comparison(result(cmp.a, runner_runtime), runner_runtime) == (cmp.a, runner_runtime)
     assert branch_comparison(result(cmp.c, inner_runtime), runner_runtime) == (cmp.c, inner_runtime)
-    assert branch_comparison(SimpleNamespace(), runner_runtime) == (None, runner_runtime)
+    # frame の無い結果は、どの比較の state も読まない別の runtime で扱う。
+    comparison, isolated = branch_comparison(SimpleNamespace(), runner_runtime, *cmp.pair_a)
+    assert comparison is None and isolated is not runner_runtime and isolated.comparison_binding is None
 
 
 @pytest.mark.parametrize("strategy_name", ["pairwise", "monolithic"])
@@ -435,3 +437,41 @@ def test_a_reason_is_answered_only_for_the_object_that_was_planned():
     with comparison_scope(cmp.a):
         assert runtime.outcome_for_reason(impostor) == FunctionProofOutcome.INCONCLUSIVE
         assert runtime.outcome_for_reason(planned) == FunctionProofOutcome.EQUIVALENT
+
+
+def test_a_runtime_serving_a_comparison_is_not_read_from_outside_it():
+    cmp = _comparisons()
+    runtime = _runtime(cmp.pair_a)
+    requirement = _requirement("r")
+    reason = _reason(requirement)
+    assert _prove(runtime, cmp.a, requirement, reason, with_artifact=True) == FunctionProofOutcome.EQUIVALENT
+    for read in (
+        lambda: runtime.outcome_for_reason(reason),
+        lambda: runtime.apply_completed_evidence(()),
+        lambda: runtime.plan_proof_gates(SimpleNamespace(unknown_reasons=[]), {}, lambda *_a: None),
+    ):
+        with pytest.raises(ComparisonRuntimeMismatch):
+            read()  # 比較の外
+        with comparison_scope(None), pytest.raises(ComparisonRuntimeMismatch):
+            read()  # binding の無い範囲
+
+
+def test_the_comparisons_own_annotations_do_not_change_the_raw_pair_it_compares():
+    from scripts.function_tracer_pcode.proof.call_effect.preflight import StrategySourceAnalysisPair
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import record_comparison_annotation
+
+    cmp = _comparisons()
+    left, right = cmp.pair_a
+    source = StrategySourceAnalysisPair.create(left, right)
+    record_comparison_annotation(left, "return_case_coverage_gap")
+    # 比較が書き戻した観測は、比較対象の raw pair を変えない（同じ比較の branch は共有できる）。
+    assert source.comparison_identity_is_current()
+    assert comparison_binding_of(left, right) == cmp.a
+    # semantic fingerprint には入る（blocker を知らずに作った証明と区別する既存の identity）。
+    assert not source.is_unchanged()
+    # 登録していない note は比較の観測として書けない。書き換えられた raw pair は別の比較。
+    with pytest.raises(ValueError, match="unregistered comparison annotation"):
+        record_comparison_annotation(left, "some_other_note")
+    left.analysis_notes.append("indirect_control_flow_unresolved")
+    assert not source.comparison_identity_is_current()
+    assert comparison_binding_of(left, right) != cmp.a

@@ -117,7 +117,8 @@ class ObligationRuntimeSession:
     outcome・cache はすべてこの比較の state で、別の比較の仕事を持ち込むと
     ``ComparisonRuntimeMismatch`` で拒否する（別の比較は自分の runtime を使う。
     ``checker/strategy_execution.prepare_strategy_runtime``）。比較の外（binding の無い
-    範囲）からの仕事は、比較の証拠を採用しないので受け付ける。
+    範囲）からは、比較の証拠も state も読まない仕事（branch の実行・view の記録）だけを
+    受け付け、gate の計画・完了証拠の適用・outcome の読み出しは仕える比較の中でだけ行う。
     """
 
     base_view: DerivedAnalysisView
@@ -523,6 +524,18 @@ class ObligationRuntimeSession:
     def _enter_current_comparison(self) -> None:
         self.claim_comparison(current_comparison())
 
+    def _require_current_comparison(self) -> None:
+        """authority を読む・作る仕事は、この runtime が仕える比較の中でだけ行う。
+
+        比較の外（binding の無い範囲）から、ある比較に仕える runtime の artifact・outcome を
+        読ませない（証拠 record の照合だけでは、runtime の state が漏れる）。
+        """
+
+        current = current_comparison()
+        if self.comparison_binding is not None and current != self.comparison_binding:
+            raise ComparisonRuntimeMismatch("obligation_runtime_comparison_mismatch")
+        self.claim_comparison(current)
+
     def _bound_producer(self, callback: Optional[Callable[[], Any]]) -> Optional[Callable[[], Any]]:
         """producer を、積んだ比較の範囲で実行する形にし、その比較をこの runtime に求める。"""
 
@@ -715,7 +728,7 @@ class ObligationRuntimeSession:
         gate_for_kind: Mapping[str, str],
         producer_factory: Callable[[str, Any, ProofRequirementId], Callable[[], FunctionProofOutcome]],
     ) -> Tuple[ProofRequirementId, ...]:
-        self._enter_current_comparison()
+        self._require_current_comparison()
         requirements: List[ProofRequirementId] = []
         seen: Set[Tuple[Any, ...]] = set()
         reasons = tuple(getattr(result, "unknown_reasons", ()) or ())
@@ -861,7 +874,7 @@ class ObligationRuntimeSession:
         *,
         reasons: Iterable[Any] = (),
     ) -> Tuple[DerivedAnalysisView, ...]:
-        self._enter_current_comparison()
+        self._require_current_comparison()
         produced: List[DerivedAnalysisView] = []
         for wrapper in evidence_wrappers:
             evidence = wrapper.get("evidence", wrapper)
@@ -1011,7 +1024,7 @@ class ObligationRuntimeSession:
         return derived
 
     def outcome_for_reason(self, reason: Any) -> FunctionProofOutcome:
-        self._enter_current_comparison()
+        self._require_current_comparison()
         requirements = (
             self.reason_requirements.get(id(reason), ())
             if self.planned_reasons.get(id(reason)) is reason

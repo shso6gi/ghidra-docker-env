@@ -75,8 +75,9 @@ def test_obligation_runtime_store_is_guarded_and_precedes_run_strategy_branch():
     fn, src = _check_fn()
     stores = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
               and any(isinstance(t, ast.Attribute) and t.attr == "_obligation_runtime_session" for t in n.targets)]
-    # B 段の保存（store_on_facade ガード付き）と D 段（recurrence runtime）の 2 箇所のみ
-    assert len(stores) == 2
+    # B 段の保存（store_on_facade ガード付き）と D 段（recurrence runtime の切り替えと、finally での
+    # 元の比較の runtime への復帰、Issue #167）の 3 箇所のみ
+    assert len(stores) == 3
     guarded = [n for n in ast.walk(fn) if isinstance(n, ast.If) and "store_on_facade" in ast.unparse(n.test)]
     assert len(guarded) == 1 and any(isinstance(b, ast.Assign) for b in guarded[0].body) and not guarded[0].orelse
     b_store_line = guarded[0].body[0].lineno

@@ -61,6 +61,7 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     InputCorrespondenceSet,
     bind_evidence_to_comparison,
     build_input_correspondence_set,
+    comparison_authority_digest,
     comparison_is_current,
     comparison_scope,
     current_comparison,
@@ -257,18 +258,17 @@ def _impl_check(
     sat_unsafety_reasons.extend(
         self._sat_decisive_return_coverage_unsafety_reasons(coverage_unsafety_reasons)
     )
+    # この比較の観測を raw analysis に書き戻す（比較の identity は変えない、Issue #167）。
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import record_comparison_annotation
+
     if "function1:return_coverage_gap" in sat_unsafety_reasons:
-        if "return_case_coverage_gap" not in analysis1.analysis_notes:
-            analysis1.analysis_notes.append("return_case_coverage_gap")
+        record_comparison_annotation(analysis1, "return_case_coverage_gap")
     if "function2:return_coverage_gap" in sat_unsafety_reasons:
-        if "return_case_coverage_gap" not in analysis2.analysis_notes:
-            analysis2.analysis_notes.append("return_case_coverage_gap")
+        record_comparison_annotation(analysis2, "return_case_coverage_gap")
     if "function1:return_coverage_inconclusive" in sat_unsafety_reasons:
-        if "return_case_coverage_inconclusive" not in analysis1.analysis_notes:
-            analysis1.analysis_notes.append("return_case_coverage_inconclusive")
+        record_comparison_annotation(analysis1, "return_case_coverage_inconclusive")
     if "function2:return_coverage_inconclusive" in sat_unsafety_reasons:
-        if "return_case_coverage_inconclusive" not in analysis2.analysis_notes:
-            analysis2.analysis_notes.append("return_case_coverage_inconclusive")
+        record_comparison_annotation(analysis2, "return_case_coverage_inconclusive")
     total_pairs = len(cases1) * len(cases2)
     active_runtime = getattr(self, "_obligation_runtime_session", None)
     successor_plan = (
@@ -430,7 +430,7 @@ def _impl_check(
         tuple(getattr(getattr(runtime, "current_view", None), "view_id", ()) or ()),
         graph.premise_digest,
         graph.generation,
-        _comparison_authority_digest(),
+        comparison_authority_digest(),
     )
     if (
         runtime is not None
@@ -2001,13 +2001,6 @@ def _impl_check(
     finally:
         self._active_safety_checker = None
         self._active_normalization_stats = None
-
-
-def _comparison_authority_digest() -> str:
-    """pair ledger を束縛する、現在の比較の authority（無ければどの比較とも一致しない値）。"""
-
-    comparison = current_comparison()
-    return "no_comparison_authority" if comparison is None else comparison.digest
 
 
 def _register_loop_pair_replanner(

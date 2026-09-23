@@ -46,6 +46,12 @@ def mark_function_unary(record: MutableMapping[str, Any]) -> MutableMapping[str,
     return record
 
 
+def function_unary_evidence(records: Any) -> tuple:
+    """``records`` のうち、関数単体の事実と明示された record（analysis 層の読み手が使う）。"""
+
+    return tuple(record for record in records or () if evidence_authority_scope(record) == FUNCTION_UNARY)
+
+
 def record_function_unary_evidence(analysis: Any, record: MutableMapping[str, Any]) -> None:
     """関数単体の事実 ``record`` を ``analysis`` の証拠列の末尾に足す（analysis 層の書き込み口）。"""
 

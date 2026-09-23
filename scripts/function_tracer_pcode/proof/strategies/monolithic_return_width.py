@@ -288,11 +288,10 @@ class ReturnWidthObservationMixin:
         analysis2: FunctionReturnAnalysis,
         reasons: list[str],
     ) -> None:
+        from scripts.function_tracer_pcode.proof.obligations.snapshot import record_comparison_annotation
+
         for label, analysis in (("function1", analysis1), ("function2", analysis2)):
-            if f"{label}:return_coverage_gap" in reasons and "return_case_coverage_gap" not in analysis.analysis_notes:
-                analysis.analysis_notes.append("return_case_coverage_gap")
-            if (
-                f"{label}:return_coverage_inconclusive" in reasons
-                and "return_case_coverage_inconclusive" not in analysis.analysis_notes
-            ):
-                analysis.analysis_notes.append("return_case_coverage_inconclusive")
+            if f"{label}:return_coverage_gap" in reasons:
+                record_comparison_annotation(analysis, "return_case_coverage_gap")
+            if f"{label}:return_coverage_inconclusive" in reasons:
+                record_comparison_annotation(analysis, "return_case_coverage_inconclusive")

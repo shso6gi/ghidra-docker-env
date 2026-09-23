@@ -768,6 +768,10 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                             promotion.attempt,
                             debug_print=self._debug_print,
                         ):
+                            # Issue #167: 後継 pair の比較は自分の runtime を使う。終わったら
+                            # facade を元の比較の runtime に戻す（後の branch・replan が後継の
+                            # 比較の runtime を元の比較の runtime として使わない）。
+                            outer_runtime = getattr(self, "_obligation_runtime_session", None)
                             self._obligation_runtime_session = promotion.recurrence_runtime
                             self._active_recurrence_promotion_authority = promotion.authority
                             try:
@@ -788,6 +792,7 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                                 )
                             finally:
                                 del self._active_recurrence_promotion_authority
+                                self._obligation_runtime_session = outer_runtime
                 # G2（Issue #106 PR-106-0）: 結果を組む直前に、この pair で
                 # 未解消の限界 / 内部バグが残っていないかを台帳へ確かめる。
                 # 深部の `except Exception` に握り潰されていても、ここで例外に

@@ -181,20 +181,23 @@ def _cutover_branch_policy(result: Any) -> tuple[Any, tuple[str, ...], bool]:
     return attempt_outcome, actions, continue_fallback
 
 
-def branch_comparison(result: Any, runtime: ObligationRuntimeSession) -> Tuple[
-    Optional[ComparisonAuthorityBinding], ObligationRuntimeSession
-]:
-    """branch の結果を作った比較の authority と、その比較の obligation runtime。
+def branch_comparison(
+    result: Any,
+    runtime: ObligationRuntimeSession,
+    analysis1: Any = None,
+    analysis2: Any = None,
+) -> Tuple[Optional[ComparisonAuthorityBinding], ObligationRuntimeSession]:
+    """branch の結果を作った比較の authority と、その比較に仕える obligation runtime。
 
     branch の後で実行する gate と集約は、その結果の UNKNOWN reason と証拠を作った比較で
-    行う（Issue #167）。再帰抽象化のように runner の raw pair と違う pair を比べた branch は、
-    自分の比較に仕える別の runtime を使っている（runner の runtime とは state を共有しない）。
-    frame の無い結果には authority が無く、比較の証拠は採用されない。
+    行う（Issue #167）。runtime は結果の frame が使った runtime（runner の raw pair の比較
+    なら runner の runtime、再帰抽象化・recurrence promotion の比較ならその比較の runtime）。
+    frame の無い結果には authority が無いので、どの比較の state も読まない別の runtime を使う。
     """
 
     frame = getattr(result, "_prepared_dispatch_frame", None)
     if frame is None or getattr(frame, "source", None) is None:
-        return None, runtime
+        return None, ObligationRuntimeSession.create(analysis1, analysis2)
     comparison = frame.comparison_binding
     frame_runtime = getattr(frame, "obligation_runtime", None)
     return comparison, frame_runtime if frame_runtime is not None else runtime
@@ -396,7 +399,7 @@ def run_obligation_branch_plan(
         while True:
             # Issue #167: gate は、この結果を作った比較（raw pair と relation）の範囲で、
             # その比較の runtime に積む（別の比較の証拠・artifact・outcome は使わない）。
-            comparison, branch_runtime = branch_comparison(result, runtime)
+            comparison, branch_runtime = branch_comparison(result, runtime, analysis1, analysis2)
             with comparison_scope(comparison):
                 branch_runtime.plan_proof_gates(result, _RECOVERY_TO_GATE, gate_producer)
                 while True:
@@ -430,12 +433,19 @@ def run_obligation_branch_plan(
                 # Compatibility/test branches without a production ledger
                 # have no pair surface to replan.
                 break
-            is_unchanged = getattr(getattr(prior_dispatch_frame, "source", None), "is_unchanged", None)
-            if callable(is_unchanged) and not is_unchanged():
-                # Issue #167: a replan continues the same comparison.  If the raw
-                # pair changed since the frame (for example a coverage note was
-                # recorded on it), the successor belongs to a finished comparison
-                # and is not replanned (the branch result stays as it is).
+            # Issue #167: a replan re-runs the runner's raw pair and continues
+            # its comparison.  A result of another comparison (a recursive
+            # abstraction or a recurrence promotion ran in its own runtime), or
+            # a raw pair that changed since the frame, is not replanned: the
+            # successor belongs to that other comparison.
+            identity_is_current = getattr(
+                getattr(prior_dispatch_frame, "source", None),
+                "comparison_identity_is_current",
+                None,
+            )
+            if branch_runtime is not runtime or (
+                callable(identity_is_current) and not identity_is_current()
+            ):
                 break
             replan_generation += 1
             successor_plan = branch_runtime.pair_ledger_manager.pending_successor
@@ -470,7 +480,7 @@ def run_obligation_branch_plan(
         pre_aggregation_outcome = result.is_equivalent
         # 結果の reason を解消できるのは、その結果を作った比較の runtime の outcome だけ
         # （Issue #167。runtime は 1 つの比較に仕える）。
-        comparison, branch_runtime = branch_comparison(result, runtime)
+        comparison, branch_runtime = branch_comparison(result, runtime, analysis1, analysis2)
         with comparison_scope(comparison):
             DecisionAggregator.apply(result, branch_runtime)
         post_aggregation_outcome = result.is_equivalent
@@ -661,7 +671,7 @@ def run_obligation_branch_plan(
         result.cutover_retry_fallback_actions = cutover_actions
         outcome = _outcome(result)
         controller.record(branch_id, outcome)
-        view_id = runtime.current_view.view_id
+        view_id = branch_runtime.current_view.view_id
         records.append(BranchExecutionRecord(
             branch_id, ActivationState.COMPLETED, outcome, view_id,
             project_proof_gates(result),

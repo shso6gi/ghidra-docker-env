@@ -402,6 +402,9 @@ class StrategySourceAnalysisPair:
     #: 何も発行しない（信頼済み signature の経路が無い、v5 §4.4）。
     input_extension_evidence: Tuple[Any, ...] = field(default=(), compare=False)
     _input_correspondence_cache: Any = field(default=None, compare=False, repr=False)
+    #: 比較の authority が束縛する raw pair の identity（Issue #167）。比較自身が raw
+    #: analysis に書き戻す note（``COMPARISON_ANNOTATION_NOTES``）を除いた fingerprint の組。
+    comparison_digest: str = field(default="", compare=False)
 
     @classmethod
     def create(
@@ -411,8 +414,10 @@ class StrategySourceAnalysisPair:
         *,
         input_extension_evidence: Tuple[Any, ...] = (),
     ) -> "StrategySourceAnalysisPair":
-        left = AnalysisSnapshot.from_function_analysis(analysis1).semantic_fingerprint
-        right = AnalysisSnapshot.from_function_analysis(analysis2).semantic_fingerprint
+        left_snapshot = AnalysisSnapshot.from_function_analysis(analysis1)
+        right_snapshot = AnalysisSnapshot.from_function_analysis(analysis2)
+        left = left_snapshot.semantic_fingerprint
+        right = right_snapshot.semantic_fingerprint
         return cls(
             analysis1,
             analysis2,
@@ -420,7 +425,16 @@ class StrategySourceAnalysisPair:
             right,
             _digest((left, right)),
             tuple(input_extension_evidence or ()),
+            comparison_digest=_comparison_pair_digest(left_snapshot, right_snapshot),
         )
+
+    def comparison_identity_is_current(self) -> bool:
+        """raw pair が、この比較が始まったときと同じ比較対象のままか（比較自身の note は除く）。"""
+
+        return _comparison_pair_digest(
+            AnalysisSnapshot.from_function_analysis(self.analysis1),
+            AnalysisSnapshot.from_function_analysis(self.analysis2),
+        ) == self.comparison_digest
 
     def input_correspondence(self) -> InputCorrespondenceSet:
         """この raw pair の最終 InputCorrespondence（raw は不変なので 1 回だけ作る）。"""
@@ -493,6 +507,10 @@ class PreparedAnalysisPair:
         return current == (self.left_digest, self.right_digest)
 
 
+def _comparison_pair_digest(left: AnalysisSnapshot, right: AnalysisSnapshot) -> str:
+    return _digest(("comparison_raw_pair_v1", left.comparison_fingerprint, right.comparison_fingerprint))
+
+
 def comparison_binding_for_raw_pair(
     analysis1: Any,
     analysis2: Any,
@@ -507,7 +525,7 @@ def comparison_binding_for_raw_pair(
 
     try:
         source = StrategySourceAnalysisPair.create(analysis1, analysis2)
-    except TypeError:
+    except (TypeError, ValueError):
         return None
     return ComparisonAuthorityBinding.of(source, relation)
 

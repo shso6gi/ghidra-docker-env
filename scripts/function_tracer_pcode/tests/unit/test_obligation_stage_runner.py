@@ -560,3 +560,58 @@ def test_production_shadow_validator_runs_final_workflows_and_hashes_surfaces():
     report = ProductionShadowValidator.run(finalized, finalized)
     assert report.comparison.compatible
     assert report.legacy_surface_hash == report.obligation_surface_hash
+
+
+@pytest.mark.parametrize("why", ["raw_pair_changed", "another_comparisons_runtime"])
+def test_a_replan_continues_only_the_runners_own_comparison(why):
+    """Issue #167: replan は runner の raw pair の比較を続ける仕事。別の比較（再帰抽象化・
+    recurrence promotion が自分の runtime で比べた pair）の結果や、比較対象が変わった raw pair
+    の結果は replan しない（後継 plan は別の比較のもの）。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.runtime import ObligationRuntimeSession
+
+    requirement = ProofRequirementId.create(
+        "return_coverage_completion", ("coverage", "f"), ProofRequirementContract("return coverage complete"),
+    )
+    reason = SimpleNamespace(
+        reason_id="return_coverage_gap", recovery_proof_kind="return_coverage_completion",
+        proof_requirement_ids=(requirement.to_dict(),), object_target_key=("coverage", "f"),
+        pair_or_case="(0,0)", stage="S_PAIRWISE",
+    )
+    comparison = _comparison()
+    first = _result(None, (reason,))
+    first.completed_recovery_proof_evidence = [{"evidence": _comparison_evidence(comparison, {
+        "proof_requirement_id": requirement.to_dict(), "status": "complete", "proof_source": "coverage_test_producer",
+    })}]
+    strategy = SimpleNamespace(
+        _return_coverage_proof_is_complete=lambda *_args: True,
+        _call_effect_summary_proof_is_complete=lambda *_args: False,
+        _recovery_proof_is_complete=lambda *_args: False,
+    )
+    checker = _checker([])
+    checker.stage_plan = [StageSpec(StageID.S_PAIRWISE, "pairwise", "pairwise")]
+    checker.pairwise_strategy = strategy
+    calls = []
+
+    def execute(*_args, **_kwargs):
+        calls.append(_kwargs["branch_context"].replan_plan)
+        runner_runtime = checker._obligation_runtime_session
+        runtime = runner_runtime
+        if why == "another_comparisons_runtime":
+            runtime = ObligationRuntimeSession.create(_analysis("B1"), _analysis("B2"))
+        binding = PairLedgerBinding(
+            "session", "S_PAIRWISE", "surface", "projection", 1,
+            runtime.current_view.view_id, runtime.premise_digest, 1, comparison.digest,
+        )
+        first._prepared_dispatch_frame = _frame(comparison, pair_disposition_ledger=runtime.open_pair_ledger(binding, 1))
+        if why == "raw_pair_changed":
+            first._prepared_dispatch_frame.source.comparison_identity_is_current = lambda: False
+        else:
+            first._prepared_dispatch_frame.obligation_runtime = runtime
+        return first
+
+    checker.check = Mock(side_effect=execute)
+    final = _run(checker, "_run_stage_plan")
+
+    assert calls == [None]  # replan しない
+    assert final.is_equivalent is None
