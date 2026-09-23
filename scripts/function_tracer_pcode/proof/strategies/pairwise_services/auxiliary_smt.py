@@ -34,7 +34,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     build_condition_only_query,
     build_normalized_inequality_query,
     build_pair_query,
-    build_parameter_semantic_constraints,
+    extension_premise_lines,
     build_single_case_condition_query,
     build_unknown_recovery_actions,
     parameter_identity_key_from_descriptor,
@@ -455,7 +455,7 @@ def _impl__build_nonnegative_query(
     declarations.extend(self._collect_auxiliary_float_declarations([expr], conditions))
 
     assertions = []
-    assertions.extend(build_parameter_semantic_constraints(symbol_infos))
+    assertions.extend(extension_premise_lines(symbol_infos))
     for condition in conditions or []:
         if condition is None:
             continue
@@ -478,13 +478,13 @@ def _impl__collect_intrinsic_parameter_specs(
 ) -> Optional[List[Dict[str, Any]]]:
     specs: Dict[Tuple[object, ...], Dict[str, Any]] = {}
     unresolved_symbol = False
-    semantic_by_index = self._auxiliary_semantic_hints_by_index(semantic_parameter_sources)
+    extensions_by_index = self._auxiliary_entailed_extensions_by_index(semantic_parameter_sources)
 
     def add_spec(identity: Optional[Tuple[object, ...]], candidate: Dict[str, Any]) -> None:
         if identity is None:
             return
         size = max(1, int(candidate.get("size", 0) or 4))
-        self._apply_auxiliary_semantic_hint(candidate, size=size, semantic_by_index=semantic_by_index)
+        self._apply_auxiliary_entailed_extension(candidate, size=size, extensions_by_index=extensions_by_index)
         existing = specs.get(identity)
         if existing is None:
             specs[identity] = {
@@ -580,7 +580,7 @@ def _impl__build_intrinsic_equivalence_query(
     symbol_infos = self._build_auxiliary_parameter_infos(parameters)
     for symbol in symbol_infos:
         declarations.append(f"(declare-const {symbol.smt_name} (_ BitVec {symbol.bit_width}))")
-    semantic_constraints = build_parameter_semantic_constraints(symbol_infos)
+    semantic_constraints = extension_premise_lines(symbol_infos)
 
     intrinsic_declarations: List[str] = []
     for expr in (left, right):

@@ -2259,13 +2259,10 @@ def _impl__counted_loop_affine_widths_are_safe(
             spec = by_identity.get(identity)
             if spec is None:
                 return False
-            try:
-                narrow_bits = int(spec.get("semantic_narrow_bits"))
-            except (TypeError, ValueError):
-                return False
-            if narrow_bits != target_bits:
-                return False
-            return spec.get("semantic_signedness") in {"signed", "unsigned"}
+            # 幅の広い parameter が target 幅に収まると言えるのは、最終
+            # InputCorrespondence が extension を含意したときだけ（Issue #167）。
+            assumption = spec.get("entailed_extension")
+            return assumption is not None and int(assumption.narrow_bits) == target_bits
         if getattr(expr, "expr_type", None) == ExpressionType.PHI:
             for cond, branch_value in getattr(expr, "value", None) or []:
                 if cond is not None and not visit(getattr(cond, "expression", None)):

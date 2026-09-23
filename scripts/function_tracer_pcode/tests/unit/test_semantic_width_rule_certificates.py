@@ -1,0 +1,448 @@
+# -*- coding: utf-8 -*-
+"""Issue #167: 有効な semantic-width 書き換え規則ごとの SMT certificate（v5 §4.6 / §4.11-13）。
+
+各規則について **実 production の規則**（``SemanticWidthNormalizer``）が出した式と、
+**実 SMT lowering**（``Expression.to_smt``）を z3 に渡して次を確かめる。
+
+1. 規則が実際に発火している（非空虚）。
+2. ``sort(original) == sort(rewritten)``。
+3. ``premise ∧ (original != rewritten)`` が UNSAT（Bool は xor）。
+4. premise 自体が SAT（空の前提で UNSAT を得る空虚さが無い）。
+5. 幅・定数の境界値でも 3 が成り立ち、その境界値が premise を満たす。
+6. 前提（入力仮定や構文条件）を欠くと規則は発火せず、欠いたまま書き換えた式には
+   z3 が反例を返す（負例。手書きの式はここでだけ使う）。
+
+``SEMANTIC_WIDTH_RULES`` に規則を足したら、ここに certificate を足さないと
+``test_every_enabled_rule_has_a_certificate`` が落ちる。
+"""
+
+from __future__ import annotations
+
+from typing import Dict, Iterable, Optional, Sequence, Tuple
+
+import pytest
+import z3
+
+from scripts.function_tracer_pcode.core import Expression, ExpressionType
+from scripts.function_tracer_pcode.core.render_smt import (
+    expression_returns_bool,
+    expression_smt_bit_width,
+)
+from scripts.function_tracer_pcode.core.semantic_freeze import publish
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import extension_assumption_line
+from scripts.function_tracer_pcode.semantics.param_semantics import ParameterSemanticHint
+from scripts.function_tracer_pcode.semantics.projection_contract import (
+    EMPTY_REWRITE_AUTHORIZATION,
+    ExtensionKind,
+    RewriteAssumption,
+    RewriteAuthorization,
+)
+from scripts.function_tracer_pcode.semantics.semantic_width import (
+    SEMANTIC_WIDTH_RULES,
+    SemanticWidthNormalizer,
+)
+
+
+# ---------------------------------------------------------------------------
+# harness
+# ---------------------------------------------------------------------------
+
+
+def _param(name: str, size: int, index: int) -> Expression:
+    return Expression(ExpressionType.PARAMETER, name=name, value=index, size=size)
+
+
+def _const(value: int, size: int) -> Expression:
+    return Expression(ExpressionType.CONSTANT, value=value, size=size)
+
+
+def _bin(op: str, left: Expression, right: Expression, size: int) -> Expression:
+    return Expression(ExpressionType.BINARY_OP, operator=op, operands=[left, right], size=size)
+
+
+def _un(op: str, operand: Expression, size: int) -> Expression:
+    return Expression(ExpressionType.UNARY_OP, operator=op, operands=[operand], size=size)
+
+
+def _low(expr: Expression, size: int) -> Expression:
+    return _bin("SUBPIECE", expr, _const(0, 8), size)
+
+
+def _hints(**by_index: ParameterSemanticHint) -> Dict[Tuple[object, ...], ParameterSemanticHint]:
+    return {("parameter_index", int(index[1:])): hint for index, hint in by_index.items()}
+
+
+def _rewrite(
+    expr: Expression,
+    *,
+    hints: Optional[Dict[Tuple[object, ...], ParameterSemanticHint]] = None,
+    authorization: RewriteAuthorization = EMPTY_REWRITE_AUTHORIZATION,
+) -> Expression:
+    # production と同じく、書き換えの入力も出力も公開済みの値として扱う。
+    return publish(SemanticWidthNormalizer(hints or {}, authorization).rewrite_expression(publish(expr)))
+
+
+def _sort(expr: Expression) -> str:
+    return "Bool" if expression_returns_bool(expr) else f"BV{expression_smt_bit_width(expr)}"
+
+
+def _declarations(params: Iterable[Tuple[str, int]]) -> str:
+    return "".join(f"(declare-const {name} (_ BitVec {bits}))\n" for name, bits in params)
+
+
+def _check(text: str) -> z3.CheckSatResult:
+    solver = z3.Solver()
+    solver.from_string(text)
+    return solver.check()
+
+
+def _differs(original: Expression, rewritten: Expression) -> str:
+    op = "xor" if _sort(original) == "Bool" else "distinct"
+    return f"(assert ({op} {publish(original).to_smt()} {publish(rewritten).to_smt()}))\n"
+
+
+def _premise(assumptions: Sequence[Tuple[str, RewriteAssumption]]) -> str:
+    return "".join(extension_assumption_line(name, item) + "\n" for name, item in assumptions)
+
+
+BOUNDARY_VALUES = {
+    8: (0, 1, 0x7F, 0x80, 0xFF),
+    16: (0, 1, 0x7FFF, 0x8000, 0xFFFF),
+    32: (0, 1, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF),
+    64: (0, 1, 0x7FFFFFFFFFFFFFFF, 0x8000000000000000, 0xFFFFFFFFFFFFFFFF, 0xFFFFFFFF80000000, 0x80000000),
+}
+
+
+def certify(
+    original: Expression,
+    rewritten: Expression,
+    params: Sequence[Tuple[str, int]],
+    assumptions: Sequence[Tuple[str, RewriteAssumption]] = (),
+) -> None:
+    assert rewritten.to_smt() != original.to_smt(), "rule did not fire"
+    assert _sort(rewritten) == _sort(original)
+    declarations = _declarations(params)
+    premise = _premise(assumptions)
+    assert _check(declarations + premise) == z3.sat
+    assert _check(declarations + premise + _differs(original, rewritten)) == z3.unsat
+    for name, bits in params:
+        for value in BOUNDARY_VALUES[bits]:
+            pinned = declarations + premise + f"(assert (= {name} (_ bv{value} {bits})))\n"
+            if _check(pinned) != z3.sat:
+                continue  # この境界値は premise の外（ext の像でない）
+            assert _check(pinned + _differs(original, rewritten)) == z3.unsat, (name, hex(value))
+
+
+def counterexample_exists(
+    original: Expression,
+    naive: Expression,
+    params: Sequence[Tuple[str, int]],
+    assumptions: Sequence[Tuple[str, RewriteAssumption]] = (),
+) -> bool:
+    text = _declarations(params) + _premise(assumptions) + _differs(original, naive)
+    return _check(text) == z3.sat
+
+
+CERTIFIED_RULES = set()
+
+
+def certifies(rule: str):
+    def mark(function):
+        assert rule in SEMANTIC_WIDTH_RULES, rule
+        CERTIFIED_RULES.add(rule)
+        return function
+    return mark
+
+
+def test_every_enabled_rule_has_a_certificate():
+    assert CERTIFIED_RULES == set(SEMANTIC_WIDTH_RULES)
+
+
+a32 = _param("a", 4, 0)
+b32 = _param("b", 4, 1)
+p64 = _param("p", 8, 0)
+q64 = _param("q", 8, 1)
+SIGN32_P = RewriteAssumption(0, 64, 32, ExtensionKind.SIGN)
+SIGN32_Q = RewriteAssumption(1, 64, 32, ExtensionKind.SIGN)
+ZERO32_P = RewriteAssumption(0, 64, 32, ExtensionKind.ZERO)
+ZERO32_Q = RewriteAssumption(1, 64, 32, ExtensionKind.ZERO)
+
+
+# ---------------------------------------------------------------------------
+# subpiece_of_extension
+# ---------------------------------------------------------------------------
+
+
+@certifies("subpiece_of_extension")
+@pytest.mark.parametrize("ext", ["INT_SEXT", "INT_ZEXT"])
+def test_subpiece_of_extension(ext):
+    original = _low(_un(ext, a32, 8), 4)
+    certify(original, _rewrite(original), [("a", 32)])
+
+
+def test_subpiece_of_extension_requires_matching_width():
+    a16 = _param("a", 2, 0)
+    original = _low(_un("INT_SEXT", a16, 8), 4)
+    assert _rewrite(original).to_smt() == original.to_smt()
+
+
+# ---------------------------------------------------------------------------
+# subpiece_of_ring_operation
+# ---------------------------------------------------------------------------
+
+
+RING = ("INT_ADD", "INT_SUB", "INT_MULT", "INT_AND", "INT_OR", "INT_XOR")
+
+
+@certifies("subpiece_of_ring_operation")
+@pytest.mark.parametrize("op", RING)
+def test_subpiece_of_ring_operation_on_extensions(op):
+    original = _low(_bin(op, _un("INT_SEXT", a32, 8), _un("INT_ZEXT", b32, 8), 8), 4)
+    certify(original, _rewrite(original), [("a", 32), ("b", 32)])
+
+
+@pytest.mark.parametrize("op", RING)
+def test_subpiece_of_ring_operation_on_hinted_wide_parameters(op):
+    """hint はどこで試すかの目安だけ。下位 bit の等式は入力仮定無しで成り立つ。"""
+
+    original = _low(_bin(op, p64, q64, 8), 4)
+    hints = _hints(i0=ParameterSemanticHint(32, "signed"), i1=ParameterSemanticHint(32, "signed"))
+    certify(original, _rewrite(original, hints=hints), [("p", 64), ("q", 64)])
+
+
+@pytest.mark.parametrize("op", RING)
+def test_bare_ring_operation_is_never_narrowed(op):
+    """v5 §4.6: 全幅の算術結果を裸で狭めない（sort が変わる）。hint も IEE も関係ない。"""
+
+    original = _bin(op, p64, q64, 8)
+    hints = _hints(i0=ParameterSemanticHint(32, "signed"), i1=ParameterSemanticHint(32, "signed"))
+    authorization = RewriteAuthorization((SIGN32_P, SIGN32_Q))
+    assert _rewrite(original, hints=hints, authorization=authorization).to_smt() == original.to_smt()
+    naive = _bin(op, _low(p64, 4), _low(q64, 4), 4)
+    assert _sort(naive) != _sort(original)
+
+
+def test_add_overflow_breaks_bare_narrowing_even_under_sign_extension():
+    """``x + 1``（64 bit）は x が sext32 像でも low32 の加算と異なる（x = 0x7fffffff）。"""
+
+    original = _bin("INT_ADD", p64, _const(1, 8), 8)
+    naive = _un("INT_SEXT", _bin("INT_ADD", _low(p64, 4), _const(1, 4), 4), 8)
+    assert counterexample_exists(original, naive, [("p", 64)], [("p", SIGN32_P)])
+
+
+# ---------------------------------------------------------------------------
+# subpiece_of_division_on_extension_images
+# ---------------------------------------------------------------------------
+
+
+#: 除算の同値は幅に依らない恒等式（0 除算と ``INT_MIN / -1`` を含む。SMT-LIB の
+#: bvsdiv/bvsrem/bvudiv/bvurem の定義で N bit の結果が W bit の結果の下位 N bit に
+#: 一致する）。z3 は 64→32 の除算器 2 つの全称同値を 60 秒で決められない
+#: （``tests/fixtures/issue167/README.md``、32→16 は 8〜28 秒）ので、全称の
+#: certificate は 16→8 で取り、production の 64→32 は境界値の全組合せで取る。
+#: どちらも同じ実規則・同じ lowering を通る（幅は引数でしかない）。
+DIVISION_CASES = [
+    ("INT_SDIV", "INT_SEXT"), ("INT_SREM", "INT_SEXT"),
+    ("INT_DIV", "INT_ZEXT"), ("INT_REM", "INT_ZEXT"),
+]
+
+
+@certifies("subpiece_of_division_on_extension_images")
+@pytest.mark.parametrize(("op", "ext"), DIVISION_CASES)
+def test_division_on_syntactic_extension_images(op, ext):
+    a8 = _param("a", 1, 0)
+    b8 = _param("b", 1, 1)
+    original = _low(_bin(op, _un(ext, a8, 2), _un(ext, b8, 2), 2), 1)
+    certify(original, _rewrite(original), [("a", 8), ("b", 8)])
+
+
+@pytest.mark.parametrize(("op", "ext"), DIVISION_CASES)
+def test_division_rewrite_at_production_width_on_all_boundary_pairs(op, ext):
+    original = _low(_bin(op, _un(ext, a32, 8), _un(ext, b32, 8), 8), 4)
+    rewritten = _rewrite(original)
+    assert rewritten.to_smt() == publish(_bin(op, a32, b32, 4)).to_smt()
+    declarations = _declarations([("a", 32), ("b", 32)])
+    for left in BOUNDARY_VALUES[32]:
+        for right in BOUNDARY_VALUES[32]:
+            pinned = declarations + f"(assert (= a (_ bv{left} 32)))\n(assert (= b (_ bv{right} 32)))\n"
+            assert _check(pinned + _differs(original, rewritten)) == z3.unsat, (hex(left), hex(right))
+
+
+SIGN8_P = RewriteAssumption(0, 16, 8, ExtensionKind.SIGN)
+SIGN8_Q = RewriteAssumption(1, 16, 8, ExtensionKind.SIGN)
+ZERO8_P = RewriteAssumption(0, 16, 8, ExtensionKind.ZERO)
+ZERO8_Q = RewriteAssumption(1, 16, 8, ExtensionKind.ZERO)
+
+
+@pytest.mark.parametrize(("op", "assumptions"), [
+    ("INT_SDIV", (SIGN8_P, SIGN8_Q)), ("INT_SREM", (SIGN8_P, SIGN8_Q)),
+    ("INT_DIV", (ZERO8_P, ZERO8_Q)), ("INT_REM", (ZERO8_P, ZERO8_Q)),
+])
+def test_division_on_parameters_needs_the_entailed_extension(op, assumptions):
+    p16 = _param("p", 2, 0)
+    q16 = _param("q", 2, 1)
+    original = _low(_bin(op, p16, q16, 2), 1)
+    authorization = RewriteAuthorization(assumptions)
+    rewritten = _rewrite(original, authorization=authorization)
+    premise = [("p", assumptions[0]), ("q", assumptions[1])]
+    certify(original, rewritten, [("p", 16), ("q", 16)], premise)
+
+    # 前提を欠くと規則は発火せず、欠いたまま書き換えた式には反例がある。
+    assert _rewrite(original).to_smt() == original.to_smt()
+    assert counterexample_exists(original, rewritten, [("p", 16), ("q", 16)])
+
+
+def test_signed_division_rejects_zero_extended_composite_operands():
+    """v5 §4.6: parameter の証拠ではなく演算の operand 式そのものが sign 像である必要。"""
+
+    p16 = _param("p", 2, 0)
+    q16 = _param("q", 2, 1)
+    masked_p = _bin("INT_AND", p16, _const(0xFF, 2), 2)
+    masked_q = _bin("INT_AND", q16, _const(0xFF, 2), 2)
+    original = _low(_bin("INT_SDIV", masked_p, masked_q, 2), 1)
+    hints = _hints(i0=ParameterSemanticHint(8, "signed"), i1=ParameterSemanticHint(8, "signed"))
+    authorization = RewriteAuthorization((SIGN8_P, SIGN8_Q))
+    assert _rewrite(original, hints=hints, authorization=authorization).to_smt() == original.to_smt()
+    naive = _bin("INT_SDIV", _low(p16, 1), _low(q16, 1), 1)
+    # parameter の SIGN 証拠があっても、operand ``p & 0xff`` は zero 像なので反例がある。
+    assert counterexample_exists(original, naive, [("p", 16), ("q", 16)], [("p", SIGN8_P), ("q", SIGN8_Q)])
+
+
+def test_signed_division_rejects_mixed_extension_kinds():
+    a8 = _param("a", 1, 0)
+    b8 = _param("b", 1, 1)
+    original = _low(_bin("INT_SDIV", _un("INT_SEXT", a8, 2), _un("INT_ZEXT", b8, 2), 2), 1)
+    assert _rewrite(original).to_smt() == original.to_smt()
+    naive = _bin("INT_SDIV", a8, b8, 1)
+    assert counterexample_exists(original, naive, [("a", 8), ("b", 8)])
+
+
+# ---------------------------------------------------------------------------
+# mask_to_zero_extension
+# ---------------------------------------------------------------------------
+
+
+@certifies("mask_to_zero_extension")
+def test_mask_becomes_zero_extension_of_low_part():
+    original = _bin("INT_AND", p64, _const(0xFFFFFFFF, 8), 8)
+    hints = _hints(i0=ParameterSemanticHint(32, "unsigned"))
+    certify(original, _rewrite(original, hints=hints), [("p", 64)])
+
+
+def test_mask_rewrite_preserves_the_parent_sort_and_value():
+    """v5 §4.6 必須反例: ``(~(p & 0xffffffff)) == 0xffffffff00000000``（p = 0xffffffff で真）。"""
+
+    masked = _bin("INT_AND", p64, _const(0xFFFFFFFF, 8), 8)
+    original = _bin("INT_EQUAL", _un("INT_NEGATE", masked, 8), _const(0xFFFFFFFF00000000, 8), 1)
+    hints = _hints(i0=ParameterSemanticHint(32, "unsigned"))
+    certify(original, _rewrite(original, hints=hints), [("p", 64)])
+
+    naive = _bin("INT_EQUAL", _un("INT_NEGATE", _low(p64, 4), 4), _const(0xFFFFFFFF00000000, 8), 1)
+    assert counterexample_exists(original, naive, [("p", 64)])
+
+
+# ---------------------------------------------------------------------------
+# comparison_constant_width_alignment
+# ---------------------------------------------------------------------------
+
+
+@certifies("comparison_constant_width_alignment")
+@pytest.mark.parametrize(("op", "constant"), [
+    ("INT_SLESS", 4), ("INT_SLESS", 0xFFFFFFFFFFFFFFFC), ("INT_SLESSEQUAL", 0xFFFFFFFF80000000),
+    ("INT_LESS", 0xFFFFFFFF), ("INT_LESSEQUAL", 4), ("INT_EQUAL", 0x80000000), ("INT_NOTEQUAL", 7),
+])
+def test_comparison_constant_is_aligned_to_the_narrow_operand(op, constant):
+    """lowering は狭い側を signed 比較なら sext、それ以外は zext で揃える。その像の定数だけ。"""
+
+    original = _bin(op, a32, _const(constant, 8), 1)
+    certify(original, _rewrite(original), [("a", 32)])
+
+
+@pytest.mark.parametrize(("op", "constant"), [
+    ("INT_LESS", 0xFFFFFFFFFFFFFFFF), ("INT_EQUAL", 0xFFFFFFFF80000000), ("INT_SLESS", 0x80000000),
+])
+def test_comparison_constant_outside_the_lowering_image_is_kept(op, constant):
+    original = _bin(op, a32, _const(constant, 8), 1)
+    assert _rewrite(original).to_smt() == original.to_smt()
+    naive = _bin(op, a32, _const(constant & 0xFFFFFFFF, 4), 1)
+    assert counterexample_exists(original, naive, [("a", 32)])
+
+
+# ---------------------------------------------------------------------------
+# comparison_on_extension_images
+# ---------------------------------------------------------------------------
+
+
+@certifies("comparison_on_extension_images")
+@pytest.mark.parametrize(("op", "ext"), [
+    ("INT_EQUAL", "INT_SEXT"), ("INT_NOTEQUAL", "INT_ZEXT"),
+    ("INT_SLESS", "INT_SEXT"), ("INT_SLESSEQUAL", "INT_SEXT"),
+    ("INT_LESS", "INT_ZEXT"), ("INT_LESSEQUAL", "INT_ZEXT"),
+])
+def test_comparison_of_syntactic_extension_images(op, ext):
+    original = _bin(op, _un(ext, a32, 8), _un(ext, b32, 8), 1)
+    certify(original, _rewrite(original), [("a", 32), ("b", 32)])
+
+
+@pytest.mark.parametrize(("op", "assumption", "constant"), [
+    ("INT_SLESS", SIGN32_P, 5), ("INT_SLESSEQUAL", SIGN32_P, 0xFFFFFFFFFFFFFFFB),
+    ("INT_EQUAL", SIGN32_P, 0xFFFFFFFF80000000), ("INT_LESS", ZERO32_P, 0xFFFFFFFF),
+    ("INT_NOTEQUAL", ZERO32_P, 0),
+])
+def test_comparison_of_parameter_needs_the_entailed_extension(op, assumption, constant):
+    original = _bin(op, p64, _const(constant, 8), 1)
+    rewritten = _rewrite(original, authorization=RewriteAuthorization((assumption,)))
+    certify(original, rewritten, [("p", 64)], [("p", assumption)])
+
+    assert _rewrite(original).to_smt() == original.to_smt()
+    assert counterexample_exists(original, rewritten, [("p", 64)])
+
+
+def test_signed_to_unsigned_comparison_conversion_is_not_performed():
+    """v5 §4.6 必須反例: ``sext32(0x80000000) <u 0`` は偽、``<s 0`` は真。
+
+    SIGN の前提があっても unsigned 比較を signed へ変えない（逆も同じ）。
+    """
+
+    original = _bin("INT_LESS", p64, _const(16, 8), 1)
+    authorization = RewriteAuthorization((SIGN32_P,))
+    assert _rewrite(original, authorization=authorization).to_smt() == original.to_smt()
+    converted = _bin("INT_SLESS", _low(p64, 4), _const(16, 4), 1)
+    assert counterexample_exists(original, converted, [("p", 64)], [("p", SIGN32_P)])
+
+    widened = _bin("INT_LESS", _un("INT_SEXT", a32, 8), _const(16, 8), 1)
+    hints = _hints(i0=ParameterSemanticHint(32, "signed", signedness_source="explicit"))
+    assert _rewrite(widened, hints=hints).to_smt() == widened.to_smt()
+
+
+def test_mixed_extension_kinds_in_equality_are_not_narrowed():
+    """``sext(a) == zext(b)`` は ``a == b`` と違う（a = b = 0x80000000）。"""
+
+    original = _bin("INT_EQUAL", _un("INT_SEXT", a32, 8), _un("INT_ZEXT", b32, 8), 1)
+    assert _rewrite(original).to_smt() == original.to_smt()
+    assert counterexample_exists(original, _bin("INT_EQUAL", a32, b32, 1), [("a", 32), ("b", 32)])
+
+
+def test_zero_image_does_not_license_signed_comparison():
+    original = _bin("INT_SLESS", p64, _const(5, 8), 1)
+    authorization = RewriteAuthorization((ZERO32_P,))
+    assert _rewrite(original, authorization=authorization).to_smt() == original.to_smt()
+    naive = _bin("INT_SLESS", _low(p64, 4), _const(5, 4), 1)
+    assert counterexample_exists(original, naive, [("p", 64)], [("p", ZERO32_P)])
+
+
+# ---------------------------------------------------------------------------
+# fragment collapse is not an enabled rule
+# ---------------------------------------------------------------------------
+
+
+def test_independent_fragment_is_not_collapsed():
+    """v5 §4.6: lo を固定して独立な hi を変えると ``PIECE(hi, lo)`` と ``sext(lo)`` は違う。"""
+
+    hi = Expression(ExpressionType.VARIABLE, name="in_a0_hi", size=4)
+    original = _bin("PIECE", hi, a32, 8)
+    authorization = RewriteAuthorization((RewriteAssumption(0, 32, 16, ExtensionKind.SIGN),))
+    assert _rewrite(original, authorization=authorization).to_smt() == original.to_smt()
+    naive = _un("INT_SEXT", a32, 8)
+    assert counterexample_exists(original, naive, [("a", 32), ("in_a0_hi", 32)])
+    assert "fragment" not in " ".join(SEMANTIC_WIDTH_RULES)

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 from unittest.mock import Mock
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner
 
@@ -867,7 +868,7 @@ def test_pairwise_readonly_shortcut_requires_count_object_identity():
         signed_counter=True,
         loop_summary=loop_summary,
     )
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
 
     decision = strategy._readonly_reduction_contract_shortcut_decision(
         ref,
@@ -940,7 +941,7 @@ def test_storage_backed_pointer_and_count_identity_participates_in_readonly_shor
         stride=4,
         element_size=4,
     ).lower_to_readonly_reduction_ref()
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
 
     assert left_ref is not None
     assert right_ref is not None
@@ -1038,7 +1039,7 @@ def test_storage_backed_count_identity_keeps_index_backcompat_for_readonly_consu
     ).lower_to_readonly_reduction_ref()
     indexed_operand_without_storage = Expression.parameter("count", index=1, data_type="int", size=4)
     builder = FormulaBuilder()
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
 
     assert storage_backed_ref is not None
     assert legacy_ref is not None
@@ -1108,7 +1109,7 @@ def test_readonly_contract_limit_key_compatibility_allows_storage_limit_to_legac
         element_size=4,
         index_scale=4,
     ).lower_to_readonly_reduction_ref()
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
 
     assert storage_ref is not None
     assert legacy_ref is not None
@@ -1174,7 +1175,7 @@ def test_readonly_contract_limit_key_compatibility_rejects_index_mismatch_or_con
     )
     legacy_limit_key = ("loop_limit_parameter", 1)
     mismatched_index_key = ("loop_limit_parameter", 2)
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
 
     assert not strategy._readonly_contract_limit_keys_compatible(
         storage_limit_key,
@@ -1253,7 +1254,7 @@ def test_storage_backed_count_identity_conflict_rejects_index_fallback():
         storage_info=other_count_storage,
     )
     builder = FormulaBuilder()
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
 
     assert left_ref is not None
     assert right_ref is not None
@@ -1347,7 +1348,7 @@ def test_readonly_count_storage_relation_records_same_register_projection_withou
         element_size=4,
         index_scale=4,
     ).lower_to_readonly_reduction_ref()
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
 
     assert wide_ref is not None
     assert narrow_ref is not None
@@ -1390,7 +1391,7 @@ def test_method_b_closure_relation_records_one_sided_summary_exact_terms():
         ReturnInfo(address="0x1004", value=summary_expr, conditions=[]),
         parameters=parameters,
     )
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
 
     relation = strategy._method_b_closure_relation_object_key(exact_case, summary_case)
 
@@ -1435,7 +1436,7 @@ def test_method_b_covering_case_producer_records_only_covering_evidence():
         returns=[summary_return],
         return_type="int",
     )
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     target = strategy._method_b_closure_object_target_key(
         base_ctx={"analysis1": analysis1, "analysis2": analysis2},
         case1=exact_case,
@@ -1501,7 +1502,7 @@ def test_method_b_guard_partition_producer_records_when_count_guard_is_proven():
         returns=[summary_return],
         return_type="int",
     )
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     target = strategy._method_b_closure_object_target_key(
         base_ctx={"analysis1": analysis1, "analysis2": analysis2},
         case1=exact_case,
@@ -1570,7 +1571,7 @@ def test_method_b_guard_partition_producer_records_count_membership_when_range_i
         returns=[summary_return],
         return_type="int",
     )
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     target = strategy._method_b_closure_object_target_key(
         base_ctx={"analysis1": analysis1, "analysis2": analysis2},
         case1=exact_case,
@@ -1635,7 +1636,7 @@ def test_method_b_guard_partition_producer_rejects_open_count_range():
         returns=[summary_return],
         return_type="int",
     )
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     target = strategy._method_b_closure_object_target_key(
         base_ctx={"analysis1": analysis1, "analysis2": analysis2},
         case1=exact_case,
@@ -1690,7 +1691,7 @@ def test_method_b_covering_case_producer_rejects_term_sequence_mismatch():
         returns=[summary_return],
         return_type="int",
     )
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     target = strategy._method_b_closure_object_target_key(
         base_ctx={"analysis1": analysis1, "analysis2": analysis2},
         case1=exact_case,
@@ -1710,7 +1711,7 @@ def test_method_b_covering_case_producer_rejects_term_sequence_mismatch():
 
 
 def test_pairwise_parameter_identity_key_refuses_descriptor_name_fallback():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     name_only_expr = Expression.parameter("count", data_type="int", size=4)
     indexed_expr = Expression.parameter("count", index=1, data_type="int", size=4)
     storage = StorageInfo(
@@ -1734,7 +1735,7 @@ def test_pairwise_parameter_identity_key_refuses_descriptor_name_fallback():
 
 
 def test_pairwise_condition_symbols_do_not_alias_name_only_parameters():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     left_count = Expression.parameter("count", data_type="int", size=4)
     right_count = Expression.parameter("count", data_type="int", size=4)
     conditions = [
@@ -1760,7 +1761,7 @@ def test_pairwise_condition_symbols_do_not_alias_name_only_parameters():
 
 
 def test_pairwise_condition_symbols_preserve_low_subpiece_parameter_identity():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     count = Expression.parameter(
         "param_2",
         index=1,
@@ -1793,7 +1794,7 @@ def test_pairwise_condition_symbols_preserve_low_subpiece_parameter_identity():
 
 
 def test_pairwise_materialized_readonly_term_refuses_unresolved_pointer_base(monkeypatch):
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     unresolved_base = LocationBaseRef.parameter("base")
     load_expr = Expression.memory(
         Expression.parameter("base", data_type="int *", size=8),
@@ -1821,7 +1822,7 @@ def test_pairwise_materialized_readonly_term_refuses_unresolved_pointer_base(mon
 
 
 def test_pairwise_materialized_readonly_term_accepts_indexed_pointer_base(monkeypatch):
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     indexed_base = LocationBaseRef.parameter("base", index=0)
     load_expr = Expression.memory(
         Expression.parameter("base", index=0, data_type="int *", size=8),
@@ -2616,7 +2617,7 @@ def _analysis_with_return(function_name: str, value: Expression, conditions=()) 
 def _pairwise_strategy_for_full_path() -> PairwiseStrategy:
     runner = ParallelSolverRunner(timeout=5)
     runner.run_sequential = Mock(wraps=runner.run_sequential)
-    strategy = PairwiseStrategy(Mock(), runner, debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), runner, debug=False)
     strategy.formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],

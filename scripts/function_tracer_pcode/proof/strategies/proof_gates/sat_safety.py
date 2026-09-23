@@ -35,6 +35,54 @@ def _impl__collect_decisive_sat_unsafety_reasons(
             reasons.append(f"{label}:{reason}")
     return reasons
 
+#: decisive gate が入力対応の不足を示す reason の label と種類（Issue #167）。
+INPUT_CORRESPONDENCE_REASON_LABEL = "pair"
+INPUT_CORRESPONDENCE_REASON_KIND = "input_correspondence"
+
+
+def _impl__input_correspondence_unsafety_reasons(
+    self,
+    query_correspondence: Any,
+    *,
+    authority_correspondence: Any,
+) -> List[str]:
+    """最終 InputCorrespondence が EQ / NOT_EQ の確定に足りないときの reason。
+
+    ``authority_correspondence`` は dispatch frame の prepared pair（互換経路では
+    raw pair から作った）relation、``query_correspondence`` は query の premise を
+    描いた builder が報告した relation。判定は ``InputCorrespondenceSet`` の型付きの
+    値だけを見る（診断文字列や ``sat_pair_info`` は読まない）。返す reason は
+    EQ 側（equivalence blocking）と NOT_EQ 側（SAT unsafety）の両方へ入れる。
+
+    * どちらかが無い → ``unavailable``（配線漏れ。0 件であるべき）。
+    * digest が違う → ``unbound``（query が別の relation で作られた）。
+    * set が不十分（R0 / 未 closure の R5 / 隠れた register alias / 構造欠陥）。
+    * 両側 0 parameter の EMPTY は十分（不足扱いしない）。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        InputCorrespondenceSet,
+    )
+
+    label = INPUT_CORRESPONDENCE_REASON_LABEL
+    kind = INPUT_CORRESPONDENCE_REASON_KIND
+    if type(authority_correspondence) is not InputCorrespondenceSet:
+        return [f"{label}:{kind}:unavailable:authority"]
+    if type(query_correspondence) is not InputCorrespondenceSet:
+        return [f"{label}:{kind}:unavailable:query"]
+    if query_correspondence.digest != authority_correspondence.digest:
+        return [f"{label}:{kind}:unbound:{query_correspondence.digest[:16]}"]
+    if authority_correspondence.decisive_sufficient:
+        return []
+    return [f"{label}:{ref}" for ref in authority_correspondence.insufficiency_evidence()]
+
+
+def _is_input_correspondence_reason(reason: Any) -> bool:
+    return str(reason or "").startswith(
+        f"{INPUT_CORRESPONDENCE_REASON_LABEL}:{INPUT_CORRESPONDENCE_REASON_KIND}:"
+    )
+
+
 def _impl__pair_return_width_unsafety_reasons(
     self,
     base_ctx: Mapping[str, Any],
@@ -142,6 +190,9 @@ def _impl__collect_equivalence_blocking_unsafety_reasons(
 
 def _impl__unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):
     reason_kind = self._blocking_reason_kind(reason)
+    if _is_input_correspondence_reason(reason):
+        # UNSAT を EQ closure と認めない（入力対応が不十分）。既存の登録済み reason。
+        return "comparison_equivalence_closure_unproven"
     if reason_kind == "return_coverage_gap":
         return UnknownReasonId.RETURN_COVERAGE_GAP
     if reason_kind == "return_coverage_inconclusive":
@@ -206,6 +257,13 @@ def _impl__make_blocking_unsafety_unknown_reason(
     stage: str,
 ):
     typed_reason_id = self._unknown_reason_id_for_blocking_unsafety(blocking_reason)
+    if _is_input_correspondence_reason(blocking_reason):
+        return make_internal_v2_reason_diagnostic(
+            typed_reason_id,
+            stage=stage,
+            evidence_refs=(blocking_reason,),
+            detail=blocking_reason,
+        )
     if typed_reason_id in {
         UnknownReasonId.RETURN_COVERAGE_GAP,
         UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE,
@@ -340,6 +398,10 @@ def _impl__sat_unsafety_resolution_proof_is_complete(
     if reason_record.reason_id not in SAT_SAFETY_TYPED_REASON_IDS:
         return False
     if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:
+        return False
+    if any(_is_input_correspondence_reason(ref) for ref in reason_record.evidence_refs or ()):
+        # counterexample の replay は model の入力 bit が実在する入力か
+        # （上位 bit の対応）を示さない。入力対応の不足は replay で解消しない。
         return False
     proof_obligation_id = self._normalize_nested_tuple(reason_record.proof_obligation_id)
     if proof_obligation_id is None:
@@ -481,6 +543,8 @@ def _impl__record_completed_sat_counterexample_replay_proof(
     if reason_record.reason_id not in SAT_SAFETY_TYPED_REASON_IDS:
         return
     if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:
+        return
+    if any(_is_input_correspondence_reason(ref) for ref in reason_record.evidence_refs or ()):
         return
     proof_obligation_id = self._normalize_nested_tuple(reason_record.proof_obligation_id)
     object_target_key = self._normalize_nested_tuple(reason_record.object_target_key)
@@ -972,6 +1036,8 @@ def _impl__sat_unsafety_reason_object_target_key(
     label, _reason_text = self._split_blocking_reason(reason)
     reason_kind = self._blocking_reason_kind(reason)
     analysis = analysis1 if label == "function1" else analysis2 if label == "function2" else None
+    if _is_input_correspondence_reason(reason):
+        return ("input_correspondence_unsafety", str(reason))
     if analysis is None:
         return ("global_unsafety", reason_kind)
     canonical_reason = f"{label}:{reason_kind}" if label else reason_kind

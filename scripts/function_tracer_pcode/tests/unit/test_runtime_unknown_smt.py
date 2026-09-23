@@ -1769,10 +1769,15 @@ def test_formula_builder_declares_intrinsics_introduced_by_render_analysis(monke
     )
     original_normalize = formula_builder_module.normalize_analysis_semantic_width
 
-    def _fake_normalize_analysis(analysis, semantic_hints, extra_vars=None):
-        if extra_vars is not None and analysis.function_name == "left":
-            return render_analysis1
-        return original_normalize(analysis, semantic_hints, extra_vars)
+    left_calls = []
+
+    def _fake_normalize_analysis(analysis, semantic_hints, **kwargs):
+        # left の 1 回目は ``_normalize_analyses``、2 回目が宣言用の render pass。
+        if analysis.function_name == "left":
+            left_calls.append(analysis)
+            if len(left_calls) >= 2:
+                return render_analysis1
+        return original_normalize(analysis, semantic_hints, **kwargs)
 
     monkeypatch.setattr(
         formula_builder_module,
@@ -1847,7 +1852,7 @@ def test_monolithic_counterexample_validation_uses_render_analysis_cases(monkeyp
     captured = {}
 
     class _FormulaBuilder:
-        def build_base_context(self, _analysis1, _analysis2):
+        def build_base_context(self, _analysis1, _analysis2, **_kwargs):
             return {
                 "header_lines": [],
                 "params1": [
@@ -1865,8 +1870,13 @@ def test_monolithic_counterexample_validation_uses_render_analysis_cases(monkeyp
                 "return_size2": 32,
             }
 
-    def _fake_normalize(analysis, _hints, extra_vars=None):
-        if analysis is raw_analysis and extra_vars:
+    normalize_calls = []
+
+    def _fake_normalize(analysis, _hints, **_kwargs):
+        # 検証用 surface の normalize（1 回目）の後に render 用の normalize（2 回目）が
+        # 同じ raw に対して呼ばれる。2 回目だけ render_analysis を返す。
+        normalize_calls.append(analysis)
+        if analysis is raw_analysis and normalize_calls.count(raw_analysis) >= 2:
             return render_analysis
         return analysis
 
@@ -1909,7 +1919,7 @@ def test_monolithic_counterexample_validation_replacer_uses_fp_mode(monkeypatch)
     captured = {}
 
     class _FormulaBuilder:
-        def build_base_context(self, _analysis1, _analysis2):
+        def build_base_context(self, _analysis1, _analysis2, **_kwargs):
             return {
                 "header_lines": [],
                 "params1": [ParameterInfo("x", "x_1", 64, 0)],

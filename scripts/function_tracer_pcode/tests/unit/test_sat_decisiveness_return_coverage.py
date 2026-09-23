@@ -1,7 +1,8 @@
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
 
 def test_pairwise_strategy_downgrades_sat_when_return_cases_leave_coverage_gap(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = {
         "header_lines": [
             "(declare-const x_1 (_ BitVec 32))",
@@ -86,7 +87,7 @@ def test_pairwise_strategy_downgrades_sat_when_return_cases_leave_coverage_gap(m
     assert analysis2.analysis_notes == []
 
 def test_pairwise_strategy_does_not_prove_equivalent_with_return_coverage_gap(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = {
         "header_lines": [
             "(declare-const x_1 (_ BitVec 32))",
@@ -161,7 +162,7 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_return_coverage_gap(mo
     assert "return_case_coverage_gap" in analysis1.analysis_notes
 
 def test_pairwise_return_coverage_covered_side_emits_completed_proof_evidence(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -204,7 +205,7 @@ def test_pairwise_return_coverage_covered_side_emits_completed_proof_evidence(mo
     assert len(analysis2.completed_recovery_proof_evidence) == 2
 
 def test_pairwise_collect_return_coverage_reason_uses_current_coverage_check_when_notes_are_stale(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -235,7 +236,7 @@ def test_pairwise_collect_return_coverage_reason_uses_current_coverage_check_whe
     assert reasons == []
 
 def test_pairwise_return_coverage_gap_requires_all_completed_proof_ids(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -264,7 +265,7 @@ def test_pairwise_return_coverage_gap_requires_all_completed_proof_ids(monkeypat
     assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
 
 def test_pairwise_return_coverage_gap_completed_proofs_allow_equivalent(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -295,7 +296,7 @@ def test_pairwise_return_coverage_gap_completed_proofs_allow_equivalent(monkeypa
     assert result.unknown_pairs == 0
 
 def test_return_coverage_proof_content_requires_disjunction_and_normalized_guard():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1, analysis2 = _return_coverage_gap_analyses()
     pending_reason = strategy._make_blocking_unsafety_unknown_reason(
         "function1:return_coverage_gap",
@@ -334,7 +335,7 @@ def test_return_coverage_proof_content_requires_disjunction_and_normalized_guard
     )
 
 def test_return_coverage_proof_completion_rejects_empty_case_guard_disjunction(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -378,7 +379,7 @@ def test_return_coverage_proof_completion_rejects_empty_case_guard_disjunction(m
     assert result.unknown_reasons[0].reason_id == UnknownReasonId.RETURN_COVERAGE_GAP.value
 
 def test_pairwise_return_coverage_gap_wrong_completed_proof_id_does_not_recover(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -413,7 +414,7 @@ def test_pairwise_return_coverage_gap_wrong_completed_proof_id_does_not_recover(
     assert result.unknown_reasons[0].reason_id == UnknownReasonId.RETURN_COVERAGE_GAP.value
 
 def test_pairwise_return_coverage_gap_missing_completed_proof_id_does_not_recover(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -442,7 +443,7 @@ def test_pairwise_return_coverage_gap_missing_completed_proof_id_does_not_recove
     assert result.unknown_reasons[0].action_status == UnknownRecoveryActionStatus.PENDING_PROOF.value
 
 def test_pairwise_return_coverage_inconclusive_unknown_does_not_complete_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -488,7 +489,7 @@ def test_pairwise_return_coverage_inconclusive_unknown_does_not_complete_proof(m
     assert result.unknown_pairs == 0
 
 def test_pairwise_return_coverage_inconclusive_query_unknown_records_recovery_proof(monkeypatch):
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = FunctionReturnAnalysis(
         function_name="func1",
         entry_point="0x1",
@@ -552,7 +553,7 @@ def test_pairwise_return_coverage_inconclusive_query_unknown_records_recovery_pr
     assert analysis1.completed_recovery_proof_evidence == ()
 
 def test_pairwise_return_coverage_inconclusive_unresolved_expression_does_not_auto_complete(monkeypatch):
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1, analysis2 = _return_coverage_gap_analyses()
     case1 = ReturnCase(
         index=0,
@@ -597,7 +598,7 @@ def test_pairwise_return_coverage_inconclusive_unresolved_expression_does_not_au
 
 
 def test_pairwise_return_coverage_accepts_typed_v2_string_reason(monkeypatch):
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1, analysis2 = _return_coverage_gap_analyses()
     case1 = ReturnCase(
         index=0,
@@ -642,7 +643,7 @@ def test_pairwise_return_coverage_accepts_typed_v2_string_reason(monkeypatch):
     assert reasons[0] == "function1:outcome_partition_completion_unproven"
 
 def test_pairwise_return_coverage_non_dischargeable_inconclusive_causes_do_not_auto_complete(monkeypatch):
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1, analysis2 = _return_coverage_gap_analyses()
     case1 = ReturnCase(
         index=0,
@@ -687,7 +688,7 @@ def test_pairwise_return_coverage_non_dischargeable_inconclusive_causes_do_not_a
         assert analysis1.completed_recovery_proof_evidence == ()
 
 def test_pairwise_return_coverage_inconclusive_invalid_proof_content_is_not_recorded(monkeypatch):
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1, analysis2 = _return_coverage_gap_analyses()
     case1 = ReturnCase(
         index=0,
@@ -735,7 +736,7 @@ def test_pairwise_return_coverage_inconclusive_invalid_proof_content_is_not_reco
     assert analysis1.completed_recovery_proof_evidence == ()
 
 def test_return_coverage_non_smt_covered_proof_content_does_not_claim_unsat():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis = FunctionReturnAnalysis(
         function_name="func",
         entry_point="0x1",
@@ -765,7 +766,7 @@ def test_return_coverage_non_smt_covered_proof_content_does_not_claim_unsat():
     assert proof_content["coverage_solver_evidence"]["proof_method"] == "unconditional_return_case"
 
 def test_pairwise_keeps_global_coverage_gap_with_sat_unsafety(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -831,7 +832,7 @@ def test_monolithic_strategy_downgrades_sat_when_return_cases_leave_coverage_gap
 
     params1 = [ParameterInfo(original_name="x", smt_name="x_1", bit_width=32, index=0)]
     params2 = [ParameterInfo(original_name="x", smt_name="x_2", bit_width=32, index=0)]
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
         formula="(set-logic QF_BV)\n(check-sat)",
         return_var1="return_1",
@@ -897,7 +898,7 @@ def test_monolithic_strategy_does_not_accept_unsat_with_return_coverage_gap():
 
     params1 = [ParameterInfo(original_name="x", smt_name="x_1", bit_width=32, index=0)]
     params2 = [ParameterInfo(original_name="x", smt_name="x_2", bit_width=32, index=0)]
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
         formula="(set-logic QF_BV)\n(check-sat)",
         return_var1="return_1",
@@ -994,7 +995,7 @@ def test_function_return_analysis_skips_monolithic_fallback_when_coverage_gap_no
     assert "return_case_coverage_gap" in analysis.get_decisive_sat_unsafety_reasons()
 
 def test_blocking_unsafety_reason_mapping_accepts_detail_suffix_for_return_coverage():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
 
     assert (
         strategy._unknown_reason_id_for_blocking_unsafety("function1:return_coverage_gap:case=3")
@@ -1006,7 +1007,7 @@ def test_blocking_unsafety_reason_mapping_accepts_detail_suffix_for_return_cover
     )
 
 def test_analysis_requires_completed_return_coverage_proof_uses_reason_kind_for_suffixes():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
 
     class _Analysis:
         def get_decisive_sat_unsafety_reasons(self):
@@ -1038,7 +1039,7 @@ def test_analysis_requires_completed_return_coverage_proof_uses_reason_kind_for_
     )
 
 def test_return_coverage_gap_emits_object_derived_pending_proof_backlog():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     x = Expression.parameter("x", 0, size=4)
     return_ref = PcodeOpRef(
         address_offset=0x401020,
@@ -1100,7 +1101,7 @@ def test_return_coverage_gap_emits_object_derived_pending_proof_backlog():
     )
 
 def test_return_coverage_inconclusive_emits_smt_disambiguation_pending_proof_backlog():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     x = Expression.parameter("x", 0, size=4)
     return_ref = PcodeOpRef(
         address_offset=0x401020,
@@ -1155,7 +1156,7 @@ def test_return_coverage_inconclusive_emits_smt_disambiguation_pending_proof_bac
     )
 
 def test_return_coverage_target_identity_is_deterministic_for_rebuilt_ast_and_case_order():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     other = _coverage_identity_analysis(binary_id="B2")
     first = strategy._return_coverage_object_target_key(
         "function1:return_coverage_gap",
@@ -1178,7 +1179,7 @@ def test_return_coverage_target_identity_is_deterministic_for_rebuilt_ast_and_ca
     assert strategy._return_coverage_object_target_key_is_valid(first)
 
 def test_return_coverage_target_identity_distinguishes_binary_identity():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     other = _coverage_identity_analysis(binary_id="B9")
     target_b1 = strategy._return_coverage_object_target_key(
         "function1:return_coverage_gap",
@@ -1194,7 +1195,7 @@ def test_return_coverage_target_identity_distinguishes_binary_identity():
     assert target_b1 != target_b2
 
 def test_return_coverage_completed_evidence_rejects_exact_target_and_schema_mismatch():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _coverage_identity_analysis(binary_id="B1")
     analysis2 = _coverage_identity_analysis(binary_id="B2")
     reason = strategy._make_blocking_unsafety_unknown_reason(
@@ -1228,7 +1229,7 @@ def test_return_coverage_completed_evidence_rejects_exact_target_and_schema_mism
     assert strategy._return_coverage_proof_id_from_evidence(solver_unknown) is None
 
 def test_return_coverage_completed_evidence_rejects_structural_content_mismatch():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _coverage_identity_analysis(binary_id="B1")
     analysis2 = _coverage_identity_analysis(binary_id="B2")
     reason = strategy._make_blocking_unsafety_unknown_reason(
@@ -1267,7 +1268,7 @@ def test_return_coverage_completed_evidence_rejects_structural_content_mismatch(
     assert strategy._return_coverage_proof_id_from_evidence(miss_mismatch) is None
 
 def test_return_coverage_normalization_required_uses_normalization_aware_schema():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _coverage_identity_analysis(binary_id="B1")
     analysis2 = _coverage_identity_analysis(binary_id="B2")
     reason = strategy._make_blocking_unsafety_unknown_reason(
@@ -1287,7 +1288,7 @@ def test_return_coverage_normalization_required_uses_normalization_aware_schema(
     assert strategy._return_coverage_proof_id_from_evidence(normalization_aware) == action.proof_obligation_id
 
 def test_return_coverage_normalization_required_by_target_digest_rejects_strict_schema():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _coverage_identity_analysis(binary_id="B1")
     analysis2 = _coverage_identity_analysis(binary_id="B2")
     reason = strategy._make_blocking_unsafety_unknown_reason(
@@ -1351,7 +1352,7 @@ def test_return_coverage_normalization_policy_rejects_unsupported_ruleset_versio
     assert PairwiseStrategy._return_coverage_normalization_policy_digest(unsupported) is None
 
 def test_return_coverage_normalization_aware_rejects_payload_mismatch():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _coverage_identity_analysis(binary_id="B1")
     analysis2 = _coverage_identity_analysis(binary_id="B2")
     reason = strategy._make_blocking_unsafety_unknown_reason(
@@ -1430,7 +1431,7 @@ def test_return_coverage_normalization_aware_rejects_payload_mismatch():
     assert strategy._return_coverage_proof_id_from_evidence(address_without_correspondence) is None
 
 def test_return_coverage_common_proof_reason_scope_is_enforced():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _coverage_identity_analysis(binary_id="B1")
     analysis2 = _coverage_identity_analysis(binary_id="B2")
     reason = strategy._make_blocking_unsafety_unknown_reason(
@@ -1447,7 +1448,7 @@ def test_return_coverage_common_proof_reason_scope_is_enforced():
     assert strategy._return_coverage_proof_id_from_evidence(evidence) is None
 
 def test_return_coverage_target_identity_validator_rejects_raw_object_leaf():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     target = strategy._return_coverage_object_target_key(
         "function1:return_coverage_gap",
         _coverage_identity_analysis(binary_id="B1"),
@@ -1461,7 +1462,7 @@ def test_return_coverage_target_identity_validator_rejects_raw_object_leaf():
     assert not strategy._return_coverage_object_target_key_is_valid(tuple(poisoned))
 
 def test_return_coverage_target_identity_rejects_opaque_return_address():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _coverage_identity_analysis(binary_id="B1")
     analysis2 = _coverage_identity_analysis(binary_id="B2")
     analysis1.returns[0].address = object()
@@ -1486,7 +1487,7 @@ def test_return_coverage_target_identity_rejects_opaque_return_address():
     assert strategy._return_coverage_proof_id_from_evidence(evidence) is None
 
 def test_return_coverage_target_identity_rejects_opaque_parameter_storage():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _coverage_identity_analysis(binary_id="B1")
     analysis2 = _coverage_identity_analysis(binary_id="B2")
     analysis1.parameters[0]["storage"] = object()
@@ -1511,7 +1512,7 @@ def test_return_coverage_target_identity_rejects_opaque_parameter_storage():
     assert strategy._return_coverage_proof_id_from_evidence(evidence) is None
 
 def test_return_coverage_object_target_ignores_diagnostic_suffix():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     x = Expression.parameter("x", 0, size=4)
     analysis1 = FunctionReturnAnalysis(
         function_name="left",
@@ -1549,7 +1550,7 @@ def test_return_coverage_object_target_ignores_diagnostic_suffix():
     )
 
 def test_return_coverage_object_target_distinguishes_guard_partitions():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     x = Expression.parameter("x", 0, size=4)
     left_zero = FunctionReturnAnalysis(
         function_name="left",
@@ -1599,7 +1600,7 @@ def test_return_coverage_object_target_distinguishes_guard_partitions():
 def test_relational_partition_mismatch_blocks_equivalence_but_not_sat_decisiveness(monkeypatch):
     """Issue #28: 'return outcome values differ' is an equivalence obligation, not a
     SAT-safety blocker, once both unary partition proofs are complete."""
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1, analysis2 = _return_coverage_gap_analyses()
     cases = []
     for analysis in (analysis1, analysis2):
@@ -1652,7 +1653,7 @@ def test_relational_partition_mismatch_blocks_equivalence_but_not_sat_decisivene
 def test_pairwise_relational_partition_mismatch_keeps_sat_decisive(monkeypatch):
     """End-to-end: with complete unary proofs and only the relational check failing,
     a validated SAT witness must still yield NOT_EQ (regression for Issue #28)."""
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = {
         "header_lines": [
             "(declare-const x_1 (_ BitVec 32))",

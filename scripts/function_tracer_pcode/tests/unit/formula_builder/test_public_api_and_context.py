@@ -930,7 +930,13 @@ class TestBooleanReturnNormalization:
         assert "(_ bv18446744073709551613 64)" in formula
         assert "(_ bv4294967293 64)" not in formula
 
-    def test_build_base_context_infers_fragment_constraints_from_piece_expression(self):
+    def test_build_base_context_leaves_inferred_fragment_unconstrained(self):
+        """``PIECE(in_a1_hi, param_2)`` の上位断片を ``sext(param_2)`` と仮定しない（Issue #167）。
+
+        修正前は ``(= in_a1_hi_1 ((_ extract 63 32) ((_ sign_extend 32) param_2_1)))``
+        を premise に入れていた。断片は自由な入力として残し、最終 relation は
+        register alias を witness に持って decisive には不十分になる。
+        """
         builder = FormulaBuilder(debug=False)
 
         wide_param = Expression.binary_op(
@@ -964,10 +970,16 @@ class TestBooleanReturnNormalization:
         analysis2 = _simple_analysis("simple", "param_2")
 
         base_ctx = builder.build_base_context(analysis1, analysis2)
-        header_text = "\n".join(base_ctx["header_lines"])
+        assertions = [line for line in base_ctx["header_lines"] if line.startswith("(assert")]
 
-        assert "in_a1_hi_1" in base_ctx["constrained_fragments"]
-        assert "(assert (= in_a1_hi_1 ((_ extract 63 32) ((_ sign_extend 32) param_2_1))))" in header_text
+        assert base_ctx["constrained_fragments"] == []
+        assert not any("in_a1_hi_1" in line for line in assertions)
+        correspondence = base_ctx["input_correspondence"]
+        assert not correspondence.decisive_sufficient
+        assert any(
+            "structural_fragment:in_a1_hi" in ref
+            for ref in correspondence.insufficiency_evidence()
+        )
 
     def test_build_base_context_records_loop_summary_smt_identity_notes(self):
         builder = FormulaBuilder(debug=False)

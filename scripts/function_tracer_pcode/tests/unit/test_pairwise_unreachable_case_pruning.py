@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Unreachable return-case pruning regressions for PairwiseStrategy."""
 
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 import sys
 from pathlib import Path
 from unittest.mock import Mock
@@ -95,7 +96,7 @@ def test_pairwise_strategy_prunes_unreachable_unknown_case_before_pairing():
         ],
     )
 
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],

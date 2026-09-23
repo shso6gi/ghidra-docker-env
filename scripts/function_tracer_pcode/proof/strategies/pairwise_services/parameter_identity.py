@@ -1,4 +1,4 @@
-"""Parameter identity keys, summary parameter references and auxiliary semantic hints."""
+"""Parameter identity keys, summary parameter references and auxiliary entailed extensions."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_wid
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ParameterInfo,
 )
+from scripts.function_tracer_pcode.semantics.projection_contract import RewriteAssumption
 
 
 def _impl__collect_summary_parameter_refs(self, *expressions: Any) -> Tuple[Any, ...]:
@@ -73,50 +74,47 @@ def _impl__auxiliary_semantic_parameter_sources(
     return tuple(sources)
 
 
-def _impl__auxiliary_semantic_hints_by_index(
+def _impl__auxiliary_entailed_extensions_by_index(
     self,
     semantic_parameter_sources: Sequence[ParameterInfo],
-) -> Dict[int, Tuple[int, str, int]]:
-    hints: Dict[int, Tuple[int, str, int]] = {}
+) -> Dict[int, RewriteAssumption]:
+    """補助 query の symbol へ引き継ぐ入力 extension 仮定。
+
+    最終 ``InputCorrespondence`` が含意した ``ParameterInfo.entailed_extension``
+    だけを使う。semantic hint（単一 use の射影主張）は入力全体の仮定ではないので
+    読まない（Issue #167）。
+    """
+    extensions: Dict[int, RewriteAssumption] = {}
     for source in semantic_parameter_sources or ():
+        assumption = getattr(source, "entailed_extension", None)
+        if assumption is None:
+            continue
         try:
             index = int(getattr(source, "index"))
-            bit_width = int(getattr(source, "bit_width"))
-            narrow_bits = getattr(source, "semantic_narrow_bits", None)
-            narrow_bits = int(narrow_bits) if narrow_bits is not None else None
         except (TypeError, ValueError):
             continue
-        signedness = getattr(source, "semantic_signedness", None)
-        if bit_width <= 0 or narrow_bits is None or narrow_bits <= 0:
-            continue
-        if narrow_bits >= bit_width or signedness not in {"signed", "unsigned"}:
-            continue
-        current = hints.get(index)
-        if current is None or bit_width > current[2]:
-            hints[index] = (narrow_bits, signedness, bit_width)
-    return hints
+        current = extensions.get(index)
+        if current is None or assumption.parameter_bits > current.parameter_bits:
+            extensions[index] = assumption
+    return extensions
 
 
-def _impl__apply_auxiliary_semantic_hint(
+def _impl__apply_auxiliary_entailed_extension(
     self,
     candidate: Dict[str, Any],
     *,
     size: int,
-    semantic_by_index: Mapping[int, Tuple[int, str, int]],
+    extensions_by_index: Mapping[int, RewriteAssumption],
 ) -> None:
     try:
         index = int(candidate.get("index"))
         bit_width = max(1, int(size)) * 8
     except (TypeError, ValueError):
         return
-    hint = semantic_by_index.get(index)
-    if hint is None:
+    assumption = extensions_by_index.get(index)
+    if assumption is None or assumption.parameter_bits != bit_width:
         return
-    narrow_bits, signedness, source_bit_width = hint
-    if source_bit_width != bit_width or narrow_bits >= bit_width:
-        return
-    candidate["semantic_narrow_bits"] = int(narrow_bits)
-    candidate["semantic_signedness"] = signedness
+    candidate["entailed_extension"] = assumption
 
 
 def _impl__build_auxiliary_parameter_infos(
@@ -141,12 +139,7 @@ def _impl__build_auxiliary_parameter_infos(
                 bit_width=max(1, int(spec.get("size", 0) or 4)) * 8,
                 index=int(spec.get("aux_index", -1) or -1),
                 is_signed=bool(spec.get("is_signed", True)),
-                semantic_narrow_bits=(
-                    int(spec["semantic_narrow_bits"])
-                    if spec.get("semantic_narrow_bits") is not None
-                    else None
-                ),
-                semantic_signedness=spec.get("semantic_signedness"),
+                entailed_extension=spec.get("entailed_extension"),
             )
         )
     return infos

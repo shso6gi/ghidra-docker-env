@@ -20,7 +20,13 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor impo
     count_counterexample_model_assertions,
     validate_counterexample_globally,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    LEFT as INPUT_LEFT,
+    RIGHT as INPUT_RIGHT,
+)
 from scripts.function_tracer_pcode.proof.strategies.monolithic_support import (
+    active_input_authorization,
+    active_input_correspondence,
     _MonolithicDecisionExecutionContext,
 )
 
@@ -63,7 +69,11 @@ class CounterexampleDecisivenessMixin:
             analysis2,
             decision_context,
         )
-        base_ctx = self.formula_builder.build_base_context(normalized1, normalized2)
+        base_ctx = self.formula_builder.build_base_context(
+            normalized1,
+            normalized2,
+            input_correspondence=active_input_correspondence(self),
+        )
         self._last_counterexample_replay_fixed_model_assertion_count = (
             count_counterexample_model_assertions(base_ctx, counterexample_raw)
         )
@@ -73,16 +83,24 @@ class CounterexampleDecisivenessMixin:
             render_analysis1 = normalize_analysis_semantic_width(
                 normalized1,
                 infer_parameter_semantics(normalized1),
-                base_ctx.get("extra_vars1", []),
+                authorization=active_input_authorization(self, INPUT_LEFT),
             )
             render_analysis2 = normalize_analysis_semantic_width(
                 normalized2,
                 infer_parameter_semantics(normalized2),
-                base_ctx.get("extra_vars2", []),
+                authorization=active_input_authorization(self, INPUT_RIGHT),
             )
 
-        cases1 = extract_return_cases(render_analysis1, self.normalization_settings)
-        cases2 = extract_return_cases(render_analysis2, self.normalization_settings)
+        cases1 = extract_return_cases(
+            render_analysis1,
+            self.normalization_settings,
+            authorization=active_input_authorization(self, INPUT_LEFT),
+        )
+        cases2 = extract_return_cases(
+            render_analysis2,
+            self.normalization_settings,
+            authorization=active_input_authorization(self, INPUT_RIGHT),
+        )
         if not cases1 or not cases2:
             self._debug_print(
                 "Monolithic SAT counterexample rejected: no return cases available for validation"

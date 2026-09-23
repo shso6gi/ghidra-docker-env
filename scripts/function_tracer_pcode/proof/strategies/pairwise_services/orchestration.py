@@ -55,6 +55,12 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     make_internal_v2_reason_diagnostic,
     make_unknown_reason,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    LEFT as INPUT_LEFT,
+    RIGHT as INPUT_RIGHT,
+    InputCorrespondenceSet,
+    build_input_correspondence_set,
+)
 from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     register_builtin_receipt_executor,
 )
@@ -86,6 +92,24 @@ def validate_counterexample_across_cases(*args, **kwargs):
     return _pairwise_facade().validate_counterexample_across_cases(*args, **kwargs)
 
 
+def _extract_cases_under_authorization(strategy, analysis, input_correspondence, side):
+    """prepared surface と同じ authorization で case を再 normalize する。
+
+    relation が無い（gate が ``unavailable`` で塞ぐ）ときと空の authorization は
+    ``_extract_return_cases`` の既定値（恒等規則だけ）と同じ意味なので、従来どおり
+    1 引数で呼ぶ（この method は差し替え可能な seam）。
+    """
+
+    authorization = (
+        input_correspondence.authorization(side)
+        if type(input_correspondence) is InputCorrespondenceSet
+        else None
+    )
+    if authorization is not None and authorization.assumptions:
+        return strategy._extract_return_cases(analysis, authorization=authorization)
+    return strategy._extract_return_cases(analysis)
+
+
 def _impl_check(
     self,
     analysis1: FunctionReturnAnalysis,
@@ -107,16 +131,21 @@ def _impl_check(
         dispatch_frame = consume_prepared_dispatch_frame(analysis1, analysis2)
         solver_analysis1 = dispatch_frame.prepared.analysis1
         solver_analysis2 = dispatch_frame.prepared.analysis2
+        input_correspondence = dispatch_frame.prepared.input_correspondence
     else:
         # Compatibility-only direct strategy invocation.  Production checker
-        # dispatch always supplies a certified prepared frame.
+        # dispatch always supplies a certified prepared frame.  The arguments
+        # are the raw pair, so the final relation is built from them first.
+        input_correspondence = build_input_correspondence_set(analysis1, analysis2)
         solver_analysis1 = normalize_analysis_semantic_width(
             analysis1,
             infer_parameter_semantics(analysis1),
+            authorization=input_correspondence.authorization(INPUT_LEFT),
         )
         solver_analysis2 = normalize_analysis_semantic_width(
             analysis2,
             infer_parameter_semantics(analysis2),
+            authorization=input_correspondence.authorization(INPUT_RIGHT),
         )
         solver_analysis1, solver_analysis2 = align_return_value_extension_surfaces(
             solver_analysis1,
@@ -126,6 +155,7 @@ def _impl_check(
     base_ctx = self.formula_builder.build_base_context(
         solver_analysis1,
         solver_analysis2,
+        input_correspondence=input_correspondence,
     )
     base_ctx["analysis1"] = solver_analysis1
     base_ctx["analysis2"] = solver_analysis2
@@ -159,12 +189,20 @@ def _impl_check(
             reason for reason in equivalence_blocking_reasons
             if reason not in covered_blockers
         ]
+    # Issue #167: EQ も NOT_EQ も、query の premise を決めた最終
+    # InputCorrespondence が十分なときだけ確定させる。
+    input_correspondence_reasons = self._input_correspondence_unsafety_reasons(
+        base_ctx.get("input_correspondence"),
+        authority_correspondence=input_correspondence,
+    )
+    sat_unsafety_reasons.extend(input_correspondence_reasons)
+    equivalence_blocking_reasons.extend(input_correspondence_reasons)
+    if self.debug and type(input_correspondence) is InputCorrespondenceSet:
+        self._debug_print(input_correspondence.diagnostic_line())
 
-    cases1 = self._extract_return_cases(solver_analysis1)
-    cases2 = self._extract_return_cases(solver_analysis2)
+    cases1 = _extract_cases_under_authorization(self, solver_analysis1, input_correspondence, INPUT_LEFT)
+    cases2 = _extract_cases_under_authorization(self, solver_analysis2, input_correspondence, INPUT_RIGHT)
 
-    self._rewrite_cases_with_parameter_fragments(cases1, base_ctx.get("extra_vars1", []))
-    self._rewrite_cases_with_parameter_fragments(cases2, base_ctx.get("extra_vars2", []))
     symbol_replace_fn1 = build_symbol_replacer(
         base_ctx["params1"],
         base_ctx.get("extra_vars1", []),

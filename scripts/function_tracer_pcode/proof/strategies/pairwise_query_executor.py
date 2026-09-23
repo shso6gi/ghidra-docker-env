@@ -417,99 +417,6 @@ def _record_return_width_block(strategy, exc: ReturnWidthMismatchError) -> None:
     stats[reason_id] = int(stats.get(reason_id, 0) or 0) + 1
 
 
-def _return_width_abi_guard_relation_lines(base_ctx: Dict[str, Any]) -> List[str]:
-    """Build object-derived ABI/semantic parameter relations for guard reachability."""
-
-    params1 = {
-        getattr(param, "index", None): param
-        for param in base_ctx.get("params1", ()) or ()
-        if getattr(param, "index", None) is not None
-    }
-    params2 = {
-        getattr(param, "index", None): param
-        for param in base_ctx.get("params2", ()) or ()
-        if getattr(param, "index", None) is not None
-    }
-
-    lines: List[str] = []
-    for index in sorted(set(params1) & set(params2)):
-        param1 = params1[index]
-        param2 = params2[index]
-        try:
-            width1 = int(getattr(param1, "bit_width", 0) or 0)
-            width2 = int(getattr(param2, "bit_width", 0) or 0)
-        except (TypeError, ValueError):
-            continue
-        if width1 <= 0 or width2 <= 0 or width1 == width2:
-            continue
-
-        if width1 > width2:
-            wide = param1
-            narrow = param2
-            wide_bits = width1
-            narrow_bits = width2
-        else:
-            wide = param2
-            narrow = param1
-            wide_bits = width2
-            narrow_bits = width1
-
-        signedness = getattr(wide, "semantic_signedness", None)
-        semantic_bits = getattr(wide, "semantic_narrow_bits", None)
-        try:
-            semantic_bits = int(semantic_bits) if semantic_bits is not None else None
-        except (TypeError, ValueError):
-            semantic_bits = None
-        if signedness not in {"signed", "unsigned"} or semantic_bits != narrow_bits:
-            continue
-
-        extend_bits = wide_bits - narrow_bits
-        if extend_bits <= 0:
-            continue
-        ext_op = "sign_extend" if signedness == "signed" else "zero_extend"
-        lines.extend(
-            [
-                (
-                    f"; param[{index}] return-width guard ABI relation: "
-                    f"{getattr(wide, 'smt_name', '<wide>')} is {signedness} "
-                    f"{narrow_bits}-bit semantic extension of "
-                    f"{getattr(narrow, 'smt_name', '<narrow>')}"
-                ),
-                (
-                    f"(assert (= {wide.smt_name} ((_ {ext_op} {extend_bits}) "
-                    f"{narrow.smt_name})))"
-                ),
-            ]
-        )
-
-    if not lines:
-        return []
-    return [
-        "",
-        "; " + "-" * 40,
-        "; Return-width guard ABI relations",
-        "; Object-derived semantic-width relations used only for guard reachability",
-        "; " + "-" * 40,
-        *lines,
-        "",
-    ]
-
-
-def _build_return_width_abi_guard_query(
-    cond_query: str,
-    base_ctx: Dict[str, Any],
-) -> Optional[str]:
-    relation_lines = _return_width_abi_guard_relation_lines(base_ctx)
-    if not relation_lines:
-        return None
-
-    check_sat = "(check-sat)"
-    stripped = cond_query.rstrip()
-    if stripped.endswith(check_sat):
-        prefix = stripped[: -len(check_sat)].rstrip()
-        return "\n".join([prefix, *relation_lines, check_sat])
-    return "\n".join([stripped, *relation_lines, check_sat])
-
 def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full", use_hard_timeout: bool = False) -> QueryResult:
     """クエリを実行する"""
     timeout = (
@@ -919,19 +826,10 @@ def solve_query_after_guard(
             context="pairwise value inequality",
         )
     except ReturnWidthMismatchError as exc:
-        abi_guard_query = _build_return_width_abi_guard_query(cond_query, base_ctx)
-        if abi_guard_query is not None:
-            abi_guard_result = strategy._solve_query_internal(
-                abi_guard_query,
-                pair_id,
-                stage="conds-only-return-width-abi-guard",
-                use_hard_timeout=False,
-            )
-            if abi_guard_result.is_equivalent is True:
-                abi_guard_result.last_query = abi_guard_query
-                abi_guard_result.pair_stage = "conds-only-return-width-abi-guard"
-                return abi_guard_result
-
+        # 以前はここで usage hint 由来の ``wide == ext(narrow)`` を足した guard
+        # query を解いていた。入力 extension 仮定は最終 InputCorrespondence だけが
+        # 持てる（Issue #167）。含意される仮定は ``cond_query`` の header premise に
+        # 既に入っているので、別の query は作らない。
         strategy._debug_print(f"  Pair {pair_id} with-ineq skipped: {exc}")
         result = QueryResult(is_equivalent=None)
         result.last_query = cond_query

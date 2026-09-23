@@ -1,3 +1,4 @@
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 import hashlib
 
 from copy import deepcopy
@@ -1076,7 +1077,7 @@ def _completed_proof_ids_for_call_effect_evidence(evidence):
     return PairwiseStrategy._completed_recovery_proof_ids(analysis)
 
 def _blocking_unsafety_object_target_key(blocking_reason, analysis1):
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis2 = FunctionReturnAnalysis(
         function_name="func2",
         entry_point="0x2000",
@@ -1315,7 +1316,7 @@ def _sat_unsafety_resolution_evidence(action, counterexample_raw=None, **overrid
     return evidence
 
 def _sat_unsafety_resolution_action():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
     analysis2 = FunctionReturnAnalysis(
         function_name="func2",
@@ -1368,7 +1369,7 @@ def _monolithic_return_coverage_gap_setup():
             return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
 
     analysis1, analysis2 = _return_coverage_gap_analyses()
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
         formula="(set-logic QF_BV)\n(check-sat)",
         return_var1="return_1",

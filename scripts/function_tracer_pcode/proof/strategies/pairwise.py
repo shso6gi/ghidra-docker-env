@@ -220,9 +220,9 @@ class PairwiseStrategy(CheckStrategy):
     _append_blocking_unknown_reasons = classmethod(_svc_orchestration._impl__append_blocking_unknown_reasons)
     _append_completed_method_b_covering_case_evidence = _svc_method_b_closure._impl__append_completed_method_b_covering_case_evidence
     _append_completed_method_b_guard_partition_evidence = _svc_method_b_closure._impl__append_completed_method_b_guard_partition_evidence
-    _apply_auxiliary_semantic_hint = _svc_parameter_identity._impl__apply_auxiliary_semantic_hint
+    _apply_auxiliary_entailed_extension = _svc_parameter_identity._impl__apply_auxiliary_entailed_extension
     _auxiliary_identity_sort_key = _svc_parameter_identity._impl__auxiliary_identity_sort_key
-    _auxiliary_semantic_hints_by_index = _svc_parameter_identity._impl__auxiliary_semantic_hints_by_index
+    _auxiliary_entailed_extensions_by_index = _svc_parameter_identity._impl__auxiliary_entailed_extensions_by_index
     _auxiliary_semantic_parameter_sources = _svc_parameter_identity._impl__auxiliary_semantic_parameter_sources
     _blocking_unknown_reasons_should_replace_pair_unknowns = staticmethod(_svc_orchestration._impl__blocking_unknown_reasons_should_replace_pair_unknowns)
     _build_auxiliary_parameter_infos = _svc_parameter_identity._impl__build_auxiliary_parameter_infos
@@ -295,10 +295,8 @@ class PairwiseStrategy(CheckStrategy):
     _unsupported_ops_include_memory_or_effect = staticmethod(_svc_opaque_unknowns._impl__unsupported_ops_include_memory_or_effect)
     check = _svc_orchestration._impl_check
     # pairwise_services.orchestration (continued)
-    _build_fragment_extension_expr = _svc_pair_cases._impl__build_fragment_extension_expr
     _cases_are_contradictory = _svc_pair_cases._impl__cases_are_contradictory
     _clear_pairwise_extra_assertions = _svc_pair_cases._impl__clear_pairwise_extra_assertions
-    _collapse_parameter_fragment_extension = _svc_pair_cases._impl__collapse_parameter_fragment_extension
     _collect_case_unknown_expression_nodes = _svc_pair_cases._impl__collect_case_unknown_expression_nodes
     _collect_unknown_expression_nodes = _svc_pair_cases._impl__collect_unknown_expression_nodes
     _collect_unknown_expression_nodes_into = _svc_pair_cases._impl__collect_unknown_expression_nodes_into
@@ -310,15 +308,12 @@ class PairwiseStrategy(CheckStrategy):
     _extract_return_cases = _svc_pair_cases._impl__extract_return_cases
     _get_expression_safety_checker = _svc_pair_cases._impl__get_expression_safety_checker
     _low_mask_width_bytes = _svc_pair_cases._impl__low_mask_width_bytes
-    _match_shift_or_fragment_expr = _svc_pair_cases._impl__match_shift_or_fragment_expr
     _normalize_constant_bias = _svc_pair_cases._impl__normalize_constant_bias
     _opaque_parameter_object_identity_key = _svc_pair_cases._impl__opaque_parameter_object_identity_key
     _parameter_object_identity_key = _svc_pair_cases._impl__parameter_object_identity_key
     _prune_unreachable_cases = _svc_pair_cases._impl__prune_unreachable_cases
     _raw_constant_value = _svc_pair_cases._impl__raw_constant_value
     _register_pairwise_extra_assertions = _svc_pair_cases._impl__register_pairwise_extra_assertions
-    _rewrite_cases_with_parameter_fragments = _svc_pair_cases._impl__rewrite_cases_with_parameter_fragments
-    _rewrite_expr_with_parameter_fragments = _svc_pair_cases._impl__rewrite_expr_with_parameter_fragments
     _solve_canonical_return_observation = _svc_pair_cases._impl__solve_canonical_return_observation
     _try_normalization_equivalence = _svc_pair_cases._impl__try_normalization_equivalence
     # pairwise_services.readonly_reduction

@@ -24,6 +24,9 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict
 
+from scripts.function_tracer_pcode.checker.arch.input_extension import (
+    provide_input_extension_evidence,
+)
 from scripts.function_tracer_pcode.proof.obligations.branch_context import BranchCheckContext
 from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     PreparedDispatchFrame,
@@ -61,7 +64,13 @@ def prepare_preflight_projection(
     enable_completed_recovery_proofs: bool,
     call_effect_shadow_manifest: Callable[..., Dict[str, Any]],
 ) -> PreflightProjectionPreparation:
-    source_pair = StrategySourceAnalysisPair.create(analysis1, analysis2)
+    # raw pair と、validator を通った入力 extension 証拠（現在の provider は
+    # 信頼済み signature が無いので発行しない。Issue #167）。
+    source_pair = StrategySourceAnalysisPair.create(
+        analysis1,
+        analysis2,
+        input_extension_evidence=provide_input_extension_evidence(analysis1, analysis2),
+    )
     prepared_pair = prepare_solver_surface(
         source_pair,
         observation_contract_digest=observation_contract_id,

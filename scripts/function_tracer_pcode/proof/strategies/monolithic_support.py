@@ -9,6 +9,9 @@ from typing import Optional, Dict, Any, Mapping, Tuple
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.structural import condition_key, expression_provenance_key
 from scripts.function_tracer_pcode.smt import ParallelResult
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    InputCorrespondenceSet,
+)
 from scripts.function_tracer_pcode.proof.monolithic_authority import (
     build_expected_region_query_set as _PINNED_BUILD_EXPECTED_REGION_QUERY_SET,
     create_shared_z3_region_session as _PINNED_CREATE_SHARED_Z3_REGION_SESSION,
@@ -168,3 +171,22 @@ class _MonolithicRegionExecution:
     session_certificate: Any = None
     sat_replay_formula: str = field(default="", repr=False, compare=False)
     sat_replay_census: Any = field(default=None, repr=False, compare=False)
+
+
+def active_input_correspondence(strategy: Any) -> Optional[InputCorrespondenceSet]:
+    """実行中の ``check()`` が使う最終 InputCorrespondence（Issue #167）。
+
+    ``MonolithicStrategy.check`` が冒頭で dispatch frame（無ければ raw pair）から
+    1 回だけ決めて ``_active_input_correspondence`` に置く。mixin はここからだけ
+    読み、builder と normalizer へ同じ値を渡す。未設定なら None（builder は渡された
+    raw analysis から作る）。
+    """
+
+    correspondence = getattr(strategy, "_active_input_correspondence", None)
+    return correspondence if type(correspondence) is InputCorrespondenceSet else None
+
+
+def active_input_authorization(strategy: Any, side: str):
+    correspondence = active_input_correspondence(strategy)
+    return None if correspondence is None else correspondence.authorization(side)
+

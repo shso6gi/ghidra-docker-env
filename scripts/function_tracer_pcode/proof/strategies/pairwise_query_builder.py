@@ -4,7 +4,7 @@
 import hashlib
 import os
 from functools import cmp_to_key
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
 from scripts.function_tracer_pcode.core import (
@@ -18,6 +18,7 @@ from scripts.function_tracer_pcode.core import (
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
 from scripts.function_tracer_pcode.semantics.param_semantics import hint_objects_by_identity
+from scripts.function_tracer_pcode.semantics.projection_contract import RewriteAuthorization
 from scripts.function_tracer_pcode.semantics.semantic_width import SemanticWidthNormalizer
 from scripts.function_tracer_pcode.semantics.normalize import (
     normalize_expression,
@@ -161,12 +162,18 @@ def extract_return_cases(
     normalization_settings: NormalizationSettings | None = None,
     *,
     apply_effective_partition: bool = True,
+    authorization: Optional[RewriteAuthorization] = None,
 ) -> List[ReturnCase]:
-    """FunctionReturnAnalysis から ReturnCase を抽出"""
+    """FunctionReturnAnalysis から ReturnCase を抽出
+
+    ``authorization`` は prepared surface を作ったときと同じ最終
+    ``InputCorrespondence`` 由来の値を渡す（二重 normalize も同じ前提で行う）。
+    省略時は空で、恒等規則だけが効く。
+    """
     cases = []
     merged_cases: Dict[Tuple[tuple, tuple], ReturnCase] = {}
     settings = normalization_settings or NormalizationSettings.safe()
-    condition_rewriter = _build_condition_rewriter(analysis)
+    condition_rewriter = _build_condition_rewriter(analysis, authorization)
 
     for index, ret_info in enumerate(analysis.returns):
         raw_conditions = [
@@ -284,9 +291,15 @@ def append_ordered_ite_default_case(
     return [*cases, default_case]
 
 
-def _build_condition_rewriter(analysis: FunctionReturnAnalysis):
+def _build_condition_rewriter(
+    analysis: FunctionReturnAnalysis,
+    authorization: Optional[RewriteAuthorization] = None,
+):
     parameter_rewriter = _ParameterMetadataRewriter(getattr(analysis, "parameters", []) or [])
-    semantic_rewriter = SemanticWidthNormalizer(hint_objects_by_identity(analysis)).rewrite_expression
+    semantic_rewriter = SemanticWidthNormalizer(
+        hint_objects_by_identity(analysis),
+        authorization,
+    ).rewrite_expression
 
     def rewrite(expr: Expression | None) -> Expression | None:
         if expr is None:

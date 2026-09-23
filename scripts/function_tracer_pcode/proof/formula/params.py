@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, TYPE_CHECKING, Mapping, Tuple
+from typing import Dict, List, Optional, Mapping, Tuple
 
 from scripts.function_tracer_pcode.core.signature import (
     get_data_type_display_name,
@@ -17,12 +17,6 @@ from scripts.function_tracer_pcode.proof.formula.types import (
     ParameterInfo,
     ParameterPair,
 )
-
-if TYPE_CHECKING:
-    from scripts.function_tracer_pcode.proof.formula.variable import (
-        ExtraVariableAnalysis,
-        ParameterFragmentInfo,
-    )
 
 
 def collect_param_info(params: List[Dict], suffix: str) -> List[ParameterInfo]:
@@ -298,171 +292,6 @@ def _type_name_looks_integral(type_name: str) -> bool:
         "qword",
     )
     return any(token in type_name for token in integral_tokens)
-
-
-def build_parameter_constraint(pair: ParameterPair) -> List[str]:
-    """パラメータ間の等価制約を構築する。"""
-    if pair.param1 is None or pair.param2 is None:
-        return [f"; Parameter index {pair.index}: missing in one function"]
-
-    param1 = pair.param1
-    param2 = pair.param2
-
-    semantic_overlap = _get_semantic_overlap_bits(param1, param2)
-    if semantic_overlap is not None:
-        return [
-            (
-                f"; {param1.smt_name} and {param2.smt_name}: "
-                f"semantic lower {semantic_overlap} bits must match"
-            ),
-            (
-                f"(assert (= ((_ extract {semantic_overlap - 1} 0) {param1.smt_name}) "
-                f"((_ extract {semantic_overlap - 1} 0) {param2.smt_name})))"
-            ),
-        ]
-
-    if not pair.has_width_mismatch():
-        return [
-            f"; {param1.smt_name} and {param2.smt_name}: same width ({param1.bit_width}bit)",
-            f"(assert (= {param1.smt_name} {param2.smt_name}))",
-        ]
-
-    overlap_bits = pair.get_overlapping_width()
-    lines = [
-        f"; {param1.smt_name} ({param1.bit_width}bit) vs {param2.smt_name} ({param2.bit_width}bit)",
-        f"; Overlapping bits: {overlap_bits}",
-        f"; Constraint: lower {overlap_bits} bits are equal",
-    ]
-
-    if param1.bit_width < param2.bit_width:
-        lines.append(
-            f"(assert (= {param1.smt_name} ((_ extract {overlap_bits - 1} 0) {param2.smt_name})))"
-        )
-        lines.append(
-            f"; Upper bits of {param2.smt_name} [{param2.bit_width - 1}:{overlap_bits}] are free"
-        )
-    else:
-        lines.append(
-            f"(assert (= ((_ extract {overlap_bits - 1} 0) {param1.smt_name}) {param2.smt_name}))"
-        )
-        lines.append(
-            f"; Upper bits of {param1.smt_name} [{param1.bit_width - 1}:{overlap_bits}] are free"
-        )
-
-    return lines
-
-
-def build_fragment_backed_parameter_constraint(
-    pair: ParameterPair,
-    fragment_info1: Optional["ParameterFragmentInfo"] = None,
-    fragment_info2: Optional["ParameterFragmentInfo"] = None,
-) -> Optional[List[str]]:
-    """Use parameter-fragment evidence to constrain full-width equality."""
-    if pair.param1 is None or pair.param2 is None:
-        return None
-
-    param1 = pair.param1
-    param2 = pair.param2
-
-    if param1.bit_width < param2.bit_width:
-        fragment_info = fragment_info1
-        narrow = param1
-        wide = param2
-    elif param2.bit_width < param1.bit_width:
-        fragment_info = fragment_info2
-        narrow = param2
-        wide = param1
-    else:
-        return None
-
-    if fragment_info is None:
-        return None
-    if fragment_info.parent_param_index != pair.index:
-        return None
-    if fragment_info.parent_param_bit_width != narrow.bit_width:
-        return None
-    if fragment_info.base_register_size_bits != wide.bit_width:
-        return None
-
-    extend_bits = wide.bit_width - narrow.bit_width
-    if extend_bits <= 0:
-        return None
-
-    ext_op = (
-        "sign_extend"
-        if fragment_info.extension_type.name == "SIGN_EXTEND"
-        else "zero_extend"
-    )
-    return [
-        (
-            f"; {wide.smt_name}: fully constrained from fragment-backed "
-            f"{narrow.smt_name} via {ext_op}"
-        ),
-        (
-            f"(assert (= {wide.smt_name} ((_ {ext_op} {extend_bits}) "
-            f"{narrow.smt_name})))"
-        ),
-    ]
-
-
-def collect_fragment_infos_by_param_index(
-    analyses: Dict[str, "ExtraVariableAnalysis"],
-) -> Dict[int, "ParameterFragmentInfo"]:
-    """Collect at most one safely-constrainable fragment per parameter index."""
-    result: Dict[int, "ParameterFragmentInfo"] = {}
-    for analysis in analyses.values():
-        if not analysis.can_safely_constrain() or analysis.fragment_info is None:
-            continue
-        parent_index = analysis.fragment_info.parent_param_index
-        if parent_index < 0 or parent_index in result:
-            continue
-        result[parent_index] = analysis.fragment_info
-    return result
-
-
-def build_parameter_semantic_constraints(params: List[ParameterInfo]) -> List[str]:
-    """Build self-consistency constraints for narrowed parameter semantics."""
-    lines: List[str] = []
-    for param in params:
-        semantic_bits = param.semantic_narrow_bits
-        signedness = param.semantic_signedness
-        if (
-            semantic_bits is None
-            or signedness not in {"signed", "unsigned"}
-            or semantic_bits >= param.bit_width
-        ):
-            continue
-
-        extend_bits = param.bit_width - semantic_bits
-        ext_op = "sign_extend" if signedness == "signed" else "zero_extend"
-        lines.append(
-            f"; {param.smt_name}: constrain to {signedness} {semantic_bits}-bit semantic value"
-        )
-        lines.append(
-            f"(assert (= {param.smt_name} ((_ {ext_op} {extend_bits}) "
-            f"((_ extract {semantic_bits - 1} 0) {param.smt_name}))))"
-        )
-    return lines
-
-
-def _get_semantic_overlap_bits(
-    param1: ParameterInfo,
-    param2: ParameterInfo,
-) -> Optional[int]:
-    candidates = []
-    if param1.semantic_narrow_bits is not None:
-        candidates.append(param1.semantic_narrow_bits)
-    if param2.semantic_narrow_bits is not None:
-        candidates.append(param2.semantic_narrow_bits)
-    if not candidates:
-        return None
-
-    overlap_bits = min(candidates)
-    if overlap_bits <= 0:
-        return None
-    if overlap_bits > min(param1.bit_width, param2.bit_width):
-        return None
-    return overlap_bits
 
 
 def merge_param_and_extra_vars(

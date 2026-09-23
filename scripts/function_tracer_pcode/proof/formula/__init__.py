@@ -16,7 +16,6 @@ _LAZY = {
     "ParameterPair": ("scripts.function_tracer_pcode.proof.formula.types", "ParameterPair"),
     "VariableAnalyzer": ("scripts.function_tracer_pcode.proof.formula.variable", "VariableAnalyzer"),
     "VariableClassification": ("scripts.function_tracer_pcode.proof.formula.variable", "VariableClassification"),
-    "get_parameter_fragment_constraints": ("scripts.function_tracer_pcode.proof.formula.variable", "get_parameter_fragment_constraints"),
 }
 
 __all__ = sorted(_LAZY)

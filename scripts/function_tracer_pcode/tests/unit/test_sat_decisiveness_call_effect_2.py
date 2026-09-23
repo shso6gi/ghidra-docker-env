@@ -1,3 +1,4 @@
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
 
 def test_call_argument_proof_rejects_unrelated_proof_content_sections():
@@ -125,7 +126,7 @@ def test_call_argument_proof_rejects_summary_callee_without_completed_proof_ids(
     assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
 
 def test_pairwise_call_argument_evidence_recovers_with_matching_completed_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -155,7 +156,7 @@ def test_pairwise_call_argument_evidence_recovers_with_matching_completed_proof(
     assert result.unknown_reasons == []
 
 def test_pairwise_preproducer_call_target_resolution_requires_pending_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -213,7 +214,7 @@ def test_pairwise_preproducer_call_target_resolution_requires_pending_proof(monk
     }
 
 def test_pairwise_call_target_resolution_requires_matching_completed_proof_by_default(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -235,7 +236,7 @@ def test_pairwise_call_target_resolution_requires_matching_completed_proof_by_de
     assert result.unknown_reasons[0].detail == "function1:effect_call_target_resolution_evidence"
 
 def test_pairwise_call_target_resolution_rejects_incomplete_completed_proof_content(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -281,7 +282,7 @@ def test_call_target_resolution_proof_rejects_mismatched_callsite_storage_payloa
     assert _completed_proof_ids_for_call_effect_evidence(evidence) == ()
 
 def test_pairwise_call_target_resolution_recovers_with_matching_completed_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -290,7 +291,9 @@ def test_pairwise_call_target_resolution_recovers_with_matching_completed_proof(
     analysis2 = FunctionReturnAnalysis(
         function_name="func2",
         entry_point="0x2000",
-        parameters=[_param("x")],
+        # Issue #167: parameter の対応が完全でないと EQ は確定しない。この test は
+        # call target 回復だけを見るので、左と同じ parameter を持たせる。
+        parameters=[_param("fp", index=0, size=8), _param("selector", index=1)],
         returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
         return_type="int",
     )
@@ -311,7 +314,7 @@ def test_pairwise_call_target_resolution_recovers_with_matching_completed_proof(
     assert result.unknown_reasons == []
 
 def test_pairwise_self_recursive_call_effect_proof_rejects_non_self_target(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -340,7 +343,7 @@ def test_pairwise_self_recursive_call_effect_proof_rejects_non_self_target(monke
     ] == []
 
 def test_pairwise_unknown_indirect_call_effect_proof_is_not_auto_completed(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -385,7 +388,7 @@ def test_call_effect_summary_producer_emits_only_object_derived_full_ids():
     assert proof_ids == (_expected_call_effect_summary_proof_id(evidence),)
 
 def test_call_effect_summary_producer_rejects_missing_unknown_indirect_target_expression():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _analysis_with_unknown_indirect_call_effect(
         function_name="func1",
         binary_id="B10",
@@ -461,7 +464,7 @@ def test_call_effect_summary_producer_rejects_active_safety_blockers():
     assert PairwiseStrategy._completed_recovery_proof_ids(unsupported_blocked) == ()
 
 def test_call_effect_summary_reason_accepts_targeted_clean_proof_with_analysis_blocker():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
     analysis2 = _analysis_with_unsupported_call_effect()
     analysis1.analysis_notes.append("indirect_control_flow_unresolved")
@@ -512,7 +515,7 @@ def test_monolithic_strategy_does_not_accept_unsat_with_incomplete_effect_summar
         return_type="int",
     )
 
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
         formula="(set-logic QF_BV)\n(check-sat)",
         return_var1="return_1",
@@ -576,7 +579,7 @@ def test_monolithic_strategy_does_not_accept_unsat_with_unsupported_effect_summa
         return_type="int",
     )
 
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
         formula="(set-logic QF_BV)\n(check-sat)",
         return_var1="return_1",
@@ -627,7 +630,7 @@ def test_monolithic_call_effect_summary_proof_complete_allows_recovery():
         returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
         return_type="int",
     )
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
         formula="(set-logic QF_BV)\n(check-sat)",
         return_var1="return_1",
@@ -677,7 +680,7 @@ def test_monolithic_call_effect_summary_bare_completed_proof_id_does_not_recover
         returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
         return_type="int",
     )
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
         formula="(set-logic QF_BV)\n(check-sat)",
         return_var1="return_1",
@@ -722,7 +725,7 @@ def test_monolithic_call_effect_summary_missing_completed_proof_id_does_not_reco
         returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
         return_type="int",
     )
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.return_value = FormulaBuilderResult(
         formula="(set-logic QF_BV)\n(check-sat)",
         return_var1="return_1",
@@ -754,7 +757,7 @@ def test_monolithic_call_effect_summary_missing_completed_proof_id_does_not_reco
     assert result.counterexample_raw is None
 
 def test_pairwise_strategy_downgrades_unsat_when_deferred_call_recovery_is_inconclusive(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = {
         "header_lines": [
             "(declare-const x_1 (_ BitVec 32))",
@@ -842,7 +845,7 @@ def test_pairwise_strategy_downgrades_unsat_when_deferred_call_recovery_is_incon
     assert result.unknown_pairs == 0
 
 def test_pairwise_strategy_records_call_effect_blocker_as_pending_object_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = {
         "header_lines": [
             "(declare-const x_1 (_ BitVec 32))",
@@ -936,7 +939,7 @@ def test_pairwise_strategy_records_call_effect_blocker_as_pending_object_proof(m
     assert _nested_contains(reason.object_target_key, pcode_ref.stable_key())
 
 def test_pairwise_strategy_records_recoverable_candidate_for_call_effect_blocker():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1, incomplete_pcode_ref, complete_pcode_ref = (
         _analysis_with_two_effect_call_argument_evidences()
     )
@@ -969,7 +972,7 @@ def test_pairwise_strategy_records_recoverable_candidate_for_call_effect_blocker
     assert proofs == []
 
 def test_pairwise_strategy_uses_unsupported_call_site_object_ref_for_blocking_proof():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     pcode_ref = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
     site = UnsupportedCallEffectRef(
         pcode_op_ref=pcode_ref,
@@ -1011,7 +1014,7 @@ def test_pairwise_strategy_uses_unsupported_call_site_object_ref_for_blocking_pr
     assert _nested_contains(reason.object_target_key, pcode_ref.stable_key())
 
 def test_pairwise_unsupported_call_effect_uses_phase2_specific_object_key():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     pcode_ref = PcodeOpRef(
         address_offset=0x401020,
         seq_time=31,
@@ -1101,7 +1104,7 @@ def test_pairwise_unsupported_call_effect_uses_phase2_specific_object_key():
     assert UnknownReasonRecord.from_dict(reason.to_dict()).object_evidence == reason.object_evidence
 
 def test_unsupported_call_site_object_key_keeps_caller_identity_distinct():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     pcode_ref = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
     site = UnsupportedCallEffectRef(
         pcode_op_ref=pcode_ref,
@@ -1157,7 +1160,7 @@ def test_unsupported_call_site_object_key_keeps_caller_identity_distinct():
     assert ("function_ref", ("function", 2, 0x1000)) in right_reason.object_target_key
 
 def test_unsupported_call_effect_blocker_prefers_unsupported_site_over_deferred_call():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     unsupported_pcode = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
     deferred_pcode = PcodeOpRef(address_offset=0x4000, seq_time=7, seq_order=2, mnemonic="CALL")
     site = UnsupportedCallEffectRef(
@@ -1214,7 +1217,7 @@ def test_unsupported_call_effect_blocker_prefers_unsupported_site_over_deferred_
     assert not _nested_contains(reason.object_target_key, deferred_pcode.stable_key())
 
 def test_bounded_deferred_target_blocker_uses_concrete_callsite_fallback():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     unsupported_pcode = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
     deferred_pcode = PcodeOpRef(address_offset=0x4000, seq_time=7, seq_order=2, mnemonic="CALL")
     site = UnsupportedCallEffectRef(
@@ -1272,7 +1275,7 @@ def test_bounded_deferred_target_blocker_uses_concrete_callsite_fallback():
     assert not _nested_contains(reason.object_target_key, "call_effect_blocker")
 
 def test_deferred_call_object_key_distinguishes_unknown_target_expression_provenance():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     pcode_ref = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
     deferred_ref = DeferredCallRef(
         caller_program_id=1,
@@ -1337,7 +1340,7 @@ def test_deferred_call_object_key_distinguishes_unknown_target_expression_proven
     )
 
 def test_deferred_call_object_key_distinguishes_truncated_target_expression_provenance():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     pcode_ref = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
     deferred_ref = DeferredCallRef(
         caller_program_id=1,
@@ -1394,7 +1397,7 @@ def test_deferred_call_object_key_distinguishes_truncated_target_expression_prov
     assert left_reason.proof_obligation_id != right_reason.proof_obligation_id
 
 def test_unsupported_call_effect_object_key_distinguishes_target_expression_provenance():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     pcode_ref = PcodeOpRef(address_offset=0x3020, seq_time=4, seq_order=1, mnemonic="CALLIND")
 
     def _analysis_with_site(target_expr: Expression) -> FunctionReturnAnalysis:
@@ -1470,7 +1473,7 @@ def test_unsupported_call_effect_object_key_distinguishes_target_expression_prov
     )
 
 def test_unsupported_call_effect_object_key_does_not_embed_process_local_target_expression_id():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     pcode_ref = PcodeOpRef(address_offset=0x3030, seq_time=5, seq_order=1, mnemonic="CALLIND")
     target_expr = _deep_zext_target("fp", 0)
 
@@ -1516,7 +1519,7 @@ def test_unsupported_call_effect_object_key_does_not_embed_process_local_target_
     assert not _nested_contains(reason.proof_obligation_id, target_identity)
 
 def test_unsupported_call_effect_object_key_distinguishes_truncated_target_expression_provenance():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     pcode_ref = PcodeOpRef(address_offset=0x3030, seq_time=5, seq_order=1, mnemonic="CALLIND")
 
     def _reason_for(target_expr: Expression):
@@ -1563,7 +1566,7 @@ def test_unsupported_call_effect_object_key_distinguishes_truncated_target_expre
     assert left_reason.proof_obligation_id != right_reason.proof_obligation_id
 
 def test_unsupported_call_effect_object_key_handles_very_deep_target_expression_without_recursion_error():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     pcode_ref = PcodeOpRef(address_offset=0x3030, seq_time=5, seq_order=1, mnemonic="CALLIND")
 
     def _reason_for(target_expr: Expression):
@@ -1609,7 +1612,7 @@ def test_unsupported_call_effect_object_key_handles_very_deep_target_expression_
     assert left_reason.proof_obligation_id != right_reason.proof_obligation_id
 
 def test_unsupported_call_effect_object_key_distinguishes_sources_beyond_digest_node_limit():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     pcode_ref = PcodeOpRef(address_offset=0x3030, seq_time=5, seq_order=1, mnemonic="CALLIND")
 
     def _reason_for(target_expr: Expression):
@@ -1655,7 +1658,7 @@ def test_unsupported_call_effect_object_key_distinguishes_sources_beyond_digest_
     assert left_reason.proof_obligation_id != right_reason.proof_obligation_id
 
 def test_unsupported_call_effect_object_key_distinguishes_deep_tail_structure_beyond_digest_node_limit():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     pcode_ref = PcodeOpRef(address_offset=0x3030, seq_time=5, seq_order=1, mnemonic="CALLIND")
 
     def _reason_for(target_expr: Expression):
@@ -1701,7 +1704,7 @@ def test_unsupported_call_effect_object_key_distinguishes_deep_tail_structure_be
     assert zext_reason.proof_obligation_id != sext_reason.proof_obligation_id
 
 def test_call_effect_blocker_candidate_score_prefers_complete_call_argument_evidence():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     incomplete = (
         "call_argument_evidence",
         "function1",

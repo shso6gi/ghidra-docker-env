@@ -34,6 +34,12 @@ from scripts.function_tracer_pcode.proof.obligations.snapshot import (
     SnapshotFingerprintCodec,
 )
 from scripts.function_tracer_pcode.core import expression_provenance_key
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    LEFT as _INPUT_LEFT,
+    RIGHT as _INPUT_RIGHT,
+    InputCorrespondenceSet,
+    build_input_correspondence_set,
+)
 from scripts.function_tracer_pcode.semantics.semantic_width import (
     align_return_value_extension_surfaces as _trusted_align_return_surfaces,
     normalize_analysis_semantic_width as _trusted_normalize_semantic_width,
@@ -100,7 +106,9 @@ def _digest(value: Any) -> str:
 
 
 _NORMALIZATION_RULE_VERSIONS = (
-    "semantic_width_normalizer_v1",
+    # v2 (Issue #167): 条件付き規則は最終 InputCorrespondence の authorization
+    # の下でだけ効く。
+    "semantic_width_normalizer_v2",
     "return_extension_surface_alignment_v1",
 )
 _NORMALIZATION_ALLOWED_ROOTS = (
@@ -132,6 +140,26 @@ def _analysis_digest(analysis: Any) -> str:
 
 def _pair_digest(pair: Tuple[Any, Any]) -> str:
     return _digest(tuple(_analysis_digest(item) for item in pair))
+
+
+def _normalize_source_pair(source_pair: "StrategySourceAnalysisPair") -> Tuple[Any, Any]:
+    """raw source を、その raw から決めた最終 relation の authorization で書き換える。
+
+    prepared surface の構築と certificate の独立再構築はどちらもここを通るので、
+    二重 normalize が同じ authorization を使うことが構造で保証される。
+    """
+
+    correspondence = source_pair.input_correspondence()
+    return (
+        _trusted_normalize_semantic_width(
+            source_pair.analysis1,
+            authorization=correspondence.authorization(_INPUT_LEFT),
+        ),
+        _trusted_normalize_semantic_width(
+            source_pair.analysis2,
+            authorization=correspondence.authorization(_INPUT_RIGHT),
+        ),
+    )
 
 
 def _changed_semantic_roots(source: Any, candidate: Any) -> Tuple[str, ...]:
@@ -166,7 +194,7 @@ class SurfaceDeltaAuditCertificate:
         ):
             return False
         source_items = (source_pair.analysis1, source_pair.analysis2)
-        normalized = tuple(_trusted_normalize_semantic_width(item) for item in source_items)
+        normalized = _normalize_source_pair(source_pair)
         aligned = _trusted_align_return_surfaces(*normalized)
         expected_steps = (
             (
@@ -225,10 +253,7 @@ class SemanticTransformationCertificate:
         audit: SurfaceDeltaAuditCertificate,
         observation_contract_digest: str,
     ) -> bool:
-        normalized = tuple(
-            _trusted_normalize_semantic_width(item)
-            for item in (source_pair.analysis1, source_pair.analysis2)
-        )
+        normalized = _normalize_source_pair(source_pair)
         premise = _digest(
             (
                 "return_alignment_premise_v1",
@@ -277,12 +302,14 @@ class NormalizationCertificate:
     semantic_delta: Tuple[Tuple[str, str, str], ...]
     surface_delta_audit: SurfaceDeltaAuditCertificate
     semantic_transformation: SemanticTransformationCertificate
+    #: 書き換えの前提を決めた最終 InputCorrespondence の digest（Issue #167）。
+    #: authorization digest の決定性の証拠であり、意味保存の証明ではない
+    #: （意味保存は規則ごとの SMT certificate test が担う）。
+    input_correspondence_digest: str = ""
 
     @staticmethod
     def _rebuild_candidate(source_pair: "StrategySourceAnalysisPair") -> Tuple[Any, Any]:
-        left = _trusted_normalize_semantic_width(source_pair.analysis1)
-        right = _trusted_normalize_semantic_width(source_pair.analysis2)
-        return _trusted_align_return_surfaces(left, right)
+        return _trusted_align_return_surfaces(*_normalize_source_pair(source_pair))
 
     def validate(self, source_pair: "StrategySourceAnalysisPair", candidate_pair: Tuple[Any, Any]) -> bool:
         if self.status != "proven":
@@ -297,6 +324,8 @@ class NormalizationCertificate:
         if candidate_digests != (self.left_candidate_digest, self.right_candidate_digest):
             return False
         if self.transformation_kind != "trusted_semantic_width_normalization":
+            return False
+        if source_pair.input_correspondence().digest != self.input_correspondence_digest:
             return False
         if not self.surface_delta_audit.validate(source_pair, candidate_pair):
             return False
@@ -342,6 +371,7 @@ class NormalizationCertificate:
                 self.semantic_delta,
                 self.surface_delta_audit.audit_id,
                 self.semantic_transformation.certificate_id,
+                self.input_correspondence_digest,
             )
         )
         return expected_semantic_id == self.semantic_id
@@ -349,17 +379,51 @@ class NormalizationCertificate:
 
 @dataclass(frozen=True)
 class StrategySourceAnalysisPair:
+    """semantic-width 書き換え前の raw pair（Issue #167 の健全性保証の起点）。"""
+
     analysis1: Any = field(compare=False)
     analysis2: Any = field(compare=False)
     left_digest: str
     right_digest: str
     pair_digest: str
+    #: validator を通った InputExtensionEvidence。production provider は現在
+    #: 何も発行しない（信頼済み signature の経路が無い、v5 §4.4）。
+    input_extension_evidence: Tuple[Any, ...] = field(default=(), compare=False)
+    _input_correspondence_cache: Any = field(default=None, compare=False, repr=False)
 
     @classmethod
-    def create(cls, analysis1: Any, analysis2: Any) -> "StrategySourceAnalysisPair":
+    def create(
+        cls,
+        analysis1: Any,
+        analysis2: Any,
+        *,
+        input_extension_evidence: Tuple[Any, ...] = (),
+    ) -> "StrategySourceAnalysisPair":
         left = AnalysisSnapshot.from_function_analysis(analysis1).semantic_fingerprint
         right = AnalysisSnapshot.from_function_analysis(analysis2).semantic_fingerprint
-        return cls(analysis1, analysis2, left, right, _digest((left, right)))
+        return cls(
+            analysis1,
+            analysis2,
+            left,
+            right,
+            _digest((left, right)),
+            tuple(input_extension_evidence or ()),
+        )
+
+    def input_correspondence(self) -> InputCorrespondenceSet:
+        """この raw pair の最終 InputCorrespondence（raw は不変なので 1 回だけ作る）。"""
+
+        if not self.is_unchanged():
+            raise ValueError("prepared_analysis_mutated")
+        cached = self._input_correspondence_cache
+        if cached is None:
+            cached = build_input_correspondence_set(
+                self.analysis1,
+                self.analysis2,
+                input_extension_evidence=self.input_extension_evidence,
+            )
+            object.__setattr__(self, "_input_correspondence_cache", cached)
+        return cached
 
     def current_side_digests(self) -> Tuple[str, str]:
         return (
@@ -380,12 +444,16 @@ class PreparedAnalysisPair:
     surface_digest: str
     certificate: NormalizationCertificate
     surface_kind: str = "certified_normalized_surface"
+    #: この surface の parameter premise / authorization / decisive 十分性の唯一の出所。
+    input_correspondence: Any = field(default=None, compare=False)
 
     def is_valid_for(self, source: StrategySourceAnalysisPair) -> bool:
         return (
             self.surface_kind == "certified_normalized_surface"
             and self.certificate.validate(source, (self.analysis1, self.analysis2))
             and self.surface_digest == self.certificate.candidate_pair_digest
+            and type(self.input_correspondence) is InputCorrespondenceSet
+            and self.input_correspondence.digest == self.certificate.input_correspondence_digest
         )
 
     def is_unchanged(self) -> bool:
@@ -410,7 +478,9 @@ def prepare_solver_surface(
     if not source.is_unchanged():
         raise ValueError("prepared_analysis_mutated")
     source_items = (source.analysis1, source.analysis2)
-    normalized = tuple(_trusted_normalize_semantic_width(item) for item in source_items)
+    # 順序が本質（v5 §4.3）: raw → 最終 relation → authorization → normalize。
+    input_correspondence = source.input_correspondence()
+    normalized = _normalize_source_pair(source)
     candidate1, candidate2 = _trusted_align_return_surfaces(*normalized)
     left = AnalysisSnapshot.from_function_analysis(candidate1).semantic_fingerprint
     right = AnalysisSnapshot.from_function_analysis(candidate2).semantic_fingerprint
@@ -502,6 +572,7 @@ def prepare_solver_surface(
             semantic_delta,
             audit_id,
             semantic_transformation_id,
+            input_correspondence.digest,
         )
     )
     instance_id = _digest(
@@ -530,6 +601,7 @@ def prepare_solver_surface(
         semantic_delta=semantic_delta,
         surface_delta_audit=surface_delta_audit,
         semantic_transformation=semantic_transformation,
+        input_correspondence_digest=input_correspondence.digest,
     )
     prepared = PreparedAnalysisPair(
         candidate1,
@@ -538,6 +610,7 @@ def prepare_solver_surface(
         right,
         candidate_digest,
         certificate,
+        input_correspondence=input_correspondence,
     )
     if not prepared.is_valid_for(source):
         raise ValueError("surface_transformation_certificate_invalid")

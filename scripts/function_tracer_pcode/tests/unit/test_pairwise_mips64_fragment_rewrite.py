@@ -1,18 +1,14 @@
 # -*- coding: utf-8 -*-
 
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 from unittest.mock import Mock, patch
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner
 
-from scripts.function_tracer_pcode.proof.formula.types import ExtraVariableInfo
-from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
-from scripts.function_tracer_pcode.proof.formula.variable import (
-    ExtensionType,
-    ExtraVariableAnalysis,
-    ParameterFragmentInfo,
-    VariableClassification,
+from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    build_input_correspondence_set,
 )
 from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
-from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
@@ -86,101 +82,55 @@ def _readonly_sum_value(
     )
 
 
-def _fragment_info(fragment_name: str, parent_name: str, parent_index: int) -> ExtraVariableInfo:
-    fragment_info = ParameterFragmentInfo(
-        fragment_name=fragment_name,
-        fragment_bit_width=32,
-        parent_param_name=parent_name,
-        parent_param_index=parent_index,
-        parent_param_bit_width=32,
-        extension_type=ExtensionType.SIGN_EXTEND,
-        bit_offset_in_base=0,
-        bit_length=32,
-        base_register_name=f"a{parent_index}",
-        base_register_size_bits=64,
-    )
-    analysis = ExtraVariableAnalysis(
-        name=fragment_name,
-        bit_width=32,
-        classification=VariableClassification.PARAMETER_FRAGMENT,
-        fragment_info=fragment_info,
-        reason="test fragment",
-    )
-    return ExtraVariableInfo(
-        original_name=fragment_name,
-        smt_name=f"{fragment_name}_2",
-        bit_width=32,
-        analysis=analysis,
-    )
+def test_pairwise_keeps_mips64_parameter_fragments_uncollapsed():
+    """``(in_a0_hi << 32) | param_1`` を ``sext(param_1)`` へ畳まない（Issue #167）。
 
-
-def test_pairwise_rewrites_mips64_parameter_fragments_before_contradiction_check():
-    strategy = PairwiseStrategy(Mock(), _solver_runner(), debug=False)
-
-    selector_is_zero = _binary(
-        "INT_EQUAL",
-        _binary("INT_SLESS", _param("param_2"), _param("param_1")),
-        _const(0),
-    )
-    cutoff = _binary(
-        "INT_ADD",
-        _binary("INT_MULT", _param("param_2"), _const(3)),
-        _const(1),
-    )
-
-    case1 = ReturnCase(
-        index=1,
-        conditions=[
-            Condition(_binary("INT_SLESSEQUAL", cutoff, _param("param_3"))),
-            Condition(selector_is_zero),
+    修正前は pairwise の case 前処理が fragment の ``is_signed`` ラベルだけで
+    畳んでいた（normalizer と同じ規則の複製）。上位断片が同じ引数の sign 拡張で
+    あることは信頼済み IEE が無ければ言えないので、式はそのまま残る。
+    """
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), _solver_runner(), debug=False)
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x1000",
+        parameters=[
+            {"name": "param_1", "data_type": "int", "size": 4, "index": 0, "is_signed": True},
+            {"name": "param_2", "data_type": "int", "size": 4, "index": 1, "is_signed": True},
         ],
-        value_expr=_const(0),
-        return_info=ReturnInfo(address="0x1", value=_const(0), conditions=[], branch_index=1),
+        returns=[
+            ReturnInfo(
+                address="0x2",
+                value=_const(1),
+                conditions=[
+                    Condition(
+                        _binary(
+                            "INT_SLESSEQUAL",
+                            _wide_param("in_a0_hi", "param_1"),
+                            _wide_param("in_a1_hi", "param_2"),
+                        )
+                    )
+                ],
+            )
+        ],
         return_type="int",
     )
 
-    wide_cutoff = Expression.unary_op("INT_SEXT", cutoff)
-    wide_cutoff.size = 8
-    case2 = ReturnCase(
-        index=2,
-        conditions=[
-            Condition(
-                _binary(
-                    "INT_SLESSEQUAL",
-                    _wide_param("in_a0_hi", "param_1"),
-                    _wide_param("in_a1_hi", "param_2"),
-                )
-            ),
-            Condition(
-                _binary(
-                    "INT_SLESS",
-                    _wide_param("in_a2_hi", "param_3"),
-                    wide_cutoff,
-                )
-            ),
-        ],
-        value_expr=_const(1),
-        return_info=ReturnInfo(address="0x2", value=_const(1), conditions=[], branch_index=2),
-        return_type="int",
-    )
+    cases = strategy._extract_return_cases(analysis)
 
-    strategy._rewrite_cases_with_parameter_fragments(
-        [case2],
-        [
-            _fragment_info("in_a0_hi", "param_1", 0),
-            _fragment_info("in_a1_hi", "param_2", 1),
-            _fragment_info("in_a2_hi", "param_3", 2),
-        ],
-    )
-
-    for cond in case2.conditions:
-        assert "in_a" not in cond.to_string()
-    assert case2.conditions[0].to_string() == "(int(param_1) <= int(param_2))"
-    assert case2.conditions[1].to_string() == "(int(param_3) < int(((param_2 * 3) + 1)))"
+    assert "in_a0_hi" in cases[0].conditions[0].to_string()
+    assert "in_a1_hi" in cases[0].conditions[0].to_string()
+    assert not hasattr(strategy, "_rewrite_cases_with_parameter_fragments")
 
 
-def test_pairwise_check_normalizes_fragment_backed_nonzero_before_case_pruning():
-    strategy = PairwiseStrategy(Mock(), _solver_runner(), debug=False)
+def test_pairwise_fragment_backed_pair_is_gated_by_input_correspondence():
+    """断片付き parameter の pair は、入力対応が不十分なので決着させない（Issue #167）。
+
+    修正前は断片を ``sext(param_2)`` と仮定して case を刈り、UNSAT にしていた。
+    修正後は ``in_a1_hi`` が自由な入力として残る。右側は param_2 の register を
+    別名で読む（構造的な断片）ので、最終 relation は不十分で、SAT も UNSAT も
+    確定に使わない。
+    """
+    strategy = PairwiseStrategy(FormulaBuilder(debug=False), _solver_runner(), debug=False)
 
     analysis1 = FunctionReturnAnalysis(
         function_name="fc_widen_then_bias_like",
@@ -221,34 +171,25 @@ def test_pairwise_check_normalizes_fragment_backed_nonzero_before_case_pruning()
                 ],
             )
         ],
-        return_type="long",
+        return_type="int",
     )
 
-    strategy.formula_builder.build_base_context.return_value = {
-        "header_lines": [
-            "(declare-const param_2_1 (_ BitVec 32))",
-            "(declare-const param_2_2 (_ BitVec 32))",
-            "(assert (= param_2_1 param_2_2))",
-        ],
-        "params1": [ParameterInfo("param_2", "param_2_1", 32, 1)],
-        "params2": [ParameterInfo("param_2", "param_2_2", 32, 1)],
-        "extra_vars1": [],
-        "extra_vars2": [_fragment_info("in_a1_hi", "param_2", 1)],
-    }
+    correspondence = build_input_correspondence_set(analysis1, analysis2)
+    assert not correspondence.decisive_sufficient
+    assert any("structural_fragment:in_a1_hi" in ref for ref in correspondence.insufficiency_evidence())
 
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is None
-    assert result.total_pairs == 1
-    assert result.unsat_pairs == 1
-    assert result.unknown_pairs == 0
-    assert "return_case_coverage_gap" in analysis1.analysis_notes
-    assert "return_case_coverage_gap" in analysis2.analysis_notes
-    strategy.solver_runner.run_sequential.assert_called()
+    assert any(
+        "input_correspondence" in ref
+        for reason in result.unknown_reasons
+        for ref in (getattr(reason, "evidence_refs", None) or ())
+    )
 
 
 def test_pairwise_extracts_cases_from_solver_view_consistently():
-    strategy = PairwiseStrategy(Mock(), _solver_runner(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), _solver_runner(), debug=False)
 
     raw_left = FunctionReturnAnalysis(
         function_name="left",
@@ -302,7 +243,7 @@ def test_pairwise_extracts_cases_from_solver_view_consistently():
 
 
 def test_pairwise_short_circuits_semantically_equal_readonly_reductions():
-    strategy = PairwiseStrategy(Mock(), _solver_runner(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), _solver_runner(), debug=False)
 
     analysis1 = FunctionReturnAnalysis(
         function_name="left",
@@ -346,7 +287,7 @@ def test_pairwise_short_circuits_semantically_equal_readonly_reductions():
 
 
 def test_pairwise_does_not_short_circuit_different_readonly_reduction_shapes():
-    strategy = PairwiseStrategy(Mock(), _solver_runner(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), _solver_runner(), debug=False)
     left = _readonly_sum_value("param_1", stride=4, element_size=4, signed_counter=True)
     right = _readonly_sum_value("param_1", stride=16, element_size=8, signed_counter=False)
 
@@ -354,7 +295,7 @@ def test_pairwise_does_not_short_circuit_different_readonly_reduction_shapes():
 
 
 def test_pairwise_short_circuits_semantically_equal_readonly_reductions_via_witnesses():
-    strategy = PairwiseStrategy(Mock(), _solver_runner(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), _solver_runner(), debug=False)
     left_witnesses = (
         ReadonlyReductionWitness(
             exact_count=1,

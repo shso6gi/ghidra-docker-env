@@ -5,21 +5,21 @@ import pytest
 
 from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.proof.formula.returns import ReturnWidthMismatchError
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    InputRelationKind,
+    build_input_correspondence_set,
+)
 from scripts.function_tracer_pcode.proof.formula.params import (
-    build_fragment_backed_parameter_constraint,
     build_parameter_pairs,
     collect_param_info,
 )
-from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo, ParameterPair
-from scripts.function_tracer_pcode.proof.formula.variable import (
-    ExtensionType,
-    ParameterFragmentInfo,
-)
+from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.core import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
     ReturnInfo,
+    StorageInfo,
 )
 
 
@@ -361,7 +361,13 @@ class TestABIConstraints:
         assert wrapper_exc.value.reason_id == direct_exc.value.reason_id
         assert str(wrapper_exc.value) == str(direct_exc.value)
 
-    def test_semantic_width_constraints_are_emitted_for_narrowed_same_width_parameters(self):
+    def test_same_width_projection_tie_comes_from_raw_closure_not_from_hint(self):
+        """両側 ``long x`` を ``SUBPIECE(x)[4]`` でしか読まない。
+
+        修正前は hint（単一 use の射影主張）から下位 32 bit の tie を作っていた。
+        修正後も同じ tie になるが、根拠は両側の raw closure at 32（R3）で、
+        自己整合制約（``x == sext(low32 x)``）は付かない（Issue #167）。
+        """
         builder = FormulaBuilder(debug=False)
         subpiece_value = Expression(
             ExpressionType.BINARY_OP,
@@ -375,43 +381,67 @@ class TestABIConstraints:
         analysis1 = _semantic_analysis("func1", "x", "long", subpiece_value)
         analysis2 = _semantic_analysis("func2", "x", "long", subpiece_value)
 
-        result = builder.build_equivalence_formula_extended(analysis1, analysis2)
-        formula = result.formula
+        correspondence = build_input_correspondence_set(analysis1, analysis2)
+        (item,) = correspondence.correspondences
+        assert item.kind is InputRelationKind.SEMANTIC_PROJECTION
+        assert item.tie_bits == 32
+        assert item.entailed == ()
 
-        assert "Parameter semantic-width constraints" not in formula
-        assert "constrain to signed 32-bit semantic value" not in formula
-        assert "semantic lower 32 bits must match" in formula
-        assert "((_ extract 31 0) x_1)" in formula
-        assert "((_ extract 31 0) x_2)" in formula
+        formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+        assertions = [line for line in formula.splitlines() if line.startswith("(assert")]
+        assert "(assert (= ((_ extract 31 0) x_1) ((_ extract 31 0) x_2)))" in assertions
+        assert not any("_extend" in line for line in assertions)
 
-    def test_fragment_backed_parameter_constraint_ties_wide_param_to_extended_narrow_value(self):
-        pair = ParameterPair(
-            index=0,
-            param1=ParameterInfo("param_1", "param_1_1", 32, 0, is_signed=True),
-            param2=ParameterInfo("param_1", "param_1_2", 64, 0, is_signed=True),
+    def test_fragment_does_not_tie_wide_param_to_extended_narrow_value(self):
+        """narrow 側の上位 register 断片があっても ``wide == sext(narrow)`` を足さない。
+
+        修正前は fragment の ``is_signed`` ラベルから cross-side の
+        ``(= param_1_2 ((_ sign_extend 32) param_1_1))`` を premise に入れていた。
+        これは入力 extension 仮定であり、信頼済み IEE が無ければ成り立たない。
+        """
+        low_storage = StorageInfo(
+            is_register=True, space_name="register", offset=0x20, size=4, size_bits=32,
+            register_name="a0_lo", base_register_name="a0", base_register_size_bits=64,
+            bit_offset_in_base=0,
         )
-        fragment_info = ParameterFragmentInfo(
-            fragment_name="in_a0_hi",
-            fragment_bit_width=32,
-            parent_param_name="param_1",
-            parent_param_index=0,
-            parent_param_bit_width=32,
-            extension_type=ExtensionType.SIGN_EXTEND,
+        high_storage = StorageInfo(
+            is_register=True, space_name="register", offset=0x24, size=4, size_bits=32,
+            register_name="a0_hi", base_register_name="a0", base_register_size_bits=64,
             bit_offset_in_base=32,
-            bit_length=32,
-            base_register_name="a0",
-            base_register_size_bits=64,
         )
-
-        lines = build_fragment_backed_parameter_constraint(
-            pair,
-            fragment_info1=fragment_info,
+        narrow_param = Expression(
+            ExpressionType.PARAMETER, name="param_1", value=0, size=4, storage_info=low_storage,
         )
+        high = Expression(ExpressionType.VARIABLE, name="in_a0_hi", size=4, storage_info=high_storage)
+        left = FunctionReturnAnalysis(
+            function_name="f",
+            entry_point="0x00401000",
+            parameters=[{
+                "name": "param_1", "size": 4, "index": 0, "is_signed": True,
+                "storage": {"is_register": True, "space_name": "register", "offset": 0x20,
+                            "size": 4, "size_bits": 32, "register_name": "a0_lo",
+                            "base_register_name": "a0", "base_register_size_bits": 64,
+                            "bit_offset_in_base": 0},
+            }],
+            returns=[ReturnInfo(
+                address="0x00401000",
+                conditions=[],
+                value=Expression(ExpressionType.BINARY_OP, operator="PIECE", operands=[high, narrow_param], size=8),
+            )],
+        )
+        right = _analysis("f", "param_1", 8)
 
-        assert lines is not None
-        text = "\n".join(lines)
-        assert "fragment-backed" in text
-        assert "(assert (= param_1_2 ((_ sign_extend 32) param_1_1)))" in text
+        correspondence = build_input_correspondence_set(left, right)
+        (item,) = correspondence.correspondences
+        assert item.kind is InputRelationKind.WIDTH_OVERLAP
+        assert item.entailed == ()
+        assert not item.decisive_sufficient
+        assert any("register_alias" in ref for ref in item.evidence)
+
+        formula = FormulaBuilder(debug=False).build_equivalence_formula_extended(left, right).formula
+        assertions = [line for line in formula.splitlines() if line.startswith("(assert")]
+        assert not any("sign_extend" in line or "in_a0_hi" in line for line in assertions)
+        assert "(assert (= param_1_1 ((_ extract 31 0) param_1_2)))" in assertions
 
 
 class TestNoRsplit:
