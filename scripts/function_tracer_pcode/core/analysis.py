@@ -409,6 +409,9 @@ class TerminationPathEffectEvidence:
     path_guard_key: Tuple[Any, ...]
     contract: TerminationContractRef
     path_guard: Tuple[Condition, ...] = field(default=(), repr=False, compare=False)
+    #: payload が構造 key で比べる引数の式（key は ``contract.payload_key`` が持つ）。
+    #: 入力の射影 closure がこの式を走査する。None は「記録していない」で、走査できない。
+    payload_arguments: Optional[Tuple[Any, ...]] = field(default=None, repr=False, compare=False)
     producer_id: str = "analyzer_terminal_path_effect_v1"
     schema_version: int = 1
 

@@ -510,6 +510,73 @@ def test_closure_witnesses_on_call_argument_and_call_effect():
     assert _witness(_closure(with_call), "call_effect", "unsupported_call_effect")
 
 
+def _termination_evidence(arguments, *, recorded=True):
+    """process exit の path 効果証拠。payload は引数の構造 key を比べる（outcome partition）。"""
+
+    from scripts.function_tracer_pcode.core.analysis import (
+        TerminationContractRef,
+        TerminationPathEffectEvidence,
+    )
+    from scripts.function_tracer_pcode.core.runtime_refs import PcodeOpRef
+
+    op_ref = PcodeOpRef(address_offset=0x1010, seq_time=0, seq_order=0, mnemonic="CALL", binary_id="B1")
+    contract = TerminationContractRef(
+        termination_class="process",
+        object_identity_key=op_ref.stable_key(),
+        payload_key=(
+            "process_exit_payload_v1", "immediate_process_exit",
+            ("termination_callee_contract_v1", ("external_function", "libc.so.6", "exit", 1)),
+            tuple(argument.structural_key() for argument in arguments),
+        ),
+        effect_key=("termination_effect_v2", "process", "immediate_process_exit"),
+        observation_contract_key=("termination_observation_v2", "process"),
+        source_contract_key=("terminal_path_effect_evidence_v1", op_ref.stable_key()),
+    )
+    extra = {"payload_arguments": tuple(arguments)} if recorded else {}
+    return TerminationPathEffectEvidence(
+        terminal_candidate_id=("termination_terminal", op_ref.stable_key()),
+        terminal_op_ref=op_ref,
+        control_effect_profile_key=("function_control_effect_profile",),
+        path_guard_key=(),
+        contract=contract,
+        **extra,
+    )
+
+
+def test_closure_reads_the_process_exit_arguments_the_termination_payload_compares():
+    """outcome partition は exit の引数を構造 key で比べるので、引数が読む bit も観測に入る。
+
+    修正前は divergence の guard だけを走査し、exit(x >> 32) のような上位 bit の読みを
+    見落として closure が成立した（R3 の低位 tie で exit status を同じとみなせた）。
+    """
+
+    x = _param("x", 8)
+    high = _bin("INT_RIGHT", x, _const(32, 8), 8)
+    unrecorded = _analysis(
+        "f", [_desc("x", 8)], [_ret(_low(x, 4))],
+        termination_path_effect_evidence=(_termination_evidence((high,), recorded=False),),
+    )
+    closure = _closure(unrecorded)
+    assert not closure.closed
+    assert _witness(closure, "termination_argument", "termination_argument_unrecorded")
+
+    reads_high = _analysis(
+        "f", [_desc("x", 8)], [_ret(_low(x, 4))],
+        termination_path_effect_evidence=(_termination_evidence((high,)),),
+    )
+    assert not _closure(reads_high).closed
+    reads_low = _analysis(
+        "f", [_desc("x", 8)], [_ret(_low(x, 4))],
+        termination_path_effect_evidence=(_termination_evidence((_low(x, 4),)),),
+    )
+    assert _closure(reads_low).closed
+    no_arguments = _analysis(
+        "f", [_desc("x", 8)], [_ret(_low(x, 4))],
+        termination_path_effect_evidence=(_termination_evidence(()),),
+    )
+    assert _closure(no_arguments).closed
+
+
 def test_closure_witnesses_on_synthetic_expression_and_loop_summary():
     x = _param("x", 8)
     synthetic = _analysis(

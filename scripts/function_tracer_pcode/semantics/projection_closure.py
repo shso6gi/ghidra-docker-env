@@ -556,9 +556,25 @@ def _deferred_call_surfaces(analysis: Any) -> Iterator[_SurfaceItem]:
             ))
 
 
+def _termination_surfaces(analysis: Any) -> Iterator[_SurfaceItem]:
+    """process exit などの path 効果。outcome partition は payload の引数を構造 key で
+    比べるので、引数が読む bit も観測に入る。式を記録していない証拠は走査できない。"""
+
+    for index, evidence in enumerate(getattr(analysis, "termination_path_effect_evidence", None) or ()):
+        location = f"termination_path_effect_evidence[{index}]"
+        yield from _conditions("path_condition", f"{location}.path_guard", getattr(evidence, "path_guard", None))
+        arguments = getattr(evidence, "payload_arguments", None)
+        if arguments is None:
+            yield _SurfaceItem("termination_argument", location, witness=("termination_argument_unrecorded", ""))
+            continue
+        for arg_index, argument in enumerate(arguments):
+            yield _SurfaceItem("termination_argument", f"{location}.payload_arguments[{arg_index}]", argument)
+
+
 def _surfaces(analysis: Any, target: _ParameterTarget) -> Iterator[_SurfaceItem]:
     yield from _return_surfaces(analysis)
     yield from _outcome_surfaces(analysis)
+    yield from _termination_surfaces(analysis)
     yield from _effect_surfaces(analysis, target)
     yield from _deferred_call_surfaces(analysis)
 
