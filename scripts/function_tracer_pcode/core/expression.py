@@ -735,11 +735,25 @@ class Expression:
     
     def to_dict(self) -> Dict[str, Any]:
         # Issue #22 PR-22-D: この表現は共有部分式を **親ごとに展開した木** なので、
-        # 共有 DAG では distinct node が少なくても指数的な大きさになり得る。
-        # 作る前に同じ schema の大きさを DAG のまま見積もり、直列化予算を超える
-        # なら作らずに限界にする（`guard_legacy_tree_serialization`）。
-        guard_legacy_tree_serialization(self)
-        return self._to_dict(set())
+        # 共有 DAG では distinct node が少なくても指数的な大きさになり得る。木は
+        # 直列化の作業量（`core/budget_policy.SerializationWork.tree`）が、DAG のまま
+        # 大きさを見積もって予算と比べてから作る。解析 1 件分の表現を作っている
+        # 最中ならその作業量へ合流し、単独ならこの 1 本だけの作業量になる。
+        from scripts.function_tracer_pcode.core.budget_policy import (
+            active_serialization_work,
+            budget_scope_is_active,
+            serialization_scope,
+        )
+
+        work = active_serialization_work()
+        if work is not None:
+            return work.tree(self)
+        if not budget_scope_is_active():
+            return self._to_dict(set())
+        with serialization_scope(
+            site=LEGACY_TREE_SERIALIZATION_SITE, target_parts=("legacy_tree",),
+        ) as work:
+            return work.tree(self)
 
     def _to_dict(self, active: Set[int]) -> Dict[str, Any]:
         node_id = id(self)
@@ -973,42 +987,6 @@ def estimate_legacy_dict_bytes(
             if id(child) not in sizes:
                 stack.append((child, False))
     return sizes.get(id(root))
-
-
-def guard_legacy_tree_serialization(expr: "Expression") -> None:
-    """木表現を作る前に大きさを見積もり、直列化の作業量へ足す（超えたら限界）。
-
-    作業量（`core/budget_policy.SerializationWork`）は、解析 1 件分の
-    `to_dict()` が開いた scope があればそこへ合流し、無ければこの 1 本だけの
-    作業量になる。どちらでも「木を作る前」に byte と distinct node を足すので、
-    予算を超える木は作られない。
-
-    予算の scope の外（pair 境界を通らない呼び出し）では何もしない。見積りが
-    できない形（閉路・JSON にならない key）では guard を掛けない — その場合の
-    挙動は従来の `to_dict` のまま。
-    """
-
-    from scripts.function_tracer_pcode.core.budget_policy import (
-        active_budget_policy,
-        budget_scope_is_active,
-        serialization_scope,
-    )
-
-    if not budget_scope_is_active():
-        return
-    policy = active_budget_policy()
-    with serialization_scope(
-        site=LEGACY_TREE_SERIALIZATION_SITE, target_parts=("legacy_tree",),
-    ) as work:
-        try:
-            size = estimate_legacy_dict_bytes(
-                expr, max_bytes=work.remaining_bytes(policy),
-            )
-        except (TypeError, ValueError):
-            return
-        if size is None:
-            return
-        work.charge_tree(expr, size)
 
 
 # Re-exported for callers that import Condition from model.expression.

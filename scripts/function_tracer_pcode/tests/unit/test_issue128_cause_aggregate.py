@@ -1355,9 +1355,10 @@ def test_to_dict_always_emits_unknown_cause_aggregate():
     payload = result.to_dict()
     assert payload["unknown_cause_aggregate"]["schema"] == UNKNOWN_CAUSE_AGGREGATE_SCHEMA
     # 一度確定した aggregate は to_dict で作り直さない（preimage 固定のため）。
+    # 出力は canonical な複製なので、同一 object ではなく同じ値。
     marker = {"schema": UNKNOWN_CAUSE_AGGREGATE_SCHEMA, "marker": True}
     result.unknown_cause_aggregate = marker
-    assert result.to_dict()["unknown_cause_aggregate"] is marker
+    assert result.to_dict()["unknown_cause_aggregate"] == marker
 
 
 def test_identity_pool_round_trips_required_proof_ids():

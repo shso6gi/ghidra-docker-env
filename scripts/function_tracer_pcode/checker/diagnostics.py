@@ -563,61 +563,79 @@ def _elapsed(row: Any) -> float:
         return 0.0
 
 
-def result_diagnostics_payload(result: Any) -> Dict[str, Any]:
-    """`EquivalenceResult.to_dict()` 用に、解析時の記録と結果の統計を合成する。
+def result_diagnostics_payload(result: Any, *, lazy: bool = False) -> Any:
+    """結果 JSON の `diagnostics`（解析時の記録と結果の統計）。
 
-    診断は判定結果に影響してはならないため、失敗しても最小のブロックを返す。
+    `lazy=True` は **浅い view**（出力の準備が使う）: 既存の dict / list は参照の
+    まま、attempt ごとの行は generator で渡す（`core/json_encoding` の JSON source
+    規則）。出力の準備が残り予算までしか辿らないので、attempt が大量でも行の list を
+    先に作らない。既定は上限なしで canonical な dict にしたもの（直接の読み手用）。
+
+    診断は判定結果に影響してはならないため、失敗しても最小のブロックを返す
+    （行の generator が行う計算は、ここで合計を数える loop が先に済ませている）。
     """
     try:
-        return _result_diagnostics_payload(result)
+        view = _result_diagnostics_view(result)
+        if lazy:
+            return view
+        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+        return RESULT_JSON_POLICY.materialize(view)
     except Exception as exc:
         return {"schema": DIAGNOSTICS_SCHEMA, "error": f"{type(exc).__name__}: {exc}"[:200]}
 
 
-def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
-    base = dict(getattr(result, "diagnostics", None) or {})
-    attempts_out = []
-    solver_seconds = 0.0
-    solver_invocations = 0
-    trace = getattr(result, "debug_trace", None)
-    for attempt in tuple(getattr(trace, "attempts", ()) or ()):
+def _attempt_rows(attempts: Any) -> Iterable[Dict[str, Any]]:
+    for attempt in attempts:
         rows = _solver_rows(getattr(attempt, "solver_results", None))
-        seconds = sum(_elapsed(row) for row in rows)
-        solver_seconds += seconds
-        solver_invocations += len(rows)
-        attempts_out.append({
+        yield {
             "attempt_id": getattr(attempt, "attempt_id", None),
             "phase": getattr(attempt, "phase", None),
             "strategy": getattr(attempt, "strategy", None),
             "elapsed_seconds": getattr(attempt, "elapsed_time", None),
-            "solver_seconds": round(seconds, 6),
+            "solver_seconds": round(sum(_elapsed(row) for row in rows), 6),
             "solver_invocations": len(rows),
-        })
-    if not attempts_out:
+        }
+
+
+def _result_diagnostics_view(result: Any) -> Any:
+    from scripts.function_tracer_pcode.core.json_encoding import JsonLazyArray
+
+    base = getattr(result, "diagnostics", None) or {}
+    solver_seconds = 0.0
+    solver_invocations = 0
+    trace = getattr(result, "debug_trace", None)
+    attempts = getattr(trace, "attempts", None) or ()
+    for attempt in attempts:
+        # 合計だけを数える（行は下の generator が出力の準備に合わせて作る）
+        rows = _solver_rows(getattr(attempt, "solver_results", None))
+        solver_seconds += sum(_elapsed(row) for row in rows)
+        solver_invocations += len(rows)
+    if not attempts:
         rows = _solver_rows(getattr(result, "solver_results", None))
         solver_seconds = sum(_elapsed(row) for row in rows)
         solver_invocations = len(rows)
-    pairwise = dict(getattr(result, "pairwise_stats", None) or {})
+    caches_empty: Dict[str, Any] = {}
     return {
         "schema": DIAGNOSTICS_SCHEMA,
         "timings": {
             "total_seconds": getattr(result, "total_time", None),
-            "analysis_seconds": dict(base.get("analysis_seconds") or {}),
+            "analysis_seconds": base.get("analysis_seconds") or caches_empty,
             "solver_seconds": round(solver_seconds, 6),
-            "attempts": attempts_out,
-            "stages": dict(base.get("stages") or {}),
-            "boundary_seconds": dict(base.get("boundary_seconds") or {}),
-            "phases": list(base.get("phases") or []),
+            "attempts": JsonLazyArray(_attempt_rows(attempts)),
+            "stages": base.get("stages") or caches_empty,
+            "boundary_seconds": base.get("boundary_seconds") or caches_empty,
+            "phases": base.get("phases") or (),
         },
-        "expressions": dict(base.get("expressions") or {}),
+        "expressions": base.get("expressions") or caches_empty,
         "caches": {
-            "callee_parameter_decompile": dict(base.get("callee_parameter_cache") or {}),
-            "callee_analysis": dict(base.get("callee_analysis_cache") or {}),
-            "callee_unbound_reuse": dict(base.get("callee_unbound_reuse") or {}),
+            "callee_parameter_decompile": base.get("callee_parameter_cache") or caches_empty,
+            "callee_analysis": base.get("callee_analysis_cache") or caches_empty,
+            "callee_unbound_reuse": base.get("callee_unbound_reuse") or caches_empty,
         },
         # Issue #125: typed failure（限界 / 内部エラー / 握り潰し）の記録。
         # 判定にも semantic projection にも効かない診断。
-        "failures": dict(base.get("failures") or {}),
+        "failures": base.get("failures") or caches_empty,
         "validated_once_entries": base.get("validated_once_entries"),
         # Issue #20 PR-20-B3: conditional lane が回ったか、回ったなら何で
         # decisive にならなかったか。判定には効かない観測。
@@ -625,9 +643,9 @@ def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
         # Issue #22 PR-22-D: 式サイズ予算の値・観測した最大値・出力準備の内訳。
         # 判定には効かない観測（既定値の根拠と headroom の使用量を読むため）。
         "expression_budget": base.get("expression_budget"),
-        "pairs": pairwise,
+        "pairs": getattr(result, "pairwise_stats", None) or caches_empty,
         "solver_invocations": solver_invocations,
-        "stage_path": list(getattr(result, "stage_path", ()) or ()),
+        "stage_path": getattr(result, "stage_path", ()) or (),
     }
 
 

@@ -37,7 +37,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
 from enum import Enum
-from typing import Any, Dict, Iterable, Iterator, List, NoReturn, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, NoReturn, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.errors import (
     ExpressionSizeBudgetExceeded,
@@ -319,38 +319,79 @@ def raise_render_budget_exceeded(exc: Any, *, subject: Any) -> NoReturn:
 # ---------------------------------------------------------------------------
 
 
-class SerializationWork:
-    """1 回の直列化（解析 1 件分など、複数の木表現の集まり）の作業量。
+def _opaque_leaf_bytes(value: Any) -> int:
+    """JSON 型でない葉（snapshot の codec が別途 canonical にする値）の大きさの代用。
 
-    木表現は式 1 つずつ作られるが、予算を当てるのは **まとめて 1 つの出力になる
-    単位**（`AnalysisSnapshot` なら解析 1 件）。式ごとに見るだけだと、1 つずつは
-    小さい木が数千個集まって巨大になる場合を止められない。
-
-    数えるのは 2 つ: 木表現の byte の合計（同じ式を 2 回書けば 2 回数える =
-    出力の大きさ）と、扱った distinct な式 node の数（共有は 1 回 = 走査の量）。
-    どちらも木を **作る前** に足し、超えたらその木を作らずに限界にする。
+    enum は値の文字列、それ以外は型名で数える。中へは入らない（snapshot の
+    表現に入る値は解析 object の `to_dict` が作った JSON 型が基本で、ここに来るのは
+    enum などの小さい葉だけ）。
     """
 
-    __slots__ = ("site", "_target_parts", "tree_bytes", "trees", "_meter")
+    raw = getattr(value, "value", None) if isinstance(value, Enum) else None
+    text = raw if isinstance(raw, str) else type(value).__qualname__
+    return len(text.encode("utf-8", "surrogatepass")) + 2
 
-    def __init__(self, *, site: str, target_parts: Tuple[Any, ...]) -> None:
+
+class SerializationWork:
+    """1 回の直列化（解析 1 件分の snapshot など、1 つの出力になる単位）の作業量。
+
+    **snapshot 側の唯一の aggregate**。その単位の表現を作る producer は、作る前か
+    record 1 件を作った直後に、必ずここを通す:
+
+    * `tree(expr)` — 式の木表現。DAG のまま大きさを見積もり（distinct node ごとに
+      1 回、`core/expression.estimate_legacy_dict_bytes`）、byte と distinct node を
+      足して予算と比べてから、木を作る。指数的に大きい木は作られない。
+    * `value(v)` — 既に在る値（list / dict / 文字列）。写す前に JSON の byte 数を
+      数える（残り予算で打ち切り。写さない）。
+    * `record(build)` / `records(items, build)` — record 1 件分の表現を作らせ、その
+      byte 数を足す（中の木は `tree` が数え済みなので数え直さず中へも入らない）。
+      列は 1 件ずつなので、超えた時点で残りの record を作らない。
+
+    単位:
+
+    * `serialization_bytes` — その単位の表現の JSON byte 数（`RESULT_JSON_POLICY`
+      で数える。木は legacy tree schema の byte 数）
+    * `serialization_nodes` — その単位の木が参照する distinct な式 node の数（DAG の
+      見積りの作業量）。byte 以外の走査量は byte 数で抑えられる（1 歩で 1 byte 以上）
+    """
+
+    __slots__ = (
+        "site", "enabled", "_target_parts", "tree_bytes", "value_bytes", "trees",
+        "records_built", "_meter", "_tree_ids", "_trees_kept",
+    )
+
+    def __init__(self, *, site: str, target_parts: Tuple[Any, ...], enabled: bool = True) -> None:
         from scripts.function_tracer_pcode.core.semantic_snapshot import (
             SemanticGraphMeter,
         )
 
         self.site = str(site)
+        #: pair の予算 scope の外（部品単体の呼び出し）では数えない（従来どおり）
+        self.enabled = bool(enabled)
         self._target_parts = tuple(target_parts)
         self.tree_bytes = 0
+        self.value_bytes = 0
         self.trees = 0
+        self.records_built = 0
         self._meter = SemanticGraphMeter()
+        #: 数え済みの木表現（id と、id の再利用を防ぐための参照）
+        self._tree_ids: set = set()
+        self._trees_kept: List[Any] = []
+
+    # -- 勘定 ----------------------------------------------------------------
+
+    @property
+    def total_bytes(self) -> int:
+        return self.tree_bytes + self.value_bytes
 
     @property
     def distinct_nodes(self) -> int:
         return self._meter.distinct_nodes
 
-    def remaining_bytes(self, policy: BudgetPolicy) -> Optional[int]:
+    def remaining_bytes(self, policy: Optional[BudgetPolicy] = None) -> Optional[int]:
+        policy = active_budget_policy() if policy is None else policy
         limit = policy.serialization_bytes
-        return None if limit is None else max(0, limit - self.tree_bytes)
+        return None if limit is None else max(0, limit - self.total_bytes)
 
     def target_key(self) -> Tuple[str, str]:
         from scripts.function_tracer_pcode.core.semantic_snapshot import (
@@ -359,20 +400,19 @@ class SerializationWork:
 
         return ("serialization", stable_atoms_digest(self._target_parts))
 
-    def charge_tree(self, root: Any, tree_bytes: int) -> None:
-        """木を 1 つ作る前に、その大きさと node を足して予算と比べる。"""
-
-        self.trees += 1
-        self.tree_bytes += int(tree_bytes)
-        # 数えるのは予算の分まで（超えたと分かれば残りの node は辿らない）
-        self._meter.add_root(root, max_distinct=active_budget_policy().serialization_nodes)
-        evidence = (
+    def _evidence(self) -> Tuple[str, ...]:
+        return (
             f"trees={self.trees}",
             f"tree_bytes={self.tree_bytes}",
+            f"value_bytes={self.value_bytes}",
+            f"records={self.records_built}",
             f"distinct_nodes={self.distinct_nodes}",
         )
+
+    def _enforce(self) -> None:
+        evidence = self._evidence()
         for kind, observed in (
-            (BudgetKind.SERIALIZATION_BYTES, self.tree_bytes),
+            (BudgetKind.SERIALIZATION_BYTES, self.total_bytes),
             (BudgetKind.SERIALIZATION_NODES, self.distinct_nodes),
         ):
             enforce_budget(
@@ -380,16 +420,144 @@ class SerializationWork:
                 target_key=self.target_key(), evidence=evidence,
             )
 
+    # -- producer の入口 -------------------------------------------------------
+
+    def tree(self, expr: Any) -> Dict[str, Any]:
+        """式の木表現を、大きさを数えて予算と比べてから作る。"""
+
+        from scripts.function_tracer_pcode.core.expression import estimate_legacy_dict_bytes
+
+        if not self.enabled:
+            return expr._to_dict(set())
+        try:
+            size = estimate_legacy_dict_bytes(expr, max_bytes=self.remaining_bytes())
+        except (TypeError, ValueError):
+            size = None
+        if size is not None:
+            self.trees += 1
+            self.tree_bytes += int(size)
+            # 数えるのは予算の分まで（超えたと分かれば残りの node は辿らない）
+            self._meter.add_root(
+                expr, max_distinct=active_budget_policy().serialization_nodes,
+            )
+            self._enforce()
+        built = expr._to_dict(set())
+        if size is not None:
+            self._register_tree(built)
+        else:
+            # 見積りできない形（閉路・JSON にならない key）: 作った木をそのまま数える
+            self.value(built)
+        return built
+
+    def value(self, value: Any) -> Any:
+        """既に在る値の JSON byte 数を足す（写さない。超えたら限界）。値をそのまま返す。"""
+
+        from scripts.function_tracer_pcode.core.json_encoding import (
+            RESULT_JSON_POLICY,
+            JsonBudgetExhausted,
+        )
+
+        if not self.enabled:
+            return value
+        remaining = self.remaining_bytes()
+        try:
+            size = RESULT_JSON_POLICY.measure(
+                value,
+                max_bytes=remaining,
+                exclude_ids=self._tree_ids,
+                opaque_bytes=_opaque_leaf_bytes,
+            )
+        except JsonBudgetExhausted as exc:
+            size = exc.consumed_bytes
+        self.value_bytes += int(size)
+        self._enforce()
+        return value
+
+    def record(self, build: Callable[[], Any]) -> Any:
+        """record 1 件分の表現を作らせ、その byte 数を足す（中の木は数え直さない）。"""
+
+        built = build()
+        if not self.enabled:
+            return built
+        self.records_built += 1
+        return self.value(built)
+
+    def records(self, items: Iterable[Any], build: Optional[Callable[[Any], Any]] = None) -> List[Any]:
+        """record の列を 1 件ずつ作る（超えた時点で残りを作らない）。
+
+        `build` を省くと各 item の `to_dict()`。
+        """
+
+        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+        out: List[Any] = []
+        frame = RESULT_JSON_POLICY.container_frame_bytes
+        self._charge_raw(frame(0))
+        for item in items:
+            # 要素を 1 つ足すと増える framing（区切りの長さは policy だけが知る）
+            self._charge_raw(frame(len(out) + 1) - frame(len(out)))
+            out.append(self.record(
+                item.to_dict if build is None else (lambda item=item: build(item))
+            ))
+        return out
+
+    def object_framing(self, mapping: Mapping[str, Any]) -> Mapping[str, Any]:
+        """値を別に数えた object の、括弧・区切り・key の byte 数を足す（mapping を返す）。"""
+
+        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+        if self.enabled:
+            self._charge_raw(
+                RESULT_JSON_POLICY.container_frame_bytes(len(mapping))
+                + sum(RESULT_JSON_POLICY.member_bytes(key, 0) for key in mapping)
+            )
+        return mapping
+
+    def _charge_raw(self, size: int) -> None:
+        if not self.enabled:
+            return
+        self.value_bytes += int(size)
+        self._enforce()
+
+    def alias_tree(self, source: Any, derived: Any) -> None:
+        """数え済みの木 `source` から作った別の表現 `derived` も数え済みにする。
+
+        snapshot の codec が木表現を canonical な tuple へ写すとき、写した側を
+        もう一度数えないために使う（大きさは元の木の byte 数で数えてある）。
+        """
+
+        if self.enabled and id(source) in self._tree_ids:
+            self._register_tree(derived)
+
+    def _register_tree(self, built: Any) -> None:
+        self._tree_ids.add(id(built))
+        self._trees_kept.append(built)
+
 
 _SERIALIZATION = threading.local()
+
+
+def active_serialization_work() -> Optional[SerializationWork]:
+    """今開いている直列化の作業量（無ければ `None`）。"""
+
+    stack = getattr(_SERIALIZATION, "stack", None)
+    return stack[-1] if stack else None
+
+
+def alias_serialized_tree(source: Any, derived: Any) -> None:
+    """今の作業量で数え済みの木 `source` から作った表現 `derived` を数え済みにする。"""
+
+    work = active_serialization_work()
+    if work is not None:
+        work.alias_tree(source, derived)
 
 
 @contextmanager
 def serialization_scope(*, site: str, target_parts: Tuple[Any, ...]) -> Iterator[SerializationWork]:
     """直列化 1 つ分の作業量を数える scope（入れ子は外側へ合流する）。
 
-    解析 1 件分の `to_dict()` を開く側（`FunctionReturnAnalysis.to_dict` /
-    `AnalysisSnapshot.from_function_analysis`）が開き、その中で作られる木表現は
+    解析 1 件分の表現を作る側（`FunctionReturnAnalysis.to_dict` /
+    `AnalysisSnapshot.from_function_analysis`）が開き、その中で作られる表現は
     すべて同じ作業量へ足される。scope の外で単独に呼ばれた `Expression.to_dict`
     は、その 1 本だけの作業量になる。thread ごとに持つ（直列化は同期処理で、
     別 thread の直列化と合算しない）。
@@ -402,7 +570,9 @@ def serialization_scope(*, site: str, target_parts: Tuple[Any, ...]) -> Iterator
     if stack:
         yield stack[-1]
         return
-    work = SerializationWork(site=site, target_parts=target_parts)
+    work = SerializationWork(
+        site=site, target_parts=target_parts, enabled=budget_scope_is_active(),
+    )
     stack.append(work)
     try:
         yield work
@@ -447,4 +617,6 @@ __all__ = [
     "raise_render_budget_exceeded",
     "serialization_scope",
     "SerializationWork",
+    "active_serialization_work",
+    "alias_serialized_tree",
 ]

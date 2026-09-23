@@ -1602,9 +1602,7 @@ def test_m1_deep_modules_gain_no_env_or_config_reads():
 #: 数える唯一の場所」。それ以外は `enforce_budget(kind, …)` を通す。
 _POLICY_FIELD_READERS = {
     "render_bytes": {"core/render_smt/render.py"},
-    "serialization_bytes": {
-        "core/budget_policy.py", "core/expression.py", "checker/output_preparation.py",
-    },
+    "serialization_bytes": {"core/budget_policy.py", "checker/output_preparation.py"},
     # 数える量を予算で打ち切るために読む（比べるのは `enforce_budget`）
     "expression_nodes": {"semantics/transform/expander_multiequal.py"},
     "expansion_cases": set(),
@@ -1683,9 +1681,9 @@ def test_the_production_boundary_only_orders_the_output_steps():
         node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
     }
     forbidden = {
-        "value_bytes", "encode_bounded", "RESULT_FIELDS", "OutputPreparer",
-        "RESULT_JSON_POLICY", "estimate_legacy_dict_bytes", "enforce_budget",
-        "serialization_bytes", "render_bytes", "envelope_headroom_bytes",
+        "measure", "encode_bounded", "RESULT_FIELDS", "OutputPreparer",
+        "RESULT_JSON_POLICY", "JsonObjectBudget", "estimate_legacy_dict_bytes",
+        "enforce_budget", "serialization_bytes", "render_bytes", "envelope_headroom_bytes",
     }
     assert not (names & forbidden), names & forbidden
     imported = {name for name, _lineno in _imported_names(tree)}
@@ -1779,3 +1777,209 @@ def test_the_output_option_is_read_once_when_the_output_is_prepared():
     assert len(offenders) == 1 and offenders[0].startswith(
         "checker/output_preparation.py"
     ), offenders
+
+
+# ---------------------------------------------------------------------------
+# live → prepared の変換境界（Issue #22 PR-22-D 修正）
+#
+# 表現を作るのは `JsonEncodingPolicy.prepare`（出力）と `SerializationWork`
+# （snapshot）だけ。producer（`json_view` と出力 field の読み方）は参照と遅延
+# 構成子を返すだけで、表現を先に作らない — 同じ欠陥を field / producer を足すたびに
+# 入れ直さないための **規則**（一覧ではない）。
+# ---------------------------------------------------------------------------
+
+#: producer が呼んではいけない「表現を先に作る」操作
+_EAGER_METHODS = frozenset({
+    "to_dict", "deepcopy", "copy", "dumps", "asdict", "materialize", "prepare",
+    "project_bounded",
+})
+_EAGER_BUILTINS = frozenset({"list", "dict", "tuple", "sorted", "set", "frozenset", "deepcopy", "asdict"})
+
+
+def _eager_constructions(node: ast.AST) -> List[str]:
+    found = []
+    for inner in ast.walk(node):
+        if isinstance(inner, (ast.ListComp, ast.DictComp, ast.SetComp)):
+            found.append(f"{type(inner).__name__}@{inner.lineno}")
+        elif isinstance(inner, ast.Call):
+            func = inner.func
+            if isinstance(func, ast.Attribute) and func.attr in _EAGER_METHODS:
+                found.append(f"{func.attr}()@{inner.lineno}")
+            elif isinstance(func, ast.Name) and func.id in _EAGER_BUILTINS:
+                found.append(f"{func.id}()@{inner.lineno}")
+    return found
+
+
+def _output_field_rows(tree: ast.Module) -> List[ast.Call]:
+    for node in tree.body:
+        target = getattr(node, "target", None) or (node.targets[0] if isinstance(node, ast.Assign) else None)
+        if isinstance(target, ast.Name) and target.id == "RESULT_FIELDS":
+            return [call for call in ast.walk(node.value) if isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name) and call.func.id == "OutputField"]
+    raise AssertionError("RESULT_FIELDS not found")
+
+
+def _reader_nodes() -> List[Tuple[str, ast.AST]]:
+    """出力 field の読み方（lambda / 関数 / その内側の関数）と、全 `json_view`。"""
+    path = PACKAGE_ROOT / "checker/output_preparation.py"
+    tree = _parse(path)
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    nodes: List[Tuple[str, ast.AST]] = []
+    for call in _output_field_rows(tree):
+        reader = call.args[2]
+        key = call.args[0]
+        label = getattr(key, "value", getattr(key, "id", "?"))
+        if isinstance(reader, ast.Lambda):
+            nodes.append((f"RESULT_FIELDS[{label}]", reader))
+        elif isinstance(reader, ast.Name):
+            nodes.append((f"RESULT_FIELDS[{label}]", functions[reader.id]))
+        elif isinstance(reader, ast.Call) and isinstance(reader.func, ast.Name):
+            nodes.append((f"RESULT_FIELDS[{label}]", functions[reader.func.id]))
+    for name in ("lazy_record", "lazy_records"):
+        json_tree = _parse(PACKAGE_ROOT / "core/json_encoding.py")
+        nodes.extend(
+            (f"core/json_encoding.py:{name}", node) for node in json_tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        )
+    diagnostics = _parse(PACKAGE_ROOT / "checker/diagnostics.py")
+    nodes.extend(
+        (f"checker/diagnostics.py:{node.name}", node) for node in diagnostics.body
+        if isinstance(node, ast.FunctionDef) and node.name in {"_result_diagnostics_view", "_attempt_rows"}
+    )
+    for module in _module_files():
+        for node in ast.walk(_parse(module)):
+            if isinstance(node, ast.FunctionDef) and node.name == "json_view":
+                nodes.append((f"{_relative(module)}:json_view@{node.lineno}", node))
+    return nodes
+
+
+def test_producers_return_json_sources_and_never_build_the_representation():
+    """producer は参照と遅延構成子だけを返す（`to_dict()`・複製・内包表記をしない）。"""
+
+    nodes = _reader_nodes()
+    assert any("json_view" in label for label, _node in nodes)
+    assert any(label.startswith("RESULT_FIELDS[debug_trace]") for label, _node in nodes)
+    offenders = {
+        label: found for label, node in nodes if (found := _eager_constructions(node))
+    }
+    assert offenders == {}, offenders
+
+
+def test_the_snapshot_representation_is_built_only_through_the_work():
+    """解析 1 件分の表現は、値も record も `SerializationWork` を通す。"""
+
+    analysis = _parse(PACKAGE_ROOT / "core/analysis.py")
+    (body,) = [
+        node for node in ast.walk(analysis)
+        if isinstance(node, ast.FunctionDef) and node.name == "_to_dict_with"
+    ]
+    assert _eager_constructions(body) == [
+        found for found in _eager_constructions(body) if found.startswith("list()")
+    ], _eager_constructions(body)
+    # `list(...)` は `value(...)` で数えた既存の list の写しだけ
+    for inner in ast.walk(body):
+        if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "list":
+            (argument,) = inner.args
+            assert isinstance(argument, ast.Call) and getattr(argument.func, "id", None) == "value"
+    # dict の値は scalar 定数か `value` / `record` / `records` の結果だけ
+    allowed_calls = {"value", "record", "records", "int", "bool"}
+    for inner in ast.walk(body):
+        if isinstance(inner, ast.Dict):
+            for value in inner.values:
+                if isinstance(value, ast.IfExp):
+                    value = value.body
+                if isinstance(value, ast.Call):
+                    name = getattr(value.func, "id", None) or getattr(value.func, "attr", None)
+                    assert name in allowed_calls | {"list"}, ast.dump(value)[:120]
+        if isinstance(inner, ast.Assign) and isinstance(inner.targets[0], ast.Subscript):
+            value = inner.value
+            name = getattr(value.func, "id", None) if isinstance(value, ast.Call) else None
+            assert name in allowed_calls | {"list"}, ast.dump(value)[:120]
+
+
+def test_json_framing_and_separators_live_only_in_the_policy():
+    """区切りの長さ・framing の勘定は `JsonEncodingPolicy` だけが持つ。"""
+
+    offenders = []
+    for path in _module_files():
+        relative = _relative(path)
+        if relative == "core/json_encoding.py":
+            continue
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.Attribute) and node.attr in {
+                "item_separator", "key_separator", "separators",
+            }:
+                offenders.append(f"{relative}:{node.lineno} .{node.attr}")
+    assert offenders == [], offenders
+
+
+def test_prepared_json_is_created_only_by_the_policy():
+    creators = set()
+    for path in _module_files():
+        for node in ast.walk(_parse(path)):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "PreparedJson"
+            ):
+                creators.add(_relative(path))
+    assert creators == {"core/json_encoding.py"}, creators
+
+
+def test_the_post_decision_lane_runs_in_its_own_failure_scope():
+    """authority 確定後の proof は、pair と別の台帳の中でだけ走る。"""
+
+    tree = _parse(PACKAGE_ROOT / "authority/decision/conditional_lane.py")
+    calls, isolated = [], []
+
+    def _visit(node, inside):
+        if isinstance(node, ast.With):
+            opens = any(
+                isinstance(item.context_expr, ast.Call)
+                and getattr(item.context_expr.func, "id", None) == "post_decision_failure_scope"
+                for item in node.items
+            )
+            inside = inside or opens
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "run_conditional_proof":
+            calls.append(node.lineno)
+            if inside:
+                isolated.append(node.lineno)
+        for child in ast.iter_child_nodes(node):
+            _visit(child, inside)
+
+    _visit(tree, False)
+    assert calls and calls == isolated, (calls, isolated)
+
+
+def test_prepared_readers_read_only_the_declared_source_attributes():
+    """A の読み方が読む結果の属性 = 準備後に差し替えを拒む属性（`PREPARED_SOURCE_ATTRIBUTES`）。"""
+
+    from scripts.function_tracer_pcode.checker.output_preparation import (
+        PREPARED_SOURCE_ATTRIBUTES,
+    )
+
+    tree = _parse(PACKAGE_ROOT / "checker/output_preparation.py")
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    read = set()
+    for call in _output_field_rows(tree):
+        if getattr(call.args[1], "id", None) != "_A":
+            continue
+        reader = call.args[2]
+        if isinstance(reader, ast.Call):  # `_when_present("name")` など
+            read.add(reader.args[0].value)
+            continue
+        node = reader if isinstance(reader, ast.Lambda) else functions[reader.id]
+        for inner in ast.walk(node):
+            if (
+                isinstance(inner, ast.Attribute)
+                and isinstance(inner.value, ast.Name)
+                and inner.value.id == "r"
+            ):
+                read.add(inner.attr)
+    methods = {"get_effective_function1_signature", "get_effective_function2_signature"}
+    assert read - methods <= PREPARED_SOURCE_ATTRIBUTES, read - methods - PREPARED_SOURCE_ATTRIBUTES
+    # 準備が読まない属性を宣言しない（smt_formula は成果物として準備する）
+    declared_extra = PREPARED_SOURCE_ATTRIBUTES - read - {
+        "effective_function1_signature", "effective_function2_signature", "smt_formula",
+    }
+    assert declared_extra == set(), declared_extra

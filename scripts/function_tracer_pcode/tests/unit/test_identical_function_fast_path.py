@@ -792,10 +792,11 @@ def test_identical_binaries_and_function_are_equivalent_without_any_analysis(mon
     assert evidence["left"]["executable_sha256"] == SHA_A
     assert evidence["left"]["match_count"] == 1
     assert payload["function1_identity"] != payload["function2_identity"]
-    assert payload["function1_identity"][:2] == (
-        "identical_fast_path_function_identity_v1", ("binary_id", "B1"),
-    )
-    assert payload["function2_identity"][1] == ("binary_id", "B2")
+    # 結果 JSON は canonical な JSON 値（配列は list）
+    assert payload["function1_identity"][:2] == [
+        "identical_fast_path_function_identity_v1", ["binary_id", "B1"],
+    ]
+    assert payload["function2_identity"][1] == ["binary_id", "B2"]
     _, bundle = _payload_with_bundle(result)
     assert bundle["canonical_semantic_result_projection"]["payload"][
         "decisive_proof_kinds"

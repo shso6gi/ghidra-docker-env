@@ -1,20 +1,41 @@
 # -*- coding: utf-8 -*-
-"""JSON の書き方と大きさの数え方（Issue #22 PR-22-D）: **1 つの policy object**。
+"""JSON の書き方・数え方・live object からの変換（Issue #22 PR-22-D）: **1 つの policy object**。
 
-結果 JSON の大きさを「書く前に見積もる側」（出力の準備・式の木表現の予算）と
-「実際に書く側」（CLI の bounded encoder）が別々の規則で数えると、見積りが実際の
-byte を下回ったときに予算が効かなくなる。だから
+結果 JSON の大きさを「書く前に数える側」と「実際に書く側」が別々の規則で数えると、
+見積りが実際の byte を下回ったときに予算が効かなくなる。だから次をすべて
+`JsonEncodingPolicy` の method にし、他の module は JSON の規則（区切りの長さ・
+key の型変換・escape）を自分で書かない:
 
-* `JsonEncodingPolicy` が `ensure_ascii` / `sort_keys` / separators を 1 箇所で持ち、
-* 見積り（`value_bytes` / `string_bytes`）も書き出し（`dumps` / `encode_bounded`）も
-  同じ object の method にし、
-* escape の規則（`"` `\\` 制御文字、`ensure_ascii` なら非 ASCII と surrogate pair）も
-  その policy から導く。
+* 書き方の設定（`ensure_ascii` / `sort_keys` / 区切り 2 種）
+* framing の勘定（`{}` / `[]`、先頭と 2 つ目以降の区切り、key と値の区切り）
+  — `JsonObjectBudget` が 1 つの object へ member を足していく勘定を持つ
+* escape の規則（`"` `\\` 制御文字、`ensure_ascii` なら非 ASCII と surrogate pair）
+* key の型変換（`true` / `false` / `null` / 数値の文字列化。`json` と同じ規則）
+* live な値から **canonical な JSON 値** への変換（`prepare`）と、その上限
+* 書き出し（`encode` / `encode_bounded`）
 
-見積りは **実際の encoder と同じ byte 数** を返す（上界として等号で成り立つ）。
-巨大な値を一度 `json.dumps` してから長さを測ることはしない — 見積りは値を
-走査するだけで文字列を作らず、`limit` を超えたら `limit + 1` で飽和してそれ以上
-走査しない。
+**live → prepared の唯一の変換境界は `prepare`**。入力は「JSON source」:
+
+* scalar（`None` / `bool` / `int` / `float` / `str`、そのサブクラスは基底型へ）
+* 既に在る container（`list` / `tuple` / `Mapping`）— 参照を渡すだけ
+* `json_view()` を持つ object — 自分の表現を **浅く** 返す（下の規則）
+* `JsonLazy(producer)` — 辿り着いたときに初めて呼ばれる値（record 1 件分の
+  `to_dict` を遅らせるのに使う）
+* `JsonLazyArray(iterable)` — 1 要素ずつ取り出される配列（generator でよい）
+* `JsonLazyObject(pairs)` — (key, 値) を 1 組ずつ取り出す object
+
+それ以外（集合・任意の object）は `JsonValueRejected`。`prepare` は source を
+**1 要素ずつ** 辿りながら数え、上限を超えた時点で `JsonBudgetExhausted` を上げて
+それ以上辿らない（写した量は残り予算 + 超えたことに気付いた 1 要素まで）。出力は
+新しく作った `dict`（key は `str`）/ `list` と immutable な scalar だけの canonical な
+JSON 値で、元の object を参照しない。書き出しはこの値を `default` hook 無しで書く
+だけなので、authority 確定後に初めて型エラーが見つかる経路は無い。
+
+`json_view()` の規則（`tests/unit/test_architecture_boundaries.py` が AST で固定）:
+自分の直下の field を並べた mapping を返し、collection は既存の参照か
+`JsonLazyArray` / generator で渡す。`to_dict()` の呼び出し・複製・内包表記・
+`list(...)` などで表現を先に作らない（作るのは `prepare` だけ）。record 1 件分の
+表現を `to_dict` に任せるときは `JsonLazy(record.to_dict)` と **呼ばずに** 渡す。
 
 単位は UTF-8 byte（`core/render_output.utf8_length` と同じ数え方）。
 """
@@ -23,8 +44,9 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Iterable, Iterator, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
 from scripts.function_tracer_pcode.core.render_output import utf8_length
@@ -44,12 +66,168 @@ class JsonOutputLimitExceeded(AnalysisFailureError):
         self.requested_bytes = int(requested_bytes)
 
 
+class JsonBudgetExhausted(AnalysisFailureError):
+    """`prepare` / `measure` が上限に達した（そこで辿るのをやめた）。
+
+    `consumed_bytes` は止めた時点までに数えた byte 数（上限 + 1 以上）で、値全体の
+    大きさではない（残りは数えていない）。
+    """
+
+    def __init__(self, *, consumed_bytes: int, max_bytes: Optional[int]) -> None:
+        super().__init__(f"JSON projection exceeded {max_bytes} bytes")
+        self.consumed_bytes = int(consumed_bytes)
+        self.max_bytes = max_bytes
+
+
+class JsonValueRejected(AnalysisFailureError):
+    """JSON source の文法に無い値（集合・任意の object・閉路・key の衝突）。
+
+    **producer のバグ** で、意味の限界ではない。出力の準備（authority 確定前）では
+    内部エラーとして記録される。`TypeError` 派生にしない（回復用の handler に
+    吸われると、canonical でない値が prepared payload に入り得る）。
+    """
+
+    def __init__(self, message: str, *, path: str) -> None:
+        super().__init__(f"{message} at {path}")
+        self.path = path
+
+
+# ---------------------------------------------------------------------------
+# JSON source の遅延構成子
+# ---------------------------------------------------------------------------
+
+
+class JsonLazy:
+    """辿り着いたときに初めて作る値（record 1 件分の `to_dict` など）。
+
+    `producer` は引数なしの callable。返り値もまた JSON source として辿る。
+    """
+
+    __slots__ = ("producer",)
+
+    def __init__(self, producer: Callable[[], Any]) -> None:
+        if not callable(producer):
+            raise TypeError("JsonLazy needs a callable")
+        self.producer = producer
+
+
+class JsonLazyArray:
+    """1 要素ずつ取り出される配列（generator でよい。1 回だけ辿る）。"""
+
+    __slots__ = ("items",)
+
+    def __init__(self, items: Iterable[Any]) -> None:
+        self.items = items
+
+
+class JsonLazyObject:
+    """(key, 値) の組を 1 つずつ取り出す object（generator でよい。1 回だけ辿る）。
+
+    既存の mapping を別の形に並べ直すとき（値の形を変える・一部だけ出す）に、
+    並べ直した dict を先に作らないために使う。
+    """
+
+    __slots__ = ("pairs",)
+
+    def __init__(self, pairs: Iterable[Tuple[Any, Any]]) -> None:
+        self.pairs = pairs
+
+
+def lazy_record(value: Any) -> Any:
+    """record 1 件分の表現を、辿り着いたときに初めて `value.to_dict` で作らせる。
+
+    偽の値（`None` など）は `None` として出す（従来の `x.to_dict() if x else None`）。
+    """
+
+    return JsonLazy(value.to_dict) if value else None
+
+
+def lazy_records(values: Iterable[Any]) -> JsonLazyArray:
+    """record の列を、1 件ずつ `to_dict` させる配列にする（列は複製しない）。"""
+
+    return JsonLazyArray(JsonLazy(value.to_dict) for value in values)
+
+
+# ---------------------------------------------------------------------------
+# prepared value
+# ---------------------------------------------------------------------------
+
+
+_PREPARED_TOKEN = object()
+
+
+class PreparedJson:
+    """`prepare` だけが作る canonical な JSON 値と、それを書いたときの byte 数。
+
+    値は新しく作った `dict`（key は `str`）/ `list` と immutable な scalar だけで、
+    live な object を参照しない。外へ渡すのは複製（`value()`）だけなので、受け取った
+    側が壊しても準備済みの値は変わらない。
+    """
+
+    __slots__ = ("_value", "encoded_bytes", "policy")
+
+    def __init__(self, value: Any, encoded_bytes: int, policy: "JsonEncodingPolicy", *, _token: Any) -> None:
+        if _token is not _PREPARED_TOKEN:
+            raise TypeError("PreparedJson is created only by JsonEncodingPolicy.prepare")
+        self._value = value
+        self.encoded_bytes = int(encoded_bytes)
+        self.policy = policy
+
+    def value(self) -> Any:
+        """canonical な値の複製（container だけ作り直す。scalar は immutable）。"""
+
+        return _copy_canonical(self._value)
+
+    def __repr__(self) -> str:  # pragma: no cover - debug 表示
+        return f"PreparedJson({self.encoded_bytes} bytes)"
+
+
+def is_prepared_json(value: Any) -> bool:
+    return type(value) is PreparedJson
+
+
+def _copy_canonical(value: Any) -> Any:
+    if not isinstance(value, (dict, list)):
+        return value
+    root: List[Any] = [None]
+    stack: List[Tuple[Any, Any, Any]] = [(value, root, 0)]
+    while stack:
+        source, parent, key = stack.pop()
+        if isinstance(source, dict):
+            out: Any = {}
+            parent[key] = out
+            for child_key, child in source.items():
+                if isinstance(child, (dict, list)):
+                    out[child_key] = None
+                    stack.append((child, out, child_key))
+                else:
+                    out[child_key] = child
+        elif isinstance(source, list):
+            out = [None] * len(source)
+            parent[key] = out
+            for index, child in enumerate(source):
+                if isinstance(child, (dict, list)):
+                    stack.append((child, out, index))
+                else:
+                    out[index] = child
+        else:
+            parent[key] = source
+    return root[0]
+
+
+# ---------------------------------------------------------------------------
+# policy
+# ---------------------------------------------------------------------------
+
+
 #: `ensure_ascii=False` で escape される文字（`json.encoder.ESCAPE` と同じ集合）。
 _ESCAPE_UNICODE = re.compile(r'[\x00-\x1f\\"]')
 #: `ensure_ascii=True` で escape される文字（`json.encoder.ESCAPE_ASCII` と同じ集合）。
 _ESCAPE_ASCII = re.compile(r'([\\"]|[^\ -~])')
 #: 2 文字の escape（`\"` `\\` `\b` `\f` `\n` `\r` `\t`）になる文字。
 _SHORT_ESCAPES = frozenset('\\"\b\f\n\r\t')
+#: 長い文字列を数えるときの 1 回分の文字数（上限に届いたら残りを数えない単位）。
+_STRING_CHUNK = 1 << 16
 
 
 def _float_text(value: float) -> str:
@@ -64,13 +242,23 @@ def _float_text(value: float) -> str:
     return float.__repr__(value)
 
 
-_ENTER = object()
-_EXIT = object()
+def _resolve(item: Any) -> Any:
+    """遅延構成子と `json_view()` を、JSON の値の形になるまで解く。"""
+
+    while True:
+        if type(item) is JsonLazy:
+            item = item.producer()
+            continue
+        view = getattr(type(item), "json_view", None)
+        if view is not None and not isinstance(item, (str, int, float, list, tuple, Mapping)):
+            item = item.json_view()
+            continue
+        return item
 
 
 @dataclass(frozen=True)
 class JsonEncodingPolicy:
-    """JSON の書き方。見積りと書き出しは必ずこの object を通す。"""
+    """JSON の書き方。数え方・変換・書き出しは必ずこの object を通す。"""
 
     ensure_ascii: bool = False
     sort_keys: bool = True
@@ -81,14 +269,32 @@ class JsonEncodingPolicy:
     def separators(self) -> Tuple[str, str]:
         return (self.item_separator, self.key_separator)
 
+    # -- framing -------------------------------------------------------------
+
+    def container_frame_bytes(self, count: int) -> int:
+        """`count` 個の要素を持つ object / array の括弧と要素間の区切りの byte 数。"""
+
+        return 2 + utf8_length(self.item_separator) * max(0, int(count) - 1)
+
+    def member_bytes(self, key: Any, value_bytes: int) -> int:
+        """object の member 1 つ（key・key と値の区切り・値）の byte 数。"""
+
+        return self.key_bytes(key) + utf8_length(self.key_separator) + int(value_bytes)
+
+    def object_bytes(self, member_bytes: Iterable[int]) -> int:
+        """member の byte 数（`member_bytes()` の値）の列から object 全体の byte 数。"""
+
+        sizes = [int(size) for size in member_bytes]
+        return self.container_frame_bytes(len(sizes)) + sum(sizes)
+
+    # -- 書き出し ------------------------------------------------------------
+
     def _encoder(self) -> json.JSONEncoder:
         return json.JSONEncoder(
             ensure_ascii=self.ensure_ascii,
             sort_keys=self.sort_keys,
             separators=self.separators,
         )
-
-    # -- 書き出し ------------------------------------------------------------
 
     def dumps(self, value: Any, *, default: Optional[Callable[[Any], Any]] = None) -> str:
         """上限なしで書く（大きさが既に分かっている小さい値だけに使う）。
@@ -108,7 +314,7 @@ class JsonEncodingPolicy:
         """上限付きで書く。上限を超えた時点で止め、途中までの断片も捨てる。
 
         `json.JSONEncoder.iterencode` の断片を数えながら貯めるので、出力は
-        `dumps()` と同じ文字列になる（同じ encoder・同じ設定）。
+        `dumps()` と同じ文字列になる（同じ encoder・同じ設定・`default` 無し）。
         """
 
         parts: List[str] = []
@@ -123,7 +329,7 @@ class JsonEncodingPolicy:
             parts.append(chunk)
         return "".join(parts)
 
-    # -- 見積りと上限付きの写し -----------------------------------------------
+    # -- 文字列と key ----------------------------------------------------------
 
     def _string_chunk_bytes(self, text: str) -> int:
         """引用符を除いた、文字列の一部を書いたときの byte 数。"""
@@ -166,63 +372,67 @@ class JsonEncodingPolicy:
                 return max_bytes + 1
         return total
 
-    def _key_bytes(self, key: Any) -> int:
-        """dict の key を書いたときの byte 数（`json` と同じ型変換）。"""
+    def canonical_key(self, key: Any) -> str:
+        """dict の key を JSON が書く文字列へ（`json` と同じ型変換）。"""
 
         if isinstance(key, str):
-            return self.string_bytes(key)
+            return key if type(key) is str else str.__str__(key)
         if key is True:
-            return 6  # "true"
+            return "true"
         if key is False:
-            return 7  # "false"
+            return "false"
         if key is None:
-            return 6  # "null"
+            return "null"
         if isinstance(key, int):
-            return len(int.__repr__(key)) + 2
+            return int.__repr__(key)
         if isinstance(key, float):
-            return self.string_bytes(_float_text(key))
+            return _float_text(key)
         raise TypeError(
             f"keys must be str, int, float, bool or None, not {type(key).__name__}"
         )
 
-    def value_bytes(
+    def key_bytes(self, key: Any) -> int:
+        """dict の key を書いたときの byte 数。"""
+
+        return self.string_bytes(self.canonical_key(key))
+
+    # -- live → canonical ----------------------------------------------------
+
+    def prepare(self, source: Any, *, max_bytes: Optional[int] = None) -> PreparedJson:
+        """JSON source を **上限まで** 辿って canonical な JSON 値へ変える（唯一の境界）。
+
+        上限を超えた時点で `JsonBudgetExhausted`、文法に無い値は `JsonValueRejected`。
+        """
+
+        value, size = self._walk(source, max_bytes, build=True, exclude_ids=None)
+        return PreparedJson(value, size, self, _token=_PREPARED_TOKEN)
+
+    def measure(
         self,
-        value: Any,
+        source: Any,
         *,
         max_bytes: Optional[int] = None,
+        exclude_ids: Optional[Any] = None,
         opaque_bytes: Optional[Callable[[Any], int]] = None,
     ) -> int:
-        """`value` を書いたときの byte 数（`max_bytes` を超えたら `max_bytes + 1`）。
+        """`prepare` と同じ走査で byte 数だけを数える（写さない）。
 
-        値は写さない（`project_bounded` と同じ走査で数えるだけ）。
+        超えたら `JsonBudgetExhausted`。`exclude_ids` に id がある container は数えず
+        中へも入らない（別の勘定で既に数えた部分: 木表現の予算を参照）。
+        `opaque_bytes` を渡すと、JSON source でない葉を拒まずにその大きさで数える
+        （snapshot のように、後段の codec が別途 canonical にする表現を数えるとき）。
         """
 
-        try:
-            return self._walk(value, max_bytes, opaque_bytes, build=False)[1]
-        except JsonBudgetExhausted:
-            return max_bytes + 1
+        return self._walk(
+            source, max_bytes, build=False, exclude_ids=exclude_ids, opaque_bytes=opaque_bytes,
+        )[1]
 
-    def project_bounded(
-        self,
-        value: Any,
-        *,
-        max_bytes: Optional[int] = None,
-        opaque_bytes: Optional[Callable[[Any], int]] = None,
-    ) -> Tuple[Any, int]:
-        """`value` を **上限まで** 写す。写した値と、それを書いたときの byte 数を返す。
+    def materialize(self, source: Any) -> Any:
+        """上限なしで canonical な値を作る（`to_dict()` を `json_view()` で定義する側用）。"""
 
-        live な値（結果が持つ dict / list / 文字列）を、出力へ置く凍結した写しに
-        変える唯一の道。写しながら数えるので、`max_bytes` を超えた時点で
-        `JsonBudgetExhausted` を上げてそれ以上写さない — 写す量は残りの予算
-        （+ 超えたことに気付いた 1 要素）までに収まる。container の型（list /
-        tuple / dict）は保つ（`copy.deepcopy` と同じ形）。文字列と scalar は
-        immutable なので参照のまま置く。JSON にならない値は `opaque_bytes` で数え、
-        参照のまま置く（JSON にできるかの判定は最終 encoder が行う）。
-        """
+        return self._walk(source, None, build=True, exclude_ids=None)[0]
 
-        return self._walk(value, max_bytes, opaque_bytes, build=True)
-
-    def _walk(self, value, max_bytes, opaque_bytes, *, build):
+    def _walk(self, value, max_bytes, *, build, exclude_ids, opaque_bytes=None):
         item_separator = utf8_length(self.item_separator)
         key_separator = utf8_length(self.key_separator)
         total = 0
@@ -238,114 +448,167 @@ class JsonEncodingPolicy:
 
         holder: List[Any] = [None]
         active = set()
-        # frame: [kind, iterator, out, parent, parent_key, count, source_id]
+        # frame: [kind, iterator, out, parent, parent_key, count, source_id, current_key, keys]
         stack: List[List[Any]] = []
 
-        def place(parent, key, item) -> None:
-            if not build:
-                return
-            parent[key] = item
+        def path() -> str:
+            """今辿っている位置（拒むときだけ組み立てる。深い入れ子で 2 乗にしない）。"""
+
+            parts = ["$"]
+            for frame in stack:
+                current = frame[7]
+                parts.append(f"[{current}]" if isinstance(current, int) else f".{current}")
+            return "".join(parts)
 
         def enter(item, parent, key) -> None:
-            if item is None:
-                charge(4)
-            elif item is True:
-                charge(4)
-            elif item is False:
-                charge(5)
+            item = _resolve(item)
+            if item is None or item is True or item is False:
+                charge(4 if item is not False else 5)
+                result = item
             elif isinstance(item, str):
-                limit = remaining()
-                charge(self.string_bytes(item, max_bytes=limit))
+                charge(self.string_bytes(item, max_bytes=remaining()))
+                result = item if type(item) is str else str.__str__(item)
             elif isinstance(item, int):
-                charge(len(int.__repr__(item)))
+                result = int(item)
+                charge(len(int.__repr__(result)))
             elif isinstance(item, float):
-                charge(len(_float_text(item)))
-            elif isinstance(item, (list, tuple, dict)):
+                result = float(item)
+                charge(len(_float_text(result)))
+            elif isinstance(item, (list, tuple, Mapping, JsonLazyArray, JsonLazyObject)):
                 source_id = id(item)
+                if exclude_ids is not None and source_id in exclude_ids:
+                    return
                 if source_id in active:
-                    raise ValueError("Circular reference detected")
+                    raise JsonValueRejected("circular reference", path=path())
                 active.add(source_id)
                 charge(2)
-                if isinstance(item, dict):
-                    out = {} if build else None
-                    iterator = iter(item.items())
+                if isinstance(item, Mapping):
                     kind = "dict"
-                else:
+                    iterator: Iterator[Any] = iter(item.items())
+                    out: Any = {} if build else None
+                elif type(item) is JsonLazyObject:
+                    kind = "dict"
+                    iterator = iter(item.pairs)
+                    out = {} if build else None
+                elif type(item) is JsonLazyArray:
+                    kind = "list"
+                    iterator = iter(item.items)
                     out = [] if build else None
+                else:
+                    kind = "list"
                     iterator = iter(item)
-                    kind = "tuple" if isinstance(item, tuple) else "list"
-                stack.append([kind, iterator, out, parent, key, 0, source_id, item])
+                    out = [] if build else None
+                stack.append([kind, iterator, out, parent, key, 0, source_id, None, set()])
                 return
-            elif opaque_bytes is not None:
+            elif opaque_bytes is not None and not build:
                 charge(int(opaque_bytes(item)))
+                return
             else:
-                raise TypeError(
-                    f"Object of type {type(item).__name__} is not JSON serializable"
+                raise JsonValueRejected(
+                    f"{type(item).__qualname__} is not a JSON source", path=path(),
                 )
-            place(parent, key, item)
+            if build:
+                parent[key] = result
 
         enter(value, holder, 0)
         while stack:
             frame = stack[-1]
-            kind, iterator, out, parent, key, count, source_id, source = frame
+            kind, iterator, out, parent, key, count, source_id, _current, keys = frame
             try:
                 child = next(iterator)
             except StopIteration:
                 stack.pop()
                 active.discard(source_id)
                 if build:
-                    if kind == "tuple":
-                        if type(source) is tuple:
-                            out = tuple(out)
-                        elif hasattr(source, "_fields"):  # NamedTuple
-                            out = type(source)(*out)
-                        else:
-                            out = type(source)(out)
-                    elif kind == "list" and type(source) is not list:
-                        out = type(source)(out)
-                    elif kind == "dict" and type(source) is not dict:
-                        out = type(source)(out)
-                place(parent, key, out)
+                    parent[key] = out
                 continue
             if count:
                 charge(item_separator)
             frame[5] = count + 1
             if kind == "dict":
                 child_key, child_value = child
-                charge(self._key_bytes(child_key) + key_separator)
-                enter(child_value, out if build else None, child_key)
+                try:
+                    text_key = self.canonical_key(child_key)
+                except TypeError as exc:
+                    raise JsonValueRejected(str(exc), path=path()) from None
+                if text_key in keys:
+                    raise JsonValueRejected(
+                        f"key {text_key!r} collides after JSON key conversion", path=path(),
+                    )
+                keys.add(text_key)
+                frame[7] = text_key
+                charge(self.string_bytes(text_key) + key_separator)
+                enter(child_value, out, text_key)
             else:
                 if build:
                     out.append(None)
-                enter(child, out if build else None, count)
+                frame[7] = count
+                enter(child, out, count)
         return holder[0], total
 
 
-class JsonBudgetExhausted(AnalysisFailureError):
-    """`project_bounded` が上限に達した（写すのをそこで止めた）。
+class JsonObjectBudget:
+    """1 つの JSON object へ member を順に足していく勘定（framing は policy が決める）。
 
-    `consumed_bytes` は止めた時点までに数えた byte 数（上限 + 1 以上）で、値全体の
-    大きさではない（残りは数えていない）。
+    出力の準備（authority 確定前）と最終 envelope（authority 確定後）が、同じ
+    object の byte 数を同じ規則で数えるための唯一の道。区切りの長さや先頭 member の
+    扱いを呼ぶ側が計算しない。
     """
 
-    def __init__(self, *, consumed_bytes: int, max_bytes: Optional[int]) -> None:
-        super().__init__(f"JSON projection exceeded {max_bytes} bytes")
-        self.consumed_bytes = int(consumed_bytes)
+    def __init__(self, policy: JsonEncodingPolicy, max_bytes: Optional[int]) -> None:
+        self.policy = policy
         self.max_bytes = max_bytes
+        self._count = 0
+        self._members = 0
 
+    @property
+    def total_bytes(self) -> int:
+        """今の member だけで閉じた object の byte 数。"""
 
-#: 長い文字列を数えるときの 1 回分の文字数（上限に届いたら残りを数えない単位）。
-_STRING_CHUNK = 1 << 16
+        return self.policy.container_frame_bytes(self._count) + self._members
+
+    @property
+    def member_count(self) -> int:
+        return self._count
+
+    def added_bytes(self, key: Any, value_bytes: int) -> int:
+        """member を 1 つ足したときに object が増える byte 数（区切りを含む）。"""
+
+        return (
+            self.policy.container_frame_bytes(self._count + 1)
+            - self.policy.container_frame_bytes(self._count)
+            + self.policy.member_bytes(key, value_bytes)
+        )
+
+    def remaining_for(self, key: Any) -> Optional[int]:
+        """次に `key` の member を足すとき、値に使ってよい byte 数（負なら入らない）。"""
+
+        if self.max_bytes is None:
+            return None
+        return self.max_bytes - self.total_bytes - self.added_bytes(key, 0)
+
+    def add(self, key: Any, value_bytes: int) -> None:
+        self._members += self.policy.member_bytes(key, value_bytes)
+        self._count += 1
 
 
 #: 結果 JSON（CLI が書く `EQUIVALENCE_RESULT_JSON`）の書き方。**唯一の定義**。
-#: 見積り・bounded encoder・CLI の出力はすべてこれを使う。
+#: 見積り・準備・bounded encoder・CLI の出力はすべてこれを使う。
 RESULT_JSON_POLICY = JsonEncodingPolicy()
 
 
 __all__ = [
     "JsonBudgetExhausted",
     "JsonEncodingPolicy",
+    "JsonLazy",
+    "JsonLazyArray",
+    "JsonLazyObject",
+    "JsonObjectBudget",
     "JsonOutputLimitExceeded",
+    "JsonValueRejected",
+    "PreparedJson",
     "RESULT_JSON_POLICY",
+    "is_prepared_json",
+    "lazy_record",
+    "lazy_records",
 ]

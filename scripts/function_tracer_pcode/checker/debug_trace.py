@@ -5,6 +5,12 @@ from typing import List, Dict, Any, Mapping, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
+from scripts.function_tracer_pcode.core.json_encoding import (
+    RESULT_JSON_POLICY,
+    JsonLazy,
+    lazy_record,
+    lazy_records,
+)
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownReasonRecord,
     build_unknown_recovery_actions,
@@ -266,8 +272,15 @@ class Attempt:
                 for ordinal, reason in enumerate(self.unknown_reasons)
             ]
     
-    def to_dict(self) -> Dict[str, Any]:
-        result = {
+    def json_view(self) -> Dict[str, Any]:
+        """結果 JSON での表現（**唯一の schema**）。浅い view で、表現は作らない。
+
+        list は参照のまま、record は `to_dict` を 1 件ずつ遅らせて渡す
+        （`core/json_encoding` の JSON source 規則）。出力の準備はこれを残り予算まで
+        しか辿らないので、record が大量でも全体を先に作らない。
+        """
+
+        return {
             "attempt_id": self.attempt_id,
             "retry_count": self.retry_count,
             "phase": self.phase,
@@ -280,26 +293,28 @@ class Attempt:
             "original_function2_signature": self.original_function2_signature,
             "effective_function1_signature": self.effective_function1_signature,
             "effective_function2_signature": self.effective_function2_signature,
-            "function1_signature_hypotheses": list(self.function1_signature_hypotheses),
-            "function2_signature_hypotheses": list(self.function2_signature_hypotheses),
+            "function1_signature_hypotheses": self.function1_signature_hypotheses,
+            "function2_signature_hypotheses": self.function2_signature_hypotheses,
             "solver_results": self.solver_results,
             "final_smt_excerpt": self.final_smt_excerpt,
             "final_smt": self.final_smt,  # ★ 追加
             "counterexample": self.counterexample,
-            "pairwise_decisive": self.pairwise_decisive.to_dict() if self.pairwise_decisive else None,
-            "pairwise_debug_stats": dict(self.pairwise_debug_stats),
-            "normalization_rules": [rule.to_dict() for rule in self.normalization_rules],
-            "unknown_reasons": [reason.to_dict() for reason in self.unknown_reasons],
-            "reason_occurrences": [item.to_dict() for item in self.reason_occurrences],
+            "pairwise_decisive": lazy_record(self.pairwise_decisive),
+            "pairwise_debug_stats": self.pairwise_debug_stats,
+            "normalization_rules": lazy_records(self.normalization_rules),
+            "unknown_reasons": lazy_records(self.unknown_reasons),
+            "reason_occurrences": lazy_records(self.reason_occurrences),
             "mips64_abi_constraints": self.mips64_abi_constraints,
             "elapsed_time": self.elapsed_time,
             "applied": self.applied,
-            "reanalyzed_sides": list(self.reanalyzed_sides),
+            "reanalyzed_sides": self.reanalyzed_sides,
             "skipped_reason": self.skipped_reason,
-            "reason_before": list(self.reason_before),
-            "reason_after": list(self.reason_after),
+            "reason_before": self.reason_before,
+            "reason_after": self.reason_after,
         }
-        return result
+
+    def to_dict(self) -> Dict[str, Any]:
+        return RESULT_JSON_POLICY.materialize(self.json_view())
 
 
 @dataclass
@@ -516,60 +531,81 @@ class DebugTrace:
             lines.append(f"  {entry['phase']}: {status} ({', '.join(details)})")
         return "\n".join(lines)
     
-    def to_dict(self) -> Dict[str, Any]:
-        observed_unknown_reasons = [
+    def _observed_unknown_reasons(self) -> List[UnknownReasonRecord]:
+        return [
             reason
             for attempt in self.attempts
             for reason in getattr(attempt, "unknown_reasons", []) or []
         ]
-        final_unknown_reasons = []
-        if self.final_result is None:
-            final_transition_reasons = {
-                TransitionReason.UNKNOWN.value,
-                TransitionReason.TIMEOUT.value,
-            }
-            for attempt in reversed(self.attempts):
-                if (
-                    attempt.result is None
-                    and attempt.transition_reason in final_transition_reasons
-                ):
-                    final_unknown_reasons = list(getattr(attempt, "unknown_reasons", []) or [])
-                    break
+
+    def _final_unknown_reasons(self) -> List[UnknownReasonRecord]:
+        if self.final_result is not None:
+            return []
+        final_transition_reasons = {
+            TransitionReason.UNKNOWN.value,
+            TransitionReason.TIMEOUT.value,
+        }
+        for attempt in reversed(self.attempts):
+            if (
+                attempt.result is None
+                and attempt.transition_reason in final_transition_reasons
+            ):
+                return list(getattr(attempt, "unknown_reasons", []) or [])
+        return []
+
+    def json_view(self) -> Dict[str, Any]:
+        """結果 JSON での表現（**唯一の schema**）。浅い view で、表現は作らない。
+
+        attempt / event は既存の list を参照のまま渡し（出力の準備が 1 件ずつ辿る）、
+        集計は `JsonLazy` で辿り着いたときに初めて計算する。
+        """
+
         return {
-            "attempts": [attempt.to_dict() for attempt in self.attempts],
-            "causal_transitions": [item.to_dict() for item in self.causal_transitions],
-            "proof_completion_events": [item.to_dict() for item in self.proof_completion_events],
-            "reason_completion_events": [item.to_dict() for item in self.reason_completion_events],
+            "attempts": self.attempts,
+            "causal_transitions": lazy_records(self.causal_transitions),
+            "proof_completion_events": lazy_records(self.proof_completion_events),
+            "reason_completion_events": lazy_records(self.reason_completion_events),
             "planned_phases": self.planned_phases,
             "known_phases": self.known_phases,
-            "used_phases": self.get_used_phases(),
-            "phase_usage": self.get_phase_usage(),
-            "unknown_reason_counts": summarize_unknown_reason_counts(
-                final_unknown_reasons,
-                primary_by_aggregation_unit=True,
-            ),
-            "observed_unknown_reason_counts": summarize_unknown_reason_counts(observed_unknown_reasons),
-            "unknown_recovery_backlog": summarize_unknown_recovery_backlog(
-                final_unknown_reasons,
-                primary_by_aggregation_unit=True,
-            ),
-            "unknown_recovery_actions": [
-                action.to_dict()
-                for action in build_unknown_recovery_actions(
-                    final_unknown_reasons,
+            "used_phases": JsonLazy(self.get_used_phases),
+            "phase_usage": JsonLazy(self.get_phase_usage),
+            "unknown_reason_counts": JsonLazy(
+                lambda: summarize_unknown_reason_counts(
+                    self._final_unknown_reasons(),
                     primary_by_aggregation_unit=True,
                 )
-            ],
-            "observed_unknown_recovery_backlog": summarize_unknown_recovery_backlog(
-                observed_unknown_reasons
             ),
-            "observed_unknown_recovery_actions": [
-                action.to_dict()
-                for action in build_unknown_recovery_actions(observed_unknown_reasons)
-            ],
+            "observed_unknown_reason_counts": JsonLazy(
+                lambda: summarize_unknown_reason_counts(self._observed_unknown_reasons())
+            ),
+            "unknown_recovery_backlog": JsonLazy(
+                lambda: summarize_unknown_recovery_backlog(
+                    self._final_unknown_reasons(),
+                    primary_by_aggregation_unit=True,
+                )
+            ),
+            "unknown_recovery_actions": JsonLazy(
+                lambda: lazy_records(
+                    build_unknown_recovery_actions(
+                        self._final_unknown_reasons(),
+                        primary_by_aggregation_unit=True,
+                    )
+                )
+            ),
+            "observed_unknown_recovery_backlog": JsonLazy(
+                lambda: summarize_unknown_recovery_backlog(self._observed_unknown_reasons())
+            ),
+            "observed_unknown_recovery_actions": JsonLazy(
+                lambda: lazy_records(
+                    build_unknown_recovery_actions(self._observed_unknown_reasons())
+                )
+            ),
             "final_result": self.final_result,
             "total_time": self.total_time,
             "error_message": self.error_message,
             "attempt_count": len(self.attempts),
         }
+
+    def to_dict(self) -> Dict[str, Any]:
+        return RESULT_JSON_POLICY.materialize(self.json_view())
     

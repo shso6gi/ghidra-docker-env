@@ -46,7 +46,7 @@ def main(argv) -> int:
             output_preparation.OutputField(
                 "m3_extra_diagnostic",
                 output_preparation.FieldOwner.METADATA,
-                lambda result, options: (True, {"observed": 1}),
+                lambda result, options: {"observed": 1},
                 output_preparation.Overflow.TRUNCATE,
             ),
         )

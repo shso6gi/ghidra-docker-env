@@ -15,6 +15,11 @@ from scripts.function_tracer_pcode.core.stage_journal import (
     journal_stage_end,
     journal_stage_start,
 )
+from scripts.function_tracer_pcode.core.json_encoding import (
+    RESULT_JSON_POLICY,
+    lazy_record,
+    lazy_records,
+)
 from scripts.function_tracer_pcode.smt.interface import SMTSolver, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 
@@ -156,12 +161,17 @@ class ParallelResult:
                 return r.model
         return None
     
-    def to_dict(self) -> Dict[str, Any]:
+    def json_view(self) -> Dict[str, Any]:
+        """結果 JSON での表現（**唯一の schema**）。solver 行は 1 件ずつ `to_dict` させる。"""
+
         return {
             "is_equivalent": self.is_equivalent,
-            "first_definitive": self.first_definitive.to_dict() if self.first_definitive else None,
-            "all_results": [r.to_dict() for r in self.results],
+            "first_definitive": lazy_record(self.first_definitive),
+            "all_results": lazy_records(self.results),
         }
+
+    def to_dict(self) -> Dict[str, Any]:
+        return RESULT_JSON_POLICY.materialize(self.json_view())
 
 
 class CancellationToken:

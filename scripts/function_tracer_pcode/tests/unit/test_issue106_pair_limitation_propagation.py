@@ -1393,16 +1393,10 @@ def test_an_internal_bug_wrapped_by_hand_still_ends_as_internal_exception():
 STABLE_CONTROL_API = frozenset({
     "record_limitation", "record_internal_bug", "pending_failure",
     "stop_state", "allows_semantic_analysis", "allows_finalization",
-    # Issue #22 PR-22-D: 出力の確定（以後の限界を記録しない）
-    "enter_finalization", "is_finalized",
 })
 
 #: 具象台帳が診断・test 向けに出している窓口（安定 contract には含めない）。
-LEDGER_DIAGNOSTIC_API = frozenset({
-    "recorded_failure_count",
-    # Issue #22 PR-22-D: 確定後の限界の件数（確定後の consumer 用、判定には使わない）
-    "limitations_after_finalization",
-})
+LEDGER_DIAGNOSTIC_API = frozenset({"recorded_failure_count"})
 
 #: 台帳 object に対して consumer が呼んでよい名前（安定 contract + identity）。
 LEDGER_ALLOWED_ATTRIBUTES = STABLE_CONTROL_API | {

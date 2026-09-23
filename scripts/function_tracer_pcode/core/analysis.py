@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields as dataclass_fields, is_dataclass, replace
 from copy import deepcopy
 import hashlib
+import itertools
 import json
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Tuple, Mapping
 
@@ -1606,9 +1607,10 @@ class FunctionReturnAnalysis:
         self.deferred_calls = normalized
 
     def to_dict(self) -> Dict:
-        # Issue #22 PR-22-D: 解析 1 件分の木表現は **まとめて** 1 つの直列化。
-        # 式ごとの見積りはこの作業量へ足され、合計が予算を超えたら次の木を
-        # 作る前に止まる（`core/budget_policy.serialization_scope`）。
+        # Issue #22 PR-22-D: 解析 1 件分の表現は **まとめて** 1 つの直列化の作業量
+        # （`core/budget_policy.SerializationWork`）。木も木以外の値も、作る前か
+        # record 1 件を作った直後にその作業量へ足され、合計が予算を超えた時点で
+        # 残りを作らずに限界になる。
         from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
 
         with serialization_scope(
@@ -1619,88 +1621,88 @@ class FunctionReturnAnalysis:
                 self.function_name,
                 self.entry_point,
             ),
-        ):
-            return self._to_dict_unscoped()
+        ) as work:
+            return self._to_dict_with(work)
 
-    def _to_dict_unscoped(self) -> Dict:
+    def _to_dict_with(self, work) -> Dict:
+        """表現の本体。**値はすべて `work` を通す**（既存の値は `value`、record は
+        `record` / `records`、木は record の中の `Expression.to_dict` が `tree` を通す）。
+        """
+
+        value, record, records = work.value, work.record, work.records
         result = {
-            "function_name": self.function_name,
-            "entry_point": self.entry_point,
-            "binary_id": self.binary_id,
-            "function_ref": self.function_ref.to_dict() if self.function_ref is not None else None,
-            "parameters": parameters_without_runtime_objects(self.parameters),
-            "returns": [r.to_dict() for r in self.returns],
-            "return_type": get_data_type_display_name(self.return_type_obj, self.return_type),
-            "unknown_event_count": self.unknown_event_count,
-            "unknown_event_reasons": list(self.unknown_event_reasons),
-            "analysis_notes": list(self.analysis_notes),
-            "recovered_from_decompiler": self.recovered_from_decompiler,
-            "incomplete_control_flow": self.incomplete_control_flow,
-            "deferred_calls": [info.to_dict() for info in self.deferred_calls.values()],
+            "function_name": value(self.function_name),
+            "entry_point": value(self.entry_point),
+            "binary_id": value(self.binary_id),
+            "function_ref": (
+                record(self.function_ref.to_dict) if self.function_ref is not None else None
+            ),
+            "parameters": record(lambda: parameters_without_runtime_objects(self.parameters)),
+            "returns": records(self.returns),
+            "return_type": value(
+                get_data_type_display_name(self.return_type_obj, self.return_type)
+            ),
+            "unknown_event_count": value(self.unknown_event_count),
+            "unknown_event_reasons": list(value(self.unknown_event_reasons)),
+            "analysis_notes": list(value(self.analysis_notes)),
+            "recovered_from_decompiler": value(self.recovered_from_decompiler),
+            "incomplete_control_flow": value(self.incomplete_control_flow),
+            "deferred_calls": records(self.deferred_calls.values()),
         }
         if self.completed_recovery_proof_ids:
-            result["completed_recovery_proof_ids"] = [
-                _jsonable_nested_tuple(proof_id)
-                for proof_id in self.completed_recovery_proof_ids
-            ]
+            result["completed_recovery_proof_ids"] = records(
+                self.completed_recovery_proof_ids, _jsonable_nested_tuple,
+            )
         if self.completed_recovery_proof_evidence:
-            result["completed_recovery_proof_evidence"] = [
-                _jsonable_nested_tuple(evidence)
-                for evidence in self.completed_recovery_proof_evidence
-            ]
+            result["completed_recovery_proof_evidence"] = records(
+                self.completed_recovery_proof_evidence, _jsonable_nested_tuple,
+            )
         if self.summary_return_candidates:
-            result["summary_return_candidates"] = [
-                candidate.to_dict()
-                for candidate in self.summary_return_candidates
-            ]
+            result["summary_return_candidates"] = records(self.summary_return_candidates)
         if self.return_outcomes or self.divergence_outcomes or self.unknown_outcomes:
-            result["outcomes"] = [
-                *(outcome.to_dict() for outcome in self.return_outcomes),
-                *(outcome.to_dict() for outcome in self.divergence_outcomes),
-                *(outcome.to_dict() for outcome in self.unknown_outcomes),
-            ]
+            result["outcomes"] = records(itertools.chain(
+                self.return_outcomes, self.divergence_outcomes, self.unknown_outcomes,
+            ))
         if self.outcome_seed is not None:
-            result["outcome_seed"] = self.outcome_seed.to_dict()
+            result["outcome_seed"] = record(self.outcome_seed.to_dict)
         if self.termination_path_effect_evidence:
-            result["termination_path_effect_evidence"] = [
-                evidence.to_dict()
-                for evidence in self.termination_path_effect_evidence
-            ]
+            result["termination_path_effect_evidence"] = records(
+                self.termination_path_effect_evidence
+            )
         if self.analysis_scope_key is not None:
-            result["analysis_scope_key"] = self.analysis_scope_key
+            result["analysis_scope_key"] = value(self.analysis_scope_key)
         if self.analysis_view_identity is not None:
-            result["analysis_view_identity"] = _jsonable_nested_tuple(self.analysis_view_identity)
-            result["partition_revision"] = int(self.partition_revision or 0)
+            result["analysis_view_identity"] = record(
+                lambda: _jsonable_nested_tuple(self.analysis_view_identity)
+            )
+            result["partition_revision"] = value(int(self.partition_revision or 0))
         if self.program_is_big_endian is not None:
-            result["program_is_big_endian"] = bool(self.program_is_big_endian)
-        
+            result["program_is_big_endian"] = value(bool(self.program_is_big_endian))
+
         if self.signedness_result:
-            result["signedness"] = self.signedness_result.to_dict()
+            result["signedness"] = record(self.signedness_result.to_dict)
         if self.signature_hypotheses:
-            result["signature_hypotheses"] = list(self.signature_hypotheses)
+            result["signature_hypotheses"] = list(value(self.signature_hypotheses))
         if self.return_type_provenance:
-            result["return_type_provenance"] = _jsonable_nested_tuple(
-                self.return_type_provenance
+            result["return_type_provenance"] = record(
+                lambda: _jsonable_nested_tuple(self.return_type_provenance)
             )
         if self.return_abi_facts:
-            result["return_abi_facts"] = _jsonable_nested_tuple(
-                self.return_abi_facts
+            result["return_abi_facts"] = record(
+                lambda: _jsonable_nested_tuple(self.return_abi_facts)
             )
         if self.comparison_surface is not None:
-            result["comparison_surface"] = self.comparison_surface.to_dict()
+            result["comparison_surface"] = record(self.comparison_surface.to_dict)
         if self.expansion_budget_truncations:
             # Issue #131 PR-B: 正規化済みの全記録（参照 event ID 込み）を出す。
             # snapshot fingerprint は ``to_dict`` から作られるので、marker の有無・
             # 参照情報の増加はそのまま解析前提の同一性に反映される。
-            result["expansion_budget_truncations"] = [
-                record.to_dict()
-                for record in merge_expansion_budget_truncations(
-                    self.expansion_budget_truncations
-                )
-            ]
-        
-        return result
-    
+            result["expansion_budget_truncations"] = records(
+                merge_expansion_budget_truncations(self.expansion_budget_truncations)
+            )
+
+        return work.object_framing(result)
+
     def should_fix_return_to_signed(self) -> bool:
         """
         戻り値の型をsignedに修正すべきかどうか

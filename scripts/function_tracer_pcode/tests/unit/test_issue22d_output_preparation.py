@@ -28,6 +28,7 @@ import pytest
 
 from scripts.function_tracer_pcode.authority.lifecycle import production_boundary
 from scripts.function_tracer_pcode.checker import output_preparation
+from scripts.function_tracer_pcode.checker.debug_trace import Attempt, DebugTrace
 from scripts.function_tracer_pcode.checker.output_preparation import (
     FieldOwner,
     OutputEnvelopeInvariantViolation,
@@ -35,7 +36,9 @@ from scripts.function_tracer_pcode.checker.output_preparation import (
     OutputOptions,
     OutputPreparer,
     Overflow,
+    PreparedField,
     PreparedPayloadStale,
+    PreparedSemanticPayload,
     RESULT_FIELDS,
     build_final_result_envelope,
     fields_owned_by,
@@ -56,7 +59,6 @@ from scripts.function_tracer_pcode.core.budget_policy import (
 )
 from scripts.function_tracer_pcode.core.errors import (
     ExpressionSizeBudgetExceeded,
-    LimitationAfterFinalization,
     PairStopState,
     pair_failure_scope,
     reset_pair_failure_scopes,
@@ -64,8 +66,11 @@ from scripts.function_tracer_pcode.core.errors import (
 from scripts.function_tracer_pcode.core.expression import estimate_legacy_dict_bytes
 from scripts.function_tracer_pcode.core.json_encoding import (
     RESULT_JSON_POLICY,
+    JsonBudgetExhausted,
     JsonEncodingPolicy,
     JsonOutputLimitExceeded,
+    JsonValueRejected,
+    PreparedJson,
 )
 from scripts.function_tracer_pcode.core.render_smt import (
     expression_to_smt,
@@ -150,6 +155,23 @@ def _reason_ids(result):
 
 def _policy(**values):
     return BudgetPolicy(**values)
+
+
+def _field_value(prepared, key):
+    """準備済み payload の 1 field の値（canonical な複製）。"""
+    for row in prepared.fields:
+        if row.key == key:
+            return None if row.json is None else row.json.value()
+    raise KeyError(key)
+
+
+#: 区切りを変えた policy（見積り・準備・書き出しが同じ規則で追従することを確かめる）
+_POLICIES = [
+    JsonEncodingPolicy(),
+    JsonEncodingPolicy(ensure_ascii=True),
+    JsonEncodingPolicy(item_separator=",", key_separator=":"),
+    JsonEncodingPolicy(ensure_ascii=True, item_separator=" ,  ", key_separator=" :"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -428,9 +450,8 @@ def _actual(value, policy=RESULT_JSON_POLICY):
     ).encode("utf-8"))
 
 
-@pytest.mark.parametrize("ensure_ascii", [False, True])
-def test_d5s_value_estimate_matches_the_encoder_for_every_character_class(ensure_ascii):
-    policy = JsonEncodingPolicy(ensure_ascii=ensure_ascii)
+@pytest.mark.parametrize("policy", _POLICIES, ids=["default", "ascii", "compact", "odd"])
+def test_d5s_value_estimate_matches_the_encoder_for_every_character_class(policy):
     shared = {"k": _STRINGS, "日本": [1, 2.5, None, True, False]}
     values = [
         *_STRINGS,
@@ -444,9 +465,18 @@ def test_d5s_value_estimate_matches_the_encoder_for_every_character_class(ensure
         (1, (2, (3,))),
     ]
     for value in values:
-        assert policy.value_bytes(value) == _actual(value, policy)
+        assert policy.measure(value) == _actual(value, policy)
+        prepared = policy.prepare(value)
+        # 準備した値は canonical な JSON（json.loads と同じ形）で、大きさは実際の byte
+        assert json.dumps(prepared.value(), sort_keys=True) == json.dumps(
+            json.loads(json.dumps(value)), sort_keys=True,
+        )
+        assert prepared.encoded_bytes == _actual(value, policy)
+        assert prepared.encoded_bytes == len(
+            policy.encode_bounded(prepared.value(), max_bytes=None).encode("utf-8")
+        )
         assert policy.encode_bounded(value, max_bytes=None) == json.dumps(
-            value, ensure_ascii=ensure_ascii, sort_keys=True, separators=policy.separators,
+            value, ensure_ascii=policy.ensure_ascii, sort_keys=True, separators=policy.separators,
         )
 
 
@@ -458,8 +488,12 @@ def test_d5s_estimate_saturates_and_stops_walking():
         return 10
 
     payload = [object() for _ in range(100_000)]
-    assert RESULT_JSON_POLICY.value_bytes(payload, max_bytes=50, opaque_bytes=_count) == 51
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.measure(payload, max_bytes=50, opaque_bytes=_count)
     assert len(visits) < 10
+    # 準備（出力）では JSON source でない値は数えずに拒む
+    with pytest.raises(JsonValueRejected):
+        RESULT_JSON_POLICY.prepare(payload, max_bytes=50)
 
 
 def test_d5s_bounded_encoder_refuses_past_the_limit():
@@ -717,7 +751,7 @@ def test_o3_m3_a_new_diagnostic_field_is_one_output_row(monkeypatch):
 
     extra = OutputField(
         "extra_observation", FieldOwner.METADATA,
-        lambda r, o: (True, {"observed": 1}), Overflow.TRUNCATE,
+        lambda r, o: {"observed": 1}, Overflow.TRUNCATE,
     )
     monkeypatch.setattr(output_preparation, "RESULT_FIELDS", RESULT_FIELDS + (extra,))
     after = json.loads(build_final_result_envelope(result).text)
@@ -752,7 +786,7 @@ def test_o4_authority_fields_fit_the_headroom_and_non_bmp_bytes_are_counted():
 def test_o4_diagnostics_are_truncated_before_authority_fields():
     result = _decided_result()
     natural = build_final_result_envelope(result)
-    diagnostics_bytes = RESULT_JSON_POLICY.value_bytes(natural.payload["diagnostics"])
+    diagnostics_bytes = RESULT_JSON_POLICY.measure(natural.payload["diagnostics"])
     result.diagnostics = {**(result.diagnostics or {}), "stages": {"huge": "d" * 50_000}}
     limit = natural.total_bytes + 1_000
     prepared = result.prepared_semantic_payload
@@ -787,18 +821,20 @@ def test_o4_an_authority_overflow_is_an_invariant_violation_not_a_limitation():
 def test_replacing_a_prepared_source_after_preparation_is_an_internal_error():
     result = create_mock_result(is_equivalent=None)
     result.prepared_semantic_payload = OutputPreparer(BudgetPolicy.unlimited()).prepare(result)
-    result.sat_pair_info = {"changed": True}
+    # 準備の後に A の元を差し替えるのは、出力に現れない更新（書く側で拒む）
     with pytest.raises(PreparedPayloadStale):
-        result.to_dict()
+        result.sat_pair_info = {"changed": True}
+    # B / C は authority 確定後に決まるので差し替えてよい
+    result.diagnostics = {"after": True}
 
 
 def test_debug_trace_is_a_diagnostic_and_never_causes_a_limitation():
     result = create_mock_result(is_equivalent=None)
-    result.debug_trace = SimpleNamespace(to_dict=lambda: {"records": ["t" * 50_000]})
+    result.debug_trace = _trace_with_attempts(1, final_smt="t" * 50_000)
     result.emit_debug_trace = True
     policy = _policy(serialization_bytes=40_000, envelope_headroom_bytes=10_000)
     prepared = OutputPreparer(policy).prepare(result)
-    trace = dict(prepared.fields)["debug_trace"]
+    trace = _field_value(prepared, "debug_trace")
     assert trace["truncated"] is True and trace["field"] == "debug_trace"
     assert "debug_trace" in prepared.plan.to_diagnostic()["truncated_fields"]
 
@@ -864,30 +900,23 @@ def test_a_budget_hit_inside_the_conditional_lane_leaves_the_decision(monkeypatc
         raise_expression_size_budget_exceeded,
     )
 
+    from scripts.function_tracer_pcode.core.errors import current_pair_ledger
+
+    pair_ledgers = []
+
     def _plan(*_args, **_kwargs):
+        pair_ledgers.append(current_pair_ledger())
         _emit_one_production_signal()
         return create_mock_result(is_equivalent=None, solver_status=SolverStatus.UNKNOWN)
 
-    from scripts.function_tracer_pcode.core.errors import (
-        PairStopState,
-        current_pair_ledger,
-    )
-
-    ledger_seen = []
+    lane_ledgers = []
 
     def _exceeding_proof(*_args, **_kwargs):
-        ledger = current_pair_ledger()
-        try:
-            raise_expression_size_budget_exceeded(
-                BudgetKind.RENDER_BYTES, observed=2, limit=1,
-                site="core.render_smt.emit", target_key=("lane",),
-            )
-        finally:
-            ledger_seen.append((
-                ledger.stop_state(),
-                ledger.recorded_failure_count(),
-                ledger.limitations_after_finalization(),
-            ))
+        lane_ledgers.append(current_pair_ledger())
+        raise_expression_size_budget_exceeded(
+            BudgetKind.RENDER_BYTES, observed=2, limit=1,
+            site="core.render_smt.emit", target_key=("lane",),
+        )
 
     monkeypatch.setattr(conditional_lane, "conditional_lane_is_eligible", lambda _d: True)
     monkeypatch.setattr(
@@ -901,14 +930,20 @@ def test_a_budget_hit_inside_the_conditional_lane_leaves_the_decision(monkeypatc
         "conditional_lane": "stopped_by_limitation",
         "reason_id": REASON,
         "site": "core.render_smt.emit",
+        "swallowed": False,
     }
     assert result.final_outcome == "UNKNOWN"
     assert result.conditional_decision_receipt is None
     assert seen[-1] == "finished"
-    # authority 確定後の限界は台帳へ pair failure として記録されない（stop state は
-    # lane の前のまま）。result 側の stop state は lane より前に確定しているので、
-    # 台帳そのものを見る（修正前は lane の中で PAIR_TERMINAL_LIMITATION になっていた）。
-    assert ledger_seen == [(PairStopState.NONE, 0, 1)]
+    # lane は pair とは別の台帳で走り、限界はその台帳に閉じる。pair の台帳は lane の
+    # 後も何も記録していない（result 側の stop state は lane より前に確定しているので、
+    # 台帳そのものを見る）。
+    (pair_ledger,) = set(pair_ledgers)
+    (lane_ledger,) = lane_ledgers
+    assert lane_ledger is not pair_ledger
+    assert lane_ledger.stop_state() is PairStopState.PAIR_TERMINAL_LIMITATION
+    assert pair_ledger.stop_state() is PairStopState.NONE
+    assert pair_ledger.recorded_failure_count() == 0
     assert result.pair_stop_state is None
 
 
@@ -1081,29 +1116,70 @@ def test_many_small_nodes_stop_at_the_budget():
     assert peak < 4 * 1024 * 1024  # 2,000,000 要素の写しを作っていない
 
 
-def test_a_huge_diagnostic_is_replaced_by_a_marker_without_being_copied():
-    trace = SimpleNamespace(to_dict=lambda: {"records": ["t" * 1024] * 200_000})
+def _trace_with_attempts(count, *, final_smt="(assert true)", events=0):
+    """本物の `DebugTrace`（attempt と causal event を大量に持てる）。"""
+    from scripts.function_tracer_pcode.checker.debug_trace import (
+        AttemptIdentity,
+        ProofCompletionEvent,
+    )
+
+    trace = DebugTrace(planned_phases=["P0_BASE"], known_phases=["P0_BASE"])
+    for index in range(count):
+        trace.add_attempt(Attempt(
+            attempt_id=index, retry_count=0, phase="P0_BASE", stage_path=["P0_BASE"],
+            strategy="pairwise", result=None, transition_reason="UNKNOWN",
+            final_smt=final_smt, solver_results={"all_results": []},
+        ))
+    identity = AttemptIdentity("pairwise", 0)
+    for index in range(events):
+        trace.add_proof_completion(ProofCompletionEvent(
+            completion_id=("c", index), proof_requirement_id={"k": index},
+            proof_artifact_ref=("a", index), proof_status="ok",
+            completed_at_attempt=identity,
+        ))
+    return trace
+
+
+def test_a_huge_diagnostic_is_replaced_by_a_marker_without_being_copied(monkeypatch):
+    """本物の DebugTrace に大量の attempt / event を持たせても、全体の `to_dict()` を
+    作らずに予算で止まり、marker に置き換わる（判定は変えない）。"""
+    trace = _trace_with_attempts(20_000, final_smt="t" * 1024, events=20_000)
     result = _huge_result(debug_trace=trace, emit_debug_trace=True)
+    views = []
+    original_view = Attempt.json_view
+
+    def _counting_view(self):
+        views.append(self)
+        return original_view(self)
+
+    monkeypatch.setattr(Attempt, "json_view", _counting_view)
+    monkeypatch.setattr(
+        DebugTrace, "to_dict", lambda self: pytest.fail("the whole trace was built"),
+    )
     holder = {}
 
     def _prepare():
         holder["prepared"] = OutputPreparer(_SMALL).prepare(result)
 
+    started = time.perf_counter()
     peak = _peak_allocation(_prepare)
+    assert time.perf_counter() - started < 1.0
     prepared = holder["prepared"]
-    marker = dict(prepared.fields)["debug_trace"]
-    assert marker["truncated"] is True and marker["original_items"] == 1
+    marker = _field_value(prepared, "debug_trace")
+    assert marker["truncated"] is True and marker["field"] == "debug_trace"
     assert "debug_trace" in prepared.plan.to_diagnostic()["truncated_fields"]
+    assert len(views) < 100  # 予算に届くまでの attempt しか表現していない
     assert peak < 4 * 1024 * 1024
 
 
 def test_a_shared_subtree_is_counted_per_reference_like_the_encoder():
     shared = {"name": "共有😀", "items": list(range(50))}
     value = {"left": shared, "right": [shared, shared], "nested": {"again": shared}}
-    projected, size = RESULT_JSON_POLICY.project_bounded(value)
+    prepared = RESULT_JSON_POLICY.prepare(value)
+    projected = prepared.value()
     assert projected == value
     assert projected["left"] is not shared  # 写しは live な値と共有しない
-    assert size == _actual(value)
+    assert prepared.encoded_bytes == _actual(value)
 
 
 def test_deeply_nested_containers_are_walked_without_python_recursion():
@@ -1112,8 +1188,8 @@ def test_deeply_nested_containers_are_walked_without_python_recursion():
     for _ in range(300):
         node.append([])
         node = node[-1]
-    projected, size = RESULT_JSON_POLICY.project_bounded(shallow)
-    assert projected == shallow and size == _actual(shallow)
+    prepared = RESULT_JSON_POLICY.prepare(shallow)
+    assert prepared.value() == shallow and prepared.encoded_bytes == _actual(shallow)
 
     deep = []
     node = deep
@@ -1121,24 +1197,21 @@ def test_deeply_nested_containers_are_walked_without_python_recursion():
         node.append([])
         node = node[-1]
     started = time.perf_counter()
-    assert RESULT_JSON_POLICY.value_bytes(deep) == 2 * 100_001
-    with pytest.raises(Exception) as caught:
-        RESULT_JSON_POLICY.project_bounded(deep, max_bytes=1000)
-    assert type(caught.value).__name__ == "JsonBudgetExhausted"
+    assert RESULT_JSON_POLICY.measure(deep) == 2 * 100_001
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.prepare(deep, max_bytes=1000)
     assert time.perf_counter() - started < 2.0
 
 
-@pytest.mark.parametrize("ensure_ascii", [False, True])
-def test_projection_counts_cjk_non_bmp_and_escapes_like_the_encoder(ensure_ascii):
-    policy = JsonEncodingPolicy(ensure_ascii=ensure_ascii)
+@pytest.mark.parametrize("policy", _POLICIES, ids=["default", "ascii", "compact", "odd"])
+def test_projection_counts_cjk_non_bmp_and_escapes_like_the_encoder(policy):
     value = {text: [text, {"k": text}] for text in _STRINGS[:-1]}
-    projected, size = policy.project_bounded(value)
-    assert projected == value
-    assert size == _actual(value, policy)
+    prepared = policy.prepare(value)
+    assert prepared.value() == value
+    assert prepared.encoded_bytes == _actual(value, policy)
     # 1 byte 手前の上限なら写しを作らずに止まる
-    with pytest.raises(Exception) as caught:
-        policy.project_bounded(value, max_bytes=size - 1)
-    assert type(caught.value).__name__ == "JsonBudgetExhausted"
+    with pytest.raises(JsonBudgetExhausted):
+        policy.prepare(value, max_bytes=prepared.encoded_bytes - 1)
 
 
 def test_a_long_string_is_counted_in_chunks_and_stops_early():
@@ -1219,47 +1292,65 @@ def test_the_aggregate_distinct_node_budget_counts_shared_nodes_once():
 # ---------------------------------------------------------------------------
 
 
-def test_a_render_overflow_before_finalization_is_a_pair_terminal_limitation():
-    from scripts.function_tracer_pcode.core.errors import enter_pair_finalization
-
+def test_a_render_overflow_before_authority_is_a_pair_limitation(monkeypatch):
+    """authority 確定 **前**（解析中）の描画超過は pair の限界: UNKNOWN + receipt。"""
     expr = _published_wide_expression()
     full = expression_to_smt(expr)
-    with pair_failure_scope(("before",), None) as ledger, budget_policy_scope(
-        _policy(render_bytes=len(full) - 1)
-    ):
-        with pytest.raises(ExpressionSizeBudgetExceeded):
-            expression_to_smt(expr)
-        assert ledger.pending_failure() is not None
-    with pair_failure_scope(("after",), None) as ledger, budget_policy_scope(
-        _policy(render_bytes=len(full) - 1)
-    ):
-        assert enter_pair_finalization() is True
-        with pytest.raises(LimitationAfterFinalization) as caught:
-            expression_to_smt(expr)
-        assert caught.value.limitation.reason_id == REASON
-        # authority 確定後は台帳へ記録しない（判定を変えない）
-        assert ledger.pending_failure() is None
-        assert ledger.stop_state() is PairStopState.NONE
+    analysis1, analysis2 = _analyses()
 
+    def _analyze(self, name, timeout):
+        if name == "func1":
+            expression_to_smt(expr)  # solver へ渡す描画が予算を超える
+        return analysis1 if name == "func1" else analysis2
 
-def test_a_nested_scope_cannot_finalize_the_outer_pair():
-    identity = ("same-pair",)
-    with pair_failure_scope(identity, None) as outer:
-        with pair_failure_scope(identity, None) as inner:
-            assert inner is outer
-            assert inner.enter_finalization() is False
-        assert outer.is_finalized() is False
-        assert outer.enter_finalization() is True
+    def _stage_plan(*_args, **_kwargs):
+        return create_mock_result(is_equivalent=True, solver_status=SolverStatus.UNSAT)
 
-
-def test_the_pair_boundary_finalizes_after_preparing_the_output(monkeypatch):
+    checker = _new_checker(_connector())
+    checker.budget_policy = _policy(render_bytes=len(full) - 1)
     seen = []
     original = production_boundary._profiled_finish
 
     def _spy(connector, session, result):
-        from scripts.function_tracer_pcode.core.errors import current_pair_ledger
+        seen.append((result.is_equivalent, _reason_ids(result)))
+        return original(connector, session, result)
 
-        seen.append((result.prepared_semantic_payload is not None, current_pair_ledger().is_finalized()))
+    monkeypatch.setattr(production_boundary, "_profiled_finish", _spy)
+    result = _run_pair(analyze=_analyze, stage_plan=_stage_plan, checker=checker)
+    assert seen == [(None, [REASON])]
+    assert result.final_outcome == "UNKNOWN"
+    assert result.pair_stop_state == PairStopState.PAIR_TERMINAL_LIMITATION.value
+    assert result.diagnostics["failures"]["analysis_limitation"]["site"] == "core.render_smt.emit"
+
+
+def test_a_post_decision_scope_keeps_its_failures_out_of_the_pair_ledger():
+    """authority 確定 **後** の計算の限界は、その計算の台帳に閉じる（pair は不変）。"""
+    from scripts.function_tracer_pcode.authority.decision.conditional_lane import (
+        post_decision_failure_scope,
+    )
+    from scripts.function_tracer_pcode.core.errors import current_pair_ledger
+
+    expr = _published_wide_expression()
+    full = expression_to_smt(expr)
+    with pair_failure_scope(("pair",), None) as pair_ledger, budget_policy_scope(
+        _policy(render_bytes=len(full) - 1)
+    ):
+        with post_decision_failure_scope() as lane_ledger:
+            assert current_pair_ledger() is lane_ledger
+            with pytest.raises(ExpressionSizeBudgetExceeded):
+                expression_to_smt(expr)
+        assert current_pair_ledger() is pair_ledger
+        assert lane_ledger.pending_failure().exception.reason_id == REASON
+        assert pair_ledger.pending_failure() is None
+        assert pair_ledger.stop_state() is PairStopState.NONE
+
+
+def test_the_boundary_prepares_the_output_before_finish(monkeypatch):
+    seen = []
+    original = production_boundary._profiled_finish
+
+    def _spy(connector, session, result):
+        seen.append(type(result.prepared_semantic_payload) is PreparedSemanticPayload)
         return original(connector, session, result)
 
     monkeypatch.setattr(production_boundary, "_profiled_finish", _spy)
@@ -1269,7 +1360,7 @@ def test_the_pair_boundary_finalizes_after_preparing_the_output(monkeypatch):
         return create_mock_result(is_equivalent=None, solver_status=SolverStatus.UNKNOWN)
 
     _run_pair(analyze=_analyze_from(*_analyses()), stage_plan=_plan, checker=_new_checker(_connector()))
-    assert seen == [(True, True)]
+    assert seen == [True]
 
 
 # ---------------------------------------------------------------------------
@@ -1279,7 +1370,7 @@ def test_the_pair_boundary_finalizes_after_preparing_the_output(monkeypatch):
 
 def _traced_result(emit):
     result = create_mock_result(is_equivalent=None)
-    result.debug_trace = SimpleNamespace(to_dict=lambda: {"records": ["r"]}, __bool__=lambda: True)
+    result.debug_trace = _trace_with_attempts(1)
     result.emit_debug_trace = emit
     return result
 
@@ -1344,7 +1435,7 @@ def test_node_counting_stops_once_the_budget_is_known_to_be_exceeded():
     assert meter.distinct_nodes == 101
 
 
-def test_a_swallowed_limitation_after_finalization_still_stops_the_lane(monkeypatch):
+def test_a_swallowed_limitation_after_authority_still_stops_the_lane(monkeypatch):
     """確定後の consumer の中で限界が握り潰されても、lane は結果を作らない。"""
     from scripts.function_tracer_pcode.authority.decision import conditional_lane
     from scripts.function_tracer_pcode.core.budget_policy import (
@@ -1374,7 +1465,237 @@ def test_a_swallowed_limitation_after_finalization_still_stops_the_lane(monkeypa
     )
     result, _seen = _run_with_finish_spy(_new_checker(_connector()), _plan, monkeypatch)
     assert result.diagnostics["conditional_lane"] == {
-        "conditional_lane": "stopped_by_limitation", "swallowed": True,
+        "conditional_lane": "stopped_by_limitation",
+        "reason_id": REASON,
+        "site": "core.render_smt.emit",
+        "swallowed": True,
     }
     assert result.conditional_decision_receipt is None
     assert result.final_outcome == "UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
+# snapshot 全体の aggregate（式は小さいが木以外の値が巨大）
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_analysis():
+    return create_mock_analysis("func1", return_type="int")
+
+
+def _unknown_outcomes(count):
+    from scripts.function_tracer_pcode.core.analysis import UnknownOutcome
+
+    return [
+        UnknownOutcome(guard=(), reason=f"reason-{index}", evidence={"index": index})
+        for index in range(count)
+    ]
+
+
+@pytest.mark.parametrize(
+    "field_name, build",
+    [
+        ("analysis_notes", lambda: [f"note-{index}" for index in range(300_000)]),
+        (
+            "completed_recovery_proof_evidence",
+            lambda: [("evidence", index, "x" * 20) for index in range(200_000)],
+        ),
+        ("unknown_outcomes", lambda: _unknown_outcomes(100_000)),
+        ("signature_hypotheses", lambda: [{"h": index} for index in range(200_000)]),
+    ],
+)
+def test_a_snapshot_with_small_expressions_but_huge_other_payload_stops_early(
+    monkeypatch, field_name, build,
+):
+    """式は小さくても、解析 1 件分の表現が予算を超える snapshot は途中で止まる。"""
+    from scripts.function_tracer_pcode.core.analysis import UnknownOutcome
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
+
+    analysis = _snapshot_analysis()
+    setattr(analysis, field_name, build())
+    records = []
+    original = UnknownOutcome.to_dict
+
+    def _counting(self):
+        records.append(self)
+        return original(self)
+
+    monkeypatch.setattr(UnknownOutcome, "to_dict", _counting)
+    policy = BudgetPolicy(serialization_bytes=64_000, envelope_headroom_bytes=0)
+
+    def _snapshot():
+        with pair_failure_scope(("huge-snapshot", field_name), None), budget_policy_scope(policy):
+            with pytest.raises(ExpressionSizeBudgetExceeded) as caught:
+                AnalysisSnapshot.from_function_analysis(analysis)
+        return caught.value
+
+    caught = []
+    started = time.perf_counter()
+    peak = _peak_allocation(lambda: caught.append(_snapshot()))
+    assert time.perf_counter() - started < 2.0
+    (exc,) = caught
+    assert exc.site == "proof.obligations.snapshot.from_function_analysis"
+    assert "budget=serialization_bytes" in exc.evidence_refs
+    assert peak < 4 * 1024 * 1024  # 巨大な値を写し終えてから測っていない
+    assert len(records) < 5_000  # record は予算に届くまでしか作っていない
+
+
+def test_many_small_fields_exceed_the_snapshot_aggregate_together():
+    """どの field も単独では予算内だが、合計が超える snapshot は止まる。"""
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
+
+    analysis = _snapshot_analysis()
+    analysis.analysis_notes = [f"n{index}" for index in range(3_000)]
+    analysis.unknown_event_reasons = [f"u{index}" for index in range(3_000)]
+    analysis.signature_hypotheses = [{"h": index} for index in range(3_000)]
+    sizes = [
+        RESULT_JSON_POLICY.measure(getattr(analysis, name))
+        for name in ("analysis_notes", "unknown_event_reasons", "signature_hypotheses")
+    ]
+    limit = max(sizes) + min(sizes) // 2  # どれも単独では収まり、合計は超える
+    assert sum(sizes) > limit
+    policy = BudgetPolicy(serialization_bytes=limit, envelope_headroom_bytes=0)
+    for name in ("analysis_notes", "unknown_event_reasons", "signature_hypotheses"):
+        assert RESULT_JSON_POLICY.measure(getattr(analysis, name)) < limit
+    with pair_failure_scope(("many-small-fields",), None) as ledger, budget_policy_scope(policy):
+        with pytest.raises(ExpressionSizeBudgetExceeded) as caught:
+            AnalysisSnapshot.from_function_analysis(analysis)
+    assert "budget=serialization_bytes" in caught.value.evidence_refs
+    assert ledger.stop_state() is PairStopState.PAIR_TERMINAL_LIMITATION
+    # 予算内なら snapshot の値は予算の scope の外と同じ
+    small = _snapshot_analysis()
+    outside = AnalysisSnapshot.from_function_analysis(small)
+    with pair_failure_scope(("small",), None), budget_policy_scope(expression_budget_policy({})):
+        inside = AnalysisSnapshot.from_function_analysis(small)
+    assert inside.semantic_fingerprint == outside.semantic_fingerprint
+
+
+def test_the_snapshot_counts_the_whole_representation_exactly():
+    """aggregate が数える byte = snapshot に入る to_dict の JSON byte（木を含めて）。"""
+    from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+
+    analysis = _analysis_with_trees(5)
+    analysis.analysis_notes = ["日本語😀", 'q"\\']
+    analysis.unknown_outcomes = _unknown_outcomes(3)
+    with budget_policy_scope(expression_budget_policy({})):
+        with serialization_scope(site="t", target_parts=("t",)) as work:
+            payload = analysis.to_dict()
+            counted = work.total_bytes
+    # 数えた byte = `to_dict` の値を実際に JSON にした byte（木も木以外も framing も）
+    assert counted == _actual(payload)
+
+
+# ---------------------------------------------------------------------------
+# prepared payload の型契約（canonical JSON だけ・authority 前に拒否）
+# ---------------------------------------------------------------------------
+
+
+class _Opaque:
+    pass
+
+
+def test_an_opaque_object_is_rejected_before_authority(monkeypatch):
+    """A の field に JSON でない object があれば、finish の前に内部エラーになる。"""
+
+    def _plan(*_args, **_kwargs):
+        _emit_one_production_signal()
+        result = create_mock_result(is_equivalent=True, solver_status=SolverStatus.UNSAT)
+        result.sat_pair_info = {"model": _Opaque()}
+        return result
+
+    checker = _new_checker(_connector())
+    result, seen = _run_with_finish_spy(checker, _plan, monkeypatch)
+    # EQ の receipt は発行されない: 内部エラーは finish ではなく既存の ERROR の
+    # durable 化へ進む（finish は一度も EQ を受け取らない）
+    assert all(item == "finished" or item[0] is not True for item in seen)
+    assert result.final_outcome == "ERROR"
+    assert result.failure_status == "internal_exception"
+    assert "JsonValueRejected" in result.error_message
+    prepared = result.prepared_semantic_payload
+    assert all(row.json is None or type(row.json) is PreparedJson for row in prepared.fields)
+    # 書き出しは型変換なしで通る（authority 後に型エラーが見つかる経路は無い）
+    payload = json.loads(build_final_result_envelope(result).text)
+    assert payload["final_outcome"] == "ERROR"
+    assert "model" not in json.dumps(payload.get("sat_pair_info"))
+
+
+def test_the_prepared_payload_accepts_only_prepared_json():
+    raw = {"model": _Opaque()}
+    with pytest.raises(TypeError):
+        PreparedJson(raw, 10, RESULT_JSON_POLICY, _token=object())
+    with pytest.raises(TypeError):
+        PreparedField("sat_pair_info", raw, "json")
+    good = OutputPreparer(BudgetPolicy.unlimited()).prepare(create_mock_result(is_equivalent=None))
+    with pytest.raises(TypeError):
+        dataclasses.replace(good, fields=good.fields + (("sat_pair_info", raw),))
+    with pytest.raises(TypeError):
+        # B の field は A に入れられない
+        dataclasses.replace(
+            good, fields=(PreparedField("decision_receipt", RESULT_JSON_POLICY.prepare({}), "json"),),
+        )
+
+
+def test_mutating_live_objects_after_preparation_does_not_leak_into_the_output():
+    result = create_mock_result(is_equivalent=None)
+    result.sat_pair_info = {"case1_summary": "before"}
+    result.constrained_fragments = ["f1"]
+    result.prepared_semantic_payload = OutputPreparer(BudgetPolicy.unlimited()).prepare(result)
+    # live な container を中身だけ書き換える（差し替えではないので書く側では拒めない）
+    result.sat_pair_info["case1_summary"] = "after"
+    result.constrained_fragments.append("f2")
+    payload = result.to_dict()
+    assert payload["sat_pair_info"] == {"case1_summary": "before"}
+    assert payload["constrained_fragments"] == ["f1"]
+    # 受け取った出力を壊しても準備済みの値は変わらない
+    payload["sat_pair_info"]["case1_summary"] = "tampered"
+    assert build_final_result_envelope(result).payload["sat_pair_info"] == {
+        "case1_summary": "before",
+    }
+
+
+# ---------------------------------------------------------------------------
+# JSON の framing は policy だけが持つ（区切りを変えても見積り == 書き出し）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("policy", _POLICIES, ids=["default", "ascii", "compact", "odd"])
+def test_the_final_envelope_bytes_equal_the_encoder_for_any_separator(policy):
+    result = _decided_result()
+    result.diagnostics = {**(result.diagnostics or {}), "note": "日本語😀 \"q\""}
+    unlimited = OutputPreparer(BudgetPolicy.unlimited(), encoding=policy).prepare(
+        result, result.prepared_semantic_payload.options,
+    )
+    result.prepared_semantic_payload = unlimited
+    envelope = build_final_result_envelope(result)
+    assert envelope.total_bytes == len(envelope.text.encode("utf-8"))
+    assert envelope.text == policy.dumps(envelope.payload)
+    # 上限をちょうどにしても収まり、1 byte 減らすと C が切り詰められる（B は不変）
+    exact = envelope.total_bytes
+    for limit, truncated in ((exact, False), (exact - 1, True)):
+        result.prepared_semantic_payload = dataclasses.replace(
+            unlimited,
+            plan=dataclasses.replace(unlimited.plan, max_bytes=limit, headroom_bytes=limit - 1),
+        )
+        bounded = build_final_result_envelope(result)
+        assert bounded.total_bytes == len(bounded.text.encode("utf-8")) <= limit
+        assert bool(bounded.truncated_metadata) is truncated
+        assert bounded.payload["decision_receipt"] == envelope.payload["decision_receipt"]
+
+
+@pytest.mark.parametrize("policy", _POLICIES, ids=["default", "ascii", "compact", "odd"])
+def test_the_object_budget_counts_framing_like_the_encoder(policy):
+    from scripts.function_tracer_pcode.core.json_encoding import JsonObjectBudget
+
+    members = {"a": 1, "日本": ["x", {"y": None}], "z": "😀"}
+    budget = JsonObjectBudget(policy, None)
+    assert budget.total_bytes == len(policy.dumps({}).encode())
+    for key, value in members.items():
+        budget.add(key, policy.measure(value))
+    assert budget.total_bytes == len(policy.dumps(members).encode("utf-8"))
+
+
+def test_an_authority_value_that_is_not_json_is_an_invariant_violation():
+    result = _decided_result()
+    result.canonical_c_active_base = ({"row": _Opaque()},)
+    with pytest.raises(OutputEnvelopeInvariantViolation):
+        build_final_result_envelope(result)

@@ -9,6 +9,10 @@ import json
 from types import MappingProxyType
 from typing import Any, Mapping, Tuple
 
+from scripts.function_tracer_pcode.core.budget_policy import (
+    alias_serialized_tree,
+    serialization_scope,
+)
 from scripts.function_tracer_pcode.proof.obligations.model import SemanticFactProvenance
 
 
@@ -63,13 +67,44 @@ def deep_freeze(value: Any) -> Any:
     return value
 
 
-def _semantic_effect_summary_projection(effect_summary: Any) -> Any:
+def _semantic_effect_summary_projection(effect_summary: Any, work: Any = None) -> Any:
     if effect_summary is None:
         return None
     # The dataclass projection is object-derived and includes stores, calls,
     # completeness reasons, and the function control/effect profile.  freeze()
     # rejects any opaque object that lacks a stable key instead of stringifying it.
-    return SnapshotFingerprintCodec.freeze(effect_summary)
+    if work is None or not _is_plain_dataclass(effect_summary):
+        return SnapshotFingerprintCodec.freeze(effect_summary)
+    # Issue #22 PR-22-D: 同じ投影（`freeze` の dataclass 分岐と同じ値）を、field の
+    # collection は 1 要素ずつ作って直列化の作業量へ足す。効果が大量でも、予算を
+    # 超えた時点で残りの要素を投影しない。
+    return (
+        effect_summary.__class__.__qualname__,
+        tuple(
+            (item.name, _freeze_counted(getattr(effect_summary, item.name), work))
+            for item in fields(effect_summary)
+        ),
+    )
+
+
+def _is_plain_dataclass(value: Any) -> bool:
+    """`freeze` が dataclass 分岐で投影する値か（stable key / to_dict を持たない）。"""
+
+    return is_dataclass(value) and not isinstance(value, type) and not any(
+        callable(getattr(value, name, None)) for name in ("stable_key", "to_key", "to_dict")
+    )
+
+
+def _freeze_counted(value: Any, work: Any) -> Any:
+    """`SnapshotFingerprintCodec.freeze(value)` と同じ値を、要素ごとに数えながら作る。"""
+
+    freeze = SnapshotFingerprintCodec.freeze
+    if isinstance(value, (tuple, list)):
+        return tuple(work.records(value, freeze))
+    if isinstance(value, Mapping):
+        items = tuple(work.records(value.items(), lambda pair: (freeze(pair[0]), freeze(pair[1]))))
+        return SnapshotFingerprintCodec.sorted_mapping_items(items)
+    return work.record(lambda: freeze(value))
 
 
 def _classify_analysis_notes(notes: Any) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
@@ -101,10 +136,7 @@ class SnapshotFingerprintCodec:
             return ("bytes", value.hex())
         if isinstance(value, Mapping):
             items = tuple((cls.freeze(key), cls.freeze(item)) for key, item in value.items())
-            canonical_keys = tuple(key for key, _item in items)
-            if len(set(canonical_keys)) != len(canonical_keys):
-                raise ValueError("mapping contains duplicate canonical semantic keys")
-            return tuple(sorted(items, key=lambda pair: cls._sort_key(pair[0])))
+            return cls.sorted_mapping_items(items)
         if isinstance(value, (tuple, list)):
             return tuple(cls.freeze(v) for v in value)
         if isinstance(value, (set, frozenset)):
@@ -117,7 +149,11 @@ class SnapshotFingerprintCodec:
             return (value.__class__.__qualname__, cls.freeze(to_key()))
         to_dict = getattr(value, "to_dict", None)
         if callable(to_dict):
-            return (value.__class__.__qualname__, cls.freeze(to_dict()))
+            built = to_dict()
+            frozen = cls.freeze(built)
+            # Issue #22 PR-22-D: 木表現を写した側は、元の木として数え済み
+            alias_serialized_tree(built, frozen)
+            return (value.__class__.__qualname__, frozen)
         if is_dataclass(value):
             return (
                 value.__class__.__qualname__,
@@ -126,6 +162,15 @@ class SnapshotFingerprintCodec:
         raise TypeError(
             f"opaque object {value.__class__.__qualname__} has no object-derived stable identity"
         )
+
+    @classmethod
+    def sorted_mapping_items(cls, items: Tuple[Tuple[Any, Any], ...]) -> Tuple[Tuple[Any, Any], ...]:
+        """凍結した (key, 値) の組を、mapping の canonical な並びにする。"""
+
+        canonical_keys = tuple(key for key, _item in items)
+        if len(set(canonical_keys)) != len(canonical_keys):
+            raise ValueError("mapping contains duplicate canonical semantic keys")
+        return tuple(sorted(items, key=lambda pair: cls._sort_key(pair[0])))
 
     @staticmethod
     def _sort_key(value: Any) -> str:
@@ -175,11 +220,10 @@ class AnalysisSnapshot:
         to_dict = getattr(analysis, "to_dict", None)
         if not callable(to_dict):
             raise TypeError("analysis must provide object-derived to_dict() data")
-        # Issue #22 PR-22-D: snapshot 1 つ分（解析の `to_dict()` と効果要約の投影）
-        # を 1 つの直列化の作業量として数える。木表現を作る前に予算と比べるので、
-        # 超過する snapshot は作られない（pair terminal な限界）。
-        from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
-
+        # Issue #22 PR-22-D: snapshot 1 つ分の最終表現（解析の `to_dict()` と効果要約の
+        # 投影）を **1 つの直列化の作業量** として数える。木も木以外の値も、作る前か
+        # record 1 件を作った直後に足され、合計が予算を超えた時点で残りを作らずに
+        # pair terminal な限界になる（式 1 本ごとの予算とは別の aggregate）。
         with serialization_scope(
             site=SNAPSHOT_SERIALIZATION_SITE,
             target_parts=(
@@ -188,11 +232,11 @@ class AnalysisSnapshot:
                 getattr(analysis, "function_name", None),
                 getattr(analysis, "entry_point", None),
             ),
-        ):
-            return cls._from_function_analysis_unscoped(analysis, to_dict)
+        ) as work:
+            return cls._from_function_analysis_with(analysis, to_dict, work)
 
     @classmethod
-    def _from_function_analysis_unscoped(cls, analysis: Any, to_dict: Any) -> "AnalysisSnapshot":
+    def _from_function_analysis_with(cls, analysis: Any, to_dict: Any, work: Any) -> "AnalysisSnapshot":
         semantic_fields = dict(to_dict())
         # These fields describe execution/diagnostic state rather than the
         # immutable extraction premise.  Proofs are applied through a derived
@@ -204,7 +248,7 @@ class AnalysisSnapshot:
         )
         semantic_fields["semantic_analysis_notes"] = semantic_notes
         semantic_fields["effect_summary"] = _semantic_effect_summary_projection(
-            getattr(analysis, "effect_summary", None)
+            getattr(analysis, "effect_summary", None), work,
         )
         function_ref = getattr(analysis, "function_ref", None)
         function_key = (
