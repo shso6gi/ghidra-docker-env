@@ -282,12 +282,28 @@ EXPANDER_DEDUP_CASE_LIMIT = _positive_int_setting("FT_EXPANDER_DEDUP_CASE_LIMIT"
 # これらを渡さない（run 単位の調査用）。
 
 #: (BudgetPolicy の field 名, 環境変数, 既定値)。既定値 `None` は無制限。
+#:
+#: 値の根拠（U-1、PR-22-D 時点の実測。固定 subset 144 pair・recorded corpus・
+#: `ell/ellProgram` B12_B16 の 13 関数・subset の TIMEOUT 5 pair を予算無しで流し、
+#: kill された pair は stage journal の観測値を読んだ）:
+#:
+#: * 観測した最大値はどれも小さい — 展開の distinct node < 2048
+#:   （`ellProgram/snippet`。EQ / NOT_EQ に届いた pair では最大 84）、展開 case
+#:   < 32、solver へ渡す描画 14,485 B、木表現 545 KB、結果 JSON 2.45 MB
+#:   （うち authority 確定後の field + 診断 2.39 MB、準備した payload 277 KB）。
+#: * kill された 12 pair はすべて条件簡約（CNF / 構造比較 / oracle）か solver の
+#:   区間にいて、式の大きさで止まっていない（#105 / #106 の担当）。
+#:
+#: したがって予算は「指数的な膨張に対する安全上限」で、TIMEOUT を狙って値を
+#: 下げない（下げても正しい判定を削るだけで、時間の原因には届かない）。既定値は
+#: 観測の最大値に対して 8〜290 倍の余裕を取った 2 の冪。値を変えるときは
+#: この表だけを変え、根拠の実測を PR に残す。
 EXPRESSION_BUDGET_DEFAULTS = (
-    ("expression_nodes", "FT_EXPRESSION_NODE_BUDGET", None),
-    ("expansion_cases", "FT_EXPANSION_CASE_BUDGET", None),
-    ("render_bytes", "FT_RENDER_BYTES_BUDGET", None),
-    ("serialization_bytes", "FT_SERIALIZATION_BYTES_BUDGET", None),
-    ("envelope_headroom_bytes", "FT_ENVELOPE_HEADROOM_BYTES", 0),
+    ("expression_nodes", "FT_EXPRESSION_NODE_BUDGET", 1 << 14),       # 16,384
+    ("expansion_cases", "FT_EXPANSION_CASE_BUDGET", 1 << 10),         # 1,024
+    ("render_bytes", "FT_RENDER_BYTES_BUDGET", 1 << 22),              # 4 MiB
+    ("serialization_bytes", "FT_SERIALIZATION_BYTES_BUDGET", 1 << 26),  # 64 MiB
+    ("envelope_headroom_bytes", "FT_ENVELOPE_HEADROOM_BYTES", 1 << 25),  # 32 MiB
 )
 
 _BUDGET_OFF_WORDS = frozenset({"off", "none", "unlimited", "0"})

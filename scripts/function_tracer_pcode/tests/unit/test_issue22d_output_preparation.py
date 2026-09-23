@@ -945,3 +945,16 @@ def test_growing_observations_reach_the_stage_journal_logarithmically(tmp_path):
         if row["payload"].get("note") == "expression_budget_observed"
     ]
     assert values == [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+
+
+def test_production_defaults_stop_an_exponential_tree_before_building_it():
+    """既定値（config）のままで、指数的な木表現は作る前に止まる。"""
+    with pair_failure_scope(("defaults",), None) as ledger, budget_policy_scope(
+        expression_budget_policy({})
+    ):
+        started = time.perf_counter()
+        with pytest.raises(ExpressionSizeBudgetExceeded) as caught:
+            _shared_dag(40).to_dict()
+        assert time.perf_counter() - started < 1.0
+    assert caught.value.site == "core.expression.to_dict"
+    assert ledger.stop_state() is PairStopState.PAIR_TERMINAL_LIMITATION
