@@ -70,6 +70,7 @@ _LAZY = {
     **{
         name: (f"{_PACKAGE}.binding", name)
         for name in (
+            "ComparisonBoundCallable",
             "OUTSIDE_COMPARISON",
             "RELATION_DIGEST_KEY",
             "bind_evidence_to_comparison",

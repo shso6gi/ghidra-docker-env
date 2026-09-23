@@ -7,6 +7,8 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, 
 
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    current_relation_digest,
+    evidence_relation_binding_holds,
     run_in_current_comparison,
 )
 from scripts.function_tracer_pcode.proof.cause_identity import (
@@ -121,7 +123,11 @@ class ObligationRuntimeSession:
     callbacks: Dict[Tuple[Any, ...], Callable[[], Any]] = field(default_factory=dict)
     producers: Dict[Tuple[Any, ...], Callable[[], Any]] = field(default_factory=dict)
     results: Dict[Tuple[Any, ...], Any] = field(default_factory=dict)
-    proof_outcomes: Dict[Tuple[Any, ...], FunctionProofOutcome] = field(default_factory=dict)
+    #: proof outcome を、それを出した比較の relation の digest ごとに分けて持つ
+    #: （Issue #167）。読むのは ``proof_outcomes``（現在の比較の分）だけ。
+    proof_outcomes_by_relation: Dict[Optional[str], Dict[Tuple[Any, ...], FunctionProofOutcome]] = field(
+        default_factory=dict
+    )
     pending_counterexamples: Dict[Tuple[Any, ...], PendingCounterexampleSafety] = field(default_factory=dict)
     reason_requirements: Dict[int, Tuple[ProofRequirementId, ...]] = field(default_factory=dict)
     unary_artifact_cache: ValidatedUnaryArtifactCache = field(
@@ -487,6 +493,37 @@ class ObligationRuntimeSession:
     def premise_digest(self) -> str:
         return self.view_records[self.current_view.view_id].premise_digest
 
+    @property
+    def proof_outcomes(self) -> Dict[Tuple[Any, ...], FunctionProofOutcome]:
+        """現在の比較の relation で出た proof outcome（別の relation の outcome は見えない）。"""
+
+        return self._outcomes_for(current_relation_digest())
+
+    def _outcomes_for(self, relation_digest: Optional[str]) -> Dict[Tuple[Any, ...], FunctionProofOutcome]:
+        return self.proof_outcomes_by_relation.setdefault(relation_digest, {})
+
+    def _comparison_instance(
+        self,
+        requirement: ProofRequirementId,
+        callback: Optional[Callable[[], Any]],
+    ) -> Tuple[ObligationInstanceId, Optional[Callable[[], Any]]]:
+        """obligation の同一性と producer を、それを積む比較の relation に束縛する（Issue #167）。
+
+        producer は積んだ比較の relation の下で実行し、同じ requirement でも relation が
+        違えば別の obligation にする（結果・outcome を共有しない）。replanner が作った
+        producer は、replanner を登録した比較の relation を持ったまま積まれる。
+        """
+
+        bound = None if callback is None else run_in_current_comparison(callback)
+        relation = current_relation_digest() if bound is None else bound.relation_digest
+        instance = ObligationInstanceId(
+            requirement,
+            self.current_view.view_id,
+            self.premise_digest,
+            comparison_relation_digest=relation,
+        )
+        return instance, bound
+
     def schedule(
         self,
         requirement: ProofRequirementId,
@@ -498,17 +535,11 @@ class ObligationRuntimeSession:
     ) -> WorkItem:
         # Issue #124: obligation の構築（scheduling）を計測する。producer の実行は run_next 側なので含まない。
         with stage_region("obligation_build"):
-            instance = ObligationInstanceId(
-                requirement,
-                self.current_view.view_id,
-                self.premise_digest,
-            )
+            instance, callback = self._comparison_instance(requirement, callback)
             item = WorkItem(instance, kind, payload)
             self.worklist.add(item)
             key = instance.to_key()
             if callback is not None:
-                # Issue #167: producer は、積んだ比較の relation の下で実行する。
-                callback = run_in_current_comparison(callback)
                 self.callbacks[key] = callback
                 self.producers[requirement.to_key()] = callback
             for dependency in depends_on:
@@ -525,11 +556,7 @@ class ObligationRuntimeSession:
         depends_on: Iterable[ProofRequirementId] = (),
     ) -> Any:
         """Schedule and execute one concrete producer in the current view."""
-        instance = ObligationInstanceId(
-            requirement,
-            self.current_view.view_id,
-            self.premise_digest,
-        )
+        instance, producer = self._comparison_instance(requirement, producer)
         cached_key = instance.to_key()
         if cached_key in self.results:
             self.events.append(ObligationExecutionEvent(
@@ -612,12 +639,14 @@ class ObligationRuntimeSession:
         callback = self.callbacks.get(key)
         value = callback() if callback is not None else item.payload
         self.results[key] = value
+        # outcome は、その obligation を積んだ比較の relation の分に記録する。
+        outcomes = self._outcomes_for(item.obligation_id.comparison_relation_digest)
         pending_safety: Optional[PendingCounterexampleSafety] = None
         result_role = getattr(value, "result_role", WorkResultRole.PROOF_DECISION)
         if result_role == WorkResultRole.NON_DECISIONAL_EXECUTION:
             pass
         elif isinstance(value, FunctionProofOutcome):
-            self.proof_outcomes[item.obligation_id.requirement_id.to_key()] = value
+            outcomes[item.obligation_id.requirement_id.to_key()] = value
         elif hasattr(value, "is_equivalent"):
             semantic = getattr(value, "is_equivalent", None)
             if semantic is True:
@@ -640,7 +669,7 @@ class ObligationRuntimeSession:
                 outcome = FunctionProofOutcome.NOT_EQUIVALENT
             else:
                 outcome = FunctionProofOutcome.INCONCLUSIVE
-            self.proof_outcomes[item.obligation_id.requirement_id.to_key()] = outcome
+            outcomes[item.obligation_id.requirement_id.to_key()] = outcome
         if item.state == ExecutionState.RUNNING:
             self.worklist.complete(item)
             event = "completed"
@@ -807,6 +836,9 @@ class ObligationRuntimeSession:
         for wrapper in evidence_wrappers:
             evidence = wrapper.get("evidence", wrapper)
             if not isinstance(evidence, Mapping):
+                continue
+            if not evidence_relation_binding_holds(evidence):
+                # 別の比較（relation）で作った証拠から、この比較の view を作らない（Issue #167）。
                 continue
             status = str(evidence.get("proof_status") or evidence.get("status") or "").lower()
             if status not in {"complete", "completed", "discharged", "proven", "verified"}:

@@ -171,12 +171,14 @@ def test_stage_runner_gates_use_the_relation_of_the_comparison_that_made_the_res
     assert branch_comparison_relation(SimpleNamespace()) is None
 
 
-def test_a_prepared_strategy_refuses_to_run_outside_its_relations_comparison(monkeypatch):
+@pytest.mark.parametrize("strategy_name", ["pairwise", "monolithic"])
+def test_a_prepared_strategy_refuses_to_run_outside_its_relations_comparison(monkeypatch, strategy_name):
     """frame の relation と、証拠を束縛する比較の relation は同じでなければならない。"""
 
     from unittest.mock import Mock
 
     from scripts.function_tracer_pcode.proof.call_effect import preflight
+    from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
     from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
 
     raw1, raw2 = _analysis("f", [4]), _analysis("g", [4])
@@ -186,7 +188,89 @@ def test_a_prepared_strategy_refuses_to_run_outside_its_relations_comparison(mon
     frame = SimpleNamespace(prepared=SimpleNamespace(analysis1=raw1, analysis2=raw2, input_correspondence=relation))
     monkeypatch.setattr(preflight, "current_dispatch_depth", lambda: 1)
     monkeypatch.setattr(preflight, "consume_prepared_dispatch_frame", lambda *_args: frame)
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = {"pairwise": PairwiseStrategy, "monolithic": MonolithicStrategy}[strategy_name](
+        Mock(), Mock(), debug=False,
+    )
     for scope in (None, other):
         with comparison_relation_scope(scope), pytest.raises(RuntimeError, match="comparison_relation_scope_mismatch"):
             strategy.check(raw1, raw2)
+
+
+def test_gate_outcomes_of_another_relation_do_not_discharge_this_comparisons_reason():
+    """runtime の obligation と proof outcome は relation ごと（review で見つけた blocker）。
+
+    再帰抽象化の branch（relation B）と後の branch（relation A）は 1 つの runtime を
+    共有する。B で出た gate outcome と B の証拠が、同じ requirement を持つ A の reason を
+    解消してはならない（A の gate は A の relation で実行し直す）。
+    """
+
+    from scripts.function_tracer_pcode.proof.obligations.model import FunctionProofOutcome
+
+    relation_a, relation_b = _two_relations()
+    runtime = ObligationRuntimeSession.create(_analysis("f", [4]), _analysis("g", [4]))
+    requirement = _requirement("readonly_identity")
+    runs = []
+
+    def reason():
+        return SimpleNamespace(
+            reason_id="readonly_identity_missing", recovery_proof_kind="", stage="S_PAIRWISE",
+            proof_requirement_ids=(requirement.to_dict(),), pair_or_case=None, object_target_key=None,
+        )
+
+    def run_gates(relation, gate_reason, outcome):
+        with comparison_relation_scope(relation):
+            runtime.plan_proof_gates(
+                SimpleNamespace(unknown_reasons=[gate_reason]), {},
+                lambda *_args: lambda: runs.append(current_relation_digest()) or outcome,
+            )
+            while runtime.run_next()[0] is not None:
+                pass
+
+    evidence_b = bind_evidence_to_relation({
+        "proof_requirement_id": requirement.to_dict(), "status": "complete", "proof_source": "gate_test",
+    }, relation_b)
+
+    reason_b, reason_a = reason(), reason()
+    run_gates(relation_b, reason_b, FunctionProofOutcome.EQUIVALENT)
+    # A の gate は B の証拠を採用しないので INCONCLUSIVE を返す。A の比較で実行されること。
+    run_gates(relation_a, reason_a, FunctionProofOutcome.INCONCLUSIVE)
+    assert runs == [relation_b.digest, relation_a.digest]
+    with comparison_relation_scope(relation_a):
+        # B の証拠は A の比較の view を作らず、B の outcome は A の reason を解消しない。
+        assert runtime.apply_completed_evidence(({"evidence": evidence_b},)) == ()
+        assert runtime.outcome_for_reason(reason_a) == FunctionProofOutcome.INCONCLUSIVE
+    with comparison_relation_scope(relation_b):
+        # B の比較の中では、B の証拠と outcome が B の reason を解消する。
+        assert len(runtime.apply_completed_evidence(({"evidence": evidence_b},))) == 1
+        assert runtime.outcome_for_reason(reason_b) == FunctionProofOutcome.EQUIVALENT
+    with comparison_relation_scope(relation_a):
+        assert runtime.outcome_for_reason(reason_a) == FunctionProofOutcome.INCONCLUSIVE
+
+
+def test_run_strategy_branch_runs_the_strategy_in_the_frames_relation():
+    from unittest.mock import Mock, patch
+
+    from scripts.function_tracer_pcode.checker import strategy_execution as se
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+
+    relation, _other = _two_relations()
+    seen = []
+    strategy = Mock(spec=PairwiseStrategy)
+    strategy.check.side_effect = lambda *_args: seen.append(current_relation_digest()) or SimpleNamespace(
+        is_equivalent=None, comparison_execution_receipt=None,
+    )
+    frame = SimpleNamespace(
+        obligation_runtime=None, replan_successor_plan=None, pair_disposition_ledger=None, receipt=None,
+        cleanup_complete=False, close=Mock(), prepared=SimpleNamespace(input_correspondence=relation),
+    )
+    ctx = SimpleNamespace(strategy=strategy, replan_plan=None, branch_id="S_PAIRWISE")
+    with patch.object(se, "push_prepared_dispatch_frame", return_value="token"), \
+         patch.object(se, "close_prepared_dispatch_frame", return_value=True), \
+         patch.object(se, "diagnostic_projection", side_effect=lambda manifest, _frame: dict(manifest)):
+        se.run_strategy_branch(
+            ctx, frame, SimpleNamespace(), "a1", "a2", False,
+            locally_issued_branch_authority=None, call_effect_shadow_manifest={},
+            debug_print=lambda _message: None, apply_preflight_final_gate=Mock(),
+        )
+    assert seen == [relation.digest]
+    assert current_relation_digest() is None

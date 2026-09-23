@@ -1,4 +1,6 @@
 from types import SimpleNamespace
+
+import pytest
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker, StageID, StageSpec
@@ -348,6 +350,74 @@ def test_production_gate_producer_and_aggregator_close_unknown_to_eq():
     runtime = checker._obligation_runtime_session
     assert runtime.artifacts[0].requirement_id == requirement
     assert any(event.kind == "return_coverage" for event in runtime.events)
+
+
+@pytest.mark.parametrize("evidence_relation", ["same", "other"])
+def test_branch_gates_run_in_the_relation_of_the_comparison_that_made_the_result(evidence_relation):
+    """Issue #167: branch の後の gate と集約は、その結果を作った比較の relation で行う。
+
+    同じ runtime に別の relation の比較で作った証拠が来ても、この結果の reason を
+    解消しない（EQ に閉じない）。
+    """
+
+    from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis, ReturnInfo
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        bind_evidence_to_relation,
+        build_input_correspondence_set,
+        current_relation_digest,
+    )
+
+    def analysis(sizes):
+        return FunctionReturnAnalysis(
+            function_name="f", entry_point="0x1000",
+            parameters=[{"name": f"p{i}", "index": i, "size": size, "data_type": "int"} for i, size in enumerate(sizes)],
+            returns=[ReturnInfo("0x1010", Expression.parameter("p0", 0, data_type="int", size=4), [])],
+            return_type="int",
+        )
+
+    relation = build_input_correspondence_set(analysis([4]), analysis([4]))
+    other = build_input_correspondence_set(analysis([4, 4]), analysis([4, 4]))
+    requirement = ProofRequirementId.create(
+        "return_coverage_completion", ("coverage", "f"), ProofRequirementContract("return coverage complete"),
+    )
+    reason = SimpleNamespace(
+        reason_id="return_coverage_gap", recovery_proof_kind="return_coverage_completion",
+        proof_requirement_ids=(requirement.to_dict(),), object_target_key=("coverage", "f"),
+        pair_or_case=None, stage="S_PAIRWISE",
+    )
+    result = _result(None, (reason,))
+    result.pairwise_stats = {"total_pairs": 1, "unsat_pairs": 1, "sat_pairs": 0, "unknown_pairs": 0, "error_pairs": 0}
+    result.decision_gated_by_pending_proof = True
+    result._prepared_dispatch_frame = SimpleNamespace(
+        prepared=SimpleNamespace(input_correspondence=relation), pair_disposition_ledger=None,
+    )
+    stamped_with = relation if evidence_relation == "same" else other
+    result.completed_recovery_proof_evidence = [{"evidence": bind_evidence_to_relation({
+        "proof_requirement_id": requirement.to_dict(), "status": "complete", "proof_source": "coverage_test_producer",
+    }, stamped_with)}]
+    gate_relations = []
+
+    def coverage_gate(*_args):
+        gate_relations.append(current_relation_digest())
+        return True
+
+    strategy = SimpleNamespace(
+        _return_coverage_proof_is_complete=coverage_gate,
+        _call_effect_summary_proof_is_complete=lambda *_args: False,
+        _recovery_proof_is_complete=lambda *_args: False,
+    )
+    checker = _checker([result])
+    checker.stage_plan = [StageSpec(StageID.S_PAIRWISE, "pairwise", "pairwise")]
+    checker.pairwise_strategy = strategy
+
+    final = _run(checker, "_run_stage_plan")
+
+    assert gate_relations == [relation.digest]
+    if evidence_relation == "same":
+        assert final.is_equivalent is True
+    else:
+        assert final.is_equivalent is None
+        assert [item.reason_id for item in final.unknown_reasons] == ["return_coverage_gap"]
 
 
 def test_completed_proof_replans_pairwise_on_successor_view_and_ledger():

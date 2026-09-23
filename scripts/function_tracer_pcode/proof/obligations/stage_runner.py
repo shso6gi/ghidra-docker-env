@@ -456,7 +456,10 @@ def run_obligation_branch_plan(
                 analysis1, analysis2, result
             )
         pre_aggregation_outcome = result.is_equivalent
-        DecisionAggregator.apply(result, runtime)
+        # 結果の reason を解消できるのは、その結果を作った比較の relation で出た
+        # proof outcome だけ（Issue #167。runtime は outcome を relation ごとに分ける）。
+        with comparison_relation_scope(branch_comparison_relation(result)):
+            DecisionAggregator.apply(result, runtime)
         post_aggregation_outcome = result.is_equivalent
         dispatch_frame = getattr(result, "_prepared_dispatch_frame", None)
         strategy_result = getattr(result, "_strategy_result", None)

@@ -7,6 +7,12 @@ relation の lifetime は「1 つの raw pair の比較」で、analysis object 
 証拠は、その比較の relation が含意した入力仮定・書き換え（``RewriteAuthorization``）
 の下でだけ成り立つので、別の relation の比較へ持ち込んではならない。
 
+束縛するのは relation の値（digest）で、比較 1 回ごとの identity ではない。同じ raw
+pair を同じ relation で比べる branch（pairwise・loop template・monolithic・replan）は
+証拠を共有してよい（同じ入力仮定の下の事実で、何についての proof かは proof の
+object target が区別する）。relation の値が違う比較（例: 再帰抽象化が summary の
+parameter を足した抽象 pair）とは共有しない。
+
 契約:
 
 * 比較の範囲: ``comparison_relation_scope(relation)`` が、1 つの比較の間だけ
@@ -20,9 +26,10 @@ relation の lifetime は「1 つの raw pair の比較」で、analysis object 
   現在の relation の digest を record に記録する（relation を明示的に受け取った
   producer は ``bind_evidence_to_relation``）。比較の外で作った record には
   「比較の外」を記録し、どの比較でも採用されない。
-* 後で実行する仕事: worklist に積む producer / replanner は
-  ``run_in_current_comparison`` で登録時の比較の relation を持ち運ぶ（runtime が
-  一括で行う）。
+* 後で実行する仕事と、その結果: worklist に積む producer / replanner は
+  ``run_in_current_comparison`` で登録時の比較の relation を持ち運び、runtime は
+  obligation の同一性と proof outcome をその relation ごとに分ける（runtime が一括で
+  行う）。別の relation の比較で出た outcome が、この比較の reason を解消しない。
 * consumer: gate は ``comparison_evidence`` を通してだけ証拠を読む。digest を
   持つ record は、現在の relation の digest と値で一致したときだけ残る。
   digest を持たない record は比較の前に関数単体で作った事実（analysis 層の
@@ -91,23 +98,40 @@ def comparison_relation_scope(relation: Optional[InputCorrespondenceSet]) -> Ite
         _CURRENT_COMPARISON.reset(token)
 
 
-def run_in_current_comparison(callback: Callable[..., Any]) -> Callable[..., Any]:
+class ComparisonBoundCallable:
+    """登録した比較の relation の下で実行する callable（``run_in_current_comparison``）。"""
+
+    __slots__ = ("_callback", "_scope")
+
+    def __init__(self, callback: Callable[..., Any], scope: Optional[_ComparisonScope]) -> None:
+        self._callback = callback
+        self._scope = scope
+
+    @property
+    def relation_digest(self) -> Optional[str]:
+        """この仕事を登録した比較の relation の digest（relation の無い比較では None）。"""
+
+        return None if self._scope is None else self._scope.digest
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        token = _CURRENT_COMPARISON.set(self._scope)
+        try:
+            return self._callback(*args, **kwargs)
+        finally:
+            _CURRENT_COMPARISON.reset(token)
+
+
+def run_in_current_comparison(callback: Callable[..., Any]) -> ComparisonBoundCallable:
     """後で実行する ``callback`` を、登録した比較の relation の下で実行する形にする。
 
     worklist の producer や replanner は、それを作った比較が終わった後に別の比較の
     範囲から実行されることがある。実行時の範囲ではなく登録時の範囲で照合する。
+    既に束縛済みなら、そのまま（最初に登録した比較の relation を保つ）。
     """
 
-    captured = _CURRENT_COMPARISON.get()
-
-    def run(*args: Any, **kwargs: Any) -> Any:
-        token = _CURRENT_COMPARISON.set(captured)
-        try:
-            return callback(*args, **kwargs)
-        finally:
-            _CURRENT_COMPARISON.reset(token)
-
-    return run
+    if isinstance(callback, ComparisonBoundCallable):
+        return callback
+    return ComparisonBoundCallable(callback, _CURRENT_COMPARISON.get())
 
 
 def current_relation() -> Optional[InputCorrespondenceSet]:

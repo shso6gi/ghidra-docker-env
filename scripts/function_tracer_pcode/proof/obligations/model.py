@@ -58,7 +58,10 @@ class ObligationInstanceId:
     requirement_id: ProofRequirementId
     derived_view_id: Tuple[Any, ...]
     premise_digest: str
-    planner_schema_version: int = 1
+    #: この obligation を積んだ比較の最終 InputCorrespondence の digest（Issue #167）。
+    #: 同じ requirement でも relation が違えば別の obligation で、結果を共有しない。
+    comparison_relation_digest: Optional[str] = None
+    planner_schema_version: int = 2
 
     def to_key(self) -> Tuple[Any, ...]:
         return (
@@ -66,6 +69,7 @@ class ObligationInstanceId:
             self.requirement_id.to_key(),
             self.derived_view_id,
             self.premise_digest,
+            self.comparison_relation_digest,
         )
 
 
