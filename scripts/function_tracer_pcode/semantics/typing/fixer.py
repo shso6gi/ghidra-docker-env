@@ -483,32 +483,52 @@ class TypeFixResult:
         return materialize(self)
 
     def __str__(self) -> str:
-        parts = []
-        if self.return_type_fixed_binary1:
-            parts.append("return_type_fixed(binary1)")
-        if self.return_type_fixed_binary2:
-            parts.append("return_type_fixed(binary2)")
-        if self.param_types_fixed_binary1:
-            parts.append("param_types_fixed(binary1)")
-        if self.param_types_fixed_binary2:
-            parts.append("param_types_fixed(binary2)")
-        if self.signedness_fixed_binary1:
-            orig = self.original_type_binary1 or "?"
-            fixed = self.fixed_type_binary1 or "?"
-            parts.append(f"signedness_fixed(binary1: {orig} -> {fixed})")
-        if self.signedness_fixed_binary2:
-            orig = self.original_type_binary2 or "?"
-            fixed = self.fixed_type_binary2 or "?"
-            parts.append(f"signedness_fixed(binary2: {orig} -> {fixed})")
-        if self.param_signedness_fixed_binary1:
-            parts.append(f"param_signedness_fixed(binary1: {self.param_signedness_override_map_binary1})")
-        if self.param_signedness_fixed_binary2:
-            parts.append(f"param_signedness_fixed(binary2: {self.param_signedness_override_map_binary2})")
-        if self.mips64_abi_fixed_binary1:
-            parts.append(f"mips64_abi_fixed(binary1: {self.mips64_abi_override_map_binary1})")
-        if self.mips64_abi_fixed_binary2:
-            parts.append(f"mips64_abi_fixed(binary2: {self.mips64_abi_override_map_binary2})")
+        return describe_type_fix(self.to_dict())
 
-        if not parts:
-            return "No type fixes applied"
-        return f"Type fixes: {', '.join(parts)} (phase: {self.retry_phase})"
+
+def type_fix_applied(payload: Any) -> bool:
+    """`TypeFixResult.any_fix_applied()` と同じ判定を、表現（出力の `type_fix_result`）から。"""
+
+    payload = payload or {}
+    return any(bool(payload.get(name)) for name in (
+        "return_type_fixed_binary1", "return_type_fixed_binary2",
+        "param_types_fixed_binary1", "param_types_fixed_binary2",
+        "signedness_fixed_binary1", "signedness_fixed_binary2",
+        "param_signedness_fixed_binary1", "param_signedness_fixed_binary2",
+        "mips64_abi_fixed_binary1", "mips64_abi_fixed_binary2",
+    ))
+
+
+def describe_type_fix(payload: Any) -> str:
+    """型修正の人間向けの説明（`TypeFixResult` の表現から作る）。"""
+
+    payload = payload or {}
+    parts = []
+    if payload.get("return_type_fixed_binary1"):
+        parts.append("return_type_fixed(binary1)")
+    if payload.get("return_type_fixed_binary2"):
+        parts.append("return_type_fixed(binary2)")
+    if payload.get("param_types_fixed_binary1"):
+        parts.append("param_types_fixed(binary1)")
+    if payload.get("param_types_fixed_binary2"):
+        parts.append("param_types_fixed(binary2)")
+    for side in ("1", "2"):
+        if payload.get(f"signedness_fixed_binary{side}"):
+            orig = payload.get(f"original_type_binary{side}") or "?"
+            fixed = payload.get(f"fixed_type_binary{side}") or "?"
+            parts.append(f"signedness_fixed(binary{side}: {orig} -> {fixed})")
+    for side in ("1", "2"):
+        if payload.get(f"param_signedness_fixed_binary{side}"):
+            parts.append(
+                f"param_signedness_fixed(binary{side}: "
+                f"{payload.get(f'param_signedness_override_map_binary{side}')})"
+            )
+    for side in ("1", "2"):
+        if payload.get(f"mips64_abi_fixed_binary{side}"):
+            parts.append(
+                f"mips64_abi_fixed(binary{side}: {payload.get(f'mips64_abi_override_map_binary{side}')})"
+            )
+
+    if not parts:
+        return "No type fixes applied"
+    return f"Type fixes: {', '.join(parts)} (phase: {payload.get('retry_phase')})"

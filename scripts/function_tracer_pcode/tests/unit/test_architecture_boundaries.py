@@ -1726,6 +1726,8 @@ def test_no_budget_is_derived_by_a_multiplier():
 #: だから出力の表へ field を足しても、意味の経路（query・判定・reason）は動かない
 #: （M-3。実経路での確認は `test_issue22d_output_schema_locality.py`）。
 _OUTPUT_LAYER_IMPORTERS = frozenset({
+    # 出力 schema は出力層の一部（C の診断 field の上限を `RESULT_FIELDS` から導く）
+    "checker/output_schema.py",
     "checker/result.py",
     "authority/lifecycle/production_boundary.py",
     "cli/commands/equivalence.py",

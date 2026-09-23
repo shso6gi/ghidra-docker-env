@@ -408,20 +408,22 @@ class SerializationWork:
 
         if not self.enabled:
             return (leaf.__json_tree__() if build else None), 0
-        from scripts.function_tracer_pcode.core.json_encoding import (
-            LEGACY,
-            RESULT_JSON_POLICY,
-        )
+        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
 
         size = leaf.__json_tree_bytes__(RESULT_JSON_POLICY, self.remaining())
         built = None
         if size is None:
-            # 見積りできない形（閉路など、未凍結の式の中だけ）: 作ってから数える
-            built = leaf.__json_tree__()
-            size = RESULT_JSON_POLICY.measure(built, max_bytes=self.remaining(), mode=LEGACY)
-        self.trees += 1
-        self.tree_bytes += int(size)
-        self.charge(size)
+            # DAG のまま見積もれない形（閉路。未凍結の式の中だけ）: node を 1 つ作るたびに
+            # 数えながら作る（作ってから数えない）
+            before = self.consumed
+            built = leaf.__json_tree_metered__(RESULT_JSON_POLICY, self.charge)
+            size = self.consumed - before
+            self.trees += 1
+            self.tree_bytes += int(size)
+        else:
+            self.trees += 1
+            self.tree_bytes += int(size)
+            self.charge(size)
         # 数えるのは予算の分まで（超えたと分かれば残りの node は辿らない）
         self._meter.add_root(leaf, max_distinct=self._policy.serialization_nodes)
         if self._policy.exceeds(BudgetKind.SERIALIZATION_NODES, self.distinct_nodes):

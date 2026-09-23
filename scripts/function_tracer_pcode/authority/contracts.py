@@ -98,9 +98,44 @@ def authority_digest(value: Any) -> str:
 #   （文字列の id との照合用。木として辿るので辿る数に上限を持つ）。
 
 
-def _canonical_events(value: Any):
+def _streaming_json_digest(value: Any, budget: list) -> str:
+    """`authority_digest(value)` と同じ digest（写しを作らない。`budget[0]` は残りの event 数）。"""
+
+    digest = hashlib.sha256()
+    counts = [0]
+    for event in _canonical_events(value, budget):
+        if event is _CLOSE:
+            counts.pop()
+            digest.update(b"]")
+            continue
+        if counts[-1]:
+            digest.update(b",")
+        counts[-1] += 1
+        if event is _OPEN:
+            digest.update(b"[")
+            counts.append(0)
+        elif type(event) is _RawLeaf:
+            digest.update(json.dumps(
+                event.value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            ).encode("utf-8", "surrogatepass"))
+        else:
+            digest.update(json.dumps(event, ensure_ascii=False).encode("utf-8", "surrogatepass"))
+    return digest.hexdigest()
+
+
+def _sorted_like_canonical_value(items: Any, budget: list) -> list:
+    """`canonical_value` と同じ集合の並び（要素の `authority_digest` 順）を、写しを作らずに。"""
+
+    keyed = [(_streaming_json_digest(item, budget), item) for item in items]
+    keyed.sort(key=lambda pair: pair[0])
+    return [item for _digest, item in keyed]
+
+
+def _canonical_events(value: Any, budget: Optional[list] = None):
     """`canonical_value(value)` の形を event 列として辿る（`_OPEN` / `_CLOSE` / 葉）。"""
 
+    if budget is None:
+        budget = [None]
     stack: list = [(iter((value,)), False)]
     while stack:
         iterator, is_container = stack[-1]
@@ -111,6 +146,10 @@ def _canonical_events(value: Any):
             if is_container:
                 yield _CLOSE
             continue
+        if budget[0] is not None:
+            budget[0] -= 1
+            if budget[0] < 0:
+                raise CanonicalWalkLimitExceeded("canonical walk exceeded its event budget")
         if item is None or type(item) in _PRIMITIVE_TYPES:
             yield item
         elif isinstance(item, Enum):
@@ -126,7 +165,7 @@ def _canonical_events(value: Any):
             stack.append((iter(item), True))
         elif isinstance(item, (set, frozenset)):
             yield _OPEN
-            stack.append((iter(sorted(item, key=authority_digest)), True))
+            stack.append((iter(_sorted_like_canonical_value(item, budget)), True))
         elif isinstance(item, (str, int, float, bool)):
             yield exact_primitive(item)
         else:
@@ -149,9 +188,8 @@ def streaming_canonical_str_digest(value: Any, *, max_events: Optional[int] = No
 
     digest = hashlib.sha256()
     counts: list = []
-    for index, event in enumerate(_canonical_events(value)):
-        if max_events is not None and index > max_events:
-            raise CanonicalWalkLimitExceeded(f"canonical walk exceeded {max_events} events")
+    # 集合の並べ替え（要素ごとの digest）も同じ上限の中で数える
+    for event in _canonical_events(value, [max_events]):
         if event is _CLOSE:
             if counts.pop() == 1:
                 digest.update(b",")
@@ -168,7 +206,7 @@ def streaming_canonical_str_digest(value: Any, *, max_events: Optional[int] = No
         leaf = event.value if type(event) is _RawLeaf else event
         # 最上位の値は str()、tuple の要素は repr()（`str(tuple)` の規則）
         text_value = str(leaf) if not counts else repr(leaf)
-        digest.update(text_value.encode("utf-8"))
+        digest.update(text_value.encode("utf-8", "surrogatepass"))
     return digest.hexdigest()
 
 

@@ -45,6 +45,74 @@ def _format_stage_seconds(diagnostics: Any) -> str:
         return ""
 
 
+def _reason_recovery_display(reason: Mapping[str, Any], actions: List[Mapping[str, Any]]) -> str:
+    matching_actions = [
+        action
+        for action in actions
+        if action.get("reason_id") == reason.get("reason_id")
+        and (reason.get("pair_or_case") is None or action.get("pair_or_case") == reason.get("pair_or_case"))
+    ]
+    if not matching_actions:
+        return reason.get("recovery_proof_kind")
+    proof_kinds = sorted({str(action.get("proof_kind")) for action in matching_actions if action.get("proof_kind")})
+    statuses = sorted({str(action.get("status")) for action in matching_actions if action.get("status")})
+    if not proof_kinds:
+        proof_kinds = [str(reason.get("recovery_proof_kind"))]
+    proof_text = ",".join(proof_kinds)
+    if statuses:
+        return f"{proof_text} ({','.join(statuses)})"
+    return proof_text
+
+
+def _format_pairwise_debug_stats(stats: Mapping[str, Any]) -> List[str]:
+    lines = ["Pairwise Final Solver Disposition Summary:"]
+    lines.append(
+        "  unsat={unsat}, sat={sat}, unknown={unknown}".format(
+            unsat=stats.get("unsat_results", 0),
+            sat=stats.get("sat_results", 0),
+            unknown=stats.get("unknown_results", 0),
+        )
+    )
+    lines.append("Pairwise Timeout Normalization Summary:")
+    lines.append(
+        "  attempts={attempts}, changed={changed}, no_change={no_change}, "
+        "unsat={unsat}, sat={sat}, unknown={unknown}".format(
+            attempts=stats.get("timeout_fallback_attempts", 0),
+            changed=stats.get("changed_pairs", 0),
+            no_change=stats.get("no_change_pairs", 0),
+            unsat=stats.get("normalization_unsat_results", stats.get("unsat_results", 0)),
+            sat=stats.get("normalization_sat_results", stats.get("sat_results", 0)),
+            unknown=stats.get("normalization_unknown_results", stats.get("unknown_results", 0)),
+        )
+    )
+    for hits_key, misses_key, label_hits, label_misses in (
+        ("exact_query_attempt_cache_hits", "exact_query_attempt_cache_misses",
+         "exact_query_cache_hits", "exact_query_cache_misses"),
+        ("obligation_pair_cache_hits", "obligation_pair_cache_misses",
+         "obligation_pair_cache_hits", "obligation_pair_cache_misses"),
+        ("guard_overlap_graph_hits", "guard_overlap_graph_misses",
+         "guard_overlap_graph_hits", "guard_overlap_graph_misses"),
+    ):
+        if hits_key in stats or misses_key in stats:
+            lines.append(
+                f"  {label_hits}={stats.get(hits_key, 0)}, {label_misses}={stats.get(misses_key, 0)}"
+            )
+    if "guard_overlap_prepass_node_hits" in stats:
+        lines.append(
+            "  guard_overlap_prepass_node_hits={hits}, value_candidates={candidates}".format(
+                hits=stats.get("guard_overlap_prepass_node_hits", 0),
+                candidates=stats.get("guard_overlap_value_candidates", 0),
+            )
+        )
+    if stats.get("pair_ledger_sealed"):
+        lines.append(
+            "  pair_ledger=sealed, skipped_after_terminal={skipped}".format(
+                skipped=stats.get("pair_ledger_skipped_after_terminal", 0),
+            )
+        )
+    return lines
+
+
 @dataclass
 class EquivalenceResult:
     """等価性判定の結果"""
@@ -255,166 +323,101 @@ class EquivalenceResult:
         return result_payload(self)
     
     def to_string(self, verbose: bool = False, show_phase_usage: bool = False) -> str:
+        """人間向けの text。**出力と同じ有界な表現**（`to_dict()` の値）から作る。
+
+        Issue #22 PR-22-D: authority 確定後に live な解析・結果 object（signature の
+        Ghidra 型・反例・solver model・debug trace）を読み直さない。A は authority 前に
+        準備した値、B / C は出力と同じ上限で準備した値を読む。
+        """
+
+        from scripts.function_tracer_pcode.checker.counterexample import format_counterexample_text
+        from scripts.function_tracer_pcode.checker.debug_trace import format_phase_usage_rows
+        from scripts.function_tracer_pcode.core.signature import format_signature_text
+        from scripts.function_tracer_pcode.semantics.typing.fixer import (
+            describe_type_fix,
+            type_fix_applied,
+        )
+
+        payload = self.to_dict()
         lines = []
         lines.append("=" * 70)
         lines.append("EQUIVALENCE CHECK RESULT")
         lines.append("=" * 70)
-        
-        # Binary 1 の情報
-        lines.append(f"Binary 1: {self.binary1_name}")
-        lines.append(f"Function 1: {self.function1_name}")
-        if self.function1_signature:
-            lines.append(f"  Original signature: {self.function1_signature.format_full(self.function1_name)}")
-        effective_signature1 = self.get_effective_function1_signature()
-        if (
-            effective_signature1
-            and self.function1_signature
-            and effective_signature1.to_dict() != self.function1_signature.to_dict()
-        ):
-            lines.append(f"  Effective signature: {effective_signature1.format_full(self.function1_name)}")
-        elif effective_signature1 and self.function1_signature is None:
-            lines.append(f"  Effective signature: {effective_signature1.format_full(self.function1_name)}")
-        if self.function1_signature_hypotheses:
-            lines.append(f"  Hypotheses: {self.function1_signature_hypotheses}")
 
-        lines.append("")
-        
-        # Binary 2 の情報
-        lines.append(f"Binary 2: {self.binary2_name}")
-        lines.append(f"Function 2: {self.function2_name}")
-        if self.function2_signature:
-            lines.append(f"  Original signature: {self.function2_signature.format_full(self.function2_name)}")
-        effective_signature2 = self.get_effective_function2_signature()
-        if (
-            effective_signature2
-            and self.function2_signature
-            and effective_signature2.to_dict() != self.function2_signature.to_dict()
-        ):
-            lines.append(f"  Effective signature: {effective_signature2.format_full(self.function2_name)}")
-        elif effective_signature2 and self.function2_signature is None:
-            lines.append(f"  Effective signature: {effective_signature2.format_full(self.function2_name)}")
-        if self.function2_signature_hypotheses:
-            lines.append(f"  Hypotheses: {self.function2_signature_hypotheses}")
-
-        lines.append("")
+        for side in ("1", "2"):
+            name = payload.get(f"function{side}_name")
+            lines.append(f"Binary {side}: {payload.get(f'binary{side}_name')}")
+            lines.append(f"Function {side}: {name}")
+            original = payload.get(f"function{side}_signature")
+            effective = payload.get(f"effective_function{side}_signature")
+            if original:
+                lines.append(f"  Original signature: {format_signature_text(original, name)}")
+            if effective and (original is None or effective != original):
+                lines.append(f"  Effective signature: {format_signature_text(effective, name)}")
+            hypotheses = payload.get(f"function{side}_signature_hypotheses")
+            if hypotheses:
+                lines.append(f"  Hypotheses: {hypotheses}")
+            lines.append("")
 
         # Pairwise統計情報を追加
-        if self.pairwise_stats:
+        stats = payload.get("pairwise_stats")
+        if isinstance(stats, dict) and stats and not stats.get("truncated"):
             lines.append("")
             lines.append("Pairwise Statistics:")
-            stats = self.pairwise_stats
-            lines.append(f"  Total pairs: {stats['total_pairs']}")
-            lines.append(f"  UNSAT: {stats['unsat_pairs']}, SAT: {stats['sat_pairs']}, "
-                        f"UNKNOWN: {stats['unknown_pairs']}, ERROR: {stats['error_pairs']}")
-            
-            if self.sat_pair_info:
-                info = self.sat_pair_info
-                lines.append(f"  First SAT pair: ({info['i']}, {info['j']})")
-                lines.append(f"    Case1: {info['case1_summary']}")
-                lines.append(f"    Case2: {info['case2_summary']}")
+            lines.append(f"  Total pairs: {stats.get('total_pairs')}")
+            lines.append(f"  UNSAT: {stats.get('unsat_pairs')}, SAT: {stats.get('sat_pairs')}, "
+                        f"UNKNOWN: {stats.get('unknown_pairs')}, ERROR: {stats.get('error_pairs')}")
 
-        if self.pairwise_debug_stats:
-            stats = self.pairwise_debug_stats
+            info = payload.get("sat_pair_info")
+            if isinstance(info, dict) and info:
+                lines.append(f"  First SAT pair: ({info.get('i')}, {info.get('j')})")
+                lines.append(f"    Case1: {info.get('case1_summary')}")
+                lines.append(f"    Case2: {info.get('case2_summary')}")
+
+        stats = payload.get("pairwise_debug_stats")
+        if isinstance(stats, dict) and stats and not stats.get("truncated"):
             lines.append("")
-            lines.append("Pairwise Final Solver Disposition Summary:")
-            lines.append(
-                "  unsat={unsat}, sat={sat}, unknown={unknown}".format(
-                    unsat=stats.get("unsat_results", 0),
-                    sat=stats.get("sat_results", 0),
-                    unknown=stats.get("unknown_results", 0),
-                )
-            )
-            lines.append("Pairwise Timeout Normalization Summary:")
-            lines.append(
-                "  attempts={attempts}, changed={changed}, no_change={no_change}, "
-                "unsat={unsat}, sat={sat}, unknown={unknown}".format(
-                    attempts=stats.get("timeout_fallback_attempts", 0),
-                    changed=stats.get("changed_pairs", 0),
-                    no_change=stats.get("no_change_pairs", 0),
-                    unsat=stats.get(
-                        "normalization_unsat_results",
-                        stats.get("unsat_results", 0),
-                    ),
-                    sat=stats.get(
-                        "normalization_sat_results",
-                        stats.get("sat_results", 0),
-                    ),
-                    unknown=stats.get(
-                        "normalization_unknown_results",
-                        stats.get("unknown_results", 0),
-                    ),
-                )
-            )
-            if (
-                "exact_query_attempt_cache_hits" in stats
-                or "exact_query_attempt_cache_misses" in stats
-            ):
-                lines.append(
-                    "  exact_query_cache_hits={hits}, exact_query_cache_misses={misses}".format(
-                        hits=stats.get("exact_query_attempt_cache_hits", 0),
-                        misses=stats.get("exact_query_attempt_cache_misses", 0),
-                    )
-                )
-            if (
-                "obligation_pair_cache_hits" in stats
-                or "obligation_pair_cache_misses" in stats
-            ):
-                lines.append(
-                    "  obligation_pair_cache_hits={hits}, obligation_pair_cache_misses={misses}".format(
-                        hits=stats.get("obligation_pair_cache_hits", 0),
-                        misses=stats.get("obligation_pair_cache_misses", 0),
-                    )
-                )
-            if "guard_overlap_graph_hits" in stats or "guard_overlap_graph_misses" in stats:
-                lines.append(
-                    "  guard_overlap_graph_hits={hits}, guard_overlap_graph_misses={misses}".format(
-                        hits=stats.get("guard_overlap_graph_hits", 0),
-                        misses=stats.get("guard_overlap_graph_misses", 0),
-                    )
-                )
-            if "guard_overlap_prepass_node_hits" in stats:
-                lines.append(
-                    "  guard_overlap_prepass_node_hits={hits}, value_candidates={candidates}".format(
-                        hits=stats.get("guard_overlap_prepass_node_hits", 0),
-                        candidates=stats.get("guard_overlap_value_candidates", 0),
-                    )
-                )
-            if stats.get("pair_ledger_sealed"):
-                lines.append(
-                    "  pair_ledger=sealed, skipped_after_terminal={skipped}".format(
-                        skipped=stats.get("pair_ledger_skipped_after_terminal", 0),
-                    )
-                )
+            lines.extend(_format_pairwise_debug_stats(stats))
 
-        if self.unknown_reasons:
+        reasons = [row for row in (payload.get("unknown_reasons") or ()) if isinstance(row, dict)]
+        if reasons:
+            actions = [
+                row for row in (payload.get("unknown_recovery_actions") or ())
+                if isinstance(row, dict)
+            ]
             lines.append("")
             lines.append("UNKNOWN Reasons:")
-            for reason in self.unknown_reasons[:10]:
-                scope = reason.pair_or_case or reason.stage or reason.reason_scope
-                recovery = self._reason_recovery_display(reason)
+            for reason in reasons[:10]:
+                scope = reason.get("pair_or_case") or reason.get("stage") or reason.get("reason_scope")
+                recovery = _reason_recovery_display(reason, actions)
                 lines.append(
-                    f"  {reason.reason_id}: class={reason.reason_class}, "
-                    f"effect={reason.decision_effect}, scope={scope}, recovery={recovery}"
+                    f"  {reason.get('reason_id')}: class={reason.get('reason_class')}, "
+                    f"effect={reason.get('decision_effect')}, scope={scope}, recovery={recovery}"
                 )
-            if len(self.unknown_reasons) > 10:
-                lines.append(f"  ... ({len(self.unknown_reasons) - 10} more)")
+            if len(reasons) > 10:
+                lines.append(f"  ... ({len(reasons) - 10} more)")
 
-            recovery_backlog = summarize_unknown_recovery_backlog(self.unknown_reasons)
+            recovery_backlog = payload.get("unknown_recovery_backlog") or {}
             if recovery_backlog:
                 lines.append("")
                 lines.append("UNKNOWN Recovery Proof Backlog:")
                 for reason_id, entry in recovery_backlog.items():
-                    proof_kinds = ", ".join(entry.get("proof_obligation_counts", {}).keys())
-                    if not proof_kinds:
-                        proof_kinds = entry.get("recovery_proof_kind") or "none"
-                    lines.append(
-                        f"  {reason_id}: count={entry.get('count', 0)}, proofs={proof_kinds}"
+                    counts = entry.get("proof_obligation_counts") if isinstance(entry, dict) else None
+                    proof_kinds = (
+                        ", ".join(counts.keys())
+                        if isinstance(counts, dict) and "bounded_evidence" not in counts else ""
                     )
-        if self.decision_gated_by_pending_proof:
+                    if not proof_kinds:
+                        proof_kinds = (entry.get("recovery_proof_kind") if isinstance(entry, dict) else None) or "none"
+                    lines.append(
+                        f"  {reason_id}: count={entry.get('count', 0) if isinstance(entry, dict) else 0}, "
+                        f"proofs={proof_kinds}"
+                    )
+        if payload.get("decision_gated_by_pending_proof"):
             lines.append("")
             lines.append("Decision gated: pending proof obligation blocks EQUIVALENT recovery")
-        if self.identical_fast_path_disposition is not None:
-            disposition = self.identical_fast_path_disposition
+        disposition = payload.get("identical_fast_path_disposition")
+        if isinstance(disposition, dict):
             lines.append("")
             lines.append(
                 "Identical function identity: applicable={applicable}, "
@@ -424,22 +427,24 @@ class EquivalenceResult:
                     reason=disposition.get("reason"),
                 )
             )
-                
+
         lines.append("")
-        
+
         # パラメータ断片として制約された変数を表示
-        if self.constrained_fragments:
-            vars_str = ", ".join(self.constrained_fragments)
+        fragments = payload.get("constrained_fragments")
+        if isinstance(fragments, list) and fragments:
+            vars_str = ", ".join(str(item) for item in fragments)
             lines.append(f"Derived fragments: {vars_str}")
             lines.append("  (upper-bits variables constrained via sign/zero extension from parameters)")
-        
-        if self.type_fix_result and self.type_fix_result.any_fix_applied():
-            lines.append(f"Type fix applied: {self.type_fix_result}")
-        if self.retry_count > 0:
-            lines.append(f"Retry count: {self.retry_count}")
-        
+
+        type_fix = payload.get("type_fix_result")
+        if isinstance(type_fix, dict) and type_fix_applied(type_fix):
+            lines.append(f"Type fix applied: {describe_type_fix(type_fix)}")
+        if (payload.get("retry_count") or 0) > 0:
+            lines.append(f"Retry count: {payload.get('retry_count')}")
+
         lines.append("-" * 70)
-        
+
         canonical_outcome = None
         if self.decision_receipt is not None:
             from scripts.function_tracer_pcode.authority.decision.production_cutover import (
@@ -449,78 +454,74 @@ class EquivalenceResult:
             canonical_outcome = outcome_from_result(self).value
         elif self.canonical_decision_required:
             raise ValueError("canonical rendering lacks DecisionReceipt")
+        error_message = payload.get("error_message")
+        failure_status = payload.get("failure_status")
+        failure_message = payload.get("failure_message")
         if canonical_outcome == "ERROR" or (
-            canonical_outcome is None and self.error_message
+            canonical_outcome is None and error_message
         ):
             lines.append("Result: ERROR")
-            if self.error_message:
-                lines.append(f"ERROR: {self.error_message}")
-            if self.failure_status:
-                lines.append(f"Failure status: {self.failure_status}")
+            if error_message:
+                lines.append(f"ERROR: {error_message}")
+            if failure_status:
+                lines.append(f"Failure status: {failure_status}")
         elif canonical_outcome in {"UNKNOWN", "TIMEOUT"} or (
-            canonical_outcome is None and self.is_equivalent is None
+            canonical_outcome is None and payload.get("is_equivalent") is None
         ):
             if canonical_outcome == "TIMEOUT" or (
-                canonical_outcome is None and self.is_timeout()
+                canonical_outcome is None and payload.get("is_timeout")
             ):
                 lines.append("Result: TIMEOUT (could not determine equivalence within time limit)")
             else:
                 lines.append("Result: UNKNOWN (could not determine equivalence)")
-            if self.failure_status:
-                lines.append(f"Failure status: {self.failure_status}")
-            if self.failure_message:
-                lines.append(f"Failure detail: {self.failure_message}")
+            if failure_status:
+                lines.append(f"Failure status: {failure_status}")
+            if failure_message:
+                lines.append(f"Failure detail: {failure_message}")
         elif canonical_outcome == "EQUIVALENT" or (
-            canonical_outcome is None and self.is_equivalent
+            canonical_outcome is None and payload.get("is_equivalent")
         ):
             lines.append("Result: EQUIVALENT ✓")
         else:
             lines.append("Result: NOT EQUIVALENT ✗")
-            if self.counterexample:
+            counterexample = payload.get("counterexample")
+            if isinstance(counterexample, dict) and counterexample:
                 lines.append("")
-                lines.append(self.counterexample.to_string())
+                lines.append(format_counterexample_text(counterexample))
             else:
                 lines.append("")
                 lines.append("(No counterexample available)")
-        
+
         lines.append("-" * 70)
-        lines.append(f"Total time: {self.total_time:.3f} seconds")
+        lines.append(f"Total time: {float(payload.get('total_time') or 0.0):.3f} seconds")
         stage_line = _format_stage_seconds(getattr(self, "diagnostics", None))
         if stage_line:
             lines.append(stage_line)
-        
-        if verbose and self.solver_results:
+
+        solver_results = payload.get("solver_results")
+        if verbose and isinstance(solver_results, dict):
             lines.append("")
             lines.append("Solver Results:")
-            for sr in self.solver_results.results:
-                status_str = sr.status.name
-                lines.append(f"  {sr.solver_name}: {status_str} ({sr.elapsed_time:.3f}s)")
-                if sr.error_message:
-                    lines.append(f"    Error: {sr.error_message}")
-                if sr.model:
-                    lines.append(f"    Model: {sr.model}")
+            for row in solver_results.get("all_results") or ():
+                if not isinstance(row, dict):
+                    continue
+                lines.append(
+                    f"  {row.get('solver_name')}: {row.get('status')} "
+                    f"({float(row.get('elapsed_time') or 0.0):.3f}s)"
+                )
+                if row.get("error_message"):
+                    lines.append(f"    Error: {row.get('error_message')}")
+                if row.get("model"):
+                    lines.append(f"    Model: {row.get('model')}")
 
-        if show_phase_usage and self.debug_trace:
-            lines.append("")
-            lines.append(self.debug_trace.format_phase_usage_summary())
-        
+        if show_phase_usage:
+            from scripts.function_tracer_pcode.checker.diagnostics import trace_timings_payload
+
+            phase_rows = trace_timings_payload(self).get("phase_usage")
+            if isinstance(phase_rows, list):
+                lines.append("")
+                lines.append(format_phase_usage_rows(phase_rows))
+
         lines.append("=" * 70)
         return "\n".join(lines)
 
-    def _reason_recovery_display(self, reason: UnknownReasonRecord) -> str:
-        matching_actions = [
-            action
-            for action in self.unknown_recovery_actions
-            if action.reason_id == reason.reason_id
-            and (reason.pair_or_case is None or action.pair_or_case == reason.pair_or_case)
-        ]
-        if not matching_actions:
-            return reason.recovery_proof_kind
-        proof_kinds = sorted({action.proof_kind for action in matching_actions if action.proof_kind})
-        statuses = sorted({action.status for action in matching_actions if action.status})
-        if not proof_kinds:
-            proof_kinds = [reason.recovery_proof_kind]
-        proof_text = ",".join(proof_kinds)
-        if statuses:
-            return f"{proof_text} ({','.join(statuses)})"
-        return proof_text

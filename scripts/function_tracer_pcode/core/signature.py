@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, TYPE_CHECKING, Tuple
+from typing import Optional, List, Dict, Any, Mapping, TYPE_CHECKING, Tuple
 from scripts.function_tracer_pcode.core.json_encoding import as_dict, each, mapping_of, materialize
 
 if TYPE_CHECKING:
@@ -1095,3 +1095,21 @@ class FunctionSignature:
                 for param in (analysis.parameters or [])
             ],
         )
+
+
+def format_signature_text(payload: Any, func_name: str) -> str:
+    """`FunctionSignature.format_full` と同じ text を、表現（出力の signature）から作る。"""
+
+    payload = payload or {}
+    parameters = payload.get("parameters") or ()
+    if not parameters:
+        params = "(void)"
+    else:
+        parts = []
+        for param in parameters:
+            param = param if isinstance(param, Mapping) else {}
+            dtype = param.get("data_type", "unknown") or "unknown"
+            name = param.get("name", "")
+            parts.append(f"{dtype} {name}" if name else str(dtype))
+        params = f"({', '.join(parts)})"
+    return f"{payload.get('return_type') or 'unknown'} {func_name}{params}"

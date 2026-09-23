@@ -66,6 +66,7 @@ from scripts.function_tracer_pcode.core.errors import (
 from scripts.function_tracer_pcode.core.expression import Expression
 from scripts.function_tracer_pcode.core.json_encoding import (
     RESULT_JSON_POLICY,
+    TEXT,
     BoundedEvidence,
     row_max_bytes,
 )
@@ -431,23 +432,58 @@ def test_h2_the_default_headroom_covers_the_schema_and_a_smaller_one_is_refused(
         _new_checker(None)
 
 
+def _worst_case_reason():
+    """行 schema の列をすべて上限いっぱい（最悪の escape）にした reason。"""
+
+    from scripts.function_tracer_pcode.checker.unknown_reason import UnknownReasonRecord
+    from scripts.function_tracer_pcode.core.json_encoding import EVIDENCE, EVIDENCE_INLINE_BYTES
+    from scripts.function_tracer_pcode.proof.unknown_reason import UnknownRecoveryProofObligation
+
+    def _filled(inline, wrap):
+        # `wrap(text)` を書いた大きさが inline ちょうどになる文字列の長さを求める
+        length = inline
+        while RESULT_JSON_POLICY.measure(wrap("e" * length)) > inline:
+            length -= 1
+        return wrap("e" * length)
+
+    shapes = {
+        "evidence_refs": lambda text: (text,),
+        "recovery_proof_obligations": lambda text: (
+            UnknownRecoveryProofObligation.create("none", "s", description=text),
+        ),
+        "typed_cause_key": lambda text: {"k": text},
+        "proof_requirement_ids": lambda text: ({"k": text},),
+    }
+    values = {}
+    for column in UNKNOWN_REASON_ROW:
+        name = column.attr or column.key
+        if column.kind == TEXT:
+            values[name] = "\x00" * column.max_chars
+        elif column.kind == EVIDENCE:
+            inline = column.inline_bytes or EVIDENCE_INLINE_BYTES
+            values[name] = _filled(inline, shapes.get(name, lambda text: text))
+    record = make_unknown_reason("unknown")
+    return UnknownReasonRecord(**{**record.__dict__, **values})
+
+
 def test_h3_the_schema_derived_headroom_holds_a_worst_case_authority_output(monkeypatch):
     """最大行数・最悪の行で埋めた B でも、schema から導いた headroom に収まる。"""
 
     monkeypatch.setattr(output_schema, "MAX_UNKNOWN_REASON_ROWS", 4)
     monkeypatch.setattr(output_schema, "MAX_RECOVERY_ACTION_ROWS", 4)
     monkeypatch.setattr(output_schema, "MAX_RELATION_ROWS", 8)
+    shell = _worst_case_reason()
+    row_bytes = RESULT_JSON_POLICY.prepare(shell).encoded_bytes
+    bound = row_max_bytes(UNKNOWN_REASON_ROW)
+    # 本当に最悪に近い行（上限の 8 割以上を使う）でないと headroom の test にならない
+    assert 0.8 * bound <= row_bytes <= bound
     result = _decided_result()
-    worst = make_unknown_reason(
-        "unknown", stage="s" * 10_000, pair_or_case="p" * 10_000, detail="\x00" * 100_000,
-        object_target_key=tuple(range(50_000)), object_evidence={"e": tuple(range(50_000))},
-        proof_obligation_id=tuple(range(50_000)),
-    )
-    result.unknown_reasons = [worst] * 4
+    result.unknown_reasons = [shell] * 4
     result.unknown_recovery_actions = []
-    long_id = "\x01" * output_schema.ID_MAX_CHARS
+    long_id = "\x01" * (output_schema.ID_MAX_CHARS + output_schema.TEXT_MARKER_MAX_CHARS)
     row = {name.key: long_id for name in output_schema.C_ACTIVE_BASE_ROW}
     result.canonical_c_active_base = tuple(dict(row) for _ in range(8))
+    result.error_message = "\x00" * output_schema.MESSAGE_MAX_CHARS
     unlimited = result.prepared_semantic_payload
     headroom = required_headroom_bytes()
     limit = unlimited.plan.prepared_bytes + headroom
@@ -464,10 +500,16 @@ def test_h3_the_schema_derived_headroom_holds_a_worst_case_authority_output(monk
 
 def test_h4_authority_output_beyond_its_schema_is_an_invariant_violation(monkeypatch):
     result = _decided_result()
-    row = {column.key: "x" for column in output_schema.C_ACTIVE_BASE_ROW}
+    # 最悪の行（列ごとの上限いっぱい・最悪の escape）で、行数の上限を 1 行超える
+    worst = "\x01" * (output_schema.ID_MAX_CHARS + output_schema.TEXT_MARKER_MAX_CHARS)
+    row = {column.key: worst for column in output_schema.C_ACTIVE_BASE_ROW}
     result.canonical_c_active_base = tuple(dict(row) for _ in range(output_schema.MAX_RELATION_ROWS + 1))
-    with pytest.raises(OutputEnvelopeInvariantViolation, match="rows over"):
+    with pytest.raises(OutputEnvelopeInvariantViolation, match="schema bound"):
         build_final_result_envelope(result)
+    # 小さい行なら行数が多くても byte の上限に収まる（行数そのものは数えない）
+    small = {column.key: "x" for column in output_schema.C_ACTIVE_BASE_ROW}
+    result.canonical_c_active_base = tuple(dict(small) for _ in range(output_schema.MAX_RELATION_ROWS + 1))
+    assert len(build_final_result_envelope(result).payload["c_active_base"]) == output_schema.MAX_RELATION_ROWS + 1
 
     result = _decided_result()
     bounds = authority_field_bounds()

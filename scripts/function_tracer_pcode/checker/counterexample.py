@@ -28,18 +28,24 @@ class FormattedCounterexample:
             import json
             return json.dumps(self.to_dict(), indent=2)
         
-        lines = []
-        lines.append("Counterexample found:")
-        lines.append("  Parameters:")
-        for name, value in self.parameters.items():
-            lines.append(f"    {name} = {value}")
-        
-        if self.return_value1:
-            lines.append(f"  Return value 1: {self.return_value1}")
-        if self.return_value2:
-            lines.append(f"  Return value 2: {self.return_value2}")
-        
-        return "\n".join(lines)
+        return format_counterexample_text(self.to_dict())
+
+
+def format_counterexample_text(payload: Dict[str, Any]) -> str:
+    """反例の人間向けの text（record の表現 = 出力の `counterexample` から作る）。"""
+
+    lines = []
+    lines.append("Counterexample found:")
+    lines.append("  Parameters:")
+    for name, value in (payload.get("parameters") or {}).items():
+        lines.append(f"    {name} = {value}")
+
+    if payload.get("return_value1"):
+        lines.append(f"  Return value 1: {payload['return_value1']}")
+    if payload.get("return_value2"):
+        lines.append(f"  Return value 2: {payload['return_value2']}")
+
+    return "\n".join(lines)
 
 
 class CounterexampleFormatter:

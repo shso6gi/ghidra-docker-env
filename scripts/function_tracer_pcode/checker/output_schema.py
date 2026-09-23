@@ -14,10 +14,11 @@ required = Σ B field の上限（固定 field + 最大行数 × 行の上限 + 
 * 行の上限は各 record の行 schema（`core/json_encoding.Column` の列）から求める
   （`row_max_bytes`）。reason / action の行は列ごとに上限を持つ（語彙・自由文は文字数、
   key / evidence は有界な証拠）。
-* 最大行数（`MAX_*_ROWS`）は authority が 1 pair で出してよい件数の契約。超えた出力は
-  切り詰めず、出力の契約違反（`OutputEnvelopeInvariantViolation`）になる。
-* B の field は準備のたびに **その field の上限** を上限にして準備する（schema を
-  破る値は headroom が余っていても違反）。
+* 最大行数（`MAX_*_ROWS`）は field の byte 上限を導く parameter（行数そのものは数えない）。
+  強制するのは field の **byte 上限**: B の field は準備のたびにその上限を上限にして準備し
+  （headroom が余っていても超えれば違反。切り詰めない）、authority 確定前に分かる field
+  （recovery action、pilot 無しの reason）は G4-b で同じ上限と比べて、超えれば判定の前に
+  限界にする（`output_preparation.check_prepared_field_bounds`）。
 
 `envelope_headroom_bytes >= required_headroom_bytes()` は checker の構築時に確かめる
 （`validate_envelope_headroom`）。field を足すときはここへ上限を 1 行足す — authority・
@@ -30,8 +31,10 @@ finalization bundle（`canonical_result_finalization_bundle`）は preimage（A 
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Dict, Mapping, Optional, Tuple
+
+from scripts.function_tracer_pcode.authority.contracts import CActiveBaseRow, QOpenBaseRow
 
 from scripts.function_tracer_pcode.core.json_encoding import (
     EVIDENCE_INLINE_BYTES,
@@ -80,22 +83,23 @@ def _object_bytes(policy: JsonEncodingPolicy, members: Mapping[str, int]) -> int
     )
 
 
-#: relation 行の列（authority の sealed dataclass の field。すべて id / 語彙の文字列）
-C_ACTIVE_BASE_ROW = tuple(
-    Column(name, TEXT, ID_MAX_CHARS)
-    for name in (
-        "result_occurrence_id", "occurrence_id", "cause_id", "reason_id",
-        "domain", "decision_effect", "target_kind",
+def _relation_row(row_type: type) -> Tuple[Column, ...]:
+    """relation 行の列を authority の sealed dataclass の field から作る（写し書きしない）。
+
+    field はすべて id / 語彙の exact str（`__post_init__` が型を確かめる）。field を足すと
+    この行と上限が自動で追従する（出力 schema の変更は 0 行）。
+    """
+
+    return tuple(
+        Column(item.name, TEXT, ID_MAX_CHARS)
+        for item in fields(row_type) if not item.name.startswith("_")
     )
-)
-Q_OPEN_BASE_ROW = tuple(
-    Column(name, TEXT, ID_MAX_CHARS)
-    for name in (
-        "result_occurrence_id", "occurrence_id", "cause_id",
-        "proof_requirement_id", "proof_kind", "semantic_target_digest",
-    )
-)
-#: `decision_receipt_payload` の列
+
+
+C_ACTIVE_BASE_ROW = _relation_row(CActiveBaseRow)
+Q_OPEN_BASE_ROW = _relation_row(QOpenBaseRow)
+#: `decision_receipt_payload` の列（key の一致は `tests/unit/test_issue22d_compositional_boundedness`
+#: が本物の receipt の payload と照らして固定する）
 DECISION_RECEIPT_ROW = tuple(
     Column(name, TEXT, ID_MAX_CHARS)
     for name in (
@@ -118,8 +122,8 @@ CONDITIONAL_RECEIPT_FIXED_ROW = tuple(
 class FieldBound:
     """B / C の 1 field の出力上の上限（JSON byte）と、その導き方。
 
-    `max_rows` は行の列の field（reason・relation など）の最大行数。`rows_attr` はその
-    行を持つ結果の属性（行数は準備の前に数える）。
+    `max_rows` は行の列の field（reason・relation など）の最大行数（`max_bytes` を導く
+    parameter。強制するのは `max_bytes`）。`rows_attr` はその行を持つ結果の属性。
     """
 
     key: str
@@ -201,20 +205,35 @@ def authority_field_bounds(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> D
 def metadata_field_bounds(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> Dict[str, FieldBound]:
     """C の field ごとの上限。切り詰めてよい診断は marker の上限（残りの予算で本体を出す）。"""
 
+    from scripts.function_tracer_pcode.checker.output_preparation import (
+        RESULT_FIELDS,
+        FieldOwner,
+        Overflow,
+    )
+
     identity = policy.container_frame_bytes(2) + 2 * policy.max_string_bytes(ID_MAX_CHARS)
-    rows = [
-        FieldBound("binary1_content_identity", identity, "(algorithm, digest)"),
-        FieldBound("binary2_content_identity", identity, "(algorithm, digest)"),
-        FieldBound("total_time", 24, "float"),
-    ]
-    for key in (
-        "pairwise_stats", "pairwise_debug_stats", "stage_path", "diagnostics",
-        "unknown_cause_aggregate",
-    ):
-        rows.append(FieldBound(
-            key, _truncation_marker_max_bytes(policy, key), "truncation marker at least",
-        ))
-    return {row.key: row for row in rows}
+    invariant = {
+        "binary1_content_identity": FieldBound("binary1_content_identity", identity, "(algorithm, digest)"),
+        "binary2_content_identity": FieldBound("binary2_content_identity", identity, "(algorithm, digest)"),
+        "total_time": FieldBound("total_time", 24, "float"),
+    }
+    rows: Dict[str, FieldBound] = {}
+    for item in RESULT_FIELDS:
+        if item.owner is not FieldOwner.METADATA:
+            continue
+        if item.overflow is Overflow.TRUNCATE:
+            # 切り詰めてよい診断: 予約するのは marker の分（本体は残りの予算で出す）
+            rows[item.key] = FieldBound(
+                item.key, _truncation_marker_max_bytes(policy, item.key), "truncation marker",
+            )
+        else:
+            bound = invariant.get(item.key)
+            if bound is None:
+                raise OutputSchemaMissing(
+                    f"{item.key} is an untruncatable metadata field without a schema bound"
+                )
+            rows[item.key] = bound
+    return rows
 
 
 def required_headroom_bytes(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> int:
@@ -250,18 +269,6 @@ def validate_envelope_headroom(budget_policy, policy: JsonEncodingPolicy = RESUL
         )
 
 
-def schema_diagnostic(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> Dict[str, object]:
-    """schema から導いた上限の内訳（診断・PR の説明用）。"""
-
-    return {
-        "required_headroom_bytes": required_headroom_bytes(policy),
-        "authority": {key: bound.max_bytes for key, bound in authority_field_bounds(policy).items()},
-        "metadata": {key: bound.max_bytes for key, bound in metadata_field_bounds(policy).items()},
-        "evidence_inline_bytes": EVIDENCE_INLINE_BYTES,
-        "label_max_chars": LABEL_MAX_CHARS,
-    }
-
-
 __all__ = [
     "ASSUMPTION_PREMISE_MAX_BYTES",
     "C_ACTIVE_BASE_ROW",
@@ -279,6 +286,5 @@ __all__ = [
     "authority_field_bounds",
     "metadata_field_bounds",
     "required_headroom_bytes",
-    "schema_diagnostic",
     "validate_envelope_headroom",
 ]

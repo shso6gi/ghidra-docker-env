@@ -33,6 +33,8 @@ CHECKER_OWNED = (
     "MATCH_AUTHORITY_DIGEST", "MATCH_CANONICAL_STR_DIGEST", "bounded_match_evidence", "match_digest",
     "finitize_unknown_reason_record", "finitize_unknown_recovery_action",
     "iter_unknown_recovery_actions", "unknown_reason_counts_source", "recovery_backlog_source",
+    "EVIDENCE_REF_MAX_CHARS", "EVIDENCE_REFS_MAX_COUNT", "PROJECTION_DIAGNOSTIC_LEGACY_ROWS",
+    "TYPED_CAUSE_KEY_INLINE_BYTES",
 )
 SNAPSHOT = pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "unknown_reason_registry_snapshot.json"
 

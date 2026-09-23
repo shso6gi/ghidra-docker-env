@@ -431,8 +431,10 @@ _INV = Overflow.INVARIANT
 #: * 判定に関わらないが切り詰めると結果を特定できなくなる値（content identity・
 #:   総時間）→ `_C` / `_INV`。
 #:
-#: field を足すときはここへ 1 行足す。判定に関わらない診断なら `_C` / `_TRUNC`
-#: の行を足すだけで、authority・identity・solver 側は変わらない（M-3）。
+#: field を足すときはここへ 1 行足す。判定に関わらない診断（`_C` / `_TRUNC`）はこの
+#: 1 行だけ（headroom は marker の分を自動で予約する）。B の field と切り詰めない C の
+#: field は、上限を `checker/output_schema.py` に 1 行足す。authority・identity・solver
+#: 側は変わらない（M-3）。
 RESULT_FIELDS: Tuple[OutputField, ...] = (
     OutputField("is_equivalent", _B, lambda r, _o: r.is_equivalent, _INV),
     OutputField("function1_name", _A, lambda r, _o: r.function1_name, _LIMIT),
@@ -641,10 +643,6 @@ class PreparedArtifact:
             raise TypeError("a prepared artifact holds only an exact str")
 
 
-def _is_json_scalar_text(value: Any) -> bool:
-    return value is None or type(value) is str
-
-
 @dataclass(frozen=True)
 class PreparedSemanticPayload:
     """authority 確定前に作る解析由来の payload（A）。
@@ -665,6 +663,8 @@ class PreparedSemanticPayload:
     smt_formula: PreparedArtifact = PreparedArtifact(None)
     #: 原因集計（C）のうち trace だけで決まる部分（authority 前に準備する。`None` は未準備）
     cause_evidence: Optional[PreparedJson] = None
+    #: 診断（C）の時間のうち trace だけで決まる行（authority 前に準備する。`None` は未準備）
+    trace_timings: Optional[PreparedJson] = None
 
     def __post_init__(self) -> None:
         keys = set()
@@ -678,8 +678,10 @@ class PreparedSemanticPayload:
             keys.add(item.key)
         if not is_prepared_json(self.raw_limitation_evidence):
             raise TypeError("raw limitation evidence must be prepared (bounded canonical) JSON")
-        if self.cause_evidence is not None and not is_prepared_json(self.cause_evidence):
-            raise TypeError("cause evidence must be prepared (bounded canonical) JSON")
+        for name in ("cause_evidence", "trace_timings"):
+            value = getattr(self, name)
+            if value is not None and not is_prepared_json(value):
+                raise TypeError(f"{name} must be prepared (bounded canonical) JSON")
         if type(self.options) is not OutputOptions:
             raise TypeError("prepared payload needs its OutputOptions")
         if type(self.smt_formula) is not PreparedArtifact:
@@ -791,6 +793,7 @@ class OutputPreparer:
             plan=plan,
             options=options,
             smt_formula=self._prepare_smt_formula(result, options),
+            trace_timings=self._prepare_trace_timings(result),
             cause_evidence=self._prepare_cause_evidence(
                 result,
                 binary_identities if binary_identities is not None else (
@@ -809,7 +812,7 @@ class OutputPreparer:
         """
 
         from scripts.function_tracer_pcode.checker.cause_aggregate import (
-            build_trace_cause_evidence,
+            build_unknown_cause_aggregate,
         )
         from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
 
@@ -819,7 +822,10 @@ class OutputPreparer:
                 site=CAUSE_EVIDENCE_SITE, target_parts=("cause_evidence",),
                 terminal=False, max_bytes=limit, enabled=limit is not None,
             ):
-                evidence = build_trace_cause_evidence(result, binary_identities=binary_identities)
+                # 集計と同じ fail-open の入口（失敗は `error` を持つ値になる）
+                evidence = build_unknown_cause_aggregate(
+                    result, trace_evidence_for=tuple(binary_identities),
+                )
             return self.encoding.prepare(evidence, max_bytes=limit)
         except (JsonBudgetExhausted, JsonValueRejected) as exc:
             return self.encoding.prepare({
@@ -829,6 +835,22 @@ class OutputPreparer:
                     if isinstance(exc, JsonBudgetExhausted) else "not_json"
                 ),
             })
+
+    def _prepare_trace_timings(self, result: Any) -> PreparedJson:
+        """診断の時間の行（trace 由来）を、authority 前に予算まで準備する（超えたら marker）。"""
+
+        from scripts.function_tracer_pcode.checker.diagnostics import TraceTimingsView
+
+        try:
+            return self.encoding.prepare(
+                TraceTimingsView(result), max_bytes=self.policy.prepared_payload_limit(),
+            )
+        except (JsonBudgetExhausted, JsonValueRejected) as exc:
+            return self.encoding.prepare(_truncation_marker(
+                "diagnostics.timings.attempts", (),
+                remaining_bytes=self.policy.prepared_payload_limit(),
+                rejected=exc if isinstance(exc, JsonValueRejected) else None,
+            ))
 
     def _prepare_limitation_evidence(self, result: Any) -> PreparedJson:
         """legacy reason の有界な証拠の行を、直列化の予算まで準備する（超えたら marker）。"""
@@ -841,10 +863,14 @@ class OutputPreparer:
                 each(reasons, LegacyReasonEvidence),
                 max_bytes=self.policy.prepared_payload_limit(),
             )
-        except JsonBudgetExhausted:
+        except (JsonBudgetExhausted, JsonValueRejected) as exc:
+            # 証拠の欠陥で判定を変えない（件数 + marker）
             return self.encoding.prepare({
                 "truncated": True,
-                "reason": BudgetKind.SERIALIZATION_BYTES.value,
+                "reason": (
+                    BudgetKind.SERIALIZATION_BYTES.value
+                    if isinstance(exc, JsonBudgetExhausted) else "not_json"
+                ),
                 "original_items": len(reasons),
             })
 
@@ -935,6 +961,38 @@ def finitize_legacy_reasons(result: Any) -> None:
         ]
 
 
+def check_prepared_field_bounds(result: Any, *, authority_projects_reasons: bool) -> None:
+    """authority 確定 **前** に分かる B の field の大きさを、出力 schema の上限と比べる（G4-b）。
+
+    recovery action の行は authority が作り直さない（finish は reason だけを canonical
+    に置き換える）ので、ここで準備して測った byte がそのまま出力の byte になる。authority
+    が reason を作らない経路（pilot 無し）では reason の行も同じ。上限を超えるなら、判定の
+    前に pair terminal な限界にする（authority 確定後に出力の契約違反で ERROR にしない）。
+    canonical reason / relation の大きさは authority の出力で、その上限は authority の
+    event stream の契約（#110）。
+    """
+
+    from scripts.function_tracer_pcode.checker.output_schema import authority_field_bounds
+
+    bounds = authority_field_bounds(RESULT_JSON_POLICY)
+    checked = ["unknown_recovery_actions"]
+    if not authority_projects_reasons:
+        checked.append("unknown_reasons")
+    for key in checked:
+        bound = bounds[key]
+        try:
+            RESULT_JSON_POLICY.measure(FIELD_BY_KEY[key].read(result, None), max_bytes=bound.max_bytes)
+        except JsonBudgetExhausted as exc:
+            raise_expression_size_budget_exceeded(
+                BudgetKind.SERIALIZATION_BYTES,
+                observed=exc.consumed_bytes,
+                limit=bound.max_bytes,
+                site=PREPARATION_SITE,
+                target_key=("result_payload", key),
+                evidence=(f"field={key}", f"schema_bound={bound.max_bytes}"),
+            )
+
+
 def prepare_pair_output(
     checker: Any,
     result: Any,
@@ -979,8 +1037,10 @@ def prepare_pair_output(
     preparer = OutputPreparer(policy)
     options = OutputOptions.for_result(result, save_formula=save_formula)
     identities = tuple(getattr(checker, "_active_binary_content_identities", None) or (None, None))
+    authority_projects_reasons = getattr(checker, "v2_dual_write_pilot_connector", None) is not None
     finitize_legacy_reasons(result)
     try:
+        check_prepared_field_bounds(result, authority_projects_reasons=authority_projects_reasons)
         prepared = preparer.prepare(result, options, binary_identities=identities)
     except (AnalysisLimitation, JsonValueRejected) as exc:
         if isinstance(exc, JsonValueRejected):
@@ -988,6 +1048,7 @@ def prepare_pair_output(
         result = _gate(result)
         finitize_legacy_reasons(result)
         try:
+            check_prepared_field_bounds(result, authority_projects_reasons=authority_projects_reasons)
             prepared = preparer.prepare(result, options, binary_identities=identities)
         except (AnalysisLimitation, JsonValueRejected) as again:
             _record_preparation_bug(again)
@@ -1151,14 +1212,6 @@ class AuthorityDecisionEnvelope:
                 raise OutputSchemaMissing(
                     f"{item.key} has no bound in checker/output_schema.authority_field_bounds"
                 )
-            if bound.max_rows is not None:
-                count = len(getattr(result, bound.rows_attr, None) or ())
-                if count > bound.max_rows:
-                    raise _violation(
-                        f"{item.key} has {count} rows over its output schema bound "
-                        f"of {bound.max_rows}",
-                        context.members,
-                    )
             row = _prepare_after_authority(
                 item, result, context, prepared, field_max_bytes=bound.max_bytes,
             )
@@ -1299,6 +1352,7 @@ __all__ = [
     "RESULT_FIELDS",
     "SerializationPlan",
     "build_final_result_envelope",
+    "check_prepared_field_bounds",
     "fields_owned_by",
     "finitize_legacy_reasons",
     "prepare_pair_output",

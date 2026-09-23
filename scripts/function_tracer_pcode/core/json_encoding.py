@@ -45,7 +45,7 @@ import hashlib
 import json
 import re
 from collections.abc import Iterator as _AbcIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as dataclass_fields, is_dataclass
 from enum import Enum
 from json.encoder import encode_basestring, encode_basestring_ascii
 from typing import Any, Callable, Iterable, Iterator, List, Optional, Tuple
@@ -138,13 +138,21 @@ class _Raw(_Source):
 
 
 class _Evidence(_Source):
-    __slots__ = ("value", "identity", "refresh")
+    __slots__ = ("value", "identity", "refresh", "inline_bytes")
 
-    def __init__(self, value: Any, identity: Any, refresh: Optional[Callable[[], Any]] = None) -> None:
+    def __init__(
+        self,
+        value: Any,
+        identity: Any,
+        refresh: Optional[Callable[[], Any]] = None,
+        inline_bytes: Optional[int] = None,
+    ) -> None:
         self.value = value
         self.identity = identity
         #: 同じ値の source を作り直す（遅延列は 1 回しか辿れないので、要約の digest 用）
         self.refresh = refresh
+        #: そのまま置いてよい大きさ（既定は `EVIDENCE_INLINE_BYTES`）
+        self.inline_bytes = EVIDENCE_INLINE_BYTES if inline_bytes is None else int(inline_bytes)
 
 
 class _Text(_Source):
@@ -252,7 +260,11 @@ def raw(value: Any) -> _Source:
 
 
 def evidence(
-    value: Any, identity: Any = None, *, refresh: Optional[Callable[[], Any]] = None,
+    value: Any,
+    identity: Any = None,
+    *,
+    refresh: Optional[Callable[[], Any]] = None,
+    inline_bytes: Optional[int] = None,
 ) -> _Source:
     """重くなり得る証拠（key / evidence）。出力では有界な表現、`to_dict()` では元の値。
 
@@ -261,7 +273,7 @@ def evidence(
     しか辿れない）を含むなら `refresh` に同じ source を作り直す callable を渡す。
     """
 
-    return _Evidence(value, identity, refresh)
+    return _Evidence(value, identity, refresh, inline_bytes)
 
 
 def text(value: Any, max_chars: int) -> _Source:
@@ -306,6 +318,11 @@ EVIDENCE_KIND_MAX_CHARS = 64
 TEXT_MARKER_MAX_CHARS = 64
 
 
+#: 有界な証拠の文字列 field に許す文字（JSON で escape されない印字可能な ASCII）。
+#: これで `EVIDENCE_SUMMARY_MAX_BYTES` が書き出しの byte 数の上限になる。
+_PRINTABLE_WITHOUT_ESCAPE = re.compile(r'[ !#-\[\]-~]*')
+
+
 @dataclass(frozen=True)
 class BoundedEvidence:
     """大きい証拠の代わりに置く有界な表現（identity・種類・大きさの下限）。
@@ -329,8 +346,13 @@ class BoundedEvidence:
             ("kind", EVIDENCE_KIND_MAX_CHARS),
         ):
             value = getattr(self, name)
-            if type(value) is not str or not value.isascii() or len(value) > limit:
-                raise ValueError(f"bounded evidence {name} must be short ASCII")
+            if (
+                type(value) is not str or len(value) > limit
+                or not _PRINTABLE_WITHOUT_ESCAPE.fullmatch(value)
+            ):
+                raise ValueError(
+                    f"bounded evidence {name} must be short printable ASCII without escapes"
+                )
 
     def match_digest(self, name: str) -> Optional[str]:
         for key, value in self.match_digests:
@@ -442,6 +464,8 @@ class Column:
     attr: Optional[str] = None
     legacy: Optional[Callable[[Any], Any]] = None
     omit_none: bool = False
+    #: `EVIDENCE` の列でそのまま置いてよい大きさ（既定は `EVIDENCE_INLINE_BYTES`）
+    inline_bytes: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.kind not in _COLUMN_KINDS:
@@ -456,6 +480,7 @@ class Column:
             return evidence(
                 self._legacy_source(value), identity,
                 refresh=None if reread is None else (lambda: self._legacy_source(reread())),
+                inline_bytes=self.inline_bytes,
             )
         return value
 
@@ -468,7 +493,8 @@ class Column:
         if self.kind == TEXT:
             return max(4, policy.max_string_bytes(self.max_chars + TEXT_MARKER_MAX_CHARS))
         if self.kind == EVIDENCE:
-            return max(4, EVIDENCE_INLINE_BYTES, EVIDENCE_SUMMARY_MAX_BYTES)
+            inline = EVIDENCE_INLINE_BYTES if self.inline_bytes is None else self.inline_bytes
+            return max(4, inline, EVIDENCE_SUMMARY_MAX_BYTES)
         if self.kind == INT:
             return INT_MAX_BYTES
         return 5
@@ -528,11 +554,11 @@ class JsonBudget:
         remaining = self.remaining()
         size = leaf.__json_tree_bytes__(RESULT_JSON_POLICY, remaining)
         if size is None:
-            # 見積りできない形（閉路など、未凍結の式の中だけ）: 作ってから数える
-            built = leaf.__json_tree__()
-            size = RESULT_JSON_POLICY.measure(built, mode=LEGACY)
-            self.charge(size)
-            return (built if build else None), size
+            # DAG のまま見積もれない形（閉路。未凍結の式の中だけ）: node を 1 つ作るたびに
+            # 数えながら作る（作ってから数えない）
+            before = self.consumed
+            built = leaf.__json_tree_metered__(RESULT_JSON_POLICY, self.charge)
+            return (built if build else None), self.consumed - before
         self.charge(size)
         return (leaf.__json_tree__() if build else None), size
 
@@ -671,7 +697,9 @@ class JsonEncodingPolicy:
     def max_string_bytes(self, max_chars: int) -> int:
         """`max_chars` 文字以下の文字列を書いたときの byte 数の上限（最悪の escape = 6 byte/文字）。"""
 
-        return 2 + 6 * int(max_chars)
+        # 最悪の escape: `ensure_ascii` では非 BMP の 1 文字が `\uXXXX\uXXXX`（12 byte）、
+        # それ以外では制御文字の `\u00XX`（6 byte）
+        return 2 + (12 if self.ensure_ascii else 6) * int(max_chars)
 
     # -- 書き出し ------------------------------------------------------------
 
@@ -805,6 +833,17 @@ class JsonEncodingPolicy:
 
         return _Walk(self, LEGACY, budget or JsonBudget(None), build=True).run(source)
 
+    def plain_bytes(self, value: Any, *, max_bytes: Optional[int] = None) -> Optional[int]:
+        """容器（tuple / list / dict）と基底型 **だけ** から成る値の byte 数（それ以外は `None`）。
+
+        `max_bytes` を超えたら `JsonBudgetExhausted`。live な object（record・式・Ghidra の
+        値など）を含む値は `None`（呼ぶ側は有界な証拠へ置き換える）。
+        """
+
+        budget = JsonBudget(max_bytes)
+        done, _ = _Walk(self, LEGACY, budget, build=False).plain(value, False)
+        return budget.consumed if done else None
+
     def count_into(self, source: Any, budget: JsonBudget, *, mode: str = LEGACY) -> None:
         """source の byte 数を `budget` へ足す（作らない）。"""
 
@@ -820,6 +859,11 @@ class JsonEncodingPolicy:
             return value
         except JsonBudgetExhausted:
             pass
+        return _summarize_evidence(self, value, identity)
+
+    def summarize_evidence(self, value: Any, identity: Any = None) -> BoundedEvidence:
+        """大きさに依らず、証拠を有界な要約にする（identity + 種類）。"""
+
         return _summarize_evidence(self, value, identity)
 
     def evidence_digest(self, value: Any) -> str:
@@ -875,7 +919,11 @@ def bounded_text(value: Any, max_chars: int) -> Any:
 def _text_marker(value: str, max_chars: int) -> str:
     """`max_chars` 文字 **以内** に収まる「先頭 + 明示の marker」（同じ上限で冪等）。"""
 
-    digest = hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+    hasher = hashlib.sha256()
+    for start in range(0, len(value), _STRING_CHUNK):
+        # 巨大な文字列を一度に encode しない（chunk ごとに hash へ流す）
+        hasher.update(value[start:start + _STRING_CHUNK].encode("utf-8", "surrogatepass"))
+    digest = hasher.hexdigest()[:16]
     keep = max(0, max_chars - TEXT_MARKER_MAX_CHARS)
     tail = f"…[+{len(value) - keep} chars sha256:{digest}]"
     keep = max(0, max_chars - len(tail))
@@ -1301,15 +1349,43 @@ class _Walk:
                 else:
                     self.push("list", iter(item), None, None, item, build=False, fn=_RAW)
                 self.drain_to(len(self.stack) - 1)
-        elif (
-            getattr(type(item), "json_items", None) is not None
-            or getattr(type(item), "__json_tree__", None) is not None
-            or type(item) is BoundedEvidence
+        else:
+            self.count_raw_leaf(item)
+        self.place(parent, key, item, build)
+
+    def count_raw_leaf(self, item: Any) -> None:
+        """LEGACY でそのまま置く JSON 型でない葉を、**後段の codec が写す形で** 数える。
+
+        snapshot の codec（`SnapshotFingerprintCodec._freeze`）は、この葉を `stable_key()` /
+        `to_key()`・record の表現・dataclass の field の順で写す。同じ順で、その写しの
+        大きさを数える（型名だけ数えて、中身を数えずに写させない）。
+        """
+
+        kind = type(item)
+        if isinstance(item, Enum):
+            self.opaque(item)
+            return
+        key_fn = getattr(item, "stable_key", None)
+        if not callable(key_fn):
+            key_fn = getattr(item, "to_key", None)
+        if callable(key_fn):
+            self.opaque(item)
+            self.count_only(key_fn(), raw_leaves=True)
+            return
+        if (
+            getattr(kind, "json_items", None) is not None
+            or getattr(kind, "__json_tree__", None) is not None
+            or kind is BoundedEvidence
         ):
             self.count_only(item, raw_leaves=False)
-        else:
+            return
+        if is_dataclass(item) and not isinstance(item, type):
             self.opaque(item)
-        self.place(parent, key, item, build)
+            for field_info in dataclass_fields(item):
+                self.budget.charge(self.policy.string_bytes(field_info.name) + 4)
+                self.count_only(getattr(item, field_info.name), raw_leaves=True)
+            return
+        self.opaque(item)
 
     def opaque(self, item: Any) -> None:
         """JSON 型でない葉（旧 `to_dict` がそのまま置いた値）: 型名や enum の値で数える。"""
@@ -1346,6 +1422,16 @@ class _Walk:
             self.enter_evidence(item, parent, key, build)
         elif kind is _Text:
             value = item.value
+            if self.mode == CANONICAL and value is not None and not isinstance(value, str):
+                # 文字列でない値（case の組など）も、列の上限まで: 収まらなければ有界な証拠
+                self.enter_evidence(
+                    _Evidence(
+                        value, None,
+                        inline_bytes=self.policy.max_string_bytes(item.max_chars + TEXT_MARKER_MAX_CHARS),
+                    ),
+                    parent, key, build,
+                )
+                return
             if self.mode == CANONICAL and isinstance(value, str) and len(value) > item.max_chars:
                 value = _text_marker(value, item.max_chars)
             self.enter(value, parent, key, build)
@@ -1387,9 +1473,9 @@ class _Walk:
             self.enter(value, parent, key, build)
             return
         try:
-            # 上限（EVIDENCE_INLINE_BYTES）まで 1 回だけ作る。収まればその値を置く
+            # 上限（`inline_bytes`）まで 1 回だけ作る。収まればその値を置く
             inline_value = _Walk(
-                self.policy, CANONICAL, JsonBudget(EVIDENCE_INLINE_BYTES), build=True,
+                self.policy, CANONICAL, JsonBudget(item.inline_bytes), build=True,
             ).run(value)
         except JsonBudgetExhausted:
             fresh = item.refresh() if item.refresh is not None else value

@@ -9,7 +9,9 @@ digest を、canonical な写しを作らずに求める。canonical_value と�
 * 同じ容器 object は 1 回だけ辿る（**DAG-aware**。共有部分のある key でも distinct な
   node の数に比例する）。
 * 2 つの値の digest が等しい ⇔ canonical_value が Python の `==` で等しい（数値は
-  `==` と同じく 1 / 1.0 / True を同一視する。NaN だけは例外で、自分自身と等しい）。
+  `==` と同じく 1 / 1.0 / True を同一視する）。例外は 2 つ: NaN は自分自身と等しい、
+  enum の値が list / dict のときは tuple と同じ形として扱う（canonical_value はその
+  値を正規化せずに返すので、`==` では list と tuple が等しくない）。
 
 この module は core の最下層で、project の他の module を import しない。
 """
@@ -95,8 +97,9 @@ def canonical_merkle_digest(value: Any) -> Tuple[str, int]:
             if item is None or type(item) in _PRIMITIVE_TYPES:
                 return item
             if isinstance(item, Enum):
-                raw = item.value
-                return raw if raw is None or type(raw) in _PRIMITIVE_TYPES else RawLeaf(raw)
+                # canonical_value は enum の値をそのまま返す。容器の値も同じ形として辿る
+                item = item.value
+                continue
             if hasattr(item, "to_authority_dict"):
                 item = item.to_authority_dict()
                 continue

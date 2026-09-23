@@ -38,8 +38,6 @@ _NON_GUARD_ATTRIBUTES: FrozenSet[GuardShape] = frozenset({
     ('attr', ('cls',), '_debug_suppressed'),
     # self._debug_suppressed  (analysis/phi_resolver.py:112)
     ('attr', ('self',), '_debug_suppressed'),
-    # self.pairwise_debug_stats  (checker/result.py:401)
-    ('attr', ('self',), 'pairwise_debug_stats'),
 })
 
 #: canonical descriptor 文法の外にある式（比較・引数付き呼び出しなど）。

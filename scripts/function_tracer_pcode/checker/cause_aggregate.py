@@ -800,19 +800,32 @@ def attach_cause_aggregate(result: Any) -> None:
         return
 
 
-def build_unknown_cause_aggregate(result: Any) -> Optional[Dict[str, Any]]:
+def build_unknown_cause_aggregate(
+    result: Any,
+    *,
+    trace_evidence_for: Optional[Tuple[Any, Any]] = None,
+) -> Optional[Dict[str, Any]]:
     """`debug_trace` を省いても原因分析を失わない compact な集計を作る。
 
     full trace の複製ではない: record 本体・solver 行・SMT・counterexample は
     持たず、reporting が読む集計と identity だけを持つ。
+
+    `trace_evidence_for=(binary1, binary2)` を渡すと、authority 確定 **前** に作る
+    trace 由来の部分（`build_trace_cause_evidence`）だけを作る。どちらも診断なので、
+    失敗しても判定を壊さず `error` を持つ値を返す（同じ fail-open の規則）。
     """
     if result is None:
         return None
     try:
+        if trace_evidence_for is not None:
+            return build_trace_cause_evidence(result, binary_identities=trace_evidence_for)
         return _build_unknown_cause_aggregate(result)
     except Exception as exc:  # 診断は判定を壊さない
         return {
-            "schema": UNKNOWN_CAUSE_AGGREGATE_SCHEMA,
+            "schema": (
+                TRACE_CAUSE_EVIDENCE_SCHEMA if trace_evidence_for is not None
+                else UNKNOWN_CAUSE_AGGREGATE_SCHEMA
+            ),
             "error": f"{type(exc).__name__}: {exc}"[:200],
         }
 
@@ -857,6 +870,9 @@ def build_trace_cause_evidence(
     legacy_attempt, legacy_records = _final_legacy_attempt(trace, attempts)
     legacy_view = None
     if trace is not None and legacy_attempt is not None:
+        # 集計は record を直接読むので、読む record の大きさを先に作業量へ数える
+        # （集計の大きさは数えた入力で抑えられる）
+        _charge_records(legacy_records)
         legacy_view = build_reason_view(legacy_records)
         legacy_view["source"] = "final_attempt"
     evidence: Dict[str, Any] = {
@@ -899,8 +915,23 @@ def build_trace_cause_evidence(
     return evidence
 
 
+def _charge_records(records: Sequence[Any]) -> None:
+    from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
+    from scripts.function_tracer_pcode.core.json_encoding import LEGACY, RESULT_JSON_POLICY
+
+    work = active_serialization_work()
+    if work is None:
+        return
+    for record in records:
+        RESULT_JSON_POLICY.count_into(record, work, mode=LEGACY)
+
+
 def trace_evidence_is_usable(evidence: Any) -> bool:
-    return isinstance(evidence, Mapping) and evidence.get("schema") == TRACE_CAUSE_EVIDENCE_SCHEMA
+    return (
+        isinstance(evidence, Mapping)
+        and evidence.get("schema") == TRACE_CAUSE_EVIDENCE_SCHEMA
+        and not evidence.get("error")
+    )
 
 
 def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
@@ -915,11 +946,12 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
             ),
         )
     if not trace_evidence_is_usable(evidence):
+        detail = None
+        if isinstance(evidence, Mapping):
+            detail = evidence.get("error") or evidence.get("reason")
         return {
             "schema": UNKNOWN_CAUSE_AGGREGATE_SCHEMA,
-            "error": "trace_evidence_unavailable:" + str(
-                (evidence or {}).get("reason") if isinstance(evidence, Mapping) else None
-            )[:120],
+            "error": ("trace_evidence_unavailable: " + str(detail))[:200],
         }
     trace_present = bool(evidence.get("trace_present"))
 

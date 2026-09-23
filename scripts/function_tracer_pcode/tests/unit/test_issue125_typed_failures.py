@@ -414,7 +414,8 @@ def test_cli_attaches_failure_diagnostics_before_the_aggregate():
         # encode は `build_final_result_envelope` が 1 回で行う。封印は builder に
         # 渡す関数の中でだけ呼ぶ（CLI が preimage を組み直さない）。
         source.index("build_canonical_result_finalization_bundle("),
-        source.index("envelope = build_final_result_envelope(result, seal=seal)"),
+        # envelope の組み立てと契約違反の ERROR は 1 つの helper（`_final_envelope_or_error_result`）
+        source.index("envelope = _final_envelope_or_error_result("),
         source.index("persist_canonical_result_envelope(result_payload)"),
     ]
     assert order == sorted(order)

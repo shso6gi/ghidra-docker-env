@@ -71,6 +71,10 @@ LABEL_MAX_CHARS = 256
 DETAIL_MAX_CHARS = 1024
 
 
+#: `typed_cause_key` の列でそのまま置く大きさ（canonical reason の固定の形が必ず収まる）
+TYPED_CAUSE_KEY_INLINE_BYTES = 4096
+
+
 def _optional_dict(value: Any) -> Any:
     return as_dict(value) if value else None
 
@@ -117,7 +121,8 @@ UNKNOWN_REASON_ROW = (
     Column("evidence_kind", TEXT, LABEL_MAX_CHARS),
     Column("object_target_key", EVIDENCE),
     Column("proof_obligation_id", EVIDENCE),
-    Column("typed_cause_key", EVIDENCE, legacy=_optional_dict),
+    # canonical reason の typed_cause_key は固定の形（digest 16 個）で、要約せずに置く
+    Column("typed_cause_key", EVIDENCE, legacy=_optional_dict, inline_bytes=TYPED_CAUSE_KEY_INLINE_BYTES),
     Column("proof_requirement_ids", EVIDENCE, legacy=_dict_items),
     Column("recovery_action", TEXT, LABEL_MAX_CHARS),
     Column("action_status", TEXT, VOCAB_MAX_CHARS),
@@ -562,7 +567,6 @@ def bounded_match_evidence(value: Any) -> Any:
     from scripts.function_tracer_pcode.core.canonical_digest import canonical_merkle_digest
     from scripts.function_tracer_pcode.core.json_encoding import (
         EVIDENCE_INLINE_BYTES,
-        LEGACY,
         RESULT_JSON_POLICY,
         BoundedEvidence,
         JsonBudgetExhausted,
@@ -572,16 +576,18 @@ def bounded_match_evidence(value: Any) -> Any:
     if value is None or type(value) is BoundedEvidence:
         return value
     try:
-        RESULT_JSON_POLICY.measure(value, max_bytes=EVIDENCE_INLINE_BYTES, mode=LEGACY)
-        return value
+        # そのまま残すのは、容器と基底型だけから成る小さい値（live な object を持たない）
+        if RESULT_JSON_POLICY.plain_bytes(value, max_bytes=EVIDENCE_INLINE_BYTES) is not None:
+            return value
     except JsonBudgetExhausted:
         pass
     kind = evidence_kind(value)
     try:
         merkle, distinct = canonical_merkle_digest(value)
     except (TypeError, UnicodeError):
-        # authority の値にならない証拠（Expression など）は照合に使えない: 型つき token の digest
-        summary = RESULT_JSON_POLICY.bounded_evidence(value)
+        # authority の値にならない証拠（Expression・live な object など）は照合に使えない:
+        # 型つき token の digest（葉は codec が写す形 = stable_key などで辿る）
+        summary = RESULT_JSON_POLICY.summarize_evidence(value)
         return BoundedEvidence(
             identity=summary.identity, identity_kind=summary.identity_kind, kind=kind,
         )
@@ -625,9 +631,33 @@ def match_digest(value: Any, name: str) -> Optional[str]:
 
 
 def _bounded_text(value: Any, max_chars: int) -> Any:
+    """自由文の列: 文字列は文字数まで、文字列でない値（case の組など）は有界な証拠。"""
+
     from scripts.function_tracer_pcode.core.json_encoding import bounded_text
 
-    return bounded_text(value, max_chars)
+    if value is None or isinstance(value, str):
+        return bounded_text(value, max_chars)
+    return bounded_match_evidence(value)
+
+
+#: 証拠の参照（evidence ref）1 つの文字数と、有界化した record が持つ参照の数
+EVIDENCE_REF_MAX_CHARS = ID_MAX_CHARS
+EVIDENCE_REFS_MAX_COUNT = 64
+
+
+def _bounded_refs(refs: Any) -> Tuple[Any, ...]:
+    """参照の列: 各参照は文字数まで、数は上限まで（超えた分は件数の marker 1 つ）。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import bounded_text
+
+    items = tuple(refs or ())
+    kept = tuple(
+        bounded_text(str(item), EVIDENCE_REF_MAX_CHARS)
+        for item in items[:EVIDENCE_REFS_MAX_COUNT]
+    )
+    if len(items) > EVIDENCE_REFS_MAX_COUNT:
+        kept += (f"…(+{len(items) - EVIDENCE_REFS_MAX_COUNT} refs)",)
+    return kept
 
 
 def finitize_unknown_reason_record(record: UnknownReasonRecord) -> UnknownReasonRecord:
@@ -645,6 +675,7 @@ def finitize_unknown_reason_record(record: UnknownReasonRecord) -> UnknownReason
         proof_requirement_ids=tuple(
             bounded_match_evidence(item) for item in record.proof_requirement_ids
         ),
+        evidence_refs=_bounded_refs(record.evidence_refs),
     )
 
 
@@ -659,7 +690,13 @@ def finitize_unknown_recovery_action(action: UnknownRecoveryAction) -> UnknownRe
         object_target_key=bounded_match_evidence(action.object_target_key),
         object_evidence=bounded_match_evidence(action.object_evidence),
         proof_obligation_id=bounded_match_evidence(action.proof_obligation_id),
+        evidence_refs=_bounded_refs(action.evidence_refs),
+        required_evidence=_bounded_refs(action.required_evidence),
     )
+
+
+#: projection の診断に写す legacy reason の行数の上限
+PROJECTION_DIAGNOSTIC_LEGACY_ROWS = 8
 
 
 def build_projection_diagnostic(
@@ -721,6 +758,10 @@ def build_projection_diagnostic(
     )
     if matched:
         diagnostic["legacy_match"] = match_kind
+        if len(matched) > PROJECTION_DIAGNOSTIC_LEGACY_ROWS:
+            # 診断に写す legacy の行は上限まで（件数は残す。`detail` が使うのは先頭 2 行）
+            diagnostic["legacy_matched_count"] = len(matched)
+            matched = matched[:PROJECTION_DIAGNOSTIC_LEGACY_ROWS]
         diagnostic["legacy"] = [
             {
                 "stage": getattr(record, "stage", None),
@@ -794,7 +835,8 @@ def _match_legacy_reasons(
     )
     cause_requirements = set(getattr(cause_occurrence, "proof_requirement_ids", ()) or ()) if cause_occurrence is not None else set()
     requirement_digests = {
-        hashlib.sha256(str(item).encode("utf-8")).hexdigest() for item in cause_requirements
+        hashlib.sha256(str(item).encode("utf-8", "surrogatepass")).hexdigest()
+        for item in cause_requirements
     }
     exact = []
     for record in candidates:
@@ -892,10 +934,19 @@ def make_production_unknown_reason(
 
 
 def _production_target_key(cause_occurrence: Any, diagnostic: Optional[Mapping[str, Any]]) -> Any:
+    """canonical reason の `object_target_key`（conditional lane が cause と照合する鍵）。
+
+    従来どおり、診断が cause を持つとき（= cause occurrence が在り、診断を作れたとき）
+    だけ設定する。値は診断の有界な写しではなく cause の封印済み canonical key そのもの
+    （`CauseIdV2` が作成時に canonical 化した値で、従来の `canonical_value(...)` と等しい）。
+    """
+
+    if not diagnostic or diagnostic.get("cause") is None:
+        return None
     cause_id = getattr(cause_occurrence, "cause_id", None)
-    if cause_id is not None:
-        return getattr(cause_id, "canonical_target_key", None)
-    return (diagnostic.get("cause") or {}).get("canonical_target_key") if diagnostic else None
+    if cause_id is None:
+        return None
+    return getattr(cause_id, "canonical_target_key", None)
 
 
 def _first_legacy_field(diagnostic: Optional[Mapping[str, Any]], field_name: str) -> Any:

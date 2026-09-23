@@ -487,44 +487,8 @@ class DebugTrace:
 
     def format_phase_usage_summary(self) -> str:
         """人間向けの Phase 利用状況サマリを返す。"""
-        usage = self.get_phase_usage()
-        if not usage:
-            return "Phase Usage Summary:\n  (none)"
+        return format_phase_usage_rows(self.get_phase_usage())
 
-        lines = ["Phase Usage Summary:"]
-        for entry in usage:
-            if not entry["reached"]:
-                status = "NOT_REACHED"
-            elif entry["used"]:
-                status = "USED"
-            else:
-                status = "NO_CHANGES"
-
-            scope = "planned" if entry["planned"] else "aux"
-            details = [f"scope={scope}"]
-            if entry["attempt_count"] > 0:
-                details.append(f"attempts={entry['attempt_count']}")
-            if entry["result_attempt_count"] > 0:
-                details.append(f"rechecks={entry['result_attempt_count']}")
-            if entry["no_change_skip_count"] > 0:
-                details.append(f"no_changes={entry['no_change_skip_count']}")
-            transition_counts = entry["transition_counts"]
-            details.append(f"unsat={transition_counts.get(TransitionReason.UNSAT.value, 0)}")
-            details.append(f"sat={transition_counts.get(TransitionReason.SAT.value, 0)}")
-            details.append(
-                f"sat_phase4b={transition_counts.get(TransitionReason.SAT_PHASE4B.value, 0)}"
-            )
-            details.append(f"unknown={transition_counts.get(TransitionReason.UNKNOWN.value, 0)}")
-            details.append(f"timeout={transition_counts.get(TransitionReason.TIMEOUT.value, 0)}")
-            details.append(
-                f"critical={transition_counts.get(TransitionReason.CRITICAL_ERROR.value, 0)}"
-            )
-            if entry["last_transition_reason"] is not None:
-                details.append(f"last={entry['last_transition_reason']}")
-
-            lines.append(f"  {entry['phase']}: {status} ({', '.join(details)})")
-        return "\n".join(lines)
-    
     def _observed_unknown_reasons(self) -> List[UnknownReasonRecord]:
         return [
             reason
@@ -591,3 +555,44 @@ class DebugTrace:
         return materialize(self)
 
     
+
+
+def format_phase_usage_rows(usage: Any) -> str:
+    """phase 利用状況の行（`get_phase_usage()` / 出力の `phase_usage`）を人間向けに整形する。"""
+    usage = list(usage or ())
+    if not usage:
+        return "Phase Usage Summary:\n  (none)"
+
+    lines = ["Phase Usage Summary:"]
+    for entry in usage:
+        if not entry["reached"]:
+            status = "NOT_REACHED"
+        elif entry["used"]:
+            status = "USED"
+        else:
+            status = "NO_CHANGES"
+
+        scope = "planned" if entry["planned"] else "aux"
+        details = [f"scope={scope}"]
+        if entry["attempt_count"] > 0:
+            details.append(f"attempts={entry['attempt_count']}")
+        if entry["result_attempt_count"] > 0:
+            details.append(f"rechecks={entry['result_attempt_count']}")
+        if entry["no_change_skip_count"] > 0:
+            details.append(f"no_changes={entry['no_change_skip_count']}")
+        transition_counts = entry["transition_counts"]
+        details.append(f"unsat={transition_counts.get(TransitionReason.UNSAT.value, 0)}")
+        details.append(f"sat={transition_counts.get(TransitionReason.SAT.value, 0)}")
+        details.append(
+            f"sat_phase4b={transition_counts.get(TransitionReason.SAT_PHASE4B.value, 0)}"
+        )
+        details.append(f"unknown={transition_counts.get(TransitionReason.UNKNOWN.value, 0)}")
+        details.append(f"timeout={transition_counts.get(TransitionReason.TIMEOUT.value, 0)}")
+        details.append(
+            f"critical={transition_counts.get(TransitionReason.CRITICAL_ERROR.value, 0)}"
+        )
+        if entry["last_transition_reason"] is not None:
+            details.append(f"last={entry['last_transition_reason']}")
+
+        lines.append(f"  {entry['phase']}: {status} ({', '.join(details)})")
+    return "\n".join(lines)

@@ -334,6 +334,20 @@ def _emit_import_error_result(
     sys.exit(CLI_EXIT_MATRIX[Outcome.ERROR])
 
 
+def _final_envelope_or_error_result(args, *, result, seal, **context):
+    """最終 envelope を組む。headroom / schema の契約違反なら内部エラーの ERROR を出して終わる。
+
+    Issue #22 PR-22-D: authority 確定 **後** の出力の契約違反で、判定は変えない
+    （`_emit_output_invariant_error_result` が確定済みの outcome と receipt を証跡に残す）。
+    """
+
+    try:
+        return build_final_result_envelope(result, seal=seal)
+    except OutputEnvelopeInvariantViolation as violation:
+        _emit_output_invariant_error_result(args, result=result, violation=violation, **context)
+        raise  # pragma: no cover - 上の関数は sys.exit する
+
+
 def _emit_output_invariant_error_result(
     args,
     *,
@@ -698,21 +712,18 @@ def run_equivalence_check(args):
         # Issue #22 PR-22-D: 準備済み payload（authority 確定前）+ authority の
         # 値 + 診断 → 封印 → 準備時の上限で bounded encode。上限を超えるのは
         # headroom 契約の違反で、判定は変えずに内部エラーとして落とす。
-        try:
-            envelope = build_final_result_envelope(result, seal=seal)
-        except OutputEnvelopeInvariantViolation as violation:
-            _emit_output_invariant_error_result(
-                args,
-                result=result,
-                violation=violation,
-                binary1_path=binary1_path,
-                binary2_path=binary2_path,
-                func_name1=func_name1,
-                func_name2=func_name2,
-                start_time=start_time,
-                binary1_content_identity=binary1_content_identity,
-                binary2_content_identity=binary2_content_identity,
-            )
+        envelope = _final_envelope_or_error_result(
+            args,
+            result=result,
+            seal=seal,
+            binary1_path=binary1_path,
+            binary2_path=binary2_path,
+            func_name1=func_name1,
+            func_name2=func_name2,
+            start_time=start_time,
+            binary1_content_identity=binary1_content_identity,
+            binary2_content_identity=binary2_content_identity,
+        )
         result_payload = envelope.payload
         if seal is not None:
             result.canonical_result_finalization_bundle = result_payload[

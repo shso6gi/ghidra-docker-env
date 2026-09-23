@@ -770,6 +770,21 @@ class Expression:
         except (TypeError, ValueError):
             return None
 
+    def __json_tree_metered__(self, policy: Any, charge: Any) -> Dict[str, Any]:
+        """木表現を、node を 1 つ作る **前** にその node の byte を `charge` しながら作る。
+
+        DAG のまま見積もれない形（閉路）でだけ使う。閉路は経路ごとに `cycle_ref` へ
+        置き換わるので、数える量は実際に作る木の byte と同じ。`charge` が予算超過で
+        例外を上げた時点で、残りの木を作らない。
+        """
+
+        meters = _TREE_BUILD_METERS
+        meters.append((policy, charge))
+        try:
+            return self._to_dict(set())
+        finally:
+            meters.pop()
+
     def __json_identity__(self) -> str:
         """証拠の digest に流す identity（DAG のまま求める構造 digest）。"""
 
@@ -780,12 +795,24 @@ class Expression:
     def _to_dict(self, active: Set[int]) -> Dict[str, Any]:
         node_id = id(self)
         if node_id in active:
+            key = self.structural_key(budget=512)
+            if _TREE_BUILD_METERS:
+                # 数えながら作る: cycle_ref の表現も作りながら数える
+                policy, charge = _TREE_BUILD_METERS[-1]
+                charge(policy.measure({"type": self.expr_type.name, "cycle_ref": 0}) - 1)
+                return {
+                    "type": self.expr_type.name,
+                    "cycle_ref": policy.materialize(
+                        runtime_ref_source(key), budget=_ChargeOnlyBudget(charge),
+                    ),
+                }
             return {
                 "type": self.expr_type.name,
-                "cycle_ref": self._serialize_runtime_ref(
-                    self.structural_key(budget=512)
-                ),
+                "cycle_ref": self._serialize_runtime_ref(key),
             }
+        if _TREE_BUILD_METERS:
+            policy, charge = _TREE_BUILD_METERS[-1]
+            charge(_node_local_bytes(self, policy))
         active.add(node_id)
         try:
             return self._to_dict_active(active)
@@ -999,6 +1026,43 @@ def estimate_legacy_dict_bytes(
             if type(child) is not _RuntimeRefChild and id(child) not in sizes:
                 stack.append((child, False))
     return sizes.get(id(root))
+
+
+#: 数えながら木を作る間の (policy, charge)（`Expression.__json_tree_metered__`）。
+#: 同期処理で入れ子になり得るので stack。空なら通常の構築（数えない）。
+_TREE_BUILD_METERS: List[Any] = []
+
+
+class _ChargeOnlyBudget:
+    """walker へ渡す予算の代わり（数えた byte を `charge` へ流すだけ。上限は `charge` が持つ）。"""
+
+    __slots__ = ("_charge",)
+
+    def __init__(self, charge: Any) -> None:
+        self._charge = charge
+
+    def charge(self, size: int) -> None:
+        self._charge(size)
+
+    def remaining(self) -> Optional[int]:
+        return None
+
+    def tree(self, leaf: Any, *, build: bool) -> Any:
+        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+        return leaf.__json_tree_metered__(RESULT_JSON_POLICY, self._charge) if build else None, 0
+
+
+def _node_local_bytes(node: "Expression", policy: Any) -> int:
+    """node 1 つ分の byte（子は含まない。runtime ref は含む）。見積りと同じ規則。"""
+
+    children: List[Any] = []
+    local = node._to_dict_active(None, collect=children)
+    size = utf8_length(policy.dumps(local, default=_opaque_local_text)) - len(children)
+    for child in children:
+        if type(child) is _RuntimeRefChild:
+            size += child.measure(policy, None)
+    return size
 
 
 class _RuntimeRefChild:
