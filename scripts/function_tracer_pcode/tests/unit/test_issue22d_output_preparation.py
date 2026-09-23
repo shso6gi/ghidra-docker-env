@@ -1312,3 +1312,15 @@ def test_metadata_counters_are_truncated_not_turned_into_a_limitation():
     assert "pairwise_debug_stats" in envelope.truncated_metadata
     assert envelope.payload["pairwise_debug_stats"]["truncated"] is True
     assert envelope.payload["final_outcome"] == result.final_outcome
+
+
+def test_node_counting_stops_once_the_budget_is_known_to_be_exceeded():
+    """distinct node の計数も予算の分までしか辿らない（数えること自体を有界に）。"""
+    node = Expression.parameter("p", 0, 4)
+    for index in range(200_000):
+        node = Expression.binary_op("INT_ADD", node, Expression.constant(index, 4))
+    meter = SemanticGraphMeter()
+    started = time.perf_counter()
+    meter.add_root(node, max_distinct=100)
+    assert time.perf_counter() - started < 0.1
+    assert meter.distinct_nodes == 101

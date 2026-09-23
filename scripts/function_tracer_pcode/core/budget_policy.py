@@ -364,7 +364,8 @@ class SerializationWork:
 
         self.trees += 1
         self.tree_bytes += int(tree_bytes)
-        self._meter.add_root(root)
+        # 数えるのは予算の分まで（超えたと分かれば残りの node は辿らない）
+        self._meter.add_root(root, max_distinct=active_budget_policy().serialization_nodes)
         evidence = (
             f"trees={self.trees}",
             f"tree_bytes={self.tree_bytes}",

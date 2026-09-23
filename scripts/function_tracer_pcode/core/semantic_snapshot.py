@@ -600,7 +600,13 @@ class SemanticGraphMeter:
         self.tree_nodes = 0
         self.roots = 0
 
-    def add_root(self, root: Any) -> None:
+    def add_root(self, root: Any, *, max_distinct: Optional[int] = None) -> None:
+        """root を足す。`max_distinct` を超えた時点で辿るのをやめる。
+
+        止めたときは `distinct_nodes` が `max_distinct + 1` 以上になり、`tree_nodes`
+        は数えた範囲までの値になる（予算を超えたことが分かれば残りは要らない）。
+        """
+
         if root is None:
             return
         self.roots += 1
@@ -620,6 +626,8 @@ class SemanticGraphMeter:
             # object を保持して id の再利用を防ぐ（数えている間に解放されない）
             self._seen[node_id] = node
             self.distinct_nodes += 1
+            if max_distinct is not None and self.distinct_nodes > max_distinct:
+                return
             stack.append((node, True))
             for edge in ordered_semantic_edges(node):
                 child = edge.child

@@ -1605,7 +1605,8 @@ _POLICY_FIELD_READERS = {
     "serialization_bytes": {
         "core/budget_policy.py", "core/expression.py", "checker/output_preparation.py",
     },
-    "expression_nodes": set(),
+    # 数える量を予算で打ち切るために読む（比べるのは `enforce_budget`）
+    "expression_nodes": {"semantics/transform/expander_multiequal.py"},
     "expansion_cases": set(),
     "serialization_nodes": set(),
     "envelope_headroom_bytes": {"core/budget_policy.py", "checker/output_preparation.py"},

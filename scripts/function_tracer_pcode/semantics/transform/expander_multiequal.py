@@ -13,7 +13,11 @@ from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
-from scripts.function_tracer_pcode.core.budget_policy import BudgetKind, enforce_budget
+from scripts.function_tracer_pcode.core.budget_policy import (
+    BudgetKind,
+    active_budget_policy,
+    enforce_budget,
+)
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
     SemanticGraphMeter,
     stable_atoms_digest,
@@ -293,9 +297,11 @@ class MultiequalExpansionMixin:
         """
 
         latest = all_expanded[-1]
-        meter.add_root(latest.value)
+        # 数えるのは予算の分まで（超えたと分かれば残りの node は辿らない）
+        max_nodes = active_budget_policy().expression_nodes
+        meter.add_root(latest.value, max_distinct=max_nodes)
         for condition in latest.conditions or ():
-            meter.add_root(getattr(condition, "expression", None))
+            meter.add_root(getattr(condition, "expression", None), max_distinct=max_nodes)
         op_key = (
             multiequal_pcode_op_ref.stable_key()
             if multiequal_pcode_op_ref is not None

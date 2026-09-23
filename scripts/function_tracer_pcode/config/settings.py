@@ -290,20 +290,22 @@ EXPANDER_DEDUP_CASE_LIMIT = _positive_int_setting("FT_EXPANDER_DEDUP_CASE_LIMIT"
 #: * 観測した最大値はどれも小さい — 展開の distinct node < 2048
 #:   （`ellProgram/snippet`。EQ / NOT_EQ に届いた pair では最大 84）、展開 case
 #:   < 32、solver へ渡す描画 14,485 B、木表現 545 KB、結果 JSON 2.45 MB
-#:   （うち authority 確定後の field + 診断 2.39 MB、準備した payload 277 KB）。
+#:   （うち authority 確定後の field + 診断 2.39 MB、準備した payload 277 KB）、
+#:   snapshot 1 つ分の木表現 836 KB / distinct node 438。
 #: * kill された 12 pair はすべて条件簡約（CNF / 構造比較 / oracle）か solver の
 #:   区間にいて、式の大きさで止まっていない（#105 / #106 の担当）。
 #:
 #: したがって予算は「指数的な膨張に対する安全上限」で、TIMEOUT を狙って値を
 #: 下げない（下げても正しい判定を削るだけで、時間の原因には届かない）。既定値は
-#: 観測の最大値に対して 8〜290 倍の余裕を取った 2 の冪。値を変えるときは
-#: この表だけを変え、根拠の実測を PR に残す。
+#: 観測の最大値に対して 8〜290 倍の余裕を取った 2 の冪。`serialization_nodes` は
+#: `expression_nodes` 以上にしてある（展開の予算が許した式は直列化できる）。
+#: 値を変えるときはこの表だけを変え、根拠の実測を PR に残す。
 EXPRESSION_BUDGET_DEFAULTS = (
     ("expression_nodes", "FT_EXPRESSION_NODE_BUDGET", 1 << 14),       # 16,384
     ("expansion_cases", "FT_EXPANSION_CASE_BUDGET", 1 << 10),         # 1,024
     ("render_bytes", "FT_RENDER_BYTES_BUDGET", 1 << 22),              # 4 MiB
     ("serialization_bytes", "FT_SERIALIZATION_BYTES_BUDGET", 1 << 26),  # 64 MiB
-    ("serialization_nodes", "FT_SERIALIZATION_NODE_BUDGET", None),
+    ("serialization_nodes", "FT_SERIALIZATION_NODE_BUDGET", 1 << 16),  # 65,536
     ("envelope_headroom_bytes", "FT_ENVELOPE_HEADROOM_BYTES", 1 << 25),  # 32 MiB
 )
 
