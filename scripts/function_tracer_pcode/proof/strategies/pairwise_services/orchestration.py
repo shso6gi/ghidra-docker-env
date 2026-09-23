@@ -59,10 +59,11 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     LEFT as INPUT_LEFT,
     RIGHT as INPUT_RIGHT,
     InputCorrespondenceSet,
-    bind_evidence_to_relation,
+    bind_evidence_to_comparison,
     build_input_correspondence_set,
-    comparison_relation_scope,
-    comparison_uses_relation,
+    comparison_is_current,
+    comparison_scope,
+    current_comparison,
 )
 from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     register_builtin_receipt_executor,
@@ -122,6 +123,7 @@ def _impl_check(
     start_time = time.time()
     from scripts.function_tracer_pcode.proof.call_effect.preflight import (
         QueryExecutionRecord,
+        comparison_binding_for_raw_pair,
         consume_prepared_dispatch_frame,
         current_dispatch_depth,
         issue_builtin_comparison_receipt,
@@ -135,17 +137,19 @@ def _impl_check(
         solver_analysis1 = dispatch_frame.prepared.analysis1
         solver_analysis2 = dispatch_frame.prepared.analysis2
         input_correspondence = dispatch_frame.prepared.input_correspondence
-        # Issue #167: この比較で作る証拠は、この relation の比較として束縛される。
-        if not comparison_uses_relation(input_correspondence):
-            raise RuntimeError("comparison_relation_scope_mismatch")
+        # Issue #167: この比較で作る authority は frame の比較（raw pair と relation）に
+        # 束縛される。範囲がその比較でなければ実行しない。
+        if not comparison_is_current(dispatch_frame.comparison_binding):
+            raise RuntimeError("comparison_authority_scope_mismatch")
     else:
         # Compatibility-only direct strategy invocation.  Production checker
         # dispatch always supplies a certified prepared frame.  The arguments
         # are the raw pair, so the final relation is built from them first.
         input_correspondence = build_input_correspondence_set(analysis1, analysis2)
-        if not comparison_uses_relation(input_correspondence):
-            # この互換呼び出しを、自分の relation の比較として実行し直す。
-            with comparison_relation_scope(input_correspondence):
+        comparison = comparison_binding_for_raw_pair(analysis1, analysis2, input_correspondence)
+        if current_comparison() != comparison:
+            # この互換呼び出しを、自分の比較（raw pair と relation）として実行し直す。
+            with comparison_scope(comparison):
                 return _impl_check(self, analysis1, analysis2, save_formula)
         solver_analysis1 = normalize_analysis_semantic_width(
             analysis1,
@@ -426,7 +430,7 @@ def _impl_check(
         tuple(getattr(getattr(runtime, "current_view", None), "view_id", ()) or ()),
         graph.premise_digest,
         graph.generation,
-        input_correspondence.digest,
+        _comparison_authority_digest(),
     )
     if (
         runtime is not None
@@ -1977,14 +1981,14 @@ def _impl_check(
             error_message=locals().get("strategy_error_message"),
         )
         # 戻り幅の完了証拠はこの比較の solver surface（relation が許可した書き換えの
-        # 結果）から作ったので、この比較の relation に束縛する（Issue #167）。
+        # 結果）から作ったので、この比較（raw pair と relation）に束縛する（Issue #167）。
         final_result.completed_recovery_proof_evidence = [
             {
                 "side": side,
                 "function_name": getattr(analysis, "function_name", None),
                 "binary_name": getattr(analysis, "binary_id", None),
                 "binary_id": getattr(analysis, "binary_id", None),
-                "evidence": bind_evidence_to_relation(dict(evidence), input_correspondence),
+                "evidence": bind_evidence_to_comparison(dict(evidence)),
             }
             for side, analysis, prepared in (
                 ("function1", solver_analysis1, prepared_widths1),
@@ -1997,6 +2001,13 @@ def _impl_check(
     finally:
         self._active_safety_checker = None
         self._active_normalization_stats = None
+
+
+def _comparison_authority_digest() -> str:
+    """pair ledger を束縛する、現在の比較の authority（無ければどの比較とも一致しない値）。"""
+
+    comparison = current_comparison()
+    return "no_comparison_authority" if comparison is None else comparison.digest
 
 
 def _register_loop_pair_replanner(

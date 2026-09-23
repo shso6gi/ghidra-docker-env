@@ -3,6 +3,16 @@ import pytest
 
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _gate_runs_in_the_fixture_comparison():
+    # fixture の比較中の証拠は、それを作った比較（raw pair と relation）の中でだけ採用される
+    # （Issue #167）。gate を直接呼ぶ test はその比較の中で呼ぶ。strategy.check は自分の比較を開く。
+    with _fixture_comparison():
+        yield
+
 
 def _formula_bound_sat_result(model):
     return _solver_bound_query_result(

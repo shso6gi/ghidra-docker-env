@@ -19,13 +19,18 @@ RUNTIME_MOD = "scripts.function_tracer_pcode.proof.obligations.runtime.Obligatio
 
 
 def _runtime(pending=None):
-    return SimpleNamespace(pair_ledger_manager=SimpleNamespace(pending_successor=pending))
+    # 同じ比較に仕える既存 runtime（比較の authority の規則は test_input_correspondence_binding）。
+    return SimpleNamespace(
+        pair_ledger_manager=SimpleNamespace(pending_successor=pending),
+        serves_comparison=lambda _comparison: True,
+        claim_comparison=lambda _comparison: None,
+    )
 
 
 # ---- prepare_strategy_runtime: 決定表 ----------------------------------------------------------
 
 def test_no_existing_runtime_creates_one_and_stores_it_on_the_facade():
-    fresh = object()
+    fresh = Mock()
     with patch(RUNTIME_MOD + ".create", return_value=fresh) as create:
         prep = se.prepare_strategy_runtime(None, None, "a1", "a2")
     assert prep.runtime is fresh and prep.store_on_facade is True
@@ -42,7 +47,7 @@ def test_existing_runtime_without_pending_successor_is_reused_and_not_stored():
 
 def test_stale_pending_successor_without_replan_gets_a_branch_local_runtime_that_is_not_stored():
     existing = _runtime(pending=object())
-    fresh = object()
+    fresh = Mock()
     with patch(RUNTIME_MOD + ".create", return_value=fresh):
         prep = se.prepare_strategy_runtime(existing, None, "a1", "a2")
     assert prep.runtime is fresh and prep.runtime is not existing
@@ -104,7 +109,8 @@ def _ctx(strategy, branch_id="DirectCall", lease=None, replan=None):
 def _frame(input_correspondence=None):
     return SimpleNamespace(obligation_runtime=None, replan_successor_plan=None, pair_disposition_ledger=None,
                            receipt=None, cleanup_complete=False, close=Mock(name="frame.close"),
-                           prepared=SimpleNamespace(input_correspondence=input_correspondence))
+                           prepared=SimpleNamespace(input_correspondence=input_correspondence),
+                           comparison_binding=None)
 
 
 def _projection_prep(manifest=None, projection=None):

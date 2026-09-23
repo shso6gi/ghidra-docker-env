@@ -80,19 +80,68 @@ def synthetic_input_extension_evidence(analysis: Any, index: int, *, logical_bit
     return evidence
 
 
-@contextmanager
-def comparison_of(analysis1: Any, analysis2: Any, **relation_options: Any) -> Iterator[Any]:
-    """producer と gate を直接呼ぶ test 用: 1 つの比較（最終 relation）の範囲を開く。
+def comparison_binding_of(analysis1: Any, analysis2: Any, relation: Any = None, **relation_options: Any) -> Any:
+    """raw pair ``(analysis1, analysis2)`` と最終 relation の ``ComparisonAuthorityBinding``。"""
 
-    production では dispatch 境界（``run_strategy_branch``）と stage runner が比較の
-    範囲を開き、比較の中で作った証拠はその relation に束縛される（Issue #167）。
-    """
-
+    from scripts.function_tracer_pcode.proof.call_effect.preflight import StrategySourceAnalysisPair
     from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        ComparisonAuthorityBinding,
         build_input_correspondence_set,
-        comparison_relation_scope,
     )
 
-    relation = build_input_correspondence_set(analysis1, analysis2, **relation_options)
-    with comparison_relation_scope(relation):
-        yield relation
+    if relation is None:
+        relation = build_input_correspondence_set(analysis1, analysis2, **relation_options)
+    return ComparisonAuthorityBinding.of(StrategySourceAnalysisPair.create(analysis1, analysis2), relation)
+
+
+@contextmanager
+def comparison_of(analysis1: Any, analysis2: Any, relation: Any = None, **relation_options: Any) -> Iterator[Any]:
+    """producer と gate を直接呼ぶ test 用: 1 つの比較（raw pair と最終 relation）の範囲を開く。
+
+    production では dispatch 境界（``run_strategy_branch``）と stage runner が比較の
+    範囲を開き、比較の中で作った証拠はその比較に束縛される（Issue #167）。
+    yield するのは ``ComparisonAuthorityBinding``（``.relation`` が最終 relation）。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import comparison_scope
+
+    binding = comparison_binding_of(analysis1, analysis2, relation, **relation_options)
+    with comparison_scope(binding):
+        yield binding
+
+
+def fixed_test_comparison(name: str = "f") -> Any:
+    """1 引数関数どうしの、決まった比較（raw pair と最終 relation）。"""
+
+    from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis, ReturnInfo
+
+    def analysis(function_name: str) -> Any:
+        return FunctionReturnAnalysis(
+            function_name=function_name, entry_point="0x1000",
+            parameters=[{"name": "p0", "index": 0, "size": 4, "data_type": "int"}],
+            returns=[ReturnInfo("0x1010", Expression.parameter("p0", 0, data_type="int", size=4), [])],
+            return_type="int",
+        )
+
+    return comparison_binding_of(analysis(name), analysis(name + "_peer"))
+
+
+def comparison_frame(comparison: Any, **fields: Any) -> Any:
+    """branch の結果に付く dispatch frame の、比較の authority だけを持つ代役。"""
+
+    from types import SimpleNamespace
+
+    fields.setdefault("obligation_runtime", None)
+    return SimpleNamespace(
+        source=SimpleNamespace(pair_digest=comparison.source_pair_digest),
+        comparison_binding=comparison,
+        **fields,
+    )
+
+
+def bound_to(comparison: Any, record: Any) -> Any:
+    """``record`` を ``comparison`` の中で作った比較の証拠として束縛する。"""
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import bind_evidence_to_comparison
+
+    return bind_evidence_to_comparison(record, comparison)

@@ -20,7 +20,7 @@ authority flow（v5 §4.3、一方向）::
 * ``pairing.py``: どの parameter とどの parameter を結ぶか。
 * ``relation.py``: 1 pair にどの relation（R0〜R5）を与えるか。raw だけを受け付ける。
 * ``model.py``: relation の値と、そこから導出される全ての値（consumer はここだけ読む）。
-* ``binding.py``: 比較の中で作った証拠と、その比較の relation の束縛・照合。
+* ``binding.py``: 比較に依存する authority の identity（raw pair と relation の組）と照合。
 
 Names are resolved lazily on first access so importing a submodule never
 pulls in the whole layer (and cannot create import cycles).
@@ -71,16 +71,16 @@ _LAZY = {
     **{
         name: (f"{_PACKAGE}.binding", name)
         for name in (
+            "ComparisonAuthorityBinding",
             "OUTSIDE_COMPARISON",
-            "RELATION_DIGEST_KEY",
             "bind_evidence_to_comparison",
-            "bind_evidence_to_relation",
+            "comparison_digest_is_current",
             "comparison_evidence",
-            "comparison_relation_scope",
-            "comparison_uses_relation",
+            "comparison_is_current",
+            "comparison_scope",
+            "current_comparison",
             "current_relation",
-            "current_relation_digest",
-            "evidence_relation_binding_holds",
+            "evidence_authority_holds",
             "merge_new_evidence",
             "relation_digest_is_current",
             "run_in_current_comparison",

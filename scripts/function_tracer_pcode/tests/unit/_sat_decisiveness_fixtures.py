@@ -1,6 +1,8 @@
 from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 import hashlib
 
+from scripts.function_tracer_pcode.core.evidence_authority import record_function_unary_evidence
+
 from contextlib import contextmanager
 from copy import deepcopy
 
@@ -796,7 +798,7 @@ def _call_effect_summary_proof_evidence(object_target_key=None, **overrides):
     }
     evidence["proof_obligation_id"] = _expected_call_effect_summary_proof_id(evidence)
     evidence.update(overrides)
-    return evidence
+    return _fixture_comparison_evidence(evidence)
 
 def _call_effect_summary_proof_content(object_target_key):
     kind = object_target_key[0] if object_target_key else None
@@ -1061,9 +1063,8 @@ def _attach_bounded_call_refinement_expansion_evidence(
     }
     if content_overrides:
         record["proof_content"].update(content_overrides)
-    analysis.completed_recovery_proof_evidence = tuple(
-        getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
-    ) + (record,)
+    # bounded call refinement は analysis 層が関数単体で作る事実。
+    record_function_unary_evidence(analysis, record)
 
 def _completed_proof_ids_for_call_effect_evidence(evidence):
     analysis = FunctionReturnAnalysis(
@@ -1210,7 +1211,7 @@ def _return_coverage_completion_evidence(
         "proof_content": proof_content,
     }
     evidence.update(overrides)
-    return evidence
+    return _fixture_comparison_evidence(evidence)
 
 def _return_coverage_completion_evidence_without_proof_id(action):
     evidence = _return_coverage_completion_evidence(action)
@@ -1314,7 +1315,7 @@ def _sat_unsafety_resolution_evidence(action, counterexample_raw=None, **overrid
         },
     }
     evidence.update(overrides)
-    return evidence
+    return _fixture_comparison_evidence(evidence)
 
 def _sat_unsafety_resolution_action():
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
@@ -1602,11 +1603,13 @@ def _readonly_identity_reason(target=None):
         object_target_key=target or _readonly_identity_target(),
     )
 
-def _readonly_fixture_relation():
-    """readonly projection の fixture proof を作った比較の最終 relation（Issue #167）。
+def _fixture_comparison_binding():
+    """fixture の比較の authority（raw pair と最終 relation、Issue #167）。
 
-    parameter 1（count）を左 64 bit / 右 32 bit にとり、左に 32 bit からの sign
-    extension を含意する（fixture proof の ``entailed_assumption`` と同じ仮定）。
+    fixture の比較中の証拠（``_fixture_comparison_evidence``）はこの比較に束縛され、gate は
+    ``_fixture_comparison()`` の範囲で照合する。relation は parameter 1（count）を左 64 bit /
+    右 32 bit にとり、左に 32 bit からの sign extension を含意する（readonly fixture proof の
+    ``entailed_assumption`` と同じ仮定）。
     """
 
     from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
@@ -1636,19 +1639,61 @@ def _readonly_fixture_relation():
     iee = synthetic_input_extension_evidence(left, 1, logical_bits=32, storage_bits=64, kind=ExtensionKind.SIGN)
     relation = build_input_correspondence_set(left, right, input_extension_evidence=(iee,))
     assert relation.entailed_projection_extension("left", 1, 64, 32) is not None
-    return relation
+    from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_binding_of
+
+    return comparison_binding_of(left, right, relation)
+
+
+def _readonly_fixture_relation():
+    return _fixture_comparison_binding().relation
 
 
 @contextmanager
-def _readonly_fixture_comparison():
-    """fixture proof と同じ relation の比較の範囲（gate はこの中で照合する）。"""
+def _fixture_comparison():
+    """fixture の比較の範囲（fixture の比較中の証拠は、この中の gate でだけ採用される）。"""
 
-    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
-        comparison_relation_scope,
-    )
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import comparison_scope
 
-    with comparison_relation_scope(_readonly_fixture_relation()):
+    with comparison_scope(_fixture_comparison_binding()):
         yield
+
+
+_readonly_fixture_comparison = _fixture_comparison
+
+
+def _fixture_comparison_evidence(record):
+    """fixture の比較の中で作った証拠として ``record`` を束縛する。"""
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import bind_evidence_to_comparison
+
+    return bind_evidence_to_comparison(record, _fixture_comparison_binding())
+
+
+def _evidence_of_this_pair(analysis1, analysis2):
+    """analysis に載せた fixture の比較中の証拠を、(analysis1, analysis2) の比較の証拠にする。
+
+    ``strategy.check`` を直接呼ぶ test 用: check は自分の比較（この raw pair と最終 relation）
+    の範囲を開くので、前の branch がこの比較で作った証拠として渡す。
+    """
+
+    from scripts.function_tracer_pcode.core.evidence_authority import (
+        AUTHORITY_SCOPE_KEY,
+        COMPARISON,
+        COMPARISON_AUTHORITY_KEY,
+    )
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import bind_evidence_to_comparison
+    from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_binding_of
+
+    comparison = comparison_binding_of(analysis1, analysis2)
+    for analysis in (analysis1, analysis2):
+        records = []
+        for record in getattr(analysis, "completed_recovery_proof_evidence", ()) or ():
+            if record.get(AUTHORITY_SCOPE_KEY) == COMPARISON:
+                record = {key: value for key, value in record.items() if key != COMPARISON_AUTHORITY_KEY}
+                record.pop(AUTHORITY_SCOPE_KEY)
+                record = bind_evidence_to_comparison(record, comparison)
+            records.append(record)
+        analysis.completed_recovery_proof_evidence = tuple(records)
 
 
 def _readonly_identity_evidence(action, **overrides):
@@ -1714,7 +1759,7 @@ def _readonly_identity_evidence(action, **overrides):
         "proof_content": proof_content,
     }
     evidence.update(overrides)
-    return evidence
+    return _fixture_comparison_evidence(evidence)
 
 def _method_b_reason(target=None):
     return make_internal_v2_reason_diagnostic(
@@ -1789,7 +1834,7 @@ def _method_b_evidence(action, **overrides):
         "proof_content": proof_content,
     }
     evidence.update(overrides)
-    return evidence
+    return _fixture_comparison_evidence(evidence)
 
 def _nested_contains(value, needle) -> bool:
     if value == needle:

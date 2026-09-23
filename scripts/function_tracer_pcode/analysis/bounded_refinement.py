@@ -19,6 +19,7 @@ from typing import (
     Tuple,
 )
 
+from scripts.function_tracer_pcode.core.evidence_authority import record_function_unary_evidence
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     Condition,
@@ -1215,7 +1216,7 @@ class BoundedCallRefiner:
             "proof_source": "bounded_call_refinement_deferred_expanded",
             "proof_content": content,
         }
-        caller_analysis.completed_recovery_proof_evidence = existing + (record,)
+        record_function_unary_evidence(caller_analysis, record)
         self._debug("Recorded bounded refinement expansion evidence")
 
     @staticmethod

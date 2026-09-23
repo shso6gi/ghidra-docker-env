@@ -27,7 +27,6 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     _ExactReadonlyReductionProof,
     _ReadonlyLoopSummaryProofAdapter,
     _RuntimeShortcutDecision,
-    bind_evidence_to_relation,
     build_unknown_recovery_actions,
     comparison_evidence,
     parameter_identity_key_from_expression,
@@ -1076,10 +1075,10 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
         },
         "parameter_extension": extension_evidence,
     }
-    # proof はこの比較の relation が含意した extension から作ったので、その relation に
-    # 束縛する（raw analysis に残っても、別の relation の比較では採用されない）。
+    # proof はこの比較の relation が含意した extension から作った。store_comparison_evidence が
+    # この比較（raw pair と relation）に束縛する（raw analysis に残っても別の比較では採用されない）。
     records.append(
-        bind_evidence_to_relation({
+        {
             "object_derived": True,
             "status": "complete",
             "reason_id": UnknownReasonId.READONLY_IDENTITY_MISSING.value,
@@ -1092,7 +1091,7 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
             "proof_obligation_id": proof_id,
             "proof_source": "readonly_same_register_projection_semantic_extension",
             "proof_content": proof_content,
-        }, input_correspondence)
+        }
     )
     store_comparison_evidence(analysis1, records)
 

@@ -41,6 +41,9 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     build_input_correspondence_set,
     rebuild_input_correspondence_set,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    ComparisonAuthorityBinding,
+)
 from scripts.function_tracer_pcode.semantics.rewrite_contract import REWRITE_RULE_TABLE_DIGEST
 from scripts.function_tracer_pcode.semantics.semantic_width import (
     align_return_value_extension_surfaces as _trusted_align_return_surfaces,
@@ -488,6 +491,25 @@ class PreparedAnalysisPair:
             for item in (self.analysis1, self.analysis2)
         )
         return current == (self.left_digest, self.right_digest)
+
+
+def comparison_binding_for_raw_pair(
+    analysis1: Any,
+    analysis2: Any,
+    relation: InputCorrespondenceSet,
+) -> Optional[ComparisonAuthorityBinding]:
+    """dispatch frame を通らない互換呼び出しの比較の authority（raw pair と relation）。
+
+    raw pair の identity は frame と同じ ``StrategySourceAnalysisPair`` が決める。
+    semantic fingerprint を取れない analysis（test の簡易 object）には binding を与えない
+    （その比較では comparison の証拠を採用しない）。
+    """
+
+    try:
+        source = StrategySourceAnalysisPair.create(analysis1, analysis2)
+    except TypeError:
+        return None
+    return ComparisonAuthorityBinding.of(source, relation)
 
 
 def prepare_solver_surface(
@@ -1528,6 +1550,12 @@ class PreparedDispatchFrame:
     )
     decision_lease: CallProofDecisionLease = field(init=False)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False, compare=False)
+
+    @property
+    def comparison_binding(self) -> ComparisonAuthorityBinding:
+        """この frame の比較の authority: raw pair と、その最終 relation（Issue #167）。"""
+
+        return ComparisonAuthorityBinding.of(self.source, self.prepared.input_correspondence)
 
     def __post_init__(self) -> None:
         lease = _acquire_decision_lease(

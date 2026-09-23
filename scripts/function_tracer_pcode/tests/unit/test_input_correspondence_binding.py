@@ -1,115 +1,175 @@
 # -*- coding: utf-8 -*-
-"""Issue #167: 比較の中で作った証拠と、その比較の最終 relation の束縛。
+"""Issue #167: 比較に依存する authority の identity と lifetime。
 
-relation の lifetime は 1 つの raw pair の比較で、analysis object の lifetime ではない。
+比較の authority は ``ComparisonAuthorityBinding``（raw pair の identity と最終
+InputCorrespondence の digest の組）で識別する。
 
-* 比較の中で作った証拠 record は、その比較の relation の digest を持つ。
-* gate は、digest が現在の比較の relation と値で一致する record だけを採用する。
-* 後で実行する仕事（worklist の producer / replanner）は、登録した比較の relation で
-  照合する。
-* stage runner は、branch の結果を作った比較の relation の下で gate を実行する。
-* 証拠の合流は record の束縛を保ち、同じ proof でも relation が違えば別の証拠にする。
+* 同じ raw pair・同じ relation → 共有してよい。
+* 同じ raw pair・違う relation → 共有しない。
+* 違う raw pair・同じ relation → 共有しない（relation digest 単独は比較の identity ではない）。
+* authority scope の無い証拠は採用しない。関数単体の事実は明示してどこでも使える。
+* obligation runtime は 1 つの比較だけに仕え、artifact・dependency・producer・replanner・
+  outcome・cache を別の比較と共有しない。
 """
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 
 from scripts.function_tracer_pcode.checker.recovery_proofs import RecoveryProofMixin
 from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis, ReturnInfo
-from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
-    OUTSIDE_COMPARISON,
-    RELATION_DIGEST_KEY,
-    bind_evidence_to_comparison,
-    bind_evidence_to_relation,
-    build_input_correspondence_set,
-    comparison_evidence,
-    comparison_relation_scope,
-    current_relation_digest,
-    merge_new_evidence,
+from scripts.function_tracer_pcode.core.evidence_authority import (
+    AUTHORITY_SCOPE_KEY,
+    COMPARISON_AUTHORITY_KEY,
+    FUNCTION_UNARY,
+    mark_function_unary,
+    record_function_unary_evidence,
 )
 from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementContract, ProofRequirementId
-from scripts.function_tracer_pcode.proof.obligations.runtime import ObligationRuntimeSession
-from scripts.function_tracer_pcode.proof.obligations.stage_runner import branch_comparison_relation
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    OUTSIDE_COMPARISON,
+    bind_evidence_to_comparison,
+    build_input_correspondence_set,
+    comparison_evidence,
+    comparison_scope,
+    current_comparison,
+    merge_new_evidence,
+    store_comparison_evidence,
+)
+from scripts.function_tracer_pcode.proof.obligations.model import FunctionProofOutcome
+from scripts.function_tracer_pcode.proof.obligations.runtime import (
+    ComparisonRuntimeMismatch,
+    ObligationRuntimeSession,
+)
+from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
+from scripts.function_tracer_pcode.proof.obligations.stage_runner import branch_comparison
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_binding_of
 
 
-def _analysis(name, parameter_sizes, binary_id="bin"):
-    x = Expression.parameter("p0", 0, data_type="int", size=parameter_sizes[0])
+def _analysis(name, sizes, entry="0x1000"):
     return FunctionReturnAnalysis(
         function_name=name,
-        entry_point="0x1000",
+        entry_point=entry,
         parameters=[
             {"name": f"p{index}", "index": index, "size": size, "data_type": "int"}
-            for index, size in enumerate(parameter_sizes)
+            for index, size in enumerate(sizes)
         ],
-        returns=[ReturnInfo("0x1010", x, [])],
+        returns=[ReturnInfo("0x1010", Expression.parameter("p0", 0, data_type="int", size=sizes[0]), [])],
         return_type="int",
-        binary_id=binary_id,
     )
 
 
-def _two_relations():
-    a = build_input_correspondence_set(_analysis("f", [4]), _analysis("g", [4]))
-    b = build_input_correspondence_set(_analysis("f", [4, 4]), _analysis("g", [4, 4]))
-    assert a.digest != b.digest
-    return a, b
+def _comparisons():
+    """A と、A と同じ relation の別 raw pair C と、A と raw pair は同じで relation が違う比較 B。"""
+
+    pair_a = (_analysis("f", [4]), _analysis("g", [4]))
+    pair_c = (_analysis("h", [4], entry="0x2000"), _analysis("k", [4], entry="0x2000"))
+    a = comparison_binding_of(*pair_a)
+    c = comparison_binding_of(*pair_c)
+    b = comparison_binding_of(*pair_a, build_input_correspondence_set(_analysis("f", [4, 4]), _analysis("g", [4, 4])))
+    return SimpleNamespace(a=a, b=b, c=c, pair_a=pair_a, pair_c=pair_c)
 
 
-def test_evidence_made_in_a_comparison_is_adopted_only_in_that_comparison():
-    a, b = _two_relations()
-    with comparison_relation_scope(a):
-        record = bind_evidence_to_comparison({"proof_obligation_id": ("p",)})
-        assert record[RELATION_DIGEST_KEY] == a.digest
-        assert comparison_evidence((record,)) == (record,)
-        with comparison_relation_scope(b):
-            # 入れ子の比較は自分の relation を持ち、外の比較の証拠を採用しない。
-            assert comparison_evidence((record,)) == ()
-        assert current_relation_digest() == a.digest
-    assert comparison_evidence((record,)) == ()
-    with comparison_relation_scope(None):
+def test_the_binding_separates_raw_pairs_that_share_a_relation_digest():
+    cmp = _comparisons()
+    fingerprints = lambda pair: tuple(AnalysisSnapshot.from_function_analysis(item).semantic_fingerprint for item in pair)
+    assert fingerprints(cmp.pair_a) != fingerprints(cmp.pair_c)
+    assert cmp.a.input_correspondence_digest == cmp.c.input_correspondence_digest
+    assert cmp.a != cmp.c and cmp.a.digest != cmp.c.digest
+    # 同じ raw pair・同じ relation は、作り直しても同じ比較（branch 間で共有できる）。
+    assert comparison_binding_of(*cmp.pair_a) == cmp.a
+    assert comparison_binding_of(*cmp.pair_a).digest == cmp.a.digest
+    # 同じ raw pair・違う relation は別の比較。
+    assert cmp.a.source_pair_digest == cmp.b.source_pair_digest and cmp.a != cmp.b
+
+
+def test_evidence_is_adopted_only_by_the_same_raw_pair_under_the_same_relation():
+    cmp = _comparisons()
+    record = bind_evidence_to_comparison({"proof_obligation_id": ("p",)}, cmp.a)
+    with comparison_scope(comparison_binding_of(*cmp.pair_a)):
+        assert comparison_evidence((record,)) == (record,)  # 正当な共有（別 branch）
+    with comparison_scope(cmp.c):
+        assert comparison_evidence((record,)) == ()  # 別 raw pair・同じ relation digest
+    with comparison_scope(cmp.b):
+        assert comparison_evidence((record,)) == ()  # 同じ raw pair・別 relation
+    with comparison_scope(None):
         assert comparison_evidence((record,)) == ()
+    assert comparison_evidence((record,)) == ()
+
+
+def test_evidence_without_an_authority_scope_is_never_adopted():
+    cmp = _comparisons()
+    unscoped = {"proof_obligation_id": ("p",)}
+    unknown_scope = {"proof_obligation_id": ("p",), AUTHORITY_SCOPE_KEY: "something_else"}
+    with comparison_scope(cmp.a):
+        assert comparison_evidence((unscoped, unknown_scope)) == ()
+    assert comparison_evidence((unscoped, unknown_scope)) == ()
+
+
+def test_function_unary_facts_are_explicit_and_usable_in_every_comparison():
+    cmp = _comparisons()
+    analysis = SimpleNamespace(completed_recovery_proof_evidence=())
+    record_function_unary_evidence(analysis, {"proof_obligation_id": ("unary",)})
+    (unary,) = analysis.completed_recovery_proof_evidence
+    assert unary[AUTHORITY_SCOPE_KEY] == FUNCTION_UNARY
+    for scope in (cmp.a, cmp.b, cmp.c):
+        with comparison_scope(scope):
+            assert comparison_evidence((unary,)) == (unary,)
+    with pytest.raises(ValueError):
+        mark_function_unary(bind_evidence_to_comparison({"proof_obligation_id": ("p",)}, cmp.a))
+    with pytest.raises(ValueError):
+        bind_evidence_to_comparison(dict(unary), cmp.a)
 
 
 def test_evidence_made_outside_any_comparison_is_never_adopted():
+    cmp = _comparisons()
     record = bind_evidence_to_comparison({"proof_obligation_id": ("p",)})
-    assert record[RELATION_DIGEST_KEY] == OUTSIDE_COMPARISON
-    a, _b = _two_relations()
-    assert comparison_evidence((record,)) == ()
-    with comparison_relation_scope(a):
+    assert record[COMPARISON_AUTHORITY_KEY] == OUTSIDE_COMPARISON
+    with comparison_scope(cmp.a):
         assert comparison_evidence((record,)) == ()
 
 
-def test_relation_independent_evidence_carries_no_binding():
-    """比較の前に関数単体で作った事実（analysis 層の証拠）は relation に依存しない。"""
+def test_the_evidence_writer_binds_what_a_comparison_adds_and_keeps_the_rest():
+    cmp = _comparisons()
+    unary = mark_function_unary({"proof_obligation_id": ("unary",)})
+    from_c = bind_evidence_to_comparison({"proof_obligation_id": ("c",)}, cmp.c)
+    analysis = SimpleNamespace(completed_recovery_proof_evidence=(unary, from_c))
+    with comparison_scope(cmp.a):
+        store_comparison_evidence(analysis, [dict(unary), dict(from_c), {"proof_obligation_id": ("a",)}])
+    records = analysis.completed_recovery_proof_evidence
+    assert records[0][AUTHORITY_SCOPE_KEY] == FUNCTION_UNARY
+    assert records[1][COMPARISON_AUTHORITY_KEY] == cmp.c.digest
+    assert records[2][COMPARISON_AUTHORITY_KEY] == cmp.a.digest
+    store_comparison_evidence(analysis, [*records, {"proof_obligation_id": ("outside",)}])
+    assert analysis.completed_recovery_proof_evidence[-1][COMPARISON_AUTHORITY_KEY] == OUTSIDE_COMPARISON
 
-    a, _b = _two_relations()
-    record = {"proof_obligation_id": ("unary",)}
-    assert comparison_evidence((record,)) == (record,)
-    with comparison_relation_scope(a):
-        assert comparison_evidence((record,)) == (record,)
 
+def test_merging_keeps_records_of_the_same_proof_from_different_comparisons():
+    cmp = _comparisons()
+    from_a = bind_evidence_to_comparison({"proof_obligation_id": ("p",)}, cmp.a)
+    from_c = bind_evidence_to_comparison({"proof_obligation_id": ["p"]}, cmp.c)
+    merged = merge_new_evidence((from_a,), (from_c, dict(from_a)))
+    assert [record[COMPARISON_AUTHORITY_KEY] for record in merged] == [cmp.a.digest, cmp.c.digest]
+    assert merge_new_evidence(merged, (from_c,)) is None
 
-def test_merging_keeps_records_of_the_same_proof_from_different_relations():
-    a, b = _two_relations()
-    from_a = bind_evidence_to_relation({"proof_obligation_id": ("p",)}, a)
-    from_b = bind_evidence_to_relation({"proof_obligation_id": ["p"]}, b)
-    merged = merge_new_evidence((from_a,), (from_b, dict(from_a)))
-    assert [record[RELATION_DIGEST_KEY] for record in merged] == [a.digest, b.digest]
-    assert merge_new_evidence(merged, (from_b,)) is None
-
-    # result からの合流（checker）も同じ規則。
     analysis = SimpleNamespace(completed_recovery_proof_evidence=(from_a,))
     checker = SimpleNamespace(enable_completed_recovery_proofs=True)
     result = SimpleNamespace(completed_recovery_proof_evidence=[
-        {"side": "function1", "evidence": from_b},
+        {"side": "function1", "evidence": from_c},
         {"side": "function1", "evidence": from_a},
     ])
     RecoveryProofMixin._merge_completed_recovery_proofs_from_result(checker, analysis, analysis, result)
-    assert [record[RELATION_DIGEST_KEY] for record in analysis.completed_recovery_proof_evidence] == [
-        a.digest, b.digest,
+    assert [record[COMPARISON_AUTHORITY_KEY] for record in analysis.completed_recovery_proof_evidence] == [
+        cmp.a.digest, cmp.c.digest,
     ]
+
+
+# ---- obligation runtime: 1 つの runtime は 1 つの比較に仕える ------------------------------
 
 
 def _requirement(name):
@@ -118,150 +178,189 @@ def _requirement(name):
     )
 
 
-def test_deferred_producers_run_in_the_comparison_that_scheduled_them():
-    a, b = _two_relations()
-    runtime = ObligationRuntimeSession.create(_analysis("f", [4]), _analysis("g", [4]))
-    seen = []
-    with comparison_relation_scope(a):
-        runtime.schedule(_requirement("deferred"), "value_relation", lambda: seen.append(current_relation_digest()))
-    with comparison_relation_scope(b):
-        runtime.run_next()
-    assert seen == [a.digest]
-
-
-def test_replanners_plan_and_produce_in_the_comparison_that_registered_them():
-    a, b = _two_relations()
-    runtime = ObligationRuntimeSession.create(_analysis("f", [4]), _analysis("g", [4]))
-    seen = []
-
-    def replan(*_args):
-        seen.append(("plan", current_relation_digest()))
-        return _requirement("replanned"), "value_relation", lambda: seen.append(("produce", current_relation_digest()))
-
-    with comparison_relation_scope(a):
-        runtime.register_pair_query_replanner("pair", "value_relation", replan)
-        runtime.register_target_query_replanner(("target",), replan)
-        runtime.register_counterexample_safety_replanner("pair", replan)
-    planners = (
-        runtime.pair_query_replanners[("pair", "value_relation")],
-        runtime.target_query_replanners[next(iter(runtime.target_query_replanners))][0],
-        runtime.counterexample_safety_replanners["pair"],
+def _reason(requirement):
+    return SimpleNamespace(
+        reason_id="readonly_identity_missing", recovery_proof_kind="", stage="S_PAIRWISE",
+        proof_requirement_ids=(requirement.to_dict(),), pair_or_case=None, object_target_key=None,
     )
-    for planner in planners:
-        seen.clear()
-        with comparison_relation_scope(b):
-            _requirement_id, _kind, producer = planner(None) if planner is planners[2] else planner()
-            producer()
-        assert seen == [("plan", a.digest), ("produce", a.digest)]
 
 
-def test_stage_runner_gates_use_the_relation_of_the_comparison_that_made_the_result():
-    raw = build_input_correspondence_set(_analysis("f", [4]), _analysis("g", [4]))
-    abstracted = build_input_correspondence_set(_analysis("f", [4, 4]), _analysis("g", [4, 4]))
+def _runtime(pair):
+    return ObligationRuntimeSession.create(*pair)
 
-    def result_for(input_correspondence):
-        frame = SimpleNamespace(prepared=SimpleNamespace(input_correspondence=input_correspondence))
+
+def _prove(runtime, comparison, requirement, reason, *, with_artifact):
+    with comparison_scope(comparison):
+        runtime.plan_proof_gates(
+            SimpleNamespace(unknown_reasons=[reason]), {},
+            lambda *_args: lambda: FunctionProofOutcome.EQUIVALENT,
+        )
+        while runtime.run_next()[0] is not None:
+            pass
+        if with_artifact:
+            runtime.apply_completed_evidence(({"evidence": bind_evidence_to_comparison({
+                "proof_requirement_id": requirement.to_dict(), "status": "complete", "proof_source": "test",
+            })},))
+        return runtime.outcome_for_reason(reason)
+
+
+@pytest.mark.parametrize("other", ["b", "c"])
+def test_an_artifact_of_another_comparison_never_validates_this_comparisons_requirement(other):
+    cmp = _comparisons()
+    requirement = _requirement("r")
+    runtime = _runtime(cmp.pair_a)
+    assert _prove(runtime, getattr(cmp, other), requirement, _reason(requirement), with_artifact=True) == (
+        FunctionProofOutcome.EQUIVALENT
+    )
+    # A は同じ requirement R を使うが、A に束縛された artifact を持たない。
+    with comparison_scope(cmp.a), pytest.raises(ComparisonRuntimeMismatch):
+        runtime.outcome_for_reason(_reason(requirement))
+    with pytest.raises(ComparisonRuntimeMismatch):
+        _prove(runtime, cmp.a, requirement, _reason(requirement), with_artifact=False)
+    # A は自分の runtime を使い、B / C の artifact を見ない。
+    assert _prove(_runtime(cmp.pair_a), cmp.a, requirement, _reason(requirement), with_artifact=False) == (
+        FunctionProofOutcome.INCONCLUSIVE
+    )
+
+
+def test_a_rescheduled_dependent_runs_only_its_own_comparisons_producer():
+    cmp = _comparisons()
+    runtime = _runtime(cmp.pair_a)
+    gate, dependent = _requirement("gate"), _requirement("dependent")
+    ran = []
+    with comparison_scope(cmp.a):
+        runtime.schedule(dependent, "value_relation", lambda: ran.append("A"), depends_on=(gate,))
+        while runtime.run_next()[0] is not None:
+            pass
+    for other in (cmp.b, cmp.c):
+        with comparison_scope(other), pytest.raises(ComparisonRuntimeMismatch):
+            runtime.schedule(dependent, "value_relation", lambda: ran.append("other"), depends_on=(gate,))
+    ran.clear()
+    with comparison_scope(cmp.a):
+        runtime.proof_outcomes[gate.to_key()] = FunctionProofOutcome.EQUIVALENT
+        runtime.apply_completed_evidence(({"evidence": bind_evidence_to_comparison({
+            "proof_requirement_id": gate.to_dict(), "status": "complete", "proof_source": "test",
+        })},))
+    while runtime.run_next()[0] is not None:
+        pass
+    assert ran == ["A"]
+
+
+def test_replanners_and_cached_results_are_not_shared_across_comparisons():
+    cmp = _comparisons()
+    runtime = _runtime(cmp.pair_a)
+    planned = []
+
+    def replanner(label):
+        def replan(*_args):
+            planned.append((label, current_comparison()))
+            return _requirement(f"replanned-{label}"), "value_relation", lambda: None
+        return replan
+
+    with comparison_scope(cmp.a):
+        runtime.register_pair_query_replanner("(0,0)", "value_relation", replanner("A"))
+        assert runtime.execute(_requirement("cached"), "value_relation", lambda: "result-of-A") == "result-of-A"
+    for other in (cmp.b, cmp.c):
+        with comparison_scope(other):
+            for use in (
+                lambda: runtime.register_pair_query_replanner("(0,0)", "value_relation", replanner("other")),
+                lambda: runtime.register_target_query_replanner(("target",), replanner("other")),
+                lambda: runtime.register_counterexample_safety_replanner("(0,0)", replanner("other")),
+                lambda: runtime.execute(_requirement("cached"), "value_relation", lambda: "result-of-other"),
+                lambda: runtime.plan_proof_gates(SimpleNamespace(unknown_reasons=[]), {}, lambda *_a: None),
+                lambda: runtime.apply_completed_evidence(()),
+            ):
+                with pytest.raises(ComparisonRuntimeMismatch):
+                    use()
+    # 登録した比較の replanner だけが残り、登録した比較の範囲で計画する。
+    with comparison_scope(cmp.b):
+        runtime.pair_query_replanners[("(0,0)", "value_relation")]()
+    assert planned == [("A", cmp.a)]
+    # 別の比較は自分の runtime で自分の結果を得る。
+    with comparison_scope(cmp.c):
+        assert _runtime(cmp.pair_c).execute(_requirement("cached"), "value_relation", lambda: "result-of-C") == (
+            "result-of-C"
+        )
+
+
+def test_deferred_producers_run_in_the_comparison_that_scheduled_them():
+    cmp = _comparisons()
+    runtime = _runtime(cmp.pair_a)
+    seen = []
+    with comparison_scope(cmp.a):
+        runtime.schedule(_requirement("deferred"), "value_relation", lambda: seen.append(current_comparison()))
+    runtime.run_next()  # 比較の外から実行しても、登録した比較の範囲で動く
+    assert seen == [cmp.a]
+
+
+def test_prepare_strategy_runtime_gives_each_comparison_its_own_runtime():
+    from scripts.function_tracer_pcode.checker.strategy_execution import prepare_strategy_runtime
+
+    cmp = _comparisons()
+    raw_runtime = _runtime(cmp.pair_a)
+    same = prepare_strategy_runtime(raw_runtime, None, *cmp.pair_a, cmp.a)
+    assert same.runtime is raw_runtime and raw_runtime.comparison_binding == cmp.a
+    # 同じ raw pair・同じ relation の別 branch は同じ runtime を共有する。
+    assert prepare_strategy_runtime(raw_runtime, None, *cmp.pair_a, comparison_binding_of(*cmp.pair_a)).runtime is (
+        raw_runtime
+    )
+    for other in (cmp.b, cmp.c):
+        separate = prepare_strategy_runtime(raw_runtime, None, *cmp.pair_a, other)
+        assert separate.runtime is not raw_runtime and separate.store_on_facade is False
+        assert separate.runtime.comparison_binding == other
+        with pytest.raises(RuntimeError, match="pair_replan_comparison_authority_changed"):
+            prepare_strategy_runtime(raw_runtime, object(), *cmp.pair_a, other)
+    assert raw_runtime.comparison_binding == cmp.a
+
+
+def test_branch_gates_use_the_comparison_and_runtime_of_the_result():
+    cmp = _comparisons()
+    runner_runtime, inner_runtime = _runtime(cmp.pair_a), _runtime(cmp.pair_c)
+
+    def result(comparison, runtime):
+        frame = SimpleNamespace(source=object(), comparison_binding=comparison, obligation_runtime=runtime)
         return SimpleNamespace(_prepared_dispatch_frame=frame)
 
-    assert branch_comparison_relation(result_for(raw)) is raw
-    # 再帰抽象化の branch は、抽象 analysis を比べた内側の比較の relation。
-    assert branch_comparison_relation(result_for(abstracted)) is abstracted
-    # frame の無い結果（互換経路）には relation が無く、束縛された証拠は採用されない。
-    assert branch_comparison_relation(result_for(None)) is None
-    assert branch_comparison_relation(SimpleNamespace()) is None
+    assert branch_comparison(result(cmp.a, runner_runtime), runner_runtime) == (cmp.a, runner_runtime)
+    assert branch_comparison(result(cmp.c, inner_runtime), runner_runtime) == (cmp.c, inner_runtime)
+    assert branch_comparison(SimpleNamespace(), runner_runtime) == (None, runner_runtime)
 
 
 @pytest.mark.parametrize("strategy_name", ["pairwise", "monolithic"])
-def test_a_prepared_strategy_refuses_to_run_outside_its_relations_comparison(monkeypatch, strategy_name):
-    """frame の relation と、証拠を束縛する比較の relation は同じでなければならない。"""
-
-    from unittest.mock import Mock
-
+def test_a_prepared_strategy_refuses_to_run_outside_its_frames_comparison(monkeypatch, strategy_name):
     from scripts.function_tracer_pcode.proof.call_effect import preflight
     from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
     from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
 
-    raw1, raw2 = _analysis("f", [4]), _analysis("g", [4])
-    relation = build_input_correspondence_set(raw1, raw2)
-    _a, other = _two_relations()
-    assert other.digest != relation.digest
-    frame = SimpleNamespace(prepared=SimpleNamespace(analysis1=raw1, analysis2=raw2, input_correspondence=relation))
+    cmp = _comparisons()
+    raw1, raw2 = cmp.pair_a
+    frame = SimpleNamespace(
+        prepared=SimpleNamespace(analysis1=raw1, analysis2=raw2, input_correspondence=cmp.a.relation),
+        comparison_binding=cmp.a,
+    )
     monkeypatch.setattr(preflight, "current_dispatch_depth", lambda: 1)
     monkeypatch.setattr(preflight, "consume_prepared_dispatch_frame", lambda *_args: frame)
     strategy = {"pairwise": PairwiseStrategy, "monolithic": MonolithicStrategy}[strategy_name](
         Mock(), Mock(), debug=False,
     )
-    for scope in (None, other):
-        with comparison_relation_scope(scope), pytest.raises(RuntimeError, match="comparison_relation_scope_mismatch"):
+    for scope in (None, cmp.b, cmp.c):
+        with comparison_scope(scope), pytest.raises(RuntimeError, match="comparison_authority_scope_mismatch"):
             strategy.check(raw1, raw2)
 
 
-def test_gate_outcomes_of_another_relation_do_not_discharge_this_comparisons_reason():
-    """runtime の obligation と proof outcome は relation ごと（review で見つけた blocker）。
-
-    再帰抽象化の branch（relation B）と後の branch（relation A）は 1 つの runtime を
-    共有する。B で出た gate outcome と B の証拠が、同じ requirement を持つ A の reason を
-    解消してはならない（A の gate は A の relation で実行し直す）。
-    """
-
-    from scripts.function_tracer_pcode.proof.obligations.model import FunctionProofOutcome
-
-    relation_a, relation_b = _two_relations()
-    runtime = ObligationRuntimeSession.create(_analysis("f", [4]), _analysis("g", [4]))
-    requirement = _requirement("readonly_identity")
-    runs = []
-
-    def reason():
-        return SimpleNamespace(
-            reason_id="readonly_identity_missing", recovery_proof_kind="", stage="S_PAIRWISE",
-            proof_requirement_ids=(requirement.to_dict(),), pair_or_case=None, object_target_key=None,
-        )
-
-    def run_gates(relation, gate_reason, outcome):
-        with comparison_relation_scope(relation):
-            runtime.plan_proof_gates(
-                SimpleNamespace(unknown_reasons=[gate_reason]), {},
-                lambda *_args: lambda: runs.append(current_relation_digest()) or outcome,
-            )
-            while runtime.run_next()[0] is not None:
-                pass
-
-    evidence_b = bind_evidence_to_relation({
-        "proof_requirement_id": requirement.to_dict(), "status": "complete", "proof_source": "gate_test",
-    }, relation_b)
-
-    reason_b, reason_a = reason(), reason()
-    run_gates(relation_b, reason_b, FunctionProofOutcome.EQUIVALENT)
-    # A の gate は B の証拠を採用しないので INCONCLUSIVE を返す。A の比較で実行されること。
-    run_gates(relation_a, reason_a, FunctionProofOutcome.INCONCLUSIVE)
-    assert runs == [relation_b.digest, relation_a.digest]
-    with comparison_relation_scope(relation_a):
-        # B の証拠は A の比較の view を作らず、B の outcome は A の reason を解消しない。
-        assert runtime.apply_completed_evidence(({"evidence": evidence_b},)) == ()
-        assert runtime.outcome_for_reason(reason_a) == FunctionProofOutcome.INCONCLUSIVE
-    with comparison_relation_scope(relation_b):
-        # B の比較の中では、B の証拠と outcome が B の reason を解消する。
-        assert len(runtime.apply_completed_evidence(({"evidence": evidence_b},))) == 1
-        assert runtime.outcome_for_reason(reason_b) == FunctionProofOutcome.EQUIVALENT
-    with comparison_relation_scope(relation_a):
-        assert runtime.outcome_for_reason(reason_a) == FunctionProofOutcome.INCONCLUSIVE
-
-
-def test_run_strategy_branch_runs_the_strategy_in_the_frames_relation():
-    from unittest.mock import Mock, patch
-
+def test_run_strategy_branch_runs_the_strategy_in_the_frames_comparison():
     from scripts.function_tracer_pcode.checker import strategy_execution as se
     from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
 
-    relation, _other = _two_relations()
+    cmp = _comparisons()
     seen = []
     strategy = Mock(spec=PairwiseStrategy)
-    strategy.check.side_effect = lambda *_args: seen.append(current_relation_digest()) or SimpleNamespace(
+    strategy.check.side_effect = lambda *_args: seen.append(current_comparison()) or SimpleNamespace(
         is_equivalent=None, comparison_execution_receipt=None,
     )
     frame = SimpleNamespace(
         obligation_runtime=None, replan_successor_plan=None, pair_disposition_ledger=None, receipt=None,
-        cleanup_complete=False, close=Mock(), prepared=SimpleNamespace(input_correspondence=relation),
+        cleanup_complete=False, close=Mock(), comparison_binding=cmp.a,
     )
     ctx = SimpleNamespace(strategy=strategy, replan_plan=None, branch_id="S_PAIRWISE")
     with patch.object(se, "push_prepared_dispatch_frame", return_value="token"), \
@@ -272,62 +371,67 @@ def test_run_strategy_branch_runs_the_strategy_in_the_frames_relation():
             locally_issued_branch_authority=None, call_effect_shadow_manifest={},
             debug_print=lambda _message: None, apply_preflight_final_gate=Mock(),
         )
-    assert seen == [relation.digest]
-    assert current_relation_digest() is None
+    assert seen == [cmp.a]
+    assert current_comparison() is None
 
 
-def test_the_evidence_writer_binds_what_a_comparison_adds_and_keeps_the_rest():
-    from scripts.function_tracer_pcode.proof.formula.input_correspondence import store_comparison_evidence
-
-    relation_a, relation_b = _two_relations()
-    unary = {"proof_obligation_id": ("unary",)}
-    from_b = bind_evidence_to_relation({"proof_obligation_id": ("b",)}, relation_b)
-    analysis = SimpleNamespace(completed_recovery_proof_evidence=(unary, from_b))
-    with comparison_relation_scope(relation_a):
-        added = {"proof_obligation_id": ("a",)}
-        explicit = bind_evidence_to_relation({"proof_obligation_id": ("explicit",)}, relation_a)
-        store_comparison_evidence(analysis, [dict(unary), dict(from_b), added, explicit])
-    records = analysis.completed_recovery_proof_evidence
-    assert RELATION_DIGEST_KEY not in records[0]  # 比較の前からある関数単体の事実
-    assert records[1][RELATION_DIGEST_KEY] == relation_b.digest  # 別の比較の証拠はそのまま
-    assert records[2][RELATION_DIGEST_KEY] == relation_a.digest  # この比較で増えた証拠
-    assert records[3][RELATION_DIGEST_KEY] == relation_a.digest
-    # 比較の外で増えた証拠は、どの比較でも採用されない印を持つ。
-    store_comparison_evidence(analysis, [*records, {"proof_obligation_id": ("outside",)}])
-    assert analysis.completed_recovery_proof_evidence[-1][RELATION_DIGEST_KEY] == OUTSIDE_COMPARISON
-
-
-def test_a_producer_validated_closure_is_sealed_to_its_ledgers_relation():
+def test_a_producer_validated_closure_is_sealed_to_its_ledgers_comparison():
+    from scripts.function_tracer_pcode.proof.obligations import pair_disposition
     from scripts.function_tracer_pcode.proof.obligations.pair_disposition import (
         PairLedgerBinding,
         ReadonlyIdentityClosureArtifact,
     )
 
-    relation_a, relation_b = _two_relations()
+    cmp = _comparisons()
 
-    def binding(relation):
+    def ledger(comparison):
         return PairLedgerBinding(
-            "session", "S_PAIRWISE", "surface", "projection", 1, ("view",), "premise", 1, relation.digest,
+            "session", "S_PAIRWISE", "surface", "projection", 1, ("view",), "premise", 1, comparison.digest,
         )
 
-    import dataclasses
-    import hashlib
-
-    from scripts.function_tracer_pcode.proof.obligations import pair_disposition
-
-    ledger_a = binding(relation_a)
+    ledger_a = ledger(cmp.a)
     digest = hashlib.sha256(b"x").hexdigest()
     payload = (
         ReadonlyIdentityClosureArtifact.PRODUCER_KIND, digest, digest, ledger_a.derived_view_id,
-        ledger_a.premise_digest, ledger_a.graph_generation, ledger_a.input_correspondence_digest,
+        ledger_a.premise_digest, ledger_a.graph_generation, ledger_a.comparison_authority_digest,
         "validated", ReadonlyIdentityClosureArtifact.schema_version,
     )
     artifact = ReadonlyIdentityClosureArtifact(
         digest, digest, ledger_a.derived_view_id, ledger_a.premise_digest, ledger_a.graph_generation,
-        ledger_a.input_correspondence_digest, pair_disposition._closure_artifact_seal(payload),
+        ledger_a.comparison_authority_digest, pair_disposition._closure_artifact_seal(payload),
     )
     assert artifact.validates(ledger_a) is True
-    # view・premise・generation が同じでも、relation の違う ledger では通らない。
-    assert artifact.validates(binding(relation_b)) is False
-    relabelled = dataclasses.replace(artifact, input_correspondence_digest=relation_b.digest)
-    assert relabelled.validates(binding(relation_b)) is False
+    for other in (cmp.b, cmp.c):
+        assert artifact.validates(ledger(other)) is False
+        relabelled = dataclasses.replace(artifact, comparison_authority_digest=other.digest)
+        assert relabelled.validates(ledger(other)) is False
+
+
+def test_a_pair_ledger_of_another_comparison_cannot_open_in_this_runtime():
+    from scripts.function_tracer_pcode.proof.obligations.pair_disposition import PairLedgerBinding
+
+    cmp = _comparisons()
+    runtime = _runtime(cmp.pair_a)
+    runtime.claim_comparison(cmp.a)
+    binding = PairLedgerBinding(
+        "session", "S_PAIRWISE", "surface", "projection", 1,
+        runtime.current_view.view_id, runtime.premise_digest, 1, cmp.c.digest,
+    )
+    with comparison_scope(cmp.a), pytest.raises(ComparisonRuntimeMismatch):
+        runtime.open_pair_ledger(binding, 1)
+
+
+def test_a_reason_is_answered_only_for_the_object_that_was_planned():
+    """``id`` で引く reason の requirement は、計画した同じ object にだけ答える。"""
+
+    cmp = _comparisons()
+    runtime = _runtime(cmp.pair_a)
+    requirement = _requirement("planned")
+    planned = _reason(requirement)
+    assert _prove(runtime, cmp.a, requirement, planned, with_artifact=True) == FunctionProofOutcome.EQUIVALENT
+    impostor = _reason(requirement)
+    # 同じ id を名乗る別 object（id の再利用）を再現する。
+    runtime.reason_requirements[id(impostor)] = runtime.reason_requirements[id(planned)]
+    with comparison_scope(cmp.a):
+        assert runtime.outcome_for_reason(impostor) == FunctionProofOutcome.INCONCLUSIVE
+        assert runtime.outcome_for_reason(planned) == FunctionProofOutcome.EQUIVALENT

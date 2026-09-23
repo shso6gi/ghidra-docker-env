@@ -695,6 +695,7 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                         replan_plan,
                         analysis1,
                         analysis2,
+                        dispatch_frame.comparison_binding,
                     )
                     if runtime_preparation.store_on_facade:
                         # 6b-2: facade write は check() に残す。strategy 実行より前、必要な場合のみ。

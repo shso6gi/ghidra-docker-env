@@ -16,10 +16,8 @@ from scripts.function_tracer_pcode.proof.obligations.model import (
     FunctionProofOutcome,
 )
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
-    comparison_relation_scope,
-)
-from scripts.function_tracer_pcode.proof.formula.input_correspondence.model import (
-    InputCorrespondenceSet,
+    ComparisonAuthorityBinding,
+    comparison_scope,
 )
 from scripts.function_tracer_pcode.proof.obligations.decision import DecisionAggregator
 from scripts.function_tracer_pcode.proof.obligations.proof import (
@@ -183,17 +181,23 @@ def _cutover_branch_policy(result: Any) -> tuple[Any, tuple[str, ...], bool]:
     return attempt_outcome, actions, continue_fallback
 
 
-def branch_comparison_relation(result: Any) -> Optional[InputCorrespondenceSet]:
-    """branch の結果を作った比較の最終 relation（frame の無い結果には無い）。
+def branch_comparison(result: Any, runtime: ObligationRuntimeSession) -> Tuple[
+    Optional[ComparisonAuthorityBinding], ObligationRuntimeSession
+]:
+    """branch の結果を作った比較の authority と、その比較の obligation runtime。
 
-    branch の後で実行する gate は、その結果の UNKNOWN reason と証拠を作った比較の
-    relation の下で照合する（Issue #167）。再帰抽象化の branch では、抽象 analysis を
-    比べた内側の比較の relation になる。
+    branch の後で実行する gate と集約は、その結果の UNKNOWN reason と証拠を作った比較で
+    行う（Issue #167）。再帰抽象化のように runner の raw pair と違う pair を比べた branch は、
+    自分の比較に仕える別の runtime を使っている（runner の runtime とは state を共有しない）。
+    frame の無い結果には authority が無く、比較の証拠は採用されない。
     """
 
     frame = getattr(result, "_prepared_dispatch_frame", None)
-    relation = getattr(getattr(frame, "prepared", None), "input_correspondence", None)
-    return relation if type(relation) is InputCorrespondenceSet else None
+    if frame is None or getattr(frame, "source", None) is None:
+        return None, runtime
+    comparison = frame.comparison_binding
+    frame_runtime = getattr(frame, "obligation_runtime", None)
+    return comparison, frame_runtime if frame_runtime is not None else runtime
 
 
 def run_obligation_branch_plan(
@@ -390,12 +394,13 @@ def run_obligation_branch_plan(
 
         replan_generation = 0
         while True:
-            # Issue #167: gate は、この結果を作った比較の relation の下で証拠を照合する
-            # （別の比較で作った証拠は採用しない。frame の無い結果には relation が無い）。
-            with comparison_relation_scope(branch_comparison_relation(result)):
-                runtime.plan_proof_gates(result, _RECOVERY_TO_GATE, gate_producer)
+            # Issue #167: gate は、この結果を作った比較（raw pair と relation）の範囲で、
+            # その比較の runtime に積む（別の比較の証拠・artifact・outcome は使わない）。
+            comparison, branch_runtime = branch_comparison(result, runtime)
+            with comparison_scope(comparison):
+                branch_runtime.plan_proof_gates(result, _RECOVERY_TO_GATE, gate_producer)
                 while True:
-                    gate_item, _gate_value = runtime.run_next()
+                    gate_item, _gate_value = branch_runtime.run_next()
                     if gate_item is None:
                         break
                 # Evidence may derive a new analysis view only for an
@@ -403,12 +408,12 @@ def run_obligation_branch_plan(
                 # pairwise branch is then executed against the successor view.
                 produced_views = ()
                 if _outcome(result) == FunctionProofOutcome.INCONCLUSIVE:
-                    produced_views = runtime.apply_completed_evidence(
+                    produced_views = branch_runtime.apply_completed_evidence(
                         getattr(result, "completed_recovery_proof_evidence", ()) or (),
                         reasons=getattr(result, "unknown_reasons", ()) or (),
                     )
                     while True:
-                        affected_item, _affected_value = runtime.run_next()
+                        affected_item, _affected_value = branch_runtime.run_next()
                         if affected_item is None:
                             break
             if not produced_views:
@@ -425,8 +430,15 @@ def run_obligation_branch_plan(
                 # Compatibility/test branches without a production ledger
                 # have no pair surface to replan.
                 break
+            is_unchanged = getattr(getattr(prior_dispatch_frame, "source", None), "is_unchanged", None)
+            if callable(is_unchanged) and not is_unchanged():
+                # Issue #167: a replan continues the same comparison.  If the raw
+                # pair changed since the frame (for example a coverage note was
+                # recorded on it), the successor belongs to a finished comparison
+                # and is not replanned (the branch result stays as it is).
+                break
             replan_generation += 1
-            successor_plan = runtime.pair_ledger_manager.pending_successor
+            successor_plan = branch_runtime.pair_ledger_manager.pending_successor
             if successor_plan is None:
                 break
             # 6c-3: successor plan は明示 context 経由でのみ渡す（facade 属性は使わない）。
@@ -456,10 +468,11 @@ def run_obligation_branch_plan(
                 analysis1, analysis2, result
             )
         pre_aggregation_outcome = result.is_equivalent
-        # 結果の reason を解消できるのは、その結果を作った比較の relation で出た
-        # proof outcome だけ（Issue #167。runtime は outcome を relation ごとに分ける）。
-        with comparison_relation_scope(branch_comparison_relation(result)):
-            DecisionAggregator.apply(result, runtime)
+        # 結果の reason を解消できるのは、その結果を作った比較の runtime の outcome だけ
+        # （Issue #167。runtime は 1 つの比較に仕える）。
+        comparison, branch_runtime = branch_comparison(result, runtime)
+        with comparison_scope(comparison):
+            DecisionAggregator.apply(result, branch_runtime)
         post_aggregation_outcome = result.is_equivalent
         dispatch_frame = getattr(result, "_prepared_dispatch_frame", None)
         strategy_result = getattr(result, "_strategy_result", None)
@@ -596,8 +609,8 @@ def run_obligation_branch_plan(
                     list(receipt.excluded_projection_binding_ids)
                     if trusted else None
                 )
-                provenance["terminal_runtime_view_id"] = runtime.current_view.view_id
-                provenance["terminal_runtime_premise_digest"] = runtime.premise_digest
+                provenance["terminal_runtime_view_id"] = branch_runtime.current_view.view_id
+                provenance["terminal_runtime_premise_digest"] = branch_runtime.premise_digest
                 provenance["receipt_final_runtime_binding_valid"] = trusted
                 provenance["receipt_successor_ledger_reused"] = (
                     bool(trusted and dispatch_frame.successor_ledger_reused)

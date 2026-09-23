@@ -1538,7 +1538,7 @@ def test_method_b_guard_partition_producer_records_when_count_guard_is_proven():
         return_type="int",
     )
     with comparison_of(widened, analysis2) as other_relation:
-        assert {item["input_correspondence_digest"] for item in evidence} != {other_relation.digest}
+        assert {item["comparison_authority"] for item in evidence} != {other_relation.digest}
         assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
     assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
 

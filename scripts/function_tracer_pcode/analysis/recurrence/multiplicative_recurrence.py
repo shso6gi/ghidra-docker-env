@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, List, Optional, Sequence, Tuple
 from dataclasses import replace
+from scripts.function_tracer_pcode.core.evidence_authority import record_function_unary_evidence
 from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
@@ -396,7 +397,7 @@ def _impl__record_structural_multiplicative_return_region_proof(
             ),
         },
     }
-    analysis.completed_recovery_proof_evidence = existing + (evidence,)
+    record_function_unary_evidence(analysis, evidence)
     return proof_ref
 
 def _impl__build_multiplicative_state_then_triangular_sum_value(

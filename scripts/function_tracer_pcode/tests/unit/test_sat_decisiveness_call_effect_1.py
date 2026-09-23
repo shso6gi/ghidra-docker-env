@@ -1,6 +1,16 @@
 from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _gate_runs_in_the_fixture_comparison():
+    # fixture の比較中の証拠は、それを作った比較（raw pair と relation）の中でだけ採用される
+    # （Issue #167）。gate を直接呼ぶ test はその比較の中で呼ぶ。strategy.check は自分の比較を開く。
+    with _fixture_comparison():
+        yield
+
 def test_function_return_analysis_marks_effect_sensitive_raw_memory_reads_as_sat_unsafe():
     params = [_param("trace", index=0, size=8, data_type="int *")]
     trace = Expression.parameter("trace", 0, size=8)
@@ -635,6 +645,7 @@ def test_pairwise_call_effect_summary_producer_connects_completed_target_proof(m
     )
     _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
 
+    _evidence_of_this_pair(analysis1, analysis2)
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is True
@@ -1546,6 +1557,7 @@ def test_pairwise_deferred_call_weak_completed_evidence_does_not_recover(monkeyp
     )
     _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
 
+    _evidence_of_this_pair(analysis1, analysis2)
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is None

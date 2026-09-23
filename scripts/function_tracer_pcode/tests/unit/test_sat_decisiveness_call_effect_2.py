@@ -1,6 +1,16 @@
 from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _gate_runs_in_the_fixture_comparison():
+    # fixture の比較中の証拠は、それを作った比較（raw pair と relation）の中でだけ採用される
+    # （Issue #167）。gate を直接呼ぶ test はその比較の中で呼ぶ。strategy.check は自分の比較を開く。
+    with _fixture_comparison():
+        yield
+
 def test_call_argument_proof_rejects_unrelated_proof_content_sections():
     object_target_key = _blocking_unsafety_object_target_key(
         "function1:effect_call_argument_evidence",
@@ -150,6 +160,7 @@ def test_pairwise_call_argument_evidence_recovers_with_matching_completed_proof(
     )
     _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
 
+    _evidence_of_this_pair(analysis1, analysis2)
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is True
@@ -308,6 +319,7 @@ def test_pairwise_call_target_resolution_recovers_with_matching_completed_proof(
     )
     _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
 
+    _evidence_of_this_pair(analysis1, analysis2)
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is True
@@ -655,6 +667,7 @@ def test_monolithic_call_effect_summary_proof_complete_allows_recovery():
         ),
     )
 
+    _evidence_of_this_pair(analysis1, analysis2)
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is True

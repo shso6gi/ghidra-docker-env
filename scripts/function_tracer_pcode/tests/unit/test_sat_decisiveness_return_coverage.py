@@ -1,5 +1,20 @@
-from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_of, echo_input_correspondence
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import (
+    comparison_binding_of,
+    comparison_of,
+    echo_input_correspondence,
+)
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import comparison_scope
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _gate_runs_in_the_fixture_comparison():
+    # fixture の比較中の証拠は、それを作った比較（raw pair と relation）の中でだけ採用される
+    # （Issue #167）。gate を直接呼ぶ test はその比較の中で呼ぶ。strategy.check は自分の比較を開く。
+    with _fixture_comparison():
+        yield
 
 def test_pairwise_strategy_downgrades_sat_when_return_cases_leave_coverage_gap(monkeypatch):
     formula_builder = echo_input_correspondence(Mock())
@@ -172,6 +187,9 @@ def test_pairwise_return_coverage_covered_side_emits_completed_proof_evidence(mo
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1, analysis2 = _return_coverage_gap_analyses()
     _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
+    # check が比較する raw pair（check は raw analysis に coverage の note を書くので、
+    # その後の raw pair は別の比較になる）。
+    comparison = comparison_binding_of(analysis1, analysis2)
 
     result = strategy.check(analysis1, analysis2)
 
@@ -196,18 +214,29 @@ def test_pairwise_return_coverage_covered_side_emits_completed_proof_evidence(mo
         tuple(item["proof_obligation_id"])
         for item in evidence
     } == {action.proof_obligation_id for action in expected_actions}
-    # 証拠はそれを作った比較の relation に束縛され、その比較の中でだけ proof に
-    # なる（Issue #167）。比較の外からは採用されない。
-    with comparison_of(analysis1, analysis2) as relation:
-        assert {item["input_correspondence_digest"] for item in evidence} == {relation.digest}
+    # 証拠はそれを作った比較（raw pair と relation）に束縛され、その比較の中でだけ proof に
+    # なる（Issue #167）。別の比較（note が付いた後の raw pair）からは採用されない。
+    assert {item["comparison_authority"] for item in evidence} == {comparison.digest}
+    with comparison_scope(comparison):
         assert PairwiseStrategy._completed_recovery_proof_ids(analysis2) == tuple(
             action.proof_obligation_id for action in expected_actions
         )
+    with comparison_of(analysis1, analysis2) as annotated:
+        assert annotated != comparison
+        assert PairwiseStrategy._completed_recovery_proof_ids(analysis2) == ()
     assert PairwiseStrategy._completed_recovery_proof_ids(analysis2) == ()
 
+    # 同じ（note の付いた）raw pair を比べ直すと、その比較が自分の証拠を作る。
+    annotated = comparison_binding_of(analysis1, analysis2)
+    strategy.check(analysis1, analysis2)
     strategy.check(analysis1, analysis2)
 
-    assert len(analysis2.completed_recovery_proof_evidence) == 2
+    by_comparison = {}
+    for item in analysis2.completed_recovery_proof_evidence:
+        by_comparison.setdefault(item["comparison_authority"], []).append(item)
+    assert {key: len(items) for key, items in by_comparison.items()} == {
+        comparison.digest: 2, annotated.digest: 2,
+    }
 
 def test_pairwise_collect_return_coverage_reason_uses_current_coverage_check_when_notes_are_stale(monkeypatch):
     formula_builder = echo_input_correspondence(Mock())
@@ -293,6 +322,7 @@ def test_pairwise_return_coverage_gap_completed_proofs_allow_equivalent(monkeypa
     )
     _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
 
+    _evidence_of_this_pair(analysis1, analysis2)
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is True
@@ -377,6 +407,7 @@ def test_return_coverage_proof_completion_rejects_empty_case_guard_disjunction(m
     _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, analysis2)
     _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis2)
 
+    _evidence_of_this_pair(analysis1, analysis2)
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is None
@@ -958,6 +989,7 @@ def test_monolithic_return_coverage_gap_completed_proofs_allow_equivalent():
         for action in actions
     )
 
+    _evidence_of_this_pair(analysis1, analysis2)
     result = strategy.check(analysis1, analysis2)
 
     assert result.is_equivalent is True

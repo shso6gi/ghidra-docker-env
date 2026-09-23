@@ -5,8 +5,11 @@ from __future__ import annotations
 from typing import Dict, Any, List, Mapping
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.core.evidence_authority import (
+    AUTHORITY_SCOPE_KEY,
+    COMPARISON_AUTHORITY_KEY,
+)
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
-    RELATION_DIGEST_KEY,
     merge_new_evidence,
 )
 from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec
@@ -60,7 +63,8 @@ class RecoveryProofMixin:
                     or evidence.get("proof_obligation_id")
                     or evidence
                 ),
-                evidence.get(RELATION_DIGEST_KEY),
+                evidence.get(AUTHORITY_SCOPE_KEY),
+                evidence.get(COMPARISON_AUTHORITY_KEY),
             )
             unique.setdefault(identity, item)
         return list(unique.values())
@@ -147,8 +151,8 @@ class RecoveryProofMixin:
             evidence = item.get("evidence")
             if not isinstance(evidence, Mapping):
                 continue
-            # 証拠の relation 束縛（Issue #167）はそのまま持ち込む。同じ proof でも
-            # 別の relation で作った record は、別の証拠として並べる。
+            # 証拠の authority（Issue #167）はそのまま持ち込む。同じ proof でも
+            # 別の比較で作った record は、別の証拠として並べる。
             merged = merge_new_evidence(
                 getattr(analysis, "completed_recovery_proof_evidence", ()) or (),
                 (evidence,),

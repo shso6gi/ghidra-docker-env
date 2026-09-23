@@ -20,8 +20,9 @@ from scripts.function_tracer_pcode.proof.formula.symbol_replace import build_sym
 from scripts.function_tracer_pcode.proof.formula.returns import ReturnWidthMismatchError
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     build_input_correspondence_set,
-    comparison_relation_scope,
-    comparison_uses_relation,
+    comparison_is_current,
+    comparison_scope,
+    current_comparison,
 )
 from scripts.function_tracer_pcode.semantics.normalize import NormalizationSettings
 from scripts.function_tracer_pcode.semantics.param_semantics import infer_parameter_semantics
@@ -216,17 +217,25 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
             analysis1 = dispatch_frame.prepared.analysis1
             analysis2 = dispatch_frame.prepared.analysis2
             input_correspondence = dispatch_frame.prepared.input_correspondence
-            # Issue #167: この比較で作る証拠は、この relation の比較として束縛される。
-            if not comparison_uses_relation(input_correspondence):
-                raise RuntimeError("comparison_relation_scope_mismatch")
+            # Issue #167: この比較で作る authority は frame の比較（raw pair と relation）に
+            # 束縛される。範囲がその比較でなければ実行しない。
+            if not comparison_is_current(dispatch_frame.comparison_binding):
+                raise RuntimeError("comparison_authority_scope_mismatch")
         else:
             # 互換経路: 引数は raw pair なので、そこから最終 relation を作る。
             input_correspondence = build_input_correspondence_set(
                 source_analysis1, source_analysis2
             )
-            if not comparison_uses_relation(input_correspondence):
-                # この互換呼び出しを、自分の relation の比較として実行し直す。
-                with comparison_relation_scope(input_correspondence):
+            from scripts.function_tracer_pcode.proof.call_effect.preflight import (
+                comparison_binding_for_raw_pair,
+            )
+
+            comparison = comparison_binding_for_raw_pair(
+                source_analysis1, source_analysis2, input_correspondence
+            )
+            if current_comparison() != comparison:
+                # この互換呼び出しを、自分の比較（raw pair と relation）として実行し直す。
+                with comparison_scope(comparison):
                     return self.check(
                         source_analysis1, source_analysis2, save_formula,
                         _build_query_set, _create_session,

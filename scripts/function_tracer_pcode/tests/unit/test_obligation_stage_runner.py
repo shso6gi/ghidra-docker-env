@@ -100,6 +100,36 @@ def _checker(results):
     return checker
 
 
+def _comparison():
+    """test の branch 結果を作った比較（raw pair と最終 relation、Issue #167）。"""
+
+    from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis, ReturnInfo
+    from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_binding_of
+
+    def analysis(name):
+        return FunctionReturnAnalysis(
+            function_name=name, entry_point="0x1000",
+            parameters=[{"name": "p0", "index": 0, "size": 4, "data_type": "int"}],
+            returns=[ReturnInfo("0x1010", Expression.parameter("p0", 0, data_type="int", size=4), [])],
+            return_type="int",
+        )
+
+    return comparison_binding_of(analysis("f"), analysis("g"))
+
+
+def _frame(comparison, **fields):
+    return SimpleNamespace(
+        source=SimpleNamespace(pair_digest=comparison.source_pair_digest),
+        comparison_binding=comparison, obligation_runtime=None, **fields,
+    )
+
+
+def _comparison_evidence(comparison, record):
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import bind_evidence_to_comparison
+
+    return bind_evidence_to_comparison(record, comparison)
+
+
 def _run(checker, method_name):
     return getattr(checker, method_name)(
         _analysis("B1"), _analysis("B2"), "B1", "B2", False,
@@ -327,12 +357,14 @@ def test_production_gate_producer_and_aggregator_close_unknown_to_eq():
         "error_pairs": 0,
     }
     result.decision_gated_by_pending_proof = True
+    comparison = _comparison()
+    result._prepared_dispatch_frame = _frame(comparison, pair_disposition_ledger=None)
     result.completed_recovery_proof_evidence = [{
-        "evidence": {
+        "evidence": _comparison_evidence(comparison, {
             "proof_requirement_id": requirement.to_dict(),
             "status": "complete",
             "proof_source": "coverage_test_producer",
-        },
+        }),
     }]
     strategy = SimpleNamespace(
         _return_coverage_proof_is_complete=lambda *_args: True,
@@ -352,31 +384,35 @@ def test_production_gate_producer_and_aggregator_close_unknown_to_eq():
     assert any(event.kind == "return_coverage" for event in runtime.events)
 
 
-@pytest.mark.parametrize("evidence_relation", ["same", "other"])
-def test_branch_gates_run_in_the_relation_of_the_comparison_that_made_the_result(evidence_relation):
-    """Issue #167: branch の後の gate と集約は、その結果を作った比較の relation で行う。
+@pytest.mark.parametrize("evidence_comparison", ["same", "other_relation", "other_raw_pair"])
+def test_branch_gates_run_in_the_comparison_that_made_the_result(evidence_comparison):
+    """Issue #167: branch の後の gate と集約は、その結果を作った比較（raw pair と relation）で行う。
 
-    同じ runtime に別の relation の比較で作った証拠が来ても、この結果の reason を
-    解消しない（EQ に閉じない）。
+    同じ runtime に別の比較で作った証拠が来ても、この結果の reason を解消しない（EQ に閉じない）。
     """
 
     from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis, ReturnInfo
     from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
-        bind_evidence_to_relation,
-        build_input_correspondence_set,
-        current_relation_digest,
+        bind_evidence_to_comparison,
+        current_comparison,
     )
+    from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_binding_of
 
-    def analysis(sizes):
+    def analysis(name, sizes):
         return FunctionReturnAnalysis(
-            function_name="f", entry_point="0x1000",
+            function_name=name, entry_point="0x1000",
             parameters=[{"name": f"p{i}", "index": i, "size": size, "data_type": "int"} for i, size in enumerate(sizes)],
             returns=[ReturnInfo("0x1010", Expression.parameter("p0", 0, data_type="int", size=4), [])],
             return_type="int",
         )
 
-    relation = build_input_correspondence_set(analysis([4]), analysis([4]))
-    other = build_input_correspondence_set(analysis([4, 4]), analysis([4, 4]))
+    comparison = comparison_binding_of(analysis("f", [4]), analysis("g", [4]))
+    other = {
+        "same": comparison,
+        "other_relation": comparison_binding_of(analysis("f", [4, 4]), analysis("g", [4, 4])),
+        "other_raw_pair": comparison_binding_of(analysis("h", [4]), analysis("k", [4])),
+    }[evidence_comparison]
+    assert other.input_correspondence_digest == comparison.input_correspondence_digest or evidence_comparison == "other_relation"
     requirement = ProofRequirementId.create(
         "return_coverage_completion", ("coverage", "f"), ProofRequirementContract("return coverage complete"),
     )
@@ -389,16 +425,19 @@ def test_branch_gates_run_in_the_relation_of_the_comparison_that_made_the_result
     result.pairwise_stats = {"total_pairs": 1, "unsat_pairs": 1, "sat_pairs": 0, "unknown_pairs": 0, "error_pairs": 0}
     result.decision_gated_by_pending_proof = True
     result._prepared_dispatch_frame = SimpleNamespace(
-        prepared=SimpleNamespace(input_correspondence=relation), pair_disposition_ledger=None,
+        source=SimpleNamespace(pair_digest=comparison.source_pair_digest),
+        prepared=SimpleNamespace(input_correspondence=comparison.relation),
+        comparison_binding=comparison,
+        pair_disposition_ledger=None,
+        obligation_runtime=None,
     )
-    stamped_with = relation if evidence_relation == "same" else other
-    result.completed_recovery_proof_evidence = [{"evidence": bind_evidence_to_relation({
+    result.completed_recovery_proof_evidence = [{"evidence": bind_evidence_to_comparison({
         "proof_requirement_id": requirement.to_dict(), "status": "complete", "proof_source": "coverage_test_producer",
-    }, stamped_with)}]
-    gate_relations = []
+    }, other)}]
+    gate_comparisons = []
 
     def coverage_gate(*_args):
-        gate_relations.append(current_relation_digest())
+        gate_comparisons.append(current_comparison())
         return True
 
     strategy = SimpleNamespace(
@@ -412,8 +451,8 @@ def test_branch_gates_run_in_the_relation_of_the_comparison_that_made_the_result
 
     final = _run(checker, "_run_stage_plan")
 
-    assert gate_relations == [relation.digest]
-    if evidence_relation == "same":
+    assert gate_comparisons == [comparison]
+    if evidence_comparison == "same":
         assert final.is_equivalent is True
     else:
         assert final.is_equivalent is None
@@ -435,12 +474,13 @@ def test_completed_proof_replans_pairwise_on_successor_view_and_ledger():
         stage="S_PAIRWISE",
     )
     first = _result(None, (reason,))
+    comparison = _comparison()
     first.completed_recovery_proof_evidence = [{
-        "evidence": {
+        "evidence": _comparison_evidence(comparison, {
             "proof_requirement_id": requirement.to_dict(),
             "status": "complete",
             "proof_source": "coverage_test_producer",
-        },
+        }),
     }]
     second = _result(True)
     second.completed_recovery_proof_evidence = []
@@ -461,12 +501,10 @@ def test_completed_proof_replans_pairwise_on_successor_view_and_ledger():
         if len(calls) == 1:
             binding = PairLedgerBinding(
                 "session", "S_PAIRWISE", "surface", "projection", 1,
-                runtime.current_view.view_id, runtime.premise_digest, 1, "relation-digest",
+                runtime.current_view.view_id, runtime.premise_digest, 1, comparison.digest,
             )
             ledger = runtime.open_pair_ledger(binding, 1)
-            first._prepared_dispatch_frame = SimpleNamespace(
-                pair_disposition_ledger=ledger
-            )
+            first._prepared_dispatch_frame = _frame(comparison, pair_disposition_ledger=ledger)
             return first
         successor_plan = runtime.pair_ledger_manager.pending_successor
         assert successor_plan is not None
@@ -480,7 +518,7 @@ def test_completed_proof_replans_pairwise_on_successor_view_and_ledger():
             2,
             successor_plan.derived_view_id,
             successor_plan.premise_digest,
-            2, "relation-digest",
+            2, comparison.digest,
         )
         replanned_ledgers.append(
             runtime.open_pair_ledger(

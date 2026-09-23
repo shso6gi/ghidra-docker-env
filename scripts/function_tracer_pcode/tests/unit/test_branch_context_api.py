@@ -163,8 +163,9 @@ def test_runner_replan_context_takes_the_successor_plan_precedence_and_keeps_the
                              proof_requirement_ids=(requirement.to_dict(),), object_target_key=("coverage", "f"),
                              pair_or_case="(0,0)", stage="S_PAIRWISE")
     first = runner_tests._result(None, (reason,))
-    first.completed_recovery_proof_evidence = [{"evidence": {"proof_requirement_id": requirement.to_dict(), "status": "complete",
-                                                              "proof_source": "coverage_test_producer"}}]
+    comparison = runner_tests._comparison()
+    first.completed_recovery_proof_evidence = [{"evidence": runner_tests._comparison_evidence(comparison, {
+        "proof_requirement_id": requirement.to_dict(), "status": "complete", "proof_source": "coverage_test_producer"})}]
     second = runner_tests._result(True)
     second.completed_recovery_proof_evidence = []
     strategy = SimpleNamespace(_return_coverage_proof_is_complete=lambda *_a: True,
@@ -179,16 +180,16 @@ def test_runner_replan_context_takes_the_successor_plan_precedence_and_keeps_the
         captured.append((ctx, kwargs["force_strategy"], ctx.production_branch_authority_lease, checker._call_proof_generation))
         if len(captured) == 1:
             binding = PairLedgerBinding("session", "S_PAIRWISE", "surface", "projection", 1,
-                                        runtime.current_view.view_id, runtime.premise_digest, 1, "relation-digest")
+                                        runtime.current_view.view_id, runtime.premise_digest, 1, comparison.digest)
             ledger = runtime.open_pair_ledger(binding, 1)
-            first._prepared_dispatch_frame = SimpleNamespace(pair_disposition_ledger=ledger)
+            first._prepared_dispatch_frame = runner_tests._frame(comparison, pair_disposition_ledger=ledger)
             return first
         successor_plan = runtime.pair_ledger_manager.pending_successor
         assert successor_plan is not None and ctx.replan_plan is successor_plan
         replacement_binding = PairLedgerBinding(successor_plan.comparison_session_id, successor_plan.branch_id, "new-surface",
-                                                "new-projection", 2, successor_plan.derived_view_id, runtime.premise_digest, 2, "relation-digest")
+                                                "new-projection", 2, successor_plan.derived_view_id, runtime.premise_digest, 2, comparison.digest)
         runtime.open_pair_ledger(replacement_binding, 2)
-        second._prepared_dispatch_frame = SimpleNamespace(pair_disposition_ledger=runtime.pair_ledger_manager.current)
+        second._prepared_dispatch_frame = runner_tests._frame(comparison, pair_disposition_ledger=runtime.pair_ledger_manager.current)
         return second
 
     checker = _runner_checker(execute)
