@@ -979,3 +979,18 @@ def test_the_frozen_size_cache_returns_the_same_exact_size_and_skips_the_walk(mo
     estimate_legacy_dict_bytes(loose)
     estimate_legacy_dict_bytes(loose)
     assert len(built) == 2 * 4
+
+
+def test_d6s_full_identity_of_a_depth_40_dag_does_not_expand_the_tree():
+    """D6s: 予算超過の target に使う identity も、比較も、DAG のまま（木展開しない）。"""
+    from scripts.function_tracer_pcode.core.structural import (
+        structural_equals,
+        structural_identity_digest,
+    )
+
+    left = publish(_shared_dag(40))
+    right = publish(_shared_dag(40))
+    started = time.perf_counter()
+    assert structural_equals(left, right)
+    assert structural_identity_digest(left) == structural_identity_digest(right)
+    assert time.perf_counter() - started < 1.0
