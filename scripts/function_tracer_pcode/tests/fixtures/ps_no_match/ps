@@ -1,0 +1,15 @@
+#!/bin/sh
+# Issue #157 fixture: a `ps` for PATH that answers the first
+# $PS_NO_MATCH_COUNT calls the way procps `ps --ppid` answers before the
+# parent has forked a child (exit 1, empty stdout and stderr), then runs the
+# real ps. The call count is kept in $PS_NO_MATCH_CALLS.
+if [ -z "${PS_NO_MATCH_REAL_PS:-}" ] || [ -z "${PS_NO_MATCH_CALLS:-}" ]; then
+    echo "ps_no_match: set PS_NO_MATCH_REAL_PS and PS_NO_MATCH_CALLS" >&2
+    exit 2
+fi
+calls=$(cat "$PS_NO_MATCH_CALLS" 2>/dev/null || echo 0)
+echo $((calls + 1)) > "$PS_NO_MATCH_CALLS"
+if [ "$calls" -lt "${PS_NO_MATCH_COUNT:-3}" ]; then
+    exit 1
+fi
+exec "$PS_NO_MATCH_REAL_PS" "$@"

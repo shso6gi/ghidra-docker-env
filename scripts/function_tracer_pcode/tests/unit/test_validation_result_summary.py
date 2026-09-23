@@ -4,6 +4,7 @@ import json
 import base64
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -1475,8 +1476,11 @@ def _observe_child_pids(
     5. rc 1 and empty stdout -> retry
     6. anything else -> fail
     7. ``attempts`` observations without a PID -> fail
+
+    Every retried observation is followed by one ``sleep(sleep_seconds)``,
+    exactly as in the loop this helper replaced, so the wait is unchanged.
     """
-    for attempt in range(attempts):
+    for _ in range(attempts):
         result = run_ps(parent_pid)
         if result.stderr:
             pytest.fail(
@@ -1503,8 +1507,7 @@ def _observe_child_pids(
                 f"ps --ppid {parent_pid} failed (rc={result.returncode}): "
                 f"stdout={result.stdout!r}"
             )
-        if attempt + 1 < attempts:
-            sleep(sleep_seconds)
+        sleep(sleep_seconds)
     pytest.fail(
         f"ps --ppid {parent_pid} reported no child after {attempts} attempts"
     )
@@ -1551,15 +1554,12 @@ def test_observe_child_pids_fails_when_no_child_appears_within_budget():
     run_ps, calls = _scripted_ps((1, "", ""))
     sleeps = []
 
-    with pytest.raises(pytest.fail.Exception, match="no child after 5 attempts"):
-        _observe_child_pids(
-            42, run_ps=run_ps, attempts=5, sleep_seconds=0.01,
-            sleep=sleeps.append,
-        )
-    assert len(calls) == 5
-    # No sleep after the last observation: the wait never exceeds the
-    # budget of the loop this helper replaced.
-    assert sleeps == [0.01] * 4
+    with pytest.raises(pytest.fail.Exception, match="no child after 100 attempts"):
+        _observe_child_pids(42, run_ps=run_ps, sleep=sleeps.append)
+    # The default budget is the replaced loop's: 100 observations, each
+    # followed by a 10 ms sleep. A longer wait would hide the race.
+    assert len(calls) == 100
+    assert sleeps == [0.01] * 100
 
 
 @pytest.mark.parametrize(
@@ -1605,9 +1605,13 @@ def test_observe_child_pids_propagates_a_failure_to_run_ps():
     assert len(calls) == 1
 
 
-def test_timed_command_pid_is_distinct_from_timed_child_process():
-    """The PID captured by ``$!`` identifies GNU time, not its child."""
-    wrapper = subprocess.Popen(
+_PS_NO_MATCH_FIXTURE = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "ps_no_match"
+)
+
+
+def _start_timed_wrapper():
+    return subprocess.Popen(
         [
             "/usr/bin/time",
             "-f",
@@ -1620,8 +1624,42 @@ def test_timed_command_pid_is_distinct_from_timed_child_process():
         stderr=subprocess.PIPE,
         text=True,
     )
+
+
+def test_timed_command_pid_is_distinct_from_timed_child_process():
+    """The PID captured by ``$!`` identifies GNU time, not its child."""
+    wrapper = _start_timed_wrapper()
     try:
         child_pids = _observe_child_pids(wrapper.pid)
+        assert wrapper.pid not in child_pids
+        assert child_pids
+    finally:
+        wrapper.terminate()
+        wrapper.wait(timeout=5)
+
+
+def test_timed_command_pid_contract_survives_ps_no_match_exits(
+    tmp_path, monkeypatch,
+):
+    """Issue #157: the real ``ps`` path retries ``ps`` exiting 1 on no match.
+
+    The fixture ``ps`` answers the first three calls the way procps does
+    before GNU time has forked its child (exit 1, no output) and runs the
+    real ``ps`` afterwards.
+    """
+    real_ps = shutil.which("ps")
+    assert real_ps
+    calls = tmp_path / "ps-calls"
+    monkeypatch.setenv(
+        "PATH", f"{_PS_NO_MATCH_FIXTURE}{os.pathsep}{os.environ['PATH']}"
+    )
+    monkeypatch.setenv("PS_NO_MATCH_REAL_PS", real_ps)
+    monkeypatch.setenv("PS_NO_MATCH_CALLS", str(calls))
+    monkeypatch.setenv("PS_NO_MATCH_COUNT", "3")
+    wrapper = _start_timed_wrapper()
+    try:
+        child_pids = _observe_child_pids(wrapper.pid)
+        assert int(calls.read_text()) >= 4
         assert wrapper.pid not in child_pids
         assert child_pids
     finally:
