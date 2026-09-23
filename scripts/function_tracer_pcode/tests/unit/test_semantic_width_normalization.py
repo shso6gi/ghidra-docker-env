@@ -31,6 +31,7 @@ from scripts.function_tracer_pcode.core import (
     ReturnInfo,
     StorageInfo,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 def _param(name: str, size: int, *, index: int | None = None, storage_info=None) -> Expression:
@@ -160,7 +161,14 @@ def _readonly_sum_expr(
     )
 
 
-def test_normalize_analysis_collapses_widened_signed_division_back_to_32bit():
+def test_normalize_analysis_keeps_widened_signed_division_at_the_wide_width():
+    """Issue #167: 除算・剰余の狭めは有効な規則ではない。
+
+    ``SUBPIECE(sdiv(sext(a), sext(b)), 0) == sdiv(a, b)`` は幅に依らない恒等式だが、
+    production 幅（64→32）で実 lowering の certificate が得られない（z3 が決着しない、
+    ``tests/fixtures/issue167/README.md``）。未証明の規則は有効にしないので、広い除算を
+    そのまま描く（意味は元式と同じ）。周囲の ring 演算の狭めは恒等規則なので残る。
+    """
     widened_div = _binary(
         "INT_SDIV",
         _unary("INT_SEXT", _param("param_1", 4), 8),
@@ -192,8 +200,8 @@ def test_normalize_analysis_collapses_widened_signed_division_back_to_32bit():
     normalized = normalize_analysis_semantic_width(analysis)
     value_smt = normalized.returns[0].value.to_smt()
 
-    assert "(bvsdiv param_1 param_2)" in value_smt
-    assert "((_ extract 31 0) (bvsdiv ((_ sign_extend 32) param_1) ((_ sign_extend 32) param_2)))" not in value_smt
+    assert "(bvsdiv param_1 param_2)" not in value_smt
+    assert "((_ extract 31 0) (bvsdiv ((_ sign_extend 32) param_1) ((_ sign_extend 32) param_2)))" in value_smt
 
 
 def test_normalize_analysis_keeps_wide_xor_at_full_width_despite_narrow_hints():
@@ -587,10 +595,11 @@ def test_formula_builder_applies_semantic_width_normalization_before_lowering():
         return_type="int",
     )
 
-    formula = builder.build_equivalence_formula_extended(narrow_analysis, widened_analysis).formula
+    formula = builder.build_equivalence_formula_extended(narrow_analysis, widened_analysis, input_correspondence=build_input_correspondence_set(narrow_analysis, widened_analysis)).formula
 
-    assert "(bvsdiv param_1_2 param_2_2)" in formula
-    assert "((_ extract 31 0) (bvsdiv ((_ sign_extend 32) param_1_2) ((_ sign_extend 32) param_2_2)))" not in formula
+    # 除算の狭めは無効（上の test を参照）。広い除算のまま lowering する。
+    assert "(bvsdiv param_1_2 param_2_2)" not in formula
+    assert "((_ extract 31 0) (bvsdiv ((_ sign_extend 32) param_1_2) ((_ sign_extend 32) param_2_2)))" in formula
     assert "(distinct param_2_2 (_ bv0 32))" in formula
 
 
@@ -710,7 +719,7 @@ def test_formula_builder_handles_mips64_abi_param_width_mismatch_in_return_exprs
         return_type="int",
     )
 
-    formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+    formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
 
     assert "(declare-const param_1_2 (_ BitVec 32))" in formula
     assert "(select mem32 param_1_2)" not in formula

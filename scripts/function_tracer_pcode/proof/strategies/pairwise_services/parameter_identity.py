@@ -8,7 +8,7 @@ from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_wid
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ParameterInfo,
 )
-from scripts.function_tracer_pcode.semantics.projection_contract import RewriteAssumption
+from scripts.function_tracer_pcode.semantics.rewrite_contract import RewriteAssumption
 
 
 def _impl__collect_summary_parameter_refs(self, *expressions: Any) -> Tuple[Any, ...]:

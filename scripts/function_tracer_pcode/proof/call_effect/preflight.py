@@ -40,6 +40,7 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     InputCorrespondenceSet,
     build_input_correspondence_set,
 )
+from scripts.function_tracer_pcode.semantics.rewrite_contract import REWRITE_RULE_TABLE_DIGEST
 from scripts.function_tracer_pcode.semantics.semantic_width import (
     align_return_value_extension_surfaces as _trusted_align_return_surfaces,
     normalize_analysis_semantic_width as _trusted_normalize_semantic_width,
@@ -106,9 +107,10 @@ def _digest(value: Any) -> str:
 
 
 _NORMALIZATION_RULE_VERSIONS = (
-    # v2 (Issue #167): 条件付き規則は最終 InputCorrespondence の authorization
-    # の下でだけ効く。
-    "semantic_width_normalizer_v2",
+    # v3 (Issue #167): 規則は rewrite_contract.REWRITE_RULES だけで、入力仮定は
+    # 最終 InputCorrespondence の authorization.grant からだけ受け取る。rule 表の
+    # digest を版に含めるので、規則の契約が変われば certificate も変わる。
+    f"semantic_width_normalizer_v3:{REWRITE_RULE_TABLE_DIGEST[:16]}",
     "return_extension_surface_alignment_v1",
 )
 _NORMALIZATION_ALLOWED_ROOTS = (

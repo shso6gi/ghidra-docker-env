@@ -11,9 +11,12 @@ from scripts.function_tracer_pcode.core import (
     ExpressionType,
     FunctionReturnAnalysis,
     ReadonlyReductionRef,
-    StorageInfo,
 )
 from scripts.function_tracer_pcode.core.signature import get_declared_type_signedness
+from scripts.function_tracer_pcode.core.storage import (
+    coerce_storage_info as _coerce_storage_info,
+    storage_identity_key_of as _storage_identity_key,
+)
 
 
 SIGNED_COMPARE_OPS = {"INT_SLESS", "INT_SLESSEQUAL"}
@@ -811,43 +814,3 @@ def _normalize_parameter_index(value: Any) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return index if index >= 0 else None
-
-
-def _storage_identity_key(storage: Optional[object]) -> Optional[Tuple[object, ...]]:
-    storage_info = _coerce_storage_info(storage)
-    if storage_info is None:
-        return None
-    return storage_info.storage_identity_key()
-
-
-def _coerce_storage_info(storage: Optional[object]) -> Optional[StorageInfo]:
-    if storage is None:
-        return None
-    if isinstance(storage, StorageInfo):
-        return storage
-    if not isinstance(storage, dict):
-        return None
-    try:
-        kind = str(storage.get("kind", "") or storage.get("space_name", "") or "").lower()
-        is_register = bool(storage.get("is_register", False)) or kind == "register"
-        return StorageInfo(
-            is_register=is_register,
-            space_name=str(storage.get("space_name") or ("register" if is_register else "")),
-            space_id=storage.get("space_id"),
-            offset=int(storage.get("offset", 0) or 0),
-            size=int(storage.get("size", 0) or 0),
-            size_bits=int(storage.get("size_bits", 0) or 0),
-            register_name=storage.get("register_name"),
-            register_offset=storage.get("register_offset"),
-            register_size=storage.get("register_size"),
-            register_size_bits=storage.get("register_size_bits"),
-            base_register_name=storage.get("base_register_name"),
-            base_register_offset=int(storage.get("base_register_offset", 0) or 0),
-            base_register_size=int(storage.get("base_register_size", 0) or 0),
-            base_register_size_bits=int(storage.get("base_register_size_bits", 0) or 0),
-            bit_offset_in_base=int(storage.get("bit_offset_in_base", 0) or 0),
-            is_stack_pointer=bool(storage.get("is_stack_pointer", False)),
-            is_frame_pointer=bool(storage.get("is_frame_pointer", False)),
-        )
-    except Exception:
-        return None

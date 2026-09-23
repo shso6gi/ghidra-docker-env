@@ -436,13 +436,26 @@ def _impl__readonly_projection_extension_proof_content_is_complete(
         return False
     expected_wide_side = "left" if left_size > right_size else "right"
     expected_narrow_side = "right" if expected_wide_side == "left" else "left"
+    # 入力 extension の出所は最終 InputCorrespondence だけ（Issue #167）。Ghidra の
+    # 推論型や semantic hint を出所とする proof は受理しない。記録された entailed
+    # 仮定が、proof content の parameter・幅・ext の種類と一致していること。
+    expected_assumption = (
+        "rewrite_assumption_v1",
+        parameter_index,
+        wide_bits,
+        narrow_bits,
+        "sign" if extension.get("extension") == "sign_extend" else "zero",
+    )
+    digest = extension.get("input_correspondence_digest")
     return (
         extension.get("wide_side") == expected_wide_side
         and extension.get("narrow_side") == expected_narrow_side
         and max(left_size, right_size) == wide_bits
         and min(left_size, right_size) == narrow_bits
-        and extension.get("proof_source")
-        in {"param_semantic_hint", "declared_parameter_narrow_type_on_wide_storage"}
+        and extension.get("proof_source") == "final_input_correspondence"
+        and isinstance(digest, str)
+        and len(digest) == 64
+        and cls._normalize_nested_tuple(extension.get("entailed_assumption")) == expected_assumption
     )
 
 def _impl__method_b_closure_proof_content_is_complete(

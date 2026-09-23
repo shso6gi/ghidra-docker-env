@@ -69,6 +69,7 @@ from scripts.function_tracer_pcode.proof.obligations.cache import ValidatedUnary
 from scripts.function_tracer_pcode.proof.obligations.model import UnaryArtifactDomain
 from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
 from scripts.function_tracer_pcode.proof.recurrence_promotion import RecurrenceSidePromotion
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 def test_phi_return_authority_serialization_is_recursive_and_canonical():
@@ -427,6 +428,7 @@ def _typed_loop_query(
         case2=summary_case,
         pair_id=pair_id,
         execution_identity_digest=execution_identity_digest,
+        input_correspondence=build_input_correspondence_set(left, right),
     )
     return _issue_loop_solver_query_authority(rendered)
 
@@ -481,6 +483,7 @@ def _loop_query_preflight_fixture(return_size1, return_size2):
         case2=summary_case,
         pair_id="(0,1)",
         execution_identity_digest=session.identity.execution_identity_digest,
+        input_correspondence=build_input_correspondence_set(left, right),
     )
     return preflight, session, blocker, requirement, exact_case, summary_case
 
@@ -553,6 +556,7 @@ def test_loop_v2_invalid_return_width_failure_is_not_suppressed(
             case2=None,
             pair_id="(0,1)",
             execution_identity_digest="invalid-width-execution",
+            input_correspondence=None,
         )
     assert raised.value is failure
 
@@ -616,6 +620,7 @@ def test_loop_v2_preflight_does_not_hide_renderer_invariant_failure():
             case2=summary_case,
             pair_id="(0,1)",
             execution_identity_digest=session.identity.execution_identity_digest,
+            input_correspondence=build_input_correspondence_set(stale_analysis, stale_analysis),
         )
 
 
@@ -931,6 +936,7 @@ def test_loop_solver_query_rejects_direct_construction_and_wrong_live_q():
         case2=summary_case,
         pair_id="(0,1)",
         execution_identity_digest=session.identity.execution_identity_digest,
+        input_correspondence=build_input_correspondence_set(left, right),
     )
     forged_payload = {
         name: getattr(rendered, name)
@@ -1224,6 +1230,7 @@ def test_loop_solver_batch_commit_failure_rolls_back_stream_and_all_ledgers(
             case2=summary_case,
             pair_id="(0,1)",
             execution_identity_digest=session.identity.execution_identity_digest,
+            input_correspondence=build_input_correspondence_set(left, right),
         )
 
         def fail_during_commit(state, payload):
@@ -1327,6 +1334,7 @@ def test_loop_solver_phase7_execution_buffer_failure_precedes_stream_and_ledgers
             case2=summary_case,
             pair_id="(0,1)",
             execution_identity_digest=session.identity.execution_identity_digest,
+            input_correspondence=build_input_correspondence_set(left, right),
         )
         root = Path(__file__).resolve().parents[4]
         manifest = json.loads((root / (
@@ -1816,6 +1824,7 @@ def test_loop_connector_finalizes_open_ledger_and_selects_terminal_timeout(monke
             case2=summary_case,
             pair_id="(0,1)",
             execution_identity_digest=session.identity.execution_identity_digest,
+            input_correspondence=build_input_correspondence_set(left, right),
         )
         assert execute_loop_solver_rendered_query(
             blocker, rendered, configured_timeout_ms=1000
@@ -1907,6 +1916,7 @@ def test_loop_connector_materializes_unemitted_receipt_before_sealing(monkeypatc
         case2=summary_case,
         pair_id="(0,1)",
         execution_identity_digest=session.identity.execution_identity_digest,
+        input_correspondence=build_input_correspondence_set(left, right),
     )
     query = _issue_loop_solver_query_authority(rendered)
     context = composite.build_loop_execution_context(session, blocker, (query,))
@@ -2027,6 +2037,7 @@ def test_loop_sat_refutation_enters_phase6_1_safety_backlog(monkeypatch):
             case2=summary_case,
             pair_id="(0,1)",
             execution_identity_digest=session.identity.execution_identity_digest,
+            input_correspondence=build_input_correspondence_set(left, right),
         )
         assert execute_loop_solver_rendered_query(
             blocker, rendered, configured_timeout_ms=1000

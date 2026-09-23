@@ -1,19 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Issue #167: 有効な semantic-width 書き換え規則ごとの SMT certificate（v5 §4.6 / §4.11-13）。
+"""Issue #167: rule 表（``rewrite_contract.REWRITE_RULES``）の規則ごとの SMT certificate。
 
 各規則について **実 production の規則**（``SemanticWidthNormalizer``）が出した式と、
-**実 SMT lowering**（``Expression.to_smt``）を z3 に渡して次を確かめる。
+**実 SMT lowering**（``Expression.to_smt``）を z3 に渡して次を確かめる（v5 §4.6）。
 
-1. 規則が実際に発火している（非空虚）。
+1. 表のその規則が実際に発火している（``applied_rules`` で規則名まで照合、非空虚）。
 2. ``sort(original) == sort(rewritten)``。
 3. ``premise ∧ (original != rewritten)`` が UNSAT（Bool は xor）。
 4. premise 自体が SAT（空の前提で UNSAT を得る空虚さが無い）。
 5. 幅・定数の境界値でも 3 が成り立ち、その境界値が premise を満たす。
-6. 前提（入力仮定や構文条件）を欠くと規則は発火せず、欠いたまま書き換えた式には
-   z3 が反例を返す（負例。手書きの式はここでだけ使う）。
+6. 入力仮定を消費する規則は、最終 relation の仮定（``RewriteAuthorization``）が
+   無いと発火せず、欠いたまま書き換えた式には z3 が反例を返す。
 
-``SEMANTIC_WIDTH_RULES`` に規則を足したら、ここに certificate を足さないと
-``test_every_enabled_rule_has_a_certificate`` が落ちる。
+表に規則を足したら、ここに certificate を足さないと
+``test_every_rule_in_the_table_has_a_certificate`` が落ちる。入力仮定を消費する
+規則は ``test_every_assumption_consuming_rule_has_a_missing_assumption_negative`` も要る。
 """
 
 from __future__ import annotations
@@ -31,16 +32,14 @@ from scripts.function_tracer_pcode.core.render_smt import (
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import extension_assumption_line
 from scripts.function_tracer_pcode.semantics.param_semantics import ParameterSemanticHint
-from scripts.function_tracer_pcode.semantics.projection_contract import (
+from scripts.function_tracer_pcode.semantics.rewrite_contract import (
     EMPTY_REWRITE_AUTHORIZATION,
+    REWRITE_RULES,
     ExtensionKind,
     RewriteAssumption,
     RewriteAuthorization,
 )
-from scripts.function_tracer_pcode.semantics.semantic_width import (
-    SEMANTIC_WIDTH_RULES,
-    SemanticWidthNormalizer,
-)
+from scripts.function_tracer_pcode.semantics.semantic_width import SemanticWidthNormalizer
 
 
 # ---------------------------------------------------------------------------
@@ -72,14 +71,21 @@ def _hints(**by_index: ParameterSemanticHint) -> Dict[Tuple[object, ...], Parame
     return {("parameter_index", int(index[1:])): hint for index, hint in by_index.items()}
 
 
-def _rewrite(
+def _normalize(
     expr: Expression,
     *,
     hints: Optional[Dict[Tuple[object, ...], ParameterSemanticHint]] = None,
     authorization: RewriteAuthorization = EMPTY_REWRITE_AUTHORIZATION,
-) -> Expression:
+) -> Tuple[Expression, Dict[str, int]]:
+    """実 normalizer の出力と、適用された規則（表の名前）。"""
+
+    normalizer = SemanticWidthNormalizer(hints or {}, authorization)
     # production と同じく、書き換えの入力も出力も公開済みの値として扱う。
-    return publish(SemanticWidthNormalizer(hints or {}, authorization).rewrite_expression(publish(expr)))
+    return publish(normalizer.rewrite_expression(publish(expr))), dict(normalizer.applied_rules)
+
+
+def _rewrite(expr: Expression, **kwargs) -> Expression:
+    return _normalize(expr, **kwargs)[0]
 
 
 def _sort(expr: Expression) -> str:
@@ -114,12 +120,17 @@ BOUNDARY_VALUES = {
 
 
 def certify(
+    rule: str,
     original: Expression,
-    rewritten: Expression,
     params: Sequence[Tuple[str, int]],
     assumptions: Sequence[Tuple[str, RewriteAssumption]] = (),
-) -> None:
+    **normalize_kwargs,
+) -> Expression:
+    """実規則で ``original`` を書き換え、``rule`` だけが発火したことと意味保存を確かめる。"""
+
+    rewritten, applied = _normalize(original, **normalize_kwargs)
     assert rewritten.to_smt() != original.to_smt(), "rule did not fire"
+    assert set(applied) == {rule}, applied
     assert _sort(rewritten) == _sort(original)
     declarations = _declarations(params)
     premise = _premise(assumptions)
@@ -131,6 +142,7 @@ def certify(
             if _check(pinned) != z3.sat:
                 continue  # この境界値は premise の外（ext の像でない）
             assert _check(pinned + _differs(original, rewritten)) == z3.unsat, (name, hex(value))
+    return rewritten
 
 
 def counterexample_exists(
@@ -144,18 +156,37 @@ def counterexample_exists(
 
 
 CERTIFIED_RULES = set()
+MISSING_ASSUMPTION_NEGATIVES = set()
 
 
-def certifies(rule: str):
+def certifies(*rules: str):
     def mark(function):
-        assert rule in SEMANTIC_WIDTH_RULES, rule
-        CERTIFIED_RULES.add(rule)
+        for rule in rules:
+            assert rule in REWRITE_RULES, rule
+            CERTIFIED_RULES.add(rule)
         return function
     return mark
 
 
-def test_every_enabled_rule_has_a_certificate():
-    assert CERTIFIED_RULES == set(SEMANTIC_WIDTH_RULES)
+def refutes_without_assumption(*rules: str):
+    """入力仮定を消費する規則が、仮定を欠くと発火せず反例を持つことの test。"""
+
+    def mark(function):
+        for rule in rules:
+            assert REWRITE_RULES[rule].consumes_input_extension, rule
+            MISSING_ASSUMPTION_NEGATIVES.add(rule)
+        return function
+    return mark
+
+
+def test_every_rule_in_the_table_has_a_certificate():
+    assert CERTIFIED_RULES == set(REWRITE_RULES)
+
+
+def test_every_assumption_consuming_rule_has_a_missing_assumption_negative():
+    assert MISSING_ASSUMPTION_NEGATIVES == {
+        name for name, rule in REWRITE_RULES.items() if rule.consumes_input_extension
+    }
 
 
 a32 = _param("a", 4, 0)
@@ -177,7 +208,7 @@ ZERO32_Q = RewriteAssumption(1, 64, 32, ExtensionKind.ZERO)
 @pytest.mark.parametrize("ext", ["INT_SEXT", "INT_ZEXT"])
 def test_subpiece_of_extension(ext):
     original = _low(_un(ext, a32, 8), 4)
-    certify(original, _rewrite(original), [("a", 32)])
+    certify("subpiece_of_extension", original, [("a", 32)])
 
 
 def test_subpiece_of_extension_requires_matching_width():
@@ -198,7 +229,7 @@ RING = ("INT_ADD", "INT_SUB", "INT_MULT", "INT_AND", "INT_OR", "INT_XOR")
 @pytest.mark.parametrize("op", RING)
 def test_subpiece_of_ring_operation_on_extensions(op):
     original = _low(_bin(op, _un("INT_SEXT", a32, 8), _un("INT_ZEXT", b32, 8), 8), 4)
-    certify(original, _rewrite(original), [("a", 32), ("b", 32)])
+    certify("subpiece_of_ring_operation", original, [("a", 32), ("b", 32)])
 
 
 @pytest.mark.parametrize("op", RING)
@@ -207,7 +238,7 @@ def test_subpiece_of_ring_operation_on_hinted_wide_parameters(op):
 
     original = _low(_bin(op, p64, q64, 8), 4)
     hints = _hints(i0=ParameterSemanticHint(32, "signed"), i1=ParameterSemanticHint(32, "signed"))
-    certify(original, _rewrite(original, hints=hints), [("p", 64), ("q", 64)])
+    certify("subpiece_of_ring_operation", original, [("p", 64), ("q", 64)], hints=hints)
 
 
 @pytest.mark.parametrize("op", RING)
@@ -231,90 +262,48 @@ def test_add_overflow_breaks_bare_narrowing_even_under_sign_extension():
 
 
 # ---------------------------------------------------------------------------
-# subpiece_of_division_on_extension_images
+# division / remainder: 有効な規則ではない
 # ---------------------------------------------------------------------------
 
 
-#: 除算の同値は幅に依らない恒等式（0 除算と ``INT_MIN / -1`` を含む。SMT-LIB の
-#: bvsdiv/bvsrem/bvudiv/bvurem の定義で N bit の結果が W bit の結果の下位 N bit に
-#: 一致する）。z3 は 64→32 の除算器 2 つの全称同値を 60 秒で決められない
-#: （``tests/fixtures/issue167/README.md``、32→16 は 8〜28 秒）ので、全称の
-#: certificate は 16→8 で取り、production の 64→32 は境界値の全組合せで取る。
-#: どちらも同じ実規則・同じ lowering を通る（幅は引数でしかない）。
+#: ``SUBPIECE(div(ext(a), ext(b)), 0) == div(a, b)`` は幅に依らない恒等式だが、
+#: production 幅（64→32）で実 lowering の certificate が得られない: z3 4.16.0 は
+#: ``bvsdiv`` の 64→32 同値を 600 秒で決められない（``tests/fixtures/issue167/README.md``）。
+#: 未証明の規則は有効にしないので、除算・剰余は狭めない。
 DIVISION_CASES = [
     ("INT_SDIV", "INT_SEXT"), ("INT_SREM", "INT_SEXT"),
     ("INT_DIV", "INT_ZEXT"), ("INT_REM", "INT_ZEXT"),
 ]
 
 
-@certifies("subpiece_of_division_on_extension_images")
 @pytest.mark.parametrize(("op", "ext"), DIVISION_CASES)
-def test_division_on_syntactic_extension_images(op, ext):
-    a8 = _param("a", 1, 0)
-    b8 = _param("b", 1, 1)
-    original = _low(_bin(op, _un(ext, a8, 2), _un(ext, b8, 2), 2), 1)
-    certify(original, _rewrite(original), [("a", 8), ("b", 8)])
+def test_division_is_never_narrowed(op, ext):
+    syntactic = _low(_bin(op, _un(ext, a32, 8), _un(ext, b32, 8), 8), 4)
+    assert _normalize(syntactic) == (publish(syntactic), {})
+    kind = ExtensionKind.SIGN if ext == "INT_SEXT" else ExtensionKind.ZERO
+    entailed = RewriteAuthorization((
+        RewriteAssumption(0, 64, 32, kind), RewriteAssumption(1, 64, 32, kind),
+    ))
+    on_parameters = _low(_bin(op, p64, q64, 8), 4)
+    assert _normalize(on_parameters, authorization=entailed) == (publish(on_parameters), {})
+    assert not any("div" in name for name in REWRITE_RULES)
 
 
-@pytest.mark.parametrize(("op", "ext"), DIVISION_CASES)
-def test_division_rewrite_at_production_width_on_all_boundary_pairs(op, ext):
-    original = _low(_bin(op, _un(ext, a32, 8), _un(ext, b32, 8), 8), 4)
-    rewritten = _rewrite(original)
-    assert rewritten.to_smt() == publish(_bin(op, a32, b32, 4)).to_smt()
-    declarations = _declarations([("a", 32), ("b", 32)])
-    for left in BOUNDARY_VALUES[32]:
-        for right in BOUNDARY_VALUES[32]:
-            pinned = declarations + f"(assert (= a (_ bv{left} 32)))\n(assert (= b (_ bv{right} 32)))\n"
-            assert _check(pinned + _differs(original, rewritten)) == z3.unsat, (hex(left), hex(right))
-
-
-SIGN8_P = RewriteAssumption(0, 16, 8, ExtensionKind.SIGN)
-SIGN8_Q = RewriteAssumption(1, 16, 8, ExtensionKind.SIGN)
-ZERO8_P = RewriteAssumption(0, 16, 8, ExtensionKind.ZERO)
-ZERO8_Q = RewriteAssumption(1, 16, 8, ExtensionKind.ZERO)
-
-
-@pytest.mark.parametrize(("op", "assumptions"), [
-    ("INT_SDIV", (SIGN8_P, SIGN8_Q)), ("INT_SREM", (SIGN8_P, SIGN8_Q)),
-    ("INT_DIV", (ZERO8_P, ZERO8_Q)), ("INT_REM", (ZERO8_P, ZERO8_Q)),
-])
-def test_division_on_parameters_needs_the_entailed_extension(op, assumptions):
-    p16 = _param("p", 2, 0)
-    q16 = _param("q", 2, 1)
-    original = _low(_bin(op, p16, q16, 2), 1)
-    authorization = RewriteAuthorization(assumptions)
-    rewritten = _rewrite(original, authorization=authorization)
-    premise = [("p", assumptions[0]), ("q", assumptions[1])]
-    certify(original, rewritten, [("p", 16), ("q", 16)], premise)
-
-    # 前提を欠くと規則は発火せず、欠いたまま書き換えた式には反例がある。
-    assert _rewrite(original).to_smt() == original.to_smt()
-    assert counterexample_exists(original, rewritten, [("p", 16), ("q", 16)])
-
-
-def test_signed_division_rejects_zero_extended_composite_operands():
-    """v5 §4.6: parameter の証拠ではなく演算の operand 式そのものが sign 像である必要。"""
+def test_signed_division_on_zero_extended_composite_operands_differs():
+    """v5 §4.6: parameter の SIGN 証拠があっても operand ``p & 0xff`` は zero 像。"""
 
     p16 = _param("p", 2, 0)
     q16 = _param("q", 2, 1)
     masked_p = _bin("INT_AND", p16, _const(0xFF, 2), 2)
     masked_q = _bin("INT_AND", q16, _const(0xFF, 2), 2)
     original = _low(_bin("INT_SDIV", masked_p, masked_q, 2), 1)
+    sign8 = (RewriteAssumption(0, 16, 8, ExtensionKind.SIGN), RewriteAssumption(1, 16, 8, ExtensionKind.SIGN))
     hints = _hints(i0=ParameterSemanticHint(8, "signed"), i1=ParameterSemanticHint(8, "signed"))
-    authorization = RewriteAuthorization((SIGN8_P, SIGN8_Q))
-    assert _rewrite(original, hints=hints, authorization=authorization).to_smt() == original.to_smt()
+    assert _rewrite(original, hints=hints, authorization=RewriteAuthorization(sign8)).to_smt() == original.to_smt()
     naive = _bin("INT_SDIV", _low(p16, 1), _low(q16, 1), 1)
-    # parameter の SIGN 証拠があっても、operand ``p & 0xff`` は zero 像なので反例がある。
-    assert counterexample_exists(original, naive, [("p", 16), ("q", 16)], [("p", SIGN8_P), ("q", SIGN8_Q)])
-
-
-def test_signed_division_rejects_mixed_extension_kinds():
-    a8 = _param("a", 1, 0)
-    b8 = _param("b", 1, 1)
-    original = _low(_bin("INT_SDIV", _un("INT_SEXT", a8, 2), _un("INT_ZEXT", b8, 2), 2), 1)
-    assert _rewrite(original).to_smt() == original.to_smt()
-    naive = _bin("INT_SDIV", a8, b8, 1)
-    assert counterexample_exists(original, naive, [("a", 8), ("b", 8)])
+    assert counterexample_exists(
+        original, naive, [("p", 16), ("q", 16)], [("p", sign8[0]), ("q", sign8[1])]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +315,7 @@ def test_signed_division_rejects_mixed_extension_kinds():
 def test_mask_becomes_zero_extension_of_low_part():
     original = _bin("INT_AND", p64, _const(0xFFFFFFFF, 8), 8)
     hints = _hints(i0=ParameterSemanticHint(32, "unsigned"))
-    certify(original, _rewrite(original, hints=hints), [("p", 64)])
+    certify("mask_to_zero_extension", original, [("p", 64)], hints=hints)
 
 
 def test_mask_rewrite_preserves_the_parent_sort_and_value():
@@ -335,7 +324,7 @@ def test_mask_rewrite_preserves_the_parent_sort_and_value():
     masked = _bin("INT_AND", p64, _const(0xFFFFFFFF, 8), 8)
     original = _bin("INT_EQUAL", _un("INT_NEGATE", masked, 8), _const(0xFFFFFFFF00000000, 8), 1)
     hints = _hints(i0=ParameterSemanticHint(32, "unsigned"))
-    certify(original, _rewrite(original, hints=hints), [("p", 64)])
+    certify("mask_to_zero_extension", original, [("p", 64)], hints=hints)
 
     naive = _bin("INT_EQUAL", _un("INT_NEGATE", _low(p64, 4), 4), _const(0xFFFFFFFF00000000, 8), 1)
     assert counterexample_exists(original, naive, [("p", 64)])
@@ -355,7 +344,7 @@ def test_comparison_constant_is_aligned_to_the_narrow_operand(op, constant):
     """lowering は狭い側を signed 比較なら sext、それ以外は zext で揃える。その像の定数だけ。"""
 
     original = _bin(op, a32, _const(constant, 8), 1)
-    certify(original, _rewrite(original), [("a", 32)])
+    certify("comparison_constant_width_alignment", original, [("a", 32)])
 
 
 @pytest.mark.parametrize(("op", "constant"), [
@@ -369,32 +358,76 @@ def test_comparison_constant_outside_the_lowering_image_is_kept(op, constant):
 
 
 # ---------------------------------------------------------------------------
-# comparison_on_extension_images
+# comparison_zero_constant_width
 # ---------------------------------------------------------------------------
 
 
-@certifies("comparison_on_extension_images")
-@pytest.mark.parametrize(("op", "ext"), [
-    ("INT_EQUAL", "INT_SEXT"), ("INT_NOTEQUAL", "INT_ZEXT"),
-    ("INT_SLESS", "INT_SEXT"), ("INT_SLESSEQUAL", "INT_SEXT"),
-    ("INT_LESS", "INT_ZEXT"), ("INT_LESSEQUAL", "INT_ZEXT"),
+@certifies("comparison_zero_constant_width")
+@pytest.mark.parametrize("op", [
+    "INT_EQUAL", "INT_NOTEQUAL", "INT_SLESS", "INT_SLESSEQUAL", "INT_LESS", "INT_LESSEQUAL",
 ])
-def test_comparison_of_syntactic_extension_images(op, ext):
+def test_comparison_zero_constant_is_widened_to_the_peer(op):
+    """lowering は狭い側を ext で揃えるが、0 はどの ext でも 0。"""
+
+    original = _bin(op, p64, _const(0, 4), 1)
+    certify("comparison_zero_constant_width", original, [("p", 64)])
+
+
+@pytest.mark.parametrize("zero_size", [4, 8])
+def test_comparison_zero_constant_is_aligned_to_a_boolean_peer(zero_size):
+    """比較結果（Bool）と 0 の比較も同じ規則。lowering は Bool を ite で bit 化する。"""
+
+    less = _bin("INT_SLESS", a32, b32, 1)
+    original = _bin("INT_EQUAL", less, _const(0, zero_size), 1)
+    certify("comparison_zero_constant_width", original, [("a", 32), ("b", 32)])
+
+
+def test_nonzero_narrow_constant_is_not_widened():
+    original = _bin("INT_SLESS", p64, _const(0x80000000, 4), 1)
+    assert _normalize(original) == (publish(original), {})
+
+
+# ---------------------------------------------------------------------------
+# comparisons on extension images（演算子ごとに規則が 1 つ）
+# ---------------------------------------------------------------------------
+
+
+COMPARISON_IMAGE_CASES = [
+    ("equality_on_extension_images", "INT_EQUAL", "INT_SEXT"),
+    ("equality_on_extension_images", "INT_NOTEQUAL", "INT_ZEXT"),
+    ("signed_order_on_sign_extension_images", "INT_SLESS", "INT_SEXT"),
+    ("signed_order_on_sign_extension_images", "INT_SLESSEQUAL", "INT_SEXT"),
+    ("unsigned_order_on_zero_extension_images", "INT_LESS", "INT_ZEXT"),
+    ("unsigned_order_on_zero_extension_images", "INT_LESSEQUAL", "INT_ZEXT"),
+]
+
+
+@certifies(*{case[0] for case in COMPARISON_IMAGE_CASES})
+@pytest.mark.parametrize(("rule", "op", "ext"), COMPARISON_IMAGE_CASES)
+def test_comparison_of_syntactic_extension_images(rule, op, ext):
     original = _bin(op, _un(ext, a32, 8), _un(ext, b32, 8), 1)
-    certify(original, _rewrite(original), [("a", 32), ("b", 32)])
+    certify(rule, original, [("a", 32), ("b", 32)])
 
 
-@pytest.mark.parametrize(("op", "assumption", "constant"), [
-    ("INT_SLESS", SIGN32_P, 5), ("INT_SLESSEQUAL", SIGN32_P, 0xFFFFFFFFFFFFFFFB),
-    ("INT_EQUAL", SIGN32_P, 0xFFFFFFFF80000000), ("INT_LESS", ZERO32_P, 0xFFFFFFFF),
-    ("INT_NOTEQUAL", ZERO32_P, 0),
-])
-def test_comparison_of_parameter_needs_the_entailed_extension(op, assumption, constant):
+PARAMETER_IMAGE_CASES = [
+    ("signed_order_on_sign_extension_images", "INT_SLESS", SIGN32_P, 5),
+    ("signed_order_on_sign_extension_images", "INT_SLESSEQUAL", SIGN32_P, 0xFFFFFFFFFFFFFFFB),
+    ("equality_on_extension_images", "INT_EQUAL", SIGN32_P, 0xFFFFFFFF80000000),
+    ("unsigned_order_on_zero_extension_images", "INT_LESS", ZERO32_P, 0xFFFFFFFF),
+    ("equality_on_extension_images", "INT_NOTEQUAL", ZERO32_P, 0),
+]
+
+
+@refutes_without_assumption(*{case[0] for case in PARAMETER_IMAGE_CASES})
+@pytest.mark.parametrize(("rule", "op", "assumption", "constant"), PARAMETER_IMAGE_CASES)
+def test_comparison_of_parameter_needs_the_entailed_extension(rule, op, assumption, constant):
     original = _bin(op, p64, _const(constant, 8), 1)
-    rewritten = _rewrite(original, authorization=RewriteAuthorization((assumption,)))
-    certify(original, rewritten, [("p", 64)], [("p", assumption)])
+    authorization = RewriteAuthorization((assumption,))
+    assert (rule, 0) in authorization.permitted_rules()
+    rewritten = certify(rule, original, [("p", 64)], [("p", assumption)], authorization=authorization)
 
-    assert _rewrite(original).to_smt() == original.to_smt()
+    # 最終 relation の仮定が無いと規則は発火せず、欠いたまま書き換えた式には反例がある。
+    assert _normalize(original)[1].get(rule) is None
     assert counterexample_exists(original, rewritten, [("p", 64)])
 
 
@@ -445,4 +478,4 @@ def test_independent_fragment_is_not_collapsed():
     assert _rewrite(original, authorization=authorization).to_smt() == original.to_smt()
     naive = _un("INT_SEXT", a32, 8)
     assert counterexample_exists(original, naive, [("a", 32), ("in_a0_hi", 32)])
-    assert "fragment" not in " ".join(SEMANTIC_WIDTH_RULES)
+    assert "fragment" not in " ".join(REWRITE_RULES)

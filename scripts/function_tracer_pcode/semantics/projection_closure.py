@@ -35,9 +35,9 @@ from scripts.function_tracer_pcode.semantics.projection_contract import (
     ClosureWitness,
     ProjectionClosure,
 )
-from scripts.function_tracer_pcode.semantics.semantic_width import (
-    _coerce_storage_info,
-    _storage_identity_key,
+from scripts.function_tracer_pcode.core.storage import (
+    coerce_storage_info as _coerce_storage_info,
+    storage_identity_key_of as _storage_identity_key,
 )
 
 
@@ -107,6 +107,7 @@ HIDDEN_INPUT_REASONS = frozenset({
     "register_alias_unknown",
     "parameter_storage_unknown",
     "parameter_identity_unknown",
+    "parameter_leaf_wider_than_declaration",
 })
 
 
@@ -228,6 +229,23 @@ def _variable_aliases_target(node: Any, target: _ParameterTarget) -> Optional[st
     return None
 
 
+def _wider_than_declaration(leaf: Any, target: _ParameterTarget) -> Optional[Tuple[str, str]]:
+    """target の leaf が宣言幅より広い bit を読むなら hidden input の理由。
+
+    lowering は leaf を宣言幅の parameter symbol として描く（metadata 同期で幅も
+    宣言幅へ揃う）ので、宣言を超える bit（register の残り）は relation のどの tie
+    にも入らない入力になる。
+    """
+
+    try:
+        leaf_bits = int(leaf.get_bit_width())
+    except (AttributeError, TypeError, ValueError):
+        return ("parameter_leaf_wider_than_declaration", _node_label(leaf) + ":width_unknown")
+    if leaf_bits > int(target.bit_width):
+        return ("parameter_leaf_wider_than_declaration", f"{_node_label(leaf)}:{leaf_bits}>{target.bit_width}")
+    return None
+
+
 def _subpiece_demand(node: Any, target: _ParameterTarget) -> Optional[_Demand]:
     """``SUBPIECE(p, k)`` を explicit extract として評価する。p でなければ None。"""
 
@@ -246,7 +264,7 @@ def _subpiece_demand(node: Any, target: _ParameterTarget) -> Optional[_Demand]:
         return _broken("extract_width_unknown", _node_label(node))
     if byte_offset < 0 or result_bits <= 0:
         return _broken("extract_width_unknown", _node_label(node))
-    return _Demand(byte_offset * 8 + result_bits)
+    return _Demand(byte_offset * 8 + result_bits, hidden=_wider_than_declaration(source, target))
 
 
 def _structural_fragment_witness(node: Any, target: _ParameterTarget) -> Optional[Tuple[str, str]]:
@@ -292,14 +310,14 @@ def _evaluate_node(node: Any, target: _ParameterTarget, child: Callable[[Any], _
     if kind == ExpressionType.PARAMETER:
         occurrence = _parameter_occurrence(node, target)
         if occurrence == "match":
-            return _broken("bare_parameter", _node_label(node))
+            return _Demand(0, ("bare_parameter", _node_label(node)), _wider_than_declaration(node, target))
         if occurrence == "unknown":
             return _broken("parameter_identity_unknown", _node_label(node))
         return _NO_DEMAND
     if kind == ExpressionType.VARIABLE:
         occurrence = _variable_occurrence(node, target)
         if occurrence == "match":
-            return _broken("bare_parameter", _node_label(node))
+            return _Demand(0, ("bare_parameter", _node_label(node)), _wider_than_declaration(node, target))
         if occurrence == "other":
             return _NO_DEMAND
         alias = _variable_aliases_target(node, target)

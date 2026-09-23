@@ -30,13 +30,15 @@ from __future__ import annotations
 from typing import Any, Optional, Tuple
 
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    InputCorrespondenceSet,
     InputExtensionEvidence,
     InputExtensionRefusal,
     StorageObservation,
     analysis_parameter_binding,
+    build_input_correspondence_set,
     validate_input_extension_evidence,
 )
-from scripts.function_tracer_pcode.semantics.semantic_width import _coerce_storage_info
+from scripts.function_tracer_pcode.core.storage import coerce_storage_info as _coerce_storage_info
 
 
 #: 信頼済み signature の出所。現在は 1 つも無い（Ghidra の推論型は含めない）。
@@ -130,4 +132,18 @@ def provide_input_extension_evidence(*analyses: Any) -> Tuple[InputExtensionEvid
         for analysis in analyses
         for evidence, _refusal in explain_input_extension_evidence(analysis)
         if evidence is not None
+    )
+
+
+def produce_final_input_correspondence(raw1: Any, raw2: Any) -> InputCorrespondenceSet:
+    """checker 層が raw pair から最終 relation を作る入口（provider の IEE を渡す）。
+
+    strategy の dispatch frame を通らない raw 直接比較（ABI retry など）はここを
+    使い、結果を FormulaBuilder へ渡す。builder 自身は relation を作らない。
+    """
+
+    return build_input_correspondence_set(
+        raw1,
+        raw2,
+        input_extension_evidence=provide_input_extension_evidence(raw1, raw2),
     )

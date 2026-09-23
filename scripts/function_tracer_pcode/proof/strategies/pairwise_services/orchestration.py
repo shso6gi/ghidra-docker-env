@@ -976,6 +976,7 @@ def _impl_check(
                                     case2=case2,
                                     pair_id=pair_id,
                                     execution_identity_digest=v2_execution_identity,
+                                    input_correspondence=base_ctx.get("input_correspondence"),
                                 )
                                 if type(loop_query_preflight) is (
                                     RenderedLoopV2SolverQuery
@@ -1029,7 +1030,8 @@ def _impl_check(
                     )
                 elif reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING:
                     self._record_completed_readonly_identity_projection_proof_if_safe(
-                        reason_record, analysis1, analysis2, case1, case2
+                        reason_record, analysis1, analysis2, case1, case2,
+                        input_correspondence=input_correspondence,
                     )
                     completed = tuple(self._completed_recovery_proof_evidence(
                         analysis1, analysis2

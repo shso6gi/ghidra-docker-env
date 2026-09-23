@@ -62,6 +62,9 @@ CONDITIONAL_SAFE_COUNTEREXAMPLE = "CONDITIONAL_SAFE_COUNTEREXAMPLE"
 
 # lane が decisive にならなかった理由（診断。判定 authority ではない）。
 LANE_ANALYSIS_UNAVAILABLE = "conditional_lane_analysis_unavailable"
+#: base pair の最終 InputCorrespondence が無い / 不十分（Issue #167）。
+LANE_INPUT_CORRESPONDENCE_UNAVAILABLE = "conditional_lane_input_correspondence_unavailable"
+LANE_INPUT_CORRESPONDENCE_INSUFFICIENT = "conditional_lane_input_correspondence_insufficient"
 LANE_VIEW_REFUSED = "conditional_lane_view_refused"
 LANE_UNMAPPED_CALL_PRESENT = "conditional_lane_unmapped_call_present"
 LANE_FORMULA_UNAVAILABLE = "conditional_lane_formula_unavailable"
@@ -473,16 +476,32 @@ def run_conditional_proof(
     analysis1: Any,
     analysis2: Any,
     *,
+    input_correspondence: Any,
     observation_policy: Any,
     solver_runner: Any,
     timeout: Optional[float] = None,
     debug: bool = False,
 ) -> ConditionalProofArtifact:
-    """conditional lane の proof 本体。base analysis は変更しない。"""
+    """conditional lane の proof 本体。base analysis は変更しない。
+
+    ``input_correspondence`` は base（raw）pair の最終 relation。formula の parameter
+    premise はこれだけから作り、relation が不十分なら EQ / NOT_EQ のどちらも
+    decisive にしない（無条件の decisive gate と同じ規則、Issue #167）。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        InputCorrespondenceSet,
+    )
 
     diagnostics: dict = {"adapter": CONDITIONAL_PROOF_ADAPTER_VERSION}
     if analysis1 is None or analysis2 is None:
         return _non_decisive((), (LANE_ANALYSIS_UNAVAILABLE,), diagnostics)
+    if type(input_correspondence) is not InputCorrespondenceSet:
+        return _non_decisive((), (LANE_INPUT_CORRESPONDENCE_UNAVAILABLE,), diagnostics)
+    input_insufficiency = tuple(
+        f"pair:{ref}" for ref in input_correspondence.insufficiency_evidence()
+    ) if not input_correspondence.decisive_sufficient else ()
+    diagnostics["input_correspondence_digest"] = input_correspondence.digest
 
     views = []
     for label, analysis in (("function1", analysis1), ("function2", analysis2)):
@@ -542,7 +561,12 @@ def run_conditional_proof(
     diagnostics["modelled_call_sites_complete"] = sites_complete
 
     try:
-        built = build_conditional_equivalence_formula(left_view, right_view, debug=debug)
+        built = build_conditional_equivalence_formula(
+            left_view,
+            right_view,
+            input_correspondence=input_correspondence,
+            debug=debug,
+        )
     except (ValueError, TypeError) as exc:
         diagnostics["formula_error"] = f"{type(exc).__name__}: {exc}"
         return _non_decisive(
@@ -612,6 +636,8 @@ def run_conditional_proof(
             )
             for reason in conditional_equivalence_blocking_reasons(analysis, view)
         )
+        if input_insufficiency:
+            blocking = (LANE_INPUT_CORRESPONDENCE_INSUFFICIENT, *input_insufficiency, *blocking)
         diagnostics["equivalence_blocking_reasons"] = list(blocking)
         if blocking:
             return _non_decisive(
@@ -634,6 +660,8 @@ def run_conditional_proof(
                 for view in (left_view, right_view)
             ),
         )
+        if input_insufficiency:
+            safety = (LANE_INPUT_CORRESPONDENCE_INSUFFICIENT, *input_insufficiency, *safety)
         diagnostics["counterexample_safety_reasons"] = list(safety)
         if safety:
             return _non_decisive(

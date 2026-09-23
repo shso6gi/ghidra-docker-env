@@ -27,6 +27,7 @@ from scripts.function_tracer_pcode.core import (
 )
 from conftest import resolve_mock_data_type
 from scripts.function_tracer_pcode.tests.unit._publication import published
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 def _simple_analysis(func_name: str, param_name: str, size: int = 4) -> FunctionReturnAnalysis:
@@ -135,7 +136,7 @@ def _readonly_loop_summary_expr() -> Expression:
 def test_formula_builder_does_not_hide_nan_only_float_difference():
     result = FormulaBuilder().build_equivalence_formula_extended(
         _max_with_less_analysis(),
-        _max_with_lessequal_analysis(),
+        _max_with_lessequal_analysis(),input_correspondence=build_input_correspondence_set(_max_with_less_analysis(), _max_with_lessequal_analysis()),
     )
 
     assert "(set-logic QF_FPBV)" in result.formula
@@ -153,7 +154,7 @@ def test_formula_builder_can_explicitly_assume_fp_inputs_are_non_nan():
         assume_fp_non_nan=True,
     ).build_equivalence_formula_extended(
         _max_with_less_analysis(),
-        _max_with_lessequal_analysis(),
+        _max_with_lessequal_analysis(),input_correspondence=build_input_correspondence_set(_max_with_less_analysis(), _max_with_lessequal_analysis()),
     )
 
     assert "(set-logic QF_FPBV)" in result.formula
@@ -170,7 +171,7 @@ def test_build_base_context_records_structured_fp_non_nan_domain_assumption():
         assume_fp_non_nan=True,
     ).build_base_context(
         _max_with_less_analysis(),
-        _max_with_less_analysis(),
+        _max_with_less_analysis(),input_correspondence=build_input_correspondence_set(_max_with_less_analysis(), _max_with_less_analysis()),
     )
 
     assert base_ctx["return_coverage_domain_assumptions"] == {"fp_non_nan": True}
@@ -181,7 +182,7 @@ def test_build_base_context_records_no_fp_domain_assumption_without_supported_fp
         assume_fp_non_nan=True,
     ).build_base_context(
         _simple_analysis("left", "param_1", size=4),
-        _simple_analysis("right", "param_1", size=4),
+        _simple_analysis("right", "param_1", size=4),input_correspondence=build_input_correspondence_set(_simple_analysis("left", "param_1", size=4), _simple_analysis("right", "param_1", size=4)),
     )
 
     assert base_ctx["return_coverage_domain_assumptions"] == {"fp_non_nan": False}
@@ -192,7 +193,7 @@ def test_formula_builder_skips_fp_non_nan_section_when_no_supported_fp_params_ex
         assume_fp_non_nan=True,
     ).build_equivalence_formula_extended(
         _simple_analysis("left", "param_1", size=4),
-        _simple_analysis("right", "param_1", size=4),
+        _simple_analysis("right", "param_1", size=4),input_correspondence=build_input_correspondence_set(_simple_analysis("left", "param_1", size=4), _simple_analysis("right", "param_1", size=4)),
     )
 
     assert "Explicit FP input-domain assumptions" not in result.formula
@@ -225,7 +226,7 @@ def test_formula_builder_applies_fp_non_nan_to_typedeffed_float_parameters():
         assume_fp_non_nan=True,
     ).build_equivalence_formula_extended(
         analysis,
-        analysis,
+        analysis,input_correspondence=build_input_correspondence_set(analysis, analysis),
     )
 
     assert "Explicit FP input-domain assumptions" in result.formula
@@ -256,7 +257,7 @@ def test_formula_builder_ignores_unsupported_float_width_for_fp_non_nan_assumpti
         assume_fp_non_nan=True,
     ).build_equivalence_formula_extended(
         unsupported_float_analysis,
-        unsupported_float_analysis,
+        unsupported_float_analysis,input_correspondence=build_input_correspondence_set(unsupported_float_analysis, unsupported_float_analysis),
     )
 
     assert "Explicit FP input-domain assumptions" not in result.formula
@@ -294,7 +295,7 @@ def test_formula_builder_selects_uf_logic_for_intrinsic_declarations():
         returns=[ReturnInfo(address="0x00402000", conditions=[], value=_readonly_loop_summary_expr())],
     )
 
-    result = FormulaBuilder().build_equivalence_formula_extended(analysis1, analysis2)
+    result = FormulaBuilder().build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
 
     assert "(set-logic QF_AUFBV)" in result.formula
     assert "(declare-fun" in result.formula
@@ -324,7 +325,7 @@ def test_formula_builder_selects_uf_logic_for_unsupported_float_predicate_width(
         returns=[ReturnInfo(address="0x00402000", conditions=[guard], value=Expression.constant(1, size=4))],
     )
 
-    result = FormulaBuilder().build_equivalence_formula_extended(analysis1, analysis2)
+    result = FormulaBuilder().build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
 
     assert "(set-logic QF_UFBV)" in result.formula
     assert "(declare-fun float_less ((_ BitVec 80) (_ BitVec 80)) Bool)" in result.formula
@@ -358,8 +359,8 @@ def test_build_base_context_selects_fp_logic_for_direct_float_sqrt_return():
         return_type_obj=resolve_mock_data_type("double"),
     )
 
-    base_ctx = FormulaBuilder().build_base_context(analysis, analysis)
-    result = FormulaBuilder().build_equivalence_formula_extended(analysis, analysis)
+    base_ctx = FormulaBuilder().build_base_context(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis))
+    result = FormulaBuilder().build_equivalence_formula_extended(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis))
 
     assert base_ctx["smt_logic"] == "QF_FPBV"
     assert "(set-logic QF_FPBV)" in result.formula
@@ -531,8 +532,8 @@ class TestSharedFormulaContext:
         builder = FormulaBuilder(debug=False, exclude_ub=False)
         analysis1, analysis2 = self._build_simple_analyses()
 
-        base_ctx = builder.build_base_context(analysis1, analysis2)
-        result = builder.build_equivalence_formula_extended(analysis1, analysis2)
+        base_ctx = builder.build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
+        result = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
         header_text = "\n".join(base_ctx["header_lines"])
 
         assert header_text in result.formula
@@ -547,10 +548,10 @@ class TestSharedFormulaContext:
         analysis1, analysis2 = self._build_simple_analyses()
 
         with patch.object(builder, "_print_debug_info") as spy_debug:
-            builder.build_base_context(analysis1, analysis2)
+            builder.build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
             spy_debug.assert_not_called()
 
-            builder.build_equivalence_formula_extended(analysis1, analysis2)
+            builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
             spy_debug.assert_called_once()
 
 
@@ -601,7 +602,7 @@ class TestBooleanReturnNormalization:
             return_type="bool",
         )
 
-        formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+        formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
 
         assert "(define-fun return_2 () (_ BitVec 8)" in formula
         assert "(ite (bvult y_2 (_ bv10 32)) (_ bv1 8) (_ bv0 8))" in formula
@@ -636,7 +637,7 @@ class TestBooleanReturnNormalization:
             return_type="uchar",
         )
 
-        formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+        formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
 
         assert "(define-fun return_1 () (_ BitVec 8)\n  (_ bv255 8))" in formula
         assert "(define-fun return_2 () (_ BitVec 8)\n  (_ bv255 8))" in formula
@@ -688,7 +689,7 @@ class TestBooleanReturnNormalization:
             return_type="int",
         )
 
-        formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+        formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
 
         assert "(bvor (ite (bvslt (_ bv100 64) y_2) (_ bv1 32) (_ bv0 32)) (_ bv2 32))" in formula
         assert "((_ zero_extend 24) (bvslt (_ bv100 64) y_2))" not in formula
@@ -723,7 +724,7 @@ class TestBooleanReturnNormalization:
             return_type_obj=resolve_mock_data_type("ulong"),
         )
 
-        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+        formula = builder.build_equivalence_formula_extended(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis)).formula
 
         assert "(define-fun return_1 () (_ BitVec 64)" in formula
         assert "((_ zero_extend 32) (_ bv2 32))" in formula
@@ -757,7 +758,7 @@ class TestBooleanReturnNormalization:
             return_type="int",
         )
 
-        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+        formula = builder.build_equivalence_formula_extended(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis)).formula
 
         assert "(declare-const return_1 (_ BitVec 32))" in formula
         assert "(declare-const return_2 (_ BitVec 32))" in formula
@@ -794,8 +795,8 @@ class TestBooleanReturnNormalization:
             return_type_obj=resolve_mock_data_type("ulong"),
         )
 
-        base_ctx = builder.build_base_context(analysis, analysis)
-        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+        base_ctx = builder.build_base_context(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis))
+        formula = builder.build_equivalence_formula_extended(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis)).formula
 
         assert base_ctx["return_size1"] == 64
         assert base_ctx["return_size2"] == 64
@@ -820,8 +821,8 @@ class TestBooleanReturnNormalization:
             return_type_obj=resolve_mock_data_type("undefined8"),
         )
 
-        base_ctx = builder.build_base_context(analysis, analysis)
-        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+        base_ctx = builder.build_base_context(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis))
+        formula = builder.build_equivalence_formula_extended(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis)).formula
 
         assert base_ctx["return_size1"] == 64
         assert "(define-fun return_1 () (_ BitVec 64)" in formula
@@ -858,7 +859,7 @@ class TestBooleanReturnNormalization:
             return_type="ulong",
         )
 
-        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+        formula = builder.build_equivalence_formula_extended(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis)).formula
 
         assert "(define-fun return_1 () (_ BitVec 64)" in formula
         assert "((_ zero_extend 32) (_ bv2 32))" in formula
@@ -888,7 +889,7 @@ class TestBooleanReturnNormalization:
             return_type="undefined8",
         )
 
-        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+        formula = builder.build_equivalence_formula_extended(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis)).formula
 
         assert "(define-fun return_1 () (_ BitVec 64)" in formula
         assert "(_ bv18446744073709551613 64)" in formula
@@ -925,7 +926,7 @@ class TestBooleanReturnNormalization:
             return_type="undefined8",
         )
 
-        formula = builder.build_equivalence_formula_extended(analysis, analysis).formula
+        formula = builder.build_equivalence_formula_extended(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis)).formula
 
         assert "(_ bv18446744073709551613 64)" in formula
         assert "(_ bv4294967293 64)" not in formula
@@ -969,7 +970,7 @@ class TestBooleanReturnNormalization:
         )
         analysis2 = _simple_analysis("simple", "param_2")
 
-        base_ctx = builder.build_base_context(analysis1, analysis2)
+        base_ctx = builder.build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
         assertions = [line for line in base_ctx["header_lines"] if line.startswith("(assert")]
 
         assert base_ctx["constrained_fragments"] == []
@@ -1013,7 +1014,7 @@ class TestBooleanReturnNormalization:
             return_type="int",
         )
 
-        base_ctx = builder.build_base_context(analysis1, analysis2)
+        base_ctx = builder.build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
         header_text = "\n".join(base_ctx["header_lines"])
 
         assert "Loop summary SMT identities" in header_text

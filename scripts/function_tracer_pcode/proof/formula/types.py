@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.proof.formula.variable import ExtraVariableAnalysis
-from scripts.function_tracer_pcode.semantics.projection_contract import RewriteAssumption
+from scripts.function_tracer_pcode.semantics.rewrite_contract import RewriteAssumption
 
 
 @dataclass

@@ -40,7 +40,7 @@ from scripts.function_tracer_pcode.proof.call_effect.obligations import (
 )
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     InputRelationKind,
-    build_parameter_only_correspondence_set,
+    build_tie_only_correspondence_set,
 )
 from scripts.function_tracer_pcode.proof.formula.params import (
     build_symbol_name_mapping,
@@ -809,7 +809,7 @@ def _parameter_prelude(
         raise ValueError("left_parameter_names_ambiguous")
     if len({item.original_name for item in right_infos}) != len(right_infos):
         raise ValueError("right_parameter_names_ambiguous")
-    correspondence = build_parameter_only_correspondence_set(left_infos, right_infos)
+    correspondence = build_tie_only_correspondence_set(left_infos, right_infos)
     if any(
         item.kind is InputRelationKind.MISSING_SIDE
         for item in correspondence.correspondences
@@ -871,19 +871,15 @@ def _call_region_parameter_prelude(proof_input: PureCallRegionProofInput):
         base_symbol = region_mapping[name]
         auxiliary = f"{base_symbol}_region_{observed_bits}"
         lines.append(f"(declare-const {auxiliary} (_ BitVec {observed_bits}))")
-        if observed_bits < declared_bits:
-            relation = (
-                f"(= {auxiliary} "
-                f"((_ extract {observed_bits - 1} 0) {base_symbol}))"
-            )
-        else:
-            if "is_signed" not in parameter:
-                raise ValueError("inline_region_parameter_signedness_missing")
-            extension = "sign_extend" if bool(parameter.get("is_signed")) else "zero_extend"
-            relation = (
-                f"(= {auxiliary} "
-                f"((_ {extension} {observed_bits - declared_bits}) {base_symbol}))"
-            )
+        if observed_bits > declared_bits:
+            # 宣言より広い読みの上位 bit は parameter の外（register の残り）で、
+            # 最終 InputCorrespondence はそれを含意しない。宣言型の符号から extension
+            # を仮定すると入力領域を狭めるので、この obligation は組めない（Issue #167）。
+            raise ValueError("inline_region_parameter_wider_than_declaration")
+        relation = (
+            f"(= {auxiliary} "
+            f"((_ extract {observed_bits - 1} 0) {base_symbol}))"
+        )
         lines.append(f"(assert {relation})")
         region_mapping[name] = auxiliary
     if proof_input.call_on_left:

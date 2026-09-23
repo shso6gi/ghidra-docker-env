@@ -14,7 +14,10 @@ from scripts.function_tracer_pcode.core import (
     ExpressionType,
     FunctionReturnAnalysis,
     ReadonlyReductionRef,
-    StorageInfo,
+)
+from scripts.function_tracer_pcode.core.storage import (
+    coerce_storage_info as _coerce_storage_info,
+    storage_identity_key_of as _storage_identity_key,
 )
 from scripts.function_tracer_pcode.core.render_smt import (
     expression_returns_bool,
@@ -26,11 +29,13 @@ from scripts.function_tracer_pcode.semantics.param_semantics import (
     ParameterSemanticHint,
     infer_parameter_semantics_by_identity,
 )
-from scripts.function_tracer_pcode.semantics.projection_contract import (
+from scripts.function_tracer_pcode.semantics.rewrite_contract import (
+    COMPARISON_NARROWING_RULES,
     EMPTY_REWRITE_AUTHORIZATION,
     ExtensionKind,
-    RewriteAssumption,
     RewriteAuthorization,
+    mark_rewritten_surface,
+    rewrite_rule,
 )
 
 
@@ -46,11 +51,6 @@ RING_TRUNCATING_BINARY_OPS = frozenset(
         "INT_XOR",
     }
 )
-#: 除算・剰余は下位 bit を上位 bit に依存させるので、両 operand の **式そのもの**
-#: が対応する extension 像に属する場合だけ狭められる。
-SIGNED_DIVISION_OPS = frozenset({"INT_SDIV", "INT_SREM"})
-UNSIGNED_DIVISION_OPS = frozenset({"INT_DIV", "INT_REM"})
-
 COMPARISON_OPS = frozenset(
     {
         "INT_EQUAL",
@@ -61,18 +61,6 @@ COMPARISON_OPS = frozenset(
         "INT_SLESSEQUAL",
     }
 )
-#: 比較を狭めてよい extension の種類。演算子は変えない（signed/unsigned の相互
-#: 変換は一括では意味を保存しない: ``sext(0x80000000) <u 0`` と ``<s 0``）。
-#: ext は単射なので等値は種類を問わない。sext は signed 順序、zext は unsigned
-#: 順序を保存する。それ以外の組は証明していないので狭めない。
-COMPARISON_NARROWING_KINDS = {
-    "INT_EQUAL": frozenset({ExtensionKind.SIGN, ExtensionKind.ZERO}),
-    "INT_NOTEQUAL": frozenset({ExtensionKind.SIGN, ExtensionKind.ZERO}),
-    "INT_SLESS": frozenset({ExtensionKind.SIGN}),
-    "INT_SLESSEQUAL": frozenset({ExtensionKind.SIGN}),
-    "INT_LESS": frozenset({ExtensionKind.ZERO}),
-    "INT_LESSEQUAL": frozenset({ExtensionKind.ZERO}),
-}
 SIGNEDNESS_KINDS = frozenset({"signed", "unsigned"})
 RETURN_EXTENSION_SURFACE_CANDIDATE_BITS = (64, 32, 16, 8)
 RETURN_VALUE_EXTENSION_OPS = frozenset({"INT_ZEXT", "INT_SEXT"})
@@ -80,18 +68,6 @@ RETURN_EXTENSION_SURFACE_SOURCE = "cross_side_return_extension_surface"
 RETURN_EXTENSION_SURFACE_COERCION = "equal_width_or_object_proven_extract"
 RETURN_EXTENSION_SURFACE_KINDS = frozenset({"INT_ZEXT", "INT_SEXT", "none"})
 
-#: 有効な書き換え規則。各規則は ``sort(original) == sort(rewritten)`` を保ち、
-#: 最終 premise の下で元式と同じ値になることを
-#: ``tests/unit/test_semantic_width_rule_certificates.py`` が実 lowering で検証する。
-#: 規則を足すときはここと certificate test を同時に足す。
-SEMANTIC_WIDTH_RULES = (
-    "subpiece_of_extension",
-    "subpiece_of_ring_operation",
-    "subpiece_of_division_on_extension_images",
-    "mask_to_zero_extension",
-    "comparison_constant_width_alignment",
-    "comparison_on_extension_images",
-)
 #: 幅の違う比較は、SMT lowering が狭い側を signed 比較なら sign_extend、それ以外は
 #: zero_extend で揃える（``core/render_smt/render.py`` の比較分岐）。
 SIGNED_COMPARISON_OPS = frozenset({"INT_SLESS", "INT_SLESSEQUAL"})
@@ -109,12 +85,13 @@ class _ExtensionImage:
 
 
 class SemanticWidthNormalizer:
-    """Semantic-width 書き換え。
+    """Semantic-width 書き換え。適用できるのは ``rewrite_contract.REWRITE_RULES`` の規則だけ。
 
-    恒等規則（入力仮定無しで値と sort を保存する）は semantic hint を「どこで
-    試すか」の目安にだけ使う。入力の上位 bit について仮定が要る規則は
-    ``authorization``（最終 ``InputCorrespondence`` が含意する仮定）に載っている
-    parameter だけに効く。hint を入力全体の extension 仮定として使うことはない。
+    書き換えは全部 ``_rewritten(rule, expr)`` を通り、規則名が表に無ければ
+    programming error。恒等規則は semantic hint を「どこで試すか」の目安にだけ
+    使う。parameter を extension 像として使う規則は ``authorization.grant`` から
+    だけ入力仮定を受け取る（最終 ``InputCorrespondence`` が含意したもの）。
+    normalizer は自分で入力仮定を作らない。
     """
 
     def __init__(
@@ -124,6 +101,13 @@ class SemanticWidthNormalizer:
     ):
         self.hints_by_identity = hints_by_identity
         self.authorization = authorization or EMPTY_REWRITE_AUTHORIZATION
+        #: 適用した規則ごとの回数（診断と certificate test 用。判定には使わない）。
+        self.applied_rules: Dict[str, int] = {}
+
+    def _rewritten(self, rule_name: str, expr: Expression) -> Expression:
+        rewrite_rule(rule_name)
+        self.applied_rules[rule_name] = self.applied_rules.get(rule_name, 0) + 1
+        return expr
 
     def rewrite_expression(self, expr: Optional[Expression]) -> Optional[Expression]:
         if expr is None:
@@ -189,6 +173,9 @@ class SemanticWidthNormalizer:
                 collapsed = self._normalize_comparison(expr)
                 if collapsed is not None:
                     return collapsed
+                widened = self._widen_zero_comparison_constant(expr)
+                if widened is not None:
+                    return widened
         return expr
 
     # -- subpiece -----------------------------------------------------------
@@ -213,38 +200,25 @@ class SemanticWidthNormalizer:
         ):
             operand = source.operands[0]
             if operand.get_bit_width() == output_bits:
-                return operand
+                return self._rewritten("subpiece_of_extension", operand)
 
         if source.expr_type != ExpressionType.BINARY_OP or len(source.operands) != 2:
             return None
-
-        if source.operator in RING_TRUNCATING_BINARY_OPS:
-            # rule: subpiece_of_ring_operation
-            left = self._low_part(source.operands[0], output_bits)
-            right = self._low_part(source.operands[1], output_bits)
-        elif source.operator in SIGNED_DIVISION_OPS or source.operator in UNSIGNED_DIVISION_OPS:
-            # rule: subpiece_of_division_on_extension_images
-            required = (
-                ExtensionKind.SIGN if source.operator in SIGNED_DIVISION_OPS else ExtensionKind.ZERO
-            )
-            left_image = self._extension_image(source.operands[0])
-            right_image = self._extension_image(source.operands[1])
-            if left_image is None or right_image is None:
-                return None
-            if {left_image.kind, right_image.kind} != {required}:
-                return None
-            if left_image.bits != output_bits or right_image.bits != output_bits:
-                return None
-            left, right = left_image.narrow, right_image.narrow
-        else:
+        # 除算・剰余の狭めは有効にしない: 恒等式は幅に依らないが、production 幅
+        # （64→32）で実 lowering の certificate が得られない（z3 が決着しない）。
+        if source.operator not in RING_TRUNCATING_BINARY_OPS:
             return None
+
+        # rule: subpiece_of_ring_operation
+        left = self._low_part(source.operands[0], output_bits)
+        right = self._low_part(source.operands[1], output_bits)
         if left is None or right is None:
             return None
 
         rebuilt = Expression.binary_op(source.operator, left, right)
         rebuilt.size = output_bits // 8
         rebuilt.data_type = source.data_type
-        return rebuilt
+        return self._rewritten("subpiece_of_ring_operation", rebuilt)
 
     def _low_part(self, expr: Expression, bits: int) -> Optional[Expression]:
         """``low_bits(expr)`` と恒等的に等しい、より狭い式（見つからなければ None）。"""
@@ -292,7 +266,7 @@ class SemanticWidthNormalizer:
         rebuilt = Expression.unary_op("INT_ZEXT", self._low_bits_expr(param_expr, narrow_bits))
         rebuilt.size = expr.size
         rebuilt.data_type = expr.data_type
-        return rebuilt
+        return self._rewritten("mask_to_zero_extension", rebuilt)
 
     # -- comparison ---------------------------------------------------------
 
@@ -319,23 +293,43 @@ class SemanticWidthNormalizer:
         operands = (narrowed, other) if constant is left else (other, narrowed)
         rebuilt = Expression.binary_op(expr.operator, *operands)
         rebuilt.size = expr.size
-        return rebuilt
+        return self._rewritten("comparison_constant_width_alignment", rebuilt)
+
+    def _widen_zero_comparison_constant(self, expr: Expression) -> Optional[Expression]:
+        """rule: comparison_zero_constant_width — 比較の定数 0 を相手の幅へ揃える。"""
+
+        if len(expr.operands) != 2:
+            return None
+        left, right = expr.operands
+        new_left = _zero_constant_at_peer_width(left, right)
+        new_right = _zero_constant_at_peer_width(right, left)
+        if new_left is left and new_right is right:
+            return None
+        return self._rewritten(
+            "comparison_zero_constant_width",
+            expr.clone_with(operands=[new_left, new_right]),
+        )
 
     def _normalize_comparison(self, expr: Expression) -> Optional[Expression]:
-        """rule: comparison_on_extension_images — 演算子を保ったまま両辺を狭める。"""
+        """演算子を保ったまま両辺を extension 像の狭い値へ置き換える。
+
+        演算子ごとの規則は ``COMPARISON_NARROWING_RULES``、規則が意味を保存する
+        ext の種類は rule 表の ``image_kinds``。
+        """
 
         if len(expr.operands) != 2:
             return None
         aligned = self._align_comparison_constant_width(expr)
         if aligned is not None:
             return aligned
-        allowed_kinds = COMPARISON_NARROWING_KINDS.get(expr.operator)
-        if not allowed_kinds:
+        rule_name = COMPARISON_NARROWING_RULES.get(expr.operator)
+        if rule_name is None:
             return None
+        allowed_kinds = rewrite_rule(rule_name).image_kinds
 
         left, right = expr.operands
-        left_image = self._extension_image(left)
-        right_image = self._extension_image(right)
+        left_image = self._extension_image(left, rule_name)
+        right_image = self._extension_image(right, rule_name)
 
         if left_image is not None and right.expr_type == ExpressionType.CONSTANT:
             right_image = self._constant_image(right, left, left_image)
@@ -355,7 +349,7 @@ class SemanticWidthNormalizer:
 
         rebuilt = Expression.binary_op(expr.operator, left_image.narrow, right_image.narrow)
         rebuilt.size = expr.size
-        return rebuilt
+        return self._rewritten(rule_name, rebuilt)
 
     def _constant_image(
         self,
@@ -372,13 +366,33 @@ class SemanticWidthNormalizer:
 
     # -- operand classification --------------------------------------------
 
-    def _extension_image(self, expr: Expression) -> Optional[_ExtensionImage]:
+    def _extension_image(self, expr: Expression, rule_name: str) -> Optional[_ExtensionImage]:
         """``expr == ext_kind(narrow)`` を示せる場合だけ返す。
 
-        * ``SEXT(e)`` / ``ZEXT(e)``: 構文から恒等的に成り立つ。
-        * ``p & (2^N - 1)``: 恒等的に ``zext(low_N(p))``。
-        * parameter ``p``: 最終 relation が ``p == ext(low_N(p))`` を含意するとき
-          （``authorization``）だけ。hint は使わない。
+        構文から恒等的に言えるもの（``_syntactic_image``）か、parameter ``p`` に
+        ついて規則 ``rule_name`` が最終 relation から ``p == ext(low_N(p))`` を
+        受け取れるとき（``authorization.grant``）だけ。hint は使わない。
+        """
+
+        image = self._syntactic_image(expr)
+        if image is not None:
+            return image
+        if expr.expr_type == ExpressionType.PARAMETER:
+            assumption = self._parameter_grant(expr, rule_name)
+            if assumption is None:
+                return None
+            return _ExtensionImage(
+                self._low_bits_expr(expr, assumption.narrow_bits),
+                assumption.narrow_bits,
+                assumption.kind,
+            )
+        return None
+
+    def _syntactic_image(self, expr: Expression) -> Optional[_ExtensionImage]:
+        """入力仮定無しで ``expr == ext_kind(narrow)`` が成り立つ形。
+
+        * ``SEXT(e)`` / ``ZEXT(e)``（e が既知の狭い値のとき）。
+        * ``p & (2^N - 1)``（恒等的に ``zext(low_N(p))``。N は hint から選ぶだけ）。
         """
 
         if (
@@ -410,16 +424,6 @@ class SemanticWidthNormalizer:
                 self._low_bits_expr(param_expr, hint.narrow_bits),
                 hint.narrow_bits,
                 ExtensionKind.ZERO,
-            )
-
-        if expr.expr_type == ExpressionType.PARAMETER:
-            assumption = self._parameter_assumption(expr)
-            if assumption is None:
-                return None
-            return _ExtensionImage(
-                self._low_bits_expr(expr, assumption.narrow_bits),
-                assumption.narrow_bits,
-                assumption.kind,
             )
         return None
 
@@ -459,7 +463,7 @@ class SemanticWidthNormalizer:
             and expr.operator == "INT_AND"
             and len(expr.operands) == 2
         ):
-            image = self._extension_image(expr)
+            image = self._syntactic_image(expr)
             if image is not None:
                 return (image.narrow, image.bits)
         return None
@@ -480,11 +484,11 @@ class SemanticWidthNormalizer:
             return self.hints_by_identity.get(("parameter_storage", storage_key))
         return None
 
-    def _parameter_assumption(self, expr: Expression) -> Optional[RewriteAssumption]:
+    def _parameter_grant(self, expr: Expression, rule_name: str):
         value = getattr(expr, "value", None)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return None
-        return self.authorization.assumption_for(int(value), expr.get_bit_width())
+        return self.authorization.grant(rule_name, int(value), expr.get_bit_width())
 
     def _split_mask_expr(self, expr: Expression):
         left, right = expr.operands
@@ -566,6 +570,7 @@ def normalize_analysis_semantic_width(
     空（恒等規則だけ）で、これは常に健全。
     """
 
+    source = analysis
     analysis = _synchronize_parameter_expression_metadata(analysis)
 
     inferred_hints_by_identity = infer_parameter_semantics_by_identity(analysis)
@@ -580,13 +585,15 @@ def normalize_analysis_semantic_width(
     # （`_synchronize_parameter_expression_metadata`）でも使う書き換えの「手順」
     # なので、そちらで公開すると、まだ幅を直している最中の値を確定扱いにして
     # しまう。完成を宣言できるのは、書き換えを全部終えたここだけ。
-    return publish_semantic_values(
+    normalized = publish_semantic_values(
         _rewrite_analysis_expressions(
             analysis,
             normalizer.rewrite_expression,
             simplify_conditions=True,
         )
     )
+    # 書き換え結果は raw ではない。最終 relation の producer はこれを拒否する。
+    return mark_rewritten_surface(normalized) if normalized is not source else normalized
 
 
 def align_return_value_extension_surfaces(
@@ -599,10 +606,11 @@ def align_return_value_extension_surfaces(
     if surface_alignment is None:
         return analysis1, analysis2
     target_bits, evidence = surface_alignment
-    return (
-        _with_return_extension_surface(analysis1, target_bits, evidence),
-        _with_return_extension_surface(analysis2, target_bits, evidence),
-    )
+    aligned = []
+    for analysis in (analysis1, analysis2):
+        result = _with_return_extension_surface(analysis, target_bits, evidence)
+        aligned.append(mark_rewritten_surface(result) if result is not analysis else result)
+    return aligned[0], aligned[1]
 
 
 def _common_return_extension_surface_alignment(
@@ -1103,16 +1111,11 @@ def _rewrite_conditions(
     simplify: bool,
 ):
     rewritten = []
-    width_changed = False
     for cond in conditions or []:
-        condition_expr = rewrite_expr(cond.expression)
-        condition_expr, condition_width_changed = _normalize_condition_comparison_constant_widths(condition_expr)
-        width_changed = width_changed or condition_width_changed
-        rewritten.append(Condition(condition_expr, cond.negated))
+        rewritten.append(Condition(rewrite_expr(cond.expression), cond.negated))
     if simplify:
         rewritten = ConditionSimplifier.simplify_conditions(rewritten)
 
-    changed = width_changed
     original = list(conditions or [])
     if len(rewritten) != len(original):
         changed = True
@@ -1124,52 +1127,27 @@ def _rewrite_conditions(
     return rewritten, changed
 
 
-def _normalize_condition_comparison_constant_widths(expr: Optional[Expression]) -> Tuple[Optional[Expression], bool]:
-    if expr is None or not getattr(expr, "operands", None):
-        return expr, False
+def _zero_constant_at_peer_width(candidate: Expression, peer: Expression) -> Expression:
+    """比較の operand が定数 0 なら相手の幅の 0（そうでなければそのまま）。"""
 
-    changed = False
-    new_operands = []
-    for operand in expr.operands:
-        new_operand, operand_changed = _normalize_condition_comparison_constant_widths(operand)
-        changed = changed or operand_changed
-        new_operands.append(new_operand)
-
-    current = expr.clone_with(operands=new_operands) if changed else expr
-    if (
-        current.expr_type != ExpressionType.BINARY_OP
-        or current.operator not in COMPARISON_OPS
-        or len(current.operands or ()) != 2
-    ):
-        return current, changed
-
-    left, right = current.operands
-    coerced_left, left_changed = _coerce_constant_operand_width(left, right)
-    coerced_right, right_changed = _coerce_constant_operand_width(right, left)
-    if not left_changed and not right_changed:
-        return current, changed
-    return current.clone_with(operands=[coerced_left, coerced_right]), True
-
-
-def _coerce_constant_operand_width(candidate: Expression, peer: Expression) -> Tuple[Expression, bool]:
     if candidate is None or peer is None or candidate.expr_type != ExpressionType.CONSTANT:
-        return candidate, False
+        return candidate
     try:
         if int(candidate.value) != 0:
-            return candidate, False
+            return candidate
     except (TypeError, ValueError):
-        return candidate, False
+        return candidate
     peer_size = int(getattr(peer, "size", 0) or 0)
     if peer_size > 0:
         desired_size = peer_size
     else:
         peer_bits = _expression_bit_width(peer)
         if peer_bits <= 0 or peer_bits % 8 != 0:
-            return candidate, False
+            return candidate
         desired_size = max(1, peer_bits // 8)
     if int(getattr(candidate, "size", 0) or 0) == desired_size:
-        return candidate, False
-    return candidate.clone_with(size=desired_size), True
+        return candidate
+    return candidate.clone_with(size=desired_size)
 
 
 def _rewrite_effect_summary_expressions(
@@ -1342,50 +1320,3 @@ def _build_hints_by_object_identity(
         if storage_key is not None:
             hints_by_identity[("parameter_storage", storage_key)] = hint
     return hints_by_identity
-
-
-def _storage_identity_key(storage_info) -> Optional[Tuple[object, ...]]:
-    storage_info = _coerce_storage_info(storage_info)
-    if storage_info is None:
-        return None
-    storage_key_fn = getattr(storage_info, "storage_identity_key", None)
-    if not callable(storage_key_fn):
-        return None
-    try:
-        storage_key = storage_key_fn()
-    except (TypeError, ValueError):
-        return None
-    return storage_key if storage_key is not None else None
-
-
-def _coerce_storage_info(storage_info) -> Optional[StorageInfo]:
-    if storage_info is None:
-        return None
-    if isinstance(storage_info, StorageInfo):
-        return storage_info
-    if not isinstance(storage_info, dict):
-        return None
-    try:
-        kind = str(storage_info.get("kind", "") or storage_info.get("space_name", "") or "").lower()
-        is_register = bool(storage_info.get("is_register", False)) or kind == "register"
-        return StorageInfo(
-            is_register=is_register,
-            space_name=str(storage_info.get("space_name") or ("register" if is_register else "")),
-            space_id=storage_info.get("space_id"),
-            offset=int(storage_info.get("offset", 0) or 0),
-            size=int(storage_info.get("size", 0) or 0),
-            size_bits=int(storage_info.get("size_bits", 0) or 0),
-            register_name=storage_info.get("register_name"),
-            register_offset=storage_info.get("register_offset"),
-            register_size=storage_info.get("register_size"),
-            register_size_bits=storage_info.get("register_size_bits"),
-            base_register_name=storage_info.get("base_register_name"),
-            base_register_offset=int(storage_info.get("base_register_offset", 0) or 0),
-            base_register_size=int(storage_info.get("base_register_size", 0) or 0),
-            base_register_size_bits=int(storage_info.get("base_register_size_bits", 0) or 0),
-            bit_offset_in_base=int(storage_info.get("bit_offset_in_base", 0) or 0),
-            is_stack_pointer=bool(storage_info.get("is_stack_pointer", False)),
-            is_frame_pointer=bool(storage_info.get("is_frame_pointer", False)),
-        )
-    except Exception:
-        return None

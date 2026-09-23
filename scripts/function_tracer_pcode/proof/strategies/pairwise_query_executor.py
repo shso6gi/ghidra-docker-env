@@ -124,6 +124,7 @@ class LoopV2QueryNotFormable:
 def _derive_loop_v2_solver_query_payload(
     *, blocker: Any, requirement: Any, analysis1: Any, analysis2: Any,
     case1: Any, case2: Any, pair_id: str, execution_identity_digest: str,
+    input_correspondence: Any,
 ) -> Dict[str, Any]:
     """Derive a loop solver query from the canonical pairwise semantic objects."""
 
@@ -189,7 +190,11 @@ def _derive_loop_v2_solver_query_payload(
         raise ValueError(
             "loop typed pair-value renderer does not own this proof kind"
         )
-    base_ctx = FormulaBuilder(debug=False).build_base_context(analysis1, analysis2)
+    # analysis1/2 は prepared surface なので relation を作り直さない（closure が
+    # 循環する）。pairwise check が dispatch frame から受け取った最終 relation を使う。
+    base_ctx = FormulaBuilder(debug=False).build_base_context(
+        analysis1, analysis2, input_correspondence=input_correspondence
+    )
     param_replace_fn1 = build_symbol_replacer(
         base_ctx["params1"], base_ctx.get("extra_vars1", []), float_mode="fp"
     )
@@ -280,6 +285,7 @@ def _build_loop_v2_renderer_authority():
     def render(
         *, blocker: Any, requirement: Any, analysis1: Any, analysis2: Any,
         case1: Any, case2: Any, pair_id: str, execution_identity_digest: str,
+        input_correspondence: Any,
     ) -> RenderedLoopV2SolverQuery:
         from scripts.function_tracer_pcode.authority.contracts import authority_digest
 
@@ -292,6 +298,7 @@ def _build_loop_v2_renderer_authority():
             case2=case2,
             pair_id=pair_id,
             execution_identity_digest=execution_identity_digest,
+            input_correspondence=input_correspondence,
         )
         rendered = object.__new__(receipt_type)
         for name, value in payload.items():
@@ -323,6 +330,7 @@ del _loop_v2_renderer_validator
 def preflight_loop_v2_solver_query(
     *, blocker: Any, requirement: Any, analysis1: Any, analysis2: Any,
     case1: Any, case2: Any, pair_id: str, execution_identity_digest: str,
+    input_correspondence: Any,
 ) -> RenderedLoopV2SolverQuery | LoopV2QueryNotFormable:
     """Render a loop-v2 query or preserve an expected return-width proof gap."""
 
@@ -336,6 +344,7 @@ def preflight_loop_v2_solver_query(
             case2=case2,
             pair_id=pair_id,
             execution_identity_digest=execution_identity_digest,
+            input_correspondence=input_correspondence,
         )
     except ReturnWidthMismatchError as exc:
         if (

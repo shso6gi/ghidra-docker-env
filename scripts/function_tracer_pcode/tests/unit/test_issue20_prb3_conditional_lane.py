@@ -42,7 +42,7 @@ from scripts.function_tracer_pcode.authority.decision.conditional_lane import (
     conditional_lane_is_eligible,
     conditional_lane_projection,
     issue_conditional_decision,
-    run_production_conditional_lane,
+    run_production_conditional_lane as _run_production_lane_with_factory,
 )
 from scripts.function_tracer_pcode.authority.decision.decision import (
     DecisiveProofKind,
@@ -63,6 +63,7 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
     PcodeOpRef,
 )
 from scripts.function_tracer_pcode.proof import conditional_lane as lane_module
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 from scripts.function_tracer_pcode.proof.conditional_lane import (
     CONDITIONAL_EQ_CLOSURE,
     CONDITIONAL_SAFE_COUNTEREXAMPLE,
@@ -70,8 +71,23 @@ from scripts.function_tracer_pcode.proof.conditional_lane import (
     COUNTEREXAMPLE_UF_INTERPRETATION_DEPENDENT,
     ConditionalProofArtifact,
     conditional_counterexample_safety_reasons,
-    run_conditional_proof,
+    run_conditional_proof as _run_conditional_proof_with_relation,
 )
+
+
+# Issue #167: lane の formula の parameter premise は base（raw）pair の最終
+# relation だけから作る。test は raw の analysis から relation を明示的に作って渡す。
+def run_conditional_proof(analysis1, analysis2, **kwargs):
+    if "input_correspondence" not in kwargs and analysis1 is not None and analysis2 is not None:
+        kwargs["input_correspondence"] = build_input_correspondence_set(analysis1, analysis2)
+    kwargs.setdefault("input_correspondence", None)
+    return _run_conditional_proof_with_relation(analysis1, analysis2, **kwargs)
+
+
+def run_production_conditional_lane(result, *, analyses, **kwargs):
+    if "input_correspondence_factory" not in kwargs and analyses is not None:
+        kwargs["input_correspondence_factory"] = lambda: build_input_correspondence_set(*analyses)
+    return _run_production_lane_with_factory(result, analyses=analyses, **kwargs)
 
 
 NO_OBSERVATION = ExternalCallEffectPolicy()
@@ -1340,3 +1356,46 @@ def test_a_decisive_artifact_requires_every_call_to_be_modelled():
             solver_disposition="unsat",
             all_calls_modelled=False,
         )
+
+
+# --- Issue #167: 最終 InputCorrespondence ---------------------------------------
+
+
+def test_the_lane_is_not_decisive_without_the_final_relation():
+    artifact = run_conditional_proof(
+        *_both_analyses(),
+        input_correspondence=None,
+        observation_policy=NO_OBSERVATION,
+        solver_runner=_Solver(True),
+    )
+    assert not artifact.decisive
+    assert artifact.non_decisive_reasons == (lane_module.LANE_INPUT_CORRESPONDENCE_UNAVAILABLE,)
+
+
+@pytest.mark.parametrize("disposition", [True, False])
+def test_an_insufficient_final_relation_blocks_both_conditional_directions(disposition):
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        InputCorrespondenceSet,
+    )
+
+    left, right = _both_analyses()
+    relation = build_input_correspondence_set(left, right)
+    assert relation.decisive_sufficient
+    insufficient = InputCorrespondenceSet(
+        correspondences=relation.correspondences,
+        left_parameter_count=relation.left_parameter_count,
+        right_parameter_count=relation.right_parameter_count,
+        structural_defects=("synthetic_defect",),
+        left_parameters=relation.left_parameters,
+        right_parameters=relation.right_parameters,
+    )
+    artifact = run_conditional_proof(
+        left,
+        right,
+        input_correspondence=insufficient,
+        observation_policy=NO_OBSERVATION,
+        solver_runner=_Solver(disposition),
+    )
+    assert not artifact.decisive
+    assert lane_module.LANE_INPUT_CORRESPONDENCE_INSUFFICIENT in artifact.non_decisive_reasons
+    assert "pair:input_correspondence:synthetic_defect" in artifact.non_decisive_reasons

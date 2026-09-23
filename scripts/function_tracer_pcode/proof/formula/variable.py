@@ -7,7 +7,7 @@
 パラメータ断片と判定しても SMT 上では拘束しない（自由な入力のまま）。
 「上位 bit は ext(param) に等しい」は入力 extension 仮定であり、その根拠は
 Ghidra の ``is_signed`` ではなく最終 ``InputCorrespondence``
-（``proof/formula/input_correspondence.py``）だけが持てる（Issue #167）。
+（``proof/formula/input_correspondence``）だけが持てる（Issue #167）。
 断片の有無は raw closure 走査が register alias として扱う。
 """
 

@@ -3,7 +3,8 @@
 
 ``tests/fixtures/issue167/decision_model.py`` は repo を import しない再実装。ここでは
 その入力（幅・IEE・raw の読み幅）を実際の analysis と validator 済み合成 IEE に写し、
-``build_input_correspondence_set`` の結果と全組合せで一致することを確かめる。
+``build_input_correspondence_set`` の結果（relation と、側ごとに入力仮定を使ってよい
+書き換え規則）と全組合せで一致することを確かめる。
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import pytest
 
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType, ReturnInfo
 from scripts.function_tracer_pcode.proof.formula import input_correspondence as ic
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import evidence as iee_contract
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     AbiExtensionRule,
     StorageObservation,
@@ -21,7 +23,7 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     build_input_correspondence_set,
     validate_input_extension_evidence,
 )
-from scripts.function_tracer_pcode.semantics.projection_contract import ExtensionKind
+from scripts.function_tracer_pcode.semantics.rewrite_contract import ExtensionKind
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 from scripts.function_tracer_pcode.tests.fixtures.issue167 import decision_model as model
 
@@ -55,7 +57,7 @@ def _analysis(side: model.Side, binary_id: str):
         rule = AbiExtensionRule("synthetic", binding.binary_id, "register", side.width, logical, None, kind, "test")
         classification = TrustedParameterClassification(
             binding, logical, kind is ExtensionKind.SIGN, "int", "synthetic", "0" * 64,
-            _factory_token=ic._TRUSTED_CLASSIFICATION_TOKEN,
+            _factory_token=iee_contract._TRUSTED_CLASSIFICATION_TOKEN,
         )
         storage = StorageObservation(binding, "r0", "register", 0, side.width, side.width)
         iee, reasons = validate_input_extension_evidence(rule, classification, storage)
@@ -67,13 +69,20 @@ def _analysis(side: model.Side, binary_id: str):
 def _production(left, right):
     left_analysis, left_iee = _analysis(left, "L")
     right_analysis, right_iee = _analysis(right, "R")
-    (item,) = build_input_correspondence_set(
+    relation_set = build_input_correspondence_set(
         left_analysis, right_analysis, input_extension_evidence=left_iee + right_iee
-    ).correspondences
+    )
+    (item,) = relation_set.correspondences
     entailed = tuple(
         (side, assumption.narrow_bits, assumption.kind.value) for side, assumption in item.entailed
     )
-    return model.Relation(item.kind.value, item.rule, item.tie_bits, entailed, item.decisive_sufficient)
+    relation = model.Relation(item.kind.value, item.rule, item.tie_bits, entailed, item.decisive_sufficient)
+    # 片側で入力仮定を使ってよい規則（parameter は index 0 だけ）。
+    permitted = {
+        side: tuple(rule for rule, index in relation_set.authorization(side).permitted_rules() if index == 0)
+        for side in (ic.LEFT, ic.RIGHT)
+    }
+    return relation, permitted
 
 
 def _sides():
@@ -92,7 +101,23 @@ SIDES = tuple(_sides())
 
 @pytest.mark.parametrize(("left", "right"), list(itertools.product(SIDES, SIDES)))
 def test_production_relation_matches_the_independent_decision_model(left, right):
-    assert _production(left, right) == model.decide(left, right)
+    relation, permitted = _production(left, right)
+    expected = model.decide(left, right)
+    assert relation == expected
+    # rule 単位の許可も独立 model と一致する（required(rule) ⊆ entailed(final)）。
+    for side in (ic.LEFT, ic.RIGHT):
+        assert permitted[side] == model.permitted_rules(expected, side), side
+
+
+def test_the_rule_table_and_the_model_agree_on_assumption_consuming_rules():
+    from scripts.function_tracer_pcode.semantics.rewrite_contract import REWRITE_RULES
+
+    production = {
+        name: tuple(sorted(kind.value for kind in rule.image_kinds))
+        for name, rule in REWRITE_RULES.items()
+        if rule.consumes_input_extension
+    }
+    assert production == {name: tuple(sorted(kinds)) for name, kinds in model.ASSUMPTION_CONSUMING_RULES.items()}
 
 
 def test_decision_model_v4_cases_hold():

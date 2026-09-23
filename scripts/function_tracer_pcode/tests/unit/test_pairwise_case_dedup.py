@@ -53,6 +53,11 @@ from scripts.function_tracer_pcode.core import (
 )
 from conftest import resolve_mock_data_type
 from scripts.function_tracer_pcode.tests.unit._publication import published
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import (
+    synthetic_input_extension_evidence,
+)
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
+from scripts.function_tracer_pcode.semantics.rewrite_contract import ExtensionKind
 
 
 def _param(name: str) -> Expression:
@@ -232,12 +237,12 @@ def _readonly_projection_case(ref, *, param_size: int, storage: StorageInfo) -> 
     )
 
 
-def _readonly_projection_reason_and_analyses(*, left_param: dict | None = None):
+def _readonly_projection_reason_and_analyses(*, left_param: dict | None = None, left_param_size: int = 4):
     wide_storage = _storage("a1", 0, 64)
     narrow_storage = _storage("a1_lo", 32, 32)
     left_ref = _readonly_projection_ref(storage=wide_storage, param_size=8)
     right_ref = _readonly_projection_ref(storage=narrow_storage, param_size=4)
-    left_case = _readonly_projection_case(left_ref, param_size=4, storage=wide_storage)
+    left_case = _readonly_projection_case(left_ref, param_size=left_param_size, storage=wide_storage)
     right_case = _readonly_projection_case(right_ref, param_size=4, storage=narrow_storage)
     if left_param is not None:
         left_case.parameters[1].update(left_param)
@@ -251,6 +256,7 @@ def _readonly_projection_reason_and_analyses(*, left_param: dict | None = None):
         parameters=left_case.parameters,
         returns=[left_case.return_info],
         return_type="int",
+        binary_id="left-binary",
     )
     analysis2 = FunctionReturnAnalysis(
         function_name="f",
@@ -258,6 +264,7 @@ def _readonly_projection_reason_and_analyses(*, left_param: dict | None = None):
         parameters=right_case.parameters,
         returns=[right_case.return_info],
         return_type="int",
+        binary_id="right-binary",
     )
     target = strategy._readonly_identity_object_target_key(
         base_ctx={"analysis1": analysis1, "analysis2": analysis2},
@@ -1272,118 +1279,95 @@ def test_nested_zero_extend_uses_rendered_operand_width_without_double_extension
     assert smt == "(bvmul (_ bv2 64) ((_ zero_extend 32) (bvadd param_1 (_ bv7 32))))"
 
 
-def test_readonly_identity_projection_producer_records_completed_proof_with_narrow_storage_type():
-    strategy, reason, analysis1, analysis2, left_case, right_case = _readonly_projection_reason_and_analyses()
-
+def _record_readonly_projection_proof(input_correspondence, **fixture):
+    strategy, reason, analysis1, analysis2, left_case, right_case = _readonly_projection_reason_and_analyses(**fixture)
+    relation = input_correspondence(analysis1, analysis2) if callable(input_correspondence) else input_correspondence
     strategy._record_completed_readonly_identity_projection_proof_if_safe(
         reason,
         analysis1,
         analysis2,
         left_case,
         right_case,
+        input_correspondence=relation,
+    )
+    return strategy, reason, analysis1, analysis2
+
+
+def _relation_with_left_extension(kind):
+    def build(analysis1, analysis2):
+        iee = synthetic_input_extension_evidence(analysis1, 1, logical_bits=32, storage_bits=64, kind=kind)
+        return build_input_correspondence_set(analysis1, analysis2, input_extension_evidence=(iee,))
+    return build
+
+
+@pytest.mark.parametrize(("kind", "extension"), [
+    (ExtensionKind.SIGN, "sign_extend"), (ExtensionKind.ZERO, "zero_extend"),
+])
+def test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_final_relation(kind, extension):
+    """Issue #167: wide 側 count が narrow 側 count の extension であることは、最終
+    InputCorrespondence が EXTENSION_BOUND でその仮定を含意したときだけ言える。
+    """
+
+    strategy, reason, analysis1, analysis2 = _record_readonly_projection_proof(
+        _relation_with_left_extension(kind), left_param_size=8,
     )
 
     assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is True
+    content = analysis1.completed_recovery_proof_evidence[0]["proof_content"]["parameter_extension"]
+    assert content["proof_source"] == "final_input_correspondence"
+    assert content["extension"] == extension
+    assert content["entailed_assumption"] == ("rewrite_assumption_v1", 1, 64, 32, kind.value)
+
+
+def test_readonly_identity_projection_proof_is_not_issued_from_an_inferred_narrow_type():
+    """Ghidra が wide storage 上に narrow 型（``int 4`` on a 64-bit register）を推論した
+    だけでは extension の証拠にならない（旧実装はこれを proven として記録した）。
+    """
+
+    strategy, reason, analysis1, analysis2 = _record_readonly_projection_proof(build_input_correspondence_set)
+
+    assert analysis1.completed_recovery_proof_evidence == ()
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+
+
+def test_readonly_identity_projection_proof_needs_an_extension_bound_relation():
+    """wide 側が 64 bit でも IEE が無ければ relation は WIDTH_OVERLAP で、仮定は含意されない。"""
+
+    strategy, reason, analysis1, analysis2 = _record_readonly_projection_proof(
+        build_input_correspondence_set, left_param_size=8,
+    )
+    assert analysis1.completed_recovery_proof_evidence == ()
+    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
+
+    strategy, reason, analysis1, analysis2 = _record_readonly_projection_proof(None, left_param_size=8)
+    assert analysis1.completed_recovery_proof_evidence == ()
+
+
+@pytest.mark.parametrize("proof_source", ["declared_parameter_narrow_type_on_wide_storage", "param_semantic_hint"])
+def test_readonly_identity_gate_rejects_extension_proofs_from_inferred_types_or_hints(proof_source):
+    strategy, reason, analysis1, analysis2 = _record_readonly_projection_proof(
+        _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
+    )
     evidence = analysis1.completed_recovery_proof_evidence[0]
-    content = evidence["proof_content"]
-    assert content["parameter_extension"]["proof_source"] == "declared_parameter_narrow_type_on_wide_storage"
-    assert content["parameter_extension"]["extension"] == "sign_extend"
-
-
-def test_readonly_identity_projection_producer_records_completed_proof_with_object_signedness():
-    class SignedDataType:
-        def isSigned(self):
-            return True
-
-    strategy, reason, analysis1, analysis2, left_case, right_case = _readonly_projection_reason_and_analyses(
-        left_param={"is_signed": None, "data_type_obj": SignedDataType()},
+    forged = dict(evidence["proof_content"]["parameter_extension"], proof_source=proof_source)
+    analysis1.completed_recovery_proof_evidence = (
+        {**evidence, "proof_content": {**evidence["proof_content"], "parameter_extension": forged}},
     )
-
-    strategy._record_completed_readonly_identity_projection_proof_if_safe(
-        reason,
-        analysis1,
-        analysis2,
-        left_case,
-        right_case,
-    )
-
-    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is True
-    content = analysis1.completed_recovery_proof_evidence[0]["proof_content"]
-    assert content["parameter_extension"]["proof_source"] == "declared_parameter_narrow_type_on_wide_storage"
-    assert content["parameter_extension"]["extension"] == "sign_extend"
-
-
-def test_readonly_identity_declared_signedness_rejects_non_bool_values():
-    assert PairwiseStrategy._readonly_parameter_declared_signedness({"is_signed": None}) is None
-    assert PairwiseStrategy._readonly_parameter_declared_signedness({"is_signed": 1}) is None
-
-    class NumericSignedDataType:
-        def isSigned(self):
-            return 1
-
-    assert (
-        PairwiseStrategy._readonly_parameter_declared_signedness(
-            {"data_type_obj": NumericSignedDataType()},
-        )
-        is None
-    )
-
-
-def test_readonly_identity_projection_producer_rejects_missing_declared_signedness():
-    strategy, reason, analysis1, analysis2, left_case, right_case = _readonly_projection_reason_and_analyses(
-        left_param={"is_signed": None, "data_type_obj": None},
-    )
-
-    strategy._record_completed_readonly_identity_projection_proof_if_safe(
-        reason,
-        analysis1,
-        analysis2,
-        left_case,
-        right_case,
-    )
-
-    assert analysis1.completed_recovery_proof_evidence == ()
     assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
 
 
-def test_readonly_identity_projection_producer_rejects_data_type_obj_without_signedness():
-    class OpaqueDataType:
-        pass
-
-    strategy, reason, analysis1, analysis2, left_case, right_case = _readonly_projection_reason_and_analyses(
-        left_param={"is_signed": None, "data_type_obj": OpaqueDataType()},
+def test_readonly_identity_gate_rejects_an_assumption_that_disagrees_with_the_content():
+    strategy, reason, analysis1, analysis2 = _record_readonly_projection_proof(
+        _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
     )
-
-    strategy._record_completed_readonly_identity_projection_proof_if_safe(
-        reason,
-        analysis1,
-        analysis2,
-        left_case,
-        right_case,
+    evidence = analysis1.completed_recovery_proof_evidence[0]
+    forged = dict(
+        evidence["proof_content"]["parameter_extension"],
+        entailed_assumption=("rewrite_assumption_v1", 1, 64, 32, "zero"),
     )
-
-    assert analysis1.completed_recovery_proof_evidence == ()
-    assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
-
-
-def test_readonly_identity_projection_producer_rejects_data_type_obj_unknown_signedness():
-    class UnknownSignednessDataType:
-        def isSigned(self):
-            return None
-
-    strategy, reason, analysis1, analysis2, left_case, right_case = _readonly_projection_reason_and_analyses(
-        left_param={"is_signed": None, "data_type_obj": UnknownSignednessDataType()},
+    analysis1.completed_recovery_proof_evidence = (
+        {**evidence, "proof_content": {**evidence["proof_content"], "parameter_extension": forged}},
     )
-
-    strategy._record_completed_readonly_identity_projection_proof_if_safe(
-        reason,
-        analysis1,
-        analysis2,
-        left_case,
-        right_case,
-    )
-
-    assert analysis1.completed_recovery_proof_evidence == ()
     assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
 
 
@@ -1454,6 +1438,7 @@ def test_readonly_identity_projection_producer_rejects_term_contract_mismatch():
         analysis2,
         left_case,
         right_case,
+        input_correspondence=build_input_correspondence_set(analysis1, analysis2),
     )
 
     assert analysis1.completed_recovery_proof_evidence == ()

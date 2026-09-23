@@ -67,35 +67,42 @@ width {32, 64} × raw read width {16, 32, bare} × IEE {none, SIGN32, ZERO32, SI
 
 ## Rule certificates
 
-`tests/unit/test_semantic_width_rule_certificates.py` certifies every rule in
-`semantic_width.SEMANTIC_WIDTH_RULES` with the real rule and the real lowering.
-For division, z3 does not decide the universal 64→32 equivalence of two dividers
-within 60 s. The universal certificate is therefore taken at 16→8 in the unit suite,
-and the production width 64→32 is checked on every pair of boundary values. The
-identity is width-generic under SMT-LIB `bvsdiv/bvsrem/bvudiv/bvurem`, division by
-zero and `INT_MIN / -1` included. Measured on this image (seconds, `unsat` =
-certified, `unknown` = 60 s timeout):
+`tests/unit/test_semantic_width_rule_certificates.py` certifies every rule in the rule
+table `semantics/rewrite_contract.REWRITE_RULES` with the real rule and the real
+lowering. Each certificate checks that exactly the named rule fired (the normalizer's
+`applied_rules`). Rules that consume an input assumption
+(`consumes_input_extension=True`) also need a negative case: without the final
+relation's assumption the rule does not fire, and the rewritten form has a
+counterexample. The test fails if either set does not match the table.
 
-| W→N | bvsdiv | bvsrem | bvudiv | bvurem |
+Division and remainder narrowing (`SUBPIECE(div(ext a, ext b), 0) -> div(a, b)`) is
+**not** an enabled rule. The identity is width-generic under SMT-LIB
+`bvsdiv/bvsrem/bvudiv/bvurem` (division by zero and `INT_MIN / -1` included), but it
+could not be certified at the production width 64->32, and an unproven rule is not
+kept for precision. Measured on this image (seconds; `unsat` = certified, `unknown` =
+solver timeout):
+
+| W->N | bvsdiv | bvsrem | bvudiv | bvurem |
 |---|---|---|---|---|
-| 16→8 | 0.03 unsat | 0.06 unsat | 0.03 unsat | 0.05 unsat |
-| 32→16 | 8.37 unsat | 15.42 unsat | 11.74 unsat | 28.28 unsat |
-| 64→32 | 60 unknown | 60 unknown | 60 unknown | 60 unknown |
+| 16->8 | 0.03 unsat | 0.06 unsat | 0.03 unsat | 0.05 unsat |
+| 32->16 | 8.37 unsat | 15.42 unsat | 11.74 unsat | 28.28 unsat |
+| 64->32 | 60 unknown | 60 unknown | 60 unknown | 60 unknown |
+| 64->32 (600 s budget) | 600 unknown | not run | not run | not run |
 
-The universal division check, for re-running (slow for 32→16):
+The check, for re-running:
 
 ```bash
 docker compose run --rm -T ghidra-dev python3 -B - <<'PY'
 import time, z3
-for W, N in ((16, 8), (32, 16)):
-    for op, ext in (("bvsdiv", "sign_extend"), ("bvsrem", "sign_extend"),
-                    ("bvudiv", "zero_extend"), ("bvurem", "zero_extend")):
-        s = z3.Solver()
-        s.from_string(
-            f"(declare-const a (_ BitVec {N}))(declare-const b (_ BitVec {N}))"
-            f"(assert (distinct ((_ extract {N-1} 0) ({op} ((_ {ext} {W-N}) a) ((_ {ext} {W-N}) b))) ({op} a b)))"
-        )
-        t = time.time(); print(W, N, op, s.check(), round(time.time() - t, 2))
+W, N = 64, 32
+for op, ext in (("bvsdiv", "sign_extend"), ("bvsrem", "sign_extend"),
+                ("bvudiv", "zero_extend"), ("bvurem", "zero_extend")):
+    s = z3.Solver(); s.set("timeout", 600000)
+    s.from_string(
+        f"(declare-const a (_ BitVec {N}))(declare-const b (_ BitVec {N}))"
+        f"(assert (distinct ((_ extract {N-1} 0) ({op} ((_ {ext} {W-N}) a) ((_ {ext} {W-N}) b))) ({op} a b)))"
+    )
+    t = time.time(); print(W, N, op, s.check(), round(time.time() - t, 1))
 PY
 ```
 

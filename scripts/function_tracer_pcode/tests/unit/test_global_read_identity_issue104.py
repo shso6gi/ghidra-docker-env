@@ -49,6 +49,7 @@ from scripts.function_tracer_pcode.tests.unit.test_global_effect_surface_issue10
 from unittest.mock import Mock
 from conftest import resolve_mock_data_type
 from scripts.function_tracer_pcode.tests.unit._publication import published
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 def _run_z3(query: str) -> str:
@@ -145,7 +146,7 @@ def _pair_query(left, right):
     left = normalize_analysis_semantic_width(left)
     right = normalize_analysis_semantic_width(right)
     builder = FormulaBuilder(debug=False, exclude_ub=False)
-    base_ctx = builder.build_base_context(left, right)
+    base_ctx = builder.build_base_context(left, right, input_correspondence=build_input_correspondence_set(left, right))
     cases1 = extract_return_cases(left)
     cases2 = extract_return_cases(right)
     replace1 = build_symbol_replacer(base_ctx["params1"], base_ctx.get("extra_vars1", []))

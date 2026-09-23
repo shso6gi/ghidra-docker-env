@@ -36,7 +36,6 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     LEFT as INPUT_LEFT,
     RIGHT as INPUT_RIGHT,
     InputCorrespondenceSet,
-    build_input_correspondence_set,
 )
 from scripts.function_tracer_pcode.proof.formula.params import (
     build_symbol_name_mapping,
@@ -317,6 +316,19 @@ def _rewrite_parameter_leaf_for_smt(
     )
 
 
+def _require_input_correspondence(value: Any) -> InputCorrespondenceSet:
+    """builder は最終 relation の consumer。relation を作らず、渡された値だけを使う。
+
+    relation は raw pair からしか作れない（``build_input_correspondence_set``）。
+    prepared（書き換え済み）analysis から builder が作り直すと closure が循環する
+    ので、ここで欠落を拒否する。
+    """
+
+    if type(value) is not InputCorrespondenceSet:
+        raise TypeError("FormulaBuilder requires the final InputCorrespondenceSet (input_correspondence=)")
+    return value
+
+
 def _require_same_parameter_shape(
     analysis: FunctionReturnAnalysis,
     params: List[ParameterInfo],
@@ -382,7 +394,8 @@ class FormulaBuilder:
         func2_suffix: str = "_2",
         extra_assertions: Optional[List[str]] = None,  # ★ NEW
         canonical_return_observation_width: Optional[int] = None,
-        input_correspondence: Optional[InputCorrespondenceSet] = None,
+        *,
+        input_correspondence: InputCorrespondenceSet,
     ) -> FormulaBuilderResult:
         """
         2つの関数の等価性検証用SMT式を構築（拡張版）
@@ -391,15 +404,16 @@ class FormulaBuilder:
             analysis1, analysis2: 各関数の解析結果
             func1_suffix, func2_suffix: サフィックス
             extra_assertions: 追加のアサート文（(check-sat)の直前に挿入）
+            input_correspondence: raw pair から作った最終 relation（必須。builder は
+                relation を作らない。raw を直接比べる経路は
+                ``build_input_correspondence_set(raw1, raw2)`` を先に呼ぶ）
         
         Returns:
             FormulaBuilderResult: 構築結果（詳細情報付き）
         """
         # Issue #124: monolithic 等価式の構築を計測する。
         with stage_region("query_build"):
-            correspondence = self._resolve_input_correspondence(
-                analysis1, analysis2, input_correspondence
-            )
+            correspondence = _require_input_correspondence(input_correspondence)
             analysis1, analysis2, _, _ = self._normalize_analyses(
                 analysis1, analysis2, correspondence
             )
@@ -563,40 +577,17 @@ class FormulaBuilder:
             param_fragment_constrained=param_fragment_constrained,
         )
 
-    def _resolve_input_correspondence(
-        self,
-        analysis1: FunctionReturnAnalysis,
-        analysis2: FunctionReturnAnalysis,
-        input_correspondence: Optional[InputCorrespondenceSet],
-    ) -> InputCorrespondenceSet:
-        """caller が渡した最終 relation を使う。無ければ入力を raw とみなして作る。
-
-        prepared（書き換え済み）analysis から closure を作ると循環するので、
-        prepared surface を渡す strategy は必ず dispatch frame の relation を渡す。
-        省略できるのは raw を直接渡す呼び出し（互換経路・ABI retry・test）だけ。
-        """
-
-        if input_correspondence is not None:
-            if type(input_correspondence) is not InputCorrespondenceSet:
-                raise TypeError("input_correspondence must be an InputCorrespondenceSet")
-            return input_correspondence
-        return build_input_correspondence_set(analysis1, analysis2)
-
     def _normalize_analyses(
         self,
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
-        input_correspondence: Optional[InputCorrespondenceSet] = None,
+        input_correspondence: InputCorrespondenceSet,
     ):
         """Apply semantic-width normalization before SMT lowering."""
         hints1 = infer_parameter_semantics(analysis1)
         hints2 = infer_parameter_semantics(analysis2)
-        authorization1 = (
-            input_correspondence.authorization(INPUT_LEFT) if input_correspondence is not None else None
-        )
-        authorization2 = (
-            input_correspondence.authorization(INPUT_RIGHT) if input_correspondence is not None else None
-        )
+        authorization1 = input_correspondence.authorization(INPUT_LEFT)
+        authorization2 = input_correspondence.authorization(INPUT_RIGHT)
         normalized1 = normalize_analysis_semantic_width(analysis1, hints1, authorization=authorization1)
         normalized2 = normalize_analysis_semantic_width(analysis2, hints2, authorization=authorization2)
         normalized1, normalized2 = align_return_value_extension_surfaces(normalized1, normalized2)
@@ -2118,7 +2109,9 @@ class FormulaBuilder:
         analysis2: FunctionReturnAnalysis,
         abi_constraints: Dict[str, Tuple[str, int]],
         func1_suffix: str = "_1",
-        func2_suffix: str = "_2"
+        func2_suffix: str = "_2",
+        *,
+        input_correspondence: InputCorrespondenceSet,
     ) -> str:
         """
         ABI整合制約を追加したSMT式を構築（後方互換性のためのラッパー）
@@ -2139,7 +2132,8 @@ class FormulaBuilder:
         result = self.build_equivalence_formula_extended(
             analysis1, analysis2,
             func1_suffix, func2_suffix,
-            extra_assertions=abi_assertion_section if abi_assertion_section else None
+            extra_assertions=abi_assertion_section if abi_assertion_section else None,
+            input_correspondence=input_correspondence,
         )
         
         return result.formula
@@ -2151,7 +2145,7 @@ class FormulaBuilder:
         func1_suffix: str = "_1",
         func2_suffix: str = "_2",
         *,
-        input_correspondence: Optional[InputCorrespondenceSet] = None,
+        input_correspondence: InputCorrespondenceSet,
     ) -> Dict[str, Any]:
         """
         Pairwise戦略用の共通SMT部分を生成
@@ -2169,9 +2163,7 @@ class FormulaBuilder:
             'smt_logic': str,
         }
         """
-        correspondence = self._resolve_input_correspondence(
-            analysis1, analysis2, input_correspondence
-        )
+        correspondence = _require_input_correspondence(input_correspondence)
         analysis1, analysis2, _, _ = self._normalize_analyses(analysis1, analysis2, correspondence)
         context = self._prepare_formula_context(
             analysis1, analysis2, func1_suffix, func2_suffix, correspondence

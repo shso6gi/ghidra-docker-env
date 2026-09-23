@@ -9,10 +9,8 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     InputRelationKind,
     build_input_correspondence_set,
 )
-from scripts.function_tracer_pcode.proof.formula.params import (
-    build_parameter_pairs,
-    collect_param_info,
-)
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_parameter_pairs
+from scripts.function_tracer_pcode.proof.formula.params import collect_param_info
 from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.core import (
     Expression,
@@ -77,7 +75,7 @@ class TestExtraAssertions:
         result = builder.build_equivalence_formula_extended(
             analysis1,
             analysis2,
-            extra_assertions=extra_assertions,
+            extra_assertions=extra_assertions,input_correspondence=build_input_correspondence_set(analysis1, analysis2),
         )
 
         lines = result.formula.split("\n")
@@ -99,7 +97,7 @@ class TestExtraAssertions:
         analysis2 = _analysis("func2", "y", 8)
 
         with pytest.raises(ReturnWidthMismatchError):
-            builder.build_equivalence_formula_extended(analysis1, analysis2)
+            builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
 
     def test_canonical_return_observation_compares_on_proven_observation_width(self):
         builder = FormulaBuilder(debug=False)
@@ -109,7 +107,7 @@ class TestExtraAssertions:
         result = builder.build_equivalence_formula_extended(
             analysis1,
             analysis2,
-            canonical_return_observation_width=32,
+            canonical_return_observation_width=32,input_correspondence=build_input_correspondence_set(analysis1, analysis2),
         )
 
         assert "Canonical return observation" in result.formula
@@ -276,7 +274,7 @@ class TestABIConstraints:
         assert "x_2" in section_text
 
         with pytest.raises(ReturnWidthMismatchError) as exc_info:
-            builder.build_with_abi_constraints(analysis1, analysis2, abi_constraints)
+            builder.build_with_abi_constraints(analysis1, analysis2, abi_constraints, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
 
         assert exc_info.value.reason_id == "return_width_bridge_missing"
 
@@ -350,12 +348,12 @@ class TestABIConstraints:
 
         section = builder.build_abi_assertion_section(abi_constraints, "_1", "_2")
         with pytest.raises(ReturnWidthMismatchError) as wrapper_exc:
-            builder.build_with_abi_constraints(analysis1, analysis2, abi_constraints)
+            builder.build_with_abi_constraints(analysis1, analysis2, abi_constraints, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
         with pytest.raises(ReturnWidthMismatchError) as direct_exc:
             builder.build_equivalence_formula_extended(
                 analysis1,
                 analysis2,
-                extra_assertions=section,
+                extra_assertions=section,input_correspondence=build_input_correspondence_set(analysis1, analysis2),
             )
 
         assert wrapper_exc.value.reason_id == direct_exc.value.reason_id
@@ -387,7 +385,7 @@ class TestABIConstraints:
         assert item.tie_bits == 32
         assert item.entailed == ()
 
-        formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+        formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
         assertions = [line for line in formula.splitlines() if line.startswith("(assert")]
         assert "(assert (= ((_ extract 31 0) x_1) ((_ extract 31 0) x_2)))" in assertions
         assert not any("_extend" in line for line in assertions)
@@ -438,7 +436,7 @@ class TestABIConstraints:
         assert not item.decisive_sufficient
         assert any("register_alias" in ref for ref in item.evidence)
 
-        formula = FormulaBuilder(debug=False).build_equivalence_formula_extended(left, right).formula
+        formula = FormulaBuilder(debug=False).build_equivalence_formula_extended(left, right, input_correspondence=build_input_correspondence_set(left, right)).formula
         assertions = [line for line in formula.splitlines() if line.startswith("(assert")]
         assert not any("sign_extend" in line or "in_a0_hi" in line for line in assertions)
         assert "(assert (= param_1_1 ((_ extract 31 0) param_1_2)))" in assertions

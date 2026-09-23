@@ -13,6 +13,10 @@ side の入力は ``Side(width, iee, demand)``:
 * ``iee``: ``None`` か ``(logical_bits, "sign"|"zero")``（validator を通った IEE）。
 * ``demand``: raw surface が parameter を読む最大上端 bit。``None`` は裸の occurrence
   （どの N < W でも閉じない）。closure at N は ``demand is not None and demand <= N``。
+
+``permitted_rules`` は relation が片側に含意した extension から、その側で入力仮定を
+使ってよい書き換え規則を決める（v5 §4.3 ``required(rule) ⊆ entailed(final)``）。
+規則ごとに意味を保存する ext の種類をここに独立に書き、production の rule 表と突き合わせる。
 """
 
 from __future__ import annotations
@@ -21,6 +25,15 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 CANDIDATE_BITS = (64, 32, 16, 8)
+
+#: 入力仮定（parameter の extension 像）を使う規則と、意味を保存する ext の種類。
+#: 等値・不等は ext が単射なので両方、signed 順序は sext、unsigned 順序は zext だけ。
+#: 除算・剰余は certificate が無いので規則に無い。
+ASSUMPTION_CONSUMING_RULES = {
+    "equality_on_extension_images": ("sign", "zero"),
+    "signed_order_on_sign_extension_images": ("sign",),
+    "unsigned_order_on_zero_extension_images": ("zero",),
+}
 
 
 @dataclass(frozen=True)
@@ -73,6 +86,15 @@ def decide(left: Optional[Side], right: Optional[Side]) -> Relation:
         return Relation("FULL_REGISTER_EQUALITY", "R4", left.width, (), True)
     wide = left if left.width > right.width else right
     return Relation("WIDTH_OVERLAP", "R5", narrow, (), wide.closed_at(narrow))
+
+
+def permitted_rules(relation: Relation, side: str) -> Tuple[str, ...]:
+    """``side`` で入力仮定を使ってよい規則（含意が無ければ空）。"""
+
+    kinds = {kind for entailed_side, _bits, kind in relation.entailed if entailed_side == side}
+    return tuple(sorted(
+        rule for rule, rule_kinds in ASSUMPTION_CONSUMING_RULES.items() if kinds & set(rule_kinds)
+    ))
 
 
 # v4 の 16 case（v5 §4.10 の説明から再構成）。期待値は v5 §4.5 / §4.11 の記述。

@@ -7,18 +7,18 @@ from functools import cmp_to_key
 from typing import Any, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
+from scripts.function_tracer_pcode.core.storage import storage_identity_key_of as _storage_identity_key
 from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
     ReturnInfo,
-    StorageInfo,
 )
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
 from scripts.function_tracer_pcode.semantics.param_semantics import hint_objects_by_identity
-from scripts.function_tracer_pcode.semantics.projection_contract import RewriteAuthorization
+from scripts.function_tracer_pcode.semantics.rewrite_contract import RewriteAuthorization
 from scripts.function_tracer_pcode.semantics.semantic_width import SemanticWidthNormalizer
 from scripts.function_tracer_pcode.semantics.normalize import (
     normalize_expression,
@@ -428,51 +428,6 @@ def _clone_expression_with(expr: Expression, *, operands) -> Expression:
         opcode=getattr(expr, "opcode", None),
     )
 
-
-def _storage_identity_key(storage_info) -> Tuple[object, ...] | None:
-    storage_info = _coerce_storage_info(storage_info)
-    if storage_info is None:
-        return None
-    storage_key_fn = getattr(storage_info, "storage_identity_key", None)
-    if not callable(storage_key_fn):
-        return None
-    try:
-        return storage_key_fn()
-    except (TypeError, ValueError):
-        return None
-
-
-def _coerce_storage_info(storage_info) -> StorageInfo | None:
-    if storage_info is None:
-        return None
-    if isinstance(storage_info, StorageInfo):
-        return storage_info
-    if not isinstance(storage_info, dict):
-        return None
-    try:
-        kind = str(storage_info.get("kind", "") or storage_info.get("space_name", "") or "").lower()
-        is_register = bool(storage_info.get("is_register", False)) or kind == "register"
-        return StorageInfo(
-            is_register=is_register,
-            space_name=str(storage_info.get("space_name") or ("register" if is_register else "")),
-            space_id=storage_info.get("space_id"),
-            offset=int(storage_info.get("offset", 0) or 0),
-            size=int(storage_info.get("size", 0) or 0),
-            size_bits=int(storage_info.get("size_bits", 0) or 0),
-            register_name=storage_info.get("register_name"),
-            register_offset=storage_info.get("register_offset"),
-            register_size=storage_info.get("register_size"),
-            register_size_bits=storage_info.get("register_size_bits"),
-            base_register_name=storage_info.get("base_register_name"),
-            base_register_offset=int(storage_info.get("base_register_offset", 0) or 0),
-            base_register_size=int(storage_info.get("base_register_size", 0) or 0),
-            base_register_size_bits=int(storage_info.get("base_register_size_bits", 0) or 0),
-            bit_offset_in_base=int(storage_info.get("bit_offset_in_base", 0) or 0),
-            is_stack_pointer=bool(storage_info.get("is_stack_pointer", False)),
-            is_frame_pointer=bool(storage_info.get("is_frame_pointer", False)),
-        )
-    except Exception:
-        return None
 
 
 def _runtime_summary_guard_conditions(

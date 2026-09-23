@@ -43,3 +43,37 @@ def echo_input_correspondence(builder: Any) -> Any:
 
     formula.side_effect = build_formula
     return builder
+
+
+def synthetic_input_extension_evidence(analysis: Any, index: int, *, logical_bits: int, storage_bits: int, kind: Any):
+    """consumer test 用の合成 IEE（validator を通す。production にこの出所は無い）。
+
+    production provider（``checker/arch/input_extension.py``）は信頼済み signature が
+    無いので IEE を発行しない。ここは IEE を消費する側（relation・書き換え・proof）が
+    正しく扱うかを確かめるためだけに、封印 token で信頼済み分類を作る。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import evidence as iee_contract
+    from scripts.function_tracer_pcode.semantics.rewrite_contract import ExtensionKind
+
+    binding = iee_contract.analysis_parameter_binding(analysis, index)
+    assert binding is not None, "the analysis needs binary_id and function_ref for a binding"
+    rule = iee_contract.AbiExtensionRule(
+        abi_id="synthetic-test-abi",
+        binary_id=binding.binary_id,
+        register_class="register",
+        storage_bits=storage_bits,
+        logical_bits=logical_bits,
+        is_signed=None,
+        kind=kind,
+        source_reference="test fixture",
+    )
+    classification = iee_contract.TrustedParameterClassification(
+        binding, logical_bits, kind is ExtensionKind.SIGN, "int",
+        "synthetic_test_signature", "0" * 64,
+        _factory_token=iee_contract._TRUSTED_CLASSIFICATION_TOKEN,
+    )
+    storage = iee_contract.StorageObservation(binding, "r0", "register", 0, storage_bits, storage_bits)
+    evidence, reasons = iee_contract.validate_input_extension_evidence(rule, classification, storage)
+    assert reasons == (), reasons
+    return evidence

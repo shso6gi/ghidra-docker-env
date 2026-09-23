@@ -34,6 +34,7 @@ from scripts.function_tracer_pcode.analysis.effects.models import (
     UnsupportedCallEffectRef,
 )
 from scripts.function_tracer_pcode.proof.formula import input_correspondence as ic
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import evidence as iee_contract
 from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     AbiExtensionRule,
@@ -50,7 +51,7 @@ from scripts.function_tracer_pcode.semantics.projection_closure import (
     scan_parameter_demand,
     scan_projection_closure,
 )
-from scripts.function_tracer_pcode.semantics.projection_contract import ExtensionKind
+from scripts.function_tracer_pcode.semantics.rewrite_contract import ExtensionKind
 from scripts.function_tracer_pcode.semantics.semantic_width import normalize_analysis_semantic_width
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 
@@ -119,7 +120,7 @@ def _synthetic_iee(analysis, index: int, *, logical_bits: int, storage_bits: int
     classification = TrustedParameterClassification(
         binding, logical_bits, kind is ExtensionKind.SIGN, "int",
         "synthetic_test_signature", "0" * 64,
-        _factory_token=ic._TRUSTED_CLASSIFICATION_TOKEN,
+        _factory_token=iee_contract._TRUSTED_CLASSIFICATION_TOKEN,
     )
     storage = StorageObservation(binding, "r0", "register", 0, storage_bits, storage_bits)
     evidence, reasons = validate_input_extension_evidence(rule, classification, storage)
@@ -143,6 +144,7 @@ def _sat(formula: str) -> z3.CheckSatResult:
 
 
 def _monolithic(left, right, **kwargs) -> z3.CheckSatResult:
+    kwargs.setdefault("input_correspondence", build_input_correspondence_set(left, right))
     formula = FormulaBuilder(debug=False).build_equivalence_formula_extended(left, right, **kwargs).formula
     return _sat(formula)
 
@@ -396,7 +398,7 @@ def test_iee_validator_rejects_mismatched_identity_and_untrusted_parts():
     binding1 = _bound(analysis, 1)
     rule = AbiExtensionRule("abi", binding0.binary_id, "register", 64, 32, None, ExtensionKind.SIGN, "ref")
     classification = TrustedParameterClassification(
-        binding0, 32, True, "int", "kind", "d" * 64, _factory_token=ic._TRUSTED_CLASSIFICATION_TOKEN
+        binding0, 32, True, "int", "kind", "d" * 64, _factory_token=iee_contract._TRUSTED_CLASSIFICATION_TOKEN
     )
     storage_other = StorageObservation(binding1, "a1", "register", 0, 64, 64)
     storage_ok = StorageObservation(binding0, "a0", "register", 0, 64, 64)
@@ -407,13 +409,13 @@ def test_iee_validator_rejects_mismatched_identity_and_untrusted_parts():
     wrong_binary = AbiExtensionRule("abi", "B9", "register", 64, 32, None, ExtensionKind.SIGN, "ref")
     assert "abi_rule_binary_mismatch" in validate_input_extension_evidence(wrong_binary, classification, storage_ok)[1]
     long_classification = TrustedParameterClassification(
-        binding0, 64, True, "int", "kind", "d" * 64, _factory_token=ic._TRUSTED_CLASSIFICATION_TOKEN
+        binding0, 64, True, "int", "kind", "d" * 64, _factory_token=iee_contract._TRUSTED_CLASSIFICATION_TOKEN
     )
     assert "no_extension_between_logical_and_storage" in validate_input_extension_evidence(
         rule, long_classification, storage_ok
     )[1]
     pointer = TrustedParameterClassification(
-        binding0, 32, True, "pointer", "kind", "d" * 64, _factory_token=ic._TRUSTED_CLASSIFICATION_TOKEN
+        binding0, 32, True, "pointer", "kind", "d" * 64, _factory_token=iee_contract._TRUSTED_CLASSIFICATION_TOKEN
     )
     assert "classification_not_integral" in validate_input_extension_evidence(rule, pointer, storage_ok)[1]
     with pytest.raises(ValueError):
@@ -727,6 +729,43 @@ def test_store_destination_through_the_parameter_register_is_a_witness():
     assert _witness(_closure(no_identity), "store_destination", "store_destination_alias_unknown")
 
 
+def test_parameter_leaf_wider_than_its_declaration_is_a_hidden_input():
+    """leaf が宣言幅（32）より広い 64 bit を読むと、上位 32 bit は parameter の外
+    （register の残り）。metadata 同期は leaf を宣言幅へ縮めるので、その bit は relation
+    のどの tie にも入らない。全幅の R4 も十分とは言えない（旧実装は COMPLETE にした）。
+    """
+
+    wide_leaf = _param("x", 8)
+    for value in (wide_leaf, _low(wide_leaf, 4)):
+        def analysis():
+            return _analysis("f", [_desc("x", 4)], [_ret(value)])
+
+        demand = scan_parameter_demand(analysis(), 0, 32)
+        assert any(item.reason == "parameter_leaf_wider_than_declaration" for item in demand.hidden_inputs)
+        relation = build_input_correspondence_set(analysis(), analysis())
+        (item,) = relation.correspondences
+        assert item.kind is InputRelationKind.FULL_REGISTER_EQUALITY
+        assert not item.decisive_sufficient
+
+    narrow_leaf = _analysis("f", [_desc("x", 4)], [_ret(_param("x", 4))])
+    assert scan_parameter_demand(narrow_leaf, 0, 32).hidden_inputs == ()
+
+
+def test_loop_renderer_takes_the_final_relation_instead_of_rebuilding_it():
+    """loop typed renderer の analysis は prepared surface。relation を渡さなければ
+    builder が拒否する（旧実装は prepared analysis から relation を作り直した）。
+    """
+
+    import inspect
+
+    from scripts.function_tracer_pcode.proof.strategies import pairwise_query_executor
+
+    parameters = inspect.signature(pairwise_query_executor.preflight_loop_v2_solver_query).parameters
+    assert parameters["input_correspondence"].default is inspect.Parameter.empty
+    source = inspect.getsource(pairwise_query_executor)
+    assert "build_input_correspondence_set" not in source
+
+
 def test_auxiliary_extension_needs_every_source_of_the_slot_to_entail_it():
     """補助 query の symbol は (index, 幅) が同じなら左右どちらにもなり得る。片側だけが
     含意する仮定（R2'）を他方へ持ち込まない。R2（他方は狭い幅）なら引き継ぐ。
@@ -734,7 +773,7 @@ def test_auxiliary_extension_needs_every_source_of_the_slot_to_entail_it():
 
     from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
     from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
-    from scripts.function_tracer_pcode.semantics.projection_contract import RewriteAssumption
+    from scripts.function_tracer_pcode.semantics.rewrite_contract import RewriteAssumption
 
     sign32 = RewriteAssumption(0, 64, 32, ExtensionKind.SIGN)
     left = ParameterInfo("p", "p_1", 64, 0, is_signed=True, entailed_extension=sign32)
@@ -801,7 +840,7 @@ def test_self_consistency_constraints_are_gone_from_the_header():
 
     x = _param("x", 8)
     analysis = _analysis("f", [_desc("x", 8)], [_ret(_const(0, 4), _bin("INT_SLESS", _low(x, 4), _const(3, 4), 1))])
-    header = FormulaBuilder(debug=False).build_base_context(analysis, analysis)["header_lines"]
+    header = FormulaBuilder(debug=False).build_base_context(analysis, analysis, input_correspondence=build_input_correspondence_set(analysis, analysis))["header_lines"]
     assert not any("_extend" in line for line in header if line.startswith("(assert"))
 
 

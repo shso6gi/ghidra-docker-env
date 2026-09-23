@@ -1643,7 +1643,10 @@ def _readonly_identity_evidence(action, **overrides):
                     "narrow_bits": 32,
                     "wide_bits": 64,
                     "extension": "sign_extend",
-                    "proof_source": "param_semantic_hint",
+                    # 入力 extension の出所は最終 InputCorrespondence だけ（Issue #167）。
+                    "proof_source": "final_input_correspondence",
+                    "input_correspondence_digest": "c" * 64,
+                    "entailed_assumption": ("rewrite_assumption_v1", 1, 64, 32, "sign"),
                 },
             }
         )

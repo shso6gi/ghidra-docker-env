@@ -31,6 +31,7 @@ from scripts.function_tracer_pcode.semantics.semantic_width import (
     normalize_analysis_semantic_width,
 )
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 def _param(name: str, size: int, index: int = 0) -> Expression:
@@ -116,7 +117,7 @@ def probe_w1_cross_use() -> Dict[str, Any]:
 
 def _monolithic_status(analysis1, analysis2) -> str:
     formula = FormulaBuilder(debug=False).build_equivalence_formula_extended(
-        analysis1, analysis2
+        analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2),
     ).formula
     return _z3(formula)
 

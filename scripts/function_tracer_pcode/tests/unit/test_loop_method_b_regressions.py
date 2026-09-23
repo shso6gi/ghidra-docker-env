@@ -61,7 +61,7 @@ from scripts.function_tracer_pcode.core import (
     loop_summary_method_b_key,
 )
 from scripts.function_tracer_pcode.core.runtime_refs import UnknownValueRef
-from scripts.function_tracer_pcode.semantics.projection_contract import (
+from scripts.function_tracer_pcode.semantics.rewrite_contract import (
     ExtensionKind,
     RewriteAssumption,
 )
