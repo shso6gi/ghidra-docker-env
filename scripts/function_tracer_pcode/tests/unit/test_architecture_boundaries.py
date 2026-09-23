@@ -1882,7 +1882,7 @@ def test_the_snapshot_representation_is_built_only_through_the_work():
             (argument,) = inner.args
             assert isinstance(argument, ast.Call) and getattr(argument.func, "id", None) == "value"
     # dict の値は scalar 定数か `value` / `record` / `records` の結果だけ
-    allowed_calls = {"value", "record", "records", "int", "bool"}
+    allowed_calls = {"value", "record", "records", "int", "bool", "_counted_nested_tuple"}
     for inner in ast.walk(body):
         if isinstance(inner, ast.Dict):
             for value in inner.values:

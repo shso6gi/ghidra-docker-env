@@ -1507,12 +1507,17 @@ def _unknown_outcomes(count):
     "field_name, build",
     [
         ("analysis_notes", lambda: [f"note-{index}" for index in range(300_000)]),
+        ("unknown_event_reasons", lambda: [f"reason-{index}" for index in range(300_000)]),
         (
-            "completed_recovery_proof_evidence",
-            lambda: [("evidence", index, "x" * 20) for index in range(200_000)],
+            "return_abi_facts",
+            lambda: tuple(("fact", index, "x" * 20) for index in range(200_000)),
         ),
         ("unknown_outcomes", lambda: _unknown_outcomes(100_000)),
         ("signature_hypotheses", lambda: [{"h": index} for index in range(200_000)]),
+        (
+            "parameters",
+            lambda: [{"name": f"p{index}", "index": index} for index in range(100_000)],
+        ),
     ],
 )
 def test_a_snapshot_with_small_expressions_but_huge_other_payload_stops_early(
@@ -1780,3 +1785,45 @@ def test_a_huge_effect_summary_stops_the_snapshot_before_projecting_every_effect
             AnalysisSnapshot.from_function_analysis(analysis)
     assert caught.value.site == "proof.obligations.snapshot.from_function_analysis"
     assert 0 < len(frozen) < 1_000  # 予算に届くまでの効果しか投影していない
+
+
+def test_the_snapshot_view_equals_to_dict_without_the_derived_proof():
+    """snapshot は捨てる derived proof を作らない。それ以外は `to_dict()` と同じ値。"""
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
+
+    analysis = _snapshot_analysis()
+    analysis.completed_recovery_proof_ids = [("proof", 1)]
+    analysis.completed_recovery_proof_evidence = [("evidence", index) for index in range(10)]
+    full = analysis.to_dict()
+    view = analysis.semantic_snapshot_dict()
+    assert "completed_recovery_proof_evidence" in full
+    assert {key: value for key, value in full.items() if not key.startswith("completed_recovery_proof")} == view
+    # 同じ解析を to_dict() から作った snapshot と同じ fingerprint
+    class _ViaToDict:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            if name == "semantic_snapshot_dict":
+                raise AttributeError(name)
+            return getattr(self._inner, name)
+
+    assert (
+        AnalysisSnapshot.from_function_analysis(analysis).semantic_fingerprint
+        == AnalysisSnapshot.from_function_analysis(_ViaToDict(analysis)).semantic_fingerprint
+    )
+
+
+def test_the_full_analysis_representation_is_bounded_including_derived_proof():
+    """`to_dict()`（snapshot 以外の読み手用の全表現）も、木以外の値ごと aggregate で止まる。"""
+    analysis = _snapshot_analysis()
+    analysis.completed_recovery_proof_evidence = [
+        ("evidence", index, "x" * 20) for index in range(200_000)
+    ]
+    policy = BudgetPolicy(serialization_bytes=64_000, envelope_headroom_bytes=0)
+    with pair_failure_scope(("full-to-dict",), None), budget_policy_scope(policy):
+        started = time.perf_counter()
+        with pytest.raises(ExpressionSizeBudgetExceeded) as caught:
+            analysis.to_dict()
+        assert time.perf_counter() - started < 1.0
+    assert caught.value.site == "core.analysis.FunctionReturnAnalysis.to_dict"

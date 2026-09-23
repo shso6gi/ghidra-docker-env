@@ -16,11 +16,11 @@ if TYPE_CHECKING:
     from scripts.function_tracer_pcode.analysis.effects.summary import EffectSummary
     from scripts.function_tracer_pcode.core.signature import SignatureHypothesis, FunctionSignature
 from scripts.function_tracer_pcode.core.signature import (
+    clone_parameter_descriptor,
     get_data_type_display_name,
     get_declared_type_size_bits,
     is_void_data_type,
     is_unsigned_data_type,
-    parameters_without_runtime_objects,
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
 from scripts.function_tracer_pcode.core.semantic_freeze import freeze_condition, freeze_expression
@@ -48,6 +48,30 @@ def _jsonable_nested_tuple(value: Any) -> Any:
     if isinstance(value, list):
         return [_jsonable_nested_tuple(item) for item in value]
     return value
+
+
+def _parameter_without_runtime_objects(parameter: Any) -> Any:
+    """`core.signature.parameters_without_runtime_objects` の 1 要素分（要素ごとに数える）。"""
+
+    return clone_parameter_descriptor(parameter, include_data_type_obj=False)
+
+
+def _counted_nested_tuple(work: Any, value: Any) -> Any:
+    """`_jsonable_nested_tuple(value)` と同じ値を、collection なら要素ごとに数えて作る。
+
+    Issue #22 PR-22-D: collection 全体を先に写してから数えると、要素が大量のとき
+    に予算より先に巨大な写しができる。要素 1 つずつ `work` へ足すので、超えた時点で
+    残りを写さない。
+    """
+
+    if isinstance(value, (tuple, list)):
+        return work.records(value, _jsonable_nested_tuple)
+    if isinstance(value, dict):
+        return work.object_framing({
+            key: work.record(lambda item=item: _jsonable_nested_tuple(item))
+            for key, item in value.items()
+        })
+    return work.record(lambda: _jsonable_nested_tuple(value))
 
 
 def _stable_json_digest(value: Any) -> str:
@@ -1622,9 +1646,30 @@ class FunctionReturnAnalysis:
                 self.entry_point,
             ),
         ) as work:
-            return self._to_dict_with(work)
+            return self._to_dict_with(work, include_derived_proof=True)
 
-    def _to_dict_with(self, work) -> Dict:
+    def semantic_snapshot_dict(self) -> Dict:
+        """snapshot が使う表現（`to_dict()` から、解析前提でない derived proof を除いたもの）。
+
+        snapshot は完了した recovery proof の id / evidence を捨てる（実行状態で、
+        解析前提の identity ではない）ので、作りも数えもしない。残りは `to_dict()` と
+        同じ値。
+        """
+
+        from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+
+        with serialization_scope(
+            site=ANALYSIS_SERIALIZATION_SITE,
+            target_parts=(
+                "function_return_analysis",
+                self.binary_id,
+                self.function_name,
+                self.entry_point,
+            ),
+        ) as work:
+            return self._to_dict_with(work, include_derived_proof=False)
+
+    def _to_dict_with(self, work, *, include_derived_proof: bool) -> Dict:
         """表現の本体。**値はすべて `work` を通す**（既存の値は `value`、record は
         `record` / `records`、木は record の中の `Expression.to_dict` が `tree` を通す）。
         """
@@ -1637,7 +1682,10 @@ class FunctionReturnAnalysis:
             "function_ref": (
                 record(self.function_ref.to_dict) if self.function_ref is not None else None
             ),
-            "parameters": record(lambda: parameters_without_runtime_objects(self.parameters)),
+            "parameters": (
+                None if self.parameters is None
+                else records(self.parameters, _parameter_without_runtime_objects)
+            ),
             "returns": records(self.returns),
             "return_type": value(
                 get_data_type_display_name(self.return_type_obj, self.return_type)
@@ -1649,11 +1697,11 @@ class FunctionReturnAnalysis:
             "incomplete_control_flow": value(self.incomplete_control_flow),
             "deferred_calls": records(self.deferred_calls.values()),
         }
-        if self.completed_recovery_proof_ids:
+        if include_derived_proof and self.completed_recovery_proof_ids:
             result["completed_recovery_proof_ids"] = records(
                 self.completed_recovery_proof_ids, _jsonable_nested_tuple,
             )
-        if self.completed_recovery_proof_evidence:
+        if include_derived_proof and self.completed_recovery_proof_evidence:
             result["completed_recovery_proof_evidence"] = records(
                 self.completed_recovery_proof_evidence, _jsonable_nested_tuple,
             )
@@ -1672,8 +1720,8 @@ class FunctionReturnAnalysis:
         if self.analysis_scope_key is not None:
             result["analysis_scope_key"] = value(self.analysis_scope_key)
         if self.analysis_view_identity is not None:
-            result["analysis_view_identity"] = record(
-                lambda: _jsonable_nested_tuple(self.analysis_view_identity)
+            result["analysis_view_identity"] = _counted_nested_tuple(
+                work, self.analysis_view_identity,
             )
             result["partition_revision"] = value(int(self.partition_revision or 0))
         if self.program_is_big_endian is not None:
@@ -1684,13 +1732,11 @@ class FunctionReturnAnalysis:
         if self.signature_hypotheses:
             result["signature_hypotheses"] = list(value(self.signature_hypotheses))
         if self.return_type_provenance:
-            result["return_type_provenance"] = record(
-                lambda: _jsonable_nested_tuple(self.return_type_provenance)
+            result["return_type_provenance"] = _counted_nested_tuple(
+                work, self.return_type_provenance,
             )
         if self.return_abi_facts:
-            result["return_abi_facts"] = record(
-                lambda: _jsonable_nested_tuple(self.return_abi_facts)
-            )
+            result["return_abi_facts"] = _counted_nested_tuple(work, self.return_abi_facts)
         if self.comparison_surface is not None:
             result["comparison_surface"] = record(self.comparison_surface.to_dict)
         if self.expansion_budget_truncations:

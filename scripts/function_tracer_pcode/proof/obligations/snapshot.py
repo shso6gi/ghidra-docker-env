@@ -237,7 +237,10 @@ class AnalysisSnapshot:
 
     @classmethod
     def _from_function_analysis_with(cls, analysis: Any, to_dict: Any, work: Any) -> "AnalysisSnapshot":
-        semantic_fields = dict(to_dict())
+        # 解析前提でない derived proof は下で捨てるので、表現できる解析は最初から
+        # 作らない（`semantic_snapshot_dict`。残りは `to_dict()` と同じ値）
+        semantic_view = getattr(analysis, "semantic_snapshot_dict", None)
+        semantic_fields = dict(semantic_view() if callable(semantic_view) else to_dict())
         # These fields describe execution/diagnostic state rather than the
         # immutable extraction premise.  Proofs are applied through a derived
         # view and must never mutate snapshot identity.
