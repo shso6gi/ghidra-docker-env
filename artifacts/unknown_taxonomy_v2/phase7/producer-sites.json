@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "1d3adf69e3d47af582a1cfdd7c07c42b2beb2f1f6b8b16e5192487a8abfb189f",
+  "manifest_digest": "058972f1bc6026a3e90d1e572e9b6b6387de5e59cbc04272eae85cf416e43092",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 32,
   "sites": [
@@ -25,12 +25,22 @@
           "expected_target_kind": "analysis_limitation",
           "slot_id": "analysis-limitation-observed:analysis_budget_exceeded",
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "expression_size_budget_exceeded"
+          ],
+          "expected_domain": "analysis_limitation",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "analysis_limitation",
+          "slot_id": "analysis-limitation-observed:expression_size_budget_exceeded",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 329,
+      "line": 345,
       "path": "scripts/function_tracer_pcode/authority/domains/analysis_limitation.py",
       "producer_site_manifest_id": "analysis-limitation-observed",
-      "source_sha256": "912a3bb9f143bf9dee1e7a76aef33135254a16fbe2bd3832e6cd7023528e9ec1"
+      "source_sha256": "a8bcdc351d5e970c621d7d8d6f8293dfd22406d8b17705834bffdea31b2f4c84"
     },
     {
       "allowed_dispositions": [

@@ -197,6 +197,14 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         """
         self.timeout = timeout
         self.debug = debug
+        # Issue #22 PR-22-D: pair に適用する式サイズ予算。値の解決は config が
+        # 1 箇所で行い（既定値 + 環境変数）、pair 境界がこの値で scope を開く。
+        # 深い module は config も環境変数も読まない。
+        from scripts.function_tracer_pcode.config.settings import (
+            expression_budget_policy,
+        )
+
+        self.budget_policy = expression_budget_policy()
         self.type_fixer_config = type_fixer_config or TypeFixerConfig()
         if enable_rewrite is not None or rewrite_direction is not None:
             warnings.warn(

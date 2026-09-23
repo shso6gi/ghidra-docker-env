@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Analysis-limitation domain: one sealed reason for an exhausted analysis budget.
+"""Analysis-limitation domain: sealed reasons for an exhausted analysis budget.
 
 Issue #125 PR-125-A。`core/errors.py` の `AnalysisLimitation` を判定 authority
-へ載せるための **最小の** producer 経路（domain 1 / sealed reason 1 /
-producer site 1）。
+へ載せるための **最小の** producer 経路（domain 1 / producer site 1）。sealed
+reason は 2 つ: 時間・段数の予算（`analysis_budget_exceeded`、#125）と式の
+大きさの予算（`expression_size_budget_exceeded`、#22 PR-22-D）。どちらも同じ
+site・同じ encoder・同じ回復契約を通る（reason が違うだけ）。
 
 `decision_effect` を `blocks_decision` にするのは、予算切れで解析を打ち切った
 場合 EQ 側・NOT_EQ 側のどちらの証明も完了していないため。片方向だけを塞ぐ
@@ -50,6 +52,9 @@ from scripts.function_tracer_pcode.authority.lifecycle.stream import (
 
 ANALYSIS_LIMITATION_DOMAIN = "analysis_limitation"
 ANALYSIS_BUDGET_REASON_ID = "analysis_budget_exceeded"
+#: Issue #22 PR-22-D: 式の大きさの予算（展開・solver 向け描画・直列化）を超えて
+#: 打ち切った限界。`core/errors.ExpressionSizeBudgetExceeded.REASON_ID` と同じ値。
+EXPRESSION_SIZE_BUDGET_REASON_ID = "expression_size_budget_exceeded"
 ANALYSIS_BUDGET_PROOF_KIND = "analysis_budget_proof"
 ANALYSIS_BUDGET_CONTRACT_ID = "analysis-budget-recovery"
 ANALYSIS_LIMITATION_TARGET_KIND = "analysis_limitation"
@@ -70,6 +75,17 @@ ANALYSIS_LIMITATION_REASON_REGISTRY = SealedReasonRegistry.build((
         ANALYSIS_BUDGET_REASON_ID, ANALYSIS_LIMITATION_DOMAIN, "proof_obligation",
         "blocks_decision", frozenset((ANALYSIS_LIMITATION_TARGET_KIND,)),
         ("limitation_site", "analysis_budget"),
+        frozenset((ANALYSIS_BUDGET_PROOF_KIND,)), True,
+        "analysis_limitation_v1", RecoveryAddressability.REQUIREMENT_REQUIRED,
+    ),
+    # 予算超過も時間切れと同じく EQ 側・NOT_EQ 側どちらの証明も完了していない
+    # ので `blocks_decision`。回復の契約（予算内で解析し直せたことの証明）も
+    # 同じ `analysis-budget-recovery` を共有する。
+    ReasonDefinition(
+        EXPRESSION_SIZE_BUDGET_REASON_ID, ANALYSIS_LIMITATION_DOMAIN,
+        "proof_obligation", "blocks_decision",
+        frozenset((ANALYSIS_LIMITATION_TARGET_KIND,)),
+        ("limitation_site", "expression_size_budget"),
         frozenset((ANALYSIS_BUDGET_PROOF_KIND,)), True,
         "analysis_limitation_v1", RecoveryAddressability.REQUIREMENT_REQUIRED,
     ),
@@ -288,7 +304,7 @@ ANALYSIS_LIMITATION_OBSERVED_SITE = AnalysisLimitationProducerSiteSpec(
     "analysis-limitation-observed",
     ANALYSIS_LIMITATION_PRODUCER_ID,
     "ELIGIBLE",
-    (ANALYSIS_BUDGET_REASON_ID,),
+    (ANALYSIS_BUDGET_REASON_ID, EXPRESSION_SIZE_BUDGET_REASON_ID),
 )
 
 ANALYSIS_LIMITATION_PRODUCER_SITE_SPECS = (ANALYSIS_LIMITATION_OBSERVED_SITE,)

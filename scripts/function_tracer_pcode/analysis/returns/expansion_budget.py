@@ -50,6 +50,9 @@ def make_expansion_budget_sink(
             )
         )
 
+    # 展開の所有 scope を 1 つの出どころにする: 式サイズ予算の target
+    # （`expander_multiequal._checkpoint_expansion_size`）も同じ値を読む。
+    sink.owner_scope_key = bound_scope
     return sink
 
 

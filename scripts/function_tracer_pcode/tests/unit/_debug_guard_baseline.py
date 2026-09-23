@@ -38,10 +38,11 @@ _NON_GUARD_ATTRIBUTES: FrozenSet[GuardShape] = frozenset({
     ('attr', ('cls',), '_debug_suppressed'),
     # self._debug_suppressed  (analysis/phi_resolver.py:112)
     ('attr', ('self',), '_debug_suppressed'),
-    # self.debug_trace  (checker/result.py:337)
-    ('attr', ('self',), 'debug_trace'),
     # self.pairwise_debug_stats  (checker/result.py:401)
     ('attr', ('self',), 'pairwise_debug_stats'),
+    # include_debug_trace  (checker/output_preparation.py): 準備済みの trace を
+    # JSON へ添付するかの出力の選択。debug message を組み立てる guard ではない。
+    ('name', 'include_debug_trace'),
 })
 
 #: canonical descriptor 文法の外にある式（比較・引数付き呼び出しなど）。

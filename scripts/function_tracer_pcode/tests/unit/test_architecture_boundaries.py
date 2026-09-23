@@ -1422,7 +1422,10 @@ def test_the_render_budget_has_one_meaning_and_one_owner():
             for keyword in node.keywords:
                 if keyword.arg and keyword.arg.endswith("limit_bytes"):
                     target = name or "<call>"
-                    if target in {"render_smt_term", "render_human_text", "_to_smt_internal"}:
+                    if target in {
+                        "render_smt_term", "render_human_text",
+                        "_to_smt_internal", "_condition_to_smt_internal",
+                    }:
                         continue  # 入口どうしの受け渡し（最終的に writer へ届く）
                     offenders.append(f"{relative}:{node.lineno} passes {keyword.arg} to {target}")
     assert offenders == [], offenders
@@ -1456,3 +1459,261 @@ def test_the_render_budget_is_not_multiplied_into_a_second_one():
     assert offenders == [], offenders
 
 
+
+
+# ---------------------------------------------------------------------------
+# 式サイズ予算と出力の準備（Issue #22 PR-22-D、計画 §4.8 M-1 / M-3）
+#
+# 変更軸ごとの owner:
+#   予算の既定値・環境変数      config/settings.py（`EXPRESSION_BUDGET_DEFAULTS`）
+#   予算の値の型・scope・超過の変換  core/budget_policy.py
+#   JSON の書き方と大きさの数え方   core/json_encoding.py（`RESULT_JSON_POLICY`）
+#   出力の準備・3 層の合成        checker/output_preparation.py
+#   呼び出し順序                authority/lifecycle/production_boundary.py
+# 既定値を変える変更が深い module へ波及しないこと、数え方と encoder が 1 つの
+# policy を共有すること、boundary が処理本体を抱え込まないことを固定する。
+# ---------------------------------------------------------------------------
+
+_BUDGET_OWNER_BANS = {
+    "core/budget_policy.py": (
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "scripts.function_tracer_pcode.core.render_plan",
+        "scripts.function_tracer_pcode.core.render_python",
+        "os",
+    ),
+    "core/json_encoding.py": (
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "scripts.function_tracer_pcode.core.expression",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "os",
+    ),
+    # 出力層は solver の実行・描画・identity・解析に依存しない（読むのは結果の
+    # 属性と authority が公開した receipt 表現だけ）。
+    "checker/output_preparation.py": (
+        "scripts.function_tracer_pcode.smt",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.render_python",
+        "scripts.function_tracer_pcode.core.render_plan",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.analysis",
+        "scripts.function_tracer_pcode.semantics",
+        "scripts.function_tracer_pcode.proof",
+        "scripts.function_tracer_pcode.config",
+        "os",
+    ),
+}
+
+
+@pytest.mark.parametrize("module_path", sorted(_BUDGET_OWNER_BANS))
+def test_budget_and_output_owners_point_downward_only(module_path):
+    path = PACKAGE_ROOT / module_path
+    offenders = [
+        f"{module_path}:{lineno} imports {name}"
+        for name, lineno in _imported_modules(_parse(path))
+        for prefix in _BUDGET_OWNER_BANS[module_path]
+        if name == prefix or name.startswith(prefix + ".")
+    ]
+    assert offenders == [], offenders
+
+
+def _string_constants(tree: ast.Module) -> Iterable[Tuple[str, int]]:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            yield node.value, node.lineno
+
+
+def test_m1_budget_defaults_and_env_names_live_only_in_config():
+    """M-1: 既定値を変える変更は config の表と policy の構築だけで閉じる。"""
+
+    from scripts.function_tracer_pcode.config.settings import EXPRESSION_BUDGET_DEFAULTS
+
+    env_names = {env_name for _name, env_name, _default in EXPRESSION_BUDGET_DEFAULTS}
+    offenders = []
+    builders = []
+    for path in _module_files():
+        relative = _relative(path)
+        tree = _parse(path)
+        if relative != "config/settings.py":
+            offenders.extend(
+                f"{relative}:{lineno} names {value}"
+                for value, lineno in _string_constants(tree)
+                if value in env_names
+            )
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "expression_budget_policy"
+            ):
+                builders.append(relative)
+    assert offenders == [], offenders
+    # policy を組み立てるのは入口（checker の構築）だけ。深い module は scope から読む。
+    assert builders == ["checker/checker.py"], builders
+
+
+#: 深い層（core / analysis / semantics / proof）で環境変数・config を直接読む
+#: module の **現状**（delete-only）。予算を足しても増えない。
+_DEEP_LAYERS = ("core/", "analysis/", "semantics/", "proof/")
+_DEEP_ENV_READERS_BASELINE = frozenset({"analysis/returns/expansion_budget.py"})
+_DEEP_CONFIG_READERS_BASELINE = frozenset({
+    "analysis/limits.py",
+    "analysis/returns/callee_unbound_reuse.py",
+    "analysis/tracer.py",
+    "semantics/transform/expander.py",
+})
+
+
+def test_m1_deep_modules_gain_no_env_or_config_reads():
+    env_readers, config_readers = set(), set()
+    for path in _module_files():
+        relative = _relative(path)
+        if not relative.startswith(_DEEP_LAYERS):
+            continue
+        tree = _parse(path)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr in {"environ", "getenv"}
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "os"
+            ):
+                env_readers.add(relative)
+        for name, _lineno in _imported_modules(tree):
+            if name.startswith("scripts.function_tracer_pcode.config"):
+                config_readers.add(relative)
+    assert env_readers <= _DEEP_ENV_READERS_BASELINE, env_readers
+    assert config_readers <= _DEEP_CONFIG_READERS_BASELINE, config_readers
+    # baseline は delete-only（消えた読み手は baseline からも消す）
+    assert env_readers == _DEEP_ENV_READERS_BASELINE, env_readers
+    assert config_readers == _DEEP_CONFIG_READERS_BASELINE, config_readers
+
+
+#: 予算の値（policy の field）を **直接** 読んでよい module。どれも「その予算を
+#: 数える唯一の場所」。それ以外は `enforce_budget(kind, …)` を通す。
+_POLICY_FIELD_READERS = {
+    "render_bytes": {"core/render_smt/render.py"},
+    "serialization_bytes": {
+        "core/budget_policy.py", "core/expression.py", "checker/output_preparation.py",
+    },
+    "expression_nodes": set(),
+    "expansion_cases": set(),
+    "envelope_headroom_bytes": {"core/budget_policy.py", "checker/output_preparation.py"},
+}
+
+
+def test_each_budget_value_is_read_by_its_one_counting_site():
+    readers = {name: set() for name in _POLICY_FIELD_READERS}
+    for path in _module_files():
+        relative = _relative(path)
+        if relative == "config/settings.py":
+            continue
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.Attribute) and node.attr in readers:
+                readers[node.attr].add(relative)
+    for name, allowed in _POLICY_FIELD_READERS.items():
+        assert readers[name] <= allowed | {"core/budget_policy.py"}, (name, readers[name])
+
+
+def test_the_limitation_is_built_in_one_place_and_raised_from_the_checkpoints():
+    constructors, raisers = set(), set()
+    for path in _module_files():
+        relative = _relative(path)
+        for node in ast.walk(_parse(path)):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            if node.func.id == "ExpressionSizeBudgetExceeded":
+                constructors.add(relative)
+            if node.func.id in {
+                "enforce_budget",
+                "raise_expression_size_budget_exceeded",
+                "raise_render_budget_exceeded",
+            }:
+                raisers.add(relative)
+    assert constructors == {"core/budget_policy.py"}, constructors
+    assert raisers == {
+        "core/budget_policy.py",
+        "core/expression.py",
+        "core/render_smt/render.py",
+        "semantics/transform/expander_multiequal.py",
+        "checker/output_preparation.py",
+    }, raisers
+
+
+def test_one_json_policy_is_shared_by_the_estimator_encoder_and_cli():
+    """見積り・bounded encoder・CLI の出力が同じ policy object を使う。"""
+
+    instantiations, cli_dumps = [], []
+    for path in _module_files():
+        relative = _relative(path)
+        for node in ast.walk(_parse(path)):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "JsonEncodingPolicy"
+            ):
+                instantiations.append(relative)
+            if (
+                relative == "cli/commands/equivalence.py"
+                and isinstance(node, ast.Attribute)
+                and node.attr in {"dumps", "dump"}
+            ):
+                cli_dumps.append(node.lineno)
+    assert instantiations == ["core/json_encoding.py"], instantiations
+    # 結果 JSON の文字列は envelope（bounded encoder）からしか来ない
+    assert cli_dumps == [], cli_dumps
+
+
+def test_the_production_boundary_only_orders_the_output_steps():
+    """R-A2: boundary は準備と scope の **呼び出し** だけを持つ。"""
+
+    path = PACKAGE_ROOT / "authority/lifecycle/production_boundary.py"
+    tree = _parse(path)
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} | {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    }
+    forbidden = {
+        "value_bytes", "encode_bounded", "RESULT_FIELDS", "OutputPreparer",
+        "RESULT_JSON_POLICY", "estimate_legacy_dict_bytes", "enforce_budget",
+        "serialization_bytes", "render_bytes", "envelope_headroom_bytes",
+    }
+    assert not (names & forbidden), names & forbidden
+    imported = {name for name, _lineno in _imported_names(tree)}
+    assert {"prepare_pair_output", "budget_policy_scope"} <= imported
+
+
+def test_no_budget_is_derived_by_a_multiplier():
+    """出力予算・直列化予算から別の上限を倍率で作らない（PR-22-C の規則の延長）。"""
+
+    modules = (
+        "core/budget_policy.py",
+        "core/json_encoding.py",
+        "checker/output_preparation.py",
+        "config/settings.py",
+    )
+    offenders = []
+    for module_path in modules:
+        for node in ast.walk(_parse(PACKAGE_ROOT / module_path)):
+            if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Mult):
+                continue
+            names = {
+                inner.id for inner in ast.walk(node) if isinstance(inner, ast.Name)
+            } | {
+                inner.attr for inner in ast.walk(node) if isinstance(inner, ast.Attribute)
+            }
+            if any(
+                word in name.lower()
+                for name in names
+                for word in ("limit", "budget", "bytes", "headroom")
+            ):
+                offenders.append(f"{module_path}:{node.lineno}")
+    assert offenders == [], offenders

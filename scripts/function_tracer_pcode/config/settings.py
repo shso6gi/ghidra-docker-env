@@ -266,3 +266,59 @@ CALLEE_UNBOUND_REUSE_SHADOW = _bool_setting("FT_CALLEE_UNBOUND_REUSE_SHADOW", Fa
 # 通常実行の既定値は変えない。明示 limit を渡す呼び出し
 # （``EXPANDER_MAX_OPERATION_CASES``）はこの設定の対象外。
 EXPANDER_DEDUP_CASE_LIMIT = _positive_int_setting("FT_EXPANDER_DEDUP_CASE_LIMIT", 16)
+
+
+# ---------------------------------------------------------------------------
+# 式の大きさの予算（Issue #22 PR-22-D）
+# ---------------------------------------------------------------------------
+#
+# **既定値の唯一の置き場**。値を変えるときに触るのはこの表と policy test だけで、
+# 数える側（expander / renderer / 出力の準備）も authority も変わらない
+# （`core/budget_policy.BudgetPolicy` が typed な値を運ぶ。深い module は環境変数も
+# この module も読まない）。値の根拠（U-1 の実測）は PR-22-D の本文に残す。
+#
+# 環境変数で個別に上書きできる。正の整数はその値、`off` / `none` / `unlimited` /
+# `0` はその予算だけ無効（制限しない）、それ以外（空・不正値）は既定値。runner は
+# これらを渡さない（run 単位の調査用）。
+
+#: (BudgetPolicy の field 名, 環境変数, 既定値)。既定値 `None` は無制限。
+EXPRESSION_BUDGET_DEFAULTS = (
+    ("expression_nodes", "FT_EXPRESSION_NODE_BUDGET", None),
+    ("expansion_cases", "FT_EXPANSION_CASE_BUDGET", None),
+    ("render_bytes", "FT_RENDER_BYTES_BUDGET", None),
+    ("serialization_bytes", "FT_SERIALIZATION_BYTES_BUDGET", None),
+    ("envelope_headroom_bytes", "FT_ENVELOPE_HEADROOM_BYTES", 0),
+)
+
+_BUDGET_OFF_WORDS = frozenset({"off", "none", "unlimited", "0"})
+
+
+def _budget_setting(name: str, default: Optional[int], environ=None) -> Optional[int]:
+    """予算 1 つを環境変数から読む（`off` 系は無効、不正値は既定値）。"""
+
+    source = environ if environ is not None else os.environ
+    raw = source.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    text = str(raw).strip().lower()
+    if text in _BUDGET_OFF_WORDS:
+        return None
+    try:
+        value = int(text, 10)
+    except ValueError:
+        return default
+    return value if value >= 1 else default
+
+
+def expression_budget_policy(environ: Optional[Mapping[str, str]] = None):
+    """既定値と環境変数から、pair に適用する `BudgetPolicy` を組み立てる。"""
+
+    from scripts.function_tracer_pcode.core.budget_policy import BudgetPolicy
+
+    values = {}
+    for field_name, env_name, default in EXPRESSION_BUDGET_DEFAULTS:
+        value = _budget_setting(env_name, default, environ)
+        if field_name == "envelope_headroom_bytes":
+            value = 0 if value is None else value
+        values[field_name] = value
+    return BudgetPolicy(**values)

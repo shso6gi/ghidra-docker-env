@@ -759,6 +759,13 @@ def test_production_boundary_fails_closed_when_expected_activation_is_missing(
         "_run_legacy_check_from_binaries",
         lambda *_args, **_kwargs: result,
     )
+    # Issue #22 PR-22-D: この fake result は結果 schema（`RESULT_FIELDS`）を持たない
+    # duck-typed な値なので、G4-b（出力の準備）は外す。この test が見るのは
+    # boundary の時間・authority の順序で、出力の準備は
+    # `test_issue22d_output_preparation.py` が本物の結果で固定する。
+    monkeypatch.setattr(
+        production_boundary, "prepare_pair_output", lambda _checker, result, **_k: result,
+    )
 
     actual = production_boundary.run_check_from_binaries_with_v2_pilot(
         checker, object(), object(), "left", "right"
@@ -812,6 +819,13 @@ def test_legacy_error_uses_typed_boundary_kind_not_arbitrary_status(monkeypatch)
         production_boundary,
         "_run_legacy_check_from_binaries",
         lambda *_args, **_kwargs: result,
+    )
+    # Issue #22 PR-22-D: この fake result は結果 schema（`RESULT_FIELDS`）を持たない
+    # duck-typed な値なので、G4-b（出力の準備）は外す。この test が見るのは
+    # boundary の時間・authority の順序で、出力の準備は
+    # `test_issue22d_output_preparation.py` が本物の結果で固定する。
+    monkeypatch.setattr(
+        production_boundary, "prepare_pair_output", lambda _checker, result, **_k: result,
     )
 
     actual = production_boundary.run_check_from_binaries_with_v2_pilot(

@@ -244,6 +244,41 @@ class DeadlineExceeded(AnalysisLimitation):
         )
 
 
+class ExpressionSizeBudgetExceeded(AnalysisLimitation):
+    """式の大きさの予算（distinct node / case / 出力 byte）を超えて打ち切った限界。
+
+    Issue #22 PR-22-D。予算は 3 箇所で見る — 展開（expander）・solver へ渡す描画・
+    直列化（出力の準備と木表現の `to_dict`）— が、**reason は 1 つ**で、どこで
+    超えたかは `site`、何を超えたかは `evidence_refs` が持つ。reason を site ごとに
+    分けないのは、どこで超えても「式が大きすぎて解析を完了できなかった」という
+    同じ事実で、authority 側の扱い（`blocks_decision`・pair terminal）も同じだから。
+
+    組み立ては `core/budget_policy.raise_expression_size_budget_exceeded` 1 箇所に
+    寄せる（evidence の書式を site ごとに書かないため）。既存 cause への帰属は
+    持たない: 予算超過は常にこの reason を所有する producer が新しい cause にする。
+    """
+
+    REASON_ID = "expression_size_budget_exceeded"
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        site: str,
+        target_key: Any = (),
+        missing_semantic_fact: Any = (),
+        evidence_refs: Any = (),
+    ) -> None:
+        super().__init__(
+            self.REASON_ID,
+            detail,
+            site=site,
+            target_key=target_key,
+            missing_semantic_fact=missing_semantic_fact,
+            evidence_refs=evidence_refs,
+        )
+
+
 # ---------------------------------------------------------------------------
 # pair 単位の実行制御（Issue #106 PR-106-0）
 # ---------------------------------------------------------------------------

@@ -180,11 +180,23 @@ def test_emit_flag_default_keeps_direct_callers_unchanged():
 
 
 def test_emit_flag_is_the_last_dataclass_field():
-    """末尾追加であること（positional 互換）。"""
+    """末尾追加であること（positional 互換）。
+
+    Issue #22 PR-22-D が後ろに `prepared_semantic_payload` を足した。emit flag の
+    位置は変わらず、その後ろにあるのは既定値付きの field だけ（positional で
+    渡す既存の呼び出し側は影響を受けない）。
+    """
     import dataclasses
 
-    names = [f.name for f in dataclasses.fields(EquivalenceResult)]
-    assert names[-1] == "emit_debug_trace"
+    fields = dataclasses.fields(EquivalenceResult)
+    names = [f.name for f in fields]
+    position = names.index("emit_debug_trace")
+    assert names[position + 1:] == ["prepared_semantic_payload"]
+    assert all(
+        f.default is not dataclasses.MISSING
+        or f.default_factory is not dataclasses.MISSING
+        for f in fields[position:]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -372,9 +384,22 @@ def test_generation_is_not_stopped_in_the_workflow_source():
     result_source = inspect.getsource(result_module)
     assert 'pop("debug_trace"' not in result_source
     assert "self.debug_trace = None" not in result_source
-    # aggregate は条件化されていない（emit flag と同じ行に載っていない）。
-    assert 'result["unknown_cause_aggregate"] = self.unknown_cause_aggregate' in result_source
-    assert "if self.debug_trace and self.emit_debug_trace:" in result_source
+    # Issue #22 PR-22-D: JSON の field 表は `checker.output_preparation` が持つ。
+    # aggregate は条件化されていない（emit flag と別の行で常に出す）。trace は
+    # object 上に在るものを、emit flag が真のときだけ添付する。
+    from scripts.function_tracer_pcode.checker import output_preparation
+
+    preparation_source = inspect.getsource(output_preparation)
+    assert "self.debug_trace = None" not in preparation_source
+    assert "result.debug_trace = None" not in preparation_source
+    assert (
+        'OutputField(\n        "unknown_cause_aggregate", _C, _always(_unknown_cause_aggregate)'
+        in preparation_source
+    )
+    assert "bool(r.debug_trace) and r.emit_debug_trace" in preparation_source
+    assert 'include_debug_trace=bool(getattr(result, "emit_debug_trace", True))' in (
+        preparation_source
+    )
 
 
 # ---------------------------------------------------------------------------

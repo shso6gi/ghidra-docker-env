@@ -114,7 +114,7 @@ def test_analysis_limitation_defaults_keep_a_non_empty_missing_fact():
 
 # --- 新 domain の sealed registry ---------------------------------------------
 
-def test_analysis_limitation_registry_is_sealed_and_single():
+def test_analysis_limitation_registry_is_sealed_and_owns_two_reasons():
     from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
         ANALYSIS_LIMITATION_DOMAIN,
         ANALYSIS_LIMITATION_REASON_REGISTRY,
@@ -124,24 +124,26 @@ def test_analysis_limitation_registry_is_sealed_and_single():
         PROCESS_DURABLE_REASON_REGISTRY,
     )
 
+    # Issue #22 PR-22-D が式サイズ予算の reason を足した（reason 2 / site 1 /
+    # 回復契約 1）。2 つとも同じ扱い: blocks_decision・同じ target kind・同じ
+    # proof kind。reason を増やす PR はここへ 1 つ足す。
+    expected = ("analysis_budget_exceeded", "expression_size_budget_exceeded")
     definitions = ANALYSIS_LIMITATION_REASON_REGISTRY.snapshot()
-    assert len(definitions) == 1
-    definition = definitions[0]
-    assert definition.reason_id == "analysis_budget_exceeded"
-    assert definition.domain == ANALYSIS_LIMITATION_DOMAIN
-    assert definition.decision_effect == "blocks_decision"
-    assert definition.allowed_target_kinds == frozenset({"analysis_limitation"})
-    assert definition.allowed_proof_kinds == frozenset({"analysis_budget_proof"})
+    assert tuple(definition.reason_id for definition in definitions) == expected
+    for definition in definitions:
+        assert definition.domain == ANALYSIS_LIMITATION_DOMAIN
+        assert definition.decision_effect == "blocks_decision"
+        assert definition.allowed_target_kinds == frozenset({"analysis_limitation"})
+        assert definition.allowed_proof_kinds == frozenset({"analysis_budget_proof"})
     assert len(ANALYSIS_LIMITATION_RECOVERY_REGISTRY.snapshot()) == 1
 
     # 既存の sealed registry と重複しない（`SealedReasonRegistry.build` が拒否する）。
     durable = PROCESS_DURABLE_REASON_REGISTRY.snapshot()
-    assert sum(
-        1 for item in durable if item.reason_id == "analysis_budget_exceeded"
-    ) == 1
+    for reason_id in expected:
+        assert sum(1 for item in durable if item.reason_id == reason_id) == 1
     assert sum(
         1 for item in durable if item.domain == ANALYSIS_LIMITATION_DOMAIN
-    ) == 1
+    ) == len(expected)
 
 
 def test_analysis_limitation_domain_is_the_only_new_producer_route():
@@ -408,10 +410,15 @@ def test_cli_attaches_failure_diagnostics_before_the_aggregate():
         source.index("attach_failure_diagnostics(result)"),
         source.index("attach_cause_aggregate(result)"),
         source.index("result.to_string("),
-        source.index("result_payload = result.to_dict()"),
+        # Issue #22 PR-22-D: preimage（旧 `result.to_dict()`）の合成・封印・bounded
+        # encode は `build_final_result_envelope` が 1 回で行う。封印は builder に
+        # 渡す関数の中でだけ呼ぶ（CLI が preimage を組み直さない）。
         source.index("build_canonical_result_finalization_bundle("),
+        source.index("envelope = build_final_result_envelope(result, seal=seal)"),
+        source.index("persist_canonical_result_envelope(result_payload)"),
     ]
     assert order == sorted(order)
+    assert "result.to_dict()" not in source
 
 
 # --- 診断が判定へ漏れない -------------------------------------------------------
@@ -497,6 +504,13 @@ PRODUCER_SITES_ADDED_AFTER_ISSUE125 = (
     # Issue #15 PR-15-A: 同一バイナリ・同一関数の identity proof。
     "checker-identical-function-identity",
 )
+
+#: PR-125-A の後に別 Issue が **既存 site** へ足した cause slot（site は増えない）。
+#: slot を足す PR はここへ reason id を足す（それ以外の contract 変化は落とす）。
+CAUSE_SLOTS_ADDED_AFTER_ISSUE125 = {
+    # Issue #22 PR-22-D: 式サイズ予算。analysis-limitation の site を共有する。
+    NEW_PRODUCER_SITE_ID: ("expression_size_budget_exceeded",),
+}
 
 #: 現在期待される producer site 総数。
 EXPECTED_PRODUCER_SITE_COUNT = (
@@ -590,7 +604,14 @@ def test_producer_sites_manifest_keeps_every_existing_site_contract():
     before_contract = _site_contract(before)
     after_contract = _site_contract(after)
     for site_id, contract in before_contract.items():
-        assert after_contract[site_id] == contract, site_id
+        current = dict(after_contract[site_id])
+        added = set(CAUSE_SLOTS_ADDED_AFTER_ISSUE125.get(site_id, ()))
+        current["expected_cause_slots"] = [
+            slot for slot in current["expected_cause_slots"]
+            if not (set(slot["allowed_reason_ids"]) <= added)
+            or slot in contract["expected_cause_slots"]
+        ]
+        assert current == contract, site_id
 
 
 def test_new_producer_site_is_reachable_from_the_sealed_spec():
@@ -610,9 +631,12 @@ def test_new_producer_site_is_reachable_from_the_sealed_spec():
     assert row["allowed_producer_ids"] == ("analysis-limitation-producer-v1",)
     assert row["enclosing_function"] == "observe_analysis_limitation"
     assert [slot["allowed_reason_ids"] for slot in row["expected_cause_slots"]] == [
-        ("analysis_budget_exceeded",)
+        ("analysis_budget_exceeded",),
+        *((reason,) for reason in CAUSE_SLOTS_ADDED_AFTER_ISSUE125[NEW_PRODUCER_SITE_ID]),
     ]
-    assert row["expected_cause_slots"][0]["expected_identity_scope"] == "RELATIONAL"
+    assert {
+        slot["expected_identity_scope"] for slot in row["expected_cause_slots"]
+    } == {"RELATIONAL"}
 
 
 def test_pilot_accepts_the_new_sealed_reason():
@@ -621,6 +645,7 @@ def test_pilot_accepts_the_new_sealed_reason():
     )
 
     assert "analysis_budget_exceeded" in PILOT_TYPED_CAUSE_KINDS
+    assert "expression_size_budget_exceeded" in PILOT_TYPED_CAUSE_KINDS
 
 
 def test_attribution_key_is_the_exact_cause_identity_input():

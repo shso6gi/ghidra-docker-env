@@ -8,7 +8,6 @@ benchmark evaluation oracle, not of the judgement, its provenance, or the signed
 execution identity (Issue #122).
 """
 
-import json
 import hashlib
 import os
 import stat
@@ -24,6 +23,10 @@ from scripts.function_tracer_pcode.ghidra.pyghidra_support import (
 )
 from scripts.function_tracer_pcode.config import apply_runtime_environment
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.checker.output_preparation import (
+    OutputEnvelopeInvariantViolation,
+    build_final_result_envelope,
+)
 # Issue #124 PR-124-B: `result_emit` は結果 JSON の外（journal）にだけ残す区間。
 from scripts.function_tracer_pcode.core.stage_journal import (
     journal_stage_end,
@@ -219,6 +222,7 @@ def _emit_import_error_result(
     func_name2: str,
     error_message: str,
     error_kind: str = "PROGRAM_IMPORT_ERROR",
+    error_stage: str = "cli_import",
     start_time: float,
     binary1_content_identity=None,
     binary2_content_identity=None,
@@ -279,7 +283,7 @@ def _emit_import_error_result(
             "binary2_content_identity": binary2_content_identity,
             "function_name1": func_name1,
             "function_name2": func_name2,
-            "error_stage": "cli_import",
+            "error_stage": error_stage,
         },
         error_kind=error_kind,
         error_artifact_digest=error_artifact_digest,
@@ -287,14 +291,18 @@ def _emit_import_error_result(
     # Issue #124 PR-124-B: ERROR 経路の emission も同じ区間名で journal に残す
     # （journal を持つ pair が結果 JSON の有無で欠けないようにする）。
     emission_started = time.monotonic()
-    journal_stage_start("result_emit", {"kind": "emission", "path": "import_error"})
-    result_payload = result.to_dict()
+    journal_stage_start("result_emit", {"kind": "emission", "path": error_stage})
     evidence, session = result._canonical_finalization_context
-    bundle = build_canonical_result_finalization_bundle(
-        result_payload_preimage=result_payload, evidence=evidence, session=session
+    envelope = build_final_result_envelope(
+        result,
+        seal=lambda preimage: build_canonical_result_finalization_bundle(
+            result_payload_preimage=preimage, evidence=evidence, session=session
+        ),
     )
-    result.canonical_result_finalization_bundle = bundle
-    result_payload["canonical_result_finalization_bundle"] = bundle
+    result_payload = envelope.payload
+    result.canonical_result_finalization_bundle = result_payload[
+        "canonical_result_finalization_bundle"
+    ]
     persist_canonical_result_envelope(result_payload)
     output_result(
         result.to_string(
@@ -304,7 +312,7 @@ def _emit_import_error_result(
         args.output,
         args.quiet,
     )
-    json_payload = json.dumps(result_payload, ensure_ascii=False, sort_keys=True)
+    json_payload = envelope.text
     output_result(
         "\n".join(
             (
@@ -317,12 +325,52 @@ def _emit_import_error_result(
         args.quiet,
     )
     journal_stage_end("result_emit", time.monotonic() - emission_started, {
-        "kind": "emission", "path": "import_error",
+        "kind": "emission", "path": error_stage,
     })
     from scripts.function_tracer_pcode.authority.contracts import Outcome
     from scripts.function_tracer_pcode.authority.decision.production_cutover import CLI_EXIT_MATRIX
 
     sys.exit(CLI_EXIT_MATRIX[Outcome.ERROR])
+
+
+def _emit_output_invariant_error_result(
+    args,
+    *,
+    result,
+    violation: OutputEnvelopeInvariantViolation,
+    binary1_path: str,
+    binary2_path: str,
+    func_name1: str,
+    func_name2: str,
+    start_time: float,
+    binary1_content_identity=None,
+    binary2_content_identity=None,
+) -> None:
+    """最終 envelope が headroom 契約を破ったときの ERROR 出力（Issue #22 PR-22-D）。
+
+    authority 確定 **後** に起きる出力の契約違反なので、意味の限界（UNKNOWN）には
+    しない。確定済みの判定は書き換えず・切り詰めず、その receipt digest と outcome
+    を ERROR の証跡へ残したうえで、import 失敗と同じ小さい ERROR 結果として出す。
+    """
+
+    receipt = getattr(result, "decision_receipt", None)
+    decided = (
+        f"; decided_outcome={getattr(result, 'final_outcome', None)}"
+        f"; decision_receipt_digest={getattr(receipt, 'receipt_digest', None)}"
+    )
+    _emit_import_error_result(
+        args,
+        binary1_path=binary1_path,
+        binary2_path=binary2_path,
+        func_name1=func_name1,
+        func_name2=func_name2,
+        error_message=f"OUTPUT_ENVELOPE_INVARIANT_VIOLATION: {violation}{decided}",
+        error_kind="OUTPUT_ENVELOPE_INVARIANT_VIOLATION",
+        error_stage="output_final_envelope",
+        start_time=start_time,
+        binary1_content_identity=binary1_content_identity,
+        binary2_content_identity=binary2_content_identity,
+    )
 
 
 def run_equivalence_check(args):
@@ -627,7 +675,6 @@ def run_equivalence_check(args):
     render_seconds = time.monotonic() - emission_started
 
     if _get_bool_arg("emit_result_json", False):
-        result_payload = result.to_dict()
         from scripts.function_tracer_pcode.authority.decision.canonical_result import (
             build_canonical_result_finalization_bundle,
             persist_canonical_result_envelope,
@@ -636,18 +683,45 @@ def run_equivalence_check(args):
         finalization_context = getattr(
             result, "_canonical_finalization_context", None
         )
+        seal = None
         if finalization_context is not None:
             evidence, session = finalization_context
-            bundle = build_canonical_result_finalization_bundle(
-                result_payload_preimage=result_payload,
-                evidence=evidence,
-                session=session,
+
+            def seal(preimage):
+                return build_canonical_result_finalization_bundle(
+                    result_payload_preimage=preimage,
+                    evidence=evidence,
+                    session=session,
+                )
+
+        # Issue #22 PR-22-D: 準備済み payload（authority 確定前）+ authority の
+        # 値 + 診断 → 封印 → 準備時の上限で bounded encode。上限を超えるのは
+        # headroom 契約の違反で、判定は変えずに内部エラーとして落とす。
+        try:
+            envelope = build_final_result_envelope(result, seal=seal)
+        except OutputEnvelopeInvariantViolation as violation:
+            _emit_output_invariant_error_result(
+                args,
+                result=result,
+                violation=violation,
+                binary1_path=binary1_path,
+                binary2_path=binary2_path,
+                func_name1=func_name1,
+                func_name2=func_name2,
+                start_time=start_time,
+                binary1_content_identity=binary1_content_identity,
+                binary2_content_identity=binary2_content_identity,
             )
-            result.canonical_result_finalization_bundle = bundle
-            result_payload["canonical_result_finalization_bundle"] = bundle
+        result_payload = envelope.payload
+        if seal is not None:
+            result.canonical_result_finalization_bundle = result_payload[
+                "canonical_result_finalization_bundle"
+            ]
 
         persist_canonical_result_envelope(result_payload)
-        json_payload = json.dumps(result_payload, ensure_ascii=False, sort_keys=True)
+        json_payload = envelope.text
+        if not args.quiet:
+            print(f"[EquivalenceCLI] Result payload bytes: {envelope.size_line()}")
         json_content = "\n".join(
             (
                 "=== EQUIVALENCE_RESULT_JSON_BEGIN ===",

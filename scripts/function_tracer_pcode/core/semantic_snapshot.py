@@ -574,6 +574,62 @@ def traverse_semantic_graph(root: Any, *, prune=None) -> SemanticTraversal:
     return SemanticTraversal(tuple(entry_order), tuple(post_order))
 
 
+#: 木として展開したときの node 数の飽和値（凍結時の `_tree_size` と同じ上限）。
+TREE_NODE_ESTIMATE_CAP = 1 << 62
+
+
+class SemanticGraphMeter:
+    """複数の root が **合わせて** 持つ distinct node 数と、木に展開した大きさ。
+
+    root を足すたびに、まだ数えていない node だけを辿る（累計の費用は distinct
+    node + 辺に比例する）。数え方の owner はこの module（辺の分解
+    `ordered_semantic_edges` と同じ規則）で、何と比べるか（予算）は呼ぶ側が持つ。
+
+    `tree_nodes` は足した root を **木として** 展開した node 数の和（飽和付き）。
+    共有 DAG では distinct より指数的に大きくなり得るので、予算ではなく証拠として
+    使う。閉路はここでは検出しない（凍結の責務）: 数えた node へは戻らないので
+    閉路があっても止まる。
+    """
+
+    __slots__ = ("_seen", "_tree", "distinct_nodes", "tree_nodes", "roots")
+
+    def __init__(self) -> None:
+        self._seen: Dict[int, Any] = {}
+        self._tree: Dict[int, int] = {}
+        self.distinct_nodes = 0
+        self.tree_nodes = 0
+        self.roots = 0
+
+    def add_root(self, root: Any) -> None:
+        if root is None:
+            return
+        self.roots += 1
+        stack: List[Tuple[Any, bool]] = [(root, False)]
+        while stack:
+            node, exiting = stack.pop()
+            node_id = id(node)
+            if exiting:
+                size = 1
+                for edge in ordered_semantic_edges(node):
+                    if edge.child is not None:
+                        size += self._tree.get(id(edge.child), 1)
+                self._tree[node_id] = min(TREE_NODE_ESTIMATE_CAP, size)
+                continue
+            if node_id in self._seen:
+                continue
+            # object を保持して id の再利用を防ぐ（数えている間に解放されない）
+            self._seen[node_id] = node
+            self.distinct_nodes += 1
+            stack.append((node, True))
+            for edge in ordered_semantic_edges(node):
+                child = edge.child
+                if child is not None and id(child) not in self._seen:
+                    stack.append((child, False))
+        self.tree_nodes = min(
+            TREE_NODE_ESTIMATE_CAP, self.tree_nodes + self._tree.get(id(root), 1)
+        )
+
+
 def graph_representation_digest(graph: ImmutableSemanticGraph) -> Optional[str]:
     """**表現** としての graph に対する安定 digest。
 

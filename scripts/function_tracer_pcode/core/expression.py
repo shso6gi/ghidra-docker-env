@@ -732,6 +732,11 @@ class Expression:
         return get_smt_operator(operator)
     
     def to_dict(self) -> Dict[str, Any]:
+        # Issue #22 PR-22-D: この表現は共有部分式を **親ごとに展開した木** なので、
+        # 共有 DAG では distinct node が少なくても指数的な大きさになり得る。
+        # 作る前に同じ schema の大きさを DAG のまま見積もり、直列化予算を超える
+        # なら作らずに限界にする（`guard_legacy_tree_serialization`）。
+        guard_legacy_tree_serialization(self)
         return self._to_dict(set())
 
     def _to_dict(self, active: Set[int]) -> Dict[str, Any]:
@@ -750,6 +755,17 @@ class Expression:
             active.remove(node_id)
 
     def _to_dict_active(self, active: Set[int]) -> Dict[str, Any]:
+        return self._legacy_dict(lambda child: child._to_dict(active))
+
+    def _legacy_dict(self, render_child) -> Dict[str, Any]:
+        """木表現 1 node 分の dict（子は `render_child(child)` の値を置く）。
+
+        **schema の唯一の定義**。実際の直列化（`_to_dict_active`）は子を再帰的に
+        描き、大きさの見積り（`estimate_legacy_dict_bytes`）は子を placeholder に
+        して node 1 つ分だけ測る。同じ関数を通すので、field を足しても見積りと
+        実出力が食い違わない。
+        """
+
         result: Dict[str, Any] = {"type": self.expr_type.name}
         if self.value is not None:
             if self.expr_type == ExpressionType.PHI:
@@ -767,12 +783,12 @@ class Expression:
                         if not isinstance(condition, Condition):
                             raise TypeError("PHI branch condition must be a Condition")
                         condition_payload = {
-                            "expression": condition.expression._to_dict(active),
+                            "expression": render_child(condition.expression),
                             "negated": bool(condition.negated),
                         }
                     branches.append({
                         "condition": condition_payload,
-                        "value": value._to_dict(active),
+                        "value": render_child(value),
                     })
                 result["value"] = branches
             else:
@@ -786,7 +802,7 @@ class Expression:
         if self.size:
             result["size"] = self.size
         if self.operands:
-            result["operands"] = [op._to_dict(active) for op in self.operands]
+            result["operands"] = [render_child(op) for op in self.operands]
         if self.storage_info:
             result["storage_info"] = self.storage_info.to_dict()
         if self.read_order_key is not None:
@@ -846,6 +862,124 @@ class Expression:
         collect_variables_with_storage_into(self, variables)
 
 
+
+
+# ---------------------------------------------------------------------------
+# 木表現の大きさ（Issue #22 PR-22-D）
+# ---------------------------------------------------------------------------
+
+#: 木表現の直列化予算を見る観測点（`ExpressionSizeBudgetExceeded.site`）。
+LEGACY_TREE_SERIALIZATION_SITE = "core.expression.to_dict"
+
+
+def _opaque_local_bytes(value: Any) -> int:
+    """JSON 型でない local 値（`to_dict` はそのまま置く）の大きさの代用値。"""
+
+    return len(type(value).__qualname__) + 2
+
+
+def estimate_legacy_dict_bytes(
+    root: "Expression",
+    *,
+    policy: Any = None,
+    max_bytes: Optional[int] = None,
+) -> Optional[int]:
+    """`root.to_dict()` を JSON にしたときの byte 数を **作らずに** 見積もる。
+
+    木表現は同じ子を参照の数だけ展開するので、distinct node ごとに 1 回だけ
+    大きさを求め（反復 post-order・memo）、辺の数だけ足す（同じ子への辺が 2 本
+    なら 2 回）。node 1 つ分の大きさは `_legacy_dict` を子 = placeholder で呼んだ
+    dict を `policy` で測る（実出力と schema を共有）。
+
+    `max_bytes` を超えた時点で `max_bytes + 1` を返し、残りを計算しない
+    （子の大きさは根の大きさ以下なので、どこかの部分木が超えれば根も超える）。
+    閉路（未凍結の式の中だけで起き得る）では `None`: 実出力は閉路を
+    `cycle_ref` に置き換えるので、木の大きさが経路に依存し DAG の memo が使えない。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+    policy = RESULT_JSON_POLICY if policy is None else policy
+    sizes: Dict[int, int] = {}
+    pending: Dict[int, Any] = {}
+    active: Set[int] = set()
+    stack: List[Any] = [(root, False)]
+    while stack:
+        node, exiting = stack.pop()
+        node_id = id(node)
+        if exiting:
+            active.discard(node_id)
+            local, children = pending.pop(node_id)
+            # placeholder の `0` は 1 byte。子の実際の大きさと差し替える
+            size = policy.value_bytes(
+                local, max_bytes=max_bytes, opaque_bytes=_opaque_local_bytes,
+            ) - len(children)
+            for child in children:
+                size += sizes[id(child)]
+            if max_bytes is not None and size > max_bytes:
+                return max_bytes + 1
+            sizes[node_id] = size
+            continue
+        if node_id in sizes:
+            continue
+        if node_id in active:
+            return None
+        active.add(node_id)
+        children: List[Any] = []
+
+        def _placeholder(child, _children=children):
+            _children.append(child)
+            return 0
+
+        pending[node_id] = (node._legacy_dict(_placeholder), children)
+        stack.append((node, True))
+        for child in reversed(children):
+            if id(child) not in sizes:
+                stack.append((child, False))
+    return sizes.get(id(root))
+
+
+def guard_legacy_tree_serialization(expr: "Expression") -> None:
+    """木表現を作る前に大きさを見積もり、直列化予算を超えるなら限界にする。
+
+    予算の scope の外（pair 境界を通らない呼び出し）では何もしない。見積りが
+    できない形（閉路・JSON にならない key）では guard を掛けない — その場合の
+    挙動は従来の `to_dict` のまま。
+    """
+
+    from scripts.function_tracer_pcode.core.budget_policy import (
+        BudgetKind,
+        active_budget_policy,
+        budget_scope_is_active,
+        observe_budget_usage,
+        raise_expression_size_budget_exceeded,
+    )
+
+    if not budget_scope_is_active():
+        return
+    limit = active_budget_policy().serialization_bytes
+    try:
+        size = estimate_legacy_dict_bytes(expr, max_bytes=limit)
+    except (TypeError, ValueError):
+        return
+    if size is None:
+        return
+    observe_budget_usage(
+        BudgetKind.SERIALIZATION_BYTES, size, site=LEGACY_TREE_SERIALIZATION_SITE,
+    )
+    if limit is not None and size > limit:
+        from scripts.function_tracer_pcode.core.structural import (
+            structural_identity_digest,
+        )
+
+        raise_expression_size_budget_exceeded(
+            BudgetKind.SERIALIZATION_BYTES,
+            observed=size,
+            limit=limit,
+            site=LEGACY_TREE_SERIALIZATION_SITE,
+            target_key=("legacy_tree", structural_identity_digest(expr)),
+            evidence=(f"tree_node_estimate={expr.tree_size()}",),
+        )
 
 
 # Re-exported for callers that import Condition from model.expression.

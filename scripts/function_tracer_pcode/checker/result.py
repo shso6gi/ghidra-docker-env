@@ -146,6 +146,14 @@ class EquivalenceResult:
     # `checker/workflow.py` が既存の debug 伝播（`--debug` / `-d` /
     # `EQBENCH_DEBUG=1`）をそのまま入れる。
     emit_debug_trace: bool = True
+    # Issue #22 PR-22-D: authority 確定 **前** に準備した解析由来の payload
+    # （`checker.output_preparation.PreparedSemanticPayload`）。pair 境界が 1 回
+    # だけ設定し、`to_dict()` はその値を使う（解析 object を読み直さない）。
+    # 判定 authority の入力ではない。境界を通らずに組んだ結果では `None` のままで、
+    # `to_dict()` はその場で準備する。
+    prepared_semantic_payload: Optional[Any] = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
@@ -218,132 +226,17 @@ class EquivalenceResult:
         return self.effective_function2_signature or self.function2_signature
     
     def to_dict(self) -> Dict[str, Any]:
-        """機械可読な辞書に変換（JSON シリアライズ可能）"""
-        decision_receipt = None
-        if self.decision_receipt is not None:
-            from scripts.function_tracer_pcode.authority.decision.production_cutover import (
-                decision_receipt_payload,
-                outcome_from_result,
-            )
+        """機械可読な辞書に変換（JSON シリアライズ可能）。
 
-            outcome_from_result(self)
-            decision_receipt = decision_receipt_payload(self.decision_receipt)
-        elif self.canonical_decision_required:
-            raise ValueError("canonical serialization lacks DecisionReceipt")
-        conditional_decision_receipt = None
-        if self.conditional_decision_receipt is not None:
-            from scripts.function_tracer_pcode.authority.decision.production_cutover import (
-                conditional_decision_receipt_payload,
-            )
+        Issue #22 PR-22-D: field ごとの所有者（解析由来 = 準備済み payload /
+        authority / 診断）と key 順は `checker.output_preparation.RESULT_FIELDS` が
+        唯一の定義。ここは合成を呼ぶだけ。
+        """
+        from scripts.function_tracer_pcode.checker.output_preparation import (
+            result_payload,
+        )
 
-            conditional_decision_receipt = conditional_decision_receipt_payload(
-                self.conditional_decision_receipt
-            )
-        elif self.conditional_outcome is not None:
-            raise ValueError("conditional outcome without its ConditionalDecisionReceipt")
-        result = {
-            "is_equivalent": self.is_equivalent,
-            "function1_name": self.function1_name,
-            "function2_name": self.function2_name,
-            "binary1_name": self.binary1_name,
-            "binary2_name": self.binary2_name,
-            "binary1_content_identity": self.binary1_content_identity,
-            "binary2_content_identity": self.binary2_content_identity,
-            "function1_identity": self.function1_identity,
-            "function2_identity": self.function2_identity,
-            "function1_signature": self.function1_signature.to_dict() if self.function1_signature else None,
-            "function2_signature": self.function2_signature.to_dict() if self.function2_signature else None,
-            "effective_function1_signature": self.get_effective_function1_signature().to_dict() if self.get_effective_function1_signature() else None,
-            "effective_function2_signature": self.get_effective_function2_signature().to_dict() if self.get_effective_function2_signature() else None,
-            "function1_signature_hypotheses": list(self.function1_signature_hypotheses),
-            "function2_signature_hypotheses": list(self.function2_signature_hypotheses),
-            "solver_results": self.solver_results.to_dict() if self.solver_results else None,
-            "counterexample": self.counterexample.to_dict() if self.counterexample else None,
-            "total_time": self.total_time,
-            "error_message": self.error_message,
-            "failure_status": self.failure_status,
-            "failure_message": self.failure_message,
-            "type_fix_result": self.type_fix_result.to_dict() if self.type_fix_result else None,
-            "retry_count": self.retry_count,
-            "is_timeout": self.is_timeout(),
-            "final_outcome": self.final_outcome,
-            "decision_receipt": decision_receipt,
-            "conditional_outcome": self.conditional_outcome,
-            "conditional_decision_receipt": conditional_decision_receipt,
-            "c_active_base": [dict(row) for row in self.canonical_c_active_base],
-            "q_open_base": [dict(row) for row in self.canonical_q_open_base],
-            "constrained_fragments": self.constrained_fragments,
-            "pairwise_stats": self.pairwise_stats,
-            "pairwise_debug_stats": self.pairwise_debug_stats,
-            "unknown_reasons": [reason.to_dict() for reason in self.unknown_reasons],
-            "unknown_recovery_actions": [
-                action.to_dict() for action in self.unknown_recovery_actions
-            ],
-            "unknown_recovery_backlog": summarize_unknown_recovery_backlog(self.unknown_reasons),
-            "decision_gated_by_pending_proof": self.decision_gated_by_pending_proof,
-            "sat_pair_info": self.sat_pair_info,
-            "stage_path": self.stage_path,
-        }
-        from scripts.function_tracer_pcode.checker.diagnostics import result_diagnostics_payload
-
-        result["diagnostics"] = result_diagnostics_payload(self)
-        # Issue #128: 原因分析の compact 集計は常時出す。既に確定していれば
-        # それを使い、ここで作り直さない（preimage 確定前に固定するため）。
-        if self.unknown_cause_aggregate is None:
-            from scripts.function_tracer_pcode.checker.cause_aggregate import (
-                build_unknown_cause_aggregate,
-            )
-
-            self.unknown_cause_aggregate = build_unknown_cause_aggregate(self)
-        result["unknown_cause_aggregate"] = self.unknown_cause_aggregate
-        if self.canonical_result_finalization_bundle is not None:
-            result["canonical_result_finalization_bundle"] = dict(
-                self.canonical_result_finalization_bundle
-            )
-        if self.completed_recovery_proof_evidence:
-            result["completed_recovery_proof_evidence"] = list(self.completed_recovery_proof_evidence)
-        if self.reason_completion_applicability_contexts:
-            result["reason_completion_applicability_contexts"] = list(
-                self.reason_completion_applicability_contexts
-            )
-        if self.call_effect_shadow_manifest is not None:
-            result["call_effect_shadow_manifest"] = dict(self.call_effect_shadow_manifest)
-        if self.call_proof_terminal_provenance is not None:
-            result["call_proof_terminal_provenance"] = dict(
-                self.call_proof_terminal_provenance
-            )
-        if self.recurrence_promotion_receipt is not None:
-            result["recurrence_promotion_receipt"] = dict(
-                self.recurrence_promotion_receipt
-            )
-        if self.decisive_proof_provenance is not None:
-            result["decisive_proof_provenance"] = dict(self.decisive_proof_provenance)
-        if self.identical_fast_path_disposition is not None:
-            result["identical_fast_path_disposition"] = dict(
-                self.identical_fast_path_disposition
-            )
-        if self.identical_function_identity_evidence is not None:
-            result["identical_function_identity_evidence"] = dict(
-                self.identical_function_identity_evidence
-            )
-        
-        # ★ 新規追加: mips64_abi_constraints
-        if self.mips64_abi_constraints:
-            # Dict[str, Tuple[str, int]] を JSON可能な形式に変換
-            result["mips64_abi_constraints"] = {
-                k: {"signedness": v[0], "narrow_bits": v[1]}
-                for k, v in self.mips64_abi_constraints.items()
-            }
-        
-        # ★ 新規追加: デバッグトレース
-        # Issue #128 PR-128-B: trace は常に object 上に在る。debug 指定のときだけ
-        # serialize する（通常 run の原因分析は常時添付の
-        # `unknown_cause_aggregate` が持つ）。to_dict 後の pop は preimage 規則
-        # 違反なので、ここで添付しないことで条件化する。
-        if self.debug_trace and self.emit_debug_trace:
-            result["debug_trace"] = self.debug_trace.to_dict()
-        
-        return result
+        return result_payload(self)
     
     def to_string(self, verbose: bool = False, show_phase_usage: bool = False) -> str:
         lines = []

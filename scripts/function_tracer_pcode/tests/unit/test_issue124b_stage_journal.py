@@ -838,6 +838,19 @@ def _fake_equivalence_environment(monkeypatch, tmp_path, journal_path):
 
     monkeypatch.setattr(module, "output_result", _record_output)
 
+    # Issue #22 PR-22-D: CLI は preimage を `build_final_result_envelope` から
+    # 受け取る（合成・封印・bounded encode）。偽の結果は結果 schema を持たない
+    # ので、builder も「`to_dict()` を呼んでその値を書く」だけの偽物にする。
+    def _fake_envelope(fake_result, *, seal=None):
+        payload = fake_result.to_dict()
+        return SimpleNamespace(
+            payload=payload,
+            text=json.dumps(payload, sort_keys=True),
+            size_line=lambda: "fake",
+        )
+
+    monkeypatch.setattr(module, "build_final_result_envelope", _fake_envelope)
+
     args = SimpleNamespace(
         equiv=[str(binary1), str(binary2)],
         binary_ids=["B1", "B2"],

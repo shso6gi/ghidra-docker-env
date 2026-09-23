@@ -622,6 +622,9 @@ def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
         # Issue #20 PR-20-B3: conditional lane が回ったか、回ったなら何で
         # decisive にならなかったか。判定には効かない観測。
         "conditional_lane": base.get("conditional_lane"),
+        # Issue #22 PR-22-D: 式サイズ予算の値・観測した最大値・出力準備の内訳。
+        # 判定には効かない観測（既定値の根拠と headroom の使用量を読むため）。
+        "expression_budget": base.get("expression_budget"),
         "pairs": pairwise,
         "solver_invocations": solver_invocations,
         "stage_path": list(getattr(result, "stage_path", ()) or ()),
