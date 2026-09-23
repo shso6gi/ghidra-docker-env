@@ -32,6 +32,10 @@ def _neon_ext_operands_are_smt_supported(expr) -> bool:
         first_bits = expression_smt_bit_width(first)
         second_bits = expression_smt_bit_width(second)
         result_bits = max(1, int(expression_smt_bit_width(expr) or 0))
+    except RENDER_FAILURES:
+        # 属性の評価も反復 driver を回すので、閉路や内部不整合を告げてくる。
+        # それを「この形は SMT に落とせない」に化けさせない。
+        raise
     except Exception:
         return False
     if first_bits <= 0 or second_bits <= 0:
@@ -206,7 +210,15 @@ def _lower_neon_ext_operands_to_smt(
     address_context: bool,
     float_mode: str,
     result_bits: int,
+    render_child=None,
 ) -> str:
+    if render_child is None:
+        render_child = _detached_child_renderer(
+            prefer_signed_arithmetic=prefer_signed_arithmetic,
+            symbol_name_mapping=symbol_name_mapping,
+            address_context=address_context,
+            float_mode=float_mode,
+        )
     if len(operands) != 4:
         raise ValueError(f"NEON_ext expects 4 operands, got {len(operands)}")
     first, second, byte_offset_expr, element_size_expr = operands
@@ -230,20 +242,8 @@ def _lower_neon_ext_operands_to_smt(
     result_bytes = result_bits // 8
     if byte_offset < 0 or byte_offset + result_bytes > source_bytes:
         raise ValueError("NEON_ext byte offset exceeds concatenated vector width")
-    first_smt = _to_smt_internal(
-        first,
-        prefer_signed_arithmetic,
-        symbol_name_mapping,
-        address_context,
-        float_mode,
-    )
-    second_smt = _to_smt_internal(
-        second,
-        prefer_signed_arithmetic,
-        symbol_name_mapping,
-        address_context,
-        float_mode,
-    )
+    first_smt = render_child(first)
+    second_smt = render_child(second)
     first_smt = _coerce_expr_to_bitvec_width(first, first_smt, first_bits, float_mode=float_mode)
     second_smt = _coerce_expr_to_bitvec_width(second, second_smt, second_bits, float_mode=float_mode)
 
@@ -276,10 +276,18 @@ def _counted_loop_sum_exact_smt(
     symbol_name_mapping: Optional[Mapping[str, str]] = None,
     address_context: Optional[Mapping[str, Any]] = None,
     float_mode: str = "real",
+    render_child=None,
 ) -> Optional[str]:
     lowering = _lowering_of_kind(expr, LoweringKind.COUNTED_LOOP_SUM)
     if lowering is None:
         return None
+    if render_child is None:
+        render_child = _detached_child_renderer(
+            prefer_signed_arithmetic=prefer_signed_arithmetic,
+            symbol_name_mapping=symbol_name_mapping,
+            address_context=address_context,
+            float_mode=float_mode,
+        )
 
     induction_step = lowering.induction_step
     residue_cases = lowering.residue_cases
@@ -327,13 +335,12 @@ def _counted_loop_sum_exact_smt(
     def _render_bias_term(bias_expr) -> Optional[str]:
         bias_bits = max(1, int(expression_smt_bit_width(bias_expr) or result_bits or 1))
         try:
-            bias_smt = _to_smt_internal(
-                bias_expr,
-                prefer_signed_arithmetic,
-                symbol_name_mapping,
-                address_context,
-                float_mode,
-            )
+            bias_smt = render_child(bias_expr)
+        except RENDER_FAILURES:
+            # 予算の打ち切りと内部不整合は「この項は描けなかった」ではない。
+            # 下の broad handler へ落とすと、上限で止めたことが lowering の
+            # 断念に化けて、予算が効かないまま解析が続く。
+            raise
         except Exception:
             return None
         bias_smt = _coerce_expr_to_bitvec_width(
@@ -438,8 +445,9 @@ def _counted_loop_sum_exact_smt(
 
 
 # Sibling modules reference each other at call time; import them last to avoid cycles.
+from scripts.function_tracer_pcode.core.render_plan import RENDER_FAILURES
 from scripts.function_tracer_pcode.core.render_smt.render import (
-    _to_smt_internal,
+    _detached_child_renderer,
 )
 from scripts.function_tracer_pcode.core.render_smt.widths import (
     _coerce_expr_to_bitvec_width,

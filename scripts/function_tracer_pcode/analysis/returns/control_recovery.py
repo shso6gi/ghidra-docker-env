@@ -1111,7 +1111,12 @@ class BranchGuardedWhileProofService:
                         ("nonprogress_backedges", tuple(sorted(acc_nonprogress_indices))),
                         ("conditional_progress_backedges", tuple(sorted(acc_conditional_progress_keys))),
                         ("conditional_progress_guard_keys", tuple(sorted(acc_conditional_progress_keys.items(), key=repr))),
-                        ("target", tuple(condition.to_string() for condition in target_conditions or ())),
+                        # 表示文字列を証跡の鍵にしない（書式を変えると値が変わる）。
+                        # 隣の `target_guard_keys` と同じ構造 key を使う。この field は
+                        # どこからも読み戻されない証跡なので、dedup の関係は動かない。
+                        ("target", tuple(
+                            condition.structural_key() for condition in target_conditions or ()
+                        )),
                         ("target_guard_keys", tuple(sorted((self.divergence_proofs.condition_identity_key(condition) for condition in target_conditions or ()), key=repr))),
                     )
         self.debug_reporter.debug_print(

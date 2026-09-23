@@ -14,6 +14,7 @@ M-107（#107）が stage plan の 637.05s のうち 415.76s を帰属できな�
 * 診断を足しても semantic projection は変わらないこと（独立 finalization 2 本）
 """
 import concurrent.futures
+import gc
 import time
 from types import SimpleNamespace
 
@@ -451,6 +452,22 @@ def test_solver_counters_do_not_double_count():
         solver_counter_snapshot,
     )
 
+    def _measure(run):
+        """実時間を測る区間の外で世代 GC を済ませてから走らせる。
+
+        この test は 50ms の sleep に対して「2 倍未満」を主張する。suite を通しで
+        走らせると、測る区間のちょうど中で第 2 世代の回収（27 万 object 規模）が
+        起きることがあり、その 20-30ms が余裕をほぼ食い潰す。どの test が幾つ
+        object を作るかで回収の位相が変わるので、**この test と無関係な変更**で
+        赤くなる。回収を先に済ませておけば、測っているものは変わらないまま、
+        位相への依存だけが消える（主張は緩めない）。
+        """
+
+        gc.collect()
+        reset_solver_counters()
+        run()
+        return solver_counter_snapshot()
+
     delay = 0.05
     classes = [
         _solver_class("s1", SolverStatus.UNKNOWN, delay),
@@ -459,9 +476,7 @@ def test_solver_counters_do_not_double_count():
     ]
     runner = ParallelSolverRunner(timeout=5, solver_classes=classes)
 
-    reset_solver_counters()
-    runner.run_parallel("(check-sat)")
-    parallel = solver_counter_snapshot()
+    parallel = _measure(lambda: runner.run_parallel("(check-sat)"))
     # 論理的な問い合わせは 1 回、backend は 3 回。
     assert parallel["logical_queries"] == 1
     assert parallel["backend_runs"] == 3
@@ -473,7 +488,6 @@ def test_solver_counters_do_not_double_count():
     assert parallel["wall_seconds"] < parallel["backend_seconds"]
 
     # run_sequential: 最初の確定結果で打ち切るので backend は 1 回だけ。
-    reset_solver_counters()
     sequential_runner = ParallelSolverRunner(
         timeout=5,
         solver_classes=[
@@ -481,8 +495,7 @@ def test_solver_counters_do_not_double_count():
             _solver_class("d2", SolverStatus.UNSAT, delay),
         ],
     )
-    sequential_runner.run_sequential("(check-sat)")
-    sequential = solver_counter_snapshot()
+    sequential = _measure(lambda: sequential_runner.run_sequential("(check-sat)"))
     assert sequential["logical_queries"] == 1
     assert sequential["backend_runs"] == 1
     assert sequential["wall_seconds"] >= delay
@@ -491,9 +504,7 @@ def test_solver_counters_do_not_double_count():
     assert sequential["wall_seconds"] < 2 * delay
 
     # orchestration の外から直接呼ばれた run_single も論理問い合わせ 1 回。
-    reset_solver_counters()
-    runner.run_single(runner._solvers[0], "(check-sat)")
-    direct = solver_counter_snapshot()
+    direct = _measure(lambda: runner.run_single(runner._solvers[0], "(check-sat)"))
     assert direct == {
         "logical_queries": 1,
         "backend_runs": 1,

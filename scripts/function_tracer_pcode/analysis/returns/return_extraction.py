@@ -1248,11 +1248,23 @@ def _impl__return_conditions_cover_region(
 
 
 def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Tuple[Any, ...]:
+    """候補 summary の identity。
+
+    条件は `Condition.structural_key()`（構造 key）で並べる。以前はここに
+    `to_string()` の fallback があったが、**表示文字列を identity に使わない**
+    （書式を変えると鍵が変わる）。`Condition` は必ず `structural_key` を持つので
+    fallback は実際には使われておらず、外しても鍵は変わらない — この site の
+    dedup 関係は base と同一。
+
+    鍵の同値関係そのもの（予算付き key の切り詰めや可換正規化）はここでは
+    変えない。それは identity の owner（PR-22-B / #181）の話。
+    """
+
     return (
         "return_info",
         self._return_site_key(ret),
         tuple(
-            getattr(condition, "structural_key", lambda: ("condition", condition.to_string()))()
+            condition.structural_key()
             for condition in tuple(getattr(ret, "conditions", ()) or ())
         ),
         expression_key_safe(getattr(ret, "value", None)),

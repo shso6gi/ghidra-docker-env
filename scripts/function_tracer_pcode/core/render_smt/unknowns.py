@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from typing import Any, List, Optional, Tuple
+from scripts.function_tracer_pcode.core.render_smt.attributes import iter_expression_nodes
 from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
 
 
@@ -100,33 +101,10 @@ def collect_unknown_smt_declarations(expr) -> List[Tuple[str, int]]:
     return declarations
 
 
-def _iter_expression_nodes(expr) -> List[Any]:
-    if expr is None:
-        return []
-
-    nodes: List[Any] = []
-    pending: List[Any] = [expr]
-    while pending:
-        current = pending.pop()
-        if current is None:
-            continue
-        nodes.append(current)
-
-        expr_type = getattr(current, "expr_type", None)
-        expr_kind = getattr(expr_type, "__class__", None)
-        if expr_type is not None and expr_kind is not None and expr_type == expr_kind.PHI and current.value:
-            for cond, value in reversed(current.value):
-                if value is not None:
-                    pending.append(value)
-                cond_expr = getattr(cond, "expression", None) if cond is not None else None
-                if cond_expr is not None:
-                    pending.append(cond_expr)
-            continue
-
-        operands = getattr(current, "operands", None) or []
-        pending.extend(reversed([operand for operand in operands if operand is not None]))
-
-    return nodes
+#: 走査は `attributes` が唯一の実装。宣言収集（unknown / CALL / float 述語 /
+#: global address）が同じ順序・同じ共有の扱いで回るように、ここでは名前だけ
+#: 引き継ぐ（旧実装は `seen` を持たず、共有部分式を親ごとに数え直していた）。
+_iter_expression_nodes = iter_expression_nodes
 
 
 def _unknown_runtime_identity_key(expr) -> Tuple[Any, ...]:

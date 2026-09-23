@@ -109,7 +109,22 @@ def _lower_intrinsic_to_smt(
     symbol_name_mapping: Optional[Mapping[str, str]],
     address_context: bool,
     float_mode: str = "uf",
+    render_child=None,
 ) -> str:
+    """intrinsic の lowering。子は `render_child` 経由でしか描かない。
+
+    `render_child` は driver が渡す「子を描く口」。単体で呼ばれたとき（test や
+    他 module からの直接利用）は同じ反復 driver を起こす口を作る — 再帰する
+    renderer へは戻らない。
+    """
+
+    if render_child is None:
+        render_child = _detached_child_renderer(
+            prefer_signed_arithmetic=prefer_signed_arithmetic,
+            symbol_name_mapping=symbol_name_mapping,
+            address_context=address_context,
+            float_mode=float_mode,
+        )
     opcode = getattr(expr, "opcode", None)
     mnemonic = getattr(expr, "name", None) or ""
     operands = getattr(expr, "operands", None) or []
@@ -119,27 +134,12 @@ def _lower_intrinsic_to_smt(
         if len(operands) != 3:
             raise ValueError(f"PTRADD expects 3 operands, got {len(operands)}")
         base, index, element_size = operands
-        base_smt = _to_smt_internal(
+        base_smt = render_child(
             base,
-            prefer_signed_arithmetic,
-            symbol_name_mapping,
-            True,
-            float_mode,
+            address_context=True,
         )
-        index_smt = _to_smt_internal(
-            index,
-            prefer_signed_arithmetic,
-            symbol_name_mapping,
-            address_context,
-            float_mode,
-        )
-        elem_smt = _to_smt_internal(
-            element_size,
-            prefer_signed_arithmetic,
-            symbol_name_mapping,
-            address_context,
-            float_mode,
-        )
+        index_smt = render_child(index)
+        elem_smt = render_child(element_size)
         target_bits = max(
             result_bits,
             expression_smt_bit_width(base),
@@ -156,20 +156,11 @@ def _lower_intrinsic_to_smt(
         if len(operands) != 2:
             raise ValueError(f"PTRSUB expects 2 operands, got {len(operands)}")
         base, offset = operands
-        base_smt = _to_smt_internal(
+        base_smt = render_child(
             base,
-            prefer_signed_arithmetic,
-            symbol_name_mapping,
-            True,
-            float_mode,
+            address_context=True,
         )
-        offset_smt = _to_smt_internal(
-            offset,
-            prefer_signed_arithmetic,
-            symbol_name_mapping,
-            address_context,
-            float_mode,
-        )
+        offset_smt = render_child(offset)
         target_bits = max(
             result_bits,
             expression_smt_bit_width(base),
@@ -186,20 +177,11 @@ def _lower_intrinsic_to_smt(
         base, count = operands
         base_bits = max(1, int(expression_smt_bit_width(base) or 1))
         count_bits = max(1, int(expression_smt_bit_width(count) or 1))
-        base_smt = _to_smt_internal(
+        base_smt = render_child(
             base,
-            prefer_signed_arithmetic,
-            symbol_name_mapping,
-            True,
-            float_mode,
+            address_context=True,
         )
-        count_smt = _to_smt_internal(
-            count,
-            prefer_signed_arithmetic,
-            symbol_name_mapping,
-            address_context,
-            float_mode,
-        )
+        count_smt = render_child(count)
         base_smt = _coerce_expr_to_bitvec_width(base, base_smt, base_bits, float_mode=float_mode)
         count_smt = _coerce_expr_to_bitvec_width(
             count,
@@ -217,27 +199,9 @@ def _lower_intrinsic_to_smt(
         base_bits = max(1, int(expression_smt_bit_width(base) or 1))
         start_bits = max(1, int(expression_smt_bit_width(start) or 1))
         limit_bits = max(1, int(expression_smt_bit_width(limit) or 1))
-        base_smt = _to_smt_internal(
-            base,
-            prefer_signed_arithmetic,
-            symbol_name_mapping,
-            address_context,
-            float_mode,
-        )
-        start_smt = _to_smt_internal(
-            start,
-            prefer_signed_arithmetic,
-            symbol_name_mapping,
-            address_context,
-            float_mode,
-        )
-        limit_smt = _to_smt_internal(
-            limit,
-            prefer_signed_arithmetic,
-            symbol_name_mapping,
-            address_context,
-            float_mode,
-        )
+        base_smt = render_child(base)
+        start_smt = render_child(start)
+        limit_smt = render_child(limit)
         base_smt = _coerce_expr_to_bitvec_width(base, base_smt, base_bits, float_mode=float_mode)
         start_smt = _coerce_expr_to_bitvec_width(
             start,
@@ -266,6 +230,7 @@ def _lower_intrinsic_to_smt(
             symbol_name_mapping=symbol_name_mapping,
             address_context=address_context,
             float_mode=float_mode,
+            render_child=render_child,
         )
         if exact_smt is not None:
             return exact_smt
@@ -276,13 +241,7 @@ def _lower_intrinsic_to_smt(
             raise ValueError(f"STATE_TRANSITION_LOOP_COUNT expects 1 operand, got {len(operands)}")
         state = operands[0]
         state_bits = max(1, int(expression_smt_bit_width(state) or 1))
-        state_smt = _to_smt_internal(
-            state,
-            prefer_signed_arithmetic,
-            symbol_name_mapping,
-            address_context,
-            float_mode,
-        )
+        state_smt = render_child(state)
         state_smt = _coerce_expr_to_bitvec_width(
             state,
             state_smt,
@@ -299,13 +258,7 @@ def _lower_intrinsic_to_smt(
         operand_bits = []
         for operand in operands:
             bits = max(1, int(expression_smt_bit_width(operand) or 1))
-            operand_smt = _to_smt_internal(
-                operand,
-                prefer_signed_arithmetic,
-                symbol_name_mapping,
-                address_context,
-                float_mode,
-            )
+            operand_smt = render_child(operand)
             rendered.append(
                 _coerce_expr_to_bitvec_width(
                     operand,
@@ -339,6 +292,7 @@ def _lower_intrinsic_to_smt(
             address_context=address_context,
             float_mode=float_mode,
             result_bits=result_bits,
+            render_child=render_child,
         )
 
     raise UnsupportedSmtIntrinsicError(mnemonic=mnemonic, opcode=opcode)
@@ -358,7 +312,7 @@ from scripts.function_tracer_pcode.core.render_smt.loop_lowering import (
 )
 from scripts.function_tracer_pcode.core.render_smt.render import (
     UnsupportedSmtIntrinsicError,
-    _to_smt_internal,
+    _detached_child_renderer,
 )
 from scripts.function_tracer_pcode.core.render_smt.unknowns import (
     _iter_expression_nodes,

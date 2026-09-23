@@ -74,6 +74,10 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
     "core/semantic_snapshot.py": (
         # 責務の逆転（表現が identity の private helper を借りる）を禁じる。
         "scripts.function_tracer_pcode.core.structural",
+        # 描画（共有方針・束縛名・出力量）を変えても表現は動かない。
+        "scripts.function_tracer_pcode.core.render_plan",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.render_python",
         "scripts.function_tracer_pcode.authority",
         "scripts.function_tracer_pcode.checker",
         "scripts.function_tracer_pcode.cli",
@@ -111,6 +115,11 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
         "os",
     ),
     "core/structural.py": (
+        # 描画規則を変えても構造 identity は動かない（`to_string()` を key に
+        # しないという契約を import の向きでも固定する）。
+        "scripts.function_tracer_pcode.core.render_plan",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.render_python",
         "scripts.function_tracer_pcode.authority",
         "scripts.function_tracer_pcode.checker",
         "scripts.function_tracer_pcode.cli",
@@ -126,6 +135,98 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
         "scripts.function_tracer_pcode.cli",
         "scripts.function_tracer_pcode.reporting",
         "scripts.function_tracer_pcode.config",
+        "os",
+    ),
+    # --- PR-22-C: 描画層の責務分割 ---------------------------------------
+    "core/render_plan.py": (
+        # 走査と共有計画は「何を描くか」を知らない（人向けにも SMT にも使う）。
+        # 式の型を知り始めると、node 種別が増えるたびにここも触ることになる。
+        "scripts.function_tracer_pcode.core.expression",
+        "scripts.function_tracer_pcode.core.condition",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.render_python",
+        "scripts.function_tracer_pcode.analysis",
+        "scripts.function_tracer_pcode.semantics",
+        "scripts.function_tracer_pcode.proof",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "os",
+    ),
+    "core/render_output.py": (
+        # 出力口と counter は描画規則も式の型も知らない。
+        "scripts.function_tracer_pcode.core.expression",
+        "scripts.function_tracer_pcode.core.condition",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.render_plan",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.render_python",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "os",
+    ),
+    "core/render_metrics.py": (
+        "scripts.function_tracer_pcode.core.expression",
+        "scripts.function_tracer_pcode.core.condition",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.render_python",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "os",
+    ),
+    "core/render_smt/context.py": (
+        # 描画文脈は identity でも表現でもない（共有可否だけを決める）。
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.render_smt.render",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "os",
+    ),
+    "core/render_smt/bindings.py": (
+        # 名前空間 owner は式の型も identity も知らない。描画 text だけを見る。
+        "scripts.function_tracer_pcode.core.expression",
+        "scripts.function_tracer_pcode.core.condition",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.render_smt.render",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "os",
+    ),
+    "core/render_python.py": (
+        # 人向け表示を変えても SMT 側は動かない（逆向きも同じ）。
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
         "os",
     ),
     "core/loop_lowering_semantics.py": (
@@ -161,6 +262,11 @@ _LEDGER_FREE_MODULES = (
     "core/semantic_snapshot.py",
     "core/semantic_projection.py",
     "core/structural.py",
+    # 描画層も失敗の記録は持たない（限界の記録先は呼び出し側の境界）。
+    "core/render_plan.py",
+    "core/render_output.py",
+    "core/render_metrics.py",
+    "core/render_python.py",
 )
 
 #: candidate hash / graph digest で等価を決めてよい唯一の module。
@@ -218,6 +324,11 @@ _PUBLICATION_FREE_MODULES = (
     "core/render_smt/unknowns.py",
     "core/render_smt/loop_lowering.py",
     "core/render_smt/intrinsics.py",
+    "core/render_smt/bindings.py",
+    "core/render_smt/context.py",
+    "core/render_smt/attributes.py",
+    "core/render_plan.py",
+    "core/render_python.py",
 )
 
 #: loop lowering の意味を決めてよい唯一の module。
@@ -243,11 +354,47 @@ _RAW_LOWERING_FIELDS = frozenset(
 #: 生 ref そのものを読んではいけない module（凍結後の描画側）。
 _RUNTIME_REF_FREE_MODULES = ("core/render_smt/loop_lowering.py",)
 
+#: 描画テキストを **文字列として見て**よい唯一の関数。
+#:
+#: 子の描画結果は参照 1 個（`RenderedTerm`）なので、その文字を見て分岐すると、
+#: 参照が名前になった / 展開されたで判定が変わる。判定に要る性質は型付きの
+#: property（`SmtTermProperties`）で運び、text を見るのは「その node 自身の
+#: fragment を 1 回だけ分類する」この関数だけにする。
+_TEXT_INSPECTION_OWNER = ("core/render_smt/float_theory.py", "_looks_like_fp_expr")
+#: 分類器（唯一の呼び出し元）。fragment を見てよいのはこの 2 つだけ。
+_FRAGMENT_CLASSIFIER = ("core/render_smt/render.py", "classify_smt_fragment")
+_FRAGMENT_READERS = frozenset({_TEXT_INSPECTION_OWNER, _FRAGMENT_CLASSIFIER})
+#: 描画テキストを保持していそうな名前。ここに挙げた名前に対する文字列検査と
+#: 文字列リテラルとの比較を、body module では 0 件で固定する。
+_RENDERED_TEXT_NAMES = (
+    "_smt",
+    "_str",
+    "_text",
+    "fragment",
+)
+_TEXT_INSPECTION_METHODS = frozenset(
+    {"startswith", "endswith", "strip", "lstrip", "rstrip", "split", "replace", "find", "index", "count"}
+)
+#: node 本体を持つ描画 module（ここでの text 検査だけを見る）。
+_RENDER_BODY_MODULES = (
+    "core/render_smt/render.py",
+    "core/render_smt/widths.py",
+    "core/render_smt/float_theory.py",
+    "core/render_smt/intrinsics.py",
+    "core/render_smt/loop_lowering.py",
+    "core/render_smt/unknowns.py",
+    "core/render_python.py",
+)
+#: 表示文字列を identity にしてはいけない（書式を変えると判定が動く）。
+_RENDERED_TEXT_CALLS = frozenset({"to_string"})
+
 #: 凍結後に意味を読む consumer。ここが生 object を読むと、同じ式の意味が
 #: 「いつ読んだか」で変わり得る。
 _SNAPSHOT_ONLY_MODULES = (
     "core/structural.py",
     "core/semantic_snapshot.py",
+    "core/render_python.py",
+    "core/render_smt/attributes.py",
     "core/render_smt/render.py",
     "core/render_smt/widths.py",
     "core/render_smt/unknowns.py",
@@ -488,7 +635,15 @@ def test_identity_kinds_are_not_merged_into_one_type():
 
     identity = structural.StructuralIdentity
     exposed = {name for name in vars(identity) if not name.startswith("_")}
-    assert exposed == {"candidate_hash", "equals", "key", "identity_digest"}, exposed
+    # 構造 identity の面だけ。solver query / rewrite の一致条件はここに入れない。
+    # **PR-22-B が公開した 4 つのまま**: identity 型は PR-22-C の must-not-change
+    # なので、renderer の PR が facade を広げない。
+    assert exposed == {
+        "candidate_hash",
+        "equals",
+        "key",
+        "identity_digest",
+    }, exposed
     for forbidden in ("solver_query", "rewrite", "authority_digest", "query_identity"):
         assert not hasattr(identity, forbidden), forbidden
 
@@ -855,3 +1010,449 @@ def test_the_commit_functions_exist_and_are_the_only_state_writers():
                 if called in _LIFECYCLE_MARK_NAMES:
                     callers.add(node.name)
     assert callers == _LIFECYCLE_COMMIT_FUNCTIONS, callers
+
+
+def _rendered_text_name(node: ast.AST):
+    if not isinstance(node, ast.Name):
+        return None
+    return node.id if node.id.endswith(_RENDERED_TEXT_NAMES) else None
+
+
+@pytest.mark.parametrize("module_path", _RENDER_BODY_MODULES)
+def test_no_renderer_body_inspects_rendered_text(module_path):
+    """描画テキストを文字列として見る分岐は renderer に **1 つも無い**。
+
+    子の描画結果は参照 1 個なので、その文字を見た分岐は「共有したか」で答えが
+    変わる。判定に要る性質は型付きの property で運ぶ（`SmtTermProperties`）。
+    この test は種類を列挙して 0 件に固定するので、同種の分岐が後から足されれば
+    落ちる。
+    """
+
+    path = PACKAGE_ROOT / module_path
+    offenders = []
+    for function in ast.walk(_parse(path)):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if (module_path, function.name) in _FRAGMENT_READERS:
+            continue
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in _TEXT_INSPECTION_METHODS
+                and _rendered_text_name(node.func.value)
+            ):
+                offenders.append(
+                    f"{module_path}:{node.lineno} {function.name} inspects "
+                    f"{_rendered_text_name(node.func.value)}.{node.func.attr}()"
+                )
+            if isinstance(node, ast.Compare):
+                operands = [node.left, *node.comparators]
+                names = [name for name in map(_rendered_text_name, operands) if name]
+                literals = [
+                    item
+                    for item in operands
+                    if isinstance(item, ast.Constant) and isinstance(item.value, str)
+                ]
+                if names and literals:
+                    offenders.append(
+                        f"{module_path}:{node.lineno} {function.name} compares "
+                        f"{names[0]} with a string literal"
+                    )
+    assert offenders == [], offenders
+
+
+def test_the_only_text_inspection_is_reached_from_the_fragment_classifier():
+    """text を見る唯一の関数は、分類器からしか呼ばれない。
+
+    分類器は node 自身の fragment を 1 回だけ見て型付きの性質を決める。他所から
+    呼べると「子の描画結果を見る」経路が復活する。
+    """
+
+    owner_module, owner_function = _TEXT_INSPECTION_OWNER
+    classifier_module, classifier_function = _FRAGMENT_CLASSIFIER
+    callers = []
+    for path in _module_files():
+        relative = _relative(path)
+        if relative == owner_module:
+            continue
+        for function in ast.walk(_parse(path)):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(function):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == owner_function
+                ):
+                    callers.append((relative, function.name))
+    assert callers == [(classifier_module, classifier_function)], callers
+
+
+def test_the_typed_term_properties_carry_every_observation_the_renderer_needs():
+    """性質は node/fragment から決まり、共有の有無で変わらない。"""
+
+    from scripts.function_tracer_pcode.core.render_smt.render import (
+        SmtTermProperties,
+        classify_smt_fragment,
+    )
+
+    assert set(SmtTermProperties._fields) == {"is_fp_term", "boolean_literal"}
+    assert classify_smt_fragment("(fp.add a b)", None, False).is_fp_term is True
+    assert classify_smt_fragment("(bvadd a b)", None, False).is_fp_term is False
+    assert classify_smt_fragment("true", None, False).boolean_literal is True
+    assert classify_smt_fragment("false", None, False).boolean_literal is False
+    assert classify_smt_fragment("(ite c a b)", None, False).boolean_literal is None
+
+
+def test_identity_is_never_built_from_the_human_rendering():
+    """`to_string()` の結果を identity / cache key / digest に使わない。
+
+    人向けの表示は読みやすさのために変わる。identity に使うと、書式を直した
+    だけで cache の当たり外れと証明の一致条件が動く（PR-22-C で共有参照を
+    入れたのがまさにその変更）。
+    """
+
+    offenders: List[str] = []
+    for path in _module_files():
+        relative = _relative(path)
+        tree = _parse(path)
+        for function in ast.walk(tree):
+            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            name = function.name.lower()
+            builds_identity = (
+                name.endswith("_key")
+                or "identity" in name
+                or "digest" in name
+                or "fingerprint" in name
+            )
+            if not builds_identity:
+                continue
+            for node in ast.walk(function):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in _RENDERED_TEXT_CALLS
+                ):
+                    offenders.append(f"{relative}:{node.lineno} in {function.name}")
+    assert offenders == [], offenders
+
+
+#: 描画を打ち切る / 内部不整合を告げる型。回復 handler に吸わせない。
+_RENDER_FAILURE_TYPES = frozenset(
+    {
+        "RenderOutputLimitExceeded",
+        "RenderPlanInvariantError",
+        "RenderedTermContractError",
+        "RenderGraphCycleError",
+    }
+)
+
+#: source 側でそれらを再送出するときに書く名前（`render_plan` が唯一の owner）。
+_RENDER_FAILURE_TUPLE = "RENDER_FAILURES"
+
+
+@pytest.mark.parametrize("module_path", _RENDER_BODY_MODULES)
+def test_a_render_abort_is_never_swallowed_by_a_recovery_handler(module_path):
+    """描画 module の広い `except` は、打ち切りを **必ず** 先に通すこと。
+
+    上限で止めたこと・閉路だったことが「この枝は描けなかった」に化けると、
+    予算も閉路検出も効かないまま解析が続き、切り詰めた表現が下流へ出る。
+
+    規則であって一覧ではない: 「子を描く呼び出しを含む `try` だけ」を見ると、
+    何が打ち切りを投げ得るかの一覧を持つことになり、投げ得る場所が増えるたび
+    （属性の評価が反復 driver を回すようになった、など）に一覧の方が古くなる。
+    だからこれらの module では、広い `except` すべてに typed な再送出を課す。
+    その `try` が本当に何も描かないなら、再送出は何もしない 1 行で済む — 一覧を
+    保守し続けるより安い。`except Exception` を消せるならその方が良い
+    （baseline は delete-only）。
+    """
+
+    path = PACKAGE_ROOT / module_path
+    offenders = []
+    for node in ast.walk(_parse(path)):
+        if not isinstance(node, ast.Try):
+            continue
+        broad = [
+            index
+            for index, handler in enumerate(node.handlers)
+            if handler.type is None
+            or (isinstance(handler.type, ast.Name) and handler.type.id == "Exception")
+        ]
+        if not broad:
+            continue
+        reraises = []
+        for index, handler in enumerate(node.handlers):
+            names = set()
+            if isinstance(handler.type, ast.Name):
+                names.add(handler.type.id)
+            elif isinstance(handler.type, ast.Tuple):
+                names.update(
+                    element.id for element in handler.type.elts if isinstance(element, ast.Name)
+                )
+            if _RENDER_FAILURE_TUPLE in names:
+                reraises.append(index)
+        if not reraises:
+            offenders.append(f"{module_path}:{node.lineno} (nothing lets a render abort through)")
+            continue
+        if all(index > broad[0] for index in reraises):
+            offenders.append(f"{module_path}:{node.lineno} (typed handler comes too late)")
+    assert offenders == [], offenders
+
+
+def test_the_render_failure_types_have_one_owner():
+    """再送出する型の一覧が `render_plan.RENDER_FAILURES` 1 箇所であること。
+
+    同じ一覧が module ごとに手書きされると、型を足したときに一部だけが追従して
+    「その module では吸われる」状態が静かに残る。
+    """
+
+    from scripts.function_tracer_pcode.core import render_plan
+
+    assert {failure.__name__ for failure in render_plan.RENDER_FAILURES} == set(
+        _RENDER_FAILURE_TYPES
+    )
+    for module_path in _RENDER_BODY_MODULES:
+        source = (PACKAGE_ROOT / module_path).read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.ExceptHandler) or not isinstance(node.type, ast.Tuple):
+                continue
+            names = {
+                element.id for element in node.type.elts if isinstance(element, ast.Name)
+            }
+            assert not (names & _RENDER_FAILURE_TYPES), (
+                f"{module_path}:{node.lineno} spells out the render failure types; "
+                f"catch render_plan.{_RENDER_FAILURE_TUPLE} instead"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 走査 machinery の owner（`render_plan.ResolutionSchedule`）
+#
+# 描画 driver と node 属性の評価は同じ形の反復をする。予定・経路・切り替えの
+# 規則を両方に書くと片方だけが直る（実際、閉路判定が scheduled を active と
+# 数える同じ誤りが両方にあった）。規則は 1 実装に寄せ、借りる側が別実装へ
+# 戻ったらここで落ちる。
+# ---------------------------------------------------------------------------
+
+#: 走査 machinery を所有する module。
+_TRAVERSAL_OWNER = "core/render_plan.py"
+
+#: 反復走査を回す（= 予定表を借りる）module。
+_TRAVERSAL_BORROWERS = ("core/render_smt/attributes.py",)
+
+
+def test_the_cycle_judgement_has_one_implementation():
+    """`RenderGraphCycleError` を投げるのは予定表だけであること。
+
+    閉路かどうかを言うには「今の経路に居るか」を知らねばならず、それを知って
+    いるのは予定表だけ。別 module が投げているなら、その module が経路を自分で
+    持っている（= 2 実装目がある）。
+    """
+
+    offenders = []
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        relative = path.relative_to(PACKAGE_ROOT).as_posix()
+        if relative.startswith("tests/") or relative == _TRAVERSAL_OWNER:
+            continue
+        for node in ast.walk(_parse(path)):
+            if not isinstance(node, ast.Raise) or node.exc is None:
+                continue
+            raised = node.exc
+            name = None
+            if isinstance(raised, ast.Call) and isinstance(raised.func, ast.Name):
+                name = raised.func.id
+            elif isinstance(raised, ast.Name):
+                name = raised.id
+            if name == "RenderGraphCycleError":
+                offenders.append(f"{relative}:{node.lineno}")
+    assert offenders == [], offenders
+
+
+def test_the_collection_switch_rule_has_one_owner():
+    """切り替えの閾値を読むのは予定表だけであること。
+
+    driver 側が閾値を読むと、切り替えの規則が実質 2 つになる。予定表が
+    `should_collect_requests()` で答える。
+    """
+
+    offenders = []
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        relative = path.relative_to(PACKAGE_ROOT).as_posix()
+        if relative.startswith("tests/") or relative == _TRAVERSAL_OWNER:
+            continue
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.Name) and node.id == "DISCOVERY_AFTER_RETRIES":
+                offenders.append(f"{relative}:{node.lineno}")
+    assert offenders == [], offenders
+
+
+@pytest.mark.parametrize("module_path", _TRAVERSAL_BORROWERS)
+def test_a_borrower_keeps_no_active_path_of_its_own(module_path):
+    """予定表を借りる側が、経路の帳簿を自分で持たないこと。
+
+    自前の `on_path` / `active` を持った瞬間に、閉路判定が何を見るかという
+    判断が 2 箇所になる。借りる側は `ResolutionSchedule` を使うだけ。
+    """
+
+    path = PACKAGE_ROOT / module_path
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    assert "ResolutionSchedule" in source, module_path
+    bookkeeping = {"on_path", "active", "_active", "_enter", "_leave", "_enter_path", "_leave_path"}
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in bookkeeping:
+            offenders.append(f"{module_path}:{node.lineno} assigns {node.id}")
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in bookkeeping:
+            offenders.append(f"{module_path}:{node.lineno} defines {node.name}")
+    assert offenders == [], offenders
+
+
+# ---------------------------------------------------------------------------
+# 組み立て方: 幅が子の数に比例する本体は、前から 1 回で組み立てること
+# ---------------------------------------------------------------------------
+
+#: 可変長の子を 1 つの文字列へ畳んでよい唯一の道。
+_FRAGMENT_BUILDER = "fragment"
+
+
+def _iterates_a_child_collection(node: ast.AST) -> bool:
+    """`expr.operands` / `branches` のような **可変長の子**を回しているか。"""
+
+    sources = {"operands", "branches", "value", "cases", "arguments", "args"}
+    for inner in ast.walk(node):
+        if isinstance(inner, ast.Attribute) and inner.attr in sources:
+            return True
+        if isinstance(inner, ast.Name) and inner.id in sources:
+            return True
+    return False
+
+
+@pytest.mark.parametrize("module_path", _RENDER_BODY_MODULES)
+def test_a_wide_body_builds_its_fragment_in_one_pass(module_path):
+    """**可変長の子**を後ろから積み直さないこと（規則、一覧ではない）。
+
+    `result = f"(ite … {result})"` のように後ろから積み直すと、文字列 copy が
+    branch 数の 2 乗になる。前から置いて最後に 1 回連結すれば線形。
+
+    これは **予算の話ではない**（組み立て中の fragment は speculative なので、
+    出力予算では裁かない）。renderer の書き方の問題で、PR-22-C の変更軸そのもの。
+    `join` は線形なので禁じない — 禁じるのは 2 乗になる形だけ。
+
+    見るのは「子の集まり（`operands` / `branches` …）を回しているか」。深さや幅で
+    決まらない繰り返し（結果幅で決まる `let` の入れ子、固定個数の `concat`）は
+    対象にしない。
+    """
+
+    path = PACKAGE_ROOT / module_path
+    offenders = []
+    for loop in ast.walk(_parse(path)):
+        if not isinstance(loop, (ast.For, ast.AsyncFor)):
+            continue
+        if not _iterates_a_child_collection(loop.iter):
+            continue
+        for node in ast.walk(loop):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name) and isinstance(node.value, ast.JoinedStr):
+                    reread = any(
+                        isinstance(part, ast.FormattedValue)
+                        and isinstance(part.value, ast.Name)
+                        and part.value.id == target.id
+                        for part in node.value.values
+                    )
+                    if reread:
+                        offenders.append(
+                            f"{module_path}:{node.lineno} rebuilds {target.id} from itself "
+                            "while walking a child collection"
+                        )
+            if (
+                isinstance(node, ast.AugAssign)
+                and isinstance(node.op, ast.Add)
+                and isinstance(node.target, ast.Name)
+                and isinstance(node.value, (ast.JoinedStr, ast.Constant))
+                and isinstance(getattr(node.value, "value", ""), str)
+            ):
+                offenders.append(
+                    f"{module_path}:{node.lineno} accumulates a string with += "
+                    "while walking a child collection"
+                )
+    assert offenders == [], offenders
+
+
+def test_the_render_budget_has_one_meaning_and_one_owner():
+    """出力予算を書き出し口以外へ渡さないこと。
+
+    `render_bytes` が意味するのは書き出した byte 数だけ。計画中に作る fragment は
+    speculative（本体が要求した子を捨てる、instance が出力に現れない）なので、
+    そこへ出力予算を当てると **正しい描画を拒める**。
+
+    予算を受け取ってよいのは `CountingWriter` だけ。計画側が予算引数を持つと、
+    「本番では渡さないが test では渡す」形になり、production で成立しない保証を
+    test が主張できてしまう。
+    """
+
+    import inspect
+
+    from scripts.function_tracer_pcode.core import render_plan
+
+    # 計画側は予算引数を持たない
+    parameters = set(inspect.signature(render_plan.build_render_plan).parameters)
+    assert not [name for name in parameters if "limit" in name or "budget" in name], parameters
+
+    # 予算を渡す呼び出しは書き出し口だけ
+    offenders = []
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        relative = path.relative_to(PACKAGE_ROOT).as_posix()
+        if relative.startswith("tests/"):
+            continue
+        for node in ast.walk(_parse(path)):
+            if not isinstance(node, ast.Call):
+                continue
+            name = None
+            if isinstance(node.func, ast.Name):
+                name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                name = node.func.attr
+            if name in {"CountingWriter", "RenderOutputLimitExceeded"}:
+                continue  # 予算の owner と、それが投げる typed failure
+            for keyword in node.keywords:
+                if keyword.arg and keyword.arg.endswith("limit_bytes"):
+                    target = name or "<call>"
+                    if target in {"render_smt_term", "render_human_text", "_to_smt_internal"}:
+                        continue  # 入口どうしの受け渡し（最終的に writer へ届く）
+                    offenders.append(f"{relative}:{node.lineno} passes {keyword.arg} to {target}")
+    assert offenders == [], offenders
+
+
+def test_the_render_budget_is_not_multiplied_into_a_second_one():
+    """出力予算から別の上限を導かないこと。
+
+    以前は「材料の許容量 = 出力予算 × 8」があった。材料と出力の比には普遍的な
+    有限上限が無いので、その倍率は原理的に決められない。倍率を書ける形が残ると、
+    次に困ったときまた倍率を足す（そして形状に合わせて調整する）ことになる。
+    """
+
+    modules = ("core/render_plan.py", "core/render_output.py")
+    offenders = []
+    for module_path in modules:
+        for node in ast.walk(_parse(PACKAGE_ROOT / module_path)):
+            if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Mult):
+                continue
+            names = {
+                inner.id
+                for inner in ast.walk(node)
+                if isinstance(inner, ast.Name)
+            } | {
+                inner.attr
+                for inner in ast.walk(node)
+                if isinstance(inner, ast.Attribute)
+            }
+            if any("limit" in name.lower() or "budget" in name.lower() for name in names):
+                offenders.append(f"{module_path}:{node.lineno}")
+    assert offenders == [], offenders
+
+

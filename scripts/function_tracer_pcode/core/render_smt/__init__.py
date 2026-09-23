@@ -1,5 +1,21 @@
-"""SMT-LIB rendering of expressions: core renderer, width coercion, float theory, loop lowerings, intrinsics and unknown-symbol declarations."""
+"""SMT-LIB rendering of expressions: core renderer, width coercion, float theory, loop lowerings, intrinsics and unknown-symbol declarations.
 
+描画は DAG を 1 回だけ辿る反復実装（`core/render_plan`）で、共有部分式は
+`let` で 1 回だけ定義する（`bindings`）。描画文脈（`context`）が違う同じ node は
+別の束縛になる。node 属性の評価（幅 / Bool sort / 符号拡張の好み）は
+`attributes` が反復 + DAG memo で回す。
+
+**この package が外へ出す面は描画の入口だけ**（`expression_to_smt` /
+`condition_to_smt` / 証拠用の 2 つ / `render_smt_term` / `SMT_RENDER_SCHEMA`）。
+共有方針・束縛名・型付きの項・属性評価は描画の実装どうしの取り決めなので、
+`bindings` / `context` / `attributes` / `render` を直接 import する側だけが見る。
+外へ出すと、共有の条件や性質の持ち方を変えるたびに外部 consumer が壊れる。
+ここに並ぶそれ以外の名前は PR-22-C より前からある再 export（既存 import の互換）。
+"""
+
+from scripts.function_tracer_pcode.core.render_smt.bindings import (  # noqa: F401
+    SMT_RENDER_SCHEMA,
+)
 from scripts.function_tracer_pcode.core.render_smt.calls import (  # noqa: F401
     CallDeclarationConflict,
     CallSmtDeclarations,
@@ -74,6 +90,7 @@ from scripts.function_tracer_pcode.core.render_smt.render import (  # noqa: F401
     _coerce_bool_to_bitvec,
     _coerce_expr_to_bool,
     _to_smt_internal,
+    render_smt_term,
     expression_contains_signed_comparison,
     expression_contains_unsupported_smt_ops,
     expression_node_has_unsupported_smt_ops,
