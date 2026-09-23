@@ -9,9 +9,11 @@
   debug 伝播（`--debug` / `-d` / `EQBENCH_DEBUG=1`）をそのまま入れる。
 * **生成停止ではない**: trace object は常に作られ、結果に残る。object 読者
   （diagnostics / attempts / `LegacyExecutionSnapshot` の event surface /
-  `to_string(show_phase_usage)` / `unknown_cause_aggregate` の生成）は従来どおり
-  full trace を読める。`evidence_present.debug_trace` は「JSON に出したか」では
-  なく「aggregate 生成時に trace を観測できたか」なので、添付を止めても True。
+  `to_string(show_phase_usage)` / `unknown_cause_aggregate` の生成）は添付を
+  止めても trace 由来の情報を失わない（Issue #22 PR-22-D 以後、出力を準備した
+  結果ではそれを authority 前に準備した値から読む）。`evidence_present.debug_trace`
+  は「JSON に出したか」ではなく「aggregate 生成時に trace を観測できたか」なので、
+  添付を止めても True。
 * **canonical 契約は無変更**: `debug_trace` key の有無は serialization surface
   なので preimage digest は変わるが、semantic projection は 1 field も変わらず、
   trace 無しの payload でも bundle の validate / replay が通る。
@@ -362,7 +364,7 @@ def test_diagnostics_and_shadow_fingerprint_survive_without_emission():
     assert snap_off.decisive_counterexample == snap_on.decisive_counterexample
     assert set(snap_on.public_schema) - set(snap_off.public_schema) == {"debug_trace"}
 
-    # (d) `to_string(show_phase_usage=True)` は従来どおり trace を読める。
+    # (d) `to_string(show_phase_usage=True)` は添付を止めても phase 使用量を描ける。
     rendered = withholding.to_string(show_phase_usage=True)
     assert trace_off.format_phase_usage_summary() in rendered
 

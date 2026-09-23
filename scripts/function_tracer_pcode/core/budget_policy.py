@@ -90,9 +90,11 @@ class BudgetPolicy:
     serialization_bytes: Optional[int] = None
     serialization_nodes: Optional[int] = None
     #: `serialization_bytes` のうち、authority 確定 **後** に足される field
-    #: （判定・canonical reason・receipt・finalization bundle・診断）のために
-    #: 出力の準備（authority 確定前）が空けておく byte 数。準備した payload が
-    #: 使えるのは `serialization_bytes - envelope_headroom_bytes` まで。
+    #: （判定・canonical reason・receipt・診断）のために出力の準備（authority 確定前）
+    #: が空けておく byte 数。準備した payload が使えるのは
+    #: `serialization_bytes - envelope_headroom_bytes` まで。値は出力 schema から導く
+    #: 下限以上でなければならない（`checker/output_schema.validate_envelope_headroom`）。
+    #: finalization bundle はこの予算の外の attachment（上限は preimage に掛かる）。
     envelope_headroom_bytes: int = 0
 
     def __post_init__(self) -> None:

@@ -529,8 +529,9 @@ def row_max_bytes(row: Tuple[Column, ...], policy: Optional["JsonEncodingPolicy"
 class JsonBudget:
     """walker が数えた byte を受け取る相手（上限を超えたら `exceeded()`）。
 
-    snapshot 側の aggregate（`core/budget_policy.SerializationWork`）はこれを継承し、
-    超過を pair terminal な限界に変え、木の distinct node も数える。
+    snapshot 側の aggregate（`core/budget_policy.SerializationWork`）は継承せずに
+    同じ interface（`charge` / `remaining` / `tree` / `exceeded`）を持ち、超過を
+    pair terminal な限界に変え、木の distinct node も数える。
     """
 
     def __init__(self, max_bytes: Optional[int] = None) -> None:

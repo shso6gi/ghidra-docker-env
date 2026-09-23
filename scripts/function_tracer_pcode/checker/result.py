@@ -211,9 +211,11 @@ class EquivalenceResult:
         default=None, repr=False, compare=False
     )
     # Issue #128 PR-128-B: `debug_trace` **object の生成は止めない**。この flag は
-    # `to_dict()` が JSON へ添付するかだけを決める（object 読者 — diagnostics /
-    # attempts / LegacyExecutionSnapshot / to_string(show_phase_usage) /
-    # aggregate 生成 — は従来どおり full trace を読める）。既定 True なので
+    # `to_dict()` が JSON へ添付するかだけを決める（trace object は結果に残る）。
+    # Issue #22 PR-22-D: 出力を準備した結果では、diagnostics / to_string /
+    # 原因集計は authority 前に準備した値（`PreparedSemanticPayload.trace_timings` /
+    # `cause_evidence`）だけを読み、trace を読み直さない。準備していない結果
+    # （直接組んだ `EquivalenceResult`）では従来どおり trace から作る。既定 True なので
     # `EquivalenceResult` を直接組む呼び出し元の挙動は変わらず、production では
     # `checker/workflow.py` が既存の debug 伝播（`--debug` / `-d` /
     # `EQBENCH_DEBUG=1`）をそのまま入れる。

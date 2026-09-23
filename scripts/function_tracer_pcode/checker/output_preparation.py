@@ -34,11 +34,11 @@ CLI:
   `INVARIANT`（切り詰めてはいけない → 出力契約の違反 = 内部エラー）。
 * **live object の読み方**（`read(result, options)`）: 値そのものではなく
   **JSON source**（`core/json_encoding` の文法）を返す。既存の container は参照を
-  渡し、record 1 件分の表現は `JsonLazy(record.to_dict)` と **呼ばずに** 渡し、
-  collection の並べ直しは generator で渡す。`to_dict()` の呼び出し・複製・内包表記
-  で表現を先に作らない（`tests/unit/test_architecture_boundaries.py` が AST で固定）。
-  表現を作るのは `OutputField.prepare` が呼ぶ `JsonEncodingPolicy.prepare` だけで、
-  それは残り予算に達した時点で辿るのをやめる。
+  渡し、record は record 自身を渡し（walker がその `json_items()` を引く）、
+  collection の並べ直しは `each` / `pairs_of` などの source で渡す。`to_dict()` の
+  呼び出し・複製・内包表記で表現を先に作らない（`tests/unit/test_architecture_boundaries.py`
+  が AST で固定）。表現を作るのは `OutputField.prepare` が呼ぶ `JsonEncodingPolicy.prepare`
+  の walker だけで、それは要素を引き出すたびに数え、残り予算に達した時点で止まる。
 
 **出力 option**: `OutputOptions` を準備の時点で 1 回だけ決める（debug trace を添付
 するか・SMT 式を保存するか）。合成は `prepared.options` だけを読む。

@@ -1833,8 +1833,9 @@ def _output_field_rows(tree: ast.Module) -> List[ast.Call]:
     raise AssertionError("RESULT_FIELDS not found")
 
 
-#: 読み方の中で呼んでよい集計（authority 後に live な trace を読む診断。出力は TRUNCATE。
-#: builder 自身の有界化は PR-22-D の残件 — `docs` / PR 本文の残件表）
+#: 読み方の中で呼んでよい集計（authority 後は準備済みの `cause_evidence` と schema で
+#: 行数が有界な canonical reason だけから組む。trace 由来の部分は authority 前に
+#: 診断用の作業量で数えながら作る。出力は TRUNCATE）
 _KNOWN_EAGER_READERS = frozenset({"RESULT_FIELDS[unknown_cause_aggregate]"})
 
 #: `json_items` の中で identity key をそのまま写す site（key の owner は identity）。

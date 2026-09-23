@@ -301,9 +301,10 @@ class AnalysisSnapshot:
         if not callable(to_dict):
             raise TypeError("analysis must provide object-derived to_dict() data")
         # Issue #22 PR-22-D: snapshot 1 つ分の最終表現（解析の `to_dict()` と効果要約の
-        # 投影）を **1 つの直列化の作業量** として数える。木も木以外の値も、作る前か
-        # record 1 件を作った直後に足され、合計が予算を超えた時点で残りを作らずに
-        # pair terminal な限界になる（式 1 本ごとの予算とは別の aggregate）。
+        # 投影）を **1 つの直列化の作業量** として数える。木は DAG のまま見積もってから、
+        # 木以外の値は walker / codec が 1 要素ずつ写しながら足し（作ってから数えない）、
+        # 合計が予算を超えた時点で残りを作らずに pair terminal な限界になる（式 1 本ごとの
+        # 予算とは別の aggregate）。
         with serialization_scope(
             site=SNAPSHOT_SERIALIZATION_SITE,
             target_parts=(

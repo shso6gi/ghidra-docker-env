@@ -850,18 +850,6 @@ def apply_type_name_to_parameter(
     return updated
 
 
-def parameters_without_runtime_objects(
-    parameters: Optional[List[Dict[str, Any]]],
-) -> Optional[List[Dict[str, Any]]]:
-    """シリアライズ可能なパラメータ一覧へ正規化する。"""
-    if parameters is None:
-        return None
-    return [
-        clone_parameter_descriptor(param, include_data_type_obj=False)
-        for param in parameters
-    ]
-
-
 @dataclass(frozen=True)
 class SignatureHypothesis:
     """関数シグネチャへ重ねる仮説的オーバーライド。"""
