@@ -396,7 +396,7 @@ def _broker_session_with_parent(row):
 
 @pytest.mark.parametrize("row", SUBORDINATE_DECOMPILATION_ADAPTER_ROWS)
 def test_subordinate_broker_binds_live_parent_without_completing_it(row):
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         BrokerAnalyzer,
         BrokerDecompiler,
         Function,
@@ -452,7 +452,7 @@ def test_subordinate_broker_binds_live_parent_without_completing_it(row):
 def test_subordinate_broker_parent_authority_failure_blocks_raw_decompile_and_projects_unknown():
     from scripts.function_tracer_pcode.authority.contracts import Outcome
     from scripts.function_tracer_pcode.authority.lifecycle.pilot import run_dual_write_pilot
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         BrokerAnalyzer,
         BrokerDecompiler,
         Function,
@@ -517,7 +517,7 @@ def test_subordinate_broker_contract_authority_failure_projects_error_without_ra
 ):
     from scripts.function_tracer_pcode.authority.contracts import Outcome
     from scripts.function_tracer_pcode.authority.lifecycle.pilot import run_dual_write_pilot
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         BrokerAnalyzer,
         BrokerDecompiler,
         Function,
@@ -574,7 +574,7 @@ def test_subordinate_broker_contract_authority_failure_projects_error_without_ra
 
 
 def test_subordinate_broker_without_live_parent_uses_standalone_operational_owner():
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         BrokerAnalyzer,
         BrokerDecompiler,
         Function,
@@ -629,7 +629,7 @@ def test_subordinate_broker_without_live_parent_uses_standalone_operational_owne
 
 
 def test_subordinate_timeout_is_observed_without_parent_completion_or_slice6_event():
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         BrokerAnalyzer,
         BrokerDecompiler,
         Function,
@@ -670,7 +670,7 @@ def test_subordinate_timeout_is_observed_without_parent_completion_or_slice6_eve
 
 @pytest.mark.parametrize("parent_live", (True, False))
 def test_subordinate_raw_exception_is_exact_and_never_emits_slice6_event(parent_live):
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         BrokerAnalyzer,
         Function,
         Program,

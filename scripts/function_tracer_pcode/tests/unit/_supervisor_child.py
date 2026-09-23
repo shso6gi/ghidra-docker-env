@@ -18,6 +18,8 @@ API だけで実行する。
   outcome を知らない）。
 * 要求した outcome と違う decision が出たら envelope を書かずに
   ``FIXTURE_FAILURE_EXIT`` で終わる。UNKNOWN を TIMEOUT の代わりに通さない。
+* Ghidra の fake と loop の fixture は共有 fixture module
+  （``_operational_test_fixtures`` / ``_loop_test_fixtures``）から取る。
 """
 
 from __future__ import annotations
@@ -196,7 +198,7 @@ def _step_checkpoint(context: _ChildContext, _step: Mapping[str, Any]) -> None:
         TOP_LEVEL_SOURCE_CONTRACT,
         decompile_function,
     )
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         BrokerAnalyzer,
         BrokerDecompiler,
         Function,
@@ -246,13 +248,11 @@ def _loop_signals(session: Any, *, execute_solver: bool) -> None:
     from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         render_loop_v2_solver_query,
     )
-    from scripts.function_tracer_pcode.tests.unit import (
-        test_unknown_taxonomy_v2_phase6_loop_recurrence as loop_fixture,
+    from scripts.function_tracer_pcode.tests.unit._loop_test_fixtures import (
+        loop_exact_fixture,
     )
 
-    blocker, _, _, _, exact_case, summary_case, left, right = (
-        loop_fixture._loop_exact_fixture()
-    )
+    blocker, _, _, _, exact_case, summary_case, left, right = loop_exact_fixture()
     with production_signal_scope(session):
         if emit_loop_recurrence_signal(
             blocker, producer_site_manifest_id="pairwise-pending-loop-blocker",

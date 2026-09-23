@@ -353,8 +353,8 @@ def _build_real_timeout_payload():
     from scripts.function_tracer_pcode.authority.lifecycle import (
         execution_authority as execution_module,
     )
-    from scripts.function_tracer_pcode.tests.unit import (
-        test_unknown_taxonomy_v2_phase6_loop_recurrence as loop_fixture,
+    from scripts.function_tracer_pcode.tests.unit._loop_test_fixtures import (
+        loop_exact_fixture,
     )
 
     key = b"w" * 32
@@ -388,7 +388,7 @@ def _build_real_timeout_payload():
         )
         session = connector.begin({"case": "issue124c-timeout-kind"})
         blocker, _, _, _, exact_case, summary_case, left, right = (
-            loop_fixture._loop_exact_fixture()
+            loop_exact_fixture()
         )
         with production_signal_scope(session):
             assert emit_loop_recurrence_signal(

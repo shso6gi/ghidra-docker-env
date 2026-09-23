@@ -51,9 +51,12 @@ from scripts.function_tracer_pcode.authority.lifecycle.production_signals import
     production_signal_scope,
 )
 from scripts.function_tracer_pcode.authority.lifecycle.stream import EventType
-from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.analysis import ReturnInfo
 from scripts.function_tracer_pcode.core import Condition, Expression
+from scripts.function_tracer_pcode.tests.unit._loop_test_fixtures import (
+    loop_exact_fixture as _loop_exact_fixture,
+    loop_function_analysis as _analysis,
+)
 from scripts.function_tracer_pcode.core.recurrence_contracts import (
     QuarantinedRecurrenceProposal,
     RecurrenceSeedCore,
@@ -337,78 +340,6 @@ def test_method_b_is_not_a_reason_or_proof_identity():
         for spec in LOOP_REASON_SPECS.values()
         for proof_kind in spec.proof_kinds
     )
-
-
-def _loop_exact_fixture():
-    from unittest.mock import Mock
-
-    from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
-    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
-    from scripts.function_tracer_pcode.core import Condition, Expression, ReturnInfo
-    from scripts.function_tracer_pcode.tests.unit.test_object_centric_runtime_refs import (
-        _readonly_loop_summary,
-        _readonly_sum_expr,
-    )
-
-    base = Expression.parameter("base", index=0, data_type="int *", size=8)
-    exact_value = Expression.binary_op(
-        "INT_ADD",
-        Expression.memory(base, size=4),
-        Expression.memory(
-            Expression.binary_op(
-                "INT_ADD", base, Expression.constant(4, size=8)
-            ),
-            size=4,
-        ),
-    )
-    summary_value = _readonly_sum_expr(_readonly_loop_summary(start=0, step=1))
-    count = Expression.parameter("count", index=1, data_type="int", size=4)
-    count_is_two = Condition(
-        Expression.binary_op(
-            "INT_EQUAL", count, Expression.constant(2, size=4)
-        ),
-        False,
-    )
-    parameters = [
-        {"name": "base", "index": 0, "data_type": "int *", "size": 8},
-        {"name": "count", "index": 1, "data_type": "int", "size": 4},
-    ]
-    exact_return = ReturnInfo(
-        address="0x1010",
-        value=exact_value,
-        conditions=[count_is_two],
-        pcode_identity="exact-return-a",
-    )
-    summary_return = ReturnInfo(
-        address="0x2020",
-        value=summary_value,
-        conditions=[count_is_two],
-        pcode_identity="summary-return-b",
-    )
-    exact_case = ReturnCase(
-        0, [count_is_two], exact_value, exact_return, parameters=parameters
-    )
-    summary_case = ReturnCase(
-        1, [count_is_two], summary_value, summary_return, parameters=parameters
-    )
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
-    left = _analysis("left-loop-exact")
-    right = _analysis("right-loop-summary")
-    blocker = LoopBlockerProductionSignal.from_loop_fallback(
-        left,
-        right,
-        exact_case,
-        summary_case,
-        "counted_loop_summary_expression_proof_missing",
-        observation_contract_id="return-and-memory-v1",
-    )
-    term = LoopExactTermRelationCompletionSignal.from_pairwise_cases(
-        blocker, exact_case, summary_case
-    )
-    guard = LoopExactGuardPartitionCompletionSignal.from_pairwise_cases(
-        term, exact_case, summary_case
-    )
-    return blocker, term, guard, strategy, exact_case, summary_case, left, right
 
 
 def _typed_loop_query(
@@ -2067,16 +1998,6 @@ def test_loop_sat_refutation_enters_phase6_1_safety_backlog(monkeypatch):
         "loop_exact_summary_relation_unproven",
         "counterexample_analysis_safety_unproven",
     }
-
-
-def _analysis(name="loop_fn"):
-    return FunctionReturnAnalysis(
-        function_name=name,
-        entry_point="0x1000",
-        parameters=[],
-        returns=[],
-        binary_id="binary-content-a",
-    )
 
 
 def _proposal(seed="seed-a", pattern="counted-loop"):
