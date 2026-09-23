@@ -193,6 +193,27 @@ def test_c2_a_nested_record_with_one_huge_field_is_not_copied_or_encoded():
     assert peak < 4 * 1024 * 1024
 
 
+def test_c5_a_huge_plain_field_of_the_effect_summary_stops_the_snapshot_projection():
+    """snapshot の効果投影は、式の木以外（plain な列）も写しながら数えて止まる。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
+    from scripts.function_tracer_pcode.tests.unit.test_effect_comparison_surface import (
+        _equivalent_void_effect_analyses,
+    )
+
+    analysis = _equivalent_void_effect_analyses()[0]
+    analysis.effect_summary.incomplete_reasons = tuple(f"reason-{index}" for index in range(2_000_000))
+
+    def _snapshot():
+        with pair_failure_scope(("c5",), None), budget_policy_scope(_SMALL):
+            with pytest.raises(ExpressionSizeBudgetExceeded):
+                AnalysisSnapshot.from_function_analysis(analysis)
+
+    elapsed, peak = _measured(_snapshot)
+    assert elapsed < 1.0
+    assert peak < 4 * 1024 * 1024
+
+
 def test_c3_a_producer_built_huge_string_is_bounded_before_authority_and_in_the_row():
     """producer が作成時に連結した巨大な自由文でも、authority 前と出力の行で有界になる。"""
 
