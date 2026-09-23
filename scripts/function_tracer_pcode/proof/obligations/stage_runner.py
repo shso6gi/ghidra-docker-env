@@ -181,26 +181,42 @@ def _cutover_branch_policy(result: Any) -> tuple[Any, tuple[str, ...], bool]:
     return attempt_outcome, actions, continue_fallback
 
 
+@dataclass(frozen=True)
+class BranchComparison:
+    """branch の結果を作った比較: その authority と runtime と、比べた pair（Issue #167）。"""
+
+    binding: Optional[ComparisonAuthorityBinding]
+    runtime: ObligationRuntimeSession
+    analysis1: Any
+    analysis2: Any
+
+
 def branch_comparison(
     result: Any,
     runtime: ObligationRuntimeSession,
     analysis1: Any = None,
     analysis2: Any = None,
-) -> Tuple[Optional[ComparisonAuthorityBinding], ObligationRuntimeSession]:
-    """branch の結果を作った比較の authority と、その比較に仕える obligation runtime。
+) -> BranchComparison:
+    """branch の結果を作った比較（authority・runtime・比べた pair）。結果ごとに 1 回だけ求める。
 
-    branch の後で実行する gate と集約は、その結果の UNKNOWN reason と証拠を作った比較で
-    行う（Issue #167）。runtime は結果の frame が使った runtime（runner の raw pair の比較
-    なら runner の runtime、再帰抽象化・recurrence promotion の比較ならその比較の runtime）。
-    frame の無い結果には authority が無いので、どの比較の state も読まない別の runtime を使う。
+    branch の後で行う gate・集約・証拠の合流は、その結果の UNKNOWN reason と証拠を作った
+    比較で行う。runtime と pair は結果の frame が使ったもの（runner の raw pair の比較なら
+    runner の runtime と raw pair、再帰抽象化・recurrence promotion の比較ならその比較の
+    runtime と、その比較が比べた pair）。frame の無い結果には authority が無いので、runner の
+    pair を、どの比較の state も読まない別の runtime で扱う。
     """
 
     frame = getattr(result, "_prepared_dispatch_frame", None)
-    if frame is None or getattr(frame, "source", None) is None:
-        return None, ObligationRuntimeSession.create(analysis1, analysis2)
-    comparison = frame.comparison_binding
+    source = getattr(frame, "source", None)
+    if frame is None or source is None:
+        return BranchComparison(None, ObligationRuntimeSession.create(analysis1, analysis2), analysis1, analysis2)
     frame_runtime = getattr(frame, "obligation_runtime", None)
-    return comparison, frame_runtime if frame_runtime is not None else runtime
+    return BranchComparison(
+        frame.comparison_binding,
+        frame_runtime if frame_runtime is not None else runtime,
+        getattr(source, "analysis1", analysis1),
+        getattr(source, "analysis2", analysis2),
+    )
 
 
 def run_obligation_branch_plan(
@@ -360,29 +376,35 @@ def run_obligation_branch_plan(
             last_call_effect_manifest = result.call_effect_shadow_manifest
         elif last_call_effect_manifest is not None:
             result.call_effect_shadow_manifest = last_call_effect_manifest
-        checker._merge_completed_recovery_proofs_from_result(analysis1, analysis2, result)
+        # Issue #167: この結果を作った比較（authority・runtime・比べた pair）。gate・集約・
+        # 証拠の合流はこの比較で行う。
+        branch = branch_comparison(result, runtime, analysis1, analysis2)
+        checker._merge_completed_recovery_proofs_from_result(branch.analysis1, branch.analysis2, result)
         def gate_producer(gate_kind, reason, _requirement):
+            subject = branch
+            gate_result = result
+
             def produce():
                 if active_strategy is None:
                     return FunctionProofOutcome.INCONCLUSIVE
                 if gate_kind == "return_coverage":
                     complete = active_strategy._return_coverage_proof_is_complete(
-                        reason, analysis1, analysis2
+                        reason, subject.analysis1, subject.analysis2
                     )
                 elif gate_kind == "call_effect":
                     complete = active_strategy._call_effect_summary_proof_is_complete(
-                        reason, analysis1, analysis2
+                        reason, subject.analysis1, subject.analysis2
                     )
                 elif gate_kind == "loop_summary":
                     complete = active_strategy._recovery_proof_is_complete(
-                        reason, analysis1, analysis2
+                        reason, subject.analysis1, subject.analysis2
                     )
                 elif gate_kind == "counterexample_safety":
                     complete = active_strategy._sat_unsafety_resolution_proof_is_complete(
                         reason,
-                        analysis1,
-                        analysis2,
-                        current_counterexample_raw=getattr(result, "counterexample_raw", None),
+                        subject.analysis1,
+                        subject.analysis2,
+                        current_counterexample_raw=getattr(gate_result, "counterexample_raw", None),
                     )
                     if complete:
                         return FunctionProofOutcome.NOT_EQUIVALENT
@@ -399,8 +421,8 @@ def run_obligation_branch_plan(
         while True:
             # Issue #167: gate は、この結果を作った比較（raw pair と relation）の範囲で、
             # その比較の runtime に積む（別の比較の証拠・artifact・outcome は使わない）。
-            comparison, branch_runtime = branch_comparison(result, runtime, analysis1, analysis2)
-            with comparison_scope(comparison):
+            branch_runtime = branch.runtime
+            with comparison_scope(branch.binding):
                 branch_runtime.plan_proof_gates(result, _RECOVERY_TO_GATE, gate_producer)
                 while True:
                     gate_item, _gate_value = branch_runtime.run_next()
@@ -474,14 +496,15 @@ def run_obligation_branch_plan(
                 last_call_effect_manifest = result.call_effect_shadow_manifest
             elif last_call_effect_manifest is not None:
                 result.call_effect_shadow_manifest = last_call_effect_manifest
+            branch = branch_comparison(result, runtime, analysis1, analysis2)
             checker._merge_completed_recovery_proofs_from_result(
-                analysis1, analysis2, result
+                branch.analysis1, branch.analysis2, result
             )
         pre_aggregation_outcome = result.is_equivalent
         # 結果の reason を解消できるのは、その結果を作った比較の runtime の outcome だけ
         # （Issue #167。runtime は 1 つの比較に仕える）。
-        comparison, branch_runtime = branch_comparison(result, runtime, analysis1, analysis2)
-        with comparison_scope(comparison):
+        branch_runtime = branch.runtime
+        with comparison_scope(branch.binding):
             DecisionAggregator.apply(result, branch_runtime)
         post_aggregation_outcome = result.is_equivalent
         dispatch_frame = getattr(result, "_prepared_dispatch_frame", None)

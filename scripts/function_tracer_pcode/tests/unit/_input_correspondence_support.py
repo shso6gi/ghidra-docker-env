@@ -133,7 +133,7 @@ def comparison_frame(comparison: Any, **fields: Any) -> Any:
 
     fields.setdefault("obligation_runtime", None)
     return SimpleNamespace(
-        source=SimpleNamespace(pair_digest=comparison.source_pair_digest),
+        source=SimpleNamespace(comparison_digest=comparison.raw_pair_digest),
         comparison_binding=comparison,
         **fields,
     )

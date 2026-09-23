@@ -525,7 +525,7 @@ def comparison_binding_for_raw_pair(
 
     try:
         source = StrategySourceAnalysisPair.create(analysis1, analysis2)
-    except (TypeError, ValueError):
+    except TypeError:
         return None
     return ComparisonAuthorityBinding.of(source, relation)
 

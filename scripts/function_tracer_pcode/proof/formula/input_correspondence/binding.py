@@ -84,13 +84,14 @@ def _is_digest(value: Any) -> bool:
 class ComparisonAuthorityBinding:
     """比較に依存する authority の identity: raw pair と、その最終 relation の組。"""
 
-    source_pair_digest: str
+    #: 比べている raw pair の identity（``StrategySourceAnalysisPair.comparison_digest``）。
+    raw_pair_digest: str
     input_correspondence_digest: str
     #: 照合には使わない（値は digest が表す）。gate が relation から値を導き直すために持つ。
     relation: InputCorrespondenceSet = field(compare=False, repr=False)
 
     def __post_init__(self) -> None:
-        if not _is_digest(self.source_pair_digest):
+        if not _is_digest(self.raw_pair_digest):
             raise ValueError("comparison authority requires the raw pair digest")
         if type(self.relation) is not InputCorrespondenceSet:
             raise TypeError("comparison authority requires the final InputCorrespondenceSet")
@@ -109,7 +110,7 @@ class ComparisonAuthorityBinding:
     def digest(self) -> str:
         return hashlib.sha256(repr((
             "comparison_authority_v1",
-            self.source_pair_digest,
+            self.raw_pair_digest,
             self.input_correspondence_digest,
         )).encode("utf-8")).hexdigest()
 

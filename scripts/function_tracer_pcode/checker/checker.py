@@ -55,7 +55,11 @@ from scripts.function_tracer_pcode.proof.call_effect.preflight import CallProofD
 # Re-exports kept for callers that import these names from this module.
 from scripts.function_tracer_pcode.smt import SolverResult
 from scripts.function_tracer_pcode.checker.abi_retry import AbiRetryMixin
-from scripts.function_tracer_pcode.proof.obligations.branch_context import BranchCheckContext, build_branch_check_context
+from scripts.function_tracer_pcode.proof.obligations.branch_context import (
+    BranchCheckContext,
+    build_branch_check_context,
+    successor_branch_context,
+)
 from scripts.function_tracer_pcode.checker.unknown_refinement import refine_unknown_reasons
 from scripts.function_tracer_pcode.checker.recurrence_promotion import (
     complete_recurrence_promotion_signals,
@@ -788,7 +792,13 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                                     force_strategy=strategy,
                                     # 6c-2: runner 由来の ctx は再帰にも明示転送、direct で組んだ ctx は
                                     # 固定転送せず再帰側で従来どおり direct context を再生成する。
-                                    branch_context=ctx if context_was_supplied else None,
+                                    # Issue #167: 後継 pair は別の比較なので、元の比較の replan plan
+                                    # （後継 ledger の intent）は持ち込まない。
+                                    branch_context=(
+                                        successor_branch_context(ctx)
+                                        if context_was_supplied
+                                        else None
+                                    ),
                                 )
                             finally:
                                 del self._active_recurrence_promotion_authority

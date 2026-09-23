@@ -100,3 +100,29 @@ def read_only(analysis):
     return analysis.completed_recovery_proof_evidence
 '''
     assert sorted(name for name, _line in _writes(ast.parse(source))) == ["assign", "augmented", "via_setattr"]
+
+
+def test_comparison_annotations_are_written_only_through_their_writer():
+    """比較が raw analysis に書き戻す観測（比較の identity から除く note）は、登録した書き込み口
+    ``record_comparison_annotation`` だけで書く（直接 append すると、除外の対象が名前だけで
+    決まり、誰が書いたかを保証できない）。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import COMPARISON_ANNOTATION_NOTES
+
+    direct = []
+    for path in sorted(PACKAGE.rglob("*.py")):
+        relative = path.relative_to(PACKAGE).as_posix()
+        if relative.startswith("tests/"):
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"append", "extend", "insert"}
+                and any(
+                    isinstance(argument, ast.Constant) and argument.value in COMPARISON_ANNOTATION_NOTES
+                    for argument in ast.walk(node)
+                )
+            ):
+                direct.append((relative, node.lineno))
+    assert direct == []

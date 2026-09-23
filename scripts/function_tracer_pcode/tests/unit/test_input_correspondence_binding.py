@@ -85,7 +85,7 @@ def test_the_binding_separates_raw_pairs_that_share_a_relation_digest():
     assert comparison_binding_of(*cmp.pair_a) == cmp.a
     assert comparison_binding_of(*cmp.pair_a).digest == cmp.a.digest
     # 同じ raw pair・違う relation は別の比較。
-    assert cmp.a.source_pair_digest == cmp.b.source_pair_digest and cmp.a != cmp.b
+    assert cmp.a.raw_pair_digest == cmp.b.raw_pair_digest and cmp.a != cmp.b
 
 
 def test_evidence_is_adopted_only_by_the_same_raw_pair_under_the_same_relation():
@@ -317,15 +317,20 @@ def test_branch_gates_use_the_comparison_and_runtime_of_the_result():
     cmp = _comparisons()
     runner_runtime, inner_runtime = _runtime(cmp.pair_a), _runtime(cmp.pair_c)
 
-    def result(comparison, runtime):
-        frame = SimpleNamespace(source=object(), comparison_binding=comparison, obligation_runtime=runtime)
+    def result(comparison, runtime, pair):
+        source = SimpleNamespace(analysis1=pair[0], analysis2=pair[1])
+        frame = SimpleNamespace(source=source, comparison_binding=comparison, obligation_runtime=runtime)
         return SimpleNamespace(_prepared_dispatch_frame=frame)
 
-    assert branch_comparison(result(cmp.a, runner_runtime), runner_runtime) == (cmp.a, runner_runtime)
-    assert branch_comparison(result(cmp.c, inner_runtime), runner_runtime) == (cmp.c, inner_runtime)
+    own = branch_comparison(result(cmp.a, runner_runtime, cmp.pair_a), runner_runtime, *cmp.pair_a)
+    assert (own.binding, own.runtime, own.analysis1, own.analysis2) == (cmp.a, runner_runtime, *cmp.pair_a)
+    # 別の比較の結果は、その比較の runtime と、その比較が比べた pair で扱う（gate の対象も）。
+    other = branch_comparison(result(cmp.c, inner_runtime, cmp.pair_c), runner_runtime, *cmp.pair_a)
+    assert (other.binding, other.runtime, other.analysis1, other.analysis2) == (cmp.c, inner_runtime, *cmp.pair_c)
     # frame の無い結果は、どの比較の state も読まない別の runtime で扱う。
-    comparison, isolated = branch_comparison(SimpleNamespace(), runner_runtime, *cmp.pair_a)
-    assert comparison is None and isolated is not runner_runtime and isolated.comparison_binding is None
+    frameless = branch_comparison(SimpleNamespace(), runner_runtime, *cmp.pair_a)
+    assert frameless.binding is None and frameless.runtime is not runner_runtime
+    assert frameless.runtime.comparison_binding is None
 
 
 @pytest.mark.parametrize("strategy_name", ["pairwise", "monolithic"])
