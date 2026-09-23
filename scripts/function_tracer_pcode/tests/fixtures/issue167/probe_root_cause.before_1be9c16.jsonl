@@ -1,0 +1,8 @@
+{"probe": "W1_cross_use_hint_contamination", "use_b_narrowed": true, "use_b_normalized": "(= ((_ extract 31 0) x) (_ bv0 32))"}
+{"expected_semantics": "sat", "monolithic": "unsat", "probe": "W6_false_equivalent"}
+{"expected_semantics": "unsat", "monolithic": "sat", "probe": "W3_false_not_equivalent"}
+{"original": "(bvadd x (_ bv1 64))", "original_bits": 64, "probe": "sort_change_bare_arithmetic", "rewritten": "(bvadd ((_ extract 31 0) x) (_ bv1 32))", "rewritten_bits": 32}
+{"differs_somewhere": "sat", "original": "(ite (bvult ((_ sign_extend 32) ((_ extract 31 0) p)) (_ bv16 64)) (_ bv1 32) (_ bv0 32))", "probe": "signed_unsigned_comparison", "rewritten": "(ite (bvslt ((_ extract 31 0) p) (_ bv16 32)) (_ bv1 32) (_ bv0 32))"}
+{"differs_somewhere": "(error \"line 3 column 182: Sorts (_ BitVec 32) and (_ BitVec 64) are incompatible\")", "original": "(ite (= (bvnot (bvand p (_ bv4294967295 64))) (_ bv18446744069414584320 64)) (_ bv1 32) (_ bv0 32))", "probe": "mask_parent_sort", "rewritten": "(ite (= (bvnot ((_ extract 31 0) p)) (_ bv18446744069414584320 64)) (_ bv1 32) (_ bv0 32))"}
+{"differs_somewhere": "sat", "original": "((_ extract 31 0) (bvsdiv (bvand a (_ bv4294967295 64)) (bvand b (_ bv4294967295 64))))", "probe": "div_composite_operand", "rewritten": "((_ extract 31 0) (bvsdiv ((_ extract 31 0) a) ((_ extract 31 0) b)))"}
+{"differs_somewhere": "sat", "original": "(concat in_a0_hi x)", "probe": "independent_fragment_collapse", "rewritten": "((_ sign_extend 32) x)"}
