@@ -32,6 +32,7 @@ from scripts.function_tracer_pcode.reporting.timeout_hotspot_summary import (
     child_solver_timeout_evidence,
     supervisor_deadline_evidence,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 OCCURRENCE = "production-pilot-0b193214248780a69165c124"
 STREAM = f"stream-{OCCURRENCE}"
@@ -401,6 +402,7 @@ def _build_real_timeout_payload():
                 requirement=requirement,
                 analysis1=left,
                 analysis2=right,
+                input_correspondence=build_input_correspondence_set(left, right),
                 case1=exact_case,
                 case2=summary_case,
                 pair_id="(issue124c,left,right)",

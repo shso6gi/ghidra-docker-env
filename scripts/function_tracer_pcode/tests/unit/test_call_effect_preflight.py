@@ -360,7 +360,7 @@ def test_receipt_merges_guard_closure_binding_consumption_and_exclusion():
         frame.generation,
         runtime.current_view.view_id,
         runtime.premise_digest,
-        1,
+        1, "relation-digest",
     )
     ledger = runtime.open_pair_ledger(ledger_binding, 1)
     ledger.close(PairClosureEvidence.validated(
@@ -403,7 +403,7 @@ def test_call_effect_replan_binds_successor_after_new_projection_is_extracted():
     old_binding = PairLedgerBinding(
         "successor-session", "S_PAIRWISE", old_prepared.surface_digest,
         old_projection.projection_id, 1,
-        runtime.current_view.view_id, runtime.premise_digest, 1,
+        runtime.current_view.view_id, runtime.premise_digest, 1, "relation-digest",
     )
     old_ledger = runtime.open_pair_ledger(old_binding, 1)
     proof_requirement = ProofRequirementId.create(
@@ -435,7 +435,7 @@ def test_call_effect_replan_binds_successor_after_new_projection_is_extracted():
         frame.generation,
         successor_plan.derived_view_id,
         successor_plan.premise_digest,
-        2,
+        2, "relation-digest",
     )
     with pytest.raises(RuntimeError, match="does not match successor intent"):
         runtime.open_pair_ledger(stale_projection_binding, 1)
@@ -454,7 +454,7 @@ def test_call_effect_replan_binds_successor_after_new_projection_is_extracted():
         frame.generation,
         successor_plan.derived_view_id,
         successor_plan.premise_digest,
-        2,
+        2, "relation-digest",
     )
     successor = runtime.open_pair_ledger(replacement_binding, 1)
     assert successor is not old_ledger

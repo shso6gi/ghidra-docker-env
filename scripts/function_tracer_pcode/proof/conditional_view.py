@@ -536,9 +536,13 @@ def build_conditional_equivalence_formula(
     left_view: ConditionalSemanticView,
     right_view: ConditionalSemanticView,
     *,
+    input_correspondence: Any,
     debug: bool = False,
 ) -> ConditionalEquivalenceFormula:
     """conditional view 由来の formula を組む **唯一の入口**。
+
+    ``input_correspondence`` は view の元になった base（raw）pair の最終 relation。
+    view は call を書き換えただけの派生物なので、relation を view から作り直さない。
 
     ``FormulaBuilder(allow_call=True)`` を production 側で直接使わせないための薄い
     adapter。``view.analysis`` 以外を conditional builder へ渡す経路を作らない。
@@ -579,6 +583,7 @@ def build_conditional_equivalence_formula(
     result = builder.build_equivalence_formula_extended(
         left_view.analysis,
         right_view.analysis,
+        input_correspondence=input_correspondence,
     )
     # dependency minimization はしない。両 view の assumption をそのまま合わせる。
     assumption_set = normalize_assumption_premises(

@@ -47,13 +47,14 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
     DeferredCallRef,
 )
 from scripts.function_tracer_pcode.proof import conditional_view as view_module
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 from scripts.function_tracer_pcode.proof.assumptions import (
     AssumptionKind,
     AssumptionPremise,
 )
 from scripts.function_tracer_pcode.proof.conditional_view import (
     ConditionalSemanticView,
-    build_conditional_equivalence_formula,
+    build_conditional_equivalence_formula as _build_conditional_formula_with_relation,
     create_conditional_view,
     external_callee_spec_premise,
 )
@@ -61,6 +62,17 @@ from scripts.function_tracer_pcode.proof.formula.builder import (
     CallFormulaUnsupported,
     FormulaBuilder,
 )
+
+
+# Issue #167: conditional formula の parameter premise は base（raw）pair の最終
+# relation から作る。view は call を書き換えた派生物なので、test は view の元の
+# analysis から relation を明示的に作って渡す。
+def build_conditional_equivalence_formula(left_view, right_view, **kwargs):
+    if "input_correspondence" not in kwargs:
+        kwargs["input_correspondence"] = build_input_correspondence_set(
+            getattr(left_view, "analysis", left_view), getattr(right_view, "analysis", right_view)
+        )
+    return _build_conditional_formula_with_relation(left_view, right_view, **kwargs)
 
 
 NO_OBSERVATION = ExternalCallEffectPolicy()
@@ -632,9 +644,9 @@ def test_unconditional_builder_rejects_a_call_analysis_end_to_end():
     builder = FormulaBuilder()
     assert builder.allow_call is False
     with pytest.raises(CallFormulaUnsupported):
-        builder.build_equivalence_formula_extended(view.analysis, view.analysis)
+        builder.build_equivalence_formula_extended(view.analysis, view.analysis, input_correspondence=build_input_correspondence_set(view.analysis, view.analysis))
     with pytest.raises(CallFormulaUnsupported):
-        builder.build_base_context(view.analysis, view.analysis)
+        builder.build_base_context(view.analysis, view.analysis, input_correspondence=build_input_correspondence_set(view.analysis, view.analysis))
     with pytest.raises(CallFormulaUnsupported):
         builder._collect_call_smt_declarations(view.analysis)
 
@@ -653,7 +665,7 @@ def test_unconditional_builder_rejects_a_call_in_a_guard():
         ]
     )
     with pytest.raises(CallFormulaUnsupported):
-        FormulaBuilder().build_equivalence_formula_extended(guarded, guarded)
+        FormulaBuilder().build_equivalence_formula_extended(guarded, guarded, input_correspondence=build_input_correspondence_set(guarded, guarded))
 
 
 def test_conditional_builder_declares_the_call_uf():
@@ -711,13 +723,14 @@ def test_conditional_entry_point_rejects_semantics_changing_builder_options():
             build_conditional_equivalence_formula(
                 left_view, right_view, **{option: True}
             )
-    signature = inspect.signature(build_conditional_equivalence_formula)
+    signature = inspect.signature(_build_conditional_formula_with_relation)
     assert not [
         name
         for name, parameter in signature.parameters.items()
         if parameter.kind is inspect.Parameter.VAR_KEYWORD
     ]
-    assert set(signature.parameters) == {"left_view", "right_view", "debug"}
+    # 公開するのは view 2 つ、base pair の最終 relation、診断の debug だけ。
+    assert set(signature.parameters) == {"left_view", "right_view", "input_correspondence", "debug"}
 
 
 def test_conditional_formula_carries_no_untracked_fp_assumption():
@@ -734,7 +747,7 @@ def test_conditional_formula_carries_no_untracked_fp_assumption():
     # （= この test が空振りしていないこと）。
     injected = FormulaBuilder(allow_call=True, assume_fp_non_nan=True)
     injected_formula = injected.build_equivalence_formula_extended(
-        left_view.analysis, right_view.analysis
+        left_view.analysis, right_view.analysis, input_correspondence=build_input_correspondence_set(left_view.analysis, right_view.analysis),
     ).formula
     assert "fp.isNaN" in injected_formula
     # entry point 経由の formula は、その追跡外 assertion を含まない。
@@ -836,9 +849,9 @@ def test_unconditional_formula_output_is_unchanged_by_the_flag():
         return_type="long",
     )
     other = plain.semantic_successor(binary_id="binary2")
-    unconditional = FormulaBuilder().build_equivalence_formula_extended(plain, other)
+    unconditional = FormulaBuilder().build_equivalence_formula_extended(plain, other, input_correspondence=build_input_correspondence_set(plain, other))
     conditional = FormulaBuilder(allow_call=True).build_equivalence_formula_extended(
-        plain, other
+        plain, other, input_correspondence=build_input_correspondence_set(plain, other),
     )
     assert unconditional.formula == conditional.formula
 

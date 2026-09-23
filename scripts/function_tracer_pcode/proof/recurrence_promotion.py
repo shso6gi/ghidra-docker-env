@@ -6,6 +6,11 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Iterable, Mapping, Optional, Tuple
 
+from scripts.function_tracer_pcode.core.evidence_authority import (
+    AUTHORITY_SCOPE_KEY,
+    FUNCTION_UNARY,
+    record_function_unary_evidence,
+)
 from scripts.function_tracer_pcode.analysis.returns.summary_returns import (
     accept_summary_return_candidates,
 )
@@ -971,7 +976,9 @@ def _prepare_side_for_proposal(
         validation_evidence.proof_result_digest,
         validation_evidence.dependency_subproof_digests,
     )
+    # unary（関数単体）の recurrence artifact。peer 関数も入力の対応も前提にしない。
     evidence = {
+        AUTHORITY_SCOPE_KEY: FUNCTION_UNARY,
         "proof_obligation_id": (
             "proof_obligation_id",
             "loop_recurrence_proof",
@@ -1019,9 +1026,7 @@ def _prepare_side_for_proposal(
     )
     unary.artifacts.append(artifact)
     entry = unary.publish_recurrence_artifact(artifact, seed, proposal)
-    successor.completed_recovery_proof_evidence = (
-        tuple(successor.completed_recovery_proof_evidence or ()) + (evidence,)
-    )
+    record_function_unary_evidence(successor, evidence)
     successor.completed_recovery_proof_ids = (
         tuple(successor.completed_recovery_proof_ids or ())
         + (evidence["proof_obligation_id"],)

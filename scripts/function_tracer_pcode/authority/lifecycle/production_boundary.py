@@ -252,6 +252,9 @@ def _run_conditional_lane(checker: Any, result: Any, *, projection: Any) -> None
             result,
             projection=projection,
             analyses=getattr(result, "_conditional_lane_analyses", None),
+            input_correspondence_factory=getattr(
+                result, "_conditional_lane_input_correspondence_factory", None
+            ),
             observation_policy=getattr(checker, "external_call_effect_policy", None),
             solver_runner=getattr(checker, "solver_runner", None),
             timeout=getattr(checker, "timeout", None),

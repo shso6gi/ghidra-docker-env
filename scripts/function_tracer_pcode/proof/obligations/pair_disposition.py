@@ -60,13 +60,17 @@ class PairLedgerBinding:
     derived_view_id: Tuple[Any, ...]
     premise_digest: str
     graph_generation: int
-    schema_version: str = "pair_disposition_ledger_v2"
+    #: この ledger の closure の前提になった比較の authority（raw pair と最終
+    #: InputCorrespondence の組の digest、Issue #167）。validator は現在の比較と値で照合する。
+    comparison_authority_digest: str
+    schema_version: str = "pair_disposition_ledger_v3"
 
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             self.schema_version, self.comparison_session_id, self.branch_id,
             self.prepared_surface_digest, self.projection_id, self.frame_generation,
             self.derived_view_id, self.premise_digest, self.graph_generation,
+            self.comparison_authority_digest,
         )
 
 
@@ -434,10 +438,12 @@ class PairLedgerSuccessorIntent:
     derived_view_id: Tuple[Any, ...]
     premise_digest: str
     graph_generation: int
+    #: 後継も前任と同じ比較（同じ raw pair と最終 InputCorrespondence）の ledger（Issue #167）。
+    comparison_authority_digest: str
     predecessor_projection_id: str
     projection_refresh_required: bool = False
     state: PairLedgerPromotionState = PairLedgerPromotionState.OPEN
-    schema_version: str = "pair_ledger_successor_intent_v2"
+    schema_version: str = "pair_ledger_successor_intent_v3"
 
     def stable_key(self) -> Tuple[Any, ...]:
         return (
@@ -448,6 +454,7 @@ class PairLedgerSuccessorIntent:
             self.derived_view_id,
             self.premise_digest,
             self.graph_generation,
+            self.comparison_authority_digest,
             self.predecessor_projection_id,
             self.projection_refresh_required,
             self.state.value,
@@ -462,6 +469,7 @@ class PairLedgerSuccessorIntent:
             and binding.derived_view_id == self.derived_view_id
             and binding.premise_digest == self.premise_digest
             and binding.graph_generation == self.graph_generation
+            and binding.comparison_authority_digest == self.comparison_authority_digest
             and (
                 not self.projection_refresh_required
                 or binding.projection_id != self.predecessor_projection_id
@@ -896,9 +904,12 @@ class ProducerValidatedClosureArtifact:
     derived_view_id: Tuple[Any, ...]
     premise_digest: str
     graph_generation: int
+    #: closure を発行した比較の authority（Issue #167）。封印に入れ、別の比較の ledger では
+    #: 検証を通らない。
+    comparison_authority_digest: str
     authority_digest: str
     validation_status: str = "validated"
-    schema_version: str = "producer_validated_closure_v2"
+    schema_version: str = "producer_validated_closure_v3"
 
     PRODUCER_KIND: ClassVar[str] = "abstract"
 
@@ -906,7 +917,8 @@ class ProducerValidatedClosureArtifact:
         payload = (
             self.PRODUCER_KIND, self.proposition_digest, self.evidence_digest,
             self.derived_view_id, self.premise_digest,
-            self.graph_generation, self.validation_status, self.schema_version,
+            self.graph_generation, self.comparison_authority_digest,
+            self.validation_status, self.schema_version,
         )
         return (
             self.PRODUCER_KIND != "abstract"
@@ -916,6 +928,7 @@ class ProducerValidatedClosureArtifact:
             and self.derived_view_id == binding.derived_view_id
             and self.premise_digest == binding.premise_digest
             and self.graph_generation == binding.graph_generation
+            and self.comparison_authority_digest == binding.comparison_authority_digest
             and hmac.compare_digest(
                 self.authority_digest, _closure_artifact_seal(payload)
             )
@@ -978,12 +991,13 @@ def issue_producer_validated_closure(
     payload = (
         artifact_type.PRODUCER_KIND, proposition_digest, evidence_digest,
         binding.derived_view_id, binding.premise_digest,
-        binding.graph_generation, "validated",
+        binding.graph_generation, binding.comparison_authority_digest, "validated",
         artifact_type.schema_version,
     )
     return artifact_type(
         proposition_digest, evidence_digest, binding.derived_view_id,
         binding.premise_digest, binding.graph_generation,
+        binding.comparison_authority_digest,
         _closure_artifact_seal(payload),
     )
 
@@ -1388,6 +1402,7 @@ class PairLedgerManager:
             tuple(derived_view_id),
             str(premise_digest),
             int(old.graph_generation) + 1,
+            old.comparison_authority_digest,
             old.projection_id,
             bool(projection_refresh_required),
         )

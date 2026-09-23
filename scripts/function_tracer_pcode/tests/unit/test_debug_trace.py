@@ -16,6 +16,12 @@ from scripts.function_tracer_pcode.checker.debug_trace import (
 )
 from scripts.function_tracer_pcode.checker.attempts import _record_explicit_proof_completions
 from scripts.function_tracer_pcode.checker.unknown_reason import make_unknown_reason
+from scripts.function_tracer_pcode.core.evidence_authority import mark_function_unary
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import (
+    bound_to,
+    comparison_frame,
+    fixed_test_comparison,
+)
 
 
 def test_normalization_rule_application():
@@ -220,7 +226,8 @@ def test_explicit_matching_proof_completion_requires_runtime_applicability():
         completed_recovery_proof_evidence=[
             {
                 "side": "function1",
-                "evidence": {
+                # unary artifact（関数単体の return partition）を指す完了証拠。
+                "evidence": mark_function_unary({
                     "proof_requirement_id": requirement,
                     "proof_status": "verified",
                     "proof_artifact_ref": ("return_partition", "f", "v1"),
@@ -228,7 +235,7 @@ def test_explicit_matching_proof_completion_requires_runtime_applicability():
                     "semantic_seed_or_premise_digest": "premise-current",
                     "evidence_or_artifact_digest": "artifact-current",
                     "recognizing_stage": "return_coverage",
-                },
+                }),
             }
         ],
         reason_completion_applicability_contexts=[{
@@ -281,7 +288,7 @@ def test_stale_runtime_completion_is_diagnostic_and_cannot_use_legacy_transition
         transition_reason=TransitionReason.UNSAT.value,
     ))
     result = SimpleNamespace(
-        completed_recovery_proof_evidence=[{"evidence": {
+        completed_recovery_proof_evidence=[{"evidence": mark_function_unary({
             "proof_requirement_id": requirement,
             "proof_status": "verified",
             "proof_artifact_ref": ("return_partition", "f", "v1"),
@@ -289,7 +296,7 @@ def test_stale_runtime_completion_is_diagnostic_and_cannot_use_legacy_transition
             "semantic_seed_or_premise_digest": "premise-current",
             "evidence_or_artifact_digest": "artifact-current",
             "recognizing_stage": "return_coverage",
-        }}],
+        })}],
         reason_completion_applicability_contexts=[{
             "proof_requirement_id": requirement,
             "proof_artifact_ref": ("return_partition", "f", "v1"),
@@ -375,16 +382,19 @@ def test_production_proof_obligation_links_unique_typed_requirement():
             transition_reason=TransitionReason.UNSAT.value,
         )
     )
+    # attempt 1 の比較で作った証拠（その比較の frame が結果に付く）。
+    comparison = fixed_test_comparison()
     result = SimpleNamespace(
+        _prepared_dispatch_frame=comparison_frame(comparison),
         completed_recovery_proof_evidence=[
             {
                 "side": "function1",
-                "evidence": {
+                "evidence": bound_to(comparison, {
                     "proof_obligation_id": legacy_obligation,
                     "status": "complete",
-                },
+                }),
             }
-        ]
+        ],
     )
 
     _record_explicit_proof_completions(trace, result)

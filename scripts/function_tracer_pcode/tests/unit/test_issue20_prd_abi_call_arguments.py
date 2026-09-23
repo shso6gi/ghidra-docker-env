@@ -12,6 +12,8 @@ M-20 で確認した blocker（引数は観測できるのに ``CallArgumentEvid
 
 from __future__ import annotations
 
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
+
 import pytest
 
 from scripts.function_tracer_pcode.core import (
@@ -1082,7 +1084,7 @@ def test_sat_over_side_specific_fresh_arguments_is_not_decisive(monkeypatch):
         assert "unresolved_return_value" in analysis.get_decisive_sat_unsafety_reasons()
 
     # (f) SAT を実際に構成して production path を通す。
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1156,7 +1158,7 @@ def test_positive_control_same_harness_reaches_unconditional_not_eq(monkeypatch)
     for analysis in (analysis1, analysis2):
         assert "unresolved_return_value" not in analysis.get_decisive_sat_unsafety_reasons()
 
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5

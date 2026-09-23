@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
 from scripts.function_tracer_pcode.core import (
@@ -14,18 +14,34 @@ from scripts.function_tracer_pcode.core import (
     ExpressionType,
     FunctionReturnAnalysis,
     ReadonlyReductionRef,
-    StorageInfo,
 )
-from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
+from scripts.function_tracer_pcode.core.storage import (
+    coerce_storage_info as _coerce_storage_info,
+    storage_identity_key_of as _storage_identity_key,
+)
+from scripts.function_tracer_pcode.core.render_smt import (
+    expression_returns_bool,
+    expression_smt_bit_width,
+)
 from scripts.function_tracer_pcode.core.semantic_freeze import publish_semantic_values
 from scripts.function_tracer_pcode.core.analysis import derive_memory_effect_bit_width
 from scripts.function_tracer_pcode.semantics.param_semantics import (
     ParameterSemanticHint,
     infer_parameter_semantics_by_identity,
 )
+from scripts.function_tracer_pcode.semantics.rewrite_contract import (
+    COMPARISON_NARROWING_RULES,
+    EMPTY_REWRITE_AUTHORIZATION,
+    ExtensionKind,
+    RewriteAuthorization,
+    mark_rewritten_surface,
+    rewrite_rule,
+)
 
 
-SAFE_TRUNCATING_BINARY_OPS = frozenset(
+#: ``SUBPIECE(a op b, 0)`` の下位 N bit は ``low_N(a) op low_N(b)`` に常に等しい
+#: （mod 2^N の環準同型）。入力仮定を要らない恒等規則。
+RING_TRUNCATING_BINARY_OPS = frozenset(
     {
         "INT_ADD",
         "INT_SUB",
@@ -33,13 +49,8 @@ SAFE_TRUNCATING_BINARY_OPS = frozenset(
         "INT_AND",
         "INT_OR",
         "INT_XOR",
-        "INT_SDIV",
-        "INT_DIV",
-        "INT_SREM",
-        "INT_REM",
     }
 )
-
 COMPARISON_OPS = frozenset(
     {
         "INT_EQUAL",
@@ -50,17 +61,6 @@ COMPARISON_OPS = frozenset(
         "INT_SLESSEQUAL",
     }
 )
-
-SIGNED_BINARY_OPS = frozenset({"INT_SDIV", "INT_SREM"})
-UNSIGNED_BINARY_OPS = frozenset({"INT_DIV", "INT_REM"})
-SIGNED_COMPARE_REWRITE_MAP = {
-    "INT_LESS": "INT_SLESS",
-    "INT_LESSEQUAL": "INT_SLESSEQUAL",
-}
-UNSIGNED_COMPARE_REWRITE_MAP = {
-    "INT_SLESS": "INT_LESS",
-    "INT_SLESSEQUAL": "INT_LESSEQUAL",
-}
 SIGNEDNESS_KINDS = frozenset({"signed", "unsigned"})
 RETURN_EXTENSION_SURFACE_CANDIDATE_BITS = (64, 32, 16, 8)
 RETURN_VALUE_EXTENSION_OPS = frozenset({"INT_ZEXT", "INT_SEXT"})
@@ -68,17 +68,46 @@ RETURN_EXTENSION_SURFACE_SOURCE = "cross_side_return_extension_surface"
 RETURN_EXTENSION_SURFACE_COERCION = "equal_width_or_object_proven_extract"
 RETURN_EXTENSION_SURFACE_KINDS = frozenset({"INT_ZEXT", "INT_SEXT", "none"})
 
+#: 幅の違う比較は、SMT lowering が狭い側を signed 比較なら sign_extend、それ以外は
+#: zero_extend で揃える（``core/render_smt/render.py`` の比較分岐）。
+SIGNED_COMPARISON_OPS = frozenset({"INT_SLESS", "INT_SLESSEQUAL"})
+
+
+class _ExtensionImage:
+    """``operand == ext_kind(narrow)`` が（恒等的に、または premise の下で）成り立つこと。"""
+
+    __slots__ = ("narrow", "bits", "kind")
+
+    def __init__(self, narrow: Expression, bits: int, kind: ExtensionKind):
+        self.narrow = narrow
+        self.bits = bits
+        self.kind = kind
+
 
 class SemanticWidthNormalizer:
-    """Normalize expressions using explicit semantic-width hints."""
+    """Semantic-width 書き換え。適用できるのは ``rewrite_contract.REWRITE_RULES`` の規則だけ。
+
+    書き換えは全部 ``_rewritten(rule, expr)`` を通り、規則名が表に無ければ
+    programming error。恒等規則は semantic hint を「どこで試すか」の目安にだけ
+    使う。parameter を extension 像として使う規則は ``authorization.grant`` から
+    だけ入力仮定を受け取る（最終 ``InputCorrespondence`` が含意したもの）。
+    normalizer は自分で入力仮定を作らない。
+    """
 
     def __init__(
         self,
         hints_by_identity: Dict[Tuple[object, ...], ParameterSemanticHint],
-        fragment_infos_by_name: Optional[Dict[str, Any]] = None,
+        authorization: Optional[RewriteAuthorization] = None,
     ):
         self.hints_by_identity = hints_by_identity
-        self.fragment_infos_by_name = fragment_infos_by_name or {}
+        self.authorization = authorization or EMPTY_REWRITE_AUTHORIZATION
+        #: 適用した規則ごとの回数（診断と certificate test 用。判定には使わない）。
+        self.applied_rules: Dict[str, int] = {}
+
+    def _rewritten(self, rule_name: str, expr: Expression) -> Expression:
+        rewrite_rule(rule_name)
+        self.applied_rules[rule_name] = self.applied_rules.get(rule_name, 0) + 1
+        return expr
 
     def rewrite_expression(self, expr: Optional[Expression]) -> Optional[Expression]:
         if expr is None:
@@ -132,92 +161,24 @@ class SemanticWidthNormalizer:
 
     def _apply_rules(self, expr: Expression) -> Expression:
         if expr.expr_type == ExpressionType.BINARY_OP:
-            if expr.operator in {"PIECE", "INT_OR"}:
-                collapsed = self._normalize_parameter_fragment_extension(expr)
-                if collapsed is not None:
-                    return collapsed
             if expr.operator == "SUBPIECE":
                 collapsed = self._normalize_subpiece(expr)
                 if collapsed is not None:
                     return collapsed
-            if expr.operator in SAFE_TRUNCATING_BINARY_OPS:
-                collapsed = self._normalize_semantic_binary(expr)
+            if expr.operator == "INT_AND":
+                collapsed = self._normalize_mask(expr)
                 if collapsed is not None:
                     return collapsed
             if expr.operator in COMPARISON_OPS:
                 collapsed = self._normalize_comparison(expr)
                 if collapsed is not None:
                     return collapsed
+                widened = self._widen_zero_comparison_constant(expr)
+                if widened is not None:
+                    return widened
         return expr
 
-    def _normalize_parameter_fragment_extension(self, expr: Expression) -> Optional[Expression]:
-        if expr.operator == "PIECE" and len(expr.operands) == 2:
-            return self._build_fragment_extension_expr(expr.operands[0], expr.operands[1])
-
-        if expr.operator != "INT_OR" or len(expr.operands) != 2:
-            return None
-
-        left, right = expr.operands
-        collapsed = self._match_shift_or_fragment_expr(left, right)
-        if collapsed is not None:
-            return collapsed
-        return self._match_shift_or_fragment_expr(right, left)
-
-    def _match_shift_or_fragment_expr(
-        self,
-        shifted_expr: Expression,
-        low_expr: Expression,
-    ) -> Optional[Expression]:
-        if (
-            shifted_expr.expr_type != ExpressionType.BINARY_OP
-            or shifted_expr.operator != "INT_LEFT"
-            or len(shifted_expr.operands) != 2
-        ):
-            return None
-
-        shift_amount = shifted_expr.operands[1]
-        if shift_amount.expr_type != ExpressionType.CONSTANT:
-            return None
-
-        return self._build_fragment_extension_expr(
-            shifted_expr.operands[0],
-            low_expr,
-            expected_shift_bits=int(shift_amount.value),
-        )
-
-    def _build_fragment_extension_expr(
-        self,
-        high_expr: Expression,
-        low_expr: Expression,
-        expected_shift_bits: Optional[int] = None,
-    ) -> Optional[Expression]:
-        if high_expr.expr_type != ExpressionType.VARIABLE or not high_expr.name:
-            return None
-
-        fragment_info = self.fragment_infos_by_name.get(high_expr.name)
-        if fragment_info is None:
-            return None
-
-        if low_expr.expr_type not in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
-            return None
-        if low_expr.name != fragment_info.parent_param_name:
-            return None
-
-        if (
-            expected_shift_bits is not None
-            and expected_shift_bits != fragment_info.parent_param_bit_width
-        ):
-            return None
-
-        ext_op = (
-            "INT_SEXT"
-            if fragment_info.extension_type.name == "SIGN_EXTEND"
-            else "INT_ZEXT"
-        )
-        rebuilt = Expression.unary_op(ext_op, low_expr)
-        rebuilt.size = max(1, fragment_info.base_register_size_bits // 8)
-        rebuilt.data_type = getattr(low_expr, "data_type", None)
-        return rebuilt
+    # -- subpiece -----------------------------------------------------------
 
     def _normalize_subpiece(self, expr: Expression) -> Optional[Expression]:
         if len(expr.operands) != 2:
@@ -231,6 +192,7 @@ class SemanticWidthNormalizer:
         if output_bits <= 0:
             return None
 
+        # rule: subpiece_of_extension
         if (
             source.expr_type == ExpressionType.UNARY_OP
             and source.operator in {"INT_SEXT", "INT_ZEXT"}
@@ -238,301 +200,246 @@ class SemanticWidthNormalizer:
         ):
             operand = source.operands[0]
             if operand.get_bit_width() == output_bits:
-                return operand
+                return self._rewritten("subpiece_of_extension", operand)
 
-        if (
-            source.expr_type != ExpressionType.BINARY_OP
-            or source.operator not in SAFE_TRUNCATING_BINARY_OPS
-            or len(source.operands) != 2
-        ):
+        if source.expr_type != ExpressionType.BINARY_OP or len(source.operands) != 2:
+            return None
+        # 除算・剰余の狭めは有効にしない: 恒等式は幅に依らないが、production 幅
+        # （64→32）で実 lowering の certificate が得られない（z3 が決着しない）。
+        if source.operator not in RING_TRUNCATING_BINARY_OPS:
             return None
 
-        left_info = self._match_semantic_extension(source.operands[0])
-        right_info = self._match_semantic_extension(source.operands[1])
-        if left_info is None or right_info is None:
-            return None
-        if left_info["bits"] != output_bits or right_info["bits"] != output_bits:
-            return None
-        if left_info["bits"] != right_info["bits"]:
+        # rule: subpiece_of_ring_operation
+        left = self._low_part(source.operands[0], output_bits)
+        right = self._low_part(source.operands[1], output_bits)
+        if left is None or right is None:
             return None
 
-        if source.operator in SIGNED_BINARY_OPS:
-            if left_info["signedness"] != "signed" or right_info["signedness"] != "signed":
-                return None
-        if source.operator in UNSIGNED_BINARY_OPS:
-            if left_info["signedness"] != "unsigned" or right_info["signedness"] != "unsigned":
-                return None
-
-        rebuilt = Expression.binary_op(
-            source.operator,
-            left_info["expr"],
-            right_info["expr"],
-        )
+        rebuilt = Expression.binary_op(source.operator, left, right)
         rebuilt.size = output_bits // 8
         rebuilt.data_type = source.data_type
-        return rebuilt
+        return self._rewritten("subpiece_of_ring_operation", rebuilt)
 
-    def _normalize_comparison(self, expr: Expression) -> Optional[Expression]:
-        if len(expr.operands) != 2:
-            return None
+    def _low_part(self, expr: Expression, bits: int) -> Optional[Expression]:
+        """``low_bits(expr)`` と恒等的に等しい、より狭い式（見つからなければ None）。"""
 
-        left, right = expr.operands
-        left_info = self._match_comparison_operand(left)
-        right_info = self._match_comparison_operand(right)
-        requires_signedness = expr.operator in {
-            "INT_LESS",
-            "INT_SLESS",
-            "INT_LESSEQUAL",
-            "INT_SLESSEQUAL",
-        }
-
-        left_constant_signedness = self._comparison_constant_signedness(expr.operator, left_info)
-        if (
-            left_info is not None
-            and right.expr_type == ExpressionType.CONSTANT
-            and left_constant_signedness in SIGNEDNESS_KINDS
-        ):
-            right_narrow = self._narrow_constant(right, left_info["bits"], left_constant_signedness)
-            if right_narrow is not None:
-                rebuilt = Expression.binary_op(
-                    self._normalize_comparison_operator(expr.operator, left_info, None),
-                    left_info["expr"],
-                    right_narrow,
-                )
-                rebuilt.size = expr.size
-                return rebuilt
-
-        right_constant_signedness = self._comparison_constant_signedness(expr.operator, right_info)
-        if (
-            right_info is not None
-            and left.expr_type == ExpressionType.CONSTANT
-            and right_constant_signedness in SIGNEDNESS_KINDS
-        ):
-            left_narrow = self._narrow_constant(left, right_info["bits"], right_constant_signedness)
-            if left_narrow is not None:
-                rebuilt = Expression.binary_op(
-                    self._normalize_comparison_operator(expr.operator, None, right_info),
-                    left_narrow,
-                    right_info["expr"],
-                )
-                rebuilt.size = expr.size
-                return rebuilt
-
-        if left_info is None or right_info is None:
-            return None
-        if left_info["bits"] != right_info["bits"]:
-            return None
-        if requires_signedness and (
-            left_info.get("signedness") not in SIGNEDNESS_KINDS
-            or right_info.get("signedness") not in SIGNEDNESS_KINDS
-        ):
-            return None
-
-        rebuilt = Expression.binary_op(
-            self._normalize_comparison_operator(expr.operator, left_info, right_info),
-            left_info["expr"],
-            right_info["expr"],
-        )
-        rebuilt.size = expr.size
-        return rebuilt
-
-    def _normalize_comparison_operator(
-        self,
-        operator: str,
-        left_info,
-        right_info,
-    ) -> str:
-        target_signedness = self._comparison_target_signedness(left_info, right_info)
-        if target_signedness == "signed":
-            return SIGNED_COMPARE_REWRITE_MAP.get(operator, operator)
-        if target_signedness == "unsigned":
-            return UNSIGNED_COMPARE_REWRITE_MAP.get(operator, operator)
-        return operator
-
-    def _comparison_target_signedness(self, left_info, right_info) -> Optional[str]:
-        explicit_infos = [
-            info
-            for info in (left_info, right_info)
-            if info is not None and bool(info.get("explicit_signedness"))
-        ]
-        if not explicit_infos:
-            return None
-
-        signednesses = {info.get("signedness") for info in explicit_infos}
-        if len(signednesses) != 1:
-            return None
-        signedness = next(iter(signednesses))
-        if signedness not in {"signed", "unsigned"}:
-            return None
-        return signedness
-
-    def _comparison_constant_signedness(self, operator: str, info) -> Optional[str]:
-        if info is None:
-            return None
-        signedness = info.get("signedness")
-        if signedness in SIGNEDNESS_KINDS:
-            return signedness
-        if operator in {"INT_EQUAL", "INT_NOTEQUAL"}:
-            return "unsigned"
-        return None
-
-    def _normalize_semantic_binary(self, expr: Expression) -> Optional[Expression]:
-        if len(expr.operands) != 2:
-            return None
-
-        left, right = expr.operands
-        left_info = self._match_semantic_low_expr(left)
-        right_info = self._match_semantic_low_expr(right)
-
-        if (
-            left_info is not None
-            and right.expr_type == ExpressionType.CONSTANT
-            and left_info.get("signedness") in SIGNEDNESS_KINDS
-        ):
-            narrowed = self._narrow_constant(
-                right,
-                left_info["bits"],
-                left_info["signedness"],
-            )
-            if narrowed is not None:
-                if self._is_all_ones_mask(narrowed, left_info["bits"]) and expr.operator == "INT_AND":
-                    return left_info["expr"]
-                right_info = {
-                    "expr": narrowed,
-                    "bits": left_info["bits"],
-                    "signedness": left_info["signedness"],
-                }
-
-        if (
-            right_info is not None
-            and left.expr_type == ExpressionType.CONSTANT
-            and right_info.get("signedness") in SIGNEDNESS_KINDS
-        ):
-            narrowed = self._narrow_constant(
-                left,
-                right_info["bits"],
-                right_info["signedness"],
-            )
-            if narrowed is not None:
-                if self._is_all_ones_mask(narrowed, right_info["bits"]) and expr.operator == "INT_AND":
-                    return right_info["expr"]
-                left_info = {
-                    "expr": narrowed,
-                    "bits": right_info["bits"],
-                    "signedness": right_info["signedness"],
-                }
-
-        if left_info is None or right_info is None:
-            return None
-        if left_info["bits"] != right_info["bits"]:
-            return None
-
-        narrow_bits = left_info["bits"]
-        if narrow_bits <= 0 or narrow_bits >= expr.get_bit_width():
-            return None
-
-        if expr.operator in SIGNED_BINARY_OPS:
-            if left_info["signedness"] != "signed" or right_info["signedness"] != "signed":
-                return None
-        if expr.operator in UNSIGNED_BINARY_OPS:
-            if left_info["signedness"] != "unsigned" or right_info["signedness"] != "unsigned":
-                return None
-
-        rebuilt = Expression.binary_op(
-            expr.operator,
-            left_info["expr"],
-            right_info["expr"],
-        )
-        rebuilt.size = max(1, narrow_bits // 8)
-        rebuilt.data_type = expr.data_type
-        return rebuilt
-
-    def _is_all_ones_mask(self, expr: Expression, bits: int) -> bool:
-        if expr.expr_type != ExpressionType.CONSTANT or bits <= 0:
-            return False
-        mask = (1 << bits) - 1
-        value = int(expr.value)
-        return (value & mask) == mask
-
-    def _match_comparison_operand(self, expr: Expression):
-        widened = self._match_semantic_extension(expr)
-        if widened is not None:
-            return widened
-        return self._match_semantic_low_expr(expr)
-
-    def _match_semantic_extension(self, expr: Expression):
         if expr.expr_type == ExpressionType.PARAMETER:
             hint = self._parameter_hint(expr)
-            if hint is not None and expr.get_bit_width() > hint.narrow_bits:
-                semantic_signedness = (
-                    hint.signedness if hint.signedness in SIGNEDNESS_KINDS else None
-                )
-                return {
-                    "expr": self._low_bits_expr(expr, hint.narrow_bits),
-                    "bits": hint.narrow_bits,
-                    "signedness": semantic_signedness,
-                    "explicit_signedness": hint.signedness_source == "explicit",
-                }
+            if hint is not None and hint.narrow_bits == bits and expr.get_bit_width() > bits:
+                return self._low_bits_expr(expr, bits)
+            return None
+        if (
+            expr.expr_type == ExpressionType.UNARY_OP
+            and expr.operator in {"INT_SEXT", "INT_ZEXT"}
+            and expr.operands
+        ):
+            inner = self._match_low_expr(expr.operands[0])
+            if inner is not None and inner[1] == bits:
+                return inner[0]
+        return None
+
+    # -- mask ---------------------------------------------------------------
+
+    def _normalize_mask(self, expr: Expression) -> Optional[Expression]:
+        """rule: mask_to_zero_extension — ``p & (2^N - 1)`` (W bit) を ``zext_W(low_N(p))`` へ。
+
+        結果は元と同じ W bit。N bit の extract へ裸で置き換えると親の sort と
+        全幅値が変わる（``~(p & 0xffffffff) == 0xffffffff00000000``）。
+        """
+
+        if len(expr.operands) != 2:
+            return None
+        param_expr, const_expr = self._split_mask_expr(expr)
+        if param_expr is None or const_expr is None:
+            return None
+        hint = self._parameter_hint(param_expr)
+        if hint is None or hint.signedness != "unsigned":
+            return None
+        width = param_expr.get_bit_width()
+        narrow_bits = hint.narrow_bits
+        if not (0 < narrow_bits < width) or expr.get_bit_width() != width:
+            return None
+        if const_expr.get_bit_width() != width:
+            return None
+        if (int(const_expr.value) & ((1 << width) - 1)) != (1 << narrow_bits) - 1:
+            return None
+        rebuilt = Expression.unary_op("INT_ZEXT", self._low_bits_expr(param_expr, narrow_bits))
+        rebuilt.size = expr.size
+        rebuilt.data_type = expr.data_type
+        return self._rewritten("mask_to_zero_extension", rebuilt)
+
+    # -- comparison ---------------------------------------------------------
+
+    def _align_comparison_constant_width(self, expr: Expression) -> Optional[Expression]:
+        """rule: comparison_constant_width_alignment — ``a[N] op c[W]``（W > N）の c を N bit へ。
+
+        lowering は ``ext_k(a) op c``（k は比較の符号で決まる）なので、c が ext_k の
+        像に入るときに限り ``a op low_N(c)`` と同値。そうでなければ触らない。
+        """
+
+        left, right = expr.operands
+        if (left.expr_type == ExpressionType.CONSTANT) == (right.expr_type == ExpressionType.CONSTANT):
+            return None
+        constant, other = (left, right) if left.expr_type == ExpressionType.CONSTANT else (right, left)
+        other_bits = other.get_bit_width()
+        if other_bits <= 0 or other_bits % 8 or constant.get_bit_width() <= other_bits:
+            return None
+        if expression_returns_bool(other):
+            return None
+        kind = ExtensionKind.SIGN if expr.operator in SIGNED_COMPARISON_OPS else ExtensionKind.ZERO
+        narrowed = self._narrow_constant(constant, other_bits, kind)
+        if narrowed is None:
+            return None
+        operands = (narrowed, other) if constant is left else (other, narrowed)
+        rebuilt = Expression.binary_op(expr.operator, *operands)
+        rebuilt.size = expr.size
+        return self._rewritten("comparison_constant_width_alignment", rebuilt)
+
+    def _widen_zero_comparison_constant(self, expr: Expression) -> Optional[Expression]:
+        """rule: comparison_zero_constant_width — 比較の定数 0 を相手の幅へ揃える。"""
+
+        if len(expr.operands) != 2:
+            return None
+        left, right = expr.operands
+        new_left = _zero_constant_at_peer_width(left, right)
+        new_right = _zero_constant_at_peer_width(right, left)
+        if new_left is left and new_right is right:
+            return None
+        return self._rewritten(
+            "comparison_zero_constant_width",
+            expr.clone_with(operands=[new_left, new_right]),
+        )
+
+    def _normalize_comparison(self, expr: Expression) -> Optional[Expression]:
+        """演算子を保ったまま両辺を extension 像の狭い値へ置き換える。
+
+        演算子ごとの規則は ``COMPARISON_NARROWING_RULES``、規則が意味を保存する
+        ext の種類は rule 表の ``image_kinds``。
+        """
+
+        if len(expr.operands) != 2:
+            return None
+        aligned = self._align_comparison_constant_width(expr)
+        if aligned is not None:
+            return aligned
+        rule_name = COMPARISON_NARROWING_RULES.get(expr.operator)
+        if rule_name is None:
+            return None
+        allowed_kinds = rewrite_rule(rule_name).image_kinds
+
+        left, right = expr.operands
+        left_image = self._extension_image(left, rule_name)
+        right_image = self._extension_image(right, rule_name)
+
+        if left_image is not None and right.expr_type == ExpressionType.CONSTANT:
+            right_image = self._constant_image(right, left, left_image)
+        elif right_image is not None and left.expr_type == ExpressionType.CONSTANT:
+            left_image = self._constant_image(left, right, right_image)
+
+        if left_image is None or right_image is None:
+            return None
+        if left_image.kind != right_image.kind or left_image.kind not in allowed_kinds:
+            return None
+        if left_image.bits != right_image.bits:
+            return None
+        if left.get_bit_width() != right.get_bit_width():
+            return None
+        if left_image.bits >= left.get_bit_width():
+            return None
+
+        rebuilt = Expression.binary_op(expr.operator, left_image.narrow, right_image.narrow)
+        rebuilt.size = expr.size
+        return self._rewritten(rule_name, rebuilt)
+
+    def _constant_image(
+        self,
+        constant: Expression,
+        peer: Expression,
+        peer_image: _ExtensionImage,
+    ) -> Optional[_ExtensionImage]:
+        if constant.get_bit_width() != peer.get_bit_width():
+            return None
+        narrowed = self._narrow_constant(constant, peer_image.bits, peer_image.kind)
+        if narrowed is None:
+            return None
+        return _ExtensionImage(narrowed, peer_image.bits, peer_image.kind)
+
+    # -- operand classification --------------------------------------------
+
+    def _extension_image(self, expr: Expression, rule_name: str) -> Optional[_ExtensionImage]:
+        """``expr == ext_kind(narrow)`` を示せる場合だけ返す。
+
+        構文から恒等的に言えるもの（``_syntactic_image``）か、parameter ``p`` に
+        ついて規則 ``rule_name`` が最終 relation から ``p == ext(low_N(p))`` を
+        受け取れるとき（``authorization.grant``）だけ。hint は使わない。
+        """
+
+        image = self._syntactic_image(expr)
+        if image is not None:
+            return image
+        if expr.expr_type == ExpressionType.PARAMETER:
+            assumption = self._parameter_grant(expr, rule_name)
+            if assumption is None:
+                return None
+            return _ExtensionImage(
+                self._low_bits_expr(expr, assumption.narrow_bits),
+                assumption.narrow_bits,
+                assumption.kind,
+            )
+        return None
+
+    def _syntactic_image(self, expr: Expression) -> Optional[_ExtensionImage]:
+        """入力仮定無しで ``expr == ext_kind(narrow)`` が成り立つ形。
+
+        * ``SEXT(e)`` / ``ZEXT(e)``（e が既知の狭い値のとき）。
+        * ``p & (2^N - 1)``（恒等的に ``zext(low_N(p))``。N は hint から選ぶだけ）。
+        """
 
         if (
             expr.expr_type == ExpressionType.UNARY_OP
             and expr.operator in {"INT_SEXT", "INT_ZEXT"}
             and expr.operands
         ):
-            inner = self._match_any_low_expr(expr.operands[0], expected_signedness=None)
-            if inner is None:
+            operand = expr.operands[0]
+            inner = self._match_low_expr(operand)
+            operand_bits = operand.get_bit_width()
+            if inner is None or inner[0] is not operand or operand_bits >= expr.get_bit_width():
                 return None
-            expected = "signed" if expr.operator == "INT_SEXT" else "unsigned"
-            return {
-                "expr": inner["expr"],
-                "bits": inner["bits"],
-                "signedness": expected,
-                "explicit_signedness": bool(inner.get("explicit_signedness")),
-            }
+            kind = ExtensionKind.SIGN if expr.operator == "INT_SEXT" else ExtensionKind.ZERO
+            return _ExtensionImage(operand, operand_bits, kind)
 
+        if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INT_AND":
+            param_expr, const_expr = self._split_mask_expr(expr)
+            if param_expr is None or const_expr is None:
+                return None
+            width = param_expr.get_bit_width()
+            hint = self._parameter_hint(param_expr)
+            if hint is None or not (0 < hint.narrow_bits < width):
+                return None
+            if const_expr.get_bit_width() != width or expr.get_bit_width() != width:
+                return None
+            if (int(const_expr.value) & ((1 << width) - 1)) != (1 << hint.narrow_bits) - 1:
+                return None
+            return _ExtensionImage(
+                self._low_bits_expr(param_expr, hint.narrow_bits),
+                hint.narrow_bits,
+                ExtensionKind.ZERO,
+            )
         return None
 
-    def _match_semantic_low_expr(self, expr: Expression):
-        return self._match_any_low_expr(expr, expected_signedness=None)
+    def _match_low_expr(self, expr: Expression) -> Optional[Tuple[Expression, int]]:
+        """既存の「狭い値」パターン。返す式は ``expr`` の下位 bits と恒等的に等しい。"""
 
-    def _match_any_low_expr(
-        self,
-        expr: Expression,
-        expected_signedness: Optional[str],
-    ):
         if expr.expr_type == ExpressionType.PARAMETER:
             hint = self._parameter_hint(expr)
+            bits = expr.get_bit_width()
             if hint is None:
-                bits = expr.get_bit_width()
-                if bits <= 32:
-                    signedness = expected_signedness or "signed"
-                    return {
-                        "expr": expr,
-                        "bits": bits,
-                        "signedness": signedness,
-                        "explicit_signedness": False,
-                    }
-                return None
-            if expr.get_bit_width() == hint.narrow_bits:
-                semantic_signedness = (
-                    hint.signedness if hint.signedness in SIGNEDNESS_KINDS else None
-                )
-                return {
-                    "expr": expr,
-                    "bits": hint.narrow_bits,
-                    "signedness": semantic_signedness,
-                    "explicit_signedness": hint.signedness_source == "explicit",
-                }
-            if expr.get_bit_width() > hint.narrow_bits:
-                semantic_signedness = (
-                    hint.signedness if hint.signedness in SIGNEDNESS_KINDS else None
-                )
-                return {
-                    "expr": self._low_bits_expr(expr, hint.narrow_bits),
-                    "bits": hint.narrow_bits,
-                    "signedness": semantic_signedness,
-                    "explicit_signedness": hint.signedness_source == "explicit",
-                }
+                return (expr, bits) if bits <= 32 else None
+            if bits == hint.narrow_bits:
+                return (expr, bits)
+            if bits > hint.narrow_bits:
+                return (self._low_bits_expr(expr, hint.narrow_bits), hint.narrow_bits)
+            return None
 
         if (
             expr.expr_type == ExpressionType.BINARY_OP
@@ -542,53 +449,23 @@ class SemanticWidthNormalizer:
             source, offset = expr.operands
             if offset.expr_type != ExpressionType.CONSTANT or int(offset.value) != 0:
                 return None
+            bits = expr.get_bit_width()
             if source.expr_type == ExpressionType.PARAMETER:
                 hint = self._parameter_hint(source)
-                if hint is not None and expr.get_bit_width() == hint.narrow_bits:
-                    semantic_signedness = (
-                        hint.signedness if hint.signedness in SIGNEDNESS_KINDS else None
-                    )
-                    return {
-                        "expr": expr,
-                        "bits": hint.narrow_bits,
-                        "signedness": semantic_signedness,
-                        "explicit_signedness": hint.signedness_source == "explicit",
-                    }
-            if expr.get_bit_width() <= 32:
-                signedness = expected_signedness or "signed"
-                return {
-                    "expr": expr,
-                    "bits": expr.get_bit_width(),
-                    "signedness": signedness,
-                    "explicit_signedness": False,
-                }
+                if hint is not None and bits == hint.narrow_bits:
+                    return (expr, bits)
+            if bits <= 32:
+                return (expr, bits)
+            return None
 
         if (
             expr.expr_type == ExpressionType.BINARY_OP
             and expr.operator == "INT_AND"
             and len(expr.operands) == 2
         ):
-            param_expr, const_expr = self._split_mask_expr(expr)
-            if param_expr is None or const_expr is None:
-                return None
-            hint = self._parameter_hint(param_expr)
-            if hint is None or hint.narrow_bits >= param_expr.get_bit_width():
-                return None
-            expected_mask = (1 << hint.narrow_bits) - 1
-            mask_bits = const_expr.get_bit_width()
-            mask_value = int(const_expr.value) & ((1 << mask_bits) - 1)
-            if mask_value != expected_mask:
-                return None
-            semantic_signedness = (
-                hint.signedness if hint.signedness in SIGNEDNESS_KINDS else None
-            )
-            return {
-                "expr": self._low_bits_expr(param_expr, hint.narrow_bits),
-                "bits": hint.narrow_bits,
-                "signedness": semantic_signedness,
-                "explicit_signedness": hint.signedness_source == "explicit",
-            }
-
+            image = self._syntactic_image(expr)
+            if image is not None:
+                return (image.narrow, image.bits)
         return None
 
     def _parameter_hint(self, expr: Expression) -> Optional[ParameterSemanticHint]:
@@ -606,6 +483,12 @@ class SemanticWidthNormalizer:
         if storage_key is not None:
             return self.hints_by_identity.get(("parameter_storage", storage_key))
         return None
+
+    def _parameter_grant(self, expr: Expression, rule_name: str):
+        value = getattr(expr, "value", None)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return self.authorization.grant(rule_name, int(value), expr.get_bit_width())
 
     def _split_mask_expr(self, expr: Expression):
         left, right = expr.operands
@@ -630,13 +513,15 @@ class SemanticWidthNormalizer:
         self,
         expr: Expression,
         narrow_bits: int,
-        signedness: str,
+        kind: ExtensionKind,
     ) -> Optional[Expression]:
+        """定数 ``c`` が ``ext_kind(low_N(c))`` に等しいときだけ ``low_N(c)`` を返す。"""
+
         if expr.expr_type != ExpressionType.CONSTANT:
             return None
 
         original_bits = expr.get_bit_width()
-        if original_bits < narrow_bits or narrow_bits <= 0:
+        if original_bits <= narrow_bits or narrow_bits <= 0:
             return None
 
         original_mask = (1 << original_bits) - 1
@@ -644,24 +529,16 @@ class SemanticWidthNormalizer:
         value_mod = int(expr.value) & original_mask
         low_value = value_mod & narrow_mask
 
-        if signedness == "signed":
-            sign_bit = 1 << (narrow_bits - 1)
-            if low_value & sign_bit:
-                expected = low_value | (((1 << (original_bits - narrow_bits)) - 1) << narrow_bits)
-            else:
-                expected = low_value
+        if kind is ExtensionKind.SIGN and low_value & (1 << (narrow_bits - 1)):
+            expected = low_value | (((1 << (original_bits - narrow_bits)) - 1) << narrow_bits)
         else:
             expected = low_value
-
         if expected != value_mod:
             return None
 
         narrowed = low_value
-        if signedness == "signed" and narrow_bits > 0:
-            sign_bit = 1 << (narrow_bits - 1)
-            if low_value & sign_bit:
-                narrowed = low_value - (1 << narrow_bits)
-
+        if kind is ExtensionKind.SIGN and low_value & (1 << (narrow_bits - 1)):
+            narrowed = low_value - (1 << narrow_bits)
         return Expression.constant(narrowed, size=max(1, narrow_bits // 8))
 
 
@@ -684,10 +561,16 @@ def _rewritten_expr_bit_width(expr: Any) -> int:
 def normalize_analysis_semantic_width(
     analysis: FunctionReturnAnalysis,
     hints: Optional[Dict[int, ParameterSemanticHint]] = None,
-    fragment_infos: Optional[Any] = None,
+    *,
+    authorization: Optional[RewriteAuthorization] = None,
 ) -> FunctionReturnAnalysis:
-    """Return a copy of the analysis with semantic-width rewrites applied."""
+    """Return a copy of the analysis with semantic-width rewrites applied.
 
+    ``authorization`` は最終 ``InputCorrespondence`` が含意する入力仮定。省略時は
+    空（恒等規則だけ）で、これは常に健全。
+    """
+
+    source = analysis
     analysis = _synchronize_parameter_expression_metadata(analysis)
 
     inferred_hints_by_identity = infer_parameter_semantics_by_identity(analysis)
@@ -696,20 +579,21 @@ def normalize_analysis_semantic_width(
     else:
         hints_by_identity = dict(inferred_hints_by_identity)
         hints_by_identity.update(_build_hints_by_object_identity(analysis, hints))
-    fragment_infos_by_name = _build_fragment_info_map(fragment_infos)
 
-    normalizer = SemanticWidthNormalizer(hints_by_identity, fragment_infos_by_name)
+    normalizer = SemanticWidthNormalizer(hints_by_identity, authorization)
     # **この関数の出口が公開点**。`_rewrite_analysis_expressions` は途中段
     # （`_synchronize_parameter_expression_metadata`）でも使う書き換えの「手順」
     # なので、そちらで公開すると、まだ幅を直している最中の値を確定扱いにして
     # しまう。完成を宣言できるのは、書き換えを全部終えたここだけ。
-    return publish_semantic_values(
+    normalized = publish_semantic_values(
         _rewrite_analysis_expressions(
             analysis,
             normalizer.rewrite_expression,
             simplify_conditions=True,
         )
     )
+    # 書き換え結果は raw ではない。最終 relation の producer はこれを拒否する。
+    return mark_rewritten_surface(normalized) if normalized is not source else normalized
 
 
 def align_return_value_extension_surfaces(
@@ -722,10 +606,11 @@ def align_return_value_extension_surfaces(
     if surface_alignment is None:
         return analysis1, analysis2
     target_bits, evidence = surface_alignment
-    return (
-        _with_return_extension_surface(analysis1, target_bits, evidence),
-        _with_return_extension_surface(analysis2, target_bits, evidence),
-    )
+    aligned = []
+    for analysis in (analysis1, analysis2):
+        result = _with_return_extension_surface(analysis, target_bits, evidence)
+        aligned.append(mark_rewritten_surface(result) if result is not analysis else result)
+    return aligned[0], aligned[1]
 
 
 def _common_return_extension_surface_alignment(
@@ -1067,17 +952,19 @@ def _expression_bit_width(expr: Optional[Expression]) -> int:
     return 0
 
 
-def _synchronize_parameter_expression_metadata(
-    analysis: FunctionReturnAnalysis,
-) -> FunctionReturnAnalysis:
-    parameters = list(analysis.parameters or [])
-    if not parameters:
-        return analysis
+def parameter_metadata_synchronizer(parameters: Any) -> Callable[[Optional[Expression]], Optional[Expression]]:
+    """PARAMETER leaf の index・型・幅を parameter 表の descriptor に揃える書き換え。
+
+    意味は変えない前提の metadata 同期で、leaf は descriptor の parameter symbol
+    として描かれる。宣言と幅の違う leaf は同期で幅の情報を失うので、最終 relation の
+    closure 走査（``projection_closure``）がその leaf を hidden input として数え、
+    relation を不十分にする（Issue #167）。この同期の owner はここだけ。
+    """
 
     params_by_index: Dict[int, Dict[str, Any]] = {}
     params_by_storage_candidates: Dict[Tuple[object, ...], list[Dict[str, Any]]] = {}
-    for param in parameters:
-        descriptor = dict(param)
+    for param in list(parameters or []):
+        descriptor = dict(param or {})
         index = descriptor.get("index")
         if isinstance(index, int) and index >= 0:
             params_by_index[index] = descriptor
@@ -1089,14 +976,18 @@ def _synchronize_parameter_expression_metadata(
         for storage_key, descriptors in params_by_storage_candidates.items()
         if len(descriptors) == 1
     }
+    return lambda expr: _rewrite_parameter_expression_metadata(expr, params_by_index, params_by_storage)
 
+
+def _synchronize_parameter_expression_metadata(
+    analysis: FunctionReturnAnalysis,
+) -> FunctionReturnAnalysis:
+    parameters = list(analysis.parameters or [])
+    if not parameters:
+        return analysis
     return _rewrite_analysis_expressions(
         analysis,
-        lambda expr: _rewrite_parameter_expression_metadata(
-            expr,
-            params_by_index,
-            params_by_storage,
-        ),
+        parameter_metadata_synchronizer(parameters),
         simplify_conditions=False,
     )
 
@@ -1226,16 +1117,11 @@ def _rewrite_conditions(
     simplify: bool,
 ):
     rewritten = []
-    width_changed = False
     for cond in conditions or []:
-        condition_expr = rewrite_expr(cond.expression)
-        condition_expr, condition_width_changed = _normalize_condition_comparison_constant_widths(condition_expr)
-        width_changed = width_changed or condition_width_changed
-        rewritten.append(Condition(condition_expr, cond.negated))
+        rewritten.append(Condition(rewrite_expr(cond.expression), cond.negated))
     if simplify:
         rewritten = ConditionSimplifier.simplify_conditions(rewritten)
 
-    changed = width_changed
     original = list(conditions or [])
     if len(rewritten) != len(original):
         changed = True
@@ -1247,52 +1133,27 @@ def _rewrite_conditions(
     return rewritten, changed
 
 
-def _normalize_condition_comparison_constant_widths(expr: Optional[Expression]) -> Tuple[Optional[Expression], bool]:
-    if expr is None or not getattr(expr, "operands", None):
-        return expr, False
+def _zero_constant_at_peer_width(candidate: Expression, peer: Expression) -> Expression:
+    """比較の operand が定数 0 なら相手の幅の 0（そうでなければそのまま）。"""
 
-    changed = False
-    new_operands = []
-    for operand in expr.operands:
-        new_operand, operand_changed = _normalize_condition_comparison_constant_widths(operand)
-        changed = changed or operand_changed
-        new_operands.append(new_operand)
-
-    current = expr.clone_with(operands=new_operands) if changed else expr
-    if (
-        current.expr_type != ExpressionType.BINARY_OP
-        or current.operator not in COMPARISON_OPS
-        or len(current.operands or ()) != 2
-    ):
-        return current, changed
-
-    left, right = current.operands
-    coerced_left, left_changed = _coerce_constant_operand_width(left, right)
-    coerced_right, right_changed = _coerce_constant_operand_width(right, left)
-    if not left_changed and not right_changed:
-        return current, changed
-    return current.clone_with(operands=[coerced_left, coerced_right]), True
-
-
-def _coerce_constant_operand_width(candidate: Expression, peer: Expression) -> Tuple[Expression, bool]:
     if candidate is None or peer is None or candidate.expr_type != ExpressionType.CONSTANT:
-        return candidate, False
+        return candidate
     try:
         if int(candidate.value) != 0:
-            return candidate, False
+            return candidate
     except (TypeError, ValueError):
-        return candidate, False
+        return candidate
     peer_size = int(getattr(peer, "size", 0) or 0)
     if peer_size > 0:
         desired_size = peer_size
     else:
         peer_bits = _expression_bit_width(peer)
         if peer_bits <= 0 or peer_bits % 8 != 0:
-            return candidate, False
+            return candidate
         desired_size = max(1, peer_bits // 8)
     if int(getattr(candidate, "size", 0) or 0) == desired_size:
-        return candidate, False
-    return candidate.clone_with(size=desired_size), True
+        return candidate
+    return candidate.clone_with(size=desired_size)
 
 
 def _rewrite_effect_summary_expressions(
@@ -1465,81 +1326,3 @@ def _build_hints_by_object_identity(
         if storage_key is not None:
             hints_by_identity[("parameter_storage", storage_key)] = hint
     return hints_by_identity
-
-
-def _storage_identity_key(storage_info) -> Optional[Tuple[object, ...]]:
-    storage_info = _coerce_storage_info(storage_info)
-    if storage_info is None:
-        return None
-    storage_key_fn = getattr(storage_info, "storage_identity_key", None)
-    if not callable(storage_key_fn):
-        return None
-    try:
-        storage_key = storage_key_fn()
-    except (TypeError, ValueError):
-        return None
-    return storage_key if storage_key is not None else None
-
-
-def _coerce_storage_info(storage_info) -> Optional[StorageInfo]:
-    if storage_info is None:
-        return None
-    if isinstance(storage_info, StorageInfo):
-        return storage_info
-    if not isinstance(storage_info, dict):
-        return None
-    try:
-        kind = str(storage_info.get("kind", "") or storage_info.get("space_name", "") or "").lower()
-        is_register = bool(storage_info.get("is_register", False)) or kind == "register"
-        return StorageInfo(
-            is_register=is_register,
-            space_name=str(storage_info.get("space_name") or ("register" if is_register else "")),
-            space_id=storage_info.get("space_id"),
-            offset=int(storage_info.get("offset", 0) or 0),
-            size=int(storage_info.get("size", 0) or 0),
-            size_bits=int(storage_info.get("size_bits", 0) or 0),
-            register_name=storage_info.get("register_name"),
-            register_offset=storage_info.get("register_offset"),
-            register_size=storage_info.get("register_size"),
-            register_size_bits=storage_info.get("register_size_bits"),
-            base_register_name=storage_info.get("base_register_name"),
-            base_register_offset=int(storage_info.get("base_register_offset", 0) or 0),
-            base_register_size=int(storage_info.get("base_register_size", 0) or 0),
-            base_register_size_bits=int(storage_info.get("base_register_size_bits", 0) or 0),
-            bit_offset_in_base=int(storage_info.get("bit_offset_in_base", 0) or 0),
-            is_stack_pointer=bool(storage_info.get("is_stack_pointer", False)),
-            is_frame_pointer=bool(storage_info.get("is_frame_pointer", False)),
-        )
-    except Exception:
-        return None
-
-
-def _build_fragment_info_map(fragment_infos: Optional[Any]) -> Dict[str, Any]:
-    if fragment_infos is None:
-        return {}
-
-    if isinstance(fragment_infos, dict):
-        items: Iterable[Any] = fragment_infos.values()
-    else:
-        items = fragment_infos
-
-    result: Dict[str, Any] = {}
-    for item in items:
-        if item is None:
-            continue
-
-        analysis = getattr(item, "analysis", None)
-        candidate = analysis if analysis is not None else item
-        fragment_info = getattr(candidate, "fragment_info", None)
-        if fragment_info is None:
-            continue
-
-        fragment_name = (
-            getattr(item, "original_name", None)
-            or getattr(candidate, "name", None)
-            or getattr(fragment_info, "fragment_name", None)
-        )
-        if fragment_name:
-            result[fragment_name] = fragment_info
-
-    return result

@@ -489,6 +489,7 @@ def run_production_conditional_lane(
     solver_runner: Any,
     timeout: Optional[float] = None,
     debug: bool = False,
+    input_correspondence_factory: Optional[Any] = None,
 ) -> Optional[Mapping[str, Any]]:
     """production の conditional lane。``result`` の conditional 列だけを触る。
 
@@ -507,7 +508,8 @@ def run_production_conditional_lane(
     decision = getattr(result, "decision_receipt", None)
     if not conditional_lane_is_eligible(decision):
         return None
-    if analyses is None:
+    if analyses is None or input_correspondence_factory is None:
+        # base pair か、その最終 relation（Issue #167）が結び付いていない（fail closed）。
         return None
     analysis1, analysis2 = analyses
 
@@ -516,6 +518,7 @@ def run_production_conditional_lane(
             artifact = run_conditional_proof(
                 analysis1,
                 analysis2,
+                input_correspondence=input_correspondence_factory(),
                 observation_policy=observation_policy,
                 solver_runner=solver_runner,
                 timeout=timeout,

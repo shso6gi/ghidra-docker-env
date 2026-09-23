@@ -482,7 +482,7 @@ CALL_EFFECT_PRODUCER_EXCEPTION_PATTERNS = frozenset((
     "caller_memory_call_return_signedness_missing", "caller_memory_call_return_width_missing",
     "caller_observation_exceeds_callee_return_width", "caller_parameter_relation_incomplete",
     "caller_parameter_relation_missing", "caller_return_observation_width_relation_missing",
-    "inline_region_parameter_signedness_missing", "inline_region_parameter_width_missing",
+    "inline_region_parameter_wider_than_declaration", "inline_region_parameter_width_missing",
     "inline_region_parameter_width_relation_ambiguous", "left_parameter_names_ambiguous",
     "memory_effect_call_target_relation_missing", "memory_effect_callsite_identity_missing",
     "memory_effect_location_relation_missing", "memory_effect_substitution_coverage_missing",

@@ -1,3 +1,4 @@
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
 
 def test_function_return_analysis_scans_raw_sibling_after_lowerable_post_state_read():
@@ -63,7 +64,7 @@ def test_function_return_analysis_scans_raw_sibling_after_lowerable_post_state_r
     assert "effect_sensitive_raw_memory_reads" in analysis.get_decisive_sat_unsafety_reasons()
 
 def test_pairwise_unknown_result_preserves_recovery_action_status(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],
@@ -144,7 +145,7 @@ def test_pairwise_unknown_result_preserves_recovery_action_status(monkeypatch):
 def test_monolithic_unsupported_intrinsic_is_unresolved_expression_not_strategy_exception():
     from scripts.function_tracer_pcode.core.render_smt import UnsupportedSmtIntrinsicError
 
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.side_effect = (
         UnsupportedSmtIntrinsicError(mnemonic="CALLOTHER", opcode="CALLOTHER")
     )
@@ -177,7 +178,7 @@ def test_monolithic_unsupported_intrinsic_is_unresolved_expression_not_strategy_
 
 
 def test_monolithic_does_not_classify_arbitrary_value_error_from_message_text():
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_equivalence_formula_extended.side_effect = ValueError(
         "Unsupported intrinsic for SMT lowering: forged diagnostic text"
     )
@@ -207,7 +208,7 @@ def test_monolithic_does_not_classify_arbitrary_value_error_from_message_text():
     assert "Unsupported intrinsic" in result.error_message
 
 def test_pairwise_global_blocker_dominates_pair_local_unresolved_expression(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -230,7 +231,7 @@ def test_pairwise_global_blocker_dominates_pair_local_unresolved_expression(monk
     assert "return_case_coverage_gap" in analysis1.analysis_notes
 
 def test_pairwise_equivalence_blocker_dominates_pair_local_unresolved_expression(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -285,7 +286,7 @@ def test_pairwise_equivalence_blocker_dominates_pair_local_unresolved_expression
     )
 
 def test_pairwise_completed_recovery_proofs_can_be_disabled(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -314,7 +315,7 @@ def test_pairwise_completed_recovery_proofs_can_be_disabled(monkeypatch):
     assert analysis2.completed_recovery_proof_evidence == ()
 
 def test_pairwise_disabled_completed_proofs_do_not_create_new_return_gap_without_active_blocker(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -348,7 +349,7 @@ def test_pairwise_disabled_completed_proofs_do_not_create_new_return_gap_without
     assert analysis2.completed_recovery_proof_evidence == ()
 
 def test_pairwise_disabled_completed_proofs_ignore_stale_summary_dependency_note(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -382,7 +383,7 @@ def test_pairwise_disabled_completed_proofs_ignore_stale_summary_dependency_note
     assert analysis2.completed_recovery_proof_evidence == ()
 
 def test_pairwise_disabled_completed_proofs_do_not_block_switch_or_control_region_recovery(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -419,7 +420,7 @@ def test_pairwise_disabled_completed_proofs_do_not_block_switch_or_control_regio
     assert analysis2.completed_recovery_proof_evidence == ()
 
 def test_pairwise_unknown_indirect_legacy_return_guard_mismatch_is_not_path_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -450,7 +451,7 @@ def test_pairwise_unknown_indirect_legacy_return_guard_mismatch_is_not_path_proo
     ]
 
 def test_pairwise_unknown_indirect_output_surface_use_keeps_unknown(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -487,7 +488,7 @@ def test_pairwise_unknown_indirect_output_surface_use_keeps_unknown(monkeypatch)
     ]
 
 def test_pairwise_unknown_indirect_observed_store_keeps_unknown(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -524,7 +525,7 @@ def test_pairwise_unknown_indirect_observed_store_keeps_unknown(monkeypatch):
     ]
 
 def test_pairwise_unknown_indirect_missing_target_expr_does_not_auto_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -560,7 +561,7 @@ def test_pairwise_unknown_indirect_missing_target_expr_does_not_auto_proof(monke
     ]
 
 def test_pairwise_unknown_indirect_target_mismatch_does_not_auto_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -590,7 +591,7 @@ def test_pairwise_unknown_indirect_target_mismatch_does_not_auto_proof(monkeypat
     }
 
 def test_pairwise_unknown_indirect_argument_mismatch_does_not_auto_proof(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -615,7 +616,7 @@ def test_pairwise_unknown_indirect_argument_mismatch_does_not_auto_proof(monkeyp
     assert len(result.unknown_reasons) == 2
 
 def test_pairwise_opaque_unresolved_return_stays_unknown(monkeypatch):
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -650,7 +651,7 @@ def test_pairwise_opaque_unresolved_return_stays_unknown(monkeypatch):
     strategy._solve_query_after_guard.assert_not_called()
 
 def test_unresolved_expression_action_status_marks_planned_without_stage_evidence():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     target = (
         "unresolved_expression",
         ("pair", "(0,1)"),
@@ -682,7 +683,7 @@ def test_unresolved_expression_action_status_marks_planned_without_stage_evidenc
 
 def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_proof(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = base_ctx
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -739,7 +740,7 @@ def test_pairwise_phi_circular_guard_same_origin_stays_unknown_with_diagnostic_p
     strategy._solve_query_internal.assert_not_called()
 
 def test_pairwise_mixed_float_phi_unresolved_uses_generic_pending_lane():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     target = (
         "unresolved_expression",
         ("pair", "case0"),
@@ -850,7 +851,7 @@ def test_pairwise_mixed_float_phi_unresolved_uses_generic_pending_lane():
 
 def test_pairwise_phi_circular_guard_solver_replay_does_not_recover_from_assumed_unknown_equality(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = base_ctx
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -890,7 +891,7 @@ def test_pairwise_phi_circular_guard_solver_replay_does_not_recover_from_assumed
 
 def test_pairwise_phi_circular_guard_polarity_mismatch_stays_unknown(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = base_ctx
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -922,7 +923,7 @@ def test_pairwise_phi_circular_guard_polarity_mismatch_stays_unknown(monkeypatch
 
 def test_pairwise_phi_circular_guard_overlap_does_not_prune_without_semantic_proof(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = base_ctx
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -955,7 +956,7 @@ def test_pairwise_phi_circular_guard_overlap_does_not_prune_without_semantic_pro
 
 def test_pairwise_phi_circular_guard_origin_mismatch_stays_unknown(monkeypatch):
     base_ctx = _base_context_for_single_int_param()
-    formula_builder = Mock()
+    formula_builder = echo_input_correspondence(Mock())
     formula_builder.build_base_context.return_value = base_ctx
     solver_runner = Mock()
     solver_runner.timeout = 5
@@ -1037,7 +1038,7 @@ def test_expression_provenance_key_prefers_parameter_runtime_ref_over_storage():
     assert key[0] != "storage"
 
 def test_artifact_stable_key_rewrites_parameter_runtime_ref_program_ids():
-    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     program_id = 3734980569294953568
     analysis = FunctionReturnAnalysis(
         function_name="fc_apply_indirect",

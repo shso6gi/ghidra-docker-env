@@ -30,6 +30,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder impor
 from scripts.function_tracer_pcode.semantics.semantic_width import normalize_analysis_semantic_width
 from scripts.function_tracer_pcode.tests.unit._publication import published
 from conftest import resolve_mock_data_type
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 def _store(location, value, order):
@@ -178,10 +179,12 @@ def test_memory_effect_width_follows_the_returns_not_the_synthetic_expr():
 
 def test_pair_query_on_store_only_difference_is_sat_after_normalization():
     old, new = _old_and_new_constructors()
+    # 最終 relation は書き換え前の raw pair から作る（Issue #167）。
+    relation = build_input_correspondence_set(old, new)
     old = normalize_analysis_semantic_width(old)
     new = normalize_analysis_semantic_width(new)
     builder = FormulaBuilder(debug=False, exclude_ub=False)
-    base_ctx = builder.build_base_context(old, new)
+    base_ctx = builder.build_base_context(old, new, input_correspondence=relation)
     assert base_ctx["return_size1"] == COMBINED_BITS
     assert base_ctx["return_size2"] == COMBINED_BITS
 

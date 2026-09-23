@@ -749,7 +749,6 @@
       "MonolithicStrategy.check": {"logged": 0, "unlogged": 2}
     },
     "proof.strategies.pairwise_query_builder": {
-      "_coerce_storage_info": {"logged": 0, "unlogged": 1},
       "save_unknown_query": {"logged": 0, "unlogged": 1}
     },
     "proof.strategies.pairwise_services.auxiliary_smt": {
@@ -780,9 +779,6 @@
     "proof.strategies.pairwise_services.parameter_identity": {
       "_impl__storage_info_from_parameter_descriptor": {"logged": 0, "unlogged": 1}
     },
-    "proof.strategies.pairwise_services.readonly_reduction": {
-      "_impl__readonly_parameter_declared_signedness": {"logged": 0, "unlogged": 1}
-    },
     "proof.strategies.pairwise_solver_proven_rewrite": {
       "_exact_expr_key": {"logged": 0, "unlogged": 1},
       "_expr_signature": {"logged": 0, "unlogged": 1}
@@ -805,14 +801,12 @@
       "write_to_file": {"logged": 0, "unlogged": 1}
     },
     "semantics.param_semantics": {
-      "_coerce_storage_info": {"logged": 0, "unlogged": 1},
       "_get_declared_bits": {"logged": 0, "unlogged": 1},
       "_get_storage_bits": {"logged": 0, "unlogged": 1},
       "_record_readonly_reduction_counter_evidence": {"logged": 0, "unlogged": 1},
       "_signed_boundary_bonus": {"logged": 0, "unlogged": 1}
     },
     "semantics.semantic_width": {
-      "_coerce_storage_info": {"logged": 0, "unlogged": 1},
       "_expression_bit_width": {"logged": 0, "unlogged": 2},
       "_rewritten_expr_bit_width": {"logged": 0, "unlogged": 2}
     },

@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from scripts.function_tracer_pcode.core.evidence_authority import function_unary_evidence
 from scripts.function_tracer_pcode.core import (
     Condition,
     CallTargetRef,
@@ -1046,7 +1047,7 @@ def _return_region_summary_proof_witnesses_include_return(
     if not isinstance(proof_ref, tuple) or len(proof_ref) != 3:
         return False
     proof_id = proof_ref[1]
-    for evidence in getattr(analysis, "completed_recovery_proof_evidence", ()) or ():
+    for evidence in function_unary_evidence(getattr(analysis, "completed_recovery_proof_evidence", ())):
         if not isinstance(evidence, Mapping):
             continue
         if evidence.get("proof_obligation_id") != proof_id:
@@ -2585,7 +2586,7 @@ def _completed_return_region_summary_proof_ids(
     analysis: FunctionReturnAnalysis,
 ) -> Tuple[Tuple[Any, ...], ...]:
     completed: List[Tuple[Any, ...]] = []
-    for evidence in getattr(analysis, "completed_recovery_proof_evidence", ()) or ():
+    for evidence in function_unary_evidence(getattr(analysis, "completed_recovery_proof_evidence", ())):
         proof_id = _return_region_summary_proof_id_from_evidence(evidence)
         if proof_id is not None:
             completed.append(proof_id)
@@ -2784,7 +2785,7 @@ def _completed_prior_state_transition_handoff_proof_ids(
     analysis: FunctionReturnAnalysis,
 ) -> Tuple[Tuple[Any, ...], ...]:
     proof_ids: List[Tuple[Any, ...]] = []
-    for evidence in getattr(analysis, "completed_recovery_proof_evidence", ()) or ():
+    for evidence in function_unary_evidence(getattr(analysis, "completed_recovery_proof_evidence", ())):
         proof_id = _prior_state_transition_handoff_proof_id_from_evidence(evidence)
         if proof_id is not None:
             proof_ids.append(proof_id)

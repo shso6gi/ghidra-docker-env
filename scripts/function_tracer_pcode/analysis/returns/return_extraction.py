@@ -804,6 +804,7 @@ def _produce_standard_termination_path_effect_evidence(self, analysis: FunctionR
             path_guard_key=guard_key,
             contract=contract,
             path_guard=guard,
+            payload_arguments=observation.get("argument_expressions"),
         ))
     analysis.termination_path_effect_evidence = tuple(produced)
     if unknown_nonreturning:

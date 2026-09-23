@@ -18,6 +18,12 @@ from scripts.function_tracer_pcode.core.structural import condition_key, express
 from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.proof.formula.symbol_replace import build_symbol_replacer
 from scripts.function_tracer_pcode.proof.formula.returns import ReturnWidthMismatchError
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    build_input_correspondence_set,
+    comparison_is_current,
+    comparison_scope,
+    current_comparison,
+)
 from scripts.function_tracer_pcode.semantics.normalize import NormalizationSettings
 from scripts.function_tracer_pcode.semantics.param_semantics import infer_parameter_semantics
 from scripts.function_tracer_pcode.semantics.semantic_width import (
@@ -110,6 +116,7 @@ from scripts.function_tracer_pcode.proof.strategies.monolithic_support import (
     _MonolithicDecisionExecutionContext,
     _MonolithicRegionPlan,
     _MonolithicRegionExecution,
+    region_query_input_correspondence,
 )
 
 
@@ -209,9 +216,36 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
             dispatch_frame = consume_prepared_dispatch_frame(analysis1, analysis2)
             analysis1 = dispatch_frame.prepared.analysis1
             analysis2 = dispatch_frame.prepared.analysis2
+            input_correspondence = dispatch_frame.prepared.input_correspondence
+            # Issue #167: この比較で作る authority は frame の比較（raw pair と relation）に
+            # 束縛される。範囲がその比較でなければ実行しない。
+            if not comparison_is_current(dispatch_frame.comparison_binding):
+                raise RuntimeError("comparison_authority_scope_mismatch")
+        else:
+            # 互換経路: 引数は raw pair なので、そこから最終 relation を作る。
+            input_correspondence = build_input_correspondence_set(
+                source_analysis1, source_analysis2
+            )
+            from scripts.function_tracer_pcode.proof.call_effect.preflight import (
+                comparison_binding_for_raw_pair,
+            )
+
+            comparison = comparison_binding_for_raw_pair(
+                source_analysis1, source_analysis2, input_correspondence
+            )
+            if current_comparison() != comparison:
+                # この互換呼び出しを、自分の比較（raw pair と relation）として実行し直す。
+                with comparison_scope(comparison):
+                    return self.check(
+                        source_analysis1, source_analysis2, save_formula,
+                        _build_query_set, _create_session,
+                    )
+        # Issue #167: この check の builder / normalizer / decisive gate は全部
+        # この 1 つの relation を使う（mixin へは decision context と引数で渡す）。
         decision_context = _MonolithicDecisionExecutionContext.create(
             analysis1,
             analysis2,
+            input_correspondence=input_correspondence,
             decision_surface=(
                 "prepared" if dispatch_frame is not None else "legacy_source"
             ),
@@ -240,7 +274,9 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
         call_width_receipt_assertion_digests = ()
         canonical_width_observation = None
         if dispatch_frame is not None and dispatch_frame.projection.semantic_bindings:
-            call_base_ctx = self.formula_builder.build_base_context(analysis1, analysis2)
+            call_base_ctx = self.formula_builder.build_base_context(
+                analysis1, analysis2, input_correspondence=input_correspondence
+            )
             call_replace1 = build_symbol_replacer(
                 call_base_ctx["params1"],
                 call_base_ctx.get("extra_vars1", []),
@@ -315,7 +351,9 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
             region_base_ctx = None
             if region_plan is not None and canonical_census is not None:
                 region_base_ctx = dict(
-                    self.formula_builder.build_base_context(analysis1, analysis2)
+                    self.formula_builder.build_base_context(
+                        analysis1, analysis2, input_correspondence=input_correspondence
+                    )
                 )
                 if call_projection_assertions:
                     region_base_ctx["header_lines"] = [
@@ -354,6 +392,7 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                         ),
                         QueryExecutionRecord=QueryExecutionRecord,
                         started_at=start_time,
+                        input_correspondence=input_correspondence,
                         base_ctx=region_base_ctx,
                         expected_query_set=expected_query_set,
                         shared_region_session=shared_region_session,
@@ -369,7 +408,7 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                 finally:
                     shared_region_session = None
 
-            build_kwargs = {}
+            build_kwargs = {"input_correspondence": input_correspondence}
             if call_projection_assertions:
                 build_kwargs["extra_assertions"] = list(call_projection_assertions)
             if region_execution is None:
@@ -384,7 +423,7 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                 except ReturnWidthMismatchError:
                     canonical_width_observation = (
                         self._canonical_return_width_observation_for_analyses(
-                            analysis1, analysis2
+                            analysis1, analysis2, input_correspondence=input_correspondence
                         )
                     )
                     bridge_narrow_bits = (
@@ -481,6 +520,18 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                     for reason in equivalence_blocking_reasons
                     if reason not in covered_blockers
                 ]
+            # Issue #167: 判定に使った query の premise を決めた relation が、
+            # この check の relation と同一で、しかも十分なときだけ確定させる。
+            input_correspondence_reasons = self._input_correspondence_unsafety_reasons(
+                region_query_input_correspondence(region_execution, region_base_ctx)
+                if region_execution is not None
+                else getattr(result, "input_correspondence", None),
+                authority_correspondence=input_correspondence,
+            )
+            sat_unsafety_reasons.extend(input_correspondence_reasons)
+            equivalence_blocking_reasons.extend(input_correspondence_reasons)
+            if self.debug and input_correspondence is not None:
+                self._debug_print(input_correspondence.diagnostic_line())
             coverage_unsafety_reasons = []
             if final_is_equivalent in {True, False}:
                 coverage_unsafety_reasons = self._collect_monolithic_return_coverage_unsafety_reasons(
@@ -519,7 +570,9 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                             count_counterexample_model_assertions(
                                 region_base_ctx or dict(
                                     self.formula_builder.build_base_context(
-                                        analysis1, analysis2
+                                        analysis1,
+                                        analysis2,
+                                        input_correspondence=input_correspondence,
                                     )
                                 ),
                                 counterexample_raw,
@@ -531,7 +584,9 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                         typed_census = reconstruct_fallback_census(frozen_surface)
                         replay_base_ctx = dict(
                             self.formula_builder.build_base_context(
-                                analysis1, analysis2
+                                analysis1,
+                                analysis2,
+                                input_correspondence=input_correspondence,
                             )
                         )
                         model_assertions = tuple(
@@ -550,6 +605,7 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                                 "legacy_fixed_model_assertions_missing"
                             )
                         replay_build_kwargs = {
+                            "input_correspondence": input_correspondence,
                             "extra_assertions": [
                                 *list(call_projection_assertions),
                                 *list(model_assertions),
@@ -782,7 +838,11 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                         )
                         try:
                             replay_targets = counterexample_replay_targets(
-                                self.formula_builder.build_base_context(analysis1, analysis2)
+                                self.formula_builder.build_base_context(
+                                    analysis1,
+                                    analysis2,
+                                    input_correspondence=input_correspondence,
+                                )
                             )
                         except Exception:
                             replay_targets = None

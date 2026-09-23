@@ -38,10 +38,11 @@ from scripts.function_tracer_pcode.proof.call_effect.obligations import (
     _INTERNAL_SOLVER_PRODUCER_TOKEN,
     _digest,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    InputRelationKind,
+    build_tie_only_correspondence_set,
+)
 from scripts.function_tracer_pcode.proof.formula.params import (
-    build_parameter_constraint,
-    build_parameter_pairs,
-    build_parameter_semantic_constraints,
     build_symbol_name_mapping,
     collect_param_info,
 )
@@ -808,20 +809,22 @@ def _parameter_prelude(
         raise ValueError("left_parameter_names_ambiguous")
     if len({item.original_name for item in right_infos}) != len(right_infos):
         raise ValueError("right_parameter_names_ambiguous")
-    pairs = build_parameter_pairs(left_infos, right_infos)
-    if any(pair.param1 is None or pair.param2 is None for pair in pairs):
+    correspondence = build_tie_only_correspondence_set(left_infos, right_infos)
+    if any(
+        item.kind is InputRelationKind.MISSING_SIDE
+        for item in correspondence.correspondences
+    ):
         raise ValueError("caller_parameter_relation_incomplete")
-    if (left_infos or right_infos) and not pairs:
+    if (left_infos or right_infos) and not correspondence.correspondences:
         raise ValueError("caller_parameter_relation_missing")
     lines = ["(set-logic QF_BV)"]
     lines.extend(
         f"(declare-const {item.smt_name} (_ BitVec {item.bit_width}))"
         for item in tuple(left_infos) + tuple(right_infos)
     )
-    lines.extend(build_parameter_semantic_constraints(left_infos))
-    lines.extend(build_parameter_semantic_constraints(right_infos))
-    for pair in pairs:
-        lines.extend(build_parameter_constraint(pair))
+    # tie だけ（extension 仮定は含意されない）。入力領域を狭めないので、この
+    # prelude で示す UNSAT は caller の全入力について成り立つ（Issue #167）。
+    lines.extend(correspondence.premise_lines(left_infos, right_infos))
     return (
         lines,
         build_symbol_name_mapping(left_infos),
@@ -868,19 +871,15 @@ def _call_region_parameter_prelude(proof_input: PureCallRegionProofInput):
         base_symbol = region_mapping[name]
         auxiliary = f"{base_symbol}_region_{observed_bits}"
         lines.append(f"(declare-const {auxiliary} (_ BitVec {observed_bits}))")
-        if observed_bits < declared_bits:
-            relation = (
-                f"(= {auxiliary} "
-                f"((_ extract {observed_bits - 1} 0) {base_symbol}))"
-            )
-        else:
-            if "is_signed" not in parameter:
-                raise ValueError("inline_region_parameter_signedness_missing")
-            extension = "sign_extend" if bool(parameter.get("is_signed")) else "zero_extend"
-            relation = (
-                f"(= {auxiliary} "
-                f"((_ {extension} {observed_bits - declared_bits}) {base_symbol}))"
-            )
+        if observed_bits > declared_bits:
+            # 宣言より広い読みの上位 bit は parameter の外（register の残り）で、
+            # 最終 InputCorrespondence はそれを含意しない。宣言型の符号から extension
+            # を仮定すると入力領域を狭めるので、この obligation は組めない（Issue #167）。
+            raise ValueError("inline_region_parameter_wider_than_declaration")
+        relation = (
+            f"(= {auxiliary} "
+            f"((_ extract {observed_bits - 1} 0) {base_symbol}))"
+        )
         lines.append(f"(assert {relation})")
         region_mapping[name] = auxiliary
     if proof_input.call_on_left:

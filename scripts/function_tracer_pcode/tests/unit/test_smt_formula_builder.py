@@ -10,6 +10,7 @@ from scripts.function_tracer_pcode.core import (
     ExpressionType,
     Condition,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 class TestIntegration:
@@ -70,7 +71,7 @@ class TestIntegration:
         
         result = builder.build_equivalence_formula_extended(
             analysis1, analysis2,
-            extra_assertions=extra_assertions
+            extra_assertions=extra_assertions, input_correspondence=build_input_correspondence_set(analysis1, analysis2),
         )
         
         formula = result.formula
@@ -165,7 +166,7 @@ class TestIntegration:
             ],
         )
 
-        result = builder.build_equivalence_formula_extended(analysis1, analysis2)
+        result = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
         formula = result.formula
 
         assert "Exclude UB: INT_LEFT shift amount must be < 64 bits" in formula
@@ -231,7 +232,7 @@ class TestIntegration:
             returns=[ReturnInfo(address="0x00402000", conditions=[], value=value2)],
         )
 
-        formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+        formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
 
         assert "signed left shift overflow requires shift < 63" in formula
         assert "(assert (bvult shift_1 (_ bv63 32)))" in formula
@@ -296,7 +297,7 @@ class TestIntegration:
             returns=[ReturnInfo(address="0x00402000", conditions=[], value=value2)],
         )
 
-        formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+        formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
 
         assert "signed left shift overflow requires shift < 63" not in formula
         assert "(assert (bvult shift_1 (_ bv64 32)))" in formula

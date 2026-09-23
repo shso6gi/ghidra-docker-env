@@ -30,6 +30,7 @@ from scripts.function_tracer_pcode.core import (
     FunctionReturnAnalysis,
     ReturnInfo,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 def _nonnull_condition(ptr: Expression) -> Condition:
@@ -227,7 +228,7 @@ def test_formula_builder_uses_effect_surface_width_for_void_effect_equivalence()
     analysis1, analysis2 = _equivalent_void_effect_analyses()
     builder = FormulaBuilder(debug=False, exclude_ub=False)
 
-    formula = builder.build_equivalence_formula_extended(analysis1, analysis2).formula
+    formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
 
     assert "(_ BitVec 0)" not in formula
     assert "(_ extract -1 0)" not in formula
@@ -238,10 +239,12 @@ def test_formula_builder_uses_effect_surface_width_for_void_effect_equivalence()
 
 def test_pairwise_query_uses_effect_surface_width_for_void_effects():
     analysis1, analysis2 = _equivalent_void_effect_analyses()
+    # 最終 relation は書き換え前の raw pair から作る（Issue #167）。
+    relation = build_input_correspondence_set(analysis1, analysis2)
     analysis1 = normalize_analysis_semantic_width(analysis1)
     analysis2 = normalize_analysis_semantic_width(analysis2)
     builder = FormulaBuilder(debug=False, exclude_ub=False)
-    base_ctx = builder.build_base_context(analysis1, analysis2)
+    base_ctx = builder.build_base_context(analysis1, analysis2, input_correspondence=relation)
 
     cases1 = extract_return_cases(analysis1)
     cases2 = extract_return_cases(analysis2)

@@ -129,6 +129,7 @@ class RegionExecutionMixin:
         call_width_receipt_assertion_digests: Tuple[Tuple[str, str], ...],
         QueryExecutionRecord,
         started_at: float,
+        input_correspondence: Any,
         base_ctx: Optional[Mapping[str, Any]] = None,
         expected_query_set: Any = None,
         shared_region_session: Any = None,
@@ -141,7 +142,11 @@ class RegionExecutionMixin:
         base_ctx = dict(
             base_ctx
             if base_ctx is not None
-            else self.formula_builder.build_base_context(analysis1, analysis2)
+            else self.formula_builder.build_base_context(
+                analysis1,
+                analysis2,
+                input_correspondence=input_correspondence,
+            )
         )
         if call_projection_assertions and not base_ctx_was_provided:
             base_ctx["header_lines"] = [
@@ -380,6 +385,7 @@ class RegionExecutionMixin:
                 replay = self.formula_builder.build_equivalence_formula_extended(
                     analysis1,
                     analysis2,
+                    input_correspondence=input_correspondence,
                     extra_assertions=[
                         *list(call_projection_assertions),
                         *list(model_assertions),
@@ -520,4 +526,5 @@ class RegionExecutionMixin:
             session_certificate=getattr(shared_region_session, "certificate", None),
             sat_replay_formula=sat_replay_formula,
             sat_replay_census=sat_replay_census,
+            input_correspondence=base_ctx.get("input_correspondence"),
         )

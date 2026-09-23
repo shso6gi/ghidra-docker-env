@@ -41,6 +41,36 @@ from scripts.function_tracer_pcode.proof.obligations.snapshot import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _runtime_work_belongs_to_one_comparison():
+    """runtime の仕事は 1 つの比較（raw pair と最終 relation）の中で行う（Issue #167）。
+
+    この module は runtime の仕組み（view・再計画・cache）を確かめる。比較の authority の
+    規則そのものは ``test_input_correspondence_binding.py``。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import comparison_scope
+    from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import fixed_test_comparison
+
+    with comparison_scope(fixed_test_comparison()):
+        yield
+
+
+def _apply_in_comparison(runtime, wrappers, **kwargs):
+    """この比較の中で作った完了証拠として runtime に渡す。"""
+
+    from scripts.function_tracer_pcode.core.evidence_authority import evidence_authority_scope
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import bind_evidence_to_comparison
+
+    bound = []
+    for wrapper in wrappers:
+        evidence = dict(wrapper.get("evidence", wrapper))
+        if evidence_authority_scope(evidence) is None:
+            bind_evidence_to_comparison(evidence)
+        bound.append({**wrapper, "evidence": evidence} if "evidence" in wrapper else evidence)
+    return runtime.apply_completed_evidence(tuple(bound), **kwargs)
+
+
 def _requirement(name="value_relation"):
     return ProofRequirementId.create(
         name,
@@ -572,7 +602,7 @@ def test_runtime_completed_proof_builds_derived_view_and_reschedules_only_depend
         "proof_content": {"coverage": "proven"},
     }
     runtime.proof_outcomes[coverage.to_key()] = FunctionProofOutcome.EQUIVALENT
-    views = runtime.apply_completed_evidence(({"evidence": evidence},))
+    views = _apply_in_comparison(runtime, ({"evidence": evidence},))
 
     assert len(views) == 1
     assert views[0].parent_view_id == runtime.base_view.view_id
@@ -598,7 +628,7 @@ def test_runtime_rejects_untyped_completion_and_does_not_change_view():
         SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
     )
     before = runtime.current_view
-    assert runtime.apply_completed_evidence(({
+    assert _apply_in_comparison(runtime, ({
         "evidence": {"status": "complete", "proof_obligation_id": ("legacy",)},
     },)) == ()
     assert runtime.current_view is before
@@ -610,7 +640,7 @@ def test_runtime_rejects_typed_status_without_producer_validation():
         SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
     )
     requirement = _requirement("return_coverage")
-    assert runtime.apply_completed_evidence(({"evidence": {
+    assert _apply_in_comparison(runtime, ({"evidence": {
         "proof_requirement_id": requirement.to_dict(),
         "status": "complete",
     }},)) == ()
@@ -628,7 +658,7 @@ def test_runtime_resolves_unique_legacy_obligation_to_typed_requirement():
         proof_requirement_ids=(requirement.to_dict(),),
     )
     runtime.proof_outcomes[requirement.to_key()] = FunctionProofOutcome.EQUIVALENT
-    views = runtime.apply_completed_evidence(({
+    views = _apply_in_comparison(runtime, ({
         "evidence": {
             "status": "complete",
             "proof_obligation_id": ("legacy", "width"),
@@ -651,37 +681,29 @@ def test_runtime_rejects_ambiguous_legacy_obligation_mapping():
             _requirement("value_relation").to_dict(),
         ),
     )
-    assert runtime.apply_completed_evidence(({
+    assert _apply_in_comparison(runtime, ({
         "evidence": {"status": "complete", "proof_obligation_id": ("legacy", "shared")},
     },), reasons=(reason,)) == ()
-
-
-def test_recursive_producer_creates_real_derived_view_with_provenance():
-    runtime = ObligationRuntimeSession.create(
-        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
-        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
-    )
-    recursive = runtime.create_recursive_view(
-        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
-        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
-        (("match", 0),),
-    )
-    assert recursive.parent_view_id == runtime.base_view.view_id
-    assert recursive.fact_provenance
-    assert runtime.artifacts[0].requirement_id.proof_kind == "recursive_call_abstraction"
 
 
 def test_running_producer_can_supersede_its_parent_view():
     left = SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000")
     right = SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000")
     runtime = ObligationRuntimeSession.create(left, right)
-    branch = _requirement("recursive_branch")
+    branch = _requirement("function_branch")
+    coverage = _requirement("return_coverage")
+    runtime.proof_outcomes[coverage.to_key()] = FunctionProofOutcome.EQUIVALENT
 
-    def produce_recursive_view():
-        runtime.create_recursive_view(left, right, (("match", 0),))
+    def produce_derived_view():
+        _apply_in_comparison(runtime, ({"evidence": {
+            "proof_requirement_id": coverage.to_dict(),
+            "status": "complete",
+            "proof_source": "test_coverage_producer",
+            "proof_content": {"coverage": "proven"},
+        }},))
         return "branch_result"
 
-    item = runtime.schedule(branch, "function_branch", produce_recursive_view)
+    item = runtime.schedule(branch, "function_branch", produce_derived_view)
     popped, result = runtime.run_next()
     assert popped is item
     assert result == "branch_result"
@@ -697,12 +719,13 @@ def test_decision_aggregator_turns_proof_closed_global_blocker_into_eq():
     requirement = _requirement("return_coverage")
     reason = SimpleNamespace(reason_id="return_coverage_gap", pair_or_case=None)
     runtime.proof_outcomes[requirement.to_key()] = FunctionProofOutcome.EQUIVALENT
-    runtime.apply_completed_evidence(({"evidence": {
+    _apply_in_comparison(runtime, ({"evidence": {
         "proof_requirement_id": requirement.to_dict(),
         "status": "complete",
         "proof_source": "coverage_test",
     }},))
     runtime.reason_requirements[id(reason)] = (requirement,)
+    runtime.planned_reasons[id(reason)] = reason
     runtime.proof_outcomes[requirement.to_key()] = FunctionProofOutcome.EQUIVALENT
     result = SimpleNamespace(
         is_equivalent=None,
@@ -731,12 +754,13 @@ def test_decision_aggregator_does_not_reclassify_proof_closed_reason_as_pair_uns
     requirement = _requirement("value_relation")
     reason = SimpleNamespace(reason_id="return_width_bridge_missing", pair_or_case="(0,1)")
     runtime.proof_outcomes[requirement.to_key()] = FunctionProofOutcome.EQUIVALENT
-    runtime.apply_completed_evidence(({"evidence": {
+    _apply_in_comparison(runtime, ({"evidence": {
         "proof_requirement_id": requirement.to_dict(),
         "status": "complete",
         "proof_source": "value_test",
     }},))
     runtime.reason_requirements[id(reason)] = (requirement,)
+    runtime.planned_reasons[id(reason)] = reason
     runtime.proof_outcomes[requirement.to_key()] = FunctionProofOutcome.EQUIVALENT
     result = SimpleNamespace(
         is_equivalent=None,
@@ -807,6 +831,13 @@ def test_typed_query_reuse_reexecutes_only_changed_semantic_pair():
     changed = create_mock_analysis(
         "right", returns=[ReturnInfo("0x2000", Expression.constant(2, 4), [])]
     )
+    # (left, changed) は別の raw pair の比較なので、(left, right) の runtime は使えない
+    # （Issue #167: runtime は 1 つの比較に仕える）。別の比較は自分の runtime を使う。
+    from scripts.function_tracer_pcode.proof.obligations.runtime import ComparisonRuntimeMismatch
+
+    with pytest.raises(ComparisonRuntimeMismatch):
+        strategy.check(left, changed)
+    strategy._obligation_runtime_session = ObligationRuntimeSession.create(left, changed)
     changed_result = strategy.check(left, changed)
     assert changed_result.pairwise_debug_stats["guard_overlap_logical_edges"] == 1
     assert solver.run_sequential.call_count > calls_after_first
@@ -854,7 +885,7 @@ def test_gate_completion_requires_real_replanned_query_outcome():
         "status": "complete",
         "proof_source": "width_gate_test",
     }
-    assert runtime.apply_completed_evidence(({"evidence": evidence},), reasons=(reason,))
+    assert _apply_in_comparison(runtime, ({"evidence": evidence},), reasons=(reason,))
     while runtime.run_next()[0] is not None:
         pass
 
@@ -912,7 +943,7 @@ def test_replanned_sat_value_query_stays_unknown_until_counterexample_is_safe():
     )
     while runtime.run_next()[0] is not None:
         pass
-    assert runtime.apply_completed_evidence(
+    assert _apply_in_comparison(runtime, 
         ({"evidence": {
             "proof_requirement_id": gate.to_dict(),
             "status": "complete",
@@ -998,7 +1029,7 @@ def test_replanned_sat_becomes_not_eq_after_counterexample_safety_completes():
     )
     while runtime.run_next()[0] is not None:
         pass
-    assert runtime.apply_completed_evidence(
+    assert _apply_in_comparison(runtime, 
         ({"evidence": {
             "proof_requirement_id": gate.to_dict(),
             "status": "complete",

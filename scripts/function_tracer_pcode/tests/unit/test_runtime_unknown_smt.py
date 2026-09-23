@@ -12,12 +12,14 @@ from scripts.function_tracer_pcode.proof.formula import builder as formula_build
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
 from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.proof.formula.types import ExtraVariableInfo, ParameterInfo
-from scripts.function_tracer_pcode.semantics.semantic_width import RETURN_EXTENSION_SURFACE_SOURCE
+from scripts.function_tracer_pcode.semantics.semantic_width import (
+    RETURN_EXTENSION_SURFACE_SOURCE,
+    parameter_metadata_synchronizer,
+)
 from scripts.function_tracer_pcode.proof.strategies import monolithic as monolithic_module
 from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
 from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
 from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
-    _ParameterMetadataRewriter,
     build_pair_query,
     extract_return_cases,
 )
@@ -50,10 +52,15 @@ from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 import scripts.function_tracer_pcode.proof.strategies.monolithic_counterexamples as _mx_monolithic_counterexamples
 import scripts.function_tracer_pcode.proof.strategies.monolithic_return_width as _mx_monolithic_return_width
 from scripts.function_tracer_pcode.tests.unit._publication import published
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 def _build_formula(builder, *args, **kwargs):
-    """Return (formula, return_var1, return_var2) from the extended builder API."""
+    """Return (formula, return_var1, return_var2) from the extended builder API.
+
+    raw の analysis を直接比べるので、最終 relation をそこから明示的に作って渡す。
+    """
+    kwargs.setdefault("input_correspondence", build_input_correspondence_set(args[0], args[1]))
     result = builder.build_equivalence_formula_extended(*args, **kwargs)
     return result.formula, result.return_var1, result.return_var2
 
@@ -168,7 +175,7 @@ def test_pairwise_query_declares_runtime_unknown_symbols():
     )
 
     builder = FormulaBuilder()
-    base_ctx = builder.build_base_context(analysis1, analysis2)
+    base_ctx = builder.build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     query = build_pair_query(
         base_ctx,
         extract_return_cases(analysis1)[0],
@@ -230,7 +237,7 @@ def test_formula_builder_declares_object_centric_readonly_reduction_functions():
     ]
 
     builder = FormulaBuilder()
-    base_ctx = builder.build_base_context(analysis1, analysis2)
+    base_ctx = builder.build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert "Intrinsic function declarations" in header_text
@@ -287,7 +294,7 @@ def test_formula_builder_adds_readonly_reduction_finite_witness_axioms():
         returns=[ReturnInfo(address="0x1004", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
     )
 
-    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert "(declare-const mem32 (Array (_ BitVec 64) (_ BitVec 32)))" in header_text
@@ -348,7 +355,7 @@ def test_formula_builder_keeps_finite_witness_axioms_without_contract_key():
         returns=[ReturnInfo(address="0x1004", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
     )
 
-    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert "Readonly reduction finite witness axioms" in header_text
@@ -412,7 +419,7 @@ def test_formula_builder_removes_readonly_global_contract_equality_even_when_con
         returns=[ReturnInfo(address="0x1004", value=_readonly_expr(), conditions=[], branch_index=0)],
     )
 
-    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_lines = base_ctx["header_lines"]
     header_text = "\n".join(header_lines)
 
@@ -485,7 +492,7 @@ def test_formula_builder_guards_readonly_finite_witness_axioms_with_case_and_pro
         returns=[ReturnInfo(address="0x1004", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
     )
 
-    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert "Readonly reduction finite witness axioms" in header_text
@@ -550,7 +557,7 @@ def test_formula_builder_rewrites_stale_readonly_proof_guard_parameter_widths():
         returns=[ReturnInfo(address="0x1004", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
     )
 
-    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert "Readonly reduction finite witness axioms" in header_text
@@ -613,7 +620,7 @@ def test_formula_builder_rewrites_stale_readonly_proof_guard_parameter_name_by_i
         returns=[ReturnInfo(address="0x1004", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
     )
 
-    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert "Readonly reduction finite witness axioms" in header_text
@@ -672,7 +679,7 @@ def test_formula_builder_skips_readonly_finite_witness_axioms_for_unlowerable_pr
         returns=[ReturnInfo(address="0x1004", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
     )
 
-    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert "Readonly reduction finite witness axioms" not in header_text
@@ -753,7 +760,7 @@ def test_formula_builder_readonly_witness_axioms_accept_storage_backed_operands(
         returns=[ReturnInfo(address="0x1004", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
     )
 
-    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert "Readonly reduction finite witness axioms" in header_text
@@ -809,7 +816,7 @@ def test_formula_builder_refuses_readonly_witness_axioms_when_operands_do_not_ma
         returns=[ReturnInfo(address="0x1004", value=Expression.constant(0, 4), conditions=[], branch_index=0)],
     )
 
-    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert "Readonly reduction finite witness axioms" not in header_text
@@ -956,7 +963,7 @@ def test_formula_builder_rejects_width_mismatch_overlap_readonly_contract_axioms
         returns=[ReturnInfo(address="0x1004", value=wide_expr, conditions=[], branch_index=0)],
     )
 
-    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert "Readonly reduction contract equality axioms" not in header_text
@@ -1047,7 +1054,7 @@ def test_formula_builder_does_not_globalize_readonly_low_bit_equality_from_align
     analysis1.comparison_surface = surface
     analysis2.comparison_surface = surface
 
-    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert "Readonly reduction contract equality axioms" not in header_text
@@ -1132,7 +1139,7 @@ def test_formula_builder_does_not_globalize_readonly_low_bit_equality_from_activ
         use_sign_extension=False,
     )
 
-    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert base_ctx["return_size1"] == 64
@@ -1216,7 +1223,7 @@ def test_formula_builder_refuses_width_projected_readonly_axiom_when_operands_do
         returns=[ReturnInfo(address="0x1004", value=malformed_wide_expr, conditions=[], branch_index=0)],
     )
 
-    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert "Readonly reduction contract equality axioms" not in header_text
@@ -1258,14 +1265,14 @@ def test_extract_return_cases_rewrites_parameter_metadata_by_index_before_name()
 
 def test_pairwise_parameter_metadata_rewriter_does_not_infer_index_from_position():
     stale_index_param = Expression.parameter("stale_count", index=1, data_type="short", size=2)
-    rewriter = _ParameterMetadataRewriter(
+    rewriter = parameter_metadata_synchronizer(
         [
             {"name": "base", "size": 8, "data_type": "int *"},
             {"name": "count", "size": 4, "data_type": "int"},
         ]
     )
 
-    rewritten_param = rewriter.rewrite(stale_index_param)
+    rewritten_param = rewriter(stale_index_param)
 
     assert rewritten_param.value == 1
     assert rewritten_param.name == "stale_count"
@@ -1275,13 +1282,13 @@ def test_pairwise_parameter_metadata_rewriter_does_not_infer_index_from_position
 
 def test_pairwise_parameter_metadata_rewriter_does_not_rewrite_indexed_expr_by_name():
     stale_index_param = Expression.parameter("count", index=7, data_type="long", size=8)
-    rewriter = _ParameterMetadataRewriter(
+    rewriter = parameter_metadata_synchronizer(
         [
             {"name": "count", "size": 4, "data_type": "int"},
         ]
     )
 
-    rewritten_param = rewriter.rewrite(stale_index_param)
+    rewritten_param = rewriter(stale_index_param)
 
     assert rewritten_param.value == 7
     assert rewritten_param.name == "count"
@@ -1291,13 +1298,13 @@ def test_pairwise_parameter_metadata_rewriter_does_not_rewrite_indexed_expr_by_n
 
 def test_pairwise_parameter_metadata_rewriter_does_not_rewrite_no_index_expr_by_name():
     name_only_param = Expression.parameter("count", data_type="long", size=8)
-    rewriter = _ParameterMetadataRewriter(
+    rewriter = parameter_metadata_synchronizer(
         [
             {"name": "count", "index": 0, "size": 4, "data_type": "int"},
         ]
     )
 
-    rewritten_param = rewriter.rewrite(name_only_param)
+    rewritten_param = rewriter(name_only_param)
 
     assert rewritten_param.value == -1
     assert rewritten_param.name == "count"
@@ -1315,7 +1322,7 @@ def test_pairwise_parameter_metadata_rewriter_rewrites_no_index_expr_by_storage_
         size_bits=64,
     )
     storage_param = Expression.parameter("stale_count", data_type="long", size=8, storage_info=storage)
-    rewriter = _ParameterMetadataRewriter(
+    rewriter = parameter_metadata_synchronizer(
         [
             {
                 "name": "count",
@@ -1327,7 +1334,7 @@ def test_pairwise_parameter_metadata_rewriter_rewrites_no_index_expr_by_storage_
         ]
     )
 
-    rewritten_param = rewriter.rewrite(storage_param)
+    rewritten_param = rewriter(storage_param)
 
     assert rewritten_param.value == 0
     assert rewritten_param.name == "stale_count"
@@ -1769,10 +1776,15 @@ def test_formula_builder_declares_intrinsics_introduced_by_render_analysis(monke
     )
     original_normalize = formula_builder_module.normalize_analysis_semantic_width
 
-    def _fake_normalize_analysis(analysis, semantic_hints, extra_vars=None):
-        if extra_vars is not None and analysis.function_name == "left":
-            return render_analysis1
-        return original_normalize(analysis, semantic_hints, extra_vars)
+    left_calls = []
+
+    def _fake_normalize_analysis(analysis, semantic_hints, **kwargs):
+        # left の 1 回目は ``_normalize_analyses``、2 回目が宣言用の render pass。
+        if analysis.function_name == "left":
+            left_calls.append(analysis)
+            if len(left_calls) >= 2:
+                return render_analysis1
+        return original_normalize(analysis, semantic_hints, **kwargs)
 
     monkeypatch.setattr(
         formula_builder_module,
@@ -1784,7 +1796,7 @@ def test_formula_builder_declares_intrinsics_introduced_by_render_analysis(monke
         r"\(declare-fun ([^ ]+)",
         collect_intrinsic_smt_declarations(reduction_expr)[0],
     ).group(1)
-    base_ctx = FormulaBuilder().build_base_context(raw_analysis1, analysis2)
+    base_ctx = FormulaBuilder().build_base_context(raw_analysis1, analysis2, input_correspondence=build_input_correspondence_set(raw_analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
     assert f"(declare-fun {declared_name} ((_ BitVec 64) (_ BitVec 64)) (_ BitVec 32))" in header_text
@@ -1847,7 +1859,7 @@ def test_monolithic_counterexample_validation_uses_render_analysis_cases(monkeyp
     captured = {}
 
     class _FormulaBuilder:
-        def build_base_context(self, _analysis1, _analysis2):
+        def build_base_context(self, _analysis1, _analysis2, **_kwargs):
             return {
                 "header_lines": [],
                 "params1": [
@@ -1865,8 +1877,13 @@ def test_monolithic_counterexample_validation_uses_render_analysis_cases(monkeyp
                 "return_size2": 32,
             }
 
-    def _fake_normalize(analysis, _hints, extra_vars=None):
-        if analysis is raw_analysis and extra_vars:
+    normalize_calls = []
+
+    def _fake_normalize(analysis, _hints, **_kwargs):
+        # 検証用 surface の normalize（1 回目）の後に render 用の normalize（2 回目）が
+        # 同じ raw に対して呼ばれる。2 回目だけ render_analysis を返す。
+        normalize_calls.append(analysis)
+        if analysis is raw_analysis and normalize_calls.count(raw_analysis) >= 2:
             return render_analysis
         return analysis
 
@@ -1909,7 +1926,7 @@ def test_monolithic_counterexample_validation_replacer_uses_fp_mode(monkeypatch)
     captured = {}
 
     class _FormulaBuilder:
-        def build_base_context(self, _analysis1, _analysis2):
+        def build_base_context(self, _analysis1, _analysis2, **_kwargs):
             return {
                 "header_lines": [],
                 "params1": [ParameterInfo("x", "x_1", 64, 0)],

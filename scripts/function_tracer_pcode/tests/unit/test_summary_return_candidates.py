@@ -367,6 +367,16 @@ def _analysis_with_exact_returns(effect_summary=None) -> FunctionReturnAnalysis:
     )
 
 
+
+def _as_function_unary(analysis):
+    """analysis 層が関数単体で作る証拠として明示する（Issue #167: scope の無い証拠は採用しない）。"""
+
+    from scripts.function_tracer_pcode.core.evidence_authority import mark_function_unary
+
+    analysis.completed_recovery_proof_evidence = tuple(
+        mark_function_unary(dict(record)) for record in analysis.completed_recovery_proof_evidence
+    )
+
 def test_unresolved_exact_return_is_not_used_as_summary_seed():
     ret = ReturnInfo(
         address="0x1000",
@@ -755,6 +765,7 @@ def test_return_region_summary_proof_can_supersede_imprecise_exact_return():
         superseded_return_keys=(_return_info_identity_key(analysis.returns[1]),),
     )
     analysis.completed_recovery_proof_evidence = (evidence,)
+    _as_function_unary(analysis)
 
     result = accept_summary_return_candidates(
         analysis,
@@ -790,6 +801,7 @@ def test_return_region_summary_superseded_key_proves_overlap_for_non_exact_witne
         superseded_return_keys=(_return_info_identity_key(analysis.returns[1]),),
     )
     analysis.completed_recovery_proof_evidence = (evidence,)
+    _as_function_unary(analysis)
 
     result = accept_summary_return_candidates(
         analysis,
@@ -819,6 +831,7 @@ def test_return_region_summary_supersede_requires_target_content_match():
         content_superseded_return_keys=(_return_info_identity_key(analysis.returns[0]),),
     )
     analysis.completed_recovery_proof_evidence = (evidence,)
+    _as_function_unary(analysis)
 
     result = accept_summary_return_candidates(
         analysis,
@@ -843,6 +856,7 @@ def test_return_region_production_object_proved_is_not_completed_coverage_proof(
         coverage_status="production_object_proved",
     )
     analysis.completed_recovery_proof_evidence = (evidence,)
+    _as_function_unary(analysis)
 
     result = accept_summary_return_candidates(
         analysis,
@@ -868,6 +882,7 @@ def test_return_region_proof_does_not_skip_overlap_value_for_non_witness_exact_r
         exact_witnesses_key=("exact_return_witnesses", ()),
     )
     analysis.completed_recovery_proof_evidence = (evidence,)
+    _as_function_unary(analysis)
 
     result = accept_summary_return_candidates(
         analysis,
@@ -910,6 +925,7 @@ def test_summary_candidate_partition_does_not_treat_return_region_proof_as_total
         pcode_identity="summary:n_gt_two",
     ))
     analysis.completed_recovery_proof_evidence = (evidence,)
+    _as_function_unary(analysis)
 
     result = accept_summary_return_candidates(
         analysis,
@@ -1810,6 +1826,7 @@ def test_summary_candidate_rejects_changed_accumulator_base_with_raw_state_trans
 def test_summary_candidate_accepts_changed_accumulator_base_with_completed_state_transition_handoff_proof():
     analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
     analysis.completed_recovery_proof_evidence = (_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE,)
+    _as_function_unary(analysis)
     n = _n()
     proved_prior_transition_key = tuple(
         (
@@ -1848,6 +1865,7 @@ def test_summary_candidate_accepts_changed_accumulator_base_with_completed_state
 def test_summary_candidate_rejects_completed_state_transition_handoff_when_completed_proofs_disabled():
     analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
     analysis.completed_recovery_proof_evidence = (_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE,)
+    _as_function_unary(analysis)
     n = _n()
     proved_prior_transition_key = tuple(
         (
@@ -1931,6 +1949,7 @@ def test_summary_candidate_rejects_state_transition_handoff_ref_without_complete
 def test_summary_candidate_rejects_state_transition_handoff_ref_with_mismatched_proof_id_target():
     analysis = _analysis_with_exact_returns(effect_summary=_empty_effect_summary())
     analysis.completed_recovery_proof_evidence = (_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE,)
+    _as_function_unary(analysis)
     n = _n()
     alternate_target_key = tuple(
         ("guard_handoff_proof", "identical_guard_domain", ("guard", "prior_entry_alt"), ("guard", "prior_entry_alt"), "proved", ("guard_constraints", ("n_gt_one",)))
@@ -1994,6 +2013,7 @@ def test_summary_candidate_rejects_state_transition_handoff_evidence_with_mismat
         "proof_obligation_id": _STATE_TRANSITION_HANDOFF_PROOF_ID,
         "proof_content": alternate_content,
     },)
+    _as_function_unary(analysis)
     proved_prior_transition_key = tuple(
         (
             "accumulator_base",
@@ -2034,6 +2054,7 @@ def test_summary_candidate_rejects_state_transition_handoff_evidence_with_missin
             "handoff_status": "proved",
         },
     },)
+    _as_function_unary(analysis)
     proved_prior_transition_key = tuple(
         (
             "accumulator_base",
@@ -2091,6 +2112,7 @@ def test_summary_candidate_rejects_state_transition_handoff_evidence_with_conten
         **_STATE_TRANSITION_HANDOFF_PROOF_EVIDENCE,
         "proof_content": bad_content,
     },)
+    _as_function_unary(analysis)
     proved_prior_transition_key = tuple(
         (
             "accumulator_base",
@@ -2163,6 +2185,7 @@ def test_summary_candidate_rejects_state_transition_handoff_edge_outside_handoff
         "proof_obligation_id": outside_proof_id,
         "proof_content": outside_content,
     },)
+    _as_function_unary(analysis)
     outside_proof_key = (
         "prior_state_transition_handoff_proof_ref",
         outside_proof_id,
@@ -2285,6 +2308,7 @@ def test_summary_candidate_rejects_state_transition_handoff_without_guard_implic
             "handoff_status": "unproved",
         },
     },)
+    _as_function_unary(analysis)
     weak_prior_transition_key = tuple(
         (
             "accumulator_base",

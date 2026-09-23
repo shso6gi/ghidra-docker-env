@@ -32,14 +32,13 @@ from scripts.function_tracer_pcode.core.render_smt import (
     expression_smt_bit_width,
     smt_logic_name,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    LEFT as INPUT_LEFT,
+    RIGHT as INPUT_RIGHT,
+    InputCorrespondenceSet,
+)
 from scripts.function_tracer_pcode.proof.formula.params import (
-    build_fragment_backed_parameter_constraint,
-    collect_fragment_infos_by_param_index,
-    build_parameter_constraint,
-    build_parameter_semantic_constraints,
-    build_parameter_pairs,
     build_symbol_name_mapping,
-    collect_param_info,
     merge_param_and_extra_vars,
 )
 from scripts.function_tracer_pcode.proof.formula.returns import (
@@ -58,12 +57,10 @@ from scripts.function_tracer_pcode.proof.formula.types import (
     FormulaBuildContext,
     FormulaBuilderResult,
     ParameterInfo,
-    ParameterPair,
 )
 from scripts.function_tracer_pcode.proof.formula.variable import (
     VariableAnalyzer,
     ExtraVariableAnalysis,
-    get_parameter_fragment_constraints,
 )
 from scripts.function_tracer_pcode.proof.formula.symbol_replace import build_symbol_replacer
 from scripts.function_tracer_pcode.analysis.memory_resolver import (
@@ -318,6 +315,38 @@ def _rewrite_parameter_leaf_for_smt(
     )
 
 
+def _require_input_correspondence(value: Any) -> InputCorrespondenceSet:
+    """builder は最終 relation の consumer。relation を作らず、渡された値だけを使う。
+
+    relation は raw pair からしか作れない（``build_input_correspondence_set``）。
+    prepared（書き換え済み）analysis から builder が作り直すと closure が循環する
+    ので、ここで欠落を拒否する。
+    """
+
+    if type(value) is not InputCorrespondenceSet:
+        raise TypeError("FormulaBuilder requires the final InputCorrespondenceSet (input_correspondence=)")
+    return value
+
+
+def _require_same_parameter_shape(
+    analysis: FunctionReturnAnalysis,
+    params: List[ParameterInfo],
+) -> None:
+    """描く analysis の parameter が relation の parameter 表と同じ形か（fail-closed）。"""
+
+    shape = sorted(
+        (
+            int(descriptor.get("index", 0)),
+            int(descriptor.get("size", 4)) * 8,
+            descriptor.get("name", f"param_{descriptor.get('index', 0)}"),
+        )
+        for descriptor in analysis.parameters or ()
+    )
+    expected = sorted((param.index, param.bit_width, param.original_name) for param in params)
+    if shape != expected:
+        raise ValueError("input_correspondence_parameter_table_mismatch")
+
+
 class CallFormulaUnsupported(ValueError):
     """conditional lane で CALL を UF として宣言できない（fail closed）。
 
@@ -364,6 +393,8 @@ class FormulaBuilder:
         func2_suffix: str = "_2",
         extra_assertions: Optional[List[str]] = None,  # ★ NEW
         canonical_return_observation_width: Optional[int] = None,
+        *,
+        input_correspondence: InputCorrespondenceSet,
     ) -> FormulaBuilderResult:
         """
         2つの関数の等価性検証用SMT式を構築（拡張版）
@@ -372,27 +403,38 @@ class FormulaBuilder:
             analysis1, analysis2: 各関数の解析結果
             func1_suffix, func2_suffix: サフィックス
             extra_assertions: 追加のアサート文（(check-sat)の直前に挿入）
+            input_correspondence: raw pair から作った最終 relation（必須。builder は
+                relation を作らない。raw を直接比べる経路は
+                ``build_input_correspondence_set(raw1, raw2)`` を先に呼ぶ）
         
         Returns:
             FormulaBuilderResult: 構築結果（詳細情報付き）
         """
         # Issue #124: monolithic 等価式の構築を計測する。
         with stage_region("query_build"):
-            analysis1, analysis2, _, _ = self._normalize_analyses(analysis1, analysis2)
+            correspondence = _require_input_correspondence(input_correspondence)
+            analysis1, analysis2, _, _ = self._normalize_analyses(
+                analysis1, analysis2, correspondence
+            )
 
             lines = []
             context = self._prepare_formula_context(
-                analysis1, analysis2, func1_suffix, func2_suffix, emit_debug_info=True
+                analysis1,
+                analysis2,
+                func1_suffix,
+                func2_suffix,
+                correspondence,
+                emit_debug_info=True,
             )
             render_analysis1 = normalize_analysis_semantic_width(
                 analysis1,
                 infer_parameter_semantics(analysis1),
-                context.extra_vars1,
+                authorization=correspondence.authorization(INPUT_LEFT),
             )
             render_analysis2 = normalize_analysis_semantic_width(
                 analysis2,
                 infer_parameter_semantics(analysis2),
-                context.extra_vars2,
+                authorization=correspondence.authorization(INPUT_RIGHT),
             )
         
             # ヘッダー
@@ -455,7 +497,8 @@ class FormulaBuilder:
                 extra_vars1=context.extra_vars1,
                 extra_vars2=context.extra_vars2,
                 constrained_fragments=context.constrained_fragments,
-                param_fragment_constrained=context.param_fragment_constrained
+                param_fragment_constrained=context.param_fragment_constrained,
+                input_correspondence=correspondence,
             )
 
     def _prepare_formula_context(
@@ -464,13 +507,16 @@ class FormulaBuilder:
         analysis2: FunctionReturnAnalysis,
         func1_suffix: str,
         func2_suffix: str,
+        input_correspondence: InputCorrespondenceSet,
         emit_debug_info: bool = False,
     ) -> FormulaBuildContext:
         """宣言・制約・補助情報をまとめて構築する"""
-        params1 = self._collect_param_info(analysis1.parameters, func1_suffix)
-        params2 = self._collect_param_info(analysis2.parameters, func2_suffix)
-        self._apply_semantic_hints(params1, infer_parameter_semantics(analysis1))
-        self._apply_semantic_hints(params2, infer_parameter_semantics(analysis2))
+        # parameter 表は最終 relation と同じもの（pairing と premise の出所を 1 つに
+        # する）。Ghidra の型 object を読み直さない。
+        params1 = input_correspondence.parameter_infos(INPUT_LEFT, func1_suffix)
+        params2 = input_correspondence.parameter_infos(INPUT_RIGHT, func2_suffix)
+        _require_same_parameter_shape(analysis1, params1)
+        _require_same_parameter_shape(analysis2, params2)
 
         param_names1 = {p.original_name for p in params1}
         param_names2 = {p.original_name for p in params2}
@@ -491,7 +537,6 @@ class FormulaBuilder:
         if self.debug and emit_debug_info:
             self._print_debug_info(params1, params2, extra_vars1, extra_vars2)
 
-        param_pairs = self._build_parameter_pairs(params1, params2)
         (
             header_lines,
             runtime_unknown_declarations,
@@ -504,9 +549,7 @@ class FormulaBuilder:
             params2,
             extra_vars1,
             extra_vars2,
-            var_analyses1,
-            var_analyses2,
-            param_pairs,
+            input_correspondence,
             func1_suffix,
             func2_suffix,
         )
@@ -523,7 +566,7 @@ class FormulaBuilder:
             extra_vars2=extra_vars2,
             var_analyses1=var_analyses1,
             var_analyses2=var_analyses2,
-            param_pairs=param_pairs,
+            input_correspondence=input_correspondence,
             return_size1=return_size1,
             return_size2=return_size2,
             smt_logic=smt_logic,
@@ -537,12 +580,15 @@ class FormulaBuilder:
         self,
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
+        input_correspondence: InputCorrespondenceSet,
     ):
         """Apply semantic-width normalization before SMT lowering."""
         hints1 = infer_parameter_semantics(analysis1)
         hints2 = infer_parameter_semantics(analysis2)
-        normalized1 = normalize_analysis_semantic_width(analysis1, hints1)
-        normalized2 = normalize_analysis_semantic_width(analysis2, hints2)
+        authorization1 = input_correspondence.authorization(INPUT_LEFT)
+        authorization2 = input_correspondence.authorization(INPUT_RIGHT)
+        normalized1 = normalize_analysis_semantic_width(analysis1, hints1, authorization=authorization1)
+        normalized2 = normalize_analysis_semantic_width(analysis2, hints2, authorization=authorization2)
         normalized1, normalized2 = align_return_value_extension_surfaces(normalized1, normalized2)
         return normalized1, normalized2, hints1, hints2
 
@@ -609,9 +655,7 @@ class FormulaBuilder:
         params2: List[ParameterInfo],
         extra_vars1: List[ExtraVariableInfo],
         extra_vars2: List[ExtraVariableInfo],
-        var_analyses1: Dict[str, ExtraVariableAnalysis],
-        var_analyses2: Dict[str, ExtraVariableAnalysis],
-        param_pairs: List[ParameterPair],
+        input_correspondence: InputCorrespondenceSet,
         func1_suffix: str,
         func2_suffix: str
     ) -> Tuple[List[str], List[Tuple[str, int]], List[str], List[str]]:
@@ -621,12 +665,12 @@ class FormulaBuilder:
         render_declaration_analysis1 = normalize_analysis_semantic_width(
             analysis1,
             infer_parameter_semantics(analysis1),
-            extra_vars1,
+            authorization=input_correspondence.authorization(INPUT_LEFT),
         )
         render_declaration_analysis2 = normalize_analysis_semantic_width(
             analysis2,
             infer_parameter_semantics(analysis2),
-            extra_vars2,
+            authorization=input_correspondence.authorization(INPUT_RIGHT),
         )
         declaration_analyses = (
             analysis1,
@@ -700,32 +744,13 @@ class FormulaBuilder:
         if readonly_witness_axioms:
             lines.extend(readonly_witness_axioms)
 
-        semantic_lines = self._build_param_semantic_constraints_section(params1, params2)
-        if semantic_lines:
-            lines.extend(semantic_lines)
-
-        lines.extend(
-            self._build_param_constraints_section(
-                param_pairs,
-                var_analyses1,
-                var_analyses2,
-            )
-        )
+        # parameter premise は最終 InputCorrespondence だけが決める（Issue #167）。
+        # 自己整合制約や fragment の ext 制約のような、relation が含意しない入力
+        # 仮定はここへ足さない。
+        lines.extend(input_correspondence.premise_lines(params1, params2))
 
         constrained_fragments: List[str] = []
         param_fragment_constrained: List[str] = []
-        constraint_lines, constrained_vars = self._build_extra_var_constraints(
-            extra_vars1,
-            extra_vars2,
-            var_analyses1,
-            var_analyses2,
-            func1_suffix,
-            func2_suffix,
-        )
-        if constraint_lines:
-            lines.extend(constraint_lines)
-            constrained_fragments.extend(constrained_vars)
-            param_fragment_constrained.extend(constrained_vars)
 
         if self.exclude_ub:
             ub_lines = self._build_ub_constraints_section(
@@ -944,8 +969,10 @@ class FormulaBuilder:
         for p in params1:
             signed_str = "signed" if p.is_signed else "unsigned"
             semantic_str = ""
-            if p.semantic_narrow_bits is not None and p.semantic_signedness:
-                semantic_str = f", semantic={p.semantic_signedness}:{p.semantic_narrow_bits}"
+            if p.entailed_extension is not None:
+                semantic_str = (
+                    f", entailed={p.entailed_extension.kind.value}:{p.entailed_extension.narrow_bits}"
+                )
             print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit, {signed_str}{semantic_str})")
         if extra_vars1:
             print("[FormulaBuilder] Function 1 extra variables:")
@@ -963,8 +990,10 @@ class FormulaBuilder:
         for p in params2:
             signed_str = "signed" if p.is_signed else "unsigned"
             semantic_str = ""
-            if p.semantic_narrow_bits is not None and p.semantic_signedness:
-                semantic_str = f", semantic={p.semantic_signedness}:{p.semantic_narrow_bits}"
+            if p.entailed_extension is not None:
+                semantic_str = (
+                    f", entailed={p.entailed_extension.kind.value}:{p.entailed_extension.narrow_bits}"
+                )
             print(f"  {p.original_name} -> {p.smt_name} ({p.bit_width}bit, {signed_str}{semantic_str})")
         if extra_vars2:
             print("[FormulaBuilder] Function 2 extra variables:")
@@ -1852,119 +1881,6 @@ class FormulaBuilder:
         runtime_name = type(runtime_ref).__qualname__
         return f"; loop-summary {intrinsic_name} {runtime_name} {status}"
     
-    def _build_param_constraints_section(
-        self,
-        param_pairs: List[ParameterPair],
-        analyses1: Dict[str, ExtraVariableAnalysis],
-        analyses2: Dict[str, ExtraVariableAnalysis],
-    ) -> List[str]:
-        """パラメータ制約セクションを構築"""
-        lines = []
-        lines.append("; " + "-" * 40)
-        lines.append("; Parameter equality constraints")
-        lines.append("; For matching bit widths: direct equality unless semantic narrowing is inferred")
-        lines.append("; For different bit widths: overlapping bits equal, upper bits free")
-        lines.append("; " + "-" * 40)
-
-        fragments1 = collect_fragment_infos_by_param_index(analyses1)
-        fragments2 = collect_fragment_infos_by_param_index(analyses2)
-        for pair in param_pairs:
-            fragment_constraint_lines = self._build_fragment_backed_parameter_constraint(
-                pair,
-                fragments1,
-                fragments2,
-            )
-            if fragment_constraint_lines:
-                lines.extend(fragment_constraint_lines)
-                continue
-            constraint_lines = self._build_parameter_constraint(pair)
-            lines.extend(constraint_lines)
-        
-        lines.append("")
-        return lines
-
-    def _build_param_semantic_constraints_section(
-        self,
-        params1: List[ParameterInfo],
-        params2: List[ParameterInfo],
-    ) -> List[str]:
-        """パラメータの意味幅整合制約を構築"""
-        lines = build_parameter_semantic_constraints(params1)
-        lines.extend(build_parameter_semantic_constraints(params2))
-        if not lines:
-            return []
-
-        return [
-            "; " + "-" * 40,
-            "; Parameter semantic-width constraints",
-            "; Constrain parameters that are used as narrower integers",
-            "; " + "-" * 40,
-            *lines,
-            "",
-        ]
-
-    def _apply_semantic_hints(
-        self,
-        params: List[ParameterInfo],
-        hints: Dict[int, Any],
-    ) -> None:
-        """Attach inferred semantic-width hints to parameter metadata."""
-        params_by_index = {param.index: param for param in params}
-        for index, hint in hints.items():
-            param = params_by_index.get(index)
-            if param is None:
-                continue
-            param.semantic_narrow_bits = hint.narrow_bits
-            param.semantic_signedness = (
-                hint.signedness
-                if hint.signedness_source == "explicit" and hint.signedness in {"signed", "unsigned"}
-                else None
-            )
-    
-    def _build_extra_var_constraints(
-        self,
-        extra_vars1: List[ExtraVariableInfo],
-        extra_vars2: List[ExtraVariableInfo],
-        analyses1: Dict[str, ExtraVariableAnalysis],
-        analyses2: Dict[str, ExtraVariableAnalysis],
-        suffix1: str,
-        suffix2: str
-    ) -> Tuple[List[str], List[str]]:
-        """
-        追加変数の制約を構築
-        
-        パラメータ断片として識別された変数には sign/zero extension 制約を適用
-        
-        Returns:
-            (制約行のリスト, 制約された変数名のリスト)
-        """
-        lines = []
-        constrained_vars = []
-        
-        # パラメータ断片の制約を生成
-        fragment_lines1, fragment_vars1 = get_parameter_fragment_constraints(analyses1, suffix1)
-        fragment_lines2, fragment_vars2 = get_parameter_fragment_constraints(analyses2, suffix2)
-        
-        if fragment_lines1 or fragment_lines2:
-            lines.append("; " + "-" * 40)
-            lines.append("; Parameter fragment constraints")
-            lines.append("; Upper-bits variables constrained via sign/zero extension")
-            lines.append("; " + "-" * 40)
-            
-            if fragment_lines1:
-                lines.append("; Function 1 fragments:")
-                lines.extend(fragment_lines1)
-            
-            if fragment_lines2:
-                lines.append("; Function 2 fragments:")
-                lines.extend(fragment_lines2)
-            
-            lines.append("")
-            constrained_vars.extend(fragment_vars1)
-            constrained_vars.extend(fragment_vars2)
-        
-        return lines, constrained_vars
-    
     def _merge_param_and_extra_vars(
         self,
         params: List[ParameterInfo],
@@ -2052,43 +1968,6 @@ class FormulaBuilder:
         if int(return_bits) == int(narrow_bits):
             return return_var
         return f"((_ extract {int(narrow_bits) - 1} 0) {return_var})"
-    
-    def _collect_param_info(
-        self,
-        params: List[Dict],
-        suffix: str
-    ) -> List[ParameterInfo]:
-        """パラメータ情報を収集"""
-        return collect_param_info(params, suffix)
-    
-    def _build_parameter_pairs(
-        self,
-        params1: List[ParameterInfo],
-        params2: List[ParameterInfo]
-    ) -> List[ParameterPair]:
-        """パラメータペアを構築"""
-        return build_parameter_pairs(params1, params2)
-    
-    def _build_parameter_constraint(self, pair: ParameterPair) -> List[str]:
-        """
-        パラメータ間の制約を構築
-        
-        - 同じビット幅: 直接等価
-        - 異なるビット幅: 重複するビット（下位ビット）のみ等価、上位ビットは自由
-        """
-        return build_parameter_constraint(pair)
-
-    def _build_fragment_backed_parameter_constraint(
-        self,
-        pair: ParameterPair,
-        fragments1: Dict[int, Any],
-        fragments2: Dict[int, Any],
-    ) -> Optional[List[str]]:
-        return build_fragment_backed_parameter_constraint(
-            pair,
-            fragments1.get(pair.index),
-            fragments2.get(pair.index),
-        )
     
     def _get_return_size(self, analysis: FunctionReturnAnalysis) -> int:
         """return値のビット幅を取得"""
@@ -2221,7 +2100,9 @@ class FormulaBuilder:
         analysis2: FunctionReturnAnalysis,
         abi_constraints: Dict[str, Tuple[str, int]],
         func1_suffix: str = "_1",
-        func2_suffix: str = "_2"
+        func2_suffix: str = "_2",
+        *,
+        input_correspondence: InputCorrespondenceSet,
     ) -> str:
         """
         ABI整合制約を追加したSMT式を構築（後方互換性のためのラッパー）
@@ -2242,7 +2123,8 @@ class FormulaBuilder:
         result = self.build_equivalence_formula_extended(
             analysis1, analysis2,
             func1_suffix, func2_suffix,
-            extra_assertions=abi_assertion_section if abi_assertion_section else None
+            extra_assertions=abi_assertion_section if abi_assertion_section else None,
+            input_correspondence=input_correspondence,
         )
         
         return result.formula
@@ -2252,7 +2134,9 @@ class FormulaBuilder:
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
         func1_suffix: str = "_1",
-        func2_suffix: str = "_2"
+        func2_suffix: str = "_2",
+        *,
+        input_correspondence: InputCorrespondenceSet,
     ) -> Dict[str, Any]:
         """
         Pairwise戦略用の共通SMT部分を生成
@@ -2270,9 +2154,10 @@ class FormulaBuilder:
             'smt_logic': str,
         }
         """
-        analysis1, analysis2, _, _ = self._normalize_analyses(analysis1, analysis2)
+        correspondence = _require_input_correspondence(input_correspondence)
+        analysis1, analysis2, _, _ = self._normalize_analyses(analysis1, analysis2, correspondence)
         context = self._prepare_formula_context(
-            analysis1, analysis2, func1_suffix, func2_suffix
+            analysis1, analysis2, func1_suffix, func2_suffix, correspondence
         )
 
         return {
@@ -2286,6 +2171,7 @@ class FormulaBuilder:
             'return_size1': context.return_size1,
             'return_size2': context.return_size2,
             'smt_logic': context.smt_logic,
+            'input_correspondence': correspondence,
             'return_coverage_domain_assumptions': {
                 'fp_non_nan': self._has_fp_non_nan_domain_assumptions(
                     analysis1,

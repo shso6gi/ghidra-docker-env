@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
 from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.proof.formula.returns import ReturnWidthMismatchError
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+from scripts.function_tracer_pcode.checker.arch.input_extension import produce_final_input_correspondence
 from scripts.function_tracer_pcode.checker.phases.handler import PhaseContext
 from scripts.function_tracer_pcode.authority.lifecycle.production_boundary import (
     run_check_from_binaries_with_v2_pilot as run_check_from_binaries,
@@ -59,7 +60,9 @@ class AbiRetryMixin:
             # SMT式を構築（ABI制約を extra_assertions として渡す）
             result = self.formula_builder.build_equivalence_formula_extended(
                 analysis1, analysis2,
-                extra_assertions=abi_assertion_section if abi_assertion_section else None
+                extra_assertions=abi_assertion_section if abi_assertion_section else None,
+                # phase の raw pair から作った最終 relation（builder は作らない）。
+                input_correspondence=produce_final_input_correspondence(analysis1, analysis2),
             )
             
             smt_formula = result.formula

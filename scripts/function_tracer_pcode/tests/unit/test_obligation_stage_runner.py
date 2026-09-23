@@ -1,4 +1,6 @@
 from types import SimpleNamespace
+
+import pytest
 from unittest.mock import Mock
 
 from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker, StageID, StageSpec
@@ -96,6 +98,36 @@ def _checker(results):
     checker._merge_completed_recovery_proofs_from_result = Mock()
     checker._should_skip_monolithic_fallback = Mock(return_value=False)
     return checker
+
+
+def _comparison():
+    """test の branch 結果を作った比較（raw pair と最終 relation、Issue #167）。"""
+
+    from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis, ReturnInfo
+    from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_binding_of
+
+    def analysis(name):
+        return FunctionReturnAnalysis(
+            function_name=name, entry_point="0x1000",
+            parameters=[{"name": "p0", "index": 0, "size": 4, "data_type": "int"}],
+            returns=[ReturnInfo("0x1010", Expression.parameter("p0", 0, data_type="int", size=4), [])],
+            return_type="int",
+        )
+
+    return comparison_binding_of(analysis("f"), analysis("g"))
+
+
+def _frame(comparison, **fields):
+    return SimpleNamespace(
+        source=SimpleNamespace(comparison_digest=comparison.raw_pair_digest),
+        comparison_binding=comparison, obligation_runtime=None, **fields,
+    )
+
+
+def _comparison_evidence(comparison, record):
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import bind_evidence_to_comparison
+
+    return bind_evidence_to_comparison(record, comparison)
 
 
 def _run(checker, method_name):
@@ -325,12 +357,14 @@ def test_production_gate_producer_and_aggregator_close_unknown_to_eq():
         "error_pairs": 0,
     }
     result.decision_gated_by_pending_proof = True
+    comparison = _comparison()
+    result._prepared_dispatch_frame = _frame(comparison, pair_disposition_ledger=None)
     result.completed_recovery_proof_evidence = [{
-        "evidence": {
+        "evidence": _comparison_evidence(comparison, {
             "proof_requirement_id": requirement.to_dict(),
             "status": "complete",
             "proof_source": "coverage_test_producer",
-        },
+        }),
     }]
     strategy = SimpleNamespace(
         _return_coverage_proof_is_complete=lambda *_args: True,
@@ -350,6 +384,81 @@ def test_production_gate_producer_and_aggregator_close_unknown_to_eq():
     assert any(event.kind == "return_coverage" for event in runtime.events)
 
 
+@pytest.mark.parametrize("evidence_comparison", ["same", "other_relation", "other_raw_pair"])
+def test_branch_gates_run_in_the_comparison_that_made_the_result(evidence_comparison):
+    """Issue #167: branch の後の gate と集約は、その結果を作った比較（raw pair と relation）で行う。
+
+    同じ runtime に別の比較で作った証拠が来ても、この結果の reason を解消しない（EQ に閉じない）。
+    """
+
+    from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis, ReturnInfo
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        bind_evidence_to_comparison,
+        current_comparison,
+    )
+    from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_binding_of
+
+    def analysis(name, sizes):
+        return FunctionReturnAnalysis(
+            function_name=name, entry_point="0x1000",
+            parameters=[{"name": f"p{i}", "index": i, "size": size, "data_type": "int"} for i, size in enumerate(sizes)],
+            returns=[ReturnInfo("0x1010", Expression.parameter("p0", 0, data_type="int", size=4), [])],
+            return_type="int",
+        )
+
+    comparison = comparison_binding_of(analysis("f", [4]), analysis("g", [4]))
+    other = {
+        "same": comparison,
+        "other_relation": comparison_binding_of(analysis("f", [4, 4]), analysis("g", [4, 4])),
+        "other_raw_pair": comparison_binding_of(analysis("h", [4]), analysis("k", [4])),
+    }[evidence_comparison]
+    assert other.input_correspondence_digest == comparison.input_correspondence_digest or evidence_comparison == "other_relation"
+    requirement = ProofRequirementId.create(
+        "return_coverage_completion", ("coverage", "f"), ProofRequirementContract("return coverage complete"),
+    )
+    reason = SimpleNamespace(
+        reason_id="return_coverage_gap", recovery_proof_kind="return_coverage_completion",
+        proof_requirement_ids=(requirement.to_dict(),), object_target_key=("coverage", "f"),
+        pair_or_case=None, stage="S_PAIRWISE",
+    )
+    result = _result(None, (reason,))
+    result.pairwise_stats = {"total_pairs": 1, "unsat_pairs": 1, "sat_pairs": 0, "unknown_pairs": 0, "error_pairs": 0}
+    result.decision_gated_by_pending_proof = True
+    result._prepared_dispatch_frame = SimpleNamespace(
+        source=SimpleNamespace(comparison_digest=comparison.raw_pair_digest),
+        prepared=SimpleNamespace(input_correspondence=comparison.relation),
+        comparison_binding=comparison,
+        pair_disposition_ledger=None,
+        obligation_runtime=None,
+    )
+    result.completed_recovery_proof_evidence = [{"evidence": bind_evidence_to_comparison({
+        "proof_requirement_id": requirement.to_dict(), "status": "complete", "proof_source": "coverage_test_producer",
+    }, other)}]
+    gate_comparisons = []
+
+    def coverage_gate(*_args):
+        gate_comparisons.append(current_comparison())
+        return True
+
+    strategy = SimpleNamespace(
+        _return_coverage_proof_is_complete=coverage_gate,
+        _call_effect_summary_proof_is_complete=lambda *_args: False,
+        _recovery_proof_is_complete=lambda *_args: False,
+    )
+    checker = _checker([result])
+    checker.stage_plan = [StageSpec(StageID.S_PAIRWISE, "pairwise", "pairwise")]
+    checker.pairwise_strategy = strategy
+
+    final = _run(checker, "_run_stage_plan")
+
+    assert gate_comparisons == [comparison]
+    if evidence_comparison == "same":
+        assert final.is_equivalent is True
+    else:
+        assert final.is_equivalent is None
+        assert [item.reason_id for item in final.unknown_reasons] == ["return_coverage_gap"]
+
+
 def test_completed_proof_replans_pairwise_on_successor_view_and_ledger():
     requirement = ProofRequirementId.create(
         "return_coverage_completion",
@@ -365,12 +474,13 @@ def test_completed_proof_replans_pairwise_on_successor_view_and_ledger():
         stage="S_PAIRWISE",
     )
     first = _result(None, (reason,))
+    comparison = _comparison()
     first.completed_recovery_proof_evidence = [{
-        "evidence": {
+        "evidence": _comparison_evidence(comparison, {
             "proof_requirement_id": requirement.to_dict(),
             "status": "complete",
             "proof_source": "coverage_test_producer",
-        },
+        }),
     }]
     second = _result(True)
     second.completed_recovery_proof_evidence = []
@@ -391,12 +501,10 @@ def test_completed_proof_replans_pairwise_on_successor_view_and_ledger():
         if len(calls) == 1:
             binding = PairLedgerBinding(
                 "session", "S_PAIRWISE", "surface", "projection", 1,
-                runtime.current_view.view_id, runtime.premise_digest, 1,
+                runtime.current_view.view_id, runtime.premise_digest, 1, comparison.digest,
             )
             ledger = runtime.open_pair_ledger(binding, 1)
-            first._prepared_dispatch_frame = SimpleNamespace(
-                pair_disposition_ledger=ledger
-            )
+            first._prepared_dispatch_frame = _frame(comparison, pair_disposition_ledger=ledger)
             return first
         successor_plan = runtime.pair_ledger_manager.pending_successor
         assert successor_plan is not None
@@ -410,7 +518,7 @@ def test_completed_proof_replans_pairwise_on_successor_view_and_ledger():
             2,
             successor_plan.derived_view_id,
             successor_plan.premise_digest,
-            2,
+            2, comparison.digest,
         )
         replanned_ledgers.append(
             runtime.open_pair_ledger(
@@ -452,3 +560,96 @@ def test_production_shadow_validator_runs_final_workflows_and_hashes_surfaces():
     report = ProductionShadowValidator.run(finalized, finalized)
     assert report.comparison.compatible
     assert report.legacy_surface_hash == report.obligation_surface_hash
+
+
+@pytest.mark.parametrize("why", ["raw_pair_changed", "another_comparisons_runtime"])
+def test_a_replan_continues_only_the_runners_own_comparison(why):
+    """Issue #167: replan は runner の raw pair の比較を続ける仕事。別の比較（再帰抽象化・
+    recurrence promotion が自分の runtime で比べた pair）の結果や、比較対象が変わった raw pair
+    の結果は replan しない（後継 plan は別の比較のもの）。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.runtime import ObligationRuntimeSession
+
+    requirement = ProofRequirementId.create(
+        "return_coverage_completion", ("coverage", "f"), ProofRequirementContract("return coverage complete"),
+    )
+    reason = SimpleNamespace(
+        reason_id="return_coverage_gap", recovery_proof_kind="return_coverage_completion",
+        proof_requirement_ids=(requirement.to_dict(),), object_target_key=("coverage", "f"),
+        pair_or_case="(0,0)", stage="S_PAIRWISE",
+    )
+    comparison = _comparison()
+    first = _result(None, (reason,))
+    first.completed_recovery_proof_evidence = [{"evidence": _comparison_evidence(comparison, {
+        "proof_requirement_id": requirement.to_dict(), "status": "complete", "proof_source": "coverage_test_producer",
+    })}]
+    strategy = SimpleNamespace(
+        _return_coverage_proof_is_complete=lambda *_args: True,
+        _call_effect_summary_proof_is_complete=lambda *_args: False,
+        _recovery_proof_is_complete=lambda *_args: False,
+    )
+    checker = _checker([])
+    checker.stage_plan = [StageSpec(StageID.S_PAIRWISE, "pairwise", "pairwise")]
+    checker.pairwise_strategy = strategy
+    calls = []
+
+    def execute(*_args, **_kwargs):
+        calls.append(_kwargs["branch_context"].replan_plan)
+        runner_runtime = checker._obligation_runtime_session
+        runtime = runner_runtime
+        if why == "another_comparisons_runtime":
+            runtime = ObligationRuntimeSession.create(_analysis("B1"), _analysis("B2"))
+        binding = PairLedgerBinding(
+            "session", "S_PAIRWISE", "surface", "projection", 1,
+            runtime.current_view.view_id, runtime.premise_digest, 1, comparison.digest,
+        )
+        first._prepared_dispatch_frame = _frame(comparison, pair_disposition_ledger=runtime.open_pair_ledger(binding, 1))
+        if why == "raw_pair_changed":
+            first._prepared_dispatch_frame.source.comparison_identity_is_current = lambda: False
+        else:
+            first._prepared_dispatch_frame.obligation_runtime = runtime
+        return first
+
+    checker.check = Mock(side_effect=execute)
+    final = _run(checker, "_run_stage_plan")
+
+    assert calls == [None]  # replan しない
+    assert final.is_equivalent is None
+
+
+def test_gates_of_another_comparisons_result_check_the_pair_that_comparison_compared():
+    """Issue #167: 再帰抽象化・recurrence promotion の結果の gate は、その比較が比べた pair を
+    その比較の runtime で調べる（runner の raw pair を別の比較の範囲で調べない）。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.runtime import ObligationRuntimeSession
+
+    requirement = ProofRequirementId.create(
+        "return_coverage_completion", ("coverage", "f"), ProofRequirementContract("return coverage complete"),
+    )
+    reason = SimpleNamespace(
+        reason_id="return_coverage_gap", recovery_proof_kind="return_coverage_completion",
+        proof_requirement_ids=(requirement.to_dict(),), object_target_key=("coverage", "f"),
+        pair_or_case=None, stage="S_PAIRWISE",
+    )
+    comparison = _comparison()
+    compared = (_analysis("abstract-left"), _analysis("abstract-right"))
+    other_runtime = ObligationRuntimeSession.create(*compared)
+    result = _result(None, (reason,))
+    result._prepared_dispatch_frame = _frame(comparison, pair_disposition_ledger=None)
+    result._prepared_dispatch_frame.source.analysis1, result._prepared_dispatch_frame.source.analysis2 = compared
+    result._prepared_dispatch_frame.obligation_runtime = other_runtime
+    subjects = []
+    strategy = SimpleNamespace(
+        _return_coverage_proof_is_complete=lambda _reason, left, right: subjects.append((left, right)) or False,
+        _call_effect_summary_proof_is_complete=lambda *_args: False,
+        _recovery_proof_is_complete=lambda *_args: False,
+    )
+    checker = _checker([result])
+    checker.stage_plan = [StageSpec(StageID.S_PAIRWISE, "pairwise", "pairwise")]
+    checker.pairwise_strategy = strategy
+
+    _run(checker, "_run_stage_plan")
+
+    assert subjects == [compared]
+    assert other_runtime.comparison_binding == comparison
+    assert checker._merge_completed_recovery_proofs_from_result.call_args.args[:2] == compared

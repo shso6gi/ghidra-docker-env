@@ -9,6 +9,9 @@ from typing import Optional, Dict, Any, Mapping, Tuple
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.structural import condition_key, expression_provenance_key
 from scripts.function_tracer_pcode.smt import ParallelResult
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+    InputCorrespondenceSet,
+)
 from scripts.function_tracer_pcode.proof.monolithic_authority import (
     build_expected_region_query_set as _PINNED_BUILD_EXPECTED_REGION_QUERY_SET,
     create_shared_z3_region_session as _PINNED_CREATE_SHARED_Z3_REGION_SESSION,
@@ -95,6 +98,9 @@ class _MonolithicDecisionExecutionContext:
     analysis_object_ids: tuple[int, int]
     prepared_surface_digest: Optional[str] = None
     return_width_query_bundle: Optional[_MonolithicReturnWidthQueryBundle] = None
+    #: この check の最終 InputCorrespondence（Issue #167）。builder・normalizer・gate は
+    #: 全部これを使う。check ごとに作る値なので、入れ子の check と混ざらない。
+    input_correspondence: Any = field(default=None, repr=False, compare=False)
 
     @classmethod
     def create(
@@ -103,8 +109,11 @@ class _MonolithicDecisionExecutionContext:
         analysis2: FunctionReturnAnalysis,
         *,
         decision_surface: str,
+        input_correspondence: InputCorrespondenceSet,
         prepared_surface_digest: Optional[str] = None,
     ) -> "_MonolithicDecisionExecutionContext":
+        if type(input_correspondence) is not InputCorrespondenceSet:
+            raise TypeError("monolithic decision context requires the final InputCorrespondenceSet")
         if decision_surface not in {"prepared", "legacy_source"}:
             raise ValueError("invalid_monolithic_decision_surface")
         if decision_surface == "prepared" and not prepared_surface_digest:
@@ -115,7 +124,11 @@ class _MonolithicDecisionExecutionContext:
             decision_surface=decision_surface,
             analysis_object_ids=(id(analysis1), id(analysis2)),
             prepared_surface_digest=prepared_surface_digest,
+            input_correspondence=input_correspondence,
         )
+
+    def authorization(self, side: str):
+        return self.input_correspondence.authorization(side)
 
     def assert_bound_to(
         self,
@@ -168,3 +181,21 @@ class _MonolithicRegionExecution:
     session_certificate: Any = None
     sat_replay_formula: str = field(default="", repr=False, compare=False)
     sat_replay_census: Any = field(default=None, repr=False, compare=False)
+    # Issue #167: region query の premise を描いた base context の最終 relation。
+    input_correspondence: Any = field(default=None, repr=False, compare=False)
+
+
+
+def region_query_input_correspondence(region_execution: Any, region_base_ctx: Any) -> Any:
+    """region split の query の premise を実際に描いた relation（Issue #167）。
+
+    decisive gate はこれを check の relation と digest で突き合わせる。呼び出し側が
+    base context を渡したならそれ、region 実行が自分で作ったなら実行記録に残した
+    もの。どちらにも無ければ None（gate は ``unavailable:query`` で塞ぐ）。check の
+    relation 自身で代用しない（代用すると束縛の検査が恒真になる）。legacy formula
+    のときは builder 結果の ``input_correspondence`` を読む。
+    """
+
+    if region_base_ctx is not None:
+        return region_base_ctx.get("input_correspondence")
+    return getattr(region_execution, "input_correspondence", None)

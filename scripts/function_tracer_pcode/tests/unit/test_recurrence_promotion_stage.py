@@ -112,9 +112,10 @@ def test_check_keeps_facade_writes_and_recursion_in_the_fixed_order():
     runtime_writes = _assign_lines(fn, "_obligation_runtime_session")
     authority_write = _assign_lines(fn, "_active_recurrence_promotion_authority")
     assert len(attempt_write) == 1 and len(authority_write) == 1
-    # (5) の runtime write は D 段の 1 箇所（もう 1 箇所は B 段の store_on_facade）
+    # (5) の runtime write は D 段の 2 箇所（後継の比較の runtime に切り替え、finally で元の比較の
+    # runtime に戻す、Issue #167）。もう 1 箇所は B 段の store_on_facade。
     d_runtime = [l for l in runtime_writes if l > signals]
-    assert len(d_runtime) == 1 and len(runtime_writes) == 2
+    assert len(d_runtime) == 2 and len(runtime_writes) == 3
     # 再帰 self.check(...) は facade（check() 本体）に残り、try の finally で active authority を削除する
     recursive = [n for n in ast.walk(fn) if isinstance(n, ast.Try)
                  and any(isinstance(d, ast.Delete) and any(isinstance(t, ast.Attribute) and t.attr == "_active_recurrence_promotion_authority" for t in d.targets) for d in n.finalbody)]
@@ -126,6 +127,8 @@ def test_check_keeps_facade_writes_and_recursion_in_the_fixed_order():
     assert [ast.unparse(a) for a in ret[0].value.args[:2]] == ["promotion.promoted1", "promotion.promoted2"]
     assert {k.arg: ast.unparse(k.value) for k in ret[0].value.keywords}["force_strategy"] == "strategy"
     assert prepare < attempt_write[0] < signals < d_runtime[0] < authority_write[0] < ret[0].lineno < recursive[0].finalbody[0].lineno
+    # 元の比較の runtime へ戻すのは finally の中
+    assert recursive[0].finalbody[-1].lineno == d_runtime[1]
     # (3) は (4) の条件分岐の外（signals の if の前）にある: attempt write は if の test より前の行
     ifs = [n for n in ast.walk(fn) if isinstance(n, ast.If) and "complete_recurrence_promotion_signals" in ast.unparse(n.test)]
     assert len(ifs) == 1 and attempt_write[0] < ifs[0].lineno and not ifs[0].orelse

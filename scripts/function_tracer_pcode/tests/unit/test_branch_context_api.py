@@ -163,8 +163,9 @@ def test_runner_replan_context_takes_the_successor_plan_precedence_and_keeps_the
                              proof_requirement_ids=(requirement.to_dict(),), object_target_key=("coverage", "f"),
                              pair_or_case="(0,0)", stage="S_PAIRWISE")
     first = runner_tests._result(None, (reason,))
-    first.completed_recovery_proof_evidence = [{"evidence": {"proof_requirement_id": requirement.to_dict(), "status": "complete",
-                                                              "proof_source": "coverage_test_producer"}}]
+    comparison = runner_tests._comparison()
+    first.completed_recovery_proof_evidence = [{"evidence": runner_tests._comparison_evidence(comparison, {
+        "proof_requirement_id": requirement.to_dict(), "status": "complete", "proof_source": "coverage_test_producer"})}]
     second = runner_tests._result(True)
     second.completed_recovery_proof_evidence = []
     strategy = SimpleNamespace(_return_coverage_proof_is_complete=lambda *_a: True,
@@ -179,16 +180,16 @@ def test_runner_replan_context_takes_the_successor_plan_precedence_and_keeps_the
         captured.append((ctx, kwargs["force_strategy"], ctx.production_branch_authority_lease, checker._call_proof_generation))
         if len(captured) == 1:
             binding = PairLedgerBinding("session", "S_PAIRWISE", "surface", "projection", 1,
-                                        runtime.current_view.view_id, runtime.premise_digest, 1)
+                                        runtime.current_view.view_id, runtime.premise_digest, 1, comparison.digest)
             ledger = runtime.open_pair_ledger(binding, 1)
-            first._prepared_dispatch_frame = SimpleNamespace(pair_disposition_ledger=ledger)
+            first._prepared_dispatch_frame = runner_tests._frame(comparison, pair_disposition_ledger=ledger)
             return first
         successor_plan = runtime.pair_ledger_manager.pending_successor
         assert successor_plan is not None and ctx.replan_plan is successor_plan
         replacement_binding = PairLedgerBinding(successor_plan.comparison_session_id, successor_plan.branch_id, "new-surface",
-                                                "new-projection", 2, successor_plan.derived_view_id, runtime.premise_digest, 2)
+                                                "new-projection", 2, successor_plan.derived_view_id, runtime.premise_digest, 2, comparison.digest)
         runtime.open_pair_ledger(replacement_binding, 2)
-        second._prepared_dispatch_frame = SimpleNamespace(pair_disposition_ledger=runtime.pair_ledger_manager.current)
+        second._prepared_dispatch_frame = runner_tests._frame(comparison, pair_disposition_ledger=runtime.pair_ledger_manager.current)
         return second
 
     checker = _runner_checker(execute)
@@ -362,7 +363,10 @@ def test_runner_builds_the_explicit_context_with_the_shared_builder_only():
     rec = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "check"
            and ast.unparse(n.func.value) == "self"]
     assert len(rec) == 1
-    assert {k.arg: ast.unparse(k.value) for k in rec[0].keywords}["branch_context"] == "ctx if context_was_supplied else None"
+    # 後継 pair は別の比較なので replan plan だけは外す（Issue #167、successor_branch_context）
+    assert {k.arg: ast.unparse(k.value) for k in rec[0].keywords}["branch_context"] == (
+        "successor_branch_context(ctx) if context_was_supplied else None"
+    )
     # abstraction stage は branch_context を check() へ転送する
     abs_src = inspect.getsource(EquivalenceChecker._run_recursive_abstraction_stage)
     assert "branch_context=branch_context" in abs_src
@@ -392,3 +396,20 @@ def test_lease_issuance_is_immediately_followed_by_the_try_finally_that_revokes_
     assert {n.name for st in imports_before for n in st.names} >= {
         "issue_production_branch_authority", "revoke_production_branch_authority", "build_branch_check_context"}
 
+
+
+def test_the_successor_pairs_comparison_does_not_inherit_the_replan_plan():
+    """Issue #167: recurrence promotion の後継 pair は別の比較。元の比較の replan plan は渡さない。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.branch_context import successor_branch_context
+
+    lease = object()
+    plain = BranchCheckContext(strategy=object(), replan_plan=None, generation=3, comparison_session_id="S",
+                               branch_id="S_PAIRWISE", decision_mode=None, production_branch_authority_lease=lease)
+    assert successor_branch_context(plain) is plain
+    replanned = BranchCheckContext(strategy=plain.strategy, replan_plan=object(), generation=3, comparison_session_id="S",
+                                   branch_id="S_PAIRWISE", decision_mode=None, production_branch_authority_lease=lease)
+    successor = successor_branch_context(replanned)
+    assert successor.replan_plan is None
+    assert (successor.strategy, successor.generation, successor.comparison_session_id, successor.branch_id,
+            successor.production_branch_authority_lease) == (plain.strategy, 3, "S", "S_PAIRWISE", lease)

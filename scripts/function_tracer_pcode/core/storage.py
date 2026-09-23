@@ -252,3 +252,55 @@ class StorageInfo:
     def to_dict(self) -> Dict[str, Any]:
         # 固定個数の scalar だけの record（式の木の node ごとに書くので walker を通さない）
         return scalar_record_dict(self)
+
+
+def coerce_storage_info(storage: Any) -> Optional[StorageInfo]:
+    """``StorageInfo`` か、その ``to_dict`` 形の dict を ``StorageInfo`` にする。
+
+    parameter descriptor は storage を dict で持つことがあるので、storage の
+    identity を比べる側（closure 走査、入力 extension 証拠、書き換え）はここを
+    通して同じ解釈を使う。解釈できなければ None。
+    """
+
+    if storage is None:
+        return None
+    if isinstance(storage, StorageInfo):
+        return storage
+    if not isinstance(storage, dict):
+        return None
+    try:
+        kind = str(storage.get("kind", "") or storage.get("space_name", "") or "").lower()
+        is_register = bool(storage.get("is_register", False)) or kind == "register"
+        return StorageInfo(
+            is_register=is_register,
+            space_name=str(storage.get("space_name") or ("register" if is_register else "")),
+            space_id=storage.get("space_id"),
+            offset=int(storage.get("offset", 0) or 0),
+            size=int(storage.get("size", 0) or 0),
+            size_bits=int(storage.get("size_bits", 0) or 0),
+            register_name=storage.get("register_name"),
+            register_offset=storage.get("register_offset"),
+            register_size=storage.get("register_size"),
+            register_size_bits=storage.get("register_size_bits"),
+            base_register_name=storage.get("base_register_name"),
+            base_register_offset=int(storage.get("base_register_offset", 0) or 0),
+            base_register_size=int(storage.get("base_register_size", 0) or 0),
+            base_register_size_bits=int(storage.get("base_register_size_bits", 0) or 0),
+            bit_offset_in_base=int(storage.get("bit_offset_in_base", 0) or 0),
+            is_stack_pointer=bool(storage.get("is_stack_pointer", False)),
+            is_frame_pointer=bool(storage.get("is_frame_pointer", False)),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def storage_identity_key_of(storage: Any) -> Optional[tuple]:
+    """``coerce_storage_info`` 後の ``StorageInfo.storage_identity_key()``（無ければ None）。"""
+
+    info = coerce_storage_info(storage)
+    if info is None:
+        return None
+    try:
+        return info.storage_identity_key()
+    except (TypeError, ValueError):
+        return None

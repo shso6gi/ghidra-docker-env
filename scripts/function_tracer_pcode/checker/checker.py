@@ -55,7 +55,11 @@ from scripts.function_tracer_pcode.proof.call_effect.preflight import CallProofD
 # Re-exports kept for callers that import these names from this module.
 from scripts.function_tracer_pcode.smt import SolverResult
 from scripts.function_tracer_pcode.checker.abi_retry import AbiRetryMixin
-from scripts.function_tracer_pcode.proof.obligations.branch_context import BranchCheckContext, build_branch_check_context
+from scripts.function_tracer_pcode.proof.obligations.branch_context import (
+    BranchCheckContext,
+    build_branch_check_context,
+    successor_branch_context,
+)
 from scripts.function_tracer_pcode.checker.unknown_refinement import refine_unknown_reasons
 from scripts.function_tracer_pcode.checker.recurrence_promotion import (
     complete_recurrence_promotion_signals,
@@ -710,6 +714,7 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                         replan_plan,
                         analysis1,
                         analysis2,
+                        dispatch_frame.comparison_binding,
                     )
                     if runtime_preparation.store_on_facade:
                         # 6b-2: facade write は check() に残す。strategy 実行より前、必要な場合のみ。
@@ -782,6 +787,10 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                             promotion.attempt,
                             debug_print=self._debug_print,
                         ):
+                            # Issue #167: 後継 pair の比較は自分の runtime を使う。終わったら
+                            # facade を元の比較の runtime に戻す（後の branch・replan が後継の
+                            # 比較の runtime を元の比較の runtime として使わない）。
+                            outer_runtime = getattr(self, "_obligation_runtime_session", None)
                             self._obligation_runtime_session = promotion.recurrence_runtime
                             self._active_recurrence_promotion_authority = promotion.authority
                             try:
@@ -798,10 +807,17 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                                     force_strategy=strategy,
                                     # 6c-2: runner 由来の ctx は再帰にも明示転送、direct で組んだ ctx は
                                     # 固定転送せず再帰側で従来どおり direct context を再生成する。
-                                    branch_context=ctx if context_was_supplied else None,
+                                    # Issue #167: 後継 pair は別の比較なので、元の比較の replan plan
+                                    # （後継 ledger の intent）は持ち込まない。
+                                    branch_context=(
+                                        successor_branch_context(ctx)
+                                        if context_was_supplied
+                                        else None
+                                    ),
                                 )
                             finally:
                                 del self._active_recurrence_promotion_authority
+                                self._obligation_runtime_session = outer_runtime
                 # G2（Issue #106 PR-106-0）: 結果を組む直前に、この pair で
                 # 未解消の限界 / 内部バグが残っていないかを台帳へ確かめる。
                 # 深部の `except Exception` に握り潰されていても、ここで例外に

@@ -19,6 +19,7 @@ from scripts.function_tracer_pcode.core import (
     ReturnInfo,
 )
 from scripts.function_tracer_pcode.tests.unit._publication import published
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
 
 def _param(name: str, *, size: int, is_signed: bool) -> dict:
@@ -371,7 +372,7 @@ def test_formula_builder_skips_concrete_address_anchor_extra_vars() -> None:
 
     result = FormulaBuilder(debug=False).build_equivalence_formula_extended(
         analysis,
-        analysis,
+        analysis,input_correspondence=build_input_correspondence_set(analysis, analysis),
     )
 
     assert "lookup_anchor_1" not in result.formula
