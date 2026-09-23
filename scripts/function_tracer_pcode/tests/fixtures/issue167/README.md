@@ -37,7 +37,7 @@ checkout of `1be9c16` at the same path and run the same command.
 | file | sha256 |
 |---|---|
 | `probe_root_cause.before_1be9c16.jsonl` | `ab4ba7647054417202d6c11177c6a26a573c3e6cfd7a921a214699769b57c86c` |
-| `probe_root_cause.after.jsonl` | see `sha256sum` in the PR (regenerated on the PR head) |
+| `probe_root_cause.after.jsonl` | `d36ef6debe1d0bfbf32fe3acf7124e951a32b2ef18c0aab9c849d306416f76c8` (re-run on the PR head gives the same bytes) |
 
 | probe | before (`1be9c16`) | after | meaning |
 |---|---|---|---|
@@ -101,5 +101,35 @@ PY
 
 ## Fixed subset before/after
 
-See `subset/README.md` for the working root, binary manifest, settings, commands and
-the changed-pair table.
+The pair set, settings and binaries are fixed; the results are in the PR body
+(the run has to be on the final head, so this file cannot carry them).
+
+| item | value |
+|---|---|
+| subset manifest | `scripts/function_tracer_pcode/reporting/eqbench_subset.json`, sha256 `c38c0df03e42787dd2582aa85cc6d654ec9c024eb61296ed40dc1977edab62fa` (Eq 8 sources × 8 pairs = 64, Neq 80) |
+| working root | a fresh clone of the canonical `targets/EqBench` at `3724fce5b287cc63165028444daf904f25b0158b` under `tmp/issue167/eqwork/` of each checkout (the runners refuse roots outside the repository); the canonical checkout is never written |
+| binaries | built into each working root before the measured runs, which use `EQBENCH_BUILD_POLICY=PREBUILT_ONLY`; the binaries each run actually compared are proven identical with `scripts.eqbench.binary_manifest`: Eq 112 binaries, manifest sha256 `86fb1f124770385eb58473eff3b9e91f2811a045e5d9259b9ac29dfacb9e4044`; Neq 140 binaries, `d4c56f6a94d2a8ea6b7803739943cffbeb675a52100ca00e0931f19b80da40b6` |
+| settings | `PARALLEL_JOBS=20`, `PAIR_PROCESS_TIMEOUT=240s`, `EQBENCH_RESOURCE_ADMISSION=0`, `EQBENCH_IDENTICAL_FAST_PATH=1`, `EQBENCH_DEBUG=1` (the `Input correspondence:` line is a debug line), equiv 10 s, decompile 60 s, pairwise 5 s / 30 s hard |
+| before | `1be9c1613c9894f89dafc5329e2410b186c1c091` in its own worktree |
+
+```bash
+# in each checkout (before: a worktree of 1be9c16; after: the PR head)
+git clone -q <canonical>/targets/EqBench tmp/issue167/eqwork/EqBench   # at 3724fce5
+docker compose run --rm -T -v "<main checkout>/.git:<main checkout>/.git:ro" ghidra-dev env \
+  EQBENCH_ROOT=/workspace/tmp/issue167/eqwork/EqBench/benchmarks \
+  NEQ_ROOT=/workspace/tmp/issue167/eqwork/EqBench/benchmarks \
+  EQBENCH_BUILD_POLICY=PREBUILT_ONLY EQBENCH_DEBUG=1 \
+  OUTPUT_BASE_DIR=/workspace/tmp/issue167/<label> SUBSET_ISSUE=167 \
+  ./eqbench_run_subset.sh
+# binaries actually compared, per half, then before vs after
+python3 -B -m scripts.eqbench.binary_manifest build --run-dir tmp/issue167/<label>/<half> \
+  --binary-root /workspace --output tmp/issue167/binary_manifest_<label>_<half>.txt
+python3 -B -m scripts.eqbench.binary_manifest compare --before <before manifest> --after <after manifest>
+# transitions
+python3 -B -m scripts.function_tracer_pcode.reporting.outcome_transition \
+  --before <before>/<half> --after <after>/<half> --changed-only --axes --reason-sets
+```
+
+The Neq half cannot re-run into a cleared output directory while its signing key
+survives under `tmp/eqbench-private-authority-neq/` (#170); remove that keyset
+directory before a re-run.
