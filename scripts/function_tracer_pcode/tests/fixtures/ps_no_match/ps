@@ -7,6 +7,10 @@ if [ -z "${PS_NO_MATCH_REAL_PS:-}" ] || [ -z "${PS_NO_MATCH_CALLS:-}" ]; then
     echo "ps_no_match: set PS_NO_MATCH_REAL_PS and PS_NO_MATCH_CALLS" >&2
     exit 2
 fi
+if [ "$PS_NO_MATCH_REAL_PS" -ef "$0" ]; then
+    echo "ps_no_match: PS_NO_MATCH_REAL_PS is this fixture, not the real ps" >&2
+    exit 2
+fi
 calls=$(cat "$PS_NO_MATCH_CALLS" 2>/dev/null || echo 0)
 echo $((calls + 1)) > "$PS_NO_MATCH_CALLS"
 if [ "$calls" -lt "${PS_NO_MATCH_COUNT:-3}" ]; then
