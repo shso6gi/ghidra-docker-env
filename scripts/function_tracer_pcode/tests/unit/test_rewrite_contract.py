@@ -131,3 +131,37 @@ def test_the_formula_builder_does_not_make_a_relation(method):
     with pytest.raises(TypeError, match="final InputCorrespondenceSet"):
         getattr(builder, method)(raw1, raw2, input_correspondence=None)
     getattr(builder, method)(raw1, raw2, input_correspondence=build_input_correspondence_set(raw1, raw2))
+
+
+def test_the_certificate_rebuild_recomputes_the_relation_from_raw_surfaces():
+    """``rebuild_input_correspondence_set`` は closure と規則をやり直す（cache の自己一致ではない）。
+
+    parameter 表だけは抽出済みのものを使う（Ghidra の型 object への問い合わせを繰り返さない）。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        rebuild_input_correspondence_set,
+    )
+
+    def analysis(value):
+        return create_mock_analysis(
+            "f",
+            return_type="long",
+            parameters=[{"name": "x", "index": 0, "size": 8, "data_type": "long", "is_signed": True}],
+            returns=[ReturnInfo(address="0x1000", conditions=[], value=value)],
+        )
+
+    x = Expression(ExpressionType.PARAMETER, name="x", value=0, size=8)
+    low = Expression(
+        ExpressionType.BINARY_OP, operator="SUBPIECE",
+        operands=[x, Expression(ExpressionType.CONSTANT, value=0, size=8)], size=4,
+    )
+    closed1, closed2 = analysis(low), analysis(low)
+    previous = build_input_correspondence_set(closed1, closed2)
+    assert rebuild_input_correspondence_set(previous, closed1, closed2).digest == previous.digest
+
+    # 同じ parameter 表でも、raw surface が違えば closure をやり直した結果が変わる。
+    bare = analysis(x)
+    assert rebuild_input_correspondence_set(previous, closed1, bare).digest != previous.digest
+    with pytest.raises(RawAnalysisRequiredError):
+        rebuild_input_correspondence_set(previous, normalize_analysis_semantic_width(_rewritable("f")), closed2)

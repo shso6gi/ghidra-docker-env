@@ -39,6 +39,7 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     RIGHT as _INPUT_RIGHT,
     InputCorrespondenceSet,
     build_input_correspondence_set,
+    rebuild_input_correspondence_set,
 )
 from scripts.function_tracer_pcode.semantics.rewrite_contract import REWRITE_RULE_TABLE_DIGEST
 from scripts.function_tracer_pcode.semantics.semantic_width import (
@@ -434,11 +435,17 @@ class StrategySourceAnalysisPair:
         return cached
 
     def rebuild_input_correspondence(self) -> InputCorrespondenceSet:
-        """cache を使わず raw から最終 relation を作り直す（certificate の独立検査用）。"""
+        """raw から最終 relation の判定（pairing・R0〜R5・closure）をやり直す。
+
+        certificate の独立検査用で、cache した relation の digest をそのまま使わない。
+        parameter 表だけは同じ raw descriptor から抽出済みのものを使う（抽出は Ghidra の
+        型 object に問い合わせる）。
+        """
 
         if not self.is_unchanged():
             raise ValueError("prepared_analysis_mutated")
-        return build_input_correspondence_set(
+        return rebuild_input_correspondence_set(
+            self.input_correspondence(),
             self.analysis1,
             self.analysis2,
             input_extension_evidence=self.input_extension_evidence,

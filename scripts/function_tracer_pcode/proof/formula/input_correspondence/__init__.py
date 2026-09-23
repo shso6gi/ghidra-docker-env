@@ -63,6 +63,7 @@ _LAZY = {
             "RawAnalysisRequiredError",
             "build_input_correspondence_set",
             "build_tie_only_correspondence_set",
+            "rebuild_input_correspondence_set",
         )
     },
     "build_parameter_pairs": (f"{_PACKAGE}.pairing", "build_parameter_pairs"),

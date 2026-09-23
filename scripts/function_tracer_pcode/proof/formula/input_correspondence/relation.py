@@ -281,6 +281,31 @@ def build_input_correspondence_set(
     return _build_set(params1, params2, contexts)
 
 
+def rebuild_input_correspondence_set(
+    previous: InputCorrespondenceSet,
+    analysis1: Any,
+    analysis2: Any,
+    *,
+    input_extension_evidence: Sequence[InputExtensionEvidence] = (),
+) -> InputCorrespondenceSet:
+    """``previous`` と同じ raw pair の relation を、pairing・R0〜R5・closure 走査から作り直す。
+
+    certificate の独立検査用。parameter 表だけは ``previous`` が同じ raw descriptor から
+    抽出したものを使う（抽出は Ghidra の型 object に問い合わせるので、繰り返すと
+    記録済み Ghidra 出力の再生と食い違う）。relation の判定そのもの（closure・規則）は
+    全部やり直す。
+    """
+
+    for analysis in (analysis1, analysis2):
+        if is_rewritten_surface(analysis):
+            raise RawAnalysisRequiredError("input_correspondence_requires_raw_analysis")
+    contexts = {
+        LEFT: _SideContext(LEFT, analysis1, _evidence_by_index(analysis1, input_extension_evidence)),
+        RIGHT: _SideContext(RIGHT, analysis2, _evidence_by_index(analysis2, input_extension_evidence)),
+    }
+    return _build_set(list(previous.left_parameters), list(previous.right_parameters), contexts)
+
+
 def build_tie_only_correspondence_set(
     params1: Sequence[ParameterInfo],
     params2: Sequence[ParameterInfo],
