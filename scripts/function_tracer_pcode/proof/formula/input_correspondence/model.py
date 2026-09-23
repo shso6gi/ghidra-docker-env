@@ -303,6 +303,35 @@ def _bound_smt_name(side: Optional[SideParameter], by_index: Mapping[int, Parame
     return param.smt_name
 
 
+def shared_entailed_extensions(parameters: Sequence[ParameterInfo]) -> Dict[int, RewriteAssumption]:
+    """左右どちらの parameter にもなり得る symbol（補助 query）が引き継ぐ入力仮定。
+
+    ``parameters`` は最終 relation の ``parameter_infos`` の値（左右両側）。symbol は
+    (index, 幅) が同じなら左右どちらの parameter にもなり得るので、その (index, 幅) の
+    **全ての** parameter が同じ仮定を含意するときだけ引き継ぐ（片側だけの含意を他方へ
+    持ち込まない）。semantic hint は入力全体の仮定ではないので読まない。
+    """
+
+    by_slot: Dict[Tuple[int, int], List[Optional[RewriteAssumption]]] = {}
+    for parameter in parameters or ():
+        try:
+            slot = (int(getattr(parameter, "index")), int(getattr(parameter, "bit_width")))
+        except (TypeError, ValueError):
+            continue
+        by_slot.setdefault(slot, []).append(getattr(parameter, "entailed_extension", None))
+    extensions: Dict[int, RewriteAssumption] = {}
+    for (index, bit_width), assumptions in sorted(by_slot.items()):
+        first = assumptions[0]
+        if first is None or first.parameter_bits != bit_width:
+            continue
+        if any(assumption != first for assumption in assumptions):
+            continue
+        current = extensions.get(index)
+        if current is None or first.parameter_bits > current.parameter_bits:
+            extensions[index] = first
+    return extensions
+
+
 def extension_premise_lines(params: Sequence[ParameterInfo]) -> List[str]:
     """補助 query 用: entailed な extension 仮定だけを描く（hint は使わない）。"""
 

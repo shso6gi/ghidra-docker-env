@@ -31,7 +31,6 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     ParameterInfo,
     QueryResult,
     ReturnCase,
-    bind_evidence_to_comparison,
     build_condition_only_query,
     build_normalized_inequality_query,
     build_pair_query,
@@ -43,6 +42,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     parameter_identity_key_from_descriptor,
     parameter_identity_key_from_expression,
     save_unknown_query,
+    store_comparison_evidence,
     solve_query_internal,
     solve_query_twostage,
     try_solver_proven_rewrite_equivalence,
@@ -64,7 +64,7 @@ def _impl__merge_completed_recovery_proofs_from_solver_analyses(
             getattr(source, "completed_recovery_proof_evidence", ()) or (),
         )
         if merged is not None:
-            target.completed_recovery_proof_evidence = tuple(merged)
+            store_comparison_evidence(target, merged)
 
 def _impl__solve_query_twostage(
     self,
@@ -148,7 +148,7 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
         if proof_content is None:
             continue
         records.append(
-            bind_evidence_to_comparison({
+            {
                 "object_derived": True,
                 "status": "complete",
                 "reason_id": reason_record.reason_id,
@@ -161,12 +161,12 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
                 "proof_obligation_id": proof_id,
                 "proof_source": "method_b_dual_summary_case_local_solver_equality",
                 "proof_content": proof_content,
-            })
+            }
         )
         existing_ids.add(proof_id)
         changed = True
     if changed:
-        analysis.completed_recovery_proof_evidence = tuple(records)
+        store_comparison_evidence(analysis, records)
 
 def _impl__method_b_dual_summary_solver_proof_content(
     self,

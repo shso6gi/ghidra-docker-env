@@ -274,3 +274,60 @@ def test_run_strategy_branch_runs_the_strategy_in_the_frames_relation():
         )
     assert seen == [relation.digest]
     assert current_relation_digest() is None
+
+
+def test_the_evidence_writer_binds_what_a_comparison_adds_and_keeps_the_rest():
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import store_comparison_evidence
+
+    relation_a, relation_b = _two_relations()
+    unary = {"proof_obligation_id": ("unary",)}
+    from_b = bind_evidence_to_relation({"proof_obligation_id": ("b",)}, relation_b)
+    analysis = SimpleNamespace(completed_recovery_proof_evidence=(unary, from_b))
+    with comparison_relation_scope(relation_a):
+        added = {"proof_obligation_id": ("a",)}
+        explicit = bind_evidence_to_relation({"proof_obligation_id": ("explicit",)}, relation_a)
+        store_comparison_evidence(analysis, [dict(unary), dict(from_b), added, explicit])
+    records = analysis.completed_recovery_proof_evidence
+    assert RELATION_DIGEST_KEY not in records[0]  # 比較の前からある関数単体の事実
+    assert records[1][RELATION_DIGEST_KEY] == relation_b.digest  # 別の比較の証拠はそのまま
+    assert records[2][RELATION_DIGEST_KEY] == relation_a.digest  # この比較で増えた証拠
+    assert records[3][RELATION_DIGEST_KEY] == relation_a.digest
+    # 比較の外で増えた証拠は、どの比較でも採用されない印を持つ。
+    store_comparison_evidence(analysis, [*records, {"proof_obligation_id": ("outside",)}])
+    assert analysis.completed_recovery_proof_evidence[-1][RELATION_DIGEST_KEY] == OUTSIDE_COMPARISON
+
+
+def test_a_producer_validated_closure_is_sealed_to_its_ledgers_relation():
+    from scripts.function_tracer_pcode.proof.obligations.pair_disposition import (
+        PairLedgerBinding,
+        ReadonlyIdentityClosureArtifact,
+    )
+
+    relation_a, relation_b = _two_relations()
+
+    def binding(relation):
+        return PairLedgerBinding(
+            "session", "S_PAIRWISE", "surface", "projection", 1, ("view",), "premise", 1, relation.digest,
+        )
+
+    import dataclasses
+    import hashlib
+
+    from scripts.function_tracer_pcode.proof.obligations import pair_disposition
+
+    ledger_a = binding(relation_a)
+    digest = hashlib.sha256(b"x").hexdigest()
+    payload = (
+        ReadonlyIdentityClosureArtifact.PRODUCER_KIND, digest, digest, ledger_a.derived_view_id,
+        ledger_a.premise_digest, ledger_a.graph_generation, ledger_a.input_correspondence_digest,
+        "validated", ReadonlyIdentityClosureArtifact.schema_version,
+    )
+    artifact = ReadonlyIdentityClosureArtifact(
+        digest, digest, ledger_a.derived_view_id, ledger_a.premise_digest, ledger_a.graph_generation,
+        ledger_a.input_correspondence_digest, pair_disposition._closure_artifact_seal(payload),
+    )
+    assert artifact.validates(ledger_a) is True
+    # view・premise・generation が同じでも、relation の違う ledger では通らない。
+    assert artifact.validates(binding(relation_b)) is False
+    relabelled = dataclasses.replace(artifact, input_correspondence_digest=relation_b.digest)
+    assert relabelled.validates(binding(relation_b)) is False

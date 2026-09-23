@@ -13,12 +13,12 @@ from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     UnknownReasonRecord,
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
-    bind_evidence_to_comparison,
     build_proof_obligation_id,
     build_unknown_recovery_actions,
     coerce_value_to_bitvec_width,
     comparison_evidence,
     make_unknown_reason,
+    store_comparison_evidence,
 )
 from scripts.function_tracer_pcode.proof.obligations import (
     SnapshotFingerprintCodec,
@@ -1069,9 +1069,9 @@ def _impl__record_completed_return_coverage_proof(
         }
         if self._return_coverage_proof_id_from_evidence(candidate) is None:
             continue
-        records.append(bind_evidence_to_comparison(candidate))
+        records.append(candidate)
         existing_ids.add(proof_id)
-    analysis.completed_recovery_proof_evidence = tuple(records)
+    store_comparison_evidence(analysis, records)
 
 def _impl__return_coverage_covered_proof_content(
     self,

@@ -12,11 +12,11 @@ from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
     UnknownRecoveryProofObligation,
-    bind_evidence_to_comparison,
     build_proof_obligation_id,
     comparison_evidence,
     make_internal_v2_reason_diagnostic,
     make_unknown_reason,
+    store_comparison_evidence,
 )
 from scripts.function_tracer_pcode.authority.domains.sat_safety_sites import (
     SAT_SAFETY_AMBIGUITY_COMPLETED_SITE,
@@ -574,7 +574,7 @@ def _impl__record_completed_sat_counterexample_replay_proof(
 
     counterexample_keys = tuple(sorted(str(key) for key in (counterexample_raw or {}).keys()))
     records.append(
-        bind_evidence_to_comparison({
+        {
             "object_derived": True,
             "status": "complete",
             "reason_id": reason_record.reason_id,
@@ -605,9 +605,9 @@ def _impl__record_completed_sat_counterexample_replay_proof(
                     "effect_status": "no_active_effect_unsafety_for_replay_gate",
                 },
             },
-        })
+        }
     )
-    analysis1.completed_recovery_proof_evidence = tuple(records)
+    store_comparison_evidence(analysis1, records)
 
 def _impl__counterexample_model_fingerprint(
     cls,

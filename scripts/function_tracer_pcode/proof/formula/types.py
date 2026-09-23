@@ -20,7 +20,8 @@ class ParameterInfo:
     index: int
     is_signed: bool = True
     #: 最終 ``InputCorrespondence`` が含意する ``p == ext(low_N(p))``。
-    #: ``InputCorrespondenceSet.parameter_infos`` だけが設定する
+    #: 値を決めるのは ``InputCorrespondenceSet``（``parameter_infos`` と、補助 query の
+    #: symbol 用の ``shared_entailed_extensions``）だけ
     #: （Issue #167: semantic hint を入力全体の仮定として使わない）。
     entailed_extension: Optional[RewriteAssumption] = None
     type_class: Optional[str] = None

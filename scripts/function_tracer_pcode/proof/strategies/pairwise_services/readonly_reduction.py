@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-#: readonly identity projection proof の入力 extension の唯一の出所（Issue #167）。
-FINAL_INPUT_CORRESPONDENCE_PROOF_SOURCE = "final_input_correspondence"
 from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
@@ -33,10 +31,15 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     build_unknown_recovery_actions,
     comparison_evidence,
     parameter_identity_key_from_expression,
+    store_comparison_evidence,
 )
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     canonicalize_location,
 )
+
+
+#: readonly identity projection proof の入力 extension の唯一の出所（Issue #167）。
+FINAL_INPUT_CORRESPONDENCE_PROOF_SOURCE = "final_input_correspondence"
 
 
 def _impl__cases_have_equivalent_runtime_reductions(
@@ -1091,7 +1094,7 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
             "proof_content": proof_content,
         }, input_correspondence)
     )
-    analysis1.completed_recovery_proof_evidence = tuple(records)
+    store_comparison_evidence(analysis1, records)
 
 
 def _impl__readonly_projection_term_contracts_match(

@@ -55,6 +55,7 @@ _LAZY = {
             "SideParameter",
             "extension_assumption_line",
             "extension_premise_lines",
+            "shared_entailed_extensions",
         )
     },
     **{
@@ -70,7 +71,6 @@ _LAZY = {
     **{
         name: (f"{_PACKAGE}.binding", name)
         for name in (
-            "ComparisonBoundCallable",
             "OUTSIDE_COMPARISON",
             "RELATION_DIGEST_KEY",
             "bind_evidence_to_comparison",
@@ -80,11 +80,11 @@ _LAZY = {
             "comparison_uses_relation",
             "current_relation",
             "current_relation_digest",
-            "evidence_merge_identity",
             "evidence_relation_binding_holds",
             "merge_new_evidence",
             "relation_digest_is_current",
             "run_in_current_comparison",
+            "store_comparison_evidence",
         )
     },
     "build_parameter_pairs": (f"{_PACKAGE}.pairing", "build_parameter_pairs"),

@@ -904,9 +904,12 @@ class ProducerValidatedClosureArtifact:
     derived_view_id: Tuple[Any, ...]
     premise_digest: str
     graph_generation: int
+    #: closure を発行した比較の最終 InputCorrespondence（Issue #167）。封印に入れ、
+    #: 別の relation の ledger では検証を通らない。
+    input_correspondence_digest: str
     authority_digest: str
     validation_status: str = "validated"
-    schema_version: str = "producer_validated_closure_v2"
+    schema_version: str = "producer_validated_closure_v3"
 
     PRODUCER_KIND: ClassVar[str] = "abstract"
 
@@ -914,7 +917,8 @@ class ProducerValidatedClosureArtifact:
         payload = (
             self.PRODUCER_KIND, self.proposition_digest, self.evidence_digest,
             self.derived_view_id, self.premise_digest,
-            self.graph_generation, self.validation_status, self.schema_version,
+            self.graph_generation, self.input_correspondence_digest,
+            self.validation_status, self.schema_version,
         )
         return (
             self.PRODUCER_KIND != "abstract"
@@ -924,6 +928,7 @@ class ProducerValidatedClosureArtifact:
             and self.derived_view_id == binding.derived_view_id
             and self.premise_digest == binding.premise_digest
             and self.graph_generation == binding.graph_generation
+            and self.input_correspondence_digest == binding.input_correspondence_digest
             and hmac.compare_digest(
                 self.authority_digest, _closure_artifact_seal(payload)
             )
@@ -986,12 +991,13 @@ def issue_producer_validated_closure(
     payload = (
         artifact_type.PRODUCER_KIND, proposition_digest, evidence_digest,
         binding.derived_view_id, binding.premise_digest,
-        binding.graph_generation, "validated",
+        binding.graph_generation, binding.input_correspondence_digest, "validated",
         artifact_type.schema_version,
     )
     return artifact_type(
         proposition_digest, evidence_digest, binding.derived_view_id,
         binding.premise_digest, binding.graph_generation,
+        binding.input_correspondence_digest,
         _closure_artifact_seal(payload),
     )
 

@@ -17,14 +17,15 @@ parameter を足した抽象 pair）とは共有しない。
 
 * 比較の範囲: ``comparison_relation_scope(relation)`` が、1 つの比較の間だけ
   現在の relation を与える。開くのは relation を決めた dispatch の境界
-  （``checker/strategy_execution.run_strategy_branch``）と、branch の結果の gate を
-  その結果を作った比較の relation で実行する境界（``proof/obligations/stage_runner``）
-  だけ。strategy は入口で自分の relation とこの範囲の relation の一致を確かめる
-  （互換の直接呼び出しは自分の relation の範囲を開いて実行し直す）。入れ子の比較は
-  自分の relation を push し、抜けると戻る。
-* producer: 比較の中で証拠 record を作ったら ``bind_evidence_to_comparison`` で
-  現在の relation の digest を record に記録する（relation を明示的に受け取った
-  producer は ``bind_evidence_to_relation``）。比較の外で作った record には
+  （``checker/strategy_execution.run_strategy_branch``）と、branch の結果をその結果を
+  作った比較の relation で扱う境界（``proof/obligations/stage_runner`` の gate と集約、
+  ``checker/attempts`` の完了記録）。strategy は入口で自分の relation とこの範囲の
+  relation の一致を確かめる（互換の直接呼び出しは自分の relation の範囲を開いて
+  実行し直す）。入れ子の比較は自分の relation を push し、抜けると戻る。
+* producer: proof 層は ``store_comparison_evidence`` だけで analysis に証拠を書く
+  （``test_comparison_evidence_writers`` が強制する）。比較の中で増えた record は
+  現在の relation の digest を持つ（relation を明示的に受け取った producer は先に
+  ``bind_evidence_to_relation`` で束縛してよい）。比較の外で作った record には
   「比較の外」を記録し、どの比較でも採用されない。
 * 後で実行する仕事と、その結果: worklist に積む producer / replanner は
   ``run_in_current_comparison`` で登録時の比較の relation を持ち運び、runtime は
@@ -180,6 +181,28 @@ def bind_evidence_to_comparison(record: MutableMapping[str, Any]) -> MutableMapp
 
     record[RELATION_DIGEST_KEY] = current_relation_digest() or OUTSIDE_COMPARISON
     return record
+
+
+def store_comparison_evidence(analysis: Any, records: Iterable[Any]) -> None:
+    """比較の中で ``analysis`` の証拠列を ``records`` に置き換える（proof 層の唯一の書き込み口）。
+
+    それまでの列に無かった record で relation を持たないものは、現在の比較の relation に
+    束縛する（producer が束縛を忘れても、比較の中で増えた証拠は必ず束縛される）。
+    それまでの列にあった record（analysis 層の関数単体の事実や、別の比較の証拠）は
+    そのまま残す。
+    """
+
+    existing = tuple(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
+    stored = []
+    for record in records or ():
+        if (
+            isinstance(record, MutableMapping)
+            and RELATION_DIGEST_KEY not in record
+            and record not in existing
+        ):
+            bind_evidence_to_comparison(record)
+        stored.append(record)
+    analysis.completed_recovery_proof_evidence = tuple(stored)
 
 
 def evidence_relation_binding_holds(record: Any) -> bool:

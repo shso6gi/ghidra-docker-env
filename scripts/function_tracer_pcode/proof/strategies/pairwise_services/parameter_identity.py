@@ -8,6 +8,9 @@ from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_wid
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ParameterInfo,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.model import (
+    shared_entailed_extensions,
+)
 from scripts.function_tracer_pcode.semantics.rewrite_contract import RewriteAssumption
 
 
@@ -78,32 +81,9 @@ def _impl__auxiliary_entailed_extensions_by_index(
     self,
     semantic_parameter_sources: Sequence[ParameterInfo],
 ) -> Dict[int, RewriteAssumption]:
-    """補助 query の symbol へ引き継ぐ入力 extension 仮定。
+    """補助 query の symbol へ引き継ぐ入力 extension 仮定（規則は最終 relation の model が持つ）。"""
 
-    最終 ``InputCorrespondence`` が含意した ``ParameterInfo.entailed_extension``
-    だけを使う。semantic hint（単一 use の射影主張）は入力全体の仮定ではないので
-    読まない（Issue #167）。補助 query の symbol は (index, 幅) が同じなら左右
-    どちらの parameter にもなり得るので、その (index, 幅) の **全ての** source が
-    同じ仮定を含意するときだけ引き継ぐ（片側だけの含意を他方へ持ち込まない）。
-    """
-    by_slot: Dict[Tuple[int, int], List[Optional[RewriteAssumption]]] = {}
-    for source in semantic_parameter_sources or ():
-        try:
-            slot = (int(getattr(source, "index")), int(getattr(source, "bit_width")))
-        except (TypeError, ValueError):
-            continue
-        by_slot.setdefault(slot, []).append(getattr(source, "entailed_extension", None))
-    extensions: Dict[int, RewriteAssumption] = {}
-    for (index, bit_width), assumptions in sorted(by_slot.items()):
-        first = assumptions[0]
-        if first is None or first.parameter_bits != bit_width:
-            continue
-        if any(assumption != first for assumption in assumptions):
-            continue
-        current = extensions.get(index)
-        if current is None or first.parameter_bits > current.parameter_bits:
-            extensions[index] = first
-    return extensions
+    return shared_entailed_extensions(semantic_parameter_sources)
 
 
 def _impl__apply_auxiliary_entailed_extension(

@@ -7,9 +7,9 @@ from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     UnknownReasonRecord,
     UnknownRecoveryProofKind,
-    bind_evidence_to_comparison,
     build_proof_obligation_id,
     comparison_evidence,
+    store_comparison_evidence,
 )
 
 
@@ -106,7 +106,7 @@ def _impl__record_completed_call_effect_summary_proof_if_safe(
         else "call_effect_summary_proof"
     )
     records.append(
-        bind_evidence_to_comparison({
+        {
             "object_derived": True,
             "status": "complete",
             "reason_id": reason_record.reason_id,
@@ -117,9 +117,9 @@ def _impl__record_completed_call_effect_summary_proof_if_safe(
             "proof_obligation_id": proof_obligation_id,
             "proof_source": proof_source,
             "proof_content": proof_content,
-        })
+        }
     )
-    analysis.completed_recovery_proof_evidence = tuple(records)
+    store_comparison_evidence(analysis, records)
 
 
 def _impl__iter_call_effect_blocker_candidates(

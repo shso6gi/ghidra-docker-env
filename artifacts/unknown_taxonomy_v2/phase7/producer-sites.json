@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "447a0fa7ede8c195fe6deb523f58c824981e1eb8a7ab02593d40aaf08131a8ae",
+  "manifest_digest": "8c0d8f141462231f4b1cabd3aff9aa6c48f3dcfa5427a03da9a27cf5451b784e",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 32,
   "sites": [
@@ -520,7 +520,7 @@
       "line": 129,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/method_b_closure.py",
       "producer_site_manifest_id": "pairwise-loop-guard-completed",
-      "source_sha256": "554a5e43d13c0a5f64542f9b6864112898034c1557c19b925b7ba4ea5990ab9b"
+      "source_sha256": "0795c382ad4c916d2e59de2a8ecacd9bc36d8efb21c88b64f5ddf4c2aedfac77"
     },
     {
       "allowed_dispositions": [
@@ -577,7 +577,7 @@
       "line": 85,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/method_b_closure.py",
       "producer_site_manifest_id": "pairwise-loop-term-completed",
-      "source_sha256": "554a5e43d13c0a5f64542f9b6864112898034c1557c19b925b7ba4ea5990ab9b"
+      "source_sha256": "0795c382ad4c916d2e59de2a8ecacd9bc36d8efb21c88b64f5ddf4c2aedfac77"
     },
     {
       "allowed_dispositions": [
@@ -1125,7 +1125,7 @@
       "line": 791,
       "path": "scripts/function_tracer_pcode/proof/obligations/pair_disposition.py",
       "producer_site_manifest_id": "safe-counterexample-pairwise-production",
-      "source_sha256": "baabe76a862d025e63cf8181fbda27fb5b38486a3fa066d448dadfdb1704f09a"
+      "source_sha256": "37c75c96338b5fe4b3dfe99794f33b1e687bcce6412b86e0866a6b1e60d3a425"
     },
     {
       "allowed_dispositions": [
@@ -1143,7 +1143,7 @@
       "line": 1320,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-ambiguity-completed",
-      "source_sha256": "a4fca7daeecb8f2881c787de2f47d289458398ba2e1d1f71e13add353c84a1ab"
+      "source_sha256": "80206a8005513554a446734b82711f49ddfde3be19621a8a77286661f4c497b4"
     },
     {
       "allowed_dispositions": [
@@ -1172,7 +1172,7 @@
       "line": 1299,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-ambiguity-observed",
-      "source_sha256": "a4fca7daeecb8f2881c787de2f47d289458398ba2e1d1f71e13add353c84a1ab"
+      "source_sha256": "80206a8005513554a446734b82711f49ddfde3be19621a8a77286661f4c497b4"
     },
     {
       "allowed_dispositions": [
@@ -1190,7 +1190,7 @@
       "line": 1279,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-blocker-completed",
-      "source_sha256": "a4fca7daeecb8f2881c787de2f47d289458398ba2e1d1f71e13add353c84a1ab"
+      "source_sha256": "80206a8005513554a446734b82711f49ddfde3be19621a8a77286661f4c497b4"
     },
     {
       "allowed_dispositions": [
@@ -1229,7 +1229,7 @@
       "line": 1255,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-blocker-observed",
-      "source_sha256": "a4fca7daeecb8f2881c787de2f47d289458398ba2e1d1f71e13add353c84a1ab"
+      "source_sha256": "80206a8005513554a446734b82711f49ddfde3be19621a8a77286661f4c497b4"
     },
     {
       "allowed_dispositions": [
