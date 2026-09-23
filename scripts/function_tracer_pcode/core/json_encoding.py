@@ -1095,9 +1095,9 @@ class _Walk:
         """容器（tuple / list / dict）と基底型だけから成る値を、frame を積まずに数えて写す。
 
         数え方・予算で止まる位置は一般の経路と同じ（1 要素ごとに残り予算と比べ、超えたら
-        その時点で `charge` して止まる）。基底型の subclass・record・sized leaf・source など
-        に出会ったら (False, None) を返し、呼び出し側が一般の経路で辿り直す（それまでの
-        勘定は `charge` していない）。LEGACY は tuple → 配列・dict の key をそのまま、
+        その時点で `charge` して止まる）。基底型の subclass は基底型として数える（一般の
+        経路と同じ）。record・sized leaf・source などに出会ったら (False, None) を返し、
+        呼び出し側が一般の経路で辿り直す（それまでの勘定は `charge` していない）。LEGACY は tuple → 配列・dict の key をそのまま、
         CANONICAL は dict の key を JSON の文字列にする。
 
         tuple だけから成る（不変な）部分木の byte 数は pair の間 cache する
@@ -1139,7 +1139,8 @@ class _Walk:
                     key, item = item
                     if type(key) is str:
                         text_key = key
-                    elif key is None or type(key) in (bool, int, float):
+                    elif key is None or isinstance(key, (str, int, float)):
+                        # 基底型の subclass の key も一般の経路と同じ `canonical_key`
                         text_key = policy.canonical_key(key)
                     else:
                         raise _NotPlain
@@ -1200,6 +1201,24 @@ class _Walk:
                         out, kind is dict, identity, 0, False, None,
                     ])
                     continue
+                elif isinstance(item, (str, int, float)):
+                    # 基底型の subclass（PyGhidra の Java primitive `JInt` / `JLong`、IntEnum
+                    # など）。一般の経路（`scalar`）と同じく基底型の値で数え、LEGACY はその
+                    # まま置き、CANONICAL は基底型へ直す。これを一般の経路へ落とすと、実
+                    # バイナリの値のほとんどが高速経路を外れる。tuple の cache は基底型だけの
+                    # 木に限る（cache の写しは値をそのまま置くので）。
+                    entry[5] = False
+                    if isinstance(item, str):
+                        base = str.__str__(item)
+                        total += string_bytes(base)
+                    elif isinstance(item, int):
+                        base = int(item)
+                        total += len(int.__repr__(base))
+                    else:
+                        base = float(item)
+                        total += len(_float_text(base))
+                    if canonical:
+                        item = base
                 else:
                     raise _NotPlain
                 if build:

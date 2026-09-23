@@ -425,3 +425,55 @@ def test_a_fixed_scalar_record_keeps_int_subclasses_like_the_old_to_dict():
     prepared = RESULT_JSON_POLICY.prepare(storage).value()
     assert type(prepared["register_offset"]) is int
     assert prepared == json.loads(json.dumps(legacy))
+
+
+class _JavaPrimitiveStr(str):
+    pass
+
+
+def _subclassed_payload(n):
+    return {
+        "offsets": tuple(_JavaPrimitiveInt(i) for i in range(n)),
+        "names": [_JavaPrimitiveStr(f"r{i}") for i in range(8)],
+        _JavaPrimitiveStr("k"): (_JavaPrimitiveInt(7), 1.5, "x"),
+        _JavaPrimitiveInt(3): None,
+    }
+
+
+def test_scalar_subclasses_stay_on_the_fast_path_with_the_general_path_result(monkeypatch):
+    # 実バイナリの値には Java primitive（int の subclass）が至る所にある。高速経路が
+    # それを一般の経路へ落とすと、replay（Python の int だけ）には出ない速度の退行に
+    # なる。高速経路は基底型として数え、一般の経路と同じ値・byte を返す。
+    from scripts.function_tracer_pcode.core import json_encoding as je
+
+    scalar_calls = []
+    original_scalar = je._Walk.scalar
+
+    def counting_scalar(self, item):
+        scalar_calls.append(item)
+        return original_scalar(self, item)
+
+    monkeypatch.setattr(je._Walk, "scalar", counting_scalar)
+    payload = _subclassed_payload(10_000)
+    legacy = RESULT_JSON_POLICY.materialize(payload)
+    prepared = RESULT_JSON_POLICY.prepare(payload)
+    assert len(scalar_calls) < 100  # 要素ごとに一般の経路の葉へ落ちていない
+
+    base = json.loads(json.dumps(payload, default=str))
+    assert json.loads(json.dumps(legacy)) == base
+    assert type(legacy["offsets"][0]) is _JavaPrimitiveInt  # LEGACY は値をそのまま置く
+    canonical = prepared.value()
+    assert canonical == base
+    assert type(canonical["offsets"][0]) is int and type(canonical["names"][0]) is str
+    assert prepared.encoded_bytes == len(RESULT_JSON_POLICY.dumps(canonical).encode("utf-8"))
+
+
+def test_a_tuple_with_scalar_subclasses_does_not_poison_the_canonical_cache():
+    from scripts.function_tracer_pcode.core.budget_policy import budget_policy_scope
+
+    shared = tuple(_JavaPrimitiveInt(i) for i in range(64))
+    with budget_policy_scope(BudgetPolicy()):
+        RESULT_JSON_POLICY.materialize({"a": shared})
+        RESULT_JSON_POLICY.materialize({"b": shared})
+        canonical = RESULT_JSON_POLICY.prepare({"c": shared}).value()
+    assert all(type(item) is int for item in canonical["c"])
