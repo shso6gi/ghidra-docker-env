@@ -25,6 +25,7 @@ from scripts.function_tracer_pcode.core import (
     ExpressionType,
     LocationBaseRef,
     ReturnInfo,
+    StorageInfo,
 )
 from scripts.function_tracer_pcode.analysis.effects.models import (
     CallArgumentEvidence,
@@ -544,6 +545,43 @@ def test_cyclic_expression_does_not_close():
     )
     closure = _closure(raw)
     assert _witness(closure, "return_value", "cycle")
+
+
+class _JInt(int):
+    """JPype の ``JInt`` と同じく int の派生型（Ghidra 由来の leaf の index）。"""
+
+
+def test_ghidra_int_subclass_index_is_still_the_parameter():
+    """subset で見つけた fail-open の回帰: leaf の index が int 派生型で、storage の表現が
+    descriptor と違っても、同じ parameter の occurrence として数える。
+
+    修正前は ``type(value) is int`` で index を読み飛ばし、storage key の比較で
+    「別 parameter」と判定して closure が空虚に成立した（SEMANTIC_PROJECTION(16)
+    になり、確認済み等価の pair が NOT_EQ になった）。
+    """
+
+    leaf_storage = StorageInfo(
+        is_register=True, space_name="register", offset=0x4000, size=4, size_bits=32,
+        register_name="w0", base_register_name="x0", base_register_size_bits=64,
+    )
+    left_x = Expression(ExpressionType.PARAMETER, name="param_1", value=_JInt(0), size=4, storage_info=leaf_storage)
+    right_x = Expression(ExpressionType.PARAMETER, name="param_1", value=_JInt(0), size=4)
+    descriptor = _desc("param_1", 4, storage={"is_register": True, "space_name": "register", "offset": 16384,
+                                              "size": 4, "size_bits": 32, "register_name": "w0"})
+    left = _analysis("foo", [descriptor], [_ret(_bin("INT_MULT", left_x, _const(3, 4), 4))])
+    right = _analysis("foo", [_desc("param_1", 4)], [_ret(_bin("INT_MULT", right_x, _const(3, 4), 4))])
+
+    assert not scan_projection_closure(left, 0, 32, 16).closed
+    (item,) = build_input_correspondence_set(left, right).correspondences
+    assert item.kind is InputRelationKind.FULL_REGISTER_EQUALITY
+
+
+def test_parameter_leaf_matches_by_name_when_index_disagrees():
+    """lowering は名前で束縛するので、index が食い違っても名前が同じなら occurrence。"""
+
+    stale = Expression(ExpressionType.PARAMETER, name="x", value=5, size=8)
+    analysis = _analysis("f", [_desc("x", 8)], [_ret(_const(0, 4), _bin("INT_EQUAL", stale, _const(0, 8), 1))])
+    assert _witness(_closure(analysis), "path_condition", "bare_parameter")
 
 
 def test_closure_is_decided_per_width():

@@ -482,9 +482,9 @@ class SemanticWidthNormalizer:
 
     def _parameter_assumption(self, expr: Expression) -> Optional[RewriteAssumption]:
         value = getattr(expr, "value", None)
-        if type(value) is not int or value < 0:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return None
-        return self.authorization.assumption_for(value, expr.get_bit_width())
+        return self.authorization.assumption_for(int(value), expr.get_bit_width())
 
     def _split_mask_expr(self, expr: Expression):
         left, right = expr.operands

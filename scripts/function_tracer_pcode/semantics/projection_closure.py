@@ -116,21 +116,40 @@ def _node_label(node: Any) -> str:
     return f"{kind}:{detail}" if detail else str(kind)
 
 
-def _parameter_occurrence(node: Any, target: _ParameterTarget) -> Optional[str]:
-    """PARAMETER node が target か。``"match"`` / ``"other"`` / ``"unknown"``."""
+def _integer(value: Any) -> Optional[int]:
+    """Python int と、Ghidra 由来の int 派生型（JPype の ``JInt`` / ``JLong``）を同じに扱う。"""
 
-    value = getattr(node, "value", None)
-    if type(value) is int and value >= 0:
-        return "match" if value == target.index else "other"
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return int(value)
+
+
+def _parameter_occurrence(node: Any, target: _ParameterTarget) -> Optional[str]:
+    """PARAMETER node が target か。``"match"`` / ``"other"`` / ``"unknown"``.
+
+    SMT への lowering は leaf を index で parameter 表に揃えてから名前で束縛する
+    ので、index・storage・名前の **どれか 1 つでも** target と一致すれば target の
+    occurrence とみなす（取り逃すと closure が空虚に成立する）。どれも一致せず、
+    比べられた属性があるときだけ別 parameter とする。
+    """
+
+    compared = False
+    index = _integer(getattr(node, "value", None))
+    if index is not None and index >= 0:
+        compared = True
+        if index == target.index:
+            return "match"
     storage_key = _storage_identity_key(getattr(node, "storage_info", None))
     if storage_key is not None and target.storage_key is not None:
-        return "match" if storage_key == target.storage_key else "other"
-    # index も storage も無い leaf は SMT への lowering（symbol replacer）と同じく
-    # 名前で解決する。
+        compared = True
+        if storage_key == target.storage_key:
+            return "match"
     name = getattr(node, "name", None)
     if name and target.name:
-        return "match" if name == target.name else "other"
-    return "unknown"
+        compared = True
+        if name == target.name:
+            return "match"
+    return "other" if compared else "unknown"
 
 
 def _variable_aliases_target(node: Any, target: _ParameterTarget) -> Optional[str]:
@@ -353,11 +372,11 @@ def _store_destination_witness(location: Any, target: _ParameterTarget) -> Optio
         return None
     if kind != "parameter":
         return ("store_destination_unknown", str(kind))
-    index = getattr(base, "parameter_index", None)
-    if type(index) is int:
-        return ("store_destination_parameter_base", f"param_{index}") if index == target.index else None
+    index = _integer(getattr(base, "parameter_index", None))
     name = getattr(base, "parameter_name", None)
-    if name and target.name and name != target.name:
+    if index == target.index or (name and name == target.name):
+        return ("store_destination_parameter_base", f"param_{target.index}")
+    if index is not None or (name and target.name):
         return None
     return ("store_destination_alias_unknown", str(name))
 
