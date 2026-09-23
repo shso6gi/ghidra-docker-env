@@ -1595,11 +1595,14 @@ def scalar_record_dict(record: Any) -> dict:
     返さない record（`StorageInfo` など）だけが使う。大きさは field の数と scalar の
     長さで決まり、入力に比例して育たない。scalar 以外が来たら `TypeError`（schema の
     誤り。`tests/unit/test_architecture_boundaries.py` が該当 class を固定する）。
+
+    scalar の subclass（PyGhidra の Java primitive `JInt` / `JLong` など）は旧
+    `to_dict()` と同じくそのまま置く（LEGACY）。出力では walker が基底型へ直す。
     """
 
     out = {}
     for key, value in record.json_items():
-        if value is not None and type(value) not in _SCALAR_TYPES:
+        if value is not None and not isinstance(value, _SCALAR_TYPES):
             raise TypeError(
                 f"{type(record).__qualname__}.{key} is not a scalar; use materialize()"
             )
@@ -1607,7 +1610,7 @@ def scalar_record_dict(record: Any) -> dict:
     return out
 
 
-_SCALAR_TYPES = frozenset({bool, int, float, str})
+_SCALAR_TYPES = (bool, int, float, str)
 
 
 #: 解析 1 件分の直列化の外で呼ばれた record の `to_dict()` を数える観測点。

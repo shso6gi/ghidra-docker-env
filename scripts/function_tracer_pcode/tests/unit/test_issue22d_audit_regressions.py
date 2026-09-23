@@ -404,3 +404,24 @@ def test_the_cli_envelope_step_turns_a_violation_into_the_error_result(monkeypat
             func_name1="f", func_name2="f", start_time=0.0,
         )
     assert len(emitted) == 1 and str(emitted[0]) == "too big"
+
+
+class _JavaPrimitiveInt(int):
+    """PyGhidra（JPype）の Java primitive（`JInt` / `JLong`）は `int` の subclass。"""
+
+
+def test_a_fixed_scalar_record_keeps_int_subclasses_like_the_old_to_dict():
+    # 実バイナリでは `tracer_storage` が `reg.getOffset()`（Java primitive）を構築後に
+    # 代入する。固定形の scalar record は、旧 `to_dict()` と同じくその値をそのまま置き、
+    # 出力（CANONICAL）では基底型へ直す。exact type で比べて落としてはいけない。
+    from scripts.function_tracer_pcode.core.storage import StorageInfo
+
+    storage = StorageInfo(is_register=True, space_name="register", offset=8, size=8,
+                          register_name="x1")
+    storage.register_offset = _JavaPrimitiveInt(8)
+    legacy = storage.to_dict()
+    assert legacy["register_offset"] == 8
+    assert type(legacy["register_offset"]) is _JavaPrimitiveInt
+    prepared = RESULT_JSON_POLICY.prepare(storage).value()
+    assert type(prepared["register_offset"]) is int
+    assert prepared == json.loads(json.dumps(legacy))
