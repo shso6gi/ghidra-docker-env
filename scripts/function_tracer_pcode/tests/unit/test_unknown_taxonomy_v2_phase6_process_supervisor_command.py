@@ -119,7 +119,7 @@ def test_launch_is_durable_before_the_child_body_and_bundleless_exit_is_error(tm
         assert run.projection["authority_kind"] == "DurableErrorFinalizationBundle"
         assert run.projection["child_exit_disposition"] == "EXIT_CODE_3"
         assert run.projection["child_returncode"] == 3
-        classified = classify(case)
+        classified = classify(run)
         assert classified["canonical_outcome"] == "ERROR"
         assert classified["classification_valid"] is True
         assert classified["error_kind"] == "operational_authority_invalid"
@@ -142,7 +142,7 @@ def test_runner_mode_does_not_resolve_a_child_exit_without_a_canonical_result(tm
         assert run.projection["child_returncode"] == 0
         assert not run.store.has("canonical-resolved-receipt.json")
         with pytest.raises(ValueError, match="not a terminal authority"):
-            classify(case)
+            classify(run)
 
 
 @pytest.mark.parametrize(
@@ -171,7 +171,7 @@ def test_deadline_without_a_checkpoint_is_a_durable_timeout(
         assert run.projection["authority_kind"] == "DurableTimeoutFinalizationBundle"
         assert run.projection["child_exit_disposition"] == disposition
         assert run.projection["child_returncode"] == returncode
-        classified = classify(case)
+        classified = classify(run)
         assert classified["canonical_outcome"] == "TIMEOUT"
         assert classified["classification_valid"] is True
         assert classified["supervisor_status"] == "TIMEOUT"
@@ -207,7 +207,7 @@ def test_child_canonical_timeout_is_resolved_by_the_supervisor_and_classified_ti
         assert projection["canonical_outcome"] == "TIMEOUT"
         assert projection["child_returncode"] == timeout_code
 
-        classified = classify(case)
+        classified = classify(run)
         assert classified["canonical_outcome"] == "TIMEOUT"
         assert classified["classification_valid"] is True
         assert classified["supervisor_status"] == "RESOLVED"
@@ -258,7 +258,7 @@ def test_child_canonical_unknown_is_resolved_and_classified_unknown(tmp_path):
         assert run.projection["authority_kind"] == RESOLVED_KIND
         assert run.projection["canonical_outcome"] == "UNKNOWN"
         assert run.projection["child_returncode"] == CLI_EXIT_CODE_BY_OUTCOME[Outcome.UNKNOWN]
-        classified = classify(case)
+        classified = classify(run)
         assert classified["canonical_outcome"] == "UNKNOWN"
         assert classified["classification_valid"] is True
         bundle = _envelope(case)["canonical_result_payload"][
@@ -297,7 +297,7 @@ def test_corrupt_canonical_envelope_fails_closed(tmp_path, field, reseal):
         assert run.projection["error_code"] == "CANONICAL_CHILD_RESULT_INVALID"
         assert not run.store.has("canonical-resolved-receipt.json")
         with pytest.raises(ValueError, match="not a terminal authority"):
-            classify(case)
+            classify(run)
 
         # restart しても壊れた envelope は canonical RESOLVED にならず、分類も
         # 通らない。restart が projection に何を書くか（decompile checkpoint の
@@ -309,4 +309,4 @@ def test_corrupt_canonical_envelope_fails_closed(tmp_path, field, reseal):
         with pytest.raises(
             ValueError, match="canonical result envelope|not a terminal authority",
         ):
-            classify(case)
+            classify(restarted)

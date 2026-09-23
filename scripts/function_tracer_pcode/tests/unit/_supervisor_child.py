@@ -9,8 +9,8 @@ API だけで実行する。
 * 最初に **launch-before-exec** を child 自身が確かめる: ``launch.json`` が
   既に durable で、``ProcessWorkerRuntime.from_environment()``（署名・PID・
   start token の検証）が通ること。通らなければ本処理に入らず
-  ``LAUNCH_EVIDENCE_EXIT`` で終わる。通れば観測を records へ書く（parent は
-  それを ``launch.json`` / projection と突き合わせる）。
+  ``LAUNCH_EVIDENCE_EXIT`` で終わる。通れば観測をこの child の記録へ書く
+  （parent は、child を起こした invocation の記録と突き合わせる）。
 * step は ``STEP_HANDLERS`` に 1 つずつ登録する。checkpoint は production の
   decompilation broker、canonical 結果は production connector と
   ``build_canonical_result_finalization_bundle`` / ``persist_canonical_result_envelope``
@@ -34,18 +34,19 @@ from typing import Any, Callable, Mapping, Optional
 
 from scripts.function_tracer_pcode.tests.unit._supervisor_faults import (
     Fault,
-    install_file_faults,
+    install_publication_faults,
     stop_here,
+)
+from scripts.function_tracer_pcode.tests.unit._supervisor_records import (
+    ChildRecords,
+    HarnessRecords,
+    write_json,
 )
 
 MODULE = "scripts.function_tracer_pcode.tests.unit._supervisor_child"
 #: harness が予約する exit code（CLI の 0-4 / supervisor の 124 / crash の 86 と別）。
 LAUNCH_EVIDENCE_EXIT = 87
 FIXTURE_FAILURE_EXIT = 88
-
-
-def launch_evidence_path(records: Path, pid: int) -> Path:
-    return Path(records) / f"launch-evidence-{pid}.json"
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +129,7 @@ class FixtureFailure(Exception):
     """child の前提・事後条件が崩れた（harness の設定誤りを黙って通さない）。"""
 
 
-def _prove_launch_before_exec(records: Path) -> Any:
+def _prove_launch_before_exec(records: ChildRecords) -> Any:
     from scripts.function_tracer_pcode.authority.process.supervisor_command import (
         CHILD_ENV_LAUNCH,
     )
@@ -160,17 +161,17 @@ def _prove_launch_before_exec(records: Path) -> Any:
         "launch_child_start_token": runtime.launch.payload["child_start_token"],
         "state_present_at_start": (runtime.store.directory / "state.json").exists(),
     }
-    path = launch_evidence_path(records, os.getpid())
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+    write_json(records.launch_evidence, evidence)
     return runtime
 
 
 class _ChildContext:
-    def __init__(self, spec: Mapping[str, Any], runtime: Any) -> None:
+    def __init__(
+        self, spec: Mapping[str, Any], runtime: Any, records: ChildRecords,
+    ) -> None:
         self.spec = spec
         self.runtime = runtime
-        self.records = Path(spec["records"])
+        self.records = records
         self.connector: Any = None
         self._session: Any = None
         self.decompiled = 0
@@ -413,18 +414,19 @@ STEP_HANDLERS: dict[str, Callable[[_ChildContext, Mapping[str, Any]], None]] = {
 
 def main(arguments: list[str]) -> int:
     spec = json.loads(arguments[0])
-    records = Path(spec["records"])
+    records = HarnessRecords(Path(spec["records"])).child(os.getpid())
     runtime = _prove_launch_before_exec(records)
     from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         RESULT_ENTRY_OCCURRENCE_NONCE_ENV,
     )
 
     os.environ[RESULT_ENTRY_OCCURRENCE_NONCE_ENV] = spec["occurrence_nonce"]
-    install_file_faults(
+    install_publication_faults(
         [Fault.from_json(item) for item in spec["faults"]],
-        role="child", store_directory=runtime.store.directory, records=records,
+        role="child", store_directory=runtime.store.directory, projection=None,
+        sink=records.faults, child=records,
     )
-    context = _ChildContext(spec, runtime)
+    context = _ChildContext(spec, runtime, records)
     try:
         for step in spec["steps"]:
             STEP_HANDLERS[step["step"]](context, step)

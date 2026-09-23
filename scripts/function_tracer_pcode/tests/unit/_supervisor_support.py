@@ -9,16 +9,27 @@ test が import する入口はこの module だけ（下の module を直接 im
 ================================  =============================================
 鍵・identity・config              ``supervisor_keys`` / ``supervisor_identity`` /
 （config field / identity 規則）  ``supervisor_config``（本 module）
-case の配置                       ``supervisor_case``（context manager、本 module）
-supervisor の起動・再起動・後始末 ``_supervisor_process``
-（起動方式 / 孤児の扱い）         （``run_supervisor`` / ``restart_supervisor`` /
+case（pair の寿命の資源）         ``supervisor_case``（context manager、本 module）
+invocation（1 回の起動の寿命）    ``_supervisor_process``（``run_supervisor`` /
+（起動方式 / 並行起動 / 孤児）    ``restart_supervisor`` / ``SupervisorRun`` /
                                   ``terminate_leftover_workers``）
+run identity と記録の置き場所     ``_supervisor_records``（唯一の定義）
 worker child が何をするか         ``_supervisor_child``（``ChildScript`` と step、
 （checkpoint / canonical outcome）  outcome は ``OUTCOME_DRIVERS`` に 1 つずつ）
 停止点（crash / stop / deadline） ``_supervisor_faults``（durable file の公開境界）
 durable store の観測              ``_supervisor_store``
-分類                              ``classify`` → production の ``classify_pair_status``
+分類                              ``classify(run)`` → production の ``classify_pair_status``
 ================================  =============================================
+
+寿命の契約:
+
+* ``SupervisorCase`` は pair にまたがる資源（config、durable store、pair log、
+  harness の記録 root）だけを持つ。「ある invocation が観測した値」は持たない。
+* ``SupervisorRun`` は 1 回の invocation だけの immutable な観測で、開始時に
+  確保した ``SupervisorInvocationId`` に束縛される。別 invocation の値を
+  継承しない（詳細は ``_supervisor_process``）。
+* 分類は run を名指す。その run が公開した projection を、その run が終わった
+  時点の store / pair log と組にして production の分類器へ渡す。
 
 harness は「状態を作る・観測する」だけで、何を期待するかは test が持つ。
 supervisor の判定・store の検証・分類は production をそのまま呼び、ここで
@@ -39,13 +50,13 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_child import (
     Envelope,
     Exit,
     Stop,
-    launch_evidence_path,
 )
 from scripts.function_tracer_pcode.tests.unit._supervisor_faults import (
     ChildStopped,
     Deadline,
     Fault,
     FileBoundary,
+    ProjectionWrite,
     crash_at,
     stop_at,
 )
@@ -57,16 +68,27 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_process import (
     terminate_leftover_workers,
     worker_alive,
 )
-from scripts.function_tracer_pcode.tests.unit._supervisor_store import StoreSnapshot
+from scripts.function_tracer_pcode.tests.unit._supervisor_records import (
+    HarnessRecords,
+    SupervisorInvocationId,
+    read_json,
+    sha256_of,
+)
+from scripts.function_tracer_pcode.tests.unit._supervisor_store import (
+    StoreSnapshot,
+    inspect_store,
+)
 
 __all__ = (
     "REPO_ROOT", "SupervisorKeys", "SupervisorIdentity", "SupervisorCase",
-    "SupervisorRun", "SupervisorRaised", "supervisor_keys", "supervisor_identity",
-    "supervisor_config", "supervisor_case", "run_supervisor", "restart_supervisor",
-    "worker_alive", "terminate_leftover_workers", "classify", "StoreSnapshot",
+    "SupervisorRun", "SupervisorRaised", "SupervisorInvocationId",
+    "NoProjectionToClassify", "StaleRunObservation", "supervisor_keys",
+    "supervisor_identity", "supervisor_config", "supervisor_case",
+    "run_supervisor", "restart_supervisor", "worker_alive",
+    "terminate_leftover_workers", "classify", "launch_evidence", "StoreSnapshot",
     "ChildScript", "Checkpoint", "Envelope", "Exit", "Stop", "Fault",
-    "FileBoundary", "ChildStopped", "Deadline", "crash_at", "stop_at",
-    "LAUNCH_EVIDENCE_EXIT", "launch_evidence_path",
+    "FileBoundary", "ProjectionWrite", "ChildStopped", "Deadline", "crash_at",
+    "stop_at", "LAUNCH_EVIDENCE_EXIT",
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -181,6 +203,8 @@ def supervisor_config(
 
 @dataclass(frozen=True)
 class SupervisorCase:
+    """pair 1 つ分の、複数の invocation にまたがる資源。"""
+
     directory: Path
     keys: SupervisorKeys
     identity: SupervisorIdentity
@@ -191,9 +215,9 @@ class SupervisorCase:
         return self.directory / "pair.log"
 
     @property
-    def records(self) -> Path:
+    def records(self) -> HarnessRecords:
         """harness だけが読み書きする記録（production は読まない）。"""
-        return self.directory / "harness"
+        return HarnessRecords(self.directory / "harness")
 
     @property
     def store_directory(self) -> Path:
@@ -213,14 +237,14 @@ def supervisor_case(
     """
 
     directory = Path(directory)
-    records = directory / "harness"
-    records.mkdir(parents=True, exist_ok=True)
+    records = HarnessRecords(directory / "harness")
+    records.root.mkdir(parents=True, exist_ok=True)
     identity = supervisor_identity(case)
     command = (
         child.command(
             case_payload=identity.case_payload,
             occurrence_nonce=identity.occurrence_nonce,
-            records=records,
+            records=records.root,
         )
         if isinstance(child, ChildScript) else tuple(child)
     )
@@ -246,16 +270,37 @@ def supervisor_case(
 # ---------------------------------------------------------------------------
 
 
-def classify(case: SupervisorCase) -> Mapping[str, Any]:
-    """runner が使う production の分類器をそのまま呼ぶ（失敗は例外のまま返す）。"""
+class NoProjectionToClassify(AssertionError):
+    """分類しようとした invocation は projection を公開していない。"""
+
+
+class StaleRunObservation(AssertionError):
+    """その invocation のあとで durable store か pair log が変わっている。"""
+
+
+def classify(run: SupervisorRun) -> Mapping[str, Any]:
+    """``run`` を runner と同じ production の分類器で分類する（失敗は例外のまま返す）。
+
+    分類器へ渡す projection は ``run`` 自身が公開した bytes で、case の
+    ``authority_output`` のいまの値ではない。store と pair log はその run が
+    終わった時点のままでなければならない（あとの invocation や test が変えて
+    いれば ``StaleRunObservation``）。
+    """
 
     from scripts.function_tracer_pcode.authority.decision.canonical_result import (
         classify_pair_status,
     )
 
+    case = run.case
+    if run.projection is None:
+        raise NoProjectionToClassify(f"{run.invocation} published no projection")
+    if inspect_store(case.store_directory).digests != run.store.digests:
+        raise StaleRunObservation(f"the durable store changed after {run.invocation}")
+    if sha256_of(case.pair_log) != run.pair_log_sha256:
+        raise StaleRunObservation(f"the pair log changed after {run.invocation}")
     config = case.config
     return classify_pair_status(
-        case.pair_log, config.authority_output,
+        case.pair_log, run.records.projection,
         checkpoint_root=config.checkpoint_root,
         execution_nonce=config.execution_nonce,
         supervisor_signing_key_id=config.supervisor_signing_key_id,
@@ -263,3 +308,9 @@ def classify(case: SupervisorCase) -> Mapping[str, Any]:
         worker_signing_key_id=config.worker_signing_key_id,
         worker_signing_key_file=config.worker_signing_key_file,
     )
+
+
+def launch_evidence(case: SupervisorCase, pid: int) -> Optional[Mapping[str, Any]]:
+    """PID の worker が本処理の前に書いた launch の観測（書かなければ None）。"""
+
+    return read_json(case.records.child(pid).launch_evidence)

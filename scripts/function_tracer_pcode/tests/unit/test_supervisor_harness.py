@@ -2,9 +2,15 @@
 """Issue #163: 共有 supervisor harness 自身の契約。
 
 harness は #165（authority / recovery / crash 境界）の test が状態を**作る**
-ための基盤なので、「名指した durable 境界で本当に止まる」「supervisor の
-crash 後に restart できる」「孤児になった worker を必ず止める」「launch の無い
-child は本処理に入らない」を実 process で固定する。
+ための基盤なので、次のことを実 process で固定する。
+
+* 名指した durable 境界で本当に止まる。
+* supervisor の crash 後に restart できる。
+* 孤児になった worker を必ず止める。
+* launch の無い child は本処理に入らない。
+* ``SupervisorRun`` は 1 回の invocation だけの観測で、crash / restart を
+  挟んでも別 invocation の値（barrier 観測・projection・停止点・分類の対象）を
+  引き継がない。
 
 ここでは supervisor がその状態から**どう判定すべきか**は固定しない（それは
 #165 の test の責務で、harness に期待値を埋め込まない）。
@@ -36,9 +42,13 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
     Deadline,
     Exit,
     FileBoundary,
+    NoProjectionToClassify,
+    ProjectionWrite,
+    StaleRunObservation,
     Stop,
+    classify,
     crash_at,
-    launch_evidence_path,
+    launch_evidence,
     restart_supervisor,
     run_supervisor,
     stop_at,
@@ -139,9 +149,9 @@ def test_worker_orphaned_by_a_supervisor_crash_is_stopped_when_the_case_closes(t
         with supervisor_case(tmp_path, ChildScript((Stop(),))) as case:
             run = run_supervisor(case, faults=(crash_at(ChildStopped()),))
             assert run.crashed is True
-            assert worker_alive(case), "the crash should have orphaned the worker"
+            assert worker_alive(run), "the crash should have orphaned the worker"
             raise RuntimeError("test body failed")
-    assert not worker_alive(case)
+    assert not worker_alive(run)
 
 
 def _worker_environment(case):
@@ -172,19 +182,116 @@ def test_the_child_does_not_run_without_a_launch_that_names_it(tmp_path):
     with supervisor_case(tmp_path, ChildScript((Exit(0),))) as case:
         finished = run_supervisor(case)
         assert finished.launch_evidence is not None
-        evidence = set(case.records.glob("launch-evidence-*.json"))
-        assert evidence == {
-            launch_evidence_path(case.records, finished.launch_evidence["pid"])
-        }
+        assert launch_evidence(case, finished.child.pid) == finished.launch_evidence
 
         bare = {
             key: value for key, value in os.environ.items()
             if not key.startswith("UNKNOWN_TAXONOMY_V2_")
         }
         for environment in (bare, _worker_environment(case)):
-            process = subprocess.run(
+            process = subprocess.Popen(
                 case.config.child_command, cwd=REPO_ROOT, env=environment,
-                capture_output=True, timeout=120,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
-            assert process.returncode == LAUNCH_EVIDENCE_EXIT, process.stderr
-            assert set(case.records.glob("launch-evidence-*.json")) == evidence
+            _, stderr = process.communicate(timeout=120)
+            assert process.returncode == LAUNCH_EVIDENCE_EXIT, stderr
+            assert launch_evidence(case, process.pid) is None
+
+
+# ---------------------------------------------------------------------------
+# run identity と寿命: SupervisorRun は 1 回の invocation だけの観測
+# ---------------------------------------------------------------------------
+
+
+def test_a_restart_does_not_inherit_the_barrier_observation_of_a_crashed_run(tmp_path):
+    with supervisor_case(tmp_path, ChildScript((Stop(),))) as case:
+        first = run_supervisor(
+            case, deadline=Deadline.AT_CHILD_STOP,
+            faults=(crash_at(FileBoundary("claimed.json")),),
+        )
+        assert first.crashed is True
+        assert first.launch_durable_at_barrier_release is True
+        assert first.child is not None and first.launch_evidence is not None
+
+        restarted = restart_supervisor(case)
+        assert restarted.invocation != first.invocation
+        # restart は barrier も worker も持たない。crash した run の値を読まない。
+        assert restarted.launch_durable_at_barrier_release is None
+        assert restarted.child is None
+        assert restarted.launch_evidence is None
+        assert restarted.store_at_child_stop is None
+        assert restarted.faults_fired == ()
+
+
+def test_a_run_that_crashes_before_projecting_reports_no_projection(tmp_path):
+    """前の invocation の projection が残っていても、それを今の run の結果にしない。"""
+
+    with supervisor_case(tmp_path, ChildScript((Exit(3),))) as case:
+        first = run_supervisor(case)
+        assert first.projection is not None
+        assert case.config.authority_output.exists()
+
+        crashed = restart_supervisor(case, faults=(crash_at(ProjectionWrite()),))
+        assert crashed.crashed is True
+        assert [entry["point"] for entry in crashed.faults_fired] == [
+            ProjectionWrite().describe()
+        ]
+        assert crashed.projection is None
+        # case の projection file はまだ前の invocation のもの（それを返さない）。
+        left_behind = json.loads(case.config.authority_output.read_text(encoding="utf-8"))
+        assert left_behind["projection_digest"] == first.projection["projection_digest"]
+
+
+def test_every_invocation_has_its_own_identity_and_records(tmp_path):
+    """crash -> crash -> restart でも identity と記録が衝突しない。"""
+
+    with supervisor_case(tmp_path, ChildScript((Stop(),))) as case:
+        first = run_supervisor(
+            case, deadline=Deadline.AT_CHILD_STOP,
+            faults=(crash_at(FileBoundary("state.json", occurrence=2)),),
+        )
+        second = restart_supervisor(case, faults=(crash_at(FileBoundary("timeout.json")),))
+        third = restart_supervisor(case)
+        runs = (first, second, third)
+        assert [run.crashed for run in runs] == [True, True, False]
+        assert len({run.invocation for run in runs}) == 3
+        assert first.invocation < second.invocation < third.invocation
+        assert [run.launch_durable_at_barrier_release for run in runs] == [True, None, None]
+        assert [[entry["point"] for entry in run.faults_fired] for run in runs] == [
+            ["after:state.json#2"], ["after:timeout.json#1"], [],
+        ]
+        assert [run.projection is None for run in runs] == [True, True, False]
+        assert [run.exit_code for run in runs][:2] == [None, None]
+
+
+def test_classification_names_the_run_it_classifies(tmp_path):
+    """分類の対象は run。別の run の projection で代わりに分類しない。"""
+
+    with supervisor_case(tmp_path, ChildScript((Exit(3),))) as case:
+        first = run_supervisor(case)
+        first_status = classify(first)
+        assert first_status["canonical_outcome"] == "ERROR"
+        assert first_status["classification_valid"] is True
+
+        crashed = restart_supervisor(case, faults=(crash_at(ProjectionWrite()),))
+        with pytest.raises(NoProjectionToClassify, match=str(crashed.invocation)):
+            classify(crashed)
+
+        restarted = restart_supervisor(case)
+        assert restarted.projection is not None
+        restarted_status = classify(restarted)
+        assert restarted_status["supervisor_projection_digest"] == (
+            restarted.projection["projection_digest"]
+        )
+        assert restarted_status["canonical_outcome"] == "ERROR"
+        # 2 つの run の projection は別物（restart は child の rc を持たない）で、
+        # 前の run を分類し直しても後の run の projection を使わない。
+        assert restarted.projection["projection_digest"] != first.projection["projection_digest"]
+        assert classify(first)["supervisor_projection_digest"] == (
+            first.projection["projection_digest"]
+        )
+
+        # あとで durable store が変われば、どの run の観測も分類の根拠にしない。
+        (case.store_directory / "state.json").write_text("{}", encoding="utf-8")
+        with pytest.raises(StaleRunObservation, match=str(restarted.invocation)):
+            classify(restarted)
