@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Issue #167: MIPS64 Phase 4-B の ABI retry の UNSAT は最終 EQ authority に届かない。
+"""Issue #167: MIPS64 Phase 4-B の ABI retry の UNSAT / SAT は最終 EQ / NOT_EQ authority に届かない。
 
 Phase 4-B（``checker/abi_retry.py``）は SAT model・usage hint・宣言型から
 ``(= wide (ext (extract narrow)))`` を足して solver を直接呼ぶ。この入力仮定は
@@ -97,6 +97,29 @@ def test_abi_retry_unsat_is_only_a_legacy_verdict_without_comparison_authority()
     assert getattr(result, "_prepared_dispatch_frame", None) is None
 
 
+class _SatRunner:
+    def run_parallel(self, _query, **_kwargs):
+        model = {"param_1_1": 0, "param_1_2": 0}
+        return ParallelResult(results=[SolverResult("fake", SolverStatus.SAT, elapsed_time=0.01, model=model)])
+
+    run_sequential = run_parallel
+
+
+def test_abi_retry_sat_is_only_a_legacy_verdict_without_counterexample_authority():
+    """NOT_EQ 側: retry の SAT も legacy の ``is_equivalent=False`` に留まり、
+    comparison receipt も dispatch frame も持たない（SAFE_COUNTEREXAMPLE の出所にならない）。
+    """
+
+    checker = EquivalenceChecker(debug=False)
+    checker.solver_runner = _SatRunner()
+
+    result = checker._retry_with_abi_constraints(_context(), {"param_1_1": ("signed", 32)}, retry_count=1)
+
+    assert result.is_equivalent is False
+    assert getattr(result, "comparison_execution_receipt", None) is None
+    assert getattr(result, "_prepared_dispatch_frame", None) is None
+
+
 def _python_sources():
     for path in sorted(PACKAGE.rglob("*.py")):
         if "tests" in path.relative_to(PACKAGE).parts:
@@ -136,6 +159,11 @@ def test_only_the_prepared_frame_stage_runner_issues_non_identical_eq_closure():
             "EQ_CLOSURE",
             "PreparedDispatchFrame",
             "issue_builtin_comparison_receipt",
+            # NOT_EQ 側の decisive proof（SAFE_COUNTEREXAMPLE）の発行経路。
+            "SafeCounterexampleProductionSignal",
+            "complete_observed_sat_safety_for_counterexample",
+            "DecisiveProofReceipt",
+            "COUNTEREXAMPLE",
         }, module
 
 
@@ -154,7 +182,7 @@ def test_final_decision_without_eq_closure_is_never_equivalent():
     for active in (False, True):
         harness, projection = _projection(with_active_sat_safety_cause=active)
         receipt = finalize_decision(FinalizationAuthority(harness.identity.result_occurrence_id, projection))
-        assert receipt.outcome is not Outcome.EQUIVALENT
+        assert receipt.outcome not in {Outcome.EQUIVALENT, Outcome.NOT_EQ}
         assert receipt.outcome is (Outcome.UNKNOWN if active else Outcome.ERROR)
 
 

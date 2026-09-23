@@ -689,7 +689,7 @@ def _relation_for_pair(
         if hidden:
             return InputCorrespondence(
                 left, right, InputRelationKind.FULL_REGISTER_EQUALITY, "R4", left.bit_width, (), False,
-                ("hidden_register_alias", *hidden),
+                ("hidden_input", *hidden),
             )
         return InputCorrespondence(
             left, right, InputRelationKind.FULL_REGISTER_EQUALITY, "R4", left.bit_width, (), True, (),
@@ -701,7 +701,7 @@ def _relation_for_pair(
     if hidden:
         return InputCorrespondence(
             left, right, InputRelationKind.WIDTH_OVERLAP, "R5", min_bits, (), False,
-            ("hidden_register_alias", *hidden),
+            ("hidden_input", *hidden),
         )
     if closed:
         return InputCorrespondence(

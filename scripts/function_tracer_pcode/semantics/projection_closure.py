@@ -47,29 +47,49 @@ from scripts.function_tracer_pcode.semantics.semantic_width import (
 
 
 @dataclass(frozen=True)
+class _ParameterEntry:
+    """parameter 表の 1 行の identity（index・名前・storage）。"""
+
+    index: Optional[int]
+    name: Optional[str]
+    storage_key: Optional[Tuple[object, ...]]
+
+
+@dataclass(frozen=True)
 class _ParameterTarget:
     index: int
     bit_width: int
     name: Optional[str]
     storage_key: Optional[Tuple[object, ...]]
     storage: Any
+    #: 同じ表の他の parameter。leaf が「別 parameter」だと言えるのは、この
+    #: どれかに解決できたときだけ（どこにも解決しない leaf は identity 不明）。
+    others: Tuple[_ParameterEntry, ...] = ()
+
+
+def _parameter_entry(descriptor: Any) -> Tuple[_ParameterEntry, Any]:
+    try:
+        index = int(descriptor.get("index"))
+    except (TypeError, ValueError, AttributeError):
+        index = None
+    getter = getattr(descriptor, "get", None)
+    storage = _coerce_storage_info(getter("storage_info", getter("storage"))) if callable(getter) else None
+    name = getter("name") if callable(getter) else None
+    return _ParameterEntry(index, name or None, _storage_identity_key(storage)), storage
 
 
 def _parameter_target(analysis: Any, parameter_index: int, parameter_bits: int) -> Optional[_ParameterTarget]:
-    for descriptor in getattr(analysis, "parameters", None) or ():
-        try:
-            index = int(descriptor.get("index"))
-        except (TypeError, ValueError, AttributeError):
+    entries = [_parameter_entry(descriptor) for descriptor in getattr(analysis, "parameters", None) or ()]
+    for position, (entry, storage) in enumerate(entries):
+        if entry.index != parameter_index:
             continue
-        if index != parameter_index:
-            continue
-        storage = _coerce_storage_info(descriptor.get("storage_info", descriptor.get("storage")))
         return _ParameterTarget(
-            index=index,
+            index=entry.index,
             bit_width=int(parameter_bits),
-            name=descriptor.get("name"),
-            storage_key=_storage_identity_key(storage),
+            name=entry.name,
+            storage_key=entry.storage_key,
             storage=storage,
+            others=tuple(other for at, (other, _storage) in enumerate(entries) if at != position),
         )
     return None
 
@@ -79,11 +99,14 @@ def _parameter_target(analysis: Any, parameter_index: int, parameter_bits: int) 
 # ---------------------------------------------------------------------------
 
 
-#: 同じ register を別名で読む（parameter の tie だけでは入力の全 bit が対応しない）理由。
+#: parameter の tie だけでは入力の全 bit が対応しない理由: 同じ register を別名で
+#: 読む、または表のどの parameter にも解決しない parameter leaf（lowering では
+#: 側ごとに別の自由 symbol になる）。
 HIDDEN_INPUT_REASONS = frozenset({
     "register_alias",
     "register_alias_unknown",
     "parameter_storage_unknown",
+    "parameter_identity_unknown",
 })
 
 
@@ -93,7 +116,7 @@ class _Demand:
 
     ``bits``: parameter を読む最大の上端 bit（occurrence 無しは 0）。
     ``witness``: closure をどの幅でも壊す最初の理由。
-    ``hidden``: 別名 register 読み（``HIDDEN_INPUT_REASONS``）の最初の理由。
+    ``hidden``: 全幅の tie でも入力が対応しない理由（``HIDDEN_INPUT_REASONS``）の最初の 1 つ。
     ``witness`` とは別に運ぶ（同じ式に裸の occurrence があっても隠れない）。
     """
 
@@ -124,32 +147,67 @@ def _integer(value: Any) -> Optional[int]:
     return int(value)
 
 
+def _identity_matches(
+    index: Optional[int],
+    storage_key: Optional[Tuple[object, ...]],
+    name: Optional[str],
+    entry: Any,
+) -> bool:
+    return (
+        (index is not None and index == entry.index)
+        or (storage_key is not None and storage_key == entry.storage_key)
+        or bool(name and name == entry.name)
+    )
+
+
 def _parameter_occurrence(node: Any, target: _ParameterTarget) -> Optional[str]:
     """PARAMETER node が target か。``"match"`` / ``"other"`` / ``"unknown"``.
 
     SMT への lowering は leaf を index で parameter 表に揃えてから名前で束縛する
     ので、index・storage・名前の **どれか 1 つでも** target と一致すれば target の
-    occurrence とみなす（取り逃すと closure が空虚に成立する）。どれも一致せず、
-    比べられた属性があるときだけ別 parameter とする。
+    occurrence とみなす（取り逃すと closure が空虚に成立する）。``"other"`` は
+    表の別の行に解決できたときだけ。どの行にも解決しない leaf は lowering で
+    表に無い自由 symbol になり、target との対応が言えないので ``"unknown"``。
     """
 
-    compared = False
     index = _integer(getattr(node, "value", None))
-    if index is not None and index >= 0:
-        compared = True
-        if index == target.index:
-            return "match"
+    if index is not None and index < 0:
+        index = None
     storage_key = _storage_identity_key(getattr(node, "storage_info", None))
-    if storage_key is not None and target.storage_key is not None:
-        compared = True
-        if storage_key == target.storage_key:
-            return "match"
-    name = getattr(node, "name", None)
-    if name and target.name:
-        compared = True
-        if name == target.name:
-            return "match"
-    return "other" if compared else "unknown"
+    name = getattr(node, "name", None) or None
+    if _identity_matches(index, storage_key, name, target):
+        return "match"
+    if any(_identity_matches(index, storage_key, name, other) for other in target.others):
+        return "other"
+    return "unknown"
+
+
+def _variable_occurrence(node: Any, target: _ParameterTarget) -> Optional[str]:
+    """VARIABLE node が名前で parameter の symbol に束縛されるか。
+
+    lowering は parameter と追加変数を **名前** で symbol に対応付ける
+    （``proof/formula/symbol_replace.py``）。parameter と同名の VARIABLE は、storage
+    に関係なくその parameter の全幅 symbol として描かれる。target と同名なら
+    ``"match"``、別 parameter と同名なら ``"other"``、どちらでもなければ None。
+    """
+
+    name = getattr(node, "name", None) or None
+    if name is None:
+        return None
+    if name == target.name:
+        return "match"
+    if any(name == other.name for other in target.others):
+        return "other"
+    return None
+
+
+def _leaf_occurrence(node: Any, target: _ParameterTarget) -> Optional[str]:
+    kind = getattr(node, "expr_type", None)
+    if kind == ExpressionType.PARAMETER:
+        return _parameter_occurrence(node, target)
+    if kind == ExpressionType.VARIABLE:
+        return _variable_occurrence(node, target)
+    return None
 
 
 def _variable_aliases_target(node: Any, target: _ParameterTarget) -> Optional[str]:
@@ -177,9 +235,7 @@ def _subpiece_demand(node: Any, target: _ParameterTarget) -> Optional[_Demand]:
     if len(operands) != 2:
         return None
     source, offset = operands
-    if getattr(source, "expr_type", None) != ExpressionType.PARAMETER:
-        return None
-    if _parameter_occurrence(source, target) != "match":
+    if _leaf_occurrence(source, target) != "match":
         return None
     if getattr(offset, "expr_type", None) != ExpressionType.CONSTANT:
         return _broken("extract_offset_not_constant", _node_label(node))
@@ -241,6 +297,11 @@ def _evaluate_node(node: Any, target: _ParameterTarget, child: Callable[[Any], _
             return _broken("parameter_identity_unknown", _node_label(node))
         return _NO_DEMAND
     if kind == ExpressionType.VARIABLE:
+        occurrence = _variable_occurrence(node, target)
+        if occurrence == "match":
+            return _broken("bare_parameter", _node_label(node))
+        if occurrence == "other":
+            return _NO_DEMAND
         alias = _variable_aliases_target(node, target)
         return _NO_DEMAND if alias is None else _broken(alias, _node_label(node))
     if kind == ExpressionType.UNKNOWN:
@@ -364,11 +425,34 @@ def _outcome_surfaces(analysis: Any) -> Iterator[_SurfaceItem]:
         yield _SurfaceItem("observation", "incomplete_control_flow", witness=("control_flow_incomplete", ""))
 
 
+def _storage_keys_overlap(left: Tuple[object, ...], right: Tuple[object, ...]) -> bool:
+    """storage identity key（``StorageInfo.storage_identity_key``）が同じ入力 bit を含むか。"""
+
+    if left[0] != right[0]:
+        return False
+    if left[0] == "register_storage":
+        # (kind, space, base offset, base bits, bit offset, bits): 同じ親 register。
+        return tuple(left[1:4]) == tuple(right[1:4])
+    if left[0] == "memory_storage":
+        # (kind, space, offset, size): 同じ space の byte 範囲が重なる。
+        return left[1] == right[1] and left[2] < right[2] + right[3] and right[2] < left[2] + left[3]
+    return tuple(left) == tuple(right)
+
+
 def _store_destination_witness(location: Any, target: _ParameterTarget) -> Optional[Tuple[str, str]]:
     base = getattr(location, "base_ref", None)
     kind = getattr(base, "kind", None)
-    if kind in {"stack_frame", "global", "storage"}:
+    if kind in {"stack_frame", "global"}:
         # 固定 base と定数 step だけの宛先は parameter の bit を読まない。
+        return None
+    if kind == "storage":
+        # 宛先 address は base storage の入口値。それが target の storage と
+        # 重なれば parameter の bit を読む。どちらかの identity が無ければ不明。
+        key = getattr(base, "storage_identity_key", None)
+        if not key or not target.storage_key:
+            return ("store_destination_alias_unknown", "storage")
+        if _storage_keys_overlap(tuple(key), tuple(target.storage_key)):
+            return ("store_destination_parameter_base", f"param_{target.index}")
         return None
     if kind != "parameter":
         return ("store_destination_unknown", str(kind))
@@ -422,10 +506,29 @@ def _effect_surfaces(analysis: Any, target: _ParameterTarget) -> Iterator[_Surfa
         yield _SurfaceItem("observation", "effect_summary", witness=("effect_summary_incomplete", str(reason)))
 
 
+def _deferred_call_surfaces(analysis: Any) -> Iterator[_SurfaceItem]:
+    """展開しなかった call（再帰要約の対象を含む）の引数と間接 target。
+
+    要約は引数の一致で call 結果を対応付けるので、引数が読む bit も観測に入る。
+    引数を回収しきれていない call は、どの bit を読むか言えない。
+    """
+
+    for index, info in enumerate((getattr(analysis, "deferred_calls", None) or {}).values()):
+        location = f"deferred_calls[{index}]"
+        for arg_index, argument in enumerate(getattr(info, "arguments", None) or ()):
+            yield _SurfaceItem("call_argument", f"{location}.arguments[{arg_index}]", argument)
+        yield _SurfaceItem("call_target", f"{location}.call_target_expr", getattr(info, "call_target_expr", None))
+        if getattr(info, "call_argument_recovery_status", None) != "complete":
+            yield _SurfaceItem("call_argument", location, witness=(
+                "call_argument_incomplete", str(getattr(info, "call_argument_recovery_status", "")),
+            ))
+
+
 def _surfaces(analysis: Any, target: _ParameterTarget) -> Iterator[_SurfaceItem]:
     yield from _return_surfaces(analysis)
     yield from _outcome_surfaces(analysis)
     yield from _effect_surfaces(analysis, target)
+    yield from _deferred_call_surfaces(analysis)
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +545,7 @@ class ParameterDemand:
     demanded_bits: int
     demand_location: str
     witnesses: Tuple[ClosureWitness, ...]
-    #: 同じ register を別名で読む箇所（全幅の tie でも入力が対応しない理由）。
+    #: 全幅の tie でも入力が対応しない箇所（``HIDDEN_INPUT_REASONS``）。
     hidden_inputs: Tuple[ClosureWitness, ...] = ()
 
     def closure(self, narrow_bits: int) -> ProjectionClosure:

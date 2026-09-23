@@ -603,6 +603,150 @@ def test_register_alias_is_a_hidden_input_even_next_to_a_bare_use():
     assert any(item.reason == "register_alias" for item in demand.hidden_inputs)
 
 
+def _stack_variable(name: str, size: int) -> Expression:
+    stack = StorageInfo(is_register=False, space_name="stack", offset=8, size=size)
+    return Expression(ExpressionType.VARIABLE, name=name, size=size, storage_info=stack)
+
+
+def test_variable_named_like_the_parameter_is_the_parameter():
+    """lowering は VARIABLE を名前で parameter の symbol に束縛する。同名の VARIABLE は
+    storage に関係なく parameter の全幅 occurrence（修正前は走査されず、同一関数が
+    SEMANTIC_PROJECTION(32) の tie だけで比べられ、上位 bit の違いで SAT になった）。
+    """
+
+    def analysis():
+        return _analysis("f", [_desc("a", 8)], [_ret(_stack_variable("a", 8))], return_type="long")
+
+    assert _witness(_closure(analysis()), "return_value", "bare_parameter")
+    left, right = analysis(), analysis()
+    (item,) = build_input_correspondence_set(left, right).correspondences
+    assert item.kind is InputRelationKind.FULL_REGISTER_EQUALITY
+    assert _monolithic(left, right) == z3.unsat
+
+    # 別 parameter と同名の VARIABLE は、その parameter（target の bit は読まない）。
+    x = _param("x", 8)
+    other = _analysis(
+        "f", [_desc("x", 8), _desc("b", 8, index=1)],
+        [_ret(_bin("INT_ADD", _low(x, 4), _low(_stack_variable("b", 8), 4), 4))],
+    )
+    assert _closure(other).closed
+
+
+def test_parameter_leaf_resolving_to_no_row_is_an_unknown_hidden_input():
+    """表のどの行にも解決しない PARAMETER leaf は lowering で側ごとの自由 symbol になる。
+    target との対応が言えないので closure を壊し、全幅の R4 も不十分にする。
+    """
+
+    stray = Expression(ExpressionType.PARAMETER, name="y", value=5, size=8)
+
+    def analysis():
+        return _analysis("f", [_desc("x", 8)], [_ret(stray)], return_type="long")
+
+    demand = scan_parameter_demand(analysis(), 0, 64)
+    assert any(item.reason == "parameter_identity_unknown" for item in demand.witnesses)
+    assert any(item.reason == "parameter_identity_unknown" for item in demand.hidden_inputs)
+    relation = build_input_correspondence_set(analysis(), analysis())
+    (item,) = relation.correspondences
+    assert item.kind is InputRelationKind.FULL_REGISTER_EQUALITY
+    assert not item.decisive_sufficient
+    assert relation.status is InputCorrespondenceStatus.INSUFFICIENT
+
+    # 表の別の行に解決する leaf は別 parameter（target の closure は壊さない）。
+    x = _param("x", 8)
+    other = Expression(ExpressionType.PARAMETER, name="z", value=1, size=8)
+    two = _analysis(
+        "f", [_desc("x", 8), _desc("z", 8, index=1)], [_ret(_bin("INT_ADD", _low(x, 4), _low(other, 4), 4))]
+    )
+    assert _closure(two).closed
+
+
+def test_deferred_call_arguments_are_an_observed_surface():
+    """展開しなかった call（再帰要約の対象）の引数も観測に入る。
+
+    修正前は ``deferred_calls`` を走査せず、``g(x >> 32)`` の上位 bit 読みが見えずに
+    closure at 32 が空虚に成立した。引数を回収しきれていない call は witness。
+    """
+
+    from scripts.function_tracer_pcode.core.analysis import DeferredCallInfo
+
+    x = _param("x", 8)
+    high = _bin("INT_RIGHT", x, _const(32, 8), 8)
+    complete = DeferredCallInfo(placeholder_name="g_call", arguments=[high], call_argument_recovery_status="complete")
+    analysis = _analysis("f", [_desc("x", 8)], [_ret(_low(x, 4))], deferred_calls={("g", 1): complete})
+    assert _witness(_closure(analysis), "call_argument", "bare_parameter")
+
+    closed_argument = DeferredCallInfo(
+        placeholder_name="g_call", arguments=[_low(x, 4)], call_argument_recovery_status="complete"
+    )
+    closed = _analysis("f", [_desc("x", 8)], [_ret(_low(x, 4))], deferred_calls={("g", 1): closed_argument})
+    assert _closure(closed).closed
+
+    partial = DeferredCallInfo(placeholder_name="g_call", arguments=[_low(x, 4)])
+    incomplete = _analysis("f", [_desc("x", 8)], [_ret(_low(x, 4))], deferred_calls={("g", 1): partial})
+    assert _witness(_closure(incomplete), "call_argument", "call_argument_incomplete")
+
+
+def _register_storage(name: str, offset: int) -> StorageInfo:
+    return StorageInfo(
+        is_register=True, space_name="register", offset=offset, size=8, size_bits=64,
+        register_name=name, base_register_name=name, base_register_offset=offset,
+        base_register_size=8, base_register_size_bits=64,
+    )
+
+
+def test_store_destination_through_the_parameter_register_is_a_witness():
+    """``storage`` base の宛先 address は、その storage の入口値。parameter の register
+    なら parameter の bit を読む（修正前は固定 base 扱いで witness を出さなかった）。
+    """
+
+    a0 = _register_storage("a0", 0x20)
+    a1 = _register_storage("a1", 0x28)
+    x = _param("x", 8, storage_info=a0)
+
+    def destination(storage: StorageInfo):
+        base = LocationBaseRef.storage(
+            space_id=None, space_name="register", offset=storage.offset, size=8,
+            storage_identity_key=storage.storage_identity_key(),
+        )
+        location = CanonicalLocation(base_ref=base, offset=0, size=4)
+        effect = StoreEffect(location=location, value=_const(0, 4), conditions=[], order_key=1)
+        return _analysis(
+            "f", [_desc("x", 8, storage_info=a0)], [_ret(_low(x, 4))],
+            effect_summary=EffectSummary(parameter_names=["x"], effects=[effect]),
+        )
+
+    assert _witness(_closure(destination(a0)), "store_destination", "store_destination_parameter_base")
+    assert _closure(destination(a1)).closed
+    unknown = LocationBaseRef.storage(space_id=None, space_name="register", offset=0x20, size=8)
+    effect = StoreEffect(location=CanonicalLocation(base_ref=unknown, offset=0, size=4), value=_const(0, 4),
+                         conditions=[], order_key=1)
+    no_identity = _analysis(
+        "f", [_desc("x", 8, storage_info=a0)], [_ret(_low(x, 4))],
+        effect_summary=EffectSummary(parameter_names=["x"], effects=[effect]),
+    )
+    assert _witness(_closure(no_identity), "store_destination", "store_destination_alias_unknown")
+
+
+def test_auxiliary_extension_needs_every_source_of_the_slot_to_entail_it():
+    """補助 query の symbol は (index, 幅) が同じなら左右どちらにもなり得る。片側だけが
+    含意する仮定（R2'）を他方へ持ち込まない。R2（他方は狭い幅）なら引き継ぐ。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+    from scripts.function_tracer_pcode.semantics.projection_contract import RewriteAssumption
+
+    sign32 = RewriteAssumption(0, 64, 32, ExtensionKind.SIGN)
+    left = ParameterInfo("p", "p_1", 64, 0, is_signed=True, entailed_extension=sign32)
+    right_wide = ParameterInfo("p", "p_2", 64, 0, is_signed=True)
+    right_wide_entailed = ParameterInfo("p", "p_2", 64, 0, is_signed=True, entailed_extension=sign32)
+    right_narrow = ParameterInfo("p", "p_2", 32, 0, is_signed=True)
+    extensions = PairwiseStrategy._auxiliary_entailed_extensions_by_index
+    assert extensions(None, (left, right_wide)) == {}
+    assert extensions(None, (left, right_wide_entailed)) == {0: sign32}
+    assert extensions(None, (left, right_narrow)) == {0: sign32}
+
+
 # ---------------------------------------------------------------------------
 # relation set status / R3 / R4 / R0
 # ---------------------------------------------------------------------------

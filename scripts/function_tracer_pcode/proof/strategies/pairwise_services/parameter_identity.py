@@ -82,20 +82,27 @@ def _impl__auxiliary_entailed_extensions_by_index(
 
     最終 ``InputCorrespondence`` が含意した ``ParameterInfo.entailed_extension``
     だけを使う。semantic hint（単一 use の射影主張）は入力全体の仮定ではないので
-    読まない（Issue #167）。
+    読まない（Issue #167）。補助 query の symbol は (index, 幅) が同じなら左右
+    どちらの parameter にもなり得るので、その (index, 幅) の **全ての** source が
+    同じ仮定を含意するときだけ引き継ぐ（片側だけの含意を他方へ持ち込まない）。
     """
-    extensions: Dict[int, RewriteAssumption] = {}
+    by_slot: Dict[Tuple[int, int], List[Optional[RewriteAssumption]]] = {}
     for source in semantic_parameter_sources or ():
-        assumption = getattr(source, "entailed_extension", None)
-        if assumption is None:
-            continue
         try:
-            index = int(getattr(source, "index"))
+            slot = (int(getattr(source, "index")), int(getattr(source, "bit_width")))
         except (TypeError, ValueError):
             continue
+        by_slot.setdefault(slot, []).append(getattr(source, "entailed_extension", None))
+    extensions: Dict[int, RewriteAssumption] = {}
+    for (index, bit_width), assumptions in sorted(by_slot.items()):
+        first = assumptions[0]
+        if first is None or first.parameter_bits != bit_width:
+            continue
+        if any(assumption != first for assumption in assumptions):
+            continue
         current = extensions.get(index)
-        if current is None or assumption.parameter_bits > current.parameter_bits:
-            extensions[index] = assumption
+        if current is None or first.parameter_bits > current.parameter_bits:
+            extensions[index] = first
     return extensions
 
 
