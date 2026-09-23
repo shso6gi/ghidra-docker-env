@@ -480,3 +480,22 @@ def test_the_comparisons_own_annotations_do_not_change_the_raw_pair_it_compares(
     left.analysis_notes.append("indirect_control_flow_unresolved")
     assert not source.comparison_identity_is_current()
     assert comparison_binding_of(left, right) != cmp.a
+
+
+def test_the_runners_runtime_serves_only_comparisons_of_its_own_raw_pair():
+    """stage runner の runtime は、先に使った比較ではなく runner 自身の raw pair の比較に仕える。"""
+
+    from scripts.function_tracer_pcode.checker.strategy_execution import prepare_strategy_runtime
+
+    cmp = _comparisons()
+    runner_runtime = _runtime(cmp.pair_a)
+    runner_runtime.reserve_for_its_raw_pair()
+    # 再帰抽象化の抽象 pair の比較（別 raw pair）が先に facade の runtime に来ても使わせない。
+    abstract = prepare_strategy_runtime(runner_runtime, None, *cmp.pair_c, cmp.c)
+    assert abstract.runtime is not runner_runtime and runner_runtime.comparison_binding is None
+    # runner 自身の raw pair の比較だけが使う（同じ raw pair・別 relation は別の比較）。
+    assert prepare_strategy_runtime(runner_runtime, None, *cmp.pair_a, cmp.a).runtime is runner_runtime
+    assert prepare_strategy_runtime(runner_runtime, None, *cmp.pair_a, cmp.b).runtime is not runner_runtime
+    # 予約していない runtime（recurrence promotion が後継の比較に渡すもの）は、最初の比較に仕える。
+    handed_over = _runtime(cmp.pair_a)
+    assert prepare_strategy_runtime(handed_over, None, *cmp.pair_c, cmp.c).runtime is handed_over

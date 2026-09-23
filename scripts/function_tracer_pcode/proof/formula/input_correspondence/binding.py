@@ -23,9 +23,10 @@ artifact、obligation と gate outcome、pair ledger の closure）は、それ�
 
 **owner と経路**
 
-* raw pair の identity は raw pair の owner（``StrategySourceAnalysisPair.comparison_digest``、
-  fingerprint の規則は ``proof/obligations/snapshot.py`` の ``comparison_fingerprint``）が
-  作り、それと relation の組 ``ComparisonAuthorityBinding`` の生成と照合はこの module だけが
+* raw pair の identity の規則は ``proof/obligations/snapshot.py`` の
+  ``comparison_pair_identity``（左右の ``comparison_fingerprint``）だけで、raw pair の owner
+  （``StrategySourceAnalysisPair.comparison_digest``）と obligation runtime（``raw_pair_digest``）
+  はこれを使う。それと relation の組 ``ComparisonAuthorityBinding`` の生成と照合はこの module だけが
   行う。比較が raw analysis に書き戻す観測（``record_comparison_annotation``）は raw pair
   の identity を変えない。それ以外の変化で raw pair が変われば、以後は別の比較になる。
 * 比較の範囲: ``comparison_scope(binding)`` が 1 つの比較の間だけ現在の binding を
@@ -43,7 +44,8 @@ artifact、obligation と gate outcome、pair ledger の closure）は、それ�
 * 後で実行する仕事: worklist の producer / replanner は ``run_in_current_comparison`` で
   登録時の範囲を持ち運ぶ。
 * obligation runtime: 1 つの runtime は 1 つの binding の比較だけに仕える
-  （``ObligationRuntimeSession.claim_comparison``）。artifact・view・dependency・producer・
+  （``ObligationRuntimeSession.claim_comparison``）。stage runner の runtime は runner 自身の
+  raw pair の比較のために予約する（``reserve_for_its_raw_pair``）。artifact・view・dependency・producer・
   replanner・outcome・cache は runtime の state なので、binding が違う比較とは共有されない。
   gate の計画・完了証拠の適用・outcome の読み出しは仕える比較の中でだけ行う。別の比較は
   自分の runtime を使い（``prepare_strategy_runtime``）、stage runner はその結果の runtime で

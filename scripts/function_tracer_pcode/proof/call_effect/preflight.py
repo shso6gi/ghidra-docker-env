@@ -32,6 +32,7 @@ from scripts.function_tracer_pcode.proof.cause_identity import (
 from scripts.function_tracer_pcode.proof.obligations.snapshot import (
     AnalysisSnapshot,
     SnapshotFingerprintCodec,
+    comparison_pair_identity,
 )
 from scripts.function_tracer_pcode.core import expression_provenance_key
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
@@ -425,13 +426,13 @@ class StrategySourceAnalysisPair:
             right,
             _digest((left, right)),
             tuple(input_extension_evidence or ()),
-            comparison_digest=_comparison_pair_digest(left_snapshot, right_snapshot),
+            comparison_digest=comparison_pair_identity(left_snapshot, right_snapshot),
         )
 
     def comparison_identity_is_current(self) -> bool:
         """raw pair が、この比較が始まったときと同じ比較対象のままか（比較自身の note は除く）。"""
 
-        return _comparison_pair_digest(
+        return comparison_pair_identity(
             AnalysisSnapshot.from_function_analysis(self.analysis1),
             AnalysisSnapshot.from_function_analysis(self.analysis2),
         ) == self.comparison_digest
@@ -505,10 +506,6 @@ class PreparedAnalysisPair:
             for item in (self.analysis1, self.analysis2)
         )
         return current == (self.left_digest, self.right_digest)
-
-
-def _comparison_pair_digest(left: AnalysisSnapshot, right: AnalysisSnapshot) -> str:
-    return _digest(("comparison_raw_pair_v1", left.comparison_fingerprint, right.comparison_fingerprint))
 
 
 def comparison_binding_for_raw_pair(

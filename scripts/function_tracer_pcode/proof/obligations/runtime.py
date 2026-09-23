@@ -37,6 +37,7 @@ from scripts.function_tracer_pcode.proof.obligations.snapshot import (
     AnalysisSnapshot,
     DerivedAnalysisView,
     SnapshotFingerprintCodec,
+    comparison_pair_identity,
 )
 from scripts.function_tracer_pcode.proof.obligations.unary_premise import (
     build_function_unary_premise,
@@ -149,6 +150,10 @@ class ObligationRuntimeSession:
     pair_ledger_manager: PairLedgerManager = field(default_factory=PairLedgerManager)
     #: この runtime が仕える比較（最初にこの runtime を使った比較が決める）。
     comparison_binding: Optional[ComparisonAuthorityBinding] = None
+    #: 作ったときの raw pair の identity（``comparison_pair_identity``。to_dict の無い簡易
+    #: object では None）。``reserve_for_its_raw_pair`` の後は、この raw pair の比較だけに仕える。
+    raw_pair_digest: Optional[str] = None
+    reserved_for_raw_pair: bool = False
 
     @classmethod
     def create(cls, analysis1: Any, analysis2: Any) -> "ObligationRuntimeSession":
@@ -175,6 +180,8 @@ class ObligationRuntimeSession:
             )
             session = cls(view, view)
             session.view_records[view.view_id] = ViewPremiseRecord(view.view_id, premise)
+            if callable(getattr(analysis1, "to_dict", None)) and callable(getattr(analysis2, "to_dict", None)):
+                session.raw_pair_digest = comparison_pair_identity(left, right)
             return session
 
     @classmethod
@@ -508,10 +515,25 @@ class ObligationRuntimeSession:
     def premise_digest(self) -> str:
         return self.view_records[self.current_view.view_id].premise_digest
 
+    def reserve_for_its_raw_pair(self) -> None:
+        """この runtime を、作ったときの raw pair の比較だけに仕えさせる（Issue #167）。
+
+        stage runner は自分の raw pair の比較のために runtime を作る。予約すると、別の raw
+        pair の比較（再帰抽象化の抽象 pair など）が先にこの runtime を使っても、それに仕え
+        させない（その比較は自分の runtime を得る）。
+        """
+
+        if self.raw_pair_digest is not None:
+            self.reserved_for_raw_pair = True
+
     def serves_comparison(self, binding: Optional[ComparisonAuthorityBinding]) -> bool:
         """``binding`` の比較の仕事をこの runtime で扱ってよいか。"""
 
-        return binding is None or self.comparison_binding is None or self.comparison_binding == binding
+        if binding is None:
+            return True
+        if self.reserved_for_raw_pair and binding.raw_pair_digest != self.raw_pair_digest:
+            return False
+        return self.comparison_binding is None or self.comparison_binding == binding
 
     def claim_comparison(self, binding: Optional[ComparisonAuthorityBinding]) -> None:
         """この runtime を ``binding`` の比較に仕えさせる（別の比較なら拒否）。"""

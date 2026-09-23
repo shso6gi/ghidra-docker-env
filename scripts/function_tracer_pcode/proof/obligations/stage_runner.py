@@ -234,6 +234,8 @@ def run_obligation_branch_plan(
     """Execute branch obligations under the versioned activation policy."""
 
     runtime = ObligationRuntimeSession.create(analysis1, analysis2)
+    # Issue #167: runner の runtime は runner の raw pair の比較だけに仕える。
+    runtime.reserve_for_its_raw_pair()
     checker._obligation_runtime_session = runtime
     last_result = None
     stage_path: List[str] = []

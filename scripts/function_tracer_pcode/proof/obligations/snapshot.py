@@ -36,6 +36,14 @@ COMPARISON_ANNOTATION_NOTES = frozenset({
 })
 
 
+def comparison_pair_identity(left: "AnalysisSnapshot", right: "AnalysisSnapshot") -> str:
+    """比較の authority が束縛する raw pair の identity（左右の ``comparison_fingerprint`` の組）。"""
+
+    return SnapshotFingerprintCodec.digest(
+        ("comparison_raw_pair_v1", left.comparison_fingerprint, right.comparison_fingerprint)
+    )
+
+
 def record_comparison_annotation(analysis: Any, note: str) -> None:
     """比較の観測 ``note`` を raw analysis に書き戻す（登録済みの note だけ）。"""
 
