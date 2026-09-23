@@ -1803,6 +1803,9 @@ def test_the_output_option_is_read_once_when_the_output_is_prepared():
 _EAGER_METHODS = frozenset({
     "to_dict", "deepcopy", "copy", "dumps", "asdict", "materialize", "prepare",
     "project_bounded", "join", "json_view",
+    # identity key の組み立て（key の owner は identity。表現の producer が呼ぶと、key の
+    # 大きさの tuple を予算の前に作る）
+    "stable_key", "to_key", "structural_key",
 })
 _EAGER_BUILTINS = frozenset({"list", "dict", "tuple", "sorted", "set", "frozenset", "deepcopy", "asdict"})
 
@@ -1834,6 +1837,11 @@ def _output_field_rows(tree: ast.Module) -> List[ast.Call]:
 #: builder 自身の有界化は PR-22-D の残件 — `docs` / PR 本文の残件表）
 _KNOWN_EAGER_READERS = frozenset({"RESULT_FIELDS[unknown_cause_aggregate]"})
 
+#: `json_items` の中で identity key をそのまま写す site（key の owner は identity）。
+#: return 値の flow certificate の key は RETURN の def-chain の辿った辺の数だけの組で、
+#: 旧 `to_dict` と同じ値。identity key を eager に作る問題の owner は別 Issue（PR 本文の残件）。
+_KNOWN_IDENTITY_KEY_COPIES = frozenset({"core/analysis.py:ReturnInfo.stable_key()"})
+
 
 def _reader_nodes() -> List[Tuple[str, ast.AST]]:
     """出力 field の読み方（lambda / 関数）と、package の全 `json_items`。"""
@@ -1864,11 +1872,21 @@ def test_producers_return_json_sources_and_never_build_the_representation():
     nodes = _reader_nodes()
     assert sum(1 for label, _node in nodes if "json_items" in label) >= 80
     assert any(label.startswith("RESULT_FIELDS[debug_trace]") for label, _node in nodes)
-    offenders = {
-        label: found for label, node in nodes
-        if label not in _KNOWN_EAGER_READERS and (found := _eager_constructions(node))
-    }
+    offenders = {}
+    identity_copies = set()
+    for label, node in nodes:
+        if label in _KNOWN_EAGER_READERS:
+            continue
+        found = []
+        for item in _eager_constructions(node):
+            if item.startswith("stable_key()") and label.startswith("core/analysis.py:json_items"):
+                identity_copies.add("core/analysis.py:ReturnInfo.stable_key()")
+                continue
+            found.append(item)
+        if found:
+            offenders[label] = found
     assert offenders == {}, offenders
+    assert identity_copies == set(_KNOWN_IDENTITY_KEY_COPIES)
 
 
 #: J2 の例外（`to_dict()` を持つが `json_items()` を持たない class）。理由つきで固定する。

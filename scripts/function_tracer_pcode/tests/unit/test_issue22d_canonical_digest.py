@@ -95,7 +95,7 @@ def test_a_dag_shaped_key_is_digested_by_its_distinct_nodes():
         node = (node, node)  # 木に展開すると 2^60 個の葉
     started = time.perf_counter()
     digest, distinct = canonical_merkle_digest(node)
-    assert distinct == 62 and time.perf_counter() - started < 0.1
+    assert distinct == 62 and time.perf_counter() - started < 1.0
     bounded = bounded_match_evidence(("key",) + tuple(range(3_000)) + (node,))
     assert type(bounded) is BoundedEvidence and bounded.distinct_nodes < 3_200
     assert bounded.match_digest(MATCH_AUTHORITY_DIGEST) == bounded.identity

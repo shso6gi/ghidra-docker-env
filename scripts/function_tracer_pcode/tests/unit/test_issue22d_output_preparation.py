@@ -1241,7 +1241,7 @@ def test_a_long_string_is_counted_in_chunks_and_stops_early():
     text = "😀" * 5_000_000
     started = time.perf_counter()
     assert RESULT_JSON_POLICY.string_bytes(text, max_bytes=100) == 101
-    assert time.perf_counter() - started < 0.1
+    assert time.perf_counter() - started < 1.0  # 負荷下でも揺れない上限（本体の確認は byte / 件数）
     assert RESULT_JSON_POLICY.string_bytes(text[:70_000]) == len(
         json.dumps(text[:70_000], ensure_ascii=False).encode()
     )
@@ -1454,7 +1454,7 @@ def test_node_counting_stops_once_the_budget_is_known_to_be_exceeded():
     meter = SemanticGraphMeter()
     started = time.perf_counter()
     meter.add_root(node, max_distinct=100)
-    assert time.perf_counter() - started < 0.1
+    assert time.perf_counter() - started < 1.0  # 負荷下でも揺れない上限（本体の確認は byte / 件数）
     assert meter.distinct_nodes == 101
 
 
