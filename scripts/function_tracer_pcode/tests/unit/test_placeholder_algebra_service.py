@@ -101,7 +101,7 @@ def test_condition_identity_key_is_the_pure_module_function_from_divergence_proo
     p = Expression.variable("param_1", 4)
     cond = Condition(Expression.binary_op("INT_SLESS", Expression.constant(0, 4), p), True)
     assert divergence_proofs.condition_identity_key(cond) == ReturnAnalyzer._condition_identity_key(cond)
-    assert divergence_proofs.condition_identity_key(cond) is not None
+    assert divergence_proofs.condition_identity_key(cond)[0] == "condition"
 
 
 def test_static_helper_is_callable_on_the_class_without_an_instance():
@@ -117,5 +117,3 @@ def test_placeholder_minus_one_matches_facade_result():
     assert analyzer._expression_is_placeholder_minus_one(expr, p) is True
     assert analyzer._placeholder_algebra.expression_is_placeholder_minus_one(expr, p) is True
     assert analyzer._expression_is_placeholder_minus_one(p, p) is False
-
-

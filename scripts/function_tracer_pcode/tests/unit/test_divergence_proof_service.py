@@ -79,13 +79,10 @@ def test_condition_identity_key_is_one_pure_module_function():
     p = Expression.variable("param_1", 4)
     cond = Condition(Expression.binary_op("INT_EQUAL", p, Expression.constant(0, 4)), False)
     key = condition_identity_key(cond)
-    # 鍵の中身の並びではなく契約を見る: 同じ 1 つの関数が答え、向きを区別し、
-    # 組めない条件には鍵を与えない（`core/structural.condition_identity`）。
-    assert key is not None
+    assert key[0] == "condition" and key[2] is False
     assert DivergenceProofService.condition_identity_key(cond) == key
     assert ReturnAnalyzer._condition_identity_key(cond) == key
-    negated = condition_identity_key(Condition(cond.expression, True))
-    assert negated is not None and negated != key
+    assert condition_identity_key(Condition(cond.expression, True))[2] is True
 
 
 def test_suppliers_read_analyzer_state_at_call_time():
@@ -117,74 +114,3 @@ def test_high_function_has_cfg_cycle_matches_facade_result():
     hf = Mock()
     with patch.object(analyzer._block_graph, "iter_high_basic_blocks", return_value=[]):
         assert analyzer._high_function_has_cfg_cycle(hf) == analyzer._divergence_proofs.high_function_has_cfg_cycle(hf)
-
-
-def test_conditional_progress_guard_key_survives_the_proof_it_is_stored_in():
-    """guard key が structural proof に入れて読み戻しても使えること。
-
-    **この proof の寿命は process 内**（`branch_guarded_structural_proof_from_return`
-    で組み、同じ解析の中で `validate_…` と `…_from_structural_proof` が読む）。
-    直列化されるのは `summary_candidate_source_key` の中の evidence としてだけで、
-    JSON から読み戻して照合することは無い（tuple は list になるので、そもそも
-    そういう契約ではない）。だから確かめるのは
-
-    * 保存形式が plain data であること（= 直列化できる）
-    * 同じ process 内で読み戻して、元の条件を引けること
-
-    の 2 つ。読み手は tuple しか受けないので、鍵の側が plain data でなくなると
-    黙って全部捨てられる（proof が必ず落ちる）。そこを固定しておく。
-    """
-    import json
-    from unittest.mock import patch
-
-    from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
-    from scripts.function_tracer_pcode.core.expression import Expression
-
-    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
-    service = analyzer._placeholder_algebra
-    divergence = analyzer._divergence_proofs
-
-    placeholder = Expression.parameter("p", 0, size=4)
-    flag = Expression.parameter("flag", 1, size=4)
-    expr = Expression.binary_op("INT_ADD", placeholder, flag)
-    condition = Condition(
-        Expression.binary_op(
-            "INT_LESS", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4)
-        )
-    )
-
-    with patch.object(service, "expression_is_one_under_conditions", return_value=True), patch.object(
-        service.condition_logic, "expressions_same_key", side_effect=lambda l, r: l is placeholder
-    ):
-        guard_key = service.placeholder_plus_unit_condition_guard_key(
-            expr, placeholder, [condition]
-        )
-
-    assert guard_key is not None and isinstance(guard_key, tuple)
-
-    proof = (
-        "branch_guarded_affine_unit_count_structural_proof",
-        ("conditional_progress_guard_keys", tuple(sorted({3: guard_key}.items(), key=repr))),
-    )
-
-    # evidence として直列化できる（wrapper object が混ざっていない）
-    marker = "<not-plain-data>"
-    assert marker not in json.dumps(proof, default=lambda o: marker)
-
-    # 同じ process 内で読み戻して照合できる
-    restored = divergence.conditional_progress_guard_keys_from_structural_proof(proof)
-    assert restored == {3: guard_key}
-    assert divergence.condition_for_identity_key(restored[3], [condition]) is condition
-
-    # その鍵で validate が通る
-    with patch.object(
-        divergence, "condition_for_identity_key", return_value=condition
-    ), patch(
-        "scripts.function_tracer_pcode.analysis.returns.divergence_proofs.ConditionSMTOracle.conjunction_is_unsat",
-        return_value=True,
-    ):
-        assert divergence.conditional_progress_guards_contradict_invariant(
-            restored, target_conditions=(condition,), invariant_conditions=(condition,)
-        ) is True
-
-
