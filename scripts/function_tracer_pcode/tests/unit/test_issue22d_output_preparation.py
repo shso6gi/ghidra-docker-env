@@ -1324,3 +1324,39 @@ def test_node_counting_stops_once_the_budget_is_known_to_be_exceeded():
     meter.add_root(node, max_distinct=100)
     assert time.perf_counter() - started < 0.1
     assert meter.distinct_nodes == 101
+
+
+def test_a_swallowed_limitation_after_finalization_still_stops_the_lane(monkeypatch):
+    """確定後の consumer の中で限界が握り潰されても、lane は結果を作らない。"""
+    from scripts.function_tracer_pcode.authority.decision import conditional_lane
+    from scripts.function_tracer_pcode.core.budget_policy import (
+        raise_expression_size_budget_exceeded,
+    )
+
+    def _plan(*_args, **_kwargs):
+        _emit_one_production_signal()
+        return create_mock_result(is_equivalent=None, solver_status=SolverStatus.UNKNOWN)
+
+    def _swallowing_proof(*_args, **_kwargs):
+        try:
+            raise_expression_size_budget_exceeded(
+                BudgetKind.RENDER_BYTES, observed=2, limit=1,
+                site="core.render_smt.emit", target_key=("lane",),
+            )
+        except Exception:
+            pass  # 深い broad except が握り潰し、計算を「成功」として続けた
+        return SimpleNamespace(
+            assumption_set=("a",), decisive=True, non_decisive_reasons=(), diagnostics={},
+        )
+
+    monkeypatch.setattr(conditional_lane, "conditional_lane_is_eligible", lambda _d: True)
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.proof.conditional_lane.run_conditional_proof",
+        _swallowing_proof,
+    )
+    result, _seen = _run_with_finish_spy(_new_checker(_connector()), _plan, monkeypatch)
+    assert result.diagnostics["conditional_lane"] == {
+        "conditional_lane": "stopped_by_limitation", "swallowed": True,
+    }
+    assert result.conditional_decision_receipt is None
+    assert result.final_outcome == "UNKNOWN"

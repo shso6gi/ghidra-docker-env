@@ -1398,7 +1398,11 @@ STABLE_CONTROL_API = frozenset({
 })
 
 #: 具象台帳が診断・test 向けに出している窓口（安定 contract には含めない）。
-LEDGER_DIAGNOSTIC_API = frozenset({"recorded_failure_count"})
+LEDGER_DIAGNOSTIC_API = frozenset({
+    "recorded_failure_count",
+    # Issue #22 PR-22-D: 確定後の限界の件数（確定後の consumer 用、判定には使わない）
+    "limitations_after_finalization",
+})
 
 #: 台帳 object に対して consumer が呼んでよい名前（安定 contract + identity）。
 LEDGER_ALLOWED_ATTRIBUTES = STABLE_CONTROL_API | {

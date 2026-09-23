@@ -622,6 +622,10 @@ class PairFailureLedger(PairExecutionControl):
         #: 台帳を作った最外の scope だけ（入れ子の境界が外側の pair を閉じない）。
         self._depth = 0
         self._finalized = False
+        #: 出力を確定した **後** に上がった限界（判定には使わない）。確定後の
+        #: consumer（conditional lane）が、途中の `except Exception` に例外を握り
+        #: 潰されても「自分の計算中に限界があった」と分かるように数だけ持つ。
+        self._after_finalization: List[AnalysisLimitation] = []
 
     # -- identity ----------------------------------------------------------
 
@@ -642,6 +646,11 @@ class PairFailureLedger(PairExecutionControl):
 
     def is_finalized(self) -> bool:
         return self._finalized
+
+    def limitations_after_finalization(self) -> int:
+        """確定後に上がった限界の件数（診断・確定後の consumer 用。判定には使わない）。"""
+
+        return len(self._after_finalization)
 
     def matches(self, pair_identity: Any, session_identity: Any) -> bool:
         return (
@@ -856,7 +865,9 @@ def raise_limitation(
     ledger = current_pair_ledger()
     if ledger is not None:
         if ledger.is_finalized():
-            # 出力を確定した後: 意味の限界にはしない（判定を変えられないため）
+            # 出力を確定した後: 意味の限界にはしない（判定を変えられないため）。
+            # 件数だけは残す — 確定後の consumer が握り潰しに負けないように。
+            ledger._after_finalization.append(exc)
             raise LimitationAfterFinalization(exc) from exc
         ledger.record_limitation(exc, stop=stop)
     raise exc
@@ -871,6 +882,17 @@ def enter_pair_finalization() -> bool:
 
     ledger = current_pair_ledger()
     return False if ledger is None else ledger.enter_finalization()
+
+
+def limitations_after_finalization() -> int:
+    """今の pair で、出力の確定後に上がった限界の件数（scope の外では 0）。
+
+    確定後の非 authoritative な consumer（conditional lane）が、自分の計算の前後で
+    比べる。途中で例外を握り潰されても、増えていればその計算は不完全。
+    """
+
+    ledger = current_pair_ledger()
+    return 0 if ledger is None else ledger.limitations_after_finalization()
 
 
 def record_internal_bug(exc: BaseException, *, site: str) -> None:

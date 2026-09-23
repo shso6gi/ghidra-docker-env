@@ -448,7 +448,10 @@ def run_production_conditional_lane(
     from scripts.function_tracer_pcode.authority.decision.production_cutover import (
         attach_conditional_decision,
     )
-    from scripts.function_tracer_pcode.core.errors import LimitationAfterFinalization
+    from scripts.function_tracer_pcode.core.errors import (
+        LimitationAfterFinalization,
+        limitations_after_finalization,
+    )
     from scripts.function_tracer_pcode.proof.conditional_lane import (
         run_conditional_proof,
     )
@@ -460,6 +463,7 @@ def run_production_conditional_lane(
         return None
     analysis1, analysis2 = analyses
 
+    limitations_before = limitations_after_finalization()
     try:
         artifact = run_conditional_proof(
             analysis1,
@@ -469,6 +473,10 @@ def run_production_conditional_lane(
             timeout=timeout,
             debug=debug,
         )
+        if limitations_after_finalization() != limitations_before:
+            # 計算の途中で限界が上がり、どこかで握り潰された。結果は不完全なので
+            # conditional 列を作らない（fail closed。判定は既に確定している）。
+            return {"conditional_lane": "stopped_by_limitation", "swallowed": True}
         if not artifact.assumption_set:
             # view が立たなかった。conditional 列は作らない（fail closed）。
             return {
