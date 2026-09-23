@@ -1699,3 +1699,17 @@ def test_an_authority_value_that_is_not_json_is_an_invariant_violation():
     result.canonical_c_active_base = ({"row": _Opaque()},)
     with pytest.raises(OutputEnvelopeInvariantViolation):
         build_final_result_envelope(result)
+
+
+def test_a_malformed_diagnostic_is_a_marker_not_an_error():
+    """JSON にならない値を含む診断は marker になる（診断の欠陥で判定を変えない）。"""
+    result = _decided_result()
+    decided = (result.final_outcome, result.decision_receipt)
+    result.pairwise_debug_stats = {"odd": _Opaque()}
+    envelope = build_final_result_envelope(result)
+    marker = envelope.payload["pairwise_debug_stats"]
+    assert marker["truncated"] is True and marker["reason"] == "not_json"
+    assert marker["rejected_at"] == "$.odd"
+    assert "pairwise_debug_stats" in envelope.truncated_metadata
+    assert (result.final_outcome, result.decision_receipt) == decided
+    assert json.loads(envelope.text)["final_outcome"] == result.final_outcome

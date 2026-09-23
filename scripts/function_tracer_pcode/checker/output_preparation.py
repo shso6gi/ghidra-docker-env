@@ -193,17 +193,30 @@ class PreparationContext:
         return self.members.policy
 
 
-def _truncation_marker(key: str, source: Any, *, remaining_bytes: Optional[int]) -> Dict[str, Any]:
-    """収まらなかった診断の代わりに置く値（件数 + marker）。元の値は写さない。"""
+def _truncation_marker(
+    key: str,
+    source: Any,
+    *,
+    remaining_bytes: Optional[int],
+    rejected: Optional[JsonValueRejected] = None,
+) -> Dict[str, Any]:
+    """表せなかった診断の代わりに置く値（件数 + marker）。元の値は写さない。
+
+    予算に収まらない（`serialization_bytes`）か、JSON にならない値を含む
+    （`not_json`、どこで拒んだかを短く残す）。どちらも判定には関わらない。
+    """
 
     count = len(source) if isinstance(source, (list, tuple, Mapping)) else None
-    return {
+    marker: Dict[str, Any] = {
         "truncated": True,
         "field": key,
-        "reason": BudgetKind.SERIALIZATION_BYTES.value,
+        "reason": BudgetKind.SERIALIZATION_BYTES.value if rejected is None else "not_json",
         "exceeded_bytes": remaining_bytes,
         "original_items": count,
     }
+    if rejected is not None:
+        marker["rejected_at"] = str(rejected.path)[:200]
+    return marker
 
 
 def _prepare_member(context: PreparationContext, key: str, source: Any, overflow: Overflow) -> PreparedField:
@@ -211,20 +224,26 @@ def _prepare_member(context: PreparationContext, key: str, source: Any, overflow
 
     `LIMITATION` / `INVARIANT` の field が収まらなければ `JsonBudgetExhausted`、
     JSON source でなければ `JsonValueRejected` をそのまま上げる（意味づけは呼ぶ側）。
+    `TRUNCATE` の field はどちらでも marker（marker も入らなければ省く）。
     """
 
     members = context.members
     encoding = context.encoding
     remaining = members.remaining_for(key)
+    rejected: Optional[JsonValueRejected] = None
     try:
         if remaining is not None and remaining < 0:
             raise JsonBudgetExhausted(consumed_bytes=0, max_bytes=remaining)
         prepared = encoding.prepare(source, max_bytes=remaining)
         shape = "json"
-    except JsonBudgetExhausted:
+    except (JsonBudgetExhausted, JsonValueRejected) as exc:
+        # 切り詰めてよい診断は、収まらなくても JSON にならなくても marker にする
+        # （診断の欠陥で判定を変えない）。それ以外の意味づけは呼ぶ側。
         if overflow is not Overflow.TRUNCATE:
             raise
-        marker = _truncation_marker(key, source, remaining_bytes=remaining)
+        if isinstance(exc, JsonValueRejected):
+            rejected = exc
+        marker = _truncation_marker(key, source, remaining_bytes=remaining, rejected=rejected)
         try:
             if remaining is not None and remaining < 0:
                 raise JsonBudgetExhausted(consumed_bytes=0, max_bytes=remaining)
