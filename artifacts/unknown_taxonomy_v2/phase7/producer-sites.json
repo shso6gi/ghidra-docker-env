@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "e942a43d4ac605455d9e07a7f8e0fdaff0dddc2953c5d53726d2b51cfa768529",
+  "manifest_digest": "cda10aea89b696144ffa31adcf819ef3a1794f04a4d468588492b1c1d0670e99",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 32,
   "sites": [
@@ -183,7 +183,7 @@
       "line": 156,
       "path": "scripts/function_tracer_pcode/checker/recurrence_stage.py",
       "producer_site_manifest_id": "checker-recurrence-proposal-blocker",
-      "source_sha256": "3cb55bf0e5001ece7a60ab3f54a5b7af88b5db6893745e7d6be65b5f025a4705"
+      "source_sha256": "5c334cbd514cf66ac39ffae977f810a8a5b881e0412684d114dcfc3a67160019"
     },
     {
       "allowed_dispositions": [

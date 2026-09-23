@@ -1106,25 +1106,3 @@ class ObligationRuntimeSession:
             self.requirement_dependents.setdefault(completed.to_key(), set()).add(
                 requirement.to_key()
             )
-
-    def create_recursive_view(self, analysis1: Any, analysis2: Any, matches: Iterable[Any]) -> DerivedAnalysisView:
-        self._enter_current_comparison()
-        match_digest = SnapshotFingerprintCodec.digest(tuple(matches))
-        requirement = ProofRequirementId.create(
-            "recursive_call_abstraction",
-            ("recursive_matches", match_digest),
-            ProofRequirementContract(
-                proposition="matched recursive calls share an abstract return",
-                observation_surface=("return_and_effect",),
-                active_precondition=(self.current_view.view_id,),
-            ),
-        )
-        evidence = {
-            "proof_requirement_id": requirement.to_dict(),
-            "status": "complete",
-            "proof_source": "recursive_abstraction_acceptance_gate",
-            "match_digest": match_digest,
-            "left_snapshot": self._snapshot(analysis1, "recursive_left").semantic_fingerprint,
-            "right_snapshot": self._snapshot(analysis2, "recursive_right").semantic_fingerprint,
-        }
-        return self._apply_artifact(requirement, evidence)

@@ -204,8 +204,10 @@ class RecurrenceStageMixin:
     ) -> Optional[EquivalenceResult]:
         """``branch_context``: Internal execution context (Phase 6c #93)。stage runner は inner ``check()`` が
         現在得ている effective context（session / generation / lease は runner 由来、branch_id は strategy class 名の
-        fallback）を渡す。direct 呼び出しでは省略し、``check()`` が direct semantics で組む。"""
-        self._last_recursive_derived_view_identity = None
+        fallback）を渡す。direct 呼び出しでは省略し、``check()`` が direct semantics で組む。
+
+        抽象 pair の比較は raw pair が違う別の比較なので、自分の obligation runtime で動く
+        （Issue #167）。この stage は runner の比較の runtime に状態を作らない。"""
         abstraction = abstract_recursive_calls(
             analysis1,
             analysis2,
@@ -222,21 +224,6 @@ class RecurrenceStageMixin:
             "Deferred call abstraction fallback: matched "
             f"{len(abstraction.matches)} deferred call(s)"
         )
-        runtime = getattr(self, "_obligation_runtime_session", None)
-        if runtime is None:
-            from scripts.function_tracer_pcode.proof.obligations.runtime import (
-                ObligationRuntimeSession,
-            )
-
-            runtime = ObligationRuntimeSession.create(analysis1, analysis2)
-            self._obligation_runtime_session = runtime
-        recursive_view = runtime.create_recursive_view(
-            abstraction.analysis1,
-            abstraction.analysis2,
-            abstraction.matches,
-        )
-        self._last_recursive_derived_view = recursive_view
-        self._last_recursive_derived_view_identity = recursive_view.view_id
         return self.check(
             abstraction.analysis1,
             abstraction.analysis2,

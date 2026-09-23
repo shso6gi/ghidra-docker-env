@@ -686,32 +686,24 @@ def test_runtime_rejects_ambiguous_legacy_obligation_mapping():
     },), reasons=(reason,)) == ()
 
 
-def test_recursive_producer_creates_real_derived_view_with_provenance():
-    runtime = ObligationRuntimeSession.create(
-        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
-        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
-    )
-    recursive = runtime.create_recursive_view(
-        SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000"),
-        SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000"),
-        (("match", 0),),
-    )
-    assert recursive.parent_view_id == runtime.base_view.view_id
-    assert recursive.fact_provenance
-    assert runtime.artifacts[0].requirement_id.proof_kind == "recursive_call_abstraction"
-
-
 def test_running_producer_can_supersede_its_parent_view():
     left = SimpleNamespace(binary_id="B1", function_name="f", entry_point="0x1000")
     right = SimpleNamespace(binary_id="B2", function_name="f", entry_point="0x1000")
     runtime = ObligationRuntimeSession.create(left, right)
-    branch = _requirement("recursive_branch")
+    branch = _requirement("function_branch")
+    coverage = _requirement("return_coverage")
+    runtime.proof_outcomes[coverage.to_key()] = FunctionProofOutcome.EQUIVALENT
 
-    def produce_recursive_view():
-        runtime.create_recursive_view(left, right, (("match", 0),))
+    def produce_derived_view():
+        _apply_in_comparison(runtime, ({"evidence": {
+            "proof_requirement_id": coverage.to_dict(),
+            "status": "complete",
+            "proof_source": "test_coverage_producer",
+            "proof_content": {"coverage": "proven"},
+        }},))
         return "branch_result"
 
-    item = runtime.schedule(branch, "function_branch", produce_recursive_view)
+    item = runtime.schedule(branch, "function_branch", produce_derived_view)
     popped, result = runtime.run_next()
     assert popped is item
     assert result == "branch_result"

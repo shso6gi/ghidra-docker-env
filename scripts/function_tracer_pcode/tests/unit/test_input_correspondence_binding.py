@@ -499,3 +499,36 @@ def test_the_runners_runtime_serves_only_comparisons_of_its_own_raw_pair():
     # 予約していない runtime（recurrence promotion が後継の比較に渡すもの）は、最初の比較に仕える。
     handed_over = _runtime(cmp.pair_a)
     assert prepare_strategy_runtime(handed_over, None, *cmp.pair_c, cmp.c).runtime is handed_over
+
+
+def test_the_recursive_abstraction_stage_leaves_the_runners_runtime_to_its_own_comparison():
+    """再帰抽象化は別の raw pair（抽象 pair）の比較なので、runner の runtime に view・artifact・
+    ledger の後継を作らない。作ると、runner の比較の後続 branch が別の比較の状態で動く。"""
+
+    from scripts.function_tracer_pcode.checker import recurrence_stage
+    from scripts.function_tracer_pcode.checker.recurrence_stage import RecurrenceStageMixin
+
+    cmp = _comparisons()
+    runner_runtime = _runtime(cmp.pair_a)
+    runner_runtime.reserve_for_its_raw_pair()
+    view, events = runner_runtime.current_view, len(runner_runtime.events)
+    checker = SimpleNamespace(
+        assume_fp_non_nan=False, observes_errno=False, observes_fenv=False, debug=False,
+        _debug_print=lambda *_args: None,
+        _obligation_runtime_session=runner_runtime,
+        pairwise_strategy=object(),
+        check=Mock(return_value="abstract_result"),
+    )
+    abstraction = SimpleNamespace(
+        applied=True, matches=(("match", 0),), analysis1=cmp.pair_c[0], analysis2=cmp.pair_c[1],
+    )
+    with patch.object(recurrence_stage, "abstract_recursive_calls", return_value=abstraction), \
+            comparison_scope(cmp.a):
+        result = RecurrenceStageMixin._run_recursive_abstraction_stage(
+            checker, *cmp.pair_a, "B1", "B2", False, None, 0, None, None,
+        )
+    assert result == "abstract_result"
+    assert runner_runtime.current_view is view
+    assert runner_runtime.artifacts == []
+    assert len(runner_runtime.events) == events
+    assert runner_runtime.pair_ledger_manager.pending_successor is None
