@@ -754,16 +754,19 @@ class Expression:
         finally:
             active.remove(node_id)
 
-    def _to_dict_active(self, active: Set[int]) -> Dict[str, Any]:
-        return self._legacy_dict(lambda child: child._to_dict(active))
+    def _to_dict_active(
+        self, active: Optional[Set[int]], collect: Optional[List[Any]] = None,
+    ) -> Dict[str, Any]:
+        """木表現 1 node 分の dict。**schema の唯一の定義**。
 
-    def _legacy_dict(self, render_child) -> Dict[str, Any]:
-        """木表現 1 node 分の dict（子は `render_child(child)` の値を置く）。
+        `collect` が `None` なら子を再帰的に描く（実際の直列化）。list を渡すと
+        子を描かずにその list へ積み、代わりに placeholder `0` を置く — 大きさの
+        見積り（`estimate_legacy_dict_bytes`）が node 1 つ分だけを測るため。
+        同じ関数を通すので、field を足しても見積りと実出力が食い違わない。
 
-        **schema の唯一の定義**。実際の直列化（`_to_dict_active`）は子を再帰的に
-        描き、大きさの見積り（`estimate_legacy_dict_bytes`）は子を placeholder に
-        して node 1 つ分だけ測る。同じ関数を通すので、field を足しても見積りと
-        実出力が食い違わない。
+        子を描く分岐を helper / lambda へ切り出さないのは、1 段あたりの Python
+        frame を増やさないため（この表現は再帰なので、frame が増えると扱える
+        深さがそのまま縮む）。
         """
 
         result: Dict[str, Any] = {"type": self.expr_type.name}
@@ -782,13 +785,23 @@ class Expression:
 
                         if not isinstance(condition, Condition):
                             raise TypeError("PHI branch condition must be a Condition")
+                        if collect is None:
+                            condition_value = condition.expression._to_dict(active)
+                        else:
+                            collect.append(condition.expression)
+                            condition_value = 0
                         condition_payload = {
-                            "expression": render_child(condition.expression),
+                            "expression": condition_value,
                             "negated": bool(condition.negated),
                         }
+                    if collect is None:
+                        branch_value = value._to_dict(active)
+                    else:
+                        collect.append(value)
+                        branch_value = 0
                     branches.append({
                         "condition": condition_payload,
-                        "value": render_child(value),
+                        "value": branch_value,
                     })
                 result["value"] = branches
             else:
@@ -802,7 +815,11 @@ class Expression:
         if self.size:
             result["size"] = self.size
         if self.operands:
-            result["operands"] = [render_child(op) for op in self.operands]
+            if collect is None:
+                result["operands"] = [op._to_dict(active) for op in self.operands]
+            else:
+                collect.extend(self.operands)
+                result["operands"] = [0] * len(self.operands)
         if self.storage_info:
             result["storage_info"] = self.storage_info.to_dict()
         if self.read_order_key is not None:
@@ -888,8 +905,8 @@ def estimate_legacy_dict_bytes(
 
     木表現は同じ子を参照の数だけ展開するので、distinct node ごとに 1 回だけ
     大きさを求め（反復 post-order・memo）、辺の数だけ足す（同じ子への辺が 2 本
-    なら 2 回）。node 1 つ分の大きさは `_legacy_dict` を子 = placeholder で呼んだ
-    dict を `policy` で測る（実出力と schema を共有）。
+    なら 2 回）。node 1 つ分の大きさは `_to_dict_active` を子 = placeholder で呼んだ
+    dict を `policy` で測る（`_to_dict_active` を共有するので実出力と schema が一致）。
 
     `max_bytes` を超えた時点で `max_bytes + 1` を返し、残りを計算しない
     （子の大きさは根の大きさ以下なので、どこかの部分木が超えれば根も超える）。
@@ -926,12 +943,7 @@ def estimate_legacy_dict_bytes(
             return None
         active.add(node_id)
         children: List[Any] = []
-
-        def _placeholder(child, _children=children):
-            _children.append(child)
-            return 0
-
-        pending[node_id] = (node._legacy_dict(_placeholder), children)
+        pending[node_id] = (node._to_dict_active(None, collect=children), children)
         stack.append((node, True))
         for child in reversed(children):
             if id(child) not in sizes:

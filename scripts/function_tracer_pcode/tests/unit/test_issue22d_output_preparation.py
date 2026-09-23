@@ -380,6 +380,21 @@ def test_the_tree_representation_is_refused_before_it_is_built():
     assert caught.value.site == "core.expression.to_dict"
 
 
+def test_the_shared_schema_adds_no_recursion_frames():
+    """見積りと schema を共有しても、木表現の 1 段あたりの frame は増えない。
+
+    `to_dict` は従来どおり再帰。1 段 3 frame（`_to_dict` → `_to_dict_active` →
+    operand の内包表記）を保つので、変更前に書けた深さの式は今も書ける。
+    """
+    import sys
+
+    node = Expression.parameter("p", 0, 4)
+    depth = (sys.getrecursionlimit() // 3) - 60
+    for index in range(depth):
+        node = Expression.binary_op("INT_ADD", node, Expression.constant(index, 4))
+    assert _actual(node.to_dict()) == estimate_legacy_dict_bytes(node)
+
+
 def test_the_tree_representation_within_budget_is_unchanged():
     dag = _shared_dag(6)
     expected = dag.to_dict()  # scope の外 = 無制限
@@ -555,7 +570,9 @@ def test_d4s_output_only_overflow_never_issues_an_equivalent_receipt(monkeypatch
 
     # 確定の後は解析 object も巨大 DAG も辿らない
     walked = []
-    monkeypatch.setattr(Expression, "_legacy_dict", lambda self, *_a: walked.append(self))
+    monkeypatch.setattr(
+        Expression, "_to_dict_active", lambda self, *_a, **_k: walked.append(self),
+    )
     monkeypatch.setattr(
         "scripts.function_tracer_pcode.core.render_smt.render.render_smt_term",
         lambda *a, **k: walked.append(a),
@@ -788,3 +805,115 @@ def test_prepared_payload_for_a_directly_built_result_is_prepared_on_demand():
     assert result.prepared_semantic_payload is None
     prepared = prepared_payload_for(result)
     assert prepared.plan.max_bytes is None
+
+
+# ---------------------------------------------------------------------------
+# D2: 既定値 ON / 予算 OFF で出力が変わらない（予算内の入力）
+# ---------------------------------------------------------------------------
+
+
+def test_d2_production_defaults_do_not_change_the_render_corpus():
+    """PR-22-C の描画 corpus（SMT / 木表現）は既定の予算の内側で不変。"""
+    from scripts.function_tracer_pcode.tests.fixtures.render.corpus import build_corpus
+
+    def _render_all():
+        rendered = {}
+        for name, spec in sorted(build_corpus().items()):
+            expr = publish(spec["expression"])
+            # 木表現（`to_dict`）は従来どおり再帰なので、Python の再帰制限に
+            # 当たる深い case（C2 の線形 10,000 段）は SMT だけを比べる。
+            tree = None
+            if (expr.tree_size() or 0) < 2_000:
+                try:
+                    tree = json.dumps(expr.to_dict(), sort_keys=True, default=str)
+                except TypeError as exc:  # 木表現を持たない形は同じ例外になること
+                    tree = f"TypeError: {exc}"
+            rendered[name] = (
+                expression_to_smt(expr, float_mode=spec.get("float_mode", "uf")),
+                tree,
+            )
+        return rendered
+
+    unlimited = _render_all()
+    with pair_failure_scope(("d2",), None) as ledger, budget_policy_scope(
+        expression_budget_policy({})
+    ):
+        bounded = _render_all()
+    assert bounded == unlimited
+    assert ledger.pending_failure() is None
+
+
+def test_d2_the_checker_uses_the_config_policy():
+    checker = _new_checker(None)
+    assert checker.budget_policy == expression_budget_policy()
+
+
+# ---------------------------------------------------------------------------
+# authority 確定後の予算超過は判定を変えない
+# ---------------------------------------------------------------------------
+
+
+def test_a_budget_hit_inside_the_conditional_lane_leaves_the_decision(monkeypatch):
+    """lane は authority 確定の **後**。そこで予算に当たっても lane が fail closed
+    になるだけで、確定した UNKNOWN と receipt は変わらない。"""
+    from scripts.function_tracer_pcode.authority.decision import conditional_lane
+    from scripts.function_tracer_pcode.core.budget_policy import (
+        raise_expression_size_budget_exceeded,
+    )
+
+    def _plan(*_args, **_kwargs):
+        _emit_one_production_signal()
+        return create_mock_result(is_equivalent=None, solver_status=SolverStatus.UNKNOWN)
+
+    def _exceeding_proof(*_args, **_kwargs):
+        raise_expression_size_budget_exceeded(
+            BudgetKind.RENDER_BYTES, observed=2, limit=1,
+            site="core.render_smt.emit", target_key=("lane",),
+        )
+
+    monkeypatch.setattr(conditional_lane, "conditional_lane_is_eligible", lambda _d: True)
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.proof.conditional_lane.run_conditional_proof",
+        _exceeding_proof,
+    )
+    checker = _new_checker(_connector())
+    result, seen = _run_with_finish_spy(checker, _plan, monkeypatch)
+    lane = result.diagnostics["conditional_lane"]
+    assert lane["conditional_lane"] == "failed"
+    assert "ExpressionSizeBudgetExceeded" in lane["error"]
+    assert result.final_outcome == "UNKNOWN"
+    assert result.conditional_decision_receipt is None
+    assert seen[-1] == "finished"
+
+
+# ---------------------------------------------------------------------------
+# CLI: headroom 契約の違反は ERROR（判定の書き換えではない）
+# ---------------------------------------------------------------------------
+
+
+def test_the_cli_reports_an_envelope_violation_as_an_internal_error(monkeypatch, tmp_path):
+    from scripts.function_tracer_pcode.authority.contracts import Outcome
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+        CLI_EXIT_MATRIX,
+    )
+    from scripts.function_tracer_pcode.cli.commands import equivalence
+
+    written = []
+    monkeypatch.setattr(equivalence, "output_result", lambda text, *_a: written.append(text))
+    decided = _decided_result()
+    violation = OutputEnvelopeInvariantViolation("too big", max_bytes=10, requested_bytes=20)
+    args = SimpleNamespace(output=None, quiet=True, verbose=False, debug=False)
+    with pytest.raises(SystemExit) as exit_info:
+        equivalence._emit_output_invariant_error_result(
+            args, result=decided, violation=violation,
+            binary1_path=str(tmp_path / "a"), binary2_path=str(tmp_path / "b"),
+            func_name1="f", func_name2="f", start_time=time.time(),
+        )
+    assert exit_info.value.code == CLI_EXIT_MATRIX[Outcome.ERROR]
+    block = next(text for text in written if "EQUIVALENCE_RESULT_JSON_BEGIN" in text)
+    payload = json.loads(block.splitlines()[1])
+    assert payload["final_outcome"] == "ERROR"
+    assert payload["error_message"].startswith("OUTPUT_ENVELOPE_INVARIANT_VIOLATION")
+    # 確定済みの判定は ERROR の証跡に残す（UNKNOWN にも書き換えない）
+    assert "decided_outcome=UNKNOWN" in payload["error_message"]
+    assert decided.decision_receipt.receipt_digest in payload["error_message"]
