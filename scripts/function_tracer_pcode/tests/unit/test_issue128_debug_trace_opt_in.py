@@ -393,13 +393,13 @@ def test_generation_is_not_stopped_in_the_workflow_source():
     assert "self.debug_trace = None" not in preparation_source
     assert "result.debug_trace = None" not in preparation_source
     assert (
-        'OutputField(\n        "unknown_cause_aggregate", _C, _always(_unknown_cause_aggregate)'
+        'OutputField("unknown_cause_aggregate", _C, _always(_unknown_cause_aggregate), _TRUNC)'
         in preparation_source
     )
-    assert "bool(r.debug_trace) and r.emit_debug_trace" in preparation_source
-    assert 'include_debug_trace=bool(getattr(result, "emit_debug_trace", True))' in (
-        preparation_source
-    )
+    # 添付するかは準備時に 1 回だけ決める（`OutputOptions`）。合成は live な
+    # flag を読まない。
+    assert "bool(r.debug_trace) and o.include_debug_trace" in preparation_source
+    assert preparation_source.count("emit_debug_trace") == 1
 
 
 # ---------------------------------------------------------------------------

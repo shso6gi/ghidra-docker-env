@@ -448,6 +448,7 @@ def run_production_conditional_lane(
     from scripts.function_tracer_pcode.authority.decision.production_cutover import (
         attach_conditional_decision,
     )
+    from scripts.function_tracer_pcode.core.errors import LimitationAfterFinalization
     from scripts.function_tracer_pcode.proof.conditional_lane import (
         run_conditional_proof,
     )
@@ -491,6 +492,15 @@ def run_production_conditional_lane(
             result=result,
         )
         attach_conditional_decision(result, receipt)
+    except LimitationAfterFinalization as exc:
+        # Issue #22 PR-22-D: lane は authority 確定の **後** に走る非 authoritative
+        # な consumer。そこで上がった限界（式サイズ予算など）は判定を変えず、
+        # 台帳にも記録されない — lane の結果だけを作らない（fail closed）。
+        return {
+            "conditional_lane": "stopped_by_limitation",
+            "reason_id": exc.limitation.reason_id,
+            "site": exc.limitation.site,
+        }
     except Exception as exc:  # noqa: BLE001
         # conditional 列は付けない。無条件の判定・reason・exit code は不変。
         return {

@@ -976,7 +976,12 @@ def estimate_legacy_dict_bytes(
 
 
 def guard_legacy_tree_serialization(expr: "Expression") -> None:
-    """木表現を作る前に大きさを見積もり、直列化予算を超えるなら限界にする。
+    """木表現を作る前に大きさを見積もり、直列化の作業量へ足す（超えたら限界）。
+
+    作業量（`core/budget_policy.SerializationWork`）は、解析 1 件分の
+    `to_dict()` が開いた scope があればそこへ合流し、無ければこの 1 本だけの
+    作業量になる。どちらでも「木を作る前」に byte と distinct node を足すので、
+    予算を超える木は作られない。
 
     予算の scope の外（pair 境界を通らない呼び出し）では何もしない。見積りが
     できない形（閉路・JSON にならない key）では guard を掛けない — その場合の
@@ -984,38 +989,26 @@ def guard_legacy_tree_serialization(expr: "Expression") -> None:
     """
 
     from scripts.function_tracer_pcode.core.budget_policy import (
-        BudgetKind,
         active_budget_policy,
         budget_scope_is_active,
-        observe_budget_usage,
-        raise_expression_size_budget_exceeded,
+        serialization_scope,
     )
 
     if not budget_scope_is_active():
         return
-    limit = active_budget_policy().serialization_bytes
-    try:
-        size = estimate_legacy_dict_bytes(expr, max_bytes=limit)
-    except (TypeError, ValueError):
-        return
-    if size is None:
-        return
-    observe_budget_usage(
-        BudgetKind.SERIALIZATION_BYTES, size, site=LEGACY_TREE_SERIALIZATION_SITE,
-    )
-    if limit is not None and size > limit:
-        from scripts.function_tracer_pcode.core.structural import (
-            structural_identity_digest,
-        )
-
-        raise_expression_size_budget_exceeded(
-            BudgetKind.SERIALIZATION_BYTES,
-            observed=size,
-            limit=limit,
-            site=LEGACY_TREE_SERIALIZATION_SITE,
-            target_key=("legacy_tree", structural_identity_digest(expr)),
-            evidence=(f"tree_node_estimate={expr.tree_size()}",),
-        )
+    policy = active_budget_policy()
+    with serialization_scope(
+        site=LEGACY_TREE_SERIALIZATION_SITE, target_parts=("legacy_tree",),
+    ) as work:
+        try:
+            size = estimate_legacy_dict_bytes(
+                expr, max_bytes=work.remaining_bytes(policy),
+            )
+        except (TypeError, ValueError):
+            return
+        if size is None:
+            return
+        work.charge_tree(expr, size)
 
 
 # Re-exported for callers that import Condition from model.expression.

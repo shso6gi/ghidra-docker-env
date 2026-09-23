@@ -1607,6 +1607,7 @@ _POLICY_FIELD_READERS = {
     },
     "expression_nodes": set(),
     "expansion_cases": set(),
+    "serialization_nodes": set(),
     "envelope_headroom_bytes": {"core/budget_policy.py", "checker/output_preparation.py"},
 }
 
@@ -1642,7 +1643,6 @@ def test_the_limitation_is_built_in_one_place_and_raised_from_the_checkpoints():
     assert constructors == {"core/budget_policy.py"}, constructors
     assert raisers == {
         "core/budget_policy.py",
-        "core/expression.py",
         "core/render_smt/render.py",
         "semantics/transform/expander_multiequal.py",
         "checker/output_preparation.py",
@@ -1717,3 +1717,64 @@ def test_no_budget_is_derived_by_a_multiplier():
             ):
                 offenders.append(f"{module_path}:{node.lineno}")
     assert offenders == [], offenders
+
+
+#: 出力層（`checker/output_preparation.py`）を import してよい module。どれも
+#: 「結果を出力する側」で、意味解析・solver・authority の判定はここに入らない。
+#: だから出力の表へ field を足しても、意味の経路（query・判定・reason）は動かない
+#: （M-3。実経路での確認は `test_issue22d_output_schema_locality.py`）。
+_OUTPUT_LAYER_IMPORTERS = frozenset({
+    "checker/result.py",
+    "authority/lifecycle/production_boundary.py",
+    "cli/commands/equivalence.py",
+})
+
+
+def test_m3_only_the_output_side_depends_on_the_output_layer():
+    importers = set()
+    for path in _module_files():
+        relative = _relative(path)
+        if relative == "checker/output_preparation.py":
+            continue
+        for name, _lineno in _imported_modules(_parse(path)):
+            if name == "scripts.function_tracer_pcode.checker.output_preparation":
+                importers.add(relative)
+    assert importers == _OUTPUT_LAYER_IMPORTERS, importers
+
+
+def test_only_fields_prepared_before_authority_can_become_a_limitation():
+    """authority 確定後に合成する field（B / C）は限界を作れない（計画 §4.6）。"""
+
+    from scripts.function_tracer_pcode.checker.output_preparation import (
+        RESULT_FIELDS,
+        FieldOwner,
+        Overflow,
+    )
+
+    for item in RESULT_FIELDS:
+        if item.overflow is Overflow.LIMITATION:
+            assert item.owner is FieldOwner.PREPARED, item.key
+        if item.owner is FieldOwner.AUTHORITY:
+            assert item.overflow is Overflow.INVARIANT, item.key
+
+
+def test_the_output_option_is_read_once_when_the_output_is_prepared():
+    """`emit_debug_trace`（出力 option）を読むのは `OutputOptions.for_result` だけ。"""
+
+    offenders = []
+    for path in _module_files():
+        relative = _relative(path)
+        if not relative.startswith(("checker/output_preparation.py", "cli/")):
+            continue
+        tree = _parse(path)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == "emit_debug_trace":
+                offenders.append(f"{relative}:{node.lineno}")
+            if (
+                isinstance(node, ast.Constant)
+                and node.value == "emit_debug_trace"
+            ):
+                offenders.append(f"{relative}:{node.lineno}")
+    assert len(offenders) == 1 and offenders[0].startswith(
+        "checker/output_preparation.py"
+    ), offenders

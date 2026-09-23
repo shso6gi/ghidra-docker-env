@@ -303,6 +303,7 @@ EXPRESSION_BUDGET_DEFAULTS = (
     ("expansion_cases", "FT_EXPANSION_CASE_BUDGET", 1 << 10),         # 1,024
     ("render_bytes", "FT_RENDER_BYTES_BUDGET", 1 << 22),              # 4 MiB
     ("serialization_bytes", "FT_SERIALIZATION_BYTES_BUDGET", 1 << 26),  # 64 MiB
+    ("serialization_nodes", "FT_SERIALIZATION_NODE_BUDGET", None),
     ("envelope_headroom_bytes", "FT_ENVELOPE_HEADROOM_BYTES", 1 << 25),  # 32 MiB
 )
 

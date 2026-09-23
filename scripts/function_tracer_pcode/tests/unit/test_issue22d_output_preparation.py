@@ -32,7 +32,9 @@ from scripts.function_tracer_pcode.checker.output_preparation import (
     FieldOwner,
     OutputEnvelopeInvariantViolation,
     OutputField,
+    OutputOptions,
     OutputPreparer,
+    Overflow,
     PreparedPayloadStale,
     RESULT_FIELDS,
     build_final_result_envelope,
@@ -54,6 +56,7 @@ from scripts.function_tracer_pcode.core.budget_policy import (
 )
 from scripts.function_tracer_pcode.core.errors import (
     ExpressionSizeBudgetExceeded,
+    LimitationAfterFinalization,
     PairStopState,
     pair_failure_scope,
     reset_pair_failure_scopes,
@@ -266,7 +269,8 @@ def test_d1_the_real_expander_stops_before_deduplication():
     assert any(ref.startswith("tree_nodes=") for ref in exc.evidence_refs)
     # target = (展開の所有 scope, MULTIEQUAL の op)
     owner, op_key = exc.target_key
-    assert owner is None and op_key
+    # 所有 scope は大きくなり得るので決定的な digest に落としてある
+    assert isinstance(owner, str) and len(owner) == 32 and op_key
     assert ledger.stop_state() is PairStopState.PAIR_TERMINAL_LIMITATION
 
 
@@ -713,7 +717,7 @@ def test_o3_m3_a_new_diagnostic_field_is_one_output_row(monkeypatch):
 
     extra = OutputField(
         "extra_observation", FieldOwner.METADATA,
-        lambda r: (True, {"observed": 1}), truncatable=True,
+        lambda r, o: (True, {"observed": 1}), Overflow.TRUNCATE,
     )
     monkeypatch.setattr(output_preparation, "RESULT_FIELDS", RESULT_FIELDS + (extra,))
     after = json.loads(build_final_result_envelope(result).text)
@@ -878,11 +882,16 @@ def test_a_budget_hit_inside_the_conditional_lane_leaves_the_decision(monkeypatc
     checker = _new_checker(_connector())
     result, seen = _run_with_finish_spy(checker, _plan, monkeypatch)
     lane = result.diagnostics["conditional_lane"]
-    assert lane["conditional_lane"] == "failed"
-    assert "ExpressionSizeBudgetExceeded" in lane["error"]
+    assert lane == {
+        "conditional_lane": "stopped_by_limitation",
+        "reason_id": REASON,
+        "site": "core.render_smt.emit",
+    }
     assert result.final_outcome == "UNKNOWN"
     assert result.conditional_decision_receipt is None
     assert seen[-1] == "finished"
+    # authority 確定後の限界は台帳へ記録されない（stop state は lane の前のまま）
+    assert result.pair_stop_state is None
 
 
 # ---------------------------------------------------------------------------
@@ -994,3 +1003,312 @@ def test_d6s_full_identity_of_a_depth_40_dag_does_not_expand_the_tree():
     assert structural_equals(left, right)
     assert structural_identity_digest(left) == structural_identity_digest(right)
     assert time.perf_counter() - started < 1.0
+
+
+# ---------------------------------------------------------------------------
+# bounded preparation の adversarial test（巨大な producer でも写すのを止める）
+# ---------------------------------------------------------------------------
+
+
+def _peak_allocation(function):
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+        function()
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+def _huge_result(**fields):
+    result = create_mock_result(is_equivalent=True)
+    for name, value in fields.items():
+        setattr(result, name, value)
+    return result
+
+
+_SMALL = BudgetPolicy(serialization_bytes=64_000, envelope_headroom_bytes=16_000)
+
+
+def test_a_huge_semantic_leaf_is_refused_without_being_copied():
+    """50 MB の文字列を持つ反例でも、予算に届いた時点で写すのをやめて限界にする。"""
+    huge = "日" * (50 * 1024 * 1024 // 3)
+    result = _huge_result(
+        counterexample=_CountingCounterexample({"x": huge}),
+    )
+
+    def _prepare():
+        with pair_failure_scope(("huge-leaf",), None), budget_policy_scope(_SMALL):
+            with pytest.raises(ExpressionSizeBudgetExceeded):
+                OutputPreparer(_SMALL).prepare(result)
+
+    started = time.perf_counter()
+    peak = _peak_allocation(_prepare)
+    assert time.perf_counter() - started < 1.0
+    assert peak < 4 * 1024 * 1024  # 巨大な文字列を encode / 複製していない
+
+
+def test_many_small_nodes_stop_at_the_budget():
+    result = _huge_result(sat_pair_info={"cases": list(range(2_000_000))})
+
+    def _prepare():
+        with pair_failure_scope(("many-small",), None), budget_policy_scope(_SMALL):
+            with pytest.raises(ExpressionSizeBudgetExceeded):
+                OutputPreparer(_SMALL).prepare(result)
+
+    started = time.perf_counter()
+    peak = _peak_allocation(_prepare)
+    assert time.perf_counter() - started < 1.0
+    assert peak < 4 * 1024 * 1024  # 2,000,000 要素の写しを作っていない
+
+
+def test_a_huge_diagnostic_is_replaced_by_a_marker_without_being_copied():
+    trace = SimpleNamespace(to_dict=lambda: {"records": ["t" * 1024] * 200_000})
+    result = _huge_result(debug_trace=trace, emit_debug_trace=True)
+    holder = {}
+
+    def _prepare():
+        holder["prepared"] = OutputPreparer(_SMALL).prepare(result)
+
+    peak = _peak_allocation(_prepare)
+    prepared = holder["prepared"]
+    marker = dict(prepared.fields)["debug_trace"]
+    assert marker["truncated"] is True and marker["original_items"] == 1
+    assert "debug_trace" in prepared.plan.to_diagnostic()["truncated_fields"]
+    assert peak < 4 * 1024 * 1024
+
+
+def test_a_shared_subtree_is_counted_per_reference_like_the_encoder():
+    shared = {"name": "共有😀", "items": list(range(50))}
+    value = {"left": shared, "right": [shared, shared], "nested": {"again": shared}}
+    projected, size = RESULT_JSON_POLICY.project_bounded(value)
+    assert projected == value
+    assert projected["left"] is not shared  # 写しは live な値と共有しない
+    assert size == _actual(value)
+
+
+def test_deeply_nested_containers_are_walked_without_python_recursion():
+    shallow = []
+    node = shallow
+    for _ in range(300):
+        node.append([])
+        node = node[-1]
+    projected, size = RESULT_JSON_POLICY.project_bounded(shallow)
+    assert projected == shallow and size == _actual(shallow)
+
+    deep = []
+    node = deep
+    for _ in range(100_000):
+        node.append([])
+        node = node[-1]
+    started = time.perf_counter()
+    assert RESULT_JSON_POLICY.value_bytes(deep) == 2 * 100_001
+    with pytest.raises(Exception) as caught:
+        RESULT_JSON_POLICY.project_bounded(deep, max_bytes=1000)
+    assert type(caught.value).__name__ == "JsonBudgetExhausted"
+    assert time.perf_counter() - started < 2.0
+
+
+@pytest.mark.parametrize("ensure_ascii", [False, True])
+def test_projection_counts_cjk_non_bmp_and_escapes_like_the_encoder(ensure_ascii):
+    policy = JsonEncodingPolicy(ensure_ascii=ensure_ascii)
+    value = {text: [text, {"k": text}] for text in _STRINGS[:-1]}
+    projected, size = policy.project_bounded(value)
+    assert projected == value
+    assert size == _actual(value, policy)
+    # 1 byte 手前の上限なら写しを作らずに止まる
+    with pytest.raises(Exception) as caught:
+        policy.project_bounded(value, max_bytes=size - 1)
+    assert type(caught.value).__name__ == "JsonBudgetExhausted"
+
+
+def test_a_long_string_is_counted_in_chunks_and_stops_early():
+    text = "😀" * 5_000_000
+    started = time.perf_counter()
+    assert RESULT_JSON_POLICY.string_bytes(text, max_bytes=100) == 101
+    assert time.perf_counter() - started < 0.1
+    assert RESULT_JSON_POLICY.string_bytes(text[:70_000]) == len(
+        json.dumps(text[:70_000], ensure_ascii=False).encode()
+    )
+
+
+# ---------------------------------------------------------------------------
+# 解析 1 件分の直列化（aggregate）
+# ---------------------------------------------------------------------------
+
+
+def _analysis_with_trees(count, depth=4):
+    from scripts.function_tracer_pcode.core.analysis import ReturnInfo
+
+    analysis = create_mock_analysis("func1", return_type="int")
+    analysis.returns = [
+        ReturnInfo(address=f"0x{index:x}", conditions=[], value=_shared_dag(depth, name=f"p{index}"))
+        for index in range(count)
+    ]
+    return analysis
+
+
+def test_the_snapshot_aggregate_refuses_before_building_the_tree_that_overflows(monkeypatch):
+    """1 つずつは小さい木が集まって予算を超える snapshot は、超える木を作る前に止まる。"""
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
+
+    analysis = _analysis_with_trees(200)
+    one_tree = estimate_legacy_dict_bytes(analysis.returns[0].value)
+    built = []
+    original = Expression._to_dict
+
+    def _counting(self, active):
+        if not active:
+            built.append(self)
+        return original(self, active)
+
+    monkeypatch.setattr(Expression, "_to_dict", _counting)
+    policy = BudgetPolicy(serialization_bytes=one_tree * 50, envelope_headroom_bytes=0)
+    with pair_failure_scope(("aggregate",), None) as ledger, budget_policy_scope(policy):
+        with pytest.raises(ExpressionSizeBudgetExceeded) as caught:
+            AnalysisSnapshot.from_function_analysis(analysis)
+    assert caught.value.site == "proof.obligations.snapshot.from_function_analysis"
+    assert "budget=serialization_bytes" in caught.value.evidence_refs
+    assert len(built) < 50  # 超えた木は作っていない
+    assert ledger.stop_state() is PairStopState.PAIR_TERMINAL_LIMITATION
+
+
+def test_the_aggregate_distinct_node_budget_counts_shared_nodes_once():
+    from scripts.function_tracer_pcode.core.analysis import ReturnInfo
+
+    shared = _shared_dag(20)
+    analysis = create_mock_analysis("func1", return_type="int")
+    analysis.returns = [
+        ReturnInfo(address=f"0x{index}", conditions=[], value=shared) for index in range(3)
+    ]
+    # 21 distinct node（共有は 1 回）: 21 なら通り、20 なら止まる
+    with pair_failure_scope(("nodes-ok",), None), budget_policy_scope(
+        BudgetPolicy(serialization_nodes=21)
+    ):
+        analysis.to_dict()
+    with pair_failure_scope(("nodes",), None), budget_policy_scope(
+        BudgetPolicy(serialization_nodes=20)
+    ):
+        with pytest.raises(ExpressionSizeBudgetExceeded) as caught:
+            analysis.to_dict()
+    assert "budget=serialization_nodes" in caught.value.evidence_refs
+    assert caught.value.site == "core.analysis.FunctionReturnAnalysis.to_dict"
+
+
+# ---------------------------------------------------------------------------
+# authority 前 / 後の限界
+# ---------------------------------------------------------------------------
+
+
+def test_a_render_overflow_before_finalization_is_a_pair_terminal_limitation():
+    from scripts.function_tracer_pcode.core.errors import enter_pair_finalization
+
+    expr = _published_wide_expression()
+    full = expression_to_smt(expr)
+    with pair_failure_scope(("before",), None) as ledger, budget_policy_scope(
+        _policy(render_bytes=len(full) - 1)
+    ):
+        with pytest.raises(ExpressionSizeBudgetExceeded):
+            expression_to_smt(expr)
+        assert ledger.pending_failure() is not None
+    with pair_failure_scope(("after",), None) as ledger, budget_policy_scope(
+        _policy(render_bytes=len(full) - 1)
+    ):
+        assert enter_pair_finalization() is True
+        with pytest.raises(LimitationAfterFinalization) as caught:
+            expression_to_smt(expr)
+        assert caught.value.limitation.reason_id == REASON
+        # authority 確定後は台帳へ記録しない（判定を変えない）
+        assert ledger.pending_failure() is None
+        assert ledger.stop_state() is PairStopState.NONE
+
+
+def test_a_nested_scope_cannot_finalize_the_outer_pair():
+    identity = ("same-pair",)
+    with pair_failure_scope(identity, None) as outer:
+        with pair_failure_scope(identity, None) as inner:
+            assert inner is outer
+            assert inner.enter_finalization() is False
+        assert outer.is_finalized() is False
+        assert outer.enter_finalization() is True
+
+
+def test_the_pair_boundary_finalizes_after_preparing_the_output(monkeypatch):
+    seen = []
+    original = production_boundary._profiled_finish
+
+    def _spy(connector, session, result):
+        from scripts.function_tracer_pcode.core.errors import current_pair_ledger
+
+        seen.append((result.prepared_semantic_payload is not None, current_pair_ledger().is_finalized()))
+        return original(connector, session, result)
+
+    monkeypatch.setattr(production_boundary, "_profiled_finish", _spy)
+
+    def _plan(*_args, **_kwargs):
+        _emit_one_production_signal()
+        return create_mock_result(is_equivalent=None, solver_status=SolverStatus.UNKNOWN)
+
+    _run_pair(analyze=_analyze_from(*_analyses()), stage_plan=_plan, checker=_new_checker(_connector()))
+    assert seen == [(True, True)]
+
+
+# ---------------------------------------------------------------------------
+# 出力 option は準備時に 1 回だけ決まる
+# ---------------------------------------------------------------------------
+
+
+def _traced_result(emit):
+    result = create_mock_result(is_equivalent=None)
+    result.debug_trace = SimpleNamespace(to_dict=lambda: {"records": ["r"]}, __bool__=lambda: True)
+    result.emit_debug_trace = emit
+    return result
+
+
+@pytest.mark.parametrize("prepared_with, flipped_to", [(True, False), (False, True)])
+def test_the_debug_option_is_fixed_when_the_output_is_prepared(prepared_with, flipped_to):
+    result = _traced_result(prepared_with)
+    result.prepared_semantic_payload = OutputPreparer(BudgetPolicy.unlimited()).prepare(result)
+    result.emit_debug_trace = flipped_to  # 準備の後で flag を変えても
+    payload = result.to_dict()
+    envelope = build_final_result_envelope(result)
+    # 添付の有無は準備時の option のまま（to_dict と最終 envelope で同じ）
+    assert ("debug_trace" in payload) is prepared_with
+    assert ("debug_trace" in envelope.payload) is prepared_with
+
+
+def test_the_smt_formula_is_a_prepared_artifact_that_never_blocks_a_decision():
+    from scripts.function_tracer_pcode.checker.output_preparation import prepared_smt_formula
+
+    result = create_mock_result(is_equivalent=True)
+    result.smt_formula = "(assert true)" * 10_000
+    small = BudgetPolicy(serialization_bytes=20_000, envelope_headroom_bytes=0)
+    # 頼まれていなければ準備しない
+    not_asked = OutputPreparer(BudgetPolicy.unlimited()).prepare(result, OutputOptions())
+    assert not_asked.smt_formula.text is None
+    # 頼まれて収まれば準備済みの文字列、収まらなければ省く（限界にしない）
+    asked = OutputOptions(include_smt_formula=True)
+    with pair_failure_scope(("formula",), None) as ledger, budget_policy_scope(small):
+        result.prepared_semantic_payload = OutputPreparer(small).prepare(result, asked)
+        assert ledger.pending_failure() is None
+    artifact = prepared_smt_formula(result)
+    assert artifact.text is None and artifact.omitted_over_bytes == 20_000
+    result.prepared_semantic_payload = OutputPreparer(BudgetPolicy.unlimited()).prepare(result, asked)
+    assert prepared_smt_formula(result).text == result.smt_formula
+
+
+def test_metadata_counters_are_truncated_not_turned_into_a_limitation():
+    """診断カウンタが大きくても、pair terminal な UNKNOWN にはならない。"""
+    result = _decided_result()
+    result.pairwise_debug_stats = {f"k{index}": index for index in range(200_000)}
+    prepared = result.prepared_semantic_payload
+    limit = prepared.plan.prepared_bytes + 400_000
+    result.prepared_semantic_payload = dataclasses.replace(
+        prepared,
+        plan=dataclasses.replace(prepared.plan, max_bytes=limit, headroom_bytes=limit - 1),
+    )
+    envelope = build_final_result_envelope(result)
+    assert "pairwise_debug_stats" in envelope.truncated_metadata
+    assert envelope.payload["pairwise_debug_stats"]["truncated"] is True
+    assert envelope.payload["final_outcome"] == result.final_outcome

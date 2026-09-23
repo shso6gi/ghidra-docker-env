@@ -380,7 +380,18 @@ def test_debug_trace_to_dict_machine_readable(mock_program_x86):
                 assert "total_time" in parsed["debug_trace"]
 
             # debug 指定が無いときは key だけが消え、object 上の trace は残る。
+            # Issue #22 PR-22-D: 添付するかは出力の準備時に 1 回だけ決まる
+            # （`OutputOptions`）ので、指定を変えたら準備し直す。
+            from scripts.function_tracer_pcode.checker.output_preparation import (
+                OutputOptions,
+                OutputPreparer,
+            )
+            from scripts.function_tracer_pcode.core.budget_policy import BudgetPolicy
+
             result.emit_debug_trace = False
+            result.prepared_semantic_payload = OutputPreparer(
+                BudgetPolicy.unlimited()
+            ).prepare(result, OutputOptions.for_result(result))
             withheld = result.to_dict()
             assert "debug_trace" not in withheld
             assert result.debug_trace is not None

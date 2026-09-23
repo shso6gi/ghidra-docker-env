@@ -1292,6 +1292,10 @@ def derive_memory_effect_bit_width(returns, effect_summary, expr_bit_width) -> i
     return max(0, int(expr_bit_width(synthetic_expr) or 0))
 
 
+#: 解析 1 件分の直列化の作業量を数える観測点（`ExpressionSizeBudgetExceeded.site`）。
+ANALYSIS_SERIALIZATION_SITE = "core.analysis.FunctionReturnAnalysis.to_dict"
+
+
 @dataclass
 class FunctionReturnAnalysis:
     """関数のreturn値解析結果"""
@@ -1602,6 +1606,23 @@ class FunctionReturnAnalysis:
         self.deferred_calls = normalized
 
     def to_dict(self) -> Dict:
+        # Issue #22 PR-22-D: 解析 1 件分の木表現は **まとめて** 1 つの直列化。
+        # 式ごとの見積りはこの作業量へ足され、合計が予算を超えたら次の木を
+        # 作る前に止まる（`core/budget_policy.serialization_scope`）。
+        from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+
+        with serialization_scope(
+            site=ANALYSIS_SERIALIZATION_SITE,
+            target_parts=(
+                "function_return_analysis",
+                self.binary_id,
+                self.function_name,
+                self.entry_point,
+            ),
+        ):
+            return self._to_dict_unscoped()
+
+    def _to_dict_unscoped(self) -> Dict:
         result = {
             "function_name": self.function_name,
             "entry_point": self.entry_point,

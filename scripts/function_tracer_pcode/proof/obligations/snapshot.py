@@ -138,6 +138,10 @@ class SnapshotFingerprintCodec:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+#: snapshot 1 つ分の直列化の作業量を数える観測点。
+SNAPSHOT_SERIALIZATION_SITE = "proof.obligations.snapshot.from_function_analysis"
+
+
 @dataclass(frozen=True)
 class AnalysisSnapshot:
     snapshot_id: Tuple[Any, ...]
@@ -171,6 +175,24 @@ class AnalysisSnapshot:
         to_dict = getattr(analysis, "to_dict", None)
         if not callable(to_dict):
             raise TypeError("analysis must provide object-derived to_dict() data")
+        # Issue #22 PR-22-D: snapshot 1 つ分（解析の `to_dict()` と効果要約の投影）
+        # を 1 つの直列化の作業量として数える。木表現を作る前に予算と比べるので、
+        # 超過する snapshot は作られない（pair terminal な限界）。
+        from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+
+        with serialization_scope(
+            site=SNAPSHOT_SERIALIZATION_SITE,
+            target_parts=(
+                "function_analysis_snapshot",
+                getattr(analysis, "binary_id", None),
+                getattr(analysis, "function_name", None),
+                getattr(analysis, "entry_point", None),
+            ),
+        ):
+            return cls._from_function_analysis_unscoped(analysis, to_dict)
+
+    @classmethod
+    def _from_function_analysis_unscoped(cls, analysis: Any, to_dict: Any) -> "AnalysisSnapshot":
         semantic_fields = dict(to_dict())
         # These fields describe execution/diagnostic state rather than the
         # immutable extraction premise.  Proofs are applied through a derived

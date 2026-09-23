@@ -662,6 +662,18 @@ def graph_representation_digest(graph: ImmutableSemanticGraph) -> Optional[str]:
     return digest.hexdigest()
 
 
+def stable_atoms_digest(value: Any) -> str:
+    """primitive の入れ子を **型を落とさずに** 決定的に digest する（hex 32 文字）。
+
+    `id()` にも `repr()` にも依存しない（未知の型は型名だけ）。大きくなり得る
+    key（解析 scope key など）を、外へ出す短い識別子へ落とすときに使う。
+    """
+
+    digest = hashlib.blake2b(digest_size=16, person=b"stable-atoms-v1")
+    digest.update(_encode_atoms_to_bytes(value))
+    return digest.hexdigest()
+
+
 def _encode_atoms_to_bytes(value: Any) -> bytes:
     """atom を **型を落とさずに** 決定的な byte 列へ符号化する。
 

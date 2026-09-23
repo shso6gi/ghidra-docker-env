@@ -14,7 +14,10 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.core.budget_policy import BudgetKind, enforce_budget
-from scripts.function_tracer_pcode.core.semantic_snapshot import SemanticGraphMeter
+from scripts.function_tracer_pcode.core.semantic_snapshot import (
+    SemanticGraphMeter,
+    stable_atoms_digest,
+)
 from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
 from scripts.function_tracer_pcode.core.semantic_freeze import freeze_expression
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
@@ -298,8 +301,12 @@ class MultiequalExpansionMixin:
             if multiequal_pcode_op_ref is not None
             else _pcode_op_stable_key(multiequal_op)
         )
+        # scope key は大きくなり得る primitive の入れ子なので、決定的な digest に
+        # 落として target にする（authority の cause identity へそのまま入る）。
         target_key = (
-            getattr(getattr(self, "_budget_sink", None), "owner_scope_key", None),
+            stable_atoms_digest(
+                getattr(getattr(self, "_budget_sink", None), "owner_scope_key", None)
+            ),
             op_key,
         )
         evidence = (

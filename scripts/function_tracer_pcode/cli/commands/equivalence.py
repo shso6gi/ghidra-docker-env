@@ -26,6 +26,7 @@ from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.checker.output_preparation import (
     OutputEnvelopeInvariantViolation,
     build_final_result_envelope,
+    prepared_smt_formula,
 )
 # Issue #124 PR-124-B: `result_emit` は結果 JSON の外（journal）にだけ残す区間。
 from scripts.function_tracer_pcode.core.stage_journal import (
@@ -744,17 +745,25 @@ def run_equivalence_check(args):
             f"render={render_seconds:.3f} total={time.monotonic() - emission_started:.3f}"
         )
 
-    if args.save_formula and result.smt_formula:
+    # Issue #22 PR-22-D: 保存する SMT 式は authority 確定前に準備した成果物だけ
+    # （予算を超えていれば省かれている。判定には効かない）。
+    formula = prepared_smt_formula(result)
+    if args.save_formula and formula.omitted_over_bytes is not None:
+        print(
+            "SMT formula was not saved: it exceeds the serialization budget "
+            f"({formula.omitted_over_bytes} bytes)"
+        )
+    if args.save_formula and formula.text:
         if not args.quiet:
             print("\nGenerated SMT Formula:")
             print("-" * 70)
-            print(result.smt_formula)
+            print(formula.text)
             print("-" * 70)
 
         if args.output:
             smt_output = args.output.rsplit(".", 1)[0] + ".smt2"
             with open(smt_output, "w") as handle:
-                handle.write(result.smt_formula)
+                handle.write(formula.text)
             print(f"SMT formula saved to: {smt_output}")
 
     if getattr(result, "decision_receipt", None) is not None:

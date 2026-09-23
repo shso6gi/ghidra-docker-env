@@ -123,25 +123,47 @@ class JsonEncodingPolicy:
             parts.append(chunk)
         return "".join(parts)
 
-    # -- 見積り --------------------------------------------------------------
+    # -- 見積りと上限付きの写し -----------------------------------------------
 
-    def string_bytes(self, text: str) -> int:
-        """文字列 1 つを JSON 文字列として書いたときの byte 数（引用符を含む）。"""
+    def _string_chunk_bytes(self, text: str) -> int:
+        """引用符を除いた、文字列の一部を書いたときの byte 数。"""
 
         if self.ensure_ascii:
-            total = len(text) + 2
+            total = len(text)
             for match in _ESCAPE_ASCII.finditer(text):
                 char = match.group(0)
                 if char in _SHORT_ESCAPES:
                     total += 1
                 elif ord(char) > 0xFFFF:
-                    total += 11  # surrogate pair: \\uXXXX\\uXXXX
+                    total += 11  # surrogate pair: \uXXXX\uXXXX
                 else:
-                    total += 5  # \\uXXXX
+                    total += 5  # \uXXXX
             return total
-        total = (len(text) if text.isascii() else len(text.encode("utf-8", "surrogatepass"))) + 2
+        total = len(text) if text.isascii() else len(text.encode("utf-8", "surrogatepass"))
         for match in _ESCAPE_UNICODE.finditer(text):
             total += 1 if match.group(0) in _SHORT_ESCAPES else 5
+        return total
+
+    def string_bytes(self, text: str, *, max_bytes: Optional[int] = None) -> int:
+        """文字列 1 つを JSON 文字列として書いたときの byte 数（引用符を含む）。
+
+        `max_bytes` を渡すと、超えた時点で `max_bytes + 1` を返して残りを数えない
+        （長い文字列を一度に encode しない: `_STRING_CHUNK` 文字ずつ数える）。
+        1 文字は少なくとも 1 byte なので、文字数だけで超えると分かればそこで止まる。
+        """
+
+        if max_bytes is not None and len(text) + 2 > max_bytes:
+            return max_bytes + 1
+        if max_bytes is None or len(text) <= _STRING_CHUNK:
+            total = self._string_chunk_bytes(text) + 2
+            if max_bytes is not None and total > max_bytes:
+                return max_bytes + 1
+            return total
+        total = 2
+        for start in range(0, len(text), _STRING_CHUNK):
+            total += self._string_chunk_bytes(text[start:start + _STRING_CHUNK])
+            if total > max_bytes:
+                return max_bytes + 1
         return total
 
     def _key_bytes(self, key: Any) -> int:
@@ -172,60 +194,148 @@ class JsonEncodingPolicy:
     ) -> int:
         """`value` を書いたときの byte 数（`max_bytes` を超えたら `max_bytes + 1`）。
 
-        走査は反復で、文字列は作らない。上限を超えた時点で残りを見ない。循環参照は
-        `json` と同じく `ValueError`。JSON にできない型は既定で `TypeError`（`json`
-        と同じ契約）。`opaque_bytes` を渡すと、その型の値をその byte 数で数える
-        （JSON へは書かない表現 — 式の木表現など — の大きさを測るとき用）。
+        値は写さない（`project_bounded` と同じ走査で数えるだけ）。
         """
 
+        try:
+            return self._walk(value, max_bytes, opaque_bytes, build=False)[1]
+        except JsonBudgetExhausted:
+            return max_bytes + 1
+
+    def project_bounded(
+        self,
+        value: Any,
+        *,
+        max_bytes: Optional[int] = None,
+        opaque_bytes: Optional[Callable[[Any], int]] = None,
+    ) -> Tuple[Any, int]:
+        """`value` を **上限まで** 写す。写した値と、それを書いたときの byte 数を返す。
+
+        live な値（結果が持つ dict / list / 文字列）を、出力へ置く凍結した写しに
+        変える唯一の道。写しながら数えるので、`max_bytes` を超えた時点で
+        `JsonBudgetExhausted` を上げてそれ以上写さない — 写す量は残りの予算
+        （+ 超えたことに気付いた 1 要素）までに収まる。container の型（list /
+        tuple / dict）は保つ（`copy.deepcopy` と同じ形）。文字列と scalar は
+        immutable なので参照のまま置く。JSON にならない値は `opaque_bytes` で数え、
+        参照のまま置く（JSON にできるかの判定は最終 encoder が行う）。
+        """
+
+        return self._walk(value, max_bytes, opaque_bytes, build=True)
+
+    def _walk(self, value, max_bytes, opaque_bytes, *, build):
         item_separator = utf8_length(self.item_separator)
         key_separator = utf8_length(self.key_separator)
         total = 0
+
+        def charge(size: int) -> None:
+            nonlocal total
+            total += size
+            if max_bytes is not None and total > max_bytes:
+                raise JsonBudgetExhausted(consumed_bytes=total, max_bytes=max_bytes)
+
+        def remaining() -> Optional[int]:
+            return None if max_bytes is None else max_bytes - total
+
+        holder: List[Any] = [None]
         active = set()
-        stack: List[Tuple[Any, Any]] = [(_ENTER, value)]
-        while stack:
-            marker, item = stack.pop()
-            if marker is _EXIT:
-                active.discard(id(item))
-                continue
+        # frame: [kind, iterator, out, parent, parent_key, count, source_id]
+        stack: List[List[Any]] = []
+
+        def place(parent, key, item) -> None:
+            if not build:
+                return
+            parent[key] = item
+
+        def enter(item, parent, key) -> None:
             if item is None:
-                size = 4
+                charge(4)
             elif item is True:
-                size = 4
+                charge(4)
             elif item is False:
-                size = 5
+                charge(5)
             elif isinstance(item, str):
-                size = self.string_bytes(item)
+                limit = remaining()
+                charge(self.string_bytes(item, max_bytes=limit))
             elif isinstance(item, int):
-                size = len(int.__repr__(item))
+                charge(len(int.__repr__(item)))
             elif isinstance(item, float):
-                size = len(_float_text(item))
+                charge(len(_float_text(item)))
             elif isinstance(item, (list, tuple, dict)):
-                marker_id = id(item)
-                if marker_id in active:
+                source_id = id(item)
+                if source_id in active:
                     raise ValueError("Circular reference detected")
-                active.add(marker_id)
-                stack.append((_EXIT, item))
-                count = len(item)
-                size = 2 + max(0, count - 1) * item_separator
+                active.add(source_id)
+                charge(2)
                 if isinstance(item, dict):
-                    size += count * key_separator
-                    for key, child in item.items():
-                        size += self._key_bytes(key)
-                        stack.append((_ENTER, child))
+                    out = {} if build else None
+                    iterator = iter(item.items())
+                    kind = "dict"
                 else:
-                    for child in item:
-                        stack.append((_ENTER, child))
+                    out = [] if build else None
+                    iterator = iter(item)
+                    kind = "tuple" if isinstance(item, tuple) else "list"
+                stack.append([kind, iterator, out, parent, key, 0, source_id, item])
+                return
             elif opaque_bytes is not None:
-                size = int(opaque_bytes(item))
+                charge(int(opaque_bytes(item)))
             else:
                 raise TypeError(
                     f"Object of type {type(item).__name__} is not JSON serializable"
                 )
-            total += size
-            if max_bytes is not None and total > max_bytes:
-                return max_bytes + 1
-        return total
+            place(parent, key, item)
+
+        enter(value, holder, 0)
+        while stack:
+            frame = stack[-1]
+            kind, iterator, out, parent, key, count, source_id, source = frame
+            try:
+                child = next(iterator)
+            except StopIteration:
+                stack.pop()
+                active.discard(source_id)
+                if build:
+                    if kind == "tuple":
+                        if type(source) is tuple:
+                            out = tuple(out)
+                        elif hasattr(source, "_fields"):  # NamedTuple
+                            out = type(source)(*out)
+                        else:
+                            out = type(source)(out)
+                    elif kind == "list" and type(source) is not list:
+                        out = type(source)(out)
+                    elif kind == "dict" and type(source) is not dict:
+                        out = type(source)(out)
+                place(parent, key, out)
+                continue
+            if count:
+                charge(item_separator)
+            frame[5] = count + 1
+            if kind == "dict":
+                child_key, child_value = child
+                charge(self._key_bytes(child_key) + key_separator)
+                enter(child_value, out if build else None, child_key)
+            else:
+                if build:
+                    out.append(None)
+                enter(child, out if build else None, count)
+        return holder[0], total
+
+
+class JsonBudgetExhausted(AnalysisFailureError):
+    """`project_bounded` が上限に達した（写すのをそこで止めた）。
+
+    `consumed_bytes` は止めた時点までに数えた byte 数（上限 + 1 以上）で、値全体の
+    大きさではない（残りは数えていない）。
+    """
+
+    def __init__(self, *, consumed_bytes: int, max_bytes: Optional[int]) -> None:
+        super().__init__(f"JSON projection exceeded {max_bytes} bytes")
+        self.consumed_bytes = int(consumed_bytes)
+        self.max_bytes = max_bytes
+
+
+#: 長い文字列を数えるときの 1 回分の文字数（上限に届いたら残りを数えない単位）。
+_STRING_CHUNK = 1 << 16
 
 
 #: 結果 JSON（CLI が書く `EQUIVALENCE_RESULT_JSON`）の書き方。**唯一の定義**。
@@ -234,6 +344,7 @@ RESULT_JSON_POLICY = JsonEncodingPolicy()
 
 
 __all__ = [
+    "JsonBudgetExhausted",
     "JsonEncodingPolicy",
     "JsonOutputLimitExceeded",
     "RESULT_JSON_POLICY",

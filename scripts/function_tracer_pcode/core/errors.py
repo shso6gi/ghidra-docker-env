@@ -279,6 +279,27 @@ class ExpressionSizeBudgetExceeded(AnalysisLimitation):
         )
 
 
+class LimitationAfterFinalization(Exception):
+    """pair の出力を確定した **後** に上がった限界（Issue #22 PR-22-D）。
+
+    出力の準備（authority 確定の直前）を終えた pair では、新しい意味の限界を
+    台帳へ記録しない — 記録しても判定はもう変えられず（receipt 後に UNKNOWN へ
+    差し替える経路は作らない）、記録だけが残ると「限界があったのに結果に出て
+    いない」状態になる。代わりにこの型で上げ、authority 確定後の consumer
+    （conditional lane のような非 authoritative な処理）が自分の結果だけを
+    fail closed にする。
+
+    `AnalysisFailureError` 族に **しない**: 族に入ると gate が内部バグとして
+    拾い直してしまう。元の限界は `limitation` に持つ。
+    """
+
+    def __init__(self, limitation: "AnalysisLimitation") -> None:
+        super().__init__(
+            f"{limitation.reason_id} after the pair output was finalized: {limitation}"
+        )
+        self.limitation = limitation
+
+
 # ---------------------------------------------------------------------------
 # pair 単位の実行制御（Issue #106 PR-106-0）
 # ---------------------------------------------------------------------------
@@ -542,7 +563,7 @@ def classify_typed_failure(exc: BaseException) -> Optional[_PairFailureRecord]:
 class PairExecutionControl:
     """pair 境界が持つ実行制御の **安定 interface**（`PairFailureLedger` が実装）。
 
-    consumer（workflow / reanalysis / checker / production boundary）はこの 6 つ
+    consumer（workflow / reanalysis / checker / production boundary）はこの 8 つ
     しか使わない。記録の保存形式・畳み込み・優先順位の解決・stop state の
     escalation は **すべて実装側** にあるので、それらを変えても consumer は
     変わらない。診断・test 専用の窓口はここに入れない（実装側に置く）。
@@ -574,6 +595,13 @@ class PairExecutionControl:
     def allows_finalization(self) -> bool:
         raise NotImplementedError
 
+    def enter_finalization(self) -> bool:
+        """出力を確定した（以後の限界は記録せず `LimitationAfterFinalization`）。"""
+        raise NotImplementedError
+
+    def is_finalized(self) -> bool:
+        raise NotImplementedError
+
 
 class PairFailureLedger(PairExecutionControl):
     """1 pair / 1 session ぶんの failure 記録・畳み込み・優先順位・stop state。
@@ -590,8 +618,30 @@ class PairFailureLedger(PairExecutionControl):
         self._fold_keys: set = set()
         self._exception_ids: set = set()
         self._stop_state = PairStopState.NONE
+        #: 同じ台帳を共有している scope の深さ（再入）。finalization へ入れるのは
+        #: 台帳を作った最外の scope だけ（入れ子の境界が外側の pair を閉じない）。
+        self._depth = 0
+        self._finalized = False
 
     # -- identity ----------------------------------------------------------
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def enter_finalization(self) -> bool:
+        """この pair の出力を確定した（以後、新しい限界を記録しない）。
+
+        出力の準備（authority 確定の直前）を終えた pair 境界が 1 回だけ呼ぶ。
+        入れ子で再入している scope からの呼び出しは無視する（外側の pair の
+        意味解析がまだ続いているため）。入ったかどうかを返す。
+        """
+
+        if self._depth > 1:
+            return False
+        self._finalized = True
+        return True
+
+    def is_finalized(self) -> bool:
+        return self._finalized
 
     def matches(self, pair_identity: Any, session_identity: Any) -> bool:
         return (
@@ -738,9 +788,12 @@ def pair_failure_scope(
         else:
             ledger = PairFailureLedger(pair_identity, session_identity)
             _PAIR_LEDGERS.append(ledger)
+        ledger._depth += 1
     try:
         yield ledger
     finally:
+        with _PAIR_LEDGER_LOCK:
+            ledger._depth -= 1
         if not reentrant:
             with _PAIR_LEDGER_LOCK:
                 if _PAIR_LEDGERS and _PAIR_LEDGERS[-1] is ledger:
@@ -794,13 +847,30 @@ def raise_limitation(
 
     先に記録するのは、途中の `except Exception` が例外を握り潰しても
     「限界があった」事実を pair 境界が読めるようにするため。
+
+    pair の出力を確定した後（`PairFailureLedger.enter_finalization`）は記録せず、
+    `LimitationAfterFinalization` を上げる（Issue #22 PR-22-D、計画 §4.6）。
     """
     if not isinstance(exc, AnalysisLimitation):
         raise TypeError("raise_limitation needs an exact analysis limitation")
     ledger = current_pair_ledger()
     if ledger is not None:
+        if ledger.is_finalized():
+            # 出力を確定した後: 意味の限界にはしない（判定を変えられないため）
+            raise LimitationAfterFinalization(exc) from exc
         ledger.record_limitation(exc, stop=stop)
     raise exc
+
+
+def enter_pair_finalization() -> bool:
+    """今の pair の出力を確定した（pair 境界が出力の準備の直後に 1 回呼ぶ）。
+
+    scope の外では何もしない。入れ子で再入している scope からの呼び出しは
+    外側の pair を閉じない（`PairFailureLedger.enter_finalization`）。
+    """
+
+    ledger = current_pair_ledger()
+    return False if ledger is None else ledger.enter_finalization()
 
 
 def record_internal_bug(exc: BaseException, *, site: str) -> None:

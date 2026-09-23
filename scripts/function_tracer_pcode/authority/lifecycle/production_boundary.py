@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.checker.pair_execution import (
 )
 from scripts.function_tracer_pcode.core.errors import (
     AnalysisFailureError,
+    enter_pair_finalization,
     pair_failure_scope,
 )
 # Issue #22 PR-22-D: 式サイズ予算の scope（台帳と同じ寿命）と、authority 確定前の
@@ -349,13 +350,18 @@ def _run_legacy_with_pair_gate(
             function_name2=function_name2,
             start_time=started,
         )
-    return prepare_pair_output(  # G4-b
+    result = prepare_pair_output(  # G4-b
         checker,
         result,
         function_name1=function_name1,
         function_name2=function_name2,
         start_time=started,
+        save_formula=bool(kwargs.get("save_formula", False)),
     )
+    # 出力を確定した: 以後（finish・conditional lane）に上がる限界は台帳へ
+    # 記録されず、判定を変えない（`LimitationAfterFinalization`）。
+    enter_pair_finalization()
+    return result
 
 
 def run_check_from_binaries_with_v2_pilot(

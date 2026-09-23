@@ -61,8 +61,10 @@ class BudgetKind(str, Enum):
     EXPANSION_CASES = "expansion_cases"
     #: solver へ渡す SMT 項 1 つの byte 数（`CountingWriter` が数える）
     RENDER_BYTES = "render_bytes"
-    #: 直列化 1 つ（結果 JSON / 式の木表現）の byte 数（`core/json_encoding` が数える）
+    #: 直列化 1 つ（結果 JSON / 解析 1 件分の木表現）の byte 数（`core/json_encoding` が数える）
     SERIALIZATION_BYTES = "serialization_bytes"
+    #: 直列化 1 つ（解析 1 件分の木表現）が扱う distinct な式 node の数
+    SERIALIZATION_NODES = "serialization_nodes"
 
 
 def _check_limit(name: str, value: Any) -> Optional[int]:
@@ -85,6 +87,7 @@ class BudgetPolicy:
     expansion_cases: Optional[int] = None
     render_bytes: Optional[int] = None
     serialization_bytes: Optional[int] = None
+    serialization_nodes: Optional[int] = None
     #: `serialization_bytes` のうち、authority 確定 **後** に足される field
     #: （判定・canonical reason・receipt・finalization bundle・診断）のために
     #: 出力の準備（authority 確定前）が空けておく byte 数。準備した payload が
@@ -311,6 +314,101 @@ def raise_render_budget_exceeded(exc: Any, *, subject: Any) -> NoReturn:
     )
 
 
+# ---------------------------------------------------------------------------
+# 直列化の作業量（aggregate）
+# ---------------------------------------------------------------------------
+
+
+class SerializationWork:
+    """1 回の直列化（解析 1 件分など、複数の木表現の集まり）の作業量。
+
+    木表現は式 1 つずつ作られるが、予算を当てるのは **まとめて 1 つの出力になる
+    単位**（`AnalysisSnapshot` なら解析 1 件）。式ごとに見るだけだと、1 つずつは
+    小さい木が数千個集まって巨大になる場合を止められない。
+
+    数えるのは 2 つ: 木表現の byte の合計（同じ式を 2 回書けば 2 回数える =
+    出力の大きさ）と、扱った distinct な式 node の数（共有は 1 回 = 走査の量）。
+    どちらも木を **作る前** に足し、超えたらその木を作らずに限界にする。
+    """
+
+    __slots__ = ("site", "_target_parts", "tree_bytes", "trees", "_meter")
+
+    def __init__(self, *, site: str, target_parts: Tuple[Any, ...]) -> None:
+        from scripts.function_tracer_pcode.core.semantic_snapshot import (
+            SemanticGraphMeter,
+        )
+
+        self.site = str(site)
+        self._target_parts = tuple(target_parts)
+        self.tree_bytes = 0
+        self.trees = 0
+        self._meter = SemanticGraphMeter()
+
+    @property
+    def distinct_nodes(self) -> int:
+        return self._meter.distinct_nodes
+
+    def remaining_bytes(self, policy: BudgetPolicy) -> Optional[int]:
+        limit = policy.serialization_bytes
+        return None if limit is None else max(0, limit - self.tree_bytes)
+
+    def target_key(self) -> Tuple[str, str]:
+        from scripts.function_tracer_pcode.core.semantic_snapshot import (
+            stable_atoms_digest,
+        )
+
+        return ("serialization", stable_atoms_digest(self._target_parts))
+
+    def charge_tree(self, root: Any, tree_bytes: int) -> None:
+        """木を 1 つ作る前に、その大きさと node を足して予算と比べる。"""
+
+        self.trees += 1
+        self.tree_bytes += int(tree_bytes)
+        self._meter.add_root(root)
+        evidence = (
+            f"trees={self.trees}",
+            f"tree_bytes={self.tree_bytes}",
+            f"distinct_nodes={self.distinct_nodes}",
+        )
+        for kind, observed in (
+            (BudgetKind.SERIALIZATION_BYTES, self.tree_bytes),
+            (BudgetKind.SERIALIZATION_NODES, self.distinct_nodes),
+        ):
+            enforce_budget(
+                kind, observed, site=self.site,
+                target_key=self.target_key(), evidence=evidence,
+            )
+
+
+_SERIALIZATION = threading.local()
+
+
+@contextmanager
+def serialization_scope(*, site: str, target_parts: Tuple[Any, ...]) -> Iterator[SerializationWork]:
+    """直列化 1 つ分の作業量を数える scope（入れ子は外側へ合流する）。
+
+    解析 1 件分の `to_dict()` を開く側（`FunctionReturnAnalysis.to_dict` /
+    `AnalysisSnapshot.from_function_analysis`）が開き、その中で作られる木表現は
+    すべて同じ作業量へ足される。scope の外で単独に呼ばれた `Expression.to_dict`
+    は、その 1 本だけの作業量になる。thread ごとに持つ（直列化は同期処理で、
+    別 thread の直列化と合算しない）。
+    """
+
+    stack = getattr(_SERIALIZATION, "stack", None)
+    if stack is None:
+        stack = []
+        _SERIALIZATION.stack = stack
+    if stack:
+        yield stack[-1]
+        return
+    work = SerializationWork(site=site, target_parts=target_parts)
+    stack.append(work)
+    try:
+        yield work
+    finally:
+        stack.pop()
+
+
 def enforce_budget(
     kind: BudgetKind,
     observed: int,
@@ -346,4 +444,6 @@ __all__ = [
     "observe_budget_usage",
     "raise_expression_size_budget_exceeded",
     "raise_render_budget_exceeded",
+    "serialization_scope",
+    "SerializationWork",
 ]
