@@ -45,7 +45,6 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
     Deadline,
     Exit,
     FileBoundary,
-    HarnessRecords,
     NoProjectionToClassify,
     NoWorkerStarted,
     ProjectionWrite,
@@ -55,6 +54,7 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
     SupervisorEntryRefused,
     SupervisorPathMismatch,
     WorkerOutlivedSupervisor,
+    allocate_invocation_ordinal,
     classify,
     crash_at,
     launch_evidence,
@@ -324,17 +324,17 @@ def test_a_crash_right_after_projecting_keeps_that_projection(tmp_path):
         assert classify(run)["canonical_outcome"] == "ERROR"
 
 
-def _allocate(root):
-    return HarnessRecords(root).allocate_invocation().invocation.ordinal
+def test_invocation_identity_allocation_is_unique_across_processes(tmp_path):
+    """並行 process の identity 確保は重複しない。
 
-
-def test_invocation_identities_stay_unique_across_concurrent_processes(tmp_path):
-    """並行に起動した supervisor（#165 T15）でも identity が重複しない。"""
+    同じ case で supervisor を並行に起動したときの意味（競合・lock・recovery）は
+    未定義で、#165 T15 が決める。ここで固定するのは identity の確保だけ。
+    """
 
     import multiprocessing
 
     with multiprocessing.get_context("fork").Pool(8) as pool:
-        ordinals = pool.map(_allocate, [tmp_path] * 32)
+        ordinals = pool.map(allocate_invocation_ordinal, [tmp_path] * 32)
     assert sorted(ordinals) == list(range(32))
 
 
@@ -492,3 +492,26 @@ def test_a_worker_that_fails_before_its_stop_points_is_not_a_normal_run(tmp_path
     with supervisor_case(tmp_path, script) as case:
         with pytest.raises(SupervisorPathMismatch, match="never passed its launch check"):
             run_supervisor(case)
+
+
+def test_inputs_that_change_while_classifying_make_the_run_stale(tmp_path, monkeypatch):
+    """分類の途中で store が変わったら、その結果をこの run の分類として返さない。
+
+    crash した run の worker が生き残って store を書くような競合を、production の
+    分類器を包んで再現する（test 側の monkeypatch）。
+    """
+
+    from scripts.function_tracer_pcode.authority.decision import canonical_result
+
+    with supervisor_case(tmp_path, ChildScript((Exit(3),))) as case:
+        run = run_supervisor(case)
+        original = canonical_result.classify_pair_status
+
+        def _store_changes_meanwhile(*args, **kwargs):
+            result = original(*args, **kwargs)
+            (case.store_directory / "written-meanwhile.json").write_text("{}", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(canonical_result, "classify_pair_status", _store_changes_meanwhile)
+        with pytest.raises(StaleRunObservation, match="written-meanwhile.json"):
+            classify(run)

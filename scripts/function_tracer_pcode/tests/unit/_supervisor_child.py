@@ -4,7 +4,9 @@
 ``python -m scripts.function_tracer_pcode.tests.unit._supervisor_child '<spec>'``
 として supervisor の barrier から exec される。何をするかは parent が
 ``ChildScript``（step の列 + 停止点）で決め、child はそれを production の
-API だけで実行する。
+API で実行する。例外は canonical TIMEOUT の driver で、solver 境界だけを
+``execution_authority._PINNED_PARALLEL_RUN_IMPL``（既存 test と同じ差し替え口）で
+TIMEOUT に固定する。
 
 * 最初に **launch-before-exec** を child 自身が確かめる: ``launch.json`` が
   既に durable で、``ProcessWorkerRuntime.from_environment()``（署名・PID・

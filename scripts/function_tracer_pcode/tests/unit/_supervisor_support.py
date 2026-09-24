@@ -116,7 +116,7 @@ __all__ = (
     "supervisor_identity", "supervisor_config", "supervisor_case",
     "run_supervisor", "restart_supervisor", "worker_alive", "SupervisorEntry",
     "SupervisorEntryRefused", "SupervisorPathMismatch", "NoWorkerStarted",
-    "WorkerOutlivedSupervisor", "HarnessRecords",
+    "WorkerOutlivedSupervisor", "allocate_invocation_ordinal",
     "classify", "launch_evidence", "StoreSnapshot",
     "ChildScript", "Checkpoint", "Envelope", "Exit", "Stop", "Fault",
     "FileBoundary", "ProjectionWrite", "ChildStopped", "Deadline", "crash_at",
@@ -332,7 +332,26 @@ def classify(run: SupervisorRun) -> Mapping[str, Any]:
     case = run.case
     if run.projection is None:
         raise NoProjectionToClassify(f"{run.invocation} published no projection")
-    now = classification_inputs(case)
+    _require_unchanged_inputs(run)
+    config = case.config
+    try:
+        return classify_pair_status(
+            case.pair_log, run.records.projection,
+            checkpoint_root=config.checkpoint_root,
+            execution_nonce=config.execution_nonce,
+            supervisor_signing_key_id=config.supervisor_signing_key_id,
+            supervisor_signing_key_file=config.supervisor_signing_key_file,
+            worker_signing_key_id=config.worker_signing_key_id,
+            worker_signing_key_file=config.worker_signing_key_file,
+        )
+    finally:
+        # 分類の途中で入力が変わった（crash した run の生き残った worker が
+        # store を書いた等）なら、その結果も拒否もこの run のものではない。
+        _require_unchanged_inputs(run)
+
+
+def _require_unchanged_inputs(run: SupervisorRun) -> None:
+    now = classification_inputs(run.case)
     changed = sorted(
         name for name in set(now) | set(run.classification_inputs)
         if now.get(name) != run.classification_inputs.get(name)
@@ -341,16 +360,16 @@ def classify(run: SupervisorRun) -> Mapping[str, Any]:
         raise StaleRunObservation(
             f"classification inputs changed after {run.invocation}: {changed}"
         )
-    config = case.config
-    return classify_pair_status(
-        case.pair_log, run.records.projection,
-        checkpoint_root=config.checkpoint_root,
-        execution_nonce=config.execution_nonce,
-        supervisor_signing_key_id=config.supervisor_signing_key_id,
-        supervisor_signing_key_file=config.supervisor_signing_key_file,
-        worker_signing_key_id=config.worker_signing_key_id,
-        worker_signing_key_file=config.worker_signing_key_file,
-    )
+
+
+def allocate_invocation_ordinal(root: Path) -> int:
+    """harness の記録 root で invocation identity を 1 つ確保し、その番号を返す。
+
+    identity 確保の並行安全性を harness 自身の test が確かめるための入口
+    （記録の配置は外へ出さない）。
+    """
+
+    return HarnessRecords(Path(root)).allocate_invocation().invocation.ordinal
 
 
 def launch_evidence(case: SupervisorCase, pid: int) -> tuple[Mapping[str, Any], ...]:

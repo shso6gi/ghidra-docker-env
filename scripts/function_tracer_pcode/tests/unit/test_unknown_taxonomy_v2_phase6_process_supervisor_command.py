@@ -27,6 +27,7 @@ supervisor・分類器のどれも mock しない。起動・鍵・identity・�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 
@@ -56,10 +57,16 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
 RESOLVED_KIND = "SupervisorCanonicalResultResolvedReceipt"
 
 
-def _envelope(case):
-    return json.loads(
-        (case.store_directory / "canonical-result-envelope.json").read_text(encoding="utf-8")
-    )
+def _store_file(run, name):
+    """run が終わった時点の store にあった file を読む（その bytes であることを確かめる）。"""
+
+    data = (run.case.store_directory / name).read_bytes()
+    assert hashlib.sha256(data).hexdigest() == run.store.digests[name], name
+    return json.loads(data)
+
+
+def _envelope(run):
+    return _store_file(run, "canonical-result-envelope.json")
 
 
 def _envelope_is_sealed(envelope):
@@ -214,14 +221,12 @@ def test_child_canonical_timeout_is_resolved_by_the_supervisor_and_classified_ti
         assert classified["authority_kind"] == RESOLVED_KIND
 
         # envelope（child）/ resolved receipt（supervisor）/ 分類の digest が一致する。
-        envelope = _envelope(case)
+        envelope = _envelope(run)
         assert _envelope_is_sealed(envelope)
         bundle = envelope["canonical_result_payload"]["canonical_result_finalization_bundle"]
         decision = bundle["decision_receipt"]["payload"]
         assert decision["outcome"] == "TIMEOUT"
-        receipt = json.loads(
-            (case.store_directory / "canonical-resolved-receipt.json").read_text(encoding="utf-8")
-        )
+        receipt = _store_file(run, "canonical-resolved-receipt.json")
         assert receipt["launch_receipt_digest"] == launch_digest
         assert receipt["child_returncode"] == timeout_code
         assert receipt["canonical_result_bundle_digest"] == bundle["bundle_digest"]
@@ -261,7 +266,7 @@ def test_child_canonical_unknown_is_resolved_and_classified_unknown(tmp_path):
         classified = classify(run)
         assert classified["canonical_outcome"] == "UNKNOWN"
         assert classified["classification_valid"] is True
-        bundle = _envelope(case)["canonical_result_payload"][
+        bundle = _envelope(run)["canonical_result_payload"][
             "canonical_result_finalization_bundle"
         ]
         assert classified["canonical_result_bundle_digest"] == bundle["bundle_digest"]
@@ -284,7 +289,7 @@ def test_corrupt_canonical_envelope_fails_closed(tmp_path, field, reseal):
     with _canonical_case(tmp_path, "UNKNOWN", corrupt=field, reseal=reseal) as case:
         run = run_supervisor(case)
         _assert_child_ran_under_this_launch(run)
-        envelope = _envelope(case)
+        envelope = _envelope(run)
         assert _envelope_is_sealed(envelope) is reseal
         bundle = envelope["canonical_result_payload"]["canonical_result_finalization_bundle"]
         assert (bundle["bundle_digest"] == envelope["canonical_result_bundle_digest"]) is (

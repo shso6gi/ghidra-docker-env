@@ -209,6 +209,7 @@ def terminate_leftover_workers(case: "SupervisorCase") -> None:
     書き換えうるので使わない。
     """
 
+    survivors = []
     for records in case.records.invocations():
         identity = records.child()
         if identity is None:
@@ -222,8 +223,12 @@ def terminate_leftover_workers(case: "SupervisorCase") -> None:
             while _process_alive(identity) and time.monotonic() < deadline:
                 time.sleep(0.01)
             if _process_alive(identity):
-                raise AssertionError(f"worker {identity.pid} survived SIGKILL")
+                survivors.append(identity.pid)
+                continue
         _reap_if_our_orphan(identity)
+    if survivors:
+        # 1 つ残っても、ほかの invocation の worker は止め終えてから知らせる。
+        raise AssertionError(f"workers {survivors} survived SIGKILL")
 
 
 def _reap_if_our_orphan(identity: ChildIdentity) -> None:

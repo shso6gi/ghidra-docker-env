@@ -287,7 +287,12 @@ def install_deadline_control(
     def controlled(self: Any, process: Any, diagnostic: Any, real_deadline: float) -> Any:
         started = invocation.child()
         if started is None or started.pid != process.pid:
-            raise AssertionError(f"{invocation.invocation} did not record the worker it started")
+            # production の run() の中なので、例外にすると _resume() に飲まれて
+            # 別の原因に見える。この invocation の status に書いて落ちる。
+            write_json(invocation.status, {
+                "exception": f"{invocation.invocation} did not record the worker it started",
+            })
+            os._exit(70)
         marker = harness.child(started).stopped
         while not marker.exists():
             if process.poll() is not None or time.monotonic() >= real_deadline:
