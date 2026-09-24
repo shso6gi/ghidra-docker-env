@@ -4,8 +4,9 @@
 
 * supervisor（``supervisor_command``）が作る disposition と、E（``child-exit.json``）
   に残す signal の結果。
-* 分類器・pair-status の封（``canonical_result`` / ``pair_status_authority``）と
-  reporting が行う「rc と disposition の join」。
+* 終端の projection（``terminal_projection``。supervisor と分類器が共有）、
+  pair-status の封（``pair_status_authority``）、reporting が行う
+  「rc と disposition の join」。
 
 どれも同じ関数で判定し、別 module に条件を写さない。この module は標準
 library しか import しない（process の起動・store・分類器に依存しない）。

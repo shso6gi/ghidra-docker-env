@@ -239,7 +239,7 @@ class Step:
     kind: StepKind
     invalid_code: Optional[InvalidCode] = None
     detail: Optional[str] = None
-    #: FINALIZE_ERROR の stage。
+    #: BEGIN_ARCHIVE / FINALIZE_ERROR の stage（A が固定し、ERROR が封をする）。
     error_stage: Optional[str] = None
 
     @property
@@ -592,7 +592,9 @@ def _supervisor_error_progress(s: TerminalSnapshot) -> Step:
             "error stage",
         )
     if live.state == CheckpointState.RESOLVED:
-        return _progress(StepKind.BEGIN_ARCHIVE)
+        return _progress(
+            StepKind.BEGIN_ARCHIVE, error_stage=ErrorStage.NON_DECOMPILATION.value,
+        )
     return _invalid(
         InvalidCode.DURABLE_STATE_INCOMPLETE,
         f"error recovery cannot finish a {live.state} chain",

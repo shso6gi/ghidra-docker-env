@@ -97,7 +97,8 @@ def inspect(
     """durable authority を書かずに、supervisor と同じ判断で終端を読む。
 
     supervisor と同じ owner lock と store の flock を取る（終端処理の途中の
-    store を読まない。lock file が無ければ作るが、authority の file は書かない）。``mode`` が None なら E に記録された mode で読む。
+    store を読まない。lock file が無ければ作るが、authority の file は書かない）。
+    ``mode`` が None なら E に記録された mode で読む。
     採用する終端（ADOPT_*）なら ``drive`` と同じ ``adopt`` で authority を作る。
     """
 

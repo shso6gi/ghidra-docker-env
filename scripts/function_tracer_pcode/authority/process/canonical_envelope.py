@@ -17,7 +17,7 @@ snapshot と分類器）も、ここの関数だけで envelope を作り・検�
 ここで envelope と E の rc から決定的に作る。projection の field は持たない
 （``terminal_projection`` が終端の種類を横断して 1 つの owner として作る）。
 
-この module は ``contracts`` と ``store_layout`` しか import しない（store・分類器・process の
+この module は ``contracts`` しか import しない（store・分類器・process の
 起動に依存しない）。bundle の中身の検証は ``validate_bundle`` として受け取る。
 """
 
@@ -33,7 +33,6 @@ from scripts.function_tracer_pcode.authority.contracts import (
     Outcome,
     authority_digest,
 )
-from scripts.function_tracer_pcode.authority.process import store_layout as layout
 
 ENVELOPE_SCHEMA = "canonical-result-envelope-v1"
 _BODY_KEYS = frozenset({

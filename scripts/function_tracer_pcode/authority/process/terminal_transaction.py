@@ -26,7 +26,6 @@ from scripts.function_tracer_pcode.authority.process import checkpoint_archive a
 from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
     SUPERVISOR_EXIT_ERROR_KIND,
     CheckpointState,
-    ErrorStage,
 )
 from scripts.function_tracer_pcode.authority.process import terminal_evidence as evidence
 from scripts.function_tracer_pcode.authority.process import terminal_recovery as recovery
@@ -181,7 +180,7 @@ def _begin_archive(store: Any, step: recovery.Step, context: SnapshotContext) ->
         resolved_state_receipt_digest=chain.resolved.receipt_digest,
         anchor_state=anchor.state,
         error_kind=SUPERVISOR_EXIT_ERROR_KIND,
-        error_stage=ErrorStage.NON_DECOMPILATION.value,
+        error_stage=step.error_stage,
         destination=archive.history_destination(chain.resolved.receipt_digest),
         members=tuple(members),
     )

@@ -101,6 +101,7 @@ from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary impor
     ALLOWED_TRANSITIONS,
     BOOTSTRAP_CHECKPOINT_KIND,
     LAUNCH_RECEIPT_KIND,
+    OPERATIONAL_ERROR_RECEIPT_KIND,
     CheckpointState,
     SUPERVISOR_DEADLINE_STAGES,
     SUPERVISOR_OPERATIONAL_ERROR_KINDS,
@@ -396,7 +397,7 @@ class ProcessSupervisorAuthorityFactory:
         expected_roles = {
             LAUNCH_RECEIPT_KIND: "supervisor",
             "SupervisorTimeoutReceipt": "supervisor",
-            "SupervisorOperationalErrorReceipt": "supervisor",
+            OPERATIONAL_ERROR_RECEIPT_KIND: "supervisor",
             **{kind: "supervisor" for kind in TERMINAL_EVIDENCE_FILES},
             "RecoveryResolutionReceipt": "supervisor",
             "ProcessLiveRequirementAssignmentReceipt": "worker",
@@ -1585,7 +1586,7 @@ class ProcessSupervisorAuthorityFactory:
             "issuer_id": PROCESS_SUPERVISOR_ISSUER_ID,
         }
         return self._issue(
-            "SupervisorOperationalErrorReceipt", payload,
+            OPERATIONAL_ERROR_RECEIPT_KIND, payload,
             signer_role="supervisor",
         )
 
@@ -1601,7 +1602,7 @@ class ProcessSupervisorAuthorityFactory:
         self.validate(error)
         if (
             launch.receipt_kind != LAUNCH_RECEIPT_KIND
-            or error.receipt_kind != "SupervisorOperationalErrorReceipt"
+            or error.receipt_kind != OPERATIONAL_ERROR_RECEIPT_KIND
             or error.payload["launch_receipt_digest"] != launch.receipt_digest
         ):
             raise ValueError("operational error receipt/launch chain differs")
@@ -1711,7 +1712,7 @@ class ProcessSupervisorAuthorityFactory:
             ),
         }
         if (
-            error.receipt_kind != "SupervisorOperationalErrorReceipt"
+            error.receipt_kind != OPERATIONAL_ERROR_RECEIPT_KIND
             or error.payload["launch_receipt_digest"] != launch.receipt_digest
             or segment.worker_prefix_kind != expected_prefix_kind
             or segment.worker_prefix_digest != expected_prefix_digest

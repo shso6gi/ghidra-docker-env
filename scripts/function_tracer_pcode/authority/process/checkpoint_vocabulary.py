@@ -39,6 +39,8 @@ TIMEOUT_STATES = frozenset({CheckpointState.TIMED_OUT_CLAIMED, CheckpointState.T
 LAUNCH_RECEIPT_KIND = "SupervisorLaunchReceipt"
 #: deadline の後に supervisor が作る ACTIVE checkpoint（worker の prefix が無いとき）。
 BOOTSTRAP_CHECKPOINT_KIND = "SupervisorBootstrapCheckpointReceipt"
+#: supervisor が封をする operational ERROR の receipt。
+OPERATIONAL_ERROR_RECEIPT_KIND = "SupervisorOperationalErrorReceipt"
 
 
 #: supervisor が自分で終端として封をする ERROR の種類（child の終了を

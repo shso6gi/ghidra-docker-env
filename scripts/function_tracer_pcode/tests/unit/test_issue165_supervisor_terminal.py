@@ -553,6 +553,48 @@ def test_t10_deadline_only_restart_with_the_child_alive_is_invalid_and_does_not_
         assert not run.store.has(layout.CHILD_EXIT)
 
 
+_FLOCK_HOLDER = """
+import fcntl, os, time
+store = os.path.join(
+    os.environ["UNKNOWN_TAXONOMY_V2_SUPERVISOR_ROOT"],
+    os.environ["UNKNOWN_TAXONOMY_V2_EXECUTION_NONCE"],
+)
+lock = open(os.path.join(store, ".checkpoint-transaction.lock"), "a")
+fcntl.flock(lock, fcntl.LOCK_EX)
+open(os.path.join(store, "..", "flock-held"), "w").close()
+time.sleep(600)
+"""
+
+
+def test_a_failed_deadline_write_stops_the_child_before_waiting_on_the_store_flock(
+    tmp_path, monkeypatch,
+):
+    """D の書込みが失敗しても、store の flock を持って止まった child を先に止める。
+
+    run の例外経路は drive（store の flock を取る）へ入る。その前に child を
+    止めないと、flock を持ったままの child を待って supervisor が進まない
+    （harness の待ち上限で失敗する）。E は無いので終端は INVALID。
+    """
+    import sys
+
+    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+        ProcessSupervisorCommand,
+    )
+
+    def fail_to_record_deadline(self, *args, **kwargs):
+        raise OSError("deadline.json could not be written")
+
+    monkeypatch.setattr(ProcessSupervisorCommand, "_record_deadline", fail_to_record_deadline)
+    command = (sys.executable, "-B", "-c", _FLOCK_HOLDER)
+    with supervisor_case(tmp_path, command, timeout=1.0, kill_grace=0.5) as case:
+        run = run_supervisor(case)
+        assert (case.config.checkpoint_root / "flock-held").exists()
+        assert run.exit_code == 2 and run.projection["status"] == "INVALID"
+        assert not run.store.has(layout.DEADLINE)
+        assert not run.store.has(layout.CHILD_EXIT)
+        assert not worker_alive(run)
+
+
 def test_t10_deadline_only_restart_with_the_child_dead_is_invalid(tmp_path):
     with supervisor_case(tmp_path, ChildScript((Stop(),)), allow_child_exit_resolution=True) as case:
         first = run_supervisor(

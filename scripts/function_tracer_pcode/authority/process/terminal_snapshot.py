@@ -22,7 +22,6 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
-from scripts.function_tracer_pcode.authority.process import checkpoint_vocabulary as vocabulary
 from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.process import checkpoint_archive as archive
 from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
@@ -32,6 +31,8 @@ from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
     validate_canonical_envelope,
 )
 from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
+    BOOTSTRAP_CHECKPOINT_KIND,
+    OPERATIONAL_ERROR_RECEIPT_KIND,
     TIMEOUT_STATES,
     CheckpointState,
 )
@@ -262,7 +263,7 @@ def _read_pending(store: Any, context: SnapshotContext) -> recovery.PendingFact:
         recovery.Presence.VALID, transaction,
         checkpoint_digest=checkpoint.receipt_digest,
         prior_resolved_digest=checkpoint.payload.get("prior_resolved_receipt_digest"),
-        is_bootstrap=checkpoint.receipt_kind == vocabulary.BOOTSTRAP_CHECKPOINT_KIND,
+        is_bootstrap=checkpoint.receipt_kind == BOOTSTRAP_CHECKPOINT_KIND,
     )
 
 
@@ -367,7 +368,7 @@ def _read_live(store: Any, context: SnapshotContext) -> recovery.LiveChainFact:
     context.state, context.checkpoint, context.prefix = state, checkpoint, prefix
     return recovery.LiveChainFact(
         recovery.LiveKind.CHAIN, checkpoint_digest=checkpoint.receipt_digest,
-        is_bootstrap=checkpoint.receipt_kind == vocabulary.BOOTSTRAP_CHECKPOINT_KIND,
+        is_bootstrap=checkpoint.receipt_kind == BOOTSTRAP_CHECKPOINT_KIND,
         prior_resolved_digest=checkpoint.payload.get("prior_resolved_receipt_digest"),
         state=value, state_digest=state.receipt_digest,
         continuation=continuation, kill_disposition=kill_disposition,
@@ -405,7 +406,7 @@ def _read_error(store: Any, context: SnapshotContext) -> recovery.ErrorFact:
         if layout.OPERATIONAL_ERROR in members:
             error = _decode_file(store, store.directory / layout.OPERATIONAL_ERROR)
             if (
-                error.receipt_kind != "SupervisorOperationalErrorReceipt"
+                error.receipt_kind != OPERATIONAL_ERROR_RECEIPT_KIND
                 or error.payload["launch_receipt_digest"] != context.launch.receipt_digest
             ):
                 raise ValueError("operational error receipt does not join the launch")

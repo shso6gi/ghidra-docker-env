@@ -718,7 +718,11 @@ class ProcessSupervisorCommand:
                 return self._resume(ownership, launch)
             except Exception:
                 # 観測か永続化の途中で失敗した。E が durable でなければ drive が
-                # INVALID にする（rc も signal 死も推定しない）。
+                # INVALID にする（rc も signal 死も推定しない）。drive は store の
+                # flock を取るので、その前に child を止める（store の transaction の
+                # 中で止まった child が flock を持ったままでも、待ち続けない）。
+                if process is not None and process.poll() is None:
+                    self._cleanup_exact_process_group(process, start_token)
                 if launch is not None:
                     return self._resume(ownership, launch)
                 raise
