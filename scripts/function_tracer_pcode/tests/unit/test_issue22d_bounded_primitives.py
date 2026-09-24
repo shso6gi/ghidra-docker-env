@@ -944,9 +944,10 @@ def test_an_earlier_diagnostic_body_never_erases_a_later_field():
     present = [key for key in ("pairwise_stats", "stage_path", "diagnostics", "unknown_cause_aggregate")
                if key in natural.payload]
     assert "unknown_cause_aggregate" in present and "diagnostics" in present
-    # 先に準備する診断（pairwise_stats）を、後の field の本体の分より大きくする
-    result.pairwise_stats = {"pad": "p" * 200_000}
+    # 先に準備する診断（pairwise_stats）を、後の field の場所まで使えばちょうど入る大きさにする
+    later = sum(RESULT_JSON_POLICY.measure(natural.payload[key]) for key in ("diagnostics", "unknown_cause_aggregate"))
     limit = natural.total_bytes + 150_000
+    result.pairwise_stats = {"pad": "p" * (150_000 + later - 200)}
     prepared = result.prepared_semantic_payload
     result.prepared_semantic_payload = dataclasses.replace(
         prepared, plan=dataclasses.replace(prepared.plan, max_bytes=limit, headroom_bytes=limit - 1),
@@ -1134,7 +1135,8 @@ def test_scope_key_bytes_and_non_str_keys_are_charged_before_they_are_built():
         object.__setattr__(record, "owner_scope_key", scope)
         object.__setattr__(record, "_event_id_cache", "e" * 64)
         started = time.perf_counter()
-        _, _, peak = _measured(lambda: pytest.raises(JsonBudgetExhausted, RESULT_JSON_POLICY.prepare, record, max_bytes=100))
+        # 他の field（event_id など）は収まり、scope key の途中で止まる上限
+        _, _, peak = _measured(lambda: pytest.raises(JsonBudgetExhausted, RESULT_JSON_POLICY.prepare, record, max_bytes=2_000))
         assert time.perf_counter() - started < 0.5
         assert peak < 8 * 1024 * 1024
 
@@ -1262,3 +1264,29 @@ def test_recompose_with_the_real_seal_in_a_regime_the_production_validator_accep
     canonical_result.validate_canonical_result_finalization_bundle(
         envelope.payload[BUNDLE_KEY], result_payload_preimage=preimage,
     )
+
+
+def test_composition_refuses_markers_that_cannot_fit_instead_of_overflowing():
+    from scripts.function_tracer_pcode.checker.output_preparation import (
+        FieldOwner,
+        RESULT_FIELDS,
+        compose_result_preimage,
+    )
+
+    from scripts.function_tracer_pcode.checker.output_preparation import Overflow
+
+    result = _decided_result()
+    natural = compose_result_preimage(result)
+    # A + B と切り詰めてはいけない C は入るが、切り詰めてよい C は marker でも入らない
+    kept = [
+        item.key for item in RESULT_FIELDS
+        if item.owner is not FieldOwner.METADATA or item.overflow is not Overflow.TRUNCATE
+    ]
+    limit = RESULT_JSON_POLICY.measure({key: natural.payload[key] for key in kept if key in natural.payload}) + 20
+    prepared = result.prepared_semantic_payload
+    result.prepared_semantic_payload = dataclasses.replace(
+        prepared, plan=dataclasses.replace(prepared.plan, max_bytes=limit, headroom_bytes=limit - 1),
+    )
+    # 黙って省かず（marker すら無い field を作らず）、出力の契約違反にする
+    with pytest.raises(OutputEnvelopeInvariantViolation, match="does not fit even as markers"):
+        compose_result_preimage(result)
