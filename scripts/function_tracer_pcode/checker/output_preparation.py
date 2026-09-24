@@ -330,12 +330,16 @@ class OutputField:
         )
 
     def read_source(self, result: Any, options: "OutputOptions") -> Any:
-        """`read` の値。読み方が値の不備で落ちたら、その field の値は JSON にならない
-        （`JsonValueRejected`。切り詰めてよい field は `_prepare_member` が marker にする）。
+        """`read` の値。切り詰めてよい診断の読み方が値の不備で落ちたら、その値は JSON に
+        ならない（`_prepare_member` が marker にする。診断の欠陥で判定を変えない）。
         """
 
         from scripts.function_tracer_pcode.core.json_encoding import PRODUCER_FAILURES
 
+        if self.overflow is not Overflow.TRUNCATE:
+            # 切り詰めてはいけない field の読み方の失敗は、その owner の契約の失敗のまま上げる
+            # （A は準備の内部エラー、B / C は出力の失敗の ERROR）
+            return self.read(result, options)
         try:
             return self.read(result, options)
         except PRODUCER_FAILURES as exc:

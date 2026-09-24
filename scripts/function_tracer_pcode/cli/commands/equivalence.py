@@ -29,7 +29,12 @@ from scripts.function_tracer_pcode.checker.output_preparation import (
     prepared_smt_formula,
 )
 # Issue #124 PR-124-B: `result_emit` は結果 JSON の外（journal）にだけ残す区間。
-from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
+from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.core.json_encoding import (
+    JsonBudgetExhausted,
+    JsonOutputLimitExceeded,
+    JsonValueRejected,
+)
 from scripts.function_tracer_pcode.core.stage_journal import (
     journal_stage_end,
     journal_stage_start,
@@ -344,8 +349,8 @@ def _emit_import_error_result(
 #: authority 確定 **後** に最終 envelope を組むときの失敗（出力の契約違反と、準備・封印・書き出しの
 #: 内部の不備）。どれも判定を変えずに durable な ERROR にする（`_final_envelope_or_error_result`）
 _POST_AUTHORITY_OUTPUT_FAILURES = (
-    OutputEnvelopeInvariantViolation, AnalysisFailureError, ArithmeticError, AttributeError,
-    LookupError, RuntimeError, TypeError, ValueError,
+    OutputEnvelopeInvariantViolation, JsonValueRejected, JsonBudgetExhausted, JsonOutputLimitExceeded,
+    ArithmeticError, AttributeError, LookupError, RuntimeError, TypeError, ValueError,
 )
 
 
@@ -360,14 +365,22 @@ def _final_envelope_or_error_result(args, *, result, seal, **context):
     try:
         return build_final_result_envelope(result, seal=seal, fallback_policy=_cli_budget_policy())
     except _POST_AUTHORITY_OUTPUT_FAILURES as failure:
-        violation = failure if isinstance(failure, OutputEnvelopeInvariantViolation) else (
-            OutputEnvelopeInvariantViolation(
-                f"the final envelope could not be built ({type(failure).__name__}: {failure})",
-                max_bytes=None, requested_bytes=None,
-            )
-        )
-        _emit_output_invariant_error_result(args, result=result, violation=violation, **context)
+        _emit_output_failure_error(args, result=result, failure=failure, **context)
         raise  # pragma: no cover - 上の関数は sys.exit する
+    except AnalysisLimitation as limitation:
+        # authority 確定後に上がった限界は判定を変えない（UNKNOWN にしない）: 出力の失敗の ERROR
+        _emit_output_failure_error(args, result=result, failure=limitation, **context)
+        raise  # pragma: no cover - 上の関数は sys.exit する
+
+
+def _emit_output_failure_error(args, *, result, failure: BaseException, **context) -> None:
+    violation = failure if isinstance(failure, OutputEnvelopeInvariantViolation) else (
+        OutputEnvelopeInvariantViolation(
+            f"the final envelope could not be built ({type(failure).__name__}: {failure})",
+            max_bytes=None, requested_bytes=None,
+        )
+    )
+    _emit_output_invariant_error_result(args, result=result, violation=violation, **context)
 
 
 def _text_or_error_result(args, *, result, payload, **context):
