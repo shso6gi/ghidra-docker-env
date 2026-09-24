@@ -341,3 +341,106 @@ def test_the_tree_estimate_stops_on_the_distinct_node_total_across_siblings():
     assert full > limit
     # 上限で止まる見積りは、全部を数える見積りより十分に早い
     assert elapsed < full_elapsed / 4
+
+
+# ---------------------------------------------------------------------------
+# primitive ごとの作業量（mutation で外すと落ちる形）
+# ---------------------------------------------------------------------------
+
+
+def test_a_scan_charges_every_pulled_element_even_when_the_output_is_tiny():
+    from scripts.function_tracer_pcode.core.json_encoding import Tally, scan
+
+    pulled = []
+
+    def elements():
+        for index in range(1_000_000):
+            pulled.append(index)
+            yield index
+
+    # 結果は `{"0": n}` の 1 組だけ: 出力の byte ではなく、引き出す作業量で止まる
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.prepare(scan(elements(), Tally(lambda _item: 0)), max_bytes=1_000)
+    assert len(pulled) <= 1_001
+
+
+def test_the_fast_path_stops_on_container_frames_without_leaves():
+    empty_lists = [[] for _ in range(1_000_000)]
+    started = time.perf_counter()
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.measure(empty_lists, max_bytes=100)
+    assert time.perf_counter() - started < 0.2
+
+
+def test_token_fingerprints_charge_a_wide_mapping_before_sorting_it():
+    wide = {object(): index for index in range(1_000_000)}  # 非 canonical（key が object）
+    work = JsonBudget(10_000)
+    started = time.perf_counter()
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.token_fingerprint(wide, work=work)
+    assert time.perf_counter() - started < 0.5
+
+
+def test_long_strings_are_not_measured_past_the_caller_bound():
+    from scripts.function_tracer_pcode.core.json_encoding import cached_string_bytes
+
+    huge = "\x01" * (64 * 1024 * 1024)
+    started = time.perf_counter()
+    assert cached_string_bytes(RESULT_JSON_POLICY, huge, max_bytes=100) == 101
+    assert time.perf_counter() - started < 0.05
+
+
+def test_the_trace_totals_are_folded_under_the_walk_budget():
+    from scripts.function_tracer_pcode.checker.diagnostics import TraceTimingsView
+
+    rows = SimpleNamespace(results=[SimpleNamespace(elapsed_time=0.001)] * 1_000)
+    attempts = [SimpleNamespace(solver_results=rows, attempt_id="a", phase="P", strategy="s", elapsed_time=0.0)] * 5_000
+    result = SimpleNamespace(debug_trace=SimpleNamespace(attempts=attempts), solver_results=None)
+    started = time.perf_counter()
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.prepare(TraceTimingsView(result), max_bytes=10_000)
+    assert time.perf_counter() - started < 0.5
+    small = SimpleNamespace(debug_trace=SimpleNamespace(attempts=attempts[:2]), solver_results=None)
+    value = RESULT_JSON_POLICY.prepare(TraceTimingsView(small)).value()
+    assert value["solver_invocations"] == 2_000 and value["solver_seconds"] == pytest.approx(2.0)
+
+
+def test_the_cause_aggregate_reads_canonical_reasons_under_its_diagnostic_work():
+    from scripts.function_tracer_pcode.checker.cause_aggregate import attach_cause_aggregate
+
+    result = _decided_result()
+    prepared = result.prepared_semantic_payload
+    result.prepared_semantic_payload = dataclasses.replace(
+        prepared, plan=dataclasses.replace(prepared.plan, headroom_bytes=4_096),
+    )
+    result.unknown_reasons = list(result.unknown_reasons) * 200_000
+    result.unknown_cause_aggregate = None
+    started = time.perf_counter()
+    attach_cause_aggregate(result)
+    # 作業量（headroom）を超えれば集計は `error` を持つ値（診断の marker）。判定は変えない
+    assert "error" in result.unknown_cause_aggregate
+    assert time.perf_counter() - started < 2.0
+
+
+def test_the_diagnostic_artifacts_draw_on_one_shared_budget(monkeypatch):
+    from scripts.function_tracer_pcode.checker import output_preparation
+    from scripts.function_tracer_pcode.core.json_encoding import JsonEncodingPolicy
+
+    limits = []
+    original = JsonEncodingPolicy.prepare
+
+    def recording(self, source, *, max_bytes=None):
+        prepared = original(self, source, max_bytes=max_bytes)
+        limits.append((max_bytes, prepared.encoded_bytes))
+        return prepared
+
+    result = _decided_result()
+    monkeypatch.setattr(JsonEncodingPolicy, "prepare", recording)
+    policy = BudgetPolicy(serialization_bytes=1 << 26, envelope_headroom_bytes=1 << 25)
+    preparer = output_preparation.OutputPreparer(policy)
+    diagnostic = JsonBudget(policy.envelope_headroom_bytes)
+    preparer._prepare_limitation_evidence(result, diagnostic=diagnostic)
+    preparer._prepare_trace_timings(result, diagnostic=diagnostic)
+    first, second = limits[-2], limits[-1]
+    # 2 つ目は 1 つ目が使った分だけ少ない上限で準備する（それぞれが全体の上限を持たない）
+    assert second[0] == first[0] - first[1]
