@@ -2278,9 +2278,6 @@ _REGISTERED_UNBOUNDED_BUDGETS = {
     ("core/json_encoding.py", "_canonical_copy_uncounted"): "`tree()` が作る前に数え済みの木の canonical な複製",
     ("core/budget_policy.py", "<module>"): "予算を無効にした policy（`FT_*` で制限だけを外す。構造は同じ）",
     ("checker/cause_aggregate.py", "reason_detail_key"): "作業量の scope の外（部品単体の呼び出し）だけ",
-    ("core/runtime_refs/unknowns.py", "_canonical_budget_value"):
-        "producer 時点の identity（`stable_key` / `event_id`。key の大きさの owner は identity）。"
-        "出力は `_canonical_budget_source` が walk の作業量へ数える",
     ("checker/debug_trace.py", "DebugTrace._iter_phase_usage"):
         "人向けの phase 利用の一覧（出力の準備の外。出力は `phase_usage_source` が walk の作業量で畳む）",
     ("checker/unknown_reason.py", "iter_unknown_recovery_actions"):
@@ -2524,8 +2521,6 @@ _REGISTERED_UNBOUNDED_WALKS = {
         "scalar だけの固定の形の marker",
     ("checker/output_preparation.py", "OutputPreparer._prepare_trace_timings"):
         "scalar だけの固定の形の marker（`_truncation_marker`。schema の上限あり）",
-    ("checker/output_preparation.py", "_marker_upper_bytes"):
-        "scalar だけの固定の形の marker（`_truncation_marker`。schema の上限あり）",
     ("checker/output_preparation.py", "OutputPreparer._prepare_limitation_evidence"):
         "scalar だけの固定の形の marker",
     ("checker/diagnostics.py", "result_diagnostics_payload"):
@@ -2755,7 +2750,6 @@ _REGISTERED_WORK_SCOPES = {
     ("checker/unknown_reason.py", "iter_unknown_recovery_actions"): "J7 の登録（producer 時点の構築）",
     ("checker/debug_trace.py", "DebugTrace._iter_phase_usage"): "J7 の登録（人向けの一覧）",
     ("checker/cause_aggregate.py", "reason_detail_key"): "J7 の登録（作業量の scope の外）",
-    ("core/runtime_refs/unknowns.py", "_canonical_budget_value"): "J7 の登録（producer 時点の identity）",
 }
 
 

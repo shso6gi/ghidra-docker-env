@@ -15,7 +15,6 @@ by type.
 
 from __future__ import annotations
 
-import functools
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable, Mapping, Tuple
@@ -244,6 +243,10 @@ class ConditionalDecisionReceipt:
             raise ValueError("conditional decision assumption set is not canonical")
         if authority_digest(self.assumption_set) != self.assumption_set_digest:
             raise ValueError("conditional decision assumption set digest mismatch")
+        # receipt の契約（表現の上限）の外の集合は receipt にならない（Issue #22 PR-22-D）
+        over_bound = assumption_set_receipt_bound_violation(self.assumption_set)
+        if over_bound is not None:
+            raise ValueError(f"conditional decision receipt exceeds its contract: {over_bound}")
 
     @classmethod
     def from_persisted(
@@ -337,52 +340,41 @@ def assumption_set_payload(premises: Iterable[AssumptionPremise]) -> list:
     return [assumption_premise_payload(premise) for premise in premises]
 
 
-#: premise の中の binary 由来の名前（library 名・external の名前）1 つの文字数の上限。premise の
-#: 大きさの上限（`assumption_premise_max_bytes`）を導く receipt の契約の parameter（Issue #22
-#: PR-22-D）。これより長い名前を持つ premise の集合は receipt にしない（fail closed）。
+#: receipt の契約（Issue #22 PR-22-D）: conditional receipt が運ぶ仮定の数と、premise 1 つの JSON
+#: byte の上限。**receipt の表現の上限**（出力 schema の headroom の根拠）で、証明の能力の上限では
+#: ない。固定の parameter で、実行時に catalog を読まない（catalog の欠け・破損で全 pair の出力を
+#: 止めない）。値の根拠は今の catalog の形の見積もり — 名前（canonical 名と alias 名）の数 ×
+#: external import の provenance の種類 × 2 binary = 528 件（binary 1 つが名前 1 つに external を
+#: 1 つ持つ形。1 binary に同じ名前の external が複数あれば超え得る）、binary 由来の名前を
+#: `PREMISE_BINARY_LABEL_MAX_CHARS` 字・最悪の escape にした premise = 10,080 B — を 64 件・1 KiB の
+#: 単位へ切り上げた値。見積もりは `tests/unit/test_issue20_prb3_conditional_lane.py` が catalog から
+#: 求め、上限を超えると落ちる（catalog が育ったら上限と headroom を決め直す）。上限を超える集合は
+#: receipt にしない（lane は fail closed、発行・検証も拒む）。
+MAX_ASSUMPTION_PREMISES = 576
+ASSUMPTION_PREMISE_MAX_BYTES = 10_240
+#: 見積もりに使う binary 由来の名前（library 名・external の名前）1 つの文字数（receipt の契約の
+#: 根拠の parameter。長い名前の premise は `ASSUMPTION_PREMISE_MAX_BYTES` で拒まれる）
 PREMISE_BINARY_LABEL_MAX_CHARS = 256
 #: external function の名前の数（original imported name と自身の名前。`_external_symbol_names`）
 _EXTERNAL_SYMBOL_NAME_COUNT = 2
+#: `conditional_decision_receipt_payload` の固定長の member（id・digest・語彙）。`assumption_set` 以外
+CONDITIONAL_RECEIPT_FIXED_FIELDS = (
+    "result_occurrence_id", "conditional_outcome", "unconditional_outcome",
+    "unconditional_receipt_digest", "lifecycle_projection_digest", "assumption_set_digest",
+    "authority_input_digest", "receipt_digest",
+)
 
 
-@functools.lru_cache(maxsize=1)
 def assumption_premise_max_bytes() -> int:
-    """premise 1 つの JSON byte の上限（catalog と premise の形から導く）。
+    """premise 1 つの JSON byte の上限（receipt の契約の固定の parameter）。"""
 
-    catalog の各 entry について、binary 由来の名前を `PREMISE_BINARY_LABEL_MAX_CHARS` 字・最悪の
-    escape にした premise を作って数えた最大。出力 schema の `conditional_decision_receipt` の
-    上限はここから導く。
-    """
-
-    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
-    from scripts.function_tracer_pcode.proof.conditional_lane import worst_case_external_callee_spec_premises
-
-    # premise の形の owner が作る最悪の形を、receipt の表現（`assumption_premise_payload`）で数える
-    return max(
-        RESULT_JSON_POLICY.plain_bytes(assumption_premise_payload(premise)) or 0
-        for premise in worst_case_external_callee_spec_premises(
-            label_max_chars=PREMISE_BINARY_LABEL_MAX_CHARS, name_count=_EXTERNAL_SYMBOL_NAME_COUNT,
-        )
-    )
+    return ASSUMPTION_PREMISE_MAX_BYTES
 
 
-@functools.lru_cache(maxsize=1)
 def max_assumption_premises() -> int:
-    """conditional receipt が運ぶ仮定の数の上限（**形の上限**。証明の能力の上限ではない）。
+    """conditional receipt が運ぶ仮定の数の上限（**表現の上限**。証明の能力の上限ではない）。"""
 
-    premise は `EXTERNAL_CALLEE_SPEC` だけで、正規化した集合の中の premise は (catalog の名前
-    （canonical 名と alias 名）, provenance の種類, 側) で決まる。したがって well-formed な集合の
-    大きさは catalog から導ける: 名前の数 × `external_import` を満たす provenance の種類 × 2 側。
-    """
-
-    from scripts.function_tracer_pcode.analysis.effects.pure_function_catalog import (
-        EXTERNAL_IMPORT_PROVENANCE_KINDS,
-        load_pure_function_catalog,
-    )
-
-    catalog = load_pure_function_catalog()
-    names = len(catalog.entries) + len(catalog.alias_rules)
-    return names * len(EXTERNAL_IMPORT_PROVENANCE_KINDS) * 2
+    return MAX_ASSUMPTION_PREMISES
 
 
 def assumption_set_receipt_bound_violation(premises: Tuple[AssumptionPremise, ...]) -> Any:
@@ -508,6 +500,10 @@ def finalize_conditional_decision(
     than the whole assumption set is malformed and yields ``ERROR`` in the
     conditional column.  The unconditional decision is never touched.
     """
+    over_bound = assumption_set_receipt_bound_violation(tuple(authority.assumption_set))
+    if over_bound is not None:
+        # receipt の契約の外の集合は発行しない（lane は発行の前に確かめて fail closed にする）
+        raise ValueError(f"conditional decision receipt exceeds its contract: {over_bound}")
     projection = authority.lifecycle_projection
     unconditional = authority.unconditional_decision
     malformed = authority.malformed_authority

@@ -473,6 +473,7 @@ def parameter_descriptor_source(param: Dict[str, Any]) -> Any:
     )
 
 
+@source_converter
 def _parameter_value_source(value: Any) -> Any:
     from scripts.function_tracer_pcode.core.json_encoding import as_dict, as_list, raw
 

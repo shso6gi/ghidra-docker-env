@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
+from scripts.function_tracer_pcode.core.json_encoding import (as_list, bounded_repr, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
 )
@@ -745,7 +745,7 @@ class LoopTermDescriptorRef:
             source_converter(lambda term: inline(
                 ("modulus", int(term[0])),
                 ("residue", int(term[1])),
-                ("bias_expr", term[2] if is_json_record(term[2]) else repr(term[2])),
+                ("bias_expr", term[2] if is_json_record(term[2]) else bounded_repr(term[2])),
             )),
         )
 
@@ -1792,7 +1792,7 @@ class CountedLoopSummaryRef:
             source_converter(lambda term: inline(
                 ("modulus", int(term[0])),
                 ("residue", int(term[1])),
-                ("bias_expr", term[2] if is_json_record(term[2]) else repr(term[2])),
+                ("bias_expr", term[2] if is_json_record(term[2]) else bounded_repr(term[2])),
             )),
         )
 

@@ -14,6 +14,7 @@ from scripts.function_tracer_pcode.core.semantic_lifecycle import (
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.render_output import utf8_length
 from scripts.function_tracer_pcode.core.json_encoding import source_converter
+from scripts.function_tracer_pcode.core.builtin_containers import plain_field_value
 from scripts.function_tracer_pcode.core.render_python import (
     expression_to_string,
     get_python_operator,
@@ -1163,8 +1164,9 @@ def runtime_ref_source(value: Any) -> Any:
     if is_json_record(value):
         return value
     if is_dataclass(value) and not isinstance(value, type):
+        # field は instance の値だけを読む（field 名を上書きした property は producer: 呼ばない）
         return pairs_of(
-            (field.name, runtime_ref_source(getattr(value, field.name))) for field in fields(value)
+            (field.name, runtime_ref_source(plain_field_value(value, field.name))) for field in fields(value)
         )
     return inline(
         ("type", f"{type(value).__module__}.{type(value).__qualname__}"),

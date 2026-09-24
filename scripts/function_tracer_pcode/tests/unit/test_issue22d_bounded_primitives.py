@@ -875,7 +875,7 @@ def test_the_truncation_marker_fits_its_schema_bound_for_any_rejected_path():
     rejected = JsonValueRejected("x", path="$" + ".é " * 5_000)
     marker = _truncation_marker("diagnostics", list(range(10)), remaining_bytes=10 ** 18, rejected=rejected)
     assert len(marker["rejected_at"]) == output_schema.MARKER_PATH_MAX_CHARS
-    assert RESULT_JSON_POLICY.measure(marker) <= output_schema._truncation_marker_max_bytes(
+    assert RESULT_JSON_POLICY.measure(marker) <= output_schema.truncation_marker_max_bytes(
         RESULT_JSON_POLICY, "diagnostics",
     )
 
@@ -898,6 +898,14 @@ def test_a_wide_scope_key_in_a_truncation_record_is_charged_before_it_is_sorted(
 
     from collections.abc import Mapping as _Mapping
 
+    record = ExpansionBudgetTruncation(kind="k")
+    # 組み込みの mapping: 幅を数えた時点で止まる（100 万の key を文字列にして並べない）
+    wide = {f"k{index}": 0 for index in range(1_000_000)}
+    object.__setattr__(record, "owner_scope_key", (wide,))
+    object.__setattr__(record, "_event_id_cache", "e" * 64)
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.prepare(record, max_bytes=10_000)
+
     pulled = []
 
     class _Wide(_Mapping):
@@ -912,13 +920,11 @@ def test_a_wide_scope_key_in_a_truncation_record_is_charged_before_it_is_sorted(
         def __getitem__(self, key):
             return 0
 
-    record = ExpansionBudgetTruncation(kind="k")
+    # 組み込みでない mapping は辿らない（`__len__` / `__iter__` は producer）: 型名の不透明値
     object.__setattr__(record, "owner_scope_key", (_Wide(),))
-    object.__setattr__(record, "_event_id_cache", "e" * 64)
-    with pytest.raises(JsonBudgetExhausted):
-        RESULT_JSON_POLICY.prepare(record, max_bytes=10_000)
-    # 幅を数えた時点で止まる（100 万の key を並べるために引き出さない）
-    assert len(pulled) < 20_000
+    prepared = RESULT_JSON_POLICY.prepare(record, max_bytes=10_000).value()
+    assert pulled == []
+    assert prepared["owner_scope_key"][0][0] == "opaque"
 
 
 # ---------------------------------------------------------------------------

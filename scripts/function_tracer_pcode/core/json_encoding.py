@@ -40,6 +40,7 @@ method で、他の module は JSON の規則を計算しない。単位は UTF-
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import re
@@ -49,6 +50,7 @@ from enum import Enum
 from json.encoder import encode_basestring, encode_basestring_ascii
 from typing import Any, Callable, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
+from scripts.function_tracer_pcode.core.builtin_containers import builtin_mapping, builtin_sequence, plain_field_value
 from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
 from scripts.function_tracer_pcode.core.render_output import utf8_length
 
@@ -93,6 +95,10 @@ class JsonValueCycle(JsonValueRejected):
     """値が自分自身を含む（walker が辿っている容器・record に戻った）。"""
 
 
+class _OpaqueLeaf(JsonValueRejected):
+    """型つき token の列に、型名しか持たない葉が現れた（値の fingerprint にならない）。"""
+
+
 # ---------------------------------------------------------------------------
 # source の遅延構成子（producer が collection を渡す唯一の方法）
 # ---------------------------------------------------------------------------
@@ -118,6 +124,30 @@ def _is_converter(fn: Any) -> bool:
 def _require_converter(fn: Any, where: str) -> None:
     if not _is_converter(fn):
         raise TypeError(f"{where} takes a registered source_converter, not {fn!r}")
+
+
+def exception_text(exc: BaseException, max_chars: int = 80) -> str:
+    """例外の型名と、引数の先頭（`str(exc)` / `repr` を呼ばない。切り出してから連結する）。
+
+    引数は組み込みの `args`（上書きした `args` を読まない）の先頭 4 つだけで、`str` は
+    `max_chars` 字まで、scalar は桁数の上限の中で、それ以外は型名。bounded path の失敗の文は
+    これだけで作る（`KeyError(<重い key>)` の `repr` を作らない）。
+    """
+
+    parts: List[str] = []
+    args = BaseException.args.__get__(exc)
+    for arg in args[:4]:
+        kind = type(arg)
+        if kind is str:
+            parts.append(arg[:max_chars])
+        elif arg is None or kind is bool or kind is float:
+            parts.append(repr(arg))
+        elif kind is int:
+            parts.append(int.__repr__(arg) if arg.bit_length() <= 64 else "<int>")
+        else:
+            parts.append(f"<{kind.__qualname__}>")
+    name = type(exc).__qualname__
+    return (f"{name}: {', '.join(parts)}" if parts else name)[:max_chars + len(name) + 2]
 
 
 class _Source:
@@ -294,7 +324,22 @@ def pairs_of(
     `pairs` は generator でよい（walker が 1 組ずつ引き出す。1 回だけ辿る）。
     """
 
+    _require_converter(fn, "pairs_of")
     return _MappingOf(_PairsView(pairs), fn)
+
+
+def _is_one_shot(source: Any) -> bool:
+    """1 回しか辿れない列か（iterator、iterator を包む `each` / `pairs_of`）。辿った後は読み直せない。"""
+
+    if isinstance(source, _AbcIterator):
+        return True
+    kind = type(source)
+    if kind is _Each:
+        return isinstance(source.items, _AbcIterator)
+    if kind is _MappingOf:
+        mapping = source.mapping
+        return type(mapping) is _PairsView and not isinstance(mapping._pairs, (list, tuple, dict))
+    return False
 
 
 def inline(*pairs: Tuple[Any, Any]) -> _Source:
@@ -556,6 +601,9 @@ def text_value_max_bytes(policy: "JsonEncodingPolicy", max_chars: int) -> int:
 UNFINGERPRINTED_WORK_EXHAUSTED = "work_exhausted"
 UNFINGERPRINTED_CYCLE = "cycle"
 UNFINGERPRINTED_UNSUPPORTED = "unsupported"
+#: 値を持たない live な object（key も record の表現も field も無い）を含む: 型名しか分からないので
+#: 値の fingerprint を作らない（別の値を同じ fingerprint にしない）
+UNFINGERPRINTED_OPAQUE = "opaque"
 
 
 def _source_value(value: Any) -> Any:
@@ -582,11 +630,9 @@ def _value_kind(value: Any) -> str:
     elif isinstance(value, (_Nested, _Raw)):
         value = value.value
     name = type(value).__qualname__
-    if isinstance(value, (list, tuple, Mapping)):
-        try:
-            return f"{name}[{len(value)}]"[:EVIDENCE_KIND_MAX_CHARS]
-        except TypeError:
-            pass
+    # 組み込みの振る舞いの容器だけ長さを読む（上書きした `__len__` を呼ばない）
+    if builtin_sequence(value) or builtin_mapping(value) is not None:
+        return f"{name}[{len(value)}]"[:EVIDENCE_KIND_MAX_CHARS]
     return name[:EVIDENCE_KIND_MAX_CHARS]
 
 
@@ -661,6 +707,12 @@ class Column:
         return 5
 
 
+def column_identity(identity: Optional[str], column: str) -> Optional[str]:
+    """record の identity（例: `cause:<id>`）の、列 1 つ分の identity（`<identity>#<列>`）。"""
+
+    return None if identity is None else f"{identity}#{column}"
+
+
 def row_items(row: Tuple[Column, ...], record: Any, *, identity: Any = None):
     """`row` の列を `record` から読んで `(key, source)` を 1 つずつ返す（`json_items` の本体）。"""
 
@@ -669,7 +721,8 @@ def row_items(row: Tuple[Column, ...], record: Any, *, identity: Any = None):
         value = getattr(record, name)
         if column.omit_none and value is None:
             continue
-        yield column.key, column.source(value, identity, record)
+        # identity は列ごと（同じ record の別の列の値に同じ fingerprint を付けない）
+        yield column.key, column.source(value, column_identity(identity, column.key), record)
 
 
 def row_max_bytes(row: Tuple[Column, ...], policy: Optional["JsonEncodingPolicy"] = None) -> int:
@@ -707,6 +760,12 @@ def max_rows_within(max_bytes: int, row_min: int, policy: Optional["JsonEncoding
 # ---------------------------------------------------------------------------
 
 
+#: いま走っている walk の作業量（`_Walk.run` の間だけ）。その間に作った `JsonBudget` は子になる
+_ACTIVE_WORK: "contextvars.ContextVar[Optional[JsonBudget]]" = contextvars.ContextVar(
+    "json_encoding_active_work", default=None,
+)
+
+
 class JsonBudget:
     """walker が数えた byte を受け取る相手（上限を超えたら `exceeded()`）。
 
@@ -720,14 +779,27 @@ class JsonBudget:
         # （`tests/unit/test_architecture_boundaries.py` の J7）
         self.max_bytes = max_bytes
         self.consumed = 0
+        # walk の中（converter・reducer・`metered` の factory・`json_items`）で作った予算は、
+        # その walk の作業量の子: 数えた量を親へも数える（新しい scope で親の上限を逃れない）
+        self.parent = _ACTIVE_WORK.get()
 
     def remaining(self) -> Optional[int]:
-        return None if self.max_bytes is None else self.max_bytes - self.consumed
+        own = None if self.max_bytes is None else self.max_bytes - self.consumed
+        parent = self.parent
+        if parent is None:
+            return own
+        inherited = parent.remaining()
+        if own is None:
+            return inherited
+        return own if inherited is None else min(own, inherited)
 
     def charge(self, size: int) -> None:
-        self.consumed += int(size)
+        size = int(size)
+        self.consumed += size
         if self.max_bytes is not None and self.consumed > self.max_bytes:
             self.exceeded()
+        if self.parent is not None:
+            self.parent.charge(size)
 
     def exceeded(self) -> None:
         raise JsonBudgetExhausted(consumed_bytes=self.consumed, max_bytes=self.max_bytes)
@@ -1158,6 +1230,8 @@ def _evidence_summary(
         return _unfingerprinted(kind, UNFINGERPRINTED_WORK_EXHAUSTED, over)
     except JsonValueCycle:
         return _unfingerprinted(kind, UNFINGERPRINTED_CYCLE, over)
+    except _OpaqueLeaf:
+        return _unfingerprinted(kind, UNFINGERPRINTED_OPAQUE, over)
     except (JsonValueRejected,) + PRODUCER_FAILURES:
         return _unfingerprinted(kind, UNFINGERPRINTED_UNSUPPORTED, over)
 
@@ -1180,6 +1254,120 @@ def _stringified_key(key: Any, work: "JsonBudget") -> str:
     raise TypeError(f"mapping key {kind.__name__} is not stringified without its own __str__")
 
 
+def stringify_plain_key(key: Any, work: "JsonBudget") -> str:
+    """mapping の key の `str(key)`（scalar と scalar の tuple だけ。作る前に長さを `work` へ数える）。
+
+    それ以外（`__str__` / `__repr__` を持つ object）は `TypeError`（producer を呼ばない）。
+    """
+
+    if type(key) is str:
+        work.charge(1 + len(key))
+        return key
+    return _stringified_key(key, work)
+
+
+def bounded_repr(value: Any, max_chars: int = 256) -> str:
+    """組み込みの `repr` を上限の中でだけ使う（上書きした `__repr__` を呼ばない）。
+
+    `None` / bool / 数値は組み込みの `repr`（桁数が大きい整数は桁数だけ）、文字列は先頭
+    `max_chars` 文字の `repr`、それ以外は型名。
+    """
+
+    if value is None or value is True or value is False:
+        return repr(value)
+    if isinstance(value, int):
+        bits = int.bit_length(value)
+        return int.__repr__(int.__index__(value)) if bits <= 1024 else f"<int {bits} bits>"
+    if isinstance(value, float):
+        return float.__repr__(value)
+    if isinstance(value, str):
+        return str.__repr__(str.__str__(value[:max_chars] if len(value) > max_chars else value))
+    return f"<{type(value).__qualname__}>"
+
+
+#: 組み込みのままの enum の `__str__` / `__hash__`（上書きした enum は producer）
+_BUILTIN_ENUM_STR = frozenset({Enum.__str__, str.__str__, int.__repr__, int.__str__, object.__str__})
+_BUILTIN_HASH = frozenset({Enum.__hash__, str.__hash__, int.__hash__, object.__hash__})
+
+
+def _builtin_enum(value: Any) -> bool:
+    kind = type(value)
+    return isinstance(value, Enum) and kind.__str__ in _BUILTIN_ENUM_STR and kind.__hash__ in _BUILTIN_HASH
+
+
+def hashable_key(value: Any, work: "JsonBudget") -> Any:
+    """集計の key として hash・比較してよい値（hash する前に長さを `work` へ数える）。
+
+    文字列・scalar・組み込みのままの enum・`BoundedEvidence`（固定長）・scalar の tuple は
+    その値のまま（同じ値は同じ key）。それ以外（上書きした `__hash__` / `__eq__` を持ち得る
+    object）は、その object の identity の key（`hash` / `==` を呼ばない。別の object は
+    同じ値でも別の単位として数える — 集計を合併しない側へ倒す）。
+    """
+
+    kind = type(value)
+    if kind is str:
+        work.charge(1 + len(value))
+        return value
+    if value is None or kind is bool or kind is int or kind is float:
+        work.charge(1)
+        return value
+    if kind is BoundedEvidence or _builtin_enum(value):
+        work.charge(1)
+        return value
+    if kind is tuple and _is_plain_key_part(value, work):
+        return value
+    work.charge(1)
+    return ("<object>", kind.__qualname__, id(value))
+
+
+def renders_with_builtins(value: Any) -> bool:
+    """`str(value)` / `repr(value)` が組み込みの実装だけで作られるか（user code を呼ばないか）。
+
+    文字列・scalar・組み込みのままの enum・`BoundedEvidence` と、それらだけから成る組み込みの
+    容器（tuple / list / dict / set / frozenset。型そのもの）。判定は値の大きさに比例する（呼ぶ
+    側が数え済みの値だけに使う）。
+    """
+
+    pending = [value]
+    seen: set = set()
+    while pending:
+        item = pending.pop()
+        kind = type(item)
+        if kind is str or item is None or kind is bool or kind is int or kind is float:
+            continue
+        if kind is BoundedEvidence or _builtin_enum(item):
+            continue
+        if kind is tuple or kind is list or kind is set or kind is frozenset or kind is dict:
+            if id(item) in seen:
+                return False
+            seen.add(id(item))
+            if kind is dict:
+                pending.extend(item.keys())
+                pending.extend(item.values())
+            else:
+                pending.extend(item)
+            continue
+        return False
+    return True
+
+
+def builtin_str(value: Any) -> str:
+    """組み込みの `str` だけで作る文字列（`renders_with_builtins` な値。それ以外は型名の印）。
+
+    上書きした `__str__` / `__repr__`（producer）を呼ばない。組み込みで書ける値では `str(value)`
+    と同じ文字列。
+    """
+
+    kind = type(value)
+    if kind is str:
+        return value
+    if isinstance(value, str) and not isinstance(value, Enum):
+        return str.__str__(value)
+    if renders_with_builtins(value):
+        return str(value)
+    return f"<{kind.__qualname__}>"
+
+
 def _is_plain_key_part(part: Any, work: "JsonBudget") -> bool:
     """`part` が scalar と tuple だけから成るか（要素を数えながら確かめる。`str()` の手間も同じ量）。"""
 
@@ -1199,16 +1387,18 @@ def _is_plain_key_part(part: Any, work: "JsonBudget") -> bool:
     return True
 
 
-def identity_key_of(value: Any) -> Tuple[bool, Any]:
-    """producer の identity key（`stable_key()`、無ければ `to_key()`）。**bounded path がこれを呼ぶ唯一の場所**。
+def identity_key_of(value: Any, *, names: Tuple[str, ...] = ("stable_key", "to_key")) -> Tuple[bool, Any]:
+    """producer の identity key（`names` の順: 既定は `stable_key()`、無ければ `to_key()`）。
 
-    method は型から引く（instance の `__getattr__` を呼ばない）。key を作る仕事は identity の
-    owner の契約（#194）で、作業量を受け取らない — 本 PR の依存として 1 箇所に閉じる。返った
-    key は呼ぶ側が作業量の中で辿る。`(True, key)` か、key を持たなければ `(False, None)`。
+    **bounded path がこれを呼ぶ唯一の場所**。method は型から引く（instance の `__getattr__` を
+    呼ばない）。key を作る仕事は identity の owner の契約（#194）で、作業量を受け取らない —
+    本 PR の依存として 1 箇所に閉じる。返った key は呼ぶ側が作業量の中で辿る。`names` は
+    その値の identity の規則（例: 切り捨て事実は `stable_key` だけ）に合わせる。`(True, key)`
+    か、key を持たなければ `(False, None)`。
     """
 
     kind = type(value)
-    for name in ("stable_key", "to_key"):
+    for name in names:
         method = getattr(kind, name, None)
         if callable(method):
             return True, method(value)
@@ -1230,10 +1420,12 @@ def _unfingerprinted(kind: str, reason: str, over: int) -> BoundedEvidence:
     )
 
 
-def _printable_identity(identity: Any) -> str:
-    text_value = identity if isinstance(identity, str) else type(identity).__qualname__
-    text_value = str.__str__(text_value)[:EVIDENCE_IDENTITY_MAX_CHARS]
-    if not _PRINTABLE_WITHOUT_ESCAPE.fullmatch(text_value):
+def _printable_identity(identity: str) -> str:
+    """identity をそのまま書ける短い文字列に（長い・escape の要る identity は全体の digest。切り詰めない:
+    切り詰めると先頭が同じ別の identity が同じ fingerprint になる）。"""
+
+    text_value = str.__str__(identity)
+    if len(text_value) > EVIDENCE_IDENTITY_MAX_CHARS or not _PRINTABLE_WITHOUT_ESCAPE.fullmatch(text_value):
         text_value = "sha256:" + hashlib.sha256(text_value.encode("utf-8", "surrogatepass")).hexdigest()
     return text_value
 
@@ -1735,9 +1927,7 @@ class _Walk:
 
     def push(self, kind: str, iterator: Iterator[Any], parent: Any, key: Any, source: Any,
              *, build: bool, fn: Any = None, preserve_keys: bool = False) -> None:
-        if isinstance(source, _AbcIterator) or (
-            type(source) is _Each and isinstance(source.items, _AbcIterator)
-        ):
+        if _is_one_shot(source):
             self.entered_iterator = True
         # 閉路の判定は **参照している値**（record / 容器）の identity で行う。遅延構成子の
         # 包み（`each` など）はその場で作る一時 object なので、中身の値で数える。frame が
@@ -1832,7 +2022,8 @@ class _Walk:
                 self.count_only(item.summary(), raw_leaves=False)
                 self.place(parent, key, item, build)
             return
-        if isinstance(item, (Mapping, list, tuple)):
+        mapping = builtin_mapping(item)
+        if mapping is not None or builtin_sequence(item):
             if self.mode == LEGACY:
                 # 既に在る値への参照: 写さずに数え、元の object をそのまま置く
                 done, _ = self.plain(item, False)
@@ -1844,8 +2035,8 @@ class _Walk:
             if done:
                 self.place(parent, key, value, build)
                 return
-            if isinstance(item, Mapping):
-                self.push("dict", iter(item.items()), parent, key, item, build=build)
+            if mapping is not None:
+                self.push("dict", iter(mapping.items()), parent, key, item, build=build)
             else:
                 self.push("list", iter(item), parent, key, item, build=build)
             return
@@ -1868,11 +2059,12 @@ class _Walk:
         if is_scalar:
             self.place(parent, key, value, build)
             return
-        if isinstance(item, (Mapping, list, tuple)):
+        mapping = builtin_mapping(item)
+        if mapping is not None or builtin_sequence(item):
             done, _ = self.plain(item, False)
             if not done:
-                if isinstance(item, Mapping):
-                    self.push("dict", iter(item.items()), None, None, item, build=False,
+                if mapping is not None:
+                    self.push("dict", iter(mapping.items()), None, None, item, build=False,
                               fn=_RAW, preserve_keys=True)
                 else:
                     self.push("list", iter(item), None, None, item, build=False, fn=_RAW)
@@ -1909,8 +2101,11 @@ class _Walk:
             self.opaque(item)
             for field_info in dataclass_fields(item):
                 self.budget.charge(self.policy.string_bytes(field_info.name) + 4)
-                self.count_only(getattr(item, field_info.name), raw_leaves=True)
+                self.count_only(plain_field_value(item, field_info.name), raw_leaves=True)
             return
+        if self.token_sink is not None:
+            # 型名しか分からない葉: 型つき token の fingerprint は値を区別しない（fingerprint を作らない）
+            raise _OpaqueLeaf(f"{kind.__qualname__} has no value to fingerprint", path=self.path())
         self.opaque(item)
 
     def opaque(self, item: Any) -> None:
@@ -1954,7 +2149,7 @@ class _Walk:
                     _Evidence(
                         value, None,
                         inline_bytes=text_value_max_bytes(self.policy, item.max_chars),
-                        one_shot=isinstance(value, _AbcIterator),
+                        one_shot=_is_one_shot(value),
                     ),
                     parent, key, build,
                 )
@@ -1974,7 +2169,7 @@ class _Walk:
                     effort.charge(1)
                     reducer.add(element, work=effort)
             except PRODUCER_FAILURES as exc:
-                self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
+                self.reject(f"producer failed ({exception_text(exc)})")
             except JsonBudgetExhausted:
                 # 集計を途中で止めた値は別の値: この walk の予算の超過として扱う
                 self.budget.exceeded()
@@ -1985,13 +2180,13 @@ class _Walk:
                 self.budget.exceeded()
                 raise
             except PRODUCER_FAILURES as exc:
-                self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
+                self.reject(f"producer failed ({exception_text(exc)})")
             self.enter(produced, parent, key, build)
         elif kind is _Metered:
             try:
                 produced = item.factory(self.effort)
             except PRODUCER_FAILURES as exc:
-                self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
+                self.reject(f"producer failed ({exception_text(exc)})")
             except JsonBudgetExhausted:
                 self.budget.exceeded()
                 raise
@@ -2065,8 +2260,13 @@ class _Walk:
 
     def run(self, source: Any) -> Any:
         holder: List[Any] = [None]
-        self.enter(source, holder, 0, self.build)
-        self.drain_to(0)
+        # walk の間に呼ぶ producer が作る予算は、この walk の作業量の子（`JsonBudget.parent`）
+        active = _ACTIVE_WORK.set(self.effort)
+        try:
+            self.enter(source, holder, 0, self.build)
+            self.drain_to(0)
+        finally:
+            _ACTIVE_WORK.reset(active)
         return holder[0]
 
     def drain_to(self, depth: int) -> None:
@@ -2078,7 +2278,7 @@ class _Walk:
             except PRODUCER_FAILURES as exc:
                 # producer（`json_items` とその helper）の失敗は、その値が JSON にならないこと
                 # （field の規則どおり: 診断は marker、準備する意味の値は内部エラー）
-                self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
+                self.reject(f"producer failed ({exception_text(exc)})")
             except JsonBudgetExhausted:
                 # producer が引き出しの中で作業量（`metered`）を使い切った: この walk の予算の超過
                 self.budget.exceeded()
@@ -2102,7 +2302,7 @@ class _Walk:
                     try:
                         text_key = self.policy.canonical_key(child_key)
                     except TypeError as exc:
-                        self.reject(str(exc))
+                        self.reject(exception_text(exc))
                 if text_key in frame.keys:
                     self.reject(f"key {text_key!r} collides after JSON key conversion")
                 frame.keys.add(text_key)
@@ -2131,7 +2331,7 @@ class _Walk:
                 try:
                     converted = fn(target)
                 except PRODUCER_FAILURES as exc:
-                    self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
+                    self.reject(f"producer failed ({exception_text(exc)})")
                 self.enter(converted, parent, out_key, frame.build)
 
 
@@ -2302,12 +2502,20 @@ __all__ = [
     "PreparedJson",
     "RESULT_JSON_POLICY",
     "identity_key_of",
+    "bounded_repr",
+    "builtin_str",
+    "exception_text",
+    "hashable_key",
+    "renders_with_builtins",
+    "stringify_plain_key",
     "Reread",
     "Reducer",
     "source_converter",
     "TEXT_MARKER_MAX_CHARS",
     "text_value_max_bytes",
     "UNFINGERPRINTED_CYCLE",
+    "UNFINGERPRINTED_OPAQUE",
+    "column_identity",
     "UNFINGERPRINTED_UNSUPPORTED",
     "UNFINGERPRINTED_WORK_EXHAUSTED",
     "as_dict",

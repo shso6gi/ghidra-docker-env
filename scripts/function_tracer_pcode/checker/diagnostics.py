@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional
 
 from scripts.function_tracer_pcode.checker.debug_trace import TransitionReason
-from scripts.function_tracer_pcode.core.json_encoding import Reducer
+from scripts.function_tracer_pcode.core.json_encoding import Reducer, exception_text
 # Issue #124: StageClock は core へ移した（analysis / proof / smt からも同じ型で
 # 計測し、checker が pull するため）。ここは既存 import を壊さないための再公開。
 from scripts.function_tracer_pcode.core.stage_clock import (  # noqa: F401
@@ -101,7 +101,7 @@ def attach_failure_diagnostics(result: Any) -> None:
             "by_site": rows,
         }
     except Exception as exc:  # 診断は判定を壊さない
-        payload = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+        payload = {"error": exception_text(exc, 200)}
     record_failure_diagnostic(result, FAILURE_SWALLOWED_EXCEPTIONS, payload)
 
 
@@ -117,7 +117,7 @@ def attach_stage_timing(result: Any, clock: StageClock) -> None:
     try:
         payload = clock.snapshot()
     except Exception as exc:  # diagnostics never fail the verdict
-        payload = {"schema": STAGE_TIMING_SCHEMA, "error": f"{type(exc).__name__}: {exc}"[:200]}
+        payload = {"schema": STAGE_TIMING_SCHEMA, "error": exception_text(exc, 200)}
     payload.update(process_counter_payload())
     try:
         diagnostics = dict(getattr(result, "diagnostics", None) or {})
@@ -225,7 +225,7 @@ def expression_stats(analysis: Any) -> Dict[str, int]:
             "return_case_count": len(returns),
             "node_count": node_count,
             "max_depth": max_depth,
-            "error": f"{type(exc).__name__}: {exc}"[:200],
+            "error": exception_text(exc, 200),
         }
     tree_total, tree_complete = _tree_node_total(returns)
     return {
@@ -476,7 +476,7 @@ class AnalysisTimer:
         try:
             self.stats[side] = expression_stats(analysis)
         except Exception as exc:
-            self.stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            self.stats[side] = {"error": exception_text(exc, 200)}
 
     def record_callee_parameter_cache(self, side: str, analyzer: Any) -> None:
         """Issue #47: callee parameter snapshot cache の hit/miss を side ごとに残す。
@@ -493,7 +493,7 @@ class AnalysisTimer:
                 self.cache_stats.get(side), dict(reader() or {})
             )
         except Exception as exc:
-            self.cache_stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            self.cache_stats[side] = {"error": exception_text(exc, 200)}
 
     def record_callee_analysis_cache(self, side: str, analyzer: Any) -> None:
         """Issue #47: callee 解析 cache の hit/miss と miss 原因を side ごとに残す。
@@ -510,7 +510,7 @@ class AnalysisTimer:
                 self.analysis_cache_stats.get(side), dict(reader() or {})
             )
         except Exception as exc:
-            self.analysis_cache_stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            self.analysis_cache_stats[side] = {"error": exception_text(exc, 200)}
 
     def record_callee_unbound_reuse(self, side: str, analyzer: Any) -> None:
         """Issue #47 (PR-B): external placeholder callee の再利用計数を side ごとに残す。
@@ -526,7 +526,7 @@ class AnalysisTimer:
                 self.reuse_stats.get(side), dict(reader() or {})
             )
         except Exception as exc:
-            self.reuse_stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            self.reuse_stats[side] = {"error": exception_text(exc, 200)}
 
     def snapshot(self) -> Dict[str, Any]:
         try:
@@ -544,7 +544,7 @@ class AnalysisTimer:
                 },
             }
         except Exception as exc:
-            return {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            return {"error": exception_text(exc, 200)}
 
 
 def _solver_rows(container: Any) -> Any:
@@ -589,7 +589,7 @@ def result_diagnostics_payload(result: Any, *, lazy: bool = False) -> Any:
 
         return RESULT_JSON_POLICY.prepare(view).value()
     except Exception as exc:
-        return {"schema": DIAGNOSTICS_SCHEMA, "error": f"{type(exc).__name__}: {exc}"[:200]}
+        return {"schema": DIAGNOSTICS_SCHEMA, "error": exception_text(exc, 200)}
 
 
 def _attempt_rows(attempts: Any) -> Iterable[Any]:
@@ -968,7 +968,7 @@ class PhaseTimeline:
         try:
             return [self._snapshot_phase(phase) for phase in self.phases]
         except Exception as exc:
-            return [{"error": f"{type(exc).__name__}: {exc}"[:200]}]
+            return [{"error": exception_text(exc, 200)}]
 
     @staticmethod
     def _snapshot_phase(phase: Mapping[str, Any]) -> Dict[str, Any]:

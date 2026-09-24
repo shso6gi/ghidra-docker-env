@@ -48,6 +48,13 @@ from dataclasses import fields, is_dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
+from scripts.function_tracer_pcode.core.builtin_containers import (
+    builtin_mapping,
+    builtin_sequence,
+    builtin_set,
+    plain_field_value,
+)
+
 
 _PRIMITIVE_TYPES = frozenset({str, int, float, bool})
 #: 文字列を hash へ流す単位（巨大な文字列を一度に escape・encode しない）
@@ -77,33 +84,12 @@ _MAPPING_TYPES = (dict, OrderedDict, types.MappingProxyType)
 _BUILTIN_ENUM_STR = frozenset({Enum.__str__, str.__str__, int.__repr__, int.__str__, object.__str__})
 
 
-def _is_builtin_sequence(item: Any) -> bool:
-    kind = type(item)
-    for base in (tuple, list):
-        if isinstance(item, base):
-            # 組み込みの `__len__` / `__getitem__` のまま（namedtuple など）でなければ辿らない
-            return kind.__len__ is base.__len__ and kind.__getitem__ is base.__getitem__
-    return False
+# 組み込みの `__len__` / `__getitem__` / `__iter__` のまま（namedtuple など）でなければ辿らない
+_is_builtin_sequence = builtin_sequence
+_is_builtin_set = builtin_set
 
 
-def _is_builtin_set(item: Any) -> bool:
-    kind = type(item)
-    for base in (frozenset, set):
-        if isinstance(item, base):
-            return kind.__iter__ is base.__iter__ and kind.__len__ is base.__len__
-    return False
-
-
-def _field_value(item: Any, name: str) -> Any:
-    """dataclass の field の値（instance の `__dict__` か slot。property などの descriptor は呼ばない）。"""
-
-    state = getattr(type(item), "__dictoffset__", 0) and object.__getattribute__(item, "__dict__")
-    if state and name in state:
-        return state[name]
-    descriptor = inspect.getattr_static(type(item), name, None)
-    if isinstance(descriptor, types.MemberDescriptorType):
-        return descriptor.__get__(item, type(item))
-    raise TypeError(f"field {name!r} of {type(item).__name__} is not a plain attribute")
+_field_value = plain_field_value
 
 
 def _exact_primitive(value: Any) -> Any:
@@ -212,8 +198,8 @@ class _Sink:
 class _End:
     """容器を閉じる action（閉路の判定から外し、閉じ括弧を流す）。
 
-    容器そのものを持つ: `to_authority_dict()` が作った一時的な容器が、子を辿り終える前に
-    解放されて `id` が別の容器に再利用されると、閉路でない値を閉路と誤る。
+    容器そのものを持つ: 固定の形の要約（`register_fixed_canonical`）が作った一時的な容器が、
+    子を辿り終える前に解放されて `id` が別の容器に再利用されると、閉路でない値を閉路と誤る。
     """
 
     __slots__ = ("container", "closing")
@@ -295,7 +281,7 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
             _push_raw_container(actions, item, work, in_set=sink.in_set)
             active.add(identity)
             continue
-        if (is_dataclass(item) and not isinstance(item, type)) or type(item) in _MAPPING_TYPES:
+        if (is_dataclass(item) and not isinstance(item, type)) or (type(item) in _MAPPING_TYPES and builtin_mapping(item) is not None):
             pairs = _pairs(item, work)
             active.add(identity)
             sink.emit(b"[")
@@ -375,7 +361,7 @@ def _pairs(item: Any, work: Any) -> list:
 def _push_raw_container(actions: list, item: Any, work: Any, *, in_set: bool) -> None:
     """enum の値（正規化されない値）を `json.dumps(sort_keys=True)` と同じ形で積む。"""
 
-    if type(item) in _MAPPING_TYPES:
+    if type(item) in _MAPPING_TYPES and builtin_mapping(item) is not None:
         if in_set:
             # set の要素の並びは要素の canonical な形を **もう一度** 正規化した値の digest
             # （mapping は [key, 値] の組になる）で、流す byte（`{...}`）とは別の形。有界な

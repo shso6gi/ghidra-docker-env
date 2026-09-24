@@ -33,7 +33,7 @@ bundle 以外の field だけを予約し、bundle は最終 envelope の残り�
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from scripts.function_tracer_pcode.authority.contracts import CActiveBaseRow, QOpenBaseRow
 
@@ -43,6 +43,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     RESULT_JSON_POLICY,
     TEXT,
     TEXT_MARKER_MAX_CHARS,
+    builtin_str,
     text_value_max_bytes,
     Column,
     JsonEncodingPolicy,
@@ -68,6 +69,7 @@ MAX_RELATION_ROWS = 512
 #: conditional receipt が運ぶ仮定（premise）の数と 1 つの上限: receipt の契約の owner
 #: （`authority/decision/conditional`）の値。lane は発行の前に同じ上限で確かめる
 from scripts.function_tracer_pcode.authority.decision.conditional import (  # noqa: E402
+    CONDITIONAL_RECEIPT_FIXED_FIELDS,
     assumption_premise_max_bytes,
     max_assumption_premises,
 )
@@ -115,15 +117,78 @@ DECISION_RECEIPT_ROW = tuple(
         "authority_input_digest", "receipt_digest",
     )
 )
-#: `conditional_decision_receipt_payload` の固定の列（`assumption_set` は別に数える）
-CONDITIONAL_RECEIPT_FIXED_ROW = tuple(
-    Column(name, TEXT, ID_MAX_CHARS)
-    for name in (
-        "result_occurrence_id", "conditional_outcome", "unconditional_outcome",
-        "unconditional_receipt_digest", "lifecycle_projection_digest",
-        "assumption_set_digest", "authority_input_digest", "receipt_digest",
+#: `conditional_decision_receipt_payload` の固定の列（名前は receipt の owner の
+#: `CONDITIONAL_RECEIPT_FIXED_FIELDS`。`assumption_set` は別に数える）
+CONDITIONAL_RECEIPT_FIXED_ROW = tuple(Column(name, TEXT, ID_MAX_CHARS) for name in CONDITIONAL_RECEIPT_FIXED_FIELDS)
+
+
+def conditional_receipt_max_bytes(policy: JsonEncodingPolicy) -> int:
+    """conditional receipt の payload 1 つの byte の上限（固定の列 + 仮定の集合。member 9 つの object）。"""
+
+    members = [policy.member_bytes(column.key, column.max_value_bytes(policy)) for column in CONDITIONAL_RECEIPT_FIXED_ROW]
+    members.append(policy.member_bytes("assumption_set", _array_bytes(
+        policy, max_assumption_premises(), assumption_premise_max_bytes(),
+    )))
+    return policy.object_bytes(members)
+
+
+#: `superseded_decision_receipt_record` の、receipt を写せなかったときの形の語彙の上限
+SUPERSEDED_UNAVAILABLE_MAX_CHARS = 64
+
+
+def superseded_decision_receipt_record(result: Any) -> Optional[Dict[str, Any]]:
+    """出力の契約違反の ERROR が持つ、取って代わられた判定（無条件と conditional の receipt）。
+
+    receipt の payload を作れない（exact な receipt でない・検証に落ちる）ときは、receipt の
+    digest と作れなかった理由の型名だけの形（`superseded_digest_record`）。**例外を上げない**:
+    ERROR の出力はこれに依存するので、元の出力の失敗と同じ失敗を繰り返さない。
+    """
+
+    from scripts.function_tracer_pcode.authority.decision.conditional import (
+        conditional_decision_receipt_payload,
     )
-)
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+        decision_receipt_payload,
+    )
+
+    receipt = getattr(result, "decision_receipt", None)
+    if receipt is None:
+        return None
+    try:
+        record: Dict[str, Any] = {"decision_receipt": decision_receipt_payload(receipt)}
+        conditional = getattr(result, "conditional_decision_receipt", None)
+        if conditional is not None:
+            record["conditional_decision_receipt"] = conditional_decision_receipt_payload(conditional)
+        return record
+    except SUPERSEDED_PAYLOAD_FAILURES as exc:
+        return superseded_digest_record(result, unavailable=type(exc).__qualname__)
+
+
+#: receipt の payload を作るときの失敗（exact でない receipt・検証の失敗・壊れた値）
+SUPERSEDED_PAYLOAD_FAILURES = (TypeError, ValueError, AttributeError, LookupError, ArithmeticError, RuntimeError)
+
+
+def superseded_digest_record(result: Any, *, unavailable: str) -> Dict[str, Any]:
+    """取って代わられた判定の receipt の digest だけの形（固定長。payload を作らない）。"""
+
+    receipt = getattr(result, "decision_receipt", None)
+    digest = getattr(receipt, "receipt_digest", None) if receipt is not None else None
+    return {
+        "decision_receipt_digest": digest if type(digest) is str and len(digest) <= ID_MAX_CHARS else None,
+        "payload_unavailable": builtin_str(unavailable)[:SUPERSEDED_UNAVAILABLE_MAX_CHARS],
+    }
+
+
+def _superseded_max_bytes(policy: JsonEncodingPolicy) -> int:
+    full = _object_bytes(policy, {
+        "decision_receipt": row_max_bytes(DECISION_RECEIPT_ROW, policy),
+        "conditional_decision_receipt": conditional_receipt_max_bytes(policy),
+    })
+    digest_only = _object_bytes(policy, {
+        "decision_receipt_digest": policy.max_string_bytes(ID_MAX_CHARS),
+        "payload_unavailable": policy.max_string_bytes(SUPERSEDED_UNAVAILABLE_MAX_CHARS),
+    })
+    return max(full, digest_only)
 
 
 @dataclass(frozen=True)
@@ -153,7 +218,7 @@ class OutputSchemaMissing(KeyError):
     """出力 field に schema の上限が無い（field を足したら `output_schema` にも 1 行足す）。"""
 
 
-def _truncation_marker_max_bytes(policy: JsonEncodingPolicy, key: str) -> int:
+def truncation_marker_max_bytes(policy: JsonEncodingPolicy, key: str) -> int:
     """`output_preparation._truncation_marker` の上限（切り詰めた診断の代わりの値）。"""
 
     return _object_bytes(policy, {
@@ -178,12 +243,7 @@ def authority_field_bounds(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> D
     reason_row = row_max_bytes(UNKNOWN_REASON_ROW, policy)
     action_row = row_max_bytes(UNKNOWN_RECOVERY_ACTION_ROW, policy)
     backlog_entry = row_max_bytes(RECOVERY_BACKLOG_ENTRY_ROW, policy)
-    conditional_receipt = (
-        row_max_bytes(CONDITIONAL_RECEIPT_FIXED_ROW, policy)
-        + policy.member_bytes("assumption_set", _array_bytes(
-            policy, max_assumption_premises(), assumption_premise_max_bytes(),
-        ))
-    )
+    conditional_receipt = conditional_receipt_max_bytes(policy)
     rows = (
         FieldBound("is_equivalent", 5, "bool / null"),
         FieldBound("error_message", _text_bytes(policy, MESSAGE_MAX_CHARS),
@@ -220,11 +280,9 @@ def authority_field_bounds(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> D
         ) + MAX_UNKNOWN_REASON_ROWS * policy.max_member_bytes(ID_MAX_CHARS, backlog_entry),
             f"≤ {MAX_UNKNOWN_REASON_ROWS} reason ids × backlog entry {backlog_entry} B"),
         FieldBound("decision_gated_by_pending_proof", 5, "bool"),
-        FieldBound("superseded_decision_receipt", _object_bytes(policy, {
-            "decision_receipt": row_max_bytes(DECISION_RECEIPT_ROW, policy),
-            "conditional_decision_receipt": conditional_receipt,
-        }), "{decision receipt row, conditional receipt} (output-contract ERROR only)",
-            exclusive_group=RECEIPT_VARIANT),
+        FieldBound("superseded_decision_receipt", _superseded_max_bytes(policy),
+                   "{decision receipt row, conditional receipt} or {receipt digest, reason} "
+                   "(output-contract ERROR only)", exclusive_group=RECEIPT_VARIANT),
     )
     return {row.key: row for row in rows}
 
@@ -251,7 +309,7 @@ def metadata_field_bounds(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> Di
         if item.overflow is Overflow.TRUNCATE:
             # 切り詰めてよい診断: 予約するのは marker の分（本体は残りの予算で出す）
             rows[item.key] = FieldBound(
-                item.key, _truncation_marker_max_bytes(policy, item.key), "truncation marker",
+                item.key, truncation_marker_max_bytes(policy, item.key), "truncation marker",
             )
         else:
             bound = invariant.get(item.key)
@@ -318,8 +376,13 @@ __all__ = [
     "MESSAGE_MAX_CHARS",
     "OutputSchemaMissing",
     "Q_OPEN_BASE_ROW",
+    "SUPERSEDED_PAYLOAD_FAILURES",
     "authority_field_bounds",
+    "conditional_receipt_max_bytes",
     "metadata_field_bounds",
+    "superseded_decision_receipt_record",
+    "superseded_digest_record",
+    "truncation_marker_max_bytes",
     "required_headroom_bytes",
     "validate_envelope_headroom",
 ]

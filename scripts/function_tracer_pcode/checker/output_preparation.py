@@ -76,6 +76,8 @@ from scripts.function_tracer_pcode.core.errors import (
 from scripts.function_tracer_pcode.core.json_encoding import (
     RESULT_JSON_POLICY,
     JsonBudget,
+    builtin_mapping,
+    builtin_sequence,
     JsonBudgetExhausted,
     JsonEncodingPolicy,
     JsonObjectBudget,
@@ -83,6 +85,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     JsonValueRejected,
     PreparedJson,
     each,
+    exception_text,
     inline,
     is_prepared_json,
     pairs_of,
@@ -209,7 +212,8 @@ def _truncation_marker(
     （`not_json`、どこで拒んだかを短く残す）。どちらも判定には関わらない。
     """
 
-    count = len(source) if isinstance(source, (list, tuple, Mapping)) else None
+    # 組み込みの振る舞いの容器だけ長さを読む（上書きした `__len__` を呼ばない）
+    count = len(source) if builtin_sequence(source) or builtin_mapping(source) is not None else None
     marker: Dict[str, Any] = {
         "truncated": True,
         "field": key,
@@ -222,17 +226,6 @@ def _truncation_marker(
 
         marker["rejected_at"] = str(rejected.path)[:MARKER_PATH_MAX_CHARS]
     return marker
-
-
-def _marker_upper_bytes(encoding: JsonEncodingPolicy, key: str, source: Any, limit: Optional[int]) -> int:
-    """`source` の切り詰め marker を書いたときの byte の上限（拒んだ場所の path を最長にして数える）。"""
-
-    from scripts.function_tracer_pcode.checker.output_schema import MARKER_PATH_MAX_CHARS
-
-    widest = JsonValueRejected("", path="$" * MARKER_PATH_MAX_CHARS)
-    return encoding.prepare(
-        _truncation_marker(key, source, remaining_bytes=limit, rejected=widest),
-    ).encoded_bytes
 
 
 class _ReadFailed:
@@ -344,7 +337,7 @@ class OutputField:
             return self.read(result, options)
         except PRODUCER_FAILURES as exc:
             return _ReadFailed(JsonValueRejected(
-                f"reader failed ({type(exc).__name__}: {str(exc)[:80]})", path=f"$.{self.key}",
+                f"reader failed ({exception_text(exc)})", path=f"$.{self.key}",
             ))
 
     def prepare_source(
@@ -1378,15 +1371,18 @@ class OutputMetadata:
 
         * 切り詰めてはいけない field を先に、出力 schema の上限の中で準備する（超えれば違反）。
         * 切り詰めてよい診断は、先に準備した診断の本体が後の field の場所を使い切らないように、
-          field ごとの場所を予約してから準備する: field ごとに marker の大きさ（その source の
-          marker を、拒んだ場所の path を最長にして書いた byte）を求め、本体をその中で試す。収まる
+          field ごとの場所を予約してから準備する: field ごとに marker の大きさの上限（schema の
+          `truncation_marker_max_bytes`。headroom・組み直しの見積もりと同じ値）の中で本体を試す。収まる
           field は本体で確定し（切り詰めても byte は減らない）、その大きさを予約する。収まらない
           field は marker の大きさを予約し、順に予約を外して残りの予算で本体（入らなければ
           marker）を準備する。予約の和が入らなければ出力の契約違反（headroom は marker の上限の和
           を含むので、契約どおりの設定では起きない）。どの field も黙って消えない。
         """
 
-        from scripts.function_tracer_pcode.checker.output_schema import metadata_field_bounds
+        from scripts.function_tracer_pcode.checker.output_schema import (
+            metadata_field_bounds,
+            truncation_marker_max_bytes,
+        )
 
         bounds = metadata_field_bounds(context.encoding)
         members = context.members
@@ -1408,7 +1404,8 @@ class OutputMetadata:
             if source is ABSENT:
                 continue
             order.append(item.key)
-            marker_bytes = _marker_upper_bytes(encoding, item.key, source, members.max_bytes)
+            # 予約・組み直しの見積もり（`freeable`）・schema の headroom は同じ 1 つの上限
+            marker_bytes = truncation_marker_max_bytes(encoding, item.key)
             try:
                 if type(source) is _ReadFailed:
                     raise source.rejected
@@ -1458,14 +1455,13 @@ def _compose_members(
     for row in authority.fields + metadata.fields:
         if row.json is not None:
             parts[row.key] = row.json.value()
-    from scripts.function_tracer_pcode.checker.output_schema import metadata_field_bounds
+    from scripts.function_tracer_pcode.checker.output_schema import truncation_marker_max_bytes
 
-    bounds = metadata_field_bounds(members.policy)
     freeable = 0
     for row in metadata.fields:
         if row.json is not None and row.shape == "json" and _TRUNCATABLE_METADATA.get(row.key):
-            # 切り詰めても marker（上限 = schema の marker の上限）は残る
-            freeable += max(0, row.json.encoded_bytes - bounds[row.key].max_bytes)
+            # 切り詰めても marker（予約と同じ上限）は残る
+            freeable += max(0, row.json.encoded_bytes - truncation_marker_max_bytes(members.policy, row.key))
     return metadata.truncated, freeable
 
 
@@ -1578,9 +1574,7 @@ def build_final_result_envelope(
 
     return finalize_result_envelope(
         compose_result_preimage(result, fallback_policy=fallback_policy), seal=seal,
-        recompose=lambda reserve: compose_result_preimage(
-            result, fallback_policy=fallback_policy, bundle_reserve=reserve,
-        ),
+        recompose_from=result, fallback_policy=fallback_policy,
     )
 
 
@@ -1588,12 +1582,14 @@ def finalize_result_envelope(
     composed: ComposedPreimage,
     *,
     seal: Optional["AuthoritySeal"] = None,
-    recompose: Optional[Callable[[int], ComposedPreimage]] = None,
+    recompose_from: Any = None,
+    fallback_policy: Optional[BudgetPolicy] = None,
 ) -> FinalResultEnvelope:
     """組んだ preimage に封印を足し、契約の上限で書く（`build_final_result_envelope` の後半）。
 
     封印が残りに収まらず、preimage に切り詰めてよい診断（C）があれば、封印の大きさ（契約の
-    上限の中で数えた値）を先に空けて組み直し（`recompose`）、封印し直す。封印は preimage の
+    上限の中で数えた値）を先に空けて `recompose_from`（preimage を組んだ結果）から組み直し
+    （`compose_result_preimage(..., bundle_reserve=...)`。callback は受けない）、封印し直す。封印は preimage の
     digest を持つので、preimage が変われば作り直す。封印の大きさは preimage の中身に依存し得る
     ので、作り直した封印も残りの予算の中で準備し直し、それでも収まらなければ出力の契約違反。
     """
@@ -1613,7 +1609,7 @@ def finalize_result_envelope(
         room = members.remaining_for(BUNDLE_KEY)
         # 封印を写す上限: 残り、組み直せるなら残り + 切り詰められる byte（1 回の準備で、入るか・
         # 組み直しに要る大きさかが分かる。封印を 3 回作らない）
-        can_recompose = recompose is not None and composed.freeable_bytes > 0 and room is not None
+        can_recompose = recompose_from is not None and composed.freeable_bytes > 0 and room is not None
         reach = room + composed.freeable_bytes if can_recompose else room
         try:
             bundle = encoding.prepare(seal.seal(preimage), max_bytes=reach)
@@ -1628,7 +1624,9 @@ def finalize_result_envelope(
         if room is not None and bundle.encoded_bytes > room:
             # 切り詰めてよい診断が場所を取っている: 封印の大きさを先に空けて組み直し、新しい
             # preimage を封印し直す（封印は preimage の digest を持つ。2 回目の封印）
-            composed = recompose(bundle.encoded_bytes)
+            composed = compose_result_preimage(
+                recompose_from, fallback_policy=fallback_policy, bundle_reserve=bundle.encoded_bytes,
+            )
             prepared, preimage, members, truncated = (
                 composed.prepared, composed.payload, composed.members, composed.truncated,
             )

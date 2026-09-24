@@ -722,10 +722,10 @@ def build_projection_diagnostic(
             # Issue #22 PR-22-D: cause の key は authority が封印した canonical な値。
             # 診断には有界な表現（大きければ cause id を identity にした要約）だけを置く
             "canonical_target_key": _bounded_cause_value(
-                getattr(cause_id, "canonical_target_key", None), cause_id, work=work,
+                getattr(cause_id, "canonical_target_key", None), cause_id, column="canonical_target_key", work=work,
             ),
             "missing_semantic_fact": _bounded_cause_value(
-                getattr(cause_id, "missing_semantic_fact", None), cause_id, work=work,
+                getattr(cause_id, "missing_semantic_fact", None), cause_id, column="missing_semantic_fact", work=work,
             ),
         }
     matched, match_kind = _match_legacy_reasons(
@@ -758,18 +758,18 @@ def build_projection_diagnostic(
     return diagnostic
 
 
-def _bounded_cause_value(value: Any, cause_id: Any, *, work: Any) -> Any:
+def _bounded_cause_value(value: Any, cause_id: Any, *, column: str, work: Any) -> Any:
     """cause の canonical な値を、小さければそのまま、大きければ cause id の要約にする。"""
 
     from scripts.function_tracer_pcode.authority.contracts import canonical_value
-    from scripts.function_tracer_pcode.core.json_encoding import BoundedEvidence, bounded_evidence
+    from scripts.function_tracer_pcode.core.json_encoding import BoundedEvidence, bounded_evidence, column_identity
 
     if value is None:
         return None
     identity = getattr(cause_id, "value", None)
     bounded = bounded_evidence(
         value, work=work,
-        identity=("cause:" + identity) if isinstance(identity, str) else None,
+        identity=column_identity("cause:" + identity, column) if isinstance(identity, str) else None,
     )
     # 小さく plain な値（容器と基底型だけ）はそのまま: canonical な形も小さい
     return bounded if type(bounded) is BoundedEvidence else canonical_value(bounded)
@@ -1399,15 +1399,16 @@ class _PrimaryFilter:
         self.fallback_index = 0
 
     def admit(self, record: UnknownReasonRecord, *, work: Any) -> bool:
-        aggregation_key = str(record.aggregation_unit or UnknownAggregationUnit.RESULT.value)
+        from scripts.function_tracer_pcode.core.json_encoding import builtin_str, hashable_key
+
+        aggregation_key = builtin_str(record.aggregation_unit or UnknownAggregationUnit.RESULT.value)
         unit_key = record.pair_or_case or record.stage
-        if type(unit_key) is str:
-            # 単位の key を hash する前に長さを数える（有界化していない trace の record もある）
-            work.charge(len(unit_key))
         if unit_key is None:
             unit_key = ("record", self.fallback_index)
             self.fallback_index += 1
-        key = (aggregation_key, unit_key)
+        # 単位の key は hash する前に数え、組み込みの値だけを値で比べる（有界化していない trace
+        # の record もある。上書きした `__hash__` / `__eq__` を呼ばない）
+        key = (hashable_key(aggregation_key, work), hashable_key(unit_key, work))
         if key in self.seen:
             return False
         self.seen.add(key)

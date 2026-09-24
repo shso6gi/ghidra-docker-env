@@ -427,6 +427,7 @@ class DebugTrace:
         fold = _PhaseUsageFold(self.known_phases, self.planned_phases)
         # 人向けの一覧（出力の準備の外。出力は `phase_usage_source` が walk の作業量で畳む）
         work = JsonBudget(None)
+        fold._seed(work)
         for attempt in self.attempts:
             fold.add(attempt, work=work)
         return iter(fold.rows.values())
@@ -525,21 +526,36 @@ class _PhaseUsageFold(Reducer):
     再解析・再判定まで進んだ phase の名前だけを返す。
     """
 
-    __slots__ = ("rows", "planned", "used_only")
+    __slots__ = ("rows", "known", "planned", "planned_keys", "used_only")
 
     def __init__(self, known_phases: Any, planned_phases: Any, *, used_only: bool = False) -> None:
+        # 行の種は最初の `add` / `result` で作業量の中で作る（構築では辿らない）
+        self.known = known_phases
         self.planned = planned_phases
+        self.planned_keys: Optional[set] = None
         self.used_only = used_only
-        self.rows: Dict[str, Dict[str, Any]] = {}
-        for phase in known_phases:
-            self._row(phase)
+        self.rows: Dict[Any, Dict[str, Any]] = {}
 
-    def _row(self, phase: str) -> Dict[str, Any]:
-        row = self.rows.get(phase)
+    #: phase の行 1 つの手間（固定の形: 11 の field と 7 の遷移の件数）
+    ROW_COST = 32
+
+    def _seed(self, work: Any) -> None:
+        if self.planned_keys is not None:
+            return
+        from scripts.function_tracer_pcode.core.json_encoding import hashable_key
+
+        self.planned_keys = {hashable_key(phase, work) for phase in (self.planned or ())}
+        for phase in self.known or ():
+            self._row(hashable_key(phase, work), phase, work)
+
+    def _row(self, key: Any, phase: Any, work: Any) -> Dict[str, Any]:
+        row = self.rows.get(key)
         if row is None:
-            row = self.rows[phase] = {
+            # 新しい phase は行を 1 つ作る（行の数は phase の数で、attempt の数ではない）
+            work.charge(self.ROW_COST)
+            row = self.rows[key] = {
                 "phase": phase,
-                "planned": phase in self.planned,
+                "planned": key in self.planned_keys,
                 "reached": False,
                 "used": False,
                 "attempt_count": 0,
@@ -559,34 +575,33 @@ class _PhaseUsageFold(Reducer):
             }
         return row
 
-    #: phase の行 1 つの手間（固定の形: 11 の field と 7 の遷移の件数）
-    ROW_COST = 32
-
     def add(self, attempt: Any, *, work: Any) -> None:
-        for label in (attempt.phase, attempt.transition_reason):
-            if type(label) is str:
-                work.charge(len(label))  # key として hash する文字列
-        if attempt.phase not in self.rows:
-            # 新しい phase は行を 1 つ作る（行の数は phase の数で、attempt の数ではない）
-            work.charge(self.ROW_COST)
-        row = self._row(attempt.phase)
+        from scripts.function_tracer_pcode.core.json_encoding import hashable_key
+
+        self._seed(work)
+        # key として hash する値は hash する前に数える（上書きした `__hash__` / `__eq__` を呼ばない）
+        phase = attempt.phase
+        reason = attempt.transition_reason
+        reason_key = hashable_key(reason, work)
+        row = self._row(hashable_key(phase, work), phase, work)
         row["reached"] = True
         row["attempt_count"] += 1
         transition_counts = row["transition_counts"]
-        transition_counts[attempt.transition_reason] = transition_counts.get(attempt.transition_reason, 0) + 1
-        if attempt.transition_reason == TransitionReason.NO_CHANGES.value:
+        transition_counts[reason_key] = transition_counts.get(reason_key, 0) + 1
+        if reason_key == TransitionReason.NO_CHANGES.value:
             row["no_change_skip_count"] += 1
         else:
             row["result_attempt_count"] += 1
             row["used"] = True
-        row["last_transition_reason"] = attempt.transition_reason
+        row["last_transition_reason"] = reason
         row["last_result"] = attempt.result
 
     def result(self, *, work: Any) -> Any:
         from scripts.function_tracer_pcode.core.json_encoding import each
 
+        self._seed(work)
         if self.used_only:
-            return each(phase for phase, row in self.rows.items() if row["used"])
+            return each(row["phase"] for row in self.rows.values() if row["used"])
         return each(iter(self.rows.values()))
 
 

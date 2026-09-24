@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from scripts.function_tracer_pcode.analysis.effects.external_call_models import (
@@ -442,64 +444,103 @@ def test_lane_fails_closed_when_the_assumptions_exceed_the_receipt_bound(monkeyp
     assert _run_lane(result, projection, _both_analyses())["conditional_lane"] == "over_receipt_bound"
 
 
-def test_the_receipt_premise_count_bound_is_the_catalog_shape_not_a_proof_limit():
-    """仮定の数の上限は catalog から導く形の上限（well-formed な集合はこれを超えない）。"""
+def _catalog_premise(catalog, entry, *, kind, library, names):
+    candidate = CallModelCandidateRef(
+        provider=catalog.provider, canonical_symbol=entry.canonical_symbol,
+        signature_key=entry.signature_key(),
+        provenance_key=("external_import_provenance_v1", kind, library, names),
+    )
+    return external_callee_spec_premise(
+        candidate, argument_widths=tuple(spec.width_bits for spec in entry.parameters),
+        return_width_bits=entry.return_spec.width_bits,
+    )
+
+
+def test_the_receipt_contract_covers_the_catalog_shape():
+    """receipt の契約（固定の上限）は今の catalog の形の見積もりを覆う（表現の上限。証明の能力の上限ではない）。
+
+    見積もり: 名前（canonical 名と alias 名）× external import の provenance の種類 × 2 binary の
+    premise を 1 つの集合にした数と、binary 由来の名前を上限の字数・最悪の escape にした premise の
+    byte。catalog が育ってこれを超えたら、上限（と出力の headroom）を決め直す。
+    """
     from scripts.function_tracer_pcode.analysis.effects.pure_function_catalog import (
         EXTERNAL_IMPORT_PROVENANCE_KINDS,
         load_pure_function_catalog,
     )
     from scripts.function_tracer_pcode.authority.decision import conditional
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
     from scripts.function_tracer_pcode.proof.assumptions import normalize_assumption_premises
+    from scripts.function_tracer_pcode.proof.conditional_lane import worst_case_external_callee_spec_premises
 
     catalog = load_pure_function_catalog()
     names = sorted(catalog.entries) + sorted(catalog.alias_rules)
-    assert conditional.max_assumption_premises() == len(names) * len(EXTERNAL_IMPORT_PROVENANCE_KINDS) * 2
-    # catalog の全部の名前 × provenance の種類 × 2 側（library 名が違う）を 1 つの集合にしても上限ちょうど
     premises = []
     for name in names:
         entry = catalog.entries.get(name) or catalog.entries[catalog.alias_rules[name].canonical_symbol]
         for kind in sorted(EXTERNAL_IMPORT_PROVENANCE_KINDS):
             for library in ("left.so", "right.so"):
-                candidate = CallModelCandidateRef(
-                    provider=catalog.provider, canonical_symbol=entry.canonical_symbol,
-                    signature_key=entry.signature_key(),
-                    provenance_key=("external_import_provenance_v1", kind, library, (name,)),
-                )
-                widths = tuple(spec.width_bits for spec in entry.parameters)
-                premises.append(external_callee_spec_premise(
-                    candidate, argument_widths=widths, return_width_bits=entry.return_spec.width_bits,
-                ))
-    assert len(normalize_assumption_premises(premises)) == conditional.max_assumption_premises()
+                premises.append(_catalog_premise(catalog, entry, kind=kind, library=library, names=(name,)))
+    estimate = len(normalize_assumption_premises(premises))
+    assert estimate == len(names) * len(EXTERNAL_IMPORT_PROVENANCE_KINDS) * 2
+    assert estimate <= conditional.MAX_ASSUMPTION_PREMISES
     assert conditional.assumption_set_receipt_bound_violation(tuple(premises)) is None
+    worst = max(
+        RESULT_JSON_POLICY.measure(conditional.assumption_premise_payload(premise))
+        for premise in worst_case_external_callee_spec_premises(
+            label_max_chars=conditional.PREMISE_BINARY_LABEL_MAX_CHARS, name_count=2,
+        )
+    )
+    assert worst <= conditional.ASSUMPTION_PREMISE_MAX_BYTES
+    # 上限は見積もりの 64 件・1 KiB の単位への切り上げ（余裕を持たせすぎて headroom を食わない）
+    assert conditional.MAX_ASSUMPTION_PREMISES == -(-estimate // 64) * 64
+    assert conditional.ASSUMPTION_PREMISE_MAX_BYTES == -(-worst // 1024) * 1024
 
 
-def test_the_premise_byte_bound_is_derived_from_the_catalog_and_the_label_limit():
-    """premise 1 つの上限は catalog の最悪の entry と binary 由来の名前の上限から導く。"""
+def test_the_receipt_contract_does_not_read_the_catalog_at_runtime(monkeypatch):
+    """出力 schema の上限（checker の構築で確かめる headroom）は catalog を読まない。"""
+    from scripts.function_tracer_pcode.analysis.effects import pure_function_catalog
+    from scripts.function_tracer_pcode.checker.output_schema import authority_field_bounds, required_headroom_bytes
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+    def broken():
+        raise FileNotFoundError("catalog is missing")
+
+    monkeypatch.setattr(pure_function_catalog, "load_pure_function_catalog", broken)
+    assert authority_field_bounds()["conditional_decision_receipt"].max_bytes > 0
+    assert required_headroom_bytes(RESULT_JSON_POLICY) > 0
+
+
+def test_the_premise_byte_bound_refuses_long_binary_labels():
+    """binary 由来の名前が上限の字数以下の premise は収まり、何倍もある名前の premise は receipt にしない。"""
     from scripts.function_tracer_pcode.analysis.effects.pure_function_catalog import load_pure_function_catalog
     from scripts.function_tracer_pcode.authority.decision import conditional
 
     catalog = load_pure_function_catalog()
-
-    def premise(entry, library, names):
-        candidate = CallModelCandidateRef(
-            provider=catalog.provider, canonical_symbol=entry.canonical_symbol,
-            signature_key=entry.signature_key(),
-            provenance_key=("external_import_provenance_v1", "thunk_to_external", library, names),
-        )
-        return external_callee_spec_premise(
-            candidate, argument_widths=tuple(spec.width_bits for spec in entry.parameters),
-            return_width_bits=entry.return_spec.width_bits,
-        )
-
     label = "\x01" * conditional.PREMISE_BINARY_LABEL_MAX_CHARS
-    # 名前が上限以下（最悪の escape）の catalog の premise は全部収まる
-    within = tuple(premise(entry, label, (label, label)) for entry in catalog.entries.values())
+    within = tuple(
+        _catalog_premise(catalog, entry, kind="thunk_to_external", library=label, names=(label, label))
+        for entry in catalog.entries.values()
+    )
     for item in within:
         assert conditional.assumption_set_receipt_bound_violation((item,)) is None
-    # 上限の何倍もある binary 由来の名前は receipt にしない
     entry = next(iter(catalog.entries.values()))
-    huge = premise(entry, "\x01" * (4 * conditional.PREMISE_BINARY_LABEL_MAX_CHARS), (label, label))
+    huge = _catalog_premise(
+        catalog, entry, kind="thunk_to_external",
+        library="\x01" * (4 * conditional.PREMISE_BINARY_LABEL_MAX_CHARS), names=(label, label),
+    )
     assert conditional.assumption_set_receipt_bound_violation((huge,)) is not None
+
+
+def test_a_receipt_outside_its_contract_is_neither_issued_nor_valid(monkeypatch):
+    """receipt の owner が上限を強制する（lane を通らない呼び出しも、上限の外の receipt を作れない）。"""
+    from scripts.function_tracer_pcode.authority.decision import conditional
+
+    monkeypatch.setattr(conditional, "MAX_ASSUMPTION_PREMISES", 0)
+    reason = conditional.assumption_set_receipt_bound_violation((object(),))
+    assert reason is not None and "premises" in reason
+    source = inspect.getsource(conditional.finalize_conditional_decision)
+    assert "assumption_set_receipt_bound_violation" in source.split("projection = ")[0]
+    assert "assumption_set_receipt_bound_violation" in inspect.getsource(conditional.ConditionalDecisionReceipt.validate)
 
 
 @pytest.mark.parametrize(

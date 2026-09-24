@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Any, Mapping, Tuple
 
 from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+from scripts.function_tracer_pcode.core.builtin_containers import plain_field_value
 from scripts.function_tracer_pcode.core.json_encoding import (
     LEGACY,
     RESULT_JSON_POLICY,
@@ -170,11 +171,10 @@ class SnapshotFingerprintCodec:
         has_key, identity_key = identity_key_of(value)
         if has_key:
             return (name, freeze(identity_key))
-        to_dict = getattr(value, "to_dict", None)
-        if callable(to_dict):
-            return (name, freeze(to_dict()))
+        if is_json_record(value):
+            return (name, freeze(value.to_dict()))
         if is_dataclass(value):
-            return (name, tuple((f.name, freeze(getattr(value, f.name))) for f in fields(value)))
+            return (name, tuple((f.name, freeze(plain_field_value(value, f.name))) for f in fields(value)))
         raise TypeError(
             f"opaque object {value.__class__.__qualname__} has no object-derived stable identity"
         )
@@ -218,20 +218,19 @@ class SnapshotFingerprintCodec:
         has_key, identity_key = identity_key_of(value)
         if has_key:
             return cls._tagged(value, cls._freeze_key(identity_key, meter), meter)
-        to_dict = getattr(value, "to_dict", None)
-        if callable(to_dict):
-            if meter is not None and is_json_record(value):
-                # walker が `budget` で数えながら作る。写しは数え済みの値から作る
-                built = RESULT_JSON_POLICY.materialize(value, budget=meter.budget)
-                return cls._tagged(value, cls._freeze(built, None), meter)
-            return cls._tagged(value, cls._freeze(to_dict(), meter), meter)
+        if is_json_record(value):
+            # walker が `budget` で数えながら作る。写しは数え済みの値から作る（json record でない
+            # object の `to_dict()` は任意の producer なので呼ばない: object-derived な identity の
+            # 無い値として拒む）
+            built = RESULT_JSON_POLICY.materialize(value, budget=meter.budget)
+            return cls._tagged(value, cls._freeze(built, None), meter)
         if is_dataclass(value):
             if meter is not None:
                 meter.frame(len(fields(value)))
             return cls._tagged(
                 value,
                 tuple(
-                    cls._pair(f.name, cls._freeze(getattr(value, f.name), meter), meter)
+                    cls._pair(f.name, cls._freeze(plain_field_value(value, f.name), meter), meter)
                     for f in fields(value)
                 ),
                 meter,

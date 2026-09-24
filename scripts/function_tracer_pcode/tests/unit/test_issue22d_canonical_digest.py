@@ -32,6 +32,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     JsonBudget,
     JsonBudgetExhausted,
     UNFINGERPRINTED_CYCLE,
+    UNFINGERPRINTED_OPAQUE,
     UNFINGERPRINTED_WORK_EXHAUSTED,
     bounded_evidence,
 )
@@ -247,9 +248,26 @@ def test_bounded_evidence_uses_one_owner_for_every_outcome():
     assert type(summary) is BoundedEvidence
     assert summary.fingerprint_kind == "canonical_sha256"
     assert summary.fingerprint == authority_digest(large)
-    # canonical な値にならない証拠（live な object）は型つき token の fingerprint
-    opaque = bounded_evidence([object()] * 1_000, work=work)
-    assert opaque.fingerprint_kind == "token_sha256"
+    # canonical な値にならない証拠（identity key を持つ live な object）は型つき token の fingerprint
+    class _Keyed:
+        def __init__(self, key):
+            self.key = key
+
+        def stable_key(self):
+            return ("keyed", self.key)
+
+    keyed = bounded_evidence([_Keyed(1)] * 1_000, work=work)
+    assert keyed.fingerprint_kind == "token_sha256"
+    assert keyed != bounded_evidence([_Keyed(2)] * 1_000, work=work)
+    # 型名しか分からない live な object は値の fingerprint を持たない（別の値を同じ要約にしない）
+    class _Case:
+        def __init__(self, value):
+            self.value = value
+
+    first = bounded_evidence([_Case(1)] * 1_000, work=work)
+    second = bounded_evidence([_Case(2)] * 1_000, work=work)
+    assert first.unfingerprinted == UNFINGERPRINTED_OPAQUE and first.fingerprint is None
+    assert first != second and first == first
     # 閉路は fingerprint の無い要約（理由つき）
     cycle = _self_list()
     cycle.extend(range(5_000))
@@ -296,21 +314,21 @@ def test_a_cycle_through_a_set_member_is_a_typed_cycle():
         canonical_fingerprint(outer, work=JsonBudget(10_000_000))
 
 
-def test_values_without_a_bounded_canonical_form_fall_back_to_a_token_fingerprint():
+def test_values_without_a_bounded_canonical_form_have_no_value_fingerprint_when_tokens_cannot_tell_them_apart():
     # set の中の、mapping を値に持つ enum: 並びの digest が流す byte と別の形なので約束しない
     in_set = frozenset({_Color.TABLE, _Color.RED})
     with pytest.raises(TypeError):
         canonical_fingerprint(in_set, work=JsonBudget(None))
+    # 型つき token の列は set の要素を辿らない（型名しか書けない）: 値の fingerprint を作らない
     summary = bounded_evidence((in_set,) + tuple(range(5_000)), work=JsonBudget(10_000_000))
-    assert summary.fingerprint_kind == "token_sha256"
-    # 深すぎる set の入れ子は RecursionError（証拠は fingerprint の無い要約か token）
+    assert summary.fingerprint is None and summary.unfingerprinted == UNFINGERPRINTED_OPAQUE
+    # 深すぎる set の入れ子は RecursionError（証拠は fingerprint の無い要約）
     deep = frozenset()
     for _ in range(5_000):
         deep = frozenset({deep})
     summary = bounded_evidence((deep,) + tuple(range(5_000)), work=JsonBudget(10_000_000))
-    assert summary.fingerprint_kind in {"token_sha256", None}
-    if summary.fingerprint_kind is None:
-        assert summary.unfingerprinted == UNFINGERPRINTED_UNSUPPORTED
+    assert summary.fingerprint is None
+    assert summary.unfingerprinted in {UNFINGERPRINTED_UNSUPPORTED, UNFINGERPRINTED_OPAQUE}
 
 
 def test_unfingerprinted_summaries_are_equal_only_to_themselves():

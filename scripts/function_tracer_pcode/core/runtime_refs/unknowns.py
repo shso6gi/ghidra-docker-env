@@ -6,9 +6,10 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from scripts.function_tracer_pcode.core.builtin_containers import builtin_mapping, builtin_sequence, builtin_set
 from scripts.function_tracer_pcode.core.json_encoding import (
     JsonBudget, as_list, each, identity_key_of, inline, is_json_record, materialize, metered, pairs_of, raw,
-    source_converter,
+    source_converter, stringify_plain_key,
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
@@ -280,38 +281,55 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
     ``hash()``・オブジェクトアドレス・既定 ``repr`` には依存しない。表現できない
     object は型名だけの不透明値へ落とす（同一性を持ち込まない）。``stable_key`` が
     自分と同種の object を返し続ける実装（テスト用 Mock など）でも止まるよう、
-    深さで打ち切る。値の規則は `_canonical_budget_value_within`（1 つの実装）。
+    深さで打ち切る。
+
+    Issue #22 PR-22-D: identity の構築（owner は #194）で、bounded path ではない。規則を
+    変えない（出力の準備は `_canonical_budget_source` が walk の作業量の中で同じ値を作り、
+    作業量の中で作れない値 — 組み込みでない容器・scalar でない key — は marker にする）。
     """
 
-    # producer 時点の identity の構築（key の大きさの owner は identity。出力の準備は
-    # `_canonical_budget_source` が walk の作業量へ数える）
-    return _canonical_budget_value_within(value, depth, work=JsonBudget(None))
-
-
-def _charge_key(key: Any, work: Any) -> None:
-    """mapping の key を `str(key)` にする手間を、作る前に数える。
-
-    scalar は長さ（数値は桁数の上限）。それ以外（tuple の key など）は、書いたときの大きさを
-    `work` の残りの中で数える（大きさに比例する `str()` を数える前に作らない）。
-    """
-
-    if isinstance(key, str):
-        work.charge(1 + len(key))
-    elif key is None or isinstance(key, (bool, float)):
-        work.charge(8)
-    elif isinstance(key, int):
-        work.charge(1 + key.bit_length() // 3)
-    else:
-        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonValueRejected
-
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if depth >= _CANONICAL_BUDGET_MAX_DEPTH:
+        return ["depth_limited", type(value).__module__, type(value).__qualname__]
+    if isinstance(value, float):
+        return repr(value)
+    if isinstance(value, bytes):
+        return ["bytes", value.hex()]
+    if isinstance(value, (list, tuple)):
+        return [_canonical_budget_value(item, depth + 1) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted(
+            (_canonical_budget_value(item, depth + 1) for item in value),
+            key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True),
+        )
+    if isinstance(value, Mapping):
+        return {
+            str(key): _canonical_budget_value(item, depth + 1)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    stable_key = getattr(value, "stable_key", None)
+    if callable(stable_key):
         try:
-            work.charge(1 + RESULT_JSON_POLICY.measure(key, max_bytes=work.remaining(), mode="legacy"))
-        except JsonValueRejected:
-            work.charge(1 + len(type(key).__qualname__))
+            key = stable_key()
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            key = None
+        if key is not None:
+            return ["stable", _canonical_budget_value(key, depth + 1)]
+    return ["opaque", type(value).__module__, type(value).__qualname__]
+
+
+#: 切り捨て事実の identity が使う key（`_canonical_budget_value` と同じ: `stable_key` だけ）
+_BUDGET_IDENTITY_KEYS = ("stable_key",)
 
 
 def _canonical_budget_value_within(value: Any, depth: int = 0, *, work: Any) -> Any:
-    """`_canonical_budget_value` の本体。容器は幅を、文字列は長さを `work` へ数えてから作る。"""
+    """`_canonical_budget_value` と同じ値を `work` の中で作る（出力の準備用。容器は幅を、文字列は長さを先に数える）。
+
+    辿るのは組み込みの振る舞いの容器だけで、mapping の key は scalar と scalar の tuple だけを
+    文字列にする（`stringify_plain_key`）。それ以外の key（`__str__` を持つ object）は
+    `TypeError`（producer を呼ばない。出力では JSON にならない値として marker になる）。
+    """
 
     if value is None or isinstance(value, (bool, int)):
         work.charge(1)
@@ -322,30 +340,28 @@ def _canonical_budget_value_within(value: Any, depth: int = 0, *, work: Any) -> 
     if depth >= _CANONICAL_BUDGET_MAX_DEPTH:
         return ["depth_limited", type(value).__module__, type(value).__qualname__]
     if isinstance(value, float):
-        return repr(value)
+        return float.__repr__(value)
     if isinstance(value, bytes):
         work.charge(1 + 2 * len(value))
         return ["bytes", value.hex()]
-    if isinstance(value, (list, tuple)):
+    if builtin_sequence(value):
         work.charge(1 + len(value))
         return [_canonical_budget_value_within(item, depth + 1, work=work) for item in value]
-    if isinstance(value, (set, frozenset)):
+    if builtin_set(value):
         work.charge(1 + len(value))
         # 並びの key（要素の JSON）の長さは、要素を作るときに数えた量に比例する
         return sorted(
             (_canonical_budget_value_within(item, depth + 1, work=work) for item in value),
             key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True),
         )
-    if isinstance(value, Mapping):
-        work.charge(1 + len(value))
-        for key in value:
-            _charge_key(key, work)
+    mapping = builtin_mapping(value)
+    if mapping is not None:
         return {
-            str(key): _canonical_budget_value_within(item, depth + 1, work=work)
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            text: _canonical_budget_value_within(item, depth + 1, work=work)
+            for text, item in _stringified_items(mapping, work)
         }
     try:
-        has_key, key = identity_key_of(value)
+        has_key, key = identity_key_of(value, names=_BUDGET_IDENTITY_KEYS)
     except (AttributeError, TypeError, ValueError, RecursionError):
         has_key, key = False, None
     if has_key and key is not None:
@@ -353,12 +369,23 @@ def _canonical_budget_value_within(value: Any, depth: int = 0, *, work: Any) -> 
     return ["opaque", type(value).__module__, type(value).__qualname__]
 
 
+def _stringified_items(mapping: Mapping[Any, Any], work: Any) -> List[Tuple[str, Any]]:
+    """mapping の (key の文字列, 値) を key の文字列で並べる（幅と key の長さを先に数える）。"""
+
+    work.charge(1 + len(mapping))
+    items: List[Tuple[str, Any]] = []
+    for key, item in mapping.items():
+        items.append((stringify_plain_key(key, work), item))
+    items.sort(key=lambda pair: pair[0])
+    return items
+
+
 def _canonical_budget_source(value: Any, depth: int = 0, *, work: Any) -> Any:
     """`_canonical_budget_value` と同じ値を 1 要素ずつ作らせる source（出力の準備用）。
 
     並べる前に幅を `work`（walk の作業量。`metered` が渡す）へ数える。集合だけは並びを
     決めるために要素の canonical な値を先に求める（旧実装と同じ順序。作る量を `work` へ
-    数えながら）。
+    数えながら）。辿る容器・key の規則は `_canonical_budget_value_within` と同じ。
     """
 
     if value is None or isinstance(value, (bool, int, str)):
@@ -366,13 +393,13 @@ def _canonical_budget_source(value: Any, depth: int = 0, *, work: Any) -> Any:
     if depth >= _CANONICAL_BUDGET_MAX_DEPTH:
         return each(("depth_limited", type(value).__module__, type(value).__qualname__))
     if isinstance(value, float):
-        return repr(value)
+        return float.__repr__(value)
     if isinstance(value, bytes):
         work.charge(1 + 2 * len(value))
         return each(("bytes", value.hex()))
-    if isinstance(value, (list, tuple)):
+    if builtin_sequence(value):
         return each(value, source_converter(lambda item: _canonical_budget_source(item, depth + 1, work=work)))
-    if isinstance(value, (set, frozenset)):
+    if builtin_set(value):
         work.charge(1 + len(value))
         ordered = sorted(
             value,
@@ -381,16 +408,14 @@ def _canonical_budget_source(value: Any, depth: int = 0, *, work: Any) -> Any:
             ),
         )
         return each(ordered, source_converter(lambda item: _canonical_budget_source(item, depth + 1, work=work)))
-    if isinstance(value, Mapping):
-        work.charge(1 + len(value))
-        for key in value:
-            _charge_key(key, work)
+    mapping = builtin_mapping(value)
+    if mapping is not None:
         return pairs_of(
-            (str(key), _canonical_budget_source(item, depth + 1, work=work))
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            (text, _canonical_budget_source(item, depth + 1, work=work))
+            for text, item in _stringified_items(mapping, work)
         )
     try:
-        has_key, key = identity_key_of(value)
+        has_key, key = identity_key_of(value, names=_BUDGET_IDENTITY_KEYS)
     except (AttributeError, TypeError, ValueError, RecursionError):
         has_key, key = False, None
     if has_key and key is not None:

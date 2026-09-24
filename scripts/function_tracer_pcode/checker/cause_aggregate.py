@@ -52,7 +52,15 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from scripts.function_tracer_pcode.core.json_encoding import CANONICAL, LEGACY
+from scripts.function_tracer_pcode.core.builtin_containers import builtin_mapping, builtin_sequence
+from scripts.function_tracer_pcode.core.json_encoding import (
+    CANONICAL,
+    LEGACY,
+    builtin_str,
+    exception_text,
+    is_json_record,
+    renders_with_builtins,
+)
 
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownReasonRecord,
@@ -125,15 +133,23 @@ def freeze_identity(value: Any) -> Any:
 
     JSON 往復で tuple が list になっても同じ値になるので、`debug_trace` 経路と
     `unknown_cause_aggregate` 経路の identity が一致する。
+
+    Issue #22 PR-22-D: 組み込みの振る舞いの容器だけを辿り、葉は組み込みで書ける値（文字列・
+    scalar・組み込みのままの enum）だけをそのまま残す。それ以外の葉（上書きした `__hash__` /
+    `__repr__` を持ち得る live な object）は型名の印にする（集計は印を hash・`repr` するだけで、
+    object の code を呼ばない）。JSON から読んだ値（reporting）は常に組み込みの値なので変わらない。
     """
-    if isinstance(value, Mapping):
+    mapping = builtin_mapping(value)
+    if mapping is not None:
         return tuple(
-            (str(key), freeze_identity(item))
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            (builtin_str(key), freeze_identity(item))
+            for key, item in sorted(mapping.items(), key=lambda pair: builtin_str(pair[0]))
         )
-    if isinstance(value, (list, tuple)):
+    if builtin_sequence(value):
         return tuple(freeze_identity(item) for item in value)
-    return value
+    if renders_with_builtins(value):
+        return value
+    return builtin_str(value)
 
 
 def identity_tuple(value: Any) -> Tuple[Any, ...]:
@@ -144,13 +160,17 @@ def identity_tuple(value: Any) -> Tuple[Any, ...]:
 
 
 def _jsonable(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(key): _jsonable(item) for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))}
-    if isinstance(value, (list, tuple)):
+    mapping = builtin_mapping(value)
+    if mapping is not None:
+        return {
+            builtin_str(key): _jsonable(item)
+            for key, item in sorted(mapping.items(), key=lambda pair: builtin_str(pair[0]))
+        }
+    if builtin_sequence(value):
         return [_jsonable(item) for item in value]
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
-    return str(value)
+    return builtin_str(value)
 
 
 def identity_digest(value: Any) -> str:
@@ -196,7 +216,7 @@ def resolve_cause_identity(
         try:
             cause: CauseKey = cause_key_from_dict(typed_cause_key)
         except ValueError as exc:
-            message = str(exc)
+            message = exception_text(exc, 200)
             if "unsupported typed cause schema" in message:
                 diagnostic = "unknown_typed_cause_schema"
             elif "unsupported identity scope" in message:
@@ -213,7 +233,7 @@ def resolve_cause_identity(
     if not object_target_key:
         return CauseIdentityResolution()
     legacy = identity_tuple(object_target_key)
-    discriminator = str(legacy[0]) if legacy else ""
+    discriminator = builtin_str(legacy[0]) if legacy else ""
     spec = LEGACY_CAUSE_SCOPES.get(discriminator)
     if spec is None:
         return CauseIdentityResolution(diagnostic="legacy_adapter_missing")
@@ -400,7 +420,7 @@ def resolve_required_proofs(
             keys.append(ProofRequirementId.from_dict(requirement).to_key())
         except (TypeError, ValueError) as exc:
             complete = False
-            message = str(exc)
+            message = exception_text(exc, 200)
             if "unsupported proof requirement schema" in message:
                 diagnostics.append("unknown_proof_requirement_schema")
             elif "requires kind, target, and contract" in message:
@@ -409,7 +429,7 @@ def resolve_required_proofs(
                 diagnostics.append("invalid_proof_requirement")
     if not explicit and object_target_key:
         for action in recovery_actions:
-            proof_kind = str(getattr(action, "proof_kind", "none"))
+            proof_kind = builtin_str(getattr(action, "proof_kind", "none"))
             if proof_kind == "none":
                 continue
             contract = (
@@ -488,7 +508,7 @@ def resolve_occurrence_transitions(
         if not isinstance(completion, Mapping):
             continue
         target = freeze_identity(completion.get("completed_occurrence_id"))
-        if str(completion.get("applicability_status")) != "APPLICABLE":
+        if builtin_str(completion.get("applicability_status")) != "APPLICABLE":
             _bump(diagnostics, "inapplicable_reason_completion")
             continue
         if target not in occurrence_ids:
@@ -498,11 +518,11 @@ def resolve_occurrence_transitions(
         expected_target = freeze_identity(record.get("object_target_key"))
         observed_target = freeze_identity(completion.get("exact_target_id"))
         expected_slots = {
-            str(item.get("proof_kind") or "")
+            builtin_str(item.get("proof_kind") or "")
             for item in (record.get("proof_requirement_ids") or ())
             if isinstance(item, Mapping)
         }
-        observed_slot = str(completion.get("exact_missing_fact_or_proof_slot") or "")
+        observed_slot = builtin_str(completion.get("exact_missing_fact_or_proof_slot") or "")
         if (
             (expected_target and expected_target != observed_target)
             or (expected_slots and observed_slot not in expected_slots)
@@ -536,8 +556,8 @@ def resolve_occurrence_transitions(
         if target not in occurrence_ids:
             _bump(diagnostics, "dangling_transition_target")
             continue
-        kind = str(transition.get("transition_kind") or "")
-        cause_kind = str(transition.get("cause_kind") or "")
+        kind = builtin_str(transition.get("transition_kind") or "")
+        cause_kind = builtin_str(transition.get("cause_kind") or "")
         cause_ref = freeze_identity(transition.get("cause_ref"))
         valid = False
         emitted_ordinal = attempt_ordinal(transition.get("emitted_at_attempt"))
@@ -598,7 +618,7 @@ def select_primary_reason_records(
     grouped: Dict[Tuple[str, Any], List[UnknownReasonRecord]] = {}
     fallback_index = 0
     for record in records:
-        aggregation_key = str(record.aggregation_unit or "result")
+        aggregation_key = builtin_str(record.aggregation_unit or "result")
         unit_key = record.pair_or_case or record.stage
         if unit_key is None:
             unit_key = f"record:{fallback_index}"
@@ -613,19 +633,19 @@ def select_primary_reason_records(
 
 def primary_reason_record_sort_key(record: UnknownReasonRecord) -> Tuple[Any, ...]:
     return (
-        PRIMARY_DECISION_EFFECT_PRIORITY.get(str(record.decision_effect), 99),
-        str(record.reason_id),
-        str(record.reason_scope),
-        str(record.recovery_proof_kind),
-        str(record.proof_stage or ""),
-        str(record.action_status or ""),
-        tuple(str(ref) for ref in (record.evidence_refs or ())),
-        str(record.detail or ""),
+        PRIMARY_DECISION_EFFECT_PRIORITY.get(builtin_str(record.decision_effect), 99),
+        builtin_str(record.reason_id),
+        builtin_str(record.reason_scope),
+        builtin_str(record.recovery_proof_kind),
+        builtin_str(record.proof_stage or ""),
+        builtin_str(record.action_status or ""),
+        tuple(builtin_str(ref) for ref in (record.evidence_refs or ())),
+        builtin_str(record.detail or ""),
     )
 
 
 def is_proof_backlog(record: UnknownReasonRecord, actions: Sequence[Any] = ()) -> bool:
-    action_statuses = {str(getattr(action, "status", "")) for action in actions}
+    action_statuses = {builtin_str(getattr(action, "status", "")) for action in actions}
     return (
         record.reason_class in PROOF_BACKLOG_CLASSES
         or record.action_status
@@ -651,31 +671,31 @@ def global_reason_tuple_from_record(
     count_kind: str,
 ) -> Tuple[str, ...]:
     return (
-        str(count_kind),
-        str(record.reason_id),
-        str(record.decision_effect),
-        str(record.reason_scope),
-        str(record.recovery_proof_kind or UNKNOWN_TUPLE_MISSING),
-        str(record.proof_stage or UNKNOWN_TUPLE_MISSING),
-        str(record.action_status or UNKNOWN_TUPLE_MISSING),
+        builtin_str(count_kind),
+        builtin_str(record.reason_id),
+        builtin_str(record.decision_effect),
+        builtin_str(record.reason_scope),
+        builtin_str(record.recovery_proof_kind or UNKNOWN_TUPLE_MISSING),
+        builtin_str(record.proof_stage or UNKNOWN_TUPLE_MISSING),
+        builtin_str(record.action_status or UNKNOWN_TUPLE_MISSING),
     )
 
 
 def global_reason_tuple_from_action(action: Any) -> Tuple[str, ...]:
     return (
-        str(getattr(action, "count_kind", UnknownCountKind.PROOF_ACTION.value)),
-        str(getattr(action, "reason_id", UnknownReasonId.UNKNOWN.value)),
-        str(getattr(action, "decision_effect", UNKNOWN_TUPLE_MISSING)),
-        str(getattr(action, "reason_scope", UNKNOWN_TUPLE_MISSING)),
-        str(getattr(action, "proof_kind", UNKNOWN_TUPLE_MISSING)),
-        str(getattr(action, "proof_stage", UNKNOWN_TUPLE_MISSING)),
-        str(getattr(action, "status", UNKNOWN_TUPLE_MISSING)),
+        builtin_str(getattr(action, "count_kind", UnknownCountKind.PROOF_ACTION.value)),
+        builtin_str(getattr(action, "reason_id", UnknownReasonId.UNKNOWN.value)),
+        builtin_str(getattr(action, "decision_effect", UNKNOWN_TUPLE_MISSING)),
+        builtin_str(getattr(action, "reason_scope", UNKNOWN_TUPLE_MISSING)),
+        builtin_str(getattr(action, "proof_kind", UNKNOWN_TUPLE_MISSING)),
+        builtin_str(getattr(action, "proof_stage", UNKNOWN_TUPLE_MISSING)),
+        builtin_str(getattr(action, "status", UNKNOWN_TUPLE_MISSING)),
     )
 
 
 def recovery_action_key(action: Any) -> str:
     return " | ".join(
-        str(value)
+        builtin_str(value)
         for value in (
             getattr(action, "reason_id", "unknown"),
             getattr(action, "proof_kind", "none"),
@@ -779,7 +799,7 @@ def _multiset_rows(counts: Mapping[Tuple[str, ...], int]) -> List[Dict[str, Any]
     """tuple キーの multiset を JSON 可能な行へ（区切り文字で潰さない）。"""
     return [
         {"key": list(key), "count": int(value)}
-        for key, value in sorted(counts.items(), key=lambda item: tuple(str(part) for part in item[0]))
+        for key, value in sorted(counts.items(), key=lambda item: tuple(builtin_str(part) for part in item[0]))
     ]
 
 
@@ -789,13 +809,13 @@ def multiset_from_rows(rows: Any) -> Dict[Tuple[str, ...], int]:
     for row in rows or ():
         if not isinstance(row, Mapping):
             continue
-        key = tuple(str(part) for part in (row.get("key") or ()))
+        key = tuple(builtin_str(part) for part in (row.get("key") or ()))
         counts[key] = counts.get(key, 0) + int(row.get("count") or 0)
     return counts
 
 
 def _inc(counts: Dict[Any, int], key: Any, amount: int = 1) -> None:
-    count_key = key if isinstance(key, tuple) else str(key)
+    count_key = key if isinstance(key, tuple) else builtin_str(key)
     counts[count_key] = int(counts.get(count_key, 0) or 0) + int(amount)
 
 
@@ -854,7 +874,7 @@ def build_unknown_cause_aggregate(
                 TRACE_CAUSE_EVIDENCE_SCHEMA if trace_evidence_for is not None
                 else UNKNOWN_CAUSE_AGGREGATE_SCHEMA
             ),
-            "error": f"{type(exc).__name__}: {exc}"[:200],
+            "error": exception_text(exc, 200),
         }
 
 
@@ -998,7 +1018,7 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
             detail = evidence.get("error") or evidence.get("reason")
         return {
             "schema": UNKNOWN_CAUSE_AGGREGATE_SCHEMA,
-            "error": ("trace_evidence_unavailable: " + str(detail))[:200],
+            "error": ("trace_evidence_unavailable: " + builtin_str(detail))[:200],
         }
     trace_present = bool(evidence.get("trace_present"))
 
@@ -1159,12 +1179,14 @@ def _event_views(values: Iterable[Any]) -> List[Dict[str, Any]]:
 
 
 def _as_mapping(value: Any) -> Dict[str, Any]:
-    if isinstance(value, Mapping):
-        return dict(value)
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
-        payload = to_dict()
-        if isinstance(payload, Mapping):
+    # 組み込みの振る舞いの mapping と json record（`to_dict()` は `materialize` が作業量の中で
+    # 作る）だけを読む。それ以外の object の `to_dict()`（任意の producer）は呼ばない
+    mapping = builtin_mapping(value)
+    if mapping is not None:
+        return dict(mapping)
+    if is_json_record(value):
+        payload = value.to_dict()
+        if builtin_mapping(payload) is not None:
             return dict(payload)
     return {}
 
@@ -1176,7 +1198,7 @@ def _final_legacy_attempt(trace: Any, attempts: Sequence[Any]):
     for attempt in reversed(tuple(attempts)):
         if (
             getattr(attempt, "result", None) is None
-            and str(getattr(attempt, "transition_reason", "")) in FINAL_UNKNOWN_TRANSITIONS
+            and builtin_str(getattr(attempt, "transition_reason", "")) in FINAL_UNKNOWN_TRANSITIONS
         ):
             return attempt, coerce_unknown_reason_records(
                 getattr(attempt, "unknown_reasons", ()) or ()
@@ -1188,11 +1210,11 @@ def _final_attempt_identity(attempts: Sequence[Any], occurrences: Sequence[Mappi
     for attempt in reversed(tuple(attempts)):
         if (
             getattr(attempt, "result", None) is None
-            and str(getattr(attempt, "transition_reason", "")) in FINAL_UNKNOWN_TRANSITIONS
+            and builtin_str(getattr(attempt, "transition_reason", "")) in FINAL_UNKNOWN_TRANSITIONS
         ):
             return freeze_identity({
                 "trace_schema_version": 1,
-                "strategy_identity": str(
+                "strategy_identity": builtin_str(
                     getattr(attempt, "strategy", None) or getattr(attempt, "phase", None) or "unknown"
                 ),
                 "attempt_ordinal": int(getattr(attempt, "attempt_id", 0) or 0),
@@ -1219,7 +1241,7 @@ def _case_pair_local(occurrence: Mapping[str, Any], record: Mapping[str, Any]):
     """`StableCasePairRef` のうち結果に依らない部分（strategy と 2 つの case）。"""
     pair = record.get("pair_or_case")
     if isinstance(pair, (tuple, list)) and len(pair) == 2:
-        strategy = str((occurrence.get("attempt_identity") or {}).get("strategy_identity") or "unknown")
+        strategy = builtin_str((occurrence.get("attempt_identity") or {}).get("strategy_identity") or "unknown")
         return (strategy, identity_tuple(pair[0]), identity_tuple(pair[1]))
     return None
 
@@ -1277,15 +1299,15 @@ class _CauseGroup:
             pair, certainty, pool: IdentityPool) -> None:
         self.occurrence_count += 1
         self.occurrence_ids.setdefault(frozen_occurrence_id, occurrence_id_payload)
-        self.reason_ids.add(str(record.get("reason_id") or "unknown"))
-        self.decision_effects.add(str(record.get("decision_effect") or ""))
+        self.reason_ids.add(builtin_str(record.get("reason_id") or "unknown"))
+        self.decision_effects.add(builtin_str(record.get("decision_effect") or ""))
         self.required.update(pool.intern(item) for item in required)
         if not complete:
             self.proof_requirements_complete = False
         legacy = record.get("proof_obligation_id")
         if legacy:
             self.legacy.add(pool.intern(freeze_identity(legacy)))
-        self.evidence.update(str(item) for item in (record.get("evidence_refs") or ()))
+        self.evidence.update(builtin_str(item) for item in (record.get("evidence_refs") or ()))
         self.certainties.add(certainty)
         if pair is not None:
             self.case_pairs.add(pair)
@@ -1342,7 +1364,7 @@ def _build_root_causes(
     for occurrence in occurrences:
         record = occurrence.get("reason_record") or {}
         total_reasons += 1
-        status = str(occurrence.get("initial_causal_status") or "unclassified")
+        status = builtin_str(occurrence.get("initial_causal_status") or "unclassified")
         if status != "unclassified":
             explicit_status += 1
         occurrence_id = freeze_identity(occurrence.get("occurrence_id"))
@@ -1365,8 +1387,8 @@ def _build_root_causes(
         certainty = "explicit" if status != "unclassified" else "unclassified"
         is_final = occurrence_id in final_ids
         if status == "unclassified" and is_final:
-            effect = str(record.get("decision_effect") or "")
-            action_status = str(record.get("action_status") or "")
+            effect = builtin_str(record.get("decision_effect") or "")
+            action_status = builtin_str(record.get("action_status") or "")
             if effect in BLOCKING_DECISION_EFFECTS and action_status != "proof_complete":
                 certainty = "inferred_final_attempt"
                 effective = "active_final_blocker"
@@ -1403,7 +1425,7 @@ def _build_root_causes(
             pool=pool,
         )
         entry["all"].add(**contribution)
-        _inc(entry["status_counts"], str(effective or "unclassified"))
+        _inc(entry["status_counts"], builtin_str(effective or "unclassified"))
         # active は「最終 attempt の occurrence」かつ「実効 status が blocker」の
         # ときだけ。`all` と別に union するので、active に数えなかった occurrence の
         # proof requirement や case pair が active 側へ混ざらない。
@@ -1492,7 +1514,7 @@ def completion_counts(
     requirement_to_reasons: Dict[Any, set] = {}
     for occurrence in occurrences:
         record = occurrence.get("reason_record") or {}
-        reason_id = str(record.get("reason_id") or "unknown")
+        reason_id = builtin_str(record.get("reason_id") or "unknown")
         for requirement in record.get("proof_requirement_ids") or ():
             try:
                 key = ProofRequirementId.from_dict(requirement).to_key()
@@ -1505,9 +1527,9 @@ def completion_counts(
     proof_by_reason: Dict[str, int] = {}
     for event in completions:
         requirement = event.get("proof_requirement_id")
-        proof_kind = str((requirement or {}).get("proof_kind") or UNKNOWN_TUPLE_MISSING)
+        proof_kind = builtin_str((requirement or {}).get("proof_kind") or UNKNOWN_TUPLE_MISSING)
         _inc(proof_by_kind, proof_kind)
-        _inc(proof_by_status, str(event.get("proof_status") or UNKNOWN_TUPLE_MISSING))
+        _inc(proof_by_status, builtin_str(event.get("proof_status") or UNKNOWN_TUPLE_MISSING))
         matched = ()
         if isinstance(requirement, Mapping):
             try:
@@ -1520,7 +1542,7 @@ def completion_counts(
             _inc(proof_by_reason, reason_id)
 
     occurrence_reason = {
-        freeze_identity(item.get("occurrence_id")): str(
+        freeze_identity(item.get("occurrence_id")): builtin_str(
             (item.get("reason_record") or {}).get("reason_id") or "unknown"
         )
         for item in occurrences
@@ -1530,7 +1552,7 @@ def completion_counts(
     for event in reason_completions:
         target = freeze_identity(event.get("completed_occurrence_id"))
         _inc(reason_by_reason, occurrence_reason.get(target, "(unmatched)"))
-        _inc(reason_by_status, str(event.get("applicability_status") or UNKNOWN_TUPLE_MISSING))
+        _inc(reason_by_status, builtin_str(event.get("applicability_status") or UNKNOWN_TUPLE_MISSING))
 
     return {
         "proof_completions": {
@@ -1552,7 +1574,7 @@ def transition_counts(
     occurrences: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any]:
     initial_status = {
-        freeze_identity(item.get("occurrence_id")): str(
+        freeze_identity(item.get("occurrence_id")): builtin_str(
             item.get("initial_causal_status") or "unclassified"
         )
         for item in occurrences
@@ -1560,7 +1582,7 @@ def transition_counts(
     by_kind: Dict[str, int] = {}
     by_status_pair: Dict[str, int] = {}
     for transition in transitions:
-        kind = str(transition.get("transition_kind") or UNKNOWN_TUPLE_MISSING)
+        kind = builtin_str(transition.get("transition_kind") or UNKNOWN_TUPLE_MISSING)
         _inc(by_kind, kind)
         target = freeze_identity(transition.get("target_occurrence_id"))
         prior = initial_status.get(target, "(unmatched)")
