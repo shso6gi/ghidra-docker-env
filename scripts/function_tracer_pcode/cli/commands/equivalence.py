@@ -737,12 +737,15 @@ def run_equivalence_check(args):
         binary2_content_identity=binary2_content_identity,
     )
     # 人向けの text は最終 envelope と同じ上限で組んだ `to_dict()` から作る（契約違反は同じ
-    # ERROR）。既存の順（to_string -> to_dict -> 封印 -> JSON 書き出し）を保つ
+    # ERROR）。既存の順（to_string -> to_dict -> 封印 -> JSON 書き出し）を保つ。text を **書く**
+    # のは最終 envelope が契約に収まると分かった後（契約違反の ERROR の前に、確定した判定の
+    # text を出さない）
     output_content = _text_or_error_result(args, result=result, payload=None, **envelope_context)
-    output_result(output_content, args.output, args.quiet)
     render_seconds = time.monotonic() - emission_started
 
     emit_json = _get_bool_arg("emit_result_json", False)
+    if not emit_json:
+        output_result(output_content, args.output, args.quiet)
     if emit_json:
         from scripts.function_tracer_pcode.authority.decision.canonical_result import (
             build_canonical_result_finalization_bundle,
@@ -769,6 +772,7 @@ def run_equivalence_check(args):
         envelope = _final_envelope_or_error_result(
             args, result=result, seal=seal, **envelope_context,
         )
+        output_result(output_content, args.output, args.quiet)
         result_payload = envelope.payload
         if seal is not None:
             result.canonical_result_finalization_bundle = result_payload[

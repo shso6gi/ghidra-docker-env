@@ -2109,10 +2109,18 @@ _PR22D_FUNCTIONS = {
         "bounded_prefix", "finitize_unknown_reason_record", "finitize_unknown_recovery_action",
         "_bounded_value", "_bounded_text", "_match_legacy_reasons", "build_projection_diagnostic",
         "_bounded_cause_value", "projection_diagnostic_work", "_ReasonCounts", "_RecoveryBacklog",
-        "_BacklogEntryView", "_PrimaryFilter",
+        "_BacklogEntryView", "_PrimaryFilter", "LegacyReasonIndex", "legacy_reason_index", "_text_cost",
+        "recovery_actions_source", "_iter_recovery_actions", "_key_width",
     },
-    "checker/cause_aggregate.py": {"_metered", "reason_detail_key", "attach_cause_aggregate", "_remaining_work"},
-    "checker/diagnostics.py": {"TraceTimingsView", "_SolverTotals", "trace_timings_payload"},
+    "checker/cause_aggregate.py": {
+        "_metered", "reason_detail_key", "attach_cause_aggregate", "_payload_occurrence_views",
+        "_prepared_within_work",
+    },
+    "checker/diagnostics.py": {
+        "TraceTimingsView", "_SolverTotals", "trace_timings_payload", "_solver_rows", "_attempt_rows",
+        "_ResultDiagnosticsView",
+    },
+    "checker/debug_trace.py": {"_PhaseUsageFold"},
 }
 #: J5 で数える呼び出し（入力に比例し得る並べ替え・hash・canonical 化・書き出し）
 _BOUNDED_WORK_NAMES = frozenset({"sorted", "canonical_value", "authority_digest"})

@@ -218,7 +218,9 @@ def _truncation_marker(
         "original_items": count,
     }
     if rejected is not None:
-        marker["rejected_at"] = str(rejected.path)[:200]
+        from scripts.function_tracer_pcode.checker.output_schema import MARKER_PATH_MAX_CHARS
+
+        marker["rejected_at"] = str(rejected.path)[:MARKER_PATH_MAX_CHARS]
     return marker
 
 
@@ -973,9 +975,11 @@ def finitize_legacy_reasons(result: Any, *, authority_projects_reasons: bool) ->
       入り得る行数の上限を導く（`max_rows_within`）。record を 1 件ずつ辿る前に件数だけで比べる。
       - recovery action と、authority が reason を作らない経路（pilot 無し）の reason は、その
         まま出力の行になる: 上限を超えれば判定の前に pair terminal な限界。
-      - pilot のある経路の legacy reason は診断にしか使われない: 先頭の行数の上限までを残し、
-        残りは件数（`legacy_reason_overflow`）だけにする。
-    * **重い field**: 1 つの作業量（`prepared_payload_limit`）を pass 全体で共有して有界にする
+      - pilot のある経路の legacy reason は診断にしか使われない: 先頭の canonical reason の
+        行数の上限（schema の `max_rows`）までを残し、残りは件数（`legacy_reason_overflow`）
+        だけにする。
+    * **重い field**: 1 つの作業量（置き換えた record が書かれる出力 field の schema の上限の和）を
+      pass 全体で共有して有界にする
       （`checker/unknown_reason.finitize_*`）。使い切った後の証拠は fingerprint の無い要約。
     """
 
@@ -991,7 +995,9 @@ def finitize_legacy_reasons(result: Any, *, authority_projects_reasons: bool) ->
     from scripts.function_tracer_pcode.core.json_encoding import max_rows_within, row_min_bytes
 
     bounds = authority_field_bounds(RESULT_JSON_POLICY)
-    work = JsonBudget(active_budget_policy().prepared_payload_limit())
+    # 辿ってよい量は、置き換えた record が書かれる出力 field の上限（schema。予算を無効にした
+    # policy でも有限）
+    work = JsonBudget(bounds["unknown_reasons"].max_bytes + bounds["unknown_recovery_actions"].max_bytes)
 
     def row_limit(key: str, row: Any) -> int:
         return max_rows_within(bounds[key].max_bytes, row_min_bytes(row, RESULT_JSON_POLICY))
@@ -1008,13 +1014,17 @@ def finitize_legacy_reasons(result: Any, *, authority_projects_reasons: bool) ->
 
     reasons = getattr(result, "unknown_reasons", None)
     if reasons:
-        limit = row_limit("unknown_reasons", UNKNOWN_REASON_ROW)
         count = len(reasons)
-        if count > limit:
-            if not authority_projects_reasons:
+        if authority_projects_reasons:
+            # 診断にしか使わない legacy reason: canonical reason の行数の上限（schema）まで残す
+            limit = bounds["unknown_reasons"].max_rows
+            if count > limit:
+                result.legacy_reason_overflow = count - limit
+                reasons = reasons[:limit]
+        else:
+            limit = row_limit("unknown_reasons", UNKNOWN_REASON_ROW)
+            if count > limit:
                 over_schema("unknown_reasons", count, limit)
-            result.legacy_reason_overflow = count - limit
-            reasons = reasons[:limit]
         result.unknown_reasons = [
             finitize_unknown_reason_record(item, work=work) if isinstance(item, UnknownReasonRecord) else item
             for item in reasons

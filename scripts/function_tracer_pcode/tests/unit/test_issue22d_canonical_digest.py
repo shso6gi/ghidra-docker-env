@@ -278,3 +278,25 @@ def test_values_without_a_bounded_canonical_form_fall_back_to_a_token_fingerprin
     assert summary.fingerprint_kind in {"token_sha256", None}
     if summary.fingerprint_kind is None:
         assert summary.unfingerprinted == UNFINGERPRINTED_UNSUPPORTED
+
+
+def test_unfingerprinted_summaries_are_equal_only_to_themselves():
+    spent = JsonBudget(0)
+    first = bounded_evidence(("a",) + tuple(range(5_000)), work=spent)
+    second = bounded_evidence(("b",) + tuple(range(5_000)), work=spent)
+    assert first.fingerprint is None and second.fingerprint is None
+    assert first.kind == second.kind and first.unfingerprinted == second.unfingerprinted
+    # 同じ種類・理由でも別の値の要約: 重ねない
+    assert first != second and len({first, second}) == 2
+    assert first == first
+
+
+def test_the_encoded_size_lower_bound_is_what_was_measured():
+    from scripts.function_tracer_pcode.core.json_encoding import EVIDENCE_INLINE_BYTES
+
+    work = JsonBudget(10_000_000)
+    large = ("key",) + tuple(range(5_000))
+    assert bounded_evidence(large, work=work).encoded_bytes_over == EVIDENCE_INLINE_BYTES
+    assert bounded_evidence(large, work=work, inline_bytes=100).encoded_bytes_over == 100
+    # plain でない値（live な object）は測っていない: 下限は 0
+    assert bounded_evidence([object()] * 1_000, work=work).encoded_bytes_over == 0

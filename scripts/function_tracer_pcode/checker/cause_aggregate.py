@@ -444,18 +444,28 @@ def attempt_ordinal(value: Any) -> Optional[int]:
 
 
 def cyclic_nodes(edges: Mapping[Any, Any]) -> set:
+    """`edges`（node → 次の node、1 本ずつ）の閉路に載る node。
+
+    Issue #22 PR-22-D: 辿り終えた node を覚えて、各 node を 1 回だけ辿る（辺の数に比例）。
+    始点ごとに鎖を辿り直さない（長い鎖で辺の数の 2 乗にならない）。
+    """
+
     cyclic = set()
+    finished = set()
     for start in edges:
+        if start in finished:
+            continue
         path: List[Any] = []
         positions: Dict[Any, int] = {}
         current = start
-        while current in edges:
+        while current in edges and current not in finished:
             if current in positions:
                 cyclic.update(path[positions[current]:])
                 break
             positions[current] = len(path)
             path.append(current)
             current = edges[current]
+        finished.update(path)
     return cyclic
 
 
@@ -1101,8 +1111,6 @@ def _payload_occurrence_views(records: Sequence[UnknownReasonRecord]) -> List[Di
     Issue #22 PR-22-D: record は出力と同じ有界な表現で読む（authority 後に大きい key を
     辿り直さない。root cause の identity は `typed_cause_key` から決まる）。
     """
-    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
-
     identity = {"trace_schema_version": 1, "strategy_identity": "payload", "attempt_ordinal": 0}
     occurrences: List[Dict[str, Any]] = []
     for ordinal, record in enumerate(records):
@@ -1113,17 +1121,28 @@ def _payload_occurrence_views(records: Sequence[UnknownReasonRecord]) -> List[Di
                 "reason_ordinal": ordinal,
             },
             "attempt_identity": identity,
-            "reason_record": RESULT_JSON_POLICY.prepare(record, max_bytes=_remaining_work()).value(),
+            "reason_record": _prepared_within_work(record),
             "initial_causal_status": "unclassified",
         })
     return occurrences
 
 
-def _remaining_work() -> Optional[int]:
+def _prepared_within_work(record: Any) -> Any:
+    """record を出力と同じ有界な行にし、書いた byte を今の直列化の作業量へ足す。
+
+    record ごとに残りの作業量を上限にし、使った分を足していく（record ごとに作業量の全体を
+    使い直さない）。作業量の scope の外（部品単体の呼び出し）では数えない。
+    """
+
     from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
 
     work = active_serialization_work()
-    return None if work is None else work.remaining()
+    if work is None:
+        return RESULT_JSON_POLICY.prepare(record).value()
+    prepared = RESULT_JSON_POLICY.prepare(record, max_bytes=work.remaining())
+    work.charge(prepared.encoded_bytes)
+    return prepared.value()
 
 
 def _payload_final_identity(evidence: Mapping[str, Any], occurrences: Sequence[Mapping[str, Any]]):

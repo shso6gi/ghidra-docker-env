@@ -523,7 +523,10 @@ def make_internal_v2_reason_diagnostic(
 # * 自由文（`detail` / `stage` / `pair_or_case`）: 行 schema の文字数まで（超えた分は明示の marker）。
 
 
-#: 証拠の参照（evidence ref）1 つの文字数と、有界化した record が持つ参照の数
+#: 証拠の参照（evidence ref）1 つの文字数と、有界化した record が持つ参照の数。
+#: 数は **引き出す要素の上限**（1M 要素の列を辿らない）で、出力の大きさはこの値に依らない
+#: （列は `EVIDENCE` の規則: inline の上限を超えれば有界な要約）。固定の EqBench subset の
+#: 観測の最大は evidence_refs 21 / proof_requirement_ids 5 / required_evidence 3（fec4b39）。
 EVIDENCE_REF_MAX_CHARS = ID_MAX_CHARS
 EVIDENCE_REFS_MAX_COUNT = 64
 
@@ -653,7 +656,9 @@ def projection_diagnostic_work() -> Any:
     return JsonBudget(authority_field_bounds()["unknown_reasons"].max_bytes)
 
 
-#: projection の診断に写す legacy reason の行数の上限
+#: projection の診断に写す legacy reason の行数の上限。`detail` が使うのは先頭 2 行で、残りは
+#: 読み手の手がかり（件数は `legacy_matched_count`）。診断は reason 行の `EVIDENCE` の列に
+#: 置かれるので、出力の大きさはこの値に依らない。固定の EqBench subset の観測の最大は 1 行（fec4b39）。
 PROJECTION_DIAGNOSTIC_LEGACY_ROWS = 8
 
 

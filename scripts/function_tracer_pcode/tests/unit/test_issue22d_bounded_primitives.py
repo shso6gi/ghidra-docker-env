@@ -757,3 +757,120 @@ def test_requirement_ids_are_measured_before_they_are_written_as_text():
     assert matched == (record,)
     # 大きい requirement は数えきれないので文字列にしない（小さい方だけ）
     assert len(written) == 1
+
+
+def test_the_decided_text_is_written_only_after_the_envelope_fits():
+    # 契約違反の ERROR の前に、確定した判定の text を書かない（text は先に作り、書くのは後）
+    import ast
+    import inspect
+
+    from scripts.function_tracer_pcode.cli.commands import equivalence
+
+    tree = ast.parse(inspect.getsource(equivalence))
+    function = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and any(
+            isinstance(call, ast.Call) and getattr(call.func, "id", None) == "_final_envelope_or_error_result"
+            for call in ast.walk(node)
+        )
+    )
+    calls = [
+        (node.lineno, node.func.id, node.args[0].id if node.args and isinstance(node.args[0], ast.Name) else None)
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    envelope_line = min(line for line, name, _ in calls if name == "_final_envelope_or_error_result")
+    text_writes = [line for line, name, first in calls if name == "output_result" and first == "output_content"]
+    text_made = min(line for line, name, _ in calls if name == "_text_or_error_result")
+    assert text_made < envelope_line
+    # emit_json のときの書き出しは envelope の後（emit しないときは envelope を作らない）
+    assert any(line > envelope_line for line in text_writes)
+    source = inspect.getsource(equivalence.run_equivalence_check)
+    assert "if not emit_json:\n        output_result(output_content" in source
+
+
+def test_payload_occurrence_views_draw_on_one_work_not_one_each():
+    from scripts.function_tracer_pcode.checker.cause_aggregate import _payload_occurrence_views
+
+    records = [make_unknown_reason("unknown", stage="S", detail="d" * 400) for _ in range(100)]
+    one = RESULT_JSON_POLICY.prepare(records[0]).encoded_bytes
+    # 1 件は収まるが 100 件は収まらない作業量: record ごとに作業量の全体を使い直さない
+    with budget_policy_scope(_POLICY):
+        with serialization_scope(site="test", target_parts=("t",), terminal=False, max_bytes=one * 10):
+            with pytest.raises(JsonBudgetExhausted):
+                _payload_occurrence_views(records)
+
+
+def test_cyclic_nodes_walks_each_edge_once():
+    import random as _random
+
+    from scripts.function_tracer_pcode.checker.cause_aggregate import cyclic_nodes
+
+    def reference(edges):
+        cyclic = set()
+        for start in edges:
+            path, positions, current = [], {}, start
+            while current in edges:
+                if current in positions:
+                    cyclic.update(path[positions[current]:])
+                    break
+                positions[current] = len(path)
+                path.append(current)
+                current = edges[current]
+        return cyclic
+
+    rng = _random.Random(7)
+    for _ in range(300):
+        size = rng.randint(0, 12)
+        edges = {node: rng.randint(0, size + 2) for node in range(size) if rng.random() < 0.9}
+        assert cyclic_nodes(edges) == reference(edges)
+    # 長い鎖（閉路は末尾の 2 node だけ）: 始点ごとに辿り直すと 2 乗
+    chain = {index: index + 1 for index in range(200_000)}
+    chain[200_000] = 199_999
+    started = time.perf_counter()
+    assert cyclic_nodes(chain) == {199_999, 200_000}
+    assert time.perf_counter() - started < 1.0
+
+
+def test_the_fast_path_rewalk_above_a_deep_live_leaf_is_charged():
+    class _Leaf:
+        def json_items(self):
+            yield "leaf", 1
+
+    deep = [_Leaf()]
+    for _ in range(4_000):
+        deep = [deep]
+    # 各段の高速経路が底まで辿り直す（深さの 2 乗）: その分を作業量へ数えて止まる
+    started = time.perf_counter()
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.prepare(deep, max_bytes=100_000)
+    assert time.perf_counter() - started < 1.0
+    # 浅ければ（辿り直しが作業量に収まれば）そのまま書ける
+    shallow = [[[_Leaf()]]]
+    assert RESULT_JSON_POLICY.prepare(shallow, max_bytes=100_000).value() == [[[{"leaf": 1}]]]
+
+
+def test_the_truncation_marker_fits_its_schema_bound_for_any_rejected_path():
+    from scripts.function_tracer_pcode.checker import output_schema
+    from scripts.function_tracer_pcode.checker.output_preparation import _truncation_marker
+    from scripts.function_tracer_pcode.core.json_encoding import JsonValueRejected
+
+    rejected = JsonValueRejected("x", path="$" + ".é " * 5_000)
+    marker = _truncation_marker("diagnostics", list(range(10)), remaining_bytes=10 ** 18, rejected=rejected)
+    assert len(marker["rejected_at"]) == output_schema.MARKER_PATH_MAX_CHARS
+    assert RESULT_JSON_POLICY.measure(marker) <= output_schema._truncation_marker_max_bytes(
+        RESULT_JSON_POLICY, "diagnostics",
+    )
+
+
+def test_diagnostic_legacy_reasons_keep_the_schema_row_count():
+    from scripts.function_tracer_pcode.checker.output_schema import MAX_UNKNOWN_REASON_ROWS
+
+    result = SimpleNamespace(
+        unknown_reasons=[make_unknown_reason("unknown", stage=f"S{index}") for index in range(1_000)],
+        unknown_recovery_actions=[], legacy_reason_overflow=0,
+    )
+    with budget_policy_scope(_POLICY):
+        finitize_legacy_reasons(result, authority_projects_reasons=True)
+    assert len(result.unknown_reasons) == MAX_UNKNOWN_REASON_ROWS
+    assert result.legacy_reason_overflow == 1_000 - MAX_UNKNOWN_REASON_ROWS

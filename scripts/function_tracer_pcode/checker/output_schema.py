@@ -69,6 +69,8 @@ MAX_ASSUMPTION_PREMISES = 64
 ASSUMPTION_PREMISE_MAX_BYTES = 4096
 #: 失敗の自由文（`error_message` / `failure_message`）の文字数
 MESSAGE_MAX_CHARS = 2048
+#: 切り詰めた診断の marker に残す、JSON にならない値を拒んだ場所（path）の文字数
+MARKER_PATH_MAX_CHARS = 200
 
 
 def _text_bytes(policy: JsonEncodingPolicy, max_chars: int) -> int:
@@ -148,7 +150,7 @@ def _truncation_marker_max_bytes(policy: JsonEncodingPolicy, key: str) -> int:
         "reason": _text_bytes(policy, VOCAB_MAX_CHARS),
         "exceeded_bytes": INT_MAX_BYTES,
         "original_items": INT_MAX_BYTES,
-        "rejected_at": policy.max_string_bytes(200),
+        "rejected_at": policy.max_string_bytes(MARKER_PATH_MAX_CHARS),
     })
 
 
