@@ -56,11 +56,12 @@ from scripts.function_tracer_pcode.checker.unknown_reason import (
 )
 
 
-#: authority が 1 pair で出してよい canonical reason の行数（実測の最大 23 の 11 倍）
+#: authority が 1 pair で出してよい canonical reason の行数（固定 subset の実測の最大 34 の 7.5 倍。
+#: main `b302389` を merge した後の値）
 MAX_UNKNOWN_REASON_ROWS = 256
 #: recovery action の行数（実測の最大 6。reason 1 件から複数 action が出るので reason と同じ上限）
 MAX_RECOVERY_ACTION_ROWS = 256
-#: relation（`c_active_base` / `q_open_base`）の行数（実測の最大 28 の 18 倍）
+#: relation（`c_active_base` / `q_open_base`）の行数（同じく実測の最大 34 の 15 倍）
 MAX_RELATION_ROWS = 512
 #: conditional receipt が運ぶ仮定（premise）の数と 1 つの上限
 MAX_ASSUMPTION_PREMISES = 64
