@@ -12,6 +12,8 @@ import sys
 import tempfile
 from typing import Any, Mapping
 
+from scripts.function_tracer_pcode.authority.process import checkpoint_vocabulary as vocabulary
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.codecs import StrictV2JsonCodec
 from scripts.function_tracer_pcode.core.json_encoding import PERSISTED_ENVELOPE_JSON_POLICY
 from scripts.function_tracer_pcode.authority.contracts import (
@@ -21,17 +23,33 @@ from scripts.function_tracer_pcode.authority.contracts import (
 )
 from scripts.function_tracer_pcode.authority.decision.decision import DecisiveProofKind
 from scripts.function_tracer_pcode.authority.decision.pair_status_authority import seal_pair_status
+from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
+    CanonicalEnvelope,
+    seal_envelope,
+)
+from scripts.function_tracer_pcode.authority.process.process_identity import (
+    process_is_alive,
+)
 from scripts.function_tracer_pcode.authority.process.supervisor import (
     PROCESS_DURABLE_REASON_REGISTRY,
     PROCESS_DURABLE_RECOVERY_REGISTRY,
 )
 from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+from scripts.function_tracer_pcode.authority.process.terminal_driver import (
+    inspect as inspect_terminal,
+)
+from scripts.function_tracer_pcode.authority.process.terminal_projection import (
+    TERMINAL_STATUSES,
+    terminal_projection,
+)
+from scripts.function_tracer_pcode.authority.process.terminal_transaction import (
+    TerminalAuthority,
+)
 
 
 BUNDLE_SCHEMA = "canonical-result-finalization-bundle-v1"
 BUNDLE_KIND = "CanonicalResultFinalizationBundle"
 SEMANTIC_SCHEMA = "canonical-semantic-result-projection-v1"
-RESULT_ENVELOPE_FILE = "canonical-result-envelope.json"
 _EARLY_ERROR_OCCURRENCE_TOKEN = object()
 
 
@@ -102,47 +120,6 @@ class EarlyErrorResultEntryOccurrenceReceipt:
             name: getattr(self, name) for name in self.__dataclass_fields__
             if name != "_factory_token"
         }
-
-
-def validate_durable_child_returncode_observation(
-    *, child_exit_disposition: str, child_returncode: Any,
-    observation_kind: str,
-) -> None:
-    """Join an OS return code to the signed terminal disposition authority."""
-
-    if type(child_exit_disposition) is not str or not child_exit_disposition:
-        raise ValueError("durable child exit disposition is missing")
-    if observation_kind == "DURABLE_RESTART_NO_CHILD_STATUS":
-        if child_returncode is not None:
-            raise ValueError("durable restart cannot invent a child return code")
-        return
-    if observation_kind != "LIVE_PROCESS_WAIT":
-        raise ValueError("child return-code observation kind is invalid")
-    if type(child_returncode) is not int:
-        raise ValueError("live terminal observation lacks an exact return code")
-    if child_exit_disposition == "SIGTERM_AFTER_DEADLINE":
-        expected = -15
-    elif child_exit_disposition == "SIGKILL_AFTER_DEADLINE":
-        expected = -9
-    elif child_exit_disposition.startswith("EXIT_CODE_"):
-        suffix = child_exit_disposition[len("EXIT_CODE_"):]
-        try:
-            expected = int(suffix)
-        except ValueError as exc:
-            raise ValueError("child exit disposition code is malformed") from exc
-    elif child_exit_disposition.startswith("EXITED_"):
-        suffix = child_exit_disposition[len("EXITED_"):]
-        code_text = suffix.split("_", 1)[0]
-        try:
-            expected = int(code_text)
-        except ValueError as exc:
-            raise ValueError("child exit disposition code is malformed") from exc
-    else:
-        raise ValueError(
-            "live return code is not derivable from durable disposition authority"
-        )
-    if child_returncode != expected:
-        raise ValueError("child return code differs from durable disposition")
 
 
 def attach_durable_error_finalization(
@@ -973,16 +950,11 @@ def persist_canonical_result_envelope(result_payload: Mapping[str, Any]) -> Path
     projected_payload = _project_json_primitives(
         result_payload, path="$.canonical_result_payload"
     )
-    envelope = {
-        "schema": "canonical-result-envelope-v1",
-        "canonical_result_payload": projected_payload,
-        "canonical_result_bundle_digest": bundle["bundle_digest"],
-    }
-    _validate_json_surface(envelope, path="$")
-    envelope["envelope_digest"] = authority_digest(envelope)
+    _validate_json_surface(projected_payload, path="$.canonical_result_payload")
+    envelope = seal_envelope(projected_payload)
     directory = Path(root) / nonce
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / RESULT_ENVELOPE_FILE
+    path = directory / layout.RESULT_ENVELOPE
     descriptor, temporary = tempfile.mkstemp(prefix=".canonical-result-", dir=directory)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -1075,31 +1047,6 @@ def _project_json_primitives(value: Any, *, path: str) -> Any:
     )
 
 
-@dataclass(frozen=True)
-class SupervisorCanonicalResultResolvedReceipt:
-    launch_receipt_digest: str
-    result_occurrence_id: str
-    execution_identity_digest: str
-    child_returncode: int
-    canonical_result_bundle_digest: str
-    payload_preimage_digest: str
-    decision_receipt_digest: str
-    receipt_digest: str
-
-    @classmethod
-    def create(cls, **values: Any) -> "SupervisorCanonicalResultResolvedReceipt":
-        payload = dict(values)
-        return cls(**payload, receipt_digest=authority_digest(payload))
-
-    def validate(self) -> None:
-        payload = {
-            key: getattr(self, key) for key in self.__dataclass_fields__
-            if key != "receipt_digest"
-        }
-        if authority_digest(payload) != self.receipt_digest:
-            raise ValueError("supervisor canonical result receipt drifted")
-
-
 def conditional_pair_status_projection(
     result_payload: Mapping[str, Any], *, result_occurrence_id: str,
     unconditional_outcome: Outcome, decision_receipt_digest: str,
@@ -1138,12 +1085,55 @@ def conditional_pair_status_projection(
     }
 
 
+def _adopted_terminal(store: Any, status: Any) -> TerminalAuthority:
+    """store が ``status`` の終端を採用する状態なら、その authority を返す（Issue #165）。
+
+    判断は supervisor と同じ ``terminal_driver.inspect``（``next_step`` と
+    ``adopt``）をそのまま使い、検証・競合の規則を分類器に複製しない。exit
+    mode は推測せず、E に記録された supervisor の mode で読む。
+    """
+
+    if status not in TERMINAL_STATUSES:
+        raise ValueError(
+            "supervisor projection is not a terminal authority: "
+            f"status={status!r}"
+        )
+    inspection = inspect_terminal(store, mode=None, process_alive=process_is_alive)
+    authority = inspection.authority
+    if authority is None or authority.status != status:
+        step = inspection.step
+        raise ValueError(
+            f"{status} projection is not the durable terminal authority: "
+            f"{step.kind.value} {getattr(step.invalid_code, 'value', None)} "
+            f"{step.detail}"
+        )
+    return authority
+
+
+def _require_logged_result(log_path: Path, envelope: CanonicalEnvelope) -> None:
+    """pair log に結果 JSON があれば、durable な canonical 結果と同じであること。"""
+
+    text = Path(log_path).read_text(encoding="utf-8", errors="replace")
+    begin = "=== EQUIVALENCE_RESULT_JSON_BEGIN ==="
+    end = "=== EQUIVALENCE_RESULT_JSON_END ==="
+    if begin in text and end in text:
+        raw = text.rsplit(begin, 1)[1].split(end, 1)[0].strip()
+        if authority_digest(json.loads(raw)) != authority_digest(envelope.payload):
+            raise ValueError("pair log and persisted canonical result differ")
+
+
 def classify_pair_status(
     log_path: Path, projection_path: Path, *, checkpoint_root: Path,
     execution_nonce: str, supervisor_signing_key_id: str,
     supervisor_signing_key_file: Path, worker_signing_key_id: str,
     worker_signing_key_file: Path,
 ) -> Mapping[str, Any]:
+    """supervisor の projection を、durable な store から同じ判断で作り直して照合する。
+
+    projection の field は supervisor と同じ ``terminal_projection`` で作った
+    ものと完全に一致しなければならない（分類器は条件を写さず、同じ関数で
+    再検証する）。分類器に固有なのは pair log との照合と conditional 列だけ。
+    """
     from scripts.function_tracer_pcode.authority.process.supervisor import (
         DurableCheckpointStore,
         ProcessSupervisorAuthorityFactory,
@@ -1166,10 +1156,10 @@ def classify_pair_status(
     )
     store = DurableCheckpointStore(checkpoint_root, factory, execution_nonce)
     launch = factory.decode(json.loads(
-        (store.directory / "launch.json").read_text(encoding="utf-8")
+        (store.directory / layout.LAUNCH).read_text(encoding="utf-8")
     ))
     if (
-        launch.receipt_kind != "SupervisorLaunchReceipt"
+        launch.receipt_kind != vocabulary.LAUNCH_RECEIPT_KIND
         or launch.payload["execution_nonce"] != execution_nonce
     ):
         raise ValueError("durable launch authority is invalid")
@@ -1180,277 +1170,37 @@ def classify_pair_status(
     if supervisor.get("launch_receipt_digest") != launch.receipt_digest:
         raise ValueError("supervisor projection does not join durable launch")
     status = supervisor.get("status")
-    if status in {"TIMEOUT", "ERROR"}:
-        expected_outcome = (
-            Outcome.TIMEOUT if status == "TIMEOUT" else Outcome.ERROR
-        )
-        if expected_outcome is Outcome.TIMEOUT:
-            prefix = store.rematerialize_active_prefix()
-            durable = store.rematerialize_timeout_bundle(prefix=prefix)
-            expected_kind = "DurableTimeoutFinalizationBundle"
-            expected_error_kind = None
-        else:
-            durable = store.rematerialize_operational_error_bundle()
-            expected_kind = "DurableErrorFinalizationBundle"
-            expected_error_kind = durable.error_kind
-        preimage = supervisor_canonical_result_payload_preimage(
-            launch, outcome=expected_outcome, error_kind=expected_error_kind
-        )
-        validated = validate_canonical_result_finalization_bundle(
-            durable.canonical_result_bundle,
-            result_payload_preimage=preimage,
-            bundle_verification_key_id=supervisor_signing_key_id,
-            bundle_verification_key=Path(
-                supervisor_signing_key_file
-            ).read_bytes(),
-        )
-        required_durable = {
-            "status", "authority_kind", "supervisor_authority_kind",
-            "supervisor_final_authority_digest", "launch_receipt_digest",
-            "finalization_bundle_digest", "event_stream_authority_digest",
-            "canonical_outcome", "decision_receipt_digest",
-            "result_occurrence_id", "result_entry_occurrence_receipt_digest",
-            "execution_identity_digest", "stream_id",
-            "source_snapshot_fingerprint", "canonical_result_bundle_digest",
-            "canonical_result_bundle_kind",
-            "canonical_result_payload_preimage_digest",
-            "semantic_projection_digest", "error_kind", "child_returncode",
-            "child_exit_disposition", "child_returncode_observation_kind",
-            "classification_valid", "projection_schema",
-        }
-        identity = validated["execution_identity"]
-        occurrence = durable.canonical_result_bundle[
-            "result_entry_occurrence_receipt"
-        ]
-        joins = {
-            "authority_kind": expected_kind,
-            "supervisor_authority_kind": expected_kind,
-            "supervisor_final_authority_digest": durable.bundle_digest,
-            "launch_receipt_digest": launch.receipt_digest,
-            "finalization_bundle_digest": durable.bundle_digest,
-            "event_stream_authority_digest": (
-                durable.composite_stream_authority_digest
-            ),
-            "canonical_outcome": expected_outcome.value,
-            "decision_receipt_digest": validated["decision_receipt_digest"],
-            "result_occurrence_id": identity["result_occurrence_id"],
-            "result_entry_occurrence_receipt_digest": occurrence[
-                "receipt_digest"
-            ],
-            "execution_identity_digest": identity[
-                "execution_identity_digest"
-            ],
-            "execution_nonce": launch.payload["execution_nonce"],
-            "stream_id": identity["stream_id"],
-            "source_snapshot_fingerprint": identity[
-                "source_snapshot_fingerprint"
-            ],
-            "canonical_result_bundle_digest": validated["bundle_digest"],
-            "canonical_result_bundle_kind": BUNDLE_KIND,
-            "canonical_result_payload_preimage_digest": validated[
-                "payload_preimage_digest"
-            ],
-            "semantic_projection_digest": validated[
-                "semantic_projection_digest"
-            ],
-            "error_kind": expected_error_kind,
-            "child_exit_disposition": durable.child_exit_disposition,
-            "child_returncode_observation_kind": supervisor[
-                "child_returncode_observation_kind"
-            ],
-            "classification_valid": True,
-        }
-        validate_durable_child_returncode_observation(
-            child_exit_disposition=durable.child_exit_disposition,
-            child_returncode=supervisor["child_returncode"],
-            observation_kind=supervisor[
-                "child_returncode_observation_kind"
-            ],
-        )
-        if (
-            set(supervisor) != required_durable
-            or validated["outcome"] != expected_outcome.value
-            or durable.canonical_result_bundle_digest
-            != validated["bundle_digest"]
-            or occurrence["launch_receipt_digest"] != launch.receipt_digest
-            or occurrence["result_entry_occurrence_id"]
-            != launch.payload["result_occurrence_id"]
-            or any(
-                supervisor[key] != value for key, value in joins.items()
-                if key != "execution_nonce"
-            )
-        ):
-            raise ValueError(
-                f"{status} projection does not join canonical durable authority"
-            )
-        return {
-            **joins,
-            "child_returncode": supervisor["child_returncode"],
-            "supervisor_status": status,
-            "supervisor_projection_digest": projection_digest,
-            "classification_valid": True,
-        }
-    if status != "RESOLVED":
+    authority = _adopted_terminal(store, status)
+    if authority.launch.receipt_digest != launch.receipt_digest:
+        raise ValueError("adopted terminal does not join the durable launch")
+    expected = terminal_projection(authority, factory)
+    if (
+        set(supervisor) != set(expected) | {"projection_schema"}
+        or any(supervisor[key] != value for key, value in expected.items())
+    ):
         raise ValueError(
-            "supervisor projection is not a terminal authority: "
-            f"status={status!r}, error_kind={supervisor.get('error_kind')!r}"
+            f"{status} projection does not join the durable terminal authority"
         )
-
-    envelope = json.loads(
-        (store.directory / RESULT_ENVELOPE_FILE).read_text(encoding="utf-8")
-    )
-    envelope_digest = envelope.pop("envelope_digest", None)
-    if (
-        set(envelope) != {
-            "schema", "canonical_result_payload",
-            "canonical_result_bundle_digest",
-        }
-        or envelope["schema"] != "canonical-result-envelope-v1"
-        or authority_digest(envelope) != envelope_digest
-    ):
-        raise ValueError("persisted canonical result envelope is invalid")
-    result_payload = envelope["canonical_result_payload"]
-    if (
-        result_payload["canonical_result_finalization_bundle"]["bundle_digest"]
-        != envelope["canonical_result_bundle_digest"]
-    ):
-        raise ValueError("persisted canonical result envelope bundle differs")
-    text = Path(log_path).read_text(encoding="utf-8", errors="replace")
-    begin = "=== EQUIVALENCE_RESULT_JSON_BEGIN ==="
-    end = "=== EQUIVALENCE_RESULT_JSON_END ==="
-    if begin in text and end in text:
-        raw = text.rsplit(begin, 1)[1].split(end, 1)[0].strip()
-        logged_payload = json.loads(raw)
-        if authority_digest(logged_payload) != authority_digest(result_payload):
-            raise ValueError("pair log and persisted canonical result differ")
-    bundle = result_payload["canonical_result_finalization_bundle"]
-    preimage = {
-        key: value for key, value in result_payload.items()
-        if key != "canonical_result_finalization_bundle"
-    }
-    validated = validate_canonical_result_finalization_bundle(
-        bundle,
-        result_payload_preimage=preimage,
-        bundle_verification_key_id=supervisor_signing_key_id,
-        bundle_verification_key=Path(
-            supervisor_signing_key_file
-        ).read_bytes(),
-    )
-    required = {
-        "status", "authority_kind", "supervisor_authority_kind",
-        "supervisor_final_authority_digest", "launch_receipt_digest",
-        "canonical_outcome", "decision_receipt_digest",
-        "result_occurrence_id", "result_entry_occurrence_receipt_digest",
-        "execution_identity_digest", "stream_id",
-        "source_snapshot_fingerprint", "canonical_result_bundle_digest",
-        "canonical_result_bundle_kind",
-        "canonical_result_payload_preimage_digest",
-        "semantic_projection_digest", "error_kind", "child_returncode",
-        "classification_valid", "projection_schema",
-    }
-    if set(supervisor) != required:
-        raise ValueError("supervisor canonical projection fields differ")
-    identity = validated["execution_identity"]
-    occurrence = bundle["result_entry_occurrence_receipt"]
-    joins = {
-        "authority_kind": "SupervisorCanonicalResultResolvedReceipt",
-        "supervisor_authority_kind": (
-            "SupervisorCanonicalResultResolvedReceipt"
-        ),
-        "supervisor_final_authority_digest": supervisor[
-            "supervisor_final_authority_digest"
-        ],
-        "launch_receipt_digest": launch.receipt_digest,
-        "canonical_outcome": validated["outcome"],
-        "decision_receipt_digest": validated["decision_receipt_digest"],
-        "result_occurrence_id": identity["result_occurrence_id"],
-        "result_entry_occurrence_receipt_digest": occurrence[
-            "receipt_digest"
-        ],
-        "execution_identity_digest": identity["execution_identity_digest"],
-        "execution_nonce": launch.payload["execution_nonce"],
-        "stream_id": identity["stream_id"],
-        "source_snapshot_fingerprint": identity[
-            "source_snapshot_fingerprint"
-        ],
-        "canonical_result_bundle_digest": validated["bundle_digest"],
-        "canonical_result_bundle_kind": BUNDLE_KIND,
-        "canonical_result_payload_preimage_digest": validated[
-            "payload_preimage_digest"
-        ],
-        "semantic_projection_digest": validated[
-            "semantic_projection_digest"
-        ],
-    }
-    if any(
-        supervisor[key] != value for key, value in joins.items()
-        if key != "execution_nonce"
-    ):
-        raise ValueError("result and supervisor canonical authorities do not join")
-    canonical_receipt_payload = json.loads(
-        (store.directory / "canonical-resolved-receipt.json").read_text(
-            encoding="utf-8"
+    conditional: Mapping[str, Any] = {}
+    if status == "RESOLVED":
+        envelope = authority.envelope
+        _require_logged_result(log_path, envelope)
+        conditional = conditional_pair_status_projection(
+            envelope.payload,
+            result_occurrence_id=expected["result_occurrence_id"],
+            unconditional_outcome=envelope.outcome,
+            decision_receipt_digest=expected["decision_receipt_digest"],
         )
-    )
-    canonical_receipt = SupervisorCanonicalResultResolvedReceipt(
-        **canonical_receipt_payload
-    )
-    canonical_receipt.validate()
-    from scripts.function_tracer_pcode.authority.decision.production_cutover import CLI_EXIT_MATRIX
-
-    resolved_outcome = Outcome(validated["outcome"])
-    if (
-        canonical_receipt.launch_receipt_digest != launch.receipt_digest
-        or canonical_receipt.receipt_digest
-        != supervisor["supervisor_final_authority_digest"]
-        or canonical_receipt.result_occurrence_id
-        != identity["result_occurrence_id"]
-        or canonical_receipt.execution_identity_digest
-        != identity["execution_identity_digest"]
-        or canonical_receipt.canonical_result_bundle_digest
-        != validated["bundle_digest"]
-        or canonical_receipt.payload_preimage_digest
-        != validated["payload_preimage_digest"]
-        or canonical_receipt.decision_receipt_digest
-        != validated["decision_receipt_digest"]
-        or canonical_receipt.child_returncode
-        != supervisor["child_returncode"]
-        or canonical_receipt.child_returncode != CLI_EXIT_MATRIX[resolved_outcome]
-    ):
-        raise ValueError("canonical resolved receipt does not join authorities")
-    if (
-        supervisor["status"] != "RESOLVED"
-        or supervisor["authority_kind"]
-        != "SupervisorCanonicalResultResolvedReceipt"
-        or supervisor["supervisor_authority_kind"]
-        != "SupervisorCanonicalResultResolvedReceipt"
-        or supervisor["classification_valid"] is not True
-    ):
-        raise ValueError("supervisor authority kind is not canonical RESOLVED")
-    outcome = Outcome(validated["outcome"])
-    error_kind = supervisor["error_kind"]
-    if (outcome is Outcome.ERROR) != (type(error_kind) is str and bool(error_kind)):
-        raise ValueError("canonical ERROR/error_kind join is invalid")
     return {
-        **joins,
+        **{key: value for key, value in expected.items() if key != "status"},
+        "execution_nonce": launch.payload["execution_nonce"],
         # Issue #20: the assumption-dependent column travels with the pair only
         # when it exists, and only bound to the authority validated above.  The
         # payload it comes from is covered by
         # ``canonical_result_payload_preimage_digest`` in the signed bundle.
-        **conditional_pair_status_projection(
-            result_payload,
-            result_occurrence_id=identity["result_occurrence_id"],
-            unconditional_outcome=outcome,
-            decision_receipt_digest=validated["decision_receipt_digest"],
-        ),
-        "error_kind": error_kind,
-        "child_returncode": supervisor["child_returncode"],
-        "supervisor_status": supervisor["status"],
+        **conditional,
+        "supervisor_status": status,
         "supervisor_projection_digest": projection_digest,
-        "supervisor_final_authority_digest": supervisor[
-            "supervisor_final_authority_digest"
-        ],
-        "classification_valid": True,
     }
 
 

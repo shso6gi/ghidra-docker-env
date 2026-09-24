@@ -1,0 +1,26 @@
+{"check": "measured_rc_is_the_cli_code", "gate": "G1", "measured": 2, "passed": true}
+{"check": "issue_persist_reread_validate", "gate": "G1", "kind": "SupervisorChildExitReceipt", "passed": true, "signing_key_id": "supervisor-key-v1"}
+{"check": "worker_role_cannot_claim_E", "error": "process receipt signer role does not match receipt kind", "gate": "G1", "passed": true}
+{"check": "tampered_E_is_rejected", "error": "process authority receipt signature/digest mismatch", "gate": "G1", "passed": true}
+{"check": "existing_receipt_rc_equals_E_rc", "e_rc": 2, "gate": "G1", "passed": true, "receipt_rc": 2}
+{"canonical_outcome": "UNKNOWN", "check": "canonical_cli_join_classifies", "gate": "G1", "passed": true}
+{"check": "no_rc_without_E", "error": "live terminal observation lacks an exact return code", "gate": "G1", "passed": true}
+{"check": "natural_E_cannot_claim_signal_death", "error": "child exit without deadline evidence claims deadline facts", "gate": "G1", "passed": true}
+{"check": "real_child_left_history_and_live_chain", "gate": "G2", "history_chains": 1, "live_state": "RESOLVED", "passed": true}
+{"check": "resume_after_0_moved", "complete": true, "gate": "G2", "live_members_left": [], "passed": true, "stage": "NON_DECOMPILATION"}
+{"check": "resume_after_1_moved", "complete": true, "gate": "G2", "live_members_left": [], "passed": true, "stage": "NON_DECOMPILATION"}
+{"check": "resume_after_2_moved", "complete": true, "gate": "G2", "live_members_left": [], "passed": true, "stage": "NON_DECOMPILATION"}
+{"check": "resume_after_3_moved", "complete": true, "gate": "G2", "live_members_left": [], "passed": true, "stage": "NON_DECOMPILATION"}
+{"check": "tampered_member_rejected", "error": "archive member ready.json differs from the manifest in history", "gate": "G2", "passed": true}
+{"check": "both_sides_missing_rejected", "error": "archive member ready.json is missing on both sides", "gate": "G2", "passed": true}
+{"check": "extra_history_file_rejected", "error": "archive destination holds unexpected files ['stray.json']", "gate": "G2", "passed": true}
+{"check": "tampered_manifest_rejected", "error": "process authority receipt signature/digest mismatch", "gate": "G2", "passed": true}
+{"check": "manifest_bound_to_its_E", "error": "archive manifest does not join launch/exit", "gate": "G2", "passed": true}
+{"check": "resume_after_4_moved", "complete": true, "gate": "G2", "live_members_left": [], "passed": true, "stage": "NON_DECOMPILATION"}
+{"check": "resume_after_5_moved", "complete": true, "gate": "G2", "live_members_left": [], "passed": true, "stage": "NON_DECOMPILATION"}
+{"check": "resume_after_6_moved", "complete": true, "gate": "G2", "live_members_left": [], "passed": true, "stage": "NON_DECOMPILATION"}
+{"check": "manifest_member_count", "gate": "G2", "members": 6, "passed": true}
+{"check": "sealed_stage_vocabulary", "gate": "G3", "passed": true, "stages": ["BEFORE_CHECKPOINT", "NON_DECOMPILATION"]}
+{"check": "during_decompilation_accepted_by_issuer", "error": "supervisor deadline stage is not sealed", "gate": "G3", "gate_satisfied": false, "passed": true}
+{"check": "supervisor_issued_non_decompilation_error", "gate": "G3", "passed": true, "stage": "NON_DECOMPILATION", "status": "ERROR"}
+{"canonical_outcome": "ERROR", "check": "non_decompilation_error_through_classifier_and_cli", "cli_returncode": 1, "error_kind": "operational_authority_invalid", "gate": "G3", "passed": true, "stderr": ""}

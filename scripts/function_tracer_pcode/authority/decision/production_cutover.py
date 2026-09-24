@@ -23,6 +23,13 @@ from scripts.function_tracer_pcode.authority.decision.conditional import (
     validate_conditional_decision_join,
 )
 from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
+from scripts.function_tracer_pcode.authority.process.process_identity import (
+    process_is_alive,
+)
+from scripts.function_tracer_pcode.authority.process.terminal_driver import (
+    inspect as inspect_terminal,
+)
+from scripts.function_tracer_pcode.authority.process.terminal_recovery import StepKind
 
 
 RETRY_FALLBACK_MATRIX: Mapping[Outcome, tuple[str, ...]] = {
@@ -199,7 +206,12 @@ def rematerialize_process_timeout_decision(
     supervisor_signing_key_id: str, supervisor_signing_key_file: Path,
     worker_signing_key_id: str, worker_signing_key_file: Path,
 ) -> DecisionReceipt:
-    """Derive TIMEOUT only from the durable terminal supervisor bundle."""
+    """Derive TIMEOUT only from the durable terminal supervisor bundle.
+
+    Issue #165: the store must adopt TIMEOUT under the same decision the
+    supervisor uses (deadline and observed exit evidence, no conflicting
+    authority); a timeout bundle alone is not TIMEOUT authority.
+    """
 
     from scripts.function_tracer_pcode.authority.codecs import StrictV2JsonCodec
     from scripts.function_tracer_pcode.authority.process.supervisor import (
@@ -216,8 +228,14 @@ def rematerialize_process_timeout_decision(
         worker_signing_key=worker_signing_key_file.read_bytes(),
     )
     store = DurableCheckpointStore(checkpoint_root, factory, execution_nonce)
-    prefix = store.rematerialize_active_prefix()
-    bundle = store.rematerialize_timeout_bundle(prefix=prefix)
+    inspection = inspect_terminal(store, mode=None, process_alive=process_is_alive)
+    step = inspection.step
+    if step.kind is not StepKind.ADOPT_TIMEOUT or inspection.authority is None:
+        raise ValueError(
+            "durable store is not a TIMEOUT terminal authority: "
+            f"{step.kind.value} {getattr(step.invalid_code, 'value', None)}"
+        )
+    bundle = inspection.authority.bundle
     factory.validate_timeout_bundle_membership(bundle)
     codec = StrictV2JsonCodec(
         reason_registry=PROCESS_DURABLE_REASON_REGISTRY,

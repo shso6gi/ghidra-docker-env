@@ -1,421 +1,110 @@
+# -*- coding: utf-8 -*-
+"""Issue #163: process supervisor の end-to-end 契約（実 child process）。
+
+どの test も「実 worker child → production supervisor → durable store /
+projection → production の ``classify_pair_status``」を通す。child・
+supervisor・分類器のどれも mock しない。起動・鍵・identity・停止点は
+``_supervisor_support`` の harness が持ち、ここは期待だけを書く。
+
+固定している契約:
+
+* launch-before-exec: child が本処理に入る時点で ``launch.json`` が durable で、
+  それが child 自身の PID / start token を名指している（child 側で検証）。
+  parent 側では child の観測・``launch.json``・projection の digest が一致する。
+* canonical 結果の無い child 終了は ERROR（``EXIT_CODE_<rc>``）として分類が
+  valid になる。runner の mode（``--allow-child-exit-resolution``）では
+  RESOLVED にせず INVALID に倒す。
+* checkpoint 無しの deadline は rc 124 / TIMEOUT / disposition を持ち、分類は
+  TIMEOUT valid。
+* child が production 経路で出した canonical TIMEOUT を supervisor は
+  RESOLVED（``SupervisorCanonicalResultResolvedReceipt``）として受け、分類は
+  TIMEOUT valid。envelope・resolved receipt・分類の digest が一致し、
+  worker 鍵で署名された ``SOLVER_TIMEOUT`` が 1 件ある。UNKNOWN で代用しない。
+* canonical UNKNOWN は同じ経路で UNKNOWN（positive control）。
+* 封の壊れた envelope は exit 2 / INVALID で、分類も restart も fail-closed。
+* start token は ``/proc/<pid>/stat`` の開始時刻に束縛される。
+"""
+
+from __future__ import annotations
+
+import hashlib
 import json
 import os
-from dataclasses import replace
-from pathlib import Path
-import subprocess
-import sys
-from enum import Enum
 
 import pytest
 
-from scripts.function_tracer_pcode.authority.contracts import authority_digest
-from scripts.function_tracer_pcode.authority.decision.decision import (
-    FinalizationAuthority,
-    TerminalTimeoutReceipt,
-    finalize_decision,
+from scripts.function_tracer_pcode.authority.contracts import (
+    CLI_EXIT_CODE_BY_OUTCOME,
+    Outcome,
+    authority_digest,
 )
-from scripts.function_tracer_pcode.authority.process.operational_extraction import (
-    OPERATIONAL_REASON_REGISTRY,
-    OPERATIONAL_RECOVERY_REGISTRY,
-)
-from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
-from scripts.function_tracer_pcode.authority.lifecycle.stream import EventIntent
-from scripts.function_tracer_pcode.authority.process.supervisor_command import (
-    ProcessSupervisorCommand,
-    SupervisorCommandConfig,
+from scripts.function_tracer_pcode.authority.process.process_identity import (
     read_process_start_token,
 )
-from scripts.function_tracer_pcode.authority.process.supervisor import (
-    CHECKPOINT_AUTHORITY_FILENAMES,
-    CheckpointState,
+from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
+    Checkpoint,
+    ChildScript,
+    Deadline,
+    Envelope,
+    Exit,
+    Stop,
+    classify,
+    restart_supervisor,
+    run_supervisor,
+    supervisor_case,
 )
-from scripts.function_tracer_pcode.authority.decision.canonical_result import classify_pair_status
-from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_process_supervisor import (
-    _active_process_authority,
-    _completed_continuation,
-)
+
+RESOLVED_KIND = "SupervisorCanonicalResultResolvedReceipt"
 
 
-def _config(tmp_path, child_command, *, timeout=30.0):
-    authority = _active_process_authority()
-    supervisor_key = tmp_path / "supervisor.key"
-    worker_key = tmp_path / "worker.key"
-    supervisor_key.write_bytes(b"s" * 32)
-    worker_key.write_bytes(b"w" * 32)
-    return authority, SupervisorCommandConfig(
-        checkpoint_root=tmp_path / "checkpoints",
-        authority_output=tmp_path / "authority.json",
-        working_directory=Path.cwd(),
-        execution_nonce="execution-nonce-1",
-        result_occurrence_id=(
-            authority["session"].identity.result_occurrence_id
-        ),
-        source_snapshot_fingerprint=(
-            authority["session"].identity.source_snapshot_fingerprint
-        ),
-        stream_id=authority["prefix"].stream_id,
-        deadline_policy_digest="deadline-policy-digest",
-        supervisor_signing_key_id="supervisor-key-v1",
-        supervisor_signing_key_file=supervisor_key,
-        worker_signing_key_id="worker-key-v1",
-        worker_signing_key_file=worker_key,
-        timeout_seconds=timeout,
-        kill_grace_seconds=0.1,
-        child_command=tuple(child_command),
-    )
+def _store_file(run, name):
+    """run が終わった時点の store にあった file を読む（その bytes であることを確かめる）。"""
+
+    data = (run.case.store_directory / name).read_bytes()
+    assert hashlib.sha256(data).hexdigest() == run.store.digests[name], name
+    return json.loads(data)
 
 
-def _projection(path):
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    digest = payload.pop("projection_digest")
-    assert digest == authority_digest(payload)
-    return payload
+def _envelope(run):
+    return _store_file(run, "canonical-result-envelope.json")
 
 
-def _classify_durable_projection(command):
-    config = command.config
-    return classify_pair_status(
-        config.working_directory / "unused-terminal-log",
-        config.authority_output,
-        checkpoint_root=config.checkpoint_root,
-        execution_nonce=config.execution_nonce,
-        supervisor_signing_key_id=config.supervisor_signing_key_id,
-        supervisor_signing_key_file=config.supervisor_signing_key_file,
-        worker_signing_key_id=config.worker_signing_key_id,
-        worker_signing_key_file=config.worker_signing_key_file,
-    )
+def _envelope_is_sealed(envelope):
+    body = {key: value for key, value in envelope.items() if key != "envelope_digest"}
+    return authority_digest(body) == envelope["envelope_digest"]
 
 
-def _json_authority_value(value):
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, dict):
-        return {str(key): _json_authority_value(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_json_authority_value(item) for item in value]
-    return value
+def _solver_timeout_events(bundle):
+    return [
+        event for event in bundle["sealed_event_stream"]["payload"]["events"]
+        if event["header"]["event_type"] == "SOLVER_TIMEOUT"
+    ]
 
 
-def _persistable_authority(value):
-    return _json_authority_value({
-        name: getattr(value, name)
-        for name in value.__dataclass_fields__
-        if not name.startswith("_")
-    })
+def _assert_child_ran_under_this_launch(run):
+    """この run が起こした実 child が、本処理の前に自分を名指す durable launch を見た。
 
+    parent 側では、supervisor が barrier を解放した瞬間に launch が既に durable
+    だったことを観測している（child の起動速度に依存しない順序の証拠）。
+    比べる値はすべてこの run の観測で、case の file を後から読み直さない。
+    返り値はその launch の receipt digest。
+    """
 
-def _persist_active_for_command(command, authority):
-    launch = command.factory.issue_launch(
-        result_occurrence_id=command.config.result_occurrence_id,
-        manifest_entry_preimage_digest=command.config.manifest_entry_preimage_digest,
-        execution_nonce=command.config.execution_nonce,
-        child_pid=4242, child_start_token="pid-start-token",
-        stream_id=command.config.stream_id,
-        source_snapshot_fingerprint=command.config.source_snapshot_fingerprint,
-        deadline_policy_digest=command.config.deadline_policy_digest,
+    assert run.launch_durable_at_barrier_release is True
+    evidence = run.launch_evidence
+    assert evidence is not None, "worker child never reached its launch check"
+    assert run.child is not None and run.child.pid != os.getpid()
+    assert (evidence["pid"], evidence["start_token"]) == (
+        run.child.pid, run.child.start_token,
     )
-    assignment = command.factory.decode(authority["assignment"].to_dict())
-    checkpoint = command.factory.issue_active_checkpoint(
-        launch=launch, prefix=authority["prefix"],
-        projection=authority["projection"], assignment=assignment,
-        invocation=authority["invocation"],
-        operational_factory=authority["operational_factory"],
-        worker_pid=4242, worker_start_token="pid-start-token",
+    # launch が名指す process は、この run が Popen で起こした worker 自身。
+    assert (evidence["launch_child_pid"], evidence["launch_child_start_token"]) == (
+        run.child.pid, run.child.start_token,
     )
-    command.store.persist_launch(launch)
-    command.store.persist_active(checkpoint, authority["prefix"])
-    return launch, checkpoint
-
-
-def _child_persist_active(*, sleep_seconds, ignore_sigterm=False):
-    """Subprocess entry used to exercise the real launch/checkpoint boundary."""
-    import signal
-    import time
-    from scripts.function_tracer_pcode.authority.process.supervisor import (
-        DurableCheckpointStore,
-        ProcessSupervisorAuthorityFactory,
-    )
-
-    authority = _active_process_authority()
-    supervisor = ProcessSupervisorAuthorityFactory(
-        supervisor_signing_key_id=os.environ[
-            "UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_ID"
-        ],
-        supervisor_signing_key=Path(os.environ[
-            "UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_FILE"
-        ]).read_bytes(),
-        worker_signing_key_id=os.environ["UNKNOWN_TAXONOMY_V2_WORKER_KEY_ID"],
-        worker_signing_key=Path(os.environ[
-            "UNKNOWN_TAXONOMY_V2_WORKER_KEY_FILE"
-        ]).read_bytes(),
-    )
-    launch = supervisor.decode(json.loads(Path(os.environ[
-        "UNKNOWN_TAXONOMY_V2_LAUNCH_PATH"
-    ]).read_text()))
-    assignment = supervisor.issue_live_assignment(
-        prefix=authority["prefix"], projection=authority["projection"],
-        reason_id="function_decompilation_artifact_unavailable",
-    )
-    checkpoint = supervisor.issue_active_checkpoint(
-        launch=launch, prefix=authority["prefix"],
-        projection=authority["projection"], assignment=assignment,
-        invocation=authority["invocation"],
-        operational_factory=authority["operational_factory"],
-        worker_pid=os.getpid(),
-        worker_start_token=launch.payload["child_start_token"],
-    )
-    store = DurableCheckpointStore(
-        Path(os.environ["UNKNOWN_TAXONOMY_V2_SUPERVISOR_ROOT"]),
-        supervisor, os.environ["UNKNOWN_TAXONOMY_V2_EXECUTION_NONCE"],
-    )
-    store.persist_active(checkpoint, authority["prefix"])
-    if ignore_sigterm:
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    if sleep_seconds:
-        time.sleep(sleep_seconds)
-
-
-def _child_persist_canonical_production_loop_timeout():
-    """Emit deployment-signed loop TIMEOUT receipts through the child boundary."""
-    from types import SimpleNamespace
-
-    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-        build_canonical_result_finalization_bundle,
-        persist_canonical_result_envelope,
-    )
-    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
-        activate_process_worker_execution_authority_deployment,
-    )
-    from scripts.function_tracer_pcode.authority.domains.loop_recurrence import (
-        LOOP_REASON_REGISTRY,
-        LOOP_RECOVERY_REGISTRY,
-        LoopBlockerProductionSignal,
-        LoopRecurrencePilotEncoder,
-        LoopSolverExecutionBatchSignal,
-    )
-    from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
-    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
-        ProductionDualWritePilotConnector,
-    )
-    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
-        CompositeProductionSignalEncoder,
-        active_loop_requirement_for_signal,
-        execute_loop_solver_rendered_query,
-        emit_loop_recurrence_signal,
-        production_signal_scope,
-    )
-    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
-        render_loop_v2_solver_query,
-    )
-    from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
-    from scripts.function_tracer_pcode.smt.parallel import ParallelResult
-    import scripts.function_tracer_pcode.authority.lifecycle.execution_authority as execution_module
-    import scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_loop_recurrence as loop_fixture
-
-    worker_key_file = Path(os.environ[
-        "UNKNOWN_TAXONOMY_V2_WORKER_KEY_FILE"
-    ])
-    activate_process_worker_execution_authority_deployment(
-        key_id=os.environ["UNKNOWN_TAXONOMY_V2_WORKER_KEY_ID"],
-        key=worker_key_file.read_bytes(),
-        key_source_id=str(worker_key_file.resolve()),
-    )
-    execution_module._PINNED_PARALLEL_RUN_IMPL = (
-        lambda _runner, _query, timeout: ParallelResult(results=[
-            SolverResult("z3", SolverStatus.TIMEOUT, elapsed_time=timeout),
-        ])
-    )
-
-    root = Path(__file__).resolve().parents[4]
-    producer_manifest = json.loads((root / (
-        "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
-    )).read_text(encoding="utf-8"))
-    loop_encoder = LoopRecurrencePilotEncoder()
-    connector = ProductionDualWritePilotConnector(
-        ShadowLifecycleReducer(
-            reason_registry=LOOP_REASON_REGISTRY,
-            recovery_registry=LOOP_RECOVERY_REGISTRY,
-        ),
-        domain_signal_encoder=CompositeProductionSignalEncoder({
-            LoopBlockerProductionSignal: loop_encoder,
-            LoopSolverExecutionBatchSignal: loop_encoder,
-        }),
-        phase7_runtime_factory=lambda identity: runtime_from_audited_manifest(
-            producer_manifest, identity
-        ),
-    )
-    raw_payload = {"case": "supervisor-retry-timeout"}
-    session = connector.begin(raw_payload)
-    blocker, _, _, _, exact_case, summary_case, left, right = (
-        loop_fixture._loop_exact_fixture()
-    )
-    with production_signal_scope(session):
-        assert emit_loop_recurrence_signal(
-            blocker,
-            producer_site_manifest_id="pairwise-pending-loop-blocker",
-        ) == 1
-        requirement = active_loop_requirement_for_signal(
-            blocker, "loop_exact_term_relation"
-        )
-        rendered = render_loop_v2_solver_query(
-            blocker=blocker,
-            requirement=requirement,
-            analysis1=left,
-            analysis2=right,
-            case1=exact_case,
-            case2=summary_case,
-            pair_id="(supervisor,left,right)",
-            execution_identity_digest=session.identity.execution_identity_digest,
-        )
-        assert execute_loop_solver_rendered_query(
-            blocker, rendered, configured_timeout_ms=1000
-        ) == 1
-    legacy = SimpleNamespace(
-        is_equivalent=None,
-        error_message=None,
-        failure_status=None,
-        failure_message=None,
-        is_timeout=lambda: True,
-    )
-    evidence = connector.finish(
-        session, legacy, case_id="supervisor-retry-timeout"
-    )
-    preimage = {"final_outcome": "TIMEOUT", "total_time": 0.0}
-    bundle = build_canonical_result_finalization_bundle(
-        result_payload_preimage=preimage,
-        evidence=evidence,
-        session=session,
-    )
-    persist_canonical_result_envelope({
-        **preimage,
-        "canonical_result_finalization_bundle": bundle,
-    })
-    raise SystemExit(3)
-
-
-def _child_persist_canonical_return_abi_authority_error():
-    """Cross the real child/supervisor boundary with a typed ABI ERROR."""
-    import time
-
-    from scripts.function_tracer_pcode.checker.result_factory import create_error_result
-    from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
-        ReturnAbiAuthorityInvalid,
-        assess_return_abi_pair,
-    )
-    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-        attach_durable_error_finalization,
-        build_canonical_result_finalization_bundle,
-        persist_canonical_result_envelope,
-    )
-    from scripts.function_tracer_pcode.authority.contracts import authority_digest
-    from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
-    from scripts.function_tracer_pcode.proof.return_width.surface import (
-        ExtensionEvidenceSource,
-        FunctionReturnWidthSeed,
-        FunctionReturnWidthTargetId,
-        GuardRegionFact,
-        GuardRegionTargetId,
-    )
-    from scripts.function_tracer_pcode.proof.return_width.surface import (
-        PairReturnObservationSeed,
-        PairReturnObservationTargetId,
-    )
-
-    def malformed_fixture_width_seed(side, function_identity):
-        guard_target = GuardRegionTargetId(
-            ("return-member", side), (("guard-slot", side),)
-        )
-        target = FunctionReturnWidthTargetId(
-            function_identity, ("return-member", side), guard_target
-        )
-        return FunctionReturnWidthSeed(
-            target,
-            GuardRegionFact("complete", (("guard", side),)),
-            64,
-            32,
-            ("storage", side, 64),
-            ("payload", side, 32),
-            ("return_type_provenance", ("declared_return_type_width", 32)),
-            ExtensionEvidenceSource(
-                "zero_extend",
-                ("storage-value", side),
-                ("payload-value", side),
-                (("producer", side),),
-                "certified_flow",
-            ),
-        )
-
-    left_analysis = FunctionReturnAnalysis(
-        "f", "0x1000", [], [], binary_id="bin-left"
-    )
-    right_analysis = FunctionReturnAnalysis(
-        "f", "0x2000", [], [], binary_id="bin-right"
-    )
-    # This is deliberately malformed rather than merely absent.  An absent
-    # envelope is a typed MISSING/UNKNOWN surface; a wrong schema remains an
-    # authority error across the child/supervisor/classifier boundary.
-    left_analysis.return_abi_facts = {"schema_version": 999}
-    right_analysis.return_abi_facts = {"schema_version": 999}
-    left_seed = malformed_fixture_width_seed(
-        "left", function_identity=left_analysis.outcome_function_identity()
-    )
-    right_seed = malformed_fixture_width_seed(
-        "right", function_identity=right_analysis.outcome_function_identity()
-    )
-    pair_target = PairReturnObservationTargetId(
-        "top_level_return", left_seed.target_id, right_seed.target_id,
-        (
-            left_seed.target_id.function_identity,
-            right_seed.target_id.function_identity,
-        ),
-    )
-    pair_seed = PairReturnObservationSeed(
-        pair_target, left_seed.digest, right_seed.digest,
-        "top_level_return", pair_target.semantic_anchors,
-    )
-    try:
-        assess_return_abi_pair(
-            left_analysis, right_analysis, left_seed, right_seed, pair_seed
-        )
-    except ReturnAbiAuthorityInvalid as exc:
-        execution_payload = {"case": "return-abi-authority-invalid"}
-        result = create_error_result(
-            analysis1=left_analysis,
-            analysis2=right_analysis,
-            binary1_name="bin-left",
-            binary2_name="bin-right",
-            error_message=exc.canonical_error_kind,
-            start_time=time.time(),
-            type_fix_result=None,
-            retry_count=0,
-            original_signature1=None,
-            original_signature2=None,
-            failure_status=exc.canonical_error_kind,
-            failure_message=str(exc),
-        )
-        artifact_digest = authority_digest({
-            "error_kind": exc.canonical_error_kind,
-            "failure_message": str(exc),
-        })
-        attach_durable_error_finalization(
-            result,
-            execution_payload=execution_payload,
-            error_kind=exc.canonical_error_kind,
-            error_artifact_digest=artifact_digest,
-        )
-        result_payload = result.to_dict()
-        evidence, session = result._canonical_finalization_context
-        bundle = build_canonical_result_finalization_bundle(
-            result_payload_preimage=result_payload,
-            evidence=evidence,
-            session=session,
-        )
-        persist_canonical_result_envelope({
-            **result_payload,
-            "canonical_result_finalization_bundle": bundle,
-        })
-        raise SystemExit(4)
-    raise AssertionError("malformed ABI fixture did not fail closed")
+    # child が見た launch.json の bytes は、run が終わった時点の store のもの。
+    assert evidence["launch_sha256"] == run.store.digests["launch.json"]
+    assert run.projection["launch_receipt_digest"] == evidence["launch_receipt_digest"]
+    return evidence["launch_receipt_digest"]
 
 
 def test_process_start_token_is_bound_to_current_linux_process():
@@ -424,3 +113,205 @@ def test_process_start_token_is_bound_to_current_linux_process():
     assert token.removeprefix("linux-proc-starttime-").isascii()
     assert token.removeprefix("linux-proc-starttime-").isdecimal()
 
+
+def test_launch_is_durable_before_the_child_body_and_bundleless_exit_is_error(tmp_path):
+    with supervisor_case(tmp_path, ChildScript((Exit(3),))) as case:
+        run = run_supervisor(case)
+        launch_digest = _assert_child_ran_under_this_launch(run)
+        # child は checkpoint を 1 つも持たない状態で起動した。
+        assert run.launch_evidence["state_present_at_start"] is False
+
+        assert run.exit_code == 3
+        assert run.projection["status"] == "ERROR"
+        assert run.projection["authority_kind"] == "DurableErrorFinalizationBundle"
+        assert run.projection["child_exit_disposition"] == "EXIT_CODE_3"
+        assert run.projection["child_returncode"] == 3
+        classified = classify(run)
+        assert classified["canonical_outcome"] == "ERROR"
+        assert classified["classification_valid"] is True
+        assert classified["error_kind"] == "operational_authority_invalid"
+        assert classified["child_exit_disposition"] == "EXIT_CODE_3"
+        assert classified["launch_receipt_digest"] == launch_digest
+        assert classified["finalization_bundle_digest"] == (
+            run.projection["finalization_bundle_digest"]
+        )
+
+
+def test_runner_mode_does_not_resolve_a_child_exit_without_a_canonical_result(tmp_path):
+    with supervisor_case(
+        tmp_path, ChildScript((Exit(0),)), allow_child_exit_resolution=True,
+    ) as case:
+        run = run_supervisor(case)
+        _assert_child_ran_under_this_launch(run)
+        assert run.exit_code == 2
+        assert run.projection["status"] == "INVALID"
+        assert run.projection["error_code"] == "CANONICAL_CHILD_RESULT_INVALID"
+        assert run.projection["child_returncode"] == 0
+        assert not run.store.has("canonical-resolved-receipt.json")
+        with pytest.raises(ValueError, match="not a terminal authority"):
+            classify(run)
+
+
+@pytest.mark.parametrize(
+    ("ignore_sigterm", "kill_grace", "disposition", "returncode"),
+    (
+        # SIGTERM で終わる child を grace 内に待つ。grace は上限で、child が
+        # 終われば即座に戻るので、負荷下で SIGKILL へ落ちない長さにする。
+        (False, 30.0, "SIGTERM_AFTER_DEADLINE", -15),
+        # SIGTERM を無視する child は grace を使い切って SIGKILL になる。
+        (True, 0.5, "SIGKILL_AFTER_DEADLINE", -9),
+    ),
+)
+def test_deadline_without_a_checkpoint_is_a_durable_timeout(
+    tmp_path, ignore_sigterm, kill_grace, disposition, returncode,
+):
+    script = ChildScript((Stop(ignore_sigterm=ignore_sigterm),))
+    with supervisor_case(tmp_path, script, kill_grace=kill_grace) as case:
+        run = run_supervisor(case, deadline=Deadline.AT_CHILD_STOP)
+        launch_digest = _assert_child_ran_under_this_launch(run)
+        # deadline は child が止まった後に来て、その時点で checkpoint は無い。
+        assert run.store_at_child_stop is not None
+        assert run.store_at_child_stop.files == {"launch.json"}
+
+        assert run.exit_code == 124
+        assert run.projection["status"] == "TIMEOUT"
+        assert run.projection["authority_kind"] == "DurableTimeoutFinalizationBundle"
+        assert run.projection["child_exit_disposition"] == disposition
+        assert run.projection["child_returncode"] == returncode
+        classified = classify(run)
+        assert classified["canonical_outcome"] == "TIMEOUT"
+        assert classified["classification_valid"] is True
+        assert classified["supervisor_status"] == "TIMEOUT"
+        assert classified["child_exit_disposition"] == disposition
+        assert classified["launch_receipt_digest"] == launch_digest
+        assert classified["finalization_bundle_digest"] == (
+            run.projection["finalization_bundle_digest"]
+        )
+
+
+def _canonical_case(tmp_path, outcome, *, corrupt=None, reseal=False):
+    script = ChildScript((
+        Checkpoint(), Envelope(outcome, corrupt=corrupt, reseal=reseal), Exit(),
+    ))
+    return supervisor_case(tmp_path, script, allow_child_exit_resolution=True)
+
+
+def test_child_canonical_timeout_is_resolved_by_the_supervisor_and_classified_timeout(
+    tmp_path,
+):
+    with _canonical_case(tmp_path, "TIMEOUT") as case:
+        run = run_supervisor(case)
+        launch_digest = _assert_child_ran_under_this_launch(run)
+        # child は decompile checkpoint を閉じてから結果を出した。
+        assert run.store.state == "RESOLVED"
+
+        timeout_code = CLI_EXIT_CODE_BY_OUTCOME[Outcome.TIMEOUT]
+        assert run.exit_code == 0
+        projection = run.projection
+        assert projection["status"] == "RESOLVED"
+        assert projection["authority_kind"] == RESOLVED_KIND
+        assert projection["supervisor_authority_kind"] == RESOLVED_KIND
+        assert projection["canonical_outcome"] == "TIMEOUT"
+        assert projection["child_returncode"] == timeout_code
+
+        classified = classify(run)
+        assert classified["canonical_outcome"] == "TIMEOUT"
+        assert classified["classification_valid"] is True
+        assert classified["supervisor_status"] == "RESOLVED"
+        assert classified["authority_kind"] == RESOLVED_KIND
+
+        # envelope（child）/ resolved receipt（supervisor）/ 分類の digest が一致する。
+        envelope = _envelope(run)
+        assert _envelope_is_sealed(envelope)
+        bundle = envelope["canonical_result_payload"]["canonical_result_finalization_bundle"]
+        decision = bundle["decision_receipt"]["payload"]
+        assert decision["outcome"] == "TIMEOUT"
+        receipt = _store_file(run, "canonical-resolved-receipt.json")
+        assert receipt["launch_receipt_digest"] == launch_digest
+        assert receipt["child_returncode"] == timeout_code
+        assert receipt["canonical_result_bundle_digest"] == bundle["bundle_digest"]
+        assert receipt["decision_receipt_digest"] == decision["receipt_digest"]
+        for key, value in (
+            ("canonical_result_bundle_digest", envelope["canonical_result_bundle_digest"]),
+            ("decision_receipt_digest", decision["receipt_digest"]),
+            ("supervisor_final_authority_digest", receipt["receipt_digest"]),
+        ):
+            assert projection[key] == classified[key] == value, key
+        # 分類器は pair log の結果 JSON と envelope を突き合わせた（log に結果がある）。
+        assert "=== EQUIVALENCE_RESULT_JSON_BEGIN ===" in case.pair_log.read_text(
+            encoding="utf-8"
+        )
+
+        # TIMEOUT の根拠は worker が署名した solver timeout 1 件（UNKNOWN の代用でない）。
+        solver_timeouts = _solver_timeout_events(bundle)
+        assert len(solver_timeouts) == 1
+        assert solver_timeouts[0]["authority_payload"]["execution_receipt_authority"][
+            "signing_key_id"
+        ] == case.keys.worker_key_id
+        selection = bundle["terminal_timeout_candidate_selection_receipt"]
+        assert selection["producer_attempt_ordinal"] == 1
+
+
+def test_child_canonical_unknown_is_resolved_and_classified_unknown(tmp_path):
+    """positive control: 同じ経路で UNKNOWN は UNKNOWN のまま届く。"""
+
+    with _canonical_case(tmp_path, "UNKNOWN") as case:
+        run = run_supervisor(case)
+        _assert_child_ran_under_this_launch(run)
+        assert run.exit_code == 0
+        assert run.projection["status"] == "RESOLVED"
+        assert run.projection["authority_kind"] == RESOLVED_KIND
+        assert run.projection["canonical_outcome"] == "UNKNOWN"
+        assert run.projection["child_returncode"] == CLI_EXIT_CODE_BY_OUTCOME[Outcome.UNKNOWN]
+        classified = classify(run)
+        assert classified["canonical_outcome"] == "UNKNOWN"
+        assert classified["classification_valid"] is True
+        bundle = _envelope(run)["canonical_result_payload"][
+            "canonical_result_finalization_bundle"
+        ]
+        assert classified["canonical_result_bundle_digest"] == bundle["bundle_digest"]
+        assert _solver_timeout_events(bundle) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "reseal"),
+    (
+        # 封だけが壊れる（bundle との join は正しい）: 封の検査だけが拒否の根拠。
+        ("envelope_digest", False),
+        # 封は正しく付け直す（bundle digest だけが食い違う）: join の検査だけが根拠。
+        ("canonical_result_bundle_digest", True),
+    ),
+    ids=("seal-only", "bundle-join-only"),
+)
+def test_corrupt_canonical_envelope_fails_closed(tmp_path, field, reseal):
+    """control と 1 文字だけ違う envelope は RESOLVED にならず、分類も通らない。"""
+
+    with _canonical_case(tmp_path, "UNKNOWN", corrupt=field, reseal=reseal) as case:
+        run = run_supervisor(case)
+        _assert_child_ran_under_this_launch(run)
+        envelope = _envelope(run)
+        assert _envelope_is_sealed(envelope) is reseal
+        bundle = envelope["canonical_result_payload"]["canonical_result_finalization_bundle"]
+        assert (bundle["bundle_digest"] == envelope["canonical_result_bundle_digest"]) is (
+            not reseal
+        )
+
+        assert run.exit_code == 2
+        assert run.projection["status"] == "INVALID"
+        assert run.projection["authority_kind"] == "InvalidSupervisorCommandProjection"
+        assert run.projection["error_code"] == "CANONICAL_CHILD_RESULT_INVALID"
+        assert not run.store.has("canonical-resolved-receipt.json")
+        with pytest.raises(ValueError, match="not a terminal authority"):
+            classify(run)
+
+        # restart しても壊れた envelope は canonical RESOLVED にならず、分類も
+        # 通らない。restart が projection に何を書くか（decompile checkpoint の
+        # RESOLVED を pair の RESOLVED と読む既存不整合）は #165 が扱うので、
+        # ここでは固定しない。
+        restarted = restart_supervisor(case)
+        assert not restarted.store.has("canonical-resolved-receipt.json")
+        assert restarted.projection["authority_kind"] != RESOLVED_KIND
+        with pytest.raises(
+            ValueError, match="canonical result envelope|not a terminal authority",
+        ):
+            classify(restarted)

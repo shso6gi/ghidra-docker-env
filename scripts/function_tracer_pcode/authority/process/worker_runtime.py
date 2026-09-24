@@ -22,6 +22,8 @@ from scripts.function_tracer_pcode.authority.process.supervisor_command import (
     CHILD_ENV_WORKER_KEY_FILE,
     CHILD_ENV_WORKER_KEY_ID,
     COMMAND_SCHEMA,
+)
+from scripts.function_tracer_pcode.authority.process.process_identity import (
     read_process_start_token,
 )
 from scripts.function_tracer_pcode.authority.lifecycle.stream import (
@@ -73,9 +75,10 @@ def require_canonical_supervisor_projection(
     expected = {
         "ERROR": "DurableErrorFinalizationBundle",
         "TIMEOUT": "DurableTimeoutFinalizationBundle",
-        "RESOLVED": {
-            "CheckpointStateTransitionReceipt", "SupervisorChildExitReceipt",
-        },
+        # Issue #165: pair の RESOLVED は検証済み canonical 結果 + CLI join の
+        # receipt だけ。decompile checkpoint の RESOLVED（state transition）や
+        # child の終了観測（E）は pair の RESOLVED ではない。
+        "RESOLVED": {"SupervisorCanonicalResultResolvedReceipt"},
     }
     expected_kind = expected.get(body.get("status"))
     if (

@@ -540,26 +540,17 @@
       "execute_loop_solver_rendered_query": {"logged": 0, "unlogged": 1}
     },
     "authority.process.supervisor": {
-      "DurableCheckpointStore._archive_resolved_checkpoint_locked": {"logged": 0, "unlogged": 1},
       "DurableCheckpointStore._commit_pending_active_locked": {"logged": 0, "unlogged": 1},
       "DurableCheckpointStore._decode_active_transaction_locked": {"logged": 0, "unlogged": 2},
-      "DurableCheckpointStore._rematerialize_operational_error_bundle_locked": {"logged": 0, "unlogged": 1},
-      "DurableCheckpointStore.persist_active": {"logged": 0, "unlogged": 1},
       "DurableCheckpointStore.read_state": {"logged": 0, "unlogged": 1},
-      "DurableCheckpointStore.recover_completion_ready": {"logged": 0, "unlogged": 1},
       "DurableCheckpointStore.rematerialize_active_prefix": {"logged": 0, "unlogged": 1},
-      "DurableCheckpointStore.rematerialize_resolved_state.<locals>.read_receipt": {"logged": 0, "unlogged": 1},
-      "DurableCheckpointStore.rematerialize_terminal_segment": {"logged": 0, "unlogged": 1},
-      "DurableCheckpointStore.rematerialize_timeout_bundle.<locals>.read_receipt": {"logged": 0, "unlogged": 1},
       "DurableCheckpointStore.rematerialize_worker_continuation": {"logged": 0, "unlogged": 1},
-      "DurableCheckpointStore.rollback_active": {"logged": 0, "unlogged": 1},
-      "DurableCheckpointStore.supervisor_finalize_operational_error": {"logged": 0, "unlogged": 1}
+      "DurableCheckpointStore.rollback_active": {"logged": 0, "unlogged": 1}
     },
     "authority.process.supervisor_command": {
       "ProcessSupervisorCommand._resume": {"logged": 0, "unlogged": 1},
-      "ProcessSupervisorCommand.run": {"logged": 0, "unlogged": 3},
-      "_read_key": {"logged": 0, "unlogged": 1},
-      "read_process_start_token": {"logged": 0, "unlogged": 1}
+      "ProcessSupervisorCommand.run": {"logged": 0, "unlogged": 1},
+      "_read_key": {"logged": 0, "unlogged": 1}
     },
     "authority.process.worker_runtime": {
       "PreparedWorkerCheckpoint.persist": {"logged": 0, "unlogged": 1}
