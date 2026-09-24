@@ -1257,6 +1257,7 @@ class ProductionDualWritePilotConnector:
 
             from scripts.function_tracer_pcode.checker.unknown_reason import (
                 build_projection_diagnostic,
+                legacy_reason_index,
                 projection_diagnostic_work,
             )
 
@@ -1266,6 +1267,12 @@ class ProductionDualWritePilotConnector:
 
             result.legacy_unknown_reasons = list(
                 getattr(result, "unknown_reasons", ()) or ()
+            )
+            # 照合用の索引は finish 1 回で 1 つ（cause ごとに legacy 全体を辿り直さない）
+            legacy_index = legacy_reason_index(
+                result.legacy_unknown_reasons,
+                work=diagnostic_work,
+                overflow=getattr(result, "legacy_reason_overflow", 0),
             )
             occurrences = _recorded_cause_occurrences(session)
             function_names = {
@@ -1295,7 +1302,7 @@ class ProductionDualWritePilotConnector:
                         build_projection_diagnostic,
                         receipt,
                         cause_occurrence=occurrences.get(receipt.occurrence_id),
-                        legacy_reasons=result.legacy_unknown_reasons,
+                        legacy_reasons=legacy_index,
                         function_names=function_names,
                         binary_names=binary_names,
                         projected_reason_counts=projected_reason_counts,

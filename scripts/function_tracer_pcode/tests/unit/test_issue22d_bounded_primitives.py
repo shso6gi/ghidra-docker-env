@@ -482,6 +482,24 @@ def test_the_diagnostic_artifacts_draw_on_one_shared_budget(monkeypatch):
     assert second[0] == first[0] - first[1]
 
 
+
+def test_the_internal_legacy_evidence_draws_on_the_shared_budget_last(monkeypatch):
+    # 出力される C の本体（trace の時間・原因集計）を先に、出力されない legacy の証拠を最後に
+    from scripts.function_tracer_pcode.checker import output_preparation
+
+    calls = []
+    for name in ("_prepare_limitation_evidence", "_prepare_trace_timings", "_prepare_cause_evidence"):
+        original = getattr(output_preparation.OutputPreparer, name)
+
+        def wrapped(self, *args, _name=name, _original=original, **kwargs):
+            calls.append((_name, kwargs["diagnostic"].remaining()))
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(output_preparation.OutputPreparer, name, wrapped)
+    _decided_result()
+    names = [name for name, _ in calls[-3:]]
+    assert names == ["_prepare_trace_timings", "_prepare_cause_evidence", "_prepare_limitation_evidence"]
+
 # ---------------------------------------------------------------------------
 # yield しない仕事（`metered`）・producer の失敗・LEGACY の列
 # ---------------------------------------------------------------------------
@@ -642,3 +660,100 @@ def test_finitized_requirement_ids_keep_their_legacy_dict_form():
     assert legacy[0] == {"requirement": "r", "index": 0}
     assert type(legacy[1]) is BoundedEvidence
     assert legacy[-1] == "…(+3 refs)"
+
+
+def test_the_diagnostics_view_does_not_prepare_trace_rows_under_another_budget():
+    from scripts.function_tracer_pcode.checker.diagnostics import result_diagnostics_payload
+
+    pulled = []
+
+    class _Attempts:
+        def __len__(self):
+            return 1_000_000
+
+        def __iter__(self):
+            for _ in range(1_000_000):
+                pulled.append(1)
+                yield SimpleNamespace(solver_results=None, attempt_id="a", phase="P", strategy="s", elapsed_time=0.0)
+
+    result = SimpleNamespace(
+        debug_trace=SimpleNamespace(attempts=_Attempts()), solver_results=None, diagnostics={},
+        prepared_semantic_payload=None, total_time=0.0, pairwise_stats=None, stage_path=(),
+    )
+    view = result_diagnostics_payload(result, lazy=True)
+    # 作っただけでは trace を辿らない（別の予算で先に準備しない）
+    assert pulled == []
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.prepare(view, max_bytes=10_000)
+    # 1 要素 1 以上を数えるので、引き出すのは予算の byte 数まで
+    assert len(pulled) <= 10_001
+
+
+# ---------------------------------------------------------------------------
+# projection の診断: legacy の索引・1:1 の照合・requirement id の文字列
+# ---------------------------------------------------------------------------
+
+
+def _cause(key, requirements=()):
+    from scripts.function_tracer_pcode.authority.contracts import canonical_value
+
+    return SimpleNamespace(
+        cause_id=SimpleNamespace(canonical_target_key=canonical_value(key)),
+        proof_requirement_ids=requirements,
+    )
+
+
+def test_a_unique_match_is_not_claimed_when_legacy_reasons_were_dropped():
+    from scripts.function_tracer_pcode.checker.unknown_reason import (
+        MATCH_UNIQUE,
+        _match_legacy_reasons,
+        legacy_reason_index,
+    )
+
+    legacy = (make_unknown_reason("unknown", stage="S"),)
+    work = JsonBudget(1 << 20)
+    whole = legacy_reason_index(legacy, work=work)
+    assert _match_legacy_reasons("unknown", _cause(("x",)), whole, {"unknown": 1}, work=work)[1] == MATCH_UNIQUE
+    # 件数の上限で残さなかった reason があれば、残した 1 件が 1:1 とは言えない
+    cut = legacy_reason_index(legacy, work=work, overflow=5)
+    assert _match_legacy_reasons("unknown", _cause(("x",)), cut, {"unknown": 1}, work=work) == ((), None)
+
+
+def test_the_legacy_index_is_built_once_not_rescanned_per_cause():
+    from scripts.function_tracer_pcode.checker.unknown_reason import _match_legacy_reasons, legacy_reason_index
+
+    records = [make_unknown_reason("unknown", stage=f"S{index}") for index in range(10_000)]
+    pulled = []
+    work = JsonBudget(1 << 24)
+    index = legacy_reason_index(_counted(records, pulled), work=work)
+    started = time.perf_counter()
+    for number in range(1_000):
+        _match_legacy_reasons("unknown", _cause(("k", number)), index, {"unknown": 1_000}, work=work)
+    assert len(pulled) == 10_000
+    assert time.perf_counter() - started < 2.0
+    # 索引を作る作業量を使い切っても例外にしない（authority の finish を止めない）
+    assert legacy_reason_index(records, work=JsonBudget(10)).truncated
+
+
+def test_requirement_ids_are_measured_before_they_are_written_as_text():
+    from scripts.function_tracer_pcode.checker.unknown_reason import _match_legacy_reasons
+
+    written = []
+
+    class _Requirement(tuple):
+        def __str__(self):
+            written.append(1)
+            return tuple.__str__(self)
+
+    huge = _Requirement(range(200_000))
+    # 照合は `str(requirement) == str(canonical_value(obligation))`（obligation の canonical な形は tuple）
+    small = _Requirement((("requirement", "r"),))
+    record = dataclasses.replace(
+        make_unknown_reason("unknown", stage="S"), proof_obligation_id={"requirement": "r"},
+    )
+    matched, _ = _match_legacy_reasons(
+        "unknown", _cause(("k",), (small, huge)), (record,), {"unknown": 2}, work=JsonBudget(50_000),
+    )
+    assert matched == (record,)
+    # 大きい requirement は数えきれないので文字列にしない（小さい方だけ）
+    assert len(written) == 1

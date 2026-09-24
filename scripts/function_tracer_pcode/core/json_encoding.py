@@ -89,6 +89,10 @@ class JsonValueRejected(AnalysisFailureError):
         self.path = path
 
 
+class JsonValueCycle(JsonValueRejected):
+    """値が自分自身を含む（walker が辿っている容器・record に戻った）。"""
+
+
 # ---------------------------------------------------------------------------
 # source の遅延構成子（producer が collection を渡す唯一の方法）
 # ---------------------------------------------------------------------------
@@ -994,7 +998,9 @@ def _evidence_summary(value: Any, *, work: "JsonBudget", identity: Any, policy: 
         return _unfingerprinted(kind, UNFINGERPRINTED_WORK_EXHAUSTED)
     except CanonicalValueCycle:
         return _unfingerprinted(kind, UNFINGERPRINTED_CYCLE)
-    except (TypeError, UnicodeError, ValueError):
+    except (TypeError, UnicodeError, ValueError, RecursionError):
+        # canonical な形を持たない（live な object・set の中の enum の mapping 値・深すぎる
+        # set の入れ子）: 型つき token の fingerprint へ
         pass
     if _exhausted(work):
         return _unfingerprinted(kind, UNFINGERPRINTED_WORK_EXHAUSTED)
@@ -1006,9 +1012,10 @@ def _evidence_summary(value: Any, *, work: "JsonBudget", identity: Any, policy: 
         )
     except JsonBudgetExhausted:
         return _unfingerprinted(kind, UNFINGERPRINTED_WORK_EXHAUSTED)
-    except (JsonValueRejected, TypeError, UnicodeError, ValueError) as exc:
-        reason = UNFINGERPRINTED_CYCLE if "circular" in str(exc) else UNFINGERPRINTED_UNSUPPORTED
-        return _unfingerprinted(kind, reason)
+    except JsonValueCycle:
+        return _unfingerprinted(kind, UNFINGERPRINTED_CYCLE)
+    except (JsonValueRejected, TypeError, UnicodeError, ValueError, RecursionError):
+        return _unfingerprinted(kind, UNFINGERPRINTED_UNSUPPORTED)
 
 
 def _refuse_refresh() -> Any:
@@ -1509,7 +1516,7 @@ class _Walk:
         source_id = None if source is None else id(source)
         if source_id is not None:
             if source_id in self.active:
-                self.reject("circular reference")
+                raise JsonValueCycle("circular reference", path=self.path())
             self.active.add(source_id)
         self.budget.charge(2)
         if self.token_sink is not None:
@@ -1992,6 +1999,7 @@ __all__ = [
     "JsonEncodingPolicy",
     "JsonObjectBudget",
     "JsonOutputLimitExceeded",
+    "JsonValueCycle",
     "JsonValueRejected",
     "LEGACY",
     "PreparedJson",

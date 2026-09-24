@@ -27,6 +27,7 @@ from scripts.function_tracer_pcode.core.canonical_digest import (
     canonical_fingerprint,
 )
 from scripts.function_tracer_pcode.core.json_encoding import (
+    UNFINGERPRINTED_UNSUPPORTED,
     BoundedEvidence,
     JsonBudget,
     JsonBudgetExhausted,
@@ -229,3 +230,51 @@ def test_bounded_evidence_equality_compares_summaries_not_the_original_values():
     assert left != right
     with pytest.raises(ValueError):
         BoundedEvidence(fingerprint=None, fingerprint_kind=None, kind="x")
+
+
+class _Fresh:
+    """`to_authority_dict()` が毎回新しい一時的な容器を返す object（id が再利用され得る）。"""
+
+    def __init__(self, depth):
+        self.depth = depth
+
+    def to_authority_dict(self):
+        return {"child": [_Fresh(self.depth - 1)] if self.depth else [], "pad": [0] * 3}
+
+
+def test_temporaries_freed_mid_walk_are_not_mistaken_for_a_cycle():
+    value = [_Fresh(3) for _ in range(2_000)]
+    assert canonical_fingerprint(value, work=JsonBudget(None)) == authority_digest(value)
+
+
+class _Holder:
+    def __init__(self):
+        self.inner = None
+
+    def to_authority_dict(self):
+        return {"inner": self.inner}
+
+
+def test_a_cycle_through_a_set_member_is_a_typed_cycle():
+    holder = _Holder()
+    outer = frozenset({("x", holder)})
+    holder.inner = outer
+    with pytest.raises(CanonicalValueCycle):
+        canonical_fingerprint(outer, work=JsonBudget(10_000_000))
+
+
+def test_values_without_a_bounded_canonical_form_fall_back_to_a_token_fingerprint():
+    # set の中の、mapping を値に持つ enum: 並びの digest が流す byte と別の形なので約束しない
+    in_set = frozenset({_Color.TABLE, _Color.RED})
+    with pytest.raises(TypeError):
+        canonical_fingerprint(in_set, work=JsonBudget(None))
+    summary = bounded_evidence((in_set,) + tuple(range(5_000)), work=JsonBudget(10_000_000))
+    assert summary.fingerprint_kind == "token_sha256"
+    # 深すぎる set の入れ子は RecursionError（証拠は fingerprint の無い要約か token）
+    deep = frozenset()
+    for _ in range(5_000):
+        deep = frozenset({deep})
+    summary = bounded_evidence((deep,) + tuple(range(5_000)), work=JsonBudget(10_000_000))
+    assert summary.fingerprint_kind in {"token_sha256", None}
+    if summary.fingerprint_kind is None:
+        assert summary.unfingerprinted == UNFINGERPRINTED_UNSUPPORTED

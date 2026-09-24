@@ -790,12 +790,23 @@ class OutputPreparer:
             context.members.total_bytes + self.policy.envelope_headroom_bytes,
             site=PREPARATION_SITE,
         )
-        # 判定に使わない準備物（legacy の証拠・trace の時間・原因集計の trace 部分）は 1 つの
+        # 判定に使わない準備物（trace の時間・原因集計の trace 部分・legacy の証拠）は 1 つの
         # 予算を共有する: 上限は authority 確定後の field に空けた headroom（これらは C の
-        # field の本体か、出力されない内部の証拠）。合計がそれを超えない
+        # field の本体か、出力されない内部の証拠）。合計がそれを超えない。出力される C の本体を
+        # 先に、出力されない内部の証拠（legacy の証拠）を最後に準備する（内部の証拠が出力の
+        # 診断の予算を先に使い切らない）
         diagnostic = JsonBudget(
             None if self.policy.prepared_payload_limit() is None
             else self.policy.envelope_headroom_bytes
+        )
+        trace_timings = self._prepare_trace_timings(result, diagnostic=diagnostic)
+        cause_evidence = self._prepare_cause_evidence(
+            result,
+            binary_identities if binary_identities is not None else (
+                getattr(result, "binary1_content_identity", None),
+                getattr(result, "binary2_content_identity", None),
+            ),
+            diagnostic=diagnostic,
         )
         return PreparedSemanticPayload(
             fields=tuple(prepared),
@@ -803,15 +814,8 @@ class OutputPreparer:
             plan=plan,
             options=options,
             smt_formula=self._prepare_smt_formula(result, options),
-            trace_timings=self._prepare_trace_timings(result, diagnostic=diagnostic),
-            cause_evidence=self._prepare_cause_evidence(
-                result,
-                binary_identities if binary_identities is not None else (
-                    getattr(result, "binary1_content_identity", None),
-                    getattr(result, "binary2_content_identity", None),
-                ),
-                diagnostic=diagnostic,
-            ),
+            trace_timings=trace_timings,
+            cause_evidence=cause_evidence,
         )
 
     def _prepare_cause_evidence(

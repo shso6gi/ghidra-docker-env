@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "3bf113e2ed30d3c6d486d6aab9c4acabb68f52b2c5f5bb257dc7f44e010909b8",
+  "manifest_digest": "88a309368823764e1f6f166e3356beaf3652612823803321f763f5bed2bf7d81",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 32,
   "sites": [
@@ -240,7 +240,7 @@
       "line": 1151,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/pilot.py",
       "producer_site_manifest_id": "comparison-inconclusive-terminal",
-      "source_sha256": "1a36da9bab048be12eb8b55476b276c6a9baea564ba35523cef8e0a939040f20"
+      "source_sha256": "03ae74ba18560cafc25cfadaf0c89f565ed3cf1c99bed7d981c29588276ea995"
     },
     {
       "allowed_dispositions": [

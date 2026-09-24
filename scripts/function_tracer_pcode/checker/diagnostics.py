@@ -629,16 +629,29 @@ class TraceTimingsView:
             return (getattr(attempt, "solver_results", None) for attempt in self._attempts)
         return iter((getattr(self._result, "solver_results", None),))
 
-    def json_items(self):
+    #: 行の名前（`json_items` の順）
+    NAMES = ("solver_seconds", "solver_invocations", "attempts", "phase_usage")
+
+    def source(self, name: str) -> Any:
+        """行 1 つの source（walker が辿る。辿る前に何も数えない・写さない）。"""
+
         from scripts.function_tracer_pcode.core.json_encoding import each, scan
 
-        # 合計は walker が attempt と solver の行を 1 つずつ数えながら畳み込む（`scan`）
-        yield "solver_seconds", scan(self._solver_containers(), _SolverTotals("seconds"))
-        yield "solver_invocations", scan(self._solver_containers(), _SolverTotals("invocations"))
-        yield "attempts", each(_attempt_rows(self._attempts))
-        # 人向けの text の phase 利用状況（debug trace を出力へ添付しないときも使う）
-        phase_usage = getattr(self._trace, "phase_usage_source", None)
-        yield "phase_usage", None if phase_usage is None else phase_usage()
+        if name in ("solver_seconds", "solver_invocations"):
+            # 合計は walker が attempt と solver の行を 1 つずつ数えながら畳み込む（`scan`）
+            what = "seconds" if name == "solver_seconds" else "invocations"
+            return scan(self._solver_containers(), _SolverTotals(what))
+        if name == "attempts":
+            return each(_attempt_rows(self._attempts))
+        if name == "phase_usage":
+            # 人向けの text の phase 利用状況（debug trace を出力へ添付しないときも使う）
+            phase_usage = getattr(self._trace, "phase_usage_source", None)
+            return None if phase_usage is None else phase_usage()
+        raise KeyError(name)
+
+    def json_items(self):
+        for name in self.NAMES:
+            yield name, self.source(name)
 
 
 class _SolverTotals:
@@ -701,15 +714,19 @@ class _ResultDiagnosticsView:
     その場で trace から作る）。判定には使わない。
     """
 
-    __slots__ = ("_result", "_base", "_timings")
+    __slots__ = ("_result", "_base", "_timings", "_view")
 
     def __init__(self, result: Any) -> None:
         self._result = result
         self._base = getattr(result, "diagnostics", None) or {}
-        # 準備済みならその値、無ければ今の pair の上限で trace から作った値（どちらも dict）
-        self._timings = trace_timings_payload(result)
+        # 準備済みならその値。無ければ trace の行の source（この walk の予算の中で辿る。
+        # 別の予算で先に準備しない）
+        self._timings = _prepared_trace_timings(result)
+        self._view = None if self._timings is not None else TraceTimingsView(result)
 
     def _timing(self, name: str) -> Any:
+        if self._view is not None:
+            return self._view.source(name)
         return self._timings.get(name) if isinstance(self._timings, dict) else None
 
     def json_items(self):
@@ -718,7 +735,7 @@ class _ResultDiagnosticsView:
         base = self._base
         result = self._result
         caches_empty: Dict[str, Any] = {}
-        attempts = self._timings.get("attempts") if isinstance(self._timings, dict) else None
+        attempts = self._timing("attempts")
         yield "schema", DIAGNOSTICS_SCHEMA
         yield "timings", inline(
             ("total_seconds", getattr(result, "total_time", None)),

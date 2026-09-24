@@ -23,6 +23,9 @@ JSON の sha256。`authority/contracts`）と **同じ値** を streaming で求
   stack は際限なく伸びない。
 * **木として辿る**（共有部分も展開する）。共有 DAG は canonical JSON が大きくなるので作業量を
   超えて止まる（呼ぶ側は fingerprint の無い表現へ退く）。
+* set の中の、mapping を値に持つ enum は `TypeError`（set の要素の並びが流す byte と別の形の
+  digest で決まるため。呼ぶ側は型つき token の fingerprint へ退く）。深すぎる set の入れ子は
+  `RecursionError`（set の要素は要素ごとに流して並べる）。
 * mapping の key は scalar（`str` / `int` / `float` / `bool` / `None` / その値の enum）だけ。
   それ以外の key は `TypeError`（canonical_value は `str(key)` で受けるが、その写しの大きさを
   作る前に数えられない）。
@@ -97,14 +100,18 @@ def _json_key(key: Any, work: Any) -> str:
 
 
 class _Sink:
-    """canonical JSON の byte を hash（`keep` なら buffer にも）へ流す。流す前に数える。"""
+    """canonical JSON の byte を hash（`keep` なら buffer にも）へ流す。流す前に数える。
 
-    __slots__ = ("hasher", "buffer", "work")
+    `in_set` は set の要素を流している sink（入れ子の sink も受け継ぐ）。
+    """
 
-    def __init__(self, work: Any, *, keep: bool = False) -> None:
+    __slots__ = ("hasher", "buffer", "work", "in_set")
+
+    def __init__(self, work: Any, *, keep: bool = False, in_set: bool = False) -> None:
         self.hasher = hashlib.sha256()
         self.buffer: Optional[List[bytes]] = [] if keep else None
         self.work = work
+        self.in_set = in_set
 
     def emit(self, data: bytes) -> None:
         self.work.charge(len(data))
@@ -144,12 +151,16 @@ class _Sink:
 
 
 class _End:
-    """容器を閉じる action（閉路の判定から外し、閉じ括弧を流す）。"""
+    """容器を閉じる action（閉路の判定から外し、閉じ括弧を流す）。
 
-    __slots__ = ("identity", "closing")
+    容器そのものを持つ: `to_authority_dict()` が作った一時的な容器が、子を辿り終える前に
+    解放されて `id` が別の容器に再利用されると、閉路でない値を閉路と誤る。
+    """
 
-    def __init__(self, identity: Optional[int], closing: bytes) -> None:
-        self.identity = identity
+    __slots__ = ("container", "closing")
+
+    def __init__(self, container: Any, closing: bytes) -> None:
+        self.container = container
         self.closing = closing
 
 
@@ -191,9 +202,11 @@ def _normalize(item: Any, work: Any) -> Any:
         return item
 
 
-def _emit(sink: _Sink, value: Any) -> None:
+def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
     work = sink.work
-    active: set = set()
+    # 辿っている容器の identity（set の要素を流す入れ子の呼び出しも同じ集合を共有する）
+    if active is None:
+        active = set()
     # 後入れ先出しの action: 値 / byte 列 / 容器の終わり
     actions: list = [value]
     while actions:
@@ -202,8 +215,7 @@ def _emit(sink: _Sink, value: Any) -> None:
             sink.emit(action)
             continue
         if type(action) is _End:
-            if action.identity is not None:
-                active.discard(action.identity)
+            active.discard(id(action.container))
             sink.emit(action.closing)
             continue
         if type(action) is _Key:
@@ -220,14 +232,14 @@ def _emit(sink: _Sink, value: Any) -> None:
         if identity in active:
             raise CanonicalValueCycle("a canonical value contains itself")
         if raw_json:
-            _push_raw_container(actions, item, identity, work)
+            _push_raw_container(actions, item, work, in_set=sink.in_set)
             active.add(identity)
             continue
         if is_dataclass(item) or isinstance(item, _AbcMapping):
             pairs = _pairs(item, work)
             active.add(identity)
             sink.emit(b"[")
-            actions.append(_End(identity, b"]"))
+            actions.append(_End(item, b"]"))
             for index in range(len(pairs) - 1, -1, -1):
                 key, child = pairs[index]
                 # [key,value] の組（canonical_value の mapping / dataclass の形）
@@ -243,7 +255,7 @@ def _emit(sink: _Sink, value: Any) -> None:
             work.charge(len(item) + 1)
             active.add(identity)
             sink.emit(b"[")
-            actions.append(_End(identity, b"]"))
+            actions.append(_End(item, b"]"))
             for index in range(len(item) - 1, -1, -1):
                 actions.append(item[index])
                 if index:
@@ -256,8 +268,8 @@ def _emit(sink: _Sink, value: Any) -> None:
             # 作業量の中で作り、digest で並べてから流す（流す byte は数え済み）
             members = []
             for member in item:
-                member_sink = _Sink(work, keep=True)
-                _emit(member_sink, member)
+                member_sink = _Sink(work, keep=True, in_set=True)
+                _emit(member_sink, member, active)
                 members.append((member_sink.hasher.hexdigest(), member_sink.buffer))
             active.discard(identity)
             members.sort(key=lambda pair: pair[0])
@@ -299,14 +311,19 @@ def _pairs(item: Any, work: Any) -> list:
     return pairs
 
 
-def _push_raw_container(actions: list, item: Any, identity: int, work: Any) -> None:
+def _push_raw_container(actions: list, item: Any, work: Any, *, in_set: bool) -> None:
     """enum の値（正規化されない値）を `json.dumps(sort_keys=True)` と同じ形で積む。"""
 
     if isinstance(item, _AbcMapping):
+        if in_set:
+            # set の要素の並びは要素の canonical な形を **もう一度** 正規化した値の digest
+            # （mapping は [key, 値] の組になる）で、流す byte（`{...}`）とは別の形。有界な
+            # canonical な形を約束しない（呼ぶ側は型つき token の fingerprint へ退く）
+            raise TypeError("an enum mapping value inside a set has no bounded canonical form")
         work.charge(len(item) + 1)
         # `json.dumps(sort_keys=True)` と同じく元の key で並べてから文字列にする
         pairs = [(_json_key(key, work), child) for key, child in sorted(item.items())]
-        actions.append(_End(identity, b"}"))
+        actions.append(_End(item, b"}"))
         for index in range(len(pairs) - 1, -1, -1):
             key, child = pairs[index]
             actions.append(_RawItem(child))
@@ -318,7 +335,7 @@ def _push_raw_container(actions: list, item: Any, identity: int, work: Any) -> N
         return
     if isinstance(item, (list, tuple)):
         work.charge(len(item) + 1)
-        actions.append(_End(identity, b"]"))
+        actions.append(_End(item, b"]"))
         for index in range(len(item) - 1, -1, -1):
             actions.append(_RawItem(item[index]))
             if index:

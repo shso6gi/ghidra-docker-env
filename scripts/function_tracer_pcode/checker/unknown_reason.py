@@ -661,7 +661,7 @@ def build_projection_diagnostic(
     receipt: Any,
     *,
     cause_occurrence: Any = None,
-    legacy_reasons: Sequence[Any] = (),
+    legacy_reasons: Any = (),
     function_names: Mapping[str, Any] = None,
     binary_names: Mapping[str, Any] = None,
     projected_reason_counts: Mapping[str, int] = None,
@@ -763,10 +763,56 @@ MATCH_FINGERPRINT = "fingerprint"
 MATCH_UNIQUE = "unique"
 
 
+class LegacyReasonIndex:
+    """projection の診断が照合する legacy reason の、reason id ごとの索引（finish 1 回で 1 つ）。
+
+    `truncated` は件数の上限で残さなかった legacy reason があること（`legacy_reason_overflow`）。
+    """
+
+    __slots__ = ("_by_reason", "truncated")
+
+    def __init__(self, by_reason: Dict[Any, Tuple[Any, ...]], truncated: bool) -> None:
+        self._by_reason = by_reason
+        self.truncated = truncated
+
+    def by_reason(self, reason_id: Any) -> Tuple[Any, ...]:
+        return self._by_reason.get(reason_id, ())
+
+
+def legacy_reason_index(legacy_reasons: Any, *, work: Any, overflow: Any = 0) -> LegacyReasonIndex:
+    """legacy reason を reason id ごとに 1 回だけ振り分ける（record 1 件ごとに `work` へ数える）。
+
+    cause ごとに legacy 全体を辿り直さない。診断なので例外を上げない: `work` を使い切ったら、
+    そこまでの索引を `truncated` にして返す（authority の finish を止めない）。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
+
+    grouped: Dict[Any, List[Any]] = {}
+    truncated = bool(overflow)
+    try:
+        for record in legacy_reasons or ():
+            work.charge(1)
+            grouped.setdefault(getattr(record, "reason_id", None), []).append(record)
+    except JsonBudgetExhausted:
+        truncated = True
+    return LegacyReasonIndex({key: tuple(records) for key, records in grouped.items()}, truncated=truncated)
+
+
+def _text_cost(item: Any, work: Any) -> int:
+    """`str(item)` の手間（文字列は長さ、それ以外は `work` の残りの中で数えた JSON の byte）。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+    if isinstance(item, str):
+        return len(item)
+    return RESULT_JSON_POLICY.measure(item, max_bytes=work.remaining())
+
+
 def _match_legacy_reasons(
     reason_id: Any,
     cause_occurrence: Any,
-    legacy_reasons: Sequence[Any],
+    legacy_reasons: Any,
     projected_reason_counts: Mapping[str, int],
     *,
     work: Any,
@@ -779,7 +825,8 @@ def _match_legacy_reasons(
        proof requirement ids.
     2. unique: no exact key is available, but the reason id has exactly one
        legacy record and exactly one projected cause, so the correspondence is
-       1:1 by construction.
+       1:1 by construction (only when no legacy record was dropped by the
+       count bound: ``legacy_reason_overflow``).
     Otherwise nothing is attached; the typed cause occurrence alone is used.
 
     Issue #22 PR-22-D: legacy の重い field は authority 前に有界化されている。
@@ -800,12 +847,13 @@ def _match_legacy_reasons(
     from scripts.function_tracer_pcode.core.json_encoding import (
         BoundedEvidence,
         JsonBudgetExhausted,
+        JsonValueRejected,
     )
 
-    candidates = tuple(
-        record for record in (legacy_reasons or ())
-        if getattr(record, "reason_id", None) == reason_id
+    index = legacy_reasons if isinstance(legacy_reasons, LegacyReasonIndex) else legacy_reason_index(
+        legacy_reasons, work=work,
     )
+    candidates = index.by_reason(reason_id)
     if not candidates:
         return (), None
     cause_id = getattr(cause_occurrence, "cause_id", None)
@@ -815,6 +863,31 @@ def _match_legacy_reasons(
         if cause_occurrence is not None else ()
     )
     fingerprint_of_cause: list = []
+    texts_of_requirements: list = []
+
+    def requirement_texts() -> frozenset:
+        # cause の requirement id の文字列（cause 1 つにつき 1 回。大きさを数えてから文字列に
+        # する。数えきれない・JSON にならない requirement は照合に使わない）
+        if not texts_of_requirements:
+            texts = set()
+            for item in requirements:
+                try:
+                    cost = _text_cost(item, work)
+                except JsonValueRejected:
+                    continue
+                except JsonBudgetExhausted:
+                    # 残りを使い切った（数えた分を足して、以後は照合に使わない）
+                    remaining = work.remaining()
+                    if remaining is not None:
+                        work.consumed += remaining
+                    break
+                try:
+                    work.charge(1 + cost)
+                except JsonBudgetExhausted:
+                    break
+                texts.add(str(item))
+            texts_of_requirements.append(frozenset(texts))
+        return texts_of_requirements[0]
 
     def cause_fingerprint() -> Optional[str]:
         if not fingerprint_of_cause:
@@ -846,13 +919,17 @@ def _match_legacy_reasons(
             record_obligation is not None and requirements
             and type(record_obligation) is not BoundedEvidence
         ):
-            obligation_text = str(canonical_value(record_obligation))
-            if any(str(item) == obligation_text for item in requirements):
+            if str(canonical_value(record_obligation)) in requirement_texts():
                 exact.append(record)
                 continue
     if exact or by_fingerprint:
         return tuple(exact) + tuple(by_fingerprint), (MATCH_EXACT if exact else MATCH_FINGERPRINT)
-    if len(candidates) == 1 and int(projected_reason_counts.get(reason_id, 0) or 0) == 1:
+    # 1:1 は legacy の reason を全部残したときだけ（先頭だけを残したなら、残さなかった record
+    # にも同じ reason id があり得る）
+    if (
+        not index.truncated
+        and len(candidates) == 1 and int(projected_reason_counts.get(reason_id, 0) or 0) == 1
+    ):
         return candidates, MATCH_UNIQUE
     return (), None
 
