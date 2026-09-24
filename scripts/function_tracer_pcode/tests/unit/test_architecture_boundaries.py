@@ -2526,12 +2526,24 @@ _REGISTERED_UNBOUNDED_WALKS = {
     ("checker/diagnostics.py", "result_diagnostics_payload"):
         "直接の読み手（出力の外）の canonical な dict。出力の準備は `lazy=True` の view を上限の中で辿る",
 }
-_WALK_BOUNDS = {"prepare": "max_bytes", "measure": "max_bytes", "materialize": "budget"}
+_WALK_BOUNDS = {"prepare": "max_bytes", "measure": "max_bytes", "materialize": "budget", "plain_bytes": "max_bytes"}
 
 
 def _is_json_policy(receiver: ast.AST) -> bool:
+    """JSON の policy と読める receiver（名前の一覧ではなく形で: `*_JSON_POLICY`・`encoding`・`policy`）。"""
+
     text = ast.unparse(receiver)
-    return text in {"RESULT_JSON_POLICY", "self.encoding", "encoding", "policy", "self.policy", "plan.encoding"}
+    last = text.rsplit(".", 1)[-1]
+    return last.endswith("JSON_POLICY") or last in {"encoding", "policy", "_policy", "_encoding"}
+
+
+def _bounded_by(call: ast.Call, keyword_name: str) -> bool:
+    """`keyword_name=` を **None でない値で** 渡しているか（`max_bytes=None` は上限なし）。"""
+
+    for keyword in call.keywords:
+        if keyword.arg == keyword_name:
+            return not (isinstance(keyword.value, ast.Constant) and keyword.value.value is None)
+    return False
 
 
 def test_j10_unbounded_walks_happen_only_at_registered_sites():
@@ -2543,7 +2555,7 @@ def test_j10_unbounded_walks_happen_only_at_registered_sites():
             if (
                 bound is not None and isinstance(call.func, ast.Attribute)
                 and _is_json_policy(call.func.value)
-                and bound not in {keyword.arg for keyword in call.keywords}
+                and not _bounded_by(call, bound)
             ):
                 found.add((relative, qualname))
     assert found == set(_REGISTERED_UNBOUNDED_WALKS), found ^ set(_REGISTERED_UNBOUNDED_WALKS)
@@ -2589,8 +2601,12 @@ def _callback_arguments(tree: ast.AST):
             continue
         func = node.func
         name = func.id if isinstance(func, ast.Name) else (func.attr if isinstance(func, ast.Attribute) else None)
-        if name in {"each", "mapping_of"} and len(node.args) >= 2:
-            yield node.lineno, name, node.args[1]
+        if name in {"each", "mapping_of", "pairs_of"}:
+            if len(node.args) >= 2:
+                yield node.lineno, name, node.args[1]
+            for keyword in node.keywords:
+                if keyword.arg == "fn":
+                    yield node.lineno, name, keyword.value
         if name == "Column":
             for keyword in node.keywords:
                 if keyword.arg == "legacy":
@@ -2619,17 +2635,82 @@ def test_j11_walker_callbacks_are_registered_source_converters():
     assert offenders == [], offenders
 
 
+#: converter（と、そこから呼ぶ同じ module の helper）が呼んではいけない、値を文字列にする組み込み
+#: （`__str__` / `__repr__` / `__format__` は live な値の producer。`bounded_repr` / `builtin_str` を使う）
+_RENDERING_BUILTINS = frozenset({"str", "repr", "format", "hash", "ascii"})
+
+
+def _is_type_name(node: ast.AST) -> bool:
+    """`type(x).__qualname__` / `type(x).__module__`（型の名前。値の producer を呼ばない）。"""
+
+    return (
+        isinstance(node, ast.Attribute) and node.attr in {"__qualname__", "__module__", "__name__"}
+        and isinstance(node.value, ast.Call) and getattr(node.value.func, "id", None) == "type"
+    )
+
+
+def _rendering_calls(node: ast.AST) -> List[str]:
+    found = []
+    for inner in ast.walk(node):
+        if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id in _RENDERING_BUILTINS:
+            found.append(f"{inner.func.id}()@{inner.lineno}")
+        elif isinstance(inner, ast.FormattedValue) and not _is_type_name(inner.value):
+            found.append(f"f-string@{inner.value.lineno}")
+    return found
+
+
+def _takes_work(function: ast.FunctionDef) -> bool:
+    arguments = function.args
+    return any(arg.arg == "work" for arg in (*arguments.args, *arguments.kwonlyargs))
+
+
+def _converter_closure(tree: ast.Module, roots: List[ast.AST]) -> List[ast.AST]:
+    """converter の本体と、そこから名前で呼ぶ同じ module の top-level 関数（作業量を受け取らないもの）。
+
+    作業量（`work`）を受け取る helper は数えながら辿る側の関数で、J5 の規則が本体を見る。
+    """
+
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    pending = list(roots)
+    closure: List[ast.AST] = []
+    seen: Set[int] = set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        closure.append(node)
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name):
+                callee = functions.get(inner.func.id)
+                if callee is not None and not _takes_work(callee):
+                    pending.append(callee)
+    return closure
+
+
 def test_j11_source_converters_do_not_build_the_representation():
+    """converter と、それが呼ぶ同じ module の helper は、表現を作らず値を文字列にしない（呼び先まで辿る）。"""
+
     offenders = []
     for path in _module_files():
         relative = _relative(path)
-        for node in ast.walk(_parse(path)):
+        tree = _parse(path)
+        roots: List[ast.AST] = []
+        for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and any(
                 isinstance(d, ast.Name) and d.id == "source_converter" for d in node.decorator_list
             ):
-                found = _eager_constructions(node)
-                if found:
-                    offenders.append(f"{relative}:{node.name} {found[:4]}")
+                roots.append(node)
+            elif (
+                isinstance(node, ast.Call) and getattr(node.func, "id", None) == "source_converter"
+                and node.args and isinstance(node.args[0], ast.Lambda)
+            ):
+                roots.append(node.args[0])
+        for node in _converter_closure(tree, roots):
+            found = _eager_constructions(node) + _rendering_calls(node)
+            if found:
+                label = getattr(node, "name", f"<lambda>@{getattr(node, 'lineno', '?')}")
+                offenders.append(f"{relative}:{label} {found[:4]}")
     assert offenders == [], offenders
 
 
@@ -2672,6 +2753,62 @@ def test_j12_reducers_receive_the_work_and_declare_no_cost_callback():
             if method is None or "work" not in {arg.arg for arg in method.args.kwonlyargs}:
                 offenders.append(f"{relative}:{node.name}.{name} does not take keyword-only work")
     assert found >= 5 and offenders == [], offenders
+
+
+#: J17 の例外（reducer の `add` が要素の値を直接 key にしてよい理由）
+_REDUCER_KEY_CHECKED = {
+    ("core/json_encoding.py", "Tally"): "key は scalar だけ（型を確かめてから hash し、文字列は長さを数える）",
+}
+#: key として hash してよい値を作る関数（hash する前に数え、組み込みの値だけを値で比べる）
+_HASHABLE_KEY_FACTORIES = frozenset({"hashable_key", "builtin_str"})
+
+
+def _key_expressions(function: ast.FunctionDef):
+    """`add` の中で hash される key の式（添字・`in`・`get` / `add` / `setdefault` / `pop` / `discard`）。"""
+
+    for node in ast.walk(function):
+        if isinstance(node, ast.Subscript) and not (
+            isinstance(node.value, ast.Name) and node.value.id == "self"
+        ):
+            yield node.slice
+        elif isinstance(node, ast.Compare) and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops):
+            yield node.left
+        elif (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"get", "add", "setdefault", "pop", "discard"} and node.args
+            # 作業量を受け取る `add`（入れ子の reducer・entry）は hash しない: その本体が数える
+            and not any(keyword.arg == "work" for keyword in node.keywords)
+        ):
+            yield node.args[0]
+
+
+def test_j17_reducers_hash_only_keys_made_for_hashing():
+    """reducer の `add` は、要素の値を直接 hash しない（`hashable_key` / `builtin_str` の値か定数だけ）。"""
+
+    offenders = []
+    for relative, node in _reducer_classes():
+        if (relative, node.name) in _REDUCER_KEY_CHECKED:
+            continue
+        methods = {item.name: item for item in node.body if isinstance(item, ast.FunctionDef)}
+        add = methods.get("add")
+        if add is None:
+            continue
+        made: Set[str] = set()
+        for inner in ast.walk(add):
+            if (
+                isinstance(inner, ast.Assign) and isinstance(inner.value, ast.Call)
+                and getattr(inner.value.func, "id", None) in _HASHABLE_KEY_FACTORIES
+            ):
+                made.update(target.id for target in inner.targets if isinstance(target, ast.Name))
+        for key in _key_expressions(add):
+            if isinstance(key, ast.Constant):
+                continue
+            if isinstance(key, ast.Name) and key.id in made:
+                continue
+            if isinstance(key, ast.Call) and getattr(key.func, "id", None) in _HASHABLE_KEY_FACTORIES:
+                continue
+            offenders.append(f"{relative}:{node.name}.add hashes {ast.unparse(key)[:60]}@{key.lineno}")
+    assert offenders == [], offenders
 
 
 def test_j12_scan_refuses_anything_but_a_reducer():
@@ -2753,11 +2890,53 @@ _REGISTERED_WORK_SCOPES = {
 }
 
 
+def _work_scope_names(tree: ast.Module) -> Set[str]:
+    """この module で `JsonBudget` を指す名前（`import ... as` の別名を含む）。"""
+
+    names = {"JsonBudget"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "JsonBudget" and alias.asname:
+                    names.add(alias.asname)
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Name) and node.value.id in names:
+            names.update(target.id for target in node.targets if isinstance(target, ast.Name))
+    return names
+
+
 def test_j16_work_scopes_are_created_only_at_registered_sites():
+    """作業量を作る呼び出し（別名・`module.JsonBudget(...)` の形も）は登録した場所だけ。
+
+    walk の中で作った作業量は実行時にもその walk の作業量の子になる（`JsonBudget.parent`。
+    `test_issue22d_live_values.py` が固定する）。ここは作ってよい場所の一覧を固定する。
+    """
+
     found = set()
     for path in _module_files():
         relative = _relative(path)
+        names = _work_scope_names(_parse(path))
         for qualname, name, lineno, call in _qualified_calls(path):
-            if name == "JsonBudget" and isinstance(call.func, ast.Name):
+            func = call.func
+            if isinstance(func, ast.Name) and func.id in names:
+                found.add((relative, qualname))
+            elif isinstance(func, ast.Attribute) and func.attr == "JsonBudget":
                 found.add((relative, qualname))
     assert found == set(_REGISTERED_WORK_SCOPES), found ^ set(_REGISTERED_WORK_SCOPES)
+
+
+def test_j18_a_work_scope_opened_inside_a_walk_charges_the_walk():
+    """実行時の保証: walk の中で作った作業量（別名でも、上限なしでも）は外の walk の作業量へ数える。"""
+
+    from scripts.function_tracer_pcode.core import json_encoding
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonBudgetExhausted, metered
+
+    Alias = json_encoding.JsonBudget
+
+    def escape(_work):
+        inner = Alias(None)
+        for _ in range(10_000):
+            inner.charge(10)
+        return "escaped"
+
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.prepare(metered(escape), max_bytes=1_000)

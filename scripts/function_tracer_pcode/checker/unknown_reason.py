@@ -1445,10 +1445,14 @@ class _ReasonCounts(Reducer):
         self.counts: Dict[str, int] = {}
 
     def add(self, value: Any, *, work: Any) -> None:
+        from scripts.function_tracer_pcode.core.json_encoding import hashable_key
+
         record = _coerce_record_within(value, work=work)
         if self.primary is not None and not self.primary.admit(record, work=work):
             return
-        self.counts[record.reason_id] = self.counts.get(record.reason_id, 0) + 1
+        # reason id は hash する前に数える（組み込みの値だけを値で比べる）
+        key = hashable_key(record.reason_id, work)
+        self.counts[key] = self.counts.get(key, 0) + 1
 
     def result(self, *, work: Any) -> Any:
         from scripts.function_tracer_pcode.core.json_encoding import pairs_of
@@ -1547,12 +1551,15 @@ class _RecoveryBacklog(Reducer):
         self.entries: Dict[str, _BacklogEntryView] = {}
 
     def add(self, value: Any, *, work: Any) -> None:
+        from scripts.function_tracer_pcode.core.json_encoding import hashable_key
+
         record = _coerce_record_within(value, work=work)
         if self.primary is not None and not self.primary.admit(record, work=work):
             return
-        entry = self.entries.get(record.reason_id)
+        key = hashable_key(record.reason_id, work)
+        entry = self.entries.get(key)
         if entry is None:
-            entry = self.entries[record.reason_id] = _BacklogEntryView()
+            entry = self.entries[key] = _BacklogEntryView()
         entry.add(record, work=work)
 
     def result(self, *, work: Any) -> Any:

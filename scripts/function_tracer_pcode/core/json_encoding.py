@@ -1100,7 +1100,9 @@ class JsonEncodingPolicy:
     def materialize(self, source: Any, *, budget: Optional[JsonBudget] = None) -> Any:
         """LEGACY 表現を作る（record の `to_dict()`・snapshot）。`budget` を渡すとそこへ数える。"""
 
-        return _Walk(self, LEGACY, budget or JsonBudget(None), build=True).run(source)
+        if budget is None:
+            return _Walk(self, LEGACY, JsonBudget(None), build=True).run(source)
+        return _Walk(self, LEGACY, budget, build=True, effort_to_budget=True).run(source)
 
     def plain_bytes(self, value: Any, *, max_bytes: Optional[int] = None) -> Optional[int]:
         """容器（tuple / list / dict）と基底型 **だけ** から成る値の byte 数（それ以外は `None`）。
@@ -1114,9 +1116,9 @@ class JsonEncodingPolicy:
         return budget.consumed if done else None
 
     def count_into(self, source: Any, budget: JsonBudget, *, mode: str = LEGACY) -> None:
-        """source の byte 数を `budget` へ足す（作らない）。"""
+        """source の byte 数を `budget` へ足す（作らない）。走査の作業量も `budget` へ数える。"""
 
-        _Walk(self, mode, budget, build=False).run(source)
+        _Walk(self, mode, budget, build=False, effort_to_budget=True).run(source)
 
     def token_fingerprint(self, value: Any, *, work: "JsonBudget") -> str:
         """証拠の型つき token 列（dict は key 順）の sha256。辿る作業量を `work` へ数える。
@@ -1126,7 +1128,7 @@ class JsonEncodingPolicy:
         """
 
         digest = hashlib.sha256()
-        _Walk(self, LEGACY, work, build=False, token_sink=digest.update).run(value)
+        _Walk(self, LEGACY, work, build=False, token_sink=digest.update, effort_to_budget=True).run(value)
         return digest.hexdigest()
 
 
@@ -1317,7 +1319,17 @@ def hashable_key(value: Any, work: "JsonBudget") -> Any:
     if kind is tuple and _is_plain_key_part(value, work):
         return value
     work.charge(1)
-    return ("<object>", kind.__qualname__, id(value))
+    return object_identity_token(value)
+
+
+def object_identity_token(value: Any) -> Tuple[str, str, int]:
+    """値で比べられない live な object の identity の印（型名と `id`。`hash` / `==` / `repr` を呼ばない）。
+
+    別の object は同じ値でも別の印（集計を合併しない側へ倒す。旧実装の既定の `hash` / `repr` と
+    同じく object ごとに区別する）。印は process の中でだけ意味を持つ（出力の値の等しさに使わない）。
+    """
+
+    return ("<object>", type(value).__qualname__, id(value))
 
 
 def renders_with_builtins(value: Any) -> bool:
@@ -1654,6 +1666,12 @@ class _Walk:
     文字列の hash）を `effort` へ数える。`effort` の上限は走査を始めたときの `budget` の残り
     （`budget` が無制限なら無制限）で、使い切ったら証拠は fingerprint の無い要約になる
     （出力の byte の勘定は変わらない）。
+
+    作業量は必ず上位の owner へ戻る（新しい scope で親の上限を逃れない）:
+    * 別の walk の中（converter・reducer・`metered` の factory・`json_items`）で始めた walk の
+      予算と作業量は、その walk の作業量の子（`JsonBudget.parent`、`_ACTIVE_WORK`）。
+    * 呼ぶ側の作業量で辿る walk（`count_into` / `materialize(budget=)` / `token_fingerprint`）の
+      作業量は、その作業量の子（`effort_to_budget`）。
     """
 
     def __init__(
@@ -1665,11 +1683,18 @@ class _Walk:
         build: bool,
         token_sink: Optional[Callable[[bytes], None]] = None,
         effort: Optional[JsonBudget] = None,
+        effort_to_budget: bool = False,
     ) -> None:
         self.policy = policy
         self.mode = mode
         self.budget = budget
-        self.effort = effort if effort is not None else JsonBudget(budget.remaining())
+        if effort is None:
+            effort = JsonBudget(budget.remaining())
+            if effort_to_budget:
+                # 呼ぶ側の作業量（`count_into` / `materialize(budget=)` / `token_fingerprint`）で
+                # 辿る: 走査の作業量もその作業量へ数える（呼ぶたびに新しい上限を持たない）
+                effort.parent = budget
+        self.effort = effort
         self.build = build
         self.token_sink = token_sink
         #: 1 回しか辿れない列（iterator）を辿ったか（辿った後の値は同じ値として辿り直せない）
@@ -2506,6 +2531,7 @@ __all__ = [
     "builtin_str",
     "exception_text",
     "hashable_key",
+    "object_identity_token",
     "renders_with_builtins",
     "stringify_plain_key",
     "Reread",

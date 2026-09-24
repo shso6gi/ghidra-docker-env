@@ -59,6 +59,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     builtin_str,
     exception_text,
     is_json_record,
+    object_identity_token,
     renders_with_builtins,
 )
 
@@ -136,8 +137,9 @@ def freeze_identity(value: Any) -> Any:
 
     Issue #22 PR-22-D: 組み込みの振る舞いの容器だけを辿り、葉は組み込みで書ける値（文字列・
     scalar・組み込みのままの enum）だけをそのまま残す。それ以外の葉（上書きした `__hash__` /
-    `__repr__` を持ち得る live な object）は型名の印にする（集計は印を hash・`repr` するだけで、
-    object の code を呼ばない）。JSON から読んだ値（reporting）は常に組み込みの値なので変わらない。
+    `__repr__` を持ち得る live な object）は object の identity の印にする（`object_identity_token`。
+    旧実装の既定の `hash` と同じく object ごとに区別し、集計は印を hash・`repr` するだけで object の
+    code を呼ばない）。JSON から読んだ値（reporting）は常に組み込みの値なので変わらない。
     """
     mapping = builtin_mapping(value)
     if mapping is not None:
@@ -149,7 +151,7 @@ def freeze_identity(value: Any) -> Any:
         return tuple(freeze_identity(item) for item in value)
     if renders_with_builtins(value):
         return value
-    return builtin_str(value)
+    return object_identity_token(value)
 
 
 def identity_tuple(value: Any) -> Tuple[Any, ...]:
