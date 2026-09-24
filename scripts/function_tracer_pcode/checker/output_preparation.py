@@ -1523,7 +1523,8 @@ class AuthoritySeal:
     型 1 つ。field に callable を持たない）。`seal(preimage)` は authority の
     `build_canonical_result_finalization_bundle` を呼ぶ: sealed event stream の codec・replay・
     digest の仕事は event stream に比例し、その上限の契約は #110（O-4 の「構築の作業量」の未達の
-    依存）。本 PR が保証するのは、呼ぶのは pair ごとに高々 2 回（組み直すときだけ 2 回目）、
+    依存）。本 PR が保証するのは、呼ぶのは envelope 1 つを作るごとに高々 2 回（組み直すときだけ
+    2 回目。出力の失敗の ERROR は別の小さい session の envelope で、その fallback を含めて高々 2 つ）、
     作った封印は残りの予算の中でしか写さない、超えれば durable な ERROR、の 3 つ。
 
     test は `seal` を上書きした subclass を使う（production の subclass は architecture test が

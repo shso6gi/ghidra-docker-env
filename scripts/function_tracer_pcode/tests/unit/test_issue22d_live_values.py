@@ -126,19 +126,53 @@ def test_walks_on_the_caller_work_charge_their_effort_to_it():
 
 
 def test_a_walk_started_inside_a_walk_is_charged_to_the_outer_work():
-    """converter・`metered` の factory の中で始めた walk は、外の walk の作業量の子（新しい上限で逃れない）。"""
+    """converter・`metered` の factory の中で始めた walk の作業量は、外の walk の作業量の子（新しい上限で逃れない）。"""
 
     inner_adds = _Adds()
 
     def factory(work):
-        # 上限なしの内側の walk: 外の walk の作業量へ数えられる
+        # 外より大きい上限の内側の walk を何度も: 作業量は外の walk の作業量へ数えられる
         for _ in range(50):
-            RESULT_JSON_POLICY.measure(_Scanned(range(2_000), inner_adds), mode=LEGACY)
+            RESULT_JSON_POLICY.measure(_Scanned(range(2_000), inner_adds), mode=LEGACY, max_bytes=1 << 30)
         return "done"
 
     with pytest.raises(JsonBudgetExhausted):
         RESULT_JSON_POLICY.prepare(metered(factory), max_bytes=5_000)
     assert inner_adds.count <= 5_000
+
+
+def test_an_unbounded_walk_cannot_start_inside_a_bounded_walk():
+    walked = []
+
+    def factory(work):
+        RESULT_JSON_POLICY.measure(iter(walked.append(index) or index for index in range(1_000_000)))
+        return "done"
+
+    with pytest.raises(JsonValueRejected):
+        RESULT_JSON_POLICY.prepare(metered(factory), max_bytes=5_000)
+    assert walked == []
+
+
+def test_prepare_fits_exactly_the_measured_size():
+    """作業量は 1 回だけ数える: `measure` した大きさの上限でちょうど書け、上限なしと同じ値。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import bounded_evidence  # noqa: F401
+
+    rows = [
+        make_unknown_reason("unknown", stage="s", object_evidence=("e" * 1_500, index), object_target_key=("k", index))
+        for index in range(20)
+    ]
+    values = [
+        each([evidence(("abc", index)) for index in range(200)]),
+        rows,
+        [evidence(("abc", index)) for index in range(50)] + ["x" * 10_000],
+    ]
+    for value in values:
+        size = RESULT_JSON_POLICY.measure(value)
+        unlimited = RESULT_JSON_POLICY.prepare(value).value()
+        exact = RESULT_JSON_POLICY.prepare(value, max_bytes=size)
+        assert exact.encoded_bytes == size
+        assert exact.value() == unlimited
 
 
 def test_a_walk_outside_any_walk_keeps_its_own_bound():
@@ -654,3 +688,128 @@ def test_scalar_subclasses_are_their_base_values_without_their_own_methods():
     key = hashable_key(("int", value), JsonBudget(1 << 20))
     assert key == ("int", 129780670288800) and type(key[1]) is int
     assert called == []
+
+
+def test_the_walker_never_iterates_a_user_iterable_or_mapping_source():
+    """`each` / `as_list` / `as_dict` / `nested` の中身も、組み込みの振る舞いの容器か iterator だけを辿る。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import as_dict, as_list, nested
+
+    pulled = []
+
+    class _Sequence:
+        def __iter__(self):
+            pulled.append(1)
+            return iter(range(10))
+
+    class _Dict(dict):
+        def items(self):
+            pulled.append(1)
+            return super().items()
+
+    for source in (each(_Sequence()), as_list(_Sequence()), as_dict(_UserMapping()), as_dict(_Dict(a=1))):
+        with pytest.raises(JsonValueRejected):
+            RESULT_JSON_POLICY.prepare(source, max_bytes=1 << 20)
+    # nested は組み込みでない容器を元の値として扱う（中身を引き出さない）
+    try:
+        RESULT_JSON_POLICY.prepare(nested(_Dict(a=1)), max_bytes=1 << 20)
+    except JsonValueRejected:
+        pass
+    assert pulled == [] and _UserMapping.calls == 0
+    # 組み込みの列・iterator・dict の view は今までどおり
+    assert RESULT_JSON_POLICY.prepare(each(iter(range(3))), max_bytes=100).value() == [0, 1, 2]
+    assert RESULT_JSON_POLICY.prepare(each({"a": 1}.keys()), max_bytes=100).value() == ["a"]
+
+
+def test_a_dataclass_that_authority_digests_by_its_own_form_gets_no_canonical_claim():
+    import dataclasses
+
+    from scripts.function_tracer_pcode.core.json_encoding import bounded_evidence
+
+    @dataclasses.dataclass(frozen=True)
+    class _Receipt:
+        a: str
+
+        def to_authority_dict(self):
+            return {"shape": "different", "a": self.a}
+
+    with pytest.raises(TypeError):
+        canonical_fingerprint(_Receipt("x"), work=JsonBudget(1 << 20))
+    summary = bounded_evidence((_Receipt("x" * 3_000),), work=JsonBudget(1 << 20))
+    assert type(summary) is BoundedEvidence and summary.fingerprint_kind != "canonical_sha256"
+
+
+def test_value_tokens_are_deterministic_for_dataclass_and_enum_leaves():
+    import dataclasses
+    import enum
+
+    from scripts.function_tracer_pcode.checker.cause_aggregate import freeze_identity, identity_digest
+
+    @dataclasses.dataclass(frozen=True)
+    class _Ref:
+        index: int
+
+    class _Kind(enum.Enum):
+        A = "a"
+
+        def __str__(self):  # 上書きした __str__（呼ばない）
+            raise AssertionError("called")
+
+    first = freeze_identity(("k", _Ref(1), _Kind.A))
+    again = freeze_identity(("k", _Ref(1), _Kind.A))
+    assert first == again and identity_digest(("k", _Ref(1))) == identity_digest(("k", _Ref(1)))
+    assert "<object>" not in repr(first)
+    assert freeze_identity(("k", _Ref(1))) != freeze_identity(("k", _Ref(2)))
+
+
+def test_an_error_whose_output_fails_after_it_was_persisted_still_exits_with_its_outcome(monkeypatch):
+    """永続化した ERROR の envelope が pair の結果: 書き出しが落ちても exit code はその outcome（join できる）。"""
+
+    from scripts.function_tracer_pcode.authority.contracts import Outcome
+    from scripts.function_tracer_pcode.authority.decision import canonical_result
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import CLI_EXIT_MATRIX
+    from scripts.function_tracer_pcode.cli.commands import equivalence
+
+    persisted = []
+
+    def broken_output(*_args, **_kwargs):
+        raise OSError("the output stream is gone")
+
+    monkeypatch.setattr(equivalence, "output_result", broken_output)
+    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", persisted.append)
+    args = SimpleNamespace(verbose=False, debug=False, output=None, quiet=True)
+    with pytest.raises(SystemExit) as exited:
+        equivalence._emit_output_invariant_error_result(
+            args, result=_decided_result(),
+            violation=OutputEnvelopeInvariantViolation("too big", max_bytes=1, requested_bytes=2),
+            binary1_path="/tmp/a", binary2_path="/tmp/b", func_name1="f", func_name2="f", start_time=0.0,
+        )
+    assert len(persisted) == 1
+    assert exited.value.code == CLI_EXIT_MATRIX[Outcome.ERROR]
+
+
+def test_the_error_is_persisted_only_after_everything_it_writes_was_built(monkeypatch):
+    """書く text を作れない ERROR は永続化しない（永続化した後に作る失敗で exit code がずれない）。"""
+
+    from scripts.function_tracer_pcode.authority.decision import canonical_result
+    from scripts.function_tracer_pcode.checker import result as result_module
+    from scripts.function_tracer_pcode.cli.commands import equivalence
+
+    order = []
+    monkeypatch.setattr(equivalence, "output_result", lambda *_a, **_k: order.append("output"))
+    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", lambda _p: order.append("persist"))
+    original = result_module.EquivalenceResult.to_string
+
+    def to_string(self, **kwargs):
+        order.append("text")
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(result_module.EquivalenceResult, "to_string", to_string)
+    args = SimpleNamespace(verbose=False, debug=False, output=None, quiet=True)
+    with pytest.raises(SystemExit):
+        equivalence._emit_output_invariant_error_result(
+            args, result=_decided_result(),
+            violation=OutputEnvelopeInvariantViolation("too big", max_bytes=1, requested_bytes=2),
+            binary1_path="/tmp/a", binary2_path="/tmp/b", func_name1="f", func_name2="f", start_time=0.0,
+        )
+    assert order.index("text") < order.index("persist") < order.index("output")

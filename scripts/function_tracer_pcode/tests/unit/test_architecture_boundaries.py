@@ -2513,7 +2513,6 @@ def test_j1_helpers_json_items_calls_do_not_build_the_representation_either():
 #: J10 の登録: walker を上限なしで回してよい場所 → なぜ
 _REGISTERED_UNBOUNDED_WALKS = {
     ("core/json_encoding.py", "materialize"): "予算 scope の外（部品単体の呼び出し）の `to_dict()`",
-    ("core/expression.py", "Expression._to_dict"): "固定の形の cycle_ref の object 1 つを測る",
     ("core/expression.py", "Expression._serialize_runtime_ref"):
         "木を作る前に runtime ref を含む大きさを数え終えている（`estimate_legacy_dict_bytes`）",
     ("checker/cause_aggregate.py", "_prepared_within_work"): "作業量の scope の外（部品単体の呼び出し）だけ",
@@ -2924,19 +2923,22 @@ def test_j16_work_scopes_are_created_only_at_registered_sites():
     assert found == set(_REGISTERED_WORK_SCOPES), found ^ set(_REGISTERED_WORK_SCOPES)
 
 
-def test_j18_a_work_scope_opened_inside_a_walk_charges_the_walk():
-    """実行時の保証: walk の中で作った作業量（別名でも、上限なしでも）は外の walk の作業量へ数える。"""
+def test_j18_a_work_scope_opened_inside_a_walk_cannot_escape_it():
+    """実行時の保証: 上限のある walk の中では、上限なしの作業量（別名でも）を作れない。"""
 
     from scripts.function_tracer_pcode.core import json_encoding
-    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonBudgetExhausted, metered
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonValueRejected, metered
 
     Alias = json_encoding.JsonBudget
+    charged = []
 
     def escape(_work):
         inner = Alias(None)
         for _ in range(10_000):
             inner.charge(10)
+            charged.append(1)
         return "escaped"
 
-    with pytest.raises(JsonBudgetExhausted):
+    with pytest.raises(JsonValueRejected):
         RESULT_JSON_POLICY.prepare(metered(escape), max_bytes=1_000)
+    assert charged == []

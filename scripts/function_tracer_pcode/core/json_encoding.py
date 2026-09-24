@@ -40,8 +40,10 @@ method で、他の module は JSON の規則を計算しない。単位は UTF-
 
 from __future__ import annotations
 
+import collections
 import contextvars
 import hashlib
+import inspect
 import json
 import re
 from collections.abc import Iterator as _AbcIterator, Mapping
@@ -50,7 +52,12 @@ from enum import Enum
 from json.encoder import encode_basestring, encode_basestring_ascii
 from typing import Any, Callable, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
-from scripts.function_tracer_pcode.core.builtin_containers import builtin_mapping, builtin_sequence, plain_field_value
+from scripts.function_tracer_pcode.core.builtin_containers import (
+    builtin_mapping,
+    builtin_sequence,
+    builtin_set,
+    plain_field_value,
+)
 from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
 from scripts.function_tracer_pcode.core.render_output import utf8_length
 
@@ -326,6 +333,18 @@ def pairs_of(
 
     _require_converter(fn, "pairs_of")
     return _MappingOf(_PairsView(pairs), fn)
+
+
+_BUILTIN_ITERABLE_TYPES = (range, collections.deque, type({}.keys()), type({}.values()), type({}.items()))
+
+
+def _walkable_items(items: Any) -> bool:
+    """`each` の列を辿ってよいか: 組み込みの容器・iterator（generator を含む）・`range`・dict の view。"""
+
+    return (
+        builtin_sequence(items) or builtin_set(items) or isinstance(items, _AbcIterator)
+        or type(items) in _BUILTIN_ITERABLE_TYPES or builtin_mapping(items) is not None
+    )
 
 
 def _is_one_shot(source: Any) -> bool:
@@ -774,14 +793,21 @@ class JsonBudget:
     pair terminal な限界に変え、木の distinct node も数える。
     """
 
-    def __init__(self, max_bytes: Optional[int]) -> None:
+    def __init__(self, max_bytes: Optional[int], *, detached: bool = False) -> None:
         # 上限は必ず渡す（既定値なし）。`None` は上限なしで、作ってよい場所は登録してある
         # （`tests/unit/test_architecture_boundaries.py` の J7）
+        if max_bytes is None and not detached:
+            active = _ACTIVE_WORK.get()
+            if active is not None and active.remaining() is not None:
+                # 上限のある walk の中（converter・reducer・`metered` の factory・`json_items`）で
+                # 上限なしの予算を作らない（新しい scope で親の上限を逃れない）。数え済みの値を
+                # 写し直す場所だけが `detached=True` で作る（J16 の登録）
+                raise TypeError("an unbounded work scope cannot start inside a bounded walk")
         self.max_bytes = max_bytes
         self.consumed = 0
-        # walk の中（converter・reducer・`metered` の factory・`json_items`）で作った予算は、
-        # その walk の作業量の子: 数えた量を親へも数える（新しい scope で親の上限を逃れない）
-        self.parent = _ACTIVE_WORK.get()
+        self.detached = detached
+        #: 数えた量を親へも数える作業量（walk の作業量の子。`_Walk` が決める）
+        self.parent: Optional["JsonBudget"] = None
 
     def remaining(self) -> Optional[int]:
         own = None if self.max_bytes is None else self.max_bytes - self.consumed
@@ -1097,11 +1123,14 @@ class JsonEncodingPolicy:
         _Walk(self, mode, budget, build=False).run(source)
         return budget.consumed
 
-    def materialize(self, source: Any, *, budget: Optional[JsonBudget] = None) -> Any:
-        """LEGACY 表現を作る（record の `to_dict()`・snapshot）。`budget` を渡すとそこへ数える。"""
+    def materialize(self, source: Any, *, budget: Optional[JsonBudget] = None, counted: bool = False) -> Any:
+        """LEGACY 表現を作る（record の `to_dict()`・snapshot）。`budget` を渡すとそこへ数える。
+
+        `counted=True` は大きさを数え終えた値を写すとき（数え直さない。walk の中でも作れる）。
+        """
 
         if budget is None:
-            return _Walk(self, LEGACY, JsonBudget(None), build=True).run(source)
+            return _Walk(self, LEGACY, JsonBudget(None, detached=counted), build=True).run(source)
         return _Walk(self, LEGACY, budget, build=True, effort_to_budget=True).run(source)
 
     def plain_bytes(self, value: Any, *, max_bytes: Optional[int] = None) -> Optional[int]:
@@ -1252,6 +1281,9 @@ def _stringified_key(key: Any, work: "JsonBudget") -> str:
     base = plain_scalar(key)
     if base is not _NOT_PLAIN:
         return str(base)
+    if _builtin_enum(key):
+        # 組み込みのままの enum（`IntEnum` を含む）: 旧 `str(k)` と同じ組み込みの `__str__`
+        return str(key)
     if kind is tuple and _is_plain_key_part(key, work):
         return str(builtin_view(key)[1])
     raise TypeError(f"mapping key {kind.__name__} is not stringified without its own __str__")
@@ -1284,7 +1316,8 @@ def bounded_repr(value: Any, max_chars: int = 256) -> str:
     if isinstance(value, float):
         return float.__repr__(value)
     if isinstance(value, str):
-        return str.__repr__(str.__str__(value[:max_chars] if len(value) > max_chars else value))
+        base = str.__str__(value)
+        return str.__repr__(base[:max_chars] if len(base) > max_chars else base)
     return f"<{type(value).__qualname__}>"
 
 
@@ -1293,9 +1326,18 @@ _BUILTIN_ENUM_STR = frozenset({Enum.__str__, str.__str__, int.__repr__, int.__st
 _BUILTIN_HASH = frozenset({Enum.__hash__, str.__hash__, int.__hash__, object.__hash__})
 
 
+_BUILTIN_ENUM_REPR = frozenset({Enum.__repr__, object.__repr__})
+
+
 def _builtin_enum(value: Any) -> bool:
+    """組み込みのままの enum か（`__str__` / `__repr__` / `__hash__` を上書きせず、値が scalar）。"""
+
     kind = type(value)
-    return isinstance(value, Enum) and kind.__str__ in _BUILTIN_ENUM_STR and kind.__hash__ in _BUILTIN_HASH
+    return (
+        isinstance(value, Enum) and kind.__str__ in _BUILTIN_ENUM_STR and kind.__hash__ in _BUILTIN_HASH
+        and kind.__repr__ in _BUILTIN_ENUM_REPR
+        and plain_scalar(object.__getattribute__(value, "_value_")) is not _NOT_PLAIN
+    )
 
 
 def hashable_key(value: Any, work: "JsonBudget") -> Any:
@@ -1310,11 +1352,43 @@ def hashable_key(value: Any, work: "JsonBudget") -> Any:
     if type(value) is str:
         work.charge(1 + len(value))
         return value
+    return value_token(value, work)
+
+
+def value_token(value: Any, work: Optional["JsonBudget"] = None, *, _depth: int = 0) -> Any:
+    """live な値の、値で比べてよい決定的な印（`builtin_view` の写し・enum の名前・dataclass の field）。
+
+    組み込みの値に書き直せる値はその写し、enum は (型名, 名前)、dataclass は (型名, field の印)。
+    どれでもない値（field を持たない live な object）だけが `object_identity_token`（process の
+    中でだけ意味を持つ）。`__str__` / `__repr__` / `__hash__` / property を呼ばない。
+    """
+
     ok, view = builtin_view(value, work)
     if ok:
         return view
-    work.charge(1)
+    kind = type(value)
+    if isinstance(value, Enum):
+        if work is not None:
+            work.charge(1)
+        return ("<enum>", kind.__qualname__, object.__getattribute__(value, "_name_"))
+    if (
+        is_dataclass(value) and not isinstance(value, type) and _depth < _VALUE_TOKEN_MAX_DEPTH
+        and inspect.getattr_static(kind, "to_authority_dict", None) is None
+    ):
+        try:
+            names = [field_info.name for field_info in dataclass_fields(value)]
+            if work is not None:
+                work.charge(1 + len(names))
+            return ("<dataclass>", kind.__qualname__, tuple(
+                (name, value_token(plain_field_value(value, name), work, _depth=_depth + 1)) for name in names
+            ))
+        except TypeError:
+            pass
     return object_identity_token(value)
+
+
+#: `value_token` が dataclass を辿る深さ（閉路・深い入れ子は identity の印）
+_VALUE_TOKEN_MAX_DEPTH = 32
 
 
 def object_identity_token(value: Any) -> Tuple[str, str, int]:
@@ -1707,11 +1781,13 @@ class _Walk:
     （`budget` が無制限なら無制限）で、使い切ったら証拠は fingerprint の無い要約になる
     （出力の byte の勘定は変わらない）。
 
-    作業量は必ず上位の owner へ戻る（新しい scope で親の上限を逃れない）:
+    作業量は必ず上位の owner へ **1 回だけ** 戻る（新しい scope で親の上限を逃れない）:
     * 別の walk の中（converter・reducer・`metered` の factory・`json_items`）で始めた walk の
-      予算と作業量は、その walk の作業量の子（`JsonBudget.parent`、`_ACTIVE_WORK`）。
+      作業量（effort）は、その walk の作業量の子（`JsonBudget.parent`、`_ACTIVE_WORK`）。出力の
+      byte は上限つきで辿り、呼ぶ側が返った大きさを数える（上限なしの予算は作れない）。
     * 呼ぶ側の作業量で辿る walk（`count_into` / `materialize(budget=)` / `token_fingerprint`）の
       作業量は、その作業量の子（`effort_to_budget`）。
+    * 数え済みの値を写し直す walk（`detached=True`: canonical な複製・数え済みの木）は数えない。
     """
 
     def __init__(
@@ -1729,11 +1805,18 @@ class _Walk:
         self.mode = mode
         self.budget = budget
         if effort is None:
-            effort = JsonBudget(budget.remaining())
+            detached = bool(getattr(budget, "detached", False))
+            # 親は下で決める（上限なしでも、親を持つ作業量は親の上限で止まる）
+            effort = JsonBudget(budget.remaining(), detached=True)
+            effort.detached = detached
             if effort_to_budget:
                 # 呼ぶ側の作業量（`count_into` / `materialize(budget=)` / `token_fingerprint`）で
                 # 辿る: 走査の作業量もその作業量へ数える（呼ぶたびに新しい上限を持たない）
                 effort.parent = budget
+            elif not detached:
+                # 別の walk の中で始めた walk: 作業量はその walk の作業量の子（出力の byte は
+                # 呼ぶ側が返った大きさを数える。どちらも 1 回だけ）
+                effort.parent = _ACTIVE_WORK.get()
         self.effort = effort
         self.build = build
         self.token_sink = token_sink
@@ -1780,17 +1863,19 @@ class _Walk:
             return True, item
         kind_of = type(item)
         if kind_of is str or isinstance(item, str):
+            # subclass は基底型の slot で読む（上書きした `__len__` / `__add__` を呼ばない）
+            base = item if kind_of is str else str.__str__(item)
             self.budget.charge(
-                self.string_bytes(item) if kind_of is str
-                else self.policy.string_bytes(item, max_bytes=self.budget.remaining())
+                self.string_bytes(base) if kind_of is str
+                else self.policy.string_bytes(base, max_bytes=self.budget.remaining())
             )
             if self.token_sink is not None:
-                self.token("s" + item)
+                self.token("s" + base)
             if kind_of is not str and self.mode == CANONICAL:
-                item = str.__str__(item)
+                item = base
             return True, item
         if kind_of is int or isinstance(item, int):
-            value = int(item)
+            value = int.__index__(item)
             try:
                 digits = len(int.__repr__(value))
             except ValueError:
@@ -1957,13 +2042,13 @@ class _Walk:
                         base = str.__str__(item)
                         total += string_bytes(base)
                     elif isinstance(item, int):
-                        base = int(item)
+                        base = int.__index__(item)
                         try:
                             total += len(int.__repr__(base))
                         except ValueError:
                             raise _NotPlain
                     else:
-                        base = float(item)
+                        base = float.__float__(item)
                         total += len(_float_text(base))
                     if canonical:
                         item = base
@@ -2188,9 +2273,15 @@ class _Walk:
     def enter_source(self, item: _Source, parent: Any, key: Any, build: bool) -> None:
         kind = type(item)
         if kind is _Each:
+            if not _walkable_items(item.items):
+                # 組み込みの振る舞いでない iterable（上書きした `__iter__`）は辿らない
+                self.reject(f"{type(item.items).__qualname__} is not a builtin iterable")
             self.push("list", iter(item.items), parent, key, item, build=build, fn=item.fn)
         elif kind is _MappingOf:
-            pairs: Iterator[Any] = iter(item.mapping.items())
+            mapping = item.mapping
+            if type(mapping) is not _PairsView and builtin_mapping(mapping) is None:
+                self.reject(f"{type(mapping).__qualname__} is not a builtin mapping")
+            pairs: Iterator[Any] = iter(mapping.items())
             if item.stringify_keys:
                 effort = self.effort
                 pairs = ((_stringified_key(child_key, effort), child) for child_key, child in pairs)
@@ -2262,17 +2353,20 @@ class _Walk:
     def enter_nested(self, value: Any, parent: Any, key: Any, build: bool) -> None:
         """旧 `_jsonable_nested_tuple`: dict は dict、tuple / list は配列、それ以外はそのまま。"""
 
-        if isinstance(value, (dict, tuple, list)):
+        mapping = builtin_mapping(value) if isinstance(value, dict) else None
+        sequence = builtin_sequence(value)
+        if mapping is not None or sequence:
             done, built = self.plain(value, build)
             if done:
                 self.place(parent, key, built, build)
                 return
-        if isinstance(value, dict):
-            self.push("dict", iter(value.items()), parent, key, value, build=build, fn=_NESTED,
+        if mapping is not None:
+            self.push("dict", iter(mapping.items()), parent, key, value, build=build, fn=_NESTED,
                       preserve_keys=(self.mode == LEGACY))
-        elif isinstance(value, (tuple, list)):
+        elif sequence:
             self.push("list", iter(value), parent, key, value, build=build, fn=_NESTED)
         else:
+            # 組み込みの振る舞いでない容器は元の値として（`enter_raw` の規則で）数える
             self.enter_raw(value, parent, key, build)
 
     def enter_evidence(self, item: _Evidence, parent: Any, key: Any, build: bool) -> None:
@@ -2401,7 +2495,8 @@ class _Walk:
 
 
 def _canonical_copy_uncounted(policy: JsonEncodingPolicy, value: Any) -> Any:
-    return _Walk(policy, CANONICAL, JsonBudget(None), build=True).run(value)
+    # `tree()` が作る前に数え済みの木の canonical な複製（数え直さない）
+    return _Walk(policy, CANONICAL, JsonBudget(None, detached=True), build=True).run(value)
 
 
 _ALL_RESERVATIONS = object()
@@ -2572,6 +2667,7 @@ __all__ = [
     "exception_text",
     "hashable_key",
     "object_identity_token",
+    "value_token",
     "builtin_view",
     "NOT_PLAIN",
     "plain_scalar",

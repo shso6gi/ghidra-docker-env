@@ -319,7 +319,11 @@ def _emit_import_error_result(
     # （journal を持つ pair が結果 JSON の有無で欠けないようにする）。
     emission_started = time.monotonic()
     journal_stage_start("result_emit", {"kind": "emission", "path": error_stage})
+    from scripts.function_tracer_pcode.authority.contracts import Outcome
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import CLI_EXIT_MATRIX
+
     emitted = False
+    persisted = False
     try:
         evidence, session = result._canonical_finalization_context
         envelope = build_final_result_envelope(
@@ -331,28 +335,21 @@ def _emit_import_error_result(
         result.canonical_result_finalization_bundle = result_payload[
             "canonical_result_finalization_bundle"
         ]
+        # 書くものを全部作ってから永続化する（永続化した後に作る失敗で exit code がずれない）
+        text_content = result.to_string(
+            verbose=getattr(args, "verbose", False),
+            show_phase_usage=getattr(args, "debug", False),
+            payload=result_payload,
+        )
+        json_content = "\n".join((
+            "=== EQUIVALENCE_RESULT_JSON_BEGIN ===",
+            envelope.text,
+            "=== EQUIVALENCE_RESULT_JSON_END ===",
+        ))
         persist_canonical_result_envelope(result_payload)
-        output_result(
-            result.to_string(
-                verbose=getattr(args, "verbose", False),
-                show_phase_usage=getattr(args, "debug", False),
-                payload=result_payload,
-            ),
-            args.output,
-            args.quiet,
-        )
-        json_payload = envelope.text
-        output_result(
-            "\n".join(
-                (
-                    "=== EQUIVALENCE_RESULT_JSON_BEGIN ===",
-                    json_payload,
-                    "=== EQUIVALENCE_RESULT_JSON_END ===",
-                )
-            ),
-            args.output,
-            args.quiet,
-        )
+        persisted = True
+        output_result(text_content, args.output, args.quiet)
+        output_result(json_content, args.output, args.quiet)
         emitted = True
     finally:
         if not emitted:
@@ -360,12 +357,13 @@ def _emit_import_error_result(
             journal_stage_end("result_emit", time.monotonic() - emission_started, {
                 "kind": "emission", "path": error_stage, "raised": True,
             })
+            if persisted:
+                # 永続化した envelope が pair の結果: 書き出しの失敗でも exit code はその outcome
+                # （supervisor が envelope と exit code を join できるように）
+                sys.exit(CLI_EXIT_MATRIX[Outcome.ERROR])
     journal_stage_end("result_emit", time.monotonic() - emission_started, {
         "kind": "emission", "path": error_stage,
     })
-    from scripts.function_tracer_pcode.authority.contracts import Outcome
-    from scripts.function_tracer_pcode.authority.decision.production_cutover import CLI_EXIT_MATRIX
-
     sys.exit(CLI_EXIT_MATRIX[Outcome.ERROR])
 
 
@@ -513,10 +511,13 @@ def _emit_output_invariant_error_result(
             superseded_decision_receipt=superseded,
             **common,
         )
-    except _POST_AUTHORITY_OUTPUT_FAILURES as second:
+    except _POST_AUTHORITY_OUTPUT_FAILURES + (AnalysisLimitation,) as second:
         # ERROR の出力自身が落ちた: 固定の文と receipt の digest だけで最後にもう 1 度だけ出す
-        # （traceback で durable な結果を失わない。これも落ちれば上げる — 再帰しない）
-        record_internal_bug(InternalError(second, site=FINAL_ENVELOPE_SITE), site=FINAL_ENVELOPE_SITE)
+        # （traceback で durable な結果を失わない。これも落ちれば上げる — 再帰しない）。台帳へは
+        # 失敗の型と有界な文だけを残す（`str(second)` を呼ばない）
+        record_internal_bug(
+            InternalError(RuntimeError(exception_text(second)), site=FINAL_ENVELOPE_SITE), site=FINAL_ENVELOPE_SITE,
+        )
         _emit_import_error_result(
             args,
             error_message=(
@@ -882,18 +883,29 @@ def run_equivalence_check(args):
                 "canonical_result_finalization_bundle"
             ]
 
-        persist_canonical_result_envelope(result_payload)
-        json_payload = envelope.text
-        if not args.quiet:
-            print(f"[EquivalenceCLI] Result payload bytes: {envelope.size_line()}")
         json_content = "\n".join(
             (
                 "=== EQUIVALENCE_RESULT_JSON_BEGIN ===",
-                json_payload,
+                envelope.text,
                 "=== EQUIVALENCE_RESULT_JSON_END ===",
             )
         )
-        output_result(json_content, args.output, args.quiet)
+        persist_canonical_result_envelope(result_payload)
+        written = False
+        try:
+            if not args.quiet:
+                print(f"[EquivalenceCLI] Result payload bytes: {envelope.size_line()}")
+            output_result(json_content, args.output, args.quiet)
+            written = True
+        finally:
+            if not written and getattr(result, "decision_receipt", None) is not None:
+                # 永続化した envelope が pair の結果: 書き出しの失敗でも exit code はその outcome
+                from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+                    CLI_EXIT_MATRIX,
+                    outcome_from_result,
+                )
+
+                sys.exit(CLI_EXIT_MATRIX[outcome_from_result(result)])
 
     journal_stage_end("result_emit", time.monotonic() - emission_started, {
         "kind": "emission",

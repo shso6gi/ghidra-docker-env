@@ -111,26 +111,6 @@ def _measured(function):
         tracemalloc.stop()
 
 
-class _CountingSequence:
-    """要素を引き出された回数を数える列（walker が 1 要素ずつ引き出すことを確かめる）。"""
-
-    def __init__(self, count, item="x"):
-        self.count = count
-        self.item = item
-        self.pulled = 0
-
-    def __len__(self):
-        return self.count
-
-    def __bool__(self):
-        return self.count > 0
-
-    def __iter__(self):
-        for _ in range(self.count):
-            self.pulled += 1
-            yield self.item
-
-
 # ---------------------------------------------------------------------------
 # C1〜C3: producer は予算を知らなくても、表現は予算で止まる
 # ---------------------------------------------------------------------------
@@ -139,7 +119,8 @@ class _CountingSequence:
 def test_c1_one_output_record_with_two_million_inner_elements_stops_at_the_budget():
     """signature の parameters が 200 万件でも、残り予算の分しか写さずに限界になる。"""
 
-    parameters = _CountingSequence(2_000_000, {"name": "a", "data_type": "int", "index": 0})
+    # 組み込みの列（walker は組み込みでない iterable を辿らない）。止まることは時間と peak memory で見る
+    parameters = [{"name": "a", "data_type": "int", "index": 0}] * 2_000_000
     result = create_mock_result(is_equivalent=True)
     result.function1_signature = FunctionSignature(return_type="int", parameters=parameters)
 
@@ -149,7 +130,6 @@ def test_c1_one_output_record_with_two_million_inner_elements_stops_at_the_budge
                 OutputPreparer(_SMALL).prepare(result)
 
     elapsed, peak = _measured(_prepare)
-    assert parameters.pulled < 5_000  # 48 KB の予算に届くまでの要素だけ
     assert elapsed < 1.0
     assert peak < 4 * 1024 * 1024
 
@@ -158,7 +138,7 @@ def test_c1_one_analysis_record_with_two_million_inner_elements_stops_at_the_bud
     """return 1 件の validation_blockers が 200 万件でも、解析の表現は予算で止まる。"""
 
     analysis = create_mock_analysis("func1", return_type="int")
-    blockers = _CountingSequence(2_000_000, "blocker")
+    blockers = ["blocker"] * 2_000_000
     analysis.returns = [ReturnInfo(
         address="0x1", value=Expression.constant(1, 4), validation_blockers=blockers,
     )]
@@ -169,7 +149,6 @@ def test_c1_one_analysis_record_with_two_million_inner_elements_stops_at_the_bud
                 analysis.to_dict()
 
     elapsed, peak = _measured(_serialize)
-    assert blockers.pulled < 10_000
     assert elapsed < 1.0
     assert peak < 4 * 1024 * 1024
 

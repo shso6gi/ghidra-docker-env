@@ -1152,9 +1152,10 @@ def build_unknown_recovery_actions(
     values: Optional[Iterable[Any]],
     *,
     primary_by_aggregation_unit: bool = False,
+    work: Any = None,
 ) -> Tuple[UnknownRecoveryAction, ...]:
     return tuple(iter_unknown_recovery_actions(
-        values, primary_by_aggregation_unit=primary_by_aggregation_unit,
+        values, primary_by_aggregation_unit=primary_by_aggregation_unit, work=work,
     ))
 
 
@@ -1162,17 +1163,20 @@ def iter_unknown_recovery_actions(
     values: Optional[Iterable[Any]],
     *,
     primary_by_aggregation_unit: bool = False,
+    work: Any = None,
 ):
     """`build_unknown_recovery_actions` と同じ action を 1 つずつ作る（producer 時点の構築）。
 
-    出力の準備は `recovery_actions_source`（walk の作業量へ数える）を使う。
+    出力の準備は `recovery_actions_source`（walk の作業量へ数える）を使う。診断（原因集計）が
+    作るときは、その作業量（`work`）へ数える。
     """
 
     from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
 
     # producer 時点（出力の前）の構築: 出力の行数は finitize が判定の前に schema と比べる
     return _iter_recovery_actions(
-        values, primary_by_aggregation_unit=primary_by_aggregation_unit, work=JsonBudget(None), for_output=False,
+        values, primary_by_aggregation_unit=primary_by_aggregation_unit,
+        work=JsonBudget(None) if work is None else work, for_output=False,
     )
 
 

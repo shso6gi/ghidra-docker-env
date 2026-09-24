@@ -9,7 +9,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from scripts.function_tracer_pcode.core.builtin_containers import builtin_mapping, builtin_sequence, builtin_set
 from scripts.function_tracer_pcode.core.json_encoding import (
     JsonBudget, as_list, each, identity_key_of, inline, is_json_record, materialize, metered, pairs_of, raw,
-    source_converter, stringify_plain_key,
+    bounded_repr, source_converter, stringify_plain_key,
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
@@ -71,6 +71,18 @@ def _runtime_ref_stable_key_or_repr(value: Any) -> Optional[Tuple[Any, ...]]:
         if key is not None:
             return ("stable", key)
     return ("repr", type(value).__module__, type(value).__qualname__, repr(value))
+
+
+def _runtime_ref_origin_source(value: Any) -> Tuple[Any, ...]:
+    """出力の `origin_ref`（`_runtime_ref_stable_key_or_repr` の有界な版。`repr` は `bounded_repr`）。"""
+
+    try:
+        has_key, key = identity_key_of(value, names=("stable_key",))
+    except (AttributeError, TypeError, ValueError, RecursionError):
+        has_key, key = False, None
+    if has_key and key is not None:
+        return ("stable", key)
+    return ("repr", type(value).__module__, type(value).__qualname__, bounded_repr(value))
 
 
 @dataclass(frozen=True)
@@ -233,8 +245,9 @@ class UnknownValueRef:
             if is_json_record(self.origin_ref):
                 yield "origin_ref", self.origin_ref
             else:
-                # 旧実装と同じ: 固定個数の要素から成る identity（stable key か repr）をそのまま置く
-                yield "origin_ref", raw(_runtime_ref_stable_key_or_repr(self.origin_ref))
+                # 固定個数の要素から成る identity（stable key か、型と有界な repr）。出力の側は
+                # live な値の `repr` を呼ばない（identity の側 `stable_key` は旧実装のまま）
+                yield "origin_ref", raw(_runtime_ref_origin_source(self.origin_ref))
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)

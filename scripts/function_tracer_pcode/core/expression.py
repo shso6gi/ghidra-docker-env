@@ -801,7 +801,8 @@ class Expression:
             if _TREE_BUILD_METERS:
                 # 数えながら作る: cycle_ref の表現も作りながら数える
                 policy, charge = _TREE_BUILD_METERS[-1]
-                charge(policy.measure({"type": self.expr_type.name, "cycle_ref": 0}) - 1)
+                # 固定の形（型名と 1 桁）の object 1 つ: 型名の長さの上限で測る
+                charge(policy.measure({"type": self.expr_type.name, "cycle_ref": 0}, max_bytes=4096) - 1)
                 return {
                     "type": self.expr_type.name,
                     "cycle_ref": policy.materialize(
@@ -814,7 +815,8 @@ class Expression:
             }
         if _TREE_BUILD_METERS:
             policy, charge = _TREE_BUILD_METERS[-1]
-            charge(_node_local_bytes(self, policy))
+            # node 1 つ分（runtime ref を含む）を、数える相手の残りの中で測る
+            charge(_node_local_bytes(self, policy, max_bytes=_meter_remaining(charge)))
         active.add(node_id)
         try:
             return self._to_dict_active(active)
@@ -913,13 +915,13 @@ class Expression:
 
         work = active_serialization_work()
         if work is None:
-            return RESULT_JSON_POLICY.materialize(runtime_ref_source(value))
+            return RESULT_JSON_POLICY.materialize(runtime_ref_source(value), counted=True)
         # 共有 DAG を木に展開すると同じ ref が何度も現れる。直列化 1 回の間は同じ object
         # の表現は同じなので memo し、置くたびに容器を作り直す（`SerializationWork`）
         memo = work.runtime_ref_memo
         hit = memo.get(id(value))
         if hit is None or hit[0] is not value:
-            hit = memo[id(value)] = (value, RESULT_JSON_POLICY.materialize(runtime_ref_source(value)))
+            hit = memo[id(value)] = (value, RESULT_JSON_POLICY.materialize(runtime_ref_source(value), counted=True))
         return copy_legacy_containers(hit[1])
 
     
@@ -1056,6 +1058,14 @@ def estimate_legacy_dict_bytes(
 _TREE_BUILD_METERS: List[Any] = []
 
 
+def _meter_remaining(charge: Any) -> Optional[int]:
+    """`charge`（予算の bound method）の持ち主の残り（分からなければ `None`）。"""
+
+    owner = getattr(charge, "__self__", None)
+    remaining = getattr(owner, "remaining", None)
+    return remaining() if callable(remaining) else None
+
+
 class _ChargeOnlyBudget:
     """walker へ渡す予算の代わり（数えた byte を `charge` へ流すだけ。上限は `charge` が持つ）。"""
 
@@ -1068,7 +1078,7 @@ class _ChargeOnlyBudget:
         self._charge(size)
 
     def remaining(self) -> Optional[int]:
-        return None
+        return _meter_remaining(self._charge)
 
     def tree(self, leaf: Any, *, build: bool) -> Any:
         from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY

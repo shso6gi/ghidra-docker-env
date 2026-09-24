@@ -62,7 +62,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     exception_text,
     plain_scalar,
     is_json_record,
-    object_identity_token,
+    value_token,
 )
 
 from scripts.function_tracer_pcode.checker.unknown_reason import (
@@ -139,9 +139,9 @@ def freeze_identity(value: Any) -> Any:
 
     Issue #22 PR-22-D: 組み込みの振る舞いの容器だけを辿り、葉は組み込みで書ける値（文字列・
     scalar・組み込みのままの enum）だけをそのまま残す。それ以外の葉（上書きした `__hash__` /
-    `__repr__` を持ち得る live な object）は object の identity の印にする（`object_identity_token`。
-    旧実装の既定の `hash` と同じく object ごとに区別し、集計は印を hash・`repr` するだけで object の
-    code を呼ばない）。JSON から読んだ値（reporting）は常に組み込みの値なので変わらない。
+    `__repr__` を持ち得る live な object）は値で比べてよい決定的な印にする（`value_token`: enum は
+    名前、dataclass は field）。field も持たない object だけが identity の印（旧実装の既定の `repr`
+    と同じく object ごとに区別する）。JSON から読んだ値（reporting）は常に組み込みの値なので変わらない。
     """
     mapping = builtin_mapping(value)
     if mapping is not None:
@@ -151,11 +151,9 @@ def freeze_identity(value: Any) -> Any:
         )
     if builtin_sequence(value):
         return tuple(freeze_identity(item) for item in value)
-    ok, view = builtin_view(value)
-    if ok:
-        # scalar の subclass（JPype の `JInt` など）は基底型の値（同じ `str` / `hash` / `==`）
-        return view
-    return object_identity_token(value)
+    # scalar の subclass（JPype の `JInt` など）は基底型の値、enum は名前、dataclass は field の印。
+    # それ以外の live な object だけが identity の印（`value_token`）
+    return value_token(value)
 
 
 def identity_tuple(value: Any) -> Tuple[Any, ...]:
@@ -756,7 +754,7 @@ def build_reason_view(records: Sequence[UnknownReasonRecord]) -> Dict[str, Any]:
         _inc(record_multiset, global_reason_tuple_from_record(
             record, UnknownCountKind.REASON_RECORD.value
         ))
-        for action in build_unknown_recovery_actions((record,)):
+        for action in build_unknown_recovery_actions((record,), work=_diagnostic_work()):
             _inc(action_multiset, global_reason_tuple_from_action(action))
 
     for record in primary:
@@ -767,7 +765,7 @@ def build_reason_view(records: Sequence[UnknownReasonRecord]) -> Dict[str, Any]:
         _inc(by_reason, record.reason_id)
         _inc(by_decision_effect, record.decision_effect)
         _inc(by_reason_scope, record.reason_scope)
-        actions = build_unknown_recovery_actions((record,))
+        actions = build_unknown_recovery_actions((record,), work=_diagnostic_work())
         if is_proof_backlog(record, actions):
             _inc(backlog_by_reason, record.reason_id)
             for action in actions:
@@ -1218,6 +1216,14 @@ def _plain_reason_payload(record: Mapping[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _diagnostic_work() -> Any:
+    """集計が作る action の作業量（診断の直列化の作業量の中なら、それ。無ければ数えない）。"""
+
+    from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
+
+    return active_serialization_work()
+
+
 def _as_mapping(value: Any) -> Dict[str, Any]:
     # 組み込みの振る舞いの mapping と json record（`to_dict()` は `materialize` が作業量の中で
     # 作る）だけを読む。それ以外の object の `to_dict()`（任意の producer）は呼ばない
@@ -1438,7 +1444,7 @@ def _build_root_causes(
             object_target_key=record.get("object_target_key"),
             identity_scope=resolution.identity_scope,
             canonical_cause_key=resolution.canonical_cause_key,
-            recovery_actions=build_unknown_recovery_actions((coerced,)),
+            recovery_actions=build_unknown_recovery_actions((coerced,), work=_diagnostic_work()),
         )
         for name in proofs.diagnostics:
             _bump(diagnostics, name)

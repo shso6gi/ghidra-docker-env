@@ -282,6 +282,10 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
             _push_raw_container(actions, item, work, in_set=sink.in_set)
             active.add(identity)
             continue
+        if inspect.getattr_static(type(item), "to_authority_dict", None) is not None:
+            # authority の値は `to_authority_dict()`（producer）の形で digest される: その形を作らずに
+            # 同じ digest は求められない（field を辿ると別の digest を `canonical_sha256` と名乗る）
+            raise TypeError(f"{type(item).__name__} has no bounded canonical form")
         if (is_dataclass(item) and not isinstance(item, type)) or (type(item) in _MAPPING_TYPES and builtin_mapping(item) is not None):
             pairs = _pairs(item, work)
             active.add(identity)

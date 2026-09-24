@@ -33,7 +33,8 @@ def builtin_mapping(item: Any) -> Optional[Mapping]:
             return None
         return item
     for base in _BUILTIN_DICTS:
-        if isinstance(item, base):
+        # `isinstance` は上書きした `__class__` を読む: 型そのものから判定する
+        if issubclass(kind, base):
             if kind.items is base.items and kind.__iter__ is base.__iter__ and kind.__len__ is base.__len__:
                 return item
             return None
@@ -45,7 +46,7 @@ def builtin_sequence(item: Any) -> bool:
 
     kind = type(item)
     for base in (tuple, list):
-        if isinstance(item, base):
+        if issubclass(kind, base):
             return (
                 kind.__iter__ is base.__iter__
                 and kind.__len__ is base.__len__
@@ -59,7 +60,7 @@ def builtin_set(item: Any) -> bool:
 
     kind = type(item)
     for base in (frozenset, set):
-        if isinstance(item, base):
+        if issubclass(kind, base):
             return kind.__iter__ is base.__iter__ and kind.__len__ is base.__len__
     return False
 

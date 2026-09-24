@@ -532,7 +532,7 @@ def test_the_premise_byte_bound_refuses_long_binary_labels():
 
 
 def test_a_receipt_outside_its_contract_is_neither_issued_nor_valid(monkeypatch):
-    """receipt の owner が上限を強制する（lane を通らない呼び出しも、上限の外の receipt を作れない）。"""
+    """receipt の owner が発行時に上限を強制する（lane を通らない呼び出しも、上限の外の receipt を作れない）。"""
     from scripts.function_tracer_pcode.authority.decision import conditional
 
     projection = _projection()
@@ -547,8 +547,8 @@ def test_a_receipt_outside_its_contract_is_neither_issued_nor_valid(monkeypatch)
     monkeypatch.setattr(conditional, "MAX_ASSUMPTION_PREMISES", 1)
     with pytest.raises(ValueError, match="exceeds its contract"):
         finalize_conditional_decision(authority())
-    with pytest.raises(ValueError, match="exceeds its contract"):
-        receipt.validate()
+    # 検証は構造だけ: 契約より前に作った receipt（永続化した結果の読み手）は拒まない
+    receipt.validate()
 
 
 @pytest.mark.parametrize(

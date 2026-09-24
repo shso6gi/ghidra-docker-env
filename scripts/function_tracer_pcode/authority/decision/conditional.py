@@ -243,10 +243,6 @@ class ConditionalDecisionReceipt:
             raise ValueError("conditional decision assumption set is not canonical")
         if authority_digest(self.assumption_set) != self.assumption_set_digest:
             raise ValueError("conditional decision assumption set digest mismatch")
-        # receipt の契約（表現の上限）の外の集合は receipt にならない（Issue #22 PR-22-D）
-        over_bound = assumption_set_receipt_bound_violation(self.assumption_set)
-        if over_bound is not None:
-            raise ValueError(f"conditional decision receipt exceeds its contract: {over_bound}")
 
     @classmethod
     def from_persisted(
@@ -349,7 +345,7 @@ def assumption_set_payload(premises: Iterable[AssumptionPremise]) -> list:
 #: `PREMISE_BINARY_LABEL_MAX_CHARS` 字・最悪の escape にした premise = 10,080 B — を 64 件・1 KiB の
 #: 単位へ切り上げた値。見積もりは `tests/unit/test_issue20_prb3_conditional_lane.py` が catalog から
 #: 求め、上限を超えると落ちる（catalog が育ったら上限と headroom を決め直す）。上限を超える集合は
-#: receipt にしない（lane は fail closed、発行・検証も拒む）。
+#: receipt にしない（lane は fail closed、発行する側も拒む。検証は構造だけ）。
 MAX_ASSUMPTION_PREMISES = 576
 ASSUMPTION_PREMISE_MAX_BYTES = 10_240
 #: 見積もりに使う binary 由来の名前（library 名・external の名前）1 つの文字数（receipt の契約の
@@ -502,7 +498,8 @@ def finalize_conditional_decision(
     """
     over_bound = assumption_set_receipt_bound_violation(tuple(authority.assumption_set))
     if over_bound is not None:
-        # receipt の契約の外の集合は発行しない（lane は発行の前に確かめて fail closed にする）
+        # receipt の契約の外の集合は発行しない（lane は発行の前に確かめて fail closed にする）。
+        # 検証（`validate`）は構造だけを見る: 契約より前に永続化した receipt の読み手を止めない
         raise ValueError(f"conditional decision receipt exceeds its contract: {over_bound}")
     projection = authority.lifecycle_projection
     unconditional = authority.unconditional_decision
