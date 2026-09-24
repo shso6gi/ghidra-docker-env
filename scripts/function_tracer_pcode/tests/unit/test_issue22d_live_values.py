@@ -233,7 +233,7 @@ def test_the_cause_aggregate_never_renders_a_live_trace_leaf():
     from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
 
     reasons = [
-        replace(make_unknown_reason("unknown", stage="P0_BASE", object_target_key=("k", index)), evidence_refs=(_Heavy(),))
+        replace(make_unknown_reason("unknown", stage="P0_BASE", object_target_key=("k", _Heavy())), pair_or_case=(_Heavy(),))
         for index in range(20)
     ]
     _Heavy.calls = 0
@@ -246,6 +246,67 @@ def test_the_cause_aggregate_never_renders_a_live_trace_leaf():
         built = build_trace_cause_evidence(result, binary_identities=("L", "R"))
     assert _Heavy.calls == 0
     assert "error" not in built
+
+
+def test_root_cause_grouping_never_renders_live_evidence_or_units():
+    """root cause に集まる record（typed cause を持つ）の証拠と単位の live な値も、描画も hash もしない。"""
+
+    from scripts.function_tracer_pcode.checker.cause_aggregate import build_trace_cause_evidence
+    from scripts.function_tracer_pcode.checker.debug_trace import DebugTrace
+    from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+    from scripts.function_tracer_pcode.tests.unit.test_issue128_cause_aggregate import (
+        _attempt,
+        _reason,
+        _unary_cause,
+    )
+
+    # `pair_or_case` は live な値のまま record に残る（参照の列は構築時に文字列になる）
+    reasons = [
+        replace(
+            _reason("summary_effect_unmodeled", cause=_unary_cause(f"site{index}"), target=f"t{index}"),
+            pair_or_case=(_Heavy(), _Heavy()),
+        )
+        for index in range(5)
+    ]
+    result = SimpleNamespace(debug_trace=DebugTrace(attempts=[_attempt(1, "pairwise", reasons)]))
+    _Heavy.calls = _Heavy.hashes = 0
+    with serialization_scope(site="probe", target_parts=("p",), terminal=False, max_bytes=1 << 22, enabled=True):
+        built = build_trace_cause_evidence(result, binary_identities=("L", "R"))
+    assert built.get("root_causes"), built
+    assert _Heavy.calls == 0 and _Heavy.hashes == 0
+
+
+def test_a_record_cannot_hold_live_evidence_refs():
+    """参照の列の型の契約は record が持つ（`replace` で live な値を入れられない）。"""
+
+    record = make_unknown_reason("unknown", stage="s", evidence_refs=("ref",))
+    with pytest.raises(TypeError):
+        replace(record, evidence_refs=(_Heavy(),))
+    assert _Heavy.calls == 0
+    # 有界化した後の列（有界な証拠・marker）は組み込みで書ける値
+    finitized = finitize_unknown_reason_record(
+        replace(record, evidence_refs=tuple(f"r{index}" for index in range(10_000))), work=JsonBudget(1 << 20),
+    )
+    assert len(finitized.evidence_refs) <= 65
+
+
+def test_an_enum_that_overrides_value_is_not_asked_for_it():
+    import enum
+
+    asked = []
+
+    class _Tricky(enum.Enum):
+        A = "a"
+
+        @property
+        def value(self):  # noqa: D401 - 上書きした property（producer）
+            asked.append(1)
+            return "x" * 1_000_000
+
+    fingerprint = canonical_fingerprint((_Tricky.A,), work=JsonBudget(1 << 20))
+    assert fingerprint == canonical_fingerprint(("a",), work=JsonBudget(1 << 20))
+    RESULT_JSON_POLICY.measure((_Tricky.A,), mode=LEGACY, max_bytes=1 << 20)
+    assert asked == []
 
 
 def test_a_truncation_scope_key_never_renders_its_live_key():

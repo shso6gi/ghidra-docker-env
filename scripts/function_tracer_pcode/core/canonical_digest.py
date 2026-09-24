@@ -234,7 +234,8 @@ def _normalize(item: Any, work: Any) -> Any:
             return item
         if isinstance(item, Enum):
             work.charge(1)
-            raw = item.value
+            # enum の値は組み込みの保存場所から読む（`value` を上書きした property は producer）
+            raw = object.__getattribute__(item, "_value_")
             if raw is None or isinstance(raw, (bool, int, float, str)):
                 return None if raw is None else _exact_primitive(raw)
             return _Raw(raw)

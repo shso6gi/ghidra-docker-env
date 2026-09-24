@@ -2137,7 +2137,7 @@ class _Walk:
         """JSON 型でない葉（旧 `to_dict` がそのまま置いた値）: 型名や enum の値で数える。"""
 
         if isinstance(item, Enum):
-            raw_value = item.value
+            raw_value = object.__getattribute__(item, "_value_")
             label = raw_value if isinstance(raw_value, str) else type(item).__qualname__
         else:
             label = type(item).__qualname__

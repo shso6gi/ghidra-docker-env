@@ -277,6 +277,15 @@ class UnknownReasonRecord:
     target_regression: Optional[str] = None
     detail: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        # 参照の列は組み込みで書ける値だけ（構築は `_coerce_evidence_refs` が文字列にし、有界化は
+        # 有界な証拠・marker に置き換える）。`replace` で live な値を入れた record は作れない:
+        # 出力・集計はこの列を組み込みの `str` で読む（live な値の `__str__` を呼ばない）
+        from scripts.function_tracer_pcode.core.json_encoding import renders_with_builtins
+
+        if not renders_with_builtins(tuple(self.evidence_refs)):
+            raise TypeError("UnknownReasonRecord.evidence_refs holds values that are not plain")
+
     def json_items(self):
         return row_items(UNKNOWN_REASON_ROW, self, identity=_evidence_identity(self))
 
