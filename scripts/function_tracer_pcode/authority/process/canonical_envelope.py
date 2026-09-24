@@ -17,7 +17,7 @@ snapshot と分類器）も、ここの関数だけで envelope を作り・検�
 それを公開する RESOLVED projection の field も、ここで envelope と E の rc
 から決定的に作る。supervisor と分類器は同じ関数の結果を比べる。
 
-この module は ``contracts`` しか import しない（store・分類器・process の
+この module は ``contracts`` と ``store_layout`` しか import しない（store・分類器・process の
 起動に依存しない）。bundle の中身の検証は ``validate_bundle`` として受け取る。
 """
 
@@ -33,9 +33,8 @@ from scripts.function_tracer_pcode.authority.contracts import (
     Outcome,
     authority_digest,
 )
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 
-RESULT_ENVELOPE_FILE = "canonical-result-envelope.json"
-CANONICAL_RECEIPT_FILENAME = "canonical-resolved-receipt.json"
 ENVELOPE_SCHEMA = "canonical-result-envelope-v1"
 _BODY_KEYS = frozenset({
     "schema", "canonical_result_payload", "canonical_result_bundle_digest",
@@ -170,7 +169,7 @@ def resolved_projection(
 
     validated = envelope.validated
     identity = validated["execution_identity"]
-    occurrence = envelope.bundle.get("result_entry_occurrence_receipt") or {}
+    occurrence = envelope.bundle["result_entry_occurrence_receipt"]
     semantic = envelope.bundle["canonical_semantic_result_projection"]
     kind = type(receipt).__name__
     return {
@@ -182,7 +181,7 @@ def resolved_projection(
         "canonical_outcome": envelope.outcome.value,
         "decision_receipt_digest": validated["decision_receipt_digest"],
         "result_occurrence_id": identity["result_occurrence_id"],
-        "result_entry_occurrence_receipt_digest": occurrence.get("receipt_digest"),
+        "result_entry_occurrence_receipt_digest": occurrence["receipt_digest"],
         "execution_identity_digest": identity["execution_identity_digest"],
         "stream_id": identity["stream_id"],
         "source_snapshot_fingerprint": identity["source_snapshot_fingerprint"],

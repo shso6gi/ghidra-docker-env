@@ -1,7 +1,8 @@
 """Issue #165: store の flock の中で終端処理を 1 手進める（durable 操作の表）。
 
-``TerminalTransaction`` は ``DurableCheckpointStore.terminal_transaction`` の中で
-だけ作られ、同じ flock の中で次の順に使う:
+``TerminalTransaction`` は ``open_transaction``（owner の supervisor として store の
+flock を 1 回取る ``DurableCheckpointStore.owned_lock``）の中でだけ作られ、同じ
+flock の中で次の順に使う:
 
 1. ``snapshot()``: store を読み直す（``terminal_snapshot``）。
 2. 呼び出し側（``terminal_driver``）が ``next_step`` で 1 手を決める。
@@ -20,6 +21,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Optional
 
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.process import checkpoint_archive as archive
 from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
     SUPERVISOR_EXIT_ERROR_KIND,
@@ -29,7 +31,6 @@ from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary impor
 from scripts.function_tracer_pcode.authority.process import terminal_evidence as evidence
 from scripts.function_tracer_pcode.authority.process import terminal_recovery as recovery
 from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
-    CANONICAL_RECEIPT_FILENAME,
     CanonicalEnvelope,
     canonical_resolved_receipt,
 )
@@ -156,7 +157,7 @@ def _issue_canonical_resolved(
         child_returncode=context.child_exit.payload["child_returncode"],
     )
     store._write_json_locked(
-        store.directory / CANONICAL_RECEIPT_FILENAME,
+        store.directory / layout.CANONICAL_RESOLVED_RECEIPT,
         {name: getattr(receipt, name) for name in receipt.__dataclass_fields__},
     )
 
@@ -186,7 +187,7 @@ def _begin_archive(store: Any, step: recovery.Step, context: SnapshotContext) ->
     )
     manifest = store.factory.issue_terminal_evidence(evidence.ARCHIVE_MANIFEST_KIND, payload)
     store._atomic_write(
-        store.directory / evidence.ARCHIVE_INTENT_FILENAME,
+        store.directory / layout.ARCHIVE_INTENT,
         store._bytes(manifest), identical_ok=True,
     )
 

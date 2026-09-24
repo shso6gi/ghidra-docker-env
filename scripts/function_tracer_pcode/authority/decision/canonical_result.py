@@ -12,6 +12,7 @@ import sys
 import tempfile
 from typing import Any, Mapping
 
+from scripts.function_tracer_pcode.authority.process import checkpoint_vocabulary as vocabulary
 from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.codecs import StrictV2JsonCodec
 from scripts.function_tracer_pcode.authority.contracts import (
@@ -22,7 +23,6 @@ from scripts.function_tracer_pcode.authority.contracts import (
 from scripts.function_tracer_pcode.authority.decision.decision import DecisiveProofKind
 from scripts.function_tracer_pcode.authority.decision.pair_status_authority import seal_pair_status
 from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
-    RESULT_ENVELOPE_FILE,
     CanonicalEnvelope,
     seal_envelope,
 )
@@ -38,9 +38,9 @@ from scripts.function_tracer_pcode.authority.process.terminal_driver import (
     inspect as inspect_terminal,
 )
 from scripts.function_tracer_pcode.authority.process.terminal_projection import (
+    TERMINAL_STATUSES,
     terminal_projection,
 )
-from scripts.function_tracer_pcode.authority.process.terminal_recovery import StepKind
 from scripts.function_tracer_pcode.authority.process.terminal_transaction import (
     TerminalAuthority,
 )
@@ -953,7 +953,7 @@ def persist_canonical_result_envelope(result_payload: Mapping[str, Any]) -> Path
     envelope = seal_envelope(projected_payload)
     directory = Path(root) / nonce
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / RESULT_ENVELOPE_FILE
+    path = directory / layout.RESULT_ENVELOPE
     descriptor, temporary = tempfile.mkstemp(prefix=".canonical-result-", dir=directory)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
@@ -1081,13 +1081,6 @@ def conditional_pair_status_projection(
     }
 
 
-_ADOPT_STEP_BY_STATUS = {
-    "RESOLVED": StepKind.ADOPT_RESOLVED,
-    "TIMEOUT": StepKind.ADOPT_TIMEOUT,
-    "ERROR": StepKind.ADOPT_ERROR,
-}
-
-
 def _adopted_terminal(store: Any, status: Any) -> TerminalAuthority:
     """store が ``status`` の終端を採用する状態なら、その authority を返す（Issue #165）。
 
@@ -1096,21 +1089,21 @@ def _adopted_terminal(store: Any, status: Any) -> TerminalAuthority:
     mode は推測せず、E に記録された supervisor の mode で読む。
     """
 
-    expected = _ADOPT_STEP_BY_STATUS.get(status)
-    if expected is None:
+    if status not in TERMINAL_STATUSES:
         raise ValueError(
             "supervisor projection is not a terminal authority: "
             f"status={status!r}"
         )
     inspection = inspect_terminal(store, mode=None, process_alive=process_is_alive)
-    step = inspection.step
-    if step.kind is not expected or inspection.authority is None:
+    authority = inspection.authority
+    if authority is None or authority.status != status:
+        step = inspection.step
         raise ValueError(
             f"{status} projection is not the durable terminal authority: "
             f"{step.kind.value} {getattr(step.invalid_code, 'value', None)} "
             f"{step.detail}"
         )
-    return inspection.authority
+    return authority
 
 
 def _require_logged_result(log_path: Path, envelope: CanonicalEnvelope) -> None:
@@ -1162,7 +1155,7 @@ def classify_pair_status(
         (store.directory / layout.LAUNCH).read_text(encoding="utf-8")
     ))
     if (
-        launch.receipt_kind != "SupervisorLaunchReceipt"
+        launch.receipt_kind != vocabulary.LAUNCH_RECEIPT_KIND
         or launch.payload["execution_nonce"] != execution_nonce
     ):
         raise ValueError("durable launch authority is invalid")

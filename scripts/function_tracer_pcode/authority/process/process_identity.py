@@ -36,8 +36,9 @@ def read_process_start_token(pid: int, *, proc_root: Path = _PROC) -> str:
 def process_is_alive(pid: int, start_token: str) -> Optional[bool]:
     """PID + start token の process がいま動いているか（zombie は終了扱い）。
 
-    start token が読めない・一致しないなら、その process はもう居ない。
-    ``/proc`` 自体が読めないときだけ None（分からない）。
+    start token が読めない・一致しないなら、その process はもう居ない（False）。
+    start token は一致したのに、続けて読む ``stat`` が読めなかったときだけ
+    None（分からない。その間に終わった可能性がある）。
     """
 
     try:

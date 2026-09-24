@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.authority.contracts import (
     BlockerEligibilityBaseRow,
@@ -447,9 +448,6 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
         persist_canonical_result_envelope,
         validate_canonical_result_finalization_bundle,
     )
-    from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
-        RESULT_ENVELOPE_FILE,
-    )
 
     class BoxedInt(int):
         pass
@@ -499,7 +497,7 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
     monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_SUPERVISOR_ROOT", str(tmp_path))
     monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_EXECUTION_NONCE", "eq-bundle")
     path = persist_canonical_result_envelope(payload)
-    assert path == tmp_path / "eq-bundle" / RESULT_ENVELOPE_FILE
+    assert path == tmp_path / "eq-bundle" / layout.RESULT_ENVELOPE
     envelope = json.loads(path.read_text(encoding="utf-8"))
     persisted = envelope["canonical_result_payload"]
     persisted_bundle = persisted["canonical_result_finalization_bundle"]

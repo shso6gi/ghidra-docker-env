@@ -263,9 +263,17 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
         "fcntl", "subprocess", "signal", "json",
         "scripts.function_tracer_pcode.authority",
     ),
+    # envelope の owner は contracts と store_layout（file 名）だけに依存する。
     "authority/process/canonical_envelope.py": (
         "os", "fcntl", "subprocess", "signal", "pathlib",
-        "scripts.function_tracer_pcode.authority.decision", "scripts.function_tracer_pcode.authority.process", "scripts.function_tracer_pcode.authority.lifecycle",
+        "scripts.function_tracer_pcode.authority.decision", "scripts.function_tracer_pcode.authority.lifecycle",
+        "scripts.function_tracer_pcode.authority.process.supervisor",
+        "scripts.function_tracer_pcode.authority.process.supervisor_command",
+        "scripts.function_tracer_pcode.authority.process.terminal_recovery",
+        "scripts.function_tracer_pcode.authority.process.terminal_snapshot",
+        "scripts.function_tracer_pcode.authority.process.terminal_transaction",
+        "scripts.function_tracer_pcode.authority.process.terminal_driver",
+        "scripts.function_tracer_pcode.authority.process.checkpoint_archive",
     ),
     # 復旧の判断は純関数（store を読む・書く・process を触る、のどれもしない）。
     "authority/process/terminal_recovery.py": (

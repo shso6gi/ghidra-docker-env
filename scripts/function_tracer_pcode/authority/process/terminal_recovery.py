@@ -230,6 +230,8 @@ class InvalidCode(str, Enum):
     CANONICAL_CHILD_RESULT_INVALID = "CANONICAL_CHILD_RESULT_INVALID"
     ACTIVE_EXIT_STAGE_UNSEALED = "ACTIVE_EXIT_STAGE_UNSEALED"
     DURABLE_STATE_INCOMPLETE = "DURABLE_STATE_INCOMPLETE"
+    #: driver: progress 操作が durable state を変えない / 既に通った state へ戻る。
+    NO_PROGRESS = "NO_PROGRESS"
 
 
 @dataclass(frozen=True)

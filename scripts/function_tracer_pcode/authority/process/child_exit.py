@@ -22,11 +22,14 @@ disposition の形:
 
 from __future__ import annotations
 
+from enum import Enum
 import re
 
 #: rc の取り方。``LIVE_PROCESS_WAIT`` は wait / poll の返り値そのもの。
 LIVE_PROCESS_WAIT = "LIVE_PROCESS_WAIT"
-#: restart した supervisor は child の終了を観測していない（rc を作らない）。
+#: #165 より前の restart が書いた、rc の無い観測（既存の pair-status と log を
+#: 読むために語彙に残す。#165 の後の supervisor は作らない: restart も E の rc を使い、
+#: E が無ければ終端にせず INVALID にする）。
 DURABLE_RESTART_NO_CHILD_STATUS = "DURABLE_RESTART_NO_CHILD_STATUS"
 OBSERVATION_KINDS = frozenset({LIVE_PROCESS_WAIT, DURABLE_RESTART_NO_CHILD_STATUS})
 
@@ -38,30 +41,61 @@ SIGNAL_SENT = "sent"
 SIGNAL_PROCESS_ABSENT = "process_absent"
 SIGNAL_RESULTS = frozenset({SIGNAL_SENT, SIGNAL_PROCESS_ABSENT})
 
-_SIGNAL_RETURNCODES = {
-    "SIGTERM_AFTER_DEADLINE": -15,
-    "SIGKILL_AFTER_DEADLINE": -9,
+
+class DeadlinePhase(str, Enum):
+    """deadline 後の終了処理（SIGTERM -> grace -> SIGKILL）のどこで child が終わったか。"""
+
+    BEFORE_SIGTERM = "BEFORE_SIGTERM"
+    AFTER_SIGTERM = "AFTER_SIGTERM"
+    BEFORE_SIGKILL = "BEFORE_SIGKILL"
+    AFTER_SIGKILL = "AFTER_SIGKILL"
+
+
+SIGTERM_AFTER_DEADLINE = "SIGTERM_AFTER_DEADLINE"
+SIGKILL_AFTER_DEADLINE = "SIGKILL_AFTER_DEADLINE"
+#: signal そのもので終わったときの disposition と、そのときの rc（Linux の値）。
+_SIGNAL_RETURNCODES = {SIGTERM_AFTER_DEADLINE: -15, SIGKILL_AFTER_DEADLINE: -9}
+#: 送った直後の phase -> その signal で終わったときの disposition。
+_SIGNAL_DEATH = {
+    DeadlinePhase.AFTER_SIGTERM: SIGTERM_AFTER_DEADLINE,
+    DeadlinePhase.AFTER_SIGKILL: SIGKILL_AFTER_DEADLINE,
 }
 _CODE = r"-?[0-9]+"
 _NATURAL = re.compile(rf"\AEXIT_CODE_({_CODE})\Z")
 _DEADLINE_EXIT = re.compile(
-    rf"\AEXITED_({_CODE})(?:_(BEFORE_SIGTERM|AFTER_SIGTERM|BEFORE_SIGKILL|AFTER_SIGKILL))?\Z"
+    rf"\AEXITED_({_CODE})(?:_({'|'.join(phase.value for phase in DeadlinePhase)}))?\Z"
 )
 
 _TERM_SENT = (SIGTERM, SIGNAL_SENT)
 #: deadline 後の disposition -> それを返しうる ``killpg`` の結果の列
-#: （``_terminate_exact_process_group`` の枝ごと。SIGTERM -> grace -> SIGKILL）。
+#: （終了処理の枝ごと）。key の None は「signal を送る前に終わっていた」。
 _DEADLINE_SIGNAL_ACTIONS = {
-    "SIGTERM_AFTER_DEADLINE": frozenset({(_TERM_SENT,)}),
-    "SIGKILL_AFTER_DEADLINE": frozenset({(_TERM_SENT, (SIGKILL, SIGNAL_SENT))}),
+    SIGTERM_AFTER_DEADLINE: frozenset({(_TERM_SENT,)}),
+    SIGKILL_AFTER_DEADLINE: frozenset({(_TERM_SENT, (SIGKILL, SIGNAL_SENT))}),
     None: frozenset({()}),
-    "BEFORE_SIGTERM": frozenset({((SIGTERM, SIGNAL_PROCESS_ABSENT),)}),
-    "AFTER_SIGTERM": frozenset({(_TERM_SENT,)}),
-    "BEFORE_SIGKILL": frozenset({
+    DeadlinePhase.BEFORE_SIGTERM.value: frozenset({((SIGTERM, SIGNAL_PROCESS_ABSENT),)}),
+    DeadlinePhase.AFTER_SIGTERM.value: frozenset({(_TERM_SENT,)}),
+    DeadlinePhase.BEFORE_SIGKILL.value: frozenset({
         (_TERM_SENT,), (_TERM_SENT, (SIGKILL, SIGNAL_PROCESS_ABSENT)),
     }),
-    "AFTER_SIGKILL": frozenset({(_TERM_SENT, (SIGKILL, SIGNAL_SENT))}),
+    DeadlinePhase.AFTER_SIGKILL.value: frozenset({(_TERM_SENT, (SIGKILL, SIGNAL_SENT))}),
 }
+
+
+def deadline_exit_disposition(returncode: int, phase: "DeadlinePhase | None") -> str:
+    """deadline 後の終了処理で観測した rc の disposition（supervisor が作る唯一の入口）。
+
+    送った signal の直後に、その signal の rc で終わったなら ``*_AFTER_DEADLINE``。
+    それ以外は ``EXITED_<rc>[_<phase>]``（phase が None なら signal を送る前）。
+    """
+
+    if type(returncode) is not int:
+        raise ValueError("child return code must be an exact int")
+    signal_death = _SIGNAL_DEATH.get(phase)
+    if signal_death is not None and returncode == _SIGNAL_RETURNCODES[signal_death]:
+        return signal_death
+    suffix = "" if phase is None else f"_{phase.value}"
+    return f"EXITED_{returncode}{suffix}"
 
 
 def natural_exit_disposition(returncode: int) -> str:
@@ -119,8 +153,9 @@ def validate_durable_child_returncode_observation(
 ) -> None:
     """OS の rc を、署名された disposition と観測の種類に join する。
 
-    restart（``DURABLE_RESTART_NO_CHILD_STATUS``）は rc を作らない。live の観測は
-    exact int の rc が disposition の名指す rc と一致しなければならない。
+    ``DURABLE_RESTART_NO_CHILD_STATUS``（#165 より前の記録）は rc を持たない。
+    live の観測は exact int の rc が disposition の名指す rc と一致しなければ
+    ならない。
     """
 
     if type(child_exit_disposition) is not str or not child_exit_disposition:

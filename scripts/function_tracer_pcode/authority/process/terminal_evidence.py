@@ -36,7 +36,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
+from scripts.function_tracer_pcode.authority.process import checkpoint_vocabulary as vocabulary
 from scripts.function_tracer_pcode.authority.process import checkpoint_archive
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.process.child_exit import (
     LIVE_PROCESS_WAIT,
     SIGNAL_NAMES,
@@ -52,15 +54,12 @@ DEADLINE_RECEIPT_KIND = "SupervisorDeadlineReceipt"
 CHILD_EXIT_RECEIPT_KIND = "SupervisorChildExitReceipt"
 ARCHIVE_MANIFEST_KIND = "SupervisorArchiveManifestReceipt"
 
-DEADLINE_FILENAME = "deadline.json"
-CHILD_EXIT_FILENAME = "child-exit.json"
-ARCHIVE_INTENT_FILENAME = "archive-intent.json"
 
 #: evidence kind -> store 直下の file 名（kind と file の対応はここだけで決める）。
 TERMINAL_EVIDENCE_FILES: Mapping[str, str] = {
-    DEADLINE_RECEIPT_KIND: DEADLINE_FILENAME,
-    CHILD_EXIT_RECEIPT_KIND: CHILD_EXIT_FILENAME,
-    ARCHIVE_MANIFEST_KIND: ARCHIVE_INTENT_FILENAME,
+    DEADLINE_RECEIPT_KIND: layout.DEADLINE,
+    CHILD_EXIT_RECEIPT_KIND: layout.CHILD_EXIT,
+    ARCHIVE_MANIFEST_KIND: layout.ARCHIVE_INTENT,
 }
 
 DEADLINE_SCHEMA = "supervisor-deadline-v1"
@@ -113,7 +112,7 @@ def _launch_identity(launch: Any) -> dict[str, Any]:
 
 
 def _require_launch_join(name: str, payload: Mapping[str, Any], launch: Any) -> None:
-    if launch.receipt_kind != "SupervisorLaunchReceipt":
+    if launch.receipt_kind != vocabulary.LAUNCH_RECEIPT_KIND:
         raise TerminalEvidenceInvalid(f"{name} requires an exact launch authority")
     for key, value in _launch_identity(launch).items():
         if payload.get(key) != value:

@@ -1,4 +1,4 @@
-"""durable checkpoint の state と、supervisor が封をする ERROR の種類・stage の語彙。
+"""durable checkpoint の state、共有する receipt kind、supervisor が封をする ERROR の種類・stage の語彙。
 
 語彙の owner はこの module だけ（Issue #165）。store（``supervisor``）・
 snapshot・復旧判断（``terminal_recovery``）・test はここから import する。
@@ -33,6 +33,12 @@ ALLOWED_TRANSITIONS = frozenset({
 
 #: timeout の chain にある state（claim した後）。
 TIMEOUT_STATES = frozenset({CheckpointState.TIMED_OUT_CLAIMED, CheckpointState.TIMED_OUT})
+
+
+#: store と終端の module が共有する receipt の kind（署名・schema は ``supervisor``）。
+LAUNCH_RECEIPT_KIND = "SupervisorLaunchReceipt"
+#: deadline の後に supervisor が作る ACTIVE checkpoint（worker の prefix が無いとき）。
+BOOTSTRAP_CHECKPOINT_KIND = "SupervisorBootstrapCheckpointReceipt"
 
 
 #: supervisor が自分で終端として封をする ERROR の種類（child の終了を

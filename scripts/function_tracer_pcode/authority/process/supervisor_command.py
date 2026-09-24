@@ -31,7 +31,6 @@ from scripts.function_tracer_pcode.authority.process.terminal_projection import 
     terminal_projection,
 )
 from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
-    RESULT_ENVELOPE_FILE,
     validate_canonical_envelope,
 )
 from scripts.function_tracer_pcode.authority.process import child_exit
@@ -376,7 +375,7 @@ class ProcessSupervisorCommand:
         （分類そのものは `reporting/timeout_hotspot_summary` が run 終了後に行う）。
         検証に失敗した場合も `validated: false` として残し、証拠の欠落と区別する。
         """
-        path = self.store.directory / RESULT_ENVELOPE_FILE
+        path = self.store.directory / layout.RESULT_ENVELOPE
         if not path.is_file():
             return None
         record: dict[str, Any] = {
@@ -479,12 +478,14 @@ class ProcessSupervisorCommand:
         signal 死を推定しない。
         """
         actions = [] if signals is None else signals
+        exited = child_exit.deadline_exit_disposition
+        phase = child_exit.DeadlinePhase
         if process.poll() is not None:
-            return f"EXITED_{process.returncode}"
+            return exited(process.returncode, None)
         if not self._same_process(process, start_token):
             raise ValueError("child PID/start-token identity changed before kill")
         if process.poll() is not None:
-            return f"EXITED_{process.returncode}"
+            return exited(process.returncode, None)
         first_signal_monotonic = time.monotonic()
         try:
             os.killpg(process.pid, signal.SIGTERM)
@@ -494,7 +495,7 @@ class ProcessSupervisorCommand:
             ))
             return_code = process.poll()
             if return_code is not None:
-                return f"EXITED_{return_code}_BEFORE_SIGTERM"
+                return exited(return_code, phase.BEFORE_SIGTERM)
             raise
         actions.append(terminal_evidence.SignalAction(
             child_exit.SIGTERM, child_exit.SIGNAL_SENT,
@@ -509,16 +510,12 @@ class ProcessSupervisorCommand:
                 pass
         try:
             process.wait(timeout=self.config.kill_grace_seconds)
-            return (
-                "SIGTERM_AFTER_DEADLINE"
-                if process.returncode == -signal.SIGTERM
-                else f"EXITED_{process.returncode}_AFTER_SIGTERM"
-            )
+            return exited(process.returncode, phase.AFTER_SIGTERM)
         except subprocess.TimeoutExpired:
             if not self._same_process(process, start_token):
                 raise ValueError("child PID/start-token identity changed before SIGKILL")
             if process.poll() is not None:
-                return f"EXITED_{process.returncode}_BEFORE_SIGKILL"
+                return exited(process.returncode, phase.BEFORE_SIGKILL)
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
@@ -527,17 +524,13 @@ class ProcessSupervisorCommand:
                 ))
                 return_code = process.poll()
                 if return_code is not None:
-                    return f"EXITED_{return_code}_BEFORE_SIGKILL"
+                    return exited(return_code, phase.BEFORE_SIGKILL)
                 raise
             actions.append(terminal_evidence.SignalAction(
                 child_exit.SIGKILL, child_exit.SIGNAL_SENT,
             ))
             process.wait()
-            return (
-                "SIGKILL_AFTER_DEADLINE"
-                if process.returncode == -signal.SIGKILL
-                else f"EXITED_{process.returncode}_AFTER_SIGKILL"
-            )
+            return exited(process.returncode, phase.AFTER_SIGKILL)
 
     def _cleanup_exact_process_group(
         self, process: subprocess.Popen[Any], start_token: Optional[str],

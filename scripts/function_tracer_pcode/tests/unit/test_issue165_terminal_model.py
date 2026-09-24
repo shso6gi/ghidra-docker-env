@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import pytest
 
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.process import terminal_recovery as tr
 from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import CheckpointState
 from scripts.function_tracer_pcode.tests.fixtures.issue165 import terminal_model as model
@@ -51,7 +52,7 @@ def test_the_reachable_set_covers_every_crash_window_the_plan_names(explored):
         and s.live.state == CheckpointState.RESOLVED.value and len(s.live.members) < 6
     )
     assert any_state(  # claimed durable / CAS 前
-        lambda s: "claimed.json" in s.timeout_members and s.live is not None
+        lambda s: layout.CLAIMED in s.timeout_members and s.live is not None
         and s.live.state == CheckpointState.ACTIVE.value
     )
     assert any_state(  # timeout bundle の部分書込み

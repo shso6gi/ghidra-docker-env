@@ -23,6 +23,13 @@ from scripts.function_tracer_pcode.authority.decision.conditional import (
     validate_conditional_decision_join,
 )
 from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
+from scripts.function_tracer_pcode.authority.process.process_identity import (
+    process_is_alive,
+)
+from scripts.function_tracer_pcode.authority.process.terminal_driver import (
+    inspect as inspect_terminal,
+)
+from scripts.function_tracer_pcode.authority.process.terminal_recovery import StepKind
 
 
 RETRY_FALLBACK_MATRIX: Mapping[Outcome, tuple[str, ...]] = {
@@ -213,13 +220,6 @@ def rematerialize_process_timeout_decision(
         PROCESS_DURABLE_RECOVERY_REGISTRY,
         ProcessSupervisorAuthorityFactory,
     )
-    from scripts.function_tracer_pcode.authority.process.process_identity import (
-        process_is_alive,
-    )
-    from scripts.function_tracer_pcode.authority.process.terminal_driver import inspect
-    from scripts.function_tracer_pcode.authority.process.terminal_recovery import (
-        StepKind,
-    )
 
     factory = ProcessSupervisorAuthorityFactory(
         supervisor_signing_key_id=supervisor_signing_key_id,
@@ -228,7 +228,7 @@ def rematerialize_process_timeout_decision(
         worker_signing_key=worker_signing_key_file.read_bytes(),
     )
     store = DurableCheckpointStore(checkpoint_root, factory, execution_nonce)
-    inspection = inspect(store, mode=None, process_alive=process_is_alive)
+    inspection = inspect_terminal(store, mode=None, process_alive=process_is_alive)
     step = inspection.step
     if step.kind is not StepKind.ADOPT_TIMEOUT or inspection.authority is None:
         raise ValueError(

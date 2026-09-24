@@ -28,6 +28,7 @@ import time
 
 import pytest
 
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.contracts import authority_digest
 from scripts.function_tracer_pcode.authority.process import terminal_evidence as te
 from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
@@ -63,9 +64,8 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
 )
 
 WORKER_CLOSED_MEMBERS = tuple(
-    name for name in CHAIN_MEMBER_NAMES if name != "recovery-resolution.json"
+    name for name in CHAIN_MEMBER_NAMES if name != layout.RECOVERY_RESOLUTION
 )
-ERROR_MEMBERS = model.ERROR_MEMBERS
 HARNESS_CRASH_RC = 86
 
 
@@ -93,8 +93,8 @@ def _store_json(case, name):
 
 
 def _evidence(case):
-    deadline = _store_json(case, te.DEADLINE_FILENAME)
-    child_exit = _store_json(case, te.CHILD_EXIT_FILENAME)
+    deadline = _store_json(case, layout.DEADLINE)
+    child_exit = _store_json(case, layout.CHILD_EXIT)
     return (
         None if deadline is None else deadline,
         None if child_exit is None else child_exit,
@@ -122,7 +122,7 @@ def _assert_terminal(run, expected):
     elif kind == "ERROR":
         assert projection["status"] == "ERROR"
         assert classified["canonical_outcome"] == "ERROR"
-        error = _store_json(run.case, "operational-error.json")
+        error = _store_json(run.case, layout.OPERATIONAL_ERROR)
         assert error["payload"]["deadline_stage"] == detail
     else:
         assert (run.exit_code, projection["status"]) == (0, "RESOLVED")
@@ -180,7 +180,7 @@ def _restart_unchanged(case, expected_code):
 
 
 def _history_directories(case):
-    root = case.store_directory / "checkpoint-history"
+    root = case.store_directory / layout.HISTORY_DIRECTORY
     return sorted(path for path in root.iterdir()) if root.is_dir() else []
 
 
@@ -191,16 +191,16 @@ def _history_directories(case):
 #: child が deadline の瞬間に止まっていた場所（worker の公開境界）と model の段階。
 CHECKPOINT_STAGES = {
     "none": ((Stop(),), (), "NONE"),
-    "active": ((Checkpoint(), Stop()), (stop_at(FileBoundary("state.json", 1)),), "ACTIVE"),
+    "active": ((Checkpoint(), Stop()), (stop_at(FileBoundary(layout.STATE, 1)),), "ACTIVE"),
     "active-continuation": (
-        (Checkpoint(), Stop()), (stop_at(FileBoundary("continuation.json")),), "ACTIVE_CONT",
+        (Checkpoint(), Stop()), (stop_at(FileBoundary(layout.CONTINUATION)),), "ACTIVE_CONT",
     ),
     # worker が ready.json を公開し state を READY へ替える前（worker の READY を採る）。
     "ready-before-cas": (
-        (Checkpoint(), Stop()), (stop_at(FileBoundary("ready.json")),), "ACTIVE_CONT",
+        (Checkpoint(), Stop()), (stop_at(FileBoundary(layout.READY)),), "ACTIVE_CONT",
     ),
     "ready": (
-        (Checkpoint(), Stop()), (stop_at(FileBoundary("state.json", 2)),), "COMPLETION_READY",
+        (Checkpoint(), Stop()), (stop_at(FileBoundary(layout.STATE, 2)),), "COMPLETION_READY",
     ),
     "resolved": ((Checkpoint(), Stop()), (), "RESOLVED"),
 }
@@ -235,25 +235,25 @@ def test_t01_deadline_and_exit_evidence_timeout_at_every_checkpoint_stage(tmp_pa
 # ---------------------------------------------------------------------------
 
 BOOTSTRAP_BOUNDARIES = (
-    FileBoundary("pending-active-transaction.json", side="before"),
-    FileBoundary("pending-active-transaction.json"),
+    FileBoundary(layout.PENDING_ACTIVE_TRANSACTION, side="before"),
+    FileBoundary(layout.PENDING_ACTIVE_TRANSACTION),
     *(FileBoundary(f"checkpoint-history/*/{name}") for name in WORKER_CLOSED_MEMBERS),
-    FileBoundary("checkpoint-prefix-stream.json"),
-    FileBoundary("checkpoint.json"),
-    FileBoundary("state.json", 1),
+    FileBoundary(layout.PREFIX_STREAM),
+    FileBoundary(layout.CHECKPOINT),
+    FileBoundary(layout.STATE, 1),
 )
 CLAIM_BOUNDARIES = (
-    FileBoundary("claimed.json", side="before"),
-    FileBoundary("claimed.json"),
-    FileBoundary("state.json", 2, side="before"),
-    FileBoundary("state.json", 2),
+    FileBoundary(layout.CLAIMED, side="before"),
+    FileBoundary(layout.CLAIMED),
+    FileBoundary(layout.STATE, 2, side="before"),
+    FileBoundary(layout.STATE, 2),
 )
 FINALIZE_BOUNDARIES = (
-    FileBoundary("timeout.json"),
-    FileBoundary("terminal-segment.json"),
-    FileBoundary("terminal-stream.json"),
-    FileBoundary("state.json", 3, side="before"),
-    FileBoundary("state.json", 3),
+    FileBoundary(layout.TIMEOUT),
+    FileBoundary(layout.TERMINAL_SEGMENT),
+    FileBoundary(layout.TERMINAL_STREAM),
+    FileBoundary(layout.STATE, 3, side="before"),
+    FileBoundary(layout.STATE, 3),
     ProjectionWrite(side="before"),
     ProjectionWrite(side="after"),
 )
@@ -268,9 +268,9 @@ def _deadline_case_after_exit(tmp_path):
     case = context.__enter__()
     first = run_supervisor(
         case, deadline=Deadline.AT_CHILD_STOP,
-        faults=(crash_at(FileBoundary(te.CHILD_EXIT_FILENAME)),),
+        faults=(crash_at(FileBoundary(layout.CHILD_EXIT)),),
     )
-    assert first.crashed and first.store.has(te.CHILD_EXIT_FILENAME)
+    assert first.crashed and first.store.has(layout.CHILD_EXIT)
     return context, case
 
 
@@ -318,12 +318,12 @@ def test_t03_a_different_durable_claim_is_rejected_not_overwritten(tmp_path):
 
     with supervisor_case(
         tmp_path, ChildScript((Checkpoint(), Stop()),
-                              faults=(stop_at(FileBoundary("state.json", 1)),)),
+                              faults=(stop_at(FileBoundary(layout.STATE, 1)),)),
         allow_child_exit_resolution=True,
     ) as case:
         first = run_supervisor(
             case, deadline=Deadline.AT_CHILD_STOP,
-            faults=(crash_at(FileBoundary("claimed.json", side="before")),),
+            faults=(crash_at(FileBoundary(layout.CLAIMED, side="before")),),
         )
         assert first.crashed
         store = _store(case)
@@ -334,7 +334,7 @@ def test_t03_a_different_durable_claim_is_rejected_not_overwritten(tmp_path):
             kill_disposition="SIGKILL_AFTER_DEADLINE",
             _capability=_TRANSITION_CAPABILITY_TOKEN,
         )
-        (case.store_directory / "claimed.json").write_bytes(store._bytes(other))
+        (case.store_directory / layout.CLAIMED).write_bytes(store._bytes(other))
         run = _restart_unchanged(case, "TERMINAL_AUTHORITY_CONFLICT")
         assert "claim disposition" in run.projection["error_detail"]
 
@@ -347,17 +347,17 @@ def test_t03_a_different_durable_claim_is_rejected_not_overwritten(tmp_path):
 NATURAL_EXITS = {
     "no-checkpoint": ((Exit(3),), (), "NONE", 3),
     "resolved": ((Checkpoint(), Exit(1)), (), "RESOLVED", 1),
-    "ready": ((Checkpoint(), Stop()), (crash_at(FileBoundary("state.json", 2)),),
+    "ready": ((Checkpoint(), Stop()), (crash_at(FileBoundary(layout.STATE, 2)),),
               "COMPLETION_READY", HARNESS_CRASH_RC),
     "active-continuation": ((Checkpoint(), Stop()),
-                            (crash_at(FileBoundary("continuation.json")),),
+                            (crash_at(FileBoundary(layout.CONTINUATION)),),
                             "ACTIVE_CONT", HARNESS_CRASH_RC),
-    "ready-before-cas": ((Checkpoint(), Stop()), (crash_at(FileBoundary("ready.json")),),
+    "ready-before-cas": ((Checkpoint(), Stop()), (crash_at(FileBoundary(layout.READY)),),
                          "ACTIVE_CONT", HARNESS_CRASH_RC),
-    "active": ((Checkpoint(), Stop()), (crash_at(FileBoundary("state.json", 1)),),
+    "active": ((Checkpoint(), Stop()), (crash_at(FileBoundary(layout.STATE, 1)),),
                "ACTIVE", HARNESS_CRASH_RC),
     "pending": ((Checkpoint(), Stop()),
-                (crash_at(FileBoundary("pending-active-transaction.json")),),
+                (crash_at(FileBoundary(layout.PENDING_ACTIVE_TRANSACTION)),),
                 "PENDING", HARNESS_CRASH_RC),
 }
 
@@ -377,7 +377,7 @@ def test_t05_t06_natural_exit_without_envelope(tmp_path, scenario, runner):
         assert child_exit["payload"]["child_returncode"] == rc
         assert child_exit["payload"]["child_exit_disposition"] == f"EXIT_CODE_{rc}"
         assert child_exit["payload"]["signal_actions"] == []
-        archive = _store_json(case, te.ARCHIVE_INTENT_FILENAME)
+        archive = _store_json(case, layout.ARCHIVE_INTENT)
         if expected == ("ERROR", ErrorStage.NON_DECOMPILATION.value):
             # 閉じた chain を A で固定して history へ移し、live に chain は残らない。
             assert archive is not None and archive["payload"]["error_stage"] == expected[1]
@@ -391,7 +391,7 @@ def test_t05_t06_natural_exit_without_envelope(tmp_path, scenario, runner):
             # ERROR にしない終わり方（BEFORE_CHECKPOINT の ERROR 以外）は A を作らない。
             assert archive is None
         if expected[0] == "INVALID":
-            assert not any(case.store_directory.joinpath(m).exists() for m in ERROR_MEMBERS)
+            assert not any(case.store_directory.joinpath(m).exists() for m in layout.ERROR_MEMBERS)
             assert run.projection["child_returncode"] == rc
 
 
@@ -400,16 +400,16 @@ def test_t05_t06_natural_exit_without_envelope(tmp_path, scenario, runner):
 # ---------------------------------------------------------------------------
 
 ARCHIVE_BOUNDARIES = (
-    FileBoundary(te.ARCHIVE_INTENT_FILENAME, side="before"),
-    FileBoundary(te.ARCHIVE_INTENT_FILENAME),
+    FileBoundary(layout.ARCHIVE_INTENT, side="before"),
+    FileBoundary(layout.ARCHIVE_INTENT),
     *(FileBoundary(f"checkpoint-history/*/{name}") for name in WORKER_CLOSED_MEMBERS),
-    *(FileBoundary(name) for name in ERROR_MEMBERS),
+    *(FileBoundary(name) for name in layout.ERROR_MEMBERS),
     ProjectionWrite(side="before"),
     ProjectionWrite(side="after"),
 )
 
 
-def _archive_case(tmp_path, *, checkpoints=1, crash=FileBoundary(te.CHILD_EXIT_FILENAME)):
+def _archive_case(tmp_path, *, checkpoints=1, crash=FileBoundary(layout.CHILD_EXIT)):
     context = supervisor_case(
         tmp_path, ChildScript(tuple(Checkpoint() for _ in range(checkpoints)) + (Exit(1),)),
     )
@@ -425,7 +425,7 @@ def test_t07_archive_and_error_recover_the_same_error_from_every_boundary(tmp_pa
         expected = _expected("natural", runner=False, phase="RESOLVED")
         control = _projection_from_every_boundary(case, ARCHIVE_BOUNDARIES, expected)
         assert control.projection["child_exit_disposition"] == "EXIT_CODE_1"
-        assert _store_json(case, "operational-error.json")["payload"]["deadline_stage"] == (
+        assert _store_json(case, layout.OPERATIONAL_ERROR)["payload"]["deadline_stage"] == (
             ErrorStage.NON_DECOMPILATION.value
         )
     finally:
@@ -433,16 +433,16 @@ def test_t07_archive_and_error_recover_the_same_error_from_every_boundary(tmp_pa
 
 
 def _tamper_history_member(case):
-    target = _history_directories(case)[0] / "checkpoint.json"
+    target = _history_directories(case)[0] / layout.CHECKPOINT
     target.write_bytes(target.read_bytes().replace(b'"', b"'", 1))
 
 
 def _delete_moved_member(case):
-    (_history_directories(case)[0] / "checkpoint-prefix-stream.json").unlink()
+    (_history_directories(case)[0] / layout.PREFIX_STREAM).unlink()
 
 
 def _live_copy_differs(case):
-    (case.store_directory / "checkpoint.json").write_text("{}", encoding="utf-8")
+    (case.store_directory / layout.CHECKPOINT).write_text("{}", encoding="utf-8")
 
 
 def _tamper_signed(name, field):
@@ -462,8 +462,8 @@ def _tamper_signed(name, field):
     (_tamper_history_member, "ARCHIVE_UNION_CONFLICT"),
     (_delete_moved_member, "ARCHIVE_UNION_CONFLICT"),
     (_live_copy_differs, "ARCHIVE_UNION_CONFLICT"),
-    (_tamper_signed(te.ARCHIVE_INTENT_FILENAME, "members"), "TERMINAL_EVIDENCE_INVALID"),
-    (_tamper_signed(te.CHILD_EXIT_FILENAME, "child_returncode"), "TERMINAL_EVIDENCE_INVALID"),
+    (_tamper_signed(layout.ARCHIVE_INTENT, "members"), "TERMINAL_EVIDENCE_INVALID"),
+    (_tamper_signed(layout.CHILD_EXIT, "child_returncode"), "TERMINAL_EVIDENCE_INVALID"),
 ), ids=("history-member", "both-sides-missing", "live-history-mismatch", "manifest", "exit"))
 def test_t08_a_tampered_archive_is_rejected_before_any_write(tmp_path, mutate, code):
     context, case = _archive_case(
@@ -503,13 +503,13 @@ def test_t09_a_new_live_chain_during_archive_stops_the_archive(tmp_path):
         store_dir = case.store_directory
         histories = {path.name: sorted(p.name for p in path.iterdir())
                      for path in _history_directories(case)}
-        archive = _store_json(case, te.ARCHIVE_INTENT_FILENAME)
+        archive = _store_json(case, layout.ARCHIVE_INTENT)
         c1 = next(
             path for path in _history_directories(case)
             if path.name != archive["payload"]["destination"].split("/")[-1]
         )
         # 移動済みの checkpoint.json の名前に、別の chain（c1）の checkpoint が現れる。
-        shutil.copy2(c1 / "checkpoint.json", store_dir / "checkpoint.json")
+        shutil.copy2(c1 / layout.CHECKPOINT, store_dir / layout.CHECKPOINT)
         _restart_unchanged(case, "ARCHIVE_UNION_CONFLICT")
         assert {path.name: sorted(p.name for p in path.iterdir())
                 for path in _history_directories(case)} == histories
@@ -542,7 +542,7 @@ def test_t10_deadline_only_restart_with_the_child_alive_is_invalid_and_does_not_
     with supervisor_case(tmp_path, ChildScript((Stop(),)), allow_child_exit_resolution=True) as case:
         first = run_supervisor(
             case, deadline=Deadline.AT_CHILD_STOP,
-            faults=(crash_at(FileBoundary(te.DEADLINE_FILENAME)),),
+            faults=(crash_at(FileBoundary(layout.DEADLINE)),),
         )
         assert first.crashed and worker_alive(first)
         run = _restart_unchanged(case, "DEADLINE_WITHOUT_EXIT_OBSERVATION")
@@ -550,14 +550,14 @@ def test_t10_deadline_only_restart_with_the_child_alive_is_invalid_and_does_not_
         assert run.projection["diagnostics"]["child_alive_at_decision"] is True
         assert run.projection["diagnostics"]["child_pid"] == first.child.pid
         assert worker_alive(first), "the restart must not kill or reap the orphan"
-        assert not run.store.has(te.CHILD_EXIT_FILENAME)
+        assert not run.store.has(layout.CHILD_EXIT)
 
 
 def test_t10_deadline_only_restart_with_the_child_dead_is_invalid(tmp_path):
     with supervisor_case(tmp_path, ChildScript((Stop(),)), allow_child_exit_resolution=True) as case:
         first = run_supervisor(
             case, deadline=Deadline.AT_CHILD_STOP,
-            faults=(crash_at(FileBoundary(te.CHILD_EXIT_FILENAME, side="before")),),
+            faults=(crash_at(FileBoundary(layout.CHILD_EXIT, side="before")),),
         )
         assert first.crashed and not worker_alive(first)
         run = _restart_unchanged(case, "DEADLINE_WITHOUT_EXIT_OBSERVATION")
@@ -566,12 +566,12 @@ def test_t10_deadline_only_restart_with_the_child_dead_is_invalid(tmp_path):
 
 
 @pytest.mark.parametrize(("termination", "boundary", "exit_durable", "alive_after"), (
-    ("deadline", FileBoundary(te.DEADLINE_FILENAME, side="before"), False, True),
-    ("deadline", FileBoundary(te.DEADLINE_FILENAME), False, True),
-    ("deadline", FileBoundary(te.CHILD_EXIT_FILENAME, side="before"), False, False),
-    ("deadline", FileBoundary(te.CHILD_EXIT_FILENAME), True, False),
-    ("natural", FileBoundary(te.CHILD_EXIT_FILENAME, side="before"), False, False),
-    ("natural", FileBoundary(te.CHILD_EXIT_FILENAME), True, False),
+    ("deadline", FileBoundary(layout.DEADLINE, side="before"), False, True),
+    ("deadline", FileBoundary(layout.DEADLINE), False, True),
+    ("deadline", FileBoundary(layout.CHILD_EXIT, side="before"), False, False),
+    ("deadline", FileBoundary(layout.CHILD_EXIT), True, False),
+    ("natural", FileBoundary(layout.CHILD_EXIT, side="before"), False, False),
+    ("natural", FileBoundary(layout.CHILD_EXIT), True, False),
 ), ids=("before-D", "after-D", "after-kill-before-E", "after-E",
         "natural-before-E", "natural-after-E"))
 def test_t16_exit_observation_windows_around_eof_and_kill(
@@ -587,7 +587,7 @@ def test_t16_exit_observation_windows_around_eof_and_kill(
         )
         assert first.crashed
         expected = _expected(termination, runner=runner, phase="NONE", exit_durable=exit_durable)
-        if boundary.path == te.DEADLINE_FILENAME and boundary.side == "before":
+        if boundary.path == layout.DEADLINE and boundary.side == "before":
             # D が durable になる前: restart から見れば終了の観測が 1 つも無い。
             expected = ("INVALID", "EXIT_NOT_OBSERVED")
         restarted = restart_supervisor(case)
@@ -622,14 +622,14 @@ def test_t11_deadline_races_keep_the_observed_disposition_and_do_not_adopt_the_e
 ):
     script = ChildScript((Checkpoint(), Envelope("UNKNOWN"), stop))
     with supervisor_case(tmp_path, script, allow_child_exit_resolution=True) as case:
-        point = FileBoundary(te.DEADLINE_FILENAME)
+        point = FileBoundary(layout.DEADLINE)
         with start_supervisor(
             case, entry=SupervisorEntry.FRESH_START, deadline=Deadline.AT_CHILD_STOP,
             faults=(pause_at(point),),
         ) as handle:
             handle.wait_until_paused(point.describe())
             # D は durable、signal はまだ。
-            assert (case.store_directory / te.DEADLINE_FILENAME).exists()
+            assert (case.store_directory / layout.DEADLINE).exists()
             child = handle.child()
             if race.startswith("A"):
                 os.kill(child.pid, signal.SIGUSR1)
@@ -646,7 +646,7 @@ def test_t11_deadline_races_keep_the_observed_disposition_and_do_not_adopt_the_e
         assert child_exit["payload"]["signal_actions"] == signals
         # 有効な envelope が durable にあっても、D が先なので RESOLVED にしない（P-T）。
         assert child_exit["payload"]["envelope_observation"]["present"] is True
-        assert not run.store.has("canonical-resolved-receipt.json")
+        assert not run.store.has(layout.CANONICAL_RESOLVED_RECEIPT)
 
 
 # ---------------------------------------------------------------------------
@@ -679,11 +679,11 @@ def test_t17_canonical_child_results_resolve_with_the_observed_exit(tmp_path, ou
         assert classified["canonical_outcome"] == outcome
         deadline, child_exit = _evidence(case)
         assert deadline is None
-        envelope = (case.store_directory / "canonical-result-envelope.json").read_bytes()
+        envelope = (case.store_directory / layout.RESULT_ENVELOPE).read_bytes()
         assert child_exit["payload"]["envelope_observation"] == {
             "present": True, "sha256": hashlib.sha256(envelope).hexdigest(),
         }
-        receipt = _store_json(case, "canonical-resolved-receipt.json")
+        receipt = _store_json(case, layout.CANONICAL_RESOLVED_RECEIPT)
         assert receipt["child_returncode"] == child_exit["payload"]["child_returncode"]
         assert run.projection["supervisor_final_authority_digest"] == receipt["receipt_digest"]
         if outcome == "ERROR":
@@ -707,7 +707,7 @@ def _forge_error_receipt(case, *, disposition):
         deadline_stage="BEFORE_CHECKPOINT", child_exit_disposition=disposition,
         _capability=_OPERATIONAL_ERROR_CAPABILITY_TOKEN,
     )
-    (case.store_directory / "operational-error.json").write_bytes(store._bytes(error))
+    (case.store_directory / layout.OPERATIONAL_ERROR).write_bytes(store._bytes(error))
 
 
 def _forge_deadline(case):
@@ -718,7 +718,7 @@ def _forge_deadline(case):
         te.deadline_payload(launch, configured_timeout_seconds=60.0,
                             deadline_detected_offset_seconds=60.0),
     )
-    (case.store_directory / te.DEADLINE_FILENAME).write_bytes(store._bytes(deadline))
+    (case.store_directory / layout.DEADLINE).write_bytes(store._bytes(deadline))
 
 
 def _edit_byte(name):
@@ -743,12 +743,12 @@ RESOLVED_CASE = ((Checkpoint(), Envelope("UNKNOWN"), Exit()), True, Deadline.TIM
      "TERMINAL_AUTHORITY_CONFLICT"),
     (ERROR_CASE, _forge_deadline, "TERMINAL_EVIDENCE_INVALID"),
     (RESOLVED_CASE, _forge_deadline, "TERMINAL_EVIDENCE_INVALID"),
-    (TIMEOUT_CASE, lambda case: (case.store_directory / "canonical-resolved-receipt.json")
+    (TIMEOUT_CASE, lambda case: (case.store_directory / layout.CANONICAL_RESOLVED_RECEIPT)
      .write_text("{}", encoding="utf-8"), "TERMINAL_EVIDENCE_INVALID"),
-    (TIMEOUT_CASE, _edit_byte("timeout.json"), "TERMINAL_EVIDENCE_INVALID"),
-    (TIMEOUT_CASE, _edit_byte(te.CHILD_EXIT_FILENAME), "TERMINAL_EVIDENCE_INVALID"),
-    (ERROR_CASE, _edit_byte("operational-error-bundle.json"), "TERMINAL_EVIDENCE_INVALID"),
-    (RESOLVED_CASE, _edit_byte("canonical-resolved-receipt.json"), "TERMINAL_EVIDENCE_INVALID"),
+    (TIMEOUT_CASE, _edit_byte(layout.TIMEOUT), "TERMINAL_EVIDENCE_INVALID"),
+    (TIMEOUT_CASE, _edit_byte(layout.CHILD_EXIT), "TERMINAL_EVIDENCE_INVALID"),
+    (ERROR_CASE, _edit_byte(layout.OPERATIONAL_ERROR_BUNDLE), "TERMINAL_EVIDENCE_INVALID"),
+    (RESOLVED_CASE, _edit_byte(layout.CANONICAL_RESOLVED_RECEIPT), "TERMINAL_EVIDENCE_INVALID"),
 ), ids=("timeout+error", "resolved+error", "error+deadline", "resolved+deadline",
         "timeout+resolved-receipt", "timeout-member", "exit-receipt", "error-bundle",
         "resolved-receipt"))
@@ -811,14 +811,14 @@ def test_t13_a_projection_that_names_another_terminal_is_not_classified(
 
 
 def _drop_evidence(case):
-    for name in (te.DEADLINE_FILENAME, te.CHILD_EXIT_FILENAME):
+    for name in (layout.DEADLINE, layout.CHILD_EXIT):
         (case.store_directory / name).unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize(("setup", "faults", "code"), (
     (TIMEOUT_CASE, (), "TERMINAL_WITHOUT_EXIT_OBSERVATION"),
     (ERROR_CASE, (), "TERMINAL_WITHOUT_EXIT_OBSERVATION"),
-    (TIMEOUT_CASE, (crash_at(FileBoundary("claimed.json")),),
+    (TIMEOUT_CASE, (crash_at(FileBoundary(layout.CLAIMED)),),
      "TERMINAL_WITHOUT_EXIT_OBSERVATION"),
 ), ids=("complete-timeout", "complete-error", "claimed"))
 def test_t14_legacy_terminal_authority_without_an_exit_observation_is_invalid(
@@ -832,7 +832,7 @@ def test_t14_legacy_terminal_authority_without_an_exit_observation_is_invalid(
 
 
 @pytest.mark.parametrize(("steps", "child_faults", "runner"), (
-    ((Checkpoint(), Stop()), (crash_at(FileBoundary("pending-active-transaction.json")),), False),
+    ((Checkpoint(), Stop()), (crash_at(FileBoundary(layout.PENDING_ACTIVE_TRANSACTION)),), False),
     ((Checkpoint(), Envelope("UNKNOWN"), Exit()), (), True),
 ), ids=("worker-pending", "valid-envelope"))
 def test_t14_a_child_result_without_an_exit_observation_is_invalid(
@@ -842,7 +842,7 @@ def test_t14_a_child_result_without_an_exit_observation_is_invalid(
         tmp_path, ChildScript(steps, faults=child_faults), allow_child_exit_resolution=runner,
     ) as case:
         first = run_supervisor(
-            case, faults=(crash_at(FileBoundary(te.CHILD_EXIT_FILENAME, side="before")),),
+            case, faults=(crash_at(FileBoundary(layout.CHILD_EXIT, side="before")),),
         )
         assert first.crashed
         _restart_unchanged(case, "EXIT_NOT_OBSERVED")
@@ -866,7 +866,7 @@ def test_t15_driving_a_terminal_store_again_changes_nothing(tmp_path):
 def test_t15_two_restarts_serialize_on_ownership_and_derive_one_terminal(tmp_path):
     context, case = _deadline_case_after_exit(tmp_path)
     try:
-        point = FileBoundary("claimed.json")
+        point = FileBoundary(layout.CLAIMED)
         with start_supervisor(case, entry=SupervisorEntry.RESUME,
                               faults=(pause_at(point),)) as first:
             first.wait_until_paused(point.describe())
@@ -887,7 +887,7 @@ def test_t15_two_restarts_serialize_on_ownership_and_derive_one_terminal(tmp_pat
 def test_t15_a_restart_waits_for_the_running_supervisor_and_agrees(tmp_path):
     with supervisor_case(tmp_path, ChildScript((Checkpoint(), Stop())),
                          allow_child_exit_resolution=True) as case:
-        point = FileBoundary(te.DEADLINE_FILENAME)
+        point = FileBoundary(layout.DEADLINE)
         with start_supervisor(case, entry=SupervisorEntry.FRESH_START,
                               deadline=Deadline.AT_CHILD_STOP,
                               faults=(pause_at(point),)) as original:

@@ -5,11 +5,12 @@ supervisor の CLI・分類器は、store の file をここの名前でだけ�
 足す・名前を変えるときに触るのはこの module と、その file の中身（schema）を
 持つ module だけ。
 
-中身の schema の owner は別:
+file の中身（schema）の owner は別:
 
 * checkpoint chain / timeout / operational error の receipt: ``supervisor``
-* D / E / A（``deadline.json`` など）: ``terminal_evidence``（kind と file の対応も）
+* D / E / A: ``terminal_evidence``（kind と file の対応も）
 * canonical 結果の envelope と resolved receipt: ``canonical_envelope``
+* history への退避の手順: ``checkpoint_archive``
 
 この module は何も import しない。
 """
@@ -17,6 +18,8 @@ supervisor の CLI・分類器は、store の file をここの名前でだけ�
 from __future__ import annotations
 
 LAUNCH = "launch.json"
+#: 閉じた chain の退避先（``<store>/checkpoint-history/<RESOLVED の digest>/``）。
+HISTORY_DIRECTORY = "checkpoint-history"
 
 # -- checkpoint chain（worker の ACTIVE → READY → RESOLVED） -------------------
 PENDING_ACTIVE_TRANSACTION = "pending-active-transaction.json"
@@ -46,6 +49,15 @@ ERROR_MEMBERS = (
     OPERATIONAL_ERROR, OPERATIONAL_ERROR_SEGMENT, OPERATIONAL_ERROR_STREAM,
     OPERATIONAL_ERROR_BUNDLE,
 )
+
+# -- supervisor が観測した終了事実（D / E / A。schema は ``terminal_evidence``） -----
+DEADLINE = "deadline.json"
+CHILD_EXIT = "child-exit.json"
+ARCHIVE_INTENT = "archive-intent.json"
+
+# -- worker の canonical 結果と、それを採用した receipt（``canonical_envelope``） ---
+RESULT_ENVELOPE = "canonical-result-envelope.json"
+CANONICAL_RESOLVED_RECEIPT = "canonical-resolved-receipt.json"
 
 #: worker / supervisor の checkpoint authority（archive / rollback / 掃除の対象）。
 CHECKPOINT_AUTHORITY_FILENAMES = (

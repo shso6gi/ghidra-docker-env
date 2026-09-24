@@ -29,7 +29,6 @@ from typing import Callable, Mapping, Optional
 
 from scripts.function_tracer_pcode.authority.process import store_layout as layout
 
-HISTORY_DIRECTORY = "checkpoint-history"
 
 
 @dataclass(frozen=True)
@@ -67,7 +66,13 @@ def history_destination(resolved_state_receipt_digest: str) -> str:
         or not all(ch.isalnum() for ch in resolved_state_receipt_digest)
     ):
         raise ArchiveConflict("history destination digest is not a safe identity")
-    return f"{HISTORY_DIRECTORY}/{resolved_state_receipt_digest}"
+    return f"{layout.HISTORY_DIRECTORY}/{resolved_state_receipt_digest}"
+
+
+def history_directory(directory: Path, resolved_state_receipt_digest: str) -> Path:
+    """閉じた chain の退避先の絶対 path。"""
+
+    return Path(directory) / history_destination(resolved_state_receipt_digest)
 
 
 def validate_member_set(
@@ -214,7 +219,7 @@ def ensure_history_directory(directory: Path, destination: str) -> Path:
     """退避先を作り、作った階層の親を fsync する（名前の永続化）。"""
 
     directory = Path(directory)
-    history_root = directory / HISTORY_DIRECTORY
+    history_root = directory / layout.HISTORY_DIRECTORY
     target = directory / destination
     created_root = not history_root.exists()
     history_root.mkdir(exist_ok=True)

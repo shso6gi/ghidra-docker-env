@@ -39,6 +39,7 @@ from dataclasses import dataclass, field, replace
 import json
 from typing import Callable, Iterable, Optional
 
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.process.terminal_evidence import (
     ANCHOR_CHAIN,
     ANCHOR_NONE,
@@ -54,11 +55,6 @@ from scripts.function_tracer_pcode.authority.process.checkpoint_archive import (
     CHAIN_MEMBER_NAMES,
 )
 
-TIMEOUT_MEMBERS = ("claimed.json", "timeout.json", "terminal-segment.json", "terminal-stream.json")
-ERROR_MEMBERS = (
-    "operational-error.json", "operational-error-segment.json",
-    "operational-error-stream.json", "operational-error-bundle.json",
-)
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +125,7 @@ def _commit(chain_id: str, prior: Optional[str], bootstrap: bool) -> list:
             live = s.live
             members = live.members - {name}
             history = s.history
-            if name == "state.json":
+            if name == layout.STATE:
                 history = history | {(resolved_token(live), live.chain_id)}
                 return replace(s, live=replace(live, members=members, state=None), history=history)
             return replace(s, live=replace(live, members=members))
@@ -151,10 +147,10 @@ def _commit(chain_id: str, prior: Optional[str], bootstrap: bool) -> list:
             live = Chain(chain_id, bootstrap, prior, None)
         return replace(s, live=replace(live, members=live.members | {add}))
 
-    steps.append(lambda s: members(s, "checkpoint-prefix-stream.json"))
-    steps.append(lambda s: members(s, "checkpoint.json"))
+    steps.append(lambda s: members(s, layout.PREFIX_STREAM))
+    steps.append(lambda s: members(s, layout.CHECKPOINT))
     steps.append(lambda s: replace(
-        s, live=replace(s.live, state=CheckpointState.ACTIVE.value, members=s.live.members | {"state.json"}),
+        s, live=replace(s.live, state=CheckpointState.ACTIVE.value, members=s.live.members | {layout.STATE}),
     ))
     steps.append(lambda s: replace(s, pending=None))
     return steps
@@ -164,7 +160,7 @@ def _worker_completion() -> list:
     def add(name: str) -> Publication:
         return lambda s: replace(s, live=replace(s.live, members=s.live.members | {name}))
     return [
-        add("continuation-stream.json"), add("continuation.json"), add("ready.json"),
+        add(layout.CONTINUATION_STREAM), add(layout.CONTINUATION), add(layout.READY),
         lambda s: replace(s, live=replace(s.live, state=CheckpointState.COMPLETION_READY.value)),
         lambda s: replace(s, live=replace(s.live, state=CheckpointState.RESOLVED.value)),
     ]
@@ -226,7 +222,7 @@ def op_bootstrap(s: ModelState) -> list:
 
 def op_recover_ready(s: ModelState) -> list:
     return [
-        lambda s: replace(s, live=replace(s.live, members=s.live.members | {"recovery-resolution.json"})),
+        lambda s: replace(s, live=replace(s.live, members=s.live.members | {layout.RECOVERY_RESOLUTION})),
         lambda s: s,  # ready.json（identical）
         lambda s: replace(s, live=replace(s.live, state=CheckpointState.RESOLVED.value, closed_by="recovery")),
     ]
@@ -234,8 +230,8 @@ def op_recover_ready(s: ModelState) -> list:
 
 def op_close_continuation(s: ModelState) -> list:
     return [
-        lambda s: replace(s, live=replace(s.live, members=s.live.members | {"recovery-resolution.json"})),
-        lambda s: replace(s, live=replace(s.live, members=s.live.members | {"ready.json"})),
+        lambda s: replace(s, live=replace(s.live, members=s.live.members | {layout.RECOVERY_RESOLUTION})),
+        lambda s: replace(s, live=replace(s.live, members=s.live.members | {layout.READY})),
         lambda s: replace(s, live=replace(s.live, state=CheckpointState.COMPLETION_READY.value, closed_by="recovery")),
         lambda s: replace(s, live=replace(s.live, state=CheckpointState.RESOLVED.value, closed_by="recovery")),
     ]
@@ -243,7 +239,7 @@ def op_close_continuation(s: ModelState) -> list:
 
 def op_claim(s: ModelState) -> list:
     return [
-        lambda s: replace(s, timeout_members=s.timeout_members | {"claimed.json"},
+        lambda s: replace(s, timeout_members=s.timeout_members | {layout.CLAIMED},
                           claimed_disposition=DISPOSITION["deadline"]),
         lambda s: replace(s, live=replace(s.live, state=CheckpointState.TIMED_OUT_CLAIMED.value)),
     ]
@@ -252,7 +248,7 @@ def op_claim(s: ModelState) -> list:
 def op_finalize_timeout(s: ModelState) -> list:
     return [
         *(lambda s, name=name: replace(s, timeout_members=s.timeout_members | {name})
-          for name in TIMEOUT_MEMBERS[1:]),
+          for name in layout.TIMEOUT_MEMBERS[1:]),
         lambda s: replace(s, live=replace(s.live, state=CheckpointState.TIMED_OUT.value)),
     ]
 
@@ -275,7 +271,7 @@ def op_advance_archive(s: ModelState) -> list:
                 return s
             members = live.members - {name}
             archive = (chain_id, token, s.archive[2] | {name})
-            if name == "state.json":
+            if name == layout.STATE:
                 return replace(
                     s, live=None if not members else replace(live, members=members, state=None),
                     archive=archive, history=s.history | {(token, chain_id)},
@@ -289,7 +285,7 @@ def op_finalize_error(stage: str) -> Callable[[ModelState], list]:
     def publications(s: ModelState) -> list:
         return [
             lambda s, name=name: replace(s, error_members=s.error_members | {name}, error_stage=stage)
-            for name in ERROR_MEMBERS
+            for name in layout.ERROR_MEMBERS
         ]
     return publications
 
@@ -388,7 +384,7 @@ def snapshot(s: ModelState, mode: tr.ExitMode) -> tr.TerminalSnapshot:
         if chain.state is None:
             live = tr.LiveChainFact(tr.LiveKind.INVALID, detail="chain members without state")
         else:
-            has_cont = {"continuation.json", "continuation-stream.json"} <= chain.members
+            has_cont = {layout.CONTINUATION, layout.CONTINUATION_STREAM} <= chain.members
             live = tr.LiveChainFact(
                 tr.LiveKind.CHAIN, checkpoint_digest=chain.chain_id,
                 is_bootstrap=chain.bootstrap, prior_resolved_digest=chain.prior,
@@ -409,13 +405,13 @@ def snapshot(s: ModelState, mode: tr.ExitMode) -> tr.TerminalSnapshot:
         pending = tr.PendingFact()
     timeout_complete = (
         s.live is not None and s.live.state == CheckpointState.TIMED_OUT.value
-        and set(TIMEOUT_MEMBERS) <= s.timeout_members
+        and set(layout.TIMEOUT_MEMBERS) <= s.timeout_members
     )
     timeout = tr.TimeoutFact(
         members=frozenset(s.timeout_members), complete=timeout_complete,
         bundle_digest="T" if timeout_complete else None,
     )
-    error_complete = set(ERROR_MEMBERS) <= s.error_members
+    error_complete = set(layout.ERROR_MEMBERS) <= s.error_members
     error = tr.ErrorFact(
         members=frozenset(s.error_members), complete=error_complete,
         stage=s.error_stage,
@@ -468,7 +464,7 @@ def worker_phase(state: ModelState) -> str:
         return "NONE"
     if state.live.state == CheckpointState.ACTIVE.value:
         members = state.live.members
-        return "ACTIVE_CONT" if {"continuation.json", "continuation-stream.json"} <= members else "ACTIVE"
+        return "ACTIVE_CONT" if {layout.CONTINUATION, layout.CONTINUATION_STREAM} <= members else "ACTIVE"
     return state.live.state
 
 
@@ -628,11 +624,11 @@ CONFLICTS = {
     # 完成した ERROR に TIMEOUT の物件を足す / その逆 / RESOLVED に D を足す。
     "timeout-on-error": (
         lambda s: bool(s.error_members),
-        lambda s: replace(s, timeout_members=s.timeout_members | {"claimed.json"}),
+        lambda s: replace(s, timeout_members=s.timeout_members | {layout.CLAIMED}),
     ),
     "error-on-timeout": (
         lambda s: bool(s.timeout_members),
-        lambda s: replace(s, error_members=s.error_members | {"operational-error.json"},
+        lambda s: replace(s, error_members=s.error_members | {layout.OPERATIONAL_ERROR},
                           error_stage=ErrorStage.BEFORE_CHECKPOINT.value),
     ),
     "deadline-on-resolved": (

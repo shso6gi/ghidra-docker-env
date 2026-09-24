@@ -44,6 +44,7 @@ import sys
 import tempfile
 from typing import Any
 
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.process import child_exit as ce
 from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
     REPO_ROOT,
@@ -108,8 +109,8 @@ def gate_g1(directory: Path) -> None:
               measured=measured)
         supervisor_factory = _factory(case)
         store = _store(case, supervisor_factory)
-        launch = supervisor_factory.decode(json.loads((store.directory / "launch.json").read_text()))
-        path = store.directory / te.CHILD_EXIT_FILENAME
+        launch = supervisor_factory.decode(json.loads((store.directory / layout.LAUNCH).read_text()))
+        path = store.directory / layout.CHILD_EXIT
         anchor = te.child_exit_anchor(supervisor_factory.decode(json.loads(path.read_text())))
         # 読み直し: 署名（supervisor role）→ schema / launch join。
         reread = supervisor_factory.decode(json.loads(path.read_text()))
@@ -139,7 +140,7 @@ def gate_g1(directory: Path) -> None:
             _emit("G1", "tampered_E_is_rejected", False)
         # E の rc から canonical resolved receipt を作り直し、分類器が受理する
         # （CLI join: receipt rc == projection rc == CLI_EXIT_MATRIX[outcome]）。
-        stored = json.loads((store.directory / "canonical-resolved-receipt.json").read_text())
+        stored = json.loads((store.directory / layout.CANONICAL_RESOLVED_RECEIPT).read_text())
         _emit("G1", "existing_receipt_rc_equals_E_rc",
               stored["child_returncode"] == reread.payload["child_returncode"],
               receipt_rc=stored["child_returncode"], e_rc=reread.payload["child_returncode"])
@@ -248,7 +249,7 @@ def gate_g2(directory: Path) -> None:
 
     template = directory / "template"
     with _two_chain_case(template) as case:
-        run = run_supervisor(case, faults=(crash_at(FileBoundary(te.CHILD_EXIT_FILENAME)),))
+        run = run_supervisor(case, faults=(crash_at(FileBoundary(layout.CHILD_EXIT)),))
         histories = sorted({f.split("/")[1] for f in run.store.files if f.startswith("checkpoint-history/")})
         _emit("G2", "real_child_left_history_and_live_chain",
               len(histories) == 1 and run.store.state == "RESOLVED" and run.crashed,
@@ -270,13 +271,13 @@ def gate_g2(directory: Path) -> None:
             worker_signing_key=(work / "keys" / "worker.key").read_bytes(),
         )
         store = DurableCheckpointStore(work / "checkpoints", factory, config.execution_nonce)
-        launch = factory.decode(json.loads((store.directory / "launch.json").read_text()))
+        launch = factory.decode(json.loads((store.directory / layout.LAUNCH).read_text()))
         exit_receipt = factory.decode(
-            json.loads((store.directory / te.CHILD_EXIT_FILENAME).read_text())
+            json.loads((store.directory / layout.CHILD_EXIT).read_text())
         )
         manifest = _build_manifest(store, factory, launch, exit_receipt)
         members_n = len(manifest.payload["members"])
-        manifest_path = store.directory / te.ARCHIVE_INTENT_FILENAME
+        manifest_path = store.directory / layout.ARCHIVE_INTENT
         store._atomic_write(manifest_path, store._bytes(manifest))
         destination = manifest.payload["destination"]
         # 最初の ``moved`` 個だけ移した分割配置（crash 境界の再現）。
@@ -319,7 +320,7 @@ def _g2_negative(store: Any, factory: Any, launch: Any, exit_receipt: Any,
         finally:
             restore()
 
-    target = history / "ready.json"
+    target = history / layout.READY
     original = target.read_bytes()
     expect_conflict(
         "tampered_member_rejected",
@@ -378,7 +379,7 @@ def gate_g3(directory: Path) -> None:
         run = run_supervisor(case)
         supervisor_factory = _factory(case)
         store = _store(case, supervisor_factory)
-        launch = supervisor_factory.decode(json.loads((store.directory / "launch.json").read_text()))
+        launch = supervisor_factory.decode(json.loads((store.directory / layout.LAUNCH).read_text()))
         # issuer が DURING_DECOMPILATION を受理するか（語彙に無ければ拒否）。
         try:
             supervisor_factory._issue_operational_error(
@@ -392,7 +393,7 @@ def gate_g3(directory: Path) -> None:
         else:
             _emit("G3", "during_decompilation_accepted_by_issuer", True, gate_satisfied=True)
         # 対照: 閉じた chain を A で退避した後の NON_DECOMPILATION ERROR（supervisor が作る）。
-        error = json.loads((store.directory / "operational-error.json").read_text())
+        error = json.loads((store.directory / layout.OPERATIONAL_ERROR).read_text())
         _emit("G3", "supervisor_issued_non_decompilation_error",
               run.projection["status"] == "ERROR"
               and error["payload"]["deadline_stage"] == "NON_DECOMPILATION",

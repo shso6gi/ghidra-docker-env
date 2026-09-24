@@ -29,7 +29,6 @@ from scripts.function_tracer_pcode.authority.process.terminal_transaction import
 #: 1 つの store で起こりうる progress 操作の数は有限（chain 1 つの close / claim /
 #: finalize、archive の member、bootstrap の commit …）。これを超えたら進んでいない。
 MAX_STEPS = 64
-NO_PROGRESS = "NO_PROGRESS"
 
 
 @dataclass(frozen=True)
@@ -77,7 +76,8 @@ def drive(
             if store_fingerprint(store.directory) == before:
                 return _no_progress(step, snapshot, "did not change the durable state", taken)
     return DriveResult(
-        None, NO_PROGRESS, f"no terminal after {MAX_STEPS} operations", steps=tuple(taken),
+        None, recovery.InvalidCode.NO_PROGRESS.value,
+        f"no terminal after {MAX_STEPS} operations", steps=tuple(taken),
     )
 
 
@@ -94,10 +94,10 @@ def inspect(
     store: Any, *, mode: Optional[recovery.ExitMode],
     process_alive: Callable[[int, str], Optional[bool]],
 ) -> Inspection:
-    """store を書かずに、supervisor と同じ判断で終端を読む。
+    """durable authority を書かずに、supervisor と同じ判断で終端を読む。
 
     supervisor と同じ owner lock と store の flock を取る（終端処理の途中の
-    store を読まない）。``mode`` が None なら E に記録された mode で読む。
+    store を読まない。lock file が無ければ作るが、authority の file は書かない）。``mode`` が None なら E に記録された mode で読む。
     採用する終端（ADOPT_*）なら ``drive`` と同じ ``adopt`` で authority を作る。
     """
 
@@ -117,7 +117,7 @@ def _no_progress(
     step: recovery.Step, snapshot: recovery.TerminalSnapshot, why: str, taken: list,
 ) -> DriveResult:
     return DriveResult(
-        None, NO_PROGRESS, f"{step.kind.value} {why}",
+        None, recovery.InvalidCode.NO_PROGRESS.value, f"{step.kind.value} {why}",
         child_returncode=snapshot.child_exit.returncode, steps=tuple(taken),
     )
 

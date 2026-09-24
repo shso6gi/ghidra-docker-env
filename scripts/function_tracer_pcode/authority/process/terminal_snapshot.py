@@ -1,13 +1,13 @@
 """Issue #165: store を lock の中で読み、終端判断の入力（事実）にする。
 
 ``read_terminal_snapshot(store, ...)`` は store の flock を持った状態で呼ぶ
-（``DurableCheckpointStore.terminal_transaction`` の中）。返すのは 2 つ:
+（``terminal_transaction.open_transaction`` の中）。返すのは 2 つ:
 
 * ``TerminalSnapshot``（``terminal_recovery``）: 判断に使う事実だけ。署名・
   schema・launch / D / E / A の join を検証した結果（VALID / INVALID と理由）。
 * ``SnapshotContext``: 同じ読込みで得た decode 済みの receipt / prefix。
-  書込み（``terminal_transaction``）はこれを使い、別に読み直さない
-  （判断と書込みが同じ lock の中の同じ観測を使う）。
+  書込み（``terminal_transaction``）はこれを使う。書込みが file を読み直す
+  ときも同じ lock の中で行い、前の周の観測は使わない。
 
 ここは読むだけで、何も書かない・判断しない（判断は ``next_step``）。読めない
 file は例外で止めず、その事実を INVALID と理由にして返す（どの証拠が壊れて
@@ -22,11 +22,10 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
+from scripts.function_tracer_pcode.authority.process import checkpoint_vocabulary as vocabulary
 from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.process import checkpoint_archive as archive
 from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
-    CANONICAL_RECEIPT_FILENAME,
-    RESULT_ENVELOPE_FILE,
     CanonicalEnvelope,
     SupervisorCanonicalResultResolvedReceipt,
     canonical_resolved_receipt,
@@ -43,7 +42,6 @@ _READ_ERRORS = (
     OSError, UnicodeDecodeError, KeyError, TypeError, ValueError, AttributeError,
 )
 
-BOOTSTRAP_CHECKPOINT_KIND = "SupervisorBootstrapCheckpointReceipt"
 
 
 def _describe(exc: BaseException) -> str:
@@ -95,8 +93,8 @@ def _decode_file(store: Any, path: Path) -> Any:
 def _read_canonical(
     store: Any, context: SnapshotContext, exit_fact: recovery.ExitFact,
 ) -> recovery.CanonicalFact:
-    envelope_path = store.directory / RESULT_ENVELOPE_FILE
-    receipt_path = store.directory / CANONICAL_RECEIPT_FILENAME
+    envelope_path = store.directory / layout.RESULT_ENVELOPE
+    receipt_path = store.directory / layout.CANONICAL_RESOLVED_RECEIPT
     presence = recovery.Presence
     envelope_presence, sha, cli_rc, detail = presence.ABSENT, None, None, None
     if envelope_path.exists():
@@ -264,7 +262,7 @@ def _read_pending(store: Any, context: SnapshotContext) -> recovery.PendingFact:
         recovery.Presence.VALID, transaction,
         checkpoint_digest=checkpoint.receipt_digest,
         prior_resolved_digest=checkpoint.payload.get("prior_resolved_receipt_digest"),
-        is_bootstrap=checkpoint.receipt_kind == BOOTSTRAP_CHECKPOINT_KIND,
+        is_bootstrap=checkpoint.receipt_kind == vocabulary.BOOTSTRAP_CHECKPOINT_KIND,
     )
 
 
@@ -369,7 +367,7 @@ def _read_live(store: Any, context: SnapshotContext) -> recovery.LiveChainFact:
     context.state, context.checkpoint, context.prefix = state, checkpoint, prefix
     return recovery.LiveChainFact(
         recovery.LiveKind.CHAIN, checkpoint_digest=checkpoint.receipt_digest,
-        is_bootstrap=checkpoint.receipt_kind == BOOTSTRAP_CHECKPOINT_KIND,
+        is_bootstrap=checkpoint.receipt_kind == vocabulary.BOOTSTRAP_CHECKPOINT_KIND,
         prior_resolved_digest=checkpoint.payload.get("prior_resolved_receipt_digest"),
         state=value, state_digest=state.receipt_digest,
         continuation=continuation, kill_disposition=kill_disposition,
@@ -429,7 +427,7 @@ def _read_history(store: Any) -> dict:
     """``checkpoint-history`` の chain（読めたものだけ。無関係な古い chain も含む）。"""
 
     history: dict = {}
-    root = store.directory / archive.HISTORY_DIRECTORY
+    root = store.directory / layout.HISTORY_DIRECTORY
     if not root.is_dir():
         return history
     for directory in sorted(root.iterdir()):

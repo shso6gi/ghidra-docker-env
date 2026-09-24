@@ -24,6 +24,8 @@ from scripts.function_tracer_pcode.authority.process.terminal_transaction import
     TerminalAuthority,
 )
 
+#: 採用できる終端の status（INVALID は終端ではない）。
+TERMINAL_STATUSES = frozenset({"RESOLVED", "TIMEOUT", "ERROR"})
 #: TIMEOUT の supervisor exit code（runner の ``timeout`` と同じ値）。
 TIMEOUT_EXIT_CODE = 124
 #: rc 0 で終わった child の supervisor ERROR（成功と区別する）。
@@ -37,7 +39,7 @@ def terminal_projection(authority: TerminalAuthority, factory: Any) -> dict[str,
         return resolved_projection(
             authority.envelope, authority.canonical_receipt, launch=authority.launch,
         )
-    if authority.status not in {"TIMEOUT", "ERROR"}:
+    if authority.status not in TERMINAL_STATUSES:
         raise ValueError(f"{authority.status!r} is not an adopted terminal")
     return _durable_projection(authority, factory)
 
@@ -57,7 +59,7 @@ def _durable_projection(authority: TerminalAuthority, factory: Any) -> dict[str,
     status, launch, bundle = authority.status, authority.launch, authority.bundle
     outcome = Outcome.TIMEOUT if status == "TIMEOUT" else Outcome.ERROR
     error_kind = bundle.error_kind if outcome is Outcome.ERROR else None
-    validated = factory._validate_supervisor_canonical_bundle(
+    validated = factory.validate_supervisor_canonical_bundle(
         bundle.canonical_result_bundle, launch=launch, outcome=outcome,
         error_kind=error_kind,
     )

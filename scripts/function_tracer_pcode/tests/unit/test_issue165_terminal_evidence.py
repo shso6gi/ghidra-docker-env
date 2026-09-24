@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.process import checkpoint_archive as ca
 from scripts.function_tracer_pcode.authority.process import child_exit as ce
 from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
@@ -77,7 +78,7 @@ def _exit(factory, launch, *, deadline=None, rc=-15, disposition="SIGTERM_AFTER_
 
 
 # ---------------------------------------------------------------------------
-# 鍵の分離
+# D / E / A の署名 role
 # ---------------------------------------------------------------------------
 
 
@@ -263,14 +264,14 @@ def test_archive_member_set_is_the_closed_chain_in_move_order():
         _members(*REQUIRED), destination=ca.history_destination("abc"),
         resolved_state_receipt_digest="abc",
     )
-    assert REQUIRED[-1] == "state.json"
+    assert REQUIRED[-1] == layout.STATE
 
 
 @pytest.mark.parametrize("names", (
     REQUIRED[:-1],                                   # state.json 欠落
-    REQUIRED + ("state.json",),                      # 重複
-    ("state.json",) + REQUIRED[:-1],                 # state.json が先
-    REQUIRED + ("claimed.json",),                    # chain 外の member
+    REQUIRED + (layout.STATE,),                      # 重複
+    (layout.STATE,) + REQUIRED[:-1],                 # state.json が先
+    REQUIRED + (layout.CLAIMED,),                    # chain 外の member
 ))
 def test_archive_member_set_rejects_partial_or_foreign_members(names):
     with pytest.raises(ca.ArchiveConflict):
@@ -310,7 +311,7 @@ def test_union_is_resumable_from_every_split_and_rejects_corruption(tmp_path):
             ca.move_member(tmp_path, destination, members[count].name)
     assert ca.inspect_union(tmp_path, members, destination).complete
     history = tmp_path / destination
-    target = history / "ready.json"
+    target = history / layout.READY
     original = target.read_bytes()
     target.write_bytes(b"tampered")
     with pytest.raises(ca.ArchiveConflict, match="differs"):
@@ -410,7 +411,7 @@ def test_child_exit_is_observed_and_written_under_one_flock(tmp_path):
     assert seen["anchor"].kind == te.ANCHOR_NONE
     assert seen["envelope"] == te.EnvelopeObservation(False, None)
     assert seen["deadline"] is None
-    stored = json.loads((store.directory / te.CHILD_EXIT_FILENAME).read_text())
+    stored = json.loads((store.directory / layout.CHILD_EXIT).read_text())
     assert stored["receipt_digest"] == receipt.receipt_digest
 
 
@@ -431,8 +432,8 @@ def _complete_timeout_snapshot():
         live=tr.LiveChainFact(tr.LiveKind.CHAIN, checkpoint_digest="B[None]", is_bootstrap=True,
                               state=CheckpointState.TIMED_OUT.value, state_digest="s",
                               kill_disposition="SIGTERM_AFTER_DEADLINE"),
-        timeout=tr.TimeoutFact(frozenset({"claimed.json", "timeout.json",
-                                          "terminal-segment.json", "terminal-stream.json"}),
+        timeout=tr.TimeoutFact(frozenset({layout.CLAIMED, layout.TIMEOUT,
+                                          layout.TERMINAL_SEGMENT, layout.TERMINAL_STREAM}),
                                complete=True, bundle_digest="T"),
         error=tr.ErrorFact(), archive=tr.ArchiveFact(), canonical=tr.CanonicalFact(),
     )
@@ -442,7 +443,7 @@ def test_a_complete_terminal_is_adopted_only_without_conflict():
     snapshot = _complete_timeout_snapshot()
     assert tr.next_step(snapshot).kind is tr.StepKind.ADOPT_TIMEOUT
     conflicted = replace(snapshot, error=tr.ErrorFact(
-        frozenset({"operational-error.json"}), stage=ErrorStage.BEFORE_CHECKPOINT.value,
+        frozenset({layout.OPERATIONAL_ERROR}), stage=ErrorStage.BEFORE_CHECKPOINT.value,
         disposition="SIGTERM_AFTER_DEADLINE",
     ))
     step = tr.next_step(conflicted)
@@ -516,10 +517,10 @@ def test_store_file_names_are_spelled_only_by_their_owner():
         value for key, value in vars(store_layout).items()
         if key.isupper() and isinstance(value, str)
     }
-    root = Path(__file__).resolve().parents[2] / "authority"
+    root = Path(__file__).resolve().parents[2]
     offenders = []
     for path in sorted(root.rglob("*.py")):
-        if path.name == "store_layout.py":
+        if path.name == "store_layout.py" or "tests" in path.relative_to(root).parts:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         offenders += [

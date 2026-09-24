@@ -780,18 +780,45 @@ def _supervisor_source():
 
 
 def test_d11_kill_sequence_and_dispositions_are_unchanged():
-    """SIGTERM -> grace -> SIGKILL と disposition 文字列を変えていない。"""
+    """SIGTERM -> grace -> SIGKILL と disposition 文字列を変えていない。
+
+    Issue #165: disposition の文字列は ``child_exit.deadline_exit_disposition``
+    だけが作る（supervisor は終了処理の枝ごとに phase を渡す）。文字列そのものは
+    builder の出力で固定する。
+    """
+    from scripts.function_tracer_pcode.authority.process.child_exit import (
+        DeadlinePhase,
+        deadline_exit_disposition,
+    )
+
     source = _supervisor_source()
     for fragment in (
         'os.killpg(process.pid, signal.SIGTERM)',
         'process.wait(timeout=self.config.kill_grace_seconds)',
         'os.killpg(process.pid, signal.SIGKILL)',
-        '"SIGTERM_AFTER_DEADLINE"',
-        '"SIGKILL_AFTER_DEADLINE"',
-        'f"EXITED_{process.returncode}_AFTER_SIGTERM"',
-        'f"EXITED_{process.returncode}_AFTER_SIGKILL"',
+        'exited(process.returncode, phase.AFTER_SIGTERM)',
+        'exited(process.returncode, phase.AFTER_SIGKILL)',
+        'exited(return_code, phase.BEFORE_SIGTERM)',
+        'exited(process.returncode, phase.BEFORE_SIGKILL)',
     ):
         assert fragment in source, fragment
+    assert {
+        (-15, DeadlinePhase.AFTER_SIGTERM): "SIGTERM_AFTER_DEADLINE",
+        (2, DeadlinePhase.AFTER_SIGTERM): "EXITED_2_AFTER_SIGTERM",
+        (-9, DeadlinePhase.AFTER_SIGKILL): "SIGKILL_AFTER_DEADLINE",
+        (-15, DeadlinePhase.AFTER_SIGKILL): "EXITED_-15_AFTER_SIGKILL",
+        (1, DeadlinePhase.BEFORE_SIGTERM): "EXITED_1_BEFORE_SIGTERM",
+        (1, DeadlinePhase.BEFORE_SIGKILL): "EXITED_1_BEFORE_SIGKILL",
+        (0, None): "EXITED_0",
+    } == {
+        (rc, phase): deadline_exit_disposition(rc, phase)
+        for rc, phase in (
+            (-15, DeadlinePhase.AFTER_SIGTERM), (2, DeadlinePhase.AFTER_SIGTERM),
+            (-9, DeadlinePhase.AFTER_SIGKILL), (-15, DeadlinePhase.AFTER_SIGKILL),
+            (1, DeadlinePhase.BEFORE_SIGTERM), (1, DeadlinePhase.BEFORE_SIGKILL),
+            (0, None),
+        )
+    }
 
 
 def test_d11_diagnostic_signal_never_goes_to_a_process_group():

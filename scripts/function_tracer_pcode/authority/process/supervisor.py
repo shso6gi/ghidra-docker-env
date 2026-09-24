@@ -91,13 +91,16 @@ from scripts.function_tracer_pcode.authority.process.checkpoint_archive import (
     CHAIN_MEMBER_NAMES,
     CHAIN_MEMBERS,
     directory_reader,
+    fsync_directory,
+    history_destination,
+    history_directory,
     live_chain_members,
-)
-from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
-    RESULT_ENVELOPE_FILE,
+    move_member,
 )
 from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
     ALLOWED_TRANSITIONS,
+    BOOTSTRAP_CHECKPOINT_KIND,
+    LAUNCH_RECEIPT_KIND,
     CheckpointState,
     SUPERVISOR_DEADLINE_STAGES,
     SUPERVISOR_OPERATIONAL_ERROR_KINDS,
@@ -391,14 +394,14 @@ class ProcessSupervisorAuthorityFactory:
         if role is None:
             raise ValueError("process authority receipt signing key is untrusted")
         expected_roles = {
-            "SupervisorLaunchReceipt": "supervisor",
+            LAUNCH_RECEIPT_KIND: "supervisor",
             "SupervisorTimeoutReceipt": "supervisor",
             "SupervisorOperationalErrorReceipt": "supervisor",
             **{kind: "supervisor" for kind in TERMINAL_EVIDENCE_FILES},
             "RecoveryResolutionReceipt": "supervisor",
             "ProcessLiveRequirementAssignmentReceipt": "worker",
             "OperationalCheckpointReceipt": "worker",
-            "SupervisorBootstrapCheckpointReceipt": "supervisor",
+            BOOTSTRAP_CHECKPOINT_KIND: "supervisor",
             "WorkerContinuationReceipt": "worker",
         }
         expected_role = expected_roles.get(receipt.receipt_kind)
@@ -426,7 +429,7 @@ class ProcessSupervisorAuthorityFactory:
         ):
             raise ValueError("process authority receipt signature/digest mismatch")
 
-    def _validate_supervisor_canonical_bundle(
+    def validate_supervisor_canonical_bundle(
         self, bundle: Mapping[str, Any], *, launch: SignedProcessAuthorityReceipt,
         outcome: Outcome, error_kind: Optional[str],
     ) -> Mapping[str, Any]:
@@ -499,7 +502,7 @@ class ProcessSupervisorAuthorityFactory:
         }
         if not all(type(value) is str and value for key, value in payload.items() if key != "child_pid"):
             raise TypeError("supervisor launch identity is incomplete")
-        return self._issue("SupervisorLaunchReceipt", payload, signer_role="supervisor")
+        return self._issue(LAUNCH_RECEIPT_KIND, payload, signer_role="supervisor")
 
     def issue_deadline_bootstrap_checkpoint(
         self, *, launch: SignedProcessAuthorityReceipt,
@@ -601,7 +604,7 @@ class ProcessSupervisorAuthorityFactory:
             "prefix_digest": prefix.prefix_authority_digest,
         })
         invocation_identity = "pair-process-" + authority_digest(target)[:32]
-        checkpoint = self._issue("SupervisorBootstrapCheckpointReceipt", {
+        checkpoint = self._issue(BOOTSTRAP_CHECKPOINT_KIND, {
             "state": CheckpointState.ACTIVE.value,
             "launch_receipt_digest": launch.receipt_digest,
             "result_occurrence_id": prefix.result_occurrence_id,
@@ -725,7 +728,7 @@ class ProcessSupervisorAuthorityFactory:
             ):
                 raise ValueError("ACTIVE checkpoint predecessor is not resolved")
         if (
-            launch.receipt_kind != "SupervisorLaunchReceipt"
+            launch.receipt_kind != LAUNCH_RECEIPT_KIND
             or prefix.result_occurrence_id != launch.payload["result_occurrence_id"]
             or prefix.stream_id != launch.payload["stream_id"]
             or projection.result_occurrence_id != prefix.result_occurrence_id
@@ -808,7 +811,7 @@ class ProcessSupervisorAuthorityFactory:
             ):
                 raise ValueError("subordinate checkpoint predecessor is not resolved")
         if (
-            launch.receipt_kind != "SupervisorLaunchReceipt"
+            launch.receipt_kind != LAUNCH_RECEIPT_KIND
             or prefix.result_occurrence_id != launch.payload["result_occurrence_id"]
             or prefix.stream_id != launch.payload["stream_id"]
             or projection.result_occurrence_id != prefix.result_occurrence_id
@@ -1380,7 +1383,7 @@ class ProcessSupervisorAuthorityFactory:
         for receipt in (launch, checkpoint, claimed, timeout, final_transition):
             self.validate(receipt)
         segment.validate(prefix, timeout)
-        canonical = self._validate_supervisor_canonical_bundle(
+        canonical = self.validate_supervisor_canonical_bundle(
             bundle.canonical_result_bundle,
             launch=launch,
             outcome=Outcome.TIMEOUT,
@@ -1468,12 +1471,12 @@ class ProcessSupervisorAuthorityFactory:
             receipt.receipt_digest: receipt
             for receipt in self._issued.values()
             if receipt.receipt_digest == bundle.launch_receipt_digest
-            and receipt.receipt_kind == "SupervisorLaunchReceipt"
+            and receipt.receipt_kind == LAUNCH_RECEIPT_KIND
         }
         if set(launches_by_digest) != {bundle.launch_receipt_digest}:
             raise ValueError("timeout bundle launch authority is not unique")
         launch = launches_by_digest[bundle.launch_receipt_digest]
-        canonical = self._validate_supervisor_canonical_bundle(
+        canonical = self.validate_supervisor_canonical_bundle(
             bundle.canonical_result_bundle,
             launch=launch,
             outcome=Outcome.TIMEOUT,
@@ -1528,7 +1531,7 @@ class ProcessSupervisorAuthorityFactory:
         if _capability is not _OPERATIONAL_ERROR_CAPABILITY_TOKEN:
             raise TypeError("operational ERROR issuance requires store capability")
         self.validate(launch)
-        if launch.receipt_kind != "SupervisorLaunchReceipt":
+        if launch.receipt_kind != LAUNCH_RECEIPT_KIND:
             raise ValueError("operational error requires exact launch authority")
         if error_kind not in SUPERVISOR_OPERATIONAL_ERROR_KINDS:
             raise ValueError("supervisor operational error kind is not sealed")
@@ -1594,7 +1597,7 @@ class ProcessSupervisorAuthorityFactory:
         self.validate(launch)
         self.validate(error)
         if (
-            launch.receipt_kind != "SupervisorLaunchReceipt"
+            launch.receipt_kind != LAUNCH_RECEIPT_KIND
             or error.receipt_kind != "SupervisorOperationalErrorReceipt"
             or error.payload["launch_receipt_digest"] != launch.receipt_digest
         ):
@@ -1799,7 +1802,7 @@ class ProcessSupervisorAuthorityFactory:
         self._validate_operational_error_segment(
             launch=launch, error=error, segment=segment, prefix=prefix
         )
-        canonical = self._validate_supervisor_canonical_bundle(
+        canonical = self.validate_supervisor_canonical_bundle(
             bundle.canonical_result_bundle,
             launch=launch,
             outcome=Outcome.ERROR,
@@ -1971,7 +1974,7 @@ class DurableCheckpointStore:
         self.factory.validate(receipt)
         terminal_evidence.validate_deadline(receipt, launch)
         self._atomic_write(
-            self.directory / terminal_evidence.DEADLINE_FILENAME,
+            self.directory / layout.DEADLINE,
             self._bytes(receipt), identical_ok=True,
         )
 
@@ -2000,7 +2003,7 @@ class DurableCheckpointStore:
             self.factory.validate(receipt)
             terminal_evidence.validate_child_exit(receipt, launch, deadline)
             self._atomic_write(
-                self.directory / terminal_evidence.CHILD_EXIT_FILENAME,
+                self.directory / layout.CHILD_EXIT,
                 self._bytes(receipt), identical_ok=True,
             )
             return receipt
@@ -2070,7 +2073,7 @@ class DurableCheckpointStore:
         return anchor(terminal_evidence.ANCHOR_NONE)
 
     def _observe_envelope_locked(self) -> "terminal_evidence.EnvelopeObservation":
-        path = self.directory / RESULT_ENVELOPE_FILE
+        path = self.directory / layout.RESULT_ENVELOPE
         if not path.exists():
             return terminal_evidence.EnvelopeObservation(False, None)
         return terminal_evidence.EnvelopeObservation(
@@ -2199,7 +2202,7 @@ class DurableCheckpointStore:
         except Exception as exc:
             raise ValueError("pending ACTIVE transaction members are invalid") from exc
         if (
-            launch.receipt_kind != "SupervisorLaunchReceipt"
+            launch.receipt_kind != LAUNCH_RECEIPT_KIND
             or launch.payload["execution_nonce"] != self.invocation_nonce
             or payload["invocation_nonce"] != launch.payload["execution_nonce"]
         ):
@@ -2240,7 +2243,7 @@ class DurableCheckpointStore:
 
     def persist_launch(self, receipt: SignedProcessAuthorityReceipt) -> None:
         self.factory.validate(receipt)
-        if receipt.receipt_kind != "SupervisorLaunchReceipt":
+        if receipt.receipt_kind != LAUNCH_RECEIPT_KIND:
             raise ValueError("launch store requires SupervisorLaunchReceipt")
         if receipt.payload["execution_nonce"] != self.invocation_nonce:
             raise ValueError("launch execution nonce differs from checkpoint directory")
@@ -2264,23 +2267,24 @@ class DurableCheckpointStore:
     def _archive_resolved_checkpoint_locked(
         self, resolved: SignedProcessAuthorityReceipt,
     ) -> None:
-        history = self.directory / "checkpoint-history" / resolved.receipt_digest
-        history.mkdir(parents=True, exist_ok=True)
-        # Issue #165: chain の member は ``CHAIN_MEMBERS`` の 1 つの表で決める
+        destination = history_destination(resolved.receipt_digest)
+        history = self.directory / destination
+        # Issue #165: chain の member は ``CHAIN_MEMBERS`` の 1 つの表で決め、移動は
+        # ``checkpoint_archive`` の手順（os.replace と両側の directory fsync）で行う
         # （supervisor の recovery で閉じた chain は recovery-resolution も連れて行く）。
         for name in CHAIN_MEMBER_NAMES:
             source = self.directory / name
-            destination = history / name
-            if destination.exists():
+            if (history / name).exists():
                 if source.exists():
-                    if source.read_bytes() != destination.read_bytes():
+                    if source.read_bytes() != (history / name).read_bytes():
                         raise ValueError(
                             "resolved checkpoint history member differs"
                         )
                     source.unlink()
+                    fsync_directory(self.directory)
                 continue
             if source.exists():
-                os.replace(source, destination)
+                move_member(self.directory, destination, name)
         try:
             archived = self.factory.decode(json.loads(
                 (history / layout.STATE).read_text(encoding="utf-8")
@@ -2291,11 +2295,6 @@ class DurableCheckpointStore:
             ) from exc
         if archived.receipt_digest != resolved.receipt_digest:
             raise ValueError("resolved checkpoint history authority differs")
-        directory_fd = os.open(history, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
 
     def _commit_pending_active_locked(
         self,
@@ -2325,8 +2324,7 @@ class DurableCheckpointStore:
                 self._archive_resolved_checkpoint_locked(current)
         elif predecessor_digest is not None:
             history_state = (
-                self.directory / "checkpoint-history"
-                / predecessor_digest / layout.STATE
+                history_directory(self.directory, predecessor_digest) / layout.STATE
             )
             try:
                 predecessor = self.factory.decode(json.loads(
@@ -2506,9 +2504,7 @@ class DurableCheckpointStore:
             history = None
             predecessor_names: tuple[str, ...] = ()
             if predecessor_digest is not None:
-                history = (
-                    self.directory / "checkpoint-history" / predecessor_digest
-                )
+                history = history_directory(self.directory, predecessor_digest)
                 predecessor_names = tuple(
                     spec.name for spec in CHAIN_MEMBERS
                     if spec.required or (history / spec.name).exists()
@@ -2882,7 +2878,7 @@ class DurableCheckpointStore:
         except (OSError, KeyError, TypeError, ValueError) as exc:
             raise ValueError("durable launch authority is missing or invalid") from exc
         if (
-            launch.receipt_kind != "SupervisorLaunchReceipt"
+            launch.receipt_kind != LAUNCH_RECEIPT_KIND
             or launch.payload["execution_nonce"] != self.invocation_nonce
         ):
             raise ValueError("durable launch authority differs from this store")
@@ -3172,9 +3168,3 @@ class DurableCheckpointStore:
         ):
             raise ValueError("persisted operational ERROR bundle integrity mismatch")
         return bundle
-
-    def rematerialize_operational_error_bundle(
-        self, *, prefix: Optional[EventStreamPrefixView] = None,
-    ) -> DurableErrorFinalizationBundle:
-        with self._locked():
-            return self._rematerialize_operational_error_bundle_locked(prefix=prefix)
