@@ -454,9 +454,16 @@ class _SupervisorInvocation:
         child_records = None if child is None else case.records.child(child)
         evidence = None if child_records is None else read_json(child_records.launch_evidence)
         child_faults = () if child_records is None else read_json_lines(child_records.faults)
-        if case.child_faults and evidence is not None and not crashed and not child_faults:
+        # worker に焼き込んだ停止点は、この invocation が worker を起こして
+        # supervisor が落ちなかった run なら、どれか 1 つに着いているはず。
+        # launch 検査の前に worker が落ちた run（evidence 無し）も同じく未到達。
+        if case.child_faults and child is not None and not crashed and not child_faults:
+            where = (
+                "the worker never passed its launch check" if evidence is None
+                else "the worker ran"
+            )
             raise SupervisorPathMismatch(
-                f"{records.invocation}: the worker ran but reached none of "
+                f"{records.invocation}: {where} and reached none of "
                 f"{[fault.at.describe() for fault in case.child_faults]}"
             )
         at_stop = read_json(records.store_at_child_stop)

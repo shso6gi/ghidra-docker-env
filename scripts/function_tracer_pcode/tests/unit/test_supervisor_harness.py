@@ -466,3 +466,29 @@ def test_a_worker_left_alive_by_a_returning_supervisor_is_reported(tmp_path, mon
     with supervisor_case(tmp_path, ChildScript((Stop(),))) as case:
         with pytest.raises(WorkerOutlivedSupervisor, match="alive after the supervisor returned"):
             run_supervisor(case)
+
+
+def test_a_worker_that_fails_before_its_stop_points_is_not_a_normal_run(tmp_path, monkeypatch):
+    """launch 検査の前に落ちた worker も、宣言した停止点に着いていない。
+
+    worker の環境から launch の path を外す（test 側の monkeypatch。fork 先へ
+    継承される）と、worker は本処理に入らず exit 87 で終わる。停止点を宣言した
+    run を、停止点の無い経路のまま返さない。
+    """
+
+    from scripts.function_tracer_pcode.authority.process import supervisor_command
+
+    original = supervisor_command.ProcessSupervisorCommand._child_environment
+
+    def _without_launch(self):
+        environment = original(self)
+        environment.pop(supervisor_command.CHILD_ENV_LAUNCH)
+        return environment
+
+    monkeypatch.setattr(
+        supervisor_command.ProcessSupervisorCommand, "_child_environment", _without_launch,
+    )
+    script = ChildScript((Checkpoint(), Stop()), faults=(stop_at(FileBoundary("continuation.json")),))
+    with supervisor_case(tmp_path, script) as case:
+        with pytest.raises(SupervisorPathMismatch, match="never passed its launch check"):
+            run_supervisor(case)
