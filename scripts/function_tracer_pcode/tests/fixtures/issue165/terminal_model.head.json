@@ -1,0 +1,30 @@
+{
+  "crash_transitions": 10566,
+  "cycles": 0,
+  "malformed_rejected": {
+    "A": 148,
+    "D": 864,
+    "E": 1019,
+    "claim-disposition-mismatch": 264,
+    "deadline-on-resolved": 6,
+    "error-on-timeout": 308,
+    "foreign-live": 232,
+    "live": 624,
+    "pending": 462,
+    "resolved-on-timeout": 308,
+    "timeout-on-error": 80,
+    "unrelated-history": 1307
+  },
+  "reachable_states": 1307,
+  "terminal_oracles": {
+    "ERROR:BEFORE_CHECKPOINT": 24,
+    "ERROR:NON_DECOMPILATION": 174,
+    "INVALID:ACTIVE_EXIT_STAGE_UNSEALED": 26,
+    "INVALID:CANONICAL_CHILD_RESULT_INVALID": 66,
+    "INVALID:DEADLINE_WITHOUT_EXIT_OBSERVATION": 144,
+    "INVALID:EXIT_NOT_OBSERVED": 144,
+    "RESOLVED:None": 9,
+    "TIMEOUT:None": 720
+  },
+  "unhandled": 0
+}
