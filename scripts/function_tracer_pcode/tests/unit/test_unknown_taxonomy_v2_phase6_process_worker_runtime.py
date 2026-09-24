@@ -16,6 +16,8 @@ from scripts.function_tracer_pcode.authority.process.supervisor_command import (
     CHILD_ENV_WORKER_KEY_FILE,
     CHILD_ENV_WORKER_KEY_ID,
     COMMAND_SCHEMA,
+)
+from scripts.function_tracer_pcode.authority.process.process_identity import (
     read_process_start_token,
 )
 from scripts.function_tracer_pcode.authority.process.worker_runtime import (
@@ -43,7 +45,7 @@ def _projection(status, child_returncode):
     kinds = {
         "ERROR": "DurableErrorFinalizationBundle",
         "TIMEOUT": "DurableTimeoutFinalizationBundle",
-        "RESOLVED": "CheckpointStateTransitionReceipt",
+        "RESOLVED": "SupervisorCanonicalResultResolvedReceipt",
     }
     body = {
         "status": status,
@@ -58,6 +60,19 @@ def _projection(status, child_returncode):
     if status == "TIMEOUT":
         body["proof_requirement_id"] = "requirement-id"
     return {**body, "projection_digest": authority_digest(body)}
+
+
+@pytest.mark.parametrize("kind", (
+    "CheckpointStateTransitionReceipt", "SupervisorChildExitReceipt",
+))
+def test_decompile_checkpoint_or_exit_observation_is_not_a_pair_resolution(kind):
+    """Issue #165: checkpoint の RESOLVED や E は pair の RESOLVED ではない。"""
+    body = dict(_projection("RESOLVED", 0))
+    body.pop("projection_digest")
+    body["authority_kind"] = kind
+    payload = {**body, "projection_digest": authority_digest(body)}
+    with pytest.raises(CanonicalCensusInvalid, match="status/authority differs"):
+        require_canonical_supervisor_projection(payload)
 
 
 @pytest.mark.parametrize("status", ("ERROR", "TIMEOUT", "RESOLVED"))

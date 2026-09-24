@@ -22,6 +22,12 @@ production には何も足さない。停止点は production の 2 つの契約
 停止点へ着いた process がすること（``Fault.action``）:
 
 * ``crash``: 記録を残して ``os._exit``。finally も cleanup も走らない。
+* ``pause``（supervisor だけ。Issue #165）: 「止まった」ことを記録し、test が
+  invocation の release FIFO に書くまでその場で待つ。durable な公開の直後
+  （例: ``deadline.json`` の公開直後 = D は durable で signal はまだ）に
+  supervisor を決定的に止める。同期は FIFO と記録だけで、sleep を合否の根拠に
+  しない。止まっている間も supervisor は持っている lock（owner lock、公開が
+  store の transaction の中なら store の flock も）を持ったまま。
 * ``stop``（worker child だけ）: 「止まった」ことを記録して、signal で終了
   させられるまで待つ。supervisor の deadline はこの記録を見て到達させる
   （sleep 競争を作らない）。store の transaction の中（flock を持ったまま）で
@@ -126,14 +132,16 @@ class Fault:
     ignore_sigterm: bool = False
 
     def __post_init__(self) -> None:
-        if self.action not in {"crash", "stop"}:
-            raise ValueError("fault action is crash or stop")
+        if self.action not in {"crash", "stop", "pause"}:
+            raise ValueError("fault action is crash, stop or pause")
         if self.action == "stop" and not isinstance(self.at, FileBoundary):
             raise ValueError("only a worker child stops, and only at a store file")
+        if self.action == "pause" and isinstance(self.at, ChildStopped):
+            raise ValueError("a supervisor pauses at a durable publication")
 
     def to_json(self) -> dict[str, Any]:
-        if not isinstance(self.at, FileBoundary):
-            raise ValueError("only store file boundaries reach the worker child")
+        if not isinstance(self.at, FileBoundary) or self.action == "pause":
+            raise ValueError("only store file crash / stop points reach the worker child")
         return {
             "path": self.at.path, "occurrence": self.at.occurrence,
             "side": self.at.side, "action": self.action,
@@ -156,6 +164,12 @@ def stop_at(point: FileBoundary) -> Fault:
     return Fault(point, "stop")
 
 
+def pause_at(point: Union[FileBoundary, ProjectionWrite]) -> Fault:
+    """supervisor をその公開の前後で止め、test の ``release`` まで待たせる。"""
+
+    return Fault(point, "pause")
+
+
 class Deadline:
     """supervisor の deadline をいつ到達させるか。"""
 
@@ -173,23 +187,45 @@ class Deadline:
 # ---------------------------------------------------------------------------
 
 
-def _fire(fault: Fault, *, role: str, sink: Path, child: Optional[ChildRecords]) -> None:
+def _fire(
+    fault: Fault, *, role: str, sink: Path, child: Optional[ChildRecords],
+    release: Optional[Path] = None,
+) -> None:
     append_json_line(sink, {
         "role": role, "pid": os.getpid(), "point": fault.at.describe(),
         "action": fault.action,
     })
     if fault.action == "crash":
         os._exit(fault.exit_code)
+    if fault.action == "pause":
+        if release is None:
+            raise AssertionError("only a supervisor invocation can pause")
+        # 書き手（test の ``release``）が開いて 1 byte 書くまで戻らない。
+        with open(release, "rb") as fifo:
+            fifo.read(1)
+        return
     if child is None:
         raise AssertionError("only a worker child can stop")
     stop_here(child, point=fault.at.describe(), ignore_sigterm=fault.ignore_sigterm)
 
 
-def stop_here(child: ChildRecords, *, point: str, ignore_sigterm: bool = False) -> None:
-    """止まったことを記録し、signal で終了させられるまで戻らない。"""
+def stop_here(
+    child: ChildRecords, *, point: str, ignore_sigterm: bool = False,
+    exit_on_sigterm: Optional[int] = None, exit_on_sigusr1: Optional[int] = None,
+) -> None:
+    """止まったことを記録し、signal で終了させられるまで戻らない。
+
+    Issue #165: ``exit_on_sigterm`` は SIGTERM を受けて自分で ``exit_code`` で
+    終わる child（signal 後の通常終了、race B）、``exit_on_sigusr1`` は test の
+    合図で通常終了する child（signal 前の通常終了、race A）。
+    """
 
     if ignore_sigterm:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if exit_on_sigterm is not None:
+        signal.signal(signal.SIGTERM, lambda *_: os._exit(exit_on_sigterm))
+    if exit_on_sigusr1 is not None:
+        signal.signal(signal.SIGUSR1, lambda *_: os._exit(exit_on_sigusr1))
     write_json(child.stopped, {
         "pid": os.getpid(), "point": point, "ignore_sigterm": ignore_sigterm,
     })
@@ -205,6 +241,7 @@ def stop_here(child: ChildRecords, *, point: str, ignore_sigterm: bool = False) 
 def install_publication_faults(
     faults: Sequence[Fault], *, role: str, store_directory: Path,
     projection: Optional[Path], sink: Path, child: Optional[ChildRecords] = None,
+    release: Optional[Path] = None,
 ) -> None:
     """この process の ``os.replace`` / ``os.rename`` を停止点つきで包む。
 
@@ -243,7 +280,7 @@ def install_publication_faults(
         for index in hits:
             fault = points[index]
             if fault.at.side == side and fault.at.occurrence == seen[index]:
-                _fire(fault, role=role, sink=sink, child=child)
+                _fire(fault, role=role, sink=sink, child=child, release=release)
 
     def _wrap(original: Any) -> Any:
         def publish(source: Any, destination: Any, *args: Any, **kwargs: Any) -> Any:

@@ -38,7 +38,7 @@ from scripts.function_tracer_pcode.authority.contracts import (
     Outcome,
     authority_digest,
 )
-from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+from scripts.function_tracer_pcode.authority.process.process_identity import (
     read_process_start_token,
 )
 from scripts.function_tracer_pcode.tests.unit._supervisor_support import (

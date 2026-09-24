@@ -86,12 +86,14 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_faults import (
     FileBoundary,
     ProjectionWrite,
     crash_at,
+    pause_at,
     stop_at,
 )
 from scripts.function_tracer_pcode.tests.unit._supervisor_process import (
     NoWorkerStarted,
     SupervisorEntry,
     SupervisorEntryRefused,
+    SupervisorHandle,
     SupervisorPathMismatch,
     SupervisorRaised,
     SupervisorRun,
@@ -99,6 +101,7 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_process import (
     classification_inputs,
     restart_supervisor,
     run_supervisor,
+    start_supervisor,
     terminate_leftover_workers,
     worker_alive,
 )
@@ -120,7 +123,8 @@ __all__ = (
     "classify", "launch_evidence", "StoreSnapshot",
     "ChildScript", "Checkpoint", "Envelope", "Exit", "Stop", "Fault",
     "FileBoundary", "ProjectionWrite", "ChildStopped", "Deadline", "crash_at",
-    "stop_at", "LAUNCH_EVIDENCE_EXIT",
+    "stop_at", "pause_at", "start_supervisor", "SupervisorHandle",
+    "LAUNCH_EVIDENCE_EXIT",
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[4]

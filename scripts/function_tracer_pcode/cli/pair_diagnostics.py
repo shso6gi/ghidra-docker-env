@@ -122,7 +122,7 @@ def _child_start_token() -> Dict[str, Any]:
     registration の可否には影響しない。
     """
     try:
-        from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+        from scripts.function_tracer_pcode.authority.process.process_identity import (
             read_process_start_token,
         )
 

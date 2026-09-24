@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.authority.decision.canonical_result import (
     validate_canonical_result_finalization_bundle,
 )
+from scripts.function_tracer_pcode.authority.process import child_exit
 from scripts.function_tracer_pcode.authority.process.stack_dump_diagnostic import (
     read_stack_dump_status,
 )
@@ -93,18 +94,7 @@ VERIFICATION_REPLAY_ONLY = "replay_only_unsigned"
 #: そもそも封が無い bundle（`bundle_seal_key_id` が null）。digest + replay が全て。
 VERIFICATION_UNSEALED = "unsealed_bundle"
 
-#: supervisor の deadline 経路が作り得る `child_exit_disposition` の全体
-#: （`_terminate_exact_process_group` の戻り値）。wildcard の部分一致では
-#: 判定しない。
-DEADLINE_DISPOSITION_RE = re.compile(
-    r"\A(?:SIGTERM_AFTER_DEADLINE|SIGKILL_AFTER_DEADLINE"
-    r"|EXITED_-?\d+(?:_(?:BEFORE|AFTER)_(?:SIGTERM|SIGKILL))?)\Z"
-)
-
 SUPERVISOR_TIMEOUT_AUTHORITY_KIND = "DurableTimeoutFinalizationBundle"
-OBSERVATION_KINDS = frozenset({
-    "LIVE_PROCESS_WAIT", "DURABLE_RESTART_NO_CHILD_STATUS",
-})
 
 RESULT_JSON_BEGIN = "=== EQUIVALENCE_RESULT_JSON_BEGIN ==="
 RESULT_JSON_END = "=== EQUIVALENCE_RESULT_JSON_END ==="
@@ -185,10 +175,6 @@ def supervisor_deadline_evidence(pair_status: Mapping[str, Any]) -> Evidence:
     「`child_returncode` が既存 validator と一致」「`classification_valid`」。
     無関係な field が増えても評価は変わらない。
     """
-    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-        validate_durable_child_returncode_observation,
-    )
-
     if not isinstance(pair_status, Mapping):
         return _evidence(["pair_status"], [], {})
     missing: List[str] = []
@@ -220,11 +206,10 @@ def supervisor_deadline_evidence(pair_status: Mapping[str, Any]) -> Evidence:
     ):
         violations.append("supervisor_authority_kind")
     if disposition is not absent and (
-        not isinstance(disposition, str)
-        or DEADLINE_DISPOSITION_RE.match(disposition) is None
+        not child_exit.is_deadline_disposition(disposition)
     ):
         violations.append("child_exit_disposition")
-    if observation_kind is not absent and observation_kind not in OBSERVATION_KINDS:
+    if observation_kind is not absent and observation_kind not in child_exit.OBSERVATION_KINDS:
         violations.append("child_returncode_observation_kind")
     if classification_valid is not absent and classification_valid is not True:
         violations.append("classification_valid")
@@ -236,7 +221,7 @@ def supervisor_deadline_evidence(pair_status: Mapping[str, Any]) -> Evidence:
         and "child_returncode_observation_kind" not in violations
     ):
         try:
-            validate_durable_child_returncode_observation(
+            child_exit.validate_durable_child_returncode_observation(
                 child_exit_disposition=disposition,
                 child_returncode=returncode,
                 observation_kind=observation_kind,

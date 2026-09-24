@@ -124,6 +124,11 @@ class InvocationRecords:
     def store_at_child_stop(self) -> Path:
         return self.directory / "store-at-child-stop.json"
 
+    @property
+    def release(self) -> Path:
+        """Issue #165: ``pause`` で止まった supervisor を再開させる FIFO。"""
+        return self.directory / "release.fifo"
+
     def child(self) -> Optional[ChildIdentity]:
         payload = read_json(self.started_child)
         return None if payload is None else ChildIdentity(**payload)

@@ -14,18 +14,29 @@ import tempfile
 import time
 from typing import Any, Mapping, Optional, Sequence
 
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.contracts import authority_digest, canonical_value
+from scripts.function_tracer_pcode.authority.process import terminal_evidence
 from scripts.function_tracer_pcode.authority.process.supervisor import (
-    CheckpointState,
     DurableCheckpointStore,
     ProcessSupervisorAuthorityFactory,
 )
-from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-    BUNDLE_KIND,
-    RESULT_ENVELOPE_FILE,
-    SupervisorCanonicalResultResolvedReceipt,
-    validate_durable_child_returncode_observation,
-    validate_canonical_result_finalization_bundle,
+from scripts.function_tracer_pcode.authority.process.terminal_driver import (
+    DriveResult,
+    drive,
+)
+from scripts.function_tracer_pcode.authority.process.terminal_recovery import ExitMode
+from scripts.function_tracer_pcode.authority.process.terminal_projection import (
+    terminal_exit_code,
+    terminal_projection,
+)
+from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
+    validate_canonical_envelope,
+)
+from scripts.function_tracer_pcode.authority.process import child_exit
+from scripts.function_tracer_pcode.authority.process.process_identity import (
+    process_is_alive,
+    read_process_start_token,
 )
 from scripts.function_tracer_pcode.authority.process.stack_dump_diagnostic import (
     DEFAULT_STACK_DUMP_LEAD_SECONDS,
@@ -57,21 +68,6 @@ def _exact_string(name: str, value: Any) -> str:
     if type(value) is not str or not value:
         raise TypeError(f"{name} must be a non-empty exact string")
     return value
-
-
-def read_process_start_token(pid: int, *, proc_root: Path = Path("/proc")) -> str:
-    if type(pid) is not int or pid <= 0:
-        raise TypeError("process PID is invalid")
-    try:
-        stat = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
-        closing = stat.rfind(")")
-        fields_after_comm = stat[closing + 2:].split()
-        start_time = fields_after_comm[19]
-    except Exception as exc:
-        raise ValueError("process start token is unavailable") from exc
-    if not start_time.isascii() or not start_time.isdecimal():
-        raise ValueError("process start token is not canonical")
-    return f"linux-proc-starttime-{start_time}"
 
 
 def _read_key(path: Path) -> bytes:
@@ -191,77 +187,19 @@ class ProcessSupervisorCommand:
         self.store = DurableCheckpointStore(
             config.checkpoint_root, self.factory, config.execution_nonce
         )
-
-    def _durable_terminal_projection(
-        self, launch: Any, bundle: Any, *, status: str,
-        child_returncode: Any,
-    ) -> dict[str, Any]:
-        from scripts.function_tracer_pcode.authority.contracts import Outcome
-
-        outcome = Outcome.TIMEOUT if status == "TIMEOUT" else Outcome.ERROR
-        error_kind = bundle.error_kind if outcome is Outcome.ERROR else None
-        validated = self.factory._validate_supervisor_canonical_bundle(
-            bundle.canonical_result_bundle,
-            launch=launch,
-            outcome=outcome,
-            error_kind=error_kind,
+        # 自然終了をどう終端へ写すか（runner は検証済み canonical 結果だけを採る）。
+        self.exit_mode = (
+            ExitMode.CANONICAL_RESULT_REQUIRED
+            if config.allow_child_exit_resolution
+            else ExitMode.SUPERVISOR_ONLY
         )
-        canonical = bundle.canonical_result_bundle
-        occurrence = canonical["result_entry_occurrence_receipt"]
-        identity = validated["execution_identity"]
-        observation_kind = (
-            "LIVE_PROCESS_WAIT" if child_returncode is not None
-            else "DURABLE_RESTART_NO_CHILD_STATUS"
-        )
-        validate_durable_child_returncode_observation(
-            child_exit_disposition=bundle.child_exit_disposition,
-            child_returncode=child_returncode,
-            observation_kind=observation_kind,
-        )
-        return {
-            "status": status,
-            "authority_kind": type(bundle).__name__,
-            "supervisor_authority_kind": type(bundle).__name__,
-            "supervisor_final_authority_digest": bundle.bundle_digest,
-            "launch_receipt_digest": launch.receipt_digest,
-            "finalization_bundle_digest": bundle.bundle_digest,
-            "event_stream_authority_digest": (
-                bundle.composite_stream_authority_digest
-            ),
-            "canonical_outcome": validated["outcome"],
-            "decision_receipt_digest": validated["decision_receipt_digest"],
-            "result_occurrence_id": identity["result_occurrence_id"],
-            "result_entry_occurrence_receipt_digest": occurrence[
-                "receipt_digest"
-            ],
-            "execution_identity_digest": identity[
-                "execution_identity_digest"
-            ],
-            "stream_id": identity["stream_id"],
-            "source_snapshot_fingerprint": identity[
-                "source_snapshot_fingerprint"
-            ],
-            "canonical_result_bundle_digest": validated["bundle_digest"],
-            "canonical_result_bundle_kind": "CanonicalResultFinalizationBundle",
-            "canonical_result_payload_preimage_digest": validated[
-                "payload_preimage_digest"
-            ],
-            "semantic_projection_digest": validated[
-                "semantic_projection_digest"
-            ],
-            "error_kind": error_kind,
-            "child_exit_disposition": bundle.child_exit_disposition,
-            "child_returncode_observation_kind": observation_kind,
-            "child_returncode": child_returncode,
-            "classification_valid": True,
-        }
 
     def _child_environment(self) -> dict[str, str]:
         environment = dict(os.environ)
         environment.update({
             CHILD_ENV_ROOT: str(self.config.checkpoint_root.resolve()),
             CHILD_ENV_NONCE: self.config.execution_nonce,
-            CHILD_ENV_LAUNCH: str((self.store.directory / "launch.json").resolve()),
+            CHILD_ENV_LAUNCH: str((self.store.directory / layout.LAUNCH).resolve()),
             CHILD_ENV_SUPERVISOR_KEY_ID: self.config.supervisor_signing_key_id,
             CHILD_ENV_SUPERVISOR_KEY_FILE: str(
                 self.config.supervisor_signing_key_file.resolve()
@@ -281,7 +219,14 @@ class ProcessSupervisorCommand:
             "_barrier", str(read_fd), "--", *child_command,
         )
 
-    def _write_projection(self, payload: Mapping[str, Any]) -> None:
+    def _write_projection(self, ownership: Any, payload: Mapping[str, Any]) -> None:
+        """projection を公開する（owner の supervisor だけが書く）。
+
+        Issue #165: projection は durable な終端 authority から毎回作り直す出力で、
+        入力としては読まない。既存の projection（改ざんを含む）を優先しない。
+        """
+        if not ownership.held:
+            raise RuntimeError("projection write requires supervisor ownership")
         body = dict(payload)
         body["projection_schema"] = COMMAND_SCHEMA
         body["projection_digest"] = authority_digest(body)
@@ -303,128 +248,6 @@ class ProcessSupervisorCommand:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-
-    def _write_canonical_resolved_receipt(
-        self, receipt: SupervisorCanonicalResultResolvedReceipt
-    ) -> None:
-        receipt.validate()
-        path = self.store.directory / "canonical-resolved-receipt.json"
-        payload = {
-            name: getattr(receipt, name) for name in receipt.__dataclass_fields__
-        }
-        fd, temporary = tempfile.mkstemp(
-            prefix=".canonical-resolved-", dir=str(path.parent)
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
-
-    def _load_canonical_child_result(
-        self, launch: Any, child_returncode: int,
-    ) -> tuple[SupervisorCanonicalResultResolvedReceipt, dict[str, Any]]:
-        from scripts.function_tracer_pcode.authority.decision.production_cutover import (
-            CLI_EXIT_MATRIX,
-        )
-        from scripts.function_tracer_pcode.authority.contracts import Outcome
-
-        path = self.store.directory / RESULT_ENVELOPE_FILE
-        envelope = json.loads(path.read_text(encoding="utf-8"))
-        if set(envelope) != {
-            "schema", "canonical_result_payload",
-            "canonical_result_bundle_digest", "envelope_digest",
-        }:
-            raise ValueError("canonical result envelope fields differ")
-        envelope_body = {
-            key: value for key, value in envelope.items()
-            if key != "envelope_digest"
-        }
-        if (
-            envelope["schema"] != "canonical-result-envelope-v1"
-            or authority_digest(envelope_body) != envelope["envelope_digest"]
-        ):
-            raise ValueError("canonical result envelope seal is invalid")
-        payload = envelope["canonical_result_payload"]
-        bundle = payload["canonical_result_finalization_bundle"]
-        preimage = {
-            key: value for key, value in payload.items()
-            if key != "canonical_result_finalization_bundle"
-        }
-        validated = validate_canonical_result_finalization_bundle(
-            bundle,
-            result_payload_preimage=preimage,
-            bundle_verification_key_id=self.config.supervisor_signing_key_id,
-            bundle_verification_key=_read_key(
-                self.config.supervisor_signing_key_file
-            ),
-        )
-        identity = validated["execution_identity"]
-        outcome = Outcome(validated["outcome"])
-        if (
-            bundle["bundle_digest"]
-            != envelope["canonical_result_bundle_digest"]
-            or identity["result_occurrence_id"]
-            != self.config.result_occurrence_id
-            or identity["source_snapshot_fingerprint"]
-            != self.config.source_snapshot_fingerprint
-            or identity["stream_id"] != self.config.stream_id
-            or launch.payload["result_occurrence_id"]
-            != identity["result_occurrence_id"]
-            or launch.payload["source_snapshot_fingerprint"]
-            != identity["source_snapshot_fingerprint"]
-            or launch.payload["stream_id"] != identity["stream_id"]
-            or child_returncode != CLI_EXIT_MATRIX[outcome]
-        ):
-            raise ValueError("canonical child result does not join launch/exit")
-        receipt = SupervisorCanonicalResultResolvedReceipt.create(
-            launch_receipt_digest=launch.receipt_digest,
-            result_occurrence_id=identity["result_occurrence_id"],
-            execution_identity_digest=identity["execution_identity_digest"],
-            child_returncode=child_returncode,
-            canonical_result_bundle_digest=validated["bundle_digest"],
-            payload_preimage_digest=validated["payload_preimage_digest"],
-            decision_receipt_digest=validated["decision_receipt_digest"],
-        )
-        receipt.validate()
-        occurrence = bundle.get("result_entry_occurrence_receipt") or {}
-        semantic = bundle["canonical_semantic_result_projection"]
-        error_kind = semantic["payload"].get("error_kind")
-        projection = {
-            "status": "RESOLVED",
-            "authority_kind": type(receipt).__name__,
-            "supervisor_authority_kind": type(receipt).__name__,
-            "supervisor_final_authority_digest": receipt.receipt_digest,
-            "launch_receipt_digest": launch.receipt_digest,
-            "canonical_outcome": outcome.value,
-            "decision_receipt_digest": validated["decision_receipt_digest"],
-            "result_occurrence_id": identity["result_occurrence_id"],
-            "result_entry_occurrence_receipt_digest": occurrence.get(
-                "receipt_digest"
-            ),
-            "execution_identity_digest": identity["execution_identity_digest"],
-            "stream_id": identity["stream_id"],
-            "source_snapshot_fingerprint": identity[
-                "source_snapshot_fingerprint"
-            ],
-            "canonical_result_bundle_digest": validated["bundle_digest"],
-            "canonical_result_bundle_kind": BUNDLE_KIND,
-            "canonical_result_payload_preimage_digest": validated[
-                "payload_preimage_digest"
-            ],
-            "semantic_projection_digest": validated[
-                "semantic_projection_digest"
-            ],
-            "error_kind": error_kind,
-            "child_returncode": child_returncode,
-            "classification_valid": True,
-        }
-        return receipt, projection
 
     def _same_process(self, process: subprocess.Popen[Any], start_token: str) -> bool:
         try:
@@ -552,19 +375,9 @@ class ProcessSupervisorCommand:
         （分類そのものは `reporting/timeout_hotspot_summary` が run 終了後に行う）。
         検証に失敗した場合も `validated: false` として残し、証拠の欠落と区別する。
         """
-        path = self.store.directory / RESULT_ENVELOPE_FILE
-        try:
-            if not path.is_file():
-                return None
-            envelope = json.loads(path.read_text(encoding="utf-8"))
-            payload = envelope["canonical_result_payload"]
-            bundle = payload["canonical_result_finalization_bundle"]
-        except _DIAGNOSTIC_GUARD_ERRORS as exc:
-            return {
-                "observed": True,
-                "validated": False,
-                "validation_error": type(exc).__name__,
-            }
+        path = self.store.directory / layout.RESULT_ENVELOPE
+        if not path.is_file():
+            return None
         record: dict[str, Any] = {
             "observed": True,
             "validated": False,
@@ -572,21 +385,16 @@ class ProcessSupervisorCommand:
             "source": "checkpoint_result_envelope",
         }
         try:
-            preimage = {
-                key: value for key, value in payload.items()
-                if key != "canonical_result_finalization_bundle"
-            }
-            validated = validate_canonical_result_finalization_bundle(
-                bundle,
-                result_payload_preimage=preimage,
-                bundle_verification_key_id=self.config.supervisor_signing_key_id,
-                bundle_verification_key=_read_key(
-                    self.config.supervisor_signing_key_file
-                ),
+            # envelope の規則（封・bundle 署名・launch join）は終端の判断と同じ
+            # validator を使う（ここだけ緩い読み方をしない）。
+            envelope = validate_canonical_envelope(
+                path.read_bytes(), launch=self.store._read_launch(),
+                validate_bundle=self.factory.validate_child_canonical_bundle,
             )
         except _DIAGNOSTIC_GUARD_ERRORS as exc:
             record["validation_error"] = type(exc).__name__
             return record
+        validated, bundle = envelope.validated, envelope.bundle
         identity = validated["execution_identity"]
         selection = bundle.get("terminal_timeout_candidate_selection_receipt")
         selection = selection if isinstance(selection, dict) else {}
@@ -637,28 +445,25 @@ class ProcessSupervisorCommand:
             return
 
     @staticmethod
-    def _resolved_projection(launch: Any, state: Any, returncode: Any) -> dict[str, Any]:
-        return {
-            "status": "RESOLVED",
-            "authority_kind": state.receipt_kind,
-            "launch_receipt_digest": launch.receipt_digest,
-            "finalization_bundle_digest": state.receipt_digest,
-            "child_returncode": returncode,
-        }
-
-    @staticmethod
-    def _invalid_projection(launch: Any, error_code: str) -> dict[str, Any]:
+    def _invalid_projection(
+        launch: Any, error_code: str, *, detail: Optional[str] = None,
+        child_returncode: Optional[int] = None,
+        diagnostics: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
+        """INVALID（終端 authority ではない）。どの証拠が足りない / 矛盾するかを残す。"""
         return {
             "status": "INVALID",
             "authority_kind": "InvalidSupervisorCommandProjection",
             "launch_receipt_digest": launch.receipt_digest,
             "error_code": error_code,
-            "child_returncode": None,
+            "error_detail": detail,
+            "diagnostics": None if diagnostics is None else dict(diagnostics),
+            "child_returncode": child_returncode,
         }
 
     def _terminate_exact_process_group(
         self, process: subprocess.Popen[Any], start_token: str,
-        *, on_first_signal: Any = None,
+        *, on_first_signal: Any = None, signals: Optional[list] = None,
     ) -> str:
         """SIGTERM -> grace -> SIGKILL。**手順と disposition 文字列は不変。**
 
@@ -667,21 +472,34 @@ class ProcessSupervisorCommand:
         渡すこと（kill 経路に I/O も lock も足さない）。終了確認や identity 検証
         で signal を送らずに戻る枝では呼ばれないので、送っていない kill を
         「開始した」と記録することはない。
+
+        Issue #165: ``signals`` には ``killpg`` を呼んだ結果だけを順に足す
+        （送って戻った / 対象が居なかった）。受信や終了は rc が表すので、ここから
+        signal 死を推定しない。
         """
+        actions = [] if signals is None else signals
+        exited = child_exit.deadline_exit_disposition
+        phase = child_exit.DeadlinePhase
         if process.poll() is not None:
-            return f"EXITED_{process.returncode}"
+            return exited(process.returncode, None)
         if not self._same_process(process, start_token):
             raise ValueError("child PID/start-token identity changed before kill")
         if process.poll() is not None:
-            return f"EXITED_{process.returncode}"
+            return exited(process.returncode, None)
         first_signal_monotonic = time.monotonic()
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
+            actions.append(terminal_evidence.SignalAction(
+                child_exit.SIGTERM, child_exit.SIGNAL_PROCESS_ABSENT,
+            ))
             return_code = process.poll()
             if return_code is not None:
-                return f"EXITED_{return_code}_BEFORE_SIGTERM"
+                return exited(return_code, phase.BEFORE_SIGTERM)
             raise
+        actions.append(terminal_evidence.SignalAction(
+            child_exit.SIGTERM, child_exit.SIGNAL_SENT,
+        ))
         if on_first_signal is not None:
             # 診断の観測点が kill 経路を壊さないようにする。ここは supervisor で
             # 最も安全側に倒すべき経路なので、callback の失敗で disposition や
@@ -692,29 +510,27 @@ class ProcessSupervisorCommand:
                 pass
         try:
             process.wait(timeout=self.config.kill_grace_seconds)
-            return (
-                "SIGTERM_AFTER_DEADLINE"
-                if process.returncode == -signal.SIGTERM
-                else f"EXITED_{process.returncode}_AFTER_SIGTERM"
-            )
+            return exited(process.returncode, phase.AFTER_SIGTERM)
         except subprocess.TimeoutExpired:
             if not self._same_process(process, start_token):
                 raise ValueError("child PID/start-token identity changed before SIGKILL")
             if process.poll() is not None:
-                return f"EXITED_{process.returncode}_BEFORE_SIGKILL"
+                return exited(process.returncode, phase.BEFORE_SIGKILL)
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
+                actions.append(terminal_evidence.SignalAction(
+                    child_exit.SIGKILL, child_exit.SIGNAL_PROCESS_ABSENT,
+                ))
                 return_code = process.poll()
                 if return_code is not None:
-                    return f"EXITED_{return_code}_BEFORE_SIGKILL"
+                    return exited(return_code, phase.BEFORE_SIGKILL)
                 raise
+            actions.append(terminal_evidence.SignalAction(
+                child_exit.SIGKILL, child_exit.SIGNAL_SENT,
+            ))
             process.wait()
-            return (
-                "SIGKILL_AFTER_DEADLINE"
-                if process.returncode == -signal.SIGKILL
-                else f"EXITED_{process.returncode}_AFTER_SIGKILL"
-            )
+            return exited(process.returncode, phase.AFTER_SIGKILL)
 
     def _cleanup_exact_process_group(
         self, process: subprocess.Popen[Any], start_token: Optional[str],
@@ -740,107 +556,9 @@ class ProcessSupervisorCommand:
         process.wait()
         return "SIGKILL_DURING_EXCEPTION_CLEANUP"
 
-    def _finalize_claimed(
-        self, *, launch: Any, claimed: Any, prefix: Any,
-        child_returncode: Any,
-    ) -> dict[str, Any]:
-        timeout, segment = self.factory.issue_supervisor_timeout(
-            claimed=claimed, prefix=prefix,
-        )
-        final = self.store.finalize_timeout(
-            claimed=claimed, timeout=timeout, segment=segment, prefix=prefix,
-        )
-        bundle = self.factory.issue_timeout_bundle(
-            launch=launch,
-            checkpoint=self.factory.decode(json.loads(
-                (self.store.directory / "checkpoint.json").read_text(encoding="utf-8")
-            )),
-            claimed=claimed, timeout=timeout, segment=segment,
-            final_transition=final, prefix=prefix,
-        )
-        return self._durable_terminal_projection(
-            launch, bundle, status="TIMEOUT",
-            child_returncode=child_returncode,
-        )
-
-    def _recover_durable_state(
-        self, *, launch: Any, state: Any, child_returncode: Any,
-        allow_active_timeout: bool = False,
-        kill_disposition: Optional[str] = None,
-    ) -> tuple[int, dict[str, Any]]:
-        state_value = CheckpointState(state.payload["state"])
-        if state_value is CheckpointState.RESOLVED:
-            prefix = self.store.rematerialize_active_prefix()
-            resolved = self.store.rematerialize_resolved_state(prefix=prefix)
-            return 0, self._resolved_projection(
-                launch, resolved, child_returncode
-            )
-        prefix = self.store.rematerialize_active_prefix()
-        if state_value is CheckpointState.COMPLETION_READY:
-            resolved = self.store.recover_completion_ready(
-                ready=state, prefix=prefix,
-            )
-            return 0, self._resolved_projection(launch, resolved, child_returncode)
-        if state_value is CheckpointState.TIMED_OUT_CLAIMED:
-            return 124, self._finalize_claimed(
-                launch=launch, claimed=state, prefix=prefix,
-                child_returncode=child_returncode,
-            )
-        if state_value is CheckpointState.TIMED_OUT:
-            bundle = self.store.rematerialize_timeout_bundle(prefix=prefix)
-            return 124, self._durable_terminal_projection(
-                launch, bundle, status="TIMEOUT",
-                child_returncode=child_returncode,
-            )
-        if state_value is CheckpointState.ACTIVE and allow_active_timeout:
-            if type(kill_disposition) is not str or not kill_disposition:
-                raise ValueError("ACTIVE deadline recovery lacks kill disposition")
-            claimed = self.store.supervisor_claim_timeout(
-                active=state, prefix=prefix,
-                kill_disposition=kill_disposition,
-            )
-            if claimed.payload["state"] == CheckpointState.RESOLVED.value:
-                return 0, self._resolved_projection(
-                    launch, claimed, child_returncode
-                )
-            return 124, self._finalize_claimed(
-                launch=launch, claimed=claimed, prefix=prefix,
-                child_returncode=child_returncode,
-            )
-        return 2, self._invalid_projection(
-            launch, "NONFINAL_ACTIVE_WITHOUT_DEADLINE_AUTHORITY"
-        )
-
-    def _finalize_deadline(
-        self, *, launch: Any, process: subprocess.Popen[Any], start_token: str,
-        on_first_signal: Any = None,
-    ) -> tuple[int, dict[str, Any]]:
-        kill_disposition = self._terminate_exact_process_group(
-            process, start_token, on_first_signal=on_first_signal,
-        )
-        recovered_pending = self.store.recover_pending_active_commit()
-        state_path = self.store.directory / "state.json"
-        state = (
-            recovered_pending[0]
-            if recovered_pending is not None
-            else self.store.read_state() if state_path.exists() else None
-        )
-        if state is None or CheckpointState(
-            state.payload["state"]
-        ) is CheckpointState.RESOLVED:
-            checkpoint, prefix = self.factory.issue_deadline_bootstrap_checkpoint(
-                launch=launch, prior_resolved=state,
-            )
-            self.store.persist_active(checkpoint, prefix)
-            state = checkpoint
-        return self._recover_durable_state(
-            launch=launch, state=state, child_returncode=process.returncode,
-            allow_active_timeout=True, kill_disposition=kill_disposition,
-        )
-
     def _load_durable_launch(self) -> Any:
         launch = self.factory.decode(json.loads(
-            (self.store.directory / "launch.json").read_text(encoding="utf-8")
+            (self.store.directory / layout.LAUNCH).read_text(encoding="utf-8")
         ))
         if (
             launch.payload["result_occurrence_id"]
@@ -857,178 +575,167 @@ class ProcessSupervisorCommand:
             raise ValueError("durable launch differs from supervisor command config")
         return launch
 
-    def _resume(self) -> int:
-        launch = self._load_durable_launch()
+    # -- Issue #165: 終了の観測（D / E）と終端 ----------------------------------
+
+    def _record_deadline(
+        self, ownership: Any, launch: Any, *, detected_offset_seconds: float,
+    ) -> None:
+        """deadline に達した事実を、signal を送る前に durable にする（D）。"""
+        payload = terminal_evidence.deadline_payload(
+            launch,
+            configured_timeout_seconds=float(self.config.timeout_seconds),
+            deadline_detected_offset_seconds=max(0.0, detected_offset_seconds),
+        )
+        receipt = self.factory.issue_terminal_evidence(
+            terminal_evidence.DEADLINE_RECEIPT_KIND, payload,
+        )
+        self.store.persist_deadline(ownership, receipt)
+
+    def _record_child_exit(
+        self, ownership: Any, *, returncode: int, disposition: str,
+        signals: tuple,
+    ) -> None:
+        """wait で取った child の終了を durable にする（E）。値は観測そのもの。"""
+
+        def build(*, launch: Any, deadline: Any, anchor: Any, envelope: Any) -> Any:
+            payload = terminal_evidence.child_exit_payload(
+                launch, deadline=deadline, child_returncode=returncode,
+                child_exit_disposition=disposition, signal_actions=signals,
+                envelope=envelope, anchor=anchor, exit_mode=self.exit_mode.value,
+            )
+            return self.factory.issue_terminal_evidence(
+                terminal_evidence.CHILD_EXIT_RECEIPT_KIND, payload,
+            )
+
+        self.store.record_child_exit(ownership, build)
+
+    def _project(self, launch: Any, result: DriveResult) -> tuple[int, dict[str, Any]]:
+        """drive の結果を projection と supervisor の exit code にする。"""
+        authority = result.authority
+        if authority is None:
+            return 2, self._invalid_projection(
+                launch, result.invalid_code, detail=result.detail,
+                child_returncode=result.child_returncode,
+                diagnostics=result.diagnostics,
+            )
+        return (
+            terminal_exit_code(authority),
+            terminal_projection(authority, self.factory),
+        )
+
+    def _resume(self, ownership: Any, launch: Any = None) -> int:
+        """durable な evidence だけから終端を決め直す（run と同じ ``drive``）。"""
+        launch = self._load_durable_launch() if launch is None else launch
         try:
-            self.store.recover_pending_active_commit()
-            canonical_receipt_path = (
-                self.store.directory / "canonical-resolved-receipt.json"
-            )
-            canonical_envelope_path = self.store.directory / RESULT_ENVELOPE_FILE
-            if canonical_receipt_path.exists() and canonical_envelope_path.exists():
-                stored = json.loads(canonical_receipt_path.read_text(encoding="utf-8"))
-                child_returncode = stored["child_returncode"]
-                receipt, projection = self._load_canonical_child_result(
-                    launch, child_returncode
-                )
-                if receipt.receipt_digest != stored["receipt_digest"]:
-                    raise ValueError("persisted canonical resolved receipt drifted")
-                self._write_projection(projection)
-                return 0
-            if (self.store.directory / "child-exit.json").exists():
-                resolved = self.store.rematerialize_child_exit_resolution()
-                projection = self._resolved_projection(
-                    launch, resolved, resolved.payload["child_returncode"]
-                )
-                self._write_projection(projection)
-                return 0
-            if (self.store.directory / "operational-error-bundle.json").exists():
-                bundle = self.store.rematerialize_operational_error_bundle()
-                if bundle.launch_receipt_digest != launch.receipt_digest:
-                    raise ValueError("durable ERROR bundle differs from launch")
-                projection = self._durable_terminal_projection(
-                    launch, bundle, status="ERROR", child_returncode=None
-                )
-                self._write_projection(projection)
-                return 2
-            state = self.store.read_state()
-            exit_code, projection = self._recover_durable_state(
-                launch=launch, state=state, child_returncode=None,
-            )
-        except Exception:
+            exit_code, projection = self._project(launch, drive(
+                self.store, ownership, mode=self.exit_mode,
+                process_alive=process_is_alive,
+            ))
+        except Exception as exc:
             projection = self._invalid_projection(
-                launch, "DURABLE_RESTART_AUTHORITY_INVALID"
+                launch, "DURABLE_RESTART_AUTHORITY_INVALID",
+                detail=f"{type(exc).__name__}: {exc}"[:500],
             )
             exit_code = 2
-        self._write_projection(projection)
+        self._write_projection(ownership, projection)
         return exit_code
 
     def run(self) -> int:
-        if (self.store.directory / "launch.json").exists():
-            return self._resume()
-        read_fd, write_fd = os.pipe()
-        process: Optional[subprocess.Popen[Any]] = None
-        launch: Any = None
-        start_token: Optional[str] = None
-        diagnostic: Optional[StackDumpDiagnostic] = None
-        try:
-            process = subprocess.Popen(
-                self._barrier_command(read_fd, self.config.child_command),
-                cwd=self.config.working_directory,
-                env=self._child_environment(),
-                pass_fds=(read_fd,),
-                start_new_session=True,
-            )
-            os.close(read_fd)
-            read_fd = -1
-            start_token = read_process_start_token(process.pid)
-            launch = self.factory.issue_launch(
-                result_occurrence_id=self.config.result_occurrence_id,
-                manifest_entry_preimage_digest=(
-                    self.config.manifest_entry_preimage_digest
-                ),
-                execution_nonce=self.config.execution_nonce,
-                child_pid=process.pid,
-                child_start_token=start_token,
-                stream_id=self.config.stream_id,
-                source_snapshot_fingerprint=(
-                    self.config.source_snapshot_fingerprint
-                ),
-                deadline_policy_digest=self.config.deadline_policy_digest,
-            )
-            self.store.persist_launch(launch)
-            os.write(write_fd, b"1")
-            os.close(write_fd)
-            write_fd = -1
-            # Issue #124 PR-124-C: deadline の起点は、この PR の前に
-            # `process.wait(timeout=self.config.timeout_seconds)` を呼んでいた
-            # のと**同じ位置**（barrier 解放の直後）で 1 回だけ固定する。診断
-            # object の生成はそのあとなので、生成時間が予算の外へ逃げない。
-            deadline = time.monotonic() + float(self.config.timeout_seconds)
-            diagnostic = self._build_stack_dump_diagnostic(process, start_token)
-            return_code = self._wait_for_child_until_deadline(
-                process, diagnostic, deadline
-            )
-            if return_code is None:
-                # deadline 到達。既存の termination / finalization 経路へそのまま入る
-                # （終了との競合の再確認も kill 手順も `_finalize_deadline` の中）。
-                # ここはまだ signal を送っていないので「termination path へ入った
-                # 時刻」として記録し、実際の SIGTERM は `on_first_signal` で測る。
-                diagnostic.note_deadline_finalization_start(time.monotonic())
-                exit_code, projection = self._finalize_deadline(
-                    launch=launch, process=process, start_token=start_token,
-                    on_first_signal=diagnostic.note_kill_signal,
+        # Issue #165: 起動から projection の公開まで、この store の owner は
+        # この supervisor 1 つ（restart の重複起動は先の終了を待つ）。
+        with self.store.supervisor_ownership() as ownership:
+            if (self.store.directory / layout.LAUNCH).exists():
+                return self._resume(ownership)
+            read_fd, write_fd = os.pipe()
+            process: Optional[subprocess.Popen[Any]] = None
+            launch: Any = None
+            start_token: Optional[str] = None
+            diagnostic: Optional[StackDumpDiagnostic] = None
+            try:
+                process = subprocess.Popen(
+                    self._barrier_command(read_fd, self.config.child_command),
+                    cwd=self.config.working_directory,
+                    env=self._child_environment(),
+                    pass_fds=(read_fd,),
+                    start_new_session=True,
                 )
-            else:
-                state_path = self.store.directory / "state.json"
-                canonical_envelope_path = (
-                    self.store.directory / RESULT_ENVELOPE_FILE
+                os.close(read_fd)
+                read_fd = -1
+                start_token = read_process_start_token(process.pid)
+                launch = self.factory.issue_launch(
+                    result_occurrence_id=self.config.result_occurrence_id,
+                    manifest_entry_preimage_digest=(
+                        self.config.manifest_entry_preimage_digest
+                    ),
+                    execution_nonce=self.config.execution_nonce,
+                    child_pid=process.pid,
+                    child_start_token=start_token,
+                    stream_id=self.config.stream_id,
+                    source_snapshot_fingerprint=(
+                        self.config.source_snapshot_fingerprint
+                    ),
+                    deadline_policy_digest=self.config.deadline_policy_digest,
                 )
-                if (
-                    self.config.allow_child_exit_resolution
-                    and canonical_envelope_path.exists()
-                ):
-                    try:
-                        resolved, projection = self._load_canonical_child_result(
-                            launch, return_code
-                        )
-                    except Exception:
-                        projection = self._invalid_projection(
-                            launch, "CANONICAL_CHILD_RESULT_INVALID"
-                        )
-                        projection["child_returncode"] = return_code
-                        exit_code = 2
-                    else:
-                        self._write_canonical_resolved_receipt(resolved)
-                        exit_code = 0
-                elif state_path.exists():
-                    state = self.store.read_state()
-                    exit_code, projection = self._recover_durable_state(
-                        launch=launch, state=state,
-                        child_returncode=return_code,
+                self.store.persist_launch(launch)
+                os.write(write_fd, b"1")
+                os.close(write_fd)
+                write_fd = -1
+                # Issue #124 PR-124-C: deadline の起点は、この PR の前に
+                # `process.wait(timeout=self.config.timeout_seconds)` を呼んでいた
+                # のと**同じ位置**（barrier 解放の直後）で 1 回だけ固定する。診断
+                # object の生成はそのあとなので、生成時間が予算の外へ逃げない。
+                deadline = time.monotonic() + float(self.config.timeout_seconds)
+                diagnostic = self._build_stack_dump_diagnostic(process, start_token)
+                return_code = self._wait_for_child_until_deadline(
+                    process, diagnostic, deadline
+                )
+                signals: list = []
+                if return_code is None:
+                    # deadline 到達。ここはまだ signal を送っていないので「termination
+                    # path へ入った時刻」として記録し、実際の SIGTERM は
+                    # `on_first_signal` で測る。Issue #165: deadline の事実（D）を
+                    # signal より前に durable にし、child の終了（E）は wait で
+                    # 取った rc と実際に送った signal だけから作る。
+                    detected = time.monotonic()
+                    diagnostic.note_deadline_finalization_start(detected)
+                    self._record_deadline(
+                        ownership, launch,
+                        detected_offset_seconds=(
+                            detected - (deadline - float(self.config.timeout_seconds))
+                        ),
                     )
-                elif self.config.allow_child_exit_resolution:
-                    try:
-                        resolved, projection = self._load_canonical_child_result(
-                            launch, return_code
-                        )
-                    except Exception:
-                        projection = self._invalid_projection(
-                            launch, "CANONICAL_CHILD_RESULT_INVALID"
-                        )
-                        projection["child_returncode"] = return_code
-                        exit_code = 2
-                    else:
-                        self._write_canonical_resolved_receipt(resolved)
-                        exit_code = 0
+                    disposition = self._terminate_exact_process_group(
+                        process, start_token,
+                        on_first_signal=diagnostic.note_kill_signal, signals=signals,
+                    )
+                    return_code = process.returncode
                 else:
-                    bundle = self.store.supervisor_finalize_operational_error(
-                        launch=launch,
-                        error_kind="operational_authority_invalid",
-                        deadline_stage="BEFORE_CHECKPOINT",
-                        child_exit_disposition=f"EXIT_CODE_{return_code}",
-                    )
-                    projection = self._durable_terminal_projection(
-                        launch, bundle, status="ERROR",
-                        child_returncode=return_code,
-                    )
-                    exit_code = return_code if return_code else 2
-            self._write_projection(projection)
-            return exit_code
-        except Exception:
-            if launch is not None:
-                return self._resume()
-            raise
-        finally:
-            for descriptor in (read_fd, write_fd):
-                if descriptor >= 0:
-                    os.close(descriptor)
-            if process is not None and process.poll() is None:
-                self._cleanup_exact_process_group(process, start_token)
-            # 取得できた dump は最終 outcome によらず run dir へ退避する。
-            # runner の `process_authority_cleanup` はこのプロセスが終わってから
-            # 走るので、ここが「cleanup 前」の最後の機会になる。
-            self._finalize_stack_dump_diagnostic(diagnostic)
+                    disposition = child_exit.natural_exit_disposition(return_code)
+                self._record_child_exit(
+                    ownership, returncode=return_code, disposition=disposition,
+                    signals=tuple(signals),
+                )
+                return self._resume(ownership, launch)
+            except Exception:
+                # 観測か永続化の途中で失敗した。E が durable でなければ drive が
+                # INVALID にする（rc も signal 死も推定しない）。drive は store の
+                # flock を取るので、その前に child を止める（store の transaction の
+                # 中で止まった child が flock を持ったままでも、待ち続けない）。
+                if process is not None and process.poll() is None:
+                    self._cleanup_exact_process_group(process, start_token)
+                if launch is not None:
+                    return self._resume(ownership, launch)
+                raise
+            finally:
+                for descriptor in (read_fd, write_fd):
+                    if descriptor >= 0:
+                        os.close(descriptor)
+                if process is not None and process.poll() is None:
+                    self._cleanup_exact_process_group(process, start_token)
+                # 取得できた dump は最終 outcome によらず run dir へ退避する。
+                # runner の `process_authority_cleanup` はこのプロセスが終わってから
+                # 走るので、ここが「cleanup 前」の最後の機会になる。
+                self._finalize_stack_dump_diagnostic(diagnostic)
 
 
 def _barrier_main(arguments: Sequence[str]) -> int:

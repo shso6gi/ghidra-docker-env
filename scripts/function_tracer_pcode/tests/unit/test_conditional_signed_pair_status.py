@@ -24,11 +24,13 @@ from scripts.function_tracer_pcode.authority.contracts import (
 )
 from scripts.function_tracer_pcode.authority.decision.canonical_result import (
     BUNDLE_KIND,
-    SupervisorCanonicalResultResolvedReceipt,
     build_canonical_result_finalization_bundle,
     classify_pair_status,
     persist_canonical_result_envelope,
     validate_canonical_result_finalization_bundle,
+)
+from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
+    SupervisorCanonicalResultResolvedReceipt,
 )
 from scripts.function_tracer_pcode.authority.decision.conditional import (
     ConditionalDecisiveProofKind,
@@ -255,6 +257,23 @@ def _classified_pair_status(
         deadline_policy_digest="deadline-policy-digest",
     )
     store.persist_launch(launch)
+    # Issue #165: pair の RESOLVED は、supervisor が wait で観測した child の
+    # 終了（E: 実測 rc 2 = UNKNOWN の CLI code）と envelope の join でだけ成り立つ。
+    from scripts.function_tracer_pcode.authority.process import child_exit, terminal_evidence
+
+    def _observed_exit(*, launch, deadline, anchor, envelope):
+        return factory.issue_terminal_evidence(
+            terminal_evidence.CHILD_EXIT_RECEIPT_KIND,
+            terminal_evidence.child_exit_payload(
+                launch, deadline=deadline, child_returncode=2,
+                child_exit_disposition=child_exit.natural_exit_disposition(2),
+                signal_actions=(), envelope=envelope, anchor=anchor,
+                exit_mode=terminal_evidence.EXIT_MODE_CANONICAL_RESULT_REQUIRED,
+            ),
+        )
+
+    with store.supervisor_ownership() as ownership:
+        store.record_child_exit(ownership, _observed_exit)
     canonical_receipt = SupervisorCanonicalResultResolvedReceipt.create(
         launch_receipt_digest=launch.receipt_digest,
         result_occurrence_id=identity["result_occurrence_id"],
