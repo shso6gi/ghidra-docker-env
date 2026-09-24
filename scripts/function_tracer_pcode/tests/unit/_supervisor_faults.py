@@ -161,10 +161,10 @@ class Deadline:
 
     #: production の timer のまま（``timeout_seconds`` 経過で到達）。
     TIMER = "timer"
-    #: worker child が ``stop`` した瞬間に到達させる。child が着く前に
-    #: ``timeout_seconds`` が過ぎたら production の timer がそのまま働き、
-    #: ``SupervisorRun.store_at_child_stop`` が ``None`` になる（黙って別の
-    #: 経路を試験したことにならない）。
+    #: worker child が ``stop`` した瞬間に到達させる。child が止まらないまま
+    #: ``timeout_seconds`` が過ぎるか child が終わったら production の経路が
+    #: そのまま進むが、その invocation は ``SupervisorPathMismatch`` になる
+    #: （黙って別の経路を試験したことにしない）。
     AT_CHILD_STOP = "at-child-stop"
 
 

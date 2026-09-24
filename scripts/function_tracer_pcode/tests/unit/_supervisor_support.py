@@ -11,8 +11,8 @@ test が import する入口はこの module だけ（下の module を直接 im
 （config field / identity 規則）  ``supervisor_config``（本 module）
 case（pair の寿命の資源）         ``supervisor_case``（context manager、本 module）
 invocation（1 回の起動の寿命）    ``_supervisor_process``（``run_supervisor`` /
-（起動方式 / 並行起動 / 孤児）    ``restart_supervisor`` / ``SupervisorRun`` /
-                                  ``terminate_leftover_workers``）
+（起動方式 / entry の判定 /       ``restart_supervisor`` / ``SupervisorRun`` /
+ 並行起動 / 孤児）                ``worker_alive`` / 孤児の後始末）
 run identity と記録の置き場所     ``_supervisor_records``（唯一の定義）
 worker child が何をするか         ``_supervisor_child``（``ChildScript`` と step、
 （checkpoint / canonical outcome）  outcome は ``OUTCOME_DRIVERS`` に 1 つずつ）
@@ -30,6 +30,36 @@ durable store の観測              ``_supervisor_store``
   継承しない（詳細は ``_supervisor_process``）。
 * 分類は run を名指す。その run が公開した projection を、その run が終わった
   時点の store / pair log と組にして production の分類器へ渡す。
+
+公開操作の契約（どの durable state で合法か / 何を保証するか）。条件は右の
+1 箇所だけで判定し、test や別 module に複製しない。
+
+=====================  ==========================  ===========================  ==============================
+操作                   合法な状態（precondition）  保証（postcondition）         判定する場所
+=====================  ==========================  ===========================  ==============================
+``supervisor_case``    いつでも                    抜けるとき（例外でも）、case  ``supervisor_case`` /
+                                                   の invocation が起こした      ``terminate_leftover_workers``
+                                                   worker は全部止まっている
+``run_supervisor``     durable launch が無い       production の FRESH_START     ``_check_entry_request`` /
+                       （過去の invocation の有無  を通り、worker を起こした      ``_observe``
+                       は問わない）                run を返す。違えば拒否
+                                                   （fork しない）か
+                                                   ``SupervisorPathMismatch``
+``restart_supervisor`` durable launch がある       production の RESUME を通り、  同上
+                       （その正しさは production   worker を起こさなかった run
+                       が判定する）                を返す。fresh start へ
+                                                   黙って落ちない
+停止点（``faults``）   crash は両 entry、stop は   ``_check_entry_request`` と
+                       worker の store file だけ、 ``Fault`` が起動前に拒否
+                       ``ChildStopped`` /
+                       ``AT_CHILD_STOP`` は
+                       FRESH_START だけ
+``classify(run)``      run が projection を公開    その run の projection を     ``classify``
+                       し、run のあと分類の入力    production 分類器で分類した
+                       が変わっていない            結果（拒否は例外）
+``worker_alive(run)``  run が worker を起こした    その worker（PID + start     ``worker_alive``
+                                                   token）がいま生きているか
+=====================  ==========================  ===========================  ==============================
 
 harness は「状態を作る・観測する」だけで、何を期待するかは test が持つ。
 supervisor の判定・store の検証・分類は production をそのまま呼び、ここで
@@ -61,6 +91,10 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_faults import (
     stop_at,
 )
 from scripts.function_tracer_pcode.tests.unit._supervisor_process import (
+    NoWorkerStarted,
+    SupervisorEntry,
+    SupervisorEntryRefused,
+    SupervisorPathMismatch,
     SupervisorRaised,
     SupervisorRun,
     classification_inputs,
@@ -81,8 +115,9 @@ __all__ = (
     "SupervisorRun", "SupervisorRaised", "SupervisorInvocationId",
     "NoProjectionToClassify", "StaleRunObservation", "supervisor_keys",
     "supervisor_identity", "supervisor_config", "supervisor_case",
-    "run_supervisor", "restart_supervisor", "worker_alive",
-    "terminate_leftover_workers", "classify", "launch_evidence", "StoreSnapshot",
+    "run_supervisor", "restart_supervisor", "worker_alive", "SupervisorEntry",
+    "SupervisorEntryRefused", "SupervisorPathMismatch", "NoWorkerStarted",
+    "classify", "launch_evidence", "StoreSnapshot",
     "ChildScript", "Checkpoint", "Envelope", "Exit", "Stop", "Fault",
     "FileBoundary", "ProjectionWrite", "ChildStopped", "Deadline", "crash_at",
     "stop_at", "LAUNCH_EVIDENCE_EXIT",

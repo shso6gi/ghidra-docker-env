@@ -11,6 +11,9 @@ harness は #165（authority / recovery / crash 境界）の test が状態を**
 * ``SupervisorRun`` は 1 回の invocation だけの観測で、crash / restart を
   挟んでも別 invocation の値（barrier 観測・projection・停止点・分類の対象）を
   引き継がない。
+* 公開操作は、それが名乗る production 経路へ入れる durable state でだけ合法。
+  restart は durable launch があるときだけで、無ければ何も起動せずに拒否する
+  （fresh start へ黙って落ちない）。
 
 ここでは supervisor がその状態から**どう判定すべきか**は固定しない（それは
 #165 の test の責務で、harness に期待値を埋め込まない）。
@@ -43,9 +46,13 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
     Exit,
     FileBoundary,
     NoProjectionToClassify,
+    NoWorkerStarted,
     ProjectionWrite,
     StaleRunObservation,
     Stop,
+    SupervisorEntry,
+    SupervisorEntryRefused,
+    SupervisorPathMismatch,
     classify,
     crash_at,
     launch_evidence,
@@ -132,7 +139,7 @@ def test_supervisor_crash_at_a_durable_boundary_leaves_it_for_restart(tmp_path):
         assert [entry["role"] for entry in run.faults_fired] == ["supervisor"]
         assert run.faults_fired[0]["point"] == "after:claimed.json#1"
         assert run.store.has("claimed.json") and run.store.state == "ACTIVE"
-        with pytest.raises(AssertionError, match="use restart_supervisor"):
+        with pytest.raises(SupervisorEntryRefused, match="use restart_supervisor"):
             run_supervisor(case)
 
         restarted = restart_supervisor(case)
@@ -327,3 +334,78 @@ def test_invocation_identities_stay_unique_across_concurrent_processes(tmp_path)
     with multiprocessing.get_context("fork").Pool(8) as pool:
         ordinals = pool.map(_allocate, [tmp_path] * 32)
     assert sorted(ordinals) == list(range(32))
+
+
+# ---------------------------------------------------------------------------
+# 公開操作の state contract: 操作は、名乗る production 経路へ入れる durable
+# state でだけ合法（「過去に invocation があった」ことは条件にしない）
+# ---------------------------------------------------------------------------
+
+
+def test_a_restart_is_refused_without_a_durable_launch(tmp_path):
+    """launch を公開する前に落ちた case は、invocation があっても restart できない。"""
+
+    with supervisor_case(tmp_path, ChildScript((Exit(3),))) as case:
+        first = run_supervisor(
+            case, faults=(crash_at(FileBoundary("launch.json", side="before")),),
+        )
+        assert first.crashed is True
+        assert first.child is not None  # worker は起こした
+        assert not first.store.has("launch.json")  # launch は durable でない
+        with pytest.raises(SupervisorEntryRefused, match="use run_supervisor"):
+            restart_supervisor(case)
+        # 拒否は何も起動せず identity も消費しない。production と同じく次は fresh start。
+        fresh = run_supervisor(case)
+        assert fresh.invocation.ordinal == first.invocation.ordinal + 1
+        assert fresh.entry is SupervisorEntry.FRESH_START
+        assert fresh.child is not None and fresh.child != first.child
+        assert fresh.launch_durable_at_barrier_release is True
+
+
+def test_a_restart_resumes_once_the_launch_is_durable(tmp_path):
+    with supervisor_case(tmp_path, ChildScript((Exit(3),))) as case:
+        first = run_supervisor(
+            case, faults=(crash_at(FileBoundary("launch.json", side="after")),),
+        )
+        assert first.crashed is True and first.store.has("launch.json")
+        with pytest.raises(SupervisorEntryRefused, match="use restart_supervisor"):
+            run_supervisor(case)
+        restarted = restart_supervisor(case)
+        assert restarted.entry is SupervisorEntry.RESUME
+        assert restarted.child is None
+        assert restarted.launch_durable_at_barrier_release is None
+        with pytest.raises(NoWorkerStarted):
+            worker_alive(restarted)
+
+
+def test_restart_eligibility_does_not_depend_on_the_projection(tmp_path):
+    """projection の有無は分類の可否で、restart の可否は durable launch で決まる。"""
+
+    with supervisor_case(tmp_path, ChildScript((Exit(3),))) as case:
+        first = run_supervisor(case, faults=(crash_at(ProjectionWrite()),))
+        assert first.crashed is True and first.projection is None
+        with pytest.raises(NoProjectionToClassify):
+            classify(first)
+        restarted = restart_supervisor(case)
+        assert restarted.entry is SupervisorEntry.RESUME
+        assert classify(restarted)["classification_valid"] is True
+
+
+def test_requests_that_no_durable_state_allows_are_refused_before_starting(tmp_path):
+    with supervisor_case(tmp_path, ChildScript((Exit(0),))) as case:
+        with pytest.raises(SupervisorEntryRefused, match="use run_supervisor"):
+            restart_supervisor(case)
+        with pytest.raises(ValueError, match="only crash the supervisor"):
+            run_supervisor(case, faults=(stop_at(FileBoundary("launch.json")),))
+        # どの拒否も identity を消費していない。
+        assert run_supervisor(case).invocation.ordinal == 0
+        with pytest.raises(ValueError, match="no worker child to stop"):
+            restart_supervisor(case, faults=(crash_at(ChildStopped()),))
+
+
+def test_a_deadline_at_the_worker_stop_is_not_replaced_by_another_path(tmp_path):
+    """worker が止まらなかった run を「止まった瞬間の deadline」の run と呼ばない。"""
+
+    with supervisor_case(tmp_path, ChildScript((Exit(0),))) as case:
+        with pytest.raises(SupervisorPathMismatch, match="never stopped"):
+            run_supervisor(case, deadline=Deadline.AT_CHILD_STOP)

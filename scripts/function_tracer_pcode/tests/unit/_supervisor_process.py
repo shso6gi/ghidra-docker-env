@@ -32,14 +32,31 @@ invocation は pytest の process から ``fork`` した process で
 ``classification_inputs`` の 1 箇所で数える。run は終了時点の値を持ち、分類の
 ときに今の値と比べる。
 
+どの production 経路へ入るか（**entry**）:
+
+* production の ``ProcessSupervisorCommand.run()`` は、store に durable な
+  ``launch.json`` があれば ``_resume()``（**RESUME**）へ、無ければ worker を
+  起こす経路（**FRESH_START**）へ入る。harness はこの durable fact を
+  ``_durable_launch_exists`` の 1 箇所だけで読む。
+* ``run_supervisor`` は FRESH_START、``restart_supervisor`` は RESUME を要求する。
+  要求と durable state が合わなければ、identity も確保せず fork もせずに
+  ``SupervisorEntryRefused`` で拒否する（別の経路へ黙って落ちない）。
+  「過去に invocation があった」ことは条件にしない（launch を公開する前に
+  crash した invocation のあとは、production も fresh start へ入る）。
+* 起動後は、その invocation が実際に worker を起こしたかで入った経路を確かめ、
+  要求と違えば ``SupervisorPathMismatch``（production の分岐が変わったことを
+  黙って見逃さない）。
+
 fork の時点で pytest の process に他の thread が残っていても、fork 先が lock
 待ちで止まった場合は待ち上限（``timeout + grace + 60s``）で失敗になる。
-起動の仕方（fork / exec / 並行起動）を変えるときに触るのはこの module だけ。
+起動の仕方（fork / exec / 並行起動）と entry の判定を変えるときに触るのは
+この module だけ。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 import os
 from pathlib import Path
 import signal
@@ -87,6 +104,27 @@ class SupervisorRaised(AssertionError):
     """production の ``run()`` が例外で抜けた（traceback を持つ）。"""
 
 
+class SupervisorEntryRefused(AssertionError):
+    """要求した entry へ、いまの durable state からは入れない（起動していない）。"""
+
+
+class SupervisorPathMismatch(AssertionError):
+    """invocation が要求した entry と違う production 経路を通った。"""
+
+
+class NoWorkerStarted(AssertionError):
+    """その run は worker を起こしていない（生存を問う対象が無い）。"""
+
+
+class SupervisorEntry(Enum):
+    """production の ``run()`` が入る経路。"""
+
+    #: durable launch が無い: worker を起こし、launch を永続化してから barrier を解放する。
+    FRESH_START = "fresh-start"
+    #: durable launch がある: ``_resume()``（worker は起こさない）。
+    RESUME = "resume"
+
+
 @dataclass(frozen=True)
 class SupervisorRun:
     """supervisor の 1 回の invocation だけの観測（別 invocation から継承しない）。"""
@@ -94,6 +132,8 @@ class SupervisorRun:
     case: "SupervisorCase" = field(repr=False, compare=False)
     #: この invocation の identity（case の中で一意、開始順）。
     invocation: SupervisorInvocationId
+    #: この invocation が通った production 経路（要求どおりであることを確認済み）。
+    entry: SupervisorEntry
     #: supervisor の exit code。停止点で crash した場合は None。
     exit_code: Optional[int]
     #: supervisor が crash 停止点で落ちたか。
@@ -140,9 +180,14 @@ def _process_alive(identity: ChildIdentity) -> bool:
 
 
 def worker_alive(run: SupervisorRun) -> bool:
-    """``run`` が起こした worker（PID + start token）がまだ動いているか。"""
+    """``run`` が起こした worker（PID + start token）がまだ動いているか。
 
-    return run.child is not None and _process_alive(run.child)
+    worker を起こしていない run（RESUME）には問えない（False と区別するため拒否）。
+    """
+
+    if run.child is None:
+        raise NoWorkerStarted(f"{run.invocation} ({run.entry.value}) started no worker")
+    return _process_alive(run.child)
 
 
 def terminate_leftover_workers(case: "SupervisorCase") -> None:
@@ -190,23 +235,60 @@ def run_supervisor(
     case: "SupervisorCase", *, deadline: str = Deadline.TIMER,
     faults: Sequence[Fault] = (),
 ) -> SupervisorRun:
-    """case の最初の invocation（worker を起こす）。"""
+    """production の FRESH_START 経路を通す（durable launch が無いときだけ合法）。"""
 
-    if case.records.invocations():
-        raise AssertionError("run_supervisor starts a pair; use restart_supervisor")
-    return _SupervisorInvocation.start(case, deadline=deadline, faults=faults).wait()
+    return _SupervisorInvocation.start(
+        case, entry=SupervisorEntry.FRESH_START, deadline=deadline, faults=faults,
+    ).wait()
 
 
 def restart_supervisor(
     case: "SupervisorCase", *, faults: Sequence[Fault] = (),
 ) -> SupervisorRun:
-    """同じ config の supervisor をもう一度起こす（production の resume 経路）。"""
+    """production の RESUME 経路を通す（durable launch があるときだけ合法）。"""
 
-    if not case.records.invocations():
-        raise AssertionError("restart_supervisor needs an earlier invocation")
-    if any(isinstance(fault.at, ChildStopped) for fault in faults):
-        raise ValueError("a restart starts no worker child to stop")
-    return _SupervisorInvocation.start(case, deadline=Deadline.TIMER, faults=faults).wait()
+    return _SupervisorInvocation.start(
+        case, entry=SupervisorEntry.RESUME, deadline=Deadline.TIMER, faults=faults,
+    ).wait()
+
+
+def _durable_launch_exists(case: "SupervisorCase") -> bool:
+    """production の ``run()`` が RESUME へ入るかを決める durable fact（唯一の判定箇所）。
+
+    production と同じく存在だけを見る。launch が正しいかは production が
+    ``_resume()`` の中で判定する（改ざんした launch の restart も合法な操作）。
+    """
+
+    return (case.store_directory / "launch.json").exists()
+
+
+def _check_entry_request(
+    case: "SupervisorCase", entry: SupervisorEntry, deadline: str,
+    faults: Sequence[Fault],
+) -> None:
+    """起動する前に、要求した entry と停止点がいまの durable state で合法か確かめる。"""
+
+    available = (
+        SupervisorEntry.RESUME if _durable_launch_exists(case)
+        else SupervisorEntry.FRESH_START
+    )
+    if entry is not available:
+        fact = "a durable launch exists" if available is SupervisorEntry.RESUME else (
+            "no durable launch exists"
+        )
+        hint = "restart_supervisor" if available is SupervisorEntry.RESUME else "run_supervisor"
+        raise SupervisorEntryRefused(
+            f"{entry.value} is not reachable: {fact}, so production would take "
+            f"{available.value} (use {hint})"
+        )
+    for fault in faults:
+        if fault.action != "crash":
+            raise ValueError("a supervisor fault can only crash the supervisor")
+    if entry is SupervisorEntry.RESUME:
+        if any(isinstance(fault.at, ChildStopped) for fault in faults):
+            raise ValueError("a resume starts no worker child to stop")
+        if deadline != Deadline.TIMER:
+            raise ValueError("a resume has no worker whose stop could bring the deadline")
 
 
 def _pair_log_size(case: "SupervisorCase") -> int:
@@ -233,10 +315,12 @@ class _SupervisorInvocation:
     """fork した supervisor 1 つ。identity は ``start`` の時点で消費される。"""
 
     def __init__(
-        self, case: "SupervisorCase", records: InvocationRecords, pid: int,
-        log_start: int, limit: float,
+        self, case: "SupervisorCase", entry: SupervisorEntry, deadline: str,
+        records: InvocationRecords, pid: int, log_start: int, limit: float,
     ) -> None:
         self.case = case
+        self.entry = entry
+        self.deadline = deadline
         self.records = records
         self.pid = pid
         self.log_start = log_start
@@ -244,11 +328,15 @@ class _SupervisorInvocation:
 
     @classmethod
     def start(
-        cls, case: "SupervisorCase", *, deadline: str, faults: Sequence[Fault],
+        cls, case: "SupervisorCase", *, entry: SupervisorEntry, deadline: str,
+        faults: Sequence[Fault],
     ) -> "_SupervisorInvocation":
-        for fault in faults:
-            if fault.action != "crash":
-                raise ValueError("a supervisor fault can only crash the supervisor")
+        """entry の合法性を確かめてから identity を確保して fork する。
+
+        並行起動（#165 T15）もこの入口を通す（拒否は identity を消費しない）。
+        """
+
+        _check_entry_request(case, entry, deadline, faults)
         records = case.records.allocate_invocation()
         log_start = _pair_log_size(case)
         sys.stdout.flush()
@@ -260,7 +348,7 @@ class _SupervisorInvocation:
             time.monotonic() + float(case.config.timeout_seconds)
             + float(case.config.kill_grace_seconds) + _WAIT_MARGIN_SECONDS
         )
-        return cls(case, records, pid, log_start, limit)
+        return cls(case, entry, deadline, records, pid, log_start, limit)
 
     def wait(self) -> SupervisorRun:
         process_status = self._reap()
@@ -307,13 +395,27 @@ class _SupervisorInvocation:
                 f"{records.invocation} returned but its projection was not captured"
             )
         child = records.child()
+        taken = SupervisorEntry.FRESH_START if child is not None else SupervisorEntry.RESUME
+        if taken is not self.entry:
+            raise SupervisorPathMismatch(
+                f"{records.invocation} asked for {self.entry.value} but production "
+                f"took {taken.value}"
+            )
         child_records = None if child is None else case.records.child(child)
         evidence = None if child_records is None else read_json(child_records.launch_evidence)
         at_stop = read_json(records.store_at_child_stop)
+        if self.deadline == Deadline.AT_CHILD_STOP and at_stop is None and not crashed:
+            # child が止まらないまま production の timer / 終了で進んだ。要求した
+            # 「child が止まった瞬間の deadline」を試験したことにしない。
+            raise SupervisorPathMismatch(
+                f"{records.invocation} asked for the deadline at the worker's stop, "
+                "but the worker never stopped"
+            )
         release = read_json(records.barrier_release)
         return SupervisorRun(
             case=case,
             invocation=records.invocation,
+            entry=self.entry,
             exit_code=None if status is None else status["exit_code"],
             crashed=crashed,
             projection=projection,
