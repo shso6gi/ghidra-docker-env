@@ -915,3 +915,63 @@ def test_a_wide_scope_key_in_a_truncation_record_is_charged_before_it_is_sorted(
         RESULT_JSON_POLICY.prepare(record, max_bytes=10_000)
     # 幅を数えた時点で止まる（100 万の key を並べるために引き出さない）
     assert len(pulled) < 20_000
+
+
+# ---------------------------------------------------------------------------
+# 最終 envelope: surrogate・key の衝突・C の場所の予約
+# ---------------------------------------------------------------------------
+
+
+def test_a_lone_surrogate_is_written_as_counted_in_the_final_envelope():
+    import json
+
+    result = _decided_result()
+    result.pairwise_stats = {"note": "file\udcff\ud800name"}
+    envelope = build_final_result_envelope(result)
+    encoded = envelope.text.encode("utf-8")  # strict: 書ける
+    assert envelope.total_bytes == len(encoded)
+    assert json.loads(envelope.text)["pairwise_stats"]["note"] == "file\udcff\ud800name"
+
+
+def test_colliding_keys_are_rejected_on_the_fast_path_too():
+    from scripts.function_tracer_pcode.core.json_encoding import JsonValueRejected
+
+    for value in ({1: "a", "1": "b"}, {True: 1, "true": 2}, {None: 1, "null": 2}):
+        with pytest.raises(JsonValueRejected, match="collides"):
+            RESULT_JSON_POLICY.prepare(value)
+    # 診断の中なら marker（判定を変えない）
+    result = _decided_result()
+    decided = (result.final_outcome, result.decision_receipt)
+    result.pairwise_stats = {1: "a", "1": "b"}
+    envelope = build_final_result_envelope(result)
+    assert envelope.payload["pairwise_stats"]["truncated"] is True
+    assert (result.final_outcome, result.decision_receipt) == decided
+
+
+def test_an_earlier_diagnostic_body_never_erases_a_later_field():
+    result = _decided_result()
+    natural = build_final_result_envelope(result)
+    present = [key for key in ("pairwise_stats", "stage_path", "diagnostics", "unknown_cause_aggregate")
+               if key in natural.payload]
+    assert "unknown_cause_aggregate" in present and "diagnostics" in present
+    # 先に準備する診断（pairwise_stats）を、後の field の本体の分より大きくする
+    result.pairwise_stats = {"pad": "p" * 200_000}
+    limit = natural.total_bytes + 150_000
+    prepared = result.prepared_semantic_payload
+    result.prepared_semantic_payload = dataclasses.replace(
+        prepared, plan=dataclasses.replace(prepared.plan, max_bytes=limit, headroom_bytes=limit - 1),
+    )
+    envelope = build_final_result_envelope(result)
+    assert envelope.total_bytes <= limit
+    # どの field も本体か marker で出る（黙って消えない）。小さい後の field は本体のまま
+    for key in present:
+        assert key in envelope.payload, key
+    assert envelope.payload["pairwise_stats"]["truncated"] is True
+    assert envelope.payload["unknown_cause_aggregate"] == natural.payload["unknown_cause_aggregate"]
+
+
+def test_untruncatable_metadata_is_capped_at_its_schema_bound():
+    result = _decided_result()
+    result.binary1_content_identity = ("sha256", "d" * 5_000)
+    with pytest.raises(OutputEnvelopeInvariantViolation, match="schema bound"):
+        build_final_result_envelope(result)

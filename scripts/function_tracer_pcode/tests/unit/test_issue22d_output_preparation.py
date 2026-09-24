@@ -1229,12 +1229,18 @@ def test_projection_counts_cjk_non_bmp_and_escapes_like_the_encoder(policy):
 
 @pytest.mark.parametrize("policy", _POLICIES, ids=["default", "ascii", "compact", "odd"])
 def test_string_bytes_follow_the_json_escape_rule(policy):
-    """文字列の byte 数（json の escape 関数で数える）が escape の規則と一致する。"""
-    for text in _STRINGS + ["\ud800 lone surrogate", "\u2028\u2029", "\x7f\x80"]:
+    """文字列の byte 数（json の escape 関数で数える）が escape の規則と、policy が **書く** byte と一致する。
+
+    surrogate（surrogateescape で読んだ file 名など）は UTF-8 で書けないので `\\uXXXX` で書き、
+    数え方も同じ（数える byte と書く byte を別の規則にしない）。
+    """
+    for text in _STRINGS + ["\ud800 lone surrogate", "x\udcff\udc80y", "\ud83d\ude00", "\u2028\u2029", "\x7f\x80"]:
         assert policy._string_chunk_bytes(text) == policy._string_chunk_bytes_by_rule(text)
-        assert policy.string_bytes(text) == len(
-            json.dumps(text, ensure_ascii=policy.ensure_ascii).encode("utf-8", "surrogatepass")
-        )
+        written = policy.encode_bounded(text, max_bytes=None)
+        assert policy.string_bytes(text) == len(written.encode("utf-8"))
+        # 読み戻すと `ensure_ascii` の書き出しを読んだ値と同じ（surrogate の組は 1 文字に戻る）
+        assert json.loads(written) == json.loads(json.dumps(text, ensure_ascii=True))
+        assert policy.dumps(text) == written
 
 
 def test_a_long_string_is_counted_in_chunks_and_stops_early():

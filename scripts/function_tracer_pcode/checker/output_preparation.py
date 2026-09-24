@@ -303,7 +303,19 @@ class OutputField:
         `field_max_bytes` は出力 schema がこの field に許す上限（B の field）。
         """
 
-        source = self.read(result, context.options)
+        return self.prepare_source(
+            self.read(result, context.options), context, field_max_bytes=field_max_bytes,
+        )
+
+    def prepare_source(
+        self,
+        source: Any,
+        context: PreparationContext,
+        *,
+        field_max_bytes: Optional[int] = None,
+    ) -> Optional[PreparedField]:
+        """読んだ source（`read` の値）を準備する（`ABSENT` なら出さない）。"""
+
         if source is ABSENT:
             return None
         return _prepare_member(
@@ -1244,9 +1256,12 @@ def _prepare_after_authority(
     prepared: PreparedSemanticPayload,
     *,
     field_max_bytes: Optional[int] = None,
+    source: Any = None,
 ) -> Optional[PreparedField]:
     try:
-        return item.prepare(result, context, field_max_bytes=field_max_bytes)
+        if source is None:
+            return item.prepare(result, context, field_max_bytes=field_max_bytes)
+        return item.prepare_source(source, context, field_max_bytes=field_max_bytes)
     except JsonBudgetExhausted as exc:
         if field_max_bytes is not None and (
             context.members.remaining_for(item.key) is None
@@ -1315,12 +1330,58 @@ class OutputMetadata:
     def prepare(
         cls, result: Any, context: PreparationContext, prepared: PreparedSemanticPayload,
     ) -> "OutputMetadata":
-        rows = []
+        """C を準備する。
+
+        * 切り詰めてはいけない field を先に、出力 schema の上限の中で準備する（超えれば違反）。
+        * 切り詰めてよい診断は、先に準備した診断の本体が後の field の場所を使い切らないように、
+          field ごとの場所を予約してから準備する: まず marker の上限の中で試し、収まった field は
+          その値（大きさ = 予約）で確定する。収まらない field は marker の上限を予約し、順に予約を
+          外して残りの予算で本体（入らなければ marker）を準備する。headroom は marker の上限の和を
+          含むので、どの field も marker 以上は必ず出る（黙って消えない）。
+        """
+
+        from scripts.function_tracer_pcode.checker.output_schema import metadata_field_bounds
+
+        bounds = metadata_field_bounds(context.encoding)
+        members = context.members
+        encoding = context.encoding
+        rows: Dict[str, PreparedField] = {}
+        large = []
+        small_keys: List[str] = []
+        order = []
         for item in _rows(FieldOwner.METADATA, first=Overflow.INVARIANT):
+            if item.overflow is not Overflow.TRUNCATE:
+                row = _prepare_after_authority(
+                    item, result, context, prepared, field_max_bytes=bounds[item.key].max_bytes,
+                )
+                if row is not None:
+                    rows[item.key] = row
+                    order.append(item.key)
+                continue
+            source = item.read(result, context.options)
+            if source is ABSENT:
+                continue
+            order.append(item.key)
+            try:
+                small = encoding.prepare(source, max_bytes=bounds[item.key].max_bytes)
+            except (JsonBudgetExhausted, JsonValueRejected):
+                large.append(item)
+                members.reserve(item.key, bounds[item.key].max_bytes)
+                continue
+            rows[item.key] = PreparedField(item.key, small, "json")
+            small_keys.append(item.key)
+            members.reserve(item.key, small.encoded_bytes)
+        for item in large:
+            members.release_reservation(item.key)
+            # source は読み直す（1 回目の試しで遅延列を辿った）
             row = _prepare_after_authority(item, result, context, prepared)
             if row is not None:
-                rows.append(row)
-        return cls(tuple(rows))
+                rows[item.key] = row
+        # 予約で場所を取っていた小さい field を、予約を外して member として足す
+        for key in small_keys:
+            members.release_reservation(key)
+            members.add(key, rows[key].json.encoded_bytes)
+        return cls(tuple(rows[key] for key in order if key in rows))
 
 
 def _compose_members(
@@ -1331,8 +1392,8 @@ def _compose_members(
 ) -> Tuple[Tuple[str, ...], int]:
     """B と C を `members` の残り予算まで準備して `parts` へ置く。
 
-    切り詰めた C と、切り詰めれば空けられる byte の上限（本体を出した TRUNCATE の C の
-    member の byte の和）を返す。
+    切り詰めた C と、切り詰めれば空けられる byte の上限（本体を出した TRUNCATE の C の、
+    本体と marker の上限の差の和）を返す。
     """
 
     context = PreparationContext(prepared.options, members)
@@ -1341,10 +1402,14 @@ def _compose_members(
     for row in authority.fields + metadata.fields:
         if row.json is not None:
             parts[row.key] = row.json.value()
+    from scripts.function_tracer_pcode.checker.output_schema import metadata_field_bounds
+
+    bounds = metadata_field_bounds(members.policy)
     freeable = 0
     for row in metadata.fields:
         if row.json is not None and row.shape == "json" and _TRUNCATABLE_METADATA.get(row.key):
-            freeable += members.policy.member_bytes(row.key, row.json.encoded_bytes)
+            # 切り詰めても marker（上限 = schema の marker の上限）は残る
+            freeable += max(0, row.json.encoded_bytes - bounds[row.key].max_bytes)
     return metadata.truncated, freeable
 
 

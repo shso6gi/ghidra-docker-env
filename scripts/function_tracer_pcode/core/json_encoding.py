@@ -720,6 +720,10 @@ def _copy_canonical(value: Any) -> Any:
 _ESCAPE_UNICODE = re.compile(r'[\x00-\x1f\\"]')
 #: `ensure_ascii=True` で escape される文字（`json.encoder.ESCAPE_ASCII` と同じ集合）。
 _ESCAPE_ASCII = re.compile(r'([\\"]|[^\ -~])')
+#: surrogate の code point（Python の文字列では単独の文字。surrogateescape で読んだ file 名など）。
+#: `ensure_ascii=False` の書き出しでも `\uXXXX` に escape する（UTF-8 で書けないため。
+#: JSON の読み手は同じ code point に戻す）。数え方も同じ規則（1 文字 6 byte）。
+_SURROGATE = re.compile("[\ud800-\udfff]")
 #: 2 文字の escape（`\"` `\\` `\b` `\f` `\n` `\r` `\t`）になる文字。
 _SHORT_ESCAPES = frozenset('\\"\b\f\n\r\t')
 #: 長い文字列を数えるときの 1 回分の文字数（上限に届いたら残りを数えない単位）。
@@ -799,13 +803,20 @@ class JsonEncodingPolicy:
     def dumps(self, value: Any, *, default: Optional[Callable[[Any], Any]] = None) -> str:
         """上限なしで書く（大きさが既に分かっている小さい値だけに使う）。"""
 
-        return json.dumps(
+        return self._escape_surrogates(json.dumps(
             value,
             ensure_ascii=self.ensure_ascii,
             sort_keys=self.sort_keys,
             separators=self.separators,
             default=default,
-        )
+        ))
+
+    def _escape_surrogates(self, text_value: str) -> str:
+        """書いた JSON の中の surrogate を `\\uXXXX` にする（文字列の中にしか現れない）。"""
+
+        if self.ensure_ascii or text_value.isascii():
+            return text_value
+        return _SURROGATE.sub(lambda match: "\\u%04x" % ord(match.group(0)), text_value)
 
     def encode_bounded(self, value: Any, *, max_bytes: Optional[int]) -> str:
         """上限付きで書く。上限を超えた時点で止め、途中までの断片も捨てる。"""
@@ -813,6 +824,7 @@ class JsonEncodingPolicy:
         parts: List[str] = []
         written = 0
         for chunk in self._encoder().iterencode(value):
+            chunk = self._escape_surrogates(chunk)
             written += utf8_length(chunk)
             if max_bytes is not None and written > max_bytes:
                 parts.clear()
@@ -830,7 +842,8 @@ class JsonEncodingPolicy:
         quoted = encode_basestring(text_value)
         if quoted.isascii():
             return len(quoted) - 2
-        return len(quoted.encode("utf-8", "surrogatepass")) - 2
+        # surrogate は `\uXXXX`（6 byte）で書く。surrogatepass の 3 byte との差を足す
+        return len(quoted.encode("utf-8", "surrogatepass")) - 2 + 3 * len(_SURROGATE.findall(quoted))
 
     def _string_chunk_bytes_by_rule(self, text_value: str) -> int:
         """`_string_chunk_bytes` と同じ値を escape の規則から数える（test の照合用）。"""
@@ -848,7 +861,7 @@ class JsonEncodingPolicy:
             return total
         total = (
             len(text_value) if text_value.isascii()
-            else len(text_value.encode("utf-8", "surrogatepass"))
+            else len(text_value.encode("utf-8", "surrogatepass")) + 3 * len(_SURROGATE.findall(text_value))
         )
         for match in _ESCAPE_UNICODE.finditer(text_value):
             total += 1 if match.group(0) in _SHORT_ESCAPES else 5
@@ -1427,6 +1440,10 @@ class _Walk:
                     key, item = item
                     if type(key) is str:
                         text_key = key
+                    elif canonical and not isinstance(key, str):
+                        # str でない key は JSON の文字列にすると別の key と衝突し得る（`1` と
+                        # `"1"`）。衝突を拒むのは一般の経路（ここで写すと片方が黙って消える）
+                        raise _NotPlain
                     elif key is None or isinstance(key, (str, int, float)):
                         # 基底型の subclass の key も一般の経路と同じ `canonical_key`
                         text_key = policy.canonical_key(key)
@@ -1919,6 +1936,9 @@ def _canonical_copy_uncounted(policy: JsonEncodingPolicy, value: Any) -> Any:
     return _Walk(policy, CANONICAL, JsonBudget(None), build=True).run(value)
 
 
+_ALL_RESERVATIONS = object()
+
+
 class JsonObjectBudget:
     """1 つの JSON object へ member を順に足していく勘定（framing は policy が決める）。"""
 
@@ -1927,9 +1947,9 @@ class JsonObjectBudget:
         self.max_bytes = max_bytes
         self._count = 0
         self._members = 0
-        #: 後で足す member のために空けておく byte（`reserve`。`remaining_for` が差し引く）
-        self._reserved_count = 0
-        self._reserved_bytes = 0
+        #: 後で足す member のために空けておく byte（key → member の byte。`remaining_for` が
+        #: その key 以外の予約を差し引く）
+        self._reserved: Dict[Any, int] = {}
 
     @property
     def total_bytes(self) -> int:
@@ -1949,8 +1969,9 @@ class JsonObjectBudget:
     def remaining_for(self, key: Any) -> Optional[int]:
         if self.max_bytes is None:
             return None
-        count = self._count + self._reserved_count
-        total = self.policy.container_frame_bytes(count) + self._members + self._reserved_bytes
+        others = [size for reserved, size in self._reserved.items() if reserved != key]
+        count = self._count + len(others)
+        total = self.policy.container_frame_bytes(count) + self._members + sum(others)
         added = (
             self.policy.container_frame_bytes(count + 1) - self.policy.container_frame_bytes(count)
             + self.policy.member_bytes(key, 0)
@@ -1958,14 +1979,20 @@ class JsonObjectBudget:
         return self.max_bytes - total - added
 
     def reserve(self, key: Any, value_bytes: int) -> None:
-        """後で `key` に `value_bytes` の値を足すための byte を空けておく（他の member の残りから引く）。"""
+        """後で `key` に `value_bytes` の値を足すための byte を空けておく（他の member の残りから引く）。
 
-        self._reserved_count = 1
-        self._reserved_bytes = self.policy.member_bytes(key, value_bytes)
+        key ごとに 1 つ（複数の key を同時に予約できる）。
+        """
 
-    def release_reservation(self) -> None:
-        self._reserved_count = 0
-        self._reserved_bytes = 0
+        self._reserved[key] = self.policy.member_bytes(key, value_bytes)
+
+    def release_reservation(self, key: Any = _ALL_RESERVATIONS) -> None:
+        """`key` の予約を外す（省略すればすべて）。"""
+
+        if key is _ALL_RESERVATIONS:
+            self._reserved.clear()
+        else:
+            self._reserved.pop(key, None)
 
     def add(self, key: Any, value_bytes: int) -> None:
         self._members += self.policy.member_bytes(key, value_bytes)
