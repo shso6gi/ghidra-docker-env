@@ -46,6 +46,10 @@ from scripts.function_tracer_pcode.authority.process.terminal_evidence import (
     CheckpointAnchor,
 )
 from scripts.function_tracer_pcode.authority.process import terminal_recovery as tr
+from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
+    CheckpointState,
+    ErrorStage,
+)
 from scripts.function_tracer_pcode.authority.process.checkpoint_archive import (
     CHAIN_MEMBER_NAMES,
 )
@@ -150,7 +154,7 @@ def _commit(chain_id: str, prior: Optional[str], bootstrap: bool) -> list:
     steps.append(lambda s: members(s, "checkpoint-prefix-stream.json"))
     steps.append(lambda s: members(s, "checkpoint.json"))
     steps.append(lambda s: replace(
-        s, live=replace(s.live, state="ACTIVE", members=s.live.members | {"state.json"}),
+        s, live=replace(s.live, state=CheckpointState.ACTIVE.value, members=s.live.members | {"state.json"}),
     ))
     steps.append(lambda s: replace(s, pending=None))
     return steps
@@ -161,8 +165,8 @@ def _worker_completion() -> list:
         return lambda s: replace(s, live=replace(s.live, members=s.live.members | {name}))
     return [
         add("continuation-stream.json"), add("continuation.json"), add("ready.json"),
-        lambda s: replace(s, live=replace(s.live, state="COMPLETION_READY")),
-        lambda s: replace(s, live=replace(s.live, state="RESOLVED")),
+        lambda s: replace(s, live=replace(s.live, state=CheckpointState.COMPLETION_READY.value)),
+        lambda s: replace(s, live=replace(s.live, state=CheckpointState.RESOLVED.value)),
     ]
 
 
@@ -224,7 +228,7 @@ def op_recover_ready(s: ModelState) -> list:
     return [
         lambda s: replace(s, live=replace(s.live, members=s.live.members | {"recovery-resolution.json"})),
         lambda s: s,  # ready.json（identical）
-        lambda s: replace(s, live=replace(s.live, state="RESOLVED", closed_by="recovery")),
+        lambda s: replace(s, live=replace(s.live, state=CheckpointState.RESOLVED.value, closed_by="recovery")),
     ]
 
 
@@ -232,8 +236,8 @@ def op_close_continuation(s: ModelState) -> list:
     return [
         lambda s: replace(s, live=replace(s.live, members=s.live.members | {"recovery-resolution.json"})),
         lambda s: replace(s, live=replace(s.live, members=s.live.members | {"ready.json"})),
-        lambda s: replace(s, live=replace(s.live, state="COMPLETION_READY", closed_by="recovery")),
-        lambda s: replace(s, live=replace(s.live, state="RESOLVED", closed_by="recovery")),
+        lambda s: replace(s, live=replace(s.live, state=CheckpointState.COMPLETION_READY.value, closed_by="recovery")),
+        lambda s: replace(s, live=replace(s.live, state=CheckpointState.RESOLVED.value, closed_by="recovery")),
     ]
 
 
@@ -241,7 +245,7 @@ def op_claim(s: ModelState) -> list:
     return [
         lambda s: replace(s, timeout_members=s.timeout_members | {"claimed.json"},
                           claimed_disposition=DISPOSITION["deadline"]),
-        lambda s: replace(s, live=replace(s.live, state="TIMED_OUT_CLAIMED")),
+        lambda s: replace(s, live=replace(s.live, state=CheckpointState.TIMED_OUT_CLAIMED.value)),
     ]
 
 
@@ -249,7 +253,7 @@ def op_finalize_timeout(s: ModelState) -> list:
     return [
         *(lambda s, name=name: replace(s, timeout_members=s.timeout_members | {name})
           for name in TIMEOUT_MEMBERS[1:]),
-        lambda s: replace(s, live=replace(s.live, state="TIMED_OUT")),
+        lambda s: replace(s, live=replace(s.live, state=CheckpointState.TIMED_OUT.value)),
     ]
 
 
@@ -362,7 +366,7 @@ def snapshot(s: ModelState, mode: tr.ExitMode) -> tr.TerminalSnapshot:
         remaining = s.live is not None and bool(s.live.members)
         archive = tr.ArchiveFact(
             V, "A", checkpoint_digest=chain_id, resolved_digest=token,
-            stage=tr.STAGE_NON_DECOMPILATION,
+            stage=ErrorStage.NON_DECOMPILATION.value,
             union=tr.UnionState.PARTIAL if remaining else tr.UnionState.COMPLETE,
         )
         if tamper == "A":
@@ -392,19 +396,19 @@ def snapshot(s: ModelState, mode: tr.ExitMode) -> tr.TerminalSnapshot:
                 continuation=V if has_cont else A,
                 kill_disposition=(
                     s.claimed_disposition
-                    if chain.state in {"TIMED_OUT_CLAIMED", "TIMED_OUT"} else None
+                    if chain.state in {CheckpointState.TIMED_OUT_CLAIMED.value, CheckpointState.TIMED_OUT.value} else None
                 ),
             )
     if tamper == "live":
         live = tr.LiveChainFact(tr.LiveKind.INVALID, detail="state signature mismatch")
     if tamper == "foreign-live" and s.archive is None:
         live = tr.LiveChainFact(
-            tr.LiveKind.CHAIN, checkpoint_digest="foreign", state="ACTIVE",
+            tr.LiveKind.CHAIN, checkpoint_digest="foreign", state=CheckpointState.ACTIVE.value,
             state_digest="foreign:ACTIVE", continuation=A,
         )
         pending = tr.PendingFact()
     timeout_complete = (
-        s.live is not None and s.live.state == "TIMED_OUT"
+        s.live is not None and s.live.state == CheckpointState.TIMED_OUT.value
         and set(TIMEOUT_MEMBERS) <= s.timeout_members
     )
     timeout = tr.TimeoutFact(
@@ -462,7 +466,7 @@ def worker_phase(state: ModelState) -> str:
         return "PENDING"
     if state.live is None or state.live.state is None:
         return "NONE"
-    if state.live.state == "ACTIVE":
+    if state.live.state == CheckpointState.ACTIVE.value:
         members = state.live.members
         return "ACTIVE_CONT" if {"continuation.json", "continuation-stream.json"} <= members else "ACTIVE"
     return state.live.state
@@ -480,10 +484,10 @@ def expected_terminal(scenario: Scenario, phase: str) -> tuple:
         return ("RESOLVED", None) if scenario.envelope == "valid" else (
             "INVALID", "CANONICAL_CHILD_RESULT_INVALID")
     if phase == "NONE":
-        return ("ERROR", tr.STAGE_BEFORE_CHECKPOINT)
+        return ("ERROR", ErrorStage.BEFORE_CHECKPOINT.value)
     if phase in {"ACTIVE", "PENDING"}:
         return ("INVALID", "ACTIVE_EXIT_STAGE_UNSEALED")
-    return ("ERROR", tr.STAGE_NON_DECOMPILATION)
+    return ("ERROR", ErrorStage.NON_DECOMPILATION.value)
 
 
 def terminal_of(step: tr.Step, state: ModelState) -> tuple:
@@ -617,7 +621,7 @@ TAMPERS = {
     "pending": lambda s: s.pending is not None,
     "live": lambda s: s.live is not None and s.archive is None and s.pending is None,
     "foreign-live": lambda s: s.exit is not None and s.exit[0] is False and (
-        s.archive is not None or s.live is None or s.live.state == "RESOLVED"),
+        s.archive is not None or s.live is None or s.live.state == CheckpointState.RESOLVED.value),
 }
 
 CONFLICTS = {
@@ -629,7 +633,7 @@ CONFLICTS = {
     "error-on-timeout": (
         lambda s: bool(s.timeout_members),
         lambda s: replace(s, error_members=s.error_members | {"operational-error.json"},
-                          error_stage=tr.STAGE_BEFORE_CHECKPOINT),
+                          error_stage=ErrorStage.BEFORE_CHECKPOINT.value),
     ),
     "deadline-on-resolved": (
         lambda s: s.canonical_receipt,
@@ -641,7 +645,7 @@ CONFLICTS = {
     ),
     "claim-disposition-mismatch": (
         lambda s: s.claimed_disposition is not None and s.live is not None
-        and s.live.state in {"TIMED_OUT_CLAIMED", "TIMED_OUT"},
+        and s.live.state in {CheckpointState.TIMED_OUT_CLAIMED.value, CheckpointState.TIMED_OUT.value},
         lambda s: replace(s, claimed_disposition="SIGKILL_AFTER_DEADLINE"),
     ),
 }

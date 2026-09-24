@@ -32,7 +32,7 @@ A worktree needs `.env` (`DOCKER_UID` / `DOCKER_GID`) next to `docker-compose.ym
 |---|---|
 | `probe_terminal_authority.before_d64aba9.jsonl` | `c189d794d630b3d1eab899bb5bfa29f3e09c624dbb5c692d751c3e87d0706d8e` |
 | `probe_terminal_authority.after.jsonl` | `0f32e6033b051ca5c368785e30df0c0215a2f4971ddd3a648df6323dec265f05` |
-| `phase0_gates.head.jsonl` | `c13aa69420f61123ef57ceed684344250fc60b0540394efd40af92967f4c9b4c` |
+| `phase0_gates.head.jsonl` | `b060aefaa8daac516011ecec5ea7ce337deae21d959a3e0ceb96ac328dd7376b` |
 | `terminal_model.head.json` | `4c6a2bbfa508904325256232c0d44e1c6fc5d271e974b0a477e200407d8b37ba` |
 
 ## Before / after (`probe_terminal_authority`)
@@ -49,7 +49,7 @@ A worktree needs `.env` (`DOCKER_UID` / `DOCKER_GID`) next to `docker-compose.ym
 
 ## Phase 0 gates
 
-The gates were first run during Phase 0, when only the terminal-evidence layer and the
+The gates were first run during Phase 0, when only the D / E / A schema layer and the
 archive module existed (the supervisor did not produce E yet). `phase0_gates.py` keeps
 the same checks in a form that runs on the PR head: G1 reads the E that the production
 supervisor wrote, and G2 crashes the supervisor right after E so that the live chain is
@@ -57,7 +57,7 @@ still there.
 
 | gate | result |
 |---|---|
-| G1 E receipt | satisfied: E is signed with the terminal-evidence key, persisted, re-read and validated against the launch; the worker's key set cannot validate it; tampering is rejected; its measured rc joins the CLI code and the classifier accepts; a natural-exit E cannot claim signal facts; no rc exists without E |
+| G1 E receipt | satisfied: E is signed with the supervisor role, persisted, re-read and validated against the launch; a receipt that claims the E kind under the worker role is rejected; tampering is rejected; its measured rc joins the CLI code and the classifier accepts; a natural-exit E cannot claim signal facts; no rc exists without E |
 | G2 archive adapter | satisfied: every split of a real chain (0–6 members moved) resumes from A + the live/history union; tampered member, member missing on both sides, extra history file, tampered manifest and a manifest bound to another E are rejected |
 | G3 ACTIVE error stage | **not satisfied** for `DURING_DECOMPILATION`: the ERROR issuer rejects it ("supervisor deadline stage is not sealed"), so a natural exit inside decompilation stays INVALID (`ACTIVE_EXIT_STAGE_UNSEALED`). `NON_DECOMPILATION` goes through the classifier, the pair-status seal and the CLI |
 | G4 state model | satisfied after one design fix found by the model (below) |

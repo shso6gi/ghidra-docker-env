@@ -22,7 +22,20 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.process import checkpoint_archive as archive
+from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
+    CANONICAL_RECEIPT_FILENAME,
+    RESULT_ENVELOPE_FILE,
+    CanonicalEnvelope,
+    SupervisorCanonicalResultResolvedReceipt,
+    canonical_resolved_receipt,
+    validate_canonical_envelope,
+)
+from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
+    TIMEOUT_STATES,
+    CheckpointState,
+)
 from scripts.function_tracer_pcode.authority.process import terminal_evidence as evidence
 from scripts.function_tracer_pcode.authority.process import terminal_recovery as recovery
 
@@ -30,30 +43,11 @@ _READ_ERRORS = (
     OSError, UnicodeDecodeError, KeyError, TypeError, ValueError, AttributeError,
 )
 
-TIMEOUT_MEMBER_NAMES = (
-    "claimed.json", "timeout.json", "terminal-segment.json", "terminal-stream.json",
-)
-ERROR_MEMBER_NAMES = (
-    "operational-error.json", "operational-error-segment.json",
-    "operational-error-stream.json", "operational-error-bundle.json",
-)
-CANONICAL_RECEIPT_FILENAME = "canonical-resolved-receipt.json"
 BOOTSTRAP_CHECKPOINT_KIND = "SupervisorBootstrapCheckpointReceipt"
 
 
 def _describe(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"[:500]
-
-
-@dataclass(frozen=True)
-class CanonicalEnvelope:
-    """検証済みの child の canonical 結果（envelope の封・bundle 署名・launch join）。"""
-
-    outcome: Any
-    cli_returncode: int
-    validated: Mapping[str, Any]
-    bundle: Mapping[str, Any]
-    sha256: str
 
 
 @dataclass
@@ -98,97 +92,22 @@ def _decode_file(store: Any, path: Path) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def validate_child_envelope(store: Any, launch: Any) -> CanonicalEnvelope:
-    """child が書いた envelope を封・bundle 署名・launch と照合する（rc は見ない）。"""
-
-    from scripts.function_tracer_pcode.authority.contracts import (
-        Outcome,
-        authority_digest,
-    )
-    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-        RESULT_ENVELOPE_FILE,
-    )
-    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
-        CLI_EXIT_MATRIX,
-    )
-
-    raw = (store.directory / RESULT_ENVELOPE_FILE).read_bytes()
-    envelope = json.loads(raw.decode("utf-8"))
-    if type(envelope) is not dict or set(envelope) != {
-        "schema", "canonical_result_payload",
-        "canonical_result_bundle_digest", "envelope_digest",
-    }:
-        raise ValueError("canonical result envelope fields differ")
-    body = {key: value for key, value in envelope.items() if key != "envelope_digest"}
-    if (
-        envelope["schema"] != "canonical-result-envelope-v1"
-        or authority_digest(body) != envelope["envelope_digest"]
-    ):
-        raise ValueError("canonical result envelope seal is invalid")
-    payload = envelope["canonical_result_payload"]
-    bundle = payload["canonical_result_finalization_bundle"]
-    preimage = {
-        key: value for key, value in payload.items()
-        if key != "canonical_result_finalization_bundle"
-    }
-    validated = store.factory.validate_child_canonical_bundle(
-        bundle, result_payload_preimage=preimage,
-    )
-    identity = validated["execution_identity"]
-    if (
-        bundle["bundle_digest"] != envelope["canonical_result_bundle_digest"]
-        or identity["result_occurrence_id"] != launch.payload["result_occurrence_id"]
-        or identity["source_snapshot_fingerprint"]
-        != launch.payload["source_snapshot_fingerprint"]
-        or identity["stream_id"] != launch.payload["stream_id"]
-    ):
-        raise ValueError("canonical child result does not join the launch")
-    outcome = Outcome(validated["outcome"])
-    return CanonicalEnvelope(
-        outcome, CLI_EXIT_MATRIX[outcome], validated, bundle,
-        hashlib.sha256(raw).hexdigest(),
-    )
-
-
-def canonical_resolved_receipt(
-    envelope: CanonicalEnvelope, *, launch: Any, child_returncode: int,
-) -> Any:
-    """envelope と E の実測 rc から canonical resolved receipt を決定的に作る。"""
-
-    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-        SupervisorCanonicalResultResolvedReceipt,
-    )
-
-    identity = envelope.validated["execution_identity"]
-    receipt = SupervisorCanonicalResultResolvedReceipt.create(
-        launch_receipt_digest=launch.receipt_digest,
-        result_occurrence_id=identity["result_occurrence_id"],
-        execution_identity_digest=identity["execution_identity_digest"],
-        child_returncode=child_returncode,
-        canonical_result_bundle_digest=envelope.validated["bundle_digest"],
-        payload_preimage_digest=envelope.validated["payload_preimage_digest"],
-        decision_receipt_digest=envelope.validated["decision_receipt_digest"],
-    )
-    receipt.validate()
-    return receipt
-
-
 def _read_canonical(
     store: Any, context: SnapshotContext, exit_fact: recovery.ExitFact,
 ) -> recovery.CanonicalFact:
-    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-        RESULT_ENVELOPE_FILE,
-        SupervisorCanonicalResultResolvedReceipt,
-    )
-
     envelope_path = store.directory / RESULT_ENVELOPE_FILE
     receipt_path = store.directory / CANONICAL_RECEIPT_FILENAME
     presence = recovery.Presence
     envelope_presence, sha, cli_rc, detail = presence.ABSENT, None, None, None
     if envelope_path.exists():
-        sha = hashlib.sha256(envelope_path.read_bytes()).hexdigest()
+        # 検証する bytes と E と照合する digest は同じ 1 回の読込みから取る。
+        raw = envelope_path.read_bytes()
+        sha = hashlib.sha256(raw).hexdigest()
         try:
-            context.envelope = validate_child_envelope(store, context.launch)
+            context.envelope = validate_canonical_envelope(
+                raw, launch=context.launch,
+                validate_bundle=store.factory.validate_child_canonical_bundle,
+            )
         except _READ_ERRORS as exc:
             envelope_presence, detail = presence.INVALID, _describe(exc)
         else:
@@ -353,33 +272,33 @@ def _in_transaction_predecessor(store: Any) -> recovery.LiveChainFact:
     """pending transaction の途中: まだ live にある前任 RESOLVED の identity。"""
 
     kind = recovery.LiveKind.IN_TRANSACTION
-    state_path = store.directory / archive.STATE_MEMBER
+    state_path = store.directory / layout.STATE
     if not state_path.exists():
         return recovery.LiveChainFact(kind)
     try:
         state = store.read_state()
-        if state.payload["state"] != recovery.RESOLVED:
+        if state.payload["state"] != CheckpointState.RESOLVED:
             return recovery.LiveChainFact(kind, state=state.payload["state"],
                                           state_digest=state.receipt_digest)
-        ready_path = store.directory / "ready.json"
+        ready_path = store.directory / layout.READY
         if not ready_path.exists():
             ready_path = (
                 store.directory / archive.history_destination(state.receipt_digest)
-                / "ready.json"
+                / layout.READY
             )
         ready = _decode_file(store, ready_path)
     except _READ_ERRORS:
         return recovery.LiveChainFact(kind)
     return recovery.LiveChainFact(
         kind, checkpoint_digest=ready.payload["prior_state_receipt_digest"],
-        state=recovery.RESOLVED, state_digest=state.receipt_digest,
+        state=CheckpointState.RESOLVED.value, state_digest=state.receipt_digest,
     )
 
 
 def _read_live(store: Any, context: SnapshotContext) -> recovery.LiveChainFact:
     presence = recovery.Presence
     members = archive.live_chain_members(store.directory)
-    if archive.STATE_MEMBER not in members:
+    if layout.STATE not in members:
         if not members:
             return recovery.LiveChainFact()
         return recovery.LiveChainFact(
@@ -388,31 +307,31 @@ def _read_live(store: Any, context: SnapshotContext) -> recovery.LiveChainFact:
         )
     try:
         state = store.read_state()
-        checkpoint = _decode_file(store, store.directory / "checkpoint.json")
+        checkpoint = _decode_file(store, store.directory / layout.CHECKPOINT)
         prefix = store.rematerialize_active_prefix()
         if checkpoint.payload["launch_receipt_digest"] != context.launch.receipt_digest:
             raise ValueError("live checkpoint does not join the launch")
         value = state.payload["state"]
         continuation = presence.ABSENT
         kill_disposition = None
-        if value == recovery.ACTIVE:
+        if value == CheckpointState.ACTIVE:
             if state.receipt_digest != checkpoint.receipt_digest:
                 raise ValueError("ACTIVE state is not the live checkpoint")
-            if (store.directory / "continuation.json").exists():
+            if (store.directory / layout.CONTINUATION).exists():
                 durable, _ = store.rematerialize_worker_continuation(prefix=prefix)
                 if durable.payload["checkpoint_receipt_digest"] != checkpoint.receipt_digest:
                     raise ValueError("live continuation continues another checkpoint")
                 continuation = presence.VALID
-            claimed_path = store.directory / "claimed.json"
+            claimed_path = store.directory / layout.CLAIMED
             if claimed_path.exists():
                 claimed = _decode_file(store, claimed_path)
                 if (
-                    claimed.payload["state"] != recovery.TIMED_OUT_CLAIMED
+                    claimed.payload["state"] != CheckpointState.TIMED_OUT_CLAIMED
                     or claimed.payload["prior_state_receipt_digest"] != state.receipt_digest
                 ):
                     raise ValueError("claimed.json does not claim the live ACTIVE state")
                 kill_disposition = claimed.payload["kill_disposition"]
-        elif value == recovery.COMPLETION_READY:
+        elif value == CheckpointState.COMPLETION_READY:
             durable, _ = store.rematerialize_worker_continuation(prefix=prefix)
             if (
                 state.payload["prior_state_receipt_digest"] != checkpoint.receipt_digest
@@ -420,23 +339,23 @@ def _read_live(store: Any, context: SnapshotContext) -> recovery.LiveChainFact:
             ):
                 raise ValueError("READY state does not close the live checkpoint")
             continuation = presence.VALID
-        elif value == recovery.RESOLVED:
+        elif value == CheckpointState.RESOLVED:
             chain = store.validate_resolved_chain_members(
                 archive.directory_reader(store.directory), present=members,
             )
             if chain.checkpoint.receipt_digest != checkpoint.receipt_digest:
                 raise ValueError("RESOLVED chain differs from the live checkpoint")
             continuation = presence.VALID
-        elif value == recovery.TIMED_OUT_CLAIMED:
-            claimed = _decode_file(store, store.directory / "claimed.json")
+        elif value == CheckpointState.TIMED_OUT_CLAIMED:
+            claimed = _decode_file(store, store.directory / layout.CLAIMED)
             if (
                 state.payload["prior_state_receipt_digest"] != checkpoint.receipt_digest
                 or claimed.receipt_digest != state.receipt_digest
             ):
                 raise ValueError("claimed state is not the durable claim")
             kill_disposition = state.payload["kill_disposition"]
-        elif value == recovery.TIMED_OUT:
-            claimed = _decode_file(store, store.directory / "claimed.json")
+        elif value == CheckpointState.TIMED_OUT:
+            claimed = _decode_file(store, store.directory / layout.CLAIMED)
             if (
                 claimed.payload["prior_state_receipt_digest"] != checkpoint.receipt_digest
                 or state.payload["prior_state_receipt_digest"] != claimed.receipt_digest
@@ -461,16 +380,14 @@ def _read_timeout(
     store: Any, context: SnapshotContext, live: recovery.LiveChainFact,
 ) -> recovery.TimeoutFact:
     members = frozenset(
-        name for name in TIMEOUT_MEMBER_NAMES if (store.directory / name).exists()
+        name for name in layout.TIMEOUT_MEMBERS if (store.directory / name).exists()
     )
-    finalize_members = members - {"claimed.json"}
-    if finalize_members and live.state not in {
-        recovery.TIMED_OUT_CLAIMED, recovery.TIMED_OUT,
-    }:
+    finalize_members = members - {layout.CLAIMED}
+    if finalize_members and live.state not in TIMEOUT_STATES:
         return recovery.TimeoutFact(
             members, detail="timeout members exist before the claim is durable",
         )
-    if live.state != recovery.TIMED_OUT:
+    if live.state != CheckpointState.TIMED_OUT:
         return recovery.TimeoutFact(members)
     try:
         bundle = store.rematerialize_timeout_bundle(prefix=context.prefix)
@@ -481,14 +398,14 @@ def _read_timeout(
 
 def _read_error(store: Any, context: SnapshotContext) -> recovery.ErrorFact:
     members = frozenset(
-        name for name in ERROR_MEMBER_NAMES if (store.directory / name).exists()
+        name for name in layout.ERROR_MEMBERS if (store.directory / name).exists()
     )
     if not members:
         return recovery.ErrorFact()
     stage = disposition = None
     try:
-        if "operational-error.json" in members:
-            error = _decode_file(store, store.directory / "operational-error.json")
+        if layout.OPERATIONAL_ERROR in members:
+            error = _decode_file(store, store.directory / layout.OPERATIONAL_ERROR)
             if (
                 error.receipt_kind != "SupervisorOperationalErrorReceipt"
                 or error.payload["launch_receipt_digest"] != context.launch.receipt_digest
@@ -496,7 +413,7 @@ def _read_error(store: Any, context: SnapshotContext) -> recovery.ErrorFact:
                 raise ValueError("operational error receipt does not join the launch")
             stage = error.payload["deadline_stage"]
             disposition = error.payload["child_exit_disposition"]
-        if members != frozenset(ERROR_MEMBER_NAMES):
+        if members != frozenset(layout.ERROR_MEMBERS):
             return recovery.ErrorFact(members, stage=stage, disposition=disposition)
         bundle = store._rematerialize_operational_error_bundle_locked(prefix=None)
     except _READ_ERRORS as exc:
@@ -517,8 +434,8 @@ def _read_history(store: Any) -> dict:
         return history
     for directory in sorted(root.iterdir()):
         try:
-            state = _decode_file(store, directory / archive.STATE_MEMBER)
-            checkpoint = _decode_file(store, directory / "checkpoint.json")
+            state = _decode_file(store, directory / layout.STATE)
+            checkpoint = _decode_file(store, directory / layout.CHECKPOINT)
         except _READ_ERRORS:
             continue
         if state.receipt_digest == directory.name:

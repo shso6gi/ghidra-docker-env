@@ -243,10 +243,34 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
         "scripts.function_tracer_pcode.smt",
         "os",
     ),
-    # Issue #165: 終端 authority の変更軸ごとの owner。
+    # Issue #165: 終端 authority の変更軸ごとの owner。process の終端の module は
+    # 分類器（decision）にも CLI の orchestration（supervisor_command）にも依存
+    # しない。分類器は下の owner を import して同じ判断・同じ検証を呼び直す。
+    # 語彙・同一性・envelope の owner は標準 library と contracts だけに依存する。
+    "authority/process/checkpoint_vocabulary.py": (
+        "os", "fcntl", "subprocess", "signal", "json", "pathlib",
+        "scripts.function_tracer_pcode.authority",
+    ),
+    "authority/process/store_layout.py": (
+        "os", "fcntl", "subprocess", "signal", "json", "pathlib",
+        "scripts.function_tracer_pcode.authority",
+    ),
+    "authority/process/child_exit.py": (
+        "os", "fcntl", "subprocess", "signal", "json", "pathlib",
+        "scripts.function_tracer_pcode.authority",
+    ),
+    "authority/process/process_identity.py": (
+        "fcntl", "subprocess", "signal", "json",
+        "scripts.function_tracer_pcode.authority",
+    ),
+    "authority/process/canonical_envelope.py": (
+        "os", "fcntl", "subprocess", "signal", "pathlib",
+        "scripts.function_tracer_pcode.authority.decision", "scripts.function_tracer_pcode.authority.process", "scripts.function_tracer_pcode.authority.lifecycle",
+    ),
     # 復旧の判断は純関数（store を読む・書く・process を触る、のどれもしない）。
     "authority/process/terminal_recovery.py": (
         "os", "fcntl", "subprocess", "signal", "tempfile", "json", "pathlib",
+        "scripts.function_tracer_pcode.authority.decision",
         "scripts.function_tracer_pcode.authority.process.supervisor",
         "scripts.function_tracer_pcode.authority.process.supervisor_command",
         "scripts.function_tracer_pcode.authority.process.terminal_snapshot",
@@ -257,6 +281,7 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
     # D / E / A の schema と検証は file も process も触らない（書くのは store）。
     "authority/process/terminal_evidence.py": (
         "os", "fcntl", "subprocess", "signal", "tempfile",
+        "scripts.function_tracer_pcode.authority.decision",
         "scripts.function_tracer_pcode.authority.process.supervisor",
         "scripts.function_tracer_pcode.authority.process.supervisor_command",
         "scripts.function_tracer_pcode.authority.process.terminal_recovery",
@@ -264,13 +289,52 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
     # archive は file の移動と照合だけ（署名・判断・lock は持たない）。
     "authority/process/checkpoint_archive.py": (
         "fcntl", "subprocess", "signal",
+        "scripts.function_tracer_pcode.authority.decision",
         "scripts.function_tracer_pcode.authority.process.supervisor",
         "scripts.function_tracer_pcode.authority.process.terminal_recovery",
         "scripts.function_tracer_pcode.authority.process.terminal_evidence",
     ),
+    "authority/process/terminal_snapshot.py": (
+        "fcntl", "subprocess", "signal",
+        "scripts.function_tracer_pcode.authority.decision",
+        "scripts.function_tracer_pcode.authority.process.supervisor_command",
+        "scripts.function_tracer_pcode.authority.process.terminal_driver",
+    ),
+    "authority/process/terminal_transaction.py": (
+        "fcntl", "subprocess", "signal",
+        "scripts.function_tracer_pcode.authority.decision",
+        "scripts.function_tracer_pcode.authority.process.supervisor_command",
+        "scripts.function_tracer_pcode.authority.process.terminal_driver",
+    ),
     # driver は loop の方針だけ（process の終了観測や signal は supervisor command）。
     "authority/process/terminal_driver.py": (
         "os", "fcntl", "subprocess", "signal",
+        "scripts.function_tracer_pcode.authority.decision",
+        "scripts.function_tracer_pcode.authority.process.supervisor_command",
+    ),
+    "authority/process/terminal_projection.py": (
+        "os", "fcntl", "subprocess", "signal",
+        "scripts.function_tracer_pcode.authority.decision",
+        "scripts.function_tracer_pcode.authority.process.supervisor_command",
+    ),
+    # store は終端の判断・transaction を知らない（lock と ownership だけを提供する）。
+    "authority/process/supervisor.py": (
+        "scripts.function_tracer_pcode.authority.process.supervisor_command",
+        "scripts.function_tracer_pcode.authority.process.terminal_recovery",
+        "scripts.function_tracer_pcode.authority.process.terminal_snapshot",
+        "scripts.function_tracer_pcode.authority.process.terminal_transaction",
+        "scripts.function_tracer_pcode.authority.process.terminal_driver",
+        "scripts.function_tracer_pcode.authority.process.terminal_projection",
+    ),
+    # supervisor の CLI（orchestration）は分類器を呼ばない。
+    "authority/process/supervisor_command.py": (
+        "scripts.function_tracer_pcode.authority.decision",
+    ),
+    # 分類器は process の orchestration（CLI）に依存しない。
+    "authority/decision/canonical_result.py": (
+        "scripts.function_tracer_pcode.authority.process.supervisor_command",
+    ),
+    "authority/decision/production_cutover.py": (
         "scripts.function_tracer_pcode.authority.process.supervisor_command",
     ),
 }

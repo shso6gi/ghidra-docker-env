@@ -173,10 +173,6 @@ def _prove_launch_before_exec(records: ChildRecords) -> Any:
         "launch_child_pid": runtime.launch.payload["child_pid"],
         "launch_child_start_token": runtime.launch.payload["child_start_token"],
         "state_present_at_start": (runtime.store.directory / "state.json").exists(),
-        # Issue #165: child が受け取った環境と引数（supervisor だけの鍵が
-        # 渡っていないことを parent が確かめる）。
-        "environment": dict(os.environ),
-        "argv": list(sys.argv),
     }
     write_json(records.identity_record, {
         "pid": records.identity.pid, "start_token": records.identity.start_token,
@@ -457,7 +453,7 @@ STEP_HANDLERS: dict[str, Callable[[_ChildContext, Mapping[str, Any]], None]] = {
 
 
 def main(arguments: list[str]) -> int:
-    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+    from scripts.function_tracer_pcode.authority.process.process_identity import (
         read_process_start_token,
     )
 

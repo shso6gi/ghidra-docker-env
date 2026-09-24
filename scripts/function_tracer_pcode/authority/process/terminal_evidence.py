@@ -20,14 +20,15 @@ A ``SupervisorArchiveManifestReceipt``  archive する完全な checkpoint   ``a
 * 観測した事実しか書かない。rc は ``wait``/``poll`` の返り値そのもの、signal は
   ``killpg`` が戻った送信だけ。deadline 到達・signal 送信・child 終了は別の
   field で、どれかから他を推測しない。
-* 署名は supervisor だけが持つ terminal-evidence 鍵（``TERMINAL_EVIDENCE_ROLE``）。
-  worker child の環境にはこの鍵を渡さない（child は supervisor 鍵を canonical
-  bundle の封に使うので、D/E/A をその鍵で署名すると child が偽造できる）。
+* 署名は既存の supervisor authority（supervisor role の鍵）を使う。runner・
+  supervisor・worker・分類器は同じ trusted な実行領域として扱い、発行 process
+  の認証（worker からの鍵の隔離）は要求しない。署名・digest・join は、
+  改ざん・取り違え（別 launch・別 D・壊れた file）を検出するためにある。
 * 検証は ``ProcessSupervisorAuthorityFactory.decode`` の署名検証の後に、ここで
   schema（key 集合・型）と launch / D / E の join を確かめる。署名が正しくても
   別 launch・別 D の evidence は受け付けない。
-* disposition と rc の対応は既存の ``validate_durable_child_returncode_observation``
-  （public の語彙の唯一の owner）をそのまま使い、ここで再定義しない。
+* disposition・送った signal・rc の対応は ``child_exit``（終了観測の語彙の
+  唯一の owner）をそのまま使い、ここで再定義しない。
 """
 
 from __future__ import annotations
@@ -35,7 +36,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
-TERMINAL_EVIDENCE_ROLE = "terminal_evidence"
+from scripts.function_tracer_pcode.authority.process import checkpoint_archive
+from scripts.function_tracer_pcode.authority.process.child_exit import (
+    LIVE_PROCESS_WAIT,
+    SIGNAL_NAMES,
+    SIGNAL_RESULTS,
+    deadline_signal_actions,
+    natural_exit_disposition,
+    validate_durable_child_returncode_observation,
+)
+
 TERMINAL_EVIDENCE_ISSUER_ID = "decompiler-process-supervisor-terminal-evidence-v1"
 
 DEADLINE_RECEIPT_KIND = "SupervisorDeadlineReceipt"
@@ -57,17 +67,6 @@ DEADLINE_SCHEMA = "supervisor-deadline-v1"
 CHILD_EXIT_SCHEMA = "supervisor-child-exit-v1"
 ARCHIVE_MANIFEST_SCHEMA = "supervisor-archive-manifest-v1"
 ARCHIVE_TRANSACTION_VERSION = 1
-
-#: E が記録する rc の取り方。public の projection / pair-status の語彙と同じ値。
-LIVE_PROCESS_WAIT = "LIVE_PROCESS_WAIT"
-
-#: ``killpg`` の結果として E に残す値。送信を試みて戻った（``sent``）のか、
-#: 対象が既に居なかった（``process_absent``）のかを区別する。受信・終了は
-#: rc の方が表す。
-SIGNAL_SENT = "sent"
-SIGNAL_PROCESS_ABSENT = "process_absent"
-SIGNAL_NAMES = frozenset({"SIGTERM", "SIGKILL"})
-SIGNAL_RESULTS = frozenset({SIGNAL_SENT, SIGNAL_PROCESS_ABSENT})
 
 #: child の自然終了を終端へどう写すかの supervisor の設定（E に固定する）。
 #: 分類器は推測せず、E に記録された値で supervisor と同じ判断をする。
@@ -278,14 +277,6 @@ _CHILD_EXIT_KEYS = frozenset({
 })
 
 
-def natural_exit_disposition(returncode: int) -> str:
-    """signal を送っていない終了の disposition（既存の ERROR と同じ語彙）。"""
-
-    if type(returncode) is not int:
-        raise TerminalEvidenceInvalid("child return code must be an exact int")
-    return f"EXIT_CODE_{returncode}"
-
-
 def child_exit_payload(
     launch: Any, *, deadline: Any, child_returncode: int,
     child_exit_disposition: str, signal_actions: tuple[SignalAction, ...],
@@ -313,10 +304,6 @@ def child_exit_payload(
 def _validate_child_exit_payload(
     payload: Mapping[str, Any], *, launch: Any, deadline: Any,
 ) -> None:
-    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-        validate_durable_child_returncode_observation,
-    )
-
     _exact_keys("child exit", payload, _CHILD_EXIT_KEYS)
     if (
         payload["schema"] != CHILD_EXIT_SCHEMA
@@ -372,35 +359,6 @@ def _validate_child_exit_payload(
             raise TerminalEvidenceInvalid(
                 "child exit signal actions do not produce its disposition"
             )
-
-
-def deadline_signal_actions(disposition: str) -> frozenset:
-    """deadline 後の終了処理（SIGTERM -> grace -> SIGKILL）で、その disposition を
-    返しうる ``killpg`` の結果の列（``_terminate_exact_process_group`` の枝ごと）。
-
-    disposition と実際に送った signal を別々に記録するので、両者が同じ終了処理の
-    1 つの枝として説明できることを確かめる（自然終了の語彙 ``EXIT_CODE_`` は
-    deadline の E には現れない）。
-    """
-
-    term_sent = ("SIGTERM", SIGNAL_SENT)
-    if disposition in {"SIGTERM_AFTER_DEADLINE"}:
-        return frozenset({(term_sent,)})
-    if disposition == "SIGKILL_AFTER_DEADLINE":
-        return frozenset({(term_sent, ("SIGKILL", SIGNAL_SENT))})
-    if not disposition.startswith("EXITED_"):
-        return frozenset()
-    rest = disposition[len("EXITED_"):].split("_", 1)
-    suffix = rest[1] if len(rest) == 2 else ""
-    return {
-        "": frozenset({()}),
-        "BEFORE_SIGTERM": frozenset({(("SIGTERM", SIGNAL_PROCESS_ABSENT),)}),
-        "AFTER_SIGTERM": frozenset({(term_sent,)}),
-        "BEFORE_SIGKILL": frozenset({
-            (term_sent,), (term_sent, ("SIGKILL", SIGNAL_PROCESS_ABSENT)),
-        }),
-        "AFTER_SIGKILL": frozenset({(term_sent, ("SIGKILL", SIGNAL_SENT))}),
-    }.get(suffix, frozenset())
 
 
 def validate_child_exit(receipt: Any, launch: Any, deadline: Any) -> None:
@@ -470,10 +428,6 @@ def archive_payload(
 def _validate_archive_payload(
     payload: Mapping[str, Any], *, launch: Any, child_exit: Any,
 ) -> None:
-    from scripts.function_tracer_pcode.authority.process.checkpoint_archive import (
-        validate_member_set,
-    )
-
     _exact_keys("archive manifest", payload, _ARCHIVE_KEYS)
     if (
         payload["schema"] != ARCHIVE_MANIFEST_SCHEMA
@@ -502,7 +456,7 @@ def _validate_archive_payload(
             _exact_digest(f"member {name}", member[name])
         members.append(ArchiveMember(**member))
     try:
-        validate_member_set(
+        checkpoint_archive.validate_member_set(
             tuple(members), destination=payload["destination"],
             resolved_state_receipt_digest=payload["resolved_state_receipt_digest"],
         )

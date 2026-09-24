@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.authority.process.terminal_snapshot import (
 )
 from scripts.function_tracer_pcode.authority.process.terminal_transaction import (
     TerminalAuthority,
+    open_transaction,
 )
 
 #: 1 つの store で起こりうる progress 操作の数は有限（chain 1 つの close / claim /
@@ -52,7 +53,7 @@ def drive(
     seen: set[str] = set()
     taken: list[str] = []
     for _ in range(MAX_STEPS):
-        with store.terminal_transaction(ownership) as transaction:
+        with open_transaction(store, ownership) as transaction:
             snapshot, context = transaction.snapshot(mode=mode, process_alive=process_alive)
             step = recovery.next_step(snapshot)
             returncode = snapshot.child_exit.returncode
@@ -78,6 +79,38 @@ def drive(
     return DriveResult(
         None, NO_PROGRESS, f"no terminal after {MAX_STEPS} operations", steps=tuple(taken),
     )
+
+
+@dataclass(frozen=True)
+class Inspection:
+    """読むだけの判断（分類器用）: 次の 1 手と、終端なら採用した authority。"""
+
+    step: recovery.Step
+    snapshot: recovery.TerminalSnapshot
+    authority: Optional[TerminalAuthority]
+
+
+def inspect(
+    store: Any, *, mode: Optional[recovery.ExitMode],
+    process_alive: Callable[[int, str], Optional[bool]],
+) -> Inspection:
+    """store を書かずに、supervisor と同じ判断で終端を読む。
+
+    supervisor と同じ owner lock と store の flock を取る（終端処理の途中の
+    store を読まない）。``mode`` が None なら E に記録された mode で読む。
+    採用する終端（ADOPT_*）なら ``drive`` と同じ ``adopt`` で authority を作る。
+    """
+
+    with store.supervisor_ownership() as ownership:
+        with open_transaction(store, ownership) as transaction:
+            snapshot, context = transaction.snapshot(mode=mode, process_alive=process_alive)
+            step = recovery.next_step(snapshot)
+            authority = (
+                transaction.adopt(step, context)
+                if step.terminal and step.kind is not recovery.StepKind.INVALID
+                else None
+            )
+            return Inspection(step, snapshot, authority)
 
 
 def _no_progress(

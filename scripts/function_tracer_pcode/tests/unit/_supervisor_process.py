@@ -177,7 +177,7 @@ class SupervisorRun:
 
 
 def _process_alive(identity: ChildIdentity) -> bool:
-    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+    from scripts.function_tracer_pcode.authority.process.process_identity import (
         read_process_start_token,
     )
 
@@ -238,7 +238,7 @@ def _reap_if_our_orphan(identity: ChildIdentity) -> None:
     回収する（PID が再利用された別 process を回収しない）。
     """
 
-    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+    from scripts.function_tracer_pcode.authority.process.process_identity import (
         read_process_start_token,
     )
 
@@ -446,9 +446,6 @@ def classification_inputs(
         "pair-log": sha256_of(case.pair_log),
         "supervisor-key": sha256_of(Path(config.supervisor_signing_key_file)),
         "worker-key": sha256_of(Path(config.worker_signing_key_file)),
-        "terminal-evidence-key": sha256_of(
-            Path(config.terminal_evidence_signing_key_file)
-        ),
     }
     inputs.update({
         f"store/{name}": digest
@@ -679,7 +676,7 @@ def _supervise_in_fork(  # pragma: no cover - runs in the forked supervisor
 def _record_started_child(records: InvocationRecords) -> None:
     """この invocation が起こした worker（barrier の process）を Popen の直後に記録する。"""
 
-    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+    from scripts.function_tracer_pcode.authority.process.process_identity import (
         read_process_start_token,
     )
 

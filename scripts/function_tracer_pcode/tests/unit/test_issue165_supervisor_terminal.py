@@ -30,6 +30,10 @@ import pytest
 
 from scripts.function_tracer_pcode.authority.contracts import authority_digest
 from scripts.function_tracer_pcode.authority.process import terminal_evidence as te
+from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
+    CheckpointState,
+    ErrorStage,
+)
 from scripts.function_tracer_pcode.authority.process import terminal_recovery as tr
 from scripts.function_tracer_pcode.authority.process.checkpoint_archive import (
     CHAIN_MEMBER_NAMES,
@@ -139,8 +143,6 @@ def _factory(case):
         supervisor_signing_key=keys.supervisor_key_file.read_bytes(),
         worker_signing_key_id=keys.worker_key_id,
         worker_signing_key=keys.worker_key_file.read_bytes(),
-        terminal_evidence_signing_key_id=keys.terminal_evidence_key_id,
-        terminal_evidence_signing_key=keys.terminal_evidence_key_file.read_bytes(),
     )
 
 
@@ -222,9 +224,9 @@ def test_t01_deadline_and_exit_evidence_timeout_at_every_checkpoint_stage(tmp_pa
         ]
         assert run.projection["child_exit_disposition"] == "SIGTERM_AFTER_DEADLINE"
         assert run.projection["child_returncode_observation_kind"] == "LIVE_PROCESS_WAIT"
-        # D も E も terminal-evidence 鍵で署名されている（worker の鍵ではない）。
+        # D も E も supervisor role で署名されている（worker role ではない）。
         assert deadline["signing_key_id"] == child_exit["signing_key_id"] == (
-            case.keys.terminal_evidence_key_id
+            case.keys.supervisor_key_id
         )
 
 
@@ -312,7 +314,6 @@ def test_t02_t03_t04_timeout_transaction_recovers_the_same_terminal_from_every_b
 def test_t03_a_different_durable_claim_is_rejected_not_overwritten(tmp_path):
     from scripts.function_tracer_pcode.authority.process.supervisor import (
         _TRANSITION_CAPABILITY_TOKEN,
-        CheckpointState,
     )
 
     with supervisor_case(
@@ -377,7 +378,7 @@ def test_t05_t06_natural_exit_without_envelope(tmp_path, scenario, runner):
         assert child_exit["payload"]["child_exit_disposition"] == f"EXIT_CODE_{rc}"
         assert child_exit["payload"]["signal_actions"] == []
         archive = _store_json(case, te.ARCHIVE_INTENT_FILENAME)
-        if expected == ("ERROR", tr.STAGE_NON_DECOMPILATION):
+        if expected == ("ERROR", ErrorStage.NON_DECOMPILATION.value):
             # 閉じた chain を A で固定して history へ移し、live に chain は残らない。
             assert archive is not None and archive["payload"]["error_stage"] == expected[1]
             assert live_chain_members(case.store_directory) == ()
@@ -425,7 +426,7 @@ def test_t07_archive_and_error_recover_the_same_error_from_every_boundary(tmp_pa
         control = _projection_from_every_boundary(case, ARCHIVE_BOUNDARIES, expected)
         assert control.projection["child_exit_disposition"] == "EXIT_CODE_1"
         assert _store_json(case, "operational-error.json")["payload"]["deadline_stage"] == (
-            tr.STAGE_NON_DECOMPILATION
+            ErrorStage.NON_DECOMPILATION.value
         )
     finally:
         context.__exit__(None, None, None)
@@ -797,8 +798,6 @@ def test_t13_a_projection_that_names_another_terminal_is_not_classified(
                 supervisor_signing_key_file=config.supervisor_signing_key_file,
                 worker_signing_key_id=config.worker_signing_key_id,
                 worker_signing_key_file=config.worker_signing_key_file,
-                terminal_evidence_signing_key_id=config.terminal_evidence_signing_key_id,
-                terminal_evidence_signing_key_file=config.terminal_evidence_signing_key_file,
             )
         # restart は既存の projection を読まず、durable authority から作り直す。
         config.authority_output.write_bytes(swapped.read_bytes())
@@ -903,23 +902,6 @@ def test_t15_a_restart_waits_for_the_running_supervisor_and_agrees(tmp_path):
         assert a.store.digests == b.store.digests
 
 
-# ---------------------------------------------------------------------------
-# 署名鍵の分離（計画 §6.2: D / E / A の鍵を child に渡さない）
-# ---------------------------------------------------------------------------
-
-
-def test_the_terminal_evidence_key_never_reaches_the_child(tmp_path):
-    with supervisor_case(tmp_path, ChildScript((Exit(3),))) as case:
-        run = run_supervisor(case)
-        evidence = run.launch_evidence
-        needle = str(case.keys.terminal_evidence_key_file)
-        visible = list(evidence["environment"].values()) + list(evidence["argv"])
-        assert all(needle not in value for value in visible)
-        assert all(case.keys.terminal_evidence_key_id not in value for value in visible)
-        key = case.keys.terminal_evidence_key_file.read_bytes().decode("latin-1")
-        assert all(key not in value for value in visible)
-
-
 def test_t14_the_process_timeout_decision_needs_the_same_terminal_authority(tmp_path):
     """``--emit-process-timeout-json`` も bundle だけでは TIMEOUT を出さない。"""
 
@@ -937,8 +919,6 @@ def test_t14_the_process_timeout_decision_needs_the_same_terminal_authority(tmp_
             supervisor_signing_key_file=config.supervisor_signing_key_file,
             worker_signing_key_id=config.worker_signing_key_id,
             worker_signing_key_file=config.worker_signing_key_file,
-            terminal_evidence_signing_key_id=config.terminal_evidence_signing_key_id,
-            terminal_evidence_signing_key_file=config.terminal_evidence_signing_key_file,
         )
         assert rematerialize_process_timeout_decision(**arguments).outcome.value == "TIMEOUT"
         _drop_evidence(case)

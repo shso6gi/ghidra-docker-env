@@ -27,8 +27,9 @@ import os
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
+
 HISTORY_DIRECTORY = "checkpoint-history"
-STATE_MEMBER = "state.json"
 
 
 @dataclass(frozen=True)
@@ -40,14 +41,14 @@ class ChainMemberSpec:
 
 #: 閉じた chain の member（移動順。``state.json`` は必ず最後）。
 CHAIN_MEMBERS: tuple[ChainMemberSpec, ...] = (
-    ChainMemberSpec("checkpoint-prefix-stream.json", "prefix_stream", True),
-    ChainMemberSpec("checkpoint.json", "checkpoint", True),
-    ChainMemberSpec("continuation-stream.json", "continuation_stream", True),
-    ChainMemberSpec("continuation.json", "continuation", True),
-    ChainMemberSpec("ready.json", "ready", True),
+    ChainMemberSpec(layout.PREFIX_STREAM, "prefix_stream", True),
+    ChainMemberSpec(layout.CHECKPOINT, "checkpoint", True),
+    ChainMemberSpec(layout.CONTINUATION_STREAM, "continuation_stream", True),
+    ChainMemberSpec(layout.CONTINUATION, "continuation", True),
+    ChainMemberSpec(layout.READY, "ready", True),
     # supervisor が worker の continuation から chain を閉じたときだけある。
-    ChainMemberSpec("recovery-resolution.json", "recovery_resolution", False),
-    ChainMemberSpec(STATE_MEMBER, "state", True),
+    ChainMemberSpec(layout.RECOVERY_RESOLUTION, "recovery_resolution", False),
+    ChainMemberSpec(layout.STATE, "state", True),
 )
 CHAIN_MEMBER_NAMES = tuple(spec.name for spec in CHAIN_MEMBERS)
 _SPEC_BY_NAME: Mapping[str, ChainMemberSpec] = {spec.name: spec for spec in CHAIN_MEMBERS}

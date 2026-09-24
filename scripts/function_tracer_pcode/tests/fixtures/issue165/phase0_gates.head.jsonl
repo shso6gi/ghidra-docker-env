@@ -1,6 +1,6 @@
 {"check": "measured_rc_is_the_cli_code", "gate": "G1", "measured": 2, "passed": true}
-{"check": "issue_persist_reread_validate", "gate": "G1", "kind": "SupervisorChildExitReceipt", "passed": true, "signing_key_id": "terminal-evidence-key-v1"}
-{"check": "worker_factory_cannot_validate_E", "error": "process authority receipt signing key is untrusted", "gate": "G1", "passed": true}
+{"check": "issue_persist_reread_validate", "gate": "G1", "kind": "SupervisorChildExitReceipt", "passed": true, "signing_key_id": "supervisor-key-v1"}
+{"check": "worker_role_cannot_claim_E", "error": "process receipt signer role does not match receipt kind", "gate": "G1", "passed": true}
 {"check": "tampered_E_is_rejected", "error": "process authority receipt signature/digest mismatch", "gate": "G1", "passed": true}
 {"check": "existing_receipt_rc_equals_E_rc", "e_rc": 2, "gate": "G1", "passed": true, "receipt_rc": 2}
 {"canonical_outcome": "UNKNOWN", "check": "canonical_cli_join_classifies", "gate": "G1", "passed": true}

@@ -6,10 +6,10 @@ harness（実 worker child）で確かめる。広い store 変更（terminal �
 より前に、次の 3 つが成り立つかだけを見る。
 
 * **G1 E receipt**: supervisor が wait で取った int rc を
-  ``SupervisorChildExitReceipt`` として terminal-evidence 鍵で発行し、
+  ``SupervisorChildExitReceipt`` として supervisor role で発行し、
   永続化 → 読み直し → 署名 / schema / launch join の検証 → その rc で
   canonical resolved receipt を作り、production の分類器（CLI join を含む）
-  が受理する。鍵の無い factory（worker）は E を検証できない。rc の無い
+  が受理する。worker role の署名で E を名乗る receipt は拒否する。rc の無い
   restart は rc を作らない（E 無しでは CLI join を組めない）。
 * **G2 archive adapter**: 実 child が作った 2 chain（history 1 + live 1）の
   live chain を A で固定し、member を 0..N 個動かした各分割配置から
@@ -44,6 +44,7 @@ import sys
 import tempfile
 from typing import Any
 
+from scripts.function_tracer_pcode.authority.process import child_exit as ce
 from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
     REPO_ROOT,
     Checkpoint,
@@ -62,24 +63,18 @@ def _emit(gate: str, check: str, passed: bool, **detail: Any) -> None:
                      sort_keys=True), flush=True)
 
 
-def _factories(case: Any) -> tuple[Any, Any]:
+def _factory(case: Any) -> Any:
     from scripts.function_tracer_pcode.authority.process.supervisor import (
         ProcessSupervisorAuthorityFactory,
     )
 
     config = case.config
-    common = dict(
+    return ProcessSupervisorAuthorityFactory(
         supervisor_signing_key_id=config.supervisor_signing_key_id,
         supervisor_signing_key=Path(config.supervisor_signing_key_file).read_bytes(),
         worker_signing_key_id=config.worker_signing_key_id,
         worker_signing_key=Path(config.worker_signing_key_file).read_bytes(),
     )
-    supervisor = ProcessSupervisorAuthorityFactory(
-        **common, terminal_evidence_signing_key_id=config.terminal_evidence_signing_key_id,
-        terminal_evidence_signing_key=Path(config.terminal_evidence_signing_key_file).read_bytes(),
-    )
-    worker = ProcessSupervisorAuthorityFactory(**common)
-    return supervisor, worker
 
 
 def _store(case: Any, factory: Any) -> Any:
@@ -111,25 +106,28 @@ def gate_g1(directory: Path) -> None:
         measured = run.projection["child_returncode"]
         _emit("G1", "measured_rc_is_the_cli_code", measured == CLI_EXIT_CODE_BY_OUTCOME[Outcome.UNKNOWN],
               measured=measured)
-        supervisor_factory, worker_factory = _factories(case)
+        supervisor_factory = _factory(case)
         store = _store(case, supervisor_factory)
         launch = supervisor_factory.decode(json.loads((store.directory / "launch.json").read_text()))
         path = store.directory / te.CHILD_EXIT_FILENAME
         anchor = te.child_exit_anchor(supervisor_factory.decode(json.loads(path.read_text())))
-        # 読み直し: 署名（terminal-evidence 鍵）→ schema / launch join。
+        # 読み直し: 署名（supervisor role）→ schema / launch join。
         reread = supervisor_factory.decode(json.loads(path.read_text()))
         te.validate_child_exit(reread, launch, None)
         _emit("G1", "issue_persist_reread_validate",
               reread.payload["child_returncode"] == measured
-              and reread.signing_key_id == case.keys.terminal_evidence_key_id,
+              and reread.signing_key_id == case.keys.supervisor_key_id,
               kind=reread.receipt_kind, signing_key_id=reread.signing_key_id)
-        # worker の factory（鍵なし）は E を検証できない。
+        # E の kind は supervisor role の署名でだけ受理する（worker role は拒否）。
+        forged = supervisor_factory._sign(
+            reread.receipt_kind, dict(reread.payload), signer_role="worker",
+        )
         try:
-            worker_factory.decode(json.loads(path.read_text()))
+            supervisor_factory.validate(forged)
         except ValueError as exc:
-            _emit("G1", "worker_factory_cannot_validate_E", True, error=str(exc))
+            _emit("G1", "worker_role_cannot_claim_E", True, error=str(exc))
         else:
-            _emit("G1", "worker_factory_cannot_validate_E", False)
+            _emit("G1", "worker_role_cannot_claim_E", False)
         # 改ざん: rc を 1 つずらして digest を計算し直しても署名で拒否。
         tampered = json.loads(path.read_text())
         tampered["payload"]["child_returncode"] = 0
@@ -153,13 +151,10 @@ def gate_g1(directory: Path) -> None:
               and classified["child_returncode"] == reread.payload["child_returncode"],
               canonical_outcome=classified["canonical_outcome"])
         # E が無い restart は rc を持たない: 同じ join を rc=None で組めない。
-        from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-            validate_durable_child_returncode_observation,
-        )
         try:
-            validate_durable_child_returncode_observation(
+            ce.validate_durable_child_returncode_observation(
                 child_exit_disposition="EXIT_CODE_2", child_returncode=None,
-                observation_kind=te.LIVE_PROCESS_WAIT,
+                observation_kind=ce.LIVE_PROCESS_WAIT,
             )
         except ValueError as exc:
             _emit("G1", "no_rc_without_E", True, error=str(exc))
@@ -170,7 +165,7 @@ def gate_g1(directory: Path) -> None:
             te.child_exit_payload(
                 launch, deadline=None, child_returncode=-15,
                 child_exit_disposition="SIGTERM_AFTER_DEADLINE",
-                signal_actions=(te.SignalAction("SIGTERM", te.SIGNAL_SENT),),
+                signal_actions=(te.SignalAction("SIGTERM", ce.SIGNAL_SENT),),
                 envelope=te.EnvelopeObservation(False, None), anchor=anchor,
                 exit_mode=te.EXIT_MODE_CANONICAL_RESULT_REQUIRED,
             )
@@ -273,8 +268,6 @@ def gate_g2(directory: Path) -> None:
             supervisor_signing_key=(work / "keys" / "supervisor.key").read_bytes(),
             worker_signing_key_id=config.worker_signing_key_id,
             worker_signing_key=(work / "keys" / "worker.key").read_bytes(),
-            terminal_evidence_signing_key_id=config.terminal_evidence_signing_key_id,
-            terminal_evidence_signing_key=(work / "keys" / "terminal-evidence.key").read_bytes(),
         )
         store = DurableCheckpointStore(work / "checkpoints", factory, config.execution_nonce)
         launch = factory.decode(json.loads((store.directory / "launch.json").read_text()))
@@ -357,7 +350,7 @@ def _g2_negative(store: Any, factory: Any, launch: Any, exit_receipt: Any,
     other = factory.issue_terminal_evidence(
         te.CHILD_EXIT_RECEIPT_KIND,
         {**exit_receipt.payload, "child_returncode": 7,
-         "child_exit_disposition": te.natural_exit_disposition(7)},
+         "child_exit_disposition": ce.natural_exit_disposition(7)},
     )
     try:
         te.validate_archive(factory.decode(json.loads(manifest_path.read_text())), launch, other)
@@ -376,10 +369,14 @@ def gate_g3(directory: Path) -> None:
     from scripts.function_tracer_pcode.authority.process import supervisor as sv
     from scripts.function_tracer_pcode.authority.contracts import authority_digest
 
-    _emit("G3", "sealed_stage_vocabulary", True, stages=sorted(sv.SUPERVISOR_DEADLINE_STAGES))
+    from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
+        SUPERVISOR_DEADLINE_STAGES,
+    )
+
+    _emit("G3", "sealed_stage_vocabulary", True, stages=sorted(SUPERVISOR_DEADLINE_STAGES))
     with _two_chain_case(directory / "g3") as case:
         run = run_supervisor(case)
-        supervisor_factory, _ = _factories(case)
+        supervisor_factory = _factory(case)
         store = _store(case, supervisor_factory)
         launch = supervisor_factory.decode(json.loads((store.directory / "launch.json").read_text()))
         # issuer が DURING_DECOMPILATION を受理するか（語彙に無ければ拒否）。
@@ -430,8 +427,6 @@ def gate_g3(directory: Path) -> None:
              "--supervisor-signing-key-file", str(config.supervisor_signing_key_file),
              "--worker-signing-key-id", config.worker_signing_key_id,
              "--worker-signing-key-file", str(config.worker_signing_key_file),
-             "--terminal-evidence-signing-key-id", config.terminal_evidence_signing_key_id,
-             "--terminal-evidence-signing-key-file", str(config.terminal_evidence_signing_key_file),
              "--pair-status-signing-private-key-file", str(private_key),
              "--pair-status-verification-key-file", str(public_key),
              "--pair-execution-target-file", str(target)],

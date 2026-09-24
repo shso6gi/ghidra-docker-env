@@ -141,26 +141,18 @@ class SupervisorKeys:
     supervisor_key_file: Path
     worker_key_id: str
     worker_key_file: Path
-    #: Issue #165: D / E / A を署名する supervisor 専用の鍵（worker に渡さない）。
-    terminal_evidence_key_id: str
-    terminal_evidence_key_file: Path
 
 
 def supervisor_keys(directory: Path) -> SupervisorKeys:
-    """deployment 鍵（supervisor / worker / terminal evidence で別 id）を file に置く。"""
+    """deployment 鍵（supervisor / worker で別 id）を file に置く。"""
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     supervisor_key = directory / "supervisor.key"
     worker_key = directory / "worker.key"
-    evidence_key = directory / "terminal-evidence.key"
     supervisor_key.write_bytes(b"s" * 32)
     worker_key.write_bytes(b"w" * 32)
-    evidence_key.write_bytes(b"e" * 32)
-    return SupervisorKeys(
-        "supervisor-key-v1", supervisor_key, "worker-key-v1", worker_key,
-        "terminal-evidence-key-v1", evidence_key,
-    )
+    return SupervisorKeys("supervisor-key-v1", supervisor_key, "worker-key-v1", worker_key)
 
 
 @dataclass(frozen=True)
@@ -232,8 +224,6 @@ def supervisor_config(
         supervisor_signing_key_file=keys.supervisor_key_file,
         worker_signing_key_id=keys.worker_key_id,
         worker_signing_key_file=keys.worker_key_file,
-        terminal_evidence_signing_key_id=keys.terminal_evidence_key_id,
-        terminal_evidence_signing_key_file=keys.terminal_evidence_key_file,
         timeout_seconds=timeout,
         kill_grace_seconds=kill_grace,
         child_command=tuple(child_command),
@@ -357,8 +347,6 @@ def classify(run: SupervisorRun) -> Mapping[str, Any]:
             supervisor_signing_key_file=config.supervisor_signing_key_file,
             worker_signing_key_id=config.worker_signing_key_id,
             worker_signing_key_file=config.worker_signing_key_file,
-            terminal_evidence_signing_key_id=config.terminal_evidence_signing_key_id,
-            terminal_evidence_signing_key_file=config.terminal_evidence_signing_key_file,
         )
     finally:
         # 分類の途中で入力が変わった（crash した run の生き残った worker が

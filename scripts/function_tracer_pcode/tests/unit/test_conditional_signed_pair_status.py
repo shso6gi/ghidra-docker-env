@@ -24,11 +24,13 @@ from scripts.function_tracer_pcode.authority.contracts import (
 )
 from scripts.function_tracer_pcode.authority.decision.canonical_result import (
     BUNDLE_KIND,
-    SupervisorCanonicalResultResolvedReceipt,
     build_canonical_result_finalization_bundle,
     classify_pair_status,
     persist_canonical_result_envelope,
     validate_canonical_result_finalization_bundle,
+)
+from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
+    SupervisorCanonicalResultResolvedReceipt,
 )
 from scripts.function_tracer_pcode.authority.decision.conditional import (
     ConditionalDecisiveProofKind,
@@ -91,7 +93,6 @@ from scripts.function_tracer_pcode.tests.unit.test_benchmark_validation_gate imp
 
 SUPERVISOR_KEY = b"s" * 32
 WORKER_KEY = b"w" * 32
-EVIDENCE_KEY = b"e" * 32
 DIGEST = "a" * 64
 
 
@@ -240,15 +241,11 @@ def _classified_pair_status(
     )
     identity = validated["execution_identity"]
 
-    evidence_key_file = workspace / "terminal-evidence.key"
-    evidence_key_file.write_bytes(EVIDENCE_KEY)
     factory = ProcessSupervisorAuthorityFactory(
         supervisor_signing_key_id="supervisor-key-v1",
         supervisor_signing_key=SUPERVISOR_KEY,
         worker_signing_key_id="worker-key-v1",
         worker_signing_key=WORKER_KEY,
-        terminal_evidence_signing_key_id="terminal-evidence-key-v1",
-        terminal_evidence_signing_key=EVIDENCE_KEY,
     )
     store = DurableCheckpointStore(checkpoint_root, factory, nonce)
     launch = factory.issue_launch(
@@ -262,14 +259,14 @@ def _classified_pair_status(
     store.persist_launch(launch)
     # Issue #165: pair の RESOLVED は、supervisor が wait で観測した child の
     # 終了（E: 実測 rc 2 = UNKNOWN の CLI code）と envelope の join でだけ成り立つ。
-    from scripts.function_tracer_pcode.authority.process import terminal_evidence
+    from scripts.function_tracer_pcode.authority.process import child_exit, terminal_evidence
 
     def _observed_exit(*, launch, deadline, anchor, envelope):
         return factory.issue_terminal_evidence(
             terminal_evidence.CHILD_EXIT_RECEIPT_KIND,
             terminal_evidence.child_exit_payload(
                 launch, deadline=deadline, child_returncode=2,
-                child_exit_disposition=terminal_evidence.natural_exit_disposition(2),
+                child_exit_disposition=child_exit.natural_exit_disposition(2),
                 signal_actions=(), envelope=envelope, anchor=anchor,
                 exit_mode=terminal_evidence.EXIT_MODE_CANONICAL_RESULT_REQUIRED,
             ),
@@ -330,8 +327,6 @@ def _classified_pair_status(
         supervisor_signing_key_file=supervisor_key_file,
         worker_signing_key_id="worker-key-v1",
         worker_signing_key_file=worker_key_file,
-        terminal_evidence_signing_key_id="terminal-evidence-key-v1",
-        terminal_evidence_signing_key_file=evidence_key_file,
     )
     return SimpleNamespace(
         status=status, decision=decision, conditional=conditional,

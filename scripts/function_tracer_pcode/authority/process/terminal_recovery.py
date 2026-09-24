@@ -29,6 +29,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Mapping, Optional
 
+from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
+    TIMEOUT_STATES,
+    CheckpointState,
+    ErrorStage,
+)
 from scripts.function_tracer_pcode.authority.process.terminal_evidence import (
     EXIT_MODE_CANONICAL_RESULT_REQUIRED,
     EXIT_MODE_SUPERVISOR_ONLY,
@@ -39,16 +44,6 @@ from scripts.function_tracer_pcode.authority.process.terminal_evidence import (
     CheckpointAnchor,
 )
 
-# checkpoint state（``supervisor.CheckpointState`` の値。ここは文字列で比べる）。
-ACTIVE = "ACTIVE"
-COMPLETION_READY = "COMPLETION_READY"
-RESOLVED = "RESOLVED"
-TIMED_OUT_CLAIMED = "TIMED_OUT_CLAIMED"
-TIMED_OUT = "TIMED_OUT"
-
-#: ERROR の stage（``supervisor.SUPERVISOR_DEADLINE_STAGES`` の封の語彙）。
-STAGE_BEFORE_CHECKPOINT = "BEFORE_CHECKPOINT"
-STAGE_NON_DECOMPILATION = "NON_DECOMPILATION"
 
 
 class Presence(str, Enum):
@@ -296,7 +291,7 @@ def _validation(s: TerminalSnapshot) -> Optional[Step]:
 
 
 def _has_timeout_artifacts(s: TerminalSnapshot) -> bool:
-    return bool(s.timeout.members) or s.live.state in {TIMED_OUT_CLAIMED, TIMED_OUT}
+    return bool(s.timeout.members) or s.live.state in TIMEOUT_STATES
 
 
 def _has_error_artifacts(s: TerminalSnapshot) -> bool:
@@ -330,7 +325,7 @@ def _allowed_bootstrap_priors(s: TerminalSnapshot, anchor: CheckpointAnchor) -> 
         s.live.kind in {LiveKind.CHAIN, LiveKind.IN_TRANSACTION}
         and not s.live.is_bootstrap
         and s.live.checkpoint_digest == anchor.checkpoint_receipt_digest
-        and s.live.state == RESOLVED
+        and s.live.state == CheckpointState.RESOLVED
     ):
         priors.add(s.live.state_digest)
     return priors
@@ -408,6 +403,13 @@ def _conflict(s: TerminalSnapshot) -> Optional[Step]:
         (resolved and error, "canonical RESOLVED and error authorities coexist"),
         (resolved and timeout, "canonical RESOLVED and timeout authorities coexist"),
         (deadline and resolved, "canonical RESOLVED was issued after a durable deadline"),
+        # 採用の直前にも CLI join を確かめる（receipt は envelope と E から誰でも
+        # 再計算できるので、発行の手前の検査だけに頼らない）。
+        (
+            resolved
+            and s.canonical.envelope_cli_returncode != s.child_exit.returncode,
+            "canonical RESOLVED does not join the canonical outcome's CLI code",
+        ),
         (deadline and error, "error authority exists for a deadline attempt"),
         # E が「deadline は無かった」と観測したのに timeout の物件がある。E も
         # 無い store（legacy）は progress で「終了観測の無い終端」として扱う。
@@ -463,7 +465,7 @@ def _conflict(s: TerminalSnapshot) -> Optional[Step]:
     if s.error.stage is not None:
         expected_stage = (
             s.archive.stage if s.archive.presence is Presence.VALID
-            else STAGE_BEFORE_CHECKPOINT
+            else ErrorStage.BEFORE_CHECKPOINT.value
         )
         if s.error.stage != expected_stage or s.error.disposition != s.child_exit.disposition:
             return _invalid(
@@ -519,15 +521,15 @@ def _deadline_progress(s: TerminalSnapshot) -> Step:
             InvalidCode.DURABLE_STATE_INCOMPLETE,
             f"deadline recovery found a {live.kind.value} live chain",
         )
-    if live.state == COMPLETION_READY:
+    if live.state == CheckpointState.COMPLETION_READY:
         return _progress(StepKind.RECOVER_READY)
-    if live.state == ACTIVE:
+    if live.state == CheckpointState.ACTIVE:
         if live.continuation is Presence.VALID:
             return _progress(StepKind.CLOSE_CONTINUATION)
         return _progress(StepKind.CLAIM_TIMEOUT)
-    if live.state == RESOLVED and not live.is_bootstrap:
+    if live.state == CheckpointState.RESOLVED and not live.is_bootstrap:
         return _progress(StepKind.BOOTSTRAP_ACTIVE)
-    if live.state == TIMED_OUT_CLAIMED:
+    if live.state == CheckpointState.TIMED_OUT_CLAIMED:
         return _progress(StepKind.FINALIZE_TIMEOUT)
     return _invalid(
         InvalidCode.DURABLE_STATE_INCOMPLETE,
@@ -567,7 +569,7 @@ def _supervisor_error_progress(s: TerminalSnapshot) -> Step:
     live = s.live
     if live.kind is LiveKind.NONE:
         if anchor is not None and anchor.kind == ANCHOR_NONE:
-            return _progress(StepKind.FINALIZE_ERROR, error_stage=STAGE_BEFORE_CHECKPOINT)
+            return _progress(StepKind.FINALIZE_ERROR, error_stage=ErrorStage.BEFORE_CHECKPOINT.value)
         return _invalid(
             InvalidCode.DURABLE_STATE_INCOMPLETE,
             "no live chain, no archive manifest, and the exit observed a checkpoint",
@@ -577,9 +579,9 @@ def _supervisor_error_progress(s: TerminalSnapshot) -> Step:
             InvalidCode.DURABLE_STATE_INCOMPLETE,
             f"error recovery found a {live.kind.value} live chain without an archive manifest",
         )
-    if live.state == COMPLETION_READY:
+    if live.state == CheckpointState.COMPLETION_READY:
         return _progress(StepKind.RECOVER_READY)
-    if live.state == ACTIVE:
+    if live.state == CheckpointState.ACTIVE:
         if live.continuation is Presence.VALID:
             return _progress(StepKind.CLOSE_CONTINUATION)
         return _invalid(
@@ -587,7 +589,7 @@ def _supervisor_error_progress(s: TerminalSnapshot) -> Step:
             "child exited inside decompilation; DURING_DECOMPILATION is not a sealed "
             "error stage",
         )
-    if live.state == RESOLVED:
+    if live.state == CheckpointState.RESOLVED:
         return _progress(StepKind.BEGIN_ARCHIVE)
     return _invalid(
         InvalidCode.DURABLE_STATE_INCOMPLETE,

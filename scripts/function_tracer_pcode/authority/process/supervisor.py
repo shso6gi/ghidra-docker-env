@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from enum import Enum
 import fcntl
 import hashlib
 import hmac
@@ -15,6 +14,7 @@ import tempfile
 import threading
 from typing import Any, Iterator, Mapping, Optional
 
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrence,
     CauseOccurrenceAuthority,
@@ -90,14 +90,21 @@ from scripts.function_tracer_pcode.authority.codecs import StrictV2JsonCodec
 from scripts.function_tracer_pcode.authority.process.checkpoint_archive import (
     CHAIN_MEMBER_NAMES,
     CHAIN_MEMBERS,
-    STATE_MEMBER,
     directory_reader,
     live_chain_members,
+)
+from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
+    RESULT_ENVELOPE_FILE,
+)
+from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
+    ALLOWED_TRANSITIONS,
+    CheckpointState,
+    SUPERVISOR_DEADLINE_STAGES,
+    SUPERVISOR_OPERATIONAL_ERROR_KINDS,
 )
 from scripts.function_tracer_pcode.authority.process import terminal_evidence
 from scripts.function_tracer_pcode.authority.process.terminal_evidence import (
     TERMINAL_EVIDENCE_FILES,
-    TERMINAL_EVIDENCE_ROLE,
 )
 from scripts.function_tracer_pcode.authority.lifecycle.stream import (
     RequirementCompletedEventAuthority,
@@ -110,20 +117,6 @@ PROCESS_SUPERVISOR_ISSUER_ID = "decompiler-process-supervisor-v1"
 PROCESS_WORKER_ISSUER_ID = "decompiler-process-runner-v1"
 PROCESS_POLICY_ID = "decompiler-deadline-policy-v1"
 EMPTY_STREAM_ROOT = "0" * 64
-CHECKPOINT_AUTHORITY_FILENAMES = (
-    "pending-active-transaction.json",
-    "checkpoint.json",
-    "state.json",
-    "checkpoint-prefix-stream.json",
-    "continuation.json",
-    "continuation-stream.json",
-    "ready.json",
-    "recovery-resolution.json",
-    "claimed.json",
-    "timeout.json",
-    "terminal-segment.json",
-    "terminal-stream.json",
-)
 ACTIVE_TRANSACTION_SCHEMA = "durable-active-checkpoint-transaction-v1"
 
 _OPERATIONAL_PROCESS_ROWS = {
@@ -185,13 +178,6 @@ PROCESS_DURABLE_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((
     *PROCESS_COMPLETION_RECOVERY_REGISTRY.snapshot(),
 ))
 
-SUPERVISOR_OPERATIONAL_ERROR_KINDS = frozenset({
-    "operational_authority_invalid",
-})
-SUPERVISOR_DEADLINE_STAGES = frozenset({
-    "BEFORE_CHECKPOINT",
-    "NON_DECOMPILATION",
-})
 SUPERVISOR_PREFIX_TERMINAL_EVENT_TYPES = frozenset({
     EventType.EQ_CLOSURE,
     EventType.COUNTEREXAMPLE,
@@ -199,20 +185,6 @@ SUPERVISOR_PREFIX_TERMINAL_EVENT_TYPES = frozenset({
 })
 
 
-class CheckpointState(str, Enum):
-    ACTIVE = "ACTIVE"
-    COMPLETION_READY = "COMPLETION_READY"
-    RESOLVED = "RESOLVED"
-    TIMED_OUT_CLAIMED = "TIMED_OUT_CLAIMED"
-    TIMED_OUT = "TIMED_OUT"
-
-
-_ALLOWED_TRANSITIONS = frozenset({
-    (CheckpointState.ACTIVE, CheckpointState.COMPLETION_READY),
-    (CheckpointState.COMPLETION_READY, CheckpointState.RESOLVED),
-    (CheckpointState.ACTIVE, CheckpointState.TIMED_OUT_CLAIMED),
-    (CheckpointState.TIMED_OUT_CLAIMED, CheckpointState.TIMED_OUT),
-})
 _SIGNED_RECEIPT_TOKEN = object()
 _TRANSITION_CAPABILITY_TOKEN = object()
 _TIMEOUT_BUNDLE_TOKEN = object()
@@ -335,15 +307,7 @@ class ProcessSupervisorAuthorityFactory:
         self, *, supervisor_signing_key_id: str,
         supervisor_signing_key: bytes, worker_signing_key_id: str,
         worker_signing_key: bytes,
-        terminal_evidence_signing_key_id: Optional[str] = None,
-        terminal_evidence_signing_key: Optional[bytes] = None,
     ) -> None:
-        """``terminal_evidence_*`` は supervisor 側（supervisor と分類器）だけが渡す。
-
-        Issue #165: D/E/A（``terminal_evidence``）は worker child が持たない鍵で
-        署名する。worker の factory はこの鍵を持たないので、D/E/A を発行も検証も
-        できない（受け取った E を worker が信じる経路を作らない）。
-        """
         key_ids = (supervisor_signing_key_id, worker_signing_key_id)
         if (
             not all(type(value) is str and value for value in key_ids)
@@ -354,29 +318,12 @@ class ProcessSupervisorAuthorityFactory:
             supervisor_signing_key, worker_signing_key,
         )):
             raise TypeError("process signing keys must contain at least 32 bytes")
-        if (terminal_evidence_signing_key_id is None) != (
-            terminal_evidence_signing_key is None
-        ):
-            raise TypeError("terminal evidence key identity and bytes go together")
-        if terminal_evidence_signing_key_id is not None and (
-            type(terminal_evidence_signing_key_id) is not str
-            or not terminal_evidence_signing_key_id
-            or terminal_evidence_signing_key_id in key_ids
-            or type(terminal_evidence_signing_key) is not bytes
-            or len(terminal_evidence_signing_key) < 32
-            or terminal_evidence_signing_key
-            in (supervisor_signing_key, worker_signing_key)
-        ):
-            raise TypeError("terminal evidence signing key is invalid")
         self.supervisor_signing_key_id = supervisor_signing_key_id
         self.worker_signing_key_id = worker_signing_key_id
-        self.terminal_evidence_signing_key_id = terminal_evidence_signing_key_id
         self.__keys = {
             "supervisor": supervisor_signing_key,
             "worker": worker_signing_key,
         }
-        if terminal_evidence_signing_key is not None:
-            self.__keys[TERMINAL_EVIDENCE_ROLE] = terminal_evidence_signing_key
         self._issued: dict[int, SignedProcessAuthorityReceipt] = {}
         self._bundles: dict[int, DurableTimeoutFinalizationBundle] = {}
         self._error_bundles: dict[int, DurableErrorFinalizationBundle] = {}
@@ -385,23 +332,20 @@ class ProcessSupervisorAuthorityFactory:
         self, kind: str, payload: Mapping[str, Any], *, signer_role: str,
     ) -> SignedProcessAuthorityReceipt:
         if signer_role not in {"worker", "supervisor"}:
-            # terminal evidence は ``issue_terminal_evidence`` からだけ署名する。
             raise ValueError("process receipt signer role is not sealed")
         return self._sign(kind, payload, signer_role=signer_role)
 
     def issue_terminal_evidence(
         self, kind: str, payload: Mapping[str, Any],
     ) -> SignedProcessAuthorityReceipt:
-        """D / E / A を supervisor 専用の terminal-evidence 鍵で署名する。
+        """D / E / A（Issue #165）を supervisor role で署名する。
 
-        schema と join の検証は ``terminal_evidence`` が持つ（ここは kind の
-        封と署名だけ）。鍵を持たない factory（worker）は発行できない。
+        schema と launch / D / E の join の検証は ``terminal_evidence`` が持つ
+        （ここは kind の封と署名だけ）。
         """
         if kind not in TERMINAL_EVIDENCE_FILES:
             raise ValueError("terminal evidence kind is not sealed")
-        if TERMINAL_EVIDENCE_ROLE not in self.__keys:
-            raise ValueError("this factory holds no terminal evidence signing key")
-        return self._sign(kind, payload, signer_role=TERMINAL_EVIDENCE_ROLE)
+        return self._sign(kind, payload, signer_role="supervisor")
 
     def _sign(
         self, kind: str, payload: Mapping[str, Any], *, signer_role: str,
@@ -425,13 +369,10 @@ class ProcessSupervisorAuthorityFactory:
         return receipt
 
     def _role_key_ids(self) -> dict[str, str]:
-        roles = {
+        return {
             "worker": self.worker_signing_key_id,
             "supervisor": self.supervisor_signing_key_id,
         }
-        if self.terminal_evidence_signing_key_id is not None:
-            roles[TERMINAL_EVIDENCE_ROLE] = self.terminal_evidence_signing_key_id
-        return roles
 
     def validate(self, receipt: SignedProcessAuthorityReceipt) -> None:
         if (
@@ -453,7 +394,7 @@ class ProcessSupervisorAuthorityFactory:
             "SupervisorLaunchReceipt": "supervisor",
             "SupervisorTimeoutReceipt": "supervisor",
             "SupervisorOperationalErrorReceipt": "supervisor",
-            **{kind: TERMINAL_EVIDENCE_ROLE for kind in TERMINAL_EVIDENCE_FILES},
+            **{kind: "supervisor" for kind in TERMINAL_EVIDENCE_FILES},
             "RecoveryResolutionReceipt": "supervisor",
             "ProcessLiveRequirementAssignmentReceipt": "worker",
             "OperationalCheckpointReceipt": "worker",
@@ -935,7 +876,7 @@ class ProcessSupervisorAuthorityFactory:
             raise TypeError("checkpoint transition requires store-owned capability")
         self.validate(prior)
         prior_state = CheckpointState(prior.payload["state"])
-        if (prior_state, next_state) not in _ALLOWED_TRANSITIONS:
+        if (prior_state, next_state) not in ALLOWED_TRANSITIONS:
             raise ValueError("checkpoint state transition is not sealed")
         if next_state in {CheckpointState.COMPLETION_READY, CheckpointState.RESOLVED}:
             if type(continuation_digest) is not str or not continuation_digest:
@@ -2065,34 +2006,15 @@ class DurableCheckpointStore:
             return receipt
 
     @contextmanager
-    def terminal_transaction(
-        self, ownership: "SupervisorOwnership",
-    ) -> Iterator[Any]:
-        """終端処理の 1 手（snapshot の再読・判定・書込み）を 1 回の flock で行う。"""
-        from scripts.function_tracer_pcode.authority.process.terminal_transaction import (
-            TerminalTransaction,
-        )
+    def owned_lock(self, ownership: "SupervisorOwnership") -> Iterator[None]:
+        """owner の supervisor として store の flock を 1 回取る（終端処理の 1 手）。
 
+        何をするか（snapshot の再読・判定・書込み）は ``terminal_transaction``
+        が持つ。store は lock と ownership の検査だけを提供する。
+        """
         self._require_ownership(ownership)
         with self._locked():
-            yield TerminalTransaction(self, ownership)
-
-    def inspect_terminal(self, *, mode: Any, process_alive: Any) -> tuple[Any, Any, Any]:
-        """終端 authority を読むだけ（書かない）: ``(next_step, snapshot, context)``。
-
-        分類器が supervisor と同じ判断で projection を確かめるための入口。
-        supervisor と同じ owner lock を取るので、終端処理の途中の store を読まない。
-        """
-        from scripts.function_tracer_pcode.authority.process.terminal_recovery import (
-            next_step,
-        )
-
-        with self.supervisor_ownership() as ownership:
-            with self.terminal_transaction(ownership) as transaction:
-                snapshot, context = transaction.snapshot(
-                    mode=mode, process_alive=process_alive,
-                )
-                return next_step(snapshot), snapshot, context
+            yield
 
     def _read_terminal_evidence_locked(
         self, kind: str,
@@ -2123,10 +2045,10 @@ class DurableCheckpointStore:
                     checkpoint_receipt_digest=checkpoint.receipt_digest,
                     transaction_digest=transaction,
                 )
-            if (self.directory / STATE_MEMBER).exists():
+            if (self.directory / layout.STATE).exists():
                 state = self.read_state()
                 checkpoint = self.factory.decode(json.loads(
-                    (self.directory / "checkpoint.json").read_text(encoding="utf-8")
+                    (self.directory / layout.CHECKPOINT).read_text(encoding="utf-8")
                 ))
                 return anchor(
                     terminal_evidence.ANCHOR_CHAIN,
@@ -2148,10 +2070,6 @@ class DurableCheckpointStore:
         return anchor(terminal_evidence.ANCHOR_NONE)
 
     def _observe_envelope_locked(self) -> "terminal_evidence.EnvelopeObservation":
-        from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-            RESULT_ENVELOPE_FILE,
-        )
-
         path = self.directory / RESULT_ENVELOPE_FILE
         if not path.exists():
             return terminal_evidence.EnvelopeObservation(False, None)
@@ -2216,7 +2134,7 @@ class DurableCheckpointStore:
 
     @property
     def _pending_active_path(self) -> Path:
-        return self.directory / "pending-active-transaction.json"
+        return self.directory / layout.PENDING_ACTIVE_TRANSACTION
 
     def _active_transaction_bytes(
         self, receipt: SignedProcessAuthorityReceipt,
@@ -2276,7 +2194,7 @@ class DurableCheckpointStore:
             ))
             prefix = EventStreamPrefixView.from_sealed_stream(stream)
             launch = self.factory.decode(json.loads(
-                (self.directory / "launch.json").read_text(encoding="utf-8")
+                (self.directory / layout.LAUNCH).read_text(encoding="utf-8")
             ))
         except Exception as exc:
             raise ValueError("pending ACTIVE transaction members are invalid") from exc
@@ -2327,13 +2245,13 @@ class DurableCheckpointStore:
         if receipt.payload["execution_nonce"] != self.invocation_nonce:
             raise ValueError("launch execution nonce differs from checkpoint directory")
         with self._locked():
-            self._atomic_write(self.directory / "launch.json", self._bytes(receipt))
+            self._atomic_write(self.directory / layout.LAUNCH, self._bytes(receipt))
 
     def resolved_predecessor(self) -> Optional[SignedProcessAuthorityReceipt]:
         """Return the exact completed checkpoint that a new ACTIVE must extend."""
 
         with self._locked():
-            state_path = self.directory / "state.json"
+            state_path = self.directory / layout.STATE
             if not state_path.exists():
                 return None
             state = self.factory.decode(json.loads(
@@ -2365,7 +2283,7 @@ class DurableCheckpointStore:
                 os.replace(source, destination)
         try:
             archived = self.factory.decode(json.loads(
-                (history / "state.json").read_text(encoding="utf-8")
+                (history / layout.STATE).read_text(encoding="utf-8")
             ))
         except (OSError, KeyError, TypeError, ValueError) as exc:
             raise ValueError(
@@ -2385,7 +2303,7 @@ class DurableCheckpointStore:
         checkpoint, prefix, prefix_bytes, checkpoint_bytes = (
             self._decode_active_transaction_locked()
         )
-        state_path = self.directory / "state.json"
+        state_path = self.directory / layout.STATE
         predecessor_digest = checkpoint.payload.get(
             "prior_resolved_receipt_digest"
         )
@@ -2408,7 +2326,7 @@ class DurableCheckpointStore:
         elif predecessor_digest is not None:
             history_state = (
                 self.directory / "checkpoint-history"
-                / predecessor_digest / "state.json"
+                / predecessor_digest / layout.STATE
             )
             try:
                 predecessor = self.factory.decode(json.loads(
@@ -2428,8 +2346,8 @@ class DurableCheckpointStore:
                 )
 
         members = (
-            (self.directory / "checkpoint-prefix-stream.json", prefix_bytes),
-            (self.directory / "checkpoint.json", checkpoint_bytes),
+            (self.directory / layout.PREFIX_STREAM, prefix_bytes),
+            (self.directory / layout.CHECKPOINT, checkpoint_bytes),
         )
         for path, expected in members:
             if path.exists() and path.read_bytes() != expected:
@@ -2473,7 +2391,7 @@ class DurableCheckpointStore:
             or receipt.payload["prefix_digest"] != prefix.prefix_authority_digest
         ):
             raise ValueError("ACTIVE checkpoint authority differs from its prefix")
-        launch_path = self.directory / "launch.json"
+        launch_path = self.directory / layout.LAUNCH
         try:
             launch = self.factory.decode(json.loads(
                 launch_path.read_text(encoding="utf-8")
@@ -2482,7 +2400,7 @@ class DurableCheckpointStore:
             raise ValueError("ACTIVE checkpoint lacks durable launch authority") from exc
         if receipt.payload["launch_receipt_digest"] != launch.receipt_digest:
             raise ValueError("ACTIVE checkpoint launch binding differs")
-        state_path = self.directory / "state.json"
+        state_path = self.directory / layout.STATE
         predecessor_digest = receipt.payload.get(
             "prior_resolved_receipt_digest"
         )
@@ -2543,9 +2461,9 @@ class DurableCheckpointStore:
                     )
                 self._commit_pending_active_locked()
 
-            state_path = self.directory / "state.json"
-            checkpoint_path = self.directory / "checkpoint.json"
-            prefix_path = self.directory / "checkpoint-prefix-stream.json"
+            state_path = self.directory / layout.STATE
+            checkpoint_path = self.directory / layout.CHECKPOINT
+            prefix_path = self.directory / layout.PREFIX_STREAM
             active_paths = (state_path, checkpoint_path, prefix_path)
             if not any(path.exists() for path in active_paths):
                 return
@@ -2573,9 +2491,9 @@ class DurableCheckpointStore:
             if any(
                 (self.directory / name).exists()
                 for name in (
-                    "continuation.json", "continuation-stream.json", "ready.json",
-                    "recovery-resolution.json", "claimed.json", "timeout.json",
-                    "terminal-segment.json", "terminal-stream.json",
+                    layout.CONTINUATION, layout.CONTINUATION_STREAM, layout.READY,
+                    layout.RECOVERY_RESOLUTION, layout.CLAIMED, layout.TIMEOUT,
+                    layout.TERMINAL_SEGMENT, layout.TERMINAL_STREAM,
                 )
             ):
                 raise ValueError(
@@ -2625,10 +2543,10 @@ class DurableCheckpointStore:
     def rematerialize_active_prefix(self) -> EventStreamPrefixView:
         try:
             checkpoint = self.factory.decode(json.loads(
-                (self.directory / "checkpoint.json").read_text(encoding="utf-8")
+                (self.directory / layout.CHECKPOINT).read_text(encoding="utf-8")
             ))
             stream = self.codec.loads(
-                (self.directory / "checkpoint-prefix-stream.json").read_text(
+                (self.directory / layout.PREFIX_STREAM).read_text(
                     encoding="utf-8"
                 )
             )
@@ -2644,7 +2562,7 @@ class DurableCheckpointStore:
         return prefix
 
     def read_state(self) -> SignedProcessAuthorityReceipt:
-        path = self.directory / "state.json"
+        path = self.directory / layout.STATE
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -2660,18 +2578,18 @@ class DurableCheckpointStore:
         )
         stream_bytes = self.codec.dumps(continuation_stream).encode("utf-8")
         self._atomic_write(
-            self.directory / "continuation-stream.json", stream_bytes,
+            self.directory / layout.CONTINUATION_STREAM, stream_bytes,
             identical_ok=True,
         )
         self._atomic_write(
-            self.directory / "continuation.json", self._bytes(receipt),
+            self.directory / layout.CONTINUATION, self._bytes(receipt),
             identical_ok=True,
         )
 
     def _replace_state_locked(
         self, replacement: SignedProcessAuthorityReceipt,
     ) -> None:
-        path = self.directory / "state.json"
+        path = self.directory / layout.STATE
         data = self._bytes(replacement)
         fd, temporary = tempfile.mkstemp(prefix=".state-", dir=str(path.parent))
         try:
@@ -2717,7 +2635,7 @@ class DurableCheckpointStore:
                 _capability=_TRANSITION_CAPABILITY_TOKEN,
             )
             self._atomic_write(
-                self.directory / "ready.json", self._bytes(ready)
+                self.directory / layout.READY, self._bytes(ready)
             )
             self._replace_state_locked(ready)
             resolved = self.factory._issue_transition(
@@ -2753,7 +2671,7 @@ class DurableCheckpointStore:
         durable, _stream = self.rematerialize_worker_continuation(prefix=prefix)
         if durable.payload["checkpoint_receipt_digest"] != active.receipt_digest:
             raise ValueError("durable continuation does not continue this checkpoint")
-        ready_path = self.directory / "ready.json"
+        ready_path = self.directory / layout.READY
         if ready_path.exists():
             ready = self.factory.decode(json.loads(ready_path.read_text(encoding="utf-8")))
             if (
@@ -2785,7 +2703,7 @@ class DurableCheckpointStore:
             lock_directory_digest=self.lock_directory_digest,
         )
         self._atomic_write(
-            self.directory / "recovery-resolution.json",
+            self.directory / layout.RECOVERY_RESOLUTION,
             self._bytes(recovery), identical_ok=True,
         )
         return recovery
@@ -2808,7 +2726,7 @@ class DurableCheckpointStore:
         current = self.read_state()
         if current.receipt_digest != active.receipt_digest:
             raise ValueError("supervisor timeout lost checkpoint CAS")
-        if (self.directory / "continuation.json").exists():
+        if (self.directory / layout.CONTINUATION).exists():
             raise ValueError("a durable continuation exists; the checkpoint closes instead")
         claimed = self.factory._issue_transition(
             prior=active, next_state=CheckpointState.TIMED_OUT_CLAIMED,
@@ -2817,7 +2735,7 @@ class DurableCheckpointStore:
             _capability=_TRANSITION_CAPABILITY_TOKEN,
         )
         self._atomic_write(
-            self.directory / "claimed.json", self._bytes(claimed), identical_ok=True,
+            self.directory / layout.CLAIMED, self._bytes(claimed), identical_ok=True,
         )
         self._replace_state_locked(claimed)
         return claimed
@@ -2838,7 +2756,7 @@ class DurableCheckpointStore:
             raise ValueError("completion recovery lost READY-state CAS")
         try:
             checkpoint = self.factory.decode(json.loads(
-                (self.directory / "checkpoint.json").read_text(encoding="utf-8")
+                (self.directory / layout.CHECKPOINT).read_text(encoding="utf-8")
             ))
         except (OSError, KeyError, TypeError, ValueError) as exc:
             raise ValueError("READY recovery authority is missing or invalid") from exc
@@ -2853,7 +2771,7 @@ class DurableCheckpointStore:
             raise ValueError("READY recovery chain differs from durable authority")
         recovery = self._write_recovery_resolution_locked(checkpoint, continuation)
         self._atomic_write(
-            self.directory / "ready.json", self._bytes(ready), identical_ok=True,
+            self.directory / layout.READY, self._bytes(ready), identical_ok=True,
         )
         resolved = self.factory._issue_transition(
             prior=ready, next_state=CheckpointState.RESOLVED,
@@ -2906,21 +2824,21 @@ class DurableCheckpointStore:
                 raise ValueError(f"persisted {name} stream is invalid") from exc
 
         launch = self._read_launch()
-        checkpoint = receipt("checkpoint.json")
+        checkpoint = receipt(layout.CHECKPOINT)
         prefix = EventStreamPrefixView.from_sealed_stream(
-            stream("checkpoint-prefix-stream.json")
+            stream(layout.PREFIX_STREAM)
         )
         prefix.validate()
-        continuation = receipt("continuation.json")
-        continuation_stream = stream("continuation-stream.json")
+        continuation = receipt(layout.CONTINUATION)
+        continuation_stream = stream(layout.CONTINUATION_STREAM)
         self.factory.validate_worker_continuation(
             continuation, prefix, continuation_stream
         )
-        ready = receipt("ready.json")
-        resolved = receipt(STATE_MEMBER)
+        ready = receipt(layout.READY)
+        resolved = receipt(layout.STATE)
         recovery = (
-            receipt("recovery-resolution.json")
-            if "recovery-resolution.json" in present else None
+            receipt(layout.RECOVERY_RESOLUTION)
+            if layout.RECOVERY_RESOLUTION in present else None
         )
         recovery_digest = None if recovery is None else recovery.receipt_digest
         if (
@@ -2959,7 +2877,7 @@ class DurableCheckpointStore:
     def _read_launch(self) -> SignedProcessAuthorityReceipt:
         try:
             launch = self.factory.decode(json.loads(
-                (self.directory / "launch.json").read_text(encoding="utf-8")
+                (self.directory / layout.LAUNCH).read_text(encoding="utf-8")
             ))
         except (OSError, KeyError, TypeError, ValueError) as exc:
             raise ValueError("durable launch authority is missing or invalid") from exc
@@ -2976,10 +2894,10 @@ class DurableCheckpointStore:
         prefix.validate()
         try:
             continuation = self.factory.decode(json.loads(
-                (self.directory / "continuation.json").read_text(encoding="utf-8")
+                (self.directory / layout.CONTINUATION).read_text(encoding="utf-8")
             ))
             continuation_stream = self.codec.loads(
-                (self.directory / "continuation-stream.json").read_text(
+                (self.directory / layout.CONTINUATION_STREAM).read_text(
                     encoding="utf-8"
                 )
             )
@@ -3004,7 +2922,7 @@ class DurableCheckpointStore:
         if current.receipt_digest != claimed.receipt_digest:
             raise ValueError("timeout finalization lost claimed-state CAS")
         self._atomic_write(
-            self.directory / "timeout.json", self._bytes(timeout),
+            self.directory / layout.TIMEOUT, self._bytes(timeout),
             identical_ok=True,
         )
         segment_payload = json.dumps({
@@ -3018,11 +2936,11 @@ class DurableCheckpointStore:
             ),
         }, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
         self._atomic_write(
-            self.directory / "terminal-segment.json", segment_payload,
+            self.directory / layout.TERMINAL_SEGMENT, segment_payload,
             identical_ok=True,
         )
         self._atomic_write(
-            self.directory / "terminal-stream.json",
+            self.directory / layout.TERMINAL_STREAM,
             self.codec.dumps(segment.composite_stream).encode("utf-8"),
             identical_ok=True,
         )
@@ -3047,12 +2965,12 @@ class DurableCheckpointStore:
         prefix.validate()
         try:
             metadata = json.loads(
-                (self.directory / "terminal-segment.json").read_text(
+                (self.directory / layout.TERMINAL_SEGMENT).read_text(
                     encoding="utf-8"
                 )
             )
             stream = self.codec.loads(
-                (self.directory / "terminal-stream.json").read_text(
+                (self.directory / layout.TERMINAL_STREAM).read_text(
                     encoding="utf-8"
                 )
             )
@@ -3090,10 +3008,10 @@ class DurableCheckpointStore:
             except (OSError, KeyError, TypeError, ValueError) as exc:
                 raise ValueError(f"persisted {name} authority is invalid") from exc
 
-        launch = read_receipt("launch.json")
-        checkpoint = read_receipt("checkpoint.json")
-        claimed = read_receipt("claimed.json")
-        timeout = read_receipt("timeout.json")
+        launch = read_receipt(layout.LAUNCH)
+        checkpoint = read_receipt(layout.CHECKPOINT)
+        claimed = read_receipt(layout.CLAIMED)
+        timeout = read_receipt(layout.TIMEOUT)
         final = self.read_state()
         segment = self.rematerialize_terminal_segment(prefix, timeout)
         return self.factory.issue_timeout_bundle(
@@ -3112,7 +3030,7 @@ class DurableCheckpointStore:
         self.factory.validate(launch)
         try:
             durable_launch = self.factory.decode(json.loads(
-                (self.directory / "launch.json").read_text(encoding="utf-8")
+                (self.directory / layout.LAUNCH).read_text(encoding="utf-8")
             ))
         except (OSError, KeyError, TypeError, ValueError) as exc:
             raise ValueError(
@@ -3122,7 +3040,7 @@ class DurableCheckpointStore:
             raise ValueError("operational ERROR durable launch differs")
         if any(
             (self.directory / name).exists()
-            for name in CHECKPOINT_AUTHORITY_FILENAMES
+            for name in layout.CHECKPOINT_AUTHORITY_FILENAMES
         ):
             raise ValueError(
                 "operational ERROR path cannot replace checkpoint authority"
@@ -3143,7 +3061,7 @@ class DurableCheckpointStore:
             _capability=_OPERATIONAL_ERROR_CAPABILITY_TOKEN,
         )
         self._atomic_write(
-            self.directory / "operational-error.json", self._bytes(error),
+            self.directory / layout.OPERATIONAL_ERROR, self._bytes(error),
             identical_ok=True,
         )
         segment_payload = json.dumps({
@@ -3160,11 +3078,11 @@ class DurableCheckpointStore:
             ),
         }, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
         self._atomic_write(
-            self.directory / "operational-error-segment.json",
+            self.directory / layout.OPERATIONAL_ERROR_SEGMENT,
             segment_payload, identical_ok=True,
         )
         self._atomic_write(
-            self.directory / "operational-error-stream.json",
+            self.directory / layout.OPERATIONAL_ERROR_STREAM,
             self.codec.dumps(segment.composite_stream).encode("utf-8"),
             identical_ok=True,
         )
@@ -3174,7 +3092,7 @@ class DurableCheckpointStore:
             if name not in {"terminal_segment", "_factory_token"}
         }, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
         self._atomic_write(
-            self.directory / "operational-error-bundle.json",
+            self.directory / layout.OPERATIONAL_ERROR_BUNDLE,
             bundle_payload, identical_ok=True,
         )
         rematerialized = self._rematerialize_operational_error_bundle_locked(
@@ -3189,32 +3107,32 @@ class DurableCheckpointStore:
     ) -> DurableErrorFinalizationBundle:
         if any(
             (self.directory / name).exists()
-            for name in CHECKPOINT_AUTHORITY_FILENAMES
+            for name in layout.CHECKPOINT_AUTHORITY_FILENAMES
         ):
             raise ValueError(
                 "persisted operational ERROR conflicts with checkpoint authority"
             )
         try:
             launch = self.factory.decode(json.loads(
-                (self.directory / "launch.json").read_text(encoding="utf-8")
+                (self.directory / layout.LAUNCH).read_text(encoding="utf-8")
             ))
             error = self.factory.decode(json.loads(
-                (self.directory / "operational-error.json").read_text(
+                (self.directory / layout.OPERATIONAL_ERROR).read_text(
                     encoding="utf-8"
                 )
             ))
             metadata = json.loads(
-                (self.directory / "operational-error-segment.json").read_text(
+                (self.directory / layout.OPERATIONAL_ERROR_SEGMENT).read_text(
                     encoding="utf-8"
                 )
             )
             stream = self.codec.loads(
-                (self.directory / "operational-error-stream.json").read_text(
+                (self.directory / layout.OPERATIONAL_ERROR_STREAM).read_text(
                     encoding="utf-8"
                 )
             )
             stored_bundle = json.loads(
-                (self.directory / "operational-error-bundle.json").read_text(
+                (self.directory / layout.OPERATIONAL_ERROR_BUNDLE).read_text(
                     encoding="utf-8"
                 )
             )

@@ -18,6 +18,7 @@ from __future__ import annotations
 import pytest
 
 from scripts.function_tracer_pcode.authority.process import terminal_recovery as tr
+from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import CheckpointState
 from scripts.function_tracer_pcode.tests.fixtures.issue165 import terminal_model as model
 
 
@@ -47,17 +48,17 @@ def test_the_reachable_set_covers_every_crash_window_the_plan_names(explored):
     assert any_state(lambda s: s.pending is not None and s.pending[2])  # bootstrap pending
     assert any_state(  # bootstrap commit が前任を退避している途中
         lambda s: s.pending is not None and s.pending[2] and s.live is not None
-        and s.live.state == "RESOLVED" and len(s.live.members) < 6
+        and s.live.state == CheckpointState.RESOLVED.value and len(s.live.members) < 6
     )
     assert any_state(  # claimed durable / CAS 前
         lambda s: "claimed.json" in s.timeout_members and s.live is not None
-        and s.live.state == "ACTIVE"
+        and s.live.state == CheckpointState.ACTIVE.value
     )
     assert any_state(  # timeout bundle の部分書込み
         lambda s: 1 < len(s.timeout_members) < 4
     )
     assert any_state(  # 完成した bundle、state 更新前
-        lambda s: len(s.timeout_members) == 4 and s.live.state == "TIMED_OUT_CLAIMED"
+        lambda s: len(s.timeout_members) == 4 and s.live.state == CheckpointState.TIMED_OUT_CLAIMED.value
     )
     assert any_state(  # A durable、移動前
         lambda s: s.archive is not None and not s.archive[2]

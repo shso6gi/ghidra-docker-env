@@ -307,10 +307,10 @@ def test_baseline_is_a_frozen_snapshot_with_stable_totals():
 
     entries = load_baseline()
     assert baseline_totals(entries) == {
-        "keys": 588,
+        "keys": 587,
         "logged": 0,
-        "unlogged": 913,
-        "handlers": 913,
+        "unlogged": 912,
+        "handlers": 912,
     }
 
 

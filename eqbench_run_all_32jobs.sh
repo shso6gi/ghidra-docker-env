@@ -631,8 +631,6 @@ run_pair() {
         --supervisor-signing-key-file "$PROCESS_SUPERVISOR_KEY_FILE"
         --worker-signing-key-id "$PROCESS_WORKER_KEY_ID"
         --worker-signing-key-file "$PROCESS_WORKER_KEY_FILE"
-        --terminal-evidence-signing-key-id "$PROCESS_TERMINAL_EVIDENCE_KEY_ID"
-        --terminal-evidence-signing-key-file "$PROCESS_TERMINAL_EVIDENCE_KEY_FILE"
         --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS"
         --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS"
         --allow-child-exit-resolution
@@ -712,8 +710,6 @@ run_pair() {
         --supervisor-signing-key-file "$PROCESS_SUPERVISOR_KEY_FILE" \
         --worker-signing-key-id "$PROCESS_WORKER_KEY_ID" \
         --worker-signing-key-file "$PROCESS_WORKER_KEY_FILE" \
-        --terminal-evidence-signing-key-id "$PROCESS_TERMINAL_EVIDENCE_KEY_ID" \
-        --terminal-evidence-signing-key-file "$PROCESS_TERMINAL_EVIDENCE_KEY_FILE" \
         --pair-status-signing-private-key-file "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
         --pair-status-verification-key-file "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
         --pair-execution-target-file "$pair_target_file" --classification-diagnostic-log "$log_file" \
@@ -914,12 +910,6 @@ PROCESS_SUPERVISOR_KEY_ID="eqbench-phase8-supervisor-v1"
 PROCESS_WORKER_KEY_ID="eqbench-phase8-worker-v1"
 PROCESS_SUPERVISOR_KEY_FILE="$PROCESS_AUTHORITY_ROOT/supervisor.key"
 PROCESS_WORKER_KEY_FILE="$PROCESS_AUTHORITY_ROOT/worker.key"
-# Issue #165: supervisor が観測した終了事実（D / E / A）の署名鍵。supervisor と
-# 分類器だけに渡し、worker child の環境には入れない。in-flight の pair の store
-# だけを検証する鍵で、既存の pair-status の再検証には使わないので、既存 evidence
-# がある run dir でも無ければ作る（retained keyset の検査対象にしない）。
-PROCESS_TERMINAL_EVIDENCE_KEY_ID="eqbench-phase8-terminal-evidence-v1"
-PROCESS_TERMINAL_EVIDENCE_KEY_FILE="$PROCESS_AUTHORITY_ROOT/terminal-evidence.key"
 PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE="$PROCESS_AUTHORITY_ROOT/pair-status-ed25519.key"
 PAIR_STATUS_VERIFICATION_KEY_FILE="$OUTPUT_BASE_DIR/pair-status-verification-key.json"
 existing_authority_evidence="$(find "$OUTPUT_BASE_DIR" \
@@ -953,8 +943,6 @@ if [[ -z "$existing_authority_evidence" ]]; then
             --write-public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
     fi
 fi
-[[ -s "$PROCESS_TERMINAL_EVIDENCE_KEY_FILE" ]] \
-    || ( umask 077; head -c 32 /dev/urandom > "$PROCESS_TERMINAL_EVIDENCE_KEY_FILE" )
 "$PYTHON_BIN" -m \
     scripts.function_tracer_pcode.authority.decision.pair_status_authority \
     --validate-private-key "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \

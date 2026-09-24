@@ -442,11 +442,13 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
     assert session.phase7_runtime_result is None
 
     from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-        RESULT_ENVELOPE_FILE,
         _semantic_projection,
         build_canonical_result_finalization_bundle,
         persist_canonical_result_envelope,
         validate_canonical_result_finalization_bundle,
+    )
+    from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
+        RESULT_ENVELOPE_FILE,
     )
 
     class BoxedInt(int):

@@ -14,6 +14,7 @@ import tempfile
 import time
 from typing import Any, Mapping, Optional, Sequence
 
+from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.contracts import authority_digest, canonical_value
 from scripts.function_tracer_pcode.authority.process import terminal_evidence
 from scripts.function_tracer_pcode.authority.process.supervisor import (
@@ -25,14 +26,18 @@ from scripts.function_tracer_pcode.authority.process.terminal_driver import (
     drive,
 )
 from scripts.function_tracer_pcode.authority.process.terminal_recovery import ExitMode
-from scripts.function_tracer_pcode.authority.process.terminal_transaction import (
-    TerminalAuthority,
+from scripts.function_tracer_pcode.authority.process.terminal_projection import (
+    terminal_exit_code,
+    terminal_projection,
 )
-from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-    BUNDLE_KIND,
+from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
     RESULT_ENVELOPE_FILE,
-    validate_durable_child_returncode_observation,
-    validate_canonical_result_finalization_bundle,
+    validate_canonical_envelope,
+)
+from scripts.function_tracer_pcode.authority.process import child_exit
+from scripts.function_tracer_pcode.authority.process.process_identity import (
+    process_is_alive,
+    read_process_start_token,
 )
 from scripts.function_tracer_pcode.authority.process.stack_dump_diagnostic import (
     DEFAULT_STACK_DUMP_LEAD_SECONDS,
@@ -66,39 +71,6 @@ def _exact_string(name: str, value: Any) -> str:
     return value
 
 
-def read_process_start_token(pid: int, *, proc_root: Path = Path("/proc")) -> str:
-    if type(pid) is not int or pid <= 0:
-        raise TypeError("process PID is invalid")
-    try:
-        stat = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
-        closing = stat.rfind(")")
-        fields_after_comm = stat[closing + 2:].split()
-        start_time = fields_after_comm[19]
-    except Exception as exc:
-        raise ValueError("process start token is unavailable") from exc
-    if not start_time.isascii() or not start_time.isdecimal():
-        raise ValueError("process start token is not canonical")
-    return f"linux-proc-starttime-{start_time}"
-
-
-def process_is_alive(pid: int, start_token: str) -> Optional[bool]:
-    """PID + start token の process がいま動いているか（zombie は終了扱い）。
-
-    Issue #165: 終端判断の入力（E と生存の矛盾 / D だけの restart の診断）。
-    start token が読めない・一致しないなら、その process はもう居ない。
-    ``/proc`` 自体が読めないときだけ None（分からない）。
-    """
-    try:
-        if read_process_start_token(pid) != start_token:
-            return False
-        stat = (Path("/proc") / str(pid) / "stat").read_text(encoding="utf-8")
-    except ValueError:
-        return False
-    except OSError:
-        return None
-    return stat[stat.rfind(")") + 2:stat.rfind(")") + 3] not in {"Z", "X"}
-
-
 def _read_key(path: Path) -> bytes:
     try:
         key = Path(path).read_bytes()
@@ -123,10 +95,6 @@ class SupervisorCommandConfig:
     supervisor_signing_key_file: Path
     worker_signing_key_id: str
     worker_signing_key_file: Path
-    # Issue #165: D / E / A（supervisor が観測した終了事実）の署名鍵。
-    # supervisor と分類器だけが持ち、worker child の環境には渡さない。
-    terminal_evidence_signing_key_id: str
-    terminal_evidence_signing_key_file: Path
     timeout_seconds: float
     kill_grace_seconds: float
     child_command: tuple[str, ...]
@@ -146,7 +114,7 @@ class SupervisorCommandConfig:
             "execution_nonce", "result_occurrence_id",
             "source_snapshot_fingerprint", "stream_id",
             "deadline_policy_digest", "supervisor_signing_key_id",
-            "worker_signing_key_id", "terminal_evidence_signing_key_id",
+            "worker_signing_key_id",
         ):
             _exact_string(name, getattr(self, name))
         if (
@@ -164,11 +132,8 @@ class SupervisorCommandConfig:
             or not all(type(item) is str and item for item in self.child_command)
         ):
             raise TypeError("child command must be a non-empty exact tuple")
-        if len({
-            self.supervisor_signing_key_id, self.worker_signing_key_id,
-            self.terminal_evidence_signing_key_id,
-        }) != 3:
-            raise ValueError("worker, supervisor and terminal evidence key IDs must differ")
+        if self.supervisor_signing_key_id == self.worker_signing_key_id:
+            raise ValueError("worker and supervisor signing key IDs must differ")
         for name in (
             "stage_journal_path", "stack_dump_file", "stack_dump_artifact",
             "diagnostic_status_output",
@@ -219,10 +184,6 @@ class ProcessSupervisorCommand:
             supervisor_signing_key=_read_key(config.supervisor_signing_key_file),
             worker_signing_key_id=config.worker_signing_key_id,
             worker_signing_key=worker_key,
-            terminal_evidence_signing_key_id=config.terminal_evidence_signing_key_id,
-            terminal_evidence_signing_key=_read_key(
-                config.terminal_evidence_signing_key_file
-            ),
         )
         self.store = DurableCheckpointStore(
             config.checkpoint_root, self.factory, config.execution_nonce
@@ -234,87 +195,12 @@ class ProcessSupervisorCommand:
             else ExitMode.SUPERVISOR_ONLY
         )
 
-    def _durable_terminal_projection(
-        self, launch: Any, bundle: Any, *, status: str,
-        child_returncode: Any,
-    ) -> dict[str, Any]:
-        from scripts.function_tracer_pcode.authority.contracts import Outcome
-
-        outcome = Outcome.TIMEOUT if status == "TIMEOUT" else Outcome.ERROR
-        error_kind = bundle.error_kind if outcome is Outcome.ERROR else None
-        validated = self.factory._validate_supervisor_canonical_bundle(
-            bundle.canonical_result_bundle,
-            launch=launch,
-            outcome=outcome,
-            error_kind=error_kind,
-        )
-        canonical = bundle.canonical_result_bundle
-        occurrence = canonical["result_entry_occurrence_receipt"]
-        identity = validated["execution_identity"]
-        observation_kind = (
-            "LIVE_PROCESS_WAIT" if child_returncode is not None
-            else "DURABLE_RESTART_NO_CHILD_STATUS"
-        )
-        validate_durable_child_returncode_observation(
-            child_exit_disposition=bundle.child_exit_disposition,
-            child_returncode=child_returncode,
-            observation_kind=observation_kind,
-        )
-        return {
-            "status": status,
-            "authority_kind": type(bundle).__name__,
-            "supervisor_authority_kind": type(bundle).__name__,
-            "supervisor_final_authority_digest": bundle.bundle_digest,
-            "launch_receipt_digest": launch.receipt_digest,
-            "finalization_bundle_digest": bundle.bundle_digest,
-            "event_stream_authority_digest": (
-                bundle.composite_stream_authority_digest
-            ),
-            "canonical_outcome": validated["outcome"],
-            "decision_receipt_digest": validated["decision_receipt_digest"],
-            "result_occurrence_id": identity["result_occurrence_id"],
-            "result_entry_occurrence_receipt_digest": occurrence[
-                "receipt_digest"
-            ],
-            "execution_identity_digest": identity[
-                "execution_identity_digest"
-            ],
-            "stream_id": identity["stream_id"],
-            "source_snapshot_fingerprint": identity[
-                "source_snapshot_fingerprint"
-            ],
-            "canonical_result_bundle_digest": validated["bundle_digest"],
-            "canonical_result_bundle_kind": "CanonicalResultFinalizationBundle",
-            "canonical_result_payload_preimage_digest": validated[
-                "payload_preimage_digest"
-            ],
-            "semantic_projection_digest": validated[
-                "semantic_projection_digest"
-            ],
-            "error_kind": error_kind,
-            "child_exit_disposition": bundle.child_exit_disposition,
-            "child_returncode_observation_kind": observation_kind,
-            "child_returncode": child_returncode,
-            "classification_valid": True,
-        }
-
     def _child_environment(self) -> dict[str, str]:
-        # Issue #165: D / E / A の署名鍵は worker child に渡さない。supervisor の
-        # 環境に（呼び出し側の export などで）鍵の path や id があっても、
-        # それを名指す変数は child の環境から落とす。
-        evidence_key = self.config.terminal_evidence_signing_key_file
-        secrets = {
-            str(evidence_key), str(evidence_key.resolve()),
-            self.config.terminal_evidence_signing_key_id,
-        }
-        environment = {
-            name: value for name, value in os.environ.items()
-            if not any(secret in value for secret in secrets)
-        }
+        environment = dict(os.environ)
         environment.update({
             CHILD_ENV_ROOT: str(self.config.checkpoint_root.resolve()),
             CHILD_ENV_NONCE: self.config.execution_nonce,
-            CHILD_ENV_LAUNCH: str((self.store.directory / "launch.json").resolve()),
+            CHILD_ENV_LAUNCH: str((self.store.directory / layout.LAUNCH).resolve()),
             CHILD_ENV_SUPERVISOR_KEY_ID: self.config.supervisor_signing_key_id,
             CHILD_ENV_SUPERVISOR_KEY_FILE: str(
                 self.config.supervisor_signing_key_file.resolve()
@@ -363,38 +249,6 @@ class ProcessSupervisorCommand:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-
-    def _resolved_projection(self, authority: TerminalAuthority) -> dict[str, Any]:
-        """検証済み canonical 結果 + E の実測 rc の CLI join（canonical RESOLVED）。"""
-        envelope = authority.envelope
-        receipt = authority.canonical_receipt
-        validated = envelope.validated
-        identity = validated["execution_identity"]
-        occurrence = envelope.bundle.get("result_entry_occurrence_receipt") or {}
-        semantic = envelope.bundle["canonical_semantic_result_projection"]
-        return {
-            "status": "RESOLVED",
-            "authority_kind": type(receipt).__name__,
-            "supervisor_authority_kind": type(receipt).__name__,
-            "supervisor_final_authority_digest": receipt.receipt_digest,
-            "launch_receipt_digest": authority.launch.receipt_digest,
-            "canonical_outcome": envelope.outcome.value,
-            "decision_receipt_digest": validated["decision_receipt_digest"],
-            "result_occurrence_id": identity["result_occurrence_id"],
-            "result_entry_occurrence_receipt_digest": occurrence.get("receipt_digest"),
-            "execution_identity_digest": identity["execution_identity_digest"],
-            "stream_id": identity["stream_id"],
-            "source_snapshot_fingerprint": identity["source_snapshot_fingerprint"],
-            "canonical_result_bundle_digest": validated["bundle_digest"],
-            "canonical_result_bundle_kind": BUNDLE_KIND,
-            "canonical_result_payload_preimage_digest": validated[
-                "payload_preimage_digest"
-            ],
-            "semantic_projection_digest": validated["semantic_projection_digest"],
-            "error_kind": semantic["payload"].get("error_kind"),
-            "child_returncode": receipt.child_returncode,
-            "classification_valid": True,
-        }
 
     def _same_process(self, process: subprocess.Popen[Any], start_token: str) -> bool:
         try:
@@ -523,18 +377,8 @@ class ProcessSupervisorCommand:
         検証に失敗した場合も `validated: false` として残し、証拠の欠落と区別する。
         """
         path = self.store.directory / RESULT_ENVELOPE_FILE
-        try:
-            if not path.is_file():
-                return None
-            envelope = json.loads(path.read_text(encoding="utf-8"))
-            payload = envelope["canonical_result_payload"]
-            bundle = payload["canonical_result_finalization_bundle"]
-        except _DIAGNOSTIC_GUARD_ERRORS as exc:
-            return {
-                "observed": True,
-                "validated": False,
-                "validation_error": type(exc).__name__,
-            }
+        if not path.is_file():
+            return None
         record: dict[str, Any] = {
             "observed": True,
             "validated": False,
@@ -542,21 +386,16 @@ class ProcessSupervisorCommand:
             "source": "checkpoint_result_envelope",
         }
         try:
-            preimage = {
-                key: value for key, value in payload.items()
-                if key != "canonical_result_finalization_bundle"
-            }
-            validated = validate_canonical_result_finalization_bundle(
-                bundle,
-                result_payload_preimage=preimage,
-                bundle_verification_key_id=self.config.supervisor_signing_key_id,
-                bundle_verification_key=_read_key(
-                    self.config.supervisor_signing_key_file
-                ),
+            # envelope の規則（封・bundle 署名・launch join）は終端の判断と同じ
+            # validator を使う（ここだけ緩い読み方をしない）。
+            envelope = validate_canonical_envelope(
+                path.read_bytes(), launch=self.store._read_launch(),
+                validate_bundle=self.factory.validate_child_canonical_bundle,
             )
         except _DIAGNOSTIC_GUARD_ERRORS as exc:
             record["validation_error"] = type(exc).__name__
             return record
+        validated, bundle = envelope.validated, envelope.bundle
         identity = validated["execution_identity"]
         selection = bundle.get("terminal_timeout_candidate_selection_receipt")
         selection = selection if isinstance(selection, dict) else {}
@@ -651,14 +490,14 @@ class ProcessSupervisorCommand:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             actions.append(terminal_evidence.SignalAction(
-                "SIGTERM", terminal_evidence.SIGNAL_PROCESS_ABSENT,
+                child_exit.SIGTERM, child_exit.SIGNAL_PROCESS_ABSENT,
             ))
             return_code = process.poll()
             if return_code is not None:
                 return f"EXITED_{return_code}_BEFORE_SIGTERM"
             raise
         actions.append(terminal_evidence.SignalAction(
-            "SIGTERM", terminal_evidence.SIGNAL_SENT,
+            child_exit.SIGTERM, child_exit.SIGNAL_SENT,
         ))
         if on_first_signal is not None:
             # 診断の観測点が kill 経路を壊さないようにする。ここは supervisor で
@@ -684,14 +523,14 @@ class ProcessSupervisorCommand:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 actions.append(terminal_evidence.SignalAction(
-                    "SIGKILL", terminal_evidence.SIGNAL_PROCESS_ABSENT,
+                    child_exit.SIGKILL, child_exit.SIGNAL_PROCESS_ABSENT,
                 ))
                 return_code = process.poll()
                 if return_code is not None:
                     return f"EXITED_{return_code}_BEFORE_SIGKILL"
                 raise
             actions.append(terminal_evidence.SignalAction(
-                "SIGKILL", terminal_evidence.SIGNAL_SENT,
+                child_exit.SIGKILL, child_exit.SIGNAL_SENT,
             ))
             process.wait()
             return (
@@ -726,7 +565,7 @@ class ProcessSupervisorCommand:
 
     def _load_durable_launch(self) -> Any:
         launch = self.factory.decode(json.loads(
-            (self.store.directory / "launch.json").read_text(encoding="utf-8")
+            (self.store.directory / layout.LAUNCH).read_text(encoding="utf-8")
         ))
         if (
             launch.payload["result_occurrence_id"]
@@ -786,16 +625,10 @@ class ProcessSupervisorCommand:
                 child_returncode=result.child_returncode,
                 diagnostics=result.diagnostics,
             )
-        if authority.status == "RESOLVED":
-            return 0, self._resolved_projection(authority)
-        returncode = authority.child_exit.payload["child_returncode"]
-        projection = self._durable_terminal_projection(
-            launch, authority.bundle, status=authority.status,
-            child_returncode=returncode,
+        return (
+            terminal_exit_code(authority),
+            terminal_projection(authority, self.factory),
         )
-        if authority.status == "TIMEOUT":
-            return 124, projection
-        return (returncode if returncode else 2), projection
 
     def _resume(self, ownership: Any, launch: Any = None) -> int:
         """durable な evidence だけから終端を決め直す（run と同じ ``drive``）。"""
@@ -818,7 +651,7 @@ class ProcessSupervisorCommand:
         # Issue #165: 起動から projection の公開まで、この store の owner は
         # この supervisor 1 つ（restart の重複起動は先の終了を待つ）。
         with self.store.supervisor_ownership() as ownership:
-            if (self.store.directory / "launch.json").exists():
+            if (self.store.directory / layout.LAUNCH).exists():
                 return self._resume(ownership)
             read_fd, write_fd = os.pipe()
             process: Optional[subprocess.Popen[Any]] = None
@@ -884,7 +717,7 @@ class ProcessSupervisorCommand:
                     )
                     return_code = process.returncode
                 else:
-                    disposition = terminal_evidence.natural_exit_disposition(return_code)
+                    disposition = child_exit.natural_exit_disposition(return_code)
                 self._record_child_exit(
                     ownership, returncode=return_code, disposition=disposition,
                     signals=tuple(signals),
@@ -934,8 +767,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--supervisor-signing-key-file", required=True)
     parser.add_argument("--worker-signing-key-id", required=True)
     parser.add_argument("--worker-signing-key-file", required=True)
-    parser.add_argument("--terminal-evidence-signing-key-id", required=True)
-    parser.add_argument("--terminal-evidence-signing-key-file", required=True)
     parser.add_argument("--timeout-seconds", required=True, type=float)
     parser.add_argument("--kill-grace-seconds", type=float, default=30.0)
     parser.add_argument("--allow-child-exit-resolution", action="store_true")
@@ -977,10 +808,6 @@ def main(arguments: Optional[Sequence[str]] = None) -> int:
         supervisor_signing_key_file=Path(args.supervisor_signing_key_file),
         worker_signing_key_id=args.worker_signing_key_id,
         worker_signing_key_file=Path(args.worker_signing_key_file),
-        terminal_evidence_signing_key_id=args.terminal_evidence_signing_key_id,
-        terminal_evidence_signing_key_file=Path(
-            args.terminal_evidence_signing_key_file
-        ),
         timeout_seconds=args.timeout_seconds,
         kill_grace_seconds=args.kill_grace_seconds,
         allow_child_exit_resolution=args.allow_child_exit_resolution,

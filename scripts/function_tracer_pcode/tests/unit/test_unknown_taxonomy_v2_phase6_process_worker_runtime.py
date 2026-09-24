@@ -16,6 +16,8 @@ from scripts.function_tracer_pcode.authority.process.supervisor_command import (
     CHILD_ENV_WORKER_KEY_FILE,
     CHILD_ENV_WORKER_KEY_ID,
     COMMAND_SCHEMA,
+)
+from scripts.function_tracer_pcode.authority.process.process_identity import (
     read_process_start_token,
 )
 from scripts.function_tracer_pcode.authority.process.worker_runtime import (

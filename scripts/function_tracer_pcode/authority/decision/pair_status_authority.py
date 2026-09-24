@@ -18,6 +18,9 @@ from scripts.function_tracer_pcode.authority.contracts import (
     Outcome,
     authority_digest,
 )
+from scripts.function_tracer_pcode.authority.process.child_exit import (
+    validate_durable_child_returncode_observation,
+)
 
 
 PAIR_STATUS_SCHEMA = "signed-canonical-pair-status-v1"
@@ -261,37 +264,16 @@ def validate_pair_status_keypair(
 
 
 def _validate_durable_child_exit(body: Mapping[str, Any]) -> None:
-    disposition = body["child_exit_disposition"]
-    observation = body["child_returncode_observation_kind"]
-    returncode = body["child_returncode"]
-    if type(disposition) is not str or not disposition:
-        raise ValueError("pair-status durable child disposition is missing")
-    if observation == "DURABLE_RESTART_NO_CHILD_STATUS":
-        if returncode is not None:
-            raise ValueError("pair-status durable restart invented a child return code")
-        return
-    if observation != "LIVE_PROCESS_WAIT" or type(returncode) is not int:
-        raise ValueError("pair-status durable child observation is invalid")
-    if disposition == "SIGTERM_AFTER_DEADLINE":
-        expected = -15
-    elif disposition == "SIGKILL_AFTER_DEADLINE":
-        expected = -9
-    elif disposition.startswith("EXIT_CODE_"):
-        code = disposition[len("EXIT_CODE_"):]
-        try:
-            expected = int(code)
-        except ValueError as exc:
-            raise ValueError("pair-status child exit disposition is malformed") from exc
-    elif disposition.startswith("EXITED_"):
-        code = disposition[len("EXITED_"):].split("_", 1)[0]
-        try:
-            expected = int(code)
-        except ValueError as exc:
-            raise ValueError("pair-status child exit disposition is malformed") from exc
-    else:
-        raise ValueError("pair-status child exit disposition is not canonical")
-    if returncode != expected:
-        raise ValueError("pair-status child return code differs from disposition")
+    """rc と disposition の join（規則は ``child_exit`` の 1 箇所）。"""
+
+    try:
+        validate_durable_child_returncode_observation(
+            child_exit_disposition=body["child_exit_disposition"],
+            child_returncode=body["child_returncode"],
+            observation_kind=body["child_returncode_observation_kind"],
+        )
+    except ValueError as exc:
+        raise ValueError(f"pair-status durable child exit is invalid: {exc}") from exc
 
 
 def _validate_pair_status_conditional_column(body: Mapping[str, Any]) -> None:

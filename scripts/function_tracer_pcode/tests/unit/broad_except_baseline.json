@@ -550,8 +550,7 @@
     "authority.process.supervisor_command": {
       "ProcessSupervisorCommand._resume": {"logged": 0, "unlogged": 1},
       "ProcessSupervisorCommand.run": {"logged": 0, "unlogged": 1},
-      "_read_key": {"logged": 0, "unlogged": 1},
-      "read_process_start_token": {"logged": 0, "unlogged": 1}
+      "_read_key": {"logged": 0, "unlogged": 1}
     },
     "authority.process.worker_runtime": {
       "PreparedWorkerCheckpoint.persist": {"logged": 0, "unlogged": 1}

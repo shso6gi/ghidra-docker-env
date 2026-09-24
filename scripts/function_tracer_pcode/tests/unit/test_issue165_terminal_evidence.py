@@ -5,7 +5,7 @@
 
 * D / E / A の schema と join（別 launch・別 D・別 E・rc と disposition の不一致を
   拒否。自然終了の E は signal / deadline を名乗れない）
-* terminal-evidence 鍵の分離（鍵の無い worker の factory は発行も検証もできない）
+* D / E / A は supervisor role の署名だけを受理する（worker role・署名後の改ざんは拒否）
 * chain member 集合と A の union 検証（両側欠落・bytes 不一致・余分な file）
 * store の flock / owner lock（入れ子は例外、supervisor 専用の書込みは owner のみ）
 * 判断の順序（完成した終端があっても競合が先）
@@ -23,6 +23,11 @@ from pathlib import Path
 import pytest
 
 from scripts.function_tracer_pcode.authority.process import checkpoint_archive as ca
+from scripts.function_tracer_pcode.authority.process import child_exit as ce
+from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
+    CheckpointState,
+    ErrorStage,
+)
 from scripts.function_tracer_pcode.authority.process import terminal_evidence as te
 from scripts.function_tracer_pcode.authority.process import terminal_recovery as tr
 from scripts.function_tracer_pcode.authority.process.supervisor import (
@@ -35,14 +40,10 @@ KEYS = dict(
     supervisor_signing_key_id="supervisor-key-v1", supervisor_signing_key=b"s" * 32,
     worker_signing_key_id="worker-key-v1", worker_signing_key=b"w" * 32,
 )
-EVIDENCE = dict(
-    terminal_evidence_signing_key_id="terminal-evidence-key-v1",
-    terminal_evidence_signing_key=b"e" * 32,
-)
 
 
-def _factory(*, evidence: bool = True) -> ProcessSupervisorAuthorityFactory:
-    return ProcessSupervisorAuthorityFactory(**KEYS, **(EVIDENCE if evidence else {}))
+def _factory() -> ProcessSupervisorAuthorityFactory:
+    return ProcessSupervisorAuthorityFactory(**KEYS)
 
 
 def _launch(factory, *, nonce="execution-1"):
@@ -64,7 +65,7 @@ def _deadline(factory, launch):
 
 
 def _exit(factory, launch, *, deadline=None, rc=-15, disposition="SIGTERM_AFTER_DEADLINE",
-          signals=(te.SignalAction("SIGTERM", te.SIGNAL_SENT),), anchor=None):
+          signals=(te.SignalAction("SIGTERM", ce.SIGNAL_SENT),), anchor=None):
     payload = te.child_exit_payload(
         launch, deadline=deadline, child_returncode=rc,
         child_exit_disposition=disposition, signal_actions=signals,
@@ -80,33 +81,34 @@ def _exit(factory, launch, *, deadline=None, rc=-15, disposition="SIGTERM_AFTER_
 # ---------------------------------------------------------------------------
 
 
-def test_only_the_supervisor_side_key_signs_and_validates_terminal_evidence():
-    supervisor = _factory()
-    worker = _factory(evidence=False)
-    launch = _launch(supervisor)
-    deadline = _deadline(supervisor, launch)
-    assert deadline.signing_key_id == "terminal-evidence-key-v1"
-    with pytest.raises(ValueError, match="no terminal evidence signing key"):
-        worker.issue_terminal_evidence(te.DEADLINE_RECEIPT_KIND, deadline.payload)
-    with pytest.raises(ValueError, match="signing key is untrusted"):
-        worker.decode(deadline.to_dict())
+def test_terminal_evidence_is_signed_and_decoded_with_the_supervisor_role():
+    factory = _factory()
+    launch = _launch(factory)
+    deadline = _deadline(factory, launch)
+    assert deadline.signing_key_id == "supervisor-key-v1"
+    assert factory.decode(deadline.to_dict()).payload == deadline.payload
 
 
-def test_supervisor_signed_receipt_cannot_claim_a_terminal_evidence_kind():
-    supervisor = _factory()
-    forged = supervisor._sign(te.CHILD_EXIT_RECEIPT_KIND, {"x": 1}, signer_role="supervisor")
-    with pytest.raises(ValueError, match="signer role does not match"):
-        supervisor.validate(forged)
+def test_a_worker_role_receipt_cannot_claim_a_terminal_evidence_kind():
+    factory = _factory()
+    for kind in te.TERMINAL_EVIDENCE_FILES:
+        forged = factory._sign(kind, {"x": 1}, signer_role="worker")
+        with pytest.raises(ValueError, match="signer role does not match"):
+            factory.validate(forged)
 
 
-@pytest.mark.parametrize("override", (
-    {"terminal_evidence_signing_key_id": "supervisor-key-v1"},
-    {"terminal_evidence_signing_key": b"s" * 32},
-    {"terminal_evidence_signing_key": b"e" * 8},
-))
-def test_terminal_evidence_key_must_be_distinct(override):
-    with pytest.raises(TypeError):
-        ProcessSupervisorAuthorityFactory(**KEYS, **{**EVIDENCE, **override})
+def test_a_terminal_evidence_payload_edited_after_signing_is_rejected():
+    factory = _factory()
+    launch = _launch(factory)
+    stored = _deadline(factory, launch).to_dict()
+    stored["payload"]["deadline_detected_offset_seconds"] = 99.0
+    with pytest.raises(ValueError, match="signature/digest mismatch"):
+        factory.decode(stored)
+
+
+def test_only_sealed_kinds_are_issued_as_terminal_evidence():
+    with pytest.raises(ValueError, match="not sealed"):
+        _factory().issue_terminal_evidence("SupervisorLaunchReceipt", {"x": 1})
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +145,8 @@ def test_exit_and_deadline_must_name_each_other_in_both_directions():
 
 
 @pytest.mark.parametrize(("rc", "disposition", "signals"), (
-    (-15, "SIGTERM_AFTER_DEADLINE", (te.SignalAction("SIGTERM", te.SIGNAL_SENT),)),
-    (2, "EXIT_CODE_2", (te.SignalAction("SIGTERM", te.SIGNAL_SENT),)),
+    (-15, "SIGTERM_AFTER_DEADLINE", (te.SignalAction("SIGTERM", ce.SIGNAL_SENT),)),
+    (2, "EXIT_CODE_2", (te.SignalAction("SIGTERM", ce.SIGNAL_SENT),)),
     (0, "EXITED_0", ()),
 ))
 def test_a_natural_exit_cannot_claim_deadline_facts(rc, disposition, signals):
@@ -165,10 +167,10 @@ def test_exit_rc_must_be_the_one_its_disposition_names(rc, disposition):
         _exit(factory, launch, deadline=deadline, rc=rc, disposition=disposition)
 
 
-SENT = te.SignalAction("SIGTERM", te.SIGNAL_SENT)
-KILLED = te.SignalAction("SIGKILL", te.SIGNAL_SENT)
-TERM_ABSENT = te.SignalAction("SIGTERM", te.SIGNAL_PROCESS_ABSENT)
-KILL_ABSENT = te.SignalAction("SIGKILL", te.SIGNAL_PROCESS_ABSENT)
+SENT = te.SignalAction("SIGTERM", ce.SIGNAL_SENT)
+KILLED = te.SignalAction("SIGKILL", ce.SIGNAL_SENT)
+TERM_ABSENT = te.SignalAction("SIGTERM", ce.SIGNAL_PROCESS_ABSENT)
+KILL_ABSENT = te.SignalAction("SIGKILL", ce.SIGNAL_PROCESS_ABSENT)
 
 
 @pytest.mark.parametrize(("rc", "disposition", "signals"), (
@@ -223,13 +225,13 @@ def test_exit_records_only_observed_signal_actions():
     receipt = _exit(
         factory, launch, deadline=deadline, rc=3,
         disposition="EXITED_3_BEFORE_SIGTERM",
-        signals=(te.SignalAction("SIGTERM", te.SIGNAL_PROCESS_ABSENT),),
+        signals=(te.SignalAction("SIGTERM", ce.SIGNAL_PROCESS_ABSENT),),
     )
     assert receipt.payload["signal_actions"] == [
         {"signal": "SIGTERM", "result": "process_absent"},
     ]
     with pytest.raises(te.TerminalEvidenceInvalid):
-        te.SignalAction("SIGHUP", te.SIGNAL_SENT).to_json()
+        te.SignalAction("SIGHUP", ce.SIGNAL_SENT).to_json()
 
 
 @pytest.mark.parametrize("value", (
@@ -375,7 +377,7 @@ def test_supervisor_only_writes_require_held_ownership(tmp_path):
     with pytest.raises(RuntimeError, match="ownership"):
         store.persist_deadline(ownership, deadline)
     with pytest.raises(RuntimeError, match="ownership"):
-        with store.terminal_transaction(ownership):
+        with store.owned_lock(ownership):
             pass
     with store.supervisor_ownership() as ownership:
         store.persist_deadline(ownership, deadline)
@@ -427,7 +429,7 @@ def _complete_timeout_snapshot():
                                deadline_digest="D", anchor=anchor),
         child_alive=False, pending=tr.PendingFact(),
         live=tr.LiveChainFact(tr.LiveKind.CHAIN, checkpoint_digest="B[None]", is_bootstrap=True,
-                              state=tr.TIMED_OUT, state_digest="s",
+                              state=CheckpointState.TIMED_OUT.value, state_digest="s",
                               kill_disposition="SIGTERM_AFTER_DEADLINE"),
         timeout=tr.TimeoutFact(frozenset({"claimed.json", "timeout.json",
                                           "terminal-segment.json", "terminal-stream.json"}),
@@ -440,12 +442,42 @@ def test_a_complete_terminal_is_adopted_only_without_conflict():
     snapshot = _complete_timeout_snapshot()
     assert tr.next_step(snapshot).kind is tr.StepKind.ADOPT_TIMEOUT
     conflicted = replace(snapshot, error=tr.ErrorFact(
-        frozenset({"operational-error.json"}), stage=tr.STAGE_BEFORE_CHECKPOINT,
+        frozenset({"operational-error.json"}), stage=ErrorStage.BEFORE_CHECKPOINT.value,
         disposition="SIGTERM_AFTER_DEADLINE",
     ))
     step = tr.next_step(conflicted)
     assert step.kind is tr.StepKind.INVALID
     assert step.invalid_code is tr.InvalidCode.TERMINAL_AUTHORITY_CONFLICT
+
+
+def _resolved_snapshot(*, returncode: int, cli_returncode: int):
+    V = tr.Presence.VALID
+    return tr.TerminalSnapshot(
+        mode=tr.ExitMode.CANONICAL_RESULT_REQUIRED,
+        launch=tr.Fact(V, "L"), deadline=tr.Fact(),
+        child_exit=tr.ExitFact(V, "E", returncode=returncode,
+                               disposition=f"EXIT_CODE_{returncode}",
+                               envelope_sha256="env",
+                               anchor=te.CheckpointAnchor(te.ANCHOR_NONE)),
+        child_alive=False, pending=tr.PendingFact(), live=tr.LiveChainFact(),
+        timeout=tr.TimeoutFact(), error=tr.ErrorFact(), archive=tr.ArchiveFact(),
+        canonical=tr.CanonicalFact(
+            receipt=V, envelope=V, envelope_sha256="env",
+            envelope_cli_returncode=cli_returncode,
+        ),
+    )
+
+
+def test_canonical_resolved_is_adopted_only_when_the_exit_joins_the_cli_code():
+    """receipt は envelope と E から誰でも再計算できる。採用の前にも CLI join を見る。"""
+
+    assert tr.next_step(
+        _resolved_snapshot(returncode=0, cli_returncode=0)
+    ).kind is tr.StepKind.ADOPT_RESOLVED
+    step = tr.next_step(_resolved_snapshot(returncode=1, cli_returncode=0))
+    assert step.kind is tr.StepKind.INVALID
+    assert step.invalid_code is tr.InvalidCode.TERMINAL_AUTHORITY_CONFLICT
+    assert "CLI code" in step.detail
 
 
 def test_validation_precedes_conflict_and_terminal():
@@ -469,32 +501,36 @@ def test_claim_disposition_must_be_the_observed_exit():
 
 
 # ---------------------------------------------------------------------------
-# 語彙の drift（判断の module は store を import しないので、同じ値かを固定する）
+# store の file 名と progress 操作の表
 # ---------------------------------------------------------------------------
 
 
-def test_the_decision_uses_the_store_state_vocabulary():
-    from scripts.function_tracer_pcode.authority.process.supervisor import CheckpointState
+def test_store_file_names_are_spelled_only_by_their_owner():
+    """store の file 名は ``store_layout`` だけが綴る（写しと drift test を作らない）。"""
 
-    assert {tr.ACTIVE, tr.COMPLETION_READY, tr.RESOLVED, tr.TIMED_OUT_CLAIMED,
-            tr.TIMED_OUT} == {state.value for state in CheckpointState}
+    import ast
+
+    from scripts.function_tracer_pcode.authority.process import store_layout
+
+    names = {
+        value for key, value in vars(store_layout).items()
+        if key.isupper() and isinstance(value, str)
+    }
+    root = Path(__file__).resolve().parents[2] / "authority"
+    offenders = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "store_layout.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        offenders += [
+            f"{path.relative_to(root)}:{node.lineno} {node.value}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and node.value in names
+        ]
+    assert offenders == []
 
 
-def test_the_snapshot_reads_the_file_names_the_store_writes():
-    import inspect
+def test_every_progress_step_has_exactly_one_durable_operation():
+    from scripts.function_tracer_pcode.authority.process import terminal_transaction
 
-    from scripts.function_tracer_pcode.authority.process import supervisor
-    from scripts.function_tracer_pcode.authority.process import terminal_snapshot as ts
-
-    assert set(ts.TIMEOUT_MEMBER_NAMES) <= set(supervisor.CHECKPOINT_AUTHORITY_FILENAMES)
-    writer = inspect.getsource(
-        supervisor.DurableCheckpointStore._finalize_operational_error_locked
-    )
-    for name in ts.ERROR_MEMBER_NAMES:
-        assert f'"{name}"' in writer, name
-    assert set(tr.StepKind) - tr.TERMINAL_STEPS == set(
-        __import__(
-            "scripts.function_tracer_pcode.authority.process.terminal_transaction",
-            fromlist=["_EXECUTORS"],
-        )._EXECUTORS
-    )
+    assert set(tr.StepKind) - tr.TERMINAL_STEPS == set(terminal_transaction._EXECUTORS)

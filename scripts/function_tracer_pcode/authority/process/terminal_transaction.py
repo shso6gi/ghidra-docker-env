@@ -16,22 +16,28 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from scripts.function_tracer_pcode.authority.process import checkpoint_archive as archive
+from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
+    SUPERVISOR_EXIT_ERROR_KIND,
+    CheckpointState,
+    ErrorStage,
+)
 from scripts.function_tracer_pcode.authority.process import terminal_evidence as evidence
 from scripts.function_tracer_pcode.authority.process import terminal_recovery as recovery
-from scripts.function_tracer_pcode.authority.process.terminal_snapshot import (
+from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
     CANONICAL_RECEIPT_FILENAME,
     CanonicalEnvelope,
-    SnapshotContext,
     canonical_resolved_receipt,
+)
+from scripts.function_tracer_pcode.authority.process.terminal_snapshot import (
+    SnapshotContext,
     read_terminal_snapshot,
 )
 
-#: supervisor が終端として書く ERROR の種類（``SUPERVISOR_OPERATIONAL_ERROR_KINDS``）。
-SUPERVISOR_EXIT_ERROR_KIND = "operational_authority_invalid"
 
 
 @dataclass(frozen=True)
@@ -46,6 +52,14 @@ class TerminalAuthority:
     #: RESOLVED の canonical 結果と receipt。
     envelope: Optional[CanonicalEnvelope] = None
     canonical_receipt: Any = None
+
+
+@contextmanager
+def open_transaction(store: Any, ownership: Any) -> Iterator["TerminalTransaction"]:
+    """終端処理の 1 手（snapshot の再読・判定・書込み）を 1 回の flock で行う。"""
+
+    with store.owned_lock(ownership):
+        yield TerminalTransaction(store, ownership)
 
 
 class TerminalTransaction:
@@ -101,7 +115,7 @@ def _bootstrap(store: Any, step: recovery.Step, context: SnapshotContext) -> Non
     prior = (
         context.state
         if context.state is not None
-        and context.state.payload["state"] == recovery.RESOLVED
+        and context.state.payload["state"] == CheckpointState.RESOLVED
         else None
     )
     checkpoint, prefix = store.factory.issue_deadline_bootstrap_checkpoint(
@@ -166,7 +180,7 @@ def _begin_archive(store: Any, step: recovery.Step, context: SnapshotContext) ->
         resolved_state_receipt_digest=chain.resolved.receipt_digest,
         anchor_state=anchor.state,
         error_kind=SUPERVISOR_EXIT_ERROR_KIND,
-        error_stage=recovery.STAGE_NON_DECOMPILATION,
+        error_stage=ErrorStage.NON_DECOMPILATION.value,
         destination=archive.history_destination(chain.resolved.receipt_digest),
         members=tuple(members),
     )
