@@ -1314,8 +1314,12 @@ def _compose_members(
     prepared: PreparedSemanticPayload,
     members: JsonObjectBudget,
     parts: Dict[str, Any],
-) -> Tuple[str, ...]:
-    """B と C を `members` の残り予算まで準備して `parts` へ置く（切り詰めた C を返す）。"""
+) -> Tuple[Tuple[str, ...], int]:
+    """B と C を `members` の残り予算まで準備して `parts` へ置く。
+
+    切り詰めた C と、切り詰めれば空けられる byte の上限（本体を出した TRUNCATE の C の
+    member の byte の和）を返す。
+    """
 
     context = PreparationContext(prepared.options, members)
     authority = AuthorityDecisionEnvelope.prepare(result, context, prepared)
@@ -1323,7 +1327,18 @@ def _compose_members(
     for row in authority.fields + metadata.fields:
         if row.json is not None:
             parts[row.key] = row.json.value()
-    return metadata.truncated
+    freeable = 0
+    for row in metadata.fields:
+        if row.json is not None and row.shape == "json" and _TRUNCATABLE_METADATA.get(row.key):
+            freeable += members.policy.member_bytes(row.key, row.json.encoded_bytes)
+    return metadata.truncated, freeable
+
+
+#: C の field のうち、切り詰めて marker にしてよいもの（schema の `Overflow.TRUNCATE`）
+_TRUNCATABLE_METADATA = {
+    item.key: item.overflow is Overflow.TRUNCATE
+    for item in RESULT_FIELDS if item.owner is FieldOwner.METADATA
+}
 
 
 @dataclass(frozen=True)
@@ -1334,12 +1349,18 @@ class ComposedPreimage:
     payload: Dict[str, Any]
     members: JsonObjectBudget
     truncated: Tuple[str, ...]
+    #: 切り詰めてよい C を marker にすれば空けられる byte の上限（組み直しで封印が入り得る幅）
+    freeable_bytes: int = 0
 
 
 def compose_result_preimage(
-    result: Any, *, fallback_policy: Optional[BudgetPolicy] = None,
+    result: Any, *, fallback_policy: Optional[BudgetPolicy] = None, bundle_reserve: Optional[int] = None,
 ) -> ComposedPreimage:
-    """A + B + C の preimage を上限の中で組む（最終 envelope と `to_dict()` の共通の本体）。"""
+    """A + B + C の preimage を上限の中で組む（最終 envelope と `to_dict()` の共通の本体）。
+
+    `bundle_reserve` を渡すと、封印（bundle）の値の byte をその分だけ先に空けてから B / C を
+    準備する（切り詰めてよい C が先に marker になる）。
+    """
 
     prepared = prepared_payload_for(result, fallback_policy=fallback_policy)
     plan = prepared.plan
@@ -1357,8 +1378,11 @@ def compose_result_preimage(
             f"({members.total_bytes} > {limit} bytes; headroom {plan.headroom_bytes})",
             members,
         )
-    truncated = _compose_members(result, prepared, members, parts)
-    return ComposedPreimage(prepared, _ordered(parts), members, tuple(truncated))
+    if bundle_reserve is not None:
+        members.reserve(BUNDLE_KEY, bundle_reserve)
+    truncated, freeable = _compose_members(result, prepared, members, parts)
+    members.release_reservation()
+    return ComposedPreimage(prepared, _ordered(parts), members, tuple(truncated), freeable)
 
 
 def build_final_result_envelope(
@@ -1388,6 +1412,9 @@ def build_final_result_envelope(
 
     return finalize_result_envelope(
         compose_result_preimage(result, fallback_policy=fallback_policy), seal=seal,
+        recompose=lambda reserve: compose_result_preimage(
+            result, fallback_policy=fallback_policy, bundle_reserve=reserve,
+        ),
     )
 
 
@@ -1395,8 +1422,15 @@ def finalize_result_envelope(
     composed: ComposedPreimage,
     *,
     seal: Optional[Callable[[Dict[str, Any]], Mapping[str, Any]]] = None,
+    recompose: Optional[Callable[[int], ComposedPreimage]] = None,
 ) -> FinalResultEnvelope:
-    """組んだ preimage に封印を足し、契約の上限で書く（`build_final_result_envelope` の後半）。"""
+    """組んだ preimage に封印を足し、契約の上限で書く（`build_final_result_envelope` の後半）。
+
+    封印が残りに収まらず、preimage に切り詰めてよい診断（C）があれば、封印の大きさ（契約の
+    上限の中で数えた値）を先に空けて組み直し（`recompose`）、封印し直す。封印は preimage の
+    digest を持つので、preimage が変われば作り直す（大きさは preimage の中身に依らない）。
+    それでも収まらなければ出力の契約違反。
+    """
 
     prepared, preimage, members, truncated = (
         composed.prepared, composed.payload, composed.members, composed.truncated,
@@ -1408,16 +1442,38 @@ def finalize_result_envelope(
     payload = preimage
     total = preimage_bytes
     if seal is not None:
-        bundle_source = seal(preimage)
         room = members.remaining_for(BUNDLE_KEY)
         try:
-            bundle = encoding.prepare(bundle_source, max_bytes=room)
+            bundle = encoding.prepare(seal(preimage), max_bytes=room)
         except JsonBudgetExhausted as exc:
-            raise _violation(
-                f"{BUNDLE_KEY} does not fit the rest of the envelope "
-                f"(> {room} bytes after a {preimage_bytes}-byte preimage)",
-                members,
-            ) from exc
+            bundle = None
+            if recompose is not None and composed.freeable_bytes > 0:
+                # 切り詰めてよい診断が場所を取っている。封印の大きさを、組み直しで空き得る幅
+                # （残り + 切り詰められる byte）の中で数え（封印は作り直す: 生成器を読み直さない）、
+                # その分を先に空けて組み直し、新しい preimage を封印し直す
+                try:
+                    needed = encoding.prepare(
+                        seal(preimage), max_bytes=room + composed.freeable_bytes,
+                    ).encoded_bytes
+                except (JsonBudgetExhausted, JsonValueRejected):
+                    needed = None
+                if needed is not None:
+                    composed = recompose(needed)
+                    prepared, preimage, members, truncated = (
+                        composed.prepared, composed.payload, composed.members, composed.truncated,
+                    )
+                    preimage_bytes = members.total_bytes
+                    room = members.remaining_for(BUNDLE_KEY)
+                    try:
+                        bundle = encoding.prepare(seal(preimage), max_bytes=room)
+                    except JsonBudgetExhausted:
+                        bundle = None
+            if bundle is None:
+                raise _violation(
+                    f"{BUNDLE_KEY} does not fit the rest of the envelope "
+                    f"(> {room} bytes after a {preimage_bytes}-byte preimage)",
+                    members,
+                ) from exc
         except JsonValueRejected as exc:
             raise _violation(f"{BUNDLE_KEY} is not JSON: {exc}", members) from exc
         payload = dict(preimage)

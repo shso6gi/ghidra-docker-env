@@ -16,8 +16,10 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.function_tracer_pcode.checker.output_preparation import (
+    BUNDLE_KEY,
     OutputEnvelopeInvariantViolation,
     build_final_result_envelope,
+    compose_result_preimage,
     finitize_legacy_reasons,
 )
 from scripts.function_tracer_pcode.checker.unknown_reason import (
@@ -242,11 +244,43 @@ def test_the_bundle_is_inside_the_contract_and_a_bundle_past_it_is_a_violation()
         prepared,
         plan=dataclasses.replace(prepared.plan, max_bytes=natural.preimage_bytes + 10_000),
     )
+    freeable = compose_result_preimage(result).freeable_bytes
     with pytest.raises(OutputEnvelopeInvariantViolation, match="does not fit the rest of the envelope"):
         build_final_result_envelope(result, seal=huge_bundle)
-    # 残りの予算で止まる（1000 万の event を書き出さない）
-    assert len(pulled) < 200
+    # 封印は高々 2 回だけ数える（残り / 残り + 切り詰められる byte）。どちらも上限の中で止まり、
+    # 1000 万の event を書き出さない
+    event_bytes = RESULT_JSON_POLICY.measure({"event": 0, "pad": "e" * 64})
+    assert len(pulled) * event_bytes <= 2 * (10_000 + freeable) + 2 * event_bytes
     assert room > 0
+
+
+def test_a_bundle_crowded_out_by_truncatable_diagnostics_recomposes_instead_of_failing():
+    # 切り詰めてよい診断（C）が場所を取っていても、封印は ERROR にならず、診断が先に marker になる
+    result = _decided_result()
+    natural = build_final_result_envelope(result, seal=lambda _preimage: {"bundle": "small"})
+    result.diagnostics = {**(result.diagnostics or {}), "stages": {"huge": "d" * 25_000}}
+    limit = natural.total_bytes + 30_000
+    prepared = result.prepared_semantic_payload
+    result.prepared_semantic_payload = dataclasses.replace(
+        prepared, plan=dataclasses.replace(prepared.plan, max_bytes=limit, headroom_bytes=limit - 1),
+    )
+    seen = []
+
+    def bundle(preimage):
+        seen.append(preimage.get("diagnostics", {}).get("truncated"))
+        return {"sealed": "b" * 20_000}
+
+    envelope = build_final_result_envelope(result, seal=bundle)
+    assert envelope.total_bytes <= limit
+    assert envelope.payload[BUNDLE_KEY]["sealed"] == "b" * 20_000
+    assert "diagnostics" in envelope.truncated_metadata
+    # 封印し直したのは組み直した preimage（切り詰めた後の digest を持つ）
+    assert seen[0] is not True and seen[-1] is True
+    # 組み直しを外すと、同じ入力は契約違反になる（組み直しが効いていることの確認）
+    from scripts.function_tracer_pcode.checker import output_preparation
+
+    with pytest.raises(OutputEnvelopeInvariantViolation):
+        output_preparation.finalize_result_envelope(compose_result_preimage(result), seal=bundle)
 
 
 def test_the_final_encode_is_bounded_by_the_contract_not_by_the_produced_size():
@@ -446,3 +480,165 @@ def test_the_diagnostic_artifacts_draw_on_one_shared_budget(monkeypatch):
     first, second = limits[-2], limits[-1]
     # 2 つ目は 1 つ目が使った分だけ少ない上限で準備する（それぞれが全体の上限を持たない）
     assert second[0] == first[0] - first[1]
+
+
+# ---------------------------------------------------------------------------
+# yield しない仕事（`metered`）・producer の失敗・LEGACY の列
+# ---------------------------------------------------------------------------
+
+
+def _counted(values, pulled):
+    for value in values:
+        pulled.append(1)
+        yield value
+
+
+def test_recovery_actions_charge_the_records_they_skip():
+    from scripts.function_tracer_pcode.checker.unknown_reason import recovery_actions_source
+
+    # 同じ集計単位の record は最初の 1 件だけが action になる: 残りは yield されずに読み飛ばされる
+    record = make_unknown_reason("unknown", stage="S")
+    pulled = []
+    started = time.perf_counter()
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.prepare(
+            recovery_actions_source(_counted([record] * 1_000_000, pulled), primary_by_aggregation_unit=True),
+            max_bytes=10_000,
+        )
+    assert len(pulled) <= 10_001
+    assert time.perf_counter() - started < 1.0
+
+
+def test_recovery_actions_charge_the_key_they_copy_into_the_obligation_id():
+    from scripts.function_tracer_pcode.checker.unknown_reason import (
+        build_unknown_recovery_actions,
+        recovery_actions_source,
+    )
+
+    pulled = []
+
+    class _CountingList(list):
+        def __iter__(self):
+            for item in list.__iter__(self):
+                pulled.append(1)
+                yield item
+
+    inner = _CountingList(range(1_000))
+    wide = [inner] * 1_000  # 写すと 100 万要素
+    record = dataclasses.replace(
+        make_unknown_reason("return_width_bridge_missing", stage="S"), object_target_key=wide, evidence_kind="k",
+    )
+    # 登録済みの obligation を持つ reason: key を写して proof obligation id を作る経路
+    assert any(action.proof_obligation_id is not None for action in build_unknown_recovery_actions([record]))
+    pulled.clear()
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.prepare(recovery_actions_source([record]), max_bytes=10_000)
+    # 写す前に要素の数を数えて止まる（入れ子の列を 1 つも写さない）
+    assert len(pulled) < 10_000
+
+
+def test_the_final_attempt_search_and_observed_reasons_are_charged_per_attempt():
+    from scripts.function_tracer_pcode.checker.debug_trace import DebugTrace
+    from scripts.function_tracer_pcode.checker.unknown_reason import unknown_reason_counts_source
+    from scripts.function_tracer_pcode.core.json_encoding import metered
+
+    # reason の無い attempt を 100 万: 引き出す要素が無くても、探した attempt を数える
+    attempts = [SimpleNamespace(result=True, transition_reason="UNSAT", unknown_reasons=())] * 1_000_000
+    trace = DebugTrace(attempts=attempts)
+    for source in (
+        metered(lambda work: unknown_reason_counts_source(trace._final_unknown_reasons(work))),
+        metered(lambda work: unknown_reason_counts_source(trace._iter_observed_unknown_reasons(work))),
+    ):
+        started = time.perf_counter()
+        with pytest.raises(JsonBudgetExhausted):
+            RESULT_JSON_POLICY.prepare(source, max_bytes=10_000)
+        assert time.perf_counter() - started < 0.5
+
+
+def _reference_phase_usage(trace):
+    # 旧実装（phase ごとに attempt を全部辿る）と同じ値
+    phases = []
+    for phase in list(trace.known_phases) + [attempt.phase for attempt in trace.attempts]:
+        if phase not in phases:
+            phases.append(phase)
+    rows = []
+    for phase in phases:
+        mine = [attempt for attempt in trace.attempts if attempt.phase == phase]
+        counts = {key: 0 for key in ("UNSAT", "SAT", "SAT->Phase4B", "UNKNOWN", "TIMEOUT", "critical_error", "no_changes")}
+        for attempt in mine:
+            counts[attempt.transition_reason] = counts.get(attempt.transition_reason, 0) + 1
+        results = [attempt for attempt in mine if attempt.transition_reason != "no_changes"]
+        rows.append({
+            "phase": phase, "planned": phase in trace.planned_phases, "reached": bool(mine),
+            "used": bool(results), "attempt_count": len(mine), "result_attempt_count": len(results),
+            "no_change_skip_count": len(mine) - len(results), "transition_counts": counts,
+            "last_transition_reason": mine[-1].transition_reason if mine else None,
+            "last_result": mine[-1].result if mine else None,
+        })
+    return rows
+
+
+def test_phase_usage_is_one_pass_and_equals_the_per_phase_count():
+    from scripts.function_tracer_pcode.checker.debug_trace import DebugTrace
+
+    reasons = ["UNSAT", "UNKNOWN", "no_changes", "TIMEOUT"]
+    attempts = [
+        SimpleNamespace(phase=f"P{index % 40}", transition_reason=reasons[index % 4], result=None)
+        for index in range(200)
+    ]
+    trace = DebugTrace(attempts=attempts, planned_phases=["P1", "PX"], known_phases=["PX", "P3"])
+    expected = _reference_phase_usage(trace)
+    assert trace.get_phase_usage() == expected
+    assert trace.get_used_phases() == [row["phase"] for row in expected if row["used"]]
+    prepared = RESULT_JSON_POLICY.prepare(trace.phase_usage_source()).value()
+    assert prepared == RESULT_JSON_POLICY.prepare(expected).value()
+    # phase の数 × attempt の数ではなく attempt の数に比例する
+    many = DebugTrace(attempts=[
+        SimpleNamespace(phase=f"P{index % 5_000}", transition_reason="UNSAT", result=None)
+        for index in range(100_000)
+    ])
+    _, elapsed, _ = _measured(many.get_phase_usage)
+    assert elapsed < 1.0
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.prepare(many.phase_usage_source(), max_bytes=10_000)
+
+
+def test_a_producer_failure_is_a_rejected_value_not_an_escaped_exception():
+    from scripts.function_tracer_pcode.core.json_encoding import JsonValueRejected, Tally, scan
+
+    class _Broken:
+        def json_items(self):
+            yield "ok", 1
+            raise TypeError("broken producer")
+
+    with pytest.raises(JsonValueRejected, match="producer failed"):
+        RESULT_JSON_POLICY.prepare(_Broken())
+
+    def explode(_item):
+        raise ValueError("broken key")
+
+    with pytest.raises(JsonValueRejected, match="producer failed"):
+        RESULT_JSON_POLICY.prepare(scan([1, 2], Tally(explode)))
+
+
+def test_unsized_solver_rows_are_a_rejected_value_not_an_uncounted_copy():
+    from scripts.function_tracer_pcode.checker.diagnostics import TraceTimingsView
+    from scripts.function_tracer_pcode.core.json_encoding import JsonValueRejected
+
+    rows = SimpleNamespace(results=iter([SimpleNamespace(elapsed_time=1.0)] * 1_000_000))
+    attempts = [SimpleNamespace(solver_results=rows, attempt_id="a", phase="P", strategy="s", elapsed_time=0.0)]
+    result = SimpleNamespace(debug_trace=SimpleNamespace(attempts=attempts), solver_results=None)
+    with pytest.raises(JsonValueRejected, match="producer failed"):
+        RESULT_JSON_POLICY.prepare(TraceTimingsView(result), max_bytes=10_000)
+
+
+def test_finitized_requirement_ids_keep_their_legacy_dict_form():
+    ids = [{"requirement": "r", "index": 0}, {"requirement": "r" * 5_000, "index": 1}]
+    ids += [{"requirement": "q", "index": index} for index in range(EVIDENCE_REFS_MAX_COUNT + 1)]
+    record = dataclasses.replace(make_unknown_reason("unknown", stage="S"), proof_requirement_ids=ids)
+    finitized = finitize_unknown_reason_record(record, work=JsonBudget(1 << 22))
+    legacy = finitized.to_dict()["proof_requirement_ids"]
+    # mapping だけを dict にし、大きい要素（有界な証拠）と件数の marker はそのまま置く
+    assert legacy[0] == {"requirement": "r", "index": 0}
+    assert type(legacy[1]) is BoundedEvidence
+    assert legacy[-1] == "…(+3 refs)"

@@ -11,12 +11,13 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     each,
     inline,
     materialize,
+    metered,
     raw,
 )
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownReasonRecord,
     coerce_unknown_reason_records,
-    iter_unknown_recovery_actions,
+    recovery_actions_source,
     recovery_backlog_source,
     unknown_reason_counts_source,
 )
@@ -418,98 +419,54 @@ class DebugTrace:
         """実際に再解析・再判定まで進んだ Phase の一覧を返す。"""
         return list(self._iter_used_phases())
 
-    def _iter_phases(self):
-        """`known_phases` → attempt の順で、重複を除いた phase 名を 1 つずつ返す。"""
-
-        seen = set()
-        for phase in self.known_phases:
-            if phase not in seen:
-                seen.add(phase)
-                yield phase
-        for attempt in self.attempts:
-            if attempt.phase not in seen:
-                seen.add(attempt.phase)
-                yield attempt.phase
-
     def _iter_phase_usage(self):
-        """phase ごとの利用状況の行を 1 つずつ作る（行は固定の形、件数は phase の数）。
+        """phase ごとの利用状況の行（`known_phases` → attempt の初出の順）。attempt を 1 回だけ辿る。"""
 
-        Issue #22 PR-22-D: 出力の準備が行を引き出すたびにその phase の attempt を数え
-        直す。全 phase 分の表を先に作らない。
-        """
-
-        for phase in self._iter_phases():
-            yield self._phase_usage_row(phase)
+        fold = _PhaseUsageFold(self.known_phases, self.planned_phases)
+        for attempt in self.attempts:
+            fold.add(attempt)
+        return iter(fold.rows.values())
 
     def _iter_used_phases(self):
-        for phase in self._iter_phases():
-            if self._phase_usage_row(phase)["used"]:
-                yield phase
+        for row in self._iter_phase_usage():
+            if row["used"]:
+                yield row["phase"]
 
-    def _phase_usage_row(self, phase: str) -> Dict[str, Any]:
-        phase_usage: Dict[str, Any] = {
-            "phase": phase,
-            "planned": phase in self.planned_phases,
-            "reached": False,
-            "used": False,
-            "attempt_count": 0,
-            "result_attempt_count": 0,
-            "no_change_skip_count": 0,
-            "transition_counts": {
-                TransitionReason.UNSAT.value: 0,
-                TransitionReason.SAT.value: 0,
-                TransitionReason.SAT_PHASE4B.value: 0,
-                TransitionReason.UNKNOWN.value: 0,
-                TransitionReason.TIMEOUT.value: 0,
-                TransitionReason.CRITICAL_ERROR.value: 0,
-                TransitionReason.NO_CHANGES.value: 0,
-            },
-            "last_transition_reason": None,
-            "last_result": None,
-        }
-        for attempt in self.attempts:
-            if attempt.phase != phase:
-                continue
-            phase_usage["reached"] = True
-            phase_usage["attempt_count"] += 1
-            transition_counts = phase_usage["transition_counts"]
-            transition_counts[attempt.transition_reason] = (
-                transition_counts.get(attempt.transition_reason, 0) + 1
-            )
-            if attempt.transition_reason == TransitionReason.NO_CHANGES.value:
-                phase_usage["no_change_skip_count"] += 1
-            else:
-                phase_usage["result_attempt_count"] += 1
-                phase_usage["used"] = True
-            phase_usage["last_transition_reason"] = attempt.transition_reason
-            phase_usage["last_result"] = attempt.result
-        return phase_usage
+    def phase_usage_source(self, *, used_only: bool = False):
+        """出力の準備用: walker が attempt を 1 つずつ数えながら phase の行へ畳み込む（`scan`）。"""
+
+        from scripts.function_tracer_pcode.core.json_encoding import scan
+
+        return scan(self.attempts, _PhaseUsageFold(self.known_phases, self.planned_phases, used_only=used_only))
 
     def format_phase_usage_summary(self) -> str:
         """人間向けの Phase 利用状況サマリを返す。"""
         return format_phase_usage_rows(self.get_phase_usage())
 
-    def _observed_unknown_reasons(self) -> List[UnknownReasonRecord]:
-        return [
-            reason
-            for attempt in self.attempts
-            for reason in getattr(attempt, "unknown_reasons", []) or []
-        ]
+    def _iter_observed_unknown_reasons(self, work: Any):
+        """attempt ごとの reason を順に引き出す（attempt 1 つごとに `work` へ数える）。"""
 
-    def _final_unknown_reasons(self) -> List[UnknownReasonRecord]:
+        for attempt in self.attempts:
+            work.charge(1)
+            yield from getattr(attempt, "unknown_reasons", None) or ()
+
+    def _final_unknown_reasons(self, work: Any) -> Any:
+        """最後の UNKNOWN / TIMEOUT の attempt の reason（写さない。探した attempt を `work` へ数える）。"""
+
         if self.final_result is not None:
-            return []
+            return ()
         final_transition_reasons = {
             TransitionReason.UNKNOWN.value,
             TransitionReason.TIMEOUT.value,
         }
         for attempt in reversed(self.attempts):
+            work.charge(1)
             if (
                 attempt.result is None
                 and attempt.transition_reason in final_transition_reasons
             ):
-                return list(getattr(attempt, "unknown_reasons", []) or [])
-        return []
+                return getattr(attempt, "unknown_reasons", None) or ()
+        return ()
 
     def json_items(self):
         """結果 JSON での表現（**唯一の schema**）。
@@ -524,28 +481,27 @@ class DebugTrace:
         yield "reason_completion_events", each(self.reason_completion_events)
         yield "planned_phases", self.planned_phases
         yield "known_phases", self.known_phases
-        yield "used_phases", each(self._iter_used_phases())
-        yield "phase_usage", each(self._iter_phase_usage())
-        yield "unknown_reason_counts", unknown_reason_counts_source(
-            self._final_unknown_reasons(), primary_by_aggregation_unit=True,
-        )
-        yield "observed_unknown_reason_counts", unknown_reason_counts_source(
-            self._observed_unknown_reasons()
-        )
-        yield "unknown_recovery_backlog", recovery_backlog_source(
-            self._final_unknown_reasons(), primary_by_aggregation_unit=True,
-        )
-        yield "unknown_recovery_actions", each(
-            iter_unknown_recovery_actions(
-                self._final_unknown_reasons(), primary_by_aggregation_unit=True,
-            )
-        )
-        yield "observed_unknown_recovery_backlog", recovery_backlog_source(
-            self._observed_unknown_reasons()
-        )
-        yield "observed_unknown_recovery_actions", each(
-            iter_unknown_recovery_actions(self._observed_unknown_reasons())
-        )
+        yield "used_phases", self.phase_usage_source(used_only=True)
+        yield "phase_usage", self.phase_usage_source()
+        # reason の列を探す・辿る仕事は walk の作業量へ数える（`metered`）
+        yield "unknown_reason_counts", metered(lambda work: unknown_reason_counts_source(
+            self._final_unknown_reasons(work), primary_by_aggregation_unit=True,
+        ))
+        yield "observed_unknown_reason_counts", metered(lambda work: unknown_reason_counts_source(
+            self._iter_observed_unknown_reasons(work),
+        ))
+        yield "unknown_recovery_backlog", metered(lambda work: recovery_backlog_source(
+            self._final_unknown_reasons(work), primary_by_aggregation_unit=True,
+        ))
+        yield "unknown_recovery_actions", metered(lambda work: recovery_actions_source(
+            self._final_unknown_reasons(work), primary_by_aggregation_unit=True,
+        ))
+        yield "observed_unknown_recovery_backlog", metered(lambda work: recovery_backlog_source(
+            self._iter_observed_unknown_reasons(work),
+        ))
+        yield "observed_unknown_recovery_actions", metered(lambda work: recovery_actions_source(
+            self._iter_observed_unknown_reasons(work),
+        ))
         yield "final_result", self.final_result
         yield "total_time", self.total_time
         yield "error_message", self.error_message
@@ -555,6 +511,73 @@ class DebugTrace:
         return materialize(self)
 
     
+
+
+
+class _PhaseUsageFold:
+    """phase ごとの利用状況の行へ attempt を 1 つずつ畳み込む（`scan` の reducer を兼ねる）。
+
+    行は `known_phases` → attempt の初出の順（行の数は phase の数）。`used_only` は実際に
+    再解析・再判定まで進んだ phase の名前だけを返す。
+    """
+
+    __slots__ = ("rows", "planned", "used_only")
+
+    def __init__(self, known_phases: Any, planned_phases: Any, *, used_only: bool = False) -> None:
+        self.planned = planned_phases
+        self.used_only = used_only
+        self.rows: Dict[str, Dict[str, Any]] = {}
+        for phase in known_phases:
+            self._row(phase)
+
+    def _row(self, phase: str) -> Dict[str, Any]:
+        row = self.rows.get(phase)
+        if row is None:
+            row = self.rows[phase] = {
+                "phase": phase,
+                "planned": phase in self.planned,
+                "reached": False,
+                "used": False,
+                "attempt_count": 0,
+                "result_attempt_count": 0,
+                "no_change_skip_count": 0,
+                "transition_counts": {
+                    TransitionReason.UNSAT.value: 0,
+                    TransitionReason.SAT.value: 0,
+                    TransitionReason.SAT_PHASE4B.value: 0,
+                    TransitionReason.UNKNOWN.value: 0,
+                    TransitionReason.TIMEOUT.value: 0,
+                    TransitionReason.CRITICAL_ERROR.value: 0,
+                    TransitionReason.NO_CHANGES.value: 0,
+                },
+                "last_transition_reason": None,
+                "last_result": None,
+            }
+        return row
+
+    def cost(self, attempt: Any) -> int:
+        return 0
+
+    def add(self, attempt: Any) -> None:
+        row = self._row(attempt.phase)
+        row["reached"] = True
+        row["attempt_count"] += 1
+        transition_counts = row["transition_counts"]
+        transition_counts[attempt.transition_reason] = transition_counts.get(attempt.transition_reason, 0) + 1
+        if attempt.transition_reason == TransitionReason.NO_CHANGES.value:
+            row["no_change_skip_count"] += 1
+        else:
+            row["result_attempt_count"] += 1
+            row["used"] = True
+        row["last_transition_reason"] = attempt.transition_reason
+        row["last_result"] = attempt.result
+
+    def result(self) -> Any:
+        from scripts.function_tracer_pcode.core.json_encoding import each
+
+        if self.used_only:
+            return each(phase for phase, row in self.rows.items() if row["used"])
+        return each(iter(self.rows.values()))
 
 
 def format_phase_usage_rows(usage: Any) -> str:

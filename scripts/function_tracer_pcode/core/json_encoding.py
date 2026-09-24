@@ -170,6 +170,13 @@ class _Scan(_Source):
         self.reducer = reducer
 
 
+class _Metered(_Source):
+    __slots__ = ("factory",)
+
+    def __init__(self, factory: Callable[[Any], Any]) -> None:
+        self.factory = factory
+
+
 #: 要素をそのまま置く（LEGACY: 旧 `list(x)` / `dict(x)` の要素。CANONICAL では通常どおり）
 _RAW = object()
 #: 要素を `nested` の規則で写す
@@ -284,14 +291,26 @@ def text(value: Any, max_chars: int) -> _Source:
 def scan(values: Any, reducer: Any) -> _Source:
     """集計（件数・group by）: walker が `values` を 1 要素ずつ引き出して `reducer` へ渡す。
 
-    `reducer.add(element)` は要素 1 つを畳み込み、要素の中で辿った追加の作業量（0 以上の
-    整数）を返す。walker は要素 1 つごとに `1 + 追加分` を作業量（`effort`）へ数えてから次を
-    引き出し、使い切れば **その walk の予算の超過** にする（集計は途中で止めると値が変わる
-    ので marker / 限界 / 契約違反は field の規則どおり）。引き出し終えたら
-    `reducer.result()`（source）を辿る。集計の producer は入力全体を先に辿らない。
+    reducer は 3 つの method を持つ: `cost(element)`（要素 1 つを畳むときに辿る量。O(1) で
+    分かる値、例えば要素の中の列の長さ）、`add(element)`（畳み込む）、`result()`（source）。
+    walker は要素 1 つごとに `1 + cost` を作業量（`effort`）へ数えて **から** 畳み込み、
+    使い切れば **その walk の予算の超過** にする（集計は途中で止めると値が変わるので marker /
+    限界 / 契約違反は field の規則どおり）。集計の producer は入力全体を先に辿らない。
     """
 
     return _Scan(values, reducer)
+
+
+def metered(factory: Callable[[Any], Any]) -> _Source:
+    """walk の作業量（`effort`）を受け取って source を作る producer（`factory(work)`）。
+
+    要素を yield する **前** に入力に比例する仕事（読み飛ばす record・最後の attempt を探す
+    走査・key の写し）をする producer は、その仕事を `work.charge` へ数えながら行う。walker が
+    要素を引き出すたびに数える分（1 要素 1 以上）だけでは、yield しない仕事が数えられない。
+    `work` を使い切れば **その walk の予算の超過**（`scan` と同じ）。
+    """
+
+    return _Metered(factory)
 
 
 class Tally:
@@ -303,10 +322,12 @@ class Tally:
         self.key = key
         self.counts: Dict[Any, int] = {}
 
-    def add(self, element: Any) -> int:
+    def cost(self, element: Any) -> int:
+        return 0
+
+    def add(self, element: Any) -> None:
         key = self.key(element)
         self.counts[key] = self.counts.get(key, 0) + 1
-        return 0
 
     def result(self) -> Any:
         return pairs_of(iter(self.counts.items()))
@@ -1197,6 +1218,11 @@ class _NoneKeys:
 _NONE_KEYS = _NoneKeys()
 
 
+#: producer（`json_items`・集計の reducer・その helper）が値の不備で上げる例外。walker は
+#: これを `JsonValueRejected`（その値は JSON にならない）に変える
+_PRODUCER_FAILURES = (TypeError, ValueError, AttributeError, LookupError)
+
+
 class _NotPlain(Exception):
     """純粋なデータ（容器と基底型だけ）の高速経路が扱えない値に出会った。"""
 
@@ -1700,15 +1726,24 @@ class _Walk:
             try:
                 for element in (item.values if item.values is not None else ()):
                     # 引き出した要素を畳み込む前に数える（上限を超えれば残りを引き出さない）
-                    self.effort.charge(1)
-                    extra = reducer.add(element)
-                    if extra:
-                        self.effort.charge(int(extra))
+                    self.effort.charge(1 + int(reducer.cost(element)))
+                    reducer.add(element)
+            except _PRODUCER_FAILURES as exc:
+                self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
             except JsonBudgetExhausted:
                 # 集計を途中で止めた値は別の値: この walk の予算の超過として扱う
                 self.budget.exceeded()
                 raise
             self.enter(reducer.result(), parent, key, build)
+        elif kind is _Metered:
+            try:
+                produced = item.factory(self.effort)
+            except _PRODUCER_FAILURES as exc:
+                self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
+            except JsonBudgetExhausted:
+                self.budget.exceeded()
+                raise
+            self.enter(produced, parent, key, build)
         else:  # pragma: no cover - 文法の追加漏れ
             self.reject(f"unknown source {kind.__qualname__}")
 
@@ -1771,6 +1806,14 @@ class _Walk:
             frame = stack[-1]
             try:
                 child = next(frame.iterator)
+            except _PRODUCER_FAILURES as exc:
+                # producer（`json_items` とその helper）の失敗は、その値が JSON にならないこと
+                # （field の規則どおり: 診断は marker、準備する意味の値は内部エラー）
+                self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
+            except JsonBudgetExhausted:
+                # producer が引き出しの中で作業量（`metered`）を使い切った: この walk の予算の超過
+                self.budget.exceeded()
+                raise
             except StopIteration:
                 stack.pop()
                 if frame.source_id is not None:
@@ -1831,6 +1874,9 @@ class JsonObjectBudget:
         self.max_bytes = max_bytes
         self._count = 0
         self._members = 0
+        #: 後で足す member のために空けておく byte（`reserve`。`remaining_for` が差し引く）
+        self._reserved_count = 0
+        self._reserved_bytes = 0
 
     @property
     def total_bytes(self) -> int:
@@ -1850,7 +1896,23 @@ class JsonObjectBudget:
     def remaining_for(self, key: Any) -> Optional[int]:
         if self.max_bytes is None:
             return None
-        return self.max_bytes - self.total_bytes - self.added_bytes(key, 0)
+        count = self._count + self._reserved_count
+        total = self.policy.container_frame_bytes(count) + self._members + self._reserved_bytes
+        added = (
+            self.policy.container_frame_bytes(count + 1) - self.policy.container_frame_bytes(count)
+            + self.policy.member_bytes(key, 0)
+        )
+        return self.max_bytes - total - added
+
+    def reserve(self, key: Any, value_bytes: int) -> None:
+        """後で `key` に `value_bytes` の値を足すための byte を空けておく（他の member の残りから引く）。"""
+
+        self._reserved_count = 1
+        self._reserved_bytes = self.policy.member_bytes(key, value_bytes)
+
+    def release_reservation(self) -> None:
+        self._reserved_count = 0
+        self._reserved_bytes = 0
 
     def add(self, key: Any, value_bytes: int) -> None:
         self._members += self.policy.member_bytes(key, value_bytes)
@@ -1959,6 +2021,7 @@ __all__ = [
     "row_items",
     "row_max_bytes",
     "row_min_bytes",
+    "metered",
     "scan",
     "max_rows_within",
     "scalar_record_dict",

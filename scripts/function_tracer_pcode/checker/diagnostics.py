@@ -546,11 +546,17 @@ class AnalysisTimer:
             return {"error": f"{type(exc).__name__}: {exc}"[:200]}
 
 
-def _solver_rows(container: Any) -> Iterable[Any]:
+def _solver_rows(container: Any) -> Any:
     results = getattr(container, "results", None)
     if results is None and isinstance(container, Mapping):
         results = container.get("results") or container.get("all_results")
-    return tuple(results or ())
+    if results is None:
+        return ()
+    # 列はそのまま返す（写さない）。長さの分からない列は、数える前に辿ることになるので
+    # producer の不備（walker が JSON にならない値として扱う）
+    if not hasattr(results, "__len__"):
+        raise TypeError(f"solver results {type(results).__name__} have no length")
+    return results
 
 
 def _elapsed(row: Any) -> float:
@@ -586,17 +592,18 @@ def result_diagnostics_payload(result: Any, *, lazy: bool = False) -> Any:
 
 
 def _attempt_rows(attempts: Any) -> Iterable[Any]:
-    from scripts.function_tracer_pcode.core.json_encoding import inline
+    from scripts.function_tracer_pcode.core.json_encoding import inline, scan
 
     for attempt in attempts:
-        rows = _solver_rows(getattr(attempt, "solver_results", None))
+        container = getattr(attempt, "solver_results", None)
+        # 行の合計・件数は walker が行の数を数えてから畳み込む（`_SolverTotals`）
         yield inline(
             ("attempt_id", getattr(attempt, "attempt_id", None)),
             ("phase", getattr(attempt, "phase", None)),
             ("strategy", getattr(attempt, "strategy", None)),
             ("elapsed_seconds", getattr(attempt, "elapsed_time", None)),
-            ("solver_seconds", round(sum(_elapsed(row) for row in rows), 6)),
-            ("solver_invocations", len(rows)),
+            ("solver_seconds", scan((container,), _SolverTotals("seconds"))),
+            ("solver_invocations", scan((container,), _SolverTotals("invocations"))),
         )
 
 
@@ -630,12 +637,15 @@ class TraceTimingsView:
         yield "solver_invocations", scan(self._solver_containers(), _SolverTotals("invocations"))
         yield "attempts", each(_attempt_rows(self._attempts))
         # 人向けの text の phase 利用状況（debug trace を出力へ添付しないときも使う）
-        phase_usage = getattr(self._trace, "_iter_phase_usage", None)
-        yield "phase_usage", None if phase_usage is None else each(phase_usage())
+        phase_usage = getattr(self._trace, "phase_usage_source", None)
+        yield "phase_usage", None if phase_usage is None else phase_usage()
 
 
 class _SolverTotals:
-    """`scan` の reducer: solver の行の秒の合計（`seconds`）か件数（`invocations`）。"""
+    """`scan` の reducer: solver 結果の容器（1 要素 = 1 容器）の行の秒の合計（`seconds`）か件数（`invocations`）。
+
+    畳む前に容器の行の数（`cost`、O(1)）を数えさせる。
+    """
 
     __slots__ = ("what", "seconds", "invocations")
 
@@ -644,12 +654,14 @@ class _SolverTotals:
         self.seconds = 0.0
         self.invocations = 0
 
-    def add(self, container: Any) -> int:
+    def cost(self, container: Any) -> int:
+        return len(_solver_rows(container))
+
+    def add(self, container: Any) -> None:
         rows = _solver_rows(container)
         for row in rows:
             self.seconds += _elapsed(row)
         self.invocations += len(rows)
-        return len(rows)
 
     def result(self) -> Any:
         return round(self.seconds, 6) if self.what == "seconds" else self.invocations

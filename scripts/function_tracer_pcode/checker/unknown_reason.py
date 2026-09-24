@@ -79,7 +79,13 @@ def _optional_dict(value: Any) -> Any:
 
 
 def _dict_items(values: Any) -> Any:
-    return each(values, as_dict)
+    # 有界化した後の列は mapping のほかに `BoundedEvidence`（大きい要素）と件数の marker（文字列）
+    # を持つ。mapping だけを旧 `to_dict` と同じく dict にし、それ以外はそのまま置く
+    return each(values, _dict_item)
+
+
+def _dict_item(value: Any) -> Any:
+    return as_dict(value) if isinstance(value, Mapping) else value
 
 
 UNKNOWN_RECOVERY_ACTION_ROW = (
@@ -998,12 +1004,57 @@ def iter_unknown_recovery_actions(
     *,
     primary_by_aggregation_unit: bool = False,
 ):
-    """`build_unknown_recovery_actions` と同じ action を 1 つずつ作る（出力の準備が引き出す）。"""
+    """`build_unknown_recovery_actions` と同じ action を 1 つずつ作る（producer 時点の構築）。
 
-    records = coerce_unknown_reason_records(values)
-    if primary_by_aggregation_unit:
-        records = _select_primary_records_by_aggregation_unit(records)
-    for record in records:
+    出力の準備は `recovery_actions_source`（walk の作業量へ数える）を使う。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
+
+    # producer 時点（出力の前）の構築: 出力の行数は finitize が判定の前に schema と比べる
+    return _iter_recovery_actions(values, primary_by_aggregation_unit=primary_by_aggregation_unit, work=JsonBudget(None))
+
+
+def recovery_actions_source(
+    values: Optional[Iterable[Any]],
+    *,
+    primary_by_aggregation_unit: bool = False,
+) -> Any:
+    """出力の準備用: `build_unknown_recovery_actions` と同じ action の列（walk の作業量へ数える）。
+
+    読み飛ばす record・obligation・proof obligation id の key の写しを、作る **前** に walk の
+    作業量へ数える（`metered`）。walker が action を引き出すたびの勘定だけでは、yield しない
+    record の仕事が数えられない。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import each, metered
+
+    return metered(lambda work: each(_iter_recovery_actions(
+        values, primary_by_aggregation_unit=primary_by_aggregation_unit, work=work,
+    )))
+
+
+def _key_width(value: Any, work: Any) -> None:
+    """`build_proof_obligation_id` が写す key（入れ子の list / tuple）の要素を、写す前に数える。"""
+
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, (list, tuple)):
+            work.charge(len(item) + 1)
+            pending.extend(child for child in item if isinstance(child, list))
+        else:
+            work.charge(1)
+
+
+def _iter_recovery_actions(values: Optional[Iterable[Any]], *, primary_by_aggregation_unit: bool, work: Any):
+    primary = _PrimaryFilter() if primary_by_aggregation_unit else None
+    for value in values or ():
+        # 読み飛ばす record も 1 件ずつ数える
+        work.charge(1)
+        record = coerce_unknown_reason_record(value)
+        if primary is not None and not primary.admit(record):
+            continue
         obligations = record.recovery_proof_obligations
         if not obligations:
             plan = get_unknown_recovery_plan(record.reason_id)
@@ -1035,6 +1086,7 @@ def iter_unknown_recovery_actions(
             )
             continue
         for obligation in obligations:
+            work.charge(1)
             proof_stage = record.proof_stage or obligation.proof_stage
             if (
                 record.proof_stage is not None
@@ -1055,6 +1107,7 @@ def iter_unknown_recovery_actions(
                 and evidence_kind is not None
                 and record.object_target_key is not None
             ):
+                _key_width(record.object_target_key, work)
                 proof_obligation_id = build_proof_obligation_id(
                     record.reason_id,
                     proof_stage,
@@ -1201,12 +1254,14 @@ class _ReasonCounts:
         self.primary = _PrimaryFilter() if primary_by_aggregation_unit else None
         self.counts: Dict[str, int] = {}
 
-    def add(self, value: Any) -> int:
+    def cost(self, value: Any) -> int:
+        return 0
+
+    def add(self, value: Any) -> None:
         record = coerce_unknown_reason_record(value)
         if self.primary is not None and not self.primary.admit(record):
-            return 0
+            return
         self.counts[record.reason_id] = self.counts.get(record.reason_id, 0) + 1
-        return 0
 
     def result(self) -> Any:
         from scripts.function_tracer_pcode.core.json_encoding import pairs_of
@@ -1256,7 +1311,7 @@ class _BacklogEntryView:
         self._distinct: List[Any] = []
         self._distinct_keys: set = set()
 
-    def add(self, record: UnknownReasonRecord) -> int:
+    def add(self, record: UnknownReasonRecord) -> None:
         if self.count == 0:
             self.target_regression = record.target_regression
             self.recovery_proof_kind = record.recovery_proof_kind
@@ -1269,15 +1324,12 @@ class _BacklogEntryView:
             ):
                 self.recovery_proof_kind = record.recovery_proof_kind
         self.count += 1
-        visited = 0
         for obligation in record.recovery_proof_obligations:
-            visited += 1
             self._kind_counts[obligation.proof_kind] = self._kind_counts.get(obligation.proof_kind, 0) + 1
             key = (obligation.proof_kind, obligation.proof_stage)
             if key not in self._distinct_keys:
                 self._distinct_keys.add(key)
                 self._distinct.append(obligation)
-        return visited
 
     @property
     def proof_obligation_counts(self) -> Any:
@@ -1304,14 +1356,24 @@ class _RecoveryBacklog:
         self.primary = _PrimaryFilter() if primary_by_aggregation_unit else None
         self.entries: Dict[str, _BacklogEntryView] = {}
 
-    def add(self, value: Any) -> int:
+    def cost(self, value: Any) -> int:
+        # 畳み込むときに辿る obligation の数（列の長さなので O(1)）
+        obligations = getattr(value, "recovery_proof_obligations", None)
+        if obligations is None and isinstance(value, Mapping):
+            obligations = value.get("recovery_proof_obligations")
+        try:
+            return len(obligations or ())
+        except TypeError:
+            return 0
+
+    def add(self, value: Any) -> None:
         record = coerce_unknown_reason_record(value)
         if self.primary is not None and not self.primary.admit(record):
-            return 0
+            return
         entry = self.entries.get(record.reason_id)
         if entry is None:
             entry = self.entries[record.reason_id] = _BacklogEntryView()
-        return entry.add(record)
+        entry.add(record)
 
     def result(self) -> Any:
         from scripts.function_tracer_pcode.core.json_encoding import pairs_of

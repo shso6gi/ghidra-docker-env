@@ -2153,6 +2153,9 @@ _REGISTERED_UNBOUNDED_BUDGETS = {
     ("core/json_encoding.py", "_canonical_copy_uncounted"): "`tree()` が作る前に数え済みの木の canonical な複製",
     ("core/budget_policy.py", "<module>"): "予算を無効にした policy（`FT_*` で制限だけを外す。構造は同じ）",
     ("checker/cause_aggregate.py", "reason_detail_key"): "作業量の scope の外（部品単体の呼び出し）だけ",
+    ("checker/unknown_reason.py", "iter_unknown_recovery_actions"):
+        "producer 時点（出力の前）の構築。出力の行数は finitize が判定の前に schema と比べ、出力は "
+        "`recovery_actions_source` が walk の作業量へ数える",
 }
 
 

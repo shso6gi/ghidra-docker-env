@@ -32,7 +32,7 @@ CHECKER_OWNED = (
     "LEGACY_REASON_EVIDENCE_ROW", "LegacyReasonEvidence",
     "MATCH_EXACT", "MATCH_FINGERPRINT", "MATCH_UNIQUE", "bounded_prefix", "projection_diagnostic_work",
     "finitize_unknown_reason_record", "finitize_unknown_recovery_action",
-    "iter_unknown_recovery_actions", "unknown_reason_counts_source", "recovery_backlog_source",
+    "iter_unknown_recovery_actions", "recovery_actions_source", "unknown_reason_counts_source", "recovery_backlog_source",
     "EVIDENCE_REF_MAX_CHARS", "EVIDENCE_REFS_MAX_COUNT", "PROJECTION_DIAGNOSTIC_LEGACY_ROWS",
     "TYPED_CAUSE_KEY_INLINE_BYTES",
 )
