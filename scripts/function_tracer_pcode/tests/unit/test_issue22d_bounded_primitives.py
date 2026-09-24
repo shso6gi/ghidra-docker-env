@@ -1318,3 +1318,37 @@ def test_fields_of_an_exclusive_output_group_never_appear_together(monkeypatch):
     # 片方だけなら収まる
     result.conditional_decision_receipt = None
     assert build_final_result_envelope(result).payload["superseded_decision_receipt"]
+
+
+def test_an_expensive_reducer_is_stopped_by_the_walk_it_charges():
+    from scripts.function_tracer_pcode.core.json_encoding import Reducer, scan
+
+    touched = []
+
+    class _Heavy(Reducer):
+        # 要素 1 つで 1 万要素を辿る reducer: 辿る前に同じ作業量へ数える
+        def add(self, element, *, work):
+            work.charge(10_000)
+            touched.append(element)
+
+        def result(self, *, work):
+            return len(touched)
+
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.prepare(scan(iter(range(1_000_000)), _Heavy()), max_bytes=100_000)
+    assert len(touched) <= 10
+
+
+def test_a_huge_tuple_key_is_charged_before_it_is_stringified():
+    from scripts.function_tracer_pcode.core.json_encoding import mapping_of
+
+    key = tuple(range(2_000_000))
+    started = time.perf_counter()
+    _, _, peak = _measured(
+        lambda: pytest.raises(JsonBudgetExhausted, RESULT_JSON_POLICY.prepare, mapping_of({key: 1}, stringify_keys=True), max_bytes=1_000)
+    )
+    assert time.perf_counter() - started < 0.5 and peak < 8 * 1024 * 1024
+    # scalar の key と scalar だけの tuple は従来どおり `str(key)`、`__str__` を持つ object は拒む
+    assert RESULT_JSON_POLICY.prepare(mapping_of({1: "a", (2, "x"): "b"}, stringify_keys=True)).value() == {
+        "1": "a", "(2, 'x')": "b",
+    }

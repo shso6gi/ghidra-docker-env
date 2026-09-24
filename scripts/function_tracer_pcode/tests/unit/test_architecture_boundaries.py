@@ -2552,3 +2552,218 @@ def test_j10_unbounded_walks_happen_only_at_registered_sites():
             ):
                 found.add((relative, qualname))
     assert found == set(_REGISTERED_UNBOUNDED_WALKS), found ^ set(_REGISTERED_UNBOUNDED_WALKS)
+
+
+# ---------------------------------------------------------------------------
+# Issue #22 PR-22-D（5 回目）: bounded path から呼べる callback を protocol に限る
+# ---------------------------------------------------------------------------
+#
+# J11 walker が要素ごとに呼ぶ変換（`each` / `mapping_of` の `fn`、`Column(legacy=)`）は登録した
+#     source converter（`@source_converter`、または `source_converter(lambda ...)`）だけ。
+#     converter の本体は表現を先に作らない（J1 と同じ規則）
+# J12 `scan` の reducer は `Reducer` の subclass で、`add` / `result` は作業量（`work`）を
+#     keyword-only で受け取る。`cost` のような「呼ぶ側が O(1) にする約束」の callback は持たない
+# J13 identity key（`stable_key()` / `to_key()`）を呼ぶのは `identity_key_of` だけ。PR-22-D の
+#     module と関数から `to_authority_dict()` を呼ばない（固定の形の要約は `register_fixed_canonical`）
+# J14 最終 envelope の封印を作るのは `AuthoritySeal` だけ（production の subclass を作らない）
+# J15 有界な証拠の identity は文字列（callable を受けない）
+# J16 作業量（`JsonBudget`）を作ってよい場所は登録した場所だけ（helper が親の作業量から逃れる
+#     新しい予算を作らない）
+
+_SOURCE_CONSTRUCTORS = frozenset({
+    "each", "nested", "as_list", "as_dict", "mapping_of", "pairs_of", "inline", "raw", "text", "evidence",
+})
+
+
+def _decorated_converters() -> Set[str]:
+    names = set()
+    for path in _module_files():
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.FunctionDef) and any(
+                (isinstance(d, ast.Name) and d.id == "source_converter") for d in node.decorator_list
+            ):
+                names.add(node.name)
+    return names
+
+
+def _callback_arguments(tree: ast.AST):
+    """(行, 呼び出し名, callback の式) を返す（each / mapping_of の 2 番目、Column の legacy=）。"""
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else (func.attr if isinstance(func, ast.Attribute) else None)
+        if name in {"each", "mapping_of"} and len(node.args) >= 2:
+            yield node.lineno, name, node.args[1]
+        if name == "Column":
+            for keyword in node.keywords:
+                if keyword.arg == "legacy":
+                    yield node.lineno, name, keyword.value
+
+
+def test_j11_walker_callbacks_are_registered_source_converters():
+    converters = _decorated_converters() | _SOURCE_CONSTRUCTORS
+    offenders = []
+    for path in _module_files():
+        relative = _relative(path)
+        for lineno, name, callback in _callback_arguments(_parse(path)):
+            if isinstance(callback, ast.Constant) and callback.value is None:
+                continue
+            if isinstance(callback, (ast.Name, ast.Attribute)):
+                label = callback.id if isinstance(callback, ast.Name) else callback.attr
+                if label in converters or label in {"_RAW", "_NESTED"}:
+                    continue
+            if (
+                isinstance(callback, ast.Call) and getattr(callback.func, "id", None) == "source_converter"
+                and callback.args and isinstance(callback.args[0], ast.Lambda)
+                and not _eager_constructions(callback.args[0])
+            ):
+                continue
+            offenders.append(f"{relative}:{lineno} {name}({ast.unparse(callback)[:60]})")
+    assert offenders == [], offenders
+
+
+def test_j11_source_converters_do_not_build_the_representation():
+    offenders = []
+    for path in _module_files():
+        relative = _relative(path)
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.FunctionDef) and any(
+                isinstance(d, ast.Name) and d.id == "source_converter" for d in node.decorator_list
+            ):
+                found = _eager_constructions(node)
+                if found:
+                    offenders.append(f"{relative}:{node.name} {found[:4]}")
+    assert offenders == [], offenders
+
+
+def test_j11_the_walker_refuses_unregistered_callbacks_at_construction():
+    from scripts.function_tracer_pcode.core.json_encoding import Column, TEXT, each, evidence, mapping_of
+
+    def plain(value):
+        return value
+
+    for construct in (
+        lambda: each([1], plain),
+        lambda: mapping_of({}, plain),
+        lambda: Column("k", TEXT, 8, legacy=plain),
+        lambda: evidence((1,), identity=lambda _value: "x"),
+    ):
+        with pytest.raises(TypeError):
+            construct()
+
+
+def _reducer_classes():
+    for path in _module_files():
+        relative = _relative(path)
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.ClassDef) and any(
+                (isinstance(base, ast.Name) and base.id == "Reducer") for base in node.bases
+            ):
+                yield relative, node
+
+
+def test_j12_reducers_receive_the_work_and_declare_no_cost_callback():
+    found = 0
+    offenders = []
+    for relative, node in _reducer_classes():
+        found += 1
+        methods = {item.name: item for item in node.body if isinstance(item, ast.FunctionDef)}
+        if "cost" in methods:
+            offenders.append(f"{relative}:{node.name}.cost")
+        for name in ("add", "result"):
+            method = methods.get(name)
+            if method is None or "work" not in {arg.arg for arg in method.args.kwonlyargs}:
+                offenders.append(f"{relative}:{node.name}.{name} does not take keyword-only work")
+    assert found >= 5 and offenders == [], offenders
+
+
+def test_j12_scan_refuses_anything_but_a_reducer():
+    from scripts.function_tracer_pcode.core.json_encoding import Tally, scan
+
+    class _Duck:
+        def add(self, element, *, work):
+            pass
+
+        def result(self, *, work):
+            return 0
+
+    with pytest.raises(TypeError):
+        scan([1], _Duck())
+    with pytest.raises(TypeError):
+        Tally(lambda element: element)
+
+
+def test_j13_identity_keys_and_authority_producers_have_one_caller():
+    offenders = []
+    # `ExpansionBudgetTruncation.event_id` は identity の digest（owner #194。producer 時点で作って
+    # cache し、出力の `json_items` は cache を読む）: 出力の側（`json_items`）だけを対象にする
+    targets = list(_j5_targets()) + [("proof/obligations/snapshot.py", None), ("core/runtime_refs/unknowns.py", {
+        "_canonical_budget_value_within", "_canonical_budget_source",
+    })]
+    for relative, names in targets:
+        for qualname, name, lineno, call in _qualified_calls(PACKAGE_ROOT / relative, names):
+            if name in {"stable_key", "to_key"} and qualname != "identity_key_of":
+                offenders.append(f"{relative}:{lineno} {qualname} calls {name}()")
+            if name == "to_authority_dict":
+                offenders.append(f"{relative}:{lineno} {qualname} calls to_authority_dict()")
+    assert offenders == [], offenders
+    from scripts.function_tracer_pcode.core import canonical_digest
+    from scripts.function_tracer_pcode.core.json_encoding import BoundedEvidence
+
+    assert set(canonical_digest._FIXED_CANONICAL) == {BoundedEvidence}
+
+
+def test_j14_the_final_envelope_is_sealed_only_by_the_authority_seal():
+    subclasses = []
+    constructions = set()
+    for path in _module_files():
+        relative = _relative(path)
+        tree = _parse(path)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and any(
+                getattr(base, "id", None) == "AuthoritySeal" for base in node.bases
+            ):
+                subclasses.append(f"{relative}:{node.name}")
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "AuthoritySeal":
+                constructions.add(relative)
+    assert subclasses == [], subclasses
+    assert constructions == {"cli/commands/equivalence.py"}, constructions
+
+
+def test_j15_bounded_evidence_identity_is_a_string():
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget, bounded_evidence
+
+    with pytest.raises(TypeError):
+        bounded_evidence(("x" * 5_000,), work=JsonBudget(1 << 20), identity=lambda _value: "cause:x")
+
+
+#: J16 の登録: 作業量を作ってよい場所 → なぜ親の作業量から逃れないか
+_REGISTERED_WORK_SCOPES = {
+    ("core/json_encoding.py", "JsonEncodingPolicy.prepare"): "walk 1 つの予算（上限は呼ぶ側の `max_bytes`）",
+    ("core/json_encoding.py", "JsonEncodingPolicy.measure"): "walk 1 つの予算（上限は呼ぶ側の `max_bytes`）",
+    ("core/json_encoding.py", "JsonEncodingPolicy.materialize"): "J7 の登録（予算 scope の外の `to_dict()`）",
+    ("core/json_encoding.py", "JsonEncodingPolicy.plain_bytes"): "walk 1 つの予算（上限は呼ぶ側の `max_bytes`）",
+    ("core/json_encoding.py", "bounded_evidence"): "試しの予算（呼ぶ側の `work` の残り以下で、使った分を `work` へ戻す）",
+    ("core/json_encoding.py", "_Walk.__init__"): "walk の作業量（上限は walk の byte 予算の残り）",
+    ("core/json_encoding.py", "_Walk.enter_evidence"): "試しの予算（walk の作業量の残り以下で、使った分を作業量へ戻す）",
+    ("core/json_encoding.py", "_canonical_copy_uncounted"): "J7 の登録（数え済みの木の複製）",
+    ("checker/output_preparation.py", "OutputPreparer.prepare"): "診断の準備物が共有する予算（上限は headroom）",
+    ("checker/output_preparation.py", "finitize_legacy_reasons"): "G4-b の作業量（上限は出力 schema の field の上限の和）",
+    ("checker/unknown_reason.py", "projection_diagnostic_work"): "finish 1 回の診断の作業量（上限は出力 schema の reason の field）",
+    ("checker/unknown_reason.py", "iter_unknown_recovery_actions"): "J7 の登録（producer 時点の構築）",
+    ("checker/debug_trace.py", "DebugTrace._iter_phase_usage"): "J7 の登録（人向けの一覧）",
+    ("checker/cause_aggregate.py", "reason_detail_key"): "J7 の登録（作業量の scope の外）",
+    ("core/runtime_refs/unknowns.py", "_canonical_budget_value"): "J7 の登録（producer 時点の identity）",
+}
+
+
+def test_j16_work_scopes_are_created_only_at_registered_sites():
+    found = set()
+    for path in _module_files():
+        relative = _relative(path)
+        for qualname, name, lineno, call in _qualified_calls(path):
+            if name == "JsonBudget" and isinstance(call.func, ast.Name):
+                found.add((relative, qualname))
+    assert found == set(_REGISTERED_WORK_SCOPES), found ^ set(_REGISTERED_WORK_SCOPES)
