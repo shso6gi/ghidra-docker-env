@@ -903,8 +903,15 @@ def test_a_wide_scope_key_in_a_truncation_record_is_charged_before_it_is_sorted(
     wide = {f"k{index}": 0 for index in range(1_000_000)}
     object.__setattr__(record, "owner_scope_key", (wide,))
     object.__setattr__(record, "_event_id_cache", "e" * 64)
-    with pytest.raises(JsonBudgetExhausted):
-        RESULT_JSON_POLICY.prepare(record, max_bytes=10_000)
+    # 並べる列（100 万の組）を作る前に止まる: 止まるまでに確保した memory は予算の桁
+    tracemalloc.start()
+    try:
+        with pytest.raises(JsonBudgetExhausted):
+            RESULT_JSON_POLICY.prepare(record, max_bytes=10_000)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 2_000_000, peak
 
     pulled = []
 
