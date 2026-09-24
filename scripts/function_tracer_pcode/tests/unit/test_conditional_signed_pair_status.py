@@ -271,6 +271,7 @@ def _classified_pair_status(
                 launch, deadline=deadline, child_returncode=2,
                 child_exit_disposition=terminal_evidence.natural_exit_disposition(2),
                 signal_actions=(), envelope=envelope, anchor=anchor,
+                exit_mode=terminal_evidence.EXIT_MODE_CANONICAL_RESULT_REQUIRED,
             ),
         )
 

@@ -918,3 +918,29 @@ def test_the_terminal_evidence_key_never_reaches_the_child(tmp_path):
         assert all(case.keys.terminal_evidence_key_id not in value for value in visible)
         key = case.keys.terminal_evidence_key_file.read_bytes().decode("latin-1")
         assert all(key not in value for value in visible)
+
+
+def test_t14_the_process_timeout_decision_needs_the_same_terminal_authority(tmp_path):
+    """``--emit-process-timeout-json`` も bundle だけでは TIMEOUT を出さない。"""
+
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+        rematerialize_process_timeout_decision,
+    )
+
+    with supervisor_case(tmp_path, ChildScript((Stop(),)),
+                         allow_child_exit_resolution=True) as case:
+        run_supervisor(case, deadline=Deadline.AT_CHILD_STOP)
+        config = case.config
+        arguments = dict(
+            checkpoint_root=config.checkpoint_root, execution_nonce=config.execution_nonce,
+            supervisor_signing_key_id=config.supervisor_signing_key_id,
+            supervisor_signing_key_file=config.supervisor_signing_key_file,
+            worker_signing_key_id=config.worker_signing_key_id,
+            worker_signing_key_file=config.worker_signing_key_file,
+            terminal_evidence_signing_key_id=config.terminal_evidence_signing_key_id,
+            terminal_evidence_signing_key_file=config.terminal_evidence_signing_key_file,
+        )
+        assert rematerialize_process_timeout_decision(**arguments).outcome.value == "TIMEOUT"
+        _drop_evidence(case)
+        with pytest.raises(ValueError, match="TERMINAL_WITHOUT_EXIT_OBSERVATION"):
+            rematerialize_process_timeout_decision(**arguments)

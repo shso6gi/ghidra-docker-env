@@ -55,7 +55,7 @@ class TerminalTransaction:
         self.ownership = ownership
 
     def snapshot(
-        self, *, mode: recovery.ExitMode,
+        self, *, mode: Optional[recovery.ExitMode],
         process_alive: Callable[[int, str], Optional[bool]],
     ) -> tuple[recovery.TerminalSnapshot, SnapshotContext]:
         self.store._assert_locked()

@@ -198,8 +198,14 @@ def rematerialize_process_timeout_decision(
     *, checkpoint_root: Path, execution_nonce: str,
     supervisor_signing_key_id: str, supervisor_signing_key_file: Path,
     worker_signing_key_id: str, worker_signing_key_file: Path,
+    terminal_evidence_signing_key_id: str, terminal_evidence_signing_key_file: Path,
 ) -> DecisionReceipt:
-    """Derive TIMEOUT only from the durable terminal supervisor bundle."""
+    """Derive TIMEOUT only from the durable terminal supervisor bundle.
+
+    Issue #165: the store must adopt TIMEOUT under the same decision the
+    supervisor uses (deadline and observed exit evidence, no conflicting
+    authority); a timeout bundle alone is not TIMEOUT authority.
+    """
 
     from scripts.function_tracer_pcode.authority.codecs import StrictV2JsonCodec
     from scripts.function_tracer_pcode.authority.process.supervisor import (
@@ -209,13 +215,30 @@ def rematerialize_process_timeout_decision(
         ProcessSupervisorAuthorityFactory,
     )
 
+    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+        process_is_alive,
+    )
+    from scripts.function_tracer_pcode.authority.process.terminal_recovery import (
+        StepKind,
+    )
+
     factory = ProcessSupervisorAuthorityFactory(
         supervisor_signing_key_id=supervisor_signing_key_id,
         supervisor_signing_key=supervisor_signing_key_file.read_bytes(),
         worker_signing_key_id=worker_signing_key_id,
         worker_signing_key=worker_signing_key_file.read_bytes(),
+        terminal_evidence_signing_key_id=terminal_evidence_signing_key_id,
+        terminal_evidence_signing_key=terminal_evidence_signing_key_file.read_bytes(),
     )
     store = DurableCheckpointStore(checkpoint_root, factory, execution_nonce)
+    step, _snapshot, _context = store.inspect_terminal(
+        mode=None, process_alive=process_is_alive,
+    )
+    if step.kind is not StepKind.ADOPT_TIMEOUT:
+        raise ValueError(
+            "durable store is not a TIMEOUT terminal authority: "
+            f"{step.kind.value} {getattr(step.invalid_code, 'value', None)}"
+        )
     prefix = store.rematerialize_active_prefix()
     bundle = store.rematerialize_timeout_bundle(prefix=prefix)
     factory.validate_timeout_bundle_membership(bundle)
@@ -431,6 +454,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--execution-nonce")
     parser.add_argument("--supervisor-signing-key-id")
     parser.add_argument("--supervisor-signing-key-file")
+    parser.add_argument("--terminal-evidence-signing-key-id")
+    parser.add_argument("--terminal-evidence-signing-key-file")
     parser.add_argument("--worker-signing-key-id")
     parser.add_argument("--worker-signing-key-file")
     parser.add_argument("--binary1-path")
@@ -492,6 +517,8 @@ def main(argv: list[str] | None = None) -> int:
             args.checkpoint_root, args.execution_nonce,
             args.supervisor_signing_key_id, args.supervisor_signing_key_file,
             args.worker_signing_key_id, args.worker_signing_key_file,
+            args.terminal_evidence_signing_key_id,
+            args.terminal_evidence_signing_key_file,
         )
         if not all(required):
             parser.error("process TIMEOUT output requires durable authority inputs")
@@ -502,6 +529,10 @@ def main(argv: list[str] | None = None) -> int:
             supervisor_signing_key_file=Path(args.supervisor_signing_key_file),
             worker_signing_key_id=args.worker_signing_key_id,
             worker_signing_key_file=Path(args.worker_signing_key_file),
+            terminal_evidence_signing_key_id=args.terminal_evidence_signing_key_id,
+            terminal_evidence_signing_key_file=Path(
+                args.terminal_evidence_signing_key_file
+            ),
         )
         if receipt.outcome is not Outcome.TIMEOUT:
             raise ValueError("durable process projection did not finalize TIMEOUT")

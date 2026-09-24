@@ -241,12 +241,18 @@ def _read_deadline(store: Any, context: SnapshotContext) -> recovery.Fact:
     return recovery.Fact(recovery.Presence.VALID, receipt.receipt_digest)
 
 
-def _read_child_exit(store: Any, context: SnapshotContext) -> recovery.ExitFact:
+def _read_child_exit(
+    store: Any, context: SnapshotContext, mode: Optional[recovery.ExitMode],
+) -> recovery.ExitFact:
     try:
         receipt = store._read_terminal_evidence_locked(evidence.CHILD_EXIT_RECEIPT_KIND)
         if receipt is None:
             return recovery.ExitFact()
         evidence.validate_child_exit(receipt, context.launch, context.deadline)
+        if mode is not None and receipt.payload["exit_mode"] != mode.value:
+            raise evidence.TerminalEvidenceInvalid(
+                "child exit was recorded under a different exit mode"
+            )
     except _READ_ERRORS as exc:
         return recovery.ExitFact(recovery.Presence.INVALID, detail=_describe(exc))
     context.child_exit = receipt
@@ -258,6 +264,7 @@ def _read_child_exit(store: Any, context: SnapshotContext) -> recovery.ExitFact:
         deadline_digest=payload["deadline_receipt_digest"],
         envelope_sha256=payload["envelope_observation"]["sha256"],
         anchor=evidence.child_exit_anchor(receipt),
+        mode=payload["exit_mode"],
     )
 
 
@@ -525,10 +532,17 @@ def _read_history(store: Any) -> dict:
 
 
 def read_terminal_snapshot(
-    store: Any, *, mode: recovery.ExitMode,
+    store: Any, *, mode: Optional[recovery.ExitMode],
     process_alive: Callable[[int, str], Optional[bool]],
 ) -> tuple[recovery.TerminalSnapshot, SnapshotContext]:
+    """``mode`` は supervisor の設定（E の記録と違えば E を INVALID にする）。
+
+    None なら E に記録された mode で読む（分類器: supervisor と同じ判断を、
+    mode を推測せずに行う）。E が無い store は mode に依らず INVALID になる。
+    """
     store._assert_locked()
+    requested_mode = mode
+    mode = recovery.ExitMode.CANONICAL_RESULT_REQUIRED if mode is None else mode
     context = SnapshotContext(fingerprint=store_fingerprint(store.directory))
     try:
         context.launch = store._read_launch()
@@ -542,7 +556,9 @@ def read_terminal_snapshot(
             archive=recovery.ArchiveFact(), canonical=recovery.CanonicalFact(),
         ), context
     deadline = _read_deadline(store, context)
-    child_exit = _read_child_exit(store, context)
+    child_exit = _read_child_exit(store, context, requested_mode)
+    if child_exit.mode is not None:
+        mode = recovery.ExitMode(child_exit.mode)
     archive_fact = _read_archive(store, context)
     pending = _read_pending(store, context)
     if archive_fact.presence is recovery.Presence.VALID:

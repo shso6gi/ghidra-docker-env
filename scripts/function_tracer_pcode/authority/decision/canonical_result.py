@@ -1138,31 +1138,30 @@ def _require_durable_terminal(store: Any, status: Any) -> Any:
     """store が ``status`` の終端を採用する状態であること（Issue #165）。
 
     判断は supervisor の ``next_step`` をそのまま使う（検証・競合の規則を
-    分類器に複製しない）。RESOLVED は canonical 結果を要求する mode、ERROR は
-    supervisor だけで決める mode でしか作られないので、その mode で読む。
+    分類器に複製しない）。exit mode は E に記録された値を使う。
     """
     from scripts.function_tracer_pcode.authority.process.supervisor_command import (
         process_is_alive,
     )
     from scripts.function_tracer_pcode.authority.process.terminal_recovery import (
-        ExitMode,
         StepKind,
     )
 
     expected = {
-        "RESOLVED": (StepKind.ADOPT_RESOLVED, ExitMode.CANONICAL_RESULT_REQUIRED),
-        "TIMEOUT": (StepKind.ADOPT_TIMEOUT, ExitMode.CANONICAL_RESULT_REQUIRED),
-        "ERROR": (StepKind.ADOPT_ERROR, ExitMode.SUPERVISOR_ONLY),
+        "RESOLVED": StepKind.ADOPT_RESOLVED,
+        "TIMEOUT": StepKind.ADOPT_TIMEOUT,
+        "ERROR": StepKind.ADOPT_ERROR,
     }.get(status)
     if expected is None:
         raise ValueError(
             "supervisor projection is not a terminal authority: "
             f"status={status!r}"
         )
+    # mode は推測しない: E に記録された supervisor の mode で読む。
     step, _snapshot, context = store.inspect_terminal(
-        mode=expected[1], process_alive=process_is_alive,
+        mode=None, process_alive=process_is_alive,
     )
-    if step.kind is not expected[0]:
+    if step.kind is not expected:
         raise ValueError(
             f"{status} projection is not the durable terminal authority: "
             f"{step.kind.value} {getattr(step.invalid_code, 'value', None)} "

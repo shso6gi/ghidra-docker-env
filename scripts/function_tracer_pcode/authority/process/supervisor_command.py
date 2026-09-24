@@ -299,7 +299,18 @@ class ProcessSupervisorCommand:
         }
 
     def _child_environment(self) -> dict[str, str]:
-        environment = dict(os.environ)
+        # Issue #165: D / E / A の署名鍵は worker child に渡さない。supervisor の
+        # 環境に（呼び出し側の export などで）鍵の path や id があっても、
+        # それを名指す変数は child の環境から落とす。
+        evidence_key = self.config.terminal_evidence_signing_key_file
+        secrets = {
+            str(evidence_key), str(evidence_key.resolve()),
+            self.config.terminal_evidence_signing_key_id,
+        }
+        environment = {
+            name: value for name, value in os.environ.items()
+            if not any(secret in value for secret in secrets)
+        }
         environment.update({
             CHILD_ENV_ROOT: str(self.config.checkpoint_root.resolve()),
             CHILD_ENV_NONCE: self.config.execution_nonce,
@@ -758,7 +769,7 @@ class ProcessSupervisorCommand:
             payload = terminal_evidence.child_exit_payload(
                 launch, deadline=deadline, child_returncode=returncode,
                 child_exit_disposition=disposition, signal_actions=signals,
-                envelope=envelope, anchor=anchor,
+                envelope=envelope, anchor=anchor, exit_mode=self.exit_mode.value,
             )
             return self.factory.issue_terminal_evidence(
                 terminal_evidence.CHILD_EXIT_RECEIPT_KIND, payload,

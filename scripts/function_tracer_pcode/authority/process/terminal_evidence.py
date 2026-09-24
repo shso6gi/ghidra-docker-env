@@ -69,6 +69,12 @@ SIGNAL_PROCESS_ABSENT = "process_absent"
 SIGNAL_NAMES = frozenset({"SIGTERM", "SIGKILL"})
 SIGNAL_RESULTS = frozenset({SIGNAL_SENT, SIGNAL_PROCESS_ABSENT})
 
+#: child の自然終了を終端へどう写すかの supervisor の設定（E に固定する）。
+#: 分類器は推測せず、E に記録された値で supervisor と同じ判断をする。
+EXIT_MODE_CANONICAL_RESULT_REQUIRED = "CANONICAL_RESULT_REQUIRED"
+EXIT_MODE_SUPERVISOR_ONLY = "SUPERVISOR_ONLY"
+EXIT_MODES = frozenset({EXIT_MODE_CANONICAL_RESULT_REQUIRED, EXIT_MODE_SUPERVISOR_ONLY})
+
 #: E が観測した checkpoint の種類。
 ANCHOR_NONE = "NONE"
 ANCHOR_PENDING_ACTIVE = "PENDING_ACTIVE"
@@ -268,7 +274,7 @@ _CHILD_EXIT_KEYS = frozenset({
     "schema", "launch_receipt_digest", *_LAUNCH_JOIN_FIELDS,
     "deadline_receipt_digest", "returncode_observation_kind",
     "child_returncode", "child_exit_disposition", "signal_actions",
-    "envelope_observation", "checkpoint_anchor", "issuer_id",
+    "envelope_observation", "checkpoint_anchor", "exit_mode", "issuer_id",
 })
 
 
@@ -283,7 +289,7 @@ def natural_exit_disposition(returncode: int) -> str:
 def child_exit_payload(
     launch: Any, *, deadline: Any, child_returncode: int,
     child_exit_disposition: str, signal_actions: tuple[SignalAction, ...],
-    envelope: EnvelopeObservation, anchor: CheckpointAnchor,
+    envelope: EnvelopeObservation, anchor: CheckpointAnchor, exit_mode: str,
 ) -> dict[str, Any]:
     payload = {
         "schema": CHILD_EXIT_SCHEMA,
@@ -297,6 +303,7 @@ def child_exit_payload(
         "signal_actions": [action.to_json() for action in signal_actions],
         "envelope_observation": envelope.to_json(),
         "checkpoint_anchor": anchor.to_json(),
+        "exit_mode": exit_mode,
         "issuer_id": TERMINAL_EVIDENCE_ISSUER_ID,
     }
     _validate_child_exit_payload(payload, launch=launch, deadline=deadline)
@@ -317,6 +324,7 @@ def _validate_child_exit_payload(
         or payload["returncode_observation_kind"] != LIVE_PROCESS_WAIT
         or type(payload["child_returncode"]) is not int
         or type(payload["signal_actions"]) is not list
+        or payload["exit_mode"] not in EXIT_MODES
     ):
         raise TerminalEvidenceInvalid("child exit receipt schema is invalid")
     _require_launch_join("child exit", payload, launch)
@@ -359,6 +367,40 @@ def _validate_child_exit_payload(
     else:
         if deadline_digest != deadline.receipt_digest:
             raise TerminalEvidenceInvalid("child exit does not join its deadline receipt")
+        observed = tuple((action["signal"], action["result"]) for action in actions)
+        if observed not in deadline_signal_actions(payload["child_exit_disposition"]):
+            raise TerminalEvidenceInvalid(
+                "child exit signal actions do not produce its disposition"
+            )
+
+
+def deadline_signal_actions(disposition: str) -> frozenset:
+    """deadline 後の終了処理（SIGTERM -> grace -> SIGKILL）で、その disposition を
+    返しうる ``killpg`` の結果の列（``_terminate_exact_process_group`` の枝ごと）。
+
+    disposition と実際に送った signal を別々に記録するので、両者が同じ終了処理の
+    1 つの枝として説明できることを確かめる（自然終了の語彙 ``EXIT_CODE_`` は
+    deadline の E には現れない）。
+    """
+
+    term_sent = ("SIGTERM", SIGNAL_SENT)
+    if disposition in {"SIGTERM_AFTER_DEADLINE"}:
+        return frozenset({(term_sent,)})
+    if disposition == "SIGKILL_AFTER_DEADLINE":
+        return frozenset({(term_sent, ("SIGKILL", SIGNAL_SENT))})
+    if not disposition.startswith("EXITED_"):
+        return frozenset()
+    rest = disposition[len("EXITED_"):].split("_", 1)
+    suffix = rest[1] if len(rest) == 2 else ""
+    return {
+        "": frozenset({()}),
+        "BEFORE_SIGTERM": frozenset({(("SIGTERM", SIGNAL_PROCESS_ABSENT),)}),
+        "AFTER_SIGTERM": frozenset({(term_sent,)}),
+        "BEFORE_SIGKILL": frozenset({
+            (term_sent,), (term_sent, ("SIGKILL", SIGNAL_PROCESS_ABSENT)),
+        }),
+        "AFTER_SIGKILL": frozenset({(term_sent, ("SIGKILL", SIGNAL_SENT))}),
+    }.get(suffix, frozenset())
 
 
 def validate_child_exit(receipt: Any, launch: Any, deadline: Any) -> None:

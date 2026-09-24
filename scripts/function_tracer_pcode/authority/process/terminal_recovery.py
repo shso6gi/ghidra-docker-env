@@ -30,6 +30,8 @@ from enum import Enum
 from typing import Mapping, Optional
 
 from scripts.function_tracer_pcode.authority.process.terminal_evidence import (
+    EXIT_MODE_CANONICAL_RESULT_REQUIRED,
+    EXIT_MODE_SUPERVISOR_ONLY,
     ANCHOR_CHAIN,
     ANCHOR_NONE,
     ANCHOR_PENDING_ACTIVE,
@@ -59,9 +61,9 @@ class ExitMode(str, Enum):
     """child の自然終了をどう終端へ写すか（``allow_child_exit_resolution``）。"""
 
     #: runner の mode: 検証済み canonical 結果（envelope + CLI join）だけが終端。
-    CANONICAL_RESULT_REQUIRED = "CANONICAL_RESULT_REQUIRED"
+    CANONICAL_RESULT_REQUIRED = EXIT_MODE_CANONICAL_RESULT_REQUIRED
     #: supervisor だけで終端を決める mode: child の結果は採用せず ERROR。
-    SUPERVISOR_ONLY = "SUPERVISOR_ONLY"
+    SUPERVISOR_ONLY = EXIT_MODE_SUPERVISOR_ONLY
 
 
 class LiveKind(str, Enum):
@@ -99,6 +101,8 @@ class ExitFact(Fact):
     deadline_digest: Optional[str] = None
     envelope_sha256: Optional[str] = None
     anchor: Optional[CheckpointAnchor] = None
+    #: supervisor が E を書いたときの exit mode（``TerminalSnapshot.mode`` の根拠）。
+    mode: Optional[str] = None
 
 
 @dataclass(frozen=True)

@@ -83,3 +83,22 @@ def test_d_only_restart_is_invalid_without_inventing_an_exit():
         step = tr.next_step(model.snapshot(state, mode))
         assert step.kind is tr.StepKind.INVALID
         assert step.invalid_code is tr.InvalidCode.DEADLINE_WITHOUT_EXIT_OBSERVATION
+
+
+def test_the_committed_model_summary_is_the_current_model(explored):
+    """``terminal_model.head.json`` が今の model の結果と一致する（証拠の陳腐化を防ぐ）。"""
+
+    import json
+    from pathlib import Path
+
+    committed = json.loads(
+        (Path(model.__file__).parent / "terminal_model.head.json").read_text(encoding="utf-8")
+    )
+    reachable = explored["reachable"]
+    terminals: dict = {}
+    for oracle in reachable.values():
+        key = f"{oracle[0]}:{oracle[1]}"
+        terminals[key] = terminals.get(key, 0) + 1
+    assert committed["reachable_states"] == len(reachable)
+    assert committed["crash_transitions"] == explored["transitions"]
+    assert committed["terminal_oracles"] == terminals

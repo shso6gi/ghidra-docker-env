@@ -70,6 +70,7 @@ def _exit(factory, launch, *, deadline=None, rc=-15, disposition="SIGTERM_AFTER_
         child_exit_disposition=disposition, signal_actions=signals,
         envelope=te.EnvelopeObservation(False, None),
         anchor=anchor or te.CheckpointAnchor(te.ANCHOR_NONE),
+        exit_mode=te.EXIT_MODE_CANONICAL_RESULT_REQUIRED,
     )
     return factory.issue_terminal_evidence(te.CHILD_EXIT_RECEIPT_KIND, payload)
 
@@ -162,6 +163,57 @@ def test_exit_rc_must_be_the_one_its_disposition_names(rc, disposition):
     deadline = _deadline(factory, launch)
     with pytest.raises(te.TerminalEvidenceInvalid):
         _exit(factory, launch, deadline=deadline, rc=rc, disposition=disposition)
+
+
+SENT = te.SignalAction("SIGTERM", te.SIGNAL_SENT)
+KILLED = te.SignalAction("SIGKILL", te.SIGNAL_SENT)
+TERM_ABSENT = te.SignalAction("SIGTERM", te.SIGNAL_PROCESS_ABSENT)
+KILL_ABSENT = te.SignalAction("SIGKILL", te.SIGNAL_PROCESS_ABSENT)
+
+
+@pytest.mark.parametrize(("rc", "disposition", "signals"), (
+    (2, "EXITED_2", ()),
+    (2, "EXITED_2_BEFORE_SIGTERM", (TERM_ABSENT,)),
+    (-15, "SIGTERM_AFTER_DEADLINE", (SENT,)),
+    (3, "EXITED_3_AFTER_SIGTERM", (SENT,)),
+    (3, "EXITED_3_BEFORE_SIGKILL", (SENT,)),
+    (3, "EXITED_3_BEFORE_SIGKILL", (SENT, KILL_ABSENT)),
+    (-9, "SIGKILL_AFTER_DEADLINE", (SENT, KILLED)),
+    (0, "EXITED_0_AFTER_SIGKILL", (SENT, KILLED)),
+))
+def test_deadline_exit_accepts_every_branch_of_the_termination(rc, disposition, signals):
+    factory = _factory()
+    launch = _launch(factory)
+    _exit(factory, launch, deadline=_deadline(factory, launch), rc=rc,
+          disposition=disposition, signals=signals)
+
+
+@pytest.mark.parametrize(("rc", "disposition", "signals"), (
+    (-9, "SIGKILL_AFTER_DEADLINE", ()),              # SIGKILL を送っていない
+    (-15, "SIGTERM_AFTER_DEADLINE", ()),             # SIGTERM を送っていない
+    (2, "EXITED_2", (SENT,)),                        # 送ったのに送る前の終了
+    (3, "EXIT_CODE_3", ()),                          # 自然終了の語彙
+    (0, "EXITED_0_AFTER_SIGKILL", (SENT,)),          # SIGKILL の記録が無い
+))
+def test_deadline_exit_rejects_signals_that_cannot_produce_its_disposition(
+    rc, disposition, signals,
+):
+    factory = _factory()
+    launch = _launch(factory)
+    with pytest.raises(te.TerminalEvidenceInvalid):
+        _exit(factory, launch, deadline=_deadline(factory, launch), rc=rc,
+              disposition=disposition, signals=signals)
+
+
+def test_exit_mode_is_sealed():
+    factory = _factory()
+    launch = _launch(factory)
+    receipt = _exit(factory, launch, rc=0, disposition="EXIT_CODE_0", signals=())
+    guessed = factory.issue_terminal_evidence(
+        te.CHILD_EXIT_RECEIPT_KIND, {**receipt.payload, "exit_mode": "GUESSED"},
+    )
+    with pytest.raises(te.TerminalEvidenceInvalid, match="schema"):
+        te.validate_child_exit(guessed, launch, None)
 
 
 def test_exit_records_only_observed_signal_actions():
@@ -289,6 +341,29 @@ def test_store_flock_and_ownership_are_not_reentrant(tmp_path):
     assert not ownership.held
 
 
+def test_another_thread_waits_for_the_store_flock_instead_of_failing(tmp_path):
+    import threading
+
+    store = DurableCheckpointStore(tmp_path, _factory(), "execution-1")
+    outcome = {}
+    started = threading.Event()
+
+    def other():
+        started.set()
+        try:
+            with store._locked():
+                outcome["acquired"] = True
+        except StoreLockReentry as exc:  # pragma: no cover - the failure mode
+            outcome["error"] = exc
+
+    with store._locked():
+        thread = threading.Thread(target=other)
+        thread.start()
+        started.wait(10)
+    thread.join(10)
+    assert outcome == {"acquired": True}
+
+
 def test_supervisor_only_writes_require_held_ownership(tmp_path):
     factory = _factory()
     store = DurableCheckpointStore(tmp_path, factory, "execution-1")
@@ -391,3 +466,35 @@ def test_claim_disposition_must_be_the_observed_exit():
     snapshot = _complete_timeout_snapshot()
     snapshot = replace(snapshot, live=replace(snapshot.live, kill_disposition="SIGKILL_AFTER_DEADLINE"))
     assert tr.next_step(snapshot).invalid_code is tr.InvalidCode.TERMINAL_AUTHORITY_CONFLICT
+
+
+# ---------------------------------------------------------------------------
+# 語彙の drift（判断の module は store を import しないので、同じ値かを固定する）
+# ---------------------------------------------------------------------------
+
+
+def test_the_decision_uses_the_store_state_vocabulary():
+    from scripts.function_tracer_pcode.authority.process.supervisor import CheckpointState
+
+    assert {tr.ACTIVE, tr.COMPLETION_READY, tr.RESOLVED, tr.TIMED_OUT_CLAIMED,
+            tr.TIMED_OUT} == {state.value for state in CheckpointState}
+
+
+def test_the_snapshot_reads_the_file_names_the_store_writes():
+    import inspect
+
+    from scripts.function_tracer_pcode.authority.process import supervisor
+    from scripts.function_tracer_pcode.authority.process import terminal_snapshot as ts
+
+    assert set(ts.TIMEOUT_MEMBER_NAMES) <= set(supervisor.CHECKPOINT_AUTHORITY_FILENAMES)
+    writer = inspect.getsource(
+        supervisor.DurableCheckpointStore._finalize_operational_error_locked
+    )
+    for name in ts.ERROR_MEMBER_NAMES:
+        assert f'"{name}"' in writer, name
+    assert set(tr.StepKind) - tr.TERMINAL_STEPS == set(
+        __import__(
+            "scripts.function_tracer_pcode.authority.process.terminal_transaction",
+            fromlist=["_EXECUTORS"],
+        )._EXECUTORS
+    )

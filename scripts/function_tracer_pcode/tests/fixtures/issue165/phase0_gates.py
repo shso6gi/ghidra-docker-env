@@ -172,6 +172,7 @@ def gate_g1(directory: Path) -> None:
                 child_exit_disposition="SIGTERM_AFTER_DEADLINE",
                 signal_actions=(te.SignalAction("SIGTERM", te.SIGNAL_SENT),),
                 envelope=te.EnvelopeObservation(False, None), anchor=anchor,
+                exit_mode=te.EXIT_MODE_CANONICAL_RESULT_REQUIRED,
             )
         except te.TerminalEvidenceInvalid as exc:
             _emit("G1", "natural_E_cannot_claim_signal_death", True, error=str(exc))

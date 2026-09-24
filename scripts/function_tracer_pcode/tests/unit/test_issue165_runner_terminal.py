@@ -65,6 +65,9 @@ PROCESS_SUPERVISOR_KEY_ID=t18-supervisor; PROCESS_SUPERVISOR_KEY_FILE="__TMP__/k
 PROCESS_WORKER_KEY_ID=t18-worker; PROCESS_WORKER_KEY_FILE="__TMP__/keys/worker.key"
 PROCESS_TERMINAL_EVIDENCE_KEY_ID=t18-terminal-evidence
 PROCESS_TERMINAL_EVIDENCE_KEY_FILE="__TMP__/keys/terminal-evidence.key"
+# 呼び出し側の環境に鍵の変数が export されていても（operator の shell など）、
+# worker child へは届かないことを確かめるために、あえて export しておく。
+export PROCESS_TERMINAL_EVIDENCE_KEY_ID PROCESS_TERMINAL_EVIDENCE_KEY_FILE
 PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE="__TMP__/keys/pair-status.key"
 PAIR_STATUS_VERIFICATION_KEY_FILE="__TMP__/keys/pair-status-verification-key.json"
 EQBENCH_DEBUG=0; EQBENCH_PROGRESS_INTERVAL_SECONDS=1; EQBENCH_IDENTICAL_FAST_PATH=1
@@ -223,3 +226,33 @@ def test_t18_exit_without_a_result_is_invalid_after_one_resume(runner_result):
     assert "not a terminal authority" in status["detail"]
     assert log.count("Supervisor recovery: resuming non-terminal projection") == 1
     assert "supervisor_exit=2" in _status_line(completed, "invalidpair")
+
+
+def test_t18_the_terminal_evidence_key_never_reaches_a_runner_worker(runner_result):
+    """計画 §6.2: D / E / A の鍵は worker child に渡らない（runner の実配置で確認）。"""
+
+    tmp, _completed = runner_result
+    key_file = str(tmp / "keys" / "terminal-evidence.key")
+    key = (tmp / "keys" / "terminal-evidence.key").read_bytes().decode("latin-1")
+    evidence = sorted((tmp / "harness").glob("children/*/launch-evidence.json"))
+    assert len(evidence) >= len(PAIRS)
+    for path in evidence:
+        seen = json.loads(path.read_text(encoding="utf-8"))
+        values = list(seen["environment"].values()) + list(seen["argv"])
+        leaked = [value for value in values if key_file in value or key in value
+                  or "t18-terminal-evidence" in value]
+        assert leaked == [], (path, leaked)
+
+
+@pytest.mark.parametrize("runner", ("eqbench_run_all_32jobs.sh", "neqbench_run_all_32jobs.sh"))
+def test_runners_do_not_export_the_terminal_evidence_key(runner):
+    """runner は鍵を supervisor / 分類器の引数でだけ渡す（環境へ export しない）。"""
+
+    import re
+
+    source = (REPO_ROOT / runner).read_text(encoding="utf-8")
+    exported = [
+        line for line in source.splitlines()
+        if re.match(r"\s*export\b", line) and "EVIDENCE_KEY" in line
+    ]
+    assert exported == []

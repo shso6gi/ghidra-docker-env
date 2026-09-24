@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 from typing import Any, Iterator, Mapping, Optional
 
 from scripts.function_tracer_pcode.authority.contracts import (
@@ -1897,12 +1898,20 @@ class ResolvedChain:
     recovery: Optional[SignedProcessAuthorityReceipt]
 
 
-#: Issue #165: この process が今持っている flock（lock file の path）。flock は
-#: open file description ごとなので、同じ process が同じ file を別 fd でもう一度
+#: Issue #165: この thread が今持っている flock（lock file の path）。flock は
+#: open file description ごとなので、同じ thread が同じ file を別 fd でもう一度
 #: 取ると自分を待って止まる。入れ子の取得は例外にする（``_exclusive_flock``）。
-_HELD_STORE_LOCKS: set[str] = set()
-_HELD_OWNER_LOCKS: set[str] = set()
+#: 別の thread は例外にせず、flock で待つ（thread ごとの記録）。
+_HELD_LOCKS = threading.local()
 _OWNERSHIP_TOKEN = object()
+
+
+def _held(kind: str) -> set[str]:
+    held = getattr(_HELD_LOCKS, kind, None)
+    if held is None:
+        held = set()
+        setattr(_HELD_LOCKS, kind, held)
+    return held
 
 
 class StoreLockReentry(RuntimeError):
@@ -1914,7 +1923,8 @@ def _lock_key(path: Path) -> str:
 
 
 @contextmanager
-def _exclusive_flock(path: Path, held: set[str]) -> Iterator[None]:
+def _exclusive_flock(path: Path, kind: str) -> Iterator[None]:
+    held = _held(kind)
     key = _lock_key(path)
     if key in held:
         raise StoreLockReentry(f"{Path(path).name} is already held by this process")
@@ -1938,7 +1948,7 @@ class SupervisorOwnership:
 
     @property
     def held(self) -> bool:
-        return self.key in _HELD_OWNER_LOCKS
+        return self.key in _held("owner")
 
 
 class DurableCheckpointStore:
@@ -1972,11 +1982,11 @@ class DurableCheckpointStore:
     def _locked(self) -> Iterator[None]:
         """store の flock を 1 回だけ取る（入れ子は例外。自分を待って止まらない）。"""
         self.root.mkdir(parents=True, exist_ok=True)
-        with _exclusive_flock(self.lock_path, _HELD_STORE_LOCKS):
+        with _exclusive_flock(self.lock_path, "store"):
             yield
 
     def _assert_locked(self) -> None:
-        if _lock_key(self.lock_path) not in _HELD_STORE_LOCKS:
+        if _lock_key(self.lock_path) not in _held("store"):
             raise RuntimeError("store operation requires the store flock")
 
     @contextmanager
@@ -1990,7 +2000,7 @@ class DurableCheckpointStore:
         kill / wait の間これを持っていても worker の store 操作は止まらない。
         """
         path = self.directory / ".supervisor-owner.lock"
-        with _exclusive_flock(path, _HELD_OWNER_LOCKS):
+        with _exclusive_flock(path, "owner"):
             ownership = SupervisorOwnership(self, _lock_key(path), _OWNERSHIP_TOKEN)
             yield ownership
 
@@ -1999,7 +2009,7 @@ class DurableCheckpointStore:
             type(ownership) is not SupervisorOwnership
             or ownership._token is not _OWNERSHIP_TOKEN
             or ownership.store is not self
-            or ownership.key not in _HELD_OWNER_LOCKS
+            or ownership.key not in _held("owner")
         ):
             raise RuntimeError("supervisor-only store write requires held ownership")
 
