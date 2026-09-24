@@ -1249,10 +1249,11 @@ def _stringified_key(key: Any, work: "JsonBudget") -> str:
     kind = type(key)
     if kind is str:
         return key
-    if key is None or kind in (bool, int, float):
-        return str(key)
+    base = plain_scalar(key)
+    if base is not _NOT_PLAIN:
+        return str(base)
     if kind is tuple and _is_plain_key_part(key, work):
-        return str(key)
+        return str(builtin_view(key)[1])
     raise TypeError(f"mapping key {kind.__name__} is not stringified without its own __str__")
 
 
@@ -1306,18 +1307,12 @@ def hashable_key(value: Any, work: "JsonBudget") -> Any:
     同じ値でも別の単位として数える — 集計を合併しない側へ倒す）。
     """
 
-    kind = type(value)
-    if kind is str:
+    if type(value) is str:
         work.charge(1 + len(value))
         return value
-    if value is None or kind is bool or kind is int or kind is float:
-        work.charge(1)
-        return value
-    if kind is BoundedEvidence or _builtin_enum(value):
-        work.charge(1)
-        return value
-    if kind is tuple and _is_plain_key_part(value, work):
-        return value
+    ok, view = builtin_view(value, work)
+    if ok:
+        return view
     work.charge(1)
     return object_identity_token(value)
 
@@ -1332,52 +1327,97 @@ def object_identity_token(value: Any) -> Tuple[str, str, int]:
     return ("<object>", type(value).__qualname__, id(value))
 
 
-def renders_with_builtins(value: Any) -> bool:
-    """`str(value)` / `repr(value)` が組み込みの実装だけで作られるか（user code を呼ばないか）。
+_NOT_PLAIN = object()
+#: `plain_scalar` が scalar でない値に返す印
+NOT_PLAIN = _NOT_PLAIN
 
-    文字列・scalar・組み込みのままの enum・`BoundedEvidence` と、それらだけから成る組み込みの
-    容器（tuple / list / dict / set / frozenset。型そのもの）。判定は値の大きさに比例する（呼ぶ
-    側が数え済みの値だけに使う）。
+
+def plain_scalar(value: Any) -> Any:
+    """scalar なら基底型の値（subclass は基底型の slot で写す: JPype の `JInt` など）、それ以外は `_NOT_PLAIN`。
+
+    enum（`IntEnum` / `str` の enum を含む）は scalar として扱わない（`_builtin_enum` の規則）。
+    subclass の `__str__` / `__repr__` / `__hash__` を呼ばない。
     """
 
-    pending = [value]
-    seen: set = set()
-    while pending:
-        item = pending.pop()
+    if value is None or value is True or value is False:
+        return value
+    kind = type(value)
+    if kind is str or kind is int or kind is float:
+        return value
+    if isinstance(value, Enum):
+        return _NOT_PLAIN
+    if isinstance(value, bool):
+        return bool.__bool__(value)
+    if isinstance(value, int):
+        return int.__index__(value)
+    if isinstance(value, float):
+        return float.__float__(value)
+    if isinstance(value, str):
+        return str.__str__(value)
+    return _NOT_PLAIN
+
+
+def builtin_view(value: Any, work: Optional["JsonBudget"] = None) -> Tuple[bool, Any]:
+    """組み込みの値だけで書き直した写し（`(True, 写し)`）。書き直せなければ `(False, None)`。
+
+    scalar は基底型の値、組み込みのままの enum と `BoundedEvidence` はそのまま、tuple / list /
+    dict / set / frozenset（型そのもの）は要素を書き直した同じ型。それ以外（live な object・
+    組み込みでない容器・閉路）は書き直さない。写しの `str` / `repr` / `hash` / `==` は組み込みの
+    実装だけで作られる。`work` を渡すと、辿る前に文字列の長さ・容器の幅を数える。
+    """
+
+    active: set = set()
+
+    def view(item: Any) -> Any:
+        base = plain_scalar(item)
+        if base is not _NOT_PLAIN:
+            if work is not None:
+                work.charge(1 + len(base) if type(base) is str else 1)
+            return base
         kind = type(item)
-        if kind is str or item is None or kind is bool or kind is int or kind is float:
-            continue
         if kind is BoundedEvidence or _builtin_enum(item):
-            continue
+            if work is not None:
+                work.charge(1)
+            return item
         if kind is tuple or kind is list or kind is set or kind is frozenset or kind is dict:
-            if id(item) in seen:
-                return False
-            seen.add(id(item))
-            if kind is dict:
-                pending.extend(item.keys())
-                pending.extend(item.values())
-            else:
-                pending.extend(item)
-            continue
-        return False
-    return True
+            if id(item) in active:
+                raise _NotPlain
+            if work is not None:
+                work.charge(1 + len(item))
+            active.add(id(item))
+            try:
+                if kind is dict:
+                    return {view(key): view(child) for key, child in item.items()}
+                return kind(view(child) for child in item)
+            finally:
+                active.discard(id(item))
+        raise _NotPlain
+
+    try:
+        return True, view(value)
+    except (_NotPlain, RecursionError, TypeError):
+        return False, None
+
+
+def renders_with_builtins(value: Any) -> bool:
+    """`value` を組み込みの値だけで書き直せるか（`builtin_view`。scalar の subclass も基底型として）。"""
+
+    return builtin_view(value)[0]
 
 
 def builtin_str(value: Any) -> str:
-    """組み込みの `str` だけで作る文字列（`renders_with_builtins` な値。それ以外は型名の印）。
+    """組み込みの `str` だけで作る文字列（`builtin_view` の写しの `str`。書き直せない値は型名の印）。
 
-    上書きした `__str__` / `__repr__`（producer）を呼ばない。組み込みで書ける値では `str(value)`
-    と同じ文字列。
+    上書きした `__str__` / `__repr__`（producer）を呼ばない。組み込みの値と、基底型と同じに書く
+    scalar の subclass（JPype の `JInt` など）では `str(value)` と同じ文字列。
     """
 
-    kind = type(value)
-    if kind is str:
+    if type(value) is str:
         return value
-    if isinstance(value, str) and not isinstance(value, Enum):
-        return str.__str__(value)
-    if renders_with_builtins(value):
-        return str(value)
-    return f"<{kind.__qualname__}>"
+    ok, view = builtin_view(value)
+    if ok:
+        return str(view)
+    return f"<{type(value).__qualname__}>"
 
 
 def _is_plain_key_part(part: Any, work: "JsonBudget") -> bool:
@@ -1392,7 +1432,7 @@ def _is_plain_key_part(part: Any, work: "JsonBudget") -> bool:
             pending.extend(item)
         elif kind is str:
             work.charge(1 + len(item))
-        elif not (item is None or kind in (bool, int, float)):
+        elif plain_scalar(item) is _NOT_PLAIN:
             return False
         else:
             work.charge(1)
@@ -2532,6 +2572,9 @@ __all__ = [
     "exception_text",
     "hashable_key",
     "object_identity_token",
+    "builtin_view",
+    "NOT_PLAIN",
+    "plain_scalar",
     "renders_with_builtins",
     "stringify_plain_key",
     "Reread",

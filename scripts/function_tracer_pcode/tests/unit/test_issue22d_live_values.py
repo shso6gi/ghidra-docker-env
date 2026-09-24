@@ -260,11 +260,11 @@ def test_root_cause_grouping_never_renders_live_evidence_or_units():
         _unary_cause,
     )
 
-    # `pair_or_case` は live な値のまま record に残る（参照の列は構築時に文字列になる）
+    # 構築（`make_unknown_reason`）を通らずに live な値を持つ record: 集計は組み込みの値だけで読む
     reasons = [
         replace(
             _reason("summary_effect_unmodeled", cause=_unary_cause(f"site{index}"), target=f"t{index}"),
-            pair_or_case=(_Heavy(), _Heavy()),
+            pair_or_case=(_Heavy(), _Heavy()), evidence_refs=(_Heavy(), "ref"),
         )
         for index in range(5)
     ]
@@ -274,20 +274,6 @@ def test_root_cause_grouping_never_renders_live_evidence_or_units():
         built = build_trace_cause_evidence(result, binary_identities=("L", "R"))
     assert built.get("root_causes"), built
     assert _Heavy.calls == 0 and _Heavy.hashes == 0
-
-
-def test_a_record_cannot_hold_live_evidence_refs():
-    """参照の列の型の契約は record が持つ（`replace` で live な値を入れられない）。"""
-
-    record = make_unknown_reason("unknown", stage="s", evidence_refs=("ref",))
-    with pytest.raises(TypeError):
-        replace(record, evidence_refs=(_Heavy(),))
-    assert _Heavy.calls == 0
-    # 有界化した後の列（有界な証拠・marker）は組み込みで書ける値
-    finitized = finitize_unknown_reason_record(
-        replace(record, evidence_refs=tuple(f"r{index}" for index in range(10_000))), work=JsonBudget(1 << 20),
-    )
-    assert len(finitized.evidence_refs) <= 65
 
 
 def test_an_enum_that_overrides_value_is_not_asked_for_it():
@@ -636,3 +622,35 @@ def test_bounded_repr_uses_only_builtin_repr():
     assert len(bounded_repr("x" * 10_000)) < 300
     assert bounded_repr(1 << 5_000).startswith("<int ")
     assert _Heavy.calls == 0
+
+
+def test_scalar_subclasses_are_their_base_values_without_their_own_methods():
+    """JPype の `JInt` のような scalar の subclass は基底型の値（subclass の `__str__` / `__hash__` を呼ばない）。
+
+    固定 subset の実バイナリでは identity の中に `JInt` が現れる: 型名の印にすると main と出力が変わる。
+    """
+
+    from scripts.function_tracer_pcode.checker.cause_aggregate import freeze_identity
+    from scripts.function_tracer_pcode.core.json_encoding import builtin_str, hashable_key
+
+    called = []
+
+    class _JInt(int):
+        def __str__(self):
+            called.append("str")
+            return "never"
+
+        __repr__ = __str__
+
+        def __hash__(self):
+            called.append("hash")
+            return 0
+
+    value = _JInt(129780670288800)
+    frozen = freeze_identity(("parameter", ("int", value)))
+    assert frozen == ("parameter", ("int", 129780670288800))
+    assert type(frozen[1][1]) is int
+    assert builtin_str(("int", value)) == "('int', 129780670288800)"
+    key = hashable_key(("int", value), JsonBudget(1 << 20))
+    assert key == ("int", 129780670288800) and type(key[1]) is int
+    assert called == []

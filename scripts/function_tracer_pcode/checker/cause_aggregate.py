@@ -56,11 +56,13 @@ from scripts.function_tracer_pcode.core.builtin_containers import builtin_mappin
 from scripts.function_tracer_pcode.core.json_encoding import (
     CANONICAL,
     LEGACY,
+    NOT_PLAIN as _NOT_PLAIN_SCALAR,
     builtin_str,
+    builtin_view,
     exception_text,
+    plain_scalar,
     is_json_record,
     object_identity_token,
-    renders_with_builtins,
 )
 
 from scripts.function_tracer_pcode.checker.unknown_reason import (
@@ -149,8 +151,10 @@ def freeze_identity(value: Any) -> Any:
         )
     if builtin_sequence(value):
         return tuple(freeze_identity(item) for item in value)
-    if renders_with_builtins(value):
-        return value
+    ok, view = builtin_view(value)
+    if ok:
+        # scalar の subclass（JPype の `JInt` など）は基底型の値（同じ `str` / `hash` / `==`）
+        return view
     return object_identity_token(value)
 
 
@@ -1180,6 +1184,40 @@ def _event_views(values: Iterable[Any]) -> List[Dict[str, Any]]:
     return [_as_mapping(value) for value in (values or ())]
 
 
+#: `make_unknown_reason` が文字列にする（`str()` を呼ぶ）field
+_STRINGIFIED_REASON_FIELDS = (
+    "reason_id", "recovery_proof_kind", "action_status", "evidence_kind", "count_kind",
+    "reason_class", "decision_effect", "reason_scope", "aggregation_unit",
+)
+
+
+def _plain_reason_value(value: Any) -> Any:
+    base = plain_scalar(value)
+    if base is not _NOT_PLAIN_SCALAR or value is None:
+        return base if value is not None else None
+    if builtin_view(value)[0]:
+        return value
+    return builtin_str(value)
+
+
+def _plain_reason_payload(record: Mapping[str, Any]) -> Dict[str, Any]:
+    """record の payload を構築し直す前に、文字列にされる field を組み込みの値だけにする。
+
+    `UnknownReasonRecord.from_dict`（`make_unknown_reason`）はこの field に `str()` を呼ぶ。trace の
+    record は構築時に文字列になっているが、構築を通らずに live な値を持つ record もあり得る:
+    その値は型名の印にしてから渡す（live な値の `__str__` を呼ばない）。組み込みの値は変わらない。
+    """
+
+    payload = dict(record)
+    for key in _STRINGIFIED_REASON_FIELDS:
+        if payload.get(key) is not None:
+            payload[key] = _plain_reason_value(payload[key])
+    refs = payload.get("evidence_refs")
+    if refs:
+        payload["evidence_refs"] = tuple(_plain_reason_value(ref) for ref in refs)
+    return payload
+
+
 def _as_mapping(value: Any) -> Dict[str, Any]:
     # 組み込みの振る舞いの mapping と json record（`to_dict()` は `materialize` が作業量の中で
     # 作る）だけを読む。それ以外の object の `to_dict()`（任意の producer）は呼ばない
@@ -1394,7 +1432,7 @@ def _build_root_causes(
             if effect in BLOCKING_DECISION_EFFECTS and action_status != "proof_complete":
                 certainty = "inferred_final_attempt"
                 effective = "active_final_blocker"
-        coerced = coerce_unknown_reason_record(record)
+        coerced = coerce_unknown_reason_record(_plain_reason_payload(record))
         proofs = resolve_required_proofs(
             proof_requirement_ids=record.get("proof_requirement_ids") or (),
             object_target_key=record.get("object_target_key"),
