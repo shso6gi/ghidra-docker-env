@@ -68,8 +68,8 @@ MAX_RELATION_ROWS = 512
 #: conditional receipt が運ぶ仮定（premise）の数と 1 つの上限: receipt の契約の owner
 #: （`authority/decision/conditional`）の値。lane は発行の前に同じ上限で確かめる
 from scripts.function_tracer_pcode.authority.decision.conditional import (  # noqa: E402
-    ASSUMPTION_PREMISE_MAX_BYTES,
-    MAX_ASSUMPTION_PREMISES,
+    assumption_premise_max_bytes,
+    max_assumption_premises,
 )
 #: 失敗の自由文（`error_message` / `failure_message`）の文字数
 MESSAGE_MAX_CHARS = 2048
@@ -139,6 +139,14 @@ class FieldBound:
     derivation: str
     max_rows: Optional[int] = None
     rows_attr: Optional[str] = None
+    #: 同じ結果で同時には値を持たない field の組の名前（headroom は組の中の最大の値だけを予約し、
+    #: 他は `null` の分。出力の準備が「組の中で値を持つのは高々 1 つ」を確かめる）
+    exclusive_group: Optional[str] = None
+
+
+#: 確定した判定の conditional receipt と、出力の契約違反の ERROR が持つ取って代わられた receipt は
+#: 同じ結果に同時には現れない（ERROR の結果は conditional receipt を持たない）
+RECEIPT_VARIANT = "receipt_variant"
 
 
 class OutputSchemaMissing(KeyError):
@@ -173,7 +181,7 @@ def authority_field_bounds(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> D
     conditional_receipt = (
         row_max_bytes(CONDITIONAL_RECEIPT_FIXED_ROW, policy)
         + policy.member_bytes("assumption_set", _array_bytes(
-            policy, MAX_ASSUMPTION_PREMISES, ASSUMPTION_PREMISE_MAX_BYTES,
+            policy, max_assumption_premises(), assumption_premise_max_bytes(),
         ))
     )
     rows = (
@@ -189,8 +197,8 @@ def authority_field_bounds(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> D
                    "decision receipt row"),
         FieldBound("conditional_outcome", _text_bytes(policy, VOCAB_MAX_CHARS), "vocabulary"),
         FieldBound("conditional_decision_receipt", conditional_receipt,
-                   f"fixed row + ≤ {MAX_ASSUMPTION_PREMISES} premises × "
-                   f"{ASSUMPTION_PREMISE_MAX_BYTES} B"),
+                   f"fixed row + ≤ {max_assumption_premises()} premises × "
+                   f"{assumption_premise_max_bytes()} B", exclusive_group=RECEIPT_VARIANT),
         FieldBound("c_active_base", _array_bytes(
             policy, MAX_RELATION_ROWS, row_max_bytes(C_ACTIVE_BASE_ROW, policy),
         ), f"≤ {MAX_RELATION_ROWS} relation rows",
@@ -215,7 +223,8 @@ def authority_field_bounds(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> D
         FieldBound("superseded_decision_receipt", _object_bytes(policy, {
             "decision_receipt": row_max_bytes(DECISION_RECEIPT_ROW, policy),
             "conditional_decision_receipt": conditional_receipt,
-        }), "{decision receipt row, conditional receipt} (output-contract ERROR only)"),
+        }), "{decision receipt row, conditional receipt} (output-contract ERROR only)",
+            exclusive_group=RECEIPT_VARIANT),
     )
     return {row.key: row for row in rows}
 
@@ -261,9 +270,19 @@ def required_headroom_bytes(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> 
     """
 
     bounds = {**authority_field_bounds(policy), **metadata_field_bounds(policy)}
-    return sum(
-        policy.added_member_bytes(key, bound.max_bytes) for key, bound in bounds.items()
-    )
+    total = 0
+    extra: Dict[str, int] = {}
+    for key, bound in bounds.items():
+        added = policy.added_member_bytes(key, bound.max_bytes)
+        if bound.exclusive_group is None:
+            total += added
+            continue
+        # 同時に値を持たない field の組: どの field も `null` で出得るので `null` の分を足し、
+        # 値を持つ高々 1 つの分（値と `null` の差）は組の中の最大だけを予約する
+        null = policy.added_member_bytes(key, 4)
+        total += null
+        extra[bound.exclusive_group] = max(extra.get(bound.exclusive_group, 0), added - null)
+    return total + sum(extra.values())
 
 
 class EnvelopeHeadroomTooSmall(ValueError):
@@ -288,13 +307,11 @@ def validate_envelope_headroom(budget_policy, policy: JsonEncodingPolicy = RESUL
 
 
 __all__ = [
-    "ASSUMPTION_PREMISE_MAX_BYTES",
     "C_ACTIVE_BASE_ROW",
     "CONDITIONAL_RECEIPT_FIXED_ROW",
     "DECISION_RECEIPT_ROW",
     "EnvelopeHeadroomTooSmall",
     "FieldBound",
-    "MAX_ASSUMPTION_PREMISES",
     "MAX_RECOVERY_ACTION_ROWS",
     "MAX_RELATION_ROWS",
     "MAX_UNKNOWN_REASON_ROWS",

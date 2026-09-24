@@ -1336,6 +1336,7 @@ class AuthorityDecisionEnvelope:
 
         bounds = authority_field_bounds(context.encoding)
         rows = []
+        present_in_group: Dict[str, str] = {}
         for item in _rows(FieldOwner.AUTHORITY):
             bound = bounds.get(item.key)
             if bound is None:
@@ -1346,6 +1347,15 @@ class AuthorityDecisionEnvelope:
                 item, result, context, prepared, field_max_bytes=bound.max_bytes,
             )
             if row is not None:
+                group = bound.exclusive_group
+                if group is not None and row.json is not None and row.json.value() is not None:
+                    # headroom は組の中の最大だけを予約している: 2 つ目は出力の契約違反
+                    if group in present_in_group:
+                        raise _violation(
+                            f"{item.key} and {present_in_group[group]} share the exclusive output "
+                            f"group {group!r}", context.members,
+                        )
+                    present_in_group[group] = item.key
                 rows.append(row)
         return cls(tuple(rows))
 

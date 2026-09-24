@@ -15,6 +15,7 @@ by type.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable, Mapping, Tuple
@@ -336,12 +337,52 @@ def assumption_set_payload(premises: Iterable[AssumptionPremise]) -> list:
     return [assumption_premise_payload(premise) for premise in premises]
 
 
-#: conditional receipt が運ぶ仮定（premise）の数と 1 つの大きさ（JSON byte）の上限。receipt の
-#: 契約（出力 schema の `conditional_decision_receipt` の上限はここから導く。Issue #22 PR-22-D）。
-#: 固定 subset（fec4b39）では conditional receipt は 1 つも発行されていない（観測の母集団が無い）。
-#: 上限は receipt の契約として宣言した値で、超える集合は receipt にしない。
-MAX_ASSUMPTION_PREMISES = 64
-ASSUMPTION_PREMISE_MAX_BYTES = 4096
+#: premise の中の binary 由来の名前（library 名・external の名前）1 つの文字数の上限。premise の
+#: 大きさの上限（`assumption_premise_max_bytes`）を導く receipt の契約の parameter（Issue #22
+#: PR-22-D）。これより長い名前を持つ premise の集合は receipt にしない（fail closed）。
+PREMISE_BINARY_LABEL_MAX_CHARS = 256
+#: external function の名前の数（original imported name と自身の名前。`_external_symbol_names`）
+_EXTERNAL_SYMBOL_NAME_COUNT = 2
+
+
+@functools.lru_cache(maxsize=1)
+def assumption_premise_max_bytes() -> int:
+    """premise 1 つの JSON byte の上限（catalog と premise の形から導く）。
+
+    catalog の各 entry について、binary 由来の名前を `PREMISE_BINARY_LABEL_MAX_CHARS` 字・最悪の
+    escape にした premise を作って数えた最大。出力 schema の `conditional_decision_receipt` の
+    上限はここから導く。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+    from scripts.function_tracer_pcode.proof.conditional_lane import worst_case_external_callee_spec_premises
+
+    # premise の形の owner が作る最悪の形を、receipt の表現（`assumption_premise_payload`）で数える
+    return max(
+        RESULT_JSON_POLICY.plain_bytes(assumption_premise_payload(premise)) or 0
+        for premise in worst_case_external_callee_spec_premises(
+            label_max_chars=PREMISE_BINARY_LABEL_MAX_CHARS, name_count=_EXTERNAL_SYMBOL_NAME_COUNT,
+        )
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def max_assumption_premises() -> int:
+    """conditional receipt が運ぶ仮定の数の上限（**形の上限**。証明の能力の上限ではない）。
+
+    premise は `EXTERNAL_CALLEE_SPEC` だけで、正規化した集合の中の premise は (catalog の名前
+    （canonical 名と alias 名）, provenance の種類, 側) で決まる。したがって well-formed な集合の
+    大きさは catalog から導ける: 名前の数 × `external_import` を満たす provenance の種類 × 2 側。
+    """
+
+    from scripts.function_tracer_pcode.analysis.effects.pure_function_catalog import (
+        EXTERNAL_IMPORT_PROVENANCE_KINDS,
+        load_pure_function_catalog,
+    )
+
+    catalog = load_pure_function_catalog()
+    names = len(catalog.entries) + len(catalog.alias_rules)
+    return names * len(EXTERNAL_IMPORT_PROVENANCE_KINDS) * 2
 
 
 def assumption_set_receipt_bound_violation(premises: Tuple[AssumptionPremise, ...]) -> Any:
@@ -354,15 +395,15 @@ def assumption_set_receipt_bound_violation(premises: Tuple[AssumptionPremise, ..
     from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted, RESULT_JSON_POLICY
 
     count = len(premises)
-    if count > MAX_ASSUMPTION_PREMISES:
-        return f"assumption_set has {count} premises (> {MAX_ASSUMPTION_PREMISES})"
+    limit = max_assumption_premises()
+    if count > limit:
+        return f"assumption_set has {count} premises (> {limit})"
+    premise_limit = assumption_premise_max_bytes()
     for index, premise in enumerate(premises):
         try:
-            RESULT_JSON_POLICY.measure(
-                assumption_premise_payload(premise), max_bytes=ASSUMPTION_PREMISE_MAX_BYTES,
-            )
+            RESULT_JSON_POLICY.measure(assumption_premise_payload(premise), max_bytes=premise_limit)
         except JsonBudgetExhausted:
-            return f"assumption premise {index} exceeds {ASSUMPTION_PREMISE_MAX_BYTES} bytes"
+            return f"assumption premise {index} exceeds {premise_limit} bytes"
     return None
 
 

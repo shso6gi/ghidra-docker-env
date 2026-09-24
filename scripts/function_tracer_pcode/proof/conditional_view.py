@@ -210,6 +210,37 @@ class ConditionalViewResult:
         return self.view is not None
 
 
+def worst_case_external_callee_spec_premises(*, label_max_chars: int, name_count: int):
+    """catalog と整合する ``EXTERNAL_CALLEE_SPEC`` premise の最悪の形（entry ごとに 1 つ）。
+
+    binary 由来の名前（library 名と external の名前 ``name_count`` 個）を ``label_max_chars``
+    字・最悪の escape にする。premise の形の owner（この module）が作り、receipt の owner が
+    自分の表現で数えて premise 1 つの上限を導く（Issue #22 PR-22-D）。
+    """
+
+    from scripts.function_tracer_pcode.analysis.effects.pure_function_catalog import (
+        EXTERNAL_IMPORT_PROVENANCE_KINDS,
+        PROVENANCE_KEY_KIND,
+        load_pure_function_catalog,
+    )
+
+    catalog = load_pure_function_catalog()
+    label = "\x01" * int(label_max_chars)
+    kind = max(EXTERNAL_IMPORT_PROVENANCE_KINDS, key=len)
+    for entry in catalog.entries.values():
+        candidate = CallModelCandidateRef(
+            provider=catalog.provider,
+            canonical_symbol=entry.canonical_symbol,
+            signature_key=entry.signature_key(),
+            provenance_key=(PROVENANCE_KEY_KIND, kind, label, (label,) * int(name_count)),
+        )
+        yield external_callee_spec_premise(
+            candidate,
+            argument_widths=tuple(spec.width_bits for spec in entry.parameters),
+            return_width_bits=entry.return_spec.width_bits,
+        )
+
+
 def _refused(
     reason: str,
     diagnostics: Sequence[Tuple[Tuple[Any, ...], str]] = (),

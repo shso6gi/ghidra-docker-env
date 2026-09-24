@@ -1302,3 +1302,19 @@ def test_composition_refuses_markers_that_cannot_fit_instead_of_overflowing():
     # 黙って省かず（marker すら無い field を作らず）、出力の契約違反にする
     with pytest.raises(OutputEnvelopeInvariantViolation, match="does not fit even as markers"):
         compose_result_preimage(result)
+
+
+def test_fields_of_an_exclusive_output_group_never_appear_together(monkeypatch):
+    # headroom は同時に現れない組（conditional receipt / 取って代わられた receipt）の最大だけを
+    # 予約する: 両方があれば出力の契約違反（headroom の勘定が壊れる前に止める）
+    from scripts.function_tracer_pcode.authority.decision import production_cutover
+
+    result = _decided_result()
+    result.superseded_decision_receipt = {"decision_receipt": {"outcome": "UNKNOWN"}}
+    result.conditional_decision_receipt = object()
+    monkeypatch.setattr(production_cutover, "conditional_decision_receipt_payload", lambda _receipt: {"x": 1})
+    with pytest.raises(OutputEnvelopeInvariantViolation, match="exclusive output group"):
+        build_final_result_envelope(result)
+    # 片方だけなら収まる
+    result.conditional_decision_receipt = None
+    assert build_final_result_envelope(result).payload["superseded_decision_receipt"]
