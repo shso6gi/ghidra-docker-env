@@ -772,40 +772,99 @@ MATCH_FINGERPRINT = "fingerprint"
 MATCH_UNIQUE = "unique"
 
 
+class _LegacyReasonGroup:
+    """1 つの reason id の legacy record と、照合の key から record の位置への索引。"""
+
+    __slots__ = ("records", "by_target", "by_fingerprint", "by_obligation")
+
+    def __init__(self) -> None:
+        self.records: List[Any] = []
+        #: inline のまま残った `object_target_key` の canonical な値 → 位置
+        self.by_target: Dict[Any, List[int]] = {}
+        #: 有界な証拠になった `object_target_key` の canonical fingerprint → 位置
+        self.by_fingerprint: Dict[str, List[int]] = {}
+        #: inline のまま残った `proof_obligation_id` の canonical な値の文字列 → 位置
+        self.by_obligation: Dict[str, List[int]] = {}
+
+
 class LegacyReasonIndex:
     """projection の診断が照合する legacy reason の、reason id ごとの索引（finish 1 回で 1 つ）。
 
-    `truncated` は件数の上限で残さなかった legacy reason があること（`legacy_reason_overflow`）。
+    照合の key（target・fingerprint・obligation）も作るときに 1 回だけ求め（`work` へ数える）、
+    cause ごとの照合は索引を引くだけにする（cause × legacy の比較をしない）。
+    `truncated` は件数の上限で残さなかった legacy reason があること（`legacy_reason_overflow`）か、
+    索引を作る作業量を使い切ったこと。
     """
 
-    __slots__ = ("_by_reason", "truncated")
+    __slots__ = ("_groups", "truncated")
 
-    def __init__(self, by_reason: Dict[Any, Tuple[Any, ...]], truncated: bool) -> None:
-        self._by_reason = by_reason
+    def __init__(self, groups: Dict[Any, _LegacyReasonGroup], truncated: bool) -> None:
+        self._groups = groups
         self.truncated = truncated
 
+    def group(self, reason_id: Any) -> Optional[_LegacyReasonGroup]:
+        return self._groups.get(reason_id)
+
     def by_reason(self, reason_id: Any) -> Tuple[Any, ...]:
-        return self._by_reason.get(reason_id, ())
+        group = self._groups.get(reason_id)
+        return () if group is None else tuple(group.records)
+
+
+def _inline_canonical(value: Any, *, work: Any) -> Any:
+    """inline のまま残った小さい値の canonical な値（大きさを数えてから作る。作れなければ `None`）。"""
+
+    from scripts.function_tracer_pcode.authority.contracts import canonical_value
+    from scripts.function_tracer_pcode.core.json_encoding import (
+        LEGACY,
+        PRODUCER_FAILURES,
+        RESULT_JSON_POLICY,
+        JsonValueRejected,
+    )
+
+    try:
+        work.charge(1 + RESULT_JSON_POLICY.measure(value, max_bytes=work.remaining(), mode=LEGACY))
+        canonical = canonical_value(value)
+        hash(canonical)
+    except (JsonValueRejected,) + PRODUCER_FAILURES:
+        return None
+    return canonical
 
 
 def legacy_reason_index(legacy_reasons: Any, *, work: Any, overflow: Any = 0) -> LegacyReasonIndex:
-    """legacy reason を reason id ごとに 1 回だけ振り分ける（record 1 件ごとに `work` へ数える）。
+    """legacy reason を reason id ごとに 1 回だけ振り分け、照合の key を 1 回だけ求める。
 
-    cause ごとに legacy 全体を辿り直さない。診断なので例外を上げない: `work` を使い切ったら、
-    そこまでの索引を `truncated` にして返す（authority の finish を止めない）。
+    record 1 件ごと・key の大きさを `work` へ数える。診断なので例外を上げない: `work` を使い
+    切ったら、そこまでの索引を `truncated` にして返す（authority の finish を止めない）。
     """
 
-    from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
+    from scripts.function_tracer_pcode.core.json_encoding import BoundedEvidence, JsonBudgetExhausted
 
-    grouped: Dict[Any, List[Any]] = {}
+    groups: Dict[Any, _LegacyReasonGroup] = {}
     truncated = bool(overflow)
     try:
         for record in legacy_reasons or ():
             work.charge(1)
-            grouped.setdefault(getattr(record, "reason_id", None), []).append(record)
+            group = groups.get(getattr(record, "reason_id", None))
+            if group is None:
+                group = groups[getattr(record, "reason_id", None)] = _LegacyReasonGroup()
+            position = len(group.records)
+            group.records.append(record)
+            target = getattr(record, "object_target_key", None)
+            if type(target) is BoundedEvidence:
+                if target.fingerprint_kind == "canonical_sha256":
+                    group.by_fingerprint.setdefault(target.fingerprint, []).append(position)
+            elif target is not None:
+                canonical = _inline_canonical(target, work=work)
+                if canonical is not None:
+                    group.by_target.setdefault(canonical, []).append(position)
+            obligation = getattr(record, "proof_obligation_id", None)
+            if obligation is not None and type(obligation) is not BoundedEvidence:
+                canonical = _inline_canonical(obligation, work=work)
+                if canonical is not None:
+                    group.by_obligation.setdefault(str(canonical), []).append(position)
     except JsonBudgetExhausted:
         truncated = True
-    return LegacyReasonIndex({key: tuple(records) for key, records in grouped.items()}, truncated=truncated)
+    return LegacyReasonIndex(groups, truncated=truncated)
 
 
 def _text_cost(item: Any, work: Any) -> int:
@@ -848,13 +907,12 @@ def _match_legacy_reasons(
       requirement id になり得る長さの文字列と等しくならない）。
     """
 
-    from scripts.function_tracer_pcode.authority.contracts import canonical_value
     from scripts.function_tracer_pcode.core.canonical_digest import (
         CanonicalValueCycle,
         canonical_fingerprint,
     )
     from scripts.function_tracer_pcode.core.json_encoding import (
-        BoundedEvidence,
+        PRODUCER_FAILURES,
         JsonBudgetExhausted,
         JsonValueRejected,
     )
@@ -862,77 +920,71 @@ def _match_legacy_reasons(
     index = legacy_reasons if isinstance(legacy_reasons, LegacyReasonIndex) else legacy_reason_index(
         legacy_reasons, work=work,
     )
-    candidates = index.by_reason(reason_id)
-    if not candidates:
+    group = index.group(reason_id)
+    if group is None or not group.records:
         return (), None
+    candidates = tuple(group.records)
     cause_id = getattr(cause_occurrence, "cause_id", None)
     cause_target = getattr(cause_id, "canonical_target_key", None) if cause_id is not None else None
     requirements = (
         getattr(cause_occurrence, "proof_requirement_ids", ()) or ()
         if cause_occurrence is not None else ()
     )
-    fingerprint_of_cause: list = []
-    texts_of_requirements: list = []
 
     def requirement_texts() -> frozenset:
         # cause の requirement id の文字列（cause 1 つにつき 1 回。大きさを数えてから文字列に
         # する。数えきれない・JSON にならない requirement は照合に使わない）
-        if not texts_of_requirements:
-            texts = set()
-            for item in requirements:
-                try:
-                    cost = _text_cost(item, work)
-                except JsonValueRejected:
-                    continue
-                except JsonBudgetExhausted:
-                    # 残りを使い切った（数えた分を足して、以後は照合に使わない）
-                    remaining = work.remaining()
-                    if remaining is not None:
-                        work.consumed += remaining
-                    break
-                try:
-                    work.charge(1 + cost)
-                except JsonBudgetExhausted:
-                    break
-                texts.add(str(item))
-            texts_of_requirements.append(frozenset(texts))
-        return texts_of_requirements[0]
-
-    def cause_fingerprint() -> Optional[str]:
-        if not fingerprint_of_cause:
+        texts = set()
+        for item in requirements:
             try:
-                fingerprint_of_cause.append(
-                    canonical_fingerprint(cause_target, work=work) if cause_target is not None else None
-                )
-            except (JsonBudgetExhausted, CanonicalValueCycle, TypeError, UnicodeError, ValueError):
-                fingerprint_of_cause.append(None)
-        return fingerprint_of_cause[0]
+                cost = _text_cost(item, work)
+            except JsonValueRejected:
+                continue
+            except JsonBudgetExhausted:
+                # 残りを使い切った（数えた分を足して、以後は照合に使わない）
+                remaining = work.remaining()
+                if remaining is not None:
+                    work.consumed += remaining
+                break
+            try:
+                work.charge(1 + cost)
+            except JsonBudgetExhausted:
+                break
+            texts.add(str(item))
+        return frozenset(texts)
 
-    exact = []
-    by_fingerprint = []
-    for record in candidates:
-        record_target = getattr(record, "object_target_key", None)
-        if record_target is not None and cause_target is not None:
-            if type(record_target) is BoundedEvidence:
-                if (
-                    record_target.fingerprint_kind == "canonical_sha256"
-                    and record_target.fingerprint == cause_fingerprint()
-                ):
-                    by_fingerprint.append(record)
-                    continue
-            elif canonical_value(record_target) == cause_target:
-                exact.append(record)
-                continue
-        record_obligation = getattr(record, "proof_obligation_id", None)
-        if (
-            record_obligation is not None and requirements
-            and type(record_obligation) is not BoundedEvidence
-        ):
-            if str(canonical_value(record_obligation)) in requirement_texts():
-                exact.append(record)
-                continue
-    if exact or by_fingerprint:
-        return tuple(exact) + tuple(by_fingerprint), (MATCH_EXACT if exact else MATCH_FINGERPRINT)
+    # cause の key: canonical fingerprint を `work` の中で 1 回だけ求める（key の大きさを数えた
+    # ことになる）。求められたときだけ、key で索引を引く（引く hash も key の大きさに比例する）
+    cause_fingerprint = None
+    if cause_target is not None:
+        try:
+            cause_fingerprint = canonical_fingerprint(cause_target, work=work)
+        except (JsonBudgetExhausted, CanonicalValueCycle) + PRODUCER_FAILURES:
+            cause_fingerprint = None
+    by_target: set = set()
+    by_fingerprint: set = set()
+    if cause_fingerprint is not None:
+        try:
+            by_target = set(group.by_target.get(cause_target, ()))
+        except TypeError:
+            by_target = set()
+        by_fingerprint = set(group.by_fingerprint.get(cause_fingerprint, ()))
+    by_obligation: set = set()
+    if requirements and group.by_obligation:
+        for text_value in requirement_texts():
+            by_obligation.update(group.by_obligation.get(text_value, ()))
+    # 旧来の規則: key が一致した record と、fingerprint で一致しなかった record のうち obligation が
+    # 一致したものが exact（元の並び）、fingerprint で一致したものはその後
+    exact_positions = sorted(by_target | (by_obligation - by_fingerprint))
+    fingerprint_positions = sorted(by_fingerprint)
+    try:
+        work.charge(len(exact_positions) + len(fingerprint_positions))
+    except JsonBudgetExhausted:
+        pass  # 引いた位置は数え済みの索引の中（使い切りは次の照合で分かる）
+    exact = [group.records[position] for position in exact_positions]
+    by_fingerprint_records = [group.records[position] for position in fingerprint_positions]
+    if exact or by_fingerprint_records:
+        return tuple(exact) + tuple(by_fingerprint_records), (MATCH_EXACT if exact else MATCH_FINGERPRINT)
     # 1:1 は legacy の reason を全部残したときだけ（先頭だけを残したなら、残さなかった record
     # にも同じ reason id があり得る）
     if (

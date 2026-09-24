@@ -1672,7 +1672,15 @@ def test_one_json_policy_is_shared_by_the_estimator_encoder_and_cli():
                 and node.attr in {"dumps", "dump"}
             ):
                 cli_dumps.append(node.lineno)
-    assert instantiations == ["core/json_encoding.py"], instantiations
+    # policy を作るのは json_encoding だけ（結果 JSON と、同じ文字列の規則で区切りだけ詰める
+    # 永続化の envelope の 2 つ）
+    assert instantiations == ["core/json_encoding.py"] * 2, instantiations
+    from scripts.function_tracer_pcode.core import json_encoding
+
+    persisted = json_encoding.PERSISTED_ENVELOPE_JSON_POLICY
+    assert (persisted.ensure_ascii, persisted.sort_keys) == (
+        json_encoding.RESULT_JSON_POLICY.ensure_ascii, json_encoding.RESULT_JSON_POLICY.sort_keys,
+    )
     # 結果 JSON の文字列は envelope（bounded encoder）からしか来ない
     assert cli_dumps == [], cli_dumps
 
@@ -2112,7 +2120,7 @@ _PR22D_FUNCTIONS = {
         "bounded_prefix", "finitize_unknown_reason_record", "finitize_unknown_recovery_action",
         "_bounded_value", "_bounded_text", "_match_legacy_reasons", "build_projection_diagnostic",
         "_bounded_cause_value", "projection_diagnostic_work", "_ReasonCounts", "_RecoveryBacklog",
-        "_BacklogEntryView", "_PrimaryFilter", "LegacyReasonIndex", "legacy_reason_index", "_text_cost",
+        "_BacklogEntryView", "_PrimaryFilter", "LegacyReasonIndex", "legacy_reason_index", "_text_cost", "_LegacyReasonGroup", "_inline_canonical",
         "recovery_actions_source", "_iter_recovery_actions", "_key_width",
     },
     "checker/cause_aggregate.py": {
@@ -2154,8 +2162,10 @@ _REGISTERED_BOUNDED_WORK = {
         "G4-b で有界化した legacy の key（inline の上限以下か `BoundedEvidence`）",
     ("checker/unknown_reason.py", "_bounded_cause_value", "canonical_value"):
         "`bounded_evidence` が inline の上限以下と確かめた plain な値だけ",
-    ("checker/unknown_reason.py", "_match_legacy_reasons", "canonical_value"):
-        "有界化で inline のまま残った小さい値だけ（大きい値は fingerprint で照合）",
+    ("checker/unknown_reason.py", "_match_legacy_reasons", "sorted"):
+        "索引で一致した位置（件数は索引に入れた record 以下で、索引を作るときに数え済み）",
+    ("checker/unknown_reason.py", "_inline_canonical", "canonical_value"):
+        "大きさを `work` へ数えた後の、有界化で inline のまま残った小さい値だけ（索引を作るとき 1 回）",
 }
 #: J7 の登録: 上限なしの予算を作ってよい場所 → なぜ
 _REGISTERED_UNBOUNDED_BUDGETS = {

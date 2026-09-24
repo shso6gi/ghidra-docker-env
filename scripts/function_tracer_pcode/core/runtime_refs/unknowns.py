@@ -287,8 +287,26 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
     return _canonical_budget_value_within(value, depth, work=JsonBudget(None))
 
 
-def _key_cost(key: Any) -> int:
-    return len(key) if isinstance(key, str) else 1
+def _charge_key(key: Any, work: Any) -> None:
+    """mapping の key を `str(key)` にする手間を、作る前に数える。
+
+    scalar は長さ（数値は桁数の上限）。それ以外（tuple の key など）は、書いたときの大きさを
+    `work` の残りの中で数える（大きさに比例する `str()` を数える前に作らない）。
+    """
+
+    if isinstance(key, str):
+        work.charge(1 + len(key))
+    elif key is None or isinstance(key, (bool, float)):
+        work.charge(8)
+    elif isinstance(key, int):
+        work.charge(1 + key.bit_length() // 3)
+    else:
+        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonValueRejected
+
+        try:
+            work.charge(1 + RESULT_JSON_POLICY.measure(key, max_bytes=work.remaining(), mode="legacy"))
+        except JsonValueRejected:
+            work.charge(1 + len(type(key).__qualname__))
 
 
 def _canonical_budget_value_within(value: Any, depth: int = 0, *, work: Any) -> Any:
@@ -320,7 +338,7 @@ def _canonical_budget_value_within(value: Any, depth: int = 0, *, work: Any) -> 
     if isinstance(value, Mapping):
         work.charge(1 + len(value))
         for key in value:
-            work.charge(_key_cost(key))
+            _charge_key(key, work)
         return {
             str(key): _canonical_budget_value_within(item, depth + 1, work=work)
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
@@ -351,6 +369,7 @@ def _canonical_budget_source(value: Any, depth: int = 0, *, work: Any) -> Any:
     if isinstance(value, float):
         return repr(value)
     if isinstance(value, bytes):
+        work.charge(1 + 2 * len(value))
         return each(("bytes", value.hex()))
     if isinstance(value, (list, tuple)):
         return each(value, lambda item: _canonical_budget_source(item, depth + 1, work=work))
@@ -366,7 +385,7 @@ def _canonical_budget_source(value: Any, depth: int = 0, *, work: Any) -> Any:
     if isinstance(value, Mapping):
         work.charge(1 + len(value))
         for key in value:
-            work.charge(_key_cost(key))
+            _charge_key(key, work)
         return pairs_of(
             (str(key), _canonical_budget_source(item, depth + 1, work=work))
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))

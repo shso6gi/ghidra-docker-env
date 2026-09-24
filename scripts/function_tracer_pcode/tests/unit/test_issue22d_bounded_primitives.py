@@ -1123,3 +1123,102 @@ def test_small_live_evidence_is_summarized_like_large_live_evidence():
     small = RESULT_JSON_POLICY.prepare(evidence((_Plain.A,))).value()
     large = RESULT_JSON_POLICY.prepare(evidence(("x" * 5_000, object()))).value()
     assert small["bounded_evidence"] == "v2" and large["bounded_evidence"] == "v2"
+
+
+def test_scope_key_bytes_and_non_str_keys_are_charged_before_they_are_built():
+    from scripts.function_tracer_pcode.core.runtime_refs.unknowns import ExpansionBudgetTruncation
+
+    for scope in ((b"\x00" * 20_000_000,), ({tuple(range(2_000_000)): 1},)):
+        record = ExpansionBudgetTruncation(kind="k")
+        object.__setattr__(record, "owner_scope_key", scope)
+        object.__setattr__(record, "_event_id_cache", "e" * 64)
+        started = time.perf_counter()
+        _, _, peak = _measured(lambda: pytest.raises(JsonBudgetExhausted, RESULT_JSON_POLICY.prepare, record, max_bytes=100))
+        assert time.perf_counter() - started < 0.5
+        assert peak < 8 * 1024 * 1024
+
+
+def _reference_match(reason_id, cause, legacy, counts):
+    """旧来の照合（cause ごとに legacy を全部比べる）。索引の照合と同じ結果になること。"""
+
+    from scripts.function_tracer_pcode.authority.contracts import authority_digest, canonical_value
+
+    candidates = tuple(record for record in legacy if record.reason_id == reason_id)
+    if not candidates:
+        return (), None
+    target = cause.cause_id.canonical_target_key
+    texts = {str(item) for item in cause.proof_requirement_ids}
+    exact, by_fingerprint = [], []
+    for record in candidates:
+        key = record.object_target_key
+        if key is not None and target is not None:
+            if type(key) is BoundedEvidence:
+                if key.fingerprint_kind == "canonical_sha256" and key.fingerprint == authority_digest(target):
+                    by_fingerprint.append(record)
+                    continue
+            elif canonical_value(key) == target:
+                exact.append(record)
+                continue
+        obligation = record.proof_obligation_id
+        if obligation is not None and texts and type(obligation) is not BoundedEvidence:
+            if str(canonical_value(obligation)) in texts:
+                exact.append(record)
+                continue
+    if exact or by_fingerprint:
+        return tuple(exact) + tuple(by_fingerprint), ("exact" if exact else "fingerprint")
+    if len(candidates) == 1 and counts.get(reason_id, 0) == 1:
+        return candidates, "unique"
+    return (), None
+
+
+def test_indexed_legacy_matching_equals_the_per_candidate_comparison():
+    import random as _random
+
+    from scripts.function_tracer_pcode.authority.contracts import canonical_value
+    from scripts.function_tracer_pcode.checker.unknown_reason import (
+        MATCH_EXACT,
+        MATCH_FINGERPRINT,
+        MATCH_UNIQUE,
+        _match_legacy_reasons,
+        legacy_reason_index,
+    )
+
+    names = {MATCH_EXACT: "exact", MATCH_FINGERPRINT: "fingerprint", MATCH_UNIQUE: "unique", None: None}
+    rng = _random.Random(9)
+    keys = [("k", 1), ("k", 2), ("big",) + tuple(range(3_000)), None]
+    obligations = [None, ("o", 1), ("o", 2)]
+    for _ in range(200):
+        legacy = []
+        for index in range(rng.randint(0, 6)):
+            record = dataclasses.replace(
+                make_unknown_reason(rng.choice(["unknown", "unknown", "other"]), stage=f"S{index}"),
+                object_target_key=rng.choice(keys), proof_obligation_id=rng.choice(obligations),
+            )
+            legacy.append(finitize_unknown_reason_record(record, work=JsonBudget(1 << 22)))
+        target = rng.choice(keys)
+        requirements = tuple(str(canonical_value(item)) for item in rng.sample(obligations[1:], rng.randint(0, 2)))
+        cause = _cause(target, requirements) if target is not None else SimpleNamespace(
+            cause_id=SimpleNamespace(canonical_target_key=None), proof_requirement_ids=requirements,
+        )
+        counts = {"unknown": rng.randint(1, 2)}
+        work = JsonBudget(1 << 22)
+        index = legacy_reason_index(legacy, work=work)
+        matched, kind = _match_legacy_reasons("unknown", cause, index, counts, work=work)
+        assert (matched, names[kind]) == _reference_match("unknown", cause, legacy, counts)
+
+
+def test_legacy_matching_does_not_compare_every_cause_with_every_record():
+    from scripts.function_tracer_pcode.checker.unknown_reason import _match_legacy_reasons, legacy_reason_index
+
+    legacy = [
+        dataclasses.replace(make_unknown_reason("unknown", stage=f"S{index}"),
+                            object_target_key=("t", index, "x" * 1_500))
+        for index in range(256)
+    ]
+    work = JsonBudget(1 << 26)
+    index = legacy_reason_index(legacy, work=work)
+    started = time.perf_counter()
+    for number in range(2_000):
+        _match_legacy_reasons("unknown", _cause(("t", number % 300, "x" * 1_500)), index, {"unknown": 2_000}, work=work)
+    # 2,000 cause × 256 record の比較（約 51 万回の canonical 化）をしない
+    assert time.perf_counter() - started < 2.0
