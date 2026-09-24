@@ -224,6 +224,17 @@ def _truncation_marker(
     return marker
 
 
+def _marker_upper_bytes(encoding: JsonEncodingPolicy, key: str, source: Any, limit: Optional[int]) -> int:
+    """`source` の切り詰め marker を書いたときの byte の上限（拒んだ場所の path を最長にして数える）。"""
+
+    from scripts.function_tracer_pcode.checker.output_schema import MARKER_PATH_MAX_CHARS
+
+    widest = JsonValueRejected("", path="$" * MARKER_PATH_MAX_CHARS)
+    return encoding.prepare(
+        _truncation_marker(key, source, remaining_bytes=limit, rejected=widest),
+    ).encoded_bytes
+
+
 class _ReadFailed:
     """読み方が落ちた field の値（`JsonValueRejected` を持つ）。"""
 
@@ -591,20 +602,13 @@ def _field_order() -> Dict[str, int]:
 #: A の field が読む結果の属性。準備の後にこれらを **差し替える** のは内部バグ
 #: （準備済みの値が結果を表さなくなる）で、`EquivalenceResult.__setattr__` が拒む。
 #: 読み方と一致していることは architecture test が AST で確かめる。
-PREPARED_SOURCE_ATTRIBUTES = frozenset({
-    "function1_name", "function2_name", "binary1_name", "binary2_name",
-    "function1_identity", "function2_identity",
-    "function1_signature", "function2_signature",
-    "effective_function1_signature", "effective_function2_signature",
-    "function1_signature_hypotheses", "function2_signature_hypotheses",
-    "solver_results", "counterexample", "type_fix_result", "retry_count",
-    "constrained_fragments", "sat_pair_info",
-    "completed_recovery_proof_evidence", "reason_completion_applicability_contexts",
-    "call_effect_shadow_manifest", "call_proof_terminal_provenance",
-    "recurrence_promotion_receipt", "decisive_proof_provenance",
-    "identical_fast_path_disposition", "identical_function_identity_evidence",
-    "mips64_abi_constraints", "debug_trace", "smt_formula",
-})
+PREPARED_SOURCE_ATTRIBUTES = frozenset(
+    # A の読み方は field と同名の結果の属性を読む（`test_prepared_readers_read_only_the_declared_
+    # source_attributes` が読み方の AST と照らす）。A の行を足せばここは自動で追従する
+    [item.key for item in RESULT_FIELDS if item.owner is FieldOwner.PREPARED]
+    # 成果物として準備する SMT 式（field ではない）
+    + ["smt_formula"]
+)
 
 
 def fields_owned_by(owner: FieldOwner) -> Tuple[str, ...]:
@@ -1360,10 +1364,12 @@ class OutputMetadata:
 
         * 切り詰めてはいけない field を先に、出力 schema の上限の中で準備する（超えれば違反）。
         * 切り詰めてよい診断は、先に準備した診断の本体が後の field の場所を使い切らないように、
-          field ごとの場所を予約してから準備する: まず marker の上限の中で試し、収まった field は
-          その値（大きさ = 予約）で確定する。収まらない field は marker の上限を予約し、順に予約を
-          外して残りの予算で本体（入らなければ marker）を準備する。headroom は marker の上限の和を
-          含むので、どの field も marker 以上は必ず出る（黙って消えない）。
+          field ごとの場所を予約してから準備する: field ごとに marker の大きさ（その source の
+          marker を、拒んだ場所の path を最長にして書いた byte）を求め、本体をその中で試す。収まる
+          field は本体で確定し（切り詰めても byte は減らない）、その大きさを予約する。収まらない
+          field は marker の大きさを予約し、順に予約を外して残りの予算で本体（入らなければ
+          marker）を準備する。予約の和が入らなければ出力の契約違反（headroom は marker の上限の和
+          を含むので、契約どおりの設定では起きない）。どの field も黙って消えない。
         """
 
         from scripts.function_tracer_pcode.checker.output_schema import metadata_field_bounds
@@ -1388,17 +1394,25 @@ class OutputMetadata:
             if source is ABSENT:
                 continue
             order.append(item.key)
+            marker_bytes = _marker_upper_bytes(encoding, item.key, source, members.max_bytes)
             try:
                 if type(source) is _ReadFailed:
                     raise source.rejected
-                small = encoding.prepare(source, max_bytes=bounds[item.key].max_bytes)
+                small = encoding.prepare(source, max_bytes=marker_bytes)
             except (JsonBudgetExhausted, JsonValueRejected):
                 large.append(item)
-                members.reserve(item.key, bounds[item.key].max_bytes)
+                members.reserve(item.key, marker_bytes)
                 continue
             rows[item.key] = PreparedField(item.key, small, "json")
             small_keys.append(item.key)
             members.reserve(item.key, small.encoded_bytes)
+        room = members.room()
+        if room is not None and room < 0:
+            raise _violation(
+                "the truncatable metadata does not fit even as markers "
+                f"(prepared {prepared.plan.prepared_bytes}, headroom {prepared.plan.headroom_bytes})",
+                members,
+            )
         for item in large:
             members.release_reservation(item.key)
             # source は読み直す（1 回目の試しで遅延列を辿った）
@@ -1535,8 +1549,8 @@ def finalize_result_envelope(
 
     封印が残りに収まらず、preimage に切り詰めてよい診断（C）があれば、封印の大きさ（契約の
     上限の中で数えた値）を先に空けて組み直し（`recompose`）、封印し直す。封印は preimage の
-    digest を持つので、preimage が変われば作り直す（大きさは preimage の中身に依らない）。
-    それでも収まらなければ出力の契約違反。
+    digest を持つので、preimage が変われば作り直す。封印の大きさは preimage の中身に依存し得る
+    ので、作り直した封印も残りの予算の中で準備し直し、それでも収まらなければ出力の契約違反。
     """
 
     prepared, preimage, members, truncated = (

@@ -352,8 +352,11 @@ EVIDENCE_INLINE_BYTES = 2048
 #: 要約の identity / kind の最大文字数（schema 上の上限）
 EVIDENCE_IDENTITY_MAX_CHARS = 96
 EVIDENCE_KIND_MAX_CHARS = 64
-#: `text()` が超えたときに足す marker の最大文字数（schema 上の上限）
-TEXT_MARKER_MAX_CHARS = 64
+#: 長い文字列の marker に入れる識別の窓（`work` を使い切ったときの有界な digest の範囲）
+TEXT_MARKER_WINDOW_CHARS = 4096
+#: `text()` が超えたときに足す marker の最大文字数（schema 上の上限。marker の書式から導く:
+#: `…[+<最大 20 桁> chars sha256w:<64 桁>]`）
+TEXT_MARKER_MAX_CHARS = len("…[+") + 20 + len(" chars sha256w:") + 64 + len("]")
 
 
 #: 有界な証拠の文字列 field に許す文字（JSON で escape されない印字可能な ASCII）。
@@ -451,6 +454,19 @@ EVIDENCE_SUMMARY_MAX_BYTES = (
     + len('"encoded_bytes_over": ') + 20
     + len('"unfingerprinted": ') + 2 + EVIDENCE_KIND_MAX_CHARS
 )
+
+
+def text_value_max_bytes(policy: "JsonEncodingPolicy", max_chars: int) -> int:
+    """`text(value, max_chars)` が書く値の byte の上限（**唯一の定義**）。
+
+    文字列は `max_chars` 文字以内ならそのまま、超えれば先頭 + marker で `max(max_chars,
+    TEXT_MARKER_MAX_CHARS)` 文字以内（`_text_marker`）。文字列でない値は、その上限以下なら
+    そのまま、超えれば有界な証拠の要約（`EVIDENCE_SUMMARY_MAX_BYTES` 以下）。
+    """
+
+    return max(
+        4, policy.max_string_bytes(max(int(max_chars), TEXT_MARKER_MAX_CHARS)), EVIDENCE_SUMMARY_MAX_BYTES,
+    )
 
 
 #: fingerprint を求められなかった理由（`BoundedEvidence.unfingerprinted`）
@@ -552,7 +568,7 @@ class Column:
 
     def max_value_bytes(self, policy: "JsonEncodingPolicy") -> int:
         if self.kind == TEXT:
-            return max(4, policy.max_string_bytes(self.max_chars + TEXT_MARKER_MAX_CHARS))
+            return text_value_max_bytes(policy, self.max_chars)
         if self.kind == EVIDENCE:
             inline = EVIDENCE_INLINE_BYTES if self.inline_bytes is None else self.inline_bytes
             return max(4, inline, EVIDENCE_SUMMARY_MAX_BYTES)
@@ -1108,8 +1124,10 @@ def _source_value_or_self(value: Any) -> Any:
 def bounded_text(value: Any, max_chars: int, *, work: "JsonBudget") -> Any:
     """`value` が `max_chars` 文字を超える文字列なら、先頭 + 明示の marker に置き換える。
 
-    marker の hash（長い文字列どうしを区別する手がかり）は、文字列の長さを `work` へ数えて
-    から求める。`work` に収まらなければ hash の無い marker（先頭と長さだけ）にする。
+    marker は必ず識別の digest を持つ（marker の文字列を集計の key にする consumer がいる）:
+    * 文字列の長さを `work` へ数えられれば、全体の SHA-256（`sha256:`）。
+    * 数えられなければ、長さと先頭・末尾 `TEXT_MARKER_WINDOW_CHARS` 文字の SHA-256
+      （`sha256w:`。範囲が有界な digest で、長さと先頭・末尾が同じ別の文字列とは区別しない）。
     """
 
     if isinstance(value, str) and len(value) > max_chars:
@@ -1120,7 +1138,10 @@ def bounded_text(value: Any, max_chars: int, *, work: "JsonBudget") -> Any:
             except JsonBudgetExhausted:
                 pass
             else:
-                digest = _string_sha256(value)
+                digest = "sha256:" + _string_sha256(value)
+        if digest is None:
+            _charge_quietly(work, 2 * TEXT_MARKER_WINDOW_CHARS)
+            digest = "sha256w:" + _window_sha256(value)
         return _text_marker(value, max_chars, digest)
     return value
 
@@ -1130,13 +1151,22 @@ def _string_sha256(value: str) -> str:
     for start in range(0, len(value), _STRING_CHUNK):
         # 巨大な文字列を一度に encode しない（chunk ごとに hash へ流す）
         hasher.update(value[start:start + _STRING_CHUNK].encode("utf-8", "surrogatepass"))
-    return hasher.hexdigest()[:16]
+    return hasher.hexdigest()
+
+
+def _window_sha256(value: str) -> str:
+    """長さと先頭・末尾の窓だけの SHA-256（範囲は `2 * TEXT_MARKER_WINDOW_CHARS` 文字で有界）。"""
+
+    hasher = hashlib.sha256(str(len(value)).encode("ascii") + b"\x1f")
+    hasher.update(value[:TEXT_MARKER_WINDOW_CHARS].encode("utf-8", "surrogatepass") + b"\x1f")
+    hasher.update(value[-TEXT_MARKER_WINDOW_CHARS:].encode("utf-8", "surrogatepass"))
+    return hasher.hexdigest()
 
 
 def _text_marker(value: str, max_chars: int, digest: Optional[str]) -> str:
     """`max_chars` 文字 **以内** に収まる「先頭 + 明示の marker」（同じ上限で冪等）。"""
 
-    note = f" sha256:{digest}" if digest is not None else ""
+    note = f" {digest}" if digest is not None else ""
     keep = max(0, max_chars - TEXT_MARKER_MAX_CHARS)
     tail = f"…[+{len(value) - keep} chars{note}]"
     keep = max(0, max_chars - len(tail))
@@ -1788,7 +1818,7 @@ class _Walk:
                     _Evidence(
                         value, None,
                         refresh=None if not isinstance(value, _AbcIterator) else _refuse_refresh,
-                        inline_bytes=self.policy.max_string_bytes(item.max_chars + TEXT_MARKER_MAX_CHARS),
+                        inline_bytes=text_value_max_bytes(self.policy, item.max_chars),
                     ),
                     parent, key, build,
                 )
@@ -2010,6 +2040,16 @@ class JsonObjectBudget:
         )
         return self.max_bytes - total - added
 
+    def room(self) -> Optional[int]:
+        """足した member と予約をすべて差し引いた残り（負なら予約が上限を超えている）。"""
+
+        if self.max_bytes is None:
+            return None
+        count = self._count + len(self._reserved)
+        return self.max_bytes - (
+            self.policy.container_frame_bytes(count) + self._members + sum(self._reserved.values())
+        )
+
     def reserve(self, key: Any, value_bytes: int) -> None:
         """後で `key` に `value_bytes` の値を足すための byte を空けておく（他の member の残りから引く）。
 
@@ -2115,6 +2155,7 @@ __all__ = [
     "PreparedJson",
     "RESULT_JSON_POLICY",
     "TEXT_MARKER_MAX_CHARS",
+    "text_value_max_bytes",
     "UNFINGERPRINTED_CYCLE",
     "UNFINGERPRINTED_UNSUPPORTED",
     "UNFINGERPRINTED_WORK_EXHAUSTED",

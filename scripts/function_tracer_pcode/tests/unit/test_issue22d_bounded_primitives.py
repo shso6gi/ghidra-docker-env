@@ -189,8 +189,9 @@ def test_a_huge_string_the_producer_already_holds_is_not_hashed_past_the_work():
     finitized, elapsed, peak = _measured(
         lambda: finitize_unknown_reason_record(record, work=JsonBudget(1 << 20)),
     )
-    # marker は先頭と長さだけ（hash を求める作業量が無い）。128 MB を hash・写しない
-    assert "sha256" not in finitized.detail and "chars" in finitized.detail
+    # 全体の hash を求める作業量が無い: marker は先頭・長さと、先頭・末尾の窓の digest だけ
+    # （128 MB を hash・写しない。marker を集計の key にしても digest が無い marker にならない）
+    assert "sha256w:" in finitized.detail and " sha256:" not in finitized.detail
     assert len(finitized.detail) <= 1024
     assert elapsed < 0.5 and peak < 4 * 1024 * 1024
 
@@ -1222,3 +1223,42 @@ def test_legacy_matching_does_not_compare_every_cause_with_every_record():
         _match_legacy_reasons("unknown", _cause(("t", number % 300, "x" * 1_500)), index, {"unknown": 2_000}, work=work)
     # 2,000 cause × 256 record の比較（約 51 万回の canonical 化）をしない
     assert time.perf_counter() - started < 2.0
+
+
+def test_recompose_with_the_real_seal_in_a_regime_the_production_validator_accepts():
+    from scripts.function_tracer_pcode.authority.decision import canonical_result
+    from scripts.function_tracer_pcode.checker.output_preparation import OutputPreparer
+    from scripts.function_tracer_pcode.checker.output_schema import (
+        required_headroom_bytes,
+        validate_envelope_headroom,
+    )
+
+    # 本番の検査が受け入れる設定（headroom = schema から導いた下限）で、封印も本物
+    headroom = required_headroom_bytes()
+    policy = BudgetPolicy(serialization_bytes=headroom + 64 * 1024, envelope_headroom_bytes=headroom)
+    validate_envelope_headroom(policy)
+    result = _decided_result()
+    result.prepared_semantic_payload = OutputPreparer(policy).prepare(
+        result, result.prepared_semantic_payload.options,
+    )
+    evidence, session = result._canonical_finalization_context
+
+    def seal(preimage):
+        return canonical_result.build_canonical_result_finalization_bundle(
+            result_payload_preimage=preimage, evidence=evidence, session=session,
+        )
+
+    natural = build_final_result_envelope(result, seal=seal)
+    bundle_bytes = RESULT_JSON_POLICY.measure(natural.payload[BUNDLE_KEY])
+    # 診断の本体だけなら収まるが、本体と封印は収まらない大きさ
+    free = natural.plan.max_bytes - natural.total_bytes
+    result.pairwise_stats = {"pad": "p" * (free + bundle_bytes // 2)}
+    envelope = build_final_result_envelope(result, seal=seal)
+    assert envelope.total_bytes <= envelope.plan.max_bytes == natural.plan.max_bytes
+    # 封印の場所は、切り詰めてよい診断を marker にして空ける（どれを切るかは順と大きさで決まる）
+    assert envelope.truncated_metadata
+    assert all(envelope.payload[key]["truncated"] is True for key in envelope.truncated_metadata)
+    preimage = {key: value for key, value in envelope.payload.items() if key != BUNDLE_KEY}
+    canonical_result.validate_canonical_result_finalization_bundle(
+        envelope.payload[BUNDLE_KEY], result_payload_preimage=preimage,
+    )

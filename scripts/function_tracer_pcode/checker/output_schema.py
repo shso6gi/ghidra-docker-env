@@ -43,6 +43,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     RESULT_JSON_POLICY,
     TEXT,
     TEXT_MARKER_MAX_CHARS,
+    text_value_max_bytes,
     Column,
     JsonEncodingPolicy,
     row_max_bytes,
@@ -77,7 +78,7 @@ MARKER_PATH_MAX_CHARS = 200
 
 
 def _text_bytes(policy: JsonEncodingPolicy, max_chars: int) -> int:
-    return max(4, policy.max_string_bytes(max_chars + TEXT_MARKER_MAX_CHARS))
+    return text_value_max_bytes(policy, max_chars)
 
 
 def _array_bytes(policy: JsonEncodingPolicy, rows: int, row_bytes: int) -> int:

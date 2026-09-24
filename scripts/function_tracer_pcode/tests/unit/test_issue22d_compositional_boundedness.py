@@ -494,7 +494,7 @@ def test_h3_the_schema_derived_headroom_holds_a_worst_case_authority_output(monk
     result = _decided_result()
     result.unknown_reasons = [shell] * 4
     result.unknown_recovery_actions = []
-    long_id = "\x01" * (output_schema.ID_MAX_CHARS + output_schema.TEXT_MARKER_MAX_CHARS)
+    long_id = "\x01" * max(output_schema.ID_MAX_CHARS, output_schema.TEXT_MARKER_MAX_CHARS)
     row = {name.key: long_id for name in output_schema.C_ACTIVE_BASE_ROW}
     result.canonical_c_active_base = tuple(dict(row) for _ in range(8))
     result.error_message = "\x00" * output_schema.MESSAGE_MAX_CHARS
@@ -515,7 +515,7 @@ def test_h3_the_schema_derived_headroom_holds_a_worst_case_authority_output(monk
 def test_h4_authority_output_beyond_its_schema_is_an_invariant_violation(monkeypatch):
     result = _decided_result()
     # 最悪の行（列ごとの上限いっぱい・最悪の escape）で、行数の上限を 1 行超える
-    worst = "\x01" * (output_schema.ID_MAX_CHARS + output_schema.TEXT_MARKER_MAX_CHARS)
+    worst = "\x01" * max(output_schema.ID_MAX_CHARS, output_schema.TEXT_MARKER_MAX_CHARS)
     row = {column.key: worst for column in output_schema.C_ACTIVE_BASE_ROW}
     result.canonical_c_active_base = tuple(dict(row) for _ in range(output_schema.MAX_RELATION_ROWS + 1))
     with pytest.raises(OutputEnvelopeInvariantViolation, match="schema bound"):

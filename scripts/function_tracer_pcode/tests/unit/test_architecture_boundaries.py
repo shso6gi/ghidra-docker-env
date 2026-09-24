@@ -2144,6 +2144,8 @@ _REGISTERED_BOUNDED_WORK = {
         "token 列の hash（流す token は walker が `work` へ数える）",
     ("core/json_encoding.py", "_printable_identity", "sha256"):
         "96 文字以下に切った identity の hash",
+    ("core/json_encoding.py", "_window_sha256", "sha256"):
+        "長さと先頭・末尾の窓（`2 * TEXT_MARKER_WINDOW_CHARS` 文字）だけの hash",
     ("core/json_encoding.py", "_string_sha256", "sha256"):
         "長い文字列の marker の hash（`bounded_text` が長さを `work` へ数えてから呼ぶ）",
     ("core/json_encoding.py", "_Walk.push", "sort"):
@@ -2417,6 +2419,8 @@ _REGISTERED_UNBOUNDED_WALKS = {
     ("checker/output_preparation.py", "OutputPreparer._prepare_cause_evidence"):
         "scalar だけの固定の形の marker",
     ("checker/output_preparation.py", "OutputPreparer._prepare_trace_timings"):
+        "scalar だけの固定の形の marker（`_truncation_marker`。schema の上限あり）",
+    ("checker/output_preparation.py", "_marker_upper_bytes"):
         "scalar だけの固定の形の marker（`_truncation_marker`。schema の上限あり）",
     ("checker/output_preparation.py", "OutputPreparer._prepare_limitation_evidence"):
         "scalar だけの固定の形の marker",

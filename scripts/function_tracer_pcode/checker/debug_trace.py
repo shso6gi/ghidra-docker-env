@@ -555,8 +555,12 @@ class _PhaseUsageFold:
             }
         return row
 
+    #: phase の行 1 つの手間（固定の形: 11 の field と 7 の遷移の件数）
+    ROW_COST = 32
+
     def cost(self, attempt: Any) -> int:
-        return 0
+        # 新しい phase は行を 1 つ作る（行の数は phase の数で、attempt の数ではない）
+        return 0 if attempt.phase in self.rows else self.ROW_COST
 
     def add(self, attempt: Any) -> None:
         row = self._row(attempt.phase)
