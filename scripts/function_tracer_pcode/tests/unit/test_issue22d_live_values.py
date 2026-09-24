@@ -813,3 +813,45 @@ def test_the_error_is_persisted_only_after_everything_it_writes_was_built(monkey
             binary1_path="/tmp/a", binary2_path="/tmp/b", func_name1="f", func_name2="f", start_time=0.0,
         )
     assert order.index("text") < order.index("persist") < order.index("output")
+
+
+def test_an_unknown_value_origin_is_rendered_without_its_repr():
+    from scripts.function_tracer_pcode.core.runtime_refs.unknowns import UnknownValueRef
+
+    class _Origin:
+        def __repr__(self):
+            _Heavy.calls += 1
+            return "r" * 20_000_000
+
+    prepared = RESULT_JSON_POLICY.prepare(UnknownValueRef(kind="unknown", origin_ref=_Origin()), max_bytes=1 << 20).value()
+    assert prepared["origin_ref"][0] == "repr" and prepared["origin_ref"][-1].endswith("_Origin>")
+    assert _Heavy.calls == 0
+
+
+def test_container_checks_do_not_read_a_spoofed_class():
+    from scripts.function_tracer_pcode.core.builtin_containers import builtin_mapping, builtin_sequence
+
+    class _Spoof:
+        @property
+        def __class__(self):  # noqa: D401 - isinstance が読む上書きした `__class__`
+            _Heavy.calls += 1
+            return dict
+
+    assert builtin_mapping(_Spoof()) is None and builtin_sequence(_Spoof()) is False
+    assert _Heavy.calls == 0
+
+
+def test_str_subclasses_are_read_through_the_base_slots():
+    class _Str(str):
+        def __len__(self):
+            _Heavy.calls += 1
+            return 10 ** 9
+
+        def __radd__(self, other):
+            _Heavy.calls += 1
+            return other
+
+    value = _Str("abc")
+    assert RESULT_JSON_POLICY.prepare({"k": value}, max_bytes=100).value() == {"k": "abc"}
+    RESULT_JSON_POLICY.token_fingerprint(("x", value), work=JsonBudget(1 << 20))
+    assert _Heavy.calls == 0
