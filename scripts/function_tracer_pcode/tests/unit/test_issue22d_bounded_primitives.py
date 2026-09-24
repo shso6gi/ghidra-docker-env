@@ -323,24 +323,26 @@ def test_the_diagnostic_artifacts_share_one_budget():
 
 
 def test_the_tree_estimate_stops_on_the_distinct_node_total_across_siblings():
+    """兄弟の部分木がそれぞれ上限未満でも、distinct な node の合計で止まる（兄弟を全部数えない）。"""
+
     from scripts.function_tracer_pcode.core.expression import estimate_legacy_dict_bytes
 
-    siblings = []
-    for branch in range(64):
-        chain = Expression(ExpressionType.CONSTANT, value=branch, size=4)
-        for depth in range(2_000):
-            chain = Expression.binary_op("+", chain, Expression(ExpressionType.CONSTANT, value=depth, size=4))
-        siblings.append(chain)
-    root = siblings[0]
-    for sibling in siblings[1:]:
-        root = Expression.binary_op("+", root, sibling)
-    limit = 200_000
+    def chain(seed, length):
+        node = Expression(ExpressionType.CONSTANT, value=seed, size=4)
+        for depth in range(length):
+            node = Expression.binary_op("+", node, Expression(ExpressionType.CONSTANT, value=depth, size=4))
+        return node
+
+    one = estimate_legacy_dict_bytes(chain(0, 600), max_bytes=None)
+    limit = int(one / 0.6)
+    # 1 つの node の直接の子が 64 本の独立な chain（どれも上限の 6 割）
+    root = Expression(ExpressionType.BINARY_OP, operator="+", operands=[chain(seed, 600) for seed in range(64)], size=4)
     estimate, elapsed, _ = _measured(lambda: estimate_legacy_dict_bytes(root, max_bytes=limit))
     assert estimate == limit + 1
     full, full_elapsed, _ = _measured(lambda: estimate_legacy_dict_bytes(root, max_bytes=None))
-    assert full > limit
-    # 上限で止まる見積りは、全部を数える見積りより十分に早い
-    assert elapsed < full_elapsed / 4
+    assert full > 30 * limit
+    # 上限で止まる見積りは 2 本目の途中で止まる（64 本を数える見積りより十分に早い）
+    assert elapsed < full_elapsed / 8
 
 
 # ---------------------------------------------------------------------------
