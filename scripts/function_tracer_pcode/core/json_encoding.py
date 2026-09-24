@@ -617,7 +617,9 @@ class JsonBudget:
     pair terminal な限界に変え、木の distinct node も数える。
     """
 
-    def __init__(self, max_bytes: Optional[int] = None) -> None:
+    def __init__(self, max_bytes: Optional[int]) -> None:
+        # 上限は必ず渡す（既定値なし）。`None` は上限なしで、作ってよい場所は登録してある
+        # （`tests/unit/test_architecture_boundaries.py` の J7）
         self.max_bytes = max_bytes
         self.consumed = 0
 

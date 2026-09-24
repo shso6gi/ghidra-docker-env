@@ -6,7 +6,9 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
-from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, materialize, pairs_of, raw)
+from scripts.function_tracer_pcode.core.json_encoding import (
+    JsonBudget, as_list, each, inline, is_json_record, materialize, metered, pairs_of, raw,
+)
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
@@ -272,32 +274,55 @@ _CANONICAL_BUDGET_MAX_DEPTH = 12
 
 
 def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
-    """決定的な JSON 化。
+    """決定的な JSON 化（producer 時点の identity: `stable_key` / `event_id`）。
 
     ``hash()``・オブジェクトアドレス・既定 ``repr`` には依存しない。表現できない
     object は型名だけの不透明値へ落とす（同一性を持ち込まない）。``stable_key`` が
     自分と同種の object を返し続ける実装（テスト用 Mock など）でも止まるよう、
-    深さで打ち切る。
+    深さで打ち切る。値の規則は `_canonical_budget_value_within`（1 つの実装）。
     """
 
-    if value is None or isinstance(value, (bool, int, str)):
+    # producer 時点の identity の構築（key の大きさの owner は identity。出力の準備は
+    # `_canonical_budget_source` が walk の作業量へ数える）
+    return _canonical_budget_value_within(value, depth, work=JsonBudget(None))
+
+
+def _key_cost(key: Any) -> int:
+    return len(key) if isinstance(key, str) else 1
+
+
+def _canonical_budget_value_within(value: Any, depth: int = 0, *, work: Any) -> Any:
+    """`_canonical_budget_value` の本体。容器は幅を、文字列は長さを `work` へ数えてから作る。"""
+
+    if value is None or isinstance(value, (bool, int)):
+        work.charge(1)
+        return value
+    if isinstance(value, str):
+        work.charge(1 + len(value))
         return value
     if depth >= _CANONICAL_BUDGET_MAX_DEPTH:
         return ["depth_limited", type(value).__module__, type(value).__qualname__]
     if isinstance(value, float):
         return repr(value)
     if isinstance(value, bytes):
+        work.charge(1 + 2 * len(value))
         return ["bytes", value.hex()]
     if isinstance(value, (list, tuple)):
-        return [_canonical_budget_value(item, depth + 1) for item in value]
+        work.charge(1 + len(value))
+        return [_canonical_budget_value_within(item, depth + 1, work=work) for item in value]
     if isinstance(value, (set, frozenset)):
+        work.charge(1 + len(value))
+        # 並びの key（要素の JSON）の長さは、要素を作るときに数えた量に比例する
         return sorted(
-            (_canonical_budget_value(item, depth + 1) for item in value),
+            (_canonical_budget_value_within(item, depth + 1, work=work) for item in value),
             key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True),
         )
     if isinstance(value, Mapping):
+        work.charge(1 + len(value))
+        for key in value:
+            work.charge(_key_cost(key))
         return {
-            str(key): _canonical_budget_value(item, depth + 1)
+            str(key): _canonical_budget_value_within(item, depth + 1, work=work)
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
         }
     stable_key = getattr(value, "stable_key", None)
@@ -307,15 +332,16 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
         except (AttributeError, TypeError, ValueError, RecursionError):
             key = None
         if key is not None:
-            return ["stable", _canonical_budget_value(key, depth + 1)]
+            return ["stable", _canonical_budget_value_within(key, depth + 1, work=work)]
     return ["opaque", type(value).__module__, type(value).__qualname__]
 
 
-def _canonical_budget_source(value: Any, depth: int = 0) -> Any:
-    """`_canonical_budget_value` と同じ値を 1 要素ずつ作らせる source。
+def _canonical_budget_source(value: Any, depth: int = 0, *, work: Any) -> Any:
+    """`_canonical_budget_value` と同じ値を 1 要素ずつ作らせる source（出力の準備用）。
 
-    集合だけは並びを決めるために要素の canonical な値を先に求める（旧実装と同じ順序。
-    集合の要素数ぶんの一時値で、集合自身の大きさに比例する）。
+    並べる前に幅を `work`（walk の作業量。`metered` が渡す）へ数える。集合だけは並びを
+    決めるために要素の canonical な値を先に求める（旧実装と同じ順序。作る量を `work` へ
+    数えながら）。
     """
 
     if value is None or isinstance(value, (bool, int, str)):
@@ -327,18 +353,22 @@ def _canonical_budget_source(value: Any, depth: int = 0) -> Any:
     if isinstance(value, bytes):
         return each(("bytes", value.hex()))
     if isinstance(value, (list, tuple)):
-        return each(value, lambda item: _canonical_budget_source(item, depth + 1))
+        return each(value, lambda item: _canonical_budget_source(item, depth + 1, work=work))
     if isinstance(value, (set, frozenset)):
+        work.charge(1 + len(value))
         ordered = sorted(
             value,
             key=lambda item: json.dumps(
-                _canonical_budget_value(item, depth + 1), ensure_ascii=False, sort_keys=True,
+                _canonical_budget_value_within(item, depth + 1, work=work), ensure_ascii=False, sort_keys=True,
             ),
         )
-        return each(ordered, lambda item: _canonical_budget_source(item, depth + 1))
+        return each(ordered, lambda item: _canonical_budget_source(item, depth + 1, work=work))
     if isinstance(value, Mapping):
+        work.charge(1 + len(value))
+        for key in value:
+            work.charge(_key_cost(key))
         return pairs_of(
-            (str(key), _canonical_budget_source(item, depth + 1))
+            (str(key), _canonical_budget_source(item, depth + 1, work=work))
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
         )
     stable_key = getattr(value, "stable_key", None)
@@ -348,7 +378,7 @@ def _canonical_budget_source(value: Any, depth: int = 0) -> Any:
         except (AttributeError, TypeError, ValueError, RecursionError):
             key = None
         if key is not None:
-            return each(("stable", _canonical_budget_source(key, depth + 1)))
+            return each(("stable", _canonical_budget_source(key, depth + 1, work=work)))
     return each(("opaque", type(value).__module__, type(value).__qualname__))
 
 
@@ -451,7 +481,9 @@ class ExpansionBudgetTruncation:
         if self.surface is not None:
             yield "surface", self.surface
         if self.owner_scope_key is not None:
-            yield "owner_scope_key", _canonical_budget_source(self.owner_scope_key)
+            yield "owner_scope_key", metered(
+                lambda work: _canonical_budget_source(self.owner_scope_key, work=work),
+            )
         if self.label is not None:
             yield "label", self.label
         if self.pcode_op_ref is not None:
@@ -474,7 +506,9 @@ class ExpansionBudgetTruncation:
                 ("max_conditions", self.conditions[1]),
             )
         if self.callee_scope_key is not None:
-            yield "callee_scope_key", _canonical_budget_source(self.callee_scope_key)
+            yield "callee_scope_key", metered(
+                lambda work: _canonical_budget_source(self.callee_scope_key, work=work),
+            )
         if self.referenced_event_ids:
             yield "referenced_event_ids", as_list(self.referenced_event_ids)
 

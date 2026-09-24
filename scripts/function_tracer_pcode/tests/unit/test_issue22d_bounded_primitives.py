@@ -449,13 +449,23 @@ def test_the_cause_aggregate_reads_canonical_reasons_under_its_diagnostic_work()
     result.prepared_semantic_payload = dataclasses.replace(
         prepared, plan=dataclasses.replace(prepared.plan, headroom_bytes=4_096),
     )
-    result.unknown_reasons = list(result.unknown_reasons) * 200_000
+    pulled = []
+
+    class _Counted(list):
+        def __iter__(self):
+            for item in list.__iter__(self):
+                pulled.append(1)
+                yield item
+
+    result.unknown_reasons = _Counted(list(result.unknown_reasons) * 200_000)
     result.unknown_cause_aggregate = None
     started = time.perf_counter()
     attach_cause_aggregate(result)
     # 作業量（headroom）を超えれば集計は `error` を持つ値（診断の marker）。判定は変えない
     assert "error" in result.unknown_cause_aggregate
     assert time.perf_counter() - started < 2.0
+    # canonical reason は数えながら引き出す（作業量を超えた後の reason を写さない）
+    assert len(pulled) < 1_000
 
 
 def test_the_diagnostic_artifacts_draw_on_one_shared_budget(monkeypatch):
@@ -497,8 +507,11 @@ def test_the_internal_legacy_evidence_draws_on_the_shared_budget_last(monkeypatc
 
         monkeypatch.setattr(output_preparation.OutputPreparer, name, wrapped)
     _decided_result()
-    names = [name for name, _ in calls[-3:]]
-    assert names == ["_prepare_trace_timings", "_prepare_cause_evidence", "_prepare_limitation_evidence"]
+    names = [name for name, _ in calls]
+    order = ["_prepare_trace_timings", "_prepare_cause_evidence", "_prepare_limitation_evidence"]
+    # 準備 1 回ごとに 3 つを 1 回ずつ、この順で
+    assert names and len(names) % 3 == 0
+    assert all(names[index:index + 3] == order for index in range(0, len(names), 3))
 
 # ---------------------------------------------------------------------------
 # yield しない仕事（`metered`）・producer の失敗・LEGACY の列
@@ -874,3 +887,31 @@ def test_diagnostic_legacy_reasons_keep_the_schema_row_count():
         finitize_legacy_reasons(result, authority_projects_reasons=True)
     assert len(result.unknown_reasons) == MAX_UNKNOWN_REASON_ROWS
     assert result.legacy_reason_overflow == 1_000 - MAX_UNKNOWN_REASON_ROWS
+
+
+def test_a_wide_scope_key_in_a_truncation_record_is_charged_before_it_is_sorted():
+    from scripts.function_tracer_pcode.core.runtime_refs.unknowns import ExpansionBudgetTruncation
+
+    from collections.abc import Mapping as _Mapping
+
+    pulled = []
+
+    class _Wide(_Mapping):
+        def __len__(self):
+            return 1_000_000
+
+        def __iter__(self):
+            for index in range(1_000_000):
+                pulled.append(1)
+                yield f"k{index}"
+
+        def __getitem__(self, key):
+            return 0
+
+    record = ExpansionBudgetTruncation(kind="k")
+    object.__setattr__(record, "owner_scope_key", (_Wide(),))
+    object.__setattr__(record, "_event_id_cache", "e" * 64)
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.prepare(record, max_bytes=10_000)
+    # 幅を数えた時点で止まる（100 万の key を並べるために引き出さない）
+    assert len(pulled) < 20_000

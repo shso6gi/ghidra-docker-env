@@ -2081,7 +2081,10 @@ def test_prepared_readers_read_only_the_declared_source_attributes():
 # J6 有界な証拠（`BoundedEvidence`）を作るのは唯一の owner（`core/json_encoding`）だけ
 # J7 上限なしの予算（`JsonBudget(None)` / `BudgetPolicy.unlimited()`）は登録した場所だけ
 # J8 digest / fingerprint の等しさを値の等しさ（⇔ / iff）として述べない
-# J9 `json_items` の中で集計（`sum` / `max` / `min` / `any` / `all`）をしない（集計は `scan`）
+# J9 `json_items` の中で集計（`sum` / `max` / `min` / `any` / `all`）をしない（集計は `scan`）。
+#    `json_items` が呼ぶ同じ module の helper も同じ（helper へ移しても規則を外れない）
+# J10 walker を上限なしで回す呼び出し（`prepare` / `measure` に `max_bytes` 無し、`materialize`
+#    に `budget` 無し）は登録した場所だけ（J7 の、予算を作らずに上限なしで辿る形）
 
 #: J4: 有界化の primitive と、上限を受け取る引数（必須の keyword-only）
 _BOUNDING_PRIMITIVES = (
@@ -2161,6 +2164,9 @@ _REGISTERED_UNBOUNDED_BUDGETS = {
     ("core/json_encoding.py", "_canonical_copy_uncounted"): "`tree()` が作る前に数え済みの木の canonical な複製",
     ("core/budget_policy.py", "<module>"): "予算を無効にした policy（`FT_*` で制限だけを外す。構造は同じ）",
     ("checker/cause_aggregate.py", "reason_detail_key"): "作業量の scope の外（部品単体の呼び出し）だけ",
+    ("core/runtime_refs/unknowns.py", "_canonical_budget_value"):
+        "producer 時点の identity（`stable_key` / `event_id`。key の大きさの owner は identity）。"
+        "出力は `_canonical_budget_source` が walk の作業量へ数える",
     ("checker/unknown_reason.py", "iter_unknown_recovery_actions"):
         "producer 時点（出力の前）の構築。出力の行数は finitize が判定の前に schema と比べ、出力は "
         "`recovery_actions_source` が walk の作業量へ数える",
@@ -2233,7 +2239,8 @@ def test_j6_only_the_owner_constructs_bounded_evidence():
     for path in _module_files():
         relative = _relative(path)
         for qualname, name, lineno, call in _qualified_calls(path):
-            if name == "BoundedEvidence" and isinstance(call.func, ast.Name):
+            # `BoundedEvidence(...)` も `json_encoding.BoundedEvidence(...)` も
+            if name == "BoundedEvidence":
                 owners.add(relative)
     assert owners == {"core/json_encoding.py"}, owners
 
@@ -2271,21 +2278,159 @@ def test_j8_no_code_or_test_claims_digest_equality_is_value_equality():
 _AGGREGATE_BUILTINS = frozenset({"sum", "max", "min", "any", "all"})
 
 
+def _json_items_closure(tree: ast.Module) -> List[Tuple[str, ast.AST]]:
+    """`json_items` と、そこから（推移的に）呼ばれる同じ module の関数 / 同じ class の method。"""
+
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    found: List[Tuple[str, ast.AST]] = []
+    seen: Set[int] = set()
+
+    def add(label: str, node: ast.AST, methods: dict) -> None:
+        if id(node) in seen:
+            return
+        seen.add(id(node))
+        found.append((label, node))
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            func = inner.func
+            if isinstance(func, ast.Name) and func.id in functions:
+                add(func.id, functions[func.id], {})
+            elif (
+                isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                and func.value.id == "self" and func.attr in methods
+            ):
+                add(f"{label.split('.')[0]}.{func.attr}", methods[func.attr], methods)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            methods = {item.name: item for item in node.body if isinstance(item, ast.FunctionDef)}
+            if "json_items" in methods:
+                add(f"{node.name}.json_items", methods["json_items"], methods)
+    return found
+
+
+def _over_literal(arg: ast.AST) -> bool:
+    """固定個数の列（tuple / list の literal）だけを辿る内包表記・literal そのもの。"""
+
+    if isinstance(arg, (ast.Tuple, ast.List)):
+        return True
+    if isinstance(arg, (ast.GeneratorExp, ast.ListComp, ast.SetComp)):
+        return all(isinstance(generator.iter, (ast.Tuple, ast.List)) for generator in arg.generators)
+    return False
+
+
+def _aggregations(node: ast.AST) -> List[int]:
+    lines = []
+    for inner in ast.walk(node):
+        if (
+            isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+            and inner.func.id in _AGGREGATE_BUILTINS
+            # 集計 = 列 1 つを畳む呼び出し（`max(1, x)` のような scalar どうしは除く）
+            and (len(inner.args) == 1 or any(
+                isinstance(arg, (ast.GeneratorExp, ast.ListComp, ast.SetComp))
+                for arg in inner.args
+            ))
+            # 固定個数の literal を畳むのは入力に比例しない
+            and not all(_over_literal(arg) for arg in inner.args)
+        ):
+            lines.append(inner.lineno)
+    return lines
+
+
+#: J9 の登録: `json_items` の helper で集計してよい場所 → なぜ有界か
+_REGISTERED_JSON_ITEMS_AGGREGATIONS: Dict[Tuple[str, str], str] = {}
+
+
 def test_j9_json_items_do_not_aggregate_collections():
     offenders = []
+    seen = set()
     for path in _module_files():
         relative = _relative(path)
-        for node in ast.walk(_parse(path)):
-            if isinstance(node, ast.FunctionDef) and node.name == "json_items":
-                for inner in ast.walk(node):
-                    if (
-                        isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
-                        and inner.func.id in _AGGREGATE_BUILTINS
-                        # 集計 = 列 1 つを畳む呼び出し（`max(1, x)` のような scalar どうしは除く）
-                        and (len(inner.args) == 1 or any(
-                            isinstance(arg, (ast.GeneratorExp, ast.ListComp, ast.SetComp))
-                            for arg in inner.args
-                        ))
-                    ):
-                        offenders.append(f"{relative}:{inner.lineno} {inner.func.id}()")
+        for label, node in _json_items_closure(_parse(path)):
+            for lineno in _aggregations(node):
+                key = (relative, label)
+                seen.add(key)
+                if key not in _REGISTERED_JSON_ITEMS_AGGREGATIONS:
+                    offenders.append(f"{relative}:{lineno} {label}")
     assert offenders == [], offenders
+    assert set(_REGISTERED_JSON_ITEMS_AGGREGATIONS) - seen == set()
+
+
+def test_j9_reaches_the_helpers_json_items_calls():
+    tree = ast.parse(
+        "def helper(rows):\n    return sum(rows)\n\n"
+        "class R:\n    def json_items(self):\n        yield 'n', self._n()\n"
+        "    def _n(self):\n        return helper(self.rows)\n"
+    )
+    labels = {label for label, node in _json_items_closure(tree) if _aggregations(node)}
+    assert labels == {"helper"}
+    fixed = ast.parse("def f(x):\n    return any(getattr(x, a) for a in ('p', 'q'))\n")
+    assert _aggregations(fixed) == []
+
+
+#: J1 の推移的な形: `json_items` が呼ぶ helper で表現を先に作ってよい場所 → なぜ有界か
+_REGISTERED_JSON_ITEMS_HELPER_BUILDS = {
+    ("core/runtime_refs/unknowns.py", "_canonical_budget_source"):
+        "mapping / set の幅と key を `work`（walk の作業量。`metered`）へ数えてから並べる",
+    ("core/runtime_refs/unknowns.py", "_canonical_budget_value_within"):
+        "容器の幅・文字列の長さを `work` へ数えてから作る（set の並びの key はその値の JSON）",
+}
+
+
+def test_j1_helpers_json_items_calls_do_not_build_the_representation_either():
+    """J1 の推移的な形: `json_items` から呼ばれる同じ module の helper も、表現を先に作らない。"""
+
+    offenders = []
+    seen = set()
+    for path in _module_files():
+        relative = _relative(path)
+        for label, node in _json_items_closure(_parse(path)):
+            if label.endswith(".json_items"):
+                continue  # json_items 自身は J1 が見る
+            if _eager_constructions(node):
+                key = (relative, label)
+                seen.add(key)
+                if key not in _REGISTERED_JSON_ITEMS_HELPER_BUILDS:
+                    offenders.append(f"{relative}:{label} {_eager_constructions(node)[:4]}")
+    assert offenders == [], offenders
+    assert set(_REGISTERED_JSON_ITEMS_HELPER_BUILDS) - seen == set()
+
+
+#: J10 の登録: walker を上限なしで回してよい場所 → なぜ
+_REGISTERED_UNBOUNDED_WALKS = {
+    ("core/json_encoding.py", "materialize"): "予算 scope の外（部品単体の呼び出し）の `to_dict()`",
+    ("core/expression.py", "Expression._to_dict"): "固定の形の cycle_ref の object 1 つを測る",
+    ("core/expression.py", "Expression._serialize_runtime_ref"):
+        "木を作る前に runtime ref を含む大きさを数え終えている（`estimate_legacy_dict_bytes`）",
+    ("checker/cause_aggregate.py", "_prepared_within_work"): "作業量の scope の外（部品単体の呼び出し）だけ",
+    ("checker/output_preparation.py", "OutputPreparer._prepare_cause_evidence"):
+        "scalar だけの固定の形の marker",
+    ("checker/output_preparation.py", "OutputPreparer._prepare_trace_timings"):
+        "scalar だけの固定の形の marker（`_truncation_marker`。schema の上限あり）",
+    ("checker/output_preparation.py", "OutputPreparer._prepare_limitation_evidence"):
+        "scalar だけの固定の形の marker",
+    ("checker/diagnostics.py", "result_diagnostics_payload"):
+        "直接の読み手（出力の外）の canonical な dict。出力の準備は `lazy=True` の view を上限の中で辿る",
+}
+_WALK_BOUNDS = {"prepare": "max_bytes", "measure": "max_bytes", "materialize": "budget"}
+
+
+def _is_json_policy(receiver: ast.AST) -> bool:
+    text = ast.unparse(receiver)
+    return text in {"RESULT_JSON_POLICY", "self.encoding", "encoding", "policy", "self.policy", "plan.encoding"}
+
+
+def test_j10_unbounded_walks_happen_only_at_registered_sites():
+    found = set()
+    for path in _module_files():
+        relative = _relative(path)
+        for qualname, name, lineno, call in _qualified_calls(path):
+            bound = _WALK_BOUNDS.get(name)
+            if (
+                bound is not None and isinstance(call.func, ast.Attribute)
+                and _is_json_policy(call.func.value)
+                and bound not in {keyword.arg for keyword in call.keywords}
+            ):
+                found.add((relative, qualname))
+    assert found == set(_REGISTERED_UNBOUNDED_WALKS), found ^ set(_REGISTERED_UNBOUNDED_WALKS)
