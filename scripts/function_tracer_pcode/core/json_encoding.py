@@ -460,7 +460,7 @@ UNFINGERPRINTED_UNSUPPORTED = "unsupported"
 
 
 def _source_value(value: Any) -> Any:
-    """source の包み（`each` / `nested` / `raw`）なら中の値（Merkle digest は値で求める）。"""
+    """source の包み（`each` / `nested` / `raw`）なら中の値（fingerprint は値で求める）。"""
 
     if isinstance(value, _Each) and value.fn in (None, _RAW):
         return value.items
@@ -1004,6 +1004,8 @@ def bounded_evidence(
             done = False
             if attempt.consumed > attempt.max_bytes:
                 over = attempt.max_bytes
+        except PRODUCER_FAILURES:
+            done = False
         _charge_quietly(work, attempt.consumed)
         if done and attempt.consumed <= limit:
             return value
@@ -1041,7 +1043,7 @@ def _evidence_summary(
         return _unfingerprinted(kind, UNFINGERPRINTED_WORK_EXHAUSTED, over)
     except CanonicalValueCycle:
         return _unfingerprinted(kind, UNFINGERPRINTED_CYCLE, over)
-    except (TypeError, UnicodeError, ValueError, RecursionError):
+    except PRODUCER_FAILURES:
         # canonical な形を持たない（live な object・set の中の enum の mapping 値・深すぎる
         # set の入れ子）: 型つき token の fingerprint へ
         pass
@@ -1058,7 +1060,7 @@ def _evidence_summary(
         return _unfingerprinted(kind, UNFINGERPRINTED_WORK_EXHAUSTED, over)
     except JsonValueCycle:
         return _unfingerprinted(kind, UNFINGERPRINTED_CYCLE, over)
-    except (JsonValueRejected, TypeError, UnicodeError, ValueError, RecursionError):
+    except (JsonValueRejected,) + PRODUCER_FAILURES:
         return _unfingerprinted(kind, UNFINGERPRINTED_UNSUPPORTED, over)
 
 
@@ -1271,9 +1273,11 @@ class _NoneKeys:
 _NONE_KEYS = _NoneKeys()
 
 
-#: producer（`json_items`・集計の reducer・その helper）が値の不備で上げる例外。walker は
-#: これを `JsonValueRejected`（その値は JSON にならない）に変える
-_PRODUCER_FAILURES = (TypeError, ValueError, AttributeError, LookupError)
+#: producer（`json_items`・集計の reducer・`each` の変換・`refresh`・`to_authority_dict` とその
+#: helper）が値の不備で上げる例外。walker と有界な証拠はこれを「JSON にならない値」
+#: （`JsonValueRejected` / fingerprint の無い要約）に変える（`RecursionError` は `RuntimeError`、
+#: `UnicodeError` は `ValueError` の派生）
+PRODUCER_FAILURES = (TypeError, ValueError, AttributeError, LookupError, RuntimeError, ArithmeticError)
 
 
 class _NotPlain(Exception):
@@ -1308,6 +1312,8 @@ class _Walk:
         self.effort = effort if effort is not None else JsonBudget(budget.remaining())
         self.build = build
         self.token_sink = token_sink
+        #: 1 回しか辿れない列（iterator）を辿ったか（辿った後の値は同じ値として辿り直せない）
+        self.entered_iterator = False
         self.item_separator = utf8_length(policy.item_separator)
         self.key_separator = utf8_length(policy.key_separator)
         self.stack: List[_Frame] = []
@@ -1561,6 +1567,10 @@ class _Walk:
 
     def push(self, kind: str, iterator: Iterator[Any], parent: Any, key: Any, source: Any,
              *, build: bool, fn: Any = None, preserve_keys: bool = False) -> None:
+        if isinstance(source, _AbcIterator) or (
+            type(source) is _Each and isinstance(source.items, _AbcIterator)
+        ):
+            self.entered_iterator = True
         # 閉路の判定は **参照している値**（record / 容器）の identity で行う。遅延構成子の
         # 包み（`each` など）はその場で作る一時 object なので、中身の値で数える。frame が
         # 値を保持するので、辿っている間に id が再利用されることは無い。
@@ -1788,22 +1798,28 @@ class _Walk:
             self.enter(value, parent, key, build)
         elif kind is _Scan:
             reducer = item.reducer
+            if isinstance(item.values, _AbcIterator):
+                self.entered_iterator = True
             try:
                 for element in (item.values if item.values is not None else ()):
                     # 引き出した要素を畳み込む前に数える（上限を超えれば残りを引き出さない）
                     self.effort.charge(1 + int(reducer.cost(element)))
                     reducer.add(element)
-            except _PRODUCER_FAILURES as exc:
+            except PRODUCER_FAILURES as exc:
                 self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
             except JsonBudgetExhausted:
                 # 集計を途中で止めた値は別の値: この walk の予算の超過として扱う
                 self.budget.exceeded()
                 raise
-            self.enter(reducer.result(), parent, key, build)
+            try:
+                produced = reducer.result()
+            except PRODUCER_FAILURES as exc:
+                self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
+            self.enter(produced, parent, key, build)
         elif kind is _Metered:
             try:
                 produced = item.factory(self.effort)
-            except _PRODUCER_FAILURES as exc:
+            except PRODUCER_FAILURES as exc:
                 self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
             except JsonBudgetExhausted:
                 self.budget.exceeded()
@@ -1838,23 +1854,35 @@ class _Walk:
         if not _exhausted(self.effort):
             remaining = self.effort.remaining()
             attempt = JsonBudget(limit if remaining is None else min(limit, remaining))
+            attempt_walk = _Walk(self.policy, CANONICAL, attempt, build=True, effort=self.effort)
             try:
                 # 上限（`inline_bytes`）まで 1 回だけ作る。収まればその値を置く（作業は effort へ）
-                inline_value = _Walk(
-                    self.policy, CANONICAL, attempt, build=True, effort=self.effort,
-                ).run(value)
+                inline_value = attempt_walk.run(value)
             except JsonBudgetExhausted:
                 _charge_quietly(self.effort, attempt.consumed)
-                over = attempt.max_bytes
+                if attempt.consumed > attempt.max_bytes:
+                    over = attempt.max_bytes
+            except JsonValueRejected:
+                # 小さくても JSON にならない値（live な object）: 大きい値と同じく有界な要約へ
+                # （`bounded_evidence` と同じ規則。大きさで受け入れが変わらない）
+                _charge_quietly(self.effort, attempt.consumed)
             else:
                 _charge_quietly(self.effort, attempt.consumed)
                 if attempt.consumed <= limit:
                     self.enter(inline_value, parent, key, build)
                     return
                 over = limit
+            if attempt_walk.entered_iterator and item.refresh is None:
+                # 試しで 1 回しか辿れない列を辿った: 同じ値として辿り直せない（別の値の
+                # fingerprint を同じ値のものとして置かない）
+                self.enter(
+                    _unfingerprinted(_value_kind(value), UNFINGERPRINTED_UNSUPPORTED, over),
+                    parent, key, build,
+                )
+                return
         try:
             fresh = item.refresh() if item.refresh is not None else value
-        except TypeError:
+        except PRODUCER_FAILURES:
             summary = _unfingerprinted(_value_kind(value), UNFINGERPRINTED_UNSUPPORTED, over)
         else:
             summary = _evidence_summary(
@@ -1876,7 +1904,7 @@ class _Walk:
             frame = stack[-1]
             try:
                 child = next(frame.iterator)
-            except _PRODUCER_FAILURES as exc:
+            except PRODUCER_FAILURES as exc:
                 # producer（`json_items` とその helper）の失敗は、その値が JSON にならないこと
                 # （field の規則どおり: 診断は marker、準備する意味の値は内部エラー）
                 self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
@@ -1929,7 +1957,11 @@ class _Walk:
             elif fn is _NESTED:
                 self.enter_nested(target, parent, out_key, frame.build)
             else:
-                self.enter(fn(target), parent, out_key, frame.build)
+                try:
+                    converted = fn(target)
+                except PRODUCER_FAILURES as exc:
+                    self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
+                self.enter(converted, parent, out_key, frame.build)
 
 
 def _canonical_copy_uncounted(policy: JsonEncodingPolicy, value: Any) -> Any:
@@ -2001,6 +2033,9 @@ class JsonObjectBudget:
 
 #: 結果 JSON（CLI が書く `EQUIVALENCE_RESULT_JSON`）の書き方。**唯一の定義**。
 RESULT_JSON_POLICY = JsonEncodingPolicy()
+#: 永続化する canonical result envelope の書き方: 結果 JSON と同じ文字列の規則（UTF-8 のまま、
+#: surrogate だけ escape）で、区切りだけ詰める（書いた payload の byte は結果 JSON 以下）
+PERSISTED_ENVELOPE_JSON_POLICY = JsonEncodingPolicy(item_separator=",", key_separator=":")
 
 
 def scalar_record_dict(record: Any) -> dict:
@@ -2073,6 +2108,8 @@ __all__ = [
     "JsonObjectBudget",
     "JsonOutputLimitExceeded",
     "JsonValueCycle",
+    "PERSISTED_ENVELOPE_JSON_POLICY",
+    "PRODUCER_FAILURES",
     "JsonValueRejected",
     "LEGACY",
     "PreparedJson",

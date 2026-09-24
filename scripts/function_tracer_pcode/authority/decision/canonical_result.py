@@ -13,6 +13,7 @@ import tempfile
 from typing import Any, Mapping
 
 from scripts.function_tracer_pcode.authority.codecs import StrictV2JsonCodec
+from scripts.function_tracer_pcode.core.json_encoding import PERSISTED_ENVELOPE_JSON_POLICY
 from scripts.function_tracer_pcode.authority.contracts import (
     Outcome,
     authority_digest,
@@ -985,7 +986,10 @@ def persist_canonical_result_envelope(result_payload: Mapping[str, Any]) -> Path
     descriptor, temporary = tempfile.mkstemp(prefix=".canonical-result-", dir=directory)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(envelope, handle, sort_keys=True, separators=(",", ":"))
+            # Issue #22 PR-22-D: 結果 JSON と同じ書き方（UTF-8 のまま、surrogate だけ escape）で、
+            # 区切りは詰める: 永続化する payload の byte は出力の契約（結果 JSON）以下で、それに
+            # 固定の形の包み（schema と 2 つの digest）が足されるだけ
+            handle.write(PERSISTED_ENVELOPE_JSON_POLICY.encode_bounded(envelope, max_bytes=None))
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())

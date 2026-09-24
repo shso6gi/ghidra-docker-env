@@ -224,6 +224,15 @@ def _truncation_marker(
     return marker
 
 
+class _ReadFailed:
+    """読み方が落ちた field の値（`JsonValueRejected` を持つ）。"""
+
+    __slots__ = ("rejected",)
+
+    def __init__(self, rejected: JsonValueRejected) -> None:
+        self.rejected = rejected
+
+
 def _prepare_member(
     context: PreparationContext,
     key: str,
@@ -247,6 +256,8 @@ def _prepare_member(
         remaining = field_max_bytes if remaining is None else min(remaining, field_max_bytes)
     rejected: Optional[JsonValueRejected] = None
     try:
+        if type(source) is _ReadFailed:
+            raise source.rejected
         if remaining is not None and remaining < 0:
             raise JsonBudgetExhausted(consumed_bytes=0, max_bytes=remaining)
         prepared = encoding.prepare(source, max_bytes=remaining)
@@ -304,8 +315,22 @@ class OutputField:
         """
 
         return self.prepare_source(
-            self.read(result, context.options), context, field_max_bytes=field_max_bytes,
+            self.read_source(result, context.options), context, field_max_bytes=field_max_bytes,
         )
+
+    def read_source(self, result: Any, options: "OutputOptions") -> Any:
+        """`read` の値。読み方が値の不備で落ちたら、その field の値は JSON にならない
+        （`JsonValueRejected`。切り詰めてよい field は `_prepare_member` が marker にする）。
+        """
+
+        from scripts.function_tracer_pcode.core.json_encoding import PRODUCER_FAILURES
+
+        try:
+            return self.read(result, options)
+        except PRODUCER_FAILURES as exc:
+            return _ReadFailed(JsonValueRejected(
+                f"reader failed ({type(exc).__name__}: {str(exc)[:80]})", path=f"$.{self.key}",
+            ))
 
     def prepare_source(
         self,
@@ -1359,11 +1384,13 @@ class OutputMetadata:
                     rows[item.key] = row
                     order.append(item.key)
                 continue
-            source = item.read(result, context.options)
+            source = item.read_source(result, context.options)
             if source is ABSENT:
                 continue
             order.append(item.key)
             try:
+                if type(source) is _ReadFailed:
+                    raise source.rejected
                 small = encoding.prepare(source, max_bytes=bounds[item.key].max_bytes)
             except (JsonBudgetExhausted, JsonValueRejected):
                 large.append(item)

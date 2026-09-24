@@ -589,7 +589,11 @@ def bounded_prefix(items: Any, *, work: Any, limit: int = EVIDENCE_REFS_MAX_COUN
     if isinstance(items, (str, bytes)):
         items = (items,)
     kept = []
-    iterator = iter(items)
+    try:
+        iterator = iter(items)
+    except TypeError:
+        # 列でない値（producer の不備）: 1 つの有界な証拠として残す
+        return (_bounded_value(items, work=work),)
     for item in islice(iterator, limit):
         if isinstance(item, str):
             kept.append(_bounded_text(item, EVIDENCE_REF_MAX_CHARS, work=work))

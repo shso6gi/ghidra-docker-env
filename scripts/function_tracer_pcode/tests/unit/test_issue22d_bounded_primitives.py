@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import dataclasses
+import enum
 import time
 import tracemalloc
 from types import SimpleNamespace
@@ -994,3 +995,131 @@ def test_any_failure_building_the_envelope_after_authority_is_a_durable_error(mo
     assert payload["superseded_decision_receipt"]["decision_receipt"]["outcome"] == decided.final_outcome
     # 確定した判定の emission の区間は ERROR の区間を開く前に閉じる
     assert ended and ended[0][0] == "result_emit" and ended[0][1][1]["superseded_by"] == "output_final_envelope"
+
+
+def test_the_persisted_envelope_is_no_larger_than_the_result_json_plus_its_wrapper(monkeypatch, tmp_path):
+    import json
+
+    from scripts.function_tracer_pcode.authority.decision import canonical_result
+
+    result = _decided_result()
+    result.pairwise_stats = {"note": "日本語😀" * 2_000}
+    evidence, session = result._canonical_finalization_context
+    envelope = build_final_result_envelope(
+        result,
+        seal=lambda preimage: canonical_result.build_canonical_result_finalization_bundle(
+            result_payload_preimage=preimage, evidence=evidence, session=session,
+        ),
+    )
+    monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_SUPERVISOR_ROOT", str(tmp_path))
+    monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_EXECUTION_NONCE", "n")
+    path = canonical_result.persist_canonical_result_envelope(envelope.payload)
+    persisted = path.read_bytes()
+    # 文字列は同じ書き方（非 ASCII を 6 / 12 byte の escape に膨らませない）、区切りは詰める
+    wrapper = len(json.dumps({
+        "schema": "canonical-result-envelope-v1", "canonical_result_payload": None,
+        "canonical_result_bundle_digest": "0" * 64, "envelope_digest": "0" * 64,
+    }, separators=(",", ":")))
+    assert len(persisted) <= envelope.total_bytes + wrapper + 1
+    assert json.loads(persisted)["canonical_result_payload"] == json.loads(envelope.text)
+
+
+# ---------------------------------------------------------------------------
+# producer の失敗・1 回しか辿れない列・小さい live な証拠
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class _NeedsFields:
+    required: int
+
+
+class _ExplodingMapping(dict):
+    def items(self):
+        raise RuntimeError("items() failed")
+
+
+def test_evidence_that_fails_while_being_fingerprinted_is_an_unsupported_summary():
+    from scripts.function_tracer_pcode.core.json_encoding import bounded_evidence
+
+    work = JsonBudget(1 << 20)
+    # dataclass の class object（field を getattr できない）・items() が落ちる mapping
+    for value in (("x" * 3_000, _NeedsFields), ("x" * 3_000, _ExplodingMapping(a=1))):
+        summary = bounded_evidence(value, work=work)
+        assert type(summary) is BoundedEvidence
+    # finitize（authority 前）も落ちない: 診断にしか使わない証拠で pair を止めない
+    record = dataclasses.replace(
+        make_unknown_reason("unknown", stage="S"), object_evidence=("x" * 3_000, _NeedsFields),
+    )
+    finitized = finitize_unknown_reason_record(record, work=work)
+    assert type(finitized.object_evidence) is BoundedEvidence
+
+
+def test_producer_failures_outside_json_items_are_rejected_values_too():
+    from scripts.function_tracer_pcode.core.json_encoding import JsonValueRejected, each, scan
+
+    def explode(_item):
+        raise KeyError("fn failed")
+
+    with pytest.raises(JsonValueRejected, match="producer failed"):
+        RESULT_JSON_POLICY.prepare(each([1], explode))
+
+    class _Reducer:
+        def cost(self, _element):
+            return 0
+
+        def add(self, _element):
+            pass
+
+        def result(self):
+            raise AttributeError("result failed")
+
+    with pytest.raises(JsonValueRejected, match="producer failed"):
+        RESULT_JSON_POLICY.prepare(scan([1], _Reducer()))
+
+
+def test_a_diagnostic_whose_reader_fails_is_a_marker():
+    from scripts.function_tracer_pcode.checker import output_preparation
+
+    result = _decided_result()
+    decided = (result.final_outcome, result.decision_receipt)
+
+    class _Broken:
+        @property
+        def pairwise_stats(self):
+            raise ValueError("no stats")
+
+        def __getattr__(self, name):
+            return getattr(result, name)
+
+    envelope = output_preparation.build_final_result_envelope(_Broken())
+    assert envelope.payload["pairwise_stats"]["truncated"] is True
+    assert (result.final_outcome, result.decision_receipt) == decided
+
+
+def _counting(prefix):
+    for index in range(5_000):
+        yield f"{prefix}{index}"
+
+
+def test_a_one_shot_iterator_inside_evidence_is_not_fingerprinted_after_it_was_consumed():
+    from scripts.function_tracer_pcode.core.json_encoding import evidence, text
+
+    for make in (lambda gen: text(("k", gen), 256), lambda gen: evidence(("k", gen))):
+        left = RESULT_JSON_POLICY.prepare(make(_counting("AAAA"))).value()
+        right = RESULT_JSON_POLICY.prepare(make(_counting("BBBB"))).value()
+        # 同じ fingerprint を別の値に付けない（辿った後の列は同じ値として辿り直せない）
+        assert left["fingerprint"] is None and right["fingerprint"] is None
+        assert left["unfingerprinted"] == "unsupported"
+
+
+class _Plain(enum.Enum):
+    A = object()
+
+
+def test_small_live_evidence_is_summarized_like_large_live_evidence():
+    from scripts.function_tracer_pcode.core.json_encoding import evidence
+
+    small = RESULT_JSON_POLICY.prepare(evidence((_Plain.A,))).value()
+    large = RESULT_JSON_POLICY.prepare(evidence(("x" * 5_000, object()))).value()
+    assert small["bounded_evidence"] == "v2" and large["bounded_evidence"] == "v2"
