@@ -597,10 +597,11 @@ class OutputEnvelopeInvariantViolation(AnalysisFailureError):
     違反（内部エラー）として扱う（`FINAL_ENVELOPE_SITE`）。
     """
 
-    def __init__(self, message: str, *, max_bytes: int, requested_bytes: int) -> None:
+    def __init__(self, message: str, *, max_bytes: Optional[int], requested_bytes: Optional[int]) -> None:
         super().__init__(message)
-        self.max_bytes = int(max_bytes)
-        self.requested_bytes = int(requested_bytes)
+        # 大きさの違反でない（準備・封印の内部の不備）なら `None`
+        self.max_bytes = None if max_bytes is None else int(max_bytes)
+        self.requested_bytes = None if requested_bytes is None else int(requested_bytes)
 
 
 # ---------------------------------------------------------------------------

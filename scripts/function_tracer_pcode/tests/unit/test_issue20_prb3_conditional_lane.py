@@ -420,6 +420,26 @@ def test_lane_runs_after_an_unconditional_unknown_with_eligible_views():
     assert result.conditional_outcome is not None
 
 
+def test_lane_fails_closed_when_the_assumptions_exceed_the_receipt_bound(monkeypatch):
+    """Issue #22 PR-22-D: receipt の契約（仮定の数と大きさ）を超える集合は receipt にしない。
+
+    確定後に出力の契約違反（ERROR）にしない: lane の診断だけが残り、判定は変わらない。
+    """
+    from scripts.function_tracer_pcode.authority.decision import conditional
+
+    projection, result = _pair()
+    before = (result.final_outcome, result.decision_receipt)
+    monkeypatch.setattr(conditional, "MAX_ASSUMPTION_PREMISES", 0)
+    diagnostics = _run_lane(result, projection, _both_analyses())
+    assert diagnostics["conditional_lane"] == "over_receipt_bound"
+    assert getattr(result, "conditional_decision_receipt", None) is None
+    assert (result.final_outcome, result.decision_receipt) == before
+    monkeypatch.setattr(conditional, "MAX_ASSUMPTION_PREMISES", 64)
+    monkeypatch.setattr(conditional, "ASSUMPTION_PREMISE_MAX_BYTES", 10)
+    projection, result = _pair()
+    assert _run_lane(result, projection, _both_analyses())["conditional_lane"] == "over_receipt_bound"
+
+
 @pytest.mark.parametrize(
     "outcome", [Outcome.EQUIVALENT, Outcome.NOT_EQ, Outcome.ERROR]
 )

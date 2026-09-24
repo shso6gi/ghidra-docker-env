@@ -64,9 +64,12 @@ MAX_UNKNOWN_REASON_ROWS = 256
 MAX_RECOVERY_ACTION_ROWS = 256
 #: relation（`c_active_base` / `q_open_base`）の行数（同じく実測の最大 34 の 15 倍）
 MAX_RELATION_ROWS = 512
-#: conditional receipt が運ぶ仮定（premise）の数と 1 つの上限
-MAX_ASSUMPTION_PREMISES = 64
-ASSUMPTION_PREMISE_MAX_BYTES = 4096
+#: conditional receipt が運ぶ仮定（premise）の数と 1 つの上限: receipt の契約の owner
+#: （`authority/decision/conditional`）の値。lane は発行の前に同じ上限で確かめる
+from scripts.function_tracer_pcode.authority.decision.conditional import (  # noqa: E402
+    ASSUMPTION_PREMISE_MAX_BYTES,
+    MAX_ASSUMPTION_PREMISES,
+)
 #: 失敗の自由文（`error_message` / `failure_message`）の文字数
 MESSAGE_MAX_CHARS = 2048
 #: 切り詰めた診断の marker に残す、JSON にならない値を拒んだ場所（path）の文字数
@@ -208,8 +211,10 @@ def authority_field_bounds(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> D
         ) + MAX_UNKNOWN_REASON_ROWS * policy.max_member_bytes(ID_MAX_CHARS, backlog_entry),
             f"≤ {MAX_UNKNOWN_REASON_ROWS} reason ids × backlog entry {backlog_entry} B"),
         FieldBound("decision_gated_by_pending_proof", 5, "bool"),
-        FieldBound("superseded_decision_receipt", row_max_bytes(DECISION_RECEIPT_ROW, policy),
-                   "decision receipt row (output-contract ERROR only)"),
+        FieldBound("superseded_decision_receipt", _object_bytes(policy, {
+            "decision_receipt": row_max_bytes(DECISION_RECEIPT_ROW, policy),
+            "conditional_decision_receipt": conditional_receipt,
+        }), "{decision receipt row, conditional receipt} (output-contract ERROR only)"),
     )
     return {row.key: row for row in rows}
 

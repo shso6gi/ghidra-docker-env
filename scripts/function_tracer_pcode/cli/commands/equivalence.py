@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from scripts.function_tracer_pcode.ghidra.pyghidra_support import (
     load_pyghidra,
@@ -29,6 +29,7 @@ from scripts.function_tracer_pcode.checker.output_preparation import (
     prepared_smt_formula,
 )
 # Issue #124 PR-124-B: `result_emit` は結果 JSON の外（journal）にだけ残す区間。
+from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
 from scripts.function_tracer_pcode.core.stage_journal import (
     journal_stage_end,
     journal_stage_start,
@@ -340,16 +341,31 @@ def _emit_import_error_result(
     sys.exit(CLI_EXIT_MATRIX[Outcome.ERROR])
 
 
-def _final_envelope_or_error_result(args, *, result, seal, **context):
-    """最終 envelope を組む。出力の契約違反なら内部エラーの ERROR を出して終わる。
+#: authority 確定 **後** に最終 envelope を組むときの失敗（出力の契約違反と、準備・封印・書き出しの
+#: 内部の不備）。どれも判定を変えずに durable な ERROR にする（`_final_envelope_or_error_result`）
+_POST_AUTHORITY_OUTPUT_FAILURES = (
+    OutputEnvelopeInvariantViolation, AnalysisFailureError, ArithmeticError, AttributeError,
+    LookupError, RuntimeError, TypeError, ValueError,
+)
 
-    Issue #22 PR-22-D: authority 確定 **後** の出力の契約違反で、判定は変えない
-    （`_emit_output_invariant_error_result` が取って代わられた receipt を持つ ERROR を出す）。
+
+def _final_envelope_or_error_result(args, *, result, seal, **context):
+    """最終 envelope を組む。組めなければ内部エラーの ERROR を出して終わる。
+
+    Issue #22 PR-22-D: authority 確定 **後** の出力の失敗（契約違反・準備や封印の内部の不備・
+    書けない文字列）で、判定は変えない（`_emit_output_invariant_error_result` が取って代わられた
+    receipt を持つ ERROR を出す。traceback で落として durable な結果を失わない）。
     """
 
     try:
         return build_final_result_envelope(result, seal=seal, fallback_policy=_cli_budget_policy())
-    except OutputEnvelopeInvariantViolation as violation:
+    except _POST_AUTHORITY_OUTPUT_FAILURES as failure:
+        violation = failure if isinstance(failure, OutputEnvelopeInvariantViolation) else (
+            OutputEnvelopeInvariantViolation(
+                f"the final envelope could not be built ({type(failure).__name__}: {failure})",
+                max_bytes=None, requested_bytes=None,
+            )
+        )
         _emit_output_invariant_error_result(args, result=result, violation=violation, **context)
         raise  # pragma: no cover - 上の関数は sys.exit する
 
@@ -390,6 +406,7 @@ def _emit_output_invariant_error_result(
     start_time: float,
     binary1_content_identity=None,
     binary2_content_identity=None,
+    emission_started: Optional[float] = None,
 ) -> None:
     """最終 envelope が出力の契約を破ったときの ERROR 出力（Issue #22 PR-22-D）。
 
@@ -405,17 +422,30 @@ def _emit_output_invariant_error_result(
     from scripts.function_tracer_pcode.core.errors import InternalError, record_internal_bug
 
     record_internal_bug(InternalError(violation, site=FINAL_ENVELOPE_SITE), site=FINAL_ENVELOPE_SITE)
+    if emission_started is not None:
+        # 確定した判定の emission はここで終わる（ERROR の emission は別の区間として開く）
+        journal_stage_end("result_emit", time.monotonic() - emission_started, {
+            "kind": "emission", "superseded_by": "output_final_envelope",
+        })
     receipt = getattr(result, "decision_receipt", None)
     superseded = None
     if receipt is not None:
+        from scripts.function_tracer_pcode.authority.decision.conditional import (
+            conditional_decision_receipt_payload,
+        )
         from scripts.function_tracer_pcode.authority.decision.production_cutover import (
             decision_receipt_payload,
         )
 
-        superseded = decision_receipt_payload(receipt)
+        # 取って代わられた判定の receipt（無条件と conditional）を構造のまま持つ
+        superseded = {"decision_receipt": decision_receipt_payload(receipt)}
+        conditional = getattr(result, "conditional_decision_receipt", None)
+        if conditional is not None:
+            superseded["conditional_decision_receipt"] = conditional_decision_receipt_payload(conditional)
+    # 確定した判定を先に書く（違反の文は長くなり得るので、上限で切れるのは後ろの違反の文だけ）
     decided = (
-        f"; decided_outcome={getattr(result, 'final_outcome', None)}"
-        f"; decision_receipt_digest={getattr(receipt, 'receipt_digest', None)}"
+        f"decided_outcome={getattr(result, 'final_outcome', None)}; "
+        f"decision_receipt_digest={getattr(receipt, 'receipt_digest', None)}; "
     )
     _emit_import_error_result(
         args,
@@ -423,7 +453,7 @@ def _emit_output_invariant_error_result(
         binary2_path=binary2_path,
         func_name1=func_name1,
         func_name2=func_name2,
-        error_message=f"OUTPUT_ENVELOPE_INVARIANT_VIOLATION: {violation}{decided}",
+        error_message=f"OUTPUT_ENVELOPE_INVARIANT_VIOLATION: {decided}{violation}",
         error_kind="OUTPUT_ENVELOPE_INVARIANT_VIOLATION",
         error_stage="output_final_envelope",
         start_time=start_time,
@@ -736,15 +766,13 @@ def run_equivalence_check(args):
         binary1_content_identity=binary1_content_identity,
         binary2_content_identity=binary2_content_identity,
     )
-    # 人向けの text は最終 envelope と同じ上限で組んだ `to_dict()` から作る（契約違反は同じ
-    # ERROR）。既存の順（to_string -> to_dict -> 封印 -> JSON 書き出し）を保つ。text を **書く**
-    # のは最終 envelope が契約に収まると分かった後（契約違反の ERROR の前に、確定した判定の
-    # text を出さない）
-    output_content = _text_or_error_result(args, result=result, payload=None, **envelope_context)
-    render_seconds = time.monotonic() - emission_started
-
+    # 人向けの text: JSON を出すなら最終 envelope の値から、出さないなら最終 envelope と同じ上限で
+    # 組んだ `to_dict()` から作る（どちらも契約違反は同じ ERROR）
     emit_json = _get_bool_arg("emit_result_json", False)
+    envelope_context["emission_started"] = emission_started
     if not emit_json:
+        output_content = _text_or_error_result(args, result=result, payload=None, **envelope_context)
+        render_seconds = time.monotonic() - emission_started
         output_result(output_content, args.output, args.quiet)
     if emit_json:
         from scripts.function_tracer_pcode.authority.decision.canonical_result import (
@@ -772,6 +800,12 @@ def run_equivalence_check(args):
         envelope = _final_envelope_or_error_result(
             args, result=result, seal=seal, **envelope_context,
         )
+        # 人向けの text は最終 envelope の値（JSON と同じ有界な値）から作り、envelope が契約に
+        # 収まると分かった後に書く（契約違反の ERROR の前に、確定した判定の text を出さない）
+        output_content = _text_or_error_result(
+            args, result=result, payload=envelope.payload, **envelope_context,
+        )
+        render_seconds = time.monotonic() - emission_started
         output_result(output_content, args.output, args.quiet)
         result_payload = envelope.payload
         if seal is not None:

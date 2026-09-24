@@ -506,7 +506,13 @@ class EquivalenceResult:
 
         lines.append("-" * 70)
         lines.append(f"Total time: {float(payload.get('total_time') or 0.0):.3f} seconds")
-        stage_line = _format_stage_seconds(getattr(self, "diagnostics", None))
+        # 段階別時間も出力と同じ有界な表現（`diagnostics.timings`）から読む（live な診断を読まない）
+        diagnostics_payload = payload.get("diagnostics")
+        timings = diagnostics_payload.get("timings") if isinstance(diagnostics_payload, dict) else None
+        stage_line = _format_stage_seconds(
+            {"stages": timings.get("stages"), "boundary_seconds": timings.get("boundary_seconds")}
+            if isinstance(timings, dict) else None
+        )
         if stage_line:
             lines.append(stage_line)
 

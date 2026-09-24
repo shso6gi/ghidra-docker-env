@@ -318,7 +318,9 @@ def test_a_violation_error_keeps_the_superseded_decision_receipt(monkeypatch, tm
     block = next(content for content in written if "EQUIVALENCE_RESULT_JSON_BEGIN" in content)
     payload = json.loads(block.split("\n")[1])
     assert payload["final_outcome"] == "ERROR"
-    assert payload["superseded_decision_receipt"] == original
+    assert payload["superseded_decision_receipt"] == {"decision_receipt": original}
+    # 確定した判定は message の先頭（上限で切れるのは後ろの違反の文だけ）
+    assert payload["error_message"].startswith("OUTPUT_ENVELOPE_INVARIANT_VIOLATION: decided_outcome=")
     assert "OUTPUT_ENVELOPE_INVARIANT_VIOLATION" in payload["error_message"]
     # ERROR 自身の receipt は別（取って代わられた判定を上書きしない）
     assert payload["decision_receipt"]["receipt_digest"] != original["receipt_digest"]
@@ -773,34 +775,20 @@ def test_requirement_ids_are_measured_before_they_are_written_as_text():
 
 
 def test_the_decided_text_is_written_only_after_the_envelope_fits():
-    # 契約違反の ERROR の前に、確定した判定の text を書かない（text は先に作り、書くのは後）
-    import ast
+    # 契約違反の ERROR の前に、確定した判定の text を書かない。JSON を出すときの text は最終
+    # envelope の値から作る（JSON と同じ有界な値）
     import inspect
 
     from scripts.function_tracer_pcode.cli.commands import equivalence
 
-    tree = ast.parse(inspect.getsource(equivalence))
-    function = next(
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and any(
-            isinstance(call, ast.Call) and getattr(call.func, "id", None) == "_final_envelope_or_error_result"
-            for call in ast.walk(node)
-        )
-    )
-    calls = [
-        (node.lineno, node.func.id, node.args[0].id if node.args and isinstance(node.args[0], ast.Name) else None)
-        for node in ast.walk(function)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    ]
-    envelope_line = min(line for line, name, _ in calls if name == "_final_envelope_or_error_result")
-    text_writes = [line for line, name, first in calls if name == "output_result" and first == "output_content"]
-    text_made = min(line for line, name, _ in calls if name == "_text_or_error_result")
-    assert text_made < envelope_line
-    # emit_json のときの書き出しは envelope の後（emit しないときは envelope を作らない）
-    assert any(line > envelope_line for line in text_writes)
     source = inspect.getsource(equivalence.run_equivalence_check)
-    assert "if not emit_json:\n        output_result(output_content" in source
-
+    branch = source[source.index("    if emit_json:\n"):]
+    envelope = branch.index("envelope = _final_envelope_or_error_result(")
+    text = branch.index("payload=envelope.payload")
+    write = branch.index("output_result(output_content, args.output, args.quiet)")
+    assert envelope < text < write
+    # JSON を出さないときは envelope を作らず、to_dict() から作った text を書く
+    assert "if not emit_json:\n        output_content = _text_or_error_result(" in source
 
 def test_payload_occurrence_views_draw_on_one_work_not_one_each():
     from scripts.function_tracer_pcode.checker.cause_aggregate import _payload_occurrence_views
@@ -975,3 +963,34 @@ def test_untruncatable_metadata_is_capped_at_its_schema_bound():
     result.binary1_content_identity = ("sha256", "d" * 5_000)
     with pytest.raises(OutputEnvelopeInvariantViolation, match="schema bound"):
         build_final_result_envelope(result)
+
+
+def test_any_failure_building_the_envelope_after_authority_is_a_durable_error(monkeypatch, tmp_path):
+    import json
+
+    from scripts.function_tracer_pcode.authority.decision import canonical_result
+    from scripts.function_tracer_pcode.cli.commands import equivalence
+
+    decided = _decided_result()
+    written, ended = [], []
+    monkeypatch.setattr(equivalence, "output_result", lambda content, *_a, **_k: written.append(content))
+    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", lambda _payload: None)
+    monkeypatch.setattr(equivalence, "journal_stage_end", lambda stage, *_a, **_k: ended.append((stage, _a)))
+    args = SimpleNamespace(verbose=False, debug=False, output=None, quiet=True)
+
+    def broken_seal(_preimage):
+        raise ValueError("seal could not encode the preimage")
+
+    with pytest.raises(SystemExit):
+        equivalence._final_envelope_or_error_result(
+            args, result=decided, seal=broken_seal,
+            binary1_path=str(tmp_path / "a"), binary2_path=str(tmp_path / "b"),
+            func_name1="f", func_name2="f", start_time=0.0, emission_started=0.0,
+        )
+    block = next(content for content in written if "EQUIVALENCE_RESULT_JSON_BEGIN" in content)
+    payload = json.loads(block.split("\n")[1])
+    assert payload["final_outcome"] == "ERROR"
+    assert "ValueError: seal could not encode the preimage" in payload["error_message"]
+    assert payload["superseded_decision_receipt"]["decision_receipt"]["outcome"] == decided.final_outcome
+    # 確定した判定の emission の区間は ERROR の区間を開く前に閉じる
+    assert ended and ended[0][0] == "result_emit" and ended[0][1][1]["superseded_by"] == "output_final_envelope"

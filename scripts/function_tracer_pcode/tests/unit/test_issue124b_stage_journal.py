@@ -901,9 +901,10 @@ def test_result_emit_journal_starts_before_to_dict(tmp_path, monkeypatch):
         rows,
         lambda row: row["event"] == EVENT_STAGE_END and row["stage"] == "result_emit",
     )
-    # 既存の添付順（to_string -> to_dict -> JSON 書き出し）は壊さない。
-    assert start < note("probe:to_string") < note("probe:to_dict")
-    assert note("probe:to_dict") < note("probe:json_write") < end
+    # 添付はすべて result_emit の区間の中。Issue #22 PR-22-D: 人向けの text は最終 envelope の値
+    # （JSON と同じ有界な値）から作るので、to_dict（envelope）-> to_string -> JSON 書き出しの順。
+    assert start < note("probe:to_dict") < note("probe:to_string")
+    assert note("probe:to_string") < note("probe:json_write") < end
     assert any("EQUIVALENCE_RESULT_JSON_BEGIN" in content for content in written)
 
 

@@ -56,6 +56,7 @@ from scripts.function_tracer_pcode.authority.contracts import (
     VerifiedLifecycleProjection,
 )
 from scripts.function_tracer_pcode.authority.decision.conditional import (
+    assumption_set_receipt_bound_violation,
     ConditionalDecisiveProofKind,
     ConditionalDecisiveProofReceipt,
     ConditionalFinalizationAuthority,
@@ -543,6 +544,17 @@ def run_production_conditional_lane(
                 "conditional_lane": "non_decisive",
                 "non_decisive_reasons": list(artifact.non_decisive_reasons),
                 "assumption_count": len(artifact.assumption_set),
+                "diagnostics": dict(artifact.diagnostics),
+            }
+        over_bound = assumption_set_receipt_bound_violation(tuple(artifact.assumption_set))
+        if over_bound is not None:
+            # receipt の契約（仮定の数と大きさ）に収まらない: receipt を作らない（fail closed。
+            # 確定済みの判定・exit code は不変。出力の契約違反の ERROR にしない）
+            return {
+                "conditional_lane": "over_receipt_bound",
+                "detail": over_bound,
+                "assumption_count": len(artifact.assumption_set),
+                "non_decisive_reasons": list(artifact.non_decisive_reasons),
                 "diagnostics": dict(artifact.diagnostics),
             }
         receipt = issue_conditional_decision(

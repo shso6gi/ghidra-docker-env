@@ -336,6 +336,36 @@ def assumption_set_payload(premises: Iterable[AssumptionPremise]) -> list:
     return [assumption_premise_payload(premise) for premise in premises]
 
 
+#: conditional receipt が運ぶ仮定（premise）の数と 1 つの大きさ（JSON byte）の上限。receipt の
+#: 契約（出力 schema の `conditional_decision_receipt` の上限はここから導く。Issue #22 PR-22-D）。
+#: 固定 subset（fec4b39）では conditional receipt は 1 つも発行されていない（観測の母集団が無い）。
+#: 上限は receipt の契約として宣言した値で、超える集合は receipt にしない。
+MAX_ASSUMPTION_PREMISES = 64
+ASSUMPTION_PREMISE_MAX_BYTES = 4096
+
+
+def assumption_set_receipt_bound_violation(premises: Tuple[AssumptionPremise, ...]) -> Any:
+    """仮定の集合が receipt の上限を超えるなら理由（超えなければ `None`）。
+
+    数を先に比べ、1 つずつの大きさは上限の中でだけ数える（上限を超えた premise を書き切らない）。
+    lane はこれを receipt を発行する **前** に確かめ、超えれば receipt を作らない（fail closed。
+    確定後に出力の契約違反で ERROR にしない）。
+    """
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted, RESULT_JSON_POLICY
+
+    count = len(premises)
+    if count > MAX_ASSUMPTION_PREMISES:
+        return f"assumption_set has {count} premises (> {MAX_ASSUMPTION_PREMISES})"
+    for index, premise in enumerate(premises):
+        try:
+            RESULT_JSON_POLICY.measure(
+                assumption_premise_payload(premise), max_bytes=ASSUMPTION_PREMISE_MAX_BYTES,
+            )
+        except JsonBudgetExhausted:
+            return f"assumption premise {index} exceeds {ASSUMPTION_PREMISE_MAX_BYTES} bytes"
+    return None
+
+
 def assumption_set_from_payload(payload: Any) -> Tuple[AssumptionPremise, ...]:
     """Rebuild a persisted assumption set exactly as it was written.
 
