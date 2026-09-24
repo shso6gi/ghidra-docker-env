@@ -47,7 +47,8 @@ from __future__ import annotations
 import ast
 import enum
 import pathlib
-from typing import Dict, Iterable, List, Tuple
+import re
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import pytest
 
@@ -2065,3 +2066,215 @@ def test_prepared_readers_read_only_the_declared_source_attributes():
         "effective_function1_signature", "effective_function2_signature", "smt_formula",
     }
     assert declared_extra == set(), declared_extra
+
+
+# ---------------------------------------------------------------------------
+# Issue #22 PR-22-D（4 回目）: 有界化する処理そのものが有界であること
+# ---------------------------------------------------------------------------
+#
+# 入力の大きさに比例する作業（容器の複製・並べ替え・digest・canonical 化・書き出し）は、
+# 上限（`work` / `max_bytes`）を受け取る **登録された有界化の primitive** の中だけで行う。
+# primitive 以外の code は、primitive が有界にした値しか受け取らない。規則は次の 6 つ:
+#
+# J4 primitive は上限を必須の keyword-only 引数で受け取る（既定値なし = 上限を知らずに呼べない）
+# J5 PR-22-D の module と関数で、並べ替え・hash・canonical 化・`dumps` を行う場所は登録の中だけ
+# J6 有界な証拠（`BoundedEvidence`）を作るのは唯一の owner（`core/json_encoding`）だけ
+# J7 上限なしの予算（`JsonBudget(None)` / `BudgetPolicy.unlimited()`）は登録した場所だけ
+# J8 digest / fingerprint の等しさを値の等しさ（⇔ / iff）として述べない
+# J9 `json_items` の中で集計（`sum` / `max` / `min` / `any` / `all`）をしない（集計は `scan`）
+
+#: J4: 有界化の primitive と、上限を受け取る引数（必須の keyword-only）
+_BOUNDING_PRIMITIVES = (
+    ("core/canonical_digest.py", "canonical_fingerprint", "work"),
+    ("core/json_encoding.py", "bounded_evidence", "work"),
+    ("core/json_encoding.py", "bounded_text", "work"),
+    ("core/json_encoding.py", "cached_string_bytes", "max_bytes"),
+    ("core/json_encoding.py", "JsonEncodingPolicy.token_fingerprint", "work"),
+    ("checker/unknown_reason.py", "bounded_prefix", "work"),
+    ("checker/unknown_reason.py", "finitize_unknown_reason_record", "work"),
+    ("checker/unknown_reason.py", "finitize_unknown_recovery_action", "work"),
+    ("checker/unknown_reason.py", "build_projection_diagnostic", "work"),
+    ("checker/unknown_reason.py", "_match_legacy_reasons", "work"),
+    ("checker/unknown_reason.py", "_bounded_cause_value", "work"),
+    ("checker/output_preparation.py", "finitize_legacy_reasons", "authority_projects_reasons"),
+)
+
+#: J5 の対象: PR-22-D が所有する module 全体と、他の module の中の PR-22-D の関数 / class
+_PR22D_MODULES = (
+    "core/json_encoding.py", "core/canonical_digest.py", "core/budget_policy.py",
+    "checker/output_preparation.py", "checker/output_schema.py",
+)
+_PR22D_FUNCTIONS = {
+    "checker/unknown_reason.py": {
+        "bounded_prefix", "finitize_unknown_reason_record", "finitize_unknown_recovery_action",
+        "_bounded_value", "_bounded_text", "_match_legacy_reasons", "build_projection_diagnostic",
+        "_bounded_cause_value", "projection_diagnostic_work", "_ReasonCounts", "_RecoveryBacklog",
+        "_BacklogEntryView", "_PrimaryFilter",
+    },
+    "checker/cause_aggregate.py": {"_metered", "reason_detail_key", "attach_cause_aggregate", "_remaining_work"},
+    "checker/diagnostics.py": {"TraceTimingsView", "_SolverTotals", "trace_timings_payload"},
+}
+#: J5 で数える呼び出し（入力に比例し得る並べ替え・hash・canonical 化・書き出し）
+_BOUNDED_WORK_NAMES = frozenset({"sorted", "canonical_value", "authority_digest"})
+_BOUNDED_WORK_ATTRS = frozenset({"sort", "dumps", "sha256", "blake2b", "md5", "sha1"})
+#: J5 の登録: (module, 関数の qualname, 呼び出し) → なぜ有界か
+_REGISTERED_BOUNDED_WORK = {
+    ("core/json_encoding.py", "JsonEncodingPolicy.dumps", "dumps"):
+        "policy の書き出し（呼ぶ側が大きさを確かめた小さい値だけ。見積りは文字列の長さを先に数える）",
+    ("core/json_encoding.py", "JsonEncodingPolicy.token_fingerprint", "sha256"):
+        "token 列の hash（流す token は walker が `work` へ数える）",
+    ("core/json_encoding.py", "_printable_identity", "sha256"):
+        "96 文字以下に切った identity の hash",
+    ("core/json_encoding.py", "_string_sha256", "sha256"):
+        "長い文字列の marker の hash（`bounded_text` が長さを `work` へ数えてから呼ぶ）",
+    ("core/json_encoding.py", "_Walk.push", "sort"):
+        "token digest の dict の並べ替え（引き出す 1 組ごとに予算へ数えてから）",
+    ("core/canonical_digest.py", "_json_key", "dumps"): "float 1 つの key",
+    ("core/canonical_digest.py", "_Sink.__init__", "sha256"): "流す byte は `emit` が `work` へ数える",
+    ("core/canonical_digest.py", "_Sink.emit_leaf", "dumps"): "float 1 つ",
+    ("core/canonical_digest.py", "_emit", "sort"): "set の要素（幅を `work` へ数え、要素の JSON も数え済み）",
+    ("core/canonical_digest.py", "_pairs", "sort"): "mapping の組（幅を `work` へ数えてから）",
+    ("core/canonical_digest.py", "_push_raw_container", "sorted"): "enum の値の dict（幅を `work` へ数えてから）",
+    ("core/budget_policy.py", "BudgetObservations.snapshot", "sorted"): "観測点（予算の種類 × site）の固定の語彙",
+    ("checker/output_preparation.py", "SerializationPlan.to_diagnostic", "sorted"): "RESULT_FIELDS の固定の field",
+    ("checker/output_preparation.py", "OutputPreparer.prepare", "sort"): "RESULT_FIELDS の固定の field",
+    ("checker/output_preparation.py", "_ordered", "sorted"): "RESULT_FIELDS の固定の key",
+    ("checker/unknown_reason.py", "build_projection_diagnostic", "canonical_value"):
+        "G4-b で有界化した legacy の key（inline の上限以下か `BoundedEvidence`）",
+    ("checker/unknown_reason.py", "_bounded_cause_value", "canonical_value"):
+        "`bounded_evidence` が inline の上限以下と確かめた plain な値だけ",
+    ("checker/unknown_reason.py", "_match_legacy_reasons", "canonical_value"):
+        "有界化で inline のまま残った小さい値だけ（大きい値は fingerprint で照合）",
+}
+#: J7 の登録: 上限なしの予算を作ってよい場所 → なぜ
+_REGISTERED_UNBOUNDED_BUDGETS = {
+    ("core/json_encoding.py", "JsonEncodingPolicy.materialize"):
+        "予算 scope の外（部品単体の呼び出し）の `to_dict()`。pair の中は `materialize()` が作業量を渡す",
+    ("core/json_encoding.py", "_canonical_copy_uncounted"): "`tree()` が作る前に数え済みの木の canonical な複製",
+    ("core/budget_policy.py", "<module>"): "予算を無効にした policy（`FT_*` で制限だけを外す。構造は同じ）",
+    ("checker/cause_aggregate.py", "reason_detail_key"): "作業量の scope の外（部品単体の呼び出し）だけ",
+}
+
+
+def _qualified_calls(path: pathlib.Path, only: Optional[Set[str]] = None):
+    """(qualname, 呼び出し名, 行, Call) を返す（`only` があれば top-level の名前で絞る）。"""
+
+    tree = _parse(path)
+    found = []
+
+    def visit(node, qual):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(child, qual + [child.name])
+                continue
+            if isinstance(child, ast.Call):
+                func = child.func
+                name = func.id if isinstance(func, ast.Name) else (
+                    func.attr if isinstance(func, ast.Attribute) else None
+                )
+                if name is not None and (only is None or (qual and qual[0] in only)):
+                    found.append((".".join(qual) or "<module>", name, child.lineno, child))
+            visit(child, qual)
+
+    visit(tree, [])
+    return found
+
+
+def _j5_targets():
+    for relative in _PR22D_MODULES:
+        yield relative, None
+    for relative, names in _PR22D_FUNCTIONS.items():
+        yield relative, names
+
+
+def test_j4_bounding_primitives_require_their_bound():
+    for relative, qualname, parameter in _BOUNDING_PRIMITIVES:
+        tree = _parse(PACKAGE_ROOT / relative)
+        node = tree
+        for part in qualname.split("."):
+            node = next(
+                item for item in ast.iter_child_nodes(node)
+                if isinstance(item, (ast.FunctionDef, ast.ClassDef)) and item.name == part
+            )
+        kwonly = {arg.arg: default for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults)}
+        assert parameter in kwonly, f"{relative}:{qualname} must take keyword-only {parameter!r}"
+        assert kwonly[parameter] is None, f"{relative}:{qualname}.{parameter} must have no default"
+
+
+def test_j5_input_proportional_work_happens_only_in_registered_primitives():
+    unexpected = []
+    seen = set()
+    for relative, names in _j5_targets():
+        for qualname, name, lineno, call in _qualified_calls(PACKAGE_ROOT / relative, names):
+            is_attr = isinstance(call.func, ast.Attribute)
+            if (not is_attr and name in _BOUNDED_WORK_NAMES) or (is_attr and name in _BOUNDED_WORK_ATTRS):
+                key = (relative, qualname, name)
+                seen.add(key)
+                if key not in _REGISTERED_BOUNDED_WORK:
+                    unexpected.append(f"{relative}:{lineno} {qualname} calls {name}()")
+    assert unexpected == [], unexpected
+    stale = set(_REGISTERED_BOUNDED_WORK) - seen
+    assert stale == set(), stale
+
+
+def test_j6_only_the_owner_constructs_bounded_evidence():
+    owners = set()
+    for path in _module_files():
+        relative = _relative(path)
+        for qualname, name, lineno, call in _qualified_calls(path):
+            if name == "BoundedEvidence" and isinstance(call.func, ast.Name):
+                owners.add(relative)
+    assert owners == {"core/json_encoding.py"}, owners
+
+
+def test_j7_unbounded_budgets_are_created_only_at_registered_sites():
+    found = set()
+    for path in _module_files():
+        relative = _relative(path)
+        for qualname, name, lineno, call in _qualified_calls(path):
+            unbounded = (
+                name == "JsonBudget" and call.args
+                and isinstance(call.args[0], ast.Constant) and call.args[0].value is None
+            ) or (name == "unlimited" and isinstance(call.func, ast.Attribute))
+            if unbounded:
+                found.add((relative, qualname))
+    assert found == set(_REGISTERED_UNBOUNDED_BUDGETS), found ^ set(_REGISTERED_UNBOUNDED_BUDGETS)
+
+
+_EQUALITY_CLAIM = re.compile(r"(digest|fingerprint|Merkle)[^\n]{0,60}(⇔|\biff\b)|(⇔|\biff\b)[^\n]{0,60}(digest|fingerprint)", re.I)
+
+
+def test_j8_no_code_or_test_claims_digest_equality_is_value_equality():
+    offenders = []
+    roots = [PACKAGE_ROOT]
+    for root in roots:
+        for path in sorted(root.rglob("*.py")):
+            if path.name == pathlib.Path(__file__).name:
+                continue
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if _EQUALITY_CLAIM.search(line):
+                    offenders.append(f"{path.relative_to(PACKAGE_ROOT)}:{lineno}")
+    assert offenders == [], offenders
+
+
+_AGGREGATE_BUILTINS = frozenset({"sum", "max", "min", "any", "all"})
+
+
+def test_j9_json_items_do_not_aggregate_collections():
+    offenders = []
+    for path in _module_files():
+        relative = _relative(path)
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.FunctionDef) and node.name == "json_items":
+                for inner in ast.walk(node):
+                    if (
+                        isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+                        and inner.func.id in _AGGREGATE_BUILTINS
+                        # 集計 = 列 1 つを畳む呼び出し（`max(1, x)` のような scalar どうしは除く）
+                        and (len(inner.args) == 1 or any(
+                            isinstance(arg, (ast.GeneratorExp, ast.ListComp, ast.SetComp))
+                            for arg in inner.args
+                        ))
+                    ):
+                        offenders.append(f"{relative}:{inner.lineno} {inner.func.id}()")
+    assert offenders == [], offenders
