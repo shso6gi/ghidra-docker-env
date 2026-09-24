@@ -298,9 +298,10 @@ def test_classification_names_the_run_it_classifies(tmp_path):
             restarted.projection["projection_digest"]
         )
         assert restarted_status["canonical_outcome"] == "ERROR"
-        # 2 つの run の projection は別物（restart は child の rc を持たない）で、
-        # 前の run を分類し直しても後の run の projection を使わない。
-        assert restarted.projection["projection_digest"] != first.projection["projection_digest"]
+        # Issue #165: restart は durable な E（実測 rc）から同じ projection を
+        # 作り直す（bytes まで同じ）。前の run を分類し直しても、その run が
+        # 公開した projection で分類する。
+        assert restarted.projection == first.projection
         assert classify(first)["supervisor_projection_digest"] == (
             first.projection["projection_digest"]
         )
@@ -397,7 +398,7 @@ def test_requests_that_no_durable_state_allows_are_refused_before_starting(tmp_p
     with supervisor_case(tmp_path, ChildScript((Exit(0),))) as case:
         with pytest.raises(SupervisorEntryRefused, match="use run_supervisor"):
             restart_supervisor(case)
-        with pytest.raises(ValueError, match="only crash the supervisor"):
+        with pytest.raises(ValueError, match="only crash or pause the supervisor"):
             run_supervisor(case, faults=(stop_at(FileBoundary("launch.json")),))
         # どの拒否も identity を消費していない。
         assert run_supervisor(case).invocation.ordinal == 0

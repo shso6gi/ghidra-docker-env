@@ -1134,11 +1134,49 @@ def conditional_pair_status_projection(
     }
 
 
+def _require_durable_terminal(store: Any, status: Any) -> Any:
+    """store が ``status`` の終端を採用する状態であること（Issue #165）。
+
+    判断は supervisor の ``next_step`` をそのまま使う（検証・競合の規則を
+    分類器に複製しない）。RESOLVED は canonical 結果を要求する mode、ERROR は
+    supervisor だけで決める mode でしか作られないので、その mode で読む。
+    """
+    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+        process_is_alive,
+    )
+    from scripts.function_tracer_pcode.authority.process.terminal_recovery import (
+        ExitMode,
+        StepKind,
+    )
+
+    expected = {
+        "RESOLVED": (StepKind.ADOPT_RESOLVED, ExitMode.CANONICAL_RESULT_REQUIRED),
+        "TIMEOUT": (StepKind.ADOPT_TIMEOUT, ExitMode.CANONICAL_RESULT_REQUIRED),
+        "ERROR": (StepKind.ADOPT_ERROR, ExitMode.SUPERVISOR_ONLY),
+    }.get(status)
+    if expected is None:
+        raise ValueError(
+            "supervisor projection is not a terminal authority: "
+            f"status={status!r}"
+        )
+    step, _snapshot, context = store.inspect_terminal(
+        mode=expected[1], process_alive=process_is_alive,
+    )
+    if step.kind is not expected[0]:
+        raise ValueError(
+            f"{status} projection is not the durable terminal authority: "
+            f"{step.kind.value} {getattr(step.invalid_code, 'value', None)} "
+            f"{step.detail}"
+        )
+    return context.child_exit
+
+
 def classify_pair_status(
     log_path: Path, projection_path: Path, *, checkpoint_root: Path,
     execution_nonce: str, supervisor_signing_key_id: str,
     supervisor_signing_key_file: Path, worker_signing_key_id: str,
-    worker_signing_key_file: Path,
+    worker_signing_key_file: Path, terminal_evidence_signing_key_id: str,
+    terminal_evidence_signing_key_file: Path,
 ) -> Mapping[str, Any]:
     from scripts.function_tracer_pcode.authority.process.supervisor import (
         DurableCheckpointStore,
@@ -1159,6 +1197,10 @@ def classify_pair_status(
         supervisor_signing_key=Path(supervisor_signing_key_file).read_bytes(),
         worker_signing_key_id=worker_signing_key_id,
         worker_signing_key=worker_key,
+        terminal_evidence_signing_key_id=terminal_evidence_signing_key_id,
+        terminal_evidence_signing_key=Path(
+            terminal_evidence_signing_key_file
+        ).read_bytes(),
     )
     store = DurableCheckpointStore(checkpoint_root, factory, execution_nonce)
     launch = factory.decode(json.loads(
@@ -1176,6 +1218,24 @@ def classify_pair_status(
     if supervisor.get("launch_receipt_digest") != launch.receipt_digest:
         raise ValueError("supervisor projection does not join durable launch")
     status = supervisor.get("status")
+    # Issue #165: 終端は supervisor と同じ判断（durable な D / E / A と終端
+    # authority の検証・競合検査）で、この status を採用する store でなければ
+    # 受理しない。projection の rc は E が観測した rc そのもの。
+    child_exit = _require_durable_terminal(store, status)
+    if status in {"TIMEOUT", "ERROR", "RESOLVED"} and (
+        supervisor.get("child_returncode")
+        != child_exit.payload["child_returncode"]
+        or (
+            status != "RESOLVED"
+            and (
+                supervisor.get("child_returncode_observation_kind")
+                != child_exit.payload["returncode_observation_kind"]
+                or supervisor.get("child_exit_disposition")
+                != child_exit.payload["child_exit_disposition"]
+            )
+        )
+    ):
+        raise ValueError(f"{status} projection does not join the observed child exit")
     if status in {"TIMEOUT", "ERROR"}:
         expected_outcome = (
             Outcome.TIMEOUT if status == "TIMEOUT" else Outcome.ERROR
@@ -1462,6 +1522,8 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("--supervisor-signing-key-file")
     parser.add_argument("--worker-signing-key-id")
     parser.add_argument("--worker-signing-key-file")
+    parser.add_argument("--terminal-evidence-signing-key-id")
+    parser.add_argument("--terminal-evidence-signing-key-file")
     parser.add_argument("--pair-status-signing-private-key-file")
     parser.add_argument("--pair-status-verification-key-file")
     parser.add_argument("--pair-execution-target-file")
@@ -1472,6 +1534,8 @@ def main(arguments: list[str] | None = None) -> int:
         args.checkpoint_root, args.execution_nonce,
         args.supervisor_signing_key_id, args.supervisor_signing_key_file,
         args.worker_signing_key_id, args.worker_signing_key_file,
+        args.terminal_evidence_signing_key_id,
+        args.terminal_evidence_signing_key_file,
         args.pair_status_signing_private_key_file,
         args.pair_status_verification_key_file,
         args.pair_execution_target_file,
@@ -1486,6 +1550,10 @@ def main(arguments: list[str] | None = None) -> int:
             supervisor_signing_key_file=Path(args.supervisor_signing_key_file),
             worker_signing_key_id=args.worker_signing_key_id,
             worker_signing_key_file=Path(args.worker_signing_key_file),
+            terminal_evidence_signing_key_id=args.terminal_evidence_signing_key_id,
+            terminal_evidence_signing_key_file=Path(
+                args.terminal_evidence_signing_key_file
+            ),
         )
         target = json.loads(Path(args.pair_execution_target_file).read_text(encoding="utf-8"))
         sealed_status = seal_pair_status(

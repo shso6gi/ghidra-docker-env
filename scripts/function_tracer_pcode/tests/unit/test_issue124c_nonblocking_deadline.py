@@ -828,6 +828,8 @@ def test_d11_deadline_policy_digest_is_not_derived_from_diagnostic_settings():
         stream_id="stream", deadline_policy_digest="digest",
         supervisor_signing_key_id="sup", supervisor_signing_key_file=Path("s.key"),
         worker_signing_key_id="wrk", worker_signing_key_file=Path("w.key"),
+        terminal_evidence_signing_key_id="evd",
+        terminal_evidence_signing_key_file=Path("e.key"),
         timeout_seconds=10.0, kill_grace_seconds=1.0,
         child_command=("true",),
     )

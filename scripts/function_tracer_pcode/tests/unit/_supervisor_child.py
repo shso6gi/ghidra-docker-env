@@ -96,12 +96,22 @@ class Exit:
 
 @dataclass(frozen=True)
 class Stop:
-    """止まったことを記録して、signal で終了させられるまで待つ。"""
+    """止まったことを記録して、signal で終了させられるまで待つ。
+
+    ``exit_on_sigterm`` / ``exit_on_sigusr1``（Issue #165）: その signal を受けたら
+    自分でその code で終わる（signal 死ではなく通常終了）。
+    """
 
     ignore_sigterm: bool = False
+    exit_on_sigterm: Optional[int] = None
+    exit_on_sigusr1: Optional[int] = None
 
     def to_json(self) -> dict[str, Any]:
-        return {"step": "stop", "ignore_sigterm": self.ignore_sigterm}
+        return {
+            "step": "stop", "ignore_sigterm": self.ignore_sigterm,
+            "exit_on_sigterm": self.exit_on_sigterm,
+            "exit_on_sigusr1": self.exit_on_sigusr1,
+        }
 
 
 @dataclass(frozen=True)
@@ -163,6 +173,10 @@ def _prove_launch_before_exec(records: ChildRecords) -> Any:
         "launch_child_pid": runtime.launch.payload["child_pid"],
         "launch_child_start_token": runtime.launch.payload["child_start_token"],
         "state_present_at_start": (runtime.store.directory / "state.json").exists(),
+        # Issue #165: child が受け取った環境と引数（supervisor だけの鍵が
+        # 渡っていないことを parent が確かめる）。
+        "environment": dict(os.environ),
+        "argv": list(sys.argv),
     }
     write_json(records.identity_record, {
         "pid": records.identity.pid, "start_token": records.identity.start_token,
@@ -312,10 +326,31 @@ def _drive_open_requirement(session: Any) -> bool:
     return False
 
 
+def _drive_error(session: Any) -> bool:
+    """型付きの ERROR event を 1 つ emit する（canonical ERROR、Issue #165）。"""
+
+    from scripts.function_tracer_pcode.authority.contracts import authority_digest
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+        ErrorEventAuthority,
+        EventIntent,
+        EventType,
+    )
+
+    session.emit(EventIntent(
+        EventType.ERROR,
+        ErrorEventAuthority(
+            "supervisor_harness_error",
+            authority_digest({"harness_error": session.identity.result_occurrence_id}),
+        ),
+    ))
+    return False
+
+
 #: canonical outcome -> (session を駆動して legacy の is_timeout を返す関数)。
 OUTCOME_DRIVERS: dict[str, Callable[[Any], bool]] = {
     "TIMEOUT": _drive_solver_timeout,
     "UNKNOWN": _drive_open_requirement,
+    "ERROR": _drive_error,
 }
 
 
@@ -407,7 +442,10 @@ def _step_exit(context: _ChildContext, step: Mapping[str, Any]) -> None:
 
 def _step_stop(context: _ChildContext, step: Mapping[str, Any]) -> None:
     sys.stdout.flush()
-    stop_here(context.records, point="step:stop", ignore_sigterm=step["ignore_sigterm"])
+    stop_here(
+        context.records, point="step:stop", ignore_sigterm=step["ignore_sigterm"],
+        exit_on_sigterm=step["exit_on_sigterm"], exit_on_sigusr1=step["exit_on_sigusr1"],
+    )
 
 
 STEP_HANDLERS: dict[str, Callable[[_ChildContext, Mapping[str, Any]], None]] = {

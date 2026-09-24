@@ -86,6 +86,18 @@ from scripts.function_tracer_pcode.authority.process.subordinate_decompilation i
     SubordinateProcessExecutionReceipt,
 )
 from scripts.function_tracer_pcode.authority.codecs import StrictV2JsonCodec
+from scripts.function_tracer_pcode.authority.process.checkpoint_archive import (
+    CHAIN_MEMBER_NAMES,
+    CHAIN_MEMBERS,
+    STATE_MEMBER,
+    directory_reader,
+    live_chain_members,
+)
+from scripts.function_tracer_pcode.authority.process import terminal_evidence
+from scripts.function_tracer_pcode.authority.process.terminal_evidence import (
+    TERMINAL_EVIDENCE_FILES,
+    TERMINAL_EVIDENCE_ROLE,
+)
 from scripts.function_tracer_pcode.authority.lifecycle.stream import (
     RequirementCompletedEventAuthority,
 )
@@ -110,7 +122,6 @@ CHECKPOINT_AUTHORITY_FILENAMES = (
     "timeout.json",
     "terminal-segment.json",
     "terminal-stream.json",
-    "child-exit.json",
 )
 ACTIVE_TRANSACTION_SCHEMA = "durable-active-checkpoint-transaction-v1"
 
@@ -323,11 +334,18 @@ class ProcessSupervisorAuthorityFactory:
         self, *, supervisor_signing_key_id: str,
         supervisor_signing_key: bytes, worker_signing_key_id: str,
         worker_signing_key: bytes,
+        terminal_evidence_signing_key_id: Optional[str] = None,
+        terminal_evidence_signing_key: Optional[bytes] = None,
     ) -> None:
+        """``terminal_evidence_*`` は supervisor 側（supervisor と分類器）だけが渡す。
+
+        Issue #165: D/E/A（``terminal_evidence``）は worker child が持たない鍵で
+        署名する。worker の factory はこの鍵を持たないので、D/E/A を発行も検証も
+        できない（受け取った E を worker が信じる経路を作らない）。
+        """
+        key_ids = (supervisor_signing_key_id, worker_signing_key_id)
         if (
-            not all(type(value) is str and value for value in (
-                supervisor_signing_key_id, worker_signing_key_id,
-            ))
+            not all(type(value) is str and value for value in key_ids)
             or supervisor_signing_key_id == worker_signing_key_id
         ):
             raise TypeError("worker/supervisor signing key identities are invalid")
@@ -335,12 +353,29 @@ class ProcessSupervisorAuthorityFactory:
             supervisor_signing_key, worker_signing_key,
         )):
             raise TypeError("process signing keys must contain at least 32 bytes")
+        if (terminal_evidence_signing_key_id is None) != (
+            terminal_evidence_signing_key is None
+        ):
+            raise TypeError("terminal evidence key identity and bytes go together")
+        if terminal_evidence_signing_key_id is not None and (
+            type(terminal_evidence_signing_key_id) is not str
+            or not terminal_evidence_signing_key_id
+            or terminal_evidence_signing_key_id in key_ids
+            or type(terminal_evidence_signing_key) is not bytes
+            or len(terminal_evidence_signing_key) < 32
+            or terminal_evidence_signing_key
+            in (supervisor_signing_key, worker_signing_key)
+        ):
+            raise TypeError("terminal evidence signing key is invalid")
         self.supervisor_signing_key_id = supervisor_signing_key_id
         self.worker_signing_key_id = worker_signing_key_id
+        self.terminal_evidence_signing_key_id = terminal_evidence_signing_key_id
         self.__keys = {
             "supervisor": supervisor_signing_key,
             "worker": worker_signing_key,
         }
+        if terminal_evidence_signing_key is not None:
+            self.__keys[TERMINAL_EVIDENCE_ROLE] = terminal_evidence_signing_key
         self._issued: dict[int, SignedProcessAuthorityReceipt] = {}
         self._bundles: dict[int, DurableTimeoutFinalizationBundle] = {}
         self._error_bundles: dict[int, DurableErrorFinalizationBundle] = {}
@@ -349,7 +384,27 @@ class ProcessSupervisorAuthorityFactory:
         self, kind: str, payload: Mapping[str, Any], *, signer_role: str,
     ) -> SignedProcessAuthorityReceipt:
         if signer_role not in {"worker", "supervisor"}:
+            # terminal evidence は ``issue_terminal_evidence`` からだけ署名する。
             raise ValueError("process receipt signer role is not sealed")
+        return self._sign(kind, payload, signer_role=signer_role)
+
+    def issue_terminal_evidence(
+        self, kind: str, payload: Mapping[str, Any],
+    ) -> SignedProcessAuthorityReceipt:
+        """D / E / A を supervisor 専用の terminal-evidence 鍵で署名する。
+
+        schema と join の検証は ``terminal_evidence`` が持つ（ここは kind の
+        封と署名だけ）。鍵を持たない factory（worker）は発行できない。
+        """
+        if kind not in TERMINAL_EVIDENCE_FILES:
+            raise ValueError("terminal evidence kind is not sealed")
+        if TERMINAL_EVIDENCE_ROLE not in self.__keys:
+            raise ValueError("this factory holds no terminal evidence signing key")
+        return self._sign(kind, payload, signer_role=TERMINAL_EVIDENCE_ROLE)
+
+    def _sign(
+        self, kind: str, payload: Mapping[str, Any], *, signer_role: str,
+    ) -> SignedProcessAuthorityReceipt:
         body = {
             "receipt_kind": kind,
             "registry_id": PROCESS_SUPERVISOR_REGISTRY_ID,
@@ -360,17 +415,22 @@ class ProcessSupervisorAuthorityFactory:
         signature = hmac.new(
             self.__keys[signer_role], digest.encode("ascii"), hashlib.sha256
         ).hexdigest()
-        key_id = (
-            self.worker_signing_key_id
-            if signer_role == "worker"
-            else self.supervisor_signing_key_id
-        )
+        key_id = self._role_key_ids()[signer_role]
         receipt = SignedProcessAuthorityReceipt(
             kind, dict(payload), digest, key_id, signature,
             _factory_token=_SIGNED_RECEIPT_TOKEN,
         )
         self._issued[id(receipt)] = receipt
         return receipt
+
+    def _role_key_ids(self) -> dict[str, str]:
+        roles = {
+            "worker": self.worker_signing_key_id,
+            "supervisor": self.supervisor_signing_key_id,
+        }
+        if self.terminal_evidence_signing_key_id is not None:
+            roles[TERMINAL_EVIDENCE_ROLE] = self.terminal_evidence_signing_key_id
+        return roles
 
     def validate(self, receipt: SignedProcessAuthorityReceipt) -> None:
         if (
@@ -379,11 +439,12 @@ class ProcessSupervisorAuthorityFactory:
             or self._issued.get(id(receipt)) is not receipt
         ):
             raise TypeError("process authority receipt is not exact factory membership")
-        role = (
-            "worker" if receipt.signing_key_id == self.worker_signing_key_id
-            else "supervisor"
-            if receipt.signing_key_id == self.supervisor_signing_key_id
-            else None
+        role = next(
+            (
+                name for name, key_id in self._role_key_ids().items()
+                if receipt.signing_key_id == key_id
+            ),
+            None,
         )
         if role is None:
             raise ValueError("process authority receipt signing key is untrusted")
@@ -391,7 +452,7 @@ class ProcessSupervisorAuthorityFactory:
             "SupervisorLaunchReceipt": "supervisor",
             "SupervisorTimeoutReceipt": "supervisor",
             "SupervisorOperationalErrorReceipt": "supervisor",
-            "SupervisorChildExitReceipt": "supervisor",
+            **{kind: TERMINAL_EVIDENCE_ROLE for kind in TERMINAL_EVIDENCE_FILES},
             "RecoveryResolutionReceipt": "supervisor",
             "ProcessLiveRequirementAssignmentReceipt": "worker",
             "OperationalCheckpointReceipt": "worker",
@@ -438,6 +499,22 @@ class ProcessSupervisorAuthorityFactory:
             result_payload_preimage=supervisor_canonical_result_payload_preimage(
                 launch, outcome=outcome, error_kind=error_kind
             ),
+            bundle_verification_key_id=self.supervisor_signing_key_id,
+            bundle_verification_key=self.__keys["supervisor"],
+        )
+
+    def validate_child_canonical_bundle(
+        self, bundle: Mapping[str, Any], *,
+        result_payload_preimage: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """child が supervisor 鍵で封をした canonical bundle を検証する（Issue #165）。"""
+        from scripts.function_tracer_pcode.authority.decision.canonical_result import (
+            validate_canonical_result_finalization_bundle,
+        )
+
+        return validate_canonical_result_finalization_bundle(
+            bundle,
+            result_payload_preimage=result_payload_preimage,
             bundle_verification_key_id=self.supervisor_signing_key_id,
             bundle_verification_key=self.__keys["supervisor"],
         )
@@ -1810,6 +1887,60 @@ class ProcessSupervisorAuthorityFactory:
             raise ValueError("operational ERROR bundle integrity mismatch")
 
 
+@dataclass(frozen=True)
+class ResolvedChain:
+    """意味検証を通った閉じた checkpoint chain（``validate_resolved_chain_members``）。"""
+
+    checkpoint: SignedProcessAuthorityReceipt
+    prefix: EventStreamPrefixView
+    resolved: SignedProcessAuthorityReceipt
+    recovery: Optional[SignedProcessAuthorityReceipt]
+
+
+#: Issue #165: この process が今持っている flock（lock file の path）。flock は
+#: open file description ごとなので、同じ process が同じ file を別 fd でもう一度
+#: 取ると自分を待って止まる。入れ子の取得は例外にする（``_exclusive_flock``）。
+_HELD_STORE_LOCKS: set[str] = set()
+_HELD_OWNER_LOCKS: set[str] = set()
+_OWNERSHIP_TOKEN = object()
+
+
+class StoreLockReentry(RuntimeError):
+    """同じ process が同じ lock を入れ子で取ろうとした（deadlock の代わりに落とす）。"""
+
+
+def _lock_key(path: Path) -> str:
+    return str(Path(path).resolve())
+
+
+@contextmanager
+def _exclusive_flock(path: Path, held: set[str]) -> Iterator[None]:
+    key = _lock_key(path)
+    if key in held:
+        raise StoreLockReentry(f"{Path(path).name} is already held by this process")
+    with Path(path).open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        held.add(key)
+        try:
+            yield
+        finally:
+            held.discard(key)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+@dataclass(frozen=True)
+class SupervisorOwnership:
+    """``DurableCheckpointStore.supervisor_ownership`` の中でだけ有効な証明。"""
+
+    store: "DurableCheckpointStore" = field(repr=False)
+    key: str
+    _token: object = field(default=None, repr=False, compare=False)
+
+    @property
+    def held(self) -> bool:
+        return self.key in _HELD_OWNER_LOCKS
+
+
 class DurableCheckpointStore:
     """Atomic, fsync-backed state/continuation store with a nonce-local lock."""
 
@@ -1839,13 +1970,184 @@ class DurableCheckpointStore:
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
+        """store の flock を 1 回だけ取る（入れ子は例外。自分を待って止まらない）。"""
         self.root.mkdir(parents=True, exist_ok=True)
-        with self.lock_path.open("a+b") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with _exclusive_flock(self.lock_path, _HELD_STORE_LOCKS):
+            yield
+
+    def _assert_locked(self) -> None:
+        if _lock_key(self.lock_path) not in _HELD_STORE_LOCKS:
+            raise RuntimeError("store operation requires the store flock")
+
+    @contextmanager
+    def supervisor_ownership(self) -> Iterator["SupervisorOwnership"]:
+        """Issue #165: この store を終端へ進める supervisor を 1 つに限る。
+
+        store の flock（worker と共有・短時間）とは別の lock で、supervisor が
+        起動から projection を書くまで持つ。2 つ目の supervisor（restart の
+        重複起動）はここで先の supervisor の終了を待ち、その後で同じ durable
+        evidence から同じ終端を導く。child は持たない（fd は継承されない）ので、
+        kill / wait の間これを持っていても worker の store 操作は止まらない。
+        """
+        path = self.directory / ".supervisor-owner.lock"
+        with _exclusive_flock(path, _HELD_OWNER_LOCKS):
+            ownership = SupervisorOwnership(self, _lock_key(path), _OWNERSHIP_TOKEN)
+            yield ownership
+
+    def _require_ownership(self, ownership: "SupervisorOwnership") -> None:
+        if (
+            type(ownership) is not SupervisorOwnership
+            or ownership._token is not _OWNERSHIP_TOKEN
+            or ownership.store is not self
+            or ownership.key not in _HELD_OWNER_LOCKS
+        ):
+            raise RuntimeError("supervisor-only store write requires held ownership")
+
+    # -- Issue #165: supervisor の終了観測（D / E）と終端 transaction ----------
+
+    def persist_deadline(
+        self, ownership: "SupervisorOwnership", receipt: SignedProcessAuthorityReceipt,
+    ) -> None:
+        """D を signal より前に durable にする。**store の flock は取らない。**
+
+        deadline に達した worker は store の transaction の中で止まっていることが
+        ある（flock を持ったまま）。D の書込みがその flock を待つと kill が
+        始まらない。D を書くのは owner の supervisor だけ（worker は書かない）
+        なので、排他は ``ownership`` が持つ。
+        """
+        self._require_ownership(ownership)
+        launch = self._read_launch()
+        self.factory.validate(receipt)
+        terminal_evidence.validate_deadline(receipt, launch)
+        self._atomic_write(
+            self.directory / terminal_evidence.DEADLINE_FILENAME,
+            self._bytes(receipt), identical_ok=True,
+        )
+
+    def record_child_exit(
+        self, ownership: "SupervisorOwnership", build: Any,
+    ) -> SignedProcessAuthorityReceipt:
+        """E を書く。anchor と envelope の観測・署名・書込みを 1 回の flock で行う。
+
+        ``build(launch=, deadline=, anchor=, envelope=)`` は署名済み E を返す
+        （rc / signal / disposition は呼び出し側が wait で観測した値）。E は
+        attempt ごとに 1 つで、既にあれば同じ bytes でない限り拒否する。
+        """
+        self._require_ownership(ownership)
+        with self._locked():
+            launch = self._read_launch()
+            deadline = self._read_terminal_evidence_locked(
+                terminal_evidence.DEADLINE_RECEIPT_KIND
+            )
+            if deadline is not None:
+                terminal_evidence.validate_deadline(deadline, launch)
+            receipt = build(
+                launch=launch, deadline=deadline,
+                anchor=self._observe_anchor_locked(),
+                envelope=self._observe_envelope_locked(),
+            )
+            self.factory.validate(receipt)
+            terminal_evidence.validate_child_exit(receipt, launch, deadline)
+            self._atomic_write(
+                self.directory / terminal_evidence.CHILD_EXIT_FILENAME,
+                self._bytes(receipt), identical_ok=True,
+            )
+            return receipt
+
+    @contextmanager
+    def terminal_transaction(
+        self, ownership: "SupervisorOwnership",
+    ) -> Iterator[Any]:
+        """終端処理の 1 手（snapshot の再読・判定・書込み）を 1 回の flock で行う。"""
+        from scripts.function_tracer_pcode.authority.process.terminal_transaction import (
+            TerminalTransaction,
+        )
+
+        self._require_ownership(ownership)
+        with self._locked():
+            yield TerminalTransaction(self, ownership)
+
+    def inspect_terminal(self, *, mode: Any, process_alive: Any) -> tuple[Any, Any, Any]:
+        """終端 authority を読むだけ（書かない）: ``(next_step, snapshot, context)``。
+
+        分類器が supervisor と同じ判断で projection を確かめるための入口。
+        supervisor と同じ owner lock を取るので、終端処理の途中の store を読まない。
+        """
+        from scripts.function_tracer_pcode.authority.process.terminal_recovery import (
+            next_step,
+        )
+
+        with self.supervisor_ownership() as ownership:
+            with self.terminal_transaction(ownership) as transaction:
+                snapshot, context = transaction.snapshot(
+                    mode=mode, process_alive=process_alive,
+                )
+                return next_step(snapshot), snapshot, context
+
+    def _read_terminal_evidence_locked(
+        self, kind: str,
+    ) -> Optional[SignedProcessAuthorityReceipt]:
+        path = self.directory / terminal_evidence.TERMINAL_EVIDENCE_FILES[kind]
+        if not path.exists():
+            return None
+        receipt = self.factory.decode(json.loads(path.read_text(encoding="utf-8")))
+        if receipt.receipt_kind != kind:
+            raise terminal_evidence.TerminalEvidenceInvalid(
+                f"{path.name} does not hold {kind}"
+            )
+        return receipt
+
+    def _observe_anchor_locked(self) -> "terminal_evidence.CheckpointAnchor":
+        """child 終了の時点の live checkpoint（解釈はせず、読めたものを名指す）。"""
+        anchor = terminal_evidence.CheckpointAnchor
+        try:
+            if self._pending_active_path.exists():
+                checkpoint, _prefix, _stream, _bytes = (
+                    self._decode_active_transaction_locked()
+                )
+                transaction = json.loads(
+                    self._pending_active_path.read_text(encoding="utf-8")
+                )["transaction_digest"]
+                return anchor(
+                    terminal_evidence.ANCHOR_PENDING_ACTIVE,
+                    checkpoint_receipt_digest=checkpoint.receipt_digest,
+                    transaction_digest=transaction,
+                )
+            if (self.directory / STATE_MEMBER).exists():
+                state = self.read_state()
+                checkpoint = self.factory.decode(json.loads(
+                    (self.directory / "checkpoint.json").read_text(encoding="utf-8")
+                ))
+                return anchor(
+                    terminal_evidence.ANCHOR_CHAIN,
+                    checkpoint_receipt_digest=checkpoint.receipt_digest,
+                    state_receipt_digest=state.receipt_digest,
+                    state=state.payload["state"],
+                )
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            return anchor(
+                terminal_evidence.ANCHOR_UNREADABLE,
+                detail=f"{type(exc).__name__}: {exc}"[:500],
+            )
+        residue = live_chain_members(self.directory)
+        if residue:
+            return anchor(
+                terminal_evidence.ANCHOR_UNREADABLE,
+                detail=f"chain members without state: {list(residue)}",
+            )
+        return anchor(terminal_evidence.ANCHOR_NONE)
+
+    def _observe_envelope_locked(self) -> "terminal_evidence.EnvelopeObservation":
+        from scripts.function_tracer_pcode.authority.decision.canonical_result import (
+            RESULT_ENVELOPE_FILE,
+        )
+
+        path = self.directory / RESULT_ENVELOPE_FILE
+        if not path.exists():
+            return terminal_evidence.EnvelopeObservation(False, None)
+        return terminal_evidence.EnvelopeObservation(
+            True, hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
 
     @staticmethod
     def _bytes(receipt: SignedProcessAuthorityReceipt) -> bytes:
@@ -1874,6 +2176,16 @@ class DurableCheckpointStore:
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
+
+    def _write_json_locked(self, path: Path, payload: Mapping[str, Any]) -> None:
+        """supervisor の durable JSON（同じ bytes の再書込みだけ許す）。"""
+        self._assert_locked()
+        self._atomic_write(
+            path,
+            json.dumps(dict(payload), sort_keys=True, separators=(",", ":")).encode("utf-8")
+            + b"\n",
+            identical_ok=True,
+        )
 
     def _atomic_replace(self, path: Path, data: bytes) -> None:
         fd, temporary = tempfile.mkstemp(prefix=".replace-", dir=str(path.parent))
@@ -2026,15 +2338,9 @@ class DurableCheckpointStore:
     ) -> None:
         history = self.directory / "checkpoint-history" / resolved.receipt_digest
         history.mkdir(parents=True, exist_ok=True)
-        names = (
-            "checkpoint-prefix-stream.json",
-            "checkpoint.json",
-            "continuation-stream.json",
-            "continuation.json",
-            "ready.json",
-            "state.json",
-        )
-        for name in names:
+        # Issue #165: chain の member は ``CHAIN_MEMBERS`` の 1 つの表で決める
+        # （supervisor の recovery で閉じた chain は recovery-resolution も連れて行く）。
+        for name in CHAIN_MEMBER_NAMES:
             source = self.directory / name
             destination = history / name
             if destination.exists():
@@ -2051,7 +2357,7 @@ class DurableCheckpointStore:
             archived = self.factory.decode(json.loads(
                 (history / "state.json").read_text(encoding="utf-8")
             ))
-        except Exception as exc:
+        except (OSError, KeyError, TypeError, ValueError) as exc:
             raise ValueError(
                 "resolved checkpoint history is incomplete or invalid"
             ) from exc
@@ -2132,22 +2438,6 @@ class DurableCheckpointStore:
         self._remove_pending_active_locked()
         return checkpoint, prefix
 
-    def recover_pending_active_commit(
-        self,
-    ) -> Optional[tuple[SignedProcessAuthorityReceipt, EventStreamPrefixView]]:
-        with self._locked():
-            if not self._pending_active_path.exists():
-                return None
-            return self._commit_pending_active_locked()
-
-    def rematerialize_child_exit_resolution(self) -> SignedProcessAuthorityReceipt:
-        receipt = self.factory.decode(json.loads(
-            (self.directory / "child-exit.json").read_text(encoding="utf-8")
-        ))
-        if receipt.receipt_kind != "SupervisorChildExitReceipt":
-            raise ValueError("durable child exit resolution kind is invalid")
-        return receipt
-
     def persist_active(
         self, receipt: SignedProcessAuthorityReceipt,
         prefix: EventStreamPrefixView,
@@ -2159,48 +2449,62 @@ class DurableCheckpointStore:
         if receipt.payload["prefix_digest"] != prefix.prefix_authority_digest:
             raise ValueError("ACTIVE checkpoint prefix authority differs")
         with self._locked():
-            launch_path = self.directory / "launch.json"
-            try:
-                launch = self.factory.decode(json.loads(
-                    launch_path.read_text(encoding="utf-8")
-                ))
-            except Exception as exc:
-                raise ValueError("ACTIVE checkpoint lacks durable launch authority") from exc
-            if receipt.payload["launch_receipt_digest"] != launch.receipt_digest:
-                raise ValueError("ACTIVE checkpoint launch binding differs")
-            state_path = self.directory / "state.json"
-            predecessor_digest = receipt.payload.get(
-                "prior_resolved_receipt_digest"
-            )
-            if state_path.exists():
-                predecessor = self.factory.decode(json.loads(
-                    state_path.read_text(encoding="utf-8")
-                ))
-                if (
-                    predecessor.payload.get("state")
-                    != CheckpointState.RESOLVED.value
-                    or predecessor.receipt_digest != predecessor_digest
-                ):
-                    raise ValueError(
-                        "ACTIVE checkpoint does not extend durable resolved state"
-                    )
-            elif predecessor_digest is not None:
-                raise ValueError("first ACTIVE checkpoint carries a predecessor")
-            prefix_stream = SealedEventStream(
-                EventStreamEnvelope(
-                    prefix.stream_id, prefix.result_occurrence_id,
-                    prefix.source_snapshot_fingerprint, 1,
-                    len(prefix.events), len(prefix.events),
-                    prefix.prefix_chain_digest, True,
-                ),
-                prefix.events,
-            )
-            prefix_stream.validate()
-            self._atomic_write(
-                self._pending_active_path,
-                self._active_transaction_bytes(receipt, prefix_stream),
-            )
-            self._commit_pending_active_locked()
+            self._persist_active_locked(receipt, prefix)
+
+    def _persist_active_locked(
+        self, receipt: SignedProcessAuthorityReceipt,
+        prefix: EventStreamPrefixView,
+    ) -> None:
+        self._assert_locked()
+        self.factory.validate(receipt)
+        prefix.validate()
+        if (
+            receipt.payload["state"] != CheckpointState.ACTIVE.value
+            or receipt.payload["prefix_digest"] != prefix.prefix_authority_digest
+        ):
+            raise ValueError("ACTIVE checkpoint authority differs from its prefix")
+        launch_path = self.directory / "launch.json"
+        try:
+            launch = self.factory.decode(json.loads(
+                launch_path.read_text(encoding="utf-8")
+            ))
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError("ACTIVE checkpoint lacks durable launch authority") from exc
+        if receipt.payload["launch_receipt_digest"] != launch.receipt_digest:
+            raise ValueError("ACTIVE checkpoint launch binding differs")
+        state_path = self.directory / "state.json"
+        predecessor_digest = receipt.payload.get(
+            "prior_resolved_receipt_digest"
+        )
+        if state_path.exists():
+            predecessor = self.factory.decode(json.loads(
+                state_path.read_text(encoding="utf-8")
+            ))
+            if (
+                predecessor.payload.get("state")
+                != CheckpointState.RESOLVED.value
+                or predecessor.receipt_digest != predecessor_digest
+            ):
+                raise ValueError(
+                    "ACTIVE checkpoint does not extend durable resolved state"
+                )
+        elif predecessor_digest is not None:
+            raise ValueError("first ACTIVE checkpoint carries a predecessor")
+        prefix_stream = SealedEventStream(
+            EventStreamEnvelope(
+                prefix.stream_id, prefix.result_occurrence_id,
+                prefix.source_snapshot_fingerprint, 1,
+                len(prefix.events), len(prefix.events),
+                prefix.prefix_chain_digest, True,
+            ),
+            prefix.events,
+        )
+        prefix_stream.validate()
+        self._atomic_write(
+            self._pending_active_path,
+            self._active_transaction_bytes(receipt, prefix_stream),
+        )
+        self._commit_pending_active_locked()
 
     def rollback_active(
         self, receipt: SignedProcessAuthorityReceipt,
@@ -2271,18 +2575,15 @@ class DurableCheckpointStore:
             predecessor_digest = receipt.payload.get(
                 "prior_resolved_receipt_digest"
             )
-            predecessor_names = (
-                "checkpoint-prefix-stream.json",
-                "checkpoint.json",
-                "continuation-stream.json",
-                "continuation.json",
-                "ready.json",
-                "state.json",
-            )
             history = None
+            predecessor_names: tuple[str, ...] = ()
             if predecessor_digest is not None:
                 history = (
                     self.directory / "checkpoint-history" / predecessor_digest
+                )
+                predecessor_names = tuple(
+                    spec.name for spec in CHAIN_MEMBERS
+                    if spec.required or (history / spec.name).exists()
                 )
                 if any(
                     not (history / name).exists()
@@ -2418,172 +2719,246 @@ class DurableCheckpointStore:
             self._replace_state_locked(resolved)
             return ready, resolved
 
-    def supervisor_claim_timeout(
+    def _close_continuation_locked(
+        self, *, active: SignedProcessAuthorityReceipt,
+        prefix: EventStreamPrefixView,
+    ) -> SignedProcessAuthorityReceipt:
+        """durable な worker continuation で ACTIVE chain を閉じる（RESOLVED まで）。
+
+        worker が ``ready.json`` を公開した直後（``state.json`` を READY へ
+        替える前）に止まった store では、その worker の READY をそのまま使う
+        （supervisor の READY で書き替えない）。どちらの READY からも同じ
+        recovery で RESOLVED にする。
+        """
+        self._assert_locked()
+        self.factory.validate(active)
+        prefix.validate()
+        current = self.read_state()
+        if (
+            current.receipt_digest != active.receipt_digest
+            or active.payload["state"] != CheckpointState.ACTIVE.value
+            or active.payload["prefix_digest"] != prefix.prefix_authority_digest
+        ):
+            raise ValueError("continuation close lost ACTIVE-state CAS")
+        durable, _stream = self.rematerialize_worker_continuation(prefix=prefix)
+        if durable.payload["checkpoint_receipt_digest"] != active.receipt_digest:
+            raise ValueError("durable continuation does not continue this checkpoint")
+        ready_path = self.directory / "ready.json"
+        if ready_path.exists():
+            ready = self.factory.decode(json.loads(ready_path.read_text(encoding="utf-8")))
+            if (
+                ready.receipt_kind != "CheckpointStateTransitionReceipt"
+                or ready.payload["state"] != CheckpointState.COMPLETION_READY.value
+                or ready.payload["prior_state_receipt_digest"] != active.receipt_digest
+                or ready.payload["continuation_digest"] != durable.receipt_digest
+            ):
+                raise ValueError("durable READY does not close this continuation")
+        else:
+            recovery = self._write_recovery_resolution_locked(active, durable)
+            ready = self.factory._issue_transition(
+                prior=active, next_state=CheckpointState.COMPLETION_READY,
+                lock_directory_digest=self.lock_directory_digest,
+                continuation_digest=durable.receipt_digest,
+                recovery_resolution=recovery,
+                _capability=_TRANSITION_CAPABILITY_TOKEN,
+            )
+            self._atomic_write(ready_path, self._bytes(ready), identical_ok=True)
+        self._replace_state_locked(ready)
+        return self._recover_completion_ready_locked(ready=ready, prefix=prefix)
+
+    def _write_recovery_resolution_locked(
+        self, active: SignedProcessAuthorityReceipt,
+        continuation: SignedProcessAuthorityReceipt,
+    ) -> SignedProcessAuthorityReceipt:
+        recovery = self.factory.issue_recovery_resolution(
+            active=active, continuation=continuation,
+            lock_directory_digest=self.lock_directory_digest,
+        )
+        self._atomic_write(
+            self.directory / "recovery-resolution.json",
+            self._bytes(recovery), identical_ok=True,
+        )
+        return recovery
+
+    def _claim_timeout_locked(
         self, *, active: SignedProcessAuthorityReceipt,
         prefix: EventStreamPrefixView, kill_disposition: str,
     ) -> SignedProcessAuthorityReceipt:
+        """continuation の無い ACTIVE を supervisor の timeout として claim する。
+
+        claim は ``kill_disposition``（E が観測したもの）から決定的に作るので、
+        ``claimed.json`` の公開後・CAS 前に止まった store でも同じ bytes を
+        書き直すだけになる（違う claim があれば既存の衝突検査で拒否）。
+        """
+        self._assert_locked()
         self.factory.validate(active)
         prefix.validate()
         if active.payload["prefix_digest"] != prefix.prefix_authority_digest:
             raise ValueError("supervisor claim prefix differs from checkpoint")
-        with self._locked():
-            current = self.read_state()
-            if current.receipt_digest != active.receipt_digest:
-                raise ValueError("supervisor timeout lost checkpoint CAS")
-            continuation = self.directory / "continuation.json"
-            if continuation.exists():
-                # Verification occurs under the same lock.  A valid continuation
-                # always wins; a torn/invalid one makes the census invalid.
-                durable = self.factory.decode(json.loads(
-                    continuation.read_text(encoding="utf-8")
-                ))
-                durable_stream = self.codec.loads(
-                    (self.directory / "continuation-stream.json").read_text(
-                        encoding="utf-8"
-                    )
-                )
-                self.factory.validate_worker_continuation(
-                    durable, prefix, durable_stream,
-                )
-                recovery = self.factory.issue_recovery_resolution(
-                    active=active, continuation=durable,
-                    lock_directory_digest=self.lock_directory_digest,
-                )
-                self._atomic_write(
-                    self.directory / "recovery-resolution.json",
-                    self._bytes(recovery), identical_ok=True,
-                )
-                ready = self.factory._issue_transition(
-                    prior=active, next_state=CheckpointState.COMPLETION_READY,
-                    lock_directory_digest=self.lock_directory_digest,
-                    continuation_digest=durable.receipt_digest,
-                    recovery_resolution=recovery,
-                    _capability=_TRANSITION_CAPABILITY_TOKEN,
-                )
-                self._atomic_write(
-                    self.directory / "ready.json", self._bytes(ready),
-                    identical_ok=True,
-                )
-                self._replace_state_locked(ready)
-                resolved = self.factory._issue_transition(
-                    prior=ready, next_state=CheckpointState.RESOLVED,
-                    lock_directory_digest=self.lock_directory_digest,
-                    continuation_digest=durable.receipt_digest,
-                    recovery_resolution=recovery,
-                    _capability=_TRANSITION_CAPABILITY_TOKEN,
-                )
-                self._replace_state_locked(resolved)
-                return resolved
-            claimed = self.factory._issue_transition(
-                prior=active, next_state=CheckpointState.TIMED_OUT_CLAIMED,
-                lock_directory_digest=self.lock_directory_digest,
-                kill_disposition=kill_disposition,
-                _capability=_TRANSITION_CAPABILITY_TOKEN,
-            )
-            self._atomic_write(
-                self.directory / "claimed.json", self._bytes(claimed)
-            )
-            self._replace_state_locked(claimed)
-            return claimed
+        current = self.read_state()
+        if current.receipt_digest != active.receipt_digest:
+            raise ValueError("supervisor timeout lost checkpoint CAS")
+        if (self.directory / "continuation.json").exists():
+            raise ValueError("a durable continuation exists; the checkpoint closes instead")
+        claimed = self.factory._issue_transition(
+            prior=active, next_state=CheckpointState.TIMED_OUT_CLAIMED,
+            lock_directory_digest=self.lock_directory_digest,
+            kill_disposition=kill_disposition,
+            _capability=_TRANSITION_CAPABILITY_TOKEN,
+        )
+        self._atomic_write(
+            self.directory / "claimed.json", self._bytes(claimed), identical_ok=True,
+        )
+        self._replace_state_locked(claimed)
+        return claimed
 
-    def recover_completion_ready(
+    def _recover_completion_ready_locked(
         self, *, ready: SignedProcessAuthorityReceipt,
         prefix: EventStreamPrefixView,
     ) -> SignedProcessAuthorityReceipt:
         """Resolve the durable worker continuation after the READY crash window."""
+        self._assert_locked()
         self.factory.validate(ready)
         prefix.validate()
-        with self._locked():
-            current = self.read_state()
-            if (
-                current.receipt_digest != ready.receipt_digest
-                or ready.payload["state"] != CheckpointState.COMPLETION_READY.value
-            ):
-                raise ValueError("completion recovery lost READY-state CAS")
-            try:
-                checkpoint = self.factory.decode(json.loads(
-                    (self.directory / "checkpoint.json").read_text(encoding="utf-8")
-                ))
-                continuation = self.factory.decode(json.loads(
-                    (self.directory / "continuation.json").read_text(encoding="utf-8")
-                ))
-                continuation_stream = self.codec.loads(
-                    (self.directory / "continuation-stream.json").read_text(
-                        encoding="utf-8"
-                    )
-                )
-            except Exception as exc:
-                raise ValueError("READY recovery authority is missing or invalid") from exc
-            self.factory.validate_worker_continuation(
-                continuation, prefix, continuation_stream
-            )
-            if (
-                checkpoint.payload["state"] != CheckpointState.ACTIVE.value
-                or ready.payload["prior_state_receipt_digest"]
-                != checkpoint.receipt_digest
-                or ready.payload["continuation_digest"]
-                != continuation.receipt_digest
-            ):
-                raise ValueError("READY recovery chain differs from durable authority")
-            recovery = self.factory.issue_recovery_resolution(
-                active=checkpoint, continuation=continuation,
-                lock_directory_digest=self.lock_directory_digest,
-            )
-            self._atomic_write(
-                self.directory / "recovery-resolution.json",
-                self._bytes(recovery), identical_ok=True,
-            )
-            self._atomic_write(
-                self.directory / "ready.json", self._bytes(ready),
-                identical_ok=True,
-            )
-            resolved = self.factory._issue_transition(
-                prior=ready, next_state=CheckpointState.RESOLVED,
-                lock_directory_digest=self.lock_directory_digest,
-                continuation_digest=continuation.receipt_digest,
-                recovery_resolution=recovery,
-                _capability=_TRANSITION_CAPABILITY_TOKEN,
-            )
-            self._replace_state_locked(resolved)
-            return resolved
+        current = self.read_state()
+        if (
+            current.receipt_digest != ready.receipt_digest
+            or ready.payload["state"] != CheckpointState.COMPLETION_READY.value
+        ):
+            raise ValueError("completion recovery lost READY-state CAS")
+        try:
+            checkpoint = self.factory.decode(json.loads(
+                (self.directory / "checkpoint.json").read_text(encoding="utf-8")
+            ))
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError("READY recovery authority is missing or invalid") from exc
+        continuation, _stream = self.rematerialize_worker_continuation(prefix=prefix)
+        if (
+            checkpoint.payload["state"] != CheckpointState.ACTIVE.value
+            or ready.payload["prior_state_receipt_digest"]
+            != checkpoint.receipt_digest
+            or ready.payload["continuation_digest"]
+            != continuation.receipt_digest
+        ):
+            raise ValueError("READY recovery chain differs from durable authority")
+        recovery = self._write_recovery_resolution_locked(checkpoint, continuation)
+        self._atomic_write(
+            self.directory / "ready.json", self._bytes(ready), identical_ok=True,
+        )
+        resolved = self.factory._issue_transition(
+            prior=ready, next_state=CheckpointState.RESOLVED,
+            lock_directory_digest=self.lock_directory_digest,
+            continuation_digest=continuation.receipt_digest,
+            recovery_resolution=recovery,
+            _capability=_TRANSITION_CAPABILITY_TOKEN,
+        )
+        self._replace_state_locked(resolved)
+        return resolved
 
     def rematerialize_resolved_state(
         self, *, prefix: EventStreamPrefixView,
     ) -> SignedProcessAuthorityReceipt:
         """Verify the complete durable completion chain, not only final state."""
         prefix.validate()
+        chain = self.validate_resolved_chain_members(
+            directory_reader(self.directory),
+            present=live_chain_members(self.directory),
+        )
+        if chain.prefix != prefix:
+            raise ValueError("durable RESOLVED chain prefix differs")
+        return chain.resolved
 
-        def read_receipt(name: str) -> SignedProcessAuthorityReceipt:
+    def validate_resolved_chain_members(
+        self, read: Any, *, present: tuple[str, ...],
+    ) -> "ResolvedChain":
+        """1 つの閉じた chain を member の bytes から意味検証する（置き場所を問わない）。
+
+        Issue #165: live の chain も、A archive の途中で live / history に
+        分かれた chain も、同じ検証を通す。``read(name)`` は member の bytes を
+        返し、``present`` はいま存在する member 名（任意 member の有無）。
+        """
+        missing = {
+            spec.name for spec in CHAIN_MEMBERS if spec.required
+        } - set(present)
+        if missing:
+            raise ValueError(f"resolved chain lacks members {sorted(missing)}")
+
+        def receipt(name: str) -> SignedProcessAuthorityReceipt:
             try:
-                return self.factory.decode(json.loads(
-                    (self.directory / name).read_text(encoding="utf-8")
-                ))
-            except Exception as exc:
+                return self.factory.decode(json.loads(read(name).decode("utf-8")))
+            except (OSError, UnicodeDecodeError, KeyError, TypeError, ValueError) as exc:
                 raise ValueError(f"persisted {name} authority is invalid") from exc
 
-        launch = read_receipt("launch.json")
-        checkpoint = read_receipt("checkpoint.json")
-        continuation, continuation_stream = self.rematerialize_worker_continuation(
-            prefix=prefix
+        def stream(name: str) -> SealedEventStream:
+            try:
+                return self.codec.loads(read(name).decode("utf-8"))
+            except (OSError, UnicodeDecodeError, KeyError, TypeError, ValueError) as exc:
+                raise ValueError(f"persisted {name} stream is invalid") from exc
+
+        launch = self._read_launch()
+        checkpoint = receipt("checkpoint.json")
+        prefix = EventStreamPrefixView.from_sealed_stream(
+            stream("checkpoint-prefix-stream.json")
         )
-        ready = read_receipt("ready.json")
-        resolved = self.read_state()
+        prefix.validate()
+        continuation = receipt("continuation.json")
+        continuation_stream = stream("continuation-stream.json")
+        self.factory.validate_worker_continuation(
+            continuation, prefix, continuation_stream
+        )
+        ready = receipt("ready.json")
+        resolved = receipt(STATE_MEMBER)
+        recovery = (
+            receipt("recovery-resolution.json")
+            if "recovery-resolution.json" in present else None
+        )
+        recovery_digest = None if recovery is None else recovery.receipt_digest
         if (
             checkpoint.payload["state"] != CheckpointState.ACTIVE.value
+            or checkpoint.payload["prefix_digest"] != prefix.prefix_authority_digest
             or checkpoint.payload["launch_receipt_digest"] != launch.receipt_digest
             or ready.payload["state"] != CheckpointState.COMPLETION_READY.value
             or ready.payload["prior_state_receipt_digest"]
             != checkpoint.receipt_digest
             or ready.payload["continuation_digest"] != continuation.receipt_digest
+            or continuation.payload["checkpoint_receipt_digest"]
+            != checkpoint.receipt_digest
             or continuation.payload["operational_authority_root_digest"]
             != checkpoint.payload["operational_authority_root_digest"]
             or resolved.payload["state"] != CheckpointState.RESOLVED.value
             or resolved.payload["prior_state_receipt_digest"] != ready.receipt_digest
             or resolved.payload["continuation_digest"]
             != continuation.receipt_digest
+            # 閉じたのが supervisor の recovery なら、その receipt もこの chain を
+            # 名指す（別 chain の recovery を連れて行かない）。
+            or resolved.payload["recovery_resolution_receipt_digest"] != recovery_digest
+            or (
+                recovery is not None
+                and (
+                    recovery.receipt_kind != "RecoveryResolutionReceipt"
+                    or recovery.payload["checkpoint_receipt_digest"]
+                    != checkpoint.receipt_digest
+                    or recovery.payload["continuation_digest"]
+                    != continuation.receipt_digest
+                )
+            )
         ):
             raise ValueError("durable RESOLVED chain is inconsistent")
-        return resolved
+        return ResolvedChain(checkpoint, prefix, resolved, recovery)
+
+    def _read_launch(self) -> SignedProcessAuthorityReceipt:
+        try:
+            launch = self.factory.decode(json.loads(
+                (self.directory / "launch.json").read_text(encoding="utf-8")
+            ))
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError("durable launch authority is missing or invalid") from exc
+        if (
+            launch.receipt_kind != "SupervisorLaunchReceipt"
+            or launch.payload["execution_nonce"] != self.invocation_nonce
+        ):
+            raise ValueError("durable launch authority differs from this store")
+        return launch
 
     def rematerialize_worker_continuation(
         self, *, prefix: EventStreamPrefixView,
@@ -2605,54 +2980,54 @@ class DurableCheckpointStore:
         )
         return continuation, continuation_stream
 
-    def finalize_timeout(
+    def _finalize_timeout_locked(
         self, *, claimed: SignedProcessAuthorityReceipt,
         timeout: SignedProcessAuthorityReceipt,
         segment: SupervisorTerminalSegment,
         prefix: EventStreamPrefixView,
     ) -> SignedProcessAuthorityReceipt:
+        self._assert_locked()
         self.factory.validate(claimed)
         self.factory.validate(timeout)
         segment.validate(prefix, timeout)
-        with self._locked():
-            current = self.read_state()
-            if current.receipt_digest != claimed.receipt_digest:
-                raise ValueError("timeout finalization lost claimed-state CAS")
-            self._atomic_write(
-                self.directory / "timeout.json", self._bytes(timeout),
-                identical_ok=True,
-            )
-            segment_payload = json.dumps({
-                "worker_prefix_digest": segment.worker_prefix_digest,
-                "timeout_receipt_digest": segment.timeout_receipt_digest,
-                "terminal_event_sequence": segment.terminal_event_sequence,
-                "terminal_event_authority_digest": segment.terminal_event_authority_digest,
-                "segment_digest": segment.segment_digest,
-                "composite_stream_authority_digest": (
-                    segment.composite_stream.envelope.authority_chain_digest
-                ),
-            }, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
-            self._atomic_write(
-                self.directory / "terminal-segment.json", segment_payload,
-                identical_ok=True,
-            )
-            self._atomic_write(
-                self.directory / "terminal-stream.json",
-                self.codec.dumps(segment.composite_stream).encode("utf-8"),
-                identical_ok=True,
-            )
-            rematerialized = self.rematerialize_terminal_segment(prefix, timeout)
-            if rematerialized.segment_digest != segment.segment_digest:
-                raise ValueError("persisted terminal segment rematerialization differs")
-            final = self.factory._issue_transition(
-                prior=claimed, next_state=CheckpointState.TIMED_OUT,
-                lock_directory_digest=self.lock_directory_digest,
-                timeout_receipt_digest=timeout.receipt_digest,
-                terminal_segment_digest=segment.segment_digest,
-                _capability=_TRANSITION_CAPABILITY_TOKEN,
-            )
-            self._replace_state_locked(final)
-            return final
+        current = self.read_state()
+        if current.receipt_digest != claimed.receipt_digest:
+            raise ValueError("timeout finalization lost claimed-state CAS")
+        self._atomic_write(
+            self.directory / "timeout.json", self._bytes(timeout),
+            identical_ok=True,
+        )
+        segment_payload = json.dumps({
+            "worker_prefix_digest": segment.worker_prefix_digest,
+            "timeout_receipt_digest": segment.timeout_receipt_digest,
+            "terminal_event_sequence": segment.terminal_event_sequence,
+            "terminal_event_authority_digest": segment.terminal_event_authority_digest,
+            "segment_digest": segment.segment_digest,
+            "composite_stream_authority_digest": (
+                segment.composite_stream.envelope.authority_chain_digest
+            ),
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+        self._atomic_write(
+            self.directory / "terminal-segment.json", segment_payload,
+            identical_ok=True,
+        )
+        self._atomic_write(
+            self.directory / "terminal-stream.json",
+            self.codec.dumps(segment.composite_stream).encode("utf-8"),
+            identical_ok=True,
+        )
+        rematerialized = self.rematerialize_terminal_segment(prefix, timeout)
+        if rematerialized.segment_digest != segment.segment_digest:
+            raise ValueError("persisted terminal segment rematerialization differs")
+        final = self.factory._issue_transition(
+            prior=claimed, next_state=CheckpointState.TIMED_OUT,
+            lock_directory_digest=self.lock_directory_digest,
+            timeout_receipt_digest=timeout.receipt_digest,
+            terminal_segment_digest=segment.segment_digest,
+            _capability=_TRANSITION_CAPABILITY_TOKEN,
+        )
+        self._replace_state_locked(final)
+        return final
 
     def rematerialize_terminal_segment(
         self, prefix: EventStreamPrefixView,
@@ -2671,7 +3046,7 @@ class DurableCheckpointStore:
                     encoding="utf-8"
                 )
             )
-        except Exception as exc:
+        except (OSError, KeyError, TypeError, ValueError) as exc:
             raise ValueError("persisted terminal segment is missing or invalid") from exc
         required = {
             "worker_prefix_digest", "timeout_receipt_digest",
@@ -2702,7 +3077,7 @@ class DurableCheckpointStore:
                 return self.factory.decode(json.loads(
                     (self.directory / name).read_text(encoding="utf-8")
                 ))
-            except Exception as exc:
+            except (OSError, KeyError, TypeError, ValueError) as exc:
                 raise ValueError(f"persisted {name} authority is invalid") from exc
 
         launch = read_receipt("launch.json")
@@ -2717,87 +3092,87 @@ class DurableCheckpointStore:
             prefix=prefix,
         )
 
-    def supervisor_finalize_operational_error(
+    def _finalize_operational_error_locked(
         self, *, launch: SignedProcessAuthorityReceipt,
         error_kind: str, deadline_stage: str,
         child_exit_disposition: str,
         prefix: Optional[EventStreamPrefixView] = None,
     ) -> DurableErrorFinalizationBundle:
+        self._assert_locked()
         self.factory.validate(launch)
-        with self._locked():
-            try:
-                durable_launch = self.factory.decode(json.loads(
-                    (self.directory / "launch.json").read_text(encoding="utf-8")
-                ))
-            except Exception as exc:
-                raise ValueError(
-                    "operational ERROR lacks durable launch authority"
-                ) from exc
-            if durable_launch.receipt_digest != launch.receipt_digest:
-                raise ValueError("operational ERROR durable launch differs")
-            if any(
-                (self.directory / name).exists()
-                for name in CHECKPOINT_AUTHORITY_FILENAMES
-            ):
-                raise ValueError(
-                    "operational ERROR path cannot replace checkpoint authority"
-                )
-            error = self.factory._issue_operational_error(
-                launch=launch, error_kind=error_kind,
-                deadline_stage=deadline_stage,
-                child_exit_disposition=child_exit_disposition,
-                prefix=prefix,
-                _capability=_OPERATIONAL_ERROR_CAPABILITY_TOKEN,
+        try:
+            durable_launch = self.factory.decode(json.loads(
+                (self.directory / "launch.json").read_text(encoding="utf-8")
+            ))
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "operational ERROR lacks durable launch authority"
+            ) from exc
+        if durable_launch.receipt_digest != launch.receipt_digest:
+            raise ValueError("operational ERROR durable launch differs")
+        if any(
+            (self.directory / name).exists()
+            for name in CHECKPOINT_AUTHORITY_FILENAMES
+        ):
+            raise ValueError(
+                "operational ERROR path cannot replace checkpoint authority"
             )
-            segment = self.factory._issue_operational_error_segment(
-                launch=launch, error=error, prefix=prefix,
-                _capability=_OPERATIONAL_ERROR_CAPABILITY_TOKEN,
-            )
-            bundle = self.factory._issue_operational_error_bundle(
-                launch=launch, error=error, segment=segment, prefix=prefix,
-                _capability=_OPERATIONAL_ERROR_CAPABILITY_TOKEN,
-            )
-            self._atomic_write(
-                self.directory / "operational-error.json", self._bytes(error),
-                identical_ok=True,
-            )
-            segment_payload = json.dumps({
-                "worker_prefix_kind": segment.worker_prefix_kind,
-                "worker_prefix_digest": segment.worker_prefix_digest,
-                "error_receipt_digest": segment.error_receipt_digest,
-                "terminal_event_sequence": segment.terminal_event_sequence,
-                "terminal_event_authority_digest": (
-                    segment.terminal_event_authority_digest
-                ),
-                "segment_digest": segment.segment_digest,
-                "composite_stream_authority_digest": (
-                    segment.composite_stream.envelope.authority_chain_digest
-                ),
-            }, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
-            self._atomic_write(
-                self.directory / "operational-error-segment.json",
-                segment_payload, identical_ok=True,
-            )
-            self._atomic_write(
-                self.directory / "operational-error-stream.json",
-                self.codec.dumps(segment.composite_stream).encode("utf-8"),
-                identical_ok=True,
-            )
-            bundle_payload = json.dumps({
-                name: getattr(bundle, name)
-                for name in bundle.__dataclass_fields__
-                if name not in {"terminal_segment", "_factory_token"}
-            }, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
-            self._atomic_write(
-                self.directory / "operational-error-bundle.json",
-                bundle_payload, identical_ok=True,
-            )
-            rematerialized = self._rematerialize_operational_error_bundle_locked(
-                prefix=prefix
-            )
-            if rematerialized.bundle_digest != bundle.bundle_digest:
-                raise ValueError("persisted operational ERROR bundle differs")
-            return bundle
+        error = self.factory._issue_operational_error(
+            launch=launch, error_kind=error_kind,
+            deadline_stage=deadline_stage,
+            child_exit_disposition=child_exit_disposition,
+            prefix=prefix,
+            _capability=_OPERATIONAL_ERROR_CAPABILITY_TOKEN,
+        )
+        segment = self.factory._issue_operational_error_segment(
+            launch=launch, error=error, prefix=prefix,
+            _capability=_OPERATIONAL_ERROR_CAPABILITY_TOKEN,
+        )
+        bundle = self.factory._issue_operational_error_bundle(
+            launch=launch, error=error, segment=segment, prefix=prefix,
+            _capability=_OPERATIONAL_ERROR_CAPABILITY_TOKEN,
+        )
+        self._atomic_write(
+            self.directory / "operational-error.json", self._bytes(error),
+            identical_ok=True,
+        )
+        segment_payload = json.dumps({
+            "worker_prefix_kind": segment.worker_prefix_kind,
+            "worker_prefix_digest": segment.worker_prefix_digest,
+            "error_receipt_digest": segment.error_receipt_digest,
+            "terminal_event_sequence": segment.terminal_event_sequence,
+            "terminal_event_authority_digest": (
+                segment.terminal_event_authority_digest
+            ),
+            "segment_digest": segment.segment_digest,
+            "composite_stream_authority_digest": (
+                segment.composite_stream.envelope.authority_chain_digest
+            ),
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+        self._atomic_write(
+            self.directory / "operational-error-segment.json",
+            segment_payload, identical_ok=True,
+        )
+        self._atomic_write(
+            self.directory / "operational-error-stream.json",
+            self.codec.dumps(segment.composite_stream).encode("utf-8"),
+            identical_ok=True,
+        )
+        bundle_payload = json.dumps({
+            name: getattr(bundle, name)
+            for name in bundle.__dataclass_fields__
+            if name not in {"terminal_segment", "_factory_token"}
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+        self._atomic_write(
+            self.directory / "operational-error-bundle.json",
+            bundle_payload, identical_ok=True,
+        )
+        rematerialized = self._rematerialize_operational_error_bundle_locked(
+            prefix=prefix
+        )
+        if rematerialized.bundle_digest != bundle.bundle_digest:
+            raise ValueError("persisted operational ERROR bundle differs")
+        return bundle
 
     def _rematerialize_operational_error_bundle_locked(
         self, *, prefix: Optional[EventStreamPrefixView],
@@ -2833,7 +3208,7 @@ class DurableCheckpointStore:
                     encoding="utf-8"
                 )
             )
-        except Exception as exc:
+        except (OSError, KeyError, TypeError, ValueError) as exc:
             raise ValueError(
                 "persisted operational ERROR authority is missing or invalid"
             ) from exc

@@ -91,6 +91,7 @@ from scripts.function_tracer_pcode.tests.unit.test_benchmark_validation_gate imp
 
 SUPERVISOR_KEY = b"s" * 32
 WORKER_KEY = b"w" * 32
+EVIDENCE_KEY = b"e" * 32
 DIGEST = "a" * 64
 
 
@@ -239,11 +240,15 @@ def _classified_pair_status(
     )
     identity = validated["execution_identity"]
 
+    evidence_key_file = workspace / "terminal-evidence.key"
+    evidence_key_file.write_bytes(EVIDENCE_KEY)
     factory = ProcessSupervisorAuthorityFactory(
         supervisor_signing_key_id="supervisor-key-v1",
         supervisor_signing_key=SUPERVISOR_KEY,
         worker_signing_key_id="worker-key-v1",
         worker_signing_key=WORKER_KEY,
+        terminal_evidence_signing_key_id="terminal-evidence-key-v1",
+        terminal_evidence_signing_key=EVIDENCE_KEY,
     )
     store = DurableCheckpointStore(checkpoint_root, factory, nonce)
     launch = factory.issue_launch(
@@ -255,6 +260,22 @@ def _classified_pair_status(
         deadline_policy_digest="deadline-policy-digest",
     )
     store.persist_launch(launch)
+    # Issue #165: pair の RESOLVED は、supervisor が wait で観測した child の
+    # 終了（E: 実測 rc 2 = UNKNOWN の CLI code）と envelope の join でだけ成り立つ。
+    from scripts.function_tracer_pcode.authority.process import terminal_evidence
+
+    def _observed_exit(*, launch, deadline, anchor, envelope):
+        return factory.issue_terminal_evidence(
+            terminal_evidence.CHILD_EXIT_RECEIPT_KIND,
+            terminal_evidence.child_exit_payload(
+                launch, deadline=deadline, child_returncode=2,
+                child_exit_disposition=terminal_evidence.natural_exit_disposition(2),
+                signal_actions=(), envelope=envelope, anchor=anchor,
+            ),
+        )
+
+    with store.supervisor_ownership() as ownership:
+        store.record_child_exit(ownership, _observed_exit)
     canonical_receipt = SupervisorCanonicalResultResolvedReceipt.create(
         launch_receipt_digest=launch.receipt_digest,
         result_occurrence_id=identity["result_occurrence_id"],
@@ -308,6 +329,8 @@ def _classified_pair_status(
         supervisor_signing_key_file=supervisor_key_file,
         worker_signing_key_id="worker-key-v1",
         worker_signing_key_file=worker_key_file,
+        terminal_evidence_signing_key_id="terminal-evidence-key-v1",
+        terminal_evidence_signing_key_file=evidence_key_file,
     )
     return SimpleNamespace(
         status=status, decision=decision, conditional=conditional,

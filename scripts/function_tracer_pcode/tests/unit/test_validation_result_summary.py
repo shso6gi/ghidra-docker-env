@@ -391,7 +391,7 @@ def test_operational_diagnostic_mode_still_verifies_signed_status(tmp_path):
 def test_runner_canonical_result_subprocess_persists_primary_classification_error(
     tmp_path,
 ):
-    paths = [tmp_path / f"input-{index}" for index in range(8)]
+    paths = [tmp_path / f"input-{index}" for index in range(9)]
     result = subprocess.run(
         [
             sys.executable,
@@ -405,6 +405,8 @@ def test_runner_canonical_result_subprocess_persists_primary_classification_erro
             "--supervisor-signing-key-file", str(paths[3]),
             "--worker-signing-key-id", "worker-key",
             "--worker-signing-key-file", str(paths[4]),
+            "--terminal-evidence-signing-key-id", "terminal-evidence-key",
+            "--terminal-evidence-signing-key-file", str(paths[8]),
             "--pair-status-signing-private-key-file", str(paths[5]),
             "--pair-status-verification-key-file", str(paths[6]),
             "--pair-execution-target-file", str(paths[7]),

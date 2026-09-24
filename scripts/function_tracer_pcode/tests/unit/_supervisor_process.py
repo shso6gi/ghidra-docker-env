@@ -276,6 +276,117 @@ def restart_supervisor(
     ).wait()
 
 
+class SupervisorHandle:
+    """起動したまま待っていない supervisor 1 つ（Issue #165: T11 / T15 の同期用）。
+
+    ``with`` で使う。抜けるとき（例外でも）まだ終わっていなければ止めて回収する
+    （止まったままの supervisor を test の外へ残さない）。``pause_at`` で止めた
+    supervisor は ``release()`` で再開させる。
+    """
+
+    def __init__(self, invocation: "_SupervisorInvocation") -> None:
+        self._invocation = invocation
+        self._run: Optional[SupervisorRun] = None
+
+    @property
+    def pid(self) -> int:
+        return self._invocation.pid
+
+    @property
+    def invocation(self) -> SupervisorInvocationId:
+        return self._invocation.records.invocation
+
+    def child(self) -> Optional[ChildIdentity]:
+        """この supervisor が起こした worker（起こしていなければ None）。"""
+
+        return self._invocation.records.child()
+
+    def paused_at(self) -> tuple[str, ...]:
+        return tuple(
+            entry["point"] for entry in read_json_lines(self._invocation.records.faults)
+            if entry["action"] == "pause"
+        )
+
+    def wait_until_paused(self, point: str, *, timeout: float = 60.0) -> None:
+        """supervisor が ``point`` で止まったと記録するまで待つ（記録が同期の根拠）。"""
+
+        limit = time.monotonic() + timeout
+        while point not in self.paused_at():
+            if self._exited() or time.monotonic() > limit:
+                raise SupervisorPathMismatch(
+                    f"{self.invocation} did not pause at {point}"
+                )
+            time.sleep(0.01)
+
+    def wait_until_blocked_on_ownership(self, *, timeout: float = 60.0) -> None:
+        """supervisor が owner lock の flock で待っていることを ``/proc/locks`` で確かめる。"""
+
+        lock = self._invocation.case.store_directory / ".supervisor-owner.lock"
+        limit = time.monotonic() + timeout
+        while not _blocked_on(lock, self.pid):
+            if self._exited() or time.monotonic() > limit:
+                raise SupervisorPathMismatch(
+                    f"{self.invocation} never waited on the supervisor owner lock"
+                )
+            time.sleep(0.01)
+
+    def release(self) -> None:
+        with open(self._invocation.records.release, "wb") as fifo:
+            fifo.write(b"1")
+
+    def wait(self) -> SupervisorRun:
+        if self._run is None:
+            self._run = self._invocation.wait()
+        return self._run
+
+    def _exited(self) -> bool:
+        return read_json(self._invocation.records.status) is not None
+
+    def __enter__(self) -> "SupervisorHandle":
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        if self._run is None:
+            try:
+                os.kill(self.pid, signal.SIGKILL)
+                os.waitpid(self.pid, 0)
+            except (ProcessLookupError, ChildProcessError):
+                pass
+
+
+def _blocked_on(lock: Path, pid: int) -> bool:
+    """``/proc/locks`` に、``pid`` が ``lock`` の inode を待つ行（``->``）があるか。"""
+
+    if not lock.exists():
+        return False
+    inode = lock.stat().st_ino
+    for line in Path("/proc/locks").read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if "->" not in fields:
+            continue
+        rest = fields[fields.index("->") + 1:]
+        if len(rest) >= 5 and rest[0] == "FLOCK" and rest[3] == str(pid):
+            if rest[4].rsplit(":", 1)[-1] == str(inode):
+                return True
+    return False
+
+
+def start_supervisor(
+    case: "SupervisorCase", *, entry: SupervisorEntry,
+    deadline: str = Deadline.TIMER, faults: Sequence[Fault] = (),
+) -> SupervisorHandle:
+    """待たずに起動する（``run_supervisor`` / ``restart_supervisor`` と同じ entry 判定）。
+
+    同じ case に 2 つ目の supervisor を起動するのは合法（Issue #165 T15）。2 つ目は
+    production の owner lock で先の supervisor の終了を待ち、そのあと同じ durable
+    evidence から終端を導く。どちらも同じ store と projection を見る。
+    """
+
+    return SupervisorHandle(_SupervisorInvocation.start(
+        case, entry=entry, deadline=deadline, faults=faults,
+    ))
+
+
 def _durable_launch_exists(case: "SupervisorCase") -> bool:
     """production の ``run()`` が RESUME へ入るかを決める durable fact（唯一の判定箇所）。
 
@@ -308,8 +419,8 @@ def _check_entry_request(
     if deadline not in {Deadline.TIMER, Deadline.AT_CHILD_STOP}:
         raise ValueError(f"unknown deadline mode {deadline!r}")
     for fault in faults:
-        if fault.action != "crash":
-            raise ValueError("a supervisor fault can only crash the supervisor")
+        if fault.action not in {"crash", "pause"}:
+            raise ValueError("a supervisor fault can only crash or pause the supervisor")
     if entry is SupervisorEntry.RESUME:
         if any(isinstance(fault.at, ChildStopped) for fault in faults):
             raise ValueError("a resume starts no worker child to stop")
@@ -335,6 +446,9 @@ def classification_inputs(
         "pair-log": sha256_of(case.pair_log),
         "supervisor-key": sha256_of(Path(config.supervisor_signing_key_file)),
         "worker-key": sha256_of(Path(config.worker_signing_key_file)),
+        "terminal-evidence-key": sha256_of(
+            Path(config.terminal_evidence_signing_key_file)
+        ),
     }
     inputs.update({
         f"store/{name}": digest
@@ -367,13 +481,14 @@ class _SupervisorInvocation:
     ) -> "_SupervisorInvocation":
         """entry の合法性を確かめてから identity を確保して fork する。
 
-        拒否は identity を消費しない。identity の確保は並行 process でも一意だが、
-        同じ case の並行起動（#165 T15）の意味（entry の判定・後始末）はまだ
-        定義していない。公開する前にそこを決める。
+        拒否は identity を消費しない。identity の確保は並行 process でも一意。
+        同じ case の並行起動（#165 T15）は ``start_supervisor`` が扱う: 後から
+        起動した supervisor は production の owner lock で先の終了を待つ。
         """
 
         _check_entry_request(case, entry, deadline, faults)
         records = case.records.allocate_invocation()
+        os.mkfifo(records.release)
         log_start = _pair_log_size(case)
         sys.stdout.flush()
         sys.stderr.flush()
@@ -415,6 +530,7 @@ class _SupervisorInvocation:
         status = read_json(records.status)
         supervisor_faults = read_json_lines(records.faults)
         crash = next((e for e in supervisor_faults if e["action"] == "crash"), None)
+        paused = {e["point"] for e in supervisor_faults if e["action"] == "pause"}
         crashed = status is None and crash is not None
         if status is None and not crashed:
             raise AssertionError(
@@ -451,10 +567,18 @@ class _SupervisorInvocation:
                 f"{records.invocation} asked for {self.entry.value} but production "
                 f"took {taken.value}"
             )
-        if self.faults and not crashed:
+        crash_points = [f.at.describe() for f in self.faults if f.action == "crash"]
+        if crash_points and not crashed:
             raise SupervisorPathMismatch(
-                f"{records.invocation} asked to crash at "
-                f"{[fault.at.describe() for fault in self.faults]} but reached none"
+                f"{records.invocation} asked to crash at {crash_points} but reached none"
+            )
+        missed_pauses = [
+            f.at.describe() for f in self.faults
+            if f.action == "pause" and f.at.describe() not in paused and not crashed
+        ]
+        if missed_pauses:
+            raise SupervisorPathMismatch(
+                f"{records.invocation} asked to pause at {missed_pauses} but never paused"
             )
         child_records = None if child is None else case.records.child(child)
         evidence = None if child_records is None else read_json(child_records.launch_evidence)
@@ -533,6 +657,7 @@ def _supervise_in_fork(  # pragma: no cover - runs in the forked supervisor
         install_publication_faults(
             faults, role="supervisor", store_directory=case.store_directory,
             projection=case.config.authority_output, sink=records.faults,
+            release=records.release,
         )
         install_deadline_control(
             deadline=deadline, faults=faults, invocation=records,
