@@ -75,6 +75,7 @@ from scripts.function_tracer_pcode.core.errors import (
 )
 from scripts.function_tracer_pcode.core.json_encoding import (
     RESULT_JSON_POLICY,
+    JsonBudget,
     JsonBudgetExhausted,
     JsonEncodingPolicy,
     JsonObjectBudget,
@@ -500,6 +501,8 @@ RESULT_FIELDS: Tuple[OutputField, ...] = (
     OutputField("diagnostics", _C, _diagnostics, _TRUNC),
     OutputField("unknown_cause_aggregate", _C, _unknown_cause_aggregate, _TRUNC),
     OutputField(BUNDLE_KEY, _B, _when_present(BUNDLE_KEY), _INV),
+    # 出力の契約違反で ERROR にした結果だけが持つ: 取って代わられた判定の receipt
+    OutputField("superseded_decision_receipt", _B, _when_present("superseded_decision_receipt"), _INV),
     OutputField(
         "completed_recovery_proof_evidence", _A,
         _when_truthy("completed_recovery_proof_evidence"), _LIMIT,
@@ -787,23 +790,33 @@ class OutputPreparer:
             context.members.total_bytes + self.policy.envelope_headroom_bytes,
             site=PREPARATION_SITE,
         )
+        # 判定に使わない準備物（legacy の証拠・trace の時間・原因集計の trace 部分）は 1 つの
+        # 予算を共有する: 上限は authority 確定後の field に空けた headroom（これらは C の
+        # field の本体か、出力されない内部の証拠）。合計がそれを超えない
+        diagnostic = JsonBudget(
+            None if self.policy.prepared_payload_limit() is None
+            else self.policy.envelope_headroom_bytes
+        )
         return PreparedSemanticPayload(
             fields=tuple(prepared),
-            raw_limitation_evidence=self._prepare_limitation_evidence(result),
+            raw_limitation_evidence=self._prepare_limitation_evidence(result, diagnostic=diagnostic),
             plan=plan,
             options=options,
             smt_formula=self._prepare_smt_formula(result, options),
-            trace_timings=self._prepare_trace_timings(result),
+            trace_timings=self._prepare_trace_timings(result, diagnostic=diagnostic),
             cause_evidence=self._prepare_cause_evidence(
                 result,
                 binary_identities if binary_identities is not None else (
                     getattr(result, "binary1_content_identity", None),
                     getattr(result, "binary2_content_identity", None),
                 ),
+                diagnostic=diagnostic,
             ),
         )
 
-    def _prepare_cause_evidence(self, result: Any, binary_identities: Tuple[Any, Any]) -> PreparedJson:
+    def _prepare_cause_evidence(
+        self, result: Any, binary_identities: Tuple[Any, Any], *, diagnostic: JsonBudget,
+    ) -> PreparedJson:
         """原因集計の trace 由来の部分を、authority 前に有界に準備する（C、判定に使わない）。
 
         集計の builder が読む record の表現は、この直列化の作業量（診断用: 超えたら
@@ -816,7 +829,7 @@ class OutputPreparer:
         )
         from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
 
-        limit = self.policy.prepared_payload_limit()
+        limit = diagnostic.remaining()
         try:
             with serialization_scope(
                 site=CAUSE_EVIDENCE_SITE, target_parts=("cause_evidence",),
@@ -826,7 +839,7 @@ class OutputPreparer:
                 evidence = build_unknown_cause_aggregate(
                     result, trace_evidence_for=tuple(binary_identities),
                 )
-            return self.encoding.prepare(evidence, max_bytes=limit)
+            return _charged(diagnostic, self.encoding.prepare(evidence, max_bytes=limit))
         except (JsonBudgetExhausted, JsonValueRejected) as exc:
             return self.encoding.prepare({
                 "truncated": True,
@@ -836,33 +849,40 @@ class OutputPreparer:
                 ),
             })
 
-    def _prepare_trace_timings(self, result: Any) -> PreparedJson:
+    def _prepare_trace_timings(self, result: Any, *, diagnostic: JsonBudget) -> PreparedJson:
         """診断の時間の行（trace 由来）を、authority 前に予算まで準備する（超えたら marker）。"""
 
         from scripts.function_tracer_pcode.checker.diagnostics import TraceTimingsView
 
+        limit = diagnostic.remaining()
         try:
-            return self.encoding.prepare(
-                TraceTimingsView(result), max_bytes=self.policy.prepared_payload_limit(),
-            )
+            return _charged(diagnostic, self.encoding.prepare(TraceTimingsView(result), max_bytes=limit))
         except (JsonBudgetExhausted, JsonValueRejected) as exc:
             return self.encoding.prepare(_truncation_marker(
                 "diagnostics.timings.attempts", (),
-                remaining_bytes=self.policy.prepared_payload_limit(),
+                remaining_bytes=limit,
                 rejected=exc if isinstance(exc, JsonValueRejected) else None,
             ))
 
-    def _prepare_limitation_evidence(self, result: Any) -> PreparedJson:
-        """legacy reason の有界な証拠の行を、直列化の予算まで準備する（超えたら marker）。"""
+    def _prepare_limitation_evidence(self, result: Any, *, diagnostic: JsonBudget) -> PreparedJson:
+        """legacy reason の有界な証拠の行を、直列化の予算まで準備する（超えたら marker）。
+
+        行は有界化した legacy reason（G4-b で件数も上限まで）。件数の上限を超えて残さなかった
+        reason があれば、最後の行にその件数を置く。
+        """
 
         from scripts.function_tracer_pcode.checker.unknown_reason import LegacyReasonEvidence
 
-        reasons = tuple(getattr(result, "unknown_reasons", None) or ())
+        reasons = getattr(result, "unknown_reasons", None) or ()
+        overflow = getattr(result, "legacy_reason_overflow", None)
+        def rows():
+            for record in reasons:
+                yield LegacyReasonEvidence(record)
+            if overflow:
+                yield {"legacy_reason_overflow": int(overflow)}
+
         try:
-            return self.encoding.prepare(
-                each(reasons, LegacyReasonEvidence),
-                max_bytes=self.policy.prepared_payload_limit(),
-            )
+            return _charged(diagnostic, self.encoding.prepare(rows(), max_bytes=diagnostic.remaining()))
         except (JsonBudgetExhausted, JsonValueRejected) as exc:
             # 証拠の欠陥で判定を変えない（件数 + marker）
             return self.encoding.prepare({
@@ -871,7 +891,7 @@ class OutputPreparer:
                     BudgetKind.SERIALIZATION_BYTES.value
                     if isinstance(exc, JsonBudgetExhausted) else "not_json"
                 ),
-                "original_items": len(reasons),
+                "original_items": len(reasons) + int(overflow or 0),
             })
 
     def _prepare_smt_formula(self, result: Any, options: OutputOptions) -> PreparedArtifact:
@@ -928,35 +948,80 @@ def _attach_budget_diagnostics(result: Any, prepared: PreparedSemanticPayload, p
     result.diagnostics = diagnostics
 
 
+def _charged(budget: JsonBudget, prepared: PreparedJson) -> PreparedJson:
+    """準備した値の byte を共有の予算へ足す（上限は準備の `max_bytes` で守られている）。"""
+
+    budget.consumed += prepared.encoded_bytes
+    return prepared
+
+
 def _record_preparation_bug(exc: BaseException) -> None:
     record_internal_bug(InternalError(exc, site=PREPARATION_SITE), site=PREPARATION_SITE)
 
 
-def finitize_legacy_reasons(result: Any) -> None:
-    """G4-b（B5）: legacy reason / recovery action の重い field を有界な表現へ置き換える。
+def finitize_legacy_reasons(result: Any, *, authority_projects_reasons: bool) -> None:
+    """G4-b（B5）: legacy reason / recovery action を、件数と重い field の両方で有界にする。
 
     authority 確定 **前** に 1 回だけ行う。以後 authority の finish（projection の診断・
-    legacy の照合）も出力も、置き換えた record しか読まない。reason id・分類・件数は
-    変えない（authority の判定と canonical reason は legacy の重い field を読まない）。
+    legacy の照合）も出力も、置き換えた record しか読まない。reason id・分類は変えない。
+
+    * **件数**: 出力 schema の field の上限と行の下限（`row_min_bytes`）から、その field に
+      入り得る行数の上限を導く（`max_rows_within`）。record を 1 件ずつ辿る前に件数だけで比べる。
+      - recovery action と、authority が reason を作らない経路（pilot 無し）の reason は、その
+        まま出力の行になる: 上限を超えれば判定の前に pair terminal な限界。
+      - pilot のある経路の legacy reason は診断にしか使われない: 先頭の行数の上限までを残し、
+        残りは件数（`legacy_reason_overflow`）だけにする。
+    * **重い field**: 1 つの作業量（`prepared_payload_limit`）を pass 全体で共有して有界にする
+      （`checker/unknown_reason.finitize_*`）。使い切った後の証拠は fingerprint の無い要約。
     """
 
+    from scripts.function_tracer_pcode.checker.output_schema import authority_field_bounds
     from scripts.function_tracer_pcode.checker.unknown_reason import (
+        UNKNOWN_REASON_ROW,
+        UNKNOWN_RECOVERY_ACTION_ROW,
         UnknownReasonRecord,
         UnknownRecoveryAction,
         finitize_unknown_reason_record,
         finitize_unknown_recovery_action,
     )
+    from scripts.function_tracer_pcode.core.json_encoding import max_rows_within, row_min_bytes
+
+    bounds = authority_field_bounds(RESULT_JSON_POLICY)
+    work = JsonBudget(active_budget_policy().prepared_payload_limit())
+
+    def row_limit(key: str, row: Any) -> int:
+        return max_rows_within(bounds[key].max_bytes, row_min_bytes(row, RESULT_JSON_POLICY))
+
+    def over_schema(key: str, count: int, limit: int) -> None:
+        raise_expression_size_budget_exceeded(
+            BudgetKind.SERIALIZATION_BYTES,
+            observed=count,
+            limit=limit,
+            site=PREPARATION_SITE,
+            target_key=("result_payload", key, "rows"),
+            evidence=(f"field={key}", f"rows={count}", f"schema_max_rows={limit}"),
+        )
 
     reasons = getattr(result, "unknown_reasons", None)
     if reasons:
+        limit = row_limit("unknown_reasons", UNKNOWN_REASON_ROW)
+        count = len(reasons)
+        if count > limit:
+            if not authority_projects_reasons:
+                over_schema("unknown_reasons", count, limit)
+            result.legacy_reason_overflow = count - limit
+            reasons = reasons[:limit]
         result.unknown_reasons = [
-            finitize_unknown_reason_record(item) if type(item) is UnknownReasonRecord else item
+            finitize_unknown_reason_record(item, work=work) if isinstance(item, UnknownReasonRecord) else item
             for item in reasons
         ]
     actions = getattr(result, "unknown_recovery_actions", None)
     if actions:
+        limit = row_limit("unknown_recovery_actions", UNKNOWN_RECOVERY_ACTION_ROW)
+        if len(actions) > limit:
+            over_schema("unknown_recovery_actions", len(actions), limit)
         result.unknown_recovery_actions = [
-            finitize_unknown_recovery_action(item) if type(item) is UnknownRecoveryAction else item
+            finitize_unknown_recovery_action(item, work=work) if isinstance(item, UnknownRecoveryAction) else item
             for item in actions
         ]
 
@@ -1038,22 +1103,28 @@ def prepare_pair_output(
     options = OutputOptions.for_result(result, save_formula=save_formula)
     identities = tuple(getattr(checker, "_active_binary_content_identities", None) or (None, None))
     authority_projects_reasons = getattr(checker, "v2_dual_write_pilot_connector", None) is not None
-    finitize_legacy_reasons(result)
+
+    def _finitize_and_check(current):
+        finitize_legacy_reasons(current, authority_projects_reasons=authority_projects_reasons)
+        check_prepared_field_bounds(current, authority_projects_reasons=authority_projects_reasons)
+
     try:
-        check_prepared_field_bounds(result, authority_projects_reasons=authority_projects_reasons)
+        _finitize_and_check(result)
         prepared = preparer.prepare(result, options, binary_identities=identities)
     except (AnalysisLimitation, JsonValueRejected) as exc:
         if isinstance(exc, JsonValueRejected):
             _record_preparation_bug(exc)
         result = _gate(result)
-        finitize_legacy_reasons(result)
         try:
-            check_prepared_field_bounds(result, authority_projects_reasons=authority_projects_reasons)
+            _finitize_and_check(result)
             prepared = preparer.prepare(result, options, binary_identities=identities)
         except (AnalysisLimitation, JsonValueRejected) as again:
             _record_preparation_bug(again)
             result = _gate(result)
-            finitize_legacy_reasons(result)
+            try:
+                finitize_legacy_reasons(result, authority_projects_reasons=True)
+            except AnalysisLimitation as third:  # pragma: no cover - 小さい結果は収まる
+                _record_preparation_bug(third)
             prepared = preparer.prepare(
                 result, options, strict=False, binary_identities=identities,
             )
@@ -1076,16 +1147,21 @@ def _rows(owner: FieldOwner, *, first: Optional[Overflow] = None) -> List[Output
     ]
 
 
-def prepared_payload_for(result: Any) -> PreparedSemanticPayload:
-    """結果の A（準備済みならそれ、無ければ上限無しで今準備する）。
+def prepared_payload_for(
+    result: Any, *, fallback_policy: Optional[BudgetPolicy] = None,
+) -> PreparedSemanticPayload:
+    """結果の A（準備済みならそれ、無ければ今準備する）。
 
     準備済みでないのは pair 境界を通らずに組んだ結果（test の直接構築、起動
-    失敗・import 失敗の ERROR）だけで、どれも解析由来の重い値を持たない。
+    失敗・import 失敗の ERROR）だけ。そのときの上限は `fallback_policy`（production の
+    CLI は config の policy を渡す）、無ければ今の pair の policy（scope の外 = 部品単体の
+    呼び出しでは無制限）。
     """
 
     prepared = getattr(result, "prepared_semantic_payload", None)
     if prepared is None:
-        return OutputPreparer(BudgetPolicy.unlimited()).prepare(result)
+        policy = fallback_policy if fallback_policy is not None else active_budget_policy()
+        return OutputPreparer(policy).prepare(result)
     if type(prepared) is not PreparedSemanticPayload:
         raise TypeError("result.prepared_semantic_payload must be a PreparedSemanticPayload")
     return prepared
@@ -1105,24 +1181,15 @@ def _ordered(parts: Dict[str, Any]) -> Dict[str, Any]:
     return {key: parts[key] for key in sorted(parts, key=lambda key: order[key])}
 
 
-def result_payload(result: Any) -> Dict[str, Any]:
-    """`EquivalenceResult.to_dict()` の本体（A は準備済みの値、B / C は今の値）。
+def result_payload(result: Any, *, fallback_policy: Optional[BudgetPolicy] = None) -> Dict[str, Any]:
+    """`EquivalenceResult.to_dict()` の本体 = 最終 envelope の preimage（封印の前）。
 
-    上限は掛けない（上限付きで書くのは `build_final_result_envelope`）。B / C も
-    同じ `JsonEncodingPolicy.prepare` を通すので、返す値は最終出力と同じ canonical な
-    JSON 値。
+    `build_final_result_envelope` と同じ組み立て（同じ上限: A は準備済み、B は schema の上限、
+    C は残りの予算）で、上限を超えれば同じ `OutputEnvelopeInvariantViolation`。`to_dict()` と
+    人向けの text も有界な値だけを読む。
     """
 
-    prepared = prepared_payload_for(result)
-    context = PreparationContext(prepared.options, JsonObjectBudget(RESULT_JSON_POLICY, None))
-    parts = prepared.values_for_output()
-    for item in RESULT_FIELDS:
-        if item.owner is FieldOwner.PREPARED:
-            continue
-        row = item.prepare(result, context)
-        if row is not None and row.json is not None:
-            parts[item.key] = row.json.value()
-    return _ordered(parts)
+    return compose_result_preimage(result, fallback_policy=fallback_policy).payload
 
 
 @dataclass(frozen=True)
@@ -1134,7 +1201,7 @@ class FinalResultEnvelope:
     plan: SerializationPlan
     total_bytes: int
     truncated_metadata: Tuple[str, ...]
-    #: 封印（attachment）を除いた preimage の byte 数（上限はこちらに掛かる）
+    #: 封印（bundle）を足す前の preimage（A + B + C）の byte 数。上限は封印を含む全体に掛かる
     preimage_bytes: int = 0
 
     def size_line(self) -> str:
@@ -1259,30 +1326,25 @@ def _compose_members(
     return metadata.truncated
 
 
-def build_final_result_envelope(
-    result: Any,
-    *,
-    seal: Optional[Callable[[Dict[str, Any]], Mapping[str, Any]]] = None,
-) -> FinalResultEnvelope:
-    """A + B + C → 封印 → bounded encode。**Expression / 解析 object を辿らない**。
+@dataclass(frozen=True)
+class ComposedPreimage:
+    """上限の中で組んだ A + B + C（封印の前）。人向けの text と最終 envelope が共有する。"""
 
-    上限は準備したときの plan（authority 確定前に決めた値）で、**preimage**（A + B + C）
-    に掛かる。A は準備済みの値をそのまま置き、B は出力 schema の field ごとの上限まで
-    （切り詰めない）、C は残り予算まで（切り詰めてよいものだけ marker）準備する。
-    object 全体の byte 数は `JsonObjectBudget` が policy の framing で数えるので、書き
-    出した文字列の長さと一致する。
+    prepared: "PreparedSemanticPayload"
+    payload: Dict[str, Any]
+    members: JsonObjectBudget
+    truncated: Tuple[str, ...]
 
-    封印（finalization bundle）は preimage 全体の digest を持つ **attachment** で、
-    preimage の上限の外に付ける（大きさの上限は authority の event stream の契約、#110）。
-    preimage が上限を超えるなら `OutputEnvelopeInvariantViolation`。
-    """
 
-    prepared = prepared_payload_for(result)
+def compose_result_preimage(
+    result: Any, *, fallback_policy: Optional[BudgetPolicy] = None,
+) -> ComposedPreimage:
+    """A + B + C の preimage を上限の中で組む（最終 envelope と `to_dict()` の共通の本体）。"""
+
+    prepared = prepared_payload_for(result, fallback_policy=fallback_policy)
     plan = prepared.plan
-    encoding = plan.encoding
     limit = plan.max_bytes
-
-    members = JsonObjectBudget(encoding, limit)
+    members = JsonObjectBudget(plan.encoding, limit)
     parts: Dict[str, Any] = {}
     for item in prepared.fields:
         if item.json is None:
@@ -1296,14 +1358,66 @@ def build_final_result_envelope(
             members,
         )
     truncated = _compose_members(result, prepared, members, parts)
-    preimage = _ordered(parts)
+    return ComposedPreimage(prepared, _ordered(parts), members, tuple(truncated))
+
+
+def build_final_result_envelope(
+    result: Any,
+    *,
+    seal: Optional[Callable[[Dict[str, Any]], Mapping[str, Any]]] = None,
+    fallback_policy: Optional[BudgetPolicy] = None,
+) -> FinalResultEnvelope:
+    """A + B + C → 封印 → bounded encode。**Expression / 解析 object を辿らない**。
+
+    **最終 JSON 全体**（A + B + C + finalization bundle）が 1 つの契約の対象で、上限は準備
+    したときの plan（authority 確定前に決めた値 = `serialization_bytes`）。
+
+    * A は準備済みの値をそのまま置き、B は出力 schema の field ごとの上限まで（切り詰め
+      ない）、C は残り予算まで（切り詰めてよいものだけ marker）準備する。
+    * 封印（bundle）は preimage（A + B + C）全体の digest を持つ receipt で、**残りの予算を
+      上限にして** 準備する（切り詰めない）。収まらなければ出力の契約違反。
+    * 書き出しは契約の上限で行い（作った大きさを上限にしない）、書いた byte と勘定の
+      一致を別に確かめる。
+    * 違反は `OutputEnvelopeInvariantViolation`（確定済みの判定は変えない。呼ぶ側が内部
+      エラーの ERROR として durable にする）。
+
+    封印を **組み立てる** 作業（authority の event stream の codec・replay）の大きさは
+    authority の event stream に比例し、その上限の契約は #110 に依存する（本 function が
+    有界にするのは、組み立てた封印を出力へ写す作業と最終 JSON の大きさ）。
+    """
+
+    return finalize_result_envelope(
+        compose_result_preimage(result, fallback_policy=fallback_policy), seal=seal,
+    )
+
+
+def finalize_result_envelope(
+    composed: ComposedPreimage,
+    *,
+    seal: Optional[Callable[[Dict[str, Any]], Mapping[str, Any]]] = None,
+) -> FinalResultEnvelope:
+    """組んだ preimage に封印を足し、契約の上限で書く（`build_final_result_envelope` の後半）。"""
+
+    prepared, preimage, members, truncated = (
+        composed.prepared, composed.payload, composed.members, composed.truncated,
+    )
+    plan = prepared.plan
+    encoding = plan.encoding
+    limit = plan.max_bytes
     preimage_bytes = members.total_bytes
     payload = preimage
     total = preimage_bytes
     if seal is not None:
         bundle_source = seal(preimage)
+        room = members.remaining_for(BUNDLE_KEY)
         try:
-            bundle = encoding.prepare(bundle_source)
+            bundle = encoding.prepare(bundle_source, max_bytes=room)
+        except JsonBudgetExhausted as exc:
+            raise _violation(
+                f"{BUNDLE_KEY} does not fit the rest of the envelope "
+                f"(> {room} bytes after a {preimage_bytes}-byte preimage)",
+                members,
+            ) from exc
         except JsonValueRejected as exc:
             raise _violation(f"{BUNDLE_KEY} is not JSON: {exc}", members) from exc
         payload = dict(preimage)
@@ -1312,14 +1426,24 @@ def build_final_result_envelope(
         members.add(BUNDLE_KEY, bundle.encoded_bytes)
         total = members.total_bytes
     try:
-        text_value = encoding.encode_bounded(payload, max_bytes=total)
+        # 契約の上限で書く（勘定が正しければ `total` 以下で、上限を超える前に止まる）
+        text_value = encoding.encode_bounded(payload, max_bytes=limit)
     except JsonOutputLimitExceeded as exc:  # pragma: no cover - 勘定と書き出しの不一致
         raise OutputEnvelopeInvariantViolation(
-            "the encoded envelope differs from its accounted size "
+            "the encoded envelope exceeds the output contract "
             f"(needed {exc.requested_bytes} > {exc.max_bytes} bytes)",
             max_bytes=exc.max_bytes,
             requested_bytes=exc.requested_bytes,
         ) from exc
+    from scripts.function_tracer_pcode.core.render_output import utf8_length
+
+    written = utf8_length(text_value)
+    if written != total:  # pragma: no cover - 勘定と書き出しの不一致（内部バグ）
+        raise OutputEnvelopeInvariantViolation(
+            f"the encoded envelope ({written} bytes) differs from its accounted size ({total} bytes)",
+            max_bytes=limit,
+            requested_bytes=written,
+        )
     return FinalResultEnvelope(
         payload=payload,
         text=text_value,
@@ -1351,7 +1475,10 @@ __all__ = [
     "PreparedSemanticPayload",
     "RESULT_FIELDS",
     "SerializationPlan",
+    "ComposedPreimage",
     "build_final_result_envelope",
+    "compose_result_preimage",
+    "finalize_result_envelope",
     "check_prepared_field_bounds",
     "fields_owned_by",
     "finitize_legacy_reasons",

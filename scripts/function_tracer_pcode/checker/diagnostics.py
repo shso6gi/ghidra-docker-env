@@ -608,47 +608,65 @@ class TraceTimingsView:
     値だけを読み、live な trace を辿らない。
     """
 
-    __slots__ = ("_trace", "_attempts", "solver_seconds", "solver_invocations")
+    __slots__ = ("_trace", "_attempts", "_result")
 
     def __init__(self, result: Any) -> None:
         trace = getattr(result, "debug_trace", None)
         self._trace = trace
+        self._result = result
         self._attempts = getattr(trace, "attempts", None) or ()
-        solver_seconds = 0.0
-        solver_invocations = 0
-        for attempt in self._attempts:
-            # 合計だけを数える（行は attempt 行の generator が出力の準備に合わせて作る）
-            rows = _solver_rows(getattr(attempt, "solver_results", None))
-            solver_seconds += sum(_elapsed(row) for row in rows)
-            solver_invocations += len(rows)
-        if not self._attempts:
-            rows = _solver_rows(getattr(result, "solver_results", None))
-            solver_seconds = sum(_elapsed(row) for row in rows)
-            solver_invocations = len(rows)
-        self.solver_seconds = round(solver_seconds, 6)
-        self.solver_invocations = solver_invocations
+
+    def _solver_containers(self) -> Any:
+        # attempt ごとの solver 結果（attempt が無ければ結果そのものの solver 結果）
+        if self._attempts:
+            return (getattr(attempt, "solver_results", None) for attempt in self._attempts)
+        return iter((getattr(self._result, "solver_results", None),))
 
     def json_items(self):
-        from scripts.function_tracer_pcode.core.json_encoding import each
+        from scripts.function_tracer_pcode.core.json_encoding import each, scan
 
-        yield "solver_seconds", self.solver_seconds
-        yield "solver_invocations", self.solver_invocations
+        # 合計は walker が attempt と solver の行を 1 つずつ数えながら畳み込む（`scan`）
+        yield "solver_seconds", scan(self._solver_containers(), _SolverTotals("seconds"))
+        yield "solver_invocations", scan(self._solver_containers(), _SolverTotals("invocations"))
         yield "attempts", each(_attempt_rows(self._attempts))
         # 人向けの text の phase 利用状況（debug trace を出力へ添付しないときも使う）
-        yield "phase_usage", (
-            None if self._trace is None else each(self._trace._iter_phase_usage())
-        )
+        phase_usage = getattr(self._trace, "_iter_phase_usage", None)
+        yield "phase_usage", None if phase_usage is None else each(phase_usage())
+
+
+class _SolverTotals:
+    """`scan` の reducer: solver の行の秒の合計（`seconds`）か件数（`invocations`）。"""
+
+    __slots__ = ("what", "seconds", "invocations")
+
+    def __init__(self, what: str) -> None:
+        self.what = what
+        self.seconds = 0.0
+        self.invocations = 0
+
+    def add(self, container: Any) -> int:
+        rows = _solver_rows(container)
+        for row in rows:
+            self.seconds += _elapsed(row)
+        self.invocations += len(rows)
+        return len(rows)
+
+    def result(self) -> Any:
+        return round(self.seconds, 6) if self.what == "seconds" else self.invocations
 
 
 def trace_timings_payload(result: Any) -> Any:
-    """trace 由来の時間の行（準備済みならその値、無ければ今 trace から作る）。"""
+    """trace 由来の時間の行（準備済みならその値、無ければ今の pair の上限で trace から作る）。"""
 
     prepared = _prepared_trace_timings(result)
     if prepared is not None:
         return prepared
+    from scripts.function_tracer_pcode.core.budget_policy import active_budget_policy
     from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
 
-    return RESULT_JSON_POLICY.prepare(TraceTimingsView(result)).value()
+    return RESULT_JSON_POLICY.prepare(
+        TraceTimingsView(result), max_bytes=active_budget_policy().prepared_payload_limit(),
+    ).value()
 
 
 def _prepared_trace_timings(result: Any) -> Any:
@@ -676,13 +694,11 @@ class _ResultDiagnosticsView:
     def __init__(self, result: Any) -> None:
         self._result = result
         self._base = getattr(result, "diagnostics", None) or {}
-        prepared = _prepared_trace_timings(result)
-        self._timings = prepared if prepared is not None else TraceTimingsView(result)
+        # 準備済みならその値、無ければ今の pair の上限で trace から作った値（どちらも dict）
+        self._timings = trace_timings_payload(result)
 
     def _timing(self, name: str) -> Any:
-        if isinstance(self._timings, dict):
-            return self._timings.get(name)
-        return getattr(self._timings, name) if name != "attempts" else None
+        return self._timings.get(name) if isinstance(self._timings, dict) else None
 
     def json_items(self):
         from scripts.function_tracer_pcode.core.json_encoding import each, inline
@@ -690,10 +706,7 @@ class _ResultDiagnosticsView:
         base = self._base
         result = self._result
         caches_empty: Dict[str, Any] = {}
-        attempts = (
-            self._timings.get("attempts") if isinstance(self._timings, dict)
-            else each(_attempt_rows(self._timings._attempts))
-        )
+        attempts = self._timings.get("attempts") if isinstance(self._timings, dict) else None
         yield "schema", DIAGNOSTICS_SCHEMA
         yield "timings", inline(
             ("total_seconds", getattr(result, "total_time", None)),

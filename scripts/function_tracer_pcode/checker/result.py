@@ -192,6 +192,11 @@ class EquivalenceResult:
     canonical_decision_required: bool = False
     canonical_c_active_base: Tuple[Mapping[str, Any], ...] = ()
     canonical_q_open_base: Tuple[Mapping[str, Any], ...] = ()
+    # Issue #22 PR-22-D: 出力の契約違反で ERROR にした結果だけが持つ、取って代わられた
+    # 判定の DecisionReceipt（`decision_receipt_payload` の固定長の行）
+    superseded_decision_receipt: Optional[Mapping[str, Any]] = field(
+        default=None, repr=False, compare=False
+    )
     canonical_result_finalization_bundle: Optional[Mapping[str, Any]] = field(
         default=None, repr=False, compare=False
     )
@@ -324,8 +329,12 @@ class EquivalenceResult:
 
         return result_payload(self)
     
-    def to_string(self, verbose: bool = False, show_phase_usage: bool = False) -> str:
+    def to_string(
+        self, verbose: bool = False, show_phase_usage: bool = False, *, payload: Optional[Mapping[str, Any]] = None,
+    ) -> str:
         """人間向けの text。**出力と同じ有界な表現**（`to_dict()` の値）から作る。
+
+        `payload` を渡すとそれ（CLI が最終 envelope 用に組んだ preimage）を読み、組み直さない。
 
         Issue #22 PR-22-D: authority 確定後に live な解析・結果 object（signature の
         Ghidra 型・反例・solver model・debug trace）を読み直さない。A は authority 前に
@@ -340,7 +349,8 @@ class EquivalenceResult:
             type_fix_applied,
         )
 
-        payload = self.to_dict()
+        if payload is None:
+            payload = self.to_dict()
         lines = []
         lines.append("=" * 70)
         lines.append("EQUIVALENCE CHECK RESULT")

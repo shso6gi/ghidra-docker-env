@@ -94,7 +94,8 @@ class BudgetPolicy:
     #: が空けておく byte 数。準備した payload が使えるのは
     #: `serialization_bytes - envelope_headroom_bytes` まで。値は出力 schema から導く
     #: 下限以上でなければならない（`checker/output_schema.validate_envelope_headroom`）。
-    #: finalization bundle はこの予算の外の attachment（上限は preimage に掛かる）。
+    #: finalization bundle は最終 JSON の予算の中で、headroom の残りに収まるかを出力時に
+    #: 確かめる（大きさの上限は authority の event stream の契約 #110 が無いと導けない）。
     envelope_headroom_bytes: int = 0
 
     def __post_init__(self) -> None:
@@ -353,7 +354,7 @@ class SerializationWork:
 
     __slots__ = (
         "site", "enabled", "_target_parts", "max_bytes", "consumed", "tree_bytes",
-        "trees", "_meter", "_policy", "terminal", "runtime_ref_memo",
+        "trees", "_meter", "_policy", "terminal", "runtime_ref_memo", "parent",
     )
 
     def __init__(
@@ -364,10 +365,14 @@ class SerializationWork:
         enabled: bool = True,
         terminal: bool = True,
         max_bytes: Optional[int] = None,
+        parent: Optional["SerializationWork"] = None,
     ) -> None:
         from scripts.function_tracer_pcode.core.semantic_snapshot import (
             SemanticGraphMeter,
         )
+
+        #: 入れ子の terminal な scope は外側の作業量へも足す（外側の上限も効く）
+        self.parent = parent
 
         self.site = str(site)
         #: この直列化 1 回の間だけの、式の木の中の runtime ref の LEGACY 表現の memo
@@ -398,6 +403,8 @@ class SerializationWork:
         self.consumed += int(size)
         if self.max_bytes is not None and self.consumed > self.max_bytes:
             self.exceeded()
+        if self.parent is not None:
+            self.parent.charge(size)
 
     def exceeded(self) -> None:
         if not self.terminal:
@@ -477,9 +484,14 @@ class SerializationWork:
         )
 
     def observe(self) -> None:
-        """この直列化の最終的な量を観測値へ残す（量は単調に増えるので最後の値が最大）。"""
+        """この直列化の最終的な量を観測値へ残す（量は単調に増えるので最後の値が最大）。
 
-        if self.enabled:
+        観測は予算の既定値を決めるため（U-1）の値で、意味の限界になる（terminal な）直列化
+        だけを残す。診断用の作業量（terminal でない）は時間などの記録の長さを数えるので
+        run ごとに揺れ、既定値の根拠にもならない。
+        """
+
+        if self.enabled and self.terminal:
             observe_budget_usage(BudgetKind.SERIALIZATION_BYTES, self.consumed, site=self.site)
             observe_budget_usage(BudgetKind.SERIALIZATION_NODES, self.distinct_nodes, site=self.site)
 
@@ -503,7 +515,7 @@ def serialization_scope(
     max_bytes: Optional[int] = None,
     enabled: Optional[bool] = None,
 ) -> Iterator[SerializationWork]:
-    """直列化 1 つ分の作業量を数える scope（入れ子は外側へ合流する）。
+    """直列化 1 つ分の作業量を数える scope（同じ意味の入れ子は外側へ合流する）。
 
     解析 1 件分の表現を作る側（`FunctionReturnAnalysis.to_dict` /
     `AnalysisSnapshot.from_function_analysis`）が開き、その中で作られる表現は
@@ -516,13 +528,18 @@ def serialization_scope(
     if stack is None:
         stack = []
         _SERIALIZATION.stack = stack
-    if stack:
-        yield stack[-1]
+    parent = stack[-1] if stack else None
+    if parent is not None and terminal and max_bytes is None:
+        # 同じ意味の入れ子（terminal・上限なし）は外側の作業量へ合流する
+        yield parent
         return
+    # 入れ子でも自分の上限・terminal を持つ。terminal なら外側へも足す。terminal でない
+    # （診断の）scope は外側と独立に数える: 診断の超過が外側の意味の限界にならない
     work = SerializationWork(
         site=site, target_parts=target_parts,
-        enabled=budget_scope_is_active() if enabled is None else enabled,
+        enabled=(budget_scope_is_active() if enabled is None else enabled),
         terminal=terminal, max_bytes=max_bytes,
+        parent=parent if terminal else None,
     )
     stack.append(work)
     try:

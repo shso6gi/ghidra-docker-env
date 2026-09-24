@@ -309,7 +309,7 @@ class _FreezeMeter:
     def scalar(self, value: Any) -> None:
         policy = self._policy
         if type(value) is str:
-            size = cached_string_bytes(policy, value)
+            size = cached_string_bytes(policy, value, max_bytes=self.budget.remaining())
         elif value is None or value is True:
             size = 4
         elif value is False:

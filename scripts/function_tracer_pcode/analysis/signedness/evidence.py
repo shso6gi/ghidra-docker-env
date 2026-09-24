@@ -4,7 +4,9 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Dict, Optional, Any, FrozenSet
-from scripts.function_tracer_pcode.core.json_encoding import bounded_summary, counts_max_bytes, each, materialize
+from itertools import chain
+
+from scripts.function_tracer_pcode.core.json_encoding import Tally, each, inline, materialize, scan
 
 
 class SignednessType(Enum):
@@ -53,11 +55,8 @@ FASTPATH_UNSIGNED_OPCODES: FrozenSet[str] = frozenset({
 })
 
 
-#: `SignednessEvidence.get_summary()` / opcode 別件数の JSON byte 数の上限（登録から求める）
-_SUMMARY_MAX_BYTES = counts_max_bytes(
-    ("signed_strong", "signed_medium", "unsigned", "ignored", "excluded_fastpath")
-)
-_OPCODE_COUNTS_MAX_BYTES = counts_max_bytes(OPCODE_EVIDENCE_MAP)
+def _opcode_of(evidence: Any) -> Any:
+    return evidence.opcode
 
 
 @dataclass
@@ -168,19 +167,25 @@ class SignednessEvidence:
         return counts
     
     def json_items(self):
-        # 件数の object は key が有限の登録（証拠の分類 / `OPCODE_EVIDENCE_MAP`）に
-        # 限られるので、登録から求めた上限つきの集計として渡す
+        # 件数は list の長さ（固定個数）。opcode 別件数は walker が証拠を 1 つずつ数えながら
+        # 集計する（`scan`。列を連結・複製しない）
         yield "result", self.result.value
-        yield "summary", bounded_summary(self.get_summary, _SUMMARY_MAX_BYTES)
-        yield "opcode_counts", bounded_summary(self.get_opcode_counts, _OPCODE_COUNTS_MAX_BYTES)
+        yield "summary", inline(
+            ("signed_strong", len(self.signed_strong)),
+            ("signed_medium", len(self.signed_medium)),
+            ("unsigned", len(self.unsigned)),
+            ("ignored", len(self.ignored)),
+            ("excluded_fastpath", len(self.excluded_fastpath)),
+        )
+        yield "opcode_counts", scan(
+            chain(self.signed_strong, self.signed_medium, self.unsigned), Tally(_opcode_of),
+        )
         yield "signed_strong", each(self.signed_strong)
         yield "signed_medium", each(self.signed_medium)
         yield "unsigned", each(self.unsigned)
         if self.excluded_fastpath:
             yield "excluded_fastpath", each(self.excluded_fastpath)
-            yield "excluded_opcode_counts", bounded_summary(
-                self.get_excluded_opcode_counts, _OPCODE_COUNTS_MAX_BYTES,
-            )
+            yield "excluded_opcode_counts", scan(iter(self.excluded_fastpath), Tally(_opcode_of))
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)

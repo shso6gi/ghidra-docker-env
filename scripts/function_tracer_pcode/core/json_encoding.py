@@ -21,9 +21,8 @@
     `mapping_of(mapping, fn)` / `inline(*pairs)`: collection を 1 要素ずつ引き出す遅延構成子
   - `evidence(value, identity=)` / `text(value, max_chars)`: 出力（CANONICAL）では有界な表現、
     `to_dict()`（LEGACY）では元の値
-  - `bounded_summary(fn, max_bytes)`: 出力の大きさが schema から上限を持つ集計（登録 reason
-    ごとの件数など）。walker が残り予算 ≥ 上限を確かめてから作らせ、作った値が上限内かを
-    確かめる（上限を破れば `JsonValueRejected`）
+  - `scan(values, reducer)`: 集計（件数・group by）。walker が要素を 1 つずつ引き出して
+    作業量へ数えながら reducer に畳ませ、結果を辿る（producer が入力全体を先に辿らない）
 
 * walker は 1 つで、mode が 2 つ:
 
@@ -163,12 +162,12 @@ class _Text(_Source):
         self.max_chars = int(max_chars)
 
 
-class _BoundedSummary(_Source):
-    __slots__ = ("fn", "max_bytes")
+class _Scan(_Source):
+    __slots__ = ("values", "reducer")
 
-    def __init__(self, fn: Callable[[], Any], max_bytes: int) -> None:
-        self.fn = fn
-        self.max_bytes = int(max_bytes)
+    def __init__(self, values: Any, reducer: Any) -> None:
+        self.values = values
+        self.reducer = reducer
 
 
 #: 要素をそのまま置く（LEGACY: 旧 `list(x)` / `dict(x)` の要素。CANONICAL では通常どおり）
@@ -282,25 +281,39 @@ def text(value: Any, max_chars: int) -> _Source:
     return _Text(value, max_chars)
 
 
-def bounded_summary(fn: Callable[[], Any], max_bytes: int) -> _Source:
-    """出力の大きさが schema で抑えられた集計（作る前に残り予算 ≥ 上限を確かめる）。"""
+def scan(values: Any, reducer: Any) -> _Source:
+    """集計（件数・group by）: walker が `values` を 1 要素ずつ引き出して `reducer` へ渡す。
 
-    return _BoundedSummary(fn, max_bytes)
+    `reducer.add(element)` は要素 1 つを畳み込み、要素の中で辿った追加の作業量（0 以上の
+    整数）を返す。walker は要素 1 つごとに `1 + 追加分` を作業量（`effort`）へ数えてから次を
+    引き出し、使い切れば **その walk の予算の超過** にする（集計は途中で止めると値が変わる
+    ので marker / 限界 / 契約違反は field の規則どおり）。引き出し終えたら
+    `reducer.result()`（source）を辿る。集計の producer は入力全体を先に辿らない。
+    """
+
+    return _Scan(values, reducer)
+
+
+class Tally:
+    """`scan` の reducer: `key(element)` ごとの件数（最初に現れた順）。"""
+
+    __slots__ = ("key", "counts")
+
+    def __init__(self, key: Callable[[Any], Any]) -> None:
+        self.key = key
+        self.counts: Dict[Any, int] = {}
+
+    def add(self, element: Any) -> int:
+        key = self.key(element)
+        self.counts[key] = self.counts.get(key, 0) + 1
+        return 0
+
+    def result(self) -> Any:
+        return pairs_of(iter(self.counts.items()))
 
 
 #: `int` 1 つを書いたときの byte 数の上限（64 bit 符号付き）
 INT_MAX_BYTES = 20
-
-
-def counts_max_bytes(keys: Iterable[Any], policy: Optional["JsonEncodingPolicy"] = None) -> int:
-    """key が有限の登録 `keys` に限られる件数 object（`{key: int}`）の byte 数の上限。
-
-    `bounded_summary` に渡す上限を、登録（opcode 表・reason registry など）から求める。
-    """
-
-    policy = RESULT_JSON_POLICY if policy is None else policy
-    sizes = [policy.member_bytes(key, INT_MAX_BYTES) for key in keys]
-    return policy.container_frame_bytes(len(sizes)) + sum(sizes)
 
 
 # ---------------------------------------------------------------------------
@@ -325,27 +338,38 @@ _PRINTABLE_WITHOUT_ESCAPE = re.compile(r'[ !#-\[\]-~]*')
 
 @dataclass(frozen=True)
 class BoundedEvidence:
-    """大きい証拠の代わりに置く有界な表現（identity・種類・大きさの下限）。
+    """大きい証拠の代わりに置く有界な表現（fingerprint・種類・大きさの下限）。
 
-    authority 確定前に作り、以後は元の値を参照しない。等しさは identity で決まる。
-    `match_digests` は生成側が付ける照合用の digest（例: legacy reason と cause の照合）。
+    authority 確定前（または出力の準備の中）に `bounded_evidence` だけが作り、以後は元の値を
+    参照しない。
+
+    * `fingerprint` は **照合用の key**（collision-resistant な SHA-256）で、値の等しさの証明では
+      ない。`fingerprint_kind`:
+      - `canonical_sha256` — `authority_digest(元の値)` と同じ値（canonical な形の JSON の sha256）
+      - `token_sha256` — canonical な値にならない証拠（live な object など）の型つき token 列の sha256
+      - `authority_identity` — 呼ぶ側が渡した identity（例: `cause:<id>`。authority が封印した値）
+    * 作業量の上限・閉路・未対応の値で fingerprint を求められなかったときは `fingerprint` が
+      `None` で、`unfingerprinted` に理由を持つ（照合には使えない）。
+    * `==` は **要約どうし** の等しさ（同じ fingerprint・種類・理由）で、元の値の等しさを意味
+      しない。元の値が等しいかを確かめる用途に使わない。
     """
 
-    identity: str
-    identity_kind: str
+    fingerprint: Optional[str]
+    fingerprint_kind: Optional[str]
     kind: str
     encoded_bytes_over: int = EVIDENCE_INLINE_BYTES
-    match_digests: Tuple[Tuple[str, str], ...] = ()
-    #: 元の値の distinct な node の数（DAG-aware に数えられたときだけ）
-    distinct_nodes: Optional[int] = None
+    unfingerprinted: Optional[str] = None
 
     def __post_init__(self) -> None:
         for name, limit in (
-            ("identity", EVIDENCE_IDENTITY_MAX_CHARS),
-            ("identity_kind", EVIDENCE_KIND_MAX_CHARS),
+            ("fingerprint", EVIDENCE_IDENTITY_MAX_CHARS),
+            ("fingerprint_kind", EVIDENCE_KIND_MAX_CHARS),
             ("kind", EVIDENCE_KIND_MAX_CHARS),
+            ("unfingerprinted", EVIDENCE_KIND_MAX_CHARS),
         ):
             value = getattr(self, name)
+            if value is None and name != "kind":
+                continue
             if (
                 type(value) is not str or len(value) > limit
                 or not _PRINTABLE_WITHOUT_ESCAPE.fullmatch(value)
@@ -353,49 +377,43 @@ class BoundedEvidence:
                 raise ValueError(
                     f"bounded evidence {name} must be short printable ASCII without escapes"
                 )
-
-    def match_digest(self, name: str) -> Optional[str]:
-        for key, value in self.match_digests:
-            if key == name:
-                return value
-        return None
+        if (self.fingerprint is None) != (self.fingerprint_kind is None):
+            raise ValueError("a bounded evidence fingerprint needs its kind")
+        if (self.fingerprint is None) == (self.unfingerprinted is None):
+            raise ValueError("bounded evidence has either a fingerprint or the reason it has none")
 
     def summary(self) -> dict:
         payload = {
-            "bounded_evidence": "v1",
-            "identity": self.identity,
-            "identity_kind": self.identity_kind,
+            "bounded_evidence": "v2",
+            "fingerprint": self.fingerprint,
+            "fingerprint_kind": self.fingerprint_kind,
             "kind": self.kind,
             "encoded_bytes_over": int(self.encoded_bytes_over),
         }
-        if self.distinct_nodes is not None:
-            payload["distinct_nodes"] = int(self.distinct_nodes)
+        if self.unfingerprinted is not None:
+            payload["unfingerprinted"] = self.unfingerprinted
         return payload
 
     def to_authority_dict(self) -> dict:
         return self.summary()
 
-    def __eq__(self, other: Any) -> bool:
-        return (
-            type(other) is BoundedEvidence
-            and other.identity_kind == self.identity_kind
-            and other.identity == self.identity
-        )
-
-    def __hash__(self) -> int:
-        return hash((self.identity_kind, self.identity))
-
 
 #: `BoundedEvidence.summary()` を書いたときの byte 数の上限（schema 上の上限）
 EVIDENCE_SUMMARY_MAX_BYTES = (
     2 + 6 * 4  # 括弧と区切り（6 member、区切りは最大 2 byte と見積もる）
-    + len('"bounded_evidence": "v1"')
-    + len('"identity": ') + 2 + EVIDENCE_IDENTITY_MAX_CHARS
-    + len('"identity_kind": ') + 2 + EVIDENCE_KIND_MAX_CHARS
+    + len('"bounded_evidence": "v2"')
+    + len('"fingerprint": ') + 2 + EVIDENCE_IDENTITY_MAX_CHARS
+    + len('"fingerprint_kind": ') + 2 + EVIDENCE_KIND_MAX_CHARS
     + len('"kind": ') + 2 + EVIDENCE_KIND_MAX_CHARS
     + len('"encoded_bytes_over": ') + 20
-    + len('"distinct_nodes": ') + 20
+    + len('"unfingerprinted": ') + 2 + EVIDENCE_KIND_MAX_CHARS
 )
+
+
+#: fingerprint を求められなかった理由（`BoundedEvidence.unfingerprinted`）
+UNFINGERPRINTED_WORK_EXHAUSTED = "work_exhausted"
+UNFINGERPRINTED_CYCLE = "cycle"
+UNFINGERPRINTED_UNSUPPORTED = "unsupported"
 
 
 def _source_value(value: Any) -> Any:
@@ -519,6 +537,28 @@ def row_max_bytes(row: Tuple[Column, ...], policy: Optional["JsonEncodingPolicy"
     policy = RESULT_JSON_POLICY if policy is None else policy
     sizes = [policy.member_bytes(column.key, column.max_value_bytes(policy)) for column in row]
     return policy.container_frame_bytes(len(sizes)) + sum(sizes)
+
+
+def row_min_bytes(row: Tuple[Column, ...], policy: Optional["JsonEncodingPolicy"] = None) -> int:
+    """`row` の行を書いたときの byte 数の **下限**（省ける列は省き、値は最小の 1 byte）。"""
+
+    policy = RESULT_JSON_POLICY if policy is None else policy
+    sizes = [policy.member_bytes(column.key, 1) for column in row if not column.omit_none]
+    return policy.container_frame_bytes(len(sizes)) + sum(sizes)
+
+
+def max_rows_within(max_bytes: int, row_min: int, policy: Optional["JsonEncodingPolicy"] = None) -> int:
+    """配列の byte 数が `max_bytes` 以下であり得る行数の上限（行の下限 `row_min` から）。
+
+    これより多い行の配列は、行がどれだけ小さくても `max_bytes` を超える。上限を超える列を
+    1 行ずつ辿らずに（件数だけで）判定するための値。
+    """
+
+    policy = RESULT_JSON_POLICY if policy is None else policy
+    sep = utf8_length(policy.item_separator)
+    if max_bytes < 2:
+        return 0
+    return max(0, (int(max_bytes) - 2 + sep) // (int(row_min) + sep))
 
 
 # ---------------------------------------------------------------------------
@@ -850,28 +890,15 @@ class JsonEncodingPolicy:
 
         _Walk(self, mode, budget, build=False).run(source)
 
-    def bounded_evidence(self, value: Any, identity: Any = None) -> Any:
-        """証拠を有界にする: 小さければ値そのもの、大きければ `BoundedEvidence`。"""
+    def token_fingerprint(self, value: Any, *, work: "JsonBudget") -> str:
+        """証拠の型つき token 列（dict は key 順）の sha256。辿る作業量を `work` へ数える。
 
-        if type(value) is BoundedEvidence or value is None:
-            return value
-        try:
-            self.measure(value, max_bytes=EVIDENCE_INLINE_BYTES, mode=LEGACY)
-            return value
-        except JsonBudgetExhausted:
-            pass
-        return _summarize_evidence(self, value, identity)
-
-    def summarize_evidence(self, value: Any, identity: Any = None) -> BoundedEvidence:
-        """大きさに依らず、証拠を有界な要約にする（identity + 種類）。"""
-
-        return _summarize_evidence(self, value, identity)
-
-    def evidence_digest(self, value: Any) -> str:
-        """証拠の型つき token 列（dict は key 順に整列）の sha256（1 回辿る。作らない）。"""
+        canonical な値にならない証拠（live な object を含む値）の fingerprint。作業量を超えたら
+        `work` の例外（`JsonBudgetExhausted`）がそのまま上がる。
+        """
 
         digest = hashlib.sha256()
-        _Walk(self, LEGACY, JsonBudget(None), build=False, token_sink=digest.update).run(value)
+        _Walk(self, LEGACY, work, build=False, token_sink=digest.update).run(value)
         return digest.hexdigest()
 
 
@@ -881,54 +908,163 @@ def evidence_kind(value: Any) -> str:
     return _value_kind(value)
 
 
-def _summarize_evidence(policy: JsonEncodingPolicy, value: Any, identity: Any) -> BoundedEvidence:
-    if callable(identity):
-        identity = identity(value)
-    if identity is None:
-        from scripts.function_tracer_pcode.core.canonical_digest import canonical_merkle_digest
+def bounded_evidence(
+    value: Any,
+    *,
+    work: "JsonBudget",
+    identity: Any = None,
+    inline_bytes: Optional[int] = None,
+    policy: Optional[JsonEncodingPolicy] = None,
+) -> Any:
+    """**証拠を有界にする唯一の入口**: 小さく plain なら値そのもの、それ以外は `BoundedEvidence`。
 
+    辿る作業（大きさの確認・fingerprint）はすべて `work` へ数える。`work` を使い切っていたら、
+    値を辿らずに fingerprint の無い `BoundedEvidence` にする（辿る量は `work` の上限で止まる）。
+
+    * そのまま残すのは、容器と基底型だけから成り `inline_bytes`（既定 `EVIDENCE_INLINE_BYTES`）
+      以下の値（live な object を持たない）。
+    * `identity`（文字列、または値を受け取る callable）があれば、それを `authority_identity`
+      の fingerprint にする（値は辿らない）。
+    * それ以外は canonical な fingerprint（`core/canonical_digest.canonical_fingerprint`）、
+      canonical な値にならなければ型つき token の fingerprint（`token_fingerprint`）。
+    """
+
+    if value is None or type(value) is BoundedEvidence:
+        return value
+    policy = RESULT_JSON_POLICY if policy is None else policy
+    limit = EVIDENCE_INLINE_BYTES if inline_bytes is None else int(inline_bytes)
+    if not _exhausted(work):
+        remaining = work.remaining()
+        attempt = JsonBudget(limit if remaining is None else min(limit, remaining))
         try:
-            # canonical な形の値は DAG-aware な Merkle digest（共有部分を 1 回だけ辿る）
-            merkle, distinct = canonical_merkle_digest(_source_value(value))
-        except (TypeError, UnicodeError):
-            return BoundedEvidence(
-                identity=policy.evidence_digest(value),
-                identity_kind="sha256",
-                kind=_value_kind(value),
-            )
-        return BoundedEvidence(
-            identity=merkle,
-            identity_kind="canonical_merkle_sha256",
-            kind=_value_kind(value),
-            distinct_nodes=distinct,
-        )
-    return BoundedEvidence(
-        identity=str(identity)[:EVIDENCE_IDENTITY_MAX_CHARS],
-        identity_kind="authority",
-        kind=_value_kind(value),
+            done, _ = _Walk(policy, LEGACY, attempt, build=False).plain(_source_value_or_self(value), False)
+        except JsonBudgetExhausted:
+            done = False
+        _charge_quietly(work, attempt.consumed)
+        if done and attempt.consumed <= limit:
+            return value
+    return _evidence_summary(value, work=work, identity=identity, policy=policy)
+
+
+def _evidence_summary(value: Any, *, work: "JsonBudget", identity: Any, policy: JsonEncodingPolicy) -> BoundedEvidence:
+    from scripts.function_tracer_pcode.core.canonical_digest import (
+        CanonicalValueCycle,
+        canonical_fingerprint,
     )
 
+    kind = _value_kind(value)
+    if callable(identity):
+        identity = identity(value)
+    if identity is not None:
+        return BoundedEvidence(
+            fingerprint=_printable_identity(identity),
+            fingerprint_kind="authority_identity",
+            kind=kind,
+        )
+    if _exhausted(work):
+        return _unfingerprinted(kind, UNFINGERPRINTED_WORK_EXHAUSTED)
+    try:
+        return BoundedEvidence(
+            fingerprint=canonical_fingerprint(_source_value(value), work=work),
+            fingerprint_kind="canonical_sha256",
+            kind=kind,
+        )
+    except JsonBudgetExhausted:
+        return _unfingerprinted(kind, UNFINGERPRINTED_WORK_EXHAUSTED)
+    except CanonicalValueCycle:
+        return _unfingerprinted(kind, UNFINGERPRINTED_CYCLE)
+    except (TypeError, UnicodeError, ValueError):
+        pass
+    if _exhausted(work):
+        return _unfingerprinted(kind, UNFINGERPRINTED_WORK_EXHAUSTED)
+    try:
+        return BoundedEvidence(
+            fingerprint=policy.token_fingerprint(value, work=work),
+            fingerprint_kind="token_sha256",
+            kind=kind,
+        )
+    except JsonBudgetExhausted:
+        return _unfingerprinted(kind, UNFINGERPRINTED_WORK_EXHAUSTED)
+    except (JsonValueRejected, TypeError, UnicodeError, ValueError) as exc:
+        reason = UNFINGERPRINTED_CYCLE if "circular" in str(exc) else UNFINGERPRINTED_UNSUPPORTED
+        return _unfingerprinted(kind, reason)
 
-def bounded_text(value: Any, max_chars: int) -> Any:
-    """`value` が `max_chars` 文字を超える文字列なら、先頭 + 明示の marker に置き換える。"""
+
+def _refuse_refresh() -> Any:
+    """1 回しか辿れない列は作り直せない: fingerprint の無い要約にする合図。"""
+
+    raise TypeError("a one-shot iterator cannot be walked again")
+
+
+def _unfingerprinted(kind: str, reason: str) -> BoundedEvidence:
+    return BoundedEvidence(fingerprint=None, fingerprint_kind=None, kind=kind, unfingerprinted=reason)
+
+
+def _printable_identity(identity: Any) -> str:
+    text_value = identity if isinstance(identity, str) else type(identity).__qualname__
+    text_value = str.__str__(text_value)[:EVIDENCE_IDENTITY_MAX_CHARS]
+    if not _PRINTABLE_WITHOUT_ESCAPE.fullmatch(text_value):
+        text_value = "sha256:" + hashlib.sha256(text_value.encode("utf-8", "surrogatepass")).hexdigest()
+    return text_value
+
+
+def _exhausted(work: "JsonBudget") -> bool:
+    remaining = work.remaining()
+    return remaining is not None and remaining <= 0
+
+
+def _charge_quietly(work: "JsonBudget", size: int) -> None:
+    """辿った分を `work` へ数える（使い切りは次の `_exhausted` で分かる。ここでは上げない）。"""
+
+    try:
+        work.charge(size)
+    except JsonBudgetExhausted:
+        pass
+
+
+def _source_value_or_self(value: Any) -> Any:
+    try:
+        return _source_value(value)
+    except TypeError:
+        return value
+
+
+def bounded_text(value: Any, max_chars: int, *, work: "JsonBudget") -> Any:
+    """`value` が `max_chars` 文字を超える文字列なら、先頭 + 明示の marker に置き換える。
+
+    marker の hash（長い文字列どうしを区別する手がかり）は、文字列の長さを `work` へ数えて
+    から求める。`work` に収まらなければ hash の無い marker（先頭と長さだけ）にする。
+    """
 
     if isinstance(value, str) and len(value) > max_chars:
-        return _text_marker(value, max_chars)
+        digest = None
+        if not _exhausted(work):
+            try:
+                work.charge(len(value))
+            except JsonBudgetExhausted:
+                pass
+            else:
+                digest = _string_sha256(value)
+        return _text_marker(value, max_chars, digest)
     return value
 
 
-def _text_marker(value: str, max_chars: int) -> str:
-    """`max_chars` 文字 **以内** に収まる「先頭 + 明示の marker」（同じ上限で冪等）。"""
-
+def _string_sha256(value: str) -> str:
     hasher = hashlib.sha256()
     for start in range(0, len(value), _STRING_CHUNK):
         # 巨大な文字列を一度に encode しない（chunk ごとに hash へ流す）
         hasher.update(value[start:start + _STRING_CHUNK].encode("utf-8", "surrogatepass"))
-    digest = hasher.hexdigest()[:16]
+    return hasher.hexdigest()[:16]
+
+
+def _text_marker(value: str, max_chars: int, digest: Optional[str]) -> str:
+    """`max_chars` 文字 **以内** に収まる「先頭 + 明示の marker」（同じ上限で冪等）。"""
+
+    note = f" sha256:{digest}" if digest is not None else ""
     keep = max(0, max_chars - TEXT_MARKER_MAX_CHARS)
-    tail = f"…[+{len(value) - keep} chars sha256:{digest}]"
+    tail = f"…[+{len(value) - keep} chars{note}]"
     keep = max(0, max_chars - len(tail))
-    tail = f"…[+{len(value) - keep} chars sha256:{digest}]"
+    tail = f"…[+{len(value) - keep} chars{note}]"
     return (value[:keep] + tail)[:max(max_chars, len(tail))]
 
 
@@ -951,11 +1087,15 @@ _PURE_TUPLE_SIZES: dict = {}
 _PURE_TUPLE_CACHE_MAX = 1 << 18
 
 
-def cached_string_bytes(policy: "JsonEncodingPolicy", text_value: str) -> int:
-    """短い文字列の JSON byte 数（policy ごとの cache を使う。長い文字列は数えるだけ）。"""
+def cached_string_bytes(policy: "JsonEncodingPolicy", text_value: str, *, max_bytes: Optional[int]) -> int:
+    """短い文字列の JSON byte 数（policy ごとの cache を使う）。
+
+    長い文字列は cache せず、`max_bytes` を超えた時点で数えるのをやめる（`string_bytes` の
+    打ち切り。上限を知らずに文字列全体を escape しない）。
+    """
 
     if len(text_value) > _SHORT_STRING:
-        return policy.string_bytes(text_value)
+        return policy.string_bytes(text_value, max_bytes=max_bytes)
     cache = _STRING_BYTES_CACHES.get(policy)
     if cache is None or len(cache) > _STRING_BYTES_CACHE_MAX:
         cache = _STRING_BYTES_CACHES[policy] = {}
@@ -1065,7 +1205,12 @@ class _Walk:
     """source を 1 要素ずつ引き出して数え（CANONICAL / LEGACY）、`build` なら作る。
 
     再帰しない（frame の stack）。予算は `JsonBudget` が持ち、超えたらそこで止まる。
-    `token_sink` を渡すと、値の型つき token 列を流す（`evidence_digest`）。
+    `token_sink` を渡すと、値の型つき token 列を流す（`token_fingerprint`）。
+
+    出力の byte（`budget`）とは別に、証拠を有界にする作業（大きさの確認・fingerprint・長い
+    文字列の hash）を `effort` へ数える。`effort` の上限は走査を始めたときの `budget` の残り
+    （`budget` が無制限なら無制限）で、使い切ったら証拠は fingerprint の無い要約になる
+    （出力の byte の勘定は変わらない）。
     """
 
     def __init__(
@@ -1076,10 +1221,12 @@ class _Walk:
         *,
         build: bool,
         token_sink: Optional[Callable[[bytes], None]] = None,
+        effort: Optional[JsonBudget] = None,
     ) -> None:
         self.policy = policy
         self.mode = mode
         self.budget = budget
+        self.effort = effort if effort is not None else JsonBudget(budget.remaining())
         self.build = build
         self.token_sink = token_sink
         self.item_separator = utf8_length(policy.item_separator)
@@ -1134,7 +1281,12 @@ class _Walk:
             return True, item
         if kind_of is int or isinstance(item, int):
             value = int(item)
-            self.budget.charge(len(int.__repr__(value)))
+            try:
+                digits = len(int.__repr__(value))
+            except ValueError:
+                # 桁数が Python の文字列化の上限を超える整数は JSON に書けない
+                self.reject("integer has too many digits to write as JSON")
+            self.budget.charge(digits)
             if self.token_sink is not None:
                 self.token("i" + int.__repr__(value))
             return True, (value if self.mode == CANONICAL else item)
@@ -1225,7 +1377,10 @@ class _Walk:
                 elif kind is bool:
                     total += 4 if item else 5
                 elif kind is int:
-                    total += len(int.__repr__(item))
+                    try:
+                        total += len(int.__repr__(item))
+                    except ValueError:
+                        raise _NotPlain
                 elif kind is float:
                     total += len(_float_text(item))
                 elif kind is tuple:
@@ -1245,6 +1400,8 @@ class _Walk:
                         continue
                     count = len(item)
                     total += 2 + (sep * (count - 1) if count else 0)
+                    if remaining is not None and total > remaining:
+                        break
                     out = [] if build else None
                     if build:
                         if entry[2]:
@@ -1256,6 +1413,8 @@ class _Walk:
                 elif kind is list or kind is dict:
                     count = len(item)
                     total += 2 + (sep * (count - 1) if count else 0)
+                    if remaining is not None and total > remaining:
+                        break
                     identity = id(item)
                     if identity in active:
                         raise _NotPlain
@@ -1284,7 +1443,10 @@ class _Walk:
                         total += string_bytes(base)
                     elif isinstance(item, int):
                         base = int(item)
-                        total += len(int.__repr__(base))
+                        try:
+                            total += len(int.__repr__(base))
+                        except ValueError:
+                            raise _NotPlain
                     else:
                         base = float(item)
                         total += len(_float_text(base))
@@ -1327,8 +1489,14 @@ class _Walk:
         if self.token_sink is not None:
             self.token("{" if kind == "dict" else "[")
             if kind == "dict":
-                # digest は dict の並びに依らない（key の文字列で整列）
-                iterator = iter(sorted(iterator, key=lambda pair: self.policy.canonical_key(pair[0])))
+                # digest は dict の並びに依らない（key の文字列で整列）。並べる前に、引き出す
+                # 1 組ごとに数える（幅が予算を超えれば並べずに止まる）
+                pairs = []
+                for pair in iterator:
+                    self.budget.charge(1)
+                    pairs.append(pair)
+                pairs.sort(key=lambda pair: self.policy.canonical_key(pair[0]))
+                iterator = iter(pairs)
         frame = _Frame()
         frame.kind = kind
         frame.iterator = iterator
@@ -1518,27 +1686,29 @@ class _Walk:
                 self.enter_evidence(
                     _Evidence(
                         value, None,
+                        refresh=None if not isinstance(value, _AbcIterator) else _refuse_refresh,
                         inline_bytes=self.policy.max_string_bytes(item.max_chars + TEXT_MARKER_MAX_CHARS),
                     ),
                     parent, key, build,
                 )
                 return
             if self.mode == CANONICAL and isinstance(value, str) and len(value) > item.max_chars:
-                value = _text_marker(value, item.max_chars)
+                value = bounded_text(value, item.max_chars, work=self.effort)
             self.enter(value, parent, key, build)
-        elif kind is _BoundedSummary:
-            remaining = self.budget.remaining()
-            if remaining is not None and remaining < item.max_bytes:
-                # 上限ぶんの余地が無い: 作る前に止まる
-                self.budget.charge(item.max_bytes)
+        elif kind is _Scan:
+            reducer = item.reducer
             try:
-                # 宣言した上限まで 1 回だけ作る（超えたら producer の契約違反）
-                value = _Walk(
-                    self.policy, self.mode, JsonBudget(item.max_bytes), build=True,
-                ).run(item.fn())
+                for element in (item.values if item.values is not None else ()):
+                    # 引き出した要素を畳み込む前に数える（上限を超えれば残りを引き出さない）
+                    self.effort.charge(1)
+                    extra = reducer.add(element)
+                    if extra:
+                        self.effort.charge(int(extra))
             except JsonBudgetExhausted:
-                self.reject(f"bounded summary exceeded its declared {item.max_bytes} bytes")
-            self.enter(value, parent, key, build)
+                # 集計を途中で止めた値は別の値: この walk の予算の超過として扱う
+                self.budget.exceeded()
+                raise
+            self.enter(reducer.result(), parent, key, build)
         else:  # pragma: no cover - 文法の追加漏れ
             self.reject(f"unknown source {kind.__qualname__}")
 
@@ -1563,16 +1733,29 @@ class _Walk:
         if self.mode == LEGACY or value is None or type(value) is BoundedEvidence:
             self.enter(value, parent, key, build)
             return
+        limit = EVIDENCE_INLINE_BYTES if item.inline_bytes is None else int(item.inline_bytes)
+        if not _exhausted(self.effort):
+            remaining = self.effort.remaining()
+            attempt = JsonBudget(limit if remaining is None else min(limit, remaining))
+            try:
+                # 上限（`inline_bytes`）まで 1 回だけ作る。収まればその値を置く（作業は effort へ）
+                inline_value = _Walk(
+                    self.policy, CANONICAL, attempt, build=True, effort=self.effort,
+                ).run(value)
+            except JsonBudgetExhausted:
+                _charge_quietly(self.effort, attempt.consumed)
+            else:
+                _charge_quietly(self.effort, attempt.consumed)
+                if attempt.consumed <= limit:
+                    self.enter(inline_value, parent, key, build)
+                    return
         try:
-            # 上限（`inline_bytes`）まで 1 回だけ作る。収まればその値を置く
-            inline_value = _Walk(
-                self.policy, CANONICAL, JsonBudget(item.inline_bytes), build=True,
-            ).run(value)
-        except JsonBudgetExhausted:
             fresh = item.refresh() if item.refresh is not None else value
-            self.enter(_summarize_evidence(self.policy, fresh, item.identity), parent, key, build)
-            return
-        self.enter(inline_value, parent, key, build)
+        except TypeError:
+            summary = _unfingerprinted(_value_kind(value), UNFINGERPRINTED_UNSUPPORTED)
+        else:
+            summary = _evidence_summary(fresh, work=self.effort, identity=item.identity, policy=self.policy)
+        self.enter(summary, parent, key, build)
 
     # -- 本体 ------------------------------------------------------------------
 
@@ -1752,13 +1935,16 @@ __all__ = [
     "PreparedJson",
     "RESULT_JSON_POLICY",
     "TEXT_MARKER_MAX_CHARS",
+    "UNFINGERPRINTED_CYCLE",
+    "UNFINGERPRINTED_UNSUPPORTED",
+    "UNFINGERPRINTED_WORK_EXHAUSTED",
     "as_dict",
     "as_list",
-    "bounded_summary",
+    "Tally",
+    "bounded_evidence",
     "bounded_text",
     "cached_string_bytes",
     "clear_size_caches",
-    "counts_max_bytes",
     "each",
     "evidence",
     "evidence_kind",
@@ -1772,6 +1958,9 @@ __all__ = [
     "raw",
     "row_items",
     "row_max_bytes",
+    "row_min_bytes",
+    "scan",
+    "max_rows_within",
     "scalar_record_dict",
     "text",
 ]

@@ -500,8 +500,8 @@ def test_d5s_estimate_saturates_and_stops_walking():
     with pytest.raises(JsonBudgetExhausted):
         RESULT_JSON_POLICY.measure(each(_elements()), max_bytes=50, mode=LEGACY)
     assert len(pulled) < 10
-    payload = [object() for _ in range(100)]
-    # 準備（出力）では JSON source でない値は数えずに拒む
+    payload = [object() for _ in range(5)]
+    # 準備（出力）では JSON source でない値は数えずに拒む（予算に届く前の値で）
     with pytest.raises(JsonValueRejected):
         RESULT_JSON_POLICY.prepare(payload, max_bytes=50)
 

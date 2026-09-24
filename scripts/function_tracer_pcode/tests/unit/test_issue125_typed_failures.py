@@ -409,7 +409,8 @@ def test_cli_attaches_failure_diagnostics_before_the_aggregate():
         source.index("attach_stage_timing(result, stage_clock)"),
         source.index("attach_failure_diagnostics(result)"),
         source.index("attach_cause_aggregate(result)"),
-        source.index("result.to_string("),
+        # 人向けの text（有界な `to_dict()` から。契約違反は同じ ERROR）
+        source.index("output_content = _text_or_error_result("),
         # Issue #22 PR-22-D: preimage（旧 `result.to_dict()`）の合成・封印・bounded
         # encode は `build_final_result_envelope` が 1 回で行う。封印は builder に
         # 渡す関数の中でだけ呼ぶ（CLI が preimage を組み直さない）。

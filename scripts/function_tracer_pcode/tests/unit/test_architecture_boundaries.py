@@ -1557,8 +1557,9 @@ def test_m1_budget_defaults_and_env_names_live_only_in_config():
             ):
                 builders.append(relative)
     assert offenders == [], offenders
-    # policy を組み立てるのは入口（checker の構築）だけ。深い module は scope から読む。
-    assert builders == ["checker/checker.py"], builders
+    # policy を組み立てるのは入口だけ: checker の構築と、pair 境界を通らなかった結果（起動・
+    # import 失敗の ERROR）を最終 envelope にする CLI。深い module は scope から読む。
+    assert sorted(builders) == ["checker/checker.py", "cli/commands/equivalence.py"], builders
 
 
 #: 深い層（core / analysis / semantics / proof）で環境変数・config を直接読む

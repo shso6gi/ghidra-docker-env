@@ -1257,7 +1257,12 @@ class ProductionDualWritePilotConnector:
 
             from scripts.function_tracer_pcode.checker.unknown_reason import (
                 build_projection_diagnostic,
+                projection_diagnostic_work,
             )
+
+            # Issue #22 PR-22-D: 診断（cause の key の要約・legacy との照合）の作業量は
+            # finish 1 回で共有する（receipt ごとに上限を持ち直さない）
+            diagnostic_work = projection_diagnostic_work()
 
             result.legacy_unknown_reasons = list(
                 getattr(result, "unknown_reasons", ()) or ()
@@ -1294,6 +1299,7 @@ class ProductionDualWritePilotConnector:
                         function_names=function_names,
                         binary_names=binary_names,
                         projected_reason_counts=projected_reason_counts,
+                        work=diagnostic_work,
                     ),
                 )
                 for receipt in projection_receipts

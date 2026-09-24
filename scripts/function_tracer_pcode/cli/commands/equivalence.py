@@ -227,6 +227,7 @@ def _emit_import_error_result(
     start_time: float,
     binary1_content_identity=None,
     binary2_content_identity=None,
+    superseded_decision_receipt=None,
 ) -> None:
     result = EquivalenceResult(
         is_equivalent=None,
@@ -239,6 +240,7 @@ def _emit_import_error_result(
         binary2_content_identity=binary2_content_identity,
         total_time=time.time() - start_time,
         error_message=error_message,
+        superseded_decision_receipt=superseded_decision_receipt,
     )
     from scripts.function_tracer_pcode.authority.contracts import authority_digest
     from scripts.function_tracer_pcode.authority.decision.production_cutover import (
@@ -262,6 +264,7 @@ def _emit_import_error_result(
             error_artifact_digest=authority_digest({
                 "result_occurrence_id": result_occurrence_id,
                 "error_message": error_message,
+                "superseded_decision_receipt": superseded_decision_receipt,
             }),
         ),
     )
@@ -274,6 +277,7 @@ def _emit_import_error_result(
     error_artifact_digest = authority_digest({
         "result_occurrence_id": result_occurrence_id,
         "error_message": error_message,
+        "superseded_decision_receipt": superseded_decision_receipt,
     })
     attach_durable_error_finalization(
         result,
@@ -299,6 +303,7 @@ def _emit_import_error_result(
         seal=lambda preimage: build_canonical_result_finalization_bundle(
             result_payload_preimage=preimage, evidence=evidence, session=session
         ),
+        fallback_policy=_cli_budget_policy(),
     )
     result_payload = envelope.payload
     result.canonical_result_finalization_bundle = result_payload[
@@ -309,6 +314,7 @@ def _emit_import_error_result(
         result.to_string(
             verbose=getattr(args, "verbose", False),
             show_phase_usage=getattr(args, "debug", False),
+            payload=result_payload,
         ),
         args.output,
         args.quiet,
@@ -335,17 +341,41 @@ def _emit_import_error_result(
 
 
 def _final_envelope_or_error_result(args, *, result, seal, **context):
-    """最終 envelope を組む。headroom / schema の契約違反なら内部エラーの ERROR を出して終わる。
+    """最終 envelope を組む。出力の契約違反なら内部エラーの ERROR を出して終わる。
 
     Issue #22 PR-22-D: authority 確定 **後** の出力の契約違反で、判定は変えない
-    （`_emit_output_invariant_error_result` が確定済みの outcome と receipt を証跡に残す）。
+    （`_emit_output_invariant_error_result` が取って代わられた receipt を持つ ERROR を出す）。
     """
 
     try:
-        return build_final_result_envelope(result, seal=seal)
+        return build_final_result_envelope(result, seal=seal, fallback_policy=_cli_budget_policy())
     except OutputEnvelopeInvariantViolation as violation:
         _emit_output_invariant_error_result(args, result=result, violation=violation, **context)
         raise  # pragma: no cover - 上の関数は sys.exit する
+
+
+def _text_or_error_result(args, *, result, payload, **context):
+    """人向けの text。`payload`（最終 envelope の値）が無ければ `to_dict()`（同じ上限）から作る。
+
+    `to_dict()` も最終 envelope と同じ上限で組むので、契約違反なら同じ ERROR にする。
+    """
+
+    try:
+        return result.to_string(
+            verbose=args.verbose, show_phase_usage=args.debug,
+            **({} if payload is None else {"payload": payload}),
+        )
+    except OutputEnvelopeInvariantViolation as violation:
+        _emit_output_invariant_error_result(args, result=result, violation=violation, **context)
+        raise  # pragma: no cover - 上の関数は sys.exit する
+
+
+def _cli_budget_policy():
+    """pair 境界を通らなかった結果（起動・import 失敗の ERROR）を準備するときの上限。"""
+
+    from scripts.function_tracer_pcode.config.settings import expression_budget_policy
+
+    return expression_budget_policy()
 
 
 def _emit_output_invariant_error_result(
@@ -361,14 +391,28 @@ def _emit_output_invariant_error_result(
     binary1_content_identity=None,
     binary2_content_identity=None,
 ) -> None:
-    """最終 envelope が headroom 契約を破ったときの ERROR 出力（Issue #22 PR-22-D）。
+    """最終 envelope が出力の契約を破ったときの ERROR 出力（Issue #22 PR-22-D）。
 
     authority 確定 **後** に起きる出力の契約違反なので、意味の限界（UNKNOWN）には
-    しない。確定済みの判定は書き換えず・切り詰めず、その receipt digest と outcome
-    を ERROR の証跡へ残したうえで、import 失敗と同じ小さい ERROR 結果として出す。
+    しない。確定済みの判定は書き換えず・切り詰めず、その DecisionReceipt（固定長の行）を
+    `superseded_decision_receipt` としてそのまま持ち、ERROR の証跡（error artifact
+    digest）にも束縛したうえで、import 失敗と同じ小さい ERROR 結果として出す（契約を
+    破った元の B / C の field は出さない — それ自身が契約に収まらない値だから）。
+    内部エラーは `InternalError(site="output.final_envelope")` として台帳へも記録する。
     """
 
+    from scripts.function_tracer_pcode.checker.output_preparation import FINAL_ENVELOPE_SITE
+    from scripts.function_tracer_pcode.core.errors import InternalError, record_internal_bug
+
+    record_internal_bug(InternalError(violation, site=FINAL_ENVELOPE_SITE), site=FINAL_ENVELOPE_SITE)
     receipt = getattr(result, "decision_receipt", None)
+    superseded = None
+    if receipt is not None:
+        from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+            decision_receipt_payload,
+        )
+
+        superseded = decision_receipt_payload(receipt)
     decided = (
         f"; decided_outcome={getattr(result, 'final_outcome', None)}"
         f"; decision_receipt_digest={getattr(receipt, 'receipt_digest', None)}"
@@ -385,6 +429,7 @@ def _emit_output_invariant_error_result(
         start_time=start_time,
         binary1_content_identity=binary1_content_identity,
         binary2_content_identity=binary2_content_identity,
+        superseded_decision_receipt=superseded,
     )
 
 
@@ -682,14 +727,23 @@ def run_equivalence_check(args):
         "kind": "emission",
         "emit_result_json": _get_bool_arg("emit_result_json", False),
     })
-    output_content = result.to_string(
-        verbose=args.verbose,
-        show_phase_usage=args.debug,
+    envelope_context = dict(
+        binary1_path=binary1_path,
+        binary2_path=binary2_path,
+        func_name1=func_name1,
+        func_name2=func_name2,
+        start_time=start_time,
+        binary1_content_identity=binary1_content_identity,
+        binary2_content_identity=binary2_content_identity,
     )
+    # 人向けの text は最終 envelope と同じ上限で組んだ `to_dict()` から作る（契約違反は同じ
+    # ERROR）。既存の順（to_string -> to_dict -> 封印 -> JSON 書き出し）を保つ
+    output_content = _text_or_error_result(args, result=result, payload=None, **envelope_context)
     output_result(output_content, args.output, args.quiet)
     render_seconds = time.monotonic() - emission_started
 
-    if _get_bool_arg("emit_result_json", False):
+    emit_json = _get_bool_arg("emit_result_json", False)
+    if emit_json:
         from scripts.function_tracer_pcode.authority.decision.canonical_result import (
             build_canonical_result_finalization_bundle,
             persist_canonical_result_envelope,
@@ -710,19 +764,10 @@ def run_equivalence_check(args):
                 )
 
         # Issue #22 PR-22-D: 準備済み payload（authority 確定前）+ authority の
-        # 値 + 診断 → 封印 → 準備時の上限で bounded encode。上限を超えるのは
-        # headroom 契約の違反で、判定は変えずに内部エラーとして落とす。
+        # 値 + 診断 → 封印 → 契約の上限で bounded encode。上限を超えるのは出力の
+        # 契約違反で、判定は変えずに内部エラーの ERROR として落とす。
         envelope = _final_envelope_or_error_result(
-            args,
-            result=result,
-            seal=seal,
-            binary1_path=binary1_path,
-            binary2_path=binary2_path,
-            func_name1=func_name1,
-            func_name2=func_name2,
-            start_time=start_time,
-            binary1_content_identity=binary1_content_identity,
-            binary2_content_identity=binary2_content_identity,
+            args, result=result, seal=seal, **envelope_context,
         )
         result_payload = envelope.payload
         if seal is not None:

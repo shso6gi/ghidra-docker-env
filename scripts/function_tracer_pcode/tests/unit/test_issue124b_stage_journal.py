@@ -782,7 +782,7 @@ def _fake_equivalence_environment(monkeypatch, tmp_path, journal_path):
             self.decision_receipt = None
             self._canonical_finalization_context = None
 
-        def to_string(self, verbose=False, show_phase_usage=False):
+        def to_string(self, verbose=False, show_phase_usage=False, payload=None):
             journal_note("probe:to_string")
             return "RESULT TEXT"
 
@@ -841,7 +841,7 @@ def _fake_equivalence_environment(monkeypatch, tmp_path, journal_path):
     # Issue #22 PR-22-D: CLI は preimage を `build_final_result_envelope` から
     # 受け取る（合成・封印・bounded encode）。偽の結果は結果 schema を持たない
     # ので、builder も「`to_dict()` を呼んでその値を書く」だけの偽物にする。
-    def _fake_envelope(fake_result, *, seal=None):
+    def _fake_envelope(fake_result, *, seal=None, fallback_policy=None):
         payload = fake_result.to_dict()
         return SimpleNamespace(
             payload=payload,

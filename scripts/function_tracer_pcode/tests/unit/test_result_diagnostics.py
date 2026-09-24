@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.checker.unknown_reason import (
     build_projection_diagnostic,
     format_projection_detail,
     make_unknown_reason,
+    projection_diagnostic_work,
 )
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType, FunctionReturnAnalysis, ReturnInfo
 from scripts.function_tracer_pcode.reporting.unknown_reason_summary import (
@@ -241,8 +242,7 @@ def test_projection_diagnostic_carries_functions_cause_and_legacy_site():
         receipt, cause_occurrence=_occurrence(), legacy_reasons=[legacy],
         function_names={"function1": "snippet", "function2": "snippet"},
         binary_names={"binary1": "newV-arm64-clang-O0", "binary2": "newV-arm64-clang-O1"},
-        projected_reason_counts={UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value: 1},
-    )
+        projected_reason_counts={UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS.value: 1}, work=projection_diagnostic_work())
     assert diagnostic["legacy_match"] == "unique"
     assert diagnostic["functions"] == {"function1": "snippet", "function2": "snippet"}
     assert diagnostic["cause"]["target_kind"] == "function_decompilation"
@@ -354,8 +354,7 @@ def test_legacy_reason_matching_is_exact_or_unique_never_a_sibling_site():
     # Exact: the cause target equals site B's object target key -> only site B.
     exact = build_projection_diagnostic(
         receipt, cause_occurrence=_cause_with_target(site_b), legacy_reasons=legacy,
-        function_names=names, projected_reason_counts={reason.value: 2},
-    )
+        function_names=names, projected_reason_counts={reason.value: 2}, work=projection_diagnostic_work())
     assert exact["legacy_match"] == "exact"
     assert [item["pair_or_case"] for item in exact["legacy"]] == ["(2,3)"]
     assert "site A detail" not in format_projection_detail(exact)
@@ -363,21 +362,18 @@ def test_legacy_reason_matching_is_exact_or_unique_never_a_sibling_site():
     # Ambiguous: two candidate sites, cause target matches neither -> no legacy attached.
     ambiguous = build_projection_diagnostic(
         receipt, cause_occurrence=_cause_with_target(("other", "target")), legacy_reasons=legacy,
-        function_names=names, projected_reason_counts={reason.value: 2},
-    )
+        function_names=names, projected_reason_counts={reason.value: 2}, work=projection_diagnostic_work())
     assert "legacy" not in ambiguous
     assert "site" not in format_projection_detail(ambiguous)
 
     # Unique 1:1: one legacy record and one projected cause for the reason.
     unique = build_projection_diagnostic(
         receipt, cause_occurrence=_cause_with_target(("other", "target")), legacy_reasons=legacy[:1],
-        function_names=names, projected_reason_counts={reason.value: 1},
-    )
+        function_names=names, projected_reason_counts={reason.value: 1}, work=projection_diagnostic_work())
     assert unique["legacy_match"] == "unique"
 
     # One legacy record but two projected causes: still ambiguous.
     not_unique = build_projection_diagnostic(
         receipt, cause_occurrence=_cause_with_target(("other", "target")), legacy_reasons=legacy[:1],
-        function_names=names, projected_reason_counts={reason.value: 2},
-    )
+        function_names=names, projected_reason_counts={reason.value: 2}, work=projection_diagnostic_work())
     assert "legacy" not in not_unique

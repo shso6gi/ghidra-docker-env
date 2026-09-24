@@ -30,7 +30,7 @@ CHECKER_OWNED = (
     "VOCAB_MAX_CHARS", "ID_MAX_CHARS", "LABEL_MAX_CHARS", "DETAIL_MAX_CHARS",
     "UNKNOWN_REASON_ROW", "UNKNOWN_RECOVERY_ACTION_ROW", "RECOVERY_BACKLOG_ENTRY_ROW",
     "LEGACY_REASON_EVIDENCE_ROW", "LegacyReasonEvidence",
-    "MATCH_AUTHORITY_DIGEST", "MATCH_CANONICAL_STR_DIGEST", "bounded_match_evidence", "match_digest",
+    "MATCH_EXACT", "MATCH_FINGERPRINT", "MATCH_UNIQUE", "bounded_prefix", "projection_diagnostic_work",
     "finitize_unknown_reason_record", "finitize_unknown_recovery_action",
     "iter_unknown_recovery_actions", "unknown_reason_counts_source", "recovery_backlog_source",
     "EVIDENCE_REF_MAX_CHARS", "EVIDENCE_REFS_MAX_COUNT", "PROJECTION_DIAGNOSTIC_LEGACY_ROWS",

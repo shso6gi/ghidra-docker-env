@@ -48,10 +48,10 @@ from scripts.function_tracer_pcode.checker.output_schema import (
 )
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     DETAIL_MAX_CHARS,
-    MATCH_AUTHORITY_DIGEST,
+    MATCH_EXACT,
+    MATCH_FINGERPRINT,
     UNKNOWN_REASON_ROW,
     _match_legacy_reasons,
-    bounded_match_evidence,
     make_unknown_reason,
 )
 from scripts.function_tracer_pcode.config.settings import expression_budget_policy
@@ -226,7 +226,7 @@ def test_c3_a_producer_built_huge_string_is_bounded_before_authority_and_in_the_
     result = create_mock_result(is_equivalent=None)
     result.unknown_reasons = [record]
     result.unknown_recovery_actions = []
-    finitize_legacy_reasons(result)
+    finitize_legacy_reasons(result, authority_projects_reasons=True)
     finitized = result.unknown_reasons[0]
     assert len(finitized.detail) <= DETAIL_MAX_CHARS + 64
     assert type(finitized.object_target_key) is BoundedEvidence
@@ -365,7 +365,7 @@ def test_b5_a_sealed_canonical_key_is_only_peeked_within_the_inline_bound():
         _WatchedTuple.watching = False
     assert _WatchedTuple.visits < 2_048 * len(canonical)
     row = envelope.payload["unknown_reasons"][0]
-    assert row["object_target_key"]["bounded_evidence"] == "v1"
+    assert row["object_target_key"]["bounded_evidence"] == "v2"
 
 
 def test_c4_a_record_to_dict_inside_the_pair_budget_never_expands_a_shared_dag():
@@ -385,15 +385,17 @@ def test_c4_a_record_to_dict_inside_the_pair_budget_never_expands_a_shared_dag()
     assert elapsed < 1.0
 
 
-def test_b5_legacy_matching_uses_digests_equal_to_canonical_value_equality():
-    """有界化した legacy key と cause の canonical key は digest で照合できる（等しさは同じ）。"""
+def test_b5_large_legacy_keys_match_by_a_labelled_fingerprint_and_small_ones_exactly():
+    """有界化した大きい legacy key は fingerprint で照合し、照合の種類を明記する（等しさの証明
+    ではない）。小さい key はそのまま残るので canonical_value の `==` で照合する（従来どおり）。"""
 
     from scripts.function_tracer_pcode.authority.contracts import canonical_value
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget, bounded_evidence
 
     key = ("return_coverage", ("target_schema_version", 3)) + tuple(range(5_000))
     legacy = make_unknown_reason("unknown", stage="S", object_target_key=key)
-    finitized = bounded_match_evidence(legacy.object_target_key)
-    assert type(finitized) is BoundedEvidence and finitized.match_digest(MATCH_AUTHORITY_DIGEST)
+    finitized = bounded_evidence(legacy.object_target_key, work=JsonBudget(None))
+    assert type(finitized) is BoundedEvidence and finitized.fingerprint_kind == "canonical_sha256"
     bounded_record = legacy.__class__(**{**legacy.__dict__, "object_target_key": finitized})
     cause = SimpleNamespace(
         cause_id=SimpleNamespace(canonical_target_key=canonical_value(key)),
@@ -403,9 +405,21 @@ def test_b5_legacy_matching_uses_digests_equal_to_canonical_value_equality():
         cause_id=SimpleNamespace(canonical_target_key=canonical_value(key[:-1])),
         proof_requirement_ids=(),
     )
-    matched, kind = _match_legacy_reasons("unknown", cause, (bounded_record,), {"unknown": 2})
-    assert kind == "exact" and matched == (bounded_record,)
-    matched, kind = _match_legacy_reasons("unknown", other, (bounded_record,), {"unknown": 2})
+    work = JsonBudget(None)
+    matched, kind = _match_legacy_reasons("unknown", cause, (bounded_record,), {"unknown": 2}, work=work)
+    assert kind == MATCH_FINGERPRINT and matched == (bounded_record,)
+    matched, kind = _match_legacy_reasons("unknown", other, (bounded_record,), {"unknown": 2}, work=work)
+    assert matched == () and kind is None
+    small = make_unknown_reason("unknown", stage="S", object_target_key=("k", 1))
+    small_cause = SimpleNamespace(
+        cause_id=SimpleNamespace(canonical_target_key=canonical_value(("k", 1))), proof_requirement_ids=(),
+    )
+    matched, kind = _match_legacy_reasons("unknown", small_cause, (small,), {"unknown": 2}, work=work)
+    assert kind == MATCH_EXACT and matched == (small,)
+    # cause の key の fingerprint を作業量の中で求められなければ、fingerprint では照合しない
+    matched, kind = _match_legacy_reasons(
+        "unknown", cause, (bounded_record,), {"unknown": 2}, work=JsonBudget(16),
+    )
     assert matched == () and kind is None
 
 

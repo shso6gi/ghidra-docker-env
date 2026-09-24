@@ -997,6 +997,9 @@ def estimate_legacy_dict_bytes(
     pending: Dict[int, Any] = {}
     active: Set[int] = set()
     stack: List[Any] = [(root, False)]
+    # distinct な node の node 1 つ分の大きさの合計。木は distinct な node を 1 回以上含むので
+    # 木の大きさ ≥ この合計: 超えた時点で止まる（兄弟の部分木を全部数え終える前に）
+    distinct_total = 0
     while stack:
         node, exiting = stack.pop()
         node_id = id(node)
@@ -1004,15 +1007,20 @@ def estimate_legacy_dict_bytes(
             active.discard(node_id)
             local, children = pending.pop(node_id)
             # placeholder の `0` は 1 byte。子の実際の大きさと差し替える
-            size = utf8_length(
-                policy.dumps(local, default=_opaque_local_text)
+            local_size = _bounded_local_bytes(
+                policy, local, None if max_bytes is None else max_bytes - distinct_total + len(children),
             ) - len(children)
             for child in children:
                 if type(child) is _RuntimeRefChild:
-                    size += child.measure(
-                        policy, None if max_bytes is None else max_bytes - size,
+                    local_size += child.measure(
+                        policy, None if max_bytes is None else max_bytes - distinct_total - local_size,
                     )
-                else:
+            distinct_total += local_size
+            if max_bytes is not None and distinct_total > max_bytes:
+                return max_bytes + 1
+            size = local_size
+            for child in children:
+                if type(child) is not _RuntimeRefChild:
                     size += sizes[id(child)]
             if max_bytes is not None and size > max_bytes:
                 return max_bytes + 1
@@ -1066,16 +1074,44 @@ class _ChargeOnlyBudget:
         return leaf.__json_tree_metered__(RESULT_JSON_POLICY, self._charge) if build else None, 0
 
 
-def _node_local_bytes(node: "Expression", policy: Any) -> int:
-    """node 1 つ分の byte（子は含まない。runtime ref は含む）。見積りと同じ規則。"""
+def _node_local_bytes(node: "Expression", policy: Any, max_bytes: Optional[int] = None) -> int:
+    """node 1 つ分の byte（子は含まない。runtime ref は含む）。見積りと同じ規則。
+
+    `max_bytes` を超えたと分かった時点で `max_bytes + 1` 以上を返す（残りを数えない）。
+    """
 
     children: List[Any] = []
     local = node._to_dict_active(None, collect=children)
-    size = utf8_length(policy.dumps(local, default=_opaque_local_text)) - len(children)
+    size = _bounded_local_bytes(
+        policy, local, None if max_bytes is None else max_bytes + len(children),
+    ) - len(children)
     for child in children:
         if type(child) is _RuntimeRefChild:
-            size += child.measure(policy, None)
+            size += child.measure(policy, None if max_bytes is None else max_bytes - size)
     return size
+
+
+def _bounded_local_bytes(policy: Any, local: Any, max_bytes: Optional[int]) -> int:
+    """node 1 つ分の dict を書いた byte。書く前に中の文字列の長さを数え、上限を超える
+    （1 文字 1 byte 以上）と分かれば書かずに `max_bytes + 1` を返す。"""
+
+    if max_bytes is not None:
+        total = 0
+        stack = [local]
+        while stack:
+            value = stack.pop()
+            if isinstance(value, str):
+                total += len(value)
+            elif isinstance(value, dict):
+                total += len(value)
+                stack.extend(value.keys())
+                stack.extend(value.values())
+            elif isinstance(value, (list, tuple)):
+                total += len(value)
+                stack.extend(value)
+            if total > max_bytes:
+                return max_bytes + 1
+    return utf8_length(policy.dumps(local, default=_opaque_local_text))
 
 
 class _RuntimeRefChild:

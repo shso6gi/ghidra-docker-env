@@ -52,6 +52,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from scripts.function_tracer_pcode.core.json_encoding import CANONICAL, LEGACY
+
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownReasonRecord,
     build_unknown_recovery_actions,
@@ -680,9 +682,13 @@ def reason_detail_key(record: Any) -> str:
     出力の reason 行から読む reporting と、live な record から作る集計で同じ key になる。
     """
     from scripts.function_tracer_pcode.checker.unknown_reason import DETAIL_MAX_CHARS
-    from scripts.function_tracer_pcode.core.json_encoding import bounded_text
+    from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget, bounded_text
 
-    detail = bounded_text(getattr(record, "detail", None), DETAIL_MAX_CHARS)
+    # 長い detail の marker の hash は今の直列化の作業量の中で求める（scope の外 = 部品単体の
+    # 呼び出しでは数えない）
+    work = active_serialization_work() or JsonBudget(None)
+    detail = bounded_text(getattr(record, "detail", None), DETAIL_MAX_CHARS, work=work)
     return f"{record.reason_id} | {detail if detail else '(no detail)'}"
 
 
@@ -794,8 +800,20 @@ def attach_cause_aggregate(result: Any) -> None:
     作る前に一度だけ確定させる」ためのもの。preimage 確定後に payload を
     書き換えてはならない（`checker/diagnostics.py` の digest 契約と同じ）。
     """
+    from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+
+    # Issue #22 PR-22-D: 集計が読む値（canonical reason・準備済みの trace 部分）は、authority
+    # 確定後の field に空けた headroom を上限にした診断用の作業量へ数えながら読む（超えれば
+    # `error` を持つ値 = 診断の marker。判定は変えない）
+    prepared = getattr(result, "prepared_semantic_payload", None)
+    plan = getattr(prepared, "plan", None)
+    limit = getattr(plan, "headroom_bytes", None) if plan is not None and plan.max_bytes is not None else None
     try:
-        result.unknown_cause_aggregate = build_unknown_cause_aggregate(result)
+        with serialization_scope(
+            site=AGGREGATE_SITE, target_parts=("unknown_cause_aggregate",),
+            terminal=False, max_bytes=limit, enabled=limit is not None,
+        ):
+            result.unknown_cause_aggregate = build_unknown_cause_aggregate(result)
     except Exception:  # 診断は判定を壊さない
         return
 
@@ -860,19 +878,23 @@ def build_trace_cause_evidence(
     """
 
     trace = getattr(result, "debug_trace", None)
-    attempts = tuple(getattr(trace, "attempts", ()) or ()) if trace is not None else ()
+    # 集計は trace の列を直接読むので、読む要素の大きさを 1 つずつ作業量へ数えてから読む
+    # （集計の作業は数えた入力で抑えられる）
+    attempts = tuple(_metered(getattr(trace, "attempts", ()), mode=LEGACY)) if trace is not None else ()
     occurrences = _trace_occurrence_views(attempts)
-    transitions = _event_views(getattr(trace, "causal_transitions", ()) if trace is not None else ())
-    completions = _event_views(getattr(trace, "proof_completion_events", ()) if trace is not None else ())
-    reason_completions = _event_views(
-        getattr(trace, "reason_completion_events", ()) if trace is not None else ()
-    )
+    transitions = _event_views(_metered(
+        getattr(trace, "causal_transitions", ()) if trace is not None else (), mode=LEGACY,
+    ))
+    completions = _event_views(_metered(
+        getattr(trace, "proof_completion_events", ()) if trace is not None else (), mode=LEGACY,
+    ))
+    reason_completions = _event_views(_metered(
+        getattr(trace, "reason_completion_events", ()) if trace is not None else (), mode=LEGACY,
+    ))
     legacy_attempt, legacy_records = _final_legacy_attempt(trace, attempts)
     legacy_view = None
     if trace is not None and legacy_attempt is not None:
-        # 集計は record を直接読むので、読む record の大きさを先に作業量へ数える
-        # （集計の大きさは数えた入力で抑えられる）
-        _charge_records(legacy_records)
+        # 最終 attempt の record は attempt と一緒に数え済み
         legacy_view = build_reason_view(legacy_records)
         legacy_view["source"] = "final_attempt"
     evidence: Dict[str, Any] = {
@@ -915,15 +937,30 @@ def build_trace_cause_evidence(
     return evidence
 
 
-def _charge_records(records: Sequence[Any]) -> None:
+#: authority 確定後に集計を作る観測点（診断用の作業量）。
+AGGREGATE_SITE = "checker.cause_aggregate.attach"
+
+
+def _metered(values: Any, *, mode: str):
+    """集計が読む列を、1 要素ずつ今の直列化の作業量へ数えてから渡す（入力を先に写さない）。
+
+    * authority 確定 **前** の trace（live な記録）は `LEGACY`（集計が読む形そのもの）で数える。
+    * authority 確定 **後** の canonical reason は `CANONICAL`（出力と同じ有界な行: 封印済みの
+      key は `cause:<id>` の要約で、辿らない）で数える。
+
+    作業量（`serialization_scope` の診断用の work）を超えれば、そこで
+    `JsonBudgetExhausted` が上がり、集計は `error` を持つ値になる（fail open）。作業量の
+    scope の外（部品単体の呼び出し）では数えない。
+    """
+
     from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
-    from scripts.function_tracer_pcode.core.json_encoding import LEGACY, RESULT_JSON_POLICY
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
 
     work = active_serialization_work()
-    if work is None:
-        return
-    for record in records:
-        RESULT_JSON_POLICY.count_into(record, work, mode=LEGACY)
+    for value in values or ():
+        if work is not None:
+            RESULT_JSON_POLICY.count_into(value, work, mode=mode)
+        yield value
 
 
 def trace_evidence_is_usable(evidence: Any) -> bool:
@@ -955,7 +992,9 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
         }
     trace_present = bool(evidence.get("trace_present"))
 
-    canonical_records = coerce_unknown_reason_records(getattr(result, "unknown_reasons", ()) or ())
+    canonical_records = coerce_unknown_reason_records(
+        _metered(getattr(result, "unknown_reasons", ()), mode=CANONICAL)
+    )
     canonical_available = getattr(result, "decision_receipt", None) is not None
 
     final_reasons = build_reason_view(canonical_records) if canonical_available else None
@@ -1074,10 +1113,17 @@ def _payload_occurrence_views(records: Sequence[UnknownReasonRecord]) -> List[Di
                 "reason_ordinal": ordinal,
             },
             "attempt_identity": identity,
-            "reason_record": RESULT_JSON_POLICY.prepare(record).value(),
+            "reason_record": RESULT_JSON_POLICY.prepare(record, max_bytes=_remaining_work()).value(),
             "initial_causal_status": "unclassified",
         })
     return occurrences
+
+
+def _remaining_work() -> Optional[int]:
+    from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
+
+    work = active_serialization_work()
+    return None if work is None else work.remaining()
 
 
 def _payload_final_identity(evidence: Mapping[str, Any], occurrences: Sequence[Mapping[str, Any]]):

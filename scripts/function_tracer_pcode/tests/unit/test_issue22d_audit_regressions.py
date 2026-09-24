@@ -30,11 +30,10 @@ from scripts.function_tracer_pcode.checker.unknown_reason import (
     TYPED_CAUSE_KEY_INLINE_BYTES,
     UNKNOWN_REASON_ROW,
     _production_target_key,
-    bounded_match_evidence,
     make_unknown_reason,
 )
 from scripts.function_tracer_pcode.core.budget_policy import BudgetPolicy
-from scripts.function_tracer_pcode.core.canonical_digest import canonical_merkle_digest
+from scripts.function_tracer_pcode.core.canonical_digest import canonical_fingerprint
 from scripts.function_tracer_pcode.core.errors import reset_pair_failure_scopes
 from scripts.function_tracer_pcode.core.expression import Expression
 from scripts.function_tracer_pcode.core.json_encoding import (
@@ -213,7 +212,7 @@ def test_small_non_json_or_live_legacy_evidence_becomes_bounded_not_an_error():
     result = create_mock_result(is_equivalent=None)
     result.unknown_reasons = [reason]
     result.unknown_recovery_actions = []
-    finitize_legacy_reasons(result)
+    finitize_legacy_reasons(result, authority_projects_reasons=True)
     finitized = result.unknown_reasons[0]
     assert type(finitized.object_target_key) is BoundedEvidence
     assert type(finitized.object_evidence) is BoundedEvidence
@@ -285,14 +284,19 @@ def test_string_bounds_cover_the_worst_escape_of_every_policy():
 
 def test_bounded_evidence_fields_cannot_exceed_the_declared_summary_size():
     with pytest.raises(ValueError):
-        BoundedEvidence(identity='a"b', identity_kind="x", kind="y")
+        BoundedEvidence(fingerprint='a"b', fingerprint_kind="x", kind="y")
     with pytest.raises(ValueError):
-        BoundedEvidence(identity="a\\b", identity_kind="x", kind="y")
+        BoundedEvidence(fingerprint="a\\b", fingerprint_kind="x", kind="y")
     widest = BoundedEvidence(
-        identity="~" * 96, identity_kind="~" * 64, kind="~" * 64,
-        encoded_bytes_over=10 ** 19, distinct_nodes=10 ** 19,
+        fingerprint="~" * 96, fingerprint_kind="~" * 64, kind="~" * 64,
+        encoded_bytes_over=10 ** 19,
     )
     assert RESULT_JSON_POLICY.measure(widest.summary()) <= EVIDENCE_SUMMARY_MAX_BYTES
+    unfingerprinted = BoundedEvidence(
+        fingerprint=None, fingerprint_kind=None, kind="~" * 64,
+        encoded_bytes_over=10 ** 19, unfingerprinted="~" * 64,
+    )
+    assert RESULT_JSON_POLICY.measure(unfingerprinted.summary()) <= EVIDENCE_SUMMARY_MAX_BYTES
 
 
 # ---------------------------------------------------------------------------
@@ -304,23 +308,22 @@ class _Coordinate(enum.Enum):
     ORIGIN = (0, 0)
 
 
-def test_digest_equality_holds_for_container_enum_values_and_colliding_sets():
-    from scripts.function_tracer_pcode.authority.contracts import (
-        canonical_value,
-        streaming_canonical_str_digest,
-    )
+def test_fingerprints_follow_the_canonical_form_for_enum_values_and_colliding_sets():
+    from scripts.function_tracer_pcode.authority.contracts import authority_digest, canonical_value
 
+    # canonical な形が等しい値（enum の値 = 同じ tuple）は同じ fingerprint
     assert canonical_value((_Coordinate.ORIGIN,)) == canonical_value(((0, 0),))
-    assert canonical_merkle_digest((_Coordinate.ORIGIN,))[0] == canonical_merkle_digest(((0, 0),))[0]
-    # hash が衝突する要素は、入れた順で集合の並びが変わる
+    assert canonical_fingerprint((_Coordinate.ORIGIN,), work=JsonBudget(None)) == canonical_fingerprint(
+        ((0, 0),), work=JsonBudget(None),
+    )
+    # hash が衝突する要素は、入れた順で集合の並びが変わる: canonical な並び（digest 順）で数える
     left, right = frozenset([1, 2 ** 61]), frozenset([2 ** 61, 1])
     assert list(left) != list(right)
-    assert canonical_merkle_digest(left) == canonical_merkle_digest(right)
-    for value in (left, {"s": right}, "lone \ud800 surrogate", (_Coordinate.ORIGIN, "\ud800")):
-        expected = hashlib.sha256(
-            str(canonical_value(value)).encode("utf-8", "surrogatepass")
-        ).hexdigest()
-        assert streaming_canonical_str_digest(value) == expected
+    for value in (left, right, {"s": right}, (_Coordinate.ORIGIN, "x")):
+        assert canonical_fingerprint(value, work=JsonBudget(None)) == authority_digest(value)
+    # lone surrogate は authority_digest と同じく canonical な値にならない（`UnicodeError`）
+    with pytest.raises(UnicodeError):
+        canonical_fingerprint("lone \ud800 surrogate", work=JsonBudget(None))
 
 
 # ---------------------------------------------------------------------------

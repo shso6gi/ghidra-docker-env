@@ -25,8 +25,9 @@ required = Σ B field の上限（固定 field + 最大行数 × 行の上限 + 
 identity・solver 側は変わらない（M-3）。
 
 finalization bundle（`canonical_result_finalization_bundle`）は preimage（A + B + C）
-全体の digest を持つ封印で、payload の予算の **外** に付ける attachment（大きさの
-上限は authority の event stream の契約、#110）。
+全体の digest を持つ receipt で、最終 JSON の予算の **中** にある（切り詰めない）。その大きさの
+上限は authority の event stream の契約（#110）が無いと schema から導けないので、headroom は
+bundle 以外の field だけを予約し、bundle は最終 envelope の残りに収まるかを出力時に確かめる。
 """
 
 from __future__ import annotations
@@ -152,7 +153,13 @@ def _truncation_marker_max_bytes(policy: JsonEncodingPolicy, key: str) -> int:
 
 
 def authority_field_bounds(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> Dict[str, FieldBound]:
-    """B の field ごとの上限（`RESULT_FIELDS` の B と 1 対 1。bundle は payload の外）。"""
+    """B の field ごとの上限（`RESULT_FIELDS` の B と 1 対 1。bundle を除く）。
+
+    finalization bundle は authority の event stream を持つ receipt で、その大きさの上限は
+    event stream の契約（#110）が無いと schema から導けない。headroom は bundle 以外の B と
+    C の上限だけを予約し、bundle は最終 envelope の残りの予算に収まるかを出力時に確かめる
+    （収まらなければ出力の契約違反の ERROR。`output_preparation.build_final_result_envelope`）。
+    """
 
     reason_row = row_max_bytes(UNKNOWN_REASON_ROW, policy)
     action_row = row_max_bytes(UNKNOWN_RECOVERY_ACTION_ROW, policy)
@@ -199,6 +206,8 @@ def authority_field_bounds(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> D
         ) + MAX_UNKNOWN_REASON_ROWS * policy.max_member_bytes(ID_MAX_CHARS, backlog_entry),
             f"≤ {MAX_UNKNOWN_REASON_ROWS} reason ids × backlog entry {backlog_entry} B"),
         FieldBound("decision_gated_by_pending_proof", 5, "bool"),
+        FieldBound("superseded_decision_receipt", row_max_bytes(DECISION_RECEIPT_ROW, policy),
+                   "decision receipt row (output-contract ERROR only)"),
     )
     return {row.key: row for row in rows}
 
