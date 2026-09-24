@@ -55,10 +55,6 @@ FASTPATH_UNSIGNED_OPCODES: FrozenSet[str] = frozenset({
 })
 
 
-def _opcode_of(evidence: Any) -> Any:
-    return evidence.opcode
-
-
 @dataclass
 class PcodeEvidence:
     """単一のP-code証拠"""
@@ -178,14 +174,14 @@ class SignednessEvidence:
             ("excluded_fastpath", len(self.excluded_fastpath)),
         )
         yield "opcode_counts", scan(
-            chain(self.signed_strong, self.signed_medium, self.unsigned), Tally(_opcode_of),
+            chain(self.signed_strong, self.signed_medium, self.unsigned), Tally("opcode"),
         )
         yield "signed_strong", each(self.signed_strong)
         yield "signed_medium", each(self.signed_medium)
         yield "unsigned", each(self.unsigned)
         if self.excluded_fastpath:
             yield "excluded_fastpath", each(self.excluded_fastpath)
-            yield "excluded_opcode_counts", scan(iter(self.excluded_fastpath), Tally(_opcode_of))
+            yield "excluded_opcode_counts", scan(iter(self.excluded_fastpath), Tally("opcode"))
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)

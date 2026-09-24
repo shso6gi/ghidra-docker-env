@@ -2281,6 +2281,8 @@ _REGISTERED_UNBOUNDED_BUDGETS = {
     ("core/runtime_refs/unknowns.py", "_canonical_budget_value"):
         "producer 時点の identity（`stable_key` / `event_id`。key の大きさの owner は identity）。"
         "出力は `_canonical_budget_source` が walk の作業量へ数える",
+    ("checker/debug_trace.py", "DebugTrace._iter_phase_usage"):
+        "人向けの phase 利用の一覧（出力の準備の外。出力は `phase_usage_source` が walk の作業量で畳む）",
     ("checker/unknown_reason.py", "iter_unknown_recovery_actions"):
         "producer 時点（出力の前）の構築。出力の行数は finitize が判定の前に schema と比べ、出力は "
         "`recovery_actions_source` が walk の作業量へ数える",

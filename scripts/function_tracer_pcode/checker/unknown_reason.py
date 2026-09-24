@@ -17,7 +17,9 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     as_list,
     each,
     materialize,
+    Reducer,
     row_items,
+    source_converter,
 )
 from scripts.function_tracer_pcode.proof.unknown_reason import (  # noqa: F401
     UNKNOWN_TUPLE_MISSING,
@@ -74,16 +76,19 @@ DETAIL_MAX_CHARS = 1024
 TYPED_CAUSE_KEY_INLINE_BYTES = 4096
 
 
+@source_converter
 def _optional_dict(value: Any) -> Any:
     return as_dict(value) if value else None
 
 
+@source_converter
 def _dict_items(values: Any) -> Any:
     # 有界化した後の列は mapping のほかに `BoundedEvidence`（大きい要素）と件数の marker（文字列）
     # を持つ。mapping だけを旧 `to_dict` と同じく dict にし、それ以外はそのまま置く
     return each(values, _dict_item)
 
 
+@source_converter
 def _dict_item(value: Any) -> Any:
     return as_dict(value) if isinstance(value, Mapping) else value
 
@@ -1150,7 +1155,9 @@ def iter_unknown_recovery_actions(
     from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
 
     # producer 時点（出力の前）の構築: 出力の行数は finitize が判定の前に schema と比べる
-    return _iter_recovery_actions(values, primary_by_aggregation_unit=primary_by_aggregation_unit, work=JsonBudget(None))
+    return _iter_recovery_actions(
+        values, primary_by_aggregation_unit=primary_by_aggregation_unit, work=JsonBudget(None), for_output=False,
+    )
 
 
 def recovery_actions_source(
@@ -1168,7 +1175,7 @@ def recovery_actions_source(
     from scripts.function_tracer_pcode.core.json_encoding import each, metered
 
     return metered(lambda work: each(_iter_recovery_actions(
-        values, primary_by_aggregation_unit=primary_by_aggregation_unit, work=work,
+        values, primary_by_aggregation_unit=primary_by_aggregation_unit, work=work, for_output=True,
     )))
 
 
@@ -1185,13 +1192,18 @@ def _key_width(value: Any, work: Any) -> None:
             work.charge(1)
 
 
-def _iter_recovery_actions(values: Optional[Iterable[Any]], *, primary_by_aggregation_unit: bool, work: Any):
+def _iter_recovery_actions(
+    values: Optional[Iterable[Any]], *, primary_by_aggregation_unit: bool, work: Any, for_output: bool,
+):
+    # producer 時点（判定が読む action）は従来の coercion、出力の準備は数えてから写す coercion
     primary = _PrimaryFilter() if primary_by_aggregation_unit else None
     for value in values or ():
         # 読み飛ばす record も 1 件ずつ数える
         work.charge(1)
-        record = coerce_unknown_reason_record(value)
-        if primary is not None and not primary.admit(record):
+        record = (
+            _coerce_record_within(value, work=work) if for_output else coerce_unknown_reason_record(value)
+        )
+        if primary is not None and not primary.admit(record, work=work):
             continue
         obligations = record.recovery_proof_obligations
         if not obligations:
@@ -1370,9 +1382,12 @@ class _PrimaryFilter:
         self.seen: set = set()
         self.fallback_index = 0
 
-    def admit(self, record: UnknownReasonRecord) -> bool:
+    def admit(self, record: UnknownReasonRecord, *, work: Any) -> bool:
         aggregation_key = str(record.aggregation_unit or UnknownAggregationUnit.RESULT.value)
         unit_key = record.pair_or_case or record.stage
+        if type(unit_key) is str:
+            # 単位の key を hash する前に長さを数える（有界化していない trace の record もある）
+            work.charge(len(unit_key))
         if unit_key is None:
             unit_key = ("record", self.fallback_index)
             self.fallback_index += 1
@@ -1383,7 +1398,27 @@ class _PrimaryFilter:
         return True
 
 
-class _ReasonCounts:
+def _coerce_record_within(value: Any, *, work: Any) -> UnknownReasonRecord:
+    """出力の準備で読む reason の値を record にする（入力に比例する写しは数えてから）。
+
+    record はそのまま、mapping は大きさを `work` の中で数えてから `from_dict`、reason id の
+    文字列は長さを数えてから。それ以外（`str()` が producer になる object）は JSON にならない値。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import LEGACY, RESULT_JSON_POLICY
+
+    if isinstance(value, UnknownReasonRecord):
+        return value
+    if type(value) is dict:
+        work.charge(1 + RESULT_JSON_POLICY.measure(value, max_bytes=work.remaining(), mode=LEGACY))
+        return UnknownReasonRecord.from_dict(value)
+    if type(value) is str:
+        work.charge(len(value))
+        return make_unknown_reason(value)
+    raise TypeError(f"{type(value).__name__} is not an unknown reason record")
+
+
+class _ReasonCounts(Reducer):
     """`scan` の reducer: `summarize_unknown_reason_counts` と同じ件数（reason id の初出順）。"""
 
     __slots__ = ("primary", "counts")
@@ -1392,16 +1427,13 @@ class _ReasonCounts:
         self.primary = _PrimaryFilter() if primary_by_aggregation_unit else None
         self.counts: Dict[str, int] = {}
 
-    def cost(self, value: Any) -> int:
-        return 0
-
-    def add(self, value: Any) -> None:
-        record = coerce_unknown_reason_record(value)
-        if self.primary is not None and not self.primary.admit(record):
+    def add(self, value: Any, *, work: Any) -> None:
+        record = _coerce_record_within(value, work=work)
+        if self.primary is not None and not self.primary.admit(record, work=work):
             return
         self.counts[record.reason_id] = self.counts.get(record.reason_id, 0) + 1
 
-    def result(self) -> Any:
+    def result(self, *, work: Any) -> Any:
         from scripts.function_tracer_pcode.core.json_encoding import pairs_of
 
         return pairs_of(iter(self.counts.items()))
@@ -1449,7 +1481,10 @@ class _BacklogEntryView:
         self._distinct: List[Any] = []
         self._distinct_keys: set = set()
 
-    def add(self, record: UnknownReasonRecord) -> None:
+    def add(self, record: UnknownReasonRecord, *, work: Any) -> None:
+        obligations = record.recovery_proof_obligations
+        # 辿る obligation の数を先に数える（record の列は tuple）
+        work.charge(len(obligations))
         if self.count == 0:
             self.target_regression = record.target_regression
             self.recovery_proof_kind = record.recovery_proof_kind
@@ -1462,7 +1497,7 @@ class _BacklogEntryView:
             ):
                 self.recovery_proof_kind = record.recovery_proof_kind
         self.count += 1
-        for obligation in record.recovery_proof_obligations:
+        for obligation in obligations:
             self._kind_counts[obligation.proof_kind] = self._kind_counts.get(obligation.proof_kind, 0) + 1
             key = (obligation.proof_kind, obligation.proof_stage)
             if key not in self._distinct_keys:
@@ -1485,7 +1520,7 @@ class _BacklogEntryView:
         return row_items(RECOVERY_BACKLOG_ENTRY_ROW, self)
 
 
-class _RecoveryBacklog:
+class _RecoveryBacklog(Reducer):
     """`scan` の reducer: `summarize_unknown_recovery_backlog` と同じ entry（reason id の初出順）。"""
 
     __slots__ = ("primary", "entries")
@@ -1494,26 +1529,16 @@ class _RecoveryBacklog:
         self.primary = _PrimaryFilter() if primary_by_aggregation_unit else None
         self.entries: Dict[str, _BacklogEntryView] = {}
 
-    def cost(self, value: Any) -> int:
-        # 畳み込むときに辿る obligation の数（列の長さなので O(1)）
-        obligations = getattr(value, "recovery_proof_obligations", None)
-        if obligations is None and isinstance(value, Mapping):
-            obligations = value.get("recovery_proof_obligations")
-        try:
-            return len(obligations or ())
-        except TypeError:
-            return 0
-
-    def add(self, value: Any) -> None:
-        record = coerce_unknown_reason_record(value)
-        if self.primary is not None and not self.primary.admit(record):
+    def add(self, value: Any, *, work: Any) -> None:
+        record = _coerce_record_within(value, work=work)
+        if self.primary is not None and not self.primary.admit(record, work=work):
             return
         entry = self.entries.get(record.reason_id)
         if entry is None:
             entry = self.entries[record.reason_id] = _BacklogEntryView()
-        entry.add(record)
+        entry.add(record, work=work)
 
-    def result(self) -> Any:
+    def result(self, *, work: Any) -> Any:
         from scripts.function_tracer_pcode.core.json_encoding import pairs_of
 
         return pairs_of(iter(self.entries.items()))

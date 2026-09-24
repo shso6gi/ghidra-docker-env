@@ -6,6 +6,8 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 
 from scripts.function_tracer_pcode.core.json_encoding import (
+    JsonBudget,
+    Reducer,
     as_dict,
     as_list,
     each,
@@ -423,8 +425,10 @@ class DebugTrace:
         """phase ごとの利用状況の行（`known_phases` → attempt の初出の順）。attempt を 1 回だけ辿る。"""
 
         fold = _PhaseUsageFold(self.known_phases, self.planned_phases)
+        # 人向けの一覧（出力の準備の外。出力は `phase_usage_source` が walk の作業量で畳む）
+        work = JsonBudget(None)
         for attempt in self.attempts:
-            fold.add(attempt)
+            fold.add(attempt, work=work)
         return iter(fold.rows.values())
 
     def _iter_used_phases(self):
@@ -514,7 +518,7 @@ class DebugTrace:
 
 
 
-class _PhaseUsageFold:
+class _PhaseUsageFold(Reducer):
     """phase ごとの利用状況の行へ attempt を 1 つずつ畳み込む（`scan` の reducer を兼ねる）。
 
     行は `known_phases` → attempt の初出の順（行の数は phase の数）。`used_only` は実際に
@@ -558,11 +562,13 @@ class _PhaseUsageFold:
     #: phase の行 1 つの手間（固定の形: 11 の field と 7 の遷移の件数）
     ROW_COST = 32
 
-    def cost(self, attempt: Any) -> int:
-        # 新しい phase は行を 1 つ作る（行の数は phase の数で、attempt の数ではない）
-        return 0 if attempt.phase in self.rows else self.ROW_COST
-
-    def add(self, attempt: Any) -> None:
+    def add(self, attempt: Any, *, work: Any) -> None:
+        for label in (attempt.phase, attempt.transition_reason):
+            if type(label) is str:
+                work.charge(len(label))  # key として hash する文字列
+        if attempt.phase not in self.rows:
+            # 新しい phase は行を 1 つ作る（行の数は phase の数で、attempt の数ではない）
+            work.charge(self.ROW_COST)
         row = self._row(attempt.phase)
         row["reached"] = True
         row["attempt_count"] += 1
@@ -576,7 +582,7 @@ class _PhaseUsageFold:
         row["last_transition_reason"] = attempt.transition_reason
         row["last_result"] = attempt.result
 
-    def result(self) -> Any:
+    def result(self, *, work: Any) -> Any:
         from scripts.function_tracer_pcode.core.json_encoding import each
 
         if self.used_only:

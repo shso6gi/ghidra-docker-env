@@ -396,11 +396,11 @@ def test_a_scan_charges_every_pulled_element_even_when_the_output_is_tiny():
     def elements():
         for index in range(1_000_000):
             pulled.append(index)
-            yield index
+            yield SimpleNamespace(kind=0)
 
     # 結果は `{"0": n}` の 1 組だけ: 出力の byte ではなく、引き出す作業量で止まる
     with pytest.raises(JsonBudgetExhausted):
-        RESULT_JSON_POLICY.prepare(scan(elements(), Tally(lambda _item: 0)), max_bytes=1_000)
+        RESULT_JSON_POLICY.prepare(scan(elements(), Tally("kind")), max_bytes=1_000)
     assert len(pulled) <= 1_001
 
 
@@ -649,11 +649,13 @@ def test_a_producer_failure_is_a_rejected_value_not_an_escaped_exception():
     with pytest.raises(JsonValueRejected, match="producer failed"):
         RESULT_JSON_POLICY.prepare(_Broken())
 
-    def explode(_item):
-        raise ValueError("broken key")
+    class _Exploding:
+        @property
+        def kind(self):
+            raise ValueError("broken key")
 
     with pytest.raises(JsonValueRejected, match="producer failed"):
-        RESULT_JSON_POLICY.prepare(scan([1, 2], Tally(explode)))
+        RESULT_JSON_POLICY.prepare(scan([_Exploding()], Tally("kind")))
 
 
 def test_unsized_solver_rows_are_a_rejected_value_not_an_uncounted_copy():
@@ -1058,22 +1060,26 @@ def test_evidence_that_fails_while_being_fingerprinted_is_an_unsupported_summary
 
 
 def test_producer_failures_outside_json_items_are_rejected_values_too():
-    from scripts.function_tracer_pcode.core.json_encoding import JsonValueRejected, each, scan
+    from scripts.function_tracer_pcode.core.json_encoding import (
+        JsonValueRejected,
+        Reducer,
+        each,
+        scan,
+        source_converter,
+    )
 
+    @source_converter
     def explode(_item):
         raise KeyError("fn failed")
 
     with pytest.raises(JsonValueRejected, match="producer failed"):
         RESULT_JSON_POLICY.prepare(each([1], explode))
 
-    class _Reducer:
-        def cost(self, _element):
-            return 0
-
-        def add(self, _element):
+    class _Reducer(Reducer):
+        def add(self, _element, *, work):
             pass
 
-        def result(self):
+        def result(self, *, work):
             raise AttributeError("result failed")
 
     with pytest.raises(JsonValueRejected, match="producer failed"):

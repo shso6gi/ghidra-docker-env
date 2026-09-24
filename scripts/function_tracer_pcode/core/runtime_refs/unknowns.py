@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from scripts.function_tracer_pcode.core.json_encoding import (
     JsonBudget, as_list, each, inline, is_json_record, materialize, metered, pairs_of, raw,
+    source_converter,
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
@@ -372,7 +373,7 @@ def _canonical_budget_source(value: Any, depth: int = 0, *, work: Any) -> Any:
         work.charge(1 + 2 * len(value))
         return each(("bytes", value.hex()))
     if isinstance(value, (list, tuple)):
-        return each(value, lambda item: _canonical_budget_source(item, depth + 1, work=work))
+        return each(value, source_converter(lambda item: _canonical_budget_source(item, depth + 1, work=work)))
     if isinstance(value, (set, frozenset)):
         work.charge(1 + len(value))
         ordered = sorted(
@@ -381,7 +382,7 @@ def _canonical_budget_source(value: Any, depth: int = 0, *, work: Any) -> Any:
                 _canonical_budget_value_within(item, depth + 1, work=work), ensure_ascii=False, sort_keys=True,
             ),
         )
-        return each(ordered, lambda item: _canonical_budget_source(item, depth + 1, work=work))
+        return each(ordered, source_converter(lambda item: _canonical_budget_source(item, depth + 1, work=work)))
     if isinstance(value, Mapping):
         work.charge(1 + len(value))
         for key in value:

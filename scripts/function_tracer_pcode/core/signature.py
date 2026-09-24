@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Mapping, TYPE_CHECKING, Tuple
-from scripts.function_tracer_pcode.core.json_encoding import as_dict, each, mapping_of, materialize
+from scripts.function_tracer_pcode.core.json_encoding import as_dict, each, mapping_of, materialize, source_converter
 
 if TYPE_CHECKING:
     from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
@@ -458,6 +458,7 @@ def clone_parameter_descriptor(
     return cloned
 
 
+@source_converter
 def parameter_descriptor_source(param: Dict[str, Any]) -> Any:
     """`clone_parameter_descriptor(param, include_data_type_obj=False)` と同じ値の JSON source。
 

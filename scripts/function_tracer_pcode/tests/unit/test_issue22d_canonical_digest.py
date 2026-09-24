@@ -62,16 +62,12 @@ class _JStr(str):
     pass
 
 
-class _Authority:
-    def to_authority_dict(self):
-        return {"k": (1, 2), "z": None}
-
 
 _EDGE_VALUES = [
     None, True, 1, 1.5, float("nan"), "a\"b\\\n é\x01", _JInt(7), _JStr("s"),
     (1, 2, [3, {"b": 1, "a": 2}]), {"z": 1, "a": {"q": frozenset({1, 2, 3})}},
     {1: "a", 2: "b", 10: "c"}, {_Color.RED: 1}, {_Named.X: 1}, _Color.RED, _Color.PAIR, _Color.TABLE,
-    _Point(1, (2, 3)), _Authority(), frozenset({(1, 2), (3,), "x"}), {frozenset({1}), frozenset({2, 3})},
+    _Point(1, (2, 3)), frozenset({(1, 2), (3,), "x"}), {frozenset({1}), frozenset({2, 3})},
     [_Color.NUMBERED], {None: 1, True: 2}, 2 ** 200, ["x" * 200_000], {1.5: 2, 0.1: 3}, "\ud800",
 ]
 
@@ -154,11 +150,57 @@ def test_a_deep_chain_and_a_huge_string_stop_at_the_work_limit():
     assert elapsed < 1.0
 
 
-def test_an_object_that_normalizes_forever_stops_at_the_work_limit():
-    # `Mock` はどの属性にも応えるので `to_authority_dict()` が無限に続く
-    elapsed, peak, consumed = _bounded_run(mock.Mock(), 50)
-    assert consumed <= 51
-    assert elapsed < 1.0 and peak < 8 * 1024 * 1024
+class _Producer:
+    """`to_authority_dict()` が入力に比例する値を作る producer（呼ばれた回数を数える）。"""
+
+    calls = 0
+
+    def to_authority_dict(self):
+        _Producer.calls += 1
+        return {"items": list(range(1_000_000))}
+
+
+class _OverridingList(list):
+    def __getitem__(self, index):
+        raise AssertionError("an overridden __getitem__ must not run")
+
+
+class _OverridingMapping(dict):
+    def items(self):
+        raise AssertionError("an overridden items() must not run")
+
+
+@dataclasses.dataclass
+class _WithProperty:
+    a: int
+    b: int = 0
+
+
+def _raising_property(_self):  # pragma: no cover - 呼ばれてはいけない
+    raise AssertionError("a property must not run")
+
+
+_WithProperty.b = property(_raising_property)
+
+
+def _with_property():
+    value = _WithProperty.__new__(_WithProperty)
+    value.__dict__["a"] = 1  # field `b` の値は property が作る（instance には無い）
+    return value
+
+
+def test_values_with_producers_are_not_called_and_have_no_bounded_canonical_form():
+    # producer（`to_authority_dict`・`__getattr__`・上書きした容器の振る舞い・property）は
+    # work を受け取らない: 呼ばずに TypeError（証拠は型つき token の fingerprint へ退く）
+    _Producer.calls = 0
+    tracked = mock.Mock()
+    for value in (_Producer(), [(_Producer(),)], tracked, _OverridingList([1, 2]),
+                  _OverridingMapping(a=1), _with_property()):
+        with pytest.raises(TypeError):
+            canonical_fingerprint(value, work=JsonBudget(10_000_000))
+    assert _Producer.calls == 0 and tracked.mock_calls == []
+    summary = bounded_evidence(("x" * 3_000, _Producer()), work=JsonBudget(10_000_000))
+    assert summary.fingerprint_kind in {"token_sha256", None} and _Producer.calls == 0
 
 
 def test_a_deeply_shared_dag_exhausts_the_work_instead_of_expanding():
@@ -232,33 +274,24 @@ def test_bounded_evidence_equality_compares_summaries_not_the_original_values():
         BoundedEvidence(fingerprint=None, fingerprint_kind=None, kind="x")
 
 
-class _Fresh:
-    """`to_authority_dict()` が毎回新しい一時的な容器を返す object（id が再利用され得る）。"""
-
-    def __init__(self, depth):
-        self.depth = depth
-
-    def to_authority_dict(self):
-        return {"child": [_Fresh(self.depth - 1)] if self.depth else [], "pad": [0] * 3}
-
-
 def test_temporaries_freed_mid_walk_are_not_mistaken_for_a_cycle():
-    value = [_Fresh(3) for _ in range(2_000)]
+    # 固定の形の record（`BoundedEvidence`）の要約は辿るたびに新しい一時的な dict
+    value = [
+        BoundedEvidence(fingerprint=f"{index:064x}", fingerprint_kind="canonical_sha256", kind="k")
+        for index in range(2_000)
+    ]
     assert canonical_fingerprint(value, work=JsonBudget(None)) == authority_digest(value)
 
 
+@dataclasses.dataclass(eq=False)
 class _Holder:
-    def __init__(self):
-        self.inner = None
-
-    def to_authority_dict(self):
-        return {"inner": self.inner}
+    inner: object = None
 
 
 def test_a_cycle_through_a_set_member_is_a_typed_cycle():
     holder = _Holder()
     outer = frozenset({("x", holder)})
-    holder.inner = outer
+    holder.inner = [outer]
     with pytest.raises(CanonicalValueCycle):
         canonical_fingerprint(outer, work=JsonBudget(10_000_000))
 

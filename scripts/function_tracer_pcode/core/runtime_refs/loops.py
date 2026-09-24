@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
-from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
+from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
 )
@@ -357,6 +357,7 @@ def _loop_expression_semantic_key(
     return None
 
 
+@source_converter
 def _loop_object_source(value: Any) -> Any:
     """`_loop_object_to_dict` と同じ値を 1 要素ずつ作らせる source（表現を先に作らない）。
 
@@ -369,7 +370,7 @@ def _loop_object_source(value: Any) -> Any:
     if isinstance(value, (tuple, list)):
         return each(value, _loop_object_source)
     if isinstance(value, dict):
-        return mapping_of(value, _loop_object_source, key=str)
+        return mapping_of(value, _loop_object_source, stringify_keys=True)
     if is_json_record(value):
         return value
     return inline(
@@ -514,7 +515,7 @@ class LoopBodyEffectRef:
         yield "guard_constraints", each(self.guard_constraints, _loop_object_source)
         yield "path_condition_sets", each(
             self.path_condition_sets,
-            lambda path_conditions: each(path_conditions, _loop_object_source),
+            source_converter(lambda path_conditions: each(path_conditions, _loop_object_source)),
         )
         yield "guard_paths_incomplete", bool(self.guard_paths_incomplete)
         yield "target_ref", _loop_object_source(self.target_ref)
@@ -732,28 +733,28 @@ class LoopTermDescriptorRef:
 
         yield "residue_cases", each(
             self.residue_cases,
-            lambda case: inline(
+            source_converter(lambda case: inline(
                 ("modulus", int(case[0])),
                 ("residue", int(case[1])),
                 ("coeff", int(case[2])),
                 ("bias", int(case[3])),
-            ),
+            )),
         )
         yield "residue_bias_terms", each(
             self.residue_bias_terms,
-            lambda term: inline(
+            source_converter(lambda term: inline(
                 ("modulus", int(term[0])),
                 ("residue", int(term[1])),
                 ("bias_expr", term[2] if is_json_record(term[2]) else repr(term[2])),
-            ),
+            )),
         )
 
         yield "lane_terms", each(
             self.lane_terms,
-            lambda lane: inline(
+            source_converter(lambda lane: inline(
                 ("byte_offset", int(lane[0])),
                 ("access_size", max(1, int(lane[1] or 0))),
-            ),
+            )),
         )
         if self.location_base_ref is not None:
             yield "location_base_ref", self.location_base_ref
@@ -1779,20 +1780,20 @@ class CountedLoopSummaryRef:
 
         yield "residue_cases", each(
             self.residue_cases,
-            lambda case: inline(
+            source_converter(lambda case: inline(
                 ("modulus", int(case[0])),
                 ("residue", int(case[1])),
                 ("coeff", int(case[2])),
                 ("bias", int(case[3])),
-            ),
+            )),
         )
         yield "residue_bias_terms", each(
             self.residue_bias_terms,
-            lambda term: inline(
+            source_converter(lambda term: inline(
                 ("modulus", int(term[0])),
                 ("residue", int(term[1])),
                 ("bias_expr", term[2] if is_json_record(term[2]) else repr(term[2])),
-            ),
+            )),
         )
 
         yield "source", self.source

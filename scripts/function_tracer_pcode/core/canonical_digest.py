@@ -17,8 +17,12 @@ JSON の sha256。`authority/contracts`）と **同じ値** を streaming で求
   - mapping / dataclass / 列は幅を数えてから子を積む（mapping は key で並べる）。set は
     要素ごとの canonical JSON を作業量の中で作ってから digest 順に並べる。文字列は chunk
     ごとに数えてから escape・hash する。整数は桁数を数えてから文字列にする。
-  - `to_authority_dict()` による正規化は 1 歩ごとに数える（正規化し続ける object も作業量の
-    中で止まる）。
+* **producer を呼ばない**（Issue #22 PR-22-D、5 回目）: 走査の中で実行するのは組み込みの容器の
+  振る舞いだけ。`to_authority_dict()`・`__getattr__`（`hasattr`）・上書きした `items()` /
+  `__len__` / `__getitem__` / `__iter__`・dataclass の property は呼ばない（どれも work を
+  受け取らずに入力に比例する仕事をし得る）。そういう値は `TypeError`（有界な canonical な形を
+  持たない。呼ぶ側は型つき token の fingerprint へ退く）。例外は `register_fixed_canonical`
+  で登録した固定の形の record（要約が O(1)。今は `BoundedEvidence` だけ）。
 * **閉路** は `CanonicalValueCycle`（型つきの失敗）。辿っている容器の identity を持つので、
   stack は際限なく伸びない。
 * **木として辿る**（共有部分も展開する）。共有 DAG は canonical JSON が大きくなるので作業量を
@@ -36,11 +40,13 @@ JSON の sha256。`authority/contracts`）と **同じ値** を streaming で求
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
-from collections.abc import Mapping as _AbcMapping
+import types
+from collections import OrderedDict
 from dataclasses import fields, is_dataclass
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 _PRIMITIVE_TYPES = frozenset({str, int, float, bool})
@@ -51,6 +57,53 @@ _ENCODE_BASESTRING = json.encoder.encode_basestring
 
 class CanonicalValueCycle(ValueError):
     """canonical な値が自分自身を含む（有限の canonical な形を持たない）。"""
+
+
+#: 固定の形の record（型 → その canonical な要約を返す関数。要約は O(1) の大きさ）
+_FIXED_CANONICAL: Dict[type, Callable[[Any], Any]] = {}
+
+
+def register_fixed_canonical(kind: type, summary: Callable[[Any], Any]) -> None:
+    """`kind` の値を、`summary(value)`（固定の形の値）として辿る（`to_authority_dict` の代わり）。
+
+    `summary` は入力に比例する仕事をしない関数だけ（固定個数の短い field を返す）。登録は
+    `tests/unit/test_architecture_boundaries.py` が固定する。
+    """
+
+    _FIXED_CANONICAL[kind] = summary
+
+
+_MAPPING_TYPES = (dict, OrderedDict, types.MappingProxyType)
+_BUILTIN_ENUM_STR = frozenset({Enum.__str__, str.__str__, int.__repr__, int.__str__, object.__str__})
+
+
+def _is_builtin_sequence(item: Any) -> bool:
+    kind = type(item)
+    for base in (tuple, list):
+        if isinstance(item, base):
+            # 組み込みの `__len__` / `__getitem__` のまま（namedtuple など）でなければ辿らない
+            return kind.__len__ is base.__len__ and kind.__getitem__ is base.__getitem__
+    return False
+
+
+def _is_builtin_set(item: Any) -> bool:
+    kind = type(item)
+    for base in (frozenset, set):
+        if isinstance(item, base):
+            return kind.__iter__ is base.__iter__ and kind.__len__ is base.__len__
+    return False
+
+
+def _field_value(item: Any, name: str) -> Any:
+    """dataclass の field の値（instance の `__dict__` か slot。property などの descriptor は呼ばない）。"""
+
+    state = getattr(type(item), "__dictoffset__", 0) and object.__getattribute__(item, "__dict__")
+    if state and name in state:
+        return state[name]
+    descriptor = inspect.getattr_static(type(item), name, None)
+    if isinstance(descriptor, types.MemberDescriptorType):
+        return descriptor.__get__(item, type(item))
+    raise TypeError(f"field {name!r} of {type(item).__name__} is not a plain attribute")
 
 
 def _exact_primitive(value: Any) -> Any:
@@ -73,11 +126,17 @@ def _scalar_key(key: Any, work: Any) -> str:
     文字列の key は長さを数えてから写す。
     """
 
-    if isinstance(key, str):
+    if isinstance(key, str) and not isinstance(key, Enum):
         work.charge(len(key))
-    elif not (key is None or isinstance(key, (bool, int, float, Enum))):
-        raise TypeError(f"mapping key {type(key).__name__} has no bounded canonical form")
-    return str(key)
+        return str.__str__(key)
+    if isinstance(key, Enum):
+        # enum の `__str__` は組み込みのものだけ（上書きした `__str__` は producer）
+        if type(key).__str__ not in _BUILTIN_ENUM_STR:
+            raise TypeError(f"mapping key {type(key).__name__} overrides __str__")
+        return str(key)
+    if key is None or isinstance(key, (bool, int, float)):
+        return str(_exact_primitive(key)) if key is not None else "None"
+    raise TypeError(f"mapping key {type(key).__name__} has no bounded canonical form")
 
 
 def _json_key(key: Any, work: Any) -> str:
@@ -193,9 +252,10 @@ def _normalize(item: Any, work: Any) -> Any:
             if raw is None or isinstance(raw, (bool, int, float, str)):
                 return None if raw is None else _exact_primitive(raw)
             return _Raw(raw)
-        if hasattr(item, "to_authority_dict"):
+        summary = _FIXED_CANONICAL.get(type(item))
+        if summary is not None:
             work.charge(1)
-            item = item.to_authority_dict()
+            item = summary(item)
             continue
         if isinstance(item, (str, int, float, bool)):
             return _exact_primitive(item)
@@ -235,7 +295,7 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
             _push_raw_container(actions, item, work, in_set=sink.in_set)
             active.add(identity)
             continue
-        if is_dataclass(item) or isinstance(item, _AbcMapping):
+        if (is_dataclass(item) and not isinstance(item, type)) or type(item) in _MAPPING_TYPES:
             pairs = _pairs(item, work)
             active.add(identity)
             sink.emit(b"[")
@@ -251,7 +311,7 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
                 if index:
                     actions.append(b",")
             continue
-        if isinstance(item, (list, tuple)):
+        if _is_builtin_sequence(item):
             work.charge(len(item) + 1)
             active.add(identity)
             sink.emit(b"[")
@@ -261,7 +321,7 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
                 if index:
                     actions.append(b",")
             continue
-        if isinstance(item, (set, frozenset)):
+        if _is_builtin_set(item):
             work.charge(len(item) + 1)
             active.add(identity)
             # canonical_value と同じ並び（要素の authority_digest 順）。要素の canonical JSON を
@@ -281,7 +341,8 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
                     sink._put(data)
             sink.emit(b"]")
             continue
-        raise TypeError(f"unsupported authority value: {type(item).__name__}")
+        # producer を持つ値（`to_authority_dict`・上書きした容器の振る舞い）と未知の型は辿らない
+        raise TypeError(f"{type(item).__name__} has no bounded canonical form")
 
 
 class _Key:
@@ -304,7 +365,7 @@ def _pairs(item: Any, work: Any) -> list:
     if is_dataclass(item):
         names = [field_info.name for field_info in fields(item)]
         work.charge(len(names) + 1)
-        return [(name, getattr(item, name)) for name in names]
+        return [(name, _field_value(item, name)) for name in names]
     work.charge(len(item) + 1)
     pairs = [(_scalar_key(key, work), child) for key, child in item.items()]
     pairs.sort(key=lambda pair: pair[0])
@@ -314,7 +375,7 @@ def _pairs(item: Any, work: Any) -> list:
 def _push_raw_container(actions: list, item: Any, work: Any, *, in_set: bool) -> None:
     """enum の値（正規化されない値）を `json.dumps(sort_keys=True)` と同じ形で積む。"""
 
-    if isinstance(item, _AbcMapping):
+    if type(item) in _MAPPING_TYPES:
         if in_set:
             # set の要素の並びは要素の canonical な形を **もう一度** 正規化した値の digest
             # （mapping は [key, 値] の組になる）で、流す byte（`{...}`）とは別の形。有界な
@@ -333,7 +394,7 @@ def _push_raw_container(actions: list, item: Any, work: Any, *, in_set: bool) ->
                 actions.append(b",")
         actions.append(b"{")
         return
-    if isinstance(item, (list, tuple)):
+    if _is_builtin_sequence(item):
         work.charge(len(item) + 1)
         actions.append(_End(item, b"]"))
         for index in range(len(item) - 1, -1, -1):
@@ -345,4 +406,4 @@ def _push_raw_container(actions: list, item: Any, work: Any, *, in_set: bool) ->
     raise TypeError(f"unsupported enum value: {type(item).__name__}")
 
 
-__all__ = ["CanonicalValueCycle", "canonical_fingerprint"]
+__all__ = ["CanonicalValueCycle", "canonical_fingerprint", "register_fixed_canonical"]

@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional
 
 from scripts.function_tracer_pcode.checker.debug_trace import TransitionReason
+from scripts.function_tracer_pcode.core.json_encoding import Reducer
 # Issue #124: StageClock は core へ移した（analysis / proof / smt からも同じ型で
 # 計測し、checker が pull するため）。ここは既存 import を壊さないための再公開。
 from scripts.function_tracer_pcode.core.stage_clock import (  # noqa: F401
@@ -654,10 +655,10 @@ class TraceTimingsView:
             yield name, self.source(name)
 
 
-class _SolverTotals:
+class _SolverTotals(Reducer):
     """`scan` の reducer: solver 結果の容器（1 要素 = 1 容器）の行の秒の合計（`seconds`）か件数（`invocations`）。
 
-    畳む前に容器の行の数（`cost`、O(1)）を数えさせる。
+    畳む前に容器の行の数を作業量へ数える。
     """
 
     __slots__ = ("what", "seconds", "invocations")
@@ -667,16 +668,14 @@ class _SolverTotals:
         self.seconds = 0.0
         self.invocations = 0
 
-    def cost(self, container: Any) -> int:
-        return len(_solver_rows(container))
-
-    def add(self, container: Any) -> None:
+    def add(self, container: Any, *, work: Any) -> None:
         rows = _solver_rows(container)
+        work.charge(len(rows))
         for row in rows:
             self.seconds += _elapsed(row)
         self.invocations += len(rows)
 
-    def result(self) -> Any:
+    def result(self, *, work: Any) -> Any:
         return round(self.seconds, 6) if self.what == "seconds" else self.invocations
 
 

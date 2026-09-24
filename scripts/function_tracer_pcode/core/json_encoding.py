@@ -47,7 +47,7 @@ from collections.abc import Iterator as _AbcIterator, Mapping
 from dataclasses import dataclass, fields as dataclass_fields, is_dataclass
 from enum import Enum
 from json.encoder import encode_basestring, encode_basestring_ascii
-from typing import Any, Callable, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
 from scripts.function_tracer_pcode.core.render_output import utf8_length
@@ -98,6 +98,28 @@ class JsonValueCycle(JsonValueRejected):
 # ---------------------------------------------------------------------------
 
 
+def source_converter(fn: Callable[[Any], Any]) -> Callable[[Any], Any]:
+    """`fn` を **source converter** として登録する（walker が要素ごとに呼んでよい関数）。
+
+    source converter は値 1 つから source（遅延構成子）か scalar を作るだけで、入力に比例する
+    仕事（内包表記・複製・並べ替え・`to_dict()`・digest）をしない（`tests/unit/
+    test_architecture_boundaries.py` の J11 が本体を検査する）。walker が呼ぶ callback は、これと
+    作業量を受け取る `metered` の factory・`Reducer` だけ（任意の callable を受けない）。
+    """
+
+    fn.__source_converter__ = True
+    return fn
+
+
+def _is_converter(fn: Any) -> bool:
+    return fn is None or fn is _RAW or fn is _NESTED or getattr(fn, "__source_converter__", False) is True
+
+
+def _require_converter(fn: Any, where: str) -> None:
+    if not _is_converter(fn):
+        raise TypeError(f"{where} takes a registered source_converter, not {fn!r}")
+
+
 class _Source:
     __slots__ = ()
 
@@ -118,12 +140,12 @@ class _Nested(_Source):
 
 
 class _MappingOf(_Source):
-    __slots__ = ("mapping", "fn", "key_fn")
+    __slots__ = ("mapping", "fn", "stringify_keys")
 
-    def __init__(self, mapping: Any, fn: Any, key_fn: Optional[Callable[[Any], Any]] = None) -> None:
+    def __init__(self, mapping: Any, fn: Any, stringify_keys: bool = False) -> None:
         self.mapping = mapping
         self.fn = fn
-        self.key_fn = key_fn
+        self.stringify_keys = stringify_keys
 
 
 class _Inline(_Source):
@@ -140,20 +162,39 @@ class _Raw(_Source):
         self.value = value
 
 
+class Reread(NamedTuple):
+    """証拠の値を読み直す手順（任意の callable ではない）: `converter(getattr(record, attribute))`。
+
+    `converter` は登録した source converter（`source_converter`。O(1) で source を作るだけ）か
+    `None`。1 回しか辿れない列を要約の fingerprint のために作り直すときに使う。
+    """
+
+    record: Any
+    attribute: str
+    converter: Any = None
+
+
 class _Evidence(_Source):
-    __slots__ = ("value", "identity", "refresh", "inline_bytes")
+    __slots__ = ("value", "identity", "reread", "one_shot", "inline_bytes")
 
     def __init__(
         self,
         value: Any,
-        identity: Any,
-        refresh: Optional[Callable[[], Any]] = None,
+        identity: Optional[str],
+        reread: Optional[Reread] = None,
         inline_bytes: Optional[int] = None,
+        one_shot: bool = False,
     ) -> None:
+        if identity is not None and type(identity) is not str:
+            raise TypeError("an evidence identity is a precomputed str (no callable)")
+        if reread is not None and (type(reread) is not Reread or not _is_converter(reread.converter)):
+            raise TypeError("an evidence reread is a Reread with a registered converter")
         self.value = value
         self.identity = identity
-        #: 同じ値の source を作り直す（遅延列は 1 回しか辿れないので、要約の digest 用）
-        self.refresh = refresh
+        #: 同じ値の source を作り直す手順（遅延列は 1 回しか辿れないので、要約の fingerprint 用）
+        self.reread = reread
+        #: 作り直せない 1 回しか辿れない列（試しで辿った後は fingerprint を求めない）
+        self.one_shot = one_shot
         #: そのまま置いてよい大きさ（既定は `EVIDENCE_INLINE_BYTES`）
         self.inline_bytes = EVIDENCE_INLINE_BYTES if inline_bytes is None else int(inline_bytes)
 
@@ -190,10 +231,11 @@ _NESTED = object()
 def each(items: Iterable[Any], fn: Optional[Callable[[Any], Any]] = None) -> _Source:
     """要素を 1 つずつ引き出す配列（`[fn(x).to_dict() for x in items]` の遅延版）。
 
-    要素（`fn` の返り値）は source として辿る（record は dict になる）。`fn` は要素 1 つ分の
-    source を返す（表現を作らない）。
+    要素（`fn` の返り値）は source として辿る（record は dict になる）。`fn` は登録した source
+    converter（`source_converter`。要素 1 つ分の source を返すだけ）。
     """
 
+    _require_converter(fn, "each")
     return _Each(items, fn)
 
 
@@ -219,11 +261,16 @@ def mapping_of(
     mapping: Any,
     fn: Optional[Callable[[Any], Any]] = None,
     *,
-    key: Optional[Callable[[Any], Any]] = None,
+    stringify_keys: bool = False,
 ) -> _Source:
-    """既存の mapping の値を 1 つずつ source として辿る（旧 `{key(k): fn(v) ...}`）。"""
+    """既存の mapping の値を 1 つずつ source として辿る（旧 `{str(k): fn(v) ...}`）。
 
-    return _MappingOf(mapping, fn, key)
+    `stringify_keys` は key を walker が文字列にする（scalar と、scalar だけから成る tuple だけ。
+    それ以外の key は JSON にならない値。任意の key 変換の callable は受けない）。
+    """
+
+    _require_converter(fn, "mapping_of")
+    return _MappingOf(mapping, fn, stringify_keys)
 
 
 class _PairsView:
@@ -271,19 +318,19 @@ def raw(value: Any) -> _Source:
 
 def evidence(
     value: Any,
-    identity: Any = None,
+    identity: Optional[str] = None,
     *,
-    refresh: Optional[Callable[[], Any]] = None,
+    reread: Optional[Reread] = None,
     inline_bytes: Optional[int] = None,
 ) -> _Source:
     """重くなり得る証拠（key / evidence）。出力では有界な表現、`to_dict()` では元の値。
 
-    `identity` は大きいときに使う identity（文字列、または値を受け取る callable）。
-    省くと値の型つき token 列の digest を streaming で求める。`value` が遅延列（1 回
-    しか辿れない）を含むなら `refresh` に同じ source を作り直す callable を渡す。
+    `identity` は大きいときに使う identity（呼ぶ側が O(1) で作った文字列。callable は受けない）。
+    省くと値の fingerprint を作業量の中で求める。`value` が遅延列（1 回しか辿れない）を含むなら
+    `reread`（読み直す手順）を渡す。
     """
 
-    return _Evidence(value, identity, refresh, inline_bytes)
+    return _Evidence(value, identity, reread, inline_bytes)
 
 
 def text(value: Any, max_chars: int) -> _Source:
@@ -292,16 +339,35 @@ def text(value: Any, max_chars: int) -> _Source:
     return _Text(value, max_chars)
 
 
-def scan(values: Any, reducer: Any) -> _Source:
-    """集計（件数・group by）: walker が `values` を 1 要素ずつ引き出して `reducer` へ渡す。
+class Reducer:
+    """`scan` の reducer の protocol（walker が呼ぶ集計の callback はこれだけ）。
 
-    reducer は 3 つの method を持つ: `cost(element)`（要素 1 つを畳むときに辿る量。O(1) で
-    分かる値、例えば要素の中の列の長さ）、`add(element)`（畳み込む）、`result()`（source）。
-    walker は要素 1 つごとに `1 + cost` を作業量（`effort`）へ数えて **から** 畳み込み、
-    使い切れば **その walk の予算の超過** にする（集計は途中で止めると値が変わるので marker /
-    限界 / 契約違反は field の規則どおり）。集計の producer は入力全体を先に辿らない。
+    * `add(element, *, work)` — 要素 1 つを畳む。要素の中で入力に比例する仕事（列を辿る・
+      文字列を hash する・行を作る）をするなら、**する前に** `work.charge` へ数える。
+    * `result(*, work)` — 集計の source を返す（大きさは畳んだ要素の数以下）。
+    walker は要素を 1 つ引き出すたびに 1 を数え、`work` に walk の作業量（`effort`）を渡す。
+    任意の callable（key 関数・cost 関数）は受けない。
     """
 
+    __slots__ = ()
+
+    def add(self, element: Any, *, work: "JsonBudget") -> None:  # pragma: no cover - protocol
+        raise NotImplementedError
+
+    def result(self, *, work: "JsonBudget") -> Any:  # pragma: no cover - protocol
+        raise NotImplementedError
+
+
+def scan(values: Any, reducer: Reducer) -> _Source:
+    """集計（件数・group by）: walker が `values` を 1 要素ずつ引き出して `reducer` へ渡す。
+
+    `reducer` は `Reducer`（`add` / `result` が walk の作業量を受け取る）。作業量を使い切れば
+    **その walk の予算の超過** にする（集計は途中で止めると値が変わるので marker / 限界 /
+    契約違反は field の規則どおり）。集計の producer は入力全体を先に辿らない。
+    """
+
+    if not isinstance(reducer, Reducer):
+        raise TypeError(f"scan takes a Reducer, not {type(reducer).__name__}")
     return _Scan(values, reducer)
 
 
@@ -317,23 +383,30 @@ def metered(factory: Callable[[Any], Any]) -> _Source:
     return _Metered(factory)
 
 
-class Tally:
-    """`scan` の reducer: `key(element)` ごとの件数（最初に現れた順）。"""
+class Tally(Reducer):
+    """`scan` の reducer: 要素の属性 `attribute` の値ごとの件数（最初に現れた順）。
 
-    __slots__ = ("key", "counts")
+    key は属性を読むだけ（任意の key 関数は受けない）。key は scalar だけ（それ以外は JSON に
+    ならない値）。
+    """
 
-    def __init__(self, key: Callable[[Any], Any]) -> None:
-        self.key = key
+    __slots__ = ("attribute", "counts")
+
+    def __init__(self, attribute: str) -> None:
+        if type(attribute) is not str:
+            raise TypeError("Tally counts by an attribute name, not a callable")
+        self.attribute = attribute
         self.counts: Dict[Any, int] = {}
 
-    def cost(self, element: Any) -> int:
-        return 0
-
-    def add(self, element: Any) -> None:
-        key = self.key(element)
+    def add(self, element: Any, *, work: "JsonBudget") -> None:
+        key = getattr(element, self.attribute)
+        if not (key is None or type(key) in (str, int, float, bool)):
+            raise TypeError(f"Tally key {type(key).__name__} is not a scalar")
+        if type(key) is str:
+            work.charge(len(key))
         self.counts[key] = self.counts.get(key, 0) + 1
 
-    def result(self) -> Any:
+    def result(self, *, work: "JsonBudget") -> Any:
         return pairs_of(iter(self.counts.items()))
 
 
@@ -444,6 +517,16 @@ class BoundedEvidence:
         return self.summary()
 
 
+def _register_bounded_evidence() -> None:
+    from scripts.function_tracer_pcode.core.canonical_digest import register_fixed_canonical
+
+    # 有界な証拠の canonical な形は固定の形の要約（`to_authority_dict` と同じ値、O(1)）
+    register_fixed_canonical(BoundedEvidence, BoundedEvidence.summary)
+
+
+_register_bounded_evidence()
+
+
 #: `BoundedEvidence.summary()` を書いたときの byte 数の上限（schema 上の上限）
 EVIDENCE_SUMMARY_MAX_BYTES = (
     2 + 6 * 4  # 括弧と区切り（6 member、区切りは最大 2 byte と見積もる）
@@ -549,14 +632,15 @@ class Column:
             raise ValueError(f"unknown column kind {self.kind!r}")
         if self.kind == TEXT and self.max_chars <= 0:
             raise ValueError(f"{self.key}: a text column needs max_chars")
+        _require_converter(self.legacy, f"Column({self.key}).legacy")
 
-    def source(self, value: Any, identity: Any = None, reread: Optional[Callable[[], Any]] = None) -> Any:
+    def source(self, value: Any, identity: Optional[str] = None, record: Any = None) -> Any:
         if self.kind == TEXT:
             return text(value, self.max_chars)
         if self.kind == EVIDENCE:
             return evidence(
                 self._legacy_source(value), identity,
-                refresh=None if reread is None else (lambda: self._legacy_source(reread())),
+                reread=None if record is None else Reread(record, self.attr or self.key, self.legacy),
                 inline_bytes=self.inline_bytes,
             )
         return value
@@ -585,9 +669,7 @@ def row_items(row: Tuple[Column, ...], record: Any, *, identity: Any = None):
         value = getattr(record, name)
         if column.omit_none and value is None:
             continue
-        yield column.key, column.source(
-            value, identity, reread=lambda name=name: getattr(record, name),
-        )
+        yield column.key, column.source(value, identity, record)
 
 
 def row_max_bytes(row: Tuple[Column, ...], policy: Optional["JsonEncodingPolicy"] = None) -> int:
@@ -997,8 +1079,8 @@ def bounded_evidence(
 
     * そのまま残すのは、容器と基底型だけから成り `inline_bytes`（既定 `EVIDENCE_INLINE_BYTES`）
       以下の値（live な object を持たない）。
-    * `identity`（文字列、または値を受け取る callable）があれば、それを `authority_identity`
-      の fingerprint にする（値は辿らない）。
+    * `identity`（呼ぶ側が O(1) で作った文字列。callable は受けない）があれば、それを
+      `authority_identity` の fingerprint にする（値は辿らない）。
     * それ以外は canonical な fingerprint（`core/canonical_digest.canonical_fingerprint`）、
       canonical な値にならなければ型つき token の fingerprint（`token_fingerprint`）。
     """
@@ -1037,8 +1119,8 @@ def _evidence_summary(
     )
 
     kind = _value_kind(value)
-    if callable(identity):
-        identity = identity(value)
+    if identity is not None and type(identity) is not str:
+        raise TypeError("an evidence identity is a precomputed str (no callable)")
     if identity is not None:
         return BoundedEvidence(
             fingerprint=_printable_identity(identity),
@@ -1080,10 +1162,50 @@ def _evidence_summary(
         return _unfingerprinted(kind, UNFINGERPRINTED_UNSUPPORTED, over)
 
 
-def _refuse_refresh() -> Any:
-    """1 回しか辿れない列は作り直せない: fingerprint の無い要約にする合図。"""
+def _stringified_key(key: Any, work: "JsonBudget") -> str:
+    """`mapping_of(stringify_keys=True)` の key の文字列（旧 `str(k)`）。
 
-    raise TypeError("a one-shot iterator cannot be walked again")
+    組み込みの `str` / `repr` だけを使う: scalar と、scalar（と同じ形の tuple）だけから成る
+    tuple。それ以外（`__str__` / `__repr__` を持つ object）は JSON にならない値（producer を
+    呼ばない）。
+    """
+
+    kind = type(key)
+    if kind is str:
+        return key
+    if key is None or kind in (bool, int, float):
+        return str(key)
+    if kind is tuple and _is_plain_key_part(key, work):
+        return str(key)
+    raise TypeError(f"mapping key {kind.__name__} is not stringified without its own __str__")
+
+
+def _is_plain_key_part(part: Any, work: "JsonBudget") -> bool:
+    """`part` が scalar と tuple だけから成るか（要素を数えながら確かめる。`str()` の手間も同じ量）。"""
+
+    pending = [part]
+    while pending:
+        item = pending.pop()
+        kind = type(item)
+        if kind is tuple:
+            work.charge(1 + len(item))
+            pending.extend(item)
+        elif kind is str:
+            work.charge(1 + len(item))
+        elif not (item is None or kind in (bool, int, float)):
+            return False
+        else:
+            work.charge(1)
+    return True
+
+
+def _reread(reread: Reread) -> Any:
+    """証拠の値を読み直す（属性を読み、登録した converter で source にする。どちらも O(1)）。"""
+
+    value = getattr(reread.record, reread.attribute)
+    if value is None or type(value) is BoundedEvidence or reread.converter is None:
+        return value
+    return reread.converter(value)
 
 
 def _unfingerprinted(kind: str, reason: str, over: int) -> BoundedEvidence:
@@ -1795,9 +1917,9 @@ class _Walk:
             self.push("list", iter(item.items), parent, key, item, build=build, fn=item.fn)
         elif kind is _MappingOf:
             pairs: Iterator[Any] = iter(item.mapping.items())
-            if item.key_fn is not None:
-                key_fn = item.key_fn
-                pairs = ((key_fn(child_key), child) for child_key, child in pairs)
+            if item.stringify_keys:
+                effort = self.effort
+                pairs = ((_stringified_key(child_key, effort), child) for child_key, child in pairs)
             self.push(
                 "dict", pairs, parent, key, item, build=build,
                 fn=item.fn, preserve_keys=(self.mode == LEGACY),
@@ -1817,8 +1939,8 @@ class _Walk:
                 self.enter_evidence(
                     _Evidence(
                         value, None,
-                        refresh=None if not isinstance(value, _AbcIterator) else _refuse_refresh,
                         inline_bytes=text_value_max_bytes(self.policy, item.max_chars),
+                        one_shot=isinstance(value, _AbcIterator),
                     ),
                     parent, key, build,
                 )
@@ -1831,10 +1953,12 @@ class _Walk:
             if isinstance(item.values, _AbcIterator):
                 self.entered_iterator = True
             try:
+                effort = self.effort
                 for element in (item.values if item.values is not None else ()):
-                    # 引き出した要素を畳み込む前に数える（上限を超えれば残りを引き出さない）
-                    self.effort.charge(1 + int(reducer.cost(element)))
-                    reducer.add(element)
+                    # 引き出した要素を畳み込む前に数える（上限を超えれば残りを引き出さない）。
+                    # 要素の中の仕事は reducer が同じ作業量へ数える
+                    effort.charge(1)
+                    reducer.add(element, work=effort)
             except PRODUCER_FAILURES as exc:
                 self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
             except JsonBudgetExhausted:
@@ -1842,7 +1966,10 @@ class _Walk:
                 self.budget.exceeded()
                 raise
             try:
-                produced = reducer.result()
+                produced = reducer.result(work=self.effort)
+            except JsonBudgetExhausted:
+                self.budget.exceeded()
+                raise
             except PRODUCER_FAILURES as exc:
                 self.reject(f"producer failed ({type(exc).__name__}: {str(exc)[:80]})")
             self.enter(produced, parent, key, build)
@@ -1902,7 +2029,7 @@ class _Walk:
                     self.enter(inline_value, parent, key, build)
                     return
                 over = limit
-            if attempt_walk.entered_iterator and item.refresh is None:
+            if item.one_shot or (attempt_walk.entered_iterator and item.reread is None):
                 # 試しで 1 回しか辿れない列を辿った: 同じ値として辿り直せない（別の値の
                 # fingerprint を同じ値のものとして置かない）
                 self.enter(
@@ -1911,7 +2038,7 @@ class _Walk:
                 )
                 return
         try:
-            fresh = item.refresh() if item.refresh is not None else value
+            fresh = value if item.reread is None else _reread(item.reread)
         except PRODUCER_FAILURES:
             summary = _unfingerprinted(_value_kind(value), UNFINGERPRINTED_UNSUPPORTED, over)
         else:
@@ -2132,6 +2259,12 @@ def materialize(source: Any) -> Any:
         return RESULT_JSON_POLICY.materialize(source, budget=work)
 
 
+
+# 組み込みの source の構成子は source converter（O(1) で source を作るだけ）
+for _constructor in (each, nested, as_list, as_dict, mapping_of, pairs_of, inline, raw, text, evidence):
+    source_converter(_constructor)
+del _constructor
+
 __all__ = [
     "BOOL",
     "BoundedEvidence",
@@ -2154,6 +2287,9 @@ __all__ = [
     "LEGACY",
     "PreparedJson",
     "RESULT_JSON_POLICY",
+    "Reread",
+    "Reducer",
+    "source_converter",
     "TEXT_MARKER_MAX_CHARS",
     "text_value_max_bytes",
     "UNFINGERPRINTED_CYCLE",

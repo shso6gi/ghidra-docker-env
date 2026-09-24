@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
-from scripts.function_tracer_pcode.core.json_encoding import as_list, each, inline, materialize
+from scripts.function_tracer_pcode.core.json_encoding import as_list, each, inline, materialize, source_converter
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     CanonicalLocation,
@@ -529,6 +529,7 @@ class FunctionControlEffectProfile:
     def to_dict(self) -> Dict[str, object]:
         return materialize(self)
 
+@source_converter
 def _store_effect_source(effect: "StoreEffect") -> object:
     """`CallSiteEffectSummaryEvidence.memory_effects` の 1 要素の表示（固定個数の member）。"""
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
-from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
+from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
 )
@@ -973,10 +973,10 @@ class ReductionAccumulatorProof:
         yield "seed_term_count", None if self.seed_term_count is None else int(self.seed_term_count)
         yield "lane_terms", each(
             self.lane_terms,
-            lambda lane: inline(
+            source_converter(lambda lane: inline(
                 ("byte_offset", int(lane[0])),
                 ("access_size", max(1, int(lane[1] or 0))),
-            ),
+            )),
         )
         yield "loop_body_witnesses", each(self.loop_body_witnesses)
         yield "exact_return_witnesses", each(self.exact_return_witnesses)

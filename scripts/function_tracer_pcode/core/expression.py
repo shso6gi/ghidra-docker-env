@@ -13,6 +13,7 @@ from scripts.function_tracer_pcode.core.semantic_lifecycle import (
 )
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.render_output import utf8_length
+from scripts.function_tracer_pcode.core.json_encoding import source_converter
 from scripts.function_tracer_pcode.core.render_python import (
     expression_to_string,
     get_python_operator,
@@ -1136,6 +1137,7 @@ class _RuntimeRefChild:
             return exc.consumed_bytes
 
 
+@source_converter
 def runtime_ref_source(value: Any) -> Any:
     """`Expression.runtime_ref` の表現（旧 `_serialize_runtime_ref`）の JSON source。
 
@@ -1157,7 +1159,7 @@ def runtime_ref_source(value: Any) -> Any:
     if isinstance(value, (tuple, list)):
         return each(value, runtime_ref_source)
     if isinstance(value, dict):
-        return mapping_of(value, runtime_ref_source, key=str)
+        return mapping_of(value, runtime_ref_source, stringify_keys=True)
     if is_json_record(value):
         return value
     if is_dataclass(value) and not isinstance(value, type):
