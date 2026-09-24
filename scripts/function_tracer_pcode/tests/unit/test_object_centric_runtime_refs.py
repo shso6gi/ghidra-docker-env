@@ -55,6 +55,10 @@ from scripts.function_tracer_pcode.checker.unknown_reason import (
     make_unknown_reason,
 )
 from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+from scripts.function_tracer_pcode.tests.unit._loop_test_fixtures import (
+    readonly_loop_summary as _readonly_loop_summary,
+    readonly_sum_expr as _readonly_sum_expr,
+)
 
 
 def _typed_method_b_reason(target):
@@ -708,53 +712,6 @@ def _path_sensitive_counted_loop_summary() -> LoopSummaryRef:
                 term_expr="i",
                 case_kind="accumulator_delta",
             ),
-        ),
-    )
-
-
-def _readonly_loop_summary(
-    *,
-    start: int,
-    seed_terms=(),
-    step: int = 1,
-) -> LoopSummaryRef:
-    return LoopSummaryRef(
-        start_expr=Expression.constant(start, size=4),
-        limit_expr=Expression.parameter("count", index=1, data_type="int", size=4),
-        step_expr=Expression.constant(step, size=4),
-        term_descriptor=LoopTermDescriptorRef(
-            kind="memory_load",
-            reduction_kind="sum",
-            location_base_ref=LocationBaseRef.parameter("base", index=0),
-            start_offset=0,
-            stride=4,
-            element_size=4,
-            result_size=4,
-        ),
-        seed_terms=tuple(seed_terms or ()),
-        side_effect_profile=LoopSideEffectProfileRef(profile="pure_memory_read", memory_reads=True),
-        loop_var_unit="element_index",
-    )
-
-
-def _readonly_sum_expr(loop_summary: LoopSummaryRef) -> Expression:
-    return Expression.intrinsic(
-        "READONLY_SUM",
-        [
-            Expression.parameter("base", index=0, data_type="int *", size=8),
-            Expression.parameter("count", index=1, data_type="int", size=4),
-        ],
-        size=4,
-        runtime_ref=ReadonlyReductionRef(
-            reduction_kind="memory_sum",
-            pointer_base_ref=LocationBaseRef.parameter("base", index=0),
-            count_parameter_name="count",
-            count_parameter_index=1,
-            stride=4,
-            element_size=4,
-            result_size=4,
-            signed_counter=True,
-            loop_summary=loop_summary,
         ),
     )
 

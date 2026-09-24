@@ -96,7 +96,7 @@ DIGEST = "a" * 64
 
 def _unknown_pilot(case: str):
     """Run a real production pilot to an unconditional UNKNOWN decision."""
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         Function,
         Program,
     )

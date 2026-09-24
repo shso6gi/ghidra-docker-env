@@ -27,6 +27,10 @@ from scripts.function_tracer_pcode.authority.process.stack_dump_diagnostic impor
     STACK_DUMP_STATUS_SCHEMA,
     read_stack_dump_status,
 )
+from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
+    run_supervisor,
+    supervisor_case,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 RUNNERS = ["eqbench_run_all_32jobs.sh", "neqbench_run_all_32jobs.sh"]
@@ -325,34 +329,15 @@ time.sleep(30)
 """
 
 
-def _supervisor_config(tmp_path, child_code, *, timeout, lead):
-    """診断つきの supervisor 設定（実 child を起こすための最小構成）。"""
-    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
-        SupervisorCommandConfig,
-    )
+def _diagnostic_case(tmp_path, child_code, *, timeout, lead):
+    """診断つきの supervisor case。鍵・identity・config・起動は共有 harness
+    （``_supervisor_support``）が持ち、ここは PR-124-C の診断 field だけを決める。"""
 
-    supervisor_key = tmp_path / "supervisor.key"
-    worker_key = tmp_path / "worker.key"
-    supervisor_key.write_bytes(b"s" * 32)
-    worker_key.write_bytes(b"w" * 32)
     metrics = tmp_path / ".runtime-metrics"
     metrics.mkdir(exist_ok=True)
-    return SupervisorCommandConfig(
-        checkpoint_root=tmp_path / "checkpoints",
-        authority_output=tmp_path / "authority.json",
-        working_directory=REPO_ROOT,
-        execution_nonce="issue124c-nonce",
-        result_occurrence_id="production-pilot-issue124c",
-        source_snapshot_fingerprint="f" * 64,
-        stream_id="stream-production-pilot-issue124c",
-        deadline_policy_digest="issue124c-deadline-policy",
-        supervisor_signing_key_id="supervisor-key-v1",
-        supervisor_signing_key_file=supervisor_key,
-        worker_signing_key_id="worker-key-v1",
-        worker_signing_key_file=worker_key,
-        timeout_seconds=timeout,
-        kill_grace_seconds=1.0,
-        child_command=(sys.executable, "-c", child_code),
+    return supervisor_case(
+        tmp_path, (sys.executable, "-c", child_code),
+        case="issue124c", timeout=timeout, kill_grace=1.0,
         stage_journal_path=tmp_path / "pair.stage.jsonl",
         stack_dump_file=tmp_path / "checkpoints" / "stack-dump.txt",
         stack_dump_artifact=metrics / "pair.stack-dump.txt",
@@ -363,27 +348,19 @@ def _supervisor_config(tmp_path, child_code, *, timeout, lead):
 
 def test_real_supervisor_requests_persists_and_records_a_stack_dump(tmp_path):
     """実 child + 実 supervisor: 送信 -> 観測 -> 退避 -> sidecar、kill は期限内。"""
-    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
-        ProcessSupervisorCommand,
+    child = _CHILD.format(
+        repo=str(REPO_ROOT),
+        journal=str(tmp_path / "pair.stage.jsonl"),
+        dump=str(tmp_path / "checkpoints" / "stack-dump.txt"),
+        artifact=str(tmp_path / ".runtime-metrics" / "pair.stack-dump.txt"),
     )
-
-    config = _supervisor_config(
-        tmp_path,
-        _CHILD.format(
-            repo=str(REPO_ROOT),
-            journal=str(tmp_path / "pair.stage.jsonl"),
-            dump=str(tmp_path / "checkpoints" / "stack-dump.txt"),
-            artifact=str(tmp_path / ".runtime-metrics" / "pair.stack-dump.txt"),
-        ),
-        timeout=4.0,
-        lead=2.0,
-    )
-    command = ProcessSupervisorCommand(config)
-    started = time.monotonic()
-    exit_code = command.run()
-    elapsed = time.monotonic() - started
-    assert exit_code == 124
-    projection = json.loads(config.authority_output.read_text(encoding="utf-8"))
+    with _diagnostic_case(tmp_path, child, timeout=4.0, lead=2.0) as case:
+        config = case.config
+        started = time.monotonic()
+        run = run_supervisor(case)
+        elapsed = time.monotonic() - started
+    assert run.exit_code == 124
+    projection = run.projection
     assert projection["status"] == "TIMEOUT"
     assert projection["authority_kind"] == "DurableTimeoutFinalizationBundle"
     # kill 手順（SIGTERM -> grace -> SIGKILL）と disposition は従来どおり。
@@ -414,10 +391,6 @@ def test_real_supervisor_requests_persists_and_records_a_stack_dump(tmp_path):
 
 def test_real_supervisor_persists_a_dump_from_a_child_that_exits_normally(tmp_path):
     """outcome によらず保存: 診断を要求する前に終わった child の dump も残す。"""
-    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
-        ProcessSupervisorCommand,
-    )
-
     child = (
         "import os, sys\n"
         f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
@@ -434,8 +407,9 @@ def test_real_supervisor_persists_a_dump_from_a_child_that_exits_normally(tmp_pa
         "faulthandler.dump_traceback(file=state.dump_file, all_threads=True)\n"
         "raise SystemExit(0)\n"
     )
-    config = _supervisor_config(tmp_path, child, timeout=30.0, lead=2.0)
-    ProcessSupervisorCommand(config).run()
+    with _diagnostic_case(tmp_path, child, timeout=30.0, lead=2.0) as case:
+        run_supervisor(case)
+        config = case.config
     status = read_stack_dump_status(config.diagnostic_status_output)
     assert status is not None
     assert status["requested"] is False       # 診断は要求していない
@@ -448,31 +422,27 @@ def test_a_failing_diagnostic_does_not_change_the_supervisor_exit(tmp_path, monk
     """診断の失敗が exit code / projection を変えない（`finally` の中の guard）。"""
     from scripts.function_tracer_pcode.authority.process import supervisor_command
 
-    config = _supervisor_config(
-        tmp_path, "import time; time.sleep(30)", timeout=1.0, lead=0.5,
-    )
     monkeypatch.setattr(
         supervisor_command.ProcessSupervisorCommand,
         "_child_terminal_timeout_evidence",
         lambda self: (_ for _ in ()).throw(AttributeError("diagnostic exploded")),
     )
-    command = supervisor_command.ProcessSupervisorCommand(config)
-    assert command.run() == 124
-    projection = json.loads(config.authority_output.read_text(encoding="utf-8"))
-    assert projection["status"] == "TIMEOUT"
-    assert projection["authority_kind"] == "DurableTimeoutFinalizationBundle"
+    with _diagnostic_case(
+        tmp_path, "import time; time.sleep(30)", timeout=1.0, lead=0.5,
+    ) as case:
+        run = run_supervisor(case)
+    assert run.exit_code == 124
+    assert run.projection["status"] == "TIMEOUT"
+    assert run.projection["authority_kind"] == "DurableTimeoutFinalizationBundle"
 
 
 def test_real_supervisor_reports_missing_when_no_dump_was_written(tmp_path):
     """dump 不存在は `missing`。未観測（`sent_but_unobserved`）と別の事実。"""
-    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
-        ProcessSupervisorCommand,
-    )
-
-    config = _supervisor_config(
+    with _diagnostic_case(
         tmp_path, "import sys; raise SystemExit(0)", timeout=30.0, lead=2.0,
-    )
-    ProcessSupervisorCommand(config).run()
+    ) as case:
+        run_supervisor(case)
+        config = case.config
     status = read_stack_dump_status(config.diagnostic_status_output)
     assert status is not None
     assert status["artifact_status"] == "missing"
@@ -506,10 +476,11 @@ def test_kill_signal_jitter_is_measured_at_the_signal_not_at_the_path_entry(
     monkeypatch.setattr(
         supervisor_command.ProcessSupervisorCommand, "_same_process", _slow_same_process
     )
-    config = _supervisor_config(
+    with _diagnostic_case(
         tmp_path, "import time; time.sleep(30)", timeout=2.0, lead=1.0,
-    )
-    assert supervisor_command.ProcessSupervisorCommand(config).run() == 124
+    ) as case:
+        assert run_supervisor(case).exit_code == 124
+        config = case.config
     status = read_stack_dump_status(config.diagnostic_status_output)
     assert status is not None
     entry = status["deadline_finalization_offset_seconds"]
@@ -527,7 +498,6 @@ def test_an_exploding_first_signal_hook_does_not_change_the_disposition(
     tmp_path, monkeypatch,
 ):
     """診断 hook が例外を投げても kill 手順と disposition は変わらない。"""
-    from scripts.function_tracer_pcode.authority.process import supervisor_command
     from scripts.function_tracer_pcode.authority.process.stack_dump_diagnostic import (
         StackDumpDiagnostic,
     )
@@ -536,11 +506,12 @@ def test_an_exploding_first_signal_hook_does_not_change_the_disposition(
         raise RuntimeError("diagnostic hook exploded")
 
     monkeypatch.setattr(StackDumpDiagnostic, "note_kill_signal", _explode)
-    config = _supervisor_config(
+    with _diagnostic_case(
         tmp_path, "import time; time.sleep(30)", timeout=2.0, lead=1.0,
-    )
-    assert supervisor_command.ProcessSupervisorCommand(config).run() == 124
-    projection = json.loads(config.authority_output.read_text(encoding="utf-8"))
+    ) as case:
+        run = run_supervisor(case)
+    assert run.exit_code == 124
+    projection = run.projection
     assert projection["status"] == "TIMEOUT"
     assert projection["authority_kind"] == "DurableTimeoutFinalizationBundle"
     assert projection["child_exit_disposition"] in {
@@ -564,12 +535,13 @@ def test_a_diagnostic_that_cannot_be_built_does_not_change_the_outcome(
     monkeypatch.setattr(
         supervisor_command.ProcessSupervisorCommand, "_stack_dump_diagnostic", _explode
     )
-    config = _supervisor_config(
+    with _diagnostic_case(
         tmp_path, "import time; time.sleep(30)", timeout=1.5, lead=0.5,
-    )
-    assert supervisor_command.ProcessSupervisorCommand(config).run() == 124
-    projection = json.loads(config.authority_output.read_text(encoding="utf-8"))
-    assert projection["status"] == "TIMEOUT"
+    ) as case:
+        run = run_supervisor(case)
+        config = case.config
+    assert run.exit_code == 124
+    assert run.projection["status"] == "TIMEOUT"
     # 無効化された診断でも sidecar は書かれ、送っていないことが読み取れる。
     status = read_stack_dump_status(config.diagnostic_status_output)
     assert status is None or (

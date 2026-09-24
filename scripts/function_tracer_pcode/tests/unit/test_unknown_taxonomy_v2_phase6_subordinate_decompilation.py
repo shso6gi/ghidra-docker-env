@@ -396,7 +396,7 @@ def _broker_session_with_parent(row):
 
 @pytest.mark.parametrize("row", SUBORDINATE_DECOMPILATION_ADAPTER_ROWS)
 def test_subordinate_broker_binds_live_parent_without_completing_it(row):
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         BrokerAnalyzer,
         BrokerDecompiler,
         Function,
@@ -452,7 +452,7 @@ def test_subordinate_broker_binds_live_parent_without_completing_it(row):
 def test_subordinate_broker_parent_authority_failure_blocks_raw_decompile_and_projects_unknown():
     from scripts.function_tracer_pcode.authority.contracts import Outcome
     from scripts.function_tracer_pcode.authority.lifecycle.pilot import run_dual_write_pilot
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         BrokerAnalyzer,
         BrokerDecompiler,
         Function,
@@ -517,7 +517,7 @@ def test_subordinate_broker_contract_authority_failure_projects_error_without_ra
 ):
     from scripts.function_tracer_pcode.authority.contracts import Outcome
     from scripts.function_tracer_pcode.authority.lifecycle.pilot import run_dual_write_pilot
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         BrokerAnalyzer,
         BrokerDecompiler,
         Function,
@@ -574,7 +574,7 @@ def test_subordinate_broker_contract_authority_failure_projects_error_without_ra
 
 
 def test_subordinate_broker_without_live_parent_uses_standalone_operational_owner():
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         BrokerAnalyzer,
         BrokerDecompiler,
         Function,
@@ -629,7 +629,7 @@ def test_subordinate_broker_without_live_parent_uses_standalone_operational_owne
 
 
 def test_subordinate_timeout_is_observed_without_parent_completion_or_slice6_event():
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         BrokerAnalyzer,
         BrokerDecompiler,
         Function,
@@ -670,7 +670,7 @@ def test_subordinate_timeout_is_observed_without_parent_completion_or_slice6_eve
 
 @pytest.mark.parametrize("parent_live", (True, False))
 def test_subordinate_raw_exception_is_exact_and_never_emits_slice6_event(parent_live):
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
+    from scripts.function_tracer_pcode.tests.unit._operational_test_fixtures import (
         BrokerAnalyzer,
         Function,
         Program,
@@ -740,97 +740,3 @@ def test_subordinate_raw_exception_is_exact_and_never_emits_slice6_event(parent_
         assert session.domain_signal_error_kinds
     else:
         assert session.domain_signal_error_kinds == []
-
-
-def _subordinate_runtime_case(tmp_path, row, result, *, extra_signal=None):
-    import os
-
-    from scripts.function_tracer_pcode.authority.process.supervisor import (
-        DurableCheckpointStore,
-        ProcessSupervisorAuthorityFactory,
-    )
-    from scripts.function_tracer_pcode.authority.process.worker_runtime import ProcessWorkerRuntime
-    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_operational_extraction import (
-        BrokerAnalyzer,
-        BrokerDecompiler,
-        Function,
-        Program,
-    )
-
-    session, _ = _broker_session_with_parent(row)
-    if extra_signal is not None:
-        session.emit_domain_signal(extra_signal)
-    manager = type("Manager", (), {
-        "getFunctions": lambda self, forward: iter(())
-    })()
-    program = Program(manager)
-    function = Function(program=program)
-    result.function = function
-    analyzer = BrokerAnalyzer(program, BrokerDecompiler(result))
-    session.domain_signal_state["operational_program_binary_identities"] = {
-        id(program): "sha256:binary",
-    }
-    process_factory = ProcessSupervisorAuthorityFactory(
-        supervisor_signing_key_id="supervisor-key-v1",
-        supervisor_signing_key=b"s" * 32,
-        worker_signing_key_id="worker-key-v1",
-        worker_signing_key=b"w" * 32,
-    )
-    prefix = session.recorder.prefix_view()
-    launch = process_factory.issue_launch(
-        result_occurrence_id=session.identity.result_occurrence_id,
-        manifest_entry_preimage_digest="manifest-preimage",
-        execution_nonce="execution-nonce-1",
-        child_pid=os.getpid(), child_start_token="test-start-token",
-        stream_id=prefix.stream_id,
-        source_snapshot_fingerprint=session.identity.source_snapshot_fingerprint,
-        deadline_policy_digest="deadline-policy-digest",
-    )
-    store = DurableCheckpointStore(
-        tmp_path, process_factory, "execution-nonce-1"
-    )
-    store.persist_launch(launch)
-    session.domain_signal_state[
-        "unknown_taxonomy_v2_process_worker_runtime"
-    ] = ProcessWorkerRuntime.for_testing(
-        process_factory=process_factory, store=store, launch=launch,
-        worker_start_token="test-start-token",
-    )
-    return session, store, analyzer, function
-
-
-def _consume_subordinate_resolved(session, store, *, process_factory=None):
-    from scripts.function_tracer_pcode.authority.process.census import (
-        ProcessAttemptCensusFactory,
-        consume_durable_supervisor_projection,
-    )
-    from scripts.function_tracer_pcode.authority.process.supervisor_command import COMMAND_SCHEMA
-
-    active = session.domain_signal_state["process_worker_checkpoint_records"][0]
-    if process_factory is None:
-        process_factory = active.runtime.process_factory
-    census_factory = ProcessAttemptCensusFactory(
-        session.identity.result_occurrence_id
-    )
-    membership = census_factory.register_subordinate(
-        active.invocation, active.operational_factory,
-        assignment=active.assignment,
-        assignment_factory=active.assignment_factory,
-        projection=active.projection, prefix=active.prefix,
-    )
-    state = store.read_state()
-    body = {
-        "status": "RESOLVED",
-        "authority_kind": "CheckpointStateTransitionReceipt",
-        "launch_receipt_digest": active.runtime.launch.receipt_digest,
-        "finalization_bundle_digest": state.receipt_digest,
-        "child_returncode": 0,
-        "projection_schema": COMMAND_SCHEMA,
-    }
-    consumed = consume_durable_supervisor_projection(
-        {**body, "projection_digest": authority_digest(body)},
-        store=store, process_authority_factory=process_factory,
-        census_factory=census_factory, membership=membership,
-    )
-    return consumed, census_factory.seal()
-
