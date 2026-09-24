@@ -45,7 +45,12 @@ invocation は pytest の process から ``fork`` した process で
   crash した invocation のあとは、production も fresh start へ入る）。
 * 起動後は、その invocation が実際に worker を起こしたかで入った経路を確かめ、
   要求と違えば ``SupervisorPathMismatch``（production の分岐が変わったことを
-  黙って見逃さない）。
+  黙って見逃さない）。要求した停止点に 1 つも着かなかった run、
+  ``Deadline.AT_CHILD_STOP`` なのに worker が止まらなかった run も同じ
+  （停止点の無い経路を試験したことにしない）。
+* supervisor が正常に戻ったあとも worker が生きていれば
+  ``WorkerOutlivedSupervisor``（production の ``run()`` は戻る前に worker を
+  止める。生きたままだと run の観測が worker の書き込みと競合する）。
 
 fork の時点で pytest の process に他の thread が残っていても、fork 先が lock
 待ちで止まった場合は待ち上限（``timeout + grace + 60s``）で失敗になる。
@@ -68,6 +73,7 @@ import traceback
 from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence
 
 from scripts.function_tracer_pcode.tests.unit._supervisor_faults import (
+    FAULT_CRASH_EXIT,
     ChildStopped,
     Deadline,
     Fault,
@@ -116,6 +122,10 @@ class NoWorkerStarted(AssertionError):
     """その run は worker を起こしていない（生存を問う対象が無い）。"""
 
 
+class WorkerOutlivedSupervisor(AssertionError):
+    """supervisor が正常に戻ったのに、起こした worker がまだ生きている。"""
+
+
 class SupervisorEntry(Enum):
     """production の ``run()`` が入る経路。"""
 
@@ -132,7 +142,8 @@ class SupervisorRun:
     case: "SupervisorCase" = field(repr=False, compare=False)
     #: この invocation の identity（case の中で一意、開始順）。
     invocation: SupervisorInvocationId
-    #: この invocation が通った production 経路（要求どおりであることを確認済み）。
+    #: この invocation が実際に通った production 経路（worker を起こしたかで観測。
+    #: 要求と違えば run を返さず ``SupervisorPathMismatch``）。
     entry: SupervisorEntry
     #: supervisor の exit code。停止点で crash した場合は None。
     exit_code: Optional[int]
@@ -202,27 +213,35 @@ def terminate_leftover_workers(case: "SupervisorCase") -> None:
         identity = records.child()
         if identity is None:
             continue
-        if not _process_alive(identity):
-            _reap_if_our_child(identity.pid)
-            continue
-        try:
-            os.killpg(identity.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            continue
-        deadline = time.monotonic() + 10.0
-        while _process_alive(identity) and time.monotonic() < deadline:
-            _reap_if_our_child(identity.pid)
-            time.sleep(0.01)
         if _process_alive(identity):
-            raise AssertionError(f"worker {identity.pid} survived SIGKILL")
+            try:
+                os.killpg(identity.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            deadline = time.monotonic() + 10.0
+            while _process_alive(identity) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if _process_alive(identity):
+                raise AssertionError(f"worker {identity.pid} survived SIGKILL")
+        _reap_if_our_orphan(identity)
 
 
-def _reap_if_our_child(pid: int) -> None:
-    """孤児が pytest（container の PID 1 など）に付け替わっていたら回収する。"""
+def _reap_if_our_orphan(identity: ChildIdentity) -> None:
+    """孤児が pytest（container の PID 1 など）に付け替わっていたら回収する。
+
+    zombie でも ``/proc/<pid>/stat`` は残るので、start token が一致するときだけ
+    回収する（PID が再利用された別 process を回収しない）。
+    """
+
+    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+        read_process_start_token,
+    )
 
     try:
-        os.waitpid(pid, os.WNOHANG)
-    except ChildProcessError:
+        if read_process_start_token(identity.pid) != identity.start_token:
+            return
+        os.waitpid(identity.pid, os.WNOHANG)
+    except (ChildProcessError, ValueError):
         pass
 
 
@@ -281,6 +300,8 @@ def _check_entry_request(
             f"{entry.value} is not reachable: {fact}, so production would take "
             f"{available.value} (use {hint})"
         )
+    if deadline not in {Deadline.TIMER, Deadline.AT_CHILD_STOP}:
+        raise ValueError(f"unknown deadline mode {deadline!r}")
     for fault in faults:
         if fault.action != "crash":
             raise ValueError("a supervisor fault can only crash the supervisor")
@@ -295,10 +316,16 @@ def _pair_log_size(case: "SupervisorCase") -> int:
     return case.pair_log.stat().st_size if case.pair_log.exists() else 0
 
 
-def classification_inputs(case: "SupervisorCase") -> Mapping[str, str]:
-    """production の分類器が読む case 側の入力の digest（projection 以外）。"""
+def classification_inputs(
+    case: "SupervisorCase", *, store: Optional[StoreSnapshot] = None,
+) -> Mapping[str, str]:
+    """production の分類器が読む case 側の入力の digest（projection 以外）。
+
+    ``store`` を渡せばその snapshot を使う（同じ観測を二度読まない）。
+    """
 
     config = case.config
+    store = inspect_store(case.store_directory) if store is None else store
     inputs = {
         "pair-log": sha256_of(case.pair_log),
         "supervisor-key": sha256_of(Path(config.supervisor_signing_key_file)),
@@ -306,7 +333,7 @@ def classification_inputs(case: "SupervisorCase") -> Mapping[str, str]:
     }
     inputs.update({
         f"store/{name}": digest
-        for name, digest in inspect_store(case.store_directory).digests.items()
+        for name, digest in store.digests.items()
     })
     return inputs
 
@@ -316,11 +343,13 @@ class _SupervisorInvocation:
 
     def __init__(
         self, case: "SupervisorCase", entry: SupervisorEntry, deadline: str,
-        records: InvocationRecords, pid: int, log_start: int, limit: float,
+        faults: Sequence[Fault], records: InvocationRecords, pid: int,
+        log_start: int, limit: float,
     ) -> None:
         self.case = case
         self.entry = entry
         self.deadline = deadline
+        self.faults = tuple(faults)
         self.records = records
         self.pid = pid
         self.log_start = log_start
@@ -333,7 +362,9 @@ class _SupervisorInvocation:
     ) -> "_SupervisorInvocation":
         """entry の合法性を確かめてから identity を確保して fork する。
 
-        並行起動（#165 T15）もこの入口を通す（拒否は identity を消費しない）。
+        拒否は identity を消費しない。identity の確保は並行 process でも一意だが、
+        同じ case の並行起動（#165 T15）の意味（entry の判定・後始末）はまだ
+        定義していない。公開する前にそこを決める。
         """
 
         _check_entry_request(case, entry, deadline, faults)
@@ -348,7 +379,7 @@ class _SupervisorInvocation:
             time.monotonic() + float(case.config.timeout_seconds)
             + float(case.config.kill_grace_seconds) + _WAIT_MARGIN_SECONDS
         )
-        return cls(case, entry, deadline, records, pid, log_start, limit)
+        return cls(case, entry, deadline, faults, records, pid, log_start, limit)
 
     def wait(self) -> SupervisorRun:
         process_status = self._reap()
@@ -373,12 +404,13 @@ class _SupervisorInvocation:
                 os.waitpid(self.pid, 0)
 
     def _observe(self, process_status: int) -> SupervisorRun:
+        """この invocation の記録から run を作り、要求どおりの経路だったか確かめる。"""
+
         case, records = self.case, self.records
         status = read_json(records.status)
         supervisor_faults = read_json_lines(records.faults)
-        crashed = status is None and any(
-            entry["action"] == "crash" for entry in supervisor_faults
-        )
+        crash = next((e for e in supervisor_faults if e["action"] == "crash"), None)
+        crashed = status is None and crash is not None
         if status is None and not crashed:
             raise AssertionError(
                 f"{records.invocation} ended with {process_status} without a status "
@@ -387,6 +419,19 @@ class _SupervisorInvocation:
             )
         if status is not None and "exception" in status:
             raise SupervisorRaised(status["exception"])
+        expected_status = (
+            next(
+                (fault.exit_code for fault in self.faults
+                 if fault.at.describe() == crash["point"]),
+                FAULT_CRASH_EXIT,
+            )
+            if crashed else status["exit_code"]
+        )
+        if process_status != expected_status:
+            raise AssertionError(
+                f"{records.invocation} exited {process_status}, its record says "
+                f"{expected_status}"
+            )
         projection = _read_projection(records.projection)
         if status is not None and projection is None:
             # run() も _resume() も戻る前に projection を書く。捕まえられなかった
@@ -401,8 +446,19 @@ class _SupervisorInvocation:
                 f"{records.invocation} asked for {self.entry.value} but production "
                 f"took {taken.value}"
             )
+        if self.faults and not crashed:
+            raise SupervisorPathMismatch(
+                f"{records.invocation} asked to crash at "
+                f"{[fault.at.describe() for fault in self.faults]} but reached none"
+            )
         child_records = None if child is None else case.records.child(child)
         evidence = None if child_records is None else read_json(child_records.launch_evidence)
+        child_faults = () if child_records is None else read_json_lines(child_records.faults)
+        if case.child_faults and evidence is not None and not crashed and not child_faults:
+            raise SupervisorPathMismatch(
+                f"{records.invocation}: the worker ran but reached none of "
+                f"{[fault.at.describe() for fault in case.child_faults]}"
+            )
         at_stop = read_json(records.store_at_child_stop)
         if self.deadline == Deadline.AT_CHILD_STOP and at_stop is None and not crashed:
             # child が止まらないまま production の timer / 終了で進んだ。要求した
@@ -411,16 +467,22 @@ class _SupervisorInvocation:
                 f"{records.invocation} asked for the deadline at the worker's stop, "
                 "but the worker never stopped"
             )
+        if child is not None and not crashed and _process_alive(child):
+            raise WorkerOutlivedSupervisor(
+                f"worker {child.pid} of {records.invocation} is alive after the "
+                "supervisor returned"
+            )
         release = read_json(records.barrier_release)
+        store = inspect_store(case.store_directory)
         return SupervisorRun(
             case=case,
             invocation=records.invocation,
-            entry=self.entry,
+            entry=taken,
             exit_code=None if status is None else status["exit_code"],
             crashed=crashed,
             projection=projection,
-            store=inspect_store(case.store_directory),
-            classification_inputs=classification_inputs(case),
+            store=store,
+            classification_inputs=classification_inputs(case, store=store),
             child=child,
             launch_evidence=evidence,
             launch_durable_at_barrier_release=(
@@ -429,9 +491,7 @@ class _SupervisorInvocation:
             store_at_child_stop=(
                 None if at_stop is None else StoreSnapshot.from_json(at_stop)
             ),
-            faults_fired=(
-                () if child_records is None else read_json_lines(child_records.faults)
-            ) + supervisor_faults,
+            faults_fired=child_faults + supervisor_faults,
             records=records,
         )
 

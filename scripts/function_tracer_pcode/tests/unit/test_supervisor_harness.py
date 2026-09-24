@@ -45,6 +45,7 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
     Deadline,
     Exit,
     FileBoundary,
+    HarnessRecords,
     NoProjectionToClassify,
     NoWorkerStarted,
     ProjectionWrite,
@@ -53,6 +54,7 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
     SupervisorEntry,
     SupervisorEntryRefused,
     SupervisorPathMismatch,
+    WorkerOutlivedSupervisor,
     classify,
     crash_at,
     launch_evidence,
@@ -195,13 +197,17 @@ def test_the_child_does_not_run_without_a_launch_that_names_it(tmp_path):
             key: value for key, value in os.environ.items()
             if not key.startswith("UNKNOWN_TAXONOMY_V2_")
         }
-        for environment in (bare, _worker_environment(case)):
+        for environment, reason in (
+            (bare, b"launch.json is not durable at child start"),
+            (_worker_environment(case), b"worker process identity differs from supervisor launch"),
+        ):
             process = subprocess.Popen(
                 case.config.child_command, cwd=REPO_ROOT, env=environment,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             )
             _, stderr = process.communicate(timeout=120)
             assert process.returncode == LAUNCH_EVIDENCE_EXIT, stderr
+            assert reason in stderr, stderr
             assert launch_evidence(case, process.pid) == ()
 
 
@@ -319,10 +325,6 @@ def test_a_crash_right_after_projecting_keeps_that_projection(tmp_path):
 
 
 def _allocate(root):
-    from scripts.function_tracer_pcode.tests.unit._supervisor_records import (
-        HarnessRecords,
-    )
-
     return HarnessRecords(root).allocate_invocation().invocation.ordinal
 
 
@@ -409,3 +411,58 @@ def test_a_deadline_at_the_worker_stop_is_not_replaced_by_another_path(tmp_path)
     with supervisor_case(tmp_path, ChildScript((Exit(0),))) as case:
         with pytest.raises(SupervisorPathMismatch, match="never stopped"):
             run_supervisor(case, deadline=Deadline.AT_CHILD_STOP)
+
+
+@pytest.mark.parametrize(
+    ("script", "faults"),
+    (
+        # supervisor 側: 公開されない file / 回数に届かない公開 / 止まらない worker
+        (ChildScript((Exit(3),)), (crash_at(FileBoundary("no-such.json")),)),
+        (ChildScript((Exit(3),)), (crash_at(FileBoundary("launch.json", occurrence=5)),)),
+        (ChildScript((Exit(3),)), (crash_at(ChildStopped()),)),
+        # worker 側: 公開されない file で止まるはずだった worker
+        (ChildScript((Exit(3),), faults=(stop_at(FileBoundary("no-such.json")),)), ()),
+    ),
+    ids=("unpublished-file", "unreached-occurrence", "worker-never-stops", "worker-point"),
+)
+def test_a_run_that_reaches_none_of_its_stop_points_is_not_a_normal_run(
+    tmp_path, script, faults,
+):
+    """停止点を要求した run が停止点の無い経路を通ったら、それを返さない。"""
+
+    with supervisor_case(tmp_path, script) as case:
+        with pytest.raises(SupervisorPathMismatch, match="reached none"):
+            run_supervisor(case, faults=faults)
+
+
+def test_an_unknown_deadline_mode_is_refused_before_starting(tmp_path):
+    with supervisor_case(tmp_path, ChildScript((Exit(0),))) as case:
+        with pytest.raises(ValueError, match="unknown deadline mode"):
+            run_supervisor(case, deadline="at_child_stop")
+        assert run_supervisor(case).invocation.ordinal == 0
+
+
+def test_a_worker_left_alive_by_a_returning_supervisor_is_reported(tmp_path, monkeypatch):
+    """production の後始末を壊すと、harness は run を返さずに知らせる。
+
+    監視の途中で例外を起こして ``_resume()`` へ逃がし、``finally`` の後始末を
+    外す（test 側の monkeypatch。fork 先へ継承される）。止まった worker が
+    生きたまま supervisor が戻る。
+    """
+
+    from scripts.function_tracer_pcode.authority.process import supervisor_command
+
+    def _monitor_fails(self, process, diagnostic, deadline):
+        raise RuntimeError("monitor failed")
+
+    monkeypatch.setattr(
+        supervisor_command.ProcessSupervisorCommand, "_wait_for_child_until_deadline",
+        _monitor_fails,
+    )
+    monkeypatch.setattr(
+        supervisor_command.ProcessSupervisorCommand, "_cleanup_exact_process_group",
+        lambda self, process, start_token: "SKIPPED_BY_TEST",
+    )
+    with supervisor_case(tmp_path, ChildScript((Stop(),))) as case:
+        with pytest.raises(WorkerOutlivedSupervisor, match="alive after the supervisor returned"):
+            run_supervisor(case)

@@ -31,35 +31,33 @@ durable store の観測              ``_supervisor_store``
 * 分類は run を名指す。その run が公開した projection を、その run が終わった
   時点の store / pair log と組にして production の分類器へ渡す。
 
-公開操作の契約（どの durable state で合法か / 何を保証するか）。条件は右の
-1 箇所だけで判定し、test や別 module に複製しない。
+公開操作の契約（どの durable state で合法か / 何を保証するか / どこで判定するか）。
+条件はそれぞれ 1 箇所だけで判定し、test や別 module に複製しない。
 
-=====================  ==========================  ===========================  ==============================
-操作                   合法な状態（precondition）  保証（postcondition）         判定する場所
-=====================  ==========================  ===========================  ==============================
-``supervisor_case``    いつでも                    抜けるとき（例外でも）、case  ``supervisor_case`` /
-                                                   の invocation が起こした      ``terminate_leftover_workers``
-                                                   worker は全部止まっている
-``run_supervisor``     durable launch が無い       production の FRESH_START     ``_check_entry_request`` /
-                       （過去の invocation の有無  を通り、worker を起こした      ``_observe``
-                       は問わない）                run を返す。違えば拒否
-                                                   （fork しない）か
-                                                   ``SupervisorPathMismatch``
-``restart_supervisor`` durable launch がある       production の RESUME を通り、  同上
-                       （その正しさは production   worker を起こさなかった run
-                       が判定する）                を返す。fresh start へ
-                                                   黙って落ちない
-停止点（``faults``）   crash は両 entry、stop は   ``_check_entry_request`` と
-                       worker の store file だけ、 ``Fault`` が起動前に拒否
-                       ``ChildStopped`` /
-                       ``AT_CHILD_STOP`` は
-                       FRESH_START だけ
-``classify(run)``      run が projection を公開    その run の projection を     ``classify``
-                       し、run のあと分類の入力    production 分類器で分類した
-                       が変わっていない            結果（拒否は例外）
-``worker_alive(run)``  run が worker を起こした    その worker（PID + start     ``worker_alive``
-                                                   token）がいま生きているか
-=====================  ==========================  ===========================  ==============================
+* ``supervisor_case``: いつでも。抜けるとき（例外でも）、case の invocation が
+  起こした worker は全部止まっている（``terminate_leftover_workers``）。
+* ``run_supervisor``: durable launch が無いときだけ（過去の invocation の有無は
+  問わない）。production の FRESH_START を通って worker を起こした run を返す。
+  正常に戻った run の worker はもう生きていない（``WorkerOutlivedSupervisor``）。
+* ``restart_supervisor``: durable launch があるときだけ（その正しさは production
+  が判定する）。production の RESUME を通って worker を起こさなかった run を
+  返す。fresh start へ黙って落ちない。
+  上の 2 つは、要求と durable state が合わなければ起動せずに
+  ``SupervisorEntryRefused``、起動後に別の経路だったと分かれば
+  ``SupervisorPathMismatch``（``_check_entry_request`` / ``_observe``）。
+* 停止点（``faults`` / ``ChildScript.faults`` / ``deadline``）: crash は両方の
+  entry、stop は worker の store file だけ、``ChildStopped`` と
+  ``AT_CHILD_STOP`` は FRESH_START だけ。不正な要求は起動前に拒否する。要求した
+  停止点に 1 つも着かなかった run と、worker が止まらなかった ``AT_CHILD_STOP``
+  の run は ``SupervisorPathMismatch``（``_check_entry_request`` / ``Fault`` /
+  ``_observe``）。
+* ``classify(run)``: run が projection を公開し、run のあと分類の入力が変わって
+  いないときだけ。その run の projection を production 分類器で分類した結果を
+  返す（拒否は例外。``classify``）。
+* ``worker_alive(run)``: run が worker を起こしたときだけ（起こしていなければ
+  ``NoWorkerStarted``）。その worker（PID + start token）がいま生きているか。
+* ``launch_evidence(case, pid)``: いつでも。その PID の process が launch 検査を
+  通って書いた観測（書かなければ空。``_supervisor_records``）。
 
 harness は「状態を作る・観測する」だけで、何を期待するかは test が持つ。
 supervisor の判定・store の検証・分類は production をそのまま呼び、ここで
@@ -97,6 +95,7 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_process import (
     SupervisorPathMismatch,
     SupervisorRaised,
     SupervisorRun,
+    WorkerOutlivedSupervisor,
     classification_inputs,
     restart_supervisor,
     run_supervisor,
@@ -117,6 +116,7 @@ __all__ = (
     "supervisor_identity", "supervisor_config", "supervisor_case",
     "run_supervisor", "restart_supervisor", "worker_alive", "SupervisorEntry",
     "SupervisorEntryRefused", "SupervisorPathMismatch", "NoWorkerStarted",
+    "WorkerOutlivedSupervisor", "HarnessRecords",
     "classify", "launch_evidence", "StoreSnapshot",
     "ChildScript", "Checkpoint", "Envelope", "Exit", "Stop", "Fault",
     "FileBoundary", "ProjectionWrite", "ChildStopped", "Deadline", "crash_at",
@@ -241,6 +241,8 @@ class SupervisorCase:
     keys: SupervisorKeys
     identity: SupervisorIdentity
     config: Any
+    #: worker の command に焼き込んだ停止点（config の一部で、restart でも同じ）。
+    child_faults: tuple[Fault, ...] = ()
 
     @property
     def pair_log(self) -> Path:
@@ -284,7 +286,10 @@ def supervisor_case(
     config = supervisor_config(
         directory, command, keys=keys, identity=identity, **config_fields,
     )
-    value = SupervisorCase(directory, keys, identity, config)
+    value = SupervisorCase(
+        directory, keys, identity, config,
+        child_faults=child.faults if isinstance(child, ChildScript) else (),
+    )
     try:
         yield value
     except BaseException:

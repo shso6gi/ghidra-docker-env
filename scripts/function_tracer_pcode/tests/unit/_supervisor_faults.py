@@ -282,8 +282,6 @@ def install_deadline_control(
     crash = next((f for f in faults if isinstance(f.at, ChildStopped)), None)
     if deadline == Deadline.TIMER and crash is None:
         return
-    if deadline not in {Deadline.TIMER, Deadline.AT_CHILD_STOP}:
-        raise ValueError(f"unknown deadline mode {deadline!r}")
     original = ProcessSupervisorCommand._wait_for_child_until_deadline
 
     def controlled(self: Any, process: Any, diagnostic: Any, real_deadline: float) -> Any:
