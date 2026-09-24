@@ -433,26 +433,29 @@ class ProcessSupervisorAuthorityFactory:
         self, bundle: Mapping[str, Any], *, launch: SignedProcessAuthorityReceipt,
         outcome: Outcome, error_kind: Optional[str],
     ) -> Mapping[str, Any]:
+        """supervisor が TIMEOUT / ERROR の終端として封をした canonical bundle。"""
         from scripts.function_tracer_pcode.authority.decision.canonical_result import (
             supervisor_canonical_result_payload_preimage,
-            validate_canonical_result_finalization_bundle,
         )
 
         self.validate(launch)
-        return validate_canonical_result_finalization_bundle(
+        return self.validate_child_canonical_bundle(
             bundle,
             result_payload_preimage=supervisor_canonical_result_payload_preimage(
                 launch, outcome=outcome, error_kind=error_kind
             ),
-            bundle_verification_key_id=self.supervisor_signing_key_id,
-            bundle_verification_key=self.__keys["supervisor"],
         )
 
     def validate_child_canonical_bundle(
         self, bundle: Mapping[str, Any], *,
         result_payload_preimage: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        """child が supervisor 鍵で封をした canonical bundle を検証する（Issue #165）。"""
+        """canonical bundle の封を supervisor 鍵で検証する（child の envelope にも使う）。
+
+        封の検証そのものは canonical bundle の owner（``canonical_result``）が持ち、
+        factory は鍵を渡すだけ。factory からその owner への依存は Issue #165 より
+        前からある（owner を下層へ移す課題は #198）。
+        """
         from scripts.function_tracer_pcode.authority.decision.canonical_result import (
             validate_canonical_result_finalization_bundle,
         )

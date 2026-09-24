@@ -13,9 +13,9 @@ snapshot と分類器）も、ここの関数だけで envelope を作り・検�
 5. launch join（occurrence・source snapshot・stream が durable launch と同じ）
 6. outcome が ERROR のときだけ ``error_kind`` がある
 
-採用した canonical 結果（``SupervisorCanonicalResultResolvedReceipt``）と、
-それを公開する RESOLVED projection の field も、ここで envelope と E の rc
-から決定的に作る。supervisor と分類器は同じ関数の結果を比べる。
+採用した canonical 結果（``SupervisorCanonicalResultResolvedReceipt``）も、
+ここで envelope と E の rc から決定的に作る。projection の field は持たない
+（``terminal_projection`` が終端の種類を横断して 1 つの owner として作る）。
 
 この module は ``contracts`` と ``store_layout`` しか import しない（store・分類器・process の
 起動に依存しない）。bundle の中身の検証は ``validate_bundle`` として受け取る。
@@ -159,37 +159,3 @@ def canonical_resolved_receipt(
     )
     receipt.validate()
     return receipt
-
-
-def resolved_projection(
-    envelope: CanonicalEnvelope, receipt: SupervisorCanonicalResultResolvedReceipt,
-    *, launch: Any,
-) -> dict[str, Any]:
-    """canonical RESOLVED の projection の field（supervisor が書き、分類器が比べる）。"""
-
-    validated = envelope.validated
-    identity = validated["execution_identity"]
-    occurrence = envelope.bundle["result_entry_occurrence_receipt"]
-    semantic = envelope.bundle["canonical_semantic_result_projection"]
-    kind = type(receipt).__name__
-    return {
-        "status": "RESOLVED",
-        "authority_kind": kind,
-        "supervisor_authority_kind": kind,
-        "supervisor_final_authority_digest": receipt.receipt_digest,
-        "launch_receipt_digest": launch.receipt_digest,
-        "canonical_outcome": envelope.outcome.value,
-        "decision_receipt_digest": validated["decision_receipt_digest"],
-        "result_occurrence_id": identity["result_occurrence_id"],
-        "result_entry_occurrence_receipt_digest": occurrence["receipt_digest"],
-        "execution_identity_digest": identity["execution_identity_digest"],
-        "stream_id": identity["stream_id"],
-        "source_snapshot_fingerprint": identity["source_snapshot_fingerprint"],
-        "canonical_result_bundle_digest": validated["bundle_digest"],
-        "canonical_result_bundle_kind": envelope.bundle["authority_kind"],
-        "canonical_result_payload_preimage_digest": validated["payload_preimage_digest"],
-        "semantic_projection_digest": validated["semantic_projection_digest"],
-        "error_kind": semantic["payload"].get("error_kind"),
-        "child_returncode": receipt.child_returncode,
-        "classification_valid": True,
-    }
