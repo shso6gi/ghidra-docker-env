@@ -535,12 +535,20 @@ def test_a_receipt_outside_its_contract_is_neither_issued_nor_valid(monkeypatch)
     """receipt の owner が上限を強制する（lane を通らない呼び出しも、上限の外の receipt を作れない）。"""
     from scripts.function_tracer_pcode.authority.decision import conditional
 
-    monkeypatch.setattr(conditional, "MAX_ASSUMPTION_PREMISES", 0)
-    reason = conditional.assumption_set_receipt_bound_violation((object(),))
-    assert reason is not None and "premises" in reason
-    source = inspect.getsource(conditional.finalize_conditional_decision)
-    assert "assumption_set_receipt_bound_violation" in source.split("projection = ")[0]
-    assert "assumption_set_receipt_bound_violation" in inspect.getsource(conditional.ConditionalDecisionReceipt.validate)
+    projection = _projection()
+    decision = _decision(Outcome.UNKNOWN, projection=projection)
+    premises = (_premise("log"), _premise("exp"))
+
+    def authority():
+        return ConditionalFinalizationAuthority(RESULT_ID, decision, projection, premises)
+
+    receipt = finalize_conditional_decision(authority())
+    receipt.validate()
+    monkeypatch.setattr(conditional, "MAX_ASSUMPTION_PREMISES", 1)
+    with pytest.raises(ValueError, match="exceeds its contract"):
+        finalize_conditional_decision(authority())
+    with pytest.raises(ValueError, match="exceeds its contract"):
+        receipt.validate()
 
 
 @pytest.mark.parametrize(

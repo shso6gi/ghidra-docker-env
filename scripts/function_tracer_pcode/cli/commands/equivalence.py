@@ -319,6 +319,7 @@ def _emit_import_error_result(
     # （journal を持つ pair が結果 JSON の有無で欠けないようにする）。
     emission_started = time.monotonic()
     journal_stage_start("result_emit", {"kind": "emission", "path": error_stage})
+    emitted = False
     try:
         evidence, session = result._canonical_finalization_context
         envelope = build_final_result_envelope(
@@ -352,12 +353,13 @@ def _emit_import_error_result(
             args.output,
             args.quiet,
         )
-    except BaseException:
-        # ERROR の emission も途中で落ちたことを journal に残す（開いた区間を閉じてから上げる）
-        journal_stage_end("result_emit", time.monotonic() - emission_started, {
-            "kind": "emission", "path": error_stage, "raised": True,
-        })
-        raise
+        emitted = True
+    finally:
+        if not emitted:
+            # ERROR の emission も途中で落ちたことを journal に残す（開いた区間を閉じてから上げる）
+            journal_stage_end("result_emit", time.monotonic() - emission_started, {
+                "kind": "emission", "path": error_stage, "raised": True,
+            })
     journal_stage_end("result_emit", time.monotonic() - emission_started, {
         "kind": "emission", "path": error_stage,
     })

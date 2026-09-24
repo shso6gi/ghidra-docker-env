@@ -527,3 +527,51 @@ def test_the_marker_bound_covers_a_rejected_path_of_escaped_characters(policy_na
         "diagnostics", list(range(10)), remaining_bytes=2 ** 63 - 1, rejected=rejected,
     )
     assert policy.measure(marker) <= truncation_marker_max_bytes(policy, "diagnostics")
+
+
+def test_the_cause_aggregate_never_calls_a_bare_to_dict():
+    from scripts.function_tracer_pcode.checker.cause_aggregate import _as_mapping
+
+    built = []
+
+    class _ToDictOnly:
+        def to_dict(self):
+            built.append(1)
+            return {"x": 1}
+
+    assert _as_mapping(_ToDictOnly()) == {}
+    assert built == []
+    assert _as_mapping({"a": 1}) == {"a": 1}
+
+
+def test_a_truncation_value_renders_like_its_identity():
+    """出力の切り捨て事実の値は identity（`_canonical_budget_value`）と同じ規則（`stable_key` だけ）。"""
+
+    from scripts.function_tracer_pcode.core.runtime_refs.unknowns import (
+        _canonical_budget_source,
+        _canonical_budget_value,
+    )
+
+    class _ToKeyOnly:
+        def to_key(self):
+            return ("k",)
+
+    class _StableKey:
+        def stable_key(self):
+            return ("s", 1)
+
+    for value in (_ToKeyOnly(), _StableKey(), ("x", 1, {"a": [1, 2]})):
+        prepared = RESULT_JSON_POLICY.prepare(
+            metered(lambda work, value=value: _canonical_budget_source(value, work=work)), max_bytes=1 << 20,
+        ).value()
+        assert prepared == json.loads(json.dumps(_canonical_budget_value(value)))
+
+
+def test_bounded_repr_uses_only_builtin_repr():
+    from scripts.function_tracer_pcode.core.json_encoding import bounded_repr
+
+    assert bounded_repr(_Heavy()) == "<_Heavy>"
+    assert bounded_repr(12) == "12" and bounded_repr("ab") == "'ab'" and bounded_repr(None) == "None"
+    assert len(bounded_repr("x" * 10_000)) < 300
+    assert bounded_repr(1 << 5_000).startswith("<int ")
+    assert _Heavy.calls == 0
