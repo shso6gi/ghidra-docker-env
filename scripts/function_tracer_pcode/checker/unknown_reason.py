@@ -741,13 +741,17 @@ def build_projection_diagnostic(
             # 診断に写す legacy の行は上限まで（件数は残す。`detail` が使うのは先頭 2 行）
             diagnostic["legacy_matched_count"] = len(matched)
             matched = matched[:PROJECTION_DIAGNOSTIC_LEGACY_ROWS]
+        # legacy の行は有界化の primitive を通して写す（G4-b で有界化済みなら何もしない。
+        # 有界化していない record でも入力に比例する写しをしない）
         diagnostic["legacy"] = [
             {
-                "stage": getattr(record, "stage", None),
-                "pair_or_case": getattr(record, "pair_or_case", None),
-                "detail": getattr(record, "detail", None),
-                "evidence_refs": list(getattr(record, "evidence_refs", ()) or ()),
-                "object_target_key": canonical_value(getattr(record, "object_target_key", None)),
+                "stage": _bounded_text(getattr(record, "stage", None), LABEL_MAX_CHARS, work=work),
+                "pair_or_case": _bounded_text(getattr(record, "pair_or_case", None), LABEL_MAX_CHARS, work=work),
+                "detail": _bounded_text(getattr(record, "detail", None), DETAIL_MAX_CHARS, work=work),
+                "evidence_refs": list(bounded_prefix(getattr(record, "evidence_refs", ()), work=work)),
+                "object_target_key": _canonical_summary(
+                    _bounded_value(getattr(record, "object_target_key", None), work=work),
+                ),
             }
             for record in matched
         ]
@@ -815,22 +819,34 @@ class LegacyReasonIndex:
         return () if group is None else tuple(group.records)
 
 
+def _canonical_summary(bounded: Any) -> Any:
+    """有界化した値（inline の上限以下の plain な値か `BoundedEvidence`）の canonical な値。
+
+    `bounded_evidence` の結果だけを受ける: plain な値は組み込みの容器だけ、`BoundedEvidence`
+    の `to_authority_dict()` は固定の形の要約（O(1)）。
+    """
+
+    from scripts.function_tracer_pcode.authority.contracts import canonical_value
+
+    return canonical_value(bounded)
+
+
 def _inline_canonical(value: Any, *, work: Any) -> Any:
     """inline のまま残った小さい値の canonical な値（大きさを数えてから作る。作れなければ `None`）。"""
 
     from scripts.function_tracer_pcode.authority.contracts import canonical_value
-    from scripts.function_tracer_pcode.core.json_encoding import (
-        LEGACY,
-        PRODUCER_FAILURES,
-        RESULT_JSON_POLICY,
-        JsonValueRejected,
-    )
+    from scripts.function_tracer_pcode.core.json_encoding import PRODUCER_FAILURES, RESULT_JSON_POLICY
 
     try:
-        work.charge(1 + RESULT_JSON_POLICY.measure(value, max_bytes=work.remaining(), mode=LEGACY))
+        # 容器（tuple / list / dict）と基底型だけから成る値だけを canonical にする（producer を
+        # 持つ値は canonical_value が `to_authority_dict()` を呼ぶので索引に入れない）
+        size = RESULT_JSON_POLICY.plain_bytes(value, max_bytes=work.remaining())
+        if size is None:
+            return None
+        work.charge(1 + size)
         canonical = canonical_value(value)
         hash(canonical)
-    except (JsonValueRejected,) + PRODUCER_FAILURES:
+    except PRODUCER_FAILURES:
         return None
     return canonical
 

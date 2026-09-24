@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from scripts.function_tracer_pcode.core.json_encoding import (
-    JsonBudget, as_list, each, inline, is_json_record, materialize, metered, pairs_of, raw,
+    JsonBudget, as_list, each, identity_key_of, inline, is_json_record, materialize, metered, pairs_of, raw,
     source_converter,
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
@@ -344,14 +344,12 @@ def _canonical_budget_value_within(value: Any, depth: int = 0, *, work: Any) -> 
             str(key): _canonical_budget_value_within(item, depth + 1, work=work)
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
         }
-    stable_key = getattr(value, "stable_key", None)
-    if callable(stable_key):
-        try:
-            key = stable_key()
-        except (AttributeError, TypeError, ValueError, RecursionError):
-            key = None
-        if key is not None:
-            return ["stable", _canonical_budget_value_within(key, depth + 1, work=work)]
+    try:
+        has_key, key = identity_key_of(value)
+    except (AttributeError, TypeError, ValueError, RecursionError):
+        has_key, key = False, None
+    if has_key and key is not None:
+        return ["stable", _canonical_budget_value_within(key, depth + 1, work=work)]
     return ["opaque", type(value).__module__, type(value).__qualname__]
 
 
@@ -391,14 +389,12 @@ def _canonical_budget_source(value: Any, depth: int = 0, *, work: Any) -> Any:
             (str(key), _canonical_budget_source(item, depth + 1, work=work))
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
         )
-    stable_key = getattr(value, "stable_key", None)
-    if callable(stable_key):
-        try:
-            key = stable_key()
-        except (AttributeError, TypeError, ValueError, RecursionError):
-            key = None
-        if key is not None:
-            return each(("stable", _canonical_budget_source(key, depth + 1, work=work)))
+    try:
+        has_key, key = identity_key_of(value)
+    except (AttributeError, TypeError, ValueError, RecursionError):
+        has_key, key = False, None
+    if has_key and key is not None:
+        return each(("stable", _canonical_budget_source(key, depth + 1, work=work)))
     return each(("opaque", type(value).__module__, type(value).__qualname__))
 
 

@@ -2222,7 +2222,7 @@ _PR22D_FUNCTIONS = {
         "bounded_prefix", "finitize_unknown_reason_record", "finitize_unknown_recovery_action",
         "_bounded_value", "_bounded_text", "_match_legacy_reasons", "build_projection_diagnostic",
         "_bounded_cause_value", "projection_diagnostic_work", "_ReasonCounts", "_RecoveryBacklog",
-        "_BacklogEntryView", "_PrimaryFilter", "LegacyReasonIndex", "legacy_reason_index", "_text_cost", "_LegacyReasonGroup", "_inline_canonical",
+        "_BacklogEntryView", "_PrimaryFilter", "LegacyReasonIndex", "legacy_reason_index", "_text_cost", "_LegacyReasonGroup", "_inline_canonical", "_canonical_summary", "_coerce_record_within",
         "recovery_actions_source", "_iter_recovery_actions", "_key_width",
     },
     "checker/cause_aggregate.py": {
@@ -2262,8 +2262,8 @@ _REGISTERED_BOUNDED_WORK = {
     ("checker/output_preparation.py", "SerializationPlan.to_diagnostic", "sorted"): "RESULT_FIELDS の固定の field",
     ("checker/output_preparation.py", "OutputPreparer.prepare", "sort"): "RESULT_FIELDS の固定の field",
     ("checker/output_preparation.py", "_ordered", "sorted"): "RESULT_FIELDS の固定の key",
-    ("checker/unknown_reason.py", "build_projection_diagnostic", "canonical_value"):
-        "G4-b で有界化した legacy の key（inline の上限以下か `BoundedEvidence`）",
+    ("checker/unknown_reason.py", "_canonical_summary", "canonical_value"):
+        "`bounded_evidence` の結果だけ（plain な小さい値か、固定の形の要約を持つ `BoundedEvidence`）",
     ("checker/unknown_reason.py", "_bounded_cause_value", "canonical_value"):
         "`bounded_evidence` が inline の上限以下と確かめた plain な値だけ",
     ("checker/unknown_reason.py", "_match_legacy_reasons", "sorted"):

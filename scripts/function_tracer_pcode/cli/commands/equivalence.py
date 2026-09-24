@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.ghidra.pyghidra_support import (
 from scripts.function_tracer_pcode.config import apply_runtime_environment
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.checker.output_preparation import (
+    AuthoritySeal,
     OutputEnvelopeInvariantViolation,
     build_final_result_envelope,
     prepared_smt_formula,
@@ -276,7 +277,6 @@ def _emit_import_error_result(
     )
     from scripts.function_tracer_pcode.authority.decision.canonical_result import (
         attach_durable_error_finalization,
-        build_canonical_result_finalization_bundle,
         persist_canonical_result_envelope,
     )
 
@@ -306,9 +306,7 @@ def _emit_import_error_result(
     evidence, session = result._canonical_finalization_context
     envelope = build_final_result_envelope(
         result,
-        seal=lambda preimage: build_canonical_result_finalization_bundle(
-            result_payload_preimage=preimage, evidence=evidence, session=session
-        ),
+        seal=AuthoritySeal(evidence=evidence, session=session),
         fallback_policy=_cli_budget_policy(),
     )
     result_payload = envelope.payload
@@ -789,7 +787,6 @@ def run_equivalence_check(args):
         output_result(output_content, args.output, args.quiet)
     if emit_json:
         from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-            build_canonical_result_finalization_bundle,
             persist_canonical_result_envelope,
         )
 
@@ -799,13 +796,7 @@ def run_equivalence_check(args):
         seal = None
         if finalization_context is not None:
             evidence, session = finalization_context
-
-            def seal(preimage):
-                return build_canonical_result_finalization_bundle(
-                    result_payload_preimage=preimage,
-                    evidence=evidence,
-                    session=session,
-                )
+            seal = AuthoritySeal(evidence=evidence, session=session)
 
         # Issue #22 PR-22-D: 準備済み payload（authority 確定前）+ authority の
         # 値 + 診断 → 封印 → 契約の上限で bounded encode。上限を超えるのは出力の

@@ -14,6 +14,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     LEGACY,
     RESULT_JSON_POLICY,
     cached_string_bytes,
+    identity_key_of,
     is_json_record,
 )
 from scripts.function_tracer_pcode.proof.obligations.model import SemanticFactProvenance
@@ -166,12 +167,9 @@ class SnapshotFingerprintCodec:
         if isinstance(value, (set, frozenset)):
             return tuple(sorted((freeze(v) for v in value), key=repr))
         name = value.__class__.__qualname__
-        stable_key = getattr(value, "stable_key", None)
-        if callable(stable_key):
-            return (name, freeze(stable_key()))
-        to_key = getattr(value, "to_key", None)
-        if callable(to_key):
-            return (name, freeze(to_key()))
+        has_key, identity_key = identity_key_of(value)
+        if has_key:
+            return (name, freeze(identity_key))
         to_dict = getattr(value, "to_dict", None)
         if callable(to_dict):
             return (name, freeze(to_dict()))
@@ -217,12 +215,9 @@ class SnapshotFingerprintCodec:
             if meter is not None:
                 meter.frame(len(value))
             return tuple(sorted((cls._freeze(v, meter) for v in value), key=repr))
-        stable_key = getattr(value, "stable_key", None)
-        if callable(stable_key):
-            return cls._tagged(value, cls._freeze_key(stable_key(), meter), meter)
-        to_key = getattr(value, "to_key", None)
-        if callable(to_key):
-            return cls._tagged(value, cls._freeze_key(to_key(), meter), meter)
+        has_key, identity_key = identity_key_of(value)
+        if has_key:
+            return cls._tagged(value, cls._freeze_key(identity_key, meter), meter)
         to_dict = getattr(value, "to_dict", None)
         if callable(to_dict):
             if meter is not None and is_json_record(value):
@@ -419,11 +414,9 @@ class AnalysisSnapshot:
             getattr(analysis, "effect_summary", None), work,
         )
         function_ref = getattr(analysis, "function_ref", None)
-        function_key = (
-            function_ref.stable_key()
-            if function_ref is not None and callable(getattr(function_ref, "stable_key", None))
-            else (getattr(analysis, "function_name", None), getattr(analysis, "entry_point", None))
-        )
+        has_key, function_key = (False, None) if function_ref is None else identity_key_of(function_ref)
+        if not has_key:
+            function_key = (getattr(analysis, "function_name", None), getattr(analysis, "entry_point", None))
         snapshot_id = (
             "function_analysis_snapshot",
             getattr(analysis, "binary_id", None),

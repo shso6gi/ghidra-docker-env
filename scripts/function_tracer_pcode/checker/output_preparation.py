@@ -1510,10 +1510,40 @@ def compose_result_preimage(
     return ComposedPreimage(prepared, _ordered(parts), members, tuple(truncated), freeable)
 
 
+class AuthoritySeal:
+    """最終 envelope の封印（canonical result finalization bundle）を作る authority の builder。
+
+    **bounded path が呼ぶ唯一の作業量を受け取らない producer**（任意の callable ではなく、この
+    型 1 つ。field に callable を持たない）。`seal(preimage)` は authority の
+    `build_canonical_result_finalization_bundle` を呼ぶ: sealed event stream の codec・replay・
+    digest の仕事は event stream に比例し、その上限の契約は #110（O-4 の「構築の作業量」の未達の
+    依存）。本 PR が保証するのは、呼ぶのは pair ごとに高々 2 回（組み直すときだけ 2 回目）、
+    作った封印は残りの予算の中でしか写さない、超えれば durable な ERROR、の 3 つ。
+
+    test は `seal` を上書きした subclass を使う（production の subclass は architecture test が
+    拒む）。
+    """
+
+    __slots__ = ("evidence", "session")
+
+    def __init__(self, *, evidence: Any, session: Any) -> None:
+        self.evidence = evidence
+        self.session = session
+
+    def seal(self, preimage: Mapping[str, Any]) -> Mapping[str, Any]:
+        from scripts.function_tracer_pcode.authority.decision.canonical_result import (
+            build_canonical_result_finalization_bundle,
+        )
+
+        return build_canonical_result_finalization_bundle(
+            result_payload_preimage=preimage, evidence=self.evidence, session=self.session,
+        )
+
+
 def build_final_result_envelope(
     result: Any,
     *,
-    seal: Optional[Callable[[Dict[str, Any]], Mapping[str, Any]]] = None,
+    seal: Optional["AuthoritySeal"] = None,
     fallback_policy: Optional[BudgetPolicy] = None,
 ) -> FinalResultEnvelope:
     """A + B + C → 封印 → bounded encode。**Expression / 解析 object を辿らない**。
@@ -1531,8 +1561,9 @@ def build_final_result_envelope(
       エラーの ERROR として durable にする）。
 
     封印を **組み立てる** 作業（authority の event stream の codec・replay）の大きさは
-    authority の event stream に比例し、その上限の契約は #110 に依存する（本 function が
-    有界にするのは、組み立てた封印を出力へ写す作業と最終 JSON の大きさ）。
+    authority の event stream に比例し、その上限の契約は #110 に依存する（`AuthoritySeal`。
+    本 function が有界にするのは、封印を呼ぶ回数・組み立てた封印を出力へ写す作業・最終 JSON
+    の大きさ）。
     """
 
     return finalize_result_envelope(
@@ -1546,7 +1577,7 @@ def build_final_result_envelope(
 def finalize_result_envelope(
     composed: ComposedPreimage,
     *,
-    seal: Optional[Callable[[Dict[str, Any]], Mapping[str, Any]]] = None,
+    seal: Optional["AuthoritySeal"] = None,
     recompose: Optional[Callable[[int], ComposedPreimage]] = None,
 ) -> FinalResultEnvelope:
     """組んだ preimage に封印を足し、契約の上限で書く（`build_final_result_envelope` の後半）。
@@ -1567,40 +1598,42 @@ def finalize_result_envelope(
     payload = preimage
     total = preimage_bytes
     if seal is not None:
+        if not isinstance(seal, AuthoritySeal):
+            raise TypeError("the final envelope is sealed only by an AuthoritySeal")
         room = members.remaining_for(BUNDLE_KEY)
+        # 封印を写す上限: 残り、組み直せるなら残り + 切り詰められる byte（1 回の準備で、入るか・
+        # 組み直しに要る大きさかが分かる。封印を 3 回作らない）
+        can_recompose = recompose is not None and composed.freeable_bytes > 0 and room is not None
+        reach = room + composed.freeable_bytes if can_recompose else room
         try:
-            bundle = encoding.prepare(seal(preimage), max_bytes=room)
+            bundle = encoding.prepare(seal.seal(preimage), max_bytes=reach)
         except JsonBudgetExhausted as exc:
-            bundle = None
-            if recompose is not None and composed.freeable_bytes > 0:
-                # 切り詰めてよい診断が場所を取っている。封印の大きさを、組み直しで空き得る幅
-                # （残り + 切り詰められる byte）の中で数え（封印は作り直す: 生成器を読み直さない）、
-                # その分を先に空けて組み直し、新しい preimage を封印し直す
-                try:
-                    needed = encoding.prepare(
-                        seal(preimage), max_bytes=room + composed.freeable_bytes,
-                    ).encoded_bytes
-                except (JsonBudgetExhausted, JsonValueRejected):
-                    needed = None
-                if needed is not None:
-                    composed = recompose(needed)
-                    prepared, preimage, members, truncated = (
-                        composed.prepared, composed.payload, composed.members, composed.truncated,
-                    )
-                    preimage_bytes = members.total_bytes
-                    room = members.remaining_for(BUNDLE_KEY)
-                    try:
-                        bundle = encoding.prepare(seal(preimage), max_bytes=room)
-                    except JsonBudgetExhausted:
-                        bundle = None
-            if bundle is None:
+            raise _violation(
+                f"{BUNDLE_KEY} does not fit the rest of the envelope "
+                f"(> {reach} bytes after a {preimage_bytes}-byte preimage)",
+                members,
+            ) from exc
+        except JsonValueRejected as exc:
+            raise _violation(f"{BUNDLE_KEY} is not JSON: {exc}", members) from exc
+        if room is not None and bundle.encoded_bytes > room:
+            # 切り詰めてよい診断が場所を取っている: 封印の大きさを先に空けて組み直し、新しい
+            # preimage を封印し直す（封印は preimage の digest を持つ。2 回目の封印）
+            composed = recompose(bundle.encoded_bytes)
+            prepared, preimage, members, truncated = (
+                composed.prepared, composed.payload, composed.members, composed.truncated,
+            )
+            preimage_bytes = members.total_bytes
+            room = members.remaining_for(BUNDLE_KEY)
+            try:
+                bundle = encoding.prepare(seal.seal(preimage), max_bytes=room)
+            except JsonBudgetExhausted as exc:
                 raise _violation(
                     f"{BUNDLE_KEY} does not fit the rest of the envelope "
                     f"(> {room} bytes after a {preimage_bytes}-byte preimage)",
                     members,
                 ) from exc
-        except JsonValueRejected as exc:
-            raise _violation(f"{BUNDLE_KEY} is not JSON: {exc}", members) from exc
+            except JsonValueRejected as exc:
+                raise _violation(f"{BUNDLE_KEY} is not JSON: {exc}", members) from exc
         payload = dict(preimage)
         payload[BUNDLE_KEY] = bundle.value()
         payload = _ordered(payload)
@@ -1657,6 +1690,7 @@ __all__ = [
     "RESULT_FIELDS",
     "SerializationPlan",
     "ComposedPreimage",
+    "AuthoritySeal",
     "build_final_result_envelope",
     "compose_result_preimage",
     "finalize_result_envelope",

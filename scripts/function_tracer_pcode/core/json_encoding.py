@@ -1199,6 +1199,22 @@ def _is_plain_key_part(part: Any, work: "JsonBudget") -> bool:
     return True
 
 
+def identity_key_of(value: Any) -> Tuple[bool, Any]:
+    """producer の identity key（`stable_key()`、無ければ `to_key()`）。**bounded path がこれを呼ぶ唯一の場所**。
+
+    method は型から引く（instance の `__getattr__` を呼ばない）。key を作る仕事は identity の
+    owner の契約（#194）で、作業量を受け取らない — 本 PR の依存として 1 箇所に閉じる。返った
+    key は呼ぶ側が作業量の中で辿る。`(True, key)` か、key を持たなければ `(False, None)`。
+    """
+
+    kind = type(value)
+    for name in ("stable_key", "to_key"):
+        method = getattr(kind, name, None)
+        if callable(method):
+            return True, method(value)
+    return False, None
+
+
 def _reread(reread: Reread) -> Any:
     """証拠の値を読み直す（属性を読み、登録した converter で source にする。どちらも O(1)）。"""
 
@@ -1877,12 +1893,10 @@ class _Walk:
         if isinstance(item, Enum):
             self.opaque(item)
             return
-        key_fn = getattr(item, "stable_key", None)
-        if not callable(key_fn):
-            key_fn = getattr(item, "to_key", None)
-        if callable(key_fn):
+        has_key, identity_key = identity_key_of(item)
+        if has_key:
             self.opaque(item)
-            self.count_only(key_fn(), raw_leaves=True)
+            self.count_only(identity_key, raw_leaves=True)
             return
         if (
             getattr(kind, "json_items", None) is not None
@@ -2287,6 +2301,7 @@ __all__ = [
     "LEGACY",
     "PreparedJson",
     "RESULT_JSON_POLICY",
+    "identity_key_of",
     "Reread",
     "Reducer",
     "source_converter",

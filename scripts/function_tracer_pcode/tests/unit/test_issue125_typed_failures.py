@@ -412,9 +412,9 @@ def test_cli_attaches_failure_diagnostics_before_the_aggregate():
         # 人向けの text（有界な `to_dict()` から。契約違反は同じ ERROR）
         source.index("output_content = _text_or_error_result("),
         # Issue #22 PR-22-D: preimage（旧 `result.to_dict()`）の合成・封印・bounded
-        # encode は `build_final_result_envelope` が 1 回で行う。封印は builder に
-        # 渡す関数の中でだけ呼ぶ（CLI が preimage を組み直さない）。
-        source.index("build_canonical_result_finalization_bundle("),
+        # encode は `build_final_result_envelope` が 1 回で行う。封印は `AuthoritySeal`
+        # （authority の builder を呼ぶ唯一の型）を渡すだけ（CLI が preimage を組み直さない）。
+        source.index("seal = AuthoritySeal("),
         # envelope の組み立てと契約違反の ERROR は 1 つの helper（`_final_envelope_or_error_result`）
         source.index("envelope = _final_envelope_or_error_result("),
         source.index("persist_canonical_result_envelope(result_payload)"),
