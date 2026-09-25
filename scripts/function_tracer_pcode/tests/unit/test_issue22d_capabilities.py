@@ -424,6 +424,15 @@ class _LiveDict(dict):
         _Calls.count += 1
         return iter(())
 
+    def get(self, key, default=None):
+        _Calls.count += 1
+        return default
+
+    def __getattribute__(self, name):
+        if name not in ("__class__", "__dict__"):
+            _Calls.count += 1
+        return dict.__getattribute__(self, name)
+
     def __iter__(self):
         _Calls.count += 1
         return iter(())
@@ -915,3 +924,42 @@ def test_j22_every_input_proportional_construct_has_a_work_owner():
     assert missing == [], {key: unowned[key] for key in missing}
     assert stale == [], stale
     assert all(reason[0] in "ABCD" for reason in _PROPORTIONAL_WORK_OWNERS.values())
+
+
+_OUTSIDE_SETATTR: dict = {}
+exec(compile(
+    "class LoudSetattr:\n"
+    "    calls = 0\n"
+    "    def __setattr__(self, name, value):\n"
+    "        LoudSetattr.calls += 1\n"
+    "        object.__setattr__(self, name, value)\n",
+    "/nonexistent/outside_setattr.py", "exec",
+), _OUTSIDE_SETATTR)
+
+
+def test_the_owner_api_never_runs_the_code_of_the_values_it_reads():
+    """`live_values` の関数そのもの（読む・書く・真偽・長さ・引く）は値の上書きした code を呼ばない。"""
+
+    from scripts.function_tracer_pcode.core import live_values
+
+    readers = (
+        live_values.as_bool, live_values.as_int, live_values.as_float, live_values.as_str, live_values.as_repr,
+        live_values.size, live_values.plain_scalar, live_values.json_scalar, live_values.builtin_container,
+        lambda value: live_values.lookup(value, "k"), lambda value: list(live_values.items_of(value)),
+        lambda value: list(live_values.elements_of(value)), lambda value: live_values.attribute(value, "x"),
+        lambda value: live_values.is_kind(value, int),
+    )
+    for value in _adversarial_values():
+        for read in readers:
+            _Calls.count = 0
+            try:
+                read(value)
+            except (TypeError, ValueError):
+                # 読めない値は拒む（`int("abc")` と同じ ValueError も含む。どちらも値の code は呼ばない）
+                pass
+            assert _Calls.count == 0, (type(value).__name__, read)
+    loud = _OUTSIDE_SETATTR["LoudSetattr"]()
+    _OUTSIDE_SETATTR["LoudSetattr"].calls = 0
+    with pytest.raises(TypeError):
+        live_values.set_state(loud, "x", 1)
+    assert _OUTSIDE_SETATTR["LoudSetattr"].calls == 0
