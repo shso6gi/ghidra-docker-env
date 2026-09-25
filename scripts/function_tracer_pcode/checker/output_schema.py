@@ -172,7 +172,7 @@ def superseded_decision_receipt_record(result: Any) -> Optional[Dict[str, Any]]:
             record["conditional_decision_receipt"] = conditional_decision_receipt_payload(conditional)
         return record
     except SUPERSEDED_PAYLOAD_FAILURES as exc:
-        return superseded_digest_record(result, unavailable=type(exc).__qualname__)
+        return superseded_digest_record(result, unavailable=live_values.type_name(type(exc)))
 
 
 #: receipt の payload を作るときの失敗（exact でない receipt・検証の失敗・壊れた値）

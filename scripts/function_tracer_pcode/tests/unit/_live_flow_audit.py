@@ -58,6 +58,8 @@ VERIFYING_PREDICATES = frozenset({"builtin_sequence", "builtin_set", "builtin_it
 #: owner の関数 / method の戻り値の種類（書いていないものは plain な値を返す）。`materialize` の
 #: LEGACY の写しは `raw` の葉を live なまま持つ
 OWNER_RESULTS = {"_walk_iter": ITER, "materialize": CONT}
+#: owner の上限の無い API（大きさの分かった小さい値にだけ使う: live な値を渡さない）
+UNBOUNDED_OWNER_METHODS = frozenset({"dumps", "encode_bounded", "scalar_record_dict"})
 
 _PLAIN_TYPES = frozenset({"str", "int", "float", "bool", "bytes", "NoneType"})
 _CONTAINER_TYPES = frozenset({"tuple", "list", "dict", "set", "frozenset"})
@@ -156,6 +158,9 @@ class PackageIndex:
                         local = alias.asname or alias.name.split(".")[0]
                         self.module_alias[module][local] = alias.name
             for node in tree.body:
+                if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+                    # 型注釈つきの module の変数（`_CACHE: dict = {}`）も値
+                    self.values.add((module, node.target.id))
                 if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
                     # module の変数: 別の関数への別名（`_f = other.f`）か、値（policy などの object）
                     name = node.targets[0].id
@@ -252,9 +257,27 @@ class PackageIndex:
         node = self.functions[key]
         for decorator in node.decorator_list:
             name = decorator.id if isinstance(decorator, ast.Name) else getattr(decorator, "attr", None)
-            if name in ("property", "cached_property"):
+            if name in ("property", "cached_property", "readable_property"):
                 return True
         return False
+
+    def is_state_setter(self, key) -> bool:
+        """`live_values.state_setter` で宣言した `__setattr__` か（`set_state()` が呼ぶ関数）。"""
+
+        return any(
+            (decorator.id if isinstance(decorator, ast.Name) else getattr(decorator, "attr", None))
+            == "state_setter"
+            for decorator in self.functions[key].decorator_list
+        )
+
+    def is_readable_property(self, key) -> bool:
+        """`live_values.readable_property` で宣言した property か（`attribute()` が呼ぶ getter）。"""
+
+        return any(
+            (decorator.id if isinstance(decorator, ast.Name) else getattr(decorator, "attr", None))
+            == "readable_property"
+            for decorator in self.functions[key].decorator_list
+        )
 
     def subclass_of(self, module: str, cls: str, base: Tuple[str, str]) -> bool:
         return base in self.mro(module, cls)
@@ -340,6 +363,13 @@ class _FunctionAudit:
             self.cls_name = None
         self.parameters = {
             arg.arg for arg in (*positional, *args.kwonlyargs, *(a for a in (args.vararg, args.kwarg) if a))
+        }
+        #: `global` / `nonlocal` で宣言した名前（代入は関数の外の状態）
+        self.globals: Set[str] = set()
+        #: 関数の中で束縛する名前（それ以外の名前は module の値）
+        self.local_names: Set[str] = set(self.parameters) | {
+            node.id for node in _own_nodes(self.node)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
         }
         self.is_generator = any(
             isinstance(n, (ast.Yield, ast.YieldFrom)) for n in _own_nodes(self.node)
@@ -428,6 +458,9 @@ class _FunctionAudit:
             for handler in s.handlers:
                 if handler.type is not None:
                     self.expr(handler.type)
+                if handler.name is not None:
+                    # 捕まえた例外は live な値を引数に持ち得る（package の例外の型だけのときは package の値）
+                    self.env[handler.name] = None if self._package_exceptions(handler.type) else LIVE
                 self.block(handler.body)
             self.block(s.orelse)
             self.block(s.finalbody)
@@ -444,13 +477,47 @@ class _FunctionAudit:
             for target in s.targets:
                 if not isinstance(target, ast.Name):
                     self.expr(target)
-        elif isinstance(s, (ast.Pass, ast.Break, ast.Continue, ast.Global, ast.Nonlocal, ast.Import, ast.ImportFrom)):
+        elif isinstance(s, (ast.Global, ast.Nonlocal)):
+            self.globals.update(s.names)
+        elif isinstance(s, (ast.Pass, ast.Break, ast.Continue, ast.Import, ast.ImportFrom)):
             pass
         else:
             self.v(s, "unsupported statement " + type(s).__name__)
 
+    @staticmethod
+    def _unbounded_owner_call(name: str, node) -> bool:
+        """owner の上限の無い API か（書く量を数えない）。上限を引数に取る API（`prepare` / `measure` /
+        `materialize` / `plain_bytes`）の上限なしの呼び出しは J10（`test_architecture_boundaries`）が
+        場所を登録して固定する。"""
+
+        return name in UNBOUNDED_OWNER_METHODS
+
+    def _module_value(self, name: str) -> bool:
+        """`name` が関数の中で束縛しない、package の module の値か（owner の module の値を除く）。"""
+
+        if name in self.local_names:
+            return False
+        resolved = self.index.resolve(self.module, name)
+        return bool(resolved) and resolved[0] == "value" and resolved[1] not in OWNER_MODULES
+
+    def _package_exceptions(self, node) -> bool:
+        """except の型が全部 package の class か（その例外の引数は package が作った値）。"""
+
+        if node is None:
+            return False
+        parts = node.elts if isinstance(node, ast.Tuple) else [node]
+        for part in parts:
+            if not isinstance(part, ast.Name):
+                return False
+            resolved = self.index.resolve(self.module, part.id)
+            if not resolved or resolved[0] != "class":
+                return False
+        return True
+
     def assign(self, target, kind, value, element_of_iteration: bool = False) -> None:
         if isinstance(target, ast.Name):
+            if target.id in self.globals and tainted(kind):
+                self.v(target, "live value stored in module state")
             self.env[target.id] = kind
             # 関数・型の別名（`constructor = make_unknown_reason`）: 呼び出しをその関数へ辿る
             alias = self._callable_alias(value)
@@ -471,6 +538,9 @@ class _FunctionAudit:
             receiver = self.expr(target.value)
             if bad(receiver) and not self._is_self(target.value):
                 self.v(target, "setting an attribute of a live value")
+            elif tainted(kind) and not self._is_self(target.value):
+                # 他の object の属性へ live な値を置くと、そこから読んだ値の種類を追えない（洗浄）
+                self.v(target, "live value stored in an attribute of another object")
             if self._is_self(target.value) and tainted(kind):
                 self._mark_field(target.attr)
             if self._is_self(target.value) and (is_obj(kind) or kind == WORK) and self.cls:
@@ -488,6 +558,8 @@ class _FunctionAudit:
                 self.v(target, "live value used as a key")
             if tainted(kind) and isinstance(target.value, ast.Attribute) and self._is_self(target.value.value):
                 self._mark_field(target.value.attr)
+            if tainted(kind) and isinstance(target.value, ast.Name) and self._module_value(target.value.id):
+                self.v(target, "live value stored in module state")
             if tainted(kind) and isinstance(target.value, ast.Name) and self.env.get(target.value.id) in (None, CONT):
                 # 変数の容器へ live な値を入れた: その容器の要素は live
                 self.env[target.value.id] = CONT
@@ -703,7 +775,9 @@ class _FunctionAudit:
             # 型の属性は metaclass の `__getattribute__` / property を通る（`type_name` / `type_module`）
             self.v(node, f"attribute .{node.attr} of the type of a live value")
             return None
-        if receiver == LIVE:
+        if receiver == LIVE or receiver == VER:
+            # 確かめた容器（VER）も属性は live（組み込みの振る舞いは反復・長さ・真偽だけ。subclass の
+            # property は外の code）
             self.v(node, f"attribute .{node.attr} of a live value")
             return LIVE
         if receiver in (ITER, CONT):
@@ -946,6 +1020,11 @@ class _FunctionAudit:
         func = node.func
         if (
             isinstance(func, ast.Attribute) and func.attr in _FILLING_METHODS and isinstance(func.value, ast.Name)
+            and any(tainted(k) for k in args) and self._module_value(func.value.id)
+        ):
+            self.v(node, "live value stored in module state")
+        elif (
+            isinstance(func, ast.Attribute) and func.attr in _FILLING_METHODS and isinstance(func.value, ast.Name)
             and any(tainted(k) for k in args) and self.env.get(func.value.id) in (None, CONT)
             and func.value.id != self.self_name
         ):
@@ -1005,11 +1084,26 @@ class _FunctionAudit:
                 if resolved is None and receiver_node.id in _BUILTIN_TYPE_NAMES:
                     constructing = (
                         receiver_node.id == "object" and func.attr == "__setattr__" and node.args
-                        and self._is_self(node.args[0]) and self.qual.split(".")[-1] in ("__init__", "__post_init__")
+                        and self._is_self(node.args[0])
+                        and self.qual.split(".")[-1] in ("__init__", "__post_init__", "__setattr__")
                     )
                     if live and not constructing:
                         self.v(node, f"{receiver_node.id}.{func.attr}() on a live value outside the owner")
                     return None
+            if (
+                isinstance(receiver_node, ast.Call) and isinstance(receiver_node.func, ast.Name)
+                and receiver_node.func.id == "super" and self.cls and self.self_name
+            ):
+                # `super().m(...)`: 自分の型の MRO の次の型の method を辿る
+                for base_module, base in self.index.mro(self.module, self.cls)[1:]:
+                    if (base_module, base + "." + func.attr) in self.index.functions:
+                        method = (base_module, base + "." + func.attr)
+                        return self.resolved_call(
+                            node, ("func",) + method, [self.env.get(self.self_name), *args], kwargs, live, bound=True,
+                        )
+                if live:
+                    self.v(node, f"live value passed to unresolved super().{func.attr}()")
+                return None
             receiver = self.expr(receiver_node)
             owner = self._receiver_class(receiver, receiver_node)
             if owner is not None:
@@ -1026,6 +1120,8 @@ class _FunctionAudit:
                 self.v(node, f"method .{func.attr}() of a live value")
                 return LIVE
             if receiver == WORK or self._owner_object(receiver_node):
+                if live and self._unbounded_owner_call(func.attr, node):
+                    self.v(node, f"live value passed to the unbounded owner API .{func.attr}()")
                 return OWNER_RESULTS.get(func.attr) if func.attr == "materialize" else None
             if receiver in (CONT, ITER):
                 return self.container_method(node, func.attr, args)
@@ -1305,10 +1401,21 @@ def _is_eq_dataclass(decorator) -> bool:
 DECLARED_DEPENDENCIES = {
     ("checker.output_preparation", "finalize_result_envelope", "live value passed to unresolved method .seal()"):
         "#110: AuthoritySeal.seal(preimage) が作業量を受け取らない（`seal(preimage, work=...)` で撤去）",
+    ("proof.obligations.snapshot", "_fingerprint_json", "live value passed to the unbounded owner API .dumps()"):
+        "#194: 凍結した値（snapshot の作成では `freeze(budget=)` が数えた写し）を書く。proof の obligation の"
+        " digest（`SnapshotFingerprintCodec.digest` の解析時の呼び出し）は凍結を数えない（identity の owner）",
     ("checker.result_assembly", "analysis_limitation_result_for_pair",
      "live value passed to authority.decision.limitation_attribution.attribute_analysis_limitation"):
         "#110: 限界の帰属は authority の event（`observe_analysis_limitation`）を発行する（event の大きさと件数は"
         " AC-110-S2 の owner）",
+}
+
+#: 宣言した依存の場所ごとの違反の数（それより多い同じ違反は宣言の外）
+DECLARED_DEPENDENCY_SITES = {
+    ("checker.output_preparation", "finalize_result_envelope", "live value passed to unresolved method .seal()"): 2,
+    ("checker.result_assembly", "analysis_limitation_result_for_pair",
+     "live value passed to authority.decision.limitation_attribution.attribute_analysis_limitation"): 1,
+    ("proof.obligations.snapshot", "_fingerprint_json", "live value passed to the unbounded owner API .dumps()"): 1,
 }
 
 #: 宣言した作業量の外の依存の **呼び先**（(module, qualname) → 理由）。監査はここへ入らない
@@ -1358,6 +1465,13 @@ def protocol_roots(index: PackageIndex):
             yield (module, qual), {params[1].arg: LIVE}
         elif cls and index.subclass_of(module, cls, reducer) and last == "result":
             yield (module, qual), {}
+        elif cls and index.is_readable_property((module, qual)) and params:
+            # `live_values.attribute` が呼ぶ property（`readable_property` で宣言したものだけ。field は live）
+            yield (module, qual), {params[0].arg: rec(module, cls)}
+        elif cls and last == "__setattr__" and len(params) >= 3 and index.is_state_setter((module, qual)):
+            # `live_values.set_state` が呼ぶ `state_setter` で宣言した `__setattr__`（書く値は live）
+            yield (module, qual), {params[0].arg: rec(module, cls), params[2].arg: LIVE}
+
 
 
 def audit(package_root: pathlib.Path, entry_roots: Iterable[Tuple[str, str, Tuple[str, ...]]] = ENTRY_ROOTS):
@@ -1392,13 +1506,17 @@ def undeclared(violations):
 
     used = set()
     rest = []
+    seen = collections.Counter()
     for module, qual, line, message in violations:
         match = next(
             (declared for declared in DECLARED_DEPENDENCIES
              if declared[0] == module and declared[1] == qual and message.startswith(declared[2])),
             None,
         )
-        if match is None:
+        if match is not None:
+            seen[match] += 1
+        if match is None or seen[match] > DECLARED_DEPENDENCY_SITES[match]:
+            # 宣言した数より多い同じ違反は宣言の外（新しい呼び出しを宣言に紛れ込ませない）
             rest.append((module, qual, line, message))
         else:
             used.add(match)
@@ -1446,9 +1564,15 @@ COMPLETING_METHODS = frozenset({"join", "sort", "extend", "update"})
 
 
 def proportional_constructs(function) -> List[str]:
-    """関数の本体の、入力に比例し得る構文（`For@行` など）。入れ子の関数の中は除く。"""
+    """関数の本体の、入力に比例し得る構文（`For@行` など）。入れ子の関数の中は除く。
+
+    反復（for / while / 内包）・列を完了させる組み込みと method（`sorted` / `.join` / 引数無しの
+    `.sort()` も）・値全体を書く組み込み（`repr` / `dumps`）・`*` の展開・列の繰り返し（`[x] * n`）・
+    切り出し（`x[a:b]`）・自分自身の呼び出し（再帰）。
+    """
 
     found = []
+    name = getattr(function, "name", None)
     for node in _own_nodes(function):
         if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
             found.append(f"{type(node).__name__}@{node.lineno}")
@@ -1458,24 +1582,130 @@ def proportional_constructs(function) -> List[str]:
             func = node.func
             if isinstance(func, ast.Name) and func.id in COMPLETING_BUILTINS and node.args:
                 found.append(f"{func.id}()@{node.lineno}")
-            elif isinstance(func, ast.Attribute) and func.attr in COMPLETING_METHODS and node.args:
+            elif isinstance(func, ast.Name) and func.id in WRITING_BUILTINS:
+                found.append(f"{func.id}()@{node.lineno}")
+            elif isinstance(func, ast.Attribute) and func.attr in COMPLETING_METHODS and (node.args or func.attr == "sort"):
                 found.append(f".{func.attr}()@{node.lineno}")
+            elif isinstance(func, ast.Attribute) and func.attr in WRITING_METHODS:
+                found.append(f".{func.attr}()@{node.lineno}")
+            elif isinstance(func, ast.Name) and func.id == name:
+                found.append(f"recursion@{node.lineno}")
+        elif isinstance(node, ast.Starred):
+            found.append(f"starred@{node.lineno}")
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult) and (
+            isinstance(node.left, (ast.List, ast.Tuple)) or isinstance(node.right, (ast.List, ast.Tuple))
+        ):
+            found.append(f"repeat@{node.lineno}")
+        elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice) and not _fixed_slice(node.slice):
+            found.append(f"slice@{node.lineno}")
     return sorted(set(found))
 
 
+#: 値全体を書く組み込み・method（書く量は値の大きさに比例する）
+WRITING_BUILTINS = frozenset({"repr"})
+WRITING_METHODS = frozenset({"dumps"})
+
+
+def _fixed_slice(node) -> bool:
+    """`x[:N]` / `x[a:N]`（N は定数・大文字の名前の定数）: 写す量は固定の上限まで。"""
+
+    def constant(bound) -> bool:
+        if isinstance(bound, ast.Constant):
+            return True
+        name = bound.id if isinstance(bound, ast.Name) else bound.attr if isinstance(bound, ast.Attribute) else None
+        return name is not None and name.isupper()
+
+    return node.upper is not None and constant(node.upper) and (node.lower is None or constant(node.lower))
+
+
+def _loops_with_preceding(body, preceding=()):
+    """関数の本体の反復と、それより前に在る（同じ段か外側の段の）文の組。"""
+
+    for position, statement in enumerate(body):
+        before = (*preceding, *body[:position])
+        if isinstance(statement, (ast.For, ast.AsyncFor, ast.While)):
+            yield statement, before
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            inner = getattr(statement, field, None)
+            if isinstance(inner, list):
+                yield from _loops_with_preceding(inner, before)
+        for handler in getattr(statement, "handlers", ()) or ():
+            yield from _loops_with_preceding(handler.body, before)
+
+
+def _charges(nodes, names) -> bool:
+    for node in nodes:
+        for inner in ast.walk(node):
+            func = getattr(inner, "func", None) if isinstance(inner, ast.Call) else None
+            if (
+                isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                and func.value.id in names and func.attr == "charge"
+            ):
+                return True
+    return False
+
+
+def _uses_work(nodes, names) -> bool:
+    """`nodes` の中で作業量の引数を数える（`work.charge(...)`）か、呼び先へ渡すか。"""
+
+    for node in nodes:
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            func = inner.func
+            if (
+                isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                and func.value.id in names and func.attr == "charge"
+            ):
+                return True
+            arguments = [*inner.args, *(keyword.value for keyword in inner.keywords)]
+            if any(isinstance(argument, ast.Name) and argument.id in names for argument in arguments):
+                return True
+    return False
+
+
 def work_owner(index: PackageIndex, key) -> Optional[str]:
-    """関数が自分で作業量の owner を持つか: "B"（作業量 / 予算を引数に取る）、"C"（反復ごとに yield
-    する generator）、どちらでもなければ `None`。"""
+    """関数が自分で作業量の owner を持つか: "B"（作業量 / 予算を引数に取り、反復ごとに数えるか渡す）、
+    "C"（反復ごとに必ず 1 つ yield する generator）、どちらでもなければ `None`。"""
 
     function = index.functions[key]
     args = function.args
-    if any(arg.arg in WORK_PARAMETER_NAMES for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)):
-        return "B"
-    loops = [n for n in _own_nodes(function) if isinstance(n, (ast.For, ast.AsyncFor, ast.While))]
-    if loops and all(any(isinstance(inner, (ast.Yield, ast.YieldFrom)) for inner in ast.walk(loop)) for loop in loops):
-        if all(not isinstance(n, (ast.ListComp, ast.SetComp, ast.DictComp)) for n in _own_nodes(function)):
+    names = {
+        arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs) if arg.arg in WORK_PARAMETER_NAMES
+    }
+    own = list(_own_nodes(function))
+    loops = [n for n in own if isinstance(n, (ast.For, ast.AsyncFor, ast.While))]
+    if names:
+        # 引数に取るだけでは owner でない: 関数の中で数えるか渡し、反復は 1 回ごとに数えるか渡すか、
+        # 反復より前に（辿る幅を）数える
+        if _uses_work(function.body, names) and all(
+            _uses_work(loop.body, names) or _charges(before, names)
+            for loop, before in _loops_with_preceding(function.body)
+        ):
+            return "B"
+        return None
+    if loops and all(_yields_every_iteration(loop) for loop in loops):
+        completing = any(
+            isinstance(n, (ast.ListComp, ast.SetComp, ast.DictComp))
+            or (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in COMPLETING_BUILTINS and n.args)
+            for n in own
+        )
+        if not completing:
             return "C"
     return None
+
+
+def _yields_every_iteration(loop) -> bool:
+    """反復の本体の直下に yield の文があり、`continue` で飛ばさない（1 回ごとに必ず 1 つ渡す）。"""
+
+    direct = any(
+        isinstance(statement, ast.Expr) and isinstance(statement.value, (ast.Yield, ast.YieldFrom))
+        for statement in loop.body
+    )
+    skips = any(isinstance(inner, ast.Continue) for statement in loop.body for inner in ast.walk(statement))
+    return direct and not skips
 
 
 def unowned_proportional_work(package_root: pathlib.Path, analyzed: Iterable[Tuple[str, str]], index: PackageIndex):

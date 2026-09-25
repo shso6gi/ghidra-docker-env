@@ -164,9 +164,13 @@ class _Sink:
         self.emit(b'"')
         for start in range(0, len(value), _STRING_CHUNK):
             chunk = value[start:start + _STRING_CHUNK]
-            # 切り出した chunk の長さを数えてから escape・encode する
+            # 切り出した chunk の長さを数えてから escape・encode する（1 文字は 1 byte 以上）。
+            # 流す byte が文字数より多い分（escape・多 byte の文字）は流す前に足す: 数える量は
+            # 流した byte（単位は emit と同じ）
             self.work.charge(len(chunk))
-            self._put(_ENCODE_BASESTRING(chunk)[1:-1].encode("utf-8"))
+            data = _ENCODE_BASESTRING(chunk)[1:-1].encode("utf-8")
+            self.work.charge(len(data) - len(chunk))
+            self._put(data)
         self.emit(b'"')
 
     def emit_leaf(self, value: Any) -> None:
@@ -191,7 +195,7 @@ class _Sink:
 class _End:
     """容器を閉じる action（閉路の判定から外す。閉じ括弧はこの直前に積んだ byte 列が流す）。
 
-    容器そのものを持つ: 固定の形の要約（`register_fixed_canonical`）が作った一時的な容器が、
+    容器そのものを持つ: 固定の形の要約（`BoundedEvidence.summary`）が作った一時的な容器が、
     子を辿り終える前に解放されて `id` が別の容器に再利用されると、閉路でない値を閉路と誤る。
     """
 

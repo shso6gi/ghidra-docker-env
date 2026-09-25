@@ -16,6 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from scripts.function_tracer_pcode.core import live_values
+
 from scripts.function_tracer_pcode.checker.output_preparation import (
     BUNDLE_KEY,
     AuthoritySeal,
@@ -390,13 +392,13 @@ def test_the_tree_estimate_stops_on_the_distinct_node_total_across_siblings():
             node = Expression.binary_op("+", node, Expression(ExpressionType.CONSTANT, value=depth, size=4))
         return node
 
-    one = estimate_legacy_dict_bytes(chain(0, 600), max_bytes=None)
+    one = estimate_legacy_dict_bytes(chain(0, 600), work=_estimate_work(), max_bytes=None)
     limit = int(one / 0.6)
     # 1 つの node の直接の子が 64 本の独立な chain（どれも上限の 6 割）
     root = Expression(ExpressionType.BINARY_OP, operator="+", operands=[chain(seed, 600) for seed in range(64)], size=4)
-    estimate, elapsed, _ = _measured(lambda: estimate_legacy_dict_bytes(root, max_bytes=limit))
+    estimate, elapsed, _ = _measured(lambda: estimate_legacy_dict_bytes(root, work=_estimate_work(), max_bytes=limit))
     assert estimate == limit + 1
-    full, full_elapsed, _ = _measured(lambda: estimate_legacy_dict_bytes(root, max_bytes=None))
+    full, full_elapsed, _ = _measured(lambda: estimate_legacy_dict_bytes(root, work=_estimate_work(), max_bytes=None))
     assert full > 30 * limit
     # 上限で止まる見積りは 2 本目の途中で止まる（64 本を数える見積りより十分に早い）
     assert elapsed < full_elapsed / 8
@@ -673,7 +675,7 @@ def test_a_producer_failure_is_a_rejected_value_not_an_escaped_exception():
         RESULT_JSON_POLICY.prepare(_Broken())
 
     class _Exploding:
-        @property
+        @live_values.readable_property
         def kind(self):
             raise ValueError("broken key")
 
@@ -1388,3 +1390,11 @@ def test_a_huge_tuple_key_is_charged_before_it_is_stringified():
     assert RESULT_JSON_POLICY.prepare(mapping_of({1: "a", (2, "x"): "b"}, stringify_keys=True)).value() == {
         "1": "a", "(2, 'x')": "b",
     }
+
+
+def _estimate_work():
+    """見積もりの作業量（test の単独の呼び出しの owner。上限なし）。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
+
+    return JsonBudget(None)

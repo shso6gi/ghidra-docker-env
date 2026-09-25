@@ -234,12 +234,13 @@ class EquivalenceResult:
         default=None, repr=False, compare=False
     )
 
+    @live_values.state_setter
     def __setattr__(self, name: str, value: Any) -> None:
         # Issue #22 PR-22-D: 準備した A（解析由来の payload）は authority 確定前に
         # 1 回だけ作り、以後 live な属性を読み直さない。準備の後でその元になる属性を
         # 差し替えるのは、出力に現れない更新なので内部バグとして拒む。
         if name in PREPARED_SOURCE_ATTRIBUTES and (
-            self.__dict__.get("prepared_semantic_payload") is not None
+            live_values.instance_state(self, "prepared_semantic_payload", None) is not None
         ):
             raise PreparedPayloadStale(
                 f"result.{name} cannot be replaced after the output was prepared"

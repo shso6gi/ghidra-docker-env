@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import gc
 import inspect
+import itertools
+import operator
 import os
 import sys
 import types
@@ -94,24 +96,26 @@ _CODE_HOLDERS = (types.FunctionType, staticmethod, classmethod, property)
 
 
 def package_type(kind: type) -> bool:
-    """`kind` とその MRO の class 文で作った型（heap type）が、どれも package の code だけから成るか。
+    """`kind` とその MRO の class 文で作った型（heap type）の中身が、どれも信頼する code とデータだけか。
 
-    package の外で package の型を継承した型（`class S(Tally): pass` や、`__getattribute__` /
-    property を足した型）は信頼しない: 型の MRO から引いた package の関数を呼んでも、その中の
-    `self.x` が外の code を呼び得る。heap type ごとに、その `__dict__` の関数・property が全部
-    package の code で、少なくとも 1 つの関数を持つ（中身の無い外の subclass を除く）ことを確かめる。
-    組み込みの型（C で定義した型）はそのまま信頼する。
+    package の外で package の型を継承した型（`__getattribute__` / property / descriptor / 関数を
+    外の code で足した型）は信頼しない: 型の MRO から引いた package の関数を呼んでも、その中の
+    `self.x` / `self.f()` が外の code を呼び得る。heap type ごとに `__dict__` の値を **許した種類
+    だけ** に限る（`_trusted_namespace_value`）。中身を足さない subclass（空の body）は信頼する
+    （足した code が無い）。組み込みの型（C で定義した型）はそのまま信頼する。
     """
 
     if not _plain_metatype(kind):
         return False
     known = _PACKAGE_TYPES.get(kind)
     if known is None:
+        # 型の属性が型自身を指す（入れ子の class の循環）ときは、調べている間は信頼する側に置く
+        _PACKAGE_TYPES[kind] = True
         known = True
         for klass in _TYPE_MRO.__get__(kind):
             if not (_TYPE_FLAGS.__get__(klass) & _HEAP_TYPE):
                 continue
-            if not _package_class_body(klass):
+            if not _trusted_class_body(klass):
                 known = False
                 break
         _PACKAGE_TYPES[kind] = known
@@ -124,77 +128,138 @@ _DATACLASS_GENERATED = frozenset({
     "__lt__", "__le__", "__gt__", "__ge__", "__getstate__", "__setstate__", "__match_args__",
 })
 
-
-def _dataclass_generated(function: types.FunctionType) -> bool:
-    """`dataclasses` が class の中に作った関数か（`<string>` の code、または `dataclasses` の
-    wrapper（Python 3.10 の `__repr__`）がその code の関数だけを包んだもの）。"""
-
-    code = function.__code__
-    if code.co_filename == "<string>":
-        return True
-    if code not in _DATACLASS_WRAPPER_CODES:
-        return False
-    wrapped = [
-        cell.cell_contents for cell in (function.__closure__ or ())
-        if type(cell.cell_contents) is types.FunctionType
-    ]
-    return len(wrapped) > 0 and all(inner.__code__.co_filename == "<string>" for inner in wrapped)
+#: 実行環境（Python の標準 library）の code の directory。`enum` / `dataclasses` / `collections` /
+#: `contextlib` / `typing` / `abc` が package の型の MRO や class の中に置く関数の code（site-packages
+#: の外）。live な値の側からは書き換えられない実行環境の code として信頼する
+_STDLIB_DIR = os.path.normpath(__import__("sysconfig").get_paths()["stdlib"]) + os.sep
 
 
-def _dataclass_wrapper_codes() -> frozenset:
-    """`dataclasses` が生成した関数を包む wrapper の code（この Python の `dataclasses` で作って確かめる）。"""
-
-    import dataclasses
-
-    @dataclasses.dataclass(order=True, frozen=True)
-    class _Probe:
-        field: int = 0
-
-    return frozenset(
-        value.__code__ for value in dict.values(dict(_TYPE_DICT.__get__(_Probe)))
-        if type(value) is types.FunctionType and value.__code__.co_filename != "<string>"
+def _runtime_file(path: Any) -> bool:
+    return (
+        type(path) is str and os.path.isabs(path)
+        and os.path.normpath(path).startswith(_STDLIB_DIR)
+        and "-packages" + os.sep not in path
     )
 
 
-def _package_class_body(klass: type) -> bool:
-    namespace = dict(_TYPE_DICT.__get__(klass))
-    dataclass_body = "__dataclass_fields__" in namespace
-    functions = 0
-    for name, value in dict.items(namespace):
-        holder = type(value)
-        if holder is types.FunctionType:
-            if not package_code(value.__code__):
-                generated = (
-                    dataclass_body and name in _DATACLASS_GENERATED and _dataclass_generated(value)
-                )
-                if not generated:
-                    return False
-                continue
-            functions += 1
-        elif holder is staticmethod or holder is classmethod:
-            inner = value.__func__
-            if type(inner) is not types.FunctionType or not package_code(inner.__code__):
-                return False
-            functions += 1
-        elif holder is property:
-            for accessor in (value.fget, value.fset, value.fdel):
-                if accessor is not None and (type(accessor) is not types.FunctionType or not package_code(accessor.__code__)):
-                    return False
-            functions += 1
-    return functions > 0
+def _trusted_function(function: Any, *, generated: bool) -> bool:
+    """呼んでよい関数か: package の code、実行環境の code（closure に包んだ callable も信頼する
+    ものだけ）、`generated` なら `dataclasses` が作った `<string>` の関数。"""
+
+    if type(function) is not types.FunctionType:
+        return False
+    filename = function.__code__.co_filename
+    if package_code(function.__code__):
+        return True
+    if filename == "<string>":
+        return generated
+    if not _runtime_file(filename):
+        return False
+    # 実行環境の wrapper（`contextmanager`・`dataclasses` の `__repr__`・`typing` の cache）は包んだ
+    # callable を呼ぶ: それも信頼するものだけ
+    for cell in function.__closure__ or ():
+        try:
+            contents = cell.cell_contents
+        except ValueError:
+            continue
+        if not _trusted_callable(contents, generated=generated):
+            return False
+    return True
 
 
-_BUILTIN_DICTS = (dict, OrderedDict)
+#: C で定義した descriptor・callable の型（包んだ Python の callable を持たない）
+_C_CODE_TYPES = (
+    types.GetSetDescriptorType, types.MemberDescriptorType, types.WrapperDescriptorType,
+    types.MethodDescriptorType, types.ClassMethodDescriptorType, types.BuiltinFunctionType,
+    type(__import__("collections").namedtuple("_T", "a").a),
+)
+
+
+def _trusted_callable(value: Any, *, generated: bool) -> bool:
+    """closure・class の中の値として信頼する callable か（callable でない値は信頼する）。"""
+
+    holder = type(value)
+    if holder is types.FunctionType:
+        return _trusted_function(value, generated=generated)
+    if holder is types.MethodType:
+        return _trusted_function(value.__func__, generated=generated)
+    if _one_of(holder, _C_CODE_TYPES):
+        return True
+    if issubclass(holder, type):
+        return not (_TYPE_FLAGS.__get__(value) & _HEAP_TYPE) or package_type(value)
+    wrapped = instance_state(value, "__wrapped__", _ABSENT) if _plain_metatype(holder) else _ABSENT
+    if holder is _LRU_WRAPPER and wrapped is not _ABSENT:
+        # `functools.lru_cache` の wrapper（C）: 包んだ関数を信頼するものだけ
+        return _trusted_callable(wrapped, generated=generated)
+    return _inert_value(value)
+
+
+_LRU_WRAPPER = type(__import__("functools").lru_cache(maxsize=None)(len))
+
+
+def _inert_value(value: Any) -> bool:
+    """属性として読んでも呼んでも code を実行しないデータか（型が descriptor・callable でない）。"""
+
+    holder = type(value)
+    if not _plain_metatype(holder):
+        return False
+    return (
+        _type_lookup(holder, "__get__", _ABSENT) is _ABSENT
+        and _type_lookup(holder, "__set__", _ABSENT) is _ABSENT
+        and _type_lookup(holder, "__delete__", _ABSENT) is _ABSENT
+        and _type_lookup(holder, "__call__", _ABSENT) is _ABSENT
+    )
+
+
+def _trusted_namespace_value(name: Any, value: Any, *, dataclass_body: bool) -> bool:
+    """class の `__dict__` の値として許した種類か（それ以外は信頼しない）。"""
+
+    holder = type(value)
+    generated = dataclass_body and type(name) is str and name in _DATACLASS_GENERATED
+    if holder is types.FunctionType:
+        return _trusted_function(value, generated=generated)
+    if holder is staticmethod or holder is classmethod:
+        inner = value.__func__
+        if type(inner) is types.FunctionType:
+            # `namedtuple` の `__new__` も `<string>` の生成された関数
+            return _trusted_function(inner, generated=generated or name == "__new__")
+        return _trusted_callable(inner, generated=False)
+    if holder is property or holder is readable_property or holder is types.DynamicClassAttribute:
+        # 読むと accessor を呼ぶ: accessor も信頼する関数だけ
+        return all(
+            accessor is None or _trusted_function(accessor, generated=False)
+            for accessor in (value.fget, value.fset, value.fdel)
+        )
+    return _trusted_callable(value, generated=False)
+
+
+def _trusted_class_body(klass: type) -> bool:
+    raw = _unwrapped(_TYPE_DICT.__get__(klass))
+    if not _exact_str_keys(raw):
+        return False
+    dataclass_body = "__dataclass_fields__" in raw and "__dataclass_params__" in raw
+    for name, value in dict.items(raw):
+        if not _trusted_namespace_value(name, value, dataclass_body=dataclass_body):
+            return False
+    return True
+
+
+#: 組み込みの mapping の型（より特殊な型を先に: `OrderedDict` の subclass は `OrderedDict` の
+#: method と比べる）
+_BUILTIN_DICTS = (OrderedDict, dict)
 _TYPE_QUALNAME = type.__dict__["__qualname__"]
 _TYPE_MODULE = type.__dict__["__module__"]
 _TYPE_MRO = type.__dict__["__mro__"]
-#: 組み込みの容器の iterator（中身を辿るのは C の実装。generator のような code を持たない）
+#: 組み込みの容器の iterator（中身を辿るのは C の実装。generator のような code を持たない）。
+#: 型そのものの容器の iterator だけ: `reversed(seq)` の汎用の型（`reversed`）は包んだ値の
+#: `__len__` / `__getitem__` を呼ぶので含めない（`reversed([])` は list 専用の iterator）。
+#: 文字列の iterator は版で型が分かれる（3.12 の ASCII 専用の型）ので ASCII と非 ASCII の両方
 _BUILTIN_ITERATOR_TYPES = frozenset(
     type(iter(sample)) for sample in (
-        (), [], {}, set(), frozenset(), "", b"", range(0), {}.keys(), {}.values(), {}.items(),
-        reversed(()), reversed([]),
+        (), [], {}, set(), frozenset(), "", "\u00e9", b"", range(0), {}.keys(), {}.values(), {}.items(),
+        reversed([]),
     )
-)
+) - {reversed}
 _BUILTIN_VIEW_TYPES = frozenset(type(view) for view in ({}.keys(), {}.values(), {}.items()))
 
 
@@ -204,11 +269,14 @@ _BUILTIN_VIEW_TYPES = frozenset(type(view) for view in ({}.keys(), {}.values(), 
 
 
 _TYPE_DICT = type.__dict__["__dict__"]
+_MISSING = object()
+_ABSENT = object()
+#: `_exact_str_keys` の identity の比較（C の実装だけで key の型を確かめる）
+_IS = operator.is_
+_REPEAT_STR = itertools.repeat(str)
 #: 型の flag（`Py_TPFLAGS_HEAPTYPE`: class 文で作った型。無ければ C で定義した組み込みの型）
 _TYPE_FLAGS = type.__dict__["__flags__"]
 _HEAP_TYPE = 1 << 9
-#: `dataclasses` の wrapper の code（`_dataclass_generated`）
-_DATACLASS_WRAPPER_CODES = _dataclass_wrapper_codes()
 
 
 def type_attribute(kind: type, name: str) -> Any:
@@ -218,20 +286,70 @@ def type_attribute(kind: type, name: str) -> Any:
     組み込みの slot（`__mro__` / `__dict__`）だけを読む。
     """
 
-    for klass in _TYPE_MRO.__get__(kind):
-        namespace = _TYPE_DICT.__get__(klass)
-        if name in namespace:
-            return namespace[name]
-    return None
+    return _type_lookup(kind, name, None)
 
 
 def _type_lookup(kind: type, name: str, missing: Any) -> Any:
     """`type_attribute` と同じ（無ければ `missing`。値が `None` の属性と区別する）。"""
 
+    plain = _STR_MROS.get(kind) if type(kind) is type else None
+    if plain is None:
+        plain = all(
+            _str_namespace(klass, _TYPE_DICT.__get__(klass)) for klass in _TYPE_MRO.__get__(kind)
+        )
+        if type(kind) is type:
+            _STR_MROS[kind] = plain
+    if plain:
+        # MRO の class の `__dict__` の key が全部組み込みの `str`（型ごとに 1 度確かめた）: hash で引く
+        for klass in _TYPE_MRO.__get__(kind):
+            namespace = _TYPE_DICT.__get__(klass)
+            if name in namespace:
+                return namespace[name]
+        return missing
     for klass in _TYPE_MRO.__get__(kind):
         namespace = _TYPE_DICT.__get__(klass)
-        if name in namespace:
-            return namespace[name]
+        if _str_namespace(klass, namespace):
+            if name in namespace:
+                return namespace[name]
+        else:
+            found = _scan_str_key(_unwrapped(namespace), name, _ABSENT)
+            if found is not _ABSENT:
+                return found
+    return missing
+
+
+#: 型の MRO の class の `__dict__` の key が全部組み込みの `str` か（metaclass が `type` の型ごと）
+_STR_MROS: dict = {}
+#: class の `__dict__` の key が全部組み込みの `str` か（class ごと。class 文・`setattr` の名前は
+#: 組み込みの `str` だが、`type(name, bases, ns)` の `ns` の key はそのまま残る）
+_STR_NAMESPACES: dict = {}
+
+
+def _str_namespace(klass: type, namespace: Any) -> bool:
+    metatype = type(klass)
+    if metatype is not type and not _plain_metatype(klass):
+        # hash・比較を上書きした metaclass の型は cache の key にしない（毎回 storage を読む）
+        return _exact_str_keys(_unwrapped(namespace))
+    known = _STR_NAMESPACES.get(klass)
+    if known is None:
+        known = _STR_NAMESPACES[klass] = _exact_str_keys(_unwrapped(namespace))
+    return known
+
+
+def _exact_str_keys(raw: dict) -> bool:
+    """dict の storage の key が全部組み込みの `str` か（`dict.__iter__` は storage を読む。key の
+    `__hash__` / `__eq__` を呼ばない。型は identity で比べる）。"""
+
+    return all(map(_IS, map(type, dict.__iter__(raw)), _REPEAT_STR))
+
+
+def _scan_str_key(raw: dict, name: str, missing: Any) -> Any:
+    """組み込みの `str` でない key を持つ dict の `name` の値（組み込みの `str` の key だけを
+    組み込みの比較で探す。他の key の `__eq__` を呼ばない）。"""
+
+    for key, value in dict.items(raw):
+        if type(key) is str and str.__eq__(key, name):
+            return value
     return missing
 
 
@@ -387,11 +505,16 @@ def as_bool(value: Any) -> bool:
         return size(value) > 0
     kind = type(value)
     if issubclass(kind, Enum) and builtin_enum(value):
-        # 組み込みのままの enum: mixin（int / str / float）は基底型の値の真偽、それ以外は真
+        # 組み込みのままの enum: mixin（int / str / float）は基底型の値の真偽（真偽の slot が基底型の
+        # ものだけ）、それ以外は `__bool__` / `__len__` を持たなければ真
+        truth = _type_lookup(kind, "__bool__", _ABSENT)
+        length = _type_lookup(kind, "__len__", _ABSENT)
         if issubclass(kind, (int, float, str)):
-            return bool(json_scalar(value))
-        if _type_lookup(kind, "__bool__", _ABSENT) is _ABSENT:
+            if _one_of(truth, _BUILTIN_TRUTH) and _one_of(length, _BUILTIN_LENGTH):
+                return bool(json_scalar(value))
+        elif truth is _ABSENT and length is _ABSENT:
             return True
+        raise TypeError(f"{type_name(kind)} is not converted to bool without its own code")
     # `__bool__` / `__len__` を MRO のどこにも持たない型の値は常に真（`bool(x)` と同じ。その値の
     # code は無い: record・generator・関数など）。`__bool__ = None` のような値も「持つ」側
     if (
@@ -400,6 +523,49 @@ def as_bool(value: Any) -> bool:
     ):
         return True
     raise TypeError(f"{type_name(kind)} is not converted to bool without its own code")
+
+
+def builtin_hashed_scalar(value: Any) -> bool:
+    """str / int / float の subclass の値で、`__hash__` / `__eq__` が基底型の組み込みの実装のままか
+    （JPype の `JString` など: dict の key として置いても値の code を呼ばない）。"""
+
+    kind = type(value)
+    if type(kind) is type:
+        known = _BUILTIN_HASHED.get(kind)
+        if known is None:
+            known = _BUILTIN_HASHED[kind] = _builtin_hashed_type(kind)
+        return known
+    return _plain_metatype(kind) and _builtin_hashed_type(kind)
+
+
+#: 型ごとの `builtin_hashed_scalar` の結果（metaclass が `type` の型だけ）
+_BUILTIN_HASHED: dict = {}
+
+
+def _builtin_hashed_type(kind: type) -> bool:
+    if issubclass(kind, Enum):
+        return False
+    for base in (str, int, float):
+        if issubclass(kind, base):
+            return (
+                _type_lookup(kind, "__hash__", None) is _type_lookup(base, "__hash__", None)
+                and _type_lookup(kind, "__eq__", None) is _type_lookup(base, "__eq__", None)
+            )
+    return False
+
+
+def _one_of(value: Any, options: Tuple[Any, ...]) -> bool:
+    """`value` が `options` のどれかと同じ object か（identity。値の `__eq__` を呼ばない）。"""
+
+    for option in options:
+        if value is option:
+            return True
+    return False
+
+
+#: 基底型の真偽・長さの slot（mixin の enum が上書きしていないもの。無いことも含む）
+_BUILTIN_TRUTH = (_ABSENT, int.__bool__, float.__bool__)
+_BUILTIN_LENGTH = (_ABSENT, str.__len__)
 
 
 def as_str(value: Any) -> str:
@@ -463,6 +629,9 @@ def builtin_enum(value: Any) -> bool:
     member = instance_state(value, "_value_", None)
     if not (member is None or type(member) is str or type(member) is int or type(member) is float or type(member) is bool):
         return False
+    # member の名前も組み込みの `str`（`Enum.__str__` / `__hash__` / `__format__` は `_name_` を使う）
+    if type(instance_state(value, "_name_", None)) is not str:
+        return False
     # 型の側の判定は型ごとに 1 度だけ（EnumMeta の hash・比較は組み込みの実装）
     known = _BUILTIN_ENUM_TYPES.get(kind) if type(kind) is EnumMeta else None
     if known is None:
@@ -481,12 +650,12 @@ def _builtin_enum_type(kind: type) -> bool:
 
     return (
         type(kind) is EnumMeta
-        and type_attribute(kind, "__str__") in _BUILTIN_ENUM_STR
-        and type_attribute(kind, "__repr__") in _BUILTIN_ENUM_REPR
-        and type_attribute(kind, "__hash__") in _BUILTIN_HASH
-        and type_attribute(kind, "__eq__") in _BUILTIN_EQ
-        and type_attribute(kind, "__format__") in _BUILTIN_ENUM_FORMAT
-        and type_attribute(kind, "__getattribute__") in _BUILTIN_GETATTRIBUTE
+        and _one_of(type_attribute(kind, "__str__"), _BUILTIN_ENUM_STR)
+        and _one_of(type_attribute(kind, "__repr__"), _BUILTIN_ENUM_REPR)
+        and _one_of(type_attribute(kind, "__hash__"), _BUILTIN_HASH)
+        and _one_of(type_attribute(kind, "__eq__"), _BUILTIN_EQ)
+        and _one_of(type_attribute(kind, "__format__"), _BUILTIN_ENUM_FORMAT)
+        and _one_of(type_attribute(kind, "__getattribute__"), _BUILTIN_GETATTRIBUTE)
         and type_attribute(kind, "__class__") is _OBJECT_CLASS
     )
 
@@ -514,27 +683,58 @@ def enum_name(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-_MISSING = object()
 #: `attribute` が instance の値の無いことを知る印（`instance_state` の既定値）
-_ABSENT = object()
+
+
+def _dict_holder(kind: type) -> Any:
+    """instance の `__dict__` を読む組み込みの descriptor（無ければ `None`。metaclass が `type` の型ごとに 1 度）。
+
+    型の MRO のどこかが持つ組み込みの getset（C の型は member descriptor）だけ。metatype の
+    `__dict__`（型 object 用）を instance に当てない。
+    """
+
+    known = _DICT_HOLDERS.get(kind, _ABSENT) if type(kind) is type else _ABSENT
+    if known is _ABSENT:
+        holder = type_attribute(kind, "__dict__")
+        holder_kind = type(holder)
+        known = holder if (
+            (holder_kind is types.GetSetDescriptorType or holder_kind is types.MemberDescriptorType)
+            and _in_mro(holder.__objclass__, kind)
+        ) else None
+        if type(kind) is type:
+            _DICT_HOLDERS[kind] = known
+    return known
+
+
+_DICT_HOLDERS: dict = {}
+
+
+def _in_mro(klass: Any, kind: type) -> bool:
+    """`klass` が `kind` の MRO に在るか（identity で比べる。metaclass の `__eq__` を呼ばない）。"""
+
+    for entry in _TYPE_MRO.__get__(kind):
+        if entry is klass:
+            return True
+    return False
 
 
 def instance_state(value: Any, name: str, default: Any = _MISSING) -> Any:
     """instance の `__dict__` か slot に在る値（descriptor・`__getattr__` を呼ばない）。"""
 
     kind = type(value)
-    offset_holder = type_attribute(kind, "__dict__")
-    # instance の `__dict__` の組み込みの getset（型の MRO のどこかが持つもの。metatype の
-    # `__dict__`（型 object 用）を instance に当てない）
-    # `__dict__` は組み込みの getset か（`types.SimpleNamespace` などの C の型は）member descriptor
-    holder_kind = type(offset_holder)
-    if (
-        (holder_kind is types.GetSetDescriptorType or holder_kind is types.MemberDescriptorType)
-        and offset_holder.__objclass__ in _TYPE_MRO.__get__(kind)
-    ):
+    offset_holder = _dict_holder(kind)
+    if offset_holder is not None:
         state = offset_holder.__get__(value, kind)
-        if type(state) is dict and name in state:
-            return state[name]
+        if type(state) is dict:
+            # key が全部組み込みの `str` のときだけ hash で引く（`setattr(o, K("x"), v)` の key の
+            # `__eq__` を呼ばない）。そうでなければ組み込みの `str` の key だけを探す
+            if _exact_str_keys(state):
+                if name in state:
+                    return state[name]
+            else:
+                found = _scan_str_key(state, name, _ABSENT)
+                if found is not _ABSENT:
+                    return found
     descriptor = type_attribute(kind, name)
     if type(descriptor) is types.MemberDescriptorType:
         try:
@@ -544,6 +744,31 @@ def instance_state(value: Any, name: str, default: Any = _MISSING) -> Any:
     if default is not _MISSING:
         return default
     raise TypeError(f"{name!r} of {type_name(kind)} is not plain instance state")
+
+
+#: `state_setter` で宣言した `__setattr__` の code
+_STATE_SETTERS: set = set()
+
+
+def state_setter(function: Any) -> Any:
+    """`set_state()` が呼んでよい package の型の `__setattr__`（record の不変条件の検査）を宣言する。
+
+    宣言していない `__setattr__` を持つ型へは `set_state` は書かない（`TypeError`）。宣言した関数は
+    `tests/unit/_live_flow_audit.py` が root として監査する（書く値は live な値）。
+    """
+
+    if type(function) is not types.FunctionType or not package_code(function.__code__):
+        raise TypeError("a state setter is a package function")
+    _STATE_SETTERS.add(function.__code__)
+    return function
+
+
+class readable_property(property):
+    """`attribute()` が呼んでよい package の property（record の API として読む値）。
+
+    `attribute()` が呼ぶ property はこれで宣言したものだけ（普通の `property` は呼ばない）。
+    宣言した getter は `tests/unit/_live_flow_audit.py` が root として監査する（field は live な値）。
+    """
 
 
 def attribute(value: Any, name: str, default: Any = None) -> Any:
@@ -561,11 +786,15 @@ def attribute(value: Any, name: str, default: Any = None) -> Any:
     if descriptor is _ABSENT:
         return default
     descriptor_kind = type(descriptor)
-    if descriptor_kind is property:
+    if descriptor_kind is readable_property:
         getter = descriptor.fget
-        # package の型の、package の code が定義した property（record の API）だけを呼ぶ
+        # package の型の、package の code が `readable_property` で宣言した property（record の API と
+        # して読んでよい値。静的な監査の root）だけを呼ぶ
         if type(getter) is types.FunctionType and package_code(getter.__code__) and package_type(kind):
             return getter(value)
+        return default
+    if descriptor_kind is property:
+        # 宣言していない property は呼ばない（その getter は bounded path の能力ではない）
         return default
     # class の定数（descriptor でない値: `__get__` を持たない型の値）はそのまま
     if _type_lookup(descriptor_kind, "__get__", _ABSENT) is _ABSENT:
@@ -584,7 +813,11 @@ def set_state(value: Any, name: str, new: Any) -> None:
     kind = type(value)
     setter = type_attribute(kind, "__setattr__")
     if setter is not object.__setattr__:
-        if type(setter) is types.FunctionType and package_code(setter.__code__) and package_type(kind):
+        if (
+            type(setter) is types.FunctionType and package_code(setter.__code__)
+            and setter.__code__ in _STATE_SETTERS and package_type(kind)
+        ):
+            # `state_setter` で宣言した package の `__setattr__`（record の不変条件の検査）だけを呼ぶ
             setter(value, name, new)
             return
         if type(setter) is types.WrapperDescriptorType and not (_TYPE_FLAGS.__get__(setter.__objclass__) & _HEAP_TYPE):
@@ -602,10 +835,12 @@ def set_state(value: Any, name: str, new: Any) -> None:
     holder_kind = type(holder)
     if (
         (holder_kind is types.GetSetDescriptorType or holder_kind is types.MemberDescriptorType)
-        and holder.__objclass__ in _TYPE_MRO.__get__(kind)
+        and _in_mro(holder.__objclass__, kind)
     ):
         state = holder.__get__(value, kind)
-        if type(state) is dict:
+        # key が全部組み込みの `str` の dict にだけ書く（書くときの hash の比較で他の key の `__eq__` を
+        # 呼ばない）
+        if type(state) is dict and _exact_str_keys(state):
             state[name] = new
             return
     raise TypeError(f"{type_name(kind)} has no instance state for {name!r}")
@@ -678,14 +913,22 @@ def builtin_mapping(item: Any) -> Any:
     """
 
     kind = type(item)
-    if kind is dict or kind is OrderedDict:
+    if kind is dict:
         return item
+    if kind is OrderedDict:
+        # `OrderedDict` の iterator は key の hash で node を引く: key の hash が組み込みの実装のもの
+        # だけ（storage の key を hash せずに確かめる）
+        return item if _hash_safe_keys(item) else None
     if kind is types.MappingProxyType:
         referents = gc.get_referents(item)
         if len(referents) != 1 or builtin_mapping(referents[0]) is None:
             return None
         return item
-    return item if _builtin_behaviour(kind, _BUILTIN_DICTS, ("items", "__iter__", "__len__")) else None
+    if not _builtin_behaviour(kind, _BUILTIN_DICTS, ("items", "__iter__", "__len__")):
+        return None
+    if issubclass(kind, OrderedDict) and not _hash_safe_keys(item):
+        return None
+    return item
 
 
 def builtin_sequence(item: Any) -> bool:
@@ -786,6 +1029,7 @@ def items_of(mapping: Any) -> Iterator[Tuple[Any, Any]]:
 
     if type(mapping) is dict:
         return iter(dict.items(mapping))
+    # `OrderedDict` は key の hash が組み込みの実装のものだけ（`builtin_mapping` が確かめた）
     return iter(_mapping_base(mapping).items(_unwrapped(mapping)))
 
 
@@ -795,6 +1039,40 @@ def values_of(mapping: Any) -> Iterator[Any]:
     if type(mapping) is dict:
         return iter(dict.values(mapping))
     return iter(_mapping_base(mapping).values(_unwrapped(mapping)))
+
+
+def _plain_keys(raw: dict) -> bool:
+    """storage の key が全部 plain な値（`_plain_key`。hash・比較が組み込みの実装）か。"""
+
+    for key in dict.__iter__(raw):
+        if not _plain_key(key):
+            return False
+    return True
+
+
+def _hash_safe_keys(raw: dict) -> bool:
+    """storage の key の hash・比較が全部組み込みの実装か（組み込みの scalar・hash を上書きしない
+    scalar の subclass・組み込みのままの enum・それらの tuple）。storage を `dict.__iter__` で読む。"""
+
+    for key in dict.__iter__(raw):
+        if not _hash_safe_key(key):
+            return False
+    return True
+
+
+def _hash_safe_key(key: Any) -> bool:
+    pending = [key]
+    while pending:
+        item = pending.pop()
+        kind = type(item)
+        if item is None or kind is str or kind is int or kind is bool or kind is float:
+            continue
+        if kind is tuple:
+            pending.extend(item)
+            continue
+        if not (builtin_hashed_scalar(item) or builtin_enum(item)):
+            return False
+    return True
 
 
 def merged_mappings(*mappings: Any) -> dict:
@@ -843,9 +1121,16 @@ def lookup(mapping: Any, key: Any, default: Any = None) -> Any:
 
     if not _plain_key(key):
         raise TypeError(f"{type_name(type(key))} is not a plain mapping key")
-    if type(mapping) is dict:
-        return dict.get(mapping, key, default)
-    return _mapping_base(mapping).get(_unwrapped(mapping), key, default)
+    base = dict if type(mapping) is dict else _mapping_base(mapping)
+    raw = mapping if type(mapping) is dict else _unwrapped(mapping)
+    if _plain_keys(raw):
+        return base.get(raw, key, default)
+    # 組み込みでない key（`__eq__` を上書きした str の subclass など）を持つ mapping: hash で引くと
+    # その key の `__eq__` を呼び得る。plain な key だけを組み込みの比較で探す
+    for stored, value in dict.items(raw):
+        if _plain_key(stored) and stored == key:
+            return value
+    return default
 
 
 def _plain_key(key: Any) -> bool:
@@ -888,6 +1173,9 @@ __all__ = [
     "as_repr",
     "as_str",
     "builtin_enum",
+    "readable_property",
+    "builtin_hashed_scalar",
+    "state_setter",
     "copied_container",
     "attribute",
     "builtin_container",

@@ -424,7 +424,7 @@ def test_the_shared_schema_adds_no_recursion_frames():
     depth = (sys.getrecursionlimit() // 3) - 60
     for index in range(depth):
         node = Expression.binary_op("INT_ADD", node, Expression.constant(index, 4))
-    assert _actual(node.to_dict()) == estimate_legacy_dict_bytes(node)
+    assert _actual(node.to_dict()) == estimate_legacy_dict_bytes(node, work=_estimate_work())
 
 
 def test_the_tree_representation_within_budget_is_unchanged():
@@ -543,13 +543,13 @@ def _phi_dag():
 def test_d5s_tree_estimate_equals_the_actual_tree_json(build):
     expr = build()
     actual = _actual(expr.to_dict())
-    assert estimate_legacy_dict_bytes(expr) == actual
-    assert estimate_legacy_dict_bytes(expr, max_bytes=actual - 1) == actual
+    assert estimate_legacy_dict_bytes(expr, work=_estimate_work()) == actual
+    assert estimate_legacy_dict_bytes(expr, work=_estimate_work(), max_bytes=actual - 1) == actual
 
 
 def test_d5s_tree_estimate_of_a_depth_40_dag_is_linear():
     started = time.perf_counter()
-    size = estimate_legacy_dict_bytes(_shared_dag(40))
+    size = estimate_legacy_dict_bytes(_shared_dag(40), work=_estimate_work())
     assert time.perf_counter() - started < 1.0
     assert size > 2 ** 40  # 木としての大きさ（作ってはいない）
 
@@ -1044,7 +1044,7 @@ def test_the_frozen_size_cache_returns_the_same_exact_size_and_skips_the_walk(mo
     """凍結済み node の大きさは再利用する（snapshot は同じ解析を何度も書く）。"""
     expr = publish(_shared_dag(12, name="名前"))
     actual = _actual(expr.to_dict())
-    assert estimate_legacy_dict_bytes(expr) == actual
+    assert estimate_legacy_dict_bytes(expr, work=_estimate_work()) == actual
     built = []
     original = Expression._to_dict_active
 
@@ -1053,12 +1053,12 @@ def test_the_frozen_size_cache_returns_the_same_exact_size_and_skips_the_walk(mo
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(Expression, "_to_dict_active", _counting)
-    assert estimate_legacy_dict_bytes(expr) == actual
+    assert estimate_legacy_dict_bytes(expr, work=_estimate_work()) == actual
     assert built == []  # 2 回目は 1 node も組み立てない
     # 未凍結の式は cache しない（書き換わり得る）
     loose = _shared_dag(3)
-    estimate_legacy_dict_bytes(loose)
-    estimate_legacy_dict_bytes(loose)
+    estimate_legacy_dict_bytes(loose, work=_estimate_work())
+    estimate_legacy_dict_bytes(loose, work=_estimate_work())
     assert len(built) == 2 * 4
 
 
@@ -1280,7 +1280,7 @@ def test_the_snapshot_aggregate_refuses_before_building_the_tree_that_overflows(
     from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
 
     analysis = _analysis_with_trees(200)
-    one_tree = estimate_legacy_dict_bytes(analysis.returns[0].value)
+    one_tree = estimate_legacy_dict_bytes(analysis.returns[0].value, work=_estimate_work())
     built = []
     original = Expression._to_dict
 
@@ -1851,3 +1851,11 @@ def test_the_full_analysis_representation_is_bounded_including_derived_proof():
             analysis.to_dict()
         assert time.perf_counter() - started < 1.0
     assert caught.value.site == "core.analysis.FunctionReturnAnalysis.to_dict"
+
+
+def _estimate_work():
+    """見積もりの作業量（test の単独の呼び出しの owner。上限なし）。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
+
+    return JsonBudget(None)

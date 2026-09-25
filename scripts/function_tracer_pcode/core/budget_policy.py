@@ -369,10 +369,15 @@ class SerializationWork:
         max_bytes: Optional[int] = None,
         parent: Optional["SerializationWork"] = None,
     ) -> None:
+        from scripts.function_tracer_pcode.core.json_encoding import active_walk_work
         from scripts.function_tracer_pcode.core.semantic_snapshot import (
             SemanticGraphMeter,
         )
 
+        if active_walk_work() is not None:
+            # walk の中（converter・reducer・`json_items`）で新しい作業量を作らない（`JsonBudget` と
+            # 同じ規則。その仕事は walk の作業量へ数える: owner は 1 つ）
+            raise TypeError("a serialization scope cannot start inside a walk; count into the walk's work instead")
         #: 入れ子の terminal な scope は外側の作業量へも足す（外側の上限も効く）
         self.parent = parent
 
@@ -416,15 +421,18 @@ class SerializationWork:
         limit = self.max_bytes
         if limit is None and self.terminal:
             limit = active_budget_policy().limit(BudgetKind.SERIALIZATION_BYTES)
-        observed = self.consumed if limit is None else max(self.consumed, limit + 1)
+        # 超えた量は上限 + 1（どこまで辿ってから止めたか・cache の当たり方に依らない値。限界の
+        # evidence は cause の identity に入るので、走査の履歴で変えない）
+        observed = self.consumed if limit is None else limit + 1
         if not self.terminal:
             from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
 
             raise JsonBudgetExhausted(consumed_bytes=observed, max_bytes=self.max_bytes)
-        # target と evidence は限界にするときだけ組み立てる
+        # target と evidence は限界にするときだけ組み立てる。比べる上限はこの作業量の上限（今の
+        # policy の上限ではない: 入れ子の scope の policy が大きくても、この作業量で止める）
         enforce_budget(
             BudgetKind.SERIALIZATION_BYTES, observed, site=self.site,
-            target_key=self.target_key(), evidence=self._evidence(),
+            target_key=self.target_key(), evidence=self._evidence(), limit=limit,
         )
 
     def tree(self, leaf: Any, *, build: bool) -> Tuple[Any, int]:
@@ -435,7 +443,8 @@ class SerializationWork:
         # sized leaf の protocol は package の型の関数を直接呼ぶ（instance の属性を引かない）
         if not self.enabled:
             return (protocol_method(leaf, "__json_tree__")(leaf) if build else None), 0
-        size = protocol_method(leaf, "__json_tree_bytes__")(leaf, RESULT_JSON_POLICY, self.remaining())
+        # 見積もりの作業量（runtime ref を辿る分）もこの作業量へ数える（byte の大きさとは分ける）
+        size = protocol_method(leaf, "__json_tree_bytes__")(leaf, RESULT_JSON_POLICY, self.remaining(), self)
         built = None
         if size is None:
             # DAG のまま見積もれない形（閉路。未凍結の式の中だけ）: node を 1 つ作るたびに
@@ -455,10 +464,16 @@ class SerializationWork:
             if not self.terminal:
                 from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
 
-                raise JsonBudgetExhausted(consumed_bytes=self.consumed, max_bytes=self.max_bytes)
+                # node の上限で止めた: byte の超過として上限 + 1 を伝える（呼ぶ側が上限の内側と
+                # 読み違えない）
+                raise JsonBudgetExhausted(
+                    consumed_bytes=self.consumed if self.max_bytes is None else self.max_bytes + 1,
+                    max_bytes=self.max_bytes,
+                )
             enforce_budget(
                 BudgetKind.SERIALIZATION_NODES, self.distinct_nodes, site=self.site,
                 target_key=self.target_key(), evidence=self._evidence(),
+                limit=self._policy.serialization_nodes,
             )
         if build and built is None:
             built = protocol_method(leaf, "__json_tree__")(leaf)
@@ -567,16 +582,20 @@ def enforce_budget(
     site: str,
     target_key: Any,
     evidence: Iterable[str] = (),
+    limit: Optional[int] = None,
 ) -> None:
-    """観測値を残し、今の policy を超えていたら限界にする（checkpoint の入口）。"""
+    """観測値を残し、上限を超えていたら限界にする（checkpoint の入口）。
+
+    上限は `limit`（作業量が自分の上限を持つとき）か、`None` なら今の policy の上限。
+    """
 
     observe_budget_usage(kind, observed, site=site)
-    policy = active_budget_policy()
-    if policy.exceeds(kind, observed):
+    bound = active_budget_policy().limit(kind) if limit is None else limit
+    if bound is not None and live_values.as_int(observed) > bound:
         raise_expression_size_budget_exceeded(
             kind,
             observed=observed,
-            limit=policy.limit(kind),
+            limit=bound,
             site=site,
             target_key=target_key,
             evidence=evidence,

@@ -531,7 +531,13 @@ def _abi_constraint_pairs(constraints: Any) -> Any:
     """ABI 制約の (key, {signedness, narrow_bits})（1 組ずつ。mapping を先に写さない）。"""
 
     for key, value in live_values.items_of(constraints):
-        signedness, narrow_bits = tuple(live_values.elements_of(value))
+        # 値は (signedness, narrow_bits) の 2 つ組（旧 unpack と同じく 2 つでなければ `ValueError`）。
+        # 列全体を先に写さない（大きさを確かめてから 2 つだけ読む）
+        if live_values.size(value) != 2:
+            raise ValueError("an ABI constraint is a (signedness, narrow_bits) pair")
+        members = live_values.elements_of(value)
+        signedness = next(members)
+        narrow_bits = next(members)
         yield key, inline(("signedness", signedness), ("narrow_bits", narrow_bits))
 
 
@@ -1611,7 +1617,12 @@ def _plan_note(prepared: Any) -> str:
     return f"prepared {plan.prepared_size()}, headroom {plan.headroom()}"
 
 
-def _violation(message: str, members: Any, consumed: int = 0) -> OutputEnvelopeInvariantViolation:
+def _violation(
+    message: str, members: Any, consumed: int = 0, *, field_bound: Optional[int] = None,
+) -> OutputEnvelopeInvariantViolation:
+    if field_bound is not None:
+        # field の schema の上限を破った: 上限と要求量は field の値（envelope 全体ではない）
+        return OutputEnvelopeInvariantViolation(message, max_bytes=field_bound, requested_bytes=consumed)
     return OutputEnvelopeInvariantViolation(
         message,
         max_bytes=_budget_limit(members) or 0,
@@ -1642,7 +1653,7 @@ def _prepare_after_authority(
         ):
             raise _violation(
                 f"{item.key} exceeds its output schema bound of {field_max_bytes} bytes",
-                members, consumed,
+                members, consumed, field_bound=field_max_bytes,
             ) from exc
         raise _violation(
             f"{item.key} must not be truncated but does not fit the envelope "

@@ -88,8 +88,9 @@ class JsonOutputLimitExceeded(AnalysisFailureError):
 class JsonBudgetExhausted(AnalysisFailureError):
     """walker が byte の上限に達した（そこで辿るのをやめた）。
 
-    `consumed_bytes` は止めた時点までに数えた byte 数（上限 + 1 以上）で、値全体の
-    大きさではない（残りは数えていない）。
+    `consumed_bytes` は上限 + 1（上限の無い予算では止めた時点までに数えた量）で、値全体の
+    大きさではない（残りは数えていない）。どこまで辿ってから止めたかに依らない値なので、
+    限界の evidence（cause の identity）に入れてよい。
     """
 
     def __init__(self, *, consumed_bytes: int, max_bytes: Optional[int]) -> None:
@@ -866,6 +867,12 @@ _ACTIVE_WORK: "contextvars.ContextVar[Optional[JsonBudget]]" = contextvars.Conte
 )
 
 
+def active_walk_work() -> Optional["JsonBudget"]:
+    """今 walk の中なら、その walk の作業量（walk の外なら `None`）。"""
+
+    return _ACTIVE_WORK.get()
+
+
 class JsonBudget:
     """walker が数えた byte を受け取る相手（上限を超えたら `exceeded()`）。
 
@@ -910,7 +917,8 @@ class JsonBudget:
     def exceeded(self) -> None:
         # 超えた事実は上限 + 1 以上として伝える（作業量（effort）が先に尽きて止めたときも、
         # 呼ぶ側が「測った大きさ」を上限の内側と読み違えない。`JsonBudgetExhausted` の契約）
-        consumed = self.consumed if self.max_bytes is None else max(self.consumed, self.max_bytes + 1)
+        # 値は上限 + 1（どこまで辿ってから止めたか・cache の当たり方に依らない）
+        consumed = self.consumed if self.max_bytes is None else self.max_bytes + 1
         raise JsonBudgetExhausted(consumed_bytes=consumed, max_bytes=self.max_bytes)
 
     def tree(self, leaf: Any, *, build: bool) -> Tuple[Any, int]:
@@ -918,7 +926,11 @@ class JsonBudget:
 
         remaining = self.remaining()
         # sized leaf の protocol は package の型の関数を直接呼ぶ（instance の属性を引かない）
-        size = protocol_method(leaf, "__json_tree_bytes__")(leaf, RESULT_JSON_POLICY, remaining)
+        # 見積もりの作業量は今の walk の作業量（walk の外ならこの予算）へ数える（byte と分ける）
+        active = _ACTIVE_WORK.get()
+        size = protocol_method(leaf, "__json_tree_bytes__")(
+            leaf, RESULT_JSON_POLICY, remaining, self if active is None else active,
+        )
         if size is None:
             # DAG のまま見積もれない形（閉路。未凍結の式の中だけ）: node を 1 つ作るたびに
             # 数えながら作る（作ってから数えない）
@@ -1217,16 +1229,31 @@ class JsonEncodingPolicy:
         value = _Walk(self, CANONICAL, budget, build=True).run(source)
         return PreparedJson(value, budget.consumed, self, _token=_PREPARED_TOKEN)
 
+    def prepare_into(self, source: Any, work: Any) -> Any:
+        """source の canonical な JSON 値を、作りながら byte と作業量を `work` へ数える。
+
+        写しは数えた走査そのものが作る（数えてから別の走査で写し直さない: 写しの中身と数えた量が
+        食い違わない）。walk の中でも使える（予算を新しく作らない）。
+        """
+
+        return _Walk(self, CANONICAL, work, build=True, effort_to_budget=True).run(source)
+
     def measure(
         self, source: Any, *, max_bytes: Optional[int] = None, mode: str = CANONICAL,
-        size_only: bool = False,
+        size_only: bool = False, effort: Optional[JsonBudget] = None,
     ) -> int:
         """`prepare`（mode=LEGACY なら `materialize`）と同じ走査で byte 数だけを数える。
 
         walk の外で使う。`size_only=True` は walk の中の登録した見積もり（大きさだけを返し、呼ぶ
         側がその大きさを **1 回だけ** 数える。上限は呼ぶ側の作業量の残り）でだけ使う（J16）。
+        `effort` を渡すと、走査の作業量はその作業量（呼ぶ側の owner）へ数え、返すのは byte だけ
+        （byte を出現の数だけ足す見積もりが、作業量を出現ごとに数え直さないため）。
         """
 
+        if effort is not None:
+            budget = JsonBudget(max_bytes, detached=True)
+            _Walk(self, mode, budget, build=False, effort=effort).run(source)
+            return budget.consumed
         budget = JsonBudget(max_bytes, detached=size_only)
         # 見積もり（`size_only`）は走査の作業量も返す大きさに含める: 呼ぶ側がそれを 1 回数える
         # （見積もりの effort を別の owner に残さない）
@@ -1399,9 +1426,11 @@ def _stringified_key(key: Any, work: "JsonBudget") -> str:
     if base is not NOT_PLAIN or _builtin_enum(key):
         # scalar（subclass は基底型の値）と組み込みのままの enum（`IntEnum` を含む）: 旧 `str(k)`
         return live_values.as_str(key)
-    if kind is tuple and _is_plain_key_part(key, work):
-        # 基底型の値へ書き直した tuple の組み込みの `repr`（= `str`）
-        return tuple.__repr__(builtin_view(key)[1])
+    if kind is tuple:
+        view = _plain_key_view(key, work)
+        if view is not _NOT_PLAIN:
+            # 基底型の値へ書き直した tuple の組み込みの `repr`（= `str`）
+            return tuple.__repr__(view)
     raise TypeError(f"mapping key {type_name(kind)} is not stringified without its own __str__")
 
 
@@ -1604,23 +1633,49 @@ def builtin_str(value: Any) -> str:
     return f"<{type_name(type(value))}>"
 
 
-def _is_plain_key_part(part: Any, work: "JsonBudget") -> bool:
-    """`part` が scalar と tuple だけから成るか（要素を数えながら確かめる。`str()` の手間も同じ量）。"""
+def _builtin_hashed_key(key: Any) -> bool:
+    """新しい dict へ置いてよい key か（`__hash__` / `__eq__` が組み込みの実装: 組み込みの scalar と
+    組み込みのままの enum）。"""
 
-    pending = [part]
-    while pending:
-        item = pending.pop()
+    kind = type(key)
+    return (
+        key is None or kind is str or kind is int or kind is bool or kind is float
+        or _builtin_enum(key) or live_values.builtin_hashed_scalar(key)
+    )
+
+
+def _plain_key_view(part: Any, work: "JsonBudget") -> Any:
+    """scalar と tuple だけから成る `part` の、基底型の値で書き直した写し（それ以外は `NOT_PLAIN`）。
+
+    確かめる走査と写す走査は 1 回（要素を数えながら。`str()` の手間も同じ量で、上限は `work`
+    だけ: 固定の上限で別に止めない）。
+    """
+
+    root: List[Any] = [None]
+    stack: List[Tuple[Any, Any, int]] = [(part, root, 0)]
+    # 子を写し終えてから tuple にする list（親が先に積まれる: 逆順に閉じる）
+    closing: List[Tuple[List[Any], Any, int]] = []
+    while stack:
+        item, parent, index = stack.pop()
         kind = type(item)
         if kind is tuple:
             work.charge(1 + len(item))
-            pending.extend(item)
+            out: List[Any] = [None] * len(item)
+            closing.append((out, parent, index))
+            for position in range(len(item) - 1, -1, -1):
+                stack.append((item[position], out, position))
         elif kind is str:
             work.charge(1 + len(item))
-        elif plain_scalar(item) is _NOT_PLAIN:
-            return False
+            parent[index] = item
         else:
+            base = plain_scalar(item)
+            if base is _NOT_PLAIN:
+                return _NOT_PLAIN
             work.charge(1)
-    return True
+            parent[index] = base
+    for out, parent, index in reversed(closing):
+        parent[index] = tuple(out)
+    return root[0]
 
 
 def identity_key_of(value: Any, *, names: Tuple[str, ...] = ("stable_key", "to_key")) -> Tuple[bool, Any]:
@@ -2075,12 +2130,19 @@ class _Walk:
                     key, item = item
                     if type(key) is str:
                         text_key = key
-                    elif canonical and not issubclass(type(key), str):
-                        # str でない key は JSON の文字列にすると別の key と衝突し得る（`1` と
-                        # `"1"`）。衝突を拒むのは一般の経路（ここで写すと片方が黙って消える）
+                    elif canonical and not (
+                        issubclass(type(key), str) and live_values.builtin_hashed_scalar(key)
+                    ):
+                        # str でない key（`1` と `"1"`）・比較を上書きした str の subclass の key
+                        # （`K("a")` と `"a"`）は JSON の文字列にすると別の key と衝突し得る。衝突を
+                        # 拒むのは一般の経路（ここで写すと片方が黙って消える）。hash・比較が `str` の
+                        # 実装のままの subclass は同じ文字列の key と同じ key（衝突しない）
                         raise _NotPlain
-                    elif key is None or issubclass(type(key), (str, int, float)):
-                        # 基底型の subclass の key も一般の経路と同じ `canonical_key`
+                    elif canonical:
+                        text_key = policy.canonical_key(key)
+                    elif _builtin_hashed_key(key):
+                        # LEGACY は key をそのまま新しい dict へ置く: hash・比較が組み込みの実装の
+                        # key だけ（基底型の subclass は一般の経路と同じ `canonical_key` で数える）
                         text_key = policy.canonical_key(key)
                     else:
                         raise _NotPlain
@@ -2304,7 +2366,9 @@ class _Walk:
                 # 既に在る値への参照: 写さずに数え、元の object をそのまま置く
                 done, _ = self.plain(item, False)
                 if not done:
-                    self.count_only(item, raw_leaves=True)
+                    # 高速経路が辿った分は作業量へ数え済み: 一般の経路で 1 回だけ辿り直す
+                    # （`enter_raw` を通すと高速経路をもう 1 度試して同じ前半を 2 回数える）
+                    self.count_raw_container(item, mapping)
                 self.place(parent, key, item, build)
                 return
             done, value = self.plain(item, build)
@@ -2339,15 +2403,20 @@ class _Walk:
         if mapping is not None or builtin_sequence(item):
             done, _ = self.plain(item, False)
             if not done:
-                if mapping is not None:
-                    self.push("dict", items_of(mapping), None, None, item, build=False,
-                              fn=_RAW, preserve_keys=True)
-                else:
-                    self.push("list", iter(item), None, None, item, build=False, fn=_RAW)
-                self.drain_to(len(self.stack) - 1)
+                self.count_raw_container(item, mapping)
         else:
             self.count_raw_leaf(item)
         self.place(parent, key, item, build)
+
+    def count_raw_container(self, item: Any, mapping: Any) -> None:
+        """高速経路で辿れなかった容器を、一般の経路で 1 回だけ数える（要素は元の値のまま）。"""
+
+        if mapping is not None:
+            self.push("dict", items_of(mapping), None, None, item, build=False,
+                      fn=_RAW, preserve_keys=True)
+        else:
+            self.push("list", iter(item), None, None, item, build=False, fn=_RAW)
+        self.drain_to(len(self.stack) - 1)
 
     def count_raw_leaf(self, item: Any) -> None:
         """LEGACY でそのまま置く JSON 型でない葉を、**後段の codec が写す形で** 数える。
@@ -2620,6 +2689,10 @@ class _Walk:
                 self.budget.charge(separator + self.string_bytes(text_key) + self.key_separator)
                 if self.token_sink is not None:
                     self.token("k" + text_key)
+                if frame.preserve_keys and not _builtin_hashed_key(child_key):
+                    # 元の key を新しい dict へ置くと key の `__hash__` / `__eq__` を呼ぶ: 組み込みの
+                    # 実装の key だけを置く
+                    self.reject(f"mapping key {type_name(type(child_key))} is not hashed by a builtin")
                 out_key = child_key if frame.preserve_keys else text_key
             else:
                 if separator:
@@ -2665,7 +2738,7 @@ class JsonObjectBudget:
         #: その key 以外の予約を差し引く）
         self._reserved: Dict[Any, int] = {}
 
-    @property
+    @live_values.readable_property
     def total_bytes(self) -> int:
         return self.policy.container_frame_bytes(self._count) + self._members
 

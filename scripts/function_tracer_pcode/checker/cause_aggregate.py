@@ -1296,10 +1296,11 @@ def _payload_occurrence_views(records: Sequence[UnknownReasonRecord]) -> List[Di
 
 
 def _prepared_within_work(record: Any) -> Any:
-    """record を出力と同じ有界な行にする（数え済みの record の写し）。
+    """record を出力と同じ有界な行にする。
 
-    record は呼ぶ側の `_counted`（CANONICAL）が今の直列化の作業量へ数えてある: ここでは数え直さず、
-    写す大きさの上限は作業量の上限（数えた量はそれ以下）。作業量の scope の外（部品単体の
+    写しは、作る走査そのものが今の直列化の作業量へ byte と作業量を数えながら作る（`prepare_into`:
+    数えた量と写しの中身が食い違わない）。`_counted` が数えたのは集計が **読む** 仕事で、写しを
+    **作る** 仕事はこの走査の分（別の仕事を 1 回ずつ数える）。作業量の scope の外（部品単体の
     呼び出し）では数えない。
     """
 
@@ -1308,9 +1309,7 @@ def _prepared_within_work(record: Any) -> Any:
     work = active_serialization_work()
     if work is None:
         return json_encoding.RESULT_JSON_POLICY.prepare(record).value()
-    # record は `_counted`（CANONICAL）が同じ作業量へ数え済み: 書く大きさは数えた量と同じなので、
-    # 上限は数えた後の残りでなく数えた量そのもの（数え直さない。exact-once）
-    return json_encoding.RESULT_JSON_POLICY.prepare(record, max_bytes=work.max_bytes).value()
+    return json_encoding.RESULT_JSON_POLICY.prepare_into(record, work)
 
 
 def _payload_final_identity(evidence: Mapping[str, Any], occurrences: Sequence[Mapping[str, Any]]):

@@ -642,15 +642,12 @@ class _PhaseUsageFold(Reducer):
                 "last_result": self.last_results[key],
             }
 
-    def _used_phases(self):
-        for key, counts in self.counts.items():
-            if counts["used"]:
-                yield self.phases[key]
-
     def result(self, *, work: Any) -> Any:
         self._seed(work)
         if self.used_only:
-            return each(self._used_phases())
+            # 使った phase を選ぶ（行ごとに数える: 使わなかった行を読み飛ばす仕事も work へ）
+            work.charge(len(self.counts))
+            return each([self.phases[key] for key, counts in self.counts.items() if counts["used"]])
         return each(self.rows())
 
 

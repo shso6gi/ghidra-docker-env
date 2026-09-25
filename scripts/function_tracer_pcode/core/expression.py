@@ -763,7 +763,12 @@ class Expression:
             budget_scope_is_active,
             serialization_scope,
         )
+        from scripts.function_tracer_pcode.core.json_encoding import active_walk_work
 
+        walk_work = active_walk_work()
+        if walk_work is not None:
+            # walk の中（record の `json_items` など）: 木はその walk の作業量へ数えて作る
+            return walk_work.tree(self, build=True)[0]
         work = active_serialization_work()
         if work is not None:
             return work.tree(self, build=True)[0]
@@ -781,11 +786,15 @@ class Expression:
 
         return self._to_dict(set())
 
-    def __json_tree_bytes__(self, policy: Any, remaining: Optional[int]) -> Optional[int]:
-        """木表現の byte 数を **作らずに** 求める（`remaining` を超えたら `remaining + 1`）。"""
+    def __json_tree_bytes__(self, policy: Any, remaining: Optional[int], work: Any) -> Optional[int]:
+        """木表現の byte 数を **作らずに** 求める（`remaining` を超えたら `remaining + 1`）。
+
+        返すのは byte だけ。見積もりの中で辿る runtime ref の作業量は `work`（呼ぶ側の作業量の
+        owner）へ distinct な ref ごとに 1 回数える（木の中の出現の数だけ byte に足さない）。
+        """
 
         try:
-            return estimate_legacy_dict_bytes(self, policy=policy, max_bytes=remaining)
+            return estimate_legacy_dict_bytes(self, policy=policy, max_bytes=remaining, work=work)
         except (TypeError, ValueError):
             return None
 
@@ -835,7 +844,7 @@ class Expression:
         if _TREE_BUILD_METERS:
             policy, work = _TREE_BUILD_METERS[-1]
             # node 1 つ分（runtime ref を含む）を、数える相手の残りの中で測る
-            work.charge(_node_local_bytes(self, policy, max_bytes=work.remaining()))
+            work.charge(_node_local_bytes(self, policy, max_bytes=work.remaining(), work=work))
         active.add(node_id)
         try:
             return self._to_dict_active(active)
@@ -1023,10 +1032,14 @@ _FROZEN_TREE_BYTES: "weakref.WeakKeyDictionary[Expression, int]" = (
 def estimate_legacy_dict_bytes(
     root: "Expression",
     *,
+    work: Any,
     policy: Any = None,
     max_bytes: Optional[int] = None,
 ) -> Optional[int]:
     """`root.to_dict()` を JSON にしたときの byte 数を **作らずに** 見積もる。
+
+    返すのは byte だけ。runtime ref を辿る作業量は `work`（呼ぶ側の作業量の owner。必ず渡す）へ
+    distinct な node ごとに 1 回数える。
 
     木表現は同じ子を参照の数だけ展開するので、distinct node ごとに 1 回だけ
     大きさを求め（反復 post-order・memo）、辺の数だけ足す（同じ子への辺が 2 本
@@ -1070,7 +1083,7 @@ def estimate_legacy_dict_bytes(
             for child in children:
                 if type(child) is _RuntimeRefChild:
                     local_size += child.measure(
-                        policy, None if max_bytes is None else max_bytes - distinct_total - local_size,
+                        policy, None if max_bytes is None else max_bytes - distinct_total - local_size, work,
                     )
             distinct_total += local_size
             if max_bytes is not None and distinct_total > max_bytes:
@@ -1113,8 +1126,10 @@ def estimate_legacy_dict_bytes(
 _TREE_BUILD_METERS: List[Any] = []
 
 
-def _node_local_bytes(node: "Expression", policy: Any, max_bytes: Optional[int] = None) -> int:
+def _node_local_bytes(node: "Expression", policy: Any, max_bytes: Optional[int], work: Any) -> int:
     """node 1 つ分の byte（子は含まない。runtime ref は含む）。見積りと同じ規則。
+
+    runtime ref を辿る作業量は `work` へ数える（返すのは byte だけ）。
 
     `max_bytes` を超えたと分かった時点で `max_bytes + 1` 以上を返す（残りを数えない）。
     """
@@ -1126,7 +1141,7 @@ def _node_local_bytes(node: "Expression", policy: Any, max_bytes: Optional[int] 
     ) - len(children)
     for child in children:
         if type(child) is _RuntimeRefChild:
-            size += child.measure(policy, None if max_bytes is None else max_bytes - size)
+            size += child.measure(policy, None if max_bytes is None else max_bytes - size, work)
     return size
 
 
@@ -1249,7 +1264,7 @@ class _RuntimeRefChild:
     def __init__(self, ref: Any) -> None:
         self.ref = ref
 
-    def measure(self, policy: Any, max_bytes: Optional[int]) -> int:
+    def measure(self, policy: Any, max_bytes: Optional[int], work: Any) -> int:
         from scripts.function_tracer_pcode.core.json_encoding import (
             LEGACY,
             JsonBudgetExhausted,
@@ -1258,12 +1273,16 @@ class _RuntimeRefChild:
         if max_bytes is not None and max_bytes < 0:
             return 1
         try:
-            # 大きさだけを返し、呼ぶ側（見積もり・数えながら作る木）がその大きさを 1 回だけ数える
+            # byte だけを返す（呼ぶ側が出現ごとに足す）。辿る作業量は `work`（呼ぶ側の作業量の owner）
+            # へ 1 回だけ数える
             return JsonEncodingPolicy.measure(
-                policy, runtime_ref_source(self.ref), max_bytes=max_bytes, mode=LEGACY, size_only=True,
+                policy, runtime_ref_source(self.ref), max_bytes=max_bytes, mode=LEGACY, effort=work,
             )
-        except JsonBudgetExhausted as exc:
-            return exc.consumed_bytes
+        except JsonBudgetExhausted:
+            # byte か作業量のどちらかが尽きた: 見積もりは上限を超えた（上限 + 1）
+            if max_bytes is None:
+                raise
+            return max_bytes + 1
 
 
 @source_converter

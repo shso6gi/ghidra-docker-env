@@ -68,6 +68,8 @@ def as_str(value): pass
 def attribute(value, name, default=None): pass
 def elements_of(value): pass
 def builtin_sequence(value): pass
+class readable_property(property): pass
+def state_setter(fn): return fn
 """
 
 _STUB_JSON_ENCODING = """
@@ -76,11 +78,16 @@ class Reducer:
     def result(self, *, work): pass
 def source_converter(fn): return fn
 def each(values, fn=None): pass
+class _Policy:
+    def dumps(self, value): pass
+RESULT_JSON_POLICY = _Policy()
 """
 
 _CASES = """
-from scripts.function_tracer_pcode.core.json_encoding import Reducer, each, source_converter
-from scripts.function_tracer_pcode.core.live_values import as_int, as_str, attribute, builtin_sequence, elements_of
+from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, Reducer, each, source_converter
+from scripts.function_tracer_pcode.core.live_values import (
+    as_int, as_str, attribute, builtin_sequence, elements_of, readable_property, state_setter,
+)
 import dataclasses
 
 
@@ -270,6 +277,67 @@ class SelfFilled:
     def json_items(self):
         yield "x", self.rows[0].name
 
+class LaunderedByBox:
+    def json_items(self):
+        box = _Holder(1)
+        box.value = self.x
+        yield "x", box.value
+
+_MODULE_ROWS = []
+_MODULE_TABLE = {}
+
+class ModuleAppend:
+    def json_items(self):
+        _MODULE_ROWS.append(self.x)
+        yield "x", 1
+
+class ModuleSubscript:
+    def json_items(self):
+        _MODULE_TABLE["k"] = self.x
+        yield "x", 1
+
+class GlobalName:
+    def json_items(self):
+        global _LAST
+        _LAST = self.x
+        yield "x", 1
+
+class _SuperBase:
+    def helper(self, value):
+        return str(value)
+
+class SuperCall(_SuperBase):
+    def json_items(self):
+        yield "x", super().helper(self.x)
+
+class ExceptAs:
+    def json_items(self):
+        try:
+            yield "x", as_int(self.x)
+        except ValueError as exc:
+            yield "y", str(exc)
+
+class VerifiedAttribute:
+    def json_items(self):
+        items = self.w
+        if builtin_sequence(items):
+            yield "x", items.meta
+
+class OwnerDumps:
+    def json_items(self):
+        yield "x", RESULT_JSON_POLICY.dumps(self.x)
+
+class ReadableRecord:
+    @readable_property
+    def label(self):
+        return str(self.raw)
+
+class CheckedRecord:
+    @state_setter
+    def __setattr__(self, name, value):
+        if value.flag:
+            object.__setattr__(self, name, value)
+
 class Clean:
     def json_items(self):
         yield "a", as_int(self.x)
@@ -311,6 +379,13 @@ _EXPECTED_VIOLATIONS = {
     # 容器の `+`・bound method の `key=`・`self` の field へ入れた live な値）
     "TypeQualname.json_items", "VerifiedMethod.json_items", "_starred", "ContainerPlus.json_items",
     "BoundKey.json_items", "SelfFilled.json_items",
+    # 4 回目の cross-audit が見つけた穴（他の object の属性・module の状態・`super()`・`except as`・
+    # 確かめた容器の属性・owner の上限の無い API）
+    "LaunderedByBox.json_items", "ModuleAppend.json_items", "ModuleSubscript.json_items",
+    "GlobalName.json_items", "_SuperBase.helper", "ExceptAs.json_items", "VerifiedAttribute.json_items",
+    "OwnerDumps.json_items",
+    # 宣言した能力（`readable_property` / `state_setter`）の本体も root として監査する
+    "ReadableRecord.label", "CheckedRecord.__setattr__",
 }
 
 
@@ -943,6 +1018,12 @@ _D_TRUNCATION = (
 )
 _D_LEGACY_RESULT = "D(#106): receipt の無い旧来の結果だけ（production の結果は receipt だけを読む）"
 _D_IDENTITY = "D(#194): 構造の identity の atom の digest（identity の owner の `core/semantic_snapshot`）"
+_B_MATCHED = (
+    "B: 照合は索引（`legacy_reason_index` が record ごとに数えた位置）だけを引き、引いた位置の数を"
+    " `work` へ数える（group の record を照合ごとに写さない）"
+)
+_A_LIMITATION = "A: 限界の record の構築（target / evidence は登録した限界の場所が作る固定の形の値）"
+_C_SKIP_KEY = "C: mapping の key ごとに yield し、読み飛ばすのは 1 つの固定の key（`data_type_obj`）だけ"
 
 _PROPORTIONAL_WORK_OWNERS = {
     ("analysis.effects.models", "StoreEffectProvenance.is_complete"): _A_FIXED,
@@ -983,7 +1064,6 @@ _PROPORTIONAL_WORK_OWNERS = {
     ("core.canonical_digest", "_emit"): _B_BOUND,
     ("core.expression", "Expression._to_dict_active"): _B_SIZED,
     ("core.expression", "_bounded_local_bytes"): _B_BOUND,
-    ("core.expression", "_node_local_bytes"): _B_BOUND,
     ("core.expression", "estimate_legacy_dict_bytes"): _B_BOUND,
     ("core.expression", "runtime_ref_source"): _C_LAZY,
     ("core.runtime_refs.loops", "CountedLoopSummaryRef.json_items"): _A_FIXED,
@@ -1013,7 +1093,6 @@ _PROPORTIONAL_WORK_OWNERS = {
     ("checker.output_preparation", "_in_field_order"): _A_FIXED,
     ("checker.result_assembly", "_hypotheses_of"): _D_PAIR_FAILURE,
     ("core.budget_policy", "SerializationWork.__init__"): _A_FIXED,
-    ("core.budget_policy", "SerializationWork.exceeded"): _A_FIXED,
     ("core.canonical_digest", "_Sink._put"): _B_BOUND,
     ("core.canonical_digest", "_Sink.emit_leaf"): _A_FIXED,
     ("core.canonical_digest", "_Sink.emit_string"): _B_BOUND,
@@ -1021,6 +1100,16 @@ _PROPORTIONAL_WORK_OWNERS = {
     ("core.semantic_snapshot", "_encode_atoms"): _D_IDENTITY,
     ("core.semantic_snapshot", "_encode_atoms_to_bytes"): _D_IDENTITY,
     ("core.semantic_snapshot", "stable_atoms_digest"): _D_IDENTITY,
+    # 検出の穴を塞いだ後に見えた構文（`repr` / `dumps` / `*` / 切り出し / 数えない work 引数）
+    ("checker.cause_aggregate", "IdentityPool.intern"): _B_COUNTED,
+    ("checker.cause_aggregate", "canonicalize_legacy_cause_key"): _B_COUNTED,
+    ("checker.cause_aggregate", "identity_digest"): _B_COUNTED,
+    ("checker.unknown_reason", "_match_legacy_reasons"): _B_MATCHED,
+    ("core.signature", "_parameter_descriptor_pairs"): _C_SKIP_KEY,
+    ("proof.obligations.snapshot", "_fingerprint_json"): _B_FROZEN,
+    # `super().__init__` を辿るようにした後に見えた限界の構築
+    ("core.errors", "AnalysisLimitation.__init__"): _A_LIMITATION,
+    ("core.errors", "_exact_tuple"): _A_LIMITATION,
 }
 
 
@@ -1338,6 +1427,38 @@ def _outside_repr(self):
 
 _wrap = getattr(dataclasses, "_recursive_repr", None)
 
+class LoudDescriptor:
+    def __get__(self, instance, owner=None):
+        calls.append("descriptor")
+        return "opcode"
+
+    def __set__(self, instance, value):
+        pass
+
+class LoudCallable:
+    def __call__(self, *args, **kwargs):
+        calls.append("callable")
+
+class DescriptorTally(Tally):
+    """package の関数を写し、外の descriptor を足した型（関数の数では見分けられない）。"""
+
+    __slots__ = ()
+    add = Tally.add
+    attribute = LoudDescriptor()
+
+class CallableTally(Tally):
+    __slots__ = ()
+    add = Tally.add
+    result = LoudCallable()
+
+_namespace = {}
+exec("def __hash__(self):\\n    return 1\\n", _namespace)
+
+class StringCodeStorage(StorageInfo):
+    """dataclass でない body に置いた `<string>` の関数（dataclass が作った関数ではない）。"""
+
+    __hash__ = _namespace["__hash__"]
+
 @dataclasses.dataclass
 class WrappedReprStorage(StorageInfo):
     """`dataclasses` の wrapper（同じ code）で外の関数を包み、package の関数を写した型。"""
@@ -1351,7 +1472,8 @@ exec(compile(_OUTSIDE_SUBCLASS_SOURCE, "/nonexistent/subclassing_outside_the_pac
 
 
 def test_outside_subclasses_of_package_types_are_not_trusted():
-    """package の型を package の外で継承した型は信頼しない（型の MRO の package の関数を呼ばない）。"""
+    """package の型を package の外で継承し code を足した型は信頼しない（型の MRO の package の関数を
+    呼ばない）。足したのが関数でなくても（descriptor・callable な object・`<string>` の関数）同じ。"""
 
     from scripts.function_tracer_pcode.core import live_values
     from scripts.function_tracer_pcode.core.json_encoding import (
@@ -1365,13 +1487,15 @@ def test_outside_subclasses_of_package_types_are_not_trusted():
 
     calls = _OUTSIDE_SUBCLASS["calls"]
     assert live_values.package_type(StorageInfo) and live_values.package_type(Tally)
-    names = (
-        "PropertyStorage", "GetattributeStorage", "EmptyStorage", "DataclassStorage",
-        "EmptyDataclassStorage", "WrappedReprStorage",
-    )
+    names = ["PropertyStorage", "GetattributeStorage", "DataclassStorage", "StringCodeStorage"]
+    if _OUTSIDE_SUBCLASS["_wrap"] is not None:
+        names.append("WrappedReprStorage")
+    # 中身を足さない subclass は信頼する（足した code が無い）
+    empty = ("EmptyStorage", "EmptyDataclassStorage")
     # 作るとき（dataclass の `__init__`）の呼び出しは数えない: owner が呼ぶかだけを見る
-    records = {name: _OUTSIDE_SUBCLASS[name]() for name in names}
-    reducers = {name: _OUTSIDE_SUBCLASS[name]("a") for name in ("OutsideTally", "EmptyTally")}
+    records = {name: _OUTSIDE_SUBCLASS[name]() for name in (*names, *empty)}
+    tallies = ("OutsideTally", "DescriptorTally", "CallableTally")
+    reducers = {name: _OUTSIDE_SUBCLASS[name]("a") for name in (*tallies, "EmptyTally")}
     calls.clear()
     for name in names:
         kind = _OUTSIDE_SUBCLASS[name]
@@ -1380,9 +1504,16 @@ def test_outside_subclasses_of_package_types_are_not_trusted():
         assert is_json_record(record) is False, name
         with pytest.raises(JsonValueRejected):
             RESULT_JSON_POLICY.prepare(record)
-    for name in ("OutsideTally", "EmptyTally"):
+    for name in tallies:
+        assert live_values.package_type(_OUTSIDE_SUBCLASS[name]) is False, name
         with pytest.raises(TypeError):
             scan([1], reducers[name])
+    for name in empty:
+        assert live_values.package_type(_OUTSIDE_SUBCLASS[name]) is True, name
+        assert RESULT_JSON_POLICY.prepare(records[name], max_bytes=10_000).value()["space_name"] == ""
+    assert live_values.package_type(_OUTSIDE_SUBCLASS["EmptyTally"]) is True
+    counted = RESULT_JSON_POLICY.prepare(scan([], reducers["EmptyTally"]), max_bytes=1_000).value()
+    assert counted == {}
     assert calls == []
 
 
@@ -1593,3 +1724,536 @@ def test_builtin_enum_checks_each_member_value_not_only_the_type():
     assert live_values.builtin_enum(Mixed.SCALAR) is True
     assert live_values.builtin_enum(Mixed.PAIR) is False
     assert live_values.builtin_enum(Mixed.SCALAR) is True
+
+
+# ---------------------------------------------------------------------------
+# 4 回目の cross-audit: 汎用の `reversed`・live な key・metaclass・enum の名前・予算の exact-once
+# ---------------------------------------------------------------------------
+
+
+class _IndexedSequence:
+    """`__len__` / `__getitem__` だけの列（`reversed()` の汎用の型はこれを呼ぶ）。"""
+
+    def __init__(self, calls):
+        self.calls = calls
+
+    def __len__(self):
+        self.calls.append("len")
+        return 2
+
+    def __getitem__(self, index):
+        self.calls.append("getitem")
+        return index
+
+
+def test_generic_reversed_iterators_are_not_builtin_iterators():
+    """`reversed(seq)` の汎用の型は包んだ値の `__len__` / `__getitem__` を呼ぶ: 組み込みの iterator ではない。"""
+
+    from scripts.function_tracer_pcode.core import live_values
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonValueRejected, as_list
+
+    calls: List[str] = []
+    sequence = _IndexedSequence(calls)
+    # `reversed()` を作るときの `__len__` は呼ぶ側の code（owner が呼ぶかだけを見る）
+    iterators = [reversed(sequence) for _ in range(3)]
+    calls.clear()
+    assert live_values.builtin_iterator(iterators[0]) is False
+    with pytest.raises(TypeError):
+        live_values.elements_of(iterators[0])
+    with pytest.raises(JsonValueRejected):
+        RESULT_JSON_POLICY.prepare(iterators[1], max_bytes=1_000)
+    with pytest.raises(JsonValueRejected):
+        RESULT_JSON_POLICY.prepare(as_list(iterators[2]), max_bytes=1_000)
+    assert calls == []
+    # list の専用の reverse iterator と、非 ASCII の文字列の iterator は組み込みの iterator
+    assert live_values.builtin_iterator(reversed([1, 2])) is True
+    assert RESULT_JSON_POLICY.prepare(iter("éa"), max_bytes=100).value() == ["é", "a"]
+
+
+class _LoudKey(str):
+    calls: List[str] = []
+
+    def __hash__(self):
+        _LoudKey.calls.append("hash")
+        return str.__hash__(str.__str__(self))
+
+    def __eq__(self, other):
+        _LoudKey.calls.append("eq")
+        return False
+
+
+class _LoudIntKey(int):
+    calls: List[str] = []
+
+    def __hash__(self):
+        _LoudIntKey.calls.append("hash")
+        return 7
+
+    def __eq__(self, other):
+        _LoudIntKey.calls.append("eq")
+        return False
+
+
+class _PlainHolder:
+    pass
+
+
+def test_owner_lookups_never_run_the_code_of_stored_keys():
+    """instance の状態・mapping の lookup・`OrderedDict` の読み・LEGACY の key の配置は、格納された key の
+    `__hash__` / `__eq__` を呼ばない（組み込みの `str` の key だけを組み込みの比較で探す）。"""
+
+    from collections import OrderedDict
+
+    from scripts.function_tracer_pcode.core import live_values
+    from scripts.function_tracer_pcode.core.json_encoding import (
+        RESULT_JSON_POLICY,
+        JsonValueRejected,
+        as_dict,
+        mapping_of,
+    )
+
+    holder = _PlainHolder()
+    holder.__dict__[_LoudKey("status")] = 1
+    holder.__dict__["plain"] = 2
+    ordered = OrderedDict([(_LoudKey("a"), 1), ("b", 2)])
+    colliding = {"a": 1}
+    colliding[_LoudKey("a")] = 2
+    int_keys = {_LoudIntKey(1): "x", _LoudIntKey(2): "y"}
+    loud_mapping = {_LoudKey("k"): 1, "j": 2}
+    # 値を作るときの hash は test の code（owner が呼ぶかだけを見る）
+    _LoudKey.calls.clear()
+    _LoudIntKey.calls.clear()
+    assert live_values.attribute(holder, "status") is None
+    assert live_values.attribute(holder, "plain") == 2
+    with pytest.raises(TypeError):
+        live_values.set_state(holder, "plain", 3)
+    assert live_values.lookup(loud_mapping, "k") is None
+    assert live_values.lookup(loud_mapping, "j") == 2
+    # `OrderedDict` の iterator は key の hash で node を引く: hash を上書きした key の `OrderedDict` は
+    # 組み込みの振る舞いの mapping ではない
+    assert live_values.builtin_mapping(ordered) is None
+    with pytest.raises(TypeError):
+        live_values.items_of(ordered)
+    # CANONICAL: 組み込みの `str` でない key は一般の経路で衝突を拒む（黙って片方を消さない）
+    with pytest.raises(JsonValueRejected):
+        RESULT_JSON_POLICY.prepare(colliding, max_bytes=1_000)
+    with pytest.raises(JsonValueRejected):
+        RESULT_JSON_POLICY.prepare(mapping_of(colliding), max_bytes=1_000)
+    # LEGACY: 元の key を新しい dict へ置くのは hash・比較が組み込みの key だけ
+    with pytest.raises(JsonValueRejected):
+        RESULT_JSON_POLICY.materialize(as_dict(int_keys))
+    assert _LoudKey.calls == []
+    assert _LoudIntKey.calls == []
+
+
+def test_mro_membership_never_runs_a_metaclass_eq():
+    """instance の `__dict__` の持ち主の型を MRO の中で探すのは identity（metaclass の `__eq__` を呼ばない）。"""
+
+    from scripts.function_tracer_pcode.core import live_values
+
+    calls: List[str] = []
+
+    class Meta(type):
+        def __eq__(cls, other):
+            calls.append("meta_eq")
+            return False
+
+        __hash__ = type.__hash__
+
+    class Base(metaclass=Meta):
+        pass
+
+    class Slotted(Base):
+        __slots__ = ()
+
+    value = Slotted()
+    value.status = "ok"
+    calls.clear()
+    assert live_values.attribute(value, "status") in ("ok", None)
+    live_values.instance_state(value, "status", None)
+    try:
+        live_values.set_state(value, "status", "x")
+    except TypeError:
+        pass
+    assert calls == []
+
+
+def test_builtin_enum_requires_a_builtin_member_name():
+    """member の `_name_` が組み込みの `str` でない enum は組み込みのままの enum ではない。"""
+
+    import enum
+
+    from scripts.function_tracer_pcode.core import live_values
+
+    calls: List[str] = []
+
+    class Name(str):
+        def __format__(self, spec):
+            calls.append("format")
+            return "X"
+
+        def __hash__(self):
+            calls.append("hash")
+            return 1
+
+    class Renamed(enum.Enum):
+        A = 1
+
+        def __init__(self, value):
+            self._name_ = Name("A")
+
+    calls.clear()
+    assert live_values.builtin_enum(Renamed.A) is False
+    with pytest.raises(TypeError):
+        live_values.as_str(Renamed.A)
+    assert calls == []
+
+
+def test_as_bool_rejects_enums_with_their_own_truth():
+    """mixin の enum が真偽・長さを上書きしていれば、plain な enum が `__len__` を持てば `TypeError`
+    （`bool()` と違う値を返さない）。`OrderedDict` の subclass は組み込みの容器の真偽。"""
+
+    import enum
+    from collections import OrderedDict
+
+    from scripts.function_tracer_pcode.core import live_values
+
+    class Truthy(enum.IntEnum):
+        ZERO = 0
+
+        def __bool__(self):
+            return True
+
+    class Sized(enum.Enum):
+        A = 1
+
+        def __len__(self):
+            return 0
+
+    class Ordered(OrderedDict):
+        pass
+
+    for value in (Truthy.ZERO, Sized.A):
+        with pytest.raises(TypeError):
+            live_values.as_bool(value)
+    assert live_values.as_bool(Ordered()) is False
+    assert live_values.as_bool(Ordered(a=1)) is True
+
+
+def test_ordered_dict_subclasses_without_overrides_are_builtin_mappings():
+    """中身を上書きしない `OrderedDict` の subclass は組み込みの振る舞いの mapping（順は linked list の順）。"""
+
+    from collections import OrderedDict
+
+    from scripts.function_tracer_pcode.core import live_values
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+    class Ordered(OrderedDict):
+        pass
+
+    value = Ordered([("b", 1), ("a", 2)])
+    value.move_to_end("b")
+    assert live_values.builtin_mapping(value) is value
+    assert list(live_values.items_of(value)) == [("a", 2), ("b", 1)]
+    assert RESULT_JSON_POLICY.prepare(value, max_bytes=100).value() == {"a": 2, "b": 1}
+
+
+def test_large_tuple_keys_are_stringified_within_the_work_only():
+    """tuple の key の文字列は `work` の中で 1 回だけ辿って作る（固定の上限で別に止めない）。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget, stringify_plain_key
+
+    key = tuple(range(70_000))
+    work = JsonBudget(None)
+    assert stringify_plain_key(key, work) == str(key)
+    assert 70_000 < work.consumed < 2 * 70_000 + 10
+
+
+def test_runtime_ref_effort_is_charged_once_and_not_multiplied_through_the_dag():
+    """式の木の見積もりは byte だけ（実際に書く木と同じ）。runtime ref を辿る作業量は distinct な ref ごとに
+    1 回だけ呼ぶ側の作業量へ数える（出現の数だけ足さない）。"""
+
+    from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType, estimate_legacy_dict_bytes
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonBudget
+    from scripts.function_tracer_pcode.core.runtime_refs.call_arguments import AbiArgumentSlotRef
+
+    slot = AbiArgumentSlotRef(ordinal=0, storage_identity_key=(tuple(range(200)),))
+    root = leaf = Expression(ExpressionType.VARIABLE, name="x", size=4, runtime_ref=slot)
+    for _ in range(6):
+        root = Expression(ExpressionType.BINARY_OP, operator="+", operands=[root, root], size=4)
+    actual = len(RESULT_JSON_POLICY.dumps(root._to_dict(set()), default=_enum_name).encode("utf-8"))
+    work = JsonBudget(None)
+    # 見積もりは実際に書く木の byte と同じ（ref の作業量を byte に混ぜない）
+    assert estimate_legacy_dict_bytes(root, work=work) == actual
+    single = JsonBudget(None)
+    estimate_legacy_dict_bytes(leaf, work=single)
+    # ref を辿る作業量は 1 回分（木の中の 64 回の出現ぶんではない）
+    assert work.consumed <= single.consumed + 10
+
+
+def _enum_name(value):
+    return value.name
+
+
+def test_a_failed_fast_path_prefix_is_walked_once():
+    """LEGACY で高速経路が途中で辿れなくなった容器は、一般の経路で 1 回だけ辿り直す（前半を 2 回数えない）。"""
+
+    from scripts.function_tracer_pcode.core.expression import ExpressionType
+    from scripts.function_tracer_pcode.core.json_encoding import LEGACY, RESULT_JSON_POLICY, JsonBudget
+
+    prefix = [7] * 1_000
+    value = prefix + [ExpressionType.CONSTANT]
+    output = RESULT_JSON_POLICY.measure(value, mode=LEGACY)
+    work = JsonBudget(None)
+    RESULT_JSON_POLICY.count_into(value, work, mode=LEGACY)
+    effort = work.consumed - output
+    prefix_bytes = len(RESULT_JSON_POLICY.dumps(prefix)) - 1
+    assert effort <= prefix_bytes + 10
+
+
+def test_exhaustion_reports_the_limit_plus_one_independent_of_walk_history():
+    """予算の超過は上限 + 1（前に同じ tuple を辿ったか・cache の当たり方に依らない）。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonBudgetExhausted
+
+    shared = tuple(range(5_000))
+    observed = []
+    for _ in range(2):
+        with pytest.raises(JsonBudgetExhausted) as stopped:
+            RESULT_JSON_POLICY.measure([shared, shared, shared], max_bytes=10_000)
+        observed.append(stopped.value.consumed_bytes)
+    assert observed == [10_001, 10_001]
+
+
+def test_a_terminal_scope_stops_at_its_own_limit_under_a_wider_policy():
+    """terminal な作業量は自分の上限で止まる（入れ子の scope の policy が大きくても黙って超えない）。"""
+
+    from scripts.function_tracer_pcode.core import budget_policy as bp
+    from scripts.function_tracer_pcode.core.errors import ExpressionSizeBudgetExceeded
+
+    with bp.budget_policy_scope(bp.BudgetPolicy(serialization_bytes=100)):
+        with pytest.raises(ExpressionSizeBudgetExceeded):
+            with bp.serialization_scope(site="outer", target_parts=("x",)) as work:
+                with bp.budget_policy_scope(bp.BudgetPolicy(serialization_bytes=10**9)):
+                    work.charge(5_000)
+
+
+def test_no_serialization_scope_starts_inside_a_walk():
+    """walk の中（converter・`json_items`）で新しい直列化の作業量を作らない（`JsonBudget` と同じ規則）。"""
+
+    from scripts.function_tracer_pcode.core import budget_policy as bp
+    from scripts.function_tracer_pcode.core import json_encoding
+
+    token = json_encoding._ACTIVE_WORK.set(json_encoding.JsonBudget(10**6, detached=True))
+    try:
+        with pytest.raises(TypeError):
+            with bp.serialization_scope(site="inner", target_parts=("x",)):
+                pass
+    finally:
+        json_encoding._ACTIVE_WORK.reset(token)
+
+
+def test_an_expression_tree_inside_a_walk_is_counted_into_the_walk():
+    """walk の中で式の `to_dict()` を呼ぶと、木はその walk の作業量へ数えて作る（別の作業量を開かない）。"""
+
+    from scripts.function_tracer_pcode.core import json_encoding
+    from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
+
+    expr = Expression(ExpressionType.VARIABLE, name="x" * 100, size=4)
+    walk_work = json_encoding.JsonBudget(10**6, detached=True)
+    token = json_encoding._ACTIVE_WORK.set(walk_work)
+    try:
+        built = expr.to_dict()
+    finally:
+        json_encoding._ACTIVE_WORK.reset(token)
+    assert built["name"] == "x" * 100
+    assert walk_work.consumed >= 100
+
+
+def test_fingerprints_charge_the_bytes_they_hash():
+    """canonical な fingerprint は流した byte（escape・多 byte の文字を含む）を数える。"""
+
+    from scripts.function_tracer_pcode.core.canonical_digest import canonical_fingerprint
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
+
+    text = "\x01" * 10_000
+    work = JsonBudget(None)
+    canonical_fingerprint(text, work=work)
+    assert work.consumed >= 6 * 10_000
+
+
+def test_cause_aggregate_copies_are_built_by_the_walk_that_charges_them():
+    """cause の集計の写しは、作る走査そのものが作業量へ数える（写しの中身と数えた量が同じ走査）。"""
+
+    from scripts.function_tracer_pcode.checker import cause_aggregate
+    from scripts.function_tracer_pcode.core import budget_policy as bp
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+    from scripts.function_tracer_pcode.core.storage import StorageInfo
+
+    record = StorageInfo(space_name="x" * 500)
+    expected = RESULT_JSON_POLICY.prepare(record, max_bytes=10_000)
+    with bp.budget_policy_scope(bp.BudgetPolicy(serialization_bytes=10**6)):
+        with bp.serialization_scope(site="aggregate", target_parts=("x",)) as work:
+            before = work.consumed
+            copy = cause_aggregate._prepared_within_work(record)
+            charged = work.consumed - before
+    assert copy == expected.value()
+    assert charged >= expected.encoded_bytes
+
+
+def test_a_node_limit_stop_reports_at_least_the_byte_limit():
+    """node の上限で止めた（terminal でない）作業量も、byte の超過として上限 + 1 以上を伝える。"""
+
+    from scripts.function_tracer_pcode.core import budget_policy as bp
+    from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
+
+    leaf = Expression(ExpressionType.VARIABLE, name="x", size=4)
+    root = Expression(ExpressionType.BINARY_OP, operator="+", operands=[leaf, leaf], size=4)
+    with bp.budget_policy_scope(bp.BudgetPolicy(serialization_bytes=10**6, serialization_nodes=1)):
+        with bp.serialization_scope(site="nodes", target_parts=("x",), terminal=False, max_bytes=1_000) as work:
+            with pytest.raises(JsonBudgetExhausted) as stopped:
+                work.tree(root, build=False)
+    assert stopped.value.consumed_bytes >= 1_001
+
+
+def test_a_schema_bound_violation_reports_the_field_bound():
+    """field の schema の上限を破った違反は、その上限と field の要求量を報告する（envelope の値ではない）。"""
+
+    from scripts.function_tracer_pcode.checker.output_preparation import _violation
+
+    violation = _violation("field exceeds its output schema bound of 64 bytes", None, 74, field_bound=64)
+    assert (violation.max_bytes, violation.requested_bytes) == (64, 74)
+
+
+_J22_CASES = """
+import json
+
+
+def uncharged(values, work):
+    for value in values:
+        pass
+
+
+def charged_each(values, work):
+    for value in values:
+        work.charge(1)
+
+
+def charged_before(values, work):
+    work.charge(len(values))
+    for value in values:
+        pass
+
+
+def skipping(values):
+    for value in values:
+        if value is None:
+            continue
+        yield value
+
+
+def sorted_then_yield(values):
+    for value in sorted(values):
+        yield value
+
+
+def lazy(values):
+    for value in values:
+        yield value
+
+
+def sorts(values):
+    values.sort()
+
+
+def writes(value):
+    return repr(value) + json.dumps(value)
+
+
+def unpacks(values):
+    return max(*values)
+
+
+def repeats(count):
+    return [None] * count
+
+
+def slices(values, start):
+    return values[start:]
+
+
+def bounded_slice(text):
+    return text[:MAX_CHARS]
+
+
+def recurses(value):
+    return recurses(value)
+"""
+
+
+def test_j22_the_detector_sees_every_proportional_construct_and_every_unowned_loop(tmp_path):
+    """J22 の検出が空の合格にならない: 数えない work 引数・読み飛ばす generator・完了させてから yield する
+    generator は owner でなく、`sort()` / `repr` / `dumps` / `*` / 繰り返し / 切り出し / 再帰を見つける。"""
+
+    package = _synthetic_package(tmp_path)
+    (package / "j22cases.py").write_text(_J22_CASES)
+    index = flow.PackageIndex(package)
+    module = flow.PKG + ".j22cases"
+    owners = {name: flow.work_owner(index, (module, name)) for name in (
+        "uncharged", "charged_each", "charged_before", "skipping", "sorted_then_yield", "lazy",
+    )}
+    assert owners == {
+        "uncharged": None, "charged_each": "B", "charged_before": "B", "skipping": None,
+        "sorted_then_yield": None, "lazy": "C",
+    }
+    constructs = {
+        name: flow.proportional_constructs(index.functions[(module, name)])
+        for name in ("sorts", "writes", "unpacks", "repeats", "slices", "bounded_slice", "recurses")
+    }
+    assert constructs["sorts"] and constructs["writes"] and constructs["unpacks"]
+    assert constructs["repeats"] and constructs["slices"] and constructs["recurses"]
+    assert constructs["bounded_slice"] == []
+
+
+class _PlainPropertyRecord:
+    """test の directory（信頼する code）の型の、宣言していない property と `__setattr__`。"""
+
+    calls: List[str] = []
+
+    @property
+    def status(self):
+        _PlainPropertyRecord.calls.append("status")
+        return "read"
+
+    def __setattr__(self, name, value):
+        _PlainPropertyRecord.calls.append("setattr")
+        object.__setattr__(self, name, value)
+
+
+def test_only_declared_properties_and_state_setters_are_capabilities():
+    """`attribute()` が呼ぶ property は `readable_property`、`set_state()` が呼ぶ `__setattr__` は
+    `state_setter` で宣言したものだけ（package の code でも宣言していなければ呼ばない）。"""
+
+    from scripts.function_tracer_pcode.core import live_values
+
+    record = object.__new__(_PlainPropertyRecord)
+    _PlainPropertyRecord.calls.clear()
+    assert live_values.attribute(record, "status") is None
+    with pytest.raises(TypeError):
+        live_values.set_state(record, "status", 1)
+    assert _PlainPropertyRecord.calls == []
+    with pytest.raises(TypeError):
+        live_values.state_setter(len)
+
+
+def test_declared_dependencies_excuse_only_their_declared_number_of_violations():
+    """宣言した依存の場所の違反は宣言した数だけを除く（同じ違反を足しても宣言に紛れ込まない）。"""
+
+    key = next(iter(flow.DECLARED_DEPENDENCY_SITES))
+    count = flow.DECLARED_DEPENDENCY_SITES[key]
+    module, qual, message = key
+    violations = [(module, qual, line, message) for line in range(count + 1)]
+    rest, used = flow.undeclared(violations)
+    assert len(rest) == 1 and used == {key}
+    assert set(flow.DECLARED_DEPENDENCY_SITES) == set(flow.DECLARED_DEPENDENCIES)

@@ -1156,7 +1156,6 @@ def _match_legacy_reasons(
         return (), None
     if not records:
         return (), None
-    candidates = tuple(records)
     # cause は live_values の規則だけで読む（instance の値。`__getattr__` を呼ばない）
     cause_id = live_values.attribute(cause_occurrence, "cause_id")
     cause_target = live_values.attribute(cause_id, "canonical_target_key") if cause_id is not None else None
@@ -1202,9 +1201,10 @@ def _match_legacy_reasons(
     # にも同じ reason id があり得る）
     if (
         not live_values.as_bool(index.truncated)
-        and live_values.size(candidates) == 1 and _count_of(projected_reason_counts, key) == 1
+        and len(records) == 1 and _count_of(projected_reason_counts, key) == 1
     ):
-        return candidates, MATCH_UNIQUE
+        # 1 件だけの group（写すのは定数の大きさ。group の record 全体を照合ごとに写さない）
+        return (records[0],), MATCH_UNIQUE
     return (), None
 
 
@@ -1827,13 +1827,13 @@ class _BacklogEntryView:
                 self._distinct_keys.add(key)
                 self._distinct.append(obligation)
 
-    @property
+    @live_values.readable_property
     def proof_obligation_counts(self) -> Any:
         from scripts.function_tracer_pcode.core.json_encoding import pairs_of
 
-        return pairs_of(iter(self._kind_counts.items()))
+        return pairs_of(live_values.items_of(self._kind_counts))
 
-    @property
+    @live_values.readable_property
     def proof_obligations(self) -> Any:
         from scripts.function_tracer_pcode.core.json_encoding import each
 

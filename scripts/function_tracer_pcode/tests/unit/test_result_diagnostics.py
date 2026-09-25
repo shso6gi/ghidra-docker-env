@@ -1,6 +1,8 @@
 """Issue #17: diagnostics block, projected-reason details, and their aggregation."""
 from types import SimpleNamespace
 
+from scripts.function_tracer_pcode.core import live_values
+
 from scripts.function_tracer_pcode.checker.diagnostics import (
     AnalysisTimer,
     expression_stats,
@@ -317,7 +319,7 @@ def test_diagnostics_are_fail_open_and_never_raise():
         stage_path = ()
         solver_results = None
 
-        @property
+        @live_values.readable_property
         def debug_trace(self):
             raise ValueError("broken trace")
 
