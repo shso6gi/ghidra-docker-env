@@ -6,7 +6,16 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, attribute, elements_of, type_module, type_name
+from scripts.function_tracer_pcode.core.live_values import (
+    NOT_PLAIN,
+    as_bool,
+    as_int,
+    attribute,
+    elements_of,
+    str_value,
+    type_module,
+    type_name,
+)
 from scripts.function_tracer_pcode.core.json_encoding import (
     as_list, builtin_str, inline, is_json_record, materialize, raw,
 )
@@ -500,21 +509,36 @@ def normalize_expansion_budget_truncations(
     するため）。
     """
 
+    # record の値は owner の規則で読む（event id は構築のときに作った文字列、参照 ID は文字列の列）
     merged: Dict[str, ExpansionBudgetTruncation] = {}
-    for item in items or ():
+    references: Dict[str, Tuple[str, ...]] = {}
+    for item in (() if items is None else elements_of(items)):
         if item is None:
             continue
-        event_id = item.event_id
+        if type(item) is not ExpansionBudgetTruncation:
+            raise TypeError("expansion budget truncations are ExpansionBudgetTruncation only")
+        event_id = _plain_event_id(item._event_id_cache)
+        referenced = tuple(_plain_event_id(ref) for ref in elements_of(item.referenced_event_ids))
         current = merged.get(event_id)
         if current is None:
             merged[event_id] = item
+            references[event_id] = referenced
             continue
-        union = tuple(sorted(
-            set(current.referenced_event_ids) | set(item.referenced_event_ids)
-        ))
-        if union != current.referenced_event_ids:
+        known = references[event_id]
+        union = tuple(sorted(set(known) | set(referenced)))
+        if union != known:
             merged[event_id] = replace(current, referenced_event_ids=union)
-    return tuple(merged[event_id] for event_id in sorted(merged))
+            references[event_id] = union
+    return tuple(merged[event_id] for event_id in sorted(references))
+
+
+def _plain_event_id(value: Any) -> str:
+    """event id（組み込みの `str` の値。それ以外は `TypeError`）。"""
+
+    text = str_value(value)
+    if text is NOT_PLAIN:
+        raise TypeError("an expansion budget event id is a str")
+    return text
 
 
 def merge_expansion_budget_truncations(

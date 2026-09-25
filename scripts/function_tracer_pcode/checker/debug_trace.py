@@ -230,7 +230,7 @@ class PairwiseDecisiveInfo:
         pair = self.decisive_pair
         if pair is not None:
             # 組み込みの列は添字で、それ以外は組み込みの振る舞いの列だけを先頭から読む
-            if type(pair) in (tuple, list):
+            if (type(pair) is tuple or type(pair) is list):
                 first = pair[0]
                 second = pair[1]
             else:

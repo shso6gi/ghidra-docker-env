@@ -27,7 +27,7 @@ callable として受け取る（instance patch seam 維持）。
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from scripts.function_tracer_pcode.core.errors import (
     AnalysisLimitation,
@@ -273,7 +273,7 @@ def unsupported_smt_result(
         solver_results=ParallelResult(results=[]),
         counterexample=None,
         smt_formula=None,
-        total_time=time.time() - start_time,
+        total_time=time.time() - live_values.as_float(start_time),
         type_fix_result=type_fix_result,
         retry_count=retry_count,
         function1_signature=original_signature1,
@@ -402,7 +402,7 @@ def analysis_limitation_result(
         solver_results=ParallelResult(results=[]),
         counterexample=None,
         smt_formula=None,
-        total_time=time.time() - start_time,
+        total_time=time.time() - live_values.as_float(start_time),
         type_fix_result=type_fix_result,
         retry_count=retry_count,
         function1_signature=original_signature1,
@@ -568,17 +568,17 @@ def analysis_limitation_result_for_pair(
         FunctionSignature.from_analysis(analysis2)
         if analysis2 is not None else original_signature2
     )
-    common = dict(
+    common = _common_fields(
         function1_name=(
-            analysis1.function_name if analysis1 is not None else function_name1
+            live_values.attribute(analysis1, "function_name") if analysis1 is not None else function_name1
         ),
         function2_name=(
-            analysis2.function_name if analysis2 is not None else function_name2
+            live_values.attribute(analysis2, "function_name") if analysis2 is not None else function_name2
         ),
         binary1_name=binary1_name,
         binary2_name=binary2_name,
         solver_results=ParallelResult(results=[]),
-        total_time=time.time() - start_time,
+        total_time=time.time() - live_values.as_float(start_time),
         type_fix_result=type_fix_result,
         retry_count=retry_count,
         function1_signature=original_signature1,
@@ -586,10 +586,10 @@ def analysis_limitation_result_for_pair(
         effective_function1_signature=effective1,
         effective_function2_signature=effective2,
         function1_signature_hypotheses=(
-            list(analysis1.signature_hypotheses) if analysis1 is not None else []
+            _hypotheses_of(analysis1)
         ),
         function2_signature_hypotheses=(
-            list(analysis2.signature_hypotheses) if analysis2 is not None else []
+            _hypotheses_of(analysis2)
         ),
         constrained_fragments=[],
     )
@@ -678,8 +678,9 @@ def attach_pair_stop_state(result: EquivalenceResult, stop_state) -> None:
 
     if stop_state is None or stop_state is PairStopState.NONE:
         return
-    live_values.set_state(result, "pair_stop_state", stop_state.value)
-    record_failure_diagnostic(result, FAILURE_PAIR_STOP_STATE, stop_state.value)
+    state = live_values.enum_value(stop_state)
+    live_values.set_state(result, "pair_stop_state", state)
+    record_failure_diagnostic(result, FAILURE_PAIR_STOP_STATE, state)
 
 
 def internal_error_result_for_pair(
@@ -712,15 +713,15 @@ def internal_error_result_for_pair(
     result = EquivalenceResult(
         is_equivalent=None,
         function1_name=(
-            analysis1.function_name if analysis1 is not None else function_name1
+            live_values.attribute(analysis1, "function_name") if analysis1 is not None else function_name1
         ),
         function2_name=(
-            analysis2.function_name if analysis2 is not None else function_name2
+            live_values.attribute(analysis2, "function_name") if analysis2 is not None else function_name2
         ),
         binary1_name=binary1_name,
         binary2_name=binary2_name,
         solver_results=ParallelResult(results=[]),
-        total_time=time.time() - start_time,
+        total_time=time.time() - live_values.as_float(start_time),
         error_message=str(exc),
         failure_status=INTERNAL_EXCEPTION_STATUS,
         failure_message=str(exc),
@@ -737,10 +738,10 @@ def internal_error_result_for_pair(
             if analysis2 is not None else original_signature2
         ),
         function1_signature_hypotheses=(
-            list(analysis1.signature_hypotheses) if analysis1 is not None else []
+            _hypotheses_of(analysis1)
         ),
         function2_signature_hypotheses=(
-            list(analysis2.signature_hypotheses) if analysis2 is not None else []
+            _hypotheses_of(analysis2)
         ),
         constrained_fragments=[],
     )
@@ -754,3 +755,18 @@ def internal_error_result_for_pair(
         "pair_scoped": True,
     })
     return result
+
+
+def _hypotheses_of(analysis: Any) -> list:
+    """解析の signature 仮説の列の写し（無ければ空）。解析の値は owner の規則で読む。"""
+
+    if analysis is None:
+        return []
+    hypotheses = live_values.attribute(analysis, "signature_hypotheses")
+    return [] if hypotheses is None else list(live_values.elements_of(hypotheses))
+
+
+def _common_fields(**fields: Any) -> Dict[str, Any]:
+    """結果の共通の field（`dict(**fields)` と同じ。keyword の名前は組み込みの `str`）。"""
+
+    return fields

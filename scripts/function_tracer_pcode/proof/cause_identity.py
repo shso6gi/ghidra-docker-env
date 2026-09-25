@@ -26,7 +26,7 @@ PROOF_REQUIREMENT_SCHEMA_VERSION = 1
 def _tuple(value: Any) -> Tuple[Any, ...]:
     if value is None:
         return ()
-    if type(value) in (tuple, list) or live_values.builtin_sequence(value):
+    if (type(value) is tuple or type(value) is list) or live_values.builtin_sequence(value):
         return tuple(_tuple_item(item) for item in live_values.elements_of(value))
     return (_tuple_item(value),)
 

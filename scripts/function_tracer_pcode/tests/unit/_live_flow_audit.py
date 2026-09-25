@@ -67,6 +67,8 @@ _EXCEPTION_NAMES = frozenset({
     "IndexError", "OverflowError", "NotImplementedError",
 })
 _APPEND_METHODS = frozenset({"append", "insert", "appendleft"})
+#: 容器へ値を足す method（足した値が live なら容器の要素も live）
+_FILLING_METHODS = frozenset({"append", "insert", "appendleft", "extend", "add", "update", "setdefault"})
 
 
 def is_rec(kind) -> bool:
@@ -270,6 +272,7 @@ class LiveFlowAudit:
         self.analyzed: Set[Tuple[str, str]] = set()
         self.live_fields: Dict[Tuple[str, str], Set[str]] = collections.defaultdict(set)
         self.declared_callees_used: Set[Tuple[str, str]] = set()
+        self.field_kinds: Dict[Tuple[str, str], Dict[str, Set[str]]] = collections.defaultdict(dict)
         self.identity_key_callers: Set[Tuple[str, str]] = set()
         self.changed = False
 
@@ -291,7 +294,7 @@ class LiveFlowAudit:
 
     def run(self, roots: Iterable[Tuple[Tuple[str, str], Dict[str, str]]]) -> None:
         roots = list(roots)
-        for _ in range(6):
+        for _ in range(30):  # field の種類が増えなくなるまで（収束しなければ最後の結果）
             self.changed = False
             self.cache.clear()
             self.violations.clear()
@@ -330,7 +333,7 @@ class _FunctionAudit:
             isinstance(d, ast.Name) and d.id == "classmethod" for d in self.node.decorator_list
         ):
             # classmethod の cls: 呼べば自分の型の構築、属性は自分の型の method
-            self.local_callables[positional[0].arg] = ("class", self.module, self.cls)
+            self.local_callables[positional[0].arg] = {("class", self.module, self.cls)}
             self.cls_name = positional[0].arg
         else:
             self.cls_name = None
@@ -363,7 +366,7 @@ class _FunctionAudit:
             # `if type(x) is not C: return` の後は x を C として扱う
             if isinstance(stmt, ast.If) and not stmt.orelse and _exits(stmt.body):
                 _, negative = self.narrowing(stmt.test)
-                for name, kind in negative.items():
+                for name, kind in self._narrow(negative).items():
                     self.env[name] = kind
 
     def stmt(self, s) -> None:
@@ -398,6 +401,7 @@ class _FunctionAudit:
         elif isinstance(s, ast.If):
             self.test(s.test)
             positive, negative = self.narrowing(s.test)
+            positive, negative = self._narrow(positive), self._narrow(negative)
             saved = dict(self.env)
             self.env.update(positive)
             self.block(s.body)
@@ -449,10 +453,9 @@ class _FunctionAudit:
             self.env[target.id] = kind
             # 関数・型の別名（`constructor = make_unknown_reason`）: 呼び出しをその関数へ辿る
             alias = self._callable_alias(value)
-            if alias is not None:
-                self.local_callables[target.id] = alias
-            else:
-                self.local_callables.pop(target.id, None)
+            # flow-insensitive: 同じ名前へ入る関数の全部を辿る（枝ごとに違う関数を入れる形）。関数で
+            # ない値も入るなら、その名前の呼び出しは解決できない callable
+            self.local_callables.setdefault(target.id, set()).add(alias)
             if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "type" and len(value.args) == 1 and isinstance(value.args[0], ast.Name):
                 self.type_of[target.id] = value.args[0].id
             else:
@@ -469,15 +472,24 @@ class _FunctionAudit:
                 self.v(target, "setting an attribute of a live value")
             if self._is_self(target.value) and tainted(kind):
                 self._mark_field(target.attr)
+            if self._is_self(target.value) and (is_obj(kind) or kind == WORK) and self.cls:
+                # package が作った object / 作業量を自分の field に置いた: その field の読みはその種類
+                kinds = self.audit.field_kinds[(self.module, self.cls)].setdefault(target.attr, set())
+                if kind not in kinds:
+                    kinds.add(kind)
+                    self.audit.changed = True
         elif isinstance(target, ast.Subscript):
             receiver = self.expr(target.value)
             index = self.expr(target.slice)
             if bad(receiver):
                 self.v(target, "item assignment on a live value")
-            if bad(index) and not self.identity_hashed(index):
+            if self.hashes_live(index):
                 self.v(target, "live value used as a key")
             if tainted(kind) and isinstance(target.value, ast.Attribute) and self._is_self(target.value.value):
                 self._mark_field(target.value.attr)
+            if tainted(kind) and isinstance(target.value, ast.Name) and self.env.get(target.value.id) in (None, CONT):
+                # 変数の容器へ live な値を入れた: その容器の要素は live
+                self.env[target.value.id] = CONT
         elif isinstance(target, ast.Starred):
             self.assign(target.value, kind, value)
 
@@ -546,9 +558,20 @@ class _FunctionAudit:
                 positive.update(p)
             return positive, negative
         if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or):
+            branches = []
             for value in test.values:
-                _, n = self.narrowing(value)
+                p, n = self.narrowing(value)
                 negative.update(n)
+                branches.append(p)
+            # `type(x) is A or type(x) is B`: 全部の枝が同じ名前を絞るなら、その合流
+            subjects = {name for branch in branches for name in branch}
+            if len(subjects) == 1 and all(len(branch) == 1 for branch in branches):
+                (subject,) = subjects
+                kinds = {branch[subject] for branch in branches}
+                if kinds <= {None, CONT}:
+                    positive[subject] = CONT if CONT in kinds else None
+                elif len(kinds) == 1:
+                    positive[subject] = kinds.pop()
             return positive, negative
         if isinstance(test, ast.Call) and len(test.args) == 1 and isinstance(test.args[0], ast.Name):
             if self._live_values_function(test.func) in VERIFYING_PREDICATES:
@@ -573,16 +596,15 @@ class _FunctionAudit:
         op = test.ops[0]
         right = test.comparators[0]
         kinds = []
-        if isinstance(op, (ast.Is, ast.IsNot, ast.Eq, ast.NotEq)):
+        # 型の絞り込みは identity（`is`）だけ: `==` / `in` は metaclass の `__eq__` を呼び得る
+        if isinstance(op, (ast.Is, ast.IsNot)):
             kinds = [self._narrowed_kind(right)]
-        elif isinstance(op, (ast.In, ast.NotIn)) and isinstance(right, (ast.Tuple, ast.Set, ast.List)):
-            kinds = [self._narrowed_kind(item) for item in right.elts]
         if not kinds or any(k == "?" for k in kinds):
             return positive, negative
         kind = kinds[0] if len(set(kinds)) == 1 else (CONT if all(k in (None, CONT) for k in kinds) else "?")
         if kind == "?":
             return positive, negative
-        if isinstance(op, (ast.Is, ast.Eq, ast.In)):
+        if isinstance(op, ast.Is):
             positive[subject] = kind
         else:
             negative[subject] = kind
@@ -601,6 +623,19 @@ class _FunctionAudit:
             if resolved and resolved[0] == "module" and resolved[1] == live_values:
                 return func.attr
         return None
+
+    def _narrow(self, updates: Dict[str, object]) -> Dict[str, object]:
+        """絞り込みを今の種類に合わせる: plain な値を package の型へ絞っても live にはしない（OBJ）。"""
+
+        out = {}
+        for name, kind in updates.items():
+            current = self.env.get(name)
+            if is_rec(kind) and not tainted(current):
+                kind = OBJ + kind[len(REC):]
+            elif kind == VER and not tainted(current):
+                kind = None
+            out[name] = kind
+        return out
 
     def _type_subject(self, node) -> Optional[str]:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "type" and len(node.args) == 1 and isinstance(node.args[0], ast.Name):
@@ -647,6 +682,11 @@ class _FunctionAudit:
         return None
 
     def e_Name(self, node):
+        if node.id not in self.env and node.id not in self.parameters:
+            resolved = self.index.resolve(self.module, node.id)
+            if resolved and resolved[0] == "value" and resolved[1] in OWNER_MODULES:
+                # owner の module の値（`RESULT_JSON_POLICY` など）: owner の object
+                return WORK
         return self.env.get(node.id)
 
     def _receiver_class(self, receiver, receiver_node):
@@ -662,7 +702,7 @@ class _FunctionAudit:
             self.v(node, f"attribute .{node.attr} of a live value")
             return LIVE
         if receiver in (ITER, CONT):
-            self.v(node, f"attribute .{node.attr} of a container of live values")
+            # package が作った組み込みの容器の属性（組み込みの method。中の live な値には触れない）
             return None
         owner = self._receiver_class(receiver, node.value)
         if owner is not None:
@@ -676,6 +716,9 @@ class _FunctionAudit:
                 return LIVE
             if node.attr in self.audit.live_fields[owner]:
                 return CONT
+            kinds = self.audit.field_kinds[owner].get(node.attr)
+            if kinds and len(kinds) == 1:
+                return next(iter(kinds))
             return None
         return None
 
@@ -685,11 +728,19 @@ class _FunctionAudit:
         if bad(receiver):
             self.v(node, "subscript of a live value")
             return LIVE
-        if bad(index) and not self.identity_hashed(index):
+        if self.hashes_live(index):
             self.v(node, "live value used as an index / key")
         if receiver in (CONT, ITER):
             return LIVE
         return None
+
+    def hashes_live(self, kind) -> bool:
+        """hash・比較するとその値の code を呼び得るか（live な値・live な値を持つ容器。identity で
+        hash される package の object は呼ばない）。"""
+
+        if kind in (CONT, ITER):
+            return True
+        return bad(kind) and not self.identity_hashed(kind)
 
     def identity_hashed(self, kind) -> bool:
         """型を確かめた package の object で、hash / 比較が object の identity のもの（その値の code を呼ばない）。"""
@@ -729,6 +780,21 @@ class _FunctionAudit:
 
     def e_Compare(self, node):
         kinds = [self.expr(node.left)] + [self.expr(c) for c in node.comparators]
+        operands = [node.left, *node.comparators]
+        for index, op in enumerate(node.ops):
+            if isinstance(op, (ast.Is, ast.IsNot)):
+                continue
+            for operand in operands[index:index + 2]:
+                subject = self._type_subject(operand)
+                of_live = subject is not None and bad(self.env.get(subject))
+                if (
+                    isinstance(operand, ast.Call) and isinstance(operand.func, ast.Name) and operand.func.id == "type"
+                    and len(operand.args) == 1 and bad(self.expr(operand.args[0]))
+                ):
+                    of_live = True
+                if of_live:
+                    # live な値の型を `==` / `in` で比べると、metaclass の `__eq__` を呼び得る（`is` で比べる）
+                    self.v(node, f"type of a live value compared with {type(op).__name__}")
         for op, left, right in zip(node.ops, kinds, kinds[1:]):
             if isinstance(op, (ast.Is, ast.IsNot)):
                 continue
@@ -736,11 +802,14 @@ class _FunctionAudit:
                 self.v(node, f"comparison ({type(op).__name__}) with a live value")
             elif isinstance(op, (ast.In, ast.NotIn)) and right in (CONT, ITER):
                 self.v(node, "membership test in a container of live values")
+            elif isinstance(op, (ast.In, ast.NotIn)) and left in (CONT, ITER):
+                self.v(node, "a container of live values hashed by a membership test")
         return None
 
     def e_IfExp(self, node):
         self.test(node.test)
         positive, negative = self.narrowing(node.test)
+        positive, negative = self._narrow(positive), self._narrow(negative)
         saved = dict(self.env)
         self.env.update(positive)
         body = self.expr(node.body)
@@ -760,13 +829,13 @@ class _FunctionAudit:
     e_List = e_Tuple
 
     def e_Set(self, node):
-        if any(bad(self.expr(e)) for e in node.elts):
+        if any(self.hashes_live(self.expr(e)) for e in node.elts):
             self.v(node, "live value hashed into a set")
         return None
 
     def e_Dict(self, node):
         for key in node.keys:
-            if key is not None and bad(self.expr(key)):
+            if key is not None and self.hashes_live(self.expr(key)):
                 self.v(node, "live value hashed as a dict key")
         kinds = [self.expr(value) for value in node.values]
         for key, kind in zip(node.keys, kinds):
@@ -831,13 +900,13 @@ class _FunctionAudit:
 
     def e_SetComp(self, node):
         (kind,) = self._comprehension(node, [node.elt])
-        if bad(kind):
+        if self.hashes_live(kind):
             self.v(node, "live value hashed into a set comprehension")
         return None
 
     def e_DictComp(self, node):
         key, value = self._comprehension(node, [node.key, node.value])
-        if bad(key):
+        if self.hashes_live(key):
             self.v(node, "live value hashed as a dict comprehension key")
         return CONT if tainted(value) else None
 
@@ -856,14 +925,25 @@ class _FunctionAudit:
                 self.v(node, "unpacking a live mapping into keywords")
             kwargs[keyword.arg] = kind
         live = [k for k in (*args, *kwargs.values()) if tainted(k)]
+        self._callable_arguments(node)
         func = node.func
+        if (
+            isinstance(func, ast.Attribute) and func.attr in _FILLING_METHODS and isinstance(func.value, ast.Name)
+            and any(tainted(k) for k in args) and self.env.get(func.value.id) in (None, CONT)
+            and func.value.id != self.self_name
+        ):
+            # 変数の容器へ live な値を足した（`rows.append(record)`）: その容器の要素は live
+            self.env[func.value.id] = CONT
         if isinstance(func, ast.Name):
-            if func.id in self.local_callables:
-                target = self.local_callables[func.id]
-                if target[0] == "func" and self.index.method_kind((target[1], target[2])) == "class":
-                    # classmethod の別名: cls を先頭に補う
-                    return self.resolved_call(node, target, [None, *args], kwargs, live, bound=True)
-                return self.resolved_call(node, target, args, kwargs, live)
+            if func.id in self.local_callables and None not in self.local_callables[func.id]:
+                results = []
+                for target in sorted(self.local_callables[func.id]):
+                    if target[0] == "func" and self.index.method_kind((target[1], target[2])) == "class":
+                        # classmethod の別名: cls を先頭に補う
+                        results.append(self.resolved_call(node, target, [None, *args], kwargs, live, bound=True))
+                    else:
+                        results.append(self.resolved_call(node, target, args, kwargs, live))
+                return join(*results)
             if func.id in self.env or func.id in self.parameters:
                 if bad(self.env.get(func.id)):
                     self.v(node, "calling a live value")
@@ -928,12 +1008,64 @@ class _FunctionAudit:
             if live:
                 return self.plain_method(node, func.attr, args)
             return None
+        if (
+            isinstance(func, ast.Call) and isinstance(func.func, ast.Name)
+            and self.index.resolve(self.module, func.func.id) == ("func", PKG + ".core.json_encoding", "protocol_method")
+        ):
+            # owner が型の MRO から引いた package の protocol の関数（record の protocol は root として監査済み）
+            self.expr(func)
+            return None
         if bad(self.expr(func)):
             self.v(node, "calling a live value")
         else:
             # 添字・呼び出しの結果など、名前で解決できない callable（関数の表・callback の値）
             self.v(node, "calling an unresolved callable expression")
         return None
+
+    def _callable_arguments(self, node) -> None:
+        """引数として渡した package の関数（`key=` / `functools.partial` / `default=`）も監査する。
+
+        `sorted` / `min` / `max` / `.sort` の `key=` は並べる列の要素を受ける（要素の種類で辿る）。
+        それ以外は呼ばれ方が分からないので、作業量でない引数は全部 live を受けるものとして辿る。
+        """
+
+        key_element = None
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in ("sorted", "min", "max") and node.args:
+            key_element = LIVE if tainted(self.expr(node.args[0])) else "plain"
+        elif isinstance(func, ast.Attribute) and func.attr == "sort":
+            key_element = LIVE if tainted(self.expr(func.value)) else "plain"
+        for keyword in node.keywords:
+            if keyword.arg == "key" and key_element is not None:
+                self._analyze_callable(keyword.value, None if key_element == "plain" else LIVE)
+        for argument in (*node.args, *(keyword.value for keyword in node.keywords if keyword.arg != "key" or key_element is None)):
+            self._analyze_callable(argument, LIVE)
+
+    def _analyze_callable(self, argument, kind) -> None:
+        """引数の式が package の関数なら、その関数を `kind` の引数で監査する。"""
+
+        if True:
+            target = None
+            if isinstance(argument, ast.Name) and argument.id not in self.env and argument.id not in self.parameters:
+                target = self.index.resolve(self.module, argument.id)
+            elif isinstance(argument, ast.Attribute) and isinstance(argument.value, ast.Name):
+                owner = self.index.resolve(self.module, argument.value.id) if argument.value.id not in self.env else None
+                if owner and owner[0] == "module":
+                    target = self.index.resolve(owner[1], argument.attr)
+                elif owner and owner[0] == "class":
+                    method = self.index.method(owner[1], owner[2], argument.attr)
+                    target = ("func",) + method if method else None
+            if not target or target[0] != "func" or target[1] in OWNER_MODULES or target[1].startswith(EXTERNAL_PREFIXES):
+                return
+            function = self.index.functions[(target[1], target[2])]
+            params = function.args.posonlyargs + function.args.args + function.args.kwonlyargs
+            self.audit.analyze(
+                (target[1], target[2]),
+                {} if kind is None else {
+                    param.arg: kind for param in params
+                    if param.arg not in WORK_PARAMETER_NAMES and param.arg not in ("self", "cls")
+                },
+            )
 
     def _owner_object(self, receiver_node) -> bool:
         base = receiver_node
@@ -953,7 +1085,7 @@ class _FunctionAudit:
         if attr in _APPEND_METHODS:
             return None
         if attr in ("get", "pop", "setdefault"):
-            if args and bad(args[0]) and not self.identity_hashed(args[0]):
+            if args and self.hashes_live(args[0]):
                 self.v(node, f"live value used as a key in .{attr}()")
             return LIVE
         if attr in ("items", "values", "keys"):
@@ -979,9 +1111,13 @@ class _FunctionAudit:
         return None
 
     def builtin_call(self, node, name, args, live):
+        if name == "range" and any(bad(k) for k in args):
+            self.v(node, "range() of a live value")
+            return None
         if name in _SAFE_BUILTINS:
             return None
-        if name in ("iter", "len") and args and args[0] == VER and len(args) == 1:
+        if name in ("iter", "len") and args and args[0] in (VER, CONT, ITER) and len(args) == 1:
+            # 組み込みの振る舞いを確かめた容器・package が作った組み込みの容器: 長さと反復は組み込みの slot
             return ITER if name == "iter" else None
         if name == "next":
             if args and bad(args[0]):
@@ -1036,6 +1172,10 @@ class _FunctionAudit:
             return None
         if kind == "class":
             if not live:
+                # plain な引数での構築: `__init__` を辿って field の種類（作業量・package の object）を覚える
+                init = self.index.method(module, name, "__init__")
+                if init is not None:
+                    self.resolved_call(node, ("func",) + init, [obj(module, name), *args], kwargs, live, bound=True)
                 return obj(module, name)
             # package の型の構築: 生成された `__init__` は値を入れるだけ。package が書いた
             # `__init__` / `__post_init__` は、live な引数 / field を受けるものとして監査する
@@ -1068,13 +1208,22 @@ class _FunctionAudit:
                 taint[function.args.vararg.arg] = CONT
         names = {p.arg for p in (*params, *function.args.kwonlyargs)}
         for keyword, arg_kind in kwargs.items():
+            if keyword is None:
+                if tainted(arg_kind):
+                    # `**kwargs` の転送: 名前で渡していない引数は全部 live を受け得る
+                    for param in (*params[len(args):], *function.args.kwonlyargs):
+                        if param.arg not in kwargs and param.arg not in WORK_PARAMETER_NAMES:
+                            taint.setdefault(param.arg, LIVE)
+                    if function.args.kwarg is not None:
+                        taint[function.args.kwarg.arg] = CONT
+                continue
             if keyword in names and arg_kind is not None:
                 taint[keyword] = arg_kind
             elif keyword not in names and tainted(arg_kind) and function.args.kwarg is not None:
                 taint[function.args.kwarg.arg] = CONT
         if bound and params and args and (args[0] == SELF or args[0] is None or is_obj(args[0])):
             taint.pop(params[0].arg, None)
-        taint = {k: v for k, v in taint.items() if tainted(v) or v == WORK}
+        taint = {k: v for k, v in taint.items() if tainted(v) or v == WORK or is_obj(v)}
         return self.audit.analyze(key, taint)
 
 
@@ -1099,6 +1248,13 @@ ENTRY_ROOTS = (
     ("proof.obligations.snapshot", "SnapshotFingerprintCodec.freeze", ("value",)),
     ("proof.obligations.snapshot", "SnapshotFingerprintCodec.digest", ("value",)),
     ("core.canonical_digest", "canonical_fingerprint", ("value",)),
+    # 作業量の object の method（名前で WORK として信頼する引数の、package の側の本体）
+    ("proof.obligations.snapshot", "_FreezeMeter.scalar", ("value",)),
+    ("proof.obligations.snapshot", "_FreezeMeter.count_value", ("value",)),
+    ("proof.obligations.snapshot", "_FreezeMeter.frame", ("count",)),
+    ("proof.obligations.snapshot", "_FreezeMeter.scalar_bytes", ("size_bytes",)),
+    ("core.budget_policy", "SerializationWork.charge", ("size",)),
+    ("core.budget_policy", "SerializationWork.tree", ("leaf",)),
 )
 
 
@@ -1128,6 +1284,9 @@ DECLARED_DEPENDENCIES = {
 DECLARED_CALLEES = {
     ("core.expression", "Expression.structural_key"):
         "#194: 閉路のある未凍結の式の cycle_ref は structural_key を組み立てる（identity key の owner）",
+    ("core.semantic_snapshot", "SemanticGraphMeter.add_root"):
+        "#194: 式の意味の graph（identity の owner の `core/semantic_snapshot`）を辿る distinct node の"
+        " 計数。上限（`max_distinct`）で止まる",
     ("core.structural", "_validated"):
         "#194: 構造 identity の入口の検証（未検証の式だけ graph を 1 度凍らせる。identity の owner）",
 }

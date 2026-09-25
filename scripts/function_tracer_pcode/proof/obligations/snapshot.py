@@ -21,6 +21,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
 from scripts.function_tracer_pcode.core.live_values import (
     NOT_PLAIN,
     as_repr,
+    as_str,
     builtin_mapping,
     builtin_sequence,
     builtin_set,
@@ -196,7 +197,7 @@ def _frozen_repr(value: Any) -> str:
     enum は `Enum.__repr__`）。それ以外は `TypeError`。
     """
 
-    if type(value) in (str, int):
+    if (type(value) is str or type(value) is int):
         return repr(value)
     pieces = []
     pending = [value]
@@ -204,7 +205,7 @@ def _frozen_repr(value: Any) -> str:
         item = pending.pop()
         kind = type(item)
         if kind is _Text:
-            pieces.append(item.text)
+            pieces.append(as_str(item.text))
         elif kind is tuple:
             count = size(item)
             pieces.append("(")
@@ -294,7 +295,7 @@ class SnapshotFingerprintCodec:
             return value
         freeze = cls._freeze_unmetered
         # 速い経路: 組み込みの型そのものの容器（組み込みの振る舞いと分かっている）
-        if type(value) in (tuple, list):
+        if (type(value) is tuple or type(value) is list):
             return tuple(freeze(v) for v in value)
         if type(value) is dict:
             return cls.sorted_mapping_items(

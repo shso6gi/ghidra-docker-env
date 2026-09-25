@@ -55,7 +55,6 @@ CLI:
 
 from __future__ import annotations
 
-import functools
 import types
 from dataclasses import dataclass
 from enum import Enum
@@ -1004,8 +1003,7 @@ class OutputPreparer:
                 raise
             if row is not None:
                 prepared.append(row)
-        order = _field_order()
-        prepared.sort(key=functools.partial(_field_position, order))
+        prepared = _in_field_order(prepared)
         plan = SerializationPlan(
             encoding=self.encoding,
             max_bytes=self.policy.serialization_bytes,
@@ -1066,12 +1064,17 @@ class OutputPreparer:
             with serialization_scope(
                 site=CAUSE_EVIDENCE_SITE, target_parts=("cause_evidence",),
                 terminal=False, max_bytes=limit, enabled=limit is not None,
-            ):
+            ) as work:
                 # 集計と同じ fail-open の入口（失敗は `error` を持つ値になる）
                 evidence = build_unknown_cause_aggregate(
                     result, trace_evidence_for=tuple(binary_identities),
                 )
-            return _charged(diagnostic, _prepare_json(self.encoding, evidence, max_bytes=limit))
+            # 集計を組んだ作業量も診断の共有の予算へ 1 回だけ数える（組む仕事と書く byte は別の単位）
+            if limit is not None:
+                diagnostic.charge(work.consumed)
+            return _charged(
+                diagnostic, _prepare_json(self.encoding, evidence, max_bytes=diagnostic.remaining()),
+            )
         except (JsonBudgetExhausted, JsonValueRejected) as exc:
             return self.encoding.prepare({
                 "truncated": True,
@@ -1192,10 +1195,17 @@ def _plain_key(key: Any) -> Any:
     return plain
 
 
-def _field_position(order: Dict[str, int], row: PreparedField) -> int:
-    """準備した field の出力の並び（`OutputPreparer.prepare` の整列の key）。"""
+def _in_field_order(rows: List[Any]) -> List[Any]:
+    """準備した field を出力の並び（`RESULT_FIELDS` の順）に並べる（安定。key は field 名の位置）。"""
 
-    return order[row.field_key()]
+    order = _field_order()
+    positions = []
+    for index, row in enumerate(rows):
+        if type(row) is not PreparedField:
+            raise TypeError("prepared rows are PreparedField only")
+        positions.append((order[row.field_key()], index))
+    positions.sort()
+    return [rows[index] for _position, index in positions]
 
 
 def _limitation_rows(reasons: Any, overflow: int):

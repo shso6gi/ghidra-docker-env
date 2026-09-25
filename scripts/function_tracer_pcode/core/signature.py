@@ -445,17 +445,22 @@ def clone_parameter_descriptor(
     *,
     include_data_type_obj: bool = True,
 ) -> Dict[str, Any]:
-    """パラメータ記述子を安全に複製する。"""
+    """パラメータ記述子を安全に複製する（値は `core.live_values` の規則で読む）。"""
     cloned: Dict[str, Any] = {}
-    for key, value in (param or {}).items():
-        if key == "data_type_obj" and not include_data_type_obj:
+    if param is None or not live_values.as_bool(param):
+        return cloned
+    for key, value in live_values.items_of(param):
+        name = live_values.str_value(key)
+        if name is live_values.NOT_PLAIN:
+            raise TypeError(f"parameter descriptor key {live_values.type_name(type(key))} is not a str")
+        if name == "data_type_obj" and not include_data_type_obj:
             continue
-        if isinstance(value, dict):
-            cloned[key] = dict(value)
-        elif isinstance(value, list):
-            cloned[key] = list(value)
+        if live_values.is_kind(value, dict) and live_values.builtin_mapping(value) is not None:
+            cloned[name] = live_values.merged_mappings(value)
+        elif live_values.is_kind(value, list) and live_values.builtin_sequence(value):
+            cloned[name] = list(live_values.elements_of(value))
         else:
-            cloned[key] = value
+            cloned[name] = value
     return cloned
 
 
@@ -1124,12 +1129,16 @@ class FunctionSignature:
     @classmethod
     def from_analysis(cls, analysis: "FunctionReturnAnalysis") -> "FunctionSignature":
         """FunctionReturnAnalysisからシグネチャを抽出"""
+        parameters = live_values.attribute(analysis, "parameters")
         return cls(
-            return_type=analysis.return_type,
-            return_type_obj=getattr(analysis, "return_type_obj", None),
+            return_type=live_values.attribute(analysis, "return_type"),
+            return_type_obj=live_values.attribute(analysis, "return_type_obj"),
             parameters=[
                 clone_parameter_descriptor(param, include_data_type_obj=True)
-                for param in (analysis.parameters or [])
+                for param in (
+                    live_values.elements_of(parameters)
+                    if parameters is not None and live_values.as_bool(parameters) else ()
+                )
             ],
         )
 

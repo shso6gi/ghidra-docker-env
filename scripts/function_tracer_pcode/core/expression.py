@@ -918,18 +918,16 @@ class Expression:
         if node_size is not None and (node_size if type(node_size) is int else as_bool(node_size)):
             result["size"] = node_size
         operands = self.operands
-        if operands is not None and (operands if type(operands) in (list, tuple) else as_bool(operands)):
-            if type(operands) not in (list, tuple):
-                operands = tuple(elements_of(operands))
+        if operands is not None and (operands if (type(operands) is list or type(operands) is tuple) else as_bool(operands)):
             if collect is None:
                 rendered = []
-                for op in operands:
+                for op in elements_of(operands):
                     if type(op) is not Expression:
                         raise TypeError("Expression operands must be Expressions")
                     rendered.append(op._to_dict(active))
                 result["operands"] = rendered
             else:
-                collect.extend(operands)
+                collect.extend(elements_of(operands))
                 result["operands"] = [0] * size(operands)
         storage_info = self.storage_info
         if storage_info is not None:
@@ -1172,7 +1170,51 @@ def _bounded_local_bytes(policy: Any, local: Any, max_bytes: Optional[int]) -> i
                         stack.extend(elements_of(value))
             if total > max_bytes:
                 return max_bytes + 1
-    return utf8_length(JsonEncodingPolicy.dumps(policy, local, default=_opaque_local_text))
+    # 書く前に組み込みの値だけの写しにする（JSON の encoder は dict の subclass の `items` を名前で
+    # 引き、書けない値には `default` を呼ぶ: live な値の code を encoder に呼ばせない）
+    return utf8_length(JsonEncodingPolicy.dumps(policy, _plain_local(local)))
+
+
+def _plain_local(local: Any) -> Any:
+    """node 1 つ分の dict の、JSON の encoder が書くのと同じ組み込みの値の写し（owner の規則で読む）。
+
+    str / int / float の subclass（mixin の enum を含む）は基底型の値（encoder と同じ）、組み込みの
+    振る舞いの容器は中身を写し、それ以外（encoder が `default` で書く値）は型名。
+    """
+
+    # 辿る値（live）・書き込む先（この関数が作る組み込みの容器）・key を別々の stack に持つ
+    root: list = []
+    values: list = [local]
+    parents: list = [root]
+    keys: list = [None]
+    while values:
+        value = values.pop()
+        parent = parents.pop()
+        key = keys.pop()
+        base = json_scalar(value)
+        if base is not NOT_PLAIN:
+            copied: Any = base
+        elif builtin_mapping(value) is not None:
+            copied = {}
+            for child_key, child in items_of(value):
+                plain_key = json_scalar(child_key)
+                values.append(child)
+                parents.append(copied)
+                keys.append(plain_key if plain_key is not NOT_PLAIN else _opaque_local_text(child_key))
+        elif builtin_sequence(value):
+            children = tuple(elements_of(value))
+            copied = [None] * len(children)
+            for index in range(len(children) - 1, -1, -1):
+                values.append(children[index])
+                parents.append(copied)
+                keys.append(index)
+        else:
+            copied = _opaque_local_text(value)
+        if key is None and type(parent) is list and parent is root:
+            parent.append(copied)
+        else:
+            parent[key] = copied
+    return root[0]
 
 
 class _RuntimeRefChild:

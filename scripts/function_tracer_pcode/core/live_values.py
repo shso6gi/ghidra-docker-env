@@ -35,39 +35,54 @@ from typing import Any, Iterator, Optional, Tuple
 
 #: 基底型でない値に `plain_scalar` / `*_value` が返す印
 NOT_PLAIN = object()
-#: package の directory（この file の 1 つ上）。package の code（型・関数・generator）の判定に使う
+#: package の directory（この file の 1 つ上）。package の code（関数・generator・property）の判定に使う
 PACKAGE_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")) + os.sep
+#: package の中でも package の code として信頼しない directory（test / fixture: 記録した Ghidra の
+#: 値の代わりの object は live な値と同じに扱う）。test の harness だけが `trust_code_directory` で足す
+_UNTRUSTED_DIRS = (os.path.join(PACKAGE_DIR, "tests") + os.sep,)
+_TRUSTED_EXTRA_DIRS: list = []
 _PACKAGE_FILES: dict = {}
-_PACKAGE_TYPES: dict = {}
+
+
+def trust_code_directory(path: str) -> None:
+    """test の harness が自分の code（test の module の record・converter・reducer）を信頼する。
+
+    production は呼ばない（信頼は package の code だけ）。足すだけで取り消さない。
+    """
+
+    directory = os.path.normpath(os.path.abspath(path)) + os.sep
+    if directory not in _TRUSTED_EXTRA_DIRS:
+        _TRUSTED_EXTRA_DIRS.append(directory)
+        _PACKAGE_FILES.clear()
 
 
 def package_file(path: Any) -> bool:
-    """file の path が package の directory の中か（正規化して 1 度だけ調べる）。"""
+    """file の path が package の code か（正規化して 1 度だけ調べる。test / fixture は除く）。"""
 
     if type(path) is not str:
         return False
     known = _PACKAGE_FILES.get(path)
     if known is None:
-        known = _PACKAGE_FILES[path] = os.path.normpath(os.path.abspath(path)).startswith(PACKAGE_DIR)
+        normalized = os.path.normpath(os.path.abspath(path))
+        known = any(normalized.startswith(directory) for directory in _TRUSTED_EXTRA_DIRS) or (
+            normalized.startswith(PACKAGE_DIR)
+            and not any(normalized.startswith(directory) for directory in _UNTRUSTED_DIRS)
+        )
+        _PACKAGE_FILES[path] = known
     return known
 
 
 def package_code(code: Any) -> bool:
-    """code object が package の file のものか。"""
+    """code object が package の file のものか（code の file 名は型の `__module__` と違い書き換えられない）。"""
 
     return type(code) is types.CodeType and package_file(code.co_filename)
 
 
-def package_type(kind: type) -> bool:
-    """`kind` が package の code（file が package の directory の中の module）で定義された型か。"""
+def package_function(value: Any) -> bool:
+    """package の code の関数か（型の MRO から引いた protocol の method・converter を呼んでよいかの判定）。"""
 
-    known = _PACKAGE_TYPES.get(kind)
-    if known is None:
-        module = sys.modules.get(type_module(kind))
-        state = types.ModuleType.__dict__["__dict__"].__get__(module) if type(module) is types.ModuleType else None
-        known = type(state) is dict and package_file(state.get("__file__"))
-        _PACKAGE_TYPES[kind] = known
-    return known
+    return type(value) is types.FunctionType and package_code(value.__code__)
+
 
 _BUILTIN_DICTS = (dict, OrderedDict)
 _TYPE_QUALNAME = type.__dict__["__qualname__"]
@@ -269,11 +284,10 @@ def as_bool(value: Any) -> bool:
     if builtin_container(value):
         return size(value) > 0
     kind = type(value)
-    # `__bool__` / `__len__` を持たない型の値は常に真（`bool(x)` と同じ）: package の record と、
-    # 組み込み（C で定義した、上書きできない型: generator・関数など）
+    # `__bool__` / `__len__` を MRO のどこにも持たない型の値は常に真（`bool(x)` と同じ。その値の
+    # code は無い: record・generator・関数など）
     if (
-        (package_type(kind) or not (_TYPE_FLAGS.__get__(kind) & _HEAP_TYPE))
-        and type_attribute(kind, "__bool__") is None
+        type_attribute(kind, "__bool__") is None
         and type_attribute(kind, "__len__") is None
     ):
         return True
@@ -336,12 +350,30 @@ def builtin_enum(value: Any) -> bool:
     kind = type(value)
     if not issubclass(kind, Enum):
         return False
+    from enum import EnumMeta
+
+    # `Enum.__str__` / `__repr__` / `__hash__` は Python の code で、member の属性と `__class__` を
+    # 読み、値の `repr` を呼ぶ: それらも組み込みのまま（metaclass・属性の読み方・値の型）のときだけ
+    member = instance_state(value, "_value_", None)
     return (
-        type_attribute(kind, "__str__") in _BUILTIN_ENUM_STR
+        type(kind) is EnumMeta
+        and type_attribute(kind, "__str__") in _BUILTIN_ENUM_STR
         and type_attribute(kind, "__repr__") in _BUILTIN_ENUM_REPR
         and type_attribute(kind, "__hash__") in _BUILTIN_HASH
-        and plain_scalar(instance_state(value, "_value_", None)) is not NOT_PLAIN
+        and type_attribute(kind, "__eq__") in _BUILTIN_EQ
+        and type_attribute(kind, "__format__") in _BUILTIN_ENUM_FORMAT
+        and type_attribute(kind, "__getattribute__") in _BUILTIN_GETATTRIBUTE
+        and type_attribute(kind, "__class__") is _OBJECT_CLASS
+        and (member is None or type(member) is str or type(member) is int or type(member) is float or type(member) is bool)
     )
+
+
+_BUILTIN_EQ = frozenset({object.__eq__, str.__eq__, int.__eq__, float.__eq__})
+_BUILTIN_ENUM_FORMAT = frozenset({Enum.__format__, object.__format__, str.__format__, int.__format__, float.__format__})
+_OBJECT_CLASS = object.__dict__["__class__"]
+_BUILTIN_GETATTRIBUTE = frozenset({
+    object.__getattribute__, str.__getattribute__, int.__getattribute__, float.__getattribute__,
+})
 
 
 def enum_value(value: Any) -> Any:
@@ -476,9 +508,18 @@ def dataclass_field_names(value: Any) -> Optional[Tuple[str, ...]]:
     table = type_attribute(kind, "__dataclass_fields__")
     if type(table) is not dict:
         return None
-    from dataclasses import _FIELD  # type: ignore[attr-defined]  # `dataclasses.fields` と同じ判定
+    import dataclasses
 
-    return tuple(name for name, field_info in table.items() if field_info._field_type is _FIELD)
+    # `dataclasses.fields` と同じ判定。表の中身も組み込みの型そのものだけ（`Field` の slot を
+    # 型の descriptor で読む。偽の表の object の属性・`__getattr__` を呼ばない）
+    field_type_slot = _type_lookup(dataclasses.Field, "_field_type", None)
+    names = []
+    for name, field_info in dict.items(table):
+        if type(name) is not str or type(field_info) is not dataclasses.Field:
+            return None
+        if field_type_slot.__get__(field_info, dataclasses.Field) is dataclasses._FIELD:  # type: ignore[attr-defined]
+            names.append(name)
+    return tuple(names)
 
 
 def field_value(value: Any, name: str) -> Any:
@@ -532,6 +573,9 @@ _BUILTIN_BEHAVIOUR: dict = {}
 def _builtin_behaviour(kind: type, bases: Tuple[type, ...], names: Tuple[str, ...]) -> bool:
     """`kind` が `bases` のどれかの subclass で、`names` の method を上書きしていないか（型ごとに 1 度だけ）。"""
 
+    if not _plain_metatype(kind):
+        # metaclass が `__eq__` / `__hash__` を持つ型は cache の key にもしない（その code を呼ばない）
+        return False
     key = (kind, bases)
     known = _BUILTIN_BEHAVIOUR.get(key)
     if known is None:
@@ -548,7 +592,21 @@ def builtin_iterator(item: Any) -> bool:
     """組み込みの容器の iterator / dict の view か（中身を辿るのは組み込みの実装だけ）。"""
 
     kind = type(item)
-    return kind in _BUILTIN_ITERATOR_TYPES or kind in _BUILTIN_VIEW_TYPES or kind is range
+    if kind is range:
+        return True
+    return _plain_metatype(kind) and (kind in _BUILTIN_ITERATOR_TYPES or kind in _BUILTIN_VIEW_TYPES)
+
+
+def _plain_metatype(kind: type) -> bool:
+    """型の hash・比較が組み込みの実装か（metaclass が `__eq__` / `__hash__` を上書きしない）。"""
+
+    metatype = type(kind)
+    if metatype is type:
+        return True
+    return (
+        _type_lookup(metatype, "__eq__", None) is object.__eq__
+        and _type_lookup(metatype, "__hash__", None) is object.__hash__
+    )
 
 
 def builtin_container(item: Any) -> bool:
@@ -574,10 +632,16 @@ def _mapping_base(mapping: Any) -> type:
 
     if builtin_mapping(mapping) is None:
         raise TypeError(f"{type_name(type(mapping))} is not a builtin mapping")
-    kind = type(mapping)
-    if kind is types.MappingProxyType:
-        return kind
+    kind = type(_unwrapped(mapping))
     return OrderedDict if issubclass(kind, OrderedDict) else dict
+
+
+def _unwrapped(mapping: Any) -> Any:
+    """`MappingProxyType` なら包んだ mapping（proxy の method は包んだ値の method を名前で呼ぶので使わない）。"""
+
+    if type(mapping) is types.MappingProxyType:
+        return gc.get_referents(mapping)[0]
+    return mapping
 
 
 def items_of(mapping: Any) -> Iterator[Tuple[Any, Any]]:
@@ -585,7 +649,7 @@ def items_of(mapping: Any) -> Iterator[Tuple[Any, Any]]:
 
     if type(mapping) is dict:
         return iter(dict.items(mapping))
-    return iter(_mapping_base(mapping).items(mapping))
+    return iter(_mapping_base(mapping).items(_unwrapped(mapping)))
 
 
 def values_of(mapping: Any) -> Iterator[Any]:
@@ -593,7 +657,7 @@ def values_of(mapping: Any) -> Iterator[Any]:
 
     if type(mapping) is dict:
         return iter(dict.values(mapping))
-    return iter(_mapping_base(mapping).values(mapping))
+    return iter(_mapping_base(mapping).values(_unwrapped(mapping)))
 
 
 def merged_mappings(*mappings: Any) -> dict:
@@ -622,7 +686,7 @@ def lookup(mapping: Any, key: Any, default: Any = None) -> Any:
         raise TypeError(f"{type_name(type(key))} is not a plain mapping key")
     if type(mapping) is dict:
         return dict.get(mapping, key, default)
-    return _mapping_base(mapping).get(mapping, key, default)
+    return _mapping_base(mapping).get(_unwrapped(mapping), key, default)
 
 
 def _plain_key(key: Any) -> bool:
@@ -656,7 +720,8 @@ __all__ = [
     "package_code",
     "package_file",
     "package_generator",
-    "package_type",
+    "package_function",
+    "trust_code_directory",
     "as_bool",
     "as_float",
     "as_int",

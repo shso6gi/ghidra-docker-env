@@ -401,7 +401,7 @@ def _path_conditions_source(path_conditions: Any) -> Any:
 def _residue_case_source(case: Any) -> Any:
     """`residue_cases` の 1 要素 `(modulus, residue, coeff, bias)` の出力（組み込みの tuple / list だけ）。"""
 
-    if type(case) in (tuple, list):
+    if (type(case) is tuple or type(case) is list):
         return inline(
             ("modulus", as_int(case[0])),
             ("residue", as_int(case[1])),
@@ -415,7 +415,7 @@ def _residue_case_source(case: Any) -> Any:
 def _residue_bias_term_source(term: Any) -> Any:
     """`residue_bias_terms` の 1 要素 `(modulus, residue, bias_expr)` の出力（組み込みの tuple / list だけ）。"""
 
-    if type(term) in (tuple, list):
+    if (type(term) is tuple or type(term) is list):
         bias_expr = term[2]
         return inline(
             ("modulus", as_int(term[0])),
@@ -429,7 +429,7 @@ def _residue_bias_term_source(term: Any) -> Any:
 def _lane_term_source(lane: Any) -> Any:
     """`lane_terms` の 1 要素 `(offset, size)` の出力（組み込みの tuple / list だけ）。"""
 
-    if type(lane) in (tuple, list):
+    if (type(lane) is tuple or type(lane) is list):
         return inline(
             ("byte_offset", as_int(lane[0])),
             ("access_size", max(1, _int_or_zero(lane[1]))),

@@ -189,6 +189,51 @@ class _Holder:
 def good_converter(value):
     return as_int(value)
 
+def _stringify(value):
+    return str(value)
+
+def _plain_builder(value):
+    return value
+
+class AliasAcrossBranches:
+    def json_items(self):
+        build = _plain_builder
+        if self.flag is None:
+            build = _stringify
+        yield "x", build(self.x)
+
+def _forwarded(**fields):
+    return _takes_value(**fields)
+
+def _takes_value(value=None):
+    return len(value)
+
+class KwargsForwarding:
+    def json_items(self):
+        yield "x", _forwarded(value=self.x)
+
+class FilledContainer:
+    def json_items(self):
+        rows = []
+        rows.append(self.x)
+        yield "x", rows[0].name
+
+def _key_of(item):
+    return item.rank
+
+class KeyCallback:
+    def json_items(self):
+        yield "x", sorted(elements_of(self.x), key=_key_of)
+
+class TypeCompared:
+    def json_items(self):
+        if type(self.x) == int:
+            yield "x", 1
+
+class TableCall:
+    def json_items(self):
+        yield "x", {"a": _stringify}["a"](self.x)
+
 class Clean:
     def json_items(self):
         yield "a", as_int(self.x)
@@ -222,6 +267,10 @@ _EXPECTED_VIOLATIONS = {
     "MethodOfField.json_items", "LambdaConverter.json_items", "LenField.json_items", "StrField.json_items",
     "GetattrField.json_items", "BaseSlotField.json_items", "ExternalField.json_items", "UnpackField.json_items",
     "NestedFunction.json_items", "_helper", "bad_converter", "BadReducer.add", "OwnedHolder.json_items",
+    # 2 回目の cross-audit が見つけた監査の穴（枝ごとに違う関数の別名・`**kwargs` の転送・容器へ入れた
+    # live な値・`key=` の callback・型の `==`・関数の表の呼び出し）
+    "_stringify", "_takes_value", "FilledContainer.json_items", "_key_of", "TypeCompared.json_items",
+    "TableCall.json_items",
 }
 
 
@@ -836,7 +885,11 @@ _B_COUNTED = "B: `_counted` が同じ直列化の作業量へ数えた trace / c
 _B_PREPARED = "B: 準備済みの値（上限 `max_bytes` の中で作った `PreparedJson` の写し）だけを辿る"
 _B_BOUND = "B: 上限（`max_bytes` / `sink.work` / 木の計測器）を持ち、辿る前にその上限へ数える"
 _B_SIZED = "B: 木を作る前に `__json_tree_bytes__` で大きさを数え、上限の中でだけ作る"
-_B_FROZEN = "B: `freeze(budget=)` が数えた写し（組み込みの値だけ）を辿る"
+_B_FROZEN = (
+    "B / D(#194): snapshot の作成では `freeze(budget=)` が数えた写し（組み込みの値だけ）を辿る。"
+    " proof の obligation の digest（`SnapshotFingerprintCodec.digest` の解析時の呼び出し）は"
+    " identity の owner の範囲"
+)
 _B_SCHEMA_ROWS = "B: G4-b（`finitize_legacy_reasons`）が出力 schema の行数へ切った列を辿る"
 _C_LAZY = "C: 1 要素ずつ yield する generator を walker へ渡す（walker が引き出すたびに数える）"
 _D_PAIR_FAILURE = (
@@ -844,8 +897,12 @@ _D_PAIR_FAILURE = (
     " 作った値の写し）"
 )
 _D_RECORD = "D(#106): record の構築（field は解析の producer が作った値。大きさは構築の owner）"
-_D_TRUNCATION = "D(#131): 展開の上限の事実の列（構築のときに確定した record の数）"
+_D_TRUNCATION = (
+    "D(#131): 展開の上限の事実の列（構築のときに確定した record の数）を `json_items` の前に並べる"
+    "（O(n log n)。n は解析が記録した事実の数）"
+)
 _D_LEGACY_RESULT = "D(#106): receipt の無い旧来の結果だけ（production の結果は receipt だけを読む）"
+_D_IDENTITY = "D(#194): 構造の identity の atom の digest（identity の owner の `core/semantic_snapshot`）"
 
 _PROPORTIONAL_WORK_OWNERS = {
     ("analysis.effects.models", "StoreEffectProvenance.is_complete"): _A_FIXED,
@@ -911,6 +968,19 @@ _PROPORTIONAL_WORK_OWNERS = {
         "_coerce_evidence_refs", "_coerce_optional_tuple", "coerce_unknown_recovery_proof_obligations",
     )},
     ("proof.unknown_reason", "_registered_recovery_proof_kind_values"): _A_FIXED,
+    ("checker.cause_aggregate", "_multiset_row_order"): _B_COUNTED,
+    ("checker.cause_aggregate", "primary_reason_record_sort_key"): _B_COUNTED,
+    ("checker.output_preparation", "_in_field_order"): _A_FIXED,
+    ("checker.result_assembly", "_hypotheses_of"): _D_PAIR_FAILURE,
+    ("core.budget_policy", "SerializationWork.__init__"): _A_FIXED,
+    ("core.budget_policy", "SerializationWork.exceeded"): _A_FIXED,
+    ("core.canonical_digest", "_Sink._put"): _B_BOUND,
+    ("core.canonical_digest", "_Sink.emit_leaf"): _A_FIXED,
+    ("core.canonical_digest", "_Sink.emit_string"): _B_BOUND,
+    ("core.expression", "_plain_local"): _B_BOUND,
+    ("core.semantic_snapshot", "_encode_atoms"): _D_IDENTITY,
+    ("core.semantic_snapshot", "_encode_atoms_to_bytes"): _D_IDENTITY,
+    ("core.semantic_snapshot", "stable_atoms_digest"): _D_IDENTITY,
 }
 
 
@@ -1011,3 +1081,127 @@ def test_producer_time_recovery_actions_charge_every_record_they_read():
         ):
             pass
     assert time.perf_counter() - started < 1.0
+
+
+# ---------------------------------------------------------------------------
+# 2 回目の cross-audit: owner の信頼の判定（型の `__module__`・test の directory・proxy・偽の表・enum）
+# ---------------------------------------------------------------------------
+
+_SPOOF_SOURCE = '''
+import enum
+import dataclasses
+
+calls = []
+
+class SpoofedRecord:
+    """package の module を名乗る型（`__module__` は書き換えられる）。"""
+
+    def json_items(self):
+        calls.append("json_items")
+        yield "x", 1
+
+SpoofedRecord.__module__ = "scripts.function_tracer_pcode.core.expression"
+
+class LoudDict(dict):
+    def values(self):
+        calls.append("values")
+        return dict.values(self)
+
+    def get(self, key, default=None):
+        calls.append("get")
+        return dict.get(self, key, default)
+
+    def __getattribute__(self, name):
+        calls.append("getattribute")
+        return dict.__getattribute__(self, name)
+
+class LoudField:
+    @property
+    def _field_type(self):
+        calls.append("_field_type")
+        return None
+
+class ForgedDataclass:
+    __dataclass_fields__ = {"a": LoudField()}
+
+class LoudEnum(enum.Enum):
+    A = 1
+
+    def __getattribute__(self, name):
+        calls.append("enum_getattribute")
+        return object.__getattribute__(self, name)
+
+class LoudMeta(type):
+    def __eq__(cls, other):
+        calls.append("meta_eq")
+        return False
+
+    def __hash__(cls):
+        calls.append("meta_hash")
+        return 1
+
+class MetaObject(metaclass=LoudMeta):
+    pass
+
+class OutsideKey:
+    def stable_key(self):
+        calls.append("stable_key")
+        return ("k",)
+
+def outside_converter(value):
+    calls.append("converter")
+    return value
+'''
+_SPOOF: dict = {}
+exec(compile(_SPOOF_SOURCE, "/nonexistent/spoofing_outside_the_package.py", "exec"), _SPOOF)
+
+
+def test_the_owner_trusts_code_by_its_file_not_by_the_type_name():
+    """package の code かは関数の code の file で決める（`__module__` を名乗っても外の code は呼ばない）。"""
+
+    import types
+
+    from scripts.function_tracer_pcode.core import live_values
+    from scripts.function_tracer_pcode.core.json_encoding import (
+        RESULT_JSON_POLICY,
+        JsonValueRejected,
+        identity_key_of,
+        is_json_record,
+        source_converter,
+    )
+
+    calls = _SPOOF["calls"]
+    calls.clear()
+    record = _SPOOF["SpoofedRecord"]()
+    assert is_json_record(record) is False
+    with pytest.raises(JsonValueRejected):
+        RESULT_JSON_POLICY.prepare(record)
+    # 包んだ dict の subclass の method を proxy 経由で呼ばない
+    proxy = types.MappingProxyType(_SPOOF["LoudDict"](a=1))
+    assert list(live_values.values_of(proxy)) == [1]
+    assert live_values.lookup(proxy, "a") == 1
+    assert list(live_values.items_of(proxy)) == [("a", 1)]
+    # 偽の `__dataclass_fields__` の中身を読まない
+    assert live_values.dataclass_field_names(_SPOOF["ForgedDataclass"]()) is None
+    # 属性の読み方を上書きした enum は組み込みのままの enum ではない
+    assert live_values.builtin_enum(_SPOOF["LoudEnum"].A) is False
+    # metaclass が `__eq__` / `__hash__` を持つ型は hash・比較しない
+    meta = _SPOOF["MetaObject"]()
+    assert live_values.builtin_iterator(meta) is False
+    assert live_values.builtin_sequence(meta) is False
+    # package の外の `stable_key` / converter は呼ばない・登録しない
+    assert identity_key_of(_SPOOF["OutsideKey"]()) == (False, None)
+    with pytest.raises(TypeError):
+        source_converter(_SPOOF["outside_converter"])
+    assert calls == []
+
+
+def test_fixtures_are_not_trusted_as_package_code():
+    """test / fixture の directory は package の code ではない（test の harness が足す `tests/unit` だけ）。"""
+
+    from scripts.function_tracer_pcode.core import live_values
+
+    fixture = str(PACKAGE_ROOT / "tests" / "fixtures" / "pcode" / "recorded_program.py")
+    assert live_values.package_file(fixture) is False
+    assert live_values.package_file(str(PACKAGE_ROOT / "core" / "json_encoding.py")) is True
+    assert live_values.package_file(__file__) is True  # conftest が `tests/unit` を信頼する

@@ -442,13 +442,13 @@ def make_unknown_reason(
         )
     normalized_proof_kind = normalized_recovery_proof_kind or definition.recovery_proof_kind
     coerced_object_target_key = _coerce_optional_tuple(object_target_key)
+    # 値は owner の規則で読む（`str()` は scalar と組み込みのままの enum の値の文字列だけ）
     normalized_action_status = _enum_value(action_status)
-    if normalized_action_status is not None:
-        normalized_action_status = str(normalized_action_status)
     resolved_proof_stage = proof_stage
-    if resolved_proof_stage is None and len(coerced_recovery_obligations) == 1:
-        resolved_proof_stage = coerced_recovery_obligations[0].proof_stage
-    resolved_evidence_kind = str(evidence_kind) if evidence_kind is not None else None
+    if resolved_proof_stage is None and live_values.size(coerced_recovery_obligations) == 1:
+        (only_obligation,) = tuple(live_values.elements_of(coerced_recovery_obligations))
+        resolved_proof_stage = live_values.attribute(only_obligation, "proof_stage")
+    resolved_evidence_kind = _plain_text(evidence_kind) if evidence_kind is not None else None
     coerced_proof_obligation_id = _coerce_optional_tuple(proof_obligation_id)
     if (
         coerced_proof_obligation_id is None
@@ -483,8 +483,13 @@ def make_unknown_reason(
         object_target_key=coerced_object_target_key,
         object_evidence=object_evidence,
         proof_obligation_id=coerced_proof_obligation_id,
-        typed_cause_key=dict(typed_cause_key) if typed_cause_key else None,
-        proof_requirement_ids=tuple(dict(item) for item in (proof_requirement_ids or ())),
+        typed_cause_key=(
+            live_values.merged_mappings(typed_cause_key)
+            if typed_cause_key is not None and live_values.as_bool(typed_cause_key) else None
+        ),
+        proof_requirement_ids=tuple(
+            live_values.merged_mappings(item) for item in _elements_or_empty(proof_requirement_ids)
+        ),
         recovery_action=recovery_action,
         action_status=normalized_action_status,
         target_regression=target_regression if target_regression is not None else definition.target_regression,

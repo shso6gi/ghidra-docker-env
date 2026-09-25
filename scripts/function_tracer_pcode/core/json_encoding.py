@@ -125,8 +125,6 @@ class _OpaqueLeaf(JsonValueRejected):
 
 #: 登録した source converter（module の top-level の関数だけ。import のときに 1 度だけ登録する）
 _CONVERTERS: set = set()
-#: package の module の接頭辞（walker が protocol の method を呼んでよい型・generator の出所）
-_PACKAGE_PREFIX = "scripts.function_tracer_pcode."
 
 
 
@@ -140,7 +138,10 @@ def source_converter(fn: Callable[[Any], Any]) -> Callable[[Any], Any]:
     本体と呼び先を検査する）。walker が呼ぶ callback は、これと `Reducer` だけ。
     """
 
-    if type(fn) is not types.FunctionType or fn.__name__ == "<lambda>" or "<locals>" in fn.__qualname__:
+    if (
+        not live_values.package_function(fn)
+        or fn.__name__ == "<lambda>" or "<locals>" in fn.__qualname__
+    ):
         raise TypeError("a source converter is a module-level function registered once at import")
     _CONVERTERS.add(fn)
     return fn
@@ -153,7 +154,7 @@ def _is_converter(fn: Any) -> bool:
 
 def _require_converter(fn: Any, where: str) -> None:
     if not _is_converter(fn):
-        raise TypeError(f"{where} takes a registered source_converter, not {fn!r}")
+        raise TypeError(f"{where} takes a registered source_converter, not {type_name(type(fn))}")
 
 
 def exception_text(exc: BaseException, max_chars: int = 80) -> str:
@@ -412,16 +413,16 @@ def inline(*pairs: Tuple[Any, Any]) -> _Source:
     return _Inline(tuple(pairs))
 
 
-_package_type = live_values.package_type
 
 
 def _record_protocol(kind: type, name: str) -> Any:
-    """package の型が定義した protocol の method（`json_items` / `__json_tree__`）。それ以外は `None`。"""
+    """型の MRO が持つ protocol の method（`json_items` / `__json_tree__`）。package の code の関数だけ。
 
-    if not _package_type(kind):
-        return None
+    信頼は関数の code の file（書き換えられない）で決める。型の `__module__` は書き換えられるので使わない。
+    """
+
     method = type_attribute(kind, name)
-    return method if type(method) is types.FunctionType else None
+    return method if live_values.package_function(method) else None
 
 
 def protocol_method(value: Any, name: str) -> Any:
@@ -497,7 +498,11 @@ def scan(values: Any, reducer: Reducer) -> _Source:
     """
 
     kind = type(reducer)
-    if not (issubclass(kind, Reducer) and _package_type(kind)):
+    if not (
+        issubclass(kind, Reducer)
+        and live_values.package_function(type_attribute(kind, "add"))
+        and live_values.package_function(type_attribute(kind, "result"))
+    ):
         raise TypeError(f"scan takes a package Reducer, not {type_name(kind)}")
     return _Scan(values, reducer)
 
@@ -532,7 +537,7 @@ class Tally(Reducer):
 
     def add(self, element: Any, *, work: "JsonBudget") -> None:
         key = hashable_key(live_values.attribute(element, self.attribute), work)
-        if not (key is None or type(key) in (str, int, float, bool)):
+        if not (key is None or (type(key) is str or type(key) is int or type(key) is float or type(key) is bool)):
             raise TypeError(f"Tally key {type_name(type(key))} is not a scalar")
         self.counts[key] = self.counts.get(key, 0) + 1
 
@@ -890,7 +895,10 @@ class JsonBudget:
             self.parent.charge(size)
 
     def exceeded(self) -> None:
-        raise JsonBudgetExhausted(consumed_bytes=self.consumed, max_bytes=self.max_bytes)
+        # 超えた事実は上限 + 1 以上として伝える（作業量（effort）が先に尽きて止めたときも、
+        # 呼ぶ側が「測った大きさ」を上限の内側と読み違えない。`JsonBudgetExhausted` の契約）
+        consumed = self.consumed if self.max_bytes is None else max(self.consumed, self.max_bytes + 1)
+        raise JsonBudgetExhausted(consumed_bytes=consumed, max_bytes=self.max_bytes)
 
     def tree(self, leaf: Any, *, build: bool) -> Tuple[Any, int]:
         """sized leaf の大きさを **作る前に** 求めて足し、`build` なら木を作る。"""
@@ -1207,7 +1215,9 @@ class JsonEncodingPolicy:
         """
 
         budget = JsonBudget(max_bytes, detached=size_only)
-        _Walk(self, mode, budget, build=False).run(source)
+        # 見積もり（`size_only`）は走査の作業量も返す大きさに含める: 呼ぶ側がそれを 1 回数える
+        # （見積もりの effort を別の owner に残さない）
+        _Walk(self, mode, budget, build=False, effort_to_budget=size_only).run(source)
         return budget.consumed
 
     def materialize(self, source: Any, *, budget: Optional[JsonBudget] = None, counted: bool = False) -> Any:
@@ -1440,19 +1450,25 @@ def value_token(value: Any, work: Optional["JsonBudget"] = None, *, _depth: int 
     中でだけ意味を持つ）。`__str__` / `__repr__` / `__hash__` / property を呼ばない。
     """
 
+    if work is None:
+        # 作業量を渡されなければ固定の上限（`builtin_view` と同じ）の中でだけ辿る。超えれば
+        # identity の印（値で比べない側へ倒す）
+        units = _ViewUnits()
+        try:
+            return value_token(value, units, _depth=_depth)
+        except _NotPlain:
+            return object_identity_token(value)
     ok, view = builtin_view(value, work)
     if ok:
         return view
     kind = type(value)
     if issubclass(kind, Enum):
-        if work is not None:
-            work.charge(1)
+        work.charge(1)
         return ("<enum>", type_name(kind), live_values.enum_name(value))
     names = dataclass_field_names(value)
     if names is not None and _depth < _VALUE_TOKEN_MAX_DEPTH and type_attribute(kind, "to_authority_dict") is None:
         try:
-            if work is not None:
-                work.charge(1 + len(names))
+            work.charge(1 + len(names))
             return ("<dataclass>", type_name(kind), tuple(
                 (name, value_token(plain_field_value(value, name), work, _depth=_depth + 1)) for name in names
             ))
@@ -1606,7 +1622,7 @@ def identity_key_of(value: Any, *, names: Tuple[str, ...] = ("stable_key", "to_k
     for name in names:
         # 型の `__dict__` の関数だけ（metaclass の hook・instance の `__getattr__` を呼ばない）
         method = type_attribute(kind, name)
-        if type(method) is types.FunctionType:
+        if live_values.package_function(method):
             return True, method(value)
     return False, None
 

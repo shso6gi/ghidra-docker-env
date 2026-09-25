@@ -202,7 +202,7 @@ def _freeze_enter(item: Any, out: List[Any], frames: List[List[Any]], active: se
     active.add(marker)
     if mapping is not None:
         keys, children = _ordered_members(mapping)
-        frames.append([iter(children), [], keys, marker])
+        frames.append([elements_of(children), [], keys, marker])
     else:
         frames.append([elements_of(item), [], None, marker])
 
@@ -281,7 +281,9 @@ def resolve_cause_identity(
     `freeze_identity` の写し。typed key の tuple は写しても同じ値）。
     """
 
-    if live_values.is_kind(typed_cause_key, Mapping):
+    # 組み込みの振る舞いの mapping だけ（`typing.Mapping` の `__subclasscheck__` は metaclass・ABC の
+    # 登録表を辿る）
+    if live_values.builtin_mapping(typed_cause_key) is not None:
         try:
             cause: CauseKey = cause_key_from_dict(typed_cause_key)
         except ValueError as exc:
@@ -585,7 +587,8 @@ def resolve_occurrence_transitions(
     occurrence_by_id = {
         freeze_identity(lookup(item, "occurrence_id")): item for item in occurrences
     }
-    occurrence_ids = set(occurrence_by_id)
+    # key は `freeze_identity` の写し（組み込みの値）: key の集合は同じ写しから作る
+    occurrence_ids = {freeze_identity(lookup(item, "occurrence_id")) for item in occurrences}
     result: Dict[Any, str] = {}
     for completion in reason_completions:
         if builtin_mapping(completion) is None:
@@ -1293,10 +1296,11 @@ def _payload_occurrence_views(records: Sequence[UnknownReasonRecord]) -> List[Di
 
 
 def _prepared_within_work(record: Any) -> Any:
-    """record を出力と同じ有界な行にし、書いた byte を今の直列化の作業量へ足す。
+    """record を出力と同じ有界な行にする（数え済みの record の写し）。
 
-    record ごとに残りの作業量を上限にし、使った分を足していく（record ごとに作業量の全体を
-    使い直さない）。作業量の scope の外（部品単体の呼び出し）では数えない。
+    record は呼ぶ側の `_counted`（CANONICAL）が今の直列化の作業量へ数えてある: ここでは数え直さず、
+    写す大きさの上限は作業量の上限（数えた量はそれ以下）。作業量の scope の外（部品単体の
+    呼び出し）では数えない。
     """
 
     from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
@@ -1304,9 +1308,9 @@ def _prepared_within_work(record: Any) -> Any:
     work = active_serialization_work()
     if work is None:
         return json_encoding.RESULT_JSON_POLICY.prepare(record).value()
-    prepared = json_encoding.RESULT_JSON_POLICY.prepare(record, max_bytes=work.remaining())
-    work.charge(prepared.encoded_bytes)
-    return prepared.value()
+    # record は `_counted`（CANONICAL）が同じ作業量へ数え済み: 書く大きさは数えた量と同じなので、
+    # 上限は数えた後の残りでなく数えた量そのもの（数え直さない。exact-once）
+    return json_encoding.RESULT_JSON_POLICY.prepare(record, max_bytes=work.max_bytes).value()
 
 
 def _payload_final_identity(evidence: Mapping[str, Any], occurrences: Sequence[Mapping[str, Any]]):
@@ -1382,7 +1386,8 @@ def _as_mapping(value: Any) -> Dict[str, Any]:
     if mapping is not None:
         return mapping
     if is_json_record(value):
-        payload = materialize(value)
+        # 値は `_counted` が同じ作業量へ数え済み: 数え直さない写し（数えた量と同じ大きさ）
+        payload = json_encoding.RESULT_JSON_POLICY.materialize(value, counted=True)
         if type(payload) is dict:
             return payload
     return {}
@@ -1530,8 +1535,8 @@ def _add_to_group(
         group.occurrence_ids[frozen_occurrence_id] = occurrence_id_payload
     group.reason_ids.add(builtin_str(_or(lookup(record, "reason_id"), "unknown")))
     group.decision_effects.add(builtin_str(_or(lookup(record, "decision_effect"), "")))
-    group.required.update(pool.intern(item) for item in required)
-    if not complete:
+    group.required.update(pool.intern(item) for item in elements_of(required))
+    if not live_values.as_bool(complete):
         group.proof_requirements_complete = False
     legacy = lookup(record, "proof_obligation_id")
     if _truthy(legacy):
@@ -1620,8 +1625,8 @@ def _build_root_causes(
             canonical_cause_key=resolution.canonical_cause_key,
             recovery_actions=build_unknown_recovery_actions((coerced,), work=_diagnostic_work()),
         )
-        for name in proofs.diagnostics:
-            _bump(diagnostics, name)
+        for name in elements_of(proofs.diagnostics):
+            _bump(diagnostics, builtin_str(name))
 
         group_key = (resolution.identity_scope, resolution.cause_kind, resolution.canonical_cause_key)
         entry = groups.get(group_key)

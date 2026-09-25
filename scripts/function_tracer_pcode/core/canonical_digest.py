@@ -90,6 +90,13 @@ def _bounded_evidence_type() -> type:
 _MAPPING_TYPES = (dict, OrderedDict, types.MappingProxyType)
 
 
+def _exact_mapping_type(item: Any) -> bool:
+    """型そのものが dict / OrderedDict / `MappingProxyType` か（identity で比べる。metaclass の `__eq__` を呼ばない）。"""
+
+    kind = type(item)
+    return kind is dict or kind is OrderedDict or kind is types.MappingProxyType
+
+
 def _scalar_key(key: Any, work: Any) -> str:
     """mapping の key の canonical な文字列（canonical_value と同じ `str(key)`）。
 
@@ -266,13 +273,13 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
             sink.emit_string(text)
             continue
         # 速い経路: 組み込みの型そのものの scalar と列（正規化も producer の確認も要らない）
-        if type(action) in (str, int, float, bool):
+        if (type(action) is str or type(action) is int or type(action) is float or type(action) is bool):
             sink.emit_leaf(action)
             continue
         if action is None:
             sink.emit(b"null")
             continue
-        if type(action) in (tuple, list):
+        if (type(action) is tuple or type(action) is list):
             identity = id(action)
             if identity in active:
                 raise CanonicalValueCycle("a canonical value contains itself")
@@ -379,7 +386,7 @@ def _pairs(actions: list, item: Any, work: Any) -> bool:
         texts = names
         children = [field_value(item, name) for name in names]
     else:
-        mapping = builtin_mapping(item) if type(item) in _MAPPING_TYPES else None
+        mapping = builtin_mapping(item) if _exact_mapping_type(item) else None
         if mapping is None:
             return False
         work.charge(size(mapping) + 1)
@@ -409,7 +416,7 @@ def _pairs(actions: list, item: Any, work: Any) -> bool:
 def _push_raw_container(actions: list, item: Any, work: Any, *, in_set: bool) -> None:
     """enum の値（正規化されない値）を `json.dumps(sort_keys=True)` と同じ形で積む。"""
 
-    mapping = builtin_mapping(item) if type(item) in _MAPPING_TYPES else None
+    mapping = builtin_mapping(item) if _exact_mapping_type(item) else None
     if mapping is not None:
         if in_set:
             # set の要素の並びは要素の canonical な形を **もう一度** 正規化した値の digest

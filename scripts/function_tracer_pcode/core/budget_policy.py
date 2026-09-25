@@ -402,20 +402,28 @@ class SerializationWork:
         return None if self.max_bytes is None else self.max_bytes - self.consumed
 
     def charge(self, size: int) -> None:
-        self.consumed += int(size)
+        # 数える量は基底型の整数（`int(size)` と同じ値。上書きした `__int__` を呼ばない）
+        size = size if type(size) is int else live_values.as_int(size)
+        self.consumed += size
         if self.max_bytes is not None and self.consumed > self.max_bytes:
             self.exceeded()
         if self.parent is not None:
             self.parent.charge(size)
 
     def exceeded(self) -> None:
+        # walker が呼ぶのは超えたときだけ（作業量が先に尽きたときを含む）: 超えた事実は上限 + 1
+        # 以上として扱う（terminal なら登録した限界になり、生の例外で pair を抜けない）
+        limit = self.max_bytes
+        if limit is None and self.terminal:
+            limit = active_budget_policy().limit(BudgetKind.SERIALIZATION_BYTES)
+        observed = self.consumed if limit is None else max(self.consumed, limit + 1)
         if not self.terminal:
             from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
 
-            raise JsonBudgetExhausted(consumed_bytes=self.consumed, max_bytes=self.max_bytes)
+            raise JsonBudgetExhausted(consumed_bytes=observed, max_bytes=self.max_bytes)
         # target と evidence は限界にするときだけ組み立てる
         enforce_budget(
-            BudgetKind.SERIALIZATION_BYTES, self.consumed, site=self.site,
+            BudgetKind.SERIALIZATION_BYTES, observed, site=self.site,
             target_key=self.target_key(), evidence=self._evidence(),
         )
 

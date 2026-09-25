@@ -217,7 +217,7 @@ class UnknownRecoveryProofObligation:
         yield "proof_kind", self.proof_kind
         yield "proof_stage", self.proof_stage
         required_evidence = self.required_evidence
-        if type(required_evidence) in (tuple, list):
+        if (type(required_evidence) is tuple or type(required_evidence) is list):
             yield "required_evidence", (item for item in required_evidence)
         else:
             yield "required_evidence", required_evidence
@@ -234,11 +234,13 @@ class UnknownRecoveryProofObligation:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "UnknownRecoveryProofObligation":
+        # payload は組み込みの振る舞いの mapping の値だけを読む（`str(x or 既定)` と同じ文字列）
+        required = live_values.lookup(payload, "required_evidence")
         return cls.create(
-            payload.get("proof_kind"),
-            str(payload.get("proof_stage") or "unspecified"),
-            required_evidence=payload.get("required_evidence") or (),
-            description=payload.get("description"),
+            live_values.lookup(payload, "proof_kind"),
+            _text_or_default(live_values.lookup(payload, "proof_stage"), "unspecified"),
+            required_evidence=required if required is not None and live_values.as_bool(required) else (),
+            description=live_values.lookup(payload, "description"),
         )
 
 
@@ -269,7 +271,7 @@ class UnknownRecoveryPlan:
         yield "reason_id", self.reason_id
         # 列は package の generator（`UnknownRecoveryProofObligation.json_items` と同じ規則）
         proof_obligations = self.proof_obligations
-        if type(proof_obligations) in (tuple, list):
+        if (type(proof_obligations) is tuple or type(proof_obligations) is list):
             yield "proof_obligations", (item for item in proof_obligations)
         else:
             yield "proof_obligations", proof_obligations
@@ -1165,9 +1167,9 @@ def _proof_obligation_id(
 
 
 def coerce_unknown_recovery_proof_obligation(value: Any) -> UnknownRecoveryProofObligation:
-    if isinstance(value, UnknownRecoveryProofObligation):
+    if live_values.is_kind(value, UnknownRecoveryProofObligation):
         return value
-    if isinstance(value, Mapping):
+    if live_values.builtin_mapping(value) is not None:
         return UnknownRecoveryProofObligation.from_dict(value)
     return UnknownRecoveryProofObligation.create(value, "unspecified")
 
@@ -1175,7 +1177,17 @@ def coerce_unknown_recovery_proof_obligation(value: Any) -> UnknownRecoveryProof
 def coerce_unknown_recovery_proof_obligations(
     values: Optional[Iterable[Any]],
 ) -> Tuple[UnknownRecoveryProofObligation, ...]:
-    return tuple(coerce_unknown_recovery_proof_obligation(value) for value in (values or ()))
+    if values is None or not live_values.as_bool(values):
+        return ()
+    return tuple(coerce_unknown_recovery_proof_obligation(value) for value in live_values.elements_of(values))
+
+
+def _text_or_default(value: Any, default: str) -> str:
+    """`str(value or default)`（値は live_values の規則で読む）。"""
+
+    if value is None or not live_values.as_bool(value):
+        return default
+    return _text(value)
 
 
 _register_default_recovery_plans()
