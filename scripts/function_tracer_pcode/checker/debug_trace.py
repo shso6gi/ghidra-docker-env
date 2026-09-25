@@ -470,31 +470,6 @@ class DebugTrace:
         """人間向けの Phase 利用状況サマリを返す。"""
         return format_phase_usage_rows(self.get_phase_usage())
 
-    def _iter_observed_unknown_reasons(self, work: Any):
-        """attempt ごとの reason を順に引き出す（attempt 1 つごとに `work` へ数える）。"""
-
-        for attempt in self.attempts:
-            work.charge(1)
-            yield from getattr(attempt, "unknown_reasons", None) or ()
-
-    def _final_unknown_reasons(self, work: Any) -> Any:
-        """最後の UNKNOWN / TIMEOUT の attempt の reason（写さない。探した attempt を `work` へ数える）。"""
-
-        if self.final_result is not None:
-            return ()
-        final_transition_reasons = {
-            TransitionReason.UNKNOWN.value,
-            TransitionReason.TIMEOUT.value,
-        }
-        for attempt in reversed(self.attempts):
-            work.charge(1)
-            if (
-                attempt.result is None
-                and attempt.transition_reason in final_transition_reasons
-            ):
-                return getattr(attempt, "unknown_reasons", None) or ()
-        return ()
-
     def json_items(self):
         """結果 JSON での表現（**唯一の schema**）。
 

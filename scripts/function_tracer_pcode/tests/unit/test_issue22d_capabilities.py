@@ -973,3 +973,41 @@ class _IdleReducer(_Reducer):
 
     def result(self, *, work):
         return 0
+
+
+def test_only_terminal_serializations_are_observed_for_the_budget_defaults():
+    """予算の既定値の根拠（観測値）に残すのは terminal な直列化だけ（診断の作業量は run ごとに揺れる）。"""
+
+    from scripts.function_tracer_pcode.core.budget_policy import (
+        BudgetPolicy,
+        budget_observations,
+        budget_policy_scope,
+        serialization_scope,
+    )
+
+    with budget_policy_scope(BudgetPolicy()):
+        with serialization_scope(site="diagnostic", target_parts=("d",), terminal=False, max_bytes=1 << 20) as work:
+            work.charge(123)
+        assert budget_observations() == {}
+        with serialization_scope(site="terminal", target_parts=("t",)) as work:
+            work.charge(7)
+        assert budget_observations() != {}
+
+
+def test_producer_time_recovery_actions_charge_every_record_they_read():
+    """producer 時点の action の構築（`iter_unknown_recovery_actions`）も、読み飛ばす record を 1 件ずつ数える。"""
+
+    import time
+
+    from scripts.function_tracer_pcode.checker.unknown_reason import iter_unknown_recovery_actions, make_unknown_reason
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget, JsonBudgetExhausted
+
+    record = make_unknown_reason("unknown", stage="S")
+    started = time.perf_counter()
+    with pytest.raises(JsonBudgetExhausted):
+        # 同じ集計単位: 最初の 1 件の後は action を作らずに読み飛ばす（それでも数える）
+        for _action in iter_unknown_recovery_actions(
+            [record] * 1_000_000, primary_by_aggregation_unit=True, work=JsonBudget(10_000),
+        ):
+            pass
+    assert time.perf_counter() - started < 1.0
