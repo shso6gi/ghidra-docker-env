@@ -422,7 +422,7 @@ def _build_real_timeout_payload():
         )
         preimage = {"final_outcome": "TIMEOUT", "total_time": 0.0}
         bundle = build_canonical_result_finalization_bundle(
-            result_payload_preimage=preimage, evidence=evidence, session=session,work=SealWorkBudget.for_result()
+            result_payload_preimage=preimage, evidence=evidence, session=session, work=SealWorkBudget.for_result()
         )
     finally:
         execution_module._PINNED_PARALLEL_RUN_IMPL = previous

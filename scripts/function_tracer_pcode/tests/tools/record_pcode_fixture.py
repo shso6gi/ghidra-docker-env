@@ -1015,7 +1015,7 @@ def record(args: argparse.Namespace) -> int:
         payload["canonical_result_finalization_bundle"] = (
             build_canonical_result_finalization_bundle(
                 result_payload_preimage=payload,
-                evidence=evidence, session=session,work=SealWorkBudget.for_result()
+                evidence=evidence, session=session, work=SealWorkBudget.for_result()
             )
         )
 

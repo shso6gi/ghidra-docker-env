@@ -231,14 +231,14 @@ def _classified_pair_status(
         attach_conditional_decision(result, conditional)
     preimage = result.to_dict()
     bundle = build_canonical_result_finalization_bundle(
-        result_payload_preimage=preimage, evidence=evidence, session=session,work=SealWorkBudget.for_result()
+        result_payload_preimage=preimage, evidence=evidence, session=session, work=SealWorkBudget.for_result()
     )
     full_payload = {**preimage, "canonical_result_finalization_bundle": bundle}
     assert persist_canonical_result_envelope(full_payload, work=SealWorkBudget.for_result()) is not None
     validated = validate_canonical_result_finalization_bundle(
         bundle, result_payload_preimage=preimage,
         bundle_verification_key_id="supervisor-key-v1",
-        bundle_verification_key=SUPERVISOR_KEY,work=SealWorkBudget.for_result()
+        bundle_verification_key=SUPERVISOR_KEY, work=SealWorkBudget.for_result()
     )
     identity = validated["execution_identity"]
 

@@ -393,7 +393,7 @@ def _step_envelope(context: _ChildContext, step: Mapping[str, Any]) -> None:
     payload = result.to_dict()
     payload["canonical_result_finalization_bundle"] = (
         build_canonical_result_finalization_bundle(
-            result_payload_preimage=dict(payload), evidence=evidence, session=session,work=SealWorkBudget.for_result()
+            result_payload_preimage=dict(payload), evidence=evidence, session=session, work=SealWorkBudget.for_result()
         )
     )
     envelope = persist_canonical_result_envelope(payload, work=SealWorkBudget.for_result())

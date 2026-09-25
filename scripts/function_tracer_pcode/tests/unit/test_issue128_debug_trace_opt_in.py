@@ -475,7 +475,7 @@ def test_canonical_result_validates_and_replays_without_debug_trace(tmp_path, mo
         bundle,
         result_payload_preimage=payload_without,
         bundle_verification_key_id="issue128b-test-key",
-        bundle_verification_key=b"k" * 32,work=SealWorkBudget.for_result()
+        bundle_verification_key=b"k" * 32, work=SealWorkBudget.for_result()
     )
     assert validated["outcome"] == "EQUIVALENT"
 
@@ -513,7 +513,7 @@ def test_omitting_debug_trace_changes_preimage_but_no_semantic_field(tmp_path, m
             bundle,
             result_payload_preimage=preimage,
             bundle_verification_key_id="issue128b-test-key",
-            bundle_verification_key=b"k" * 32,work=SealWorkBudget.for_result()
+            bundle_verification_key=b"k" * 32, work=SealWorkBudget.for_result()
         )
         assert validated["outcome"] == "EQUIVALENT"
 

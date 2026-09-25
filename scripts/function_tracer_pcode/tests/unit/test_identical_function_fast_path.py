@@ -751,7 +751,7 @@ def _payload_with_bundle(result):
     payload = result.to_dict()
     evidence, session = result._canonical_finalization_context
     bundle = build_canonical_result_finalization_bundle(
-        result_payload_preimage=payload, evidence=evidence, session=session,work=SealWorkBudget.for_result()
+        result_payload_preimage=payload, evidence=evidence, session=session, work=SealWorkBudget.for_result()
     )
     return payload, bundle
 

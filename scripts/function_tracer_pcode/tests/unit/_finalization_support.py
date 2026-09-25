@@ -90,6 +90,6 @@ def _independent_finalization(tmp_path, monkeypatch, *, case_id, result_payload_
     bundle = build_canonical_result_finalization_bundle(
         result_payload_preimage=result_payload_preimage,
         evidence=evidence,
-        session=session,work=SealWorkBudget.for_result()
+        session=session, work=SealWorkBudget.for_result()
     )
     return bundle, session, evidence

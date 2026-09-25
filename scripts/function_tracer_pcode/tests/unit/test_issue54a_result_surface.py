@@ -137,7 +137,7 @@ def test_rewrite_info_changes_the_payload_preimage_but_not_the_semantic_projecti
             bundle,
             result_payload_preimage=preimage,
             bundle_verification_key_id="issue54a-test-key",
-            bundle_verification_key=b"k" * 32,work=SealWorkBudget.for_result()
+            bundle_verification_key=b"k" * 32, work=SealWorkBudget.for_result()
         )
         assert validated["outcome"] == "EQUIVALENT"
 

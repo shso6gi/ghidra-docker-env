@@ -470,12 +470,12 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
     bundle = build_canonical_result_finalization_bundle(
         result_payload_preimage=preimage,
         evidence=evidence,
-        session=session,work=SealWorkBudget.for_result()
+        session=session, work=SealWorkBudget.for_result()
     )
     assert validate_canonical_result_finalization_bundle(
         bundle,
         bundle_verification_key_id="phase10-test-key",
-        bundle_verification_key=b"k" * 32,work=SealWorkBudget.for_result()
+        bundle_verification_key=b"k" * 32, work=SealWorkBudget.for_result()
     )["outcome"] == "EQUIVALENT"
     forged_signature = deepcopy(bundle)
     forged_signature["bundle_signature"] = "0" * 64
@@ -483,7 +483,7 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
         validate_canonical_result_finalization_bundle(
             forged_signature,
             bundle_verification_key_id="phase10-test-key",
-            bundle_verification_key=b"k" * 32,work=SealWorkBudget.for_result()
+            bundle_verification_key=b"k" * 32, work=SealWorkBudget.for_result()
         )
     semantic_a = _semantic_projection(
         preimage, evidence.pilot_result,
@@ -510,7 +510,7 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
         result_payload_preimage={
             key: value for key, value in persisted.items()
             if key != "canonical_result_finalization_bundle"
-        },work=SealWorkBudget.for_result()
+        }, work=SealWorkBudget.for_result()
     )["outcome"] == "EQUIVALENT"
 
     forged = deepcopy(persisted_bundle)
@@ -652,7 +652,7 @@ def test_canonical_bundle_rejects_foreign_result_entry_occurrence(
     bundle = build_canonical_result_finalization_bundle(
         result_payload_preimage={"final_outcome": "EQUIVALENT"},
         evidence=evidence,
-        session=session,work=SealWorkBudget.for_result()
+        session=session, work=SealWorkBudget.for_result()
     )
     foreign = PINNED_SOLVER_EXECUTION_ISSUER.issue_result_entry_occurrence(
         result_occurrence_id="foreign-result-occurrence",
@@ -675,7 +675,7 @@ def test_canonical_bundle_rejects_foreign_result_entry_occurrence(
             forged,
             result_payload_preimage={"final_outcome": "EQUIVALENT"},
             bundle_verification_key_id="occurrence-key",
-            bundle_verification_key=key,work=SealWorkBudget.for_result()
+            bundle_verification_key=key, work=SealWorkBudget.for_result()
         )
 
 
@@ -715,7 +715,7 @@ def test_signed_early_error_bundle_requires_typed_result_entry_occurrence(
     evidence, session = result._canonical_finalization_context
     bundle = build_canonical_result_finalization_bundle(
         result_payload_preimage={"final_outcome": "ERROR"},
-        evidence=evidence, session=session,work=SealWorkBudget.for_result()
+        evidence=evidence, session=session, work=SealWorkBudget.for_result()
     )
     occurrence = bundle["result_entry_occurrence_receipt"]
     assert occurrence["authority_kind"] == (
@@ -736,5 +736,5 @@ def test_signed_early_error_bundle_requires_typed_result_entry_occurrence(
             forged,
             result_payload_preimage={"final_outcome": "ERROR"},
             bundle_verification_key_id="early-error-key",
-            bundle_verification_key=key,work=SealWorkBudget.for_result()
+            bundle_verification_key=key, work=SealWorkBudget.for_result()
         )

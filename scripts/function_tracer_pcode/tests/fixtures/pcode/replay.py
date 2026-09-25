@@ -201,10 +201,10 @@ def replay_recorded_pair(
             evidence, session = finalization
             bundle = build_canonical_result_finalization_bundle(
                 result_payload_preimage=payload,
-                evidence=evidence, session=session,work=SealWorkBudget.for_result()
+                evidence=evidence, session=session, work=SealWorkBudget.for_result()
             )
             validate_canonical_result_finalization_bundle(
-                bundle, result_payload_preimage=payload,work=SealWorkBudget.for_result()
+                bundle, result_payload_preimage=payload, work=SealWorkBudget.for_result()
             )
             payload["canonical_result_finalization_bundle"] = bundle
     except Exception as exc:  # 欠落注入では production 側が途中で落ちることもある

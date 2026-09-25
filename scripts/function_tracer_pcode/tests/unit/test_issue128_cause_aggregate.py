@@ -1431,7 +1431,7 @@ def test_aggregate_changes_preimage_but_no_semantic_field(tmp_path, monkeypatch)
             bundle,
             result_payload_preimage=preimage,
             bundle_verification_key_id="issue128-test-key",
-            bundle_verification_key=b"k" * 32,work=SealWorkBudget.for_result()
+            bundle_verification_key=b"k" * 32, work=SealWorkBudget.for_result()
         )
         assert validated["outcome"] == "EQUIVALENT"
 
