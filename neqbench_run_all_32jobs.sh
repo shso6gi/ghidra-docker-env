@@ -193,7 +193,13 @@ if [[ -s "$OUTPUT_BASE_DIR/run_manifest.txt" ]] \
     echo "Use a fresh OUTPUT_BASE_DIR for the same-ISA caller-closure evaluation." >&2
     exit 1
 fi
-if [[ "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR" || "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR/"* ]]; then exit 1; fi
+# Issue #170: key root も OUTPUT と同じく正規化してから包含を判定する（`//`、`..`、相対
+# path、symlink の綴りで秘密鍵が OUTPUT の中へ書かれる迂回を塞ぐ）。
+EQBENCH_PRIVATE_AUTHORITY_ROOT="$(realpath -m "$EQBENCH_PRIVATE_AUTHORITY_ROOT")"
+if [[ "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR" || "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR/"* ]]; then
+    echo "Error: private authority root must be outside OUTPUT_BASE_DIR" >&2
+    exit 1
+fi
 CENSUS="$OUTPUT_BASE_DIR/neq_source_pairs.tsv"; : > "$CENSUS"
 SOURCE_PAIR_COUNT=0
 while IFS= read -r dir; do
@@ -279,18 +285,26 @@ AUTHORITY_ROOT="$EQBENCH_PRIVATE_AUTHORITY_ROOT/$KEYSET"
 SUPERVISOR_KEY_ID=eqbench-neq-supervisor-v1; WORKER_KEY_ID=eqbench-neq-worker-v1
 SUPERVISOR_KEY="$AUTHORITY_ROOT/supervisor.key"; WORKER_KEY="$AUTHORITY_ROOT/worker.key"
 PAIR_PRIVATE_KEY="$AUTHORITY_ROOT/pair-status-ed25519.key"; PAIR_PUBLIC_KEY="$OUTPUT_BASE_DIR/pair-status-verification-key.json"
+# Issue #170: 鍵を読む・書く・検証する区間だけ keyset の lock を保持する（窓の中で `&` を使わない）。
+validation_lock_authority_keyset "$AUTHORITY_ROOT" || exit 1
 existing_status="$(find "$OUTPUT_BASE_DIR" -type f -name '*.pair-status.json' -print -quit)"
 if [[ -n "$existing_status" && ( ! -s "$SUPERVISOR_KEY" || ! -s "$WORKER_KEY" || ! -s "$PAIR_PRIVATE_KEY" || ! -s "$PAIR_PUBLIC_KEY" ) ]]; then
     echo "Existing Neq authority evidence has no complete retained keyset" >&2
     exit 1
 fi
-mkdir -p "$AUTHORITY_ROOT"; chmod 700 "$AUTHORITY_ROOT"
-[[ -s "$SUPERVISOR_KEY" ]] || { umask 077; head -c 32 /dev/urandom > "$SUPERVISOR_KEY"; }
-[[ -s "$WORKER_KEY" ]] || { umask 077; head -c 32 /dev/urandom > "$WORKER_KEY"; }
-if [[ ! -s "$PAIR_PRIVATE_KEY" ]]; then
-    "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.pair_status_authority --generate-private-key "$PAIR_PRIVATE_KEY" --write-public-key "$PAIR_PUBLIC_KEY" >/dev/null
-fi
-"$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.pair_status_authority --validate-private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" >/dev/null
+PROCESS_KEY_WRITTEN=0
+for process_key_file in "$SUPERVISOR_KEY" "$WORKER_KEY"; do
+    [[ ! -s "$process_key_file" ]] || continue
+    PROCESS_KEY_WRITTEN=1
+    if ! (umask 077; head -c 32 /dev/urandom > "$process_key_file"); then
+        echo "Error: process authority key cannot be written: $process_key_file" >&2
+        exit 1
+    fi
+done
+validation_materialize_pair_status_keypair "$PYTHON_BIN" "$PAIR_PRIVATE_KEY" "$PAIR_PUBLIC_KEY" || exit 1
+validation_unlock_authority_keyset
+# HMAC 鍵を新しく書いた run は、以降の書き込みも umask 077 で行う（main と同じ）。
+if (( PROCESS_KEY_WRITTEN == 1 )); then umask 077; fi
 
 PROCESS_CLEANUP_FAILURES="$OUTPUT_BASE_DIR/process_authority_cleanup_failures.txt"; : > "$PROCESS_CLEANUP_FAILURES"
 # Issue #124 PR-124-C: cleanup 前に確認した dump 退避状態（診断のみ。cleanup 失敗

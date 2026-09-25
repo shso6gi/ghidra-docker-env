@@ -261,6 +261,33 @@ All runners are configured through environment variables (`PARALLEL_JOBS`,
 `SKIP_COMPLETED_RESULTS`, `ERROR_ONLY_RERUN`, timeouts); see the header of each
 script for the full list and defaults.
 
+### Private authority keyset
+
+Each run signs its pair statuses with a private key kept outside the run tree, in
+the keyset `<realpath(EQBENCH_PRIVATE_AUTHORITY_ROOT)>/<keyset id>` (the keyset id
+is `sha256` of the canonical `OUTPUT_BASE_DIR`, or `EQBENCH_AUTHORITY_KEYSET_ID`
+for the Eq runner); the public key is written to
+`OUTPUT_BASE_DIR/pair-status-verification-key.json`. Both runners reject a
+private root that resolves inside `OUTPUT_BASE_DIR`, whatever its spelling
+(`//`, `..`, a relative path, a symlink).
+
+- The keys are created, re-exported and validated only by
+  `validation_materialize_pair_status_keypair` in
+  `scripts/validation_matrix_common.sh`: no private key → generate the pair;
+  private key only (e.g. the run tree was deleted and is being re-run) → rewrite
+  the public key from it; always → validate the pair. An existing private key is
+  never rewritten, and a failure exits 1 with the reason instead of a traceback.
+- Several runs can point at the same keyset (a shared override, a renamed output,
+  another container). The keyset directory is therefore locked (`flock` on its
+  inode) while its keys are read, written and validated, and only then. A run
+  that finds the keyset held waits up to `VALIDATION_KEYSET_LOCK_WAIT_SECONDS`
+  (default 120) and then exits 1 with "held by another run for too long" without
+  touching the keyset.
+- Known limitation: a corrupted private key that is still 32 bytes long cannot be
+  detected while the public key is missing, because any 32 bytes are a valid
+  Ed25519 seed; the public key is then re-exported from it. To start over, remove
+  both the run tree and its keyset directory.
+
 ### Identical binary / identical function fast path
 
 A pair whose two inputs are the same bytes and whose two function names are the

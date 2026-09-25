@@ -912,6 +912,8 @@ PROCESS_SUPERVISOR_KEY_FILE="$PROCESS_AUTHORITY_ROOT/supervisor.key"
 PROCESS_WORKER_KEY_FILE="$PROCESS_AUTHORITY_ROOT/worker.key"
 PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE="$PROCESS_AUTHORITY_ROOT/pair-status-ed25519.key"
 PAIR_STATUS_VERIFICATION_KEY_FILE="$OUTPUT_BASE_DIR/pair-status-verification-key.json"
+# Issue #170: 鍵を読む・書く・検証する区間だけ keyset の lock を保持する（窓の中で `&` を使わない）。
+validation_lock_authority_keyset "$PROCESS_AUTHORITY_ROOT" || exit 1
 existing_authority_evidence="$(find "$OUTPUT_BASE_DIR" \
     \( -name '*.pair-status.json' -o -name 'pair-status-verification-key.json' \
        -o -path '*/.process-authority/*' \) -print -quit)"
@@ -925,28 +927,22 @@ if [[ -n "$existing_authority_evidence" ]]; then
         exit 1
     fi
 fi
-mkdir -p "$PROCESS_AUTHORITY_ROOT"
-chmod 700 "$PROCESS_AUTHORITY_ROOT"
+if [[ -z "$existing_authority_evidence" ]]; then
+    for process_key_file in "$PROCESS_SUPERVISOR_KEY_FILE" "$PROCESS_WORKER_KEY_FILE"; do
+        [[ ! -s "$process_key_file" ]] || continue
+        if ! (umask 077; head -c 32 /dev/urandom > "$process_key_file"); then
+            echo "Error: process authority key cannot be written: $process_key_file" >&2
+            exit 1
+        fi
+    done
+fi
+validation_materialize_pair_status_keypair "$PYTHON_BIN" \
+    "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" "$PAIR_STATUS_VERIFICATION_KEY_FILE" || exit 1
+validation_unlock_authority_keyset
+# 新しい keyset で始める run は、以降の書き込みも umask 077 で行う（main と同じ）。
 if [[ -z "$existing_authority_evidence" ]]; then
     umask 077
-    [[ -s "$PROCESS_SUPERVISOR_KEY_FILE" ]] || head -c 32 /dev/urandom > "$PROCESS_SUPERVISOR_KEY_FILE"
-    [[ -s "$PROCESS_WORKER_KEY_FILE" ]] || head -c 32 /dev/urandom > "$PROCESS_WORKER_KEY_FILE"
-    if [[ ! -s "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" ]]; then
-        "$PYTHON_BIN" -m \
-            scripts.function_tracer_pcode.authority.decision.pair_status_authority \
-            --generate-private-key "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
-            --write-public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
-    elif [[ ! -s "$PAIR_STATUS_VERIFICATION_KEY_FILE" ]]; then
-        "$PYTHON_BIN" -m \
-            scripts.function_tracer_pcode.authority.decision.pair_status_authority \
-            --export-public-from-private "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
-            --write-public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
-    fi
 fi
-"$PYTHON_BIN" -m \
-    scripts.function_tracer_pcode.authority.decision.pair_status_authority \
-    --validate-private-key "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
-    --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
 EXPECTED_PAIR_STATUS_PATHS_FILE="$OUTPUT_BASE_DIR/expected_pair_status_paths.txt"
 : > "$EXPECTED_PAIR_STATUS_PATHS_FILE"
 VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE="$OUTPUT_BASE_DIR/verified_skipped_pair_status_paths.txt"
