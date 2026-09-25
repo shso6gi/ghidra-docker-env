@@ -1794,6 +1794,15 @@ class _LoudIntKey(int):
         return False
 
 
+class _EqOnlyKey(str):
+    calls: List[str] = []
+    __hash__ = str.__hash__
+
+    def __eq__(self, other):
+        _EqOnlyKey.calls.append("eq")
+        return False
+
+
 class _PlainHolder:
     pass
 
@@ -1820,6 +1829,12 @@ def test_owner_lookups_never_run_the_code_of_stored_keys():
     colliding[_LoudKey("a")] = 2
     int_keys = {_LoudIntKey(1): "x", _LoudIntKey(2): "y"}
     loud_mapping = {_LoudKey("k"): 1, "j": 2}
+    # hash は `str` のままで比較だけを上書きした key（同じ文字列の key と並べると比較が呼ばれる）
+    eq_only = {"a": 1}
+    eq_only[_EqOnlyKey("a")] = 2
+    eq_only_ordered = OrderedDict([("a", 1)])
+    eq_only_ordered[_EqOnlyKey("a")] = 2
+    _EqOnlyKey.calls.clear()
     # 値を作るときの hash は test の code（owner が呼ぶかだけを見る）
     _LoudKey.calls.clear()
     _LoudIntKey.calls.clear()
@@ -1842,6 +1857,13 @@ def test_owner_lookups_never_run_the_code_of_stored_keys():
     # LEGACY: 元の key を新しい dict へ置くのは hash・比較が組み込みの key だけ
     with pytest.raises(JsonValueRejected):
         RESULT_JSON_POLICY.materialize(as_dict(int_keys))
+    with pytest.raises(JsonValueRejected):
+        RESULT_JSON_POLICY.materialize(as_dict(eq_only))
+    # `OrderedDict` の iterator は同じ hash の key を比べる: 比較を上書きした key の `OrderedDict` は読まない
+    assert live_values.builtin_mapping(eq_only_ordered) is None
+    with pytest.raises(TypeError):
+        list(live_values.items_of(eq_only_ordered))
+    assert _EqOnlyKey.calls == []
     assert _LoudKey.calls == []
     assert _LoudIntKey.calls == []
 
@@ -1977,7 +1999,11 @@ def test_runtime_ref_effort_is_charged_once_and_not_multiplied_through_the_dag()
     from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonBudget
     from scripts.function_tracer_pcode.core.runtime_refs.call_arguments import AbiArgumentSlotRef
 
-    slot = AbiArgumentSlotRef(ordinal=0, storage_identity_key=(tuple(range(200)),))
+    from scripts.function_tracer_pcode.core.storage import StorageInfo
+
+    # 末尾の record で高速経路が途中で辿れなくなる ref（辿り直しの作業量を持つ。record の LEGACY の
+    # 表現は JSON の object と同じ byte）
+    slot = AbiArgumentSlotRef(ordinal=0, storage_identity_key=(tuple(range(200)) + (StorageInfo(space_name="s"),),))
     root = leaf = Expression(ExpressionType.VARIABLE, name="x", size=4, runtime_ref=slot)
     for _ in range(6):
         root = Expression(ExpressionType.BINARY_OP, operator="+", operands=[root, root], size=4)
@@ -1992,7 +2018,10 @@ def test_runtime_ref_effort_is_charged_once_and_not_multiplied_through_the_dag()
 
 
 def _enum_name(value):
-    return value.name
+    # LEGACY の木に元のまま置かれた record は、その `json_items` の object として書く（walker が数える形）
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+    return RESULT_JSON_POLICY.materialize(value)
 
 
 def test_a_failed_fast_path_prefix_is_walked_once():
