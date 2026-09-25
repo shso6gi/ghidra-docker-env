@@ -1205,3 +1205,22 @@ def test_fixtures_are_not_trusted_as_package_code():
     assert live_values.package_file(fixture) is False
     assert live_values.package_file(str(PACKAGE_ROOT / "core" / "json_encoding.py")) is True
     assert live_values.package_file(__file__) is True  # conftest が `tests/unit` を信頼する
+
+
+def test_an_effort_stop_reports_at_least_the_limit():
+    """作業量（effort）が先に尽きて止めた走査も、超過は上限 + 1 以上として伝える（測った大きさを小さく読ませない）。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import LEGACY, RESULT_JSON_POLICY, JsonBudgetExhausted
+
+    # reducer の要素（byte を持たない仕事）だけで作業量を使い切る
+    with pytest.raises(JsonBudgetExhausted) as stopped:
+        RESULT_JSON_POLICY.measure(
+            _scan_of_idle_elements(), mode=LEGACY, max_bytes=1_000,
+        )
+    assert stopped.value.consumed_bytes >= 1_001
+
+
+def _scan_of_idle_elements():
+    from scripts.function_tracer_pcode.core.json_encoding import scan
+
+    return scan(range(1_000_000), _IdleReducer())

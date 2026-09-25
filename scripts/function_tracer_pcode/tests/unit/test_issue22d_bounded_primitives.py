@@ -825,15 +825,16 @@ def test_the_decided_text_is_written_only_after_the_envelope_fits():
     assert "if not emit_json:\n        output_content = _text_or_error_result(" in source
 
 def test_payload_occurrence_views_draw_on_one_work_not_one_each():
-    from scripts.function_tracer_pcode.checker.cause_aggregate import _payload_occurrence_views
+    from scripts.function_tracer_pcode.checker.cause_aggregate import CANONICAL, _counted, _payload_occurrence_views
 
     records = [make_unknown_reason("unknown", stage="S", detail="d" * 400) for _ in range(100)]
     one = RESULT_JSON_POLICY.prepare(records[0]).encoded_bytes
-    # 1 件は収まるが 100 件は収まらない作業量: record ごとに作業量の全体を使い直さない
+    # 1 件は収まるが 100 件は収まらない作業量: record ごとに作業量の全体を使い直さない。record は
+    # 集計の入口（`_counted`）が 1 回だけ数え、写す側は数え直さない（exact-once）
     with budget_policy_scope(_POLICY):
         with serialization_scope(site="test", target_parts=("t",), terminal=False, max_bytes=one * 10):
             with pytest.raises(JsonBudgetExhausted):
-                _payload_occurrence_views(records)
+                _payload_occurrence_views(list(_counted(records, mode=CANONICAL)))
 
 
 def test_cyclic_nodes_walks_each_edge_once():

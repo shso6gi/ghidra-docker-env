@@ -2265,7 +2265,7 @@ _REGISTERED_BOUNDED_WORK = {
     ("core/canonical_digest.py", "_push_raw_container", "sorted"): "enum の値の dict（幅を `work` へ数えてから）",
     ("core/budget_policy.py", "BudgetObservations.snapshot", "sorted"): "観測点（予算の種類 × site）の固定の語彙",
     ("checker/output_preparation.py", "SerializationPlan.to_diagnostic", "sorted"): "RESULT_FIELDS の固定の field",
-    ("checker/output_preparation.py", "OutputPreparer.prepare", "sort"): "RESULT_FIELDS の固定の field",
+    ("checker/output_preparation.py", "_in_field_order", "sort"): "RESULT_FIELDS の固定の field（位置の整数の組）",
     ("checker/output_preparation.py", "_ordered", "sorted"): "RESULT_FIELDS の固定の key",
     ("checker/unknown_reason.py", "_canonical_summary", "canonical_value"):
         "`bounded_evidence` の結果だけ（plain な小さい値か、固定の形の要約を持つ `BoundedEvidence`）",
@@ -2516,6 +2516,8 @@ _REGISTERED_UNBOUNDED_WALKS = {
     ("core/expression.py", "Expression._serialize_runtime_ref"):
         "木を作る前に runtime ref を含む大きさを数え終えている（`estimate_legacy_dict_bytes`）",
     ("checker/cause_aggregate.py", "_prepared_within_work"): "作業量の scope の外（部品単体の呼び出し）だけ",
+    ("checker/cause_aggregate.py", "_as_mapping"):
+        "`_counted` が同じ作業量へ数え済みの record の写し（`counted=True`。数え直さない: exact-once）",
     ("checker/output_preparation.py", "OutputPreparer._prepare_cause_evidence"):
         "scalar だけの固定の形の marker",
     ("checker/output_preparation.py", "OutputPreparer._prepare_trace_timings"):
