@@ -33,6 +33,7 @@ from scripts.function_tracer_pcode.reporting.timeout_hotspot_summary import (
     supervisor_deadline_evidence,
 )
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
+from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
 
 OCCURRENCE = "production-pilot-0b193214248780a69165c124"
 STREAM = f"stream-{OCCURRENCE}"
@@ -421,7 +422,7 @@ def _build_real_timeout_payload():
         )
         preimage = {"final_outcome": "TIMEOUT", "total_time": 0.0}
         bundle = build_canonical_result_finalization_bundle(
-            result_payload_preimage=preimage, evidence=evidence, session=session,
+            result_payload_preimage=preimage, evidence=evidence, session=session,work=SealWorkBudget.for_result()
         )
     finally:
         execution_module._PINNED_PARALLEL_RUN_IMPL = previous

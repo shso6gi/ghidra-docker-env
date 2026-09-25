@@ -40,6 +40,7 @@ from scripts.function_tracer_pcode.ghidra.function_identity import (
     FunctionIdentityUnavailable,
     resolve_binary_function_identity,
 )
+from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
 
 
 SHA_A = "a" * 64
@@ -750,7 +751,7 @@ def _payload_with_bundle(result):
     payload = result.to_dict()
     evidence, session = result._canonical_finalization_context
     bundle = build_canonical_result_finalization_bundle(
-        result_payload_preimage=payload, evidence=evidence, session=session,
+        result_payload_preimage=payload, evidence=evidence, session=session,work=SealWorkBudget.for_result()
     )
     return payload, bundle
 
@@ -813,7 +814,7 @@ def test_fast_path_result_survives_bundle_validation(monkeypatch):
     )
     payload, bundle = _payload_with_bundle(result)
     validated = validate_canonical_result_finalization_bundle(
-        bundle, result_payload_preimage=payload
+        bundle, result_payload_preimage=payload, work=SealWorkBudget.for_result()
     )
     assert validated["outcome"] == "EQUIVALENT"
 
@@ -863,7 +864,7 @@ def test_bundle_validation_rejects_a_drifting_provenance(monkeypatch, mutate, ex
     mutate(payload)
     with pytest.raises(ValueError):
         validate_canonical_result_finalization_bundle(
-            bundle, result_payload_preimage=payload
+            bundle, result_payload_preimage=payload, work=SealWorkBudget.for_result()
         )
 
 

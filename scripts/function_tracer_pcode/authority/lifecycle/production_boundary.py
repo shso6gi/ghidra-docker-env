@@ -297,6 +297,26 @@ def _session_identity(session: Any) -> Any:
     return getattr(getattr(session, "identity", None), "result_occurrence_id", None)
 
 
+def _event_contract_checkpoint(checker: Any) -> None:
+    """Issue #110: 判定の前に、予定の occurrence（遅延した観測）も authority event の契約に収まるか。
+
+    収まらなければ限界が pair の台帳へ記録される（gate がそれを登録済みの理由の UNKNOWN にする）。
+    """
+    from scripts.function_tracer_pcode.authority.event_contract import (
+        AuthorityEventContractExceeded,
+    )
+
+    session = getattr(checker, "_active_v2_dual_write_pilot_session", None)
+    checkpoint = getattr(session, "event_contract_checkpoint", None)
+    if checkpoint is None:
+        return
+    try:
+        checkpoint()
+    except AuthorityEventContractExceeded:
+        # 台帳に記録済み（`EventContractLedger._exceed`）: 下の gate が限界の結果にする
+        return
+
+
 def _run_legacy_with_pair_gate(
     checker: Any,
     program1: Any,
@@ -334,6 +354,7 @@ def _run_legacy_with_pair_gate(
         if failure_result is None:  # 台帳にも型にも根拠が無い: 従来どおり上へ
             raise
         return failure_result
+    _event_contract_checkpoint(checker)
     return apply_pair_failure_gate(  # G4-a
         checker,
         result,

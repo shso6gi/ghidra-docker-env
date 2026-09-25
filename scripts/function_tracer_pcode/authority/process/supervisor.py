@@ -460,9 +460,11 @@ class ProcessSupervisorAuthorityFactory:
         from scripts.function_tracer_pcode.authority.decision.canonical_result import (
             validate_canonical_result_finalization_bundle,
         )
+        from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
 
         return validate_canonical_result_finalization_bundle(
             bundle,
+            work=SealWorkBudget.for_result(),
             result_payload_preimage=result_payload_preimage,
             bundle_verification_key_id=self.supervisor_signing_key_id,
             bundle_verification_key=self.__keys["supervisor"],
@@ -1338,6 +1340,7 @@ class ProcessSupervisorAuthorityFactory:
             error_kind=None,
             seal_key_id=self.supervisor_signing_key_id,
             seal_key=self.__keys["supervisor"],
+            work=_supervisor_seal_work(),
         )
         payload = {
             "launch_receipt_digest": launch.receipt_digest,
@@ -1763,6 +1766,7 @@ class ProcessSupervisorAuthorityFactory:
             error_kind=error.payload["error_kind"],
             seal_key_id=self.supervisor_signing_key_id,
             seal_key=self.__keys["supervisor"],
+            work=_supervisor_seal_work(),
         )
         payload = {
             "launch_receipt_digest": launch.receipt_digest,
@@ -1852,6 +1856,14 @@ class ResolvedChain:
 #: 別の thread は例外にせず、flock で待つ（thread ごとの記録）。
 _HELD_LOCKS = threading.local()
 _OWNERSHIP_TOKEN = object()
+
+
+def _supervisor_seal_work() -> Any:
+    """Issue #110: 1 回の terminal の封印（supervisor の固定の形の preimage）の有限の作業量。"""
+
+    from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
+
+    return SealWorkBudget.for_supervisor()
 
 
 def _held(kind: str) -> set[str]:

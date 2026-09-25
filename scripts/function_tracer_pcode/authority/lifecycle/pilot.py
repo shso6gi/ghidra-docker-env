@@ -227,9 +227,11 @@ class DualWritePilotResult:
                 GenericReceiptBoundSolverExecutionEventAuthority,
             )
         )
+        # Issue #110: build the bound-digest set once (was rebuilt per solver
+        # event: O(solver events x execution events) on the seal path).
+        bound_execution_digests = set(self.reduction.snapshot.execution_event_digests)
         bound_solver_event_count = sum(
-            digest in set(self.reduction.snapshot.execution_event_digests)
-            for digest in solver_event_digests
+            digest in bound_execution_digests for digest in solver_event_digests
         )
         timeout_event_digests = {
             recorded.authority_digest
@@ -545,6 +547,18 @@ class ProductionDualWritePilotSession:
         self._phase7_signal_sites: dict[int, str] = {}
         self._phase7_signal_transactions: dict[int, Any] = {}
         self._domain_signal_transaction_lock = RLock()
+        # Issue #110: the publication gate owns one event-contract ledger per
+        # session.  Every transaction is admitted against the authority event
+        # contract before any event is staged or digested.
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            EventContractLedger,
+        )
+
+        self.event_contract = EventContractLedger()
+        #: Finish-time emissions run after the pair gate.  A refusal there is
+        #: dropped (the stream stays a valid prefix) and the contract limitation
+        #: cause is published from the reserve before the decision.
+        self.finishing = False
 
     @contextmanager
     def domain_signal_transaction(self) -> Any:
@@ -554,7 +568,20 @@ class ProductionDualWritePilotSession:
             yield
 
     def emit(self, intent: Any) -> int:
-        return self.emit_many((intent,))[0]
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            AuthorityEventContractExceeded,
+        )
+
+        try:
+            return self.emit_many((intent,))[0]
+        except AuthorityEventContractExceeded:
+            if not self.finishing:
+                raise
+            # A direct finish-time emission after the pair gate: the refused
+            # event is dropped (nothing was buffered or staged) and the
+            # contract limitation cause is published from the reserve before
+            # the decision (``ensure_event_contract_limitation``).
+            return 0
 
     def emit_many(
         self, intents: Sequence[Any], commit_callback: Any = None, *,
@@ -598,6 +625,12 @@ class ProductionDualWritePilotSession:
                 # that would discard the already-committed producer state.
                 self._rollback_phase7_signal_transaction(transaction_signal)
                 return ()
+        # Issue #110: admit the whole transaction against the authority event
+        # contract before anything is buffered, staged or digested.  A refusal
+        # records a pair-terminal limitation and leaves the stream unchanged.
+        admission = self.event_contract.admit(
+            batch, pending_occurrences=self.pending_deferred_occurrences()
+        )
         transaction = None
         if (
             self.phase7_runtime is not None
@@ -621,11 +654,49 @@ class ProductionDualWritePilotSession:
             recorded = self.recorder.append_many(
                 batch, commit_before_publication
             )
+            self.event_contract.commit(admission)
             return tuple(item.header.sequence_number for item in recorded)
         except Exception:
             if transaction is not None:
                 self._rollback_phase7_transaction(transaction)
             raise
+
+    def pending_deferred_occurrences(self) -> int:
+        """Occurrences that will be published before the decision (deferred SAT safety)."""
+
+        pending = self.domain_signal_state.get("sat_safety_deferred_observations")
+        return len(pending) if type(pending) is dict else 0
+
+    def event_contract_checkpoint(self) -> None:
+        """Before the pair gate: the deferred occurrences must still fit the contract."""
+
+        self.event_contract.checkpoint(
+            pending_occurrences=self.pending_deferred_occurrences()
+        )
+
+    def ensure_event_contract_limitation(self) -> None:
+        """Publish the contract limitation cause (reserve) if a finish-time refusal dropped events."""
+
+        exceeded = self.event_contract.exceeded
+        if exceeded is None or self.event_contract.limitation_recorded:
+            return
+        from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+            observe_analysis_limitation,
+        )
+        from scripts.function_tracer_pcode.authority.lifecycle.production_context import (
+            production_pilot_session_scope,
+        )
+
+        with production_pilot_session_scope(self):
+            observe_analysis_limitation(
+                reason_id=exceeded.reason_id,
+                limitation_site=exceeded.site,
+                target_key=exceeded.target_key,
+                missing_semantic_fact=exceeded.missing_semantic_fact,
+                evidence_refs=exceeded.evidence_refs,
+            )
+        if not self.event_contract.limitation_recorded:
+            raise ValueError("authority event contract limitation was not published")
 
     def _begin_phase7_transaction(self) -> Any:
         if self.phase7_runtime is None:
@@ -773,6 +844,10 @@ class ProductionDualWritePilotSession:
             )
             return len(recorded_sequences)
         except Exception as exc:
+            from scripts.function_tracer_pcode.authority.event_contract import (
+                AuthorityEventContractExceeded,
+            )
+
             rollback_failures = []
             if external_committed:
                 try:
@@ -800,6 +875,11 @@ class ProductionDualWritePilotSession:
                     "Phase 7 rollback: "
                     + f"{type(rollback_exc).__name__}: {rollback_exc}"
                 )
+            if type(exc) is AuthorityEventContractExceeded and not rollback_failures:
+                # A contract refusal is a recorded pair-terminal limitation, not
+                # an encoding failure: the transaction was rolled back and the
+                # stream stays a valid prefix.
+                return 0
             self.domain_signal_error_kinds.append(type(exc).__name__)
             self.domain_signal_error_details.append(
                 f"{type(signal).__name__}: {exc}"
@@ -1071,6 +1151,10 @@ class ProductionDualWritePilotConnector:
         from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
             finalize_deferred_sat_safety_observations,
         )
+        # Issue #110: from here on emissions run after the pair gate; a
+        # contract refusal drops the event and the limitation cause is
+        # published from the reserve before the decision.
+        session.finishing = True
         finalize_deferred_sat_safety_observations(session)
         execution_history_finalizer = getattr(
             session.domain_signal_encoder,
@@ -1079,6 +1163,7 @@ class ProductionDualWritePilotConnector:
         )
         if callable(execution_history_finalizer):
             execution_history_finalizer(session)
+        session.ensure_event_contract_limitation()
         # A failed signal encoding leaves its Phase 7 discovery activation
         # deliberately unmaterialized.  Report the original encoding failure
         # before Phase 7 finalization; otherwise the pending-discovery guard
@@ -1170,6 +1255,7 @@ class ProductionDualWritePilotConnector:
             session, pre_closure_projection, terminal_candidate_view
         ):
             session.emit(intent)
+        session.ensure_event_contract_limitation()
         session.domain_signal_state["terminal_candidate_view"] = (
             terminal_candidate_view
         )

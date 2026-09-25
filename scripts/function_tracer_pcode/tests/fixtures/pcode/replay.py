@@ -28,6 +28,7 @@ from scripts.function_tracer_pcode.tests.fixtures.pcode.recorded_program import 
 from scripts.function_tracer_pcode.tests.fixtures.pcode.snapshot import (
     AnalysisSnapshotCollector,
 )
+from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
 
 
 #: 再生中に import させない runtime。``ImportError`` を出すのは Ghidra の
@@ -200,10 +201,10 @@ def replay_recorded_pair(
             evidence, session = finalization
             bundle = build_canonical_result_finalization_bundle(
                 result_payload_preimage=payload,
-                evidence=evidence, session=session,
+                evidence=evidence, session=session,work=SealWorkBudget.for_result()
             )
             validate_canonical_result_finalization_bundle(
-                bundle, result_payload_preimage=payload,
+                bundle, result_payload_preimage=payload,work=SealWorkBudget.for_result()
             )
             payload["canonical_result_finalization_bundle"] = bundle
     except Exception as exc:  # 欠落注入では production 側が途中で落ちることもある

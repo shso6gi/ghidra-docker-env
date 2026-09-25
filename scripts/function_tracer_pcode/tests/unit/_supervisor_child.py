@@ -45,6 +45,7 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_records import (
     HarnessRecords,
     write_json,
 )
+from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
 
 MODULE = "scripts.function_tracer_pcode.tests.unit._supervisor_child"
 #: harness が予約する exit code（CLI の 0-4 / supervisor の 124 / crash の 86 と別）。
@@ -392,10 +393,10 @@ def _step_envelope(context: _ChildContext, step: Mapping[str, Any]) -> None:
     payload = result.to_dict()
     payload["canonical_result_finalization_bundle"] = (
         build_canonical_result_finalization_bundle(
-            result_payload_preimage=dict(payload), evidence=evidence, session=session,
+            result_payload_preimage=dict(payload), evidence=evidence, session=session,work=SealWorkBudget.for_result()
         )
     )
-    envelope = persist_canonical_result_envelope(payload)
+    envelope = persist_canonical_result_envelope(payload, work=SealWorkBudget.for_result())
     if envelope is None:
         raise FixtureFailure("canonical envelope was not persisted")
     context.emitted_outcome = requested

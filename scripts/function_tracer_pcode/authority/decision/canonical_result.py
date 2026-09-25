@@ -34,6 +34,7 @@ from scripts.function_tracer_pcode.authority.process.supervisor import (
     PROCESS_DURABLE_RECOVERY_REGISTRY,
 )
 from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+from scripts.function_tracer_pcode.authority.seal_work import SealPlan
 from scripts.function_tracer_pcode.authority.process.terminal_driver import (
     inspect as inspect_terminal,
 )
@@ -231,20 +232,63 @@ def _semantic_projection(
 
 def build_canonical_result_finalization_bundle(
     *, result_payload_preimage: Mapping[str, Any], evidence: Any, session: Any,
+    work: Any,
 ) -> Mapping[str, Any]:
-    """Seal all replay material for one normal production-pilot finalization."""
+    """Seal all replay material for one normal production-pilot finalization.
+
+    Issue #110: every step proportional to the stream / projection / receipts /
+    preimage is charged to the finite ``work`` (``authority.seal_work.SealWork``)
+    before it runs; exceeding it raises ``BundleWorkExceeded`` and no partial
+    bundle, digest or replay is returned.
+    """
 
     pilot = evidence.pilot_result
+    occurrence = evidence.result_entry_occurrence_receipt
+    selection = session.domain_signal_state.get(
+        "terminal_timeout_candidate_selection"
+    )
+    plan = SealPlan.price(
+        work,
+        stream=pilot.sealed_event_stream,
+        projection=pilot.reduction.projection,
+        receipts=(
+            *pilot.decisive_proof_receipts, *pilot.terminal_timeout_receipts,
+            *pilot.error_receipts, pilot.candidate.decision_receipt,
+            occurrence, selection,
+        ),
+        preimage=result_payload_preimage,
+        execution=session.execution_payload,
+    )
+    plan.charge("pilot_validate")
     pilot.validate()
     codec = _codec()
+    plan.charge("semantic_projection")
     semantic = _semantic_projection(
         result_payload_preimage, pilot, session.execution_payload
     )
-    occurrence = evidence.result_entry_occurrence_receipt
     seal_key_id = os.environ.get("UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_ID")
     seal_key_file = os.environ.get("UNKNOWN_TAXONOMY_V2_SUPERVISOR_KEY_FILE")
     if bool(seal_key_id) != bool(seal_key_file):
         raise ValueError("canonical result bundle seal configuration is incomplete")
+    plan.charge("execution_payload_digest")
+    execution_payload_digest = authority_digest(session.execution_payload)
+    plan.charge("encode_stream")
+    encoded_stream = _encoded(codec, pilot.sealed_event_stream)
+    plan.charge("encode_projection")
+    encoded_projection = _encoded(codec, pilot.reduction.projection)
+    plan.charge("encode_receipts")
+    encoded_decisive = tuple(
+        _encoded(codec, item) for item in pilot.decisive_proof_receipts
+    )
+    encoded_timeouts = tuple(
+        _encoded(codec, item) for item in pilot.terminal_timeout_receipts
+    )
+    encoded_errors = tuple(
+        _encoded(codec, item) for item in pilot.error_receipts
+    )
+    encoded_decision = _encoded(codec, pilot.candidate.decision_receipt)
+    plan.charge("preimage_digest")
+    preimage_digest = authority_digest(result_payload_preimage)
     body = {
         "schema": BUNDLE_SCHEMA,
         "authority_kind": BUNDLE_KIND,
@@ -260,11 +304,11 @@ def build_canonical_result_finalization_bundle(
             "stream_id": pilot.sealed_event_stream.envelope.stream_id,
         },
         "execution_payload": session.execution_payload,
-        "execution_payload_digest": authority_digest(session.execution_payload),
+        "execution_payload_digest": execution_payload_digest,
         "result_entry_occurrence_receipt": (
             occurrence.to_authority_dict() if occurrence is not None else None
         ),
-        "sealed_event_stream": _encoded(codec, pilot.sealed_event_stream),
+        "sealed_event_stream": encoded_stream,
         "terminalizations": tuple(
             {
                 "event_sequence_number": item.event_sequence_number,
@@ -272,33 +316,19 @@ def build_canonical_result_finalization_bundle(
             }
             for item in session.terminalizations
         ),
-        "final_lifecycle_projection": _encoded(
-            codec, pilot.reduction.projection
-        ),
-        "decisive_proof_receipts": tuple(
-            _encoded(codec, item) for item in pilot.decisive_proof_receipts
-        ),
-        "terminal_timeout_receipts": tuple(
-            _encoded(codec, item) for item in pilot.terminal_timeout_receipts
-        ),
+        "final_lifecycle_projection": encoded_projection,
+        "decisive_proof_receipts": encoded_decisive,
+        "terminal_timeout_receipts": encoded_timeouts,
         "terminal_timeout_candidate_selection_receipt": (
-            session.domain_signal_state[
-                "terminal_timeout_candidate_selection"
-            ].to_authority_dict()
-            if session.domain_signal_state.get(
-                "terminal_timeout_candidate_selection"
-            ) is not None else None
+            selection.to_authority_dict() if selection is not None else None
         ),
-        "error_receipts": tuple(
-            _encoded(codec, item) for item in pilot.error_receipts
-        ),
-        "decision_receipt": _encoded(codec, pilot.candidate.decision_receipt),
-        "canonical_result_payload_preimage_digest": authority_digest(
-            result_payload_preimage
-        ),
+        "error_receipts": encoded_errors,
+        "decision_receipt": encoded_decision,
+        "canonical_result_payload_preimage_digest": preimage_digest,
         "canonical_semantic_result_projection": semantic,
         "bundle_seal_key_id": seal_key_id,
     }
+    plan.charge("bundle_digest")
     bundle_digest = authority_digest(body)
     signature = None
     if seal_key_file is not None:
@@ -311,8 +341,8 @@ def build_canonical_result_finalization_bundle(
         "bundle_digest": bundle_digest,
         "bundle_signature": signature,
     }
-    validate_canonical_result_finalization_bundle(
-        bundle, result_payload_preimage=result_payload_preimage
+    _validate_bundle_with_plan(
+        bundle, plan, result_payload_preimage=result_payload_preimage
     )
     return bundle
 
@@ -337,16 +367,29 @@ def build_supervisor_canonical_result_finalization_bundle(
     *, launch: Any, sealed_event_stream: Any,
     terminalizations: tuple[tuple[int, str], ...],
     expected_outcome: Outcome, error_kind: str | None,
-    seal_key_id: str, seal_key: bytes,
+    seal_key_id: str, seal_key: bytes, work: Any,
 ) -> Mapping[str, Any]:
-    """Run the canonical reducer/finalizer for a supervisor terminal stream."""
+    """Run the canonical reducer/finalizer for a supervisor terminal stream.
+
+    Issue #110: metered like the production seal (``work`` is a finite
+    ``SealWork``; ``BundleWorkExceeded`` returns no partial bundle).
+    """
 
     from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
         TerminalizationIntent,
         run_dual_write_pilot,
     )
 
+    preimage = supervisor_canonical_result_payload_preimage(
+        launch, outcome=expected_outcome, error_kind=error_kind
+    )
+    plan = SealPlan.price(
+        work, stream=sealed_event_stream, projection=None, receipts=(),
+        preimage=preimage, execution=None,
+    )
+    plan.charge("supervisor_stream_validate")
     sealed_event_stream.validate()
+    plan.charge("supervisor_replay")
     replayed = run_dual_write_pilot(
         legacy_outcome=Outcome.UNKNOWN,
         reducer=ShadowLifecycleReducer(
@@ -407,11 +450,35 @@ def build_supervisor_canonical_result_finalization_bundle(
         }),
         "stream_id": stream_identity.stream_id,
     }
-    preimage = supervisor_canonical_result_payload_preimage(
-        launch, outcome=expected_outcome, error_kind=error_kind
+    plan.measure_more(
+        projection=replayed.reduction.projection,
+        receipts=(
+            *replayed.decisive_proof_receipts,
+            *replayed.terminal_timeout_receipts,
+            *replayed.error_receipts,
+            replayed.candidate.decision_receipt,
+        ),
     )
     codec = _codec()
+    plan.charge("semantic_projection")
     semantic = _semantic_projection(preimage, replayed)
+    plan.charge("encode_stream")
+    encoded_stream = _encoded(codec, sealed_event_stream)
+    plan.charge("encode_projection")
+    encoded_projection = _encoded(codec, replayed.reduction.projection)
+    plan.charge("encode_receipts")
+    encoded_decisive = tuple(
+        _encoded(codec, item) for item in replayed.decisive_proof_receipts
+    )
+    encoded_timeouts = tuple(
+        _encoded(codec, item) for item in replayed.terminal_timeout_receipts
+    )
+    encoded_errors = tuple(
+        _encoded(codec, item) for item in replayed.error_receipts
+    )
+    encoded_decision = _encoded(codec, replayed.candidate.decision_receipt)
+    plan.charge("preimage_digest")
+    preimage_digest = authority_digest(preimage)
     body = {
         "schema": BUNDLE_SCHEMA,
         "authority_kind": BUNDLE_KIND,
@@ -421,32 +488,22 @@ def build_supervisor_canonical_result_finalization_bundle(
             stream_identity.source_snapshot_fingerprint
         ),
         "result_entry_occurrence_receipt": occurrence,
-        "sealed_event_stream": _encoded(codec, sealed_event_stream),
+        "sealed_event_stream": encoded_stream,
         "terminalizations": tuple({
             "event_sequence_number": sequence,
             "proof_requirement_id": requirement,
         } for sequence, requirement in terminalizations),
-        "final_lifecycle_projection": _encoded(
-            codec, replayed.reduction.projection
-        ),
-        "decisive_proof_receipts": tuple(
-            _encoded(codec, item) for item in replayed.decisive_proof_receipts
-        ),
-        "terminal_timeout_receipts": tuple(
-            _encoded(codec, item)
-            for item in replayed.terminal_timeout_receipts
-        ),
+        "final_lifecycle_projection": encoded_projection,
+        "decisive_proof_receipts": encoded_decisive,
+        "terminal_timeout_receipts": encoded_timeouts,
         "terminal_timeout_candidate_selection_receipt": None,
-        "error_receipts": tuple(
-            _encoded(codec, item) for item in replayed.error_receipts
-        ),
-        "decision_receipt": _encoded(
-            codec, replayed.candidate.decision_receipt
-        ),
-        "canonical_result_payload_preimage_digest": authority_digest(preimage),
+        "error_receipts": encoded_errors,
+        "decision_receipt": encoded_decision,
+        "canonical_result_payload_preimage_digest": preimage_digest,
         "canonical_semantic_result_projection": semantic,
         "bundle_seal_key_id": seal_key_id,
     }
+    plan.charge("bundle_digest")
     bundle_digest = authority_digest(body)
     bundle = {
         **body,
@@ -455,8 +512,8 @@ def build_supervisor_canonical_result_finalization_bundle(
             seal_key, bundle_digest.encode("ascii"), hashlib.sha256
         ).hexdigest(),
     }
-    validate_canonical_result_finalization_bundle(
-        bundle,
+    _validate_bundle_with_plan(
+        bundle, plan,
         result_payload_preimage=preimage,
         bundle_verification_key_id=seal_key_id,
         bundle_verification_key=seal_key,
@@ -553,6 +610,58 @@ def _operational_content_identity(value: Any) -> str:
 
 def validate_canonical_result_finalization_bundle(
     bundle: Mapping[str, Any], *,
+    work: Any,
+    result_payload_preimage: Mapping[str, Any] | None = None,
+    bundle_verification_key_id: str | None = None,
+    bundle_verification_key: bytes | None = None,
+) -> Mapping[str, Any]:
+    """Replay-verify a persisted bundle within the finite seal ``work`` (Issue #110)."""
+
+    plan = _price_bundle(work, bundle, result_payload_preimage)
+    return _validate_bundle_with_plan(
+        bundle, plan,
+        result_payload_preimage=result_payload_preimage,
+        bundle_verification_key_id=bundle_verification_key_id,
+        bundle_verification_key=bundle_verification_key,
+    )
+
+
+def _price_bundle(
+    work: Any, bundle: Mapping[str, Any], preimage: Mapping[str, Any] | None,
+) -> SealPlan:
+    """Measure the encoded bundle (dict) before any decode, digest or replay."""
+
+    if type(bundle) is not dict:
+        raise ValueError("canonical result bundle fields differ")
+    receipts = []
+    for key in (
+        "decisive_proof_receipts", "terminal_timeout_receipts", "error_receipts",
+    ):
+        value = bundle.get(key)
+        if isinstance(value, (list, tuple)):
+            receipts.extend(value)
+    for key in (
+        "decision_receipt", "result_entry_occurrence_receipt",
+        "terminal_timeout_candidate_selection_receipt",
+        "canonical_semantic_result_projection", "execution_identity",
+        "terminalizations",
+    ):
+        receipts.append(bundle.get(key))
+    stream = bundle.get("sealed_event_stream")
+    if not isinstance(stream, Mapping):
+        raise ValueError("canonical result bundle fields differ")
+    return SealPlan.price(
+        work,
+        stream=stream,
+        projection=bundle.get("final_lifecycle_projection"),
+        receipts=tuple(receipts),
+        preimage=preimage,
+        execution=bundle.get("execution_payload"),
+    )
+
+
+def _validate_bundle_with_plan(
+    bundle: Mapping[str, Any], plan: SealPlan, *,
     result_payload_preimage: Mapping[str, Any] | None = None,
     bundle_verification_key_id: str | None = None,
     bundle_verification_key: bytes | None = None,
@@ -584,8 +693,10 @@ def validate_canonical_result_finalization_bundle(
     if (
         bundle["schema"] != BUNDLE_SCHEMA
         or bundle["authority_kind"] != BUNDLE_KIND
-        or authority_digest(body) != bundle["bundle_digest"]
     ):
+        raise ValueError("canonical result bundle seal is invalid")
+    plan.charge("verify_bundle_digest")
+    if authority_digest(body) != bundle["bundle_digest"]:
         raise ValueError("canonical result bundle seal is invalid")
     if bool(bundle_verification_key_id) != bool(bundle_verification_key):
         raise ValueError("canonical result bundle verification key is incomplete")
@@ -602,13 +713,18 @@ def validate_canonical_result_finalization_bundle(
             )
         ):
             raise ValueError("canonical result bundle signature is invalid")
-    if result_payload_preimage is not None and authority_digest(
-        result_payload_preimage
-    ) != bundle["canonical_result_payload_preimage_digest"]:
-        raise ValueError("canonical result payload preimage differs from bundle")
+    if result_payload_preimage is not None:
+        plan.charge("verify_preimage_digest")
+        if authority_digest(
+            result_payload_preimage
+        ) != bundle["canonical_result_payload_preimage_digest"]:
+            raise ValueError("canonical result payload preimage differs from bundle")
     codec = _codec()
+    plan.charge("decode_stream")
     stream = codec.loads(json.dumps(bundle["sealed_event_stream"]))
+    plan.charge("decode_projection")
     projection = codec.loads(json.dumps(bundle["final_lifecycle_projection"]))
+    plan.charge("decode_receipts")
     decisive = tuple(
         codec.loads(json.dumps(item))
         for item in bundle["decisive_proof_receipts"]
@@ -625,6 +741,7 @@ def validate_canonical_result_finalization_bundle(
         reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
         recovery_registry=PROCESS_DURABLE_RECOVERY_REGISTRY,
     )
+    plan.charge("verify_replay")
     reduction = reducer.replay(stream)
     if reduction.projection != projection:
         raise ValueError("canonical result lifecycle replay drifted")
@@ -640,6 +757,7 @@ def validate_canonical_result_finalization_bundle(
         )
         for item in bundle["terminalizations"]
     )
+    plan.charge("verify_dual_write_replay")
     replayed = run_dual_write_pilot(
         legacy_outcome=Outcome.UNKNOWN,
         reducer=reducer,
@@ -661,6 +779,7 @@ def validate_canonical_result_finalization_bundle(
         for event in selected_timeout_events
     )
     if solver_timeout_is_terminal:
+        plan.charge("verify_timeout_selection")
         if type(selection_payload) is not dict:
             raise ValueError(
                 "canonical solver TIMEOUT lacks candidate selection authority"
@@ -767,6 +886,7 @@ def validate_canonical_result_finalization_bundle(
         raise ValueError(
             "canonical non-solver terminal carries timeout selection authority"
         )
+    plan.charge("verify_equality")
     if (
         replayed.reduction.projection != projection
         or replayed.decisive_proof_receipts != decisive
@@ -776,6 +896,7 @@ def validate_canonical_result_finalization_bundle(
     ):
         raise ValueError("canonical result decision replay drifted")
     identity = bundle["execution_identity"]
+    plan.charge("verify_execution_identity")
     execution_payload = (
         canonical_value(bundle["execution_payload"])
         if bundle["execution_payload"] is not None else None
@@ -903,6 +1024,7 @@ def validate_canonical_result_finalization_bundle(
         ):
             raise ValueError("result-entry occurrence does not join execution payload")
     if result_payload_preimage is not None:
+        plan.charge("verify_decisive_provenance")
         _validate_decisive_proof_provenance(
             result_payload_preimage.get("decisive_proof_provenance"),
             decisive_receipts=decisive,
@@ -910,6 +1032,7 @@ def validate_canonical_result_finalization_bundle(
             execution_payload=execution_payload,
         )
     semantic = bundle["canonical_semantic_result_projection"]
+    plan.charge("verify_semantic_projection")
     if result_payload_preimage is not None:
         rebuilt_semantic = _semantic_projection(
             result_payload_preimage, replayed, execution_payload
@@ -933,7 +1056,11 @@ def validate_canonical_result_finalization_bundle(
     }
 
 
-def persist_canonical_result_envelope(result_payload: Mapping[str, Any]) -> Path | None:
+def persist_canonical_result_envelope(
+    result_payload: Mapping[str, Any], *, work: Any,
+) -> Path | None:
+    """Verify and persist the canonical result envelope within the finite seal ``work`` (Issue #110)."""
+
     root = os.environ.get("UNKNOWN_TAXONOMY_V2_SUPERVISOR_ROOT")
     nonce = os.environ.get("UNKNOWN_TAXONOMY_V2_EXECUTION_NONCE")
     bundle = result_payload.get("canonical_result_finalization_bundle")
@@ -943,14 +1070,17 @@ def persist_canonical_result_envelope(result_payload: Mapping[str, Any]) -> Path
         key: value for key, value in result_payload.items()
         if key != "canonical_result_finalization_bundle"
     }
-    validate_canonical_result_finalization_bundle(
-        bundle, result_payload_preimage=preimage
-    )
+    plan = _price_bundle(work, bundle, preimage)
+    _validate_bundle_with_plan(bundle, plan, result_payload_preimage=preimage)
+    plan.charge("persist_project")
     projected_payload = _project_json_primitives(
         result_payload, path="$.canonical_result_payload"
     )
+    plan.charge("persist_surface")
     _validate_json_surface(projected_payload, path="$.canonical_result_payload")
+    plan.charge("persist_seal")
     envelope = seal_envelope(projected_payload)
+    plan.charge("persist_write")
     directory = Path(root) / nonce
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / layout.RESULT_ENVELOPE
