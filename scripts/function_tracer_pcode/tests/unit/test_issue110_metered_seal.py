@@ -634,3 +634,174 @@ def test_the_contract_numbers_have_one_owner():
             if "AUTHORITY_EVENT_CONTRACT" not in text:
                 offenders.append(str(path.relative_to(PACKAGE_ROOT)))
     assert offenders == []
+
+
+# ---------------------------------------------------------------------------
+# mutation で見つけた穴を塞ぐ test
+# ---------------------------------------------------------------------------
+
+_EXPECTED_STEPS_BY_FUNCTION = {
+    "build_canonical_result_finalization_bundle": EXPECTED_BUILD_STEPS[:8],
+    "build_supervisor_canonical_result_finalization_bundle": [
+        "supervisor_stream_validate", "supervisor_replay", "semantic_projection", "encode_stream",
+        "encode_projection", "encode_receipts", "preimage_digest", "bundle_digest",
+    ],
+    "_validate_bundle_with_plan": EXPECTED_BUILD_STEPS[8:14] + [
+        "verify_dual_write_replay", "verify_timeout_selection", "verify_equality",
+        "verify_execution_identity", "verify_decisive_provenance", "verify_semantic_projection",
+    ],
+    "persist_canonical_result_envelope": [
+        "persist_project", "persist_surface", "persist_seal", "persist_write",
+    ],
+}
+
+
+def test_each_seal_function_charges_its_steps_in_order():
+    """関数ごとに、数える段の列（code の順）が決まった列と一致する（段を 1 つ外すと落ちる）。"""
+
+    functions = {
+        node.name: node for node in _canonical_result_tree().body if isinstance(node, ast.FunctionDef)
+    }
+    for name, expected in _EXPECTED_STEPS_BY_FUNCTION.items():
+        steps = []
+        for node in ast.walk(functions[name]):
+            if (
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "charge" and node.args and isinstance(node.args[0], ast.Constant)
+            ):
+                steps.append((node.lineno, node.args[0].value))
+        assert [step for _line, step in sorted(steps)] == expected, name
+
+
+def test_pricing_charges_each_event_before_measuring_it():
+    events = tuple(SimpleNamespace(authority_payload=None, diagnostic_payload=None) for _ in range(1_000))
+    # header（1 event 1,024 単位）を辿る前に数える: 50 event 分の作業量なら 50 event 目あたりで止まる
+    work = SealWorkBudget(50 * 1024)
+    with pytest.raises(BundleWorkExceeded) as stopped:
+        SealPlan.price(work, stream=SimpleNamespace(events=events), projection=None,
+                       receipts=(), preimage=None, execution=None)
+    assert stopped.value.step == "price"
+    assert work.consumed <= 52 * 1024
+
+
+@dataclass(frozen=True)
+class _Projection:
+    c_active_base: tuple
+
+
+def test_pricing_charges_the_reduction_by_events_and_active_occurrences():
+    events = tuple(SimpleNamespace(authority_payload=1, diagnostic_payload=None) for _ in range(50))
+    small = SealWorkBudget.for_result()
+    SealPlan.price(small, stream=SimpleNamespace(events=events), projection=_Projection(()),
+                   receipts=(), preimage=None, execution=None)
+    rows = _Projection(tuple(range(40)))
+    large = SealWorkBudget.for_result()
+    plan = SealPlan.price(large, stream=SimpleNamespace(events=events), projection=rows,
+                          receipts=(), preimage=None, execution=None)
+    assert plan.components.reduction == 50 * 40
+    assert large.consumed - small.consumed >= 50 * 40 - 50
+
+
+def test_a_step_cannot_be_charged_twice():
+    plan = SealPlan.price(SealWorkBudget.for_result(), stream=SimpleNamespace(events=()), projection=None,
+                          receipts=(), preimage=None, execution=None)
+    plan.charge("preimage_digest")
+    with pytest.raises(ValueError):
+        plan.charge("preimage_digest")
+    with pytest.raises(KeyError):
+        plan.charge("unregistered_step")
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_the_meter_charges_at_least_what_it_reports(seed):
+    rng = random.Random(1000 + seed)
+    value = _random_value(rng)
+    sink = LimitedUnits(10**9)
+    units = measure_canonical_units(value, sink)
+    assert sink.consumed >= units
+
+
+def test_a_refused_oversized_event_keeps_later_events_out(monkeypatch):
+    """1 つの event が大きすぎて拒まれたら、後の小さい event も拒む（stream は超過の前の prefix のまま）。"""
+
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        SatSafetyBlockerProductionSignal,
+        emit_sat_safety_signal,
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+
+    monkeypatch.setenv(NONCE_ENV, "issue110-sticky-occurrence")
+    connector = _connector()
+    session = connector.begin({"case": "issue110-sticky"})
+    probe = SealWorkBudget.for_result()
+    small = canonical_units_within(_sat_blocker(0), 10**9)
+    session.event_contract = EventContractLedger(AuthorityEventContract(max_event_payload_units=small * 40))
+    big = SatSafetyBlockerProductionSignal(
+        action="OBSERVED", reason_id="counterexample_analysis_safety_unproven",
+        canonical_target_key=("issue110-big", "k" * (small * 60)),
+        missing_semantic_fact=("counterexample_safety_gate_unproven", "model"),
+        evidence_refs=("issue110-big",), producer_id="sat_unsafety_reason_producer",
+    )
+    with pair_failure_scope(("issue110", "sticky"), session.identity.result_occurrence_id):
+        with production_signal_scope(session):
+            first = emit_sat_safety_signal(_sat_blocker(1), producer_site_manifest_id="sat-safety-blocker-observed")
+            refused = emit_sat_safety_signal(big, producer_site_manifest_id="sat-safety-blocker-observed")
+            later = emit_sat_safety_signal(_sat_blocker(2), producer_site_manifest_id="sat-safety-blocker-observed")
+    assert (first, refused, later) == (1, 0, 0)
+    assert session.recorder.event_count == 1
+    assert probe.consumed == 0
+
+
+def test_a_refused_finish_time_eq_closure_publishes_the_limitation(monkeypatch):
+    """finish の中（pending EQ authority の publish）で拒まれても、判定の前に限界の cause を publish する。"""
+
+    from scripts.function_tracer_pcode.authority.contracts import authority_digest
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        ANALYSIS_BUDGET_REASON_ID,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
+        PINNED_SOLVER_EXECUTION_ISSUER,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        emit_sat_safety_signal,
+        issue_pending_eq_closure_authority,
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+    from scripts.function_tracer_pcode.tests.unit.test_monolithic_region_split import _analysis
+
+    monkeypatch.setenv(NONCE_ENV, "issue110-eq-occurrence")
+    connector = _connector()
+    session = connector.begin({"case": "issue110-eq"})
+    with pair_failure_scope(("issue110", "eq"), session.identity.result_occurrence_id):
+        with production_signal_scope(session):
+            assert emit_sat_safety_signal(
+                _sat_blocker(0), producer_site_manifest_id="sat-safety-blocker-observed",
+            ) == 1
+            trusted = EquivalenceChecker(
+                strategy="monolithic", timeout=5, monolithic_timeout=5, canonical_decision_cutover=False,
+            ).check(_analysis("left", 7), _analysis("right", 7))
+            frame = trusted._prepared_dispatch_frame
+            issue_pending_eq_closure_authority(session, frame.receipt, frame)
+    # 分析の後の event 数ちょうどで、finish の event（EQ closure）は ordinary な枠に入らない
+    recorded = session.recorder.event_count
+    ledger = EventContractLedger(AuthorityEventContract(max_events=recorded + 4))
+    ledger.events = session.event_contract.events
+    ledger.ordinary_occurrences = session.event_contract.ordinary_occurrences
+    ledger.relation_rows = session.event_contract.relation_rows
+    ledger.payload_units = session.event_contract.payload_units
+    session.event_contract = ledger
+    payload = dict(session.execution_payload)
+    nonce = payload.pop("result_entry_occurrence_nonce")
+    session.result_entry_occurrence_receipt = PINNED_SOLVER_EXECUTION_ISSUER.issue_result_entry_occurrence(
+        result_occurrence_id=session.identity.result_occurrence_id,
+        execution_payload_digest=authority_digest(payload), startup_receipt_digests=(), occurrence_nonce=nonce,
+    )
+    evidence = connector.finish(session, _legacy_result(), case_id="issue110-eq")
+    pilot = evidence.pilot_result
+    assert session.event_contract.exceeded is not None
+    assert session.event_contract.limitation_recorded
+    assert pilot.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+    assert ANALYSIS_BUDGET_REASON_ID in {row.reason_id for row in pilot.reduction.projection.c_active_base}
