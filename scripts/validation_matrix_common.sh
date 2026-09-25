@@ -392,7 +392,7 @@ validation_lock_authority_keyset() {
         return 1
     fi
     if ! mkdir -p -m 700 -- "$dir" 2>/dev/null || [[ -L "$dir" || ! -d "$dir" ]]; then
-        echo "Error: authority keyset is not a directory: $dir" >&2
+        echo "Error: authority keyset is not a directory and cannot be created as one: $dir" >&2
         return 1
     fi
     if ! exec {lock_fd}<"$dir"; then

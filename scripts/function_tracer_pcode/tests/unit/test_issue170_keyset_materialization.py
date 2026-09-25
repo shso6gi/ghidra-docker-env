@@ -238,6 +238,30 @@ def _hold_keyset_lock(keyset: Path) -> int:
     return fd
 
 
+def _blocked_in_flock(session_id: int) -> bool:
+    """session（runner と子）の中に ``flock`` で待っている process があるか。"""
+
+    for stat in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            text = stat.read_text()
+        except OSError:
+            continue
+        comm = text[text.index("(") + 1:text.rindex(")")]
+        fields = text[text.rindex(")") + 2:].split()
+        if comm == "flock" and int(fields[3]) == session_id:
+            return True
+    return False
+
+
+def _wait_until(predicate, timeout: float = 90.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.05)
+    raise AssertionError("condition not reached")
+
+
 def _runner_setup(kind: str, harness: Harness, output: Path) -> tuple[dict[str, str], Path]:
     """runner の keyset と、同じ keyset を指すための env を返す。"""
 
@@ -327,9 +351,12 @@ def test_waiter_materializes_after_the_holder_releases(harness, holder):
         EQBENCH_AUTHORITY_KEYSET_ID=keyset.name,
         VALIDATION_KEYSET_LOCK_WAIT_SECONDS="60",
     )
-    time.sleep(1.5)
+    # B が keyset の flock で待っているところを観測する（main では待たずに gen へ進む）。
+    _wait_until(lambda: _blocked_in_flock(harness.procs["B"].pid) or harness.key_ops("B"))
+    time.sleep(0.5)
     # B は A が鍵の窓にいる間、どの鍵 CLI にも到達しない。
     assert harness.key_ops("B") == []
+    assert _blocked_in_flock(harness.procs["B"].pid)
     assert "arrive gen" not in harness.events("B")
     assert harness.procs["B"].poll() is None
 
@@ -749,7 +776,7 @@ def test_the_key_window_brackets_guard_hmac_and_helper_without_background_jobs(k
     assert "(umask 077; head -c 32 /dev/urandom >" in window
 
 
-def test_lock_functions_hold_no_other_resource():
+def test_lock_waits_bounded_and_restricts_permissions_under_the_lock():
     source = COMMON.read_text(encoding="utf-8")
     lock = _shell_function(source, "validation_lock_authority_keyset")
     assert 'flock -E 75 -w "$wait_seconds"' in lock
