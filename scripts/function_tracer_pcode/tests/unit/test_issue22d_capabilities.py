@@ -795,7 +795,7 @@ def test_lazy_sources_are_pulled_only_until_the_budget_stops_them():
             yield index
 
     for source in (lambda: flatten(outer()), lambda: flatten(empty_outer()), lambda: each(plain()),
-                   lambda: scan(plain(), _DeltaReducer())):
+                   lambda: scan(plain(), _DeltaReducer()), lambda: scan(plain(), _IdleReducer())):
         pulled.clear()
         with pytest.raises(JsonBudgetExhausted):
             RESULT_JSON_POLICY.prepare(source(), max_bytes=1_000)
@@ -963,3 +963,13 @@ def test_the_owner_api_never_runs_the_code_of_the_values_it_reads():
     with pytest.raises(TypeError):
         live_values.set_state(loud, "x", 1)
     assert _OUTSIDE_SETATTR["LoudSetattr"].calls == 0
+
+
+class _IdleReducer(_Reducer):
+    """要素に何もしない reducer: 引き出しの作業量は walker だけが数える（出力は小さい）。"""
+
+    def add(self, element, *, work):
+        pass
+
+    def result(self, *, work):
+        return 0

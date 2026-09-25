@@ -930,6 +930,9 @@ class _FunctionAudit:
             return None
         if bad(self.expr(func)):
             self.v(node, "calling a live value")
+        else:
+            # 添字・呼び出しの結果など、名前で解決できない callable（関数の表・callback の値）
+            self.v(node, "calling an unresolved callable expression")
         return None
 
     def _owner_object(self, receiver_node) -> bool:
