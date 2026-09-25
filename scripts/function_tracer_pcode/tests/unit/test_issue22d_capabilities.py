@@ -1151,6 +1151,15 @@ class OutsideKey:
 def outside_converter(value):
     calls.append("converter")
     return value
+
+from scripts.function_tracer_pcode.core.json_encoding import Reducer as _Base
+
+class OutsideReducer(_Base):
+    def add(self, element, *, work):
+        calls.append("reducer")
+
+    def result(self, *, work):
+        return 0
 '''
 _SPOOF: dict = {}
 exec(compile(_SPOOF_SOURCE, "/nonexistent/spoofing_outside_the_package.py", "exec"), _SPOOF)
@@ -1193,6 +1202,11 @@ def test_the_owner_trusts_code_by_its_file_not_by_the_type_name():
     assert identity_key_of(_SPOOF["OutsideKey"]()) == (False, None)
     with pytest.raises(TypeError):
         source_converter(_SPOOF["outside_converter"])
+    # package の外の code の reducer は `scan` へ渡せない（`Reducer` の subclass でも）
+    from scripts.function_tracer_pcode.core.json_encoding import scan
+
+    with pytest.raises(TypeError):
+        scan([1], _SPOOF["OutsideReducer"]())
     assert calls == []
 
 
