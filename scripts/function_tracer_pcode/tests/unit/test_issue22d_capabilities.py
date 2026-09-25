@@ -1854,9 +1854,10 @@ def test_owner_lookups_never_run_the_code_of_stored_keys():
         RESULT_JSON_POLICY.prepare(colliding, max_bytes=1_000)
     with pytest.raises(JsonValueRejected):
         RESULT_JSON_POLICY.prepare(mapping_of(colliding), max_bytes=1_000)
-    # LEGACY: 元の key を新しい dict へ置くのは hash・比較が組み込みの key だけ
-    with pytest.raises(JsonValueRejected):
-        RESULT_JSON_POLICY.materialize(as_dict(int_keys))
+    # LEGACY: 元の key を新しい dict へ置くのは hash・比較が組み込みの key だけ。hash を上書きした
+    # scalar の subclass（JPype の `JInt` の形）は値と同じく基底型の値の key として置く
+    placed = RESULT_JSON_POLICY.materialize(as_dict(int_keys))
+    assert placed == {1: "x", 2: "y"} and all(type(key) is int for key in placed)
     with pytest.raises(JsonValueRejected):
         RESULT_JSON_POLICY.materialize(as_dict(eq_only))
     # `OrderedDict` の iterator は同じ hash の key を比べる: 比較を上書きした key の `OrderedDict` は読まない

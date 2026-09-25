@@ -572,3 +572,32 @@ def test_the_unmetered_freeze_equals_the_metered_copy():
     unmetered = SnapshotFingerprintCodec.freeze(value)
     metered = SnapshotFingerprintCodec.freeze(value, budget=JsonBudget(None))
     assert unmetered == metered
+
+
+class _JavaHashedInt(int):
+    """JPype の `JInt` は `__hash__` / `__eq__` を自分の型で持つ（組み込みの `int` の実装ではない）。"""
+
+    calls: list = []
+
+    def __hash__(self):
+        _JavaHashedInt.calls.append("hash")
+        return int.__hash__(self)
+
+    def __eq__(self, other):
+        _JavaHashedInt.calls.append("eq")
+        return int.__eq__(self, other)
+
+
+def test_a_signature_hypothesis_keyed_by_java_primitives_keeps_its_legacy_form():
+    # 固定 subset の 26 pair の退行（`parameter_type_overrides` の key が JPype の `JInt`）: LEGACY は
+    # hash を上書きした scalar の subclass の key を基底型の値の key として置く（key の code を呼ばず、
+    # 型を直す仮説の payload は旧 `to_dict()` と同じ値）
+    from scripts.function_tracer_pcode.core.signature import SignatureHypothesis
+
+    hypothesis = SignatureHypothesis(parameter_type_overrides={_JavaHashedInt(0): "int", _JavaHashedInt(2): "uint"})
+    _JavaHashedInt.calls.clear()
+    payload = hypothesis.to_dict()
+    assert _JavaHashedInt.calls == []
+    assert payload["parameter_type_overrides"] == {0: "int", 2: "uint"}
+    assert all(type(key) is int for key in payload["parameter_type_overrides"])
+    assert SignatureHypothesis.from_dict(payload).parameter_type_overrides == {0: "int", 2: "uint"}

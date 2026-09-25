@@ -2144,6 +2144,11 @@ class _Walk:
                         # LEGACY は key をそのまま新しい dict へ置く: hash・比較が組み込みの実装の
                         # key だけ（基底型の subclass は一般の経路と同じ `canonical_key` で数える）
                         text_key = policy.canonical_key(key)
+                    elif issubclass(type(key), (str, int, float)) and not _builtin_enum(key):
+                        # hash を上書きした scalar の subclass（JPype の `JInt` など）: 値と同じく
+                        # 基底型の値の key として置く（key の `__hash__` / `__eq__` を呼ばない）
+                        text_key = policy.canonical_key(key)
+                        key = json_scalar(key)
                     else:
                         raise _NotPlain
                     total += string_bytes(text_key) + key_sep
@@ -2407,6 +2412,24 @@ class _Walk:
         else:
             self.count_raw_leaf(item)
         self.place(parent, key, item, build)
+
+    def legacy_key(self, key: Any) -> Any:
+        """LEGACY で新しい dict へ置く key（元の key を置くと key の `__hash__` / `__eq__` を呼び得る）。
+
+        hash・比較が組み込みの実装の key はそのまま。それ以外の scalar の subclass（JPype の `JInt`
+        など）は値と同じく基底型の値、そういう scalar を含む tuple は基底型の値の tuple（作業量の中で
+        1 回だけ作る）。それ以外の key は JSON にならない値。
+        """
+
+        if _builtin_hashed_key(key) or live_values.hash_safe_key(key):
+            return key
+        if issubclass(type(key), (str, int, float)) and not _builtin_enum(key):
+            return json_scalar(key)
+        if type(key) is tuple:
+            view = _plain_key_view(key, self.effort)
+            if view is not _NOT_PLAIN:
+                return view
+        self.reject(f"mapping key {type_name(type(key))} is not hashed by a builtin")
 
     def count_raw_container(self, item: Any, mapping: Any) -> None:
         """高速経路で辿れなかった容器を、一般の経路で 1 回だけ数える（要素は元の値のまま）。"""
@@ -2689,11 +2712,7 @@ class _Walk:
                 self.budget.charge(separator + self.string_bytes(text_key) + self.key_separator)
                 if self.token_sink is not None:
                     self.token("k" + text_key)
-                if frame.preserve_keys and not _builtin_hashed_key(child_key):
-                    # 元の key を新しい dict へ置くと key の `__hash__` / `__eq__` を呼ぶ: 組み込みの
-                    # 実装の key だけを置く
-                    self.reject(f"mapping key {type_name(type(child_key))} is not hashed by a builtin")
-                out_key = child_key if frame.preserve_keys else text_key
+                out_key = self.legacy_key(child_key) if frame.preserve_keys else text_key
             else:
                 if separator:
                     self.budget.charge(separator)

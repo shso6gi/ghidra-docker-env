@@ -1060,6 +1060,12 @@ def _hash_safe_keys(raw: dict) -> bool:
     return True
 
 
+def hash_safe_key(key: Any) -> bool:
+    """dict の key として新しい dict へ置いても値の code を呼ばないか（hash・比較が組み込みの実装）。"""
+
+    return _hash_safe_key(key)
+
+
 def _hash_safe_key(key: Any) -> bool:
     pending = [key]
     while pending:
@@ -1175,6 +1181,7 @@ __all__ = [
     "builtin_enum",
     "readable_property",
     "builtin_hashed_scalar",
+    "hash_safe_key",
     "state_setter",
     "copied_container",
     "attribute",
