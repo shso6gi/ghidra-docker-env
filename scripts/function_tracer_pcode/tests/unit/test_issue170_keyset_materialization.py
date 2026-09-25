@@ -667,6 +667,30 @@ def test_lock_restricts_permissions_only_after_acquiring_it(tmp_path):
     assert (keyset.stat().st_mode & 0o777) == 0o700
 
 
+def test_lock_rejects_a_keyset_replaced_while_waiting(tmp_path):
+    keyset = tmp_path / "ks"
+    fd = _hold_keyset_lock(keyset)
+    waiter = subprocess.Popen(
+        ["bash", "-c", f'set -euo pipefail\nsource "{COMMON}"\nvalidation_lock_authority_keyset "$1"',
+         "bash", str(keyset)],
+        cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
+        env={**os.environ, "VALIDATION_KEYSET_LOCK_WAIT_SECONDS": "60"},
+    )
+    try:
+        _wait_until(lambda: _blocked_in_flock(waiter.pid))
+        keyset.rename(tmp_path / "ks.old")
+        keyset.mkdir(mode=0o755)
+        keyset.chmod(0o755)
+    finally:
+        os.close(fd)
+    _, err = waiter.communicate(timeout=60)
+
+    assert waiter.returncode == 1, err
+    assert "was replaced while waiting for its lock" in err
+    assert (keyset.stat().st_mode & 0o777) == 0o755
+
+
 def test_lock_refuses_a_second_keyset_and_unlock_releases(tmp_path):
     first = tmp_path / "first"
     second = tmp_path / "second"
