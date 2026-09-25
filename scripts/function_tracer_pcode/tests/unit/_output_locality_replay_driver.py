@@ -42,13 +42,19 @@ def main(argv) -> int:
     Z3Solver.check_equivalence_direct = _logged_direct
     ConditionSMTOracle._build_script = classmethod(_logged_build)
     if mode == "extra":
+        # field を足す: 表に 1 行（計算する読み方は登録した関数の名前で呼ぶ）
         output_preparation.RESULT_FIELDS = output_preparation.RESULT_FIELDS + (
             output_preparation.OutputField(
                 "m3_extra_diagnostic",
                 output_preparation.FieldOwner.METADATA,
-                lambda result, options: {"observed": 1},
+                output_preparation._function("m3_extra_diagnostic"),
                 output_preparation.Overflow.TRUNCATE,
             ),
+        )
+        registered = output_preparation._read_by_function
+        output_preparation._read_by_function = (
+            lambda name, result, options: {"observed": 1} if name == "m3_extra_diagnostic"
+            else registered(name, result, options)
         )
     case_dir = Path(replay_worker.__file__).resolve().parent / case_id
     report_path = Path(output + ".report.json")

@@ -258,11 +258,25 @@ def rematerialize_process_timeout_decision(
 def outcome_from_result(result: Any) -> Outcome:
     """Read final status only from the sealed receipt."""
 
-    receipt = getattr(result, "decision_receipt", None)
+    return outcome_from_projection(
+        getattr(result, "decision_receipt", None),
+        final_outcome=getattr(result, "final_outcome", None),
+        is_equivalent=getattr(result, "is_equivalent", None),
+    )
+
+
+def outcome_from_projection(receipt: Any, *, final_outcome: Any, is_equivalent: Any) -> Outcome:
+    """`outcome_from_result` の本体（結果の object を受けず、読んだ値だけを受ける）。
+
+    Issue #22 PR-22-D: 出力の bounded path は結果の live な値を `core.live_values` で読んで
+    渡す（`final_outcome` は基底型の文字列、`is_equivalent` は `True` / `False` / `None` の
+    identity で比べる値）。receipt は exact な `DecisionReceipt` だけを受ける。
+    """
+
     if type(receipt) is not DecisionReceipt:
         raise ValueError("canonical result lacks its DecisionReceipt authority")
     receipt.validate()
-    declared = getattr(result, "final_outcome", None)
+    declared = final_outcome
     if declared is not None and declared != receipt.outcome.value:
         raise ValueError("serialized final outcome contradicts DecisionReceipt")
     projected = {
@@ -272,7 +286,7 @@ def outcome_from_result(result: Any) -> Outcome:
         Outcome.TIMEOUT: None,
         Outcome.ERROR: None,
     }[receipt.outcome]
-    if getattr(result, "is_equivalent", None) is not projected:
+    if is_equivalent is not projected:
         raise ValueError("legacy is_equivalent projection contradicts DecisionReceipt")
     return receipt.outcome
 

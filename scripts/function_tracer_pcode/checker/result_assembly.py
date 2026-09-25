@@ -38,7 +38,7 @@ from scripts.function_tracer_pcode.proof.obligations.branch_context import Branc
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.checker.result_factory import create_error_result
 from scripts.function_tracer_pcode.checker.unknown_reason import make_internal_v2_reason_diagnostic
-from scripts.function_tracer_pcode.core import FunctionSignature
+from scripts.function_tracer_pcode.core import FunctionSignature, live_values
 from scripts.function_tracer_pcode.core.render_smt import UnknownSmtExtensionWidthError
 from scripts.function_tracer_pcode.smt import ParallelResult
 
@@ -638,17 +638,23 @@ def _carry_pair_diagnostics(result: EquivalenceResult, carry_from) -> None:
     """
     if carry_from is None or carry_from is result:
         return
-    trace = getattr(carry_from, "debug_trace", None)
+    # 引き継ぐ元の結果は owner の規則で読む（`__getattr__`・上書きした容器の code を呼ばない）
+    trace = live_values.attribute(carry_from, "debug_trace")
     if trace is not None:
-        result.debug_trace = trace
-        result.emit_debug_trace = bool(getattr(carry_from, "emit_debug_trace", True))
-    carried = getattr(carry_from, "diagnostics", None)
-    if isinstance(carried, dict) and carried:
-        merged = dict(carried)
-        current = getattr(result, "diagnostics", None)
-        if isinstance(current, dict):
-            merged.update(current)
-        result.diagnostics = merged
+        live_values.set_state(result, "debug_trace", trace)
+        live_values.set_state(
+            result, "emit_debug_trace", live_values.as_bool(live_values.attribute(carry_from, "emit_debug_trace", True)),
+        )
+    carried = live_values.attribute(carry_from, "diagnostics")
+    if type(carried) is dict:
+        if not carried:
+            return
+        current = live_values.attribute(result, "diagnostics")
+        live_values.set_state(
+            result, "diagnostics",
+            live_values.merged_mappings(carried, current) if type(current) is dict
+            else live_values.merged_mappings(carried),
+        )
 
 
 def attach_pair_stop_state(result: EquivalenceResult, stop_state) -> None:
@@ -672,7 +678,7 @@ def attach_pair_stop_state(result: EquivalenceResult, stop_state) -> None:
 
     if stop_state is None or stop_state is PairStopState.NONE:
         return
-    result.pair_stop_state = stop_state.value
+    live_values.set_state(result, "pair_stop_state", stop_state.value)
     record_failure_diagnostic(result, FAILURE_PAIR_STOP_STATE, stop_state.value)
 
 

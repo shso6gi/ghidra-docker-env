@@ -519,7 +519,11 @@ def test_h4_m3_a_new_authority_field_must_extend_the_output_schema(monkeypatch):
     """M-3: B の field を足すなら、変わるのは出力 schema（上限の 1 行）だけ。"""
 
     result = _decided_result()
-    extra = OutputField("extra_authority", FieldOwner.AUTHORITY, lambda r, o: "v", Overflow.INVARIANT)
+    # 読み方は閉じた種類（結果の属性を読む）。field 表の 1 行 + 出力 schema の 1 行
+    result.extra_authority = "v"
+    extra = OutputField(
+        "extra_authority", FieldOwner.AUTHORITY, output_preparation._attribute("extra_authority"), Overflow.INVARIANT,
+    )
     monkeypatch.setattr(output_preparation, "RESULT_FIELDS", RESULT_FIELDS + (extra,))
     with pytest.raises(OutputSchemaMissing):
         build_final_result_envelope(result)

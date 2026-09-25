@@ -5,22 +5,28 @@ from typing import List, Dict, Any, Mapping, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
+from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import (
     JsonBudget,
     Reducer,
     as_dict,
     as_list,
     each,
+    flatten,
+    hashable_key,
     inline,
     materialize,
-    metered,
     raw,
+    scan,
 )
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownReasonRecord,
     coerce_unknown_reason_records,
+    recovery_actions_reducer,
     recovery_actions_source,
+    recovery_backlog_reducer,
     recovery_backlog_source,
+    unknown_reason_counts_reducer,
     unknown_reason_counts_source,
 )
 
@@ -92,7 +98,7 @@ class ReasonOccurrence:
     def json_items(self):
         yield "occurrence_id", self.occurrence_id
         yield "reason_record", self.reason_record
-        yield "attempt_identity", self.occurrence_id.attempt_identity
+        yield "attempt_identity", live_values.attribute(self.occurrence_id, "attempt_identity")
         yield "initial_causal_status", self.initial_causal_status
 
     def to_dict(self) -> Dict[str, Any]:
@@ -164,7 +170,7 @@ class ReasonCausalTransition:
         yield "transition_kind", self.transition_kind
         yield "cause_kind", self.cause_kind
         # 旧 `to_dict`: 表現を持つ参照は表現に、それ以外はそのまま置く
-        yield "cause_ref", cause_ref if hasattr(cause_ref, "to_dict") else raw(cause_ref)
+        yield "cause_ref", cause_ref if live_values.type_attribute(type(cause_ref), "to_dict") is not None else raw(cause_ref)
         yield "emitted_at_attempt", self.emitted_at_attempt
         yield "transition_ordinal", self.transition_ordinal
 
@@ -192,6 +198,10 @@ class NormalizationRuleApplication:
         return materialize(self)
 
 
+#: 列の要素が尽きたことを知る印（`PairwiseDecisiveInfo.json_items`）
+_NO_ELEMENT = object()
+
+
 @dataclass
 class PairwiseDecisiveInfo:
     """Pairwise戦略の決定的情報（どのペアが結果を決定したか）"""
@@ -217,8 +227,19 @@ class PairwiseDecisiveInfo:
         yield "unsat_pairs", self.unsat_pairs
         yield "sat_pairs", self.sat_pairs
         yield "unknown_pairs", self.unknown_pairs
-        if self.decisive_pair is not None:
-            yield "decisive_pair", inline(("i", self.decisive_pair[0]), ("j", self.decisive_pair[1]))
+        pair = self.decisive_pair
+        if pair is not None:
+            # 組み込みの列は添字で、それ以外は組み込みの振る舞いの列だけを先頭から読む
+            if type(pair) in (tuple, list):
+                first = pair[0]
+                second = pair[1]
+            else:
+                elements = live_values.elements_of(pair)
+                first = next(elements, _NO_ELEMENT)
+                second = next(elements, _NO_ELEMENT)
+                if second is _NO_ELEMENT:
+                    raise IndexError("a decisive pair needs two elements")
+            yield "decisive_pair", inline(("i", first), ("j", second))
             yield "pair_stage", self.pair_stage
             yield "case1_summary", self.case1_summary
             yield "case2_summary", self.case2_summary
@@ -303,7 +324,8 @@ class Attempt:
         yield "final_smt_excerpt", self.final_smt_excerpt
         yield "final_smt", self.final_smt  # ★ 追加
         yield "counterexample", self.counterexample
-        yield "pairwise_decisive", self.pairwise_decisive if self.pairwise_decisive else None
+        pairwise_decisive = self.pairwise_decisive
+        yield "pairwise_decisive", pairwise_decisive if live_values.as_bool(pairwise_decisive) else None
         yield "pairwise_debug_stats", as_dict(self.pairwise_debug_stats)
         yield "normalization_rules", each(self.normalization_rules)
         yield "unknown_reasons", each(self.unknown_reasons)
@@ -430,7 +452,7 @@ class DebugTrace:
         fold._seed(work)
         for attempt in self.attempts:
             fold.add(attempt, work=work)
-        return iter(fold.rows.values())
+        return fold.rows()
 
     def _iter_used_phases(self):
         for row in self._iter_phase_usage():
@@ -488,35 +510,65 @@ class DebugTrace:
         yield "known_phases", self.known_phases
         yield "used_phases", self.phase_usage_source(used_only=True)
         yield "phase_usage", self.phase_usage_source()
-        # reason の列を探す・辿る仕事は walk の作業量へ数える（`metered`）
-        yield "unknown_reason_counts", metered(lambda work: unknown_reason_counts_source(
-            self._final_unknown_reasons(work), primary_by_aggregation_unit=True,
-        ))
-        yield "observed_unknown_reason_counts", metered(lambda work: unknown_reason_counts_source(
-            self._iter_observed_unknown_reasons(work),
-        ))
-        yield "unknown_recovery_backlog", metered(lambda work: recovery_backlog_source(
-            self._final_unknown_reasons(work), primary_by_aggregation_unit=True,
-        ))
-        yield "unknown_recovery_actions", metered(lambda work: recovery_actions_source(
-            self._final_unknown_reasons(work), primary_by_aggregation_unit=True,
-        ))
-        yield "observed_unknown_recovery_backlog", metered(lambda work: recovery_backlog_source(
-            self._iter_observed_unknown_reasons(work),
-        ))
-        yield "observed_unknown_recovery_actions", metered(lambda work: recovery_actions_source(
-            self._iter_observed_unknown_reasons(work),
-        ))
+        # 最後の UNKNOWN / TIMEOUT の attempt を探す仕事・attempt ごとの reason を辿る仕事は、
+        # walker が attempt / reason を 1 つずつ引き出して数える（`scan` の reducer / `flatten`）
+        skip_final = self.final_result is not None
+        observed = flatten(self.attempts, "unknown_reasons")
+        yield "unknown_reason_counts", scan(
+            self.attempts, _FinalAttemptReasons(unknown_reason_counts_reducer(True), skip=skip_final),
+        )
+        yield "observed_unknown_reason_counts", unknown_reason_counts_source(observed)
+        yield "unknown_recovery_backlog", scan(
+            self.attempts, _FinalAttemptReasons(recovery_backlog_reducer(True), skip=skip_final),
+        )
+        yield "unknown_recovery_actions", scan(
+            self.attempts, _FinalAttemptReasons(recovery_actions_reducer(True), skip=skip_final),
+        )
+        yield "observed_unknown_recovery_backlog", recovery_backlog_source(flatten(self.attempts, "unknown_reasons"))
+        yield "observed_unknown_recovery_actions", recovery_actions_source(flatten(self.attempts, "unknown_reasons"))
         yield "final_result", self.final_result
         yield "total_time", self.total_time
         yield "error_message", self.error_message
-        yield "attempt_count", len(self.attempts)
+        yield "attempt_count", live_values.size(self.attempts)
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)
 
     
 
+
+
+#: 最後の attempt として reason を読む遷移（`_extract_final_unknown_reasons` と同じ）
+_FINAL_TRANSITION_REASONS = frozenset({TransitionReason.UNKNOWN.value, TransitionReason.TIMEOUT.value})
+
+
+class _FinalAttemptReasons(Reducer):
+    """`scan` の reducer: 最後の UNKNOWN / TIMEOUT の attempt の reason を、`inner`（Reducer）で畳む。
+
+    walker が attempt を 1 つずつ引き出して数える（探す仕事は walker の勘定）。`add` は attempt の
+    field を読んで最後に当たる attempt を覚えるだけ（O(1)）。`result` は、その attempt の reason を
+    `inner` で畳む `scan`（reason も walker が 1 つずつ数える）。
+    """
+
+    __slots__ = ("inner", "skip", "last")
+
+    def __init__(self, inner: Reducer, *, skip: bool) -> None:
+        self.inner = inner
+        self.skip = skip
+        self.last: Any = None
+
+    def add(self, attempt: Any, *, work: Any) -> None:
+        if self.skip:
+            return
+        if (
+            live_values.attribute(attempt, "result") is None
+            and hashable_key(live_values.attribute(attempt, "transition_reason"), work) in _FINAL_TRANSITION_REASONS
+        ):
+            self.last = attempt
+
+    def result(self, *, work: Any) -> Any:
+        reasons = None if self.last is None else live_values.attribute(self.last, "unknown_reasons")
+        return scan(() if reasons is None else reasons, self.inner)
 
 
 class _PhaseUsageFold(Reducer):
@@ -526,7 +578,7 @@ class _PhaseUsageFold(Reducer):
     再解析・再判定まで進んだ phase の名前だけを返す。
     """
 
-    __slots__ = ("rows", "known", "planned", "planned_keys", "used_only")
+    __slots__ = ("counts", "phases", "last_reasons", "last_results", "known", "planned", "planned_keys", "used_only")
 
     def __init__(self, known_phases: Any, planned_phases: Any, *, used_only: bool = False) -> None:
         # 行の種は最初の `add` / `result` で作業量の中で作る（構築では辿らない）
@@ -534,7 +586,12 @@ class _PhaseUsageFold(Reducer):
         self.planned = planned_phases
         self.planned_keys: Optional[set] = None
         self.used_only = used_only
-        self.rows: Dict[Any, Dict[str, Any]] = {}
+        #: phase の key → 数え上げ（package が作る plain な値だけ）。live な値（phase の名前・最後の
+        #: 遷移理由 / 結果）は key ごとの別の表に置き、行は `rows` が組み立てる
+        self.counts: Dict[Any, Dict[str, Any]] = {}
+        self.phases: Dict[Any, Any] = {}
+        self.last_reasons: Dict[Any, Any] = {}
+        self.last_results: Dict[Any, Any] = {}
 
     #: phase の行 1 つの手間（固定の形: 11 の field と 7 の遷移の件数）
     ROW_COST = 32
@@ -542,19 +599,16 @@ class _PhaseUsageFold(Reducer):
     def _seed(self, work: Any) -> None:
         if self.planned_keys is not None:
             return
-        from scripts.function_tracer_pcode.core.json_encoding import hashable_key
+        self.planned_keys = {hashable_key(phase, work) for phase in _phase_names(self.planned)}
+        for phase in _phase_names(self.known):
+            self._counts(hashable_key(phase, work), phase, work)
 
-        self.planned_keys = {hashable_key(phase, work) for phase in (self.planned or ())}
-        for phase in self.known or ():
-            self._row(hashable_key(phase, work), phase, work)
-
-    def _row(self, key: Any, phase: Any, work: Any) -> Dict[str, Any]:
-        row = self.rows.get(key)
-        if row is None:
+    def _counts(self, key: Any, phase: Any, work: Any) -> Dict[str, Any]:
+        counts = self.counts.get(key)
+        if counts is None:
             # 新しい phase は行を 1 つ作る（行の数は phase の数で、attempt の数ではない）
             work.charge(self.ROW_COST)
-            row = self.rows[key] = {
-                "phase": phase,
+            counts = self.counts[key] = {
                 "planned": key in self.planned_keys,
                 "reached": False,
                 "used": False,
@@ -570,39 +624,65 @@ class _PhaseUsageFold(Reducer):
                     TransitionReason.CRITICAL_ERROR.value: 0,
                     TransitionReason.NO_CHANGES.value: 0,
                 },
-                "last_transition_reason": None,
-                "last_result": None,
             }
-        return row
+            self.phases[key] = phase
+            self.last_reasons[key] = None
+            self.last_results[key] = None
+        return counts
 
     def add(self, attempt: Any, *, work: Any) -> None:
-        from scripts.function_tracer_pcode.core.json_encoding import hashable_key
-
         self._seed(work)
         # key として hash する値は hash する前に数える（上書きした `__hash__` / `__eq__` を呼ばない）
-        phase = attempt.phase
-        reason = attempt.transition_reason
+        phase = live_values.attribute(attempt, "phase")
+        reason = live_values.attribute(attempt, "transition_reason")
         reason_key = hashable_key(reason, work)
-        row = self._row(hashable_key(phase, work), phase, work)
-        row["reached"] = True
-        row["attempt_count"] += 1
-        transition_counts = row["transition_counts"]
+        key = hashable_key(phase, work)
+        counts = self._counts(key, phase, work)
+        counts["reached"] = True
+        counts["attempt_count"] += 1
+        transition_counts = counts["transition_counts"]
         transition_counts[reason_key] = transition_counts.get(reason_key, 0) + 1
         if reason_key == TransitionReason.NO_CHANGES.value:
-            row["no_change_skip_count"] += 1
+            counts["no_change_skip_count"] += 1
         else:
-            row["result_attempt_count"] += 1
-            row["used"] = True
-        row["last_transition_reason"] = reason
-        row["last_result"] = attempt.result
+            counts["result_attempt_count"] += 1
+            counts["used"] = True
+        self.last_reasons[key] = reason
+        self.last_results[key] = live_values.attribute(attempt, "result")
+
+    def rows(self):
+        """phase ごとの行（`known_phases` → attempt の初出の順）。"""
+
+        for key, counts in self.counts.items():
+            yield {
+                "phase": self.phases[key],
+                "planned": counts["planned"],
+                "reached": counts["reached"],
+                "used": counts["used"],
+                "attempt_count": counts["attempt_count"],
+                "result_attempt_count": counts["result_attempt_count"],
+                "no_change_skip_count": counts["no_change_skip_count"],
+                "transition_counts": counts["transition_counts"],
+                "last_transition_reason": self.last_reasons[key],
+                "last_result": self.last_results[key],
+            }
+
+    def _used_phases(self):
+        for key, counts in self.counts.items():
+            if counts["used"]:
+                yield self.phases[key]
 
     def result(self, *, work: Any) -> Any:
-        from scripts.function_tracer_pcode.core.json_encoding import each
-
         self._seed(work)
         if self.used_only:
-            return each(row["phase"] for row in self.rows.values() if row["used"])
-        return each(iter(self.rows.values()))
+            return each(self._used_phases())
+        return each(self.rows())
+
+
+def _phase_names(phases: Any) -> Any:
+    """phase の名前の列（`None` は空。組み込みの振る舞いの列だけを辿る）。"""
+
+    return () if phases is None else live_values.elements_of(phases)
 
 
 def format_phase_usage_rows(usage: Any) -> str:

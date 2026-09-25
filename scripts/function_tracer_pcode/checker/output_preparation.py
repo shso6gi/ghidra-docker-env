@@ -55,6 +55,8 @@ CLI:
 
 from __future__ import annotations
 
+import functools
+import types
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
@@ -73,11 +75,10 @@ from scripts.function_tracer_pcode.core.errors import (
     InternalError,
     record_internal_bug,
 )
+from scripts.function_tracer_pcode.core import json_encoding, live_values
 from scripts.function_tracer_pcode.core.json_encoding import (
     RESULT_JSON_POLICY,
     JsonBudget,
-    builtin_mapping,
-    builtin_sequence,
     JsonBudgetExhausted,
     JsonEncodingPolicy,
     JsonObjectBudget,
@@ -85,6 +86,8 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     JsonValueRejected,
     PreparedJson,
     each,
+    builtin_str,
+    bounded_repr,
     exception_text,
     inline,
     is_prepared_json,
@@ -139,13 +142,21 @@ class OutputOptions:
     include_debug_trace: bool = True
     include_smt_formula: bool = False
 
-    @classmethod
-    def for_result(cls, result: Any, *, save_formula: bool = False) -> "OutputOptions":
+    @staticmethod
+    def for_result(result: Any, *, save_formula: bool = False) -> "OutputOptions":
         """結果の flag（workflow が `checker.debug` から決めた値）を **ここで 1 回だけ** 読む。"""
 
-        return cls(
-            include_debug_trace=bool(getattr(result, "emit_debug_trace", True)),
-            include_smt_formula=bool(save_formula),
+        return OutputOptions(
+            include_debug_trace=live_values.as_bool(live_values.attribute(result, "emit_debug_trace", True)),
+            include_smt_formula=live_values.as_bool(save_formula),
+        )
+
+    def plain(self) -> "OutputOptions":
+        """同じ選択の複製（field を plain な `bool` として読み直す。準備済みの payload から読むとき）。"""
+
+        return OutputOptions(
+            include_debug_trace=live_values.as_bool(self.include_debug_trace),
+            include_smt_formula=live_values.as_bool(self.include_smt_formula),
         )
 
 
@@ -160,7 +171,45 @@ class _Absent:
 ABSENT = _Absent()
 
 #: `read(result, options)` → JSON source か `ABSENT`。
-Read = Callable[[Any, OutputOptions], Any]
+class ReadKind(Enum):
+    """結果の field の読み方の種類（閉じた集合。任意の callable は受けない）。"""
+
+    ATTRIBUTE = "attribute"      # 属性の値
+    PRESENT = "present"          # 属性の値（`None` なら出さない）
+    TRUTHY = "truthy"            # 属性の値（偽なら出さない）
+    OR_NONE = "or_none"          # 属性の値（偽なら `None`）
+    EACH = "each"                # 属性の列を 1 要素ずつ（`each`）
+    MESSAGE = "message"          # 失敗の自由文（出力 schema の文字数まで）
+    METHOD = "method"            # package の結果の型の method（引数なし）
+    FUNCTION = "function"        # この module の読み方の関数（`_read_by_function` の登録）
+
+
+@dataclass(frozen=True)
+class Read:
+    """field の読み方: `kind` と、読む結果の属性（method・関数）の名前。"""
+
+    kind: ReadKind
+    name: str
+
+
+def _attribute(name: str) -> Read:
+    return Read(ReadKind.ATTRIBUTE, name)
+
+
+def _method(name: str) -> Read:
+    return Read(ReadKind.METHOD, name)
+
+
+def _function(name: str) -> Read:
+    return Read(ReadKind.FUNCTION, name)
+
+
+def _each(name: str) -> Read:
+    return Read(ReadKind.EACH, name)
+
+
+def _or_none(name: str) -> Read:
+    return Read(ReadKind.OR_NONE, name)
 
 
 @dataclass(frozen=True)
@@ -173,18 +222,41 @@ class PreparedField:
     shape: str
 
     def __post_init__(self) -> None:
-        if self.shape not in ("json", "truncation_marker", "omitted"):
-            raise ValueError(f"unknown prepared field shape {self.shape!r}")
-        if (self.json is None) != (self.shape == "omitted"):
-            raise TypeError(f"{self.key}: only an omitted field lacks its prepared JSON")
+        shape = self.shape
+        if type(shape) is not str:
+            raise ValueError(f"unknown prepared field shape {bounded_repr(shape)}")
+        if shape not in ("json", "truncation_marker", "omitted"):
+            raise ValueError(f"unknown prepared field shape {shape!r}")
+        if (self.json is None) != (shape == "omitted"):
+            raise TypeError(f"{builtin_str(self.key)}: only an omitted field lacks its prepared JSON")
         if self.json is not None and not is_prepared_json(self.json):
             raise TypeError(
-                f"{self.key}: a prepared field holds only JsonEncodingPolicy.prepare output"
+                f"{builtin_str(self.key)}: a prepared field holds only JsonEncodingPolicy.prepare output"
             )
 
     @property
     def encoded_bytes(self) -> int:
-        return 0 if self.json is None else self.json.encoded_bytes
+        prepared = self.json
+        if type(prepared) is PreparedJson:
+            return live_values.as_int(prepared.encoded_bytes)
+        return 0
+
+    def field_key(self) -> str:
+        return live_values.as_str(self.key)
+
+    def field_shape(self) -> str:
+        return live_values.as_str(self.shape)
+
+    def has_json(self) -> bool:
+        return self.json is not None
+
+    def json_value(self) -> Any:
+        """準備した値の複製（`PreparedJson.value`）。"""
+
+        prepared = self.json
+        if type(prepared) is not PreparedJson:
+            raise TypeError(f"{builtin_str(self.key)}: the field has no prepared JSON")
+        return prepared.value()
 
 
 @dataclass
@@ -213,7 +285,11 @@ def _truncation_marker(
     """
 
     # 組み込みの振る舞いの容器だけ長さを読む（上書きした `__len__` を呼ばない）
-    count = len(source) if builtin_sequence(source) or builtin_mapping(source) is not None else None
+    count = (
+        live_values.size(source)
+        if live_values.builtin_sequence(source) or live_values.builtin_mapping(source) is not None
+        else None
+    )
     marker: Dict[str, Any] = {
         "truncated": True,
         "field": key,
@@ -226,6 +302,14 @@ def _truncation_marker(
 
         marker["rejected_at"] = str(rejected.path)[:MARKER_PATH_MAX_CHARS]
     return marker
+
+
+def _prepare_json(encoding: Any, source: Any, *, max_bytes: Optional[int]) -> PreparedJson:
+    """`encoding`（`JsonEncodingPolicy` そのもの）の walker で `source` を `max_bytes` まで準備する。"""
+
+    if type(encoding) is not JsonEncodingPolicy:
+        raise TypeError("output preparation needs an exact JsonEncodingPolicy")
+    return encoding.prepare(source, max_bytes=max_bytes)
 
 
 class _ReadFailed:
@@ -264,7 +348,7 @@ def _prepare_member(
             raise source.rejected
         if remaining is not None and remaining < 0:
             raise JsonBudgetExhausted(consumed_bytes=0, max_bytes=remaining)
-        prepared = encoding.prepare(source, max_bytes=remaining)
+        prepared = _prepare_json(encoding, source, max_bytes=remaining)
         shape = "json"
     except (JsonBudgetExhausted, JsonValueRejected) as exc:
         # 切り詰めてよい診断は、収まらなくても JSON にならなくても marker にする
@@ -329,13 +413,13 @@ class OutputField:
 
         from scripts.function_tracer_pcode.core.json_encoding import PRODUCER_FAILURES
 
-        if self.overflow is not Overflow.TRUNCATE:
-            # 切り詰めてはいけない field の読み方の失敗は、その owner の契約の失敗のまま上げる
-            # （A は準備の内部エラー、B / C は出力の失敗の ERROR）
-            return self.read(result, options)
         try:
-            return self.read(result, options)
+            return _read(self.read, result, options)
         except PRODUCER_FAILURES as exc:
+            if self.overflow is not Overflow.TRUNCATE:
+                # 切り詰めてはいけない field の読み方の失敗は、その owner の契約の失敗のまま上げる
+                # （A は準備の内部エラー、B / C は出力の失敗の ERROR）
+                raise
             return _ReadFailed(JsonValueRejected(
                 f"reader failed ({exception_text(exc)})", path=f"$.{self.key}",
             ))
@@ -362,93 +446,159 @@ class OutputField:
 
 
 def _when_truthy(attribute: str) -> Read:
-    def read(r, _o):
-        value = getattr(r, attribute)
-        return value if value else ABSENT
-    return read
+    return Read(ReadKind.TRUTHY, attribute)
 
 
 def _when_present(attribute: str) -> Read:
-    def read(r, _o):
-        value = getattr(r, attribute)
-        return ABSENT if value is None else value
-    return read
-
-
-def _mips64_abi_constraints(r, _o) -> Any:
-    constraints = r.mips64_abi_constraints
-    if not constraints:
-        return ABSENT
-    return pairs_of(
-        (key, inline(("signedness", value[0]), ("narrow_bits", value[1])))
-        for key, value in constraints.items()
-    )
+    return Read(ReadKind.PRESENT, attribute)
 
 
 def _message(attribute: str) -> Read:
     """失敗の自由文（出力 schema の文字数まで。超えた分は明示の marker）。"""
 
-    def read(r, _o):
+    return Read(ReadKind.MESSAGE, attribute)
+
+
+def _read(spec: Read, result: Any, options: OutputOptions) -> Any:
+    """読み方 1 つを実行する（結果の live な値は owner の API だけで読む）。"""
+
+    kind = spec.kind
+    if kind is ReadKind.METHOD:
+        return _result_method(result, spec.name)
+    if kind is ReadKind.FUNCTION:
+        return _read_by_function(spec.name, result, options)
+    value = live_values.attribute(result, spec.name)
+    if kind is ReadKind.ATTRIBUTE:
+        return value
+    if kind is ReadKind.PRESENT:
+        return ABSENT if value is None else value
+    if kind is ReadKind.TRUTHY:
+        return value if value is not None and live_values.as_bool(value) else ABSENT
+    if kind is ReadKind.OR_NONE:
+        return value if value is not None and live_values.as_bool(value) else None
+    if kind is ReadKind.EACH:
+        return each(value)
+    if kind is ReadKind.MESSAGE:
         from scripts.function_tracer_pcode.checker.output_schema import MESSAGE_MAX_CHARS
 
-        return text(getattr(r, attribute), MESSAGE_MAX_CHARS)
-    return read
+        return text(value, MESSAGE_MAX_CHARS)
+    raise TypeError("unknown read kind")  # pragma: no cover - 閉じた集合の追加漏れ
 
 
-def _debug_trace(r, o) -> Any:
+def _result_method(result: Any, name: str) -> Any:
+    """結果の型（`EquivalenceResult`）の引数なしの method（閉じた名前の集合。型を確かめて名前で呼ぶ）。"""
+
+    from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+
+    if type(result) is not EquivalenceResult:
+        raise TypeError(f"{live_values.type_name(type(result))} is not an EquivalenceResult")
+    if name == "is_timeout":
+        return result.is_timeout()
+    if name == "get_effective_function1_signature":
+        return result.get_effective_function1_signature()
+    if name == "get_effective_function2_signature":
+        return result.get_effective_function2_signature()
+    raise TypeError(f"no registered result method {name}")
+
+
+def _read_by_function(name: str, result: Any, options: OutputOptions) -> Any:
+    """登録した読み方の関数（名前で呼ぶ。関数の値を field に持たない）。"""
+
+    if name == "mips64_abi_constraints":
+        return _mips64_abi_constraints(result, options)
+    if name == "debug_trace":
+        return _debug_trace(result, options)
+    if name == "decision_receipt":
+        return _decision_receipt(result, options)
+    if name == "conditional_decision_receipt":
+        return _conditional_decision_receipt(result, options)
+    if name == "unknown_recovery_backlog":
+        return _unknown_recovery_backlog(result, options)
+    if name == "diagnostics":
+        return _diagnostics(result, options)
+    if name == "unknown_cause_aggregate":
+        return _unknown_cause_aggregate(result, options)
+    raise TypeError(f"no registered reader function {name}")
+
+
+def _mips64_abi_constraints(r: Any, _o: OutputOptions) -> Any:
+    constraints = live_values.attribute(r, "mips64_abi_constraints")
+    if constraints is None or not live_values.as_bool(constraints):
+        return ABSENT
+    return pairs_of(_abi_constraint_pairs(constraints))
+
+
+def _abi_constraint_pairs(constraints: Any) -> Any:
+    """ABI 制約の (key, {signedness, narrow_bits})（1 組ずつ。mapping を先に写さない）。"""
+
+    for key, value in live_values.items_of(constraints):
+        signedness, narrow_bits = tuple(live_values.elements_of(value))
+        yield key, inline(("signedness", signedness), ("narrow_bits", narrow_bits))
+
+
+def _debug_trace(r: Any, o: OutputOptions) -> Any:
     # Issue #128 PR-128-B: trace は常に object 上に在り、debug 指定のときだけ JSON へ
     # 添付する（指定は `OutputOptions` が準備時に 1 回決める）。
-    trace = r.debug_trace
-    if trace and o.include_debug_trace:
+    trace = live_values.attribute(r, "debug_trace")
+    if trace is not None and live_values.as_bool(trace) and o.include_debug_trace:
         return trace
     return ABSENT
 
 
-def _decision_receipt(r, _o) -> Any:
-    if r.decision_receipt is not None:
-        from scripts.function_tracer_pcode.authority.decision.production_cutover import (
-            decision_receipt_payload,
-            outcome_from_result,
-        )
+def _decision_receipt(r: Any, _o: OutputOptions) -> Any:
+    from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
 
-        outcome_from_result(r)
-        return decision_receipt_payload(r.decision_receipt)
-    if r.canonical_decision_required:
+    receipt = live_values.attribute(r, "decision_receipt")
+    if receipt is not None:
+        from scripts.function_tracer_pcode.authority.decision.production_cutover import decision_receipt_payload
+        from scripts.function_tracer_pcode.checker.result import decided_outcome_of
+
+        if type(receipt) is not DecisionReceipt:
+            raise TypeError("the decision receipt column requires an exact DecisionReceipt")
+        decided_outcome_of(r)
+        return decision_receipt_payload(receipt)
+    if live_values.as_bool(live_values.attribute(r, "canonical_decision_required", False)):
         raise ValueError("canonical serialization lacks DecisionReceipt")
     return None
 
 
-def _conditional_decision_receipt(r, _o) -> Any:
-    if r.conditional_decision_receipt is not None:
+def _conditional_decision_receipt(r: Any, _o: OutputOptions) -> Any:
+    from scripts.function_tracer_pcode.authority.decision.conditional import ConditionalDecisionReceipt
+
+    receipt = live_values.attribute(r, "conditional_decision_receipt")
+    if receipt is not None:
         from scripts.function_tracer_pcode.authority.decision.production_cutover import (
             conditional_decision_receipt_payload,
         )
 
-        return conditional_decision_receipt_payload(r.conditional_decision_receipt)
-    if r.conditional_outcome is not None:
+        if type(receipt) is not ConditionalDecisionReceipt:
+            raise TypeError("the conditional column requires an exact ConditionalDecisionReceipt")
+        return conditional_decision_receipt_payload(receipt)
+    if live_values.attribute(r, "conditional_outcome") is not None:
         raise ValueError("conditional outcome without its ConditionalDecisionReceipt")
     return None
 
 
-def _unknown_recovery_backlog(r, _o) -> Any:
+def _unknown_recovery_backlog(r: Any, _o: OutputOptions) -> Any:
     from scripts.function_tracer_pcode.checker.unknown_reason import recovery_backlog_source
 
-    return recovery_backlog_source(r.unknown_reasons)
+    return recovery_backlog_source(live_values.attribute(r, "unknown_reasons"))
 
 
-def _diagnostics(r, _o) -> Any:
+def _diagnostics(r: Any, _o: OutputOptions) -> Any:
     from scripts.function_tracer_pcode.checker.diagnostics import result_diagnostics_payload
 
     return result_diagnostics_payload(r, lazy=True)
 
 
-def _unknown_cause_aggregate(r, _o) -> Any:
+def _unknown_cause_aggregate(r: Any, _o: OutputOptions) -> Any:
     # Issue #128: 原因分析の compact 集計は常時出す。CLI が封印の前に確定させる
     # （`attach_cause_aggregate`）。確定していなければその場で作る。どちらも trace 由来の
     # 部分は authority 前に準備した値（`PreparedSemanticPayload.cause_evidence`）を読み、
     # authority 後に live な trace を辿らない（残りは canonical reason だけ）。
-    if r.unknown_cause_aggregate is not None:
-        return r.unknown_cause_aggregate
+    aggregate = live_values.attribute(r, "unknown_cause_aggregate")
+    if aggregate is not None:
+        return aggregate
     from scripts.function_tracer_pcode.checker.cause_aggregate import (
         build_unknown_cause_aggregate,
     )
@@ -484,69 +634,69 @@ _INV = Overflow.INVARIANT
 #: field は、上限を `checker/output_schema.py` に 1 行足す。authority・identity・solver
 #: 側は変わらない（M-3）。
 RESULT_FIELDS: Tuple[OutputField, ...] = (
-    OutputField("is_equivalent", _B, lambda r, _o: r.is_equivalent, _INV),
-    OutputField("function1_name", _A, lambda r, _o: r.function1_name, _LIMIT),
-    OutputField("function2_name", _A, lambda r, _o: r.function2_name, _LIMIT),
-    OutputField("binary1_name", _A, lambda r, _o: r.binary1_name, _LIMIT),
-    OutputField("binary2_name", _A, lambda r, _o: r.binary2_name, _LIMIT),
+    OutputField("is_equivalent", _B, _attribute("is_equivalent"), _INV),
+    OutputField("function1_name", _A, _attribute("function1_name"), _LIMIT),
+    OutputField("function2_name", _A, _attribute("function2_name"), _LIMIT),
+    OutputField("binary1_name", _A, _attribute("binary1_name"), _LIMIT),
+    OutputField("binary2_name", _A, _attribute("binary2_name"), _LIMIT),
     # content identity は `check_from_binaries` が boundary の **後** に書く
-    OutputField("binary1_content_identity", _C, lambda r, _o: r.binary1_content_identity, _INV),
-    OutputField("binary2_content_identity", _C, lambda r, _o: r.binary2_content_identity, _INV),
-    OutputField("function1_identity", _A, lambda r, _o: r.function1_identity, _LIMIT),
-    OutputField("function2_identity", _A, lambda r, _o: r.function2_identity, _LIMIT),
-    OutputField("function1_signature", _A, lambda r, _o: r.function1_signature, _LIMIT),
-    OutputField("function2_signature", _A, lambda r, _o: r.function2_signature, _LIMIT),
+    OutputField("binary1_content_identity", _C, _attribute("binary1_content_identity"), _INV),
+    OutputField("binary2_content_identity", _C, _attribute("binary2_content_identity"), _INV),
+    OutputField("function1_identity", _A, _attribute("function1_identity"), _LIMIT),
+    OutputField("function2_identity", _A, _attribute("function2_identity"), _LIMIT),
+    OutputField("function1_signature", _A, _attribute("function1_signature"), _LIMIT),
+    OutputField("function2_signature", _A, _attribute("function2_signature"), _LIMIT),
     OutputField(
         "effective_function1_signature", _A,
-        lambda r, _o: r.get_effective_function1_signature(), _LIMIT,
+        _method("get_effective_function1_signature"), _LIMIT,
     ),
     OutputField(
         "effective_function2_signature", _A,
-        lambda r, _o: r.get_effective_function2_signature(), _LIMIT,
+        _method("get_effective_function2_signature"), _LIMIT,
     ),
     OutputField(
         "function1_signature_hypotheses", _A,
-        lambda r, _o: r.function1_signature_hypotheses, _LIMIT,
+        _attribute("function1_signature_hypotheses"), _LIMIT,
     ),
     OutputField(
         "function2_signature_hypotheses", _A,
-        lambda r, _o: r.function2_signature_hypotheses, _LIMIT,
+        _attribute("function2_signature_hypotheses"), _LIMIT,
     ),
-    OutputField("solver_results", _A, lambda r, _o: r.solver_results or None, _LIMIT),
-    OutputField("counterexample", _A, lambda r, _o: r.counterexample, _LIMIT),
-    OutputField("total_time", _C, lambda r, _o: r.total_time, _INV),
+    OutputField("solver_results", _A, _or_none("solver_results"), _LIMIT),
+    OutputField("counterexample", _A, _attribute("counterexample"), _LIMIT),
+    OutputField("total_time", _C, _attribute("total_time"), _INV),
     OutputField("error_message", _B, _message("error_message"), _INV),
-    OutputField("failure_status", _B, lambda r, _o: r.failure_status, _INV),
+    OutputField("failure_status", _B, _attribute("failure_status"), _INV),
     OutputField("failure_message", _B, _message("failure_message"), _INV),
-    OutputField("type_fix_result", _A, lambda r, _o: r.type_fix_result, _LIMIT),
-    OutputField("retry_count", _A, lambda r, _o: r.retry_count, _LIMIT),
-    OutputField("is_timeout", _B, lambda r, _o: r.is_timeout(), _INV),
-    OutputField("final_outcome", _B, lambda r, _o: r.final_outcome, _INV),
-    OutputField("decision_receipt", _B, _decision_receipt, _INV),
-    OutputField("conditional_outcome", _B, lambda r, _o: r.conditional_outcome, _INV),
-    OutputField("conditional_decision_receipt", _B, _conditional_decision_receipt, _INV),
-    OutputField("c_active_base", _B, lambda r, _o: r.canonical_c_active_base, _INV),
-    OutputField("q_open_base", _B, lambda r, _o: r.canonical_q_open_base, _INV),
-    OutputField("constrained_fragments", _A, lambda r, _o: r.constrained_fragments, _LIMIT),
+    OutputField("type_fix_result", _A, _attribute("type_fix_result"), _LIMIT),
+    OutputField("retry_count", _A, _attribute("retry_count"), _LIMIT),
+    OutputField("is_timeout", _B, _method("is_timeout"), _INV),
+    OutputField("final_outcome", _B, _attribute("final_outcome"), _INV),
+    OutputField("decision_receipt", _B, _function("decision_receipt"), _INV),
+    OutputField("conditional_outcome", _B, _attribute("conditional_outcome"), _INV),
+    OutputField("conditional_decision_receipt", _B, _function("conditional_decision_receipt"), _INV),
+    OutputField("c_active_base", _B, _attribute("canonical_c_active_base"), _INV),
+    OutputField("q_open_base", _B, _attribute("canonical_q_open_base"), _INV),
+    OutputField("constrained_fragments", _A, _attribute("constrained_fragments"), _LIMIT),
     # solver / pair の件数。判定には効かない観測（reporting は読むが、欠けても
     # 判定の再構成には要らない）
-    OutputField("pairwise_stats", _C, lambda r, _o: r.pairwise_stats, _TRUNC),
-    OutputField("pairwise_debug_stats", _C, lambda r, _o: r.pairwise_debug_stats, _TRUNC),
-    OutputField("unknown_reasons", _B, lambda r, _o: each(r.unknown_reasons), _INV),
+    OutputField("pairwise_stats", _C, _attribute("pairwise_stats"), _TRUNC),
+    OutputField("pairwise_debug_stats", _C, _attribute("pairwise_debug_stats"), _TRUNC),
+    OutputField("unknown_reasons", _B, _each("unknown_reasons"), _INV),
     OutputField(
         "unknown_recovery_actions", _B,
-        lambda r, _o: each(r.unknown_recovery_actions), _INV,
+        _each("unknown_recovery_actions"), _INV,
     ),
-    OutputField("unknown_recovery_backlog", _B, _unknown_recovery_backlog, _INV),
+    OutputField("unknown_recovery_backlog", _B, _function("unknown_recovery_backlog"), _INV),
     OutputField(
         "decision_gated_by_pending_proof", _B,
-        lambda r, _o: r.decision_gated_by_pending_proof, _INV,
+        _attribute("decision_gated_by_pending_proof"), _INV,
     ),
-    OutputField("sat_pair_info", _A, lambda r, _o: r.sat_pair_info, _LIMIT),
+    OutputField("sat_pair_info", _A, _attribute("sat_pair_info"), _LIMIT),
     # 通った phase / stage の足跡（診断）
-    OutputField("stage_path", _C, lambda r, _o: r.stage_path, _TRUNC),
-    OutputField("diagnostics", _C, _diagnostics, _TRUNC),
-    OutputField("unknown_cause_aggregate", _C, _unknown_cause_aggregate, _TRUNC),
+    OutputField("stage_path", _C, _attribute("stage_path"), _TRUNC),
+    OutputField("diagnostics", _C, _function("diagnostics"), _TRUNC),
+    OutputField("unknown_cause_aggregate", _C, _function("unknown_cause_aggregate"), _TRUNC),
     OutputField(BUNDLE_KEY, _B, _when_present(BUNDLE_KEY), _INV),
     # 出力の契約違反で ERROR にした結果だけが持つ: 取って代わられた判定の receipt
     OutputField("superseded_decision_receipt", _B, _when_present("superseded_decision_receipt"), _INV),
@@ -583,9 +733,9 @@ RESULT_FIELDS: Tuple[OutputField, ...] = (
         "identical_function_identity_evidence", _A,
         _when_present("identical_function_identity_evidence"), _LIMIT,
     ),
-    OutputField("mips64_abi_constraints", _A, _mips64_abi_constraints, _LIMIT),
+    OutputField("mips64_abi_constraints", _A, _function("mips64_abi_constraints"), _LIMIT),
     # 判定に関わらないので、予算を超えるなら件数 + marker に置き換える。
-    OutputField("debug_trace", _A, _debug_trace, _TRUNC),
+    OutputField("debug_trace", _A, _function("debug_trace"), _TRUNC),
 )
 
 FIELD_BY_KEY: Dict[str, OutputField] = {item.key: item for item in RESULT_FIELDS}
@@ -626,8 +776,8 @@ class OutputEnvelopeInvariantViolation(AnalysisFailureError):
     def __init__(self, message: str, *, max_bytes: Optional[int], requested_bytes: Optional[int]) -> None:
         super().__init__(message)
         # 大きさの違反でない（準備・封印の内部の不備）なら `None`
-        self.max_bytes = None if max_bytes is None else int(max_bytes)
-        self.requested_bytes = None if requested_bytes is None else int(requested_bytes)
+        self.max_bytes = _optional_int(max_bytes)
+        self.requested_bytes = _optional_int(requested_bytes)
 
 
 # ---------------------------------------------------------------------------
@@ -655,8 +805,25 @@ class SerializationPlan:
             return None
         return self.max_bytes - self.headroom_bytes
 
+    # 準備済みの payload から読む値（plain な値として読み直す）
+
+    def limit(self) -> Optional[int]:
+        return _optional_int(self.max_bytes)
+
+    def headroom(self) -> int:
+        return live_values.as_int(self.headroom_bytes)
+
+    def prepared_size(self) -> int:
+        return live_values.as_int(self.prepared_bytes)
+
+    def encoder(self) -> JsonEncodingPolicy:
+        encoding = self.encoding
+        if type(encoding) is not JsonEncodingPolicy:
+            raise TypeError("a serialization plan needs an exact JsonEncodingPolicy")
+        return encoding
+
     def to_diagnostic(self) -> Dict[str, Any]:
-        largest = sorted(self.field_bytes, key=lambda row: (-row[1], row[0]))[:5]
+        largest = sorted(self.field_bytes, key=_largest_first)[:5]
         return {
             "max_bytes": self.max_bytes,
             "headroom_bytes": self.headroom_bytes,
@@ -669,6 +836,12 @@ class SerializationPlan:
                 {"field": key, "bytes": size} for key, size, _shape in largest
             ],
         }
+
+
+def _largest_first(row: Tuple[str, int, str]) -> Tuple[int, str]:
+    """field の大きさの行の整列の key（大きい順、同じなら key の順）。"""
+
+    return (-row[1], row[0])
 
 
 @dataclass(frozen=True)
@@ -712,24 +885,37 @@ class PreparedSemanticPayload:
 
     def __post_init__(self) -> None:
         keys = set()
-        for item in self.fields:
+        for item in live_values.elements_of(self.fields):
             if type(item) is not PreparedField:
                 raise TypeError("prepared payload fields must be PreparedField")
-            if FIELD_BY_KEY.get(item.key) is None or FIELD_BY_KEY[item.key].owner is not _A:
-                raise TypeError(f"{item.key} is not a prepared (A) field")
-            if item.key in keys:
-                raise ValueError(f"{item.key} prepared twice")
-            keys.add(item.key)
+            key = item.field_key()
+            if FIELD_BY_KEY.get(key) is None or FIELD_BY_KEY[key].owner is not _A:
+                raise TypeError(f"{key} is not a prepared (A) field")
+            if key in keys:
+                raise ValueError(f"{key} prepared twice")
+            keys.add(key)
         if not is_prepared_json(self.raw_limitation_evidence):
             raise TypeError("raw limitation evidence must be prepared (bounded canonical) JSON")
         for name in ("cause_evidence", "trace_timings"):
-            value = getattr(self, name)
+            value = live_values.attribute(self, name)
             if value is not None and not is_prepared_json(value):
                 raise TypeError(f"{name} must be prepared (bounded canonical) JSON")
         if type(self.options) is not OutputOptions:
             raise TypeError("prepared payload needs its OutputOptions")
         if type(self.smt_formula) is not PreparedArtifact:
             raise TypeError("prepared payload needs a PreparedArtifact for the SMT formula")
+
+    def payload_plan(self) -> SerializationPlan:
+        plan = self.plan
+        if type(plan) is not SerializationPlan:
+            raise TypeError("prepared payload needs its SerializationPlan")
+        return plan
+
+    def output_options(self) -> OutputOptions:
+        options = self.options
+        if type(options) is not OutputOptions:
+            raise TypeError("prepared payload needs its OutputOptions")
+        return options.plain()
 
     def keys(self) -> Tuple[str, ...]:
         return tuple(item.key for item in self.fields if item.json is not None)
@@ -804,7 +990,8 @@ class OutputPreparer:
         )
         for item in ordered:
             try:
-                row = item.prepare(result, context)
+                # `RESULT_FIELDS` の行（package の定数）の準備
+                row = OutputField.prepare(item, result, context)
             except JsonBudgetExhausted as exc:
                 if not strict:
                     prepared.append(PreparedField(item.key, None, "omitted"))
@@ -818,7 +1005,7 @@ class OutputPreparer:
             if row is not None:
                 prepared.append(row)
         order = _field_order()
-        prepared.sort(key=lambda row: order[row.key])
+        prepared.sort(key=functools.partial(_field_position, order))
         plan = SerializationPlan(
             encoding=self.encoding,
             max_bytes=self.policy.serialization_bytes,
@@ -844,8 +1031,8 @@ class OutputPreparer:
         cause_evidence = self._prepare_cause_evidence(
             result,
             binary_identities if binary_identities is not None else (
-                getattr(result, "binary1_content_identity", None),
-                getattr(result, "binary2_content_identity", None),
+                live_values.attribute(result, "binary1_content_identity"),
+                live_values.attribute(result, "binary2_content_identity"),
             ),
             diagnostic=diagnostic,
         )
@@ -884,7 +1071,7 @@ class OutputPreparer:
                 evidence = build_unknown_cause_aggregate(
                     result, trace_evidence_for=tuple(binary_identities),
                 )
-            return _charged(diagnostic, self.encoding.prepare(evidence, max_bytes=limit))
+            return _charged(diagnostic, _prepare_json(self.encoding, evidence, max_bytes=limit))
         except (JsonBudgetExhausted, JsonValueRejected) as exc:
             return self.encoding.prepare({
                 "truncated": True,
@@ -901,7 +1088,7 @@ class OutputPreparer:
 
         limit = diagnostic.remaining()
         try:
-            return _charged(diagnostic, self.encoding.prepare(TraceTimingsView(result), max_bytes=limit))
+            return _charged(diagnostic, _prepare_json(self.encoding, TraceTimingsView(result), max_bytes=limit))
         except (JsonBudgetExhausted, JsonValueRejected) as exc:
             return self.encoding.prepare(_truncation_marker(
                 "diagnostics.timings.attempts", (),
@@ -916,18 +1103,15 @@ class OutputPreparer:
         reason があれば、最後の行にその件数を置く。
         """
 
-        from scripts.function_tracer_pcode.checker.unknown_reason import LegacyReasonEvidence
-
-        reasons = getattr(result, "unknown_reasons", None) or ()
-        overflow = getattr(result, "legacy_reason_overflow", None)
-        def rows():
-            for record in reasons:
-                yield LegacyReasonEvidence(record)
-            if overflow:
-                yield {"legacy_reason_overflow": int(overflow)}
-
+        reasons = live_values.attribute(result, "unknown_reasons")
+        if not _truthy(reasons):
+            reasons = ()
+        overflow = live_values.attribute(result, "legacy_reason_overflow")
+        overflow_count = live_values.as_int(overflow) if _truthy(overflow) else 0
         try:
-            return _charged(diagnostic, self.encoding.prepare(rows(), max_bytes=diagnostic.remaining()))
+            return _charged(diagnostic, _prepare_json(
+                self.encoding, _limitation_rows(reasons, overflow_count), max_bytes=diagnostic.remaining(),
+            ))
         except (JsonBudgetExhausted, JsonValueRejected) as exc:
             # 証拠の欠陥で判定を変えない（件数 + marker）
             return self.encoding.prepare({
@@ -936,19 +1120,25 @@ class OutputPreparer:
                     BudgetKind.SERIALIZATION_BYTES.value
                     if isinstance(exc, JsonBudgetExhausted) else "not_json"
                 ),
-                "original_items": len(reasons) + int(overflow or 0),
+                "original_items": live_values.size(reasons) + overflow_count,
             })
 
     def _prepare_smt_formula(self, result: Any, options: OutputOptions) -> PreparedArtifact:
         """保存を頼まれた SMT 式を、直列化 1 つ分の予算まで準備する（超えたら省く）。"""
 
-        text = getattr(result, "smt_formula", None)
-        if not options.include_smt_formula or not text:
+        if not live_values.as_bool(live_values.attribute(options, "include_smt_formula")):
+            return PreparedArtifact(None)
+        text = live_values.attribute(result, "smt_formula")
+        if text is None:
             return PreparedArtifact(None)
         if type(text) is not str:
+            if not live_values.as_bool(text):
+                return PreparedArtifact(None)
             raise JsonValueRejected(
-                f"{type(text).__qualname__} is not an SMT formula text", path="$.smt_formula",
+                f"{live_values.type_name(type(text))} is not an SMT formula text", path="$.smt_formula",
             )
+        if not text:
+            return PreparedArtifact(None)
         limit = self.policy.serialization_bytes
         if limit is not None and _bounded_utf8_length(text, limit) > limit:
             return PreparedArtifact(None, omitted_over_bytes=limit)
@@ -981,16 +1171,59 @@ class OutputPreparer:
         )
 
 
+def _truthy(value: Any) -> bool:
+    """`bool(value)`（`None` は偽。scalar・組み込みの振る舞いの容器・package の record だけを読む）。"""
+
+    return value is not None and live_values.as_bool(value)
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    """`None` か plain な `int`（package の record の field を読み直す）。"""
+
+    return None if value is None else live_values.as_int(value)
+
+
+def _plain_key(key: Any) -> Any:
+    """mapping の key の plain な値（scalar だけ。それ以外は `TypeError`）。"""
+
+    plain = live_values.plain_scalar(key)
+    if plain is live_values.NOT_PLAIN:
+        raise TypeError(f"{live_values.type_name(type(key))} is not a plain mapping key")
+    return plain
+
+
+def _field_position(order: Dict[str, int], row: PreparedField) -> int:
+    """準備した field の出力の並び（`OutputPreparer.prepare` の整列の key）。"""
+
+    return order[row.field_key()]
+
+
+def _limitation_rows(reasons: Any, overflow: int):
+    """legacy reason の有界な証拠の行（walker が 1 行ずつ引き出す）と、残さなかった件数の行。"""
+
+    from scripts.function_tracer_pcode.checker.unknown_reason import LegacyReasonEvidence
+
+    for record in live_values.elements_of(reasons):
+        yield LegacyReasonEvidence(record)
+    if overflow:
+        yield {"legacy_reason_overflow": overflow}
+
+
 def _attach_budget_diagnostics(result: Any, prepared: PreparedSemanticPayload, policy) -> None:
     """予算の値・観測値・準備の内訳を診断へ書く（C、判定に使わない）。"""
 
-    diagnostics = dict(getattr(result, "diagnostics", None) or {})
+    current = live_values.attribute(result, "diagnostics")
+    diagnostics: Dict[Any, Any] = {}
+    if _truthy(current):
+        # 組み込みの振る舞いの mapping の複製（key は scalar だけ）
+        for key, value in live_values.items_of(current):
+            diagnostics[_plain_key(key)] = value
     diagnostics["expression_budget"] = {
         "policy": policy.to_diagnostic(),
         "observed": budget_observations(),
         "serialization": prepared.plan.to_diagnostic(),
     }
-    result.diagnostics = diagnostics
+    live_values.set_state(result, "diagnostics", diagnostics)
 
 
 def _charged(budget: JsonBudget, prepared: PreparedJson) -> PreparedJson:
@@ -1026,57 +1259,92 @@ def finitize_legacy_reasons(result: Any, *, authority_projects_reasons: bool) ->
     from scripts.function_tracer_pcode.checker.unknown_reason import (
         UNKNOWN_REASON_ROW,
         UNKNOWN_RECOVERY_ACTION_ROW,
-        UnknownReasonRecord,
-        UnknownRecoveryAction,
-        finitize_unknown_reason_record,
-        finitize_unknown_recovery_action,
     )
-    from scripts.function_tracer_pcode.core.json_encoding import max_rows_within, row_min_bytes
 
     bounds = authority_field_bounds(RESULT_JSON_POLICY)
     # 辿ってよい量は、置き換えた record が書かれる出力 field の上限（schema。予算を無効にした
     # policy でも有限）
     work = JsonBudget(bounds["unknown_reasons"].max_bytes + bounds["unknown_recovery_actions"].max_bytes)
 
-    def row_limit(key: str, row: Any) -> int:
-        return max_rows_within(bounds[key].max_bytes, row_min_bytes(row, RESULT_JSON_POLICY))
-
-    def over_schema(key: str, count: int, limit: int) -> None:
-        raise_expression_size_budget_exceeded(
-            BudgetKind.SERIALIZATION_BYTES,
-            observed=count,
-            limit=limit,
-            site=PREPARATION_SITE,
-            target_key=("result_payload", key, "rows"),
-            evidence=(f"field={key}", f"rows={count}", f"schema_max_rows={limit}"),
-        )
-
-    reasons = getattr(result, "unknown_reasons", None)
-    if reasons:
-        count = len(reasons)
+    reasons = live_values.attribute(result, "unknown_reasons")
+    if _truthy(reasons):
+        count = live_values.size(reasons)
+        keep = count
         if authority_projects_reasons:
             # 診断にしか使わない legacy reason: canonical reason の行数の上限（schema）まで残す
             limit = bounds["unknown_reasons"].max_rows
             if count > limit:
-                result.legacy_reason_overflow = count - limit
-                reasons = reasons[:limit]
+                live_values.set_state(result, "legacy_reason_overflow", count - limit)
+                keep = limit
         else:
-            limit = row_limit("unknown_reasons", UNKNOWN_REASON_ROW)
+            limit = _schema_row_limit(bounds, "unknown_reasons", UNKNOWN_REASON_ROW)
             if count > limit:
-                over_schema("unknown_reasons", count, limit)
-        result.unknown_reasons = [
-            finitize_unknown_reason_record(item, work=work) if isinstance(item, UnknownReasonRecord) else item
-            for item in reasons
-        ]
-    actions = getattr(result, "unknown_recovery_actions", None)
-    if actions:
-        limit = row_limit("unknown_recovery_actions", UNKNOWN_RECOVERY_ACTION_ROW)
-        if len(actions) > limit:
-            over_schema("unknown_recovery_actions", len(actions), limit)
-        result.unknown_recovery_actions = [
-            finitize_unknown_recovery_action(item, work=work) if isinstance(item, UnknownRecoveryAction) else item
-            for item in actions
-        ]
+                _raise_over_schema("unknown_reasons", count, limit)
+        live_values.set_state(result, "unknown_reasons", _finitized_reasons(reasons, keep, work=work))
+    actions = live_values.attribute(result, "unknown_recovery_actions")
+    if _truthy(actions):
+        count = live_values.size(actions)
+        limit = _schema_row_limit(bounds, "unknown_recovery_actions", UNKNOWN_RECOVERY_ACTION_ROW)
+        if count > limit:
+            _raise_over_schema("unknown_recovery_actions", count, limit)
+        live_values.set_state(result, "unknown_recovery_actions", _finitized_actions(actions, work=work))
+
+
+def _schema_row_limit(bounds: Mapping[str, Any], key: str, row: Any) -> int:
+    """出力 schema の field の上限と行の下限から導く、その field に入り得る行数の上限。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import max_rows_within, row_min_bytes
+
+    return max_rows_within(bounds[key].max_bytes, row_min_bytes(row, RESULT_JSON_POLICY))
+
+
+def _raise_over_schema(key: str, count: int, limit: int) -> None:
+    raise_expression_size_budget_exceeded(
+        BudgetKind.SERIALIZATION_BYTES,
+        observed=count,
+        limit=limit,
+        site=PREPARATION_SITE,
+        target_key=("result_payload", key, "rows"),
+        evidence=(f"field={key}", f"rows={count}", f"schema_max_rows={limit}"),
+    )
+
+
+def _finitized_reasons(reasons: Any, keep: int, *, work: JsonBudget) -> List[Any]:
+    """先頭 `keep` 件の legacy reason（`UnknownReasonRecord` は重い field を有界にした record）。"""
+
+    from scripts.function_tracer_pcode.checker.unknown_reason import (
+        UnknownReasonRecord,
+        finitize_unknown_reason_record,
+    )
+
+    kept: List[Any] = []
+    taken = 0
+    for item in live_values.elements_of(reasons):
+        if taken >= keep:
+            break
+        taken += 1
+        if live_values.is_kind(item, UnknownReasonRecord):
+            kept.append(finitize_unknown_reason_record(item, work=work))
+        else:
+            kept.append(item)
+    return kept
+
+
+def _finitized_actions(actions: Any, *, work: JsonBudget) -> List[Any]:
+    """recovery action（`UnknownRecoveryAction` は重い field を有界にした record）。"""
+
+    from scripts.function_tracer_pcode.checker.unknown_reason import (
+        UnknownRecoveryAction,
+        finitize_unknown_recovery_action,
+    )
+
+    kept: List[Any] = []
+    for item in live_values.elements_of(actions):
+        if live_values.is_kind(item, UnknownRecoveryAction):
+            kept.append(finitize_unknown_recovery_action(item, work=work))
+        else:
+            kept.append(item)
+    return kept
 
 
 def check_prepared_field_bounds(result: Any, *, authority_projects_reasons: bool) -> None:
@@ -1099,7 +1367,9 @@ def check_prepared_field_bounds(result: Any, *, authority_projects_reasons: bool
     for key in checked:
         bound = bounds[key]
         try:
-            RESULT_JSON_POLICY.measure(FIELD_BY_KEY[key].read(result, None), max_bytes=bound.max_bytes)
+            # 切り詰めてはいけない field（B）の読み方の値（`read_source` は `read` の値そのもの）
+            source = OutputField.read_source(FIELD_BY_KEY[key], result, None)
+            json_encoding.RESULT_JSON_POLICY.measure(source, max_bytes=bound.max_bytes)
         except JsonBudgetExhausted as exc:
             raise_expression_size_budget_exceeded(
                 BudgetKind.SERIALIZATION_BYTES,
@@ -1138,42 +1408,29 @@ def prepare_pair_output(
 
     if result is None:
         return result
-    from scripts.function_tracer_pcode.checker.pair_execution import (
-        apply_pair_failure_gate,
-    )
-
-    def _gate(current):
-        return apply_pair_failure_gate(
-            checker,
-            current,
-            function_name1=function_name1,
-            function_name2=function_name2,
-            start_time=start_time,
-        )
-
     policy = active_budget_policy()
     preparer = OutputPreparer(policy)
     options = OutputOptions.for_result(result, save_formula=save_formula)
-    identities = tuple(getattr(checker, "_active_binary_content_identities", None) or (None, None))
-    authority_projects_reasons = getattr(checker, "v2_dual_write_pilot_connector", None) is not None
-
-    def _finitize_and_check(current):
-        finitize_legacy_reasons(current, authority_projects_reasons=authority_projects_reasons)
-        check_prepared_field_bounds(current, authority_projects_reasons=authority_projects_reasons)
+    identities = live_values.attribute(checker, "_active_binary_content_identities")
+    identities = tuple(live_values.elements_of(identities)) if _truthy(identities) else (None, None)
+    authority_projects_reasons = (
+        live_values.attribute(checker, "v2_dual_write_pilot_connector") is not None
+    )
+    gate = _PairFailureGate(checker, function_name1, function_name2, start_time)
 
     try:
-        _finitize_and_check(result)
+        _finitize_and_check(result, authority_projects_reasons=authority_projects_reasons)
         prepared = preparer.prepare(result, options, binary_identities=identities)
     except (AnalysisLimitation, JsonValueRejected) as exc:
         if isinstance(exc, JsonValueRejected):
             _record_preparation_bug(exc)
-        result = _gate(result)
+        result = gate.apply(result)
         try:
-            _finitize_and_check(result)
+            _finitize_and_check(result, authority_projects_reasons=authority_projects_reasons)
             prepared = preparer.prepare(result, options, binary_identities=identities)
         except (AnalysisLimitation, JsonValueRejected) as again:
             _record_preparation_bug(again)
-            result = _gate(result)
+            result = gate.apply(result)
             try:
                 finitize_legacy_reasons(result, authority_projects_reasons=True)
             except AnalysisLimitation as third:  # pragma: no cover - 小さい結果は収まる
@@ -1182,8 +1439,38 @@ def prepare_pair_output(
                 result, options, strict=False, binary_identities=identities,
             )
     _attach_budget_diagnostics(result, prepared, policy)
-    result.prepared_semantic_payload = prepared
+    live_values.set_state(result, "prepared_semantic_payload", prepared)
     return result
+
+
+def _finitize_and_check(result: Any, *, authority_projects_reasons: bool) -> None:
+    finitize_legacy_reasons(result, authority_projects_reasons=authority_projects_reasons)
+    check_prepared_field_bounds(result, authority_projects_reasons=authority_projects_reasons)
+
+
+class _PairFailureGate:
+    """準備が収まらない / JSON にならない結果を、pair の失敗の変換（G4-a と同じ）で作り直す。"""
+
+    __slots__ = ("checker", "function_name1", "function_name2", "start_time")
+
+    def __init__(self, checker: Any, function_name1: str, function_name2: str, start_time: float) -> None:
+        self.checker = checker
+        self.function_name1 = function_name1
+        self.function_name2 = function_name2
+        self.start_time = start_time
+
+    def apply(self, current: Any) -> Any:
+        from scripts.function_tracer_pcode.checker.pair_execution import (
+            apply_pair_failure_gate,
+        )
+
+        return apply_pair_failure_gate(
+            self.checker,
+            current,
+            function_name1=self.function_name1,
+            function_name2=self.function_name2,
+            start_time=self.start_time,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1211,7 +1498,7 @@ def prepared_payload_for(
     呼び出しでは無制限）。
     """
 
-    prepared = getattr(result, "prepared_semantic_payload", None)
+    prepared = live_values.attribute(result, "prepared_semantic_payload")
     if prepared is None:
         policy = fallback_policy if fallback_policy is not None else active_budget_policy()
         return OutputPreparer(policy).prepare(result)
@@ -1223,15 +1510,30 @@ def prepared_payload_for(
 def prepared_smt_formula(result: Any) -> PreparedArtifact:
     """`--save-formula` が書く SMT 式（準備済みの成果物だけを返す）。"""
 
-    prepared = getattr(result, "prepared_semantic_payload", None)
+    prepared = live_values.attribute(result, "prepared_semantic_payload")
     if prepared is None:
-        return PreparedArtifact(getattr(result, "smt_formula", None))
+        return PreparedArtifact(live_values.attribute(result, "smt_formula"))
+    if type(prepared) is not PreparedSemanticPayload:
+        raise TypeError("result.prepared_semantic_payload must be a PreparedSemanticPayload")
     return prepared.smt_formula
 
 
+#: `_ordered` が「その field は無い」ことを知る印
+_NO_PART = object()
+
+
 def _ordered(parts: Dict[str, Any]) -> Dict[str, Any]:
+    """field の値を出力の key 順に並べ直す（並びは `RESULT_FIELDS` の固定の key で決める）。"""
+
     order = _field_order()
-    return {key: parts[key] for key in sorted(parts, key=lambda key: order[key])}
+    ordered: Dict[str, Any] = {}
+    for key in sorted(order, key=order.__getitem__):
+        value = parts.get(key, _NO_PART)
+        if value is not _NO_PART:
+            ordered[key] = value
+    if len(ordered) != live_values.size(parts):
+        raise KeyError("the result payload has a key outside RESULT_FIELDS")
+    return ordered
 
 
 def result_payload(result: Any, *, fallback_policy: Optional[BudgetPolicy] = None) -> Dict[str, Any]:
@@ -1268,11 +1570,42 @@ class FinalResultEnvelope:
         )
 
 
-def _violation(message: str, members: JsonObjectBudget, consumed: int = 0) -> OutputEnvelopeInvariantViolation:
+def _budget_total(members: Any) -> int:
+    """object の勘定の今の byte 数（`JsonObjectBudget.total_bytes` を plain な `int` で読む）。"""
+
+    return live_values.as_int(live_values.attribute(members, "total_bytes"))
+
+
+def _budget_limit(members: Any) -> Optional[int]:
+    return _optional_int(live_values.attribute(members, "max_bytes"))
+
+
+def _object_budget(members: Any) -> JsonObjectBudget:
+    """組んだ preimage の勘定（`JsonObjectBudget` そのもの）。"""
+
+    if type(members) is not JsonObjectBudget:
+        raise TypeError("the composed preimage needs its JsonObjectBudget")
+    return members
+
+
+def _checked_payload(prepared: Any) -> PreparedSemanticPayload:
+    if type(prepared) is not PreparedSemanticPayload:
+        raise TypeError("result.prepared_semantic_payload must be a PreparedSemanticPayload")
+    return prepared
+
+
+def _plan_note(prepared: Any) -> str:
+    """違反の文に添える準備の内訳（`prepared N, headroom M`）。"""
+
+    plan = _checked_payload(prepared).payload_plan()
+    return f"prepared {plan.prepared_size()}, headroom {plan.headroom()}"
+
+
+def _violation(message: str, members: Any, consumed: int = 0) -> OutputEnvelopeInvariantViolation:
     return OutputEnvelopeInvariantViolation(
         message,
-        max_bytes=members.max_bytes or 0,
-        requested_bytes=members.total_bytes + consumed,
+        max_bytes=_budget_limit(members) or 0,
+        requested_bytes=_budget_total(members) + consumed,
     )
 
 
@@ -1285,26 +1618,29 @@ def _prepare_after_authority(
     field_max_bytes: Optional[int] = None,
     source: Any = None,
 ) -> Optional[PreparedField]:
+    # `item` は `RESULT_FIELDS` の行（package の定数）
+    members = context.members
     try:
         if source is None:
-            return item.prepare(result, context, field_max_bytes=field_max_bytes)
-        return item.prepare_source(source, context, field_max_bytes=field_max_bytes)
+            return OutputField.prepare(item, result, context, field_max_bytes=field_max_bytes)
+        return OutputField.prepare_source(item, source, context, field_max_bytes=field_max_bytes)
     except JsonBudgetExhausted as exc:
+        consumed = exc.consumed_bytes
         if field_max_bytes is not None and (
-            context.members.remaining_for(item.key) is None
-            or field_max_bytes <= context.members.remaining_for(item.key)
+            members.remaining_for(item.key) is None
+            or field_max_bytes <= members.remaining_for(item.key)
         ):
             raise _violation(
                 f"{item.key} exceeds its output schema bound of {field_max_bytes} bytes",
-                context.members, exc.consumed_bytes,
+                members, consumed,
             ) from exc
         raise _violation(
             f"{item.key} must not be truncated but does not fit the envelope "
-            f"(prepared {prepared.plan.prepared_bytes}, headroom {prepared.plan.headroom_bytes})",
-            context.members, exc.consumed_bytes,
+            f"({_plan_note(prepared)})",
+            members, consumed,
         ) from exc
     except JsonValueRejected as exc:
-        raise _violation(f"{item.key} is not JSON: {exc}", context.members) from exc
+        raise _violation(f"{item.key} is not JSON: {exc}", members) from exc
 
 
 @dataclass(frozen=True)
@@ -1318,9 +1654,9 @@ class AuthorityDecisionEnvelope:
 
     fields: Tuple[PreparedField, ...]
 
-    @classmethod
+    @staticmethod
     def prepare(
-        cls, result: Any, context: PreparationContext, prepared: PreparedSemanticPayload,
+        result: Any, context: PreparationContext, prepared: PreparedSemanticPayload,
     ) -> "AuthorityDecisionEnvelope":
         from scripts.function_tracer_pcode.checker.output_schema import (
             OutputSchemaMissing,
@@ -1350,7 +1686,7 @@ class AuthorityDecisionEnvelope:
                         )
                     present_in_group[group] = item.key
                 rows.append(row)
-        return cls(tuple(rows))
+        return AuthorityDecisionEnvelope(tuple(rows))
 
 
 @dataclass(frozen=True)
@@ -1361,11 +1697,11 @@ class OutputMetadata:
 
     @property
     def truncated(self) -> Tuple[str, ...]:
-        return tuple(row.key for row in self.fields if row.shape != "json")
+        return tuple(row.field_key() for row in self.fields if row.field_shape() != "json")
 
-    @classmethod
+    @staticmethod
     def prepare(
-        cls, result: Any, context: PreparationContext, prepared: PreparedSemanticPayload,
+        result: Any, context: PreparationContext, prepared: PreparedSemanticPayload,
     ) -> "OutputMetadata":
         """C を準備する。
 
@@ -1400,7 +1736,8 @@ class OutputMetadata:
                     rows[item.key] = row
                     order.append(item.key)
                 continue
-            source = item.read_source(result, context.options)
+            # `item` は `RESULT_FIELDS` の行（package の定数）
+            source = OutputField.read_source(item, result, context.options)
             if source is ABSENT:
                 continue
             order.append(item.key)
@@ -1409,7 +1746,7 @@ class OutputMetadata:
             try:
                 if type(source) is _ReadFailed:
                     raise source.rejected
-                small = encoding.prepare(source, max_bytes=marker_bytes)
+                small = _prepare_json(encoding, source, max_bytes=marker_bytes)
             except (JsonBudgetExhausted, JsonValueRejected):
                 large.append(item)
                 members.reserve(item.key, marker_bytes)
@@ -1420,8 +1757,7 @@ class OutputMetadata:
         room = members.room()
         if room is not None and room < 0:
             raise _violation(
-                "the truncatable metadata does not fit even as markers "
-                f"(prepared {prepared.plan.prepared_bytes}, headroom {prepared.plan.headroom_bytes})",
+                f"the truncatable metadata does not fit even as markers ({_plan_note(prepared)})",
                 members,
             )
         for item in large:
@@ -1433,8 +1769,8 @@ class OutputMetadata:
         # 予約で場所を取っていた小さい field を、予約を外して member として足す
         for key in small_keys:
             members.release_reservation(key)
-            members.add(key, rows[key].json.encoded_bytes)
-        return cls(tuple(rows[key] for key in order if key in rows))
+            members.add(key, rows[key].encoded_bytes)
+        return OutputMetadata(tuple(rows[key] for key in order if key in rows))
 
 
 def _compose_members(
@@ -1449,7 +1785,8 @@ def _compose_members(
     本体と marker の上限の差の和）を返す。
     """
 
-    context = PreparationContext(prepared.options, members)
+    # option は準備済みの payload から plain な値として読み直す（context は package の値だけ）
+    context = PreparationContext(_checked_payload(prepared).output_options(), members)
     authority = AuthorityDecisionEnvelope.prepare(result, context, prepared)
     metadata = OutputMetadata.prepare(result, context, prepared)
     for row in authority.fields + metadata.fields:
@@ -1461,7 +1798,7 @@ def _compose_members(
     for row in metadata.fields:
         if row.json is not None and row.shape == "json" and _TRUNCATABLE_METADATA.get(row.key):
             # 切り詰めても marker（予約と同じ上限）は残る
-            freeable += max(0, row.json.encoded_bytes - truncation_marker_max_bytes(members.policy, row.key))
+            freeable += max(0, row.encoded_bytes - truncation_marker_max_bytes(members.policy, row.key))
     return metadata.truncated, freeable
 
 
@@ -1483,6 +1820,26 @@ class ComposedPreimage:
     #: 切り詰めてよい C を marker にすれば空けられる byte の上限（組み直しで封印が入り得る幅）
     freeable_bytes: int = 0
 
+    # 最終 envelope が読む値（型を確かめ、plain な値として読み直す）
+
+    def payload_plan(self) -> "SerializationPlan":
+        return _checked_payload(self.prepared).payload_plan()
+
+    def preimage(self) -> Dict[str, Any]:
+        payload = self.payload
+        if type(payload) is not dict:
+            raise TypeError("the composed preimage needs its payload dict")
+        return payload
+
+    def budget(self) -> JsonObjectBudget:
+        return _object_budget(self.members)
+
+    def truncated_fields(self) -> Tuple[str, ...]:
+        return tuple(live_values.as_str(key) for key in live_values.elements_of(self.truncated))
+
+    def freeable(self) -> int:
+        return live_values.as_int(self.freeable_bytes)
+
 
 def compose_result_preimage(
     result: Any, *, fallback_policy: Optional[BudgetPolicy] = None, bundle_reserve: Optional[int] = None,
@@ -1493,24 +1850,27 @@ def compose_result_preimage(
     準備する（切り詰めてよい C が先に marker になる）。
     """
 
-    prepared = prepared_payload_for(result, fallback_policy=fallback_policy)
-    plan = prepared.plan
-    limit = plan.max_bytes
-    members = JsonObjectBudget(plan.encoding, limit)
+    prepared = _checked_payload(prepared_payload_for(result, fallback_policy=fallback_policy))
+    plan = prepared.payload_plan()
+    limit = plan.limit()
+    members = JsonObjectBudget(plan.encoder(), limit)
     parts: Dict[str, Any] = {}
-    for item in prepared.fields:
-        if item.json is None:
+    for item in live_values.elements_of(prepared.fields):
+        if type(item) is not PreparedField:
+            raise TypeError("prepared payload fields must be PreparedField")
+        if not item.has_json():
             continue
-        members.add(item.key, item.json.encoded_bytes)
-        parts[item.key] = item.json.value()
+        key = item.field_key()
+        members.add(key, item.encoded_bytes)
+        parts[key] = item.json_value()
     if limit is not None and members.total_bytes > limit:
         raise _violation(
             "prepared output exceeded the envelope before authority fields "
-            f"({members.total_bytes} > {limit} bytes; headroom {plan.headroom_bytes})",
+            f"({members.total_bytes} > {limit} bytes; headroom {plan.headroom()})",
             members,
         )
     if bundle_reserve is not None:
-        members.reserve(BUNDLE_KEY, bundle_reserve)
+        members.reserve(BUNDLE_KEY, live_values.as_int(bundle_reserve))
     truncated, freeable = _compose_members(result, prepared, members, parts)
     members.release_reservation()
     return ComposedPreimage(prepared, _ordered(parts), members, tuple(truncated), freeable)
@@ -1595,13 +1955,15 @@ def finalize_result_envelope(
     ので、作り直した封印も残りの予算の中で準備し直し、それでも収まらなければ出力の契約違反。
     """
 
-    prepared, preimage, members, truncated = (
-        composed.prepared, composed.payload, composed.members, composed.truncated,
-    )
-    plan = prepared.plan
-    encoding = plan.encoding
-    limit = plan.max_bytes
-    preimage_bytes = members.total_bytes
+    if type(composed) is not ComposedPreimage:
+        raise TypeError("the final envelope is built from a ComposedPreimage")
+    plan = composed.payload_plan()
+    preimage = composed.preimage()
+    members = composed.budget()
+    truncated = composed.truncated_fields()
+    encoding = plan.encoder()
+    limit = plan.limit()
+    preimage_bytes = _budget_total(members)
     payload = preimage
     total = preimage_bytes
     if seal is not None:
@@ -1610,8 +1972,9 @@ def finalize_result_envelope(
         room = members.remaining_for(BUNDLE_KEY)
         # 封印を写す上限: 残り、組み直せるなら残り + 切り詰められる byte（1 回の準備で、入るか・
         # 組み直しに要る大きさかが分かる。封印を 3 回作らない）
-        can_recompose = recompose_from is not None and composed.freeable_bytes > 0 and room is not None
-        reach = room + composed.freeable_bytes if can_recompose else room
+        freeable = composed.freeable()
+        can_recompose = recompose_from is not None and freeable > 0 and room is not None
+        reach = room + freeable if can_recompose else room
         try:
             bundle = encoding.prepare(seal.seal(preimage), max_bytes=reach)
         except JsonBudgetExhausted as exc:
@@ -1622,16 +1985,18 @@ def finalize_result_envelope(
             ) from exc
         except JsonValueRejected as exc:
             raise _violation(f"{BUNDLE_KEY} is not JSON: {exc}", members) from exc
-        if room is not None and bundle.encoded_bytes > room:
+        bundle_bytes = live_values.as_int(bundle.encoded_bytes)
+        if room is not None and bundle_bytes > room:
             # 切り詰めてよい診断が場所を取っている: 封印の大きさを先に空けて組み直し、新しい
             # preimage を封印し直す（封印は preimage の digest を持つ。2 回目の封印）
             composed = compose_result_preimage(
-                recompose_from, fallback_policy=fallback_policy, bundle_reserve=bundle.encoded_bytes,
+                recompose_from, fallback_policy=fallback_policy, bundle_reserve=bundle_bytes,
             )
-            prepared, preimage, members, truncated = (
-                composed.prepared, composed.payload, composed.members, composed.truncated,
-            )
-            preimage_bytes = members.total_bytes
+            plan = composed.payload_plan()
+            preimage = composed.preimage()
+            members = composed.budget()
+            truncated = composed.truncated_fields()
+            preimage_bytes = _budget_total(members)
             room = members.remaining_for(BUNDLE_KEY)
             try:
                 bundle = encoding.prepare(seal.seal(preimage), max_bytes=room)
@@ -1643,11 +2008,12 @@ def finalize_result_envelope(
                 ) from exc
             except JsonValueRejected as exc:
                 raise _violation(f"{BUNDLE_KEY} is not JSON: {exc}", members) from exc
-        payload = dict(preimage)
+            bundle_bytes = live_values.as_int(bundle.encoded_bytes)
+        payload = {**preimage}
         payload[BUNDLE_KEY] = bundle.value()
         payload = _ordered(payload)
-        members.add(BUNDLE_KEY, bundle.encoded_bytes)
-        total = members.total_bytes
+        members.add(BUNDLE_KEY, bundle_bytes)
+        total = _budget_total(members)
     try:
         # 契約の上限で書く（勘定が正しければ `total` 以下で、上限を超える前に止まる）
         text_value = encoding.encode_bounded(payload, max_bytes=limit)

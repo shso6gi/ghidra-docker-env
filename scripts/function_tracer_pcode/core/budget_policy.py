@@ -39,6 +39,7 @@ from dataclasses import dataclass, fields
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, NoReturn, Optional, Tuple
 
+from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.errors import (
     ExpressionSizeBudgetExceeded,
     PairStopState,
@@ -251,7 +252,8 @@ def observe_budget_usage(kind: BudgetKind, value: int, *, site: str) -> None:
 
     scope = _active_scope()
     if scope is not None:
-        scope.observations.observe(kind, value, site=site)
+        # 観測値は owner の API で基底型の整数にしてから渡す（`observe` の `int()` と同じ値）
+        scope.observations.observe(kind, live_values.as_int(value), site=site)
 
 
 def budget_observations() -> Dict[str, Any]:
@@ -420,17 +422,18 @@ class SerializationWork:
     def tree(self, leaf: Any, *, build: bool) -> Tuple[Any, int]:
         """sized leaf（式の木）の大きさを **作る前に** 求めて足し、`build` なら作る。"""
 
-        if not self.enabled:
-            return (leaf.__json_tree__() if build else None), 0
-        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, protocol_method
 
-        size = leaf.__json_tree_bytes__(RESULT_JSON_POLICY, self.remaining())
+        # sized leaf の protocol は package の型の関数を直接呼ぶ（instance の属性を引かない）
+        if not self.enabled:
+            return (protocol_method(leaf, "__json_tree__")(leaf) if build else None), 0
+        size = protocol_method(leaf, "__json_tree_bytes__")(leaf, RESULT_JSON_POLICY, self.remaining())
         built = None
         if size is None:
             # DAG のまま見積もれない形（閉路。未凍結の式の中だけ）: node を 1 つ作るたびに
             # 数えながら作る（作ってから数えない）
             before = self.consumed
-            built = leaf.__json_tree_metered__(RESULT_JSON_POLICY, self.charge)
+            built = protocol_method(leaf, "__json_tree_metered__")(leaf, RESULT_JSON_POLICY, self)
             size = self.consumed - before
             self.trees += 1
             self.tree_bytes += int(size)
@@ -450,7 +453,7 @@ class SerializationWork:
                 target_key=self.target_key(), evidence=self._evidence(),
             )
         if build and built is None:
-            built = leaf.__json_tree__()
+            built = protocol_method(leaf, "__json_tree__")(leaf)
         return (built if build else None), size
 
     # -- 勘定 ----------------------------------------------------------------

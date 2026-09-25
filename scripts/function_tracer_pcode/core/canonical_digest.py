@@ -21,7 +21,7 @@ JSON の sha256。`authority/contracts`）と **同じ値** を streaming で求
   振る舞いだけ。`to_authority_dict()`・`__getattr__`（`hasattr`）・上書きした `items()` /
   `__len__` / `__getitem__` / `__iter__`・dataclass の property は呼ばない（どれも work を
   受け取らずに入力に比例する仕事をし得る）。そういう値は `TypeError`（有界な canonical な形を
-  持たない。呼ぶ側は型つき token の fingerprint へ退く）。例外は `register_fixed_canonical`
+  持たない。呼ぶ側は型つき token の fingerprint へ退く）。例外は固定の形の record（`BoundedEvidence`）
   で登録した固定の形の record（要約が O(1)。今は `BoundedEvidence` だけ）。
 * **閉路** は `CanonicalValueCycle`（型つきの失敗）。辿っている容器の identity を持つので、
   stack は際限なく伸びない。
@@ -34,7 +34,8 @@ JSON の sha256。`authority/contracts`）と **同じ値** を streaming で求
   それ以外の key は `TypeError`（canonical_value は `str(key)` で受けるが、その写しの大きさを
   作る前に数えられない）。
 
-この module は core の最下層で、project の他の module を import しない。
+この module は core の最下層で、project の module は live な値の読み方の owner（`core.live_values`）
+だけを import する（scalar・enum・容器・dataclass の field はすべてその規則で読む）。
 """
 
 from __future__ import annotations
@@ -44,19 +45,27 @@ import inspect
 import json
 import types
 from collections import OrderedDict
-from dataclasses import fields, is_dataclass
-from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
-from scripts.function_tracer_pcode.core.builtin_containers import (
+from scripts.function_tracer_pcode.core.live_values import (
+    NOT_PLAIN,
+    as_str,
     builtin_mapping,
     builtin_sequence,
     builtin_set,
-    plain_field_value,
+    dataclass_field_names,
+    elements_of,
+    enum_value,
+    field_value,
+    is_enum,
+    items_of,
+    json_scalar,
+    plain_scalar,
+    size,
+    type_name,
 )
 
 
-_PRIMITIVE_TYPES = frozenset({str, int, float, bool})
 #: 文字列を hash へ流す単位（巨大な文字列を一度に escape・encode しない）
 _STRING_CHUNK = 1 << 16
 _ENCODE_BASESTRING = json.encoder.encode_basestring
@@ -66,82 +75,59 @@ class CanonicalValueCycle(ValueError):
     """canonical な値が自分自身を含む（有限の canonical な形を持たない）。"""
 
 
-#: 固定の形の record（型 → その canonical な要約を返す関数。要約は O(1) の大きさ）
-_FIXED_CANONICAL: Dict[type, Callable[[Any], Any]] = {}
+def _bounded_evidence_type() -> type:
+    """固定の形の record（`BoundedEvidence`。canonical な形は O(1) の要約）の型。
 
-
-def register_fixed_canonical(kind: type, summary: Callable[[Any], Any]) -> None:
-    """`kind` の値を、`summary(value)`（固定の形の値）として辿る（`to_authority_dict` の代わり）。
-
-    `summary` は入力に比例する仕事をしない関数だけ（固定個数の短い field を返す）。登録は
-    `tests/unit/test_architecture_boundaries.py` が固定する。
+    callable の登録表は持たない: 固定の形の record はこの 1 つだけで、要約は名前で呼ぶ
+    （`BoundedEvidence.summary`）。json_encoding はこの module を import するので遅延で読む。
     """
 
-    _FIXED_CANONICAL[kind] = summary
+    from scripts.function_tracer_pcode.core.json_encoding import BoundedEvidence
+
+    return BoundedEvidence
 
 
 _MAPPING_TYPES = (dict, OrderedDict, types.MappingProxyType)
-_BUILTIN_ENUM_STR = frozenset({Enum.__str__, str.__str__, int.__repr__, int.__str__, object.__str__})
-
-
-# 組み込みの `__len__` / `__getitem__` / `__iter__` のまま（namedtuple など）でなければ辿らない
-_is_builtin_sequence = builtin_sequence
-_is_builtin_set = builtin_set
-
-
-_field_value = plain_field_value
-
-
-def _exact_primitive(value: Any) -> Any:
-    # `authority/contracts.exact_primitive` と同じ規則（基底型の subclass を基底型へ）
-    if isinstance(value, bool):
-        return bool(value)
-    if isinstance(value, int):
-        return int.__index__(value)
-    if isinstance(value, str):
-        return str.__str__(value)
-    if isinstance(value, float):
-        return float(float.__repr__(value))
-    return value
 
 
 def _scalar_key(key: Any, work: Any) -> str:
     """mapping の key の canonical な文字列（canonical_value と同じ `str(key)`）。
 
     scalar（`str` / `int` / `float` / `bool` / `None` / enum）でなければ `TypeError`。
-    文字列の key は長さを数えてから写す。
+    文字列の key は長さを数えてから写す。enum は組み込みのままの `__str__` だけ
+    （`live_values.as_str`。上書きした `__str__` は producer なので `TypeError`）。
     """
 
-    if isinstance(key, str) and not isinstance(key, Enum):
-        work.charge(len(key))
-        return str.__str__(key)
-    if isinstance(key, Enum):
-        # enum の `__str__` は組み込みのものだけ（上書きした `__str__` は producer）
-        if type(key).__str__ not in _BUILTIN_ENUM_STR:
-            raise TypeError(f"mapping key {type(key).__name__} overrides __str__")
-        return str(key)
-    if key is None or isinstance(key, (bool, int, float)):
-        return str(_exact_primitive(key)) if key is not None else "None"
-    raise TypeError(f"mapping key {type(key).__name__} has no bounded canonical form")
+    base = plain_scalar(key)
+    if base is NOT_PLAIN:
+        if is_enum(key):
+            return as_str(key)
+        raise TypeError(f"mapping key {type_name(type(key))} has no bounded canonical form")
+    if type(base) is str:
+        work.charge(len(base))
+        return base
+    return str(base)
 
 
-def _json_key(key: Any, work: Any) -> str:
-    """`json.dumps` が dict の key を文字列にする規則（enum の値の中の dict）。"""
+def _json_key(key: Any, work: Any) -> tuple:
+    """`json.dumps(sort_keys=True)` が dict の key を並べる値と、文字列にした key（enum の値の中の dict）。"""
 
-    if isinstance(key, str):
-        work.charge(len(key))
-        return str.__str__(key)
-    if key is True:
-        return "true"
-    if key is False:
-        return "false"
-    if key is None:
-        return "null"
-    if isinstance(key, int):
-        return int.__repr__(int.__index__(key))
-    if isinstance(key, float):
-        return json.dumps(float(key))
-    raise TypeError(f"keys must be str, int, float, bool or None, not {type(key).__name__}")
+    base = json_scalar(key)
+    kind = type(base)
+    if kind is str:
+        work.charge(len(base))
+        return base, base
+    if base is True:
+        return base, "true"
+    if base is False:
+        return base, "false"
+    if base is None:
+        return base, "null"
+    if kind is int:
+        return base, int.__repr__(base)
+    if kind is float:
+        return base, json.dumps(base)
+    raise TypeError(f"keys must be str, int, float, bool or None, not {type_name(type(key))}")
 
 
 class _Sink:
@@ -196,17 +182,16 @@ class _Sink:
 
 
 class _End:
-    """容器を閉じる action（閉路の判定から外し、閉じ括弧を流す）。
+    """容器を閉じる action（閉路の判定から外す。閉じ括弧はこの直前に積んだ byte 列が流す）。
 
     容器そのものを持つ: 固定の形の要約（`register_fixed_canonical`）が作った一時的な容器が、
     子を辿り終える前に解放されて `id` が別の容器に再利用されると、閉路でない値を閉路と誤る。
     """
 
-    __slots__ = ("container", "closing")
+    __slots__ = ("container",)
 
-    def __init__(self, container: Any, closing: bytes) -> None:
+    def __init__(self, container: Any) -> None:
         self.container = container
-        self.closing = closing
 
 
 class _Raw:
@@ -227,25 +212,35 @@ def canonical_fingerprint(value: Any, *, work: Any) -> str:
 
 
 def _normalize(item: Any, work: Any) -> Any:
-    """canonical_value と同じ正規化（容器以外）。1 歩ごとに数える。"""
+    """canonical_value と同じ正規化（容器以外）。1 歩ごとに数える。
+
+    scalar（subclass を含む）は基底型の値（`live_values.plain_scalar`）、enum は `_value_`
+    （`live_values.enum_value`。`value` を上書きした property は producer なので呼ばない）、
+    容器の値を持つ enum は `_Raw`、それ以外は値そのもの。
+    """
 
     while True:
-        if item is None or type(item) in _PRIMITIVE_TYPES:
-            return item
-        if isinstance(item, Enum):
+        if item is None:
+            return None
+        kind = type(item)
+        if kind is str or kind is int or kind is float or kind is bool:
+            return plain_scalar(item)
+        if is_enum(item):
             work.charge(1)
-            # enum の値は組み込みの保存場所から読む（`value` を上書きした property は producer）
-            raw = object.__getattribute__(item, "_value_")
-            if raw is None or isinstance(raw, (bool, int, float, str)):
-                return None if raw is None else _exact_primitive(raw)
+            raw = enum_value(item)
+            scalar = plain_scalar(raw)
+            if scalar is not NOT_PLAIN:
+                return scalar
             return _Raw(raw)
-        summary = _FIXED_CANONICAL.get(type(item))
-        if summary is not None:
+        if kind is _bounded_evidence_type():
+            from scripts.function_tracer_pcode.core.json_encoding import BoundedEvidence
+
             work.charge(1)
-            item = summary(item)
+            item = BoundedEvidence.summary(item)
             continue
-        if isinstance(item, (str, int, float, bool)):
-            return _exact_primitive(item)
+        scalar = plain_scalar(item)
+        if scalar is not NOT_PLAIN:
+            return scalar
         return item
 
 
@@ -263,17 +258,47 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
             continue
         if type(action) is _End:
             active.discard(id(action.container))
-            sink.emit(action.closing)
             continue
         if type(action) is _Key:
-            sink.emit_string(action.text)
+            text = action.text
+            if type(text) is not str:  # pragma: no cover - `_Key` は文字列にした key だけを持つ
+                raise TypeError("a mapping key was not converted to text")
+            sink.emit_string(text)
             continue
-        raw_json = type(action) is _RawItem
-        item = action.value if raw_json else _normalize(action, work)
+        # 速い経路: 組み込みの型そのものの scalar と列（正規化も producer の確認も要らない）
+        if type(action) in (str, int, float, bool):
+            sink.emit_leaf(action)
+            continue
+        if action is None:
+            sink.emit(b"null")
+            continue
+        if type(action) in (tuple, list):
+            identity = id(action)
+            if identity in active:
+                raise CanonicalValueCycle("a canonical value contains itself")
+            count = size(action)
+            work.charge(count + 1)
+            active.add(identity)
+            sink.emit(b"[")
+            actions.append(b"]")
+            actions.append(_End(action))
+            for index in range(count - 1, -1, -1):
+                actions.append(action[index])
+                if index:
+                    actions.append(b",")
+            continue
+        if type(action) is _RawItem:
+            item = action.value
+            raw_json = True
+        else:
+            item = _normalize(action, work)
+            raw_json = False
         if type(item) is _Raw:
-            item, raw_json = item.value, True
-        if item is None or isinstance(item, (bool, int, float, str)):
-            sink.emit_leaf(item if type(item) in _PRIMITIVE_TYPES or item is None else _exact_primitive(item))
+            item = item.value
+            raw_json = True
+        scalar = json_scalar(item) if raw_json else plain_scalar(item)
+        if scalar is not NOT_PLAIN:
+            sink.emit_leaf(scalar)
             continue
         identity = id(item)
         if identity in active:
@@ -285,45 +310,37 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
         if inspect.getattr_static(type(item), "to_authority_dict", None) is not None:
             # authority の値は `to_authority_dict()`（producer）の形で digest される: その形を作らずに
             # 同じ digest は求められない（field を辿ると別の digest を `canonical_sha256` と名乗る）
-            raise TypeError(f"{type(item).__name__} has no bounded canonical form")
-        if (is_dataclass(item) and not isinstance(item, type)) or (type(item) in _MAPPING_TYPES and builtin_mapping(item) is not None):
-            pairs = _pairs(item, work)
+            raise TypeError(f"{type_name(type(item))} has no bounded canonical form")
+        if _pairs(actions, item, work):
             active.add(identity)
             sink.emit(b"[")
-            actions.append(_End(item, b"]"))
-            for index in range(len(pairs) - 1, -1, -1):
-                key, child = pairs[index]
-                # [key,value] の組（canonical_value の mapping / dataclass の形）
-                actions.append(b"]")
-                actions.append(child)
-                actions.append(b",")
-                actions.append(_Key(key))
-                actions.append(b"[")
+            continue
+        if builtin_sequence(item):
+            count = size(item)
+            work.charge(count + 1)
+            children = list(elements_of(item))
+            active.add(identity)
+            sink.emit(b"[")
+            actions.append(b"]")
+            actions.append(_End(item))
+            for index in range(count - 1, -1, -1):
+                actions.append(children[index])
                 if index:
                     actions.append(b",")
             continue
-        if _is_builtin_sequence(item):
-            work.charge(len(item) + 1)
-            active.add(identity)
-            sink.emit(b"[")
-            actions.append(_End(item, b"]"))
-            for index in range(len(item) - 1, -1, -1):
-                actions.append(item[index])
-                if index:
-                    actions.append(b",")
-            continue
-        if _is_builtin_set(item):
-            work.charge(len(item) + 1)
+        if builtin_set(item):
+            work.charge(size(item) + 1)
             active.add(identity)
             # canonical_value と同じ並び（要素の authority_digest 順）。要素の canonical JSON を
-            # 作業量の中で作り、digest で並べてから流す（流す byte は数え済み）
+            # 作業量の中で作り、digest で並べてから流す（流す byte は数え済み）。digest の等しい
+            # 要素は canonical JSON も等しいので、(digest, byte 列) の組で並べても流す byte は同じ
             members = []
-            for member in item:
+            for member in elements_of(item):
                 member_sink = _Sink(work, keep=True, in_set=True)
                 _emit(member_sink, member, active)
                 members.append((member_sink.hasher.hexdigest(), member_sink.buffer))
             active.discard(identity)
-            members.sort(key=lambda pair: pair[0])
+            members.sort()
             sink.emit(b"[")
             for index, (_digest, chunks) in enumerate(members):
                 if index:
@@ -333,7 +350,7 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
             sink.emit(b"]")
             continue
         # producer を持つ値（`to_authority_dict`・上書きした容器の振る舞い）と未知の型は辿らない
-        raise TypeError(f"{type(item).__name__} has no bounded canonical form")
+        raise TypeError(f"{type_name(type(item))} has no bounded canonical form")
 
 
 class _Key:
@@ -350,51 +367,90 @@ class _RawItem:
         self.value = value
 
 
-def _pairs(item: Any, work: Any) -> list:
-    """mapping / dataclass の (key, 子) を、幅を数えてから key で並べる。"""
+def _pairs(actions: list, item: Any, work: Any) -> bool:
+    """mapping / dataclass の (key, 子) を、幅を数えてから key で並べて積む（容器の終わりを含む）。
 
-    if is_dataclass(item):
-        names = [field_info.name for field_info in fields(item)]
+    mapping / dataclass でなければ何も積まずに `False`。
+    """
+
+    names = dataclass_field_names(item)
+    if names is not None:
         work.charge(len(names) + 1)
-        return [(name, _field_value(item, name)) for name in names]
-    work.charge(len(item) + 1)
-    pairs = [(_scalar_key(key, work), child) for key, child in item.items()]
-    pairs.sort(key=lambda pair: pair[0])
-    return pairs
+        texts = names
+        children = [field_value(item, name) for name in names]
+    else:
+        mapping = builtin_mapping(item) if type(item) in _MAPPING_TYPES else None
+        if mapping is None:
+            return False
+        work.charge(size(mapping) + 1)
+        # (key の文字列, 元の位置) で並べる（key だけで並べる安定な整列と同じ順）
+        keyed = []
+        values = []
+        for key, child in items_of(mapping):
+            keyed.append((_scalar_key(key, work), len(values)))
+            values.append(child)
+        keyed.sort()
+        texts = [text for text, _position in keyed]
+        children = [values[position] for _text, position in keyed]
+    actions.append(b"]")
+    actions.append(_End(item))
+    for index in range(len(texts) - 1, -1, -1):
+        # [key,value] の組（canonical_value の mapping / dataclass の形）
+        actions.append(b"]")
+        actions.append(children[index])
+        actions.append(b",")
+        actions.append(_Key(texts[index]))
+        actions.append(b"[")
+        if index:
+            actions.append(b",")
+    return True
 
 
 def _push_raw_container(actions: list, item: Any, work: Any, *, in_set: bool) -> None:
     """enum の値（正規化されない値）を `json.dumps(sort_keys=True)` と同じ形で積む。"""
 
-    if type(item) in _MAPPING_TYPES and builtin_mapping(item) is not None:
+    mapping = builtin_mapping(item) if type(item) in _MAPPING_TYPES else None
+    if mapping is not None:
         if in_set:
             # set の要素の並びは要素の canonical な形を **もう一度** 正規化した値の digest
             # （mapping は [key, 値] の組になる）で、流す byte（`{...}`）とは別の形。有界な
             # canonical な形を約束しない（呼ぶ側は型つき token の fingerprint へ退く）
             raise TypeError("an enum mapping value inside a set has no bounded canonical form")
-        work.charge(len(item) + 1)
-        # `json.dumps(sort_keys=True)` と同じく元の key で並べてから文字列にする
-        pairs = [(_json_key(key, work), child) for key, child in sorted(item.items())]
-        actions.append(_End(item, b"}"))
-        for index in range(len(pairs) - 1, -1, -1):
-            key, child = pairs[index]
-            actions.append(_RawItem(child))
+        work.charge(size(mapping) + 1)
+        # `json.dumps(sort_keys=True)` と同じく key の（基底型の）値で並べてから文字列にする
+        keyed = []
+        texts = []
+        values = []
+        for key, child in items_of(mapping):
+            order, text = _json_key(key, work)
+            keyed.append((order, len(values)))
+            texts.append(text)
+            values.append(child)
+        order = sorted(keyed)
+        actions.append(b"}")
+        actions.append(_End(item))
+        for index in range(len(order) - 1, -1, -1):
+            position = order[index][1]
+            actions.append(_RawItem(values[position]))
             actions.append(b":")
-            actions.append(_Key(key))
+            actions.append(_Key(texts[position]))
             if index:
                 actions.append(b",")
         actions.append(b"{")
         return
-    if _is_builtin_sequence(item):
-        work.charge(len(item) + 1)
-        actions.append(_End(item, b"]"))
-        for index in range(len(item) - 1, -1, -1):
-            actions.append(_RawItem(item[index]))
+    if builtin_sequence(item):
+        count = size(item)
+        work.charge(count + 1)
+        children = list(elements_of(item))
+        actions.append(b"]")
+        actions.append(_End(item))
+        for index in range(count - 1, -1, -1):
+            actions.append(_RawItem(children[index]))
             if index:
                 actions.append(b",")
         actions.append(b"[")
         return
-    raise TypeError(f"unsupported enum value: {type(item).__name__}")
+    raise TypeError(f"unsupported enum value: {type_name(type(item))}")
 
 
-__all__ = ["CanonicalValueCycle", "canonical_fingerprint", "register_fixed_canonical"]
+__all__ = ["CanonicalValueCycle", "canonical_fingerprint"]

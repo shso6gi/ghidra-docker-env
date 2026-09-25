@@ -37,6 +37,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 
 from scripts.function_tracer_pcode.authority.contracts import CActiveBaseRow, QOpenBaseRow
 
+from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import (
     EVIDENCE_INLINE_BYTES,
     INT_MAX_BYTES,
@@ -151,13 +152,23 @@ def superseded_decision_receipt_record(result: Any) -> Optional[Dict[str, Any]]:
         decision_receipt_payload,
     )
 
-    receipt = getattr(result, "decision_receipt", None)
+    # 結果は live_values の規則だけで読む（instance の値と package の property。`__getattr__` を
+    # 呼ばない）。receipt の payload は receipt の owner が exact な型を確かめてから作る
+    receipt = live_values.attribute(result, "decision_receipt")
     if receipt is None:
         return None
+    from scripts.function_tracer_pcode.authority.decision.conditional import ConditionalDecisionReceipt
+    from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
+
     try:
+        # receipt の owner へは exact な receipt の型だけを渡す（それ以外は作れなかった形）
+        if type(receipt) is not DecisionReceipt:
+            raise TypeError("superseded decision receipt is not an exact DecisionReceipt")
         record: Dict[str, Any] = {"decision_receipt": decision_receipt_payload(receipt)}
-        conditional = getattr(result, "conditional_decision_receipt", None)
+        conditional = live_values.attribute(result, "conditional_decision_receipt")
         if conditional is not None:
+            if type(conditional) is not ConditionalDecisionReceipt:
+                raise TypeError("superseded conditional receipt is not an exact ConditionalDecisionReceipt")
             record["conditional_decision_receipt"] = conditional_decision_receipt_payload(conditional)
         return record
     except SUPERSEDED_PAYLOAD_FAILURES as exc:
@@ -171,10 +182,15 @@ SUPERSEDED_PAYLOAD_FAILURES = (TypeError, ValueError, AttributeError, LookupErro
 def superseded_digest_record(result: Any, *, unavailable: str) -> Dict[str, Any]:
     """取って代わられた判定の receipt の digest だけの形（固定長。payload を作らない）。"""
 
-    receipt = getattr(result, "decision_receipt", None)
-    digest = getattr(receipt, "receipt_digest", None) if receipt is not None else None
+    receipt = live_values.attribute(result, "decision_receipt")
+    digest = live_values.attribute(receipt, "receipt_digest") if receipt is not None else None
+    if type(digest) is str:
+        if len(digest) > ID_MAX_CHARS:
+            digest = None
+    else:
+        digest = None
     return {
-        "decision_receipt_digest": digest if type(digest) is str and len(digest) <= ID_MAX_CHARS else None,
+        "decision_receipt_digest": digest,
         "payload_unavailable": builtin_str(unavailable)[:SUPERSEDED_UNAVAILABLE_MAX_CHARS],
     }
 

@@ -4,8 +4,8 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Dict, Optional, Any, FrozenSet
-from itertools import chain
 
+from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import Tally, each, inline, materialize, scan
 
 
@@ -67,11 +67,12 @@ class PcodeEvidence:
     
     def json_items(self):
         yield "opcode", self.opcode
-        yield "category", self.category.value
+        # enum の値は member の `_value_`（`value` の property を呼ばない）
+        yield "category", live_values.enum_value(self.category)
         yield "address", self.address
-        if self.context:
+        if self.context is not None and live_values.as_bool(self.context):
             yield "context", self.context
-        if self.excluded:
+        if live_values.as_bool(self.excluded):
             yield "excluded", True
             yield "exclusion_reason", self.exclusion_reason
 
@@ -165,24 +166,36 @@ class SignednessEvidence:
     def json_items(self):
         # 件数は list の長さ（固定個数）。opcode 別件数は walker が証拠を 1 つずつ数えながら
         # 集計する（`scan`。列を連結・複製しない）
-        yield "result", self.result.value
+        # 列・enum は owner の API で読む（出力の入口から live な値として辿られる）
+        signed_strong = self.signed_strong
+        signed_medium = self.signed_medium
+        unsigned = self.unsigned
+        excluded_fastpath = self.excluded_fastpath
+        yield "result", live_values.enum_value(self.result)
         yield "summary", inline(
-            ("signed_strong", len(self.signed_strong)),
-            ("signed_medium", len(self.signed_medium)),
-            ("unsigned", len(self.unsigned)),
-            ("ignored", len(self.ignored)),
-            ("excluded_fastpath", len(self.excluded_fastpath)),
+            ("signed_strong", live_values.size(signed_strong)),
+            ("signed_medium", live_values.size(signed_medium)),
+            ("unsigned", live_values.size(unsigned)),
+            ("ignored", live_values.size(self.ignored)),
+            ("excluded_fastpath", live_values.size(excluded_fastpath)),
         )
         yield "opcode_counts", scan(
-            chain(self.signed_strong, self.signed_medium, self.unsigned), Tally("opcode"),
+            _evidences_in_order(signed_strong, signed_medium, unsigned), Tally("opcode"),
         )
-        yield "signed_strong", each(self.signed_strong)
-        yield "signed_medium", each(self.signed_medium)
-        yield "unsigned", each(self.unsigned)
-        if self.excluded_fastpath:
-            yield "excluded_fastpath", each(self.excluded_fastpath)
-            yield "excluded_opcode_counts", scan(iter(self.excluded_fastpath), Tally("opcode"))
+        yield "signed_strong", each(signed_strong)
+        yield "signed_medium", each(signed_medium)
+        yield "unsigned", each(unsigned)
+        if live_values.as_bool(excluded_fastpath):
+            yield "excluded_fastpath", each(excluded_fastpath)
+            yield "excluded_opcode_counts", scan(live_values.elements_of(excluded_fastpath), Tally("opcode"))
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)
     
+
+
+def _evidences_in_order(*groups: Any):
+    """証拠の列を順に 1 要素ずつ返す（旧 `itertools.chain`。列は owner の API で辿る）。"""
+
+    for group in groups:
+        yield from live_values.elements_of(group)

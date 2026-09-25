@@ -19,6 +19,18 @@ PUBLIC_NAMES = (
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
 
 
+
+LIVE_VALUES = "scripts.function_tracer_pcode.core.live_values"
+
+
+def _imports_only_the_standard_library(module_name):
+    import importlib
+
+    tree = ast.parse(inspect.getsource(importlib.import_module(module_name)))
+    mods = [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
+    mods += [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
+    return not [m for m in mods if m.startswith("scripts")]
+
 def _canonical_public_names():
     tree = ast.parse(inspect.getsource(canonical)); names = set()
     for node in tree.body:
@@ -36,7 +48,9 @@ def test_public_surface_and_module_identity_are_canonical():
     tree = ast.parse(inspect.getsource(canonical))
     mods = [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)] + \
            [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
-    assert not [m for m in mods if m.startswith("scripts.")]
+    assert not [m for m in mods if m.startswith("scripts.") and m != LIVE_VALUES]
+    # 例外は live な値を読む唯一の規則（`core.live_values`。標準 library だけに依る最下層）
+    assert _imports_only_the_standard_library(LIVE_VALUES)
 
 
 def test_serialization_round_trip():

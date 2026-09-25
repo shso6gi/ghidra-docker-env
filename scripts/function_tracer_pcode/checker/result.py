@@ -4,7 +4,7 @@
 from typing import Optional, Dict, Any, List, Mapping, Tuple
 from dataclasses import dataclass, field
 
-from scripts.function_tracer_pcode.core import FunctionSignature
+from scripts.function_tracer_pcode.core import FunctionSignature, live_values
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverStatus
 from scripts.function_tracer_pcode.checker.counterexample import FormattedCounterexample
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
@@ -248,7 +248,8 @@ class EquivalenceResult:
 
     def __post_init__(self) -> None:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
-        if self.unknown_recovery_actions:
+        actions = self.unknown_recovery_actions
+        if actions is not None and live_values.as_bool(actions):
             self.unknown_recovery_actions = list(
                 coerce_unknown_recovery_actions(self.unknown_recovery_actions)
             )
@@ -261,30 +262,37 @@ class EquivalenceResult:
             self.decision_gated_by_pending_proof = True
 
     def _has_pending_proof_gate(self) -> bool:
-        for action in self.unknown_recovery_actions:
-            if action.status != UnknownRecoveryActionStatus.PENDING_PROOF.value:
+        pending = UnknownRecoveryActionStatus.PENDING_PROOF.value
+        for action in live_values.elements_of(self.unknown_recovery_actions):
+            # 状態は基底型の文字列で比べる（action の field は owner の規則で読む）
+            if live_values.str_value(live_values.attribute(action, "status")) != pending:
                 continue
-            if action.proof_obligation_id is not None or action.object_target_key is not None:
+            if (
+                live_values.attribute(action, "proof_obligation_id") is not None
+                or live_values.attribute(action, "object_target_key") is not None
+            ):
                 return True
         return False
     
     def is_timeout(self) -> bool:
-        """タイムアウトで結果が不明かどうかを判定"""
-        if self.decision_receipt is not None:
-            from scripts.function_tracer_pcode.authority.decision.production_cutover import (
-                outcome_from_result,
-            )
+        """タイムアウトで結果が不明かどうかを判定（出力の bounded path も呼ぶ: 値は owner の規則で読む）"""
+        if live_values.attribute(self, "decision_receipt") is not None:
             from scripts.function_tracer_pcode.authority.contracts import Outcome
 
-            return outcome_from_result(self) is Outcome.TIMEOUT
-        if self.canonical_decision_required:
+            return decided_outcome_of(self) is Outcome.TIMEOUT
+        if live_values.as_bool(live_values.attribute(self, "canonical_decision_required", False)):
             raise ValueError("canonical result lacks DecisionReceipt")
-        if self.is_equivalent is not None:
+        if live_values.attribute(self, "is_equivalent") is not None:
             return False
-        if not self.solver_results or not self.solver_results.results:
+        solver_results = live_values.attribute(self, "solver_results")
+        if solver_results is None or not live_values.as_bool(solver_results):
             return False
-        for sr in self.solver_results.results:
-            if sr.status == SolverStatus.TIMEOUT:
+        results = live_values.attribute(solver_results, "results")
+        if results is None or not live_values.as_bool(results):
+            return False
+        for sr in live_values.elements_of(results):
+            # `SolverStatus` は mixin の無い enum: `==` は identity
+            if live_values.attribute(sr, "status") is SolverStatus.TIMEOUT:
                 return True
         return False
     
@@ -310,11 +318,17 @@ class EquivalenceResult:
 
     def get_effective_function1_signature(self) -> Optional[FunctionSignature]:
         """判定時に有効だった binary1 側シグネチャを返す。"""
-        return self.effective_function1_signature or self.function1_signature
+        return _first_present(
+            live_values.attribute(self, "effective_function1_signature"),
+            live_values.attribute(self, "function1_signature"),
+        )
 
     def get_effective_function2_signature(self) -> Optional[FunctionSignature]:
         """判定時に有効だった binary2 側シグネチャを返す。"""
-        return self.effective_function2_signature or self.function2_signature
+        return _first_present(
+            live_values.attribute(self, "effective_function2_signature"),
+            live_values.attribute(self, "function2_signature"),
+        )
     
     def to_dict(self) -> Dict[str, Any]:
         """機械可読な辞書に変換（JSON シリアライズ可能）。
@@ -543,3 +557,39 @@ class EquivalenceResult:
         lines.append("=" * 70)
         return "\n".join(lines)
 
+
+def _first_present(preferred: Any, fallback: Any) -> Any:
+    """`preferred or fallback`（真偽は owner の規則で読む）。"""
+
+    if preferred is not None and live_values.as_bool(preferred):
+        return preferred
+    return fallback
+
+
+def decided_outcome_of(result: Any) -> Any:
+    """receipt が決めた outcome（`outcome_from_result` と同じ検査。結果の値は owner の規則で読む）。"""
+
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import outcome_from_projection
+
+    raw_declared = live_values.attribute(result, "final_outcome")
+    declared: Any = None
+    if raw_declared is not None:
+        # 基底型の文字列（str の enum も `json_scalar` で値の文字列）。文字列でなければ比べて矛盾にする
+        base = live_values.json_scalar(raw_declared)
+        declared = base if type(base) is str else _NOT_AN_OUTCOME
+    raw_equivalent = live_values.attribute(result, "is_equivalent")
+    # `True` / `False` / `None` の identity だけを渡す（それ以外は矛盾の印）
+    equivalent: Any = (
+        True if raw_equivalent is True else False if raw_equivalent is False
+        else None if raw_equivalent is None else _NOT_AN_OUTCOME
+    )
+    from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
+
+    receipt = live_values.attribute(result, "decision_receipt")
+    if type(receipt) is not DecisionReceipt:
+        raise ValueError("canonical result lacks its DecisionReceipt authority")
+    return outcome_from_projection(receipt, final_outcome=declared, is_equivalent=equivalent)
+
+
+#: `decided_outcome_of` が矛盾として渡す印（どの outcome とも等しくない plain な値）
+_NOT_AN_OUTCOME = "<not an outcome>"

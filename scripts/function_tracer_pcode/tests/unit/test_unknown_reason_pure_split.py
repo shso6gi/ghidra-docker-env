@@ -34,11 +34,25 @@ CHECKER_OWNED = (
     "LegacyReasonIndex", "legacy_reason_index",
     "finitize_unknown_reason_record", "finitize_unknown_recovery_action",
     "iter_unknown_recovery_actions", "recovery_actions_source", "unknown_reason_counts_source", "recovery_backlog_source",
+    # 6 回目: 集計の reducer（`scan` へ渡す package の `Reducer`。debug trace が同じ集計を畳む）
+    "recovery_actions_reducer", "unknown_reason_counts_reducer", "recovery_backlog_reducer",
     "EVIDENCE_REF_MAX_CHARS", "EVIDENCE_REFS_MAX_COUNT", "PROJECTION_DIAGNOSTIC_LEGACY_ROWS",
     "TYPED_CAUSE_KEY_INLINE_BYTES",
 )
 SNAPSHOT = pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "unknown_reason_registry_snapshot.json"
 
+
+
+LIVE_VALUES = "scripts.function_tracer_pcode.core.live_values"
+
+
+def _imports_only_the_standard_library(module_name):
+    import importlib
+
+    tree = ast.parse(inspect.getsource(importlib.import_module(module_name)))
+    mods = [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
+    mods += [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
+    return not [m for m in mods if m.startswith("scripts")]
 
 def _top_level_public(module):
     tree = ast.parse(inspect.getsource(module)); names = set()
@@ -54,7 +68,9 @@ def test_canonical_pure_module_imports_no_upper_layer():
     tree = ast.parse(inspect.getsource(proof_ur))
     mods = [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
     mods += [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
-    assert not [m for m in mods if m.startswith("scripts.")], mods
+    assert not [m for m in mods if m.startswith("scripts.") and m != LIVE_VALUES], mods
+    # 例外は live な値を読む唯一の規則（`core.live_values`。標準 library だけに依る最下層）
+    assert _imports_only_the_standard_library(LIVE_VALUES)
     src = inspect.getsource(proof_ur)
     for layer in ("authority", "checker", "reporting"):
         assert f"function_tracer_pcode.{layer}" not in src

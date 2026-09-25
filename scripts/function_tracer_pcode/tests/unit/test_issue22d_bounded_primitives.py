@@ -40,11 +40,13 @@ from scripts.function_tracer_pcode.core.errors import AnalysisLimitation, reset_
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.json_encoding import (
     RESULT_JSON_POLICY,
+    JsonValueRejected,
     BoundedEvidence,
     JsonBudget,
     JsonBudgetExhausted,
     UNFINGERPRINTED_CYCLE,
     UNFINGERPRINTED_WORK_EXHAUSTED,
+    source_converter,
 )
 from scripts.function_tracer_pcode.tests.unit.test_issue22d_output_preparation import _decided_result
 
@@ -141,16 +143,21 @@ def test_a_million_recovery_actions_are_a_limitation_without_finitizing_them():
 
 
 def test_a_million_refs_and_requirement_ids_are_pulled_only_up_to_the_prefix():
-    refs = _CountedSequence(1_000_000, "ref")
-    requirements = _CountedSequence(1_000_000, "req:x")
+    refs = ["ref"] * 1_000_000
+    requirements = ["req:x"] * 1_000_000
     record = make_unknown_reason("unknown", stage="S")
     record = dataclasses.replace(record, evidence_refs=refs, proof_requirement_ids=requirements)
     finitized, elapsed, peak = _measured(
         lambda: finitize_unknown_reason_record(record, work=JsonBudget(1 << 20)),
     )
-    assert refs.pulled == EVIDENCE_REFS_MAX_COUNT and requirements.pulled == EVIDENCE_REFS_MAX_COUNT
+    assert len(finitized.evidence_refs) == EVIDENCE_REFS_MAX_COUNT + 1
     assert finitized.evidence_refs[-1] == f"…(+{1_000_000 - EVIDENCE_REFS_MAX_COUNT} refs)"
     assert elapsed < 0.5 and peak < 4 * 1024 * 1024
+    # 組み込みでない列（`__len__` / `__iter__` を持つ object）は辿らない（その code を呼ばない）
+    counted = _CountedSequence(1_000_000, "ref")
+    record = dataclasses.replace(record, evidence_refs=counted, proof_requirement_ids=counted)
+    finitize_unknown_reason_record(record, work=JsonBudget(1 << 20))
+    assert counted.pulled == 0
 
 
 def test_a_very_wide_target_key_is_summarized_within_the_work():
@@ -530,7 +537,7 @@ def test_the_internal_legacy_evidence_draws_on_the_shared_budget_last(monkeypatc
     assert all(names[index:index + 3] == order for index in range(0, len(names), 3))
 
 # ---------------------------------------------------------------------------
-# yield しない仕事（`metered`）・producer の失敗・LEGACY の列
+# yield しない仕事（reducer）・producer の失敗・LEGACY の列
 # ---------------------------------------------------------------------------
 
 
@@ -570,32 +577,36 @@ def test_recovery_actions_charge_the_key_they_copy_into_the_obligation_id():
                 pulled.append(1)
                 yield item
 
-    inner = _CountingList(range(1_000))
-    wide = [inner] * 1_000  # 写すと 100 万要素
+    wide = [list(range(1_000))] * 1_000  # 写すと 100 万要素
     record = dataclasses.replace(
         make_unknown_reason("return_width_bridge_missing", stage="S"), object_target_key=wide, evidence_kind="k",
     )
     # 登録済みの obligation を持つ reason: key を写して proof obligation id を作る経路
     assert any(action.proof_obligation_id is not None for action in build_unknown_recovery_actions([record]))
-    pulled.clear()
+    started = time.perf_counter()
     with pytest.raises(JsonBudgetExhausted):
         RESULT_JSON_POLICY.prepare(recovery_actions_source([record]), max_bytes=10_000)
-    # 写す前に要素の数を数えて止まる（入れ子の列を 1 つも写さない）
-    assert len(pulled) < 10_000
+    # 写す前に要素の数を数えて止まる（100 万要素を写さない）
+    assert time.perf_counter() - started < 0.5
+    # 上書きした `__iter__` の列は辿らない（葉として置く。その code を呼ばない）
+    inner = _CountingList(range(1_000))
+    record = dataclasses.replace(record, object_target_key=[inner] * 1_000)
+    pulled.clear()
+    try:
+        RESULT_JSON_POLICY.prepare(recovery_actions_source([record]), max_bytes=10_000)
+    except (JsonBudgetExhausted, JsonValueRejected):
+        pass
+    assert pulled == []
 
 
 def test_the_final_attempt_search_and_observed_reasons_are_charged_per_attempt():
     from scripts.function_tracer_pcode.checker.debug_trace import DebugTrace
-    from scripts.function_tracer_pcode.checker.unknown_reason import unknown_reason_counts_source
-    from scripts.function_tracer_pcode.core.json_encoding import metered
 
     # reason の無い attempt を 100 万: 引き出す要素が無くても、探した attempt を数える
     attempts = [SimpleNamespace(result=True, transition_reason="UNSAT", unknown_reasons=())] * 1_000_000
     trace = DebugTrace(attempts=attempts)
-    for source in (
-        metered(lambda work: unknown_reason_counts_source(trace._final_unknown_reasons(work))),
-        metered(lambda work: unknown_reason_counts_source(trace._iter_observed_unknown_reasons(work))),
-    ):
+    items = dict(trace.json_items())
+    for source in (items["unknown_reason_counts"], items["observed_unknown_reason_counts"]):
         started = time.perf_counter()
         with pytest.raises(JsonBudgetExhausted):
             RESULT_JSON_POLICY.prepare(source, max_bytes=10_000)
@@ -714,10 +725,17 @@ def test_the_diagnostics_view_does_not_prepare_trace_rows_under_another_budget()
     view = result_diagnostics_payload(result, lazy=True)
     # 作っただけでは trace を辿らない（別の予算で先に準備しない）
     assert pulled == []
-    with pytest.raises(JsonBudgetExhausted):
+    # 組み込みでない列（上書きした `__len__` / `__iter__`）は辿らない: JSON にならない値
+    with pytest.raises(JsonValueRejected):
         RESULT_JSON_POLICY.prepare(view, max_bytes=10_000)
-    # 1 要素 1 以上を数えるので、引き出すのは予算の byte 数まで
-    assert len(pulled) <= 10_001
+    assert pulled == []
+    # 組み込みの列なら、1 要素 1 以上を数えて予算で止まる
+    rows = [SimpleNamespace(solver_results=None, attempt_id="a", phase="P", strategy="s", elapsed_time=0.0)] * 1_000_000
+    result.debug_trace = SimpleNamespace(attempts=rows)
+    started = time.perf_counter()
+    with pytest.raises(JsonBudgetExhausted):
+        RESULT_JSON_POLICY.prepare(result_diagnostics_payload(result, lazy=True), max_bytes=10_000)
+    assert time.perf_counter() - started < 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -778,7 +796,7 @@ def test_requirement_ids_are_measured_before_they_are_written_as_text():
 
     huge = _Requirement(range(200_000))
     # 照合は `str(requirement) == str(canonical_value(obligation))`（obligation の canonical な形は tuple）
-    small = _Requirement((("requirement", "r"),))
+    small = (("requirement", "r"),)
     record = dataclasses.replace(
         make_unknown_reason("unknown", stage="S"), proof_obligation_id={"requirement": "r"},
     )
@@ -786,8 +804,8 @@ def test_requirement_ids_are_measured_before_they_are_written_as_text():
         "unknown", _cause(("k",), (small, huge)), (record,), {"unknown": 2}, work=JsonBudget(50_000),
     )
     assert matched == (record,)
-    # 大きい requirement は数えきれないので文字列にしない（小さい方だけ）
-    assert len(written) == 1
+    # 上書きした `__str__` は呼ばない（大きい requirement は型名の印。小さい方は組み込みの `str` の写し）
+    assert written == []
 
 
 def test_the_decided_text_is_written_only_after_the_envelope_fits():
@@ -898,11 +916,10 @@ def test_a_wide_scope_key_in_a_truncation_record_is_charged_before_it_is_sorted(
 
     from collections.abc import Mapping as _Mapping
 
-    record = ExpansionBudgetTruncation(kind="k")
-    # 組み込みの mapping: 幅を数えた時点で止まる（100 万の key を文字列にして並べない）
+    # identity（100 万の key を並べた canonical な値）は構築のとき（owner #194）に作る。出力は
+    # その写し（組み込みの値だけ）を、幅を数えながら辿って止まる
     wide = {f"k{index}": 0 for index in range(1_000_000)}
-    object.__setattr__(record, "owner_scope_key", (wide,))
-    object.__setattr__(record, "_event_id_cache", "e" * 64)
+    record = ExpansionBudgetTruncation(kind="k", owner_scope_key=(wide,))
     # 並べる列（100 万の組）を作る前に止まる: 止まるまでに確保した memory は予算の桁
     tracemalloc.start()
     try:
@@ -927,11 +944,11 @@ def test_a_wide_scope_key_in_a_truncation_record_is_charged_before_it_is_sorted(
         def __getitem__(self, key):
             return 0
 
-    # 組み込みでない mapping は辿らない（`__len__` / `__iter__` は producer）: 型名の不透明値
-    object.__setattr__(record, "owner_scope_key", (_Wide(),))
-    prepared = RESULT_JSON_POLICY.prepare(record, max_bytes=10_000).value()
+    # identity は main の規則（組み込みでない mapping も `Mapping` として辿る）。出力はその写しだけを読む
+    record = ExpansionBudgetTruncation(kind="k", owner_scope_key=(_Wide(),))
+    pulled.clear()
+    RESULT_JSON_POLICY.prepare(record, max_bytes=100_000_000)
     assert pulled == []
-    assert prepared["owner_scope_key"][0][0] == "opaque"
 
 
 # ---------------------------------------------------------------------------
@@ -1082,21 +1099,21 @@ def test_evidence_that_fails_while_being_fingerprinted_is_an_unsupported_summary
     assert type(finitized.object_evidence) is BoundedEvidence
 
 
+@source_converter
+def _explode(_item):
+    raise KeyError("fn failed")
+
+
 def test_producer_failures_outside_json_items_are_rejected_values_too():
     from scripts.function_tracer_pcode.core.json_encoding import (
         JsonValueRejected,
         Reducer,
         each,
         scan,
-        source_converter,
     )
 
-    @source_converter
-    def explode(_item):
-        raise KeyError("fn failed")
-
     with pytest.raises(JsonValueRejected, match="producer failed"):
-        RESULT_JSON_POLICY.prepare(each([1], explode))
+        RESULT_JSON_POLICY.prepare(each([1], _explode))
 
     class _Reducer(Reducer):
         def add(self, _element, *, work):
@@ -1114,18 +1131,18 @@ def test_a_diagnostic_whose_reader_fails_is_a_marker():
 
     result = _decided_result()
     decided = (result.final_outcome, result.decision_receipt)
+    # 診断の値の読み方（record の `json_items`）が失敗する: その field だけ marker
+    result.pairwise_stats = _BrokenStats()
 
-    class _Broken:
-        @property
-        def pairwise_stats(self):
-            raise ValueError("no stats")
-
-        def __getattr__(self, name):
-            return getattr(result, name)
-
-    envelope = output_preparation.build_final_result_envelope(_Broken())
+    envelope = output_preparation.build_final_result_envelope(result)
     assert envelope.payload["pairwise_stats"]["truncated"] is True
     assert (result.final_outcome, result.decision_receipt) == decided
+
+
+class _BrokenStats:
+    def json_items(self):
+        raise ValueError("no stats")
+        yield  # pragma: no cover - generator にする
 
 
 def _counting(prefix):
@@ -1159,10 +1176,9 @@ def test_small_live_evidence_is_summarized_like_large_live_evidence():
 def test_scope_key_bytes_and_non_str_keys_are_charged_before_they_are_built():
     from scripts.function_tracer_pcode.core.runtime_refs.unknowns import ExpansionBudgetTruncation
 
-    for scope in ((b"\x00" * 20_000_000,), ({tuple(range(2_000_000)): 1},)):
-        record = ExpansionBudgetTruncation(kind="k")
-        object.__setattr__(record, "owner_scope_key", scope)
-        object.__setattr__(record, "_event_id_cache", "e" * 64)
+    for scope in ((b"\x00" * 2_000_000,), ({tuple(range(200_000)): 1},)):
+        # identity（bytes の hex・tuple の key の文字列）は構築のとき（#194）に作る。出力は写しを辿る
+        record = ExpansionBudgetTruncation(kind="k", owner_scope_key=scope)
         started = time.perf_counter()
         # 他の field（event_id など）は収まり、scope key の途中で止まる上限
         _, _, peak = _measured(lambda: pytest.raises(JsonBudgetExhausted, RESULT_JSON_POLICY.prepare, record, max_bytes=2_000))
@@ -1322,10 +1338,16 @@ def test_fields_of_an_exclusive_output_group_never_appear_together(monkeypatch):
     # 予約する: 両方があれば出力の契約違反（headroom の勘定が壊れる前に止める）
     from scripts.function_tracer_pcode.authority.decision import production_cutover
 
+    from scripts.function_tracer_pcode.checker import output_preparation
+
     result = _decided_result()
     result.superseded_decision_receipt = {"decision_receipt": {"outcome": "UNKNOWN"}}
     result.conditional_decision_receipt = object()
-    monkeypatch.setattr(production_cutover, "conditional_decision_receipt_payload", lambda _receipt: {"x": 1})
+    # conditional 列の読み方（登録した関数）を、receipt の型を問わない形に差し替える
+    monkeypatch.setattr(
+        output_preparation, "_conditional_decision_receipt",
+        lambda r, _o: {"x": 1} if r.conditional_decision_receipt is not None else None,
+    )
     with pytest.raises(OutputEnvelopeInvariantViolation, match="exclusive output group"):
         build_final_result_envelope(result)
     # 片方だけなら収まる

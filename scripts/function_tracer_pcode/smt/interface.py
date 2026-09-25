@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 # Re-exports kept for callers that import these names from this module.
 from typing import List  # noqa: F401
+from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import materialize
 
 
@@ -37,7 +38,8 @@ class SolverResult:
     
     def json_items(self):
         yield "solver_name", self.solver_name
-        yield "status", self.status.name
+        # enum の名前は member の `_name_`（`name` の property を呼ばない）
+        yield "status", live_values.enum_name(self.status)
         yield "elapsed_time", self.elapsed_time
         yield "model", self.model
         yield "error_message", self.error_message

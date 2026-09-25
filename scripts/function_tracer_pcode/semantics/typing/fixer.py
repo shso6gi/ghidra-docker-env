@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
+from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import as_dict, materialize
 from scripts.function_tracer_pcode.core import (
     FunctionReturnAnalysis,
@@ -470,13 +471,13 @@ class TypeFixResult:
         yield "param_signedness_fixed_binary2", self.param_signedness_fixed_binary2
         yield "mips64_abi_fixed_binary1", self.mips64_abi_fixed_binary1
         yield "mips64_abi_fixed_binary2", self.mips64_abi_fixed_binary2
-        if self.param_signedness_override_map_binary1:
+        if live_values.as_bool(self.param_signedness_override_map_binary1):
             yield "param_signedness_override_map_binary1", self.param_signedness_override_map_binary1
-        if self.param_signedness_override_map_binary2:
+        if live_values.as_bool(self.param_signedness_override_map_binary2):
             yield "param_signedness_override_map_binary2", self.param_signedness_override_map_binary2
-        if self.mips64_abi_override_map_binary1:
+        if live_values.as_bool(self.mips64_abi_override_map_binary1):
             yield "mips64_abi_override_map_binary1", self.mips64_abi_override_map_binary1
-        if self.mips64_abi_override_map_binary2:
+        if live_values.as_bool(self.mips64_abi_override_map_binary2):
             yield "mips64_abi_override_map_binary2", self.mips64_abi_override_map_binary2
 
     def to_dict(self) -> dict:

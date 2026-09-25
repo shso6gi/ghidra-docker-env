@@ -883,6 +883,12 @@ class RecurrenceSubproofEvidence:
             not isinstance(item, str) or not item for item in self.dependencies
         ):
             raise ValueError("recurrence subproof dependency digest is invalid")
+        # The digest is derived once from the validated immutable fields.  The
+        # bounded output path (``json_items``) reads this plain value and never
+        # re-encodes the record's fields itself.
+        object.__setattr__(
+            self, "_digest", RecurrenceDigestCodec.digest(self.schema_version, self.stable_key()),
+        )
 
     def stable_key(self) -> Tuple[Any, ...]:
         return (
@@ -892,7 +898,7 @@ class RecurrenceSubproofEvidence:
 
     @property
     def digest(self) -> str:
-        return RecurrenceDigestCodec.digest(self.schema_version, self.stable_key())
+        return self._digest
 
     def json_items(self):
         yield "proof_kind", self.proof_kind
@@ -998,6 +1004,12 @@ class RecurrenceValidationEvidence:
                 )
             ):
                 raise ValueError("recurrence transition evidence binding mismatch")
+        # Derived once from the validated immutable fields (see
+        # ``RecurrenceSubproofEvidence.__post_init__``).
+        object.__setattr__(
+            self, "_proof_result_digest",
+            RecurrenceDigestCodec.digest(self.schema_version, self.stable_key()),
+        )
 
     @property
     def dependency_subproof_digests(self) -> Tuple[str, ...]:
@@ -1012,7 +1024,7 @@ class RecurrenceValidationEvidence:
 
     @property
     def proof_result_digest(self) -> str:
-        return RecurrenceDigestCodec.digest(self.schema_version, self.stable_key())
+        return self._proof_result_digest
 
     def json_items(self):
         yield "seed_core_digest", self.seed_core_digest

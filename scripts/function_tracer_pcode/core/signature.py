@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Mapping, TYPE_CHECKING, Tuple
+from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import as_dict, each, mapping_of, materialize, source_converter
 
 if TYPE_CHECKING:
@@ -467,19 +468,28 @@ def parameter_descriptor_source(param: Dict[str, Any]) -> Any:
 
     from scripts.function_tracer_pcode.core.json_encoding import pairs_of
 
-    return pairs_of(
-        ((key, value) for key, value in (param or {}).items() if key != "data_type_obj"),
-        _parameter_value_source,
-    )
+    if param is None or live_values.builtin_mapping(param) is None and not live_values.as_bool(param):
+        # 旧 `(param or {})`: 偽の値は空の object
+        return pairs_of((), _parameter_value_source)
+    return pairs_of(_parameter_descriptor_pairs(param), _parameter_value_source)
+
+
+def _parameter_descriptor_pairs(param: Any):
+    """`param` の (key, 値) のうち `data_type_obj` 以外（mapping は owner の API で 1 組ずつ読む）。"""
+
+    for key, value in live_values.items_of(param):
+        if live_values.str_value(key) == "data_type_obj":
+            continue
+        yield key, value
 
 
 @source_converter
 def _parameter_value_source(value: Any) -> Any:
     from scripts.function_tracer_pcode.core.json_encoding import as_dict, as_list, raw
 
-    if isinstance(value, dict):
+    if live_values.is_kind(value, dict):
         return as_dict(value)
-    if isinstance(value, list):
+    if live_values.is_kind(value, list):
         return as_list(value)
     return raw(value)
 
@@ -538,7 +548,7 @@ class ResolvedTypeSpec:
             yield "size_bytes", self.size_bytes
         if self.is_signed is not None:
             yield "is_signed", self.is_signed
-        if self.data_type_path:
+        if self.data_type_path is not None and live_values.as_bool(self.data_type_path):
             yield "data_type_path", self.data_type_path
 
     def to_dict(self) -> Dict[str, Any]:
@@ -877,13 +887,13 @@ class SignatureHypothesis:
         yield "parameter_type_overrides", as_dict(self.parameter_type_overrides)
         if self.resolved_return_override is not None:
             yield "resolved_return_override", self.resolved_return_override
-        if self.resolved_parameter_overrides:
+        if live_values.as_bool(self.resolved_parameter_overrides):
             yield "resolved_parameter_overrides", mapping_of(self.resolved_parameter_overrides)
-        if self.phase:
+        if live_values.as_bool(self.phase):
             yield "phase", self.phase
-        if self.reason:
+        if live_values.as_bool(self.reason):
             yield "reason", self.reason
-        if self.evidence:
+        if live_values.as_bool(self.evidence):
             yield "evidence", as_dict(self.evidence)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -956,6 +966,39 @@ class SignatureHypothesis:
         return f"{prefix}: {payload}"
 
 
+#: 戻り値の型の表示名を決める field（書き換えたら表示名を作り直す）
+RETURN_TYPE_INPUTS = frozenset({"return_type", "return_type_obj"})
+#: 戻り値の型の表示名を置く instance の属性（dataclass の field ではない: 等しさ・repr・snapshot に出ない）
+RETURN_TYPE_DISPLAY_ATTRIBUTE = "_return_type_display"
+
+
+def record_return_type_display(record: Any, name: str, value: Any) -> None:
+    """record の field を書き、戻り値の型の表示名を **書いたとき** に 1 度だけ作る（Issue #22 PR-22-D）。
+
+    表示名は Ghidra の `DataType.getName()`（JVM の code）から作る。出力の bounded path は live な
+    object の code を呼ばないので、解析の時点（field を書いた時点）で文字列にしておき、出力は
+    その文字列だけを読む（`return_type_display_of`）。
+    """
+
+    object.__setattr__(record, name, value)
+    if name in RETURN_TYPE_INPUTS:
+        state = record.__dict__
+        display = get_data_type_display_name(state.get("return_type_obj"), state.get("return_type"))
+        object.__setattr__(record, RETURN_TYPE_DISPLAY_ATTRIBUTE, display)
+
+
+def return_type_display_of(record: Any) -> Optional[str]:
+    """書いたときに作った戻り値の型の表示名（instance の値だけを読む。無ければ `return_type`）。"""
+
+    display = live_values.instance_state(record, RETURN_TYPE_DISPLAY_ATTRIBUTE, _NO_DISPLAY)
+    if display is _NO_DISPLAY:
+        return live_values.attribute(record, "return_type")
+    return display
+
+
+_NO_DISPLAY = object()
+
+
 @dataclass
 class FunctionSignature:
     """関数シグネチャ情報"""
@@ -964,9 +1007,13 @@ class FunctionSignature:
     return_type_obj: Any = None
     parameters: Optional[List[Dict[str, Any]]] = None
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        record_return_type_display(self, name, value)
+
     def format_return_type(self) -> str:
         """戻り値の型をフォーマット"""
-        return get_data_type_display_name(self.return_type_obj, self.return_type) or "unknown"
+        name = return_type_display_of(self)
+        return name if name is not None and live_values.as_bool(name) else "unknown"
 
     def format_parameters(self) -> str:
         """引数リストをフォーマット（例: (int a, long b)）"""

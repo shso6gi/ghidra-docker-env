@@ -1953,7 +1953,9 @@ _KNOWN_EAGER_READERS = frozenset({"RESULT_FIELDS[unknown_cause_aggregate]"})
 #: `json_items` の中で identity key をそのまま写す site（key の owner は identity）。
 #: return 値の flow certificate の key は RETURN の def-chain の辿った辺の数だけの組で、
 #: 旧 `to_dict` と同じ値。identity key を eager に作る問題の owner は別 Issue（PR 本文の残件）。
-_KNOWN_IDENTITY_KEY_COPIES = frozenset({"core/analysis.py:ReturnInfo.stable_key()"})
+#: 6 回目: `ReturnInfo.json_items` の証明書の key は owner の `identity_key_of`（#194。呼ぶ場所は
+#: `test_issue22d_capabilities.py` の J19 が固定する）で読む: `stable_key()` を直接呼ぶ producer は無い
+_KNOWN_IDENTITY_KEY_COPIES: frozenset = frozenset()
 
 
 def _reader_nodes() -> List[Tuple[str, ast.AST]]:
@@ -1970,6 +1972,9 @@ def _reader_nodes() -> List[Tuple[str, ast.AST]]:
             nodes.append((f"RESULT_FIELDS[{label}]", reader))
         elif isinstance(reader, ast.Name):
             nodes.append((f"RESULT_FIELDS[{label}]", functions[reader.id]))
+        elif isinstance(reader, ast.Call) and isinstance(reader.func, ast.Name) and reader.func.id == "_function":
+            # 登録した読み方の関数（`_read_by_function` が名前で呼ぶ `_<name>`）
+            nodes.append((f"RESULT_FIELDS[{label}]", functions["_" + reader.args[0].value]))
         elif isinstance(reader, ast.Call) and isinstance(reader.func, ast.Name):
             nodes.append((f"RESULT_FIELDS[{label}]", functions[reader.func.id]))
     for module in _module_files():
@@ -2226,7 +2231,7 @@ _PR22D_FUNCTIONS = {
         "recovery_actions_source", "_iter_recovery_actions", "_key_width",
     },
     "checker/cause_aggregate.py": {
-        "_metered", "reason_detail_key", "attach_cause_aggregate", "_payload_occurrence_views",
+        "_counted", "reason_detail_key", "attach_cause_aggregate", "_payload_occurrence_views",
         "_prepared_within_work",
     },
     "checker/diagnostics.py": {
@@ -2483,12 +2488,7 @@ def test_j9_reaches_the_helpers_json_items_calls():
 
 
 #: J1 の推移的な形: `json_items` が呼ぶ helper で表現を先に作ってよい場所 → なぜ有界か
-_REGISTERED_JSON_ITEMS_HELPER_BUILDS = {
-    ("core/runtime_refs/unknowns.py", "_canonical_budget_source"):
-        "mapping / set の幅と key を `work`（walk の作業量。`metered`）へ数えてから並べる",
-    ("core/runtime_refs/unknowns.py", "_canonical_budget_value_within"):
-        "容器の幅・文字列の長さを `work` へ数えてから作る（set の並びの key はその値の JSON）",
-}
+_REGISTERED_JSON_ITEMS_HELPER_BUILDS: dict = {}
 
 
 def test_j1_helpers_json_items_calls_do_not_build_the_representation_either():
@@ -2570,7 +2570,7 @@ def test_j10_unbounded_walks_happen_only_at_registered_sites():
 # J12 `scan` の reducer は `Reducer` の subclass で、`add` / `result` は作業量（`work`）を
 #     keyword-only で受け取る。`cost` のような「呼ぶ側が O(1) にする約束」の callback は持たない
 # J13 identity key（`stable_key()` / `to_key()`）を呼ぶのは `identity_key_of` だけ。PR-22-D の
-#     module と関数から `to_authority_dict()` を呼ばない（固定の形の要約は `register_fixed_canonical`）
+#     module と関数から `to_authority_dict()` を呼ばない（固定の形の要約は `BoundedEvidence.summary` だけ）
 # J14 最終 envelope の封印を作るのは `AuthoritySeal` だけ（production の subclass を作らない）
 # J15 有界な証拠の identity は文字列（callable を受けない）
 # J16 作業量（`JsonBudget`）を作ってよい場所は登録した場所だけ（helper が親の作業量から逃れる
@@ -2831,7 +2831,8 @@ def test_j13_identity_keys_and_authority_producers_have_one_caller():
     # `ExpansionBudgetTruncation.event_id` は identity の digest（owner #194。producer 時点で作って
     # cache し、出力の `json_items` は cache を読む）: 出力の側（`json_items`）だけを対象にする
     targets = list(_j5_targets()) + [("proof/obligations/snapshot.py", None), ("core/runtime_refs/unknowns.py", {
-        "_canonical_budget_value_within", "_canonical_budget_source",
+        # 出力の側の helper（切り捨て事実の identity は構築のときに作って cache する: #194）
+        "_runtime_ref_origin_source", "_call_target_display_name", "_deferred_call_display_name",
     })]
     for relative, names in targets:
         for qualname, name, lineno, call in _qualified_calls(PACKAGE_ROOT / relative, names):
@@ -2843,7 +2844,9 @@ def test_j13_identity_keys_and_authority_producers_have_one_caller():
     from scripts.function_tracer_pcode.core import canonical_digest
     from scripts.function_tracer_pcode.core.json_encoding import BoundedEvidence
 
-    assert set(canonical_digest._FIXED_CANONICAL) == {BoundedEvidence}
+    # 固定の形の record は 1 つだけで、callable の登録表は持たない（要約は名前で呼ぶ）
+    assert canonical_digest._bounded_evidence_type() is BoundedEvidence
+    assert not hasattr(canonical_digest, "register_fixed_canonical")
 
 
 def test_j14_the_final_envelope_is_sealed_only_by_the_authority_seal():
@@ -2924,21 +2927,25 @@ def test_j16_work_scopes_are_created_only_at_registered_sites():
 
 
 def test_j18_a_work_scope_opened_inside_a_walk_cannot_escape_it():
-    """実行時の保証: 上限のある walk の中では、上限なしの作業量（別名でも）を作れない。"""
+    """実行時の保証: walk の中では新しい作業量（別名でも、有限でも）を作れない（owner は walk の作業量 1 つ）。"""
 
     from scripts.function_tracer_pcode.core import json_encoding
-    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonValueRejected, metered
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonValueRejected, Reducer, scan
 
     Alias = json_encoding.JsonBudget
     charged = []
 
-    def escape(_work):
-        inner = Alias(None)
-        for _ in range(10_000):
-            inner.charge(10)
-            charged.append(1)
-        return "escaped"
+    class _Escape(Reducer):
+        def add(self, element, *, work):
+            work.charge(1)
+
+        def result(self, *, work):
+            inner = Alias(1 << 40)
+            for _ in range(10_000):
+                inner.charge(10)
+                charged.append(1)
+            return "escaped"
 
     with pytest.raises(JsonValueRejected):
-        RESULT_JSON_POLICY.prepare(metered(escape), max_bytes=1_000)
+        RESULT_JSON_POLICY.prepare(scan((0,), _Escape()), max_bytes=1_000)
     assert charged == []

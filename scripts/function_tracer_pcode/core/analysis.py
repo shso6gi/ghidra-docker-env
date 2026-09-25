@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields as dataclass_fields, is_dataclass, replace
 from copy import deepcopy
 import hashlib
-import itertools
 import json
 from typing import List, Dict, Optional, Any, TYPE_CHECKING, Tuple, Mapping
 
@@ -15,11 +14,13 @@ if TYPE_CHECKING:
     from scripts.function_tracer_pcode.analysis.signedness import SignednessEvidence
     from scripts.function_tracer_pcode.analysis.effects.summary import EffectSummary
     from scripts.function_tracer_pcode.core.signature import SignatureHypothesis, FunctionSignature
+from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import (
     RESULT_JSON_POLICY,
     as_dict,
     as_list,
     each,
+    identity_key_of,
     materialize,
     nested,
     pairs_of,
@@ -28,6 +29,8 @@ from scripts.function_tracer_pcode.core.signature import (
     clone_parameter_descriptor,
     parameter_descriptor_source,
     get_data_type_display_name,
+    record_return_type_display,
+    return_type_display_of,
     get_declared_type_size_bits,
     is_void_data_type,
     is_unsigned_data_type,
@@ -143,7 +146,7 @@ class ReturnPathEvidence:
         )
 
     def json_items(self):
-        yield "schema_version", int(self.schema_version)
+        yield "schema_version", live_values.as_int(self.schema_version)
         yield "terminal_op_ref", self.terminal_op_ref
         yield "coverage_status", self.coverage_status
         yield "path_block_keys", nested(self.path_block_keys)
@@ -286,12 +289,16 @@ class ReturnInfo:
             yield "pcode_time", self.pcode_time
         if self.pcode_op_ref is not None:
             yield "pcode_op_ref", self.pcode_op_ref
-        if self.return_value_pcode_op_refs:
+        if live_values.as_bool(self.return_value_pcode_op_refs):
             yield "return_value_pcode_op_refs", each(self.return_value_pcode_op_refs)
-        if self.return_value_flow_certificate is not None:
-            # identity の owner（`stable_key`）が作る key をそのまま写す
-            yield "return_value_flow_certificate", nested(self.return_value_flow_certificate.stable_key())
-        if self.return_kind != "exact":
+        certificate = self.return_value_flow_certificate
+        if certificate is not None:
+            # identity の owner（`stable_key`）が作る key をそのまま写す（method は型から引く）
+            has_key, certificate_key = identity_key_of(certificate, names=("stable_key",))
+            if not has_key:
+                raise TypeError("return_value_flow_certificate has no stable_key")
+            yield "return_value_flow_certificate", nested(certificate_key)
+        if live_values.str_value(self.return_kind) != "exact":
             yield "return_kind", self.return_kind
         if self.retained_exact_return_ref is not None:
             yield "retained_exact_return_ref", nested(self.retained_exact_return_ref)
@@ -303,7 +310,7 @@ class ReturnInfo:
             yield "summary_candidate_source_key", nested(self.summary_candidate_source_key)
         if self.summary_transition_evidence_key is not None:
             yield "summary_transition_evidence_key", nested(self.summary_transition_evidence_key)
-        if self.validation_blockers:
+        if live_values.as_bool(self.validation_blockers):
             yield "validation_blockers", as_list(self.validation_blockers)
         if self.return_path_evidence is not None:
             yield "return_path_evidence", self.return_path_evidence
@@ -393,7 +400,7 @@ class TerminationContractRef:
         )
 
     def json_items(self):
-        yield "schema_version", int(self.schema_version)
+        yield "schema_version", live_values.as_int(self.schema_version)
         yield "termination_class", self.termination_class
         yield "object_identity_key", nested(self.object_identity_key)
         yield "payload_key", nested(self.payload_key)
@@ -429,7 +436,7 @@ class TerminationPathEffectEvidence:
         )
 
     def json_items(self):
-        yield "schema_version", int(self.schema_version)
+        yield "schema_version", live_values.as_int(self.schema_version)
         yield "producer_id", self.producer_id
         yield "terminal_candidate_id", nested(self.terminal_candidate_id)
         yield "terminal_op_ref", self.terminal_op_ref
@@ -494,7 +501,7 @@ class SymbolicRegionCandidate:
         yield "candidate_id", nested(self.candidate_id)
         yield "terminal_candidate_id", nested(self.terminal_candidate_id)
         yield "guard", each(self.guard)
-        yield "guard_extraction_complete", bool(self.guard_extraction_complete)
+        yield "guard_extraction_complete", live_values.as_bool(self.guard_extraction_complete)
         yield "producer_evidence_key", nested(self.producer_evidence_key)
         if self.observed_value is not None:
             yield "observed_value", self.observed_value
@@ -536,8 +543,8 @@ class FunctionOutcomeSeed:
         yield "symbolic_regions", each(self.symbolic_regions)
         yield "unresolved_control_evidence", nested(self.unresolved_control_evidence)
         yield "control_flow_evidence_key", nested(self.control_flow_evidence_key)
-        yield "partition_revision", int(self.partition_revision)
-        yield "extraction_schema_version", int(self.extraction_schema_version)
+        yield "partition_revision", live_values.as_int(self.partition_revision)
+        yield "extraction_schema_version", live_values.as_int(self.extraction_schema_version)
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)
@@ -581,7 +588,7 @@ class SummaryReturnCandidate:
         yield "call_effect_key", nested(self.call_effect_key)
         yield "ub_assumption_key", nested(self.ub_assumption_key)
         yield "effect_model_schema_version", self.effect_model_schema_version
-        yield "eq_eligible", bool(self.eq_eligible)
+        yield "eq_eligible", live_values.as_bool(self.eq_eligible)
         yield "acceptance_status", self.acceptance_status
         yield "validation_blockers", as_list(self.validation_blockers)
         yield "evidence", nested(self.evidence)
@@ -697,7 +704,14 @@ class DeferredCallInfo:
 
     @property
     def placeholder_name(self) -> str:
-        return self.display_hint or self.deferred_call_ref.display_name()
+        hint = self.display_hint
+        if hint is not None and live_values.as_bool(hint):
+            return hint
+        deferred_call_ref = self.deferred_call_ref
+        if type(deferred_call_ref) is DeferredCallRef:
+            return deferred_call_ref.display_name()
+        # 呼び出し地点の参照は `DeferredCallRef`（`__init__` が作る）。それ以外の値の method は呼ばない
+        raise TypeError(f"deferred_call_ref is not a DeferredCallRef ({live_values.type_name(type(deferred_call_ref))})")
 
     @staticmethod
     def _normalize_call_model_candidate(candidate: object):
@@ -735,7 +749,11 @@ class DeferredCallInfo:
 
     @property
     def target_name(self) -> str:
-        return self.target_ref.display_name()
+        target_ref = self.target_ref
+        if type(target_ref) is CallTargetRef:
+            return target_ref.display_name()
+        # 呼び出し先の参照は `CallTargetRef`（`__init__` が正規化する）。それ以外の値の method は呼ばない
+        raise TypeError(f"target_ref is not a CallTargetRef ({live_values.type_name(type(target_ref))})")
 
     @property
     def target_key(self):
@@ -874,7 +892,7 @@ class SignednessResult:
         yield "signedness", self.signedness
         yield "evidence_summary", self.evidence_summary
         yield "opcode_counts", self.opcode_counts
-        if self.excluded_fastpath_count > 0:
+        if live_values.as_int(self.excluded_fastpath_count) > 0:
             yield "excluded_fastpath_count", self.excluded_fastpath_count
             yield "excluded_opcode_counts", self.excluded_opcode_counts
 
@@ -1346,6 +1364,9 @@ class FunctionReturnAnalysis:
     # 記録がある限り「展開が完全だった」ことは前提にできない。
     expansion_budget_truncations: Tuple[ExpansionBudgetTruncation, ...] = ()
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        record_return_type_display(self, name, value)
+
     def __post_init__(self) -> None:
         if self.function_ref is None:
             entry_offset = None
@@ -1663,48 +1684,58 @@ class FunctionReturnAnalysis:
             else each(self.parameters, parameter_descriptor_source)
         )
         yield "returns", each(self.returns)
-        yield "return_type", get_data_type_display_name(self.return_type_obj, self.return_type)
+        # 表示名は field を書いたときに作った文字列（Ghidra の object の code を出力で呼ばない）
+        yield "return_type", return_type_display_of(self)
         yield "unknown_event_count", self.unknown_event_count
         yield "unknown_event_reasons", as_list(self.unknown_event_reasons)
         yield "analysis_notes", as_list(self.analysis_notes)
         yield "recovered_from_decompiler", self.recovered_from_decompiler
         yield "incomplete_control_flow", self.incomplete_control_flow
-        yield "deferred_calls", each(self.deferred_calls.values())
-        if include_derived_proof and self.completed_recovery_proof_ids:
+        yield "deferred_calls", each(live_values.values_of(self.deferred_calls))
+        if include_derived_proof and live_values.as_bool(self.completed_recovery_proof_ids):
             yield "completed_recovery_proof_ids", each(self.completed_recovery_proof_ids, nested)
-        if include_derived_proof and self.completed_recovery_proof_evidence:
+        if include_derived_proof and live_values.as_bool(self.completed_recovery_proof_evidence):
             yield "completed_recovery_proof_evidence", each(
                 self.completed_recovery_proof_evidence, nested,
             )
-        if self.summary_return_candidates:
+        if live_values.as_bool(self.summary_return_candidates):
             yield "summary_return_candidates", each(self.summary_return_candidates)
-        if self.return_outcomes or self.divergence_outcomes or self.unknown_outcomes:
-            yield "outcomes", each(itertools.chain(
-                self.return_outcomes, self.divergence_outcomes, self.unknown_outcomes,
-            ))
+        return_outcomes = self.return_outcomes
+        divergence_outcomes = self.divergence_outcomes
+        unknown_outcomes = self.unknown_outcomes
+        if (
+            live_values.as_bool(return_outcomes)
+            or live_values.as_bool(divergence_outcomes)
+            or live_values.as_bool(unknown_outcomes)
+        ):
+            # 3 つの列を順に 1 要素ずつ（列を連結・複製しない）
+            yield "outcomes", each(_outcomes_in_order(return_outcomes, divergence_outcomes, unknown_outcomes))
         if self.outcome_seed is not None:
             yield "outcome_seed", self.outcome_seed
-        if self.termination_path_effect_evidence:
+        if live_values.as_bool(self.termination_path_effect_evidence):
             yield "termination_path_effect_evidence", each(self.termination_path_effect_evidence)
         if self.analysis_scope_key is not None:
             yield "analysis_scope_key", self.analysis_scope_key
         if self.analysis_view_identity is not None:
             yield "analysis_view_identity", nested(self.analysis_view_identity)
-            yield "partition_revision", int(self.partition_revision or 0)
+            partition_revision = self.partition_revision
+            yield "partition_revision", (
+                live_values.as_int(partition_revision) if live_values.as_bool(partition_revision) else 0
+            )
         if self.program_is_big_endian is not None:
-            yield "program_is_big_endian", bool(self.program_is_big_endian)
+            yield "program_is_big_endian", live_values.as_bool(self.program_is_big_endian)
 
-        if self.signedness_result:
+        if live_values.as_bool(self.signedness_result):
             yield "signedness", self.signedness_result
-        if self.signature_hypotheses:
+        if live_values.as_bool(self.signature_hypotheses):
             yield "signature_hypotheses", as_list(self.signature_hypotheses)
-        if self.return_type_provenance:
+        if live_values.as_bool(self.return_type_provenance):
             yield "return_type_provenance", nested(self.return_type_provenance)
-        if self.return_abi_facts:
+        if live_values.as_bool(self.return_abi_facts):
             yield "return_abi_facts", nested(self.return_abi_facts)
         if self.comparison_surface is not None:
             yield "comparison_surface", self.comparison_surface
-        if self.expansion_budget_truncations:
+        if live_values.as_bool(self.expansion_budget_truncations):
             # Issue #131 PR-B: 正規化済みの全記録（参照 event ID 込み）を出す。
             # snapshot fingerprint は ``to_dict`` から作られるので、marker の有無・
             # 参照情報の増加はそのまま解析前提の同一性に反映される。
@@ -2360,3 +2391,14 @@ class FunctionReturnAnalysis:
     def get_comparison_type_obj(self):
         surface = self.get_comparison_surface()
         return surface.type_obj
+
+
+def _outcomes_in_order(*groups: Any):
+    """outcome の列を順に 1 要素ずつ返す（列は owner の API で辿る。上書きした `__iter__` を呼ばない）。
+
+    `flatten` は空の列にも 1 を数えるので、出力 byte と作業量を一致させる snapshot の
+    勘定（`FunctionReturnAnalysis._materialize`）では使わない。
+    """
+
+    for group in groups:
+        yield from live_values.elements_of(group)

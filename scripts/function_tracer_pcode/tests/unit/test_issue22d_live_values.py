@@ -37,7 +37,6 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     UNFINGERPRINTED_OPAQUE,
     each,
     evidence,
-    metered,
     pairs_of,
     scan,
 )
@@ -103,6 +102,25 @@ class _Adds(Reducer):
         return self.count
 
 
+class _RunInside(Reducer):
+    """walk の中（reducer の `result`）で `body(work)` を実行する test の reducer。"""
+
+    __slots__ = ("body",)
+
+    def __init__(self, body):
+        self.body = body
+
+    def add(self, element, *, work):
+        work.charge(1)
+
+    def result(self, *, work):
+        return self.body(work)
+
+
+def _inside(body):
+    return scan((0,), _RunInside(body))
+
+
 class _Scanned:
     """`json_items` が要素 2,000 の `scan` を返す record。"""
 
@@ -125,20 +143,33 @@ def test_walks_on_the_caller_work_charge_their_effort_to_it():
     assert reducer.count <= parent.max_bytes
 
 
-def test_a_walk_started_inside_a_walk_is_charged_to_the_outer_work():
-    """converter・`metered` の factory の中で始めた walk の作業量は、外の walk の作業量の子（新しい上限で逃れない）。"""
+def test_nested_work_inside_a_walk_is_counted_into_the_walk_work_once():
+    """walk の中の入れ子の仕事は `count_into(value, work)` で walk の作業量へ 1 回だけ数える（新しい上限で逃れない）。"""
 
     inner_adds = _Adds()
 
     def factory(work):
-        # 外より大きい上限の内側の walk を何度も: 作業量は外の walk の作業量へ数えられる
         for _ in range(50):
-            RESULT_JSON_POLICY.measure(_Scanned(range(2_000), inner_adds), mode=LEGACY, max_bytes=1 << 30)
+            RESULT_JSON_POLICY.count_into(_Scanned(range(2_000), inner_adds), work, mode=LEGACY)
         return "done"
 
     with pytest.raises(JsonBudgetExhausted):
-        RESULT_JSON_POLICY.prepare(metered(factory), max_bytes=5_000)
+        RESULT_JSON_POLICY.prepare(_inside(factory), max_bytes=5_000)
     assert inner_adds.count <= 5_000
+
+
+@pytest.mark.parametrize("start", [
+    lambda work: RESULT_JSON_POLICY.measure(["x"] * 10, max_bytes=1 << 30),
+    lambda work: RESULT_JSON_POLICY.prepare(["x"] * 10, max_bytes=1 << 30),
+    lambda work: RESULT_JSON_POLICY.plain_bytes(["x"] * 10, max_bytes=1 << 30),
+    lambda work: JsonBudget(1 << 30),
+    lambda work: JsonBudget(None),
+])
+def test_a_walk_cannot_open_a_new_work_scope(start):
+    """walk の中では新しい予算を作れない（有限でも無限でも）: owner は walk の作業量 1 つ。"""
+
+    with pytest.raises(JsonValueRejected):
+        RESULT_JSON_POLICY.prepare(_inside(start), max_bytes=5_000)
 
 
 def test_an_unbounded_walk_cannot_start_inside_a_bounded_walk():
@@ -149,7 +180,7 @@ def test_an_unbounded_walk_cannot_start_inside_a_bounded_walk():
         return "done"
 
     with pytest.raises(JsonValueRejected):
-        RESULT_JSON_POLICY.prepare(metered(factory), max_bytes=5_000)
+        RESULT_JSON_POLICY.prepare(_inside(factory), max_bytes=5_000)
     assert walked == []
 
 
@@ -329,13 +360,16 @@ def test_an_enum_that_overrides_value_is_not_asked_for_it():
     assert asked == []
 
 
-def test_a_truncation_scope_key_never_renders_its_live_key():
-    from scripts.function_tracer_pcode.core.runtime_refs.unknowns import _canonical_budget_source
+def test_a_truncation_scope_key_is_rendered_from_its_identity_built_at_construction():
+    """切り捨て事実の scope key は構築のとき（identity の owner #194）に 1 度だけ組み立て、出力はその写しを読む。"""
 
-    source = metered(lambda work: _canonical_budget_source({(_Heavy(),): 1}, work=work))
-    with pytest.raises(JsonValueRejected):
-        RESULT_JSON_POLICY.prepare(source, max_bytes=500)
-    assert _Heavy.calls == 0
+    from scripts.function_tracer_pcode.core.runtime_refs.unknowns import ExpansionBudgetTruncation
+
+    record = ExpansionBudgetTruncation(kind="k", owner_scope_key=({(_Heavy(),): 1},))
+    _Heavy.calls = _Heavy.hashes = 0
+    RESULT_JSON_POLICY.prepare(record, max_bytes=1 << 23)
+    RESULT_JSON_POLICY.measure(record, mode=LEGACY, max_bytes=1 << 23)
+    assert _Heavy.calls == 0 and _Heavy.hashes == 0
 
 
 def test_the_snapshot_codec_never_calls_a_bare_to_dict():
@@ -436,10 +470,16 @@ def test_the_columns_of_one_record_do_not_share_an_authority_fingerprint():
     from scripts.function_tracer_pcode.core.json_encoding import TEXT, Column, EVIDENCE, row_items
 
     row = (Column("left", EVIDENCE), Column("right", EVIDENCE))
-    record = SimpleNamespace(left=("a",) + tuple(range(5_000)), right=("b",) + tuple(range(5_000)))
-    prepared = RESULT_JSON_POLICY.prepare(
-        metered(lambda _work: dict(row_items(row, record, identity="cause:c1"))), max_bytes=1 << 20,
-    ).value()
+
+    class _Row:
+        def __init__(self):
+            self.left = ("a",) + tuple(range(5_000))
+            self.right = ("b",) + tuple(range(5_000))
+
+        def json_items(self):
+            return row_items(row, self, identity="cause:c1")
+
+    prepared = RESULT_JSON_POLICY.prepare(_Row(), max_bytes=1 << 20).value()
     assert prepared["left"]["fingerprint"] != prepared["right"]["fingerprint"]
     assert TEXT  # 列の種類は同じ語彙
 
@@ -629,7 +669,7 @@ def test_a_truncation_value_renders_like_its_identity():
     """出力の切り捨て事実の値は identity（`_canonical_budget_value`）と同じ規則（`stable_key` だけ）。"""
 
     from scripts.function_tracer_pcode.core.runtime_refs.unknowns import (
-        _canonical_budget_source,
+        ExpansionBudgetTruncation,
         _canonical_budget_value,
     )
 
@@ -642,10 +682,9 @@ def test_a_truncation_value_renders_like_its_identity():
             return ("s", 1)
 
     for value in (_ToKeyOnly(), _StableKey(), ("x", 1, {"a": [1, 2]})):
-        prepared = RESULT_JSON_POLICY.prepare(
-            metered(lambda work, value=value: _canonical_budget_source(value, work=work)), max_bytes=1 << 20,
-        ).value()
-        assert prepared == json.loads(json.dumps(_canonical_budget_value(value)))
+        record = ExpansionBudgetTruncation(kind="k", owner_scope_key=(value,))
+        prepared = RESULT_JSON_POLICY.prepare(record, max_bytes=1 << 20).value()
+        assert prepared["owner_scope_key"] == json.loads(json.dumps(_canonical_budget_value((value,))))
 
 
 def test_bounded_repr_uses_only_builtin_repr():
@@ -824,12 +863,13 @@ def test_an_unknown_value_origin_is_rendered_without_its_repr():
             return "r" * 20_000_000
 
     prepared = RESULT_JSON_POLICY.prepare(UnknownValueRef(kind="unknown", origin_ref=_Origin()), max_bytes=1 << 20).value()
-    assert prepared["origin_ref"][0] == "repr" and prepared["origin_ref"][-1].endswith("_Origin>")
+    # record でない origin は型だけ（identity・`repr` は `UnknownValueRef.stable_key` の側）
+    assert prepared["origin_ref"][0] == "ref" and prepared["origin_ref"][-1].endswith("_Origin")
     assert _Heavy.calls == 0
 
 
 def test_container_checks_do_not_read_a_spoofed_class():
-    from scripts.function_tracer_pcode.core.builtin_containers import builtin_mapping, builtin_sequence
+    from scripts.function_tracer_pcode.core.live_values import builtin_mapping, builtin_sequence
 
     class _Spoof:
         @property

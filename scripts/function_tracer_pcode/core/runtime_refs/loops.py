@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, bounded_repr, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, attribute, is_kind, size
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
 )
@@ -44,7 +45,7 @@ class LoopVariableIdentityRef:
     def json_items(self):
         yield "kind", "loop_variable_identity"
         yield "role", self.role
-        yield "binder_ordinal", int(self.binder_ordinal)
+        yield "binder_ordinal", as_int(self.binder_ordinal)
         yield "varnode_key", self.varnode_key
 
     def to_dict(self) -> Dict[str, Any]:
@@ -365,11 +366,11 @@ def _loop_object_source(value: Any) -> Any:
     object は旧実装と同じ不透明な表示になる。
     """
 
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or is_kind(value, (bool, int, float, str)):
         return value
-    if isinstance(value, (tuple, list)):
+    if is_kind(value, (tuple, list)):
         return each(value, _loop_object_source)
-    if isinstance(value, dict):
+    if is_kind(value, dict):
         return mapping_of(value, _loop_object_source, stringify_keys=True)
     if is_json_record(value):
         return value
@@ -377,6 +378,63 @@ def _loop_object_source(value: Any) -> Any:
         ("type", f"{type(value).__module__}.{type(value).__qualname__}"),
         ("unkeyable", True),
     )
+
+
+def _int_or_zero(value: Any) -> int:
+    """`int(value or 0)` と同じ値（真偽と整数化は owner の API で読む。live な値の code を呼ばない）。"""
+
+    if type(value) is int:
+        return value
+    if value is None or not as_bool(value):
+        return 0
+    return as_int(value)
+
+
+@source_converter
+def _path_conditions_source(path_conditions: Any) -> Any:
+    """`path_condition_sets` の 1 経路（条件の列）の出力。"""
+
+    return each(path_conditions, _loop_object_source)
+
+
+@source_converter
+def _residue_case_source(case: Any) -> Any:
+    """`residue_cases` の 1 要素 `(modulus, residue, coeff, bias)` の出力（組み込みの tuple / list だけ）。"""
+
+    if type(case) in (tuple, list):
+        return inline(
+            ("modulus", as_int(case[0])),
+            ("residue", as_int(case[1])),
+            ("coeff", as_int(case[2])),
+            ("bias", as_int(case[3])),
+        )
+    raise TypeError("a residue case is not a builtin tuple / list")
+
+
+@source_converter
+def _residue_bias_term_source(term: Any) -> Any:
+    """`residue_bias_terms` の 1 要素 `(modulus, residue, bias_expr)` の出力（組み込みの tuple / list だけ）。"""
+
+    if type(term) in (tuple, list):
+        bias_expr = term[2]
+        return inline(
+            ("modulus", as_int(term[0])),
+            ("residue", as_int(term[1])),
+            ("bias_expr", bias_expr if is_json_record(bias_expr) else bounded_repr(bias_expr)),
+        )
+    raise TypeError("a residue bias term is not a builtin tuple / list")
+
+
+@source_converter
+def _lane_term_source(lane: Any) -> Any:
+    """`lane_terms` の 1 要素 `(offset, size)` の出力（組み込みの tuple / list だけ）。"""
+
+    if type(lane) in (tuple, list):
+        return inline(
+            ("byte_offset", as_int(lane[0])),
+            ("access_size", max(1, _int_or_zero(lane[1]))),
+        )
+    raise TypeError("a lane term is not a builtin tuple / list")
 
 
 def _loop_object_to_dict(value: Any) -> Any:
@@ -515,12 +573,12 @@ class LoopBodyEffectRef:
         yield "guard_constraints", each(self.guard_constraints, _loop_object_source)
         yield "path_condition_sets", each(
             self.path_condition_sets,
-            source_converter(lambda path_conditions: each(path_conditions, _loop_object_source)),
+            _path_conditions_source,
         )
-        yield "guard_paths_incomplete", bool(self.guard_paths_incomplete)
+        yield "guard_paths_incomplete", as_bool(self.guard_paths_incomplete)
         yield "target_ref", _loop_object_source(self.target_ref)
         yield "order_key", self.order_key
-        yield "keyable", bool(self.keyable)
+        yield "keyable", as_bool(self.keyable)
         yield "unkeyable_reason", self.unkeyable_reason
 
     def to_dict(self) -> Dict[str, Any]:
@@ -620,17 +678,17 @@ class LoopSideEffectProfileRef:
     def json_items(self):
         yield "kind", "loop_side_effect_profile"
         yield "profile", self.profile
-        yield "memory_reads", bool(self.memory_reads)
-        yield "memory_writes", bool(self.memory_writes)
-        yield "calls", bool(self.calls)
-        yield "escapes", bool(self.escapes)
-        yield "conditional_guards", bool(self.conditional_guards)
-        yield "context_memory_writes", bool(self.context_memory_writes)
-        yield "context_calls", bool(self.context_calls)
-        yield "context_escapes", bool(self.context_escapes)
-        yield "context_conditional_guards", bool(self.context_conditional_guards)
-        yield "effect_count", int(self.effect_count)
-        yield "guard_count", int(self.guard_count)
+        yield "memory_reads", as_bool(self.memory_reads)
+        yield "memory_writes", as_bool(self.memory_writes)
+        yield "calls", as_bool(self.calls)
+        yield "escapes", as_bool(self.escapes)
+        yield "conditional_guards", as_bool(self.conditional_guards)
+        yield "context_memory_writes", as_bool(self.context_memory_writes)
+        yield "context_calls", as_bool(self.context_calls)
+        yield "context_escapes", as_bool(self.context_escapes)
+        yield "context_conditional_guards", as_bool(self.context_conditional_guards)
+        yield "effect_count", as_int(self.effect_count)
+        yield "guard_count", as_int(self.guard_count)
         yield "effect_descriptors", each(self.effect_descriptors)
         yield "context_descriptors", each(self.context_descriptors)
 
@@ -726,35 +784,23 @@ class LoopTermDescriptorRef:
         yield "kind", "loop_term_descriptor"
         yield "term_kind", self.kind
         yield "reduction_kind", self.reduction_kind
-        yield "start_offset", int(self.start_offset)
-        yield "stride", int(self.stride)
-        yield "element_size", int(self.element_size)
-        yield "result_size", max(1, int(self.result_size or 0))
+        yield "start_offset", as_int(self.start_offset)
+        yield "stride", as_int(self.stride)
+        yield "element_size", as_int(self.element_size)
+        yield "result_size", max(1, _int_or_zero(self.result_size))
 
         yield "residue_cases", each(
             self.residue_cases,
-            source_converter(lambda case: inline(
-                ("modulus", int(case[0])),
-                ("residue", int(case[1])),
-                ("coeff", int(case[2])),
-                ("bias", int(case[3])),
-            )),
+            _residue_case_source,
         )
         yield "residue_bias_terms", each(
             self.residue_bias_terms,
-            source_converter(lambda term: inline(
-                ("modulus", int(term[0])),
-                ("residue", int(term[1])),
-                ("bias_expr", term[2] if is_json_record(term[2]) else bounded_repr(term[2])),
-            )),
+            _residue_bias_term_source,
         )
 
         yield "lane_terms", each(
             self.lane_terms,
-            source_converter(lambda lane: inline(
-                ("byte_offset", int(lane[0])),
-                ("access_size", max(1, int(lane[1] or 0))),
-            )),
+            _lane_term_source,
         )
         if self.location_base_ref is not None:
             yield "location_base_ref", self.location_base_ref
@@ -1019,13 +1065,13 @@ class LoopSummaryRef:
         yield "step_expr", _loop_object_source(self.step_expr)
         yield "term_descriptor", self.term_descriptor
         yield "seed_terms", each(self.seed_terms, _loop_object_source)
-        yield "seed_term_count", None if self.seed_term_count is None else int(self.seed_term_count)
+        yield "seed_term_count", None if self.seed_term_count is None else as_int(self.seed_term_count)
         yield "witnesses", each(self.witnesses, _loop_object_source)
         yield "side_effect_profile", self.side_effect_profile
         yield "guard_constraints", each(self.guard_constraints, _loop_object_source)
         yield "cases", each(self.cases)
         yield "source", self.source
-        yield "constant_bias", int(self.constant_bias)
+        yield "constant_bias", as_int(self.constant_bias)
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)
@@ -1075,8 +1121,9 @@ class ComposedLoopSummaryRef:
 
     @property
     def side_effect_profile(self) -> LoopSideEffectProfileRef:
-        profile = getattr(self.current, "side_effect_profile", None)
-        return profile if isinstance(profile, LoopSideEffectProfileRef) else LoopSideEffectProfileRef()
+        # `current` の属性は owner の API で読む（`__getattr__` / package の外の property を呼ばない）
+        profile = attribute(self.current, "side_effect_profile")
+        return profile if is_kind(profile, LoopSideEffectProfileRef) else LoopSideEffectProfileRef()
 
     @property
     def guard_constraints(self) -> Tuple[Any, ...]:
@@ -1767,33 +1814,24 @@ class CountedLoopSummaryRef:
 
     def display_name(self) -> str:
         return (
-            f"counted_loop(step={int(self.induction_step)},"
-            f"signed={bool(self.signed_loop)},"
-            f"cases={len(self.residue_cases)})"
+            f"counted_loop(step={as_int(self.induction_step)},"
+            f"signed={as_bool(self.signed_loop)},"
+            f"cases={size(self.residue_cases)})"
         )
 
     def json_items(self):
         yield "kind", "counted_loop_summary"
-        yield "induction_step", int(self.induction_step)
-        yield "result_size", max(1, int(self.result_size or 0))
-        yield "signed_loop", bool(self.signed_loop)
+        yield "induction_step", as_int(self.induction_step)
+        yield "result_size", max(1, _int_or_zero(self.result_size))
+        yield "signed_loop", as_bool(self.signed_loop)
 
         yield "residue_cases", each(
             self.residue_cases,
-            source_converter(lambda case: inline(
-                ("modulus", int(case[0])),
-                ("residue", int(case[1])),
-                ("coeff", int(case[2])),
-                ("bias", int(case[3])),
-            )),
+            _residue_case_source,
         )
         yield "residue_bias_terms", each(
             self.residue_bias_terms,
-            source_converter(lambda term: inline(
-                ("modulus", int(term[0])),
-                ("residue", int(term[1])),
-                ("bias_expr", term[2] if is_json_record(term[2]) else bounded_repr(term[2])),
-            )),
+            _residue_bias_term_source,
         )
 
         yield "source", self.source
@@ -1927,7 +1965,7 @@ class StateTransitionLoopSummaryRef:
         )
 
     def display_name(self) -> str:
-        return f"state_transition_loop(state={int(self.state_size)},result={int(self.result_size)})"
+        return f"state_transition_loop(state={as_int(self.state_size)},result={as_int(self.result_size)})"
 
     def json_items(self):
         yield "kind", "state_transition_loop_summary"
@@ -1937,8 +1975,8 @@ class StateTransitionLoopSummaryRef:
         yield "accumulator_init", _loop_object_source(self.accumulator_init)
         yield "accumulator_delta", _loop_object_source(self.accumulator_delta)
         yield "side_effect_profile", self.side_effect_profile
-        yield "state_size", int(self.state_size)
-        yield "result_size", int(self.result_size)
+        yield "state_size", as_int(self.state_size)
+        yield "result_size", as_int(self.result_size)
         yield "source", self.source
         yield "display_name", self.display_name()
 
@@ -2050,7 +2088,7 @@ class CountedStateTransitionLoopSummaryRef:
         )
 
     def display_name(self) -> str:
-        return f"counted_state_transition(state={int(self.state_size)},result={int(self.result_size)})"
+        return f"counted_state_transition(state={as_int(self.state_size)},result={as_int(self.result_size)})"
 
     def json_items(self):
         yield "kind", "counted_state_transition_loop_summary"
@@ -2062,9 +2100,9 @@ class CountedStateTransitionLoopSummaryRef:
         yield "transition_cases", _loop_object_source(self.transition_cases)
         yield "side_effect_profile", self.side_effect_profile
         yield "guard_constraints", _loop_object_source(self.guard_constraints)
-        yield "state_size", int(self.state_size)
-        yield "result_size", int(self.result_size)
-        yield "signed_loop", bool(self.signed_loop)
+        yield "state_size", as_int(self.state_size)
+        yield "result_size", as_int(self.result_size)
+        yield "signed_loop", as_bool(self.signed_loop)
         yield "handoff_proof_key", _loop_object_source(self.handoff_proof_key)
         yield "source", self.source
         yield "display_name", self.display_name()

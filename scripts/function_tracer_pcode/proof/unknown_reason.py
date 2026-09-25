@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
+import scripts.function_tracer_pcode.core.live_values as live_values
+
 
 UNKNOWN_TUPLE_MISSING = "<missing>"
 
@@ -127,30 +129,49 @@ class UnknownRecoveryProofKind(str, Enum):
     RETURN_COVERAGE_COMPLETION = "return_coverage_completion"
 
 
+def _text(value: Any) -> str:
+    """`str(value)`（scalar と組み込みのままの enum は同じ文字列。それ以外は型名の印。値の code を呼ばない）。"""
+
+    if type(value) is str:
+        return value
+    try:
+        return live_values.as_str(value)
+    except TypeError:
+        return "<" + live_values.type_name(type(value)) + ">"
+
+
 def _enum_value(value: Any) -> Optional[str]:
     if value is None:
         return None
-    if isinstance(value, Enum):
-        return str(value.value)
-    return str(value)
+    if type(value) is str:
+        return value
+    if live_values.is_enum(value):
+        return _text(live_values.enum_value(value))
+    return _text(value)
 
 
 def _coerce_evidence_refs(evidence_refs: Optional[Sequence[Any]]) -> Tuple[str, ...]:
     refs = []
-    for ref in evidence_refs or ():
+    if evidence_refs is None or not live_values.as_bool(evidence_refs):
+        return ()
+    # 文字列は旧来どおり 1 文字ずつ（`for ref in "abc"`）。それ以外は組み込みの振る舞いの列だけ
+    text = live_values.str_value(evidence_refs)
+    for ref in (iter(text) if text is not live_values.NOT_PLAIN else live_values.elements_of(evidence_refs)):
         if ref is None:
             continue
-        refs.append(str(ref))
+        refs.append(_text(ref))
     return tuple(refs)
 
 
 def _coerce_optional_tuple(value: Any) -> Optional[Tuple[Any, ...]]:
     if value is None:
         return None
-    if isinstance(value, tuple):
-        return tuple(_coerce_optional_tuple(item) if isinstance(item, list) else item for item in value)
-    if isinstance(value, list):
-        return tuple(_coerce_optional_tuple(item) if isinstance(item, list) else item for item in value)
+    if live_values.is_kind(value, (tuple, list)) and live_values.builtin_sequence(value):
+        return tuple(
+            _coerce_optional_tuple(item)
+            if live_values.is_kind(item, list) and live_values.builtin_sequence(item) else item
+            for item in live_values.elements_of(value)
+        )
     return (value,)
 
 
@@ -191,10 +212,15 @@ class UnknownRecoveryProofObligation:
         )
 
     def json_items(self):
-        # pure layer（project の module を import しない）: 列は iterator（walker の遅延配列）
+        # pure layer（project の module を import しない）: 列は package の generator（walker の遅延配列）。
+        # 辿るのは型が組み込みの tuple / list のときだけ（それ以外の値はそのまま walker が裁く）
         yield "proof_kind", self.proof_kind
         yield "proof_stage", self.proof_stage
-        yield "required_evidence", iter(self.required_evidence)
+        required_evidence = self.required_evidence
+        if type(required_evidence) in (tuple, list):
+            yield "required_evidence", (item for item in required_evidence)
+        else:
+            yield "required_evidence", required_evidence
         yield "description", self.description
 
     def to_dict(self) -> Dict[str, Any]:
@@ -241,7 +267,12 @@ class UnknownRecoveryPlan:
 
     def json_items(self):
         yield "reason_id", self.reason_id
-        yield "proof_obligations", iter(self.proof_obligations)
+        # 列は package の generator（`UnknownRecoveryProofObligation.json_items` と同じ規則）
+        proof_obligations = self.proof_obligations
+        if type(proof_obligations) in (tuple, list):
+            yield "proof_obligations", (item for item in proof_obligations)
+        else:
+            yield "proof_obligations", proof_obligations
         yield "target_regression", self.target_regression
         yield "description", self.description
 
@@ -1093,12 +1124,43 @@ def build_proof_obligation_id(
     evidence_kind: Any,
     object_target_key: Any,
 ) -> Tuple[Any, ...]:
-    return (
+    return _proof_obligation_id(
         normalize_unknown_reason_id(reason_id),
-        str(proof_stage or UNKNOWN_TUPLE_MISSING),
+        _text_or_missing(proof_stage),
         normalize_recovery_proof_kind(recovery_proof_kind) or UnknownRecoveryProofKind.NONE.value,
-        str(evidence_kind or UNKNOWN_TUPLE_MISSING),
-        _coerce_optional_tuple(object_target_key) or (UNKNOWN_TUPLE_MISSING,),
+        _text_or_missing(evidence_kind),
+        _coerce_optional_tuple(object_target_key),
+    )
+
+
+def _text_or_missing(value: Any) -> str:
+    """`str(value or UNKNOWN_TUPLE_MISSING)`（値は live_values の規則で読む）。"""
+
+    if value is None or not live_values.as_bool(value):
+        return UNKNOWN_TUPLE_MISSING
+    return _text(value)
+
+
+def _proof_obligation_id(
+    reason_id: str,
+    proof_stage: str,
+    proof_kind: str,
+    evidence_kind: str,
+    object_target_key: Optional[Tuple[Any, ...]],
+) -> Tuple[Any, ...]:
+    """正規化した部分から proof obligation id を組む（id の形の唯一の owner）。
+
+    `object_target_key` は `_coerce_optional_tuple` の結果（`None` か組み込みの tuple）。値の中身は
+    読まない（空かどうかだけ）。bounded path（`checker.unknown_reason`）は live な値を正規化して
+    からここへ渡す。
+    """
+
+    return (
+        reason_id,
+        proof_stage,
+        proof_kind,
+        evidence_kind,
+        object_target_key or (UNKNOWN_TUPLE_MISSING,),
     )
 
 

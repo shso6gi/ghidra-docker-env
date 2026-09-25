@@ -531,6 +531,39 @@ def test_the_premise_byte_bound_refuses_long_binary_labels():
     assert conditional.assumption_set_receipt_bound_violation((huge,)) is not None
 
 
+def test_the_premise_bound_counts_the_written_bytes_without_building_the_payload(monkeypatch):
+    """上限の確かめは書く形と同じ byte を数え、payload を写さない（上限を超える premise を先に組み立てない）。"""
+    from scripts.function_tracer_pcode.analysis.effects.pure_function_catalog import load_pure_function_catalog
+    from scripts.function_tracer_pcode.authority.decision import conditional
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonEncodingPolicy
+
+    catalog = load_pure_function_catalog()
+    label = "\x01" * conditional.PREMISE_BINARY_LABEL_MAX_CHARS
+    premises = [
+        _catalog_premise(catalog, entry, kind="thunk_to_external", library=label, names=(label, label))
+        for entry in catalog.entries.values()
+    ]
+    measured = []
+    original = JsonEncodingPolicy.measure
+
+    def spy(self, value, **kwargs):
+        measured.append(original(self, value))
+        return original(self, value, **kwargs)
+
+    monkeypatch.setattr(conditional, "assumption_premise_payload", _never_called)
+    monkeypatch.setattr(JsonEncodingPolicy, "measure", spy)
+    assert conditional.assumption_set_receipt_bound_violation(tuple(premises)) is None
+    monkeypatch.undo()
+    assert measured == [
+        len(RESULT_JSON_POLICY.dumps(conditional.assumption_premise_payload(premise)).encode("utf-8"))
+        for premise in premises
+    ]
+
+
+def _never_called(*_args, **_kwargs):
+    raise AssertionError("the bound check must not build the written payload")
+
+
 def test_a_receipt_outside_its_contract_is_neither_issued_nor_valid(monkeypatch):
     """receipt の owner が発行時に上限を強制する（lane を通らない呼び出しも、上限の外の receipt を作れない）。"""
     from scripts.function_tracer_pcode.authority.decision import conditional

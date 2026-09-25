@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
+from scripts.function_tracer_pcode.core.live_values import is_kind
 
 
 CALL_MODEL_CANDIDATE_KIND = "call_model_candidate"
@@ -121,9 +122,9 @@ class CallModelCandidateRef:
 def _jsonable_key_source(value: Any) -> Any:
     """`_jsonable_key` と同じ値を 1 要素ずつ作らせる source（tuple は配列、それ以外はそのまま）。"""
 
-    if isinstance(value, tuple):
+    if is_kind(value, tuple):
         return each(value, _jsonable_key_source)
-    if value is None or isinstance(value, (bool, int, float, str)):
+    if value is None or is_kind(value, (bool, int, float, str)):
         return value
     return raw(value)
 

@@ -762,11 +762,17 @@ def test_o3_m3_a_new_diagnostic_field_is_one_output_row(monkeypatch):
     prepared = result.prepared_semantic_payload
     before = json.loads(build_final_result_envelope(result).text)
 
+    # field を足す: 表に 1 行（読み方は閉じた種類。計算する読み方は登録した関数の名前）
     extra = OutputField(
         "extra_observation", FieldOwner.METADATA,
-        lambda r, o: {"observed": 1}, Overflow.TRUNCATE,
+        output_preparation._function("extra_observation"), Overflow.TRUNCATE,
     )
     monkeypatch.setattr(output_preparation, "RESULT_FIELDS", RESULT_FIELDS + (extra,))
+    registered = output_preparation._read_by_function
+    monkeypatch.setattr(
+        output_preparation, "_read_by_function",
+        lambda name, r, o: {"observed": 1} if name == "extra_observation" else registered(name, r, o),
+    )
     after = json.loads(build_final_result_envelope(result).text)
 
     assert after["extra_observation"] == {"observed": 1}

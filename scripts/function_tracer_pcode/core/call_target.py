@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Optional, Tuple, Union
+from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import materialize
 
 
@@ -236,13 +237,14 @@ class CallTargetRef:
         return cls(kind="unknown", display_hint=display_hint)
 
     def is_function(self) -> bool:
-        return self.kind == "function"
+        # kind は `__post_init__` が検査した文字列（owner の API で基底型の値として比べる）
+        return live_values.str_value(self.kind) == "function"
 
     def is_code_address(self) -> bool:
-        return self.kind == "code_address"
+        return live_values.str_value(self.kind) == "code_address"
 
     def is_unknown(self) -> bool:
-        return self.kind == "unknown"
+        return live_values.str_value(self.kind) == "unknown"
 
     def stable_key(self) -> Tuple[Any, ...]:
         if self.is_function():
@@ -279,14 +281,21 @@ class CallTargetRef:
         return self.stable_key()
 
     def display_name(self) -> str:
-        if self.function_name:
-            return self.function_name
-        if self.is_code_address() and self.address_offset is not None:
-            return self.display_hint or f"ADDR_{self.address_offset:x}"
-        if self.is_function() and self.entry_offset is not None:
-            return f"sub_{self.entry_offset:x}"
-        if self.display_hint:
-            return self.display_hint
+        # field は owner の API で読む（出力の入口から live な値として辿られる）
+        function_name = self.function_name
+        if function_name is not None and live_values.as_bool(function_name):
+            return function_name
+        display_hint = self.display_hint
+        address_offset = self.address_offset
+        if self.is_code_address() and address_offset is not None:
+            if display_hint is not None and live_values.as_bool(display_hint):
+                return display_hint
+            return f"ADDR_{live_values.as_int(address_offset):x}"
+        entry_offset = self.entry_offset
+        if self.is_function() and entry_offset is not None:
+            return f"sub_{live_values.as_int(entry_offset):x}"
+        if display_hint is not None and live_values.as_bool(display_hint):
+            return display_hint
         return "UNKNOWN_FUNC"
 
     def placeholder_name(self) -> str:
@@ -295,7 +304,7 @@ class CallTargetRef:
     def json_items(self):
         yield "kind", self.kind
         yield "display_name", self.display_name()
-        if self.function_name:
+        if self.function_name is not None and live_values.as_bool(self.function_name):
             yield "function_name", self.function_name
         if self.program_id is not None:
             yield "program_id", self.program_id
@@ -305,13 +314,13 @@ class CallTargetRef:
             yield "address_offset", self.address_offset
         if self.is_external is not None:
             yield "is_external", self.is_external
-        if self.library_name:
+        if self.library_name is not None and live_values.as_bool(self.library_name):
             yield "library_name", self.library_name
         if self.is_thunk is not None:
             yield "is_thunk", self.is_thunk
         if self.thunked_is_external is not None:
             yield "thunked_is_external", self.thunked_is_external
-        if self.thunked_library_name:
+        if self.thunked_library_name is not None and live_values.as_bool(self.thunked_library_name):
             yield "thunked_library_name", self.thunked_library_name
 
     def to_dict(self) -> dict:
@@ -319,7 +328,7 @@ class CallTargetRef:
 
 
 def coerce_call_target_ref(target: Union["CallTargetRef", str, None]) -> Optional["CallTargetRef"]:
-    if isinstance(target, CallTargetRef):
+    if live_values.is_kind(target, CallTargetRef):
         return target
     if target is None:
         return None

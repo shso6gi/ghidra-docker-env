@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
-from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
+from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw)
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, str_value
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
 )
@@ -43,7 +44,7 @@ class AddressValueRef:
         )
 
     def has_concrete_address(self) -> bool:
-        return int(self.address_offset) >= 0
+        return as_int(self.address_offset) >= 0
 
     def global_object_identity(self) -> Optional[Tuple[str, int, int]]:
         """``(symbol_name, object_size, offset_in_object)`` of a writable global.
@@ -71,20 +72,24 @@ class AddressValueRef:
         return (str(self.object_symbol_name), size, offset)
 
     def is_readonly_memory(self) -> bool:
-        return bool(
+        # field の真偽は owner の API で読む（`bool(...)` と同じ値）
+        return (
             self.has_concrete_address()
-            and self.is_initialized
-            and self.can_read
-            and not self.can_write
-            and not self.is_volatile
+            and as_bool(self.is_initialized)
+            and as_bool(self.can_read)
+            and not as_bool(self.can_write)
+            and not as_bool(self.is_volatile)
         )
 
     def display_name(self) -> str:
-        return self.display_hint or f"ADDR_{int(self.address_offset):x}"
+        hint = self.display_hint
+        if as_bool(hint):
+            return hint
+        return f"ADDR_{as_int(self.address_offset):x}"
 
     def json_items(self):
         yield "kind", "address"
-        yield "address_offset", int(self.address_offset)
+        yield "address_offset", as_int(self.address_offset)
         yield "source", self.source
         yield "display_name", self.display_name()
         yield "program_id", self.program_id
@@ -104,6 +109,24 @@ class AddressValueRef:
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)
+
+
+def _kind_text(kind: Any) -> Any:
+    """`kind` の field の基底型の文字列（文字列でなければ `NOT_PLAIN`。`==` を live な値に当てない）。"""
+
+    if type(kind) is str:
+        return kind
+    return str_value(kind)
+
+
+def _int_or_zero(value: Any) -> int:
+    """`int(value or 0)` と同じ値（真偽と整数化は owner の API で読む）。"""
+
+    if type(value) is int:
+        return value
+    if value is None or not as_bool(value):
+        return 0
+    return as_int(value)
 
 
 @dataclass(frozen=True)
@@ -212,16 +235,16 @@ class LocationBaseRef:
         )
 
     def is_parameter(self) -> bool:
-        return self.kind == "parameter"
+        return _kind_text(self.kind) == "parameter"
 
     def is_stack_frame(self) -> bool:
-        return self.kind == "stack_frame"
+        return _kind_text(self.kind) == "stack_frame"
 
     def is_storage(self) -> bool:
-        return self.kind == "storage"
+        return _kind_text(self.kind) == "storage"
 
     def is_global(self) -> bool:
-        return self.kind == "global"
+        return _kind_text(self.kind) == "global"
 
     @property
     def global_symbol_name(self) -> Optional[str]:
@@ -323,14 +346,18 @@ class LocationBaseRef:
         )
 
     def display_name(self) -> str:
-        if self.display_hint:
-            return self.display_hint
+        hint = self.display_hint
+        if as_bool(hint):
+            return hint
         if self.is_parameter():
-            return self.parameter_name or "param"
+            name = self.parameter_name
+            return name if as_bool(name) else "param"
         if self.is_stack_frame():
             return "stackframe"
-        space = self.storage_space or "mem"
-        return f"{space}@{int(self.storage_offset or 0)}:{int(self.storage_size or 0)}"
+        space = self.storage_space
+        if not as_bool(space):
+            space = "mem"
+        return f"{builtin_str(space)}@{_int_or_zero(self.storage_offset)}:{_int_or_zero(self.storage_size)}"
 
     def matches_parameter(self, param: Dict[str, Any]) -> bool:
         if not self.is_parameter():
@@ -389,7 +416,7 @@ class LocationStep:
 
     def json_items(self):
         yield "kind", self.kind
-        yield "value", int(self.value)
+        yield "value", as_int(self.value)
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)
@@ -435,8 +462,8 @@ class CanonicalLocation:
 
     def json_items(self):
         yield "base_ref", self.base_ref
-        yield "offset", int(self.offset)
-        yield "size", int(self.size)
+        yield "offset", as_int(self.offset)
+        yield "size", as_int(self.size)
         yield "steps", each(self.steps)
 
     def to_dict(self) -> Dict[str, Any]:

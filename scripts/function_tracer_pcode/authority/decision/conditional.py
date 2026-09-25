@@ -388,8 +388,18 @@ def assumption_set_receipt_bound_violation(premises: Tuple[AssumptionPremise, ..
         return f"assumption_set has {count} premises (> {limit})"
     premise_limit = assumption_premise_max_bytes()
     for index, premise in enumerate(premises):
+        if type(premise) is not AssumptionPremise:
+            raise TypeError(f"assumption sets carry AssumptionPremise only: {type(premise).__name__}")
+        # 書く形（`assumption_premise_payload`）と同じ byte を、payload を写さずに上限の中で数える
+        # （tuple と list は同じ JSON の配列。上限を超える premise の payload を先に組み立てない）
+        shape = {
+            "kind": premise.kind.value,
+            "subject": premise.subject,
+            "payload": premise.payload,
+            "schema_version": premise.schema_version,
+        }
         try:
-            RESULT_JSON_POLICY.measure(assumption_premise_payload(premise), max_bytes=premise_limit)
+            RESULT_JSON_POLICY.measure(shape, max_bytes=premise_limit)
         except JsonBudgetExhausted:
             return f"assumption premise {index} exceeds {premise_limit} bytes"
     return None

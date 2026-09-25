@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
+from scripts.function_tracer_pcode.core.live_values import as_int, as_str, attribute
 
 
 _ABI_SLOT_KIND = "abi_argument_slot"
@@ -180,7 +181,8 @@ class FreshCallArgumentRef:
 
     def display_name(self) -> str:
         # discriminator は __post_init__ で保証済み。ここで既定値へ丸めない。
-        return f"fresh_{self.binary_id}_arg{self.slot.ordinal}"
+        # field は owner の API で読む（`__post_init__` が str / int に正規化済みなので同じ文字列）
+        return f"fresh_{as_str(self.binary_id)}_arg{as_int(attribute(self.slot, 'ordinal'))}"
 
     def json_items(self):
         yield "kind", _FRESH_ARGUMENT_KIND

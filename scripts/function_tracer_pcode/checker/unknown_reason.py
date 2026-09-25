@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from dataclasses import dataclass, fields, replace
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 # Phase 7-1b-1 (#97): pure な定義層は proof.unknown_reason へ移動した。以下は (a) 本 module の実装が使う名前と
 # (b) 旧 path `checker.unknown_reason` からの互換 import のための再輸出（同一 object。再定義しない）。
+from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import (
     EVIDENCE,
     INT,
@@ -15,11 +16,13 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     Column,
     as_dict,
     as_list,
+    builtin_str,
     each,
     materialize,
     Reducer,
     row_items,
     source_converter,
+    value_token,
 )
 from scripts.function_tracer_pcode.proof.unknown_reason import (  # noqa: F401
     UNKNOWN_TUPLE_MISSING,
@@ -39,6 +42,7 @@ from scripts.function_tracer_pcode.proof.unknown_reason import (  # noqa: F401
     _coerce_evidence_refs,
     _coerce_optional_tuple,
     _enum_value,
+    _proof_obligation_id,
     _registered_recovery_proof_kind_values,
     build_proof_obligation_id,
     coerce_unknown_recovery_proof_obligation,
@@ -78,7 +82,8 @@ TYPED_CAUSE_KEY_INLINE_BYTES = 4096
 
 @source_converter
 def _optional_dict(value: Any) -> Any:
-    return as_dict(value) if value else None
+    # 真偽は live_values の規則で読む（上書きした `__bool__` / `__len__` を呼ばない）
+    return as_dict(value) if live_values.as_bool(value) else None
 
 
 @source_converter
@@ -90,7 +95,8 @@ def _dict_items(values: Any) -> Any:
 
 @source_converter
 def _dict_item(value: Any) -> Any:
-    return as_dict(value) if isinstance(value, Mapping) else value
+    # 組み込みの振る舞いの mapping だけを dict にする（`isinstance` は `__class__` を読む）
+    return as_dict(value) if live_values.builtin_mapping(value) is not None else value
 
 
 UNKNOWN_RECOVERY_ACTION_ROW = (
@@ -142,15 +148,62 @@ UNKNOWN_REASON_ROW = (
 )
 
 
-def _evidence_identity(record: Any) -> Any:
-    """大きい証拠を要約するときの identity。authority の projection なら cause id。"""
+def _evidence_identity(typed_cause_key: Any) -> Any:
+    """大きい証拠を要約するときの identity（record の `typed_cause_key`）。authority の projection なら cause id。
 
-    typed_cause_key = getattr(record, "typed_cause_key", None)
-    if isinstance(typed_cause_key, Mapping):
-        cause_id = typed_cause_key.get("cause_id")
-        if isinstance(cause_id, str) and cause_id:
-            return "cause:" + cause_id
+    値は live_values の規則だけで読む（組み込みの mapping の `cause_id` の文字列だけ）。
+    """
+
+    mapping = live_values.builtin_mapping(typed_cause_key)
+    if mapping is None:
+        return None
+    cause_id = live_values.str_value(live_values.lookup(mapping, "cause_id"))
+    if cause_id is not live_values.NOT_PLAIN and cause_id:
+        return "cause:" + cause_id
     return None
+
+
+def _plain_text(value: Any) -> str:
+    """`str(value)`（scalar・組み込みのままの enum は同じ文字列。それ以外は組み込みの `str` の写し）。"""
+
+    if type(value) is str:
+        return value
+    try:
+        return live_values.as_str(value)
+    except TypeError:
+        return builtin_str(value)
+
+
+def _plain_enum_value(value: Any) -> Optional[str]:
+    """`_enum_value(value)` と同じ文字列を live_values の規則だけで求める（enum は `_value_`）。
+
+    pure layer（`proof.unknown_reason`）の関数へ live な値を渡さずに、正規化した文字列を渡す。
+    `_enum_value` は文字列をそのまま返すので、結果は元の値を渡したときと同じ。
+    """
+
+    if value is None:
+        return None
+    if type(value) is str:
+        return value
+    if live_values.is_enum(value):
+        return _plain_text(live_values.enum_value(value))
+    return _plain_text(value)
+
+
+def _or(value: Any, default: Any) -> Any:
+    """`value or default`（真偽は live_values の規則。自身の code でしか決まらない値は `TypeError`）。"""
+
+    return value if live_values.as_bool(value) else default
+
+
+def _text_or(value: Any, default: str) -> str:
+    """`str(value or default)`（live_values の規則で読む）。"""
+
+    if type(value) is str:
+        return value or default
+    if value is None or not live_values.as_bool(value):
+        return default
+    return _plain_text(value)
 
 
 @dataclass(frozen=True)
@@ -176,14 +229,18 @@ class UnknownRecoveryAction:
     detail: Optional[str] = None
 
     def json_items(self):
-        return row_items(UNKNOWN_RECOVERY_ACTION_ROW, self, identity=_evidence_identity(self))
+        # action は `typed_cause_key` を持たない（証拠の identity は無い）
+        return row_items(UNKNOWN_RECOVERY_ACTION_ROW, self, identity=None)
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "UnknownRecoveryAction":
-        raw_reason_id = _enum_value(payload.get("reason_id"))
+        # payload は live な mapping: 組み込みの振る舞いの mapping の値だけを読む（真偽・文字列も
+        # live_values の規則。`str(x or 既定)` と同じ文字列）
+        fields_ = _payload_view(payload)
+        raw_reason_id = _plain_enum_value(fields_.get("reason_id"))
         reason_id = normalize_unknown_reason_id(raw_reason_id)
         if reason_id == UnknownReasonId.UNKNOWN.value and raw_reason_id:
             try:
@@ -204,52 +261,57 @@ class UnknownRecoveryAction:
             reason_id != UnknownReasonId.UNKNOWN.value
             and reason_id in _UNKNOWN_REASON_REGISTRY
         )
+        target_regression = fields_.get("target_regression")
         return cls(
-            count_kind=_enum_value(payload.get("count_kind")) or UnknownCountKind.PROOF_ACTION.value,
+            count_kind=_plain_enum_value(fields_.get("count_kind")) or UnknownCountKind.PROOF_ACTION.value,
             reason_id=reason_id,
-            decision_effect=str(
-                payload.get("decision_effect")
-                or (
-                    definition.decision_effect
-                    if use_definition_defaults
-                    else UnknownDecisionEffect.DIAGNOSTIC_ONLY.value
-                )
+            decision_effect=_text_or(
+                fields_.get("decision_effect"),
+                definition.decision_effect if use_definition_defaults
+                else UnknownDecisionEffect.DIAGNOSTIC_ONLY.value,
             ),
-            reason_scope=str(
-                payload.get("reason_scope")
-                or (
-                    definition.reason_scope
-                    if use_definition_defaults
-                    else UnknownReasonScope.GLOBAL.value
-                )
+            reason_scope=_text_or(
+                fields_.get("reason_scope"),
+                definition.reason_scope if use_definition_defaults else UnknownReasonScope.GLOBAL.value,
             ),
-            proof_kind=normalize_recovery_proof_kind(payload.get("proof_kind")) or UnknownRecoveryProofKind.NONE.value,
-            proof_stage=str(payload.get("proof_stage") or "unspecified"),
-            status=str(payload.get("status") or UnknownRecoveryActionStatus.PLANNED.value),
-            aggregation_unit=str(
-                payload.get("aggregation_unit")
-                or (
-                    definition.aggregation_unit
-                    if use_definition_defaults
-                    else UnknownAggregationUnit.RESULT.value
-                )
+            proof_kind=(
+                normalize_recovery_proof_kind(_plain_enum_value(fields_.get("proof_kind")))
+                or UnknownRecoveryProofKind.NONE.value
             ),
-            stage=payload.get("stage"),
-            pair_or_case=payload.get("pair_or_case"),
-            required_evidence=_coerce_evidence_refs(payload.get("required_evidence") or ()),
-            evidence_refs=_coerce_evidence_refs(payload.get("evidence_refs") or ()),
-            evidence_kind=payload.get("evidence_kind"),
-            object_target_key=_coerce_optional_tuple(payload.get("object_target_key")),
-            object_evidence=payload.get("object_evidence"),
-            proof_obligation_id=_coerce_optional_tuple(payload.get("proof_obligation_id")),
-            recovery_action=payload.get("recovery_action"),
+            proof_stage=_text_or(fields_.get("proof_stage"), "unspecified"),
+            status=_text_or(fields_.get("status"), UnknownRecoveryActionStatus.PLANNED.value),
+            aggregation_unit=_text_or(
+                fields_.get("aggregation_unit"),
+                definition.aggregation_unit if use_definition_defaults
+                else UnknownAggregationUnit.RESULT.value,
+            ),
+            stage=fields_.get("stage"),
+            pair_or_case=fields_.get("pair_or_case"),
+            required_evidence=_coerce_evidence_refs(fields_.get("required_evidence")),
+            evidence_refs=_coerce_evidence_refs(fields_.get("evidence_refs")),
+            evidence_kind=fields_.get("evidence_kind"),
+            object_target_key=_coerce_optional_tuple(fields_.get("object_target_key")),
+            object_evidence=fields_.get("object_evidence"),
+            proof_obligation_id=_coerce_optional_tuple(fields_.get("proof_obligation_id")),
+            recovery_action=fields_.get("recovery_action"),
             target_regression=(
-                payload.get("target_regression")
-                if payload.get("target_regression") is not None
+                target_regression
+                if target_regression is not None
                 else definition.target_regression if use_definition_defaults else None
             ),
-            detail=payload.get("detail"),
+            detail=fields_.get("detail"),
         )
+
+
+def _payload_view(payload: Any) -> Dict[str, Any]:
+    """live な mapping の (key の文字列, 値) の dict（組み込みの振る舞いの mapping だけ）。"""
+
+    if type(payload) is dict:
+        return payload
+    view: Dict[str, Any] = {}
+    for key, value in live_values.items_of(payload):
+        view[_plain_text(key)] = value
+    return view
 
 
 @dataclass(frozen=True)
@@ -278,7 +340,7 @@ class UnknownReasonRecord:
     detail: Optional[str] = None
 
     def json_items(self):
-        return row_items(UNKNOWN_REASON_ROW, self, identity=_evidence_identity(self))
+        return row_items(UNKNOWN_REASON_ROW, self, identity=_evidence_identity(self.typed_cause_key))
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)
@@ -286,7 +348,9 @@ class UnknownReasonRecord:
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "UnknownReasonRecord":
         constructor = make_unknown_reason
-        raw_reason_id = _enum_value(payload.get("reason_id"))
+        payload = _payload_view(payload)
+        # reason id は `_enum_value` と同じ文字列を live_values の規則で求める（真偽も同じ規則）
+        raw_reason_id = _plain_enum_value(payload.get("reason_id"))
         if raw_reason_id not in _UNKNOWN_REASON_REGISTRY:
             try:
                 from scripts.function_tracer_pcode.authority.process.supervisor import (
@@ -307,7 +371,7 @@ class UnknownReasonRecord:
             aggregation_unit=payload.get("aggregation_unit"),
             stage=payload.get("stage"),
             pair_or_case=payload.get("pair_or_case"),
-            evidence_refs=payload.get("evidence_refs") or (),
+            evidence_refs=_or(payload.get("evidence_refs"), ()),
             recovery_proof_kind=payload.get("recovery_proof_kind"),
             recovery_proof_obligations=payload.get("recovery_proof_obligations"),
             proof_stage=payload.get("proof_stage"),
@@ -316,7 +380,7 @@ class UnknownReasonRecord:
             object_evidence=payload.get("object_evidence"),
             proof_obligation_id=payload.get("proof_obligation_id"),
             typed_cause_key=payload.get("typed_cause_key"),
-            proof_requirement_ids=payload.get("proof_requirement_ids") or (),
+            proof_requirement_ids=_or(payload.get("proof_requirement_ids"), ()),
             recovery_action=payload.get("recovery_action"),
             action_status=payload.get("action_status"),
             target_regression=payload.get("target_regression"),
@@ -393,12 +457,14 @@ def make_unknown_reason(
         and coerced_object_target_key is not None
         and normalized_proof_kind != UnknownRecoveryProofKind.NONE.value
     ):
+        # key は元の値を渡す（`build_proof_obligation_id` が同じ `_coerce_optional_tuple` を掛ける。
+        # 写しは冪等なので `coerced_object_target_key` を渡すのと同じ id）
         coerced_proof_obligation_id = build_proof_obligation_id(
             definition.reason_id,
             resolved_proof_stage,
             normalized_proof_kind,
             resolved_evidence_kind,
-            coerced_object_target_key,
+            object_target_key,
         )
     return UnknownReasonRecord(
         count_kind=_enum_value(count_kind) or UnknownCountKind.REASON_RECORD.value,
@@ -456,7 +522,7 @@ def make_internal_v2_reason_diagnostic(
     )
     provided_reason_class = _enum_value(kwargs.pop("reason_class", None))
     provided_decision_effect = _enum_value(kwargs.pop("decision_effect", None))
-    provided_target_regression = kwargs.pop("target_regression", None)
+    provided_target_regression = _plain_enum_value(kwargs.pop("target_regression", None))
     if provided_reason_class not in {None, projected_reason_class}:
         raise ValueError("typed compatibility reason class differs from v2 registry")
     if provided_decision_effect not in {None, definition.decision_effect}:
@@ -481,7 +547,7 @@ def make_internal_v2_reason_diagnostic(
         projected.proof_stage is not None
         and projected.evidence_kind is not None
         and projected.object_target_key is not None
-        and projected.recovery_proof_kind != UnknownRecoveryProofKind.NONE.value
+        and _plain_enum_value(projected.recovery_proof_kind) != UnknownRecoveryProofKind.NONE.value
     ):
         exact_proof_obligation_id = build_proof_obligation_id(
             definition.reason_id,
@@ -492,20 +558,25 @@ def make_internal_v2_reason_diagnostic(
         )
         if (
             provided_proof_obligation_id is not None
-            and provided_proof_obligation_id != exact_proof_obligation_id
+            # 値の印で比べる（tuple の葉の `__eq__` を呼ばない。plain な値なら `!=` と同じ）
+            and value_token(provided_proof_obligation_id) != value_token(exact_proof_obligation_id)
         ):
             raise ValueError("typed compatibility proof ID differs from exact v2 reason")
-    diagnostic_cause_key = dict(projected.typed_cause_key or {})
+    diagnostic_cause_key: Dict[str, Any] = {}
+    typed = projected.typed_cause_key
+    if typed is not None and live_values.as_bool(typed):
+        for key, value in live_values.items_of(typed):
+            diagnostic_cause_key[_plain_text(key)] = value
     diagnostic_cause_key["authority_class"] = "LEGACY_DIAGNOSTIC"
-    return replace(
-        projected,
-        reason_id=definition.reason_id,
-        reason_class=projected_reason_class,
-        decision_effect=definition.decision_effect,
-        proof_obligation_id=exact_proof_obligation_id,
-        typed_cause_key=diagnostic_cause_key,
-        target_regression=definition.reason_id,
-    )
+    # `dataclasses.replace` と同じ record（field は instance の値だけで読む）
+    values = _field_values(projected, _UNKNOWN_REASON_FIELDS)
+    values["reason_id"] = definition.reason_id
+    values["reason_class"] = projected_reason_class
+    values["decision_effect"] = definition.decision_effect
+    values["proof_obligation_id"] = exact_proof_obligation_id
+    values["typed_cause_key"] = diagnostic_cause_key
+    values["target_regression"] = definition.reason_id
+    return UnknownReasonRecord(**values)
 
 
 # ---------------------------------------------------------------------------
@@ -574,7 +645,8 @@ def _bounded_text(value: Any, max_chars: int, *, work: Any) -> Any:
 
     from scripts.function_tracer_pcode.core.json_encoding import bounded_text
 
-    if value is None or isinstance(value, str):
+    # 型は `type(x)` の MRO で調べる（`isinstance` は上書きした `__class__` を読む）
+    if value is None or live_values.is_kind(value, str):
         return bounded_text(value, max_chars, work=work)
     return _bounded_value(value, work=work)
 
@@ -587,70 +659,91 @@ def bounded_prefix(items: Any, *, work: Any, limit: int = EVIDENCE_REFS_MAX_COUN
     以外は有界な証拠。
     """
 
-    from itertools import islice
+    from scripts.function_tracer_pcode.core.json_encoding import _walk_iter
 
     if items is None:
         return ()
-    if isinstance(items, (str, bytes)):
+    if live_values.is_kind(items, str) or live_values.is_kind(items, bytes):
         items = (items,)
     kept = []
     try:
-        iterator = iter(items)
+        # 辿るのは walker と同じ列だけ（組み込みの振る舞いの容器・その iterator・package の
+        # generator。上書きした `__iter__` を呼ばない）
+        iterator = _walk_iter(items)
     except TypeError:
         # 列でない値（producer の不備）: 1 つの有界な証拠として残す
         return (_bounded_value(items, work=work),)
-    for item in islice(iterator, limit):
-        if isinstance(item, str):
+    more = False
+    for item in iterator:
+        if len(kept) >= limit:
+            # 上限の次の要素が在る（大きさの分からない列の marker に使う）
+            more = True
+            break
+        if live_values.is_kind(item, str):
             kept.append(_bounded_text(item, EVIDENCE_REF_MAX_CHARS, work=work))
         else:
             kept.append(_bounded_value(item, work=work))
     try:
-        total = len(items)
+        total = live_values.size(items)
     except TypeError:
         total = None
     if total is not None:
         if total > limit:
             kept.append(f"…(+{total - limit} refs)")
-    else:
-        for _more in iterator:
-            kept.append("…(+more refs)")
-            break
+    elif more:
+        kept.append("…(+more refs)")
     return tuple(kept)
 
 
 def finitize_unknown_reason_record(record: UnknownReasonRecord, *, work: Any) -> UnknownReasonRecord:
-    """legacy reason 1 件の重い field を有界な表現へ置き換える（reason id などは不変）。"""
+    """legacy reason 1 件の重い field を有界な表現へ置き換える（reason id などは不変）。
 
-    return replace(
-        record,
-        stage=_bounded_text(record.stage, LABEL_MAX_CHARS, work=work),
-        pair_or_case=_bounded_text(record.pair_or_case, LABEL_MAX_CHARS, work=work),
-        detail=_bounded_text(record.detail, DETAIL_MAX_CHARS, work=work),
-        object_target_key=_bounded_value(record.object_target_key, work=work),
-        object_evidence=_bounded_value(record.object_evidence, work=work),
-        proof_obligation_id=_bounded_value(record.proof_obligation_id, work=work),
-        typed_cause_key=_bounded_value(
-            record.typed_cause_key, work=work, inline_bytes=TYPED_CAUSE_KEY_INLINE_BYTES,
-        ),
-        proof_requirement_ids=bounded_prefix(record.proof_requirement_ids, work=work),
-        evidence_refs=bounded_prefix(record.evidence_refs, work=work),
+    `dataclasses.replace` と同じ record を、field を instance の値だけで読んで作る（exact な型だけ）。
+    """
+
+    if type(record) is not UnknownReasonRecord:
+        raise TypeError(f"{type(record).__name__} is not an unknown reason record")
+    values = _field_values(record, _UNKNOWN_REASON_FIELDS)
+    values["stage"] = _bounded_text(record.stage, LABEL_MAX_CHARS, work=work)
+    values["pair_or_case"] = _bounded_text(record.pair_or_case, LABEL_MAX_CHARS, work=work)
+    values["detail"] = _bounded_text(record.detail, DETAIL_MAX_CHARS, work=work)
+    values["object_target_key"] = _bounded_value(record.object_target_key, work=work)
+    values["object_evidence"] = _bounded_value(record.object_evidence, work=work)
+    values["proof_obligation_id"] = _bounded_value(record.proof_obligation_id, work=work)
+    values["typed_cause_key"] = _bounded_value(
+        record.typed_cause_key, work=work, inline_bytes=TYPED_CAUSE_KEY_INLINE_BYTES,
     )
+    values["proof_requirement_ids"] = bounded_prefix(record.proof_requirement_ids, work=work)
+    values["evidence_refs"] = bounded_prefix(record.evidence_refs, work=work)
+    return UnknownReasonRecord(**values)
 
 
 def finitize_unknown_recovery_action(action: UnknownRecoveryAction, *, work: Any) -> UnknownRecoveryAction:
-    """recovery action 1 件の重い field を有界な表現へ置き換える。"""
+    """recovery action 1 件の重い field を有界な表現へ置き換える（`dataclasses.replace` と同じ record）。"""
 
-    return replace(
-        action,
-        stage=_bounded_text(action.stage, LABEL_MAX_CHARS, work=work),
-        pair_or_case=_bounded_text(action.pair_or_case, LABEL_MAX_CHARS, work=work),
-        detail=_bounded_text(action.detail, DETAIL_MAX_CHARS, work=work),
-        object_target_key=_bounded_value(action.object_target_key, work=work),
-        object_evidence=_bounded_value(action.object_evidence, work=work),
-        proof_obligation_id=_bounded_value(action.proof_obligation_id, work=work),
-        evidence_refs=bounded_prefix(action.evidence_refs, work=work),
-        required_evidence=bounded_prefix(action.required_evidence, work=work),
-    )
+    if type(action) is not UnknownRecoveryAction:
+        raise TypeError(f"{type(action).__name__} is not an unknown recovery action")
+    values = _field_values(action, _UNKNOWN_RECOVERY_ACTION_FIELDS)
+    values["stage"] = _bounded_text(action.stage, LABEL_MAX_CHARS, work=work)
+    values["pair_or_case"] = _bounded_text(action.pair_or_case, LABEL_MAX_CHARS, work=work)
+    values["detail"] = _bounded_text(action.detail, DETAIL_MAX_CHARS, work=work)
+    values["object_target_key"] = _bounded_value(action.object_target_key, work=work)
+    values["object_evidence"] = _bounded_value(action.object_evidence, work=work)
+    values["proof_obligation_id"] = _bounded_value(action.proof_obligation_id, work=work)
+    values["evidence_refs"] = bounded_prefix(action.evidence_refs, work=work)
+    values["required_evidence"] = bounded_prefix(action.required_evidence, work=work)
+    return UnknownRecoveryAction(**values)
+
+
+#: record / action の field の名前（`dataclasses.fields` の順。有界化は同じ型で作り直す）
+_UNKNOWN_REASON_FIELDS = tuple(item.name for item in fields(UnknownReasonRecord))
+_UNKNOWN_RECOVERY_ACTION_FIELDS = tuple(item.name for item in fields(UnknownRecoveryAction))
+
+
+def _field_values(value: Any, names: Tuple[str, ...]) -> Dict[str, Any]:
+    """dataclass の field の値（instance の値だけ。descriptor・`__getattr__` を呼ばない）。"""
+
+    return {name: live_values.field_value(value, name) for name in names}
 
 
 def projection_diagnostic_work() -> Any:
@@ -693,69 +786,83 @@ def build_projection_diagnostic(
     Issue #22 PR-22-D: 辿る作業（cause の key の要約・legacy との照合）は `work`
     （`projection_diagnostic_work()`。finish 1 回で共有）へ数える。
     """
-    from scripts.function_tracer_pcode.authority.contracts import canonical_value
-
+    # receipt・cause・legacy の record・名前の mapping は live_values の規則だけで読む（instance の
+    # 値と package の property だけ。`__getattr__` / 上書きした `get` を呼ばない）
+    reason_id = live_values.attribute(receipt, "reason_id")
     diagnostic: Dict[str, Any] = {
         "schema": "unknown-reason-diagnostic-v1",
-        "reason_id": getattr(receipt, "reason_id", None),
+        "reason_id": reason_id,
         "functions": {
-            "function1": (function_names or {}).get("function1"),
-            "function2": (function_names or {}).get("function2"),
+            "function1": _name_of(function_names, "function1"),
+            "function2": _name_of(function_names, "function2"),
         },
         "binaries": {
-            "binary1": (binary_names or {}).get("binary1"),
-            "binary2": (binary_names or {}).get("binary2"),
+            "binary1": _name_of(binary_names, "binary1"),
+            "binary2": _name_of(binary_names, "binary2"),
         },
     }
     if cause_occurrence is not None:
-        cause_id = getattr(cause_occurrence, "cause_id", None)
-        scope = getattr(cause_occurrence, "identity_scope", None)
+        cause_id = live_values.attribute(cause_occurrence, "cause_id")
+        scope = live_values.attribute(cause_occurrence, "identity_scope")
         diagnostic["cause"] = {
-            "occurrence_id": getattr(cause_occurrence, "occurrence_id", None),
-            "target_kind": getattr(cause_occurrence, "target_kind", None),
-            "identity_scope": getattr(scope, "value", scope),
-            "producer_id": getattr(cause_occurrence, "producer_id", None),
-            "evidence_kind": getattr(cause_occurrence, "evidence_kind", None),
+            "occurrence_id": live_values.attribute(cause_occurrence, "occurrence_id"),
+            "target_kind": live_values.attribute(cause_occurrence, "target_kind"),
+            # enum は `_value_`（`value` の property を呼ばない）
+            "identity_scope": (
+                live_values.enum_value(scope) if live_values.is_enum(scope) else live_values.attribute(scope, "value", scope)
+            ),
+            "producer_id": live_values.attribute(cause_occurrence, "producer_id"),
+            "evidence_kind": live_values.attribute(cause_occurrence, "evidence_kind"),
             "evidence_refs": list(bounded_prefix(
-                getattr(cause_occurrence, "evidence_refs", ()), work=work,
+                live_values.attribute(cause_occurrence, "evidence_refs", ()), work=work,
             )),
             # Issue #22 PR-22-D: cause の key は authority が封印した canonical な値。
             # 診断には有界な表現（大きければ cause id を identity にした要約）だけを置く
             "canonical_target_key": _bounded_cause_value(
-                getattr(cause_id, "canonical_target_key", None), cause_id, column="canonical_target_key", work=work,
+                live_values.attribute(cause_id, "canonical_target_key"), cause_id, column="canonical_target_key", work=work,
             ),
             "missing_semantic_fact": _bounded_cause_value(
-                getattr(cause_id, "missing_semantic_fact", None), cause_id, column="missing_semantic_fact", work=work,
+                live_values.attribute(cause_id, "missing_semantic_fact"), cause_id, column="missing_semantic_fact", work=work,
             ),
         }
     matched, match_kind = _match_legacy_reasons(
-        diagnostic["reason_id"],
+        reason_id,
         cause_occurrence,
         legacy_reasons,
         projected_reason_counts or {},
         work=work,
     )
-    if matched:
+    if live_values.as_bool(matched):
         diagnostic["legacy_match"] = match_kind
-        if len(matched) > PROJECTION_DIAGNOSTIC_LEGACY_ROWS:
+        matched_count = live_values.size(matched)
+        if matched_count > PROJECTION_DIAGNOSTIC_LEGACY_ROWS:
             # 診断に写す legacy の行は上限まで（件数は残す。`detail` が使うのは先頭 2 行）
-            diagnostic["legacy_matched_count"] = len(matched)
-            matched = matched[:PROJECTION_DIAGNOSTIC_LEGACY_ROWS]
+            diagnostic["legacy_matched_count"] = matched_count
         # legacy の行は有界化の primitive を通して写す（G4-b で有界化済みなら何もしない。
         # 有界化していない record でも入力に比例する写しをしない）
-        diagnostic["legacy"] = [
-            {
-                "stage": _bounded_text(getattr(record, "stage", None), LABEL_MAX_CHARS, work=work),
-                "pair_or_case": _bounded_text(getattr(record, "pair_or_case", None), LABEL_MAX_CHARS, work=work),
-                "detail": _bounded_text(getattr(record, "detail", None), DETAIL_MAX_CHARS, work=work),
-                "evidence_refs": list(bounded_prefix(getattr(record, "evidence_refs", ()), work=work)),
+        rows: List[Dict[str, Any]] = []
+        for record in live_values.elements_of(matched):
+            if len(rows) >= PROJECTION_DIAGNOSTIC_LEGACY_ROWS:
+                break
+            rows.append({
+                "stage": _bounded_text(live_values.attribute(record, "stage"), LABEL_MAX_CHARS, work=work),
+                "pair_or_case": _bounded_text(live_values.attribute(record, "pair_or_case"), LABEL_MAX_CHARS, work=work),
+                "detail": _bounded_text(live_values.attribute(record, "detail"), DETAIL_MAX_CHARS, work=work),
+                "evidence_refs": list(bounded_prefix(live_values.attribute(record, "evidence_refs", ()), work=work)),
                 "object_target_key": _canonical_summary(
-                    _bounded_value(getattr(record, "object_target_key", None), work=work),
+                    _bounded_value(live_values.attribute(record, "object_target_key"), work=work),
                 ),
-            }
-            for record in matched
-        ]
+            })
+        diagnostic["legacy"] = rows
     return diagnostic
+
+
+def _name_of(names: Any, key: str) -> Any:
+    """`(names or {}).get(key)`（組み込みの振る舞いの mapping だけ。基底型の `get` で引く）。"""
+
+    if names is None:
+        return None
+    return live_values.lookup(names, key)
 
 
 def _bounded_cause_value(value: Any, cause_id: Any, *, column: str, work: Any) -> Any:
@@ -766,10 +873,10 @@ def _bounded_cause_value(value: Any, cause_id: Any, *, column: str, work: Any) -
 
     if value is None:
         return None
-    identity = getattr(cause_id, "value", None)
+    identity = live_values.str_value(live_values.attribute(cause_id, "value"))
     bounded = bounded_evidence(
         value, work=work,
-        identity=column_identity("cause:" + identity, column) if isinstance(identity, str) else None,
+        identity=column_identity("cause:" + identity, column) if identity is not live_values.NOT_PLAIN else None,
     )
     # 小さく plain な値（容器と基底型だけ）はそのまま: canonical な形も小さい
     return bounded if type(bounded) is BoundedEvidence else canonical_value(bounded)
@@ -812,11 +919,24 @@ class LegacyReasonIndex:
         self.truncated = truncated
 
     def group(self, reason_id: Any) -> Optional[_LegacyReasonGroup]:
-        return self._groups.get(reason_id)
+        # 索引の key は `_group_key` の plain な値（live な reason id の `__hash__` / `__eq__` を呼ばない）
+        groups = self._groups
+        if type(groups) is not dict:
+            return None
+        return groups.get(_group_key(reason_id))
 
     def by_reason(self, reason_id: Any) -> Tuple[Any, ...]:
-        group = self._groups.get(reason_id)
-        return () if group is None else tuple(group.records)
+        group = self.group(reason_id)
+        if type(group) is not _LegacyReasonGroup:
+            return ()
+        records = group.records
+        return tuple(records) if type(records) is list else ()
+
+
+def _group_key(reason_id: Any) -> Any:
+    """索引の key にする reason id（文字列はそのまま、それ以外は値で比べてよい決定的な印）。"""
+
+    return reason_id if type(reason_id) is str else value_token(reason_id)
 
 
 def _canonical_summary(bounded: Any) -> Any:
@@ -835,7 +955,7 @@ def _inline_canonical(value: Any, *, work: Any) -> Any:
     """inline のまま残った小さい値の canonical な値（大きさを数えてから作る。作れなければ `None`）。"""
 
     from scripts.function_tracer_pcode.authority.contracts import canonical_value
-    from scripts.function_tracer_pcode.core.json_encoding import PRODUCER_FAILURES, RESULT_JSON_POLICY
+    from scripts.function_tracer_pcode.core.json_encoding import PRODUCER_FAILURES, RESULT_JSON_POLICY, builtin_view
 
     try:
         # 容器（tuple / list / dict）と基底型だけから成る値だけを canonical にする（producer を
@@ -844,7 +964,11 @@ def _inline_canonical(value: Any, *, work: Any) -> Any:
         if size is None:
             return None
         work.charge(1 + size)
-        canonical = canonical_value(value)
+        # canonical にするのは組み込みの値だけで書き直した写し（数え済みの plain な値と同じ形）
+        ok, view = builtin_view(value)
+        if not ok:
+            return None
+        canonical = canonical_value(view)
         hash(canonical)
     except PRODUCER_FAILURES:
         return None
@@ -860,25 +984,35 @@ def legacy_reason_index(legacy_reasons: Any, *, work: Any, overflow: Any = 0) ->
 
     from scripts.function_tracer_pcode.core.json_encoding import BoundedEvidence, JsonBudgetExhausted
 
+    from scripts.function_tracer_pcode.core.json_encoding import _walk_iter
+
     groups: Dict[Any, _LegacyReasonGroup] = {}
-    truncated = bool(overflow)
+    truncated = live_values.as_bool(overflow)
+    # 辿るのは walker と同じ列だけ（組み込みの振る舞いの容器・その iterator・package の generator）
+    records = () if legacy_reasons is None else _walk_iter(legacy_reasons)
     try:
-        for record in legacy_reasons or ():
+        for record in records:
             work.charge(1)
-            group = groups.get(getattr(record, "reason_id", None))
+            # record は live_values の規則だけで読む（instance の値。`__getattr__` を呼ばない）
+            key = _group_key(live_values.attribute(record, "reason_id"))
+            group = groups.get(key)
             if group is None:
-                group = groups[getattr(record, "reason_id", None)] = _LegacyReasonGroup()
+                group = groups[key] = _LegacyReasonGroup()
             position = len(group.records)
             group.records.append(record)
-            target = getattr(record, "object_target_key", None)
+            target = live_values.attribute(record, "object_target_key")
             if type(target) is BoundedEvidence:
-                if target.fingerprint_kind == "canonical_sha256":
-                    group.by_fingerprint.setdefault(target.fingerprint, []).append(position)
+                # 要約の field は構築時に exact な str と確かめ済み（`BoundedEvidence.__post_init__`）
+                fingerprint_kind = target.fingerprint_kind
+                fingerprint = target.fingerprint
+                if type(fingerprint_kind) is str and type(fingerprint) is str:
+                    if fingerprint_kind == "canonical_sha256":
+                        group.by_fingerprint.setdefault(fingerprint, []).append(position)
             elif target is not None:
                 canonical = _inline_canonical(target, work=work)
                 if canonical is not None:
                     group.by_target.setdefault(canonical, []).append(position)
-            obligation = getattr(record, "proof_obligation_id", None)
+            obligation = live_values.attribute(record, "proof_obligation_id")
             if obligation is not None and type(obligation) is not BoundedEvidence:
                 canonical = _inline_canonical(obligation, work=work)
                 if canonical is not None:
@@ -893,9 +1027,73 @@ def _text_cost(item: Any, work: Any) -> int:
 
     from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
 
-    if isinstance(item, str):
-        return len(item)
+    text = live_values.str_value(item)
+    if text is not live_values.NOT_PLAIN:
+        return len(text)
     return RESULT_JSON_POLICY.measure(item, max_bytes=work.remaining())
+
+
+def _requirement_texts(requirements: Any, work: Any) -> frozenset:
+    """cause の requirement id の文字列（cause 1 つにつき 1 回。大きさを数えてから文字列にする）。
+
+    数えきれない・JSON にならない requirement は照合に使わない。文字列は組み込みの `str` の写し
+    （上書きした `__str__` を呼ばない）。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import (
+        JsonBudgetExhausted,
+        JsonValueRejected,
+        _walk_iter,
+    )
+
+    texts = set()
+    for item in _walk_iter(requirements):
+        try:
+            cost = _text_cost(item, work)
+        except JsonValueRejected:
+            continue
+        except JsonBudgetExhausted:
+            # 残りを使い切った（数えた分を足して、以後は照合に使わない）
+            remaining = work.remaining()
+            if remaining is not None:
+                work.consumed += remaining
+            break
+        try:
+            work.charge(1 + cost)
+        except JsonBudgetExhausted:
+            break
+        texts.add(builtin_str(item))
+    return frozenset(texts)
+
+
+def _index_positions(index: Any, key: Any) -> set:
+    """索引（dict: key → 位置の list）の `key` の位置。key が plain な値でなければ空。
+
+    key の `__hash__` / `__eq__` は組み込みの値のものだけ（`live_values.lookup` が確かめる）。
+    """
+
+    found: set = set()
+    if type(index) is not dict:
+        return found
+    try:
+        positions = live_values.lookup(index, key, ())
+    except TypeError:
+        return found
+    if type(positions) is list:
+        for position in positions:
+            if type(position) is int:
+                found.add(position)
+    return found
+
+
+def _count_of(counts: Any, key: Any) -> int:
+    """`int(counts.get(key, 0) or 0)`（組み込みの mapping と plain な key だけ。それ以外は 0）。"""
+
+    try:
+        value = live_values.lookup(counts, key, 0)
+    except TypeError:
+        return 0
+    return live_values.as_int(value) if live_values.as_bool(value) else 0
 
 
 def _match_legacy_reasons(
@@ -935,44 +1133,32 @@ def _match_legacy_reasons(
     from scripts.function_tracer_pcode.core.json_encoding import (
         PRODUCER_FAILURES,
         JsonBudgetExhausted,
-        JsonValueRejected,
     )
 
-    index = legacy_reasons if isinstance(legacy_reasons, LegacyReasonIndex) else legacy_reason_index(
-        legacy_reasons, work=work,
-    )
+    if type(legacy_reasons) is LegacyReasonIndex:
+        index = legacy_reasons
+    else:
+        index = legacy_reason_index(legacy_reasons, work=work)
+    if type(index) is not LegacyReasonIndex:
+        raise TypeError(f"{type(index).__name__} is not a legacy reason index")
+    key = _group_key(reason_id)
     group = index.group(reason_id)
-    if group is None or not group.records:
+    if type(group) is not _LegacyReasonGroup:
         return (), None
-    candidates = tuple(group.records)
-    cause_id = getattr(cause_occurrence, "cause_id", None)
-    cause_target = getattr(cause_id, "canonical_target_key", None) if cause_id is not None else None
+    records = group.records
+    if type(records) is not list:
+        return (), None
+    if not records:
+        return (), None
+    candidates = tuple(records)
+    # cause は live_values の規則だけで読む（instance の値。`__getattr__` を呼ばない）
+    cause_id = live_values.attribute(cause_occurrence, "cause_id")
+    cause_target = live_values.attribute(cause_id, "canonical_target_key") if cause_id is not None else None
     requirements = (
-        getattr(cause_occurrence, "proof_requirement_ids", ()) or ()
+        live_values.attribute(cause_occurrence, "proof_requirement_ids", ())
         if cause_occurrence is not None else ()
     )
-
-    def requirement_texts() -> frozenset:
-        # cause の requirement id の文字列（cause 1 つにつき 1 回。大きさを数えてから文字列に
-        # する。数えきれない・JSON にならない requirement は照合に使わない）
-        texts = set()
-        for item in requirements:
-            try:
-                cost = _text_cost(item, work)
-            except JsonValueRejected:
-                continue
-            except JsonBudgetExhausted:
-                # 残りを使い切った（数えた分を足して、以後は照合に使わない）
-                remaining = work.remaining()
-                if remaining is not None:
-                    work.consumed += remaining
-                break
-            try:
-                work.charge(1 + cost)
-            except JsonBudgetExhausted:
-                break
-            texts.add(str(item))
-        return frozenset(texts)
+    has_requirements = requirements is not None and live_values.as_bool(requirements)
 
     # cause の key: canonical fingerprint を `work` の中で 1 回だけ求める（key の大きさを数えた
     # ことになる）。求められたときだけ、key で索引を引く（引く hash も key の大きさに比例する）
@@ -985,15 +1171,15 @@ def _match_legacy_reasons(
     by_target: set = set()
     by_fingerprint: set = set()
     if cause_fingerprint is not None:
-        try:
-            by_target = set(group.by_target.get(cause_target, ()))
-        except TypeError:
-            by_target = set()
-        by_fingerprint = set(group.by_fingerprint.get(cause_fingerprint, ()))
+        # 索引は key を plain な値の間だけで比べる（cause の key が plain でなければ一致しない）
+        by_target = _index_positions(group.by_target, cause_target)
+        by_fingerprint = _index_positions(group.by_fingerprint, cause_fingerprint)
     by_obligation: set = set()
-    if requirements and group.by_obligation:
-        for text_value in requirement_texts():
-            by_obligation.update(group.by_obligation.get(text_value, ()))
+    obligation_index = group.by_obligation
+    if has_requirements and type(obligation_index) is dict:
+        if obligation_index:
+            for text_value in _requirement_texts(requirements, work):
+                by_obligation.update(_index_positions(obligation_index, text_value))
     # 旧来の規則: key が一致した record と、fingerprint で一致しなかった record のうち obligation が
     # 一致したものが exact（元の並び）、fingerprint で一致したものはその後
     exact_positions = sorted(by_target | (by_obligation - by_fingerprint))
@@ -1002,15 +1188,15 @@ def _match_legacy_reasons(
         work.charge(len(exact_positions) + len(fingerprint_positions))
     except JsonBudgetExhausted:
         pass  # 引いた位置は数え済みの索引の中（使い切りは次の照合で分かる）
-    exact = [group.records[position] for position in exact_positions]
-    by_fingerprint_records = [group.records[position] for position in fingerprint_positions]
+    exact = [records[position] for position in exact_positions]
+    by_fingerprint_records = [records[position] for position in fingerprint_positions]
     if exact or by_fingerprint_records:
         return tuple(exact) + tuple(by_fingerprint_records), (MATCH_EXACT if exact else MATCH_FINGERPRINT)
     # 1:1 は legacy の reason を全部残したときだけ（先頭だけを残したなら、残さなかった record
     # にも同じ reason id があり得る）
     if (
-        not index.truncated
-        and len(candidates) == 1 and int(projected_reason_counts.get(reason_id, 0) or 0) == 1
+        not live_values.as_bool(index.truncated)
+        and live_values.size(candidates) == 1 and _count_of(projected_reason_counts, key) == 1
     ):
         return candidates, MATCH_UNIQUE
     return (), None
@@ -1115,21 +1301,31 @@ def _first_legacy_field(diagnostic: Optional[Mapping[str, Any]], field_name: str
 
 
 def coerce_unknown_reason_record(value: Any) -> UnknownReasonRecord:
-    if isinstance(value, UnknownReasonRecord):
+    # 型は `type(x)` で決める（`isinstance` は上書きした `__class__` を読む）。reason id は
+    # `_enum_value` と同じ文字列にしてから渡す（pure layer に live な値を渡さない）
+    if type(value) is UnknownReasonRecord:
         return value
-    if isinstance(value, Mapping):
+    if live_values.builtin_mapping(value) is not None:
         return UnknownReasonRecord.from_dict(value)
-    return make_unknown_reason(value)
+    return make_unknown_reason(_plain_enum_value(value))
 
 
 def coerce_unknown_reason_records(values: Optional[Iterable[Any]]) -> Tuple[UnknownReasonRecord, ...]:
-    return tuple(coerce_unknown_reason_record(value) for value in (values or ()))
+    return tuple(coerce_unknown_reason_record(value) for value in _elements_or_empty(values))
+
+
+def _elements_or_empty(values: Any) -> Iterator[Any]:
+    """`values or ()` の要素（真偽と反復は live_values の規則。上書きした `__iter__` を呼ばない）。"""
+
+    if values is None or not live_values.as_bool(values):
+        return iter(())
+    return live_values.elements_of(values)
 
 
 def coerce_unknown_recovery_action(value: Any) -> UnknownRecoveryAction:
-    if isinstance(value, UnknownRecoveryAction):
+    if live_values.is_kind(value, UnknownRecoveryAction):
         return value
-    if isinstance(value, Mapping):
+    if live_values.builtin_mapping(value) is not None:
         return UnknownRecoveryAction.from_dict(value)
     return UnknownRecoveryAction(
         count_kind=UnknownCountKind.PROOF_ACTION.value,
@@ -1140,12 +1336,12 @@ def coerce_unknown_recovery_action(value: Any) -> UnknownRecoveryAction:
         proof_stage="unspecified",
         status=UnknownRecoveryActionStatus.NO_REGISTERED_PLAN.value,
         aggregation_unit=UnknownAggregationUnit.RESULT.value,
-        detail=str(value),
+        detail=_plain_text(value),
     )
 
 
 def coerce_unknown_recovery_actions(values: Optional[Iterable[Any]]) -> Tuple[UnknownRecoveryAction, ...]:
-    return tuple(coerce_unknown_recovery_action(value) for value in (values or ()))
+    return tuple(coerce_unknown_recovery_action(value) for value in _elements_or_empty(values))
 
 
 def build_unknown_recovery_actions(
@@ -1176,7 +1372,7 @@ def iter_unknown_recovery_actions(
     # producer 時点（出力の前）の構築: 出力の行数は finitize が判定の前に schema と比べる
     return _iter_recovery_actions(
         values, primary_by_aggregation_unit=primary_by_aggregation_unit,
-        work=JsonBudget(None) if work is None else work, for_output=False,
+        work=JsonBudget(None) if work is None else work,
     )
 
 
@@ -1185,129 +1381,208 @@ def recovery_actions_source(
     *,
     primary_by_aggregation_unit: bool = False,
 ) -> Any:
-    """出力の準備用: `build_unknown_recovery_actions` と同じ action の列（walk の作業量へ数える）。
+    """出力の準備用: `build_unknown_recovery_actions` と同じ action の列（walker が数えながら畳む）。
 
     読み飛ばす record・obligation・proof obligation id の key の写しを、作る **前** に walk の
-    作業量へ数える（`metered`）。walker が action を引き出すたびの勘定だけでは、yield しない
-    record の仕事が数えられない。
+    作業量へ数える（`scan` + `_RecoveryActions`。任意の callable を渡さない）。
     """
 
-    from scripts.function_tracer_pcode.core.json_encoding import each, metered
+    from scripts.function_tracer_pcode.core.json_encoding import scan
 
-    return metered(lambda work: each(_iter_recovery_actions(
-        values, primary_by_aggregation_unit=primary_by_aggregation_unit, work=work, for_output=True,
-    )))
+    return scan(values, recovery_actions_reducer(primary_by_aggregation_unit))
+
+
+def recovery_actions_reducer(primary_by_aggregation_unit: bool = False) -> "Reducer":
+    return _RecoveryActions(primary_by_aggregation_unit)
+
+
+class _RecoveryActions(Reducer):
+    """`scan` の reducer: record を 1 件ずつ action へ（`build_unknown_recovery_actions` と同じ action）。
+
+    record の読み直し・単位の key・obligation・key の写しは作る前に作業量へ数える（action の数は
+    数えた obligation の数以下）。`result` は畳んだ action の列。
+    """
+
+    __slots__ = ("primary", "actions")
+
+    def __init__(self, primary_by_aggregation_unit: bool) -> None:
+        self.primary = _PrimaryFilter() if primary_by_aggregation_unit else None
+        self.actions: List[UnknownRecoveryAction] = []
+
+    def add(self, value: Any, *, work: Any) -> None:
+        record = _coerce_record_within(value, work=work)
+        primary = self.primary
+        if primary is not None and not _PrimaryFilter.admit(primary, record, work=work):
+            return
+        for action in _record_actions(record, work):
+            work.charge(1)
+            self.actions.append(action)
+
+    def result(self, *, work: Any) -> Any:
+        from scripts.function_tracer_pcode.core.json_encoding import each
+
+        return each(self.actions)
 
 
 def _key_width(value: Any, work: Any) -> None:
     """`build_proof_obligation_id` が写す key（入れ子の list / tuple）の要素を、写す前に数える。"""
 
+    # 辿るのは組み込みの振る舞いの list / tuple だけ（`_optional_tuple_of` が写すものと同じ）
     pending = [value]
     while pending:
         item = pending.pop()
-        if isinstance(item, (list, tuple)):
-            work.charge(len(item) + 1)
-            pending.extend(child for child in item if isinstance(child, list))
+        if live_values.builtin_sequence(item):
+            work.charge(live_values.size(item) + 1)
+            pending.extend(child for child in item if live_values.is_kind(child, list))
         else:
             work.charge(1)
 
 
+def _optional_tuple_of(value: Any) -> Optional[Tuple[Any, ...]]:
+    """`_coerce_optional_tuple` と同じ tuple を live_values の規則だけで作る（入れ子の list も tuple に）。
+
+    辿るのは組み込みの振る舞いの list / tuple だけ（上書きした `__iter__` を呼ばない）。組み込みの
+    振る舞いでない入れ子の list はそのまま置く（`_key_width` はそれを 1 つと数える）。
+    """
+
+    if value is None:
+        return None
+    if live_values.builtin_sequence(value):
+        return tuple(
+            _optional_tuple_of(item)
+            if live_values.is_kind(item, list) and live_values.builtin_sequence(item) else item
+            for item in value
+        )
+    return (value,)
+
+
 def _iter_recovery_actions(
-    values: Optional[Iterable[Any]], *, primary_by_aggregation_unit: bool, work: Any, for_output: bool,
+    values: Optional[Iterable[Any]], *, primary_by_aggregation_unit: bool, work: Any,
 ):
-    # producer 時点（判定が読む action）は従来の coercion、出力の準備は数えてから写す coercion
+    """producer 時点（判定が読む action）の構築。出力の準備は `_RecoveryActions`（walker が数える）。"""
+
     primary = _PrimaryFilter() if primary_by_aggregation_unit else None
-    for value in values or ():
+    for value in _elements_or_empty(values):
         # 読み飛ばす record も 1 件ずつ数える
         work.charge(1)
-        record = (
-            _coerce_record_within(value, work=work) if for_output else coerce_unknown_reason_record(value)
-        )
+        record = coerce_unknown_reason_record(value)
         if primary is not None and not primary.admit(record, work=work):
             continue
-        obligations = record.recovery_proof_obligations
-        if not obligations:
-            plan = get_unknown_recovery_plan(record.reason_id)
-            obligations = plan.proof_obligations
-        if not obligations:
-            if record.recovery_proof_kind == UnknownRecoveryProofKind.NONE.value:
-                continue
-            yield (
-                UnknownRecoveryAction(
-                    count_kind=UnknownCountKind.PROOF_ACTION.value,
-                    reason_id=record.reason_id,
-                    decision_effect=record.decision_effect,
-                    reason_scope=record.reason_scope,
-                    proof_kind=record.recovery_proof_kind,
-                    proof_stage=record.proof_stage or "unspecified",
-                    status=record.action_status or UnknownRecoveryActionStatus.NO_REGISTERED_PLAN.value,
-                    aggregation_unit=record.aggregation_unit,
-                    stage=record.stage,
-                    pair_or_case=record.pair_or_case,
-                    evidence_refs=record.evidence_refs,
-                    evidence_kind=record.evidence_kind,
-                    object_target_key=record.object_target_key,
-                    object_evidence=record.object_evidence,
-                    proof_obligation_id=record.proof_obligation_id,
-                    recovery_action=record.recovery_action,
-                    target_regression=record.target_regression,
-                    detail=record.detail,
-                )
+        yield from _record_actions(record, work)
+
+
+def _record_actions(record: "UnknownReasonRecord", work: Any):
+    """record 1 件の recovery action（obligation ごとに作る前に `work` へ数える）。
+
+    record の field は live な値として扱う: 真偽・比較・正規化は live_values の規則で読み、
+    pure layer（`proof.unknown_reason`）へは正規化した文字列だけを渡す。
+    """
+
+    if type(record) is not UnknownReasonRecord:
+        raise TypeError(f"{type(record).__name__} is not an unknown reason record")
+    none_kind = UnknownRecoveryProofKind.NONE.value
+    obligations = record.recovery_proof_obligations
+    if not live_values.as_bool(obligations):
+        plan = get_unknown_recovery_plan(_plain_enum_value(record.reason_id))
+        obligations = plan.proof_obligations
+    if not live_values.as_bool(obligations):
+        if _plain_enum_value(record.recovery_proof_kind) == none_kind:
+            return
+        yield (
+            UnknownRecoveryAction(
+                count_kind=UnknownCountKind.PROOF_ACTION.value,
+                reason_id=record.reason_id,
+                decision_effect=record.decision_effect,
+                reason_scope=record.reason_scope,
+                proof_kind=record.recovery_proof_kind,
+                proof_stage=_or(record.proof_stage, "unspecified"),
+                status=_or(record.action_status, UnknownRecoveryActionStatus.NO_REGISTERED_PLAN.value),
+                aggregation_unit=record.aggregation_unit,
+                stage=record.stage,
+                pair_or_case=record.pair_or_case,
+                evidence_refs=record.evidence_refs,
+                evidence_kind=record.evidence_kind,
+                object_target_key=record.object_target_key,
+                object_evidence=record.object_evidence,
+                proof_obligation_id=record.proof_obligation_id,
+                recovery_action=record.recovery_action,
+                target_regression=record.target_regression,
+                detail=record.detail,
             )
-            continue
-        for obligation in obligations:
-            work.charge(1)
-            proof_stage = record.proof_stage or obligation.proof_stage
-            if (
-                record.proof_stage is not None
-                or record.evidence_kind is not None
-                or record.recovery_action is not None
-            ):
-                proof_kind = record.recovery_proof_kind
-                if proof_kind == UnknownRecoveryProofKind.NONE.value:
-                    proof_kind = obligation.proof_kind
-            else:
-                proof_kind = obligation.proof_kind
-            evidence_kind = record.evidence_kind
-            if evidence_kind is None and obligation.required_evidence:
-                evidence_kind = obligation.required_evidence[0]
-            proof_obligation_id = record.proof_obligation_id
-            if (
-                proof_obligation_id is None
-                and evidence_kind is not None
-                and record.object_target_key is not None
-            ):
-                _key_width(record.object_target_key, work)
-                proof_obligation_id = build_proof_obligation_id(
-                    record.reason_id,
-                    proof_stage,
-                    proof_kind,
-                    evidence_kind,
-                    record.object_target_key,
-                )
-            yield (
-                UnknownRecoveryAction(
-                    count_kind=UnknownCountKind.PROOF_ACTION.value,
-                    reason_id=record.reason_id,
-                    decision_effect=record.decision_effect,
-                    reason_scope=record.reason_scope,
-                    proof_kind=proof_kind,
-                    proof_stage=proof_stage,
-                    status=record.action_status or UnknownRecoveryActionStatus.PLANNED.value,
-                    aggregation_unit=record.aggregation_unit,
-                    stage=record.stage,
-                    pair_or_case=record.pair_or_case,
-                    required_evidence=obligation.required_evidence,
-                    evidence_refs=record.evidence_refs,
-                    evidence_kind=evidence_kind,
-                    object_target_key=record.object_target_key,
-                    object_evidence=record.object_evidence,
-                    proof_obligation_id=proof_obligation_id,
-                    recovery_action=record.recovery_action,
-                    target_regression=record.target_regression,
-                    detail=obligation.description or record.detail,
-                )
+        )
+        return
+    for obligation in live_values.elements_of(obligations):
+        work.charge(1)
+        obligation_kind, obligation_stage, required_evidence, description = _obligation_fields(obligation)
+        proof_stage = _or(record.proof_stage, obligation_stage)
+        if (
+            record.proof_stage is not None
+            or record.evidence_kind is not None
+            or record.recovery_action is not None
+        ):
+            proof_kind = record.recovery_proof_kind
+            if _plain_enum_value(proof_kind) == none_kind:
+                proof_kind = obligation_kind
+        else:
+            proof_kind = obligation_kind
+        evidence_kind = record.evidence_kind
+        if evidence_kind is None and live_values.as_bool(required_evidence):
+            evidence_kind = next(live_values.elements_of(required_evidence))
+        proof_obligation_id = record.proof_obligation_id
+        target = record.object_target_key
+        if (
+            proof_obligation_id is None
+            and evidence_kind is not None
+            and target is not None
+        ):
+            _key_width(target, work)
+            # `build_proof_obligation_id` と同じ id（部分を live_values の規則で正規化してから組む）
+            proof_obligation_id = _proof_obligation_id(
+                normalize_unknown_reason_id(_plain_enum_value(record.reason_id)),
+                _text_or(proof_stage, UNKNOWN_TUPLE_MISSING),
+                normalize_recovery_proof_kind(_plain_enum_value(proof_kind)) or none_kind,
+                _text_or(evidence_kind, UNKNOWN_TUPLE_MISSING),
+                _optional_tuple_of(target),
             )
+        yield (
+            UnknownRecoveryAction(
+                count_kind=UnknownCountKind.PROOF_ACTION.value,
+                reason_id=record.reason_id,
+                decision_effect=record.decision_effect,
+                reason_scope=record.reason_scope,
+                proof_kind=proof_kind,
+                proof_stage=proof_stage,
+                status=_or(record.action_status, UnknownRecoveryActionStatus.PLANNED.value),
+                aggregation_unit=record.aggregation_unit,
+                stage=record.stage,
+                pair_or_case=record.pair_or_case,
+                required_evidence=required_evidence,
+                evidence_refs=record.evidence_refs,
+                evidence_kind=evidence_kind,
+                object_target_key=target,
+                object_evidence=record.object_evidence,
+                proof_obligation_id=proof_obligation_id,
+                recovery_action=record.recovery_action,
+                target_regression=record.target_regression,
+                detail=_or(description, record.detail),
+            )
+        )
+
+
+def _obligation_fields(obligation: Any) -> Tuple[Any, Any, Any, Any]:
+    """recovery proof obligation の (proof_kind, proof_stage, required_evidence, description)。
+
+    exact な `UnknownRecoveryProofObligation` は field をそのまま、それ以外は live_values の規則で読む。
+    """
+
+    if type(obligation) is UnknownRecoveryProofObligation:
+        return obligation.proof_kind, obligation.proof_stage, obligation.required_evidence, obligation.description
+    return (
+        live_values.attribute(obligation, "proof_kind"),
+        live_values.attribute(obligation, "proof_stage"),
+        live_values.attribute(obligation, "required_evidence", ()),
+        live_values.attribute(obligation, "description"),
+    )
 
 
 def summarize_unknown_reason_counts(
@@ -1403,10 +1678,13 @@ class _PrimaryFilter:
         self.fallback_index = 0
 
     def admit(self, record: UnknownReasonRecord, *, work: Any) -> bool:
-        from scripts.function_tracer_pcode.core.json_encoding import builtin_str, hashable_key
+        from scripts.function_tracer_pcode.core.json_encoding import hashable_key
 
-        aggregation_key = builtin_str(record.aggregation_unit or UnknownAggregationUnit.RESULT.value)
-        unit_key = record.pair_or_case or record.stage
+        if type(record) is not UnknownReasonRecord:
+            raise TypeError(f"{type(record).__name__} is not an unknown reason record")
+        # 真偽は live_values の規則で読む（上書きした `__bool__` / `__len__` を呼ばない）
+        aggregation_key = builtin_str(_or(record.aggregation_unit, UnknownAggregationUnit.RESULT.value))
+        unit_key = _or(record.pair_or_case, record.stage)
         if unit_key is None:
             unit_key = ("record", self.fallback_index)
             self.fallback_index += 1
@@ -1428,15 +1706,18 @@ def _coerce_record_within(value: Any, *, work: Any) -> UnknownReasonRecord:
 
     from scripts.function_tracer_pcode.core.json_encoding import LEGACY, RESULT_JSON_POLICY
 
-    if isinstance(value, UnknownReasonRecord):
-        return value
     if type(value) is dict:
         work.charge(1 + RESULT_JSON_POLICY.measure(value, max_bytes=work.remaining(), mode=LEGACY))
-        return UnknownReasonRecord.from_dict(value)
-    if type(value) is str:
+        record = UnknownReasonRecord.from_dict(value)
+    elif type(value) is str:
         work.charge(len(value))
-        return make_unknown_reason(value)
-    raise TypeError(f"{type(value).__name__} is not an unknown reason record")
+        record = make_unknown_reason(value)
+    else:
+        record = value
+    # 型は `type(x)` で決める（`isinstance` は上書きした `__class__` を読む）
+    if type(record) is not UnknownReasonRecord:
+        raise TypeError(f"{type(record).__name__} is not an unknown reason record")
+    return record
 
 
 class _ReasonCounts(Reducer):
@@ -1452,7 +1733,8 @@ class _ReasonCounts(Reducer):
         from scripts.function_tracer_pcode.core.json_encoding import hashable_key
 
         record = _coerce_record_within(value, work=work)
-        if self.primary is not None and not self.primary.admit(record, work=work):
+        primary = self.primary
+        if primary is not None and not _PrimaryFilter.admit(primary, record, work=work):
             return
         # reason id は hash する前に数える（組み込みの値だけを値で比べる）
         key = hashable_key(record.reason_id, work)
@@ -1473,7 +1755,11 @@ def unknown_reason_counts_source(
 
     from scripts.function_tracer_pcode.core.json_encoding import scan
 
-    return scan(values, _ReasonCounts(primary_by_aggregation_unit))
+    return scan(values, unknown_reason_counts_reducer(primary_by_aggregation_unit))
+
+
+def unknown_reason_counts_reducer(primary_by_aggregation_unit: bool = False) -> "Reducer":
+    return _ReasonCounts(primary_by_aggregation_unit)
 
 
 #: backlog の 1 entry（reason id ごと）の列。obligation の件数・列は有界な証拠。
@@ -1507,9 +1793,12 @@ class _BacklogEntryView:
         self._distinct_keys: set = set()
 
     def add(self, record: UnknownReasonRecord, *, work: Any) -> None:
+        if type(record) is not UnknownReasonRecord:
+            raise TypeError(f"{type(record).__name__} is not an unknown reason record")
         obligations = record.recovery_proof_obligations
-        # 辿る obligation の数を先に数える（record の列は tuple）
-        work.charge(len(obligations))
+        # 辿る obligation の数を先に数える（record の列は組み込みの振る舞いの列だけ）
+        work.charge(live_values.size(obligations))
+        none_kind = UnknownRecoveryProofKind.NONE.value
         if self.count == 0:
             self.target_regression = record.target_regression
             self.recovery_proof_kind = record.recovery_proof_kind
@@ -1517,14 +1806,17 @@ class _BacklogEntryView:
             if self.target_regression is None:
                 self.target_regression = record.target_regression
             if (
-                self.recovery_proof_kind == UnknownRecoveryProofKind.NONE.value
-                and record.recovery_proof_kind != UnknownRecoveryProofKind.NONE.value
+                _plain_enum_value(self.recovery_proof_kind) == none_kind
+                and _plain_enum_value(record.recovery_proof_kind) != none_kind
             ):
                 self.recovery_proof_kind = record.recovery_proof_kind
         self.count += 1
-        for obligation in obligations:
-            self._kind_counts[obligation.proof_kind] = self._kind_counts.get(obligation.proof_kind, 0) + 1
-            key = (obligation.proof_kind, obligation.proof_stage)
+        for obligation in live_values.elements_of(obligations):
+            proof_kind, proof_stage, _required, _description = _obligation_fields(obligation)
+            # 件数・重複の key は plain な値だけ（live な値の `__hash__` / `__eq__` を呼ばない）
+            kind_key = _group_key(proof_kind)
+            self._kind_counts[kind_key] = self._kind_counts.get(kind_key, 0) + 1
+            key = (kind_key, _group_key(proof_stage))
             if key not in self._distinct_keys:
                 self._distinct_keys.add(key)
                 self._distinct.append(obligation)
@@ -1558,7 +1850,8 @@ class _RecoveryBacklog(Reducer):
         from scripts.function_tracer_pcode.core.json_encoding import hashable_key
 
         record = _coerce_record_within(value, work=work)
-        if self.primary is not None and not self.primary.admit(record, work=work):
+        primary = self.primary
+        if primary is not None and not _PrimaryFilter.admit(primary, record, work=work):
             return
         key = hashable_key(record.reason_id, work)
         entry = self.entries.get(key)
@@ -1585,4 +1878,8 @@ def recovery_backlog_source(
 
     from scripts.function_tracer_pcode.core.json_encoding import scan
 
-    return scan(values, _RecoveryBacklog(primary_by_aggregation_unit))
+    return scan(values, recovery_backlog_reducer(primary_by_aggregation_unit))
+
+
+def recovery_backlog_reducer(primary_by_aggregation_unit: bool = False) -> "Reducer":
+    return _RecoveryBacklog(primary_by_aggregation_unit)

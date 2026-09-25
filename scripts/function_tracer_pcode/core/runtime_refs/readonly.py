@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
-from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
+from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, type_name
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
 )
@@ -16,6 +17,14 @@ from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeBlockRef,
     PcodeOpRef,
 )
+
+
+def _location_base_display_name(ref: Any) -> Any:
+    """`ref.display_name()`（`LocationBaseRef` だけ。それ以外は `TypeError`。live な値の method を呼ばない）。"""
+
+    if type(ref) is LocationBaseRef:
+        return ref.display_name()
+    raise TypeError(f"{type_name(type(ref))} is not a LocationBaseRef")
 
 
 @dataclass(frozen=True)
@@ -34,8 +43,8 @@ class ReadonlyReductionTermRef:
 
     def json_items(self):
         yield "kind", "readonly_reduction_term"
-        yield "byte_offset", int(self.byte_offset)
-        yield "access_size", max(1, int(self.access_size or 0))
+        yield "byte_offset", as_int(self.byte_offset)
+        yield "access_size", max(1, _int_or_zero(self.access_size))
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)
@@ -60,7 +69,7 @@ class ReadonlyReductionWitness:
     def json_items(self):
         yield "kind", "readonly_reduction_witness"
         yield "count_semantics", self.count_semantics
-        yield "exact_count", int(self.exact_count)
+        yield "exact_count", as_int(self.exact_count)
         yield "terms", each(self.terms)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -961,28 +970,23 @@ class ReductionAccumulatorProof:
         yield "count_parameter_name", self.count_parameter_name
         yield "count_parameter_index", self.count_parameter_index
         yield "count_parameter_storage_identity_key", self.count_parameter_storage_identity_key
-        yield "result_size", max(1, int(self.result_size))
-        yield "stride", int(self.stride)
-        yield "element_size", int(self.element_size)
-        yield "start_offset", int(self.start_offset)
-        yield "start_index", int(self.start_index)
-        yield "index_step", int(self.index_step)
-        yield "index_scale", int(self.index_scale or self.stride)
-        yield "signed_counter", bool(self.signed_counter)
+        yield "result_size", max(1, as_int(self.result_size))
+        yield "stride", as_int(self.stride)
+        yield "element_size", as_int(self.element_size)
+        yield "start_offset", as_int(self.start_offset)
+        yield "start_index", as_int(self.start_index)
+        yield "index_step", as_int(self.index_step)
+        index_scale = self.index_scale
+        yield "index_scale", as_int(index_scale) if as_bool(index_scale) else as_int(self.stride)
+        yield "signed_counter", as_bool(self.signed_counter)
         yield "seed_terms", each(self.seed_terms)
-        yield "seed_term_count", None if self.seed_term_count is None else int(self.seed_term_count)
-        yield "lane_terms", each(
-            self.lane_terms,
-            source_converter(lambda lane: inline(
-                ("byte_offset", int(lane[0])),
-                ("access_size", max(1, int(lane[1] or 0))),
-            )),
-        )
+        yield "seed_term_count", None if self.seed_term_count is None else as_int(self.seed_term_count)
+        yield "lane_terms", each(self.lane_terms, _lane_term_source)
         yield "loop_body_witnesses", each(self.loop_body_witnesses)
         yield "exact_return_witnesses", each(self.exact_return_witnesses)
         yield "guard_constraints", each(self.guard_constraints, _loop_object_source)
         yield "side_effect_profile", self.side_effect_profile
-        yield "constant_bias", int(self.constant_bias)
+        yield "constant_bias", as_int(self.constant_bias)
         yield "induction_phi_ref", self.induction_phi_ref if self.induction_phi_ref is not None else None
         yield "accumulator_phi_ref", self.accumulator_phi_ref if self.accumulator_phi_ref is not None else None
         yield "update_op_ref", self.update_op_ref if self.update_op_ref is not None else None
@@ -991,7 +995,7 @@ class ReductionAccumulatorProof:
         yield "return_value_op_refs", each(self.return_value_op_refs)
         yield "entry_block_ref", self.entry_block_ref if self.entry_block_ref is not None else None
         yield "backedge_block_ref", self.backedge_block_ref if self.backedge_block_ref is not None else None
-        yield "return_region_value_proven", bool(self.return_region_value_proven)
+        yield "return_region_value_proven", as_bool(self.return_region_value_proven)
         yield "source", self.source
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1084,12 +1088,12 @@ class ReadonlyReductionRef:
 
     def display_name(self) -> str:
         return (
-            f"{self.reduction_kind}("
-            f"{self.pointer_base_ref.display_name()},"
-            f"{self.count_parameter_name},"
-            f"stride={int(self.stride)},"
-            f"elem={int(self.element_size)},"
-            f"bias={int(self.constant_bias)})"
+            f"{builtin_str(self.reduction_kind)}("
+            f"{builtin_str(_location_base_display_name(self.pointer_base_ref))},"
+            f"{builtin_str(self.count_parameter_name)},"
+            f"stride={as_int(self.stride)},"
+            f"elem={as_int(self.element_size)},"
+            f"bias={as_int(self.constant_bias)})"
         )
 
     def readonly_term_sequence_contract_key(
@@ -1262,16 +1266,16 @@ class ReadonlyReductionRef:
         yield "count_parameter_name", self.count_parameter_name
         yield "count_parameter_index", self.count_parameter_index
         yield "count_parameter_storage_identity_key", self.count_parameter_storage_identity_key
-        yield "stride", int(self.stride)
-        yield "element_size", int(self.element_size)
-        yield "result_size", int(self.result_size)
-        yield "start_offset", int(self.start_offset)
-        yield "signed_counter", bool(self.signed_counter)
+        yield "stride", as_int(self.stride)
+        yield "element_size", as_int(self.element_size)
+        yield "result_size", as_int(self.result_size)
+        yield "start_offset", as_int(self.start_offset)
+        yield "signed_counter", as_bool(self.signed_counter)
         yield "source", self.source
         yield "semantic_witnesses", each(self.semantic_witnesses)
         yield "loop_summary", self.loop_summary if self.loop_summary is not None else None
         yield "accumulator_proof", self.accumulator_proof if self.accumulator_proof is not None else None
-        yield "constant_bias", int(self.constant_bias)
+        yield "constant_bias", as_int(self.constant_bias)
         yield "display_name", self.display_name()
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1332,6 +1336,8 @@ from scripts.function_tracer_pcode.core.runtime_refs.loops import (
     _bias_key,
     _count_parameter_semantic_identities,
     _count_parameter_semantic_identity,
+    _int_or_zero,
+    _lane_term_source,
     _loop_int_expr,
     _loop_object_key,
     _loop_object_source,

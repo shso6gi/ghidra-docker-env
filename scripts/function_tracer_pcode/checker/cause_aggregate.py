@@ -52,17 +52,32 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from scripts.function_tracer_pcode.core.builtin_containers import builtin_mapping, builtin_sequence
+from scripts.function_tracer_pcode.core import json_encoding, live_values
 from scripts.function_tracer_pcode.core.json_encoding import (
     CANONICAL,
     LEGACY,
     NOT_PLAIN as _NOT_PLAIN_SCALAR,
     builtin_str,
     builtin_view,
+    copy_legacy_containers,
     exception_text,
     plain_scalar,
     is_json_record,
+    materialize,
     value_token,
+)
+from scripts.function_tracer_pcode.core.live_values import (
+    as_bool,
+    as_int,
+    as_str,
+    attribute,
+    builtin_mapping,
+    builtin_sequence,
+    elements_of,
+    items_of,
+    json_scalar,
+    lookup,
+    size,
 )
 
 from scripts.function_tracer_pcode.checker.unknown_reason import (
@@ -142,18 +157,73 @@ def freeze_identity(value: Any) -> Any:
     `__repr__` を持ち得る live な object）は値で比べてよい決定的な印にする（`value_token`: enum は
     名前、dataclass は field）。field も持たない object だけが identity の印（旧実装の既定の `repr`
     と同じく object ごとに区別する）。JSON から読んだ値（reporting）は常に組み込みの値なので変わらない。
+
+    容器は `live_values` の `items_of` / `elements_of` だけで辿り、写しは package が組む tuple と
+    owner が作る葉（`builtin_str` の key・`value_token`）だけから成る（写しは組み込みの値）。
+    再帰せずに明示の段で辿る（深い入れ子で `RecursionError` にならない。閉路は `ValueError`）。
     """
-    mapping = builtin_mapping(value)
+    if builtin_mapping(value) is None and not builtin_sequence(value):
+        return value_token(value)
+    root: List[Any] = []
+    # 辿っている容器の段: [子の iterator, 子の写し, mapping の key 列（列なら None）, 容器の id]
+    frames: List[List[Any]] = []
+    active: set = set()
+    _freeze_enter(value, root, frames, active)
+    while frames:
+        frame = frames[-1]
+        child = next(frame[0], _FROZEN_END)
+        if child is _FROZEN_END:
+            frames.pop()
+            active.discard(frame[3])
+            keys = frame[2]
+            frozen = tuple(frame[1]) if keys is None else tuple(zip(keys, frame[1]))
+            (frames[-1][1] if frames else root).append(frozen)
+            continue
+        _freeze_enter(child, frame[1], frames, active)
+    return root[0]
+
+
+#: `freeze_identity` の段の子の終わり
+_FROZEN_END = object()
+
+
+def _freeze_enter(item: Any, out: List[Any], frames: List[List[Any]], active: set) -> None:
+    """`item` の写しを `out` へ置く（葉）か、`item` の子を写す段を `frames` へ積む（容器）。"""
+
+    mapping = builtin_mapping(item)
+    if mapping is None and not builtin_sequence(item):
+        # scalar の subclass（JPype の `JInt` など）は基底型の値、enum は名前、dataclass は field の印。
+        # それ以外の live な object だけが identity の印（`value_token`）
+        out.append(value_token(item))
+        return
+    marker = id(item)
+    if marker in active:
+        raise ValueError("cyclic identity value")
+    active.add(marker)
     if mapping is not None:
-        return tuple(
-            (builtin_str(key), freeze_identity(item))
-            for key, item in sorted(mapping.items(), key=lambda pair: builtin_str(pair[0]))
-        )
-    if builtin_sequence(value):
-        return tuple(freeze_identity(item) for item in value)
-    # scalar の subclass（JPype の `JInt` など）は基底型の値、enum は名前、dataclass は field の印。
-    # それ以外の live な object だけが identity の印（`value_token`）
-    return value_token(value)
+        keys, children = _ordered_members(mapping)
+        frames.append([iter(children), [], keys, marker])
+    else:
+        frames.append([elements_of(item), [], None, marker])
+
+
+def _ordered_members(mapping: Any) -> Tuple[List[str], List[Any]]:
+    """mapping の (key の文字列, 値) を key の文字列の順に（安定。同じ文字列は元の順）。"""
+
+    keys: List[str] = []
+    children: List[Any] = []
+    for key, child in items_of(mapping):
+        keys.append(builtin_str(key))
+        children.append(child)
+    order = sorted(range(len(keys)), key=keys.__getitem__)
+    return [keys[index] for index in order], [children[index] for index in order]
+
+
+def _in_key_order(values: Sequence[Any], keys: Sequence[Any]) -> List[Any]:
+    """`values` を対応する `keys`（組み込みの値）の順に並べる（安定。`values` 自身は比べない）。"""
+
+    order = sorted(range(len(keys)), key=keys.__getitem__)
+    return [values[index] for index in order]
 
 
 def identity_tuple(value: Any) -> Tuple[Any, ...]:
@@ -163,24 +233,16 @@ def identity_tuple(value: Any) -> Tuple[Any, ...]:
     return frozen if isinstance(frozen, tuple) else (frozen,)
 
 
-def _jsonable(value: Any) -> Any:
-    mapping = builtin_mapping(value)
-    if mapping is not None:
-        return {
-            builtin_str(key): _jsonable(item)
-            for key, item in sorted(mapping.items(), key=lambda pair: builtin_str(pair[0]))
-        }
-    if builtin_sequence(value):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return builtin_str(value)
-
-
 def identity_digest(value: Any) -> str:
-    """identity の安定した digest（tuple/list の違いに依らない）。"""
+    """identity の安定した digest（tuple/list の違いに依らない）。
+
+    `freeze_identity` の写しは tuple と組み込みの葉だけなので、JSON の scalar でない葉
+    （集合・組み込みのままの enum・`BoundedEvidence`・印の object）だけを `builtin_str` で書く
+    （旧 `_jsonable` と同じ文字列）。
+    """
     payload = json.dumps(
-        _jsonable(freeze_identity(value)),
+        freeze_identity(value),
+        default=builtin_str,
         sort_keys=True,
         ensure_ascii=False,
         separators=(",", ":"),
@@ -214,9 +276,12 @@ def resolve_cause_identity(
 
     `diagnostic` は解決できなかった理由の counter 名で、呼び出し側が自分の
     diagnostics に加算する。identity を返さないことと counter は 1 対 1。
+
+    Issue #22 PR-22-D: 返す identity は組み込みの値だけ（scope / kind は文字列、key は
+    `freeze_identity` の写し。typed key の tuple は写しても同じ値）。
     """
 
-    if isinstance(typed_cause_key, Mapping):
+    if live_values.is_kind(typed_cause_key, Mapping):
         try:
             cause: CauseKey = cause_key_from_dict(typed_cause_key)
         except ValueError as exc:
@@ -229,12 +294,12 @@ def resolve_cause_identity(
                 diagnostic = "incomplete_typed_cause_key"
             return CauseIdentityResolution(diagnostic=diagnostic)
         return CauseIdentityResolution(
-            identity_scope=cause.identity_scope,
-            cause_kind=cause.cause_kind,
-            canonical_cause_key=canonical_cause_tuple(cause),
+            identity_scope=as_str(attribute(cause, "identity_scope")),
+            cause_kind=as_str(attribute(cause, "cause_kind")),
+            canonical_cause_key=freeze_identity(canonical_cause_tuple(cause)),
             typed=True,
         )
-    if not object_target_key:
+    if not as_bool(object_target_key):
         return CauseIdentityResolution()
     legacy = identity_tuple(object_target_key)
     discriminator = builtin_str(legacy[0]) if legacy else ""
@@ -386,11 +451,25 @@ def validate_legacy_cause_key(schema: str, key: Tuple[Any, ...]) -> str:
 
 
 def contains_tagged_identity(value: Any, tag: str) -> bool:
-    if isinstance(value, tuple):
-        if value and value[0] == tag:
-            return True
-        return any(contains_tagged_identity(item, tag) for item in value)
+    """`value`（`freeze_identity` の写し）の中に先頭が `tag` の tuple があるか（再帰しない）。"""
+
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, tuple):
+            if item and item[0] == tag:
+                return True
+            pending.extend(item)
     return False
+
+
+def _requirement_key(requirement: Any) -> Tuple[Any, ...]:
+    """proof requirement の payload の key（`ProofRequirementId.from_dict(...).to_key()`）。"""
+
+    requirement_id = ProofRequirementId.from_dict(requirement)
+    if type(requirement_id) is not ProofRequirementId:
+        raise TypeError("proof requirement is not a ProofRequirementId")
+    return requirement_id.to_key()
 
 
 @dataclass(frozen=True)
@@ -418,10 +497,10 @@ def resolve_required_proofs(
     keys: List[Tuple[Any, ...]] = []
     complete = True
     diagnostics: List[str] = []
-    explicit = tuple(proof_requirement_ids or ())
+    explicit = tuple(_elements(proof_requirement_ids))
     for requirement in explicit:
         try:
-            keys.append(ProofRequirementId.from_dict(requirement).to_key())
+            keys.append(_requirement_key(requirement))
         except (TypeError, ValueError) as exc:
             complete = False
             message = exception_text(exc, 200)
@@ -431,15 +510,15 @@ def resolve_required_proofs(
                 diagnostics.append("proof_requirement_identity_incomplete")
             else:
                 diagnostics.append("invalid_proof_requirement")
-    if not explicit and object_target_key:
-        for action in recovery_actions:
-            proof_kind = builtin_str(getattr(action, "proof_kind", "none"))
+    if not explicit and as_bool(object_target_key):
+        for action in elements_of(recovery_actions):
+            proof_kind = builtin_str(attribute(action, "proof_kind", "none"))
             if proof_kind == "none":
                 continue
             contract = (
                 "legacy_recovery_contract",
                 proof_kind,
-                freeze_identity(getattr(action, "required_evidence", ()) or ()),
+                freeze_identity(_or(attribute(action, "required_evidence", ()), ())),
             )
             try:
                 requirement = ProofRequirementId.create(
@@ -458,11 +537,11 @@ def resolve_required_proofs(
 # ---------------------------------------------------------------------------
 
 def attempt_ordinal(value: Any) -> Optional[int]:
-    if not isinstance(value, Mapping):
+    if builtin_mapping(value) is None:
         return None
-    raw = value.get("attempt_ordinal")
+    raw = lookup(value, "attempt_ordinal")
     try:
-        return int(raw)
+        return as_int(raw)
     except (TypeError, ValueError):
         return None
 
@@ -504,41 +583,41 @@ def resolve_occurrence_transitions(
     """occurrence_id -> 実効 causal status。完了/遷移の証拠だけで決める。"""
 
     occurrence_by_id = {
-        freeze_identity(item.get("occurrence_id")): item for item in occurrences
+        freeze_identity(lookup(item, "occurrence_id")): item for item in occurrences
     }
     occurrence_ids = set(occurrence_by_id)
     result: Dict[Any, str] = {}
     for completion in reason_completions:
-        if not isinstance(completion, Mapping):
+        if builtin_mapping(completion) is None:
             continue
-        target = freeze_identity(completion.get("completed_occurrence_id"))
-        if builtin_str(completion.get("applicability_status")) != "APPLICABLE":
+        target = freeze_identity(lookup(completion, "completed_occurrence_id"))
+        if builtin_str(lookup(completion, "applicability_status")) != "APPLICABLE":
             _bump(diagnostics, "inapplicable_reason_completion")
             continue
         if target not in occurrence_ids:
             _bump(diagnostics, "dangling_reason_completion_target")
             continue
-        record = occurrence_by_id[target].get("reason_record") or {}
-        expected_target = freeze_identity(record.get("object_target_key"))
-        observed_target = freeze_identity(completion.get("exact_target_id"))
+        record = _or(lookup(occurrence_by_id[target], "reason_record"), {})
+        expected_target = freeze_identity(lookup(record, "object_target_key"))
+        observed_target = freeze_identity(lookup(completion, "exact_target_id"))
         expected_slots = {
-            builtin_str(item.get("proof_kind") or "")
-            for item in (record.get("proof_requirement_ids") or ())
-            if isinstance(item, Mapping)
+            builtin_str(_or(lookup(item, "proof_kind"), ""))
+            for item in _elements(lookup(record, "proof_requirement_ids"))
+            if builtin_mapping(item) is not None
         }
-        observed_slot = builtin_str(completion.get("exact_missing_fact_or_proof_slot") or "")
+        observed_slot = builtin_str(_or(lookup(completion, "exact_missing_fact_or_proof_slot"), ""))
         if (
             (expected_target and expected_target != observed_target)
             or (expected_slots and observed_slot not in expected_slots)
-            or not completion.get("source_snapshot_fingerprint")
-            or not completion.get("semantic_seed_or_premise_digest")
-            or not completion.get("evidence_or_artifact_digest")
-            or not completion.get("recognizing_stage")
+            or not as_bool(lookup(completion, "source_snapshot_fingerprint"))
+            or not as_bool(lookup(completion, "semantic_seed_or_premise_digest"))
+            or not as_bool(lookup(completion, "evidence_or_artifact_digest"))
+            or not as_bool(lookup(completion, "recognizing_stage"))
         ):
             _bump(diagnostics, "invalid_reason_completion_applicability")
             continue
-        completed_ordinal = attempt_ordinal(completion.get("completed_at_attempt"))
-        target_ordinal = attempt_ordinal(occurrence_by_id[target].get("attempt_identity"))
+        completed_ordinal = attempt_ordinal(lookup(completion, "completed_at_attempt"))
+        target_ordinal = attempt_ordinal(lookup(occurrence_by_id[target], "attempt_identity"))
         if (
             completed_ordinal is None
             or target_ordinal is None
@@ -549,23 +628,28 @@ def resolve_occurrence_transitions(
         result[target] = "discharged"
     seen = set()
     by_target: Dict[Any, set] = {}
-    for transition in sorted(transitions, key=lambda item: repr(freeze_identity(item))):
-        if not isinstance(transition, Mapping):
+    # 並びは各 transition の写しの `repr`（transition 自身は比べない）
+    transitions = list(transitions)
+    ordered_transitions = _in_key_order(
+        transitions, [repr(freeze_identity(item)) for item in transitions],
+    )
+    for transition in ordered_transitions:
+        if builtin_mapping(transition) is None:
             continue
-        transition_id = freeze_identity(transition.get("transition_id"))
+        transition_id = freeze_identity(lookup(transition, "transition_id"))
         if transition_id in seen:
             continue
         seen.add(transition_id)
-        target = freeze_identity(transition.get("target_occurrence_id"))
+        target = freeze_identity(lookup(transition, "target_occurrence_id"))
         if target not in occurrence_ids:
             _bump(diagnostics, "dangling_transition_target")
             continue
-        kind = builtin_str(transition.get("transition_kind") or "")
-        cause_kind = builtin_str(transition.get("cause_kind") or "")
-        cause_ref = freeze_identity(transition.get("cause_ref"))
+        kind = builtin_str(_or(lookup(transition, "transition_kind"), ""))
+        cause_kind = builtin_str(_or(lookup(transition, "cause_kind"), ""))
+        cause_ref = freeze_identity(lookup(transition, "cause_ref"))
         valid = False
-        emitted_ordinal = attempt_ordinal(transition.get("emitted_at_attempt"))
-        target_ordinal = attempt_ordinal(occurrence_by_id[target].get("attempt_identity"))
+        emitted_ordinal = attempt_ordinal(lookup(transition, "emitted_at_attempt"))
+        target_ordinal = attempt_ordinal(lookup(occurrence_by_id[target], "attempt_identity"))
         if emitted_ordinal is None or target_ordinal is None or emitted_ordinal <= target_ordinal:
             _bump(diagnostics, "non_forward_causal_transition")
             continue
@@ -605,6 +689,35 @@ def _bump(diagnostics: Optional[Dict[str, int]], key: str, amount: int = 1) -> N
     diagnostics[key] = int(diagnostics.get(key, 0) or 0) + amount
 
 
+def _truthy(value: Any) -> bool:
+    """`bool(value)`（`live_values.as_bool`。`None` は偽）。"""
+
+    return value is not None and as_bool(value)
+
+
+def _or(value: Any, default: Any) -> Any:
+    """`value or default`（真偽は `live_values.as_bool` で決める。live な値の `__bool__` を呼ばない）。"""
+
+    if value is None:
+        return default
+    return value if as_bool(value) else default
+
+
+def _elements(value: Any):
+    """`value or ()` の要素（組み込みの振る舞いの列・集合・iterator だけを辿る。無い値は空）。
+
+    `None` と偽の scalar（`0` / `""` / `False`）は空。それ以外は `live_values.elements_of`
+    （辿れない値は `TypeError`: 集計は `error` を持つ値になる）。
+    """
+
+    if value is None:
+        return iter(())
+    base = plain_scalar(value)
+    if base is not _NOT_PLAIN_SCALAR and not base:
+        return iter(())
+    return elements_of(value)
+
+
 # ---------------------------------------------------------------------------
 # reason record の集計（reporting と共有）
 # ---------------------------------------------------------------------------
@@ -622,8 +735,8 @@ def select_primary_reason_records(
     grouped: Dict[Tuple[str, Any], List[UnknownReasonRecord]] = {}
     fallback_index = 0
     for record in records:
-        aggregation_key = builtin_str(record.aggregation_unit or "result")
-        unit_key = record.pair_or_case or record.stage
+        aggregation_key = builtin_str(_or(attribute(record, "aggregation_unit"), "result"))
+        unit_key = _or(attribute(record, "pair_or_case"), attribute(record, "stage"))
         if unit_key is None:
             unit_key = f"record:{fallback_index}"
             fallback_index += 1
@@ -637,28 +750,30 @@ def select_primary_reason_records(
 
 def primary_reason_record_sort_key(record: UnknownReasonRecord) -> Tuple[Any, ...]:
     return (
-        PRIMARY_DECISION_EFFECT_PRIORITY.get(builtin_str(record.decision_effect), 99),
-        builtin_str(record.reason_id),
-        builtin_str(record.reason_scope),
-        builtin_str(record.recovery_proof_kind),
-        builtin_str(record.proof_stage or ""),
-        builtin_str(record.action_status or ""),
-        tuple(builtin_str(ref) for ref in (record.evidence_refs or ())),
-        builtin_str(record.detail or ""),
+        PRIMARY_DECISION_EFFECT_PRIORITY.get(builtin_str(attribute(record, "decision_effect")), 99),
+        builtin_str(attribute(record, "reason_id")),
+        builtin_str(attribute(record, "reason_scope")),
+        builtin_str(attribute(record, "recovery_proof_kind")),
+        builtin_str(_or(attribute(record, "proof_stage"), "")),
+        builtin_str(_or(attribute(record, "action_status"), "")),
+        tuple(builtin_str(ref) for ref in _elements(attribute(record, "evidence_refs"))),
+        builtin_str(_or(attribute(record, "detail"), "")),
     )
 
 
 def is_proof_backlog(record: UnknownReasonRecord, actions: Sequence[Any] = ()) -> bool:
-    action_statuses = {builtin_str(getattr(action, "status", "")) for action in actions}
+    action_statuses = {builtin_str(attribute(action, "status", "")) for action in elements_of(actions)}
+    # 文字列の値で比べる（`json_scalar`: 文字列と文字列の enum は基底型の `str`。live な値の
+    # `__hash__` / `__eq__` を呼ばない）
     return (
-        record.reason_class in PROOF_BACKLOG_CLASSES
-        or record.action_status
+        json_scalar(attribute(record, "reason_class")) in PROOF_BACKLOG_CLASSES
+        or json_scalar(attribute(record, "action_status"))
         in {
             UnknownRecoveryActionStatus.PENDING_PROOF.value,
             UnknownRecoveryActionStatus.PLANNED.value,
         }
         or (
-            record.object_target_key is not None
+            attribute(record, "object_target_key") is not None
             and bool(
                 action_statuses
                 & {
@@ -676,24 +791,24 @@ def global_reason_tuple_from_record(
 ) -> Tuple[str, ...]:
     return (
         builtin_str(count_kind),
-        builtin_str(record.reason_id),
-        builtin_str(record.decision_effect),
-        builtin_str(record.reason_scope),
-        builtin_str(record.recovery_proof_kind or UNKNOWN_TUPLE_MISSING),
-        builtin_str(record.proof_stage or UNKNOWN_TUPLE_MISSING),
-        builtin_str(record.action_status or UNKNOWN_TUPLE_MISSING),
+        builtin_str(attribute(record, "reason_id")),
+        builtin_str(attribute(record, "decision_effect")),
+        builtin_str(attribute(record, "reason_scope")),
+        builtin_str(_or(attribute(record, "recovery_proof_kind"), UNKNOWN_TUPLE_MISSING)),
+        builtin_str(_or(attribute(record, "proof_stage"), UNKNOWN_TUPLE_MISSING)),
+        builtin_str(_or(attribute(record, "action_status"), UNKNOWN_TUPLE_MISSING)),
     )
 
 
 def global_reason_tuple_from_action(action: Any) -> Tuple[str, ...]:
     return (
-        builtin_str(getattr(action, "count_kind", UnknownCountKind.PROOF_ACTION.value)),
-        builtin_str(getattr(action, "reason_id", UnknownReasonId.UNKNOWN.value)),
-        builtin_str(getattr(action, "decision_effect", UNKNOWN_TUPLE_MISSING)),
-        builtin_str(getattr(action, "reason_scope", UNKNOWN_TUPLE_MISSING)),
-        builtin_str(getattr(action, "proof_kind", UNKNOWN_TUPLE_MISSING)),
-        builtin_str(getattr(action, "proof_stage", UNKNOWN_TUPLE_MISSING)),
-        builtin_str(getattr(action, "status", UNKNOWN_TUPLE_MISSING)),
+        builtin_str(attribute(action, "count_kind", UnknownCountKind.PROOF_ACTION.value)),
+        builtin_str(attribute(action, "reason_id", UnknownReasonId.UNKNOWN.value)),
+        builtin_str(attribute(action, "decision_effect", UNKNOWN_TUPLE_MISSING)),
+        builtin_str(attribute(action, "reason_scope", UNKNOWN_TUPLE_MISSING)),
+        builtin_str(attribute(action, "proof_kind", UNKNOWN_TUPLE_MISSING)),
+        builtin_str(attribute(action, "proof_stage", UNKNOWN_TUPLE_MISSING)),
+        builtin_str(attribute(action, "status", UNKNOWN_TUPLE_MISSING)),
     )
 
 
@@ -701,10 +816,10 @@ def recovery_action_key(action: Any) -> str:
     return " | ".join(
         builtin_str(value)
         for value in (
-            getattr(action, "reason_id", "unknown"),
-            getattr(action, "proof_kind", "none"),
-            getattr(action, "proof_stage", "unspecified"),
-            getattr(action, "status", "unspecified"),
+            attribute(action, "reason_id", "unknown"),
+            attribute(action, "proof_kind", "none"),
+            attribute(action, "proof_stage", "unspecified"),
+            attribute(action, "status", "unspecified"),
         )
     )
 
@@ -722,8 +837,9 @@ def reason_detail_key(record: Any) -> str:
     # 長い detail の marker の hash は今の直列化の作業量の中で求める（scope の外 = 部品単体の
     # 呼び出しでは数えない）
     work = active_serialization_work() or JsonBudget(None)
-    detail = bounded_text(getattr(record, "detail", None), DETAIL_MAX_CHARS, work=work)
-    return f"{record.reason_id} | {detail if detail else '(no detail)'}"
+    detail = bounded_text(attribute(record, "detail"), DETAIL_MAX_CHARS, work=work)
+    reason_id = builtin_str(attribute(record, "reason_id"))
+    return f"{reason_id} | {detail if detail else '(no detail)'}"
 
 
 def build_reason_view(records: Sequence[UnknownReasonRecord]) -> Dict[str, Any]:
@@ -734,7 +850,7 @@ def build_reason_view(records: Sequence[UnknownReasonRecord]) -> Dict[str, Any]:
     「record が 1 件も無い結果」の合成は結果単位の話なのでここではしない。
     """
 
-    records = tuple(records)
+    records = tuple(elements_of(records))
     primary = select_primary_reason_records(records)
     by_reason: Dict[str, int] = {}
     by_decision_effect: Dict[str, int] = {}
@@ -751,34 +867,34 @@ def build_reason_view(records: Sequence[UnknownReasonRecord]) -> Dict[str, Any]:
     operational_by_class: Dict[str, int] = {}
 
     for record in records:
-        _inc(record_multiset, global_reason_tuple_from_record(
+        _inc_row(record_multiset, global_reason_tuple_from_record(
             record, UnknownCountKind.REASON_RECORD.value
         ))
-        for action in build_unknown_recovery_actions((record,), work=_diagnostic_work()):
-            _inc(action_multiset, global_reason_tuple_from_action(action))
+        for action in elements_of(build_unknown_recovery_actions((record,), work=_diagnostic_work())):
+            _inc_row(action_multiset, global_reason_tuple_from_action(action))
 
     for record in primary:
         _inc(by_reason_detail, reason_detail_key(record))
-        _inc(validation_multiset, global_reason_tuple_from_record(
+        _inc_row(validation_multiset, global_reason_tuple_from_record(
             record, UnknownCountKind.VALIDATION_UNKNOWN_UNIT.value
         ))
-        _inc(by_reason, record.reason_id)
-        _inc(by_decision_effect, record.decision_effect)
-        _inc(by_reason_scope, record.reason_scope)
-        actions = build_unknown_recovery_actions((record,), work=_diagnostic_work())
+        _inc(by_reason, attribute(record, "reason_id"))
+        _inc(by_decision_effect, attribute(record, "decision_effect"))
+        _inc(by_reason_scope, attribute(record, "reason_scope"))
+        actions = tuple(elements_of(build_unknown_recovery_actions((record,), work=_diagnostic_work())))
         if is_proof_backlog(record, actions):
-            _inc(backlog_by_reason, record.reason_id)
+            _inc(backlog_by_reason, attribute(record, "reason_id"))
             for action in actions:
-                _inc(backlog_by_proof_kind, action.proof_kind)
+                _inc(backlog_by_proof_kind, attribute(action, "proof_kind"))
                 _inc(backlog_by_recovery_action, recovery_action_key(action))
-                _inc(backlog_by_action_status, action.status)
+                _inc(backlog_by_action_status, attribute(action, "status"))
         else:
-            _inc(operational_by_reason, record.reason_id)
-            _inc(operational_by_class, record.reason_class)
+            _inc(operational_by_reason, attribute(record, "reason_id"))
+            _inc(operational_by_class, attribute(record, "reason_class"))
 
     return {
-        "unit_count": len(primary),
-        "record_count": len(records),
+        "unit_count": size(primary),
+        "record_count": size(records),
         "by_reason": by_reason,
         "by_decision_effect": by_decision_effect,
         "by_reason_scope": by_reason_scope,
@@ -803,8 +919,12 @@ def _multiset_rows(counts: Mapping[Tuple[str, ...], int]) -> List[Dict[str, Any]
     """tuple キーの multiset を JSON 可能な行へ（区切り文字で潰さない）。"""
     return [
         {"key": list(key), "count": int(value)}
-        for key, value in sorted(counts.items(), key=lambda item: tuple(builtin_str(part) for part in item[0]))
+        for key, value in sorted(counts.items(), key=_multiset_row_order)
     ]
+
+
+def _multiset_row_order(item: Tuple[Tuple[str, ...], int]) -> Tuple[str, ...]:
+    return tuple(builtin_str(part) for part in item[0])
 
 
 def multiset_from_rows(rows: Any) -> Dict[Tuple[str, ...], int]:
@@ -819,8 +939,14 @@ def multiset_from_rows(rows: Any) -> Dict[Tuple[str, ...], int]:
 
 
 def _inc(counts: Dict[Any, int], key: Any, amount: int = 1) -> None:
-    count_key = key if isinstance(key, tuple) else builtin_str(key)
+    """文字列の key（`builtin_str` の写し）の件数を足す。"""
+    count_key = builtin_str(key)
     counts[count_key] = int(counts.get(count_key, 0) or 0) + int(amount)
+
+
+def _inc_row(counts: Dict[Tuple[str, ...], int], key: Tuple[str, ...], amount: int = 1) -> None:
+    """multiset の行（`global_reason_tuple_*` が作る文字列の tuple）の件数を足す。"""
+    counts[key] = int(counts.get(key, 0) or 0) + int(amount)
 
 
 # ---------------------------------------------------------------------------
@@ -834,20 +960,28 @@ def attach_cause_aggregate(result: Any) -> None:
     作る前に一度だけ確定させる」ためのもの。preimage 確定後に payload を
     書き換えてはならない（`checker/diagnostics.py` の digest 契約と同じ）。
     """
+    from scripts.function_tracer_pcode.checker.result import EquivalenceResult
     from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
 
     # Issue #22 PR-22-D: 集計が読む値（canonical reason・準備済みの trace 部分）は、authority
     # 確定後の field に空けた headroom を上限にした診断用の作業量へ数えながら読む（超えれば
     # `error` を持つ値 = 診断の marker。判定は変えない）
-    prepared = getattr(result, "prepared_semantic_payload", None)
-    plan = getattr(prepared, "plan", None)
-    limit = getattr(plan, "headroom_bytes", None) if plan is not None and plan.max_bytes is not None else None
+    prepared = attribute(result, "prepared_semantic_payload")
+    plan = attribute(prepared, "plan") if prepared is not None else None
+    limit = None
+    if plan is not None and attribute(plan, "max_bytes") is not None:
+        headroom = attribute(plan, "headroom_bytes")
+        limit = as_int(headroom) if headroom is not None else None
     try:
         with serialization_scope(
             site=AGGREGATE_SITE, target_parts=("unknown_cause_aggregate",),
             terminal=False, max_bytes=limit, enabled=limit is not None,
         ):
-            result.unknown_cause_aggregate = build_unknown_cause_aggregate(result)
+            aggregate = build_unknown_cause_aggregate(result)
+            # 載せる先は package の結果の型だけ（その型の `__setattr__` だけが走る）。それ以外の
+            # object には載せない（`to_dict()` 相当の出力はその場で集計を組む）
+            if type(result) is EquivalenceResult:
+                live_values.set_state(result, "unknown_cause_aggregate", aggregate)
     except Exception:  # 診断は判定を壊さない
         return
 
@@ -911,19 +1045,19 @@ def build_trace_cause_evidence(
     （authority 後）ので、ここでは trace の event だけを残す。
     """
 
-    trace = getattr(result, "debug_trace", None)
+    trace = attribute(result, "debug_trace")
     # 集計は trace の列を直接読むので、読む要素の大きさを 1 つずつ作業量へ数えてから読む
-    # （集計の作業は数えた入力で抑えられる）
-    attempts = tuple(_metered(getattr(trace, "attempts", ()), mode=LEGACY)) if trace is not None else ()
+    # （集計の作業は数えた入力で抑えられる）。trace の field は `live_values.attribute` だけで読む
+    attempts = tuple(_counted(attribute(trace, "attempts", ()), mode=LEGACY)) if trace is not None else ()
     occurrences = _trace_occurrence_views(attempts)
-    transitions = _event_views(_metered(
-        getattr(trace, "causal_transitions", ()) if trace is not None else (), mode=LEGACY,
+    transitions = _event_views(_counted(
+        attribute(trace, "causal_transitions", ()) if trace is not None else (), mode=LEGACY,
     ))
-    completions = _event_views(_metered(
-        getattr(trace, "proof_completion_events", ()) if trace is not None else (), mode=LEGACY,
+    completions = _event_views(_counted(
+        attribute(trace, "proof_completion_events", ()) if trace is not None else (), mode=LEGACY,
     ))
-    reason_completions = _event_views(_metered(
-        getattr(trace, "reason_completion_events", ()) if trace is not None else (), mode=LEGACY,
+    reason_completions = _event_views(_counted(
+        attribute(trace, "reason_completion_events", ()) if trace is not None else (), mode=LEGACY,
     ))
     legacy_attempt, legacy_records = _final_legacy_attempt(trace, attempts)
     legacy_view = None
@@ -935,11 +1069,11 @@ def build_trace_cause_evidence(
         "schema": TRACE_CAUSE_EVIDENCE_SCHEMA,
         "trace_present": trace is not None,
         "has_final_attempt": legacy_attempt is not None,
-        "has_trace_occurrences": bool(occurrences),
+        "has_trace_occurrences": size(occurrences) > 0,
         "legacy_view": legacy_view,
         "attempts": _attempt_summary(attempts, legacy_attempt) if trace is not None else None,
     }
-    if occurrences:
+    if size(occurrences) > 0:
         diagnostics: Dict[str, int] = {}
         root_causes, root_cause_stats, identity_pool = _build_root_causes(
             binary_identities,
@@ -950,24 +1084,22 @@ def build_trace_cause_evidence(
             attempts=attempts,
             diagnostics=diagnostics,
         )
-        evidence.update({
-            "root_causes": root_causes,
-            "root_cause_stats": root_cause_stats,
-            "identity_pool": identity_pool,
-            "completions": (
-                completion_counts(completions, reason_completions, occurrences)
-                if trace is not None else None
-            ),
-            "transitions": transition_counts(transitions, occurrences) if trace is not None else None,
-        })
+        evidence["root_causes"] = root_causes
+        evidence["root_cause_stats"] = root_cause_stats
+        evidence["identity_pool"] = identity_pool
+        evidence["completions"] = (
+            completion_counts(completions, reason_completions, occurrences)
+            if trace is not None else None
+        )
+        evidence["transitions"] = (
+            transition_counts(transitions, occurrences) if trace is not None else None
+        )
     else:
         # root cause は authority 後に canonical reason から作る（trace の event だけ残す）
-        evidence.update({
-            "transition_events": transitions,
-            "completion_events": completions,
-            "reason_completion_events": reason_completions,
-            "final_attempt_identity": _final_attempt_identity(attempts, ()),
-        })
+        evidence["transition_events"] = transitions
+        evidence["completion_events"] = completions
+        evidence["reason_completion_events"] = reason_completions
+        evidence["final_attempt_identity"] = _final_attempt_identity(attempts, ())
     return evidence
 
 
@@ -975,7 +1107,7 @@ def build_trace_cause_evidence(
 AGGREGATE_SITE = "checker.cause_aggregate.attach"
 
 
-def _metered(values: Any, *, mode: str):
+def _counted(values: Any, *, mode: str):
     """集計が読む列を、1 要素ずつ今の直列化の作業量へ数えてから渡す（入力を先に写さない）。
 
     * authority 確定 **前** の trace（live な記録）は `LEGACY`（集計が読む形そのもの）で数える。
@@ -988,20 +1120,19 @@ def _metered(values: Any, *, mode: str):
     """
 
     from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
-    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
 
     work = active_serialization_work()
-    for value in values or ():
+    for value in _elements(values):
         if work is not None:
-            RESULT_JSON_POLICY.count_into(value, work, mode=mode)
+            json_encoding.RESULT_JSON_POLICY.count_into(value, work, mode=mode)
         yield value
 
 
 def trace_evidence_is_usable(evidence: Any) -> bool:
     return (
-        isinstance(evidence, Mapping)
-        and evidence.get("schema") == TRACE_CAUSE_EVIDENCE_SCHEMA
-        and not evidence.get("error")
+        builtin_mapping(evidence) is not None
+        and json_scalar(lookup(evidence, "schema")) == TRACE_CAUSE_EVIDENCE_SCHEMA
+        and not as_bool(lookup(evidence, "error"))
     )
 
 
@@ -1012,24 +1143,26 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
         evidence = build_trace_cause_evidence(
             result,
             binary_identities=(
-                getattr(result, "binary1_content_identity", None),
-                getattr(result, "binary2_content_identity", None),
+                attribute(result, "binary1_content_identity"),
+                attribute(result, "binary2_content_identity"),
             ),
         )
     if not trace_evidence_is_usable(evidence):
         detail = None
-        if isinstance(evidence, Mapping):
-            detail = evidence.get("error") or evidence.get("reason")
+        if builtin_mapping(evidence) is not None:
+            detail = _or(lookup(evidence, "error"), lookup(evidence, "reason"))
         return {
             "schema": UNKNOWN_CAUSE_AGGREGATE_SCHEMA,
             "error": ("trace_evidence_unavailable: " + builtin_str(detail))[:200],
         }
-    trace_present = bool(evidence.get("trace_present"))
+    # evidence は package が組んだ dict か、authority 前に準備した canonical な値（どちらも
+    # `lookup` で読む）
+    trace_present = as_bool(lookup(evidence, "trace_present"))
 
     canonical_records = coerce_unknown_reason_records(
-        _metered(getattr(result, "unknown_reasons", ()), mode=CANONICAL)
+        _counted(attribute(result, "unknown_reasons", ()), mode=CANONICAL)
     )
-    canonical_available = getattr(result, "decision_receipt", None) is not None
+    canonical_available = attribute(result, "decision_receipt") is not None
 
     final_reasons = build_reason_view(canonical_records) if canonical_available else None
     # `legacy_view` は「trace を見た consumer が診断に使う record 集合」の集計で、
@@ -1040,8 +1173,8 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
     #   payload_records -- 最終 attempt が無いので結果の `unknown_reasons`
     legacy_view = None
     if trace_present:
-        if evidence.get("has_final_attempt"):
-            legacy_view = evidence.get("legacy_view")
+        if as_bool(lookup(evidence, "has_final_attempt")):
+            legacy_view = lookup(evidence, "legacy_view")
         else:
             legacy_view = build_reason_view(canonical_records)
             legacy_view["source"] = "payload_records"
@@ -1051,23 +1184,23 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
         else ("legacy" if legacy_view is not None else None)
     )
 
-    if evidence.get("has_trace_occurrences"):
-        root_causes = evidence.get("root_causes")
-        root_cause_stats = evidence.get("root_cause_stats")
-        identity_pool = evidence.get("identity_pool")
-        completions_block = evidence.get("completions")
-        transitions_block = evidence.get("transitions")
+    if as_bool(lookup(evidence, "has_trace_occurrences")):
+        root_causes = lookup(evidence, "root_causes")
+        root_cause_stats = lookup(evidence, "root_cause_stats")
+        identity_pool = lookup(evidence, "identity_pool")
+        completions_block = lookup(evidence, "completions")
+        transitions_block = lookup(evidence, "transitions")
     else:
         # trace に occurrence が無い: root cause は canonical reason（authority の出力）から
         occurrences = _payload_occurrence_views(canonical_records)
-        transitions = list(evidence.get("transition_events") or ())
-        completions = list(evidence.get("completion_events") or ())
-        reason_completions = list(evidence.get("reason_completion_events") or ())
+        transitions = list(_elements(lookup(evidence, "transition_events")))
+        completions = list(_elements(lookup(evidence, "completion_events")))
+        reason_completions = list(_elements(lookup(evidence, "reason_completion_events")))
         diagnostics: Dict[str, int] = {}
         root_causes, root_cause_stats, identity_pool = _build_root_causes(
             (
-                getattr(result, "binary1_content_identity", None),
-                getattr(result, "binary2_content_identity", None),
+                attribute(result, "binary1_content_identity"),
+                attribute(result, "binary2_content_identity"),
             ),
             occurrences=occurrences,
             transitions=transitions,
@@ -1088,14 +1221,21 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
         "final_reasons": final_reasons,
         "legacy_view": legacy_view,
         "effective_source": effective_source,
-        "backlog": dict(effective_view["backlog"]) if effective_view is not None else None,
-        "operational": dict(effective_view["operational"]) if effective_view is not None else None,
+        # view の block の写し（容器だけ作り直す。値は件数と文字列）
+        "backlog": (
+            copy_legacy_containers(lookup(effective_view, "backlog"))
+            if effective_view is not None else None
+        ),
+        "operational": (
+            copy_legacy_containers(lookup(effective_view, "operational"))
+            if effective_view is not None else None
+        ),
         "completions": completions_block,
         "transitions": transitions_block,
         "root_causes": root_causes,
         "identity_pool": identity_pool,
         "root_cause_stats": root_cause_stats,
-        "attempts": evidence.get("attempts") if trace_present else None,
+        "attempts": lookup(evidence, "attempts") if trace_present else None,
         # `evidence_present` は「件数が非 0 か」ではなく **「その情報を観測できたか」**。
         # trace を見られなかったのか、見た上で 0 件だったのかを consumer が区別する
         # ための証言で、block の `null` と対になる。
@@ -1113,9 +1253,10 @@ def _build_unknown_cause_aggregate(result: Any) -> Dict[str, Any]:
 
 
 def _prepared_trace_evidence(result: Any) -> Any:
-    prepared = getattr(result, "prepared_semantic_payload", None)
-    cause_evidence = getattr(prepared, "cause_evidence", None)
-    if cause_evidence is None:
+    prepared = attribute(result, "prepared_semantic_payload")
+    cause_evidence = attribute(prepared, "cause_evidence") if prepared is not None else None
+    # 準備済みの値（`PreparedJson`: owner の型）だけを読む
+    if type(cause_evidence) is not json_encoding.PreparedJson:
         return None
     return cause_evidence.value()
 
@@ -1124,7 +1265,7 @@ def _trace_occurrence_views(attempts: Sequence[Any]) -> List[Dict[str, Any]]:
     """trace の occurrence 列（`root_blocker_summary._extract_occurrences` と同じ）。"""
     occurrences: List[Dict[str, Any]] = []
     for attempt in attempts:
-        for occurrence in tuple(getattr(attempt, "reason_occurrences", ()) or ()):
+        for occurrence in tuple(_elements(attribute(attempt, "reason_occurrences", ()))):
             occurrences.append(_as_mapping(occurrence))
     return occurrences
 
@@ -1137,7 +1278,7 @@ def _payload_occurrence_views(records: Sequence[UnknownReasonRecord]) -> List[Di
     """
     identity = {"trace_schema_version": 1, "strategy_identity": "payload", "attempt_ordinal": 0}
     occurrences: List[Dict[str, Any]] = []
-    for ordinal, record in enumerate(records):
+    for ordinal, record in enumerate(elements_of(records)):
         occurrences.append({
             "occurrence_id": {
                 "occurrence_schema_version": 1,
@@ -1159,27 +1300,27 @@ def _prepared_within_work(record: Any) -> Any:
     """
 
     from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
-    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
 
     work = active_serialization_work()
     if work is None:
-        return RESULT_JSON_POLICY.prepare(record).value()
-    prepared = RESULT_JSON_POLICY.prepare(record, max_bytes=work.remaining())
+        return json_encoding.RESULT_JSON_POLICY.prepare(record).value()
+    prepared = json_encoding.RESULT_JSON_POLICY.prepare(record, max_bytes=work.remaining())
     work.charge(prepared.encoded_bytes)
     return prepared.value()
 
 
 def _payload_final_identity(evidence: Mapping[str, Any], occurrences: Sequence[Mapping[str, Any]]):
-    identity = evidence.get("final_attempt_identity")
+    identity = lookup(evidence, "final_attempt_identity")
     if identity is not None:
         return freeze_identity(identity)
     if occurrences:
-        return freeze_identity(occurrences[-1].get("attempt_identity"))
+        return freeze_identity(lookup(occurrences[-1], "attempt_identity"))
     return None
 
 
 def _event_views(values: Iterable[Any]) -> List[Dict[str, Any]]:
-    return [_as_mapping(value) for value in (values or ())]
+    # `values` は `_counted` が作る generator（数えた要素を 1 つずつ渡す）
+    return [_as_mapping(value) for value in values]
 
 
 #: `make_unknown_reason` が文字列にする（`str()` を呼ぶ）field
@@ -1206,13 +1347,21 @@ def _plain_reason_payload(record: Mapping[str, Any]) -> Dict[str, Any]:
     その値は型名の印にしてから渡す（live な値の `__str__` を呼ばない）。組み込みの値は変わらない。
     """
 
-    payload = dict(record)
+    # `from_dict` が読むのは文字列の key だけなので、文字列の key（基底型の `str`）の項だけを写す
+    # （live な key の `__hash__` / `__eq__` を呼ばない）
+    payload: Dict[str, Any] = {}
+    for key, item in items_of(record):
+        name = live_values.str_value(key)
+        if name is not live_values.NOT_PLAIN:
+            payload[name] = item
     for key in _STRINGIFIED_REASON_FIELDS:
         if payload.get(key) is not None:
             payload[key] = _plain_reason_value(payload[key])
     refs = payload.get("evidence_refs")
-    if refs:
-        payload["evidence_refs"] = tuple(_plain_reason_value(ref) for ref in refs)
+    if refs is not None:
+        plain_refs = tuple(_plain_reason_value(ref) for ref in _elements(refs))
+        if plain_refs:
+            payload["evidence_refs"] = plain_refs
     return payload
 
 
@@ -1227,27 +1376,29 @@ def _diagnostic_work() -> Any:
 def _as_mapping(value: Any) -> Dict[str, Any]:
     # 組み込みの振る舞いの mapping と json record（`to_dict()` は `materialize` が作業量の中で
     # 作る）だけを読む。それ以外の object の `to_dict()`（任意の producer）は呼ばない
+    # 組み込みの振る舞いの mapping はそのまま（集計は `lookup` で読むだけで書き換えない）。json record
+    # は LEGACY の写し（旧 `to_dict()` と同じ `materialize`。record の `to_dict` は呼ばない）
     mapping = builtin_mapping(value)
     if mapping is not None:
-        return dict(mapping)
+        return mapping
     if is_json_record(value):
-        payload = value.to_dict()
-        if builtin_mapping(payload) is not None:
-            return dict(payload)
+        payload = materialize(value)
+        if type(payload) is dict:
+            return payload
     return {}
 
 
 def _final_legacy_attempt(trace: Any, attempts: Sequence[Any]):
     """legacy 最終 attempt（`_extract_final_unknown_reasons` の legacy 分岐と同条件）。"""
-    if trace is None or getattr(trace, "final_result", None) is not None:
+    if trace is None or attribute(trace, "final_result") is not None:
         return None, ()
     for attempt in reversed(tuple(attempts)):
         if (
-            getattr(attempt, "result", None) is None
-            and builtin_str(getattr(attempt, "transition_reason", "")) in FINAL_UNKNOWN_TRANSITIONS
+            attribute(attempt, "result") is None
+            and builtin_str(attribute(attempt, "transition_reason", "")) in FINAL_UNKNOWN_TRANSITIONS
         ):
             return attempt, coerce_unknown_reason_records(
-                getattr(attempt, "unknown_reasons", ()) or ()
+                tuple(_elements(attribute(attempt, "unknown_reasons", ())))
             )
     return None, ()
 
@@ -1255,29 +1406,29 @@ def _final_legacy_attempt(trace: Any, attempts: Sequence[Any]):
 def _final_attempt_identity(attempts: Sequence[Any], occurrences: Sequence[Mapping[str, Any]]):
     for attempt in reversed(tuple(attempts)):
         if (
-            getattr(attempt, "result", None) is None
-            and builtin_str(getattr(attempt, "transition_reason", "")) in FINAL_UNKNOWN_TRANSITIONS
+            attribute(attempt, "result") is None
+            and builtin_str(attribute(attempt, "transition_reason", "")) in FINAL_UNKNOWN_TRANSITIONS
         ):
             return freeze_identity({
                 "trace_schema_version": 1,
                 "strategy_identity": builtin_str(
-                    getattr(attempt, "strategy", None) or getattr(attempt, "phase", None) or "unknown"
+                    _or(_or(attribute(attempt, "strategy"), attribute(attempt, "phase")), "unknown")
                 ),
-                "attempt_ordinal": int(getattr(attempt, "attempt_id", 0) or 0),
+                "attempt_ordinal": as_int(_or(attribute(attempt, "attempt_id", 0), 0)),
             })
     if occurrences:
-        return freeze_identity(occurrences[-1].get("attempt_identity"))
+        return freeze_identity(lookup(occurrences[-1], "attempt_identity"))
     return None
 
 
 def _attempt_summary(attempts: Sequence[Any], legacy_attempt: Any) -> Dict[str, Any]:
     final = legacy_attempt if legacy_attempt is not None else (attempts[-1] if attempts else None)
     return {
-        "count": len(attempts),
+        "count": size(attempts),
         "final": None if final is None else {
-            "strategy": getattr(final, "strategy", None),
-            "attempt_id": getattr(final, "attempt_id", None),
-            "transition_reason": getattr(final, "transition_reason", None),
+            "strategy": attribute(final, "strategy"),
+            "attempt_id": attribute(final, "attempt_id"),
+            "transition_reason": attribute(final, "transition_reason"),
         },
         "final_is_unknown_attempt": legacy_attempt is not None,
     }
@@ -1285,10 +1436,12 @@ def _attempt_summary(attempts: Sequence[Any], legacy_attempt: Any) -> Dict[str, 
 
 def _case_pair_local(occurrence: Mapping[str, Any], record: Mapping[str, Any]):
     """`StableCasePairRef` のうち結果に依らない部分（strategy と 2 つの case）。"""
-    pair = record.get("pair_or_case")
-    if isinstance(pair, (tuple, list)) and len(pair) == 2:
-        strategy = builtin_str((occurrence.get("attempt_identity") or {}).get("strategy_identity") or "unknown")
-        return (strategy, identity_tuple(pair[0]), identity_tuple(pair[1]))
+    pair = lookup(record, "pair_or_case")
+    if builtin_sequence(pair) and size(pair) == 2:
+        first, second = elements_of(pair)
+        attempt_identity = _or(lookup(occurrence, "attempt_identity"), {})
+        strategy = builtin_str(_or(lookup(attempt_identity, "strategy_identity"), "unknown"))
+        return (strategy, identity_tuple(first), identity_tuple(second))
     return None
 
 
@@ -1341,37 +1494,56 @@ class _CauseGroup:
     case_pairs: set = field(default_factory=set)
     proof_requirements_complete: bool = True
 
-    def add(self, *, occurrence_id_payload, frozen_occurrence_id, record, required, complete,
-            pair, certainty, pool: IdentityPool) -> None:
-        self.occurrence_count += 1
-        self.occurrence_ids.setdefault(frozen_occurrence_id, occurrence_id_payload)
-        self.reason_ids.add(builtin_str(record.get("reason_id") or "unknown"))
-        self.decision_effects.add(builtin_str(record.get("decision_effect") or ""))
-        self.required.update(pool.intern(item) for item in required)
-        if not complete:
-            self.proof_requirements_complete = False
-        legacy = record.get("proof_obligation_id")
-        if legacy:
-            self.legacy.add(pool.intern(freeze_identity(legacy)))
-        self.evidence.update(builtin_str(item) for item in (record.get("evidence_refs") or ()))
-        self.certainties.add(certainty)
-        if pair is not None:
-            self.case_pairs.add(pair)
-
     def to_dict(self) -> Dict[str, Any]:
-        ordered = lambda values: sorted(values, key=repr)
         return {
             "occurrence_count": self.occurrence_count,
-            "occurrence_ids": [self.occurrence_ids[key] for key in ordered(self.occurrence_ids)],
-            "reason_ids": ordered(self.reason_ids),
-            "decision_effects": ordered(self.decision_effects),
+            "occurrence_ids": [self.occurrence_ids[key] for key in _by_repr(self.occurrence_ids)],
+            "reason_ids": _by_repr(self.reason_ids),
+            "decision_effects": _by_repr(self.decision_effects),
             "required_proof_id_refs": sorted(self.required),
             "proof_requirements_complete": self.proof_requirements_complete,
             "legacy_proof_obligation_id_refs": sorted(self.legacy),
-            "evidence_refs": ordered(self.evidence),
-            "certainties": ordered(self.certainties),
-            "case_pairs": ordered(self.case_pairs),
+            "evidence_refs": _by_repr(self.evidence),
+            "certainties": _by_repr(self.certainties),
+            "case_pairs": _by_repr(self.case_pairs),
         }
+
+
+def _by_repr(values: Iterable[Any]) -> List[Any]:
+    """組み込みの値（写し・文字列）の集合を `repr` の順に。"""
+    return sorted(values, key=repr)
+
+
+def _add_to_group(
+    group: _CauseGroup, *, occurrence_id_payload: Any, frozen_occurrence_id: Any, record: Any,
+    required: Tuple[Any, ...], complete: bool, pair: Any, certainty: str, pool: IdentityPool,
+) -> None:
+    """occurrence 1 件を原因の union（`_CauseGroup`）へ足す。
+
+    Issue #22 PR-22-D: `record` / `occurrence_id_payload` は trace の表現（live な葉を持ち得る）なので、
+    `live_values` の `lookup` / `elements_of` / `as_bool` だけで読む。group の集合へ入れるのは
+    組み込みの値（`builtin_str`・`freeze_identity` の写し）だけで、payload はそのまま置く。
+    """
+
+    group.occurrence_count += 1
+    if frozen_occurrence_id not in group.occurrence_ids:
+        group.occurrence_ids[frozen_occurrence_id] = occurrence_id_payload
+    group.reason_ids.add(builtin_str(_or(lookup(record, "reason_id"), "unknown")))
+    group.decision_effects.add(builtin_str(_or(lookup(record, "decision_effect"), "")))
+    group.required.update(pool.intern(item) for item in required)
+    if not complete:
+        group.proof_requirements_complete = False
+    legacy = lookup(record, "proof_obligation_id")
+    if _truthy(legacy):
+        group.legacy.add(pool.intern(freeze_identity(legacy)))
+    group.evidence.update(builtin_str(item) for item in _elements(lookup(record, "evidence_refs")))
+    group.certainties.add(certainty)
+    if pair is not None:
+        group.case_pairs.add(pair)
+
+
+def _cause_key_digest(cause: Mapping[str, Any]) -> str:
+    return cause["cause_key_digest"]
 
 
 def _build_root_causes(
@@ -1385,8 +1557,9 @@ def _build_root_causes(
     diagnostics: Dict[str, int],
     final_identity: Any = None,
 ):
-    left = identity_tuple(binary_identities[0])
-    right = identity_tuple(binary_identities[1])
+    left_identity, right_identity = elements_of(binary_identities)
+    left = identity_tuple(left_identity)
+    right = identity_tuple(right_identity)
     transition_state = resolve_occurrence_transitions(
         occurrences,
         transitions,
@@ -1399,25 +1572,26 @@ def _build_root_causes(
         final_identity = _final_attempt_identity(attempts, occurrences)
     if final_identity is not None:
         final_ids = {
-            freeze_identity(item.get("occurrence_id"))
+            freeze_identity(lookup(item, "occurrence_id"))
             for item in occurrences
-            if freeze_identity(item.get("attempt_identity")) == final_identity
+            if freeze_identity(lookup(item, "attempt_identity")) == final_identity
         }
 
     pool = IdentityPool()
     groups: Dict[Any, Dict[str, Any]] = {}
     total_reasons = typed_reasons = explicit_status = pair_identified = 0
     for occurrence in occurrences:
-        record = occurrence.get("reason_record") or {}
+        record = _or(lookup(occurrence, "reason_record"), {})
         total_reasons += 1
-        status = builtin_str(occurrence.get("initial_causal_status") or "unclassified")
+        status = builtin_str(_or(lookup(occurrence, "initial_causal_status"), "unclassified"))
         if status != "unclassified":
             explicit_status += 1
-        occurrence_id = freeze_identity(occurrence.get("occurrence_id"))
+        occurrence_id_payload = lookup(occurrence, "occurrence_id")
+        occurrence_id = freeze_identity(occurrence_id_payload)
         effective = transition_state.get(occurrence_id, status)
         resolution = resolve_cause_identity(
-            typed_cause_key=record.get("typed_cause_key"),
-            object_target_key=record.get("object_target_key"),
+            typed_cause_key=lookup(record, "typed_cause_key"),
+            object_target_key=lookup(record, "object_target_key"),
             left_binary_identity=left,
             right_binary_identity=right,
         )
@@ -1433,15 +1607,15 @@ def _build_root_causes(
         certainty = "explicit" if status != "unclassified" else "unclassified"
         is_final = occurrence_id in final_ids
         if status == "unclassified" and is_final:
-            effect = builtin_str(record.get("decision_effect") or "")
-            action_status = builtin_str(record.get("action_status") or "")
+            effect = builtin_str(_or(lookup(record, "decision_effect"), ""))
+            action_status = builtin_str(_or(lookup(record, "action_status"), ""))
             if effect in BLOCKING_DECISION_EFFECTS and action_status != "proof_complete":
                 certainty = "inferred_final_attempt"
                 effective = "active_final_blocker"
         coerced = coerce_unknown_reason_record(_plain_reason_payload(record))
         proofs = resolve_required_proofs(
-            proof_requirement_ids=record.get("proof_requirement_ids") or (),
-            object_target_key=record.get("object_target_key"),
+            proof_requirement_ids=_or(lookup(record, "proof_requirement_ids"), ()),
+            object_target_key=lookup(record, "object_target_key"),
             identity_scope=resolution.identity_scope,
             canonical_cause_key=resolution.canonical_cause_key,
             recovery_actions=build_unknown_recovery_actions((coerced,), work=_diagnostic_work()),
@@ -1460,27 +1634,25 @@ def _build_root_causes(
                 "status_counts": {},
             }
             groups[group_key] = entry
-        contribution = dict(
-            occurrence_id_payload=occurrence.get("occurrence_id"),
-            frozen_occurrence_id=occurrence_id,
-            record=record,
-            required=proofs.keys,
-            complete=proofs.complete,
-            pair=pair,
-            certainty=certainty,
-            pool=pool,
+        _add_to_group(
+            entry["all"], occurrence_id_payload=occurrence_id_payload,
+            frozen_occurrence_id=occurrence_id, record=record, required=proofs.keys,
+            complete=proofs.complete, pair=pair, certainty=certainty, pool=pool,
         )
-        entry["all"].add(**contribution)
         _inc(entry["status_counts"], builtin_str(effective or "unclassified"))
         # active は「最終 attempt の occurrence」かつ「実効 status が blocker」の
         # ときだけ。`all` と別に union するので、active に数えなかった occurrence の
         # proof requirement や case pair が active 側へ混ざらない。
         if effective in _ACTIVE_CAUSAL_STATUSES and is_final:
-            entry["active"].add(**contribution)
+            _add_to_group(
+                entry["active"], occurrence_id_payload=occurrence_id_payload,
+                frozen_occurrence_id=occurrence_id, record=record, required=proofs.keys,
+                complete=proofs.complete, pair=pair, certainty=certainty, pool=pool,
+            )
             entry["active_count"] += 1
 
     root_causes = [_freeze_cause(entry) for entry in groups.values()]
-    root_causes.sort(key=lambda item: item["cause_key_digest"])
+    root_causes.sort(key=_cause_key_digest)
     stats_pool = list(pool.items)
     stats = {
         "total_reasons": total_reasons,
@@ -1488,26 +1660,26 @@ def _build_root_causes(
         "explicit_causal_status": explicit_status,
         "pair_identified": pair_identified,
         "transition_target_count": len({
-            freeze_identity(item.get("target_occurrence_id"))
+            freeze_identity(lookup(item, "target_occurrence_id"))
             for item in transitions
-            if isinstance(item, Mapping) and item.get("target_occurrence_id")
+            if builtin_mapping(item) is not None and _truthy(lookup(item, "target_occurrence_id"))
         }),
         "proof_completion_count": 0,
         "linked_completion_count": 0,
         "diagnostics": diagnostics,
     }
     completion_ids = {
-        freeze_identity(item.get("completion_id"))
+        freeze_identity(lookup(item, "completion_id"))
         for item in completions
-        if isinstance(item, Mapping) and item.get("completion_id")
+        if builtin_mapping(item) is not None and _truthy(lookup(item, "completion_id"))
     }
     stats["proof_completion_count"] = len(completion_ids)
     stats["linked_completion_count"] = len({
-        freeze_identity(item.get("cause_ref"))
+        freeze_identity(lookup(item, "cause_ref"))
         for item in transitions
-        if isinstance(item, Mapping)
-        and item.get("cause_kind") == "proof_completion"
-        and freeze_identity(item.get("cause_ref")) in completion_ids
+        if builtin_mapping(item) is not None
+        and json_scalar(lookup(item, "cause_kind")) == "proof_completion"
+        and freeze_identity(lookup(item, "cause_ref")) in completion_ids
     })
     return root_causes, stats, stats_pool
 
@@ -1559,11 +1731,11 @@ def completion_counts(
     """完了イベントの集計。backlog（未完了）とは独立に数える。"""
     requirement_to_reasons: Dict[Any, set] = {}
     for occurrence in occurrences:
-        record = occurrence.get("reason_record") or {}
-        reason_id = builtin_str(record.get("reason_id") or "unknown")
-        for requirement in record.get("proof_requirement_ids") or ():
+        record = _or(lookup(occurrence, "reason_record"), {})
+        reason_id = builtin_str(_or(lookup(record, "reason_id"), "unknown"))
+        for requirement in _elements(lookup(record, "proof_requirement_ids")):
             try:
-                key = ProofRequirementId.from_dict(requirement).to_key()
+                key = _requirement_key(requirement)
             except (TypeError, ValueError):
                 continue
             requirement_to_reasons.setdefault(freeze_identity(key), set()).add(reason_id)
@@ -1572,14 +1744,16 @@ def completion_counts(
     proof_by_status: Dict[str, int] = {}
     proof_by_reason: Dict[str, int] = {}
     for event in completions:
-        requirement = event.get("proof_requirement_id")
-        proof_kind = builtin_str((requirement or {}).get("proof_kind") or UNKNOWN_TUPLE_MISSING)
+        requirement = lookup(event, "proof_requirement_id")
+        proof_kind = builtin_str(
+            _or(lookup(_or(requirement, {}), "proof_kind"), UNKNOWN_TUPLE_MISSING)
+        )
         _inc(proof_by_kind, proof_kind)
-        _inc(proof_by_status, builtin_str(event.get("proof_status") or UNKNOWN_TUPLE_MISSING))
+        _inc(proof_by_status, builtin_str(_or(lookup(event, "proof_status"), UNKNOWN_TUPLE_MISSING)))
         matched = ()
-        if isinstance(requirement, Mapping):
+        if builtin_mapping(requirement) is not None:
             try:
-                key = freeze_identity(ProofRequirementId.from_dict(requirement).to_key())
+                key = freeze_identity(_requirement_key(requirement))
             except (TypeError, ValueError):
                 key = None
             if key is not None:
@@ -1588,27 +1762,29 @@ def completion_counts(
             _inc(proof_by_reason, reason_id)
 
     occurrence_reason = {
-        freeze_identity(item.get("occurrence_id")): builtin_str(
-            (item.get("reason_record") or {}).get("reason_id") or "unknown"
+        freeze_identity(lookup(item, "occurrence_id")): builtin_str(
+            _or(lookup(_or(lookup(item, "reason_record"), {}), "reason_id"), "unknown")
         )
         for item in occurrences
     }
     reason_by_reason: Dict[str, int] = {}
     reason_by_status: Dict[str, int] = {}
     for event in reason_completions:
-        target = freeze_identity(event.get("completed_occurrence_id"))
+        target = freeze_identity(lookup(event, "completed_occurrence_id"))
         _inc(reason_by_reason, occurrence_reason.get(target, "(unmatched)"))
-        _inc(reason_by_status, builtin_str(event.get("applicability_status") or UNKNOWN_TUPLE_MISSING))
+        _inc(reason_by_status, builtin_str(
+            _or(lookup(event, "applicability_status"), UNKNOWN_TUPLE_MISSING)
+        ))
 
     return {
         "proof_completions": {
-            "total": len(completions),
+            "total": size(completions),
             "by_proof_kind": proof_by_kind,
             "by_proof_status": proof_by_status,
             "by_reason": proof_by_reason,
         },
         "reason_completions": {
-            "total": len(reason_completions),
+            "total": size(reason_completions),
             "by_reason": reason_by_reason,
             "by_applicability_status": reason_by_status,
         },
@@ -1620,22 +1796,22 @@ def transition_counts(
     occurrences: Sequence[Mapping[str, Any]],
 ) -> Dict[str, Any]:
     initial_status = {
-        freeze_identity(item.get("occurrence_id")): builtin_str(
-            item.get("initial_causal_status") or "unclassified"
+        freeze_identity(lookup(item, "occurrence_id")): builtin_str(
+            _or(lookup(item, "initial_causal_status"), "unclassified")
         )
         for item in occurrences
     }
     by_kind: Dict[str, int] = {}
     by_status_pair: Dict[str, int] = {}
     for transition in transitions:
-        kind = builtin_str(transition.get("transition_kind") or UNKNOWN_TUPLE_MISSING)
+        kind = builtin_str(_or(lookup(transition, "transition_kind"), UNKNOWN_TUPLE_MISSING))
         _inc(by_kind, kind)
-        target = freeze_identity(transition.get("target_occurrence_id"))
+        target = freeze_identity(lookup(transition, "target_occurrence_id"))
         prior = initial_status.get(target, "(unmatched)")
         _inc(by_status_pair, f"{prior}->{kind}")
     return {
         "causal_transitions": {
-            "total": len(transitions),
+            "total": size(transitions),
             "by_transition_kind": by_kind,
             "by_status_pair": by_status_pair,
         },

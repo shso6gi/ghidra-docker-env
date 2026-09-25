@@ -6,10 +6,9 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
-from scripts.function_tracer_pcode.core.builtin_containers import builtin_mapping, builtin_sequence, builtin_set
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, attribute, elements_of, type_module, type_name
 from scripts.function_tracer_pcode.core.json_encoding import (
-    JsonBudget, as_list, each, identity_key_of, inline, is_json_record, materialize, metered, pairs_of, raw,
-    bounded_repr, source_converter, stringify_plain_key,
+    as_list, builtin_str, inline, is_json_record, materialize, raw,
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
@@ -41,9 +40,14 @@ class DeferredCallRef:
         )
 
     def display_name(self) -> str:
-        target_name = self.target_ref.display_name() if self.target_ref is not None else "unknown"
-        if self.pcode_op_ref is not None and self.pcode_op_ref.address_offset is not None:
-            return f"{target_name}@0x{int(self.pcode_op_ref.address_offset):x}"
+        # field は owner の API / 型を確かめた package の method で読む（live な値の code を呼ばない）
+        target = self.target_ref
+        target_name = _call_target_display_name(target) if target is not None else "unknown"
+        op = self.pcode_op_ref
+        if op is not None:
+            offset = op.address_offset if type(op) is PcodeOpRef else attribute(op, "address_offset")
+            if offset is not None:
+                return f"{builtin_str(target_name)}@0x{as_int(offset):x}"
         return target_name
 
     def json_items(self):
@@ -57,6 +61,22 @@ class DeferredCallRef:
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)
+
+
+def _call_target_display_name(target: Any) -> Any:
+    """`target.display_name()`（`__post_init__` が正規化した `CallTargetRef` だけ。それ以外は `TypeError`）。"""
+
+    if type(target) is CallTargetRef:
+        return target.display_name()
+    raise TypeError(f"{type_name(type(target))} is not a CallTargetRef")
+
+
+def _deferred_call_display_name(ref: Any) -> Any:
+    """`ref.display_name()`（`DeferredCallRef` だけ。それ以外は `TypeError`。live な値の method を呼ばない）。"""
+
+    if type(ref) is DeferredCallRef:
+        return ref.display_name()
+    raise TypeError(f"{type_name(type(ref))} is not a DeferredCallRef")
 
 
 def _runtime_ref_stable_key_or_repr(value: Any) -> Optional[Tuple[Any, ...]]:
@@ -74,15 +94,13 @@ def _runtime_ref_stable_key_or_repr(value: Any) -> Optional[Tuple[Any, ...]]:
 
 
 def _runtime_ref_origin_source(value: Any) -> Tuple[Any, ...]:
-    """出力の `origin_ref`（`_runtime_ref_stable_key_or_repr` の有界な版。`repr` は `bounded_repr`）。"""
+    """出力の `origin_ref`（record でない origin の型だけ。identity・`repr` を bounded path で作らない）。
 
-    try:
-        has_key, key = identity_key_of(value, names=("stable_key",))
-    except (AttributeError, TypeError, ValueError, RecursionError):
-        has_key, key = False, None
-    if has_key and key is not None:
-        return ("stable", key)
-    return ("repr", type(value).__module__, type(value).__qualname__, bounded_repr(value))
+    origin の identity（`stable_key` / `repr`）は `UnknownValueRef.stable_key` の側（#194）が持つ。
+    """
+
+    kind = type(value)
+    return ("ref", type_module(kind), type_name(kind))
 
 
 @dataclass(frozen=True)
@@ -100,9 +118,6 @@ class UnknownValueRef:
     def __post_init__(self) -> None:
         normalized_target = coerce_call_target_ref(self.target_ref)
         object.__setattr__(self, "target_ref", normalized_target)
-        deferred_call_ref = getattr(self, "deferred_call_ref", None)
-        if isinstance(deferred_call_ref, DeferredCallRef):
-            object.__setattr__(self, "deferred_call_ref", deferred_call_ref)
 
     @classmethod
     def deferred_call(
@@ -114,14 +129,17 @@ class UnknownValueRef:
         sequence: Optional[int] = None,
         deferred_key: Optional[Tuple[Any, ...]] = None,
     ) -> "UnknownValueRef":
-        normalized = coerce_call_target_ref(target_ref) or CallTargetRef.unknown()
+        # `coerce_call_target_ref` は `CallTargetRef`（真偽を上書きしない record）か `None` を返す
+        normalized = coerce_call_target_ref(target_ref)
+        if normalized is None:
+            normalized = CallTargetRef.unknown()
         normalized_ref = deferred_call_ref
         if normalized_ref is None:
             normalized_ref = DeferredCallRef(
                 target_ref=normalized,
                 sequence=sequence,
             )
-        display_hint = placeholder_name or normalized_ref.display_name()
+        display_hint = placeholder_name or _deferred_call_display_name(normalized_ref)
         return cls(
             kind="deferred_call",
             reason="call_out_of_scope",
@@ -222,13 +240,18 @@ class UnknownValueRef:
         return key + (("diagnostic_origin", _runtime_ref_stable_key_or_repr(self.origin_ref)),)
 
     def display_name(self) -> str:
-        if self.display_hint:
-            return self.display_hint
-        if self.deferred_call_ref is not None:
-            return self.deferred_call_ref.display_name()
-        if self.target_ref is not None:
-            return self.target_ref.display_name()
-        return self.reason or "unknown"
+        # field の真偽は owner の API、参照先の名前は型を確かめた package の method で読む
+        hint = self.display_hint
+        if as_bool(hint):
+            return hint
+        deferred = self.deferred_call_ref
+        if deferred is not None:
+            return _deferred_call_display_name(deferred)
+        target = self.target_ref
+        if target is not None:
+            return _call_target_display_name(target)
+        reason = self.reason
+        return reason if as_bool(reason) else "unknown"
 
     def json_items(self):
         yield "kind", self.kind
@@ -297,8 +320,8 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
     深さで打ち切る。
 
     Issue #22 PR-22-D: identity の構築（owner は #194）で、bounded path ではない。規則を
-    変えない（出力の準備は `_canonical_budget_source` が walk の作業量の中で同じ値を作り、
-    作業量の中で作れない値 — 組み込みでない容器・scalar でない key — は marker にする）。
+    変えない。`ExpansionBudgetTruncation` は構築のときにこの値を 1 度だけ作り、出力はその写し
+    （組み込みの値だけの値）を読むだけ（bounded path で identity を組み立てない）。
     """
 
     if value is None or isinstance(value, (bool, int, str)):
@@ -330,110 +353,6 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
         if key is not None:
             return ["stable", _canonical_budget_value(key, depth + 1)]
     return ["opaque", type(value).__module__, type(value).__qualname__]
-
-
-#: 切り捨て事実の identity が使う key（`_canonical_budget_value` と同じ: `stable_key` だけ）
-_BUDGET_IDENTITY_KEYS = ("stable_key",)
-
-
-def _canonical_budget_value_within(value: Any, depth: int = 0, *, work: Any) -> Any:
-    """`_canonical_budget_value` と同じ値を `work` の中で作る（出力の準備用。容器は幅を、文字列は長さを先に数える）。
-
-    辿るのは組み込みの振る舞いの容器だけで、mapping の key は scalar と scalar の tuple だけを
-    文字列にする（`stringify_plain_key`）。それ以外の key（`__str__` を持つ object）は
-    `TypeError`（producer を呼ばない。出力では JSON にならない値として marker になる）。
-    """
-
-    if value is None or isinstance(value, (bool, int)):
-        work.charge(1)
-        return value
-    if isinstance(value, str):
-        work.charge(1 + len(value))
-        return value
-    if depth >= _CANONICAL_BUDGET_MAX_DEPTH:
-        return ["depth_limited", type(value).__module__, type(value).__qualname__]
-    if isinstance(value, float):
-        return float.__repr__(value)
-    if isinstance(value, bytes):
-        work.charge(1 + 2 * len(value))
-        return ["bytes", value.hex()]
-    if builtin_sequence(value):
-        work.charge(1 + len(value))
-        return [_canonical_budget_value_within(item, depth + 1, work=work) for item in value]
-    if builtin_set(value):
-        work.charge(1 + len(value))
-        # 並びの key（要素の JSON）の長さは、要素を作るときに数えた量に比例する
-        return sorted(
-            (_canonical_budget_value_within(item, depth + 1, work=work) for item in value),
-            key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True),
-        )
-    mapping = builtin_mapping(value)
-    if mapping is not None:
-        return {
-            text: _canonical_budget_value_within(item, depth + 1, work=work)
-            for text, item in _stringified_items(mapping, work)
-        }
-    try:
-        has_key, key = identity_key_of(value, names=_BUDGET_IDENTITY_KEYS)
-    except (AttributeError, TypeError, ValueError, RecursionError):
-        has_key, key = False, None
-    if has_key and key is not None:
-        return ["stable", _canonical_budget_value_within(key, depth + 1, work=work)]
-    return ["opaque", type(value).__module__, type(value).__qualname__]
-
-
-def _stringified_items(mapping: Mapping[Any, Any], work: Any) -> List[Tuple[str, Any]]:
-    """mapping の (key の文字列, 値) を key の文字列で並べる（幅と key の長さを先に数える）。"""
-
-    work.charge(1 + len(mapping))
-    items: List[Tuple[str, Any]] = []
-    for key, item in mapping.items():
-        items.append((stringify_plain_key(key, work), item))
-    items.sort(key=lambda pair: pair[0])
-    return items
-
-
-def _canonical_budget_source(value: Any, depth: int = 0, *, work: Any) -> Any:
-    """`_canonical_budget_value` と同じ値を 1 要素ずつ作らせる source（出力の準備用）。
-
-    並べる前に幅を `work`（walk の作業量。`metered` が渡す）へ数える。集合だけは並びを
-    決めるために要素の canonical な値を先に求める（旧実装と同じ順序。作る量を `work` へ
-    数えながら）。辿る容器・key の規則は `_canonical_budget_value_within` と同じ。
-    """
-
-    if value is None or isinstance(value, (bool, int, str)):
-        return value
-    if depth >= _CANONICAL_BUDGET_MAX_DEPTH:
-        return each(("depth_limited", type(value).__module__, type(value).__qualname__))
-    if isinstance(value, float):
-        return float.__repr__(value)
-    if isinstance(value, bytes):
-        work.charge(1 + 2 * len(value))
-        return each(("bytes", value.hex()))
-    if builtin_sequence(value):
-        return each(value, source_converter(lambda item: _canonical_budget_source(item, depth + 1, work=work)))
-    if builtin_set(value):
-        work.charge(1 + len(value))
-        ordered = sorted(
-            value,
-            key=lambda item: json.dumps(
-                _canonical_budget_value_within(item, depth + 1, work=work), ensure_ascii=False, sort_keys=True,
-            ),
-        )
-        return each(ordered, source_converter(lambda item: _canonical_budget_source(item, depth + 1, work=work)))
-    mapping = builtin_mapping(value)
-    if mapping is not None:
-        return pairs_of(
-            (text, _canonical_budget_source(item, depth + 1, work=work))
-            for text, item in _stringified_items(mapping, work)
-        )
-    try:
-        has_key, key = identity_key_of(value, names=_BUDGET_IDENTITY_KEYS)
-    except (AttributeError, TypeError, ValueError, RecursionError):
-        has_key, key = False, None
-    if has_key and key is not None:
-        return each(("stable", _canonical_budget_source(key, depth + 1, work=work)))
-    return each(("opaque", type(value).__module__, type(value).__qualname__))
 
 
 def _canonical_budget_json(payload: Any) -> str:
@@ -481,6 +400,14 @@ class ExpansionBudgetTruncation:
             "referenced_event_ids",
             tuple(sorted({str(item) for item in (self.referenced_event_ids or ())})),
         )
+        # identity（owner #194 の規則 `_canonical_budget_value`）は構築のときに 1 度だけ作る。
+        # 出力（`json_items`）はこの写し（組み込みの値だけの値）を読むだけで、bounded path で
+        # identity を組み立てない（Issue #22 PR-22-D）
+        object.__setattr__(self, "_owner_scope_value", _canonical_budget_value(self.owner_scope_key))
+        object.__setattr__(self, "_callee_scope_value", _canonical_budget_value(self.callee_scope_key))
+        object.__setattr__(self, "_event_id_cache", hashlib.sha256(
+            _canonical_budget_json(self.stable_key()).encode("utf-8")
+        ).hexdigest())
 
     def stable_key(self) -> Tuple[Any, ...]:
         """発生事実キー。``event_id`` と参照先 event の内容は含めない。"""
@@ -489,25 +416,18 @@ class ExpansionBudgetTruncation:
             _EXPANSION_BUDGET_TRUNCATION_KEY_VERSION,
             self.kind,
             self.surface,
-            _canonical_budget_value(self.owner_scope_key),
+            self._owner_scope_value,
             self.label,
             _canonical_budget_value(self.pcode_op_ref),
             self.dedup,
             self.paths,
             self.conditions,
-            _canonical_budget_value(self.callee_scope_key),
+            self._callee_scope_value,
         )
 
     @property
     def event_id(self) -> str:
-        cached = getattr(self, "_event_id_cache", None)
-        if cached is not None:
-            return cached
-        digest = hashlib.sha256(
-            _canonical_budget_json(self.stable_key()).encode("utf-8")
-        ).hexdigest()
-        object.__setattr__(self, "_event_id_cache", digest)
-        return digest
+        return self._event_id_cache
 
     def with_binding(
         self,
@@ -535,35 +455,36 @@ class ExpansionBudgetTruncation:
         if self.surface is not None:
             yield "surface", self.surface
         if self.owner_scope_key is not None:
-            yield "owner_scope_key", metered(
-                lambda work: _canonical_budget_source(self.owner_scope_key, work=work),
-            )
+            # 構築のときの identity の写し（組み込みの値だけ。walker が要素ごとに数える）
+            yield "owner_scope_key", self._owner_scope_value
         if self.label is not None:
             yield "label", self.label
         if self.pcode_op_ref is not None:
             yield "pcode_op_ref", self.pcode_op_ref
-        if self.dedup is not None:
+        # 件数の欄は `__post_init__` が組み込みの tuple に正規化済み（型を確かめてから添字で読む）
+        dedup = self.dedup
+        if type(dedup) is tuple:
             yield "dedup", inline(
-                ("candidate_count", self.dedup[0]),
-                ("kept_count", self.dedup[1]),
-                ("limit", self.dedup[2]),
+                ("candidate_count", dedup[0]),
+                ("kept_count", dedup[1]),
+                ("limit", dedup[2]),
             )
-        if self.paths is not None:
+        paths = self.paths
+        if type(paths) is tuple:
             yield "paths", inline(
-                ("valid_path_count", self.paths[0]),
-                ("kept_path_count", self.paths[1]),
-                ("limit_paths", self.paths[2]),
+                ("valid_path_count", paths[0]),
+                ("kept_path_count", paths[1]),
+                ("limit_paths", paths[2]),
             )
-        if self.conditions is not None:
+        conditions = self.conditions
+        if type(conditions) is tuple:
             yield "conditions", inline(
-                ("dropped_path_count", self.conditions[0]),
-                ("max_conditions", self.conditions[1]),
+                ("dropped_path_count", conditions[0]),
+                ("max_conditions", conditions[1]),
             )
         if self.callee_scope_key is not None:
-            yield "callee_scope_key", metered(
-                lambda work: _canonical_budget_source(self.callee_scope_key, work=work),
-            )
-        if self.referenced_event_ids:
+            yield "callee_scope_key", self._callee_scope_value
+        if as_bool(self.referenced_event_ids):
             yield "referenced_event_ids", as_list(self.referenced_event_ids)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -603,7 +524,10 @@ def merge_expansion_budget_truncations(
 
     combined: List[ExpansionBudgetTruncation] = []
     for group in groups:
-        combined.extend(item for item in (group or ()) if item is not None)
+        if group is None:
+            continue
+        # 記録源は組み込みの列（owner の API で要素を読む。live な値の `__iter__` / `__bool__` を呼ばない）
+        combined.extend(item for item in elements_of(group) if item is not None)
     return normalize_expansion_budget_truncations(combined)
 
 

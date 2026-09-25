@@ -24,7 +24,7 @@ checker.result_assembly / authority … UNKNOWN / ERROR の判定・receipt・JS
 新しい failure class（`AnalysisFailureError` 派生）が増えても、この module も
 workflow / boundary も変更点は無い。`PairFailureKind` が 1 つ増えるとき — つまり
 「既存どちらの変換規則にも載らない failure handling policy」を足すとき — だけ、
-下の `_HANDLING_BY_KIND` が唯一の対応点になる。
+下の 3 つの振り分け（`_build_result_for` など）が唯一の対応点になる。
 
 `PairFailureKind` は **最終 outcome ではなく変換 policy の category** である点に
 注意。`LIMITATION` の結果が reason 付き UNKNOWN になるか
@@ -34,9 +34,10 @@ workflow / boundary も変更点は無い。`PairFailureKind` が 1 つ増える
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
+from scripts.function_tracer_pcode.core import live_values
+from scripts.function_tracer_pcode.core.json_encoding import value_token
 from scripts.function_tracer_pcode.core.errors import (
     PairFailureKind,
     PairPendingFailure,
@@ -86,29 +87,10 @@ def binary_display_name(program, fallback: str) -> str:
 PAIR_FAILURE_IDENTITY_ATTRIBUTE = "_pair_failure_identity"
 
 
-@dataclass(frozen=True)
-class _KindHandling:
-    """1 つの `PairFailureKind` について consumer が知るべきことのすべて。
-
-    `build_result` = 解析が無くても組める結果（G3 / G4-a / G5）。
-    `build_result_with_analyses` = 両側 analysis がある場所（`check()`）用の
-    richer な結果。**どちらも winner は台帳が決めたものを受け取る**（この
-    module が例外から winner を推測することはない）。
-    `replaces_unrelated_result` = 別の failure を表す結果を置き換えてよいか。
-
-    種別が増えたときに触るのはこの表の 1 行だけで、gate 側（workflow /
-    boundary / `check()`）にも分岐は増えない。
-    """
-
-    build_result: Callable[..., Any]
-    build_result_with_analyses: Callable[..., Any]
-    replaces_unrelated_result: Callable[[Any, PairPendingFailure], bool]
-
-
 def _build_limitation_result(checker, failure, **common):
     return analysis_limitation_result_for_pair(
         failure.exception,
-        session=getattr(checker, "_active_v2_dual_write_pilot_session", None),
+        session=live_values.attribute(checker, "_active_v2_dual_write_pilot_session"),
         **common,
     )
 
@@ -120,7 +102,7 @@ def _build_internal_bug_result(checker, failure, **common):
 def _build_limitation_result_with_analyses(checker, failure, **common):
     return analysis_limitation_result(
         failure.exception,
-        session=getattr(checker, "_active_v2_dual_write_pilot_session", None),
+        session=live_values.attribute(checker, "_active_v2_dual_write_pilot_session"),
         **common,
     )
 
@@ -135,9 +117,10 @@ def _limitation_replaces_unrelated_result(result, failure) -> bool:
     基盤側の ERROR（`function_lookup_miss` など）を意味的な UNKNOWN へ
     格下げしないため。UNKNOWN は置き換えて、限界を reason として出す。
     """
-    return result.is_equivalent is not None or not getattr(
-        result, "error_message", None
-    )
+    if live_values.attribute(result, "is_equivalent") is not None:
+        return True
+    message = live_values.attribute(result, "error_message")
+    return message is None or not live_values.as_bool(message)
 
 
 def _internal_bug_replaces_unrelated_result(result, failure) -> bool:
@@ -145,20 +128,35 @@ def _internal_bug_replaces_unrelated_result(result, failure) -> bool:
     return True
 
 
-#: 種別 → 扱い方。`PairFailureKind` に member を足したらここへ 1 行足す。
+#: 種別 → 扱い方。`PairFailureKind` に member を足したら、下の 3 つの振り分けへ 1 分岐ずつ足す
+#: （関数の表を値として持たない: 振り分けは名前で呼ぶ関数だけ。bounded path の監査が辿れる）。
 #: 足し忘れは `KeyError` で即座に落ちる（黙って別種別として扱わない）。
-_HANDLING_BY_KIND = {
-    PairFailureKind.LIMITATION: _KindHandling(
-        _build_limitation_result,
-        _build_limitation_result_with_analyses,
-        _limitation_replaces_unrelated_result,
-    ),
-    PairFailureKind.INTERNAL_BUG: _KindHandling(
-        _build_internal_bug_result,
-        _build_internal_bug_result_with_analyses,
-        _internal_bug_replaces_unrelated_result,
-    ),
-}
+
+
+def _build_result_for(kind: PairFailureKind, checker: Any, failure: PairPendingFailure, **common: Any) -> Any:
+    if kind is PairFailureKind.LIMITATION:
+        return _build_limitation_result(checker, failure, **common)
+    if kind is PairFailureKind.INTERNAL_BUG:
+        return _build_internal_bug_result(checker, failure, **common)
+    raise KeyError(kind)
+
+
+def _build_result_with_analyses_for(
+    kind: PairFailureKind, checker: Any, failure: PairPendingFailure, **common: Any,
+) -> Any:
+    if kind is PairFailureKind.LIMITATION:
+        return _build_limitation_result_with_analyses(checker, failure, **common)
+    if kind is PairFailureKind.INTERNAL_BUG:
+        return _build_internal_bug_result_with_analyses(checker, failure, **common)
+    raise KeyError(kind)
+
+
+def _replaces_unrelated_result_for(kind: PairFailureKind, result: Any, failure: PairPendingFailure) -> bool:
+    if kind is PairFailureKind.LIMITATION:
+        return _limitation_replaces_unrelated_result(result, failure)
+    if kind is PairFailureKind.INTERNAL_BUG:
+        return _internal_bug_replaces_unrelated_result(result, failure)
+    raise KeyError(kind)
 
 
 def _stamp_pair_failure_identity(result, failure: PairPendingFailure):
@@ -167,7 +165,7 @@ def _stamp_pair_failure_identity(result, failure: PairPendingFailure):
     結果を組む場所はこの module 1 つなので、焼き込みもここ 1 箇所で済む。
     """
     if result is not None:
-        setattr(result, PAIR_FAILURE_IDENTITY_ATTRIBUTE, failure.identity)
+        live_values.set_state(result, PAIR_FAILURE_IDENTITY_ATTRIBUTE, failure.identity)
     return result
 
 
@@ -187,7 +185,8 @@ def pair_failure_result(
     `result` を渡した場合は、その結果の **診断だけ** を引き継いで判定面は作り直す。
     """
     return _stamp_pair_failure_identity(
-        _HANDLING_BY_KIND[failure.kind].build_result(
+        _build_result_for(
+            failure.kind,
             checker,
             failure,
             stop_state=failure.stop_state,
@@ -230,7 +229,8 @@ def pair_failure_result_from_check(
     if failure is None:
         return None
     return _stamp_pair_failure_identity(
-        _HANDLING_BY_KIND[failure.kind].build_result_with_analyses(
+        _build_result_with_analyses_for(
+            failure.kind,
             checker,
             failure,
             analysis1=analysis1,
@@ -282,7 +282,7 @@ def apply_pair_failure_gate(
 
     判定は 2 段。(1) 結果が **winner そのもの** を表していれば作り直さない
     （failure 識別子の完全一致。同種の別 failure とは区別する）。(2) そうで
-    なければ、種別ごとの置き換え規則（`_HANDLING_BY_KIND`）に従う。どの分岐でも
+    なければ、種別ごとの置き換え規則（`_replaces_unrelated_result_for`）に従う。どの分岐でも
     stop state は結果へ写す（診断）。
 
     台帳が無い（pair scope の外で呼ばれた）ときは何もしない。
@@ -298,13 +298,18 @@ def apply_pair_failure_gate(
     return pair_failure_result(
         checker,
         failure,
-        function_name1=(getattr(result, "function1_name", None) or function_name1),
-        function_name2=(getattr(result, "function2_name", None) or function_name2),
-        binary1_name=result.binary1_name,
-        binary2_name=result.binary2_name,
+        function_name1=_name_or(live_values.attribute(result, "function1_name"), function_name1),
+        function_name2=_name_or(live_values.attribute(result, "function2_name"), function_name2),
+        binary1_name=live_values.attribute(result, "binary1_name"),
+        binary2_name=live_values.attribute(result, "binary2_name"),
         start_time=start_time,
         result=result,
     )
+
+
+def _name_or(name, fallback):
+    """結果の名前（空なら `fallback`。旧 `name or fallback`）。"""
+    return name if name is not None and live_values.as_bool(name) else fallback
 
 
 def _failure_already_in_result(result, failure: PairPendingFailure) -> bool:
@@ -315,11 +320,11 @@ def _failure_already_in_result(result, failure: PairPendingFailure) -> bool:
     誤認してしまう。識別子が違えば、その結果は winner を表していないので、
     種別ごとの置き換え規則（`replaces_unrelated_result`）へ進む。
     """
-    if getattr(result, PAIR_FAILURE_IDENTITY_ATTRIBUTE, None) == failure.identity:
+    # 焼き込んだ識別子は値の印で比べる（結果の object の `__eq__` を呼ばない）
+    stamped = live_values.attribute(result, PAIR_FAILURE_IDENTITY_ATTRIBUTE)
+    if stamped is not None and value_token(stamped) == value_token(failure.identity):
         return True
-    return not _HANDLING_BY_KIND[failure.kind].replaces_unrelated_result(
-        result, failure
-    )
+    return not _replaces_unrelated_result_for(failure.kind, result, failure)
 
 
 __all__ = [

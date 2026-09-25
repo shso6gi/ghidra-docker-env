@@ -342,7 +342,7 @@ class PairFailureKind(Enum):
     最終 outcome そのものではない。`LIMITATION` は attribution の結果しだいで
     reason 付き UNKNOWN にも `limitation_unattributed` の ERROR にもなる —
     どちらにするかを決めるのは従来どおり authority 側で、この enum が決めるのは
-    「どの変換規則（`_HANDLING_BY_KIND` の 1 行）へ渡すか」だけ。
+    「どの変換規則（`checker/pair_execution.py` の振り分けの 1 分岐）へ渡すか」だけ。
 
     失敗の *クラス* が増えても（`FrozenExpressionError` / `ExpressionCycleError` /
     新しい `AnalysisLimitation` 派生）この enum は増えない。増えるとしたら

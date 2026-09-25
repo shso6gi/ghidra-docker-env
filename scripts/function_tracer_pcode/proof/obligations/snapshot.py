@@ -2,21 +2,38 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, is_dataclass
-from enum import Enum
+from dataclasses import dataclass, field
 import hashlib
-import json
 from types import MappingProxyType
 from typing import Any, Mapping, Tuple
 
+from scripts.function_tracer_pcode.core import json_encoding
 from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
-from scripts.function_tracer_pcode.core.builtin_containers import plain_field_value
 from scripts.function_tracer_pcode.core.json_encoding import (
     LEGACY,
     RESULT_JSON_POLICY,
+    builtin_view,
     cached_string_bytes,
     identity_key_of,
     is_json_record,
+    materialize,
+)
+from scripts.function_tracer_pcode.core.live_values import (
+    NOT_PLAIN,
+    as_repr,
+    builtin_mapping,
+    builtin_sequence,
+    builtin_set,
+    dataclass_field_names,
+    elements_of,
+    enum_value,
+    field_value,
+    is_enum,
+    items_of,
+    json_scalar,
+    plain_scalar,
+    size,
+    type_name,
 )
 from scripts.function_tracer_pcode.proof.obligations.model import SemanticFactProvenance
 
@@ -128,8 +145,126 @@ def _classify_analysis_notes(notes: Any) -> Tuple[Tuple[str, ...], Tuple[str, ..
     return tuple(semantic), tuple(diagnostic)
 
 
+#: fingerprint の JSON の書き方（key 順・区切り `,` `:`・ASCII だけ）。凍結した値の書き出しと
+#: mapping の key の並びの両方に使う
+_FINGERPRINT_JSON = json_encoding.JsonEncodingPolicy(ensure_ascii=True, item_separator=",", key_separator=":")
+
+
+def _fingerprint_json(value: Any) -> str:
+    """凍結した値の fingerprint の JSON（`json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=True)`）。"""
+
+    return json_encoding.JsonEncodingPolicy.dumps(_FINGERPRINT_JSON, value)
+
+
+def _enum_payload(value: Any) -> Any:
+    """enum の member の値（instance の `_value_`。`value` の property を呼ばない）の写し。
+
+    scalar は基底型の値、それ以外は組み込みの値だけで書き直した写し（`builtin_view`）。書き直せない
+    値（live な object を含む値）は object-derived な identity を持たないので `TypeError`。
+    """
+
+    raw = enum_value(value)
+    scalar = plain_scalar(raw)
+    if scalar is not NOT_PLAIN:
+        return scalar
+    ok, view = builtin_view(raw)
+    if not ok:
+        raise TypeError(f"enum {type_name(type(value))} has no object-derived stable value")
+    return view
+
+
+def _mixin_enum(value: Any) -> bool:
+    """`int` / `str` / `float` を mixin した enum か（JSON では基底型の値で書く。写しは member のまま）。"""
+
+    return is_enum(value) and json_scalar(value) is not NOT_PLAIN
+
+
+class _Text:
+    """`_frozen_repr` が流す固定の文字列（区切り・括弧）。"""
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def _frozen_repr(value: Any) -> str:
+    """凍結した値の `repr`（set の要素の並びの key）を、組み込みの `repr` の規則だけで作る。
+
+    凍結した値は基底型の scalar・mixin の enum の member・tuple と、enum の値の写し（list / dict）
+    だけから成る。葉は `live_values.as_repr`（scalar の subclass は基底型の `repr`、組み込みのままの
+    enum は `Enum.__repr__`）。それ以外は `TypeError`。
+    """
+
+    if type(value) in (str, int):
+        return repr(value)
+    pieces = []
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        kind = type(item)
+        if kind is _Text:
+            pieces.append(item.text)
+        elif kind is tuple:
+            count = size(item)
+            pieces.append("(")
+            pending.append(_Text(",)" if count == 1 else ")"))
+            for index in range(count - 1, -1, -1):
+                pending.append(item[index])
+                if index:
+                    pending.append(_Text(", "))
+        elif kind is list:
+            count = size(item)
+            pieces.append("[")
+            pending.append(_Text("]"))
+            for index in range(count - 1, -1, -1):
+                pending.append(item[index])
+                if index:
+                    pending.append(_Text(", "))
+        elif kind is dict:
+            keys = []
+            children = []
+            for key, child in items_of(item):
+                keys.append(key)
+                children.append(child)
+            pieces.append("{")
+            pending.append(_Text("}"))
+            for index in range(len(keys) - 1, -1, -1):
+                pending.append(children[index])
+                pending.append(_Text(": "))
+                pending.append(keys[index])
+                if index:
+                    pending.append(_Text(", "))
+        else:
+            pieces.append(as_repr(item))
+    return "".join(pieces)
+
+
+def _set_members(frozen: Any) -> Tuple[Any, ...]:
+    """凍結した set の要素を、要素の `repr` の順（同じ `repr` は元の順）に並べる。"""
+
+    count = size(frozen)
+    keyed = []
+    for index in range(count):
+        keyed.append((_frozen_repr(frozen[index]), index))
+    keyed.sort()
+    return tuple(frozen[index] for _text, index in keyed)
+
+
+def _tagged(name: str, frozen: Any, meter: Any) -> Tuple[str, Any]:
+    if meter is not None:
+        meter.frame(2)
+        meter.scalar(name)
+    return (name, frozen)
+
+
 class SnapshotFingerprintCodec:
-    """Canonicalizes semantic DTO data without stringifying opaque objects."""
+    """Canonicalizes semantic DTO data without stringifying opaque objects.
+
+    live な値は `core.live_values` の規則だけで読む（Issue #22 PR-22-D）: scalar の subclass は基底型の
+    slot の値、enum の値は instance の `_value_`、容器は組み込みの振る舞いのもの（上書きした
+    `items` / `__iter__` / `__len__` を持つ容器は辿らない）、型は `type(value)`（`__class__` を読まない）。
+    """
 
     @classmethod
     def freeze(cls, value: Any, *, budget: Any = None) -> Any:
@@ -152,92 +287,112 @@ class SnapshotFingerprintCodec:
         （`test_the_unmetered_freeze_equals_the_metered_copy` が同じ値であることを固定）。
         """
 
-        if value is None or isinstance(value, (bool, int, float, str)):
+        if value is None:
+            return None
+        kind = type(value)
+        if kind is str or kind is int or kind is bool or kind is float:
             return value
-        if isinstance(value, Enum):
-            return (value.__class__.__qualname__, value.value)
-        if isinstance(value, bytes):
-            return ("bytes", value.hex())
         freeze = cls._freeze_unmetered
-        if isinstance(value, Mapping):
+        # 速い経路: 組み込みの型そのものの容器（組み込みの振る舞いと分かっている）
+        if type(value) in (tuple, list):
+            return tuple(freeze(v) for v in value)
+        if type(value) is dict:
             return cls.sorted_mapping_items(
                 tuple((freeze(key), freeze(item)) for key, item in value.items())
             )
-        if isinstance(value, (tuple, list)):
-            return tuple(freeze(v) for v in value)
-        if isinstance(value, (set, frozenset)):
-            return tuple(sorted((freeze(v) for v in value), key=repr))
-        name = value.__class__.__qualname__
+        scalar = plain_scalar(value)
+        if scalar is not NOT_PLAIN:
+            return scalar
+        if is_enum(value):
+            if _mixin_enum(value):
+                return value
+            return (type_name(kind), _enum_payload(value))
+        if kind is bytes:
+            return ("bytes", value.hex())
+        mapping = builtin_mapping(value)
+        if mapping is not None:
+            return cls.sorted_mapping_items(
+                tuple((freeze(key), freeze(item)) for key, item in items_of(mapping))
+            )
+        if builtin_sequence(value):
+            return tuple(freeze(v) for v in elements_of(value))
+        if builtin_set(value):
+            return _set_members(tuple(freeze(v) for v in elements_of(value)))
+        name = type_name(kind)
         has_key, identity_key = identity_key_of(value)
         if has_key:
             return (name, freeze(identity_key))
         if is_json_record(value):
-            return (name, freeze(value.to_dict()))
-        if is_dataclass(value):
-            return (name, tuple((f.name, freeze(plain_field_value(value, f.name))) for f in fields(value)))
-        raise TypeError(
-            f"opaque object {value.__class__.__qualname__} has no object-derived stable identity"
-        )
+            # record の LEGACY 表現（`to_dict()` と同じ walker。解析 1 件分の作業量の中ならそこへ数える）
+            return (name, freeze(materialize(value)))
+        names = dataclass_field_names(value)
+        if names is not None:
+            return (name, tuple((field_name, freeze(field_value(value, field_name))) for field_name in names))
+        raise TypeError(f"opaque object {name} has no object-derived stable identity")
 
     @classmethod
     def _freeze(cls, value: Any, meter: Any) -> Any:
         if meter is None:
             return cls._freeze_unmetered(value)
-        if value is None or isinstance(value, (bool, int, float, str)):
-            if meter is not None:
-                meter.scalar(value)
-            return value
-        if isinstance(value, Enum):
-            if meter is not None:
-                meter.frame(2)
-                meter.scalar(value.__class__.__qualname__)
-                meter.scalar(value.value)
-            return (value.__class__.__qualname__, value.value)
-        if isinstance(value, bytes):
-            if meter is not None:
-                meter.frame(2)
-                meter.scalar("bytes")
-                meter.scalar_bytes(2 * len(value) + 2)
+        scalar = plain_scalar(value)
+        if scalar is not NOT_PLAIN:
+            meter.scalar(scalar)
+            return scalar
+        kind = type(value)
+        if is_enum(value):
+            base = json_scalar(value)
+            if base is not NOT_PLAIN:
+                # mixin の enum（写しは member のまま。JSON では基底型の値）
+                meter.scalar(base)
+                return value
+            name = type_name(kind)
+            payload = _enum_payload(value)
+            meter.frame(2)
+            meter.scalar(name)
+            meter.scalar(payload)
+            return (name, payload)
+        if kind is bytes:
+            meter.frame(2)
+            meter.scalar("bytes")
+            meter.scalar_bytes(2 * len(value) + 2)
             return ("bytes", value.hex())
-        if isinstance(value, Mapping):
-            if meter is not None:
-                meter.frame(len(value))
-            items = tuple(
-                cls._pair(cls._freeze(key, meter), cls._freeze(item, meter), meter, key_counted=True)
-                for key, item in value.items()
-            )
-            return cls.sorted_mapping_items(items)
-        if isinstance(value, (tuple, list)):
-            if meter is not None:
-                meter.frame(len(value))
-            return tuple(cls._freeze(v, meter) for v in value)
-        if isinstance(value, (set, frozenset)):
-            if meter is not None:
-                meter.frame(len(value))
-            return tuple(sorted((cls._freeze(v, meter) for v in value), key=repr))
+        mapping = builtin_mapping(value)
+        if mapping is not None:
+            meter.frame(size(mapping))
+            items = []
+            for key, item in items_of(mapping):
+                frozen_key = cls._freeze(key, meter)
+                frozen_item = cls._freeze(item, meter)
+                meter.frame(2)
+                items.append((frozen_key, frozen_item))
+            return cls.sorted_mapping_items(tuple(items))
+        if builtin_sequence(value):
+            meter.frame(size(value))
+            return tuple(cls._freeze(v, meter) for v in elements_of(value))
+        if builtin_set(value):
+            meter.frame(size(value))
+            return _set_members(tuple(cls._freeze(v, meter) for v in elements_of(value)))
+        name = type_name(kind)
         has_key, identity_key = identity_key_of(value)
         if has_key:
-            return cls._tagged(value, cls._freeze_key(identity_key, meter), meter)
+            return _tagged(name, cls._freeze_key(identity_key, meter), meter)
         if is_json_record(value):
             # walker が `budget` で数えながら作る。写しは数え済みの値から作る（json record でない
             # object の `to_dict()` は任意の producer なので呼ばない: object-derived な identity の
             # 無い値として拒む）
-            built = RESULT_JSON_POLICY.materialize(value, budget=meter.budget)
-            return cls._tagged(value, cls._freeze(built, None), meter)
-        if is_dataclass(value):
-            if meter is not None:
-                meter.frame(len(fields(value)))
-            return cls._tagged(
-                value,
-                tuple(
-                    cls._pair(f.name, cls._freeze(plain_field_value(value, f.name), meter), meter)
-                    for f in fields(value)
-                ),
-                meter,
-            )
-        raise TypeError(
-            f"opaque object {value.__class__.__qualname__} has no object-derived stable identity"
-        )
+            built = json_encoding.RESULT_JSON_POLICY.materialize(value, budget=meter.budget)
+            return _tagged(name, cls._freeze(built, None), meter)
+        names = dataclass_field_names(value)
+        if names is not None:
+            meter.frame(len(names))
+            fields_frozen = []
+            for field_name in names:
+                frozen_field = cls._freeze(field_value(value, field_name), meter)
+                meter.frame(2)
+                meter.scalar(field_name)
+                fields_frozen.append((field_name, frozen_field))
+            return _tagged(name, tuple(fields_frozen), meter)
+        raise TypeError(f"opaque object {name} has no object-derived stable identity")
 
     @classmethod
     def _freeze_key(cls, key: Any, meter: Any) -> Any:
@@ -252,39 +407,30 @@ class SnapshotFingerprintCodec:
         meter.count_value(key)
         return cls._freeze(key, None)
 
-    @staticmethod
-    def _pair(key: Any, item: Any, meter: Any, *, key_counted: bool = False) -> Tuple[Any, Any]:
-        if meter is not None:
-            meter.frame(2)
-            if not key_counted:
-                meter.scalar(key)
-        return (key, item)
-
-    @staticmethod
-    def _tagged(value: Any, frozen: Any, meter: Any) -> Tuple[str, Any]:
-        name = value.__class__.__qualname__
-        if meter is not None:
-            meter.frame(2)
-            meter.scalar(name)
-        return (name, frozen)
-
     @classmethod
     def sorted_mapping_items(cls, items: Tuple[Tuple[Any, Any], ...]) -> Tuple[Tuple[Any, Any], ...]:
-        """凍結した (key, 値) の組を、mapping の canonical な並びにする。"""
+        """凍結した (key, 値) の組を、mapping の canonical な並び（key の JSON の順）にする。
 
-        canonical_keys = tuple(key for key, _item in items)
-        if len(set(canonical_keys)) != len(canonical_keys):
-            raise ValueError("mapping contains duplicate canonical semantic keys")
-        return tuple(sorted(items, key=lambda pair: cls._sort_key(pair[0])))
+        key の JSON が同じ組（canonical な key の重複）は `ValueError`。
+        """
+
+        keyed = []
+        for key, _item in items:
+            keyed.append((_fingerprint_json(key), size(keyed)))
+        keyed.sort()
+        for index in range(1, size(keyed)):
+            if keyed[index - 1][0] == keyed[index][0]:
+                raise ValueError("mapping contains duplicate canonical semantic keys")
+        return tuple(items[index] for _text, index in keyed)
 
     @staticmethod
     def _sort_key(value: Any) -> str:
-        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return _fingerprint_json(value)
 
     @classmethod
     def digest(cls, value: Any) -> str:
         frozen = cls.freeze(value)
-        payload = json.dumps(frozen, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        payload = _fingerprint_json(frozen)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -302,24 +448,25 @@ class _FreezeMeter:
 
     def scalar(self, value: Any) -> None:
         policy = self._policy
-        if type(value) is str:
-            size = cached_string_bytes(policy, value, max_bytes=self.budget.remaining())
-        elif value is None or value is True:
-            size = 4
-        elif value is False:
-            size = 5
-        elif isinstance(value, str):
-            size = policy.string_bytes(value, max_bytes=self.budget.remaining())
-        elif isinstance(value, int):
-            size = len(int.__repr__(int(value)))
-        elif isinstance(value, float):
-            size = len(float.__repr__(float(value)))
+        # 基底型の値（scalar の subclass・mixin の enum は基底型の slot）で数える
+        base = json_scalar(value)
+        kind = type(base)
+        if kind is str:
+            size_bytes = cached_string_bytes(policy, base, max_bytes=self.budget.remaining())
+        elif base is None or base is True:
+            size_bytes = 4
+        elif base is False:
+            size_bytes = 5
+        elif kind is int:
+            size_bytes = len(int.__repr__(base))
+        elif kind is float:
+            size_bytes = len(float.__repr__(base))
         else:
-            size = policy.string_bytes(type(value).__qualname__)
-        self.budget.charge(size)
+            size_bytes = policy.string_bytes(type_name(type(value)))
+        self.budget.charge(size_bytes)
 
-    def scalar_bytes(self, size: int) -> None:
-        self.budget.charge(size)
+    def scalar_bytes(self, size_bytes: int) -> None:
+        self.budget.charge(size_bytes)
 
     def count_value(self, value: Any) -> None:
         """既に在る値（identity key）の JSON byte を、写す前に数えて足す。"""

@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core.json_encoding import as_list, each, inline, materialize, source_converter
+from scripts.function_tracer_pcode.core.live_values import (
+    NOT_PLAIN, as_bool, as_int, attribute, plain_scalar, str_value, type_name,
+)
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     CanonicalLocation,
@@ -34,6 +37,25 @@ _UNKNOWN_EFFECT_ORDER_KEY = -1
 class EffectOrderUnavailable(RuntimeError):
     """Raised when a real P-code op cannot provide a conservative order key."""
 
+
+def _plain_text(value: Any) -> Any:
+    """文字列の field の基底型の値（文字列でなければ `NOT_PLAIN`。live な値の `==` / `hash` を呼ばない）。"""
+
+    if type(value) is str:
+        return value
+    return str_value(value)
+
+
+def _is_zero(value: Any) -> bool:
+    """`value == 0` と同じ値（scalar だけ。基底型の値で比べる。それ以外は `TypeError`）。"""
+
+    if type(value) is int:
+        return value == 0
+    base = plain_scalar(value)
+    if base is NOT_PLAIN:
+        raise TypeError(f"{type_name(type(value))} is not compared with 0 without its own code")
+    return base == 0
+
 @dataclass(frozen=True)
 class StoreEffectProvenance:
     """Object-derived producer identity for one summarized STORE effect."""
@@ -46,15 +68,31 @@ class StoreEffectProvenance:
     nested_effect_provenance: Optional["StoreEffectProvenance"] = None
 
     def is_complete(self) -> bool:
-        if self.source_kind not in {"local_store", "call_derived"}:
+        # field は owner の API / 型を確かめた package の method で読む（live な値の code を呼ばない）。
+        # 型の分からない参照先は完全と言わない（fail closed）
+        source_kind = _plain_text(self.source_kind)
+        if source_kind not in {"local_store", "call_derived"}:
             return False
-        if self.producer_pcode_op_ref is None:
+        op = self.producer_pcode_op_ref
+        if op is None:
             return False
         if self.producer_block_ref is None:
             return False
-        if any(
-            getattr(self.producer_pcode_op_ref, attribute, None) is None
-            for attribute in (
+        if type(op) is PcodeOpRef:
+            if (
+                op.binary_id is None
+                or op.function_entry_space is None
+                or op.function_entry_offset is None
+                or op.target_space is None
+                or op.target_offset is None
+                or op.seq_time is None
+                or op.seq_order is None
+                or op.opcode is None
+            ):
+                return False
+        elif any(
+            attribute(op, name) is None
+            for name in (
                 "binary_id",
                 "function_entry_space",
                 "function_entry_offset",
@@ -66,15 +104,19 @@ class StoreEffectProvenance:
             )
         ):
             return False
-        if self.source_kind == "call_derived":
-            return (
-                self.call_target_ref is not None
-                and not self.call_target_ref.is_unknown()
-                and self.callee_effect_index is not None
-                and int(self.callee_effect_index) >= 0
-                and self.nested_effect_provenance is not None
-                and self.nested_effect_provenance.is_complete()
-            )
+        if source_kind == "call_derived":
+            target = self.call_target_ref
+            if type(target) is not CallTargetRef:
+                return False
+            if target.is_unknown():
+                return False
+            index = self.callee_effect_index
+            if index is None or as_int(index) < 0:
+                return False
+            nested = self.nested_effect_provenance
+            if type(nested) is not StoreEffectProvenance:
+                return False
+            return nested.is_complete()
         return (
             self.call_target_ref is None
             and self.callee_effect_index is None
@@ -187,10 +229,11 @@ class UnsupportedCallEffectRef:
         yield "pcode_op_ref", self.pcode_op_ref
         yield "target_ref", self.target_ref
         yield "target_expr", self.target_expr
-        yield "arguments", each(self.arguments or ())
-        yield "path_conditions", each(self.path_conditions or ())
+        # 空の列と `None` は同じ空の配列（`x or ()` と同じ出力。live な値の `__bool__` を呼ばない）
+        yield "arguments", each(self.arguments if self.arguments is not None else ())
+        yield "path_conditions", each(self.path_conditions if self.path_conditions is not None else ())
         yield "reason", self.reason
-        yield "order_key", int(self.order_key)
+        yield "order_key", as_int(self.order_key)
 
     def to_dict(self) -> Dict[str, object]:
         return materialize(self)
@@ -249,7 +292,7 @@ class CallTargetResolutionEvidence:
         yield "resolution_kind", self.resolution_kind
         yield "path_condition_keys", self.path_condition_keys
         yield "target_condition_keys", self.target_condition_keys
-        yield "order_key", int(self.order_key)
+        yield "order_key", as_int(self.order_key)
 
     def to_dict(self) -> Dict[str, object]:
         return materialize(self)
@@ -337,13 +380,13 @@ class CallSiteEffectSummaryEvidence:
         yield "argument_keys", self.argument_keys
         yield "path_condition_keys", self.path_condition_keys
         yield "summary_status", self.summary_status
-        yield "memory_effect_count", int(self.memory_effect_count)
-        yield "has_unsupported_nested_call", bool(self.has_unsupported_nested_call)
+        yield "memory_effect_count", as_int(self.memory_effect_count)
+        yield "has_unsupported_nested_call", as_bool(self.has_unsupported_nested_call)
         yield "incomplete_reasons", self.incomplete_reasons
         yield "callee_control_profile_key", self.callee_control_profile_key
-        yield "callee_ordered_scalar_store_candidate", bool(self.callee_ordered_scalar_store_candidate)
+        yield "callee_ordered_scalar_store_candidate", as_bool(self.callee_ordered_scalar_store_candidate)
         yield "callee_cfg_edge_keys", self.callee_cfg_edge_keys
-        yield "callee_recursive_scc_proven", bool(self.callee_recursive_scc_proven)
+        yield "callee_recursive_scc_proven", as_bool(self.callee_recursive_scc_proven)
         yield "callee_recursive_scc_identity", self.callee_recursive_scc_identity
         yield "callee_recursive_scc_member_keys", self.callee_recursive_scc_member_keys
         yield "return_summary_status", self.return_summary_status
@@ -403,43 +446,44 @@ class FunctionControlEffectProfile:
 
     @property
     def phase2_memory_free_scalar_candidate(self) -> bool:
+        # field の真偽・件数は owner の API で読む（常に bool を返す。消費側は真偽だけを使う）
         return (
-            self.pcode_enumeration_complete
-            and self.cfg_edges_complete
-            and self.cfg_acyclic
-            and self.terminal_return_coverage_complete
-            and self.load_count == 0
-            and self.store_count == 0
-            and self.call_count == 0
-            and self.callind_count == 0
-            and self.callother_count == 0
-            and self.branchind_count == 0
-            and self.float_op_count == 0
-            and self.pcode_after_return_count == 0
-            and self.abnormal_terminal_block_count == 0
-            and self.call_like_identity_complete
-            and not self.phase2_unsafe_mnemonics
-            and not self.unsupported_mnemonics
+            as_bool(self.pcode_enumeration_complete)
+            and as_bool(self.cfg_edges_complete)
+            and as_bool(self.cfg_acyclic)
+            and as_bool(self.terminal_return_coverage_complete)
+            and _is_zero(self.load_count)
+            and _is_zero(self.store_count)
+            and _is_zero(self.call_count)
+            and _is_zero(self.callind_count)
+            and _is_zero(self.callother_count)
+            and _is_zero(self.branchind_count)
+            and _is_zero(self.float_op_count)
+            and _is_zero(self.pcode_after_return_count)
+            and _is_zero(self.abnormal_terminal_block_count)
+            and as_bool(self.call_like_identity_complete)
+            and not as_bool(self.phase2_unsafe_mnemonics)
+            and not as_bool(self.unsupported_mnemonics)
         )
 
     @property
     def phase3_ordered_scalar_store_candidate(self) -> bool:
         return (
-            self.pcode_enumeration_complete
-            and self.cfg_edges_complete
-            and self.cfg_acyclic
-            and self.terminal_return_coverage_complete
-            and self.load_count == 0
-            and self.call_count == 0
-            and self.callind_count == 0
-            and self.callother_count == 0
-            and self.branchind_count == 0
-            and self.float_op_count == 0
-            and self.pcode_after_return_count == 0
-            and self.abnormal_terminal_block_count == 0
-            and self.call_like_identity_complete
-            and not self.phase2_unsafe_mnemonics
-            and not self.unsupported_mnemonics
+            as_bool(self.pcode_enumeration_complete)
+            and as_bool(self.cfg_edges_complete)
+            and as_bool(self.cfg_acyclic)
+            and as_bool(self.terminal_return_coverage_complete)
+            and _is_zero(self.load_count)
+            and _is_zero(self.call_count)
+            and _is_zero(self.callind_count)
+            and _is_zero(self.callother_count)
+            and _is_zero(self.branchind_count)
+            and _is_zero(self.float_op_count)
+            and _is_zero(self.pcode_after_return_count)
+            and _is_zero(self.abnormal_terminal_block_count)
+            and as_bool(self.call_like_identity_complete)
+            and not as_bool(self.phase2_unsafe_mnemonics)
+            and not as_bool(self.unsupported_mnemonics)
         )
 
     def stable_key(self) -> Tuple[object, ...]:
@@ -486,28 +530,28 @@ class FunctionControlEffectProfile:
         )
 
     def json_items(self):
-        yield "block_count", int(self.block_count)
-        yield "pcode_op_count", int(self.pcode_op_count)
-        yield "return_block_count", int(self.return_block_count)
-        yield "pcode_enumeration_complete", bool(self.pcode_enumeration_complete)
-        yield "cfg_edges_complete", bool(self.cfg_edges_complete)
-        yield "cfg_acyclic", bool(self.cfg_acyclic)
-        yield "terminal_return_coverage_complete", bool(self.terminal_return_coverage_complete)
-        yield "load_count", int(self.load_count)
-        yield "store_count", int(self.store_count)
-        yield "call_count", int(self.call_count)
-        yield "callind_count", int(self.callind_count)
-        yield "callother_count", int(self.callother_count)
-        yield "branchind_count", int(self.branchind_count)
-        yield "float_op_count", int(self.float_op_count)
-        yield "pcode_after_return_count", int(self.pcode_after_return_count)
-        yield "abnormal_terminal_block_count", int(self.abnormal_terminal_block_count)
+        yield "block_count", as_int(self.block_count)
+        yield "pcode_op_count", as_int(self.pcode_op_count)
+        yield "return_block_count", as_int(self.return_block_count)
+        yield "pcode_enumeration_complete", as_bool(self.pcode_enumeration_complete)
+        yield "cfg_edges_complete", as_bool(self.cfg_edges_complete)
+        yield "cfg_acyclic", as_bool(self.cfg_acyclic)
+        yield "terminal_return_coverage_complete", as_bool(self.terminal_return_coverage_complete)
+        yield "load_count", as_int(self.load_count)
+        yield "store_count", as_int(self.store_count)
+        yield "call_count", as_int(self.call_count)
+        yield "callind_count", as_int(self.callind_count)
+        yield "callother_count", as_int(self.callother_count)
+        yield "branchind_count", as_int(self.branchind_count)
+        yield "float_op_count", as_int(self.float_op_count)
+        yield "pcode_after_return_count", as_int(self.pcode_after_return_count)
+        yield "abnormal_terminal_block_count", as_int(self.abnormal_terminal_block_count)
         yield "call_like_pcode_op_keys", self.call_like_pcode_op_keys
-        yield "call_like_identity_complete", bool(self.call_like_identity_complete)
+        yield "call_like_identity_complete", as_bool(self.call_like_identity_complete)
         yield "function_identity_key", self.function_identity_key
         yield "direct_call_target_keys", self.direct_call_target_keys
-        yield "call_graph_edges_complete", bool(self.call_graph_edges_complete)
-        yield "recursive_scc_proven", bool(self.recursive_scc_proven)
+        yield "call_graph_edges_complete", as_bool(self.call_graph_edges_complete)
+        yield "recursive_scc_proven", as_bool(self.recursive_scc_proven)
         yield "recursive_scc_identity", self.recursive_scc_identity
         yield "recursive_scc_member_keys", self.recursive_scc_member_keys
         yield "phase2_unsafe_mnemonics", as_list(self.phase2_unsafe_mnemonics)
@@ -518,26 +562,31 @@ class FunctionControlEffectProfile:
         yield "region_pcode_op_keys", self.region_pcode_op_keys
         yield "region_live_in_keys", self.region_live_in_keys
         yield "region_live_out_keys", self.region_live_out_keys
-        yield "region_identity_complete", bool(self.region_identity_complete)
-        yield "region_single_entry", bool(self.region_single_entry)
-        yield "region_all_exits_enumerated", bool(self.region_all_exits_enumerated)
-        yield "region_cross_edges_enumerated", bool(self.region_cross_edges_enumerated)
+        yield "region_identity_complete", as_bool(self.region_identity_complete)
+        yield "region_single_entry", as_bool(self.region_single_entry)
+        yield "region_all_exits_enumerated", as_bool(self.region_all_exits_enumerated)
+        yield "region_cross_edges_enumerated", as_bool(self.region_cross_edges_enumerated)
         yield "unsupported_mnemonics", as_list(self.unsupported_mnemonics)
-        yield "phase2_memory_free_scalar_candidate", bool(self.phase2_memory_free_scalar_candidate)
-        yield "phase3_ordered_scalar_store_candidate", bool(self.phase3_ordered_scalar_store_candidate)
+        yield "phase2_memory_free_scalar_candidate", as_bool(self.phase2_memory_free_scalar_candidate)
+        yield "phase3_ordered_scalar_store_candidate", as_bool(self.phase3_ordered_scalar_store_candidate)
 
     def to_dict(self) -> Dict[str, object]:
         return materialize(self)
 
 @source_converter
 def _store_effect_source(effect: "StoreEffect") -> object:
-    """`CallSiteEffectSummaryEvidence.memory_effects` の 1 要素の表示（固定個数の member）。"""
+    """`CallSiteEffectSummaryEvidence.memory_effects` の 1 要素の表示（固定個数の member）。
 
+    要素は `StoreEffect` だけ（型を確かめてから field を読む。それ以外は `TypeError`）。
+    """
+
+    if type(effect) is not StoreEffect:
+        raise TypeError("a memory effect is not a StoreEffect")
     return inline(
         ("location", effect.location),
         ("value", effect.value),
         ("conditions", each(effect.conditions)),
-        ("order_key", int(effect.order_key)),
+        ("order_key", as_int(effect.order_key)),
         ("provenance", effect.provenance),
     )
 
