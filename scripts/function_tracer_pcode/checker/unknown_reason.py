@@ -707,7 +707,7 @@ def finitize_unknown_reason_record(record: UnknownReasonRecord, *, work: Any) ->
     """
 
     if type(record) is not UnknownReasonRecord:
-        raise TypeError(f"{type(record).__name__} is not an unknown reason record")
+        raise TypeError(f"{live_values.type_name(type(record))} is not an unknown reason record")
     values = _field_values(record, _UNKNOWN_REASON_FIELDS)
     values["stage"] = _bounded_text(record.stage, LABEL_MAX_CHARS, work=work)
     values["pair_or_case"] = _bounded_text(record.pair_or_case, LABEL_MAX_CHARS, work=work)
@@ -727,7 +727,7 @@ def finitize_unknown_recovery_action(action: UnknownRecoveryAction, *, work: Any
     """recovery action 1 件の重い field を有界な表現へ置き換える（`dataclasses.replace` と同じ record）。"""
 
     if type(action) is not UnknownRecoveryAction:
-        raise TypeError(f"{type(action).__name__} is not an unknown recovery action")
+        raise TypeError(f"{live_values.type_name(type(action))} is not an unknown recovery action")
     values = _field_values(action, _UNKNOWN_RECOVERY_ACTION_FIELDS)
     values["stage"] = _bounded_text(action.stage, LABEL_MAX_CHARS, work=work)
     values["pair_or_case"] = _bounded_text(action.pair_or_case, LABEL_MAX_CHARS, work=work)
@@ -965,7 +965,8 @@ def _inline_canonical(value: Any, *, work: Any) -> Any:
     try:
         # 容器（tuple / list / dict）と基底型だけから成る値だけを canonical にする（producer を
         # 持つ値は canonical_value が `to_authority_dict()` を呼ぶので索引に入れない）
-        size = RESULT_JSON_POLICY.plain_bytes(value, max_bytes=work.remaining())
+        # plain でないと分かるまでに辿った分も `work` へ数える（`None` で返っても作業は残る）
+        size = RESULT_JSON_POLICY.plain_bytes(value, max_bytes=work.remaining(), work=work)
         if size is None:
             return None
         work.charge(1 + size)
@@ -1145,7 +1146,7 @@ def _match_legacy_reasons(
     else:
         index = legacy_reason_index(legacy_reasons, work=work)
     if type(index) is not LegacyReasonIndex:
-        raise TypeError(f"{type(index).__name__} is not a legacy reason index")
+        raise TypeError(f"{live_values.type_name(type(index))} is not a legacy reason index")
     key = _group_key(reason_id)
     group = index.group(reason_id)
     if type(group) is not _LegacyReasonGroup:
@@ -1484,7 +1485,7 @@ def _record_actions(record: "UnknownReasonRecord", work: Any):
     """
 
     if type(record) is not UnknownReasonRecord:
-        raise TypeError(f"{type(record).__name__} is not an unknown reason record")
+        raise TypeError(f"{live_values.type_name(type(record))} is not an unknown reason record")
     none_kind = UnknownRecoveryProofKind.NONE.value
     obligations = record.recovery_proof_obligations
     if not live_values.as_bool(obligations):
@@ -1686,7 +1687,7 @@ class _PrimaryFilter:
         from scripts.function_tracer_pcode.core.json_encoding import hashable_key
 
         if type(record) is not UnknownReasonRecord:
-            raise TypeError(f"{type(record).__name__} is not an unknown reason record")
+            raise TypeError(f"{live_values.type_name(type(record))} is not an unknown reason record")
         # 真偽は live_values の規則で読む（上書きした `__bool__` / `__len__` を呼ばない）
         aggregation_key = builtin_str(_or(record.aggregation_unit, UnknownAggregationUnit.RESULT.value))
         unit_key = _or(record.pair_or_case, record.stage)
@@ -1721,7 +1722,7 @@ def _coerce_record_within(value: Any, *, work: Any) -> UnknownReasonRecord:
         record = value
     # 型は `type(x)` で決める（`isinstance` は上書きした `__class__` を読む）
     if type(record) is not UnknownReasonRecord:
-        raise TypeError(f"{type(record).__name__} is not an unknown reason record")
+        raise TypeError(f"{live_values.type_name(type(record))} is not an unknown reason record")
     return record
 
 
@@ -1799,7 +1800,7 @@ class _BacklogEntryView:
 
     def add(self, record: UnknownReasonRecord, *, work: Any) -> None:
         if type(record) is not UnknownReasonRecord:
-            raise TypeError(f"{type(record).__name__} is not an unknown reason record")
+            raise TypeError(f"{live_values.type_name(type(record))} is not an unknown reason record")
         obligations = record.recovery_proof_obligations
         # 辿る obligation の数を先に数える（record の列は組み込みの振る舞いの列だけ）
         work.charge(live_values.size(obligations))

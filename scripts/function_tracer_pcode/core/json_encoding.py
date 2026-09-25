@@ -421,8 +421,20 @@ def _record_protocol(kind: type, name: str) -> Any:
     信頼は関数の code の file（書き換えられない）で決める。型の `__module__` は書き換えられるので使わない。
     """
 
-    method = type_attribute(kind, name)
-    return method if live_values.package_function(method) else None
+    if not live_values.package_type(kind):
+        # （hash・比較を上書きした metaclass の型もここで外れる: 下の cache の key にしない）
+        return None
+    key = (kind, name)
+    known = _RECORD_PROTOCOLS.get(key, _NO_PROTOCOL)
+    if known is _NO_PROTOCOL:
+        method = type_attribute(kind, name)
+        known = _RECORD_PROTOCOLS[key] = method if live_values.package_function(method) else None
+    return known
+
+
+#: 型と名前ごとの `_record_protocol` の結果（package の型だけ）
+_RECORD_PROTOCOLS: dict = {}
+_NO_PROTOCOL = object()
 
 
 def protocol_method(value: Any, name: str) -> Any:
@@ -500,6 +512,7 @@ def scan(values: Any, reducer: Reducer) -> _Source:
     kind = type(reducer)
     if not (
         issubclass(kind, Reducer)
+        and live_values.package_type(kind)
         and live_values.package_function(type_attribute(kind, "add"))
         and live_values.package_function(type_attribute(kind, "result"))
     ):
@@ -1232,17 +1245,19 @@ class JsonEncodingPolicy:
 
     def plain_bytes(
         self, value: Any, *, max_bytes: Optional[int] = None, size_only: bool = False,
+        work: Optional[JsonBudget] = None,
     ) -> Optional[int]:
         """容器（tuple / list / dict）と基底型 **だけ** から成る値の byte 数（それ以外は `None`）。
 
         `size_only=True` は walk の中の登録した見積もり（呼ぶ側が返った大きさを 1 回だけ数える）。
 
         `max_bytes` を超えたら `JsonBudgetExhausted`。live な object（record・式・Ghidra の
-        値など）を含む値は `None`（呼ぶ側は有界な証拠へ置き換える）。
+        値など）を含む値は `None`（呼ぶ側は有界な証拠へ置き換える）。`work` を渡すと、`None` に
+        なるまでに辿った分をその作業量へ数える（返った大きさは呼ぶ側が 1 回だけ数える）。
         """
 
         budget = JsonBudget(max_bytes, detached=size_only)
-        done, _ = _Walk(self, LEGACY, budget, build=False).plain(value, False)
+        done, _ = _Walk(self, LEGACY, budget, build=False, effort=work).plain(value, False)
         return budget.consumed if done else None
 
     def count_into(self, source: Any, budget: JsonBudget, *, mode: str = LEGACY) -> None:
@@ -1622,7 +1637,7 @@ def identity_key_of(value: Any, *, names: Tuple[str, ...] = ("stable_key", "to_k
     for name in names:
         # 型の `__dict__` の関数だけ（metaclass の hook・instance の `__getattr__` を呼ばない）
         method = type_attribute(kind, name)
-        if live_values.package_function(method):
+        if live_values.package_function(method) and live_values.package_type(kind):
             return True, method(value)
     return False, None
 
@@ -2431,6 +2446,9 @@ class _Walk:
             self.enter(value, parent, key, build)
         elif kind is _Scan:
             reducer = item.reducer
+            # reducer の method は型の関数（`scan` が確かめた package の関数）を直接呼ぶ（instance の
+            # 属性に置いた callable を呼ばない）
+            add = type_attribute(type(reducer), "add")
             values = item.values
             if _is_one_shot(values):
                 self.entered_iterator = True
@@ -2445,7 +2463,7 @@ class _Walk:
                     # 引き出した要素を畳み込む前に数える（上限を超えれば残りを引き出さない）。
                     # 要素の中の仕事は reducer が同じ作業量へ数える
                     effort.charge(1)
-                    reducer.add(element, work=effort)
+                    add(reducer, element, work=effort)
             except PRODUCER_FAILURES as exc:
                 self.reject(f"producer failed ({exception_text(exc)})")
             except JsonBudgetExhausted:
@@ -2453,7 +2471,7 @@ class _Walk:
                 self.budget.exceeded()
                 raise
             try:
-                produced = reducer.result(work=self.effort)
+                produced = type_attribute(type(reducer), "result")(reducer, work=self.effort)
             except JsonBudgetExhausted:
                 self.budget.exceeded()
                 raise

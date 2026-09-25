@@ -209,11 +209,11 @@ def canonical_cause_tuple(value: CauseKey) -> Tuple[Any, ...]:
     elif type(value) is ExecutionCauseKey:
         pairs = value.json_items()
     else:
-        raise TypeError(f"{type(value).__name__} is not a typed cause key")
+        raise TypeError(f"{live_values.type_name(type(value))} is not a typed cause key")
     names = []
     items = []
     for name, item in pairs:
-        names.append(name)
+        names.append(live_values.as_str(name))
         items.append(item)
     order = sorted(range(len(names)), key=names.__getitem__)
     return tuple((names[index], _tuple_item(items[index])) for index in order)

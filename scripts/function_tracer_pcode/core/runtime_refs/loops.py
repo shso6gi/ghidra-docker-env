@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, bounded_repr, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, attribute, is_kind, size
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, attribute, is_kind, size, type_module, type_name
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
 )
@@ -375,7 +375,7 @@ def _loop_object_source(value: Any) -> Any:
     if is_json_record(value):
         return value
     return inline(
-        ("type", f"{type(value).__module__}.{type(value).__qualname__}"),
+        ("type", type_module(type(value)) + "." + type_name(type(value))),
         ("unkeyable", True),
     )
 
@@ -452,11 +452,11 @@ def _loop_object_to_dict(value: Any) -> Any:
             return to_dict()
         except (AttributeError, TypeError, ValueError, RecursionError):
             return {
-                "type": f"{type(value).__module__}.{type(value).__qualname__}",
+                "type": type_module(type(value)) + "." + type_name(type(value)),
                 "unserializable": True,
             }
     return {
-        "type": f"{type(value).__module__}.{type(value).__qualname__}",
+        "type": type_module(type(value)) + "." + type_name(type(value)),
         "unkeyable": True,
     }
 

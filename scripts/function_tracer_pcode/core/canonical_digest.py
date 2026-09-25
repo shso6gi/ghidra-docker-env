@@ -185,7 +185,7 @@ class _Sink:
         elif type(value) is float:
             self.emit(json.dumps(value).encode("ascii"))
         else:  # pragma: no cover - 呼ぶ側が基底型へ直してから渡す
-            raise TypeError(f"unsupported authority leaf: {type(value).__name__}")
+            raise TypeError(f"unsupported authority leaf: {type_name(type(value))}")
 
 
 class _End:

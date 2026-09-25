@@ -35,6 +35,7 @@ WORK = "WORK"  # 作業量 / 予算 / policy（owner の object）
 REC = "REC"    # "REC:<module>:<class>": 型を確かめた package の object（field は live）
 OBJ = "OBJ"    # "OBJ:<module>:<class>": package が plain な引数で作った object（field は自身の状態）
 VER = "VER"    # live だが組み込みの振る舞いを確かめた容器（反復・`len`・真偽は組み込みの slot）
+TYPE = "TYPE"  # live な値の型（`type(x)`）: `is` / `issubclass` / owner の関数にだけ渡してよい
 
 RECORD_METHODS = frozenset({"json_items", "__json_tree__", "__json_tree_bytes__", "__json_tree_metered__", "__json_identity__"})
 WORK_PARAMETER_NAMES = frozenset({"work", "budget", "effort", "meter", "units"})
@@ -698,6 +699,10 @@ class _FunctionAudit:
 
     def e_Attribute(self, node):
         receiver = self.expr(node.value)
+        if receiver == TYPE:
+            # 型の属性は metaclass の `__getattribute__` / property を通る（`type_name` / `type_module`）
+            self.v(node, f"attribute .{node.attr} of the type of a live value")
+            return None
         if receiver == LIVE:
             self.v(node, f"attribute .{node.attr} of a live value")
             return LIVE
@@ -738,7 +743,7 @@ class _FunctionAudit:
         """hash・比較するとその値の code を呼び得るか（live な値・live な値を持つ容器。identity で
         hash される package の object は呼ばない）。"""
 
-        if kind in (CONT, ITER):
+        if kind in (CONT, ITER, TYPE):
             return True
         return bad(kind) and not self.identity_hashed(kind)
 
@@ -762,6 +767,11 @@ class _FunctionAudit:
             return LIVE
         if isinstance(node.op, ast.Mod) and tainted(right):
             self.v(node, "%-formatting a live value")
+        if left in (CONT, ITER) or right in (CONT, ITER):
+            # 容器の連結・繰り返しの結果も live な値を持つ容器
+            return CONT
+        if left == TYPE or right == TYPE:
+            self.v(node, "operator on the type of a live value")
         return None
 
     def e_UnaryOp(self, node):
@@ -913,11 +923,18 @@ class _FunctionAudit:
     # -- 呼び出し ----------------------------------------------------------
     def e_Call(self, node):
         args = []
+        starred_live = False
         for argument in node.args:
             kind = self.expr(argument.value if isinstance(argument, ast.Starred) else argument)
             if isinstance(argument, ast.Starred) and bad(kind):
                 self.v(argument, "unpacking a live value into arguments")
+            if isinstance(argument, ast.Starred) and tainted(kind):
+                # `f(*rows)`: 容器の要素（live）が残りの引数へ入る
+                starred_live = True
+                kind = LIVE
             args.append(kind)
+        if starred_live:
+            args.extend([LIVE] * 8)
         kwargs = {}
         for keyword in node.keywords:
             kind = self.expr(keyword.value)
@@ -934,6 +951,13 @@ class _FunctionAudit:
         ):
             # 変数の容器へ live な値を足した（`rows.append(record)`）: その容器の要素は live
             self.env[func.value.id] = CONT
+        if (
+            isinstance(func, ast.Attribute) and func.attr in _FILLING_METHODS
+            and isinstance(func.value, ast.Attribute) and self._is_self(func.value.value)
+            and any(tainted(k) for k in args)
+        ):
+            # 自分の field の容器へ live な値を足した（`self.items.append(value)`）: その field の要素は live
+            self._mark_field(func.value.attr)
         if isinstance(func, ast.Name):
             if func.id in self.local_callables and None not in self.local_callables[func.id]:
                 results = []
@@ -998,7 +1022,7 @@ class _FunctionAudit:
                 if live:
                     self.v(node, f"live value passed to unresolved self.{func.attr}()")
                 return None
-            if receiver == LIVE:
+            if receiver == LIVE or receiver == VER or receiver == TYPE:
                 self.v(node, f"method .{func.attr}() of a live value")
                 return LIVE
             if receiver == WORK or self._owner_object(receiver_node):
@@ -1038,6 +1062,12 @@ class _FunctionAudit:
         for keyword in node.keywords:
             if keyword.arg == "key" and key_element is not None:
                 self._analyze_callable(keyword.value, None if key_element == "plain" else LIVE)
+            if (
+                keyword.arg == "key" and isinstance(keyword.value, ast.Attribute)
+                and tainted(self.expr(keyword.value.value))
+            ):
+                # 容器の bound method を key に: 並べるのは容器の中の live な値（比較が live な code）
+                self.v(node, "a container of live values used as a sort key")
         for argument in (*node.args, *(keyword.value for keyword in node.keywords if keyword.arg != "key" or key_element is None)):
             self._analyze_callable(argument, LIVE)
 
@@ -1114,6 +1144,8 @@ class _FunctionAudit:
         if name == "range" and any(bad(k) for k in args):
             self.v(node, "range() of a live value")
             return None
+        if name == "type" and args and tainted(args[0]):
+            return TYPE
         if name in _SAFE_BUILTINS:
             return None
         if name in ("iter", "len") and args and args[0] in (VER, CONT, ITER) and len(args) == 1:

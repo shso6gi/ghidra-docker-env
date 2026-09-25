@@ -1159,7 +1159,8 @@ def _bounded_local_bytes(policy: Any, local: Any, max_bytes: Optional[int]) -> i
                 if text is not NOT_PLAIN:
                     total += len(text)
                 else:
-                    mapping = builtin_mapping(value) if is_kind(value, dict) else None
+                    # dict の subclass も proxy も組み込みの振る舞いの写像なら数える
+                    mapping = builtin_mapping(value)
                     if mapping is not None:
                         total += size(mapping)
                         for key, child in items_of(mapping):
@@ -1179,42 +1180,65 @@ def _plain_local(local: Any) -> Any:
     """node 1 つ分の dict の、JSON の encoder が書くのと同じ組み込みの値の写し（owner の規則で読む）。
 
     str / int / float の subclass（mixin の enum を含む）は基底型の値（encoder と同じ）、組み込みの
-    振る舞いの容器は中身を写し、それ以外（encoder が `default` で書く値）は型名。
+    振る舞いの容器は中身を写し、それ以外（encoder が `default` で書く値）は型名。encoder と同じく
+    循環は `ValueError`、JSON の scalar でない key は `TypeError`（共有された容器は何度でも写す）。
     """
 
-    # 辿る値（live）・書き込む先（この関数が作る組み込みの容器）・key を別々の stack に持つ
+    # 辿る値（live）・書き込む先（この関数が作る組み込みの容器）・key を別々の stack に持つ。
+    # 容器を出る印（`_LEAVE`）で今辿っている経路（`active`）から外す
     root: list = []
     values: list = [local]
     parents: list = [root]
     keys: list = [None]
+    active: set = set()
     while values:
         value = values.pop()
         parent = parents.pop()
         key = keys.pop()
+        if parent is _LEAVE:
+            active.discard(key)
+            continue
         base = json_scalar(value)
+        mapping = builtin_mapping(value) if base is NOT_PLAIN else None
         if base is not NOT_PLAIN:
             copied: Any = base
-        elif builtin_mapping(value) is not None:
-            copied = {}
-            for child_key, child in items_of(value):
-                plain_key = json_scalar(child_key)
-                values.append(child)
-                parents.append(copied)
-                keys.append(plain_key if plain_key is not NOT_PLAIN else _opaque_local_text(child_key))
-        elif builtin_sequence(value):
-            children = tuple(elements_of(value))
-            copied = [None] * len(children)
-            for index in range(len(children) - 1, -1, -1):
-                values.append(children[index])
-                parents.append(copied)
-                keys.append(index)
+        elif mapping is not None or builtin_sequence(value):
+            if id(value) in active:
+                raise ValueError("Circular reference detected")
+            active.add(id(value))
+            values.append(None)
+            parents.append(_LEAVE)
+            keys.append(id(value))
+            if mapping is not None:
+                copied = {}
+                for child_key, child in items_of(mapping):
+                    plain_key = json_scalar(child_key)
+                    if plain_key is NOT_PLAIN:
+                        raise TypeError(
+                            "keys must be str, int, float, bool or None, not "
+                            + type_name(type(child_key))
+                        )
+                    values.append(child)
+                    parents.append(copied)
+                    keys.append(plain_key)
+            else:
+                children = tuple(elements_of(value))
+                copied = [None] * len(children)
+                for index in range(len(children) - 1, -1, -1):
+                    values.append(children[index])
+                    parents.append(copied)
+                    keys.append(index)
         else:
             copied = _opaque_local_text(value)
-        if key is None and type(parent) is list and parent is root:
+        if parent is root:
             parent.append(copied)
         else:
             parent[key] = copied
     return root[0]
+
+
+#: `_plain_local` の stack で「容器を出る」印
+_LEAVE: list = []
 
 
 class _RuntimeRefChild:

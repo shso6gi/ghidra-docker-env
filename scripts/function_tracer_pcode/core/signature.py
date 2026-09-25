@@ -455,12 +455,10 @@ def clone_parameter_descriptor(
             raise TypeError(f"parameter descriptor key {live_values.type_name(type(key))} is not a str")
         if name == "data_type_obj" and not include_data_type_obj:
             continue
-        if live_values.is_kind(value, dict) and live_values.builtin_mapping(value) is not None:
-            cloned[name] = live_values.merged_mappings(value)
-        elif live_values.is_kind(value, list) and live_values.builtin_sequence(value):
-            cloned[name] = list(live_values.elements_of(value))
-        else:
-            cloned[name] = value
+        # dict / list は（subclass も）基底型の slot で写す（旧 `dict(value)` / `list(value)`: 複製は
+        # 元の live な容器を共有しない）。それ以外は同じ値
+        copied = live_values.copied_container(value)
+        cloned[name] = value if copied is live_values.NOT_PLAIN else copied
     return cloned
 
 

@@ -47,7 +47,10 @@ _PACKAGE_FILES: dict = {}
 def trust_code_directory(path: str) -> None:
     """test の harness が自分の code（test の module の record・converter・reducer）を信頼する。
 
-    production は呼ばない（信頼は package の code だけ）。足すだけで取り消さない。
+    **test の harness（`tests/conftest.py`）だけが呼ぶ**。production は呼ばない（信頼は package の
+    code だけ。`tests/unit/test_issue22d_capabilities.py` が呼び出し元を固定する）。足すだけで
+    取り消さない。code の file 名は `compile` で偽れるが、それは code を書いて実行できる側の操作で
+    （live な値の側からはできない）、この信頼の境界の外。
     """
 
     directory = os.path.normpath(os.path.abspath(path)) + os.sep
@@ -59,7 +62,8 @@ def trust_code_directory(path: str) -> None:
 def package_file(path: Any) -> bool:
     """file の path が package の code か（正規化して 1 度だけ調べる。test / fixture は除く）。"""
 
-    if type(path) is not str:
+    if type(path) is not str or not os.path.isabs(path):
+        # 相対の file 名（`<string>`・cwd に依る名前）は package の code ではない
         return False
     known = _PACKAGE_FILES.get(path)
     if known is None:
@@ -82,6 +86,102 @@ def package_function(value: Any) -> bool:
     """package の code の関数か（型の MRO から引いた protocol の method・converter を呼んでよいかの判定）。"""
 
     return type(value) is types.FunctionType and package_code(value.__code__)
+
+
+_PACKAGE_TYPES: dict = {}
+#: 型の中の code（関数・property の getter / setter）の読み方
+_CODE_HOLDERS = (types.FunctionType, staticmethod, classmethod, property)
+
+
+def package_type(kind: type) -> bool:
+    """`kind` とその MRO の class 文で作った型（heap type）が、どれも package の code だけから成るか。
+
+    package の外で package の型を継承した型（`class S(Tally): pass` や、`__getattribute__` /
+    property を足した型）は信頼しない: 型の MRO から引いた package の関数を呼んでも、その中の
+    `self.x` が外の code を呼び得る。heap type ごとに、その `__dict__` の関数・property が全部
+    package の code で、少なくとも 1 つの関数を持つ（中身の無い外の subclass を除く）ことを確かめる。
+    組み込みの型（C で定義した型）はそのまま信頼する。
+    """
+
+    if not _plain_metatype(kind):
+        return False
+    known = _PACKAGE_TYPES.get(kind)
+    if known is None:
+        known = True
+        for klass in _TYPE_MRO.__get__(kind):
+            if not (_TYPE_FLAGS.__get__(klass) & _HEAP_TYPE):
+                continue
+            if not _package_class_body(klass):
+                known = False
+                break
+        _PACKAGE_TYPES[kind] = known
+    return known
+
+
+#: `dataclasses` が class の中に作る関数の名前（code の file は `<string>`。定義した class の code）
+_DATACLASS_GENERATED = frozenset({
+    "__init__", "__repr__", "__eq__", "__hash__", "__setattr__", "__delattr__",
+    "__lt__", "__le__", "__gt__", "__ge__", "__getstate__", "__setstate__", "__match_args__",
+})
+
+
+def _dataclass_generated(function: types.FunctionType) -> bool:
+    """`dataclasses` が class の中に作った関数か（`<string>` の code、または `dataclasses` の
+    wrapper（Python 3.10 の `__repr__`）がその code の関数だけを包んだもの）。"""
+
+    code = function.__code__
+    if code.co_filename == "<string>":
+        return True
+    if code not in _DATACLASS_WRAPPER_CODES:
+        return False
+    wrapped = [
+        cell.cell_contents for cell in (function.__closure__ or ())
+        if type(cell.cell_contents) is types.FunctionType
+    ]
+    return len(wrapped) > 0 and all(inner.__code__.co_filename == "<string>" for inner in wrapped)
+
+
+def _dataclass_wrapper_codes() -> frozenset:
+    """`dataclasses` が生成した関数を包む wrapper の code（この Python の `dataclasses` で作って確かめる）。"""
+
+    import dataclasses
+
+    @dataclasses.dataclass(order=True, frozen=True)
+    class _Probe:
+        field: int = 0
+
+    return frozenset(
+        value.__code__ for value in dict.values(dict(_TYPE_DICT.__get__(_Probe)))
+        if type(value) is types.FunctionType and value.__code__.co_filename != "<string>"
+    )
+
+
+def _package_class_body(klass: type) -> bool:
+    namespace = dict(_TYPE_DICT.__get__(klass))
+    dataclass_body = "__dataclass_fields__" in namespace
+    functions = 0
+    for name, value in dict.items(namespace):
+        holder = type(value)
+        if holder is types.FunctionType:
+            if not package_code(value.__code__):
+                generated = (
+                    dataclass_body and name in _DATACLASS_GENERATED and _dataclass_generated(value)
+                )
+                if not generated:
+                    return False
+                continue
+            functions += 1
+        elif holder is staticmethod or holder is classmethod:
+            inner = value.__func__
+            if type(inner) is not types.FunctionType or not package_code(inner.__code__):
+                return False
+            functions += 1
+        elif holder is property:
+            for accessor in (value.fget, value.fset, value.fdel):
+                if accessor is not None and (type(accessor) is not types.FunctionType or not package_code(accessor.__code__)):
+                    return False
+            functions += 1
+    return functions > 0
 
 
 _BUILTIN_DICTS = (dict, OrderedDict)
@@ -107,6 +207,8 @@ _TYPE_DICT = type.__dict__["__dict__"]
 #: 型の flag（`Py_TPFLAGS_HEAPTYPE`: class 文で作った型。無ければ C で定義した組み込みの型）
 _TYPE_FLAGS = type.__dict__["__flags__"]
 _HEAP_TYPE = 1 << 9
+#: `dataclasses` の wrapper の code（`_dataclass_generated`）
+_DATACLASS_WRAPPER_CODES = _dataclass_wrapper_codes()
 
 
 def type_attribute(kind: type, name: str) -> Any:
@@ -284,14 +386,18 @@ def as_bool(value: Any) -> bool:
     if builtin_container(value):
         return size(value) > 0
     kind = type(value)
-    # `__bool__` / `__len__` を MRO のどこにも持たない型の値は常に真（`bool(x)` と同じ。その値の
-    # code は無い: record・generator・関数など）
-    if (
-        type_attribute(kind, "__bool__") is None
-        and type_attribute(kind, "__len__") is None
-    ):
-        return True
     if issubclass(kind, Enum) and builtin_enum(value):
+        # 組み込みのままの enum: mixin（int / str / float）は基底型の値の真偽、それ以外は真
+        if issubclass(kind, (int, float, str)):
+            return bool(json_scalar(value))
+        if _type_lookup(kind, "__bool__", _ABSENT) is _ABSENT:
+            return True
+    # `__bool__` / `__len__` を MRO のどこにも持たない型の値は常に真（`bool(x)` と同じ。その値の
+    # code は無い: record・generator・関数など）。`__bool__ = None` のような値も「持つ」側
+    if (
+        _type_lookup(kind, "__bool__", _ABSENT) is _ABSENT
+        and _type_lookup(kind, "__len__", _ABSENT) is _ABSENT
+    ):
         return True
     raise TypeError(f"{type_name(kind)} is not converted to bool without its own code")
 
@@ -355,6 +461,24 @@ def builtin_enum(value: Any) -> bool:
     # `Enum.__str__` / `__repr__` / `__hash__` は Python の code で、member の属性と `__class__` を
     # 読み、値の `repr` を呼ぶ: それらも組み込みのまま（metaclass・属性の読み方・値の型）のときだけ
     member = instance_state(value, "_value_", None)
+    if not (member is None or type(member) is str or type(member) is int or type(member) is float or type(member) is bool):
+        return False
+    # 型の側の判定は型ごとに 1 度だけ（EnumMeta の hash・比較は組み込みの実装）
+    known = _BUILTIN_ENUM_TYPES.get(kind) if type(kind) is EnumMeta else None
+    if known is None:
+        known = _builtin_enum_type(kind)
+        if type(kind) is EnumMeta:
+            _BUILTIN_ENUM_TYPES[kind] = known
+    return known
+
+
+#: 型の側が組み込みのままの enum か（`_builtin_enum_type` の結果。型ごと）
+_BUILTIN_ENUM_TYPES: dict = {}
+
+
+def _builtin_enum_type(kind: type) -> bool:
+    from enum import EnumMeta
+
     return (
         type(kind) is EnumMeta
         and type_attribute(kind, "__str__") in _BUILTIN_ENUM_STR
@@ -364,7 +488,6 @@ def builtin_enum(value: Any) -> bool:
         and type_attribute(kind, "__format__") in _BUILTIN_ENUM_FORMAT
         and type_attribute(kind, "__getattribute__") in _BUILTIN_GETATTRIBUTE
         and type_attribute(kind, "__class__") is _OBJECT_CLASS
-        and (member is None or type(member) is str or type(member) is int or type(member) is float or type(member) is bool)
     )
 
 
@@ -440,8 +563,8 @@ def attribute(value: Any, name: str, default: Any = None) -> Any:
     descriptor_kind = type(descriptor)
     if descriptor_kind is property:
         getter = descriptor.fget
-        # package の code が定義した property（record の API）だけを呼ぶ
-        if type(getter) is types.FunctionType and package_code(getter.__code__):
+        # package の型の、package の code が定義した property（record の API）だけを呼ぶ
+        if type(getter) is types.FunctionType and package_code(getter.__code__) and package_type(kind):
             return getter(value)
         return default
     # class の定数（descriptor でない値: `__get__` を持たない型の値）はそのまま
@@ -461,7 +584,7 @@ def set_state(value: Any, name: str, new: Any) -> None:
     kind = type(value)
     setter = type_attribute(kind, "__setattr__")
     if setter is not object.__setattr__:
-        if type(setter) is types.FunctionType and package_code(setter.__code__):
+        if type(setter) is types.FunctionType and package_code(setter.__code__) and package_type(kind):
             setter(value, name, new)
             return
         if type(setter) is types.WrapperDescriptorType and not (_TYPE_FLAGS.__get__(setter.__objclass__) & _HEAP_TYPE):
@@ -505,6 +628,20 @@ def dataclass_field_names(value: Any) -> Optional[Tuple[str, ...]]:
     kind = type(value)
     if issubclass(kind, type):
         return None
+    if not _plain_metatype(kind):
+        return _dataclass_field_names(kind)
+    # 型ごとに 1 度だけ（field の表は class を作るときに決まる）
+    known = _DATACLASS_FIELD_NAMES.get(kind, _ABSENT)
+    if known is _ABSENT:
+        known = _DATACLASS_FIELD_NAMES[kind] = _dataclass_field_names(kind)
+    return known
+
+
+#: 型ごとの `dataclass_field_names` の結果（dataclass でない型は `None`）
+_DATACLASS_FIELD_NAMES: dict = {}
+
+
+def _dataclass_field_names(kind: type) -> Optional[Tuple[str, ...]]:
     table = type_attribute(kind, "__dataclass_fields__")
     if type(table) is not dict:
         return None
@@ -639,8 +776,8 @@ def _mapping_base(mapping: Any) -> type:
 def _unwrapped(mapping: Any) -> Any:
     """`MappingProxyType` なら包んだ mapping（proxy の method は包んだ値の method を名前で呼ぶので使わない）。"""
 
-    if type(mapping) is types.MappingProxyType:
-        return gc.get_referents(mapping)[0]
+    while type(mapping) is types.MappingProxyType:
+        mapping = gc.get_referents(mapping)[0]
     return mapping
 
 
@@ -674,6 +811,28 @@ def merged_mappings(*mappings: Any) -> dict:
                 raise TypeError(f"mapping key {type_name(type(key))} is not a builtin str")
             merged[key] = value
     return merged
+
+
+def copied_container(value: Any) -> Any:
+    """dict / list の（subclass を含む）値の、基底型の slot で写した組み込みの dict / list。
+
+    上書きした `items` / `__iter__` / `keys` / `copy` などは呼ばない（基底型の storage を読む）。
+    dict の key は plain な値（`_plain_key`）だけ（新しい dict に入れるときにその `__hash__` を
+    呼ぶため）で、そうでなければ `TypeError`。dict / list の値でなければ `NOT_PLAIN`。
+    """
+
+    kind = type(value)
+    if issubclass(kind, dict):
+        # storage の key を先に確かめる（`dict.__iter__` は storage を読む。key の code は呼ばない）
+        keys = tuple(dict.__iter__(value))
+        for key in keys:
+            if not _plain_key(key):
+                raise TypeError(f"mapping key {type_name(type(key))} is not a plain key")
+        base = OrderedDict if issubclass(kind, OrderedDict) else dict
+        return dict(base.items(value))
+    if issubclass(kind, list):
+        return list.copy(value)
+    return NOT_PLAIN
 
 
 def lookup(mapping: Any, key: Any, default: Any = None) -> Any:
@@ -721,6 +880,7 @@ __all__ = [
     "package_file",
     "package_generator",
     "package_function",
+    "package_type",
     "trust_code_directory",
     "as_bool",
     "as_float",
@@ -728,6 +888,7 @@ __all__ = [
     "as_repr",
     "as_str",
     "builtin_enum",
+    "copied_container",
     "attribute",
     "builtin_container",
     "builtin_iterator",

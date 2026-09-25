@@ -234,6 +234,42 @@ class TableCall:
     def json_items(self):
         yield "x", {"a": _stringify}["a"](self.x)
 
+class TypeQualname:
+    def json_items(self):
+        yield "x", type(self.x).__qualname__
+
+class VerifiedMethod:
+    def json_items(self):
+        items = self.w
+        if builtin_sequence(items):
+            yield "x", items.index(1)
+
+def _starred(value):
+    return value.name
+
+class StarredForwarding:
+    def json_items(self):
+        rows = [self.x]
+        yield "x", _starred(*rows)
+
+class ContainerPlus:
+    def json_items(self):
+        rows = [] + [self.x]
+        yield "x", rows[0].name
+
+class BoundKey:
+    def json_items(self):
+        rows = [self.x]
+        yield "x", sorted(elements_of(self.y), key=rows.__getitem__)
+
+class SelfFilled:
+    def __init__(self, x):
+        self.rows = []
+        self.rows.append(x)
+
+    def json_items(self):
+        yield "x", self.rows[0].name
+
 class Clean:
     def json_items(self):
         yield "a", as_int(self.x)
@@ -271,6 +307,10 @@ _EXPECTED_VIOLATIONS = {
     # live な値・`key=` の callback・型の `==`・関数の表の呼び出し）
     "_stringify", "_takes_value", "FilledContainer.json_items", "_key_of", "TypeCompared.json_items",
     "TableCall.json_items",
+    # 3 回目の cross-audit が見つけた穴（`type(live)` の属性・確かめた容器の method・`*` の転送・
+    # 容器の `+`・bound method の `key=`・`self` の field へ入れた live な値）
+    "TypeQualname.json_items", "VerifiedMethod.json_items", "_starred", "ContainerPlus.json_items",
+    "BoundKey.json_items", "SelfFilled.json_items",
 }
 
 
@@ -1238,3 +1278,318 @@ def _scan_of_idle_elements():
     from scripts.function_tracer_pcode.core.json_encoding import scan
 
     return scan(range(1_000_000), _IdleReducer())
+
+
+# ---------------------------------------------------------------------------
+# 3 回目の cross-audit: package の型を継承した外の型・instance の method・owner の読み方の端
+# ---------------------------------------------------------------------------
+
+_OUTSIDE_SUBCLASS_SOURCE = '''
+from scripts.function_tracer_pcode.core.json_encoding import Tally
+from scripts.function_tracer_pcode.core.storage import StorageInfo
+
+calls = []
+
+class PropertyStorage(StorageInfo):
+    @property
+    def space_name(self):
+        calls.append("property")
+        return "x"
+
+    @space_name.setter
+    def space_name(self, value):
+        pass
+
+class GetattributeStorage(StorageInfo):
+    def __getattribute__(self, name):
+        calls.append("getattribute")
+        return object.__getattribute__(self, name)
+
+class EmptyStorage(StorageInfo):
+    pass
+
+class OutsideTally(Tally):
+    __slots__ = ()
+
+    def __getattribute__(self, name):
+        calls.append("tally_getattribute")
+        return object.__getattribute__(self, name)
+
+class EmptyTally(Tally):
+    __slots__ = ()
+
+import dataclasses
+
+@dataclasses.dataclass
+class DataclassStorage(StorageInfo):
+    """外の dataclass: `dataclasses` が作る名前（`__repr__`）を外の code で定義する。"""
+
+    def __repr__(self):
+        calls.append("repr")
+        return "outside"
+
+@dataclasses.dataclass
+class EmptyDataclassStorage(StorageInfo):
+    pass
+
+def _outside_repr(self):
+    calls.append("wrapped_repr")
+    return "outside"
+
+_wrap = getattr(dataclasses, "_recursive_repr", None)
+
+@dataclasses.dataclass
+class WrappedReprStorage(StorageInfo):
+    """`dataclasses` の wrapper（同じ code）で外の関数を包み、package の関数を写した型。"""
+
+    json_items = StorageInfo.json_items
+    if _wrap is not None:
+        __repr__ = _wrap(_outside_repr)
+'''
+_OUTSIDE_SUBCLASS: dict = {}
+exec(compile(_OUTSIDE_SUBCLASS_SOURCE, "/nonexistent/subclassing_outside_the_package.py", "exec"), _OUTSIDE_SUBCLASS)
+
+
+def test_outside_subclasses_of_package_types_are_not_trusted():
+    """package の型を package の外で継承した型は信頼しない（型の MRO の package の関数を呼ばない）。"""
+
+    from scripts.function_tracer_pcode.core import live_values
+    from scripts.function_tracer_pcode.core.json_encoding import (
+        RESULT_JSON_POLICY,
+        JsonValueRejected,
+        Tally,
+        is_json_record,
+        scan,
+    )
+    from scripts.function_tracer_pcode.core.storage import StorageInfo
+
+    calls = _OUTSIDE_SUBCLASS["calls"]
+    assert live_values.package_type(StorageInfo) and live_values.package_type(Tally)
+    names = (
+        "PropertyStorage", "GetattributeStorage", "EmptyStorage", "DataclassStorage",
+        "EmptyDataclassStorage", "WrappedReprStorage",
+    )
+    # 作るとき（dataclass の `__init__`）の呼び出しは数えない: owner が呼ぶかだけを見る
+    records = {name: _OUTSIDE_SUBCLASS[name]() for name in names}
+    reducers = {name: _OUTSIDE_SUBCLASS[name]("a") for name in ("OutsideTally", "EmptyTally")}
+    calls.clear()
+    for name in names:
+        kind = _OUTSIDE_SUBCLASS[name]
+        record = records[name]
+        assert live_values.package_type(kind) is False, name
+        assert is_json_record(record) is False, name
+        with pytest.raises(JsonValueRejected):
+            RESULT_JSON_POLICY.prepare(record)
+    for name in ("OutsideTally", "EmptyTally"):
+        with pytest.raises(TypeError):
+            scan([1], reducers[name])
+    assert calls == []
+
+
+class _InstanceMethodReducer(_Reducer):
+    def __init__(self) -> None:
+        self.count = 0
+
+    def add(self, element, *, work):
+        work.charge(1)
+        self.count += 1
+
+    def result(self, *, work):
+        return self.count
+
+
+def test_the_walker_calls_reducer_methods_of_the_type_not_of_the_instance():
+    """reducer の `add` / `result` は型の関数を呼ぶ（instance に置いた callable を呼ばない）。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, scan
+
+    calls: List[str] = []
+    reducer = _InstanceMethodReducer()
+    reducer.add = lambda *args, **kwargs: calls.append("instance_add")  # type: ignore[method-assign]
+    reducer.result = lambda *args, **kwargs: calls.append("instance_result")  # type: ignore[method-assign]
+    assert RESULT_JSON_POLICY.prepare(scan([1, 2, 3], reducer), max_bytes=1_000).value() == 3
+    assert calls == []
+
+
+def test_as_bool_reads_the_truth_of_builtin_values_only():
+    """`as_bool` は組み込みの値の真偽だけ（mixin の enum は基底型の値、`__bool__` を持つ型は `TypeError`）。"""
+
+    import enum
+
+    from scripts.function_tracer_pcode.core import live_values
+
+    class Number(enum.IntEnum):
+        ZERO = 0
+        ONE = 1
+
+    class Text(str, enum.Enum):
+        EMPTY = ""
+        FULL = "a"
+
+    class Plain(enum.Enum):
+        A = 0
+
+    class Flags(enum.Flag):
+        NONE = 0
+        A = 1
+
+    class NoneBool:
+        __bool__ = None
+
+    class Truthy:
+        pass
+
+    assert live_values.as_bool(Number.ZERO) is False
+    assert live_values.as_bool(Number.ONE) is True
+    assert live_values.as_bool(Text.EMPTY) is False
+    assert live_values.as_bool(Text.FULL) is True
+    assert live_values.as_bool(Plain.A) is True
+    assert live_values.as_bool(Truthy()) is True
+    for value in (Flags.NONE, NoneBool()):
+        with pytest.raises(TypeError):
+            live_values.as_bool(value)
+
+
+def test_nested_proxies_are_read_through_the_wrapped_mapping():
+    """proxy を重ねた mapping も、包んだ mapping の基底型の method で読む（proxy の method を呼ばない）。"""
+
+    import types
+
+    from scripts.function_tracer_pcode.core import live_values
+
+    inner = _SPOOF["LoudDict"](a=1)
+    nested = types.MappingProxyType(types.MappingProxyType(inner))
+    calls = _SPOOF["calls"]
+    calls.clear()
+    assert live_values.builtin_mapping(nested) is None or list(live_values.items_of(nested)) == [("a", 1)]
+    plain_nested = types.MappingProxyType(types.MappingProxyType({"a": 1}))
+    assert live_values.builtin_mapping(plain_nested) is plain_nested
+    assert list(live_values.items_of(plain_nested)) == [("a", 1)]
+    assert list(live_values.values_of(plain_nested)) == [1]
+    assert live_values.lookup(plain_nested, "a") == 1
+    assert calls == []
+
+
+def test_relative_code_file_names_are_not_package_code():
+    """相対の file 名（cwd に依る名前・`<string>`）は package の code ではない。"""
+
+    import os
+
+    from scripts.function_tracer_pcode.core import live_values
+
+    absolute = str(PACKAGE_ROOT / "core" / "json_encoding.py")
+    assert live_values.package_file(absolute) is True
+    assert live_values.package_file(os.path.relpath(absolute)) is False
+    assert live_values.package_file("scripts/function_tracer_pcode/core/json_encoding.py") is False
+    assert live_values.package_file("<string>") is False
+
+
+def test_trust_code_directory_is_called_only_by_the_test_harness():
+    """`trust_code_directory` を呼ぶのは test の harness（`tests/conftest.py`）だけ（production は呼ばない）。"""
+
+    callers = []
+    for path in PACKAGE_ROOT.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "trust_code_directory(" not in text:
+            continue
+        for node in ast.walk(ast.parse(text)):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+                if name == "trust_code_directory":
+                    callers.append(str(path.relative_to(PACKAGE_ROOT)))
+    assert sorted(callers) == ["tests/conftest.py"], callers
+
+
+def test_plain_local_matches_the_encoder_on_cycles_keys_and_proxies():
+    """node の local の写しは encoder と同じく循環は `ValueError`・scalar でない key は `TypeError`、
+    proxy も数える（共有した容器は何度でも写す）。"""
+
+    import types
+
+    from scripts.function_tracer_pcode.core import expression
+
+    cyclic: list = []
+    cyclic.append(cyclic)
+    with pytest.raises(ValueError):
+        expression._plain_local({"a": cyclic})
+    with pytest.raises(TypeError):
+        expression._plain_local({(1, 2): 1})
+    shared = [1, 2]
+    assert expression._plain_local({"a": shared, "b": shared}) == {"a": [1, 2], "b": [1, 2]}
+    proxy = types.MappingProxyType({"k": "v" * 100})
+    assert expression._plain_local({"p": proxy}) == {"p": {"k": "v" * 100}}
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+    # 事前の数え上げも proxy の中の文字列を数える（上限を超えれば書かずに上限 + 1）
+    assert expression._bounded_local_bytes(RESULT_JSON_POLICY, {"p": proxy}, 50) == 51
+
+
+def test_inline_canonical_charges_the_walk_that_found_a_live_value():
+    """plain でないと分かって `None` を返した走査も、辿った分を `work` へ数える。"""
+
+    from scripts.function_tracer_pcode.checker import unknown_reason
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
+
+    work = JsonBudget(10_000)
+    value = (tuple(range(200)), _Opaque())
+    assert unknown_reason._inline_canonical(value, work=work) is None
+    assert work.consumed >= 200
+
+
+def test_parameter_descriptor_clones_copy_containers_by_their_base_slots():
+    """記述子の複製は dict / list を（subclass も）基底型の slot で写す（元の容器を共有せず、上書きを呼ばない）。"""
+
+    from scripts.function_tracer_pcode.core.signature import clone_parameter_descriptor
+
+    calls: List[str] = []
+
+    class LoudMapping(dict):
+        def items(self):
+            calls.append("items")
+            return dict.items(self)
+
+        def keys(self):
+            calls.append("keys")
+            return dict.keys(self)
+
+        def __iter__(self):
+            calls.append("iter")
+            return dict.__iter__(self)
+
+        def copy(self):
+            calls.append("copy")
+            return dict.copy(self)
+
+    class LoudList(list):
+        def __iter__(self):
+            calls.append("list_iter")
+            return list.__iter__(self)
+
+        def copy(self):
+            calls.append("list_copy")
+            return list.copy(self)
+
+    mapping = LoudMapping(a=1)
+    sequence = LoudList([1, 2])
+    cloned = clone_parameter_descriptor({"m": mapping, "s": sequence, "n": 3})
+    assert cloned == {"m": {"a": 1}, "s": [1, 2], "n": 3}
+    assert type(cloned["m"]) is dict and cloned["m"] is not mapping
+    assert type(cloned["s"]) is list and cloned["s"] is not sequence
+    assert calls == []
+
+
+def test_builtin_enum_checks_each_member_value_not_only_the_type():
+    """型の側の判定を型ごとに cache しても、member の値の判定は member ごと（非 scalar の値は外す）。"""
+
+    import enum
+
+    from scripts.function_tracer_pcode.core import live_values
+
+    class Mixed(enum.Enum):
+        SCALAR = 1
+        PAIR = (1, 2)
+
+    assert live_values.builtin_enum(Mixed.SCALAR) is True
+    assert live_values.builtin_enum(Mixed.PAIR) is False
+    assert live_values.builtin_enum(Mixed.SCALAR) is True
