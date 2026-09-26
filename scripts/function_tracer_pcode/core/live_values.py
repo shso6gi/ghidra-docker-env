@@ -1221,6 +1221,9 @@ def _plain_keys(raw: dict) -> bool:
 
     if not _within_scan(dict.__len__(raw)):
         return False
+    if _exact_str_keys(raw):
+        # よくある形（instance の `__dict__`・record）: 型を C の比較だけで確かめる（key ごとの判定を省く）
+        return True
     for key in dict.__iter__(raw):
         if not _plain_key(key):
             return False
@@ -1233,6 +1236,8 @@ def _hash_safe_keys(raw: dict) -> bool:
 
     if not _within_scan(dict.__len__(raw)):
         return False
+    if _exact_str_keys(raw):
+        return True
     for key in dict.__iter__(raw):
         if not _hash_safe_key(key):
             return False

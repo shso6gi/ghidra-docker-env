@@ -416,10 +416,13 @@ class SnapshotFingerprintCodec:
         """
 
         keyed = []
+        # 位置は数えながら持つ（組ごとに列の長さを読み直さない）
+        count = 0
         for key, _item in items:
-            keyed.append((_fingerprint_json(key), size(keyed)))
+            keyed.append((_fingerprint_json(key), count))
+            count += 1
         keyed.sort()
-        for index in range(1, size(keyed)):
+        for index in range(1, count):
             if keyed[index - 1][0] == keyed[index][0]:
                 raise ValueError("mapping contains duplicate canonical semantic keys")
         return tuple(items[index] for _text, index in keyed)

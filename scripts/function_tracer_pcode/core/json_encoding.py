@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import functools
 import json
 import operator
 import re
@@ -1057,6 +1058,13 @@ class JsonEncodingPolicy:
     item_separator: str = ", "
     key_separator: str = ": "
 
+    def __post_init__(self) -> None:
+        # 引数を束ねた `json.dumps`（値ごとに 1 度だけ作る。field ではないので比較・hash に入らない）
+        object.__setattr__(self, "_bound_dumps", functools.partial(
+            json.dumps, ensure_ascii=self.ensure_ascii, sort_keys=self.sort_keys,
+            separators=(self.item_separator, self.key_separator),
+        ))
+
     @property
     def separators(self) -> Tuple[str, str]:
         return (self.item_separator, self.key_separator)
@@ -1106,13 +1114,19 @@ class JsonEncodingPolicy:
     def dumps(self, value: Any, *, default: Optional[Callable[[Any], Any]] = None) -> str:
         """上限なしで書く（大きさが既に分かっている小さい値だけに使う）。"""
 
-        return self._escape_surrogates(json.dumps(
-            value,
-            ensure_ascii=self.ensure_ascii,
-            sort_keys=self.sort_keys,
-            separators=self.separators,
-            default=default,
-        ))
+        if default is None:
+            # 引数を束ねた `json.dumps`（policy ごとに 1 度だけ作る。大量に呼ぶ fingerprint の経路）
+            text_value = self._bound_dumps(value)
+        else:
+            text_value = json.dumps(
+                value,
+                ensure_ascii=self.ensure_ascii,
+                sort_keys=self.sort_keys,
+                separators=self.separators,
+                default=default,
+            )
+        # `ensure_ascii` の出力は ASCII（surrogate は escape 済み）
+        return text_value if self.ensure_ascii else self._escape_surrogates(text_value)
 
     def _escape_surrogates(self, text_value: str) -> str:
         """書いた JSON の中の surrogate を `\\uXXXX` にする（文字列の中にしか現れない）。"""
