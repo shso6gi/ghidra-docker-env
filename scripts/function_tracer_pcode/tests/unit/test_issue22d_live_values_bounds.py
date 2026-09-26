@@ -299,3 +299,59 @@ def test_a_verified_container_never_runs_its_own_truth_method():
         assert predicate(quiet()) is True
     assert live_values.builtin_mapping(type("LoudDict", (dict,), {"__bool__": _boom})()) is None
     assert live_values.builtin_mapping(type("QuietDict", (dict,), {})()) is not None
+
+
+# ---------------------------------------------------------------------------
+# 作業量を受け取らない関数の入口（`elements_within_limit` / `items_within_limit` / `scan_budget`）
+# ---------------------------------------------------------------------------
+
+
+def test_the_unmetered_readers_stop_at_the_bound():
+    limit = live_values.SCAN_LIMIT
+    inside = list(range(limit))
+    assert list(live_values.elements_within_limit(inside)) == inside
+    assert dict(live_values.items_within_limit({"a": 1})) == {"a": 1}
+    for container in (list(range(limit + 1)), tuple(range(limit + 1)), set(range(limit + 1)), "x" * (limit + 1)):
+        assert isinstance(_quick(live_values.elements_within_limit, container), TypeError)
+    assert isinstance(_quick(live_values.items_within_limit, {index: index for index in range(limit + 1)}), TypeError)
+    # iterator は 1 要素ずつ数え、上限を超えた要素で止まる（それより先を引き出さない）
+    pulled = []
+
+    def _source():
+        for index in range(BIG):
+            pulled.append(index)
+            yield index
+
+    with pytest.raises(TypeError):
+        for _ in live_values.elements_within_limit(_source()):
+            pass
+    assert len(pulled) == limit + 1
+
+
+def test_a_shared_scan_bounds_the_sum_of_nested_sequences():
+    half = live_values.SCAN_LIMIT // 2 + 1
+    scan = live_values.scan_budget()
+    assert len(list(live_values.elements_within_limit(list(range(half)), scan))) == half
+    with pytest.raises(TypeError):
+        live_values.elements_within_limit(list(range(half)), scan)
+    # 共有しなければそれぞれは上限の内側
+    assert len(list(live_values.elements_within_limit(list(range(half))))) == half
+
+
+def test_normalizing_truncations_bounds_records_and_references_together():
+    """記録の参照 ID は 1 つの上限を共有する（1 件ずつは内側でも、和が外なら `TypeError`）。"""
+
+    from scripts.function_tracer_pcode.core.runtime_refs.unknowns import (
+        ExpansionBudgetTruncation,
+        normalize_expansion_budget_truncations,
+    )
+
+    half = live_values.SCAN_LIMIT // 2 + 1
+    records = [
+        ExpansionBudgetTruncation(kind="paths", label=f"t{side}",
+                                  referenced_event_ids=tuple(f"r{side}-{index}" for index in range(half)))
+        for side in range(2)
+    ]
+    assert len(normalize_expansion_budget_truncations(records[:1])) == 1
+    with pytest.raises(TypeError):
+        normalize_expansion_budget_truncations(records)

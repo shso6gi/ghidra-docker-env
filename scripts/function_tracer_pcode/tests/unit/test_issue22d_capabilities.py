@@ -2313,3 +2313,14 @@ def test_declared_dependencies_excuse_only_their_declared_number_of_violations()
     rest, used = flow.undeclared(violations)
     assert len(rest) == 1 and used == {key}
     assert set(flow.DECLARED_DEPENDENCY_SITES) == set(flow.DECLARED_DEPENDENCIES)
+
+
+def test_the_snapshot_mapping_order_rejects_duplicate_canonical_keys():
+    """凍結した mapping の並べ替えは key の JSON で並べ、同じ JSON の key（canonical な重複）は拒む。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec
+
+    ordered = SnapshotFingerprintCodec.sorted_mapping_items((("b", 2), ("a", 1), ("c", 3)))
+    assert ordered == (("a", 1), ("b", 2), ("c", 3))
+    with pytest.raises(ValueError, match="duplicate canonical semantic keys"):
+        SnapshotFingerprintCodec.sorted_mapping_items((("a", 1), ("b", 2), ("a", 3)))

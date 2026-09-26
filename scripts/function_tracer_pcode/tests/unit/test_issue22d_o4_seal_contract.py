@@ -354,3 +354,24 @@ def test_output_preparation_never_runs_past_the_contract_even_with_the_budget_of
         assert prepared.prepared_payload_limit() is not None
     default = expression_budget_policy({})
     assert OutputPreparer(default).policy is default
+
+
+def test_the_diagnostics_copy_is_bounded_and_leaves_a_count_marker():
+    """診断の mapping の key の写しは live_values の上限まで。外は件数の marker（判定に使わない）。"""
+
+    from scripts.function_tracer_pcode.checker import output_preparation
+    from scripts.function_tracer_pcode.core import live_values
+    from scripts.function_tracer_pcode.core.budget_policy import BudgetPolicy
+
+    result = create_mock_result(is_equivalent=True)
+    result.diagnostics = {f"k{index}": index for index in range(10 ** 6)}
+    prepared = SimpleNamespace(plan=SimpleNamespace(to_diagnostic=lambda: {}))
+    started = time.perf_counter()
+    output_preparation._attach_budget_diagnostics(result, prepared, BudgetPolicy.unlimited())
+    assert time.perf_counter() - started < 1.0
+    assert result.diagnostics["diagnostics_overflow"] == {"truncated": True, "keys": 10 ** 6}
+    assert set(result.diagnostics) == {"diagnostics_overflow", "expression_budget"}
+    small = create_mock_result(is_equivalent=True)
+    small.diagnostics = {f"k{index}": index for index in range(live_values.SCAN_LIMIT)}
+    output_preparation._attach_budget_diagnostics(small, prepared, BudgetPolicy.unlimited())
+    assert len(small.diagnostics) == live_values.SCAN_LIMIT + 1
