@@ -2030,3 +2030,125 @@ def test_the_contract_numbers_have_no_second_home():
             if value is not None and value >= floor and value in values:
                 offenders.append(f"{path.relative_to(PACKAGE_ROOT)}:{node.lineno} {value}")
     assert offenders == [], offenders
+
+
+def test_a_limitation_event_is_measured_against_the_limitation_bound(monkeypatch):
+    """限界の cause の event は予約した大きさ（`max_limitation_event_units`）までしか publish できない。"""
+
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        ANALYSIS_BUDGET_REASON_ID,
+        observe_analysis_limitation,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        production_signal_scope,
+    )
+
+    contract = AuthorityEventContract(max_limitation_event_units=8 << 10)
+    _connector_, session, _emitted, _pending = _finished_session(
+        monkeypatch, blockers=1, case_id="issue110-limitation-size", contract=contract,
+    )
+    with production_signal_scope(session):
+        observe_analysis_limitation(
+            reason_id=ANALYSIS_BUDGET_REASON_ID, limitation_site="issue110.size",
+            target_key=("issue110-size", "t" * (16 << 10)), evidence_refs=("issue110-size",),
+        )
+    assert session.event_contract.exceeded.bound == "event_payload_units"
+    assert session.event_contract.exceeded.limit == contract.max_limitation_event_units
+
+
+def test_a_truncated_stream_takes_no_new_promise_without_building_its_authority(monkeypatch):
+    _connector_, session, _pending = _truncated_session(monkeypatch, "issue110-no-promise")
+    built = []
+    real_authority = session.domain_signal_encoder.authority_for_signal
+    monkeypatch.setattr(session.domain_signal_encoder, "authority_for_signal",
+                        lambda owner, signal: built.append(signal) or real_authority(owner, signal),
+                        raising=False)
+    assert _defer(session, _sat_blocker(9300)) == 0
+    assert built == [] and session.event_contract.deferred_unpublished == 0
+
+
+def test_a_promise_counts_against_the_total_with_the_limitation_causes(monkeypatch):
+    """約束も全体の上限（限界の cause と契約の超過の専用の枠を含む）で数える。"""
+
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        ANALYSIS_BUDGET_REASON_ID,
+        observe_analysis_limitation,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        production_signal_scope,
+    )
+
+    contract = AuthorityEventContract(max_cause_occurrences=16)
+    _connector_, session, _emitted, _pending = _finished_session(
+        monkeypatch, blockers=0, case_id="issue110-promise-total", contract=contract,
+    )
+    with production_signal_scope(session):
+        for index in range(3):
+            observe_analysis_limitation(
+                reason_id=ANALYSIS_BUDGET_REASON_ID, limitation_site=f"issue110.pt.{index}",
+                target_key=("issue110-pt", index), evidence_refs=(f"issue110-pt-{index}",),
+            )
+    for index in range(20):
+        _defer(session, _sat_blocker(9400 + index))
+    # 全体 16 から専用の枠 1 と限界 3 を除いた 12（予約を除く枠 12 と同じだが、全体の上限でも止まる）
+    assert session.event_contract.deferred_unpublished == contract.max_cause_occurrences - 1 - 3
+
+
+def test_a_direct_emit_overflow_publishes_the_contract_cause_at_once(monkeypatch):
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+        CauseObservedEventAuthority,
+        EventIntent,
+        EventType,
+    )
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+
+    contract = AuthorityEventContract(max_cause_occurrences=16)
+    _connector_, session, _emitted, _pending = _finished_session(
+        monkeypatch, blockers=contract.ordinary_cause_occurrences, case_id="issue110-direct",
+        contract=contract,
+    )
+    authority = session.domain_signal_encoder.authority_for_signal(session, _sat_blocker(9500))
+    with pair_failure_scope(("issue110", "direct"), session.identity.result_occurrence_id):
+        with production_signal_scope(session):
+            with pytest.raises(AuthorityEventContractExceeded):
+                session.emit(EventIntent(EventType.CAUSE_OBSERVED, CauseObservedEventAuthority(authority)))
+    assert session.event_contract.contract_cause_published
+
+
+def test_a_refused_contract_cause_does_not_recurse_and_fails_closed(monkeypatch):
+    """契約の超過の限界の cause そのものが拒まれても（契約の設定の誤り）、再帰せず、判定の前に止まる。"""
+
+    contract = AuthorityEventContract(max_cause_occurrences=16, max_limitation_event_units=1)
+    connector, session, _emitted, _pending = _finished_session(
+        monkeypatch, blockers=30, case_id="issue110-no-recursion", contract=contract,
+    )
+    assert session.stream_truncated and not session.event_contract.contract_cause_published
+    with pytest.raises(ValueError, match="not active"):
+        session.ensure_event_contract_limitation()
+
+
+def test_every_bundle_builder_checks_the_sealed_form_before_its_digest():
+    """bundle を作る関数はどれも、`bundle_digest` を数える直前に encode した形を確かめる。"""
+
+    tree = _canonical_result_tree()
+    builders = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        order = []
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call):
+                name = sub.func.attr if isinstance(sub.func, ast.Attribute) else getattr(sub.func, "id", None)
+                if name == "_check_sealed_form":
+                    order.append(("check", sub.lineno))
+                if name == "charge" and sub.args and isinstance(sub.args[0], ast.Constant) \
+                        and sub.args[0].value == "bundle_digest":
+                    order.append(("digest", sub.lineno))
+        if any(kind == "digest" for kind, _ in order):
+            builders += 1
+            kinds = [kind for kind, _ in sorted(order, key=lambda item: item[1])]
+            assert kinds == ["check", "digest"], (node.name, kinds)
+    assert builders == 2

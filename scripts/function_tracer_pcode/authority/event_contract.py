@@ -244,12 +244,6 @@ class EventContractLedger:
 
         return self.limitation_occurrences > 0
 
-    def refuse_if_truncated(self) -> None:
-        """切られた stream へ ordinary な transaction を作らせない（encode の前に O(1) で拒む）。"""
-
-        if self.exceeded is not None:
-            raise self.exceeded
-
     def _limits(self, kind: str) -> tuple:
         """(event, cause の合計, relation, stream の単位) の上限。専用の枠は使われるまで残す。"""
 
