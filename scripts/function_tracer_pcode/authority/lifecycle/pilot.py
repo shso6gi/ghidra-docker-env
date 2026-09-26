@@ -780,34 +780,65 @@ class ProductionDualWritePilotSession:
     def publish_event_contract_limitation(self) -> Optional[str]:
         """Publish the contract limitation cause of a truncated stream (its dedicated reserve slot).
 
-        Called at the overflow itself, so the durable prefix records the
-        truncation even if the worker never reaches the pair gate or finish,
-        and again before the decision.  Idempotent (the encoder does not
-        observe one limitation twice); returns its occurrence id.
+        Called at the overflow itself and again before the decision; the cause
+        is the first overflow's (its occurrence is bound to the ledger's
+        dedicated slot before it is published, so no other limitation can use
+        the slot).  A checkpoint taken after the overflow therefore records the
+        truncation; a supervisor PROCESS_TIMEOUT decided on an earlier
+        checkpoint keeps its TIMEOUT (process authority precedence, never EQ /
+        NOT_EQ).  Not published while a Phase 7 signal transaction is open
+        (the refused signal's wrapper is still being rolled back; the domain
+        path and the finish publish afterwards).  Idempotent; returns the
+        cause's occurrence id.
         """
 
         exceeded = self.event_contract.exceeded
-        if exceeded is None or self._publishing_contract_limitation:
+        if (
+            exceeded is None or self._publishing_contract_limitation
+            or self._phase7_signal_transactions
+        ):
             return None
         from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+            analysis_limitation_signal,
             observe_analysis_limitation,
         )
         from scripts.function_tracer_pcode.authority.lifecycle.production_context import (
             production_pilot_session_scope,
         )
 
+        fields_ = dict(
+            reason_id=exceeded.reason_id,
+            limitation_site=exceeded.site,
+            target_key=exceeded.target_key,
+            missing_semantic_fact=exceeded.missing_semantic_fact,
+            evidence_refs=exceeded.evidence_refs,
+        )
+        resolver = getattr(self.domain_signal_encoder, "authority_for_signal", None)
+        if not callable(resolver):
+            return None
+        self.event_contract.bind_contract_cause(
+            resolver(self, analysis_limitation_signal(**fields_)).occurrence.occurrence_id
+        )
         self._publishing_contract_limitation = True
         try:
             with production_pilot_session_scope(self):
-                return observe_analysis_limitation(
-                    reason_id=exceeded.reason_id,
-                    limitation_site=exceeded.site,
-                    target_key=exceeded.target_key,
-                    missing_semantic_fact=exceeded.missing_semantic_fact,
-                    evidence_refs=exceeded.evidence_refs,
-                )
+                return observe_analysis_limitation(**fields_)
         finally:
             self._publishing_contract_limitation = False
+
+    def event_contract_diagnostic(self) -> Mapping[str, Any]:
+        """Diagnostic (never an authority input) of a truncated stream: the overflow and its consequences."""
+
+        exceeded = self.event_contract.exceeded
+        return {
+            "bound": exceeded.bound if exceeded is not None else None,
+            "limit": exceeded.limit if exceeded is not None else None,
+            "observed": exceeded.observed if exceeded is not None else None,
+            "contract_cause_published": self.event_contract.contract_cause_published,
+            "truncation_consequences": {
+                kind: dict(entry) for kind, entry in sorted(self.truncation_consequences.items())
+            },
+        }
 
     def ensure_event_contract_limitation(self) -> Optional[str]:
         """A truncated stream carries its own contract limitation cause, active, before the decision.
@@ -1570,6 +1601,16 @@ class ProductionDualWritePilotConnector:
                 for receipt in projection_receipts
             ]
             result.unknown_reason_projection_mode = "V2_CANONICAL"
+        if session.stream_truncated:
+            # Issue #110: the truncation and what followed it are observable
+            # (diagnostic only; the decision is the contract limitation's).
+            from scripts.function_tracer_pcode.checker.diagnostics import (
+                record_failure_diagnostic,
+            )
+
+            record_failure_diagnostic(
+                result, "authority_event_contract", session.event_contract_diagnostic()
+            )
         stream = session.recorder.seal()
         if session.domain_signal_error_kinds:
             session.closed = True

@@ -294,17 +294,23 @@ ANALYSIS_LIMITATION_OBSERVED_SITE = AnalysisLimitationProducerSiteSpec(
 ANALYSIS_LIMITATION_PRODUCER_SITE_SPECS = (ANALYSIS_LIMITATION_OBSERVED_SITE,)
 
 
-def occurrence_limitation_site(occurrence: Any) -> Optional[str]:
-    """この domain の occurrence が記録する限界の場所（それ以外の occurrence は `None`）。
+def analysis_limitation_signal(
+    *,
+    reason_id: str,
+    limitation_site: str,
+    target_key: Any = (),
+    missing_semantic_fact: Any = (),
+    evidence_refs: tuple[str, ...] = (),
+) -> AnalysisLimitationBlockerSignal:
+    """この domain の限界 1 件の signal（観測する側と、その occurrence を先に知りたい側が同じ形を作る）。"""
 
-    encoder は occurrence の `evidence_refs` の先頭に限界の場所を置く（`AnalysisLimitationPilotEncoder`）。
-    その並びの owner はこの module なので、場所を読む側（authority event の契約）はここを通す。
-    """
-
-    if getattr(occurrence, "target_kind", None) != ANALYSIS_LIMITATION_TARGET_KIND:
-        return None
-    refs = getattr(occurrence, "evidence_refs", ())
-    return refs[0] if refs else None
+    return AnalysisLimitationBlockerSignal(
+        declared_reason_id=reason_id,
+        limitation_site=limitation_site,
+        canonical_target_key=target_key,
+        missing_semantic_fact=missing_semantic_fact,
+        evidence_refs=tuple(evidence_refs),
+    )
 
 
 def observe_analysis_limitation(
@@ -332,12 +338,12 @@ def observe_analysis_limitation(
         emit_analysis_limitation_signal,
     )
 
-    signal = AnalysisLimitationBlockerSignal(
-        declared_reason_id=reason_id,
+    signal = analysis_limitation_signal(
+        reason_id=reason_id,
         limitation_site=limitation_site,
-        canonical_target_key=target_key,
+        target_key=target_key,
         missing_semantic_fact=missing_semantic_fact,
-        evidence_refs=tuple(evidence_refs),
+        evidence_refs=evidence_refs,
     )
     emit_analysis_limitation_signal(
         signal,

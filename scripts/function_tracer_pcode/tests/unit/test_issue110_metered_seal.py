@@ -2227,3 +2227,192 @@ def test_finish_fails_closed_when_the_contract_cause_was_never_published(monkeyp
     with pytest.raises(ValueError, match="not active"):
         connector.finish(session, _legacy_result(is_equivalent=True), case_id="issue110-unpublished")
     assert session.stream_truncated
+
+
+# ---------------------------------------------------------------------------
+# 4 回目の review（fresh reviewer）で見つけた穴を塞ぐ test
+# ---------------------------------------------------------------------------
+
+
+def test_the_dedicated_slot_belongs_to_the_first_overflows_cause_only(monkeypatch):
+    """専用の枠は最初の超過の限界の cause の occurrence だけのもの（同じ場所の別の限界は使えない）。"""
+
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        ANALYSIS_BUDGET_REASON_ID,
+        observe_analysis_limitation,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        emit_sat_safety_signal,
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+
+    contract = AuthorityEventContract(max_cause_occurrences=16)
+    connector, session, _emitted, _pending = _finished_session(
+        monkeypatch, blockers=contract.ordinary_cause_occurrences, case_id="issue110-own-slot",
+        contract=contract,
+    )
+    real_publish = type(session).publish_event_contract_limitation
+    monkeypatch.setattr(type(session), "publish_event_contract_limitation", lambda self: None)
+    with pair_failure_scope(("issue110", "own-slot"), session.identity.result_occurrence_id):
+        with production_signal_scope(session):
+            for index in range(contract.limitation_reserve_occurrences - 1):
+                observe_analysis_limitation(
+                    reason_id=ANALYSIS_BUDGET_REASON_ID, limitation_site=f"issue110.own.{index}",
+                    target_key=("issue110-own", index), evidence_refs=(f"issue110-own-{index}",),
+                )
+            assert emit_sat_safety_signal(
+                _sat_blocker(9600), producer_site_manifest_id="sat-safety-blocker-observed",
+            ) == 0
+            assert session.stream_truncated and not session.event_contract.contract_cause_published
+            # 同じ場所（authority.event_contract）の、最初の超過とは別の限界は専用の枠を使えない
+            observe_analysis_limitation(
+                reason_id=ANALYSIS_BUDGET_REASON_ID, limitation_site=EVENT_CONTRACT_LIMITATION_SITE,
+                target_key=("authority_event_contract", "some_other_bound"),
+                evidence_refs=("limit=1",),
+            )
+    assert not session.event_contract.contract_cause_published
+    monkeypatch.setattr(type(session), "publish_event_contract_limitation", real_publish)
+    assert session.ensure_event_contract_limitation() == session.event_contract.contract_cause_id
+    assert session.event_contract.contract_cause_published
+
+
+def test_the_contract_cause_is_not_published_inside_an_open_phase7_transaction(monkeypatch):
+    connector, session, emitted, _pending = _finished_session(
+        monkeypatch, blockers=2, case_id="issue110-open-phase7",
+        contract=AuthorityEventContract(max_cause_occurrences=16),
+    )
+    with pytest.raises(AuthorityEventContractExceeded):
+        session.event_contract._exceed("events", 1, 2)
+    session._phase7_signal_transactions[0] = object()
+    assert session.publish_event_contract_limitation() is None
+    assert not session.event_contract.contract_cause_published
+    del session._phase7_signal_transactions[0]
+    assert session.publish_event_contract_limitation() is not None
+    assert session.event_contract.contract_cause_published
+
+
+def test_a_truncated_pair_reports_its_overflow_as_a_diagnostic(monkeypatch):
+    """切られた pair は超過と、その後の producer の失敗を診断に出す（上限の内側の pair は出さない）。"""
+
+    connector, session, pending = _truncated_session(monkeypatch, "issue110-diagnostic")
+    _shadow_emit(session, 9700)
+    _attribute_pending_limitation(session, pending)
+    result = _legacy_result()
+    connector.finish(session, result, case_id="issue110-diagnostic")
+    diagnostic = result.diagnostics["failures"]["authority_event_contract"]
+    assert diagnostic["bound"] == "cause_occurrences" and diagnostic["contract_cause_published"]
+    assert diagnostic["truncation_consequences"]["AuthorityEventContractExceeded"]["count"] == 1
+    connector, session, _emitted, _pending = _finished_session(
+        monkeypatch, blockers=2, case_id="issue110-no-diagnostic",
+    )
+    result = _legacy_result()
+    connector.finish(session, result, case_id="issue110-no-diagnostic")
+    assert "authority_event_contract" not in (getattr(result, "diagnostics", None) or {}).get("failures", {})
+
+
+def test_event_payload_types_keep_no_data_in_private_fields():
+    """event の payload の型の `_` field は封印の token だけ（射影の外に大きいデータを持たない:
+    封印した形の倍率 `sealed_form_factor` の前提）。"""
+
+    from dataclasses import fields as dataclass_fields, is_dataclass
+
+    from scripts.function_tracer_pcode.authority.lifecycle import stream
+
+    offenders = []
+    for expected in stream._EVENT_PAYLOAD_TYPES.values():
+        for payload_type in (expected if type(expected) is tuple else (expected,)):
+            if not is_dataclass(payload_type):
+                continue
+            for field in dataclass_fields(payload_type):
+                if field.name.startswith("_") and field.type not in ("object", object):
+                    offenders.append(f"{payload_type.__name__}.{field.name}: {field.type}")
+    assert offenders == []
+
+
+def test_a_not_eq_pair_truncated_after_its_counterexample_is_unknown(monkeypatch):
+    """契約が無ければ NOT_EQ の pair（安全な反例）も、切られた stream では UNKNOWN（NOT_EQ を通さない）。"""
+
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        AnalysisLimitationBlockerSignal,
+        AnalysisLimitationPilotEncoder,
+    )
+    from scripts.function_tracer_pcode.authority.domains.sat_safety import SatSafetyPilotEncoder
+    from scripts.function_tracer_pcode.proof.obligations.pair_disposition import (
+        CounterexampleSafetyReceipt,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        CompositeProductionSignalEncoder,
+        SafeCounterexampleProductionSignal,
+        SatSafetyBlockerProductionSignal,
+        emit_sat_safety_signal,
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.process.supervisor import (
+        PROCESS_DURABLE_REASON_REGISTRY,
+        PROCESS_DURABLE_RECOVERY_REGISTRY,
+    )
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+    from scripts.function_tracer_pcode.proof.obligations.pair_disposition import (
+        emit_safe_counterexample_production_signal,
+    )
+
+    def _run(case_id, contract):
+        monkeypatch.setenv(NONCE_ENV, f"{case_id}-occurrence")
+        sat = SatSafetyPilotEncoder()
+        connector = ProductionDualWritePilotConnector(
+            ShadowLifecycleReducer(
+                reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
+                recovery_registry=PROCESS_DURABLE_RECOVERY_REGISTRY,
+            ),
+            domain_signal_encoder=CompositeProductionSignalEncoder({
+                AnalysisLimitationBlockerSignal: AnalysisLimitationPilotEncoder(),
+                SatSafetyBlockerProductionSignal: sat,
+                SafeCounterexampleProductionSignal: sat,
+            }),
+        )
+        session = connector.begin({"case": case_id})
+        if contract is not None:
+            session.event_contract = EventContractLedger(contract)
+        receipt = CounterexampleSafetyReceipt.from_pairwise_validation(
+            query="(assert distinct)\n(check-sat)", model={"x": 1}, premise_digest="typed-premise",
+            pair_key=(0, 1), analysis_safe=True, global_case_replay_safe=True,
+            same_function_replay_safe=True,
+        )
+        with pair_failure_scope(("issue110", case_id), session.identity.result_occurrence_id):
+            with production_signal_scope(session):
+                assert emit_safe_counterexample_production_signal(safety_receipt=receipt) == 1
+                if contract is not None:
+                    big = SatSafetyBlockerProductionSignal(
+                        action="OBSERVED", reason_id="counterexample_analysis_safety_unproven",
+                        canonical_target_key=("issue110-cx-big", "k" * 50_000),
+                        missing_semantic_fact=("counterexample_safety_gate_unproven", "model"),
+                        evidence_refs=("issue110-cx-big",), producer_id="sat_unsafety_reason_producer",
+                    )
+                    assert emit_sat_safety_signal(big, producer_site_manifest_id="sat-safety-blocker-observed") == 0
+        _finish_nonce(session)
+        return session, connector.finish(session, _legacy_result(is_equivalent=False), case_id=case_id)
+
+    _session, control = _run("issue110-cx-control", None)
+    assert control.pilot_result.candidate.decision_receipt.outcome is Outcome.NOT_EQ
+    session, truncated = _run("issue110-cx-truncated", AuthorityEventContract(max_event_payload_units=20_000))
+    assert session.stream_truncated
+    assert truncated.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+
+
+def _finish_nonce(session):
+    from scripts.function_tracer_pcode.authority.contracts import authority_digest
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
+        PINNED_SOLVER_EXECUTION_ISSUER,
+    )
+
+    payload = dict(session.execution_payload)
+    nonce = payload.pop("result_entry_occurrence_nonce")
+    session.result_entry_occurrence_receipt = PINNED_SOLVER_EXECUTION_ISSUER.issue_result_entry_occurrence(
+        result_occurrence_id=session.identity.result_occurrence_id,
+        execution_payload_digest=authority_digest(payload), startup_receipt_digests=(), occurrence_nonce=nonce,
+    )

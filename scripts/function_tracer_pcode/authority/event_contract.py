@@ -209,7 +209,7 @@ class EventContractLedger:
     __slots__ = (
         "contract", "events", "ordinary_occurrences", "limitation_occurrences",
         "relation_rows", "payload_units", "exceeded", "deferred_unpublished",
-        "contract_cause_published", "_deferred_ids", "_published_ids",
+        "contract_cause_published", "contract_cause_id", "_deferred_ids", "_published_ids",
     )
 
     def __init__(self, contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT) -> None:
@@ -227,6 +227,8 @@ class EventContractLedger:
         self.deferred_unpublished = 0
         #: 契約の超過の限界の cause を publish したか（専用の枠を使った）
         self.contract_cause_published = False
+        #: 専用の枠を使える唯一の occurrence（最初の超過の限界の cause。publish する前に session が束ねる）
+        self.contract_cause_id: Optional[str] = None
         #: 約束した occurrence の id（契約で `ordinary + 約束` 以下に抑えるので有界）
         self._deferred_ids: set = set()
         #: publish した cause occurrence の id（契約で `max_cause_occurrences` 以下に抑えるので有界）
@@ -243,6 +245,26 @@ class EventContractLedger:
         """限界の cause（`analysis_limitation` domain）を 1 つ以上 publish したか。"""
 
         return self.limitation_occurrences > 0
+
+    def bind_contract_cause(self, occurrence_id: str) -> None:
+        """最初の超過の限界の cause の occurrence を、専用の枠を使える唯一の occurrence として束ねる。"""
+
+        if self.exceeded is None:
+            raise ValueError("only a truncated stream has a contract limitation cause")
+        if type(occurrence_id) is not str or not occurrence_id:
+            raise TypeError("a contract limitation cause is an exact occurrence id")
+        if self.contract_cause_id not in (None, occurrence_id):
+            raise ValueError("the contract limitation cause is already bound to another occurrence")
+        self.contract_cause_id = occurrence_id
+
+    def _admission_kind(self, intents: Sequence[Any]) -> str:
+        if not intents or not all(_is_limitation_cause(intent) for intent in intents):
+            return _ORDINARY
+        if self.contract_cause_id is not None and all(
+            _occurrence_of(intent).occurrence_id == self.contract_cause_id for intent in intents
+        ):
+            return _CONTRACT
+        return _LIMITATION
 
     def _limits(self, kind: str) -> tuple:
         """(event, cause の合計, relation, stream の単位) の上限。専用の枠は使われるまで残す。"""
@@ -275,7 +297,7 @@ class EventContractLedger:
         """
 
         contract = self.contract
-        kind = _admission_kind(intents)
+        kind = self._admission_kind(intents)
         if self.exceeded is not None and kind == _ORDINARY:
             raise self.exceeded
         event_limit, cause_limit, relation_limit, unit_limit = self._limits(kind)
@@ -458,27 +480,6 @@ def _occurrence_of(intent: Any) -> Any:
     if type(payload) is not CauseObservedEventAuthority:
         return None
     return payload.occurrence_authority.occurrence
-
-
-def _admission_kind(intents: Sequence[Any]) -> str:
-    if not intents or not all(_is_limitation_cause(intent) for intent in intents):
-        return _ORDINARY
-    if all(_is_contract_cause(intent) for intent in intents):
-        return _CONTRACT
-    return _LIMITATION
-
-
-def _is_contract_cause(intent: Any) -> bool:
-    """契約の超過そのものの限界の cause か（専用の枠を使える唯一の event）。"""
-
-    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
-        occurrence_limitation_site,
-    )
-
-    occurrence = _occurrence_of(intent)
-    return occurrence is not None and (
-        occurrence_limitation_site(occurrence) == EVENT_CONTRACT_LIMITATION_SITE
-    )
 
 
 def _is_limitation_cause(intent: Any) -> bool:

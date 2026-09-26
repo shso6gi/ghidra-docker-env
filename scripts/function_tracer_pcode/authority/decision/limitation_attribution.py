@@ -267,7 +267,7 @@ def _unattributed(
             None if occurrence_id is None
             else _active_row_for_occurrence(pilot, occurrence_id)
         )
-    except (TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError) as exc:
         return LimitationAttribution(
             UNATTRIBUTED, limitation.reason_id,
             f"{detail}; the truncated stream's contract cause is not active: "

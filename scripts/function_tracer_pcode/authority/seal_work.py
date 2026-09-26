@@ -130,7 +130,8 @@ class SealWorkBudget(SealWork):
 #: receipt の単位）・`preimage`（結果の payload の preimage の単位）・`execution`（execution payload の
 #: 単位）・`reduction`（reducer の replay: 実行 event × active な occurrence）・`bundle`（封印した bundle
 #: 全体の単位 = 上の和）。係数は各段が値全体を辿る回数（canonicalize・書く・読む・hash chain の検証は
-#: それぞれ 1 回）。
+#: それぞれ 1 回）。これは仕事の **model** で実測ではない: 実際の仕事は各成分の定数倍（例: reducer は
+#: event ごとに active な occurrence の frontier を評価する）で、成分は契約で有界なので上限も有界。
 SEAL_COST_MODEL: Dict[str, Mapping[str, int]] = {
     # 封印（production）
     "pilot_validate": {"stream": 2, "events": 4, "projection": 2, "receipts": 1},
