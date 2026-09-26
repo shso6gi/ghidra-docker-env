@@ -207,7 +207,8 @@ _B = "B: `SCAN_LIMIT` の固定の上限（長さを O(1) で比べてから辿�
 _C = "C: iterator を返し、辿る側が要素ごとに数える"
 _AMORTIZED = (
     "B(償却): 型の信頼の判定 1 つにつき高々 1 つの仮の判定で、深さの組を移るのは高々 `NESTING_LIMIT` 回"
-    "（仕事は判定の数に比例し、判定そのものは `SCAN_LIMIT` の中。循環の test が数を確かめる）"
+    "（仕事は判定の数に比例し、判定そのものは `SCAN_LIMIT` の中。循環の test が数を確かめる）。"
+    "入れ子の上限で切った判定は残さないので、切られる形の型は問い合わせごとに辿り直す（既存の設計）"
 )
 
 LIVE_VALUES_WORK_OWNERS = {
@@ -605,3 +606,26 @@ def test_cloning_a_signature_bounds_the_sum_of_parameters_members_and_copies():
     signature = FunctionSignature.from_analysis(small)
     assert signature.parameters == [{"name": "p", "tags": ["t"]}]
     assert signature.parameters[0]["tags"] is not small.parameters[0]["tags"]
+
+
+def test_no_provisional_verdict_outlives_the_outermost_query():
+    """最も外の判定が終わった後に、仮の判定（型・class の body）も深さの組も残らない（確定するか捨てる）。"""
+
+    def outside():  # pragma: no cover - never called
+        return None
+
+    outside.__code__ = outside.__code__.replace(co_filename="/elsewhere/outside.py")
+    first = type("LeakA", (), {})
+    second = type("LeakB", (), {})
+    first.b = second
+    second.b = second  # 内の型が自分を仮定して根で決まる（外の型の body へ仮定を持ち越さない）
+    tainted = _connected_types("LeakTainted", 6)
+    tainted[3].outside = outside
+    shapes = [first, _connected_types("LeakPeer", 6)[0], tainted[0], _holder_chain("LeakCut")[-1]]
+    state = live_values._NESTING
+    for kind in shapes:
+        live_values.package_type(kind)
+        assert state.provisional_types == {} and state.provisional_bodies == {}
+        assert all(group == [] for group in state.by_depth)
+        assert state.active == {}
+    assert live_values._TRUSTED_BODIES.get(first) is True

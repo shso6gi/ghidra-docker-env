@@ -586,7 +586,11 @@ def _walked_sizes(run):
                 return base.__len__(value)
         if isinstance(value, types.GeneratorType) and value.gi_code in counting:
             return 0
-        if isinstance(value, (types.GeneratorType, type(iter(())), type(iter([])), type(iter({}.items())))):
+        # 列でない値（scalar・record）は辿る列を持たない。それ以外の反復できる値（iterator・view・
+        # `map` など）は長さが分からない: 数えずに辿り得るので `None`
+        if value is None or isinstance(value, (str, bytes, int, float, bool)):
+            return 0
+        if getattr(type(value), "__iter__", None) is not None:
             return None
         return 0
 

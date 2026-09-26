@@ -2365,35 +2365,204 @@ def test_every_counted_record_label_is_checked_at_runtime():
     assert labelled == set(_record_walk_targets().values())
 
 
-#: 渡す値の大きさまで抑える分類（数えた入力・schema の行数・固定の形の構築・読みの上限・索引）。自分の
-#: 反復だけを抑える分類（`_A_FIXED` など）は含めない
-_INPUT_BOUNDING_LABELS = (
-    _B_COUNTED, _B_SCHEMA_ROWS, _A_FIXED_CALL, _A_LIMITATION, _B_MATCHED, _B_OWNER_ELEMENTS, _B_COUNTED_RECORD,
-)
+#: 渡す値の要素の数を抑える呼び出し（作業量へ数えながら渡す generator・読みの上限）。この呼び出しの値は
+#: 呼ぶ側の引数に由来しても有界
+_COUNTING_CALLS = frozenset({
+    "_counted", "elements_within_limit", "items_within_limit", "prefix_within_limit", "copied_within_limit",
+})
+#: record の型の `__post_init__` が辿る field（構築の keyword）
+_WALKED_FIELDS = {"EquivalenceResult": frozenset({"unknown_reasons", "unknown_recovery_actions"})}
 
 
-def _bounds_its_input(index, key) -> bool:
-    """呼ぶ側が渡す値の大きさを抑える関数か: 渡す値まで抑える分類がある、作業量の引数を受け取る、
-    または walker が要素ごとに作業量を渡す `Reducer` の method。"""
+def _call_name(func: ast.expr) -> Optional[str]:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
 
-    module, qual = key
-    if _PROPORTIONAL_WORK_OWNERS.get((module[len(flow.PKG) + 1:], qual)) in _INPUT_BOUNDING_LABELS:
-        return True
-    function = index.functions.get(key)
-    if function is not None:
-        names = {arg.arg for arg in function.args.posonlyargs + function.args.args + function.args.kwonlyargs}
-        if names & flow.WORK_PARAMETER_NAMES:
-            return True
-    if "." in qual and qual.rsplit(".", 1)[1] in ("add", "result"):
-        cls = qual.rsplit(".", 1)[0]
-        return index.subclass_of(module, cls, (flow.PKG + ".core.json_encoding", "Reducer"))
-    return False
+
+def _parameters(function) -> List[str]:
+    args = function.args
+    names = [arg.arg for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
+    names += [arg.arg for arg in (args.vararg, args.kwarg) if arg is not None]
+    return names
+
+
+def _own_statements(function):
+    """関数の本体の node（入れ子の関数・class の中は除く）。"""
+
+    pending = list(function.body)
+    while pending:
+        node = pending.pop()
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                pending.append(child)
+
+
+class _Summaries:
+    """package の関数の戻り値へ流れる引数の名前（関数ごとに 1 度だけ。再帰の途中は `None` = 保守的）。"""
+
+    def __init__(self, index):
+        self.index = index
+        self.memo: dict = {}
+        self.active: set = set()
+
+    def resolve(self, module: str, func: ast.expr):
+        if isinstance(func, ast.Name):
+            key = (module, func.id)
+            if key in self.index.functions:
+                return key
+            imported = self.index.imports.get(module, {}).get(func.id)
+            if imported is not None and imported in self.index.functions:
+                return imported
+        return None
+
+    def returns(self, key):
+        if key in self.memo:
+            return self.memo[key]
+        if key in self.active:
+            return None
+        self.active.add(key)
+        try:
+            flow_of = _Forwarding(self.index.functions[key], key[0], self)
+            found: Set[str] = set()
+            for node in flow_of.nodes:
+                if isinstance(node, (ast.Return, ast.Yield, ast.YieldFrom)) and node.value is not None:
+                    found |= flow_of.of(node.value)
+        finally:
+            self.active.discard(key)
+        self.memo[key] = found
+        return found
+
+
+class _Forwarding:
+    """関数の中で、どの引数の値がどの式へ流れるか（代入・反復・with を不動点まで）。数える呼び出し・
+    比較・否定で止まり、package の関数の呼び出しは戻り値へ流れる引数だけを通す（解決できない呼び出しは
+    全部の引数を通す: 保守的）。"""
+
+    def __init__(self, function, module: str, summaries: "_Summaries"):
+        self.module = module
+        self.summaries = summaries
+        self.taint = {name: {name} for name in _parameters(function)}
+        nodes = list(_own_statements(function))
+        self.nodes = nodes
+        for _ in range(12):
+            changed = False
+            for node in nodes:
+                for targets, value in self._bindings(node):
+                    flow_in = self.of(value)
+                    for target in targets:
+                        for name in (n.id for n in ast.walk(target) if isinstance(n, ast.Name)):
+                            before = self.taint.setdefault(name, set())
+                            if not flow_in <= before:
+                                before |= flow_in
+                                changed = True
+            if not changed:
+                break
+
+    @staticmethod
+    def _bindings(node):
+        if isinstance(node, ast.Assign):
+            yield node.targets, node.value
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            yield [node.target], node.value
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            yield [node.target], node.iter
+        elif isinstance(node, ast.comprehension):
+            yield [node.target], node.iter
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    yield [item.optional_vars], item.context_expr
+        elif isinstance(node, ast.NamedExpr):
+            yield [node.target], node.value
+
+    def of(self, expr) -> Set[str]:
+        if expr is None:
+            return set()
+        if isinstance(expr, ast.Name):
+            return set(self.taint.get(expr.id, ()))
+        if isinstance(expr, ast.IfExp):
+            # 条件は値へ流れない（どちらかの枝の値）
+            return self.of(expr.body) | self.of(expr.orelse)
+        if isinstance(expr, ast.Compare) or (isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not)):
+            # 比較・否定の値は真偽（辿る列を持たない）
+            return set()
+        if isinstance(expr, ast.Call):
+            if _call_name(expr.func) in _COUNTING_CALLS:
+                return set()
+            key = self.summaries.resolve(self.module, expr.func)
+            flows = None if key is None else self.summaries.returns(key)
+            if flows is not None:
+                params = _parameters(self.summaries.index.functions[key])
+                found: Set[str] = set()
+                for position, arg in enumerate(expr.args):
+                    if isinstance(arg, ast.Starred) or position >= len(params) or params[position] in flows:
+                        found |= self.of(arg)
+                for keyword in expr.keywords:
+                    if keyword.arg is None or keyword.arg in flows:
+                        found |= self.of(keyword.value)
+                return found
+        found = set()
+        for child in ast.iter_child_nodes(expr):
+            if not isinstance(child, ast.Lambda):
+                found |= self.of(child)
+        return found
+
+
+def _forwarded(index, caller, target, walked: Set[str]) -> Set[str]:
+    """`caller` が `target` を呼ぶ式で、`target` が辿る入力（`walked`）へ流れる `caller` の引数の名前。
+    呼ぶ式を見つけられなければ（`replace` など）、全部の引数を渡すとみなす（保守的）。"""
+
+    function = index.functions[caller]
+    flow_of = _Forwarding(function, caller[0], _Summaries(index))
+    module, qual = target
+    owner_cls, _, method = qual.rpartition(".")
+    target_function = index.functions.get(target)
+    if method == "__post_init__":
+        names = {owner_cls}
+        positional: List[str] = []
+    else:
+        names = {method}
+        positional = _parameters(target_function) if target_function is not None else []
+    forwarded: Set[str] = set()
+    matched = False
+    for node in flow_of.nodes:
+        if not (isinstance(node, ast.Call) and _call_name(node.func) in names):
+            continue
+        matched = True
+        params = list(positional)
+        if params and params[0] in ("self", "cls") and isinstance(node.func, ast.Attribute):
+            receiver = params.pop(0)
+            if receiver in walked:
+                forwarded |= flow_of.of(node.func.value)
+        for position, arg in enumerate(node.args):
+            name = params[position] if position < len(params) else None
+            if isinstance(arg, ast.Starred) or name is None or name in walked:
+                forwarded |= flow_of.of(arg)
+        for keyword in node.keywords:
+            if keyword.arg is None or keyword.arg in walked:
+                forwarded |= flow_of.of(keyword.value)
+    if not matched:
+        return set(_parameters(function))
+    return forwarded
+
+
+def _walked_inputs(index, target) -> Set[str]:
+    module, qual = target
+    owner_cls, _, method = qual.rpartition(".")
+    if method == "__post_init__":
+        return set(_WALKED_FIELDS.get(owner_cls, ()))
+    function = index.functions.get(target)
+    return set(_parameters(function)) if function is not None else set()
 
 
 def test_counted_record_functions_reach_the_bounded_path_only_through_bounding_callers():
-    """「数えてから辿る」record の関数の bounded path の呼び出し元を、監査が解決した呼び出しの辺で遡ると、
-    どの経路も入力を抑える関数（分類のある owner・作業量を受け取る関数・`Reducer`）で終わる（分類の無い
-    中継の関数を通るだけで、入口から live な入力を数えずに渡す経路は無い）。"""
+    """「数えてから辿る」record の関数が辿る入力を、bounded path の呼び出しの辺（監査が解決したもの）で遡る:
+    呼ぶ側が自分で作った値（引数に由来しない値・数える呼び出しを通した値）を渡す経路で終わり、入口の
+    引数（live な入力）を数えずにそのまま辿る経路は無い。固定の形の構築も、自分の引数を渡すなら中継として遡る。"""
 
     _violations, _analyzed, index, _missing = flow.audit(PACKAGE_ROOT)
     callers = flow.audit.last.callers
@@ -2403,20 +2572,24 @@ def test_counted_record_functions_reach_the_bounded_path_only_through_bounding_c
     }
     unbounded = []
     for target in sorted(labelled):
-        pending = [(target, (target,))]
-        seen = {target}
         assert callers.get(target), target  # bounded path から呼ばれている（空の合格にしない）
+        pending = [(target, frozenset(_walked_inputs(index, target)), (target,))]
+        seen = set()
         while pending:
-            key, path = pending.pop()
+            key, walked, path = pending.pop()
             for caller in sorted(callers.get(key, ())):
-                if caller in labelled or _bounds_its_input(index, caller):
+                if caller in labelled or caller not in index.functions:
                     continue
-                if caller in seen:
+                if flow.work_owner(index, caller) == "B":
+                    # 受け取った作業量を反復ごとに数えるか渡す関数（作業量の owner）: 渡す値はその作業量の中
                     continue
-                seen.add(caller)
+                forwarded = frozenset(_forwarded(index, caller, key, set(walked)))
+                if not forwarded or (caller, forwarded) in seen:
+                    continue
+                seen.add((caller, forwarded))
                 chain = path + (caller,)
-                if not callers.get(caller) or len(chain) > 8:
-                    unbounded.append(tuple(f"{m[len(flow.PKG) + 1:]}::{q}" for m, q in chain))
+                if not callers.get(caller) or len(chain) > 10:
+                    unbounded.append((tuple(f"{m[len(flow.PKG) + 1:]}::{q}" for m, q in chain), sorted(forwarded)))
                     continue
-                pending.append((caller, chain))
+                pending.append((caller, forwarded, chain))
     assert unbounded == []

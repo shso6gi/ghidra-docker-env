@@ -289,9 +289,13 @@ class EquivalenceResult:
         solver_results = live_values.attribute(self, "solver_results")
         if solver_results is None or not live_values.as_bool(solver_results):
             return False
-        if live_values.is_kind(solver_results, ParallelResult):
-            # solver の結果の owner が作ったときに数えた事実（行を辿り直さない）
-            return live_values.attribute(solver_results, "timed_out") is True
+        timed_out = (
+            live_values.instance_state(solver_results, "timed_out", None)
+            if live_values.is_kind(solver_results, ParallelResult) else None
+        )
+        if type(timed_out) is bool:
+            # solver の結果の owner が作ったときに数えた事実（行を辿り直さない。作っていない値は下で読む）
+            return timed_out
         results = live_values.attribute(solver_results, "results")
         if results is None or not live_values.as_bool(results):
             return False

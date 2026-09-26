@@ -239,7 +239,9 @@ def package_type(kind: type) -> bool:
     finally:
         del state.active[kind]
         assumed, cut = state.assumed, state.cut
-        state.assumed, state.cut = min(outer_assumed, assumed), outer_cut or cut
+        # 外の判定へ渡す仮定は、終わった自分（とその内）より外の型のものだけ（自分を仮定した分は下で決まる）
+        state.assumed = min(outer_assumed, assumed if assumed < depth else NESTING_LIMIT + 1)
+        state.cut = outer_cut or cut
         if not decided or cut:
             # 例外で抜けた・上限で切った判定: この判定を仮定した仮の判定も残さない
             _settle(state, depth, commit=False)
