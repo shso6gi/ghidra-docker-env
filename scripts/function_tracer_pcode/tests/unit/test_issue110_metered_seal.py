@@ -2082,16 +2082,20 @@ def test_a_promise_counts_against_the_total_with_the_limitation_causes(monkeypat
     _connector_, session, _emitted, _pending = _finished_session(
         monkeypatch, blockers=0, case_id="issue110-promise-total", contract=contract,
     )
+    limitations = 5  # 共有の予約（3）より多い: 全体の上限が予約を除く枠より先に効く
     with production_signal_scope(session):
-        for index in range(3):
+        for index in range(limitations):
             observe_analysis_limitation(
                 reason_id=ANALYSIS_BUDGET_REASON_ID, limitation_site=f"issue110.pt.{index}",
                 target_key=("issue110-pt", index), evidence_refs=(f"issue110-pt-{index}",),
             )
+    assert session.event_contract.limitation_occurrences == limitations
     for index in range(20):
         _defer(session, _sat_blocker(9400 + index))
-    # 全体 16 から専用の枠 1 と限界 3 を除いた 12（予約を除く枠 12 と同じだが、全体の上限でも止まる）
-    assert session.event_contract.deferred_unpublished == contract.max_cause_occurrences - 1 - 3
+    # 全体 16 から専用の枠 1 と限界 5 を除いた 10（予約を除く枠 12 より小さい）
+    expected = contract.max_cause_occurrences - 1 - limitations
+    assert expected < contract.ordinary_cause_occurrences
+    assert session.event_contract.deferred_unpublished == expected
 
 
 def test_a_direct_emit_overflow_publishes_the_contract_cause_at_once(monkeypatch):
@@ -2152,3 +2156,74 @@ def test_every_bundle_builder_checks_the_sealed_form_before_its_digest():
             kinds = [kind for kind, _ in sorted(order, key=lambda item: item[1])]
             assert kinds == ["check", "digest"], (node.name, kinds)
     assert builders == 2
+
+
+@pytest.mark.parametrize("part", ["projection", "receipts", "execution"])
+def test_each_sealed_part_stops_at_its_contract_bound(part):
+    """projection・receipt・execution payload は、それぞれの上限まで数えながら測って止まる。"""
+
+    contract = AuthorityEventContract(
+        max_projection_units=1 << 10, max_receipt_units=1 << 10, max_execution_payload_units=1 << 10,
+    )
+    big = {"rows": "r" * 5_000}
+    parts = dict(projection=None, receipts=(), execution=None)
+    parts[part] = (big,) if part == "receipts" else big
+    with pytest.raises(BundleWorkExceeded) as refused:
+        SealPlan.price(SealWorkBudget.for_result(), stream=SimpleNamespace(events=()), preimage=None,
+                       contract=contract, **parts)
+    assert refused.value.kind == "contract"
+
+
+def test_a_direct_emit_after_an_overflow_is_refused_even_within_bounds(monkeypatch):
+    """超過は sticky: 1 つの大きい event で超えた後は、上限の内側の小さい直接の emit も拒む。"""
+
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        SatSafetyBlockerProductionSignal,
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+        CauseObservedEventAuthority,
+        EventIntent,
+        EventType,
+    )
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+
+    monkeypatch.setenv(NONCE_ENV, "issue110-direct-sticky-occurrence")
+    connector = _connector()
+    session = connector.begin({"case": "issue110-direct-sticky"})
+    small = canonical_units_within(_sat_blocker(0), 10**9)
+    session.event_contract = EventContractLedger(AuthorityEventContract(max_event_payload_units=small * 40))
+    big = SatSafetyBlockerProductionSignal(
+        action="OBSERVED", reason_id="counterexample_analysis_safety_unproven",
+        canonical_target_key=("issue110-direct-big", "k" * (small * 60)),
+        missing_semantic_fact=("counterexample_safety_gate_unproven", "model"),
+        evidence_refs=("issue110-direct-big",), producer_id="sat_unsafety_reason_producer",
+    )
+
+    def _intent(signal):
+        authority = session.domain_signal_encoder.authority_for_signal(session, signal)
+        return EventIntent(EventType.CAUSE_OBSERVED, CauseObservedEventAuthority(authority))
+
+    with pair_failure_scope(("issue110", "direct-sticky"), session.identity.result_occurrence_id):
+        with production_signal_scope(session):
+            with pytest.raises(AuthorityEventContractExceeded):
+                session.emit(_intent(big))
+            count = session.recorder.event_count
+            with pytest.raises(AuthorityEventContractExceeded):
+                session.emit(_intent(_sat_blocker(1)))
+    assert session.recorder.event_count == count
+
+
+def test_finish_fails_closed_when_the_contract_cause_was_never_published(monkeypatch):
+    """超過の時点の publish が失敗していても、判定の前の確認が止める（切られた stream を判定しない）。"""
+
+    connector, session = _eq_session(monkeypatch, "issue110-unpublished")
+    reserve = AUTHORITY_EVENT_CONTRACT.limitation_reserve_occurrences * (
+        AUTHORITY_EVENT_CONTRACT.max_limitation_event_units
+    )
+    session.event_contract = EventContractLedger(AuthorityEventContract(max_stream_payload_units=reserve + 1))
+    # 契約の超過の限界の cause を publish できない（例: 設定の誤り）状態を作る
+    monkeypatch.setattr(type(session), "publish_event_contract_limitation", lambda self: None)
+    with pytest.raises(ValueError, match="not active"):
+        connector.finish(session, _legacy_result(is_equivalent=True), case_id="issue110-unpublished")
+    assert session.stream_truncated
