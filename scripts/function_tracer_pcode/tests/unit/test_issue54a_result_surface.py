@@ -26,6 +26,7 @@ from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.tests.unit._finalization_support import (
     _independent_finalization,
 )
+from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
 
 
 def _attempt(**overrides):
@@ -136,7 +137,7 @@ def test_rewrite_info_changes_the_payload_preimage_but_not_the_semantic_projecti
             bundle,
             result_payload_preimage=preimage,
             bundle_verification_key_id="issue54a-test-key",
-            bundle_verification_key=b"k" * 32,
+            bundle_verification_key=b"k" * 32, work=SealWorkBudget.for_result()
         )
         assert validated["outcome"] == "EQUIVALENT"
 

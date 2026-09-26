@@ -15,6 +15,9 @@ import threading
 from typing import Any, Iterator, Mapping, Optional
 
 from scripts.function_tracer_pcode.authority.process import store_layout as layout
+from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
+    read_canonical_envelope,
+)
 from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrence,
     CauseOccurrenceAuthority,
@@ -228,6 +231,12 @@ class SupervisorTerminalSegment:
         self, prefix: EventStreamPrefixView,
         timeout_receipt: SignedProcessAuthorityReceipt,
     ) -> None:
+        # Issue #110: 検証の仕事は event 数に比例する: 契約の外の stream は検証を始めない
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            require_events_within_contract,
+        )
+
+        require_events_within_contract(len(self.composite_stream.events))
         prefix.validate()
         self.composite_stream.validate()
         events = self.composite_stream.events
@@ -460,9 +469,11 @@ class ProcessSupervisorAuthorityFactory:
         from scripts.function_tracer_pcode.authority.decision.canonical_result import (
             validate_canonical_result_finalization_bundle,
         )
+        from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
 
         return validate_canonical_result_finalization_bundle(
             bundle,
+            work=SealWorkBudget.for_result(),
             result_payload_preimage=result_payload_preimage,
             bundle_verification_key_id=self.supervisor_signing_key_id,
             bundle_verification_key=self.__keys["supervisor"],
@@ -1338,6 +1349,7 @@ class ProcessSupervisorAuthorityFactory:
             error_kind=None,
             seal_key_id=self.supervisor_signing_key_id,
             seal_key=self.__keys["supervisor"],
+            work=_supervisor_seal_work(),
         )
         payload = {
             "launch_receipt_digest": launch.receipt_digest,
@@ -1436,6 +1448,12 @@ class ProcessSupervisorAuthorityFactory:
             }
         }
         segment = bundle.terminal_segment
+        # Issue #110: 契約の外の stream は検証を始めない（O(1)）
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            require_events_within_contract,
+        )
+
+        require_events_within_contract(len(segment.composite_stream.events))
         segment.composite_stream.validate()
         events = segment.composite_stream.events
         if len(events) < 2:
@@ -1660,6 +1678,12 @@ class ProcessSupervisorAuthorityFactory:
     ) -> None:
         self.validate(launch)
         self.validate(error)
+        # Issue #110: 契約の外の stream は検証を始めない（O(1)）
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            require_events_within_contract,
+        )
+
+        require_events_within_contract(len(segment.composite_stream.events))
         segment.composite_stream.validate()
         events = segment.composite_stream.events
         expected_prefix_kind = error.payload["worker_prefix_kind"]
@@ -1763,6 +1787,7 @@ class ProcessSupervisorAuthorityFactory:
             error_kind=error.payload["error_kind"],
             seal_key_id=self.supervisor_signing_key_id,
             seal_key=self.__keys["supervisor"],
+            work=_supervisor_seal_work(),
         )
         payload = {
             "launch_receipt_digest": launch.receipt_digest,
@@ -1852,6 +1877,14 @@ class ResolvedChain:
 #: 別の thread は例外にせず、flock で待つ（thread ごとの記録）。
 _HELD_LOCKS = threading.local()
 _OWNERSHIP_TOKEN = object()
+
+
+def _supervisor_seal_work() -> Any:
+    """Issue #110: 1 回の terminal の封印（supervisor の固定の形の preimage）の有限の作業量。"""
+
+    from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
+
+    return SealWorkBudget.for_supervisor()
 
 
 def _held(kind: str) -> set[str]:
@@ -2080,8 +2113,10 @@ class DurableCheckpointStore:
         path = self.directory / layout.RESULT_ENVELOPE
         if not path.exists():
             return terminal_evidence.EnvelopeObservation(False, None)
+        # Issue #110: the same bounded read as the terminal snapshot (the digest
+        # of at most the contract bound + 1 bytes; whole-file within bounds).
         return terminal_evidence.EnvelopeObservation(
-            True, hashlib.sha256(path.read_bytes()).hexdigest(),
+            True, read_canonical_envelope(path).sha256,
         )
 
     @staticmethod

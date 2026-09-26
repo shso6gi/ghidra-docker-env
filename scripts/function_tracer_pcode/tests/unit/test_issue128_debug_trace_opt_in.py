@@ -57,6 +57,7 @@ from scripts.function_tracer_pcode.tests.unit.test_issue128_cause_aggregate impo
     _unary_cause,
     _without_trace,
 )
+from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
@@ -474,7 +475,7 @@ def test_canonical_result_validates_and_replays_without_debug_trace(tmp_path, mo
         bundle,
         result_payload_preimage=payload_without,
         bundle_verification_key_id="issue128b-test-key",
-        bundle_verification_key=b"k" * 32,
+        bundle_verification_key=b"k" * 32, work=SealWorkBudget.for_result()
     )
     assert validated["outcome"] == "EQUIVALENT"
 
@@ -512,7 +513,7 @@ def test_omitting_debug_trace_changes_preimage_but_no_semantic_field(tmp_path, m
             bundle,
             result_payload_preimage=preimage,
             bundle_verification_key_id="issue128b-test-key",
-            bundle_verification_key=b"k" * 32,
+            bundle_verification_key=b"k" * 32, work=SealWorkBudget.for_result()
         )
         assert validated["outcome"] == "EQUIVALENT"
 

@@ -34,6 +34,7 @@ from scripts.function_tracer_pcode.core.stage_clock import (
     split_region_by_ancestor,
     stage_region,
 )
+from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
 
 # 計測の分解能に依存しない程度に長い区間（合計しても 1 秒未満）。
 TICK = 0.02
@@ -816,7 +817,7 @@ def test_stages_change_preimage_but_no_semantic_field(tmp_path, monkeypatch):
             bundle,
             result_payload_preimage=preimage,
             bundle_verification_key_id="issue124-test-key",
-            bundle_verification_key=b"k" * 32,
+            bundle_verification_key=b"k" * 32, work=SealWorkBudget.for_result()
         )
         assert validated["outcome"] == "EQUIVALENT"
 

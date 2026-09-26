@@ -828,7 +828,7 @@ def _fake_equivalence_environment(monkeypatch, tmp_path, journal_path):
     monkeypatch.setattr(checker_package, "TypeFixerConfig", lambda *_a, **_k: object())
     monkeypatch.setattr(cause_aggregate, "attach_cause_aggregate", lambda _result: None)
     monkeypatch.setattr(
-        canonical_result, "persist_canonical_result_envelope", lambda _payload: None
+        canonical_result, "persist_canonical_result_envelope", lambda _payload, **_kw: None
     )
 
     def _record_output(content, output_path, quiet):

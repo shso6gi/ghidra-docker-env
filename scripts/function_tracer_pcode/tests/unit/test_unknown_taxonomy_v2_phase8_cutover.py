@@ -43,6 +43,7 @@ from scripts.function_tracer_pcode.reporting.result_summary import (
     classify_result_payload,
     read_validation_log_record,
 )
+from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
 
 
 def _projection(result_id, *, active=False, open_requirement=False):
@@ -469,12 +470,12 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
     bundle = build_canonical_result_finalization_bundle(
         result_payload_preimage=preimage,
         evidence=evidence,
-        session=session,
+        session=session, work=SealWorkBudget.for_result()
     )
     assert validate_canonical_result_finalization_bundle(
         bundle,
         bundle_verification_key_id="phase10-test-key",
-        bundle_verification_key=b"k" * 32,
+        bundle_verification_key=b"k" * 32, work=SealWorkBudget.for_result()
     )["outcome"] == "EQUIVALENT"
     forged_signature = deepcopy(bundle)
     forged_signature["bundle_signature"] = "0" * 64
@@ -482,7 +483,7 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
         validate_canonical_result_finalization_bundle(
             forged_signature,
             bundle_verification_key_id="phase10-test-key",
-            bundle_verification_key=b"k" * 32,
+            bundle_verification_key=b"k" * 32, work=SealWorkBudget.for_result()
         )
     semantic_a = _semantic_projection(
         preimage, evidence.pilot_result,
@@ -496,7 +497,7 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
     payload = {**preimage, "canonical_result_finalization_bundle": bundle}
     monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_SUPERVISOR_ROOT", str(tmp_path))
     monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_EXECUTION_NONCE", "eq-bundle")
-    path = persist_canonical_result_envelope(payload)
+    path = persist_canonical_result_envelope(payload, work=SealWorkBudget.for_result())
     assert path == tmp_path / "eq-bundle" / layout.RESULT_ENVELOPE
     envelope = json.loads(path.read_text(encoding="utf-8"))
     persisted = envelope["canonical_result_payload"]
@@ -509,7 +510,7 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
         result_payload_preimage={
             key: value for key, value in persisted.items()
             if key != "canonical_result_finalization_bundle"
-        },
+        }, work=SealWorkBudget.for_result()
     )["outcome"] == "EQUIVALENT"
 
     forged = deepcopy(persisted_bundle)
@@ -524,7 +525,7 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
     forged["bundle_digest"] = authority_digest(forged_body)
     with pytest.raises(ValueError, match="terminalization"):
         validate_canonical_result_finalization_bundle(
-            forged, result_payload_preimage=preimage
+            forged, result_payload_preimage=preimage, work=SealWorkBudget.for_result()
         )
 
     forged = deepcopy(persisted_bundle)
@@ -543,7 +544,7 @@ def test_eq_cutover_is_bound_to_audited_comparison_receipt_signal(
     forged["bundle_digest"] = authority_digest(forged_body)
     with pytest.raises(ValueError, match="semantic result projection"):
         validate_canonical_result_finalization_bundle(
-            forged, result_payload_preimage=preimage
+            forged, result_payload_preimage=preimage, work=SealWorkBudget.for_result()
         )
 
 
@@ -651,7 +652,7 @@ def test_canonical_bundle_rejects_foreign_result_entry_occurrence(
     bundle = build_canonical_result_finalization_bundle(
         result_payload_preimage={"final_outcome": "EQUIVALENT"},
         evidence=evidence,
-        session=session,
+        session=session, work=SealWorkBudget.for_result()
     )
     foreign = PINNED_SOLVER_EXECUTION_ISSUER.issue_result_entry_occurrence(
         result_occurrence_id="foreign-result-occurrence",
@@ -674,7 +675,7 @@ def test_canonical_bundle_rejects_foreign_result_entry_occurrence(
             forged,
             result_payload_preimage={"final_outcome": "EQUIVALENT"},
             bundle_verification_key_id="occurrence-key",
-            bundle_verification_key=key,
+            bundle_verification_key=key, work=SealWorkBudget.for_result()
         )
 
 
@@ -714,7 +715,7 @@ def test_signed_early_error_bundle_requires_typed_result_entry_occurrence(
     evidence, session = result._canonical_finalization_context
     bundle = build_canonical_result_finalization_bundle(
         result_payload_preimage={"final_outcome": "ERROR"},
-        evidence=evidence, session=session,
+        evidence=evidence, session=session, work=SealWorkBudget.for_result()
     )
     occurrence = bundle["result_entry_occurrence_receipt"]
     assert occurrence["authority_kind"] == (
@@ -735,5 +736,5 @@ def test_signed_early_error_bundle_requires_typed_result_entry_occurrence(
             forged,
             result_payload_preimage={"final_outcome": "ERROR"},
             bundle_verification_key_id="early-error-key",
-            bundle_verification_key=key,
+            bundle_verification_key=key, work=SealWorkBudget.for_result()
         )

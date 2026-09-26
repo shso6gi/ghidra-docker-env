@@ -290,12 +290,18 @@ def _emit_import_error_result(
     journal_stage_start("result_emit", {"kind": "emission", "path": "import_error"})
     result_payload = result.to_dict()
     evidence, session = result._canonical_finalization_context
+    # Issue #110: the seal and the persisted-envelope verification run within
+    # one finite seal work budget (no unmetered seal).
+    from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
+
+    seal_work = SealWorkBudget.for_result()
     bundle = build_canonical_result_finalization_bundle(
-        result_payload_preimage=result_payload, evidence=evidence, session=session
+        result_payload_preimage=result_payload, evidence=evidence, session=session,
+        work=seal_work,
     )
     result.canonical_result_finalization_bundle = bundle
     result_payload["canonical_result_finalization_bundle"] = bundle
-    persist_canonical_result_envelope(result_payload)
+    persist_canonical_result_envelope(result_payload, work=seal_work)
     output_result(
         result.to_string(
             verbose=getattr(args, "verbose", False),
@@ -633,6 +639,11 @@ def run_equivalence_check(args):
             persist_canonical_result_envelope,
         )
 
+        from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
+
+        # Issue #110: one finite seal work budget for the seal and the
+        # persisted-envelope verification of this result.
+        seal_work = SealWorkBudget.for_result()
         finalization_context = getattr(
             result, "_canonical_finalization_context", None
         )
@@ -642,11 +653,12 @@ def run_equivalence_check(args):
                 result_payload_preimage=result_payload,
                 evidence=evidence,
                 session=session,
+                work=seal_work,
             )
             result.canonical_result_finalization_bundle = bundle
             result_payload["canonical_result_finalization_bundle"] = bundle
 
-        persist_canonical_result_envelope(result_payload)
+        persist_canonical_result_envelope(result_payload, work=seal_work)
         json_payload = json.dumps(result_payload, ensure_ascii=False, sort_keys=True)
         json_content = "\n".join(
             (
