@@ -1076,3 +1076,46 @@ def test_supervisor_segments_check_the_event_count_before_validating():
             assert checks and min(c.lineno for c in checks) < min(c.lineno for c in calls), node.name
             guarded += 1
     assert guarded == 3
+
+
+def test_limitation_causes_use_the_reserve_up_to_the_contract_only(monkeypatch):
+    """予約した枠の限界の cause も、cause の上限そのものを超えては publish できない。"""
+
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        ANALYSIS_BUDGET_REASON_ID,
+        observe_analysis_limitation,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+
+    monkeypatch.setenv(NONCE_ENV, "issue110-reserve-occurrence")
+    connector = _connector()
+    session = connector.begin({"case": "issue110-reserve"})
+    session.event_contract = EventContractLedger(AuthorityEventContract(max_cause_occurrences=8))
+    with pair_failure_scope(("issue110", "reserve"), session.identity.result_occurrence_id):
+        with production_signal_scope(session):
+            for index in range(12):
+                observe_analysis_limitation(
+                    reason_id=ANALYSIS_BUDGET_REASON_ID, limitation_site=f"issue110.site.{index}",
+                    target_key=("issue110", index), evidence_refs=(f"issue110-{index}",),
+                )
+    assert session.event_contract.limitation_occurrences == 8
+    assert session.recorder.event_count == 8
+    assert session.event_contract.exceeded.bound == "cause_occurrences"
+
+
+def test_the_stream_total_bound_is_enforced_while_measuring(monkeypatch):
+    """stream 全体の上限は、1 event の上限より小さい残りまでしか測らずに止まる。"""
+
+    one = canonical_units_within(_sat_blocker(0), 10**9)
+    contract = AuthorityEventContract(
+        max_stream_payload_units=one * 3 + 4 * 64 * 1024, max_cause_occurrences=64,
+    )
+    _connector_, session, emitted, _pending = _finished_session(
+        monkeypatch, blockers=10, case_id="issue110-stream", contract=contract,
+    )
+    assert session.event_contract.exceeded.bound == "stream_payload_units"
+    assert session.event_contract.payload_units <= contract.ordinary_stream_payload_units
+    assert sum(emitted) <= 4
