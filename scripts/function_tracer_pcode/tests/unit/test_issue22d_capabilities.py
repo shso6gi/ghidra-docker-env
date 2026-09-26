@@ -50,7 +50,7 @@ _IDENTITY_KEY_CALLERS = {
 
 
 def test_j19_the_declared_dependencies_are_exactly_the_ones_owned_elsewhere():
-    """作業量の外の依存は宣言した場所だけ（#110: 封印と authority の event、#194: identity key）。
+    """作業量の外の依存は宣言した場所だけ（#194: identity key。#110 の封印と event の契約は接続済み）。
 
     増えた依存は落ちる（登録しないと通らない）。依存の owner の Issue が片づけば宣言を消す。
     """
@@ -59,7 +59,7 @@ def test_j19_the_declared_dependencies_are_exactly_the_ones_owned_elsewhere():
     callers = flow.audit.last.identity_key_callers
     assert callers == _IDENTITY_KEY_CALLERS, callers
     reasons = list(flow.DECLARED_DEPENDENCIES.values()) + list(flow.DECLARED_CALLEES.values())
-    assert all(reason.startswith(("#110:", "#194:")) for reason in reasons), reasons
+    assert all(reason.startswith("#194:") for reason in reasons), reasons
 
 
 _STUB_LIVE_VALUES = """
@@ -1007,16 +1007,17 @@ _B_FROZEN = (
 )
 _B_SCHEMA_ROWS = "B: G4-b（`finitize_legacy_reasons`）が出力 schema の行数へ切った列を辿る"
 _C_LAZY = "C: 1 要素ずつ yield する generator を walker へ渡す（walker が引き出すたびに数える）"
-_D_PAIR_FAILURE = (
-    "D(#106): pair の台帳が決めた 1 件の failure から結果を組む（record の件数は定数、field は解析が"
-    " 作った値の写し）"
+_B_OWNER_ELEMENTS = (
+    "B: 作業量を受け取らない record の構築・写し。解析の値の列・mapping は `live_values.bounded_elements` /"
+    " `bounded_items` だけで辿る（owner の固定の上限 `SCAN_LIMIT`。辿る前に O(1) で比べ、超えれば"
+    " `TypeError`）。入れ子の列は 1 つの上限を共有し、深さは `NESTING_LIMIT` まで"
 )
-_D_RECORD = "D(#106): record の構築（field は解析の producer が作った値。大きさは構築の owner）"
-_D_TRUNCATION = (
-    "D(#131): 展開の上限の事実の列（構築のときに確定した record の数）を `json_items` の前に並べる"
-    "（O(n log n)。n は解析が記録した事実の数）"
+_A_FIXED_CALL = "A: 固定の形（呼び出しの keyword・定数の上限の stack の行・型の dataclass の field 名）だけを辿る"
+_A_GATE_RECORD = (
+    "A: producer 時点の record の構築（大きい値は G4-b の `finitize_legacy_reasons` が判定の前に作業量で"
+    " 有界にする）。bounded path からは pair の失敗の変換（`_PairFailureGate`）が作る固定の形の結果"
+    "（登録した限界の場所の reason 1 件）だけが通る"
 )
-_D_LEGACY_RESULT = "D(#106): receipt の無い旧来の結果だけ（production の結果は receipt だけを読む）"
 _D_IDENTITY = "D(#194): 構造の identity の atom の digest（identity の owner の `core/semantic_snapshot`）"
 _B_MATCHED = (
     "B: 照合は索引（`legacy_reason_index` が record ごとに数えた位置）だけを引き、引いた位置の数を"
@@ -1051,14 +1052,16 @@ _PROPORTIONAL_WORK_OWNERS = {
         "_object_bytes", "_superseded_max_bytes", "authority_field_bounds", "conditional_receipt_max_bytes",
         "metadata_field_bounds",
     )},
-    ("checker.result", "EquivalenceResult.__post_init__"): _D_RECORD,
-    ("checker.result", "EquivalenceResult._has_pending_proof_gate"): _D_RECORD,
-    ("checker.result", "EquivalenceResult.is_timeout"): _D_LEGACY_RESULT,
-    ("checker.result_assembly", "analysis_limitation_result_for_pair"): _D_PAIR_FAILURE,
-    ("checker.result_assembly", "internal_error_result_for_pair"): _D_PAIR_FAILURE,
-    **{("checker.unknown_reason", name): _D_RECORD for name in (
-        "_field_values", "_index_positions", "_optional_tuple_of", "_payload_view", "coerce_unknown_reason_records",
-        "coerce_unknown_recovery_actions", "make_internal_v2_reason_diagnostic", "make_unknown_reason",
+    ("checker.result", "EquivalenceResult.__post_init__"): _A_GATE_RECORD,
+    ("checker.result", "EquivalenceResult._has_pending_proof_gate"): _A_GATE_RECORD,
+    ("checker.result", "EquivalenceResult.is_timeout"): _A_GATE_RECORD,
+    ("checker.result_assembly", "analysis_limitation_result_for_pair"): _B_OWNER_ELEMENTS,
+    ("checker.result_assembly", "internal_error_result_for_pair"): _A_FIXED_CALL,
+    **{("checker.unknown_reason", name): _A_GATE_RECORD for name in (
+        "_index_positions", "_optional_tuple_of", "_payload_view", "coerce_unknown_reason_records", "coerce_unknown_recovery_actions",
+    )},
+    **{("checker.unknown_reason", name): _A_FIXED_CALL for name in (
+        "_field_values", "make_internal_v2_reason_diagnostic", "make_unknown_reason",
     )},
     ("core.budget_policy", "raise_expression_size_budget_exceeded"): _A_FIXED,
     ("core.canonical_digest", "_emit"): _B_BOUND,
@@ -1071,10 +1074,10 @@ _PROPORTIONAL_WORK_OWNERS = {
     ("core.runtime_refs.loops", "_lane_term_source"): _A_FIXED,
     ("core.runtime_refs.readonly", "ReadonlyReductionTermRef.json_items"): _A_FIXED,
     ("core.runtime_refs.readonly", "ReductionAccumulatorProof.json_items"): _A_FIXED,
-    ("core.runtime_refs.unknowns", "merge_expansion_budget_truncations"): _D_TRUNCATION,
-    ("core.runtime_refs.unknowns", "normalize_expansion_budget_truncations"): _D_TRUNCATION,
-    ("core.signature", "FunctionSignature.from_analysis"): _D_RECORD,
-    ("core.signature", "clone_parameter_descriptor"): _D_RECORD,
+    ("core.runtime_refs.unknowns", "merge_expansion_budget_truncations"): _B_OWNER_ELEMENTS,
+    ("core.runtime_refs.unknowns", "normalize_expansion_budget_truncations"): _B_OWNER_ELEMENTS,
+    ("core.signature", "FunctionSignature.from_analysis"): _B_OWNER_ELEMENTS,
+    ("core.signature", "clone_parameter_descriptor"): _B_OWNER_ELEMENTS,
     **{("proof.cause_identity", name): _B_COUNTED for name in (
         "_tuple", "_tuple_item", "canonical_cause_tuple", "cause_key_from_dict",
     )},
@@ -1084,14 +1087,14 @@ _PROPORTIONAL_WORK_OWNERS = {
     ("proof.obligations.snapshot", "_set_members"): _B_FROZEN,
     ("proof.unknown_reason", "UnknownRecoveryPlan.json_items"): _C_LAZY,
     ("proof.unknown_reason", "UnknownRecoveryProofObligation.json_items"): _C_LAZY,
-    **{("proof.unknown_reason", name): _D_RECORD for name in (
+    **{("proof.unknown_reason", name): _A_GATE_RECORD for name in (
         "_coerce_evidence_refs", "_coerce_optional_tuple", "coerce_unknown_recovery_proof_obligations",
     )},
     ("proof.unknown_reason", "_registered_recovery_proof_kind_values"): _A_FIXED,
     ("checker.cause_aggregate", "_multiset_row_order"): _B_COUNTED,
     ("checker.cause_aggregate", "primary_reason_record_sort_key"): _B_COUNTED,
     ("checker.output_preparation", "_in_field_order"): _A_FIXED,
-    ("checker.result_assembly", "_hypotheses_of"): _D_PAIR_FAILURE,
+    ("checker.result_assembly", "_hypotheses_of"): _B_OWNER_ELEMENTS,
     ("core.budget_policy", "SerializationWork.__init__"): _A_FIXED,
     ("core.canonical_digest", "_Sink._put"): _B_BOUND,
     ("core.canonical_digest", "_Sink.emit_leaf"): _A_FIXED,
@@ -1111,6 +1114,24 @@ _PROPORTIONAL_WORK_OWNERS = {
     ("core.errors", "AnalysisLimitation.__init__"): _A_LIMITATION,
     ("core.errors", "_exact_tuple"): _A_LIMITATION,
 }
+
+
+def test_j22_only_the_identity_owner_is_left_as_a_dependency():
+    """J22 の分類で「owner の Issue に委ねる（D）」のは identity key の #194 だけ（他は A / B / C で抑える）。"""
+
+    dependencies = {
+        key: label for key, label in _PROPORTIONAL_WORK_OWNERS.items() if "D(" in label
+    }
+    assert dependencies and all("#194" in label for label in dependencies.values()), dependencies
+
+
+def test_j19_declared_dependencies_are_the_identity_owner_only():
+    """宣言した作業量の外の依存（場所と呼び先）は #194 だけ（#110 の宣言は接続で撤去した）。"""
+
+    from scripts.function_tracer_pcode.tests.unit import _live_flow_audit as flow
+
+    reasons = list(flow.DECLARED_DEPENDENCIES.values()) + list(flow.DECLARED_CALLEES.values())
+    assert reasons and all(reason.startswith("#194:") for reason in reasons), reasons
 
 
 def test_j22_every_input_proportional_construct_has_a_work_owner():

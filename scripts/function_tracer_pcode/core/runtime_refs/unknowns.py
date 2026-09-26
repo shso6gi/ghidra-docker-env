@@ -11,6 +11,8 @@ from scripts.function_tracer_pcode.core.live_values import (
     as_bool,
     as_int,
     attribute,
+    elements_within_limit,
+    scan_budget,
     elements_of,
     str_value,
     type_module,
@@ -512,13 +514,17 @@ def normalize_expansion_budget_truncations(
     # record の値は owner の規則で読む（event id は構築のときに作った文字列、参照 ID は文字列の列）
     merged: Dict[str, ExpansionBudgetTruncation] = {}
     references: Dict[str, Tuple[str, ...]] = {}
-    for item in (() if items is None else elements_of(items)):
+    # 記録と参照 ID の和は owner の固定の上限まで（作業量を受け取らない正規化。超えれば `TypeError`）
+    scan = scan_budget()
+    for item in (() if items is None else elements_within_limit(items, scan)):
         if item is None:
             continue
         if type(item) is not ExpansionBudgetTruncation:
             raise TypeError("expansion budget truncations are ExpansionBudgetTruncation only")
         event_id = _plain_event_id(item._event_id_cache)
-        referenced = tuple(_plain_event_id(ref) for ref in elements_of(item.referenced_event_ids))
+        referenced = tuple(
+            _plain_event_id(ref) for ref in elements_within_limit(item.referenced_event_ids, scan)
+        )
         current = merged.get(event_id)
         if current is None:
             merged[event_id] = item
@@ -551,7 +557,7 @@ def merge_expansion_budget_truncations(
         if group is None:
             continue
         # 記録源は組み込みの列（owner の API で要素を読む。live な値の `__iter__` / `__bool__` を呼ばない）
-        combined.extend(item for item in elements_of(group) if item is not None)
+        combined.extend(item for item in elements_within_limit(group) if item is not None)
     return normalize_expansion_budget_truncations(combined)
 
 

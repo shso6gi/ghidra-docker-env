@@ -1738,7 +1738,9 @@ class FunctionReturnAnalysis:
         if live_values.as_bool(self.expansion_budget_truncations):
             # Issue #131 PR-B: 正規化済みの全記録（参照 event ID 込み）を出す。
             # snapshot fingerprint は ``to_dict`` から作られるので、marker の有無・
-            # 参照情報の増加はそのまま解析前提の同一性に反映される。
+            # 参照情報の増加はそのまま解析前提の同一性に反映される（記録の順だけの違いは同じ
+            # 値: 正規化は同一性の規則）。正規化は owner の固定の上限の中（記録と参照の和が
+            # `live_values.SCAN_LIMIT` まで）で行う
             yield "expansion_budget_truncations", each(
                 merge_expansion_budget_truncations(self.expansion_budget_truncations)
             )

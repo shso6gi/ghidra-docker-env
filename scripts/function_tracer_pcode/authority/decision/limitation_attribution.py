@@ -253,6 +253,38 @@ def _matching_active_rows(
     return tuple(matches)
 
 
+def _plain_limitation(describe: Any, limitation: AnalysisLimitation) -> AnalysisLimitation:
+    """限界（と帰属キー）の plain な写し（`describe` は session の上限つきの写し。1 回で全部を写す）。"""
+
+    key = limitation.attribution
+    key_parts = None if key is None else (
+        key.canonical_target_key, key.missing_semantic_fact, key.semantic_proposition,
+        key.proof_requirement_ids, key.observation_surface, key.active_semantic_precondition,
+        key.correspondence_contract,
+    )
+    target_key, missing, evidence_refs, plain_key_parts = describe((
+        limitation.target_key, limitation.missing_semantic_fact, limitation.evidence_refs, key_parts,
+    ))
+    plain_key = None
+    if key is not None:
+        (
+            canonical_target_key, missing_semantic_fact, semantic_proposition, proof_requirement_ids,
+            observation_surface, active_semantic_precondition, correspondence_contract,
+        ) = plain_key_parts
+        plain_key = CauseAttributionKey(
+            reason_id=key.reason_id, identity_scope=key.identity_scope, target_kind=key.target_kind,
+            canonical_target_key=canonical_target_key, missing_semantic_fact=missing_semantic_fact,
+            semantic_proposition=semantic_proposition, proof_requirement_ids=proof_requirement_ids,
+            observation_surface=observation_surface,
+            active_semantic_precondition=active_semantic_precondition,
+            correspondence_contract=correspondence_contract,
+        )
+    return AnalysisLimitation(
+        limitation.reason_id, limitation.detail, site=limitation.site, target_key=target_key,
+        missing_semantic_fact=missing, evidence_refs=evidence_refs, attribution=plain_key,
+    )
+
+
 def _unattributed(
     pilot: Any, limitation: AnalysisLimitation, detail: str,
 ) -> LimitationAttribution:
@@ -311,6 +343,30 @@ def attribute_analysis_limitation(
     # emit が届く session（contextvar）と checker が持つ view は production では
     # 同じ object。明示引数を優先し、無ければ emit と同じ session を読む。
     pilot = session if session is not None else _active_pilot_session()
+
+    # Issue #110: 限界の記述（と帰属キー）は、どちらの経路でも何かを作る前に、authority の event の
+    # 契約の上限まで数えながら plain な値へ写す（上限の外は契約の超過。live な値の code を呼ばない）
+    if pilot is not None:
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            AuthorityEventContractExceeded,
+        )
+
+        describe = getattr(pilot, "plain_limitation_description", None)
+        if not callable(describe):
+            return _unattributed(
+                pilot, limitation, "the pilot session cannot bound a limitation description",
+            )
+        try:
+            limitation = _plain_limitation(describe, limitation)
+        except AuthorityEventContractExceeded:
+            return _unattributed(
+                pilot, limitation, "the limitation description is outside the authority event contract",
+            )
+        except (TypeError, ValueError) as exc:
+            return _unattributed(
+                pilot, limitation, f"the limitation description is not plain: {type(exc).__name__}",
+            )
+        key = limitation.attribution
 
     if definition.domain == ANALYSIS_LIMITATION_DOMAIN:
         if pilot is None:

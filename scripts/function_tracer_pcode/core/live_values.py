@@ -69,6 +69,32 @@ def _require_scan(count: int, what: str) -> None:
         raise TypeError(f"{what} has {count} entries, more than the bounded path reads ({SCAN_LIMIT})")
 
 
+class _Scan:
+    """入れ子の走査（class の body の値・包んだ callable）が共有する 1 つの上限（`SCAN_LIMIT`）。
+
+    入れ子のそれぞれを別に上限まで辿ると上限の積になる: 1 つの判定の中で辿る数の和を上限にする。
+    """
+
+    __slots__ = ("used",)
+
+    def __init__(self) -> None:
+        self.used = 0
+
+    def admit(self, count: int) -> bool:
+        """`count` 個をこの判定の上限の中で辿ってよいか（よければ数える）。"""
+
+        if self.used + count > SCAN_LIMIT:
+            return False
+        self.used += count
+        return True
+
+
+#: 型の信頼の判定の入れ子（class の中の値が別の型を指し、その型の判定が始まる）の深さの上限。
+#: 判定は型ごとに 1 度だけで（cache）、入れ子は Python の stack を使うので、その余裕の中の小さい値
+NESTING_LIMIT = 32
+_PACKAGE_TYPE_DEPTH = [0]
+
+
 def trust_code_directory(path: str) -> None:
     """test の harness が自分の code（test の module の record・converter・reducer）を信頼する。
 
@@ -131,22 +157,39 @@ def package_type(kind: type) -> bool:
     if not _plain_metatype(kind):
         return False
     known = _PACKAGE_TYPES.get(kind)
-    if known is None:
-        # 型の属性が型自身を指す（入れ子の class の循環）ときは、調べている間は信頼する側に置く
-        _PACKAGE_TYPES[kind] = True
-        known = True
+    if known is not None:
+        return known
+    if _PACKAGE_TYPE_DEPTH[0] >= NESTING_LIMIT:
+        # 型の中の値が指す型の判定の入れ子が深すぎる: 信頼しない（cache しない: 浅い呼び出しで判定し直す）
+        return False
+    # 型の属性が型自身を指す（入れ子の class の循環）ときは、調べている間は信頼する側に置く。判定が
+    # 終わらずに抜けても（例外）、仮の値は残さない（信頼しない値に置き換える）
+    _PACKAGE_TYPES[kind] = True
+    _PACKAGE_TYPE_DEPTH[0] += 1
+    decided = False
+    try:
+        known = _package_type_uncached(kind)
+        decided = True
+    finally:
+        _PACKAGE_TYPE_DEPTH[0] -= 1
+        _PACKAGE_TYPES[kind] = known if decided else False
+    return known
+
+
+def _package_type_uncached(kind: type) -> bool:
+    try:
         mro = _TYPE_MRO.__get__(kind)
         if not _within_scan(tuple.__len__(mro)):
-            known = False
-            mro = ()
+            return False
         for klass in mro:
             if not (_TYPE_FLAGS.__get__(klass) & _HEAP_TYPE):
                 continue
             if not _trusted_class_body(klass):
-                known = False
-                break
-        _PACKAGE_TYPES[kind] = known
-    return known
+                return False
+        return True
+    except TypeError:
+        # 上限の外の値を読もうとした（読む関数は `TypeError`）: 確かめられない型は信頼しない
+        return False
 
 
 #: `dataclasses` が class の中に作る関数の名前（code の file は `<string>`。定義した class の code）
@@ -167,15 +210,6 @@ def _runtime_file(path: Any) -> bool:
         and os.path.normpath(path).startswith(_STDLIB_DIR)
         and "-packages" + os.sep not in path
     )
-
-
-def _trusted_function(function: Any, *, generated: bool) -> bool:
-    """呼んでよい関数か: package の code、実行環境の code（closure に包んだ callable も信頼する
-    ものだけ）、`generated` なら `dataclasses` が作った `<string>` の関数。"""
-
-    if type(function) is not types.FunctionType:
-        return False
-    return _trusted_callable(function, generated=generated)
 
 
 def _function_verdict(function: Any, *, generated: bool) -> Optional[bool]:
@@ -199,7 +233,7 @@ _C_CODE_TYPES = (
 )
 
 
-def _trusted_callable(value: Any, *, generated: bool) -> bool:
+def _trusted_callable(value: Any, *, generated: bool, scan: Any = None) -> bool:
     """closure・class の中の値として信頼する callable か（callable でない値は信頼する）。
 
     実行環境の wrapper（`contextmanager`・`dataclasses` の `__repr__`・`typing` の cache・`lru_cache`）は
@@ -207,11 +241,17 @@ def _trusted_callable(value: Any, *, generated: bool) -> bool:
     辿る数は `SCAN_LIMIT` まで（それを超える入れ子は信頼しない）。
     """
 
-    pending = [value]
-    nodes = 0
+    scan = _Scan() if scan is None else scan
+    try:
+        return _trusted_callables([value], generated=generated, scan=scan)
+    except TypeError:
+        # 上限の外の値を読もうとした: 確かめられない callable は信頼しない
+        return False
+
+
+def _trusted_callables(pending: list, *, generated: bool, scan: Any) -> bool:
     while pending:
-        nodes += 1
-        if not _within_scan(nodes):
+        if not scan.admit(1):
             return False
         item = pending.pop()
         holder = type(item)
@@ -224,7 +264,7 @@ def _trusted_callable(value: Any, *, generated: bool) -> bool:
                 return False
             if verdict is None:
                 cells = item.__closure__ or ()
-                if not _within_scan(nodes + len(pending) + tuple.__len__(cells)):
+                if not _within_scan(scan.used + len(pending) + tuple.__len__(cells)):
                     return False
                 for cell in cells:
                     try:
@@ -252,48 +292,77 @@ _LRU_WRAPPER = type(__import__("functools").lru_cache(maxsize=None)(len))
 
 
 def _inert_value(value: Any) -> bool:
-    """属性として読んでも呼んでも code を実行しないデータか（型が descriptor・callable でない）。"""
+    """属性として読んでも呼んでも code を実行しないデータか（型が descriptor・callable でない）。
+
+    型を上限の中で読めなければ（`TypeError`）データとは確かめられない: 信頼しない。
+    """
 
     holder = type(value)
     if not _plain_metatype(holder):
         return False
-    return (
-        _type_lookup(holder, "__get__", _ABSENT) is _ABSENT
-        and _type_lookup(holder, "__set__", _ABSENT) is _ABSENT
-        and _type_lookup(holder, "__delete__", _ABSENT) is _ABSENT
-        and _type_lookup(holder, "__call__", _ABSENT) is _ABSENT
-    )
+    try:
+        return (
+            _type_lookup(holder, "__get__", _ABSENT) is _ABSENT
+            and _type_lookup(holder, "__set__", _ABSENT) is _ABSENT
+            and _type_lookup(holder, "__delete__", _ABSENT) is _ABSENT
+            and _type_lookup(holder, "__call__", _ABSENT) is _ABSENT
+        )
+    except TypeError:
+        return False
 
 
-def _trusted_namespace_value(name: Any, value: Any, *, dataclass_body: bool) -> bool:
+def _trusted_namespace_value(name: Any, value: Any, *, dataclass_body: bool, scan: Any = None) -> bool:
     """class の `__dict__` の値として許した種類か（それ以外は信頼しない）。"""
 
     holder = type(value)
     generated = dataclass_body and type(name) is str and name in _DATACLASS_GENERATED
     if holder is types.FunctionType:
-        return _trusted_function(value, generated=generated)
+        return _trusted_callable(value, generated=generated, scan=scan)
     if holder is staticmethod or holder is classmethod:
         inner = value.__func__
         if type(inner) is types.FunctionType:
             # `namedtuple` の `__new__` も `<string>` の生成された関数
-            return _trusted_function(inner, generated=generated or name == "__new__")
-        return _trusted_callable(inner, generated=False)
+            return _trusted_callable(inner, generated=generated or name == "__new__", scan=scan)
+        return _trusted_callable(inner, generated=False, scan=scan)
     if holder is property or holder is readable_property or holder is types.DynamicClassAttribute:
         # 読むと accessor を呼ぶ: accessor も信頼する関数だけ
         return all(
-            accessor is None or _trusted_function(accessor, generated=False)
+            accessor is None or (
+                type(accessor) is types.FunctionType
+                and _trusted_callable(accessor, generated=False, scan=scan)
+            )
             for accessor in (value.fget, value.fset, value.fdel)
         )
-    return _trusted_callable(value, generated=False)
+    return _trusted_callable(value, generated=False, scan=scan)
 
 
 def _trusted_class_body(klass: type) -> bool:
+    """class の body（`__dict__`）の値が全部許した種類か（class ごとに 1 度だけ。辿る数の和は上限まで）。"""
+
+    cacheable = _plain_metatype(type(klass)) if type(klass) is not type else True
+    known = _TRUSTED_BODIES.get(klass) if cacheable else None
+    if known is not None:
+        return known
+    known = _trusted_class_body_uncached(klass)
+    if cacheable:
+        _TRUSTED_BODIES[klass] = known
+    return known
+
+
+#: class ごとの `_trusted_class_body` の結果（hash・比較が組み込みの実装の metaclass の class だけ）
+_TRUSTED_BODIES: dict = {}
+
+
+def _trusted_class_body_uncached(klass: type) -> bool:
     raw = _unwrapped(_TYPE_DICT.__get__(klass))
     if not _exact_str_keys(raw):
         return False
+    scan = _Scan()
+    if not scan.admit(dict.__len__(raw)):
+        return False
     dataclass_body = "__dataclass_fields__" in raw and "__dataclass_params__" in raw
     for name, value in dict.items(raw):
-        if not _trusted_namespace_value(name, value, dataclass_body=dataclass_body):
+        if not _trusted_namespace_value(name, value, dataclass_body=dataclass_body, scan=scan):
             return False
     return True
 
@@ -362,6 +431,14 @@ def _type_lookup(kind: type, name: str, missing: Any) -> Any:
             if name in namespace:
                 return namespace[name]
         return missing
+    # 組み込みの `str` でない key を持つ namespace は key を 1 つずつ比べる: その数の和を MRO 全体で
+    # 上限と比べてから辿る（class ごとに上限まで辿ると MRO × namespace になる）
+    scanned = 0
+    for klass in mro:
+        namespace = _TYPE_DICT.__get__(klass)
+        if not _str_namespace(klass, namespace):
+            scanned += dict.__len__(_unwrapped(namespace))
+    _require_scan(scanned, "the non-str namespaces of a type's MRO")
     for klass in mro:
         namespace = _TYPE_DICT.__get__(klass)
         if _str_namespace(klass, namespace):
@@ -606,10 +683,14 @@ def _builtin_hashed_type(kind: type) -> bool:
         return False
     for base in (str, int, float):
         if issubclass(kind, base):
-            return (
-                _type_lookup(kind, "__hash__", None) is _type_lookup(base, "__hash__", None)
-                and _type_lookup(kind, "__eq__", None) is _type_lookup(base, "__eq__", None)
-            )
+            try:
+                return (
+                    _type_lookup(kind, "__hash__", None) is _type_lookup(base, "__hash__", None)
+                    and _type_lookup(kind, "__eq__", None) is _type_lookup(base, "__eq__", None)
+                )
+            except TypeError:
+                # 型を上限の中で読めない: 組み込みの hash とは確かめられない
+                return False
     return False
 
 
@@ -685,11 +766,16 @@ def builtin_enum(value: Any) -> bool:
 
     # `Enum.__str__` / `__repr__` / `__hash__` は Python の code で、member の属性と `__class__` を
     # 読み、値の `repr` を呼ぶ: それらも組み込みのまま（metaclass・属性の読み方・値の型）のときだけ
-    member = instance_state(value, "_value_", None)
+    try:
+        member = instance_state(value, "_value_", None)
+        name = instance_state(value, "_name_", None)
+    except TypeError:
+        # member の状態を上限の中で読めない: 組み込みのままの enum とは確かめられない
+        return False
     if not (member is None or type(member) is str or type(member) is int or type(member) is float or type(member) is bool):
         return False
     # member の名前も組み込みの `str`（`Enum.__str__` / `__hash__` / `__format__` は `_name_` を使う）
-    if type(instance_state(value, "_name_", None)) is not str:
+    if type(name) is not str:
         return False
     # 型の側の判定は型ごとに 1 度だけ（EnumMeta の hash・比較は組み込みの実装）
     known = _BUILTIN_ENUM_TYPES.get(kind) if type(kind) is EnumMeta else None
@@ -705,6 +791,13 @@ _BUILTIN_ENUM_TYPES: dict = {}
 
 
 def _builtin_enum_type(kind: type) -> bool:
+    try:
+        return _builtin_enum_type_checked(kind)
+    except TypeError:
+        return False
+
+
+def _builtin_enum_type_checked(kind: type) -> bool:
     from enum import EnumMeta
 
     return (
@@ -939,7 +1032,11 @@ _DATACLASS_FIELD_NAMES: dict = {}
 
 
 def _dataclass_field_names(kind: type) -> Optional[Tuple[str, ...]]:
-    table = type_attribute(kind, "__dataclass_fields__")
+    try:
+        table = type_attribute(kind, "__dataclass_fields__")
+    except TypeError:
+        # 型を上限の中で読めない: dataclass とは確かめられない
+        return None
     if type(table) is not dict or not _within_scan(dict.__len__(table)):
         return None
     import dataclasses
@@ -1030,7 +1127,11 @@ def _builtin_behaviour(kind: type, bases: Tuple[type, ...], names: Tuple[str, ..
         known = False
         for base in bases:
             if issubclass(kind, base):
-                known = all(type_attribute(kind, name) is type_attribute(base, name) for name in names)
+                try:
+                    known = all(type_attribute(kind, name) is type_attribute(base, name) for name in names)
+                except TypeError:
+                    # 型を上限の中で読めない: 組み込みの振る舞いとは確かめられない
+                    known = False
                 break
         _BUILTIN_BEHAVIOUR[key] = known
     return known
@@ -1051,10 +1152,13 @@ def _plain_metatype(kind: type) -> bool:
     metatype = type(kind)
     if metatype is type:
         return True
-    return (
-        _type_lookup(metatype, "__eq__", None) is object.__eq__
-        and _type_lookup(metatype, "__hash__", None) is object.__hash__
-    )
+    try:
+        return (
+            _type_lookup(metatype, "__eq__", None) is object.__eq__
+            and _type_lookup(metatype, "__hash__", None) is object.__hash__
+        )
+    except TypeError:
+        return False
 
 
 def builtin_container(item: Any) -> bool:
@@ -1252,6 +1356,48 @@ def package_generator(value: Any) -> bool:
     return type(value) is types.GeneratorType and package_code(value.gi_code)
 
 
+def scan_budget() -> Any:
+    """入れ子の列を辿る 1 つの判定が共有する上限（`elements_within_limit(..., scan=)` に渡す）。"""
+
+    return _Scan()
+
+
+def elements_within_limit(values: Any, scan: Any = None) -> Iterator[Any]:
+    """`elements_of` と同じ要素を `SCAN_LIMIT` 個まで（大きさの分かる容器は辿る前に O(1) で比べ、
+    iterator は 1 要素ずつ数える。超えれば `TypeError`）。`scan` を渡すと、入れ子の列の和を上限にする。
+
+    作業量を受け取らない関数（record の構築・写し）が解析の値の列を辿るときの入口。作業量で数える
+    walker は `elements_of` を使う（数えながら止まる）。
+    """
+
+    if type(values) is str or builtin_sequence(values) or builtin_set(values):
+        count = len(values)
+        if scan is None:
+            _require_scan(count, "a sequence read without a work budget")
+        elif not scan.admit(count):
+            raise TypeError(f"nested sequences read without a work budget exceed {SCAN_LIMIT} elements")
+        return iter(values)
+    return _counted(elements_of(values), scan)
+
+
+def items_within_limit(mapping: Any) -> Iterator[Tuple[Any, Any]]:
+    """`items_of` と同じ (key, 値) を `SCAN_LIMIT` 組まで（辿る前に O(1) で比べる。超えれば `TypeError`）。"""
+
+    _require_scan(size(mapping), "a mapping read without a work budget")
+    return items_of(mapping)
+
+
+def _counted(iterator: Iterator[Any], scan: Any = None) -> Iterator[Any]:
+    count = 0
+    for value in iterator:
+        count += 1
+        if scan is None:
+            _require_scan(count, "an iterator read without a work budget")
+        elif not scan.admit(1):
+            raise TypeError(f"nested sequences read without a work budget exceed {SCAN_LIMIT} elements")
+        yield value
+
+
 def elements_of(values: Any) -> Iterator[Any]:
     """組み込みの振る舞いの列・集合・iterator・package の generator の要素。それ以外は `TypeError`。"""
 
@@ -1264,6 +1410,9 @@ def elements_of(values: Any) -> Iterator[Any]:
 
 __all__ = [
     "SCAN_LIMIT",
+    "elements_within_limit",
+    "items_within_limit",
+    "scan_budget",
     "NOT_PLAIN",
     "PACKAGE_DIR",
     "package_code",

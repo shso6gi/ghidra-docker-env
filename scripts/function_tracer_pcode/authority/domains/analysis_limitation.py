@@ -361,10 +361,11 @@ def observe_analysis_limitation(
     # Issue #110: 記述（live な値でもよい）は、signal を作る前に限界の event の上限まで数えながら plain
     # な値へ写す（上限の外は契約の超過。作ってから測らない）
     describe = getattr(session, "plain_limitation_description", None)
-    if callable(describe):
-        target_key, missing_semantic_fact, evidence_refs = describe(
-            (target_key, missing_semantic_fact, tuple(evidence_refs)),
-        )
+    if not callable(describe):
+        raise TypeError("the production pilot session cannot bound a limitation description")
+    target_key, missing_semantic_fact, evidence_refs = describe(
+        (target_key, missing_semantic_fact, evidence_refs),
+    )
     signal = analysis_limitation_signal(
         reason_id=reason_id,
         limitation_site=limitation_site,

@@ -372,7 +372,7 @@ def analysis_limitation_result(
         **attribution.to_diagnostic(),
         "site": exc.site,
         "exception_type": type(exc).__name__,
-        "evidence_refs": list(exc.evidence_refs),
+        "evidence_refs": list(live_values.elements_within_limit(exc.evidence_refs)),
         "message": str(exc)[:500],
     }
     if not attribution.is_attributed:
@@ -417,7 +417,7 @@ def analysis_limitation_result(
             make_internal_v2_reason_diagnostic(
                 exc.reason_id,
                 stage="S_ANALYSIS_LIMITATION",
-                evidence_refs=(exc.site, *exc.evidence_refs),
+                evidence_refs=(exc.site, *live_values.elements_within_limit(exc.evidence_refs)),
                 object_target_key=(
                     "analysis_limitation_v1",
                     exc.reason_id,
@@ -556,7 +556,7 @@ def analysis_limitation_result_for_pair(
         **attribution.to_diagnostic(),
         "site": exc.site,
         "exception_type": type(exc).__name__,
-        "evidence_refs": list(exc.evidence_refs),
+        "evidence_refs": list(live_values.elements_within_limit(exc.evidence_refs)),
         "message": str(exc)[:500],
         "pair_scoped": True,
     }
@@ -611,7 +611,7 @@ def analysis_limitation_result_for_pair(
                 make_internal_v2_reason_diagnostic(
                     exc.reason_id,
                     stage="S_ANALYSIS_LIMITATION",
-                    evidence_refs=(exc.site, *exc.evidence_refs),
+                    evidence_refs=(exc.site, *live_values.elements_within_limit(exc.evidence_refs)),
                     object_target_key=(
                         "analysis_limitation_v1",
                         exc.reason_id,
@@ -763,7 +763,7 @@ def _hypotheses_of(analysis: Any) -> list:
     if analysis is None:
         return []
     hypotheses = live_values.attribute(analysis, "signature_hypotheses")
-    return [] if hypotheses is None else list(live_values.elements_of(hypotheses))
+    return [] if hypotheses is None else list(live_values.elements_within_limit(hypotheses))
 
 
 def _common_fields(**fields: Any) -> Dict[str, Any]:

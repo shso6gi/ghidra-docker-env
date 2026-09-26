@@ -271,3 +271,67 @@ def test_a_relation_overflow_reaches_the_output_as_a_registered_unknown(monkeypa
     assert BUDGET_REASON in _unknown_reason_ids(payload)
     assert len(payload["q_open_base"]) <= contract.max_relation_rows
     assert len(payload["q_open_base"]) == len(result.canonical_q_open_base)
+
+
+def test_a_huge_limitation_description_is_bounded_before_attribution_digests_it(monkeypatch):
+    """帰属する限界の記述（target key・帰属キー）が契約の外なら、帰属は何かを作る前（digest の前）に
+    契約の超過の限界の cause へ向く（10^6 要素の key を digest・写しにしない）。"""
+
+    from scripts.function_tracer_pcode.authority.decision import limitation_attribution as la
+    from scripts.function_tracer_pcode.authority.domains import analysis_limitation
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        ANALYSIS_BUDGET_REASON_ID,
+    )
+    from scripts.function_tracer_pcode.core.errors import (
+        AnalysisLimitation,
+        CauseAttributionKey,
+        pair_failure_scope,
+    )
+
+    monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE", "issue22d-o4-huge-occurrence")
+    session = _connector().begin({"case": "issue22d-o4-huge"})
+    huge = tuple(range(10 ** 6))
+    digested = []
+    real_digest = analysis_limitation.authority_digest
+
+    def _digest(value):
+        digested.append(value)
+        return real_digest(value)
+
+    monkeypatch.setattr(analysis_limitation, "authority_digest", _digest)
+    for limitation in (
+        AnalysisLimitation(
+            ANALYSIS_BUDGET_REASON_ID, "a huge target", site="issue22d.o4.huge",
+            target_key=huge, evidence_refs=("issue22d-o4-huge",),
+        ),
+        AnalysisLimitation(
+            ANALYSIS_BUDGET_REASON_ID, "a huge attribution key", site="issue22d.o4.huge-key",
+            target_key=("issue22d-o4-huge-key",), evidence_refs=("issue22d-o4-huge-key",),
+            attribution=CauseAttributionKey(
+                reason_id=ANALYSIS_BUDGET_REASON_ID, identity_scope="RELATIONAL", target_kind="limitation",
+                canonical_target_key=huge, missing_semantic_fact=("issue22d",),
+                semantic_proposition=("issue22d",), proof_requirement_ids=(),
+            ),
+        ),
+    ):
+        with pair_failure_scope(("issue22d", "o4-huge"), session.identity.result_occurrence_id):
+            started = time.perf_counter()
+            attribution = la.attribute_analysis_limitation(session, limitation)
+            assert time.perf_counter() - started < 1.0
+        assert attribution.disposition in (la.ATTRIBUTED_TRUNCATED_STREAM, la.UNATTRIBUTED)
+        assert session.event_contract.contract_cause_published
+        assert not any(value is huge or huge in _flat(value) for value in digested)
+
+
+def _flat(value, depth=0):
+    """digest に渡った値の中の tuple（浅く。10^6 要素の tuple そのものが入っていないかを見る）。"""
+
+    if depth > 4 or not isinstance(value, (tuple, list, dict)):
+        return ()
+    items = value.values() if isinstance(value, dict) else value
+    found = []
+    for item in items:
+        if isinstance(item, tuple) and len(item) > 1000:
+            found.append(item)
+        found.extend(_flat(item, depth + 1))
+    return found

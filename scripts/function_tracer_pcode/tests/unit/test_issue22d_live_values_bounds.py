@@ -149,6 +149,55 @@ def test_nested_closures_are_checked_without_recursion():
     assert live_values._trusted_callable(functools.lru_cache(maxsize=None)(len), generated=False) is True
 
 
+def test_an_unverifiable_type_is_never_left_trusted():
+    """判定の途中で上限の外の値に当たっても、その型を信頼しない（仮の「信頼」を残さない）。"""
+
+    blob = _Record()
+    blob.__dict__.update({f"a{index}": index for index in range(live_values.SCAN_LIMIT + 10)})
+
+    def outside():  # pragma: no cover - never called
+        return None
+
+    outside.__code__ = outside.__code__.replace(co_filename="/elsewhere/outside.py")
+    kind = type("Unverifiable", (), {"blob": blob, "f": outside})
+    assert live_values.package_type(kind) is False
+    assert live_values.package_type(kind) is False  # 2 回目も（cache に信頼が残らない）
+
+
+def test_class_chains_are_checked_once_per_class():
+    """class の body は class ごとに 1 度だけ確かめる: 継承の鎖でも MRO × namespace を毎回辿らない。"""
+
+    kinds = [object]
+    for index in range(100):
+        body = {f"attr{member}": member for member in range(1_000)}
+        kinds.append(type(f"Chain{index}", (kinds[-1],), body))
+    started = time.perf_counter()
+    for kind in kinds[1:]:
+        live_values.package_type(kind)
+    assert time.perf_counter() - started < 5.0
+
+
+def test_non_str_namespaces_are_bounded_across_the_whole_mro():
+    """組み込みの `str` でない key の namespace を key で探すときは、MRO 全体の和で上限と比べる。"""
+
+    kinds = [object]
+    for index in range(40):
+        namespace = {f"n{member}": member for member in range(200)}
+        namespace[1] = "not a str key"
+        kinds.append(type(f"Odd{index}", (kinds[-1],), namespace))
+    outcome = _quick(live_values.type_attribute, kinds[-1], "missing", seconds=0.5)
+    assert isinstance(outcome, TypeError) and "non-str namespaces" in str(outcome)
+
+
+def test_nested_type_references_stop_at_the_nesting_limit():
+    """型の中の値が別の型を指す入れ子が深くても、判定は深さの上限で止まる（stack を使い尽くさない）。"""
+
+    inner = type("Leaf", (), {})
+    for index in range(live_values.NESTING_LIMIT * 4):
+        inner = type(f"Holder{index}", (), {"inner": inner})
+    assert live_values.package_type(inner) in (True, False)
+
+
 # ---------------------------------------------------------------------------
 # J22 を owner 自身へ: 入力に比例する構文を持つ関数は A / B / C のどれかに分類する
 # ---------------------------------------------------------------------------
@@ -159,10 +208,10 @@ _C = "C: iterator を返し、辿る側が要素ごとに数える"
 
 LIVE_VALUES_WORK_OWNERS = {
     "package_file": _A,
-    "package_type": _B,
-    "_trusted_callable": _B,
+    "_package_type_uncached": _B,
+    "_trusted_callables": _B,
     "_trusted_namespace_value": _A,
-    "_trusted_class_body": _B,
+    "_trusted_class_body_uncached": _B,
     "_type_lookup": _B,
     "_exact_str_keys": _B,
     "_scan_str_key": _B,
@@ -180,10 +229,11 @@ LIVE_VALUES_WORK_OWNERS = {
     "copied_container": _B,
     "lookup": _B,
     "_plain_key": _B,
+    "_counted": _B,
 }
 
 #: B の関数が上限と比べる呼び出し（長さを O(1) で読んで比べる owner の関数）
-_BOUNDING_CALLS = frozenset({"_within_scan", "_require_scan", "_exact_str_keys"})
+_BOUNDING_CALLS = frozenset({"_within_scan", "_require_scan", "_exact_str_keys", "admit"})
 
 
 def _live_values_functions():
