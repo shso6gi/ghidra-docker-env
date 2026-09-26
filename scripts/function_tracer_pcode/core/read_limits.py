@@ -83,13 +83,29 @@ def elements_within_limit(values: Any, scan: Any = None) -> Iterator[Any]:
     return _counted(live_values.elements_of(values), scan)
 
 
-def items_within_limit(mapping: Any) -> Iterator[Tuple[Any, Any]]:
-    """`live_values.items_of` と同じ (key, 値) を `SCAN_LIMIT` 組まで（辿る前に O(1) で比べる。外は登録済みの限界）。"""
+def items_within_limit(mapping: Any, scan: Any = None) -> Iterator[Tuple[Any, Any]]:
+    """`live_values.items_of` と同じ (key, 値) を `SCAN_LIMIT` 組まで（辿る前に O(1) で比べる。外は登録済みの
+    限界）。`scan` を渡すと、入れ子の読みの和を上限にする。"""
 
     count = live_values.size(mapping)
-    if not _admitted(count, None):
+    if not _admitted(count, scan):
         _scan_limit_exceeded("a mapping read without a work budget", count)
     return live_values.items_of(mapping)
+
+
+def copied_within_limit(value: Any, scan: Any = None) -> Any:
+    """`live_values.copied_container` と同じ写し（dict / list の subclass も基底型の slot で）を、写す要素の
+    数を読みの上限（`scan` を渡せば入れ子の和）へ数えてから作る。dict / list でなければ `NOT_PLAIN`。"""
+
+    if live_values.is_kind(value, dict):
+        count = dict.__len__(value)
+    elif live_values.is_kind(value, list):
+        count = list.__len__(value)
+    else:
+        return live_values.NOT_PLAIN
+    if not _admitted(count, scan):
+        _scan_limit_exceeded("a container copied without a work budget", count)
+    return live_values.copied_container(value)
 
 
 def _counted(iterator: Iterator[Any], scan: Any = None) -> Iterator[Any]:
@@ -124,6 +140,7 @@ def omitted_beyond_limit(values: Any) -> int:
 
 __all__ = [
     "SCAN_LIMITATION_SITE",
+    "copied_within_limit",
     "elements_within_limit",
     "items_within_limit",
     "omitted_beyond_limit",

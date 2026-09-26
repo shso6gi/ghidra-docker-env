@@ -445,13 +445,17 @@ def clone_parameter_descriptor(
     param: Dict[str, Any],
     *,
     include_data_type_obj: bool = True,
+    scan: Any = None,
 ) -> Dict[str, Any]:
-    """パラメータ記述子を安全に複製する（値は `core.live_values` の規則で読む）。"""
+    """パラメータ記述子を安全に複製する（値は `core.live_values` の規則で読む）。
+
+    作業量を受け取らない写し: member と、写す dict / list の要素は読みの上限まで（`scan` を渡せば、
+    複数の記述子を写す呼び出し全体の和を上限にする）。
+    """
     cloned: Dict[str, Any] = {}
     if param is None or not live_values.as_bool(param):
         return cloned
-    # 作業量を受け取らない写し: member は owner の上限まで
-    for key, value in read_limits.items_within_limit(param):
+    for key, value in read_limits.items_within_limit(param, scan):
         name = live_values.str_value(key)
         if name is live_values.NOT_PLAIN:
             raise TypeError(f"parameter descriptor key {live_values.type_name(type(key))} is not a str")
@@ -459,7 +463,7 @@ def clone_parameter_descriptor(
             continue
         # dict / list は（subclass も）基底型の slot で写す（旧 `dict(value)` / `list(value)`: 複製は
         # 元の live な容器を共有しない）。それ以外は同じ値
-        copied = live_values.copied_container(value)
+        copied = read_limits.copied_within_limit(value, scan)
         cloned[name] = value if copied is live_values.NOT_PLAIN else copied
     return cloned
 
@@ -1130,13 +1134,15 @@ class FunctionSignature:
     def from_analysis(cls, analysis: "FunctionReturnAnalysis") -> "FunctionSignature":
         """FunctionReturnAnalysisからシグネチャを抽出"""
         parameters = live_values.attribute(analysis, "parameters")
+        # 記述子の列・各記述子の member・写す容器の要素の和を 1 つの読みの上限にする（積にしない）
+        scan = read_limits.scan_budget()
         return cls(
             return_type=live_values.attribute(analysis, "return_type"),
             return_type_obj=live_values.attribute(analysis, "return_type_obj"),
             parameters=[
-                clone_parameter_descriptor(param, include_data_type_obj=True)
+                clone_parameter_descriptor(param, include_data_type_obj=True, scan=scan)
                 for param in (
-                    read_limits.elements_within_limit(parameters)
+                    read_limits.elements_within_limit(parameters, scan)
                     if parameters is not None and live_values.as_bool(parameters) else ()
                 )
             ],

@@ -46,7 +46,7 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
     PcodeBlockRef,
     PcodeOpRef,
     UnknownValueRef,
-    merge_expansion_budget_truncations,
+    normalize_expansion_budget_truncations,
 )
 
 
@@ -1365,6 +1365,11 @@ class FunctionReturnAnalysis:
     expansion_budget_truncations: Tuple[ExpansionBudgetTruncation, ...] = ()
 
     def __setattr__(self, name: str, value: Any) -> None:
+        if name == "expansion_budget_truncations":
+            # Issue #131: 記録の順だけの違いは同じ値（正規化は同一性の規則）。書いたときに 1 度だけ
+            # 正規化する（記録と参照の和は owner の固定の上限の中。超えれば解析の時点の登録済みの限界）。
+            # 出力・fingerprint の walker は正規化済みの記録を数えながら写すだけ
+            value = normalize_expansion_budget_truncations(value)
         record_return_type_display(self, name, value)
 
     def __post_init__(self) -> None:
@@ -1739,11 +1744,8 @@ class FunctionReturnAnalysis:
             # Issue #131 PR-B: 正規化済みの全記録（参照 event ID 込み）を出す。
             # snapshot fingerprint は ``to_dict`` から作られるので、marker の有無・
             # 参照情報の増加はそのまま解析前提の同一性に反映される（記録の順だけの違いは同じ
-            # 値: 正規化は同一性の規則）。正規化は owner の固定の上限の中（記録と参照の和が
-            # `live_values.SCAN_LIMIT` まで）で行う
-            yield "expansion_budget_truncations", each(
-                merge_expansion_budget_truncations(self.expansion_budget_truncations)
-            )
+            # 値: 正規化は同一性の規則）。正規化は field を書いたとき（`__setattr__`）に済んでいる
+            yield "expansion_budget_truncations", each(self.expansion_budget_truncations)
 
     def should_fix_return_to_signed(self) -> bool:
         """

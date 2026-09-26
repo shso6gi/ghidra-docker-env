@@ -8,7 +8,7 @@ import inspect
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import List, Optional, Dict, Any, Type
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from scripts.function_tracer_pcode.core.stage_journal import (
     journal_counter,
@@ -138,9 +138,13 @@ class ParallelResult:
     results: List[SolverResult]
     first_definitive: Optional[SolverResult] = None  # 最初に確定した結果
     is_equivalent: Optional[bool] = None
+    #: TIMEOUT の行があるか（作ったときに 1 度だけ数える事実。`EquivalenceResult.is_timeout` が
+    #: 行を辿り直さずに読む。結果 JSON の schema・比較には入れない）
+    timed_out: bool = field(default=False, init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         """手動構築時も SAT/UNSAT から代表結果を補完する。"""
+        self.timed_out = any(result.status == SolverStatus.TIMEOUT for result in self.results)
         if self.first_definitive is None:
             for result in self.results:
                 if result.status in (SolverStatus.SAT, SolverStatus.UNSAT):

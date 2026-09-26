@@ -205,6 +205,10 @@ def test_nested_type_references_stop_at_the_nesting_limit():
 _A = "A: 固定の大きさ（module の定数の組・登録した directory）だけを辿る"
 _B = "B: `SCAN_LIMIT` の固定の上限（長さを O(1) で比べてから辿る。上限の外は信頼しない / TypeError）"
 _C = "C: iterator を返し、辿る側が要素ごとに数える"
+_AMORTIZED = (
+    "B(償却): 型の信頼の判定 1 つにつき高々 1 つの仮の判定で、深さの組を移るのは高々 `NESTING_LIMIT` 回"
+    "（仕事は判定の数に比例し、判定そのものは `SCAN_LIMIT` の中。循環の test が数を確かめる）"
+)
 
 LIVE_VALUES_WORK_OWNERS = {
     "package_file": _A,
@@ -232,6 +236,9 @@ LIVE_VALUES_WORK_OWNERS = {
     # 判定の途中の状態の 2 引数の `min`（入れ子の深さの比較）だけ
     "package_type": _A,
     "_trusted_class_body": _A,
+    # 深さの組（`NESTING_LIMIT + 1` 個）を作るだけ
+    "_Nesting.__init__": _A,
+    "_settle": _AMORTIZED,
 }
 
 #: `core/read_limits`（作業量を受け取らない読みの固定の上限の owner）の入力に比例する関数
@@ -501,7 +508,16 @@ def test_timeout_reads_of_solver_results_are_bounded_by_the_read_limit():
     from scripts.function_tracer_pcode.core.errors import DeadlineExceeded
     from scripts.function_tracer_pcode.smt import SolverStatus
 
+    from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult
+
     result = create_mock_result(is_equivalent=None)
+    # solver の owner が作った集約は、作ったときの事実を読む（行の数に依らず、読みの上限にかからない）
+    rows = [SolverResult(solver_name="z3", status=SolverStatus.UNKNOWN)] * (live_values.SCAN_LIMIT + 1)
+    result.solver_results = ParallelResult(results=rows + [SolverResult(solver_name="z3", status=SolverStatus.TIMEOUT)])
+    assert result.is_timeout() is True
+    result.solver_results = ParallelResult(results=rows)
+    assert result.is_timeout() is False
+    # owner の外の列（test の値など）は読みの固定の上限まで（外は登録済みの限界）
     result.solver_results = SimpleNamespace(
         results=[SimpleNamespace(status=SolverStatus.UNKNOWN)] * (live_values.SCAN_LIMIT + 1),
     )
@@ -509,3 +525,83 @@ def test_timeout_reads_of_solver_results_are_bounded_by_the_read_limit():
         result.is_timeout()
     result.solver_results = SimpleNamespace(results=[SimpleNamespace(status=SolverStatus.TIMEOUT)])
     assert result.is_timeout() is True
+
+
+def _connected_types(tag, count):
+    kinds = [type(f"{tag}{index}", (), {}) for index in range(count)]
+    for kind in kinds:
+        for index, other in enumerate(kinds):
+            if other is not kind:
+                setattr(kind, f"peer{index}", other)
+    return kinds
+
+
+def _counting_evaluations(monkeypatch):
+    calls = []
+    real = live_values._package_type_uncached
+
+    def _count(kind):
+        calls.append(kind)
+        return real(kind)
+
+    monkeypatch.setattr(live_values, "_package_type_uncached", _count)
+    return calls
+
+
+def test_a_cycle_of_mutually_trusting_types_is_judged_once_per_type(monkeypatch):
+    """互いを指す型の循環（強連結）でも、1 回の判定で型ごとに高々 1 度だけ判定する（循環の経路ごとに判定し直さない）。"""
+
+    kinds = _connected_types("Peer", 12)
+    calls = _counting_evaluations(monkeypatch)
+    settled = []
+    real_settle = live_values._settle
+
+    def _settle(state, depth, **kwargs):
+        settled.append(len(state.by_depth[depth]))
+        return real_settle(state, depth, **kwargs)
+
+    monkeypatch.setattr(live_values, "_settle", _settle)
+    started = time.perf_counter()
+    assert live_values.package_type(kinds[0]) is True
+    assert time.perf_counter() - started < 1.0
+    assert len(calls) <= len(kinds)
+    # 仮の判定を確定する仕事は判定の数 × 入れ子の深さ以下（償却）
+    assert sum(settled) <= len(calls) * live_values.NESTING_LIMIT
+    # 根の判定が「信頼」に決まったので、循環の全部が確定した（聞き直しても判定しない）
+    assert all(live_values.package_type(kind) is True for kind in kinds)
+    assert len(calls) <= len(kinds)
+
+
+def test_a_cycle_with_one_untrusted_member_is_untrusted_everywhere(monkeypatch):
+    """循環の 1 つが信頼しない値を持てば、どの型から聞いても信頼しない（仮定の「信頼」を残さない）。判定の数も線形。"""
+
+    def outside():  # pragma: no cover - never called
+        return None
+
+    outside.__code__ = outside.__code__.replace(co_filename="/elsewhere/outside.py")
+    kinds = _connected_types("Tainted", 12)
+    kinds[7].outside = outside
+    calls = _counting_evaluations(monkeypatch)
+    assert live_values.package_type(kinds[0]) is False
+    assert all(live_values.package_type(kind) is False for kind in kinds)
+    assert len(calls) <= 3 * len(kinds)
+
+
+def test_cloning_a_signature_bounds_the_sum_of_parameters_members_and_copies():
+    """signature の写しは、記述子の列・member・写す容器の要素の和を 1 つの読みの上限にする（積にしない）。"""
+
+    from types import SimpleNamespace
+
+    from scripts.function_tracer_pcode.core.errors import DeadlineExceeded
+    from scripts.function_tracer_pcode.core.signature import FunctionSignature
+
+    third = live_values.SCAN_LIMIT // 3
+    # 1 つずつは上限の内側（記述子の数・member の数・容器の要素の数のどれも）でも、和は外
+    parameters = [{"name": f"p{index}", "tags": ["t"]} for index in range(third)]
+    analysis = SimpleNamespace(return_type="int", return_type_obj=None, parameters=parameters)
+    with pytest.raises(DeadlineExceeded):
+        FunctionSignature.from_analysis(analysis)
+    small = SimpleNamespace(return_type="int", return_type_obj=None, parameters=[{"name": "p", "tags": ["t"]}])
+    signature = FunctionSignature.from_analysis(small)
+    assert signature.parameters == [{"name": "p", "tags": ["t"]}]
+    assert signature.parameters[0]["tags"] is not small.parameters[0]["tags"]

@@ -96,17 +96,53 @@ NESTING_LIMIT = 32
 
 
 class _Nesting(threading.local):
-    """判定の途中の状態（thread ごと。途中の仮の「信頼」を他の thread の判定へ見せない）。
+    """型の信頼の判定の途中の状態（thread ごと。途中の仮の「信頼」を他の thread の判定へ見せない）。
 
-    * `active`: 判定の途中の型 → 入れ子の深さ（型が自分や祖先を指す循環は、その間だけ信頼する側）
-    * `assumed`: 途中で仮定した祖先の深さの最小（仮定に依る判定は、仮定した型の判定より内なら cache しない）
-    * `cut`: 途中で入れ子の上限に当たったか（上限で切った判定は cache しない: 浅い呼び出しで判定し直す）
+    信頼は単調（信頼すると仮定する型が増えれば、信頼する型は増えるだけ）で、判定は最大不動点:
+    循環の途中の型（自分・祖先）は判定の間だけ信頼する側に置く。
+
+    * `active`: 判定の途中の型 → 入れ子の深さ
+    * `assumed`: 今の判定が仮定した途中の型の深さの最小（仮定しなければ `NESTING_LIMIT + 1`）
+    * `cut`: 今の判定が入れ子の上限に当たったか（上限で切った「信頼しない」は悲観的な値: 残さない）
+    * `provisional_types` / `provisional_bodies`: 途中の祖先を仮定して「信頼」と出した判定 → 仮定した深さ。
+      同じ判定の中では仮定ごと使い回し（循環の中の型を何度も判定し直さない）、仮定した深さの判定が
+      終わるときに確定させる（その判定が「信頼」なら残し、そうでなければ捨てる）。`by_depth` はその深さ
+      ごとの組（1 つの判定は高々 `NESTING_LIMIT` 回しか組を移らない）
+    * 楽観的な仮定の下で「信頼しない」と出た判定は（上限で切っていなければ）仮定に依らず確定
+
+    同じ thread の判定の途中に割り込んで判定を呼ぶ code（finalizer・weakref の callback）は、途中の型を
+    仮の「信頼」として読む（threat model の外: 解析の値は判定の途中に code を実行しない）。
     """
 
     def __init__(self) -> None:
         self.active: dict = {}
         self.assumed = NESTING_LIMIT + 1
         self.cut = False
+        self.provisional_types: dict = {}
+        self.provisional_bodies: dict = {}
+        self.by_depth: list = [[] for _ in range(NESTING_LIMIT + 1)]
+
+
+def _settle(state: "_Nesting", depth: int, *, commit: bool, retag: Optional[int] = None) -> None:
+    """深さ `depth` の判定が終わった: それを仮定した仮の判定を確定する（残す / 捨てる / さらに外の仮定へ）。"""
+
+    group = state.by_depth[depth]
+    state.by_depth[depth] = []
+    for table, key in group:
+        if table.get(key) != depth:
+            continue
+        if retag is not None:
+            table[key] = retag
+            state.by_depth[retag].append((table, key))
+            continue
+        del table[key]
+        if commit:
+            (_PACKAGE_TYPES if table is state.provisional_types else _TRUSTED_BODIES)[key] = True
+
+
+def _provisionally(state: "_Nesting", table: dict, key: Any, assumed: int) -> None:
+    table[key] = assumed
+    state.by_depth[assumed].append((table, key))
 
 
 _NESTING = _Nesting()
@@ -178,15 +214,20 @@ def package_type(kind: type) -> bool:
         return known
     state = _NESTING
     depth = state.active.get(kind)
+    if depth is None:
+        depth = state.provisional_types.get(kind)
     if depth is not None:
-        # 型の属性が判定の途中の型（自分・祖先）を指す循環: その間だけ信頼する側に置く（仮定を記録する）
+        # 判定の途中の型（自分・祖先）か、途中の祖先を仮定して「信頼」と出した型: 仮定ごと使う
         state.assumed = min(state.assumed, depth)
         return True
     depth = len(state.active)
     if depth >= NESTING_LIMIT:
-        # 型の中の値が指す型の判定の入れ子が深すぎる: 信頼しない（この判定を含む判定は cache しない）
+        # 型の中の値が指す型の判定の入れ子が深すぎる: 信頼しない（この判定を含む判定は残さない）
         state.cut = True
         return False
+    if depth == 0:
+        # 最も外の判定: 前の判定の状態を持ち越さない
+        state.assumed, state.cut = NESTING_LIMIT + 1, False
     outer_assumed, outer_cut = state.assumed, state.cut
     state.assumed, state.cut = NESTING_LIMIT + 1, False
     state.active[kind] = depth
@@ -199,10 +240,23 @@ def package_type(kind: type) -> bool:
         del state.active[kind]
         assumed, cut = state.assumed, state.cut
         state.assumed, state.cut = min(outer_assumed, assumed), outer_cut or cut
-    # 確定した判定だけを残す: 上限で切らず、仮定したのが自分（か内の型）だけのとき。例外で抜けた
-    # 判定・祖先の仮定に依る判定は残さない（仮の値は他の判定にも他の thread にも見えない）
-    if decided and not cut and assumed >= depth:
+        if not decided or cut:
+            # 例外で抜けた・上限で切った判定: この判定を仮定した仮の判定も残さない
+            _settle(state, depth, commit=False)
+    if not decided or cut:
+        return known
+    if assumed >= depth:
+        # 自分より外を仮定していない（自分が循環の根）: 判定は確定し、自分を仮定した仮の判定も決まる
+        _settle(state, depth, commit=known)
         _PACKAGE_TYPES[kind] = known
+    elif known is False:
+        # 楽観的な仮定の下でも信頼しない: 確定（自分を仮定した仮の判定は仮定が崩れたので捨てる）
+        _settle(state, depth, commit=False)
+        _PACKAGE_TYPES[kind] = False
+    else:
+        # 外の祖先を仮定した「信頼」: 仮の判定（自分を仮定した仮の判定もその祖先の仮定へ移す）
+        _settle(state, depth, commit=False, retag=assumed)
+        _provisionally(state, state.provisional_types, kind, assumed)
     return known
 
 
@@ -371,10 +425,15 @@ def _trusted_class_body(klass: type) -> bool:
 
     # cache の key にするのは metaclass が `__eq__` / `__hash__` を持たない class だけ（その code を呼ばない）
     cacheable = _plain_metatype(klass)
-    known = _TRUSTED_BODIES.get(klass) if cacheable else None
-    if known is not None:
-        return known
     state = _NESTING
+    if cacheable:
+        known = _TRUSTED_BODIES.get(klass)
+        if known is not None:
+            return known
+        assumed = state.provisional_bodies.get(klass)
+        if assumed is not None:
+            state.assumed = min(state.assumed, assumed)
+            return True
     outer_assumed, outer_cut = state.assumed, state.cut
     state.assumed, state.cut = NESTING_LIMIT + 1, False
     try:
@@ -382,9 +441,14 @@ def _trusted_class_body(klass: type) -> bool:
     finally:
         assumed, cut = state.assumed, state.cut
         state.assumed, state.cut = min(outer_assumed, assumed), outer_cut or cut
-    # 判定の途中の型の仮定にも入れ子の上限にも依らない判定だけを残す（class の body は型の判定の内側）
-    if cacheable and not cut and assumed > NESTING_LIMIT:
+    # 型の判定と同じ規則で残す（class の body は型の判定の内側）: 上限で切った判定は残さない、仮定の
+    # 無い判定と楽観的な仮定の下の「信頼しない」は確定、途中の祖先を仮定した「信頼」は仮の判定
+    if not cacheable or cut:
+        return known
+    if assumed > NESTING_LIMIT or known is False:
         _TRUSTED_BODIES[klass] = known
+    else:
+        _provisionally(state, state.provisional_bodies, klass, assumed)
     return known
 
 

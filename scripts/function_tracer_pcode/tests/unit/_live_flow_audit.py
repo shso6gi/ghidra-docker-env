@@ -50,14 +50,18 @@ LIVE_VALUES_RESULTS = {
     "enum_value": LIVE,
     "lookup": LIVE,
     "merged_mappings": CONT,
+    "copied_container": CONT,
     "items_of": ITER,
     "values_of": ITER,
     "elements_of": ITER,
     "builtin_mapping": VER,
-    # `core/read_limits`（作業量を受け取らない読みの固定の上限）
+}
+#: `core/read_limits`（作業量を受け取らない読みの固定の上限）の関数の戻り値の種類（書いていない関数は plain）
+READ_LIMITS_RESULTS = {
     "elements_within_limit": ITER,
     "items_within_limit": ITER,
     "prefix_within_limit": CONT,
+    "copied_within_limit": CONT,
 }
 #: 真のとき引数を VER にする live_values の述語
 VERIFYING_PREDICATES = frozenset({"builtin_sequence", "builtin_set", "builtin_iterator", "builtin_container"})
@@ -304,12 +308,17 @@ class LiveFlowAudit:
         self.declared_callees_used: Set[Tuple[str, str]] = set()
         self.field_kinds: Dict[Tuple[str, str], Dict[str, Set[str]]] = collections.defaultdict(dict)
         self.identity_key_callers: Set[Tuple[str, str]] = set()
+        #: bounded path の呼び出しの辺（呼ばれる関数 → 呼ぶ関数の集合。監査が解決した呼び出しだけ）
+        self.callers: Dict[Tuple[str, str], Set[Tuple[str, str]]] = collections.defaultdict(set)
+        self._running: List[Tuple[str, str]] = []
         self.changed = False
 
     def report(self, key, node, message: str) -> None:
         self.violations.add((key[0][len(PKG) + 1:], key[1], getattr(node, "lineno", 0), message))
 
     def analyze(self, key, taint: Dict[str, str]):
+        if self._running:
+            self.callers[key].add(self._running[-1])
         frozen = (key, tuple(sorted(taint.items())))
         if frozen in self.cache:
             return self.cache[frozen]
@@ -317,7 +326,11 @@ class LiveFlowAudit:
             return LIVE
         self.stack.add(frozen)
         self.analyzed.add(key)
-        result = _FunctionAudit(self, key, dict(taint)).run()
+        self._running.append(key)
+        try:
+            result = _FunctionAudit(self, key, dict(taint)).run()
+        finally:
+            self._running.pop()
         self.stack.discard(frozen)
         self.cache[frozen] = result
         return result
@@ -1293,6 +1306,8 @@ class _FunctionAudit:
                 self.audit.identity_key_callers.add((self.module[len(PKG) + 1:], self.qual))
             if kind == "func" and module == PKG + ".core.live_values":
                 return LIVE_VALUES_RESULTS.get(name)
+            if kind == "func" and module == PKG + ".core.read_limits":
+                return READ_LIMITS_RESULTS.get(name)
             if kind == "func":
                 return OWNER_RESULTS.get(name)
             return None

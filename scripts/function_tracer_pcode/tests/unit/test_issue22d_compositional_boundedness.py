@@ -559,13 +559,18 @@ def _record_walk_targets():
 
 
 def _walked_sizes(run):
-    """bounded path（G4-b → finish → 最終 envelope）の中の呼び出しごとの (関数, 列の長さ, 数え済みの作業量)。"""
+    """bounded path（G4-b → finish → 最終 envelope）の中の、record の関数の呼び出しごとの (関数, 辿り得る列の
+    長さ)。組み込みの容器の subclass は基底型の長さで、長さの分からない iterator は `None`。"""
 
     import sys
+    import types
 
-    from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
+    from scripts.function_tracer_pcode.checker import cause_aggregate
+    from scripts.function_tracer_pcode.core import read_limits
 
     targets = _record_walk_targets()
+    # 要素ごとに作業量（または読みの上限）へ数えてから渡す generator: 辿る数はその数え方が抑える
+    counting = {cause_aggregate._counted.__code__, read_limits._counted.__code__}
     roots = {
         output_preparation.prepare_pair_output.__code__,
         production_boundary._profiled_finish.__code__,
@@ -573,9 +578,17 @@ def _walked_sizes(run):
     }
     inside = [0]
     calls = []
+    bases = (list, tuple, dict, set, frozenset)
 
     def _size(value):
-        return len(value) if type(value) in (list, tuple, dict, set, frozenset) else 0
+        for base in bases:
+            if isinstance(value, base):
+                return base.__len__(value)
+        if isinstance(value, types.GeneratorType) and value.gi_code in counting:
+            return 0
+        if isinstance(value, (types.GeneratorType, type(iter(())), type(iter([])), type(iter({}.items())))):
+            return None
+        return 0
 
     def _profile(frame, event, _arg):
         code = frame.f_code
@@ -583,12 +596,11 @@ def _walked_sizes(run):
             inside[0] += 1 if event == "call" else -1 if event == "return" else 0
         elif event == "call" and inside[0] and code in targets:
             local = frame.f_locals
-            sizes = [_size(value) for value in local.values()]
+            sizes = [_size(value) for name, value in local.items() if name != "self"]
             owner = local.get("self")
             if owner is not None:
-                sizes += [_size(vars(owner).get(name)) for name in ("unknown_reasons", "unknown_recovery_actions")]
-            work = active_serialization_work()
-            calls.append((targets[code], max(sizes + [0]), None if work is None else work.consumed))
+                sizes += [_size(value) for value in vars(owner).values()]
+            calls.append((targets[code], None if None in sizes else max(sizes + [0])))
 
     sys.setprofile(_profile)
     try:
@@ -598,37 +610,99 @@ def _walked_sizes(run):
     return result, calls
 
 
-@pytest.mark.parametrize("where", ["result", "final_attempt"])
-def test_record_walks_on_the_bounded_path_see_only_schema_rows_or_counted_input(where):
-    count = 5_000
+#: 診断の作業量（headroom）より大きい入力を作る葉（`count_into` が辿り切る前に作業量が尽きる大きさ）
+_HEAVY = "h" * 8192
+_MANY = 5_000
+
+
+def _heavy_reasons():
+    return [_legacy_reason(("call_effect_blocker", index), {"blob": _HEAVY}) for index in range(_MANY)]
+
+
+def _heavy_action(index):
+    from scripts.function_tracer_pcode.checker.unknown_reason import UnknownRecoveryAction
+
+    return UnknownRecoveryAction(
+        count_kind="proof_action", reason_id="unknown", decision_effect="diagnostic_only", reason_scope="global",
+        proof_kind="none", proof_stage="s", status="no_registered_plan", aggregation_unit="result",
+        evidence_refs=tuple(f"a{index}-{ref}" for ref in range(100)), detail=_HEAVY,
+    )
+
+
+def _record_walk_plan(kind):
+    from scripts.function_tracer_pcode.core.errors import DeadlineExceeded, raise_limitation
+    from scripts.function_tracer_pcode.proof.unknown_reason import UnknownRecoveryProofObligation
 
     def _plan(*_args, **_kwargs):
         _emit_one_production_signal()
+        if kind == "pair_limitation":
+            raise_limitation(DeadlineExceeded(
+                "record walk", site="issue22d.record_walk", target_key=("record_walk",), evidence_refs=("e",),
+            ))
         result = create_mock_result(is_equivalent=None, solver_status=SolverStatus.UNKNOWN)
-        reasons = [_legacy_reason(("call_effect_blocker", index), {"blob": (index,)}) for index in range(count)]
-        result.unknown_reasons = reasons if where == "result" else reasons[:1]
+        one = [_legacy_reason(("call_effect_blocker", 0), {"blob": 1})]
+        result.unknown_reasons = _heavy_reasons() if kind == "result_reasons" else one
+        if kind == "reason_fields":
+            result.unknown_reasons = [make_unknown_reason(
+                "unknown", stage="S", detail="d", evidence_refs=tuple(f"r{ref}" for ref in range(50_000)),
+                recovery_proof_obligations=tuple(
+                    UnknownRecoveryProofObligation.create("none", "s", description=_HEAVY) for _ in range(_MANY)
+                ),
+            )]
+        if kind == "recovery_actions":
+            result.unknown_recovery_actions = [_heavy_action(index) for index in range(_MANY)]
+        if kind == "payload_over_budget":
+            result.constrained_fragments = ["f" * 100] * 10_000
         trace = DebugTrace(planned_phases=["P0_BASE"], known_phases=["P0_BASE"])
         trace.add_attempt(Attempt(
             attempt_id=0, retry_count=0, phase="P0_BASE", stage_path=["P0_BASE"],
             strategy="pairwise", result=None, transition_reason="UNKNOWN",
-            unknown_reasons=reasons if where == "final_attempt" else reasons[:1],
+            unknown_reasons=_heavy_reasons() if kind == "final_attempt" else one,
         ))
         result.debug_trace = trace
         return result
 
-    def _run():
-        result = _run_pair(analyze=_analyze_from(*_analyses()), stage_plan=_plan, checker=_new_checker(_connector()))
-        build_final_result_envelope(result)
-        return result
+    return _plan
 
-    result, calls = _walked_sizes(_run)
-    assert result.final_outcome == "UNKNOWN"
+
+_RECORD_WALK_KINDS = (
+    "result_reasons", "final_attempt", "reason_fields", "recovery_actions", "pair_limitation", "payload_over_budget",
+)
+#: 上の場面で bounded path の中から実際に呼ばれる入口（残りの対象はこれらの内側からだけ呼ばれる:
+#: `test_counted_record_functions_reach_the_bounded_path_only_through_bounding_callers` が静的に確かめる）
+_OBSERVED_RECORD_ENTRIES = frozenset({
+    "EquivalenceResult.__post_init__", "coerce_unknown_reason_records", "_index_positions",
+    "_coerce_evidence_refs", "_coerce_optional_tuple",
+})
+
+
+def test_record_walks_on_the_bounded_path_never_see_uncounted_input(monkeypatch):
+    """診断の作業量より大きい入力（reason・最終 attempt・reason の列・recovery action）と、G4-b が結果を
+    作り直す場面（pair の限界・payload の予算超過）で、bounded path の record の関数が辿る列は、どの
+    呼び出しも出力 schema の行数以下（数えずに辿る呼び出しがあれば、大きい列をそのまま辿るので落ちる）。"""
+
+    from scripts.function_tracer_pcode.checker.output_schema import required_headroom_bytes
+
     rows = output_schema.MAX_UNKNOWN_REASON_ROWS
-    unbounded = [
-        (name, walked, consumed) for name, walked, consumed in calls
-        if walked > rows and (consumed is None or consumed < walked)
-    ]
-    assert calls and unbounded == []
-    # 結果の legacy reason の列（5,000 件）は、集計が作業量へ数えてから辿る（上の条件の後半）。
-    # 最終 attempt の列は数えている途中で作業量が尽き、辿られない
-    assert any(walked > rows for _name, walked, _consumed in calls) is (where == "result")
+    observed = set()
+    for kind in _RECORD_WALK_KINDS:
+        if kind == "payload_over_budget":
+            # 準備した payload の予算を小さく（headroom は schema の下限のまま）: G4-b が結果を作り直す
+            headroom = required_headroom_bytes()
+            monkeypatch.setenv("FT_ENVELOPE_HEADROOM_BYTES", str(headroom))
+            monkeypatch.setenv("FT_SERIALIZATION_BYTES_BUDGET", str(headroom + (64 << 10)))
+
+        def _run():
+            result = _run_pair(
+                analyze=_analyze_from(*_analyses()), stage_plan=_record_walk_plan(kind),
+                checker=_new_checker(_connector()),
+            )
+            build_final_result_envelope(result)
+            return result
+
+        result, calls = _walked_sizes(_run)
+        assert result.final_outcome == "UNKNOWN", kind
+        unbounded = [(name, walked) for name, walked in calls if walked is None or walked > rows]
+        assert unbounded == [], (kind, unbounded)
+        observed |= {name for name, _walked in calls}
+    assert observed == set(_OBSERVED_RECORD_ENTRIES), observed ^ set(_OBSERVED_RECORD_ENTRIES)

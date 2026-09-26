@@ -513,7 +513,7 @@ def normalize_expansion_budget_truncations(
     # record の値は owner の規則で読む（event id は構築のときに作った文字列、参照 ID は文字列の列）
     merged: Dict[str, ExpansionBudgetTruncation] = {}
     references: Dict[str, Tuple[str, ...]] = {}
-    # 記録と参照 ID の和は owner の固定の上限まで（作業量を受け取らない正規化。超えれば `TypeError`）
+    # 記録と参照 ID の和は owner の固定の上限まで（作業量を受け取らない正規化。超えれば登録済みの限界）
     scan = scan_budget()
     for item in (() if items is None else elements_within_limit(items, scan)):
         if item is None:

@@ -72,6 +72,11 @@ class readable_property(property): pass
 def state_setter(fn): return fn
 """
 
+_STUB_READ_LIMITS = """
+def elements_within_limit(values, scan=None): pass
+def prefix_within_limit(values): pass
+"""
+
 _STUB_JSON_ENCODING = """
 class Reducer:
     def add(self, element, *, work): pass
@@ -88,6 +93,7 @@ from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY,
 from scripts.function_tracer_pcode.core.live_values import (
     as_int, as_str, attribute, builtin_sequence, elements_of, readable_property, state_setter,
 )
+from scripts.function_tracer_pcode.core.read_limits import elements_within_limit, prefix_within_limit
 import dataclasses
 
 
@@ -357,6 +363,21 @@ class Clean:
             for item in items:
                 yield "h", item
 
+class ReadLimitElement:
+    def json_items(self):
+        for value in elements_within_limit(self.y):
+            yield "c", str(value)
+
+class ReadLimitPrefix:
+    def json_items(self):
+        for value in prefix_within_limit(self.y):
+            yield "c", value.name
+
+class CleanReadLimits:
+    def json_items(self):
+        for value in elements_within_limit(self.y):
+            yield "c", as_str(value)
+
 class CleanReducer(Reducer):
     def add(self, element, *, work):
         work.charge(1)
@@ -386,6 +407,8 @@ _EXPECTED_VIOLATIONS = {
     "OwnerDumps.json_items",
     # 宣言した能力（`readable_property` / `state_setter`）の本体も root として監査する
     "ReadableRecord.label", "CheckedRecord.__setattr__",
+    # `core/read_limits` の読みが返す要素も live（owner の関数の戻り値の種類は module ごとの表から）
+    "ReadLimitElement.json_items", "ReadLimitPrefix.json_items",
 }
 
 
@@ -394,6 +417,7 @@ def _synthetic_package(root: pathlib.Path) -> pathlib.Path:
     (package / "core").mkdir(parents=True)
     (package / "core" / "live_values.py").write_text(_STUB_LIVE_VALUES)
     (package / "core" / "json_encoding.py").write_text(_STUB_JSON_ENCODING)
+    (package / "core" / "read_limits.py").write_text(_STUB_READ_LIMITS)
     (package / "cases.py").write_text(_CASES)
     return package
 
@@ -405,7 +429,9 @@ def test_j19_the_audit_finds_every_forbidden_operation_and_accepts_the_owner_api
     flagged = {qual for module, qual, _line, _message in violations if module == "cases"}
     missed = _EXPECTED_VIOLATIONS - flagged
     assert missed == set(), missed
-    assert not {"Clean.json_items", "CleanReducer.add", "CleanReducer.result", "good_converter"} & flagged, [
+    assert not {
+        "Clean.json_items", "CleanReducer.add", "CleanReducer.result", "good_converter", "CleanReadLimits.json_items",
+    } & flagged, [
         v for v in violations if v[1].startswith(("Clean", "good_"))
     ]
 
@@ -1082,8 +1108,6 @@ _PROPORTIONAL_WORK_OWNERS = {
     ("core.runtime_refs.loops", "_lane_term_source"): _A_FIXED,
     ("core.runtime_refs.readonly", "ReadonlyReductionTermRef.json_items"): _A_FIXED,
     ("core.runtime_refs.readonly", "ReductionAccumulatorProof.json_items"): _A_FIXED,
-    ("core.runtime_refs.unknowns", "merge_expansion_budget_truncations"): _B_OWNER_ELEMENTS,
-    ("core.runtime_refs.unknowns", "normalize_expansion_budget_truncations"): _B_OWNER_ELEMENTS,
     ("core.signature", "FunctionSignature.from_analysis"): _B_OWNER_ELEMENTS,
     ("core.signature", "clone_parameter_descriptor"): _B_OWNER_ELEMENTS,
     **{("proof.cause_identity", name): _B_COUNTED for name in (
@@ -2330,8 +2354,8 @@ def test_the_snapshot_mapping_order_rejects_duplicate_canonical_keys():
 
 
 def test_every_counted_record_label_is_checked_at_runtime():
-    """「数えてから辿る」record のラベルは、実行して確かめる test の対象と同じ集合（ラベルだけ付け替えて
-    通すことはできない）。"""
+    """「数えてから辿る」record のラベルは、実行して確かめる test の対象と同じ集合（その test は対象の
+    うち bounded path の入口を実行して観測する。残りは下の静的な閉包が確かめる）。"""
 
     from scripts.function_tracer_pcode.tests.unit.test_issue22d_compositional_boundedness import (
         _record_walk_targets,
@@ -2339,3 +2363,60 @@ def test_every_counted_record_label_is_checked_at_runtime():
 
     labelled = {name for (_module, name), label in _PROPORTIONAL_WORK_OWNERS.items() if label == _B_COUNTED_RECORD}
     assert labelled == set(_record_walk_targets().values())
+
+
+#: 渡す値の大きさまで抑える分類（数えた入力・schema の行数・固定の形の構築・読みの上限・索引）。自分の
+#: 反復だけを抑える分類（`_A_FIXED` など）は含めない
+_INPUT_BOUNDING_LABELS = (
+    _B_COUNTED, _B_SCHEMA_ROWS, _A_FIXED_CALL, _A_LIMITATION, _B_MATCHED, _B_OWNER_ELEMENTS, _B_COUNTED_RECORD,
+)
+
+
+def _bounds_its_input(index, key) -> bool:
+    """呼ぶ側が渡す値の大きさを抑える関数か: 渡す値まで抑える分類がある、作業量の引数を受け取る、
+    または walker が要素ごとに作業量を渡す `Reducer` の method。"""
+
+    module, qual = key
+    if _PROPORTIONAL_WORK_OWNERS.get((module[len(flow.PKG) + 1:], qual)) in _INPUT_BOUNDING_LABELS:
+        return True
+    function = index.functions.get(key)
+    if function is not None:
+        names = {arg.arg for arg in function.args.posonlyargs + function.args.args + function.args.kwonlyargs}
+        if names & flow.WORK_PARAMETER_NAMES:
+            return True
+    if "." in qual and qual.rsplit(".", 1)[1] in ("add", "result"):
+        cls = qual.rsplit(".", 1)[0]
+        return index.subclass_of(module, cls, (flow.PKG + ".core.json_encoding", "Reducer"))
+    return False
+
+
+def test_counted_record_functions_reach_the_bounded_path_only_through_bounding_callers():
+    """「数えてから辿る」record の関数の bounded path の呼び出し元を、監査が解決した呼び出しの辺で遡ると、
+    どの経路も入力を抑える関数（分類のある owner・作業量を受け取る関数・`Reducer`）で終わる（分類の無い
+    中継の関数を通るだけで、入口から live な入力を数えずに渡す経路は無い）。"""
+
+    _violations, _analyzed, index, _missing = flow.audit(PACKAGE_ROOT)
+    callers = flow.audit.last.callers
+    labelled = {
+        (flow.PKG + "." + module, qual)
+        for (module, qual), label in _PROPORTIONAL_WORK_OWNERS.items() if label == _B_COUNTED_RECORD
+    }
+    unbounded = []
+    for target in sorted(labelled):
+        pending = [(target, (target,))]
+        seen = {target}
+        assert callers.get(target), target  # bounded path から呼ばれている（空の合格にしない）
+        while pending:
+            key, path = pending.pop()
+            for caller in sorted(callers.get(key, ())):
+                if caller in labelled or _bounds_its_input(index, caller):
+                    continue
+                if caller in seen:
+                    continue
+                seen.add(caller)
+                chain = path + (caller,)
+                if not callers.get(caller) or len(chain) > 8:
+                    unbounded.append(tuple(f"{m[len(flow.PKG) + 1:]}::{q}" for m, q in chain))
+                    continue
+                pending.append((caller, chain))
+    assert unbounded == []

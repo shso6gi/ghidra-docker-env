@@ -289,10 +289,13 @@ class EquivalenceResult:
         solver_results = live_values.attribute(self, "solver_results")
         if solver_results is None or not live_values.as_bool(solver_results):
             return False
+        if live_values.is_kind(solver_results, ParallelResult):
+            # solver の結果の owner が作ったときに数えた事実（行を辿り直さない）
+            return live_values.attribute(solver_results, "timed_out") is True
         results = live_values.attribute(solver_results, "results")
         if results is None or not live_values.as_bool(results):
             return False
-        # receipt の無い結果（authority の前・旧来の結果）だけ: solver の結果の列は owner の固定の上限まで
+        # receipt の無い、solver の owner が作っていない結果の列だけ: 読みの固定の上限まで
         for sr in read_limits.elements_within_limit(results):
             # `SolverStatus` は mixin の無い enum: `==` は identity
             if live_values.attribute(sr, "status") is SolverStatus.TIMEOUT:
