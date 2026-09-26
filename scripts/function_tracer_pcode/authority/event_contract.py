@@ -146,6 +146,8 @@ class _Admission:
     limitation_occurrences: int
     relation_rows: int
     payload_units: int
+    #: この transaction が publish する cause occurrence の id（遅延した約束を果たしたかを commit で反映する）
+    occurrence_ids: tuple
 
 
 class EventContractLedger:
@@ -153,11 +155,16 @@ class EventContractLedger:
 
     数えるのは publish した event だけ（拒んだ transaction は数えない）。occurrence の数・relation の
     行は event の authority から数え、payload の大きさは digest の前に上限まで測る。
+
+    判定の前に publish すると約束した occurrence（遅延した SAT-safety の観測）は `defer` で約束の時点に
+    数え、publish したとき（`commit`）か約束が消えたとき（`release`）に約束の勘定から外す: 同じ occurrence を
+    約束と publish の 2 回数えない（exact-once）。約束の数も契約の中（約束の時点で超えれば拒む）。
     """
 
     __slots__ = (
         "contract", "events", "ordinary_occurrences", "limitation_occurrences",
-        "relation_rows", "payload_units", "exceeded",
+        "relation_rows", "payload_units", "exceeded", "deferred_unpublished",
+        "_deferred_ids", "_published_ids",
     )
 
     def __init__(self, contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT) -> None:
@@ -171,20 +178,32 @@ class EventContractLedger:
         self.payload_units = 0
         #: 最初に超えた契約（超えた後の ordinary な transaction は全部拒む: stream は prefix のまま）
         self.exceeded: Optional[AuthorityEventContractExceeded] = None
+        #: 約束して、まだ publish していない occurrence の数
+        self.deferred_unpublished = 0
+        #: 約束した occurrence の id（契約で `ordinary + 約束` 以下に抑えるので有界）
+        self._deferred_ids: set = set()
+        #: publish した cause occurrence の id（契約で `max_cause_occurrences` 以下に抑えるので有界）
+        self._published_ids: set = set()
+
+    @property
+    def stream_truncated(self) -> bool:
+        """契約を超えた（sticky）: stream はその時点までの prefix で、判定は契約の限界の cause が決める。"""
+
+        return self.exceeded is not None
 
     @property
     def limitation_recorded(self) -> bool:
-        """契約の超過を記録する限界の cause を publish したか（判定が必ず UNKNOWN になる）。"""
+        """限界の cause（`analysis_limitation` domain）を 1 つ以上 publish したか。"""
 
         return self.limitation_occurrences > 0
 
-    def admit(self, intents: Sequence[Any], *, pending_occurrences: int = 0) -> _Admission:
+    def admit(self, intents: Sequence[Any]) -> _Admission:
         """transaction を publish してよいか確かめ、よければ publish 後の勘定を返す（まだ数えない）。
 
         超えるなら限界を pair の台帳へ記録して `AuthorityEventContractExceeded` を上げる。件数は測る前に
         （O(1) で）比べ、payload は 1 event ずつ、残りの枠（1 event の上限と stream の残りの小さい方）
-        まで測る: 超える transaction を全部測ってから拒まない。`pending_occurrences` は判定の前に必ず
-        publish される予定の occurrence（遅延した SAT-safety の観測など）。
+        まで測る: 超える transaction を全部測ってから拒まない。cause の数は、publish 済み・この
+        transaction・約束して未 publish の合計（約束をこの transaction が果たすなら 1 回だけ数える）。
         """
 
         contract = self.contract
@@ -193,29 +212,38 @@ class EventContractLedger:
             raise self.exceeded
         if limitation_only:
             # 予約した枠（限界の cause）: 上限そのものまで
-            event_limit, cause_limit = contract.max_events, contract.max_cause_occurrences
+            event_limit = contract.max_events
             relation_limit, unit_limit = contract.max_relation_rows, contract.max_stream_payload_units
         else:
-            event_limit, cause_limit = contract.ordinary_events, contract.ordinary_cause_occurrences
+            event_limit = contract.ordinary_events
             relation_limit, unit_limit = contract.ordinary_relation_rows, contract.ordinary_stream_payload_units
         events = self.events + len(intents)
         if events > event_limit:
             self._exceed("events", event_limit, events)
         ordinary = self.ordinary_occurrences
         limitation = self.limitation_occurrences
+        pending = self.deferred_unpublished
         relations = self.relation_rows
         units = self.payload_units
+        occurrence_ids = []
         for intent in intents:
             occurrence = _occurrence_of(intent)
             if occurrence is not None:
+                occurrence_id = occurrence.occurrence_id
+                if (
+                    occurrence_id in self._deferred_ids
+                    and occurrence_id not in self._published_ids
+                    and occurrence_id not in occurrence_ids
+                ):
+                    # 約束を果たす occurrence: 約束の勘定から publish の勘定へ移す（2 回数えない）
+                    pending -= 1
+                occurrence_ids.append(occurrence_id)
                 if _is_limitation_cause(intent):
                     limitation += 1
                 else:
                     ordinary += 1
                 relations += len(occurrence.proof_requirement_ids)
-                causes = ordinary + limitation if limitation_only else ordinary + pending_occurrences
-                if causes > cause_limit:
-                    self._exceed("cause_occurrences", cause_limit, causes)
+                self._check_causes(ordinary, limitation, pending, limitation_only=limitation_only)
                 if relations > relation_limit:
                     self._exceed("relation_rows", relation_limit, relations)
             remaining = unit_limit - units
@@ -227,14 +255,26 @@ class EventContractLedger:
                 self._exceed("event_payload_units", contract.max_event_payload_units,
                              contract.max_event_payload_units + 1)
             units += measured
-        if not limitation_only and ordinary + pending_occurrences > cause_limit:
-            self._exceed("cause_occurrences", cause_limit, ordinary + pending_occurrences)
-        return _Admission(self._state(), events, ordinary, limitation, relations, units)
+        return _Admission(
+            self._state(), events, ordinary, limitation, relations, units, tuple(occurrence_ids),
+        )
+
+    def _check_causes(
+        self, ordinary: int, limitation: int, pending: int, *, limitation_only: bool,
+    ) -> None:
+        """cause の数の 2 つの上限: 限界以外（約束を含む）は予約を除く枠、全部は `max_cause_occurrences`。"""
+
+        contract = self.contract
+        total = ordinary + limitation + pending
+        if total > contract.max_cause_occurrences:
+            self._exceed("cause_occurrences", contract.max_cause_occurrences, total)
+        if not limitation_only and ordinary + pending > contract.ordinary_cause_occurrences:
+            self._exceed("cause_occurrences", contract.ordinary_cause_occurrences, ordinary + pending)
 
     def _state(self) -> tuple:
         return (
             self.events, self.ordinary_occurrences, self.limitation_occurrences,
-            self.relation_rows, self.payload_units,
+            self.relation_rows, self.payload_units, self.deferred_unpublished,
         )
 
     def is_current(self, admission: Any) -> bool:
@@ -254,22 +294,60 @@ class EventContractLedger:
         self.limitation_occurrences = admission.limitation_occurrences
         self.relation_rows = admission.relation_rows
         self.payload_units = admission.payload_units
+        for occurrence_id in admission.occurrence_ids:
+            if occurrence_id in self._published_ids:
+                continue
+            self._published_ids.add(occurrence_id)
+            if occurrence_id in self._deferred_ids:
+                self.deferred_unpublished -= 1
 
-    def checkpoint(self, *, pending_occurrences: int) -> None:
-        """判定の前の確認: 予定の occurrence を足しても枠が残るか（超えるなら限界を記録して上げる）。"""
+    def defer(self, occurrence_id: str) -> None:
+        """判定の前に publish すると約束した occurrence を、約束の時点で数える（超えるなら拒む）。
+
+        publish 済み・約束済みの occurrence は数えない。超えるなら限界を pair の台帳へ記録して
+        `AuthorityEventContractExceeded` を上げ、約束は記録しない。
+        """
+
+        if type(occurrence_id) is not str or not occurrence_id:
+            raise TypeError("a deferred occurrence id is a non-empty str")
+        if occurrence_id in self._deferred_ids or occurrence_id in self._published_ids:
+            return
+        if self.exceeded is not None:
+            raise self.exceeded
+        pending = self.deferred_unpublished + 1
+        self._check_causes(
+            self.ordinary_occurrences, self.limitation_occurrences, pending, limitation_only=False,
+        )
+        self._deferred_ids.add(occurrence_id)
+        self.deferred_unpublished = pending
+
+    def release(self, occurrence_id: str) -> None:
+        """約束が消えた（完了で退いた・finish で publish を試みた）occurrence を約束の勘定から外す。"""
+
+        if occurrence_id not in self._deferred_ids:
+            return
+        self._deferred_ids.discard(occurrence_id)
+        if occurrence_id not in self._published_ids:
+            self.deferred_unpublished -= 1
+
+    def checkpoint(self) -> None:
+        """判定の前（pair の gate の前）の確認: 超過が記録済みなら上げる（約束は約束の時点で数え済み）。"""
 
         if self.exceeded is not None:
             raise self.exceeded
-        observed = self.ordinary_occurrences + pending_occurrences
-        if observed > self.contract.ordinary_cause_occurrences:
-            self._exceed("cause_occurrences", self.contract.ordinary_cause_occurrences, observed)
+        self._check_causes(
+            self.ordinary_occurrences, self.limitation_occurrences, self.deferred_unpublished,
+            limitation_only=False,
+        )
 
     def _exceed(self, bound: str, limit: int, observed: int) -> None:
         exceeded = AuthorityEventContractExceeded(bound, limit=limit, observed=observed)
-        self.exceeded = exceeded
-        ledger = current_pair_ledger()
-        if ledger is not None:
-            ledger.record_limitation(exceeded, stop=PairStopState.PAIR_TERMINAL_LIMITATION)
+        if self.exceeded is None:
+            # 最初の超過が stream を切った点（限界の cause はこの超過を記録する）
+            self.exceeded = exceeded
+            ledger = current_pair_ledger()
+            if ledger is not None:
+                ledger.record_limitation(exceeded, stop=PairStopState.PAIR_TERMINAL_LIMITATION)
         raise exceeded
 
 

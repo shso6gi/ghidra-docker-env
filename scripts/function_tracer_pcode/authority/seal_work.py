@@ -35,8 +35,10 @@ class BundleWorkExceeded(ValueError):
 
     `kind` は `"work"`（作業量の上限）か `"contract"`（入力が契約の外）。`ValueError` の subclass:
     永続化した bundle を読む側（supervisor の terminal snapshot・reporting）は、検証できない bundle と
-    同じく無効として扱う。封印する側（出力の finalization）は型で受けて、判定の receipt を残した
-    ERROR にする（部分的な bundle を使わない）。
+    同じく無効として扱う。封印する側の CLI（`cli/commands/equivalence`）は受けずに伝える: worker は
+    canonical result envelope を書かずに失敗で終わり、supervisor が pair を operational ERROR として
+    確定する（部分的な bundle を使わない）。判定の receipt を残した結果の ERROR にするのは出力の
+    finalization（PR #190 の `AuthoritySeal`）の責務。
     """
 
     def __init__(self, message: str, *, kind: str, step: str, consumed: int, limit: Optional[int]) -> None:
@@ -182,11 +184,15 @@ class SealComponents:
 class SealPlan:
     """1 回の封印・検証の作業量の計画（測った大きさと、段ごとに 1 回だけ数える記録）。"""
 
-    __slots__ = ("work", "components", "charged")
+    __slots__ = ("work", "components", "charged", "contract")
 
-    def __init__(self, work: SealWork, components: SealComponents) -> None:
+    def __init__(
+        self, work: SealWork, components: SealComponents,
+        contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT,
+    ) -> None:
         self.work = work
         self.components = components
+        self.contract = contract
         #: 数え終えた段（同じ段を 2 回数えない: exact-once）
         self.charged: list = []
 
@@ -207,11 +213,17 @@ class SealPlan:
         if len(events) > contract.max_events:
             _contract(work, f"sealed event stream has {len(events)} events", contract.max_events)
         stream_units = _measure(_stream_frame(stream), work)
+        cause_events = 0
         for event in events:
             stream_units += _measure(_event_value(event), work)
             if stream_units > contract.max_sealed_stream_units:
                 _contract(work, "the sealed event stream is outside the authority event contract",
                           contract.max_sealed_stream_units)
+            if _is_cause_event(event):
+                cause_events += 1
+                if cause_events > contract.max_cause_occurrences:
+                    _contract(work, "the sealed event stream has more causes than the contract",
+                              contract.max_cause_occurrences)
         projection_units = _measure(projection, work)
         if projection_units > contract.max_projection_units:
             _contract(work, "the lifecycle projection is outside the authority event contract",
@@ -227,30 +239,40 @@ class SealPlan:
             _contract(work, "the execution payload is outside the authority event contract",
                       contract.max_execution_payload_units)
         preimage_units = _measure(preimage, work)
-        # replay の前（projection がまだ無い: supervisor の stream）は active な occurrence の上限で見積もる
-        active = (
-            _active_occurrences(projection) if projection is not None
-            else contract.max_cause_occurrences
-        )
-        reduction = len(events) * max(1, active)
+        # replay の仕事は event ごとに、それまでに観測した occurrence（discharge 済みも含む）に比例する:
+        # 最後の `c_active_base` ではなく stream の cause event の数で見積もる（projection の有無に依らない）
+        reduction = len(events) * max(1, cause_events)
         work.charge(reduction)
         components = SealComponents(
             stream=stream_units, events=len(events), projection=projection_units,
             receipts=receipt_units, preimage=preimage_units, execution=execution_units,
             reduction=reduction,
         )
-        return cls(work, components)
+        return cls(work, components, contract)
 
     def measure_more(self, *, projection: Any = None, receipts: Sequence[Any] = ()) -> None:
-        """replay の後にできた projection / receipt を、encode する前に数えながら測って足す。"""
+        """replay の後にできた projection / receipt を、encode する前に数えながら測って足す。
 
-        added_projection = _measure(projection, self.work) if projection is not None else 0
-        added_receipts = sum(_measure(item, self.work) for item in receipts)
+        足した後の大きさも契約の上限と比べる（`price` と同じ上限: 外なら encode せずに止まる）。
+        """
+
+        contract = self.contract
         current = self.components
+        projection_units = current.projection
+        if projection is not None:
+            projection_units += _measure(projection, self.work)
+            if projection_units > contract.max_projection_units:
+                _contract(self.work, "the lifecycle projection is outside the authority event contract",
+                          contract.max_projection_units)
+        receipt_units = current.receipts
+        for item in receipts:
+            receipt_units += _measure(item, self.work)
+            if receipt_units > contract.max_receipt_units:
+                _contract(self.work, "the receipts are outside the authority event contract",
+                          contract.max_receipt_units)
         self.components = SealComponents(
             stream=current.stream, events=current.events,
-            projection=current.projection + added_projection,
-            receipts=current.receipts + added_receipts,
+            projection=projection_units, receipts=receipt_units,
             preimage=current.preimage, execution=current.execution,
             reduction=current.reduction,
         )
@@ -367,13 +389,16 @@ def _contract(work: Any, message: str, limit: int) -> None:
     )
 
 
-def _active_occurrences(projection: Any) -> int:
-    if isinstance(projection, Mapping):
-        payload = projection.get("payload")
-        rows = payload.get("c_active_base") if isinstance(payload, Mapping) else None
-        return len(rows) if isinstance(rows, (list, tuple)) else 0
-    rows = getattr(projection, "c_active_base", ())
-    return len(rows) if isinstance(rows, tuple) else 0
+def _is_cause_event(event: Any) -> bool:
+    """cause occurrence を作る event か（記録済みの event は object、bundle の中は encode 済みの dict）。"""
+
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import EventType
+
+    if isinstance(event, Mapping):
+        header = event.get("header")
+        return isinstance(header, Mapping) and header.get("event_type") == EventType.CAUSE_OBSERVED.value
+    header = getattr(event, "header", None)
+    return getattr(header, "event_type", None) is EventType.CAUSE_OBSERVED
 
 
 __all__ = [

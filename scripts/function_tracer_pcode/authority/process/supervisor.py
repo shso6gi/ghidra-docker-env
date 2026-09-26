@@ -15,6 +15,9 @@ import threading
 from typing import Any, Iterator, Mapping, Optional
 
 from scripts.function_tracer_pcode.authority.process import store_layout as layout
+from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
+    read_canonical_envelope,
+)
 from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrence,
     CauseOccurrenceAuthority,
@@ -2110,8 +2113,10 @@ class DurableCheckpointStore:
         path = self.directory / layout.RESULT_ENVELOPE
         if not path.exists():
             return terminal_evidence.EnvelopeObservation(False, None)
+        # Issue #110: the same bounded read as the terminal snapshot (the digest
+        # of at most the contract bound + 1 bytes; whole-file within bounds).
         return terminal_evidence.EnvelopeObservation(
-            True, hashlib.sha256(path.read_bytes()).hexdigest(),
+            True, read_canonical_envelope(path).sha256,
         )
 
     @staticmethod

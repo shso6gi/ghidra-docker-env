@@ -322,20 +322,71 @@ def test_a_refused_transaction_leaves_the_stream_a_valid_prefix(monkeypatch):
     assert session.domain_signal_error_kinds == []
 
 
-def test_the_pair_gate_checkpoint_counts_deferred_occurrences(monkeypatch):
-    """判定の前に publish される予定の（遅延した）occurrence も、gate の前の checkpoint が数える。"""
+def _defer(session, blocker):
+    from dataclasses import replace
+
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        emit_sat_safety_signal,
+        production_signal_scope,
+    )
+
+    with production_signal_scope(session):
+        return emit_sat_safety_signal(
+            replace(blocker, defer_until_terminal=True),
+            producer_site_manifest_id="sat-safety-blocker-observed",
+        )
+
+
+def test_a_deferred_occurrence_is_counted_when_it_is_promised(monkeypatch):
+    """判定の前に publish すると約束した（遅延した）occurrence は約束の時点で数え、枠を超える約束は拒む。"""
+
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
 
     contract = AuthorityEventContract(max_cause_occurrences=16)
     _connector_, session, emitted, _pending = _finished_session(
         monkeypatch, blockers=5, case_id="issue110-deferred", contract=contract,
     )
     assert session.event_contract.exceeded is None
-    session.domain_signal_state["sat_safety_deferred_observations"] = {
-        f"deferred-{index}": object() for index in range(20)
-    }
+    with pair_failure_scope(("issue110", "deferred"), session.identity.result_occurrence_id) as ledger:
+        for index in range(20):
+            _defer(session, _sat_blocker(100 + index))
+        assert ledger.pending_failure() is not None
+    room = contract.ordinary_cause_occurrences - 5
+    assert session.event_contract.deferred_unpublished == room
+    assert len(session.domain_signal_state["sat_safety_deferred_observations"]) == room
+    assert session.event_contract.exceeded.bound == "cause_occurrences"
     with pytest.raises(AuthorityEventContractExceeded):
         session.event_contract_checkpoint()
-    assert session.event_contract.exceeded.bound == "cause_occurrences"
+
+
+def test_a_kept_promise_is_counted_once(monkeypatch):
+    """約束した occurrence を後で publish しても 1 回だけ数える（約束と publish の 2 回数えない）。"""
+
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        emit_sat_safety_signal,
+        production_signal_scope,
+    )
+
+    contract = AuthorityEventContract(max_cause_occurrences=16)
+    connector, session, emitted, _pending = _finished_session(
+        monkeypatch, blockers=0, case_id="issue110-once", contract=contract,
+    )
+    for index in range(6):
+        assert _defer(session, _sat_blocker(index)) == 0
+    assert session.event_contract.deferred_unpublished == 6
+    with production_signal_scope(session):
+        published = [
+            emit_sat_safety_signal(_sat_blocker(index), producer_site_manifest_id="sat-safety-blocker-observed")
+            for index in range(contract.ordinary_cause_occurrences)
+        ]
+    # 約束した 6 件は publish で約束の勘定から外れる: 枠いっぱい（12 件）まで publish できる
+    assert sum(published) == contract.ordinary_cause_occurrences
+    assert session.event_contract.deferred_unpublished == 0
+    assert session.event_contract.exceeded is None
+    evidence = connector.finish(session, _legacy_result(), case_id="issue110-once")
+    assert session.event_contract.exceeded is None
+    assert session.event_contract.ordinary_occurrences == contract.ordinary_cause_occurrences
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
 
 
 def test_a_finish_time_refusal_publishes_the_contract_limitation_before_the_decision(monkeypatch):
@@ -345,23 +396,22 @@ def test_a_finish_time_refusal_publishes_the_contract_limitation_before_the_deci
         ANALYSIS_BUDGET_REASON_ID,
     )
 
-    contract = AuthorityEventContract(max_cause_occurrences=16)
+    contract = AuthorityEventContract(max_cause_occurrences=64, max_events=16)
     connector, session, emitted, _pending = _finished_session(
         monkeypatch, blockers=3, case_id="issue110-finish", contract=contract,
     )
+    for index in range(20):
+        _defer(session, _sat_blocker(1000 + index))
     assert session.event_contract.exceeded is None
-    # finish の中で publish される遅延した観測が枠を超える（gate の後の超過）
-    deferred = {f"finish-{index}": (_sat_blocker(1000 + index), "sat-safety-blocker-observed")
-                for index in range(30)}
-    session.domain_signal_state["sat_safety_deferred_observations"] = deferred
-    session.event_contract.ordinary_occurrences = 0  # checkpoint を通した後の状態を作る
+    # 遅延した観測は finish の中で publish され、event の数の枠（12 件）を超える（gate の後の超過）
     evidence = connector.finish(session, _legacy_result(), case_id="issue110-finish")
     pilot = evidence.pilot_result
-    assert session.event_contract.exceeded is not None
+    assert session.event_contract.exceeded.bound == "events"
     assert session.event_contract.limitation_recorded
+    assert session.event_contract.deferred_unpublished == 0
     assert pilot.candidate.decision_receipt.outcome is Outcome.UNKNOWN
     assert ANALYSIS_BUDGET_REASON_ID in {row.reason_id for row in pilot.reduction.projection.c_active_base}
-    assert len(pilot.reduction.projection.c_active_base) <= contract.max_cause_occurrences
+    assert session.recorder.event_count <= contract.max_events
 
 
 def test_the_contract_limitation_cause_is_identified_by_its_site():
@@ -735,21 +785,72 @@ def test_pricing_charges_each_event_before_measuring_it():
 
 
 @dataclass(frozen=True)
-class _Projection:
-    c_active_base: tuple
+class _Header:
+    event_type: Enum
 
 
-def test_pricing_charges_the_reduction_by_events_and_active_occurrences():
-    events = tuple(SimpleNamespace(authority_payload=1, diagnostic_payload=None) for _ in range(50))
-    small = SealWorkBudget.for_result()
-    SealPlan.price(small, stream=SimpleNamespace(events=events), projection=_Projection(()),
-                   receipts=(), preimage=None, execution=None)
-    rows = _Projection(tuple(range(40)))
-    large = SealWorkBudget.for_result()
-    plan = SealPlan.price(large, stream=SimpleNamespace(events=events), projection=rows,
+@dataclass(frozen=True)
+class _Event:
+    header: _Header
+    authority_payload: int = 1
+    diagnostic_payload: None = None
+
+
+def _typed_events(kinds):
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import EventType
+
+    return tuple(_Event(_Header(EventType(kind))) for kind in kinds)
+
+
+def test_pricing_charges_the_reduction_by_events_and_the_stream_causes():
+    """replay の見積もりは event の数 × stream の cause event の数（最後の `c_active_base` にも projection の
+    有無にも依らない: discharge 済みの occurrence も replay は辿る）。封印した形の dict でも同じ。"""
+
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import EventType
+
+    kinds = [EventType.CAUSE_OBSERVED.value] * 40 + [EventType.SOLVER_UNKNOWN.value] * 10
+    events = _typed_events(kinds)
+    for projection in (None, {"payload": {"c_active_base": []}}):
+        plan = SealPlan.price(SealWorkBudget.for_result(), stream=SimpleNamespace(events=events),
+                              projection=projection, receipts=(), preimage=None, execution=None)
+        assert plan.components.reduction == 50 * 40
+    encoded = {"payload": {"events": [{"header": {"event_type": kind}} for kind in kinds]}}
+    plan = SealPlan.price(SealWorkBudget.for_result(), stream=encoded, projection=None,
                           receipts=(), preimage=None, execution=None)
     assert plan.components.reduction == 50 * 40
-    assert large.consumed - small.consumed >= 50 * 40 - 50
+    without_causes = SealPlan.price(
+        SealWorkBudget.for_result(), stream=SimpleNamespace(events=_typed_events(kinds[40:])),
+        projection=None, receipts=(), preimage=None, execution=None,
+    )
+    assert without_causes.components.reduction == 10
+
+
+def test_a_stream_with_more_causes_than_the_contract_is_refused_while_it_is_measured():
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import EventType
+
+    contract = AuthorityEventContract(max_cause_occurrences=8)
+    events = _typed_events([EventType.CAUSE_OBSERVED.value] * 9)
+    with pytest.raises(BundleWorkExceeded) as refused:
+        SealPlan.price(SealWorkBudget.for_result(), stream=SimpleNamespace(events=events),
+                       projection=None, receipts=(), preimage=None, execution=None, contract=contract)
+    assert refused.value.kind == "contract"
+
+
+def test_measure_more_enforces_the_projection_and_receipt_bounds():
+    """replay の後に足す projection / receipt も契約の上限と比べる（encode の前に止まる）。"""
+
+    contract = AuthorityEventContract(max_projection_units=64, max_receipt_units=64)
+    fresh = lambda: SealPlan.price(  # noqa: E731
+        SealWorkBudget.for_result(), stream=SimpleNamespace(events=()), projection=None,
+        receipts=(), preimage=None, execution=None, contract=contract,
+    )
+    fresh().measure_more(projection={"rows": "x" * 20}, receipts=("y" * 20,))
+    with pytest.raises(BundleWorkExceeded) as projection:
+        fresh().measure_more(projection={"rows": "x" * 100})
+    assert projection.value.kind == "contract"
+    with pytest.raises(BundleWorkExceeded) as receipts:
+        fresh().measure_more(receipts=("y" * 40, "z" * 40))
+    assert receipts.value.kind == "contract"
 
 
 def test_a_step_cannot_be_charged_twice():
@@ -1119,3 +1220,242 @@ def test_the_stream_total_bound_is_enforced_while_measuring(monkeypatch):
     assert session.event_contract.exceeded.bound == "stream_payload_units"
     assert session.event_contract.payload_units <= contract.ordinary_stream_payload_units
     assert sum(emitted) <= 4
+
+
+# ---------------------------------------------------------------------------
+# 契約で切られた stream（truncated regime）: 超過の後の producer の失敗・finish の段・solver の履歴
+# ---------------------------------------------------------------------------
+
+
+def _truncated_session(monkeypatch, case_id: str):
+    """契約（cause 16 件）を超えて stream が切られた session（pair の台帳に限界がある）。"""
+
+    contract = AuthorityEventContract(max_cause_occurrences=16)
+    connector, session, emitted, pending = _finished_session(
+        monkeypatch, blockers=40, case_id=case_id, contract=contract,
+    )
+    assert session.stream_truncated and pending is not None
+    return connector, session, pending
+
+
+def _shadow_emit(session, index):
+    """production の producer（decompilation broker など）の形: emit の失敗を shadow error として記録する。"""
+
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        production_signal_scope,
+        record_production_pilot_shadow_error,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+        CauseObservedEventAuthority,
+        EventIntent,
+        EventType,
+    )
+
+    with production_signal_scope(session):
+        try:
+            authority = session.domain_signal_encoder.authority_for_signal(session, _sat_blocker(index))
+            emitted = session.emit(EventIntent(EventType.CAUSE_OBSERVED, CauseObservedEventAuthority(authority)))
+            if emitted != 1:
+                raise ValueError("producer event was not recorded")
+        except Exception as exc:  # noqa: BLE001 - the production producer's catch
+            record_production_pilot_shadow_error(exc)
+
+
+def test_a_producer_failure_after_the_truncation_is_a_consequence_not_an_error(monkeypatch):
+    """超過の後に producer が emit の失敗（や、拒まれた event を前提にした不整合）を shadow error として記録
+    しても、pair は契約の限界の UNKNOWN（ERROR にならない）。失敗は診断として残る。"""
+
+    connector, session, pending = _truncated_session(monkeypatch, "issue110-consequence")
+    _shadow_emit(session, 5000)
+    assert session.domain_signal_error_kinds == []
+    assert session.truncation_consequences == {"AuthorityEventContractExceeded": 1}
+    _attribute_pending_limitation(session, pending)
+    evidence = connector.finish(session, _legacy_result(), case_id="issue110-consequence")
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+
+
+def test_a_producer_failure_before_the_truncation_stays_an_error(monkeypatch):
+    connector, session, _emitted, _pending = _finished_session(
+        monkeypatch, blockers=2, case_id="issue110-real-error",
+        contract=AuthorityEventContract(max_cause_occurrences=16),
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        production_signal_scope,
+        record_production_pilot_shadow_error,
+    )
+
+    with production_signal_scope(session):
+        record_production_pilot_shadow_error(ValueError("a real encoding failure"))
+    assert not session.stream_truncated
+    assert session.domain_signal_error_kinds == ["ValueError"]
+    with pytest.raises(ValueError, match="encoding is incomplete"):
+        connector.finish(session, _legacy_result(), case_id="issue110-real-error")
+
+
+def test_a_rollback_failure_stays_an_error_on_a_truncated_stream(monkeypatch):
+    connector, session, _pending = _truncated_session(monkeypatch, "issue110-rollback")
+
+    def _broken_rollback(_session, _signal):
+        raise RuntimeError("rollback broke")
+
+    monkeypatch.setattr(session.domain_signal_encoder, "rollback_emitted_signal", _broken_rollback,
+                        raising=False)
+    assert session.emit_domain_signal(_sat_blocker(6000)) == 0
+    assert session.domain_signal_error_kinds == ["AuthorityEventContractExceeded"]
+    assert "rollback broke" in session.domain_signal_error_details[0]
+
+
+def test_a_finish_stage_stops_at_its_first_refused_event(monkeypatch):
+    """stream を完成させる finish の段は最初に拒まれた event で止まる（拒まれた状態を前提に先へ進まない）。"""
+
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+        CauseObservedEventAuthority,
+        EventIntent,
+        EventType,
+    )
+
+    contract = AuthorityEventContract(max_cause_occurrences=16)
+    connector, session, _emitted, _pending = _finished_session(
+        monkeypatch, blockers=10, case_id="issue110-stage", contract=contract,
+    )
+    progress = []
+
+    def _history(owner):
+        for index in range(5):
+            authority = owner.domain_signal_encoder.authority_for_signal(owner, _sat_blocker(7000 + index))
+            owner.emit(EventIntent(EventType.CAUSE_OBSERVED, CauseObservedEventAuthority(authority)))
+            progress.append(index)
+
+    monkeypatch.setattr(session.domain_signal_encoder, "finalize_open_execution_history", _history,
+                        raising=False)
+    evidence = connector.finish(session, _legacy_result(), case_id="issue110-stage")
+    room = contract.ordinary_cause_occurrences - 10
+    assert progress == list(range(room))
+    assert session.stream_truncated
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+
+
+def test_a_truncated_stream_abandons_its_solver_history(monkeypatch):
+    """切られた stream の solver の台帳は stream に束ねずに閉じる: evidence bundle も timeout の束縛も作らない。"""
+
+    from scripts.function_tracer_pcode.authority.domains.call_effect import (
+        CALL_EFFECT_PRODUCTION_STAGE_REGISTRY,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
+        PINNED_SOLVER_EXECUTION_ISSUER,
+    )
+
+    connector, session, pending = _truncated_session(monkeypatch, "issue110-abandon")
+    result_id = session.identity.result_occurrence_id
+    PINNED_SOLVER_EXECUTION_ISSUER._ledger_for(CALL_EFFECT_PRODUCTION_STAGE_REGISTRY, result_id)
+    assert PINNED_SOLVER_EXECUTION_ISSUER.has_open_result_ledger(CALL_EFFECT_PRODUCTION_STAGE_REGISTRY, result_id)
+    resolved = []
+    monkeypatch.setattr(session.domain_signal_encoder, "finalize_terminal_timeout_bindings",
+                        lambda *args: resolved.append(args) or (), raising=False)
+    _attribute_pending_limitation(session, pending)
+    evidence = connector.finish(session, _legacy_result(), case_id="issue110-abandon")
+    assert not PINNED_SOLVER_EXECUTION_ISSUER.has_open_result_ledger(
+        CALL_EFFECT_PRODUCTION_STAGE_REGISTRY, result_id
+    )
+    assert resolved == [] and evidence.execution_authority_evidence_bundles == ()
+    assert session.domain_signal_state["terminal_timeout_domain_candidate_bindings"] == ()
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+    assert PINNED_SOLVER_EXECUTION_ISSUER.abandon_result_ledgers(result_id) == 0
+    with pytest.raises(ValueError, match="only a truncated stream"):
+        _connector_, fresh, _emitted, _pending = _finished_session(
+            monkeypatch, blockers=1, case_id="issue110-not-truncated",
+        )
+        fresh.abandon_execution_history()
+
+
+def test_the_contract_cause_itself_must_be_active_before_the_decision(monkeypatch):
+    """別の限界の cause があっても、切られた stream は契約の限界の cause そのものを active に持つ。"""
+
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        ANALYSIS_BUDGET_REASON_ID,
+        observe_analysis_limitation,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        production_signal_scope,
+    )
+
+    connector, session, _pending = _truncated_session(monkeypatch, "issue110-own-cause")
+    with production_signal_scope(session):
+        observe_analysis_limitation(
+            reason_id=ANALYSIS_BUDGET_REASON_ID, limitation_site="issue110.other",
+            target_key=("issue110", "other"), evidence_refs=("issue110-other",),
+        )
+    assert session.event_contract.limitation_recorded
+    session.ensure_event_contract_limitation()
+    active = session.preview_lifecycle_projection().c_active_base
+    # 別の限界と契約の限界の 2 つ（別の限界があるだけで契約の cause を省かない）
+    assert len([row for row in active if row.reason_id == ANALYSIS_BUDGET_REASON_ID]) == 2
+    # 観測した occurrence が active でなければ（discharge 済みなど）判定の前に失敗する
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.authority.domains.analysis_limitation.observe_analysis_limitation",
+        lambda **_kw: "not-an-active-occurrence",
+    )
+    with pytest.raises(ValueError, match="not active"):
+        session.ensure_event_contract_limitation()
+
+
+def test_a_committed_replay_is_not_admitted(monkeypatch):
+    """publish しない（commit 済みの）replay は契約に数えない（余分な限界を記録しない）。"""
+
+    contract = AuthorityEventContract(max_cause_occurrences=16)
+    _connector_, session, emitted, _pending = _finished_session(
+        monkeypatch, blockers=contract.ordinary_cause_occurrences, case_id="issue110-replay",
+        contract=contract,
+    )
+    assert session.event_contract.exceeded is None
+    monkeypatch.setattr(session.domain_signal_encoder, "supports_signal_replay",
+                        lambda *_a: True, raising=False)
+    monkeypatch.setattr(session.domain_signal_encoder, "is_committed_signal_replay",
+                        lambda *_a: True, raising=False)
+    assert session.emit_domain_signal(_sat_blocker(8000)) == 0
+    assert session.event_contract.exceeded is None
+    assert session.domain_signal_error_kinds == []
+
+
+def test_the_envelope_read_never_reads_past_the_contract(monkeypatch, tmp_path):
+    """envelope file は上限 + 1 byte より先を読まない。上限の内側の digest は file 全体の sha256（従来と同じ）。"""
+
+    import hashlib
+
+    from scripts.function_tracer_pcode.authority import seal_work
+    from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
+        EnvelopeOutsideContract,
+        read_canonical_envelope,
+    )
+
+    monkeypatch.setattr(seal_work, "persisted_envelope_byte_limit", lambda **_kw: 100)
+    inside = tmp_path / "inside.json"
+    inside.write_bytes(b"x" * 100)
+    read = read_canonical_envelope(inside)
+    assert read.raw == b"x" * 100 and read.sha256 == hashlib.sha256(b"x" * 100).hexdigest()
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(b"y" * 10_000_000)
+    reads = []
+    real_open = open
+
+    class _CountingFile:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+
+        def read(self, size=-1):
+            data = self._handle.read(size)
+            reads.append(len(data))
+            return data
+
+    monkeypatch.setattr("builtins.open", lambda path, mode="r", *a, **k: _CountingFile(real_open(path, mode, *a, **k)))
+    read = read_canonical_envelope(outside)
+    assert sum(reads) == 101 and read.raw is None
+    assert read.sha256 == hashlib.sha256(b"y" * 101).hexdigest()
+    with pytest.raises(EnvelopeOutsideContract):
+        read.require_within_contract()

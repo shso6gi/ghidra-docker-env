@@ -31,6 +31,7 @@ from scripts.function_tracer_pcode.authority.process.terminal_projection import 
     terminal_projection,
 )
 from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
+    read_canonical_envelope,
     validate_canonical_envelope,
 )
 from scripts.function_tracer_pcode.authority.process import child_exit
@@ -388,7 +389,7 @@ class ProcessSupervisorCommand:
             # envelope の規則（封・bundle 署名・launch join）は終端の判断と同じ
             # validator を使う（ここだけ緩い読み方をしない）。
             envelope = validate_canonical_envelope(
-                path.read_bytes(), launch=self.store._read_launch(),
+                read_canonical_envelope(path).require_within_contract(), launch=self.store._read_launch(),
                 validate_bundle=self.factory.validate_child_canonical_bundle,
             )
         except _DIAGNOSTIC_GUARD_ERRORS as exc:

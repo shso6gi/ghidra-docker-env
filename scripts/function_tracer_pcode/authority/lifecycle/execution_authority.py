@@ -1093,6 +1093,25 @@ class PinnedSolverExecutionIssuer:
             self._sealed_results.add(key)
             return census
 
+    def abandon_result_ledgers(self, result_occurrence_id: str) -> int:
+        """Close every open ledger of one result without binding it to a stream.
+
+        Issue #110: a stream truncated by the authority event contract lacks
+        the refused solver events, so its census is never sealed into solver
+        evidence.  The ledgers are closed (no later execution can be issued
+        for the result) and discarded.  Idempotent; returns the number closed.
+        """
+
+        _exact_string(result_occurrence_id, "canonical result occurrence ID")
+        with self._ledger_lock:
+            keys = tuple(
+                key for key in self._ledgers if key[2] == result_occurrence_id
+            )
+            for key in keys:
+                self._ledgers.pop(key)
+                self._sealed_results.add(key)
+            return len(keys)
+
     def execute(
         self,
         *,

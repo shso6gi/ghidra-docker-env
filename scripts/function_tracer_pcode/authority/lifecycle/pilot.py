@@ -557,10 +557,12 @@ class ProductionDualWritePilotSession:
         self.event_contract = EventContractLedger()
         #: (intents, admission) admitted by the domain-signal path before Phase 7 buffering
         self._domain_admission: Any = None
-        #: Finish-time emissions run after the pair gate.  A refusal there is
-        #: dropped (the stream stays a valid prefix) and the contract limitation
-        #: cause is published from the reserve before the decision.
-        self.finishing = False
+        #: Failures that follow from a contract-truncated stream (diagnostic
+        #: only: exception type name -> count).  Once the stream is truncated
+        #: the contract limitation decides the pair, so these are not
+        #: encoding errors.  Failures recorded before the truncation stay in
+        #: ``domain_signal_error_kinds``.
+        self.truncation_consequences: dict[str, int] = {}
 
     @contextmanager
     def domain_signal_transaction(self) -> Any:
@@ -570,20 +572,78 @@ class ProductionDualWritePilotSession:
             yield
 
     def emit(self, intent: Any) -> int:
+        return self.emit_many((intent,))[0]
+
+    @property
+    def stream_truncated(self) -> bool:
+        """Issue #110: the event contract truncated this stream (sticky).
+
+        The stream stays the valid prefix published before the refusal, the
+        pair ledger holds the pair-terminal contract limitation, and the
+        decision is the contract limitation cause (UNKNOWN).  Finish no longer
+        completes the stream (``complete_stream``) and producer failures that
+        follow are truncation consequences (``record_domain_signal_failure``).
+        """
+
+        return self.event_contract.stream_truncated
+
+    def record_domain_signal_failure(self, kind: str, detail: str) -> None:
+        """The single owner of producer-side authority failures of this session.
+
+        Before the stream is truncated a failure is an encoding error (the pair
+        becomes ERROR at finish).  After the truncation the producer ran against
+        a stream that intentionally lacks the refused events, so the failure is
+        a consequence of the truncation and is kept only as a diagnostic: the
+        pair is already decided by the contract limitation (UNKNOWN, never a
+        weaker EQ / NOT_EQ gate).
+        """
+
+        if self.stream_truncated:
+            self.truncation_consequences[kind] = (
+                self.truncation_consequences.get(kind, 0) + 1
+            )
+            return
+        self.domain_signal_error_kinds.append(kind)
+        self.domain_signal_error_details.append(detail)
+
+    def complete_stream(self, stage: Callable[[Any], Any]) -> None:
+        """Run one finish stage that completes the stream (emits after the pair gate).
+
+        A truncated stream is not completed: the stage does not run.  A stage
+        stops at its first refused event (``AuthorityEventContractExceeded``
+        unwinds it; no later step of the stage runs against the refused
+        state) and the stream is truncated from there on.
+        """
+
         from scripts.function_tracer_pcode.authority.event_contract import (
             AuthorityEventContractExceeded,
         )
 
+        if self.stream_truncated:
+            return
         try:
-            return self.emit_many((intent,))[0]
+            stage(self)
         except AuthorityEventContractExceeded:
-            if not self.finishing:
+            if not self.stream_truncated:
                 raise
-            # A direct finish-time emission after the pair gate: the refused
-            # event is dropped (nothing was buffered or staged) and the
-            # contract limitation cause is published from the reserve before
-            # the decision (``ensure_event_contract_limitation``).
-            return 0
+
+    def abandon_execution_history(self) -> None:
+        """Close this result's solver ledgers without binding them to the truncated stream.
+
+        The census of a truncated stream cannot be bound (its refused events
+        are missing by construction), so no solver evidence bundle and no
+        terminal timeout binding is made: the contract limitation decides.
+        """
+
+        from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
+            PINNED_SOLVER_EXECUTION_ISSUER,
+        )
+
+        if not self.stream_truncated:
+            raise ValueError("only a truncated stream abandons its execution history")
+        PINNED_SOLVER_EXECUTION_ISSUER.abandon_result_ledgers(
+            self.identity.result_occurrence_id
+        )
 
     def emit_many(
         self, intents: Sequence[Any], commit_callback: Any = None, *,
@@ -612,12 +672,7 @@ class ProductionDualWritePilotSession:
             raise TypeError("Phase 7 execution prebuffer flag is not exact")
         batch = tuple(intents)
         if transaction_signal is not None:
-            replay_probe = getattr(
-                self.domain_signal_encoder, "is_committed_signal_replay", None
-            )
-            if callable(replay_probe) and replay_probe(
-                self, transaction_signal, batch
-            ):
+            if self._is_committed_replay(transaction_signal, batch):
                 # The source-side wrapper may already have opened and
                 # materialized a Phase 7 activation before this shared
                 # publication gate sees the semantic replay.  A committed
@@ -636,9 +691,7 @@ class ProductionDualWritePilotSession:
             if stashed is not None and stashed[0] is batch:
                 admission = stashed[1]
         if admission is None or not self.event_contract.is_current(admission):
-            admission = self.event_contract.admit(
-                batch, pending_occurrences=self.pending_deferred_occurrences()
-            )
+            admission = self.event_contract.admit(batch)
         transaction = None
         if (
             self.phase7_runtime is not None
@@ -669,24 +722,28 @@ class ProductionDualWritePilotSession:
                 self._rollback_phase7_transaction(transaction)
             raise
 
-    def pending_deferred_occurrences(self) -> int:
-        """Occurrences that will be published before the decision (deferred SAT safety)."""
-
-        pending = self.domain_signal_state.get("sat_safety_deferred_observations")
-        return len(pending) if type(pending) is dict else 0
+    def _is_committed_replay(self, signal: Any, batch: tuple) -> bool:
+        replay_probe = getattr(
+            self.domain_signal_encoder, "is_committed_signal_replay", None
+        )
+        return bool(callable(replay_probe) and replay_probe(self, signal, batch))
 
     def event_contract_checkpoint(self) -> None:
-        """Before the pair gate: the deferred occurrences must still fit the contract."""
+        """Before the pair gate: a recorded contract overflow is raised (deferrals are counted when made)."""
 
-        self.event_contract.checkpoint(
-            pending_occurrences=self.pending_deferred_occurrences()
-        )
+        self.event_contract.checkpoint()
 
     def ensure_event_contract_limitation(self) -> None:
-        """Publish the contract limitation cause (reserve) if a finish-time refusal dropped events."""
+        """A truncated stream carries its own contract limitation cause, active, before the decision.
+
+        The cause is observed idempotently (from the reserve) and must be in
+        the current ``c_active_base``: another limitation cause is not enough
+        (it may be discharged), and a truncated stream without its active
+        contract cause could not be decided UNKNOWN.
+        """
 
         exceeded = self.event_contract.exceeded
-        if exceeded is None or self.event_contract.limitation_recorded:
+        if exceeded is None:
             return
         from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
             observe_analysis_limitation,
@@ -696,15 +753,19 @@ class ProductionDualWritePilotSession:
         )
 
         with production_pilot_session_scope(self):
-            observe_analysis_limitation(
+            occurrence_id = observe_analysis_limitation(
                 reason_id=exceeded.reason_id,
                 limitation_site=exceeded.site,
                 target_key=exceeded.target_key,
                 missing_semantic_fact=exceeded.missing_semantic_fact,
                 evidence_refs=exceeded.evidence_refs,
             )
-        if not self.event_contract.limitation_recorded:
-            raise ValueError("authority event contract limitation was not published")
+        active = {
+            row.occurrence_id
+            for row in self.preview_lifecycle_projection().c_active_base
+        }
+        if occurrence_id is None or occurrence_id not in active:
+            raise ValueError("authority event contract limitation is not active")
 
     def _begin_phase7_transaction(self) -> Any:
         if self.phase7_runtime is None:
@@ -807,12 +868,27 @@ class ProductionDualWritePilotSession:
         external_committed = False
         try:
             intents = tuple(self.domain_signal_encoder(self, signal))
+            replay_support = getattr(
+                self.domain_signal_encoder, "supports_signal_replay", None
+            )
+            if callable(replay_support):
+                supports_replay = bool(replay_support(self, signal))
+            else:
+                supports_replay = callable(getattr(
+                    self.domain_signal_encoder, "is_committed_signal_replay", None
+                ))
+            if intents and supports_replay and self._is_committed_replay(
+                signal, intents
+            ):
+                # A committed replay publishes nothing: close its Phase 7
+                # wrapper transaction as the publication gate does, without
+                # admitting it against the event contract.
+                self._rollback_phase7_signal_transaction(signal)
+                return 0
             # Issue #110: admit the transaction against the event contract
             # before the Phase 7 runtime buffers any of it (a refusal rolls
             # back an empty buffer).
-            admission = self.event_contract.admit(
-                intents, pending_occurrences=self.pending_deferred_occurrences()
-            ) if intents else None
+            admission = self.event_contract.admit(intents) if intents else None
             if self.phase7_runtime is not None:
                 try:
                     site_id = self._phase7_signal_sites[id(signal)]
@@ -842,15 +918,6 @@ class ProductionDualWritePilotSession:
                     self.phase7_runtime is not None
                 ),
             }
-            replay_support = getattr(
-                self.domain_signal_encoder, "supports_signal_replay", None
-            )
-            if callable(replay_support):
-                supports_replay = bool(replay_support(self, signal))
-            else:
-                supports_replay = callable(getattr(
-                    self.domain_signal_encoder, "is_committed_signal_replay", None
-                ))
             if supports_replay:
                 emit_kwargs["transaction_signal"] = signal
             # The admission above is handed to the publication gate for this
@@ -895,18 +962,22 @@ class ProductionDualWritePilotSession:
                     "Phase 7 rollback: "
                     + f"{type(rollback_exc).__name__}: {rollback_exc}"
                 )
-            if type(exc) is AuthorityEventContractExceeded and not rollback_failures:
+            if rollback_failures:
+                # A failed rollback leaves producer / Phase 7 state that the
+                # prefix does not describe: an error even on a truncated stream.
+                self.domain_signal_error_kinds.append(type(exc).__name__)
+                self.domain_signal_error_details.append(
+                    f"{type(signal).__name__}: {exc}"
+                    + " | rollback failures: " + "; ".join(rollback_failures)
+                )
+                return 0
+            if type(exc) is AuthorityEventContractExceeded:
                 # A contract refusal is a recorded pair-terminal limitation, not
                 # an encoding failure: the transaction was rolled back and the
                 # stream stays a valid prefix.
                 return 0
-            self.domain_signal_error_kinds.append(type(exc).__name__)
-            self.domain_signal_error_details.append(
-                f"{type(signal).__name__}: {exc}"
-                + (
-                    " | rollback failures: " + "; ".join(rollback_failures)
-                    if rollback_failures else ""
-                )
+            self.record_domain_signal_failure(
+                type(exc).__name__, f"{type(signal).__name__}: {exc}"
             )
             return 0
 
@@ -1171,18 +1242,21 @@ class ProductionDualWritePilotConnector:
         from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
             finalize_deferred_sat_safety_observations,
         )
-        # Issue #110: from here on emissions run after the pair gate; a
-        # contract refusal drops the event and the limitation cause is
-        # published from the reserve before the decision.
-        session.finishing = True
-        finalize_deferred_sat_safety_observations(session)
+        # Issue #110: from here on emissions run after the pair gate.  Each
+        # stage that completes the stream stops at its first contract refusal;
+        # a truncated stream is not completed, its solver history is closed
+        # without a stream binding and the contract limitation cause is
+        # published (active) from the reserve before the decision.
+        session.complete_stream(finalize_deferred_sat_safety_observations)
         execution_history_finalizer = getattr(
             session.domain_signal_encoder,
             "finalize_open_execution_history",
             None,
         )
         if callable(execution_history_finalizer):
-            execution_history_finalizer(session)
+            session.complete_stream(execution_history_finalizer)
+        if session.stream_truncated:
+            session.abandon_execution_history()
         session.ensure_event_contract_limitation()
         # A failed signal encoding leaves its Phase 7 discovery activation
         # deliberately unmaterialized.  Report the original encoding failure
@@ -1276,10 +1350,15 @@ class ProductionDualWritePilotConnector:
             finalize_pending_eq_authorities,
         )
 
-        for intent in finalize_pending_eq_authorities(
-            session, pre_closure_projection, terminal_candidate_view
-        ):
-            session.emit(intent)
+        def emit_pending_eq_authorities(owner: Any) -> None:
+            for intent in finalize_pending_eq_authorities(
+                owner, pre_closure_projection, terminal_candidate_view
+            ):
+                owner.emit(intent)
+
+        session.complete_stream(emit_pending_eq_authorities)
+        if session.stream_truncated:
+            session.abandon_execution_history()
         session.ensure_event_contract_limitation()
         session.domain_signal_state["terminal_candidate_view"] = (
             terminal_candidate_view
@@ -1290,7 +1369,9 @@ class ProductionDualWritePilotConnector:
             ).items()
             if entry.get("state") == "PENDING"
         )
-        if live_pending:
+        # A pending EQ of a truncated stream is never decided: the active
+        # contract limitation cause blocks EQ.
+        if live_pending and not session.stream_truncated:
             session.closed = True
             raise ValueError("production session cannot seal with live pending EQ")
         timeout_selection_stream = (
@@ -1301,11 +1382,20 @@ class ProductionDualWritePilotConnector:
             "finalize_terminal_timeout_bindings",
             None,
         )
-        timeout_selection_was_resolved = callable(terminal_resolver)
-        terminal_bindings = (
-            tuple(terminal_resolver(session, timeout_selection_stream))
-            if callable(terminal_resolver) else ()
-        )
+        if session.stream_truncated:
+            # The truncated stream lacks the refused solver events, so no
+            # execution can be bound as the terminal timeout: resolved, none.
+            timeout_selection_was_resolved = True
+            terminal_bindings = ()
+            session.domain_signal_state[
+                "terminal_timeout_domain_candidate_bindings"
+            ] = ()
+        else:
+            timeout_selection_was_resolved = callable(terminal_resolver)
+            terminal_bindings = (
+                tuple(terminal_resolver(session, timeout_selection_stream))
+                if callable(terminal_resolver) else ()
+            )
         if len(terminal_bindings) > 1:
             session.closed = True
             raise ValueError("terminal timeout resolver selected multiple executions")
