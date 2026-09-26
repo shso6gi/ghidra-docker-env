@@ -1083,7 +1083,9 @@ def _index_positions(index: Any, key: Any) -> set:
         return found
     try:
         positions = live_values.lookup(index, key, ())
-    except TypeError:
+    except (TypeError, live_values.StorageBeyondReadBound):
+        # 診断の照合: 安全に引けない key と、作業量を受け取らない読みの上限の外の key（量の信号）は、
+        # どちらも「exact には一致しない」（fingerprint の照合が引き受ける。判定には使わない）
         return found
     if type(positions) is list:
         for position in positions:
@@ -1097,7 +1099,8 @@ def _count_of(counts: Any, key: Any) -> int:
 
     try:
         value = live_values.lookup(counts, key, 0)
-    except TypeError:
+    except (TypeError, live_values.StorageBeyondReadBound):
+        # 診断の数え上げ: 安全に引けない・読みの上限の外の key / mapping は 0 件（判定には使わない）
         return 0
     return live_values.as_int(value) if live_values.as_bool(value) else 0
 

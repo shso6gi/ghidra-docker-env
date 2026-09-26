@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 """Issue #22 PR-22-D: `core/live_values`（bounded path が live な値を読む唯一の owner）自身の仕事の上限。
 
-live な値の storage（instance の `__dict__`・class の namespace と MRO・closure・dict の key・key の
-tuple・包んだ proxy）を作業量を受け取らずに読む関数は、どれも次のどれか（J22 を owner 自身へ）:
+live な値の storage を作業量を受け取らずに読む関数は、どれも次のどれか（J22 を owner 自身へ）:
 
 * A: 固定の大きさ（module の定数の組・登録した directory）だけを辿る
 * B: 固定の上限の型の契約（`SCAN_LIMIT`）: 長さを組み込みの slot で O(1) に読んで比べてから辿る。
-  上限の外は、述語は「確かめられない」（信頼しない）、key で読む関数は `TypeError`
+  上限の意味は読むものの種類で 2 つ: **型**（namespace・MRO・closure）は「確かめられない」= 信頼しない
+  （文脈に依らず cache する）、**値の storage**（dict / `__dict__` の key・key の tuple・proxy の段・写す
+  容器）は安全の判定ではなく量の信号 `StorageBeyondReadBound`。作業量を持つ owner が
+  `metered_storage_reads` で包んだ読みは、上限を超えた分をその作業量へ数えて読む
 * C: iterator を返し、辿る側が要素ごとに数える
 
-上限の外の入力（100 万 key の `__dict__`・大きい class の namespace・大きい OrderedDict・深い / 幅の広い
-key の tuple）で、どの関数も storage を辿らずに止まる。
+量の意味（限界の種類）は `live_values` では決めない（`test_issue22d_read_bound_contract.py`）。
 """
 
 from __future__ import annotations
@@ -23,11 +24,13 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.core import live_values, read_limits
+from scripts.function_tracer_pcode.core import live_values
+from scripts.function_tracer_pcode.core.json_encoding import JsonBudget, JsonBudgetExhausted
 from scripts.function_tracer_pcode.tests.unit import _live_flow_audit as audit
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 BIG = 1_000_000
+BEYOND = live_values.StorageBeyondReadBound
 
 
 def _quick(call, *args, seconds=0.05):
@@ -36,10 +39,16 @@ def _quick(call, *args, seconds=0.05):
     started = time.perf_counter()
     try:
         outcome = call(*args)
-    except TypeError as exc:
+    except (TypeError, BEYOND) as exc:
         outcome = exc
     assert time.perf_counter() - started < seconds, call
     return outcome
+
+
+def _signal(outcome):
+    """量の信号（`TypeError` でも限界でもない）。"""
+
+    return type(outcome) is BEYOND and not isinstance(outcome, TypeError)
 
 
 class _Record:
@@ -53,22 +62,65 @@ def big_record():
     return record
 
 
-def test_a_million_key_instance_state_is_not_read_by_key(big_record, monkeypatch):
-    """100 万 key の `__dict__`: key の型を確かめる走査をせず、key で読む関数は `TypeError`。"""
+def test_a_million_key_instance_state_is_a_quantity_signal_not_an_unsafe_value(big_record, monkeypatch):
+    """100 万 key の `__dict__`: key の型を確かめる走査をせず、量の信号（`TypeError` にしない）。"""
 
     scanned = []
     real_is = live_values._IS
     monkeypatch.setattr(live_values, "_IS", lambda *args: scanned.append(1) or real_is(*args))
     outcome = _quick(live_values.instance_state, big_record, "k1")
-    assert isinstance(outcome, TypeError) and "more than the bounded path reads" in str(outcome)
+    assert _signal(outcome) and outcome.observed == BIG and outcome.limit == live_values.SCAN_LIMIT
     # 型の namespace（小さい）は確かめても、100 万 key の `__dict__` の key は 1 つも確かめない
     assert len(scanned) < 100
-    assert isinstance(_quick(live_values.attribute, big_record, "k1"), TypeError)
-    assert isinstance(_quick(live_values.set_state, big_record, "k1", 0), TypeError)
+    assert _signal(_quick(live_values.attribute, big_record, "k1"))
+    assert _signal(_quick(live_values.set_state, big_record, "k1", 0))
     # 上限の内側の record は今までどおり読める
     small = _Record()
     small.x = 1
     assert live_values.instance_state(small, "x") == 1
+
+
+def test_a_bounded_meter_reads_beyond_the_fixed_bound_and_charges_only_the_excess():
+    """作業量を持つ owner の中（`metered_storage_reads`）は、上限を超えた分だけを作業量へ数えて読む。"""
+
+    record = _Record()
+    record.__dict__.update({f"k{index}": index for index in range(live_values.SCAN_LIMIT + 10)})
+    work = JsonBudget(1_000)
+    with live_values.metered_storage_reads(work):
+        assert live_values.instance_state(record, "k1") == 1
+    assert work.consumed == 10
+    small = _Record()
+    small.x = 1
+    untouched = JsonBudget(1_000)
+    with live_values.metered_storage_reads(untouched):
+        live_values.instance_state(small, "x")
+    assert untouched.consumed == 0  # 上限の内側の入力の勘定は変わらない
+    # 作業量が足りなければ、その作業量の超過（信号ではない）
+    with pytest.raises(JsonBudgetExhausted):
+        with live_values.metered_storage_reads(JsonBudget(5)):
+            live_values.instance_state(record, "k1")
+
+
+def test_an_unbounded_meter_does_not_lift_the_fixed_bound():
+    """上限の無い作業量で包んでも、値の storage の読みは固定の上限のまま（上限の無い走査にしない）。"""
+
+    record = _Record()
+    record.__dict__.update({f"k{index}": index for index in range(live_values.SCAN_LIMIT + 10)})
+    with live_values.metered_storage_reads(JsonBudget(None, detached=True)):
+        assert _signal(_quick(live_values.instance_state, record, "k1"))
+
+
+def test_only_registered_meters_are_accepted():
+    class _Anything:
+        def charge(self, size):  # pragma: no cover - never registered
+            pass
+
+        def remaining(self):  # pragma: no cover
+            return 1
+
+    # 回復用の `except TypeError` に吸われない型で拒む（owner の不備）
+    with pytest.raises(ValueError):
+        live_values.metered_storage_reads(_Anything())
 
 
 def test_a_large_class_namespace_is_not_trusted_or_read(monkeypatch):
@@ -76,7 +128,20 @@ def test_a_large_class_namespace_is_not_trusted_or_read(monkeypatch):
     big_type = type("BigNamespace", (), namespace)
     assert _quick(live_values.package_type, big_type) is False
     outcome = _quick(live_values.type_attribute, big_type, "m1")
-    assert isinstance(outcome, TypeError)
+    assert isinstance(outcome, TypeError) and not _signal(outcome)
+
+
+def test_type_trust_does_not_depend_on_an_active_meter():
+    """型の信頼の判定は文脈に依らない: meter の中でも外でも、上限の外の値を持つ型は信頼しない。"""
+
+    blob = _Record()
+    blob.__dict__.update({f"a{index}": index for index in range(live_values.SCAN_LIMIT + 10)})
+    inside = type("InsideMeter", (), {"blob": blob})
+    outside = type("OutsideMeter", (), {"blob": blob})
+    with live_values.metered_storage_reads(JsonBudget(1 << 20)):
+        assert live_values.package_type(inside) is live_values.package_type(inside)
+        verdict_inside = live_values.package_type(inside)
+    assert live_values.package_type(outside) is verdict_inside
 
 
 def test_a_long_mro_is_not_walked():
@@ -88,32 +153,39 @@ def test_a_long_mro_is_not_walked():
     assert isinstance(_quick(live_values.type_attribute, deepest, "x"), TypeError)
 
 
-def test_a_large_ordered_dict_is_not_a_builtin_mapping_without_a_scan():
+def test_a_large_ordered_dict_is_a_quantity_signal_and_its_length_needs_no_key_scan():
+    """反復の安全（key の hash）は値の storage の読み: 上限の外は量の信号。長さ・真偽は key を読まない。"""
+
     big = OrderedDict((index, index) for index in range(BIG))
-    assert _quick(live_values.builtin_mapping, big) is None
+    assert _signal(_quick(live_values.builtin_mapping, big))
+    assert _quick(live_values.size, big) == BIG
+    assert _quick(live_values.as_bool, big) is True
+    assert live_values.builtin_container(big) is True
     small = OrderedDict(a=1)
     assert live_values.builtin_mapping(small) is small
 
 
-def test_deep_and_wide_tuple_keys_stop_at_the_bound():
+def test_deep_and_wide_tuple_keys_are_a_quantity_signal():
     wide = tuple(range(BIG))
     deep = ()
     for _ in range(BIG):
         deep = (deep,)
     for key in (wide, deep):
-        assert _quick(live_values.hash_safe_key, key) is False
-        assert _quick(live_values._plain_key, key) is False
-        assert isinstance(_quick(live_values.lookup, {}, key), TypeError)
+        assert _signal(_quick(live_values.hash_safe_key, key))
+        assert _signal(_quick(live_values._plain_key, key))
+        assert _signal(_quick(live_values.lookup, {}, key))
     assert live_values.hash_safe_key((1, ("a", 2.0))) is True
+    # 安全でない key は量と関係なく「安全でない」（信号にしない）
+    assert live_values.hash_safe_key((1, object())) is False
 
 
-def test_mapping_reads_by_key_stop_at_the_bound():
+def test_mapping_reads_by_key_beyond_the_bound_are_a_quantity_signal():
     big = {index: index for index in range(BIG)}
     big["odd"] = 1
-    assert isinstance(_quick(live_values.copied_container, big), TypeError)
-    assert isinstance(_quick(live_values.merged_mappings, {"a": 1}, {f"k{i}": i for i in range(10)} | big), TypeError)
-    assert isinstance(_quick(live_values.copied_container, list(range(BIG))), TypeError)
-    # 組み込みでない key を持つ大きい mapping は key で探さない
+    assert _signal(_quick(live_values.copied_container, big))
+    assert _signal(_quick(live_values.merged_mappings, {"a": 1}, {f"k{i}": i for i in range(10)} | big))
+    assert _signal(_quick(live_values.copied_container, list(range(BIG))))
+
     class _Key(str):
         def __eq__(self, other):  # pragma: no cover - must never run
             raise AssertionError("a live key's __eq__ ran")
@@ -122,17 +194,39 @@ def test_mapping_reads_by_key_stop_at_the_bound():
 
     mixed = {f"k{i}": i for i in range(live_values.SCAN_LIMIT + 1)}
     mixed[_Key("x")] = 0
-    assert isinstance(_quick(live_values.lookup, mixed, "k1"), TypeError)
+    assert _signal(_quick(live_values.lookup, mixed, "k1"))
+    # 上限の内側の、組み込みでない key を持つ mapping は安全でない key を比べずに探す
+    few = {"k1": 1, _Key("x"): 0}
+    assert live_values.lookup(few, "k1") == 1
 
 
-def test_a_chain_of_mapping_proxies_stops_at_the_bound():
+def test_a_chain_of_mapping_proxies_is_a_quantity_signal():
     proxy = types.MappingProxyType({"a": 1})
     for _ in range(live_values.SCAN_LIMIT + 5):
         proxy = types.MappingProxyType(proxy)
-    assert _quick(live_values.builtin_mapping, proxy) is None
-    assert isinstance(_quick(live_values._unwrapped, proxy), TypeError)
+    assert _signal(_quick(live_values.builtin_mapping, proxy))
+    assert _signal(_quick(live_values._unwrapped, proxy))
     shallow = types.MappingProxyType(types.MappingProxyType({"a": 1}))
     assert live_values.builtin_mapping(shallow) is shallow
+
+
+def test_storage_count_reads_the_base_slot_without_running_value_code():
+    """`storage_count` は振る舞いを確かめる前に基底型の slot で数える（上書きした `__len__` を呼ばない）。"""
+
+    class _Loud(dict):
+        def __len__(self):  # pragma: no cover - must never run
+            raise AssertionError("a live __len__ ran")
+
+    loud = _Loud({"a": 1, "b": 2})
+    assert live_values.storage_count(loud) == 2
+    assert live_values.storage_count(OrderedDict(a=1)) == 1
+    assert live_values.storage_count(types.MappingProxyType({"a": 1, "b": 2})) == 2
+    assert live_values.storage_count(iter([1])) is None
+    assert live_values.storage_count("text") is None
+    chain = types.MappingProxyType({})
+    for _ in range(live_values.SCAN_LIMIT + 5):
+        chain = types.MappingProxyType(chain)
+    assert live_values.storage_count(chain) == live_values.SCAN_LIMIT + 1
 
 
 def test_nested_closures_are_checked_without_recursion():
@@ -203,7 +297,11 @@ def test_nested_type_references_stop_at_the_nesting_limit():
 # ---------------------------------------------------------------------------
 
 _A = "A: 固定の大きさ（module の定数の組・登録した directory）だけを辿る"
-_B = "B: `SCAN_LIMIT` の固定の上限（長さを O(1) で比べてから辿る。上限の外は信頼しない / TypeError）"
+_B = (
+    "B: `SCAN_LIMIT` の固定の上限（長さを O(1) で比べてから辿る。型の上限の外は信頼しない / TypeError、"
+    "値の storage の上限の外は量の信号 `StorageBeyondReadBound`（meter の中は超えた分を作業量へ））"
+)
+_B_CALLER = "B(呼ぶ側): 呼ぶ側が先に数を上限と比べてから呼ぶ（呼ぶ関数はどれも B。下の test が確かめる）"
 _C = "C: iterator を返し、辿る側が要素ごとに数える"
 _AMORTIZED = (
     "B(償却): 型の信頼の判定 1 つにつき高々 1 つの仮の判定で、深さの組を移るのは高々 `NESTING_LIMIT` 回"
@@ -216,15 +314,16 @@ LIVE_VALUES_WORK_OWNERS = {
     "_package_type_uncached": _B,
     "_trusted_callables": _B,
     "_trusted_namespace_value": _A,
-    "_trusted_class_body_uncached": _B,
+    "_trusted_class_body_values": _B,
     "_type_lookup": _B,
-    "_exact_str_keys": _B,
-    "_scan_str_key": _B,
+    "_exact_str_raw": _B_CALLER,
+    "_str_key_value": _B_CALLER,
     "_builtin_hashed_type": _A,
     "_one_of": _A,
     "_in_mro": _B,
     "_dataclass_field_names": _B,
-    "builtin_mapping": _B,
+    "_mapping_storage": _B,
+    "storage_count": _B,
     "_builtin_behaviour": _A,
     "_unwrapped": _B,
     "_plain_keys": _B,
@@ -240,6 +339,9 @@ LIVE_VALUES_WORK_OWNERS = {
     # 深さの組（`NESTING_LIMIT + 1` 個）を作るだけ
     "_Nesting.__init__": _A,
     "_settle": _AMORTIZED,
+    # 2 引数の `max`（固定の上限の中の分を数えない）だけ / 登録した meter の型の組だけ
+    "_StorageRead.admit": _A,
+    "_registered_meter": _A,
 }
 
 #: `core/read_limits`（作業量を受け取らない読みの固定の上限の owner）の入力に比例する関数
@@ -257,7 +359,9 @@ OWNER_WORK = {
 }
 
 #: B の関数が上限と比べる呼び出し（長さを O(1) で読んで比べる owner の関数）
-_BOUNDING_CALLS = frozenset({"_within_scan", "_require_scan", "_exact_str_keys", "admit", "_admitted"})
+_BOUNDING_CALLS = frozenset({
+    "_within_scan", "_require_scan", "_exact_str_keys", "admit", "_admit", "_admit_storage",
+})
 
 
 def _live_values_functions(path="core/live_values.py"):
@@ -303,9 +407,32 @@ def test_j22_the_bounded_functions_compare_with_the_bound_before_they_walk(path)
             )
             for sub in ast.walk(functions[name])
         )
-        if not (calls & _BOUNDING_CALLS or ranges):
+        # 辿る数そのものを `SCAN_LIMIT` と比べる（`layers > SCAN_LIMIT`）
+        compares = any(
+            isinstance(sub, ast.Compare)
+            and any(isinstance(node, ast.Name) and node.id == "SCAN_LIMIT" for node in ast.walk(sub))
+            for sub in ast.walk(functions[name])
+        )
+        if not (calls & _BOUNDING_CALLS or ranges or compares):
             unbounded.append(name)
     assert unbounded == []
+
+
+@pytest.mark.parametrize("path", sorted(OWNER_WORK))
+def test_j22_caller_bounded_functions_are_called_only_after_the_bound(path):
+    """B(呼ぶ側) の関数を呼ぶ owner の関数は、どれも自分で上限と比べる（数を比べずに呼ぶ経路を足さない）。"""
+
+    functions = dict(_live_values_functions(path))
+    caller_bounded = {name for name, kind in OWNER_WORK[path].items() if kind == _B_CALLER}
+    offenders = []
+    for name, function in functions.items():
+        calls = {
+            (sub.func.id if isinstance(sub.func, ast.Name) else getattr(sub.func, "attr", None))
+            for sub in ast.walk(function) if isinstance(sub, ast.Call)
+        }
+        if calls & caller_bounded and not calls & _BOUNDING_CALLS and name not in caller_bounded:
+            offenders.append(name)
+    assert offenders == []
 
 
 def test_the_bound_has_one_owner():
@@ -336,107 +463,6 @@ def test_a_verified_container_never_runs_its_own_truth_method():
 # ---------------------------------------------------------------------------
 # 作業量を受け取らない関数の入口（`core/read_limits`: 上限の超過は登録済みの限界、診断は先頭だけ）
 # ---------------------------------------------------------------------------
-
-
-def _limitation(call, *args):
-    """`call(*args)`（反復するなら最後まで）が上げた、固定の上限の超過の登録済みの限界。"""
-
-    from scripts.function_tracer_pcode.core.errors import DeadlineExceeded
-
-    started = time.perf_counter()
-    with pytest.raises(DeadlineExceeded) as raised:
-        for _ in call(*args):
-            pass
-    assert time.perf_counter() - started < 0.5, call
-    assert raised.value.site == read_limits.SCAN_LIMITATION_SITE
-    assert raised.value.reason_id == "analysis_budget_exceeded"
-    return raised.value
-
-
-def test_the_unmetered_readers_stop_at_the_bound_with_a_registered_limitation():
-    """上限の外は内部バグ（`TypeError`）でなく、pair terminal な登録済みの限界（pair の台帳へ記録してから）。"""
-
-    from scripts.function_tracer_pcode.core.errors import PairStopState, pair_failure_scope
-
-    limit = live_values.SCAN_LIMIT
-    inside = list(range(limit))
-    assert list(read_limits.elements_within_limit(inside)) == inside
-    assert dict(read_limits.items_within_limit({"a": 1})) == {"a": 1}
-    for container in (list(range(limit + 1)), tuple(range(limit + 1)), set(range(limit + 1))):
-        _limitation(read_limits.elements_within_limit, container)
-    _limitation(read_limits.items_within_limit, {index: index for index in range(limit + 1)})
-    # 文字列は要素の列として読まない（`elements_of` と同じ）
-    with pytest.raises(TypeError):
-        read_limits.elements_within_limit("x")
-    # iterator は 1 要素ずつ数え、上限を超えた要素で止まる（それより先を引き出さない）
-    pulled = []
-
-    def _source():
-        for index in range(BIG):
-            pulled.append(index)
-            yield index
-
-    _limitation(read_limits.elements_within_limit, _source())
-    assert len(pulled) == limit + 1
-    with pair_failure_scope(("live_values", "scan"), None) as ledger:
-        _limitation(read_limits.elements_within_limit, list(range(limit + 1)))
-        pending = ledger.pending_failure()
-    assert pending is not None and pending.stop_state is PairStopState.PAIR_TERMINAL_LIMITATION
-
-
-def test_the_diagnostic_prefix_keeps_the_head_and_counts_the_rest():
-    limit = live_values.SCAN_LIMIT
-    values = tuple(range(limit + 7))
-    assert read_limits.prefix_within_limit(values) == tuple(range(limit))
-    assert read_limits.omitted_beyond_limit(values) == 7
-    assert read_limits.prefix_within_limit(("a", "b")) == ("a", "b")
-    assert read_limits.omitted_beyond_limit(("a", "b")) == 0
-    # iterator は上限の個数を写したところで止める（残りを引き出さない）
-    pulled = []
-
-    def _source():
-        for index in range(BIG):
-            pulled.append(index)
-            yield index
-
-    assert len(_quick(read_limits.prefix_within_limit, _source())) == limit
-    assert len(pulled) == limit + 1
-
-
-def test_a_shared_scan_bounds_the_sum_of_nested_sequences():
-    half = live_values.SCAN_LIMIT // 2 + 1
-    scan = read_limits.scan_budget()
-    assert len(list(read_limits.elements_within_limit(list(range(half)), scan))) == half
-    _limitation(read_limits.elements_within_limit, list(range(half)), scan)
-    # 共有しなければそれぞれは上限の内側
-    assert len(list(read_limits.elements_within_limit(list(range(half))))) == half
-
-
-def test_normalizing_truncations_bounds_records_and_references_together():
-    """記録の参照 ID は 1 つの上限を共有する（1 件ずつは内側でも、和が外なら登録済みの限界）。"""
-
-    from scripts.function_tracer_pcode.core.runtime_refs.unknowns import (
-        ExpansionBudgetTruncation,
-        normalize_expansion_budget_truncations,
-    )
-
-    half = live_values.SCAN_LIMIT // 2 + 1
-    records = [
-        ExpansionBudgetTruncation(kind="paths", label=f"t{side}",
-                                  referenced_event_ids=tuple(f"r{side}-{index}" for index in range(half)))
-        for side in range(2)
-    ]
-    assert len(normalize_expansion_budget_truncations(records[:1])) == 1
-    _limitation(lambda: iter(normalize_expansion_budget_truncations(records)))
-    # 記録そのものも同じ上限に数える: 参照 ID の和は上限ちょうどでも、記録の 2 件で外
-    exact = [
-        ExpansionBudgetTruncation(kind="paths", label=f"e{side}", referenced_event_ids=tuple(
-            f"e{side}-{index}" for index in range(live_values.SCAN_LIMIT // 2)
-        ))
-        for side in range(2)
-    ]
-    _limitation(lambda: iter(normalize_expansion_budget_truncations(exact)))
-    assert len(normalize_expansion_budget_truncations(exact[:1])) == 1
 
 
 def test_a_metaclass_hash_never_runs_through_the_class_body_cache():
@@ -500,34 +526,6 @@ def test_a_verdict_that_assumed_an_untrusted_ancestor_is_not_cached():
     assert live_values.package_type(child) is False
 
 
-def test_timeout_reads_of_solver_results_are_bounded_by_the_read_limit():
-    """receipt の無い結果の `is_timeout` は solver の結果の列を読みの上限までしか辿らない（外は登録済みの限界）。"""
-
-    from types import SimpleNamespace
-
-    from conftest import create_mock_result
-    from scripts.function_tracer_pcode.core.errors import DeadlineExceeded
-    from scripts.function_tracer_pcode.smt import SolverStatus
-
-    from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult
-
-    result = create_mock_result(is_equivalent=None)
-    # solver の owner が作った集約は、作ったときの事実を読む（行の数に依らず、読みの上限にかからない）
-    rows = [SolverResult(solver_name="z3", status=SolverStatus.UNKNOWN)] * (live_values.SCAN_LIMIT + 1)
-    result.solver_results = ParallelResult(results=rows + [SolverResult(solver_name="z3", status=SolverStatus.TIMEOUT)])
-    assert result.is_timeout() is True
-    result.solver_results = ParallelResult(results=rows)
-    assert result.is_timeout() is False
-    # owner の外の列（test の値など）は読みの固定の上限まで（外は登録済みの限界）
-    result.solver_results = SimpleNamespace(
-        results=[SimpleNamespace(status=SolverStatus.UNKNOWN)] * (live_values.SCAN_LIMIT + 1),
-    )
-    with pytest.raises(DeadlineExceeded):
-        result.is_timeout()
-    result.solver_results = SimpleNamespace(results=[SimpleNamespace(status=SolverStatus.TIMEOUT)])
-    assert result.is_timeout() is True
-
-
 def _connected_types(tag, count):
     kinds = [type(f"{tag}{index}", (), {}) for index in range(count)]
     for kind in kinds:
@@ -586,26 +584,6 @@ def test_a_cycle_with_one_untrusted_member_is_untrusted_everywhere(monkeypatch):
     assert live_values.package_type(kinds[0]) is False
     assert all(live_values.package_type(kind) is False for kind in kinds)
     assert len(calls) <= 3 * len(kinds)
-
-
-def test_cloning_a_signature_bounds_the_sum_of_parameters_members_and_copies():
-    """signature の写しは、記述子の列・member・写す容器の要素の和を 1 つの読みの上限にする（積にしない）。"""
-
-    from types import SimpleNamespace
-
-    from scripts.function_tracer_pcode.core.errors import DeadlineExceeded
-    from scripts.function_tracer_pcode.core.signature import FunctionSignature
-
-    third = live_values.SCAN_LIMIT // 3
-    # 1 つずつは上限の内側（記述子の数・member の数・容器の要素の数のどれも）でも、和は外
-    parameters = [{"name": f"p{index}", "tags": ["t"]} for index in range(third)]
-    analysis = SimpleNamespace(return_type="int", return_type_obj=None, parameters=parameters)
-    with pytest.raises(DeadlineExceeded):
-        FunctionSignature.from_analysis(analysis)
-    small = SimpleNamespace(return_type="int", return_type_obj=None, parameters=[{"name": "p", "tags": ["t"]}])
-    signature = FunctionSignature.from_analysis(small)
-    assert signature.parameters == [{"name": "p", "tags": ["t"]}]
-    assert signature.parameters[0]["tags"] is not small.parameters[0]["tags"]
 
 
 def test_no_provisional_verdict_outlives_the_outermost_query():

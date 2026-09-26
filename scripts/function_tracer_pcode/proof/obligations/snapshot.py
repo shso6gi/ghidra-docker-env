@@ -19,6 +19,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     materialize,
 )
 from scripts.function_tracer_pcode.core.live_values import (
+    metered_storage_reads,
     NOT_PLAIN,
     as_repr,
     as_str,
@@ -278,7 +279,9 @@ class SnapshotFingerprintCodec:
 
         if budget is None:
             return cls._freeze_unmetered(value)
-        return cls._freeze(value, _FreezeMeter(budget))
+        # 値の storage の読みも固定の上限を超えた分は同じ予算へ（超えればその予算の超過）
+        with metered_storage_reads(budget):
+            return cls._freeze(value, _FreezeMeter(budget))
 
     @classmethod
     def _freeze_unmetered(cls, value: Any) -> Any:

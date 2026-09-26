@@ -27,13 +27,13 @@ from scripts.function_tracer_pcode.checker.phases.handler import (
     PhaseSpec,
 )
 from scripts.function_tracer_pcode.checker.pair_execution import (
+    PAIR_FAILURE_EXCEPTIONS,
     apply_pair_failure_gate,
     binary_display_name,
     pair_allows_semantic_analysis,
     pair_failure_result_for_exception,
     pair_stop_state,
 )
-from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 
 
@@ -77,7 +77,7 @@ def run_check_from_binaries(
                 binary1_id=binary1_id,
                 binary2_id=binary2_id,
             )
-        except AnalysisFailureError as exc:
+        except PAIR_FAILURE_EXCEPTIONS as exc:
             # G3（Issue #106 PR-106-0）: 初回解析など `check()` の外で起きた
             # failure はここで結果になる。握り潰された failure も、握り潰されずに
             # そのまま上がってきた failure も、台帳が優先順位を解決した 1 件に

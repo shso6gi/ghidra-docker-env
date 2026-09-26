@@ -48,6 +48,7 @@ from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional
 
 from scripts.function_tracer_pcode.core.live_values import (
+    metered_storage_reads,
     NOT_PLAIN,
     as_str,
     builtin_mapping,
@@ -218,7 +219,9 @@ def canonical_fingerprint(value: Any, *, work: Any) -> str:
     """`authority_digest(value)` と同じ digest を、`work` の中で streaming に求める。"""
 
     sink = _Sink(work)
-    _emit(sink, value)
+    # 値の storage の読みも固定の上限を超えた分はこの作業量へ（超えればこの作業量の超過）
+    with metered_storage_reads(work):
+        _emit(sink, value)
     return sink.hasher.hexdigest()
 
 

@@ -67,7 +67,8 @@ def test_top_level_try_except_handlers_keep_their_types_order_and_bodies():
     assert len(tr.handlers) == 3 and not tr.orelse and not tr.finalbody
     assert [ast.unparse(handler.type) for handler in tr.handlers] == [
         "(UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError)",
-        "AnalysisFailureError",
+        # gate の族（`AnalysisFailureError` + 値の storage の読みの量の信号。Issue #22 PR-22-D）
+        "PAIR_FAILURE_EXCEPTIONS",
         "Exception",
     ]
     # handler 1: debug print → unsupported_smt_result を返す

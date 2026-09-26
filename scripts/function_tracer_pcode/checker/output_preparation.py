@@ -1255,12 +1255,13 @@ def _attach_budget_diagnostics(result: Any, prepared: PreparedSemanticPayload, p
         # 組み込みの振る舞いの mapping の複製（key は scalar だけ）。作業量を受け取らない複製は
         # live_values の固定の上限の組まで（先頭から）で、外は件数の marker（診断だけ。判定・canonical
         # reason は読まないので outcome は変わらない）
-        for key, value in read_limits.prefix_within_limit(live_values.items_of(current)):
+        rows = read_limits.prefix_items_within_limit(current)
+        for key, value in rows:
             diagnostics[_plain_key(key)] = value
-        omitted = read_limits.omitted_beyond_limit(current)
+        omitted = read_limits.omitted_beyond_limit(current, kept=len(rows))
         if omitted:
             diagnostics["diagnostics_overflow"] = {
-                "truncated": True, "keys": live_values.size(current), "kept": live_values.SCAN_LIMIT,
+                "truncated": True, "keys": live_values.size(current), "kept": len(rows),
             }
     diagnostics["expression_budget"] = {
         "policy": policy.to_diagnostic(),

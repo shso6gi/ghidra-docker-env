@@ -1569,6 +1569,15 @@ class _ViewUnits:
         if self.left < 0:
             raise _NotPlain
 
+    def remaining(self) -> int:
+        return self.left
+
+
+#: 値の storage の読みを数える作業量の型（`live_values.metered_storage_reads` が受け取る）: 作業量
+#: （`JsonBudget` と subclass の `SerializationWork`）と、作業量を受け取らない `builtin_view` の固定の単位
+live_values.register_storage_meter(JsonBudget)
+live_values.register_storage_meter(_ViewUnits)
+
 
 def builtin_view(value: Any, work: Optional["JsonBudget"] = None) -> Tuple[bool, Any]:
     """組み込みの値だけで書き直した写し（`(True, 写し)`）。書き直せなければ `(False, None)`。
@@ -1582,7 +1591,9 @@ def builtin_view(value: Any, work: Optional["JsonBudget"] = None) -> Tuple[bool,
 
     units: Any = _ViewUnits() if work is None else work
     try:
-        return True, _builtin_view_of(value, units, set())
+        # 値の storage の読みも同じ単位で数える（作業量が無ければ固定の上限 `_ViewUnits`: 超えれば書き直さない）
+        with live_values.metered_storage_reads(units):
+            return True, _builtin_view_of(value, units, set())
     except (_NotPlain, RecursionError, TypeError):
         return False, None
 
@@ -2679,8 +2690,11 @@ class _Walk:
         # walk の間に呼ぶ producer が作る予算は、この walk の作業量の子（`JsonBudget.parent`）
         active = _ACTIVE_WORK.set(self.effort)
         try:
-            self.enter(source, holder, 0, self.build)
-            self.drain_to(0)
+            # 値の storage の読み（key の検査・instance の状態）も固定の上限を超えた分はこの walk の作業量へ
+            # 数える（組み込みのままの容器は要素ごとに数えて辿るので、検査の要る容器も同じ意味にする）
+            with live_values.metered_storage_reads(self.effort):
+                self.enter(source, holder, 0, self.build)
+                self.drain_to(0)
         finally:
             _ACTIVE_WORK.reset(active)
         return holder[0]

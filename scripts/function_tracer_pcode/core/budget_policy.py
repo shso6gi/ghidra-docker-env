@@ -522,6 +522,9 @@ class SerializationWork:
             observe_budget_usage(BudgetKind.SERIALIZATION_NODES, self.distinct_nodes, site=self.site)
 
 
+#: 直列化の作業量は値の storage の読みも数える（`live_values.metered_storage_reads`）
+live_values.register_storage_meter(SerializationWork)
+
 _SERIALIZATION = threading.local()
 
 
@@ -569,7 +572,10 @@ def serialization_scope(
     )
     stack.append(work)
     try:
-        yield work
+        # この scope の中の値の storage の読みも、固定の上限を超えた分はこの作業量へ（上限の無い作業量は
+        # 固定の上限を外さない: `live_values.metered_storage_reads`）
+        with live_values.metered_storage_reads(work):
+            yield work
     finally:
         stack.pop()
         work.observe()

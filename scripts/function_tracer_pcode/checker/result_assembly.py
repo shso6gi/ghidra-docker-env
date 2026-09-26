@@ -370,7 +370,7 @@ def analysis_limitation_result(
 
     attribution = attribute_analysis_limitation(session, exc)
     evidence_refs = read_limits.prefix_within_limit(exc.evidence_refs)
-    omitted_refs = read_limits.omitted_beyond_limit(exc.evidence_refs)
+    omitted_refs = read_limits.omitted_beyond_limit(exc.evidence_refs, kept=len(evidence_refs))
     diagnostic = {
         **attribution.to_diagnostic(),
         "site": exc.site,
@@ -561,7 +561,7 @@ def analysis_limitation_result_for_pair(
 
     attribution = attribute_analysis_limitation(session, exc)
     evidence_refs = read_limits.prefix_within_limit(exc.evidence_refs)
-    omitted_refs = read_limits.omitted_beyond_limit(exc.evidence_refs)
+    omitted_refs = read_limits.omitted_beyond_limit(exc.evidence_refs, kept=len(evidence_refs))
     diagnostic = {
         **attribution.to_diagnostic(),
         "site": exc.site,
