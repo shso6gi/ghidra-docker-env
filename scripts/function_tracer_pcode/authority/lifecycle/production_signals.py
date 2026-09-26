@@ -1221,26 +1221,39 @@ def active_operational_authority_factory() -> Optional[Any]:
 
 
 def record_production_pilot_shadow_error(exc: Exception) -> None:
+    """Record a producer-side authority failure on the active session.
+
+    The session owns the classification (``record_domain_signal_failure``):
+    an encoding error before the event contract truncated the stream, a
+    diagnostic truncation consequence after it (Issue #110).
+    """
+
     import traceback
 
     session = active_production_pilot_session()
-    if session is not None:
-        error_kinds = getattr(session, "domain_signal_error_kinds", None)
-        if isinstance(error_kinds, list):
-            error_kinds.append(type(exc).__name__)
-        details = getattr(session, "domain_signal_error_details", None)
-        if isinstance(details, list):
-            frames = traceback.extract_tb(exc.__traceback__)
-            selected_frames = (
-                frames
-                if len(frames) <= 8
-                else frames[:6] + frames[-2:]
-            )
-            location = " <- ".join(
-                f"{frame.filename}:{frame.lineno}:{frame.name}"
-                for frame in selected_frames
-            ) or "unknown-catch-site"
-            details.append(f"{location}: {exc}")
+    if session is None:
+        return
+    recorder = getattr(session, "record_domain_signal_failure", None)
+    frames = traceback.extract_tb(exc.__traceback__)
+    selected_frames = (
+        frames
+        if len(frames) <= 8
+        else frames[:6] + frames[-2:]
+    )
+    location = " <- ".join(
+        f"{frame.filename}:{frame.lineno}:{frame.name}"
+        for frame in selected_frames
+    ) or "unknown-catch-site"
+    detail = f"{location}: {exc}"
+    if callable(recorder):
+        recorder(type(exc).__name__, detail)
+        return
+    error_kinds = getattr(session, "domain_signal_error_kinds", None)
+    if isinstance(error_kinds, list):
+        error_kinds.append(type(exc).__name__)
+    details = getattr(session, "domain_signal_error_details", None)
+    if isinstance(details, list):
+        details.append(detail)
 
 
 def production_signal_scope(session: Any) -> Iterator[None]:
@@ -1366,9 +1379,19 @@ def emit_sat_safety_signal(
             )
             if not callable(authority_for_signal):
                 raise TypeError("SAT safety encoder lacks occurrence authority")
+            if session.stream_truncated:
+                # Issue #110: a truncated stream takes no new promise (O(1),
+                # before the occurrence authority is built).
+                return 0
             occurrence_id = authority_for_signal(
                 session, signal
             ).occurrence.occurrence_id
+            # Issue #110: the promise to publish before the decision is counted
+            # against the event contract when it is made.  A refused deferral
+            # is the recorded contract limitation (the pair is decided by it),
+            # so the promise is not kept.
+            if occurrence_id not in pending and not session.defer_occurrence(occurrence_id):
+                return 0
             prior = pending.setdefault(
                 occurrence_id, (signal, producer_site_manifest_id)
             )
@@ -1417,6 +1440,7 @@ def emit_sat_safety_completion_if_observed(
         ).occurrence.occurrence_id
         if occurrence_id in pending:
             pending.pop(occurrence_id)
+            session.event_contract.release(occurrence_id)
             if not pending:
                 session.domain_signal_state.pop(
                     "sat_safety_deferred_observations", None
@@ -1503,6 +1527,9 @@ def finalize_deferred_sat_safety_observations(session: Any) -> None:
                 manifest_id, terminal_signal
             )
         session.emit_domain_signal(terminal_signal)
+        # The promise is kept (published) or refused by the contract: either
+        # way it no longer holds room in the contract.
+        session.event_contract.release(occurrence_id)
 
 
 def emit_call_effect_signal(

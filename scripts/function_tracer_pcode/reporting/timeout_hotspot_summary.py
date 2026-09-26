@@ -102,6 +102,14 @@ RESULT_JSON_END = "=== EQUIVALENCE_RESULT_JSON_END ==="
 #: 読み込みで起こり得る失敗（`except Exception` は使わない）。
 _READ_ERRORS = (KeyError, OSError, RecursionError, TypeError, ValueError)
 
+def _bundle_work_exceeded() -> type:
+    """封印の検証が作業量・契約の外で止まった失敗（Issue #110。読み取りの失敗と同じく記録する）。"""
+
+    from scripts.function_tracer_pcode.authority.seal_work import BundleWorkExceeded
+
+    return BundleWorkExceeded
+
+
 #: 待機中と読める frame の関数名（`waiting` 印を付けるだけで原因ではない）。
 WAITING_FRAME_MARKERS = ("wait", "acquire", "select", "poll")
 
@@ -342,13 +350,16 @@ def _pair_log_child_evidence(
         if key_name != "canonical_result_finalization_bundle"
     }
     try:
+        from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
+
         validated = validate_canonical_result_finalization_bundle(
             dict(bundle),
+            work=SealWorkBudget.for_result(),
             result_payload_preimage=preimage,
             bundle_verification_key_id=key_id if verified_with_key else None,
             bundle_verification_key=key if verified_with_key else None,
         )
-    except _READ_ERRORS as exc:
+    except _READ_ERRORS + (_bundle_work_exceeded(),) as exc:
         detail["validation_error"] = type(exc).__name__
         return _evidence([], ["canonical_result_finalization_bundle"], detail)
     identity = validated["execution_identity"]

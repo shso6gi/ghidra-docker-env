@@ -402,7 +402,7 @@ def test_the_cli_envelope_step_turns_a_violation_into_the_error_result(monkeypat
     )
     with pytest.raises(SystemExit):
         equivalence._final_envelope_or_error_result(
-            SimpleNamespace(), result=_decided_result(), seal=None,
+            SimpleNamespace(), result=_decided_result(), seal=None, work=None,
             binary1_path=str(tmp_path / "a"), binary2_path=str(tmp_path / "b"),
             func_name1="f", func_name2="f", start_time=0.0,
         )

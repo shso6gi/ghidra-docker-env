@@ -90,6 +90,7 @@ from scripts.function_tracer_pcode.tests.unit.test_benchmark_validation_gate imp
     NEQ,
     _manifest,
 )
+from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
 
 SUPERVISOR_KEY = b"s" * 32
 WORKER_KEY = b"w" * 32
@@ -230,14 +231,14 @@ def _classified_pair_status(
         attach_conditional_decision(result, conditional)
     preimage = result.to_dict()
     bundle = build_canonical_result_finalization_bundle(
-        result_payload_preimage=preimage, evidence=evidence, session=session,
+        result_payload_preimage=preimage, evidence=evidence, session=session, work=SealWorkBudget.for_result()
     )
     full_payload = {**preimage, "canonical_result_finalization_bundle": bundle}
-    assert persist_canonical_result_envelope(full_payload) is not None
+    assert persist_canonical_result_envelope(full_payload, work=SealWorkBudget.for_result()) is not None
     validated = validate_canonical_result_finalization_bundle(
         bundle, result_payload_preimage=preimage,
         bundle_verification_key_id="supervisor-key-v1",
-        bundle_verification_key=SUPERVISOR_KEY,
+        bundle_verification_key=SUPERVISOR_KEY, work=SealWorkBudget.for_result()
     )
     identity = validated["execution_identity"]
 

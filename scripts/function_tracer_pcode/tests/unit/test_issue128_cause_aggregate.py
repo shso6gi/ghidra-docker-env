@@ -52,6 +52,7 @@ from scripts.function_tracer_pcode.reporting.unknown_reason_summary import (
     format_validation_unknown_summary,
     summarize_validation_unknowns,
 )
+from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
 
 
 # ---------------------------------------------------------------------------
@@ -1431,7 +1432,7 @@ def test_aggregate_changes_preimage_but_no_semantic_field(tmp_path, monkeypatch)
             bundle,
             result_payload_preimage=preimage,
             bundle_verification_key_id="issue128-test-key",
-            bundle_verification_key=b"k" * 32,
+            bundle_verification_key=b"k" * 32, work=SealWorkBudget.for_result()
         )
         assert validated["outcome"] == "EQUIVALENT"
 

@@ -510,7 +510,8 @@ def _emit(monkeypatch, result, violation=None):
     written = []
     persisted = []
     monkeypatch.setattr(equivalence, "output_result", lambda content, *_a, **_k: written.append(content))
-    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", persisted.append)
+    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope",
+                        lambda payload, **_kw: persisted.append(payload))
     args = SimpleNamespace(verbose=False, debug=False, output=None, quiet=True)
     with pytest.raises(SystemExit):
         equivalence._emit_output_invariant_error_result(
@@ -580,7 +581,7 @@ def test_the_text_path_turns_output_failures_into_the_same_error(monkeypatch):
     result.to_string = broken
     written = []
     monkeypatch.setattr(equivalence, "output_result", lambda content, *_a, **_k: written.append(content))
-    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", lambda _payload: None)
+    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", lambda _payload, **_kw: None)
     args = SimpleNamespace(verbose=False, debug=False, output=None, quiet=True)
     with pytest.raises(SystemExit):
         equivalence._text_or_error_result(
@@ -815,7 +816,8 @@ def test_an_error_whose_output_fails_after_it_was_persisted_still_exits_with_its
         raise OSError("the output stream is gone")
 
     monkeypatch.setattr(equivalence, "output_result", broken_output)
-    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", persisted.append)
+    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope",
+                        lambda payload, **_kw: persisted.append(payload))
     args = SimpleNamespace(verbose=False, debug=False, output=None, quiet=True)
     with pytest.raises(SystemExit) as exited:
         equivalence._emit_output_invariant_error_result(
@@ -836,7 +838,8 @@ def test_the_error_is_persisted_only_after_everything_it_writes_was_built(monkey
 
     order = []
     monkeypatch.setattr(equivalence, "output_result", lambda *_a, **_k: order.append("output"))
-    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", lambda _p: order.append("persist"))
+    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope",
+                        lambda _p, **_kw: order.append("persist"))
     original = result_module.EquivalenceResult.to_string
 
     def to_string(self, **kwargs):

@@ -75,11 +75,57 @@ class CanonicalEnvelope:
     sha256: str
 
 
+class EnvelopeOutsideContract(ValueError):
+    """envelope file が契約の上限（`persisted_envelope_byte_limit`）より大きい（decode せずに無効）。"""
+
+
+@dataclass(frozen=True)
+class EnvelopeRead:
+    """envelope file を 1 回読んだもの（Issue #110）。"""
+
+    #: 読んだ bytes（高々 上限 + 1 byte）の sha256。child 終了の観測（E）と終端の snapshot が同じ規則で取る
+    sha256: str
+    #: 契約の上限の内側なら file の bytes 全体、外なら `None`（decode しない）
+    raw: Any
+
+    def require_within_contract(self) -> bytes:
+        if self.raw is None:
+            raise EnvelopeOutsideContract(_OUTSIDE_CONTRACT)
+        return self.raw
+
+
+def read_canonical_envelope(path: Any) -> EnvelopeRead:
+    """envelope file を読む唯一の入口（Issue #110）: 上限 + 1 byte より先は読まない。
+
+    上限の内側の file の digest は file 全体の sha256（従来と同じ）。上限の外の file は読み切らず、
+    読んだ bytes の digest だけを持つ（E と snapshot が同じ digest になり、envelope は無効）。
+    """
+
+    from scripts.function_tracer_pcode.authority.seal_work import persisted_envelope_byte_limit
+
+    limit = persisted_envelope_byte_limit()
+    with open(path, "rb") as handle:
+        raw = handle.read(limit + 1)
+    return EnvelopeRead(
+        hashlib.sha256(raw).hexdigest(), raw if len(raw) <= limit else None,
+    )
+
+
+_OUTSIDE_CONTRACT = "canonical result envelope is outside the authority event contract"
+
+
 def validate_canonical_envelope(
     raw: bytes, *, launch: Any, validate_bundle: BundleValidator,
 ) -> CanonicalEnvelope:
-    """envelope file の bytes を検証する（rc は見ない。E との join は呼び出し側）。"""
+    """envelope file の bytes を検証する（rc は見ない。E との join は呼び出し側）。
 
+    Issue #110: 読む（`json.loads`・digest）前に大きさを契約の上限と比べる（上限の外は無効）。
+    """
+
+    from scripts.function_tracer_pcode.authority.seal_work import persisted_envelope_byte_limit
+
+    if len(raw) > persisted_envelope_byte_limit():
+        raise EnvelopeOutsideContract(_OUTSIDE_CONTRACT)
     envelope = json.loads(raw.decode("utf-8"))
     if type(envelope) is not dict or set(envelope) != _BODY_KEYS | {"envelope_digest"}:
         raise ValueError("canonical result envelope fields differ")

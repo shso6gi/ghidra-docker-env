@@ -828,7 +828,7 @@ def _fake_equivalence_environment(monkeypatch, tmp_path, journal_path):
     monkeypatch.setattr(checker_package, "TypeFixerConfig", lambda *_a, **_k: object())
     monkeypatch.setattr(cause_aggregate, "attach_cause_aggregate", lambda _result: None)
     monkeypatch.setattr(
-        canonical_result, "persist_canonical_result_envelope", lambda _payload: None
+        canonical_result, "persist_canonical_result_envelope", lambda _payload, **_kw: None
     )
 
     def _record_output(content, output_path, quiet):
@@ -841,7 +841,7 @@ def _fake_equivalence_environment(monkeypatch, tmp_path, journal_path):
     # Issue #22 PR-22-D: CLI は preimage を `build_final_result_envelope` から
     # 受け取る（合成・封印・bounded encode）。偽の結果は結果 schema を持たない
     # ので、builder も「`to_dict()` を呼んでその値を書く」だけの偽物にする。
-    def _fake_envelope(fake_result, *, seal=None, fallback_policy=None):
+    def _fake_envelope(fake_result, *, seal=None, work=None, fallback_policy=None):
         payload = fake_result.to_dict()
         return SimpleNamespace(
             payload=payload,

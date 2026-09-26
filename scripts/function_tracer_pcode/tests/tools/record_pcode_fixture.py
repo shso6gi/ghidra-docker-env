@@ -79,6 +79,7 @@ from scripts.function_tracer_pcode.tests.fixtures.pcode.snapshot import (
     AnalysisSnapshotCollector,
     check_snapshot,
 )
+from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
 
 #: 飽和記録の対象にする Java class の単純名。**1 case の end-to-end で実際に
 #: HighFunction から辿れた kind だけを入れる**（API 名も kind も先回りしない）。
@@ -1014,7 +1015,7 @@ def record(args: argparse.Namespace) -> int:
         payload["canonical_result_finalization_bundle"] = (
             build_canonical_result_finalization_bundle(
                 result_payload_preimage=payload,
-                evidence=evidence, session=session,
+                evidence=evidence, session=session, work=SealWorkBudget.for_result()
             )
         )
 

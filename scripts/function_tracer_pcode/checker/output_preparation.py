@@ -1897,19 +1897,35 @@ def compose_result_preimage(
     return ComposedPreimage(prepared, _ordered(parts), members, tuple(truncated), freeable)
 
 
+#: 1 つの最終 envelope が封印する回数の上限（組み直すときだけ 2 回目。`finalize_result_envelope`）
+SEALS_PER_ENVELOPE = 2
+
+
+def envelope_seal_work() -> Any:
+    """最終 envelope 1 つの封印の作業量（Issue #110 の `SealWork`）。
+
+    封印を `SEALS_PER_ENVELOPE` 回と、その envelope の永続化の検証 1 回の作業量（上限は authority の
+    event の契約と結果の preimage の上限だけから決まる: 契約の内側の入力は作業量の不足で失敗しない）。
+    envelope 1 つにつき 1 つ作り、その envelope の封印と永続化だけに使う（1 つの結果が作る envelope は
+    確定した判定の envelope と、出力の失敗の ERROR の envelope の高々 2 つ + 最後の固定の文の envelope）。
+    """
+
+    from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
+
+    return SealWorkBudget.for_result(passes=SEALS_PER_ENVELOPE + 1)
+
+
 class AuthoritySeal:
     """最終 envelope の封印（canonical result finalization bundle）を作る authority の builder。
 
-    **bounded path が呼ぶ唯一の作業量を受け取らない producer**（任意の callable ではなく、この
-    型 1 つ。field に callable を持たない）。`seal(preimage)` は authority の
-    `build_canonical_result_finalization_bundle` を呼ぶ: sealed event stream の codec・replay・
-    digest の仕事は event stream に比例し、その上限の契約は #110（O-4 の「構築の作業量」の未達の
-    依存）。本 PR が保証するのは、呼ぶのは envelope 1 つを作るごとに高々 2 回（組み直すときだけ
-    2 回目。出力の失敗の ERROR は別の小さい session の envelope で、その fallback を含めて高々 2 つ）、
-    作った封印は残りの予算の中でしか写さない、超えれば durable な ERROR、の 3 つ。
+    `seal(preimage, work=...)` は authority の `build_canonical_result_finalization_bundle` を呼ぶ。
+    sealed event stream の codec・replay・digest の仕事は、呼ぶ側の有限の作業量 `work`（Issue #110 の
+    `SealWork`）の中でだけ行う（各段を実行する前に数え、超えれば `BundleWorkExceeded`: 部分的な封印を
+    返さない）。field に callable を持たない。本 module が保証するのは、呼ぶのは envelope 1 つを作るごとに
+    高々 `SEALS_PER_ENVELOPE` 回、作った封印は残りの予算の中でしか写さない、超えれば durable な ERROR。
 
-    test は `seal` を上書きした subclass を使う（production の subclass は architecture test が
-    拒む）。
+    production の型はこの型そのもの（subclass を作らない: architecture test の J14。
+    `finalize_result_envelope` は型を `is` で確かめる）。
     """
 
     __slots__ = ("evidence", "session")
@@ -1918,13 +1934,14 @@ class AuthoritySeal:
         self.evidence = evidence
         self.session = session
 
-    def seal(self, preimage: Mapping[str, Any]) -> Mapping[str, Any]:
+    def seal(self, preimage: Mapping[str, Any], *, work: Any) -> Mapping[str, Any]:
         from scripts.function_tracer_pcode.authority.decision.canonical_result import (
             build_canonical_result_finalization_bundle,
         )
 
         return build_canonical_result_finalization_bundle(
             result_payload_preimage=preimage, evidence=self.evidence, session=self.session,
+            work=work,
         )
 
 
@@ -1932,6 +1949,7 @@ def build_final_result_envelope(
     result: Any,
     *,
     seal: Optional["AuthoritySeal"] = None,
+    work: Any = None,
     fallback_policy: Optional[BudgetPolicy] = None,
 ) -> FinalResultEnvelope:
     """A + B + C → 封印 → bounded encode。**Expression / 解析 object を辿らない**。
@@ -1948,14 +1966,14 @@ def build_final_result_envelope(
     * 違反は `OutputEnvelopeInvariantViolation`（確定済みの判定は変えない。呼ぶ側が内部
       エラーの ERROR として durable にする）。
 
-    封印を **組み立てる** 作業（authority の event stream の codec・replay）の大きさは
-    authority の event stream に比例し、その上限の契約は #110 に依存する（`AuthoritySeal`。
-    本 function が有界にするのは、封印を呼ぶ回数・組み立てた封印を出力へ写す作業・最終 JSON
-    の大きさ）。
+    封印を **組み立てる** 作業（authority の event stream の codec・replay）は `work`（この envelope の
+    `envelope_seal_work()`）の中でだけ行う（Issue #110 の契約: event の件数と大きさは authority の
+    event の契約が作る時点で抑え、封印の各段は実行する前に数える）。本 function が有界にするのは、
+    封印を呼ぶ回数・組み立てた封印を出力へ写す作業・最終 JSON の大きさ。
     """
 
     return finalize_result_envelope(
-        compose_result_preimage(result, fallback_policy=fallback_policy), seal=seal,
+        compose_result_preimage(result, fallback_policy=fallback_policy), seal=seal, work=work,
         recompose_from=result, fallback_policy=fallback_policy,
     )
 
@@ -1964,6 +1982,7 @@ def finalize_result_envelope(
     composed: ComposedPreimage,
     *,
     seal: Optional["AuthoritySeal"] = None,
+    work: Any = None,
     recompose_from: Any = None,
     fallback_policy: Optional[BudgetPolicy] = None,
 ) -> FinalResultEnvelope:
@@ -1988,8 +2007,10 @@ def finalize_result_envelope(
     payload = preimage
     total = preimage_bytes
     if seal is not None:
-        if not isinstance(seal, AuthoritySeal):
+        if type(seal) is not AuthoritySeal:
             raise TypeError("the final envelope is sealed only by an AuthoritySeal")
+        if work is None:
+            raise TypeError("a sealed final envelope needs its seal work (envelope_seal_work())")
         room = members.remaining_for(BUNDLE_KEY)
         # 封印を写す上限: 残り、組み直せるなら残り + 切り詰められる byte（1 回の準備で、入るか・
         # 組み直しに要る大きさかが分かる。封印を 3 回作らない）
@@ -1997,7 +2018,7 @@ def finalize_result_envelope(
         can_recompose = recompose_from is not None and freeable > 0 and room is not None
         reach = room + freeable if can_recompose else room
         try:
-            bundle = encoding.prepare(seal.seal(preimage), max_bytes=reach)
+            bundle = encoding.prepare(seal.seal(preimage, work=work), max_bytes=reach)
         except JsonBudgetExhausted as exc:
             raise _violation(
                 f"{BUNDLE_KEY} does not fit the rest of the envelope "
@@ -2020,7 +2041,7 @@ def finalize_result_envelope(
             preimage_bytes = _budget_total(members)
             room = members.remaining_for(BUNDLE_KEY)
             try:
-                bundle = encoding.prepare(seal.seal(preimage), max_bytes=room)
+                bundle = encoding.prepare(seal.seal(preimage, work=work), max_bytes=room)
             except JsonBudgetExhausted as exc:
                 raise _violation(
                     f"{BUNDLE_KEY} does not fit the rest of the envelope "
@@ -2087,6 +2108,8 @@ __all__ = [
     "SerializationPlan",
     "ComposedPreimage",
     "AuthoritySeal",
+    "SEALS_PER_ENVELOPE",
+    "envelope_seal_work",
     "build_final_result_envelope",
     "compose_result_preimage",
     "finalize_result_envelope",

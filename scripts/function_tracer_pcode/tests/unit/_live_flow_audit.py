@@ -23,6 +23,8 @@ import pathlib
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 PKG = "scripts.function_tracer_pcode"
+#: 作業量か authority の event の契約が仕事を抑える authority の入口（その owner の表）
+from scripts.function_tracer_pcode.authority.event_contract import BOUNDED_ENTRY_POINTS  # noqa: E402
 OWNER_MODULES = frozenset({PKG + ".core.json_encoding", PKG + ".core.live_values"})
 #: 外部の依存（D）: live な値を渡すこと自体を違反にする
 EXTERNAL_PREFIXES = (PKG + ".authority.", PKG + ".cli.")
@@ -1291,6 +1293,15 @@ class _FunctionAudit:
                 return OWNER_RESULTS.get(name)
             return None
         if module.startswith(EXTERNAL_PREFIXES):
+            bound = BOUNDED_ENTRY_POINTS.get(f"{module[len(PKG) + 1:]}.{name}")
+            if bound == "work":
+                # Issue #110: 作業量を必ず受け取る authority の入口。呼ぶ側の有限の作業量を渡すこと
+                if kwargs.get("work") != WORK:
+                    self.v(node, f"metered authority API {module[len(PKG) + 1:]}.{name} called without a work budget")
+                return None
+            if bound == "event_contract":
+                # Issue #110: authority の event の契約が入力を作る前に測り、件数と大きさを抑える入口
+                return None
             # authority が自分の record（型を確かめた authority の型の object）を読むのは許す
             foreign = [k for k in live if not (is_rec(k) and rec_class(k)[0].startswith(EXTERNAL_PREFIXES))]
             if foreign:
@@ -1399,22 +1410,13 @@ def _is_eq_dataclass(decorator) -> bool:
 #: 宣言した作業量の外の依存（owner の Issue が引き継ぐ）: (module, qualname, 違反の文の先頭) → 理由。
 #: 監査はこの場所の違反だけを除き、除いた場所が 1 つでも使われなくなれば（stale）落ちる。
 DECLARED_DEPENDENCIES = {
-    ("checker.output_preparation", "finalize_result_envelope", "live value passed to unresolved method .seal()"):
-        "#110: AuthoritySeal.seal(preimage) が作業量を受け取らない（`seal(preimage, work=...)` で撤去）",
     ("proof.obligations.snapshot", "_fingerprint_json", "live value passed to the unbounded owner API .dumps()"):
         "#194: 凍結した値（snapshot の作成では `freeze(budget=)` が数えた写し）を書く。proof の obligation の"
         " digest（`SnapshotFingerprintCodec.digest` の解析時の呼び出し）は凍結を数えない（identity の owner）",
-    ("checker.result_assembly", "analysis_limitation_result_for_pair",
-     "live value passed to authority.decision.limitation_attribution.attribute_analysis_limitation"):
-        "#110: 限界の帰属は authority の event（`observe_analysis_limitation`）を発行する（event の大きさと件数は"
-        " AC-110-S2 の owner）",
 }
 
 #: 宣言した依存の場所ごとの違反の数（それより多い同じ違反は宣言の外）
 DECLARED_DEPENDENCY_SITES = {
-    ("checker.output_preparation", "finalize_result_envelope", "live value passed to unresolved method .seal()"): 2,
-    ("checker.result_assembly", "analysis_limitation_result_for_pair",
-     "live value passed to authority.decision.limitation_attribution.attribute_analysis_limitation"): 1,
     ("proof.obligations.snapshot", "_fingerprint_json", "live value passed to the unbounded owner API .dumps()"): 1,
 }
 

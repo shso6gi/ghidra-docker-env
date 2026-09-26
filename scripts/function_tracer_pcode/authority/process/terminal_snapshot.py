@@ -28,6 +28,7 @@ from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
     CanonicalEnvelope,
     SupervisorCanonicalResultResolvedReceipt,
     canonical_resolved_receipt,
+    read_canonical_envelope,
     validate_canonical_envelope,
 )
 from scripts.function_tracer_pcode.authority.process.checkpoint_vocabulary import (
@@ -99,12 +100,13 @@ def _read_canonical(
     presence = recovery.Presence
     envelope_presence, sha, cli_rc, detail = presence.ABSENT, None, None, None
     if envelope_path.exists():
-        # 検証する bytes と E と照合する digest は同じ 1 回の読込みから取る。
-        raw = envelope_path.read_bytes()
-        sha = hashlib.sha256(raw).hexdigest()
+        # 検証する bytes と E と照合する digest は同じ 1 回の読込みから取る。契約の上限の外の
+        # file は読み切らずに無効（Issue #110）。
+        read = read_canonical_envelope(envelope_path)
+        sha = read.sha256
         try:
             context.envelope = validate_canonical_envelope(
-                raw, launch=context.launch,
+                read.require_within_contract(), launch=context.launch,
                 validate_bundle=store.factory.validate_child_canonical_bundle,
             )
         except _READ_ERRORS as exc:

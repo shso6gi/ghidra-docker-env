@@ -417,7 +417,8 @@ def test_cli_attaches_failure_diagnostics_before_the_aggregate():
         source.index("seal = AuthoritySeal("),
         # envelope の組み立てと契約違反の ERROR は 1 つの helper（`_final_envelope_or_error_result`）
         source.index("envelope = _final_envelope_or_error_result("),
-        source.index("persist_canonical_result_envelope(result_payload)"),
+        # Issue #110: 封印と永続化の検証は同じ envelope の作業量 1 つ
+        source.index("persist_canonical_result_envelope(result_payload, work=seal_work)"),
     ]
     assert order == sorted(order)
     assert "result.to_dict()" not in source

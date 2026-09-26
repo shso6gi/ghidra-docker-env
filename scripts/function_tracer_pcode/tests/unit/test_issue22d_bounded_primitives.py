@@ -19,6 +19,7 @@ import pytest
 from scripts.function_tracer_pcode.core import live_values
 
 from scripts.function_tracer_pcode.checker.output_preparation import (
+    envelope_seal_work,
     BUNDLE_KEY,
     AuthoritySeal,
     OutputEnvelopeInvariantViolation,
@@ -53,15 +54,30 @@ from scripts.function_tracer_pcode.core.json_encoding import (
 from scripts.function_tracer_pcode.tests.unit.test_issue22d_output_preparation import _decided_result
 
 
-class _FakeSeal(AuthoritySeal):
-    """test の封印（`seal` を上書きした subclass。production の封印は authority の builder）。"""
+class _FakeBuild:
+    """test の封印の中身（`evidence` に持たせる。production の封印は authority の builder）。"""
 
     def __init__(self, build):
-        super().__init__(evidence=None, session=None)
-        self._build = build
+        self.build = build
 
-    def seal(self, preimage):
-        return self._build(preimage)
+
+def _FakeSeal(build):  # noqa: N802 - 以前の test の封印の型と同じ呼び方
+    """production と同じ型の封印（J14: subclass を作らない）で、中身だけを test の builder にする。"""
+
+    return AuthoritySeal(evidence=_FakeBuild(build), session=None)
+
+
+_REAL_SEAL = AuthoritySeal.seal
+
+
+@pytest.fixture(autouse=True)
+def _fake_seal_dispatch(monkeypatch):
+    def _seal(self, preimage, *, work):
+        if type(self.evidence) is _FakeBuild:
+            return self.evidence.build(preimage)
+        return _REAL_SEAL(self, preimage, work=work)
+
+    monkeypatch.setattr(AuthoritySeal, "seal", _seal)
 
 
 @pytest.fixture(autouse=True)
@@ -249,7 +265,7 @@ def test_reason_counts_and_backlog_are_one_pass_and_bounded_by_the_walk():
 
 def test_the_bundle_is_inside_the_contract_and_a_bundle_past_it_is_a_violation():
     result = _decided_result()
-    natural = build_final_result_envelope(result, seal=_FakeSeal(lambda _preimage: {"bundle": "small"}))
+    natural = build_final_result_envelope(result, work=envelope_seal_work(), seal=_FakeSeal(lambda _preimage: {"bundle": "small"}))
     assert natural.total_bytes == len(natural.text.encode("utf-8"))
     assert natural.total_bytes <= natural.plan.max_bytes
     prepared = result.prepared_semantic_payload
@@ -269,7 +285,7 @@ def test_the_bundle_is_inside_the_contract_and_a_bundle_past_it_is_a_violation()
     )
     freeable = compose_result_preimage(result).freeable_bytes
     with pytest.raises(OutputEnvelopeInvariantViolation, match="does not fit the rest of the envelope"):
-        build_final_result_envelope(result, seal=_FakeSeal(huge_bundle))
+        build_final_result_envelope(result, work=envelope_seal_work(), seal=_FakeSeal(huge_bundle))
     # 封印は高々 2 回だけ数える（残り / 残り + 切り詰められる byte）。どちらも上限の中で止まり、
     # 1000 万の event を書き出さない
     event_bytes = RESULT_JSON_POLICY.measure({"event": 0, "pad": "e" * 64})
@@ -280,7 +296,7 @@ def test_the_bundle_is_inside_the_contract_and_a_bundle_past_it_is_a_violation()
 def test_a_bundle_crowded_out_by_truncatable_diagnostics_recomposes_instead_of_failing():
     # 切り詰めてよい診断（C）が場所を取っていても、封印は ERROR にならず、診断が先に marker になる
     result = _decided_result()
-    natural = build_final_result_envelope(result, seal=_FakeSeal(lambda _preimage: {"bundle": "small"}))
+    natural = build_final_result_envelope(result, work=envelope_seal_work(), seal=_FakeSeal(lambda _preimage: {"bundle": "small"}))
     result.diagnostics = {**(result.diagnostics or {}), "stages": {"huge": "d" * 25_000}}
     limit = natural.total_bytes + 30_000
     prepared = result.prepared_semantic_payload
@@ -293,7 +309,7 @@ def test_a_bundle_crowded_out_by_truncatable_diagnostics_recomposes_instead_of_f
         seen.append(preimage.get("diagnostics", {}).get("truncated"))
         return {"sealed": "b" * 20_000}
 
-    envelope = build_final_result_envelope(result, seal=_FakeSeal(bundle))
+    envelope = build_final_result_envelope(result, work=envelope_seal_work(), seal=_FakeSeal(bundle))
     assert envelope.total_bytes <= limit
     assert envelope.payload[BUNDLE_KEY]["sealed"] == "b" * 20_000
     assert "diagnostics" in envelope.truncated_metadata
@@ -303,7 +319,7 @@ def test_a_bundle_crowded_out_by_truncatable_diagnostics_recomposes_instead_of_f
     from scripts.function_tracer_pcode.checker import output_preparation
 
     with pytest.raises(OutputEnvelopeInvariantViolation):
-        output_preparation.finalize_result_envelope(compose_result_preimage(result), seal=_FakeSeal(bundle))
+        output_preparation.finalize_result_envelope(compose_result_preimage(result), work=envelope_seal_work(), seal=_FakeSeal(bundle))
 
 
 def test_the_final_encode_is_bounded_by_the_contract_not_by_the_produced_size():
@@ -329,7 +345,7 @@ def test_a_violation_error_keeps_the_superseded_decision_receipt(monkeypatch, tm
     original = decision_receipt_payload(decided.decision_receipt)
     written = []
     monkeypatch.setattr(equivalence, "output_result", lambda content, *_a, **_k: written.append(content))
-    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", lambda _payload: None)
+    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", lambda _payload, **_kw: None)
     args = SimpleNamespace(verbose=False, debug=False, output=None, quiet=True)
     with pytest.raises(SystemExit):
         equivalence._emit_output_invariant_error_result(
@@ -1024,7 +1040,7 @@ def test_any_failure_building_the_envelope_after_authority_is_a_durable_error(mo
     decided = _decided_result()
     written, ended = [], []
     monkeypatch.setattr(equivalence, "output_result", lambda content, *_a, **_k: written.append(content))
-    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", lambda _payload: None)
+    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", lambda _payload, **_kw: None)
     monkeypatch.setattr(equivalence, "journal_stage_end", lambda stage, *_a, **_k: ended.append((stage, _a)))
     args = SimpleNamespace(verbose=False, debug=False, output=None, quiet=True)
 
@@ -1033,7 +1049,7 @@ def test_any_failure_building_the_envelope_after_authority_is_a_durable_error(mo
 
     with pytest.raises(SystemExit):
         equivalence._final_envelope_or_error_result(
-            args, result=decided, seal=_FakeSeal(broken_seal),
+            args, result=decided, work=envelope_seal_work(), seal=_FakeSeal(broken_seal),
             binary1_path=str(tmp_path / "a"), binary2_path=str(tmp_path / "b"),
             func_name1="f", func_name2="f", start_time=0.0, emission_started=0.0,
         )
@@ -1057,10 +1073,11 @@ def test_the_persisted_envelope_is_no_larger_than_the_result_json_plus_its_wrapp
     envelope = build_final_result_envelope(
         result,
         seal=AuthoritySeal(evidence=evidence, session=session),
+        work=envelope_seal_work(),
     )
     monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_SUPERVISOR_ROOT", str(tmp_path))
     monkeypatch.setenv("UNKNOWN_TAXONOMY_V2_EXECUTION_NONCE", "n")
-    path = canonical_result.persist_canonical_result_envelope(envelope.payload)
+    path = canonical_result.persist_canonical_result_envelope(envelope.payload, work=envelope_seal_work())
     persisted = path.read_bytes()
     # 文字列は同じ書き方（非 ASCII を 6 / 12 byte の escape に膨らませない）、区切りは詰める
     wrapper = len(json.dumps({
@@ -1294,19 +1311,19 @@ def test_recompose_with_the_real_seal_in_a_regime_the_production_validator_accep
     evidence, session = result._canonical_finalization_context
 
     seal = AuthoritySeal(evidence=evidence, session=session)
-    natural = build_final_result_envelope(result, seal=seal)
+    natural = build_final_result_envelope(result, seal=seal, work=envelope_seal_work())
     bundle_bytes = RESULT_JSON_POLICY.measure(natural.payload[BUNDLE_KEY])
     # 診断の本体だけなら収まるが、本体と封印は収まらない大きさ
     free = natural.plan.max_bytes - natural.total_bytes
     result.pairwise_stats = {"pad": "p" * (free + bundle_bytes // 2)}
-    envelope = build_final_result_envelope(result, seal=seal)
+    envelope = build_final_result_envelope(result, seal=seal, work=envelope_seal_work())
     assert envelope.total_bytes <= envelope.plan.max_bytes == natural.plan.max_bytes
     # 封印の場所は、切り詰めてよい診断を marker にして空ける（どれを切るかは順と大きさで決まる）
     assert envelope.truncated_metadata
     assert all(envelope.payload[key]["truncated"] is True for key in envelope.truncated_metadata)
     preimage = {key: value for key, value in envelope.payload.items() if key != BUNDLE_KEY}
     canonical_result.validate_canonical_result_finalization_bundle(
-        envelope.payload[BUNDLE_KEY], result_payload_preimage=preimage,
+        envelope.payload[BUNDLE_KEY], result_payload_preimage=preimage, work=envelope_seal_work(),
     )
 
 

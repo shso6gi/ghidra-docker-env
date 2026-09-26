@@ -27,6 +27,7 @@ from scripts.function_tracer_pcode.checker.output_preparation import (
     AuthoritySeal,
     OutputEnvelopeInvariantViolation,
     build_final_result_envelope,
+    envelope_seal_work,
     prepared_smt_formula,
 )
 # Issue #124 PR-124-B: `result_emit` は結果 JSON の外（journal）にだけ残す区間。
@@ -326,9 +327,12 @@ def _emit_import_error_result(
     persisted = False
     try:
         evidence, session = result._canonical_finalization_context
+        # Issue #110: この ERROR の envelope の封印と永続化の検証は、この envelope の作業量の中でだけ
+        seal_work = envelope_seal_work()
         envelope = build_final_result_envelope(
             result,
             seal=AuthoritySeal(evidence=evidence, session=session),
+            work=seal_work,
             fallback_policy=_cli_budget_policy(),
         )
         result_payload = envelope.payload
@@ -346,7 +350,7 @@ def _emit_import_error_result(
             envelope.text,
             "=== EQUIVALENCE_RESULT_JSON_END ===",
         ))
-        persist_canonical_result_envelope(result_payload)
+        persist_canonical_result_envelope(result_payload, work=seal_work)
         persisted = True
         output_result(text_content, args.output, args.quiet)
         output_result(json_content, args.output, args.quiet)
@@ -375,7 +379,7 @@ _POST_AUTHORITY_OUTPUT_FAILURES = (
 )
 
 
-def _final_envelope_or_error_result(args, *, result, seal, **context):
+def _final_envelope_or_error_result(args, *, result, seal, work, **context):
     """最終 envelope を組む。組めなければ内部エラーの ERROR を出して終わる。
 
     Issue #22 PR-22-D: authority 確定 **後** の出力の失敗（契約違反・準備や封印の内部の不備・
@@ -384,7 +388,9 @@ def _final_envelope_or_error_result(args, *, result, seal, **context):
     """
 
     try:
-        return build_final_result_envelope(result, seal=seal, fallback_policy=_cli_budget_policy())
+        return build_final_result_envelope(
+            result, seal=seal, work=work, fallback_policy=_cli_budget_policy(),
+        )
     except _POST_AUTHORITY_OUTPUT_FAILURES as failure:
         _emit_output_failure_error(args, result=result, failure=failure, **context)
         raise  # pragma: no cover - 上の関数は sys.exit する
@@ -856,6 +862,9 @@ def run_equivalence_check(args):
             persist_canonical_result_envelope,
         )
 
+        # Issue #110: この envelope の封印（高々 `SEALS_PER_ENVELOPE` 回）と永続化の検証は、この
+        # envelope の有限の作業量 1 つの中でだけ
+        seal_work = envelope_seal_work()
         finalization_context = getattr(
             result, "_canonical_finalization_context", None
         )
@@ -868,7 +877,7 @@ def run_equivalence_check(args):
         # 値 + 診断 → 封印 → 契約の上限で bounded encode。上限を超えるのは出力の
         # 契約違反で、判定は変えずに内部エラーの ERROR として落とす。
         envelope = _final_envelope_or_error_result(
-            args, result=result, seal=seal, **envelope_context,
+            args, result=result, seal=seal, work=seal_work, **envelope_context,
         )
         # 人向けの text は最終 envelope の値（JSON と同じ有界な値）から作り、envelope が契約に
         # 収まると分かった後に書く（契約違反の ERROR の前に、確定した判定の text を出さない）
@@ -890,7 +899,7 @@ def run_equivalence_check(args):
                 "=== EQUIVALENCE_RESULT_JSON_END ===",
             )
         )
-        persist_canonical_result_envelope(result_payload)
+        persist_canonical_result_envelope(result_payload, work=seal_work)
         written = False
         try:
             if not args.quiet:

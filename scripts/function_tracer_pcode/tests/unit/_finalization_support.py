@@ -10,6 +10,8 @@ finalization 状態を再利用したりすると、一致が vacuous になる�
 PR も同じ手順を使うのでここへ出した（挙動は変えていない）。
 """
 
+from scripts.function_tracer_pcode.authority.seal_work import SealWorkBudget
+
 
 def _independent_finalization(tmp_path, monkeypatch, *, case_id, result_payload_preimage):
     """1 本の production-pilot session を新規に起こし、渡した preimage で finalize する。
@@ -88,6 +90,6 @@ def _independent_finalization(tmp_path, monkeypatch, *, case_id, result_payload_
     bundle = build_canonical_result_finalization_bundle(
         result_payload_preimage=result_payload_preimage,
         evidence=evidence,
-        session=session,
+        session=session, work=SealWorkBudget.for_result()
     )
     return bundle, session, evidence
