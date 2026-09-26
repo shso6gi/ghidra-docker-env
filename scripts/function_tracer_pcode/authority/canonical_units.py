@@ -62,9 +62,13 @@ def _scalar_units(value: Any, sink: UnitSink) -> int:
     if kind is str:
         return _string_units(value, sink)
     if kind is int:
-        # 桁数を作る前に数える（`int.__repr__` は桁数に比例する）
-        sink.charge(max(1, value.bit_length() // 3 + 1))
+        # 桁数（と符号）を作る前に数える（`int.__repr__` は桁数に比例する）。書いた長さが数えた量を
+        # 超えた分も足す（返す単位は必ず数えた単位以下）
+        charged = value.bit_length() // 3 + 2
+        sink.charge(charged)
         size = len(int.__repr__(value))
+        if size > charged:
+            sink.charge(size - charged)
         return size
     if kind is float:
         size = len(json.dumps(value))
@@ -99,10 +103,16 @@ def measure_canonical_units(value: Any, sink: UnitSink) -> int:
             total += _scalar_units(item, sink)
             continue
         if isinstance(item, Enum):
+            # 値への 1 hop も数える（hop だけが続く値でも作業量の上限で止まる）
+            sink.charge(1)
+            total += 1
             pending.append(item.value)
             continue
         to_authority_dict = getattr(item, "to_authority_dict", None)
         if to_authority_dict is not None:
+            # authority の表現への 1 hop も呼ぶ前に数える（自分自身を返す値でも上限で止まる）
+            sink.charge(1)
+            total += 1
             pending.append(to_authority_dict())
             continue
         if is_dataclass(item) and not isinstance(item, type):

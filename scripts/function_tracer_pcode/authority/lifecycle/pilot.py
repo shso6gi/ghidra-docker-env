@@ -555,6 +555,8 @@ class ProductionDualWritePilotSession:
         )
 
         self.event_contract = EventContractLedger()
+        #: (intents, admission) admitted by the domain-signal path before Phase 7 buffering
+        self._domain_admission: Any = None
         #: Finish-time emissions run after the pair gate.  A refusal there is
         #: dropped (the stream stays a valid prefix) and the contract limitation
         #: cause is published from the reserve before the decision.
@@ -602,6 +604,7 @@ class ProductionDualWritePilotSession:
         self, intents: Sequence[Any], commit_callback: Any = None, *,
         phase7_execution_intents_prebuffered: bool = False,
         transaction_signal: Any = None,
+        admission: Any = None,
     ) -> tuple[int, ...]:
         if self.closed:
             raise ValueError("production dual-write pilot session is closed")
@@ -628,9 +631,14 @@ class ProductionDualWritePilotSession:
         # Issue #110: admit the whole transaction against the authority event
         # contract before anything is buffered, staged or digested.  A refusal
         # records a pair-terminal limitation and leaves the stream unchanged.
-        admission = self.event_contract.admit(
-            batch, pending_occurrences=self.pending_deferred_occurrences()
-        )
+        if admission is None:
+            stashed = self._domain_admission
+            if stashed is not None and stashed[0] is batch:
+                admission = stashed[1]
+        if admission is None or not self.event_contract.is_current(admission):
+            admission = self.event_contract.admit(
+                batch, pending_occurrences=self.pending_deferred_occurrences()
+            )
         transaction = None
         if (
             self.phase7_runtime is not None
@@ -799,6 +807,12 @@ class ProductionDualWritePilotSession:
         external_committed = False
         try:
             intents = tuple(self.domain_signal_encoder(self, signal))
+            # Issue #110: admit the transaction against the event contract
+            # before the Phase 7 runtime buffers any of it (a refusal rolls
+            # back an empty buffer).
+            admission = self.event_contract.admit(
+                intents, pending_occurrences=self.pending_deferred_occurrences()
+            ) if intents else None
             if self.phase7_runtime is not None:
                 try:
                     site_id = self._phase7_signal_sites[id(signal)]
@@ -839,9 +853,15 @@ class ProductionDualWritePilotSession:
                 ))
             if supports_replay:
                 emit_kwargs["transaction_signal"] = signal
-            recorded_sequences = self.emit_many(
-                intents, commit_all, **emit_kwargs
-            )
+            # The admission above is handed to the publication gate for this
+            # exact intents tuple (one slot; a stale one is admitted again).
+            self._domain_admission = (intents, admission) if admission is not None else None
+            try:
+                recorded_sequences = self.emit_many(
+                    intents, commit_all, **emit_kwargs
+                )
+            finally:
+                self._domain_admission = None
             return len(recorded_sequences)
         except Exception as exc:
             from scripts.function_tracer_pcode.authority.event_contract import (
@@ -1240,9 +1260,14 @@ class ProductionDualWritePilotConnector:
                     ),
                 )
             if emitted != 1:
-                raise ValueError(
-                    "inconclusive comparison C/Q was not materialized"
-                )
+                if session.event_contract.exceeded is None:
+                    raise ValueError(
+                        "inconclusive comparison C/Q was not materialized"
+                    )
+                # Issue #110: the closure was refused by the event contract
+                # after the pair gate; the contract limitation blocks the
+                # decision instead (published from the reserve).
+                session.ensure_event_contract_limitation()
         pre_closure_projection = session.preview_lifecycle_projection()
         terminal_candidate_view = TerminalCandidateView.freeze(
             session, pre_closure_projection

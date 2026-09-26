@@ -30,11 +30,13 @@ from scripts.function_tracer_pcode.authority.event_contract import (
 )
 
 
-class BundleWorkExceeded(Exception):
+class BundleWorkExceeded(ValueError):
     """封印・検証の仕事が作業量を超えた、または入力が authority event の契約の外（部分的な結果は無い）。
 
-    `kind` は `"work"`（作業量の上限）か `"contract"`（stream が契約の外）。呼ぶ側（出力の
-    finalization）はこれを durable な ERROR にする（判定の receipt は残す）。
+    `kind` は `"work"`（作業量の上限）か `"contract"`（入力が契約の外）。`ValueError` の subclass:
+    永続化した bundle を読む側（supervisor の terminal snapshot・reporting）は、検証できない bundle と
+    同じく無効として扱う。封印する側（出力の finalization）は型で受けて、判定の receipt を残した
+    ERROR にする（部分的な bundle を使わない）。
     """
 
     def __init__(self, message: str, *, kind: str, step: str, consumed: int, limit: Optional[int]) -> None:
@@ -151,10 +153,8 @@ RESULT_PREIMAGE_UNITS = 256 << 20
 #: supervisor が作る terminal の preimage（固定の形の 7 field）の上限
 SUPERVISOR_PREIMAGE_UNITS = 64 << 10
 
-#: `bundle` の成分以外に bundle の本体へ入る固定の field（identity・digest・key id ほか）の単位
+#: `bundle` の成分以外に bundle の本体へ入る固定の field（schema・kind・digest・key id）の単位
 _BUNDLE_FIXED_UNITS = 4096
-#: 1 event の header（stream id・digest ほか）の単位
-_EVENT_HEADER_UNITS = 1024
 
 
 @dataclass(frozen=True)
@@ -196,42 +196,37 @@ class SealPlan:
         preimage: Any, execution: Any,
         contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT,
     ) -> "SealPlan":
-        """入力の大きさを `work` へ数えながら測り、stream を契約と比べる（外なら何も作らずに止まる）。
+        """入力の大きさを `work` へ数えながら測り、契約の上限と比べる（外なら何も作らずに止まる）。
 
-        `stream` は sealed event stream（object）か、bundle の中の encode 済みの dict。
+        `stream` は sealed event stream（object）か、bundle の中の encode 済みの dict。event は 1 つ
+        ずつ（header・digest を含む全体を）辿る前に数え、数え終えるまでに契約の上限を超えれば止まる。
         """
 
         _require_work(work)
         events = _stream_events(stream)
         if len(events) > contract.max_events:
-            raise BundleWorkExceeded(
-                f"sealed event stream has {len(events)} events (> {contract.max_events})",
-                kind="contract", step="price", consumed=getattr(work, "consumed", 0),
-                limit=contract.max_events,
-            )
-        stream_units = 0
+            _contract(work, f"sealed event stream has {len(events)} events", contract.max_events)
+        stream_units = _measure(_stream_frame(stream), work)
         for event in events:
-            # 1 event ずつ、辿る前に数える（10^6 event の stream は数え始めた所で止まる）
-            work.charge(_EVENT_HEADER_UNITS)
-            payload = _event_payload(event)
-            measured = _measure(payload, work)
-            if measured > contract.max_event_payload_units:
-                raise BundleWorkExceeded(
-                    "a sealed event payload is outside the authority event contract",
-                    kind="contract", step="price", consumed=getattr(work, "consumed", 0),
-                    limit=contract.max_event_payload_units,
-                )
-            stream_units += _EVENT_HEADER_UNITS + measured
-            if stream_units > contract.max_stream_payload_units + len(events) * _EVENT_HEADER_UNITS:
-                raise BundleWorkExceeded(
-                    "the sealed event stream is outside the authority event contract",
-                    kind="contract", step="price", consumed=getattr(work, "consumed", 0),
-                    limit=contract.max_stream_payload_units,
-                )
+            stream_units += _measure(_event_value(event), work)
+            if stream_units > contract.max_sealed_stream_units:
+                _contract(work, "the sealed event stream is outside the authority event contract",
+                          contract.max_sealed_stream_units)
         projection_units = _measure(projection, work)
-        receipt_units = sum(_measure(item, work) for item in receipts)
-        preimage_units = _measure(preimage, work)
+        if projection_units > contract.max_projection_units:
+            _contract(work, "the lifecycle projection is outside the authority event contract",
+                      contract.max_projection_units)
+        receipt_units = 0
+        for item in receipts:
+            receipt_units += _measure(item, work)
+            if receipt_units > contract.max_receipt_units:
+                _contract(work, "the receipts are outside the authority event contract",
+                          contract.max_receipt_units)
         execution_units = _measure(execution, work)
+        if execution_units > contract.max_execution_payload_units:
+            _contract(work, "the execution payload is outside the authority event contract",
+                      contract.max_execution_payload_units)
+        preimage_units = _measure(preimage, work)
         # replay の前（projection がまだ無い: supervisor の stream）は active な occurrence の上限で見積もる
         active = (
             _active_occurrences(projection) if projection is not None
@@ -280,28 +275,45 @@ class SealPlan:
 def seal_work_limit(
     *, contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT, preimage_units: int,
 ) -> int:
-    """契約の上限の入力を封印し、検証し、永続化する作業量の上限（全段の和 + 測る分）。"""
+    """契約の上限の入力を封印し、検証し、永続化する作業量の上限（測る分 + 全段の和、封印と永続化の 2 回分）。
+
+    成分の上限は全部 `authority/event_contract` の契約（`SealPlan.price` が測りながら強制する）と
+    呼ぶ側の preimage の上限だけから導く: 契約の内側の入力は作業量の不足で失敗しない。
+    """
 
     if type(preimage_units) is not int or preimage_units < 0:
         raise ValueError("a seal work limit needs a non-negative preimage bound")
-    events = contract.max_events
-    stream = contract.max_stream_payload_units + events * _EVENT_HEADER_UNITS
-    # projection / receipt は occurrence と relation の上限から（行 1 つは 1 event の上限以下）
-    rows = contract.max_cause_occurrences + 2 * contract.max_relation_rows
-    projection = rows * 4096
-    receipts = contract.max_cause_occurrences * 4096
     worst = SealComponents(
-        stream=stream, events=events, projection=projection, receipts=receipts,
-        preimage=preimage_units, execution=1 << 20,
-        reduction=events * contract.max_cause_occurrences,
+        stream=contract.max_sealed_stream_units, events=contract.max_events,
+        projection=contract.max_projection_units, receipts=contract.max_receipt_units,
+        preimage=preimage_units, execution=contract.max_execution_payload_units,
+        reduction=contract.max_events * contract.max_cause_occurrences,
     )
-    priced = worst.stream + worst.projection + worst.receipts + worst.preimage + worst.execution + worst.reduction
+    priced = (
+        worst.stream + worst.projection + worst.receipts + worst.preimage + worst.execution
+        + worst.reduction
+    )
     steps = sum(
         sum(weight * worst.get(name) for name, weight in coefficients.items())
         for coefficients in SEAL_COST_MODEL.values()
     )
-    # 封印（価格 + 段）・その中の検証・永続化の検証（価格 + 段）の 2 回分
     return 2 * (priced + steps)
+
+
+def persisted_envelope_byte_limit(
+    *, contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT,
+    preimage_units: int = RESULT_PREIMAGE_UNITS,
+) -> int:
+    """永続化した canonical result envelope の byte 数の上限（preimage + 契約の上限の bundle）。
+
+    canonical unit は UTF-8 の JSON の byte 以上。envelope の file は ASCII の escape（非 ASCII の 1 文字が
+    `\\uXXXX` の 6〜12 byte、UTF-8 の 2〜4 byte の高々 3 倍）で書くので、封印した形の倍率を掛ける。
+    """
+
+    return contract.sealed_form_factor * (
+        preimage_units + contract.max_sealed_stream_units + contract.max_projection_units
+        + contract.max_receipt_units + contract.max_execution_payload_units + _BUNDLE_FIXED_UNITS
+    )
 
 
 def _require_work(work: Any) -> None:
@@ -329,10 +341,30 @@ def _stream_events(stream: Any) -> Sequence[Any]:
     return events
 
 
-def _event_payload(event: Any) -> Any:
-    if isinstance(event, Mapping):
-        return (event.get("authority_payload"), event.get("diagnostic_payload"))
-    return (event.authority_payload, event.diagnostic_payload)
+def _event_value(event: Any) -> Any:
+    """測る event の全体（header・digest・payload）。記録済みの event は object、bundle の中は dict。"""
+
+    if isinstance(event, Mapping) or hasattr(event, "header"):
+        return event
+    return (getattr(event, "authority_payload", None), getattr(event, "diagnostic_payload", None))
+
+
+def _stream_frame(stream: Any) -> Any:
+    """stream の event 以外（envelope・schema の包み）。"""
+
+    if isinstance(stream, Mapping):
+        payload = stream.get("payload")
+        frame = {key: value for key, value in stream.items() if key != "payload"}
+        if isinstance(payload, Mapping):
+            frame["payload"] = {key: value for key, value in payload.items() if key != "events"}
+        return frame
+    return getattr(stream, "envelope", None)
+
+
+def _contract(work: Any, message: str, limit: int) -> None:
+    raise BundleWorkExceeded(
+        message, kind="contract", step="price", consumed=getattr(work, "consumed", 0), limit=limit,
+    )
 
 
 def _active_occurrences(projection: Any) -> int:
@@ -345,6 +377,7 @@ def _active_occurrences(projection: Any) -> int:
 
 
 __all__ = [
+    "persisted_envelope_byte_limit",
     "RESULT_PREIMAGE_UNITS",
     "SUPERVISOR_PREIMAGE_UNITS",
     "BundleWorkExceeded",

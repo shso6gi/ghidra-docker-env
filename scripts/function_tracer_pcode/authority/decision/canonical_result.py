@@ -254,7 +254,7 @@ def build_canonical_result_finalization_bundle(
         receipts=(
             *pilot.decisive_proof_receipts, *pilot.terminal_timeout_receipts,
             *pilot.error_receipts, pilot.candidate.decision_receipt,
-            occurrence, selection,
+            occurrence, selection, tuple(session.terminalizations),
         ),
         preimage=result_payload_preimage,
         execution=session.execution_payload,
@@ -617,6 +617,7 @@ def validate_canonical_result_finalization_bundle(
 ) -> Mapping[str, Any]:
     """Replay-verify a persisted bundle within the finite seal ``work`` (Issue #110)."""
 
+    _require_bundle_fields(bundle)
     plan = _price_bundle(work, bundle, result_payload_preimage)
     return _validate_bundle_with_plan(
         bundle, plan,
@@ -626,37 +627,55 @@ def validate_canonical_result_finalization_bundle(
     )
 
 
+_BUNDLE_FIELDS = frozenset({
+    "schema", "authority_kind", "execution_identity",
+    "execution_payload",
+    "execution_payload_digest",
+    "result_entry_occurrence_receipt", "sealed_event_stream",
+    "terminalizations", "final_lifecycle_projection",
+    "decisive_proof_receipts", "terminal_timeout_receipts",
+    "terminal_timeout_candidate_selection_receipt",
+    "error_receipts", "decision_receipt",
+    "canonical_result_payload_preimage_digest",
+    "canonical_semantic_result_projection", "bundle_seal_key_id",
+    "bundle_digest", "bundle_signature",
+})
+
+
+def _require_bundle_fields(bundle: Any) -> None:
+    """O(1) の形の確認（数える前に: 形の違う bundle は main と同じ ``ValueError``）。"""
+
+    if type(bundle) is not dict or set(bundle) != _BUNDLE_FIELDS:
+        raise ValueError("canonical result bundle fields differ")
+    if not isinstance(bundle["sealed_event_stream"], Mapping):
+        raise ValueError("canonical result bundle fields differ")
+
+
 def _price_bundle(
     work: Any, bundle: Mapping[str, Any], preimage: Mapping[str, Any] | None,
 ) -> SealPlan:
-    """Measure the encoded bundle (dict) before any decode, digest or replay."""
+    """Measure the whole encoded bundle (dict) before any decode, digest or replay.
 
-    if type(bundle) is not dict:
-        raise ValueError("canonical result bundle fields differ")
-    receipts = []
-    for key in (
-        "decisive_proof_receipts", "terminal_timeout_receipts", "error_receipts",
-    ):
-        value = bundle.get(key)
-        if isinstance(value, (list, tuple)):
-            receipts.extend(value)
-    for key in (
-        "decision_receipt", "result_entry_occurrence_receipt",
-        "terminal_timeout_candidate_selection_receipt",
-        "canonical_semantic_result_projection", "execution_identity",
-        "terminalizations",
-    ):
-        receipts.append(bundle.get(key))
-    stream = bundle.get("sealed_event_stream")
-    if not isinstance(stream, Mapping):
-        raise ValueError("canonical result bundle fields differ")
+    The stream (event by event) and the projection are measured on their own;
+    every other field (receipts, identity, digests, terminalizations) is
+    measured as one rest-of-bundle component.
+    """
+
+    _require_bundle_fields(bundle)
+    rest = {
+        key: value for key, value in bundle.items()
+        if key not in {
+            "sealed_event_stream", "final_lifecycle_projection", "execution_payload",
+        }
+    }
+    stream = bundle["sealed_event_stream"]
     return SealPlan.price(
         work,
         stream=stream,
-        projection=bundle.get("final_lifecycle_projection"),
-        receipts=tuple(receipts),
+        projection=bundle["final_lifecycle_projection"],
+        receipts=(rest,),
         preimage=preimage,
-        execution=bundle.get("execution_payload"),
+        execution=bundle["execution_payload"],
     )
 
 
@@ -671,21 +690,7 @@ def _validate_bundle_with_plan(
         EventType,
     )
 
-    expected_keys = {
-        "schema", "authority_kind", "execution_identity",
-        "execution_payload",
-        "execution_payload_digest",
-        "result_entry_occurrence_receipt", "sealed_event_stream",
-        "terminalizations", "final_lifecycle_projection",
-        "decisive_proof_receipts", "terminal_timeout_receipts",
-        "terminal_timeout_candidate_selection_receipt",
-        "error_receipts", "decision_receipt",
-        "canonical_result_payload_preimage_digest",
-        "canonical_semantic_result_projection", "bundle_seal_key_id",
-        "bundle_digest", "bundle_signature",
-    }
-    if type(bundle) is not dict or set(bundle) != expected_keys:
-        raise ValueError("canonical result bundle fields differ")
+    _require_bundle_fields(bundle)
     body = {
         key: value for key, value in bundle.items()
         if key not in {"bundle_digest", "bundle_signature"}
@@ -767,12 +772,11 @@ def _validate_bundle_with_plan(
     selection_payload = bundle[
         "terminal_timeout_candidate_selection_receipt"
     ]
+    # Issue #110: one pass (was events x terminalizations comparisons).
+    terminal_sequences = {item.event_sequence_number for item in terminalizations}
     selected_timeout_events = tuple(
         event for event in stream.events
-        if any(
-            event.header.sequence_number == item.event_sequence_number
-            for item in terminalizations
-        )
+        if event.header.sequence_number in terminal_sequences
     )
     solver_timeout_is_terminal = any(
         event.header.event_type is EventType.SOLVER_TIMEOUT

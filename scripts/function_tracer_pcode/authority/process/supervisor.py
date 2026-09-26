@@ -228,6 +228,12 @@ class SupervisorTerminalSegment:
         self, prefix: EventStreamPrefixView,
         timeout_receipt: SignedProcessAuthorityReceipt,
     ) -> None:
+        # Issue #110: 検証の仕事は event 数に比例する: 契約の外の stream は検証を始めない
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            require_events_within_contract,
+        )
+
+        require_events_within_contract(len(self.composite_stream.events))
         prefix.validate()
         self.composite_stream.validate()
         events = self.composite_stream.events
@@ -1439,6 +1445,12 @@ class ProcessSupervisorAuthorityFactory:
             }
         }
         segment = bundle.terminal_segment
+        # Issue #110: 契約の外の stream は検証を始めない（O(1)）
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            require_events_within_contract,
+        )
+
+        require_events_within_contract(len(segment.composite_stream.events))
         segment.composite_stream.validate()
         events = segment.composite_stream.events
         if len(events) < 2:
@@ -1663,6 +1675,12 @@ class ProcessSupervisorAuthorityFactory:
     ) -> None:
         self.validate(launch)
         self.validate(error)
+        # Issue #110: 契約の外の stream は検証を始めない（O(1)）
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            require_events_within_contract,
+        )
+
+        require_events_within_contract(len(segment.composite_stream.events))
         segment.composite_stream.validate()
         events = segment.composite_stream.events
         expected_prefix_kind = error.payload["worker_prefix_kind"]

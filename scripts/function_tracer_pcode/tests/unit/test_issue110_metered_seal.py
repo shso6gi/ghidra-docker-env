@@ -469,13 +469,31 @@ def test_a_step_over_the_budget_never_runs(monkeypatch, failing_step):
         calls["encoded"] += 1
         return real_encoded(codec, value)
 
+    from scripts.function_tracer_pcode.authority.codecs import StrictV2JsonCodec
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+
+    real_loads = StrictV2JsonCodec.loads
+    real_replay = ShadowLifecycleReducer.replay
+
+    def _counting_loads(self, raw):
+        calls["loads"] += 1
+        return real_loads(self, raw)
+
+    def _counting_replay(self, stream):
+        calls["replay"] += 1
+        return real_replay(self, stream)
+
     monkeypatch.setattr(canonical_result, "_encoded", _counting_encoded)
+    monkeypatch.setattr(StrictV2JsonCodec, "loads", _counting_loads)
+    monkeypatch.setattr(ShadowLifecycleReducer, "replay", _counting_replay)
     work = SealWorkBudget(before_step)
     with pytest.raises(BundleWorkExceeded) as stopped:
         _build(evidence, session, preimage, work)
     assert stopped.value.step == failing_step
-    if failing_step == "encode_stream":
-        assert calls["encoded"] == 0
+    started = {"encode_stream": calls["encoded"], "decode_stream": calls["loads"],
+               "verify_replay": calls["replay"]}
+    if failing_step in started:
+        assert started[failing_step] == 0, calls
 
 
 def test_a_million_event_stream_stops_before_any_work(monkeypatch):
@@ -483,8 +501,13 @@ def test_a_million_event_stream_stops_before_any_work(monkeypatch):
 
     from scripts.function_tracer_pcode.authority.decision import canonical_result
 
-    event = {"authority_payload": {"x": 1}, "diagnostic_payload": None, "header": {}}
-    bundle = {"sealed_event_stream": {"payload": {"events": [event] * 1_000_000}}}
+    evidence, session, preimage = _sealed_inputs(monkeypatch, case_id="issue110-million")
+    bundle = dict(_build(evidence, session, preimage, SealWorkBudget.for_result()))
+    stream = dict(bundle["sealed_event_stream"])
+    payload = dict(stream["payload"])
+    payload["events"] = [payload["events"][0]] * 1_000_000
+    stream["payload"] = payload
+    bundle["sealed_event_stream"] = stream
     work = SealWorkBudget.for_result()
     started = time.perf_counter()
     with pytest.raises(BundleWorkExceeded) as stopped:
@@ -512,12 +535,25 @@ def test_a_stream_within_the_count_but_over_the_work_stops_while_measuring():
     assert work.consumed <= 50_000 + 20_000
 
 
-def test_a_huge_event_payload_is_outside_the_contract():
-    events = (SimpleNamespace(authority_payload="z" * (AUTHORITY_EVENT_CONTRACT.max_event_payload_units + 10),
-                              diagnostic_payload=None),)
+def test_a_huge_event_payload_stops_while_it_is_measured():
+    """1 event が大きすぎても、測っている途中で作業量の上限に達して止まる（全体を作らない）。"""
+
+    events = (SimpleNamespace(authority_payload="z" * 50_000_000, diagnostic_payload=None),)
+    work = SealWorkBudget(1_000_000)
+    started = time.perf_counter()
+    with pytest.raises(BundleWorkExceeded) as stopped:
+        SealPlan.price(work, stream=SimpleNamespace(events=events),
+                       projection=None, receipts=(), preimage=None, execution=None)
+    assert stopped.value.kind == "work" and stopped.value.step == "price"
+    assert time.perf_counter() - started < 0.5
+
+
+def test_a_sealed_stream_over_the_contract_is_refused_while_it_is_measured():
+    contract = AuthorityEventContract(max_stream_payload_units=1 << 10, max_events=8)
+    events = tuple(SimpleNamespace(authority_payload="z" * 8_000, diagnostic_payload=None) for _ in range(8))
     with pytest.raises(BundleWorkExceeded) as stopped:
         SealPlan.price(SealWorkBudget.for_result(), stream=SimpleNamespace(events=events),
-                       projection=None, receipts=(), preimage=None, execution=None)
+                       projection=None, receipts=(), preimage=None, execution=None, contract=contract)
     assert stopped.value.kind == "contract"
 
 
@@ -625,14 +661,21 @@ def test_no_production_call_seals_without_work():
 def test_the_contract_numbers_have_one_owner():
     """event の契約の数値は `authority/event_contract` だけに書く（他の module に同じ上限を書かない）。"""
 
+    import re
+
+    fields = (
+        "max_cause_occurrences", "max_relation_rows", "max_events", "max_event_payload_units",
+        "max_stream_payload_units", "max_projection_units", "max_receipt_units",
+        "max_execution_payload_units", "sealed_form_factor", "sealed_event_frame_units",
+    )
+    definition = re.compile(r"\b(" + "|".join(fields) + r")\s*(:\s*int\s*)?=\s*\d")
     offenders = []
-    for path in (PACKAGE_ROOT / "authority").rglob("*.py"):
-        if path.name in {"event_contract.py", "seal_work.py", "canonical_units.py"}:
+    for path in PACKAGE_ROOT.rglob("*.py"):
+        if "tests" in path.relative_to(PACKAGE_ROOT).parts or path.name == "event_contract.py":
             continue
-        text = path.read_text(encoding="utf-8")
-        if "max_cause_occurrences" in text or "max_relation_rows" in text:
-            if "AUTHORITY_EVENT_CONTRACT" not in text:
-                offenders.append(str(path.relative_to(PACKAGE_ROOT)))
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if definition.search(line):
+                offenders.append(f"{path.relative_to(PACKAGE_ROOT)}:{line_number}")
     assert offenders == []
 
 
@@ -674,14 +717,21 @@ def test_each_seal_function_charges_its_steps_in_order():
 
 
 def test_pricing_charges_each_event_before_measuring_it():
-    events = tuple(SimpleNamespace(authority_payload=None, diagnostic_payload=None) for _ in range(1_000))
-    # header（1 event 1,024 単位）を辿る前に数える: 50 event 分の作業量なら 50 event 目あたりで止まる
-    work = SealWorkBudget(50 * 1024)
+    # 封印した形の event（header・digest・payload の dict）を 1 つずつ、辿る前に数える: 約 50 event 分の
+    # 作業量なら 50 event 目あたりで止まる（残りの event にも reducer の見積もりにも進まない）
+    event = {
+        "header": {"stream_id": "s" * 40, "sequence_number": 1, "event_type": "CAUSE_OBSERVED",
+                   "predecessor_authority_digest": "0" * 64, "authority_payload_digest": "1" * 64},
+        "authority_digest": "2" * 64, "authority_payload": {"x": "y" * 400}, "diagnostic_payload": None,
+    }
+    one = canonical_units_within(event, 10**6)
+    stream = {"payload": {"events": [event] * 1_000}}
+    work = SealWorkBudget(50 * one)
     with pytest.raises(BundleWorkExceeded) as stopped:
-        SealPlan.price(work, stream=SimpleNamespace(events=events), projection=None,
+        SealPlan.price(work, stream=stream, projection=None,
                        receipts=(), preimage=None, execution=None)
     assert stopped.value.step == "price"
-    assert work.consumed <= 52 * 1024
+    assert work.consumed <= 52 * one
 
 
 @dataclass(frozen=True)
@@ -734,7 +784,6 @@ def test_a_refused_oversized_event_keeps_later_events_out(monkeypatch):
     monkeypatch.setenv(NONCE_ENV, "issue110-sticky-occurrence")
     connector = _connector()
     session = connector.begin({"case": "issue110-sticky"})
-    probe = SealWorkBudget.for_result()
     small = canonical_units_within(_sat_blocker(0), 10**9)
     session.event_contract = EventContractLedger(AuthorityEventContract(max_event_payload_units=small * 40))
     big = SatSafetyBlockerProductionSignal(
@@ -750,7 +799,7 @@ def test_a_refused_oversized_event_keeps_later_events_out(monkeypatch):
             later = emit_sat_safety_signal(_sat_blocker(2), producer_site_manifest_id="sat-safety-blocker-observed")
     assert (first, refused, later) == (1, 0, 0)
     assert session.recorder.event_count == 1
-    assert probe.consumed == 0
+    assert session.event_contract.exceeded.bound == "event_payload_units"
 
 
 def test_a_refused_finish_time_eq_closure_publishes_the_limitation(monkeypatch):
@@ -805,3 +854,225 @@ def test_a_refused_finish_time_eq_closure_publishes_the_limitation(monkeypatch):
     assert session.event_contract.limitation_recorded
     assert pilot.candidate.decision_receipt.outcome is Outcome.UNKNOWN
     assert ANALYSIS_BUDGET_REASON_ID in {row.reason_id for row in pilot.reduction.projection.c_active_base}
+
+
+
+# ---------------------------------------------------------------------------
+# 横断監査（fresh reviewer）で見つけた穴を塞ぐ test
+# ---------------------------------------------------------------------------
+
+
+def test_a_seal_failure_is_a_value_error_and_the_field_check_comes_first():
+    """`BundleWorkExceeded` は `ValueError`（永続化した bundle の読み手は無効として扱う）。形の違う bundle は
+    数える前に main と同じ `ValueError("fields differ")`。"""
+
+    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
+        validate_canonical_result_finalization_bundle,
+    )
+
+    assert issubclass(BundleWorkExceeded, ValueError)
+    work = SealWorkBudget.for_result()
+    malformed = {"sealed_event_stream": {"payload": {"events": [{}] * 5_000}}}
+    with pytest.raises(ValueError, match="fields differ") as stopped:
+        validate_canonical_result_finalization_bundle(malformed, work=work)
+    assert type(stopped.value) is ValueError
+    assert work.consumed == 0
+
+
+class _SelfAuthority:
+    def to_authority_dict(self):
+        return self
+
+
+def test_the_meter_stops_on_values_that_only_hop():
+    """自分を返す `to_authority_dict`・Mock のように hop だけが続く値も、上限の中で止まる（無限に回らない）。"""
+
+    from unittest.mock import MagicMock
+
+    # Mock は呼ぶたびに自分の呼び出しの記録が伸びる（Mock 自身の仕事）ので小さい上限で確かめる
+    for value, limit in ((_SelfAuthority(), 100_000), (MagicMock(), 200)):
+        started = time.perf_counter()
+        assert canonical_units_within(value, limit) is None
+        assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize("seed", range(30))
+def test_the_meter_never_reports_more_than_its_limit(seed):
+    rng = random.Random(5000 + seed)
+    values = [(-rng.randrange(1, 10**6),) * rng.randrange(1, 400), _random_value(rng), -15, (-1,) * 1000]
+    for value in values:
+        sink = LimitedUnits(10**9)
+        exact = measure_canonical_units(value, sink)
+        needed = sink.consumed
+        for limit in (0, 1, exact // 2, max(0, exact - 1), exact, needed - 1, needed):
+            measured = canonical_units_within(value, max(0, limit))
+            assert measured is None or measured <= max(0, limit)
+        # 数えた量（報告する単位以上）ちょうどの上限なら測り終える
+        assert canonical_units_within(value, needed) == exact
+
+
+def test_an_earlier_limitation_is_still_attributed_after_the_contract_overflows(monkeypatch):
+    """契約を超える前に別の限界（gate の winner）が台帳にあっても、その限界の cause は予約した枠で publish
+    でき、pair は登録済みの理由の UNKNOWN（`limitation_unattributed` の ERROR にならない）。"""
+
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        ANALYSIS_BUDGET_REASON_ID,
+        observe_analysis_limitation,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        production_signal_scope,
+    )
+
+    contract = AuthorityEventContract(max_cause_occurrences=16)
+    connector, session, _emitted, _pending = _finished_session(
+        monkeypatch, blockers=40, case_id="issue110-earlier", contract=contract,
+    )
+    assert session.event_contract.exceeded is not None
+    before = session.event_contract.limitation_occurrences
+    with production_signal_scope(session):
+        observe_analysis_limitation(
+            reason_id=ANALYSIS_BUDGET_REASON_ID, limitation_site="checker.checker.EquivalenceChecker.check",
+            target_key=("left", "right"), evidence_refs=("issue110-earlier",),
+        )
+    assert session.event_contract.limitation_occurrences == before + 1
+    evidence = connector.finish(session, _legacy_result(), case_id="issue110-earlier")
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+
+
+def test_a_stale_admission_is_counted_again_before_publication():
+    ledger = EventContractLedger()
+    first = ledger.admit(())
+    ledger.commit(first)
+    stale = ledger.admit(())
+    ledger.events += 1
+    assert ledger.is_current(stale) is False
+    with pytest.raises(ValueError):
+        ledger.commit(stale)
+
+
+def test_recorded_streams_and_envelopes_outside_the_contract_are_refused_before_reading():
+    from scripts.function_tracer_pcode.authority.event_contract import require_events_within_contract
+    from scripts.function_tracer_pcode.authority.process.canonical_envelope import validate_canonical_envelope
+    from scripts.function_tracer_pcode.authority.seal_work import persisted_envelope_byte_limit
+
+    require_events_within_contract(AUTHORITY_EVENT_CONTRACT.max_events)
+    with pytest.raises(ValueError):
+        require_events_within_contract(AUTHORITY_EVENT_CONTRACT.max_events + 1)
+
+    class _Huge(bytes):
+        def __len__(self):
+            return persisted_envelope_byte_limit() + 1
+
+        def decode(self, *args, **kwargs):  # pragma: no cover - must not be read
+            raise AssertionError("an oversized envelope was read")
+
+    with pytest.raises(ValueError, match="outside the authority event contract"):
+        validate_canonical_envelope(_Huge(b"{}"), launch=None, validate_bundle=None)
+
+
+def test_the_contract_holds_with_the_phase7_runtime(monkeypatch):
+    """production と同じ Phase 7 runtime を持つ session でも、契約の超過は buffer を残さずに止まる。"""
+
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        AnalysisLimitationBlockerSignal,
+        AnalysisLimitationPilotEncoder,
+    )
+    from scripts.function_tracer_pcode.authority.domains.sat_safety import SatSafetyPilotEncoder
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        CompositeProductionSignalEncoder,
+        SatSafetyBlockerProductionSignal,
+        emit_sat_safety_signal,
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.process.supervisor import (
+        PROCESS_DURABLE_REASON_REGISTRY,
+        PROCESS_DURABLE_RECOVERY_REGISTRY,
+    )
+    from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+
+    manifest = json.loads((PACKAGE_ROOT.parents[1] / (
+        "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
+    )).read_text(encoding="utf-8"))
+    monkeypatch.setenv(NONCE_ENV, "issue110-phase7-occurrence")
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=PROCESS_DURABLE_REASON_REGISTRY,
+            recovery_registry=PROCESS_DURABLE_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            AnalysisLimitationBlockerSignal: AnalysisLimitationPilotEncoder(),
+            SatSafetyBlockerProductionSignal: SatSafetyPilotEncoder(),
+        }),
+        phase7_runtime_factory=lambda identity: runtime_from_audited_manifest(manifest, identity),
+    )
+    session = connector.begin({"case": "issue110-phase7"})
+    session.event_contract = EventContractLedger(AuthorityEventContract(max_cause_occurrences=16))
+    buffered = []
+    real_buffer = session.phase7_runtime.buffer_signal_intents
+
+    def _counting_buffer(site_id, signal, intents):
+        buffered.append(signal)
+        return real_buffer(site_id, signal, intents)
+
+    monkeypatch.setattr(session.phase7_runtime, "buffer_signal_intents", _counting_buffer)
+    with pair_failure_scope(("issue110", "phase7"), session.identity.result_occurrence_id):
+        with production_signal_scope(session):
+            emitted = [
+                emit_sat_safety_signal(_sat_blocker(index), producer_site_manifest_id="sat-safety-blocker-observed")
+                for index in range(30)
+            ]
+    assert sum(emitted) == 12 and session.domain_signal_error_kinds == []
+    assert session.recorder.event_count == 12
+    # 拒んだ signal は Phase 7 の buffer に 1 度も入らない（admission は buffer より前）
+    assert len(buffered) == 12
+
+
+def test_the_stream_frame_and_the_rest_of_the_bundle_are_priced(monkeypatch):
+    """event 以外（stream の envelope・bundle の残りの field）も、digest・decode の前に測る。"""
+
+    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
+        validate_canonical_result_finalization_bundle,
+    )
+
+    stream = {"object_type": "SealedEventStream", "payload": {"envelope": {"note": "e" * 400_000}, "events": []}}
+    with pytest.raises(BundleWorkExceeded) as stopped:
+        SealPlan.price(SealWorkBudget(100_000), stream=stream, projection=None,
+                       receipts=(), preimage=None, execution=None)
+    assert stopped.value.step == "price"
+    evidence, session, preimage = _sealed_inputs(monkeypatch, case_id="issue110-rest")
+    bundle = dict(_build(evidence, session, preimage, SealWorkBudget.for_result()))
+    measured = SealWorkBudget.for_result()
+    validate_canonical_result_finalization_bundle(dict(bundle), work=measured, result_payload_preimage=preimage)
+    bundle["execution_payload_digest"] = "d" * 5_000_000
+    with pytest.raises(BundleWorkExceeded) as stopped:
+        validate_canonical_result_finalization_bundle(
+            bundle, work=SealWorkBudget(measured.consumed), result_payload_preimage=preimage,
+        )
+    assert stopped.value.step == "price"
+
+
+def test_supervisor_segments_check_the_event_count_before_validating():
+    tree = ast.parse((PACKAGE_ROOT / "authority/process/supervisor.py").read_text(encoding="utf-8"))
+    guarded = 0
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef,)):
+            calls = [
+                inner for inner in ast.walk(node)
+                if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Attribute)
+                and inner.func.attr == "validate"
+                and isinstance(inner.func.value, ast.Attribute) and inner.func.value.attr == "composite_stream"
+            ]
+            if not calls:
+                continue
+            checks = [
+                inner for inner in ast.walk(node)
+                if isinstance(inner, ast.Call) and getattr(inner.func, "id", None) == "require_events_within_contract"
+            ]
+            assert checks and min(c.lineno for c in checks) < min(c.lineno for c in calls), node.name
+            guarded += 1
+    assert guarded == 3

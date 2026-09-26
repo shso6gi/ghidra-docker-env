@@ -3,7 +3,9 @@
 pair ごとの sealed event stream に入る event の数・1 event の大きさ・stream 全体の大きさと、authority が
 作る cause occurrence の数（= canonical reason の行数）・relation の行数（`c_active_base` /
 `q_open_base`）の上限をここで決め、**event を作る時点**（session の publication gate、digest の前）で
-強制する。上限は出力（`checker/output_schema` など）が読む値でもあり、ここ以外に数値を書かない。
+強制する。authority の外（出力の schema など）がこれらの上限を使うときもここを正本として読み、
+ここ以外に数値を書かない。封印（`authority/seal_work`）が作業量の上限を導く派生の上限（封印した形の
+大きさ・projection / receipt / execution payload の上限）もここが持つ。
 
 超えるときは、authority の判定の **前** に pair の限界（登録済みの理由 `analysis_budget_exceeded`、
 限界の場所 `authority.event_contract`）にする: 限界を pair の台帳へ記録してから（pair terminal）、
@@ -47,20 +49,42 @@ class AuthorityEventContract:
     max_event_payload_units: int = 1 << 20
     #: 1 stream の payload の canonical unit の合計
     max_stream_payload_units: int = 16 << 20
-    #: 契約の超過を記録する限界の cause（`analysis_limitation` domain）のための予約
+    #: 限界の cause（`analysis_limitation` domain）のための予約
     limitation_reserve_occurrences: int = 4
+    #: 封印した形（codec が encode した event・replay した値）の単位は、payload の canonical unit の
+    #: 高々この倍 + 1 event の枠（型の名前と payload の包み・dict の key の分）。固定 subset（main
+    #: `9f79560`、4,626 event）の実測は 1.8 倍以下（2,000 単位を超える payload）・枠 1,966 単位以下
+    sealed_form_factor: int = 4
+    #: 封印した形の 1 event の枠（header・event digest・包み）の単位
+    sealed_event_frame_units: int = 4096
+    #: lifecycle projection（`c_active_base` / `q_open_base` / eligibility / satisfaction の行）の単位
+    max_projection_units: int = 64 << 20
+    #: receipt（decisive / timeout / error / decision / occurrence / selection）と bundle の固定の field の単位
+    max_receipt_units: int = 4 << 20
+    #: execution payload（pair の実行の identity）の単位
+    max_execution_payload_units: int = 1 << 20
 
     def __post_init__(self) -> None:
         for name in (
             "max_cause_occurrences", "max_relation_rows", "max_events",
             "max_event_payload_units", "max_stream_payload_units",
-            "limitation_reserve_occurrences",
+            "limitation_reserve_occurrences", "sealed_form_factor", "sealed_event_frame_units",
+            "max_projection_units", "max_receipt_units", "max_execution_payload_units",
         ):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
                 raise ValueError(f"authority event contract {name} is not a positive int")
         if self.limitation_reserve_occurrences >= self.max_cause_occurrences:
             raise ValueError("the limitation reserve must leave room for ordinary causes")
+
+    @property
+    def max_sealed_stream_units(self) -> int:
+        """封印した形の stream の単位の上限（契約の内側の stream はこれを超えない）。"""
+
+        return (
+            self.sealed_form_factor * self.max_stream_payload_units
+            + self.max_events * self.sealed_event_frame_units
+        )
 
     @property
     def ordinary_cause_occurrences(self) -> int:
@@ -115,6 +139,8 @@ class AuthorityEventContractExceeded(AnalysisLimitation):
 
 @dataclass(frozen=True)
 class _Admission:
+    #: 数えた時の勘定（publish の時点で勘定が進んでいれば、この admission は古い: 数え直す）
+    base: tuple
     events: int
     ordinary_occurrences: int
     limitation_occurrences: int
@@ -155,16 +181,26 @@ class EventContractLedger:
     def admit(self, intents: Sequence[Any], *, pending_occurrences: int = 0) -> _Admission:
         """transaction を publish してよいか確かめ、よければ publish 後の勘定を返す（まだ数えない）。
 
-        超えるなら限界を pair の台帳へ記録して `AuthorityEventContractExceeded` を上げる。
-        `pending_occurrences` は判定の前に必ず publish される予定の occurrence（遅延した
-        SAT-safety の観測など）で、今の transaction の後にも枠が残るかを確かめる。
+        超えるなら限界を pair の台帳へ記録して `AuthorityEventContractExceeded` を上げる。件数は測る前に
+        （O(1) で）比べ、payload は 1 event ずつ、残りの枠（1 event の上限と stream の残りの小さい方）
+        まで測る: 超える transaction を全部測ってから拒まない。`pending_occurrences` は判定の前に必ず
+        publish される予定の occurrence（遅延した SAT-safety の観測など）。
         """
 
         contract = self.contract
         limitation_only = bool(intents) and all(_is_limitation_cause(intent) for intent in intents)
         if self.exceeded is not None and not limitation_only:
             raise self.exceeded
+        if limitation_only:
+            # 予約した枠（限界の cause）: 上限そのものまで
+            event_limit, cause_limit = contract.max_events, contract.max_cause_occurrences
+            relation_limit, unit_limit = contract.max_relation_rows, contract.max_stream_payload_units
+        else:
+            event_limit, cause_limit = contract.ordinary_events, contract.ordinary_cause_occurrences
+            relation_limit, unit_limit = contract.ordinary_relation_rows, contract.ordinary_stream_payload_units
         events = self.events + len(intents)
+        if events > event_limit:
+            self._exceed("events", event_limit, events)
         ordinary = self.ordinary_occurrences
         limitation = self.limitation_occurrences
         relations = self.relation_rows
@@ -177,36 +213,42 @@ class EventContractLedger:
                 else:
                     ordinary += 1
                 relations += len(occurrence.proof_requirement_ids)
-            measured = _payload_units(intent, contract.max_event_payload_units)
+                causes = ordinary + limitation if limitation_only else ordinary + pending_occurrences
+                if causes > cause_limit:
+                    self._exceed("cause_occurrences", cause_limit, causes)
+                if relations > relation_limit:
+                    self._exceed("relation_rows", relation_limit, relations)
+            remaining = unit_limit - units
+            per_event = min(contract.max_event_payload_units, remaining)
+            measured = _payload_units(intent, per_event) if per_event >= 0 else None
             if measured is None:
+                if per_event < contract.max_event_payload_units:
+                    self._exceed("stream_payload_units", unit_limit, unit_limit + 1)
                 self._exceed("event_payload_units", contract.max_event_payload_units,
                              contract.max_event_payload_units + 1)
             units += measured
-        if limitation_only:
-            # 予約した枠（限界の cause 自身）: 上限そのものまで
-            checks = (
-                ("cause_occurrences", ordinary + limitation, contract.max_cause_occurrences),
-                ("relation_rows", relations, contract.max_relation_rows),
-                ("events", events, contract.max_events),
-                ("stream_payload_units", units, contract.max_stream_payload_units),
-            )
-        else:
-            checks = (
-                ("cause_occurrences", ordinary + pending_occurrences, contract.ordinary_cause_occurrences),
-                ("relation_rows", relations, contract.ordinary_relation_rows),
-                ("events", events, contract.ordinary_events),
-                ("stream_payload_units", units, contract.ordinary_stream_payload_units),
-            )
-        for bound, observed, limit in checks:
-            if observed > limit:
-                self._exceed(bound, limit, observed)
-        return _Admission(events, ordinary, limitation, relations, units)
+        if not limitation_only and ordinary + pending_occurrences > cause_limit:
+            self._exceed("cause_occurrences", cause_limit, ordinary + pending_occurrences)
+        return _Admission(self._state(), events, ordinary, limitation, relations, units)
+
+    def _state(self) -> tuple:
+        return (
+            self.events, self.ordinary_occurrences, self.limitation_occurrences,
+            self.relation_rows, self.payload_units,
+        )
+
+    def is_current(self, admission: Any) -> bool:
+        """`admission` が今の勘定の上で数えたものか（古ければ publish の前に数え直す）。"""
+
+        return type(admission) is _Admission and admission.base == self._state()
 
     def commit(self, admission: _Admission) -> None:
         """`admit` が返した勘定を publish の後に 1 回だけ反映する。"""
 
         if type(admission) is not _Admission:
             raise TypeError("event contract commit needs an admission")
+        if admission.base != self._state():
+            raise ValueError("event contract admission is stale")
         self.events = admission.events
         self.ordinary_occurrences = admission.ordinary_occurrences
         self.limitation_occurrences = admission.limitation_occurrences
@@ -231,6 +273,20 @@ class EventContractLedger:
         raise exceeded
 
 
+def require_events_within_contract(
+    count: int, *, contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT,
+) -> None:
+    """記録済みの stream（durable な prefix・composite stream）の event 数が契約の中か（O(1)。外なら `ValueError`）。
+
+    検証（hash chain・replay）の仕事は event 数に比例する: 契約の外の stream は検証を始めずに無効にする。
+    """
+
+    if type(count) is not int or count > contract.max_events:
+        raise ValueError(
+            f"recorded event stream has {count} events, outside the authority event contract"
+        )
+
+
 def _occurrence_of(intent: Any) -> Any:
     from scripts.function_tracer_pcode.authority.lifecycle.stream import (
         CauseObservedEventAuthority,
@@ -246,21 +302,18 @@ def _occurrence_of(intent: Any) -> Any:
 
 
 def _is_limitation_cause(intent: Any) -> bool:
-    """契約の超過そのものを記録する限界の cause（予約した枠を使える唯一の event）か。
+    """予約した枠を使える event か: `analysis_limitation` domain の cause（pair の限界の cause）。
 
-    `analysis_limitation` domain の cause で、限界の場所が `EVENT_CONTRACT_LIMITATION_SITE`
-    （occurrence の最初の evidence ref）のものだけ。他の限界の cause は ordinary に数える。
+    契約の超過そのものの限界だけでなく、それより前に台帳へ記録された別の限界（gate が帰属させる
+    winner）の cause も予約した枠で publish できる（超過の後でも限界が帰属でき、ERROR にならない）。
+    限界の cause は限界ごとに 1 つ（encoder が target ごとに重複を除く）なので、予約は小さい。
     """
     from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
         ANALYSIS_LIMITATION_TARGET_KIND,
     )
 
     occurrence = _occurrence_of(intent)
-    return (
-        occurrence is not None
-        and occurrence.target_kind == ANALYSIS_LIMITATION_TARGET_KIND
-        and occurrence.evidence_refs[:1] == (EVENT_CONTRACT_LIMITATION_SITE,)
-    )
+    return occurrence is not None and occurrence.target_kind == ANALYSIS_LIMITATION_TARGET_KIND
 
 
 def _payload_units(intent: Any, limit: int) -> Optional[int]:
@@ -269,13 +322,14 @@ def _payload_units(intent: Any, limit: int) -> Optional[int]:
     authority = canonical_units_within(intent.authority_payload, limit)
     if authority is None:
         return None
-    diagnostic = canonical_units_within(intent.diagnostic_payload, limit - authority)
+    diagnostic = canonical_units_within(intent.diagnostic_payload, max(0, limit - authority))
     if diagnostic is None:
         return None
     return authority + diagnostic
 
 
 __all__ = [
+    "require_events_within_contract",
     "AUTHORITY_EVENT_CONTRACT",
     "AuthorityEventContract",
     "AuthorityEventContractExceeded",

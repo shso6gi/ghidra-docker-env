@@ -78,8 +78,15 @@ class CanonicalEnvelope:
 def validate_canonical_envelope(
     raw: bytes, *, launch: Any, validate_bundle: BundleValidator,
 ) -> CanonicalEnvelope:
-    """envelope file の bytes を検証する（rc は見ない。E との join は呼び出し側）。"""
+    """envelope file の bytes を検証する（rc は見ない。E との join は呼び出し側）。
 
+    Issue #110: 読む（`json.loads`・digest）前に大きさを契約の上限と比べる（上限の外は無効）。
+    """
+
+    from scripts.function_tracer_pcode.authority.seal_work import persisted_envelope_byte_limit
+
+    if len(raw) > persisted_envelope_byte_limit():
+        raise ValueError("canonical result envelope is outside the authority event contract")
     envelope = json.loads(raw.decode("utf-8"))
     if type(envelope) is not dict or set(envelope) != _BODY_KEYS | {"envelope_digest"}:
         raise ValueError("canonical result envelope fields differ")
