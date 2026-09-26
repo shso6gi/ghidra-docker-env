@@ -34,7 +34,11 @@ from scripts.function_tracer_pcode.authority.process.supervisor import (
     PROCESS_DURABLE_RECOVERY_REGISTRY,
 )
 from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
-from scripts.function_tracer_pcode.authority.seal_work import SealPlan
+from scripts.function_tracer_pcode.authority.seal_work import (
+    BundleWorkExceeded,
+    SealPlan,
+    persisted_envelope_byte_limit,
+)
 from scripts.function_tracer_pcode.authority.process.terminal_driver import (
     inspect as inspect_terminal,
 )
@@ -328,6 +332,7 @@ def build_canonical_result_finalization_bundle(
         "canonical_semantic_result_projection": semantic,
         "bundle_seal_key_id": seal_key_id,
     }
+    _check_sealed_form(plan, body, signed=seal_key_file is not None)
     plan.charge("bundle_digest")
     bundle_digest = authority_digest(body)
     signature = None
@@ -503,6 +508,7 @@ def build_supervisor_canonical_result_finalization_bundle(
         "canonical_semantic_result_projection": semantic,
         "bundle_seal_key_id": seal_key_id,
     }
+    _check_sealed_form(plan, body, signed=True)
     plan.charge("bundle_digest")
     bundle_digest = authority_digest(body)
     bundle = {
@@ -662,21 +668,42 @@ def _price_bundle(
     """
 
     _require_bundle_fields(bundle)
+    return SealPlan.price(work, preimage=preimage, **_bundle_parts(bundle))
+
+
+def _bundle_parts(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    """The parts a reader measures: stream, projection, execution payload, and the rest as one."""
+
     rest = {
         key: value for key, value in bundle.items()
         if key not in {
             "sealed_event_stream", "final_lifecycle_projection", "execution_payload",
         }
     }
-    stream = bundle["sealed_event_stream"]
-    return SealPlan.price(
-        work,
-        stream=stream,
-        projection=bundle["final_lifecycle_projection"],
-        receipts=(rest,),
-        preimage=preimage,
-        execution=bundle["execution_payload"],
-    )
+    return {
+        "stream": bundle["sealed_event_stream"],
+        "projection": bundle["final_lifecycle_projection"],
+        "receipts": (rest,),
+        "execution": bundle["execution_payload"],
+    }
+
+
+#: 封印の前に測る bundle の digest / 署名の場所を埋める値（本物と同じ長さの 16 進 64 文字）
+_DIGEST_PLACEHOLDER = "0" * 64
+
+
+def _check_sealed_form(plan: SealPlan, body: Mapping[str, Any], *, signed: bool) -> None:
+    """Issue #110: the encoded bundle a reader will measure is within the contract, before the digest.
+
+    The digest and signature are not known yet; placeholders of the same
+    length stand in, so the check measures exactly what the reader measures.
+    """
+
+    plan.check_sealed_form(**_bundle_parts({
+        **body,
+        "bundle_digest": _DIGEST_PLACEHOLDER,
+        "bundle_signature": _DIGEST_PLACEHOLDER if signed else None,
+    }))
 
 
 def _validate_bundle_with_plan(
@@ -1085,14 +1112,23 @@ def persist_canonical_result_envelope(
     plan.charge("persist_seal")
     envelope = seal_envelope(projected_payload)
     plan.charge("persist_write")
+    # Issue #110: never write an envelope its reader rejects (the reader
+    # refuses files over this bound before decoding them).
+    text = json.dumps(envelope, sort_keys=True, separators=(",", ":")) + "\n"
+    limit = persisted_envelope_byte_limit()
+    if len(text.encode("utf-8")) > limit:
+        raise BundleWorkExceeded(
+            "the canonical result envelope is outside the persisted bound",
+            kind="contract", step="persist_write",
+            consumed=getattr(work, "consumed", 0), limit=limit,
+        )
     directory = Path(root) / nonce
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / layout.RESULT_ENVELOPE
     descriptor, temporary = tempfile.mkstemp(prefix=".canonical-result-", dir=directory)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(envelope, handle, sort_keys=True, separators=(",", ":"))
-            handle.write("\n")
+            handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)

@@ -50,6 +50,7 @@ from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
 )
 from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
     ANALYSIS_LIMITATION_REASON_REGISTRY,
+    AnalysisLimitationBlockerSignal,
 )
 
 
@@ -514,6 +515,10 @@ class LegacyOutcomeObservationReceipt:
         }
 
 
+#: 切られた stream の後の producer の失敗を診断に残すとき、1 種類につき残す最初の詳細の文字数
+_CONSEQUENCE_DETAIL_CHARS = 500
+
+
 class ProductionDualWritePilotSession:
     def __init__(
         self,
@@ -562,7 +567,8 @@ class ProductionDualWritePilotSession:
         #: the contract limitation decides the pair, so these are not
         #: encoding errors.  Failures recorded before the truncation stay in
         #: ``domain_signal_error_kinds``.
-        self.truncation_consequences: dict[str, int] = {}
+        self.truncation_consequences: dict[str, dict[str, Any]] = {}
+        self._publishing_contract_limitation = False
 
     @contextmanager
     def domain_signal_transaction(self) -> Any:
@@ -599,9 +605,12 @@ class ProductionDualWritePilotSession:
         """
 
         if self.stream_truncated:
-            self.truncation_consequences[kind] = (
-                self.truncation_consequences.get(kind, 0) + 1
+            # One entry per failure kind (the kinds are exception type names,
+            # a finite set): the count and the first detail, bounded.
+            entry = self.truncation_consequences.setdefault(
+                kind, {"count": 0, "first_detail": detail[:_CONSEQUENCE_DETAIL_CHARS]},
             )
+            entry["count"] += 1
             return
         self.domain_signal_error_kinds.append(kind)
         self.domain_signal_error_details.append(detail)
@@ -609,10 +618,12 @@ class ProductionDualWritePilotSession:
     def complete_stream(self, stage: Callable[[Any], Any]) -> None:
         """Run one finish stage that completes the stream (emits after the pair gate).
 
-        A truncated stream is not completed: the stage does not run.  A stage
-        stops at its first refused event (``AuthorityEventContractExceeded``
-        unwinds it; no later step of the stage runs against the refused
-        state) and the stream is truncated from there on.
+        A truncated stream is not completed: the stage does not run.  Inside a
+        stage, a refused direct emit unwinds it
+        (``AuthorityEventContractExceeded``: no later step runs against the
+        refused state); a domain signal after the truncation is refused before
+        it is encoded and returns 0 (O(1) each), so a stage that emits domain
+        signals may keep looping, but publishes nothing.
         """
 
         from scripts.function_tracer_pcode.authority.event_contract import (
@@ -650,15 +661,23 @@ class ProductionDualWritePilotSession:
         phase7_execution_intents_prebuffered: bool = False,
         transaction_signal: Any = None,
     ) -> tuple[int, ...]:
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            AuthorityEventContractExceeded,
+        )
+
         with self._domain_signal_transaction_lock:
-            return self._emit_many_locked(
-                intents,
-                commit_callback,
-                phase7_execution_intents_prebuffered=(
-                    phase7_execution_intents_prebuffered
-                ),
-                transaction_signal=transaction_signal,
-            )
+            try:
+                return self._emit_many_locked(
+                    intents,
+                    commit_callback,
+                    phase7_execution_intents_prebuffered=(
+                        phase7_execution_intents_prebuffered
+                    ),
+                    transaction_signal=transaction_signal,
+                )
+            except AuthorityEventContractExceeded:
+                self.publish_event_contract_limitation()
+                raise
 
     def _emit_many_locked(
         self, intents: Sequence[Any], commit_callback: Any = None, *,
@@ -704,23 +723,53 @@ class ProductionDualWritePilotSession:
                     if intent.event_type is not EventType.CAUSE_OBSERVED:
                         self.phase7_runtime.buffer_execution_intent(intent)
 
+            committed = None
+
             def commit_before_publication() -> None:
-                nonlocal transaction
+                nonlocal transaction, committed
+                # The contract is counted first, before any producer callback
+                # can re-enter the gate; publication itself cannot fail after
+                # the callback, and a callback failure undoes the count.
+                committed = self.event_contract.commit(admission)
                 if commit_callback is not None:
                     commit_callback()
                 if transaction is not None:
                     self._commit_phase7_transaction(transaction)
                     transaction = None
 
-            recorded = self.recorder.append_many(
-                batch, commit_before_publication
-            )
-            self.event_contract.commit(admission)
+            published = False
+            try:
+                recorded = self.recorder.append_many(
+                    batch, commit_before_publication
+                )
+                published = True
+            finally:
+                if not published and committed is not None:
+                    self.event_contract.undo(committed)
             return tuple(item.header.sequence_number for item in recorded)
         except Exception:
             if transaction is not None:
                 self._rollback_phase7_transaction(transaction)
             raise
+
+    def defer_occurrence(self, occurrence_id: str) -> bool:
+        """Promise to publish ``occurrence_id`` before the decision (counted now).
+
+        Returns ``False`` when the contract refuses the promise: the refusal is
+        the recorded contract limitation (published now), and the promise is
+        not kept.
+        """
+
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            AuthorityEventContractExceeded,
+        )
+
+        try:
+            self.event_contract.defer(occurrence_id)
+        except AuthorityEventContractExceeded:
+            self.publish_event_contract_limitation()
+            return False
+        return True
 
     def _is_committed_replay(self, signal: Any, batch: tuple) -> bool:
         replay_probe = getattr(
@@ -728,23 +777,18 @@ class ProductionDualWritePilotSession:
         )
         return bool(callable(replay_probe) and replay_probe(self, signal, batch))
 
-    def event_contract_checkpoint(self) -> None:
-        """Before the pair gate: a recorded contract overflow is raised (deferrals are counted when made)."""
+    def publish_event_contract_limitation(self) -> Optional[str]:
+        """Publish the contract limitation cause of a truncated stream (its dedicated reserve slot).
 
-        self.event_contract.checkpoint()
-
-    def ensure_event_contract_limitation(self) -> None:
-        """A truncated stream carries its own contract limitation cause, active, before the decision.
-
-        The cause is observed idempotently (from the reserve) and must be in
-        the current ``c_active_base``: another limitation cause is not enough
-        (it may be discharged), and a truncated stream without its active
-        contract cause could not be decided UNKNOWN.
+        Called at the overflow itself, so the durable prefix records the
+        truncation even if the worker never reaches the pair gate or finish,
+        and again before the decision.  Idempotent (the encoder does not
+        observe one limitation twice); returns its occurrence id.
         """
 
         exceeded = self.event_contract.exceeded
-        if exceeded is None:
-            return
+        if exceeded is None or self._publishing_contract_limitation:
+            return None
         from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
             observe_analysis_limitation,
         )
@@ -752,20 +796,38 @@ class ProductionDualWritePilotSession:
             production_pilot_session_scope,
         )
 
-        with production_pilot_session_scope(self):
-            occurrence_id = observe_analysis_limitation(
-                reason_id=exceeded.reason_id,
-                limitation_site=exceeded.site,
-                target_key=exceeded.target_key,
-                missing_semantic_fact=exceeded.missing_semantic_fact,
-                evidence_refs=exceeded.evidence_refs,
-            )
+        self._publishing_contract_limitation = True
+        try:
+            with production_pilot_session_scope(self):
+                return observe_analysis_limitation(
+                    reason_id=exceeded.reason_id,
+                    limitation_site=exceeded.site,
+                    target_key=exceeded.target_key,
+                    missing_semantic_fact=exceeded.missing_semantic_fact,
+                    evidence_refs=exceeded.evidence_refs,
+                )
+        finally:
+            self._publishing_contract_limitation = False
+
+    def ensure_event_contract_limitation(self) -> Optional[str]:
+        """A truncated stream carries its own contract limitation cause, active, before the decision.
+
+        The cause must be in the current ``c_active_base``: another limitation
+        cause is not enough (it may be discharged), and a truncated stream
+        without its active contract cause could not be decided UNKNOWN.
+        Returns the cause's occurrence id (``None`` for a stream in bounds).
+        """
+
+        if self.event_contract.exceeded is None:
+            return None
+        occurrence_id = self.publish_event_contract_limitation()
         active = {
             row.occurrence_id
             for row in self.preview_lifecycle_projection().c_active_base
         }
         if occurrence_id is None or occurrence_id not in active:
             raise ValueError("authority event contract limitation is not active")
+        return occurrence_id
 
     def _begin_phase7_transaction(self) -> Any:
         if self.phase7_runtime is None:
@@ -865,9 +927,23 @@ class ProductionDualWritePilotSession:
         self.observed_domain_signal_count += 1
         if self.domain_signal_encoder is None:
             return 0
+        if self.stream_truncated and type(signal) is not AnalysisLimitationBlockerSignal:
+            # Issue #110: a truncated stream publishes only limitation causes.
+            # Refuse before encoding (O(1)): close the wrapper's Phase 7
+            # transaction; nothing was encoded, buffered or committed.
+            self._rollback_phase7_signal_transaction(signal)
+            return 0
         external_committed = False
         try:
             intents = tuple(self.domain_signal_encoder(self, signal))
+            site_id = None
+            if self.phase7_runtime is not None:
+                try:
+                    site_id = self._phase7_signal_sites[id(signal)]
+                except KeyError as exc:
+                    raise ValueError(
+                        "production signal lacks audited pre-emission site"
+                    ) from exc
             replay_support = getattr(
                 self.domain_signal_encoder, "supports_signal_replay", None
             )
@@ -890,12 +966,6 @@ class ProductionDualWritePilotSession:
             # back an empty buffer).
             admission = self.event_contract.admit(intents) if intents else None
             if self.phase7_runtime is not None:
-                try:
-                    site_id = self._phase7_signal_sites[id(signal)]
-                except KeyError as exc:
-                    raise ValueError(
-                        "production signal lacks audited pre-emission site"
-                    ) from exc
                 self.phase7_runtime.buffer_signal_intents(site_id, signal, intents)
                 for intent in intents:
                     if intent.event_type is not EventType.CAUSE_OBSERVED:
@@ -974,7 +1044,10 @@ class ProductionDualWritePilotSession:
             if type(exc) is AuthorityEventContractExceeded:
                 # A contract refusal is a recorded pair-terminal limitation, not
                 # an encoding failure: the transaction was rolled back and the
-                # stream stays a valid prefix.
+                # stream stays a valid prefix.  The contract cause is published
+                # now (dedicated slot), so even an early-killed worker's prefix
+                # records the truncation.
+                self.publish_event_contract_limitation()
                 return 0
             self.record_domain_signal_failure(
                 type(exc).__name__, f"{type(signal).__name__}: {exc}"

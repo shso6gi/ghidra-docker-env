@@ -1379,22 +1379,19 @@ def emit_sat_safety_signal(
             )
             if not callable(authority_for_signal):
                 raise TypeError("SAT safety encoder lacks occurrence authority")
+            if session.stream_truncated:
+                # Issue #110: a truncated stream takes no new promise (O(1),
+                # before the occurrence authority is built).
+                return 0
             occurrence_id = authority_for_signal(
                 session, signal
             ).occurrence.occurrence_id
-            if occurrence_id not in pending:
-                # Issue #110: the promise to publish before the decision is
-                # counted against the event contract when it is made.  A
-                # refused deferral is the recorded contract limitation (the
-                # pair is decided by it), so the promise is not kept.
-                from scripts.function_tracer_pcode.authority.event_contract import (
-                    AuthorityEventContractExceeded,
-                )
-
-                try:
-                    session.event_contract.defer(occurrence_id)
-                except AuthorityEventContractExceeded:
-                    return 0
+            # Issue #110: the promise to publish before the decision is counted
+            # against the event contract when it is made.  A refused deferral
+            # is the recorded contract limitation (the pair is decided by it),
+            # so the promise is not kept.
+            if occurrence_id not in pending and not session.defer_occurrence(occurrence_id):
+                return 0
             prior = pending.setdefault(
                 occurrence_id, (signal, producer_site_manifest_id)
             )

@@ -294,6 +294,19 @@ ANALYSIS_LIMITATION_OBSERVED_SITE = AnalysisLimitationProducerSiteSpec(
 ANALYSIS_LIMITATION_PRODUCER_SITE_SPECS = (ANALYSIS_LIMITATION_OBSERVED_SITE,)
 
 
+def occurrence_limitation_site(occurrence: Any) -> Optional[str]:
+    """この domain の occurrence が記録する限界の場所（それ以外の occurrence は `None`）。
+
+    encoder は occurrence の `evidence_refs` の先頭に限界の場所を置く（`AnalysisLimitationPilotEncoder`）。
+    その並びの owner はこの module なので、場所を読む側（authority event の契約）はここを通す。
+    """
+
+    if getattr(occurrence, "target_kind", None) != ANALYSIS_LIMITATION_TARGET_KIND:
+        return None
+    refs = getattr(occurrence, "evidence_refs", ())
+    return refs[0] if refs else None
+
+
 def observe_analysis_limitation(
     *,
     reason_id: str,

@@ -9,6 +9,12 @@
 集合の要素の digest と並べ替え）を足した決定的な量。同じ値なら同じ単位になる（呼び出しの順・cache に
 依らない）。authority の event の契約（`authority/event_contract`）と封印の作業量
 （`authority/seal_work`）が同じ meter を使う。
+
+authority の表現への射影（`to_authority_dict()`）を持つ値は、射影を **呼ぶ前に** その値を構造として
+（公開 field を、射影を呼ばずに）数えてから射影を呼ぶ: 射影の仕事は数えた構造に比例する。射影を持てる
+のは dataclass の値だけ（それ以外は `TypeError`: 任意の callable を呼ばない）。この値の単位は構造の単位と
+射影の単位の和（canonical JSON の byte 以上。数えた単位と報告する単位が一致するので、上限はどれも
+測りながら数えた量で強制できる）。
 """
 
 from __future__ import annotations
@@ -84,6 +90,17 @@ def measure_canonical_units(value: Any, sink: UnitSink) -> int:
     `TypeError`。再帰しない（深い入れ子でも Python の stack を使わない）。
     """
 
+    return _walk(value, sink, structural=False, projected={})
+
+
+def _walk(value: Any, sink: UnitSink, *, structural: bool, projected: dict) -> int:
+    """1 つの値を辿る。`structural` は射影を呼ばずに値の構造（公開 field）を数える走査。
+
+    `projected` は構造を数え終えた射影を持つ値（id → 値。1 回の測定の中で同じ値の構造を 2 回数えない:
+    射影が子の値をそのまま返しても、入れ子の深さの 2 乗にならない）。値を持ち続けるので、測定の途中で
+    id が別の値に使い回されることはない。
+    """
+
     total = 0
     # [子の iterator, この容器までの合計の単位, 集合か, 子の数]
     frames: List[List[Any]] = []
@@ -109,14 +126,32 @@ def measure_canonical_units(value: Any, sink: UnitSink) -> int:
             pending.append(item.value)
             continue
         to_authority_dict = getattr(item, "to_authority_dict", None)
+        is_value_dataclass = is_dataclass(item) and not isinstance(item, type)
         if to_authority_dict is not None:
-            # authority の表現への 1 hop も呼ぶ前に数える（自分自身を返す値でも上限で止まる）
+            if not is_value_dataclass:
+                raise TypeError(
+                    f"an authority projection must be a dataclass value: {type(item).__name__}"
+                )
+            # 射影への 1 hop も数える（自分自身を返す値でも上限で止まる）
             sink.charge(1)
             total += 1
+            if structural:
+                # 入れ子の射影の構造もここで数え済み（後で射影の結果から出会っても数え直さない）
+                projected[id(item)] = item
+                members = _public_members(item)
+                total += _open_pairs(members, frames, pending, total, sink, ordered=False)
+                continue
+            if id(item) not in projected:
+                # 射影を呼ぶ前に、射影が辿る構造を数える（射影は呼ばない）
+                projected[id(item)] = item
+                total += _walk(item, sink, structural=True, projected=projected)
             pending.append(to_authority_dict())
             continue
-        if is_dataclass(item) and not isinstance(item, type):
-            members = [(member.name, getattr(item, member.name)) for member in fields(item)]
+        if is_value_dataclass:
+            members = (
+                _public_members(item) if structural
+                else [(member.name, getattr(item, member.name)) for member in fields(item)]
+            )
             total += _open_pairs(members, frames, pending, total, sink, ordered=False)
             continue
         if isinstance(item, _AbcMapping):
@@ -137,8 +172,22 @@ def measure_canonical_units(value: Any, sink: UnitSink) -> int:
         if isinstance(item, (str, int, float)):
             total += _scalar_units(exact_primitive(item), sink)
             continue
+        if structural:
+            # 構造の走査の葉（射影が自分で表現を決める値）: 1 単位（その表現は射影の走査が数える）
+            sink.charge(1)
+            total += 1
+            continue
         raise TypeError(f"unsupported authority value: {type(item).__name__}")
     return total
+
+
+def _public_members(item: Any) -> List[Any]:
+    """射影を持つ値の構造: 公開 field（`_` で始まる field は射影の外の封印の token など）。"""
+
+    return [
+        (member.name, getattr(item, member.name))
+        for member in fields(item) if not member.name.startswith("_")
+    ]
 
 
 def _open_pairs(

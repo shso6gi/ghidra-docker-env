@@ -14,8 +14,15 @@ UNREGISTERED          `reason_id` が sealed registry に無い / retired umbrel
 OWNED_PRODUCER        analysis_limitation domain の reason → cause を観測し、
                       **その occurrence が現在 active か** を projection で確認
 EXISTING_CAUSE        帰属キーに **ちょうど 1 つ** 対応する active occurrence
+TRUNCATED_STREAM      上記で帰属できず、authority event の契約が stream を切った（Issue #110）→
+                      契約の超過の限界の cause（専用の枠で必ず publish できる）へ帰属
 UNATTRIBUTED          上記以外（fail-closed。呼び出し側が ERROR に落とす）
 ===================== ==========================================================
+
+切られた stream では、限界の cause そのものが拒まれて publish できないことがある（予約の共有の枠を
+他の限界が使い切ったとき）。その pair は契約の超過の限界の cause（`blocks_decision`、discharge する
+producer が無い）が判定を止めているので、限界をそれへ帰属させる。帰属先の cause は解消されないので、
+「cause が解消されたなら限界も解消された」の対応は空に成り立ち、EQ / NOT_EQ は通らない。
 
 **「観測したことがある」と「今 active」は別**。producer の重複排除 ledger は
 reducer の重複 occurrence 拒否を避けるための履歴で、requirement を discharge した
@@ -53,13 +60,16 @@ from scripts.function_tracer_pcode.authority.domains.analysis_limitation import 
 UNREGISTERED = "UNREGISTERED"
 ATTRIBUTED_NEW_CAUSE = "ATTRIBUTED_NEW_CAUSE"
 ATTRIBUTED_EXISTING_CAUSE = "ATTRIBUTED_EXISTING_CAUSE"
+ATTRIBUTED_TRUNCATED_STREAM = "ATTRIBUTED_TRUNCATED_STREAM"
 UNATTRIBUTED = "UNATTRIBUTED"
 
 #: 帰属できなかったときに結果へ載せる `failure_status`。
 UNREGISTERED_REASON_STATUS = "unregistered_reason"
 LIMITATION_UNATTRIBUTED_STATUS = "limitation_unattributed"
 
-_ATTRIBUTED = frozenset({ATTRIBUTED_NEW_CAUSE, ATTRIBUTED_EXISTING_CAUSE})
+_ATTRIBUTED = frozenset({
+    ATTRIBUTED_NEW_CAUSE, ATTRIBUTED_EXISTING_CAUSE, ATTRIBUTED_TRUNCATED_STREAM,
+})
 
 
 @dataclass(frozen=True)
@@ -243,6 +253,38 @@ def _matching_active_rows(
     return tuple(matches)
 
 
+def _unattributed(
+    pilot: Any, limitation: AnalysisLimitation, detail: str,
+) -> LimitationAttribution:
+    """帰属できなかった: stream が切られていれば契約の超過の限界の cause（active）へ帰属させる。"""
+
+    unattributed = LimitationAttribution(UNATTRIBUTED, limitation.reason_id, detail)
+    if pilot is None or getattr(pilot, "stream_truncated", False) is not True:
+        return unattributed
+    try:
+        occurrence_id = pilot.ensure_event_contract_limitation()
+        row = (
+            None if occurrence_id is None
+            else _active_row_for_occurrence(pilot, occurrence_id)
+        )
+    except (TypeError, ValueError) as exc:
+        return LimitationAttribution(
+            UNATTRIBUTED, limitation.reason_id,
+            f"{detail}; the truncated stream's contract cause is not active: "
+            f"{type(exc).__name__}",
+        )
+    if row is None:
+        return unattributed
+    return LimitationAttribution(
+        ATTRIBUTED_TRUNCATED_STREAM, limitation.reason_id,
+        "the authority event contract truncated the stream before this limitation "
+        f"could be attributed ({detail}); the contract limitation cause blocks the decision",
+        cause_id=row.cause_id,
+        occurrence_id=row.occurrence_id,
+        decision_effect=row.decision_effect,
+    )
+
+
 def attribute_analysis_limitation(
     session: Any, limitation: AnalysisLimitation,
 ) -> LimitationAttribution:
@@ -272,8 +314,8 @@ def attribute_analysis_limitation(
 
     if definition.domain == ANALYSIS_LIMITATION_DOMAIN:
         if pilot is None:
-            return LimitationAttribution(
-                UNATTRIBUTED, reason_id,
+            return _unattributed(
+                pilot, limitation,
                 "no production pilot session is available to confirm an active cause",
             )
         try:
@@ -289,20 +331,20 @@ def attribute_analysis_limitation(
                 else _active_row_for_occurrence(pilot, occurrence_id)
             )
         except Exception as exc:  # 観測も確認もできないなら帰属できない
-            return LimitationAttribution(
-                UNATTRIBUTED, reason_id,
+            return _unattributed(
+                pilot, limitation,
                 f"analysis limitation producer failed: {type(exc).__name__}",
             )
         if occurrence_id is None:
-            return LimitationAttribution(
-                UNATTRIBUTED, reason_id,
+            return _unattributed(
+                pilot, limitation,
                 "analysis limitation producer did not observe a cause",
             )
         if row is None:
             # 過去に観測済みでも、その cause が discharge 済みなら未解消の
             # blocker は存在しない。履歴だけを根拠に成功扱いしない。
-            return LimitationAttribution(
-                UNATTRIBUTED, reason_id,
+            return _unattributed(
+                pilot, limitation,
                 "the limitation cause is not active in the current lifecycle "
                 "projection (a discharged observation is not re-activated here)",
             )
@@ -316,25 +358,25 @@ def attribute_analysis_limitation(
         )
 
     if key is None:
-        return LimitationAttribution(
-            UNATTRIBUTED, reason_id,
+        return _unattributed(
+            pilot, limitation,
             "limitation carries no cause attribution key",
         )
     if pilot is None:
-        return LimitationAttribution(
-            UNATTRIBUTED, reason_id,
+        return _unattributed(
+            pilot, limitation,
             "no production pilot session is available to read active causes",
         )
     try:
         matches = _matching_active_rows(pilot, key)
     except Exception as exc:  # 読めないなら帰属できない（fail-closed）
-        return LimitationAttribution(
-            UNATTRIBUTED, reason_id,
+        return _unattributed(
+            pilot, limitation,
             f"active cause prefix is unreadable: {type(exc).__name__}",
         )
     if len(matches) != 1:
-        return LimitationAttribution(
-            UNATTRIBUTED, reason_id,
+        return _unattributed(
+            pilot, limitation,
             f"attribution key matches {len(matches)} active causes, not exactly one",
         )
     row, occurrence = matches[0]

@@ -50,7 +50,10 @@ class BundleWorkExceeded(ValueError):
 
 
 class SealWork(UnitSink):
-    """封印の作業量の protocol: `charge(units)`（超えれば `BundleWorkExceeded`）と `remaining()`。"""
+    """封印の作業量の protocol: `charge(units)`（超えれば `BundleWorkExceeded`）・`remaining()` と、
+    この作業量で封印してよい preimage の上限 `preimage_limit`（canonical unit）。"""
+
+    preimage_limit: int
 
     def remaining(self) -> Optional[int]:  # pragma: no cover - protocol
         raise NotImplementedError
@@ -59,13 +62,18 @@ class SealWork(UnitSink):
 class SealWorkBudget(SealWork):
     """有限の封印の作業量（上限は必ず渡す: 上限なしの封印は作れない）。"""
 
-    __slots__ = ("limit", "consumed", "step")
+    __slots__ = ("limit", "consumed", "step", "preimage_limit")
 
-    def __init__(self, limit: int) -> None:
+    def __init__(
+        self, limit: int, *, preimage_limit: int = AUTHORITY_EVENT_CONTRACT.max_result_preimage_units,
+    ) -> None:
         if type(limit) is not int or limit < 0:
             raise ValueError("a seal work budget has a finite non-negative limit")
+        if type(preimage_limit) is not int or preimage_limit < 0:
+            raise ValueError("a seal work budget has a finite non-negative preimage bound")
         self.limit = limit
         self.consumed = 0
+        self.preimage_limit = preimage_limit
         #: 今数えている段（失敗の報告用）
         self.step = "price"
 
@@ -77,21 +85,29 @@ class SealWorkBudget(SealWork):
         """契約の上限の stream と、上限 `preimage_units` の preimage を封印・検証・永続化できる作業量。
 
         上限の内側の入力で封印が作業量の不足で失敗しない（決定的: 同じ入力なら同じ量を数える）。
+        preimage はこの上限の中でだけ封印する（`SealPlan.price` が測りながら強制する）。
         """
 
-        return cls(seal_work_limit(contract=contract, preimage_units=preimage_units))
+        return cls(
+            seal_work_limit(contract=contract, preimage_units=preimage_units),
+            preimage_limit=preimage_units,
+        )
 
     @classmethod
-    def for_result(cls) -> "SealWorkBudget":
+    def for_result(
+        cls, contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT,
+    ) -> "SealWorkBudget":
         """結果の payload 全体を preimage にする呼び出し側（CLI・結果の検証・reporting）の作業量。"""
 
-        return cls.for_seal(preimage_units=RESULT_PREIMAGE_UNITS)
+        return cls.for_seal(preimage_units=contract.max_result_preimage_units, contract=contract)
 
     @classmethod
-    def for_supervisor(cls) -> "SealWorkBudget":
+    def for_supervisor(
+        cls, contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT,
+    ) -> "SealWorkBudget":
         """supervisor の terminal の封印（固定の形の preimage）の作業量。"""
 
-        return cls.for_seal(preimage_units=SUPERVISOR_PREIMAGE_UNITS)
+        return cls.for_seal(preimage_units=contract.max_supervisor_preimage_units, contract=contract)
 
     def remaining(self) -> Optional[int]:
         return self.limit - self.consumed
@@ -148,17 +164,6 @@ SEAL_COST_MODEL: Dict[str, Mapping[str, int]] = {
     "persist_write": {"preimage": 1, "bundle": 1},
 }
 
-#: 自分の preimage の契約を持たない呼び出し側（結果の payload 全体を preimage にする CLI・supervisor の
-#: 結果の検証・reporting）の preimage の上限。旧 full matrix の最大の結果 JSON（26 MB）の約 10 倍。
-#: preimage の契約を持つ呼び出し側（PR #190 の出力の予算）はその上限を渡す
-RESULT_PREIMAGE_UNITS = 256 << 20
-#: supervisor が作る terminal の preimage（固定の形の 7 field）の上限
-SUPERVISOR_PREIMAGE_UNITS = 64 << 10
-
-#: `bundle` の成分以外に bundle の本体へ入る固定の field（schema・kind・digest・key id）の単位
-_BUNDLE_FIXED_UNITS = 4096
-
-
 @dataclass(frozen=True)
 class SealComponents:
     """測った入力の大きさ（canonical unit）。"""
@@ -170,12 +175,12 @@ class SealComponents:
     preimage: int
     execution: int
     reduction: int
+    #: bundle の固定の包み（`AuthorityEventContract.bundle_frame_units`）
+    frame: int
 
     @property
     def bundle(self) -> int:
-        return (
-            self.stream + self.projection + self.receipts + self.execution + _BUNDLE_FIXED_UNITS
-        )
+        return self.stream + self.projection + self.receipts + self.execution + self.frame
 
     def get(self, name: str) -> int:
         return self.bundle if name == "bundle" else getattr(self, name)
@@ -205,76 +210,68 @@ class SealPlan:
         """入力の大きさを `work` へ数えながら測り、契約の上限と比べる（外なら何も作らずに止まる）。
 
         `stream` は sealed event stream（object）か、bundle の中の encode 済みの dict。event は 1 つ
-        ずつ（header・digest を含む全体を）辿る前に数え、数え終えるまでに契約の上限を超えれば止まる。
+        ずつ（header・digest を含む全体を）辿る前に数え、数えた量が上限を超えた時点で止まる。
+        preimage は `work.preimage_limit` まで。最後に replay の見積もりを数える。
         """
 
         _require_work(work)
-        events = _stream_events(stream)
-        if len(events) > contract.max_events:
-            _contract(work, f"sealed event stream has {len(events)} events", contract.max_events)
-        stream_units = _measure(_stream_frame(stream), work)
-        cause_events = 0
-        for event in events:
-            stream_units += _measure(_event_value(event), work)
-            if stream_units > contract.max_sealed_stream_units:
-                _contract(work, "the sealed event stream is outside the authority event contract",
-                          contract.max_sealed_stream_units)
-            if _is_cause_event(event):
-                cause_events += 1
-                if cause_events > contract.max_cause_occurrences:
-                    _contract(work, "the sealed event stream has more causes than the contract",
-                              contract.max_cause_occurrences)
-        projection_units = _measure(projection, work)
-        if projection_units > contract.max_projection_units:
-            _contract(work, "the lifecycle projection is outside the authority event contract",
-                      contract.max_projection_units)
-        receipt_units = 0
-        for item in receipts:
-            receipt_units += _measure(item, work)
-            if receipt_units > contract.max_receipt_units:
-                _contract(work, "the receipts are outside the authority event contract",
-                          contract.max_receipt_units)
-        execution_units = _measure(execution, work)
-        if execution_units > contract.max_execution_payload_units:
-            _contract(work, "the execution payload is outside the authority event contract",
-                      contract.max_execution_payload_units)
-        preimage_units = _measure(preimage, work)
+        measured = _measure_parts(
+            work, contract, stream=stream, projection=projection, receipts=receipts,
+            execution=execution,
+        )
+        preimage_units = _measure_capped(
+            preimage, work, work.preimage_limit, "the result preimage is outside its seal bound",
+        )
         # replay の仕事は event ごとに、それまでに観測した occurrence（discharge 済みも含む）に比例する:
         # 最後の `c_active_base` ではなく stream の cause event の数で見積もる（projection の有無に依らない）
-        reduction = len(events) * max(1, cause_events)
+        reduction = measured["events"] * max(1, measured["cause_events"])
         work.charge(reduction)
         components = SealComponents(
-            stream=stream_units, events=len(events), projection=projection_units,
-            receipts=receipt_units, preimage=preimage_units, execution=execution_units,
-            reduction=reduction,
+            stream=measured["stream"], events=measured["events"],
+            projection=measured["projection"], receipts=measured["receipts"],
+            preimage=preimage_units, execution=measured["execution"], reduction=reduction,
+            frame=contract.bundle_frame_units,
         )
         return cls(work, components, contract)
+
+    def check_sealed_form(
+        self, *, stream: Any, projection: Any, receipts: Sequence[Any], execution: Any,
+    ) -> None:
+        """encode した形（読む側が測る形）が契約の上限の中か、digest を取る前に数えながら確かめる。
+
+        書く側（封印）は object の形で `price` を測るが、読む側（`validate_...`）は encode した dict を
+        測る。書いた bundle を読む側が拒まないよう、同じ上限を encode した形でも確かめる（replay の
+        見積もりは数えない: 同じ replay を 2 回数えない）。
+        """
+
+        _measure_parts(
+            self.work, self.contract, stream=stream, projection=projection, receipts=receipts,
+            execution=execution,
+        )
 
     def measure_more(self, *, projection: Any = None, receipts: Sequence[Any] = ()) -> None:
         """replay の後にできた projection / receipt を、encode する前に数えながら測って足す。
 
-        足した後の大きさも契約の上限と比べる（`price` と同じ上限: 外なら encode せずに止まる）。
+        足した後の大きさも契約の上限と比べる（`price` と同じ上限: 超えた時点で止まる）。
         """
 
         contract = self.contract
         current = self.components
         projection_units = current.projection
         if projection is not None:
-            projection_units += _measure(projection, self.work)
-            if projection_units > contract.max_projection_units:
-                _contract(self.work, "the lifecycle projection is outside the authority event contract",
-                          contract.max_projection_units)
-        receipt_units = current.receipts
-        for item in receipts:
-            receipt_units += _measure(item, self.work)
-            if receipt_units > contract.max_receipt_units:
-                _contract(self.work, "the receipts are outside the authority event contract",
-                          contract.max_receipt_units)
+            projection_units += _measure_capped(
+                projection, self.work, contract.max_projection_units - current.projection,
+                "the lifecycle projection is outside the authority event contract",
+            )
+        receipt_units = current.receipts + _measure_capped(
+            tuple(receipts), self.work, contract.max_receipt_units - current.receipts,
+            "the receipts are outside the authority event contract",
+        ) if receipts else current.receipts
         self.components = SealComponents(
             stream=current.stream, events=current.events,
             projection=projection_units, receipts=receipt_units,
             preimage=current.preimage, execution=current.execution,
-            reduction=current.reduction,
+            reduction=current.reduction, frame=current.frame,
         )
 
     def cost(self, step: str) -> int:
@@ -300,21 +297,21 @@ def seal_work_limit(
     """契約の上限の入力を封印し、検証し、永続化する作業量の上限（測る分 + 全段の和、封印と永続化の 2 回分）。
 
     成分の上限は全部 `authority/event_contract` の契約（`SealPlan.price` が測りながら強制する）と
-    呼ぶ側の preimage の上限だけから導く: 契約の内側の入力は作業量の不足で失敗しない。
+    呼ぶ側の preimage の上限だけから導く: 契約の内側の入力は作業量の不足で失敗しない。測る分は
+    object の形（`price`）と encode した形（`check_sealed_form`）の 2 回。
     """
 
     if type(preimage_units) is not int or preimage_units < 0:
         raise ValueError("a seal work limit needs a non-negative preimage bound")
     worst = SealComponents(
-        stream=contract.max_sealed_stream_units, events=contract.max_events,
+        stream=contract.max_sealed_stream_units, events=contract.max_sealed_events,
         projection=contract.max_projection_units, receipts=contract.max_receipt_units,
         preimage=preimage_units, execution=contract.max_execution_payload_units,
-        reduction=contract.max_events * contract.max_cause_occurrences,
+        reduction=contract.max_sealed_events * contract.max_cause_occurrences,
+        frame=contract.bundle_frame_units,
     )
-    priced = (
-        worst.stream + worst.projection + worst.receipts + worst.preimage + worst.execution
-        + worst.reduction
-    )
+    measured_parts = worst.stream + worst.projection + worst.receipts + worst.execution
+    priced = 2 * measured_parts + worst.preimage + worst.reduction
     steps = sum(
         sum(weight * worst.get(name) for name, weight in coefficients.items())
         for coefficients in SEAL_COST_MODEL.values()
@@ -324,17 +321,20 @@ def seal_work_limit(
 
 def persisted_envelope_byte_limit(
     *, contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT,
-    preimage_units: int = RESULT_PREIMAGE_UNITS,
+    preimage_units: Optional[int] = None,
 ) -> int:
     """永続化した canonical result envelope の byte 数の上限（preimage + 契約の上限の bundle）。
 
     canonical unit は UTF-8 の JSON の byte 以上。envelope の file は ASCII の escape（非 ASCII の 1 文字が
     `\\uXXXX` の 6〜12 byte、UTF-8 の 2〜4 byte の高々 3 倍）で書くので、封印した形の倍率を掛ける。
+    書く側（`persist_canonical_result_envelope`）はこの上限を超える envelope を書かない。
     """
 
+    preimage = contract.max_result_preimage_units if preimage_units is None else preimage_units
     return contract.sealed_form_factor * (
-        preimage_units + contract.max_sealed_stream_units + contract.max_projection_units
-        + contract.max_receipt_units + contract.max_execution_payload_units + _BUNDLE_FIXED_UNITS
+        preimage + contract.max_sealed_stream_units + contract.max_projection_units
+        + contract.max_receipt_units + contract.max_execution_payload_units
+        + contract.bundle_frame_units
     )
 
 
@@ -343,11 +343,63 @@ def _require_work(work: Any) -> None:
         raise TypeError("sealing requires a finite SealWork budget")
 
 
-def _measure(value: Any, work: Any) -> int:
-    if value is None:
-        work.charge(4)
-        return 4
-    return measure_canonical_units(value, work)
+class _Capped(UnitSink):
+    """`work` へ数えながら、この部分の上限 `cap` も数える（超えた時点で契約の外として止まる）。"""
+
+    __slots__ = ("work", "cap", "used", "message")
+
+    def __init__(self, work: Any, cap: int, message: str) -> None:
+        self.work, self.cap, self.used, self.message = work, cap, 0, message
+
+    def charge(self, units: int) -> None:
+        self.work.charge(units)
+        self.used += units
+        if self.used > self.cap:
+            _contract(self.work, self.message, self.cap)
+
+
+def _measure_capped(value: Any, work: Any, cap: int, message: str) -> int:
+    return measure_canonical_units(value, _Capped(work, cap, message))
+
+
+def _measure_parts(
+    work: Any, contract: AuthorityEventContract, *, stream: Any, projection: Any,
+    receipts: Sequence[Any], execution: Any,
+) -> Dict[str, int]:
+    """stream（event ごと）・projection・receipt・execution payload を、各上限まで数えながら測る。"""
+
+    events = _stream_events(stream)
+    if len(events) > contract.max_sealed_events:
+        _contract(work, f"sealed event stream has {len(events)} events", contract.max_sealed_events)
+    stream_sink = _Capped(
+        work, contract.max_sealed_stream_units,
+        "the sealed event stream is outside the authority event contract",
+    )
+    stream_units = measure_canonical_units(_stream_frame(stream), stream_sink)
+    cause_events = 0
+    for event in events:
+        stream_units += measure_canonical_units(_event_value(event), stream_sink)
+        if _is_cause_event(event):
+            cause_events += 1
+            if cause_events > contract.max_cause_occurrences:
+                _contract(work, "the sealed event stream has more causes than the contract",
+                          contract.max_cause_occurrences)
+    projection_units = _measure_capped(
+        projection, work, contract.max_projection_units,
+        "the lifecycle projection is outside the authority event contract",
+    )
+    receipt_units = _measure_capped(
+        tuple(receipts), work, contract.max_receipt_units,
+        "the receipts are outside the authority event contract",
+    )
+    execution_units = _measure_capped(
+        execution, work, contract.max_execution_payload_units,
+        "the execution payload is outside the authority event contract",
+    )
+    return {
+        "stream": stream_units, "events": len(events), "cause_events": cause_events,
+        "projection": projection_units, "receipts": receipt_units, "execution": execution_units,
+    }
 
 
 def _stream_events(stream: Any) -> Sequence[Any]:
@@ -403,8 +455,6 @@ def _is_cause_event(event: Any) -> bool:
 
 __all__ = [
     "persisted_envelope_byte_limit",
-    "RESULT_PREIMAGE_UNITS",
-    "SUPERVISOR_PREIMAGE_UNITS",
     "BundleWorkExceeded",
     "SEAL_COST_MODEL",
     "SealComponents",
