@@ -45,6 +45,29 @@ _UNTRUSTED_DIRS = (os.path.join(PACKAGE_DIR, "tests") + os.sep,)
 _TRUSTED_EXTRA_DIRS: list = []
 _PACKAGE_FILES: dict = {}
 
+#: 作業量を受け取らずに読む live な storage の数の上限（**固定の上限の型の契約**）: dict / instance の
+#: `__dict__` の key、class の namespace と MRO、closure の cell、key の tuple の node、包んだ
+#: `MappingProxyType` の段。長さは組み込みの slot で O(1) に読み、上限を超える値は辿らない:
+#: 述語（`package_type` / `builtin_mapping` / `hash_safe_key` …）は「確かめられない」（信頼しない）、
+#: key で読む関数（`instance_state` / `lookup` / `type_attribute` …）は `TypeError`（値の code を呼ばない）。
+#: 要素ごとに辿る関数（`items_of` / `elements_of`）は iterator を返し、辿る側が要素ごとに数える。
+#: 上限は package と実行環境の型の namespace・record の instance の状態・解析の record の key の実測の
+#: 最大（`test_issue22d_live_values_bounds.py` が固定 subset の値を記録する）に対して十分大きい 2 の冪
+SCAN_LIMIT = 1 << 12
+
+
+def _within_scan(count: int) -> bool:
+    """storage の数 `count`（組み込みの slot で読んだ長さ）が上限の中か（述語の側）。"""
+
+    return count <= SCAN_LIMIT
+
+
+def _require_scan(count: int, what: str) -> None:
+    """storage の数が上限の中でなければ `TypeError`（key で読む関数の側。辿る前に O(1) で比べる）。"""
+
+    if count > SCAN_LIMIT:
+        raise TypeError(f"{what} has {count} entries, more than the bounded path reads ({SCAN_LIMIT})")
+
 
 def trust_code_directory(path: str) -> None:
     """test の harness が自分の code（test の module の record・converter・reducer）を信頼する。
@@ -112,7 +135,11 @@ def package_type(kind: type) -> bool:
         # 型の属性が型自身を指す（入れ子の class の循環）ときは、調べている間は信頼する側に置く
         _PACKAGE_TYPES[kind] = True
         known = True
-        for klass in _TYPE_MRO.__get__(kind):
+        mro = _TYPE_MRO.__get__(kind)
+        if not _within_scan(tuple.__len__(mro)):
+            known = False
+            mro = ()
+        for klass in mro:
             if not (_TYPE_FLAGS.__get__(klass) & _HEAP_TYPE):
                 continue
             if not _trusted_class_body(klass):
@@ -148,6 +175,12 @@ def _trusted_function(function: Any, *, generated: bool) -> bool:
 
     if type(function) is not types.FunctionType:
         return False
+    return _trusted_callable(function, generated=generated)
+
+
+def _function_verdict(function: Any, *, generated: bool) -> Optional[bool]:
+    """関数の code だけで決まる判定（`None` は「実行環境の wrapper: 包んだ callable も確かめる」）。"""
+
     filename = function.__code__.co_filename
     if package_code(function.__code__):
         return True
@@ -155,16 +188,7 @@ def _trusted_function(function: Any, *, generated: bool) -> bool:
         return generated
     if not _runtime_file(filename):
         return False
-    # 実行環境の wrapper（`contextmanager`・`dataclasses` の `__repr__`・`typing` の cache）は包んだ
-    # callable を呼ぶ: それも信頼するものだけ
-    for cell in function.__closure__ or ():
-        try:
-            contents = cell.cell_contents
-        except ValueError:
-            continue
-        if not _trusted_callable(contents, generated=generated):
-            return False
-    return True
+    return None
 
 
 #: C で定義した descriptor・callable の型（包んだ Python の callable を持たない）
@@ -176,22 +200,52 @@ _C_CODE_TYPES = (
 
 
 def _trusted_callable(value: Any, *, generated: bool) -> bool:
-    """closure・class の中の値として信頼する callable か（callable でない値は信頼する）。"""
+    """closure・class の中の値として信頼する callable か（callable でない値は信頼する）。
 
-    holder = type(value)
-    if holder is types.FunctionType:
-        return _trusted_function(value, generated=generated)
-    if holder is types.MethodType:
-        return _trusted_function(value.__func__, generated=generated)
-    if _one_of(holder, _C_CODE_TYPES):
-        return True
-    if issubclass(holder, type):
-        return not (_TYPE_FLAGS.__get__(value) & _HEAP_TYPE) or package_type(value)
-    wrapped = instance_state(value, "__wrapped__", _ABSENT) if _plain_metatype(holder) else _ABSENT
-    if holder is _LRU_WRAPPER and wrapped is not _ABSENT:
-        # `functools.lru_cache` の wrapper（C）: 包んだ関数を信頼するものだけ
-        return _trusted_callable(wrapped, generated=generated)
-    return _inert_value(value)
+    実行環境の wrapper（`contextmanager`・`dataclasses` の `__repr__`・`typing` の cache・`lru_cache`）は
+    包んだ callable を呼ぶ: それも信頼するものだけ。包んだものは 1 つの作業の列で辿り（再帰しない）、
+    辿る数は `SCAN_LIMIT` まで（それを超える入れ子は信頼しない）。
+    """
+
+    pending = [value]
+    nodes = 0
+    while pending:
+        nodes += 1
+        if not _within_scan(nodes):
+            return False
+        item = pending.pop()
+        holder = type(item)
+        if holder is types.MethodType:
+            item = item.__func__
+            holder = type(item)
+        if holder is types.FunctionType:
+            verdict = _function_verdict(item, generated=generated)
+            if verdict is False:
+                return False
+            if verdict is None:
+                cells = item.__closure__ or ()
+                if not _within_scan(nodes + len(pending) + tuple.__len__(cells)):
+                    return False
+                for cell in cells:
+                    try:
+                        pending.append(cell.cell_contents)
+                    except ValueError:
+                        continue
+            continue
+        if _one_of(holder, _C_CODE_TYPES):
+            continue
+        if issubclass(holder, type):
+            if (_TYPE_FLAGS.__get__(item) & _HEAP_TYPE) and not package_type(item):
+                return False
+            continue
+        wrapped = instance_state(item, "__wrapped__", _ABSENT) if _plain_metatype(holder) else _ABSENT
+        if holder is _LRU_WRAPPER and wrapped is not _ABSENT:
+            # `functools.lru_cache` の wrapper（C）: 包んだ関数を信頼するものだけ
+            pending.append(wrapped)
+            continue
+        if not _inert_value(item):
+            return False
+    return True
 
 
 _LRU_WRAPPER = type(__import__("functools").lru_cache(maxsize=None)(len))
@@ -292,21 +346,23 @@ def type_attribute(kind: type, name: str) -> Any:
 def _type_lookup(kind: type, name: str, missing: Any) -> Any:
     """`type_attribute` と同じ（無ければ `missing`。値が `None` の属性と区別する）。"""
 
+    mro = _TYPE_MRO.__get__(kind)
+    _require_scan(tuple.__len__(mro), "a type's MRO")
     plain = _STR_MROS.get(kind) if type(kind) is type else None
     if plain is None:
         plain = all(
-            _str_namespace(klass, _TYPE_DICT.__get__(klass)) for klass in _TYPE_MRO.__get__(kind)
+            _str_namespace(klass, _TYPE_DICT.__get__(klass)) for klass in mro
         )
         if type(kind) is type:
             _STR_MROS[kind] = plain
     if plain:
         # MRO の class の `__dict__` の key が全部組み込みの `str`（型ごとに 1 度確かめた）: hash で引く
-        for klass in _TYPE_MRO.__get__(kind):
+        for klass in mro:
             namespace = _TYPE_DICT.__get__(klass)
             if name in namespace:
                 return namespace[name]
         return missing
-    for klass in _TYPE_MRO.__get__(kind):
+    for klass in mro:
         namespace = _TYPE_DICT.__get__(klass)
         if _str_namespace(klass, namespace):
             if name in namespace:
@@ -340,6 +396,8 @@ def _exact_str_keys(raw: dict) -> bool:
     """dict の storage の key が全部組み込みの `str` か（`dict.__iter__` は storage を読む。key の
     `__hash__` / `__eq__` を呼ばない。型は identity で比べる）。"""
 
+    if not _within_scan(dict.__len__(raw)):
+        return False
     return all(map(_IS, map(type, dict.__iter__(raw)), _REPEAT_STR))
 
 
@@ -347,6 +405,7 @@ def _scan_str_key(raw: dict, name: str, missing: Any) -> Any:
     """組み込みの `str` でない key を持つ dict の `name` の値（組み込みの `str` の key だけを
     組み込みの比較で探す。他の key の `__eq__` を呼ばない）。"""
 
+    _require_scan(dict.__len__(raw), "a mapping read by key")
     for key, value in dict.items(raw):
         if type(key) is str and str.__eq__(key, name):
             return value
@@ -712,7 +771,10 @@ _DICT_HOLDERS: dict = {}
 def _in_mro(klass: Any, kind: type) -> bool:
     """`klass` が `kind` の MRO に在るか（identity で比べる。metaclass の `__eq__` を呼ばない）。"""
 
-    for entry in _TYPE_MRO.__get__(kind):
+    mro = _TYPE_MRO.__get__(kind)
+    if not _within_scan(tuple.__len__(mro)):
+        return False
+    for entry in mro:
         if entry is klass:
             return True
     return False
@@ -878,7 +940,7 @@ _DATACLASS_FIELD_NAMES: dict = {}
 
 def _dataclass_field_names(kind: type) -> Optional[Tuple[str, ...]]:
     table = type_attribute(kind, "__dataclass_fields__")
-    if type(table) is not dict:
+    if type(table) is not dict or not _within_scan(dict.__len__(table)):
         return None
     import dataclasses
 
@@ -920,10 +982,16 @@ def builtin_mapping(item: Any) -> Any:
         # だけ（storage の key を hash せずに確かめる）
         return item if _hash_safe_keys(item) else None
     if kind is types.MappingProxyType:
-        referents = gc.get_referents(item)
-        if len(referents) != 1 or builtin_mapping(referents[0]) is None:
-            return None
-        return item
+        # 包んだ値を段ごとに辿る（段の数は上限まで。再帰しない）
+        inner = item
+        for _depth in range(SCAN_LIMIT):
+            referents = gc.get_referents(inner)
+            if len(referents) != 1:
+                return None
+            inner = referents[0]
+            if type(inner) is not types.MappingProxyType:
+                return item if builtin_mapping(inner) is not None else None
+        return None
     if not _builtin_behaviour(kind, _BUILTIN_DICTS, ("items", "__iter__", "__len__")):
         return None
     if issubclass(kind, OrderedDict) and not _hash_safe_keys(item):
@@ -1019,7 +1087,10 @@ def _mapping_base(mapping: Any) -> type:
 def _unwrapped(mapping: Any) -> Any:
     """`MappingProxyType` なら包んだ mapping（proxy の method は包んだ値の method を名前で呼ぶので使わない）。"""
 
+    depth = 0
     while type(mapping) is types.MappingProxyType:
+        depth += 1
+        _require_scan(depth, "a chain of mapping proxies")
         mapping = gc.get_referents(mapping)[0]
     return mapping
 
@@ -1044,6 +1115,8 @@ def values_of(mapping: Any) -> Iterator[Any]:
 def _plain_keys(raw: dict) -> bool:
     """storage の key が全部 plain な値（`_plain_key`。hash・比較が組み込みの実装）か。"""
 
+    if not _within_scan(dict.__len__(raw)):
+        return False
     for key in dict.__iter__(raw):
         if not _plain_key(key):
             return False
@@ -1054,6 +1127,8 @@ def _hash_safe_keys(raw: dict) -> bool:
     """storage の key の hash・比較が全部組み込みの実装か（組み込みの scalar・hash を上書きしない
     scalar の subclass・組み込みのままの enum・それらの tuple）。storage を `dict.__iter__` で読む。"""
 
+    if not _within_scan(dict.__len__(raw)):
+        return False
     for key in dict.__iter__(raw):
         if not _hash_safe_key(key):
             return False
@@ -1068,12 +1143,18 @@ def hash_safe_key(key: Any) -> bool:
 
 def _hash_safe_key(key: Any) -> bool:
     pending = [key]
+    nodes = 0
     while pending:
+        nodes += 1
+        if not _within_scan(nodes):
+            return False
         item = pending.pop()
         kind = type(item)
         if item is None or kind is str or kind is int or kind is bool or kind is float:
             continue
         if kind is tuple:
+            if not _within_scan(nodes + len(pending) + tuple.__len__(item)):
+                return False
             pending.extend(item)
             continue
         if not (builtin_hashed_scalar(item) or builtin_enum(item)):
@@ -1090,6 +1171,7 @@ def merged_mappings(*mappings: Any) -> dict:
 
     merged: dict = {}
     for mapping in mappings:
+        _require_scan(size(mapping), "a merged mapping")
         for key, value in items_of(mapping):
             if type(key) is not str:
                 raise TypeError(f"mapping key {type_name(type(key))} is not a builtin str")
@@ -1108,6 +1190,7 @@ def copied_container(value: Any) -> Any:
     kind = type(value)
     if issubclass(kind, dict):
         # storage の key を先に確かめる（`dict.__iter__` は storage を読む。key の code は呼ばない）
+        _require_scan(dict.__len__(value), "a copied mapping")
         keys = tuple(dict.__iter__(value))
         for key in keys:
             if not _plain_key(key):
@@ -1115,6 +1198,7 @@ def copied_container(value: Any) -> Any:
         base = OrderedDict if issubclass(kind, OrderedDict) else dict
         return dict(base.items(value))
     if issubclass(kind, list):
+        _require_scan(list.__len__(value), "a copied list")
         return list.copy(value)
     return NOT_PLAIN
 
@@ -1133,6 +1217,7 @@ def lookup(mapping: Any, key: Any, default: Any = None) -> Any:
         return base.get(raw, key, default)
     # 組み込みでない key（`__eq__` を上書きした str の subclass など）を持つ mapping: hash で引くと
     # その key の `__eq__` を呼び得る。plain な key だけを組み込みの比較で探す
+    _require_scan(dict.__len__(raw), "a mapping read by key")
     for stored, value in dict.items(raw):
         if _plain_key(stored) and stored == key:
             return value
@@ -1140,12 +1225,25 @@ def lookup(mapping: Any, key: Any, default: Any = None) -> Any:
 
 
 def _plain_key(key: Any) -> bool:
-    kind = type(key)
-    if key is None or kind is str or kind is int or kind is bool or kind is float:
-        return True
-    if kind is tuple:
-        return all(_plain_key(part) for part in key)
-    return False
+    """組み込みの scalar か、その tuple か（node の数は上限まで。再帰しない）。"""
+
+    pending = [key]
+    nodes = 0
+    while pending:
+        nodes += 1
+        if not _within_scan(nodes):
+            return False
+        item = pending.pop()
+        kind = type(item)
+        if item is None or kind is str or kind is int or kind is bool or kind is float:
+            continue
+        if kind is tuple:
+            if not _within_scan(nodes + len(pending) + tuple.__len__(item)):
+                return False
+            pending.extend(item)
+            continue
+        return False
+    return True
 
 
 def package_generator(value: Any) -> bool:
@@ -1165,6 +1263,7 @@ def elements_of(values: Any) -> Iterator[Any]:
 
 
 __all__ = [
+    "SCAN_LIMIT",
     "NOT_PLAIN",
     "PACKAGE_DIR",
     "package_code",
