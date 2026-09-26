@@ -1008,19 +1008,20 @@ _B_FROZEN = (
 _B_SCHEMA_ROWS = "B: G4-b（`finitize_legacy_reasons`）が出力 schema の行数へ切った列を辿る"
 _C_LAZY = "C: 1 要素ずつ yield する generator を walker へ渡す（walker が引き出すたびに数える）"
 _B_OWNER_ELEMENTS = (
-    "B: 作業量を受け取らない record の構築・写し。解析の値の列・mapping は `live_values.elements_within_limit` /"
+    "B: 作業量を受け取らない record の構築・写し。解析の値の列・mapping は `read_limits.elements_within_limit` /"
     " `items_within_limit` だけで辿る（owner の固定の上限 `SCAN_LIMIT`。辿る前に O(1) で比べ、超えれば"
-    " `TypeError`）。入れ子の列は 1 つの上限を共有し、深さは `NESTING_LIMIT` まで"
+    " 登録済みの限界）。入れ子の列は 1 つの上限を共有し、深さは `NESTING_LIMIT` まで"
 )
 _A_FIXED_CALL = "A: 固定の形（呼び出しの keyword・定数の上限の stack の行・型の dataclass の field 名）だけを辿る"
-_A_GATE_RECORD = (
-    "A: producer 時点の record の構築（大きい値は G4-b の `finitize_legacy_reasons` が判定の前に作業量で"
-    " 有界にする）。bounded path からは pair の失敗の変換（`_PairFailureGate`）が作る固定の形の結果"
-    "（登録した限界の場所の reason 1 件）だけが通る"
+_B_COUNTED_RECORD = (
+    "B: record の列の構築・写し。bounded path（G4-b → finish → 最終 envelope）の呼び出しは、渡す列が"
+    " 出力 schema の行数以下（G4-b が切った列・pair の失敗の変換の固定の形の record）か、呼ぶ側が同じ"
+    " 作業量へ先に数えた列だけ（`test_record_walks_on_the_bounded_path_see_only_schema_rows_or_counted_input`"
+    " が実行して確かめる）"
 )
 _B_DIAGNOSTIC_KEYS = (
-    "B: 診断の mapping の key の写しは `live_values.SCAN_LIMIT` まで（長さを O(1) で比べてから辿る。"
-    " 外は件数の marker で、判定には使わない）"
+    "B: 診断の mapping の key の写しは先頭の `live_values.SCAN_LIMIT` 組まで（`read_limits.prefix_within_limit`。"
+    " 残りは件数の marker で、判定には使わない）"
 )
 _D_IDENTITY = "D(#194): 構造の identity の atom の digest（identity の owner の `core/semantic_snapshot`）"
 _B_MATCHED = (
@@ -1051,18 +1052,20 @@ _PROPORTIONAL_WORK_OWNERS = {
     )},
     ("checker.output_preparation", "OutputPreparer._prepare_cause_evidence"): _B_PREPARED,
     ("checker.output_preparation", "_attach_budget_diagnostics"): _B_DIAGNOSTIC_KEYS,
+    ("checker.output_preparation", "output_contract_policy"): _A_FIXED,
+    ("checker.output_schema", "required_headroom_bytes"): _A_FIXED,
     ("checker.output_preparation", "_bounded_utf8_length"): _B_BOUND,
     ("checker.output_preparation", "_rows"): _B_SCHEMA_ROWS,
     **{("checker.output_schema", name): _A_FIXED for name in (
         "_object_bytes", "_superseded_max_bytes", "authority_field_bounds", "conditional_receipt_max_bytes",
         "metadata_field_bounds",
     )},
-    ("checker.result", "EquivalenceResult.__post_init__"): _A_GATE_RECORD,
-    ("checker.result", "EquivalenceResult._has_pending_proof_gate"): _A_GATE_RECORD,
-    ("checker.result", "EquivalenceResult.is_timeout"): _A_GATE_RECORD,
+    ("checker.result", "EquivalenceResult.__post_init__"): _B_COUNTED_RECORD,
+    ("checker.result", "EquivalenceResult._has_pending_proof_gate"): _B_COUNTED_RECORD,
+    ("checker.result", "EquivalenceResult.is_timeout"): _B_OWNER_ELEMENTS,
     ("checker.result_assembly", "analysis_limitation_result_for_pair"): _B_OWNER_ELEMENTS,
     ("checker.result_assembly", "internal_error_result_for_pair"): _A_FIXED_CALL,
-    **{("checker.unknown_reason", name): _A_GATE_RECORD for name in (
+    **{("checker.unknown_reason", name): _B_COUNTED_RECORD for name in (
         "_index_positions", "_optional_tuple_of", "_payload_view", "coerce_unknown_reason_records", "coerce_unknown_recovery_actions",
     )},
     **{("checker.unknown_reason", name): _A_FIXED_CALL for name in (
@@ -1092,7 +1095,7 @@ _PROPORTIONAL_WORK_OWNERS = {
     ("proof.obligations.snapshot", "_set_members"): _B_FROZEN,
     ("proof.unknown_reason", "UnknownRecoveryPlan.json_items"): _C_LAZY,
     ("proof.unknown_reason", "UnknownRecoveryProofObligation.json_items"): _C_LAZY,
-    **{("proof.unknown_reason", name): _A_GATE_RECORD for name in (
+    **{("proof.unknown_reason", name): _B_COUNTED_RECORD for name in (
         "_coerce_evidence_refs", "_coerce_optional_tuple", "coerce_unknown_recovery_proof_obligations",
     )},
     ("proof.unknown_reason", "_registered_recovery_proof_kind_values"): _A_FIXED,
@@ -2324,3 +2327,15 @@ def test_the_snapshot_mapping_order_rejects_duplicate_canonical_keys():
     assert ordered == (("a", 1), ("b", 2), ("c", 3))
     with pytest.raises(ValueError, match="duplicate canonical semantic keys"):
         SnapshotFingerprintCodec.sorted_mapping_items((("a", 1), ("b", 2), ("a", 3)))
+
+
+def test_every_counted_record_label_is_checked_at_runtime():
+    """「数えてから辿る」record のラベルは、実行して確かめる test の対象と同じ集合（ラベルだけ付け替えて
+    通すことはできない）。"""
+
+    from scripts.function_tracer_pcode.tests.unit.test_issue22d_compositional_boundedness import (
+        _record_walk_targets,
+    )
+
+    labelled = {name for (_module, name), label in _PROPORTIONAL_WORK_OWNERS.items() if label == _B_COUNTED_RECORD}
+    assert labelled == set(_record_walk_targets().values())

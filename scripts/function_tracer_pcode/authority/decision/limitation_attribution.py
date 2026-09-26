@@ -253,8 +253,20 @@ def _matching_active_rows(
     return tuple(matches)
 
 
-def _plain_limitation(describe: Any, limitation: AnalysisLimitation) -> AnalysisLimitation:
-    """限界（と帰属キー）の plain な写し（`describe` は session の上限つきの写し。1 回で全部を写す）。"""
+@dataclass(frozen=True)
+class _PlainLimitation:
+    """帰属が読む限界の記述の plain な写し（例外そのものは作り直さない: `detail` を写さない）。"""
+
+    site: str
+    target_key: tuple
+    missing_semantic_fact: tuple
+    evidence_refs: tuple
+    attribution: Optional[CauseAttributionKey]
+
+
+def _plain_limitation(describe: Any, limitation: AnalysisLimitation) -> _PlainLimitation:
+    """限界（と帰属キー）の、帰属が読む field の plain な写し（`describe` は session の上限つきの写し。
+    1 回で全部を写す）。"""
 
     key = limitation.attribution
     key_parts = None if key is None else (
@@ -279,9 +291,9 @@ def _plain_limitation(describe: Any, limitation: AnalysisLimitation) -> Analysis
             active_semantic_precondition=active_semantic_precondition,
             correspondence_contract=correspondence_contract,
         )
-    return AnalysisLimitation(
-        limitation.reason_id, limitation.detail, site=limitation.site, target_key=target_key,
-        missing_semantic_fact=missing, evidence_refs=evidence_refs, attribution=plain_key,
+    return _PlainLimitation(
+        site=limitation.site, target_key=tuple(target_key), missing_semantic_fact=tuple(missing),
+        evidence_refs=tuple(evidence_refs), attribution=plain_key,
     )
 
 
@@ -357,7 +369,7 @@ def attribute_analysis_limitation(
                 pilot, limitation, "the pilot session cannot bound a limitation description",
             )
         try:
-            limitation = _plain_limitation(describe, limitation)
+            plain = _plain_limitation(describe, limitation)
         except AuthorityEventContractExceeded:
             return _unattributed(
                 pilot, limitation, "the limitation description is outside the authority event contract",
@@ -366,7 +378,7 @@ def attribute_analysis_limitation(
             return _unattributed(
                 pilot, limitation, f"the limitation description is not plain: {type(exc).__name__}",
             )
-        key = limitation.attribution
+        key = plain.attribution
 
     if definition.domain == ANALYSIS_LIMITATION_DOMAIN:
         if pilot is None:
@@ -377,10 +389,10 @@ def attribute_analysis_limitation(
         try:
             occurrence_id = observe_analysis_limitation(
                 reason_id=reason_id,
-                limitation_site=limitation.site,
-                target_key=limitation.target_key,
-                missing_semantic_fact=limitation.missing_semantic_fact,
-                evidence_refs=limitation.evidence_refs,
+                limitation_site=plain.site,
+                target_key=plain.target_key,
+                missing_semantic_fact=plain.missing_semantic_fact,
+                evidence_refs=plain.evidence_refs,
             )
             row = (
                 None if occurrence_id is None

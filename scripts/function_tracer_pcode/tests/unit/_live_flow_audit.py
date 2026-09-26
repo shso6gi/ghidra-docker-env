@@ -25,7 +25,7 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 PKG = "scripts.function_tracer_pcode"
 #: 作業量か authority の event の契約が仕事を抑える authority の入口（その owner の表）
 from scripts.function_tracer_pcode.authority.event_contract import BOUNDED_ENTRY_POINTS  # noqa: E402
-OWNER_MODULES = frozenset({PKG + ".core.json_encoding", PKG + ".core.live_values"})
+OWNER_MODULES = frozenset({PKG + ".core.json_encoding", PKG + ".core.live_values", PKG + ".core.read_limits"})
 #: 外部の依存（D）: live な値を渡すこと自体を違反にする
 EXTERNAL_PREFIXES = (PKG + ".authority.", PKG + ".cli.")
 
@@ -54,6 +54,10 @@ LIVE_VALUES_RESULTS = {
     "values_of": ITER,
     "elements_of": ITER,
     "builtin_mapping": VER,
+    # `core/read_limits`（作業量を受け取らない読みの固定の上限）
+    "elements_within_limit": ITER,
+    "items_within_limit": ITER,
+    "prefix_within_limit": CONT,
 }
 #: 真のとき引数を VER にする live_values の述語
 VERIFYING_PREDICATES = frozenset({"builtin_sequence", "builtin_set", "builtin_iterator", "builtin_container"})

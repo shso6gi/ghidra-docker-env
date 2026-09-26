@@ -531,3 +531,104 @@ def test_h4_m3_a_new_authority_field_must_extend_the_output_schema(monkeypatch):
     extended = {**bounds, "extra_authority": bounds["final_outcome"].__class__("extra_authority", 64, "test")}
     monkeypatch.setattr(output_schema, "authority_field_bounds", lambda _policy=None: extended)
     assert build_final_result_envelope(result).payload["extra_authority"] == "v"
+
+
+# ---------------------------------------------------------------------------
+# J22 の「数えてから辿る」record の関数: bounded path の呼び出しは、渡す列が schema の行数以下か、
+# 同じ作業量へ先に数えた列だけ（ラベルの主張を実行して確かめる）
+# ---------------------------------------------------------------------------
+
+
+def _record_walk_targets():
+    from scripts.function_tracer_pcode.checker import result as result_module
+    from scripts.function_tracer_pcode.checker import unknown_reason as checker_reasons
+    from scripts.function_tracer_pcode.proof import unknown_reason as proof_reasons
+
+    targets = {}
+    for owner, names in (
+        (checker_reasons, ("_index_positions", "_optional_tuple_of", "_payload_view",
+                           "coerce_unknown_reason_records", "coerce_unknown_recovery_actions")),
+        (proof_reasons, ("_coerce_evidence_refs", "_coerce_optional_tuple",
+                         "coerce_unknown_recovery_proof_obligations")),
+    ):
+        for name in names:
+            targets[getattr(owner, name).__code__] = name
+    for name in ("__post_init__", "_has_pending_proof_gate"):
+        targets[result_module.EquivalenceResult.__dict__[name].__code__] = f"EquivalenceResult.{name}"
+    return targets
+
+
+def _walked_sizes(run):
+    """bounded path（G4-b → finish → 最終 envelope）の中の呼び出しごとの (関数, 列の長さ, 数え済みの作業量)。"""
+
+    import sys
+
+    from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
+
+    targets = _record_walk_targets()
+    roots = {
+        output_preparation.prepare_pair_output.__code__,
+        production_boundary._profiled_finish.__code__,
+        output_preparation.build_final_result_envelope.__code__,
+    }
+    inside = [0]
+    calls = []
+
+    def _size(value):
+        return len(value) if type(value) in (list, tuple, dict, set, frozenset) else 0
+
+    def _profile(frame, event, _arg):
+        code = frame.f_code
+        if code in roots:
+            inside[0] += 1 if event == "call" else -1 if event == "return" else 0
+        elif event == "call" and inside[0] and code in targets:
+            local = frame.f_locals
+            sizes = [_size(value) for value in local.values()]
+            owner = local.get("self")
+            if owner is not None:
+                sizes += [_size(vars(owner).get(name)) for name in ("unknown_reasons", "unknown_recovery_actions")]
+            work = active_serialization_work()
+            calls.append((targets[code], max(sizes + [0]), None if work is None else work.consumed))
+
+    sys.setprofile(_profile)
+    try:
+        result = run()
+    finally:
+        sys.setprofile(None)
+    return result, calls
+
+
+@pytest.mark.parametrize("where", ["result", "final_attempt"])
+def test_record_walks_on_the_bounded_path_see_only_schema_rows_or_counted_input(where):
+    count = 5_000
+
+    def _plan(*_args, **_kwargs):
+        _emit_one_production_signal()
+        result = create_mock_result(is_equivalent=None, solver_status=SolverStatus.UNKNOWN)
+        reasons = [_legacy_reason(("call_effect_blocker", index), {"blob": (index,)}) for index in range(count)]
+        result.unknown_reasons = reasons if where == "result" else reasons[:1]
+        trace = DebugTrace(planned_phases=["P0_BASE"], known_phases=["P0_BASE"])
+        trace.add_attempt(Attempt(
+            attempt_id=0, retry_count=0, phase="P0_BASE", stage_path=["P0_BASE"],
+            strategy="pairwise", result=None, transition_reason="UNKNOWN",
+            unknown_reasons=reasons if where == "final_attempt" else reasons[:1],
+        ))
+        result.debug_trace = trace
+        return result
+
+    def _run():
+        result = _run_pair(analyze=_analyze_from(*_analyses()), stage_plan=_plan, checker=_new_checker(_connector()))
+        build_final_result_envelope(result)
+        return result
+
+    result, calls = _walked_sizes(_run)
+    assert result.final_outcome == "UNKNOWN"
+    rows = output_schema.MAX_UNKNOWN_REASON_ROWS
+    unbounded = [
+        (name, walked, consumed) for name, walked, consumed in calls
+        if walked > rows and (consumed is None or consumed < walked)
+    ]
+    assert calls and unbounded == []
+    # 結果の legacy reason の列（5,000 件）は、集計が作業量へ数えてから辿る（上の条件の後半）。
+    # 最終 attempt の列は数えている途中で作業量が尽き、辿られない
+    assert any(walked > rows for _name, walked, _consumed in calls) is (where == "result")

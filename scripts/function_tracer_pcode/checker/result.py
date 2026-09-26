@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any, List, Mapping, Tuple
 from dataclasses import dataclass, field
 
 from scripts.function_tracer_pcode.core import FunctionSignature, live_values
+from scripts.function_tracer_pcode.core import read_limits
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverStatus
 from scripts.function_tracer_pcode.checker.counterexample import FormattedCounterexample
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
@@ -291,7 +292,8 @@ class EquivalenceResult:
         results = live_values.attribute(solver_results, "results")
         if results is None or not live_values.as_bool(results):
             return False
-        for sr in live_values.elements_of(results):
+        # receipt の無い結果（authority の前・旧来の結果）だけ: solver の結果の列は owner の固定の上限まで
+        for sr in read_limits.elements_within_limit(results):
             # `SolverStatus` は mixin の無い enum: `==` は identity
             if live_values.attribute(sr, "status") is SolverStatus.TIMEOUT:
                 return True

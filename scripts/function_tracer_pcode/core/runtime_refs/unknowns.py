@@ -11,13 +11,12 @@ from scripts.function_tracer_pcode.core.live_values import (
     as_bool,
     as_int,
     attribute,
-    elements_within_limit,
-    scan_budget,
     elements_of,
     str_value,
     type_module,
     type_name,
 )
+from scripts.function_tracer_pcode.core.read_limits import elements_within_limit, scan_budget
 from scripts.function_tracer_pcode.core.json_encoding import (
     as_list, builtin_str, inline, is_json_record, materialize, raw,
 )

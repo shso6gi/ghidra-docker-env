@@ -354,6 +354,18 @@ def test_output_preparation_never_runs_past_the_contract_even_with_the_budget_of
         assert prepared.prepared_payload_limit() is not None
     default = expression_budget_policy({})
     assert OutputPreparer(default).policy is default
+    # 上限で置き換えるときは headroom も有効な値（設定の組み合わせで policy を作れない値にしない）。
+    # 準備した payload と判定に使わない準備物（headroom を共有）の和は上限の中
+    huge_headroom = expression_budget_policy({
+        "FT_SERIALIZATION_BYTES_BUDGET": "off", "FT_ENVELOPE_HEADROOM_BYTES": str(300 << 20),
+    })
+    clamped = OutputPreparer(huge_headroom).policy
+    assert clamped.envelope_headroom_bytes <= ceiling // 2
+    assert clamped.prepared_payload_limit() + clamped.envelope_headroom_bytes == ceiling
+    no_headroom = OutputPreparer(expression_budget_policy({
+        "FT_SERIALIZATION_BYTES_BUDGET": "off", "FT_ENVELOPE_HEADROOM_BYTES": "off",
+    })).policy
+    assert no_headroom.envelope_headroom_bytes == output_schema.required_headroom_bytes()
 
 
 def test_the_diagnostics_copy_is_bounded_and_leaves_a_count_marker():
@@ -369,9 +381,33 @@ def test_the_diagnostics_copy_is_bounded_and_leaves_a_count_marker():
     started = time.perf_counter()
     output_preparation._attach_budget_diagnostics(result, prepared, BudgetPolicy.unlimited())
     assert time.perf_counter() - started < 1.0
-    assert result.diagnostics["diagnostics_overflow"] == {"truncated": True, "keys": 10 ** 6}
-    assert set(result.diagnostics) == {"diagnostics_overflow", "expression_budget"}
+    limit = live_values.SCAN_LIMIT
+    assert result.diagnostics["diagnostics_overflow"] == {"truncated": True, "keys": 10 ** 6, "kept": limit}
+    # 先頭の上限の組は残す（`failures` など既存の診断を捨てない）
+    assert len(result.diagnostics) == limit + 2 and result.diagnostics["k0"] == 0
     small = create_mock_result(is_equivalent=True)
     small.diagnostics = {f"k{index}": index for index in range(live_values.SCAN_LIMIT)}
     output_preparation._attach_budget_diagnostics(small, prepared, BudgetPolicy.unlimited())
     assert len(small.diagnostics) == live_values.SCAN_LIMIT + 1
+
+
+def test_a_limitation_with_more_evidence_than_the_read_bound_is_still_an_attributed_unknown():
+    """authority の契約に収まる限界（参照 5,000 件）は、診断の写しが先頭だけでも pair を止めない:
+    登録済みの理由の UNKNOWN に帰属し、写さなかった件数を診断に残す。"""
+
+    from scripts.function_tracer_pcode.core import live_values
+    from scripts.function_tracer_pcode.core.errors import DeadlineExceeded, raise_limitation
+
+    refs = tuple(f"e{index}" for index in range(5_000))
+
+    def _plan(*_args, **_kwargs):
+        raise_limitation(DeadlineExceeded(
+            "many evidence refs", site="issue22d.o4.many-refs", target_key=("issue22d-many-refs",),
+            evidence_refs=refs,
+        ))
+
+    result = _run_pair(analyze=_analyze_from(*_analyses()), stage_plan=_plan, checker=_new_checker(_connector()))
+    assert result.final_outcome == "UNKNOWN"
+    assert BUDGET_REASON in {reason.reason_id for reason in result.unknown_reasons}
+    text = json.dumps(result.diagnostics, default=str)
+    assert f'"evidence_refs_omitted": {len(refs) - live_values.SCAN_LIMIT}' in text

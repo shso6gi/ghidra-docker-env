@@ -1439,19 +1439,29 @@ def test_the_smt_formula_is_a_prepared_artifact_that_never_blocks_a_decision():
     with pair_failure_scope(("formula",), None) as ledger, budget_policy_scope(small):
         result.prepared_semantic_payload = OutputPreparer(small).prepare(result, asked)
         assert ledger.pending_failure() is None
-    artifact = prepared_smt_formula(result)
+    artifact = prepared_smt_formula(result, requested=True)
     assert artifact.text is None and artifact.omitted_over_bytes == 20_000
     result.prepared_semantic_payload = OutputPreparer(BudgetPolicy.unlimited()).prepare(result, asked)
-    assert prepared_smt_formula(result).text == result.smt_formula
+    assert prepared_smt_formula(result, requested=True).text == result.smt_formula
+    # 頼まれていなければ何もしない
+    assert prepared_smt_formula(result, requested=False).text is None
     # 準備済みでない結果も同じ owner が同じ上限で準備する（生の属性をそのまま返さない）
     unprepared = create_mock_result(is_equivalent=True)
     unprepared.smt_formula = result.smt_formula
     with budget_policy_scope(small):
-        artifact = prepared_smt_formula(unprepared)
+        artifact = prepared_smt_formula(unprepared, requested=True)
     assert artifact.text is None and artifact.omitted_over_bytes == 20_000
-    assert prepared_smt_formula(unprepared).text == result.smt_formula
+    assert prepared_smt_formula(unprepared, requested=True).text == result.smt_formula
+    # 式にならない値・読めない live な値は保存しない（authority の後なので失敗にしない）
     unprepared.smt_formula = ["not", "a", "formula"]
-    assert prepared_smt_formula(unprepared).text is None
+    assert prepared_smt_formula(unprepared, requested=True).text is None
+
+    class _Live:
+        pass
+
+    unprepared.smt_formula = _Live()
+    assert prepared_smt_formula(unprepared, requested=True).text is None
+    assert prepared_smt_formula(unprepared, requested=False).text is None
 
 
 def test_metadata_counters_are_truncated_not_turned_into_a_limitation():

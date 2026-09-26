@@ -931,7 +931,7 @@ def run_equivalence_check(args):
 
     # Issue #22 PR-22-D: 保存する SMT 式は authority 確定前に準備した成果物だけ
     # （予算を超えていれば省かれている。判定には効かない）。
-    formula = prepared_smt_formula(result)
+    formula = prepared_smt_formula(result, requested=bool(args.save_formula))
     if args.save_formula and formula.omitted_over_bytes is not None:
         print(
             "SMT formula was not saved: it exceeds the serialization budget "

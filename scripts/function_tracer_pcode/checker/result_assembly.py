@@ -39,6 +39,7 @@ from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.checker.result_factory import create_error_result
 from scripts.function_tracer_pcode.checker.unknown_reason import make_internal_v2_reason_diagnostic
 from scripts.function_tracer_pcode.core import FunctionSignature, live_values
+from scripts.function_tracer_pcode.core import read_limits
 from scripts.function_tracer_pcode.core.render_smt import UnknownSmtExtensionWidthError
 from scripts.function_tracer_pcode.smt import ParallelResult
 
@@ -368,11 +369,15 @@ def analysis_limitation_result(
     )
 
     attribution = attribute_analysis_limitation(session, exc)
+    evidence_refs = read_limits.prefix_within_limit(exc.evidence_refs)
+    omitted_refs = read_limits.omitted_beyond_limit(exc.evidence_refs)
     diagnostic = {
         **attribution.to_diagnostic(),
         "site": exc.site,
         "exception_type": type(exc).__name__,
-        "evidence_refs": list(live_values.elements_within_limit(exc.evidence_refs)),
+        # 診断の写しは先頭だけ（判定に使わない。authority の cause は契約の中で全部を持つ）
+        "evidence_refs": list(evidence_refs),
+        **({"evidence_refs_omitted": omitted_refs} if omitted_refs else {}),
         "message": str(exc)[:500],
     }
     if not attribution.is_attributed:
@@ -417,7 +422,10 @@ def analysis_limitation_result(
             make_internal_v2_reason_diagnostic(
                 exc.reason_id,
                 stage="S_ANALYSIS_LIMITATION",
-                evidence_refs=(exc.site, *live_values.elements_within_limit(exc.evidence_refs)),
+                evidence_refs=(
+                    exc.site, *evidence_refs,
+                    *((f"evidence_refs_omitted={omitted_refs}",) if omitted_refs else ()),
+                ),
                 object_target_key=(
                     "analysis_limitation_v1",
                     exc.reason_id,
@@ -552,11 +560,15 @@ def analysis_limitation_result_for_pair(
     )
 
     attribution = attribute_analysis_limitation(session, exc)
+    evidence_refs = read_limits.prefix_within_limit(exc.evidence_refs)
+    omitted_refs = read_limits.omitted_beyond_limit(exc.evidence_refs)
     diagnostic = {
         **attribution.to_diagnostic(),
         "site": exc.site,
         "exception_type": type(exc).__name__,
-        "evidence_refs": list(live_values.elements_within_limit(exc.evidence_refs)),
+        # 診断の写しは先頭だけ（判定に使わない。authority の cause は契約の中で全部を持つ）
+        "evidence_refs": list(evidence_refs),
+        **({"evidence_refs_omitted": omitted_refs} if omitted_refs else {}),
         "message": str(exc)[:500],
         "pair_scoped": True,
     }
@@ -611,7 +623,10 @@ def analysis_limitation_result_for_pair(
                 make_internal_v2_reason_diagnostic(
                     exc.reason_id,
                     stage="S_ANALYSIS_LIMITATION",
-                    evidence_refs=(exc.site, *live_values.elements_within_limit(exc.evidence_refs)),
+                    evidence_refs=(
+                    exc.site, *evidence_refs,
+                    *((f"evidence_refs_omitted={omitted_refs}",) if omitted_refs else ()),
+                ),
                     object_target_key=(
                         "analysis_limitation_v1",
                         exc.reason_id,
@@ -763,7 +778,7 @@ def _hypotheses_of(analysis: Any) -> list:
     if analysis is None:
         return []
     hypotheses = live_values.attribute(analysis, "signature_hypotheses")
-    return [] if hypotheses is None else list(live_values.elements_within_limit(hypotheses))
+    return [] if hypotheses is None else list(read_limits.elements_within_limit(hypotheses))
 
 
 def _common_fields(**fields: Any) -> Dict[str, Any]:

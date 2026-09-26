@@ -30,6 +30,7 @@ import itertools
 import operator
 import os
 import sys
+import threading
 import types
 from collections import OrderedDict
 from enum import Enum
@@ -92,7 +93,23 @@ class _Scan:
 #: 型の信頼の判定の入れ子（class の中の値が別の型を指し、その型の判定が始まる）の深さの上限。
 #: 判定は型ごとに 1 度だけで（cache）、入れ子は Python の stack を使うので、その余裕の中の小さい値
 NESTING_LIMIT = 32
-_PACKAGE_TYPE_DEPTH = [0]
+
+
+class _Nesting(threading.local):
+    """判定の途中の状態（thread ごと。途中の仮の「信頼」を他の thread の判定へ見せない）。
+
+    * `active`: 判定の途中の型 → 入れ子の深さ（型が自分や祖先を指す循環は、その間だけ信頼する側）
+    * `assumed`: 途中で仮定した祖先の深さの最小（仮定に依る判定は、仮定した型の判定より内なら cache しない）
+    * `cut`: 途中で入れ子の上限に当たったか（上限で切った判定は cache しない: 浅い呼び出しで判定し直す）
+    """
+
+    def __init__(self) -> None:
+        self.active: dict = {}
+        self.assumed = NESTING_LIMIT + 1
+        self.cut = False
+
+
+_NESTING = _Nesting()
 
 
 def trust_code_directory(path: str) -> None:
@@ -159,20 +176,33 @@ def package_type(kind: type) -> bool:
     known = _PACKAGE_TYPES.get(kind)
     if known is not None:
         return known
-    if _PACKAGE_TYPE_DEPTH[0] >= NESTING_LIMIT:
-        # 型の中の値が指す型の判定の入れ子が深すぎる: 信頼しない（cache しない: 浅い呼び出しで判定し直す）
+    state = _NESTING
+    depth = state.active.get(kind)
+    if depth is not None:
+        # 型の属性が判定の途中の型（自分・祖先）を指す循環: その間だけ信頼する側に置く（仮定を記録する）
+        state.assumed = min(state.assumed, depth)
+        return True
+    depth = len(state.active)
+    if depth >= NESTING_LIMIT:
+        # 型の中の値が指す型の判定の入れ子が深すぎる: 信頼しない（この判定を含む判定は cache しない）
+        state.cut = True
         return False
-    # 型の属性が型自身を指す（入れ子の class の循環）ときは、調べている間は信頼する側に置く。判定が
-    # 終わらずに抜けても（例外）、仮の値は残さない（信頼しない値に置き換える）
-    _PACKAGE_TYPES[kind] = True
-    _PACKAGE_TYPE_DEPTH[0] += 1
+    outer_assumed, outer_cut = state.assumed, state.cut
+    state.assumed, state.cut = NESTING_LIMIT + 1, False
+    state.active[kind] = depth
+    known = False
     decided = False
     try:
         known = _package_type_uncached(kind)
         decided = True
     finally:
-        _PACKAGE_TYPE_DEPTH[0] -= 1
-        _PACKAGE_TYPES[kind] = known if decided else False
+        del state.active[kind]
+        assumed, cut = state.assumed, state.cut
+        state.assumed, state.cut = min(outer_assumed, assumed), outer_cut or cut
+    # 確定した判定だけを残す: 上限で切らず、仮定したのが自分（か内の型）だけのとき。例外で抜けた
+    # 判定・祖先の仮定に依る判定は残さない（仮の値は他の判定にも他の thread にも見えない）
+    if decided and not cut and assumed >= depth:
+        _PACKAGE_TYPES[kind] = known
     return known
 
 
@@ -339,12 +369,21 @@ def _trusted_namespace_value(name: Any, value: Any, *, dataclass_body: bool, sca
 def _trusted_class_body(klass: type) -> bool:
     """class の body（`__dict__`）の値が全部許した種類か（class ごとに 1 度だけ。辿る数の和は上限まで）。"""
 
-    cacheable = _plain_metatype(type(klass)) if type(klass) is not type else True
+    # cache の key にするのは metaclass が `__eq__` / `__hash__` を持たない class だけ（その code を呼ばない）
+    cacheable = _plain_metatype(klass)
     known = _TRUSTED_BODIES.get(klass) if cacheable else None
     if known is not None:
         return known
-    known = _trusted_class_body_uncached(klass)
-    if cacheable:
+    state = _NESTING
+    outer_assumed, outer_cut = state.assumed, state.cut
+    state.assumed, state.cut = NESTING_LIMIT + 1, False
+    try:
+        known = _trusted_class_body_uncached(klass)
+    finally:
+        assumed, cut = state.assumed, state.cut
+        state.assumed, state.cut = min(outer_assumed, assumed), outer_cut or cut
+    # 判定の途中の型の仮定にも入れ子の上限にも依らない判定だけを残す（class の body は型の判定の内側）
+    if cacheable and not cut and assumed > NESTING_LIMIT:
         _TRUSTED_BODIES[klass] = known
     return known
 
@@ -1361,48 +1400,6 @@ def package_generator(value: Any) -> bool:
     return type(value) is types.GeneratorType and package_code(value.gi_code)
 
 
-def scan_budget() -> Any:
-    """入れ子の列を辿る 1 つの判定が共有する上限（`elements_within_limit(..., scan=)` に渡す）。"""
-
-    return _Scan()
-
-
-def elements_within_limit(values: Any, scan: Any = None) -> Iterator[Any]:
-    """`elements_of` と同じ要素を `SCAN_LIMIT` 個まで（大きさの分かる容器は辿る前に O(1) で比べ、
-    iterator は 1 要素ずつ数える。超えれば `TypeError`）。`scan` を渡すと、入れ子の列の和を上限にする。
-
-    作業量を受け取らない関数（record の構築・写し）が解析の値の列を辿るときの入口。作業量で数える
-    walker は `elements_of` を使う（数えながら止まる）。
-    """
-
-    if type(values) is str or builtin_sequence(values) or builtin_set(values):
-        count = len(values)
-        if scan is None:
-            _require_scan(count, "a sequence read without a work budget")
-        elif not scan.admit(count):
-            raise TypeError(f"nested sequences read without a work budget exceed {SCAN_LIMIT} elements")
-        return iter(values)
-    return _counted(elements_of(values), scan)
-
-
-def items_within_limit(mapping: Any) -> Iterator[Tuple[Any, Any]]:
-    """`items_of` と同じ (key, 値) を `SCAN_LIMIT` 組まで（辿る前に O(1) で比べる。超えれば `TypeError`）。"""
-
-    _require_scan(size(mapping), "a mapping read without a work budget")
-    return items_of(mapping)
-
-
-def _counted(iterator: Iterator[Any], scan: Any = None) -> Iterator[Any]:
-    count = 0
-    for value in iterator:
-        count += 1
-        if scan is None:
-            _require_scan(count, "an iterator read without a work budget")
-        elif not scan.admit(1):
-            raise TypeError(f"nested sequences read without a work budget exceed {SCAN_LIMIT} elements")
-        yield value
-
-
 def elements_of(values: Any) -> Iterator[Any]:
     """組み込みの振る舞いの列・集合・iterator・package の generator の要素。それ以外は `TypeError`。"""
 
@@ -1415,9 +1412,6 @@ def elements_of(values: Any) -> Iterator[Any]:
 
 __all__ = [
     "SCAN_LIMIT",
-    "elements_within_limit",
-    "items_within_limit",
-    "scan_budget",
     "NOT_PLAIN",
     "PACKAGE_DIR",
     "package_code",

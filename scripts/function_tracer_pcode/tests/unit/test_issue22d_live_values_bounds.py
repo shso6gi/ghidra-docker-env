@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.core import live_values
+from scripts.function_tracer_pcode.core import live_values, read_limits
 from scripts.function_tracer_pcode.tests.unit import _live_flow_audit as audit
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -229,15 +229,31 @@ LIVE_VALUES_WORK_OWNERS = {
     "copied_container": _B,
     "lookup": _B,
     "_plain_key": _B,
+    # 判定の途中の状態の 2 引数の `min`（入れ子の深さの比較）だけ
+    "package_type": _A,
+    "_trusted_class_body": _A,
+}
+
+#: `core/read_limits`（作業量を受け取らない読みの固定の上限の owner）の入力に比例する関数
+READ_LIMITS_WORK_OWNERS = {
     "_counted": _B,
+    "prefix_within_limit": _B,
+    # 2 引数の `max` だけ
+    "omitted_beyond_limit": _A,
+}
+
+#: owner の file → その分類（J22 を owner 自身へ）
+OWNER_WORK = {
+    "core/live_values.py": LIVE_VALUES_WORK_OWNERS,
+    "core/read_limits.py": READ_LIMITS_WORK_OWNERS,
 }
 
 #: B の関数が上限と比べる呼び出し（長さを O(1) で読んで比べる owner の関数）
-_BOUNDING_CALLS = frozenset({"_within_scan", "_require_scan", "_exact_str_keys", "admit"})
+_BOUNDING_CALLS = frozenset({"_within_scan", "_require_scan", "_exact_str_keys", "admit", "_admitted"})
 
 
-def _live_values_functions():
-    tree = ast.parse((PACKAGE_ROOT / "core" / "live_values.py").read_text(encoding="utf-8"))
+def _live_values_functions(path="core/live_values.py"):
+    tree = ast.parse((PACKAGE_ROOT / path).read_text(encoding="utf-8"))
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             yield node.name, node
@@ -247,28 +263,36 @@ def _live_values_functions():
                     yield f"{node.name}.{item.name}", item
 
 
-def test_j22_every_proportional_function_of_the_owner_is_classified():
+@pytest.mark.parametrize("path", sorted(OWNER_WORK))
+def test_j22_every_proportional_function_of_the_owner_is_classified(path):
+    owners = OWNER_WORK[path]
     proportional = {
         name: audit.proportional_constructs(function)
-        for name, function in _live_values_functions()
+        for name, function in _live_values_functions(path)
         if audit.proportional_constructs(function)
     }
-    assert set(proportional) == set(LIVE_VALUES_WORK_OWNERS), set(proportional) ^ set(LIVE_VALUES_WORK_OWNERS)
+    assert set(proportional) == set(owners), set(proportional) ^ set(owners)
 
 
-def test_j22_the_bounded_functions_compare_with_the_bound_before_they_walk():
-    functions = dict(_live_values_functions())
+@pytest.mark.parametrize("path", sorted(OWNER_WORK))
+def test_j22_the_bounded_functions_compare_with_the_bound_before_they_walk(path):
+    functions = dict(_live_values_functions(path))
     unbounded = []
-    for name, kind in LIVE_VALUES_WORK_OWNERS.items():
+    for name, kind in OWNER_WORK[path].items():
         if kind != _B:
             continue
         calls = {
             (sub.func.id if isinstance(sub.func, ast.Name) else getattr(sub.func, "attr", None))
             for sub in ast.walk(functions[name]) if isinstance(sub, ast.Call)
         }
+        # `range(SCAN_LIMIT)` / `islice(..., SCAN_LIMIT [+ 1])`: 辿る数そのものを上限で切る
         ranges = any(
-            isinstance(sub, ast.Call) and getattr(sub.func, "id", None) == "range"
-            and any(isinstance(arg, ast.Name) and arg.id == "SCAN_LIMIT" for arg in sub.args)
+            isinstance(sub, ast.Call)
+            and (getattr(sub.func, "id", None) == "range" or getattr(sub.func, "attr", None) == "islice")
+            and any(
+                isinstance(node, ast.Name) and node.id == "SCAN_LIMIT"
+                for arg in sub.args for node in ast.walk(arg)
+            )
             for sub in ast.walk(functions[name])
         )
         if not (calls & _BOUNDING_CALLS or ranges):
@@ -302,18 +326,40 @@ def test_a_verified_container_never_runs_its_own_truth_method():
 
 
 # ---------------------------------------------------------------------------
-# 作業量を受け取らない関数の入口（`elements_within_limit` / `items_within_limit` / `scan_budget`）
+# 作業量を受け取らない関数の入口（`core/read_limits`: 上限の超過は登録済みの限界、診断は先頭だけ）
 # ---------------------------------------------------------------------------
 
 
-def test_the_unmetered_readers_stop_at_the_bound():
+def _limitation(call, *args):
+    """`call(*args)`（反復するなら最後まで）が上げた、固定の上限の超過の登録済みの限界。"""
+
+    from scripts.function_tracer_pcode.core.errors import DeadlineExceeded
+
+    started = time.perf_counter()
+    with pytest.raises(DeadlineExceeded) as raised:
+        for _ in call(*args):
+            pass
+    assert time.perf_counter() - started < 0.5, call
+    assert raised.value.site == read_limits.SCAN_LIMITATION_SITE
+    assert raised.value.reason_id == "analysis_budget_exceeded"
+    return raised.value
+
+
+def test_the_unmetered_readers_stop_at_the_bound_with_a_registered_limitation():
+    """上限の外は内部バグ（`TypeError`）でなく、pair terminal な登録済みの限界（pair の台帳へ記録してから）。"""
+
+    from scripts.function_tracer_pcode.core.errors import PairStopState, pair_failure_scope
+
     limit = live_values.SCAN_LIMIT
     inside = list(range(limit))
-    assert list(live_values.elements_within_limit(inside)) == inside
-    assert dict(live_values.items_within_limit({"a": 1})) == {"a": 1}
-    for container in (list(range(limit + 1)), tuple(range(limit + 1)), set(range(limit + 1)), "x" * (limit + 1)):
-        assert isinstance(_quick(live_values.elements_within_limit, container), TypeError)
-    assert isinstance(_quick(live_values.items_within_limit, {index: index for index in range(limit + 1)}), TypeError)
+    assert list(read_limits.elements_within_limit(inside)) == inside
+    assert dict(read_limits.items_within_limit({"a": 1})) == {"a": 1}
+    for container in (list(range(limit + 1)), tuple(range(limit + 1)), set(range(limit + 1))):
+        _limitation(read_limits.elements_within_limit, container)
+    _limitation(read_limits.items_within_limit, {index: index for index in range(limit + 1)})
+    # 文字列は要素の列として読まない（`elements_of` と同じ）
+    with pytest.raises(TypeError):
+        read_limits.elements_within_limit("x")
     # iterator は 1 要素ずつ数え、上限を超えた要素で止まる（それより先を引き出さない）
     pulled = []
 
@@ -322,24 +368,44 @@ def test_the_unmetered_readers_stop_at_the_bound():
             pulled.append(index)
             yield index
 
-    with pytest.raises(TypeError):
-        for _ in live_values.elements_within_limit(_source()):
-            pass
+    _limitation(read_limits.elements_within_limit, _source())
+    assert len(pulled) == limit + 1
+    with pair_failure_scope(("live_values", "scan"), None) as ledger:
+        _limitation(read_limits.elements_within_limit, list(range(limit + 1)))
+        pending = ledger.pending_failure()
+    assert pending is not None and pending.stop_state is PairStopState.PAIR_TERMINAL_LIMITATION
+
+
+def test_the_diagnostic_prefix_keeps_the_head_and_counts_the_rest():
+    limit = live_values.SCAN_LIMIT
+    values = tuple(range(limit + 7))
+    assert read_limits.prefix_within_limit(values) == tuple(range(limit))
+    assert read_limits.omitted_beyond_limit(values) == 7
+    assert read_limits.prefix_within_limit(("a", "b")) == ("a", "b")
+    assert read_limits.omitted_beyond_limit(("a", "b")) == 0
+    # iterator は上限の個数を写したところで止める（残りを引き出さない）
+    pulled = []
+
+    def _source():
+        for index in range(BIG):
+            pulled.append(index)
+            yield index
+
+    assert len(_quick(read_limits.prefix_within_limit, _source())) == limit
     assert len(pulled) == limit + 1
 
 
 def test_a_shared_scan_bounds_the_sum_of_nested_sequences():
     half = live_values.SCAN_LIMIT // 2 + 1
-    scan = live_values.scan_budget()
-    assert len(list(live_values.elements_within_limit(list(range(half)), scan))) == half
-    with pytest.raises(TypeError):
-        live_values.elements_within_limit(list(range(half)), scan)
+    scan = read_limits.scan_budget()
+    assert len(list(read_limits.elements_within_limit(list(range(half)), scan))) == half
+    _limitation(read_limits.elements_within_limit, list(range(half)), scan)
     # 共有しなければそれぞれは上限の内側
-    assert len(list(live_values.elements_within_limit(list(range(half))))) == half
+    assert len(list(read_limits.elements_within_limit(list(range(half))))) == half
 
 
 def test_normalizing_truncations_bounds_records_and_references_together():
-    """記録の参照 ID は 1 つの上限を共有する（1 件ずつは内側でも、和が外なら `TypeError`）。"""
+    """記録の参照 ID は 1 つの上限を共有する（1 件ずつは内側でも、和が外なら登録済みの限界）。"""
 
     from scripts.function_tracer_pcode.core.runtime_refs.unknowns import (
         ExpansionBudgetTruncation,
@@ -353,8 +419,7 @@ def test_normalizing_truncations_bounds_records_and_references_together():
         for side in range(2)
     ]
     assert len(normalize_expansion_budget_truncations(records[:1])) == 1
-    with pytest.raises(TypeError):
-        normalize_expansion_budget_truncations(records)
+    _limitation(lambda: iter(normalize_expansion_budget_truncations(records)))
     # 記録そのものも同じ上限に数える: 参照 ID の和は上限ちょうどでも、記録の 2 件で外
     exact = [
         ExpansionBudgetTruncation(kind="paths", label=f"e{side}", referenced_event_ids=tuple(
@@ -362,6 +427,42 @@ def test_normalizing_truncations_bounds_records_and_references_together():
         ))
         for side in range(2)
     ]
-    with pytest.raises(TypeError):
-        normalize_expansion_budget_truncations(exact)
+    _limitation(lambda: iter(normalize_expansion_budget_truncations(exact)))
     assert len(normalize_expansion_budget_truncations(exact[:1])) == 1
+
+
+def test_a_metaclass_hash_never_runs_through_the_class_body_cache():
+    """class の body の cache の key は metaclass が `__hash__` / `__eq__` を持たない class だけ。"""
+
+    calls = []
+
+    class _Loud(type):
+        def __hash__(cls):  # pragma: no cover - must never run
+            calls.append("hash")
+            return type.__hash__(cls)
+
+        def __eq__(cls, other):  # pragma: no cover - must never run
+            calls.append("eq")
+            return type.__eq__(cls, other)
+
+    class _Quiet(_Loud):
+        __hash__ = type.__hash__
+        __eq__ = type.__eq__
+
+    base = _Loud("LoudBase", (), {})
+    kind = _Quiet("QuietKind", (base,), {})
+    live_values.package_type(kind)
+    live_values._trusted_class_body(base)
+    assert calls == []
+
+
+def test_a_verdict_cut_by_the_nesting_limit_is_not_cached():
+    """入れ子の上限で切った判定は残さない: 深い型を先に聞いても、浅く聞き直せば判定し直す。"""
+
+    chain = [type("Leaf", (), {})]
+    for index in range(live_values.NESTING_LIMIT + 4):
+        chain.append(type(f"Holder{index}", (), {"inner": chain[-1]}))
+    live_values.package_type(chain[-1])
+    # 上限の内側の深さから聞いた判定は、上限で切られた判定の古い値ではない
+    mid = chain[len(chain) // 2]
+    assert live_values.package_type(mid) == live_values._package_type_uncached(mid)

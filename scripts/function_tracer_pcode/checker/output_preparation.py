@@ -75,6 +75,7 @@ from scripts.function_tracer_pcode.core.errors import (
     record_internal_bug,
 )
 from scripts.function_tracer_pcode.core import json_encoding, live_values
+from scripts.function_tracer_pcode.core import read_limits
 from scripts.function_tracer_pcode.core.json_encoding import (
     RESULT_JSON_POLICY,
     JsonBudget,
@@ -954,17 +955,22 @@ def output_contract_policy(policy: BudgetPolicy) -> BudgetPolicy:
 
     調査用に予算を外した（`off`）policy・契約より大きい予算でも、準備の作業量は封印が受け取れる
     preimage の上限を超えない（作業量を受け取らない準備を作らない）。上限の内側の予算はそのまま。
+    上限で置き換えるときは headroom も有効な値にする: schema が要る headroom 以上、上限の半分以下
+    （payload の余地を残す。設定の組み合わせで policy を作れない値にしない）。準備した payload と
+    判定に使わない準備物（headroom を共有する）の和は上限を超えない。
     """
 
     from dataclasses import replace
 
     from scripts.function_tracer_pcode.authority.event_contract import AUTHORITY_EVENT_CONTRACT
+    from scripts.function_tracer_pcode.checker.output_schema import required_headroom_bytes
 
     ceiling = AUTHORITY_EVENT_CONTRACT.max_result_preimage_units
     configured = policy.serialization_bytes
     if configured is not None and configured <= ceiling:
         return policy
-    return replace(policy, serialization_bytes=ceiling)
+    headroom = min(max(policy.envelope_headroom_bytes, required_headroom_bytes()), ceiling // 2)
+    return replace(policy, serialization_bytes=ceiling, envelope_headroom_bytes=headroom)
 
 
 class OutputPreparer:
@@ -979,12 +985,6 @@ class OutputPreparer:
         if type(policy) is not BudgetPolicy:
             raise TypeError("output preparation needs an exact BudgetPolicy")
         self.policy = output_contract_policy(policy)
-        #: 判定に使わない準備物が共有する予算: authority 確定後の field に空けた headroom。予算を外した
-        #: policy（headroom を持たない）では契約の上限（診断を 0 byte に潰さず、上限は外さない）
-        self._diagnostic_limit = (
-            policy.envelope_headroom_bytes if policy.prepared_payload_limit() is not None
-            else self.policy.serialization_bytes
-        )
         self.encoding = encoding
 
     def prepare(
@@ -1051,7 +1051,7 @@ class OutputPreparer:
         # field の本体か、出力されない内部の証拠）。合計がそれを超えない。出力される C の本体を
         # 先に、出力されない内部の証拠（legacy の証拠）を最後に準備する（内部の証拠が出力の
         # 診断の予算を先に使い切らない）
-        diagnostic = JsonBudget(self._diagnostic_limit)
+        diagnostic = JsonBudget(self.policy.envelope_headroom_bytes)
         trace_timings = self._prepare_trace_timings(result, diagnostic=diagnostic)
         cause_evidence = self._prepare_cause_evidence(
             result,
@@ -1252,15 +1252,16 @@ def _attach_budget_diagnostics(result: Any, prepared: PreparedSemanticPayload, p
     current = live_values.attribute(result, "diagnostics")
     diagnostics: Dict[Any, Any] = {}
     if _truthy(current):
-        count = live_values.size(current)
-        if count > live_values.SCAN_LIMIT:
-            # 作業量を受け取らない複製は live_values の固定の上限まで。外は件数の marker（診断だけ。
-            # 判定・canonical reason は読まないので outcome は変わらない）
-            diagnostics["diagnostics_overflow"] = {"truncated": True, "keys": count}
-        else:
-            # 組み込みの振る舞いの mapping の複製（key は scalar だけ）
-            for key, value in live_values.items_of(current):
-                diagnostics[_plain_key(key)] = value
+        # 組み込みの振る舞いの mapping の複製（key は scalar だけ）。作業量を受け取らない複製は
+        # live_values の固定の上限の組まで（先頭から）で、外は件数の marker（診断だけ。判定・canonical
+        # reason は読まないので outcome は変わらない）
+        for key, value in read_limits.prefix_within_limit(live_values.items_of(current)):
+            diagnostics[_plain_key(key)] = value
+        omitted = read_limits.omitted_beyond_limit(current)
+        if omitted:
+            diagnostics["diagnostics_overflow"] = {
+                "truncated": True, "keys": live_values.size(current), "kept": live_values.SCAN_LIMIT,
+            }
     diagnostics["expression_budget"] = {
         "policy": policy.to_diagnostic(),
         "observed": budget_observations(),
@@ -1550,19 +1551,22 @@ def prepared_payload_for(
     return prepared
 
 
-def prepared_smt_formula(result: Any) -> PreparedArtifact:
-    """`--save-formula` が書く SMT 式（準備済みの成果物だけを返す）。
+def prepared_smt_formula(result: Any, *, requested: bool) -> PreparedArtifact:
+    """`--save-formula` が書く SMT 式（準備済みの成果物だけを返す）。頼まれていなければ何もしない。
 
     準備済みでない結果（pair 境界を通らずに組んだ結果）の式も、同じ owner が同じ上限で今準備する
-    （生の属性をそのまま書かない。式にならない値・上限の外は保存しない）。
+    （生の属性をそのまま書かない。式にならない値・読めない値・上限の外は保存しない。authority の
+    後なので失敗にしない）。
     """
 
+    if requested is not True:
+        return PreparedArtifact(None)
     prepared = live_values.attribute(result, "prepared_semantic_payload")
     if prepared is None:
         options = OutputOptions(include_debug_trace=False, include_smt_formula=True)
         try:
             return OutputPreparer(active_budget_policy())._prepare_smt_formula(result, options)
-        except JsonValueRejected:
+        except (JsonValueRejected, TypeError):
             return PreparedArtifact(None)
     if type(prepared) is not PreparedSemanticPayload:
         raise TypeError("result.prepared_semantic_payload must be a PreparedSemanticPayload")

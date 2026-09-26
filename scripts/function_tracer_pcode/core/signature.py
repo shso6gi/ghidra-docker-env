@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Mapping, TYPE_CHECKING, Tuple
 from scripts.function_tracer_pcode.core import live_values
+from scripts.function_tracer_pcode.core import read_limits
 from scripts.function_tracer_pcode.core.json_encoding import as_dict, each, mapping_of, materialize, source_converter
 
 if TYPE_CHECKING:
@@ -450,7 +451,7 @@ def clone_parameter_descriptor(
     if param is None or not live_values.as_bool(param):
         return cloned
     # 作業量を受け取らない写し: member は owner の上限まで
-    for key, value in live_values.items_within_limit(param):
+    for key, value in read_limits.items_within_limit(param):
         name = live_values.str_value(key)
         if name is live_values.NOT_PLAIN:
             raise TypeError(f"parameter descriptor key {live_values.type_name(type(key))} is not a str")
@@ -1135,7 +1136,7 @@ class FunctionSignature:
             parameters=[
                 clone_parameter_descriptor(param, include_data_type_obj=True)
                 for param in (
-                    live_values.elements_within_limit(parameters)
+                    read_limits.elements_within_limit(parameters)
                     if parameters is not None and live_values.as_bool(parameters) else ()
                 )
             ],
