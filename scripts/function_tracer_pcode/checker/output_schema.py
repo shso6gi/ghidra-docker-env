@@ -60,13 +60,18 @@ from scripts.function_tracer_pcode.checker.unknown_reason import (
 )
 
 
-#: authority が 1 pair で出してよい canonical reason の行数（固定 subset の実測の最大 34 の 7.5 倍。
-#: main `b302389` を merge した後の値）
-MAX_UNKNOWN_REASON_ROWS = 256
+#: 行数の上限の owner は authority の event の契約（Issue #110: authority は 1 pair の cause occurrence と
+#: relation の行を、event を作る時点でこの上限の中に抑える）。出力の schema はその値を読むだけ
+from scripts.function_tracer_pcode.authority.event_contract import (  # noqa: E402
+    AUTHORITY_EVENT_CONTRACT as _AUTHORITY_EVENT_CONTRACT,
+)
+
+#: authority が 1 pair で出してよい canonical reason の行数（cause occurrence の上限）
+MAX_UNKNOWN_REASON_ROWS = _AUTHORITY_EVENT_CONTRACT.max_cause_occurrences
 #: recovery action の行数（実測の最大 6。reason 1 件から複数 action が出るので reason と同じ上限）
-MAX_RECOVERY_ACTION_ROWS = 256
-#: relation（`c_active_base` / `q_open_base`）の行数（同じく実測の最大 34 の 15 倍）
-MAX_RELATION_ROWS = 512
+MAX_RECOVERY_ACTION_ROWS = MAX_UNKNOWN_REASON_ROWS
+#: relation（`c_active_base` / `q_open_base`）の行数（relation の行の上限）
+MAX_RELATION_ROWS = _AUTHORITY_EVENT_CONTRACT.max_relation_rows
 #: conditional receipt が運ぶ仮定（premise）の数と 1 つの上限: receipt の契約の owner
 #: （`authority/decision/conditional`）の値。lane は発行の前に同じ上限で確かめる
 from scripts.function_tracer_pcode.authority.decision.conditional import (  # noqa: E402
