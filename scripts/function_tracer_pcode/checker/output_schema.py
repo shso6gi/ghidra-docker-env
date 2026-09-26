@@ -68,7 +68,9 @@ from scripts.function_tracer_pcode.authority.event_contract import (  # noqa: E4
 
 #: authority が 1 pair で出してよい canonical reason の行数（cause occurrence の上限）
 MAX_UNKNOWN_REASON_ROWS = _AUTHORITY_EVENT_CONTRACT.max_cause_occurrences
-#: recovery action の行数（実測の最大 6。reason 1 件から複数 action が出るので reason と同じ上限）
+#: recovery action の行数（固定 subset の実測の最大 6）。action はそのまま出力の行になるので、上限を
+#: 超える列は切り詰めず、G4-b（`finitize_legacy_reasons`）が判定の前に pair terminal な限界にする。
+#: 数値は canonical reason の行と同じ契約の値を使う（action ごとの別の上限の owner を作らない）
 MAX_RECOVERY_ACTION_ROWS = MAX_UNKNOWN_REASON_ROWS
 #: relation（`c_active_base` / `q_open_base`）の行数（relation の行の上限）
 MAX_RELATION_ROWS = _AUTHORITY_EVENT_CONTRACT.max_relation_rows

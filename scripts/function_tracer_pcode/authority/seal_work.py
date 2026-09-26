@@ -333,8 +333,9 @@ def persisted_envelope_byte_limit(
 ) -> int:
     """永続化した canonical result envelope の byte 数の上限（preimage + 契約の上限の bundle）。
 
-    canonical unit は UTF-8 の JSON の byte 以上。envelope の file は ASCII の escape（非 ASCII の 1 文字が
-    `\\uXXXX` の 6〜12 byte、UTF-8 の 2〜4 byte の高々 3 倍）で書くので、封印した形の倍率を掛ける。
+    canonical unit は UTF-8 の JSON の byte 以上。envelope の file は結果 JSON と同じ文字列の規則
+    （`PERSISTED_ENVELOPE_JSON_POLICY`: UTF-8 のまま、UTF-8 で書けない surrogate だけ `\\uXXXX` の 6 byte、
+    canonical の 3 byte の 2 倍）で書くので、封印した形の倍率（その 2 倍以上）を掛ける。
     書く側（`persist_canonical_result_envelope`）はこの上限を超える envelope を書かない。
     """
 

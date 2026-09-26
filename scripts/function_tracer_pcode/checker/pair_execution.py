@@ -320,7 +320,9 @@ def _failure_already_in_result(result, failure: PairPendingFailure) -> bool:
     誤認してしまう。識別子が違えば、その結果は winner を表していないので、
     種別ごとの置き換え規則（`replaces_unrelated_result`）へ進む。
     """
-    # 焼き込んだ識別子は値の印で比べる（結果の object の `__eq__` を呼ばない）
+    # 焼き込んだ識別子は値の印で比べる（結果の object の `__eq__` を呼ばない）。値の印にできない live な
+    # target は identity の印なので、値が等しい別 object は「別」と見て winner の結果を作り直す側へ倒れる
+    # （同じ winner の結果を組み直すだけで、別の failure を表す結果を残すことはない）
     stamped = live_values.attribute(result, PAIR_FAILURE_IDENTITY_ATTRIBUTE)
     if stamped is not None and value_token(stamped) == value_token(failure.identity):
         return True

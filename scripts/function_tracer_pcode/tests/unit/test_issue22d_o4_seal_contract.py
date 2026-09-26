@@ -335,3 +335,22 @@ def _flat(value, depth=0):
             found.append(item)
         found.extend(_flat(item, depth + 1))
     return found
+
+
+def test_output_preparation_never_runs_past_the_contract_even_with_the_budget_off():
+    """調査用に直列化の予算を外しても（`off`）・契約より大きくしても、出力の準備の byte の上限は
+    authority の契約（結果の preimage）の中。上限の内側の予算はそのまま。"""
+
+    from scripts.function_tracer_pcode.checker.output_preparation import OutputPreparer
+    from scripts.function_tracer_pcode.config.settings import expression_budget_policy
+    from scripts.function_tracer_pcode.core.budget_policy import BudgetPolicy
+
+    ceiling = AUTHORITY_EVENT_CONTRACT.max_result_preimage_units
+    off = expression_budget_policy({"FT_SERIALIZATION_BYTES_BUDGET": "off"})
+    assert off.serialization_bytes is None
+    for policy in (off, BudgetPolicy.unlimited(), BudgetPolicy(serialization_bytes=ceiling * 2)):
+        prepared = OutputPreparer(policy).policy
+        assert prepared.serialization_bytes == ceiling
+        assert prepared.prepared_payload_limit() is not None
+    default = expression_budget_policy({})
+    assert OutputPreparer(default).policy is default

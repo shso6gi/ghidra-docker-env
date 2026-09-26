@@ -1089,7 +1089,7 @@ def builtin_mapping(item: Any) -> Any:
             if type(inner) is not types.MappingProxyType:
                 return item if builtin_mapping(inner) is not None else None
         return None
-    if not _builtin_behaviour(kind, _BUILTIN_DICTS, ("items", "__iter__", "__len__")):
+    if not _builtin_behaviour(kind, _BUILTIN_DICTS, ("items", "__iter__", "__len__", "__bool__")):
         return None
     if issubclass(kind, OrderedDict) and not _hash_safe_keys(item):
         return None
@@ -1097,19 +1097,19 @@ def builtin_mapping(item: Any) -> Any:
 
 
 def builtin_sequence(item: Any) -> bool:
-    """組み込みの振る舞い（`__iter__` / `__len__` / `__getitem__`）の list / tuple か（namedtuple を含む）。"""
+    """組み込みの振る舞い（`__iter__` / `__len__` / `__getitem__` / 真偽）の list / tuple か（namedtuple を含む）。"""
 
     kind = type(item)
     if kind is tuple or kind is list:
         return True
-    return _builtin_behaviour(kind, (tuple, list), ("__iter__", "__len__", "__getitem__"))
+    return _builtin_behaviour(kind, (tuple, list), ("__iter__", "__len__", "__getitem__", "__bool__"))
 
 
 def builtin_set(item: Any) -> bool:
     kind = type(item)
     if kind is frozenset or kind is set:
         return True
-    return _builtin_behaviour(kind, (frozenset, set), ("__iter__", "__len__"))
+    return _builtin_behaviour(kind, (frozenset, set), ("__iter__", "__len__", "__bool__"))
 
 
 _BUILTIN_BEHAVIOUR: dict = {}

@@ -280,3 +280,22 @@ def test_the_bound_has_one_owner():
     assert live_values.SCAN_LIMIT == 1 << 12
     source = (PACKAGE_ROOT / "core" / "live_values.py").read_text(encoding="utf-8")
     assert source.count("SCAN_LIMIT = ") == 1
+
+
+def test_a_verified_container_never_runs_its_own_truth_method():
+    """確かめた容器（反復・長さ・真偽は組み込みの slot）は、`__bool__` を上書きした subclass を含まない
+    （audit は確かめた容器の真偽の判定を許すので、owner がその slot まで確かめる）。"""
+
+    def _boom(self):  # pragma: no cover - must never run
+        raise AssertionError("a live __bool__ ran")
+
+    for base, predicate in (
+        (list, live_values.builtin_sequence), (tuple, live_values.builtin_sequence),
+        (set, live_values.builtin_set), (frozenset, live_values.builtin_set),
+    ):
+        loud = type(f"Loud{base.__name__}", (base,), {"__bool__": _boom})
+        quiet = type(f"Quiet{base.__name__}", (base,), {})
+        assert predicate(loud()) is False
+        assert predicate(quiet()) is True
+    assert live_values.builtin_mapping(type("LoudDict", (dict,), {"__bool__": _boom})()) is None
+    assert live_values.builtin_mapping(type("QuietDict", (dict,), {})()) is not None

@@ -862,7 +862,10 @@ def test_prepared_payload_for_a_directly_built_result_is_prepared_on_demand():
     result = create_mock_result(is_equivalent=True)
     assert result.prepared_semantic_payload is None
     prepared = prepared_payload_for(result)
-    assert prepared.plan.max_bytes is None
+    # pair の予算の scope の外（予算無し）でも、準備の上限は authority の契約の上限
+    from scripts.function_tracer_pcode.authority.event_contract import AUTHORITY_EVENT_CONTRACT
+
+    assert prepared.plan.max_bytes == AUTHORITY_EVENT_CONTRACT.max_result_preimage_units
 
 
 # ---------------------------------------------------------------------------
@@ -1440,6 +1443,15 @@ def test_the_smt_formula_is_a_prepared_artifact_that_never_blocks_a_decision():
     assert artifact.text is None and artifact.omitted_over_bytes == 20_000
     result.prepared_semantic_payload = OutputPreparer(BudgetPolicy.unlimited()).prepare(result, asked)
     assert prepared_smt_formula(result).text == result.smt_formula
+    # 準備済みでない結果も同じ owner が同じ上限で準備する（生の属性をそのまま返さない）
+    unprepared = create_mock_result(is_equivalent=True)
+    unprepared.smt_formula = result.smt_formula
+    with budget_policy_scope(small):
+        artifact = prepared_smt_formula(unprepared)
+    assert artifact.text is None and artifact.omitted_over_bytes == 20_000
+    assert prepared_smt_formula(unprepared).text == result.smt_formula
+    unprepared.smt_formula = ["not", "a", "formula"]
+    assert prepared_smt_formula(unprepared).text is None
 
 
 def test_metadata_counters_are_truncated_not_turned_into_a_limitation():

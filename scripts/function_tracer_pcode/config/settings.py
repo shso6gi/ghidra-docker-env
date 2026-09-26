@@ -279,7 +279,8 @@ EXPANDER_DEDUP_CASE_LIMIT = _positive_int_setting("FT_EXPANDER_DEDUP_CASE_LIMIT"
 #
 # 環境変数で個別に上書きできる。正の整数はその値、`off` / `none` / `unlimited` /
 # `0` はその予算だけ無効（制限しない）、それ以外（空・不正値）は既定値。runner は
-# これらを渡さない（run 単位の調査用）。
+# これらを渡さない（run 単位の調査用）。無効にしても出力の準備は authority の契約の上限
+# （結果の preimage、`checker/output_preparation.output_contract_policy`）を超えない。
 
 #: (BudgetPolicy の field 名, 環境変数, 既定値)。既定値 `None` は無制限。
 #:

@@ -949,6 +949,24 @@ def _bounded_utf8_length(text: str, max_bytes: Optional[int]) -> int:
     return total
 
 
+def output_contract_policy(policy: BudgetPolicy) -> BudgetPolicy:
+    """出力の準備が使う policy: 直列化の byte の予算は authority の契約の上限（結果の preimage）まで。
+
+    調査用に予算を外した（`off`）policy・契約より大きい予算でも、準備の作業量は封印が受け取れる
+    preimage の上限を超えない（作業量を受け取らない準備を作らない）。上限の内側の予算はそのまま。
+    """
+
+    from dataclasses import replace
+
+    from scripts.function_tracer_pcode.authority.event_contract import AUTHORITY_EVENT_CONTRACT
+
+    ceiling = AUTHORITY_EVENT_CONTRACT.max_result_preimage_units
+    configured = policy.serialization_bytes
+    if configured is not None and configured <= ceiling:
+        return policy
+    return replace(policy, serialization_bytes=ceiling)
+
+
 class OutputPreparer:
     """A を 1 回だけ準備する。**大きさの判定と予算超過の変換はここだけ**。"""
 
@@ -960,7 +978,13 @@ class OutputPreparer:
     ) -> None:
         if type(policy) is not BudgetPolicy:
             raise TypeError("output preparation needs an exact BudgetPolicy")
-        self.policy = policy
+        self.policy = output_contract_policy(policy)
+        #: 判定に使わない準備物が共有する予算: authority 確定後の field に空けた headroom。予算を外した
+        #: policy（headroom を持たない）では契約の上限（診断を 0 byte に潰さず、上限は外さない）
+        self._diagnostic_limit = (
+            policy.envelope_headroom_bytes if policy.prepared_payload_limit() is not None
+            else self.policy.serialization_bytes
+        )
         self.encoding = encoding
 
     def prepare(
@@ -1027,10 +1051,7 @@ class OutputPreparer:
         # field の本体か、出力されない内部の証拠）。合計がそれを超えない。出力される C の本体を
         # 先に、出力されない内部の証拠（legacy の証拠）を最後に準備する（内部の証拠が出力の
         # 診断の予算を先に使い切らない）
-        diagnostic = JsonBudget(
-            None if self.policy.prepared_payload_limit() is None
-            else self.policy.envelope_headroom_bytes
-        )
+        diagnostic = JsonBudget(self._diagnostic_limit)
         trace_timings = self._prepare_trace_timings(result, diagnostic=diagnostic)
         cause_evidence = self._prepare_cause_evidence(
             result,
@@ -1231,9 +1252,15 @@ def _attach_budget_diagnostics(result: Any, prepared: PreparedSemanticPayload, p
     current = live_values.attribute(result, "diagnostics")
     diagnostics: Dict[Any, Any] = {}
     if _truthy(current):
-        # 組み込みの振る舞いの mapping の複製（key は scalar だけ）
-        for key, value in live_values.items_of(current):
-            diagnostics[_plain_key(key)] = value
+        count = live_values.size(current)
+        if count > live_values.SCAN_LIMIT:
+            # 作業量を受け取らない複製は live_values の固定の上限まで。外は件数の marker（診断だけ。
+            # 判定・canonical reason は読まないので outcome は変わらない）
+            diagnostics["diagnostics_overflow"] = {"truncated": True, "keys": count}
+        else:
+            # 組み込みの振る舞いの mapping の複製（key は scalar だけ）
+            for key, value in live_values.items_of(current):
+                diagnostics[_plain_key(key)] = value
     diagnostics["expression_budget"] = {
         "policy": policy.to_diagnostic(),
         "observed": budget_observations(),
@@ -1524,11 +1551,19 @@ def prepared_payload_for(
 
 
 def prepared_smt_formula(result: Any) -> PreparedArtifact:
-    """`--save-formula` が書く SMT 式（準備済みの成果物だけを返す）。"""
+    """`--save-formula` が書く SMT 式（準備済みの成果物だけを返す）。
+
+    準備済みでない結果（pair 境界を通らずに組んだ結果）の式も、同じ owner が同じ上限で今準備する
+    （生の属性をそのまま書かない。式にならない値・上限の外は保存しない）。
+    """
 
     prepared = live_values.attribute(result, "prepared_semantic_payload")
     if prepared is None:
-        return PreparedArtifact(live_values.attribute(result, "smt_formula"))
+        options = OutputOptions(include_debug_trace=False, include_smt_formula=True)
+        try:
+            return OutputPreparer(active_budget_policy())._prepare_smt_formula(result, options)
+        except JsonValueRejected:
+            return PreparedArtifact(None)
     if type(prepared) is not PreparedSemanticPayload:
         raise TypeError("result.prepared_semantic_payload must be a PreparedSemanticPayload")
     return prepared.smt_formula
@@ -2089,6 +2124,7 @@ __all__ = [
     "ABSENT",
     "AuthorityDecisionEnvelope",
     "OutputMetadata",
+    "output_contract_policy",
     "BUNDLE_KEY",
     "FIELD_BY_KEY",
     "FieldOwner",

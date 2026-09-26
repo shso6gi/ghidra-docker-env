@@ -1008,8 +1008,8 @@ _B_FROZEN = (
 _B_SCHEMA_ROWS = "B: G4-b（`finitize_legacy_reasons`）が出力 schema の行数へ切った列を辿る"
 _C_LAZY = "C: 1 要素ずつ yield する generator を walker へ渡す（walker が引き出すたびに数える）"
 _B_OWNER_ELEMENTS = (
-    "B: 作業量を受け取らない record の構築・写し。解析の値の列・mapping は `live_values.bounded_elements` /"
-    " `bounded_items` だけで辿る（owner の固定の上限 `SCAN_LIMIT`。辿る前に O(1) で比べ、超えれば"
+    "B: 作業量を受け取らない record の構築・写し。解析の値の列・mapping は `live_values.elements_within_limit` /"
+    " `items_within_limit` だけで辿る（owner の固定の上限 `SCAN_LIMIT`。辿る前に O(1) で比べ、超えれば"
     " `TypeError`）。入れ子の列は 1 つの上限を共有し、深さは `NESTING_LIMIT` まで"
 )
 _A_FIXED_CALL = "A: 固定の形（呼び出しの keyword・定数の上限の stack の行・型の dataclass の field 名）だけを辿る"
@@ -1017,6 +1017,10 @@ _A_GATE_RECORD = (
     "A: producer 時点の record の構築（大きい値は G4-b の `finitize_legacy_reasons` が判定の前に作業量で"
     " 有界にする）。bounded path からは pair の失敗の変換（`_PairFailureGate`）が作る固定の形の結果"
     "（登録した限界の場所の reason 1 件）だけが通る"
+)
+_B_DIAGNOSTIC_KEYS = (
+    "B: 診断の mapping の key の写しは `live_values.SCAN_LIMIT` まで（長さを O(1) で比べてから辿る。"
+    " 外は件数の marker で、判定には使わない）"
 )
 _D_IDENTITY = "D(#194): 構造の identity の atom の digest（identity の owner の `core/semantic_snapshot`）"
 _B_MATCHED = (
@@ -1042,10 +1046,11 @@ _PROPORTIONAL_WORK_OWNERS = {
     **{("checker.output_preparation", name): _A_FIXED for name in (
         "AuthorityDecisionEnvelope.prepare", "ComposedPreimage.truncated_fields", "OutputMetadata.prepare",
         "OutputMetadata.truncated", "OutputPreparer._raise_exceeded", "OutputPreparer.prepare",
-        "_attach_budget_diagnostics", "_compose_members", "_field_order", "_ordered", "_prepare_member",
+        "_compose_members", "_field_order", "_ordered", "_prepare_member",
         "check_prepared_field_bounds", "compose_result_preimage", "prepare_pair_output",
     )},
     ("checker.output_preparation", "OutputPreparer._prepare_cause_evidence"): _B_PREPARED,
+    ("checker.output_preparation", "_attach_budget_diagnostics"): _B_DIAGNOSTIC_KEYS,
     ("checker.output_preparation", "_bounded_utf8_length"): _B_BOUND,
     ("checker.output_preparation", "_rows"): _B_SCHEMA_ROWS,
     **{("checker.output_schema", name): _A_FIXED for name in (
