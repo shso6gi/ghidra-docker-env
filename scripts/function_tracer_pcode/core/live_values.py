@@ -391,22 +391,21 @@ def package_type(kind: type) -> bool:
 
 
 def _package_type_uncached(kind: type) -> bool:
-    # 型の信頼の判定は文脈に依らない（型ごとに cache する）: 判定の中の値の storage の読み（class の中の
-    # 値の状態）は作業量で数えず、上限の外は「確かめられない」= 信頼しない
-    with _Unmetered():
-        try:
-            mro = _TYPE_MRO.__get__(kind)
-            if not _within_scan(tuple.__len__(mro)):
-                return False
-            for klass in mro:
-                if not (_TYPE_FLAGS.__get__(klass) & _HEAP_TYPE):
-                    continue
-                if not _trusted_class_body(klass):
-                    return False
-            return True
-        except (TypeError, StorageBeyondReadBound):
-            # 上限の外の値を読もうとした: 確かめられない型は信頼しない（量の信号も同じ: 型の判定の側）
+    try:
+        mro = _TYPE_MRO.__get__(kind)
+        if not _within_scan(tuple.__len__(mro)):
             return False
+        for klass in mro:
+            if not (_TYPE_FLAGS.__get__(klass) & _HEAP_TYPE):
+                continue
+            # class の body の値（値の storage を読む唯一の場所）は `_trusted_class_body` が文脈に依らずに
+            # 確かめる（作業量で数えない。上限の外は信頼しない）
+            if not _trusted_class_body(klass):
+                return False
+        return True
+    except TypeError:
+        # 上限の外の型を読もうとした（型の属性を読む関数は `TypeError`）: 確かめられない型は信頼しない
+        return False
 
 
 #: `dataclasses` が class の中に作る関数の名前（code の file は `<string>`。定義した class の code）
@@ -590,11 +589,12 @@ _TRUSTED_BODIES: dict = {}
 
 
 def _trusted_class_body_uncached(klass: type) -> bool:
+    # 型の信頼の判定は文脈に依らない（class ごとに cache する）: class の中の値の storage の読みは作業量で
+    # 数えず、上限の外は「確かめられない」= 信頼しない（量の信号を型の判定の側の答えにする唯一の場所）
     with _Unmetered():
         try:
             return _trusted_class_body_values(klass)
         except StorageBeyondReadBound:
-            # class の中の値の storage が上限の外: 確かめられない class の body は信頼しない（型の判定の側）
             return False
 
 

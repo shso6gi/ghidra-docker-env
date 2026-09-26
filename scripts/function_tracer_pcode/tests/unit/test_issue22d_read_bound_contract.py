@@ -287,7 +287,9 @@ def test_a_shared_scan_bounds_the_sum_at_the_boundary():
     assert exc.observed == LIMIT + 1
     other = read_limits.scan_budget()
     _drain(read_limits.elements_within_limit(list(range(half)), other))
-    _limitation(read_limits.elements_within_limit, iter(range(half + 1)), other)  # iterator も同じ和
+    # iterator も同じ和（1 要素ずつ数える）: 和がちょうど上限までは読め、その次で限界
+    assert len(_drain(read_limits.elements_within_limit(iter(range(half)), other))) == half
+    _limitation(read_limits.elements_within_limit, iter(range(1)), other)
 
 
 def test_nested_quantities_inside_a_read_are_the_same_limitation():
@@ -320,6 +322,7 @@ def test_diagnostic_prefixes_never_stop_the_pair():
     big = OrderedDict((f"k{index}", index) for index in range(LIMIT + 7))
     rows = read_limits.prefix_items_within_limit(big)
     assert rows == () and read_limits.omitted_beyond_limit(big, kept=0) == LIMIT + 7
+    assert read_limits.prefix_within_limit(big) == ()
     pulled = []
 
     def _source():
@@ -447,3 +450,22 @@ def test_cloning_a_signature_bounds_the_sum_of_parameters_members_and_copies():
     signature = FunctionSignature.from_analysis(small)
     assert signature.parameters == [{"name": "p", "tags": ["t"]}]
     assert signature.parameters[0]["tags"] is not small.parameters[0]["tags"]
+
+
+def test_a_serialization_scope_meters_reads_beyond_the_fixed_bound():
+    """直列化の scope の中（walker の外の読み: 原因集計など）も、上限を超えた分はその作業量へ数えて読む
+    （足りなければその作業量の超過: 診断は marker、判定の scope は限界）。"""
+
+    from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+
+    big = {f"k{index}": index for index in range(LIMIT + 50)}
+    with serialization_scope(site="probe", target_parts=("probe",), terminal=False, max_bytes=1 << 20, enabled=True) as work:
+        assert live_values.lookup(big, "k1") == 1
+    assert work.consumed >= 50
+    # 上限の無い（無効な）scope は固定の上限を外さない
+    with serialization_scope(site="probe", target_parts=("probe",), terminal=False, enabled=False):
+        with pytest.raises(BEYOND):
+            live_values.lookup(big, "k1")
+    with pytest.raises(JsonBudgetExhausted):
+        with serialization_scope(site="probe", target_parts=("probe",), terminal=False, max_bytes=10, enabled=True):
+            live_values.lookup(big, "k1")
