@@ -355,3 +355,13 @@ def test_normalizing_truncations_bounds_records_and_references_together():
     assert len(normalize_expansion_budget_truncations(records[:1])) == 1
     with pytest.raises(TypeError):
         normalize_expansion_budget_truncations(records)
+    # 記録そのものも同じ上限に数える: 参照 ID の和は上限ちょうどでも、記録の 2 件で外
+    exact = [
+        ExpansionBudgetTruncation(kind="paths", label=f"e{side}", referenced_event_ids=tuple(
+            f"e{side}-{index}" for index in range(live_values.SCAN_LIMIT // 2)
+        ))
+        for side in range(2)
+    ]
+    with pytest.raises(TypeError):
+        normalize_expansion_budget_truncations(exact)
+    assert len(normalize_expansion_budget_truncations(exact[:1])) == 1
