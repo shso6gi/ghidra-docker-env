@@ -823,6 +823,15 @@ def test_pricing_charges_the_reduction_by_events_and_the_stream_causes():
         projection=None, receipts=(), preimage=None, execution=None,
     )
     assert without_causes.components.reduction == 10
+    # 見積もった replay の仕事は price の中で数える（同じ大きさの stream で cause の数だけが違う）
+    same_size = [EventType.SOLVER_UNKNOWN.value] * 50
+    assert len(EventType.CAUSE_OBSERVED.value) == len(EventType.SOLVER_UNKNOWN.value)
+    with_causes_work, without_causes_work = SealWorkBudget.for_result(), SealWorkBudget.for_result()
+    SealPlan.price(with_causes_work, stream=SimpleNamespace(events=events), projection=None,
+                   receipts=(), preimage=None, execution=None)
+    SealPlan.price(without_causes_work, stream=SimpleNamespace(events=_typed_events(same_size)),
+                   projection=None, receipts=(), preimage=None, execution=None)
+    assert with_causes_work.consumed - without_causes_work.consumed == 50 * 40 - 50
 
 
 def test_a_stream_with_more_causes_than_the_contract_is_refused_while_it_is_measured():
@@ -1601,3 +1610,38 @@ def test_every_envelope_read_goes_through_the_bounded_reader():
                     checked += 1
     assert offenders == [], offenders
     assert checked == 3  # 終端の snapshot・checkpoint の診断・child 終了の観測
+
+
+def test_a_truncated_stream_is_not_completed_at_finish(monkeypatch):
+    """gate の前に切られた stream では、finish の stream を完成させる段（solver の履歴など）を走らせない。
+
+    段は拒まれた event を前提にしうる（ABI/width の completion が「live な C_active の行が無い」で
+    失敗したのが実測）: 走らせれば ERROR になる。"""
+
+    connector, session, pending = _truncated_session(monkeypatch, "issue110-not-completed")
+    ran = []
+
+    def _inconsistent_history(owner):
+        ran.append(owner)
+        raise ValueError("completion artifact does not bind one live C_active row")
+
+    monkeypatch.setattr(session.domain_signal_encoder, "finalize_open_execution_history",
+                        _inconsistent_history, raising=False)
+    _attribute_pending_limitation(session, pending)
+    evidence = connector.finish(session, _legacy_result(), case_id="issue110-not-completed")
+    assert ran == []
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN
+
+
+def test_a_pending_eq_of_a_truncated_stream_does_not_block_the_seal(monkeypatch):
+    """切られた stream の pending EQ は決まらない（限界の cause が EQ を止める）: seal を止める ERROR にしない。"""
+
+    connector, session, pending = _truncated_session(monkeypatch, "issue110-pending-eq")
+    session.domain_signal_state["pending_eq_authorities"] = {"issue110-nonce": {"state": "PENDING"}}
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.authority.lifecycle.production_signals.finalize_pending_eq_authorities",
+        lambda *_a: pytest.fail("a truncated stream does not finalize pending EQ"),
+    )
+    _attribute_pending_limitation(session, pending)
+    evidence = connector.finish(session, _legacy_result(), case_id="issue110-pending-eq")
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.UNKNOWN

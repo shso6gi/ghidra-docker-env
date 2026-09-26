@@ -1357,8 +1357,6 @@ class ProductionDualWritePilotConnector:
                 owner.emit(intent)
 
         session.complete_stream(emit_pending_eq_authorities)
-        if session.stream_truncated:
-            session.abandon_execution_history()
         session.ensure_event_contract_limitation()
         session.domain_signal_state["terminal_candidate_view"] = (
             terminal_candidate_view
