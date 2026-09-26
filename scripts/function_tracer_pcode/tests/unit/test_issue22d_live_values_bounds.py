@@ -456,13 +456,56 @@ def test_a_metaclass_hash_never_runs_through_the_class_body_cache():
     assert calls == []
 
 
-def test_a_verdict_cut_by_the_nesting_limit_is_not_cached():
-    """入れ子の上限で切った判定は残さない: 深い型を先に聞いても、浅く聞き直せば判定し直す。"""
-
-    chain = [type("Leaf", (), {})]
+def _holder_chain(tag):
+    chain = [type(f"{tag}Leaf", (), {})]
     for index in range(live_values.NESTING_LIMIT + 4):
-        chain.append(type(f"Holder{index}", (), {"inner": chain[-1]}))
-    live_values.package_type(chain[-1])
-    # 上限の内側の深さから聞いた判定は、上限で切られた判定の古い値ではない
-    mid = chain[len(chain) // 2]
-    assert live_values.package_type(mid) == live_values._package_type_uncached(mid)
+        chain.append(type(f"{tag}Holder{index}", (), {"inner": chain[-1]}))
+    return chain
+
+
+def test_a_verdict_cut_by_the_nesting_limit_is_not_cached():
+    """入れ子の上限で切った判定は残さない: 深い型を先に聞いても、浅い深さから聞けば同じ形の新しい型と
+    同じ判定（上限の内側）になる。"""
+
+    cut_first = _holder_chain("Cut")
+    fresh = _holder_chain("Fresh")
+    mid = len(cut_first) // 2
+    assert live_values.package_type(cut_first[-1]) is False  # 上限で切られる
+    expected = live_values.package_type(fresh[mid])
+    assert expected is True
+    assert live_values.package_type(cut_first[mid]) is expected
+
+
+def test_a_verdict_that_assumed_an_untrusted_ancestor_is_not_cached():
+    """循環の途中で祖先を仮に信頼して出した判定は、祖先の判定が「信頼しない」に決まったら残らない。"""
+
+    def outside():  # pragma: no cover - never called
+        return None
+
+    outside.__code__ = outside.__code__.replace(co_filename="/elsewhere/outside.py")
+    ancestor = type("Ancestor", (), {})
+    child = type("Child", (), {"ancestor": ancestor})
+    ancestor.child = child
+    ancestor.outside = outside
+    assert live_values.package_type(ancestor) is False
+    # child は ancestor を指す: 信頼しない型を指す型は信頼しない（仮定で出した「信頼」を残さない）
+    assert live_values.package_type(child) is False
+
+
+def test_timeout_reads_of_solver_results_are_bounded_by_the_read_limit():
+    """receipt の無い結果の `is_timeout` は solver の結果の列を読みの上限までしか辿らない（外は登録済みの限界）。"""
+
+    from types import SimpleNamespace
+
+    from conftest import create_mock_result
+    from scripts.function_tracer_pcode.core.errors import DeadlineExceeded
+    from scripts.function_tracer_pcode.smt import SolverStatus
+
+    result = create_mock_result(is_equivalent=None)
+    result.solver_results = SimpleNamespace(
+        results=[SimpleNamespace(status=SolverStatus.UNKNOWN)] * (live_values.SCAN_LIMIT + 1),
+    )
+    with pytest.raises(DeadlineExceeded):
+        result.is_timeout()
+    result.solver_results = SimpleNamespace(results=[SimpleNamespace(status=SolverStatus.TIMEOUT)])
+    assert result.is_timeout() is True
