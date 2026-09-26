@@ -1459,3 +1459,145 @@ def test_the_envelope_read_never_reads_past_the_contract(monkeypatch, tmp_path):
     assert read.sha256 == hashlib.sha256(b"y" * 101).hexdigest()
     with pytest.raises(EnvelopeOutsideContract):
         read.require_within_contract()
+
+
+def test_a_completed_promise_releases_its_room(monkeypatch):
+    """完了で退いた約束は契約の枠を返す（約束のまま数え続けない）。"""
+
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        emit_sat_safety_completion_if_observed,
+        emit_sat_safety_signal,
+        production_signal_scope,
+    )
+
+    contract = AuthorityEventContract(max_cause_occurrences=16)
+    _connector_, session, _emitted, _pending = _finished_session(
+        monkeypatch, blockers=0, case_id="issue110-release", contract=contract,
+    )
+    for index in range(6):
+        _defer(session, _sat_blocker(index))
+    assert session.event_contract.deferred_unpublished == 6
+    # 完了の proof artifact は SAT-safety の test が持つ: ここでは完了が約束した occurrence を名指すことだけ作る
+    encoder = session.domain_signal_encoder
+    real_authority = encoder.authority_for_signal
+    monkeypatch.setattr(encoder, "authority_for_signal", lambda owner, signal: real_authority(
+        owner, signal.observed if isinstance(signal, SimpleNamespace) else signal,
+    ), raising=False)
+    with production_signal_scope(session):
+        for index in range(6):
+            emit_sat_safety_completion_if_observed(
+                SimpleNamespace(action="COMPLETED", observed=_sat_blocker(index)),
+                producer_site_manifest_id="sat-safety-blocker-completed",
+            )
+    assert session.event_contract.deferred_unpublished == 0
+    with production_signal_scope(session):
+        published = [
+            emit_sat_safety_signal(_sat_blocker(100 + index), producer_site_manifest_id="sat-safety-blocker-observed")
+            for index in range(contract.ordinary_cause_occurrences)
+        ]
+    assert sum(published) == contract.ordinary_cause_occurrences
+    assert session.event_contract.exceeded is None
+
+
+def test_publishing_a_promise_at_the_edge_counts_it_once(monkeypatch):
+    """枠が約束で埋まっていても、約束した occurrence 自身の publish は同じ transaction で 1 回だけ数える。"""
+
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        emit_sat_safety_signal,
+        production_signal_scope,
+    )
+
+    contract = AuthorityEventContract(max_cause_occurrences=16)
+    _connector_, session, _emitted, _pending = _finished_session(
+        monkeypatch, blockers=0, case_id="issue110-edge", contract=contract,
+    )
+    room = contract.ordinary_cause_occurrences
+    for index in range(room // 2):
+        _defer(session, _sat_blocker(index))
+    with production_signal_scope(session):
+        others = [
+            emit_sat_safety_signal(_sat_blocker(100 + index), producer_site_manifest_id="sat-safety-blocker-observed")
+            for index in range(room - room // 2)
+        ]
+        assert sum(others) == room - room // 2
+        # 枠はちょうど埋まっている（publish 済み + 約束 = 枠）: 約束した occurrence の publish は通る
+        assert emit_sat_safety_signal(_sat_blocker(0), producer_site_manifest_id="sat-safety-blocker-observed") == 1
+    assert session.event_contract.exceeded is None
+    assert session.event_contract.deferred_unpublished == room // 2 - 1
+
+
+def test_the_cause_total_includes_the_limitation_causes(monkeypatch):
+    """限界の cause が予約より多く publish された後は、限界以外の cause は全体の上限までしか publish できない。"""
+
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        ANALYSIS_BUDGET_REASON_ID,
+        observe_analysis_limitation,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        emit_sat_safety_signal,
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+
+    monkeypatch.setenv(NONCE_ENV, "issue110-total-occurrence")
+    contract = AuthorityEventContract(max_cause_occurrences=16)
+    connector = _connector()
+    session = connector.begin({"case": "issue110-total"})
+    session.event_contract = EventContractLedger(contract)
+    with pair_failure_scope(("issue110", "total"), session.identity.result_occurrence_id):
+        with production_signal_scope(session):
+            for index in range(8):
+                observe_analysis_limitation(
+                    reason_id=ANALYSIS_BUDGET_REASON_ID, limitation_site=f"issue110.total.{index}",
+                    target_key=("issue110-total", index), evidence_refs=(f"issue110-total-{index}",),
+                )
+            published = [
+                emit_sat_safety_signal(_sat_blocker(index), producer_site_manifest_id="sat-safety-blocker-observed")
+                for index in range(contract.ordinary_cause_occurrences)
+            ]
+    assert session.event_contract.limitation_occurrences == 8
+    assert sum(published) == contract.max_cause_occurrences - 8
+    assert session.event_contract.exceeded.bound == "cause_occurrences"
+
+
+def test_the_first_overflow_is_the_one_kept_and_recorded():
+    """最初の超過が stream を切った点: 後の超過（予約の枠の超過など）で上書きしない。"""
+
+    ledger = EventContractLedger(AuthorityEventContract(max_cause_occurrences=16))
+    for bound in ("events", "cause_occurrences"):
+        with pytest.raises(AuthorityEventContractExceeded):
+            ledger._exceed(bound, 1, 2)
+    assert ledger.exceeded.bound == "events"
+
+
+def test_every_envelope_read_goes_through_the_bounded_reader():
+    """`RESULT_ENVELOPE` の path を持つ変数は `read_canonical_envelope` だけが読む（file 全体を読む呼び出しに渡さない）。"""
+
+    whole_file_reads = {"read_bytes", "read_text", "open"}
+    offenders = []
+    checked = 0
+    for path in sorted((PACKAGE_ROOT / "authority").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            envelope_paths = {
+                target.id
+                for sub in ast.walk(node) if isinstance(sub, ast.Assign)
+                for target in sub.targets if isinstance(target, ast.Name)
+                if any(isinstance(item, ast.Attribute) and item.attr == "RESULT_ENVELOPE"
+                       for item in ast.walk(sub.value))
+            }
+            for sub in ast.walk(node):
+                if not isinstance(sub, ast.Call):
+                    continue
+                func = sub.func
+                receiver = func.value.id if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) else None
+                name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+                arguments = {arg.id for arg in sub.args if isinstance(arg, ast.Name)}
+                if name in whole_file_reads and (receiver in envelope_paths or arguments & envelope_paths):
+                    offenders.append(f"{path.relative_to(PACKAGE_ROOT)}:{node.name}:{sub.lineno} {name}")
+                if name == "read_canonical_envelope" and arguments & envelope_paths:
+                    checked += 1
+    assert offenders == [], offenders
+    assert checked == 3  # 終端の snapshot・checkpoint の診断・child 終了の観測

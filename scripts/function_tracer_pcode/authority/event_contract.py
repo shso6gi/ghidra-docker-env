@@ -331,14 +331,13 @@ class EventContractLedger:
             self.deferred_unpublished -= 1
 
     def checkpoint(self) -> None:
-        """判定の前（pair の gate の前）の確認: 超過が記録済みなら上げる（約束は約束の時点で数え済み）。"""
+        """判定の前（pair の gate の前）の確認: 超過が記録済みなら上げる。
+
+        cause の数は約束（`defer`）と publish（`admit`）の時点で数え済みなので、ここで数え直さない。
+        """
 
         if self.exceeded is not None:
             raise self.exceeded
-        self._check_causes(
-            self.ordinary_occurrences, self.limitation_occurrences, self.deferred_unpublished,
-            limitation_only=False,
-        )
 
     def _exceed(self, bound: str, limit: int, observed: int) -> None:
         exceeded = AuthorityEventContractExceeded(bound, limit=limit, observed=observed)
