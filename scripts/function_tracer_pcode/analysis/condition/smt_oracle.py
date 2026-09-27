@@ -4,12 +4,26 @@
 from __future__ import annotations
 
 import importlib
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+import time
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple
 
+from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
+    cache_lookup,
+    cache_store,
+    clear_condition_caches,
+    root_memo,
+)
+from scripts.function_tracer_pcode.core.condition_metrics import note, observe
+from scripts.function_tracer_pcode.analysis.condition.query_identity import (
+    QUERY_IDENTITY_SCHEMA,
+    RewriteIdentity,
+    SolverQueryIdentity,
+    runtime_identity_from_projection,
+    solver_symbol_identity,
+    solver_symbol_identity_is_safe,
+)
 from scripts.function_tracer_pcode.core import Condition
 from scripts.function_tracer_pcode.core.semantic_projection import project_runtime_ref
-from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
-from scripts.function_tracer_pcode.core.structural import condition_key, key_contains_placeholder
 from scripts.function_tracer_pcode.core.render_smt import (
     CallDeclarationConflict,
     add_call_smt_declaration,
@@ -18,7 +32,6 @@ from scripts.function_tracer_pcode.core.render_smt import (
     collect_float_predicate_smt_declarations,
     collect_unknown_smt_declarations,
     expression_uses_smt_float_theory,
-    normalize_call_symbol_name,
     expression_contains_unsupported_smt_ops,
     expression_returns_bool,
     expression_smt_bit_width,
@@ -29,25 +42,167 @@ from scripts.function_tracer_pcode.smt.solvers.z3 import isolated_solver
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 
 
+class _RootSolverFacts(NamedTuple):
+    """root 1 つが script に要求する宣言と、組めるか（root だけに依存する値）。"""
+
+    usable: bool
+    symbol_widths: Tuple[Tuple[Any, int], ...] = ()
+    memory_widths: frozenset = frozenset()
+    call_declarations: Tuple[Tuple[str, Tuple[Tuple[int, ...], int]], ...] = ()
+    unknown_decls: frozenset = frozenset()
+    float_predicate_decls: frozenset = frozenset()
+    uses_float_theory: bool = False
+
+
+_UNUSABLE_ROOT = _RootSolverFacts(usable=False)
+
+
+class _QueryFacts(NamedTuple):
+    usable: bool
+    symbol_widths: Dict[Any, int]
+    memory_widths: frozenset
+    call_declarations: Dict[str, Tuple[Tuple[int, ...], int]]
+    unknown_decls: frozenset
+    float_predicate_decls: frozenset
+    uses_float_theory: bool
+
+
+_UNUSABLE_QUERY = _QueryFacts(False, {}, frozenset(), {}, frozenset(), frozenset(), False)
+
+
+def _root_solver_facts(expr: Any) -> _RootSolverFacts:
+    """旧 `_build_script` の条件ごとの検査と宣言の収集（同じ規則、root 1 つ分）。"""
+
+    note("oracle.root_facts_built")
+    if expr is None:
+        return _UNUSABLE_ROOT
+    if expression_contains_unsupported_smt_ops(expr, allow_call=True):
+        return _UNUSABLE_ROOT
+    symbol_widths: Dict[Any, int] = {}
+    memory_widths = set()
+    call_declarations: Dict[str, Tuple[Tuple[int, ...], int]] = {}
+    for node in ConditionSMTOracle._iter_expression_nodes(expr):
+        expr_type = getattr(node, "expr_type", None)
+        expr_kind = getattr(expr_type, "__class__", None)
+        if expr_type is None or expr_kind is None:
+            continue
+        if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
+            identity = solver_symbol_identity(node)
+            if not solver_symbol_identity_is_safe(identity):
+                return _UNUSABLE_ROOT
+            bit_width = max(1, int(expression_smt_bit_width(node) or 0))
+            existing = symbol_widths.get(identity)
+            if existing is not None and existing != bit_width:
+                return _UNUSABLE_ROOT
+            symbol_widths[identity] = bit_width
+        elif expr_type == expr_kind.MEMORY:
+            mem_bits = max(1, int(expression_smt_bit_width(node) or 0))
+            if mem_bits not in {8, 16, 32, 64}:
+                return _UNUSABLE_ROOT
+            memory_widths.add(mem_bits)
+        elif expr_type == expr_kind.CALL:
+            # 宣言規則は core/render_smt の共有 helper が唯一の実装。
+            # 幅が取れない CALL も、同名で signature が食い違う CALL も
+            # fail closed（従来どおり oracle は答えない）。
+            try:
+                if not add_call_smt_declaration(call_declarations, node):
+                    return _UNUSABLE_ROOT
+            except CallDeclarationConflict:
+                return _UNUSABLE_ROOT
+    return _RootSolverFacts(
+        usable=True,
+        symbol_widths=tuple(symbol_widths.items()),
+        memory_widths=frozenset(memory_widths),
+        call_declarations=tuple(call_declarations.items()),
+        unknown_decls=frozenset(collect_unknown_smt_declarations(expr)),
+        float_predicate_decls=frozenset(
+            collect_float_predicate_smt_declarations(expr, float_mode="fp")
+        ),
+        uses_float_theory=bool(expression_uses_smt_float_theory(expr)),
+    )
+
+
+def _merge_root_facts(facts: Iterable[_RootSolverFacts]) -> _QueryFacts:
+    """root ごとの値を query 1 つ分へ合わせる（root をまたぐ幅・宣言の食い違いは組めない）。"""
+
+    symbol_widths: Dict[Any, int] = {}
+    memory_widths = set()
+    call_declarations: Dict[str, Tuple[Tuple[int, ...], int]] = {}
+    unknown_decls = set()
+    float_predicate_decls = set()
+    uses_float_theory = False
+    for root in facts:
+        if not root.usable:
+            return _UNUSABLE_QUERY
+        for identity, bit_width in root.symbol_widths:
+            existing = symbol_widths.get(identity)
+            if existing is not None and existing != bit_width:
+                return _UNUSABLE_QUERY
+            symbol_widths[identity] = bit_width
+        for name, signature in root.call_declarations:
+            prior = call_declarations.get(name)
+            if prior is not None and prior != signature:
+                return _UNUSABLE_QUERY
+            call_declarations[name] = signature
+        memory_widths.update(root.memory_widths)
+        unknown_decls.update(root.unknown_decls)
+        float_predicate_decls.update(root.float_predicate_decls)
+        uses_float_theory = uses_float_theory or root.uses_float_theory
+    return _QueryFacts(
+        True,
+        symbol_widths,
+        frozenset(memory_widths),
+        call_declarations,
+        frozenset(unknown_decls),
+        frozenset(float_predicate_decls),
+        uses_float_theory,
+    )
+
+
+def _objvar_number(name: str) -> int:
+    return int(name.rsplit("_", 1)[1])
+
+
+def _reason_is_timeout(solver: Any) -> bool:
+    """solver の `unknown` が時間切れによるものか（計測用。判定には使わない）。"""
+
+    try:
+        reason = str(solver.reason_unknown())
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        return False
+    return "timeout" in reason or "canceled" in reason
+
+
 class ConditionSMTOracle:
-    """Direct SMT reachability oracle over object-centric condition ASTs."""
+    """Direct SMT reachability oracle over object-centric condition ASTs.
+
+    Issue #105 PR-105-A: 1 回の問い合わせは
+
+    1. `SolverQueryIdentity.from_conditions`（script を組まない。root ごとの graph は
+       pair の cache scope の中で root 1 つにつき 1 回だけ作る）
+    2. identity の意味で使えない query（非対応の演算・symbol の identity 不足・幅の食い
+       違い）は solver を呼ばずに `None`（覚えない）
+    3. 判定の cache を identity で引く（bucket → 完全比較）。**記憶した `None` も hit**
+       で、solver を呼び直さない（未判定のまま返す。`True` / `False` にはしない）
+    4. miss のときだけ script を組み（symbol は identity の canonical な割当）、solver を
+       呼び、判定（`True` / `False` / `None`）を覚える。例外・限界は覚えない
+
+    の順。cache の保存と寿命は `condition_cache`、計測は `condition_metrics` が持つ。
+    """
 
     QUERY_TIMEOUT_MS = 250
+    #: 判定の表の上限（件数、超えたら全消去。旧 `_unsat_cache` と同じ）
     _CACHE_LIMIT = 4096
+    #: 書き換えの表の上限（件数）
+    _REWRITE_CACHE_LIMIT = 8192
     _availability_checked = False
     _available = False
     _z3: Any = None
-    _unsat_cache: Dict[Tuple[object, ...], Optional[bool]] = {}
-    _CACHE_KEY_SCHEMA_VERSION = "condition-smt-cache-v2"
-    _RECOVERABLE_KEY_ERRORS = (
-        AttributeError,
-        IndexError,
-        KeyError,
-        TypeError,
-        ValueError,
-        RecursionError,
-    )
-
+    _CACHE_KEY_SCHEMA_VERSION = QUERY_IDENTITY_SCHEMA
+    #: pair の cache store 上の表の名前（この owner が使う表）
+    VERDICT_TABLE = "oracle.verdict"
+    REWRITE_TABLE = "oracle.rewrite"
+    ROOT_FACTS_MEMO = "oracle.root_facts"
     @classmethod
     def is_available(cls) -> bool:
         if cls._availability_checked:
@@ -62,22 +217,40 @@ class ConditionSMTOracle:
         return cls._available
 
     @classmethod
+    def reset_caches(cls) -> None:
+        """今の pair の store から、この owner の表を消す（pair 境界の scope とは別に使える）。"""
+
+        clear_condition_caches((cls.VERDICT_TABLE, cls.REWRITE_TABLE))
+
+    @classmethod
     def conjunction_is_unsat(
         cls,
         conditions: Sequence,
         *,
-        cache_key: Optional[Tuple[object, ...]] = None,
         use_cache: bool = True,
     ) -> Optional[bool]:
-        usable, script = cls._build_script(conditions)
+        conditions = tuple(conditions or ())
+        query = SolverQueryIdentity.from_conditions(conditions)
+        if conditions:
+            if not cls.is_available():
+                return None
+            if not cls._query_facts(query, conditions).usable:
+                note("oracle.unusable")
+                return None
+
+        cacheable = use_cache and query.cacheable
+        if cacheable:
+            found, cached = cache_lookup(cls.VERDICT_TABLE, query, limit=cls._CACHE_LIMIT)
+            if found:
+                if cached is None:
+                    note("oracle.unknown_hit")
+                return cached
+        elif use_cache:
+            note("oracle.uncacheable_query")
+
+        usable, script = cls._build_script(conditions, query=query, use_cache=use_cache)
         if not usable or script is None:
             return None
-
-        query_key = (cache_key or cls._build_cache_key(conditions)) if use_cache else None
-        if query_key is not None:
-            cached = cls._unsat_cache.get(query_key)
-            if cached is not None:
-                return cached
 
         z3 = cls._z3
         if z3 is None and not cls.is_available():
@@ -87,252 +260,138 @@ class ConditionSMTOracle:
         try:
             # Issue #161: query ごとに専用の solver context（他の query の履歴を持ち込まない）
             solver = isolated_solver(z3, script, int(cls.QUERY_TIMEOUT_MS))
+            note("oracle.queries")
+            started = time.monotonic()
             result = solver.check()
+            observe("oracle.check_ms", int((time.monotonic() - started) * 1000))
             if result == z3.unsat:
-                if query_key is not None:
-                    cls._remember(query_key, True)
-                return True
-            if result == z3.sat:
-                if query_key is not None:
-                    cls._remember(query_key, False)
-                return False
-            if query_key is not None:
-                cls._remember(query_key, None)
-            return None
+                verdict: Optional[bool] = True
+            elif result == z3.sat:
+                verdict = False
+            else:
+                verdict = None
+                note("oracle.unknowns")
+                if _reason_is_timeout(solver):
+                    note("oracle.timeouts")
+            if cacheable:
+                cache_store(cls.VERDICT_TABLE, query, verdict, limit=cls._CACHE_LIMIT)
+            return verdict
         except AnalysisLimitation:
             # Issue #106 PR-106-0: 解析の限界は「回復可能な失敗」ではない。ここで
             # 握り潰すと pair の打ち切りが遅れるので、そのまま上へ返す。
             raise
         except Exception:
+            # 例外は判定ではないので覚えない（次の同じ query はもう一度 solver を呼ぶ）
             return None
 
     @classmethod
-    def _remember(cls, key: Tuple[object, ...], value: Optional[bool]) -> None:
-        if len(cls._unsat_cache) >= cls._CACHE_LIMIT:
-            cls._unsat_cache.clear()
-        cls._unsat_cache[key] = value
+    def _query_facts(cls, query: SolverQueryIdentity, conditions: Sequence) -> "_QueryFacts":
+        """query を組むのに要る宣言と、組めるか（root ごとの値を root 単位で memo して合わせる）。"""
 
-    @classmethod
-    def _safe_condition_cache_component(cls, condition) -> Optional[Tuple[object, ...]]:
-        try:
-            key = condition_key(condition, budget=96)
-            if key_contains_placeholder(key):
-                return None
-            return key
-        except cls._RECOVERABLE_KEY_ERRORS:
-            return None
-
-    @classmethod
-    def _build_cache_key(cls, conditions: Sequence) -> Optional[Tuple[object, ...]]:
-        keys = [cls._safe_condition_cache_component(condition) for condition in (conditions or ())]
-        if any(key is None for key in keys):
-            return None
-        keys.sort(key=repr)
-        return ("unsat", cls._CACHE_KEY_SCHEMA_VERSION, tuple(keys))
+        return _merge_root_facts(
+            root_memo(
+                cls.ROOT_FACTS_MEMO,
+                getattr(conditions[index], "expression", None),
+                _root_solver_facts,
+            )
+            for index in query.order
+        )
 
     @classmethod
     def _build_script(
         cls,
         conditions: Sequence,
+        *,
+        query: Optional[SolverQueryIdentity] = None,
+        use_cache: bool = True,
     ) -> Tuple[bool, Optional[str]]:
+        """SMT script を組む（symbol は `SolverQueryIdentity` の canonical な割当）。
+
+        assert は identity の canonical な順に並べるので、同じ identity の query は
+        必ず同じ script になる。書き換え（symbol 名の差し替え）と描画は `RewriteIdentity`
+        を key に pair の中で使い回す（`use_cache=False` なら毎回作り直す）。
+        """
+
         if not conditions:
             return True, "(set-logic QF_AUFBV)"
         if not cls.is_available():
             return False, None
+        conditions = tuple(conditions)
+        if query is None:
+            query = SolverQueryIdentity.from_conditions(conditions)
+        facts = cls._query_facts(query, conditions)
+        if not facts.usable:
+            return False, None
+        note("oracle.scripts_built")
 
-        var_widths: Dict[str, int] = {}
-        memory_widths = set()
-        unknown_decls = set()
-        float_predicate_decls = set()
-        uses_float_theory = False
-        call_declarations: Dict[str, Tuple[Tuple[int, ...], int]] = {}
-        symbol_names: Dict[Tuple[Any, ...], str] = {}
-
-        for condition in conditions:
-            expr = getattr(condition, "expression", None)
-            if expr is None:
-                return False, None
-            if expression_contains_unsupported_smt_ops(expr, allow_call=True):
-                return False, None
-
-            for node in cls._iter_expression_nodes(expr):
-                expr_type = getattr(node, "expr_type", None)
-                expr_kind = getattr(expr_type, "__class__", None)
-                if expr_type is None or expr_kind is None:
-                    continue
-                if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
-                    identity = cls._expression_identity_key(node)
-                    if not cls._identity_is_solver_safe(identity):
-                        return False, None
-                    bit_width = max(1, int(expression_smt_bit_width(node) or 0))
-                    if bit_width <= 0:
-                        return False, None
-                    existing_symbol = symbol_names.get(identity)
-                    if existing_symbol is None:
-                        existing_symbol = f"objvar_{len(symbol_names)}"
-                        symbol_names[identity] = existing_symbol
-                    existing = var_widths.get(existing_symbol)
-                    if existing is not None and existing != bit_width:
-                        return False, None
-                    var_widths[existing_symbol] = bit_width
-                elif expr_type == expr_kind.MEMORY:
-                    mem_bits = max(1, int(expression_smt_bit_width(node) or 0))
-                    if mem_bits not in {8, 16, 32, 64}:
-                        return False, None
-                    memory_widths.add(mem_bits)
-                elif expr_type == expr_kind.CALL:
-                    # 宣言規則は core/render_smt の共有 helper が唯一の実装。
-                    # 幅が取れない CALL も、同名で signature が食い違う CALL も
-                    # fail closed（従来どおり oracle は答えない）。
-                    try:
-                        if not add_call_smt_declaration(call_declarations, node):
-                            return False, None
-                    except CallDeclarationConflict:
-                        return False, None
-
-            for decl in collect_unknown_smt_declarations(expr):
-                unknown_decls.add(decl)
-            uses_float_theory = uses_float_theory or expression_uses_smt_float_theory(expr)
-            for decl in collect_float_predicate_smt_declarations(expr, float_mode="fp"):
-                float_predicate_decls.add(decl)
-
+        symbol_names = query.symbol_names
         lines: List[str] = [
-            f"(set-logic {smt_logic_name(uses_float_theory=uses_float_theory, uses_arrays=True, uses_uf=bool(float_predicate_decls))})"
+            f"(set-logic {smt_logic_name(uses_float_theory=facts.uses_float_theory, uses_arrays=True, uses_uf=bool(facts.float_predicate_decls))})"
         ]
-        for name, bit_width in sorted(var_widths.items()):
-            lines.append(f"(declare-const {name} (_ BitVec {bit_width}))")
-        for mem_bits in sorted(memory_widths):
+        for identity, symbol in sorted(
+            symbol_names.items(), key=lambda item: _objvar_number(item[1])
+        ):
+            lines.append(f"(declare-const {symbol} (_ BitVec {facts.symbol_widths[identity]}))")
+        for mem_bits in sorted(facts.memory_widths):
             lines.append(
                 f"(declare-const mem{mem_bits} (Array (_ BitVec 64) (_ BitVec {mem_bits})))"
             )
-        for symbol_name, bit_width in sorted(unknown_decls):
+        for symbol_name, bit_width in sorted(facts.unknown_decls):
             lines.append(f"(declare-const {symbol_name} (_ BitVec {bit_width}))")
-        lines.extend(sorted(float_predicate_decls))
-        lines.extend(call_smt_declaration_lines(call_declarations))
-        for condition in conditions:
-            condition_expr = getattr(condition, "expression", None)
-            if condition_expr is None:
-                return False, None
-            condition_smt = cls._condition_to_smt(condition, symbol_names)
-            if not expression_returns_bool(condition_expr):
-                bits = max(1, int(expression_smt_bit_width(condition_expr) or 0))
-                if bits <= 0:
-                    return False, None
-                condition_smt = f"(not (= {condition_smt} (_ bv0 {bits})))"
-            lines.append(f"(assert {condition_smt})")
+        lines.extend(sorted(facts.float_predicate_decls))
+        lines.extend(call_smt_declaration_lines(facts.call_declarations))
+        mapping = query.mapping_items()
+        for entry, index in zip(query.entries, query.order):
+            condition = conditions[index]
+            assertion = cls._condition_assertion(
+                condition, entry.graph, mapping, symbol_names, use_cache=use_cache
+            )
+            lines.append(f"(assert {assertion})")
         return True, "\n".join(lines)
 
     @classmethod
-    def _symbol_name(cls, expr) -> Optional[str]:
-        expr_type = getattr(expr, "expr_type", None)
-        expr_kind = getattr(expr_type, "__class__", None)
-        if expr_type is None or expr_kind is None:
-            return None
-        if expr_type == expr_kind.CALL:
-            return normalize_call_symbol_name(getattr(expr, "name", None))
-        identity = cls._expression_identity_key(expr)
-        if identity is None:
-            return None
-        return str(identity)
+    def _condition_assertion(
+        cls, condition, root_graph, mapping, symbol_names, *, use_cache: bool = True
+    ) -> str:
+        """条件 1 つの assert 本体（書き換えと描画は `RewriteIdentity` で使い回す）。
+
+        使い回すのは root を書き換えて描画した式の文字列だけ（root graph + mapping +
+        描画文脈で決まる値）。向きと bool 化は従来と同じ順（否定してから bool 化）で
+        毎回付ける。
+        """
+
+        expr = condition.expression
+        key = RewriteIdentity.for_root(root_graph, mapping)
+        cacheable = use_cache and key.cacheable
+        found, rendered = (False, None)
+        if cacheable:
+            found, rendered = cache_lookup(
+                cls.REWRITE_TABLE, key, limit=cls._REWRITE_CACHE_LIMIT
+            )
+        if not found:
+            rendered = cls._rewrite_expr_with_symbol_names(expr, symbol_names).to_smt(
+                float_mode="fp"
+            )
+            if cacheable:
+                cache_store(cls.REWRITE_TABLE, key, rendered, limit=cls._REWRITE_CACHE_LIMIT)
+        if getattr(condition, "negated", False):
+            rendered = f"(not {rendered})"
+        if not expression_returns_bool(expr):
+            bits = max(1, int(expression_smt_bit_width(expr) or 0))
+            rendered = f"(not (= {rendered} (_ bv0 {bits})))"
+        return rendered
+
+    # -- solver symbol identity（規則の owner は `query_identity`。ここは委譲だけ） --
 
     @classmethod
     def _identity_is_solver_safe(cls, identity: Optional[Tuple[Any, ...]]) -> bool:
-        if not isinstance(identity, tuple) or not identity:
-            return False
-        # Name-only parameters are not object identities. They can collide
-        # across distinct storage/index/provenance sources, so SMT-backed
-        # coverage and implication checks must decline instead of proving.
-        if identity[0] == "parameter_name":
-            return False
-        if identity[0] == "parameter_generated_ordinal":
-            return False
-        if cls._identity_contains_unsafe_parameter_key(identity):
-            return False
-        if (
-            identity[0] == "runtime_ref"
-            and len(identity) >= 3
-            and isinstance(identity[2], tuple)
-            and identity[2]
-            and identity[2][0]
-            in {
-                "parameter_without_semantic_identity",
-                "stable_parameter_without_index",
-            }
-        ):
-            return False
-        return True
-
-    @classmethod
-    def _identity_contains_unsafe_parameter_key(cls, value: Any) -> bool:
-        if isinstance(value, tuple):
-            if cls._is_unsafe_parameter_key(value):
-                return True
-            return any(cls._identity_contains_unsafe_parameter_key(item) for item in value)
-        if isinstance(value, (list, set, frozenset)):
-            return any(cls._identity_contains_unsafe_parameter_key(item) for item in value)
-        return False
-
-    @staticmethod
-    def _is_unsafe_parameter_key(value: Tuple[Any, ...]) -> bool:
-        if not value or value[0] != "parameter":
-            return False
-        if len(value) == 1:
-            return True
-        if len(value) == 2:
-            return value[1] is None
-        if len(value) == 3:
-            return value[1] is None or value[2] is None
-        if len(value) >= 4:
-            return value[3] is None
-        return False
+        return solver_symbol_identity_is_safe(identity)
 
     @classmethod
     def _expression_identity_key(cls, expr) -> Optional[Tuple[Any, ...]]:
-        """solver query 用の object identity。
+        """solver query 用の object identity（`query_identity.solver_symbol_identity`）。"""
 
-        凍結済みの式では runtime_ref / storage の意味 key を **凍結時に確定した
-        投影** から読む。query identity が生 object の後からの変化で動くと、
-        同じ query に別の cache 行が当たってしまう。
-        """
-
-        expr_type = getattr(expr, "expr_type", None)
-        expr_kind = getattr(expr_type, "__class__", None)
-        if expr_type is None or expr_kind is None:
-            return None
-        if expr_type in {expr_kind.PARAMETER, expr_kind.VARIABLE}:
-            projection = semantic_projection(expr)
-            runtime_identity = cls._runtime_ref_identity_from_projection(projection)
-            if runtime_identity is not None:
-                return (
-                    "runtime_ref",
-                    "parameter" if expr_type == expr_kind.PARAMETER else "variable",
-                    runtime_identity,
-                )
-            if expr_type == expr_kind.PARAMETER:
-                parameter_name = getattr(expr, "name", None)
-                try:
-                    parameter_index = int(getattr(expr, "value", -1))
-                    if parameter_index >= 0:
-                        # Some synthetic/unit-test expressions can carry a
-                        # placeholder index for multiple distinct parameters.
-                        # Include the name when present to avoid conflating
-                        # unrelated parameters in solver-backed condition
-                        # implication.
-                        if parameter_name:
-                            return ("parameter_index_name", parameter_index, str(parameter_name))
-                        return ("parameter_index", parameter_index)
-                except (TypeError, ValueError):
-                    parameter_index = None
-                if projection.storage_identity_supported:
-                    if projection.storage_identity is None:
-                        return None
-                    return ("parameter_storage", projection.storage_identity)
-                if parameter_name:
-                    return ("parameter_name", str(parameter_name))
-            return None
-        if expr_type == expr_kind.CALL:
-            return normalize_call_symbol_name(getattr(expr, "name", None))
-        return None
+        return solver_symbol_identity(expr)
 
     @classmethod
     def has_object_identity_support(cls, conditions: Sequence) -> bool:
@@ -366,67 +425,7 @@ class ConditionSMTOracle:
 
         if runtime_ref is None:
             return None
-        return cls._runtime_ref_identity_from_projection(
-            project_runtime_ref(None, runtime_ref)
-        )
-
-    @classmethod
-    def _runtime_ref_identity_from_projection(cls, projection) -> Optional[Tuple[Any, ...]]:
-        """投影 1 つから identity を決める（`SemanticSnapshot` でも `RuntimeRefProjection` でも）。"""
-
-        return cls._runtime_ref_identity_from_parts(
-            semantic_identity=projection.runtime_semantic_key
-            if hasattr(projection, "runtime_semantic_key")
-            else projection.semantic_key,
-            stable_identity=projection.runtime_stable_key
-            if hasattr(projection, "runtime_stable_key")
-            else projection.stable_key,
-            parameter_ref=projection.runtime_is_parameter_ref
-            if hasattr(projection, "runtime_is_parameter_ref")
-            else projection.is_parameter_ref,
-        )
-
-    @classmethod
-    def _runtime_ref_identity_from_parts(
-        cls,
-        *,
-        semantic_identity: Any,
-        stable_identity: Any,
-        parameter_ref: bool,
-    ) -> Optional[Tuple[Any, ...]]:
-        """identity の **決め方** はここ 1 箇所（生 object 経由も投影経由も同じ）。"""
-
-        if semantic_identity is not None:
-            return ("semantic", semantic_identity)
-        if stable_identity is not None:
-            if parameter_ref:
-                return ("parameter_without_semantic_identity", stable_identity)
-            return ("stable", stable_identity)
-        if parameter_ref:
-            return ("parameter_without_semantic_identity", None)
-        return None
-
-    @staticmethod
-    def _runtime_ref_is_parameter_ref(runtime_ref: Any) -> bool:
-        return project_runtime_ref(None, runtime_ref).is_parameter_ref
-
-    @classmethod
-    def _condition_to_smt(
-        cls,
-        condition,
-        symbol_names: Dict[Tuple[Any, ...], str],
-    ) -> str:
-        expr = getattr(condition, "expression", None)
-        if expr is None:
-            return "false"
-        rewritten = cls._rewrite_expr_with_symbol_names(
-            expr,
-            symbol_names,
-        )
-        condition_smt = rewritten.to_smt(float_mode="fp")
-        if getattr(condition, "negated", False):
-            return f"(not {condition_smt})"
-        return condition_smt
+        return runtime_identity_from_projection(project_runtime_ref(None, runtime_ref))
 
     @classmethod
     def _rewrite_expr_with_symbol_names(

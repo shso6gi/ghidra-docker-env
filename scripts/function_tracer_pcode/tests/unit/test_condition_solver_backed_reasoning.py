@@ -118,18 +118,33 @@ def test_smt_oracle_does_not_assume_ordered_float_complement():
     assert ConditionSMTOracle.conjunction_is_unsat(conditions) is False
 
 
-def test_smt_oracle_authority_mode_bypasses_boolean_cache(monkeypatch):
-    class AlwaysUnsatCache(dict):
-        def get(self, _key, _default=None):
-            return True
+def test_smt_oracle_authority_mode_bypasses_boolean_cache():
+    """`use_cache=False` は記憶した判定を読まない（authority 側の再確認用）。
 
-    monkeypatch.setattr(ConditionSMTOracle, "_unsat_cache", AlwaysUnsatCache())
+    Issue #105 PR-105-A: 判定の cache は pair の store の表（class 属性ではない）。
+    同じ query の identity に偽の `True` を置き、`use_cache=True` はそれを返し、
+    `use_cache=False` は solver の答え（充足可能 = `False`）を返すことを確かめる。
+    """
+
+    from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
+        cache_store,
+        condition_cache_scope,
+    )
+    from scripts.function_tracer_pcode.analysis.condition.query_identity import (
+        SolverQueryIdentity,
+    )
+
     satisfiable = [Condition(Expression.constant(1, size=1), False)]
-
-    assert ConditionSMTOracle.conjunction_is_unsat(satisfiable) is True
-    assert ConditionSMTOracle.conjunction_is_unsat(
-        satisfiable, use_cache=False
-    ) is False
+    with condition_cache_scope():
+        cache_store(
+            ConditionSMTOracle.VERDICT_TABLE,
+            SolverQueryIdentity.from_conditions(satisfiable),
+            True,
+        )
+        assert ConditionSMTOracle.conjunction_is_unsat(satisfiable) is True
+        assert ConditionSMTOracle.conjunction_is_unsat(
+            satisfiable, use_cache=False
+        ) is False
 
 
 def test_solver_backed_implication_handles_phi_with_unknown_branch():
@@ -481,7 +496,14 @@ def test_object_centric_condition_basis_prunes_negated_compound_implied_by_atomi
     assert all(not cond.equals(not_add_branch) for cond in basis)
 
 
-def test_smt_oracle_cache_key_is_structural_and_order_independent():
+def test_smt_oracle_cache_key_is_order_independent_and_polarity_sensitive():
+    """query の identity は条件の順に依らず、向きは区別する（旧 `_build_cache_key` の契約）。"""
+
+    from scripts.function_tracer_pcode.analysis.condition.query_identity import (
+        QUERY_IDENTITY_SCHEMA,
+        SolverQueryIdentity,
+    )
+
     cond_a = Condition(
         Expression.binary_op(
             "INT_NOTEQUAL",
@@ -491,53 +513,58 @@ def test_smt_oracle_cache_key_is_structural_and_order_independent():
     )
     cond_b = Condition(
         Expression.binary_op(
-            "INT_NOTEQUAL",
-            Expression(ExpressionType.PARAMETER, name="param_1", value=0, size=4),
-            Expression(ExpressionType.CONSTANT, value=0, size=4),
+            "INT_EQUAL",
+            Expression(ExpressionType.PARAMETER, name="param_2", value=1, size=4),
+            Expression(ExpressionType.CONSTANT, value=3, size=4),
         )
     )
 
-    key_one = ConditionSMTOracle._build_cache_key((cond_a, cond_b))
-    key_two = ConditionSMTOracle._build_cache_key((cond_b, cond_a))
-    key_single = ConditionSMTOracle._build_cache_key((cond_a,))
-    key_single_negated = ConditionSMTOracle._build_cache_key((Condition(cond_a.expression, True),))
+    key_one = SolverQueryIdentity.from_conditions((cond_a, cond_b))
+    key_two = SolverQueryIdentity.from_conditions((cond_b, cond_a))
+    key_single = SolverQueryIdentity.from_conditions((cond_a,))
+    key_single_negated = SolverQueryIdentity.from_conditions(
+        (Condition(cond_a.expression, True),)
+    )
 
     assert key_one == key_two
     assert key_single != key_single_negated
-    assert key_one[0] == "unsat"
-    assert key_one[1] == ConditionSMTOracle._CACHE_KEY_SCHEMA_VERSION
+    assert key_one.schema == QUERY_IDENTITY_SCHEMA
+    assert ConditionSMTOracle._CACHE_KEY_SCHEMA_VERSION == QUERY_IDENTITY_SCHEMA
 
 
-def test_smt_oracle_cache_key_declines_placeholder_components(monkeypatch):
-    import scripts.function_tracer_pcode.analysis.condition.smt_oracle as smt_oracle
+def test_smt_oracle_cache_key_declines_object_valued_nodes():
+    """値が Python object 表現へ落ちた node を含む query は cache の key にしない。
 
-    cond = Condition(
-        Expression.binary_op(
-            "INT_NOTEQUAL",
-            Expression(ExpressionType.PARAMETER, name="param_1", value=0, size=4),
-            Expression(ExpressionType.CONSTANT, value=0, size=4),
-        )
+    旧実装は予算超過の placeholder を含む key を拒んでいた。DAG の完全比較には
+    予算の placeholder が無いので、代わりに「値で比較できない node」を拒む:
+    自分自身以外と一致せず、判定は覚えない（毎回 solver に聞く）。
+    """
+
+    from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
+        condition_cache_scope,
     )
-    monkeypatch.setattr(smt_oracle, "condition_key", lambda _condition, budget=96: ("placeholder",))
-    monkeypatch.setattr(smt_oracle, "key_contains_placeholder", lambda _key: True)
-
-    assert ConditionSMTOracle._build_cache_key((cond,)) is None
-
-
-def test_smt_oracle_cache_key_declines_unsafe_components(monkeypatch):
-    import scripts.function_tracer_pcode.analysis.condition.smt_oracle as smt_oracle
-
-    cond = Condition(
-        Expression.binary_op(
-            "INT_NOTEQUAL",
-            Expression(ExpressionType.PARAMETER, name="param_1", value=0, size=4),
-            Expression(ExpressionType.CONSTANT, value=0, size=4),
-        )
+    from scripts.function_tracer_pcode.analysis.condition.query_identity import (
+        SolverQueryIdentity,
     )
 
-    def raise_attribute_error(_condition, budget=96):
-        raise AttributeError("synthetic structural key failure")
+    class _Opaque:
+        pass
 
-    monkeypatch.setattr(smt_oracle, "condition_key", raise_attribute_error)
+    def _cond():
+        return Condition(
+            Expression.binary_op(
+                "INT_EQUAL",
+                Expression(ExpressionType.LITERAL, value=_Opaque(), size=4),
+                Expression(ExpressionType.CONSTANT, value=0, size=4),
+            )
+        )
 
-    assert ConditionSMTOracle._build_cache_key((cond,)) is None
+    first, second = _cond(), _cond()
+    key_first = SolverQueryIdentity.from_conditions((first,))
+    key_second = SolverQueryIdentity.from_conditions((second,))
+    assert key_first.cacheable is False
+    assert key_first != key_second
+    assert key_first == key_first
+    with condition_cache_scope() as store:
+        ConditionSMTOracle.conjunction_is_unsat((first,))
+        assert len(store.table(ConditionSMTOracle.VERDICT_TABLE)) == 0

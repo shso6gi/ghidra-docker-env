@@ -12,7 +12,16 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
-from scripts.function_tracer_pcode.core.structural import expression_provenance_key
+from scripts.function_tracer_pcode.core.structural import (
+    ConditionsSignature,
+    expression_provenance_key,
+)
+from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
+    cache_lookup,
+    cache_store,
+    clear_condition_caches,
+)
+from scripts.function_tracer_pcode.analysis.condition.query_identity import SolverQueryIdentity
 from scripts.function_tracer_pcode.analysis.debug import summarize_expression, summarize_condition
 from scripts.function_tracer_pcode.analysis.condition.bitvector import (
     eval_constant_raw,
@@ -134,17 +143,50 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
     _debug_suppressed: bool = False
     _DEBUG_REPEAT_LIMIT: int = 8
     _debug_repeat_counts: Dict[Tuple[str, str], int] = {}
-    _active_normalization_keys: Set[Tuple[object, ...]] = set()
+    # 再入 guard（今の呼び出しの途中にある問い。cache ではないので pair を持ち越さない:
+    # 呼び出しが終われば空）。key は cache と同じ identity（bucket → 完全比較）。
+    _active_normalization_keys: Set[SolverQueryIdentity] = set()
     _active_reduction_keys: Set[Tuple[int, Tuple[int, ...]]] = set()
-    _active_implied_keys: Set[Tuple[Tuple[int, ...], Tuple[int, ...]]] = set()
-    _active_formula_implies_keys: Set[Tuple[object, ...]] = set()
-    _formula_implies_cache: Dict[Tuple[object, ...], Optional[bool]] = {}
-    _implied_cache: Dict[Tuple[Tuple[int, ...], int], Optional[bool]] = {}
+    _active_implied_keys: Set[Tuple[object, ...]] = set()
+    _active_formula_implies_keys: Set[SolverQueryIdentity] = set()
+    # Issue #105 PR-105-A: 判定の cache は pair の store（`condition_cache`）の表。
+    # class 属性の process 寿命の cache は持たない。
+    FORMULA_UNSAT_TABLE: str = "simplifier.formula_unsat"
+    FORMULA_IMPLIES_TABLE: str = "simplifier.formula_implies"
+    IMPLIED_TABLE: str = "simplifier.implied"
     _FORMULA_IMPLIES_CACHE_LIMIT: int = 8192
     _IMPLIED_CACHE_LIMIT: int = 8192
     _CONTEXTUAL_REDUCTION_MAX_ITERATIONS: int = 4
     _CONTEXTUAL_REDUCTION_MAX_CONDITIONS: int = 64
     
+    @classmethod
+    def reset_caches(cls) -> None:
+        """今の pair の store から、条件簡約の表を消す（pair 境界の scope とは別に使える）。"""
+
+        clear_condition_caches(
+            (cls.FORMULA_UNSAT_TABLE, cls.FORMULA_IMPLIES_TABLE, cls.IMPLIED_TABLE)
+        )
+        ConditionSMTOracle.reset_caches()
+
+    @classmethod
+    def _implication_cache_key(
+        cls,
+        condition: Condition,
+        context_list: List[Condition],
+        implied_conditions: Optional[Set[Tuple[str, str, str, bool]]],
+    ) -> Tuple[object, ...]:
+        """含意の問いの key: 文脈の identity・条件の identity・渡された正規形の集合。
+
+        結果は 3 つすべてに依存する（正規形の集合が空か文脈から作ったものかで答えが
+        変わり得る）ので、どれも落とさない。identity は bucket → 完全比較。
+        """
+
+        return (
+            SolverQueryIdentity.from_conditions(context_list),
+            SolverQueryIdentity.from_conditions((condition,)),
+            frozenset(implied_conditions or ()),
+        )
+
     @classmethod
     def _conditions_structurally_equal(cls, left: Condition, right: Condition) -> bool:
         if left.negated != right.negated:
@@ -343,20 +385,20 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         prefer_solver: bool = False,
     ) -> bool:
         context_list = list(context_conditions or [])
-        context_signature = tuple(cls._safe_condition_ids(context_list))
-        condition_signature = cls._safe_condition_id(condition)
-        cache_key = (context_signature, condition_signature)
+        if len(context_list) > cls._CONTEXTUAL_REDUCTION_MAX_CONDITIONS:
+            return False
+        cache_key = cls._implication_cache_key(condition, context_list, implied_conditions)
         if cache_key in cls._active_implied_keys:
             return False
-        if len(cache_key[0]) > cls._CONTEXTUAL_REDUCTION_MAX_CONDITIONS:
-            return False
-        if cache_key in cls._implied_cache:
-            return bool(cls._implied_cache[cache_key])
+        cacheable = cache_key[0].cacheable and cache_key[1].cacheable
+        if cacheable:
+            found, cached = cache_lookup(cls.IMPLIED_TABLE, cache_key, limit=cls._IMPLIED_CACHE_LIMIT)
+            if found:
+                return bool(cached)
 
         def _store_implied_cache(result: bool) -> bool:
-            if len(cls._implied_cache) >= cls._IMPLIED_CACHE_LIMIT:
-                cls._implied_cache.clear()
-            cls._implied_cache[cache_key] = result
+            if cacheable:
+                cache_store(cls.IMPLIED_TABLE, cache_key, result, limit=cls._IMPLIED_CACHE_LIMIT)
             return result
 
         cls._active_implied_keys.add(cache_key)
@@ -649,7 +691,7 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
                 "solver_backed": False,
             }
 
-        guard_key = cls._condition_object_cache_key(conditions)
+        guard_key = SolverQueryIdentity.from_conditions(conditions)
         use_nonrecursive = (
             guard_key in cls._active_normalization_keys
             or cls._should_skip_contextual_reduction(conditions)
@@ -876,7 +918,8 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
     ) -> Dict[str, object]:
         flattened: List[Condition] = []
         contradiction_indices: Set[int] = set()
-        seen_keys: Set[Tuple[object, ...]] = set()
+        # 重複は条件の structural identity（bucket = candidate hash → `Condition.equals`）
+        seen_conditions: Set[Condition] = set()
         selected: List[Condition] = []
 
         for cond in conditions:
@@ -890,13 +933,9 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
                 flattened.append(flat)
 
         for cond in flattened:
-            try:
-                key = cls._safe_condition_cache_key([cond], budget=128)[0]
-            except _CONDITION_RECOVERABLE_ERRORS:
-                key = ("unsafe", cls._safe_condition_id(cond))
-            if key in seen_keys:
+            if cond in seen_conditions:
                 continue
-            seen_keys.add(key)
+            seen_conditions.add(cond)
             if cls.evaluate_condition_truth(cond) is False:
                 contradiction_indices.add(len(selected))
             for other_index, other in enumerate(selected):
@@ -919,15 +958,6 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         }
 
     @classmethod
-    def _condition_object_cache_key(
-        cls,
-        conditions: Iterable[Condition],
-    ) -> Tuple[int, ...]:
-        keys = [cls._safe_condition_id(cond) for cond in (conditions or []) if cond is not None]
-        keys.sort()
-        return tuple(keys)
-
-    @classmethod
     def _should_skip_contextual_reduction(
         cls,
         conditions: Iterable[Condition],
@@ -938,7 +968,7 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
             try:
                 key = condition_key(cond, budget=96)
             except _CONDITION_RECOVERABLE_ERRORS:
-                key = ("unsafe", cls._safe_condition_id(cond))
+                key = ("unsafe",)
             if key_contains_placeholder(key):
                 return True
             metrics = cls._condition_metrics(cond)
@@ -1054,6 +1084,9 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         conditions: Iterable[Condition],
     ) -> List[Condition]:
         flattened: List[Condition] = []
+        # 重複の判定は bucket（candidate hash）→ `Condition.equals`（完全比較）。
+        # 条件どうしの総当たりにしない（Issue #105 の B3_B11 の kill 位置）。
+        seen: Set[Condition] = set()
         for condition in list(conditions or []):
             if condition is None:
                 continue
@@ -1061,8 +1094,9 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
                 truth_value = cls.evaluate_condition_truth(flat)
                 if truth_value is True:
                     continue
-                if any(flat.equals(existing) for existing in flattened):
+                if flat in seen:
                     continue
+                seen.add(flat)
                 flattened.append(flat)
 
         ranked_conditions = sorted(
@@ -1111,15 +1145,16 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
     def object_centric_conditions_signature(
         cls,
         conditions: Iterable[Condition],
-    ) -> Tuple[object, ...]:
-        signature = []
-        for condition in cls.build_object_centric_condition_basis(conditions):
-            try:
-                signature.append(condition.structural_key(budget=256))
-            except _CONDITION_RECOVERABLE_ERRORS:
-                signature.append(("unsafe", cls._safe_condition_id(condition)))
-        signature.sort(key=repr)
-        return tuple(signature)
+    ) -> ConditionsSignature:
+        """object-centric basis の条件の多重集合の structural identity（dedup / dict key 用）。
+
+        Issue #105 PR-105-A: 旧実装は `condition_key(budget=256)` の tuple を `repr` 順に
+        並べた値で、予算を超えた別々の条件が同じ placeholder になって一致していた。
+        `ConditionsSignature` は bucket（candidate hash）→ `Condition.equals`（完全比較）
+        で一致を決める（予算超過は不一致）。
+        """
+
+        return ConditionsSignature(cls.build_object_centric_condition_basis(conditions))
 
     @classmethod
     def object_centric_is_contradiction(
@@ -1130,14 +1165,7 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         if not basis:
             return False
 
-        try:
-            unsat_cache_key = ("raw-unsat", cls._safe_condition_cache_key(basis))
-        except _CONDITION_RECOVERABLE_ERRORS:
-            unsat_cache_key = ("raw-unsat",)
-        solver_unsat = ConditionSMTOracle.conjunction_is_unsat(
-            basis,
-            cache_key=unsat_cache_key,
-        )
+        solver_unsat = ConditionSMTOracle.conjunction_is_unsat(basis)
         if solver_unsat is not None:
             return solver_unsat
 

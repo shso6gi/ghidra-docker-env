@@ -60,6 +60,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
+from scripts.function_tracer_pcode.core.condition_metrics import (
+    condition_metrics_snapshot,
+)
 from scripts.function_tracer_pcode.core.budget_policy import (
     BudgetKind,
     BudgetPolicy,
@@ -1269,6 +1272,11 @@ def _attach_budget_diagnostics(result: Any, prepared: PreparedSemanticPayload, p
         "observed": budget_observations(),
         "serialization": prepared.plan.to_diagnostic(),
     }
+    # Issue #105 PR-105-A: 条件簡約・条件 oracle の計測（PR-105-B の予算を決める分布）。
+    # 数だけで判定に使わない。scope の外（pair 境界を通らない呼び出し）では空なので書かない。
+    condition_simplify = condition_metrics_snapshot()
+    if condition_simplify:
+        diagnostics["condition_simplify"] = condition_simplify
     live_values.set_state(result, "diagnostics", diagnostics)
 
 

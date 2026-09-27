@@ -68,10 +68,10 @@ class ExpandedValue:
         )
     
     def get_condition_signature(self) -> Hashable:
-        """
-        条件のシグネチャを取得（重複排除用）
-        
-        条件を正規化して、ソート済みの文字列として返す
+        """条件の多重集合の structural identity（重複排除用、`ConditionsSignature`）。
+
+        bucket（candidate hash）→ `Condition.equals`（完全比較）で一致を決めるので、
+        dict / set の key にそのまま使える（Issue #105 PR-105-A）。
         """
         return ConditionSimplifier.object_centric_conditions_signature(self.conditions)
     
