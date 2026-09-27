@@ -1678,10 +1678,21 @@ def _assigned_names(function) -> dict:
     return found
 
 
-def _charges_for(nodes, names, iterated, assigned) -> bool:
+def _measured_assignment_map(function) -> dict:
+    """関数の中の `name = 式` の、名前 → 式の中で幅を測った名前（`count = size(values)` なら values）。"""
+
+    found: dict = {}
+    for node in _walk_own(function):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            found.setdefault(node.targets[0].id, set()).update(_measured_names(node.value))
+    return found
+
+
+def _charges_for(nodes, names, iterated, assigned, measured_assignments=None) -> bool:
     """`nodes` の中に、`iterated` の名前（または 1 段の代入でそれを参照する名前）を引数に持つ
     `work.charge(...)` が在るか。辿る値に名前が無い（定数の列など）ときは、どれかの charge で足りる。"""
 
+    measured_assignments = measured_assignments or {}
     iterated = iterated - {name for name in iterated if name in names}
     # 辿る側も 1 段遡る（`positions = sorted(found)` を辿る内包表記は、`found` を数えた charge で足りる）
     iterated = set(iterated)
@@ -1697,14 +1708,37 @@ def _charges_for(nodes, names, iterated, assigned) -> bool:
                 continue
             if not iterated:
                 return True
+            # 数えるのは測った幅（`len(x)` / `size(x)` などの引数の名前、または測った値を 1 段の代入で
+            # 束ねた名前）: `work.charge(values is None)` は幅を数えていない
             charged = set()
             for argument in (*inner.args, *(keyword.value for keyword in inner.keywords)):
+                charged |= _measured_names(argument)
                 for name in _names_in(argument):
-                    charged.add(name)
-                    charged.update(assigned.get(name, ()))
+                    if name in measured_assignments:
+                        charged |= measured_assignments[name]
             if charged & iterated:
                 return True
     return False
+
+
+#: 列の幅を測る呼び出し（`work.charge(...)` の引数でこれに渡した名前が「数えた幅」）
+_MEASURING_CALLS = frozenset({"len", "size", "storage_count", "storage_extent", "container_frame_bytes"})
+
+
+def _measured_names(node) -> set:
+    """式の中で幅を測る呼び出し（`len(x)` / `size(x)` / `x.__len__()`）に渡した名前。"""
+
+    found = set()
+    for inner in _walk_own(node):
+        if isinstance(inner, ast.Call):
+            func = inner.func
+            called = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+            if called in _MEASURING_CALLS:
+                for argument in inner.args:
+                    found |= _names_in(argument)
+            if called == "__len__" and isinstance(func, ast.Attribute):
+                found |= _names_in(func.value)
+    return found
 
 
 def _charges(nodes, names) -> bool:
@@ -1762,24 +1796,35 @@ def _local_containers(function) -> frozenset:
             continue
         if isinstance(target, ast.Name):
             assignments.append((target.id, value))
-    found = set()
-    for name, value in assignments:
-        if (
+    def _created(value) -> bool:
+        return (
             (isinstance(value, (ast.List, ast.Set)) and not value.elts)
             or (isinstance(value, ast.Dict) and not value.keys)
             or (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
                 and value.func.id in _EMPTY_CONTAINER_CALLS and not value.args and not value.keywords)
             or isinstance(value, (ast.ListComp, ast.SetComp, ast.DictComp))
-        ):
-            found.add(name)
+        )
+
+    bindings: dict = {}
+    for name, value in assignments:
+        bindings.setdefault(name, []).append(value)
+    # 名前ごとに **全部の** 代入を見る（`kept = []` の後に `kept = values` と束ね直した名前は local でない）。
+    # 添字（`box[0]`）は local の容器の中の値で、容器ではない
+    found = {name for name, values in bindings.items() if all(_created(value) for value in values)}
     changed = True
     while changed:
         changed = False
-        for name, value in assignments:
+        for name, values in bindings.items():
             if name in found:
                 continue
-            sources = _names_in(value) - _PYTHON_BUILTINS
-            if sources and sources <= found:
+            if all(
+                _created(value) or (
+                    not any(isinstance(inner, ast.Subscript) for inner in _walk_own(value))
+                    and (_names_in(value) - _PYTHON_BUILTINS)
+                    and (_names_in(value) - _PYTHON_BUILTINS) <= found
+                )
+                for value in values
+            ):
                 found.add(name)
                 changed = True
     return frozenset(found)
@@ -1797,9 +1842,20 @@ def _traversed_sources(node) -> frozenset:
         if isinstance(node.func, ast.Attribute):
             parts.append(node.func.value)
         found = frozenset().union(*(_names_in(part) for part in parts)) if parts else frozenset()
+    elif isinstance(node, ast.AugAssign):
+        found = _names_in(node.value) | _names_in(node.target)
+    elif isinstance(node, ast.While):
+        found = _names_in(node.test)
     else:
         found = frozenset()
     return found - _PYTHON_BUILTINS
+
+
+def _counter_update(node, local) -> bool:
+    """累算の代入のうち、関数の中で作った容器を詰めるもの（`kept += values`）以外（数の counter・属性の更新）。
+    容器を詰める `+=` は、右辺が同じ規則（local だけ・数えた幅）を満たすときだけ。"""
+
+    return isinstance(node, ast.AugAssign) and not (isinstance(node.target, ast.Name) and node.target.id in local)
 
 
 def _completes_local(node, local) -> bool:
@@ -1811,9 +1867,12 @@ def _completes_local(node, local) -> bool:
 
 
 def _completing(node) -> bool:
-    """列を完成させる構文（内包表記・`sorted` / `tuple` などの組み込み・`.join` / `.sort()` などの method）。"""
+    """列を完成させる構文（内包表記・`sorted` / `tuple` などの組み込み・`.join` / `.sort()` などの method・
+    `+=` / `|=` などの累算の代入）。"""
 
     if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
+        return True
+    if isinstance(node, ast.AugAssign):
         return True
     if isinstance(node, ast.Call):
         func = node.func
@@ -1873,7 +1932,15 @@ def _walk_own(node):
 
 def work_owner(index: PackageIndex, key) -> Optional[str]:
     """関数が自分で作業量の owner を持つか: "B"（作業量 / 予算を引数に取り、反復ごとに数えるか渡す）、
-    "C"（反復ごとに必ず 1 つ yield する generator）、どちらでもなければ `None`。"""
+    "C"（反復ごとに必ず 1 つ yield する generator）、どちらでもなければ `None`。
+
+    B は構文の規則: 反復・列を完成させる構文（内包表記・完成させる組み込み / method・local の容器を詰める
+    `+=`）は、その中で作業量を数えるか作業量を受け取る呼び先へ渡すか、それより前に辿る値の幅を測って
+    数える（`len` / `size` などの引数・1 段の代入）か、関数の中で作った容器だけを辿る。静的な規則の限界:
+    解決できない呼び先（method）へ作業量を渡す形は「渡した」と数え、B の関数の中の `repr` / 切り出し /
+    `*` / 繰り返し / 再帰は見ない。これらは bounded path の入口を実行する動的な test
+    （`test_record_walks_on_the_bounded_path_never_see_uncounted_input` ほか）が補う。
+    """
 
     function = index.functions[key]
     args = function.args
@@ -1890,17 +1957,19 @@ def work_owner(index: PackageIndex, key) -> Optional[str]:
         # 前に数える形は、数える呼び出しの引数が辿る値（の名前、または 1 段の代入の元）を参照すること
         # （`work.charge(1)` の後の `sorted(values)` は数えていない）
         assigned = _assigned_names(function)
+        measured = _measured_assignment_map(function)
         if (
             _uses_work(function.body, names)
             and all(
                 _uses_work(loop.body, names)
-                or _charges_for(before, names, _names_in(loop.iter if isinstance(loop, (ast.For, ast.AsyncFor)) else None), assigned)
+                or _charges_for(before, names, _traversed_sources(loop), assigned, measured)
                 or _completes_local(loop, local)
                 for loop, before in _loops_with_preceding(function.body)
             )
             and all(
-                _uses_work([node], names)
-                or _charges_for(before, names, _names_in(node), assigned)
+                _counter_update(node, local)
+                or _uses_work([node], names)
+                or _charges_for(before, names, _names_in(node), assigned, measured)
                 or _completes_local(node, local)
                 for node, before in _completions_with_preceding(function.body)
             )

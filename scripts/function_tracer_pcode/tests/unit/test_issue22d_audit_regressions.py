@@ -573,6 +573,21 @@ def test_the_unmetered_freeze_equals_the_metered_copy():
     metered = SnapshotFingerprintCodec.freeze(value, budget=JsonBudget(None))
     assert unmetered == metered
 
+    # 容器の値の enum も同じ写し（小さい値は同じ tuple、固定の上限の外の値はどちらも拒む）
+    class Shape(enum.Enum):
+        SMALL = (1, 2, 3)
+        HUGE = tuple(range(70_000))
+
+    assert SnapshotFingerprintCodec.freeze(Shape.SMALL) == SnapshotFingerprintCodec.freeze(
+        Shape.SMALL, budget=JsonBudget(None),
+    )
+    for freeze in (
+        lambda: SnapshotFingerprintCodec.freeze(Shape.HUGE),
+        lambda: SnapshotFingerprintCodec.freeze(Shape.HUGE, budget=JsonBudget(None)),
+    ):
+        with pytest.raises(TypeError):
+            freeze()
+
 
 class _JavaHashedInt(int):
     """JPype の `JInt` は `__hash__` / `__eq__` を自分の型で持つ（組み込みの `int` の実装ではない）。"""

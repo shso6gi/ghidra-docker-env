@@ -417,9 +417,10 @@ def _persist_then_write(args, *, result, payload, work, text, json_content, size
     except _POST_AUTHORITY_OUTPUT_FAILURES as failure:
         _emit_output_failure_error(args, result=result, failure=failure, **context)
         raise  # pragma: no cover - 上の関数は sys.exit する
-    output_result(text, args.output, args.quiet)
     written = False
     try:
+        # 永続化した後の書き出しの失敗（text も JSON も）は、永続化した envelope の outcome の exit code
+        output_result(text, args.output, args.quiet)
         if not args.quiet:
             print(f"[EquivalenceCLI] Result payload bytes: {size_line}")
         output_result(json_content, args.output, args.quiet)

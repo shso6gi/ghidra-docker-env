@@ -1123,6 +1123,36 @@ def test_a_decided_envelope_that_cannot_be_persisted_is_a_durable_error_before_a
     assert [item["final_outcome"] for item in persisted] == ["ERROR"]
 
 
+def test_a_write_failure_after_the_envelope_is_persisted_exits_with_the_persisted_outcome(monkeypatch, tmp_path):
+    """永続化した後の書き出しの失敗（text も JSON も）は、永続化した envelope の outcome の exit code で終わる
+    （supervisor が envelope と exit code を join できる。traceback の exit 1 にしない）。"""
+
+    from scripts.function_tracer_pcode.authority.decision import canonical_result
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+        CLI_EXIT_MATRIX,
+        outcome_from_result,
+    )
+    from scripts.function_tracer_pcode.cli.commands import equivalence
+
+    decided = _decided_result()
+
+    def _broken_write(content, *_a, **_k):
+        raise OSError("broken pipe")
+
+    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", lambda _payload, **_kw: None)
+    monkeypatch.setattr(equivalence, "output_result", _broken_write)
+    args = SimpleNamespace(verbose=False, debug=False, output=None, quiet=True)
+    evidence, session = decided._canonical_finalization_context
+    work = envelope_seal_work()
+    envelope = build_final_result_envelope(decided, seal=AuthoritySeal(evidence=evidence, session=session), work=work)
+    with pytest.raises(SystemExit) as exited:
+        equivalence._persist_then_write(
+            args, result=decided, payload=envelope.payload, work=work, text="DECIDED TEXT",
+            json_content="DECIDED JSON", size_line=envelope.size_line(),
+        )
+    assert exited.value.code == CLI_EXIT_MATRIX[outcome_from_result(decided)]
+
+
 def test_the_persisted_envelope_is_no_larger_than_the_result_json_plus_its_wrapper(monkeypatch, tmp_path):
     import json
 

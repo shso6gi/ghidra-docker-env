@@ -2255,6 +2255,40 @@ def counted_width_then_comprehension(values, work):
     return [value for value in values]
 
 
+def rebinds_local(values, work):
+    kept = []
+    kept = values
+    work.charge(1)
+    return sorted(kept)
+
+
+def fills_local_in_place(values, work):
+    kept = []
+    work.charge(1)
+    kept += values
+    return tuple(kept)
+
+
+def subscripts_local(values, work):
+    box = []
+    box.append(values)
+    work.charge(1)
+    inner = box[0]
+    return sorted(inner)
+
+
+def while_after_token_charge(values, work):
+    work.charge(1)
+    index = 0
+    while index < len(values):
+        index += 1
+
+
+def mentions_without_measuring(values, work):
+    work.charge(values is None)
+    return sorted(values)
+
+
 def filled_then_completed(values, work):
     kept = []
     for value in values:
@@ -2322,6 +2356,8 @@ def test_j22_the_detector_sees_every_proportional_construct_and_every_unowned_lo
         "uncharged", "charged_each", "charged_before", "skipping", "sorted_then_yield", "lazy",
         "token_charge_then_loop", "token_charge_then_sorted", "token_charge_then_comprehension",
         "work_only_to_a_builtin", "width_then_sorted", "counted_width_then_comprehension", "filled_then_completed",
+        "rebinds_local", "fills_local_in_place", "subscripts_local", "while_after_token_charge",
+        "mentions_without_measuring",
     )}
     assert owners == {
         "uncharged": None, "charged_each": "B", "charged_before": "B", "skipping": None,
@@ -2332,6 +2368,10 @@ def test_j22_the_detector_sees_every_proportional_construct_and_every_unowned_lo
         "work_only_to_a_builtin": None, "width_then_sorted": "B", "counted_width_then_comprehension": "B",
         # 関数の中で数えながら詰めた容器を完成させるのは、詰めた反復の規則で足りる
         "filled_then_completed": "B",
+        # 関数の中で作った容器と言えない形（束ね直し・live な入力を `+=` で詰める・中の値を取り出す）、
+        # `while` の前の形だけの charge、幅を測らない charge は owner でない
+        "rebinds_local": None, "fills_local_in_place": None, "subscripts_local": None,
+        "while_after_token_charge": None, "mentions_without_measuring": None,
     }
     constructs = {
         name: flow.proportional_constructs(index.functions[(module, name)])
@@ -2680,15 +2720,23 @@ def test_snapshot_creation_never_runs_the_code_of_the_values_it_freezes():
     built = RESULT_JSON_POLICY.materialize({"analysis_scope_key": _Hostile(a=1)})
     with pytest.raises(TypeError):
         AnalysisSnapshot.create(("s",), built)
-    # 上書きした容器は写さない（そのまま返す: 写すとその code を呼ぶ）
-    hostile = _Hostile(a=1)
-    assert deep_freeze(hostile) is hostile
+    # 上書きした容器は写さない（写すとその code を呼ぶ）: 変更できる mapping をそのまま置かずに拒む
+    with pytest.raises(TypeError):
+        deep_freeze(_Hostile(a=1))
+    # key の hash が組み込みでない mapping も読み取り専用の写し（変更できる元の dict を置かない）
+    inner = {frozenset({1}): [1, 2]}
+    frozen_inner = deep_freeze({"m": inner})["m"]
+    assert frozen_inner is not inner and frozen_inner[frozenset({1})] == (1, 2)
     frozen = deep_freeze({"a": [1, (2, 3)], "b": {"c": {4}}})
     assert frozen["a"] == (1, (2, 3)) and frozen["b"]["c"] == frozenset({4})
     semantic, diagnostic = _classify_analysis_notes(["debug:x", _Note(), "custom"])
     from scripts.function_tracer_pcode.core.live_values import type_name
 
-    assert diagnostic == ("debug:x",) and semantic == (f"<{type_name(_Note)}>", "custom")
+    assert diagnostic == ("debug:x",) and semantic[1] == "custom"
+    assert semantic[0].startswith(f"<{type_name(_Note)}@")
+    # 型の同じ別の note は別の note（1 つに合併しない）
+    first, second = _classify_analysis_notes([_Note(), _Note()])[0]
+    assert first != second
     assert calls == []
 
 

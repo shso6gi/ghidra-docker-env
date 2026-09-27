@@ -20,7 +20,8 @@ JSON の sha256。`authority/contracts`）と **同じ値** を streaming で求
 * **producer を呼ばない**: 走査の中で実行するのは組み込みの容器の振る舞いだけ。
   `to_authority_dict()`・`__getattr__`（`hasattr`）・上書きした `items()` / `__len__` /
   `__getitem__` / `__iter__`・dataclass の property・metaclass の hook は呼ばない（どれも work を
-  受け取らずに入力に比例する仕事をし得る。型の属性は `live_values.type_attribute` で読む）。そういう
+  受け取らずに入力に比例する仕事をし得る。型の属性は `live_values.type_attribute` で読む: MRO の class の
+  `__dict__` だけで、metaclass に置いた属性は見ない）。そういう
   値は `TypeError`（有界な canonical な形を持たない。呼ぶ側は型つき token の fingerprint へ退く）。
   例外は固定の形の record `BoundedEvidence`（要約が O(1)）だけ。
 * **閉路** は `CanonicalValueCycle`（型つきの失敗）。辿っている容器の identity を持つので、

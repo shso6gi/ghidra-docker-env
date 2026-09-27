@@ -27,7 +27,6 @@ J19（`tests/unit/_live_flow_audit.py`）が bounded path の関数からそれ�
 from __future__ import annotations
 
 import gc
-import inspect
 import itertools
 import operator
 import os
