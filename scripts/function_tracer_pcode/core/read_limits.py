@@ -106,7 +106,8 @@ class _SharedScan:
 
 
 def scan_budget() -> _SharedScan:
-    """入れ子の列を辿る 1 つの読みが共有する上限（`elements_within_limit(..., scan)` に渡す）。"""
+    """入れ子の列を辿る 1 つの読みが共有する上限（`elements_within_limit(..., scan)` に渡す）。数えてから
+    安全の判定で拒まれた読みの数も和に入る（拒めば `TypeError` が呼ぶ側へ上がり、その読み全体が失敗する）。"""
 
     return _SharedScan()
 
@@ -154,6 +155,11 @@ def elements_within_limit(values: Any, scan: Any = None) -> Iterator[Any]:
     1 要素ずつ数える。量の限界は容器の種類に依らない。作業量で数える walker は `elements_of` を使う。
     """
 
+    kind = type(values)
+    if kind is tuple or kind is list:
+        # 型そのものの列: 数は基底型の slot、反復は値の storage を読まない（入れ子の文脈は要らない）
+        _admit(kind.__len__(values), scan, "a sequence read without a work budget")
+        return iter(values)
     count = _admitted_count(values, scan, "a sequence read without a work budget")
     with _nested(scan):
         iterator = live_values.elements_of(values)
@@ -209,6 +215,8 @@ def prefix_items_within_limit(mapping: Any) -> tuple:
 
 
 def _prefix(read: Any, values: Any) -> tuple:
+    # 反復の確かめが上限の外の storage を読む容器（key を hash して辿る大きい `OrderedDict`）は何も写さない
+    # （dict は先頭を写す）: 判定に使わない写しの容器の種類の違い。写さなかった件数は `omitted_beyond_limit`
     head: list = []
     with live_values.signalled_storage_reads():
         try:

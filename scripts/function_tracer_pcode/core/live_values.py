@@ -75,7 +75,8 @@ _PACKAGE_FILES: dict = {}
 #:   述語は量のせいで「安全でない」（False / None / `TypeError`）とは答えない。
 #:
 #: 上限は package と実行環境の型の namespace・record の instance の状態・解析の record の key の実測の
-#: 最大（`test_issue22d_live_values_bounds.py` が固定 subset の値を記録する）に対して十分大きい 2 の冪
+#: 最大に対して十分大きい 2 の冪（実測は test ではなく PR-22-D の検証の固定 subset: 結果 JSON の列の長さ
+#: 177・mapping の key 57・入れ子の深さ 30。固定 subset で読みの上限の限界は 0 件）
 SCAN_LIMIT = 1 << 12
 
 
@@ -226,6 +227,7 @@ class fixed_bound_reads:
 
     def __exit__(self, *_exc: Any) -> None:
         _STORAGE_METER.reset(self._token)
+        self._token = None
 
 
 class signalled_storage_reads:
@@ -245,13 +247,16 @@ class signalled_storage_reads:
 
     def __exit__(self, *_exc: Any) -> None:
         _STORAGE_METER.reset(self._token)
+        self._token = None
 
 
 class _StorageRead:
     """値の storage を 1 回読む走査の 1 つの量の数（上限までは固定の上限の中。超えた分の意味は文脈の owner）。
 
     `traversal` は反復の確かめ（反復・写しの前に、これから辿る要素を確かめる走査）: 量の owner の無い
-    文脈では反復と同じく上限なしで読む。それ以外は隠れた読み（呼ぶ側が辿ると頼んでいない走査）。
+    文脈では反復と同じく上限なしで読む。それ以外は隠れた読み（呼ぶ側が辿ると頼んでいない走査）。確かめの
+    中の隠れた読み（key が enum の member なら、その hash が読む member の状態を名前で読む）は隠れた読みの
+    まま（key を hash する容器だけが読む量で、key の tuple の node と同じ種類の違い）。
     """
 
     __slots__ = ("what", "used", "traversal")
