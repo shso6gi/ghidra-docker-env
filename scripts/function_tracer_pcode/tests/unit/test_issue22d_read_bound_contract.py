@@ -552,9 +552,14 @@ def test_a_meter_charges_one_traversal_once():
 
 
 def test_keys_and_key_tuple_nodes_are_separate_quantities():
-    """key の数（O(1) で数える）と key の tuple の node（走査の中で数える）は別の量で、それぞれ 1 回の
-    走査の中の和を上限と比べる（key ごとに上限まで辿らない: 上限の積にしない）。上限の内側の数の mapping
-    を、node を足して上限の外にしない（数えて通した入口の後で落ちない）。"""
+    """要素の数（O(1) で数えて最初に比べる）と key の tuple の node（O(1) では数えられないので、key を
+    hash する読み（`OrderedDict` の反復の確かめ・写し・key で引く）が確かめながら数える）は別の量で、
+    それぞれ 1 回の走査の中の和を上限と比べる（key ごとに上限まで辿らない: 上限の積にしない）。
+
+    * 要素の数と node を足して比べない（要素 1,400・node 2,800 の mapping は上限の中）
+    * node の量は要素の数を通した後でも上限を超え得る（超えれば同じ限界。安全でない値にしない）
+    * dict の反復は key を hash しないので node を読まない（読まない量は数えない）
+    """
 
     small = {(index, "x"): index for index in range(1400)}  # key 1,400・node 2,800
     ordered = OrderedDict(small)
@@ -590,6 +595,92 @@ def test_keys_and_key_tuple_nodes_are_separate_quantities():
     with pytest.raises(FixedReadBoundExceeded):
         read_limits.items_within_limit(OrderedDict(wide))
     assert time.perf_counter() - started < 1.0
+
+
+def test_the_read_limit_entries_read_key_tuple_nodes_in_their_fixed_bound():
+    """入口の中の key の tuple の node も固定の上限（`fixed_bound_reads`）: `OrderedDict` の反復の確かめは
+    どの入口からでも同じ境界（`elements_within_limit` / `items_within_limit`）。"""
+
+    width = 8
+    keys = LIMIT // width
+    at_bound = OrderedDict((tuple(range(index, index + width)), index) for index in range(keys))
+    beyond = OrderedDict((tuple(range(index, index + width)), index) for index in range(keys + 1))
+    for call in (read_limits.elements_within_limit, read_limits.items_within_limit):
+        assert len(list(call(at_bound))) == keys
+        with pytest.raises(FixedReadBoundExceeded):
+            call(beyond)
+    # 量の owner の無い文脈では反復と同じく上限なし
+    assert len(list(live_values.elements_of(beyond))) == keys + 1
+
+
+def test_a_shared_scan_shares_the_nested_quantities_too():
+    """共有の scan は要素だけでなく key の tuple の node・proxy の段の和も共有する（呼び出しごとに上限まで
+    辿ると、scan の要素の和が上限の中でも上限の積になる）。"""
+
+    node_heavy = [{tuple(range(3000)): 1}, {tuple(range(3000, 6000)): 2}]
+    scan = read_limits.scan_budget()
+    assert len(read_limits.copied_within_limit(node_heavy[0], scan)) == 1
+    with pytest.raises(FixedReadBoundExceeded):
+        read_limits.copied_within_limit(node_heavy[1], scan)
+    # scan を共有しなければ呼び出しごとの上限
+    assert len(read_limits.copied_within_limit(node_heavy[1])) == 1
+
+    def _chain(layers):
+        proxy = {"a": 1}
+        for _ in range(layers):
+            proxy = types.MappingProxyType(proxy)
+        return proxy
+
+    scan = read_limits.scan_budget()
+    assert len(list(read_limits.items_within_limit(_chain(3000), scan))) == 1
+    with pytest.raises(FixedReadBoundExceeded):
+        read_limits.items_within_limit(_chain(3000), scan)
+    # 共有の scan の node は写しの中の入れ子の写しにも効く（signature の記述子の写し）
+    from scripts.function_tracer_pcode.core.signature import FunctionSignature
+
+    parameters = [{"name": f"p{index}", "v": {tuple(range(4000)): 1}} for index in range(3)]
+    started = time.perf_counter()
+    with pytest.raises(FixedReadBoundExceeded):
+        FunctionSignature.from_analysis(SimpleNamespace(return_type="int", return_type_obj=None, parameters=parameters))
+    assert time.perf_counter() - started < 1.0
+
+
+def test_a_lookup_counts_before_it_verifies_and_needs_no_iteration_check():
+    """key で引く読みは隠れた読み: 要素の数を先に上限と比べ（`OrderedDict` でも反復の確かめを先に走らせない）、
+    上限の外は dict と同じ限界。上限の内側の、hash を上書きした key を持つ `OrderedDict` も dict と同じく
+    plain な key だけを組み込みの比較で探す（その key の `__hash__` を呼ばない）。"""
+
+    armed = []
+
+    class _Key(str):
+        def __hash__(self):
+            if armed:  # pragma: no cover - must never run once armed
+                raise AssertionError("a live key's __hash__ ran")
+            return str.__hash__(self)
+
+        __eq__ = str.__eq__
+
+    for kind in (dict, OrderedDict):
+        armed.clear()
+        big = kind((f"k{index}", index) for index in range(200_000))
+        big[_Key("odd")] = -1
+        small = kind(k1=1)
+        small[_Key("odd")] = -1
+        armed.append(True)
+        started = time.perf_counter()
+        with pytest.raises(FixedReadBoundExceeded):
+            live_values.lookup(big, "k1")
+        assert time.perf_counter() - started < 0.05, kind
+        assert live_values.lookup(small, "k1") == 1
+        assert live_values.lookup(types.MappingProxyType(small), "k1") == 1
+
+
+def test_an_unowned_merge_is_a_traversal():
+    """重ねる写し（`merged_mappings`）は写す要素の反復: 量の owner の無い文脈では上限なし（dict と同じ）。"""
+
+    big = {f"k{index}": index for index in range(LIMIT + 50)}
+    assert len(live_values.merged_mappings({"a": 1}, big)) == LIMIT + 51
+    assert len(live_values.merged_mappings(OrderedDict(big))) == LIMIT + 50
 
 
 def test_unowned_traversals_verify_like_they_iterate_and_hidden_reads_are_bounded():

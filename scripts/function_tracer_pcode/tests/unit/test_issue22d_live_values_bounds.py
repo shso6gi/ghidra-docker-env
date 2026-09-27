@@ -335,7 +335,7 @@ LIVE_VALUES_WORK_OWNERS = {
     "_in_mro": _B,
     "_dataclass_field_names": _B,
     "_mapping_storage": _B,
-    "storage_count": _B,
+    "storage_extent": _B,
     "_builtin_behaviour": _A,
     "_unwrapped": _B,
     "_plain_keys": _B,
