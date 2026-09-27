@@ -576,11 +576,14 @@ def test_the_unmetered_freeze_equals_the_metered_copy():
     # 容器の値の enum も同じ写し（小さい値は同じ tuple、固定の上限の外の値はどちらも拒む）
     class Shape(enum.Enum):
         SMALL = (1, 2, 3)
+        SET = frozenset({1, 2})
+        KEYED = {(1, 2): "a"}
         HUGE = tuple(range(70_000))
 
-    assert SnapshotFingerprintCodec.freeze(Shape.SMALL) == SnapshotFingerprintCodec.freeze(
-        Shape.SMALL, budget=JsonBudget(None),
-    )
+    for member in (Shape.SMALL, Shape.SET, Shape.KEYED):
+        assert SnapshotFingerprintCodec.freeze(member) == SnapshotFingerprintCodec.freeze(
+            member, budget=JsonBudget(None),
+        ), member
     for freeze in (
         lambda: SnapshotFingerprintCodec.freeze(Shape.HUGE),
         lambda: SnapshotFingerprintCodec.freeze(Shape.HUGE, budget=JsonBudget(None)),

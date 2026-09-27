@@ -120,10 +120,12 @@ def deep_freeze(value: Any) -> Any:
 
     mapping = builtin_mapping(value)
     if mapping is not None:
-        # key は置かれた dict と同じ key（新しい dict に置くときの hash は置いた側と同じ実装）
+        # key は置かれた dict と同じ key を新しい dict へ置く: hash が組み込みでない key は置いたときと
+        # 同じ `__hash__` をもう一度呼ぶ（main と同じ。変更できる元の mapping を snapshot に置かないことを
+        # 優先する。意味の値の key は digest が確かめ、診断の値の key は production では str / tuple）
         return MappingProxyType({key: deep_freeze(item) for key, item in items_of(mapping)})
     if is_kind(value, dict):
-        raise TypeError(f"{type_name(type(value))} overrides its mapping behaviour and is not frozen")
+        raise TypeError(f"{type_name(type(value))} is not a mapping that can be read without its own code; not frozen")
     if builtin_sequence(value):
         return tuple(deep_freeze(item) for item in elements_of(value))
     if builtin_set(value):
@@ -368,15 +370,12 @@ class SnapshotFingerprintCodec:
                 meter.scalar(base)
                 return value
             name = type_name(kind)
-            # 写しは予算なしの凍結と同じ（固定の上限の中の組み込みの値だけの写し）。予算へは写しの
-            # JSON の大きさを足す（写しは固定の上限の中なので、測るのも有界）
+            # 写しは予算なしの凍結と同じ（固定の上限の中の組み込みの値だけの写し）。予算へは写しを
+            # 同じ meter で凍結した大きさを足す（組み込みの値だけの写しなので凍結でき、固定の上限の中）
             payload = _enum_payload(value)
             meter.frame(2)
             meter.scalar(name)
-            if plain_scalar(payload) is not NOT_PLAIN:
-                meter.scalar(payload)
-            else:
-                meter.budget.charge(json_encoding.RESULT_JSON_POLICY.measure(payload))
+            cls._freeze(payload, meter)
             return (name, payload)
         if kind is bytes:
             meter.frame(2)
