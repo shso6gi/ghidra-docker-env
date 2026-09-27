@@ -13,6 +13,16 @@ from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.core.budget_policy import (
+    BudgetKind,
+    active_budget_policy,
+    exceeded_budget_bound,
+    raise_expression_size_budget_exceeded,
+)
+from scripts.function_tracer_pcode.core.semantic_snapshot import (
+    SemanticGraphMeter,
+    stable_atoms_digest,
+)
 from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
 from scripts.function_tracer_pcode.core.semantic_freeze import freeze_expression
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
@@ -46,6 +56,12 @@ def replace_pcode_op_ref(
     if pcode_op_ref is None or truncation.pcode_op_ref is not None:
         return truncation
     return dataclasses_replace(truncation, pcode_op_ref=pcode_op_ref)
+
+
+#: 展開の式サイズ予算を見る観測点（`ExpressionSizeBudgetExceeded.site`）。
+EXPANSION_BUDGET_SITE = (
+    "semantics.transform.expander_multiequal._expand_multiequal_internal"
+)
 
 
 class MultiequalExpansionMixin:
@@ -105,6 +121,10 @@ class MultiequalExpansionMixin:
         
         all_expanded: List[ExpandedValue] = []
         multiequal_pcode_op_ref = _pcode_op_ref_from_tracer(self.tracer, multiequal_op)
+        # Issue #22 PR-22-D: 候補 case 群の大きさ（重複排除の前）。case を 1 つ
+        # 足すたびに予算と比べ、超えたらこの pair の解析を打ち切る（切り詰めて
+        # 続行はしない。#131 の切り捨て marker とは別）。
+        size_meter = SemanticGraphMeter()
         canonical_multiequal_location = self._infer_multiequal_location_for_expansion(
             multiequal_op,
             base_conditions,
@@ -177,6 +197,9 @@ class MultiequalExpansionMixin:
                     )
                     if canonical_value is not None:
                         all_expanded.append(ExpandedValue(canonical_value, input_conditions))
+                        self._checkpoint_expansion_size(
+                            size_meter, all_expanded, multiequal_op, multiequal_pcode_op_ref,
+                        )
                         cases_emitted += 1
                         if self.debug:
                             self._debug_expr(
@@ -194,6 +217,9 @@ class MultiequalExpansionMixin:
                     )
                     if canonical_value is not None:
                         all_expanded.append(ExpandedValue(canonical_value, input_conditions))
+                        self._checkpoint_expansion_size(
+                            size_meter, all_expanded, multiequal_op, multiequal_pcode_op_ref,
+                        )
                         cases_emitted += 1
                         if self.debug:
                             self._debug_expr(
@@ -213,6 +239,9 @@ class MultiequalExpansionMixin:
                 for ev in expanded_inputs:
                     if ev.is_valid():
                         all_expanded.append(ev)
+                        self._checkpoint_expansion_size(
+                            size_meter, all_expanded, multiequal_op, multiequal_pcode_op_ref,
+                        )
                         cases_emitted += 1
                         if self.debug:
                             self._debug_expr(
@@ -244,6 +273,70 @@ class MultiequalExpansionMixin:
         self._debug_print("MULTIEQUAL -> 0 branches (no valid branches)", depth)
         self._debug_print("=" * 50, depth)
         return [ExpandedValue(Expression.unknown("phi_no_valid_branch"), list(base_conditions))]
+
+    def _checkpoint_expansion_size(
+        self,
+        meter: SemanticGraphMeter,
+        all_expanded: List[ExpandedValue],
+        multiequal_op,
+        multiequal_pcode_op_ref,
+    ) -> None:
+        """最後に足した候補 case を数え、式サイズ予算と比べる（Issue #22 PR-22-D）。
+
+        置き場所は `all_expanded.append` の直後・`_deduplicate_expanded_values` の
+        前。重複排除の後で比べると、膨張した case 群を作り終えてから（= 時間を
+        使い切ってから）気付くことになる。
+
+        数えるのは候補 case の値と条件が **合わせて** 持つ distinct node と case 数。
+        木として展開した大きさ（`tree_nodes`）は証拠として残すだけで予算にしない
+        （共有 DAG では distinct より指数的に大きく、描画・直列化は DAG のまま
+        扱えるので、それを理由に打ち切る根拠にならない）。
+
+        target は「どの解析 scope の・どの MULTIEQUAL か」。scope は展開の所有 scope
+        を束縛した sink（`_budget_sink.owner_scope_key`）から読む — 切り捨て marker の
+        所有 scope と同じ値で、別の出どころを作らない。
+        """
+
+        latest = all_expanded[-1]
+        # 数えるのは予算の分まで（超えたと分かれば残りの node は辿らない）
+        max_nodes = active_budget_policy().expression_nodes
+        meter.add_root(latest.value, max_distinct=max_nodes)
+        for condition in latest.conditions or ():
+            meter.add_root(getattr(condition, "expression", None), max_distinct=max_nodes)
+
+        def _describe():
+            # target と evidence は超えたときだけ作る（case ごとに op の key・scope の digest を作らない）
+            op_key = (
+                multiequal_pcode_op_ref.stable_key()
+                if multiequal_pcode_op_ref is not None
+                else _pcode_op_stable_key(multiequal_op)
+            )
+            # scope key は大きくなり得る primitive の入れ子なので、決定的な digest に
+            # 落として target にする（authority の cause identity へそのまま入る）。
+            target_key = (
+                stable_atoms_digest(
+                    getattr(getattr(self, "_budget_sink", None), "owner_scope_key", None)
+                ),
+                op_key,
+            )
+            evidence = (
+                f"distinct_nodes={meter.distinct_nodes}",
+                f"cases={len(all_expanded)}",
+                f"tree_nodes={meter.tree_nodes}",
+            )
+            return target_key, evidence
+
+        for kind, observed in (
+            (BudgetKind.EXPANSION_CASES, len(all_expanded)),
+            (BudgetKind.EXPRESSION_NODES, meter.distinct_nodes),
+        ):
+            bound = exceeded_budget_bound(kind, observed, site=EXPANSION_BUDGET_SITE)
+            if bound is not None:
+                target_key, evidence = _describe()
+                raise_expression_size_budget_exceeded(
+                    kind, observed=observed, limit=bound, site=EXPANSION_BUDGET_SITE,
+                    target_key=target_key, evidence=evidence,
+                )
 
     def _debug_multiequal_input_trace(
         self,

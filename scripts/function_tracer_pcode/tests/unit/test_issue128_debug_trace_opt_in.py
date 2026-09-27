@@ -9,9 +9,11 @@
   debug 伝播（`--debug` / `-d` / `EQBENCH_DEBUG=1`）をそのまま入れる。
 * **生成停止ではない**: trace object は常に作られ、結果に残る。object 読者
   （diagnostics / attempts / `LegacyExecutionSnapshot` の event surface /
-  `to_string(show_phase_usage)` / `unknown_cause_aggregate` の生成）は従来どおり
-  full trace を読める。`evidence_present.debug_trace` は「JSON に出したか」では
-  なく「aggregate 生成時に trace を観測できたか」なので、添付を止めても True。
+  `to_string(show_phase_usage)` / `unknown_cause_aggregate` の生成）は添付を
+  止めても trace 由来の情報を失わない（Issue #22 PR-22-D 以後、出力を準備した
+  結果ではそれを authority 前に準備した値から読む）。`evidence_present.debug_trace`
+  は「JSON に出したか」ではなく「aggregate 生成時に trace を観測できたか」なので、
+  添付を止めても True。
 * **canonical 契約は無変更**: `debug_trace` key の有無は serialization surface
   なので preimage digest は変わるが、semantic projection は 1 field も変わらず、
   trace 無しの payload でも bundle の validate / replay が通る。
@@ -135,12 +137,19 @@ def _result(trace, reason, *, emit=True):
 # 1. serialize の条件化
 # ---------------------------------------------------------------------------
 
+def _canonical(trace):
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+    return RESULT_JSON_POLICY.prepare(trace).value()
+
+
 def test_to_dict_omits_debug_trace_unless_emit_flag():
     """既定（True）では従来どおり出て、False では **key だけ** が消える。"""
     trace, reason = _rich_trace()
     emitted = _result(trace, reason).to_dict()
     # 既定 True: 従来の出力そのまま。しかも emit 経路で内容を削っていない。
-    assert emitted["debug_trace"] == trace.to_dict()
+    # 出力は trace の canonical な表現（Issue #22 PR-22-D: 出力の準備が作る JSON 値）
+    assert emitted["debug_trace"] == _canonical(trace)
     assert emitted["debug_trace"]["attempts"], "fixture が空 trace では条件化を測れない"
 
     trace2, reason2 = _rich_trace()
@@ -177,15 +186,27 @@ def test_emit_flag_default_keeps_direct_callers_unchanged():
         unknown_reasons=[reason],
     )
     assert result.emit_debug_trace is True
-    assert result.to_dict()["debug_trace"] == trace.to_dict()
+    assert result.to_dict()["debug_trace"] == _canonical(trace)
 
 
 def test_emit_flag_is_the_last_dataclass_field():
-    """末尾追加であること（positional 互換）。"""
+    """末尾追加であること（positional 互換）。
+
+    Issue #22 PR-22-D が後ろに `prepared_semantic_payload` を足した。emit flag の
+    位置は変わらず、その後ろにあるのは既定値付きの field だけ（positional で
+    渡す既存の呼び出し側は影響を受けない）。
+    """
     import dataclasses
 
-    names = [f.name for f in dataclasses.fields(EquivalenceResult)]
-    assert names[-1] == "emit_debug_trace"
+    fields = dataclasses.fields(EquivalenceResult)
+    names = [f.name for f in fields]
+    position = names.index("emit_debug_trace")
+    assert names[position + 1:] == ["prepared_semantic_payload"]
+    assert all(
+        f.default is not dataclasses.MISSING
+        or f.default_factory is not dataclasses.MISSING
+        for f in fields[position:]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +365,7 @@ def test_diagnostics_and_shadow_fingerprint_survive_without_emission():
     assert snap_off.decisive_counterexample == snap_on.decisive_counterexample
     assert set(snap_on.public_schema) - set(snap_off.public_schema) == {"debug_trace"}
 
-    # (d) `to_string(show_phase_usage=True)` は従来どおり trace を読める。
+    # (d) `to_string(show_phase_usage=True)` は添付を止めても phase 使用量を描ける。
     rendered = withholding.to_string(show_phase_usage=True)
     assert trace_off.format_phase_usage_summary() in rendered
 
@@ -373,9 +394,22 @@ def test_generation_is_not_stopped_in_the_workflow_source():
     result_source = inspect.getsource(result_module)
     assert 'pop("debug_trace"' not in result_source
     assert "self.debug_trace = None" not in result_source
-    # aggregate は条件化されていない（emit flag と同じ行に載っていない）。
-    assert 'result["unknown_cause_aggregate"] = self.unknown_cause_aggregate' in result_source
-    assert "if self.debug_trace and self.emit_debug_trace:" in result_source
+    # Issue #22 PR-22-D: JSON の field 表は `checker.output_preparation` が持つ。
+    # aggregate は条件化されていない（emit flag と別の行で常に出す）。trace は
+    # object 上に在るものを、emit flag が真のときだけ添付する。
+    from scripts.function_tracer_pcode.checker import output_preparation
+
+    preparation_source = inspect.getsource(output_preparation)
+    assert "self.debug_trace = None" not in preparation_source
+    assert "result.debug_trace = None" not in preparation_source
+    assert (
+        'OutputField("unknown_cause_aggregate", _C, _function("unknown_cause_aggregate"), _TRUNC)'
+        in preparation_source
+    )
+    # 添付するかは準備時に 1 回だけ決める（`OutputOptions`）。合成は live な
+    # flag を読まない。
+    assert "if trace is not None and live_values.as_bool(trace) and o.include_debug_trace:" in preparation_source
+    assert preparation_source.count("emit_debug_trace") == 1
 
 
 # ---------------------------------------------------------------------------

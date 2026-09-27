@@ -27,7 +27,7 @@ callable として受け取る（instance patch seam 維持）。
 from __future__ import annotations
 
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 from scripts.function_tracer_pcode.core.errors import (
     AnalysisLimitation,
@@ -38,7 +38,8 @@ from scripts.function_tracer_pcode.proof.obligations.branch_context import Branc
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 from scripts.function_tracer_pcode.checker.result_factory import create_error_result
 from scripts.function_tracer_pcode.checker.unknown_reason import make_internal_v2_reason_diagnostic
-from scripts.function_tracer_pcode.core import FunctionSignature
+from scripts.function_tracer_pcode.core import FunctionSignature, live_values
+from scripts.function_tracer_pcode.core import read_limits
 from scripts.function_tracer_pcode.core.render_smt import UnknownSmtExtensionWidthError
 from scripts.function_tracer_pcode.smt import ParallelResult
 
@@ -273,7 +274,7 @@ def unsupported_smt_result(
         solver_results=ParallelResult(results=[]),
         counterexample=None,
         smt_formula=None,
-        total_time=time.time() - start_time,
+        total_time=time.time() - live_values.as_float(start_time),
         type_fix_result=type_fix_result,
         retry_count=retry_count,
         function1_signature=original_signature1,
@@ -368,11 +369,15 @@ def analysis_limitation_result(
     )
 
     attribution = attribute_analysis_limitation(session, exc)
+    evidence_refs = read_limits.prefix_within_limit(exc.evidence_refs)
+    omitted_refs = read_limits.omitted_beyond_limit(exc.evidence_refs, kept=len(evidence_refs))
     diagnostic = {
         **attribution.to_diagnostic(),
         "site": exc.site,
         "exception_type": type(exc).__name__,
-        "evidence_refs": list(exc.evidence_refs),
+        # 診断の写しは先頭だけ（判定に使わない。authority の cause は契約の中で全部を持つ）
+        "evidence_refs": list(evidence_refs),
+        **({"evidence_refs_omitted": omitted_refs} if omitted_refs else {}),
         "message": str(exc)[:500],
     }
     if not attribution.is_attributed:
@@ -402,7 +407,7 @@ def analysis_limitation_result(
         solver_results=ParallelResult(results=[]),
         counterexample=None,
         smt_formula=None,
-        total_time=time.time() - start_time,
+        total_time=time.time() - live_values.as_float(start_time),
         type_fix_result=type_fix_result,
         retry_count=retry_count,
         function1_signature=original_signature1,
@@ -417,7 +422,10 @@ def analysis_limitation_result(
             make_internal_v2_reason_diagnostic(
                 exc.reason_id,
                 stage="S_ANALYSIS_LIMITATION",
-                evidence_refs=(exc.site, *exc.evidence_refs),
+                evidence_refs=(
+                    exc.site, *evidence_refs,
+                    *((f"evidence_refs_omitted={omitted_refs}",) if omitted_refs else ()),
+                ),
                 object_target_key=(
                     "analysis_limitation_v1",
                     exc.reason_id,
@@ -552,11 +560,15 @@ def analysis_limitation_result_for_pair(
     )
 
     attribution = attribute_analysis_limitation(session, exc)
+    evidence_refs = read_limits.prefix_within_limit(exc.evidence_refs)
+    omitted_refs = read_limits.omitted_beyond_limit(exc.evidence_refs, kept=len(evidence_refs))
     diagnostic = {
         **attribution.to_diagnostic(),
         "site": exc.site,
         "exception_type": type(exc).__name__,
-        "evidence_refs": list(exc.evidence_refs),
+        # 診断の写しは先頭だけ（判定に使わない。authority の cause は契約の中で全部を持つ）
+        "evidence_refs": list(evidence_refs),
+        **({"evidence_refs_omitted": omitted_refs} if omitted_refs else {}),
         "message": str(exc)[:500],
         "pair_scoped": True,
     }
@@ -568,17 +580,17 @@ def analysis_limitation_result_for_pair(
         FunctionSignature.from_analysis(analysis2)
         if analysis2 is not None else original_signature2
     )
-    common = dict(
+    common = _common_fields(
         function1_name=(
-            analysis1.function_name if analysis1 is not None else function_name1
+            live_values.attribute(analysis1, "function_name") if analysis1 is not None else function_name1
         ),
         function2_name=(
-            analysis2.function_name if analysis2 is not None else function_name2
+            live_values.attribute(analysis2, "function_name") if analysis2 is not None else function_name2
         ),
         binary1_name=binary1_name,
         binary2_name=binary2_name,
         solver_results=ParallelResult(results=[]),
-        total_time=time.time() - start_time,
+        total_time=time.time() - live_values.as_float(start_time),
         type_fix_result=type_fix_result,
         retry_count=retry_count,
         function1_signature=original_signature1,
@@ -586,10 +598,10 @@ def analysis_limitation_result_for_pair(
         effective_function1_signature=effective1,
         effective_function2_signature=effective2,
         function1_signature_hypotheses=(
-            list(analysis1.signature_hypotheses) if analysis1 is not None else []
+            _hypotheses_of(analysis1)
         ),
         function2_signature_hypotheses=(
-            list(analysis2.signature_hypotheses) if analysis2 is not None else []
+            _hypotheses_of(analysis2)
         ),
         constrained_fragments=[],
     )
@@ -611,7 +623,10 @@ def analysis_limitation_result_for_pair(
                 make_internal_v2_reason_diagnostic(
                     exc.reason_id,
                     stage="S_ANALYSIS_LIMITATION",
-                    evidence_refs=(exc.site, *exc.evidence_refs),
+                    evidence_refs=(
+                    exc.site, *evidence_refs,
+                    *((f"evidence_refs_omitted={omitted_refs}",) if omitted_refs else ()),
+                ),
                     object_target_key=(
                         "analysis_limitation_v1",
                         exc.reason_id,
@@ -638,17 +653,23 @@ def _carry_pair_diagnostics(result: EquivalenceResult, carry_from) -> None:
     """
     if carry_from is None or carry_from is result:
         return
-    trace = getattr(carry_from, "debug_trace", None)
+    # 引き継ぐ元の結果は owner の規則で読む（`__getattr__`・上書きした容器の code を呼ばない）
+    trace = live_values.attribute(carry_from, "debug_trace")
     if trace is not None:
-        result.debug_trace = trace
-        result.emit_debug_trace = bool(getattr(carry_from, "emit_debug_trace", True))
-    carried = getattr(carry_from, "diagnostics", None)
-    if isinstance(carried, dict) and carried:
-        merged = dict(carried)
-        current = getattr(result, "diagnostics", None)
-        if isinstance(current, dict):
-            merged.update(current)
-        result.diagnostics = merged
+        live_values.set_state(result, "debug_trace", trace)
+        live_values.set_state(
+            result, "emit_debug_trace", live_values.as_bool(live_values.attribute(carry_from, "emit_debug_trace", True)),
+        )
+    carried = live_values.attribute(carry_from, "diagnostics")
+    if type(carried) is dict:
+        if not carried:
+            return
+        current = live_values.attribute(result, "diagnostics")
+        live_values.set_state(
+            result, "diagnostics",
+            live_values.merged_mappings(carried, current) if type(current) is dict
+            else live_values.merged_mappings(carried),
+        )
 
 
 def attach_pair_stop_state(result: EquivalenceResult, stop_state) -> None:
@@ -672,8 +693,9 @@ def attach_pair_stop_state(result: EquivalenceResult, stop_state) -> None:
 
     if stop_state is None or stop_state is PairStopState.NONE:
         return
-    result.pair_stop_state = stop_state.value
-    record_failure_diagnostic(result, FAILURE_PAIR_STOP_STATE, stop_state.value)
+    state = live_values.enum_value(stop_state)
+    live_values.set_state(result, "pair_stop_state", state)
+    record_failure_diagnostic(result, FAILURE_PAIR_STOP_STATE, state)
 
 
 def internal_error_result_for_pair(
@@ -706,15 +728,15 @@ def internal_error_result_for_pair(
     result = EquivalenceResult(
         is_equivalent=None,
         function1_name=(
-            analysis1.function_name if analysis1 is not None else function_name1
+            live_values.attribute(analysis1, "function_name") if analysis1 is not None else function_name1
         ),
         function2_name=(
-            analysis2.function_name if analysis2 is not None else function_name2
+            live_values.attribute(analysis2, "function_name") if analysis2 is not None else function_name2
         ),
         binary1_name=binary1_name,
         binary2_name=binary2_name,
         solver_results=ParallelResult(results=[]),
-        total_time=time.time() - start_time,
+        total_time=time.time() - live_values.as_float(start_time),
         error_message=str(exc),
         failure_status=INTERNAL_EXCEPTION_STATUS,
         failure_message=str(exc),
@@ -731,10 +753,10 @@ def internal_error_result_for_pair(
             if analysis2 is not None else original_signature2
         ),
         function1_signature_hypotheses=(
-            list(analysis1.signature_hypotheses) if analysis1 is not None else []
+            _hypotheses_of(analysis1)
         ),
         function2_signature_hypotheses=(
-            list(analysis2.signature_hypotheses) if analysis2 is not None else []
+            _hypotheses_of(analysis2)
         ),
         constrained_fragments=[],
     )
@@ -748,3 +770,23 @@ def internal_error_result_for_pair(
         "pair_scoped": True,
     })
     return result
+
+
+def _hypotheses_of(analysis: Any) -> list:
+    """解析の signature 仮説の列の写し（無ければ空）。解析の値は owner の規則で読む。"""
+
+    if analysis is None:
+        return []
+    hypotheses = live_values.attribute(analysis, "signature_hypotheses")
+    return [] if hypotheses is None else list(read_limits.elements_within_limit(hypotheses))
+
+
+def _common_fields(**fields: Any) -> Dict[str, Any]:
+    """結果の共通の field（`dict(**fields)` と同じ値。keyword の名前は組み込みの `str`）。
+
+    組み込みの `dict(...)` を live な値の keyword で呼ぶと、bounded path の監査（J19）はその mapping の
+    中身を live な値として扱い、そこから組む結果の読みを全部違反にする。package の関数が keyword を
+    受けて返す mapping は、監査が keyword ごとの流れとして辿れる（値は読まずに運ぶだけ）。
+    """
+
+    return fields

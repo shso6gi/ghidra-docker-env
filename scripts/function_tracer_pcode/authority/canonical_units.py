@@ -215,6 +215,46 @@ def _member_name(member: Any) -> str:
     return member[0]
 
 
+def plain_copy(value: Any, sink: UnitSink) -> Any:
+    """`value`（live でもよい）を plain な値（`None`・bool・`str`・`int`・`float` と、それらの tuple）へ、
+    数えながら写す。単位は canonical な表現と同じ規則で、写す **前に** `sink` へ数える。
+
+    scalar の subclass（JPype の `JInt` など）は基底型の slot で基底型の値にする（値の code を呼ばない:
+    `core.live_values.plain_scalar`）。容器は組み込みの tuple / list だけを辿る（中身の `__iter__` を上書き
+    しない型だけ）。それ以外の値は `TypeError`（任意の object の表現を作らない）。再帰しない。
+    """
+
+    from scripts.function_tracer_pcode.core import live_values
+
+    root: List[Any] = []
+    # [親の list, 残りの子（逆順）]
+    stack: List[List[Any]] = [[root, [value]]]
+    while stack:
+        frame = stack[-1]
+        if not frame[1]:
+            stack.pop()
+            if stack:
+                stack[-1][0].append(tuple(frame[0]))
+            continue
+        item = frame[1].pop()
+        scalar = live_values.plain_scalar(item)
+        if scalar is not live_values.NOT_PLAIN:
+            _scalar_units(scalar, sink)
+            frame[0].append(scalar)
+            continue
+        if live_values.builtin_sequence(item):
+            count = live_values.size(item)
+            sink.charge(2 + max(0, count - 1))
+            children = []
+            for child in live_values.elements_of(item):
+                children.append(child)
+            children.reverse()
+            stack.append([[], children])
+            continue
+        raise TypeError("a limitation description is plain values and tuples only")
+    return root[0]
+
+
 class LimitedUnits(UnitSink):
     """上限つきの単位の数え手（上限を超えたら `UnitLimitExceeded`）。"""
 
@@ -258,4 +298,5 @@ __all__ = [
     "UnitSink",
     "canonical_units_within",
     "measure_canonical_units",
+    "plain_copy",
 ]

@@ -119,6 +119,8 @@ def test_no_case_is_dropped_from_the_full_corpus():
 REPLAY_ENTRY_POINTS = {
     "test_recorded_program_roundtrip.py": "_replay",
     "test_recorded_pairs.py": "validate_replay",
+    # Issue #22 PR-22-D: M-3 の出力 schema 局所性（診断 field あり / なしで再生）
+    "test_issue22d_output_schema_locality.py": "_replay_with_query_log",
 }
 RECORDED_REPLAY_MARKER = "recorded_replay"
 

@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from scripts.function_tracer_pcode.analysis.effects.external_call_models import (
@@ -63,6 +65,7 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
     PcodeOpRef,
 )
 from scripts.function_tracer_pcode.proof import conditional_lane as lane_module
+from scripts.function_tracer_pcode.proof.conditional_view import external_callee_spec_premise
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 from scripts.function_tracer_pcode.proof.conditional_lane import (
     CONDITIONAL_EQ_CLOSURE,
@@ -418,6 +421,167 @@ def test_lane_runs_after_an_unconditional_unknown_with_eligible_views():
     assert diagnostics is not None and diagnostics["conditional_lane"] == "issued"
     assert type(result.conditional_decision_receipt) is ConditionalDecisionReceipt
     assert result.conditional_outcome is not None
+
+
+def test_lane_fails_closed_when_the_assumptions_exceed_the_receipt_bound(monkeypatch):
+    """Issue #22 PR-22-D: receipt の契約（仮定の数と大きさ）を超える集合は receipt にしない。
+
+    確定後に出力の契約違反（ERROR）にしない: lane の診断だけが残り、判定は変わらない。
+    """
+    from scripts.function_tracer_pcode.authority.decision import conditional
+
+    projection, result = _pair()
+    before = (result.final_outcome, result.decision_receipt)
+    original = conditional.max_assumption_premises
+    monkeypatch.setattr(conditional, "max_assumption_premises", lambda: 0)
+    diagnostics = _run_lane(result, projection, _both_analyses())
+    assert diagnostics["conditional_lane"] == "over_receipt_bound"
+    assert getattr(result, "conditional_decision_receipt", None) is None
+    assert (result.final_outcome, result.decision_receipt) == before
+    monkeypatch.setattr(conditional, "max_assumption_premises", original)
+    monkeypatch.setattr(conditional, "assumption_premise_max_bytes", lambda: 10)
+    projection, result = _pair()
+    assert _run_lane(result, projection, _both_analyses())["conditional_lane"] == "over_receipt_bound"
+
+
+def _catalog_premise(catalog, entry, *, kind, library, names):
+    candidate = CallModelCandidateRef(
+        provider=catalog.provider, canonical_symbol=entry.canonical_symbol,
+        signature_key=entry.signature_key(),
+        provenance_key=("external_import_provenance_v1", kind, library, names),
+    )
+    return external_callee_spec_premise(
+        candidate, argument_widths=tuple(spec.width_bits for spec in entry.parameters),
+        return_width_bits=entry.return_spec.width_bits,
+    )
+
+
+def test_the_receipt_contract_covers_the_catalog_shape():
+    """receipt の契約（固定の上限）は今の catalog の形の見積もりを覆う（表現の上限。証明の能力の上限ではない）。
+
+    見積もり: 名前（canonical 名と alias 名）× external import の provenance の種類 × 2 binary の
+    premise を 1 つの集合にした数と、binary 由来の名前を上限の字数・最悪の escape にした premise の
+    byte。catalog が育ってこれを超えたら、上限（と出力の headroom）を決め直す。
+    """
+    from scripts.function_tracer_pcode.analysis.effects.pure_function_catalog import (
+        EXTERNAL_IMPORT_PROVENANCE_KINDS,
+        load_pure_function_catalog,
+    )
+    from scripts.function_tracer_pcode.authority.decision import conditional
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+    from scripts.function_tracer_pcode.proof.assumptions import normalize_assumption_premises
+    from scripts.function_tracer_pcode.proof.conditional_lane import worst_case_external_callee_spec_premises
+
+    catalog = load_pure_function_catalog()
+    names = sorted(catalog.entries) + sorted(catalog.alias_rules)
+    premises = []
+    for name in names:
+        entry = catalog.entries.get(name) or catalog.entries[catalog.alias_rules[name].canonical_symbol]
+        for kind in sorted(EXTERNAL_IMPORT_PROVENANCE_KINDS):
+            for library in ("left.so", "right.so"):
+                premises.append(_catalog_premise(catalog, entry, kind=kind, library=library, names=(name,)))
+    estimate = len(normalize_assumption_premises(premises))
+    assert estimate == len(names) * len(EXTERNAL_IMPORT_PROVENANCE_KINDS) * 2
+    assert estimate <= conditional.MAX_ASSUMPTION_PREMISES
+    assert conditional.assumption_set_receipt_bound_violation(tuple(premises)) is None
+    worst = max(
+        RESULT_JSON_POLICY.measure(conditional.assumption_premise_payload(premise))
+        for premise in worst_case_external_callee_spec_premises(
+            label_max_chars=conditional.PREMISE_BINARY_LABEL_MAX_CHARS, name_count=2,
+        )
+    )
+    assert worst <= conditional.ASSUMPTION_PREMISE_MAX_BYTES
+    # 上限は見積もりの 64 件・1 KiB の単位への切り上げ（余裕を持たせすぎて headroom を食わない）
+    assert conditional.MAX_ASSUMPTION_PREMISES == -(-estimate // 64) * 64
+    assert conditional.ASSUMPTION_PREMISE_MAX_BYTES == -(-worst // 1024) * 1024
+
+
+def test_the_receipt_contract_does_not_read_the_catalog_at_runtime(monkeypatch):
+    """出力 schema の上限（checker の構築で確かめる headroom）は catalog を読まない。"""
+    from scripts.function_tracer_pcode.analysis.effects import pure_function_catalog
+    from scripts.function_tracer_pcode.checker.output_schema import authority_field_bounds, required_headroom_bytes
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+    def broken():
+        raise FileNotFoundError("catalog is missing")
+
+    monkeypatch.setattr(pure_function_catalog, "load_pure_function_catalog", broken)
+    assert authority_field_bounds()["conditional_decision_receipt"].max_bytes > 0
+    assert required_headroom_bytes(RESULT_JSON_POLICY) > 0
+
+
+def test_the_premise_byte_bound_refuses_long_binary_labels():
+    """binary 由来の名前が上限の字数以下の premise は収まり、何倍もある名前の premise は receipt にしない。"""
+    from scripts.function_tracer_pcode.analysis.effects.pure_function_catalog import load_pure_function_catalog
+    from scripts.function_tracer_pcode.authority.decision import conditional
+
+    catalog = load_pure_function_catalog()
+    label = "\x01" * conditional.PREMISE_BINARY_LABEL_MAX_CHARS
+    within = tuple(
+        _catalog_premise(catalog, entry, kind="thunk_to_external", library=label, names=(label, label))
+        for entry in catalog.entries.values()
+    )
+    for item in within:
+        assert conditional.assumption_set_receipt_bound_violation((item,)) is None
+    entry = next(iter(catalog.entries.values()))
+    huge = _catalog_premise(
+        catalog, entry, kind="thunk_to_external",
+        library="\x01" * (4 * conditional.PREMISE_BINARY_LABEL_MAX_CHARS), names=(label, label),
+    )
+    assert conditional.assumption_set_receipt_bound_violation((huge,)) is not None
+
+
+def test_the_premise_bound_counts_the_written_bytes_without_building_the_payload(monkeypatch):
+    """上限の確かめは書く形と同じ byte を数え、payload を写さない（上限を超える premise を先に組み立てない）。"""
+    from scripts.function_tracer_pcode.analysis.effects.pure_function_catalog import load_pure_function_catalog
+    from scripts.function_tracer_pcode.authority.decision import conditional
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonEncodingPolicy
+
+    catalog = load_pure_function_catalog()
+    label = "\x01" * conditional.PREMISE_BINARY_LABEL_MAX_CHARS
+    premises = [
+        _catalog_premise(catalog, entry, kind="thunk_to_external", library=label, names=(label, label))
+        for entry in catalog.entries.values()
+    ]
+    measured = []
+    original = JsonEncodingPolicy.measure
+
+    def spy(self, value, **kwargs):
+        measured.append(original(self, value))
+        return original(self, value, **kwargs)
+
+    monkeypatch.setattr(conditional, "assumption_premise_payload", _never_called)
+    monkeypatch.setattr(JsonEncodingPolicy, "measure", spy)
+    assert conditional.assumption_set_receipt_bound_violation(tuple(premises)) is None
+    monkeypatch.undo()
+    assert measured == [
+        len(RESULT_JSON_POLICY.dumps(conditional.assumption_premise_payload(premise)).encode("utf-8"))
+        for premise in premises
+    ]
+
+
+def _never_called(*_args, **_kwargs):
+    raise AssertionError("the bound check must not build the written payload")
+
+
+def test_a_receipt_outside_its_contract_is_neither_issued_nor_valid(monkeypatch):
+    """receipt の owner が発行時に上限を強制する（lane を通らない呼び出しも、上限の外の receipt を作れない）。"""
+    from scripts.function_tracer_pcode.authority.decision import conditional
+
+    projection = _projection()
+    decision = _decision(Outcome.UNKNOWN, projection=projection)
+    premises = (_premise("log"), _premise("exp"))
+
+    def authority():
+        return ConditionalFinalizationAuthority(RESULT_ID, decision, projection, premises)
+
+    receipt = finalize_conditional_decision(authority())
+    receipt.validate()
+    monkeypatch.setattr(conditional, "MAX_ASSUMPTION_PREMISES", 1)
+    with pytest.raises(ValueError, match="exceeds its contract"):
+        finalize_conditional_decision(authority())
+    # 検証は構造だけ: 契約より前に作った receipt（永続化した結果の読み手）は拒まない
+    receipt.validate()
 
 
 @pytest.mark.parametrize(

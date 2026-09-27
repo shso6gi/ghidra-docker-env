@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Dict, Optional, Any, FrozenSet
 
+from scripts.function_tracer_pcode.core import live_values
+from scripts.function_tracer_pcode.core.json_encoding import Tally, each, inline, materialize, scan
+
 
 class SignednessType(Enum):
     """符号性の種類"""
@@ -62,18 +65,19 @@ class PcodeEvidence:
     excluded: bool = False  # fast-path として除外されたか
     exclusion_reason: Optional[str] = None  # 除外理由
     
+    def json_items(self):
+        yield "opcode", self.opcode
+        # enum の値は member の `_value_`（`value` の property を呼ばない）
+        yield "category", live_values.enum_value(self.category)
+        yield "address", self.address
+        if self.context is not None and live_values.as_bool(self.context):
+            yield "context", self.context
+        if live_values.as_bool(self.excluded):
+            yield "excluded", True
+            yield "exclusion_reason", self.exclusion_reason
+
     def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "opcode": self.opcode,
-            "category": self.category.value,
-            "address": self.address,
-        }
-        if self.context:
-            result["context"] = self.context
-        if self.excluded:
-            result["excluded"] = True
-            result["exclusion_reason"] = self.exclusion_reason
-        return result
+        return materialize(self)
 
 
 @dataclass
@@ -159,20 +163,39 @@ class SignednessEvidence:
             counts[ev.opcode] = counts.get(ev.opcode, 0) + 1
         return counts
     
+    def json_items(self):
+        # 件数は list の長さ（固定個数）。opcode 別件数は walker が証拠を 1 つずつ数えながら
+        # 集計する（`scan`。列を連結・複製しない）
+        # 列・enum は owner の API で読む（出力の入口から live な値として辿られる）
+        signed_strong = self.signed_strong
+        signed_medium = self.signed_medium
+        unsigned = self.unsigned
+        excluded_fastpath = self.excluded_fastpath
+        yield "result", live_values.enum_value(self.result)
+        yield "summary", inline(
+            ("signed_strong", live_values.size(signed_strong)),
+            ("signed_medium", live_values.size(signed_medium)),
+            ("unsigned", live_values.size(unsigned)),
+            ("ignored", live_values.size(self.ignored)),
+            ("excluded_fastpath", live_values.size(excluded_fastpath)),
+        )
+        yield "opcode_counts", scan(
+            _evidences_in_order(signed_strong, signed_medium, unsigned), Tally("opcode"),
+        )
+        yield "signed_strong", each(signed_strong)
+        yield "signed_medium", each(signed_medium)
+        yield "unsigned", each(unsigned)
+        if live_values.as_bool(excluded_fastpath):
+            yield "excluded_fastpath", each(excluded_fastpath)
+            yield "excluded_opcode_counts", scan(live_values.elements_of(excluded_fastpath), Tally("opcode"))
+
     def to_dict(self) -> Dict[str, Any]:
-        """辞書形式に変換"""
-        result = {
-            "result": self.result.value,
-            "summary": self.get_summary(),
-            "opcode_counts": self.get_opcode_counts(),
-            "signed_strong": [e.to_dict() for e in self.signed_strong],
-            "signed_medium": [e.to_dict() for e in self.signed_medium],
-            "unsigned": [e.to_dict() for e in self.unsigned],
-        }
-        
-        if self.excluded_fastpath:
-            result["excluded_fastpath"] = [e.to_dict() for e in self.excluded_fastpath]
-            result["excluded_opcode_counts"] = self.get_excluded_opcode_counts()
-        
-        return result
+        return materialize(self)
     
+
+
+def _evidences_in_order(*groups: Any):
+    """証拠の列を順に 1 要素ずつ返す（旧 `itertools.chain`。列は owner の API で辿る）。"""
+
+    for group in groups:
+        yield from live_values.elements_of(group)

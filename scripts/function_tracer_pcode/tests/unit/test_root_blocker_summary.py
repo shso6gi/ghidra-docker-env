@@ -731,7 +731,8 @@ def test_check_from_binaries_preserves_supplied_content_identities(monkeypatch):
 
     assert returned.binary1_content_identity == ("sha256", "left-sha")
     assert returned.binary2_content_identity == ("sha256", "right-sha")
-    assert returned.to_dict()["binary1_content_identity"] == ("sha256", "left-sha")
+    # 結果 JSON は canonical な JSON 値（配列は list）
+    assert returned.to_dict()["binary1_content_identity"] == ["sha256", "left-sha"]
 
 
 @pytest.mark.parametrize(

@@ -1,9 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Analysis-limitation domain: one sealed reason for an exhausted analysis budget.
+"""Analysis-limitation domain: sealed reasons for an exhausted analysis budget.
 
 Issue #125 PR-125-A。`core/errors.py` の `AnalysisLimitation` を判定 authority
-へ載せるための **最小の** producer 経路（domain 1 / sealed reason 1 /
-producer site 1）。
+へ載せるための **最小の** producer 経路（domain 1 / producer site 1）。sealed
+reason は 2 つ: 解析の予算（`analysis_budget_exceeded`、#125）と式の大きさの予算
+（`expression_size_budget_exceeded`、#22 PR-22-D）。どちらも同じ site・同じ encoder・
+同じ回復契約を通る（reason が違うだけ）。
+
+`analysis_budget_exceeded` は deadline 専用の reason ではない: 時間・段数の予算
+（`DeadlineExceeded`、#106）・作業量を受け取らない読みの固定の上限（`FixedReadBoundExceeded`、
+`core/read_limits`）・authority の event の契約（`AuthorityEventContractExceeded`、#110）が共有する。
+種類を見分けるのは reason id ではなく型（と stop state: deadline だけが `PAIR_TERMINAL_DEADLINE`）。
 
 `decision_effect` を `blocks_decision` にするのは、予算切れで解析を打ち切った
 場合 EQ 側・NOT_EQ 側のどちらの証明も完了していないため。片方向だけを塞ぐ
@@ -50,6 +57,9 @@ from scripts.function_tracer_pcode.authority.lifecycle.stream import (
 
 ANALYSIS_LIMITATION_DOMAIN = "analysis_limitation"
 ANALYSIS_BUDGET_REASON_ID = "analysis_budget_exceeded"
+#: Issue #22 PR-22-D: 式の大きさの予算（展開・solver 向け描画・直列化）を超えて
+#: 打ち切った限界。`core/errors.ExpressionSizeBudgetExceeded.REASON_ID` と同じ値。
+EXPRESSION_SIZE_BUDGET_REASON_ID = "expression_size_budget_exceeded"
 ANALYSIS_BUDGET_PROOF_KIND = "analysis_budget_proof"
 ANALYSIS_BUDGET_CONTRACT_ID = "analysis-budget-recovery"
 ANALYSIS_LIMITATION_TARGET_KIND = "analysis_limitation"
@@ -70,6 +80,17 @@ ANALYSIS_LIMITATION_REASON_REGISTRY = SealedReasonRegistry.build((
         ANALYSIS_BUDGET_REASON_ID, ANALYSIS_LIMITATION_DOMAIN, "proof_obligation",
         "blocks_decision", frozenset((ANALYSIS_LIMITATION_TARGET_KIND,)),
         ("limitation_site", "analysis_budget"),
+        frozenset((ANALYSIS_BUDGET_PROOF_KIND,)), True,
+        "analysis_limitation_v1", RecoveryAddressability.REQUIREMENT_REQUIRED,
+    ),
+    # 予算超過も時間切れと同じく EQ 側・NOT_EQ 側どちらの証明も完了していない
+    # ので `blocks_decision`。回復の契約（予算内で解析し直せたことの証明）も
+    # 同じ `analysis-budget-recovery` を共有する。
+    ReasonDefinition(
+        EXPRESSION_SIZE_BUDGET_REASON_ID, ANALYSIS_LIMITATION_DOMAIN,
+        "proof_obligation", "blocks_decision",
+        frozenset((ANALYSIS_LIMITATION_TARGET_KIND,)),
+        ("limitation_site", "expression_size_budget"),
         frozenset((ANALYSIS_BUDGET_PROOF_KIND,)), True,
         "analysis_limitation_v1", RecoveryAddressability.REQUIREMENT_REQUIRED,
     ),
@@ -288,7 +309,7 @@ ANALYSIS_LIMITATION_OBSERVED_SITE = AnalysisLimitationProducerSiteSpec(
     "analysis-limitation-observed",
     ANALYSIS_LIMITATION_PRODUCER_ID,
     "ELIGIBLE",
-    (ANALYSIS_BUDGET_REASON_ID,),
+    (ANALYSIS_BUDGET_REASON_ID, EXPRESSION_SIZE_BUDGET_REASON_ID),
 )
 
 ANALYSIS_LIMITATION_PRODUCER_SITE_SPECS = (ANALYSIS_LIMITATION_OBSERVED_SITE,)
@@ -338,6 +359,18 @@ def observe_analysis_limitation(
         emit_analysis_limitation_signal,
     )
 
+    session = active_production_pilot_session()
+    if session is None:
+        # pilot が無ければ何もしない（記述も作らない）
+        return None
+    # Issue #110: 記述（live な値でもよい）は、signal を作る前に限界の event の上限まで数えながら plain
+    # な値へ写す（上限の外は契約の超過。作ってから測らない）
+    describe = getattr(session, "plain_limitation_description", None)
+    if not callable(describe):
+        raise TypeError("the production pilot session cannot bound a limitation description")
+    target_key, missing_semantic_fact, evidence_refs = describe(
+        (target_key, missing_semantic_fact, evidence_refs),
+    )
     signal = analysis_limitation_signal(
         reason_id=reason_id,
         limitation_site=limitation_site,
@@ -349,9 +382,6 @@ def observe_analysis_limitation(
         signal,
         producer_site_manifest_id=ANALYSIS_LIMITATION_OBSERVED_SITE.site_id,
     )
-    session = active_production_pilot_session()
-    if session is None:
-        return None
     resolver = getattr(session.domain_signal_encoder, "authority_for_signal", None)
     if not callable(resolver):
         return None

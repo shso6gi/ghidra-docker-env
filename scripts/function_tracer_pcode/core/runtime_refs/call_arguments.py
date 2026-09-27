@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
+from scripts.function_tracer_pcode.core.live_values import as_int, as_str, attribute
 
 
 _ABI_SLOT_KIND = "abi_argument_slot"
@@ -99,19 +101,20 @@ class AbiArgumentSlotRef:
 
         return self.stable_key() + (self.storage_identity_key, self.declared_type_name)
 
+    def json_items(self):
+        yield "kind", _ABI_SLOT_KIND
+        yield "ordinal", self.ordinal
+        yield "storage_class", self.storage_class
+        yield "width_bits", self.width_bits
+        yield "storage_identity_key", (
+            as_list(self.storage_identity_key)
+            if self.storage_identity_key is not None
+            else None
+        )
+        yield "declared_type_name", self.declared_type_name
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": _ABI_SLOT_KIND,
-            "ordinal": self.ordinal,
-            "storage_class": self.storage_class,
-            "width_bits": self.width_bits,
-            "storage_identity_key": (
-                list(self.storage_identity_key)
-                if self.storage_identity_key is not None
-                else None
-            ),
-            "declared_type_name": self.declared_type_name,
-        }
+        return materialize(self)
 
 
 class MissingSideDiscriminator(ValueError):
@@ -178,17 +181,19 @@ class FreshCallArgumentRef:
 
     def display_name(self) -> str:
         # discriminator は __post_init__ で保証済み。ここで既定値へ丸めない。
-        return f"fresh_{self.binary_id}_arg{self.slot.ordinal}"
+        # field は owner の API で読む（`__post_init__` が str / int に正規化済みなので同じ文字列）
+        return f"fresh_{as_str(self.binary_id)}_arg{as_int(attribute(self.slot, 'ordinal'))}"
+
+    def json_items(self):
+        yield "kind", _FRESH_ARGUMENT_KIND
+        yield "binary_id", self.binary_id
+        yield "slot", self.slot
+        yield "call_site_key", as_list(self.call_site_key) if self.call_site_key is not None else None
+        yield "reason", self.reason
+        yield "display_name", self.display_name()
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": _FRESH_ARGUMENT_KIND,
-            "binary_id": self.binary_id,
-            "slot": self.slot.to_dict(),
-            "call_site_key": list(self.call_site_key) if self.call_site_key is not None else None,
-            "reason": self.reason,
-            "display_name": self.display_name(),
-        }
+        return materialize(self)
 
 
 def fresh_call_argument_refs_are_side_distinct(

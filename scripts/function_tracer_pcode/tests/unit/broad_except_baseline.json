@@ -648,9 +648,6 @@
       "InternalError.stack_lines": {"logged": 0, "unlogged": 1},
       "log_swallowed": {"logged": 0, "unlogged": 1}
     },
-    "core.expression": {
-      "Expression._serialize_runtime_ref": {"logged": 0, "unlogged": 1}
-    },
     "core.render_smt.loop_lowering": {
       "_counted_loop_sum_exact_smt.<locals>._render_bias_term": {"logged": 0, "unlogged": 1},
       "_neon_ext_operands_are_smt_supported": {"logged": 0, "unlogged": 1}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 
 
 _MAX_PARENT_PCODE_OP_SCAN = 10000
@@ -337,34 +338,34 @@ class PcodeOpRef:
             and self.local_op_ordinal is not None
         )
 
-    def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "kind": "pcode_op",
-            "address_offset": self.address_offset,
-            "seq_time": self.seq_time,
-            "seq_order": self.seq_order,
-            "block_index": self.block_index,
-            "mnemonic": self.mnemonic,
-            "input_sizes": list(self.input_sizes),
-            "output_size": self.output_size,
-        }
+    def json_items(self):
+        yield "kind", "pcode_op"
+        yield "address_offset", self.address_offset
+        yield "seq_time", self.seq_time
+        yield "seq_order", self.seq_order
+        yield "block_index", self.block_index
+        yield "mnemonic", self.mnemonic
+        yield "input_sizes", as_list(self.input_sizes)
+        yield "output_size", self.output_size
         if self.binary_id is not None:
-            result["binary_id"] = self.binary_id
+            yield "binary_id", self.binary_id
         if self.program_uid is not None:
-            result["program_uid"] = self.program_uid
+            yield "program_uid", self.program_uid
         if self.function_entry_space is not None:
-            result["function_entry_space"] = self.function_entry_space
+            yield "function_entry_space", self.function_entry_space
         if self.function_entry_offset is not None:
-            result["function_entry_offset"] = self.function_entry_offset
+            yield "function_entry_offset", self.function_entry_offset
         if self.target_space is not None:
-            result["target_space"] = self.target_space
+            yield "target_space", self.target_space
         if self.target_offset is not None:
-            result["target_offset"] = self.target_offset
+            yield "target_offset", self.target_offset
         if self.opcode is not None:
-            result["opcode"] = self.opcode
+            yield "opcode", self.opcode
         if self.local_op_ordinal is not None:
-            result["local_op_ordinal"] = self.local_op_ordinal
-        return result
+            yield "local_op_ordinal", self.local_op_ordinal
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -400,12 +401,13 @@ class PcodeBlockRef:
             None if self.start_address_offset is None else int(self.start_address_offset),
         )
 
+    def json_items(self):
+        yield "kind", "pcode_block"
+        yield "block_index", self.block_index
+        yield "start_address_offset", self.start_address_offset
+        yield "binary_id", self.binary_id
+        yield "function_entry_space", self.function_entry_space
+        yield "function_entry_offset", self.function_entry_offset
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "pcode_block",
-            "block_index": self.block_index,
-            "start_address_offset": self.start_address_offset,
-            "binary_id": self.binary_id,
-            "function_entry_space": self.function_entry_space,
-            "function_entry_offset": self.function_entry_offset,
-        }
+        return materialize(self)

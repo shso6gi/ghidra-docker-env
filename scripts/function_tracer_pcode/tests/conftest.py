@@ -13,6 +13,13 @@ if str(workspace_root) not in sys.path:
 
 pytest = cast(Any, importlib.import_module("pytest"))
 
+# Issue #22 PR-22-D: bounded path が呼んでよい code は package の code だけ（`core/live_values`）。
+# test の module が定義する record・converter・reducer も呼ばせるため、test の harness だけが
+# `tests/unit` を信頼する（fixture の記録した Ghidra の値の代わりは信頼しない: production と同じ）
+from scripts.function_tracer_pcode.core import live_values as _live_values  # noqa: E402
+
+_live_values.trust_code_directory(str(Path(__file__).parent / "unit"))
+
 # Issue #109: 1 replay の検証は test module ではなく
 # `tests/fixtures/pcode/replay_validation.py` が持つ（fast / full が共有する
 # 唯一の実装）。assertion rewriting の対象へ明示的に入れておかないと、そこだけ

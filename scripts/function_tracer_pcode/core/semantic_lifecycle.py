@@ -66,6 +66,8 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import Any, Dict
 
+from scripts.function_tracer_pcode.core import live_values
+
 
 class SemanticLifecycle(IntEnum):
     """意味値が今どの段階に居るか。
@@ -120,11 +122,22 @@ def state_of(fields: Dict[str, Any]) -> SemanticLifecycle:
     ならない、という不変条件をここで閉じている。
     """
 
-    if not fields.get("_frozen", False):
+    # `__dict__` は owner の API で読む（出力の入口から live な値の `__dict__` が渡る）
+    if not _flag(live_values.lookup(fields, "_frozen", False)):
         return SemanticLifecycle.CONSTRUCTION
-    if fields.get("_published", False):
+    if _flag(live_values.lookup(fields, "_published", False)):
         return SemanticLifecycle.PUBLISHED
     return SemanticLifecycle.VALIDATED
+
+
+def _flag(value: Any) -> bool:
+    """状態の bit の真偽（`mark_*` が書くのは `True`。それ以外の値は owner の API で読む）。"""
+
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    return live_values.as_bool(value)
 
 
 def mark_validated(fields: Dict[str, Any]) -> None:
@@ -151,10 +164,13 @@ def lifecycle_of(value: Any) -> SemanticLifecycle:
     種別を確かめてから渡すこと。
     """
 
-    fields = getattr(value, "__dict__", None)
-    if not isinstance(fields, dict):
+    # instance の `__dict__` の値だけを読む（`__getattr__` / descriptor を呼ばない。`__dict__`
+    # を持たない値は bit も持たないので CONSTRUCTION）。規則は `state_of` と同じ
+    if not _flag(live_values.instance_state(value, "_frozen", False)):
         return SemanticLifecycle.CONSTRUCTION
-    return state_of(fields)
+    if _flag(live_values.instance_state(value, "_published", False)):
+        return SemanticLifecycle.PUBLISHED
+    return SemanticLifecycle.VALIDATED
 
 
 def is_validated(value: Any) -> bool:

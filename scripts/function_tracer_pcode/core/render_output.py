@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
 
 
@@ -40,6 +41,11 @@ def utf8_length(text: str) -> int:
     大量に測るので、ここが素直な encode だと無視できない費用になる）。
     """
 
+    if type(text) is not str:
+        # str の subclass は基底型の値で数える（上書きした `isascii` / `encode` / `__len__` を呼ばない）
+        text = live_values.str_value(text)
+        if text is live_values.NOT_PLAIN:
+            raise TypeError("utf8_length measures a str")
     return len(text) if text.isascii() else len(text.encode("utf-8"))
 
 

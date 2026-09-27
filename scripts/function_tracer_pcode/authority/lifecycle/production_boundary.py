@@ -24,6 +24,13 @@ from scripts.function_tracer_pcode.core.errors import (
     AnalysisFailureError,
     pair_failure_scope,
 )
+# Issue #22 PR-22-D: 式サイズ予算の scope（台帳と同じ寿命）と、authority 確定前の
+# 出力準備（G4-b）。boundary は順序だけを持ち、予算の値・大きさの勘定・payload の
+# 変換は `core.budget_policy` / `checker.output_preparation` が持つ。
+from scripts.function_tracer_pcode.core.budget_policy import budget_policy_scope
+from scripts.function_tracer_pcode.checker.output_preparation import (
+    prepare_pair_output,
+)
 from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     production_signal_scope,
 )
@@ -310,6 +317,9 @@ def _run_legacy_with_pair_gate(
     G3（`checker.workflow`）が受け損ねた例外 — workflow の外で投げられたもの —
     をここで受け、同じ規則で結果にする。正常に返った結果についても、台帳に未解消
     の失敗があるのに EQ / NOT_EQ になっていないかを確かめる。
+
+    最後に G4-b（出力の準備）を通す。`connector.finish` より前なので、出力が
+    予算に収まらない pair は receipt を発行する前に reason 付き UNKNOWN になる。
     """
     started = time.time()
     names = dict(
@@ -333,14 +343,24 @@ def _run_legacy_with_pair_gate(
         )
         if failure_result is None:  # 台帳にも型にも根拠が無い: 従来どおり上へ
             raise
-        return failure_result
-    return apply_pair_failure_gate(  # G4-a
+        result = failure_result
+    else:
+        result = apply_pair_failure_gate(  # G4-a
+            checker,
+            result,
+            function_name1=function_name1,
+            function_name2=function_name2,
+            start_time=started,
+        )
+    result = prepare_pair_output(  # G4-b
         checker,
         result,
         function_name1=function_name1,
         function_name2=function_name2,
         start_time=started,
+        save_formula=bool(kwargs.get("save_formula", False)),
     )
+    return result
 
 
 def run_check_from_binaries_with_v2_pilot(
@@ -356,7 +376,9 @@ def run_check_from_binaries_with_v2_pilot(
     if connector is None:
         # pilot 無しの legacy 経路。台帳の scope は同じように張る（限界は帰属
         # できないので `limitation_unattributed` の ERROR になる = fail-closed）。
-        with pair_failure_scope(pair_identity, None):
+        with pair_failure_scope(pair_identity, None), budget_policy_scope(
+            getattr(checker, "budget_policy", None)
+        ):
             return _run_legacy_with_pair_gate(
                 checker, program1, program2,
                 function_name1, function_name2, kwargs,
@@ -465,6 +487,9 @@ def run_check_from_binaries_with_v2_pilot(
     try:
         pair_scope.enter_context(
             pair_failure_scope(pair_identity, _session_identity(session))
+        )
+        pair_scope.enter_context(
+            budget_policy_scope(getattr(checker, "budget_policy", None))
         )
         check_started = time.monotonic()
         with production_signal_scope(session):

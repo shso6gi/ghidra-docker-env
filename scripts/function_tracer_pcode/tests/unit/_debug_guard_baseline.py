@@ -38,10 +38,6 @@ _NON_GUARD_ATTRIBUTES: FrozenSet[GuardShape] = frozenset({
     ('attr', ('cls',), '_debug_suppressed'),
     # self._debug_suppressed  (analysis/phi_resolver.py:112)
     ('attr', ('self',), '_debug_suppressed'),
-    # self.debug_trace  (checker/result.py:337)
-    ('attr', ('self',), 'debug_trace'),
-    # self.pairwise_debug_stats  (checker/result.py:401)
-    ('attr', ('self',), 'pairwise_debug_stats'),
 })
 
 #: canonical descriptor 文法の外にある式（比較・引数付き呼び出しなど）。
@@ -94,6 +90,8 @@ _NON_GUARD_UNSUPPORTED: FrozenSet[GuardShape] = frozenset(
         "Compare(left=Call(func=Attribute(value=Attribute(value=Name(id='self', ctx=Load()), attr='block_graph', ctx=Load()), attr='block_debug_key', ctx=Load()), args=[Name(id='successor', ctx=Load())], keywords=[]), ops=[In()], comparators=[Name(id='scc_keys', ctx=Load())])",
         # self.block_graph.block_debug_key(successor) not in scc_keys  (analysis/returns/divergence_proofs.py:264)
         "Compare(left=Call(func=Attribute(value=Attribute(value=Name(id='self', ctx=Load()), attr='block_graph', ctx=Load()), attr='block_debug_key', ctx=Load()), args=[Name(id='successor', ctx=Load())], keywords=[]), ops=[NotIn()], comparators=[Name(id='scc_keys', ctx=Load())])",
+        # name == 'debug_trace'  (checker/output_preparation.py: 登録した読み方の関数の名前の振り分け)
+        "Compare(left=Name(id='name', ctx=Load()), ops=[Eq()], comparators=[Constant(value='debug_trace')])",
         # type(debug) is not bool  (proof/conditional_view.py:563)
         "Compare(left=Call(func=Name(id='type', ctx=Load()), args=[Name(id='debug', ctx=Load())], keywords=[]), ops=[IsNot()], comparators=[Name(id='bool', ctx=Load())])",
     }

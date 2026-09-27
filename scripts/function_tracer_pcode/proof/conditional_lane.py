@@ -47,10 +47,11 @@ from scripts.function_tracer_pcode.proof.assumptions import (
     AssumptionPremise,
     normalize_assumption_premises,
 )
-from scripts.function_tracer_pcode.proof.conditional_view import (
+from scripts.function_tracer_pcode.proof.conditional_view import (  # noqa: F401 - receipt の上限の根拠を再輸出
     ConditionalSemanticView,
     build_conditional_equivalence_formula,
     create_conditional_view,
+    worst_case_external_callee_spec_premises,
 )
 
 

@@ -336,6 +336,75 @@ def assumption_set_payload(premises: Iterable[AssumptionPremise]) -> list:
     return [assumption_premise_payload(premise) for premise in premises]
 
 
+#: receipt の契約（Issue #22 PR-22-D）: conditional receipt が運ぶ仮定の数と、premise 1 つの JSON
+#: byte の上限。**receipt の表現の上限**（出力 schema の headroom の根拠）で、証明の能力の上限では
+#: ない。固定の parameter で、実行時に catalog を読まない（catalog の欠け・破損で全 pair の出力を
+#: 止めない）。値の根拠は今の catalog の形の見積もり — 名前（canonical 名と alias 名）の数 ×
+#: external import の provenance の種類 × 2 binary = 528 件（binary 1 つが名前 1 つに external を
+#: 1 つ持つ形。1 binary に同じ名前の external が複数あれば超え得る）、binary 由来の名前を
+#: `PREMISE_BINARY_LABEL_MAX_CHARS` 字・最悪の escape にした premise = 10,080 B — を 64 件・1 KiB の
+#: 単位へ切り上げた値。見積もりは `tests/unit/test_issue20_prb3_conditional_lane.py` が catalog から
+#: 求め、上限を超えると落ちる（catalog が育ったら上限と headroom を決め直す）。上限を超える集合は
+#: receipt にしない（lane は fail closed、発行する側も拒む。検証は構造だけ）。
+MAX_ASSUMPTION_PREMISES = 576
+ASSUMPTION_PREMISE_MAX_BYTES = 10_240
+#: 見積もりに使う binary 由来の名前（library 名・external の名前）1 つの文字数（receipt の契約の
+#: 根拠の parameter。長い名前の premise は `ASSUMPTION_PREMISE_MAX_BYTES` で拒まれる）
+PREMISE_BINARY_LABEL_MAX_CHARS = 256
+#: external function の名前の数（original imported name と自身の名前。`_external_symbol_names`）
+_EXTERNAL_SYMBOL_NAME_COUNT = 2
+#: `conditional_decision_receipt_payload` の固定長の member（id・digest・語彙）。`assumption_set` 以外
+CONDITIONAL_RECEIPT_FIXED_FIELDS = (
+    "result_occurrence_id", "conditional_outcome", "unconditional_outcome",
+    "unconditional_receipt_digest", "lifecycle_projection_digest", "assumption_set_digest",
+    "authority_input_digest", "receipt_digest",
+)
+
+
+def assumption_premise_max_bytes() -> int:
+    """premise 1 つの JSON byte の上限（receipt の契約の固定の parameter）。"""
+
+    return ASSUMPTION_PREMISE_MAX_BYTES
+
+
+def max_assumption_premises() -> int:
+    """conditional receipt が運ぶ仮定の数の上限（**表現の上限**。証明の能力の上限ではない）。"""
+
+    return MAX_ASSUMPTION_PREMISES
+
+
+def assumption_set_receipt_bound_violation(premises: Tuple[AssumptionPremise, ...]) -> Any:
+    """仮定の集合が receipt の上限を超えるなら理由（超えなければ `None`）。
+
+    数を先に比べ、1 つずつの大きさは上限の中でだけ数える（上限を超えた premise を書き切らない）。
+    lane はこれを receipt を発行する **前** に確かめ、超えれば receipt を作らない（fail closed。
+    確定後に出力の契約違反で ERROR にしない）。
+    """
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted, RESULT_JSON_POLICY
+
+    count = len(premises)
+    limit = max_assumption_premises()
+    if count > limit:
+        return f"assumption_set has {count} premises (> {limit})"
+    premise_limit = assumption_premise_max_bytes()
+    for index, premise in enumerate(premises):
+        if type(premise) is not AssumptionPremise:
+            raise TypeError(f"assumption sets carry AssumptionPremise only: {type(premise).__name__}")
+        # 書く形（`assumption_premise_payload`）と同じ byte を、payload を写さずに上限の中で数える
+        # （tuple と list は同じ JSON の配列。上限を超える premise の payload を先に組み立てない）
+        shape = {
+            "kind": premise.kind.value,
+            "subject": premise.subject,
+            "payload": premise.payload,
+            "schema_version": premise.schema_version,
+        }
+        try:
+            RESULT_JSON_POLICY.measure(shape, max_bytes=premise_limit)
+        except JsonBudgetExhausted:
+            return f"assumption premise {index} exceeds {premise_limit} bytes"
+    return None
+
+
 def assumption_set_from_payload(payload: Any) -> Tuple[AssumptionPremise, ...]:
     """Rebuild a persisted assumption set exactly as it was written.
 
@@ -437,6 +506,11 @@ def finalize_conditional_decision(
     than the whole assumption set is malformed and yields ``ERROR`` in the
     conditional column.  The unconditional decision is never touched.
     """
+    over_bound = assumption_set_receipt_bound_violation(tuple(authority.assumption_set))
+    if over_bound is not None:
+        # receipt の契約の外の集合は発行しない（lane は発行の前に確かめて fail closed にする）。
+        # 検証（`validate`）は構造だけを見る: 契約より前に永続化した receipt の読み手を止めない
+        raise ValueError(f"conditional decision receipt exceeds its contract: {over_bound}")
     projection = authority.lifecycle_projection
     unconditional = authority.unconditional_decision
     malformed = authority.malformed_authority

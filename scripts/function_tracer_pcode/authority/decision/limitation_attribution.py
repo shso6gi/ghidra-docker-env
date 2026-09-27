@@ -253,6 +253,50 @@ def _matching_active_rows(
     return tuple(matches)
 
 
+@dataclass(frozen=True)
+class _PlainLimitation:
+    """帰属が読む限界の記述の plain な写し（例外そのものは作り直さない: `detail` を写さない）。"""
+
+    site: str
+    target_key: tuple
+    missing_semantic_fact: tuple
+    evidence_refs: tuple
+    attribution: Optional[CauseAttributionKey]
+
+
+def _plain_limitation(describe: Any, limitation: AnalysisLimitation) -> _PlainLimitation:
+    """限界（と帰属キー）の、帰属が読む field の plain な写し（`describe` は session の上限つきの写し。
+    1 回で全部を写す）。"""
+
+    key = limitation.attribution
+    key_parts = None if key is None else (
+        key.canonical_target_key, key.missing_semantic_fact, key.semantic_proposition,
+        key.proof_requirement_ids, key.observation_surface, key.active_semantic_precondition,
+        key.correspondence_contract,
+    )
+    target_key, missing, evidence_refs, plain_key_parts = describe((
+        limitation.target_key, limitation.missing_semantic_fact, limitation.evidence_refs, key_parts,
+    ))
+    plain_key = None
+    if key is not None:
+        (
+            canonical_target_key, missing_semantic_fact, semantic_proposition, proof_requirement_ids,
+            observation_surface, active_semantic_precondition, correspondence_contract,
+        ) = plain_key_parts
+        plain_key = CauseAttributionKey(
+            reason_id=key.reason_id, identity_scope=key.identity_scope, target_kind=key.target_kind,
+            canonical_target_key=canonical_target_key, missing_semantic_fact=missing_semantic_fact,
+            semantic_proposition=semantic_proposition, proof_requirement_ids=proof_requirement_ids,
+            observation_surface=observation_surface,
+            active_semantic_precondition=active_semantic_precondition,
+            correspondence_contract=correspondence_contract,
+        )
+    return _PlainLimitation(
+        site=limitation.site, target_key=tuple(target_key), missing_semantic_fact=tuple(missing),
+        evidence_refs=tuple(evidence_refs), attribution=plain_key,
+    )
+
+
 def _unattributed(
     pilot: Any, limitation: AnalysisLimitation, detail: str,
 ) -> LimitationAttribution:
@@ -312,6 +356,30 @@ def attribute_analysis_limitation(
     # 同じ object。明示引数を優先し、無ければ emit と同じ session を読む。
     pilot = session if session is not None else _active_pilot_session()
 
+    # Issue #110: 限界の記述（と帰属キー）は、どちらの経路でも何かを作る前に、authority の event の
+    # 契約の上限まで数えながら plain な値へ写す（上限の外は契約の超過。live な値の code を呼ばない）
+    if pilot is not None:
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            AuthorityEventContractExceeded,
+        )
+
+        describe = getattr(pilot, "plain_limitation_description", None)
+        if not callable(describe):
+            return _unattributed(
+                pilot, limitation, "the pilot session cannot bound a limitation description",
+            )
+        try:
+            plain = _plain_limitation(describe, limitation)
+        except AuthorityEventContractExceeded:
+            return _unattributed(
+                pilot, limitation, "the limitation description is outside the authority event contract",
+            )
+        except (TypeError, ValueError) as exc:
+            return _unattributed(
+                pilot, limitation, f"the limitation description is not plain: {type(exc).__name__}",
+            )
+        key = plain.attribution
+
     if definition.domain == ANALYSIS_LIMITATION_DOMAIN:
         if pilot is None:
             return _unattributed(
@@ -321,10 +389,10 @@ def attribute_analysis_limitation(
         try:
             occurrence_id = observe_analysis_limitation(
                 reason_id=reason_id,
-                limitation_site=limitation.site,
-                target_key=limitation.target_key,
-                missing_semantic_fact=limitation.missing_semantic_fact,
-                evidence_refs=limitation.evidence_refs,
+                limitation_site=plain.site,
+                target_key=plain.target_key,
+                missing_semantic_fact=plain.missing_semantic_fact,
+                evidence_refs=plain.evidence_refs,
             )
             row = (
                 None if occurrence_id is None

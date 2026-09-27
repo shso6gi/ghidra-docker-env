@@ -752,6 +752,24 @@ class ProductionDualWritePilotSession:
                 self._rollback_phase7_transaction(transaction)
             raise
 
+    def plain_limitation_description(self, description: Any) -> Any:
+        """A limitation cause's description, copied to plain values within the contract before it is built.
+
+        A description over the limitation event bound is the contract overflow
+        (recorded, then the contract cause is published and the refusal is
+        raised): no representation of it is built.
+        """
+
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            AuthorityEventContractExceeded,
+        )
+
+        try:
+            return self.event_contract.plain_limitation_description(description)
+        except AuthorityEventContractExceeded:
+            self.publish_event_contract_limitation()
+            raise
+
     def defer_occurrence(self, occurrence_id: str) -> bool:
         """Promise to publish ``occurrence_id`` before the decision (counted now).
 
@@ -819,10 +837,19 @@ class ProductionDualWritePilotSession:
         self.event_contract.bind_contract_cause(
             resolver(self, analysis_limitation_signal(**fields_)).occurrence.occurrence_id
         )
+        from scripts.function_tracer_pcode.authority.event_contract import (
+            AuthorityEventContractExceeded,
+        )
+
         self._publishing_contract_limitation = True
         try:
             with production_pilot_session_scope(self):
                 return observe_analysis_limitation(**fields_)
+        except AuthorityEventContractExceeded:
+            # The contract cause itself does not fit (a misconfigured
+            # contract): nothing is published here and the check before the
+            # decision (``ensure_event_contract_limitation``) fails closed.
+            return None
         finally:
             self._publishing_contract_limitation = False
 
@@ -1560,10 +1587,22 @@ class ProductionDualWritePilotConnector:
 
             from scripts.function_tracer_pcode.checker.unknown_reason import (
                 build_projection_diagnostic,
+                legacy_reason_index,
+                projection_diagnostic_work,
             )
+
+            # Issue #22 PR-22-D: 診断（cause の key の要約・legacy との照合）の作業量は
+            # finish 1 回で共有する（receipt ごとに上限を持ち直さない）
+            diagnostic_work = projection_diagnostic_work()
 
             result.legacy_unknown_reasons = list(
                 getattr(result, "unknown_reasons", ()) or ()
+            )
+            # 照合用の索引は finish 1 回で 1 つ（cause ごとに legacy 全体を辿り直さない）
+            legacy_index = legacy_reason_index(
+                result.legacy_unknown_reasons,
+                work=diagnostic_work,
+                overflow=getattr(result, "legacy_reason_overflow", 0),
             )
             occurrences = _recorded_cause_occurrences(session)
             function_names = {
@@ -1588,14 +1627,16 @@ class ProductionDualWritePilotConnector:
                     projection_factory=(
                         session.phase7_runtime_result.projection_factory
                     ),
+                    cause_occurrence=occurrences.get(receipt.occurrence_id),
                     diagnostic=_safe_projection_diagnostic(
                         build_projection_diagnostic,
                         receipt,
                         cause_occurrence=occurrences.get(receipt.occurrence_id),
-                        legacy_reasons=result.legacy_unknown_reasons,
+                        legacy_reasons=legacy_index,
                         function_names=function_names,
                         binary_names=binary_names,
                         projected_reason_counts=projected_reason_counts,
+                        work=diagnostic_work,
                     ),
                 )
                 for receipt in projection_receipts

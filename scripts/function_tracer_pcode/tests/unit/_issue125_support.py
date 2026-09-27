@@ -85,6 +85,15 @@ class LifecycleHarness:
         self._recovery_registry = (
             recovery_registry or PROCESS_DURABLE_RECOVERY_REGISTRY
         )
+        from scripts.function_tracer_pcode.authority.event_contract import EventContractLedger
+
+        #: production の session と同じ authority event の契約（限界の記述の上限つきの写し）
+        self._event_contract = EventContractLedger()
+
+    def plain_limitation_description(self, description):
+        """production の session と同じ: 限界の記述を作る前に、契約の上限まで数えながら plain な値へ写す。"""
+
+        return self._event_contract.plain_limitation_description(description)
 
     # -- occurrence 組み立て ------------------------------------------------
 

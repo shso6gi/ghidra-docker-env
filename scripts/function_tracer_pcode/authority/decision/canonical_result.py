@@ -15,6 +15,10 @@ from typing import Any, Mapping
 from scripts.function_tracer_pcode.authority.process import checkpoint_vocabulary as vocabulary
 from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.codecs import StrictV2JsonCodec
+from scripts.function_tracer_pcode.core.json_encoding import (
+    PERSISTED_ENVELOPE_JSON_POLICY,
+    JsonOutputLimitExceeded,
+)
 from scripts.function_tracer_pcode.authority.contracts import (
     Outcome,
     authority_digest,
@@ -1112,16 +1116,18 @@ def persist_canonical_result_envelope(
     plan.charge("persist_seal")
     envelope = seal_envelope(projected_payload)
     plan.charge("persist_write")
-    # Issue #110: never write an envelope its reader rejects (the reader
-    # refuses files over this bound before decoding them).
-    text = json.dumps(envelope, sort_keys=True, separators=(",", ":")) + "\n"
+    # Issue #110 / #22 PR-22-D: 結果 JSON と同じ書き方（UTF-8 のまま、surrogate だけ escape、区切りは
+    # 詰める）で、読む側の byte の上限（読む前に拒む上限）の中でだけ書く。上限は書きながら強制する
+    # （上限を超えた時点で止め、断片を残さない）。読む側が拒む envelope は書かない
     limit = persisted_envelope_byte_limit()
-    if len(text.encode("utf-8")) > limit:
+    try:
+        text = PERSISTED_ENVELOPE_JSON_POLICY.encode_bounded(envelope, max_bytes=limit - 1) + "\n"
+    except JsonOutputLimitExceeded as exc:
         raise BundleWorkExceeded(
             "the canonical result envelope is outside the persisted bound",
             kind="contract", step="persist_write",
             consumed=getattr(work, "consumed", 0), limit=limit,
-        )
+        ) from exc
     directory = Path(root) / nonce
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / layout.RESULT_ENVELOPE

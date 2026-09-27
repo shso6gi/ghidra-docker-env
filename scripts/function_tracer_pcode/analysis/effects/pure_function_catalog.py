@@ -98,6 +98,8 @@ PROVENANCE_THUNK_TO_EXTERNAL = "thunk_to_external"
 _PROVENANCE_KINDS_SATISFYING_EXTERNAL_IMPORT = frozenset(
     {PROVENANCE_DIRECT_EXTERNAL, PROVENANCE_THUNK_TO_EXTERNAL}
 )
+#: ``external_import`` を満たす provenance の種別（conditional receipt の仮定の数の上限が読む）。
+EXTERNAL_IMPORT_PROVENANCE_KINDS = _PROVENANCE_KINDS_SATISFYING_EXTERNAL_IMPORT
 
 #: ``signature_key`` の schema tag（catalog signature の同一性判定に使う）。
 SIGNATURE_KEY_KIND = "c99_math_signature_v1"

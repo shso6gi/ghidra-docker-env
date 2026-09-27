@@ -23,6 +23,10 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional
 
 from scripts.function_tracer_pcode.checker.debug_trace import TransitionReason
+# 型を確かめてから method を呼ぶための名前（debug の可否の guard ではない）
+from scripts.function_tracer_pcode.checker.debug_trace import DebugTrace as _AttemptTrace
+from scripts.function_tracer_pcode.core import json_encoding, live_values
+from scripts.function_tracer_pcode.core.json_encoding import Reducer, builtin_str, exception_text
 # Issue #124: StageClock は core へ移した（analysis / proof / smt からも同じ型で
 # 計測し、checker が pull するため）。ここは既存 import を壊さないための再公開。
 from scripts.function_tracer_pcode.core.stage_clock import (  # noqa: F401
@@ -68,11 +72,11 @@ def record_failure_diagnostic(result: Any, kind: str, payload: Any) -> None:
     block の他の key も消さない。診断なので、書けなくても判定は変えない。
     """
     try:
-        diagnostics = dict(getattr(result, "diagnostics", None) or {})
-        failures = dict(diagnostics.get("failures") or {})
+        diagnostics = _mapping_copy(live_values.attribute(result, "diagnostics"))
+        failures = _mapping_copy(diagnostics.get("failures"))
         failures[kind] = payload
         diagnostics["failures"] = failures
-        result.diagnostics = diagnostics
+        live_values.set_state(result, "diagnostics", diagnostics)
     except Exception:  # 診断は判定を壊さない
         return
 
@@ -100,7 +104,7 @@ def attach_failure_diagnostics(result: Any) -> None:
             "by_site": rows,
         }
     except Exception as exc:  # 診断は判定を壊さない
-        payload = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+        payload = {"error": exception_text(exc, 200)}
     record_failure_diagnostic(result, FAILURE_SWALLOWED_EXCEPTIONS, payload)
 
 
@@ -116,7 +120,7 @@ def attach_stage_timing(result: Any, clock: StageClock) -> None:
     try:
         payload = clock.snapshot()
     except Exception as exc:  # diagnostics never fail the verdict
-        payload = {"schema": STAGE_TIMING_SCHEMA, "error": f"{type(exc).__name__}: {exc}"[:200]}
+        payload = {"schema": STAGE_TIMING_SCHEMA, "error": exception_text(exc, 200)}
     payload.update(process_counter_payload())
     try:
         diagnostics = dict(getattr(result, "diagnostics", None) or {})
@@ -224,7 +228,7 @@ def expression_stats(analysis: Any) -> Dict[str, int]:
             "return_case_count": len(returns),
             "node_count": node_count,
             "max_depth": max_depth,
-            "error": f"{type(exc).__name__}: {exc}"[:200],
+            "error": exception_text(exc, 200),
         }
     tree_total, tree_complete = _tree_node_total(returns)
     return {
@@ -475,7 +479,7 @@ class AnalysisTimer:
         try:
             self.stats[side] = expression_stats(analysis)
         except Exception as exc:
-            self.stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            self.stats[side] = {"error": exception_text(exc, 200)}
 
     def record_callee_parameter_cache(self, side: str, analyzer: Any) -> None:
         """Issue #47: callee parameter snapshot cache の hit/miss を side ごとに残す。
@@ -492,7 +496,7 @@ class AnalysisTimer:
                 self.cache_stats.get(side), dict(reader() or {})
             )
         except Exception as exc:
-            self.cache_stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            self.cache_stats[side] = {"error": exception_text(exc, 200)}
 
     def record_callee_analysis_cache(self, side: str, analyzer: Any) -> None:
         """Issue #47: callee 解析 cache の hit/miss と miss 原因を side ごとに残す。
@@ -509,7 +513,7 @@ class AnalysisTimer:
                 self.analysis_cache_stats.get(side), dict(reader() or {})
             )
         except Exception as exc:
-            self.analysis_cache_stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            self.analysis_cache_stats[side] = {"error": exception_text(exc, 200)}
 
     def record_callee_unbound_reuse(self, side: str, analyzer: Any) -> None:
         """Issue #47 (PR-B): external placeholder callee の再利用計数を side ごとに残す。
@@ -525,7 +529,7 @@ class AnalysisTimer:
                 self.reuse_stats.get(side), dict(reader() or {})
             )
         except Exception as exc:
-            self.reuse_stats[side] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            self.reuse_stats[side] = {"error": exception_text(exc, 200)}
 
     def snapshot(self) -> Dict[str, Any]:
         try:
@@ -543,89 +547,297 @@ class AnalysisTimer:
                 },
             }
         except Exception as exc:
-            return {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            return {"error": exception_text(exc, 200)}
 
 
-def _solver_rows(container: Any) -> Iterable[Any]:
-    results = getattr(container, "results", None)
-    if results is None and isinstance(container, Mapping):
-        results = container.get("results") or container.get("all_results")
-    return tuple(results or ())
+def _mapping_copy(value: Any) -> Dict[Any, Any]:
+    """組み込みの振る舞いの mapping の浅い複製（旧 `dict(value or {})`。key は scalar だけ）。"""
+
+    copied: Dict[Any, Any] = {}
+    if not _truthy(value):
+        return copied
+    for key, item in live_values.items_of(value):
+        plain = live_values.plain_scalar(key)
+        if plain is live_values.NOT_PLAIN:
+            raise TypeError(f"{live_values.type_name(type(key))} is not a plain mapping key")
+        copied[plain] = item
+    return copied
+
+
+def _truthy(value: Any) -> bool:
+    """`bool(value)`（`None` は偽。scalar・組み込みの振る舞いの容器・package の record だけを読む）。"""
+
+    return value is not None and live_values.as_bool(value)
+
+
+def _record_or_mapping_value(value: Any, name: str) -> Any:
+    """record の field `name`（無ければ組み込みの振る舞いの mapping の key `name`）。"""
+
+    found = live_values.attribute(value, name)
+    if found is None:
+        mapping = live_values.builtin_mapping(value)
+        if mapping is not None:
+            found = live_values.lookup(mapping, name)
+    return found
+
+
+def _solver_rows(container: Any) -> Any:
+    results = live_values.attribute(container, "results")
+    if results is None:
+        mapping = live_values.builtin_mapping(container)
+        if mapping is not None:
+            results = live_values.lookup(mapping, "results")
+            if not _truthy(results):
+                results = live_values.lookup(mapping, "all_results")
+    if results is None:
+        return ()
+    # 列はそのまま返す（写さない）。反復してよい組み込みの振る舞いの容器でない列は producer の
+    # 不備（walker が JSON にならない値として扱う）
+    if not live_values.builtin_container(results):
+        raise TypeError(f"solver results {live_values.type_name(type(results))} are not a builtin container")
+    return results
 
 
 def _elapsed(row: Any) -> float:
-    value = getattr(row, "elapsed_time", None)
-    if value is None and isinstance(row, Mapping):
-        value = row.get("elapsed_time")
+    value = _record_or_mapping_value(row, "elapsed_time")
     try:
-        return float(value or 0.0)
+        return live_values.as_float(value) if _truthy(value) else 0.0
     except (TypeError, ValueError):
         return 0.0
 
 
-def result_diagnostics_payload(result: Any) -> Dict[str, Any]:
-    """`EquivalenceResult.to_dict()` 用に、解析時の記録と結果の統計を合成する。
+def result_diagnostics_payload(result: Any, *, lazy: bool = False) -> Any:
+    """結果 JSON の `diagnostics`（解析時の記録と結果の統計）。
 
-    診断は判定結果に影響してはならないため、失敗しても最小のブロックを返す。
+    `lazy=True` は JSON source（出力の準備が使う）: 固定の形の view で、attempt ごとの
+    行は walker が 1 つずつ引き出す（`core/json_encoding`）。出力の準備が残り予算まで
+    しか辿らないので、attempt が大量でも行の list を先に作らない。既定は上限なしで
+    作った canonical な dict（直接の読み手用。結果 JSON と同じ値）。
+
+    診断は判定結果に影響してはならないため、失敗しても最小のブロックを返す
+    （行の generator が行う計算は、ここで合計を数える loop が先に済ませている）。
     """
     try:
-        return _result_diagnostics_payload(result)
+        view = _ResultDiagnosticsView(result)
+        if lazy:
+            return view
+        return json_encoding.RESULT_JSON_POLICY.prepare(view).value()
     except Exception as exc:
-        return {"schema": DIAGNOSTICS_SCHEMA, "error": f"{type(exc).__name__}: {exc}"[:200]}
+        return {"schema": DIAGNOSTICS_SCHEMA, "error": exception_text(exc, 200)}
 
 
-def _result_diagnostics_payload(result: Any) -> Dict[str, Any]:
-    base = dict(getattr(result, "diagnostics", None) or {})
-    attempts_out = []
-    solver_seconds = 0.0
-    solver_invocations = 0
-    trace = getattr(result, "debug_trace", None)
-    for attempt in tuple(getattr(trace, "attempts", ()) or ()):
-        rows = _solver_rows(getattr(attempt, "solver_results", None))
-        seconds = sum(_elapsed(row) for row in rows)
-        solver_seconds += seconds
-        solver_invocations += len(rows)
-        attempts_out.append({
-            "attempt_id": getattr(attempt, "attempt_id", None),
-            "phase": getattr(attempt, "phase", None),
-            "strategy": getattr(attempt, "strategy", None),
-            "elapsed_seconds": getattr(attempt, "elapsed_time", None),
-            "solver_seconds": round(seconds, 6),
-            "solver_invocations": len(rows),
-        })
-    if not attempts_out:
-        rows = _solver_rows(getattr(result, "solver_results", None))
-        solver_seconds = sum(_elapsed(row) for row in rows)
-        solver_invocations = len(rows)
-    pairwise = dict(getattr(result, "pairwise_stats", None) or {})
-    return {
-        "schema": DIAGNOSTICS_SCHEMA,
-        "timings": {
-            "total_seconds": getattr(result, "total_time", None),
-            "analysis_seconds": dict(base.get("analysis_seconds") or {}),
-            "solver_seconds": round(solver_seconds, 6),
-            "attempts": attempts_out,
-            "stages": dict(base.get("stages") or {}),
-            "boundary_seconds": dict(base.get("boundary_seconds") or {}),
-            "phases": list(base.get("phases") or []),
-        },
-        "expressions": dict(base.get("expressions") or {}),
-        "caches": {
-            "callee_parameter_decompile": dict(base.get("callee_parameter_cache") or {}),
-            "callee_analysis": dict(base.get("callee_analysis_cache") or {}),
-            "callee_unbound_reuse": dict(base.get("callee_unbound_reuse") or {}),
-        },
+def _attempt_rows(attempts: Any) -> Iterable[Any]:
+    from scripts.function_tracer_pcode.core.json_encoding import inline, scan
+
+    if not _truthy(attempts):
+        return
+    for attempt in live_values.elements_of(attempts):
+        container = live_values.attribute(attempt, "solver_results")
+        # 行の合計・件数は walker が行の数を数えてから畳み込む（`_SolverTotals`）
+        yield inline(
+            ("attempt_id", live_values.attribute(attempt, "attempt_id")),
+            ("phase", live_values.attribute(attempt, "phase")),
+            ("strategy", live_values.attribute(attempt, "strategy")),
+            ("elapsed_seconds", live_values.attribute(attempt, "elapsed_time")),
+            ("solver_seconds", scan((container,), _SolverTotals("seconds"))),
+            ("solver_invocations", scan((container,), _SolverTotals("invocations"))),
+        )
+
+
+def _attempt_solver_results(attempts: Any) -> Iterator[Any]:
+    for attempt in live_values.elements_of(attempts):
+        yield live_values.attribute(attempt, "solver_results")
+
+
+#: trace 由来の時間の行の名前（`TraceTimingsView.json_items` の順）
+_TRACE_TIMING_NAMES = ("solver_seconds", "solver_invocations", "attempts", "phase_usage")
+
+
+class TraceTimingsView:
+    """trace（解析の記録）から決まる時間の行（attempt 行と solver の合計）。
+
+    Issue #22 PR-22-D: authority 確定 **前**（G4-b）に準備する
+    （`PreparedSemanticPayload.trace_timings`）。authority 後の `diagnostics` は準備した
+    値だけを読み、live な trace を辿らない。
+    """
+
+    __slots__ = ("_trace", "_attempts", "_result")
+
+    def __init__(self, result: Any) -> None:
+        trace = live_values.attribute(result, "debug_trace")
+        self._trace = trace
+        self._result = result
+        # attempt の列（無い・空は walk の中で `()` として読む。構築では辿らない）
+        self._attempts = live_values.attribute(trace, "attempts")
+
+    def _solver_containers(self) -> Any:
+        # attempt ごとの solver 結果（attempt が無ければ結果そのものの solver 結果）
+        attempts = self._attempts
+        if _truthy(attempts):
+            return _attempt_solver_results(attempts)
+        return (live_values.attribute(self._result, "solver_results"),)
+
+    #: 行の名前（`json_items` の順）
+    NAMES = _TRACE_TIMING_NAMES
+
+    def source(self, name: str) -> Any:
+        """行 1 つの source（walker が辿る。辿る前に何も数えない・写さない）。"""
+
+        from scripts.function_tracer_pcode.core.json_encoding import each, scan
+
+        if name in ("solver_seconds", "solver_invocations"):
+            # 合計は walker が attempt と solver の行を 1 つずつ数えながら畳み込む（`scan`）
+            what = "seconds" if name == "solver_seconds" else "invocations"
+            return scan(self._solver_containers(), _SolverTotals(what))
+        if name == "attempts":
+            return each(_attempt_rows(self._attempts))
+        if name == "phase_usage":
+            # 人向けの text の phase 利用状況（debug trace を出力へ添付しないときも使う）
+            trace = self._trace
+            if type(trace) is _AttemptTrace:
+                return trace.phase_usage_source()
+            return None
+        raise KeyError(name)
+
+    def json_items(self):
+        for name in _TRACE_TIMING_NAMES:
+            yield name, self.source(name)
+
+
+class _SolverTotals(Reducer):
+    """`scan` の reducer: solver 結果の容器（1 要素 = 1 容器）の行の秒の合計（`seconds`）か件数（`invocations`）。
+
+    畳む前に容器の行の数を作業量へ数える。
+    """
+
+    __slots__ = ("what", "seconds", "invocations")
+
+    def __init__(self, what: str) -> None:
+        self.what = what
+        self.seconds = 0.0
+        self.invocations = 0
+
+    def add(self, container: Any, *, work: Any) -> None:
+        rows = _solver_rows(container)
+        count = live_values.size(rows)
+        work.charge(count)
+        # 行は `live_values` の反復で辿る（容器の `__iter__` / `__len__` を呼ばない）
+        for row in live_values.elements_of(rows):
+            self.seconds += _elapsed(row)
+        self.invocations += count
+
+    def result(self, *, work: Any) -> Any:
+        return round(self.seconds, 6) if self.what == "seconds" else self.invocations
+
+
+def trace_timings_payload(result: Any) -> Any:
+    """trace 由来の時間の行（準備済みならその値、無ければ今の pair の上限で trace から作る）。"""
+
+    prepared = _prepared_trace_timings(result)
+    if prepared is not None:
+        return prepared
+    from scripts.function_tracer_pcode.core.budget_policy import active_budget_policy
+
+    return json_encoding.RESULT_JSON_POLICY.prepare(
+        TraceTimingsView(result), max_bytes=active_budget_policy().prepared_payload_limit(),
+    ).value()
+
+
+def _prepared_trace_timings(result: Any) -> Any:
+    prepared = live_values.attribute(result, "prepared_semantic_payload")
+    timings = live_values.attribute(prepared, "trace_timings")
+    # 準備済みの値（出力の準備が作った `PreparedJson`）だけを読む
+    if type(timings) is not json_encoding.PreparedJson:
+        return None
+    value = timings.value()
+    return value if isinstance(value, dict) and "attempts" in value else {
+        "solver_seconds": None, "solver_invocations": None, "attempts": value,
+    }
+
+
+class _ResultDiagnosticsView:
+    """`diagnostics` の固定の形の view。
+
+    C（authority 確定後に合成する診断）: 結果の診断記録（`result.diagnostics`、boundary と
+    lane が書く C の値）を authority 後に読む。trace 由来の行は authority 前に準備した値
+    （`trace_timings`）を読み、live な trace を読み直さない（準備していない結果だけ、
+    その場で trace から作る）。判定には使わない。
+    """
+
+    __slots__ = ("_result", "_base", "_timings", "_view")
+
+    def __init__(self, result: Any) -> None:
+        self._result = result
+        # 結果の診断記録（組み込みの振る舞いの mapping。読むのは `_base_value` だけ）
+        self._base = live_values.attribute(result, "diagnostics")
+        # 準備済みならその値。無ければ trace の行の source（この walk の予算の中で辿る。
+        # 別の予算で先に準備しない）
+        self._timings = _prepared_trace_timings(result)
+        self._view = None if self._timings is not None else TraceTimingsView(result)
+
+    def _timing(self, name: str) -> Any:
+        view = self._view
+        if type(view) is TraceTimingsView:
+            return view.source(name)
+        timings = self._timings
+        return timings.get(name) if type(timings) is dict else None
+
+    def json_items(self):
+        from scripts.function_tracer_pcode.core.json_encoding import each, inline
+
+        base = self._base
+        result = self._result
+        caches_empty: Dict[str, Any] = {}
+        attempts = self._timing("attempts")
+        yield "schema", DIAGNOSTICS_SCHEMA
+        yield "timings", inline(
+            ("total_seconds", live_values.attribute(result, "total_time")),
+            ("analysis_seconds", _base_value(base, "analysis_seconds", caches_empty)),
+            ("solver_seconds", self._timing("solver_seconds")),
+            ("attempts", attempts),
+            ("stages", _base_value(base, "stages", caches_empty)),
+            ("boundary_seconds", _base_value(base, "boundary_seconds", caches_empty)),
+            ("phases", _base_value(base, "phases", ())),
+        )
+        yield "expressions", _base_value(base, "expressions", caches_empty)
+        yield "caches", inline(
+            ("callee_parameter_decompile", _base_value(base, "callee_parameter_cache", caches_empty)),
+            ("callee_analysis", _base_value(base, "callee_analysis_cache", caches_empty)),
+            ("callee_unbound_reuse", _base_value(base, "callee_unbound_reuse", caches_empty)),
+        )
         # Issue #125: typed failure（限界 / 内部エラー / 握り潰し）の記録。
         # 判定にも semantic projection にも効かない診断。
-        "failures": dict(base.get("failures") or {}),
-        "validated_once_entries": base.get("validated_once_entries"),
+        yield "failures", _base_value(base, "failures", caches_empty)
+        yield "validated_once_entries", _base_value(base, "validated_once_entries", None, falsy=True)
         # Issue #20 PR-20-B3: conditional lane が回ったか、回ったなら何で
         # decisive にならなかったか。判定には効かない観測。
-        "conditional_lane": base.get("conditional_lane"),
-        "pairs": pairwise,
-        "solver_invocations": solver_invocations,
-        "stage_path": list(getattr(result, "stage_path", ()) or ()),
-    }
+        yield "conditional_lane", _base_value(base, "conditional_lane", None, falsy=True)
+        # Issue #22 PR-22-D: 式サイズ予算の値・観測した最大値・出力準備の内訳。
+        # 判定には効かない観測（既定値の根拠と headroom の使用量を読むため）。
+        yield "expression_budget", _base_value(base, "expression_budget", None, falsy=True)
+        yield "pairs", _or_default(live_values.attribute(result, "pairwise_stats"), caches_empty)
+        yield "solver_invocations", self._timing("solver_invocations")
+        yield "stage_path", _or_default(live_values.attribute(result, "stage_path", ()), ())
+
+
+def _or_default(value: Any, default: Any) -> Any:
+    """`value or default`（真偽は `_truthy` で読む）。"""
+
+    return value if _truthy(value) else default
+
+
+def _base_value(base: Any, key: str, default: Any, *, falsy: bool = False) -> Any:
+    """結果の診断記録の `key`（旧 `(diagnostics or {}).get(key) or default`。`falsy` は偽の値もそのまま）。
+
+    読むのは組み込みの振る舞いの mapping だけ（それ以外は `TypeError`）。
+    """
+
+    if not _truthy(base):
+        return default
+    value = live_values.lookup(base, key)
+    if falsy:
+        return value
+    return _or_default(value, default)
 
 
 PHASE_TIMING_SCHEMA = "phase-timing-v1"
@@ -655,13 +867,18 @@ def unknown_reason_ids(result: Any) -> list:
         return []
     try:
         ids = set()
-        for reason in getattr(result, "unknown_reasons", None) or ():
-            reason_id = getattr(reason, "reason_id", None)
-            if reason_id is None and isinstance(reason, Mapping):
-                reason_id = reason.get("reason_id")
-            reason_id = getattr(reason_id, "value", reason_id)
-            if reason_id:
-                ids.add(str(reason_id))
+        reasons = live_values.attribute(result, "unknown_reasons")
+        if not _truthy(reasons):
+            return []
+        for reason in live_values.elements_of(reasons):
+            reason_id = _record_or_mapping_value(reason, "reason_id")
+            # enum は member の値（`value` の property を呼ばない）、それ以外は record の `value`
+            if live_values.is_enum(reason_id):
+                reason_id = live_values.enum_value(reason_id)
+            else:
+                reason_id = live_values.attribute(reason_id, "value", reason_id)
+            if _truthy(reason_id):
+                ids.add(builtin_str(reason_id))
         return sorted(ids)
     except Exception:
         return []
@@ -830,7 +1047,7 @@ class PhaseTimeline:
         try:
             return [self._snapshot_phase(phase) for phase in self.phases]
         except Exception as exc:
-            return [{"error": f"{type(exc).__name__}: {exc}"[:200]}]
+            return [{"error": exception_text(exc, 200)}]
 
     @staticmethod
     def _snapshot_phase(phase: Mapping[str, Any]) -> Dict[str, Any]:

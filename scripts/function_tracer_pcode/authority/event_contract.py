@@ -405,6 +405,24 @@ class EventContractLedger:
         for occurrence_id in committed.added_ids:
             self._published_ids.discard(occurrence_id)
 
+    def plain_limitation_description(self, description: Any) -> Any:
+        """限界の cause を作る前に、その記述（live でもよい）を限界の event の上限まで数えながら plain な値へ写す。
+
+        上限を超えれば契約の超過（`event_payload_units`）として記録して上げる（記述を作らない）。
+        """
+
+        from scripts.function_tracer_pcode.authority.canonical_units import (
+            LimitedUnits,
+            UnitLimitExceeded,
+            plain_copy,
+        )
+
+        limit = self.contract.max_limitation_event_units
+        try:
+            return plain_copy(description, LimitedUnits(limit))
+        except UnitLimitExceeded:
+            self._exceed("event_payload_units", limit, limit + 1)
+
     def defer(self, occurrence_id: str) -> None:
         """判定の前に publish すると約束した occurrence を、約束の時点で数える（超えるなら拒む）。
 
@@ -450,6 +468,22 @@ class EventContractLedger:
             if ledger is not None:
                 ledger.record_limitation(exceeded, stop=PairStopState.PAIR_TERMINAL_LIMITATION)
         raise exceeded
+
+
+#: authority の外（出力の準備・pair の gate）が **live な値を渡してよい** authority の入口と、その仕事を
+#: 抑えるもの（Issue #110 の契約）。
+#:
+#: * `"work"`: 呼ぶ側が渡す有限の `SealWork`（keyword-only・既定値なしの `work`）の中でだけ仕事をする
+#:   （各段を実行する前に数える。`test_issue110_metered_seal.py` が署名と段を固定する）。
+#: * `"event_contract"`: 作る authority の event は publication gate でこの契約が件数と大きさを抑え、
+#:   live な入力も作る前に契約の上限まで plain な値へ写して測る（上限の外は契約の超過）。
+#:
+#: 表にない authority の関数へ live な値を渡すのは、出力の準備の監査（`_live_flow_audit`）の違反。
+BOUNDED_ENTRY_POINTS = {
+    "authority.decision.canonical_result.build_canonical_result_finalization_bundle": "work",
+    "authority.decision.canonical_result.persist_canonical_result_envelope": "work",
+    "authority.decision.limitation_attribution.attribute_analysis_limitation": "event_contract",
+}
 
 
 def require_events_within_contract(
@@ -510,6 +544,7 @@ def _payload_units(intent: Any, limit: int) -> Optional[int]:
 
 
 __all__ = [
+    "BOUNDED_ENTRY_POINTS",
     "require_events_within_contract",
     "AUTHORITY_EVENT_CONTRACT",
     "AuthorityEventContract",

@@ -782,7 +782,7 @@ def _fake_equivalence_environment(monkeypatch, tmp_path, journal_path):
             self.decision_receipt = None
             self._canonical_finalization_context = None
 
-        def to_string(self, verbose=False, show_phase_usage=False):
+        def to_string(self, verbose=False, show_phase_usage=False, payload=None):
             journal_note("probe:to_string")
             return "RESULT TEXT"
 
@@ -838,6 +838,19 @@ def _fake_equivalence_environment(monkeypatch, tmp_path, journal_path):
 
     monkeypatch.setattr(module, "output_result", _record_output)
 
+    # Issue #22 PR-22-D: CLI は preimage を `build_final_result_envelope` から
+    # 受け取る（合成・封印・bounded encode）。偽の結果は結果 schema を持たない
+    # ので、builder も「`to_dict()` を呼んでその値を書く」だけの偽物にする。
+    def _fake_envelope(fake_result, *, seal=None, work=None, fallback_policy=None):
+        payload = fake_result.to_dict()
+        return SimpleNamespace(
+            payload=payload,
+            text=json.dumps(payload, sort_keys=True),
+            size_line=lambda: "fake",
+        )
+
+    monkeypatch.setattr(module, "build_final_result_envelope", _fake_envelope)
+
     args = SimpleNamespace(
         equiv=[str(binary1), str(binary2)],
         binary_ids=["B1", "B2"],
@@ -888,9 +901,10 @@ def test_result_emit_journal_starts_before_to_dict(tmp_path, monkeypatch):
         rows,
         lambda row: row["event"] == EVENT_STAGE_END and row["stage"] == "result_emit",
     )
-    # 既存の添付順（to_string -> to_dict -> JSON 書き出し）は壊さない。
-    assert start < note("probe:to_string") < note("probe:to_dict")
-    assert note("probe:to_dict") < note("probe:json_write") < end
+    # 添付はすべて result_emit の区間の中。Issue #22 PR-22-D: 人向けの text は最終 envelope の値
+    # （JSON と同じ有界な値）から作るので、to_dict（envelope）-> to_string -> JSON 書き出しの順。
+    assert start < note("probe:to_dict") < note("probe:to_string")
+    assert note("probe:to_string") < note("probe:json_write") < end
     assert any("EQUIVALENCE_RESULT_JSON_BEGIN" in content for content in written)
 
 

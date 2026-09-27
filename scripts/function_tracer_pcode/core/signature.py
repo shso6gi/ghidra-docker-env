@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any, TYPE_CHECKING, Tuple
+from typing import Optional, List, Dict, Any, Mapping, TYPE_CHECKING, Tuple
+from scripts.function_tracer_pcode.core import live_values
+from scripts.function_tracer_pcode.core import read_limits
+from scripts.function_tracer_pcode.core.json_encoding import as_dict, each, mapping_of, materialize, source_converter
 
 if TYPE_CHECKING:
     from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
@@ -442,19 +445,62 @@ def clone_parameter_descriptor(
     param: Dict[str, Any],
     *,
     include_data_type_obj: bool = True,
+    scan: Any = None,
 ) -> Dict[str, Any]:
-    """パラメータ記述子を安全に複製する。"""
+    """パラメータ記述子を安全に複製する（値は `core.live_values` の規則で読む）。
+
+    作業量を受け取らない写し: member と、写す dict / list の要素は読みの上限まで（`scan` を渡せば、
+    複数の記述子を写す呼び出し全体の和を上限にする）。
+    """
     cloned: Dict[str, Any] = {}
-    for key, value in (param or {}).items():
-        if key == "data_type_obj" and not include_data_type_obj:
+    if param is None or not live_values.as_bool(param):
+        return cloned
+    for key, value in read_limits.items_within_limit(param, scan):
+        name = live_values.str_value(key)
+        if name is live_values.NOT_PLAIN:
+            raise TypeError(f"parameter descriptor key {live_values.type_name(type(key))} is not a str")
+        if name == "data_type_obj" and not include_data_type_obj:
             continue
-        if isinstance(value, dict):
-            cloned[key] = dict(value)
-        elif isinstance(value, list):
-            cloned[key] = list(value)
-        else:
-            cloned[key] = value
+        # dict / list は（subclass も）基底型の slot で写す（旧 `dict(value)` / `list(value)`: 複製は
+        # 元の live な容器を共有しない）。それ以外は同じ値
+        copied = read_limits.copied_within_limit(value, scan)
+        cloned[name] = value if copied is live_values.NOT_PLAIN else copied
     return cloned
+
+
+@source_converter
+def parameter_descriptor_source(param: Dict[str, Any]) -> Any:
+    """`clone_parameter_descriptor(param, include_data_type_obj=False)` と同じ値の JSON source。
+
+    複製を先に作らず、walker が member を 1 つずつ写す（Issue #22 PR-22-D）。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import pairs_of
+
+    if param is None or live_values.builtin_mapping(param) is None and not live_values.as_bool(param):
+        # 旧 `(param or {})`: 偽の値は空の object
+        return pairs_of((), _parameter_value_source)
+    return pairs_of(_parameter_descriptor_pairs(param), _parameter_value_source)
+
+
+def _parameter_descriptor_pairs(param: Any):
+    """`param` の (key, 値) のうち `data_type_obj` 以外（mapping は owner の API で 1 組ずつ読む）。"""
+
+    for key, value in live_values.items_of(param):
+        if live_values.str_value(key) == "data_type_obj":
+            continue
+        yield key, value
+
+
+@source_converter
+def _parameter_value_source(value: Any) -> Any:
+    from scripts.function_tracer_pcode.core.json_encoding import as_dict, as_list, raw
+
+    if live_values.is_kind(value, dict):
+        return as_dict(value)
+    if live_values.is_kind(value, list):
+        return as_list(value)
+    return raw(value)
 
 
 def _call_zero_arg(obj: Any, method_name: str) -> Any:
@@ -504,18 +550,18 @@ class ResolvedTypeSpec:
     source: str = "heuristic"
     data_type_path: Optional[str] = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
-            "type_name": self.type_name,
-            "source": self.source,
-        }
+    def json_items(self):
+        yield "type_name", self.type_name
+        yield "source", self.source
         if self.size_bytes is not None:
-            result["size_bytes"] = self.size_bytes
+            yield "size_bytes", self.size_bytes
         if self.is_signed is not None:
-            result["is_signed"] = self.is_signed
-        if self.data_type_path:
-            result["data_type_path"] = self.data_type_path
-        return result
+            yield "is_signed", self.is_signed
+        if self.data_type_path is not None and live_values.as_bool(self.data_type_path):
+            yield "data_type_path", self.data_type_path
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
     @classmethod
     def from_dict(
@@ -825,18 +871,6 @@ def apply_type_name_to_parameter(
     return updated
 
 
-def parameters_without_runtime_objects(
-    parameters: Optional[List[Dict[str, Any]]],
-) -> Optional[List[Dict[str, Any]]]:
-    """シリアライズ可能なパラメータ一覧へ正規化する。"""
-    if parameters is None:
-        return None
-    return [
-        clone_parameter_descriptor(param, include_data_type_obj=False)
-        for param in parameters
-    ]
-
-
 @dataclass(frozen=True)
 class SignatureHypothesis:
     """関数シグネチャへ重ねる仮説的オーバーライド。"""
@@ -857,25 +891,22 @@ class SignatureHypothesis:
             or bool(self.parameter_type_overrides)
         )
 
-    def to_dict(self) -> Dict[str, Any]:
-        result = {
-            "return_type_override": self.return_type_override,
-            "parameter_type_overrides": dict(self.parameter_type_overrides),
-        }
+    def json_items(self):
+        yield "return_type_override", self.return_type_override
+        yield "parameter_type_overrides", as_dict(self.parameter_type_overrides)
         if self.resolved_return_override is not None:
-            result["resolved_return_override"] = self.resolved_return_override.to_dict()
-        if self.resolved_parameter_overrides:
-            result["resolved_parameter_overrides"] = {
-                index: spec.to_dict()
-                for index, spec in self.resolved_parameter_overrides.items()
-            }
-        if self.phase:
-            result["phase"] = self.phase
-        if self.reason:
-            result["reason"] = self.reason
-        if self.evidence:
-            result["evidence"] = dict(self.evidence)
-        return result
+            yield "resolved_return_override", self.resolved_return_override
+        if live_values.as_bool(self.resolved_parameter_overrides):
+            yield "resolved_parameter_overrides", mapping_of(self.resolved_parameter_overrides)
+        if live_values.as_bool(self.phase):
+            yield "phase", self.phase
+        if live_values.as_bool(self.reason):
+            yield "reason", self.reason
+        if live_values.as_bool(self.evidence):
+            yield "evidence", as_dict(self.evidence)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
     @classmethod
     def from_dict(
@@ -944,6 +975,39 @@ class SignatureHypothesis:
         return f"{prefix}: {payload}"
 
 
+#: 戻り値の型の表示名を決める field（書き換えたら表示名を作り直す）
+RETURN_TYPE_INPUTS = frozenset({"return_type", "return_type_obj"})
+#: 戻り値の型の表示名を置く instance の属性（dataclass の field ではない: 等しさ・repr・snapshot に出ない）
+RETURN_TYPE_DISPLAY_ATTRIBUTE = "_return_type_display"
+
+
+def record_return_type_display(record: Any, name: str, value: Any) -> None:
+    """record の field を書き、戻り値の型の表示名を **書いたとき** に 1 度だけ作る（Issue #22 PR-22-D）。
+
+    表示名は Ghidra の `DataType.getName()`（JVM の code）から作る。出力の bounded path は live な
+    object の code を呼ばないので、解析の時点（field を書いた時点）で文字列にしておき、出力は
+    その文字列だけを読む（`return_type_display_of`）。
+    """
+
+    object.__setattr__(record, name, value)
+    if name in RETURN_TYPE_INPUTS:
+        state = record.__dict__
+        display = get_data_type_display_name(state.get("return_type_obj"), state.get("return_type"))
+        object.__setattr__(record, RETURN_TYPE_DISPLAY_ATTRIBUTE, display)
+
+
+def return_type_display_of(record: Any) -> Optional[str]:
+    """書いたときに作った戻り値の型の表示名（instance の値だけを読む。無ければ `return_type`）。"""
+
+    display = live_values.instance_state(record, RETURN_TYPE_DISPLAY_ATTRIBUTE, _NO_DISPLAY)
+    if display is _NO_DISPLAY:
+        return live_values.attribute(record, "return_type")
+    return display
+
+
+_NO_DISPLAY = object()
+
+
 @dataclass
 class FunctionSignature:
     """関数シグネチャ情報"""
@@ -952,9 +1016,13 @@ class FunctionSignature:
     return_type_obj: Any = None
     parameters: Optional[List[Dict[str, Any]]] = None
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        record_return_type_display(self, name, value)
+
     def format_return_type(self) -> str:
         """戻り値の型をフォーマット"""
-        return get_data_type_display_name(self.return_type_obj, self.return_type) or "unknown"
+        name = return_type_display_of(self)
+        return name if name is not None and live_values.as_bool(name) else "unknown"
 
     def format_parameters(self) -> str:
         """引数リストをフォーマット（例: (int a, long b)）"""
@@ -979,11 +1047,15 @@ class FunctionSignature:
         """完全なシグネチャをフォーマット（例: int func(int a, long b)）"""
         return f"{self.format_return_type()} {func_name}{self.format_parameters()}"
 
+    def json_items(self):
+        yield "return_type", self.format_return_type()
+        yield "parameters", (
+            None if self.parameters is None
+            else each(self.parameters, parameter_descriptor_source)
+        )
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "return_type": self.format_return_type(),
-            "parameters": parameters_without_runtime_objects(self.parameters),
-        }
+        return materialize(self)
 
     def clone(self) -> "FunctionSignature":
         return FunctionSignature(
@@ -1061,11 +1133,35 @@ class FunctionSignature:
     @classmethod
     def from_analysis(cls, analysis: "FunctionReturnAnalysis") -> "FunctionSignature":
         """FunctionReturnAnalysisからシグネチャを抽出"""
+        parameters = live_values.attribute(analysis, "parameters")
+        # 記述子の列・各記述子の member・写す容器の要素の和を 1 つの読みの上限にする（積にしない）
+        scan = read_limits.scan_budget()
         return cls(
-            return_type=analysis.return_type,
-            return_type_obj=getattr(analysis, "return_type_obj", None),
+            return_type=live_values.attribute(analysis, "return_type"),
+            return_type_obj=live_values.attribute(analysis, "return_type_obj"),
             parameters=[
-                clone_parameter_descriptor(param, include_data_type_obj=True)
-                for param in (analysis.parameters or [])
+                clone_parameter_descriptor(param, include_data_type_obj=True, scan=scan)
+                for param in (
+                    read_limits.elements_within_limit(parameters, scan)
+                    if parameters is not None and live_values.as_bool(parameters) else ()
+                )
             ],
         )
+
+
+def format_signature_text(payload: Any, func_name: str) -> str:
+    """`FunctionSignature.format_full` と同じ text を、表現（出力の signature）から作る。"""
+
+    payload = payload or {}
+    parameters = payload.get("parameters") or ()
+    if not parameters:
+        params = "(void)"
+    else:
+        parts = []
+        for param in parameters:
+            param = param if isinstance(param, Mapping) else {}
+            dtype = param.get("data_type", "unknown") or "unknown"
+            name = param.get("name", "")
+            parts.append(f"{dtype} {name}" if name else str(dtype))
+        params = f"({', '.join(parts)})"
+    return f"{payload.get('return_type') or 'unknown'} {func_name}{params}"

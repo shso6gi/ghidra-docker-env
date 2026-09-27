@@ -244,6 +244,41 @@ class DeadlineExceeded(AnalysisLimitation):
         )
 
 
+class ExpressionSizeBudgetExceeded(AnalysisLimitation):
+    """式の大きさの予算（distinct node / case / 出力 byte）を超えて打ち切った限界。
+
+    Issue #22 PR-22-D。予算は 3 箇所で見る — 展開（expander）・solver へ渡す描画・
+    直列化（出力の準備と、解析 1 件分の表現 = snapshot / `to_dict`）— が、**reason は 1 つ**で、どこで
+    超えたかは `site`、何を超えたかは `evidence_refs` が持つ。reason を site ごとに
+    分けないのは、どこで超えても「式が大きすぎて解析を完了できなかった」という
+    同じ事実で、authority 側の扱い（`blocks_decision`・pair terminal）も同じだから。
+
+    組み立ては `core/budget_policy.raise_expression_size_budget_exceeded` 1 箇所に
+    寄せる（evidence の書式を site ごとに書かないため）。既存 cause への帰属は
+    持たない: 予算超過は常にこの reason を所有する producer が新しい cause にする。
+    """
+
+    REASON_ID = "expression_size_budget_exceeded"
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        site: str,
+        target_key: Any = (),
+        missing_semantic_fact: Any = (),
+        evidence_refs: Any = (),
+    ) -> None:
+        super().__init__(
+            self.REASON_ID,
+            detail,
+            site=site,
+            target_key=target_key,
+            missing_semantic_fact=missing_semantic_fact,
+            evidence_refs=evidence_refs,
+        )
+
+
 # ---------------------------------------------------------------------------
 # pair 単位の実行制御（Issue #106 PR-106-0）
 # ---------------------------------------------------------------------------
@@ -307,12 +342,12 @@ class PairFailureKind(Enum):
     最終 outcome そのものではない。`LIMITATION` は attribution の結果しだいで
     reason 付き UNKNOWN にも `limitation_unattributed` の ERROR にもなる —
     どちらにするかを決めるのは従来どおり authority 側で、この enum が決めるのは
-    「どの変換規則（`_HANDLING_BY_KIND` の 1 行）へ渡すか」だけ。
+    「どの変換規則（`checker/pair_execution.py` の 3 つの振り分けのそれぞれの分岐）へ渡すか」だけ。
 
     失敗の *クラス* が増えても（`FrozenExpressionError` / `ExpressionCycleError` /
     新しい `AnalysisLimitation` 派生）この enum は増えない。増えるとしたら
     「既存のどちらの変換規則にも載らない失敗」を足すときだけで、そのときは
-    consumer 側の変換表 1 箇所が対応点になる。
+    consumer 側の 3 つの振り分け（1 分岐ずつ。足し忘れは test が落とす）が対応点になる。
     """
 
     LIMITATION = "limitation"

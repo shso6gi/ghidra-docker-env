@@ -2047,13 +2047,19 @@ def test_a_limitation_event_is_measured_against_the_limitation_bound(monkeypatch
     _connector_, session, _emitted, _pending = _finished_session(
         monkeypatch, blockers=1, case_id="issue110-limitation-size", contract=contract,
     )
+    events_before = session.recorder.event_count
+    # 記述は signal を作る前に上限まで数えながら写す: 上限の外は観測そのものが契約の超過
     with production_signal_scope(session):
-        observe_analysis_limitation(
-            reason_id=ANALYSIS_BUDGET_REASON_ID, limitation_site="issue110.size",
-            target_key=("issue110-size", "t" * (16 << 10)), evidence_refs=("issue110-size",),
-        )
+        with pytest.raises(AuthorityEventContractExceeded):
+            observe_analysis_limitation(
+                reason_id=ANALYSIS_BUDGET_REASON_ID, limitation_site="issue110.size",
+                target_key=("issue110-size", "t" * (16 << 10)), evidence_refs=("issue110-size",),
+            )
     assert session.event_contract.exceeded.bound == "event_payload_units"
     assert session.event_contract.exceeded.limit == contract.max_limitation_event_units
+    # 大きい限界の cause は作られず、契約の超過の cause だけが増えた
+    assert session.recorder.event_count == events_before + 1
+    assert session.event_contract.contract_cause_published
 
 
 def test_a_truncated_stream_takes_no_new_promise_without_building_its_authority(monkeypatch):

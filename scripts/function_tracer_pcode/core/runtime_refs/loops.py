@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from scripts.function_tracer_pcode.core.json_encoding import (as_list, bounded_repr, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, attribute, is_kind, size, type_module, type_name
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
 )
@@ -40,13 +42,14 @@ class LoopVariableIdentityRef:
             self.varnode_key,
         )
 
+    def json_items(self):
+        yield "kind", "loop_variable_identity"
+        yield "role", self.role
+        yield "binder_ordinal", as_int(self.binder_ordinal)
+        yield "varnode_key", self.varnode_key
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "loop_variable_identity",
-            "role": self.role,
-            "binder_ordinal": int(self.binder_ordinal),
-            "varnode_key": self.varnode_key,
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -355,6 +358,85 @@ def _loop_expression_semantic_key(
     return None
 
 
+@source_converter
+def _loop_object_source(value: Any) -> Any:
+    """`_loop_object_to_dict` と同じ値を 1 要素ずつ作らせる source（表現を先に作らない）。
+
+    record（`json_items()` を持つ object）と sized leaf（式）は walker が辿る。それ以外の
+    object は旧実装と同じ不透明な表示になる。
+    """
+
+    if value is None or is_kind(value, (bool, int, float, str)):
+        return value
+    if is_kind(value, (tuple, list)):
+        return each(value, _loop_object_source)
+    if is_kind(value, dict):
+        return mapping_of(value, _loop_object_source, stringify_keys=True)
+    if is_json_record(value):
+        return value
+    return inline(
+        ("type", type_module(type(value)) + "." + type_name(type(value))),
+        ("unkeyable", True),
+    )
+
+
+def _int_or_zero(value: Any) -> int:
+    """`int(value or 0)` と同じ値（真偽と整数化は owner の API で読む。live な値の code を呼ばない）。"""
+
+    if type(value) is int:
+        return value
+    if value is None or not as_bool(value):
+        return 0
+    return as_int(value)
+
+
+@source_converter
+def _path_conditions_source(path_conditions: Any) -> Any:
+    """`path_condition_sets` の 1 経路（条件の列）の出力。"""
+
+    return each(path_conditions, _loop_object_source)
+
+
+@source_converter
+def _residue_case_source(case: Any) -> Any:
+    """`residue_cases` の 1 要素 `(modulus, residue, coeff, bias)` の出力（組み込みの tuple / list だけ）。"""
+
+    if (type(case) is tuple or type(case) is list):
+        return inline(
+            ("modulus", as_int(case[0])),
+            ("residue", as_int(case[1])),
+            ("coeff", as_int(case[2])),
+            ("bias", as_int(case[3])),
+        )
+    raise TypeError("a residue case is not a builtin tuple / list")
+
+
+@source_converter
+def _residue_bias_term_source(term: Any) -> Any:
+    """`residue_bias_terms` の 1 要素 `(modulus, residue, bias_expr)` の出力（組み込みの tuple / list だけ）。"""
+
+    if (type(term) is tuple or type(term) is list):
+        bias_expr = term[2]
+        return inline(
+            ("modulus", as_int(term[0])),
+            ("residue", as_int(term[1])),
+            ("bias_expr", bias_expr if is_json_record(bias_expr) else bounded_repr(bias_expr)),
+        )
+    raise TypeError("a residue bias term is not a builtin tuple / list")
+
+
+@source_converter
+def _lane_term_source(lane: Any) -> Any:
+    """`lane_terms` の 1 要素 `(offset, size)` の出力（組み込みの tuple / list だけ）。"""
+
+    if (type(lane) is tuple or type(lane) is list):
+        return inline(
+            ("byte_offset", as_int(lane[0])),
+            ("access_size", max(1, _int_or_zero(lane[1]))),
+        )
+    raise TypeError("a lane term is not a builtin tuple / list")
+
+
 def _loop_object_to_dict(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
@@ -370,11 +452,11 @@ def _loop_object_to_dict(value: Any) -> Any:
             return to_dict()
         except (AttributeError, TypeError, ValueError, RecursionError):
             return {
-                "type": f"{type(value).__module__}.{type(value).__qualname__}",
+                "type": type_module(type(value)) + "." + type_name(type(value)),
                 "unserializable": True,
             }
     return {
-        "type": f"{type(value).__module__}.{type(value).__qualname__}",
+        "type": type_module(type(value)) + "." + type_name(type(value)),
         "unkeyable": True,
     }
 
@@ -480,32 +562,27 @@ class LoopBodyEffectRef:
             bool(self.keyable),
         )
 
+    def json_items(self):
+        yield "kind", "loop_body_effect"
+        yield "effect_kind", self.kind
+        yield "source", self.source
+        yield "scope", self.scope
+        yield "address_space", _loop_object_source(self.address_space)
+        yield "location", _loop_object_source(self.location)
+        yield "value_expr", _loop_object_source(self.value_expr)
+        yield "guard_constraints", each(self.guard_constraints, _loop_object_source)
+        yield "path_condition_sets", each(
+            self.path_condition_sets,
+            _path_conditions_source,
+        )
+        yield "guard_paths_incomplete", as_bool(self.guard_paths_incomplete)
+        yield "target_ref", _loop_object_source(self.target_ref)
+        yield "order_key", self.order_key
+        yield "keyable", as_bool(self.keyable)
+        yield "unkeyable_reason", self.unkeyable_reason
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "loop_body_effect",
-            "effect_kind": self.kind,
-            "source": self.source,
-            "scope": self.scope,
-            "address_space": _loop_object_to_dict(self.address_space),
-            "location": _loop_object_to_dict(self.location),
-            "value_expr": _loop_object_to_dict(self.value_expr),
-            "guard_constraints": [
-                _loop_object_to_dict(guard)
-                for guard in self.guard_constraints
-            ],
-            "path_condition_sets": [
-                [
-                    _loop_object_to_dict(condition)
-                    for condition in path_conditions
-                ]
-                for path_conditions in self.path_condition_sets
-            ],
-            "guard_paths_incomplete": bool(self.guard_paths_incomplete),
-            "target_ref": _loop_object_to_dict(self.target_ref),
-            "order_key": self.order_key,
-            "keyable": bool(self.keyable),
-            "unkeyable_reason": self.unkeyable_reason,
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -598,30 +675,25 @@ class LoopSideEffectProfileRef:
             or any(_descriptor_requires_effect_proof(effect) for effect in context_descriptors)
         )
 
+    def json_items(self):
+        yield "kind", "loop_side_effect_profile"
+        yield "profile", self.profile
+        yield "memory_reads", as_bool(self.memory_reads)
+        yield "memory_writes", as_bool(self.memory_writes)
+        yield "calls", as_bool(self.calls)
+        yield "escapes", as_bool(self.escapes)
+        yield "conditional_guards", as_bool(self.conditional_guards)
+        yield "context_memory_writes", as_bool(self.context_memory_writes)
+        yield "context_calls", as_bool(self.context_calls)
+        yield "context_escapes", as_bool(self.context_escapes)
+        yield "context_conditional_guards", as_bool(self.context_conditional_guards)
+        yield "effect_count", as_int(self.effect_count)
+        yield "guard_count", as_int(self.guard_count)
+        yield "effect_descriptors", each(self.effect_descriptors)
+        yield "context_descriptors", each(self.context_descriptors)
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "loop_side_effect_profile",
-            "profile": self.profile,
-            "memory_reads": bool(self.memory_reads),
-            "memory_writes": bool(self.memory_writes),
-            "calls": bool(self.calls),
-            "escapes": bool(self.escapes),
-            "conditional_guards": bool(self.conditional_guards),
-            "context_memory_writes": bool(self.context_memory_writes),
-            "context_calls": bool(self.context_calls),
-            "context_escapes": bool(self.context_escapes),
-            "context_conditional_guards": bool(self.context_conditional_guards),
-            "effect_count": int(self.effect_count),
-            "guard_count": int(self.guard_count),
-            "effect_descriptors": [
-                effect.to_dict()
-                for effect in self.effect_descriptors
-            ],
-            "context_descriptors": [
-                effect.to_dict()
-                for effect in self.context_descriptors
-            ],
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -708,43 +780,33 @@ class LoopTermDescriptorRef:
             tuple((int(offset), max(1, int(size or 0))) for offset, size in self.lane_terms),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
-            "kind": "loop_term_descriptor",
-            "term_kind": self.kind,
-            "reduction_kind": self.reduction_kind,
-            "start_offset": int(self.start_offset),
-            "stride": int(self.stride),
-            "element_size": int(self.element_size),
-            "result_size": max(1, int(self.result_size or 0)),
-            "residue_cases": [
-                {
-                    "modulus": int(modulus),
-                    "residue": int(residue),
-                    "coeff": int(coeff),
-                    "bias": int(bias),
-                }
-                for modulus, residue, coeff, bias in self.residue_cases
-            ],
-            "residue_bias_terms": [
-                {
-                    "modulus": int(modulus),
-                    "residue": int(residue),
-                    "bias_expr": getattr(bias_expr, "to_dict", lambda: repr(bias_expr))(),
-                }
-                for modulus, residue, bias_expr in self.residue_bias_terms
-            ],
-            "lane_terms": [
-                {
-                    "byte_offset": int(offset),
-                    "access_size": max(1, int(size or 0)),
-                }
-                for offset, size in self.lane_terms
-            ],
-        }
+    def json_items(self):
+        yield "kind", "loop_term_descriptor"
+        yield "term_kind", self.kind
+        yield "reduction_kind", self.reduction_kind
+        yield "start_offset", as_int(self.start_offset)
+        yield "stride", as_int(self.stride)
+        yield "element_size", as_int(self.element_size)
+        yield "result_size", max(1, _int_or_zero(self.result_size))
+
+        yield "residue_cases", each(
+            self.residue_cases,
+            _residue_case_source,
+        )
+        yield "residue_bias_terms", each(
+            self.residue_bias_terms,
+            _residue_bias_term_source,
+        )
+
+        yield "lane_terms", each(
+            self.lane_terms,
+            _lane_term_source,
+        )
         if self.location_base_ref is not None:
-            result["location_base_ref"] = self.location_base_ref.to_dict()
-        return result
+            yield "location_base_ref", self.location_base_ref
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -795,18 +857,16 @@ class LoopCaseRef:
             self.source,
         )
 
+    def json_items(self):
+        yield "kind", "loop_case"
+        yield "case_kind", self.case_kind
+        yield "path_conditions", each(self.path_conditions, _loop_object_source)
+        yield "body_effect", _loop_object_source(self.body_effect)
+        yield "term_expr", _loop_object_source(self.term_expr)
+        yield "source", self.source
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "loop_case",
-            "case_kind": self.case_kind,
-            "path_conditions": [
-                _loop_object_to_dict(condition)
-                for condition in self.path_conditions
-            ],
-            "body_effect": _loop_object_to_dict(self.body_effect),
-            "term_expr": _loop_object_to_dict(self.term_expr),
-            "source": self.source,
-        }
+        return materialize(self)
 
 
 def _bias_key(value: int, result_size: int) -> Tuple[int, int]:
@@ -997,23 +1057,24 @@ class LoopSummaryRef:
     def pairwise_semantic_key(self) -> Optional[Tuple[Any, ...]]:
         return self.semantic_key()
 
+    def json_items(self):
+        yield "kind", "loop_summary"
+        yield "loop_var_unit", self.loop_var_unit
+        yield "start_expr", _loop_object_source(self.start_expr)
+        yield "limit_expr", _loop_object_source(self.limit_expr)
+        yield "step_expr", _loop_object_source(self.step_expr)
+        yield "term_descriptor", self.term_descriptor
+        yield "seed_terms", each(self.seed_terms, _loop_object_source)
+        yield "seed_term_count", None if self.seed_term_count is None else as_int(self.seed_term_count)
+        yield "witnesses", each(self.witnesses, _loop_object_source)
+        yield "side_effect_profile", self.side_effect_profile
+        yield "guard_constraints", each(self.guard_constraints, _loop_object_source)
+        yield "cases", each(self.cases)
+        yield "source", self.source
+        yield "constant_bias", as_int(self.constant_bias)
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "loop_summary",
-            "loop_var_unit": self.loop_var_unit,
-            "start_expr": _loop_object_to_dict(self.start_expr),
-            "limit_expr": _loop_object_to_dict(self.limit_expr),
-            "step_expr": _loop_object_to_dict(self.step_expr),
-            "term_descriptor": self.term_descriptor.to_dict(),
-            "seed_terms": [_loop_object_to_dict(term) for term in self.seed_terms],
-            "seed_term_count": None if self.seed_term_count is None else int(self.seed_term_count),
-            "witnesses": [_loop_object_to_dict(witness) for witness in self.witnesses],
-            "side_effect_profile": self.side_effect_profile.to_dict(),
-            "guard_constraints": [_loop_object_to_dict(guard) for guard in self.guard_constraints],
-            "cases": [case.to_dict() for case in self.cases],
-            "source": self.source,
-            "constant_bias": int(self.constant_bias),
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -1060,8 +1121,9 @@ class ComposedLoopSummaryRef:
 
     @property
     def side_effect_profile(self) -> LoopSideEffectProfileRef:
-        profile = getattr(self.current, "side_effect_profile", None)
-        return profile if isinstance(profile, LoopSideEffectProfileRef) else LoopSideEffectProfileRef()
+        # `current` の属性は owner の API で読む（`__getattr__` / package の外の property を呼ばない）
+        profile = attribute(self.current, "side_effect_profile")
+        return profile if is_kind(profile, LoopSideEffectProfileRef) else LoopSideEffectProfileRef()
 
     @property
     def guard_constraints(self) -> Tuple[Any, ...]:
@@ -1134,15 +1196,16 @@ class ComposedLoopSummaryRef:
                 return True
         return False
 
+    def json_items(self):
+        yield "kind", "composed_loop_summary"
+        yield "prior", _loop_object_source(self.prior)
+        yield "current", _loop_object_source(self.current)
+        yield "handoff_proof_key", _loop_object_source(self.handoff_proof_key)
+        yield "side_effect_profile", self.side_effect_profile
+        yield "source", self.source
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "composed_loop_summary",
-            "prior": _loop_object_to_dict(self.prior),
-            "current": _loop_object_to_dict(self.current),
-            "handoff_proof_key": _loop_object_to_dict(self.handoff_proof_key),
-            "side_effect_profile": self.side_effect_profile.to_dict(),
-            "source": self.source,
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -1178,16 +1241,17 @@ class LoopSummaryProofObligation:
             reason=reason,
         )
 
+    def json_items(self):
+        yield "kind", "loop_summary_proof_obligation"
+        yield "proof_kind", self.proof_kind
+        yield "left_summary_key", self.left_summary_key
+        yield "right_summary_key", self.right_summary_key
+        yield "relation", self.relation
+        yield "required_evidence", self.required_evidence
+        yield "reason", self.reason
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "loop_summary_proof_obligation",
-            "proof_kind": self.proof_kind,
-            "left_summary_key": self.left_summary_key,
-            "right_summary_key": self.right_summary_key,
-            "relation": self.relation,
-            "required_evidence": self.required_evidence,
-            "reason": self.reason,
-        }
+        return materialize(self)
 
 
 def _loop_summary_comparison_key(summary: Optional["LoopSummaryRef"]) -> Optional[Tuple[Any, ...]]:
@@ -1228,15 +1292,14 @@ class LoopSummaryComparisonResult:
     def blocks_shortcut(self) -> bool:
         return self.status in {"different", "incompatible"}
 
+    def json_items(self):
+        yield "kind", "loop_summary_comparison_result"
+        yield "status", self.status
+        yield "reason", self.reason
+        yield "proof_obligation", self.proof_obligation if self.proof_obligation is not None else None
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "loop_summary_comparison_result",
-            "status": self.status,
-            "reason": self.reason,
-            "proof_obligation": self.proof_obligation.to_dict()
-            if self.proof_obligation is not None
-            else None,
-        }
+        return materialize(self)
 
 
 def compare_loop_summaries(
@@ -1751,38 +1814,32 @@ class CountedLoopSummaryRef:
 
     def display_name(self) -> str:
         return (
-            f"counted_loop(step={int(self.induction_step)},"
-            f"signed={bool(self.signed_loop)},"
-            f"cases={len(self.residue_cases)})"
+            f"counted_loop(step={as_int(self.induction_step)},"
+            f"signed={as_bool(self.signed_loop)},"
+            f"cases={size(self.residue_cases)})"
         )
 
+    def json_items(self):
+        yield "kind", "counted_loop_summary"
+        yield "induction_step", as_int(self.induction_step)
+        yield "result_size", max(1, _int_or_zero(self.result_size))
+        yield "signed_loop", as_bool(self.signed_loop)
+
+        yield "residue_cases", each(
+            self.residue_cases,
+            _residue_case_source,
+        )
+        yield "residue_bias_terms", each(
+            self.residue_bias_terms,
+            _residue_bias_term_source,
+        )
+
+        yield "source", self.source
+        yield "loop_summary", self.loop_summary if self.loop_summary is not None else None
+        yield "display_name", self.display_name()
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "counted_loop_summary",
-            "induction_step": int(self.induction_step),
-            "result_size": max(1, int(self.result_size or 0)),
-            "signed_loop": bool(self.signed_loop),
-            "residue_cases": [
-                {
-                    "modulus": int(modulus),
-                    "residue": int(residue),
-                    "coeff": int(coeff),
-                    "bias": int(bias),
-                }
-                for modulus, residue, coeff, bias in self.residue_cases
-            ],
-            "residue_bias_terms": [
-                {
-                    "modulus": int(modulus),
-                    "residue": int(residue),
-                    "bias_expr": getattr(bias_expr, "to_dict", lambda: repr(bias_expr))(),
-                }
-                for modulus, residue, bias_expr in self.residue_bias_terms
-            ],
-            "source": self.source,
-            "loop_summary": self.loop_summary.to_dict() if self.loop_summary is not None else None,
-            "display_name": self.display_name(),
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -1908,22 +1965,23 @@ class StateTransitionLoopSummaryRef:
         )
 
     def display_name(self) -> str:
-        return f"state_transition_loop(state={int(self.state_size)},result={int(self.result_size)})"
+        return f"state_transition_loop(state={as_int(self.state_size)},result={as_int(self.result_size)})"
+
+    def json_items(self):
+        yield "kind", "state_transition_loop_summary"
+        yield "state_guard", _loop_object_source(self.state_guard)
+        yield "transition_expr", _loop_object_source(self.transition_expr)
+        yield "transition_cases", _loop_object_source(self.transition_cases)
+        yield "accumulator_init", _loop_object_source(self.accumulator_init)
+        yield "accumulator_delta", _loop_object_source(self.accumulator_delta)
+        yield "side_effect_profile", self.side_effect_profile
+        yield "state_size", as_int(self.state_size)
+        yield "result_size", as_int(self.result_size)
+        yield "source", self.source
+        yield "display_name", self.display_name()
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "state_transition_loop_summary",
-            "state_guard": _loop_object_to_dict(self.state_guard),
-            "transition_expr": _loop_object_to_dict(self.transition_expr),
-            "transition_cases": _loop_object_to_dict(self.transition_cases),
-            "accumulator_init": _loop_object_to_dict(self.accumulator_init),
-            "accumulator_delta": _loop_object_to_dict(self.accumulator_delta),
-            "side_effect_profile": self.side_effect_profile.to_dict(),
-            "state_size": int(self.state_size),
-            "result_size": int(self.result_size),
-            "source": self.source,
-            "display_name": self.display_name(),
-        }
+        return materialize(self)
 
 
 @dataclass(frozen=True)
@@ -2030,26 +2088,27 @@ class CountedStateTransitionLoopSummaryRef:
         )
 
     def display_name(self) -> str:
-        return f"counted_state_transition(state={int(self.state_size)},result={int(self.result_size)})"
+        return f"counted_state_transition(state={as_int(self.state_size)},result={as_int(self.result_size)})"
+
+    def json_items(self):
+        yield "kind", "counted_state_transition_loop_summary"
+        yield "initial_state", _loop_object_source(self.initial_state)
+        yield "start_expr", _loop_object_source(self.start_expr)
+        yield "limit_expr", _loop_object_source(self.limit_expr)
+        yield "step_expr", _loop_object_source(self.step_expr)
+        yield "transition_expr", _loop_object_source(self.transition_expr)
+        yield "transition_cases", _loop_object_source(self.transition_cases)
+        yield "side_effect_profile", self.side_effect_profile
+        yield "guard_constraints", _loop_object_source(self.guard_constraints)
+        yield "state_size", as_int(self.state_size)
+        yield "result_size", as_int(self.result_size)
+        yield "signed_loop", as_bool(self.signed_loop)
+        yield "handoff_proof_key", _loop_object_source(self.handoff_proof_key)
+        yield "source", self.source
+        yield "display_name", self.display_name()
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "counted_state_transition_loop_summary",
-            "initial_state": _loop_object_to_dict(self.initial_state),
-            "start_expr": _loop_object_to_dict(self.start_expr),
-            "limit_expr": _loop_object_to_dict(self.limit_expr),
-            "step_expr": _loop_object_to_dict(self.step_expr),
-            "transition_expr": _loop_object_to_dict(self.transition_expr),
-            "transition_cases": _loop_object_to_dict(self.transition_cases),
-            "side_effect_profile": self.side_effect_profile.to_dict(),
-            "guard_constraints": _loop_object_to_dict(self.guard_constraints),
-            "state_size": int(self.state_size),
-            "result_size": int(self.result_size),
-            "signed_loop": bool(self.signed_loop),
-            "handoff_proof_key": _loop_object_to_dict(self.handoff_proof_key),
-            "source": self.source,
-            "display_name": self.display_name(),
-        }
+        return materialize(self)
 
 
 # Sibling modules reference each other at call time; import them last to avoid cycles.

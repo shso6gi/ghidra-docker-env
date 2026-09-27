@@ -6,6 +6,20 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from scripts.function_tracer_pcode.core.live_values import (
+    NOT_PLAIN,
+    as_bool,
+    as_int,
+    attribute,
+    elements_of,
+    str_value,
+    type_module,
+    type_name,
+)
+from scripts.function_tracer_pcode.core.read_limits import elements_within_limit, scan_budget
+from scripts.function_tracer_pcode.core.json_encoding import (
+    as_list, builtin_str, inline, is_json_record, materialize, raw,
+)
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
@@ -36,21 +50,43 @@ class DeferredCallRef:
         )
 
     def display_name(self) -> str:
-        target_name = self.target_ref.display_name() if self.target_ref is not None else "unknown"
-        if self.pcode_op_ref is not None and self.pcode_op_ref.address_offset is not None:
-            return f"{target_name}@0x{int(self.pcode_op_ref.address_offset):x}"
+        # field は owner の API / 型を確かめた package の method で読む（live な値の code を呼ばない）
+        target = self.target_ref
+        target_name = _call_target_display_name(target) if target is not None else "unknown"
+        op = self.pcode_op_ref
+        if op is not None:
+            offset = op.address_offset if type(op) is PcodeOpRef else attribute(op, "address_offset")
+            if offset is not None:
+                return f"{builtin_str(target_name)}@0x{as_int(offset):x}"
         return target_name
 
+    def json_items(self):
+        yield "kind", "deferred_call_site"
+        yield "caller_program_id", self.caller_program_id
+        yield "caller_entry_offset", self.caller_entry_offset
+        yield "pcode_op_ref", self.pcode_op_ref if self.pcode_op_ref is not None else None
+        yield "target_ref", self.target_ref if self.target_ref is not None else None
+        yield "sequence", self.sequence
+        yield "display_name", self.display_name()
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "kind": "deferred_call_site",
-            "caller_program_id": self.caller_program_id,
-            "caller_entry_offset": self.caller_entry_offset,
-            "pcode_op_ref": self.pcode_op_ref.to_dict() if self.pcode_op_ref is not None else None,
-            "target_ref": self.target_ref.to_dict() if self.target_ref is not None else None,
-            "sequence": self.sequence,
-            "display_name": self.display_name(),
-        }
+        return materialize(self)
+
+
+def _call_target_display_name(target: Any) -> Any:
+    """`target.display_name()`（`__post_init__` が正規化した `CallTargetRef` だけ。それ以外は `TypeError`）。"""
+
+    if type(target) is CallTargetRef:
+        return target.display_name()
+    raise TypeError(f"{type_name(type(target))} is not a CallTargetRef")
+
+
+def _deferred_call_display_name(ref: Any) -> Any:
+    """`ref.display_name()`（`DeferredCallRef` だけ。それ以外は `TypeError`。live な値の method を呼ばない）。"""
+
+    if type(ref) is DeferredCallRef:
+        return ref.display_name()
+    raise TypeError(f"{type_name(type(ref))} is not a DeferredCallRef")
 
 
 def _runtime_ref_stable_key_or_repr(value: Any) -> Optional[Tuple[Any, ...]]:
@@ -65,6 +101,16 @@ def _runtime_ref_stable_key_or_repr(value: Any) -> Optional[Tuple[Any, ...]]:
         if key is not None:
             return ("stable", key)
     return ("repr", type(value).__module__, type(value).__qualname__, repr(value))
+
+
+def _runtime_ref_origin_source(value: Any) -> Tuple[Any, ...]:
+    """出力の `origin_ref`（record でない origin の型だけ。identity・`repr` を bounded path で作らない）。
+
+    origin の identity（`stable_key` / `repr`）は `UnknownValueRef.stable_key` の側（#194）が持つ。
+    """
+
+    kind = type(value)
+    return ("ref", type_module(kind), type_name(kind))
 
 
 @dataclass(frozen=True)
@@ -82,9 +128,6 @@ class UnknownValueRef:
     def __post_init__(self) -> None:
         normalized_target = coerce_call_target_ref(self.target_ref)
         object.__setattr__(self, "target_ref", normalized_target)
-        deferred_call_ref = getattr(self, "deferred_call_ref", None)
-        if isinstance(deferred_call_ref, DeferredCallRef):
-            object.__setattr__(self, "deferred_call_ref", deferred_call_ref)
 
     @classmethod
     def deferred_call(
@@ -96,14 +139,17 @@ class UnknownValueRef:
         sequence: Optional[int] = None,
         deferred_key: Optional[Tuple[Any, ...]] = None,
     ) -> "UnknownValueRef":
-        normalized = coerce_call_target_ref(target_ref) or CallTargetRef.unknown()
+        # `coerce_call_target_ref` は `CallTargetRef`（真偽を上書きしない record）か `None` を返す
+        normalized = coerce_call_target_ref(target_ref)
+        if normalized is None:
+            normalized = CallTargetRef.unknown()
         normalized_ref = deferred_call_ref
         if normalized_ref is None:
             normalized_ref = DeferredCallRef(
                 target_ref=normalized,
                 sequence=sequence,
             )
-        display_hint = placeholder_name or normalized_ref.display_name()
+        display_hint = placeholder_name or _deferred_call_display_name(normalized_ref)
         return cls(
             kind="deferred_call",
             reason="call_out_of_scope",
@@ -204,34 +250,40 @@ class UnknownValueRef:
         return key + (("diagnostic_origin", _runtime_ref_stable_key_or_repr(self.origin_ref)),)
 
     def display_name(self) -> str:
-        if self.display_hint:
-            return self.display_hint
+        # field の真偽は owner の API、参照先の名前は型を確かめた package の method で読む
+        hint = self.display_hint
+        if as_bool(hint):
+            return hint
+        deferred = self.deferred_call_ref
+        if deferred is not None:
+            return _deferred_call_display_name(deferred)
+        target = self.target_ref
+        if target is not None:
+            return _call_target_display_name(target)
+        reason = self.reason
+        return reason if as_bool(reason) else "unknown"
+
+    def json_items(self):
+        yield "kind", self.kind
+        yield "display_name", self.display_name()
+        if self.reason is not None:
+            yield "reason", self.reason
         if self.deferred_call_ref is not None:
-            return self.deferred_call_ref.display_name()
+            yield "deferred_call_ref", self.deferred_call_ref
         if self.target_ref is not None:
-            return self.target_ref.display_name()
-        return self.reason or "unknown"
+            yield "target_ref", self.target_ref
+        if self.origin_kind is not None:
+            yield "origin_kind", self.origin_kind
+        if self.origin_ref is not None:
+            if is_json_record(self.origin_ref):
+                yield "origin_ref", self.origin_ref
+            else:
+                # 固定個数の要素から成る identity（stable key か、型と有界な repr）。出力の側は
+                # live な値の `repr` を呼ばない（identity の側 `stable_key` は旧実装のまま）
+                yield "origin_ref", raw(_runtime_ref_origin_source(self.origin_ref))
 
     def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
-            "kind": self.kind,
-            "display_name": self.display_name(),
-        }
-        if self.reason is not None:
-            result["reason"] = self.reason
-        if self.deferred_call_ref is not None:
-            result["deferred_call_ref"] = self.deferred_call_ref.to_dict()
-        if self.target_ref is not None:
-            result["target_ref"] = self.target_ref.to_dict()
-        if self.origin_kind is not None:
-            result["origin_kind"] = self.origin_kind
-        if self.origin_ref is not None:
-            to_dict = getattr(self.origin_ref, "to_dict", None)
-            if callable(to_dict):
-                result["origin_ref"] = to_dict()
-            else:
-                result["origin_ref"] = _runtime_ref_stable_key_or_repr(self.origin_ref)
-        return result
+        return materialize(self)
 
 
 # ---------------------------------------------------------------------------
@@ -270,12 +322,16 @@ _CANONICAL_BUDGET_MAX_DEPTH = 12
 
 
 def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
-    """決定的な JSON 化。
+    """決定的な JSON 化（producer 時点の identity: `stable_key` / `event_id`）。
 
     ``hash()``・オブジェクトアドレス・既定 ``repr`` には依存しない。表現できない
     object は型名だけの不透明値へ落とす（同一性を持ち込まない）。``stable_key`` が
     自分と同種の object を返し続ける実装（テスト用 Mock など）でも止まるよう、
     深さで打ち切る。
+
+    Issue #22 PR-22-D: identity の構築（owner は #194）で、bounded path ではない。規則を
+    変えない。`ExpansionBudgetTruncation` は構築のときにこの値を 1 度だけ作り、出力はその写し
+    （組み込みの値だけの値）を読むだけ（bounded path で identity を組み立てない）。
     """
 
     if value is None or isinstance(value, (bool, int, str)):
@@ -354,6 +410,14 @@ class ExpansionBudgetTruncation:
             "referenced_event_ids",
             tuple(sorted({str(item) for item in (self.referenced_event_ids or ())})),
         )
+        # identity（owner #194 の規則 `_canonical_budget_value`）は構築のときに 1 度だけ作る。
+        # 出力（`json_items`）はこの写し（組み込みの値だけの値）を読むだけで、bounded path で
+        # identity を組み立てない（Issue #22 PR-22-D）
+        object.__setattr__(self, "_owner_scope_value", _canonical_budget_value(self.owner_scope_key))
+        object.__setattr__(self, "_callee_scope_value", _canonical_budget_value(self.callee_scope_key))
+        object.__setattr__(self, "_event_id_cache", hashlib.sha256(
+            _canonical_budget_json(self.stable_key()).encode("utf-8")
+        ).hexdigest())
 
     def stable_key(self) -> Tuple[Any, ...]:
         """発生事実キー。``event_id`` と参照先 event の内容は含めない。"""
@@ -362,25 +426,18 @@ class ExpansionBudgetTruncation:
             _EXPANSION_BUDGET_TRUNCATION_KEY_VERSION,
             self.kind,
             self.surface,
-            _canonical_budget_value(self.owner_scope_key),
+            self._owner_scope_value,
             self.label,
             _canonical_budget_value(self.pcode_op_ref),
             self.dedup,
             self.paths,
             self.conditions,
-            _canonical_budget_value(self.callee_scope_key),
+            self._callee_scope_value,
         )
 
     @property
     def event_id(self) -> str:
-        cached = getattr(self, "_event_id_cache", None)
-        if cached is not None:
-            return cached
-        digest = hashlib.sha256(
-            _canonical_budget_json(self.stable_key()).encode("utf-8")
-        ).hexdigest()
-        object.__setattr__(self, "_event_id_cache", digest)
-        return digest
+        return self._event_id_cache
 
     def with_binding(
         self,
@@ -402,41 +459,46 @@ class ExpansionBudgetTruncation:
             return self
         return replace(self, surface=bound_surface, owner_scope_key=bound_owner)
 
-    def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
-            "event_id": self.event_id,
-            "kind": self.kind,
-        }
+    def json_items(self):
+        yield "event_id", self.event_id
+        yield "kind", self.kind
         if self.surface is not None:
-            result["surface"] = self.surface
+            yield "surface", self.surface
         if self.owner_scope_key is not None:
-            result["owner_scope_key"] = _canonical_budget_value(self.owner_scope_key)
+            # 構築のときの identity の写し（組み込みの値だけ。walker が要素ごとに数える）
+            yield "owner_scope_key", self._owner_scope_value
         if self.label is not None:
-            result["label"] = self.label
+            yield "label", self.label
         if self.pcode_op_ref is not None:
-            result["pcode_op_ref"] = self.pcode_op_ref.to_dict()
-        if self.dedup is not None:
-            result["dedup"] = {
-                "candidate_count": self.dedup[0],
-                "kept_count": self.dedup[1],
-                "limit": self.dedup[2],
-            }
-        if self.paths is not None:
-            result["paths"] = {
-                "valid_path_count": self.paths[0],
-                "kept_path_count": self.paths[1],
-                "limit_paths": self.paths[2],
-            }
-        if self.conditions is not None:
-            result["conditions"] = {
-                "dropped_path_count": self.conditions[0],
-                "max_conditions": self.conditions[1],
-            }
+            yield "pcode_op_ref", self.pcode_op_ref
+        # 件数の欄は `__post_init__` が組み込みの tuple に正規化済み（型を確かめてから添字で読む）
+        dedup = self.dedup
+        if type(dedup) is tuple:
+            yield "dedup", inline(
+                ("candidate_count", dedup[0]),
+                ("kept_count", dedup[1]),
+                ("limit", dedup[2]),
+            )
+        paths = self.paths
+        if type(paths) is tuple:
+            yield "paths", inline(
+                ("valid_path_count", paths[0]),
+                ("kept_path_count", paths[1]),
+                ("limit_paths", paths[2]),
+            )
+        conditions = self.conditions
+        if type(conditions) is tuple:
+            yield "conditions", inline(
+                ("dropped_path_count", conditions[0]),
+                ("max_conditions", conditions[1]),
+            )
         if self.callee_scope_key is not None:
-            result["callee_scope_key"] = _canonical_budget_value(self.callee_scope_key)
-        if self.referenced_event_ids:
-            result["referenced_event_ids"] = list(self.referenced_event_ids)
-        return result
+            yield "callee_scope_key", self._callee_scope_value
+        if as_bool(self.referenced_event_ids):
+            yield "referenced_event_ids", as_list(self.referenced_event_ids)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return materialize(self)
 
 
 def normalize_expansion_budget_truncations(
@@ -448,21 +510,40 @@ def normalize_expansion_budget_truncations(
     するため）。
     """
 
+    # record の値は owner の規則で読む（event id は構築のときに作った文字列、参照 ID は文字列の列）
     merged: Dict[str, ExpansionBudgetTruncation] = {}
-    for item in items or ():
+    references: Dict[str, Tuple[str, ...]] = {}
+    # 記録と参照 ID の和は owner の固定の上限まで（作業量を受け取らない正規化。超えれば登録済みの限界）
+    scan = scan_budget()
+    for item in (() if items is None else elements_within_limit(items, scan)):
         if item is None:
             continue
-        event_id = item.event_id
+        if type(item) is not ExpansionBudgetTruncation:
+            raise TypeError("expansion budget truncations are ExpansionBudgetTruncation only")
+        event_id = _plain_event_id(item._event_id_cache)
+        referenced = tuple(
+            _plain_event_id(ref) for ref in elements_within_limit(item.referenced_event_ids, scan)
+        )
         current = merged.get(event_id)
         if current is None:
             merged[event_id] = item
+            references[event_id] = referenced
             continue
-        union = tuple(sorted(
-            set(current.referenced_event_ids) | set(item.referenced_event_ids)
-        ))
-        if union != current.referenced_event_ids:
+        known = references[event_id]
+        union = tuple(sorted(set(known) | set(referenced)))
+        if union != known:
             merged[event_id] = replace(current, referenced_event_ids=union)
-    return tuple(merged[event_id] for event_id in sorted(merged))
+            references[event_id] = union
+    return tuple(merged[event_id] for event_id in sorted(references))
+
+
+def _plain_event_id(value: Any) -> str:
+    """event id（組み込みの `str` の値。それ以外は `TypeError`）。"""
+
+    text = str_value(value)
+    if text is NOT_PLAIN:
+        raise TypeError("an expansion budget event id is a str")
+    return text
 
 
 def merge_expansion_budget_truncations(
@@ -472,7 +553,10 @@ def merge_expansion_budget_truncations(
 
     combined: List[ExpansionBudgetTruncation] = []
     for group in groups:
-        combined.extend(item for item in (group or ()) if item is not None)
+        if group is None:
+            continue
+        # 記録源は組み込みの列（owner の API で要素を読む。live な値の `__iter__` / `__bool__` を呼ばない）
+        combined.extend(item for item in elements_within_limit(group) if item is not None)
     return normalize_expansion_budget_truncations(combined)
 
 

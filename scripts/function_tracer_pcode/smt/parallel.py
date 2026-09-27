@@ -8,13 +8,14 @@ import inspect
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import List, Optional, Dict, Any, Type
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from scripts.function_tracer_pcode.core.stage_journal import (
     journal_counter,
     journal_stage_end,
     journal_stage_start,
 )
+from scripts.function_tracer_pcode.core.json_encoding import each, materialize
 from scripts.function_tracer_pcode.smt.interface import SMTSolver, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 
@@ -137,9 +138,14 @@ class ParallelResult:
     results: List[SolverResult]
     first_definitive: Optional[SolverResult] = None  # 最初に確定した結果
     is_equivalent: Optional[bool] = None
+    #: TIMEOUT の行があるか（作ったときに 1 度だけ数える事実。`EquivalenceResult.is_timeout` が
+    #: 行を辿り直さずに読む。結果 JSON の schema・比較には入れない）。作った後に `results` へ行を
+    #: 足さない（足すなら新しい `ParallelResult` を作る: この事実が行と食い違う）
+    timed_out: bool = field(default=False, init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         """手動構築時も SAT/UNSAT から代表結果を補完する。"""
+        self.timed_out = any(result.status == SolverStatus.TIMEOUT for result in self.results)
         if self.first_definitive is None:
             for result in self.results:
                 if result.status in (SolverStatus.SAT, SolverStatus.UNSAT):
@@ -156,12 +162,15 @@ class ParallelResult:
                 return r.model
         return None
     
+    def json_items(self):
+        """結果 JSON での表現（**唯一の schema**）。solver 行は 1 件ずつ辿る。"""
+
+        yield "is_equivalent", self.is_equivalent
+        yield "first_definitive", self.first_definitive
+        yield "all_results", each(self.results)
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "is_equivalent": self.is_equivalent,
-            "first_definitive": self.first_definitive.to_dict() if self.first_definitive else None,
-            "all_results": [r.to_dict() for r in self.results],
-        }
+        return materialize(self)
 
 
 class CancellationToken:

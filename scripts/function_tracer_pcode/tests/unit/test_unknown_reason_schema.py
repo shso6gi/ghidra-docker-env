@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import hashlib
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -776,9 +777,10 @@ def test_equivalence_result_serializes_completed_recovery_proof_evidence():
         completed_recovery_proof_evidence=[{"side": "function1", "evidence": evidence}],
     )
 
-    assert result.to_dict()["completed_recovery_proof_evidence"] == [
-        {"side": "function1", "evidence": evidence}
-    ]
+    # 結果 JSON は canonical な JSON 値（配列は list）
+    assert result.to_dict()["completed_recovery_proof_evidence"] == json.loads(
+        json.dumps([{"side": "function1", "evidence": evidence}])
+    )
 
 
 class _FakeCase:

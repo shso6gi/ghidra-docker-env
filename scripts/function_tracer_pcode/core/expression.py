@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """式の表現クラス"""
 import copy
+import weakref
 from enum import Enum, auto
 from typing import List, NamedTuple, Optional, Any, Dict, Set, Mapping
-from dataclasses import is_dataclass, fields
 
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     SemanticLifecycle,
@@ -11,6 +11,27 @@ from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     state_of,
 )
 from scripts.function_tracer_pcode.core.storage import StorageInfo
+from scripts.function_tracer_pcode.core.render_output import utf8_length
+from scripts.function_tracer_pcode.core import json_encoding
+from scripts.function_tracer_pcode.core.json_encoding import JsonEncodingPolicy, source_converter
+from scripts.function_tracer_pcode.core.live_values import (
+    NOT_PLAIN,
+    as_bool,
+    as_int,
+    builtin_mapping,
+    builtin_sequence,
+    dataclass_field_names,
+    elements_of,
+    enum_name,
+    field_value,
+    is_kind,
+    items_of,
+    json_scalar,
+    size,
+    str_value,
+    type_module,
+    type_name,
+)
 from scripts.function_tracer_pcode.core.render_python import (
     expression_to_string,
     get_python_operator,
@@ -732,98 +753,234 @@ class Expression:
         return get_smt_operator(operator)
     
     def to_dict(self) -> Dict[str, Any]:
+        # Issue #22 PR-22-D: この表現は共有部分式を **親ごとに展開した木** なので、
+        # 共有 DAG では distinct node が少なくても指数的な大きさになり得る。木は
+        # walker（`core/json_encoding`）の sized leaf として、DAG のまま大きさを
+        # 求めて予算と比べてから作る。解析 1 件分の表現を作っている最中なら
+        # その作業量（`SerializationWork`）へ合流し、単独ならこの 1 本だけの作業量。
+        from scripts.function_tracer_pcode.core.budget_policy import (
+            active_serialization_work,
+            budget_scope_is_active,
+            serialization_scope,
+        )
+        from scripts.function_tracer_pcode.core.json_encoding import active_walk_work
+
+        walk_work = active_walk_work()
+        if walk_work is not None:
+            # walk の中（record の `json_items` など）: 木はその walk の作業量へ数えて作る
+            return walk_work.tree(self, build=True)[0]
+        work = active_serialization_work()
+        if work is not None:
+            return work.tree(self, build=True)[0]
+        if not budget_scope_is_active():
+            return self._to_dict(set())
+        with serialization_scope(
+            site=LEGACY_TREE_SERIALIZATION_SITE, target_parts=("legacy_tree",),
+        ) as work:
+            return work.tree(self, build=True)[0]
+
+    # -- walker の sized leaf（`core/json_encoding`）------------------------------
+
+    def __json_tree__(self) -> Dict[str, Any]:
+        """木表現を作る（大きさは呼ぶ側が `__json_tree_bytes__` で確かめ済み）。"""
+
         return self._to_dict(set())
+
+    def __json_tree_bytes__(self, policy: Any, remaining: Optional[int], work: Any) -> Optional[int]:
+        """木表現の byte 数を **作らずに** 求める（`remaining` を超えたら `remaining + 1`）。
+
+        返すのは byte だけ。見積もりの中で辿る runtime ref の作業量は `work`（呼ぶ側の作業量の
+        owner）へ distinct な ref ごとに 1 回数える（木の中の出現の数だけ byte に足さない）。
+        """
+
+        try:
+            return estimate_legacy_dict_bytes(self, policy=policy, max_bytes=remaining, work=work)
+        except (TypeError, ValueError):
+            return None
+
+    def __json_tree_metered__(self, policy: Any, work: Any) -> Dict[str, Any]:
+        """木表現を、node を 1 つ作る **前** にその node の byte を `work` へ数えながら作る。
+
+        DAG のまま見積もれない形（閉路）でだけ使う。閉路は経路ごとに `cycle_ref` へ
+        置き換わるので、数える量は実際に作る木の byte と同じ。`work`（owner の予算。
+        `charge` / `remaining` を持つ）が予算超過で例外を上げた時点で、残りの木を作らない。
+        callable は受けない（数える相手の object を受ける）。
+        """
+
+        meters = _TREE_BUILD_METERS
+        meters.append((policy, work))
+        try:
+            return self._to_dict(set())
+        finally:
+            meters.pop()
+
+    def __json_identity__(self) -> str:
+        """証拠の digest に流す identity（DAG のまま求める構造 digest）。"""
+
+        from scripts.function_tracer_pcode.core.structural import structural_identity_digest
+
+        return str(structural_identity_digest(self))
 
     def _to_dict(self, active: Set[int]) -> Dict[str, Any]:
         node_id = id(self)
         if node_id in active:
+            key = self.structural_key(budget=512)
+            if _TREE_BUILD_METERS:
+                # 数えながら作る: cycle_ref の表現も作りながら数える
+                policy, work = _TREE_BUILD_METERS[-1]
+                # 固定の形（型名と 1 桁）の object 1 つ: 型名の長さの上限で測る
+                type_text = enum_name(self.expr_type)
+                work.charge(JsonEncodingPolicy.measure(
+                    policy, {"type": type_text, "cycle_ref": 0}, max_bytes=_CYCLE_REF_SHAPE_BYTES, size_only=True,
+                ) - 1)
+                return {
+                    "type": type_text,
+                    "cycle_ref": JsonEncodingPolicy.materialize(policy, runtime_ref_source(key), budget=work),
+                }
             return {
-                "type": self.expr_type.name,
-                "cycle_ref": self._serialize_runtime_ref(
-                    self.structural_key(budget=512)
-                ),
+                "type": enum_name(self.expr_type),
+                "cycle_ref": self._serialize_runtime_ref(key),
             }
+        if _TREE_BUILD_METERS:
+            policy, work = _TREE_BUILD_METERS[-1]
+            # node 1 つ分（runtime ref を含む）を、数える相手の残りの中で測る
+            work.charge(_node_local_bytes(self, policy, max_bytes=work.remaining(), work=work))
         active.add(node_id)
         try:
             return self._to_dict_active(active)
         finally:
             active.remove(node_id)
 
-    def _to_dict_active(self, active: Set[int]) -> Dict[str, Any]:
-        result: Dict[str, Any] = {"type": self.expr_type.name}
-        if self.value is not None:
-            if self.expr_type == ExpressionType.PHI:
+    def _to_dict_active(
+        self, active: Optional[Set[int]], collect: Optional[List[Any]] = None,
+    ) -> Dict[str, Any]:
+        """木表現 1 node 分の dict。**schema の唯一の定義**。
+
+        `collect` が `None` なら子を再帰的に描く（実際の直列化）。list を渡すと
+        子を描かずにその list へ積み、代わりに placeholder `0` を置く — 大きさの
+        見積り（`estimate_legacy_dict_bytes`）が node 1 つ分だけを測るため。
+        同じ関数を通すので、field を足しても見積りと実出力が食い違わない。
+
+        子を描く分岐を helper / lambda へ切り出さないのは、1 段あたりの Python
+        frame を増やさないため（この表現は再帰なので、frame が増えると扱える
+        深さがそのまま縮む）。
+        """
+
+        # field は live な値: 型を確かめてから読む（`core.live_values` の規則。式の子は
+        # `type(x) is Expression` を確かめてから自分の method を呼ぶ）
+        expr_type = self.expr_type
+        if type(expr_type) is ExpressionType:
+            result: Dict[str, Any] = {"type": expr_type._name_}
+        else:
+            result = {"type": enum_name(expr_type)}
+        node_value = self.value
+        if node_value is not None:
+            if expr_type is ExpressionType.PHI:
                 branches = []
-                for branch in self.value:
-                    if not isinstance(branch, (tuple, list)) or len(branch) != 2:
+                for branch in elements_of(node_value):
+                    if not builtin_sequence(branch) or size(branch) != 2:
                         raise TypeError("PHI branch must be a condition/value pair")
-                    condition, value = branch
-                    if not isinstance(value, Expression):
+                    condition, value = elements_of(branch)
+                    if type(value) is not Expression:
                         raise TypeError("PHI branch value must be an Expression")
                     condition_payload = None
                     if condition is not None:
                         from scripts.function_tracer_pcode.core.condition import Condition
 
-                        if not isinstance(condition, Condition):
+                        if type(condition) is not Condition:
                             raise TypeError("PHI branch condition must be a Condition")
+                        condition_expression = condition.expression
+                        if type(condition_expression) is not Expression:
+                            raise TypeError("PHI branch condition must hold an Expression")
+                        if collect is None:
+                            condition_value = condition_expression._to_dict(active)
+                        else:
+                            collect.append(condition_expression)
+                            condition_value = 0
                         condition_payload = {
-                            "expression": condition.expression._to_dict(active),
-                            "negated": bool(condition.negated),
+                            "expression": condition_value,
+                            "negated": as_bool(condition.negated),
                         }
+                    if collect is None:
+                        branch_value = value._to_dict(active)
+                    else:
+                        collect.append(value)
+                        branch_value = 0
                     branches.append({
                         "condition": condition_payload,
-                        "value": value._to_dict(active),
+                        "value": branch_value,
                     })
                 result["value"] = branches
             else:
-                result["value"] = self.value
-        if self.operator:
-            result["operator"] = self.operator
-        if self.name:
-            result["name"] = self.name
-        if self.data_type:
-            result["data_type"] = self.data_type
-        if self.size:
-            result["size"] = self.size
-        if self.operands:
-            result["operands"] = [op._to_dict(active) for op in self.operands]
-        if self.storage_info:
-            result["storage_info"] = self.storage_info.to_dict()
+                result["value"] = node_value
+        # `if self.x:`（旧）の真偽: 文字列・整数は組み込みの値のまま、それ以外は `live_values.as_bool`
+        operator = self.operator
+        if operator is not None and (operator if type(operator) is str else as_bool(operator)):
+            result["operator"] = operator
+        name = self.name
+        if name is not None and (name if type(name) is str else as_bool(name)):
+            result["name"] = name
+        data_type = self.data_type
+        if data_type is not None and (data_type if type(data_type) is str else as_bool(data_type)):
+            result["data_type"] = data_type
+        node_size = self.size
+        if node_size is not None and (node_size if type(node_size) is int else as_bool(node_size)):
+            result["size"] = node_size
+        operands = self.operands
+        if operands is not None and (operands if (type(operands) is list or type(operands) is tuple) else as_bool(operands)):
+            if collect is None:
+                rendered = []
+                for op in elements_of(operands):
+                    if type(op) is not Expression:
+                        raise TypeError("Expression operands must be Expressions")
+                    rendered.append(op._to_dict(active))
+                result["operands"] = rendered
+            else:
+                collect.extend(elements_of(operands))
+                result["operands"] = [0] * size(operands)
+        storage_info = self.storage_info
+        if storage_info is not None:
+            if type(storage_info) is not StorageInfo:
+                raise TypeError("Expression storage_info must be a StorageInfo")
+            result["storage_info"] = storage_info.to_dict()
         if self.read_order_key is not None:
             result["read_order_key"] = self.read_order_key
         if self.runtime_ref is not None:
-            result["runtime_ref"] = self._serialize_runtime_ref(self.runtime_ref)
-        if self.opcode is not None:
-            result["opcode"] = int(self.opcode)
+            if collect is None:
+                result["runtime_ref"] = self._serialize_runtime_ref(self.runtime_ref)
+            else:
+                # 見積り: runtime ref は子と同じく node の外で数える（node の dict に
+                # ref の表現を作らない）
+                collect.append(_RuntimeRefChild(self.runtime_ref))
+                result["runtime_ref"] = 0
+        opcode = self.opcode
+        if opcode is not None:
+            if type(opcode) is int:
+                result["opcode"] = opcode
+            else:
+                # `int(opcode)`（旧）: scalar の subclass・mixin の enum は基底型の値
+                base = json_scalar(opcode)
+                result["opcode"] = as_int(opcode if base is NOT_PLAIN else base)
         return result
 
     def _serialize_runtime_ref(self, value: Any) -> Any:
-        if value is None or isinstance(value, (bool, int, float, str)):
-            return value
-        if isinstance(value, tuple):
-            return [self._serialize_runtime_ref(item) for item in value]
-        if isinstance(value, list):
-            return [self._serialize_runtime_ref(item) for item in value]
-        if isinstance(value, dict):
-            return {
-                str(key): self._serialize_runtime_ref(item)
-                for key, item in value.items()
-            }
-        to_dict = getattr(value, "to_dict", None)
-        if callable(to_dict):
-            try:
-                return to_dict()
-            except Exception:
-                pass
-        if is_dataclass(value):
-            return {
-                field.name: self._serialize_runtime_ref(getattr(value, field.name))
-                for field in fields(value)
-            }
-        return {
-            "type": f"{type(value).__module__}.{type(value).__qualname__}",
-            "object_id": id(value),
-        }
+        # 木を作るのは大きさ（runtime ref を含む）を数え終えた後なので、ここは数えない
+        from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
+        from scripts.function_tracer_pcode.core.json_encoding import copy_legacy_containers
+
+        work = active_serialization_work()
+        if work is None:
+            return json_encoding.RESULT_JSON_POLICY.materialize(runtime_ref_source(value), counted=True)
+        # 共有 DAG を木に展開すると同じ ref が何度も現れる。直列化 1 回の間は同じ object
+        # の表現は同じなので memo し、置くたびに容器を作り直す（`SerializationWork`）
+        memo = work.runtime_ref_memo
+        hit = memo.get(id(value))
+        if hit is None or hit[0] is not value:
+            hit = memo[id(value)] = (
+                value, json_encoding.RESULT_JSON_POLICY.materialize(runtime_ref_source(value), counted=True),
+            )
+        return copy_legacy_containers(hit[1])
+
     
     def get_all_variables(self) -> Set[str]:
         """式に含まれる全ての変数名（パラメータ・変数）を取得"""
@@ -846,6 +1003,335 @@ class Expression:
         collect_variables_with_storage_into(self, variables)
 
 
+
+
+# ---------------------------------------------------------------------------
+# 木表現の大きさ（Issue #22 PR-22-D）
+# ---------------------------------------------------------------------------
+
+#: 閉路の参照（`{"type": 型名, "cycle_ref": 0}`、固定の形）を測るときの byte の上限（型名の長さの上限。
+#: 測る値は固定の形で、これを超える型名は無い）
+_CYCLE_REF_SHAPE_BYTES = 4096
+#: 木表現の直列化予算を見る観測点（`ExpressionSizeBudgetExceeded.site`）。
+LEGACY_TREE_SERIALIZATION_SITE = "core.expression.to_dict"
+
+
+def _opaque_local_text(value: Any) -> str:
+    """JSON 型でない local 値（`to_dict` はそのまま置く）の大きさの代用表現。"""
+
+    return type_name(type(value))
+
+
+#: 凍結済み node の木表現の大きさ（JSON byte、飽和していない正確な値）。
+#: 凍結後は field も子も変わらないので、同じ node の大きさを pair の中で何度
+#: 求め直しても同じ値になる。snapshot は同じ解析を何度も `to_dict()` するので、
+#: ここで再利用しないと見積りが `to_dict` 本体より重くなる（実測で 6 倍）。
+#: 弱参照なので式と一緒に消える（process 寿命の identity cache にはならない）。
+_FROZEN_TREE_BYTES: "weakref.WeakKeyDictionary[Expression, int]" = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def estimate_legacy_dict_bytes(
+    root: "Expression",
+    *,
+    work: Any,
+    policy: Any = None,
+    max_bytes: Optional[int] = None,
+) -> Optional[int]:
+    """`root.to_dict()` を JSON にしたときの byte 数を **作らずに** 見積もる。
+
+    返すのは byte だけ。runtime ref を辿る作業量は `work`（呼ぶ側の作業量の owner。必ず渡す）へ
+    distinct な node ごとに 1 回数える。
+
+    木表現は同じ子を参照の数だけ展開するので、distinct node ごとに 1 回だけ
+    大きさを求め（反復 post-order・memo）、辺の数だけ足す（同じ子への辺が 2 本
+    なら 2 回）。node 1 つ分の大きさは `_to_dict_active` を子 = placeholder で
+    呼んだ dict を `policy` の encoder で書いた長さ（実出力と schema・encoder を
+    共有するので等しい）。node 1 つ分の dict は小さいので、これは「巨大な値を
+    書いてから測る」ことにはならない — 木全体は作らない。
+
+    `max_bytes` を超えた時点で `max_bytes + 1` を返し、残りを計算しない
+    （子の大きさは根の大きさ以下なので、どこかの部分木が超えれば根も超える）。
+    閉路（未凍結の式の中だけで起き得る）では `None`: 実出力は閉路を
+    `cycle_ref` に置き換えるので、木の大きさが経路に依存し DAG の memo が使えない。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+    policy = RESULT_JSON_POLICY if policy is None else policy
+    cache = _FROZEN_TREE_BYTES if policy is RESULT_JSON_POLICY else None
+    sizes: Dict[int, int] = {}
+    pending: Dict[int, Any] = {}
+    active: Set[int] = set()
+    # 辿る node と、その node を出るところか（2 本の stack。node は live な値なので組にしない）
+    stack: List[Any] = [root]
+    exits: List[bool] = [False]
+    # distinct な node の node 1 つ分の大きさの合計。木は distinct な node を 1 回以上含むので
+    # 木の大きさ ≥ この合計: 超えた時点で止まる（兄弟の部分木を全部数え終える前に）
+    distinct_total = 0
+    while stack:
+        node = stack.pop()
+        exiting = exits.pop()
+        if type(node) is not Expression:
+            raise TypeError("an Expression tree contains a non-Expression child")
+        node_id = id(node)
+        if exiting:
+            active.discard(node_id)
+            local, children = pending.pop(node_id)
+            # placeholder の `0` は 1 byte。子の実際の大きさと差し替える
+            local_size = _bounded_local_bytes(
+                policy, local, None if max_bytes is None else max_bytes - distinct_total + len(children),
+            ) - len(children)
+            for child in children:
+                if type(child) is _RuntimeRefChild:
+                    local_size += child.measure(
+                        policy, None if max_bytes is None else max_bytes - distinct_total - local_size, work,
+                    )
+            distinct_total += local_size
+            if max_bytes is not None and distinct_total > max_bytes:
+                return max_bytes + 1
+            size = local_size
+            for child in children:
+                if type(child) is not _RuntimeRefChild:
+                    size += sizes[id(child)]
+            if max_bytes is not None and size > max_bytes:
+                return max_bytes + 1
+            sizes[node_id] = size
+            if cache is not None and state_of(node.__dict__) >= SemanticLifecycle.VALIDATED:
+                cache[node] = size
+            continue
+        if node_id in sizes:
+            continue
+        if cache is not None and state_of(node.__dict__) >= SemanticLifecycle.VALIDATED:
+            known = cache.get(node)
+            if known is not None:
+                if max_bytes is not None and known > max_bytes:
+                    return max_bytes + 1
+                sizes[node_id] = known
+                continue
+        if node_id in active:
+            return None
+        active.add(node_id)
+        children: List[Any] = []
+        pending[node_id] = (node._to_dict_active(None, collect=children), children)
+        stack.append(node)
+        exits.append(True)
+        for child in reversed(children):
+            if type(child) is not _RuntimeRefChild and id(child) not in sizes:
+                stack.append(child)
+                exits.append(False)
+    return sizes.get(id(root))
+
+
+#: 数えながら木を作る間の (policy, work)（`Expression.__json_tree_metered__`）。
+#: 同期処理で入れ子になり得るので stack。空なら通常の構築（数えない）。
+_TREE_BUILD_METERS: List[Any] = []
+
+
+def _node_local_bytes(node: "Expression", policy: Any, max_bytes: Optional[int], work: Any) -> int:
+    """node 1 つ分の byte（子は含まない。runtime ref は含む）。見積りと同じ規則。
+
+    runtime ref を辿る作業量は `work` へ数える（返すのは byte だけ）。
+
+    `max_bytes` を超えたと分かった時点で `max_bytes + 1` 以上を返す（残りを数えない）。
+    """
+
+    children: List[Any] = []
+    local = node._to_dict_active(None, collect=children)
+    size = _bounded_local_bytes(
+        policy, local, None if max_bytes is None else max_bytes + len(children),
+    ) - len(children)
+    for child in children:
+        if type(child) is _RuntimeRefChild:
+            size += child.measure(policy, None if max_bytes is None else max_bytes - size, work)
+    return size
+
+
+def _bounded_local_bytes(policy: Any, local: Any, max_bytes: Optional[int]) -> int:
+    """node 1 つ分の dict を書いた byte。書く前に中の文字列の長さを数え、上限を超える
+    （1 文字 1 byte 以上）と分かれば書かずに `max_bytes + 1` を返す。
+
+    中の値は `core.live_values` の規則で読む（組み込みの振る舞いの容器だけを辿る）。
+    """
+
+    if max_bytes is not None:
+        total = 0
+        stack = [local]
+        while stack:
+            value = stack.pop()
+            kind = type(value)
+            if kind is str:
+                total += len(value)
+            elif kind is dict:
+                # node の dict（package が作った組み込みの dict）。幅を上限と比べてから子を積む
+                total += size(value)
+                if total > max_bytes:
+                    return max_bytes + 1
+                stack.extend(value.keys())
+                stack.extend(value.values())
+            elif kind is list or kind is tuple:
+                total += size(value)
+                if total > max_bytes:
+                    return max_bytes + 1
+                stack.extend(elements_of(value))
+            elif kind is not int and value is not None:
+                # 組み込みの型でない値: 文字列の subclass は基底型の長さ、容器は組み込みの振る舞いのものだけ
+                text = str_value(value)
+                if text is not NOT_PLAIN:
+                    total += len(text)
+                else:
+                    # dict の subclass も proxy も組み込みの振る舞いの写像なら数える
+                    mapping = builtin_mapping(value)
+                    if mapping is not None:
+                        total += size(mapping)
+                        if total > max_bytes:
+                            return max_bytes + 1
+                        for key, child in items_of(mapping):
+                            stack.append(key)
+                            stack.append(child)
+                    elif builtin_sequence(value):
+                        total += size(value)
+                        if total > max_bytes:
+                            return max_bytes + 1
+                        stack.extend(elements_of(value))
+            if total > max_bytes:
+                return max_bytes + 1
+    # 書く前に組み込みの値だけの写しにする（JSON の encoder は dict の subclass の `items` を名前で
+    # 引き、書けない値には `default` を呼ぶ: live な値の code を encoder に呼ばせない）
+    return utf8_length(JsonEncodingPolicy.dumps(policy, _plain_local(local)))
+
+
+def _plain_local(local: Any) -> Any:
+    """node 1 つ分の dict の、JSON の encoder が書くのと同じ組み込みの値の写し（owner の規則で読む）。
+
+    str / int / float の subclass（mixin の enum を含む）は基底型の値（encoder と同じ）、組み込みの
+    振る舞いの容器は中身を写し、それ以外（encoder が `default` で書く値）は型名。encoder と同じく
+    循環は `ValueError`、JSON の scalar でない key は `TypeError`（共有された容器は何度でも写す）。
+    """
+
+    # 辿る値（live）・書き込む先（この関数が作る組み込みの容器）・key を別々の stack に持つ。
+    # 容器を出る印（`_LEAVE`）で今辿っている経路（`active`）から外す
+    root: list = []
+    values: list = [local]
+    parents: list = [root]
+    keys: list = [None]
+    active: set = set()
+    while values:
+        value = values.pop()
+        parent = parents.pop()
+        key = keys.pop()
+        if parent is _LEAVE:
+            active.discard(key)
+            continue
+        base = json_scalar(value)
+        mapping = builtin_mapping(value) if base is NOT_PLAIN else None
+        if base is not NOT_PLAIN:
+            copied: Any = base
+        elif mapping is not None or builtin_sequence(value):
+            if id(value) in active:
+                raise ValueError("Circular reference detected")
+            active.add(id(value))
+            values.append(None)
+            parents.append(_LEAVE)
+            keys.append(id(value))
+            if mapping is not None:
+                copied = {}
+                for child_key, child in items_of(mapping):
+                    plain_key = json_scalar(child_key)
+                    if plain_key is NOT_PLAIN:
+                        raise TypeError(
+                            "keys must be str, int, float, bool or None, not "
+                            + type_name(type(child_key))
+                        )
+                    values.append(child)
+                    parents.append(copied)
+                    keys.append(plain_key)
+            else:
+                children = tuple(elements_of(value))
+                copied = [None] * len(children)
+                for index in range(len(children) - 1, -1, -1):
+                    values.append(children[index])
+                    parents.append(copied)
+                    keys.append(index)
+        else:
+            copied = _opaque_local_text(value)
+        if parent is root:
+            parent.append(copied)
+        else:
+            parent[key] = copied
+    return root[0]
+
+
+#: `_plain_local` の stack で「容器を出る」印
+_LEAVE: list = []
+
+
+class _RuntimeRefChild:
+    """見積りで node の外に置く runtime ref（walker が作らずに数える）。"""
+
+    __slots__ = ("ref",)
+
+    def __init__(self, ref: Any) -> None:
+        self.ref = ref
+
+    def measure(self, policy: Any, max_bytes: Optional[int], work: Any) -> int:
+        from scripts.function_tracer_pcode.core.json_encoding import (
+            LEGACY,
+            JsonBudgetExhausted,
+        )
+
+        if max_bytes is not None and max_bytes < 0:
+            return 1
+        try:
+            # byte だけを返す（呼ぶ側が出現ごとに足す）。辿る作業量は `work`（呼ぶ側の作業量の owner）
+            # へ 1 回だけ数える
+            return JsonEncodingPolicy.measure(
+                policy, runtime_ref_source(self.ref), max_bytes=max_bytes, mode=LEGACY, effort=work,
+            )
+        except JsonBudgetExhausted:
+            # byte か作業量のどちらかが尽きた: 見積もりは上限を超えた（上限 + 1）
+            if max_bytes is None:
+                raise
+            return max_bytes + 1
+
+
+@source_converter
+def runtime_ref_source(value: Any) -> Any:
+    """`Expression.runtime_ref` の表現（旧 `_serialize_runtime_ref`）の JSON source。
+
+    scalar はそのまま、tuple / list は配列、dict は key を文字列にした object、
+    record（`json_items()`）は record の表現、dataclass は field の object、それ以外は
+    型と object id。walker が 1 要素ずつ写す（ref の表現を先に作らない）。
+    """
+
+    from scripts.function_tracer_pcode.core.json_encoding import (
+        each,
+        inline,
+        is_json_record,
+        mapping_of,
+        pairs_of,
+    )
+
+    # 型は `core.live_values` の規則で読む（`isinstance` は上書きした `__class__` を読む）。
+    # 列・mapping は旧来どおり subclass も walker（owner）へ渡す（辿れるかは walker が決める）
+    if value is None or json_scalar(value) is not NOT_PLAIN:
+        return value
+    if is_kind(value, tuple) or is_kind(value, list):
+        return each(value, runtime_ref_source)
+    if is_kind(value, dict):
+        return mapping_of(value, runtime_ref_source, stringify_keys=True)
+    if is_json_record(value):
+        return value
+    names = dataclass_field_names(value)
+    if names is not None:
+        # field は instance の値だけを読む（field 名を上書きした property は producer: 呼ばない）
+        return pairs_of((name, runtime_ref_source(field_value(value, name))) for name in names)
+    kind = type(value)
+    return inline(
+        ("type", type_module(kind) + "." + type_name(kind)),
+        ("object_id", id(value)),
+    )
 
 
 # Re-exported for callers that import Condition from model.expression.

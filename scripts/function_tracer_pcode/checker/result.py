@@ -4,11 +4,16 @@
 from typing import Optional, Dict, Any, List, Mapping, Tuple
 from dataclasses import dataclass, field
 
-from scripts.function_tracer_pcode.core import FunctionSignature
+from scripts.function_tracer_pcode.core import FunctionSignature, live_values
+from scripts.function_tracer_pcode.core import read_limits
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverStatus
 from scripts.function_tracer_pcode.checker.counterexample import FormattedCounterexample
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 from scripts.function_tracer_pcode.checker.debug_trace import DebugTrace
+from scripts.function_tracer_pcode.checker.output_preparation import (
+    PREPARED_SOURCE_ATTRIBUTES,
+    PreparedPayloadStale,
+)
 from scripts.function_tracer_pcode.checker.unknown_reason import (
     UnknownReasonRecord,
     UnknownRecoveryAction,
@@ -39,6 +44,74 @@ def _format_stage_seconds(diagnostics: Any) -> str:
         return "Stage seconds: " + " ".join(parts)
     except Exception:
         return ""
+
+
+def _reason_recovery_display(reason: Mapping[str, Any], actions: List[Mapping[str, Any]]) -> str:
+    matching_actions = [
+        action
+        for action in actions
+        if action.get("reason_id") == reason.get("reason_id")
+        and (reason.get("pair_or_case") is None or action.get("pair_or_case") == reason.get("pair_or_case"))
+    ]
+    if not matching_actions:
+        return reason.get("recovery_proof_kind")
+    proof_kinds = sorted({str(action.get("proof_kind")) for action in matching_actions if action.get("proof_kind")})
+    statuses = sorted({str(action.get("status")) for action in matching_actions if action.get("status")})
+    if not proof_kinds:
+        proof_kinds = [str(reason.get("recovery_proof_kind"))]
+    proof_text = ",".join(proof_kinds)
+    if statuses:
+        return f"{proof_text} ({','.join(statuses)})"
+    return proof_text
+
+
+def _format_pairwise_debug_stats(stats: Mapping[str, Any]) -> List[str]:
+    lines = ["Pairwise Final Solver Disposition Summary:"]
+    lines.append(
+        "  unsat={unsat}, sat={sat}, unknown={unknown}".format(
+            unsat=stats.get("unsat_results", 0),
+            sat=stats.get("sat_results", 0),
+            unknown=stats.get("unknown_results", 0),
+        )
+    )
+    lines.append("Pairwise Timeout Normalization Summary:")
+    lines.append(
+        "  attempts={attempts}, changed={changed}, no_change={no_change}, "
+        "unsat={unsat}, sat={sat}, unknown={unknown}".format(
+            attempts=stats.get("timeout_fallback_attempts", 0),
+            changed=stats.get("changed_pairs", 0),
+            no_change=stats.get("no_change_pairs", 0),
+            unsat=stats.get("normalization_unsat_results", stats.get("unsat_results", 0)),
+            sat=stats.get("normalization_sat_results", stats.get("sat_results", 0)),
+            unknown=stats.get("normalization_unknown_results", stats.get("unknown_results", 0)),
+        )
+    )
+    for hits_key, misses_key, label_hits, label_misses in (
+        ("exact_query_attempt_cache_hits", "exact_query_attempt_cache_misses",
+         "exact_query_cache_hits", "exact_query_cache_misses"),
+        ("obligation_pair_cache_hits", "obligation_pair_cache_misses",
+         "obligation_pair_cache_hits", "obligation_pair_cache_misses"),
+        ("guard_overlap_graph_hits", "guard_overlap_graph_misses",
+         "guard_overlap_graph_hits", "guard_overlap_graph_misses"),
+    ):
+        if hits_key in stats or misses_key in stats:
+            lines.append(
+                f"  {label_hits}={stats.get(hits_key, 0)}, {label_misses}={stats.get(misses_key, 0)}"
+            )
+    if "guard_overlap_prepass_node_hits" in stats:
+        lines.append(
+            "  guard_overlap_prepass_node_hits={hits}, value_candidates={candidates}".format(
+                hits=stats.get("guard_overlap_prepass_node_hits", 0),
+                candidates=stats.get("guard_overlap_value_candidates", 0),
+            )
+        )
+    if stats.get("pair_ledger_sealed"):
+        lines.append(
+            "  pair_ledger=sealed, skipped_after_terminal={skipped}".format(
+                skipped=stats.get("pair_ledger_skipped_after_terminal", 0),
+            )
+        )
+    return lines
 
 
 @dataclass
@@ -120,6 +193,11 @@ class EquivalenceResult:
     canonical_decision_required: bool = False
     canonical_c_active_base: Tuple[Mapping[str, Any], ...] = ()
     canonical_q_open_base: Tuple[Mapping[str, Any], ...] = ()
+    # Issue #22 PR-22-D: 出力の契約違反で ERROR にした結果だけが持つ、取って代わられた
+    # 判定の DecisionReceipt（`decision_receipt_payload` の固定長の行）
+    superseded_decision_receipt: Optional[Mapping[str, Any]] = field(
+        default=None, repr=False, compare=False
+    )
     canonical_result_finalization_bundle: Optional[Mapping[str, Any]] = field(
         default=None, repr=False, compare=False
     )
@@ -139,17 +217,41 @@ class EquivalenceResult:
         default=None, repr=False, compare=False
     )
     # Issue #128 PR-128-B: `debug_trace` **object の生成は止めない**。この flag は
-    # `to_dict()` が JSON へ添付するかだけを決める（object 読者 — diagnostics /
-    # attempts / LegacyExecutionSnapshot / to_string(show_phase_usage) /
-    # aggregate 生成 — は従来どおり full trace を読める）。既定 True なので
+    # `to_dict()` が JSON へ添付するかだけを決める（trace object は結果に残る）。
+    # Issue #22 PR-22-D: 出力を準備した結果では、diagnostics / to_string /
+    # 原因集計は authority 前に準備した値（`PreparedSemanticPayload.trace_timings` /
+    # `cause_evidence`）だけを読み、trace を読み直さない。準備していない結果
+    # （直接組んだ `EquivalenceResult`）では従来どおり trace から作る。既定 True なので
     # `EquivalenceResult` を直接組む呼び出し元の挙動は変わらず、production では
     # `checker/workflow.py` が既存の debug 伝播（`--debug` / `-d` /
     # `EQBENCH_DEBUG=1`）をそのまま入れる。
     emit_debug_trace: bool = True
+    # Issue #22 PR-22-D: authority 確定 **前** に準備した解析由来の payload
+    # （`checker.output_preparation.PreparedSemanticPayload`）。pair 境界が 1 回
+    # だけ設定し、`to_dict()` はその値を使う（解析 object を読み直さない）。
+    # 判定 authority の入力ではない。境界を通らずに組んだ結果では `None` のままで、
+    # `to_dict()` はその場で準備する。
+    prepared_semantic_payload: Optional[Any] = field(
+        default=None, repr=False, compare=False
+    )
+
+    @live_values.state_setter
+    def __setattr__(self, name: str, value: Any) -> None:
+        # Issue #22 PR-22-D: 準備した A（解析由来の payload）は authority 確定前に
+        # 1 回だけ作り、以後 live な属性を読み直さない。準備の後でその元になる属性を
+        # 差し替えるのは、出力に現れない更新なので内部バグとして拒む。
+        if name in PREPARED_SOURCE_ATTRIBUTES and (
+            live_values.instance_state(self, "prepared_semantic_payload", None) is not None
+        ):
+            raise PreparedPayloadStale(
+                f"result.{name} cannot be replaced after the output was prepared"
+            )
+        object.__setattr__(self, name, value)
 
     def __post_init__(self) -> None:
         self.unknown_reasons = list(coerce_unknown_reason_records(self.unknown_reasons))
-        if self.unknown_recovery_actions:
+        actions = self.unknown_recovery_actions
+        if actions is not None and live_values.as_bool(actions):
             self.unknown_recovery_actions = list(
                 coerce_unknown_recovery_actions(self.unknown_recovery_actions)
             )
@@ -162,30 +264,45 @@ class EquivalenceResult:
             self.decision_gated_by_pending_proof = True
 
     def _has_pending_proof_gate(self) -> bool:
-        for action in self.unknown_recovery_actions:
-            if action.status != UnknownRecoveryActionStatus.PENDING_PROOF.value:
+        pending = UnknownRecoveryActionStatus.PENDING_PROOF.value
+        for action in live_values.elements_of(self.unknown_recovery_actions):
+            # 状態は基底型の文字列で比べる（action の field は owner の規則で読む）
+            if live_values.str_value(live_values.attribute(action, "status")) != pending:
                 continue
-            if action.proof_obligation_id is not None or action.object_target_key is not None:
+            if (
+                live_values.attribute(action, "proof_obligation_id") is not None
+                or live_values.attribute(action, "object_target_key") is not None
+            ):
                 return True
         return False
     
     def is_timeout(self) -> bool:
-        """タイムアウトで結果が不明かどうかを判定"""
-        if self.decision_receipt is not None:
-            from scripts.function_tracer_pcode.authority.decision.production_cutover import (
-                outcome_from_result,
-            )
+        """タイムアウトで結果が不明かどうかを判定（出力の bounded path も呼ぶ: 値は owner の規則で読む）"""
+        if live_values.attribute(self, "decision_receipt") is not None:
             from scripts.function_tracer_pcode.authority.contracts import Outcome
 
-            return outcome_from_result(self) is Outcome.TIMEOUT
-        if self.canonical_decision_required:
+            return decided_outcome_of(self) is Outcome.TIMEOUT
+        if live_values.as_bool(live_values.attribute(self, "canonical_decision_required", False)):
             raise ValueError("canonical result lacks DecisionReceipt")
-        if self.is_equivalent is not None:
+        if live_values.attribute(self, "is_equivalent") is not None:
             return False
-        if not self.solver_results or not self.solver_results.results:
+        solver_results = live_values.attribute(self, "solver_results")
+        if solver_results is None or not live_values.as_bool(solver_results):
             return False
-        for sr in self.solver_results.results:
-            if sr.status == SolverStatus.TIMEOUT:
+        timed_out = (
+            live_values.instance_state(solver_results, "timed_out", None)
+            if live_values.is_kind(solver_results, ParallelResult) else None
+        )
+        if type(timed_out) is bool:
+            # solver の結果の owner が作ったときに数えた事実（行を辿り直さない。作っていない値は下で読む）
+            return timed_out
+        results = live_values.attribute(solver_results, "results")
+        if results is None or not live_values.as_bool(results):
+            return False
+        # receipt の無い、solver の owner が作っていない結果の列だけ: 読みの固定の上限まで
+        for sr in read_limits.elements_within_limit(results):
+            # `SolverStatus` は mixin の無い enum: `==` は identity
+            if live_values.attribute(sr, "status") is SolverStatus.TIMEOUT:
                 return True
         return False
     
@@ -211,301 +328,132 @@ class EquivalenceResult:
 
     def get_effective_function1_signature(self) -> Optional[FunctionSignature]:
         """判定時に有効だった binary1 側シグネチャを返す。"""
-        return self.effective_function1_signature or self.function1_signature
+        return _first_present(
+            live_values.attribute(self, "effective_function1_signature"),
+            live_values.attribute(self, "function1_signature"),
+        )
 
     def get_effective_function2_signature(self) -> Optional[FunctionSignature]:
         """判定時に有効だった binary2 側シグネチャを返す。"""
-        return self.effective_function2_signature or self.function2_signature
+        return _first_present(
+            live_values.attribute(self, "effective_function2_signature"),
+            live_values.attribute(self, "function2_signature"),
+        )
     
     def to_dict(self) -> Dict[str, Any]:
-        """機械可読な辞書に変換（JSON シリアライズ可能）"""
-        decision_receipt = None
-        if self.decision_receipt is not None:
-            from scripts.function_tracer_pcode.authority.decision.production_cutover import (
-                decision_receipt_payload,
-                outcome_from_result,
-            )
+        """機械可読な辞書に変換（JSON シリアライズ可能）。
 
-            outcome_from_result(self)
-            decision_receipt = decision_receipt_payload(self.decision_receipt)
-        elif self.canonical_decision_required:
-            raise ValueError("canonical serialization lacks DecisionReceipt")
-        conditional_decision_receipt = None
-        if self.conditional_decision_receipt is not None:
-            from scripts.function_tracer_pcode.authority.decision.production_cutover import (
-                conditional_decision_receipt_payload,
-            )
+        Issue #22 PR-22-D: field ごとの所有者（解析由来 = 準備済み payload /
+        authority / 診断）と key 順は `checker.output_preparation.RESULT_FIELDS` が
+        唯一の定義。ここは合成を呼ぶだけ。
+        """
+        from scripts.function_tracer_pcode.checker.output_preparation import (
+            result_payload,
+        )
 
-            conditional_decision_receipt = conditional_decision_receipt_payload(
-                self.conditional_decision_receipt
-            )
-        elif self.conditional_outcome is not None:
-            raise ValueError("conditional outcome without its ConditionalDecisionReceipt")
-        result = {
-            "is_equivalent": self.is_equivalent,
-            "function1_name": self.function1_name,
-            "function2_name": self.function2_name,
-            "binary1_name": self.binary1_name,
-            "binary2_name": self.binary2_name,
-            "binary1_content_identity": self.binary1_content_identity,
-            "binary2_content_identity": self.binary2_content_identity,
-            "function1_identity": self.function1_identity,
-            "function2_identity": self.function2_identity,
-            "function1_signature": self.function1_signature.to_dict() if self.function1_signature else None,
-            "function2_signature": self.function2_signature.to_dict() if self.function2_signature else None,
-            "effective_function1_signature": self.get_effective_function1_signature().to_dict() if self.get_effective_function1_signature() else None,
-            "effective_function2_signature": self.get_effective_function2_signature().to_dict() if self.get_effective_function2_signature() else None,
-            "function1_signature_hypotheses": list(self.function1_signature_hypotheses),
-            "function2_signature_hypotheses": list(self.function2_signature_hypotheses),
-            "solver_results": self.solver_results.to_dict() if self.solver_results else None,
-            "counterexample": self.counterexample.to_dict() if self.counterexample else None,
-            "total_time": self.total_time,
-            "error_message": self.error_message,
-            "failure_status": self.failure_status,
-            "failure_message": self.failure_message,
-            "type_fix_result": self.type_fix_result.to_dict() if self.type_fix_result else None,
-            "retry_count": self.retry_count,
-            "is_timeout": self.is_timeout(),
-            "final_outcome": self.final_outcome,
-            "decision_receipt": decision_receipt,
-            "conditional_outcome": self.conditional_outcome,
-            "conditional_decision_receipt": conditional_decision_receipt,
-            "c_active_base": [dict(row) for row in self.canonical_c_active_base],
-            "q_open_base": [dict(row) for row in self.canonical_q_open_base],
-            "constrained_fragments": self.constrained_fragments,
-            "pairwise_stats": self.pairwise_stats,
-            "pairwise_debug_stats": self.pairwise_debug_stats,
-            "unknown_reasons": [reason.to_dict() for reason in self.unknown_reasons],
-            "unknown_recovery_actions": [
-                action.to_dict() for action in self.unknown_recovery_actions
-            ],
-            "unknown_recovery_backlog": summarize_unknown_recovery_backlog(self.unknown_reasons),
-            "decision_gated_by_pending_proof": self.decision_gated_by_pending_proof,
-            "sat_pair_info": self.sat_pair_info,
-            "stage_path": self.stage_path,
-        }
-        from scripts.function_tracer_pcode.checker.diagnostics import result_diagnostics_payload
-
-        result["diagnostics"] = result_diagnostics_payload(self)
-        # Issue #128: 原因分析の compact 集計は常時出す。既に確定していれば
-        # それを使い、ここで作り直さない（preimage 確定前に固定するため）。
-        if self.unknown_cause_aggregate is None:
-            from scripts.function_tracer_pcode.checker.cause_aggregate import (
-                build_unknown_cause_aggregate,
-            )
-
-            self.unknown_cause_aggregate = build_unknown_cause_aggregate(self)
-        result["unknown_cause_aggregate"] = self.unknown_cause_aggregate
-        if self.canonical_result_finalization_bundle is not None:
-            result["canonical_result_finalization_bundle"] = dict(
-                self.canonical_result_finalization_bundle
-            )
-        if self.completed_recovery_proof_evidence:
-            result["completed_recovery_proof_evidence"] = list(self.completed_recovery_proof_evidence)
-        if self.reason_completion_applicability_contexts:
-            result["reason_completion_applicability_contexts"] = list(
-                self.reason_completion_applicability_contexts
-            )
-        if self.call_effect_shadow_manifest is not None:
-            result["call_effect_shadow_manifest"] = dict(self.call_effect_shadow_manifest)
-        if self.call_proof_terminal_provenance is not None:
-            result["call_proof_terminal_provenance"] = dict(
-                self.call_proof_terminal_provenance
-            )
-        if self.recurrence_promotion_receipt is not None:
-            result["recurrence_promotion_receipt"] = dict(
-                self.recurrence_promotion_receipt
-            )
-        if self.decisive_proof_provenance is not None:
-            result["decisive_proof_provenance"] = dict(self.decisive_proof_provenance)
-        if self.identical_fast_path_disposition is not None:
-            result["identical_fast_path_disposition"] = dict(
-                self.identical_fast_path_disposition
-            )
-        if self.identical_function_identity_evidence is not None:
-            result["identical_function_identity_evidence"] = dict(
-                self.identical_function_identity_evidence
-            )
-        
-        # ★ 新規追加: mips64_abi_constraints
-        if self.mips64_abi_constraints:
-            # Dict[str, Tuple[str, int]] を JSON可能な形式に変換
-            result["mips64_abi_constraints"] = {
-                k: {"signedness": v[0], "narrow_bits": v[1]}
-                for k, v in self.mips64_abi_constraints.items()
-            }
-        
-        # ★ 新規追加: デバッグトレース
-        # Issue #128 PR-128-B: trace は常に object 上に在る。debug 指定のときだけ
-        # serialize する（通常 run の原因分析は常時添付の
-        # `unknown_cause_aggregate` が持つ）。to_dict 後の pop は preimage 規則
-        # 違反なので、ここで添付しないことで条件化する。
-        if self.debug_trace and self.emit_debug_trace:
-            result["debug_trace"] = self.debug_trace.to_dict()
-        
-        return result
+        return result_payload(self)
     
-    def to_string(self, verbose: bool = False, show_phase_usage: bool = False) -> str:
+    def to_string(
+        self, verbose: bool = False, show_phase_usage: bool = False, *, payload: Optional[Mapping[str, Any]] = None,
+    ) -> str:
+        """人間向けの text。**出力と同じ有界な表現**（`to_dict()` の値）から作る。
+
+        `payload` を渡すとそれ（CLI が最終 envelope 用に組んだ preimage）を読み、組み直さない。
+
+        Issue #22 PR-22-D: authority 確定後に live な解析・結果 object（signature の
+        Ghidra 型・反例・solver model・debug trace）を読み直さない。A は authority 前に
+        準備した値、B / C は出力と同じ上限で準備した値を読む。
+        """
+
+        from scripts.function_tracer_pcode.checker.counterexample import format_counterexample_text
+        from scripts.function_tracer_pcode.checker.debug_trace import format_phase_usage_rows
+        from scripts.function_tracer_pcode.core.signature import format_signature_text
+        from scripts.function_tracer_pcode.semantics.typing.fixer import (
+            describe_type_fix,
+            type_fix_applied,
+        )
+
+        if payload is None:
+            payload = self.to_dict()
         lines = []
         lines.append("=" * 70)
         lines.append("EQUIVALENCE CHECK RESULT")
         lines.append("=" * 70)
-        
-        # Binary 1 の情報
-        lines.append(f"Binary 1: {self.binary1_name}")
-        lines.append(f"Function 1: {self.function1_name}")
-        if self.function1_signature:
-            lines.append(f"  Original signature: {self.function1_signature.format_full(self.function1_name)}")
-        effective_signature1 = self.get_effective_function1_signature()
-        if (
-            effective_signature1
-            and self.function1_signature
-            and effective_signature1.to_dict() != self.function1_signature.to_dict()
-        ):
-            lines.append(f"  Effective signature: {effective_signature1.format_full(self.function1_name)}")
-        elif effective_signature1 and self.function1_signature is None:
-            lines.append(f"  Effective signature: {effective_signature1.format_full(self.function1_name)}")
-        if self.function1_signature_hypotheses:
-            lines.append(f"  Hypotheses: {self.function1_signature_hypotheses}")
 
-        lines.append("")
-        
-        # Binary 2 の情報
-        lines.append(f"Binary 2: {self.binary2_name}")
-        lines.append(f"Function 2: {self.function2_name}")
-        if self.function2_signature:
-            lines.append(f"  Original signature: {self.function2_signature.format_full(self.function2_name)}")
-        effective_signature2 = self.get_effective_function2_signature()
-        if (
-            effective_signature2
-            and self.function2_signature
-            and effective_signature2.to_dict() != self.function2_signature.to_dict()
-        ):
-            lines.append(f"  Effective signature: {effective_signature2.format_full(self.function2_name)}")
-        elif effective_signature2 and self.function2_signature is None:
-            lines.append(f"  Effective signature: {effective_signature2.format_full(self.function2_name)}")
-        if self.function2_signature_hypotheses:
-            lines.append(f"  Hypotheses: {self.function2_signature_hypotheses}")
-
-        lines.append("")
+        for side in ("1", "2"):
+            name = payload.get(f"function{side}_name")
+            lines.append(f"Binary {side}: {payload.get(f'binary{side}_name')}")
+            lines.append(f"Function {side}: {name}")
+            original = payload.get(f"function{side}_signature")
+            effective = payload.get(f"effective_function{side}_signature")
+            if original:
+                lines.append(f"  Original signature: {format_signature_text(original, name)}")
+            if effective and (original is None or effective != original):
+                lines.append(f"  Effective signature: {format_signature_text(effective, name)}")
+            hypotheses = payload.get(f"function{side}_signature_hypotheses")
+            if hypotheses:
+                lines.append(f"  Hypotheses: {hypotheses}")
+            lines.append("")
 
         # Pairwise統計情報を追加
-        if self.pairwise_stats:
+        stats = payload.get("pairwise_stats")
+        if isinstance(stats, dict) and stats and not stats.get("truncated"):
             lines.append("")
             lines.append("Pairwise Statistics:")
-            stats = self.pairwise_stats
-            lines.append(f"  Total pairs: {stats['total_pairs']}")
-            lines.append(f"  UNSAT: {stats['unsat_pairs']}, SAT: {stats['sat_pairs']}, "
-                        f"UNKNOWN: {stats['unknown_pairs']}, ERROR: {stats['error_pairs']}")
-            
-            if self.sat_pair_info:
-                info = self.sat_pair_info
-                lines.append(f"  First SAT pair: ({info['i']}, {info['j']})")
-                lines.append(f"    Case1: {info['case1_summary']}")
-                lines.append(f"    Case2: {info['case2_summary']}")
+            lines.append(f"  Total pairs: {stats.get('total_pairs')}")
+            lines.append(f"  UNSAT: {stats.get('unsat_pairs')}, SAT: {stats.get('sat_pairs')}, "
+                        f"UNKNOWN: {stats.get('unknown_pairs')}, ERROR: {stats.get('error_pairs')}")
 
-        if self.pairwise_debug_stats:
-            stats = self.pairwise_debug_stats
+            info = payload.get("sat_pair_info")
+            if isinstance(info, dict) and info:
+                lines.append(f"  First SAT pair: ({info.get('i')}, {info.get('j')})")
+                lines.append(f"    Case1: {info.get('case1_summary')}")
+                lines.append(f"    Case2: {info.get('case2_summary')}")
+
+        stats = payload.get("pairwise_debug_stats")
+        if isinstance(stats, dict) and stats and not stats.get("truncated"):
             lines.append("")
-            lines.append("Pairwise Final Solver Disposition Summary:")
-            lines.append(
-                "  unsat={unsat}, sat={sat}, unknown={unknown}".format(
-                    unsat=stats.get("unsat_results", 0),
-                    sat=stats.get("sat_results", 0),
-                    unknown=stats.get("unknown_results", 0),
-                )
-            )
-            lines.append("Pairwise Timeout Normalization Summary:")
-            lines.append(
-                "  attempts={attempts}, changed={changed}, no_change={no_change}, "
-                "unsat={unsat}, sat={sat}, unknown={unknown}".format(
-                    attempts=stats.get("timeout_fallback_attempts", 0),
-                    changed=stats.get("changed_pairs", 0),
-                    no_change=stats.get("no_change_pairs", 0),
-                    unsat=stats.get(
-                        "normalization_unsat_results",
-                        stats.get("unsat_results", 0),
-                    ),
-                    sat=stats.get(
-                        "normalization_sat_results",
-                        stats.get("sat_results", 0),
-                    ),
-                    unknown=stats.get(
-                        "normalization_unknown_results",
-                        stats.get("unknown_results", 0),
-                    ),
-                )
-            )
-            if (
-                "exact_query_attempt_cache_hits" in stats
-                or "exact_query_attempt_cache_misses" in stats
-            ):
-                lines.append(
-                    "  exact_query_cache_hits={hits}, exact_query_cache_misses={misses}".format(
-                        hits=stats.get("exact_query_attempt_cache_hits", 0),
-                        misses=stats.get("exact_query_attempt_cache_misses", 0),
-                    )
-                )
-            if (
-                "obligation_pair_cache_hits" in stats
-                or "obligation_pair_cache_misses" in stats
-            ):
-                lines.append(
-                    "  obligation_pair_cache_hits={hits}, obligation_pair_cache_misses={misses}".format(
-                        hits=stats.get("obligation_pair_cache_hits", 0),
-                        misses=stats.get("obligation_pair_cache_misses", 0),
-                    )
-                )
-            if "guard_overlap_graph_hits" in stats or "guard_overlap_graph_misses" in stats:
-                lines.append(
-                    "  guard_overlap_graph_hits={hits}, guard_overlap_graph_misses={misses}".format(
-                        hits=stats.get("guard_overlap_graph_hits", 0),
-                        misses=stats.get("guard_overlap_graph_misses", 0),
-                    )
-                )
-            if "guard_overlap_prepass_node_hits" in stats:
-                lines.append(
-                    "  guard_overlap_prepass_node_hits={hits}, value_candidates={candidates}".format(
-                        hits=stats.get("guard_overlap_prepass_node_hits", 0),
-                        candidates=stats.get("guard_overlap_value_candidates", 0),
-                    )
-                )
-            if stats.get("pair_ledger_sealed"):
-                lines.append(
-                    "  pair_ledger=sealed, skipped_after_terminal={skipped}".format(
-                        skipped=stats.get("pair_ledger_skipped_after_terminal", 0),
-                    )
-                )
+            lines.extend(_format_pairwise_debug_stats(stats))
 
-        if self.unknown_reasons:
+        reasons = [row for row in (payload.get("unknown_reasons") or ()) if isinstance(row, dict)]
+        if reasons:
+            actions = [
+                row for row in (payload.get("unknown_recovery_actions") or ())
+                if isinstance(row, dict)
+            ]
             lines.append("")
             lines.append("UNKNOWN Reasons:")
-            for reason in self.unknown_reasons[:10]:
-                scope = reason.pair_or_case or reason.stage or reason.reason_scope
-                recovery = self._reason_recovery_display(reason)
+            for reason in reasons[:10]:
+                scope = reason.get("pair_or_case") or reason.get("stage") or reason.get("reason_scope")
+                recovery = _reason_recovery_display(reason, actions)
                 lines.append(
-                    f"  {reason.reason_id}: class={reason.reason_class}, "
-                    f"effect={reason.decision_effect}, scope={scope}, recovery={recovery}"
+                    f"  {reason.get('reason_id')}: class={reason.get('reason_class')}, "
+                    f"effect={reason.get('decision_effect')}, scope={scope}, recovery={recovery}"
                 )
-            if len(self.unknown_reasons) > 10:
-                lines.append(f"  ... ({len(self.unknown_reasons) - 10} more)")
+            if len(reasons) > 10:
+                lines.append(f"  ... ({len(reasons) - 10} more)")
 
-            recovery_backlog = summarize_unknown_recovery_backlog(self.unknown_reasons)
+            recovery_backlog = payload.get("unknown_recovery_backlog") or {}
             if recovery_backlog:
                 lines.append("")
                 lines.append("UNKNOWN Recovery Proof Backlog:")
                 for reason_id, entry in recovery_backlog.items():
-                    proof_kinds = ", ".join(entry.get("proof_obligation_counts", {}).keys())
-                    if not proof_kinds:
-                        proof_kinds = entry.get("recovery_proof_kind") or "none"
-                    lines.append(
-                        f"  {reason_id}: count={entry.get('count', 0)}, proofs={proof_kinds}"
+                    counts = entry.get("proof_obligation_counts") if isinstance(entry, dict) else None
+                    proof_kinds = (
+                        ", ".join(counts.keys())
+                        if isinstance(counts, dict) and "bounded_evidence" not in counts else ""
                     )
-        if self.decision_gated_by_pending_proof:
+                    if not proof_kinds:
+                        proof_kinds = (entry.get("recovery_proof_kind") if isinstance(entry, dict) else None) or "none"
+                    lines.append(
+                        f"  {reason_id}: count={entry.get('count', 0) if isinstance(entry, dict) else 0}, "
+                        f"proofs={proof_kinds}"
+                    )
+        if payload.get("decision_gated_by_pending_proof"):
             lines.append("")
             lines.append("Decision gated: pending proof obligation blocks EQUIVALENT recovery")
-        if self.identical_fast_path_disposition is not None:
-            disposition = self.identical_fast_path_disposition
+        disposition = payload.get("identical_fast_path_disposition")
+        if isinstance(disposition, dict):
             lines.append("")
             lines.append(
                 "Identical function identity: applicable={applicable}, "
@@ -515,22 +463,24 @@ class EquivalenceResult:
                     reason=disposition.get("reason"),
                 )
             )
-                
+
         lines.append("")
-        
+
         # パラメータ断片として制約された変数を表示
-        if self.constrained_fragments:
-            vars_str = ", ".join(self.constrained_fragments)
+        fragments = payload.get("constrained_fragments")
+        if isinstance(fragments, list) and fragments:
+            vars_str = ", ".join(str(item) for item in fragments)
             lines.append(f"Derived fragments: {vars_str}")
             lines.append("  (upper-bits variables constrained via sign/zero extension from parameters)")
-        
-        if self.type_fix_result and self.type_fix_result.any_fix_applied():
-            lines.append(f"Type fix applied: {self.type_fix_result}")
-        if self.retry_count > 0:
-            lines.append(f"Retry count: {self.retry_count}")
-        
+
+        type_fix = payload.get("type_fix_result")
+        if isinstance(type_fix, dict) and type_fix_applied(type_fix):
+            lines.append(f"Type fix applied: {describe_type_fix(type_fix)}")
+        if (payload.get("retry_count") or 0) > 0:
+            lines.append(f"Retry count: {payload.get('retry_count')}")
+
         lines.append("-" * 70)
-        
+
         canonical_outcome = None
         if self.decision_receipt is not None:
             from scripts.function_tracer_pcode.authority.decision.production_cutover import (
@@ -540,78 +490,116 @@ class EquivalenceResult:
             canonical_outcome = outcome_from_result(self).value
         elif self.canonical_decision_required:
             raise ValueError("canonical rendering lacks DecisionReceipt")
+        error_message = payload.get("error_message")
+        failure_status = payload.get("failure_status")
+        failure_message = payload.get("failure_message")
         if canonical_outcome == "ERROR" or (
-            canonical_outcome is None and self.error_message
+            canonical_outcome is None and error_message
         ):
             lines.append("Result: ERROR")
-            if self.error_message:
-                lines.append(f"ERROR: {self.error_message}")
-            if self.failure_status:
-                lines.append(f"Failure status: {self.failure_status}")
+            if error_message:
+                lines.append(f"ERROR: {error_message}")
+            if failure_status:
+                lines.append(f"Failure status: {failure_status}")
         elif canonical_outcome in {"UNKNOWN", "TIMEOUT"} or (
-            canonical_outcome is None and self.is_equivalent is None
+            canonical_outcome is None and payload.get("is_equivalent") is None
         ):
             if canonical_outcome == "TIMEOUT" or (
-                canonical_outcome is None and self.is_timeout()
+                canonical_outcome is None and payload.get("is_timeout")
             ):
                 lines.append("Result: TIMEOUT (could not determine equivalence within time limit)")
             else:
                 lines.append("Result: UNKNOWN (could not determine equivalence)")
-            if self.failure_status:
-                lines.append(f"Failure status: {self.failure_status}")
-            if self.failure_message:
-                lines.append(f"Failure detail: {self.failure_message}")
+            if failure_status:
+                lines.append(f"Failure status: {failure_status}")
+            if failure_message:
+                lines.append(f"Failure detail: {failure_message}")
         elif canonical_outcome == "EQUIVALENT" or (
-            canonical_outcome is None and self.is_equivalent
+            canonical_outcome is None and payload.get("is_equivalent")
         ):
             lines.append("Result: EQUIVALENT ✓")
         else:
             lines.append("Result: NOT EQUIVALENT ✗")
-            if self.counterexample:
+            counterexample = payload.get("counterexample")
+            if isinstance(counterexample, dict) and counterexample:
                 lines.append("")
-                lines.append(self.counterexample.to_string())
+                lines.append(format_counterexample_text(counterexample))
             else:
                 lines.append("")
                 lines.append("(No counterexample available)")
-        
+
         lines.append("-" * 70)
-        lines.append(f"Total time: {self.total_time:.3f} seconds")
-        stage_line = _format_stage_seconds(getattr(self, "diagnostics", None))
+        lines.append(f"Total time: {float(payload.get('total_time') or 0.0):.3f} seconds")
+        # 段階別時間も出力と同じ有界な表現（`diagnostics.timings`）から読む（live な診断を読まない）
+        diagnostics_payload = payload.get("diagnostics")
+        timings = diagnostics_payload.get("timings") if isinstance(diagnostics_payload, dict) else None
+        stage_line = _format_stage_seconds(
+            {"stages": timings.get("stages"), "boundary_seconds": timings.get("boundary_seconds")}
+            if isinstance(timings, dict) else None
+        )
         if stage_line:
             lines.append(stage_line)
-        
-        if verbose and self.solver_results:
+
+        solver_results = payload.get("solver_results")
+        if verbose and isinstance(solver_results, dict):
             lines.append("")
             lines.append("Solver Results:")
-            for sr in self.solver_results.results:
-                status_str = sr.status.name
-                lines.append(f"  {sr.solver_name}: {status_str} ({sr.elapsed_time:.3f}s)")
-                if sr.error_message:
-                    lines.append(f"    Error: {sr.error_message}")
-                if sr.model:
-                    lines.append(f"    Model: {sr.model}")
+            for row in solver_results.get("all_results") or ():
+                if not isinstance(row, dict):
+                    continue
+                lines.append(
+                    f"  {row.get('solver_name')}: {row.get('status')} "
+                    f"({float(row.get('elapsed_time') or 0.0):.3f}s)"
+                )
+                if row.get("error_message"):
+                    lines.append(f"    Error: {row.get('error_message')}")
+                if row.get("model"):
+                    lines.append(f"    Model: {row.get('model')}")
 
-        if show_phase_usage and self.debug_trace:
-            lines.append("")
-            lines.append(self.debug_trace.format_phase_usage_summary())
-        
+        if show_phase_usage:
+            from scripts.function_tracer_pcode.checker.diagnostics import trace_timings_payload
+
+            phase_rows = trace_timings_payload(self).get("phase_usage")
+            if isinstance(phase_rows, list):
+                lines.append("")
+                lines.append(format_phase_usage_rows(phase_rows))
+
         lines.append("=" * 70)
         return "\n".join(lines)
 
-    def _reason_recovery_display(self, reason: UnknownReasonRecord) -> str:
-        matching_actions = [
-            action
-            for action in self.unknown_recovery_actions
-            if action.reason_id == reason.reason_id
-            and (reason.pair_or_case is None or action.pair_or_case == reason.pair_or_case)
-        ]
-        if not matching_actions:
-            return reason.recovery_proof_kind
-        proof_kinds = sorted({action.proof_kind for action in matching_actions if action.proof_kind})
-        statuses = sorted({action.status for action in matching_actions if action.status})
-        if not proof_kinds:
-            proof_kinds = [reason.recovery_proof_kind]
-        proof_text = ",".join(proof_kinds)
-        if statuses:
-            return f"{proof_text} ({','.join(statuses)})"
-        return proof_text
+
+def _first_present(preferred: Any, fallback: Any) -> Any:
+    """`preferred or fallback`（真偽は owner の規則で読む）。"""
+
+    if preferred is not None and live_values.as_bool(preferred):
+        return preferred
+    return fallback
+
+
+def decided_outcome_of(result: Any) -> Any:
+    """receipt が決めた outcome（`outcome_from_result` と同じ検査。結果の値は owner の規則で読む）。"""
+
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import outcome_from_projection
+
+    raw_declared = live_values.attribute(result, "final_outcome")
+    declared: Any = None
+    if raw_declared is not None:
+        # 基底型の文字列（str の enum も `json_scalar` で値の文字列）。文字列でなければ比べて矛盾にする
+        base = live_values.json_scalar(raw_declared)
+        declared = base if type(base) is str else _NOT_AN_OUTCOME
+    raw_equivalent = live_values.attribute(result, "is_equivalent")
+    # `True` / `False` / `None` の identity だけを渡す（それ以外は矛盾の印）
+    equivalent: Any = (
+        True if raw_equivalent is True else False if raw_equivalent is False
+        else None if raw_equivalent is None else _NOT_AN_OUTCOME
+    )
+    from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
+
+    receipt = live_values.attribute(result, "decision_receipt")
+    if type(receipt) is not DecisionReceipt:
+        raise ValueError("canonical result lacks its DecisionReceipt authority")
+    return outcome_from_projection(receipt, final_outcome=declared, is_equivalent=equivalent)
+
+
+#: `decided_outcome_of` が矛盾として渡す印（どの outcome とも等しくない plain な値）
+_NOT_AN_OUTCOME = "<not an outcome>"

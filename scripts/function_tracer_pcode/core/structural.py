@@ -11,6 +11,7 @@ import hashlib
 import json
 from typing import Any, Optional, Tuple
 
+from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.semantic_lifecycle import is_validated
@@ -1034,10 +1035,17 @@ def structural_identity_digest(expr: Optional[Expression]) -> Optional[str]:
     expr = _validated(expr)
     if expr is None:
         return None
-    if not expr.__dict__.get("_identity_complete", False):
+    # 凍結が `__dict__` に置いた値だけを owner の API で読む（出力の入口から live な値が渡る）
+    complete = live_values.instance_state(expr, "_identity_complete", False)
+    if complete is not True and (complete is False or not live_values.as_bool(complete)):
         return None
-    digest = expr.__dict__.get("_equivalence_digest")
-    return None if digest is None else digest.hex()
+    digest = live_values.instance_state(expr, "_equivalence_digest", None)
+    if type(digest) is bytes:
+        return digest.hex()
+    if digest is None:
+        return None
+    # 凍結が置くのは `bytes` だけ（それ以外の値の method は呼ばない）
+    raise TypeError(f"equivalence digest is not bytes ({live_values.type_name(type(digest))})")
 
 
 class StructuralIdentity:

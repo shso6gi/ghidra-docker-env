@@ -266,3 +266,94 @@ CALLEE_UNBOUND_REUSE_SHADOW = _bool_setting("FT_CALLEE_UNBOUND_REUSE_SHADOW", Fa
 # 通常実行の既定値は変えない。明示 limit を渡す呼び出し
 # （``EXPANDER_MAX_OPERATION_CASES``）はこの設定の対象外。
 EXPANDER_DEDUP_CASE_LIMIT = _positive_int_setting("FT_EXPANDER_DEDUP_CASE_LIMIT", 16)
+
+
+# ---------------------------------------------------------------------------
+# 式の大きさの予算（Issue #22 PR-22-D）
+# ---------------------------------------------------------------------------
+#
+# **既定値の唯一の置き場**。値を変えるときに触るのはこの表と policy test だけで、
+# 数える側（expander / renderer / 出力の準備）も authority も変わらない
+# （`core/budget_policy.BudgetPolicy` が typed な値を運ぶ。深い module は環境変数も
+# この module も読まない）。値の根拠（U-1 の実測）は PR-22-D の本文に残す。
+#
+# 環境変数で個別に上書きできる。正の整数はその値、`off` / `none` / `unlimited` /
+# `0` はその予算だけ無効（制限しない）、それ以外（空・不正値）は既定値。runner は
+# これらを渡さない（run 単位の調査用）。無効にしても出力の準備は authority の契約の上限
+# （結果の preimage、`checker/output_preparation.output_contract_policy`）を超えない。
+
+#: (BudgetPolicy の field 名, 環境変数, 既定値)。既定値 `None` は無制限。
+#:
+#: 値の根拠（U-1、PR-22-D 時点の実測。固定 subset 144 pair・recorded corpus・
+#: `ell/ellProgram` B12_B16 の 11 関数・subset の TIMEOUT 5 pair を予算無しで流し、
+#: kill された pair は stage journal の観測値を読んだ）:
+#:
+#: * 観測した最大値はどれも小さい — 展開の distinct node < 2048
+#:   （`ellProgram/snippet`。EQ / NOT_EQ に届いた pair では最大 84）、展開 case
+#:   < 32、solver へ渡す描画 14,485 B、木表現 545 KB、結果 JSON 2.45 MB
+#:   （うち authority 確定後の field + 診断 2.39 MB、準備した payload 277 KB）、
+#:   snapshot 1 つ分の木表現 836 KB / distinct node 438。
+#: * kill された 12 pair はすべて条件簡約（CNF / 構造比較 / oracle）か solver の
+#:   区間にいて、式の大きさで止まっていない（#105 / #106 の担当）。
+#:
+#: したがって予算は「指数的な膨張に対する安全上限」で、TIMEOUT を狙って値を
+#: 下げない（下げても正しい判定を削るだけで、時間の原因には届かない）。既定値は
+#: 観測の最大値に対して 8〜290 倍の余裕を取った 2 の冪。`serialization_nodes` は
+#: `expression_nodes` 以上にしてある（展開の予算が許した式は直列化できる）。
+#: 値を変えるときはこの表だけを変え、根拠の実測を PR に残す。
+EXPRESSION_BUDGET_DEFAULTS = (
+    ("expression_nodes", "FT_EXPRESSION_NODE_BUDGET", 1 << 14),       # 16,384
+    ("expansion_cases", "FT_EXPANSION_CASE_BUDGET", 1 << 10),         # 1,024
+    ("render_bytes", "FT_RENDER_BYTES_BUDGET", 1 << 22),              # 4 MiB
+    ("serialization_bytes", "FT_SERIALIZATION_BYTES_BUDGET", 1 << 26),  # 64 MiB
+    ("serialization_nodes", "FT_SERIALIZATION_NODE_BUDGET", 1 << 16),  # 65,536
+    ("envelope_headroom_bytes", "FT_ENVELOPE_HEADROOM_BYTES", 1 << 25),  # 32 MiB
+)
+
+_BUDGET_OFF_WORDS = frozenset({"off", "none", "unlimited", "0"})
+
+
+def _budget_setting(name: str, default: Optional[int], environ=None) -> Optional[int]:
+    """予算 1 つを環境変数から読む（`off` 系は無効、読めない値・1 未満の値は既定値）。
+
+    値 1 つずつの誤りは既定値へ戻す。値どうしの組み合わせの誤りは `expression_budget_policy` が
+    起動時に止める（下）。
+    """
+
+    source = environ if environ is not None else os.environ
+    raw = source.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    text = str(raw).strip().lower()
+    if text in _BUDGET_OFF_WORDS:
+        return None
+    try:
+        value = int(text, 10)
+    except ValueError:
+        return default
+    return value if value >= 1 else default
+
+
+def expression_budget_policy(environ: Optional[Mapping[str, str]] = None):
+    """既定値と環境変数から、pair に適用する `BudgetPolicy` を組み立てる。
+
+    値どうしの組み合わせの誤り（`FT_SERIALIZATION_BYTES_BUDGET` が `FT_ENVELOPE_HEADROOM_BYTES`
+    以下、など）は既定値へ黙って戻さず、どの環境変数かを示す `ValueError` で起動時に止める（どちらを
+    直すべきかは設定した人にしか分からない。pair を 1 つも走らせない fail-fast）。headroom の `off`
+    は 0 で、直列化の予算が有限なら出力 schema の最小値を満たさない（`EquivalenceChecker` の構築で
+    `EnvelopeHeadroomTooSmall`）。
+    """
+
+    from scripts.function_tracer_pcode.core.budget_policy import BudgetPolicy
+
+    values = {}
+    for field_name, env_name, default in EXPRESSION_BUDGET_DEFAULTS:
+        value = _budget_setting(env_name, default, environ)
+        if field_name == "envelope_headroom_bytes":
+            value = 0 if value is None else value
+        values[field_name] = value
+    try:
+        return BudgetPolicy(**values)
+    except ValueError as exc:
+        names = ", ".join(f"{env_name}={values[field_name]}" for field_name, env_name, _ in EXPRESSION_BUDGET_DEFAULTS)
+        raise ValueError(f"inconsistent expression budget settings ({names}): {exc}") from exc

@@ -316,6 +316,36 @@ A run recorded before this field existed names no schema and is read as the
 previous (v2) config unchanged; the soundness gate reports its mode as
 `legacy_unknown` and does not guess.
 
+### Expression size budgets (Issue #22)
+
+Each pair process builds one `BudgetPolicy` from these environment variables
+(`config/settings.EXPRESSION_BUDGET_DEFAULTS` is the only place the defaults live):
+
+| Variable | Default | Bounds |
+|---|---|---|
+| `FT_EXPRESSION_NODE_BUDGET` | 16,384 | distinct nodes one MULTIEQUAL expansion may build |
+| `FT_EXPANSION_CASE_BUDGET` | 1,024 | cases one MULTIEQUAL expansion may build |
+| `FT_RENDER_BYTES_BUDGET` | 4 MiB | SMT text rendered for the solver |
+| `FT_SERIALIZATION_BYTES_BUDGET` | 64 MiB | JSON bytes of one analysis representation / the whole result |
+| `FT_SERIALIZATION_NODE_BUDGET` | 65,536 | distinct expression nodes one serialization refers to |
+| `FT_ENVELOPE_HEADROOM_BYTES` | 32 MiB | part of the result budget kept for fields written after the decision |
+
+`off` / `none` / `unlimited` / `0` disables a budget (for investigation; output
+preparation is still capped by the authority contract). An unreadable value or a
+value below 1 falls back to the default. An inconsistent combination (for example a
+serialization budget not larger than the headroom, or a headroom too small for the
+output schema) stops the process at start-up with an error naming the variables,
+so no pair runs with a guessed policy.
+
+A pair that exceeds a budget before the decision ends as `UNKNOWN` with the registered
+reason `expression_size_budget_exceeded` (a pair-terminal limitation, never
+`EQUIVALENT` / `NOT_EQ`). A read that receives no work budget and exceeds the fixed read
+bound (4,096 entries, `core/read_limits`) is `UNKNOWN` with `analysis_budget_exceeded`
+(`FixedReadBoundExceeded`, not a deadline). A failure while writing the output after
+the decision is a durable `ERROR` that keeps the superseded decision receipt. The
+budgets are safety bounds against exponential growth: do not lower them to turn a
+`TIMEOUT` into `UNKNOWN`.
+
 ### Measurement subset
 
 `scripts/function_tracer_pcode/reporting/eqbench_subset.json` fixes a small

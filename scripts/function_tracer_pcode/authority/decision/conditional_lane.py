@@ -48,13 +48,15 @@ partition、ABI 幅、recurrence、argument extraction など）は残り、
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Optional, Sequence, Tuple
+from contextlib import contextmanager
+from typing import Any, Iterator, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.authority.contracts import (
     Outcome,
     VerifiedLifecycleProjection,
 )
 from scripts.function_tracer_pcode.authority.decision.conditional import (
+    assumption_set_receipt_bound_violation,
     ConditionalDecisiveProofKind,
     ConditionalDecisiveProofReceipt,
     ConditionalFinalizationAuthority,
@@ -429,6 +431,56 @@ def issue_conditional_decision(
     return finalize_conditional_decision(authority)
 
 
+class _PostDecisionConsumer:
+    """authority 確定後の consumer の台帳 identity（どの pair の台帳とも一致しない）。"""
+
+    __slots__ = ("label",)
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    def __repr__(self) -> str:  # pragma: no cover - debug 表示
+        return f"PostDecisionConsumer({self.label})"
+
+
+@contextmanager
+def post_decision_failure_scope(label: str = "conditional_lane") -> Iterator[Any]:
+    """authority 確定 **後** の計算を、pair の台帳から切り離して走らせる scope。
+
+    Issue #22 PR-22-D: 判定と receipt は既に確定している。その後の計算（conditional
+    lane の proof）で上がった限界・内部バグは pair の台帳へ入れてはいけない — 入れて
+    も判定は変えられず、「pair を止めた failure が結果に出ていない」状態だけが残る。
+    既存の `pair_failure_scope` に **どの pair とも一致しない identity** を渡すと
+    新しい台帳が積まれるので、scope の中の `raise_limitation` / `record_internal_bug`
+    はその台帳へ記録され、抜けると捨てられる。consumer はその台帳を読んで、自分の
+    結果だけを fail closed にする（途中で例外が握り潰されても記録は残る）。
+
+    `PairExecutionControl` には何も足さない（pair lifecycle の owner は PR-106-0 の
+    台帳、deadline の finalization は PR-106-A の `Deadline`）。
+    """
+
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+
+    with pair_failure_scope(_PostDecisionConsumer(label), None) as ledger:
+        yield ledger
+
+
+def _stopped_lane_diagnostic(exc: BaseException, *, swallowed: bool) -> Mapping[str, Any]:
+    """lane を止めた failure の診断（限界なら reason、内部バグなら元の例外型）。"""
+
+    reason_id = getattr(exc, "reason_id", None)
+    return {
+        "conditional_lane": (
+            "stopped_by_limitation" if reason_id is not None else "stopped_by_internal_error"
+        ),
+        "reason_id": reason_id if reason_id is not None else getattr(
+            exc, "exception_type", type(exc).__name__
+        ),
+        "site": getattr(exc, "site", None),
+        "swallowed": swallowed,
+    }
+
+
 def run_production_conditional_lane(
     result: Any,
     *,
@@ -449,6 +501,7 @@ def run_production_conditional_lane(
     from scripts.function_tracer_pcode.authority.decision.production_cutover import (
         attach_conditional_decision,
     )
+    from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
     from scripts.function_tracer_pcode.proof.conditional_lane import (
         run_conditional_proof,
     )
@@ -462,15 +515,21 @@ def run_production_conditional_lane(
     analysis1, analysis2 = analyses
 
     try:
-        artifact = run_conditional_proof(
-            analysis1,
-            analysis2,
-            input_correspondence=input_correspondence_factory(),
-            observation_policy=observation_policy,
-            solver_runner=solver_runner,
-            timeout=timeout,
-            debug=debug,
-        )
+        with post_decision_failure_scope() as lane_ledger:
+            artifact = run_conditional_proof(
+                analysis1,
+                analysis2,
+                input_correspondence=input_correspondence_factory(),
+                observation_policy=observation_policy,
+                solver_runner=solver_runner,
+                timeout=timeout,
+                debug=debug,
+            )
+            stopped = lane_ledger.pending_failure()
+        if stopped is not None:
+            # 計算の途中で限界 / 内部バグが記録され、どこかで握り潰された。結果は
+            # 不完全なので conditional 列を作らない（fail closed。判定は確定済み）。
+            return _stopped_lane_diagnostic(stopped.exception, swallowed=True)
         if not artifact.assumption_set:
             # view が立たなかった。conditional 列は作らない（fail closed）。
             return {
@@ -487,6 +546,17 @@ def run_production_conditional_lane(
                 "assumption_count": len(artifact.assumption_set),
                 "diagnostics": dict(artifact.diagnostics),
             }
+        over_bound = assumption_set_receipt_bound_violation(tuple(artifact.assumption_set))
+        if over_bound is not None:
+            # receipt の契約（仮定の数と大きさ）に収まらない: receipt を作らない（fail closed。
+            # 確定済みの判定・exit code は不変。出力の契約違反の ERROR にしない）
+            return {
+                "conditional_lane": "over_receipt_bound",
+                "detail": over_bound,
+                "assumption_count": len(artifact.assumption_set),
+                "non_decisive_reasons": list(artifact.non_decisive_reasons),
+                "diagnostics": dict(artifact.diagnostics),
+            }
         receipt = issue_conditional_decision(
             unconditional_decision=decision,
             projection=projection,
@@ -494,6 +564,11 @@ def run_production_conditional_lane(
             result=result,
         )
         attach_conditional_decision(result, receipt)
+    except AnalysisLimitation as exc:
+        # Issue #22 PR-22-D: lane は authority 確定の **後** に走る非 authoritative
+        # な consumer。そこで上がった限界（式サイズ予算など）は lane 自身の台帳に
+        # 閉じ（pair の台帳・判定・receipt は変わらない）、lane の結果だけを作らない。
+        return _stopped_lane_diagnostic(exc, swallowed=False)
     except Exception as exc:  # noqa: BLE001
         # conditional 列は付けない。無条件の判定・reason・exit code は不変。
         return {

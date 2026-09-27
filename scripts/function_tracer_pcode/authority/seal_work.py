@@ -81,25 +81,29 @@ class SealWorkBudget(SealWork):
     def for_seal(
         cls, *, preimage_units: int,
         contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT,
+        passes: int = 2,
     ) -> "SealWorkBudget":
-        """契約の上限の stream と、上限 `preimage_units` の preimage を封印・検証・永続化できる作業量。
+        """契約の上限の stream と、上限 `preimage_units` の preimage を `passes` 回封印・検証・永続化できる作業量。
 
         上限の内側の入力で封印が作業量の不足で失敗しない（決定的: 同じ入力なら同じ量を数える）。
         preimage はこの上限の中でだけ封印する（`SealPlan.price` が測りながら強制する）。
+        `passes` は 1 つの作業量で行う封印と永続化の回数の和（既定は封印 1 回 + 永続化 1 回）。
         """
 
         return cls(
-            seal_work_limit(contract=contract, preimage_units=preimage_units),
+            seal_work_limit(contract=contract, preimage_units=preimage_units, passes=passes),
             preimage_limit=preimage_units,
         )
 
     @classmethod
     def for_result(
-        cls, contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT,
+        cls, contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT, *, passes: int = 2,
     ) -> "SealWorkBudget":
         """結果の payload 全体を preimage にする呼び出し側（CLI・結果の検証・reporting）の作業量。"""
 
-        return cls.for_seal(preimage_units=contract.max_result_preimage_units, contract=contract)
+        return cls.for_seal(
+            preimage_units=contract.max_result_preimage_units, contract=contract, passes=passes,
+        )
 
     @classmethod
     def for_supervisor(
@@ -294,16 +298,19 @@ class SealPlan:
 
 def seal_work_limit(
     *, contract: AuthorityEventContract = AUTHORITY_EVENT_CONTRACT, preimage_units: int,
+    passes: int = 2,
 ) -> int:
-    """契約の上限の入力を封印し、検証し、永続化する作業量の上限（測る分 + 全段の和、封印と永続化の 2 回分）。
+    """契約の上限の入力を `passes` 回（封印と永続化の回数の和）封印・検証・永続化する作業量の上限。
 
-    成分の上限は全部 `authority/event_contract` の契約（`SealPlan.price` が測りながら強制する）と
-    呼ぶ側の preimage の上限だけから導く: 契約の内側の入力は作業量の不足で失敗しない。測る分は
-    object の形（`price`）と encode した形（`check_sealed_form`）の 2 回。
+    1 回分は測る分 + 全段の和。成分の上限は全部 `authority/event_contract` の契約（`SealPlan.price` が
+    測りながら強制する）と呼ぶ側の preimage の上限だけから導く: 契約の内側の入力は作業量の不足で
+    失敗しない。測る分は object の形（`price`）と encode した形（`check_sealed_form`）の 2 回。
     """
 
     if type(preimage_units) is not int or preimage_units < 0:
         raise ValueError("a seal work limit needs a non-negative preimage bound")
+    if type(passes) is not int or passes < 1:
+        raise ValueError("a seal work limit covers at least one pass")
     worst = SealComponents(
         stream=contract.max_sealed_stream_units, events=contract.max_sealed_events,
         projection=contract.max_projection_units, receipts=contract.max_receipt_units,
@@ -317,7 +324,7 @@ def seal_work_limit(
         sum(weight * worst.get(name) for name, weight in coefficients.items())
         for coefficients in SEAL_COST_MODEL.values()
     )
-    return 2 * (priced + steps)
+    return passes * (priced + steps)
 
 
 def persisted_envelope_byte_limit(
@@ -326,8 +333,9 @@ def persisted_envelope_byte_limit(
 ) -> int:
     """永続化した canonical result envelope の byte 数の上限（preimage + 契約の上限の bundle）。
 
-    canonical unit は UTF-8 の JSON の byte 以上。envelope の file は ASCII の escape（非 ASCII の 1 文字が
-    `\\uXXXX` の 6〜12 byte、UTF-8 の 2〜4 byte の高々 3 倍）で書くので、封印した形の倍率を掛ける。
+    canonical unit は UTF-8 の JSON の byte 以上。envelope の file は結果 JSON と同じ文字列の規則
+    （`PERSISTED_ENVELOPE_JSON_POLICY`: UTF-8 のまま、UTF-8 で書けない surrogate だけ `\\uXXXX` の 6 byte、
+    canonical の 3 byte の 2 倍）で書くので、封印した形の倍率（その 2 倍以上）を掛ける。
     書く側（`persist_canonical_result_envelope`）はこの上限を超える envelope を書かない。
     """
 

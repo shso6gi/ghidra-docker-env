@@ -243,6 +243,11 @@ class ConditionTracker:
             if budget_sink is not None:
                 budget_sink(truncation)
 
+        # 包んでも所有 scope は変わらない（式サイズ予算の target が読む）。
+        observing_budget_sink.owner_scope_key = getattr(
+            budget_sink, "owner_scope_key", None
+        )
+
         expander = ExpressionExpander(
             self.tracer,
             self,

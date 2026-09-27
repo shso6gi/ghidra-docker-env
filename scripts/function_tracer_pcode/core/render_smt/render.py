@@ -12,7 +12,18 @@ from scripts.function_tracer_pcode.core.render_smt.attributes import (
     evaluate_attribute,
     render_attribute_scope,
 )
-from scripts.function_tracer_pcode.core.render_output import CountingWriter, RenderCounters
+from scripts.function_tracer_pcode.core.render_output import (
+    CountingWriter,
+    RenderCounters,
+    RenderOutputLimitExceeded,
+    utf8_length,
+)
+from scripts.function_tracer_pcode.core.budget_policy import (
+    BudgetKind,
+    active_budget_policy,
+    observe_budget_usage,
+    raise_render_budget_exceeded,
+)
 from scripts.function_tracer_pcode.core.render_metrics import record_render
 from scripts.function_tracer_pcode.core.render_plan import (
     NO_SHARING_POLICY,
@@ -209,6 +220,10 @@ class UnsupportedSmtOperatorError(UnsupportedSmtSemanticsError):
         )
 
 
+#: solver へ渡す描画の出力を観測・予算判定する点（書き出し口は `CountingWriter`）。
+SOLVER_RENDER_SITE = "core.render_smt.emit"
+
+
 def expression_to_smt(
     expr,
     *,
@@ -236,12 +251,20 @@ def expression_to_smt(
 
     if expr is not None and not _is_published_semantic_input(expr):
         raise _unpublished_semantic_input(expr)
-    return _to_smt_internal(
-        expr,
-        symbol_name_mapping=symbol_name_mapping,
-        float_mode=float_mode,
-        shared=shared,
-    )
+    # Issue #22 PR-22-D: solver へ渡す描画だけに出力予算を当てる。証拠・表示用の
+    # 入口（下の 2 つ）は判定に使わないので予算で pair を止めない。
+    try:
+        text = _to_smt_internal(
+            expr,
+            symbol_name_mapping=symbol_name_mapping,
+            float_mode=float_mode,
+            shared=shared,
+            limit_bytes=active_budget_policy().render_bytes,
+        )
+    except RenderOutputLimitExceeded as exc:
+        raise_render_budget_exceeded(exc, subject=expr)
+    observe_budget_usage(BudgetKind.RENDER_BYTES, utf8_length(text), site=SOLVER_RENDER_SITE)
+    return text
 
 
 def render_expression_smt_evidence(
@@ -287,12 +310,18 @@ def condition_to_smt(
 
     if condition is not None and not _is_published_semantic_input(condition):
         raise _unpublished_semantic_input(condition)
-    return _condition_to_smt_internal(
-        condition,
-        symbol_name_mapping=symbol_name_mapping,
-        float_mode=float_mode,
-        shared=shared,
-    )
+    try:
+        text = _condition_to_smt_internal(
+            condition,
+            symbol_name_mapping=symbol_name_mapping,
+            float_mode=float_mode,
+            shared=shared,
+            limit_bytes=active_budget_policy().render_bytes,
+        )
+    except RenderOutputLimitExceeded as exc:
+        raise_render_budget_exceeded(exc, subject=condition)
+    observe_budget_usage(BudgetKind.RENDER_BYTES, utf8_length(text), site=SOLVER_RENDER_SITE)
+    return text
 
 
 def render_condition_smt_evidence(
@@ -320,6 +349,7 @@ def _condition_to_smt_internal(
     address_context: Any = None,
     float_mode: str = "uf",
     shared: bool = True,
+    limit_bytes: Optional[int] = None,
 ) -> str:
     """条件の描画入口。**renderer 内部の再帰はここを通らない**。
 
@@ -341,6 +371,7 @@ def _condition_to_smt_internal(
         context,
         symbol_name_mapping,
         shared=shared,
+        limit_bytes=limit_bytes,
     )
 
 
@@ -850,6 +881,7 @@ def _to_smt_internal(
     float_mode: str = "uf",
     *,
     shared: bool = True,
+    limit_bytes: Optional[int] = None,
 ) -> str:
     """描画の内部入口。**反復**で DAG を 1 回だけ辿る。
 
@@ -868,6 +900,7 @@ def _to_smt_internal(
         context,
         symbol_name_mapping,
         shared=shared,
+        limit_bytes=limit_bytes,
     )
 
 
