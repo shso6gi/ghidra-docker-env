@@ -33,8 +33,8 @@ def main(argv) -> int:
         queries.append(("pairwise", hashlib.sha256(smt_script.encode()).hexdigest()))
         return original_direct(self, smt_script, *args, **kwargs)
 
-    def _logged_build(cls, conditions):
-        usable, script = original_build(cls, conditions)
+    def _logged_build(cls, conditions, **kwargs):
+        usable, script = original_build(cls, conditions, **kwargs)
         if script is not None:
             queries.append(("oracle", hashlib.sha256(script.encode()).hexdigest()))
         return usable, script

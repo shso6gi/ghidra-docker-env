@@ -1007,21 +1007,40 @@ def test_d13_dpll_decisions_and_satisfiability_calls_are_counted(monkeypatch, sc
     assert per_call["count"] == 1 and per_call["max"] == snapshot["counters"]["dpll.decisions"]
 
 
-def test_d13_counters_reach_the_result_diagnostics(scoped):
+def test_d13_counters_reach_the_result_json(scoped):
+    """D13: 計測は出力の準備が診断へ写し、結果 JSON の `diagnostics.condition_simplify` に出る。"""
+
     from scripts.function_tracer_pcode.checker import output_preparation
+    from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 
     scoped.metrics.note("oracle.queries", 3)
     scoped.metrics.observe("dpll.decisions_per_call", 5)
-    result = SimpleNamespace(diagnostics={"existing": 1})
+    result = EquivalenceResult(
+        is_equivalent=None, function1_name="l", function2_name="r",
+        binary1_name="L", binary2_name="R", solver_results=None,
+    )
+    result.diagnostics = {"failures": {"total": 0}}
     prepared = SimpleNamespace(plan=SimpleNamespace(to_diagnostic=lambda: {}))
     policy = SimpleNamespace(to_diagnostic=lambda: {})
     output_preparation._attach_budget_diagnostics(result, prepared, policy)
 
-    block = result.diagnostics["condition_simplify"]
+    block = result.to_dict()["diagnostics"]["condition_simplify"]
     assert block["schema"] == "condition-simplify-metrics-v1"
     assert block["counters"]["oracle.queries"] == 3
     assert block["distributions"]["dpll.decisions_per_call"]["max"] == 5
-    assert result.diagnostics["existing"] == 1
+    assert result.to_dict()["diagnostics"]["failures"] == {"total": 0}
+
+
+def test_d13_no_counters_outside_a_pair_scope_means_no_diagnostic_block():
+    from scripts.function_tracer_pcode.checker import output_preparation
+
+    assert active_condition_metrics() is None
+    result = SimpleNamespace(diagnostics={})
+    prepared = SimpleNamespace(plan=SimpleNamespace(to_diagnostic=lambda: {}))
+    output_preparation._attach_budget_diagnostics(
+        result, prepared, SimpleNamespace(to_diagnostic=lambda: {})
+    )
+    assert "condition_simplify" not in result.diagnostics
 
 
 def test_d13_counters_do_not_change_answers(monkeypatch):
