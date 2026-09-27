@@ -54,11 +54,19 @@ _PACKAGE_FILES: dict = {}
 #:   一部で、型ごとに cache する。上限の外は「確かめられない」= 信頼しない（述語）/ `TypeError`（型の
 #:   属性を読む関数）。文脈（作業量の有無）に依らない値にする（cache の判定が履歴で変わらない）。
 #: * **値の storage**（dict / instance の `__dict__` の key・key の tuple の node・包んだ
-#:   `MappingProxyType` の段・写す容器）: 上限の外は安全でないという判定ではなく **量** の信号
-#:   （`StorageBeyondReadBound`）。作業量を持つ owner が `metered_storage_reads` で包んだ読みでは、
-#:   上限を超えた分をその作業量へ数えて読む（その作業量の超過がその owner の意味）。包んでいない読みでは
-#:   信号を上げる（意味（限界の種類）は受け取る owner が決める: `core/read_limits` と pair の境界）。
-#:   述語は量のせいで「安全でない」（False / None）とは答えない。
+#:   `MappingProxyType` の段・写す容器）: 上限の外は安全でないという判定ではなく **量** の問題で、
+#:   意味はこの module が決めない。今の文脈の量の owner が決める（`_StorageRead.admit` の 1 箇所）:
+#:
+#:   - 作業量を持つ owner の読み（`metered_storage_reads`）: 超えた分をその作業量へ数えて読む（超過の
+#:     意味はその作業量の owner のもの。上限の無い作業量は組み込みの容器と同じく上限なしで読む）。
+#:   - 上限なしで辿ると宣言した owner の読み（`unbounded_storage_reads`: 予算なしの凍結）: 上限なしで
+#:     読む（その owner は組み込みの容器も上限なしで辿る）。
+#:   - 意味を自分で決めると宣言した読み（`signalled_storage_reads`）: 量の信号
+#:     `StorageBeyondReadBound` を呼ぶ側へ上げる（型の信頼の判定・診断の写し）。
+#:   - それ以外（作業量を受け取らない読み）: 登録した量の意味の owner（`core/read_limits`）が型つきの
+#:     限界を台帳へ記録して上げる（`register_unmetered_read_owner`）。
+#:
+#:   述語は量のせいで「安全でない」（False / None / `TypeError`）とは答えない。
 #:
 #: 上限は package と実行環境の型の namespace・record の instance の状態・解析の record の key の実測の
 #: 最大（`test_issue22d_live_values_bounds.py` が固定 subset の値を記録する）に対して十分大きい 2 の冪
@@ -83,8 +91,9 @@ class StorageBeyondReadBound(Exception):
 
     「安全に読めない」という判定（`TypeError`）ではなく、意味の限界（`AnalysisLimitation`）でもない:
     どちらの型からも派生しない（`except TypeError` の回復用の handler が「安全でない値」と読み替えない、
-    限界の種類を live な値の owner が決めない）。受け取る owner が意味を決める: 作業量を受け取らない読みは
-    `core/read_limits`（型つきの限界）、pair の境界に届いたものは失敗の種類の owner（`core/errors`）。
+    限界の種類を live な値の owner が決めない）。上がるのは `signalled_storage_reads` の中（呼ぶ側が
+    その場で意味を決める）と、量の意味の owner が登録されていない process（この module だけを使う
+    test）だけ。pair の境界へは届かない（作業量を受け取らない読みは登録した owner が限界にする）。
     """
 
     def __init__(self, what: str, observed: int) -> None:
@@ -96,34 +105,65 @@ class StorageBeyondReadBound(Exception):
 
 #: 値の storage の読みを数える作業量の型（`register_storage_meter` で owner が登録する: `JsonBudget`）
 _STORAGE_METER_TYPES: list = []
-#: 今の読みを数える作業量（`metered_storage_reads` の中だけ。context ごと）
+#: 今の読みの量の owner（context ごと）: 作業量（`metered_storage_reads`）・`_SIGNALLED`
+#: （`signalled_storage_reads`）・`None`（作業量を受け取らない読み: 登録した量の意味の owner）
 _STORAGE_METER = contextvars.ContextVar("live_values_storage_meter", default=None)
+#: `signalled_storage_reads` の中の印（量の信号を呼ぶ側へ上げる）
+_SIGNALLED = object()
+#: `unbounded_storage_reads` の中の印（上限なしで読む）
+_UNBOUNDED = object()
+#: 作業量を受け取らない読みの量の意味の owner（`register_unmetered_read_owner` で 1 つだけ）
+_UNMETERED_READ_OWNER: list = []
 
 
 def register_storage_meter(kind: type) -> None:
     """値の storage の読みを数えてよい作業量の型を登録する（作業量の owner が import のときに 1 度）。
 
     その型（と subclass）の `charge(units)` は、上限を超えたら自分の超過（`JsonBudgetExhausted` /
-    terminal な作業量の限界）を上げる owner の method で、`remaining()` は残り（上限が無ければ `None`:
-    その作業量は固定の上限を外さない）を返す。
+    terminal な作業量の限界）を上げる owner の method（上限の無い作業量は数えるだけ）。
     """
 
     if type(kind) is not type or not package_type(kind):
         raise TypeError("a storage meter is a package type")
-    if kind not in _STORAGE_METER_TYPES:
+    if not any(kind is known for known in _STORAGE_METER_TYPES):
         _STORAGE_METER_TYPES.append(kind)
+
+
+def register_unmetered_read_owner(owner: Any) -> None:
+    """作業量を受け取らない読みが固定の上限を超えたときの意味の owner を登録する（`core/read_limits` が
+    import のときに 1 度。2 つ目の owner は `ValueError`）。
+
+    `owner(what, observed)` は型つきの限界を台帳へ記録して上げる package の関数（戻らない。戻れば量の
+    信号を上げる）。この module は限界の種類を知らない（標準 library だけを import する）ので、owner の
+    側が自分を登録する。
+    """
+
+    if type(owner) is not types.FunctionType or not package_code(owner.__code__):
+        raise TypeError("an unmetered read owner is a package function")
+    if _UNMETERED_READ_OWNER:
+        if _UNMETERED_READ_OWNER[0] is not owner:
+            raise ValueError("the unmetered read owner is already registered")
+        return
+    _UNMETERED_READ_OWNER.append(owner)
 
 
 def _registered_meter(meter: Any) -> bool:
     kind = type(meter)
+    # 登録した型そのもの（walk ごとに作る owner の作業量の大半）は同一性だけで。subclass は MRO を辿る
+    for base in _STORAGE_METER_TYPES:
+        if kind is base:
+            return True
     return any(_in_mro(base, kind) for base in _STORAGE_METER_TYPES)
 
 
 class metered_storage_reads:
     """この中の値の storage の読みは、固定の上限を超えた分を `meter` へ数えて読む（作業量を持つ owner だけが使う）。
 
-    `meter` が `None` なら何もしない（外の meter をそのまま使う: 作業量の無い入れ子の owner が、外の
-    作業量で数えている読みを数えない読みへ戻さない）。
+    固定の上限の中の分は数えず、超えた分だけを `meter.charge` へ（上限の内側の入力の勘定を変えない）。
+    上限の無い作業量の読みは上限なしで読む（その owner は組み込みの容器も上限なしで辿る: 容器の種類で
+    結果を変えない）。入れ子では内側の作業量で数える（読むのは内側の owner の走査）。`meter` が `None`
+    なら何もしない（外の owner をそのまま使う: 作業量の無い入れ子の owner が、外の作業量で数えている
+    読みを数えない読みへ戻さない）。
     """
 
     __slots__ = ("meter", "_token")
@@ -146,9 +186,10 @@ class metered_storage_reads:
             self._token = None
 
 
-class _Unmetered:
-    """この中の値の storage の読みは作業量で数えない（型の信頼の判定: 判定を文脈に依らない値にする）。
-    使うたびに作る（token を instance が持つ: thread・入れ子の間で共有しない）。"""
+class unbounded_storage_reads:
+    """この中の値の storage の読みは上限なしで読む（作業量を持たずに値全体を辿ると宣言した owner だけが
+    使う: 予算なしの凍結。その owner は組み込みの容器も上限なしで辿るので、確かめの要る容器（`OrderedDict`・
+    proxy）だけを止めない。上限の無い作業量の `metered_storage_reads` と同じ意味）。"""
 
     __slots__ = ("_token",)
 
@@ -156,7 +197,26 @@ class _Unmetered:
         self._token = None
 
     def __enter__(self) -> None:
-        self._token = _STORAGE_METER.set(None)
+        self._token = _STORAGE_METER.set(_UNBOUNDED)
+
+    def __exit__(self, *_exc: Any) -> None:
+        _STORAGE_METER.reset(self._token)
+
+
+class signalled_storage_reads:
+    """この中の値の storage の読みは、上限を超えたら量の信号 `StorageBeyondReadBound` を呼ぶ側へ上げる
+    （作業量で数えず、限界も記録しない）。量の意味をその場で決める owner だけが使い、同じ関数の中で
+    信号を捕まえる（型の信頼の判定: 文脈に依らない「信頼しない」。診断の写し: 写せた先頭まで）。
+    使うたびに作る（token を instance が持つ: thread・入れ子の間で共有しない）。
+    """
+
+    __slots__ = ("_token",)
+
+    def __init__(self) -> None:
+        self._token = None
+
+    def __enter__(self) -> None:
+        self._token = _STORAGE_METER.set(_SIGNALLED)
 
     def __exit__(self, *_exc: Any) -> None:
         _STORAGE_METER.reset(self._token)
@@ -177,11 +237,16 @@ class _StorageRead:
         self.used = used
         if used <= SCAN_LIMIT:
             return
+        # 上限の外の意味は今の文脈の量の owner が決める（この 1 箇所だけ）
         meter = _STORAGE_METER.get()
-        remaining = None if meter is None else _type_lookup(type(meter), "remaining", None)
-        # 上限の無い作業量（`remaining()` が `None`）は固定の上限を外さない: 数えない読みと同じ信号
-        if type(remaining) is not types.FunctionType or remaining(meter) is None:
+        if meter is None:
+            if _UNMETERED_READ_OWNER:
+                _UNMETERED_READ_OWNER[0](self.what, used)
             raise StorageBeyondReadBound(self.what, used)
+        if meter is _SIGNALLED:
+            raise StorageBeyondReadBound(self.what, used)
+        if meter is _UNBOUNDED:
+            return
         charge = _type_lookup(type(meter), "charge", None)
         if type(charge) is not types.FunctionType:
             raise ValueError(f"{type_name(type(meter))} has no charge method")
@@ -189,13 +254,28 @@ class _StorageRead:
         charge(meter, used - max(before, SCAN_LIMIT))
 
 
-def _admit_storage(count: int, what: str) -> None:
-    """値の storage `count` 個を 1 回の走査として読んでよいか（`_StorageRead` の 1 回分）。"""
+def _admit_storage(count: int, what: str) -> Optional["_StorageRead"]:
+    """値の storage `count` 個を 1 回の走査として読んでよいか（`_StorageRead` の 1 回分）。
+
+    上限の外なら数えた読みを返す（同じ走査の入れ子の読みはそれへ足す: `_continued_read`）。
+    """
 
     if count <= SCAN_LIMIT:
         # 上限の内側（よくある形）は数えるものが無い
-        return
-    _StorageRead(what).admit(count)
+        return None
+    read = _StorageRead(what)
+    read.admit(count)
+    return read
+
+
+def _continued_read(read: Optional["_StorageRead"], count: int, what: str) -> "_StorageRead":
+    """`_admit_storage` で `count` 個を数えた走査の続き（入れ子の読みを同じ走査の和へ足す）。上限の
+    内側で数えなかった走査は、数えた数から始める（同じ storage を 2 度数えない）。"""
+
+    if read is None:
+        read = _StorageRead(what)
+        read.used = count
+    return read
 
 
 class _Scan:
@@ -590,8 +670,8 @@ _TRUSTED_BODIES: dict = {}
 
 def _trusted_class_body_uncached(klass: type) -> bool:
     # 型の信頼の判定は文脈に依らない（class ごとに cache する）: class の中の値の storage の読みは作業量で
-    # 数えず、上限の外は「確かめられない」= 信頼しない（量の信号を型の判定の側の答えにする唯一の場所）
-    with _Unmetered():
+    # 数えず限界も記録せず、上限の外は「確かめられない」= 信頼しない（量の信号を型の判定の答えにする場所）
+    with signalled_storage_reads():
         try:
             return _trusted_class_body_values(klass)
         except StorageBeyondReadBound:
@@ -894,7 +974,7 @@ def as_bool(value: Any) -> bool:
     base = plain_scalar(value)
     if base is not NOT_PLAIN:
         return bool(base)
-    if builtin_container(value):
+    if _builtin_length(value):
         return size(value) > 0
     kind = type(value)
     if issubclass(kind, Enum) and builtin_enum(value):
@@ -1331,7 +1411,7 @@ def builtin_mapping(item: Any) -> Any:
     dict / OrderedDict とその subclass（`items` / `__iter__` / `__len__` / 真偽を上書きしないもの）と、
     それらを包む `MappingProxyType`（包んだ値を `gc.get_referents` で確かめる）。`OrderedDict` の系統は
     反復が key の hash で node を引くので、key の hash が組み込みの実装のものだけ（値の storage の読み:
-    上限の外は `None` でなく量の信号）。長さ・真偽だけなら `_builtin_mapping_behaviour`（key を読まない）。
+    上限の外の意味は今の文脈の量の owner）。長さ・真偽だけなら `_builtin_length`（key を読まない）。
     """
 
     inner = _mapping_storage(item)
@@ -1364,10 +1444,6 @@ def _mapping_storage(item: Any) -> Any:
     return item
 
 
-def _builtin_mapping_behaviour(item: Any) -> bool:
-    """長さ・真偽を組み込みの slot で読んでよい mapping か（型の判定だけ。key の hash は確かめない）。"""
-
-    return _mapping_storage(item) is not None
 
 
 def builtin_sequence(item: Any) -> bool:
@@ -1436,10 +1512,17 @@ def _plain_metatype(kind: type) -> bool:
 
 
 def builtin_container(item: Any) -> bool:
-    """長さ・真偽を組み込みの slot で読んでよい容器か（型の判定だけ。反復してよいかは `builtin_mapping` /
-    `elements_of` が確かめる）。"""
+    """反復してよい組み込みの振る舞いの容器か（`elements_of` と同じ判定: mapping は `builtin_mapping`）。
+    長さ・真偽もその基底型の slot で読める。"""
 
-    return builtin_sequence(item) or builtin_set(item) or _builtin_mapping_behaviour(item)
+    return builtin_sequence(item) or builtin_set(item) or builtin_mapping(item) is not None
+
+
+def _builtin_length(item: Any) -> bool:
+    """長さ・真偽を組み込みの slot で読んでよい容器か（`size` / `as_bool` の側。型の判定だけで key を
+    読まない: 反復してよいかは `builtin_container` が確かめる）。"""
+
+    return builtin_sequence(item) or builtin_set(item) or _mapping_storage(item) is not None
 
 
 def size(item: Any) -> int:
@@ -1526,27 +1609,33 @@ def values_of(mapping: Any) -> Iterator[Any]:
 
 
 def _plain_keys(raw: dict) -> bool:
-    """storage の key が全部 plain な値（`_plain_key`。hash・比較が組み込みの実装）か。"""
+    """storage の key が全部 plain な値（`_plain_key`。hash・比較が組み込みの実装）か。key と key の
+    tuple の node の和を 1 回の走査として数える（key ごとに上限まで辿ると上限の積になる）。"""
 
-    _admit_storage(dict.__len__(raw), "a mapping's keys")
+    count = dict.__len__(raw)
+    read = _admit_storage(count, "a mapping's keys")
     if _exact_str_raw(raw):
         # よくある形（instance の `__dict__`・record）: 型を C の比較だけで確かめる（key ごとの判定を省く）
         return True
+    read = _continued_read(read, count, "a mapping's keys")
     for key in dict.__iter__(raw):
-        if not _plain_key(key):
+        if not _plain_key(key, read):
             return False
     return True
 
 
 def _hash_safe_keys(raw: dict) -> bool:
     """storage の key の hash・比較が全部組み込みの実装か（組み込みの scalar・hash を上書きしない
-    scalar の subclass・組み込みのままの enum・それらの tuple）。storage を `dict.__iter__` で読む。"""
+    scalar の subclass・組み込みのままの enum・それらの tuple）。storage を `dict.__iter__` で読む。
+    key と key の tuple の node の和を 1 回の走査として数える。"""
 
-    _admit_storage(dict.__len__(raw), "a mapping's keys")
+    count = dict.__len__(raw)
+    read = _admit_storage(count, "a mapping's keys")
     if _exact_str_raw(raw):
         return True
+    read = _continued_read(read, count, "a mapping's keys")
     for key in dict.__iter__(raw):
-        if not _hash_safe_key(key):
+        if not _hash_safe_key(key, read):
             return False
     return True
 
@@ -1557,13 +1646,15 @@ def hash_safe_key(key: Any) -> bool:
     return _hash_safe_key(key)
 
 
-def _hash_safe_key(key: Any) -> bool:
+def _hash_safe_key(key: Any, read: Optional["_StorageRead"] = None) -> bool:
     kind = type(key)
     if kind is str or kind is int or key is None or kind is bool or kind is float:
         return True
-    # key の tuple の node は値の storage の読み（上限の外は「安全でない」でなく量の信号）
-    read = _StorageRead("a key's tuple nodes")
-    read.admit(1)
+    # key の tuple の node は値の storage の読み（上限の外は「安全でない」でなく量）。mapping の key の
+    # 判定では mapping の読み（`read`: key の数を数え済み）へ足す
+    if read is None:
+        read = _StorageRead("a key's tuple nodes")
+        read.admit(1)
     pending = [key]
     while pending:
         item = pending.pop()
@@ -1607,10 +1698,14 @@ def copied_container(value: Any) -> Any:
     kind = type(value)
     if issubclass(kind, dict):
         # storage の key を先に確かめる（`dict.__iter__` は storage を読む。key の code は呼ばない）
-        _admit_storage(dict.__len__(value), "a copied mapping")
+        count = dict.__len__(value)
+        read = _admit_storage(count, "a copied mapping")
         keys = tuple(dict.__iter__(value))
         for key in keys:
-            if not _plain_key(key):
+            if read is None and type(key) is tuple:
+                # key の tuple の node は写す mapping の走査へ足す（最初の tuple の key から数え始める）
+                read = _continued_read(read, count, "a copied mapping")
+            if not _plain_key(key, read):
                 raise TypeError(f"mapping key {type_name(type(key))} is not a plain key")
         base = OrderedDict if issubclass(kind, OrderedDict) else dict
         return dict(base.items(value))
@@ -1634,21 +1729,25 @@ def lookup(mapping: Any, key: Any, default: Any = None) -> Any:
         return base.get(raw, key, default)
     # 組み込みでない key（`__eq__` を上書きした str の subclass など）を持つ mapping: hash で引くと
     # その key の `__eq__` を呼び得る。plain な key だけを組み込みの比較で探す
-    _admit_storage(dict.__len__(raw), "a mapping read by key")
+    # （`_plain_keys` と別の 2 度目の走査として数える）
+    count = dict.__len__(raw)
+    read = _continued_read(_admit_storage(count, "a mapping read by key"), count, "a mapping read by key")
     for stored, value in dict.items(raw):
-        if _plain_key(stored) and stored == key:
+        if _plain_key(stored, read) and stored == key:
             return value
     return default
 
 
-def _plain_key(key: Any) -> bool:
-    """組み込みの scalar か、その tuple か（node は値の storage の読み。再帰しない）。"""
+def _plain_key(key: Any, read: Optional["_StorageRead"] = None) -> bool:
+    """組み込みの scalar か、その tuple か（node は値の storage の読み。再帰しない。mapping の key の
+    判定では mapping の読み `read` へ足す）。"""
 
     kind = type(key)
     if kind is str or kind is int or key is None or kind is bool or kind is float:
         return True
-    read = _StorageRead("a key's tuple nodes")
-    read.admit(1)
+    if read is None:
+        read = _StorageRead("a key's tuple nodes")
+        read.admit(1)
     pending = [key]
     while pending:
         item = pending.pop()
@@ -1683,6 +1782,9 @@ __all__ = [
     "StorageBeyondReadBound",
     "metered_storage_reads",
     "register_storage_meter",
+    "register_unmetered_read_owner",
+    "signalled_storage_reads",
+    "unbounded_storage_reads",
     "storage_count",
     "SCAN_LIMIT",
     "NOT_PLAIN",

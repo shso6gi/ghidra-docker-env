@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """Issue #22 PR-22-D: 作業量を受け取らない読みの「量が多すぎる」の意味の契約（責務の境界を型と test で固定する）。
 
-* `core/live_values`（安全の owner）: 値の storage の読みが固定の上限を超えたら量の信号
-  `StorageBeyondReadBound`（`TypeError` でも限界でもない）。安全でない値は `TypeError` / `None`。
+* `core/live_values`（安全の owner）: 値の storage の読みが固定の上限を超えたら、意味を今の文脈の量の
+  owner へ渡す（作業量へ数える・呼ぶ側へ量の信号 `StorageBeyondReadBound`・登録した `core/read_limits`）。
+  安全でない値は `TypeError` / `None`（量と混同しない）。
 * `core/read_limits`（量の意味の owner）: 基底型の slot で O(1) に数えてから（安全の判定より先に）上限と
-  比べ、上限の外は型つきの登録済みの限界 `FixedReadBoundExceeded`（pair terminal）。
+  比べ、上限の外は型つきの登録済みの限界 `FixedReadBoundExceeded`（pair terminal）。作業量の無い文脈の
+  入れ子の読みの上限の外も、登録した owner として同じ限界にする（記録が先）。
 * `DeadlineExceeded` は #106 の時間・段数の型で、読みの量の限界に使わない。
 * 量の多い入力は容器の種類（dict / OrderedDict / subclass / proxy / iterator）で意味が変わらない。
 """
@@ -142,13 +144,14 @@ def test_a_fixed_read_overflow_is_a_dedicated_limitation_not_a_deadline():
     exc = FixedReadBoundExceeded("probe", observed=LIMIT + 1)
     assert isinstance(exc, AnalysisLimitation)
     assert not isinstance(exc, DeadlineExceeded) and DeadlineExceeded not in type(exc).__mro__
-    # reason id は authority の契約と共通、分類（型・種類・stop state）は deadline と別
+    # reason id は authority の契約と共通、分類（型・site・target の種類・stop state）は deadline と別
     assert exc.reason_id == ANALYSIS_BUDGET_REASON_ID == DeadlineExceeded.REASON_ID
-    assert FixedReadBoundExceeded.LIMITATION_KIND == "fixed_read_bound"
-    assert "limitation_kind=fixed_read_bound" in exc.evidence_refs
-    # 型の stop state は失敗の種類の owner（軸 C）の既定と同じ（deadline の stop state にならない）
-    assert FixedReadBoundExceeded.STOP_STATE is PairStopState.PAIR_TERMINAL_LIMITATION
-    assert errors._default_stop_state(PairFailureKind.LIMITATION, exc) is FixedReadBoundExceeded.STOP_STATE
+    assert exc.site == read_limits.SCAN_LIMITATION_SITE
+    assert exc.target_key[0] == read_limits.READ_BOUND_TARGET == "fixed_read_bound"
+    # stop state は軸 C の owner が型から決める（作る場所で選ばない。deadline の stop state にならない）
+    assert errors._default_stop_state(PairFailureKind.LIMITATION, exc) is PairStopState.PAIR_TERMINAL_LIMITATION
+    deadline = DeadlineExceeded("probe", site="probe")
+    assert errors._default_stop_state(PairFailureKind.LIMITATION, deadline) is PairStopState.PAIR_TERMINAL_DEADLINE
 
 
 def test_a_fixed_read_overflow_is_recorded_as_a_pair_terminal_limitation():
@@ -195,31 +198,111 @@ def test_the_storage_signal_is_neither_unsafety_nor_a_limitation():
         assert not issubclass(BEYOND, base), base
 
 
-#: 量の信号の意味を決めてよい module（owner）と、その理由
+#: 量の信号を受け取ってよい module（`signalled_storage_reads` の中で、同じ関数の中で捕まえる）と、その意味
 _SIGNAL_OWNERS = {
-    "core/read_limits.py": "作業量を受け取らない読みの量の意味（型つきの限界・診断の写し）",
+    "core/read_limits.py": "診断の写し（止めない: 写せた先頭まで）",
     "core/live_values.py": "型の信頼の判定（文脈に依らない: 上限の外の値を持つ型は信頼しない）",
-    "checker/unknown_reason.py": "診断の legacy の照合（読めない key は exact に一致しない / 0 件）",
 }
 #: 値の storage の読みを作業量へ数えてよい owner（`metered_storage_reads` を使う module）
 _METER_OWNERS = frozenset({
     "core/json_encoding.py", "core/canonical_digest.py", "core/budget_policy.py", "proof/obligations/snapshot.py",
+    "checker/unknown_reason.py",
 })
+#: 作業量の型を登録してよい owner（その作業量の超過の意味の owner）
+_METER_TYPE_OWNERS = frozenset({"core/json_encoding.py", "core/budget_policy.py"})
+#: 値全体を上限なしで辿ると宣言してよい owner（`unbounded_storage_reads`: 予算なしの凍結）
+_UNBOUNDED_OWNERS = frozenset({"proof/obligations/snapshot.py"})
+_OWNER_NAMES = (
+    "StorageBeyondReadBound", "signalled_storage_reads", "register_unmetered_read_owner", "unbounded_storage_reads",
+)
 
 
-def test_only_declared_owners_decide_the_meaning_of_the_storage_signal():
-    catching, metering = set(), set()
+def _references(tree, name):
+    """`name` を名前か属性で参照する node（別名への代入・`except` の tuple・`is` の比較も参照）。"""
+
+    return [node for node in ast.walk(tree) if (isinstance(node, ast.Name) and node.id == name)
+            or (isinstance(node, ast.Attribute) and node.attr == name)
+            or (isinstance(node, ast.alias) and (node.name == name or node.asname == name))]
+
+
+def test_only_declared_owners_decide_the_meaning_of_a_read_beyond_the_bound():
+    """量の意味を決める入口は参照で数える（handler の形・別名・`except Exception` に依らない）: 量の信号と
+    その文脈を参照するのは宣言した owner だけ、作業量を受け取らない文脈の owner の登録は `read_limits` だけ。"""
+
+    referencing = {name: set() for name in _OWNER_NAMES}
+    registering, metering, meter_types = set(), set(), set()
     for relative, tree in _production_modules():
+        for name in _OWNER_NAMES:
+            if _references(tree, name):
+                referencing[name].add(relative)
         for node in ast.walk(tree):
-            if isinstance(node, ast.ExceptHandler) and node.type is not None:
-                caught = node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
-                if any(_name_of(item) == "StorageBeyondReadBound" for item in caught):
-                    catching.add(relative)
-            if isinstance(node, ast.Call) and _name_of(node.func) == "metered_storage_reads":
-                metering.add(relative)
-    # `core/read_limits` の `_SignalAsLimitation` は `kind is StorageBeyondReadBound` で比べる（handler でない）
-    assert catching <= set(_SIGNAL_OWNERS), catching
+            if isinstance(node, ast.Call):
+                called = _name_of(node.func)
+                if called == "register_unmetered_read_owner":
+                    registering.add(relative)
+                if called == "metered_storage_reads":
+                    metering.add(relative)
+                if called == "register_storage_meter":
+                    meter_types.add(relative)
+    assert referencing["StorageBeyondReadBound"] <= set(_SIGNAL_OWNERS), referencing
+    assert referencing["signalled_storage_reads"] <= set(_SIGNAL_OWNERS), referencing
+    assert registering == {"core/read_limits.py"}, registering
+    assert referencing["register_unmetered_read_owner"] <= {"core/read_limits.py", "core/live_values.py"}
     assert metering == _METER_OWNERS, metering
+    assert referencing["unbounded_storage_reads"] <= _UNBOUNDED_OWNERS | {"core/live_values.py"}, referencing
+    assert meter_types == _METER_TYPE_OWNERS, meter_types
+
+
+def _functions(tree):
+    return [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+
+def test_every_signalled_read_catches_the_signal_in_the_same_function():
+    """`signalled_storage_reads` の本体は `StorageBeyondReadBound` を捕まえる `try` だけ（信号を関数の外へ出さない）。"""
+
+    found = 0
+    for relative in _SIGNAL_OWNERS:
+        tree = ast.parse((PACKAGE_ROOT / relative).read_text(encoding="utf-8"))
+        for function in _functions(tree):
+            for node in ast.walk(function):
+                if not isinstance(node, ast.With):
+                    continue
+                if not any(isinstance(item.context_expr, ast.Call) and _name_of(item.context_expr.func) == "signalled_storage_reads"
+                           for item in node.items):
+                    continue
+                found += 1
+                assert len(node.body) == 1 and isinstance(node.body[0], ast.Try), (relative, function.name)
+                handlers = node.body[0].handlers
+                caught = [item for handler in handlers if handler.type is not None
+                          for item in (handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type])]
+                assert [_name_of(item) for item in caught] == ["StorageBeyondReadBound"], (relative, function.name)
+    assert found == 2  # 型の信頼の判定と、診断の写し
+
+
+def test_the_production_entries_register_the_unmetered_read_owner():
+    """作業量を受け取らない読みの量の意味の owner は、pair を実行する入口を import しただけで登録済み
+    （登録が無いと量の信号が pair の境界まで届く）。"""
+
+    import subprocess
+    import sys
+
+    root = PACKAGE_ROOT.parents[1]
+    for entry in ("scripts.function_tracer_pcode.checker.pair_execution", "scripts.function_tracer_pcode.checker.checker",
+                  "scripts.function_tracer_pcode.authority.lifecycle.production_boundary"):
+        probe = (f"import {entry}\n"
+                 "from scripts.function_tracer_pcode.core import live_values, read_limits\n"
+                 "assert live_values._UNMETERED_READ_OWNER == [read_limits.raise_read_bound_exceeded]\n")
+        completed = subprocess.run([sys.executable, "-B", "-c", probe], cwd=root, capture_output=True, text=True)
+        assert completed.returncode == 0, (entry, completed.stderr[-2000:])
+
+
+def test_a_second_unmetered_read_owner_is_refused():
+    with pytest.raises(ValueError):
+        live_values.register_unmetered_read_owner(_production_modules)
+    with pytest.raises(TypeError):
+        live_values.register_unmetered_read_owner(len)
+    # 同じ owner の登録は何もしない
+    live_values.register_unmetered_read_owner(read_limits.raise_read_bound_exceeded)
 
 
 # ---------------------------------------------------------------------------
@@ -364,8 +447,138 @@ def test_the_walker_treats_large_containers_alike(kind):
 def test_the_walker_reads_a_record_with_a_large_instance_state():
     record = _Record(LIMIT + 10)
     assert RESULT_JSON_POLICY.prepare(record, max_bytes=1 << 20).value() == {"x": 1}
-    with pytest.raises(BEYOND):
-        live_values.attribute(record, "x")  # 作業量の外では量の信号（意味は受け取る owner が決める）
+    # 作業量の外では作業量を受け取らない読みの量の限界（登録した owner が決める）
+    with pytest.raises(FixedReadBoundExceeded):
+        live_values.attribute(record, "x")
+
+
+@pytest.mark.parametrize("kind", ["dict", "OrderedDict", "proxy(OrderedDict)"])
+def test_an_unbounded_walk_and_a_nested_uncounted_walk_treat_large_containers_alike(kind):
+    """上限の無い作業量の walk・入れ子の数えない walk も、容器の種類で結果を変えない（上限なしで読む）。"""
+
+    from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec
+    from scripts.function_tracer_pcode.core.canonical_digest import canonical_fingerprint
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
+
+    reference = _mappings(LIMIT + 50)["dict"]
+    value = _mappings(LIMIT + 50)[kind]
+    assert RESULT_JSON_POLICY.materialize(value) == RESULT_JSON_POLICY.materialize(reference)
+    assert RESULT_JSON_POLICY.prepare({"f": value}, max_bytes=None).value() == {"f": dict(reference)}
+    assert canonical_fingerprint(value, work=JsonBudget(None)) == canonical_fingerprint(dict(reference), work=JsonBudget(None))
+    # 予算なしの凍結は予算つきの凍結と同じ写し（容器の種類で予算なしの側だけ失敗しない）
+    assert SnapshotFingerprintCodec.freeze(value) == SnapshotFingerprintCodec.freeze(value, budget=JsonBudget(1 << 26))
+    with serialization_scope(site="probe", target_parts=("probe",), terminal=False, max_bytes=1 << 24, enabled=True) as work:
+        counted = RESULT_JSON_POLICY.materialize(value, budget=work)
+        uncounted = RESULT_JSON_POLICY.materialize(value, counted=True)
+    assert counted == uncounted == RESULT_JSON_POLICY.materialize(reference)
+
+
+def test_iteration_safety_is_not_weakened_to_length_safety():
+    """`builtin_container` は反復してよいかの判定: key の hash を上書きした `OrderedDict` は長さは読めても
+    反復してよい容器ではない（その `__hash__` を呼ぶ読み方を許さない）。"""
+
+    armed = []
+
+    class _Key(str):
+        def __hash__(self):
+            if armed:  # pragma: no cover - must never run once armed
+                raise AssertionError("a live key's __hash__ ran")
+            return str.__hash__(self)
+
+        __eq__ = str.__eq__
+
+    loud = OrderedDict()
+    loud[_Key("k")] = 1
+    armed.append(True)
+    assert live_values.size(loud) == 1 and live_values.as_bool(loud) is True
+    assert live_values.builtin_container(loud) is False
+    assert live_values.builtin_mapping(loud) is None
+    with pytest.raises(TypeError):
+        live_values.elements_of(loud)
+
+
+def test_solver_totals_read_the_rows_through_the_live_value_rules():
+    from scripts.function_tracer_pcode.checker.diagnostics import _SolverTotals
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
+
+    class _LoudRows(list):
+        def __iter__(self):  # pragma: no cover - must never run
+            raise AssertionError("a live __iter__ ran")
+
+    totals = _SolverTotals("invocations")
+    with pytest.raises(TypeError):
+        totals.add(SimpleNamespace(results=_LoudRows([SimpleNamespace(elapsed_time=1.0)])), work=JsonBudget(100))
+    seconds = _SolverTotals("seconds")
+    seconds.add(SimpleNamespace(results=[SimpleNamespace(elapsed_time=1.5)] * 2), work=JsonBudget(100))
+    assert seconds.result(work=None) == 3.0
+
+
+def test_legacy_reason_lookups_count_their_reads_in_the_matching_work():
+    """診断の legacy の照合は索引の読みも照合の作業量で数える（固定の上限の外でも作業量の中なら引ける、
+    足りなければ一致しない。量の限界で pair を止めない・量を「安全でない」にしない）。"""
+
+    from scripts.function_tracer_pcode.checker.unknown_reason import _count_of, _index_positions
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
+
+    index = {f"k{position}": [position] for position in range(LIMIT + 100)}
+    with pair_failure_scope(("read_limits", "legacy"), None) as ledger:
+        work = JsonBudget(1 << 20)
+        assert _index_positions(index, "k7", work) == {7}
+        assert work.consumed >= 100
+        assert _index_positions(index, "k7", JsonBudget(10)) == set()
+        counts = {f"r{position}": position for position in range(LIMIT + 100)}
+        assert _count_of(counts, "r3", JsonBudget(1 << 20)) == 3
+        assert _count_of(counts, "r3", JsonBudget(10)) == 0
+        assert ledger.pending_failure() is None
+
+
+def test_a_meter_charges_one_traversal_once():
+    """key の判定・写しの走査は 1 回につき上限を超えた分を 1 度だけ数える（入れ子の node は同じ走査へ）。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
+
+    mixed = {index: index for index in range(LIMIT + 10)}
+    work = JsonBudget(1 << 20)
+    with live_values.metered_storage_reads(work):
+        copied = live_values.copied_container(mixed)
+    assert copied == mixed and work.consumed == 10
+    pairs = {(index, index): index for index in range(LIMIT)}
+    work = JsonBudget(1 << 20)
+    with live_values.metered_storage_reads(work):
+        assert live_values.lookup(pairs, (1, 1)) == 1
+    # 1 回の走査 = key の数 + key ごとの 2 node。上限の中の分（LIMIT）を除いた 2 * LIMIT だけ
+    # （lookup の key 自身の判定は別の読みで上限の中）
+    assert work.consumed == (LIMIT + 2 * LIMIT) - LIMIT
+
+
+def test_nested_key_reads_share_one_bound_with_the_keys():
+    """key の数と key の tuple の node の和を 1 つの読みとして数える（key ごとに上限まで辿らない:
+    上限の積にしない）。和がちょうど上限までは読め、次で量の問題。"""
+
+    width = 7
+    keys = LIMIT // (width + 1)  # key の数 + key ごとの node（width 個）の和がちょうど上限
+    probe = tuple(range(width))
+    at_bound = {tuple(range(index, index + width)): index for index in range(keys)}
+    assert live_values.lookup(at_bound, probe) == 0
+    assert len(live_values.copied_container(at_bound)) == keys
+    beyond = {tuple(range(index, index + width)): index for index in range(keys + 1)}
+    with pytest.raises(FixedReadBoundExceeded):
+        live_values.lookup(beyond, probe)
+    with pytest.raises(FixedReadBoundExceeded):
+        live_values.copied_container(beyond)
+    # key ごとには上限の中（1 つの key の node は上限より少し少ない）でも、和は 2 つ目の key で外
+    shared = tuple(range(LIMIT - 10))
+    wide = {(index, shared): index for index in range(LIMIT)}
+    started = time.perf_counter()
+    with pytest.raises(FixedReadBoundExceeded):
+        live_values.copied_container(wide)
+    with pytest.raises(FixedReadBoundExceeded):
+        live_values.lookup(wide, "absent")
+    ordered = OrderedDict(wide)
+    with pytest.raises(FixedReadBoundExceeded):
+        live_values.builtin_mapping(ordered)
+    assert time.perf_counter() - started < 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -394,11 +607,25 @@ def test_a_large_container_read_without_work_is_a_reason_unknown(kind):
     _read_bound_unknown(_pair_with(lambda: list(read_limits.items_within_limit(big))))
 
 
-def test_a_stray_storage_signal_at_the_gate_is_the_same_reason_unknown():
-    """意味を決める owner を通らずに gate へ届いた量の信号も、同じ登録済みの限界（内部バグの ERROR にしない）。"""
+def test_an_unmetered_live_value_read_beyond_the_bound_is_the_same_reason_unknown():
+    """`live_values` の読みを作業量の外で直接使っても、同じ登録済みの限界（内部バグの ERROR にしない）。"""
 
     big = {f"k{index}": index for index in range(LIMIT + 100)}
     _read_bound_unknown(_pair_with(lambda: live_values.lookup(big, "k1")))
+
+
+def test_an_unmetered_read_beyond_the_bound_is_recorded_before_it_can_be_swallowed():
+    """登録した owner は限界を台帳へ記録してから上げる: 途中の `except Exception` が握り潰しても pair は止まる。"""
+
+    big = OrderedDict((f"k{index}", index) for index in range(LIMIT + 100))
+    with pair_failure_scope(("read_limits", "swallowed"), None) as ledger:
+        try:
+            live_values.elements_of(big)
+        except Exception:  # noqa: BLE001 - the swallowing intermediate the ledger exists for
+            pass
+        pending = ledger.pending_failure()
+    assert pending is not None and type(pending.exception) is FixedReadBoundExceeded
+    assert pending.stop_state is PairStopState.PAIR_TERMINAL_LIMITATION
 
 
 # ---------------------------------------------------------------------------
@@ -462,10 +689,9 @@ def test_a_serialization_scope_meters_reads_beyond_the_fixed_bound():
     with serialization_scope(site="probe", target_parts=("probe",), terminal=False, max_bytes=1 << 20, enabled=True) as work:
         assert live_values.lookup(big, "k1") == 1
     assert work.consumed >= 50
-    # 上限の無い（無効な）scope は固定の上限を外さない
+    # 無効な scope は数えるだけ（その直列化が組み込みの容器を上限なしで辿るのと同じ）
     with serialization_scope(site="probe", target_parts=("probe",), terminal=False, enabled=False):
-        with pytest.raises(BEYOND):
-            live_values.lookup(big, "k1")
+        assert live_values.lookup(big, "k1") == 1
     with pytest.raises(JsonBudgetExhausted):
         with serialization_scope(site="probe", target_parts=("probe",), terminal=False, max_bytes=10, enabled=True):
             live_values.lookup(big, "k1")

@@ -1569,9 +1569,6 @@ class _ViewUnits:
         if self.left < 0:
             raise _NotPlain
 
-    def remaining(self) -> int:
-        return self.left
-
 
 #: 値の storage の読みを数える作業量の型（`live_values.metered_storage_reads` が受け取る）: 作業量
 #: （`JsonBudget` と subclass の `SerializationWork`）と、作業量を受け取らない `builtin_view` の固定の単位

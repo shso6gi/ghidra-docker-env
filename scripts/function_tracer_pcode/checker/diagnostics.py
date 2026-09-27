@@ -591,10 +591,10 @@ def _solver_rows(container: Any) -> Any:
                 results = live_values.lookup(mapping, "all_results")
     if results is None:
         return ()
-    # 列はそのまま返す（写さない）。組み込みの振る舞いでない（長さを組み込みの slot で
-    # 数えられない）列は producer の不備（walker が JSON にならない値として扱う）
+    # 列はそのまま返す（写さない）。反復してよい組み込みの振る舞いの容器でない列は producer の
+    # 不備（walker が JSON にならない値として扱う）
     if not live_values.builtin_container(results):
-        raise TypeError(f"solver results {live_values.type_name(type(results))} have no length")
+        raise TypeError(f"solver results {live_values.type_name(type(results))} are not a builtin container")
     return results
 
 
@@ -719,10 +719,12 @@ class _SolverTotals(Reducer):
 
     def add(self, container: Any, *, work: Any) -> None:
         rows = _solver_rows(container)
-        work.charge(len(rows))
-        for row in rows:
+        count = live_values.size(rows)
+        work.charge(count)
+        # 行は `live_values` の反復で辿る（容器の `__iter__` / `__len__` を呼ばない）
+        for row in live_values.elements_of(rows):
             self.seconds += _elapsed(row)
-        self.invocations += len(rows)
+        self.invocations += count
 
     def result(self, *, work: Any) -> Any:
         return round(self.seconds, 6) if self.what == "seconds" else self.invocations

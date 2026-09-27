@@ -1050,10 +1050,6 @@ _B_DIAGNOSTIC_KEYS = (
     " 残りは件数の marker で、判定には使わない）"
 )
 _D_IDENTITY = "D(#194): 構造の identity の atom の digest（identity の owner の `core/semantic_snapshot`）"
-_B_MATCHED = (
-    "B: 照合は索引（`legacy_reason_index` が record ごとに数えた位置）だけを引き、引いた位置の数を"
-    " `work` へ数える（group の record を照合ごとに写さない）"
-)
 _A_LIMITATION = "A: 限界の record の構築（target / evidence は登録した限界の場所が作る固定の形の値）"
 _C_SKIP_KEY = "C: mapping の key ごとに yield し、読み飛ばすのは 1 つの固定の key（`data_type_obj`）だけ"
 
@@ -1139,7 +1135,6 @@ _PROPORTIONAL_WORK_OWNERS = {
     ("checker.cause_aggregate", "IdentityPool.intern"): _B_COUNTED,
     ("checker.cause_aggregate", "canonicalize_legacy_cause_key"): _B_COUNTED,
     ("checker.cause_aggregate", "identity_digest"): _B_COUNTED,
-    ("checker.unknown_reason", "_match_legacy_reasons"): _B_MATCHED,
     ("core.signature", "_parameter_descriptor_pairs"): _C_SKIP_KEY,
     ("proof.obligations.snapshot", "_fingerprint_json"): _B_FROZEN,
     # `super().__init__` を辿るようにした後に見えた限界の構築

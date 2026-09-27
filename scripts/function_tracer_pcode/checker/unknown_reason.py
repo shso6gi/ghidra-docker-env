@@ -1072,20 +1072,24 @@ def _requirement_texts(requirements: Any, work: Any) -> frozenset:
     return frozenset(texts)
 
 
-def _index_positions(index: Any, key: Any) -> set:
+def _index_positions(index: Any, key: Any, work: Any) -> set:
     """索引（dict: key → 位置の list）の `key` の位置。key が plain な値でなければ空。
 
-    key の `__hash__` / `__eq__` は組み込みの値のものだけ（`live_values.lookup` が確かめる）。
+    key の `__hash__` / `__eq__` は組み込みの値のものだけ（`live_values.lookup` が確かめる）。索引・
+    key の storage の読みは照合の作業量 `work` で数える（固定の上限を超えた分。使い切れば一致しない）。
     """
+
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
 
     found: set = set()
     if type(index) is not dict:
         return found
     try:
-        positions = live_values.lookup(index, key, ())
-    except (TypeError, live_values.StorageBeyondReadBound):
-        # 診断の照合: 安全に引けない key と、作業量を受け取らない読みの上限の外の key（量の信号）は、
-        # どちらも「exact には一致しない」（fingerprint の照合が引き受ける。判定には使わない）
+        with live_values.metered_storage_reads(work):
+            positions = live_values.lookup(index, key, ())
+    except (TypeError, JsonBudgetExhausted):
+        # 診断の照合: 安全に引けない key と、作業量の中で引けない索引は「exact には一致しない」
+        # （fingerprint の照合が引き受ける。判定には使わない）
         return found
     if type(positions) is list:
         for position in positions:
@@ -1094,13 +1098,18 @@ def _index_positions(index: Any, key: Any) -> set:
     return found
 
 
-def _count_of(counts: Any, key: Any) -> int:
-    """`int(counts.get(key, 0) or 0)`（組み込みの mapping と plain な key だけ。それ以外は 0）。"""
+def _count_of(counts: Any, key: Any, work: Any) -> int:
+    """`int(counts.get(key, 0) or 0)`（組み込みの mapping と plain な key だけ。それ以外は 0）。
+    storage の読みは照合の作業量 `work` で数える（使い切れば 0 件）。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
 
     try:
-        value = live_values.lookup(counts, key, 0)
-    except (TypeError, live_values.StorageBeyondReadBound):
-        # 診断の数え上げ: 安全に引けない・読みの上限の外の key / mapping は 0 件（判定には使わない）
+        with live_values.metered_storage_reads(work):
+            value = live_values.lookup(counts, key, 0)
+    except (TypeError, JsonBudgetExhausted):
+        # 診断の数え上げ: 安全に引けない key / mapping と、作業量の中で引けない mapping は 0 件
+        # （判定には使わない）
         return 0
     return live_values.as_int(value) if live_values.as_bool(value) else 0
 
@@ -1180,14 +1189,14 @@ def _match_legacy_reasons(
     by_fingerprint: set = set()
     if cause_fingerprint is not None:
         # 索引は key を plain な値の間だけで比べる（cause の key が plain でなければ一致しない）
-        by_target = _index_positions(group.by_target, cause_target)
-        by_fingerprint = _index_positions(group.by_fingerprint, cause_fingerprint)
+        by_target = _index_positions(group.by_target, cause_target, work)
+        by_fingerprint = _index_positions(group.by_fingerprint, cause_fingerprint, work)
     by_obligation: set = set()
     obligation_index = group.by_obligation
     if has_requirements and type(obligation_index) is dict:
         if obligation_index:
             for text_value in _requirement_texts(requirements, work):
-                by_obligation.update(_index_positions(obligation_index, text_value))
+                by_obligation.update(_index_positions(obligation_index, text_value, work))
     # 旧来の規則: key が一致した record と、fingerprint で一致しなかった record のうち obligation が
     # 一致したものが exact（元の並び）、fingerprint で一致したものはその後
     exact_positions = sorted(by_target | (by_obligation - by_fingerprint))
@@ -1204,7 +1213,7 @@ def _match_legacy_reasons(
     # にも同じ reason id があり得る）
     if (
         not live_values.as_bool(index.truncated)
-        and len(records) == 1 and _count_of(projected_reason_counts, key) == 1
+        and len(records) == 1 and _count_of(projected_reason_counts, key, work) == 1
     ):
         # 1 件だけの group（写すのは定数の大きさ。group の record 全体を照合ごとに写さない）
         return (records[0],), MATCH_UNIQUE

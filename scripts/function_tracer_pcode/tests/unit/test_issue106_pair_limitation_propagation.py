@@ -827,41 +827,12 @@ def test_e0j_recoverable_error_tuples_never_absorb_limitations():
                 continue
             if not any(name in tuple_names for name in targets):
                 continue
-            if set(targets) <= GATE_FAILURE_FAMILIES:
-                # gate の族（回復用ではない: 下の test が handler の形を確かめる）
-                continue
             for element in node.value.elts:
                 if isinstance(element, ast.Name) and element.id in (
                     FORBIDDEN_IN_RECOVERABLE
                 ):
                     offenders.append(f"{rel}:{node.lineno} {targets[0]} -> {element.id}")
     assert offenders == [], "\n".join(offenders)
-
-
-#: gate が捕まえて軸 A（`classify_failure_kind`）へ渡す例外の族（回復用 tuple ではない）
-GATE_FAILURE_FAMILIES = frozenset({"PAIR_FAILURE_EXCEPTIONS"})
-
-
-def test_e0j_the_gate_failure_family_is_only_caught_to_hand_the_failure_to_the_ledger():
-    """gate の族で捕まえる handler は、捕まえた例外をそのまま pair の失敗の結果化（台帳の winner 解決）へ
-    渡す（回復して続ける handler に族を使わない）。"""
-
-    handlers = []
-    for rel, _path, tree in _source_modules():
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.ExceptHandler) or node.type is None:
-                continue
-            caught = node.type.id if isinstance(node.type, ast.Name) else getattr(node.type, "attr", None)
-            if caught not in GATE_FAILURE_FAMILIES:
-                continue
-            calls = {
-                sub.func.id if isinstance(sub.func, ast.Name) else getattr(sub.func, "attr", None)
-                for sub in ast.walk(node) if isinstance(sub, ast.Call)
-            }
-            handed = any(name and name.startswith("pair_failure_result") for name in calls)
-            handlers.append((rel, node.lineno, handed and node.name is not None))
-    assert len(handlers) == 3, handlers
-    assert all(handed for _rel, _line, handed in handlers), handlers
 
 
 # ---------------------------------------------------------------------------

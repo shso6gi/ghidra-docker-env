@@ -7,11 +7,12 @@ live な値の storage を作業量を受け取らずに読む関数は、どれ
 * B: 固定の上限の型の契約（`SCAN_LIMIT`）: 長さを組み込みの slot で O(1) に読んで比べてから辿る。
   上限の意味は読むものの種類で 2 つ: **型**（namespace・MRO・closure）は「確かめられない」= 信頼しない
   （文脈に依らず cache する）、**値の storage**（dict / `__dict__` の key・key の tuple・proxy の段・写す
-  容器）は安全の判定ではなく量の信号 `StorageBeyondReadBound`。作業量を持つ owner が
-  `metered_storage_reads` で包んだ読みは、上限を超えた分をその作業量へ数えて読む
+  容器）は安全の判定ではなく量で、意味は今の文脈の量の owner（作業量・呼ぶ側・`core/read_limits`）
 * C: iterator を返し、辿る側が要素ごとに数える
 
-量の意味（限界の種類）は `live_values` では決めない（`test_issue22d_read_bound_contract.py`）。
+この file は `live_values` 自身の契約を、量の意味を呼ぶ側が決める文脈（`signalled_storage_reads`: 量の
+信号 `StorageBeyondReadBound`）と作業量の文脈で確かめる。作業量を受け取らない文脈の意味（型つきの
+限界）は `test_issue22d_read_bound_contract.py`。
 """
 
 from __future__ import annotations
@@ -37,10 +38,11 @@ def _quick(call, *args, seconds=0.05):
     """`call(*args)` の結果（または上げた例外）と、それが一瞬で終わったこと。"""
 
     started = time.perf_counter()
-    try:
-        outcome = call(*args)
-    except (TypeError, BEYOND) as exc:
-        outcome = exc
+    with live_values.signalled_storage_reads():
+        try:
+            outcome = call(*args)
+        except (TypeError, BEYOND) as exc:
+            outcome = exc
     assert time.perf_counter() - started < seconds, call
     return outcome
 
@@ -101,22 +103,31 @@ def test_a_bounded_meter_reads_beyond_the_fixed_bound_and_charges_only_the_exces
             live_values.instance_state(record, "k1")
 
 
-def test_an_unbounded_meter_does_not_lift_the_fixed_bound():
-    """上限の無い作業量で包んでも、値の storage の読みは固定の上限のまま（上限の無い走査にしない）。"""
+def test_an_unbounded_meter_reads_like_the_builtin_containers_it_walks():
+    """上限の無い作業量の owner は組み込みの容器を上限なしで辿る: 値の storage の読みも上限なしで読む
+    （容器の種類で結果を変えない）。入れ子では内側の作業量で数える（読むのは内側の owner の走査）。"""
 
     record = _Record()
     record.__dict__.update({f"k{index}": index for index in range(live_values.SCAN_LIMIT + 10)})
-    with live_values.metered_storage_reads(JsonBudget(None, detached=True)):
-        assert _signal(_quick(live_values.instance_state, record, "k1"))
+    big = OrderedDict((index, index) for index in range(live_values.SCAN_LIMIT + 10))
+    unbounded = JsonBudget(None, detached=True)
+    with live_values.metered_storage_reads(unbounded):
+        assert live_values.instance_state(record, "k1") == 1
+        assert live_values.builtin_mapping(big) is big
+    outer = JsonBudget(1 << 20)
+    with live_values.metered_storage_reads(outer):
+        with live_values.metered_storage_reads(JsonBudget(None, detached=True)):
+            assert live_values.builtin_mapping(big) is big
+        # `None` は外の作業量をそのまま使う
+        with live_values.metered_storage_reads(None):
+            assert live_values.builtin_mapping(big) is big
+    assert outer.consumed == 10
 
 
 def test_only_registered_meters_are_accepted():
     class _Anything:
         def charge(self, size):  # pragma: no cover - never registered
             pass
-
-        def remaining(self):  # pragma: no cover
-            return 1
 
     # 回復用の `except TypeError` に吸われない型で拒む（owner の不備）
     with pytest.raises(ValueError):
@@ -154,13 +165,14 @@ def test_a_long_mro_is_not_walked():
 
 
 def test_a_large_ordered_dict_is_a_quantity_signal_and_its_length_needs_no_key_scan():
-    """反復の安全（key の hash）は値の storage の読み: 上限の外は量の信号。長さ・真偽は key を読まない。"""
+    """反復の安全（key の hash）は値の storage の読み: 上限の外は量の信号。長さ・真偽は key を読まない。
+    `builtin_container` は反復してよいかの判定（`builtin_mapping` と同じ）。"""
 
     big = OrderedDict((index, index) for index in range(BIG))
     assert _signal(_quick(live_values.builtin_mapping, big))
+    assert _signal(_quick(live_values.builtin_container, big))
     assert _quick(live_values.size, big) == BIG
     assert _quick(live_values.as_bool, big) is True
-    assert live_values.builtin_container(big) is True
     small = OrderedDict(a=1)
     assert live_values.builtin_mapping(small) is small
 
@@ -299,7 +311,7 @@ def test_nested_type_references_stop_at_the_nesting_limit():
 _A = "A: 固定の大きさ（module の定数の組・登録した directory）だけを辿る"
 _B = (
     "B: `SCAN_LIMIT` の固定の上限（長さを O(1) で比べてから辿る。型の上限の外は信頼しない / TypeError、"
-    "値の storage の上限の外は量の信号 `StorageBeyondReadBound`（meter の中は超えた分を作業量へ））"
+    "値の storage の上限の外は今の文脈の量の owner（作業量へ超えた分・呼ぶ側へ量の信号・`read_limits` の限界））"
 )
 _B_CALLER = "B(呼ぶ側): 呼ぶ側が先に数を上限と比べてから呼ぶ（呼ぶ関数はどれも B。下の test が確かめる）"
 _C = "C: iterator を返し、辿る側が要素ごとに数える"
@@ -342,12 +354,13 @@ LIVE_VALUES_WORK_OWNERS = {
     # 2 引数の `max`（固定の上限の中の分を数えない）だけ / 登録した meter の型の組だけ
     "_StorageRead.admit": _A,
     "_registered_meter": _A,
+    "register_storage_meter": _A,
 }
 
 #: `core/read_limits`（作業量を受け取らない読みの固定の上限の owner）の入力に比例する関数
 READ_LIMITS_WORK_OWNERS = {
     "_counted": _B,
-    "prefix_within_limit": _B,
+    "_prefix": _B,
     # 2 引数の `max` だけ
     "omitted_beyond_limit": _A,
 }
@@ -410,7 +423,7 @@ def test_j22_the_bounded_functions_compare_with_the_bound_before_they_walk(path)
         # 辿る数そのものを `SCAN_LIMIT` と比べる（`layers > SCAN_LIMIT`）
         compares = any(
             isinstance(sub, ast.Compare)
-            and any(isinstance(node, ast.Name) and node.id == "SCAN_LIMIT" for node in ast.walk(sub))
+            and any(_names_the_bound(node) for node in ast.walk(sub))
             for sub in ast.walk(functions[name])
         )
         if not (calls & _BOUNDING_CALLS or ranges or compares):
@@ -418,21 +431,55 @@ def test_j22_the_bounded_functions_compare_with_the_bound_before_they_walk(path)
     assert unbounded == []
 
 
+def _names_the_bound(node):
+    return (isinstance(node, ast.Name) and node.id == "SCAN_LIMIT") or (
+        isinstance(node, ast.Attribute) and node.attr == "SCAN_LIMIT"
+    )
+
+
+def _called(node):
+    return node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None)
+
+
+def _position(node):
+    return (node.lineno, node.col_offset)
+
+
 @pytest.mark.parametrize("path", sorted(OWNER_WORK))
 def test_j22_caller_bounded_functions_are_called_only_after_the_bound(path):
-    """B(呼ぶ側) の関数を呼ぶ owner の関数は、どれも自分で上限と比べる（数を比べずに呼ぶ経路を足さない）。"""
+    """B(呼ぶ側) の関数の呼び出しは、どれも **同じ storage の数** を上限と比べる呼び出しより後にある
+    （呼ぶ関数に上限の呼び出しがどこかに在るだけでは足りない: 順序と、比べる数の storage を確かめる）。"""
 
     functions = dict(_live_values_functions(path))
     caller_bounded = {name for name, kind in OWNER_WORK[path].items() if kind == _B_CALLER}
-    offenders = []
+    offenders, checked = [], 0
     for name, function in functions.items():
-        calls = {
-            (sub.func.id if isinstance(sub.func, ast.Name) else getattr(sub.func, "attr", None))
-            for sub in ast.walk(function) if isinstance(sub, ast.Call)
-        }
-        if calls & caller_bounded and not calls & _BOUNDING_CALLS and name not in caller_bounded:
-            offenders.append(name)
+        if name in caller_bounded:
+            continue
+        bounds = []
+        for sub in ast.walk(function):
+            if isinstance(sub, ast.Call) and _called(sub) in _BOUNDING_CALLS:
+                bounds.append((_position(sub), {node.id for arg in sub.args for node in ast.walk(arg) if isinstance(node, ast.Name)}))
+        # 数を変数へ置いてから比べる形（`count = dict.__len__(raw)` → `_admit_storage(count, ...)`）
+        assigned = {}
+        for sub in ast.walk(function):
+            if isinstance(sub, ast.Assign) and len(sub.targets) == 1 and isinstance(sub.targets[0], ast.Name):
+                assigned[sub.targets[0].id] = {node.id for node in ast.walk(sub.value) if isinstance(node, ast.Name)}
+        for sub in ast.walk(function):
+            if not (isinstance(sub, ast.Call) and _called(sub) in caller_bounded and sub.args):
+                continue
+            checked += 1
+            storage = sub.args[0].id if isinstance(sub.args[0], ast.Name) else None
+            ok = storage is not None and any(
+                position < _position(sub)
+                and (storage in names or any(storage in assigned.get(name, ()) for name in names))
+                for position, names in bounds
+            )
+            if not ok:
+                offenders.append((name, _called(sub), sub.lineno))
     assert offenders == []
+    if path == "core/live_values.py":
+        assert checked >= 5  # instance の状態・key の走査・型の namespace の呼び出し
 
 
 def test_the_bound_has_one_owner():

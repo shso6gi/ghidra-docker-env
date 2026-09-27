@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
     UnknownSmtExtensionWidthError,
     UnsupportedSmtOperatorError,
 )
+from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
 from scripts.function_tracer_pcode.core.stage_clock import open_stage_region, stage_region
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner, ParallelResult
 from scripts.function_tracer_pcode.proof.formula import FormulaBuilder
@@ -71,7 +72,6 @@ from scripts.function_tracer_pcode.checker.result_assembly import (
     unsupported_smt_result,
 )
 from scripts.function_tracer_pcode.checker.pair_execution import (
-    PAIR_FAILURE_EXCEPTIONS,
     pair_failure_result_from_check,
     raise_pending_pair_failure,
 )
@@ -866,7 +866,7 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                     original_signature2=original_signature2,
                 )
 
-            except PAIR_FAILURE_EXCEPTIONS as e:
+            except AnalysisFailureError as e:
                 # Issue #106 PR-106-0: typed な pair failure（限界 / 内部バグ）。
                 # **どれを結果化するかは execution control が決める**ので、ここは
                 # 捕まえた例外で直接結果を作らず、台帳へ渡して winner を受け取る。
@@ -892,7 +892,7 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                     original_signature2=original_signature2,
                 )
                 if typed_result is None:
-                    # gate の族（`PAIR_FAILURE_EXCEPTIONS`）は必ず分類できるので到達しない。
+                    # `AnalysisFailureError` は必ず分類できるので到達しない。
                     # 分類できない型が族に入ったら、黙って結果にせず上へ返す。
                     raise
                 return typed_result

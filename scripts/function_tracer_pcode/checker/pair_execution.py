@@ -36,10 +36,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from scripts.function_tracer_pcode.core import live_values, read_limits
+from scripts.function_tracer_pcode.core import live_values
+# pair の実行制御の owner は、作業量を受け取らない値の storage の読みの量の意味の owner
+# （`core/read_limits`: 上限の外を型つきの限界として台帳へ記録する）が登録済みであることを保証する
+from scripts.function_tracer_pcode.core import read_limits  # noqa: F401
 from scripts.function_tracer_pcode.core.json_encoding import value_token
 from scripts.function_tracer_pcode.core.errors import (
-    AnalysisFailureError,
     PairFailureKind,
     PairPendingFailure,
     PairStopState,
@@ -86,20 +88,6 @@ def binary_display_name(program, fallback: str) -> str:
 #: `EquivalenceResult` の宣言 field にしないのは、判定にも serialization にも
 #: 関与させないため（`_conditional_lane_analyses` などと同じ扱い）。
 PAIR_FAILURE_IDENTITY_ATTRIBUTE = "_pair_failure_identity"
-
-#: gate（G3 / G5 / `check()`）が捕まえて台帳の winner 解決へ渡す例外の族。`AnalysisFailureError` と、
-#: 作業量を受け取らない値の storage の読みの量の信号（意味を決める owner を通らずに gate へ届いたもの）。
-#: gate はこの族で捕まえる（捕まえた例外は `_pair_failure_of` が pair の失敗の型にしてから台帳へ）
-PAIR_FAILURE_EXCEPTIONS = (AnalysisFailureError, live_values.StorageBeyondReadBound)
-
-
-def _pair_failure_of(exc: BaseException) -> BaseException:
-    """gate が捕まえた例外の、pair の失敗としての型。量の信号は読みの量の限界（意味の owner は
-    `core/read_limits`。内部バグ・安全でない値にしない）、それ以外はそのまま（軸 A が種別を決める）。"""
-
-    if type(exc) is live_values.StorageBeyondReadBound:
-        return read_limits.limitation_for_signal(exc)
-    return exc
 
 
 def _build_limitation_result(checker, failure, **common):
@@ -240,7 +228,7 @@ def pair_failure_result_from_check(
 
     族の外の例外は `None` を返す（呼び出し側の generic 経路が扱う）。
     """
-    failure = adopt_pair_failure(_pair_failure_of(exc))
+    failure = adopt_pair_failure(exc)
     if failure is None:
         return None
     return _stamp_pair_failure_identity(
@@ -274,7 +262,7 @@ def pair_failure_result_for_exception(
     限界も、ここで同じ 1 本の経路に合流する。台帳にも型情報にも根拠が無い場合
     だけ `None` を返し、呼び出し側は従来の generic 経路へ落とす。
     """
-    failure = adopt_pair_failure(_pair_failure_of(exc))
+    failure = adopt_pair_failure(exc)
     if failure is None:
         return None
     return pair_failure_result(checker, failure, **kwargs)
@@ -346,7 +334,6 @@ def _failure_already_in_result(result, failure: PairPendingFailure) -> bool:
 
 __all__ = [
     "apply_pair_failure_gate",
-    "PAIR_FAILURE_EXCEPTIONS",
     "binary_display_name",
     "pair_allows_semantic_analysis",
     "pair_failure_result",

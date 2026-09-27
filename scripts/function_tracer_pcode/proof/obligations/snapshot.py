@@ -20,6 +20,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
 )
 from scripts.function_tracer_pcode.core.live_values import (
     metered_storage_reads,
+    unbounded_storage_reads,
     NOT_PLAIN,
     as_repr,
     as_str,
@@ -278,7 +279,10 @@ class SnapshotFingerprintCodec:
         """
 
         if budget is None:
-            return cls._freeze_unmetered(value)
+            # 予算なしの写しは値全体を上限なしで辿る: 値の storage の読みも上限なしで（容器の種類で
+            # 予算なしの側だけ止めない）
+            with unbounded_storage_reads():
+                return cls._freeze_unmetered(value)
         # 値の storage の読みも固定の上限を超えた分は同じ予算へ（超えればその予算の超過）
         with metered_storage_reads(budget):
             return cls._freeze(value, _FreezeMeter(budget))

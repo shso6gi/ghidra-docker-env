@@ -572,8 +572,8 @@ def serialization_scope(
     )
     stack.append(work)
     try:
-        # この scope の中の値の storage の読みも、固定の上限を超えた分はこの作業量へ（上限の無い作業量は
-        # 固定の上限を外さない: `live_values.metered_storage_reads`）
+        # この scope の中の値の storage の読みも、固定の上限を超えた分はこの作業量へ（無効な scope は
+        # 数えるだけ: この scope の直列化が組み込みの容器を辿るのと同じ。`live_values.metered_storage_reads`）
         with live_values.metered_storage_reads(work):
             yield work
     finally:
