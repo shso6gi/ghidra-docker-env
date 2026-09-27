@@ -210,10 +210,8 @@ _METER_OWNERS = frozenset({
 })
 #: 作業量の型を登録してよい owner（その作業量の超過の意味の owner）
 _METER_TYPE_OWNERS = frozenset({"core/json_encoding.py", "core/budget_policy.py"})
-#: 値全体を上限なしで辿ると宣言してよい owner（`unbounded_storage_reads`: 予算なしの凍結）
-_UNBOUNDED_OWNERS = frozenset({"proof/obligations/snapshot.py"})
 _OWNER_NAMES = (
-    "StorageBeyondReadBound", "signalled_storage_reads", "register_unmetered_read_owner", "unbounded_storage_reads",
+    "StorageBeyondReadBound", "signalled_storage_reads", "register_unmetered_read_owner", "fixed_bound_reads",
 )
 
 
@@ -249,7 +247,8 @@ def test_only_declared_owners_decide_the_meaning_of_a_read_beyond_the_bound():
     assert registering == {"core/read_limits.py"}, registering
     assert referencing["register_unmetered_read_owner"] <= {"core/read_limits.py", "core/live_values.py"}
     assert metering == _METER_OWNERS, metering
-    assert referencing["unbounded_storage_reads"] <= _UNBOUNDED_OWNERS | {"core/live_values.py"}, referencing
+    # 反復の確かめも含めて固定の上限で読む文脈は、作業量を受け取らない読みの入口だけ
+    assert referencing["fixed_bound_reads"] <= {"core/read_limits.py", "core/live_values.py"}, referencing
     assert meter_types == _METER_TYPE_OWNERS, meter_types
 
 
@@ -547,38 +546,89 @@ def test_a_meter_charges_one_traversal_once():
     work = JsonBudget(1 << 20)
     with live_values.metered_storage_reads(work):
         assert live_values.lookup(pairs, (1, 1)) == 1
-    # 1 回の走査 = key の数 + key ごとの 2 node。上限の中の分（LIMIT）を除いた 2 * LIMIT だけ
+    # key の数（LIMIT、上限の中）と key の tuple の node（2 * LIMIT）は別の量: node の上限を超えた分だけ
     # （lookup の key 自身の判定は別の読みで上限の中）
-    assert work.consumed == (LIMIT + 2 * LIMIT) - LIMIT
+    assert work.consumed == 2 * LIMIT - LIMIT
 
 
-def test_nested_key_reads_share_one_bound_with_the_keys():
-    """key の数と key の tuple の node の和を 1 つの読みとして数える（key ごとに上限まで辿らない:
-    上限の積にしない）。和がちょうど上限までは読め、次で量の問題。"""
+def test_keys_and_key_tuple_nodes_are_separate_quantities():
+    """key の数（O(1) で数える）と key の tuple の node（走査の中で数える）は別の量で、それぞれ 1 回の
+    走査の中の和を上限と比べる（key ごとに上限まで辿らない: 上限の積にしない）。上限の内側の数の mapping
+    を、node を足して上限の外にしない（数えて通した入口の後で落ちない）。"""
 
-    width = 7
-    keys = LIMIT // (width + 1)  # key の数 + key ごとの node（width 個）の和がちょうど上限
+    small = {(index, "x"): index for index in range(1400)}  # key 1,400・node 2,800
+    ordered = OrderedDict(small)
+    assert live_values.lookup(small, (3, "x")) == 3
+    assert len(live_values.copied_container(small)) == 1400
+    assert len(read_limits.copied_within_limit(small)) == 1400
+    assert live_values.builtin_mapping(ordered) is ordered
+    assert len(list(read_limits.items_within_limit(ordered))) == 1400
+    assert len(read_limits.prefix_items_within_limit(ordered)) == 1400
+
+    width = 8
+    keys = LIMIT // width  # node の和がちょうど上限
     probe = tuple(range(width))
-    at_bound = {tuple(range(index, index + width)): index for index in range(keys)}
-    assert live_values.lookup(at_bound, probe) == 0
-    assert len(live_values.copied_container(at_bound)) == keys
-    beyond = {tuple(range(index, index + width)): index for index in range(keys + 1)}
+    at_bound = OrderedDict((tuple(range(index, index + width)), index) for index in range(keys))
+    beyond = OrderedDict((tuple(range(index, index + width)), index) for index in range(keys + 1))
+    assert live_values.lookup(dict(at_bound), probe) == 0
+    assert len(list(read_limits.items_within_limit(at_bound))) == keys
     with pytest.raises(FixedReadBoundExceeded):
-        live_values.lookup(beyond, probe)
+        live_values.lookup(dict(beyond), probe)  # 隠れた読み（key で引く前の確かめ）
     with pytest.raises(FixedReadBoundExceeded):
-        live_values.copied_container(beyond)
+        read_limits.items_within_limit(beyond)  # 固定の上限の入口（入れ子の量も同じ上限）
+    with pytest.raises(FixedReadBoundExceeded):
+        read_limits.copied_within_limit(dict(beyond))
+
     # key ごとには上限の中（1 つの key の node は上限より少し少ない）でも、和は 2 つ目の key で外
     shared = tuple(range(LIMIT - 10))
     wide = {(index, shared): index for index in range(LIMIT)}
     started = time.perf_counter()
     with pytest.raises(FixedReadBoundExceeded):
-        live_values.copied_container(wide)
-    with pytest.raises(FixedReadBoundExceeded):
         live_values.lookup(wide, "absent")
-    ordered = OrderedDict(wide)
     with pytest.raises(FixedReadBoundExceeded):
-        live_values.builtin_mapping(ordered)
+        read_limits.copied_within_limit(wide)
+    with pytest.raises(FixedReadBoundExceeded):
+        read_limits.items_within_limit(OrderedDict(wide))
     assert time.perf_counter() - started < 1.0
+
+
+def test_unowned_traversals_verify_like_they_iterate_and_hidden_reads_are_bounded():
+    """量の owner の無い文脈: 反復の確かめ（`OrderedDict` の key の hash）は反復の一部で、dict の反復と
+    同じく上限なしで読む（容器の種類で結果を変えない・台帳に何も残さない）。隠れた読み（key で引く・
+    名前で属性を読む）は固定の上限の限界。"""
+
+    from scripts.function_tracer_pcode.checker.cause_aggregate import freeze_identity
+    from scripts.function_tracer_pcode.proof.cause_identity import _tuple_item
+
+    count = LIMIT + 900
+    reference = {f"k{index}": index for index in range(count)}
+    with pair_failure_scope(("read_limits", "traversals"), None) as ledger:
+        for kind in ("OrderedDict", "OrderedDict_subclass", "proxy(OrderedDict)", "dict_subclass"):
+            value = _mappings(count)[kind]
+            assert len(list(live_values.items_of(value))) == count, kind
+            assert live_values.builtin_container(value) is True, kind
+            assert _tuple_item({"a": value}) == _tuple_item({"a": dict(reference)}), kind
+            assert freeze_identity({"m": value}) == freeze_identity({"m": dict(reference)}), kind
+            assert len(live_values.copied_container(_mappings(count)["OrderedDict"])) == count
+        assert ledger.pending_failure() is None
+        with pytest.raises(FixedReadBoundExceeded):
+            live_values.lookup(_mappings(count)["OrderedDict"], "k1")
+        assert type(ledger.pending_failure().exception) is FixedReadBoundExceeded
+
+
+def test_the_read_limit_entries_keep_their_fixed_bound_inside_a_meter():
+    """作業量を受け取らない読みの入口は、作業量の文脈の中でも固定の上限（API の選択。作業量を持つ呼ぶ
+    側は walker を使う）。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
+
+    big = OrderedDict((f"k{index}", index) for index in range(LIMIT + 1))
+    with live_values.metered_storage_reads(JsonBudget(None)):
+        assert len(list(live_values.items_of(big))) == LIMIT + 1
+        with pytest.raises(FixedReadBoundExceeded):
+            read_limits.items_within_limit(big)
+        with pytest.raises(FixedReadBoundExceeded):
+            read_limits.elements_within_limit(list(range(LIMIT + 1)))
 
 
 # ---------------------------------------------------------------------------
@@ -617,10 +667,10 @@ def test_an_unmetered_live_value_read_beyond_the_bound_is_the_same_reason_unknow
 def test_an_unmetered_read_beyond_the_bound_is_recorded_before_it_can_be_swallowed():
     """登録した owner は限界を台帳へ記録してから上げる: 途中の `except Exception` が握り潰しても pair は止まる。"""
 
-    big = OrderedDict((f"k{index}", index) for index in range(LIMIT + 100))
+    big = {f"k{index}": index for index in range(LIMIT + 100)}
     with pair_failure_scope(("read_limits", "swallowed"), None) as ledger:
         try:
-            live_values.elements_of(big)
+            live_values.lookup(big, "k1")  # 隠れた読み（key で引く前の key の確かめ）
         except Exception:  # noqa: BLE001 - the swallowing intermediate the ledger exists for
             pass
         pending = ledger.pending_failure()

@@ -12,9 +12,12 @@ mapping を辿る関数（record の構築・写し）の唯一の入口。責�
   - この module の入口は、読む前に基底型の slot で O(1) に数え（`live_values.storage_count`）、上限の
     外は **型つきの登録済みの限界** `FixedReadBoundExceeded` を pair の台帳へ記録してから上げる。上限の
     内側だけ安全の判定（振る舞い・key の hash）を行い、それから辿る。
-  - 作業量の無い文脈の入れ子の読み（key の tuple・包んだ proxy・instance の `__dict__`）が上限を
-    超えたときも、`live_values` へ登録したこの module が同じ限界にする（どの関数から読んだかに依らない:
-    途中の `except TypeError` / `except Exception` を素通りせず、記録が先）。
+  - 入口の中の入れ子の量（key の tuple の node・包んだ proxy の段・反復の確かめ）も同じ固定の上限で
+    読む（`live_values.fixed_bound_reads`）。量の owner の無い文脈の隠れた読み（key で引く・名前で
+    属性を読む）が上限を超えたときも、`live_values` へ登録したこの module が同じ限界にする（どの関数から
+    読んだかに依らない: 途中の `except TypeError` / `except Exception` を素通りせず、記録が先）。
+  - 入口は作業量の文脈の中で呼ばれても固定の上限で読む（「作業量を受け取らない読み」という API の選択。
+    作業量を持つ呼ぶ側は walker を使う）。
 
 * `DeadlineExceeded`（時間・段数の打ち切り）は #106 の owner の型で、ここでは使わない: 読みの量の限界は
   reason id（`analysis_budget_exceeded`、authority の契約と共通）だけを共有し、Python の型・stop state
@@ -53,7 +56,7 @@ class FixedReadBoundExceeded(AnalysisLimitation):
         limit = live_values.SCAN_LIMIT
         super().__init__(
             self.REASON_ID,
-            f"{what} exceeds the fixed read bound ({observed} > {limit})",
+            f"{what} exceeds the fixed read bound (at least {observed} > {limit})",
             site=SCAN_LIMITATION_SITE,
             target_key=(READ_BOUND_TARGET, what),
             missing_semantic_fact=(READ_BOUND_TARGET, what, limit),
@@ -118,7 +121,8 @@ def elements_within_limit(values: Any, scan: Any = None) -> Iterator[Any]:
     count = live_values.storage_count(values)
     if count is not None:
         _admit(count, scan, "a sequence read without a work budget")
-    iterator = live_values.elements_of(values)
+    with live_values.fixed_bound_reads():
+        iterator = live_values.elements_of(values)
     return iterator if count is not None else _counted(iterator, scan)
 
 
@@ -128,7 +132,8 @@ def items_within_limit(mapping: Any, scan: Any = None) -> Iterator[Tuple[Any, An
     count = live_values.storage_count(mapping)
     if count is not None:
         _admit(count, scan, "a mapping read without a work budget")
-    return live_values.items_of(mapping)
+    with live_values.fixed_bound_reads():
+        return live_values.items_of(mapping)
 
 
 def copied_within_limit(value: Any, scan: Any = None) -> Any:
@@ -138,10 +143,13 @@ def copied_within_limit(value: Any, scan: Any = None) -> Any:
     if not (live_values.is_kind(value, dict) or live_values.is_kind(value, list)):
         return live_values.NOT_PLAIN
     _admit(live_values.storage_count(value), scan, "a container copied without a work budget")
-    return live_values.copied_container(value)
+    with live_values.fixed_bound_reads():
+        return live_values.copied_container(value)
 
 
 def _counted(iterator: Iterator[Any], scan: Any = None) -> Iterator[Any]:
+    # 引き出しは呼ぶ側の文脈（generator の中で文脈を切り替えると、止まっている間も呼ぶ側に残る）: 要素を
+    # 作る package の generator の読みはその generator の owner の規則
     count = 0
     for value in iterator:
         count += 1
