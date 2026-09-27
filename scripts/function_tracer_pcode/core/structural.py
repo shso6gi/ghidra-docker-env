@@ -1066,3 +1066,102 @@ class StructuralIdentity:
     key = staticmethod(expression_key)
     #: 完全比較と同じ同値関係を持つ安定 digest（32 byte、prefilter に使える）
     identity_digest = staticmethod(structural_identity_digest)
+
+
+# ---------------------------------------------------------------------------
+# 条件の集合の structural identity（Issue #105 PR-105-A）
+# ---------------------------------------------------------------------------
+
+_CONDITIONS_SIGNATURE_PERSON = b"conds-sig-v1"
+
+
+def _condition_bucket(condition: Condition) -> bytes:
+    """条件 1 つの bucket 値（candidate hash + 向き）。**一致の確定には使わない**。"""
+
+    digest = candidate_hash(condition.expression) or b""
+    return (b"\x01" if condition.negated else b"\x00") + digest
+
+
+class ConditionsSignature:
+    """条件の **多重集合** の structural identity（dedup / dict key 用）。
+
+    旧 `object_centric_conditions_signature` は予算付き `condition_key` の tuple を
+    `repr` 順に並べた値で、予算を超えた 2 つの条件は同じ `("truncated", …)` の
+    placeholder になり **別の条件なのに一致** していた。ここでは:
+
+    * `fast` — 各条件の candidate hash と向きから作る bucket 値（`__hash__` だけが
+      使う）。衝突は設計上あり得るので **等価の確定には使わない**。
+    * 等価（`__eq__`）— 同じ bucket 値の条件どうしを `Condition.equals`（DAG-aware な
+      完全比較、`structural_equals`）で 1 対 1 に対応付けられたときだけ一致。
+      `Condition.equals` は同値関係なので、同じ bucket の中で貪欲に対応付けても
+      多重集合の一致を取り逃さない。比較予算を超えた組は不一致（cache / dedup の
+      miss になるだけで、別の条件を同一視しない）。
+
+    順序は意味を持たない（条件の conjunction）。条件 object は保持するので、
+    `id()` の再利用で別の条件と取り違えることはない。
+    """
+
+    __slots__ = ("fast", "_conditions", "_buckets")
+
+    def __init__(self, conditions) -> None:
+        items = [(_condition_bucket(condition), condition) for condition in conditions or ()]
+        items.sort(key=lambda item: item[0])
+        digest = hashlib.blake2b(digest_size=16, person=_CONDITIONS_SIGNATURE_PERSON)
+        digest.update(b"%d|" % len(items))
+        for bucket, _condition in items:
+            digest.update(b"%d:" % len(bucket))
+            digest.update(bucket)
+        self.fast = digest.digest()
+        self._buckets = tuple(bucket for bucket, _condition in items)
+        self._conditions = tuple(condition for _bucket, condition in items)
+
+    def __len__(self) -> int:
+        return len(self._conditions)
+
+    @property
+    def conditions(self) -> Tuple[Condition, ...]:
+        """bucket 値の順に並べた条件（同じ bucket の中は入力順）。"""
+
+        return self._conditions
+
+    def __hash__(self) -> int:
+        return hash(self.fast)
+
+    def __eq__(self, other: Any) -> bool:
+        if self is other:
+            return True
+        if not isinstance(other, ConditionsSignature):
+            return NotImplemented
+        if self.fast != other.fast or self._buckets != other._buckets:
+            return False
+        # bucket 値の列が同じなので、同じ bucket の区間どうしを対応付ければよい
+        index = 0
+        count = len(self._conditions)
+        while index < count:
+            end = index + 1
+            while end < count and self._buckets[end] == self._buckets[index]:
+                end += 1
+            unmatched = list(other._conditions[index:end])
+            for condition in self._conditions[index:end]:
+                for position, candidate in enumerate(unmatched):
+                    if condition is candidate or condition.equals(candidate):
+                        del unmatched[position]
+                        break
+                else:
+                    return False
+            index = end
+        return True
+
+    def __ne__(self, other: Any) -> bool:
+        equal = self.__eq__(other)
+        return equal if equal is NotImplemented else not equal
+
+    def __repr__(self) -> str:
+        # logging / 例外から暗黙に呼ばれるので条件を描画しない（Issue #22 の有界性）
+        return f"ConditionsSignature(conditions={len(self._conditions)}, fast={self.fast.hex()[:12]})"
+
+
+def conditions_signature(conditions) -> ConditionsSignature:
+    """条件の多重集合の structural identity（`ConditionsSignature`）。"""
+
+    return ConditionsSignature(conditions)

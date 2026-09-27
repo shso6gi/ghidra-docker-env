@@ -694,6 +694,16 @@ def _encode_atoms_to_bytes(value: Any) -> bytes:
     return "".join(parts).encode("utf-8", "surrogatepass")
 
 
+def encode_stable_atoms(value: Any) -> bytes:
+    """primitive の入れ子の決定的な byte 列（digest の材料・並べ替えの鍵に使う）。
+
+    `stable_atoms_digest` と同じ符号化の、digest にする前の値。未知の型は型名だけに
+    なるので **一致の確定には使えない**（候補の絞り込みと決定的な順序付けだけ）。
+    """
+
+    return _encode_atoms_to_bytes(value)
+
+
 def _encode_atoms(value: Any, parts: List[str]) -> None:
     if value is None:
         parts.append("n;")
@@ -728,8 +738,19 @@ def walk_dag(root: Any) -> ImmutableSemanticGraph:
     残る。「2 つの式が同じか」は `core/structural.py` が決める。
     """
 
+    return walk_dag_nodes(root)[0]
+
+
+def walk_dag_nodes(root: Any) -> Tuple[ImmutableSemanticGraph, Tuple[Any, ...]]:
+    """`walk_dag` と同じ graph に、番号順の node object の並びを添えて返す。
+
+    `nodes[i]` が `graph.nodes[i]`（`canonical_node_no == i`）の node。graph に
+    載らない node ごとの値（solver が読む意味値など）を consumer が同じ番号で並べる
+    ためのもので、番号の振り方はここ 1 箇所だけにある（consumer は走査を書かない）。
+    """
+
     if root is None:
-        return ImmutableSemanticGraph(root_no=None, nodes=())
+        return ImmutableSemanticGraph(root_no=None, nodes=()), ()
 
     traversal = traverse_semantic_graph(root)
     numbers = {id(node): index for index, node in enumerate(traversal.entry_order)}
@@ -755,4 +776,4 @@ def walk_dag(root: Any) -> ImmutableSemanticGraph:
             )
         )
 
-    return ImmutableSemanticGraph(root_no=0, nodes=tuple(records))
+    return ImmutableSemanticGraph(root_no=0, nodes=tuple(records)), traversal.entry_order
