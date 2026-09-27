@@ -118,6 +118,17 @@ def deep_freeze(value: Any) -> Any:
     subclass は写すとその code を呼ぶので `TypeError`（変更できる mapping をそのまま snapshot に置かない:
     fail-closed。snapshot の意味の値は fingerprint の digest が先に拒む）。"""
 
+    kind = type(value)
+    # よくある形（組み込みの型そのもの）は型の同一性で振り分ける: 反復は組み込みの実装だけで、値の code を
+    # 呼ばない（snapshot のたびに意味の値全体を辿るので、node ごとの判定を軽くする）
+    if kind is str or kind is int or value is None or kind is bool or kind is float:
+        return value
+    if kind is dict:
+        return MappingProxyType({key: deep_freeze(item) for key, item in dict.items(value)})
+    if kind is tuple or kind is list:
+        return tuple(deep_freeze(item) for item in value)
+    if kind is frozenset or kind is set:
+        return frozenset(deep_freeze(item) for item in value)
     mapping = builtin_mapping(value)
     if mapping is not None:
         # key は置かれた dict と同じ key を新しい dict へ置く: hash が組み込みでない key は置いたときと
