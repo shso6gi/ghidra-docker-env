@@ -668,7 +668,8 @@ def test_cnf_literal_sort_key_is_unchanged_and_linear_on_a_shared_key(scoped):
     )
     assert ConditionSimplifier._literal_sort_key(literal) == expected
 
-    deep = _shared_key(60)  # 木にすると 2^60 要素
+    # 木にすると 2^22 要素（memo 無しなら数秒以上かかる深さ。memo ありは distinct 23 個）
+    deep = _shared_key(22)
     started = time.perf_counter()
     first = ConditionSimplifier._literal_sort_key(((deep, "INT_EQUAL", 0), True))
     again = ConditionSimplifier._literal_sort_key(((deep, "INT_EQUAL", 0), False))
