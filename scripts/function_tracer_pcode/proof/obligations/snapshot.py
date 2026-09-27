@@ -21,6 +21,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
 from scripts.function_tracer_pcode.core.live_values import (
     metered_storage_reads,
     NOT_PLAIN,
+    as_bool,
     as_repr,
     as_str,
     builtin_mapping,
@@ -30,6 +31,7 @@ from scripts.function_tracer_pcode.core.live_values import (
     elements_of,
     enum_value,
     field_value,
+    hash_safe_key,
     is_enum,
     items_of,
     json_scalar,
@@ -111,12 +113,20 @@ FUNCTION_ANALYSIS_FIELD_CLASSIFICATION = MappingProxyType({
 
 
 def deep_freeze(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return MappingProxyType({key: deep_freeze(item) for key, item in value.items()})
-    if isinstance(value, (list, tuple)):
-        return tuple(deep_freeze(item) for item in value)
-    if isinstance(value, (set, frozenset)):
-        return frozenset(deep_freeze(item) for item in value)
+    """組み込みの振る舞いの容器を読み取り専用の写しにする（`core/live_values` の規則で辿る: 上書きした
+    `items()` / `__iter__` を呼ばない）。key の hash が組み込みの実装でない mapping・組み込みの振る舞いで
+    ない値はそのまま（写すと key の `__hash__` / 値の code を呼ぶ）。"""
+
+    mapping = builtin_mapping(value)
+    if mapping is not None:
+        pairs = tuple(items_of(mapping))
+        if not all(hash_safe_key(key) for key, _item in pairs):
+            return value
+        return MappingProxyType({key: deep_freeze(item) for key, item in pairs})
+    if builtin_sequence(value):
+        return tuple(deep_freeze(item) for item in elements_of(value))
+    if builtin_set(value):
+        return frozenset(deep_freeze(item) for item in elements_of(value))
     return value
 
 
@@ -134,8 +144,13 @@ def _semantic_effect_summary_projection(effect_summary: Any, work: Any = None) -
 def _classify_analysis_notes(notes: Any) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
     semantic = []
     diagnostic = []
-    for raw_note in notes or ():
-        note = str(raw_note)
+    # note は `core/live_values` の規則で読む（scalar・組み込みのままの enum は `str()` と同じ文字列、
+    # それ以外は型名の印: 値の `__str__` を呼ばない。未知の note と同じく semantic 側）
+    for raw_note in (elements_of(notes) if notes is not None and as_bool(notes) else ()):
+        try:
+            note = as_str(raw_note)
+        except TypeError:
+            note = f"<{type_name(type(raw_note))}>"
         if note in SEMANTIC_ANALYSIS_NOTES:
             semantic.append(note)
         elif note.startswith(("debug:", "diagnostic:")):
@@ -158,18 +173,19 @@ def _fingerprint_json(value: Any) -> str:
     return json_encoding.JsonEncodingPolicy.dumps(_FINGERPRINT_JSON, value)
 
 
-def _enum_payload(value: Any) -> Any:
+def _enum_payload(value: Any, work: Any = None) -> Any:
     """enum の member の値（instance の `_value_`。`value` の property を呼ばない）の写し。
 
-    scalar は基底型の値、それ以外は組み込みの値だけで書き直した写し（`builtin_view`）。書き直せない
-    値（live な object を含む値）は object-derived な identity を持たないので `TypeError`。
+    scalar は基底型の値、それ以外は組み込みの値だけで書き直した写し（`builtin_view`。`work` を渡すと
+    写す要素と文字をその作業量へ数える: 無ければ `builtin_view` の固定の上限）。書き直せない値（live な
+    object を含む値）は object-derived な identity を持たないので `TypeError`。
     """
 
     raw = enum_value(value)
     scalar = plain_scalar(raw)
     if scalar is not NOT_PLAIN:
         return scalar
-    ok, view = builtin_view(raw)
+    ok, view = builtin_view(raw, work)
     if not ok:
         raise TypeError(f"enum {type_name(type(value))} has no object-derived stable value")
     return view
@@ -350,10 +366,13 @@ class SnapshotFingerprintCodec:
                 meter.scalar(base)
                 return value
             name = type_name(kind)
-            payload = _enum_payload(value)
+            # 容器の値の写しは同じ予算で数えながら作る（`builtin_view(raw, budget)`）: 数えるのは
+            # scalar の値だけ（容器の写しは作るときに数えた）
+            payload = _enum_payload(value, meter.budget)
             meter.frame(2)
             meter.scalar(name)
-            meter.scalar(payload)
+            if plain_scalar(payload) is not NOT_PLAIN:
+                meter.scalar(payload)
             return (name, payload)
         if kind is bytes:
             meter.frame(2)
@@ -503,10 +522,12 @@ class AnalysisSnapshot:
         extraction_schema_version: int = 1,
     ) -> "AnalysisSnapshot":
         payload = (extraction_schema_version, snapshot_id, semantic_fields)
+        # fingerprint を先に求める（opaque な値・上書きした容器は digest が拒む。拒まれた値を写さない）
+        fingerprint = SnapshotFingerprintCodec.digest(payload)
         return cls(
             snapshot_id=tuple(snapshot_id),
             semantic_fields=deep_freeze(dict(semantic_fields)),
-            semantic_fingerprint=SnapshotFingerprintCodec.digest(payload),
+            semantic_fingerprint=fingerprint,
             extraction_schema_version=extraction_schema_version,
             diagnostic_refs=deep_freeze(dict(diagnostic_refs or {})),
         )

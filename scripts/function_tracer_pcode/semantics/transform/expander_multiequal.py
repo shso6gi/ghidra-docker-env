@@ -16,7 +16,8 @@ from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.core.budget_policy import (
     BudgetKind,
     active_budget_policy,
-    enforce_budget,
+    exceeded_budget_bound,
+    raise_expression_size_budget_exceeded,
 )
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
     SemanticGraphMeter,
@@ -302,38 +303,40 @@ class MultiequalExpansionMixin:
         meter.add_root(latest.value, max_distinct=max_nodes)
         for condition in latest.conditions or ():
             meter.add_root(getattr(condition, "expression", None), max_distinct=max_nodes)
-        op_key = (
-            multiequal_pcode_op_ref.stable_key()
-            if multiequal_pcode_op_ref is not None
-            else _pcode_op_stable_key(multiequal_op)
-        )
-        # scope key は大きくなり得る primitive の入れ子なので、決定的な digest に
-        # 落として target にする（authority の cause identity へそのまま入る）。
-        target_key = (
-            stable_atoms_digest(
-                getattr(getattr(self, "_budget_sink", None), "owner_scope_key", None)
-            ),
-            op_key,
-        )
-        evidence = (
-            f"distinct_nodes={meter.distinct_nodes}",
-            f"cases={len(all_expanded)}",
-            f"tree_nodes={meter.tree_nodes}",
-        )
-        enforce_budget(
-            BudgetKind.EXPANSION_CASES,
-            len(all_expanded),
-            site=EXPANSION_BUDGET_SITE,
-            target_key=target_key,
-            evidence=evidence,
-        )
-        enforce_budget(
-            BudgetKind.EXPRESSION_NODES,
-            meter.distinct_nodes,
-            site=EXPANSION_BUDGET_SITE,
-            target_key=target_key,
-            evidence=evidence,
-        )
+
+        def _describe():
+            # target と evidence は超えたときだけ作る（case ごとに op の key・scope の digest を作らない）
+            op_key = (
+                multiequal_pcode_op_ref.stable_key()
+                if multiequal_pcode_op_ref is not None
+                else _pcode_op_stable_key(multiequal_op)
+            )
+            # scope key は大きくなり得る primitive の入れ子なので、決定的な digest に
+            # 落として target にする（authority の cause identity へそのまま入る）。
+            target_key = (
+                stable_atoms_digest(
+                    getattr(getattr(self, "_budget_sink", None), "owner_scope_key", None)
+                ),
+                op_key,
+            )
+            evidence = (
+                f"distinct_nodes={meter.distinct_nodes}",
+                f"cases={len(all_expanded)}",
+                f"tree_nodes={meter.tree_nodes}",
+            )
+            return target_key, evidence
+
+        for kind, observed in (
+            (BudgetKind.EXPANSION_CASES, len(all_expanded)),
+            (BudgetKind.EXPRESSION_NODES, meter.distinct_nodes),
+        ):
+            bound = exceeded_budget_bound(kind, observed, site=EXPANSION_BUDGET_SITE)
+            if bound is not None:
+                target_key, evidence = _describe()
+                raise_expression_size_budget_exceeded(
+                    kind, observed=observed, limit=bound, site=EXPANSION_BUDGET_SITE,
+                    target_key=target_key, evidence=evidence,
+                )
 
     def _debug_multiequal_input_trace(
         self,

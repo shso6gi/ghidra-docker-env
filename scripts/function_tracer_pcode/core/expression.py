@@ -831,7 +831,7 @@ class Expression:
                 # 固定の形（型名と 1 桁）の object 1 つ: 型名の長さの上限で測る
                 type_text = enum_name(self.expr_type)
                 work.charge(JsonEncodingPolicy.measure(
-                    policy, {"type": type_text, "cycle_ref": 0}, max_bytes=4096, size_only=True,
+                    policy, {"type": type_text, "cycle_ref": 0}, max_bytes=_CYCLE_REF_SHAPE_BYTES, size_only=True,
                 ) - 1)
                 return {
                     "type": type_text,
@@ -1009,6 +1009,9 @@ class Expression:
 # 木表現の大きさ（Issue #22 PR-22-D）
 # ---------------------------------------------------------------------------
 
+#: 閉路の参照（`{"type": 型名, "cycle_ref": 0}`、固定の形）を測るときの byte の上限（型名の長さの上限。
+#: 測る値は固定の形で、これを超える型名は無い）
+_CYCLE_REF_SHAPE_BYTES = 4096
 #: 木表現の直列化予算を見る観測点（`ExpressionSizeBudgetExceeded.site`）。
 LEGACY_TREE_SERIALIZATION_SITE = "core.expression.to_dict"
 
@@ -1161,12 +1164,16 @@ def _bounded_local_bytes(policy: Any, local: Any, max_bytes: Optional[int]) -> i
             if kind is str:
                 total += len(value)
             elif kind is dict:
-                # node の dict（package が作った組み込みの dict）
+                # node の dict（package が作った組み込みの dict）。幅を上限と比べてから子を積む
                 total += size(value)
+                if total > max_bytes:
+                    return max_bytes + 1
                 stack.extend(value.keys())
                 stack.extend(value.values())
             elif kind is list or kind is tuple:
                 total += size(value)
+                if total > max_bytes:
+                    return max_bytes + 1
                 stack.extend(elements_of(value))
             elif kind is not int and value is not None:
                 # 組み込みの型でない値: 文字列の subclass は基底型の長さ、容器は組み込みの振る舞いのものだけ
@@ -1178,11 +1185,15 @@ def _bounded_local_bytes(policy: Any, local: Any, max_bytes: Optional[int]) -> i
                     mapping = builtin_mapping(value)
                     if mapping is not None:
                         total += size(mapping)
+                        if total > max_bytes:
+                            return max_bytes + 1
                         for key, child in items_of(mapping):
                             stack.append(key)
                             stack.append(child)
                     elif builtin_sequence(value):
                         total += size(value)
+                        if total > max_bytes:
+                            return max_bytes + 1
                         stack.extend(elements_of(value))
             if total > max_bytes:
                 return max_bytes + 1

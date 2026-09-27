@@ -139,7 +139,8 @@ class ParallelResult:
     first_definitive: Optional[SolverResult] = None  # 最初に確定した結果
     is_equivalent: Optional[bool] = None
     #: TIMEOUT の行があるか（作ったときに 1 度だけ数える事実。`EquivalenceResult.is_timeout` が
-    #: 行を辿り直さずに読む。結果 JSON の schema・比較には入れない）
+    #: 行を辿り直さずに読む。結果 JSON の schema・比較には入れない）。作った後に `results` へ行を
+    #: 足さない（足すなら新しい `ParallelResult` を作る: この事実が行と食い違う）
     timed_out: bool = field(default=False, init=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:

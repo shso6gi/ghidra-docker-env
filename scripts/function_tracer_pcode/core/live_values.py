@@ -6,13 +6,15 @@ bounded path（walker・canonical digest・snapshot の codec・有界な証拠�
 `repr(x)` / `hash(x)` / `len(x)` / `iter(x)` / `isinstance(x, T)` / `getattr(x, name)` /
 `dataclasses.fields(x)`）は live な値の user code（`__int__` / `__float__` / `__str__` /
 `__repr__` / `__hash__` / `__len__` / `__iter__` / `__class__` / `__getattr__` / property /
-metaclass の `__getattribute__`）を呼び得る。`tests/unit/test_architecture_boundaries.py` の
-J19 が bounded path の関数からそれらの直接の呼び出しを拒む。
+metaclass の `__getattribute__`）を呼び得る。`tests/unit/test_issue22d_capabilities.py` の
+J19（`tests/unit/_live_flow_audit.py`）が bounded path の関数からそれらの直接の呼び出しを拒む。
 
 規則:
 
 * 型は `type(x)` だけで決める（`isinstance` は上書きした `__class__` を読む）。型の属性は
-  `inspect.getattr_static` で読む（metaclass の `__getattr__` / `__getattribute__` を呼ばない）。
+  `type_attribute`（組み込みの slot `type.__dict__["__mro__"]` / `["__dict__"]` だけを読む）で読む。
+  `inspect.getattr_static` は使わない（`klass.__dict__` を普通の属性の読みで引くので metaclass の
+  `__getattribute__` を呼び、名前の比較で namespace の key の `__eq__` を呼び得る）。
 * scalar の subclass（`bool` / `int` / `float` / `str`）は基底型の slot で基底型の値にする
   （`int.__index__` / `float.__float__` / `str.__str__`）。enum は scalar として扱わない。
 * 容器は組み込みの振る舞い（`items` / `__iter__` / `__len__` / `__getitem__` を上書きしない
@@ -444,8 +446,6 @@ def package_function(value: Any) -> bool:
 
 
 _PACKAGE_TYPES: dict = {}
-#: 型の中の code（関数・property の getter / setter）の読み方
-_CODE_HOLDERS = (types.FunctionType, staticmethod, classmethod, property)
 
 
 def package_type(kind: type) -> bool:
@@ -773,8 +773,8 @@ _HEAP_TYPE = 1 << 9
 def type_attribute(kind: type, name: str) -> Any:
     """型 `kind` の属性（MRO の各 class の `__dict__` から。metaclass の hook を呼ばない）。無ければ `None`。
 
-    `inspect.getattr_static(kind, name)` の instance 向けの部分と同じ（metaclass の属性は含めない）。
-    組み込みの slot（`__mro__` / `__dict__`）だけを読む。
+    `inspect.getattr_static(kind, name)` の instance 向けの部分と同じ値（metaclass の属性は含めない）を、
+    組み込みの slot（`__mro__` / `__dict__`）だけで読む（`getattr_static` と違い metaclass の hook を呼ばない）。
     """
 
     return _type_lookup(kind, name, None)

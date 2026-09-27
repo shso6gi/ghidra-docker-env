@@ -11,8 +11,12 @@ reducer の引数・出力の入口が受け取る結果）にしてよいこと
 
 それ以外（属性・添字・呼び出し・反復・真偽・比較・演算・hash・format・組み込み関数・未解決の
 method への引数）は違反として列挙する。関数を跨ぐ流れは、package の関数の引数・戻り値として
-追う（呼び出し先を同じ規則で監査する）。owner の module の中は監査しない（owner の規則は
-J20 と adversarial test が守る）。
+追う（呼び出し先を同じ規則で監査する）。owner の module（`OWNER_MODULES`）の中はこの監査では辿らない。
+owner の規則は次が守る: owner 自身への J22（`test_issue22d_live_values_bounds.py` の `OWNER_WORK`:
+入力に比例する関数の分類と、上限の比較が辿るより前にあること）、owner の API が読む値の code を
+呼ばないことの adversarial test（`test_issue22d_capabilities.py` の
+`test_the_owner_api_never_runs_the_code_of_the_values_it_reads` ほか、`test_issue22d_live_values*.py`・
+`test_issue22d_read_bound_contract.py`）、owner が `inspect.getattr_static` を使わないことの静的 test。
 """
 
 from __future__ import annotations
@@ -1656,6 +1660,53 @@ def _loops_with_preceding(body, preceding=()):
             yield from _loops_with_preceding(handler.body, before)
 
 
+def _names_in(node) -> frozenset:
+    """式の中の名前（`None` なら空）。"""
+
+    if node is None:
+        return frozenset()
+    return frozenset(inner.id for inner in _walk_own(node) if isinstance(inner, ast.Name))
+
+
+def _assigned_names(function) -> dict:
+    """関数の中の `name = 式` の、名前 → 式の中の名前（1 段の遡りに使う）。"""
+
+    found: dict = {}
+    for node in _walk_own(function):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            found.setdefault(node.targets[0].id, set()).update(_names_in(node.value))
+    return found
+
+
+def _charges_for(nodes, names, iterated, assigned) -> bool:
+    """`nodes` の中に、`iterated` の名前（または 1 段の代入でそれを参照する名前）を引数に持つ
+    `work.charge(...)` が在るか。辿る値に名前が無い（定数の列など）ときは、どれかの charge で足りる。"""
+
+    iterated = iterated - {name for name in iterated if name in names}
+    # 辿る側も 1 段遡る（`positions = sorted(found)` を辿る内包表記は、`found` を数えた charge で足りる）
+    iterated = set(iterated)
+    for name in tuple(iterated):
+        iterated.update(assigned.get(name, ()))
+    for node in nodes:
+        for inner in ast.walk(node):
+            func = getattr(inner, "func", None) if isinstance(inner, ast.Call) else None
+            if not (
+                isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+                and func.value.id in names and func.attr == "charge"
+            ):
+                continue
+            if not iterated:
+                return True
+            charged = set()
+            for argument in (*inner.args, *(keyword.value for keyword in inner.keywords)):
+                for name in _names_in(argument):
+                    charged.add(name)
+                    charged.update(assigned.get(name, ()))
+            if charged & iterated:
+                return True
+    return False
+
+
 def _charges(nodes, names) -> bool:
     for node in nodes:
         for inner in ast.walk(node):
@@ -1681,10 +1732,143 @@ def _uses_work(nodes, names) -> bool:
                 and func.value.id in names and func.attr == "charge"
             ):
                 return True
+            # 渡すのは作業量を受け取る呼び先へだけ（`repr(work)` / `str(work)` のような組み込みへ渡しても
+            # 数えたことにならない）
+            if isinstance(func, ast.Name) and func.id in _PYTHON_BUILTINS:
+                continue
             arguments = [*inner.args, *(keyword.value for keyword in inner.keywords)]
             if any(isinstance(argument, ast.Name) and argument.id in names for argument in arguments):
                 return True
     return False
+
+
+_PYTHON_BUILTINS = frozenset(dir(__import__("builtins")))
+
+
+_EMPTY_CONTAINER_CALLS = frozenset({"list", "set", "dict"})
+
+
+def _local_containers(function) -> frozenset:
+    """関数の中で作った容器の名前: 空の容器（`[]` / `set()` / `{}`）・内包表記・それらだけから作った値
+    （`order = sorted(keyed)`）。大きさは関数の中で詰めた反復・内包表記が決め、それらは同じ規則で確かめる。"""
+
+    assignments = []
+    for node in _walk_own(function):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            target, value = node.target, node.value
+        else:
+            continue
+        if isinstance(target, ast.Name):
+            assignments.append((target.id, value))
+    found = set()
+    for name, value in assignments:
+        if (
+            (isinstance(value, (ast.List, ast.Set)) and not value.elts)
+            or (isinstance(value, ast.Dict) and not value.keys)
+            or (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+                and value.func.id in _EMPTY_CONTAINER_CALLS and not value.args and not value.keywords)
+            or isinstance(value, (ast.ListComp, ast.SetComp, ast.DictComp))
+        ):
+            found.add(name)
+    changed = True
+    while changed:
+        changed = False
+        for name, value in assignments:
+            if name in found:
+                continue
+            sources = _names_in(value) - _PYTHON_BUILTINS
+            if sources and sources <= found:
+                found.add(name)
+                changed = True
+    return frozenset(found)
+
+
+def _traversed_sources(node) -> frozenset:
+    """反復・完成させる構文が辿る元の名前（反復の対象・内包表記の `iter`・呼び出しの引数と method の受け手）。"""
+
+    if isinstance(node, (ast.For, ast.AsyncFor)):
+        found = _names_in(node.iter)
+    elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+        found = frozenset().union(*(_names_in(generator.iter) for generator in node.generators))
+    elif isinstance(node, ast.Call):
+        parts = [*node.args, *(keyword.value for keyword in node.keywords)]
+        if isinstance(node.func, ast.Attribute):
+            parts.append(node.func.value)
+        found = frozenset().union(*(_names_in(part) for part in parts)) if parts else frozenset()
+    else:
+        found = frozenset()
+    return found - _PYTHON_BUILTINS
+
+
+def _completes_local(node, local) -> bool:
+    """関数の中で作った容器だけを辿る構文（`tuple(kept)` / `keyed.sort()` / `[t for t in keyed]`）:
+    大きさは詰めた反復・内包表記が決める。"""
+
+    sources = _traversed_sources(node)
+    return bool(sources) and sources <= local
+
+
+def _completing(node) -> bool:
+    """列を完成させる構文（内包表記・`sorted` / `tuple` などの組み込み・`.join` / `.sort()` などの method）。"""
+
+    if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp)):
+        return True
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in COMPLETING_BUILTINS and node.args:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr in COMPLETING_METHODS and (node.args or func.attr == "sort"):
+            return True
+    return False
+
+
+def _own_expressions(statement):
+    """文そのものの式（複合文は本体を除いた部分: 条件・反復の対象・with の項目）。"""
+
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return []
+    if isinstance(statement, (ast.For, ast.AsyncFor)):
+        return [statement.iter]
+    if isinstance(statement, (ast.While, ast.If)):
+        return [statement.test]
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return [item.context_expr for item in statement.items]
+    if isinstance(statement, ast.Try):
+        return []
+    return [statement]
+
+
+def _completions_with_preceding(body, preceding=()):
+    """関数の本体の、列を完成させる構文と、それを含む文より前に在る（同じ段か外側の段の）文の組。"""
+
+    for position, statement in enumerate(body):
+        before = (*preceding, *body[:position])
+        for expression in _own_expressions(statement):
+            for node in _walk_own(expression):
+                if _completing(node):
+                    yield node, before
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            inner = getattr(statement, field, None)
+            if isinstance(inner, list):
+                yield from _completions_with_preceding(inner, before)
+        for handler in getattr(statement, "handlers", ()) or ():
+            yield from _completions_with_preceding(handler.body, before)
+
+
+def _walk_own(node):
+    """`node` の中の node（入れ子の関数・lambda の中は除く）。"""
+
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        yield current
+        for child in ast.iter_child_nodes(current):
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                pending.append(child)
 
 
 def work_owner(index: PackageIndex, key) -> Optional[str]:
@@ -1698,12 +1882,28 @@ def work_owner(index: PackageIndex, key) -> Optional[str]:
     }
     own = list(_own_nodes(function))
     loops = [n for n in own if isinstance(n, (ast.For, ast.AsyncFor, ast.While))]
+    local = _local_containers(function)
     if names:
-        # 引数に取るだけでは owner でない: 関数の中で数えるか渡し、反復は 1 回ごとに数えるか渡すか、
-        # 反復より前に（辿る幅を）数える
-        if _uses_work(function.body, names) and all(
-            _uses_work(loop.body, names) or _charges(before, names)
-            for loop, before in _loops_with_preceding(function.body)
+        # 引数に取るだけでは owner でない: 関数の中で数えるか（作業量を受け取る呼び先へ）渡し、反復と
+        # 列を完成させる構文（内包表記・`sorted` など）は、その中で数えるか渡すか、それより前に（辿る幅を）
+        # 数える
+        # 前に数える形は、数える呼び出しの引数が辿る値（の名前、または 1 段の代入の元）を参照すること
+        # （`work.charge(1)` の後の `sorted(values)` は数えていない）
+        assigned = _assigned_names(function)
+        if (
+            _uses_work(function.body, names)
+            and all(
+                _uses_work(loop.body, names)
+                or _charges_for(before, names, _names_in(loop.iter if isinstance(loop, (ast.For, ast.AsyncFor)) else None), assigned)
+                or _completes_local(loop, local)
+                for loop, before in _loops_with_preceding(function.body)
+            )
+            and all(
+                _uses_work([node], names)
+                or _charges_for(before, names, _names_in(node), assigned)
+                or _completes_local(node, local)
+                for node, before in _completions_with_preceding(function.body)
+            )
         ):
             return "B"
         return None

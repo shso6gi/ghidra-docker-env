@@ -1042,7 +1042,7 @@ _A_FIXED_CALL = "A: 固定の形（呼び出しの keyword・定数の上限の 
 _B_COUNTED_RECORD = (
     "B: record の列の構築・写し。bounded path（G4-b → finish → 最終 envelope）の呼び出しは、渡す列が"
     " 出力 schema の行数以下（G4-b が切った列・pair の失敗の変換の固定の形の record）か、呼ぶ側が同じ"
-    " 作業量へ先に数えた列だけ（`test_record_walks_on_the_bounded_path_see_only_schema_rows_or_counted_input`"
+    " 作業量へ先に数えた列だけ（`test_record_walks_on_the_bounded_path_never_see_uncounted_input`"
     " が実行して確かめる）"
 )
 _B_DIAGNOSTIC_KEYS = (
@@ -1097,7 +1097,6 @@ _PROPORTIONAL_WORK_OWNERS = {
     ("core.canonical_digest", "_emit"): _B_BOUND,
     ("core.expression", "Expression._to_dict_active"): _B_SIZED,
     ("core.expression", "_bounded_local_bytes"): _B_BOUND,
-    ("core.expression", "estimate_legacy_dict_bytes"): _B_BOUND,
     ("core.expression", "runtime_ref_source"): _C_LAZY,
     ("core.runtime_refs.loops", "CountedLoopSummaryRef.json_items"): _A_FIXED,
     ("core.runtime_refs.loops", "LoopTermDescriptorRef.json_items"): _A_FIXED,
@@ -2224,6 +2223,47 @@ def charged_before(values, work):
         pass
 
 
+def token_charge_then_loop(values, work):
+    work.charge(1)
+    for value in values:
+        pass
+
+
+def token_charge_then_sorted(values, work):
+    work.charge(1)
+    return sorted(values)
+
+
+def token_charge_then_comprehension(values, work):
+    work.charge(1)
+    return [value for value in values]
+
+
+def work_only_to_a_builtin(values, work):
+    for value in values:
+        repr(work)
+
+
+def width_then_sorted(values, work):
+    work.charge(len(values))
+    return sorted(values)
+
+
+def counted_width_then_comprehension(values, work):
+    count = len(values)
+    work.charge(count + 1)
+    return [value for value in values]
+
+
+def filled_then_completed(values, work):
+    kept = []
+    for value in values:
+        work.charge(1)
+        kept.append(value)
+    order = sorted(kept)
+    return tuple(order)
+
+
 def skipping(values):
     for value in values:
         if value is None:
@@ -2280,10 +2320,18 @@ def test_j22_the_detector_sees_every_proportional_construct_and_every_unowned_lo
     module = flow.PKG + ".j22cases"
     owners = {name: flow.work_owner(index, (module, name)) for name in (
         "uncharged", "charged_each", "charged_before", "skipping", "sorted_then_yield", "lazy",
+        "token_charge_then_loop", "token_charge_then_sorted", "token_charge_then_comprehension",
+        "work_only_to_a_builtin", "width_then_sorted", "counted_width_then_comprehension", "filled_then_completed",
     )}
     assert owners == {
         "uncharged": None, "charged_each": "B", "charged_before": "B", "skipping": None,
         "sorted_then_yield": None, "lazy": "C",
+        # 前に数えるのは辿る値の幅（引数が辿る値を参照する charge）でなければ owner でない。列を完成させる
+        # 構文も反復と同じ規則。作業量を組み込みへ渡しても数えたことにならない
+        "token_charge_then_loop": None, "token_charge_then_sorted": None, "token_charge_then_comprehension": None,
+        "work_only_to_a_builtin": None, "width_then_sorted": "B", "counted_width_then_comprehension": "B",
+        # 関数の中で数えながら詰めた容器を完成させるのは、詰めた反復の規則で足りる
+        "filled_then_completed": "B",
     }
     constructs = {
         name: flow.proportional_constructs(index.functions[(module, name)])
@@ -2365,8 +2413,20 @@ def test_every_counted_record_label_is_checked_at_runtime():
 _COUNTING_CALLS = frozenset({
     "_counted", "elements_within_limit", "items_within_limit", "prefix_within_limit", "copied_within_limit",
 })
-#: record の型の `__post_init__` が辿る field（構築の keyword）
-_WALKED_FIELDS = {"EquivalenceResult": frozenset({"unknown_reasons", "unknown_recovery_actions"})}
+def _post_init_walked_fields(function) -> set:
+    """`__post_init__` が呼び出しへ渡す自分の field（`coerce_*(self.unknown_reasons)` など。構築の keyword）。
+    production の `__post_init__` の AST から導く（test に field の一覧を書き写さない）。"""
+
+    found = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.Call):
+            for argument in (*node.args, *(keyword.value for keyword in node.keywords)):
+                if (
+                    isinstance(argument, ast.Attribute) and isinstance(argument.value, ast.Name)
+                    and argument.value.id == "self"
+                ):
+                    found.add(argument.attr)
+    return found
 
 
 def _call_name(func: ast.expr) -> Optional[str]:
@@ -2546,11 +2606,11 @@ def _forwarded(index, caller, target, walked: Set[str]) -> Set[str]:
 
 
 def _walked_inputs(index, target) -> Set[str]:
-    module, qual = target
-    owner_cls, _, method = qual.rpartition(".")
-    if method == "__post_init__":
-        return set(_WALKED_FIELDS.get(owner_cls, ()))
+    _module, qual = target
+    method = qual.rpartition(".")[2]
     function = index.functions.get(target)
+    if method == "__post_init__":
+        return _post_init_walked_fields(function) if function is not None else set()
     return set(_parameters(function)) if function is not None else set()
 
 
@@ -2588,3 +2648,68 @@ def test_counted_record_functions_reach_the_bounded_path_only_through_bounding_c
                     continue
                 pending.append((caller, forwarded, chain))
     assert unbounded == []
+
+
+def test_snapshot_creation_never_runs_the_code_of_the_values_it_freezes():
+    """snapshot の作成は fingerprint を先に求め（上書きした容器・opaque な値は digest が拒む）、写しと
+    note の分類も `live_values` の規則で読む（上書きした `items()` / `__iter__` / `__str__` を呼ばない）。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import (
+        AnalysisSnapshot,
+        _classify_analysis_notes,
+        deep_freeze,
+    )
+
+    calls = []
+
+    class _Hostile(dict):
+        def items(self):  # pragma: no cover - must never run
+            calls.append("items")
+            return dict.items(self)
+
+        def __iter__(self):  # pragma: no cover - must never run
+            calls.append("iter")
+            return dict.__iter__(self)
+
+    class _Note:
+        def __str__(self):  # pragma: no cover - must never run
+            calls.append("str")
+            return "note"
+
+    built = RESULT_JSON_POLICY.materialize({"analysis_scope_key": _Hostile(a=1)})
+    with pytest.raises(TypeError):
+        AnalysisSnapshot.create(("s",), built)
+    # 上書きした容器は写さない（そのまま返す: 写すとその code を呼ぶ）
+    hostile = _Hostile(a=1)
+    assert deep_freeze(hostile) is hostile
+    frozen = deep_freeze({"a": [1, (2, 3)], "b": {"c": {4}}})
+    assert frozen["a"] == (1, (2, 3)) and frozen["b"]["c"] == frozenset({4})
+    semantic, diagnostic = _classify_analysis_notes(["debug:x", _Note(), "custom"])
+    from scripts.function_tracer_pcode.core.live_values import type_name
+
+    assert diagnostic == ("debug:x",) and semantic == (f"<{type_name(_Note)}>", "custom")
+    assert calls == []
+
+
+def test_the_bounded_path_owners_never_read_type_attributes_with_getattr_static():
+    """owner の module・bounded path の core は型の属性を `live_values.type_attribute`（組み込みの slot だけを
+    読む）で読む。`inspect.getattr_static` は `klass.__dict__` を普通の属性の読みで引くので metaclass の
+    `__getattribute__` を呼び、名前の比較で namespace の key の `__eq__` を呼び得る。"""
+
+    import ast
+
+    modules = sorted(flow.OWNER_MODULES | {
+        flow.PKG + ".core.canonical_digest", flow.PKG + ".core.budget_policy",
+        flow.PKG + ".proof.obligations.snapshot", flow.PKG + ".checker.output_preparation",
+    })
+    offenders = []
+    for module in modules:
+        path = PACKAGE_ROOT / (module[len(flow.PKG) + 1:].replace(".", "/") + ".py")
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute) and node.attr == "getattr_static") or (
+                isinstance(node, ast.alias) and node.name == "getattr_static"
+            ):
+                offenders.append((module, getattr(node, "lineno", 0)))
+    assert offenders == []

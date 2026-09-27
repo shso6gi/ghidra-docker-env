@@ -67,6 +67,7 @@ from scripts.function_tracer_pcode.core.budget_policy import (
     budget_observations,
     observe_budget_usage,
     raise_expression_size_budget_exceeded,
+    raise_output_schema_exceeded,
 )
 from scripts.function_tracer_pcode.core.errors import (
     AnalysisFailureError,
@@ -1344,13 +1345,9 @@ def _schema_row_limit(bounds: Mapping[str, Any], key: str, row: Any) -> int:
 
 
 def _raise_over_schema(key: str, count: int, limit: int) -> None:
-    raise_expression_size_budget_exceeded(
-        BudgetKind.SERIALIZATION_BYTES,
-        observed=count,
-        limit=limit,
-        site=PREPARATION_SITE,
-        target_key=("result_payload", key, "rows"),
-        evidence=(f"field={key}", f"rows={count}", f"schema_max_rows={limit}"),
+    raise_output_schema_exceeded(
+        field_key=key, unit="rows", observed=count, limit=limit,
+        site=PREPARATION_SITE, target_key=("result_payload", key, "rows"),
     )
 
 
@@ -1416,13 +1413,9 @@ def check_prepared_field_bounds(result: Any, *, authority_projects_reasons: bool
             source = OutputField.read_source(FIELD_BY_KEY[key], result, None)
             json_encoding.RESULT_JSON_POLICY.measure(source, max_bytes=bound.max_bytes)
         except JsonBudgetExhausted as exc:
-            raise_expression_size_budget_exceeded(
-                BudgetKind.SERIALIZATION_BYTES,
-                observed=exc.consumed_bytes,
-                limit=bound.max_bytes,
-                site=PREPARATION_SITE,
-                target_key=("result_payload", key),
-                evidence=(f"field={key}", f"schema_bound={bound.max_bytes}"),
+            raise_output_schema_exceeded(
+                field_key=key, unit="bytes", observed=exc.consumed_bytes, limit=bound.max_bytes,
+                site=PREPARATION_SITE, target_key=("result_payload", key),
             )
 
 

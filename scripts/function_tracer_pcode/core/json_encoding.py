@@ -54,6 +54,7 @@ from json.encoder import encode_basestring, encode_basestring_ascii
 from typing import Any, Callable, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import live_values
+from scripts.function_tracer_pcode.core.canonical_digest import STRING_CHUNK
 from scripts.function_tracer_pcode.core.live_values import (
     NOT_PLAIN,
     builtin_enum as _builtin_enum,
@@ -1010,18 +1011,13 @@ def _copy_canonical(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
-#: `ensure_ascii=False` で escape される文字（`json.encoder.ESCAPE` と同じ集合）。
-_ESCAPE_UNICODE = re.compile(r'[\x00-\x1f\\"]')
-#: `ensure_ascii=True` で escape される文字（`json.encoder.ESCAPE_ASCII` と同じ集合）。
-_ESCAPE_ASCII = re.compile(r'([\\"]|[^\ -~])')
 #: surrogate の code point（Python の文字列では単独の文字。surrogateescape で読んだ file 名など）。
 #: `ensure_ascii=False` の書き出しでも `\uXXXX` に escape する（UTF-8 で書けないため。
 #: JSON の読み手は同じ code point に戻す）。数え方も同じ規則（1 文字 6 byte）。
 _SURROGATE = re.compile("[\ud800-\udfff]")
-#: 2 文字の escape（`\"` `\\` `\b` `\f` `\n` `\r` `\t`）になる文字。
-_SHORT_ESCAPES = frozenset('\\"\b\f\n\r\t')
-#: 長い文字列を数えるときの 1 回分の文字数（上限に届いたら残りを数えない単位）。
-_STRING_CHUNK = 1 << 16
+#: 長い文字列を数える・書くときの 1 回分の文字数（上限に届いたら残りを数えない単位。owner は
+#: `core/canonical_digest.STRING_CHUNK`: fingerprint の streaming と同じ単位）
+_STRING_CHUNK = STRING_CHUNK
 
 CANONICAL = "canonical"
 LEGACY = "legacy"
@@ -1161,28 +1157,6 @@ class JsonEncodingPolicy:
             return len(quoted) - 2
         # surrogate は `\uXXXX`（6 byte）で書く。surrogatepass の 3 byte との差を足す
         return len(quoted.encode("utf-8", "surrogatepass")) - 2 + 3 * len(_SURROGATE.findall(quoted))
-
-    def _string_chunk_bytes_by_rule(self, text_value: str) -> int:
-        """`_string_chunk_bytes` と同じ値を escape の規則から数える（test の照合用）。"""
-
-        if self.ensure_ascii:
-            total = len(text_value)
-            for match in _ESCAPE_ASCII.finditer(text_value):
-                char = match.group(0)
-                if char in _SHORT_ESCAPES:
-                    total += 1
-                elif ord(char) > 0xFFFF:
-                    total += 11  # surrogate pair: \uXXXX\uXXXX
-                else:
-                    total += 5  # \uXXXX
-            return total
-        total = (
-            len(text_value) if text_value.isascii()
-            else len(text_value.encode("utf-8", "surrogatepass")) + 3 * len(_SURROGATE.findall(text_value))
-        )
-        for match in _ESCAPE_UNICODE.finditer(text_value):
-            total += 1 if match.group(0) in _SHORT_ESCAPES else 5
-        return total
 
     def string_bytes(self, text_value: str, *, max_bytes: Optional[int] = None) -> int:
         """文字列 1 つを JSON 文字列として書いたときの byte 数（引用符を含む）。
@@ -1946,8 +1920,8 @@ class _NoneKeys:
 _NONE_KEYS = _NoneKeys()
 
 
-#: producer（`json_items`・集計の reducer・`each` の変換・`refresh`・`to_authority_dict` とその
-#: helper）が値の不備で上げる例外。walker と有界な証拠はこれを「JSON にならない値」
+#: producer（`json_items`・集計の reducer・`each` の変換・`to_authority_dict` とその helper）が
+#: 値の不備で上げる例外。walker と有界な証拠はこれを「JSON にならない値」
 #: （`JsonValueRejected` / fingerprint の無い要約）に変える（`RecursionError` は `RuntimeError`、
 #: `UnicodeError` は `ValueError` の派生）
 PRODUCER_FAILURES = (TypeError, ValueError, AttributeError, LookupError, RuntimeError, ArithmeticError)

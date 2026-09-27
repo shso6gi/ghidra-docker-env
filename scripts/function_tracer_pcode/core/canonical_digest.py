@@ -17,12 +17,12 @@ JSON の sha256。`authority/contracts`）と **同じ値** を streaming で求
   - mapping / dataclass / 列は幅を数えてから子を積む（mapping は key で並べる）。set は
     要素ごとの canonical JSON を作業量の中で作ってから digest 順に並べる。文字列は chunk
     ごとに数えてから escape・hash する。整数は桁数を数えてから文字列にする。
-* **producer を呼ばない**（Issue #22 PR-22-D、5 回目）: 走査の中で実行するのは組み込みの容器の
-  振る舞いだけ。`to_authority_dict()`・`__getattr__`（`hasattr`）・上書きした `items()` /
-  `__len__` / `__getitem__` / `__iter__`・dataclass の property は呼ばない（どれも work を
-  受け取らずに入力に比例する仕事をし得る）。そういう値は `TypeError`（有界な canonical な形を
-  持たない。呼ぶ側は型つき token の fingerprint へ退く）。例外は固定の形の record（`BoundedEvidence`）
-  で登録した固定の形の record（要約が O(1)。今は `BoundedEvidence` だけ）。
+* **producer を呼ばない**: 走査の中で実行するのは組み込みの容器の振る舞いだけ。
+  `to_authority_dict()`・`__getattr__`（`hasattr`）・上書きした `items()` / `__len__` /
+  `__getitem__` / `__iter__`・dataclass の property・metaclass の hook は呼ばない（どれも work を
+  受け取らずに入力に比例する仕事をし得る。型の属性は `live_values.type_attribute` で読む）。そういう
+  値は `TypeError`（有界な canonical な形を持たない。呼ぶ側は型つき token の fingerprint へ退く）。
+  例外は固定の形の record `BoundedEvidence`（要約が O(1)）だけ。
 * **閉路** は `CanonicalValueCycle`（型つきの失敗）。辿っている容器の identity を持つので、
   stack は際限なく伸びない。
 * **木として辿る**（共有部分も展開する）。共有 DAG は canonical JSON が大きくなるので作業量を
@@ -41,7 +41,6 @@ JSON の sha256。`authority/contracts`）と **同じ値** を streaming で求
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 import types
 from collections import OrderedDict
@@ -63,12 +62,14 @@ from scripts.function_tracer_pcode.core.live_values import (
     json_scalar,
     plain_scalar,
     size,
+    type_attribute,
     type_name,
 )
 
 
-#: 文字列を hash へ流す単位（巨大な文字列を一度に escape・encode しない）
-_STRING_CHUNK = 1 << 16
+#: 文字列を escape・hash・書き出しへ流す単位（巨大な文字列を一度に escape・encode しない。
+#: `core/json_encoding` の bounded な書き出しも同じ単位を使う）
+STRING_CHUNK = 1 << 16
 _ENCODE_BASESTRING = json.encoder.encode_basestring
 
 
@@ -86,9 +87,6 @@ def _bounded_evidence_type() -> type:
     from scripts.function_tracer_pcode.core.json_encoding import BoundedEvidence
 
     return BoundedEvidence
-
-
-_MAPPING_TYPES = (dict, OrderedDict, types.MappingProxyType)
 
 
 def _exact_mapping_type(item: Any) -> bool:
@@ -163,8 +161,8 @@ class _Sink:
 
     def emit_string(self, value: str) -> None:
         self.emit(b'"')
-        for start in range(0, len(value), _STRING_CHUNK):
-            chunk = value[start:start + _STRING_CHUNK]
+        for start in range(0, len(value), STRING_CHUNK):
+            chunk = value[start:start + STRING_CHUNK]
             # 切り出した chunk の長さを数えてから escape・encode する（1 文字は 1 byte 以上）。
             # 流す byte が文字数より多い分（escape・多 byte の文字）は流す前に足す: 数える量は
             # 流した byte（単位は emit と同じ）
@@ -321,7 +319,7 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
             _push_raw_container(actions, item, work, in_set=sink.in_set)
             active.add(identity)
             continue
-        if inspect.getattr_static(type(item), "to_authority_dict", None) is not None:
+        if type_attribute(type(item), "to_authority_dict") is not None:
             # authority の値は `to_authority_dict()`（producer）の形で digest される: その形を作らずに
             # 同じ digest は求められない（field を辿ると別の digest を `canonical_sha256` と名乗る）
             raise TypeError(f"{type_name(type(item))} has no bounded canonical form")

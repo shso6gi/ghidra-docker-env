@@ -1967,3 +1967,32 @@ def test_record_internal_bug_outside_a_scope_is_a_no_op():
     """scope の外の `record_internal_bug` は記録先が無いだけで失敗しない。"""
     record_internal_bug(FrozenExpressionError("x"), site="core.expression")
     assert current_pair_ledger() is None
+
+
+
+def test_every_failure_kind_is_handled_by_every_dispatcher():
+    """種別 → 扱い方の 3 つの振り分け（`pair_execution`）は、どれも `PairFailureKind` の全 member の分岐を
+    持つ（member を足して 1 つでも足し忘れると、実行時の `KeyError` を待たずにここで落ちる）。"""
+
+    import ast
+    import inspect
+
+    from scripts.function_tracer_pcode.checker import pair_execution
+    from scripts.function_tracer_pcode.core.errors import PairFailureKind
+
+    members = {member.name for member in PairFailureKind}
+    for dispatcher in (
+        pair_execution._build_result_for,
+        pair_execution._build_result_with_analyses_for,
+        pair_execution._replaces_unrelated_result_for,
+    ):
+        tree = ast.parse(inspect.getsource(dispatcher))
+        handled = {
+            node.test.comparators[0].attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+            and isinstance(node.test.comparators[0], ast.Attribute)
+            and isinstance(node.test.comparators[0].value, ast.Name)
+            and node.test.comparators[0].value.id == "PairFailureKind"
+        }
+        assert handled == members, (dispatcher.__name__, handled)

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import time
 from types import SimpleNamespace
 
@@ -1218,11 +1219,11 @@ def test_deeply_nested_containers_are_walked_without_python_recursion():
     for _ in range(100_000):
         node.append([])
         node = node[-1]
-    started = time.perf_counter()
+    # 深さ 10 万（Python の再帰の上限の 100 倍）を辿り切る・予算で止まること自体が「再帰しない」証拠
+    # （時間では比べない: 負荷のある runner で揺れる）
     assert RESULT_JSON_POLICY.measure(deep) == 2 * 100_001
     with pytest.raises(JsonBudgetExhausted):
         RESULT_JSON_POLICY.prepare(deep, max_bytes=1000)
-    assert time.perf_counter() - started < 2.0
 
 
 @pytest.mark.parametrize("policy", _POLICIES, ids=["default", "ascii", "compact", "odd"])
@@ -1236,6 +1237,39 @@ def test_projection_counts_cjk_non_bmp_and_escapes_like_the_encoder(policy):
         policy.prepare(value, max_bytes=prepared.encoded_bytes - 1)
 
 
+#: `ensure_ascii=False` で escape される文字（`json.encoder.ESCAPE` と同じ集合）
+_ESCAPE_UNICODE = re.compile(r'[\x00-\x1f\\"]')
+#: `ensure_ascii=True` で escape される文字（`json.encoder.ESCAPE_ASCII` と同じ集合）
+_ESCAPE_ASCII = re.compile(r'([\\"]|[^\ -~])')
+#: surrogate の code point（`ensure_ascii=False` でも `\uXXXX` に escape する）
+_SURROGATE_POINT = re.compile("[\ud800-\udfff]")
+#: 2 文字の escape になる文字
+_SHORT_ESCAPES = frozenset('\\"\b\f\n\r\t')
+
+
+def _string_chunk_bytes_by_rule(policy, text_value):
+    """`_string_chunk_bytes` と同じ値を JSON の escape の規則から数える照合（owner の実装と別の書き方）。"""
+
+    if policy.ensure_ascii:
+        total = len(text_value)
+        for match in _ESCAPE_ASCII.finditer(text_value):
+            char = match.group(0)
+            if char in _SHORT_ESCAPES:
+                total += 1
+            elif ord(char) > 0xFFFF:
+                total += 11  # surrogate pair: \uXXXX\uXXXX
+            else:
+                total += 5  # \uXXXX
+        return total
+    total = (
+        len(text_value) if text_value.isascii()
+        else len(text_value.encode("utf-8", "surrogatepass")) + 3 * len(_SURROGATE_POINT.findall(text_value))
+    )
+    for match in _ESCAPE_UNICODE.finditer(text_value):
+        total += 1 if match.group(0) in _SHORT_ESCAPES else 5
+    return total
+
+
 @pytest.mark.parametrize("policy", _POLICIES, ids=["default", "ascii", "compact", "odd"])
 def test_string_bytes_follow_the_json_escape_rule(policy):
     """文字列の byte 数（json の escape 関数で数える）が escape の規則と、policy が **書く** byte と一致する。
@@ -1244,7 +1278,7 @@ def test_string_bytes_follow_the_json_escape_rule(policy):
     数え方も同じ（数える byte と書く byte を別の規則にしない）。
     """
     for text in _STRINGS + ["\ud800 lone surrogate", "x\udcff\udc80y", "\ud83d\ude00", "\u2028\u2029", "\x7f\x80"]:
-        assert policy._string_chunk_bytes(text) == policy._string_chunk_bytes_by_rule(text)
+        assert policy._string_chunk_bytes(text) == _string_chunk_bytes_by_rule(policy, text)
         written = policy.encode_bounded(text, max_bytes=None)
         assert policy.string_bytes(text) == len(written.encode("utf-8"))
         # 読み戻すと `ensure_ascii` の書き出しを読んだ値と同じ（surrogate の組は 1 文字に戻る）
@@ -1881,3 +1915,31 @@ def _estimate_work():
     from scripts.function_tracer_pcode.core.json_encoding import JsonBudget
 
     return JsonBudget(None)
+
+
+def test_a_serialization_overflow_evidence_does_not_depend_on_traversal_history():
+    """直列化の予算の超過の evidence（cause の identity に入る）は、同じ入力なら走査の履歴（同じ scope の
+    前の直列化・大きさの cache の当たり方）で変わらない（途中の量を入れない）。"""
+
+    from scripts.function_tracer_pcode.core.budget_policy import (
+        BudgetPolicy,
+        budget_policy_scope,
+        serialization_scope,
+    )
+    from scripts.function_tracer_pcode.core.errors import ExpressionSizeBudgetExceeded
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonBudget
+
+    shared = tuple(range(1000, 1100))
+
+    def _overflow(warm):
+        with budget_policy_scope(BudgetPolicy(serialization_bytes=200)):
+            if warm:
+                RESULT_JSON_POLICY.materialize({"w": shared}, budget=JsonBudget(None))
+            with pytest.raises(ExpressionSizeBudgetExceeded) as raised:
+                with serialization_scope(site="probe", target_parts=("p",), enabled=True) as work:
+                    RESULT_JSON_POLICY.materialize({"a": "x" * 50, "b": shared}, budget=work)
+        return raised.value.evidence_refs, raised.value.target_key
+
+    cold, warm = _overflow(False), _overflow(True)
+    assert cold == warm
+    assert cold[0] == ("budget=serialization_bytes", "limit=200", "observed=201")

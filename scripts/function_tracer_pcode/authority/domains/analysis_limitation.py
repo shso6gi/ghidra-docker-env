@@ -3,9 +3,14 @@
 
 Issue #125 PR-125-A。`core/errors.py` の `AnalysisLimitation` を判定 authority
 へ載せるための **最小の** producer 経路（domain 1 / producer site 1）。sealed
-reason は 2 つ: 時間・段数の予算（`analysis_budget_exceeded`、#125）と式の
-大きさの予算（`expression_size_budget_exceeded`、#22 PR-22-D）。どちらも同じ
-site・同じ encoder・同じ回復契約を通る（reason が違うだけ）。
+reason は 2 つ: 解析の予算（`analysis_budget_exceeded`、#125）と式の大きさの予算
+（`expression_size_budget_exceeded`、#22 PR-22-D）。どちらも同じ site・同じ encoder・
+同じ回復契約を通る（reason が違うだけ）。
+
+`analysis_budget_exceeded` は deadline 専用の reason ではない: 時間・段数の予算
+（`DeadlineExceeded`、#106）・作業量を受け取らない読みの固定の上限（`FixedReadBoundExceeded`、
+`core/read_limits`）・authority の event の契約（`AuthorityEventContractExceeded`、#110）が共有する。
+種類を見分けるのは reason id ではなく型（と stop state: deadline だけが `PAIR_TERMINAL_DEADLINE`）。
 
 `decision_effect` を `blocks_decision` にするのは、予算切れで解析を打ち切った
 場合 EQ 側・NOT_EQ 側のどちらの証明も完了していないため。片方向だけを塞ぐ

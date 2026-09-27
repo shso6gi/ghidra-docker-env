@@ -782,6 +782,11 @@ def _hypotheses_of(analysis: Any) -> list:
 
 
 def _common_fields(**fields: Any) -> Dict[str, Any]:
-    """結果の共通の field（`dict(**fields)` と同じ。keyword の名前は組み込みの `str`）。"""
+    """結果の共通の field（`dict(**fields)` と同じ値。keyword の名前は組み込みの `str`）。
+
+    組み込みの `dict(...)` を live な値の keyword で呼ぶと、bounded path の監査（J19）はその mapping の
+    中身を live な値として扱い、そこから組む結果の読みを全部違反にする。package の関数が keyword を
+    受けて返す mapping は、監査が keyword ごとの流れとして辿れる（値は読まずに運ぶだけ）。
+    """
 
     return fields

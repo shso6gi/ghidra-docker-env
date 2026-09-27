@@ -668,13 +668,25 @@ def test_phase_usage_is_one_pass_and_equals_the_per_phase_count():
     assert trace.get_used_phases() == [row["phase"] for row in expected if row["used"]]
     prepared = RESULT_JSON_POLICY.prepare(trace.phase_usage_source()).value()
     assert prepared == RESULT_JSON_POLICY.prepare(expected).value()
-    # phase の数 × attempt の数ではなく attempt の数に比例する
-    many = DebugTrace(attempts=[
-        SimpleNamespace(phase=f"P{index % 5_000}", transition_reason="UNSAT", result=None)
-        for index in range(100_000)
-    ])
-    _, elapsed, _ = _measured(many.get_phase_usage)
-    assert elapsed < 1.0
+    # phase の数 × attempt の数ではなく attempt の数に比例する: 規模を 10 倍（attempt も phase も）に
+    # すると、比例なら約 10 倍・積なら約 100 倍。同じ機械の上の比で比べる（runner の速さに依らない）
+    def _trace(count):
+        return DebugTrace(attempts=[
+            SimpleNamespace(phase=f"P{index % (count // 20)}", transition_reason="UNSAT", result=None)
+            for index in range(count)
+        ])
+
+    def _fastest(trace):
+        best = None
+        for _ in range(3):
+            started = time.perf_counter()
+            trace.get_phase_usage()
+            elapsed = time.perf_counter() - started
+            best = elapsed if best is None else min(best, elapsed)
+        return best
+
+    small, many = _trace(10_000), _trace(100_000)
+    assert _fastest(many) < 40 * _fastest(small)
     with pytest.raises(JsonBudgetExhausted):
         RESULT_JSON_POLICY.prepare(many.phase_usage_source(), max_bytes=10_000)
 
@@ -837,8 +849,12 @@ def test_the_decided_text_is_written_only_after_the_envelope_fits():
     branch = source[source.index("    if emit_json:\n"):]
     envelope = branch.index("envelope = _final_envelope_or_error_result(")
     text = branch.index("payload=envelope.payload")
-    write = branch.index("output_result(output_content, args.output, args.quiet)")
+    write = branch.index("_persist_then_write(")
     assert envelope < text < write
+    # 書き出しは永続化の後（永続化の失敗の前に確定した判定の text を出さない）
+    helper = inspect.getsource(equivalence._persist_then_write)
+    persist = helper.index("persist_canonical_result_envelope(payload, work=work)")
+    assert persist < helper.index("output_result(text,") < helper.index("output_result(json_content,")
     # JSON を出さないときは envelope を作らず、to_dict() から作った text を書く
     assert "if not emit_json:\n        output_content = _text_or_error_result(" in source
 
@@ -1060,6 +1076,51 @@ def test_any_failure_building_the_envelope_after_authority_is_a_durable_error(mo
     assert payload["superseded_decision_receipt"]["decision_receipt"]["outcome"] == decided.final_outcome
     # 確定した判定の emission の区間は ERROR の区間を開く前に閉じる
     assert ended and ended[0][0] == "result_emit" and ended[0][1][1]["superseded_by"] == "output_final_envelope"
+
+
+def test_a_decided_envelope_that_cannot_be_persisted_is_a_durable_error_before_any_decided_text(
+    monkeypatch, tmp_path,
+):
+    """確定した判定の envelope は永続化してから書き出す: 永続化の失敗は、確定した判定の text を出さずに
+    判定の receipt を持つ durable な ERROR（traceback にしない。ERROR の経路と同じ順序）。"""
+
+    import json
+
+    from scripts.function_tracer_pcode.authority.decision import canonical_result
+    from scripts.function_tracer_pcode.cli.commands import equivalence
+
+    decided = _decided_result()
+    written = []
+    persisted = []
+
+    def _persist(payload, **_kw):
+        if payload.get("final_outcome") != "ERROR":
+            raise ValueError("the persisted envelope failed its verification")
+        persisted.append(payload)
+
+    monkeypatch.setattr(equivalence, "output_result", lambda content, *_a, **_k: written.append(content))
+    monkeypatch.setattr(canonical_result, "persist_canonical_result_envelope", _persist)
+    monkeypatch.setattr(equivalence, "journal_stage_end", lambda *_a, **_k: None)
+    args = SimpleNamespace(verbose=False, debug=False, output=None, quiet=True)
+    evidence, session = decided._canonical_finalization_context
+    work = envelope_seal_work()
+    envelope = build_final_result_envelope(
+        decided, seal=AuthoritySeal(evidence=evidence, session=session), work=work,
+    )
+    with pytest.raises(SystemExit):
+        equivalence._persist_then_write(
+            args, result=decided, payload=envelope.payload, work=work, text="DECIDED TEXT",
+            json_content="DECIDED JSON", size_line=envelope.size_line(),
+            binary1_path=str(tmp_path / "a"), binary2_path=str(tmp_path / "b"),
+            func_name1="f", func_name2="f", start_time=0.0, emission_started=0.0,
+        )
+    assert "DECIDED TEXT" not in written and "DECIDED JSON" not in written
+    block = next(content for content in written if "EQUIVALENCE_RESULT_JSON_BEGIN" in content)
+    payload = json.loads(block.split("\n")[1])
+    assert payload["final_outcome"] == "ERROR"
+    assert "the persisted envelope failed its verification" in payload["error_message"]
+    assert payload["superseded_decision_receipt"]["decision_receipt"]["outcome"] == decided.final_outcome
+    assert [item["final_outcome"] for item in persisted] == ["ERROR"]
 
 
 def test_the_persisted_envelope_is_no_larger_than_the_result_json_plus_its_wrapper(monkeypatch, tmp_path):

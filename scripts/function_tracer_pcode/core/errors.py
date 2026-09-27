@@ -342,12 +342,12 @@ class PairFailureKind(Enum):
     最終 outcome そのものではない。`LIMITATION` は attribution の結果しだいで
     reason 付き UNKNOWN にも `limitation_unattributed` の ERROR にもなる —
     どちらにするかを決めるのは従来どおり authority 側で、この enum が決めるのは
-    「どの変換規則（`checker/pair_execution.py` の振り分けの 1 分岐）へ渡すか」だけ。
+    「どの変換規則（`checker/pair_execution.py` の 3 つの振り分けのそれぞれの分岐）へ渡すか」だけ。
 
     失敗の *クラス* が増えても（`FrozenExpressionError` / `ExpressionCycleError` /
     新しい `AnalysisLimitation` 派生）この enum は増えない。増えるとしたら
     「既存のどちらの変換規則にも載らない失敗」を足すときだけで、そのときは
-    consumer 側の変換表 1 箇所が対応点になる。
+    consumer 側の 3 つの振り分け（1 分岐ずつ。足し忘れは test が落とす）が対応点になる。
     """
 
     LIMITATION = "limitation"

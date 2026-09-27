@@ -184,10 +184,20 @@ def test_only_the_deadline_owner_constructs_or_subclasses_deadline_exceeded():
 
     constructed, subclassed = [], []
     for relative, tree in _production_modules():
+        # import の別名（`from ... import DeadlineExceeded as D`）・代入の別名も同じ型として数える
+        aliases = {"DeadlineExceeded"}
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and _name_of(node.func) == "DeadlineExceeded":
+            if isinstance(node, ast.alias) and node.name == "DeadlineExceeded" and node.asname:
+                aliases.add(node.asname)
+            if (
+                isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                and _name_of(node.value) == "DeadlineExceeded"
+            ):
+                aliases.add(node.targets[0].id)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and _name_of(node.func) in aliases:
                 constructed.append(relative)
-            if isinstance(node, ast.ClassDef) and any(_name_of(base) == "DeadlineExceeded" for base in node.bases):
+            if isinstance(node, ast.ClassDef) and any(_name_of(base) in aliases for base in node.bases):
                 subclassed.append(relative)
     assert set(constructed) <= _DEADLINE_OWNERS, constructed
     assert set(subclassed) <= _DEADLINE_OWNERS, subclassed

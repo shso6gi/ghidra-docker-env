@@ -1199,12 +1199,14 @@ def _match_legacy_reasons(
                 by_obligation.update(_index_positions(obligation_index, text_value, work))
     # 旧来の規則: key が一致した record と、fingerprint で一致しなかった record のうち obligation が
     # 一致したものが exact（元の並び）、fingerprint で一致したものはその後
-    exact_positions = sorted(by_target | (by_obligation - by_fingerprint))
-    fingerprint_positions = sorted(by_fingerprint)
+    exact_found = by_target | (by_obligation - by_fingerprint)
+    # 並べる前に数える（引いた位置は数え済みの索引の中。使い切りは次の照合で分かる）
     try:
-        work.charge(len(exact_positions) + len(fingerprint_positions))
+        work.charge(len(exact_found) + len(by_fingerprint))
     except JsonBudgetExhausted:
-        pass  # 引いた位置は数え済みの索引の中（使い切りは次の照合で分かる）
+        pass
+    exact_positions = sorted(exact_found)
+    fingerprint_positions = sorted(by_fingerprint)
     exact = [records[position] for position in exact_positions]
     by_fingerprint_records = [records[position] for position in fingerprint_positions]
     if exact or by_fingerprint_records:

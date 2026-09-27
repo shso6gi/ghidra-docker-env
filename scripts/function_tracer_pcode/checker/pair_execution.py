@@ -131,9 +131,11 @@ def _internal_bug_replaces_unrelated_result(result, failure) -> bool:
     return True
 
 
-#: 種別 → 扱い方。`PairFailureKind` に member を足したら、下の 3 つの振り分けへ 1 分岐ずつ足す
-#: （関数の表を値として持たない: 振り分けは名前で呼ぶ関数だけ。bounded path の監査が辿れる）。
-#: 足し忘れは `KeyError` で即座に落ちる（黙って別種別として扱わない）。
+#: 種別 → 扱い方。`PairFailureKind` に member を足したら、下の 3 つの振り分けへ 1 分岐ずつ足す。
+#: 関数の表を値として持たず、扱い方ごとに振り分けを分けるのは bounded path の監査（J19）の精度のため:
+#: 表の callable は解決できない呼び出しになり、1 つの振り分けへ全部の扱い方をまとめると、監査が
+#: 呼び元ごとの引数・戻り値を合流させて live な値の流れを見失う（受け入れた trade-off）。足し忘れは
+#: test（`test_every_failure_kind_is_handled_by_every_dispatcher`）と、実行時の `KeyError` で落ちる。
 
 
 def _build_result_for(kind: PairFailureKind, checker: Any, failure: PairPendingFailure, **common: Any) -> Any:

@@ -314,7 +314,11 @@ _BUDGET_OFF_WORDS = frozenset({"off", "none", "unlimited", "0"})
 
 
 def _budget_setting(name: str, default: Optional[int], environ=None) -> Optional[int]:
-    """予算 1 つを環境変数から読む（`off` 系は無効、不正値は既定値）。"""
+    """予算 1 つを環境変数から読む（`off` 系は無効、読めない値・1 未満の値は既定値）。
+
+    値 1 つずつの誤りは既定値へ戻す。値どうしの組み合わせの誤りは `expression_budget_policy` が
+    起動時に止める（下）。
+    """
 
     source = environ if environ is not None else os.environ
     raw = source.get(name)
@@ -331,7 +335,14 @@ def _budget_setting(name: str, default: Optional[int], environ=None) -> Optional
 
 
 def expression_budget_policy(environ: Optional[Mapping[str, str]] = None):
-    """既定値と環境変数から、pair に適用する `BudgetPolicy` を組み立てる。"""
+    """既定値と環境変数から、pair に適用する `BudgetPolicy` を組み立てる。
+
+    値どうしの組み合わせの誤り（`FT_SERIALIZATION_BYTES_BUDGET` が `FT_ENVELOPE_HEADROOM_BYTES`
+    以下、など）は既定値へ黙って戻さず、どの環境変数かを示す `ValueError` で起動時に止める（どちらを
+    直すべきかは設定した人にしか分からない。pair を 1 つも走らせない fail-fast）。headroom の `off`
+    は 0 で、直列化の予算が有限なら出力 schema の最小値を満たさない（`EquivalenceChecker` の構築で
+    `EnvelopeHeadroomTooSmall`）。
+    """
 
     from scripts.function_tracer_pcode.core.budget_policy import BudgetPolicy
 
@@ -341,4 +352,8 @@ def expression_budget_policy(environ: Optional[Mapping[str, str]] = None):
         if field_name == "envelope_headroom_bytes":
             value = 0 if value is None else value
         values[field_name] = value
-    return BudgetPolicy(**values)
+    try:
+        return BudgetPolicy(**values)
+    except ValueError as exc:
+        names = ", ".join(f"{env_name}={values[field_name]}" for field_name, env_name, _ in EXPRESSION_BUDGET_DEFAULTS)
+        raise ValueError(f"inconsistent expression budget settings ({names}): {exc}") from exc

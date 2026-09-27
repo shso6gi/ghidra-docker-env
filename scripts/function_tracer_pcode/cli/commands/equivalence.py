@@ -400,6 +400,40 @@ def _final_envelope_or_error_result(args, *, result, seal, work, **context):
         raise  # pragma: no cover - 上の関数は sys.exit する
 
 
+def _persist_then_write(args, *, result, payload, work, text, json_content, size_line, **context) -> None:
+    """確定した判定の envelope を永続化してから、text と JSON を書き出す（ERROR の経路と同じ順序）。
+
+    永続化の失敗（封印の検証・読む側の上限・作業量）は、永続化の前に確定した判定の text を出さずに、
+    authority 後の出力の失敗と同じ durable な ERROR にする（traceback にしない）。永続化した後の
+    書き出しの失敗は、永続化した envelope が pair の結果なので exit code はその outcome。
+    """
+
+    from scripts.function_tracer_pcode.authority.decision.canonical_result import (
+        persist_canonical_result_envelope,
+    )
+
+    try:
+        persist_canonical_result_envelope(payload, work=work)
+    except _POST_AUTHORITY_OUTPUT_FAILURES as failure:
+        _emit_output_failure_error(args, result=result, failure=failure, **context)
+        raise  # pragma: no cover - 上の関数は sys.exit する
+    output_result(text, args.output, args.quiet)
+    written = False
+    try:
+        if not args.quiet:
+            print(f"[EquivalenceCLI] Result payload bytes: {size_line}")
+        output_result(json_content, args.output, args.quiet)
+        written = True
+    finally:
+        if not written and getattr(result, "decision_receipt", None) is not None:
+            from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+                CLI_EXIT_MATRIX,
+                outcome_from_result,
+            )
+
+            sys.exit(CLI_EXIT_MATRIX[outcome_from_result(result)])
+
+
 def _emit_output_failure_error(args, *, result, failure: BaseException, **context) -> None:
     violation = failure if isinstance(failure, OutputEnvelopeInvariantViolation) else (
         OutputEnvelopeInvariantViolation(
@@ -858,10 +892,6 @@ def run_equivalence_check(args):
         render_seconds = time.monotonic() - emission_started
         output_result(output_content, args.output, args.quiet)
     if emit_json:
-        from scripts.function_tracer_pcode.authority.decision.canonical_result import (
-            persist_canonical_result_envelope,
-        )
-
         # Issue #110: この envelope の封印（高々 `SEALS_PER_ENVELOPE` 回）と永続化の検証は、この
         # envelope の有限の作業量 1 つの中でだけ
         seal_work = envelope_seal_work()
@@ -885,7 +915,6 @@ def run_equivalence_check(args):
             args, result=result, payload=envelope.payload, **envelope_context,
         )
         render_seconds = time.monotonic() - emission_started
-        output_result(output_content, args.output, args.quiet)
         result_payload = envelope.payload
         if seal is not None:
             result.canonical_result_finalization_bundle = result_payload[
@@ -899,22 +928,10 @@ def run_equivalence_check(args):
                 "=== EQUIVALENCE_RESULT_JSON_END ===",
             )
         )
-        persist_canonical_result_envelope(result_payload, work=seal_work)
-        written = False
-        try:
-            if not args.quiet:
-                print(f"[EquivalenceCLI] Result payload bytes: {envelope.size_line()}")
-            output_result(json_content, args.output, args.quiet)
-            written = True
-        finally:
-            if not written and getattr(result, "decision_receipt", None) is not None:
-                # 永続化した envelope が pair の結果: 書き出しの失敗でも exit code はその outcome
-                from scripts.function_tracer_pcode.authority.decision.production_cutover import (
-                    CLI_EXIT_MATRIX,
-                    outcome_from_result,
-                )
-
-                sys.exit(CLI_EXIT_MATRIX[outcome_from_result(result)])
+        _persist_then_write(
+            args, result=result, payload=result_payload, work=seal_work, text=output_content,
+            json_content=json_content, size_line=envelope.size_line(), **envelope_context,
+        )
 
     journal_stage_end("result_emit", time.monotonic() - emission_started, {
         "kind": "emission",

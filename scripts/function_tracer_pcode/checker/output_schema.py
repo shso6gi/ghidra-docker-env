@@ -26,8 +26,11 @@ identity・solver 側は変わらない（M-3）。
 
 finalization bundle（`canonical_result_finalization_bundle`）は preimage（A + B + C）
 全体の digest を持つ receipt で、最終 JSON の予算の **中** にある（切り詰めない）。その大きさの
-上限は authority の event stream の契約（#110）が無いと schema から導けないので、headroom は
-bundle 以外の field だけを予約し、bundle は最終 envelope の残りに収まるかを出力時に確かめる。
+上限は authority の event の契約（#110、`authority/seal_work.persisted_envelope_byte_limit`）が決める。
+headroom は bundle 以外の field だけを予約し、bundle は最終 envelope の残りに収まるかを出力時に
+確かめる（収まらなければ判定の receipt を持つ durable な ERROR。fail-closed）。契約の上限の bundle は
+既定の最終 JSON の予算（`serialization_bytes` 64 MiB）より大きくなり得るので、契約の中の event stream でも
+出力時に ERROR になり得る（固定 subset の bundle の最大は 0.9 MB。予算と契約のどちらを合わせるかは #110）。
 """
 
 from __future__ import annotations
@@ -68,8 +71,10 @@ from scripts.function_tracer_pcode.authority.event_contract import (  # noqa: E4
 
 #: authority が 1 pair で出してよい canonical reason の行数（cause occurrence の上限）
 MAX_UNKNOWN_REASON_ROWS = _AUTHORITY_EVENT_CONTRACT.max_cause_occurrences
-#: recovery action の行数（固定 subset の実測の最大 6）。action はそのまま出力の行になるので、上限を
-#: 超える列は切り詰めず、G4-b（`finitize_legacy_reasons`）が判定の前に pair terminal な限界にする。
+#: recovery action の行数（固定 subset の実測の最大 6）。field の byte の上限はこの行数 × 行の最大 byte。
+#: action はそのまま出力の行になるので、上限を超える列は切り詰めず、G4-b（`finitize_legacy_reasons`・
+#: `check_prepared_field_bounds`）が判定の前に pair terminal な限界にする: 先に行数をその byte に入り得る
+#: 行数（最小の行で数えた数。この値以上）と比べ、次に準備した列の byte をその上限と比べる。
 #: 数値は canonical reason の行と同じ契約の値を使う（action ごとの別の上限の owner を作らない）
 MAX_RECOVERY_ACTION_ROWS = MAX_UNKNOWN_REASON_ROWS
 #: relation（`c_active_base` / `q_open_base`）の行数（relation の行の上限）
@@ -257,10 +262,10 @@ def truncation_marker_max_bytes(policy: JsonEncodingPolicy, key: str) -> int:
 def authority_field_bounds(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> Dict[str, FieldBound]:
     """B の field ごとの上限（`RESULT_FIELDS` の B と 1 対 1。bundle を除く）。
 
-    finalization bundle は authority の event stream を持つ receipt で、その大きさの上限は
-    event stream の契約（#110）が無いと schema から導けない。headroom は bundle 以外の B と
-    C の上限だけを予約し、bundle は最終 envelope の残りの予算に収まるかを出力時に確かめる
-    （収まらなければ出力の契約違反の ERROR。`output_preparation.build_final_result_envelope`）。
+    finalization bundle は authority の event stream を持つ receipt で、その大きさの上限は #110 の
+    契約（`authority/seal_work.persisted_envelope_byte_limit`）の側にあり、この表には入れない。headroom は
+    bundle 以外の B と C の上限だけを予約し、bundle は最終 envelope の残りの予算に収まるかを出力時に
+    確かめる（収まらなければ出力の契約違反の ERROR。`output_preparation.build_final_result_envelope`）。
     """
 
     reason_row = row_max_bytes(UNKNOWN_REASON_ROW, policy)

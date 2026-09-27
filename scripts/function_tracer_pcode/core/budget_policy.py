@@ -42,7 +42,6 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, NoRet
 from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.errors import (
     ExpressionSizeBudgetExceeded,
-    PairStopState,
     raise_limitation,
 )
 from scripts.function_tracer_pcode.core.stage_journal import journal_note
@@ -280,8 +279,9 @@ def raise_expression_size_budget_exceeded(
     """予算超過を登録済み reason の限界として上げる（**唯一の組み立て口**）。
 
     evidence の書式（`budget=` / `limit=` / `observed=` + checkpoint 固有の量）を
-    ここ 1 箇所で決める。stop state は常に `PAIR_TERMINAL_LIMITATION`（初回で確定、
-    phase recovery 無し）。
+    ここ 1 箇所で決める。evidence は cause の identity に入るので、走査の履歴（どこまで辿ってから
+    止めたか・cache の当たり方）で変わる途中の量を入れない。stop state は軸 C（`core/errors`）の
+    限界の既定 `PAIR_TERMINAL_LIMITATION`（初回で確定、phase recovery 無し。ここでは選ばない）。
     """
 
     kind = BudgetKind(kind)
@@ -297,7 +297,43 @@ def raise_expression_size_budget_exceeded(
                 *tuple(str(item) for item in evidence),
             ),
         ),
-        stop=PairStopState.PAIR_TERMINAL_LIMITATION,
+    )
+
+
+#: 出力 schema の上限（行数・byte）の超過の evidence の印（`BudgetPolicy` の予算の値ではない）
+OUTPUT_SCHEMA_BOUND = "output_schema"
+
+
+def raise_output_schema_exceeded(
+    *,
+    field_key: str,
+    unit: str,
+    observed: int,
+    limit: int,
+    site: str,
+    target_key: Any,
+) -> NoReturn:
+    """判定の前に分かる出力の field（B）が出力 schema の上限を超えたことを、式の大きさの予算と同じ
+    reason の限界として上げる（**唯一の組み立て口** の 1 つ）。
+
+    上限の owner は `checker/output_schema`（行数は authority の event の契約 #110 から、byte は行の schema
+    から導く）で、`BudgetPolicy` の予算ではない: evidence の `bound=` はその owner を、`unit=` は
+    行数（`rows`）か byte（`bytes`）かを示す（予算の値の超過と読み違えない）。
+    """
+
+    raise_limitation(
+        ExpressionSizeBudgetExceeded(
+            f"output schema bound of {field_key} {unit} {int(observed)} exceeded {int(limit)}",
+            site=site,
+            target_key=target_key,
+            evidence_refs=(
+                f"bound={OUTPUT_SCHEMA_BOUND}",
+                f"field={field_key}",
+                f"unit={unit}",
+                f"limit={int(limit)}",
+                f"observed={int(observed)}",
+            ),
+        ),
     )
 
 
@@ -355,8 +391,7 @@ class SerializationWork:
     """
 
     __slots__ = (
-        "site", "enabled", "_target_parts", "max_bytes", "consumed", "tree_bytes",
-        "trees", "_meter", "_policy", "terminal", "runtime_ref_memo", "parent",
+        "site", "enabled", "_target_parts", "max_bytes", "consumed", "_meter", "_policy", "terminal", "runtime_ref_memo", "parent",
     )
 
     def __init__(
@@ -397,8 +432,6 @@ class SerializationWork:
         limit = self._policy.serialization_bytes if max_bytes is None else max_bytes
         self.max_bytes = limit if self.enabled else None
         self.consumed = 0
-        self.tree_bytes = 0
-        self.trees = 0
         self._meter = SemanticGraphMeter()
 
     # -- JsonBudget の interface -------------------------------------------------
@@ -432,7 +465,7 @@ class SerializationWork:
         # policy の上限ではない: 入れ子の scope の policy が大きくても、この作業量で止める）
         enforce_budget(
             BudgetKind.SERIALIZATION_BYTES, observed, site=self.site,
-            target_key=self.target_key(), evidence=self._evidence(), limit=limit,
+            target_key=self.target_key(), limit=limit,
         )
 
     def tree(self, leaf: Any, *, build: bool) -> Tuple[Any, int]:
@@ -452,11 +485,7 @@ class SerializationWork:
             before = self.consumed
             built = protocol_method(leaf, "__json_tree_metered__")(leaf, RESULT_JSON_POLICY, self)
             size = self.consumed - before
-            self.trees += 1
-            self.tree_bytes += int(size)
         else:
-            self.trees += 1
-            self.tree_bytes += int(size)
             self.charge(size)
         # 数えるのは予算の分まで（超えたと分かれば残りの node は辿らない）
         self._meter.add_root(leaf, max_distinct=self._policy.serialization_nodes)
@@ -472,7 +501,7 @@ class SerializationWork:
                 )
             enforce_budget(
                 BudgetKind.SERIALIZATION_NODES, self.distinct_nodes, site=self.site,
-                target_key=self.target_key(), evidence=self._evidence(),
+                target_key=self.target_key(),
                 limit=self._policy.serialization_nodes,
             )
         if build and built is None:
@@ -500,14 +529,6 @@ class SerializationWork:
         )
 
         return ("serialization", stable_atoms_digest(self._target_parts))
-
-    def _evidence(self) -> Tuple[str, ...]:
-        return (
-            f"trees={self.trees}",
-            f"tree_bytes={self.tree_bytes}",
-            f"value_bytes={self.consumed - self.tree_bytes}",
-            f"distinct_nodes={self.distinct_nodes}",
-        )
 
     def observe(self) -> None:
         """この直列化の最終的な量を観測値へ残す（量は単調に増えるので最後の値が最大）。
@@ -581,6 +602,19 @@ def serialization_scope(
         work.observe()
 
 
+def exceeded_budget_bound(
+    kind: BudgetKind, observed: int, *, site: str, limit: Optional[int] = None,
+) -> Optional[int]:
+    """観測値を残し、上限を超えていればその上限を、そうでなければ `None` を返す（checkpoint の比較の
+    半分: 上限の内側の checkpoint は限界の target / evidence を作らない）。"""
+
+    observe_budget_usage(kind, observed, site=site)
+    bound = active_budget_policy().limit(kind) if limit is None else limit
+    if bound is not None and live_values.as_int(observed) > bound:
+        return bound
+    return None
+
+
 def enforce_budget(
     kind: BudgetKind,
     observed: int,
@@ -593,11 +627,12 @@ def enforce_budget(
     """観測値を残し、上限を超えていたら限界にする（checkpoint の入口）。
 
     上限は `limit`（作業量が自分の上限を持つとき）か、`None` なら今の policy の上限。
+    target と evidence を作るのに仕事が要る checkpoint は `exceeded_budget_bound` で比べてから、
+    超えたときだけ組み立てて `raise_expression_size_budget_exceeded` を呼ぶ。
     """
 
-    observe_budget_usage(kind, observed, site=site)
-    bound = active_budget_policy().limit(kind) if limit is None else limit
-    if bound is not None and live_values.as_int(observed) > bound:
+    bound = exceeded_budget_bound(kind, observed, site=site, limit=limit)
+    if bound is not None:
         raise_expression_size_budget_exceeded(
             kind,
             observed=observed,
@@ -617,6 +652,8 @@ __all__ = [
     "budget_policy_scope",
     "budget_scope_is_active",
     "enforce_budget",
+    "raise_output_schema_exceeded",
+    "exceeded_budget_bound",
     "observe_budget_usage",
     "raise_expression_size_budget_exceeded",
     "raise_render_budget_exceeded",
