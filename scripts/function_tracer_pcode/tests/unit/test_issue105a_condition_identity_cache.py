@@ -887,6 +887,31 @@ def test_each_scope_starts_empty_and_restores_the_outer_store():
     assert active_condition_cache() is None
 
 
+def test_the_root_memo_does_not_keep_a_root_alive(scoped):
+    """root 単位の memo は式 object を生かし続けない（回収されたら entry も消える）。"""
+
+    import gc
+    import weakref
+
+    root = _slt(_param("param_1", 0), _const(0)).expression
+    alive = weakref.ref(root)
+    root_query_graph(root)
+    assert root_query_graph(root) is root_query_graph(root)
+    del root
+    gc.collect()
+    assert alive() is None
+    memo = scoped.store._roots.get("query_identity.root_graph", {})
+    assert all(entry[0]() is not None for entry in memo.values())
+
+
+def test_the_root_memo_keeps_values_that_cannot_be_weakly_referenced(scoped):
+    term = ("param", "param_1", ("int", 0), 4)
+    built = []
+    assert root_memo("kind", term, lambda root: built.append(root) or "v") == "v"
+    assert root_memo("kind", term, lambda root: built.append(root) or "other") == "v"
+    assert built == [term]
+
+
 def test_reset_caches_clears_only_the_owners_tables(scoped):
     key = _query(_slt(_param("param_1", 0), _const(0)))
     cache_store(ConditionSMTOracle.VERDICT_TABLE, key, True)

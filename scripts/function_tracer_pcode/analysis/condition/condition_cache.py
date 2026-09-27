@@ -20,8 +20,9 @@ consumer（何を覚えるか）          smt_oracle（verdict・書き換え）
   始めて抜けたら捨てる。次の pair へ意味の状態を持ち越さない。scope の外（部品単体の
   呼び出し）では **何も覚えない**（lookup は常に miss、store は捨てる）: process 全体に
   生きる意味の cache は作らない。
-* root 単位の memo（`root_memo`）は root **object** を key にし、object を値と一緒に
-  持つ（`id()` の再利用で別の root と取り違えない）。root だけに依存する値にしか使わない
+* root 単位の memo（`root_memo`）は root **object** を key にする（取り出した参照が
+  同じ object を指すときだけ hit。式 object は弱参照で持ち、回収されたら entry も消える
+  ので、memo が DAG を生かし続けない）。root だけに依存する値にしか使わない
   （mapping や描画文脈に依存する値は identity を key にした表へ）。
 
 保持の仕方は `core/budget_policy` の scope と同じ module 単位の stack（contextvar に
@@ -31,6 +32,7 @@ consumer（何を覚えるか）          smt_oracle（verdict・書き換え）
 from __future__ import annotations
 
 import threading
+import weakref
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -114,7 +116,7 @@ class ConditionCacheStore:
         with self._lock:
             memo = self._roots.setdefault(kind, {})
             entry = memo.get(id(root))
-            if entry is not None and entry[0] is root:
+            if entry is not None and entry[0]() is root:
                 note(f"memo.{kind}.hit")
                 return entry[1]
         value = build(root)
@@ -123,8 +125,7 @@ class ConditionCacheStore:
             if len(memo) >= DEFAULT_ROOT_MEMO_LIMIT:
                 memo.clear()
                 note(f"memo.{kind}.cleared")
-            # object を値と一緒に持つ: 生きている間は同じ id が別の root に再利用されない
-            memo[id(root)] = (root, value)
+            memo[id(root)] = (_root_reference(root, memo), value)
         return value
 
     def clear(self, names: Optional[Tuple[str, ...]] = None) -> None:
@@ -139,6 +140,30 @@ class ConditionCacheStore:
                 table = self._tables.get(name)
                 if table is not None:
                     table.clear()
+
+
+def _root_reference(root: Any, memo: Dict[int, Tuple[Any, Any]]) -> Callable[[], Any]:
+    """root を指す参照（取り出すと root か `None`）。
+
+    式 object は弱参照で持つ: memo が root を生かし続けると、pair の間ずっと本来は
+    捨てられる DAG が残る。root が回収されたら entry も消す（callback は回収の途中、
+    memory が再利用される前に走るので、同じ `id()` の別の object と取り違えない）。
+    値は root だけで決まるので、root が消えた entry は誰にも引かれず、捨てても答えは
+    変わらない。弱参照を持てない値（tuple の構造 key など）は強参照で持つ（表の件数の
+    上限で有界）。
+    """
+
+    key = id(root)
+
+    def _evict(_reference: Any) -> None:
+        entry = memo.get(key)
+        if entry is not None and entry[0] is _reference:
+            memo.pop(key, None)
+
+    try:
+        return weakref.ref(root, _evict)
+    except TypeError:
+        return lambda: root
 
 
 _SCOPE_LOCK = threading.Lock()
